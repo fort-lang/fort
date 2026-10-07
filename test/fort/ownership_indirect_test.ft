@@ -1,0 +1,347 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| R05 known function pointer
+//| R06 two fort targets
+//| R07 mixed fort and extern targets
+//| R08 unknown fort target
+//| R09 callback body escape
+//| R10 abort-only indirect targets
+//| R11 mixed abort and normal targets
+//| R12 unknown target exit outcome
+//| indirect calls ok
+/// Checks calls of function values against the targets of the call graph (D17.13, D17.18).
+import fir;
+import ownership_api;
+import ownership_recursive;
+import ownership_recursive_env;
+import ownership_summary_body;
+import ownership_summary_model;
+
+string[6] KNOWN = {
+    "fn reader(i32* p) i32 { return *p; }",
+    "fn caller(i32* p) i32 { fn (i32*) i32 f = reader; return f(p); }",
+    "fn many(i32* p) i32 { fn (i32*) i32 f = reader; return f(p) + reader(p) + f(p); }",
+    "fn released(i32 mut* own p) i32 {",
+    "    i32* v = p; del(p); fn (i32*) i32 f = reader; return f(v); }",
+    "fn local() i32 { i32 x = 1; fn (i32*) i32 f = reader; return f(&x); }",
+};
+
+// The graph keeps both stored functions as targets of each call through `f`.
+string[6] TWO = {
+    "fn reader(i32* p) i32 { return *p; }",
+    "fn zero(i32* p) i32 { return 0; }",
+    "fn local() i32 { i32 x = 1; (fn (i32*) i32) mut f = reader; f = zero; return f(&x); }",
+    "fn formal(i32* p) i32 { (fn (i32*) i32) mut f = reader; f = zero; return f(p); }",
+    "fn released(i32 mut* own p) i32 {",
+    "    i32* v = p; del(p); (fn (i32*) i32) mut f = reader; f = zero; return f(v); }",
+};
+
+// Each target stores its borrowed argument into caller storage.
+string[7] STORES = {
+    "struct view_box { i32* ptr; }",
+    "fn keep_a(view_box mut* out, i32* p) void { out->ptr = p; }",
+    "fn keep_b(view_box mut* out, i32* p) void { out->ptr = p; }",
+    "fn store(view_box mut* out, i32* p) void {",
+    "    (fn (view_box mut*, i32*) void) mut f = keep_a; f = keep_b; f(out, p); }",
+    "fn single(view_box mut* out, i32* p) void {",
+    "    fn (view_box mut*, i32*) void f = keep_a; f(out, p); }",
+};
+
+string[4] FOREIGN = {
+    "extern fn ext() void;",
+    "fn noop() void { }",
+    "fn direct(i32 mut* own p) i32 { i32* v = p; del(p); ext(); return *v; }",
+    "fn through(i32 mut* own p) void { fn () void f = noop; f(); del(p); }",
+};
+
+string[3] UNKNOWN = {
+    "fn reader(i32* p) i32 { return *p; }",
+    "fn apply(fn (i32*) i32 f, i32* p) i32 { return f(p); }",
+    "fn caller(i32 mut* own q) void { apply(reader, q); del(q); }",
+};
+
+string[7] CALLBACK = {
+    "struct inline_box { i32 value; }",
+    "fn cb(inline_box value) i32* { return &value.value; }",
+    "fn caller(inline_box v) i32* { fn (inline_box) i32* f = cb; return f(v); }",
+    "fn stored(inline_box value) i32* { return &value.value; }",
+    "fn holder() void { fn (inline_box) i32* f = stored; }",
+    "fn good(i32* p) i32 { return *p; }",
+    "fn reads(i32* p) i32 { fn (i32*) i32 f = good; return f(p); }",
+};
+
+string[6] ABORTS = {
+    "fn stop_a() void { panic(\"a\"); }",
+    "fn stop_b() void { panic(\"b\"); }",
+    "fn noop() void { }",
+    "fn both(i32 mut* own p) void { (fn () void) mut f = stop_a; f = stop_b; f(); }",
+    "fn single(i32 mut* own p) void { fn () void f = stop_a; f(); }",
+    "fn mixed(i32 mut* own p) void { (fn () void) mut f = stop_a; f = noop; f(); del(p); }",
+};
+
+string[3] GUARDED = {
+    "fn maybe(bool fail) void { if (fail) { panic(\"x\"); } }",
+    "fn guarded(i32 mut* own p, bool fail) void { fn (bool) void f = maybe; f(fail); del(p); }",
+    "fn leak(i32 mut* own p, bool fail) void { fn (bool) void f = maybe; f(fail); }",
+};
+
+string[3] INVOKE = {
+    "fn invoke(fn () void f, i32 mut* own p) void { f(); del(p); }",
+    "fn keep(fn () void f, i32 mut* own p) void { f(); }",
+    "fn noop() void { }",
+};
+
+// One explicit target and no residual target is the call of that body: a caller error is
+// definite, and the requirement on the caller formal is exported.
+fn known_pointer() void {
+    ownership_recursive_env.closure mut c = ownership_recursive_env.closure{};
+    string[5] names = {"reader", "caller", "released", "local", "many"};
+    ownership_recursive_env.open(&c, KNOWN[..], names[..]);
+    defer ownership_recursive_env.close(&c);
+    ownership_recursive_env.solve(&c);
+    ownership_recursive_env.complete(&c, "caller", 1);
+    // Three call records: each call finds its own record and exports the two requirements of
+    // `reader` at its own position.
+    ownership_recursive_env.complete(&c, "many", 1);
+    assert(ownership_recursive_env.summary(&c, "many")->requirements.len == 6);
+    assert(ownership_recursive_env.summary(&c, "caller")->requirements.len == 2);
+    ownership_recursive_env.failed(&c, "released");
+    assert(ownership_recursive_env.saw(&c, ownership_api.event_kind.caller_requirement,
+        "released") == 1);
+    ownership_recursive_env.complete(&c, "local", 1);
+    assert(c.counts.events == 1 && c.counts.computations == 5);
+    println("R05 known function pointer");
+}
+
+// A target of several is a possibility. A failed requirement of one target is incomplete
+// proof with abstract evidence, and a requirement on a caller formal is not exported.
+fn two_targets() void {
+    ownership_recursive_env.closure mut c = ownership_recursive_env.closure{};
+    string[5] names = {"reader", "zero", "local", "formal", "released"};
+    ownership_recursive_env.open(&c, TWO[..], names[..]);
+    defer ownership_recursive_env.close(&c);
+    ownership_recursive_env.solve(&c);
+    u64 call = ownership_recursive_env.call_of(&c, "local", 0);
+    assert(c.graph.calls[call].fort_len == 2 && !c.graph.calls[call].residual_fort);
+    ownership_recursive_env.complete(&c, "local", 1);
+    ownership_recursive_env.incomplete(&c, "formal",
+        ownership_api.incomplete_reason.unknown_effect);
+    assert(ownership_recursive_env.saw(&c, ownership_api.event_kind.incomplete_proof,
+        "formal") == 0);
+    ownership_summary_model.summary* released = ownership_recursive_env.summary(&c,
+        "released");
+    assert(released->proof.kind == ownership_api.proof_kind.incomplete && released->cases.len == 0);
+    assert(ownership_recursive_env.saw(&c, ownership_api.event_kind.caller_requirement,
+        "released") == 0);
+    assert(ownership_recursive_env.possible(&c, ownership_api.event_kind.incomplete_proof,
+        "released") == 2);
+    // One target exports its store into caller storage. Two targets export nothing.
+    ownership_recursive_env.closure mut stores = ownership_recursive_env.closure{};
+    string[4] store_names = {"keep_a", "keep_b", "store", "single"};
+    ownership_recursive_env.open(&stores, STORES[..], store_names[..]);
+    defer ownership_recursive_env.close(&stores);
+    ownership_recursive_env.solve(&stores);
+    ownership_recursive_env.complete(&stores, "single", 1);
+    assert(ownership_recursive_env.summary(&stores, "single")->retained.len == 1);
+    ownership_recursive_env.incomplete(&stores, "store",
+        ownership_api.incomplete_reason.unknown_effect);
+    println("R06 two fort targets");
+}
+
+// A foreign alternative keeps the body unsupported with the foreign reason, before flow runs.
+// A residual fort alternative at the same call keeps the fort reason: foreign trust never
+// covers an unknown fort target.
+fn mixed_foreign() void {
+    ownership_recursive_env.closure mut c = ownership_recursive_env.closure{};
+    string[3] names = {"noop", "direct", "through"};
+    ownership_recursive_env.open(&c, FOREIGN[..], names[..]);
+    defer ownership_recursive_env.close(&c);
+    ownership_recursive_env.solve(&c);
+    ownership_recursive_env.incomplete(&c, "direct", ownership_api.incomplete_reason.missing_ffi);
+    ownership_recursive_env.complete(&c, "through", 1);
+    assert(c.counts.events == 0);
+    u64 call = ownership_recursive_env.call_of(&c, "through", 0);
+    c.graph.calls[call].residual_foreign = true;
+    ownership_recursive_env.solve(&c);
+    ownership_recursive_env.incomplete(&c, "through",
+        ownership_api.incomplete_reason.missing_ffi);
+    assert(c.counts.events == 0);
+    c.graph.calls[call].residual_fort = true;
+    ownership_recursive_env.solve(&c);
+    ownership_recursive_env.incomplete(&c, "through",
+        ownership_api.incomplete_reason.unknown_effect);
+    assert(ownership_recursive_env.saw(&c, ownership_api.event_kind.incomplete_proof,
+        "through") == 1);
+    println("R07 mixed fort and extern targets");
+}
+
+// A function parameter keeps a residual fort target, so the call stays unresolved: no
+// summary is empty, and no foreign trust applies.
+fn unknown_target() void {
+    ownership_recursive_env.closure mut c = ownership_recursive_env.closure{};
+    string[3] names = {"reader", "apply", "caller"};
+    ownership_recursive_env.open(&c, UNKNOWN[..], names[..]);
+    defer ownership_recursive_env.close(&c);
+    ownership_recursive_env.solve(&c);
+    assert(c.graph.calls[ownership_recursive_env.call_of(&c, "apply", 0)].residual_fort);
+    ownership_recursive_env.complete(&c, "reader", 1);
+    ownership_recursive_env.incomplete(&c, "apply", ownership_api.incomplete_reason.unknown_effect);
+    ownership_recursive_env.incomplete(&c, "caller",
+        ownership_api.incomplete_reason.unknown_effect);
+    assert(ownership_recursive_env.saw(&c, ownership_api.event_kind.invalid_use, "caller") == 0);
+    println("R08 unknown fort target");
+}
+
+// Each callback body gets its own analysis with symbolic inputs, whether a call reaches it or
+// not. Its escape fails that body, and the call through the function value stays unresolved.
+fn callback_escape() void {
+    ownership_recursive_env.closure mut c = ownership_recursive_env.closure{};
+    string[6] names = {"cb", "caller", "stored", "holder", "good", "reads"};
+    ownership_recursive_env.open(&c, CALLBACK[..], names[..]);
+    defer ownership_recursive_env.close(&c);
+    ownership_recursive_env.solve(&c);
+    ownership_recursive_env.failed(&c, "cb");
+    assert(ownership_recursive_env.saw(&c, ownership_api.event_kind.invalid_use, "cb") == 1);
+    ownership_recursive_env.failed(&c, "stored");
+    assert(ownership_recursive_env.saw(&c, ownership_api.event_kind.invalid_use, "stored") == 1);
+    ownership_summary_model.summary* caller = ownership_recursive_env.summary(&c, "caller");
+    assert(!ownership_api.successful(caller->proof) && caller->cases.len == 0);
+    assert(ownership_recursive_env.saw(&c, ownership_api.event_kind.invalid_use, "caller") == 0);
+    ownership_recursive_env.complete(&c, "holder", 1);
+    ownership_recursive_env.complete(&c, "reads", 1);
+    println("R09 callback body escape");
+}
+
+// When each possible target aborts, the call has no normal continuation, so the live owner
+// needs no cleanup. Two unguarded abort cases at one call give one abort case.
+fn abort_only() void {
+    ownership_recursive_env.closure mut c = ownership_recursive_env.closure{};
+    string[6] names = {"stop_a", "stop_b", "noop", "both", "single", "mixed"};
+    ownership_recursive_env.open(&c, ABORTS[..], names[..]);
+    defer ownership_recursive_env.close(&c);
+    ownership_recursive_env.solve(&c);
+    ownership_recursive_env.complete(&c, "both", 1);
+    assert(ownership_recursive_env.outcomes(&c, "both", ownership_api.outcome_kind.abort) == 1);
+    ownership_summary_model.summary* both = ownership_recursive_env.summary(&c, "both");
+    assert(both->cases[0].outcome.kind == ownership_api.outcome_kind.abort &&
+        !both->cases[0].outcome.cleanup_required);
+    ownership_recursive_env.complete(&c, "single", 1);
+    assert(ownership_recursive_env.outcomes(&c, "single", ownership_api.outcome_kind.abort) == 1);
+    assert(ownership_recursive_env.saw(&c, ownership_api.event_kind.lost_ownership, "both") == 0);
+    println("R10 abort-only indirect targets");
+}
+
+// Some targets of several return and others abort, so the continuation hangs on which target
+// runs: the call stays unresolved. One target with a returning and an aborting case keeps both
+// outcomes, and its normal path keeps the owner obligation.
+fn mixed_outcomes() void {
+    ownership_recursive_env.closure mut c = ownership_recursive_env.closure{};
+    string[6] names = {"stop_a", "stop_b", "noop", "both", "single", "mixed"};
+    ownership_recursive_env.open(&c, ABORTS[..], names[..]);
+    defer ownership_recursive_env.close(&c);
+    ownership_recursive_env.solve(&c);
+    ownership_recursive_env.incomplete(&c, "mixed", ownership_api.incomplete_reason.unknown_effect);
+    assert(ownership_recursive_env.saw(&c, ownership_api.event_kind.lost_ownership,
+        "mixed") == 0);
+    ownership_recursive_env.closure mut g = ownership_recursive_env.closure{};
+    string[3] guarded_names = {"maybe", "guarded", "leak"};
+    ownership_recursive_env.open(&g, GUARDED[..], guarded_names[..]);
+    defer ownership_recursive_env.close(&g);
+    ownership_recursive_env.solve(&g);
+    ownership_recursive_env.complete(&g, "guarded", 2);
+    assert(ownership_recursive_env.outcomes(&g, "guarded", ownership_api.outcome_kind.abort) == 1);
+    assert(ownership_recursive_env.outcomes(&g, "guarded",
+        ownership_api.outcome_kind.function_return) == 1);
+    ownership_recursive_env.failed(&g, "leak");
+    assert(ownership_recursive_env.saw(&g, ownership_api.event_kind.lost_ownership, "leak") == 1);
+    println("R11 mixed abort and normal targets");
+}
+
+// An unknown target keeps a possible return with the caller obligations. The caller cannot
+// prove its cleanup and reports no lost owner.
+fn unknown_exit() void {
+    ownership_recursive_env.closure mut c = ownership_recursive_env.closure{};
+    string[3] names = {"invoke", "keep", "noop"};
+    ownership_recursive_env.open(&c, INVOKE[..], names[..]);
+    defer ownership_recursive_env.close(&c);
+    ownership_recursive_env.solve(&c);
+    ownership_recursive_env.incomplete(&c, "invoke",
+        ownership_api.incomplete_reason.unknown_effect);
+    ownership_recursive_env.incomplete(&c, "keep", ownership_api.incomplete_reason.missing_path);
+    assert(ownership_recursive_env.saw(&c, ownership_api.event_kind.lost_ownership, "keep") == 0);
+    assert(ownership_recursive_env.saw(&c, ownership_api.event_kind.invalid_use, "invoke") == 0);
+    println("R12 unknown target exit outcome");
+}
+
+// A client that refuses a computation, or gives it invalid limits, leaves its members without a
+// proof. A graph without a proof, a graph whose ledger refuses the layout, or inputs that do not
+// name the graph bodies leave each body without a proof.
+fn solver_inputs() void {
+    ownership_recursive_env.closure mut c = ownership_recursive_env.closure{};
+    string[4] names = {"reader", "caller", "released", "local"};
+    ownership_recursive_env.open(&c, KNOWN[..], names[..]);
+    defer ownership_recursive_env.close(&c);
+    c.counts.refuse_begin = true;
+    ownership_recursive_env.solve(&c);
+    ownership_recursive_env.incomplete(&c, "reader",
+        ownership_api.incomplete_reason.missing_budget);
+    ownership_recursive_env.incomplete(&c, "caller",
+        ownership_api.incomplete_reason.missing_budget);
+    c.counts.refuse_begin = false;
+    c.counts.zero_limits = true;
+    ownership_recursive_env.solve(&c);
+    ownership_recursive_env.incomplete(&c, "local",
+        ownership_api.incomplete_reason.missing_budget);
+    c.counts.zero_limits = false;
+    ownership_api.proof_status built = c.graph.proof;
+    c.graph.proof = ownership_api.incomplete(ownership_api.incomplete_reason.work_limit,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    ownership_recursive_env.solve(&c);
+    assert(c.solution.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    ownership_recursive_env.incomplete(&c, "caller", ownership_api.incomplete_reason.work_limit);
+    assert(c.counts.computations == 0);
+    c.graph.proof = built;
+    u64 bound = c.graph.limits.w;
+    c.graph.limits.w = c.graph.work;
+    ownership_recursive_env.solve(&c);
+    ownership_recursive_env.incomplete(&c, "reader", ownership_api.incomplete_reason.work_limit);
+    assert(c.solution.proof.terminal.limit.category == ownership_api.limit_category.w);
+    c.graph.limits.w = bound;
+    c.graph.proof = built;
+    ownership_recursive.solution mut short = ownership_recursive.solve(&c.graph,
+        c.inputs[..3], &c.services,
+        ownership_recursive.computation_hook{cast(&c.counts, void mut*),
+            ownership_recursive_env.begin});
+    defer ownership_recursive.free(&short);
+    assert(short.proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+    assert(short.summaries.len == 3 && short.summaries[0].residual_effects);
+    ownership_summary_body.body_input swapped = c.inputs[0];
+    c.inputs[0] = c.inputs[1];
+    c.inputs[1] = swapped;
+    ownership_recursive_env.solve(&c);
+    assert(c.solution.proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+    c.inputs[1] = c.inputs[0];
+    c.inputs[0] = swapped;
+    fir.func* body = c.inputs[2].function.body;
+    c.inputs[2].function.body = c.inputs[3].function.body;
+    ownership_recursive_env.solve(&c);
+    assert(c.solution.proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+    c.inputs[2].function.body = body;
+    ownership_recursive_env.solve(&c);
+    ownership_recursive_env.complete(&c, "caller", 1);
+}
+
+fn main() i32 {
+    solver_inputs();
+    known_pointer();
+    two_targets();
+    mixed_foreign();
+    unknown_target();
+    callback_escape();
+    abort_only();
+    mixed_outcomes();
+    unknown_exit();
+    println("indirect calls ok");
+    return 0;
+}

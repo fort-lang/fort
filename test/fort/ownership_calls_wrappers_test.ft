@@ -149,8 +149,9 @@ fn aborts(ownership_call_bodies.bodies* b, u64 index) void {
     assert(row.results.len == 0 && row.guard.kind == ownership_api.entity_kind.none);
 }
 
-// Only a direct fort call can stay an unresolved step. An extern call or an indirect call
-// stops extraction. Flow does not run, so the read after the release reports no event.
+// Only a fort call can stay an unresolved step. An extern call stops extraction with the
+// foreign reason, and an indirect call without graph targets with the fort reason. Flow does
+// not run, so the read after the release reports no event.
 string[2] EXTERN_CALL = {
     "extern fn ext() void;",
     "fn callee(i32 mut* own p) i32 { i32* v = p; del(p); ext(); return *v; }",
@@ -494,13 +495,13 @@ fn owning_argument() void {
     unresolved(&b, 2, ownership_api.incomplete_reason.missing_path);
 }
 
-fn foreign_call(string@ text) void {
+fn foreign_call(string@ text, ownership_api.incomplete_reason why) void {
     ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
     string[1] names = {"callee"};
     ownership_call_bodies.open(&b, text, names[..]);
     defer ownership_call_bodies.close(&b);
     ownership_call_bodies.infer(&b, 0);
-    unresolved(&b, 0, ownership_api.incomplete_reason.unknown_effect);
+    unresolved(&b, 0, why);
     assert(b.services.counts.events == 0);
 }
 
@@ -519,8 +520,8 @@ fn main() i32 {
     owning_argument();
     effects_before_abort();
     unresolved_calls();
-    foreign_call(EXTERN_CALL[..]);
-    foreign_call(INDIRECT_CALL[..]);
+    foreign_call(EXTERN_CALL[..], ownership_api.incomplete_reason.missing_ffi);
+    foreign_call(INDIRECT_CALL[..], ownership_api.incomplete_reason.unknown_effect);
     println("direct-call wrappers ok");
     return 0;
 }

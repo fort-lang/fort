@@ -1,0 +1,357 @@
+/// Solves the ownership summaries of call-graph components, each callee component first.
+import ownership_api;
+import ownership_graph;
+import ownership_keys;
+import ownership_limits;
+import ownership_summary;
+import ownership_summary_body;
+import ownership_summary_model;
+
+/// Starts the computation of one component (D17.18). The client configures the meter that its
+/// services charge for a computation of FIR size `size`, and stores the limit table of that
+/// computation in `limits`. A false result refuses the computation.
+struct computation_hook {
+    void mut* context;
+    fn (void mut*, u64, ownership_api.limit_table mut*) bool begin;
+}
+
+/// One solved closure. Entry i of each array of bodies names body i of the graph. The inputs
+/// borrow the records, and the records borrow the views and the summaries. Keep the solution
+/// at one address, and alive while an input or a view is in use.
+struct solution {
+    ownership_summary_model.summary mut@ own summaries;
+    ownership_summary_model.summary_view mut@ own views;
+    ownership_summary_body.call_targets mut@ own records;
+    ownership_summary_body.callee_binding mut@ own bindings;
+    // Body i owns records `records_first[i]` up to `records_first[i + 1]`.
+    u64 mut@ own records_first;
+    ownership_api.proof_status proof;
+}
+
+fn free(solution mut* out) void {
+    u64 mut i = 0;
+    while (i < out->summaries.len) {
+        ownership_summary_model.free(&out->summaries[i]);
+        i += 1;
+    }
+    solution mut owned = move(*out);
+    del(owned.summaries);
+    del(owned.views);
+    del(owned.records);
+    del(owned.bindings);
+    del(owned.records_first);
+    *out = solution{};
+}
+
+// The working storage of one solve. The members of component c are the bodies
+// `members[members_first[c]]` up to `members[members_first[c + 1]]`, in key order.
+struct solver {
+    ownership_graph.graph mut* graph;
+    ownership_summary_body.body_input mut@ inputs;
+    ownership_api.services* services;
+    computation_hook hook;
+    solution mut* out;
+    u32 mut@ own members;
+    u64 mut@ own members_first;
+    bool mut@ own solved;
+    // The graph call of each record, and the first binding of its fort targets.
+    u64 mut@ own record_calls;
+    u64 mut@ own record_bindings;
+}
+
+fn free_solver(solver mut* s) void {
+    del(s->members);
+    del(s->members_first);
+    del(s->solved);
+    del(s->record_calls);
+    del(s->record_bindings);
+}
+
+// A summary that publishes `proof` with no case and residual effects.
+fn refused_summary(ownership_api.proof_status proof) ownership_summary_model.summary {
+    ownership_summary_model.summary mut out = ownership_summary_model.summary{};
+    out.proof = proof;
+    out.residual_effects = true;
+    out.operation = proof.terminal.operation;
+    out.source = proof.terminal.source;
+    return out;
+}
+
+fn publish(solver mut* s, u64 body, ownership_summary_model.summary mut published) void {
+    ownership_summary_model.free(&s->out->summaries[body]);
+    s->out->summaries[body] = move(published);
+    s->out->views[body] = ownership_summary_model.view(&s->out->summaries[body]);
+}
+
+fn refuse_members(solver mut* s, u64 component, ownership_api.proof_status proof) void {
+    u64 mut i = s->members_first[component];
+    while (i < s->members_first[component + 1]) {
+        publish(s, cast(s->members[i], u64), refused_summary(proof));
+        i += 1;
+    }
+}
+
+fn refuse_all(solver mut* s, ownership_api.proof_status proof) void {
+    u64 mut i = 0;
+    while (i < s->out->summaries.len) {
+        publish(s, i, refused_summary(proof));
+        i += 1;
+    }
+}
+
+// The body of `key`, or U64_MAX. The graph keeps its bodies in increasing key order.
+fn body_of(ownership_graph.graph* g, ownership_api.function_id key, u64 mut* steps) u64 {
+    u64 mut low = 0;
+    u64 mut high = g->bodies.len;
+    while (low < high) {
+        *steps += 1;
+        u64 middle = low + (high - low) / 2;
+        i32 order = ownership_keys.function(g->bodies[middle].key, key);
+        if (order == 0) { return middle; }
+        if (order < 0) { low = middle + 1; } else { high = middle; }
+    }
+    return ownership_api.U64_MAX;
+}
+
+// The inputs name the graph bodies in graph order, and the graph has a component order.
+fn valid_inputs(solver* s) bool {
+    ownership_graph.graph* g = s->graph;
+    if (s->services == null || s->hook.begin == null || s->inputs.len != g->bodies.len ||
+        g->components.len != g->bodies.len ||
+        ownership_graph.callee_first(g).len != cast(g->component_count, u64)) { return false; }
+    u64 mut i = 0;
+    while (i < s->inputs.len) {
+        if (ownership_keys.function(s->inputs[i].function.key, g->bodies[i].key) != 0 ||
+            s->inputs[i].function.body != g->bodies[i].body) { return false; }
+        i += 1;
+    }
+    i = 0;
+    while (i < g->calls_len) {
+        if (cast(g->calls[i].body, u64) >= g->bodies.len) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+// Lays out one record for each graph call and the members of each component. The graph
+// build collected these calls, so the layout charges the graph ledger.
+fn lay_out(solver mut* s) bool {
+    ownership_graph.graph mut* g = s->graph;
+    u64 n = g->bodies.len;
+    u64 components = cast(g->component_count, u64);
+    u64 mut targets = 0;
+    u64 mut i = 0;
+    while (i < g->calls_len) {
+        if (g->calls[i].fort_len > ownership_api.U64_MAX - targets) { return false; }
+        targets += g->calls[i].fort_len;
+        i += 1;
+    }
+    if (n > ownership_api.U64_MAX - 1 - g->calls_len ||
+        components > ownership_api.U64_MAX - 1 - n - g->calls_len ||
+        !ownership_graph.charge_work(g, n + g->calls_len + components + 1)) { return false; }
+    s->out->records_first = new(u64, n + 1);
+    s->out->records = new(ownership_summary_body.call_targets, g->calls_len);
+    s->record_calls = new(u64, g->calls_len);
+    s->record_bindings = new(u64, g->calls_len);
+    s->out->bindings = new(ownership_summary_body.callee_binding, targets);
+    i = 0;
+    while (i < g->calls_len) {
+        s->out->records_first[cast(g->calls[i].body, u64) + 1] += 1;
+        i += 1;
+    }
+    i = 0;
+    while (i < n) {
+        s->out->records_first[i + 1] += s->out->records_first[i];
+        i += 1;
+    }
+    // Each body keeps the graph order of its calls: increasing block, then statement.
+    u64 mut@ own next = new(u64, n);
+    defer del(next);
+    i = 0;
+    while (i < n) { next[i] = s->out->records_first[i]; i += 1; }
+    u64 mut first = 0;
+    i = 0;
+    while (i < g->calls_len) {
+        ownership_graph.call_site* call = &g->calls[i];
+        u64 at = next[cast(call->body, u64)];
+        next[cast(call->body, u64)] += 1;
+        s->out->records[at] = ownership_summary_body.call_targets{call->position.block,
+            call->position.operation, s->out->bindings[first..first + call->fort_len],
+            call->residual_fort, call->foreign_len > 0 || call->residual_foreign};
+        s->record_calls[at] = i;
+        s->record_bindings[at] = first;
+        first += call->fort_len;
+        i += 1;
+    }
+    s->members_first = new(u64, components + 1);
+    s->members = new(u32, n);
+    s->solved = new(bool, components);
+    i = 0;
+    while (i < n) {
+        s->members_first[cast(g->components[i], u64) + 1] += 1;
+        i += 1;
+    }
+    i = 0;
+    while (i < components) {
+        s->members_first[i + 1] += s->members_first[i];
+        i += 1;
+    }
+    u64 mut@ own place = new(u64, components);
+    defer del(place);
+    i = 0;
+    while (i < components) { place[i] = s->members_first[i]; i += 1; }
+    i = 0;
+    while (i < n) {
+        u64 component = cast(g->components[i], u64);
+        s->members[place[component]] = cast(i, u32);
+        place[component] += 1;
+        i += 1;
+    }
+    return true;
+}
+
+// One computation: its limits, and the position that its own charges name.
+struct computation {
+    u64 component;
+    ownership_api.limit_table limits;
+    ownership_api.operation_position operation;
+    ownership_api.proof_status proof;
+}
+
+fn charge(solver* s, computation mut* c, u64 amount) bool {
+    u64 mut left = amount;
+    while (left > 0) {
+        ownership_api.charge_result charged = ownership_api.charge_work(s->services,
+            ownership_api.work_kind.summary_solver, c->operation, ownership_api.source_position{});
+        if (!charged.allowed) {
+            c->proof = charged.proof;
+            return false;
+        }
+        left -= 1;
+    }
+    return true;
+}
+
+// Binds each fort target of each call of the members. A target outside a solved component has
+// no published summary, so the call stays unresolved. Thus a call inside a recursive
+// component stays unresolved too: no caller reads an unpublished summary (D17.18).
+fn bind_records(solver mut* s, computation mut* c) bool {
+    ownership_graph.graph* g = s->graph;
+    u64 mut m = s->members_first[c->component];
+    while (m < s->members_first[c->component + 1]) {
+        u64 body = cast(s->members[m], u64);
+        u64 mut k = s->out->records_first[body];
+        while (k < s->out->records_first[body + 1]) {
+            ownership_graph.call_site* site = &g->calls[s->record_calls[k]];
+            u64 mut t = 0;
+            while (t < site->fort_len) {
+                u64 mut steps = 0;
+                u64 target = body_of(g, site->fort_targets[t].function, &steps);
+                if (!charge(s, c, steps + 1)) { return false; }
+                u64 group = target == ownership_api.U64_MAX ? ownership_api.U64_MAX :
+                    cast(g->components[target], u64);
+                if (target == ownership_api.U64_MAX || !s->solved[group]) {
+                    s->out->records[k].residual_fort = true;
+                    t += 1;
+                    continue;
+                }
+                s->out->bindings[s->record_bindings[k] + t] =
+                    ownership_summary_body.callee_binding{g->bodies[target].body->sym,
+                        &s->out->views[target]};
+                t += 1;
+            }
+            k += 1;
+        }
+        s->inputs[body].targets =
+            s->out->records[s->out->records_first[body]..s->out->records_first[body + 1]];
+        s->inputs[body].limits = c->limits;
+        m += 1;
+    }
+    return true;
+}
+
+// A refused W charge stops the computation (D17.18). The summary keeps the refused status.
+fn work_refused(ownership_summary_model.summary* result) bool {
+    return result->proof.terminal.limit.present &&
+        result->proof.terminal.limit.category == ownership_api.limit_category.w;
+}
+
+fn solve_component(solver mut* s, u64 component) void {
+    ownership_graph.graph* g = s->graph;
+    u64 first = s->members_first[component];
+    u64 last = s->members_first[component + 1];
+    computation mut c = computation{.component = component,
+        .proof = ownership_summary_model.complete()};
+    c.operation = ownership_api.operation_position{
+        .function = g->bodies[cast(s->members[first], u64)].key};
+    u64 mut size = 0;
+    u64 mut m = first;
+    while (m < last) {
+        size = ownership_limits.saturating_sum(size,
+            ownership_limits.fir_size(g->bodies[cast(s->members[m], u64)].body));
+        m += 1;
+    }
+    if (!s->hook.begin(s->hook.context, size, &c.limits) ||
+        !ownership_api.valid_limits(&c.limits)) {
+        refuse_members(s, component, ownership_api.incomplete(
+            ownership_api.incomplete_reason.missing_budget, c.operation,
+            ownership_api.source_position{}));
+        return;
+    }
+    if (!bind_records(s, &c)) {
+        refuse_members(s, component, c.proof);
+        return;
+    }
+    m = first;
+    while (m < last) {
+        u64 body = cast(s->members[m], u64);
+        s->inputs[body].services = s->services;
+        ownership_summary_model.summary mut result = ownership_summary.infer(&s->inputs[body]);
+        if (work_refused(&result)) {
+            ownership_api.proof_status proof = result.proof;
+            ownership_summary_model.free(&result);
+            refuse_members(s, component, proof);
+            return;
+        }
+        publish(s, body, move(result));
+        m += 1;
+    }
+}
+
+/// Solves the summary of each body of `g`, each callee component before its callers
+/// (D17.18, `spec/fir.md` 14.1). `inputs[i]` is the inference input of body i of `g`. The
+/// solver sets its call targets, services, and limits; the client keeps the rest. One
+/// computation solves each component, and `hook` starts it. A call between two members of
+/// one recursive component stays unresolved.
+fn solve(ownership_graph.graph mut* g, ownership_summary_body.body_input mut@ inputs,
+    ownership_api.services* svc, computation_hook hook) solution {
+    solution mut out = solution{};
+    out.proof = ownership_summary_model.complete();
+    out.summaries = new(ownership_summary_model.summary, inputs.len);
+    out.views = new(ownership_summary_model.summary_view, inputs.len);
+    solver mut s = solver{.graph = g, .inputs = inputs, .services = svc, .hook = hook,
+        .out = &out};
+    defer free_solver(&s);
+    if (!ownership_api.successful(g->proof)) {
+        out.proof = g->proof.kind == ownership_api.proof_kind.incomplete ? g->proof :
+            ownership_api.incomplete(ownership_api.incomplete_reason.missing_graph,
+                ownership_api.operation_position{}, ownership_api.source_position{});
+        refuse_all(&s, out.proof);
+        return out;
+    }
+    if (!valid_inputs(&s) || !lay_out(&s)) {
+        out.proof = ownership_api.successful(g->proof) ?
+            ownership_api.incomplete(ownership_api.incomplete_reason.invalid_input,
+                ownership_api.operation_position{}, ownership_api.source_position{}) : g->proof;
+        refuse_all(&s, out.proof);
+        return out;
+    }
+    u32@ order = ownership_graph.callee_first(g);
+    u64 mut i = 0;
+    while (i < order.len) {
+        solve_component(&s, cast(order[i], u64));
+        s.solved[cast(order[i], u64)] = true;
+        i += 1;
+    }
+    return out;
+}

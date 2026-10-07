@@ -1327,7 +1327,24 @@ came here.
   A callee summary without a proof keeps the call unknown. Its body reported its own error, so
   the call does not fail the caller for it. A direct fort call without a summary, such as a
   recursive call or a missing body, is an unresolved step with the same continuation. An extern
-  or indirect call stays unsupported in the extractor.
+  call keeps the body unsupported with the reason `missing_ffi`. An indirect call without graph
+  targets keeps it unsupported with `unknown_effect`.
+- **A call of a function value applies the summary of each fort target** (D17.13, D17.18).
+  `ownership_recursive.solve` gives each graph call one `call_targets` record and binds each
+  explicit fort target to its published summary. Extraction finds the record of a call by a
+  binary search, and a direct call without a record finds its callee by symbol. One explicit
+  target and no residual target is the call of that body, with definite caller errors.
+  With several targets, each target applies its possible cases. A failure of one target is
+  incomplete proof with abstract-possibility evidence, because a target set entry is no witness
+  (`spec/fir.md` 14.1, A04). Such a call exports no requirement and no caller-visible effect.
+  It keeps a continuation only when each target can return, and its path ends when no target
+  can return. Otherwise it stays unresolved.
+  A residual fort target keeps an unresolved step. A foreign target or a residual foreign target
+  keeps the body unsupported with `missing_ffi`. A residual fort target at the same call keeps
+  `unknown_effect`, so foreign trust never covers an unknown fort target.
+  Each possible abort case gives one abort exit at the call, and two abort exits with one guard
+  give one case. The solver solves the components callee first, one computation each. A call
+  between two members of one recursive component stays unresolved.
 - **A branch on a captured formal gives guarded cases** (D17.18).
   Extraction walks each reached block of a forward tree and keeps the origins and scalars at each
   block entry. A back edge or a second parent keeps the body unsupported, so an `if` whose

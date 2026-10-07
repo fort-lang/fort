@@ -162,6 +162,7 @@ struct call_bindings {
     u64 sources_len;
     u64 allocations_len;
     u64 captures_len;
+    ownership_calls.event_binding[1] events;
     bool unknown;
 }
 
@@ -204,9 +205,10 @@ fn designated_storage(call_context* c, ownership_api.entity_id source, types.nod
 
 // Binds each callee root to the current facts of this path. Formal identity proves nothing:
 // two formals bound to one source keep one source and one allocation (D17.15).
-fn bind_call(call_context* c, ownership_summary_body.call_site site, fir.statement* call,
+fn bind_call(call_context* c, ownership_summary_body.call_site site,
+    ownership_summary_body.call_target target, fir.statement* call,
     ownership_state.state* facts, call_bindings mut* out) bool {
-    ownership_summary_model.summary_view* summary = site.summary;
+    ownership_summary_model.summary_view* summary = target.binding.summary;
     u64 count = summary->roots.len;
     if (count > types.TYPE_MAX_SIZE / sizeof(ownership_calls.source_binding) ||
         !call_work(c, count)) { return false; }
@@ -272,12 +274,12 @@ fn bind_call(call_context* c, ownership_summary_body.call_site site, fir.stateme
                 out->allocations_len += 1;
             }
         } else if (row.kind == ownership_summary_model.root_kind.allocation_template) {
-            if (template >= site.fresh_count) {
+            if (template >= target.fresh_count) {
                 out->unknown = true;
                 return true;
             }
             ownership_api.entity_id key = ownership_api.entity_id{c->in->function.key,
-                ownership_api.entity_kind.allocation, site.fresh_first + template};
+                ownership_api.entity_kind.allocation, target.fresh_first + template};
             out->allocations[out->allocations_len] = ownership_calls.allocation_binding{
                 row.allocation, ownership_api.allocation_fact{.key = key,
                     .validity = ownership_api.validity_kind.live,
@@ -307,13 +309,19 @@ fn bind_call(call_context* c, ownership_summary_body.call_site site, fir.stateme
     return true;
 }
 
+// Extraction appends the call sites in block and gap order, so a binary search finds one in
+// O(log n) W units.
 fn call_site_at(call_context* c, ownership_flow.step* s) u64 {
-    u64 mut i = 0;
-    while (i < c->program->calls_len) {
+    u64 mut low = 0;
+    u64 mut high = c->program->calls_len;
+    while (low < high) {
         if (!call_work(c, 1)) { return ownership_api.U64_MAX; }
-        ownership_summary_body.call_site site = c->program->calls[i];
-        if (site.block == s->block && site.gap == s->gap) { return i; }
-        i += 1;
+        u64 middle = low + (high - low) / 2;
+        ownership_summary_body.call_site site = c->program->calls[middle];
+        if (site.block == s->block && site.gap == s->gap) { return middle; }
+        if (site.block < s->block || (site.block == s->block && site.gap < s->gap)) {
+            low = middle + 1;
+        } else { high = middle; }
     }
     return ownership_api.U64_MAX;
 }
@@ -408,8 +416,11 @@ fn listed(ownership_api.entity_id@ keys, ownership_api.entity_id key) bool {
 
 // Exports the callee requirements and the call result of this body (D17.14, D17.17).
 // Any other caller-visible callee effect keeps the published summary incomplete.
+// A call of several targets exports nothing: an exported requirement or effect would bind
+// each caller to one target, and a target of several is not a witness (`spec/fir.md` 14.1).
 fn export_call(call_context* c, ownership_summary_body.call_site site, fir.statement* call,
-    ownership_flow.step* s, ownership_calls.application* applied, u64 index) bool {
+    ownership_flow.step* s, ownership_calls.application* applied, u64 index, bool definite)
+    bool {
     ownership_summary_body.body_program mut* program = c->program;
     ownership_summary_model.summary* bound = &applied->bound.model;
     // Only the applied case runs. A requirement or effect after its abort is not exported.
@@ -427,6 +438,9 @@ fn export_call(call_context* c, ownership_summary_body.call_site site, fir.state
         bool readable = row.kind == ownership_summary_model.requirement_kind.live_source ||
             row.kind == ownership_summary_model.requirement_kind.extent;
         if (root != ownership_api.U64_MAX && readable &&
+            row.guard.kind == ownership_api.entity_kind.none && !definite) {
+            program->call_residual = true;
+        } else if (root != ownership_api.U64_MAX && readable &&
             row.guard.kind == ownership_api.entity_kind.none) {
             ownership_summary_model.symbolic_root formal = program->roots[root];
             ownership_summary_body.export_requirement(c->in, program, row,
@@ -447,7 +461,7 @@ fn export_call(call_context* c, ownership_summary_body.call_site site, fir.state
             node.payload != ownership_summary_model.payload_kind.read &&
             (caller_visible(c, node.effect.place, node.effect.allocation) ||
             caller_visible(c, node.operand, ownership_api.entity_id{})) &&
-            !export_store(c, call, s, bound, node)) {
+            (!definite || !export_store(c, call, s, bound, node))) {
             program->call_residual = true;
         }
         if (!ownership_api.successful(program->proof)) { return false; }
@@ -527,9 +541,10 @@ struct continuation {
 }
 
 // Applies one possible case. An abort records its exit. A normal return joins the
-// continuation. `stop` names a verdict that ends the path.
+// continuation. `stop` names a verdict that ends the path. A case of one target of several
+// is a possibility: a failed application keeps the call unresolved.
 fn apply_one(call_context* c, ownership_summary_body.call_site site, fir.statement* call,
-    ownership_flow.step* s, ownership_calls.request* req, u64 index,
+    ownership_flow.step* s, ownership_calls.request* req, u64 index, bool definite,
     continuation mut* kept, ownership_flow.call_verdict mut* verdict) bool {
     ownership_calls.application mut applied = ownership_calls.apply_case(req, index);
     defer ownership_calls.free(&applied);
@@ -539,16 +554,17 @@ fn apply_one(call_context* c, ownership_summary_body.call_site site, fir.stateme
         return false;
     }
     if (!ownership_api.successful(applied.proof)) {
-        if (applied.proof.kind == ownership_api.proof_kind.incomplete &&
-            applied.proof.terminal.reason != ownership_api.incomplete_reason.work_limit &&
-            applied.proof.terminal.reason != ownership_api.incomplete_reason.report_limit) {
+        bool limit = applied.proof.terminal.reason == ownership_api.incomplete_reason.work_limit ||
+            applied.proof.terminal.reason == ownership_api.incomplete_reason.report_limit;
+        if ((applied.proof.kind == ownership_api.proof_kind.incomplete && !limit) ||
+            (!definite && applied.proof.kind != ownership_api.proof_kind.incomplete)) {
             verdict->unknown = true;
             return false;
         }
         verdict->proof = applied.proof;
         return false;
     }
-    if (!export_call(c, site, call, s, &applied, index)) {
+    if (!export_call(c, site, call, s, &applied, index, definite)) {
         verdict->proof = c->program->proof;
         return false;
     }
@@ -582,11 +598,103 @@ fn apply_one(call_context* c, ownership_summary_body.call_site site, fir.stateme
     return true;
 }
 
-// Applies the published callee summary at one call (D17.18). Each case whose guard does not
-// fail runs. A proved abort records an abort exit and needs no cleanup. Two normal cases join
-// into one continuation. When only aborts run, the path ends. An unresolved summary keeps a
-// possible return with its obligations. So does a summary whose guards all fail: such guards
-// cover no caller value, and they prove no absence of return.
+// A target of several is a possibility and not a witness (`spec/fir.md` 14.1). The event
+// service of its application turns each definite event into incomplete proof with
+// abstract-possibility evidence, so no caller error names one possible target.
+struct possibility {
+    ownership_api.services* inner;
+}
+
+fn possible_event(void mut* opaque, ownership_api.event_request* req)
+    ownership_api.event_result {
+    possibility mut* wrap = cast(opaque, possibility mut*);
+    ownership_api.event_request mut changed = *req;
+    if (changed.event.kind != ownership_api.event_kind.incomplete_proof &&
+        changed.event.kind != ownership_api.event_kind.work_failure) {
+        changed.event.kind = ownership_api.event_kind.incomplete_proof;
+        changed.event.evidence = ownership_api.evidence_kind.abstract_possibility;
+        changed.event.reason = ownership_api.incomplete_reason.missing_path;
+    }
+    if (changed.current.kind != ownership_api.proof_kind.incomplete && changed.current.failed) {
+        changed.current = ownership_api.incomplete(ownership_api.incomplete_reason.missing_path,
+            changed.event.operation, changed.event.source);
+        changed.current.terminal.relation = changed.event.relation;
+    }
+    return ownership_api.record_event(wrap->inner, &changed);
+}
+
+// One fort target of a call: its bindings, its request, and its possible cases.
+struct target_plan {
+    call_bindings bindings;
+    ownership_calls.request req;
+    ownership_summary_model.context guard;
+    // A possible case of the target returns normally.
+    bool returns;
+}
+
+fn free_plans(target_plan mut@ plans) void {
+    u64 mut i = 0;
+    while (i < plans.len) {
+        free_bindings(&plans[i].bindings);
+        i += 1;
+    }
+}
+
+enum plan_result { ready, unresolved, stop }
+
+// Binds one target and decides each guard of its cases before any case runs. No caller value
+// decides an unbound guard, so the call stays unresolved (D17.18).
+fn plan_target(call_context* c, ownership_summary_body.call_site site,
+    ownership_summary_body.call_target target, fir.statement* call, ownership_flow.step* s,
+    ownership_state.state* facts, ownership_api.services* svc, target_plan mut* plan)
+    plan_result {
+    ownership_summary_model.summary_view* summary = target.binding.summary;
+    if (summary == null) { return plan_result.unresolved; }
+    // A callee without a proof keeps an unknown call. A callee body that failed reported its
+    // own error, so the call does not fail this body for it (D17.18).
+    if (summary->residual_effects || !ownership_api.successful(summary->proof) ||
+        summary->cases.len == 0) { return plan_result.unresolved; }
+    if (!bind_call(c, site, target, call, facts, &plan->bindings)) { return plan_result.stop; }
+    if (plan->bindings.unknown) { return plan_result.unresolved; }
+    plan->bindings.events[0] = ownership_calls.event_binding{s->operation, site.event};
+    ownership_api.alias_binding@ no_globals = {};
+    plan->req = ownership_calls.request{.summary = summary,
+        .before = ownership_state.view(facts), .operation = s->operation, .source = s->source,
+        .aliases = plan->bindings.aliases[..plan->bindings.aliases_len],
+        .sources = plan->bindings.sources[..plan->bindings.sources_len],
+        .allocations = plan->bindings.allocations[..plan->bindings.allocations_len],
+        .captures = plan->bindings.captures[..plan->bindings.captures_len],
+        .globals = no_globals, .events = plan->bindings.events[..], .services = svc,
+        .limits = c->in->limits,
+        .coverage = ownership_summary_model.coverage_status{true, true, false},
+        .correspondence_complete = true, .event_map_complete = true};
+    plan->req.result.actual_slot = ownership_summary_body.slot(c->in, call->place.local);
+    plan->guard = ownership_summary_model.context{svc, s->operation, s->source,
+        site.event, summary->source};
+    u64 mut possible = 0;
+    u64 mut i = 0;
+    while (i < summary->cases.len) {
+        ownership_calls.guard_answer answer = ownership_calls.case_answer(&plan->req,
+            &plan->guard, &c->program->proof, i);
+        if (answer == ownership_calls.guard_answer.unbound) { return plan_result.unresolved; }
+        if (!ownership_api.successful(c->program->proof)) { return plan_result.stop; }
+        if (answer != ownership_calls.guard_answer.fails) {
+            possible += 1;
+            plan->returns = plan->returns ||
+                summary->cases[i].outcome.kind == ownership_api.outcome_kind.function_return;
+        }
+        i += 1;
+    }
+    // Guards that all fail cover no caller value. They prove no absence of return.
+    if (possible == 0) { return plan_result.unresolved; }
+    return plan_result.ready;
+}
+
+// Applies the published summary of each fort target at one call (D17.18). Each case whose
+// guard does not fail runs. A proved abort records an abort exit and needs no cleanup. Normal
+// cases join into one continuation. When only aborts run, the path ends. An unresolved target
+// keeps a possible return with its obligations. With several targets, a continuation needs
+// each target to return: otherwise the call stays unresolved.
 fn call_step(void mut* opaque, ownership_flow.step* s, ownership_state.state mut* facts)
     ownership_flow.call_verdict {
     call_context* c = cast(opaque, call_context*);
@@ -603,69 +711,61 @@ fn call_step(void mut* opaque, ownership_flow.step* s, ownership_state.state mut
     }
     ownership_summary_body.call_site site = c->program->calls[index];
     fir.statement* call = fir.block_statement(c->in->function.body, site.block, site.gap);
-    // A callee without a summary or without a proof keeps an unknown call. A callee body that
-    // failed reported its own error, so the call does not fail this body for it (D17.18).
-    ownership_summary_model.summary_view* summary = site.summary;
-    if (summary == null || summary->residual_effects ||
-        !ownership_api.successful(summary->proof) || summary->cases.len == 0) {
-        return unresolved_call(c, call, facts);
-    }
-    call_bindings mut bindings = call_bindings{};
-    defer free_bindings(&bindings);
-    if (!bind_call(c, site, call, facts, &bindings)) {
+    if (site.unresolved || site.targets_len == 0) { return unresolved_call(c, call, facts); }
+    bool definite = site.targets_len == 1;
+    possibility mut wrap = possibility{c->in->services};
+    ownership_api.services mut possible_services = *c->in->services;
+    possible_services.event_context = cast(&wrap, void mut*);
+    possible_services.event = possible_event;
+    ownership_api.services* mut svc = c->in->services;
+    if (!definite) { svc = &possible_services; }
+    if (site.targets_len > types.TYPE_MAX_SIZE / sizeof(target_plan) ||
+        !call_work(c, site.targets_len)) {
         verdict.proof = c->program->proof;
         return verdict;
     }
-    if (bindings.unknown) { return unresolved_call(c, call, facts); }
-    ownership_calls.event_binding[1] events = {ownership_calls.event_binding{s->operation,
-        site.event}};
-    ownership_api.alias_binding@ no_globals = {};
-    ownership_calls.request mut req = ownership_calls.request{.summary = summary,
-        .before = ownership_state.view(facts), .operation = s->operation, .source = s->source,
-        .aliases = bindings.aliases[..bindings.aliases_len],
-        .sources = bindings.sources[..bindings.sources_len],
-        .allocations = bindings.allocations[..bindings.allocations_len],
-        .captures = bindings.captures[..bindings.captures_len], .globals = no_globals,
-        .events = events[..], .services = c->in->services, .limits = c->in->limits,
-        .coverage = ownership_summary_model.coverage_status{true, true, false},
-        .correspondence_complete = true, .event_map_complete = true};
-    req.result.actual_slot = ownership_summary_body.slot(c->in, call->place.local);
-    ownership_summary_model.context guard_context = ownership_summary_model.context{
-        c->in->services, s->operation, s->source, site.event, summary->source};
-    // Each guard is decided before any case runs. No caller value decides an unbound guard,
-    // so the call stays unresolved (D17.18).
-    u64 mut possible = 0;
-    u64 mut i = 0;
-    while (i < summary->cases.len) {
-        ownership_calls.guard_answer answer = ownership_calls.case_answer(&req, &guard_context,
-            &c->program->proof, i);
-        if (answer == ownership_calls.guard_answer.unbound) {
-            return unresolved_call(c, call, facts);
-        }
-        if (!ownership_api.successful(c->program->proof)) {
+    target_plan mut@ own plans = new(target_plan, site.targets_len);
+    defer del(plans);
+    defer free_plans(plans[..]);
+    u64 mut returning = 0;
+    u64 mut t = 0;
+    while (t < site.targets_len) {
+        plan_result planned = plan_target(c, site,
+            c->program->targets[site.targets_first + t], call, s, facts, svc, &plans[t]);
+        if (planned == plan_result.stop) {
             verdict.proof = c->program->proof;
             return verdict;
         }
-        if (answer != ownership_calls.guard_answer.fails) { possible += 1; }
-        i += 1;
+        if (planned == plan_result.unresolved) { return unresolved_call(c, call, facts); }
+        if (plans[t].returns) { returning += 1; }
+        t += 1;
     }
-    if (possible == 0) { return unresolved_call(c, call, facts); }
+    if (!definite && returning != 0 && returning != site.targets_len) {
+        return unresolved_call(c, call, facts);
+    }
     continuation mut kept = continuation{.facts = ownership_state.empty()};
     defer ownership_state.free(&kept.facts);
-    i = 0;
-    while (i < summary->cases.len) {
-        ownership_calls.guard_answer answer = ownership_calls.case_answer(&req, &guard_context,
-            &c->program->proof, i);
-        if (!ownership_api.successful(c->program->proof)) {
-            verdict.proof = c->program->proof;
-            return verdict;
+    t = 0;
+    while (t < site.targets_len) {
+        ownership_summary_model.summary_view* summary = plans[t].req.summary;
+        u64 mut i = 0;
+        while (i < summary->cases.len) {
+            ownership_calls.guard_answer answer = ownership_calls.case_answer(&plans[t].req,
+                &plans[t].guard, &c->program->proof, i);
+            if (!ownership_api.successful(c->program->proof)) {
+                verdict.proof = c->program->proof;
+                return verdict;
+            }
+            if (answer != ownership_calls.guard_answer.fails) {
+                if (!apply_one(c, site, call, s, &plans[t].req, i, definite, &kept,
+                    &verdict)) {
+                    if (verdict.unknown) { return unresolved_call(c, call, facts); }
+                    return verdict;
+                }
+            }
+            i += 1;
         }
-        if (answer != ownership_calls.guard_answer.fails &&
-            !apply_one(c, site, call, s, &req, i, &kept, &verdict)) {
-            if (verdict.unknown) { return unresolved_call(c, call, facts); }
-            return verdict;
-        }
-        i += 1;
+        t += 1;
     }
     if (kept.normals == 0) { return verdict; }
     if (!export_call_result(c, call, s, &kept.facts, kept.normals)) {
@@ -914,8 +1014,10 @@ fn exit_less(exit_snapshot* a, exit_snapshot* b) bool {
     return position_less(a->operation, b->operation);
 }
 
-// The exits of the observer list, sorted by FIR position. Two exits at one position, or an
-// exit that is neither a return nor an abort, leave the summary without a proof.
+// The exits of the observer list, sorted by FIR position. Each possible abort case of a call
+// gives one abort exit, so several abort exits can share the position of their call. Two
+// other exits at one position, or an exit that is neither a return nor an abort, leave the
+// summary without a proof.
 fn sorted_exits(ownership_summary_body.body_program mut* program, exits* observations,
     exit_snapshot* mut@ out) bool {
     exit_snapshot* mut item = observations->first;
@@ -929,7 +1031,9 @@ fn sorted_exits(ownership_summary_body.body_program mut* program, exits* observa
             out[j] = out[j - 1];
             j -= 1;
         }
-        if (j > 0 && ownership_keys.operation(out[j - 1]->operation, item->operation) == 0) {
+        if (j > 0 && ownership_keys.operation(out[j - 1]->operation, item->operation) == 0 &&
+            (item->outcome.kind != ownership_api.outcome_kind.abort ||
+            out[j - 1]->outcome.kind != ownership_api.outcome_kind.abort)) {
             return false;
         }
         out[j] = item;
@@ -937,6 +1041,57 @@ fn sorted_exits(ownership_summary_body.body_program mut* program, exits* observa
         item = item->next;
     }
     return count == out.len && item == null;
+}
+
+// One formal atom of exit `a` is also an atom of exit `b`.
+fn guard_within(ownership_summary_body.body_input* in,
+    ownership_summary_body.body_program mut* program, exit_snapshot* a, exit_snapshot* b)
+    bool {
+    u64 mut i = 0;
+    while (i < a->facts.predicates_len) {
+        ownership_api.predicate_atom atom = a->facts.predicates[i];
+        bool mut found = !formal_atom(in, atom);
+        u64 mut j = 0;
+        while (!found && j < b->facts.predicates_len) {
+            if (!ownership_summary_body.work(program, 1)) { return false; }
+            ownership_api.predicate_atom other = b->facts.predicates[j];
+            found = formal_atom(in, other) && ownership_summary_model.same(other.left, atom.left) &&
+                other.lower.value == atom.lower.value;
+            j += 1;
+        }
+        if (!found) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+// Two abort exits at one call position with one guard are one case. A copy would let a
+// recursive component add one more copy in each round, so it never reaches a fixed point.
+// Returns the number of exits that `ordered` keeps at its front.
+fn distinct_exits(ownership_summary_body.body_input* in,
+    ownership_summary_body.body_program mut* program, exit_snapshot* mut@ ordered) u64 {
+    u64 mut kept = 0;
+    u64 mut i = 0;
+    while (i < ordered.len) {
+        exit_snapshot* exit = ordered[i];
+        bool mut copy = false;
+        u64 mut j = kept;
+        while (!copy && j > 0 && ownership_keys.operation(ordered[j - 1]->operation,
+            exit->operation) == 0) {
+            if (!ownership_summary_body.work(program, 1)) { return kept; }
+            exit_snapshot* prior = ordered[j - 1];
+            copy = exit->outcome.kind == ownership_api.outcome_kind.abort &&
+                prior->outcome.kind == ownership_api.outcome_kind.abort &&
+                guard_within(in, program, exit, prior) && guard_within(in, program, prior, exit);
+            j -= 1;
+        }
+        if (!copy) {
+            ordered[kept] = exit;
+            kept += 1;
+        }
+        i += 1;
+    }
+    return kept;
 }
 
 // The owned records of one publication. The summary view borrows these slices.
@@ -1288,7 +1443,7 @@ fn publish(ownership_summary_body.body_input* in,
     ownership_summary_body.body_program mut* program, exits* observations)
     ownership_summary_model.summary {
     ownership_summary_model.summary mut out = failed(program);
-    u64 count = observations->count;
+    u64 mut count = observations->count;
     if (count == 0 || program->call_residual) {
         out.proof = ownership_api.incomplete(ownership_api.incomplete_reason.unknown_effect,
             program->context.operation, program->context.source);
@@ -1313,6 +1468,8 @@ fn publish(ownership_summary_body.body_input* in,
             program->context.operation, program->context.source);
         return out;
     }
+    count = distinct_exits(in, program, ordered[..]);
+    if (!ownership_api.successful(program->proof)) { return failed(program); }
     u64 results = result_capacity(in, program, observations);
     exit_snapshot* mut item = observations->first;
     u64 mut predicate_count = 0;
@@ -1397,7 +1554,7 @@ fn infer_watched(ownership_summary_body.body_input* in, budget_watch* watch)
     return publish(in, &program, &observations);
 }
 
-/// Infers the summary of one body. `in->callees` names the published direct callees.
+/// Infers the summary of one body. `in->callees` and `in->targets` name the callees.
 /// A callee summary cannot override an unsupported operation in this body.
 /// The inference sees each charge through a watch. A call stops at its first refused charge.
 fn infer(ownership_summary_body.body_input* in) ownership_summary_model.summary {

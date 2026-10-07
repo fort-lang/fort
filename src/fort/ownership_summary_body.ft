@@ -18,15 +18,28 @@ import types;
 u32 U32_MAX = 4294967295;
 u64 U64_MAX = 18446744073709551615;
 
-// A published direct callee. The checked symbol names its declaration.
+// A published callee. The checked symbol names its declaration.
 // The summary stays immutable and live through each inference that reads it.
 struct callee_binding {
     ast.sym* symbol;
     ownership_summary_model.summary_view* summary;
 }
 
+// The targets of one call statement from the call graph (D17.18). A residual fort target
+// keeps the call unresolved. A foreign target or a residual foreign target keeps the body
+// unsupported, because this extractor applies no foreign boundary (D17.13).
+struct call_targets {
+    u32 block;
+    u32 gap;
+    callee_binding@ fort;
+    bool residual_fort;
+    bool foreign;
+}
+
 // Stable identities use the checked function key and its finite FIR local numbers.
 // The verified body, checked types, and filenames outlive this input and its results.
+// `targets` is sorted by block and gap. Without a record, a direct call finds its callee in
+// `callees`, and an indirect call stays unsupported.
 struct body_input {
     ownership_graph.body_input function;
     ownership_flow.source_file_binding@ source_files;
@@ -35,17 +48,26 @@ struct body_input {
     ownership_summary_model.coverage_status coverage;
     bool correspondence_complete;
     callee_binding@ callees;
+    call_targets@ targets;
 }
 
-// One direct call of an available callee summary. Extraction fixes its event key and the
-// fresh allocation keys of the callee templates, so no call depth creates a key (D17.18).
+// One possible fort target of a call. Extraction fixes the fresh allocation keys of its
+// callee templates, so no call depth creates a key (D17.18). A null summary is unresolved.
+struct call_target {
+    callee_binding binding;
+    u32 fresh_first;
+    u32 fresh_count;
+}
+
+// One call of fort targets. Extraction fixes its event key. An unresolved call has a residual
+// fort target, so no summary decides it.
 struct call_site {
     u32 block;
     u32 gap;
-    ownership_summary_model.summary_view* summary;
     ownership_api.entity_id event;
-    u32 fresh_first;
-    u32 fresh_count;
+    u64 targets_first;
+    u64 targets_len;
+    bool unresolved;
     // The scalar value of each operand on the path of the call: exact, a captured formal
     // value of this body, or unknown.
     u64 args_first;
@@ -71,6 +93,8 @@ struct body_program {
     bool mut@ own addressed;
     call_site mut@ own calls;
     u64 calls_len;
+    call_target mut@ own targets;
+    u64 targets_len;
     ownership_api.scalar_fact mut@ own call_args;
     u64 call_args_len;
     // The body is a forward tree. Each reached block keeps its one parent and the origins and
@@ -123,6 +147,7 @@ fn free(body_program mut* out) void {
     del(owned.scalars);
     del(owned.addressed);
     del(owned.calls);
+    del(owned.targets);
     del(owned.call_args);
     del(owned.parents);
     del(owned.reached);
@@ -1170,58 +1195,113 @@ fn assign_output(body_input* in, body_program mut* out, fir.statement* stmt,
         selected.flow_path);
 }
 
-fn binding(body_input* in, body_program mut* out, ast.sym* symbol)
-    ownership_summary_model.summary_view* {
-    if (symbol == null) { return null; }
+// The supplied binding of a direct callee. A missing binding has no summary.
+fn binding(body_input* in, body_program mut* out, ast.sym* symbol) callee_binding {
+    callee_binding mut found = callee_binding{.symbol = symbol};
+    if (symbol == null) { return found; }
     u64 mut i = 0;
     while (i < in->callees.len) {
-        if (!work(out, 1)) { return null; }
-        if (in->callees[i].symbol == symbol) { return in->callees[i].summary; }
+        if (!work(out, 1)) { return found; }
+        if (in->callees[i].symbol == symbol) { return in->callees[i]; }
         i += 1;
+    }
+    return found;
+}
+
+// The target record of the call at `block` and `gap`, or null. The records increase by block
+// and gap, so a binary search finds one in O(log n) W units.
+fn record_at(body_input* in, body_program mut* out, u32 block, u32 gap) call_targets* {
+    u64 mut low = 0;
+    u64 mut high = in->targets.len;
+    while (low < high) {
+        if (!work(out, 1)) { return null; }
+        u64 middle = low + (high - low) / 2;
+        call_targets* row = &in->targets[middle];
+        if (row->block == block && row->gap == gap) { return row; }
+        if (row->block < block || (row->block == block && row->gap < gap)) {
+            low = middle + 1;
+        } else { high = middle; }
     }
     return null;
 }
 
-// Each callee requirement can add one requirement and one read. The result adds one write.
-fn call_capacity(body_input* in, body_program mut* out, fir.statement* stmt) u64 {
-    if (stmt->kind != fir.stmt_kind.st_assign || stmt->value.kind != fir.rvalue_kind.rv_call ||
-        stmt->value.callee != fir.callee_kind.cl_fn) { return 0; }
-    ownership_summary_model.summary_view* summary = binding(in, out, stmt->value.callee_sym);
+// The number of fort targets that extraction keeps for one call statement.
+fn target_count(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
+    u32 gap) u64 {
+    if (stmt->kind != fir.stmt_kind.st_assign || stmt->value.kind != fir.rvalue_kind.rv_call) {
+        return 0;
+    }
+    call_targets* record = record_at(in, out, block, gap);
+    if (record != null) { return record->fort.len; }
+    return stmt->value.callee == fir.callee_kind.cl_fn ? 1 : 0;
+}
+
+fn requirement_capacity(ownership_summary_model.summary_view* summary) u64 {
     if (summary == null) { return 0; }
     if (summary->requirements.len > (U64_MAX - 2) / 2) { return U64_MAX; }
     return summary->requirements.len * 2 + 2;
 }
 
-// The callee result designates the source of one argument in each normal case.
-// Any other result keeps an unknown origin, so a later read cannot export a requirement.
-fn call_origin(body_input* in, body_program mut* out, fir.rvalue rv,
-    ownership_summary_model.summary_view* summary) ownership_api.entity_id {
+// Each callee requirement can add one requirement and one read. The result adds one write.
+// Each fort target of the call can add its own.
+fn call_capacity(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
+    u32 gap) u64 {
+    if (stmt->kind != fir.stmt_kind.st_assign || stmt->value.kind != fir.rvalue_kind.rv_call) {
+        return 0;
+    }
+    call_targets* record = record_at(in, out, block, gap);
+    if (record == null) {
+        if (stmt->value.callee != fir.callee_kind.cl_fn) { return 0; }
+        return requirement_capacity(binding(in, out, stmt->value.callee_sym).summary);
+    }
+    u64 mut total = 0;
+    u64 mut i = 0;
+    while (i < record->fort.len) {
+        u64 one = requirement_capacity(record->fort[i].summary);
+        if (one > U64_MAX - total) { return U64_MAX; }
+        total += one;
+        i += 1;
+    }
+    return total;
+}
+
+// The callee result designates the source of one argument in each normal case of each
+// target. Any other result keeps an unknown origin, so a later read cannot export a
+// requirement.
+fn call_origin(body_input* in, body_program mut* out, fir.rvalue rv, call_target@ targets)
+    ownership_api.entity_id {
     ownership_api.entity_id mut found = ownership_api.entity_id{};
-    u64 mut c = 0;
-    while (c < summary->cases.len) {
-        ownership_summary_model.case_record row = summary->cases[c];
-        u64 mut k = 0;
-        while (row.outcome.kind == ownership_api.outcome_kind.function_return &&
-            k < row.results.len) {
-            u64 mut r = 0;
-            while (r < summary->results.len) {
-                if (!work(out, 1)) { return ownership_api.entity_id{}; }
-                ownership_summary_model.relation result = summary->results[r];
-                if (ownership_summary_model.same(result.key, row.results[k])) {
-                    ownership_api.entity_id origin = argument_origin(in, out, rv, summary,
-                        result.borrow.source);
-                    if (origin.kind == ownership_api.entity_kind.none ||
-                        (found.kind != ownership_api.entity_kind.none &&
-                            !ownership_summary_model.same(found, origin))) {
-                        return ownership_api.entity_id{};
+    u64 mut t = 0;
+    while (t < targets.len) {
+        ownership_summary_model.summary_view* summary = targets[t].binding.summary;
+        if (summary == null) { return ownership_api.entity_id{}; }
+        u64 mut c = 0;
+        while (c < summary->cases.len) {
+            ownership_summary_model.case_record row = summary->cases[c];
+            u64 mut k = 0;
+            while (row.outcome.kind == ownership_api.outcome_kind.function_return &&
+                k < row.results.len) {
+                u64 mut r = 0;
+                while (r < summary->results.len) {
+                    if (!work(out, 1)) { return ownership_api.entity_id{}; }
+                    ownership_summary_model.relation result = summary->results[r];
+                    if (ownership_summary_model.same(result.key, row.results[k])) {
+                        ownership_api.entity_id origin = argument_origin(in, out, rv, summary,
+                            result.borrow.source);
+                        if (origin.kind == ownership_api.entity_kind.none ||
+                            (found.kind != ownership_api.entity_kind.none &&
+                                !ownership_summary_model.same(found, origin))) {
+                            return ownership_api.entity_id{};
+                        }
+                        found = origin;
                     }
-                    found = origin;
+                    r += 1;
                 }
-                r += 1;
+                k += 1;
             }
-            k += 1;
+            c += 1;
         }
-        c += 1;
+        t += 1;
     }
     return found;
 }
@@ -1413,18 +1493,24 @@ fn aggregate_value(body_input* in, body_program mut* out, fir.statement* stmt, u
     if (dst != 0 && ownership_api.successful(out->proof)) { out->holding[dst] = 1; }
 }
 
-// A call of an available summary becomes one flow step at its exact gap (D17.18).
-// Flow applies the summary to the current facts. Unsupported calls stay unknown effects.
+// A call of fort targets becomes one flow step at its exact gap (D17.18). Flow applies the
+// summaries of the targets to the current facts. A direct fort call without a published
+// summary, such as a recursive call or a missing body, and a call with a residual fort target
+// stay unresolved steps: flow keeps their continuation and obligations. A foreign alternative
+// keeps the body unsupported with the reason `missing_ffi`, because extraction applies no
+// foreign boundary (D17.13). Foreign trust never covers a residual fort target.
 fn call(body_input* in, body_program mut* out, fir.statement* stmt, u32 block, u32 gap) void {
     fir.func* f = in->function.body;
     fir.rvalue rv = stmt->value;
-    ownership_summary_model.summary_view* summary = rv.callee == fir.callee_kind.cl_fn ?
-        binding(in, out, rv.callee_sym) : null;
+    call_targets* record = record_at(in, out, block, gap);
     if (!ownership_api.successful(out->proof)) { return; }
-    // A direct fort call without a published summary, such as a recursive call or a missing
-    // body, stays an unresolved step: flow keeps its continuation and obligations. An extern or
-    // indirect call stays unsupported here.
-    if (rv.callee != fir.callee_kind.cl_fn || !direct(stmt->place)) {
+    bool residual = record != null && record->residual_fort;
+    if (!residual && (rv.callee == fir.callee_kind.cl_extern ||
+        (record != null && record->foreign))) {
+        reject(out, ownership_api.incomplete_reason.missing_ffi);
+        return;
+    }
+    if ((rv.callee == fir.callee_kind.cl_value && record == null) || !direct(stmt->place)) {
         reject(out, ownership_api.incomplete_reason.unknown_effect);
         return;
     }
@@ -1444,31 +1530,43 @@ fn call(body_input* in, body_program mut* out, fir.statement* stmt, u32 block, u
         reject(out, ownership_api.incomplete_reason.unknown_effect);
         return;
     }
-    if (out->calls_len >= out->calls.len || out->steps_len >= out->steps.len) {
+    u64 count = residual ? 0 : record != null ? record->fort.len : 1;
+    if (out->calls_len >= out->calls.len || out->steps_len >= out->steps.len ||
+        count > out->targets.len - out->targets_len) {
         reject(out, ownership_api.incomplete_reason.invalid_input);
         return;
     }
-    u32 mut templates = 0;
-    u64 mut i = 0;
-    while (summary != null && i < summary->roots.len) {
-        if (!work(out, 1)) { return; }
-        if (summary->roots[i].kind == ownership_summary_model.root_kind.allocation_template) {
-            if (templates == U32_MAX) {
-                reject(out, ownership_api.incomplete_reason.invalid_input);
-                return;
-            }
-            templates += 1;
-        }
-        i += 1;
-    }
     ownership_api.entity_id event = next(out, ownership_api.entity_kind.event);
-    u32 first = out->next_key + 1;
-    u32 mut t = 0;
-    while (t < templates) {
-        next(out, ownership_api.entity_kind.allocation);
+    u64 first_target = out->targets_len;
+    u64 mut t = 0;
+    while (t < count) {
+        callee_binding target = record != null ? record->fort[t] :
+            binding(in, out, rv.callee_sym);
+        u32 mut templates = 0;
+        u64 mut i = 0;
+        while (target.summary != null && i < target.summary->roots.len) {
+            if (!work(out, 1)) { return; }
+            if (target.summary->roots[i].kind ==
+                ownership_summary_model.root_kind.allocation_template) {
+                if (templates == U32_MAX) {
+                    reject(out, ownership_api.incomplete_reason.invalid_input);
+                    return;
+                }
+                templates += 1;
+            }
+            i += 1;
+        }
+        u32 first = out->next_key + 1;
+        u32 mut k = 0;
+        while (k < templates) {
+            next(out, ownership_api.entity_kind.allocation);
+            k += 1;
+        }
+        if (!ownership_api.successful(out->proof)) { return; }
+        out->targets[out->targets_len] = call_target{target, first, templates};
+        out->targets_len += 1;
         t += 1;
     }
-    if (!ownership_api.successful(out->proof)) { return; }
     if (cast(rv.ops_len, u64) > out->call_args.len - out->call_args_len) {
         reject(out, ownership_api.incomplete_reason.invalid_input);
         return;
@@ -1485,7 +1583,7 @@ fn call(body_input* in, body_program mut* out, fir.statement* stmt, u32 block, u
         out->call_args_len += 1;
         op += 1;
     }
-    out->calls[out->calls_len] = call_site{block, gap, summary, event, first, templates,
+    out->calls[out->calls_len] = call_site{block, gap, event, first_target, count, residual,
         args_first, rv.ops_len};
     out->calls_len += 1;
     ownership_api.operation_position at = position(in, block, gap, false);
@@ -1507,8 +1605,9 @@ fn call(body_input* in, body_program mut* out, fir.statement* stmt, u32 block, u
         .operation = at, .source = location(in, out, stmt->loc)};
     out->steps_len += 1;
     out->scalars[dst] = ownership_api.scalar_fact{};
-    out->origins[dst] = reference(dst_ty) && summary != null ?
-        call_origin(in, out, rv, summary) : ownership_api.entity_id{};
+    out->origins[dst] = reference(dst_ty) && count > 0 ?
+        call_origin(in, out, rv, out->targets[first_target..first_target + count]) :
+        ownership_api.entity_id{};
 }
 
 fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block, u32 gap)
@@ -1921,6 +2020,7 @@ fn extract(body_input* in) body_program {
     u64 mut count = 0;
     u64 mut extra = 0;
     u64 mut operands = 0;
+    u64 mut targets = 0;
     u32 mut b = 0;
     while (b < fir.block_count(f)) {
         if (!work(&out, 1)) { return out; }
@@ -1958,10 +2058,16 @@ fn extract(body_input* in) body_program {
                     op += 1;
                 }
             }
-            u64 calls = call_capacity(in, &out, stmt);
+            u64 calls = call_capacity(in, &out, stmt, b, gap);
             if (stmt->kind == fir.stmt_kind.st_assign &&
                 stmt->value.kind == fir.rvalue_kind.rv_call) {
                 operands += cast(stmt->value.ops_len, u64);
+                u64 called = target_count(in, &out, stmt, b, gap);
+                if (called > U64_MAX - targets) {
+                    reject(&out, ownership_api.incomplete_reason.invalid_input);
+                    return out;
+                }
+                targets += called;
             }
             if (projections > (U64_MAX - extra) / 2 || calls > U64_MAX - extra - projections * 2) {
                 reject(&out, ownership_api.incomplete_reason.invalid_input);
@@ -2013,6 +2119,11 @@ fn extract(body_input* in) body_program {
         return out;
     }
     out.call_args = new(ownership_api.scalar_fact, operands);
+    if (targets > types.TYPE_MAX_SIZE / sizeof(call_target)) {
+        reject(&out, ownership_api.incomplete_reason.invalid_input);
+        return out;
+    }
+    out.targets = new(call_target, targets);
     if (locals != 0 && blocks > types.TYPE_MAX_SIZE / sizeof(ownership_api.scalar_fact) / locals ||
         blocks > types.TYPE_MAX_SIZE / sizeof(ownership_flow.value_edge) / 2 ||
         !work(&out, blocks * (locals * 2 + 4))) {
