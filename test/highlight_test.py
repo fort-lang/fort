@@ -30,6 +30,7 @@ FORT_TESTS_DIR = ROOT / "test" / "fort"
 LSP_TESTS_DIR = ROOT / "test" / "lsp"
 TTY_DIR = ROOT / "test" / "tty"
 OWNERSHIP_APPROVED_DIR = ROOT / "test" / "ownership" / "approved"
+OWNERSHIP_QUALIFICATION_DIR = ROOT / "test" / "ownership" / "qualification"
 EDITOR_FIXTURE_DIR = ROOT / "editors" / "vscode" / "test" / "fixtures"
 
 # Every directory of fort the grammar is held over. `src/fort` is the only one
@@ -44,6 +45,7 @@ CORPUS_DIRS = (
     LSP_TESTS_DIR,
     TTY_DIR,
     OWNERSHIP_APPROVED_DIR,
+    OWNERSHIP_QUALIFICATION_DIR,
 )
 # The least number of `.ft` each of those directories holds. A directory grows,
 # so its own test asserts a floor. No test asserts the exact total.
@@ -62,6 +64,7 @@ CORPUS_MINIMUMS = {
     LSP_TESTS_DIR: 20,
     TTY_DIR: 2,
     OWNERSHIP_APPROVED_DIR: 10,
+    OWNERSHIP_QUALIFICATION_DIR: 20,
 }
 # The `.ft` of the repository that are deliberately outside the corpus, each
 # because it is meant to hold a lexical error.
@@ -794,6 +797,10 @@ class CorpusTest(unittest.TestCase):
     def test_every_approved_ownership_example_spells_correctly(self):
         """Check the approved examples without selecting ownership analysis."""
         self.check_directory(OWNERSHIP_APPROVED_DIR)
+
+    def test_every_ownership_qualification_fixture_spells_correctly(self):
+        """Check the counterparts and probes that the qualification matrix runs."""
+        self.check_directory(OWNERSHIP_QUALIFICATION_DIR)
 
     def test_the_corpus_walk_holds_no_duplicate(self):
         """Each file reaches exactly one of the tests above.
