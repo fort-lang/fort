@@ -1301,16 +1301,78 @@ def validate_audit(path, *, checkout, compiler, compiler_checkout, compiler_prov
     return audit
 
 
+# The scopes that a CI gate can enforce. Each names its analysis row.
+ENFORCED_SCOPES = ("local",)
+
+
+def scope_problems(report, scope, checkout):
+    """Return the declared bodies of one report and the problems of its enforced scope.
+
+    A body declares its obligations when the scope's correspondence is complete. A declared
+    body needs complete proof. A violation in any body is a problem.
+    """
+    index = ANALYSES.index(scope)
+    files = report["files"]
+    declared = 0
+    problems = []
+    for body in report["bodies"]:
+        row = body["analyses"][index]
+        source = body["source"]
+        path = Path(files[source["file"]]["path"])
+        try:
+            shown = path.resolve().relative_to(Path(checkout).resolve())
+        except ValueError:
+            shown = path
+        where = f"{shown}:{source['line']}: {source['name']}"
+        if row["violations"]:
+            problems.append(f"{where}: {row['violations']} {scope} violation(s)")
+        if row["correspondence"] == "complete":
+            declared += 1
+            if row["proof"] != "complete" and not row["violations"]:
+                problems.append(f"{where}: incomplete declared {scope} obligation ({row['proof']})")
+    return declared, problems
+
+
+def enforce_audit(path, *, scope, **common):
+    """Validate the evidence, then reject violations and incomplete declared obligations.
+
+    Results outside the declared scope stay informational. Acceptance here changes no
+    compiler verdict and proves no complete ownership.
+    """
+    require(scope in ENFORCED_SCOPES, "enforce: unknown scope")
+    validated = validate_audit(path, **common)
+    bodies = 0
+    declared = 0
+    problems = []
+    for attempt in validated["attempts"]:
+        report, _ = read_json(attempt["report_path"])
+        found, listed = scope_problems(report, scope, common["checkout"])
+        bodies = checked_sum((bodies, len(report["bodies"])), "context bodies")
+        declared = checked_sum((declared, found), "declared bodies")
+        for problem in listed:
+            if problem not in problems:
+                problems.append(problem)
+    summary = {
+        "scope": scope,
+        "context_bodies": bodies,
+        "declared_context_bodies": declared,
+        "problems": len(problems),
+    }
+    return summary, problems
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="action", required=True)
-    for name in ("run", "validate"):
+    for name in ("run", "validate", "enforce"):
         sub = subparsers.add_parser(name)
         sub.add_argument("--checkout", type=Path, required=True)
         sub.add_argument("--compiler", type=Path, required=True)
         sub.add_argument("--compiler-checkout", type=Path)
         sub.add_argument("--compiler-provenance", type=Path, required=True)
-        if name == "validate":
+        if name == "enforce":
+            sub.add_argument("--scope", choices=ENFORCED_SCOPES, required=True)
+        if name in ("validate", "enforce"):
             sub.add_argument("attestation", type=Path)
         else:
             sub.add_argument("--output", type=Path, required=True)
@@ -1328,6 +1390,12 @@ def main(argv=None):
         "compiler_provenance": options.compiler_provenance,
     }
     try:
+        if options.action == "enforce":
+            summary, problems = enforce_audit(options.attestation, scope=options.scope, **common)
+            for problem in problems:
+                print(problem, file=sys.stderr)
+            print(json.dumps(summary, sort_keys=True))
+            return 1 if problems else 0
         if options.action == "validate":
             audit = validate_audit(options.attestation, **common)
         else:

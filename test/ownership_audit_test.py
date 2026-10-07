@@ -188,6 +188,32 @@ def fit_local_ledgers(report):
     report["meters"] = meters
 
 
+def localize(report, root, kind):
+    """Give the synthetic report an integrated local analysis.
+
+    Even bodies declare their obligations and prove them. Odd bodies have incomplete
+    correspondence. `kind` puts a violation or an incomplete declared obligation into the
+    first body of main.ft, or into the shared body of every root.
+    """
+    report["analyses"][2].update(producer="integrated", status="incomplete")
+    for index, body in enumerate(report["bodies"]):
+        row = body["analyses"][2]
+        if index % 2 == 0:
+            row.update(correspondence="complete", solver="complete", proof="complete")
+        else:
+            row.update(correspondence="incomplete", solver="complete", proof="incomplete")
+        main_first = index == 0 and root.endswith("main.ft")
+        shared = body["source"]["name"] == "shared"
+        if (kind == "violation" and main_first) or (kind == "shared_violation" and shared):
+            row.update(correspondence="complete", proof="violated", violations=1)
+        if kind == "incomplete" and main_first:
+            row.update(correspondence="complete", proof="incomplete")
+        body["violations"] = row["violations"]
+        proofs = [value["proof"] for value in body["analyses"]]
+        body["ownership"] = "violated" if "violated" in proofs else "incomplete"
+    report["totals"] = audit.derived_totals(report["bodies"])
+
+
 class RepositoryFixture(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="fort audit ")
@@ -322,6 +348,9 @@ fit_local_ledgers(report)
 report["compiler_version"] = {version.strip()!r}
 if mode == "version_mismatch":
     report["compiler_version"] = "wrong compiler version"
+if mode.startswith("local_"):
+    from ownership_audit_test import localize
+    localize(report, root, mode[len("local_"):])
 if mode == "incomplete":
     report["enumeration"]["complete"] = False
     report["first_incomplete"] = {{"stage": "enumeration", "code": "source_coverage",
@@ -2142,6 +2171,97 @@ class RunnerTests(RepositoryFixture):
             with self.subTest(cfg=cfg):
                 with self.assertRaises(audit.InvalidEvidence):
                     audit.effective_configuration(TARGET, cfg)
+
+
+class EnforcementTests(RepositoryFixture):
+    def enforce(self, mode):
+        self.executable(mode)
+        result, errors = self.run_fixture()
+        self.assertEqual(errors, [])
+        self.assertTrue(result["complete"])
+        return audit.enforce_audit(
+            self.base / "out/audit.json",
+            scope="local",
+            checkout=self.checkout,
+            compiler=self.compiler,
+            compiler_checkout=self.checkout,
+            compiler_provenance=self.provenance,
+        )
+
+    def test_clean_scope_accepts_and_counts_declared_bodies(self):
+        summary, problems = self.enforce("local_clean")
+        self.assertEqual(problems, [])
+        self.assertEqual(summary["scope"], "local")
+        self.assertEqual(summary["problems"], 0)
+        self.assertGreater(summary["declared_context_bodies"], 0)
+        self.assertLess(summary["declared_context_bodies"], summary["context_bodies"])
+
+    def test_violation_anywhere_is_rejected(self):
+        summary, problems = self.enforce("local_violation")
+        self.assertEqual(problems, ["src/fort/main.ft:1: main: 1 local violation(s)"])
+        self.assertEqual(summary["problems"], 1)
+
+    def test_incomplete_declared_obligation_is_rejected(self):
+        summary, problems = self.enforce("local_incomplete")
+        expected = "src/fort/main.ft:1: main: incomplete declared local obligation (incomplete)"
+        self.assertEqual(problems, [expected])
+
+    def test_one_body_in_overlapping_closures_is_one_problem(self):
+        summary, problems = self.enforce("local_shared_violation")
+        self.assertEqual(problems, ["src/fort/shared.ft:1: shared: 1 local violation(s)"])
+        self.assertEqual(summary["problems"], 1)
+
+    def test_unavailable_local_rows_declare_nothing(self):
+        summary, problems = self.enforce("valid")
+        self.assertEqual(problems, [])
+        self.assertEqual(summary["declared_context_bodies"], 0)
+
+    def test_enforcement_validates_the_evidence_first(self):
+        self.executable("local_clean")
+        self.run_fixture()
+        report = self.base / "out/report-0000.json"
+        report.write_text(report.read_text().replace('"complete": true', '"complete": false', 1))
+        with self.assertRaises(audit.InvalidEvidence):
+            audit.enforce_audit(
+                self.base / "out/audit.json",
+                scope="local",
+                checkout=self.checkout,
+                compiler=self.compiler,
+                compiler_checkout=self.checkout,
+                compiler_provenance=self.provenance,
+            )
+        with self.assertRaisesRegex(audit.InvalidEvidence, "unknown scope"):
+            audit.enforce_audit(self.base / "out/audit.json", scope="raw")
+
+    def test_cli_returns_one_for_problems_and_zero_for_a_clean_scope(self):
+        common = [
+            "--checkout",
+            str(self.checkout),
+            "--compiler",
+            str(self.compiler),
+            "--compiler-provenance",
+            str(self.provenance),
+        ]
+        for mode, status in (("local_clean", 0), ("local_violation", 1)):
+            with self.subTest(mode=mode):
+                self.executable(mode)
+                self.run_fixture(output=mode)
+                stdout = io.StringIO()
+                with redirect_stdout(stdout), redirect_stderr(io.StringIO()) as errors:
+                    result = audit.main(
+                        [
+                            "enforce",
+                            "--scope",
+                            "local",
+                            *common,
+                            str(self.base / mode / "audit.json"),
+                        ]
+                    )
+                self.assertEqual(result, status)
+                self.assertEqual(json.loads(stdout.getvalue())["problems"], status)
+                self.assertEqual(len(errors.getvalue().splitlines()), status)
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            audit.main(["enforce", "--scope", "raw", *common, str(self.base / "x.json")])
 
 
 class AttestationTests(RepositoryFixture):
