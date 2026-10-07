@@ -1,0 +1,365 @@
+/// Solves the heap proof of checked bodies through their call graph (D17.16, D17.18).
+import fir;
+import fir_lower;
+import fir_verify;
+import lower_env;
+import ownership_api;
+import ownership_flow;
+import ownership_graph;
+import ownership_heap;
+import ownership_keys;
+import ownership_limits;
+
+u64 BODIES = 32;
+u64 EVENTS = 64;
+u64 TEXT = 64;
+
+// One recorded event. The observer keeps a copy of the text.
+struct event_row {
+    ownership_api.event_kind kind;
+    ownership_api.evidence_kind evidence;
+    ownership_api.incomplete_reason reason;
+    ownership_api.operation_position operation;
+    u32 line;
+    u32 col;
+    // The event carries a lost precision fact of this category.
+    bool lossy;
+    ownership_api.limit_category lost;
+    u64 lost_bound;
+    // The event has a validated witness link.
+    bool witness;
+    // The event or its proof names an exhaustion of the W bound.
+    bool budget;
+    u8[64] text;
+    u64 text_len;
+}
+
+// The meter of the computation that runs now and every event of the whole solve.
+struct counters {
+    ownership_limits.meter meter;
+    u64 total_calls;
+    // The client refuses the charge with this index, when it is not 0.
+    u64 deny_at;
+    u64 computations;
+    // A bound for each computation, or 0 for the production bound.
+    u64 work;
+    u64 h;
+    u64 r;
+    u64 p;
+    u64 events;
+    event_row[64] rows;
+    // The W use and the W bound of each computation, in solve order.
+    u64[16] used;
+    u64[16] bounds;
+    // The greatest D, R, P, and H amount that a charge requested.
+    u64 most_d;
+    u64 most_r;
+    u64 most_p;
+    u64 most_h;
+    bool refuse_begin;
+}
+
+fn finish(counters mut* counts) void {
+    if (counts->computations == 0 || counts->computations > counts->used.len) { return; }
+    counts->used[counts->computations - 1] = counts->meter.used.w;
+    counts->bounds[counts->computations - 1] = counts->meter.bounds.w;
+}
+
+// Function i gets declaration key i + 1, so the graph keeps the names in their given order.
+struct closure {
+    lower_env.env checked;
+    fir.func[32] functions;
+    ownership_graph.body_input[32] graph_inputs;
+    ownership_heap.body_input[32] inputs;
+    ownership_flow.source_file_binding[1] files;
+    ownership_api.services services;
+    counters counts;
+    ownership_graph.graph graph;
+    ownership_heap.solution solution;
+    u64 count;
+}
+
+fn budget(void mut* opaque, ownership_api.charge_request* req) ownership_api.charge_result {
+    counters mut* counts = cast(opaque, counters mut*);
+    assert(ownership_keys.canonical_charges(req));
+    counts->total_calls += 1;
+    u64 mut i = 0;
+    while (i < req->items.len) {
+        ownership_api.charge_item item = req->items[i];
+        if (item.category == ownership_api.limit_category.d && item.amount > counts->most_d) {
+            counts->most_d = item.amount;
+        }
+        if (item.category == ownership_api.limit_category.r && item.amount > counts->most_r) {
+            counts->most_r = item.amount;
+        }
+        if (item.category == ownership_api.limit_category.p && item.amount > counts->most_p) {
+            counts->most_p = item.amount;
+        }
+        if (item.category == ownership_api.limit_category.h && item.amount > counts->most_h) {
+            counts->most_h = item.amount;
+        }
+        i += 1;
+    }
+    if (counts->deny_at != 0 && counts->total_calls == counts->deny_at) {
+        ownership_api.charge_result mut out = ownership_api.charge_result{};
+        out.limit = ownership_api.exhaustion{true, req->items[0].category,
+            req->items[0].scope, req->work, 7, 7, req->items[0].amount,
+            req->operation, req->source, false};
+        return out;
+    }
+    return ownership_limits.try_charge(&counts->meter, req);
+}
+
+fn event(void mut* opaque, ownership_api.event_request* req) ownership_api.event_result {
+    counters mut* counts = cast(opaque, counters mut*);
+    if (counts->events < counts->rows.len) {
+        ownership_api.exhaustion limit = req->event.limit.present ? req->event.limit :
+            req->current.terminal.limit;
+        event_row mut row = event_row{};
+        row.kind = req->event.kind;
+        row.evidence = req->event.evidence;
+        row.reason = req->event.reason;
+        row.operation = req->event.operation;
+        row.line = req->event.source.line;
+        row.col = req->event.source.col;
+        row.lossy = req->event.precision.bound != 0;
+        row.lost = req->event.precision.category;
+        row.lost_bound = req->event.precision.bound;
+        row.witness = req->event.witnesses.len > 0 && req->event.witnesses[0].validated;
+        row.budget = limit.present && limit.category == ownership_api.limit_category.w;
+        u64 mut i = 0;
+        while (i < req->event.text.len && i < TEXT) {
+            row.text[i] = cast(req->event.text[i], u8);
+            i += 1;
+        }
+        row.text_len = i;
+        counts->rows[counts->events] = row;
+    }
+    counts->events += 1;
+    ownership_api.event_result mut out = ownership_api.event_result{};
+    out.retained = true;
+    out.proof = req->current;
+    return out;
+}
+
+// Each computation gets a fresh meter with the bound of its FIR size.
+fn begin(void mut* opaque, u64 size, ownership_api.limit_table mut* limits) bool {
+    counters mut* counts = cast(opaque, counters mut*);
+    finish(counts);
+    if (counts->refuse_begin) { return false; }
+    ownership_api.limit_table mut table = ownership_limits.computation(size);
+    if (counts->work != 0) { table.w = counts->work; }
+    if (counts->h != 0) { table.h = counts->h; }
+    if (counts->r != 0) { table.r = counts->r; }
+    if (counts->p != 0) { table.p = counts->p; }
+    assert(ownership_limits.configure(&counts->meter, &table));
+    counts->computations += 1;
+    *limits = table;
+    return true;
+}
+
+/// Lowers and verifies each named function, then builds the call graph of all of them.
+fn open(closure mut* c, string@ text, string@ names) void {
+    assert(names.len <= BODIES);
+    lower_env.open(&c->checked);
+    lower_env.check_lines(&c->checked, text, true);
+    c->services.budget_context = cast(&c->counts, void mut*);
+    c->services.event_context = cast(&c->counts, void mut*);
+    c->services.budget = budget;
+    c->services.event = event;
+    u64 mut i = 0;
+    while (i < names.len) {
+        fir_lower.report mut why = fir_lower.report{};
+        assert(fir_lower.lower_function(&c->checked.c.ck, lower_env.decl(&c->checked, names[i]),
+            &c->functions[i], &why));
+        fir_verify.violation mut failure = fir_verify.violation{};
+        assert(!fir_verify.find_violation(&c->functions[i], &c->checked.rt, &failure));
+        c->files[0] = ownership_flow.source_file_binding{1, 1,
+            fir.block_at(&c->functions[i], 0)->term.loc.file};
+        c->graph_inputs[i] = ownership_graph.body_input{ownership_api.function_id{
+            ownership_api.declaration_id{1, cast(i + 1, u32)}, 1}, &c->functions[i], true};
+        c->inputs[i] = ownership_heap.body_input{c->graph_inputs[i].key, &c->functions[i],
+            c->files[..]};
+        i += 1;
+    }
+    c->count = names.len;
+    ownership_api.limit_table graph_limits = ownership_limits.computation(
+        ownership_graph.closure_size(c->graph_inputs[..c->count]));
+    c->graph = ownership_graph.build(c->graph_inputs[..c->count], graph_limits);
+    assert(ownership_api.successful(c->graph.proof));
+}
+
+/// Solves every component. A repeat replaces the solution and the recorded events.
+fn solve(closure mut* c) void {
+    ownership_heap.free(&c->solution);
+    c->counts.events = 0;
+    c->counts.total_calls = 0;
+    c->counts.computations = 0;
+    c->counts.most_d = 0;
+    c->counts.most_r = 0;
+    c->counts.most_p = 0;
+    c->counts.most_h = 0;
+    c->solution = ownership_heap.solve(&c->graph, c->inputs[..c->count], &c->services,
+        ownership_heap.computation_hook{cast(&c->counts, void mut*), begin});
+    finish(&c->counts);
+}
+
+/// Each computation stayed within its W bound, and the greatest use is returned.
+fn within_limits(closure* c) u64 {
+    u64 mut most = 0;
+    u64 mut i = 0;
+    while (i < c->counts.computations && i < c->counts.used.len) {
+        assert(c->counts.used[i] <= c->counts.bounds[i]);
+        if (c->counts.used[i] > most) { most = c->counts.used[i]; }
+        i += 1;
+    }
+    return most;
+}
+
+fn close(closure mut* c) void {
+    ownership_heap.free(&c->solution);
+    ownership_graph.free(&c->graph);
+    u64 mut i = 0;
+    while (i < c->count) {
+        fir.func_free(&c->functions[i]);
+        i += 1;
+    }
+    lower_env.close(&c->checked);
+}
+
+/// A context over the lowered body `name` with its fixed slots laid out, for the state tests.
+/// Its meter takes the production table of the body's FIR size. The caller frees the context
+/// with ownership_heap.free_context before it closes the closure.
+fn context_of(closure mut* c, string name, ownership_heap.context mut* out) void {
+    u64 at = index(c, name);
+    ownership_api.limit_table table = ownership_limits.computation(
+        ownership_limits.fir_size(&c->functions[at]));
+    assert(ownership_limits.configure(&c->counts.meter, &table));
+    ownership_heap.callee@ none = {};
+    ownership_heap.open(out, &c->inputs[at], &c->services, none);
+    assert(ownership_heap.lay_out(out));
+}
+
+/// Checks, lowers, and solves `text` in one call.
+fn run(closure mut* c, string@ text, string@ names) void {
+    open(c, text, names);
+    solve(c);
+}
+
+fn index(closure* c, string name) u64 {
+    u64 mut i = 0;
+    while (i < c->count) {
+        if (c->functions[i].sym->name == name) { return i; }
+        i += 1;
+    }
+    panic("ownership_heap_env: no such body");
+}
+
+fn summary(closure* c, string name) ownership_heap.summary* {
+    return &c->solution.summaries[index(c, name)];
+}
+
+fn rounds(closure* c, string name) u64 { return c->solution.rounds[index(c, name)]; }
+
+/// The heap proof of `name` is complete, and a caller can apply its summary.
+fn proved(closure* c, string name) bool {
+    ownership_heap.summary* s = summary(c, name);
+    return ownership_api.successful(s->proof) && s->known && !s->residual;
+}
+
+/// The heap proof of `name` failed with a definite error of its own body.
+fn failed(closure* c, string name) bool {
+    ownership_heap.summary* s = summary(c, name);
+    return s->proof.kind == ownership_api.proof_kind.complete && s->proof.failed;
+}
+
+/// The heap proof of `name` is incomplete for `why`.
+fn unproved(closure* c, string name, ownership_api.incomplete_reason why) bool {
+    ownership_heap.summary* s = summary(c, name);
+    return s->proof.kind == ownership_api.proof_kind.incomplete &&
+        s->proof.terminal.reason == why;
+}
+
+/// The number of recorded events of `kind` and `evidence` in body `name`.
+fn saw(closure* c, string name, ownership_api.event_kind kind,
+    ownership_api.evidence_kind evidence) u64 {
+    u32 declaration = cast(index(c, name) + 1, u32);
+    u64 mut found = 0;
+    u64 mut i = 0;
+    while (i < c->counts.events && i < c->counts.rows.len) {
+        event_row row = c->counts.rows[i];
+        if (row.kind == kind && row.evidence == evidence &&
+            row.operation.function.declaration.declaration == declaration) {
+            found += 1;
+        }
+        i += 1;
+    }
+    return found;
+}
+
+/// The number of recorded events in body `name`.
+fn events(closure* c, string name) u64 {
+    u32 declaration = cast(index(c, name) + 1, u32);
+    u64 mut found = 0;
+    u64 mut i = 0;
+    while (i < c->counts.events && i < c->counts.rows.len) {
+        if (c->counts.rows[i].operation.function.declaration.declaration == declaration) {
+            found += 1;
+        }
+        i += 1;
+    }
+    return found;
+}
+
+/// The first event of body `name`, or a zero row.
+fn first(closure* c, string name) event_row {
+    u32 declaration = cast(index(c, name) + 1, u32);
+    u64 mut i = 0;
+    while (i < c->counts.events && i < c->counts.rows.len) {
+        if (c->counts.rows[i].operation.function.declaration.declaration == declaration) {
+            return c->counts.rows[i];
+        }
+        i += 1;
+    }
+    return event_row{};
+}
+
+fn text(event_row* row) string {
+    return cast(row->text[0..row->text_len], string);
+}
+
+/// The text of the first event of body `name`, or "".
+fn first_text(closure* c, string name) string {
+    u32 declaration = cast(index(c, name) + 1, u32);
+    u64 mut i = 0;
+    while (i < c->counts.events && i < c->counts.rows.len) {
+        if (c->counts.rows[i].operation.function.declaration.declaration == declaration) {
+            return text(&c->counts.rows[i]);
+        }
+        i += 1;
+    }
+    return "";
+}
+
+/// The number of recorded events that name an exhaustion of the W bound.
+fn budget_events(closure* c) u64 {
+    u64 mut found = 0;
+    u64 mut i = 0;
+    while (i < c->counts.events && i < c->counts.rows.len) {
+        if (c->counts.rows[i].budget) { found += 1; }
+        i += 1;
+    }
+    return found;
+}
+
+/// Prints each recorded event, for a failing test.
+fn dump(closure* c) void {
+    u64 mut i = 0;
+    while (i < c->counts.events && i < c->counts.rows.len) {
+        event_row row = c->counts.rows[i];
+        eprintln("event body ", row.operation.function.declaration.declaration, " kind ",
+            cast(row.kind, u32), " evidence ", cast(row.evidence, u32), " reason ",
+            cast(row.reason, u32), " at ", row.line, ":", row.col, " ", text(&row));
+        i += 1;
+    }
+}

@@ -1,0 +1,779 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| lattice tables
+//| keys and views
+//| known integers
+//| the entry state
+//| unfold and fold
+//| canonical form
+//| joins keep obligations
+//| widening removes cells
+//| precision covers
+//| null tests
+//| caller requirements
+//| branch rejoins
+//| heap state ok
+/// Checks the state operations of the heap proof one at a time (D17.16, D17.18, fir.md 14.1).
+import fir;
+import ownership_api;
+import ownership_heap;
+import ownership_heap_env;
+import ownership_limits;
+import types;
+
+string[16] HOST = {
+    "struct node { node mut* own next; u8 mut@ own bytes; i32 v; }",
+    "struct holder { node mut* own first; node mut* own second; }",
+    "fn host(node mut* own p, node mut* own q, holder mut* h, u8@ view) void {",
+    "    node mut* own a = null; node mut* own b = null; node* w = null;",
+    "    u8 small = 0; i8 tiny = 0; u64 wide = 0; i64 sign = 0; }",
+    "fn diamond(bool c) i32 { i32 mut x = 0; if (c) { x = 1; } else { x = 2; } return x; }",
+    "fn looping(u64 n) u64 { u64 mut i = 0; while (i < n) { i += 1; } return i; }",
+    "fn aborting(bool c) i32 { i32 mut x = 0; if (c) { panic(\"no\"); } return x; }",
+    "fn calling(bool c) i32 { i32 mut x = 0; if (c) { x = leaf(); } return x; }",
+    "fn leaf() i32 { return 1; }",
+    "fn nested(bool c, bool d) i32 { i32 mut x = 0; if (c) { if (d) { x = 1; } x += 1; }",
+    "    return x; }",
+    "fn asserting(bool c) i32 { assert(c); return 1; }",
+    "fn checked(u8 x) u8 { return x + 1; }",
+    "fn unused() void { }",
+    "fn empty() void { }",
+};
+
+string[11] NAMES = {"host", "diamond", "looping", "aborting", "calling", "leaf", "nested",
+    "asserting", "checked", "unused", "empty"};
+
+struct fixture {
+    ownership_heap_env.closure c;
+    ownership_heap.context ctx;
+}
+
+fn open(fixture mut* x, string name) void {
+    ownership_heap_env.open(&x->c, HOST[..], NAMES[..]);
+    ownership_heap_env.context_of(&x->c, name, &x->ctx);
+}
+
+fn close(fixture mut* x) void {
+    ownership_heap.free_context(&x->ctx);
+    ownership_heap_env.close(&x->c);
+}
+
+fn local(u32 n) ownership_heap.slot_key {
+    return ownership_heap.key_of(ownership_heap.base_kind.local, n);
+}
+
+fn field_key(ownership_heap.base_kind base, u32 id, u32 k) ownership_heap.slot_key {
+    ownership_heap.slot_key mut key = ownership_heap.key_of(base, id);
+    assert(ownership_heap.extend(&key, k));
+    return key;
+}
+
+fn value_at(ownership_heap.state* s, ownership_heap.slot_key k) ownership_heap.value {
+    u64 at = ownership_heap.find_slot(s, k);
+    assert(at != ownership_heap.U64_MAX);
+    return s->slots[at].v;
+}
+
+fn set_value(ownership_heap.state mut* s, ownership_heap.slot_key k, ownership_heap.value v)
+    void {
+    u64 at = ownership_heap.find_slot(s, k);
+    assert(at != ownership_heap.U64_MAX);
+    s->slots[at].v = v;
+}
+
+// The live obligations of a state: used atoms with a live or unknown status and a root that
+// can be nonnull.
+fn obligations(ownership_heap.state* s) u64 {
+    u64 mut n = 0;
+    u64 mut i = 0;
+    while (i < s->atoms_len) {
+        ownership_heap.atom a = s->atoms[i];
+        if (a.used && a.root != ownership_heap.root_kind.null_root &&
+            (a.status == ownership_heap.atom_status.live ||
+            a.status == ownership_heap.atom_status.unknown)) { n += 1; }
+        i += 1;
+    }
+    return n;
+}
+
+fn cells(ownership_heap.state* s) u64 {
+    u64 mut n = 0;
+    u64 mut i = 0;
+    while (i < s->atoms_len) {
+        if (s->atoms[i].used && s->atoms[i].kind == ownership_heap.atom_kind.cell) { n += 1; }
+        i += 1;
+    }
+    return n;
+}
+
+fn same(ownership_heap.context mut* ctx, ownership_heap.state* a, ownership_heap.state* b) bool {
+    bool mut out = false;
+    assert(ownership_heap.equal(ctx, a, b, &out));
+    return out;
+}
+
+// A fresh cell of `node` in local `n`, with its reference leaves empty.
+fn fresh_cell(ownership_heap.context mut* ctx, ownership_heap.state mut* s, u32 n) u32 {
+    types.node* t = s->atoms[0].ty;
+    ownership_heap.atom mut a = ownership_heap.new_atom(ownership_heap.atom_kind.cell, t,
+        ownership_heap.shape_of(ctx, t), ownership_heap.root_kind.nonnull);
+    a.fresh = true;
+    u32 made = ownership_heap.push_atom(s, a);
+    ownership_heap.add_cell_slots(ctx, s, made, t);
+    set_value(s, local(n), ownership_heap.own_value(made));
+    return made;
+}
+
+fn tables() void {
+    println("lattice tables");
+    ownership_heap.root_kind[4] roots = {ownership_heap.root_kind.null_root,
+        ownership_heap.root_kind.nonnull, ownership_heap.root_kind.free,
+        ownership_heap.root_kind.joined};
+    u64 mut i = 0;
+    while (i < roots.len) {
+        u64 mut j = 0;
+        while (j < roots.len) {
+            ownership_heap.root_kind r = ownership_heap.join_root(roots[i], roots[j]);
+            if (i == j) {
+                assert(r == roots[i]);
+            } else {
+                assert(r == ownership_heap.root_kind.joined);
+            }
+            assert(r == ownership_heap.join_root(roots[j], roots[i]));
+            j += 1;
+        }
+        i += 1;
+    }
+    ownership_heap.atom_status[6] all = {ownership_heap.atom_status.live,
+        ownership_heap.atom_status.released, ownership_heap.atom_status.maybe_released,
+        ownership_heap.atom_status.leaked, ownership_heap.atom_status.escaped,
+        ownership_heap.atom_status.unknown};
+    i = 0;
+    while (i < all.len) {
+        u64 mut j = 0;
+        while (j < all.len) {
+            ownership_heap.atom_status st = ownership_heap.join_status(all[i], all[j]);
+            assert(st == ownership_heap.join_status(all[j], all[i]));
+            if (i == j) { assert(st == all[i]); }
+            j += 1;
+        }
+        i += 1;
+    }
+    // A release on one path and a live allocation on the other is a possible release.
+    assert(ownership_heap.join_status(ownership_heap.atom_status.live,
+        ownership_heap.atom_status.released) == ownership_heap.atom_status.maybe_released);
+    // An unknown or escaped side makes the join unknown.
+    assert(ownership_heap.join_status(ownership_heap.atom_status.escaped,
+        ownership_heap.atom_status.live) == ownership_heap.atom_status.unknown);
+    // A reported loss on one side keeps the other side checked.
+    assert(ownership_heap.join_status(ownership_heap.atom_status.leaked,
+        ownership_heap.atom_status.released) == ownership_heap.atom_status.released);
+    assert(ownership_heap.certainty_of(ownership_heap.root_kind.nonnull) ==
+        ownership_heap.certainty.definite);
+    assert(ownership_heap.certainty_of(ownership_heap.root_kind.free) ==
+        ownership_heap.certainty.choice);
+    assert(ownership_heap.certainty_of(ownership_heap.root_kind.joined) ==
+        ownership_heap.certainty.possible);
+    assert(ownership_heap.bit(0) == 1 && ownership_heap.bit(63) != 0);
+    assert(ownership_heap.bit(64) == 0);
+    assert(ownership_heap.grow(0, 1) == 8 && ownership_heap.grow(8, 9) == 16);
+    assert(ownership_heap.grow(16, 3) == 16);
+    // A join of two refined values of one free choice stays a free choice only when both sides
+    // are witnessed.
+    ownership_heap.atom mut x = ownership_heap.new_atom(ownership_heap.atom_kind.region, null, 0,
+        ownership_heap.root_kind.nonnull);
+    x.choice = true;
+    ownership_heap.atom mut y = x;
+    y.root = ownership_heap.root_kind.null_root;
+    assert(ownership_heap.join_atom(x, y, true, true).root == ownership_heap.root_kind.free);
+    assert(ownership_heap.join_atom(x, y, true, false).root == ownership_heap.root_kind.joined);
+    y.choice = false;
+    assert(ownership_heap.join_atom(x, y, true, true).root == ownership_heap.root_kind.joined);
+    // A null root holds no allocation, so the other side gives the status.
+    ownership_heap.atom mut gone = x;
+    gone.status = ownership_heap.atom_status.released;
+    assert(ownership_heap.join_atom(gone, y, true, true).status ==
+        ownership_heap.atom_status.released);
+    // Different kinds join to an opaque atom with no template.
+    ownership_heap.atom mut f = ownership_heap.new_atom(ownership_heap.atom_kind.flat, null, 0,
+        ownership_heap.root_kind.nonnull);
+    ownership_heap.atom k = ownership_heap.join_atom(x, f, true, true);
+    assert(k.kind == ownership_heap.atom_kind.opaque && k.shape == 0);
+    // Handles survive only when both sides name one entry value.
+    x.handle = 2;
+    x.handle_field = ownership_heap.NONE;
+    f.handle = 3;
+    assert(ownership_heap.join_atom(x, f, true, true).handle == ownership_heap.NONE);
+    assert(ownership_heap.join_atom(x, x, true, true).handle == 2);
+}
+
+fn keys() void {
+    println("keys and views");
+    ownership_heap.slot_key mut k = local(3);
+    u32 mut i = 0;
+    while (i < 6) {
+        assert(ownership_heap.extend(&k, i));
+        i += 1;
+    }
+    assert(k.depth == 6);
+    // The seventh field is past the path bound.
+    assert(!ownership_heap.extend(&k, 6));
+    assert(k.depth == 6);
+    ownership_heap.slot_key head = field_key(ownership_heap.base_kind.cell, 4, 1);
+    ownership_heap.slot_key mut out = ownership_heap.slot_key{};
+    u32[6] mut path = {};
+    path[0] = 2;
+    path[1] = 3;
+    assert(ownership_heap.rebase(head, 2, path, &out));
+    assert(out.depth == 3 && out.path[0] == 1 && out.path[1] == 2 && out.path[2] == 3);
+    assert(ownership_heap.prefix_of(head, out) && !ownership_heap.prefix_of(out, head));
+    assert(ownership_heap.prefix_of(head, head));
+    assert(!ownership_heap.prefix_of(field_key(ownership_heap.base_kind.cell, 5, 1), out));
+    assert(!ownership_heap.rebase(k, 1, path, &out));
+    assert(ownership_heap.key_order(local(1), local(2)) < 0);
+    assert(ownership_heap.key_order(local(2), field_key(ownership_heap.base_kind.local, 2, 0)) < 0);
+    assert(ownership_heap.key_order(local(9), ownership_heap.key_of(
+        ownership_heap.base_kind.caller, 0)) < 0);
+    assert(ownership_heap.key_order(ownership_heap.key_of(ownership_heap.base_kind.caller, 7),
+        ownership_heap.key_of(ownership_heap.base_kind.cell, 0)) < 0);
+    assert(ownership_heap.key_order(head, head) == 0 && ownership_heap.same_key(head, head));
+    assert(!ownership_heap.same_key(head, out));
+    // A view keeps at most eight sources; the ninth fails and a caller makes it unknown.
+    ownership_heap.value mut v = ownership_heap.empty_value();
+    v.kind = ownership_heap.value_kind.view;
+    u32 mut s = 0;
+    while (s < 8) {
+        assert(ownership_heap.add_source(&v, 20 - s));
+        s += 1;
+    }
+    assert(ownership_heap.add_source(&v, 20));
+    assert(!ownership_heap.add_source(&v, 1));
+    assert(v.count == 8);
+    ownership_heap.sort_sources(&v);
+    assert(v.sources[0] == 13 && v.sources[7] == 20);
+    ownership_heap.remove_source(&v, 15);
+    assert(v.count == 7 && v.sources[2] == 16);
+    ownership_heap.value mut w = v;
+    assert(ownership_heap.same_value(v, w));
+    w.exact = true;
+    assert(!ownership_heap.same_value(v, w));
+    w = v;
+    w.param = 1;
+    assert(!ownership_heap.same_value(v, w));
+    assert(ownership_heap.same_value(ownership_heap.own_value(3), ownership_heap.own_value(3)));
+    assert(!ownership_heap.same_value(ownership_heap.own_value(3), ownership_heap.own_value(4)));
+    assert(!ownership_heap.same_value(ownership_heap.empty_value(),
+        ownership_heap.unknown_value()));
+    ownership_heap.value mut t1 = ownership_heap.scalar_value();
+    t1.known = true;
+    t1.truth = true;
+    ownership_heap.value mut t2 = t1;
+    t2.truth = false;
+    assert(!ownership_heap.same_value(t1, t2));
+    t2 = t1;
+    t2.numbered = true;
+    t2.number = 7;
+    assert(!ownership_heap.same_value(t1, t2));
+}
+
+fn integers() void {
+    println("known integers");
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "host");
+    fir.func* f = x.ctx.f;
+    // The locals after the parameters and the three named owners: small, tiny, wide, sign.
+    types.node* small = fir.local_at(f, 8)->ty;
+    types.node* tiny = fir.local_at(f, 9)->ty;
+    types.node* wide = fir.local_at(f, 10)->ty;
+    types.node* sign = fir.local_at(f, 11)->ty;
+    assert(ownership_heap.numbered_in(255, small).numbered);
+    assert(!ownership_heap.numbered_in(256, small).numbered);
+    assert(!ownership_heap.numbered_in(-1, small).numbered);
+    assert(ownership_heap.numbered_in(-128, tiny).numbered);
+    assert(!ownership_heap.numbered_in(-129, tiny).numbered);
+    assert(!ownership_heap.numbered_in(128, tiny).numbered);
+    assert(ownership_heap.numbered_in(9223372036854775807, wide).numbered);
+    assert(!ownership_heap.numbered_in(-1, wide).numbered);
+    assert(ownership_heap.numbered_in(-9223372036854775807 - 1, sign).numbered);
+    assert(!ownership_heap.numbered_in(1, null).numbered);
+    assert(ownership_heap.numbered_in(4, sign).number == 4);
+}
+
+fn entry_state() void {
+    println("the entry state");
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "host");
+    ownership_heap.context mut* ctx = &x.ctx;
+    // p, q, h->first, h->second: four owned interface leaves in fixed-slot order.
+    assert(ctx->interface_len == 4 && ctx->callers_len == 1);
+    assert(ctx->interface[0].kind == ownership_heap.atom_kind.region);
+    assert(ctx->interface[2].key.base == ownership_heap.base_kind.caller);
+    assert(ctx->interface[2].key.depth == 1 && ctx->interface[2].key.path[0] == 0);
+    ownership_heap.state mut s = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&s);
+    assert(s.reached && s.witness && s.atoms_len == 4);
+    u64 mut i = 0;
+    while (i < 4) {
+        ownership_heap.atom a = s.atoms[i];
+        assert(a.root == ownership_heap.root_kind.free && a.choice);
+        assert(a.origin == ownership_heap.bit(i));
+        assert(a.handle == cast(i, u32) && a.handle_field == ownership_heap.NONE && !a.strict);
+        i += 1;
+    }
+    assert(value_at(&s, local(1)).kind == ownership_heap.value_kind.owned);
+    ownership_heap.value h = value_at(&s, local(3));
+    assert(h.kind == ownership_heap.value_kind.address && h.param == 3);
+    assert(h.target.base == ownership_heap.base_kind.caller && h.target.id == 0);
+    ownership_heap.value view = value_at(&s, local(4));
+    assert(view.kind == ownership_heap.value_kind.view && view.external && view.param == 4);
+    assert(value_at(&s, local(5)).kind == ownership_heap.value_kind.empty);
+    assert(value_at(&s, local(8)).kind == ownership_heap.value_kind.scalar);
+    // A copy of the state is equal to it and owns separate storage.
+    ownership_heap.state mut copy = ownership_heap.clone(&s);
+    defer ownership_heap.free_state(&copy);
+    assert(same(ctx, &s, &copy));
+    copy.atoms[0].root = ownership_heap.root_kind.nonnull;
+    assert(!same(ctx, &s, &copy));
+    assert(s.atoms[0].root == ownership_heap.root_kind.free);
+}
+
+fn unfold_fold() void {
+    println("unfold and fold");
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "host");
+    ownership_heap.context mut* ctx = &x.ctx;
+    ownership_heap.state mut s = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&s);
+    ownership_heap.content mut m = ownership_heap.measure(ctx, &s);
+    // Four atoms; two regions of one template: 1 + 1 parameter + 2 clauses + 2 descendants.
+    // No root is refined, and the deepest slot is a field of caller storage.
+    assert(m.r == 4 && m.h == 6 && m.p == 0 && m.d == 1);
+    assert(ownership_heap.unfold(ctx, &s, 0));
+    assert(s.atoms[0].kind == ownership_heap.atom_kind.cell);
+    assert(s.atoms[0].root == ownership_heap.root_kind.nonnull);
+    ownership_heap.value next = value_at(&s, field_key(ownership_heap.base_kind.cell, 0, 0));
+    ownership_heap.value bytes = value_at(&s, field_key(ownership_heap.base_kind.cell, 0, 1));
+    assert(next.kind == ownership_heap.value_kind.owned);
+    assert(bytes.kind == ownership_heap.value_kind.owned);
+    ownership_heap.atom child = s.atoms[next.atom];
+    assert(child.kind == ownership_heap.atom_kind.region);
+    assert(child.root == ownership_heap.root_kind.free);
+    assert(child.strict && child.choice && child.origin == 1);
+    assert(child.handle == 0 && child.handle_field == 0);
+    ownership_heap.atom payload = s.atoms[bytes.atom];
+    assert(payload.kind == ownership_heap.atom_kind.flat && payload.handle_field == 1);
+    // The scalar field has no slot. Two edges now, and the template of q stays. The root of a
+    // cell is no refined fact: its kind gives it.
+    m = ownership_heap.measure(ctx, &s);
+    assert(m.r == 6 && m.h == 8 && m.p == 0);
+    s.atoms[1].root = ownership_heap.root_kind.null_root;
+    assert(ownership_heap.measure(ctx, &s).p == 1);
+    s.atoms[1].root = ownership_heap.root_kind.free;
+    // A child of a strict child is strict and has no handle: it is no entry field.
+    assert(ownership_heap.unfold(ctx, &s, next.atom));
+    ownership_heap.value deeper = value_at(&s,
+        field_key(ownership_heap.base_kind.cell, next.atom, 0));
+    assert(s.atoms[deeper.atom].strict && s.atoms[deeper.atom].handle == ownership_heap.NONE);
+    // A member view of p gains each child as a source.
+    ownership_heap.value mut member = ownership_heap.empty_value();
+    member.kind = ownership_heap.value_kind.view;
+    assert(ownership_heap.add_source(&member, 0));
+    set_value(&s, local(7), member);
+    // The fold puts the children back into p, clears its handle, and keeps its identity.
+    assert(ownership_heap.fold(ctx, &s, 0));
+    assert(s.atoms[0].kind == ownership_heap.atom_kind.region);
+    assert(s.atoms[0].handle == ownership_heap.NONE && s.atoms[0].origin == 1);
+    assert(!s.atoms[next.atom].used && !s.atoms[bytes.atom].used && !s.atoms[deeper.atom].used);
+    assert(!s.atoms[0].strict);
+    assert(ownership_heap.find_slot(&s, field_key(ownership_heap.base_kind.cell, 0, 0)) ==
+        ownership_heap.U64_MAX);
+    ownership_heap.value kept = value_at(&s, local(7));
+    assert(kept.kind == ownership_heap.value_kind.view && kept.count == 1 && kept.sources[0] == 0);
+    // A self-cycle never folds.
+    u32 cycle = fresh_cell(ctx, &s, 5);
+    set_value(&s, field_key(ownership_heap.base_kind.cell, cycle, 0),
+        ownership_heap.own_value(cycle));
+    assert(!ownership_heap.fold(ctx, &s, cycle));
+    // A released child never folds.
+    u32 parent = fresh_cell(ctx, &s, 6);
+    u32 inner = fresh_cell(ctx, &s, 7);
+    set_value(&s, local(7), ownership_heap.empty_value());
+    set_value(&s, field_key(ownership_heap.base_kind.cell, parent, 0),
+        ownership_heap.own_value(inner));
+    s.atoms[inner].status = ownership_heap.atom_status.released;
+    assert(!ownership_heap.fold(ctx, &s, parent));
+    s.atoms[inner].status = ownership_heap.atom_status.live;
+    assert(ownership_heap.fold(ctx, &s, parent));
+    assert(s.atoms[parent].fresh && !s.atoms[inner].used);
+    // An opaque payload never folds.
+    u32 boxed = fresh_cell(ctx, &s, 6);
+    ownership_heap.atom mut blob = ownership_heap.new_atom(ownership_heap.atom_kind.opaque, null, 0,
+        ownership_heap.root_kind.nonnull);
+    u32 blob_at = ownership_heap.push_atom(&s, blob);
+    set_value(&s, field_key(ownership_heap.base_kind.cell, boxed, 1),
+        ownership_heap.own_value(blob_at));
+    assert(!ownership_heap.fold(ctx, &s, boxed));
+}
+
+fn canonical_form() void {
+    println("canonical form");
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "host");
+    ownership_heap.context mut* ctx = &x.ctx;
+    ownership_heap.state mut a = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&a);
+    ownership_heap.state mut b = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&b);
+    // The same two fresh cells, made in the opposite order.
+    u32 a1 = fresh_cell(ctx, &a, 5);
+    u32 a2 = fresh_cell(ctx, &a, 6);
+    u32 b2 = fresh_cell(ctx, &b, 6);
+    u32 b1 = fresh_cell(ctx, &b, 5);
+    assert(a1 != b1 && a2 != b2);
+    assert(!same(ctx, &a, &b));
+    assert(ownership_heap.canonical(ctx, &a));
+    assert(ownership_heap.canonical(ctx, &b));
+    assert(same(ctx, &a, &b));
+    // Canonical form is stable.
+    ownership_heap.state mut again = ownership_heap.clone(&a);
+    defer ownership_heap.free_state(&again);
+    assert(ownership_heap.canonical(ctx, &again));
+    assert(same(ctx, &a, &again));
+    // A null root leaves its slot; a released record with no view goes.
+    again.atoms[0].root = ownership_heap.root_kind.null_root;
+    u32 last = value_at(&again, local(6)).atom;
+    again.atoms[last].status = ownership_heap.atom_status.released;
+    set_value(&again, local(6), ownership_heap.empty_value());
+    u64 before = again.atoms_len;
+    assert(ownership_heap.canonical(ctx, &again));
+    assert(value_at(&again, local(1)).kind == ownership_heap.value_kind.empty);
+    assert(again.atoms_len == before - 1);
+    // An interface record keeps its index even when no slot owns it.
+    assert(again.atoms[0].kind == ownership_heap.atom_kind.region);
+    // A live atom that no slot owns stays: an obligation is never dropped.
+    ownership_heap.atom mut orphan = ownership_heap.new_atom(ownership_heap.atom_kind.flat, null, 0,
+        ownership_heap.root_kind.nonnull);
+    ownership_heap.push_atom(&again, orphan);
+    u64 count = obligations(&again);
+    assert(ownership_heap.canonical(ctx, &again));
+    assert(obligations(&again) == count);
+    // A released record that a view names stays for that view.
+    ownership_heap.atom mut dead = orphan;
+    dead.status = ownership_heap.atom_status.released;
+    u32 dead_at = ownership_heap.push_atom(&again, dead);
+    ownership_heap.value mut v = ownership_heap.empty_value();
+    v.kind = ownership_heap.value_kind.view;
+    v.exact = true;
+    assert(ownership_heap.add_source(&v, dead_at));
+    set_value(&again, local(7), v);
+    assert(ownership_heap.canonical(ctx, &again));
+    ownership_heap.value seen = value_at(&again, local(7));
+    assert(seen.count == 1 && again.atoms[seen.sources[0]].status ==
+        ownership_heap.atom_status.released);
+}
+
+fn joins() void {
+    println("joins keep obligations");
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "host");
+    ownership_heap.context mut* ctx = &x.ctx;
+    ownership_heap.state mut a = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&a);
+    assert(ownership_heap.canonical(ctx, &a));
+    // A join with itself changes nothing.
+    ownership_heap.state mut self_join = ownership_heap.state{};
+    defer ownership_heap.free_state(&self_join);
+    assert(ownership_heap.join(ctx, &a, &a, false, &self_join));
+    assert(same(ctx, &self_join, &a));
+    // One path allocates into `a`, the other leaves it empty.
+    ownership_heap.state mut b = ownership_heap.clone(&a);
+    defer ownership_heap.free_state(&b);
+    u32 made = fresh_cell(ctx, &b, 5);
+    assert(ownership_heap.canonical(ctx, &b));
+    ownership_heap.state mut ab = ownership_heap.state{};
+    defer ownership_heap.free_state(&ab);
+    assert(ownership_heap.join(ctx, &a, &b, false, &ab));
+    ownership_heap.state mut ba = ownership_heap.state{};
+    defer ownership_heap.free_state(&ba);
+    assert(ownership_heap.join(ctx, &b, &a, false, &ba));
+    // The join commutes, keeps the obligation, and forgets the empty path only by a joined root.
+    assert(same(ctx, &ab, &ba));
+    assert(obligations(&ab) == obligations(&b));
+    ownership_heap.value kept = value_at(&ab, local(5));
+    assert(kept.kind == ownership_heap.value_kind.owned);
+    assert(ab.atoms[kept.atom].root == ownership_heap.root_kind.joined);
+    // The cell met an empty slot, so it folded into its template.
+    assert(ab.atoms[kept.atom].kind == ownership_heap.atom_kind.region && made >= 4);
+    // A join with bottom is the other side.
+    ownership_heap.state mut none = ownership_heap.bottom(ab.ended.len);
+    defer ownership_heap.free_state(&none);
+    ownership_heap.state mut with_bottom = ownership_heap.state{};
+    defer ownership_heap.free_state(&with_bottom);
+    assert(ownership_heap.join(ctx, &none, &ab, false, &with_bottom));
+    assert(same(ctx, &with_bottom, &ab));
+    // An interface atom that one path moves keeps no index: its identity splits.
+    ownership_heap.state mut moved = ownership_heap.clone(&a);
+    defer ownership_heap.free_state(&moved);
+    set_value(&moved, local(5), value_at(&moved, local(1)));
+    set_value(&moved, local(1), ownership_heap.empty_value());
+    ownership_heap.state mut split = ownership_heap.state{};
+    defer ownership_heap.free_state(&split);
+    assert(ownership_heap.join(ctx, &a, &moved, false, &split));
+    assert(obligations(&split) >= obligations(&a));
+    assert(value_at(&split, local(1)).kind == ownership_heap.value_kind.owned);
+    assert(value_at(&split, local(5)).kind == ownership_heap.value_kind.owned);
+    assert(value_at(&split, local(1)).atom != 0 && value_at(&split, local(5)).atom != 0);
+    // A released interface record on one path and a live one on the other is a possible release.
+    ownership_heap.state mut gone = ownership_heap.clone(&a);
+    defer ownership_heap.free_state(&gone);
+    gone.atoms[1].status = ownership_heap.atom_status.released;
+    set_value(&gone, local(2), ownership_heap.empty_value());
+    ownership_heap.state mut either = ownership_heap.state{};
+    defer ownership_heap.free_state(&either);
+    assert(ownership_heap.join(ctx, &a, &gone, false, &either));
+    assert(value_at(&either, local(2)).kind == ownership_heap.value_kind.owned);
+    // The witness of a join holds when one side has it.
+    ownership_heap.state mut blind = ownership_heap.clone(&a);
+    defer ownership_heap.free_state(&blind);
+    blind.witness = false;
+    ownership_heap.state mut seen = ownership_heap.state{};
+    defer ownership_heap.free_state(&seen);
+    assert(ownership_heap.join(ctx, &blind, &a, false, &seen));
+    assert(seen.witness);
+    ownership_heap.state mut neither = ownership_heap.state{};
+    defer ownership_heap.free_state(&neither);
+    assert(ownership_heap.join(ctx, &blind, &blind, false, &neither));
+    assert(!neither.witness);
+    // A local that one path ended is possibly ended after the join.
+    ownership_heap.state mut ended = ownership_heap.clone(&a);
+    defer ownership_heap.free_state(&ended);
+    ended.ended[5] = 1;
+    ownership_heap.state mut maybe = ownership_heap.state{};
+    defer ownership_heap.free_state(&maybe);
+    assert(ownership_heap.join(ctx, &a, &ended, false, &maybe));
+    assert(maybe.ended[5] == 2);
+}
+
+fn widening() void {
+    println("widening removes cells");
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "host");
+    ownership_heap.context mut* ctx = &x.ctx;
+    ownership_heap.state mut a = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&a);
+    // A chain of three fresh cells and a self-cycle.
+    u32 head = fresh_cell(ctx, &a, 5);
+    u32 mut tail = head;
+    u32 mut k = 0;
+    while (k < 2) {
+        ownership_heap.atom mut c = ownership_heap.new_atom(ownership_heap.atom_kind.cell,
+            a.atoms[0].ty, ownership_heap.shape_of(ctx, a.atoms[0].ty),
+            ownership_heap.root_kind.nonnull);
+        c.fresh = true;
+        u32 made = ownership_heap.push_atom(&a, c);
+        ownership_heap.add_cell_slots(ctx, &a, made, a.atoms[0].ty);
+        set_value(&a, field_key(ownership_heap.base_kind.cell, tail, 0),
+            ownership_heap.own_value(made));
+        tail = made;
+        k += 1;
+    }
+    u32 cycle = fresh_cell(ctx, &a, 6);
+    set_value(&a, field_key(ownership_heap.base_kind.cell, cycle, 0),
+        ownership_heap.own_value(cycle));
+    assert(cells(&a) == 4);
+    u64 before = obligations(&a);
+    assert(ownership_heap.widen_cells(ctx, &a));
+    assert(cells(&a) == 0);
+    // The chain folds into one region; the cycle becomes one opaque atom. No obligation goes.
+    assert(a.atoms[head].kind == ownership_heap.atom_kind.region);
+    assert(a.atoms[cycle].kind == ownership_heap.atom_kind.opaque);
+    assert(obligations(&a) == before - 2);
+    assert(a.atoms[head].used && a.atoms[cycle].used && !a.atoms[tail].used);
+    // A widened join of two widened states has no cell either.
+    ownership_heap.state mut b = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&b);
+    fresh_cell(ctx, &b, 6);
+    ownership_heap.state mut w = ownership_heap.state{};
+    defer ownership_heap.free_state(&w);
+    assert(ownership_heap.canonical(ctx, &a));
+    assert(ownership_heap.canonical(ctx, &b));
+    assert(ownership_heap.join(ctx, &a, &b, true, &w));
+    assert(cells(&w) == 0);
+    assert(obligations(&w) >= obligations(&a));
+}
+
+fn covers() void {
+    println("precision covers");
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "host");
+    ownership_heap.context mut* ctx = &x.ctx;
+    ownership_heap.state mut s = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&s);
+    assert(ownership_heap.unfold(ctx, &s, 0));
+    u32 a = fresh_cell(ctx, &s, 5);
+    ownership_heap.value mut v = ownership_heap.empty_value();
+    v.kind = ownership_heap.value_kind.view;
+    assert(ownership_heap.add_source(&v, a));
+    set_value(&s, local(7), v);
+    u64 owners = 0;
+    ownership_heap.cover(&s);
+    u64 mut i = 0;
+    while (i < s.atoms_len) {
+        ownership_heap.atom item = s.atoms[i];
+        if (item.used) {
+            assert(item.kind == ownership_heap.atom_kind.opaque ||
+                item.kind == ownership_heap.atom_kind.flat);
+        }
+        i += 1;
+    }
+    // Each owner keeps an obligation; the view keeps no source.
+    assert(value_at(&s, local(1)).kind == ownership_heap.value_kind.owned);
+    assert(value_at(&s, local(5)).kind == ownership_heap.value_kind.owned);
+    assert(value_at(&s, local(7)).kind == ownership_heap.value_kind.unknown);
+    assert(obligations(&s) == 5 + owners);
+    ownership_heap.content m = ownership_heap.measure(ctx, &s);
+    assert(m.h == 0 && m.r == 5);
+    // A P cover keeps each atom and joins each refined root.
+    s.atoms[1].root = ownership_heap.root_kind.nonnull;
+    ownership_heap.cover_roots(&s);
+    assert(s.atoms[1].root == ownership_heap.root_kind.joined);
+    assert(obligations(&s) == 5 + owners);
+}
+
+fn tests() void {
+    println("null tests");
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "host");
+    ownership_heap.context mut* ctx = &x.ctx;
+    ownership_heap.state mut s = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&s);
+    ownership_heap.value mut cond = ownership_heap.scalar_value();
+    cond.test = 0;
+    cond.test_nonnull = true;
+    ownership_heap.state mut yes = ownership_heap.clone(&s);
+    defer ownership_heap.free_state(&yes);
+    assert(ownership_heap.refine(&yes, cond, true));
+    assert(yes.atoms[0].root == ownership_heap.root_kind.nonnull && yes.witness);
+    ownership_heap.state mut no = ownership_heap.clone(&s);
+    defer ownership_heap.free_state(&no);
+    assert(ownership_heap.refine(&no, cond, false));
+    assert(no.atoms[0].root == ownership_heap.root_kind.null_root && no.witness);
+    // A refined root contradicts the other edge.
+    assert(!ownership_heap.refine(&yes, cond, false));
+    assert(!ownership_heap.refine(&no, cond, true));
+    // A joined root refines but clears the witness of the edge.
+    ownership_heap.state mut joined = ownership_heap.clone(&s);
+    defer ownership_heap.free_state(&joined);
+    joined.atoms[0].root = ownership_heap.root_kind.joined;
+    assert(ownership_heap.refine(&joined, cond, true));
+    assert(!joined.witness);
+    // A cell has a nonnull root.
+    ownership_heap.state mut cell = ownership_heap.clone(&s);
+    defer ownership_heap.free_state(&cell);
+    assert(ownership_heap.unfold(ctx, &cell, 0));
+    assert(!ownership_heap.refine(&cell, cond, false));
+    // A known truth value selects one edge; an untracked one clears each witness.
+    ownership_heap.value mut known = ownership_heap.scalar_value();
+    known.known = true;
+    known.truth = false;
+    assert(ownership_heap.refine(&s, known, false) && !ownership_heap.refine(&s, known, true));
+    assert(s.witness);
+    assert(ownership_heap.refine(&s, ownership_heap.scalar_value(), true));
+    assert(!s.witness);
+}
+
+fn requirements() void {
+    println("caller requirements");
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "host");
+    ownership_heap.context mut* ctx = &x.ctx;
+    ownership_heap.state mut s = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&s);
+    // The entry value of q becomes a requirement and an empty root.
+    assert(ownership_heap.require_empty(ctx, &s, 1));
+    assert(ctx->require_null[1] && s.atoms[1].root == ownership_heap.root_kind.null_root);
+    // The entry next field of p becomes a field requirement.
+    assert(ownership_heap.unfold(ctx, &s, 0));
+    ownership_heap.value next = value_at(&s, field_key(ownership_heap.base_kind.cell, 0, 0));
+    assert(ownership_heap.require_empty(ctx, &s, next.atom));
+    assert(ctx->require_fields[0] == 1 && !ctx->require_null[0]);
+    // A field of a field is no entry field: no requirement names it.
+    ownership_heap.value bytes = value_at(&s, field_key(ownership_heap.base_kind.cell, 0, 1));
+    s.atoms[bytes.atom].root = ownership_heap.root_kind.nonnull;
+    assert(!ownership_heap.require_empty(ctx, &s, bytes.atom));
+    s.atoms[bytes.atom].root = ownership_heap.root_kind.free;
+    s.atoms[bytes.atom].status = ownership_heap.atom_status.unknown;
+    assert(!ownership_heap.require_empty(ctx, &s, bytes.atom));
+    // A fresh allocation is no input choice.
+    u32 made = fresh_cell(ctx, &s, 5);
+    assert(!ownership_heap.require_empty(ctx, &s, made));
+}
+
+fn rejoin_of(string name, u32 block) u32 {
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, name);
+    assert(ownership_heap.lay_out_rejoins(&x.ctx));
+    return x.ctx.rejoin[cast(block, u64)];
+}
+
+fn rejoins() void {
+    println("branch rejoins");
+    // A diamond rejoins at the block after both arms.
+    u32 diamond = rejoin_of("diamond", 0);
+    assert(diamond != ownership_heap.NONE && diamond > 0);
+    // A loop on an untracked condition has a cycle, so its branch rejoins nowhere.
+    fixture mut l = fixture{};
+    defer close(&l);
+    open(&l, "looping");
+    assert(ownership_heap.lay_out_rejoins(&l.ctx));
+    u64 mut b = 0;
+    while (b < l.ctx.rejoin.len) {
+        assert(l.ctx.rejoin[b] == ownership_heap.NONE);
+        b += 1;
+    }
+    // A branch with an aborting arm, or with a call, rejoins nowhere.
+    assert(rejoin_of("aborting", 0) == ownership_heap.NONE);
+    assert(rejoin_of("calling", 0) == ownership_heap.NONE);
+    // A nested branch rejoins inside its outer arm, and the outer branch rejoins after it.
+    fixture mut n = fixture{};
+    defer close(&n);
+    open(&n, "nested");
+    assert(ownership_heap.lay_out_rejoins(&n.ctx));
+    u64 mut found = 0;
+    b = 0;
+    while (b < n.ctx.rejoin.len) {
+        if (n.ctx.rejoin[b] != ownership_heap.NONE) { found += 1; }
+        b += 1;
+    }
+    assert(found == 2);
+    // An assert that no mode removes ends its block with an abort edge.
+    assert(rejoin_of("asserting", 0) == ownership_heap.NONE);
+}
+
+fn main() i32 {
+    tables();
+    keys();
+    integers();
+    entry_state();
+    unfold_fold();
+    canonical_form();
+    joins();
+    widening();
+    covers();
+    tests();
+    requirements();
+    rejoins();
+    println("heap state ok");
+    return 0;
+}

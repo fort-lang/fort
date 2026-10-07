@@ -1,0 +1,255 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| owner names
+//| event keys and positions
+//| evidence classes
+//| one event for each operation and owner
+//| a precision stop records its event
+//| a call that can fail to return clears the witness
+//| heap events ok
+/// Checks the events of the heap proof (`spec/toolchain.md` 4.2): the owner that each names, its
+/// position, its evidence class, and its key.
+import ownership_api;
+import ownership_heap;
+import ownership_heap_env;
+
+fn is(ownership_heap_env.event_row row, ownership_api.event_kind kind,
+    ownership_api.evidence_kind evidence) bool {
+    return row.kind == kind && row.evidence == evidence;
+}
+
+// The owner of a lost obligation is named as the source spells it: a local, a field of a
+// local, a field through a pointer, a field of caller storage, and the target of a pointer to
+// an owner.
+fn names() void {
+    println("owner names");
+    string[17] text = {
+        "struct leaf { i32 mut* own child; }",
+        "struct pair { i32 mut* own left; leaf inner; }",
+        "struct holder { i32 mut* own first; }",
+        "fn local_name() void { i32 mut* own a = new(i32); }",
+        "fn field_name() void { pair mut p = {}; p.left = new(i32); }",
+        "fn nested_name() void { pair mut p = {}; p.inner.child = new(i32); }",
+        "fn arrow_name() void { leaf mut* own l = new(leaf); l->child = new(i32); del(l); }",
+        "fn caller_name(holder mut* h) void { h->first = new(i32); h->first = new(i32); }",
+        "fn slot_name(i32 mut* own mut* out) void { *out = new(i32); *out = new(i32); }",
+        "fn temp_name() void { del(new(leaf)); i32 mut* own mut t = new(i32);",
+        "    t = new(i32); del(t); }",
+        "fn param_name(i32 mut* own p) void { }",
+        "fn deep_name() void { leaf mut* own a = new(leaf); a->child = new(i32);",
+        "    leaf mut* own b = move(a); del(b); }",
+        "fn view_name() i32 { i32 mut* own a = new(i32); i32* seen = a; del(a); return *seen; }",
+        "fn unused() void { }",
+        "fn again() void { }",
+    };
+    string[11] bodies = {"local_name", "field_name", "nested_name", "arrow_name", "caller_name",
+        "slot_name", "temp_name", "param_name", "deep_name", "view_name", "unused"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], bodies[..]);
+    assert(ownership_heap_env.first_text(&c, "local_name") == "a");
+    assert(ownership_heap_env.first_text(&c, "field_name") == "p.left");
+    assert(ownership_heap_env.first_text(&c, "nested_name") == "p.inner.child");
+    assert(ownership_heap_env.first_text(&c, "arrow_name") == "l->child");
+    // The first store over the caller's owner becomes a requirement (`spec/fir.md` 14 Calls); the
+    // second store loses the fresh allocation of the first.
+    assert(ownership_heap_env.first_text(&c, "caller_name") == "h->first");
+    assert(ownership_heap_env.summary(&c, "caller_name")->interface[0].require_null);
+    assert(ownership_heap_env.first_text(&c, "slot_name") == "*out");
+    assert(ownership_heap_env.first_text(&c, "temp_name") == "t");
+    assert(ownership_heap_env.first_text(&c, "param_name") == "p");
+    assert(ownership_heap_env.first_text(&c, "deep_name") == "b->child");
+    assert(ownership_heap_env.first_text(&c, "view_name") == "seen");
+    assert(ownership_heap_env.events(&c, "unused") == 0);
+}
+
+// Each event names its body, block, operation, and the source position of the operation.
+fn positions() void {
+    println("event keys and positions");
+    string[9] text = {
+        "fn two_losses() void {",
+        "    i32 mut* own a = new(i32);",
+        "    i32 mut* own b = new(i32);",
+        "    del(a);",
+        "}",
+        "fn at_return(bool c) i32 mut* own { i32 mut* own a = new(i32);",
+        "    i32* v = a; del(a);",
+        "    return new(i32); }",
+        "fn quiet() void { }",
+    };
+    string[3] bodies = {"two_losses", "at_return", "quiet"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], bodies[..]);
+    ownership_heap_env.event_row row = ownership_heap_env.first(&c, "two_losses");
+    assert(is(row, ownership_api.event_kind.lost_ownership,
+        ownership_api.evidence_kind.unconditional));
+    // The dead marker of `b` stands at the closing brace of its scope.
+    assert(row.line == 5 && row.col == 1 && ownership_heap_env.text(&row) == "b");
+    assert(row.operation.function.declaration.declaration == 1);
+    assert(!row.operation.terminator);
+    assert(ownership_heap_env.events(&c, "two_losses") == 1);
+    // A dangling view that nothing reads gives no event (D17.14).
+    assert(ownership_heap_env.proved(&c, "at_return"));
+    assert(ownership_heap_env.events(&c, "quiet") == 0);
+}
+
+// A definite violation on a witnessed path is unconditional; a free input choice gives a
+// validated path with a witness link; any other is incomplete proof with abstract possibility
+// evidence (`spec/toolchain.md` 4.2).
+fn evidence() void {
+    println("evidence classes");
+    string[13] text = {
+        "struct leaf { i32 mut* own child; }",
+        "fn definite() void { leaf mut* own a = new(leaf); a->child = new(i32); del(a); }",
+        "fn chosen(leaf mut* own a) void { leaf mut* own b = move(a); del(b); }",
+        "fn joined(bool c) void { leaf mut* own a = new(leaf); if (c) { a->child = new(i32); }",
+        "    del(a); }",
+        "fn unwitnessed(bool c) void { if (c) { leaf mut* own a = new(leaf);",
+        "    a->child = new(i32); del(a); } }",
+        "fn witnessed_branch(leaf mut* own a) void { if (a == null) { return; }",
+        "    leaf mut* own b = move(a); del(b); }",
+        "fn diamond(bool c, i32 x) void { i32 mut y = 0; if (c) { y = x; } else { y = 1; }",
+        "    leaf mut* own a = new(leaf); a->child = new(i32); del(a); }",
+        "fn unused() void { }",
+        "fn again() void { }",
+    };
+    string[7] bodies = {"definite", "chosen", "joined", "unwitnessed", "witnessed_branch",
+        "diamond", "unused"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], bodies[..]);
+    ownership_heap_env.event_row hard = ownership_heap_env.first(&c, "definite");
+    assert(is(hard, ownership_api.event_kind.lost_ownership,
+        ownership_api.evidence_kind.unconditional));
+    assert(!hard.witness);
+    // `b` holds the entry value of `a`, a free choice of the caller, so the release that loses
+    // its child is a validated path with a witness link. A caller requirement cannot repair
+    // this error of the body (`spec/fir.md` 14.1).
+    ownership_heap_env.event_row chose = ownership_heap_env.first(&c, "chosen");
+    assert(is(chose, ownership_api.event_kind.lost_ownership,
+        ownership_api.evidence_kind.validated_path));
+    assert(chose.witness && ownership_heap_env.text(&chose) == "b->child");
+    assert(ownership_heap_env.summary(&c, "chosen")->interface[0].require_fields == 0);
+    assert(ownership_heap_env.unproved(&c, "joined", ownership_api.incomplete_reason.missing_path));
+    ownership_heap_env.event_row soft = ownership_heap_env.first(&c, "joined");
+    assert(is(soft, ownership_api.event_kind.incomplete_proof,
+        ownership_api.evidence_kind.abstract_possibility));
+    // The branch on an untracked scalar clears the witness of the loss inside it.
+    assert(ownership_heap_env.unproved(&c, "unwitnessed",
+        ownership_api.incomplete_reason.missing_path));
+    // A null test on a free choice keeps the witness of the loss after it.
+    ownership_heap_env.event_row tested = ownership_heap_env.first(&c, "witnessed_branch");
+    assert(is(tested, ownership_api.event_kind.lost_ownership,
+        ownership_api.evidence_kind.validated_path));
+    assert(tested.witness);
+    // Both arms of the diamond reach the loss with no call and no cycle: the witness returns.
+    assert(ownership_heap_env.failed(&c, "diamond"));
+    assert(is(ownership_heap_env.first(&c, "diamond"), ownership_api.event_kind.lost_ownership,
+        ownership_api.evidence_kind.unconditional));
+}
+
+// One operation with one lost owner gives one event, also when its loss repeats in a loop or on
+// several paths; owned descendants of a lost owner give no second event.
+fn deduplication() void {
+    println("one event for each operation and owner");
+    string[11] text = {
+        "struct leaf { i32 mut* own child; leaf mut* own next; }",
+        "fn chain_lost() void { leaf mut* own a = new(leaf); a->next = new(leaf);",
+        "    a->next->child = new(i32); }",
+        "fn in_loop(u64 n) void { u64 mut i = 0; while (i < n) { leaf mut* own a = new(leaf);",
+        "    a->child = new(i32); del(a); i += 1; } }",
+        "fn two_paths(bool c) void { leaf mut* own a = new(leaf); a->child = new(i32);",
+        "    if (c) { del(a); } else { del(a); } }",
+        "fn two_children() void { leaf mut* own a = new(leaf); a->child = new(i32);",
+        "    a->next = new(leaf); del(a); }",
+        "fn unused() void { }",
+        "fn again() void { }",
+    };
+    string[5] bodies = {"chain_lost", "in_loop", "two_paths", "two_children", "unused"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], bodies[..]);
+    // `a` owns its next node, which owns a child: one loss at the end of `a`.
+    assert(ownership_heap_env.events(&c, "chain_lost") == 1);
+    assert(ownership_heap_env.first_text(&c, "chain_lost") == "a");
+    // The loop body runs in many iterations; the release that loses the child is one operation.
+    assert(ownership_heap_env.events(&c, "in_loop") == 1);
+    // Two releases, two operations, two events.
+    assert(ownership_heap_env.events(&c, "two_paths") == 2);
+    // Two owned fields of one release: one event for each lost owner.
+    assert(ownership_heap_env.events(&c, "two_children") == 2);
+}
+
+// A precision stop in a round that records no event still leaves one event at the stop, so no
+// incomplete result goes unrecorded (`spec/fir.md` 14.1). A caller with no obligation that the
+// stopped callee can reach keeps its own proof.
+fn stops() void {
+    println("a precision stop records its event");
+    string[6] text = {
+        "struct node { node mut* own next; u64 count; }",
+        "fn three() void { node mut* own a = new(node); node mut* own b = new(node);",
+        "    node mut* own d = new(node); u64 x = 1;",
+        "    a->next = move(b); a->next->next = move(d); }",
+        "fn caller() void { three(); }",
+        "fn unused() void { }",
+    };
+    string[2] bodies = {"three", "caller"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    c.counts.r = 2;
+    ownership_heap_env.run(&c, text[..], bodies[..]);
+    assert(ownership_heap_env.unproved(&c, "three",
+        ownership_api.incomplete_reason.missing_graph));
+    assert(ownership_heap_env.events(&c, "three") == 1);
+    ownership_heap_env.event_row stop = ownership_heap_env.first(&c, "three");
+    assert(is(stop, ownership_api.event_kind.incomplete_proof,
+        ownership_api.evidence_kind.abstract_possibility));
+    assert(stop.line == 3 && ownership_heap_env.text(&stop) ==
+        "the state within its precision bounds");
+    assert(ownership_heap_env.proved(&c, "caller"));
+}
+
+// A branch gives its witness back where its paths rejoin only if the branch itself was reached
+// with a witness at its terminator. A call before the branch that can fail to return clears it
+// (`spec/toolchain.md` 4.2).
+fn exit_witness() void {
+    println("a call that can fail to return clears the witness");
+    string[8] text = {
+        "struct node { node mut* own next; u64 count; }",
+        "fn spin(u64 k) void { while (k != 0) { } }",
+        "fn after_spin(bool flag) u64 { node mut* own a = new(node); node* v = a; del(a);",
+        "    spin(5); u64 mut x = 0; if (flag) { x = 1; } else { x = 2; }",
+        "    return v->count + x; }",
+        "fn before_spin(bool flag) u64 { node mut* own a = new(node); node* v = a; del(a);",
+        "    u64 mut x = 0; if (flag) { x = 1; } else { x = 2; } return v->count + x; }",
+        "fn unused() void { }",
+    };
+    string[3] bodies = {"spin", "after_spin", "before_spin"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], bodies[..]);
+    assert(ownership_heap_env.proved(&c, "spin"));
+    assert(!ownership_heap_env.summary(&c, "spin")->witness);
+    // `spin` can loop forever, so the read after the branch has no validated path.
+    assert(ownership_heap_env.unproved(&c, "after_spin",
+        ownership_api.incomplete_reason.missing_path));
+    assert(ownership_heap_env.saw(&c, "after_spin", ownership_api.event_kind.invalid_use,
+        ownership_api.evidence_kind.unconditional) == 0);
+    // With no call before it, the branch gives its witness back.
+    assert(ownership_heap_env.failed(&c, "before_spin"));
+    assert(ownership_heap_env.first(&c, "before_spin").evidence ==
+        ownership_api.evidence_kind.unconditional);
+}
+
+fn main() i32 {
+    names();
+    positions();
+    evidence();
+    deduplication();
+    stops();
+    exit_witness();
+    println("heap events ok");
+    return 0;
+}
