@@ -68,7 +68,24 @@ FAILURE_CODES = (
 U64_MAX = (1 << 64) - 1
 U32_MAX = (1 << 32) - 1
 LIMIT_VERSION = 2
-REPORT_VERSION = 4
+REPORT_VERSION = 5
+# The producer analyses with a ledger for each verified body, and the classification ledgers
+# of the two flow analyses among them.
+BODY_LEDGERS = ("local", "stored_borrows", "raw")
+CLASSIFICATION_LEDGERS = {
+    "local_classification": "local",
+    "stored_borrows_classification": "stored_borrows",
+}
+LEDGER_LABELS = {"local": "local", "stored_borrows": "stored", "raw": "raw"}
+METER_NAMES = (
+    "graph_private",
+    "services",
+    "local",
+    "local_classification",
+    "stored_borrows",
+    "stored_borrows_classification",
+    "raw",
+)
 LIMIT_MEMBERS = ("version", "d", "r", "p", "g", "h", "t", "e", "w", "w_scale", "v")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 REVISION = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
@@ -700,9 +717,10 @@ def validate_report(
     graph_sizes = []
     body_sizes = 0
     service_sizes = {}
-    local_sizes = {}
-    classification_sizes = {}
-    raw_sizes = {}
+    # The producer analyses keep one ledger for each verified body. A flow analysis also keeps
+    # a classification ledger of the same FIR size when the body needs one.
+    ledger_sizes = {name: {} for name in BODY_LEDGERS}
+    classification_sizes = {name: {} for name in CLASSIFICATION_LEDGERS.values()}
     for index, meter in enumerate(array(report["meters"], "meters")):
         obj(meter, ("id", "name", "owner", "fir_size", "counts", "first_refusal"), "meter")
         require(integer(meter["id"], "meter id") == index, "meters: IDs have gaps")
@@ -710,7 +728,7 @@ def validate_report(
         meter_bounds["w"] = work_bound(table, integer(meter["fir_size"], "meter FIR size"))
         choice(
             meter["name"],
-            ("graph_private", "services", "local", "local_classification", "raw"),
+            METER_NAMES,
             "meter name",
         )
         if meter["name"] == "graph_private":
@@ -725,21 +743,20 @@ def validate_report(
                 for name in ("module", "declaration", "instance")
             )
             require(owner_key in keys, "meter: unknown owner")
-        # A local ledger is the flow computation of one body, beside its service ledger. A
-        # classification ledger is the second local run of that body, when it needed one.
-        if meter["name"] == "local":
-            require(owner_key is not None, "local ledger: missing owner")
-            require(owner_key not in local_sizes, "local ledger: duplicate owner")
-            local_sizes[owner_key] = meter["fir_size"]
-        elif meter["name"] == "local_classification":
-            require(owner_key is not None, "classification ledger: missing owner")
-            require(owner_key not in classification_sizes, "classification ledger: duplicate owner")
-            classification_sizes[owner_key] = meter["fir_size"]
-        elif meter["name"] == "raw":
-            # A raw ledger is the raw analysis of one body, beside its service ledger.
-            require(owner_key is not None, "raw ledger: missing owner")
-            require(owner_key not in raw_sizes, "raw ledger: duplicate owner")
-            raw_sizes[owner_key] = meter["fir_size"]
+        # A local, stored or raw ledger is the computation of one body, beside its service
+        # ledger. A classification ledger is the second run of a flow, when it needed one.
+        if meter["name"] in BODY_LEDGERS:
+            label = LEDGER_LABELS[meter["name"]]
+            sizes = ledger_sizes[meter["name"]]
+            require(owner_key is not None, f"{label} ledger: missing owner")
+            require(owner_key not in sizes, f"{label} ledger: duplicate owner")
+            sizes[owner_key] = meter["fir_size"]
+        elif meter["name"] in CLASSIFICATION_LEDGERS:
+            flow = CLASSIFICATION_LEDGERS[meter["name"]]
+            label = "classification" if flow == "local" else "stored classification"
+            require(owner_key is not None, f"{label} ledger: missing owner")
+            require(owner_key not in classification_sizes[flow], f"{label} ledger: duplicate owner")
+            classification_sizes[flow][owner_key] = meter["fir_size"]
         elif meter["name"] == "services" and owner_key is not None:
             service_sizes[owner_key] = meter["fir_size"]
         count_keys = set()
@@ -778,21 +795,21 @@ def validate_report(
                 and (refusal["limit"] is None or refusal["limit"]["category"] == "W"),
                 "graph private ledger: unsupported refusal category",
             )
-    for owner_key, size in local_sizes.items():
-        require(
-            service_sizes.get(owner_key) == size,
-            "local ledger: FIR size differs from the service ledger of its body",
-        )
-    for owner_key, size in classification_sizes.items():
-        require(
-            local_sizes.get(owner_key) == size,
-            "classification ledger: FIR size differs from the local ledger of its body",
-        )
-    for owner_key, size in raw_sizes.items():
-        require(
-            service_sizes.get(owner_key) == size,
-            "raw ledger: FIR size differs from the service ledger of its body",
-        )
+    for analysis in BODY_LEDGERS:
+        label = LEDGER_LABELS[analysis]
+        for owner_key, size in ledger_sizes[analysis].items():
+            require(
+                service_sizes.get(owner_key) == size,
+                f"{label} ledger: FIR size differs from the service ledger of its body",
+            )
+        for owner_key, size in classification_sizes.get(analysis, {}).items():
+            require(
+                ledger_sizes[analysis].get(owner_key) == size,
+                "classification ledger: FIR size differs from the local ledger of its body"
+                if analysis == "local"
+                else "stored classification ledger: FIR size differs from the stored ledger of"
+                " its body",
+            )
     # The graph build covers each verified body, and each verified body has one ledger.
     require(len(graph_sizes) <= 1, "meters: two graph ledgers")
     require(
@@ -803,29 +820,23 @@ def validate_report(
     validate_totals(report["totals"], totals)
     reason(report["first_incomplete"], files, source_lines, limits=table)
     reason(report["failure"], files, source_lines, failure=True, limits=table)
-    # Version 3 integrates the local analysis: each verified body has one local ledger.
-    require(
-        analyses[ANALYSES.index("local")]["producer"] == "integrated",
-        "local analysis: producer is not integrated",
-    )
+    # Version 3 integrates the local analysis, version 4 the raw analysis and version 5 the
+    # stored-borrow analysis: each verified body has one ledger of each.
     verified = {
         tuple(body["key"][name] for name in ("module", "declaration", "instance"))
         for body in bodies
         if body["verification"] == "complete"
     }
-    require(
-        set(local_sizes) == verified,
-        "local ledger: each verified body needs exactly one local ledger",
-    )
-    # Version 4 integrates the raw analysis: each verified body has one raw ledger.
-    require(
-        analyses[ANALYSES.index("raw")]["producer"] == "integrated",
-        "raw analysis: producer is not integrated",
-    )
-    require(
-        set(raw_sizes) == verified,
-        "raw ledger: each verified body needs exactly one raw ledger",
-    )
+    for analysis in BODY_LEDGERS:
+        label = LEDGER_LABELS[analysis]
+        require(
+            analyses[ANALYSES.index(analysis)]["producer"] == "integrated",
+            f"{label} analysis: producer is not integrated",
+        )
+        require(
+            set(ledger_sizes[analysis]) == verified,
+            f"{label} ledger: each verified body needs exactly one {label} ledger",
+        )
     if any(row["status"] == "incomplete" for row in analyses) or any(
         body["first_incomplete"] is not None for body in bodies
     ):

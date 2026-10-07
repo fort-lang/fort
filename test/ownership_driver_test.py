@@ -110,16 +110,19 @@ class OwnershipDriverTest(unittest.TestCase):
         self.assertEqual(document["bodies"], [])
         self.assertEqual(document["enumeration"]["selected_bodies"], 0)
         self.assertEqual(len(document["analyses"]), 7)
-        # The local and raw analyses have no closure facts outside bodies, so no body leaves
-        # no gap of theirs.
+        # The local, stored-borrow and raw analyses have no closure facts outside bodies, so no
+        # body leaves no gap of theirs.
         self.assertEqual(document["analyses"][2], {"name": "local", "producer": "integrated",
+                                                   "status": "complete"})
+        self.assertEqual(document["analyses"][3], {"name": "stored_borrows",
+                                                   "producer": "integrated",
                                                    "status": "complete"})
         self.assertEqual(document["analyses"][4], {"name": "raw", "producer": "integrated",
                                                    "status": "complete"})
-        self.assertEqual([row["producer"] for row in document["analyses"]][3:],
-                         ["unavailable", "integrated", "unavailable", "unavailable"])
-        self.assertEqual([row["status"] for row in document["analyses"]][3:],
-                         ["incomplete", "complete", "incomplete", "incomplete"])
+        self.assertEqual([row["producer"] for row in document["analyses"]][5:],
+                         ["unavailable"] * 2)
+        self.assertEqual([row["status"] for row in document["analyses"]][5:],
+                         ["incomplete"] * 2)
         self.assertEqual([row["name"] for row in document["meters"]], ["graph_private"])
 
     def test_diagnostic_document_stays_version_one(self):
@@ -131,9 +134,9 @@ class OwnershipDriverTest(unittest.TestCase):
         self.assertEqual(diagnostic["symbols"], [])
         self.assertIn("ownership proof is incomplete", diagnostic["diagnostics"][0]["message"])
         self.assertEqual(coverage["kind"], "fort-ownership-report")
-        # Version 2 added the W scale and FIR sizes, version 3 the local ledgers and version 4
-        # the raw ledgers.
-        self.assertEqual(coverage["version"], 4)
+        # Version 2 added the W scale and FIR sizes, version 3 the local ledgers, version 4 the
+        # raw ledgers and version 5 the stored-borrow ledgers.
+        self.assertEqual(coverage["version"], 5)
         self.assertIn("w_scale", coverage["limits"])
 
     def test_index_still_populates_identifier_records(self):
@@ -383,8 +386,9 @@ class OwnershipDriverTest(unittest.TestCase):
         self.assertEqual(document["bodies"], [])
         self.assertEqual(document["meters"], [])
         self.assertEqual([row["status"] for row in document["analyses"]][3:],
-                         ["incomplete", "unexecuted", "incomplete", "incomplete"])
-        # The local and raw analyses ran on no body and the denominator is incomplete.
+                         ["unexecuted", "unexecuted", "incomplete", "incomplete"])
+        # The local, stored-borrow and raw analyses ran on no body and the denominator is
+        # incomplete.
         self.assertEqual(document["analyses"][2]["status"], "unexecuted")
 
     def test_actual_verifier_failure_exits_two_and_retains_unexecuted_rows(self):
@@ -684,6 +688,127 @@ class OwnershipDriverTest(unittest.TestCase):
                                     self.result.stderr))
         self.assertTrue(all(value == projections[0] for value in projections))
         self.assertEqual(projections[0][1], 2)
+
+    STORED_CASES = (
+        "struct box { i32 mut* p; i32 n; }\n"
+        "struct pair { i32 mut* own a; i32 mut* own b; }\n"
+        "fn field_use() void {\n"
+        "    i32 mut* own p = new(i32);\n"
+        "    box b = box{p, 1};\n"
+        "    del(p);\n"
+        "    *b.p = 1;\n"
+        "}\n"
+        "fn owner_leak() void { pair s = pair{new(i32), new(i32)}; del(s.a); }\n"
+        "fn stack_return() i32* { i32 x = 1; return &x; }\n"
+        "fn local_leak() void { i32 mut* own p = new(i32); }\n"
+        "fn main() i32 { return 0; }\n"
+    )
+
+    def stored_row(self, document, name):
+        return self.body(document, name)["analyses"][3]
+
+    def test_stored_violations_are_rendered_and_counted(self):
+        self.entry.write_text(self.STORED_CASES)
+        self.assertEqual(self.invoke(standard=Path(OPTIONS.std_dir)).returncode, 1)
+        document = self.evidence()
+        stderr = self.result.stderr.decode()
+        self.assertIn("main.ft:7:10: error: invalid use of 'b.p'", stderr)
+        self.assertIn("main.ft:7:10: note: reference source is no longer live", stderr)
+        self.assertIn("main.ft:9:69: error: lost ownership of 's.b'", stderr)
+        self.assertIn("main.ft:9:69: note: storage ends with a live owner", stderr)
+        self.assertIn("main.ft:10:37: error: invalid use of the result", stderr)
+        self.assertIn("main.ft:10:37: note: returned view outlives its source", stderr)
+        # The local run validates the leak of p, so it is one diagnostic in the local row.
+        self.assertEqual(stderr.count("lost ownership of 'p'"), 1)
+        self.assertEqual(document["totals"]["violations"], 4)
+        self.assertEqual(document["totals"]["analyses"][2]["violations"], 1)
+        self.assertEqual(document["totals"]["analyses"][3]["violations"], 3)
+        self.assertEqual(document["totals"]["analyses"][3]["proof"]["violated"], 3)
+        for name in ("field_use", "owner_leak", "stack_return"):
+            with self.subTest(name=name):
+                self.assertEqual(self.stored_row(document, name),
+                                 {"name": "stored_borrows", "correspondence": "complete",
+                                  "solver": "complete", "proof": "violated",
+                                  "violations": 1})
+                self.assertEqual(self.body(document, name)["violations"], 1)
+        leak = self.body(document, "local_leak")
+        self.assertEqual(leak["violations"], 1)
+        self.assertEqual(self.local_row(document, "local_leak")["violations"], 1)
+        self.assertEqual(self.stored_row(document, "local_leak")["violations"], 0)
+        self.assertEqual(self.stored_row(document, "local_leak")["proof"], "incomplete")
+        self.assertEqual(document["analyses"][3]["producer"], "integrated")
+        # Violations render in body order: field_use, owner_leak, stack_return, local_leak.
+        order = [stderr.index(text) for text in ("'b.p'", "'s.b'", "the result", "'p'")]
+        self.assertEqual(order, sorted(order))
+
+    # The stored diagnostics of the approved examples that the stored row decides. A position
+    # is the FIR location of the operation; the approved design marks a later column of some
+    # of them. Examples 9 and 18 stay outside the stored scope (unknown_source).
+    APPROVED_STORED = {
+        "ex05_local_address.ft": ("bad", "3:5: error: invalid use of the result"),
+        "ex06_local_span.ft": ("bad", "3:5: error: invalid use of the result"),
+        "ex12_partial_move.ft": ("demo", "11:18: error: invalid use of 'value.part.ptr'"),
+        "ex14_aggregate_overwrite.ft": ("demo", "6:13: error: lost ownership of 'value.ptr'"),
+        "ex09_retained_field.ft": ("demo", None),
+        "ex18_retained_key.ft": ("demo", None),
+    }
+
+    def test_stored_diagnostics_of_the_approved_examples(self):
+        approved = CHECKOUT / "test" / "ownership" / "approved"
+        for name, (body, expected) in self.APPROVED_STORED.items():
+            with self.subTest(example=name):
+                self.entry.write_bytes((approved / name).read_bytes())
+                self.assertEqual(self.invoke(standard=Path(OPTIONS.std_dir)).returncode, 1)
+                document = self.evidence()
+                stderr = self.result.stderr.decode()
+                row = self.stored_row(document, body)
+                if expected is None:
+                    self.assertNotIn("invalid use", stderr)
+                    self.assertEqual((row["correspondence"], row["proof"]),
+                                     ("incomplete", "incomplete"))
+                    self.assertEqual(document["totals"]["violations"], 0)
+                    continue
+                self.assertIn("main.ft:" + expected, stderr)
+                self.assertEqual(stderr.count(": error: invalid use") +
+                                 stderr.count(": error: lost ownership"), 1)
+                self.assertEqual((row["proof"], row["violations"]), ("violated", 1))
+                self.assertEqual(self.local_row(document, body)["violations"], 0)
+                self.assertEqual(document["totals"]["analyses"][3]["violations"], 1)
+
+    def test_stored_ledgers_pair_with_service_ledgers(self):
+        self.entry.write_text(self.STORED_CASES)
+        self.assertEqual(self.invoke(standard=Path(OPTIONS.std_dir)).returncode, 1)
+        document = self.evidence()
+        services = {json.dumps(row["owner"], sort_keys=True): row
+                    for row in document["meters"] if row["name"] == "services"}
+        stored = [row for row in document["meters"] if row["name"] == "stored_borrows"]
+        self.assertEqual(len(stored), len(services))
+        for row in stored:
+            paired = services[json.dumps(row["owner"], sort_keys=True)]
+            self.assertEqual(row["fir_size"], paired["fir_size"])
+            limits = document["limits"]
+            counts = {count["category"]: count for count in row["counts"]}
+            self.assertEqual(counts["W"]["bound"], limits["w"] + limits["w_scale"] *
+                             row["fir_size"])
+            self.assertIsNone(row["first_refusal"])
+        # Each body's ledgers stand in the order services, local, stored, raw.
+        names = [row["name"] for row in document["meters"] if row["owner"] is not None]
+        self.assertEqual(names[:4], ["services", "local", "stored_borrows", "raw"])
+
+    def test_stored_verdicts_stay_identical_in_every_mode(self):
+        self.entry.write_text(self.STORED_CASES)
+        projections = []
+        for flags in ((), ("--release",), ("--no-bounds-check",),
+                      ("--release", "--no-bounds-check")):
+            with self.subTest(flags=flags):
+                self.assertEqual(self.invoke(*flags, standard=Path(OPTIONS.std_dir)).returncode,
+                                 1)
+                document = self.evidence()
+                projections.append(([row["analyses"][3] for row in document["bodies"]],
+                                    document["totals"]["violations"],
+                                    self.result.stderr))
+        self.assertTrue(all(value == projections[0] for value in projections))
+        self.assertEqual(projections[0][1], 4)
 
     def test_report_can_replace_an_old_report_atomically(self):
         self.report.write_bytes(b"old report\n")
