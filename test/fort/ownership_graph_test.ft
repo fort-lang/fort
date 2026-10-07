@@ -11,6 +11,7 @@
 //| G08 fort and foreign
 //| G09 unknown fort
 //| G10 target limit
+//| G11 body fact chains
 /// Tests call components and target propagation over verified FIR.
 import ast;
 import check_env;
@@ -40,6 +41,33 @@ fn lower(lower_env.env mut* e, string name) fir.func {
     return body;
 }
 
+// Each body chain visits exactly the facts of that body, in increasing index order.
+// No two facts of one body share a place and a target.
+fn chains_cover(ownership_graph.graph* g) void {
+    u64 mut seen = 0;
+    u64 mut body = 0;
+    while (body < g->bodies.len) {
+        u64 mut previous = ownership_graph.U64_MAX;
+        u64 mut i = g->first_fact[body];
+        while (i != ownership_graph.U64_MAX) {
+            assert(i < g->facts_len && cast(g->facts[i].body, u64) == body);
+            assert(previous == ownership_graph.U64_MAX || previous < i);
+            u64 mut j = g->first_fact[body];
+            while (j != i) {
+                assert(!(ownership_graph.same_place(&g->facts[j], &g->facts[i]) &&
+                    ownership_graph.same_target(g->facts[j].value, g->facts[i].value)));
+                j = g->facts[j].next;
+            }
+            previous = i;
+            seen += 1;
+            i = g->facts[i].next;
+        }
+        assert(g->last_fact[body] == previous);
+        body += 1;
+    }
+    assert(seen == g->facts_len);
+}
+
 fn open(fixture mut* f, string@ source, string@ names, u64 target_limit) void {
     lower_env.open(&f->checked);
     lower_env.check_lines(&f->checked, source, true);
@@ -57,6 +85,7 @@ fn open(fixture mut* f, string@ source, string@ names, u64 target_limit) void {
     limits.t = target_limit;
     f->graph = ownership_graph.build(f->inputs[..], limits);
     assert(ownership_api.successful(f->graph.proof));
+    chains_cover(&f->graph);
 }
 
 fn close(fixture mut* f) void {
@@ -601,6 +630,37 @@ fn query_limits() void {
     close(&f);
 }
 
+// Facts of three bodies interleave in the fact array. Lookups read one body chain.
+fn body_chains() void {
+    fixture mut f = fixture{};
+    string[6] source = {"struct slot { fn () void cb; }", "fn first() void {}",
+        "fn second() void {}",
+        "fn invoke(fn () void cb, slot s) void { fn () void copy = cb; copy(); s.cb(); }",
+        "fn left() void { slot s = {second}; invoke(first, s); }",
+        "fn right() void { slot s = {first}; invoke(second, s); }"};
+    string[5] names = {"first", "second", "invoke", "left", "right"};
+    open(&f, source[..], names[..], 4);
+    u64 mut bodies = 0;
+    u64 mut body = 0;
+    while (body < f.graph.bodies.len) {
+        if (f.graph.first_fact[body] != ownership_graph.U64_MAX) { bodies += 1; }
+        body += 1;
+    }
+    assert(bodies >= 3);
+    u64 copied = nth_call(&f, "invoke", 0);
+    assert(target(&f, copied, 1) && target(&f, copied, 2));
+    u64 field = nth_call(&f, "invoke", 1);
+    assert(target(&f, field, 1) && target(&f, field, 2));
+    u64 work = f.graph.work;
+    u64 facts = f.graph.facts_len;
+    close(&f);
+    fixture mut again = fixture{};
+    open(&again, source[..], names[..], 4);
+    assert(again.graph.work == work && again.graph.facts_len == facts);
+    close(&again);
+    println("G11 body fact chains");
+}
+
 fn main() i32 {
     acyclic();
     self_recursion();
@@ -613,5 +673,6 @@ fn main() i32 {
     unknown_fort();
     query_limits();
     two_targets(1, true);
+    body_chains();
     return 0;
 }
