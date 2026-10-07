@@ -1,0 +1,631 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| leaf borrows ok
+//| leaf owners ok
+//| whole slots ok
+//| stack sources ok
+//| weak stores ok
+//| weak owners ok
+//| relations ok
+/// Tests the transfer effects that the stored-borrow producer adds: reference leaves of
+/// private aggregate slots, stack sources of taken locals, and weak element stores.
+import ownership_api;
+import ownership_local_env;
+import ownership_state;
+import ownership_transfer;
+
+fn succeeded(ownership_api.proof_status proof) void {
+    assert(ownership_api.successful(proof));
+    assert(proof.kind == ownership_api.proof_kind.complete);
+    assert(!proof.failed && !proof.terminal.present);
+}
+
+fn violated(ownership_api.proof_status proof) void {
+    assert(!ownership_api.successful(proof));
+    assert(proof.failed && !proof.terminal.present);
+    assert(proof.kind == ownership_api.proof_kind.complete);
+}
+
+fn incomplete(ownership_api.proof_status proof) void {
+    assert(!ownership_api.successful(proof));
+    assert(proof.failed && proof.terminal.present);
+    assert(proof.kind == ownership_api.proof_kind.incomplete);
+}
+
+fn field(u32 k) ownership_api.projection {
+    return ownership_api.projection{.kind = ownership_api.projection_kind.field, .field = k};
+}
+
+fn element(i64 k) ownership_api.projection {
+    return ownership_api.projection{.kind = ownership_api.projection_kind.fixed_index,
+        .index = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.exact, .value = k}};
+}
+
+fn leaf(u32 slot, ownership_api.projection@ parts) ownership_api.place_path {
+    ownership_api.place_path mut out = ownership_local_env.place(slot);
+    out.projections = parts;
+    return out;
+}
+
+// A request between two places that may be leaves of private aggregate slots.
+fn leaf_req(ownership_local_env.env mut* e, ownership_transfer.action kind,
+    ownership_api.place_path from, ownership_api.place_path to) ownership_transfer.request {
+    ownership_transfer.request mut r = ownership_local_env.req(e, kind, 0, 0);
+    r.source = from;
+    r.destination = to;
+    r.leaf_places_proved = true;
+    return r;
+}
+
+fn apply(ownership_local_env.env mut* e, ownership_transfer.request* r)
+    ownership_api.proof_status {
+    return ownership_local_env.apply(e, r);
+}
+
+fn copy_into(ownership_local_env.env mut* e, ownership_api.place_path from,
+    ownership_api.place_path to) ownership_api.proof_status {
+    ownership_transfer.request mut r = leaf_req(e, ownership_transfer.action.copy, from, to);
+    return apply(e, &r);
+}
+
+fn move_into(ownership_local_env.env mut* e, ownership_api.place_path from,
+    ownership_api.place_path to) ownership_api.proof_status {
+    ownership_transfer.request mut r = leaf_req(e, ownership_transfer.action.move_owner, from,
+        to);
+    return apply(e, &r);
+}
+
+fn use_leaf(ownership_local_env.env mut* e, ownership_api.place_path at)
+    ownership_api.proof_status {
+    ownership_transfer.request mut r = leaf_req(e, ownership_transfer.action.use, at, at);
+    r.temporal_use = true;
+    return apply(e, &r);
+}
+
+fn inspect_leaf(ownership_local_env.env mut* e, ownership_api.place_path at)
+    ownership_api.proof_status {
+    ownership_transfer.request mut r = leaf_req(e, ownership_transfer.action.inspect, at, at);
+    return apply(e, &r);
+}
+
+fn release_leaf(ownership_local_env.env mut* e, ownership_api.place_path at)
+    ownership_api.proof_status {
+    ownership_transfer.request mut r = leaf_req(e, ownership_transfer.action.release, at, at);
+    r.leaves_empty_proved = true;
+    return apply(e, &r);
+}
+
+fn end_leaf(ownership_local_env.env mut* e, ownership_api.place_path at)
+    ownership_api.proof_status {
+    ownership_transfer.request mut r = leaf_req(e, ownership_transfer.action.dead, at, at);
+    r.private_slot_proved = true;
+    return apply(e, &r);
+}
+
+fn empty_leaf(ownership_local_env.env mut* e, ownership_api.place_path at)
+    ownership_api.proof_status {
+    ownership_transfer.request mut r = leaf_req(e, ownership_transfer.action.assignment, at, at);
+    r.value = ownership_local_env.empty_value();
+    return apply(e, &r);
+}
+
+fn outside(ownership_local_env.env mut* e) ownership_api.proof_status {
+    ownership_transfer.request mut r = ownership_local_env.req(e,
+        ownership_transfer.action.outside, 0, 0);
+    return apply(e, &r);
+}
+
+fn stack(ownership_local_env.env mut* e, ownership_transfer.action kind, u32 slot, u32 key)
+    ownership_api.proof_status {
+    ownership_transfer.request mut r = ownership_local_env.req(e, kind, slot, slot);
+    r.source_key = ownership_local_env.id(ownership_api.entity_kind.source, key);
+    return apply(e, &r);
+}
+
+// A `live` marker with a retired source for the borrows of the ended instances.
+fn retiring_begin(ownership_local_env.env mut* e, u32 slot, u32 key, u32 retired)
+    ownership_api.proof_status {
+    ownership_transfer.request mut r = ownership_local_env.req(e,
+        ownership_transfer.action.stack_begin, slot, slot);
+    r.source_key = ownership_local_env.id(ownership_api.entity_kind.source, key);
+    r.fresh_source.key = ownership_local_env.id(ownership_api.entity_kind.source, retired);
+    return apply(e, &r);
+}
+
+fn source(ownership_local_env.env* e, u32 key) ownership_api.source_fact {
+    u64 index = ownership_state.source_index(&e->state,
+        ownership_local_env.id(ownership_api.entity_kind.source, key));
+    assert(index != ownership_state.U64_MAX);
+    return e->state.sources[index];
+}
+
+fn allocation(ownership_local_env.env* e, u32 key) ownership_api.allocation_fact {
+    u64 index = ownership_state.allocation_index(&e->state,
+        ownership_local_env.id(ownership_api.entity_kind.allocation, key));
+    assert(index != ownership_state.U64_MAX);
+    return e->state.allocations[index];
+}
+
+// The count of contents rows at one place: two rows are two alternatives.
+fn rows_at(ownership_local_env.env* e, ownership_api.place_path at) u64 {
+    u64 mut count = 0;
+    u64 mut i = 0;
+    while (i < e->state.contents_len) {
+        if (ownership_state.same_place(e->state.contents[i].place, at)) { count += 1; }
+        i += 1;
+    }
+    return count;
+}
+
+fn contents_at(ownership_local_env.env* e, ownership_api.place_path at)
+    ownership_api.contents_fact {
+    u64 index = ownership_transfer.contents_index(&e->state, at);
+    assert(index != ownership_transfer.U64_MAX);
+    return e->state.contents[index];
+}
+
+// A borrow copied into a field names the field and keeps its source. A use through the
+// field after the release of that source is an invalid use (field UAF, D17.14).
+fn leaf_borrows() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    ownership_api.projection[1] first = {field(0)};
+    ownership_api.projection[1] second = {field(1)};
+    ownership_api.place_path p = ownership_local_env.place(1);
+    ownership_api.place_path b0 = leaf(2, first[..]);
+    ownership_api.place_path b1 = leaf(2, second[..]);
+    succeeded(ownership_local_env.alloc(&e, 1, 10, 20, 1));
+    succeeded(copy_into(&e, p, b0));
+    succeeded(copy_into(&e, p, b1));
+    ownership_api.contents_fact held = contents_at(&e, b0);
+    assert(held.borrows.len == 1);
+    assert(held.borrows[0].source.ordinal == 20);
+    assert(ownership_state.same_place(held.borrows[0].containing, b0));
+    succeeded(use_leaf(&e, b0));
+    succeeded(inspect_leaf(&e, b1));
+    succeeded(ownership_local_env.release(&e, 1, true));
+    ownership_state.state mut before = ownership_state.clone(&e.state);
+    violated(use_leaf(&e, b0));
+    assert(e.counts.last_kind == ownership_api.event_kind.invalid_use);
+    assert(e.counts.last_relation.ordinal == 20);
+    violated(inspect_leaf(&e, b1));
+    assert(ownership_state.equal(&e.state, &before));
+    ownership_state.free(&before);
+    // Without the leaf proof a projected place is no proved slot.
+    ownership_transfer.request mut plain = leaf_req(&e, ownership_transfer.action.use, b0, b0);
+    plain.leaf_places_proved = false;
+    plain.temporal_use = true;
+    incomplete(apply(&e, &plain));
+    // A dereference, a variable index, a negative index or a residual path is no leaf.
+    ownership_api.projection[2] through = {field(0),
+        ownership_api.projection{.kind = ownership_api.projection_kind.dereference}};
+    incomplete(use_leaf(&e, leaf(2, through[..])));
+    ownership_api.projection[1] captured = {ownership_api.projection{
+        .kind = ownership_api.projection_kind.captured_index}};
+    incomplete(use_leaf(&e, leaf(2, captured[..])));
+    ownership_api.projection[1] negative = {element(-1)};
+    incomplete(use_leaf(&e, leaf(2, negative[..])));
+    ownership_api.place_path mut residual = b0;
+    residual.residual = true;
+    incomplete(use_leaf(&e, residual));
+    ownership_local_env.free(&e);
+}
+
+// Two fields of one slot are separate owners. A prefix overlaps the leaves below it.
+fn leaf_owners() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    ownership_api.projection[1] first = {field(0)};
+    ownership_api.projection[1] second = {field(1)};
+    ownership_api.place_path b0 = leaf(3, first[..]);
+    ownership_api.place_path b1 = leaf(3, second[..]);
+    succeeded(empty_leaf(&e, b0));
+    succeeded(empty_leaf(&e, b1));
+    succeeded(ownership_local_env.alloc(&e, 1, 11, 21, 1));
+    succeeded(move_into(&e, ownership_local_env.place(1), b0));
+    succeeded(ownership_local_env.alloc(&e, 2, 12, 22, 1));
+    // Field 0 owns, so field 1 is the separate empty destination.
+    succeeded(move_into(&e, ownership_local_env.place(2), b1));
+    assert(ownership_state.same_place(allocation(&e, 11).owner.place, b0));
+    assert(ownership_state.same_place(allocation(&e, 12).owner.place, b1));
+    // A store over a live leaf owner discards it; a store into the other leaf does not.
+    violated(empty_leaf(&e, b1));
+    assert(e.counts.last_kind == ownership_api.event_kind.lost_ownership);
+    succeeded(release_leaf(&e, b0));
+    assert(allocation(&e, 11).validity == ownership_api.validity_kind.released);
+    assert(allocation(&e, 12).validity == ownership_api.validity_kind.live);
+    succeeded(end_leaf(&e, b0));
+    violated(end_leaf(&e, b1));
+    assert(e.counts.last_kind == ownership_api.event_kind.lost_ownership);
+    // An unknown call cannot reach a leaf of a private slot, so the leaf keeps its owner.
+    succeeded(copy_into(&e, b1, ownership_local_env.place(4)));
+    succeeded(outside(&e));
+    assert(allocation(&e, 12).validity == ownership_api.validity_kind.live);
+    assert(source(&e, 22).validity == ownership_api.validity_kind.live);
+    succeeded(ownership_local_env.use(&e, 4));
+    succeeded(move_into(&e, b1, ownership_local_env.place(5)));
+    succeeded(end_leaf(&e, b1));
+    succeeded(ownership_local_env.release(&e, 5, true));
+    // A nested leaf owner overlaps its containing field: the end of the field is unproved.
+    ownership_api.projection[2] nested = {field(0), field(1)};
+    ownership_api.place_path inner = leaf(6, nested[..]);
+    succeeded(empty_leaf(&e, inner));
+    succeeded(ownership_local_env.alloc(&e, 7, 13, 23, 1));
+    succeeded(move_into(&e, ownership_local_env.place(7), inner));
+    incomplete(end_leaf(&e, leaf(6, first[..])));
+    // Constant elements are separate leaves too.
+    ownership_api.projection[1] zero = {element(0)};
+    ownership_api.projection[1] one = {element(1)};
+    succeeded(empty_leaf(&e, leaf(8, zero[..])));
+    succeeded(ownership_local_env.alloc(&e, 9, 14, 24, 1));
+    succeeded(move_into(&e, ownership_local_env.place(9), leaf(8, zero[..])));
+    succeeded(empty_leaf(&e, leaf(8, one[..])));
+    violated(empty_leaf(&e, leaf(8, zero[..])));
+    ownership_local_env.free(&e);
+}
+
+// Whole slots keep the old overlap answers: a slot owner is definite at its own slot, possible
+// under a leaf of its root, and absent at another root.
+fn whole_slots() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    succeeded(ownership_local_env.alloc(&e, 1, 15, 25, 1));
+    assert(ownership_transfer.owner_overlap(&e.state, ownership_local_env.place(1)) ==
+        ownership_transfer.overlap_kind.definite);
+    assert(ownership_transfer.owner_overlap(&e.state, ownership_local_env.place(2)) ==
+        ownership_transfer.overlap_kind.none);
+    ownership_api.projection[1] first = {field(0)};
+    assert(ownership_transfer.owner_overlap(&e.state, leaf(1, first[..])) ==
+        ownership_transfer.overlap_kind.possible);
+    assert(ownership_transfer.relate(ownership_local_env.place(1), leaf(1, first[..])) ==
+        ownership_transfer.region_relation.partial);
+    assert(ownership_transfer.relate(leaf(1, first[..]), leaf(1, first[..])) ==
+        ownership_transfer.region_relation.same);
+    // A dereference, a variable index or a residual projection names no exact region of its
+    // root, so it may overlap any path of that root, even a distinct field.
+    ownership_api.projection[2] through = {field(0),
+        ownership_api.projection{.kind = ownership_api.projection_kind.dereference}};
+    ownership_api.projection[1] second = {field(1)};
+    assert(ownership_transfer.relate(leaf(1, through[..]), leaf(1, second[..])) ==
+        ownership_transfer.region_relation.possible);
+    ownership_api.projection[1] captured = {ownership_api.projection{
+        .kind = ownership_api.projection_kind.captured_index}};
+    ownership_api.projection[1] constant = {element(1)};
+    assert(ownership_transfer.relate(leaf(1, captured[..]), leaf(1, constant[..])) ==
+        ownership_transfer.region_relation.possible);
+    ownership_api.projection[1] rest = {ownership_api.projection{
+        .kind = ownership_api.projection_kind.residual}};
+    assert(ownership_transfer.relate(leaf(1, rest[..]), leaf(1, second[..])) ==
+        ownership_transfer.region_relation.possible);
+    // Fields and elements of one root never compare as one region.
+    assert(ownership_transfer.relate(leaf(1, first[..]), leaf(1, constant[..])) ==
+        ownership_transfer.region_relation.possible);
+    // Different roots stay separate, whatever their paths.
+    assert(ownership_transfer.relate(leaf(1, first[..]), leaf(2, first[..])) ==
+        ownership_transfer.region_relation.disjoint);
+    assert(ownership_transfer.leaf_path(leaf(1, first[..])));
+    assert(!ownership_transfer.leaf_path(leaf(1, through[..])));
+    assert(!ownership_transfer.leaf_path(leaf(1, captured[..])));
+    // A residual owner may overlap anything.
+    u64 index = ownership_state.allocation_index(&e.state,
+        ownership_local_env.id(ownership_api.entity_kind.allocation, 15));
+    e.state.allocations[index].owner.place.residual = true;
+    assert(ownership_transfer.owner_overlap(&e.state, ownership_local_env.place(2)) ==
+        ownership_transfer.overlap_kind.possible);
+    ownership_local_env.free(&e);
+}
+
+// A stack source begins at entry or at `live`, survives unknown calls, and ends at `dead`.
+// A new instance needs no borrow of the old one (inline escape, D17.14).
+fn stack_sources() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    succeeded(stack(&e, ownership_transfer.action.stack_begin, 7, 70));
+    assert(source(&e, 70).kind == ownership_api.source_kind.stack);
+    assert(source(&e, 70).validity == ownership_api.validity_kind.live);
+    ownership_state.state mut once = ownership_state.clone(&e.state);
+    succeeded(stack(&e, ownership_transfer.action.stack_begin, 7, 70));
+    assert(ownership_state.equal(&e.state, &once));
+    ownership_state.free(&once);
+    succeeded(ownership_local_env.address(&e, 7, 8, 70, true));
+    succeeded(outside(&e));
+    assert(source(&e, 70).validity == ownership_api.validity_kind.live);
+    succeeded(ownership_local_env.use(&e, 8));
+    succeeded(stack(&e, ownership_transfer.action.stack_end, 7, 70));
+    assert(source(&e, 70).validity == ownership_api.validity_kind.ended);
+    ownership_state.state mut ended = ownership_state.clone(&e.state);
+    succeeded(stack(&e, ownership_transfer.action.stack_end, 7, 70));
+    assert(ownership_state.equal(&e.state, &ended));
+    ownership_state.free(&ended);
+    violated(ownership_local_env.use(&e, 8));
+    assert(e.counts.last_kind == ownership_api.event_kind.invalid_use);
+    // The old borrow still names the ended instance. Without a retired source the new
+    // instance cannot begin.
+    incomplete(stack(&e, ownership_transfer.action.stack_begin, 7, 70));
+    assert(e.counts.last_reason == ownership_api.incomplete_reason.missing_path);
+    assert(source(&e, 70).validity == ownership_api.validity_kind.ended);
+    // With one, the old borrow moves to it and stays invalid; the new instance is live.
+    succeeded(retiring_begin(&e, 7, 70, 71));
+    assert(source(&e, 70).validity == ownership_api.validity_kind.live);
+    assert(source(&e, 71).validity == ownership_api.validity_kind.ended);
+    violated(ownership_local_env.use(&e, 8));
+    assert(e.counts.last_relation.ordinal == 71);
+    // A second retirement reuses the retired source.
+    succeeded(ownership_local_env.address(&e, 7, 9, 70, true));
+    succeeded(stack(&e, ownership_transfer.action.stack_end, 7, 70));
+    succeeded(retiring_begin(&e, 7, 70, 71));
+    violated(ownership_local_env.use(&e, 9));
+    assert(e.counts.last_relation.ordinal == 71);
+    // A retired key that names the source itself, or a live source, is no retirement.
+    succeeded(ownership_local_env.address(&e, 7, 10, 70, true));
+    succeeded(stack(&e, ownership_transfer.action.stack_end, 7, 70));
+    incomplete(retiring_begin(&e, 7, 70, 70));
+    ownership_local_env.add_stack(&e, 72);
+    incomplete(retiring_begin(&e, 7, 70, 72));
+    // Without a borrow of the ended instance the new one begins without a retirement.
+    succeeded(ownership_local_env.assign_empty(&e, 10));
+    succeeded(stack(&e, ownership_transfer.action.stack_begin, 7, 70));
+    assert(source(&e, 70).validity == ownership_api.validity_kind.live);
+    // A join of a live and an ended instance has unknown validity. Its end ends it, and a new
+    // instance begins from it when no borrow of the old one remains.
+    u64 index = ownership_state.source_index(&e.state,
+        ownership_local_env.id(ownership_api.entity_kind.source, 70));
+    e.state.sources[index].validity = ownership_api.validity_kind.unknown;
+    succeeded(stack(&e, ownership_transfer.action.stack_end, 7, 70));
+    assert(source(&e, 70).validity == ownership_api.validity_kind.ended);
+    e.state.sources[index].validity = ownership_api.validity_kind.unknown;
+    succeeded(stack(&e, ownership_transfer.action.stack_begin, 7, 70));
+    assert(source(&e, 70).validity == ownership_api.validity_kind.live);
+    succeeded(ownership_local_env.address(&e, 7, 8, 70, true));
+    e.state.sources[index].validity = ownership_api.validity_kind.unknown;
+    incomplete(stack(&e, ownership_transfer.action.stack_begin, 7, 70));
+    assert(source(&e, 70).validity == ownership_api.validity_kind.unknown);
+    succeeded(ownership_local_env.assign_empty(&e, 8));
+    // Released and heap sources, and absent keys, give no stack proof.
+    e.state.sources[index].validity = ownership_api.validity_kind.released;
+    incomplete(stack(&e, ownership_transfer.action.stack_end, 7, 70));
+    incomplete(stack(&e, ownership_transfer.action.stack_begin, 7, 70));
+    succeeded(ownership_local_env.alloc(&e, 1, 16, 26, 1));
+    incomplete(stack(&e, ownership_transfer.action.stack_end, 1, 26));
+    incomplete(stack(&e, ownership_transfer.action.stack_begin, 1, 26));
+    incomplete(stack(&e, ownership_transfer.action.stack_end, 9, 99));
+    ownership_transfer.request mut keyless = ownership_local_env.req(&e,
+        ownership_transfer.action.stack_begin, 9, 9);
+    incomplete(apply(&e, &keyless));
+    ownership_local_env.free(&e);
+}
+
+fn weak(ownership_local_env.env mut* e, u32 root, ownership_api.place_path@ elements,
+    ownership_api.place_path from, bool owns, bool moves) ownership_transfer.request {
+    ownership_transfer.request mut r = leaf_req(e, ownership_transfer.action.weak_store, from,
+        ownership_local_env.place(root));
+    r.weak_places = elements;
+    r.weak_guard = ownership_local_env.id(ownership_api.entity_kind.guard, root);
+    r.destination_owns = owns;
+    r.weak_moves = moves;
+    return r;
+}
+
+// A store through a variable index keeps the old contents of each element of the actual
+// array and adds the new value as an alternative (D17.15).
+fn weak_stores() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    ownership_api.projection[1] zero = {element(0)};
+    ownership_api.projection[1] one = {element(1)};
+    ownership_api.place_path[2] elements = {leaf(9, zero[..]), leaf(9, one[..])};
+    succeeded(ownership_local_env.alloc(&e, 1, 17, 27, 1));
+    succeeded(copy_into(&e, ownership_local_env.place(1), elements[0]));
+    succeeded(empty_leaf(&e, elements[1]));
+    succeeded(ownership_local_env.alloc(&e, 2, 18, 28, 1));
+    ownership_transfer.request mut r = weak(&e, 9, elements[..], ownership_local_env.place(2),
+        false, false);
+    succeeded(apply(&e, &r));
+    assert(rows_at(&e, elements[0]) == 2);
+    assert(rows_at(&e, elements[1]) == 2);
+    // The same value again adds no alternative, so a loop that repeats the store converges.
+    ownership_transfer.request mut again = weak(&e, 9, elements[..],
+        ownership_local_env.place(2), false, false);
+    succeeded(apply(&e, &again));
+    assert(rows_at(&e, elements[0]) == 2);
+    assert(rows_at(&e, elements[1]) == 2);
+    // The unselected old borrow of element 0 stays: a use cannot pick one alternative.
+    incomplete(use_leaf(&e, elements[0]));
+    succeeded(ownership_local_env.release(&e, 1, true));
+    incomplete(use_leaf(&e, elements[0]));
+    // A strong store replaces both alternatives.
+    succeeded(empty_leaf(&e, elements[0]));
+    assert(rows_at(&e, elements[0]) == 1);
+    // The stored value is read first: a dangling value is an invalid use on every path.
+    succeeded(ownership_local_env.alloc(&e, 3, 19, 29, 1));
+    succeeded(ownership_local_env.copy(&e, 3, 4, false));
+    succeeded(ownership_local_env.release(&e, 3, true));
+    ownership_transfer.request mut dangling = weak(&e, 9, elements[..],
+        ownership_local_env.place(4), false, false);
+    violated(apply(&e, &dangling));
+    // A missing guard, a foreign root, a whole slot, or an element without facts is no proof.
+    ownership_transfer.request mut unguarded = weak(&e, 9, elements[..],
+        ownership_local_env.place(2), false, false);
+    unguarded.weak_guard = ownership_api.entity_id{};
+    incomplete(apply(&e, &unguarded));
+    ownership_api.place_path[1] other = {leaf(10, zero[..])};
+    ownership_transfer.request mut foreign = weak(&e, 9, other[..],
+        ownership_local_env.place(2), false, false);
+    incomplete(apply(&e, &foreign));
+    ownership_api.place_path[1] whole = {ownership_local_env.place(9)};
+    ownership_transfer.request mut slot = weak(&e, 9, whole[..], ownership_local_env.place(2),
+        false, false);
+    incomplete(apply(&e, &slot));
+    ownership_api.projection[1] two = {element(2)};
+    ownership_api.place_path[1] fresh = {leaf(9, two[..])};
+    ownership_transfer.request mut unknown = weak(&e, 9, fresh[..], ownership_local_env.place(2),
+        false, false);
+    incomplete(apply(&e, &unknown));
+    ownership_transfer.request mut empty = weak(&e, 9, elements[0..0],
+        ownership_local_env.place(2), false, false);
+    incomplete(apply(&e, &empty));
+    // An opaque value is an unknown alternative.
+    ownership_transfer.request mut opaque = weak(&e, 9, elements[..],
+        ownership_local_env.place(2), false, false);
+    opaque.opaque_value = true;
+    succeeded(apply(&e, &opaque));
+    assert(rows_at(&e, elements[0]) == 2);
+    ownership_transfer.request mut unknown_again = weak(&e, 9, elements[..],
+        ownership_local_env.place(2), false, false);
+    unknown_again.opaque_value = true;
+    succeeded(apply(&e, &unknown_again));
+    assert(rows_at(&e, elements[0]) == 2);
+    ownership_local_env.free(&e);
+}
+
+// An owning element array: each element must be empty, and the moved obligation rests at the
+// array root, which no element step discharges and no other slot overlaps.
+fn weak_owners() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    ownership_api.projection[1] zero = {element(0)};
+    ownership_api.projection[1] one = {element(1)};
+    ownership_api.place_path[2] elements = {leaf(11, zero[..]), leaf(11, one[..])};
+    succeeded(empty_leaf(&e, elements[0]));
+    succeeded(empty_leaf(&e, elements[1]));
+    succeeded(ownership_local_env.alloc(&e, 1, 30, 40, 1));
+    ownership_transfer.request mut r = weak(&e, 11, elements[..], ownership_local_env.place(1),
+        true, true);
+    succeeded(apply(&e, &r));
+    ownership_api.allocation_fact moved = allocation(&e, 30);
+    assert(moved.obligation && !moved.owner.place.residual);
+    assert(moved.owner.place.root.ordinal == 11 && moved.owner.place.projections.len == 0);
+    assert(ownership_transfer.empty_owner_proved(contents_at(&e, ownership_local_env.place(1))));
+    // No element end can discharge the residual obligation.
+    incomplete(end_leaf(&e, elements[0]));
+    incomplete(end_leaf(&e, elements[1]));
+    assert(allocation(&e, 30).obligation);
+    // A copy of a live owner into owning elements makes a second owner on every path.
+    succeeded(ownership_local_env.alloc(&e, 2, 31, 41, 1));
+    succeeded(empty_leaf(&e, leaf(12, zero[..])));
+    succeeded(empty_leaf(&e, leaf(12, one[..])));
+    ownership_api.place_path[2] spare = {leaf(12, zero[..]), leaf(12, one[..])};
+    ownership_transfer.request mut copied = weak(&e, 12, spare[..], ownership_local_env.place(2),
+        true, false);
+    violated(apply(&e, &copied));
+    assert(e.counts.last_kind == ownership_api.event_kind.lost_ownership);
+    // A live owner in one element: the store can lose it, but no element is proved selected.
+    succeeded(move_into(&e, ownership_local_env.place(2), spare[0]));
+    succeeded(ownership_local_env.alloc(&e, 3, 32, 42, 1));
+    ownership_state.state mut before = ownership_state.clone(&e.state);
+    ownership_transfer.request mut over = weak(&e, 12, spare[..], ownership_local_env.place(3),
+        true, true);
+    incomplete(apply(&e, &over));
+    assert(ownership_state.equal(&e.state, &before));
+    ownership_state.free(&before);
+    // The unselected owner keeps its exact place and its obligation.
+    assert(ownership_state.same_place(allocation(&e, 31).owner.place, spare[0]));
+    succeeded(release_leaf(&e, spare[0]));
+    succeeded(ownership_local_env.release(&e, 3, true));
+    // An owning element with unknown contents and no owner fact can still hold an owner, so
+    // the store cannot prove that it discards none.
+    ownership_api.place_path[2] unknown = {leaf(13, zero[..]), leaf(13, one[..])};
+    succeeded(empty_leaf(&e, unknown[1]));
+    ownership_transfer.request mut opaque = leaf_req(&e, ownership_transfer.action.assignment,
+        unknown[0], unknown[0]);
+    opaque.opaque_value = true;
+    succeeded(apply(&e, &opaque));
+    succeeded(ownership_local_env.alloc(&e, 4, 33, 43, 1));
+    ownership_transfer.request mut into = weak(&e, 13, unknown[..], ownership_local_env.place(4),
+        true, true);
+    incomplete(apply(&e, &into));
+    assert(ownership_state.same_place(allocation(&e, 33).owner.place,
+        ownership_local_env.place(4)));
+    succeeded(ownership_local_env.release(&e, 4, true));
+    ownership_local_env.free(&e);
+}
+
+// The expected relation of two leaf paths of one root: `same` for equal paths, `partial`
+// when one is a proper prefix of the other, `disjoint` at the first distinct field or
+// constant index, and `possible` at the first field against an element.
+fn expected(ownership_api.projection@ a, ownership_api.projection@ b)
+    ownership_transfer.region_relation {
+    u64 mut i = 0;
+    while (i < a.len && i < b.len) {
+        if (a[i].kind != b[i].kind) { return ownership_transfer.region_relation.possible; }
+        bool other = a[i].kind == ownership_api.projection_kind.field ?
+            a[i].field != b[i].field : a[i].index.value != b[i].index.value;
+        if (other) { return ownership_transfer.region_relation.disjoint; }
+        i += 1;
+    }
+    if (a.len == b.len) { return ownership_transfer.region_relation.same; }
+    return ownership_transfer.region_relation.partial;
+}
+
+// Every pair of 11 leaf paths of one root, from the root itself to depth 16: the relation
+// is the expected one and the same in both orders. The two-part paths cover each first
+// projection against each second one.
+fn relations() void {
+    ownership_api.projection[16] mut deep = {};
+    u64 mut k = 0;
+    while (k < 16) { deep[k] = field(0); k += 1; }
+    ownership_api.projection[16] mut deeper = deep;
+    deeper[15] = field(1);
+    ownership_api.projection[2] f0f0 = {field(0), field(0)};
+    ownership_api.projection[2] f0f1 = {field(0), field(1)};
+    ownership_api.projection[2] f0e0 = {field(0), element(0)};
+    ownership_api.projection[2] e0f0 = {element(0), field(0)};
+    ownership_api.projection[2] e1f0 = {element(1), field(0)};
+    ownership_api.projection[1] f0 = {field(0)};
+    ownership_api.projection[1] f1 = {field(1)};
+    ownership_api.projection[1] e0 = {element(0)};
+    ownership_api.projection@[11] paths = {deep[0..0], f0[..], f1[..], e0[..], f0f0[..],
+        f0f1[..], f0e0[..], e0f0[..], e1f0[..], deep[..], deeper[..]};
+    u64 mut checked = 0;
+    u64 mut i = 0;
+    while (i < paths.len) {
+        u64 mut j = 0;
+        while (j < paths.len) {
+            ownership_transfer.region_relation got = ownership_transfer.relate(
+                leaf(1, paths[i]), leaf(1, paths[j]));
+            assert(got == expected(paths[i], paths[j]));
+            assert(got == ownership_transfer.relate(leaf(1, paths[j]), leaf(1, paths[i])));
+            assert((got == ownership_transfer.region_relation.same) == (i == j));
+            checked += 1;
+            j += 1;
+        }
+        i += 1;
+    }
+    assert(checked == 121);
+    // The boundaries by name: the deepest leaves differ only in their last field, and the
+    // root contains every leaf.
+    assert(ownership_transfer.relate(leaf(1, deep[..]), leaf(1, deeper[..])) ==
+        ownership_transfer.region_relation.disjoint);
+    assert(ownership_transfer.relate(leaf(1, deep[0..0]), leaf(1, deeper[..])) ==
+        ownership_transfer.region_relation.partial);
+    assert(ownership_transfer.relate(leaf(1, f0[..]), leaf(1, f0e0[..])) ==
+        ownership_transfer.region_relation.partial);
+    assert(ownership_transfer.relate(leaf(1, e0f0[..]), leaf(1, e1f0[..])) ==
+        ownership_transfer.region_relation.disjoint);
+    // A residual place may overlap any place, even one of another root.
+    ownership_api.place_path mut rest = leaf(1, f0[..]);
+    rest.residual = true;
+    assert(ownership_transfer.relate(rest, leaf(2, f1[..])) ==
+        ownership_transfer.region_relation.possible);
+    assert(ownership_transfer.relate(leaf(2, f1[..]), rest) ==
+        ownership_transfer.region_relation.possible);
+}
+
+fn main() i32 {
+    leaf_borrows();
+    println("leaf borrows ok");
+    leaf_owners();
+    println("leaf owners ok");
+    whole_slots();
+    println("whole slots ok");
+    stack_sources();
+    println("stack sources ok");
+    weak_stores();
+    println("weak stores ok");
+    weak_owners();
+    println("weak owners ok");
+    relations();
+    println("relations ok");
+    return 0;
+}
