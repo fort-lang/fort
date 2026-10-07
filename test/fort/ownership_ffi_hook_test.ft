@@ -1,0 +1,510 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| accept F01-A
+//| accept F01-B
+//| accept F01-C
+//| accept ex19_call_only
+//| accept ex19_unknown_extern
+//| accept ex19_known_alias
+//| accept F05-A
+//| reject F05-E
+//| reject F05-I
+//| accept F05-J
+//| accept F05-L
+//| accept nine choice facts
+//| accept F09-A
+//| accept F09-B
+//| accept F10-A
+//| accept F10-B
+//| accept P24
+//| accept P25
+//| accept scalar result
+//| accept guarded borrowed choices
+//| accept borrowed null choice
+//| accept guarded scalar choices
+/// Tests foreign results, kept caller facts, and call outcomes at the signature hook.
+import ownership_api;
+import ownership_ffi;
+import ownership_ffi_hook_env as env;
+import ownership_state;
+import ownership_transfer;
+import std.str;
+
+ownership_api.entity_id NO_GUARD = {};
+
+fn borrowed_view() void {
+    env.env mut e = {};
+    env.open(&e, 1, "foreign_view");
+    defer env.close(&e);
+    env.add_empty(&e, env.slot(9), 90);
+    env.choose(&e, 0, env.slot(9), NO_GUARD, false);
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted(&e, out);
+    assert(out.trusted_sources.len == 1 && out.signature_transfers.len == 0);
+    assert(out.trusted_sources[0].key.ordinal == 12);
+    assert(out.trusted_sources[0].kind == ownership_api.source_kind.trusted_foreign);
+    assert(out.trusted_sources[0].allocation.kind == ownership_api.entity_kind.none);
+    assert(out.outcomes[0].possible_caller_return);
+    ownership_state.state* s = env.after(&e, 0);
+    env.foreign_result(s, env.slot(9), false);
+    assert(s->sources_len == 1 && s->allocations_len == 0 && s->contents_len == 1);
+    println("accept F01-A");
+}
+fn borrowed_argument() void {
+    env.env mut e = {};
+    env.open(&e, 2, "foreign_touch");
+    defer env.close(&e);
+    env.heap_owner(&e);
+    env.operand(&e, 0, 1, env.parameter(&e, 0));
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted(&e, out);
+    assert(out.trusted_sources.len == 0 && out.signature_transfers.len == 0);
+    ownership_state.state* s = env.after(&e, 0);
+    // A borrowed argument and a void result change no fact.
+    assert(ownership_state.equal(s, &e.input));
+    env.obligated(s, 1, env.slot(1));
+    assert(env.source(s, 1).kind == ownership_api.source_kind.heap);
+    assert(env.contents(s, env.slot(1)).span_length.value == 4);
+    env.views(s, env.slot(8), 1);
+    println("accept F01-B");
+}
+// Example 19 known alias: two fort owners lend views to copy_bytes.
+fn known_alias(env.env mut* e, u32 number) void {
+    env.open(e, number, "copy_bytes");
+    env.add_source(e, 1, ownership_api.source_kind.heap, true);
+    env.add_source(e, 2, ownership_api.source_kind.heap, true);
+    env.add_owner(e, 1, env.slot(1), env.exact(1));
+    env.add_owner(e, 2, env.slot(2), env.exact(1));
+    env.add_view(e, env.slot(1), 1, 11, env.exact(1));
+    env.add_view(e, env.slot(2), 2, 21, env.exact(1));
+    env.add_empty(e, env.slot(9), 90);
+    env.add_scalar(e, env.slot(10), 100);
+    env.operand(e, 0, 0, env.parameter(e, 0));
+    env.operand(e, 1, 1, env.parameter(e, 1));
+    env.operand(e, 2, 3, env.parameter(e, 2));
+    env.choose(e, 0, env.slot(9), NO_GUARD, false);
+    env.finish(e);
+}
+fn copied_result() void {
+    env.env mut e = {};
+    known_alias(&e, 3);
+    defer env.close(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted(&e, out);
+    assert(out.trusted_sources.len == 1 && out.signature_transfers.len == 0);
+    ownership_state.state* s = env.after(&e, 0);
+    // The result trusts C. It has no relation to A1 or A2.
+    env.foreign_result(s, env.slot(9), false);
+    env.obligated(s, 1, env.slot(1));
+    env.obligated(s, 2, env.slot(2));
+    assert(s->sources_len == 3 && s->allocations_len == 2);
+    println("accept F01-C");
+}
+fn call_only() void {
+    env.env mut e = {};
+    env.open(&e, 4, "foreign_view");
+    defer env.close(&e);
+    env.heap_owner(&e);
+    env.finish(&e);
+    // A discarded borrowed result needs no destination and keeps every fact.
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted(&e, out);
+    assert(out.trusted_sources.len == 0 && out.signature_transfers.len == 0);
+    assert(ownership_state.equal(env.after(&e, 0), &e.input));
+    println("accept ex19_call_only");
+}
+fn unknown_extern() void {
+    env.env mut e = {};
+    env.open(&e, 5, "foreign_view");
+    defer env.close(&e);
+    env.add_empty(&e, env.slot(9), 90);
+    env.choose(&e, 0, env.slot(9), NO_GUARD, false);
+    env.finish(&e);
+    env.accepted(&e, env.call(&e));
+    // `return *p;` reads the trusted result without a static extent.
+    ownership_state.state mut* s = env.successor(&e);
+    ownership_state.state mut before = ownership_state.clone(s);
+    defer ownership_state.free(&before);
+    ownership_api.proof_status read = env.act(&e, s, ownership_transfer.action.use, 1,
+        env.slot(9), env.slot(9));
+    assert(ownership_api.successful(read) && e.b.events_seen == 0);
+    assert(ownership_state.equal(&before, s));
+    println("accept ex19_unknown_extern");
+}
+fn known_alias_program() void {
+    env.env mut e = {};
+    known_alias(&e, 6);
+    defer env.close(&e);
+    env.accepted(&e, env.call(&e));
+    ownership_state.state mut* s = env.successor(&e);
+    // `u8 value = *result; del(src); del(dst);`
+    assert(ownership_api.successful(env.act(&e, s, ownership_transfer.action.use, 1,
+        env.slot(9), env.slot(9))));
+    assert(ownership_api.successful(env.act(&e, s, ownership_transfer.action.release, 2,
+        env.slot(2), env.slot(2))));
+    assert(ownership_api.successful(env.act(&e, s, ownership_transfer.action.release, 3,
+        env.slot(1), env.slot(1))));
+    env.released(s, 1);
+    env.released(s, 2);
+    env.empty_at(s, env.slot(1));
+    env.empty_at(s, env.slot(2));
+    // No source relation ties the result to A1, so the release cannot invalidate it.
+    assert(env.source(s, 12).validity == ownership_api.validity_kind.live);
+    assert(e.b.events_seen == 0);
+    println("accept ex19_known_alias");
+}
+fn make(env.env mut* e, u32 number) void {
+    env.open(e, number, "foreign_make");
+    env.add_empty(e, env.slot(9), 90);
+    env.add_scalar(e, env.slot(10), 100);
+    env.operand(e, 0, 1, env.parameter(e, 0));
+    env.bind(e, env.slot(9), env.result_type(e));
+}
+fn owning_result() void {
+    env.env mut e = {};
+    make(&e, 7);
+    defer env.close(&e);
+    env.choose(&e, 0, env.slot(9), NO_GUARD, false);
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted(&e, out);
+    assert(out.trusted_sources.len == 1 && out.signature_transfers.len == 0);
+    assert(out.trusted_sources[0].allocation.ordinal == 12);
+    ownership_state.state* s = env.after(&e, 0);
+    // The scalar argument creates no extent. The owner keeps an unknown length.
+    env.foreign_result(s, env.slot(9), true);
+    assert(env.contents(s, env.slot(10)).kind == ownership_api.contents_kind.scalar);
+    assert(s->sources_len == 1 && s->allocations_len == 1);
+    println("accept F05-A");
+}
+fn live_destination() void {
+    env.env mut e = {};
+    env.open(&e, 8, "foreign_make");
+    defer env.close(&e);
+    env.heap_owner(&e);
+    env.add_scalar(&e, env.slot(10), 100);
+    env.operand(&e, 0, 3, env.parameter(&e, 0));
+    env.bind(&e, env.slot(1), env.result_type(&e));
+    env.choose(&e, 0, env.slot(1), NO_GUARD, false);
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.rejected(&e, out, ownership_api.event_kind.lost_ownership,
+        "The result destination contains a live owner.");
+    env.definite(&e, out);
+    assert(e.b.observed.relation.ordinal == 1);
+    println("reject F05-E");
+}
+fn zero_length_owner() void {
+    env.env mut e = {};
+    make(&e, 9);
+    defer env.close(&e);
+    env.choose(&e, 0, env.slot(9), NO_GUARD, false);
+    env.finish(&e);
+    env.accepted(&e, env.call(&e));
+    ownership_state.state mut* s = env.successor(&e);
+    u64 owner = ownership_state.allocation_index(s, env.id(ownership_api.entity_kind.allocation,
+        12));
+    s->allocations[owner].logical_length = env.exact(0);
+    u64 held = ownership_transfer.contents_index(s, env.slot(9));
+    s->contents[held].span_length = env.exact(0);
+    ownership_state.state mut before = ownership_state.clone(s);
+    defer ownership_state.free(&before);
+    // A known zero length does not make the owner empty.
+    ownership_api.proof_status proof = env.act(&e, s, ownership_transfer.action.dead, 1,
+        env.slot(9), env.slot(9));
+    assert(!ownership_api.successful(proof) && proof.failed);
+    assert(e.b.events_seen == 1 && e.b.observed.kind == ownership_api.event_kind.lost_ownership);
+    assert(str.equal(e.b.observed.text, "storage ends with a live owner"));
+    assert(ownership_state.equal(&before, s));
+    println("reject F05-I");
+}
+// `p = foreign_make(0)` with an explicit null partition: each alternative holds its own fact.
+fn empty_result() void {
+    env.env mut e = {};
+    make(&e, 10);
+    defer env.close(&e);
+    env.choose(&e, 0, env.slot(9), env.guard_key(7), false);
+    env.fact(&e, 0, 0, 7, false);
+    env.choose(&e, 1, env.slot(9), env.guard_key(8), true);
+    env.fact(&e, 1, 0, 8, true);
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted(&e, out);
+    ownership_ffi.successor* core = e.store.retained->core;
+    assert(core->len == 2 && core->guards[0].ordinal == 7 && core->guards[1].ordinal == 8);
+    env.foreign_result(&core->states[0], env.slot(9), true);
+    env.local_facts(&core->states[0], 7, 7, true);
+    assert(core->states[0].predicates[0].lower.value == 1);
+    ownership_state.state mut* s = &e.store.retained->core->states[1];
+    env.empty_at(s, env.slot(9));
+    assert(env.contents(s, env.slot(9)).value_version.ordinal == 120);
+    assert(s->sources_len == 0 && s->allocations_len == 0);
+    env.local_facts(s, 8, 8, true);
+    assert(s->predicates[0].lower.value == 0);
+    // `del(p)` on the proved empty result releases nothing.
+    assert(ownership_api.successful(env.act(&e, s, ownership_transfer.action.release, 1,
+        env.slot(9), env.slot(9))));
+    assert(s->allocations_len == 0 && e.b.events_seen == 0);
+    println("accept F05-J");
+}
+// The nonempty alternative gets no non-null fact that the producer did not give.
+// The null fact of the empty alternative does not reach the nonempty one.
+fn nullable_result() void {
+    env.env mut e = {};
+    make(&e, 11);
+    defer env.close(&e);
+    env.choose(&e, 0, env.slot(9), env.guard_key(7), false);
+    env.choose(&e, 1, env.slot(9), env.guard_key(8), true);
+    env.fact(&e, 1, 0, 8, true);
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted(&e, out);
+    assert(out.trusted_sources.len == 1);
+    ownership_ffi.successor* core = e.store.retained->core;
+    assert(core->len == 2 && core->guards[0].ordinal == 7 && core->guards[1].ordinal == 8);
+    // One fresh obligation on the nonempty alternative.
+    env.foreign_result(&core->states[0], env.slot(9), true);
+    env.local_facts(&core->states[0], 7, 0, false);
+    env.empty_at(&core->states[1], env.slot(9));
+    assert(core->states[1].sources_len == 0 && core->states[1].allocations_len == 0);
+    env.local_facts(&core->states[1], 8, 8, true);
+    // The caller state keeps no guard and no fact of either choice.
+    assert(e.input.guards_len == 0 && e.input.predicates_len == 0);
+    println("accept F05-L");
+}
+// More facts than the fixed array holds stay in the choice's own state.
+fn many_facts() void {
+    env.env mut e = {};
+    make(&e, 20);
+    defer env.close(&e);
+    ownership_api.predicate_atom[9] mut facts = {};
+    facts[0] = env.nullness(80, e.request.fresh_version, false);
+    u64 mut i = 1;
+    while (i < facts.len) {
+        facts[i].key = env.id(ownership_api.entity_kind.predicate, 80 + cast(i, u32));
+        facts[i].kind = ownership_api.predicate_kind.equality;
+        facts[i].left = env.id(ownership_api.entity_kind.value, 300 + cast(i, u32));
+        facts[i].right = env.id(ownership_api.entity_kind.value, 400 + cast(i, u32));
+        i += 1;
+    }
+    env.choose(&e, 0, env.slot(9), env.guard_key(7), false);
+    e.choices[0].facts = facts[..];
+    env.choose(&e, 1, env.slot(9), env.guard_key(8), true);
+    env.fact(&e, 1, 0, 8, true);
+    env.finish(&e);
+    env.accepted(&e, env.call(&e));
+    ownership_state.state* s = &e.store.retained->core->states[0];
+    assert(s->predicates_len == 9 && s->guards_len == 1);
+    assert(s->guards[0].key.ordinal == 7 && s->guards[0].positive.len == 9);
+    assert(s->guards[0].positive[8].ordinal == 88);
+    env.local_facts(&e.store.retained->core->states[1], 8, 8, true);
+    println("accept nine choice facts");
+}
+fn hidden(env.env mut* e, u32 number, bool foreign) void {
+    env.open(e, number, "foreign_touch");
+    if (foreign) { env.foreign_owner(e); } else { env.heap_owner(e); }
+    env.operand(e, 0, 1, env.parameter(e, 0));
+    env.finish(e);
+    ownership_api.ffi_result out = env.call(e);
+    env.accepted(e, out);
+    assert(out.hidden_effects_outside_proof && out.signature_transfers.len == 0);
+    assert(ownership_state.equal(env.after(e, 0), &e->input));
+}
+fn hidden_retention() void {
+    env.env mut e = {};
+    hidden(&e, 12, false);
+    defer env.close(&e);
+    env.obligated(env.after(&e, 0), 1, env.slot(1));
+    println("accept F09-A");
+}
+fn cleanup_after_retention() void {
+    env.env mut e = {};
+    hidden(&e, 13, false);
+    defer env.close(&e);
+    ownership_state.state mut* s = env.successor(&e);
+    // No invented retained edge blocks the release after the last known use.
+    assert(ownership_api.successful(env.act(&e, s, ownership_transfer.action.release, 1,
+        env.slot(1), env.slot(1))));
+    env.released(s, 1);
+    ownership_api.proof_status late = env.act(&e, s, ownership_transfer.action.use, 2,
+        env.slot(8), env.slot(8));
+    assert(!ownership_api.successful(late) && e.b.observed.kind ==
+        ownership_api.event_kind.invalid_use);
+    println("accept F09-B");
+}
+fn hidden_release() void {
+    env.env mut e = {};
+    hidden(&e, 14, false);
+    defer env.close(&e);
+    ownership_state.state* s = env.after(&e, 0);
+    env.obligated(s, 1, env.slot(1));
+    assert(env.allocation(s, 1).history.len == 0);
+    assert(env.source(s, 1).validity == ownership_api.validity_kind.live);
+    println("accept F10-A");
+}
+fn unobserved_release() void {
+    env.env mut e = {};
+    hidden(&e, 15, true);
+    defer env.close(&e);
+    ownership_state.state mut* s = env.successor(&e);
+    env.obligated(s, 9, env.slot(9));
+    assert(ownership_api.successful(env.act(&e, s, ownership_transfer.action.use, 1,
+        env.slot(8), env.slot(8))));
+    assert(env.source(s, 9).validity == ownership_api.validity_kind.live);
+    println("accept F10-B");
+}
+fn caller_return() void {
+    env.env mut e = {};
+    hidden(&e, 16, false);
+    defer env.close(&e);
+    ownership_api.ffi_result view = ownership_ffi.public_view(e.store.retained);
+    ownership_api.outcome_fact outcome = view.outcomes[0];
+    assert(outcome.possible_caller_return && outcome.cleanup_required && !outcome.cleanup_proved);
+    assert(outcome.effects.len == 0);
+    env.obligated(env.after(&e, 0), 1, env.slot(1));
+    println("accept P24");
+}
+fn noreturn_call() void {
+    env.env mut e = {};
+    env.open(&e, 17, "foreign_stop");
+    defer env.close(&e);
+    env.heap_owner(&e);
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted(&e, out);
+    // Noreturn removes the caller return only. It proves no abort or final cleanup.
+    ownership_api.outcome_fact outcome = out.outcomes[0];
+    assert(!outcome.possible_caller_return);
+    assert(outcome.kind == ownership_api.outcome_kind.unresolved_foreign);
+    assert(outcome.cleanup_required && !outcome.cleanup_proved);
+    env.obligated(env.after(&e, 0), 1, env.slot(1));
+    println("accept P25");
+}
+fn scalar_result() void {
+    env.env mut e = {};
+    env.open(&e, 18, "foreign_bits");
+    defer env.close(&e);
+    env.heap_owner(&e);
+    env.add_scalar(&e, env.slot(10), 100);
+    env.choose(&e, 0, env.slot(10), NO_GUARD, false);
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted(&e, out);
+    // An integer result is a scalar value. It names no source and no trust.
+    assert(out.trusted_sources.len == 0 && out.signature_transfers.len == 0);
+    ownership_state.state* s = env.after(&e, 0);
+    ownership_api.contents_fact value = env.contents(s, env.slot(10));
+    assert(value.kind == ownership_api.contents_kind.scalar && value.borrows.len == 0);
+    assert(value.value_version.ordinal == 120);
+    assert(s->sources_len == 1 && s->allocations_len == 1);
+    env.obligated(s, 1, env.slot(1));
+    println("accept scalar result");
+}
+fn guarded_views() void {
+    env.env mut e = {};
+    env.open(&e, 19, "foreign_view");
+    defer env.close(&e);
+    env.heap_owner(&e);
+    env.add_empty(&e, env.slot(9), 90);
+    env.choose(&e, 0, env.slot(9), env.guard_key(7), false);
+    env.choose(&e, 1, env.slot(2), env.guard_key(8), false);
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted(&e, out);
+    // Each guarded alternative receives the fresh trusted source at its own destination.
+    assert(out.trusted_sources.len == 1);
+    ownership_ffi.successor* core = e.store.retained->core;
+    assert(core->len == 2 && core->guards[0].ordinal == 7 && core->guards[1].ordinal == 8);
+    env.foreign_result(&core->states[0], env.slot(9), false);
+    env.foreign_result(&core->states[1], env.slot(2), false);
+    assert(env.contents(&core->states[0], env.slot(2)).owner_empty);
+    assert(env.contents(&core->states[1], env.slot(9)).owner_empty);
+    env.obligated(&core->states[0], 1, env.slot(1));
+    env.obligated(&core->states[1], 1, env.slot(1));
+    // Each alternative holds its own guard and no guard of the other choice.
+    env.local_facts(&core->states[0], 7, 0, false);
+    env.local_facts(&core->states[1], 8, 0, false);
+    println("accept guarded borrowed choices");
+}
+// A borrowed result may be null on one alternative. Only an own result needs a nonempty choice
+// that is not null, because only it carries a fresh obligation.
+fn borrowed_null_choice() void {
+    env.env mut e = {};
+    env.open(&e, 21, "foreign_view");
+    defer env.close(&e);
+    env.add_empty(&e, env.slot(9), 90);
+    env.choose(&e, 0, env.slot(9), env.guard_key(7), false);
+    env.fact(&e, 0, 0, 7, true);
+    env.choose(&e, 1, env.slot(9), env.guard_key(8), false);
+    env.fact(&e, 1, 0, 8, false);
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted(&e, out);
+    ownership_ffi.successor* core = e.store.retained->core;
+    env.foreign_result(&core->states[0], env.slot(9), false);
+    env.foreign_result(&core->states[1], env.slot(9), false);
+    env.local_facts(&core->states[0], 7, 7, true);
+    env.local_facts(&core->states[1], 8, 8, true);
+    assert(core->states[0].predicates[0].lower.value == 0);
+    assert(core->states[1].predicates[0].lower.value == 1);
+    println("accept borrowed null choice");
+}
+// An integer result may split on its value. Each alternative holds its own membership fact.
+fn guarded_scalars() void {
+    env.env mut e = {};
+    env.open(&e, 22, "foreign_bits");
+    defer env.close(&e);
+    env.add_scalar(&e, env.slot(10), 100);
+    env.choose(&e, 0, env.slot(10), env.guard_key(7), false);
+    env.choose(&e, 1, env.slot(10), env.guard_key(8), false);
+    u64 mut i = 0;
+    while (i < 2) {
+        e.atoms[i * 2].key = env.id(ownership_api.entity_kind.predicate, 7 + cast(i, u32));
+        e.atoms[i * 2].kind = ownership_api.predicate_kind.membership;
+        e.atoms[i * 2].left = e.request.fresh_version;
+        e.atoms[i * 2].lower = env.exact(cast(i, i64));
+        e.atoms[i * 2].upper = env.exact(cast(i, i64) + 1);
+        e.choices[i].facts = e.atoms[i * 2..i * 2 + 1];
+        i += 1;
+    }
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted(&e, out);
+    assert(out.trusted_sources.len == 0);
+    ownership_ffi.successor* core = e.store.retained->core;
+    assert(core->len == 2);
+    env.local_facts(&core->states[0], 7, 7, true);
+    env.local_facts(&core->states[1], 8, 8, true);
+    assert(core->states[0].predicates[0].lower.value == 0);
+    assert(core->states[1].predicates[0].lower.value == 1);
+    assert(env.contents(&core->states[1], env.slot(10)).kind == ownership_api.contents_kind.scalar);
+    println("accept guarded scalar choices");
+}
+fn main() i32 {
+    borrowed_view();
+    borrowed_argument();
+    copied_result();
+    call_only();
+    unknown_extern();
+    known_alias_program();
+    owning_result();
+    live_destination();
+    zero_length_owner();
+    empty_result();
+    nullable_result();
+    many_facts();
+    hidden_retention();
+    cleanup_after_retention();
+    hidden_release();
+    unobserved_release();
+    caller_return();
+    noreturn_call();
+    scalar_result();
+    guarded_views();
+    borrowed_null_choice();
+    guarded_scalars();
+    return 0;
+}

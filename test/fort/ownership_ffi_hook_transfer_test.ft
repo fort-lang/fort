@@ -1,0 +1,524 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| accept F06-A
+//| accept F06-B
+//| accept F06-C
+//| accept F06-D
+//| reject F06-E
+//| reject F06-F
+//| accept F06-G
+//| accept F06-H
+//| accept F06-I
+//| reject F06-J
+//| accept P28
+//| accept P32
+//| reject P33
+//| accept P34
+//| reject P35
+//| reject prefix destination
+//| accept disjoint destination
+//| accept field destination
+//| accept owned descendant transfer
+//| accept borrowed sibling kept
+//| accept noreturn transfer
+//| accept successive foreign calls
+/// Tests own argument transfers and result destinations after the transfers.
+import check_env;
+import ownership_api;
+import ownership_ffi;
+import ownership_ffi_boundary_env as base;
+import ownership_ffi_hook_env as env;
+import ownership_state;
+import ownership_transfer;
+import std.str;
+import types;
+
+ownership_api.entity_id NO_GUARD = {};
+
+fn take(env.env mut* e, u32 number, string name, u32 holding) void {
+    env.open(e, number, name);
+    env.foreign_owner(e);
+    env.bind(e, env.slot(holding), env.parameter(e, 0));
+    env.operand_at(e, 0, env.slot(holding), env.parameter(e, 0));
+}
+fn moved_then_taken() void {
+    env.env mut e = {};
+    env.open(&e, 1, "foreign_take");
+    defer env.close(&e);
+    env.foreign_owner(&e);
+    // `move(p9)` into the holding operand P2 runs before the call.
+    assert(ownership_api.successful(env.act(&e, env.state(&e), ownership_transfer.action.move_owner,
+        1, env.slot(9), env.slot(2))));
+    // The moved borrow names its new containing slot and keeps its source.
+    ownership_api.borrow_relation moved = env.contents(env.state(&e), env.slot(2)).borrows[0];
+    assert(moved.containing.root.ordinal == 2 && moved.source.ordinal == 9);
+    env.bind(&e, env.slot(2), env.parameter(&e, 0));
+    env.operand_at(&e, 0, env.slot(2), env.parameter(&e, 0));
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted(&e, out);
+    assert(out.signature_transfers.len == 1 && out.trusted_sources.len == 0);
+    env.transfer_effect(out, 0, 9, env.slot(2), 9);
+    ownership_state.state* s = env.after(&e, 0);
+    env.empty_at(s, env.slot(9));
+    env.empty_at(s, env.slot(2));
+    env.detached(s, 9);
+    // The owner moved once before the call and transferred once at it.
+    assert(env.allocation(s, 9).history.len == 2);
+    env.views(s, env.slot(8), 9);
+    println("accept F06-A");
+}
+fn heap_taken() void {
+    env.env mut e = {};
+    env.open(&e, 2, "foreign_take");
+    defer env.close(&e);
+    env.heap_owner(&e);
+    assert(ownership_api.successful(env.act(&e, env.state(&e), ownership_transfer.action.move_owner,
+        1, env.slot(1), env.slot(2))));
+    env.bind(&e, env.slot(2), env.parameter(&e, 0));
+    env.operand_at(&e, 0, env.slot(2), env.parameter(&e, 0));
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted(&e, out);
+    env.transfer_effect(out, 0, 1, env.slot(2), 1);
+    ownership_state.state* s = env.after(&e, 0);
+    env.empty_at(s, env.slot(1));
+    env.empty_at(s, env.slot(2));
+    env.detached(s, 1);
+    // The fort source keeps its class and its known length.
+    assert(env.source(s, 1).kind == ownership_api.source_kind.heap);
+    assert(env.allocation(s, 1).logical_length.value == 4);
+    println("accept F06-B");
+}
+fn holding_once() void {
+    env.env mut e = {};
+    take(&e, 3, "foreign_take", 9);
+    defer env.close(&e);
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted(&e, out);
+    assert(out.signature_transfers.len == 1);
+    env.transfer_effect(out, 0, 9, env.slot(9), 9);
+    ownership_state.state* s = env.after(&e, 0);
+    env.empty_at(s, env.slot(9));
+    env.detached(s, 9);
+    assert(env.allocation(s, 9).history.len == 1);
+    println("accept F06-C");
+}
+fn borrowed_input() void {
+    env.env mut e = {};
+    env.open(&e, 4, "foreign_touch");
+    defer env.close(&e);
+    env.foreign_owner(&e);
+    env.operand_at(&e, 0, env.slot(8), env.parameter(&e, 0));
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted(&e, out);
+    assert(out.signature_transfers.len == 0);
+    assert(ownership_state.equal(env.after(&e, 0), &e.input));
+    env.obligated(env.after(&e, 0), 9, env.slot(9));
+    println("accept F06-D");
+}
+fn borrowed_view_for_own() void {
+    env.env mut e = {};
+    env.open(&e, 5, "foreign_take");
+    defer env.close(&e);
+    env.foreign_owner(&e);
+    env.bind(&e, env.slot(8), env.declared(&e, "foreign_touch")->params[0]);
+    env.operand_at(&e, 0, env.slot(8), env.parameter(&e, 0));
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.rejected(&e, out, ownership_api.event_kind.caller_requirement,
+        "The own argument has no unique owning operand.");
+    env.definite(&e, out);
+    println("reject F06-E");
+}
+fn one_allocation_twice() void {
+    env.env mut e = {};
+    take(&e, 6, "foreign_take_two", 9);
+    defer env.close(&e);
+    env.operand_at(&e, 1, env.slot(9), env.parameter(&e, 1));
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.rejected(&e, out, ownership_api.event_kind.caller_requirement,
+        "Two own operands select the same allocation.");
+    env.definite(&e, out);
+    println("reject F06-F");
+}
+fn empty_second_call() void {
+    env.env mut e = {};
+    take(&e, 7, "foreign_take", 9);
+    defer env.close(&e);
+    env.finish(&e);
+    env.accepted(&e, env.call(&e));
+    env.advance(&e);
+    // The second call reads the canonical empty P9. It transfers nothing.
+    env.operand_at(&e, 0, env.slot(9), env.parameter(&e, 0));
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted(&e, out);
+    assert(out.signature_transfers.len == 0);
+    ownership_state.state* s = env.after(&e, 0);
+    assert(ownership_state.equal(s, &e.input));
+    env.empty_at(s, env.slot(9));
+    env.detached(s, 9);
+    assert(env.allocation(s, 9).history.len == 1);
+    println("accept F06-G");
+}
+fn alias_after_transfer() void {
+    env.env mut e = {};
+    take(&e, 8, "foreign_take", 9);
+    defer env.close(&e);
+    env.finish(&e);
+    env.accepted(&e, env.call(&e));
+    ownership_state.state mut* s = env.successor(&e);
+    // The transfer releases nothing, so the known alias keeps its live source.
+    assert(ownership_api.successful(env.act(&e, s, ownership_transfer.action.inspect, 1,
+        env.slot(8), env.slot(8))));
+    env.views(s, env.slot(8), 9);
+    env.detached(s, 9);
+    assert(env.source(s, 9).allocation.ordinal == 9);
+    println("accept F06-H");
+}
+fn validation_first() void {
+    env.env mut e = {};
+    take(&e, 9, "foreign_mix", 9);
+    defer env.close(&e);
+    env.operand_at(&e, 1, env.slot(8), env.parameter(&e, 1));
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted(&e, out);
+    assert(out.signature_transfers.len == 1);
+    env.transfer_effect(out, 0, 9, env.slot(9), 9);
+    ownership_state.state* s = env.after(&e, 0);
+    env.detached(s, 9);
+    env.views(s, env.slot(8), 9);
+    println("accept F06-I");
+}
+fn ambiguous_owner() void {
+    env.env mut e = {};
+    take(&e, 10, "foreign_take", 9);
+    defer env.close(&e);
+    env.state(&e)->allocations[0].count.many = true;
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.rejected(&e, out, ownership_api.event_kind.incomplete_proof,
+        "The owning operand remains ambiguous.");
+    env.possible(&e, out);
+    println("reject F06-J");
+}
+fn instance(ownership_api.entity_kind kind, u32 ordinal) ownership_api.entity_id {
+    ownership_api.entity_id mut key = env.id(kind, ordinal);
+    key.function.instance = 2;
+    return key;
+}
+fn function_instances() void {
+    env.env mut e = {};
+    take(&e, 11, "foreign_take", 9);
+    defer env.close(&e);
+    // A second instance of the function uses ordinal 9 for each key.
+    ownership_state.state mut* s = env.state(&e);
+    s->sources[1] = s->sources[0];
+    s->sources[1].key = instance(ownership_api.entity_kind.source, 9);
+    s->sources[1].allocation = instance(ownership_api.entity_kind.allocation, 9);
+    s->sources_len = 2;
+    s->allocations[1] = s->allocations[0];
+    s->allocations[1].key = s->sources[1].allocation;
+    s->allocations[1].site = s->sources[1].allocation;
+    ownership_api.place_path mut other = env.slot(9);
+    other.root = instance(ownership_api.entity_kind.slot, 9);
+    s->allocations[1].owner.place = other;
+    s->allocations_len = 2;
+    ownership_api.contents_fact mut held = env.contents(s, env.slot(9));
+    held.place = other;
+    s->contents[s->contents_len] = held;
+    s->contents_len += 1;
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted(&e, out);
+    assert(out.signature_transfers.len == 1);
+    assert(out.signature_transfers[0].allocation.function.instance == 1);
+    ownership_state.state* next = env.after(&e, 0);
+    env.detached(next, 9);
+    ownership_api.allocation_fact kept = next->allocations[1];
+    assert(kept.key.function.instance == 2 && kept.obligation && !kept.owner.detached);
+    assert(ownership_state.same_place(kept.owner.place, other));
+    println("accept P28");
+}
+fn take_make(env.env mut* e, u32 number) void {
+    env.open(e, number, "foreign_take_make");
+    env.add_source(e, 1, ownership_api.source_kind.heap, true);
+    env.add_owner(e, 1, env.slot(1), env.exact(4));
+    env.add_view(e, env.slot(1), 1, 11, env.exact(4));
+    env.bind(e, env.slot(1), env.parameter(e, 0));
+    env.bind(e, env.slot(2), env.result_type(e));
+    env.operand_at(e, 0, env.slot(1), env.parameter(e, 0));
+    env.choose(e, 0, env.slot(2), NO_GUARD, false);
+}
+fn result_after_transfer() void {
+    env.env mut e = {};
+    take_make(&e, 12);
+    defer env.close(&e);
+    env.add_empty(&e, env.slot(2), 90);
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted(&e, out);
+    assert(out.signature_transfers.len == 1 && out.trusted_sources.len == 1);
+    ownership_state.state* s = env.after(&e, 0);
+    env.empty_at(s, env.slot(1));
+    env.detached(s, 1);
+    env.foreign_result(s, env.slot(2), true);
+    println("accept P32");
+}
+fn live_result_destination() void {
+    env.env mut e = {};
+    take_make(&e, 13);
+    defer env.close(&e);
+    env.add_source(&e, 2, ownership_api.source_kind.heap, true);
+    env.add_owner(&e, 2, env.slot(2), env.exact(4));
+    env.add_view(&e, env.slot(2), 2, 21, env.exact(4));
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.rejected(&e, out, ownership_api.event_kind.lost_ownership,
+        "The result destination contains a live owner.");
+    env.definite(&e, out);
+    assert(e.b.observed.relation.ordinal == 2);
+    println("reject P33");
+}
+fn projected(env.env mut* e, u32 number, bool sibling) void {
+    env.open(e, number, "foreign_take_make");
+    types.node* own_pointer = env.parameter(e, 0);
+    env.bind(e, env.slot(3), types.type_array(&e->b.raw.table, own_pointer, 2));
+    ownership_api.place_path first = env.index(e, 3, 0);
+    ownership_api.place_path second = env.index(e, 3, 1);
+    env.add_source(e, 1, ownership_api.source_kind.heap, true);
+    env.add_owner(e, 1, first, env.exact(1));
+    env.add_view(e, first, 1, 11, env.exact(1));
+    if (sibling) {
+        env.add_source(e, 2, ownership_api.source_kind.heap, true);
+        env.add_owner(e, 2, second, env.exact(1));
+        env.add_view(e, second, 2, 21, env.exact(1));
+    } else { env.add_empty(e, second, 30); }
+    env.operand_at(e, 0, first, own_pointer);
+    // The captured index i has two complete choices: P3[0] and P3[1].
+    env.choose(e, 0, first, env.guard_key(70), false);
+    env.choose(e, 1, second, env.guard_key(71), false);
+    env.finish(e);
+}
+fn projected_choices() void {
+    env.env mut e = {};
+    projected(&e, 14, false);
+    defer env.close(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted(&e, out);
+    ownership_ffi.successor* core = e.store.retained->core;
+    assert(core->len == 2 && core->guards[0].ordinal == 70 && core->guards[1].ordinal == 71);
+    // The transfer empties P3[0] first. Only the selected choice receives A12.
+    env.foreign_result(&core->states[0], env.index(&e, 3, 0), true);
+    env.empty_at(&core->states[0], env.index(&e, 3, 1));
+    env.foreign_result(&core->states[1], env.index(&e, 3, 1), true);
+    env.empty_at(&core->states[1], env.index(&e, 3, 0));
+    env.detached(&core->states[0], 1);
+    env.detached(&core->states[1], 1);
+    println("accept P34");
+}
+fn projected_live_sibling() void {
+    env.env mut e = {};
+    projected(&e, 15, true);
+    defer env.close(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.rejected(&e, out, ownership_api.event_kind.lost_ownership,
+        "A feasible result destination retains a live owner.");
+    // One feasible choice of two fails. No validated witness exists.
+    assert(out.proof.kind == ownership_api.proof_kind.complete && !out.proof.terminal.present);
+    env.possible(&e, out);
+    assert(e.b.observed.relation.ordinal == 2);
+    println("reject P35");
+}
+fn prefix_destination() void {
+    env.env mut e = {};
+    env.open(&e, 16, "foreign_make");
+    defer env.close(&e);
+    env.add_source(&e, 2, ownership_api.source_kind.heap, true);
+    env.add_owner(&e, 2, env.slot(3), env.exact(4));
+    env.add_view(&e, env.slot(3), 2, 21, env.exact(4));
+    env.add_scalar(&e, env.slot(10), 100);
+    env.operand_at(&e, 0, env.slot(10), env.parameter(&e, 0));
+    env.bind(&e, env.slot(3), types.type_array(&e.b.raw.table, env.result_type(&e), 2));
+    env.choose(&e, 0, env.index(&e, 3, 0), NO_GUARD, false);
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.rejected(&e, out, ownership_api.event_kind.incomplete_proof,
+        "The result destination may hold a live owner.");
+    env.possible(&e, out);
+    println("reject prefix destination");
+}
+fn disjoint_destination() void {
+    env.env mut e = {};
+    env.open(&e, 17, "foreign_take_make");
+    defer env.close(&e);
+    types.node* own_pointer = env.parameter(&e, 0);
+    env.bind(&e, env.slot(3), types.type_array(&e.b.raw.table, own_pointer, 2));
+    ownership_api.place_path first = env.index(&e, 3, 0);
+    ownership_api.place_path second = env.index(&e, 3, 1);
+    env.add_source(&e, 1, ownership_api.source_kind.heap, true);
+    env.add_owner(&e, 1, first, env.exact(1));
+    env.add_view(&e, first, 1, 11, env.exact(1));
+    env.add_source(&e, 2, ownership_api.source_kind.heap, true);
+    env.add_owner(&e, 2, second, env.exact(1));
+    env.add_view(&e, second, 2, 21, env.exact(1));
+    env.operand_at(&e, 0, first, own_pointer);
+    // A disjoint sibling owner does not block an exact single destination.
+    env.choose(&e, 0, first, NO_GUARD, false);
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted(&e, out);
+    ownership_state.state* s = env.after(&e, 0);
+    env.foreign_result(s, first, true);
+    env.obligated(s, 2, second);
+    println("accept disjoint destination");
+}
+fn field_destination() void {
+    env.env mut e = {};
+    env.open(&e, 18, "foreign_make");
+    defer env.close(&e);
+    env.bind(&e, env.slot(3), check_env.sym_main(&e.b.checked, "Twin")->ty);
+    ownership_api.projection[1] mut parts = {};
+    parts[0].kind = ownership_api.projection_kind.field;
+    ownership_api.place_path mut left = env.slot(3);
+    left.projections = parts[..];
+    ownership_api.projection[1] mut other = {};
+    other[0].kind = ownership_api.projection_kind.field;
+    other[0].field = 1;
+    ownership_api.place_path mut right = env.slot(3);
+    right.projections = other[..];
+    env.add_source(&e, 2, ownership_api.source_kind.heap, true);
+    env.add_owner(&e, 2, right, env.exact(1));
+    env.add_view(&e, right, 2, 21, env.exact(1));
+    env.add_empty(&e, left, 30);
+    env.add_scalar(&e, env.slot(10), 100);
+    env.operand_at(&e, 0, env.slot(10), env.parameter(&e, 0));
+    // The owner in field 1 does not overlap the result destination in field 0.
+    env.choose(&e, 0, left, NO_GUARD, false);
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted(&e, out);
+    ownership_state.state* s = env.after(&e, 0);
+    env.foreign_result(s, left, true);
+    env.obligated(s, 2, right);
+    println("accept field destination");
+}
+// The own argument P1 holds A1. A1 owns A2 in field 0 and may borrow A3 in field 1.
+fn node(env.env mut* e, u32 number, bool sibling) ownership_api.ffi_result {
+    env.open(e, number, "take_node");
+    base.graph(&e->b, sibling);
+    env.finish(e);
+    ownership_api.ffi_result out = env.call(e);
+    env.accepted(e, out);
+    // The root and its owned descendant transfer once each, in closure order.
+    assert(out.signature_transfers.len == 2);
+    env.transfer_effect(out, 0, 1, env.slot(1), 1);
+    ownership_api.place_path child = base.field(&e->b, env.id(ownership_api.entity_kind.allocation,
+        1), 0);
+    env.transfer_effect(out, 1, 2, child, 2);
+    ownership_state.state* s = env.after(e, 0);
+    env.empty_at(s, env.slot(1));
+    env.detached(s, 1);
+    env.detached(s, 2);
+    // Only the argument's holding operand empties. The child keeps its holding contents.
+    env.views(s, child, 2);
+    assert(env.contents(s, child).borrows[0].containing.root.ordinal == 1);
+    return out;
+}
+fn owned_descendant() void {
+    env.env mut e = {};
+    node(&e, 19, false);
+    defer env.close(&e);
+    assert(env.after(&e, 0)->allocations_len == 2 && env.after(&e, 0)->edges_len == 1);
+    println("accept owned descendant transfer");
+}
+fn borrowed_sibling() void {
+    env.env mut e = {};
+    node(&e, 20, true);
+    defer env.close(&e);
+    // A borrowed edge selects no allocation. The sibling stays with its caller owner.
+    ownership_state.state* s = env.after(&e, 0);
+    env.obligated(s, 3, env.slot(3));
+    assert(s->edges_len == 2);
+    println("accept borrowed sibling kept");
+}
+fn noreturn_transfer() void {
+    env.env mut e = {};
+    take(&e, 21, "foreign_take_stop", 9);
+    defer env.close(&e);
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted(&e, out);
+    // A noreturn callee still receives the own argument. No caller return follows.
+    assert(!out.outcomes[0].possible_caller_return && out.outcomes[0].effects.len == 1);
+    env.transfer_effect(out, 0, 9, env.slot(9), 9);
+    env.detached(env.after(&e, 0), 9);
+    println("accept noreturn transfer");
+}
+// Each successor is a valid input core for the next boundary.
+fn successive_calls() void {
+    env.env mut e = {};
+    env.open(&e, 22, "foreign_make");
+    defer env.close(&e);
+    env.add_empty(&e, env.slot(9), 90);
+    env.add_scalar(&e, env.slot(10), 100);
+    env.operand_at(&e, 0, env.slot(10), env.parameter(&e, 0));
+    env.bind(&e, env.slot(9), env.result_type(&e));
+    env.choose(&e, 0, env.slot(9), NO_GUARD, false);
+    env.finish(&e);
+    env.accepted(&e, env.call(&e));
+    env.advance(&e);
+    // `foreign_touch(p9)` lends the fresh foreign owner and keeps every fact.
+    env.declaration(&e, "foreign_touch");
+    e.request.choices = e.choices[..0];
+    env.operand_at(&e, 0, env.slot(9), env.parameter(&e, 0));
+    ownership_api.ffi_result lent = env.call(&e);
+    env.accepted(&e, lent);
+    assert(lent.signature_transfers.len == 0);
+    assert(ownership_state.equal(env.after(&e, 0), &e.input));
+    env.obligated(env.after(&e, 0), 12, env.slot(9));
+    env.advance(&e);
+    // `foreign_take(move(p9))` gives the foreign owner back to C.
+    env.declaration(&e, "foreign_take");
+    base.binding(&e.b, env.id(ownership_api.entity_kind.allocation, 12), env.byte(&e));
+    env.operand_at(&e, 0, env.slot(9), env.parameter(&e, 0));
+    ownership_api.ffi_result taken = env.call(&e);
+    env.accepted(&e, taken);
+    env.transfer_effect(taken, 0, 12, env.slot(9), 12);
+    ownership_state.state* s = env.after(&e, 0);
+    env.empty_at(s, env.slot(9));
+    env.detached(s, 12);
+    assert(env.allocation(s, 12).history.len == 1);
+    assert(env.source(s, 12).kind == ownership_api.source_kind.trusted_foreign);
+    println("accept successive foreign calls");
+}
+fn main() i32 {
+    moved_then_taken();
+    heap_taken();
+    holding_once();
+    borrowed_input();
+    borrowed_view_for_own();
+    one_allocation_twice();
+    empty_second_call();
+    alias_after_transfer();
+    validation_first();
+    ambiguous_owner();
+    function_instances();
+    result_after_transfer();
+    live_result_destination();
+    projected_choices();
+    projected_live_sibling();
+    prefix_destination();
+    disjoint_destination();
+    field_destination();
+    owned_descendant();
+    borrowed_sibling();
+    noreturn_transfer();
+    successive_calls();
+    return 0;
+}

@@ -1,0 +1,630 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| reject F07-A
+//| reject F07-B
+//| reject F07-C
+//| accept F07-D
+//| reject F01-E
+//| reject P01
+//| reject P02
+//| reject P03
+//| reject P04
+//| reject P05
+//| reject F03-D
+//| reject P06
+//| reject P07
+//| reject P08
+//| reject P09
+//| reject P10
+//| reject fresh version collision
+//| reject fresh key kind
+//| reject fresh key function
+//| accept P29
+//| reject P30
+//| reject P31
+//| reject void result choice
+//| reject owning result without choice
+//| reject incomplete choices
+//| reject borrowed empty choice
+//| reject nonlocal destination
+//| reject residual destination
+//| reject captured destination
+//| reject other function destination
+//| reject borrowed owning destination
+//| reject unguarded choices
+//| reject guarded single choice
+//| reject single choice with a fact
+//| reject existing choice guard
+//| reject repeated guard
+//| reject empty choice without a fact
+//| reject empty choice with a non-null fact
+//| reject empty choice with another version fact
+//| reject empty choice with both facts
+//| reject nonempty choice with a null fact
+//| reject caller nullness fact
+//| reject existing fact key
+//| reject repeated fact key
+//| reject fact key kind
+//| reject unbounded nullness fact
+//| reject fact key of another function
+//| reject only a null choice
+//| reject unguarded empty choice
+//| reject fresh relation collision
+//| reject fresh edge relation collision
+//| reject residual owner place
+//| reject ambiguous destination owner
+//| accept borrowed result without allocation key
+//| reject choice fact bound
+//| reject P11 to P18 single sweep
+//| reject P11 to P18 choice sweep
+/// Tests refusals before publication. Each one keeps the input and the prior result.
+import check_env;
+import ownership_api;
+import ownership_ffi;
+import ownership_ffi_hook_env as env;
+import ownership_limits;
+import ownership_state;
+import ownership_transfer;
+import prim;
+import std.str;
+import types;
+
+ownership_api.entity_id NO_GUARD = {};
+
+fn touch(env.env mut* e, u32 number, u32 holding) void {
+    env.open(e, number, "foreign_touch");
+    env.heap_owner(e);
+    env.operand_at(e, 0, env.slot(holding), env.parameter(e, 0));
+}
+fn released_argument() void {
+    env.env mut e = {};
+    touch(&e, 1, 8);
+    defer env.close(&e);
+    ownership_state.state mut* s = env.state(&e);
+    s->sources[0].validity = ownership_api.validity_kind.released;
+    s->allocations[0].validity = ownership_api.validity_kind.released;
+    s->allocations[0].obligation = false;
+    env.finish(&e);
+    env.definite(&e, env.refused(&e, ownership_api.event_kind.invalid_use,
+        "The argument source is released."));
+    println("reject F07-A");
+}
+fn stack(env.env mut* e, u32 number, ownership_api.validity_kind validity) void {
+    env.open(e, number, "foreign_touch");
+    env.add_source(e, 1, ownership_api.source_kind.stack, false);
+    env.state(e)->sources[0].validity = validity;
+    env.add_view(e, env.slot(1), 1, 11, env.exact(1));
+    env.operand_at(e, 0, env.slot(1), env.parameter(e, 0));
+}
+fn ended_argument() void {
+    env.env mut e = {};
+    stack(&e, 2, ownership_api.validity_kind.ended);
+    defer env.close(&e);
+    env.finish(&e);
+    env.definite(&e, env.refused(&e, ownership_api.event_kind.invalid_use,
+        "The argument source has ended."));
+    println("reject F07-B");
+}
+fn one_dead_argument() void {
+    env.env mut e = {};
+    env.open(&e, 3, "copy_bytes");
+    defer env.close(&e);
+    env.add_source(&e, 1, ownership_api.source_kind.heap, true);
+    env.add_source(&e, 2, ownership_api.source_kind.heap, true);
+    env.add_owner(&e, 1, env.slot(1), env.exact(1));
+    env.add_owner(&e, 2, env.slot(2), env.exact(1));
+    env.add_view(&e, env.slot(1), 1, 11, env.exact(1));
+    env.add_view(&e, env.slot(2), 2, 21, env.exact(1));
+    env.add_scalar(&e, env.slot(10), 100);
+    env.add_empty(&e, env.slot(9), 90);
+    ownership_state.state mut* s = env.state(&e);
+    s->sources[1].validity = ownership_api.validity_kind.released;
+    s->allocations[1].validity = ownership_api.validity_kind.released;
+    s->allocations[1].obligation = false;
+    env.operand_at(&e, 0, env.slot(1), env.parameter(&e, 0));
+    env.operand_at(&e, 1, env.slot(2), env.parameter(&e, 1));
+    env.operand_at(&e, 2, env.slot(10), env.parameter(&e, 2));
+    env.choose(&e, 0, env.slot(9), NO_GUARD, false);
+    env.finish(&e);
+    env.definite(&e, env.refused(&e, ownership_api.event_kind.invalid_use,
+        "The argument source is released."));
+    assert(e.b.observed.relation.ordinal == 2);
+    println("reject F07-C");
+}
+fn unrelated_dead_local() void {
+    env.env mut e = {};
+    stack(&e, 4, ownership_api.validity_kind.live);
+    defer env.close(&e);
+    env.add_source(&e, 7, ownership_api.source_kind.stack, false);
+    env.state(&e)->sources[1].validity = ownership_api.validity_kind.ended;
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted(&e, out);
+    ownership_state.state* s = env.after(&e, 0);
+    assert(ownership_state.equal(s, &e.input));
+    assert(env.source(s, 7).validity == ownership_api.validity_kind.ended);
+    assert(env.source(s, 1).validity == ownership_api.validity_kind.live);
+    println("accept F07-D");
+}
+fn unknown_fort_argument() void {
+    env.env mut e = {};
+    stack(&e, 5, ownership_api.validity_kind.unknown);
+    defer env.close(&e);
+    env.state(&e)->sources[0].kind = ownership_api.source_kind.unknown_fort;
+    env.finish(&e);
+    ownership_api.ffi_result out = env.refused(&e, ownership_api.event_kind.incomplete_proof,
+        "The captured argument version does not match.");
+    env.possible(&e, out);
+    println("reject F01-E");
+}
+fn take(env.env mut* e, u32 number) void {
+    env.open(e, number, "foreign_take");
+    env.foreign_owner(e);
+    env.bind(e, env.slot(9), env.parameter(e, 0));
+    env.operand_at(e, 0, env.slot(9), env.parameter(e, 0));
+}
+fn malformed(u32 number) void {
+    env.env mut e = {};
+    take(&e, 10 + number);
+    defer env.close(&e);
+    string mut text = "";
+    if (number == 1) {
+        e.b.request.event_map_complete = false;
+        text = "The event map is missing.";
+    } else if (number == 2) {
+        e.b.events[0].key.function.instance += 1;
+        text = "The event function does not match the operation.";
+    } else if (number == 3) {
+        e.b.events[1] = e.b.events[0];
+        e.b.request.events = e.b.events[..];
+        text = "The event map has duplicate keys.";
+    } else if (number == 4) {
+        e.b.request.source_map_complete = false;
+        text = "The supplied source correspondence is missing.";
+    } else if (number == 5) {
+        e.b.request.call.declaration.symbol = check_env.sym_main(&e.b.checked, "fort_touch");
+        e.b.request.call.declaration.ty = e.b.request.call.declaration.symbol->ty;
+        e.b.declarations[0] = e.b.request.call.declaration;
+        text = "The declaration is not an extern function.";
+    } else if (number == 6) {
+        e.b.request.call.declaration.ty = env.parameter(&e, 0);
+        text = "The binding has no checked function type.";
+    } else if (number == 7) {
+        e.b.request.operands = e.b.operands[..0];
+        e.b.request.call.arguments = e.b.arguments[..0];
+        text = "The fixed signature argument count does not match.";
+    } else {
+        e.b.operands[0].version = env.id(ownership_api.entity_kind.value, 92);
+        text = "The captured argument version does not match.";
+    }
+    env.finish(&e);
+    ownership_api.ffi_result out = env.refused(&e, ownership_api.event_kind.incomplete_proof,
+        text);
+    env.possible(&e, out);
+}
+// An available fort function with a pointer result is not an extern. Its result gets no trust.
+fn fort_wrapper() void {
+    env.env mut e = {};
+    stack(&e, 20, ownership_api.validity_kind.live);
+    defer env.close(&e);
+    e.b.request.call.declaration.symbol = check_env.sym_main(&e.b.checked, "fort_view");
+    e.b.request.call.declaration.ty = e.b.request.call.declaration.symbol->ty;
+    e.b.declarations[0] = e.b.request.call.declaration;
+    env.add_empty(&e, env.slot(9), 90);
+    env.choose(&e, 0, env.slot(9), NO_GUARD, false);
+    env.finish(&e);
+    ownership_api.ffi_result out = env.refused(&e, ownership_api.event_kind.incomplete_proof,
+        "The declaration is not an extern function.");
+    env.possible(&e, out);
+    assert(env.source(env.state(&e), 1).kind == ownership_api.source_kind.stack);
+    println("reject F03-D");
+}
+fn make(env.env mut* e, u32 number) void {
+    env.open(e, number, "foreign_make");
+    env.foreign_owner(e);
+    env.add_scalar(e, env.slot(10), 100);
+    env.operand_at(e, 0, env.slot(10), env.parameter(e, 0));
+    env.bind(e, env.slot(2), env.result_type(e));
+    env.choose(e, 0, env.slot(2), NO_GUARD, false);
+}
+fn fresh(u32 number, string text) void {
+    env.env mut e = {};
+    make(&e, 30 + number);
+    defer env.close(&e);
+    if (number == 1) { e.request.fresh_source = env.id(ownership_api.entity_kind.source, 9); }
+    if (number == 2) {
+        e.request.fresh_allocation = env.id(ownership_api.entity_kind.allocation, 9);
+    }
+    if (number == 3) { e.request.fresh_version = env.id(ownership_api.entity_kind.value, 81); }
+    if (number == 4) { e.request.fresh_source.kind = ownership_api.entity_kind.relation; }
+    if (number == 5) { e.request.fresh_allocation.function.instance = 2; }
+    env.finish(&e);
+    env.possible(&e, env.refused(&e, ownership_api.event_kind.incomplete_proof, text));
+}
+fn tail(env.env mut* e, u32 number) void {
+    env.open(e, number, "foreign_log");
+    env.heap_owner(e);
+    env.add_scalar(e, env.slot(10), 100);
+    env.add_scalar(e, env.slot(11), 110);
+    types.node* format = env.parameter(e, 0);
+    env.operand_at(e, 0, env.slot(8), format);
+    env.operand_at(e, 1, env.slot(10), types.type_prim(&e->b.raw.table, prim.prim_kind.prim_i32));
+    env.operand_at(e, 2, env.slot(11), types.type_prim(&e->b.raw.table, prim.prim_kind.prim_u64));
+}
+fn variadic_tail() void {
+    env.env mut e = {};
+    tail(&e, 40);
+    defer env.close(&e);
+    env.operand_at(&e, 3, env.slot(8), env.parameter(&e, 0));
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted(&e, out);
+    // Scalar tail values create no source or extent relation.
+    assert(ownership_state.equal(env.after(&e, 0), &e.input));
+    assert(out.trusted_sources.len == 0 && out.signature_transfers.len == 0);
+    println("accept P29");
+}
+fn released_tail() void {
+    env.env mut e = {};
+    tail(&e, 41);
+    defer env.close(&e);
+    env.add_source(&e, 7, ownership_api.source_kind.heap, true);
+    env.add_owner(&e, 7, env.slot(7), env.exact(1));
+    env.add_view(&e, env.slot(7), 7, 71, env.exact(1));
+    ownership_state.state mut* s = env.state(&e);
+    s->sources[1].validity = ownership_api.validity_kind.released;
+    s->allocations[1].validity = ownership_api.validity_kind.released;
+    s->allocations[1].obligation = false;
+    env.operand_at(&e, 3, env.slot(7), env.parameter(&e, 0));
+    env.finish(&e);
+    env.definite(&e, env.refused(&e, ownership_api.event_kind.invalid_use,
+        "The variadic pointer source is released."));
+    println("reject P30");
+}
+fn span_tail() void {
+    env.env mut e = {};
+    tail(&e, 42);
+    defer env.close(&e);
+    env.operand_at(&e, 3, env.slot(8),
+        types.type_span(&e.b.raw.table, env.byte(&e), false, false));
+    env.finish(&e);
+    env.possible(&e, env.refused(&e, ownership_api.event_kind.incomplete_proof,
+        "The supplied tail type violates the checked extern ABI precondition."));
+    println("reject P31");
+}
+fn choice_refusal(u32 number, string name, string text) void {
+    env.env mut e = {};
+    env.open(&e, 50 + number, name);
+    defer env.close(&e);
+    env.foreign_owner(&e);
+    env.add_scalar(&e, env.slot(10), 100);
+    if (str.equal(name, "foreign_make")) {
+        env.operand_at(&e, 0, env.slot(10), env.parameter(&e, 0));
+        env.bind(&e, env.slot(2), env.result_type(&e));
+    }
+    if (str.equal(name, "foreign_touch")) {
+        env.operand_at(&e, 0, env.slot(8), env.parameter(&e, 0));
+    }
+    ownership_api.place_path mut destination = env.slot(2);
+    if (number == 1) { env.choose(&e, 0, destination, NO_GUARD, false); }
+    if (number == 3) {
+        env.choose(&e, 0, destination, NO_GUARD, false);
+        e.request.choices_complete = false;
+    }
+    if (number == 4) { env.choose(&e, 0, destination, NO_GUARD, true); }
+    if (number == 5) {
+        destination.root.kind = ownership_api.entity_kind.allocation;
+        env.choose(&e, 0, destination, NO_GUARD, false);
+    }
+    if (number == 6) {
+        destination.residual = true;
+        env.choose(&e, 0, destination, NO_GUARD, false);
+    }
+    if (number == 7) {
+        destination = env.index(&e, 2, 0);
+        ownership_api.projection[1] mut parts = {destination.projections[0]};
+        parts[0].kind = ownership_api.projection_kind.captured_index;
+        destination.projections = ownership_state.copy_projections(env.state(&e), parts[..]);
+        env.choose(&e, 0, destination, NO_GUARD, false);
+    }
+    if (number == 8) {
+        env.bind(&e, env.slot(3), env.declared(&e, "foreign_touch")->params[0]);
+        env.choose(&e, 0, env.slot(3), NO_GUARD, false);
+    }
+    if (number == 9) {
+        env.choose(&e, 0, destination, env.guard_key(70), false);
+        env.choose(&e, 1, destination, NO_GUARD, true);
+    }
+    if (number == 10) {
+        env.choose(&e, 0, destination, env.guard_key(72), false);
+    }
+    if (number == 13) {
+        // A guard that the caller state already holds cannot name a new alternative.
+        env.choose(&e, 0, destination, env.add_guard(&e, 70), false);
+        env.choose(&e, 1, destination, env.guard_key(71), false);
+    }
+    if (number == 14) {
+        env.choose(&e, 0, destination, NO_GUARD, false);
+        env.fact(&e, 0, 0, 70, false);
+    }
+    if (number == 12) {
+        destination.root.function.instance = 2;
+        env.choose(&e, 0, destination, NO_GUARD, false);
+    }
+    if (number == 11) {
+        env.choose(&e, 0, destination, env.guard_key(70), false);
+        env.choose(&e, 1, destination, env.guard_key(70), true);
+    }
+    env.finish(&e);
+    env.possible(&e, env.refused(&e, ownership_api.event_kind.incomplete_proof, text));
+}
+// D17.13 gives an own result a fresh obligation. Only its own null alternative removes it.
+// Choice 0 is nonempty with guard 70. Choice 1 is empty with guard 71.
+fn result_fact(u32 number, u32 kind, string text) void {
+    env.env mut e = {};
+    make(&e, number);
+    defer env.close(&e);
+    env.choose(&e, 0, env.slot(2), env.guard_key(70), false);
+    env.choose(&e, 1, env.slot(2), env.guard_key(71), true);
+    if (kind == 1) { env.fact(&e, 1, 0, 71, false); }
+    if (kind == 2) {
+        env.fact(&e, 1, 0, 71, true);
+        e.atoms[2].left = env.id(ownership_api.entity_kind.value, 999);
+    }
+    if (kind == 3) {
+        env.fact(&e, 1, 0, 71, true);
+        env.fact(&e, 1, 1, 72, false);
+    }
+    if (kind == 4) {
+        env.fact(&e, 0, 0, 70, true);
+        env.fact(&e, 1, 0, 71, true);
+    }
+    if (kind == 5) {
+        // Every alternative copies the caller state. A fact there would reach both.
+        ownership_state.append_predicates(env.state(&e),
+            env.nullness(60, e.request.fresh_version, false));
+        env.fact(&e, 1, 0, 71, true);
+    }
+    if (kind == 6) {
+        ownership_state.append_predicates(env.state(&e),
+            env.nullness(71, env.id(ownership_api.entity_kind.value, 999), true));
+        env.fact(&e, 1, 0, 71, true);
+    }
+    if (kind == 7) {
+        env.fact(&e, 0, 0, 71, false);
+        env.fact(&e, 1, 0, 71, true);
+    }
+    if (kind == 8) {
+        env.fact(&e, 1, 0, 71, true);
+        e.atoms[2].key.kind = ownership_api.entity_kind.guard;
+    }
+    if (kind == 9) {
+        env.fact(&e, 1, 0, 71, true);
+        e.atoms[2].lower = env.exact(2);
+    }
+    if (kind == 12) {
+        env.fact(&e, 1, 0, 71, true);
+        e.atoms[2].key.function.instance = 2;
+    }
+    if (kind == 10) {
+        // The only choice is a null alternative. The obligation would vanish on every path.
+        e.request.choices = e.choices[1..2];
+        env.fact(&e, 1, 0, 71, true);
+    }
+    if (kind == 11) {
+        env.choose(&e, 0, env.slot(2), NO_GUARD, true);
+    }
+    env.finish(&e);
+    env.possible(&e, env.refused(&e, ownership_api.event_kind.incomplete_proof, text));
+}
+fn relation_collision(u32 number, bool edge) void {
+    env.env mut e = {};
+    env.open(&e, number, "foreign_view");
+    defer env.close(&e);
+    env.heap_owner(&e);
+    env.add_empty(&e, env.slot(9), 90);
+    if (edge) {
+        ownership_state.state mut* s = env.state(&e);
+        s->edges[s->edges_len].key = env.id(ownership_api.entity_kind.relation, 900);
+        s->edges_len += 1;
+        e.request.fresh_relation = env.id(ownership_api.entity_kind.relation, 900);
+    } else {
+        // The P8 view already uses relation key 81.
+        e.request.fresh_relation = env.id(ownership_api.entity_kind.relation, 81);
+    }
+    env.choose(&e, 0, env.slot(9), NO_GUARD, false);
+    env.finish(&e);
+    env.possible(&e, env.refused(&e, ownership_api.event_kind.incomplete_proof,
+        "The fresh relation key already exists."));
+}
+fn destination_owner(u32 number, bool residual) void {
+    env.env mut e = {};
+    make(&e, number);
+    defer env.close(&e);
+    env.add_source(&e, 3, ownership_api.source_kind.heap, true);
+    ownership_api.place_path mut held = env.slot(3);
+    if (residual) {
+        // A residual owner place may name any part of slot 3 or another root.
+        held.residual = true;
+    } else { held = env.slot(2); }
+    env.add_owner(&e, 3, held, env.exact(1));
+    if (!residual) {
+        // Two possible owners: the destination may or may not hold A3.
+        env.state(&e)->allocations[1].count.many = true;
+    }
+    env.finish(&e);
+    env.possible(&e, env.refused(&e, ownership_api.event_kind.incomplete_proof,
+        "The result destination may hold a live owner."));
+    assert(e.b.observed.relation.ordinal == 3);
+}
+// Only an owning result needs an allocation key.
+fn borrowed_keys(u32 number) void {
+    env.env mut e = {};
+    env.open(&e, number, "foreign_view");
+    defer env.close(&e);
+    env.foreign_owner(&e);
+    e.request.fresh_allocation = ownership_api.entity_id{};
+    env.choose(&e, 0, env.slot(2), NO_GUARD, false);
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted(&e, out);
+    ownership_state.state* s = env.after(&e, 0);
+    assert(s->allocations_len == 1);
+    env.foreign_result(s, env.slot(2), false);
+    assert(out.trusted_sources.len == 1);
+}
+fn fact_bound() void {
+    env.env mut e = {};
+    make(&e, 81);
+    defer env.close(&e);
+    env.choose(&e, 0, env.slot(2), env.guard_key(70), false);
+    env.fact(&e, 0, 0, 80, false);
+    env.fact(&e, 0, 1, 82, false);
+    e.atoms[1].left = env.id(ownership_api.entity_kind.value, 999);
+    env.choose(&e, 1, env.slot(2), env.guard_key(71), true);
+    env.fact(&e, 1, 0, 81, true);
+    env.finish(&e);
+    ownership_api.limit_table mut limits = ownership_limits.production();
+    limits.p = 1;
+    assert(ownership_limits.configure(&e.b.raw.budget.meter, &limits));
+    ownership_api.ffi_result out = env.call(&e);
+    env.rejected(&e, out, ownership_api.event_kind.work_failure, "");
+    assert(out.proof.terminal.limit.present);
+    assert(out.proof.terminal.limit.category == ownership_api.limit_category.p);
+    assert(out.proof.terminal.limit.bound == 1 && out.proof.terminal.limit.attempted == 2);
+    println("reject choice fact bound");
+}
+fn single_sweep() void {
+    env.env mut e = {};
+    env.open(&e, 60, "foreign_take_two_make");
+    defer env.close(&e);
+    env.foreign_owner(&e);
+    env.add_source(&e, 1, ownership_api.source_kind.heap, true);
+    env.add_owner(&e, 1, env.slot(1), env.exact(4));
+    env.add_view(&e, env.slot(1), 1, 11, env.exact(4));
+    env.add_empty(&e, env.slot(3), 30);
+    env.bind(&e, env.slot(9), env.parameter(&e, 0));
+    env.bind(&e, env.slot(1), env.parameter(&e, 1));
+    env.bind(&e, env.slot(3), env.result_type(&e));
+    env.operand_at(&e, 0, env.slot(9), env.parameter(&e, 0));
+    env.operand_at(&e, 1, env.slot(1), env.parameter(&e, 1));
+    env.choose(&e, 0, env.slot(3), NO_GUARD, false);
+    env.finish(&e);
+    u64 total = env.sweep(&e);
+    eprintln("single sweep positions ", total);
+    assert(total >= 100);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted(&e, out);
+    assert(out.signature_transfers.len == 2 && out.trusted_sources.len == 1);
+    println("reject P11 to P18 single sweep");
+}
+fn choice_sweep() void {
+    env.env mut e = {};
+    env.open(&e, 61, "foreign_take_make");
+    defer env.close(&e);
+    types.node* own_pointer = env.parameter(&e, 0);
+    env.bind(&e, env.slot(3), types.type_array(&e.b.raw.table, own_pointer, 2));
+    ownership_api.place_path first = env.index(&e, 3, 0);
+    ownership_api.place_path second = env.index(&e, 3, 1);
+    env.add_source(&e, 1, ownership_api.source_kind.heap, true);
+    env.add_owner(&e, 1, first, env.exact(1));
+    env.add_view(&e, first, 1, 11, env.exact(1));
+    env.add_empty(&e, second, 30);
+    env.operand_at(&e, 0, first, own_pointer);
+    env.choose(&e, 0, first, env.guard_key(70), false);
+    env.fact(&e, 0, 0, 80, false);
+    env.choose(&e, 1, second, env.guard_key(71), false);
+    env.fact(&e, 1, 0, 81, false);
+    env.fact(&e, 1, 1, 82, false);
+    e.atoms[3].left = env.id(ownership_api.entity_kind.value, 999);
+    env.finish(&e);
+    u64 total = env.sweep(&e);
+    eprintln("choice sweep positions ", total);
+    assert(total >= 100);
+    env.accepted(&e, env.call(&e));
+    assert(e.store.retained->core->len == 2);
+    env.local_facts(&e.store.retained->core->states[0], 70, 80, true);
+    assert(e.store.retained->core->states[1].predicates_len == 2);
+    println("reject P11 to P18 choice sweep");
+}
+fn main() i32 {
+    released_argument();
+    ended_argument();
+    one_dead_argument();
+    unrelated_dead_local();
+    unknown_fort_argument();
+    malformed(1); println("reject P01");
+    malformed(2); println("reject P02");
+    malformed(3); println("reject P03");
+    malformed(4); println("reject P04");
+    malformed(5); println("reject P05");
+    fort_wrapper();
+    malformed(6); println("reject P06");
+    malformed(7); println("reject P07");
+    malformed(8); println("reject P08");
+    fresh(1, "The fresh source key already exists."); println("reject P09");
+    fresh(2, "The fresh allocation key already exists."); println("reject P10");
+    fresh(3, "The fresh value version already exists.");
+    println("reject fresh version collision");
+    fresh(4, "The fresh result keys are invalid."); println("reject fresh key kind");
+    fresh(5, "The fresh result keys are invalid."); println("reject fresh key function");
+    variadic_tail();
+    released_tail();
+    span_tail();
+    choice_refusal(1, "foreign_touch", "The result choices are incomplete.");
+    println("reject void result choice");
+    choice_refusal(2, "foreign_make", "The result choices are incomplete.");
+    println("reject owning result without choice");
+    choice_refusal(3, "foreign_view", "The result choices are incomplete.");
+    println("reject incomplete choices");
+    choice_refusal(4, "foreign_view", "Only an owning result has an empty choice.");
+    println("reject borrowed empty choice");
+    choice_refusal(5, "foreign_view", "The result destination is not a complete local place.");
+    println("reject nonlocal destination");
+    choice_refusal(6, "foreign_view", "The result destination is not a complete local place.");
+    println("reject residual destination");
+    choice_refusal(7, "foreign_view", "The result destination is not a complete local place.");
+    println("reject captured destination");
+    choice_refusal(12, "foreign_view", "The result destination is not a complete local place.");
+    println("reject other function destination");
+    choice_refusal(8, "foreign_make", "The owning result destination is not an owning place.");
+    println("reject borrowed owning destination");
+    choice_refusal(9, "foreign_make", "A result choice needs a new guard.");
+    println("reject unguarded choices");
+    choice_refusal(10, "foreign_view", "A single result choice is unconditional.");
+    println("reject guarded single choice");
+    choice_refusal(14, "foreign_view", "A single result choice is unconditional.");
+    println("reject single choice with a fact");
+    choice_refusal(13, "foreign_view", "A result choice needs a new guard.");
+    println("reject existing choice guard");
+    choice_refusal(11, "foreign_make", "The result choices repeat a guard.");
+    println("reject repeated guard");
+    string none = "An empty result choice needs a null fact.";
+    string invalid = "The result choice facts are invalid.";
+    string nonempty = "An owning result needs a nonempty choice.";
+    result_fact(66, 0, none); println("reject empty choice without a fact");
+    result_fact(67, 1, none); println("reject empty choice with a non-null fact");
+    result_fact(68, 2, none); println("reject empty choice with another version fact");
+    result_fact(71, 3, none); println("reject empty choice with both facts");
+    result_fact(72, 4, "A nonempty owning result choice cannot be null.");
+    println("reject nonempty choice with a null fact");
+    result_fact(73, 5, "The caller state already holds a nullness fact on the result.");
+    println("reject caller nullness fact");
+    result_fact(74, 6, invalid); println("reject existing fact key");
+    result_fact(75, 7, invalid); println("reject repeated fact key");
+    result_fact(76, 8, invalid); println("reject fact key kind");
+    result_fact(77, 9, invalid); println("reject unbounded nullness fact");
+    result_fact(80, 12, invalid); println("reject fact key of another function");
+    result_fact(78, 10, nonempty); println("reject only a null choice");
+    result_fact(79, 11, nonempty); println("reject unguarded empty choice");
+    relation_collision(69, false); println("reject fresh relation collision");
+    relation_collision(70, true); println("reject fresh edge relation collision");
+    destination_owner(62, true); println("reject residual owner place");
+    destination_owner(63, false); println("reject ambiguous destination owner");
+    borrowed_keys(65); println("accept borrowed result without allocation key");
+    fact_bound();
+    single_sweep();
+    choice_sweep();
+    return 0;
+}

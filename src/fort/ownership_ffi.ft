@@ -732,6 +732,7 @@ struct boundary_plan {
 struct preparation {
     boundary_plan mut* own selected;
     ownership_api.proof_status proof;
+    ownership_api.entity_id event;
 }
 struct preparation_context {
     copy_context copy;
@@ -740,6 +741,7 @@ struct preparation_context {
     string message;
     ownership_api.event_kind kind;
     ownership_api.entity_id relation;
+    bool possible;
 }
 struct checked_place {
     types.node* ty;
@@ -767,7 +769,8 @@ fn preparation_fail(preparation_context mut* c, string text,
     c->kind = kind;
     c->relation = relation;
     if (kind == ownership_api.event_kind.invalid_use ||
-        kind == ownership_api.event_kind.caller_requirement) {
+        kind == ownership_api.event_kind.caller_requirement ||
+        kind == ownership_api.event_kind.lost_ownership) {
         c->copy.proof.failed = true;
     } else {
         failed(&c->copy, ownership_api.incomplete_reason.unknown_effect, relation);
@@ -782,7 +785,8 @@ fn preparation_report(preparation_context mut* c) void {
     event.operation = c->metadata.operation;
     event.source = c->metadata.source;
     event.kind = c->kind;
-    event.evidence = c->copy.proof.kind == ownership_api.proof_kind.complete ?
+    // A violation on one feasible choice of several has no validated witness.
+    event.evidence = c->copy.proof.kind == ownership_api.proof_kind.complete && !c->possible ?
         ownership_api.evidence_kind.unconditional :
         ownership_api.evidence_kind.abstract_possibility;
     event.reason = first.reason;
@@ -1156,7 +1160,9 @@ fn preparation_arguments(preparation_context mut* c, boundary_plan mut* plan) bo
                 "The supplied tail type violates the checked extern ABI precondition.",
                 ownership_api.event_kind.incomplete_proof, operand.version);
         }
-        if (ownership_keys.function(operand.version.function, r->call.operation.function) != 0) {
+        // A transfer writes a canonical empty owner with no value version.
+        if (operand.version.kind != ownership_api.entity_kind.none &&
+            ownership_keys.function(operand.version.function, r->call.operation.function) != 0) {
             return preparation_fail(c, "The captured argument function key does not match.",
                 ownership_api.event_kind.incomplete_proof, operand.version);
         }
@@ -1597,5 +1603,616 @@ fn prepare_boundary(ownership_api.services* svc, boundary_request* req) preparat
     }
     preparation_report(&c);
     out.proof = c.copy.proof;
+    out.event = c.metadata.event;
     return out;
+}
+
+// The signature hook applies the trusted extern boundary to a prepared plan (D17.13).
+// The producer partitions a foreign result into choices. Each choice names one destination, a
+// new guard, and the facts that hold on that choice only. The hook adds them to that choice.
+struct result_choice {
+    ownership_api.entity_id guard;
+    ownership_api.place_path destination;
+    bool empty;
+    ownership_api.predicate_atom@ facts;
+}
+// The closure assigns the fresh result keys before the hook runs. The hook checks them.
+struct hook_request {
+    boundary_request boundary;
+    result_choice@ choices;
+    bool choices_complete;
+    ownership_api.entity_id fresh_source;
+    ownership_api.entity_id fresh_allocation;
+    ownership_api.entity_id fresh_version;
+    ownership_api.entity_id fresh_relation;
+}
+enum result_shape { none, scalar, borrowed, owning }
+enum place_relation { disjoint, overlap, equal }
+struct hook_context {
+    preparation_context prep;
+    hook_request* request;
+    boundary_plan* plan;
+    result_shape shape;
+    bool reported;
+    ownership_state.state transferred;
+    ownership_state.state mut@ own states;
+    u64 states_len;
+    ownership_api.ordered_effect mut@ own transfers;
+    u64 transfers_len;
+    ownership_api.source_fact[1] trusted;
+    u64 trusted_len;
+}
+// The public callback context keeps the private inputs that the frozen request has no field for.
+struct adapter {
+    storage_context storage;
+    hook_request request;
+    ownership_api.services* services;
+}
+
+fn free_hook(hook_context mut* h) void {
+    u64 mut i = 0;
+    while (i < h->states_len) { ownership_state.free(&h->states[i]); i += 1; }
+    del(h->states);
+    del(h->transfers);
+    ownership_state.free(&h->transferred);
+    h->states_len = 0;
+    h->transfers_len = 0;
+}
+fn hook_fail(hook_context mut* h, string text, ownership_api.event_kind kind,
+    ownership_api.entity_id relation) bool {
+    return preparation_fail(&h->prep, text, kind, relation);
+}
+// A state mutator reports its own refusal. A precision refusal has no report yet.
+fn hook_mutation(hook_context mut* h, ownership_api.mutation_result result) bool {
+    if (result.applied) { return true; }
+    h->prep.copy.proof = result.proof;
+    if (!result.precision_lost) { h->reported = true; }
+    return false;
+}
+fn result_shape_of(types.node* ty) result_shape {
+    if (ty->kind == types.type_kind.k_void) { return result_shape.none; }
+    if (ty->kind == types.type_kind.k_ptr || ty->kind == types.type_kind.k_voidptr) {
+        return ty->is_own ? result_shape.owning : result_shape.borrowed;
+    }
+    return result_shape.scalar;
+}
+fn hook_guard(hook_context mut* h, ownership_api.entity_id guard) bool {
+    ownership_state.state* s = h->prep.request->before;
+    u64 mut i = 0;
+    while (i < s->guards_len) {
+        if (!spend(&h->prep.copy, 1)) { return false; }
+        if (same_key(s->guards[i].key, guard)) { return true; }
+        i += 1;
+    }
+    return false;
+}
+// A choice fact has a new predicate key that no earlier fact of any choice uses.
+fn hook_fact_key(hook_context mut* h, ownership_api.entity_id key, u64 choice, u64 fact) bool {
+    if (!hook_key(h, key, ownership_api.entity_kind.predicate)) { return false; }
+    ownership_state.state* s = h->prep.request->before;
+    u64 mut i = 0;
+    while (i < s->predicates_len) {
+        if (!spend(&h->prep.copy, 1)) { return false; }
+        if (same_key(s->predicates[i].key, key)) { return false; }
+        i += 1;
+    }
+    u64 mut c = 0;
+    while (c <= choice) {
+        result_choice earlier = h->request->choices[c];
+        u64 limit = c == choice ? fact : earlier.facts.len;
+        u64 mut f = 0;
+        while (f < limit) {
+            if (!spend(&h->prep.copy, 1)) { return false; }
+            if (same_key(earlier.facts[f].key, key)) { return false; }
+            f += 1;
+        }
+        c += 1;
+    }
+    return true;
+}
+fn hook_on_result(hook_context mut* h, ownership_api.predicate_atom atom) bool {
+    return atom.kind == ownership_api.predicate_kind.nullness &&
+        same_key(atom.left, h->request->fresh_version);
+}
+// A nullness fact on the result says null with `lower` exact 0 and not null with exact 1.
+fn hook_choice_facts(hook_context mut* h, u64 at) bool {
+    result_choice choice = h->request->choices[at];
+    u64 mut nulls = 0;
+    u64 mut values = 0;
+    u64 mut i = 0;
+    while (i < choice.facts.len) {
+        if (!spend(&h->prep.copy, 1)) { return false; }
+        ownership_api.predicate_atom atom = choice.facts[i];
+        bool bounded = atom.lower.kind == ownership_api.fact_kind.exact &&
+            (atom.lower.value == 0 || atom.lower.value == 1);
+        if (!hook_fact_key(h, atom.key, at, i) || (hook_on_result(h, atom) && !bounded)) {
+            if (!ownership_api.successful(h->prep.copy.proof)) { return false; }
+            return hook_fail(h, "The result choice facts are invalid.",
+                ownership_api.event_kind.incomplete_proof, atom.key);
+        }
+        if (hook_on_result(h, atom) && atom.lower.value == 0) { nulls += 1; }
+        if (hook_on_result(h, atom) && atom.lower.value == 1) { values += 1; }
+        i += 1;
+    }
+    // An own result keeps its fresh obligation unless its own choice proves the result null.
+    if (choice.empty && (nulls == 0 || values != 0)) {
+        return hook_fail(h, "An empty result choice needs a null fact.",
+            ownership_api.event_kind.incomplete_proof, choice.guard);
+    }
+    if (!choice.empty && h->shape == result_shape.owning && nulls != 0) {
+        return hook_fail(h, "A nonempty owning result choice cannot be null.",
+            ownership_api.event_kind.incomplete_proof, choice.guard);
+    }
+    return true;
+}
+// Every alternative copies the caller state, so the state cannot hold a fact on the result.
+fn hook_fresh_facts(hook_context mut* h) bool {
+    ownership_state.state* s = h->prep.request->before;
+    u64 mut i = 0;
+    while (i < s->predicates_len) {
+        if (!spend(&h->prep.copy, 1)) { return false; }
+        if (hook_on_result(h, s->predicates[i])) {
+            return hook_fail(h, "The caller state already holds a nullness fact on the result.",
+                ownership_api.event_kind.incomplete_proof, s->predicates[i].key);
+        }
+        i += 1;
+    }
+    return true;
+}
+// A destination is an actual local place of the calling function with exact projections.
+fn hook_place(hook_context mut* h, ownership_api.place_path p) bool {
+    if (p.root.kind != ownership_api.entity_kind.slot || p.residual ||
+        ownership_keys.function(p.root.function,
+        h->prep.request->call.operation.function) != 0) { return false; }
+    u64 mut i = 0;
+    while (i < p.projections.len) {
+        if (!spend(&h->prep.copy, 1)) { return false; }
+        ownership_api.projection part = p.projections[i];
+        if (part.kind != ownership_api.projection_kind.field &&
+            (part.kind != ownership_api.projection_kind.fixed_index ||
+            part.index.kind != ownership_api.fact_kind.exact || part.index.value < 0)) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+fn hook_choices(hook_context mut* h) bool {
+    hook_request* r = h->request;
+    u64 count = r->choices.len;
+    if ((h->shape == result_shape.none && count != 0) ||
+        (h->shape == result_shape.owning && count == 0) ||
+        (count != 0 && !r->choices_complete)) {
+        return hook_fail(h, "The result choices are incomplete.",
+            ownership_api.event_kind.incomplete_proof, ownership_api.entity_id{});
+    }
+    // At least one choice of an own result carries its fresh obligation.
+    bool mut nonempty = false;
+    u64 mut i = 0;
+    while (i < count) {
+        if (!spend(&h->prep.copy, 1)) { return false; }
+        if (!r->choices[i].empty) { nonempty = true; }
+        i += 1;
+    }
+    if (h->shape == result_shape.owning && !nonempty) {
+        return hook_fail(h, "An owning result needs a nonempty choice.",
+            ownership_api.event_kind.incomplete_proof, ownership_api.entity_id{});
+    }
+    if (count != 0 && !hook_fresh_facts(h)) { return false; }
+    i = 0;
+    while (i < count) {
+        if (!spend(&h->prep.copy, 1)) { return false; }
+        result_choice choice = r->choices[i];
+        if (!hook_place(h, choice.destination)) {
+            if (!ownership_api.successful(h->prep.copy.proof)) { return false; }
+            return hook_fail(h, "The result destination is not a complete local place.",
+                ownership_api.event_kind.incomplete_proof, choice.destination.root);
+        }
+        if (choice.empty && h->shape != result_shape.owning) {
+            return hook_fail(h, "Only an owning result has an empty choice.",
+                ownership_api.event_kind.incomplete_proof, choice.destination.root);
+        }
+        if (h->shape == result_shape.owning) {
+            checked_place held = preparation_type(&h->prep, choice.destination);
+            if (!ownership_api.successful(h->prep.copy.proof)) { return false; }
+            if (!held.complete || !types.type_is_reference(held.ty) || !held.ty->is_own) {
+                return hook_fail(h, "The owning result destination is not an owning place.",
+                    ownership_api.event_kind.incomplete_proof, choice.destination.root);
+            }
+        }
+        if (count == 1 && (choice.guard.kind != ownership_api.entity_kind.none ||
+            choice.facts.len != 0)) {
+            return hook_fail(h, "A single result choice is unconditional.",
+                ownership_api.event_kind.incomplete_proof, choice.guard);
+        }
+        if (count > 1 && (choice.guard.kind != ownership_api.entity_kind.guard ||
+            hook_guard(h, choice.guard))) {
+            if (!ownership_api.successful(h->prep.copy.proof)) { return false; }
+            return hook_fail(h, "A result choice needs a new guard.",
+                ownership_api.event_kind.incomplete_proof, choice.guard);
+        }
+        u64 mut j = 0;
+        while (j < i) {
+            if (!spend(&h->prep.copy, 1)) { return false; }
+            if (same_key(r->choices[j].guard, choice.guard)) {
+                return hook_fail(h, "The result choices repeat a guard.",
+                    ownership_api.event_kind.incomplete_proof, choice.guard);
+            }
+            j += 1;
+        }
+        if (!hook_choice_facts(h, i)) { return false; }
+        i += 1;
+    }
+    return true;
+}
+fn hook_key(hook_context mut* h, ownership_api.entity_id key, ownership_api.entity_kind kind)
+    bool {
+    return key.kind == kind && ownership_keys.function(key.function,
+        h->prep.request->call.operation.function) == 0;
+}
+// Fresh keys cannot name an existing source, allocation, value version, or relation.
+fn hook_fresh(hook_context mut* h) bool {
+    hook_request* r = h->request;
+    ownership_state.state* s = h->prep.request->before;
+    if (r->choices.len == 0) { return true; }
+    // A reference result has a nonempty choice, so it always needs a fresh source.
+    bool sourced = h->shape == result_shape.borrowed || h->shape == result_shape.owning;
+    bool allocates = h->shape == result_shape.owning;
+    if (!hook_key(h, r->fresh_version, ownership_api.entity_kind.value) ||
+        (sourced && (!hook_key(h, r->fresh_source, ownership_api.entity_kind.source) ||
+        !hook_key(h, r->fresh_relation, ownership_api.entity_kind.relation))) ||
+        (allocates && !hook_key(h, r->fresh_allocation, ownership_api.entity_kind.allocation))) {
+        return hook_fail(h, "The fresh result keys are invalid.",
+            ownership_api.event_kind.incomplete_proof, ownership_api.entity_id{});
+    }
+    u64 mut i = 0;
+    while (i < s->contents_len) {
+        if (!spend(&h->prep.copy, 1)) { return false; }
+        if (same_key(s->contents[i].value_version, r->fresh_version)) {
+            return hook_fail(h, "The fresh value version already exists.",
+                ownership_api.event_kind.incomplete_proof, r->fresh_version);
+        }
+        i += 1;
+    }
+    i = 0;
+    while (sourced && i < s->contents_len) {
+        u64 mut b = 0;
+        while (b < s->contents[i].borrows.len) {
+            if (!spend(&h->prep.copy, 1)) { return false; }
+            if (same_key(s->contents[i].borrows[b].key, r->fresh_relation)) {
+                return hook_fail(h, "The fresh relation key already exists.",
+                    ownership_api.event_kind.incomplete_proof, r->fresh_relation);
+            }
+            b += 1;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (sourced && i < s->edges_len) {
+        if (!spend(&h->prep.copy, 1)) { return false; }
+        if (same_key(s->edges[i].key, r->fresh_relation)) {
+            return hook_fail(h, "The fresh relation key already exists.",
+                ownership_api.event_kind.incomplete_proof, r->fresh_relation);
+        }
+        i += 1;
+    }
+    i = 0;
+    while (sourced && i < s->sources_len) {
+        if (!spend(&h->prep.copy, 1)) { return false; }
+        if (same_key(s->sources[i].key, r->fresh_source)) {
+            return hook_fail(h, "The fresh source key already exists.",
+                ownership_api.event_kind.incomplete_proof, r->fresh_source);
+        }
+        i += 1;
+    }
+    i = 0;
+    while (allocates && i < s->allocations_len) {
+        if (!spend(&h->prep.copy, 1)) { return false; }
+        if (same_key(s->allocations[i].key, r->fresh_allocation)) {
+            return hook_fail(h, "The fresh allocation key already exists.",
+                ownership_api.event_kind.incomplete_proof, r->fresh_allocation);
+        }
+        i += 1;
+    }
+    return true;
+}
+fn hook_source(hook_context mut* h, ownership_api.entity_id allocation) ownership_api.entity_id {
+    ownership_state.state* s = &h->transferred;
+    ownership_api.entity_id mut found = {};
+    u64 mut matches = 0;
+    u64 mut i = 0;
+    while (i < s->sources_len) {
+        if (!spend(&h->prep.copy, 1)) { return ownership_api.entity_id{}; }
+        if (same_key(s->sources[i].allocation, allocation)) {
+            found = s->sources[i].key;
+            matches += 1;
+        }
+        i += 1;
+    }
+    return matches == 1 ? found : ownership_api.entity_id{};
+}
+// An own input discharges the caller once. The transfer itself releases nothing.
+fn hook_transfers(hook_context mut* h) bool {
+    boundary_plan* plan = h->plan;
+    ownership_state.state mut* t = &h->transferred;
+    ownership_api.services* svc = h->prep.copy.services;
+    ownership_api.operation_position op = h->prep.metadata.operation;
+    ownership_api.source_position at = h->prep.metadata.source;
+    if (!array_permission(&h->prep.copy, plan->selected_len)) { return false; }
+    h->transfers = new(ownership_api.ordered_effect, plan->selected_len);
+    u64 mut i = 0;
+    while (i < plan->selected_len) {
+        if (!spend(&h->prep.copy, 1)) { return false; }
+        selected_allocation item = plan->selected[i];
+        u64 mut index = ownership_state.U64_MAX;
+        u64 mut j = 0;
+        while (j < t->allocations_len) {
+            if (!spend(&h->prep.copy, 1)) { return false; }
+            if (same_key(t->allocations[j].key, item.allocation)) { index = j; }
+            j += 1;
+        }
+        if (index == ownership_state.U64_MAX) { return preparation_graph_fail(&h->prep); }
+        ownership_api.entity_id source = hook_source(h, item.allocation);
+        if (!ownership_api.successful(h->prep.copy.proof)) { return false; }
+        ownership_api.place_path held = t->allocations[index].owner.place;
+        ownership_api.owner_location mut after = {};
+        after.detached = true;
+        if (!hook_mutation(h, ownership_state.transfer_owner(t, svc, item.allocation, after,
+            true, op, at))) { return false; }
+        t->allocations[index].obligation = false;
+        if (item.incoming.key.kind == ownership_api.entity_kind.none) {
+            ownership_api.place_path holding = plan->operands[item.argument].value.place;
+            ownership_api.place_path[1] aliases = {holding};
+            ownership_api.contents_fact mut empty = {};
+            empty.place = holding;
+            empty.kind = ownership_api.contents_kind.empty_owner;
+            empty.owner_empty = true;
+            empty.span_length.kind = ownership_api.fact_kind.exact;
+            if (!hook_mutation(h, ownership_state.strong_contents(t, svc, empty, aliases[..],
+                true, op, at))) { return false; }
+        }
+        h->transfers[h->transfers_len] = ownership_api.ordered_effect{item.allocation,
+            ownership_api.effect_kind.transfer, op, held, source, item.allocation,
+            ownership_api.entity_id{}};
+        h->transfers_len += 1;
+        i += 1;
+    }
+    return true;
+}
+fn hook_relation(hook_context mut* h, ownership_api.place_path a, ownership_api.place_path b)
+    place_relation {
+    if (ownership_state.has_residual(a) || ownership_state.has_residual(b)) {
+        return place_relation.overlap;
+    }
+    if (!same_key(a.root, b.root)) { return place_relation.disjoint; }
+    u64 shorter = a.projections.len < b.projections.len ? a.projections.len : b.projections.len;
+    u64 mut i = 0;
+    while (i < shorter) {
+        if (!spend(&h->prep.copy, 1)) { return place_relation.overlap; }
+        ownership_api.projection x = a.projections[i];
+        ownership_api.projection y = b.projections[i];
+        if (x.kind == ownership_api.projection_kind.field &&
+            y.kind == ownership_api.projection_kind.field) {
+            if (x.field != y.field) { return place_relation.disjoint; }
+        } else if (x.kind == ownership_api.projection_kind.fixed_index &&
+            y.kind == ownership_api.projection_kind.fixed_index &&
+            x.index.kind == ownership_api.fact_kind.exact &&
+            y.index.kind == ownership_api.fact_kind.exact) {
+            if (x.index.value != y.index.value) { return place_relation.disjoint; }
+        } else { return place_relation.overlap; }
+        i += 1;
+    }
+    return a.projections.len == b.projections.len ? place_relation.equal : place_relation.overlap;
+}
+// Result publication cannot discard a live owner. The check reads the state after transfers.
+fn hook_destinations(hook_context mut* h) bool {
+    ownership_state.state* t = &h->transferred;
+    u64 count = h->request->choices.len;
+    u64 mut c = 0;
+    while (c < count) {
+        ownership_api.place_path destination = h->request->choices[c].destination;
+        u64 mut i = 0;
+        while (i < t->allocations_len) {
+            if (!spend(&h->prep.copy, 1)) { return false; }
+            ownership_api.allocation_fact owner = t->allocations[i];
+            if (owner.obligation) {
+                place_relation related = hook_relation(h, owner.owner.place, destination);
+                if (!ownership_api.successful(h->prep.copy.proof)) { return false; }
+                bool one = owner.count.one && !owner.count.zero && !owner.count.many;
+                if (related == place_relation.equal && one) {
+                    h->prep.possible = count > 1;
+                    return hook_fail(h, count > 1 ?
+                        "A feasible result destination retains a live owner." :
+                        "The result destination contains a live owner.",
+                        ownership_api.event_kind.lost_ownership, owner.key);
+                }
+                if (related != place_relation.disjoint) {
+                    return hook_fail(h, "The result destination may hold a live owner.",
+                        ownership_api.event_kind.incomplete_proof, owner.key);
+                }
+            }
+            i += 1;
+        }
+        c += 1;
+    }
+    return true;
+}
+// Each nonempty reference choice receives one fresh trusted source. An owning one also
+// receives one fresh obligation with an unknown length. No nullness fact appears.
+fn hook_write(hook_context mut* h, ownership_state.state mut* s, result_choice choice) bool {
+    hook_request* r = h->request;
+    ownership_api.services* svc = h->prep.copy.services;
+    ownership_api.operation_position op = h->prep.metadata.operation;
+    ownership_api.source_position at = h->prep.metadata.source;
+    ownership_api.contents_fact mut value = {};
+    value.place = choice.destination;
+    value.value_version = r->fresh_version;
+    ownership_api.borrow_relation[1] mut borrows = {};
+    // The facts and the guard of a choice hold in that choice's state only.
+    if (choice.guard.kind != ownership_api.entity_kind.none) {
+        // Up to 8 facts use a fixed array. A scratch block in each write would reorder the
+        // allocator's free lists, as `ownership_state.index_view` notes.
+        ownership_api.entity_id[8] mut local = {};
+        ownership_api.entity_id mut@ own mut spilled = {};
+        defer del(spilled);
+        ownership_api.entity_id mut@ mut positive = local[0..0];
+        if (choice.facts.len <= local.len) { positive = local[0..choice.facts.len]; }
+        else {
+            spilled = new(ownership_api.entity_id, choice.facts.len);
+            positive = spilled[..];
+        }
+        u64 mut i = 0;
+        while (i < choice.facts.len) {
+            if (!hook_mutation(h, ownership_state.add_predicate(s, svc, choice.facts[i], op, at))) {
+                return false;
+            }
+            positive[i] = choice.facts[i].key;
+            i += 1;
+        }
+        ownership_api.guard_fact mut guard = {};
+        guard.key = choice.guard;
+        guard.positive = positive;
+        if (!hook_mutation(h, ownership_state.add_guard(s, svc, guard, op, at))) { return false; }
+    }
+    if (h->shape == result_shape.scalar) {
+        value.kind = ownership_api.contents_kind.scalar;
+    } else if (choice.empty) {
+        value.kind = ownership_api.contents_kind.empty_owner;
+        value.owner_empty = true;
+        value.span_length.kind = ownership_api.fact_kind.exact;
+    } else {
+        ownership_api.source_fact mut source = {};
+        source.key = r->fresh_source;
+        source.kind = ownership_api.source_kind.trusted_foreign;
+        source.validity = ownership_api.validity_kind.live;
+        source.boundary = op;
+        if (h->shape == result_shape.owning) { source.allocation = r->fresh_allocation; }
+        if (!hook_mutation(h, ownership_state.add_source(s, svc, source, op, at))) {
+            return false;
+        }
+        if (h->shape == result_shape.owning) {
+            ownership_api.allocation_fact mut owner = {};
+            owner.key = r->fresh_allocation;
+            owner.site = r->fresh_allocation;
+            owner.validity = ownership_api.validity_kind.live;
+            owner.count.one = true;
+            owner.obligation = true;
+            owner.owner.place = choice.destination;
+            if (!hook_mutation(h, ownership_state.add_allocation(s, svc, owner, op, at))) {
+                return false;
+            }
+        }
+        borrows[0].key = r->fresh_relation;
+        borrows[0].value_version = r->fresh_version;
+        borrows[0].containing = choice.destination;
+        borrows[0].source = r->fresh_source;
+        borrows[0].range.source = r->fresh_source;
+        borrows[0].representation_complete = true;
+        value.kind = ownership_api.contents_kind.reference;
+        value.borrows = borrows[..];
+        if (h->trusted_len == 0) { h->trusted[0] = source; h->trusted_len = 1; }
+    }
+    ownership_api.place_path[1] aliases = {choice.destination};
+    return hook_mutation(h, ownership_state.strong_contents(s, svc, value, aliases[..], true,
+        op, at));
+}
+fn hook_results(hook_context mut* h) bool {
+    u64 count = h->request->choices.len;
+    if (count == 0) { return true; }
+    if (count == 1) { return hook_write(h, &h->transferred, h->request->choices[0]); }
+    if (!array_permission(&h->prep.copy, count)) { return false; }
+    h->states = new(ownership_state.state, count);
+    u64 mut i = 0;
+    while (i < count) {
+        if (!spend(&h->prep.copy, 1)) { return false; }
+        h->states_len += 1;
+        if (!copy_state(&h->prep.copy, &h->transferred, &h->states[i]) ||
+            !hook_write(h, &h->states[i], h->request->choices[i])) { return false; }
+        i += 1;
+    }
+    return true;
+}
+fn hook_publish(storage_context mut* store, hook_context mut* h) ownership_api.ffi_result {
+    ownership_api.ffi_result mut out = {};
+    hook_request* r = h->request;
+    u64 count = h->states_len == 0 ? 1 : h->states_len;
+    u64 operands = h->plan->operands.len;
+    if (!array_permission(&h->prep.copy, count) || !array_permission(&h->prep.copy, operands)) {
+        preparation_report(&h->prep);
+        out.proof = h->prep.copy.proof;
+        return out;
+    }
+    alternative mut@ own alternatives = new(alternative, count);
+    defer del(alternatives);
+    ownership_api.contents_fact mut@ own arguments = new(ownership_api.contents_fact, operands);
+    defer del(arguments);
+    if (h->states_len == 0) {
+        alternatives[0].before = &h->transferred;
+        if (r->choices.len == 1) { alternatives[0].guard = r->choices[0].guard; }
+    }
+    u64 mut i = 0;
+    while (i < h->states_len) {
+        alternatives[i] = alternative{r->choices[i].guard, &h->states[i]};
+        i += 1;
+    }
+    i = 0;
+    while (i < operands) { arguments[i] = h->plan->operands[i].value; i += 1; }
+    ownership_api.outcome_fact[1] mut outcomes = {};
+    outcomes[0].kind = ownership_api.outcome_kind.unresolved_foreign;
+    outcomes[0].possible_caller_return = !r->boundary.call.declaration.ty->is_noreturn;
+    outcomes[0].cleanup_required = true;
+    outcomes[0].effects = h->transfers[..h->transfers_len];
+    storage_request mut stored = {};
+    stored.operation = h->prep.metadata.operation;
+    stored.source = h->prep.metadata.source;
+    stored.event = h->prep.metadata.event;
+    stored.alternatives = alternatives[..];
+    stored.arguments = arguments[..];
+    stored.trusted_sources = h->trusted[..h->trusted_len];
+    stored.signature_transfers = h->transfers[..h->transfers_len];
+    stored.outcomes = outcomes[..];
+    stored.proof.kind = ownership_api.proof_kind.complete;
+    stored.hidden_effects_outside_proof = true;
+    return retain(store, h->prep.copy.services, &stored);
+}
+/// Applies one trusted extern call to supplied caller facts (D17.13).
+/// Only a complete call replaces the retained result. A failure keeps the input and that result.
+fn apply_boundary(storage_context mut* store, ownership_api.services* svc, hook_request* req)
+    ownership_api.ffi_result {
+    ownership_api.ffi_result mut out = {};
+    preparation mut prepared = prepare_boundary(svc, &req->boundary);
+    if (!ownership_api.successful(prepared.proof) || prepared.selected == null) {
+        drop_boundary_plan(move(prepared.selected));
+        out.proof = prepared.proof;
+        return out;
+    }
+    hook_context mut h = {};
+    defer free_hook(&h);
+    h.prep.copy.services = svc;
+    h.prep.copy.proof.kind = ownership_api.proof_kind.complete;
+    h.prep.metadata.operation = req->boundary.call.operation;
+    h.prep.metadata.source = req->boundary.call.source;
+    h.prep.metadata.event = prepared.event;
+    h.prep.copy.request = &h.prep.metadata;
+    h.prep.request = &req->boundary;
+    h.prep.kind = ownership_api.event_kind.incomplete_proof;
+    h.request = req;
+    h.plan = prepared.selected;
+    h.shape = result_shape_of(req->boundary.call.declaration.ty->elem);
+    if (hook_choices(&h) && hook_fresh(&h) &&
+        copy_state(&h.prep.copy, req->boundary.before, &h.transferred) &&
+        hook_transfers(&h) && hook_destinations(&h) && hook_results(&h)) {
+        out = hook_publish(store, &h);
+    } else {
+        if (!h.reported) { preparation_report(&h.prep); }
+        out.proof = h.prep.copy.proof;
+    }
+    drop_boundary_plan(move(prepared.selected));
+    return out;
+}
+/// Serves `ownership_api.foreign`. The context supplies the private boundary inputs.
+fn adapter_call(void mut* opaque, ownership_api.ffi_request* req) ownership_api.ffi_result {
+    adapter mut* a = cast(opaque, adapter mut*);
+    a->request.boundary.call = *req;
+    return apply_boundary(&a->storage, a->services, &a->request);
 }
