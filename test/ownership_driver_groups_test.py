@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Check three selected driver groups: check against build, no C compiler, pre-transform FIR.
+"""Check three selected driver groups and the ownership pass of the FIR harness.
+
+The groups are check against build, no C compiler, and pre-transform FIR.
 
 Each group uses one program whose selected proof exits 1. The entry module holds checked
 arithmetic and an overwrite, so the build-mode pass changes its FIR. An imported module holds a
@@ -13,6 +15,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -222,6 +225,85 @@ class DriverGroupsTest(unittest.TestCase):
             "}\n"
         )
         self.assertEqual(fir_sizes(text), {"main.f": 3, "main.g": 1})
+
+
+V5_BODY = (
+    "fn main.f(_1 (x): i32) -> i32 {\n"
+    "    bb0: {\n"
+    "        _0 = move _1 #2:12 s1;\n"
+    "        return #2:5 s1;\n"
+    "    }\n"
+    "}\n"
+)
+
+LEAK_BODY = (
+    "fn main.leak() -> void {\n"
+    "    let _1 (p): i32 mut* own #1:1;\n"
+    "\n"
+    "    bb0: {\n"
+    "        live(_1) #1:1 s0;\n"
+    "        _1 = alloc<i32>(const u64 1) #1:1 s0;\n"
+    "        dead(_1) #1:1 s1;\n"
+    "        return #1:1 s1;\n"
+    "    }\n"
+    "}\n"
+)
+
+
+class FirOwnershipPassTest(unittest.TestCase):
+    """The pass `ownership-local` of `fort --fir-test` reports errors with an exit status.
+
+    A broken verifier rule gives exit 2 and an ownership error gives exit 1; neither is a panic.
+    """
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="fort-fir-ownership-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+
+    def run_test(self, passes, body):
+        path = self.root / "case.fir"
+        path.write_text("".join("//! pass: %s\n" % name for name in passes) + body)
+        return subprocess.run([OPTIONS.fort, "--std-dir", OPTIONS.std_dir, "--fir-test",
+                               str(path)], cwd=self.root, capture_output=True, text=True,
+                              timeout=120, check=False)
+
+    def test_a_broken_verifier_rule_exits_two_without_a_panic(self):
+        result = self.run_test(["ownership-local"], V5_BODY)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("fort: error: fir.verify: V5 a move of a place whose type does not own: "
+                      "main.f bb0 statement 0 (s1)", result.stderr)
+        self.assertNotIn("panic", result.stderr)
+
+    def test_the_verify_pass_still_panics_on_the_same_rule(self):
+        # The control of the case above: the same text under `verify` ends with SIGABRT.
+        result = self.run_test(["verify"], V5_BODY)
+        self.assertLess(result.returncode, 0)
+        self.assertIn("fir.verify: V5", result.stderr)
+
+    def test_a_source_ownership_error_exits_one_with_no_module(self):
+        result = self.run_test(["ownership-local"], LEAK_BODY)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("case.fir:1:1: error: lost ownership of 'p'", result.stderr)
+        # The verifier finds no rule broken in the same text.
+        self.assertEqual(self.run_test(["verify"], LEAK_BODY).returncode, 0)
+
+    def test_the_pass_runs_before_the_build_mode_pass(self):
+        result = self.run_test(["build-mode", "ownership-local"], LEAK_BODY)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("fort: error: the pass 'ownership-local' runs before the pass 'build-mode'",
+                      result.stderr)
+        before = self.run_test(["ownership-local", "build-mode"], LEAK_BODY)
+        self.assertEqual(before.returncode, 1, before.stderr)
+        self.assertIn("case.fir:1:1: error: lost ownership of 'p'", before.stderr)
+
+    def test_the_pass_takes_no_argument(self):
+        result = self.run_test(["ownership-local --release"], LEAK_BODY)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("fort: error: the pass 'ownership-local' takes no argument", result.stderr)
 
 
 def main():

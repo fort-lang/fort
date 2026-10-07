@@ -1,6 +1,7 @@
 /// Writes version 1 ownership coverage from retained source analyses.
 import containers;
 import diag;
+import fir;
 import json;
 import modules;
 import ownership_api;
@@ -305,9 +306,15 @@ fn verdict(ownership_source.context* c) i32 {
 fn location(ownership_source.context* c, ownership_api.source_position source,
     string entry) diag.loc {
     if (!source.filename_present) { return diag.loc_make(entry, 1, 1); }
-    string file = modules.file_at(c->modules, cast(source.file, u64));
-    return diag.loc_range(file, source.line, source.col,
-        source.end_line, source.end_col);
+    return position_in(modules.file_at(c->modules, cast(source.file, u64)), source, entry);
+}
+
+// The range of `source` in `file`. A source with no position stands at 1:1 of `entry` (D14.2).
+fn position_in(string file, ownership_api.source_position source, string entry) diag.loc {
+    if (!source.filename_present || source.line == 0 || source.col == 0) {
+        return diag.loc_make(entry, 1, 1);
+    }
+    return diag.loc_range(file, source.line, source.col, source.end_line, source.end_col);
 }
 
 fn diagnostic(ownership_source.context mut* c, diag.sink mut* diagnostics, string entry,
@@ -339,21 +346,41 @@ fn diagnostic(ownership_source.context mut* c, diag.sink mut* diagnostics, strin
     }
     strbuf.str_buf mut message = strbuf.create();
     defer strbuf.free(&message);
-    strbuf.append(&message, "ownership proof is incomplete (");
-    strbuf.append(&message, rendered.stage);
-    strbuf.append(&message, ": ");
-    strbuf.append(&message, rendered.code);
-    if (rendered.limit.present) {
-        strbuf.append(&message, "; category ");
-        strbuf.append(&message, CATEGORIES[cast(rendered.limit.category, u64)]);
-        strbuf.append(&message, "; used ");
-        strbuf.append_u64(&message, rendered.limit.used);
-        strbuf.append(&message, "; bound ");
-        strbuf.append_u64(&message, rendered.limit.bound);
-    }
-    strbuf.push(&message, ')');
+    incomplete_message(rendered, &message);
     diag.error(diagnostics, location(c, rendered.source, entry), strbuf.view(&message));
     return normal;
+}
+
+// The text of an incomplete-proof error (toolchain.md 4.2).
+fn incomplete_message(reason rendered, strbuf.str_buf mut* message) void {
+    strbuf.append(message, "ownership proof is incomplete (");
+    strbuf.append(message, rendered.stage);
+    strbuf.append(message, ": ");
+    strbuf.append(message, rendered.code);
+    if (rendered.limit.present) {
+        strbuf.append(message, "; category ");
+        strbuf.append(message, CATEGORIES[cast(rendered.limit.category, u64)]);
+        strbuf.append(message, "; used ");
+        strbuf.append_u64(message, rendered.limit.used);
+        strbuf.append(message, "; bound ");
+        strbuf.append_u64(message, rendered.limit.bound);
+    }
+    strbuf.push(message, ')');
+}
+
+// The text of a refused V charge for rendered violations.
+fn report_limit_message(u64 bound, strbuf.str_buf mut* message) void {
+    strbuf.append(message, "cannot prove complete ownership reporting within the report bound ");
+    strbuf.append_u64(message, bound);
+}
+
+// The text of the error of a validated local violation. Its note is the violation text.
+fn violation_message(ownership_source_local.violation* v, strbuf.str_buf mut* message) void {
+    strbuf.append(message, v->kind == ownership_api.event_kind.invalid_use ?
+        "invalid use of " : "lost ownership of ");
+    if (v->quoted) { strbuf.push(message, '\''); }
+    strbuf.append(message, v->name);
+    if (v->quoted) { strbuf.push(message, '\''); }
 }
 
 // Renders validated local violations in canonical body and operation order.
@@ -368,19 +395,13 @@ fn violations(ownership_source.context mut* c, diag.sink mut* diagnostics, strin
             if (!ownership_source_local.charge_rendered(&row->local, v)) {
                 strbuf.str_buf mut limit = strbuf.create();
                 defer strbuf.free(&limit);
-                strbuf.append(&limit,
-                    "cannot prove complete ownership reporting within the report bound ");
-                strbuf.append_u64(&limit, row->local.meter.bounds.v);
+                report_limit_message(row->local.meter.bounds.v, &limit);
                 diag.error(diagnostics, location(c, v->source, entry), strbuf.view(&limit));
                 return false;
             }
             strbuf.str_buf mut message = strbuf.create();
             defer strbuf.free(&message);
-            strbuf.append(&message, v->kind == ownership_api.event_kind.invalid_use ?
-                "invalid use of " : "lost ownership of ");
-            if (v->quoted) { strbuf.push(&message, '\''); }
-            strbuf.append(&message, v->name);
-            if (v->quoted) { strbuf.push(&message, '\''); }
+            violation_message(v, &message);
             diag.loc at = location(c, v->source, entry);
             diag.error(diagnostics, at, strbuf.view(&message));
             diag.note(diagnostics, at, v->text);
@@ -427,6 +448,48 @@ fn diagnose(ownership_source.context mut* c, diag.sink mut* diagnostics, string 
         }
         i += 1;
     }
+}
+
+/// Renders the local verdict of function `index` of a `.fir` test whose locations name `file`:
+/// each validated violation as an error and a note, then one incomplete-proof error when the
+/// local proof has no violation and is not complete. Returns the number of errors.
+fn fir_test_local(fir.func* f, u32 index, diag.sink mut* diagnostics, string file) u64 {
+    ownership_source_local.context mut local = ownership_source_local.context{};
+    defer ownership_source_local.free(&local);
+    ownership_api.function_id key = ownership_api.function_id{
+        ownership_api.declaration_id{0, index}, 0};
+    diag.loc name = f->sym->decl;
+    ownership_api.source_position declaration = ownership_api.source_position{0, 0, name.line,
+        name.col, name.end_line, name.end_col, true};
+    ownership_source_local.prepare(&local, f, key, 0, file, declaration);
+    ownership_source_local.solve(&local);
+    u64 mut errors = 0;
+    u64 mut k = 0;
+    while (k < local.violations_len) {
+        ownership_source_local.violation* v = &local.violations[k];
+        diag.loc at = position_in(file, v->source, file);
+        strbuf.str_buf mut message = strbuf.create();
+        defer strbuf.free(&message);
+        if (!ownership_source_local.charge_rendered(&local, v)) {
+            report_limit_message(local.meter.bounds.v, &message);
+            diag.error(diagnostics, at, strbuf.view(&message));
+            return errors + 1;
+        }
+        violation_message(v, &message);
+        diag.error(diagnostics, at, strbuf.view(&message));
+        diag.note(diagnostics, at, v->text);
+        errors += 1;
+        k += 1;
+    }
+    reason why = proof_reason("local", local.proof);
+    if (errors == 0 && why.present) {
+        strbuf.str_buf mut message = strbuf.create();
+        defer strbuf.free(&message);
+        incomplete_message(why, &message);
+        diag.error(diagnostics, position_in(file, why.source, file), strbuf.view(&message));
+        errors += 1;
+    }
+    return errors;
 }
 
 fn same_reason(reason a, reason b) bool {

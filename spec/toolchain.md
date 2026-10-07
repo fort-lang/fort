@@ -221,12 +221,23 @@ The proof adds no runtime ownership checks. It preserves the representations and
   `spec/fir.md` 13 and exits 0 (D14.1). A diagnostic of the prelude or of the FIR text writes no
   FIR and exits 1. The pass `none` runs nothing. The pass `verify` runs the verifier of
   `spec/fir.md` 10 on each function, and the first violation ends the compiler with a panic.
+  The pass `ownership-local` runs the local ownership analysis of `--ownership-check` on each
+  function, in text order (D17.14, D17.18). It runs no other analysis, so it gives no closure
+  proof. It first tests each function with the verifier in report mode. A broken rule writes
+  `fort: error:` and the violation, with no panic, and exits 2, as a verification failure of
+  `--ownership-check` does (1.1). Each validated violation is an error and a note at its
+  location. A function with no violation and an incomplete local proof gets one
+  `ownership proof is incomplete` error at its first incomplete reason (4.2). After an error
+  the pass writes no FIR and exits 1. A complete local proof proves one function in the local
+  scope of 1.1. The pass `ownership-local` must come before every pass `build-mode`, because
+  the proof reads the FIR before that pass (D19.8); after one it exits 2.
   The pass `build-mode` runs the build-mode pass of `spec/fir.md` 11 on each function, and does
   not run the verifier. Its arguments `--release` and `--no-bounds-check` select the mode, and
   with no argument it runs the default mode. The compiler reads every directive before it runs
-  a pass. An unknown pass, an argument of `none` or `verify`, and an argument of `build-mode`
-  that is no mode exit 2. `--fir-test` takes the target rule of `--check` and is a usage error
-  together with `--tokens`, `--ast`, `--check`, `--json`, `--index`, `--fir` or `--fir-after`.
+  a pass. An unknown pass, an argument of `none`, `verify` or `ownership-local`, and an
+  argument of `build-mode` that is no mode exit 2. `--fir-test` takes the target rule of
+  `--check` and is a usage error together with `--tokens`, `--ast`, `--check`, `--json`,
+  `--index`, `--fir` or `--fir-after`.
 - `--fir-verify-report` implies `--fir` and takes its target rule. It lowers each function of
   the closure as `--fir` does and runs the verifier of `spec/fir.md` 10 in report mode, first on
   the output of the lowering and then, when the function keeps every rule, on the output of the

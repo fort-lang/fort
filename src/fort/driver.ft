@@ -51,10 +51,12 @@ string FIR_BUILD_MODE = "build-mode";
 string[FIR_PASS_COUNT] FIR_PASSES = {"lower", "build-mode"};
 
 // The passes that the `//! pass:` directives of a `.fir` test name (spec/fir.md 16.3). `none`
-// runs nothing, `verify` runs the verifier on each function, and `build-mode` runs the build-mode
-// pass for the mode that its arguments, `--release` and `--no-bounds-check`, select.
+// runs nothing, `verify` runs the verifier on each function, `ownership-local` runs the local
+// ownership analysis on each function, and `build-mode` runs the build-mode pass for the mode
+// that its arguments, `--release` and `--no-bounds-check`, select.
 string FIR_TEST_NONE = "none";
 string FIR_TEST_VERIFY = "verify";
+string FIR_TEST_OWNERSHIP_LOCAL = "ownership-local";
 string FIR_TEST_RELEASE = "--release";
 string FIR_TEST_NO_BOUNDS = "--no-bounds-check";
 
@@ -1319,6 +1321,7 @@ struct fir_test {
 enum test_pass_kind {
     tp_none,
     tp_verify,
+    tp_ownership_local,
     tp_build,
 }
 
@@ -1378,8 +1381,9 @@ fn read_fir_test(string text, fir_test mut* t) void {
 }
 
 // Reads the text of one `//! pass:` directive into *out. EXIT_OK when the pass runs, else
-// EXIT_USAGE after an error: an unknown pass, `none` or `verify` with an argument, or an argument
-// of `build-mode` that is not --release or --no-bounds-check. Spaces separate the arguments.
+// EXIT_USAGE after an error: an unknown pass, `none`, `verify` or `ownership-local` with an
+// argument, or an argument of `build-mode` that is not --release or --no-bounds-check. Spaces
+// separate the arguments.
 fn fir_test_pass(string text, test_pass mut* out) i32 {
     *out = test_pass{};
     i64 space = str.index_of(text, ' ');
@@ -1389,13 +1393,15 @@ fn fir_test_pass(string text, test_pass mut* out) i32 {
         name = text[0..cast(space, u64)];
         rest = text[cast(space, u64) + 1..text.len];
     }
-    if (name == FIR_TEST_NONE || name == FIR_TEST_VERIFY) {
+    if (name == FIR_TEST_NONE || name == FIR_TEST_VERIFY || name == FIR_TEST_OWNERSHIP_LOCAL) {
         if (space >= 0) {
             eprintln("fort: error: the pass '", name, "' takes no argument");
             return EXIT_USAGE;
         }
         if (name == FIR_TEST_VERIFY) {
             out->kind = test_pass_kind.tp_verify;
+        } else if (name == FIR_TEST_OWNERSHIP_LOCAL) {
+            out->kind = test_pass_kind.tp_ownership_local;
         }
         return EXIT_OK;
     }
@@ -1425,12 +1431,21 @@ fn fir_test_pass(string text, test_pass mut* out) i32 {
     return EXIT_OK;
 }
 
-// Runs the passes of a `.fir` test in order, each over every function of `m` in text order. The
-// pass `verify` ends the compiler with a panic at the first violation of a rule.
-fn run_test_passes(fir.module mut* m, test_pass@ passes, fir_verify.runtime* rt) void {
+// Runs the passes of a `.fir` test in order, each over every function of `m` in text order.
+// EXIT_OK when all passes ran. The pass `verify` ends the compiler with a panic at the first
+// violation of a rule. The pass `ownership-local` stops the run after it reports an error
+// (exit 1) or a broken verifier rule (exit 2).
+fn run_test_passes(fir.module mut* m, test_pass@ passes, fir_verify.runtime* rt,
+    diag.sink mut* diagnostics, string file) i32 {
     u64 mut pass_index = 0;
     while (pass_index < passes.len) {
         test_pass p = passes[pass_index];
+        if (p.kind == test_pass_kind.tp_ownership_local) {
+            i32 status = local_ownership_pass(m, rt, diagnostics, file);
+            if (status != EXIT_OK) {
+                return status;
+            }
+        }
         u64 mut k = 0;
         while (k < m->funcs.len) {
             fir.func mut* f = &m->funcs.items[k];
@@ -1443,6 +1458,43 @@ fn run_test_passes(fir.module mut* m, test_pass@ passes, fir_verify.runtime* rt)
         }
         pass_index += 1;
     }
+    return EXIT_OK;
+}
+
+// The pass `ownership-local` of a `.fir` test: the local ownership analysis of --ownership-check
+// on each function, in text order (D17.14, D17.18). It runs no other analysis, so it proves no
+// closure. The verifier tests each function first and does not panic: a broken rule is exit 2,
+// as a verification failure of --ownership-check is (toolchain.md 1.1). A validated violation,
+// or an incomplete local proof, is an error at its source location, and the pass then gives
+// exit 1. The function index is the declaration key in module 0.
+fn local_ownership_pass(fir.module mut* m, fir_verify.runtime* rt, diag.sink mut* diagnostics,
+    string file) i32 {
+    u64 mut k = 0;
+    while (k < m->funcs.len) {
+        fir.func* f = &m->funcs.items[k];
+        strbuf.str_buf mut failure = strbuf.create();
+        defer strbuf.free(&failure);
+        if (!fir_verify.verify_report(f, rt, &failure)) {
+            error(strbuf.view(&failure));
+            return EXIT_USAGE;
+        }
+        k += 1;
+    }
+    u64 mut errors = 0;
+    k = 0;
+    while (k < m->funcs.len) {
+        if (k > fir.U32_LIMIT) {
+            error("the .fir test has more functions than a declaration key holds");
+            return EXIT_USAGE;
+        }
+        errors += ownership_report.fir_test_local(&m->funcs.items[k], cast(k, u32), diagnostics,
+            file);
+        k += 1;
+    }
+    if (errors > 0) {
+        return EXIT_COMPILE_ERROR;
+    }
+    return EXIT_OK;
 }
 
 // --fir-test reads a `.fir` test (spec/fir.md 16.3): it checks the prelude of the test as the
@@ -1450,7 +1502,8 @@ fn run_test_passes(fir.module mut* m, test_pass@ passes, fir_verify.runtime* rt)
 // test names, in order, and writes the module to stdout in one print. The harness compares the
 // text. A diagnostic of the prelude or of the FIR text is exit 1 with no text; an unreadable file
 // and a pass that does not run are exit 2. The pass `verify` ends the compiler with a panic at
-// the first violation of a rule, and writes no text then.
+// the first violation of a rule, and writes no text then. The pass `ownership-local` writes no
+// text after an error (exit 1) or a broken rule (exit 2), and it must come before `build-mode`.
 fn fir_test_entry(options* opts, string program) i32 {
     if (!target_form(opts->target)) {
         usage_error_arg("unsupported target", opts->target);
@@ -1475,11 +1528,18 @@ fn fir_test_entry(options* opts, string program) i32 {
     test_pass mut@ own passes = new(test_pass, t.passes.len);
     defer del(passes);
     u64 mut k = 0;
+    bool mut transformed = false;
     while (k < t.passes.len) {
         i32 pass = fir_test_pass(containers.str_at(&t.passes, k), &passes[k]);
         if (pass != EXIT_OK) {
             return pass;
         }
+        // The proof reads the FIR before the build-mode pass (spec/fir.md 14, D19.8).
+        if (passes[k].kind == test_pass_kind.tp_ownership_local && transformed) {
+            error("the pass 'ownership-local' runs before the pass 'build-mode'");
+            return EXIT_USAGE;
+        }
+        transformed = transformed || passes[k].kind == test_pass_kind.tp_build;
         k += 1;
     }
     // The loader reads the prelude in place of the file, so a diagnostic of the prelude names
@@ -1510,7 +1570,10 @@ fn fir_test_entry(options* opts, string program) i32 {
         return EXIT_COMPILE_ERROR;
     }
     fir_verify.runtime rt = fir_verify.runtime_of(&an.ck);
-    run_test_passes(&m, passes, &rt);
+    i32 ran = run_test_passes(&m, passes, &rt, session.diags(&s), opts->entry);
+    if (ran != EXIT_OK) {
+        return ran;
+    }
     strbuf.str_buf mut out = strbuf.create();
     defer strbuf.free(&out);
     fir_print.print_module(&m, &out);
