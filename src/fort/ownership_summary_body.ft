@@ -1421,7 +1421,10 @@ fn call(body_input* in, body_program mut* out, fir.statement* stmt, u32 block, u
     ownership_summary_model.summary_view* summary = rv.callee == fir.callee_kind.cl_fn ?
         binding(in, out, rv.callee_sym) : null;
     if (!ownership_api.successful(out->proof)) { return; }
-    if (summary == null || !direct(stmt->place)) {
+    // A direct fort call without a published summary, such as a recursive call or a missing
+    // body, stays an unresolved step: flow keeps its continuation and obligations. An extern or
+    // indirect call stays unsupported here.
+    if (rv.callee != fir.callee_kind.cl_fn || !direct(stmt->place)) {
         reject(out, ownership_api.incomplete_reason.unknown_effect);
         return;
     }
@@ -1447,7 +1450,7 @@ fn call(body_input* in, body_program mut* out, fir.statement* stmt, u32 block, u
     }
     u32 mut templates = 0;
     u64 mut i = 0;
-    while (i < summary->roots.len) {
+    while (summary != null && i < summary->roots.len) {
         if (!work(out, 1)) { return; }
         if (summary->roots[i].kind == ownership_summary_model.root_kind.allocation_template) {
             if (templates == U32_MAX) {
@@ -1504,8 +1507,8 @@ fn call(body_input* in, body_program mut* out, fir.statement* stmt, u32 block, u
         .operation = at, .source = location(in, out, stmt->loc)};
     out->steps_len += 1;
     out->scalars[dst] = ownership_api.scalar_fact{};
-    out->origins[dst] = reference(dst_ty) ? call_origin(in, out, rv, summary) :
-        ownership_api.entity_id{};
+    out->origins[dst] = reference(dst_ty) && summary != null ?
+        call_origin(in, out, rv, summary) : ownership_api.entity_id{};
 }
 
 fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block, u32 gap)

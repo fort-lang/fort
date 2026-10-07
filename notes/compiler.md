@@ -1268,7 +1268,9 @@ came here.
   Only the effects of the applied case run. A requirement after an abort cannot fail the call.
   The handler checks no collection loan, so a direct call inside an open loan fails before it.
   A callee summary without a proof keeps the call unknown. Its body reported its own error, so
-  the call does not fail the caller for it.
+  the call does not fail the caller for it. A direct fort call without a summary, such as a
+  recursive call or a missing body, is an unresolved step with the same continuation. An extern
+  or indirect call stays unsupported in the extractor.
 - **A branch on a captured formal gives guarded cases** (D17.18).
   Extraction walks each reached block of a forward tree and keeps the origins and scalars at each
   block entry. A back edge or a second parent keeps the body unsupported, so an `if` whose

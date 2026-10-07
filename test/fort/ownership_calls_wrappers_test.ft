@@ -98,6 +98,16 @@ string[2] UNKNOWN_DEL = {
     "fn caller(i32 mut* own p) void { callee(); del(p); }",
 };
 
+string[2] MISSING = {
+    "fn missing() void { }",
+    "fn caller(i32 mut* own p) void { missing(); }",
+};
+
+string[2] RECURSIVE = {
+    "fn spin() void { spin(); }",
+    "fn caller(i32 mut* own p) void { spin(); }",
+};
+
 string[3] OWN_MOVE = {
     "fn inner(i32 mut* own p) void { del(p); }",
     "fn callee(i32 mut* own p) void { inner(move(p)); }",
@@ -138,6 +148,19 @@ fn aborts(ownership_call_bodies.bodies* b, u64 index) void {
     assert(!row.outcome.possible_caller_return && !row.outcome.cleanup_required);
     assert(row.results.len == 0 && row.guard.kind == ownership_api.entity_kind.none);
 }
+
+// Only a direct fort call can stay an unresolved step. An extern call or an indirect call
+// stops extraction. Flow does not run, so the read after the release reports no event.
+string[2] EXTERN_CALL = {
+    "extern fn ext() void;",
+    "fn callee(i32 mut* own p) i32 { i32* v = p; del(p); ext(); return *v; }",
+};
+
+string[3] INDIRECT_CALL = {
+    "fn noop() void { }",
+    "fn callee(i32 mut* own p) i32 {",
+    "    fn() void f = noop; i32* v = p; del(p); f(); return *v; }",
+};
 
 fn unresolved(ownership_call_bodies.bodies* b, u64 index, ownership_api.incomplete_reason why)
     void {
@@ -427,6 +450,32 @@ fn case_g12_3() void {
     ownership_calls_env.boundary("G12.3", "", "incomplete_proof");
 }
 
+// A direct call without a published summary stays an unresolved step. Flow keeps the possible
+// return and the owner, so the caller return cannot prove cleanup: incomplete proof, not a lost
+// owner. A recursive call has no summary while its own body is inferred.
+fn unresolved_calls() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"missing", "caller"};
+    ownership_call_bodies.open(&b, MISSING[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer(&b, 1);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 1);
+    assert(s->proof.kind == ownership_api.proof_kind.incomplete && s->cases.len == 0);
+    assert(s->proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.incomplete_proof));
+    assert(b.services.counts.last.operation.terminator);
+    ownership_call_bodies.bodies mut spin = ownership_call_bodies.bodies{};
+    string[2] spin_names = {"spin", "caller"};
+    ownership_call_bodies.open(&spin, RECURSIVE[..], spin_names[..]);
+    defer ownership_call_bodies.close(&spin);
+    ownership_call_bodies.infer_all(&spin);
+    unresolved(&spin, 0, ownership_api.incomplete_reason.unknown_effect);
+    ownership_summary_model.summary* caller = ownership_call_bodies.summary(&spin, 1);
+    assert(caller->proof.kind == ownership_api.proof_kind.incomplete && caller->cases.len == 0);
+    assert(caller->proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(!ownership_call_bodies.saw(&spin, ownership_api.event_kind.lost_ownership));
+}
+
 // A wrapper that moves its own owner into a callee changes caller storage that this unit does
 // not export. Flow checks the wrapper and finds no error. Its summary stays incomplete.
 fn owning_argument() void {
@@ -445,6 +494,16 @@ fn owning_argument() void {
     unresolved(&b, 2, ownership_api.incomplete_reason.missing_path);
 }
 
+fn foreign_call(string@ text) void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[1] names = {"callee"};
+    ownership_call_bodies.open(&b, text, names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer(&b, 0);
+    unresolved(&b, 0, ownership_api.incomplete_reason.unknown_effect);
+    assert(b.services.counts.events == 0);
+}
+
 fn main() i32 {
     case_g02_1();
     case_g02_3();
@@ -459,6 +518,9 @@ fn main() i32 {
     case_g12_3();
     owning_argument();
     effects_before_abort();
+    unresolved_calls();
+    foreign_call(EXTERN_CALL[..]);
+    foreign_call(INDIRECT_CALL[..]);
     println("direct-call wrappers ok");
     return 0;
 }
