@@ -15,6 +15,10 @@ enum action {
     use,
     inspect,
     dead,
+    // A move into storage outside local proof: a field, an element, a global or a callee.
+    escape,
+    // An effect outside local proof, such as an unknown fort call. Only slot owners keep facts.
+    outside,
 }
 
 // The checked closure assigns one event key to each full operation position.
@@ -42,6 +46,13 @@ struct request {
     bool direct_source_proved;
     bool direct_destination_proved;
     bool event_map_complete_proved;
+    // No FIR address names the slot, so no borrow names its storage. Its end needs no source.
+    bool private_slot_proved;
+    // A span element or a pointee read needs a live source. Bounds keep their runtime check.
+    bool temporal_use;
+    // An assignment stores a value that an effect outside local proof produced. The store
+    // keeps the destination check. Later reads of the unknown contents need other facts.
+    bool opaque_value;
     event_binding@ event_bindings;
 }
 
@@ -237,6 +248,16 @@ fn other_owner_possible(ownership_state.state* s, ownership_api.place_path place
     return false;
 }
 
+// Two exact lengths are equal values. Two symbolic lengths are one captured value version.
+fn same_length(ownership_api.scalar_fact a, ownership_api.scalar_fact b) bool {
+    if (a.kind == ownership_api.fact_kind.exact && b.kind == ownership_api.fact_kind.exact) {
+        return a.value == b.value;
+    }
+    return a.kind == ownership_api.fact_kind.symbolic &&
+        b.kind == ownership_api.fact_kind.symbolic &&
+        a.symbol.kind == ownership_api.entity_kind.value && same_entity(a.symbol, b.symbol);
+}
+
 fn owner_reference_proved(ownership_state.state* s,
     ownership_api.contents_fact value, ownership_api.allocation_fact owner) bool {
     if (value.kind != ownership_api.contents_kind.reference || value.owner_empty ||
@@ -252,9 +273,7 @@ fn owner_reference_proved(ownership_state.state* s,
         !same_entity(s->sources[source].allocation, owner.key)) { return false; }
     if (s->sources[source].kind == ownership_api.source_kind.trusted_foreign) { return true; }
     return s->sources[source].kind == ownership_api.source_kind.heap &&
-        value.span_length.kind == ownership_api.fact_kind.exact &&
-        owner.logical_length.kind == ownership_api.fact_kind.exact &&
-        value.span_length.value == owner.logical_length.value;
+        same_length(value.span_length, owner.logical_length);
 }
 
 fn empty_owner_proved(ownership_api.contents_fact value) bool {
@@ -377,7 +396,8 @@ fn check_read(ownership_state.state* s, ownership_api.services* svc, request* re
         return invalid(svc, req, ownership_api.event_kind.invalid_use, req->source_key,
             "empty reference has no element");
     }
-    if (dereference && ((value.span_length.kind != ownership_api.fact_kind.exact && !foreign) ||
+    if (dereference && !req->temporal_use &&
+        ((value.span_length.kind != ownership_api.fact_kind.exact && !foreign) ||
         (value.span_length.kind == ownership_api.fact_kind.exact &&
         value.span_length.value < 0))) {
         return unproved(svc, req, req->source.root);
@@ -597,6 +617,11 @@ fn do_assignment(ownership_state.state mut* s, ownership_api.services* svc,
         return invalid(svc, req, ownership_api.event_kind.lost_ownership,
             req->destination.root, "assignment would discard a live owner");
     }
+    if (req->opaque_value) {
+        ownership_api.contents_fact mut unknown = ownership_api.contents_fact{};
+        unknown.kind = ownership_api.contents_kind.unknown;
+        return write(s, svc, unknown, req->destination, req);
+    }
     ownership_api.proof_status read = check_read(s, svc, req, req->value, false);
     if (!ownership_api.successful(read)) { return read; }
     if (req->destination_owns && !req->value.owner_empty) {
@@ -648,6 +673,11 @@ fn do_dead(ownership_state.state mut* s, ownership_api.services* svc,
         return invalid(svc, req, ownership_api.event_kind.lost_ownership,
             req->source.root, "storage ends with a live owner");
     }
+    if (req->private_slot_proved && req->source_key.kind == ownership_api.entity_kind.none) {
+        ownership_api.proof_status mut proof = ownership_api.proof_status{};
+        proof.kind = ownership_api.proof_kind.complete;
+        return proof;
+    }
     u64 source = source_index(s, req->source_key);
     if (!req->liveness_proved || !req->source_correspondence_proved ||
         source == U64_MAX ||
@@ -662,6 +692,70 @@ fn do_dead(ownership_state.state mut* s, ownership_api.services* svc,
     ownership_api.mutation_result ended = ownership_state.end_source(s, svc,
         req->source_key, req->operation, req->source_position);
     return ended.proof;
+}
+
+// The obligation leaves local proof. The detached allocation keeps its sources and history.
+fn do_escape(ownership_state.state mut* s, ownership_api.services* svc,
+    request* req) ownership_api.proof_status {
+    u64 index = contents_index(s, req->source);
+    if (index == U64_MAX) { return unproved(svc, req, req->source.root); }
+    ownership_api.contents_fact value = s->contents[index];
+    u64 owners = owner_count(s, req->source);
+    if (owners == 0) {
+        if (!empty_owner_proved(value) || owner_overlap(s, req->source) != overlap_kind.none) {
+            return unproved(svc, req, req->source.root);
+        }
+        return write(s, svc, empty_value(req->source), req->source, req);
+    }
+    u64 owner = owner_index(s, req->source);
+    if (owners != 1 || value.owner_empty ||
+        !owner_reference_proved(s, value, s->allocations[owner]) ||
+        other_owner_possible(s, req->source, s->allocations[owner].key)) {
+        return unproved(svc, req, req->source.root);
+    }
+    ownership_api.owner_location mut after = ownership_api.owner_location{};
+    after.detached = true;
+    ownership_api.mutation_result moved = ownership_state.transfer_owner(s, svc,
+        s->allocations[owner].key, after, true, req->operation, req->source_position);
+    if (!moved.applied) { return moved.proof; }
+    return write(s, svc, empty_value(req->source), req->source, req);
+}
+
+// A slot owner keeps its live allocation: only an operation on that slot can release it.
+fn slot_owned(ownership_api.allocation_fact a) bool {
+    return a.obligation && a.validity == ownership_api.validity_kind.live &&
+        !a.owner.detached && !ownership_state.has_residual(a.owner.place) &&
+        a.owner.place.root.kind == ownership_api.entity_kind.slot &&
+        a.owner.place.projections.len == 0;
+}
+
+// Static and foreign sources keep their trust (D17.13). Other live facts become unknown.
+fn do_outside(ownership_state.state mut* s) ownership_api.proof_status {
+    u64 mut i = 0;
+    while (i < s->sources_len) {
+        ownership_api.source_fact source = s->sources[i];
+        bool mut kept = source.kind == ownership_api.source_kind.static_storage ||
+            source.kind == ownership_api.source_kind.trusted_foreign;
+        if (!kept && source.kind == ownership_api.source_kind.heap) {
+            u64 a = ownership_state.allocation_index(s, source.allocation);
+            kept = a != U64_MAX && slot_owned(s->allocations[a]);
+        }
+        if (!kept && source.validity == ownership_api.validity_kind.live) {
+            s->sources[i].validity = ownership_api.validity_kind.unknown;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < s->allocations_len) {
+        if (!slot_owned(s->allocations[i]) &&
+            s->allocations[i].validity == ownership_api.validity_kind.live) {
+            s->allocations[i].validity = ownership_api.validity_kind.unknown;
+        }
+        i += 1;
+    }
+    ownership_api.proof_status mut proof = ownership_api.proof_status{};
+    proof.kind = ownership_api.proof_kind.complete;
+    return proof;
 }
 
 /// Applies one effect. A failed effect leaves the input state unchanged.
@@ -700,6 +794,8 @@ fn apply(ownership_state.state mut* s, ownership_api.services* svc,
     else if (req->kind == action.assignment) { proof = do_assignment(&next, &local, req); }
     else if (req->kind == action.address) { proof = do_address(&next, &local, req); }
     else if (req->kind == action.dead) { proof = do_dead(&next, &local, req); }
+    else if (req->kind == action.escape) { proof = do_escape(&next, &local, req); }
+    else if (req->kind == action.outside) { proof = do_outside(&next); }
     else {
         u64 index = contents_index(&next, req->source);
         if (index == U64_MAX) { proof = unproved(&local, req, req->source.root); }
