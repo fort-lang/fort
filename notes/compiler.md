@@ -321,9 +321,11 @@ came here.
   through `ownership_state.unit_spend`, as the content counts do, but at another unit: a content
   count pays one unit for each 64 rows that it sorts (`rows_spend`), and a transfer scan pays one
   unit for each row that it compares with a place. A W refusal in the transfer reports one work
-  failure through the mapped route, as a state mutator does. The removal passes keep the other
-  rows in their order in one pass each. The type walk reads no state and pays no W; the byte
-  kernel pays for the type before the transfer. `test/fort/ownership_places_test.ft` pins
+  failure through the mapped route, as a state mutator does. The dispatch unit of `apply`, the
+  first charge of each action, reports its refusal in the same way (`dispatch_refusals` in
+  `test/fort/ownership_places_test.ft`). The removal passes keep the other rows in their order
+  in one pass each. The type walk reads no state and pays no W; the byte kernel pays for the
+  type before the transfer. `test/fort/ownership_places_test.ft` pins
   `1 + 6C + 4A + S` W for C contents, A allocation and S source rows. That move has no reference
   leaf, and no fact stands below its two places.
   Neither move rebases an inline address. Abstract temporary ownership ends on transfer even when
