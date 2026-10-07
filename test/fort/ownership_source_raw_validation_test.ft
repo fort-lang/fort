@@ -1,0 +1,606 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| witnesses ok
+//| order ok
+//| work refusal ok
+//| report refusal ok
+//| residual ok
+//| residual bound ok
+//| mixed notes ok
+//| own notes ok
+//| conditional notes ok
+//| possible notes ok
+/// Checks the validation of raw failures (toolchain 4.2) and the ledger of the raw analysis:
+/// a violation needs a definite failure and a witness path, the records keep source order, and
+/// a W or V refusal leaves the solver incomplete (fir.md 14.1).
+import ownership_api;
+import ownership_raw_source_env;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import ownership_source_raw;
+import std.strbuf;
+
+string WINDOW = "typed access exceeds its inherited window";
+
+// A definite failure validates only through a witness path. The walk takes no back edge, so
+// a failure that only a second iteration reaches stays unproved. A parameter that a condition
+// tests takes the value that reaches the failure.
+fn witnesses() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[30] lines = {
+        "fn chosen(bool c) u64 {",
+        "    u8 tag = 1;",
+        "    if (c) {",
+        "        u64* p = cast(&tag, u64*);",
+        "        return *p;",
+        "    }",
+        "    return 0;",
+        "}",
+        "fn first_iteration() u64 {",
+        "    u8 tag = 1;",
+        "    u64 mut i = 0;",
+        "    u64 mut sum = 0;",
+        "    while (i < 2) {",
+        "        u64* p = cast(&tag, u64*);",
+        "        sum +%= *p;",
+        "        i += 1;",
+        "    }",
+        "    return sum;",
+        "}",
+        "fn second_iteration() u64 {",
+        "    u8 tag = 1;",
+        "    u64 mut i = 0;",
+        "    u64 mut sum = 0;",
+        "    while (i < 2) {",
+        "        u64* p = cast(&tag, u64*);",
+        "        if (i == 1) { sum +%= *p; }",
+        "        i += 1;",
+        "    }",
+        "    return sum;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.violation(&c, "chosen", "p", WINDOW, 5);
+    ownership_raw_source_env.violation(&c, "first_iteration", "p", WINDOW, 15);
+    ownership_raw_source_env.unproved(&c, "second_iteration",
+        "typed access window remains unproved", 26);
+    ownership_raw_source_env.report(&c, "witnesses");
+}
+
+// Violations and failures keep the order of toolchain 4.2: source range first.
+fn order() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[11] lines = {
+        "fn two(u64 bits, bool c) u64 {",
+        "    u8 tag = 1;",
+        "    u8* q = cast(bits, u8*);",
+        "    u64* p = cast(&tag, u64*);",
+        "    u64 a = *p;",
+        "    u8 b = *q;",
+        "    u8* mut r = null;",
+        "    if (c) { r = &tag; }",
+        "    u64* s = cast(r, u64*);",
+        "    return a +% cast(b, u64) +% *s;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_source_raw.context* r = ownership_raw_source_env.raw(&c, "two");
+    if (r->violations_len != 2 || r->unproved_len != 1) {
+        eprintln("two: ", r->violations_len, " violations, ", r->unproved_len, " failures");
+        ownership_raw_source_env.mismatch(&c);
+    } else {
+        assert(r->violations[0].source.line == 5 && r->violations[0].name == "p");
+        assert(r->violations[0].text == WINDOW);
+        assert(r->violations[1].source.line == 6 && r->violations[1].name == "q");
+        assert(r->violations[1].text == "raw access needs a proved original source");
+        assert(r->unproved[0].source.line == 10 && r->unproved[0].name == "s");
+        assert(ownership_source_raw.before(&r->violations[0], &r->violations[1]));
+        assert(!ownership_source_raw.before(&r->violations[1], &r->violations[0]));
+    }
+    ownership_raw_source_env.report(&c, "order");
+}
+
+// The program of the refusal checks: one definite failure, so the kernel charges work and
+// records one event.
+string[5] FAILING = {
+    "fn wide() u64 {",
+    "    u8 tag = 1;",
+    "    u64* p = cast(&tag, u64*);",
+    "    return *p;",
+    "}",
+};
+
+fn source_text(string@ lines, strbuf.str_buf mut* out) void {
+    u64 mut i = 0;
+    while (i < lines.len) {
+        strbuf.append(out, lines[i]);
+        strbuf.push(out, '\n');
+        i += 1;
+    }
+}
+
+// A W refusal stops the computation. Its published result keeps the incomplete status
+// (fir.md 14.1).
+fn work_refusal() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    ownership_source_env.runtime(&e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    source_text(FAILING[..], &text);
+    assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+    ownership_source.body mut* row = ownership_source_env.find(&e, "main", "wide");
+    row->raw.meter.bounds.w = 3;
+    ownership_source.analyze(&e.source);
+    ownership_source_raw.context* r = &row->raw;
+    assert(r->first_refusal.terminal.present && r->first_refusal.terminal.limit.present);
+    assert(r->first_refusal.terminal.limit.category == ownership_api.limit_category.w);
+    assert(r->first_refusal.terminal.limit.bound == 3);
+    assert(r->violations_len == 0 && r->unproved_len == 0);
+    assert(r->correspondence == ownership_source_local.status.complete);
+    assert(r->solver == ownership_source_local.status.incomplete);
+    assert(!ownership_api.successful(r->proof));
+    assert(r->proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    println("work refusal ok");
+}
+
+// A V refusal of a retained event loses the record, so no later failure validates and the
+// solver stays incomplete. The bound keeps one event: the second failure loses its record.
+fn report_refusal() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    ownership_source_env.runtime(&e);
+    string[7] lines = {
+        "fn wide() u64 {",
+        "    u8 tag = 1;",
+        "    u64* p = cast(&tag, u64*);",
+        "    u64* q = cast(&tag, u64*);",
+        "    return *p +% *q;",
+        "}",
+        "fn root() i32 { return 0; }",
+    };
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    source_text(lines[..], &text);
+    assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+    ownership_source.body mut* row = ownership_source_env.find(&e, "main", "wide");
+    row->raw.meter.bounds.v = 1;
+    ownership_source.analyze(&e.source);
+    ownership_source_raw.context* r = &row->raw;
+    assert(r->records_lost && r->violations_len == 1);
+    assert(r->first_refusal.terminal.reason == ownership_api.incomplete_reason.report_limit);
+    assert(r->solver == ownership_source_local.status.incomplete);
+    println("report refusal ok");
+}
+
+// More alternatives than G merge into a residual description: the access stays unproved, in
+// the declared scope (fir.md 14.1). Each branch gives the pointer one more window.
+fn residual() void {
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    strbuf.append(&text, "fn many(u64 k) u8 {\n    u8[200] mut bytes = {};\n");
+    strbuf.append(&text, "    u8* mut p = &bytes[0];\n");
+    u64 mut i = 1;
+    while (i < 140) {
+        strbuf.append(&text, "    if (k == ");
+        strbuf.append_u64(&text, i);
+        strbuf.append(&text, ") { p = &bytes[");
+        strbuf.append_u64(&text, i);
+        strbuf.append(&text, "]; }\n");
+        i += 1;
+    }
+    strbuf.append(&text, "    return *p;\n}\n");
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    ownership_source_env.runtime(&e);
+    assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+    ownership_source.analyze(&e.source);
+    ownership_source.body* row = ownership_source_env.find(&e, "main", "many");
+    assert(row->raw.correspondence == ownership_source_local.status.complete);
+    assert(!ownership_api.successful(row->raw.proof) && row->raw.violations_len == 0);
+    assert(row->raw.unproved_len == 1 && row->raw.unproved[0].source.line == 143);
+    println("residual ok");
+}
+
+// A body whose pointer takes `count` windows of one array: the first before the branches,
+// one more in each branch. The return reads the pointer on line `count` + 3.
+fn alternatives(strbuf.str_buf mut* text, string name, u64 count) void {
+    strbuf.append(text, "fn ");
+    strbuf.append(text, name);
+    strbuf.append(text, "(u64 k) u8 {\n    u8[200] mut bytes = {};\n");
+    strbuf.append(text, "    u8* mut p = &bytes[0];\n");
+    u64 mut i = 1;
+    while (i < count) {
+        strbuf.append(text, "    if (k == ");
+        strbuf.append_u64(text, i);
+        strbuf.append(text, ") { p = &bytes[");
+        strbuf.append_u64(text, i);
+        strbuf.append(text, "]; }\n");
+        i += 1;
+    }
+    strbuf.append(text, "    return *p;\n}\n");
+}
+
+// G is 128 (fir.md 14.1): a value keeps 128 windows and proves the access through each of
+// them. One more window makes the value residual, and the access stays unproved.
+fn residual_bound() void {
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    alternatives(&text, "at_bound", 128);
+    alternatives(&text, "past_bound", 129);
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    ownership_source_env.runtime(&e);
+    assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+    ownership_source.analyze(&e.source);
+    ownership_source.body* at = ownership_source_env.find(&e, "main", "at_bound");
+    assert(at->raw.correspondence == ownership_source_local.status.complete);
+    assert(ownership_api.successful(at->raw.proof));
+    assert(at->raw.unproved_len == 0 && at->raw.violations_len == 0);
+    ownership_source.body* past = ownership_source_env.find(&e, "main", "past_bound");
+    assert(past->raw.correspondence == ownership_source_local.status.complete);
+    assert(!ownership_api.successful(past->raw.proof) && past->raw.violations_len == 0);
+    assert(past->raw.unproved_len == 1);
+    // The first body spans lines 1 to 132, so the second returns on line 132 + 129 + 3.
+    assert(past->raw.unproved[0].source.line == 264);
+    println("residual bound ok");
+}
+
+// The note of a violation names each reason that holds on some path, so it names the reason
+// of the path that the witness takes (toolchain 4.2). One reason gives its own note; two or
+// three give one note that names each. A join with a value that passes gives no violation.
+fn mixed_notes() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[92] lines = {
+        "struct item { u64 a; u32 x; u32 y; }",
+        "fn join_extent_align(bool c) u32 {",
+        "    u64[16] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ mut w = b[0..2];",
+        "    if (c) { w = b[2..128]; }",
+        "    u32* p = cast(w.ptr, u32*);",
+        "    return *p;",
+        "}",
+        "fn join_recon_align(bool c, u64 bits) u32 {",
+        "    u64[16] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ w = b[2..128];",
+        "    u32* mut p = cast(w.ptr, u32*);",
+        "    if (c) { p = cast(bits, u32*); }",
+        "    return *p;",
+        "}",
+        "fn join_recon_window(bool c, u64 bits) u32 {",
+        "    u64[16] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ w = b[0..2];",
+        "    u32* mut p = cast(w.ptr, u32*);",
+        "    if (c) { p = cast(bits, u32*); }",
+        "    return *p;",
+        "}",
+        "fn join_all_access(u64 k, u64 bits) u32 {",
+        "    u64[16] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ short = b[0..2];",
+        "    u8@ odd = b[2..128];",
+        "    u32* mut p = cast(short.ptr, u32*);",
+        "    if (k == 1) { p = cast(odd.ptr, u32*); }",
+        "    if (k == 2) { p = cast(bits, u32*); }",
+        "    return *p;",
+        "}",
+        "fn join_two_align(bool c) u32 {",
+        "    u64[16] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ mut w = b[6..128];",
+        "    if (c) { w = b[2..128]; }",
+        "    u32* p = cast(w.ptr, u32*);",
+        "    return *p;",
+        "}",
+        "fn join_extent_ok(bool c) u32 {",
+        "    u64[16] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ mut w = b[0..2];",
+        "    if (c) { w = b[4..128]; }",
+        "    u32* p = cast(w.ptr, u32*);",
+        "    return *p;",
+        "}",
+        "fn join_derive_null(bool c) u64 {",
+        "    u32 small = 7;",
+        "    item* mut p = cast(&small, item*);",
+        "    if (c) { p = null; }",
+        "    u32* q = &p->x;",
+        "    return cast(q, u64);",
+        "}",
+        "fn join_range_recon(bool c, u64 bits) u64 {",
+        "    u64[2] words = {};",
+        "    u8* mut b = cast(&words, u8*);",
+        "    if (c) { b = cast(bits, u8*); }",
+        "    u8@ w = b[0..40];",
+        "    return w.len;",
+        "}",
+        "fn join_range_bounds(bool c, u64 bits) u64 {",
+        "    u64[2] words = {};",
+        "    u8* mut b = cast(&words, u8*);",
+        "    if (c) { b = cast(bits, u8*); }",
+        "    u64 lo = 4;",
+        "    u64 hi = 2;",
+        "    u8@ w = b[lo..hi];",
+        "    return w.len;",
+        "}",
+        "fn join_el_recon_align(bool c, u64 bits, u64 i) u32 {",
+        "    u64[16] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ w = b[2..128];",
+        "    item* mut q = cast(w.ptr, item*);",
+        "    if (c) { q = cast(bits, item*); }",
+        "    item@ s = q[0..4];",
+        "    return s[i].x;",
+        "}",
+        "fn join_el_two(bool c, u64 i) u32 {",
+        "    u64[16] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ mut w = b[2..128];",
+        "    if (c) { w = b[4..128]; }",
+        "    item* q = cast(w.ptr, item*);",
+        "    item@ s = q[0..4];",
+        "    return s[i].x;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.violation(&c, "join_extent_align", "p",
+        "each path fails: the access exceeds its window, or is misaligned", 8);
+    ownership_raw_source_env.violation(&c, "join_recon_align", "p",
+        "each path fails: no proved source, or the access is misaligned", 16);
+    ownership_raw_source_env.violation(&c, "join_recon_window", "p",
+        "each path fails: no proved source, or the access exceeds its window", 24);
+    ownership_raw_source_env.violation(&c, "join_all_access", "p",
+        "each path fails: no proved source, a short window, or misalignment", 34);
+    ownership_raw_source_env.violation(&c, "join_two_align", "p",
+        "typed access alignment remains unproved", 42);
+    ownership_raw_source_env.unproved_at(&c, "join_extent_ok", 50);
+    ownership_raw_source_env.violation(&c, "join_derive_null", "p",
+        "each path fails: no proved source, or a field past its window", 56);
+    ownership_raw_source_env.violation(&c, "join_range_recon", "b",
+        "each path fails: no proved source, or the range exceeds its storage", 63);
+    ownership_raw_source_env.violation(&c, "join_range_bounds", "b",
+        "each path fails: no proved source, or the range bounds are invalid", 72);
+    ownership_raw_source_env.violation(&c, "join_el_recon_align", "s",
+        "each path fails: no proved source, or the element is misaligned", 82);
+    ownership_raw_source_env.unproved_at(&c, "join_el_two", 91);
+    ownership_raw_source_env.report(&c, "mixed notes");
+}
+
+// The record of an obligation names a reason of that obligation. An early refusal of a
+// range in a loop has no kernel event, so its note is the default, not the reason of the
+// access before it. An element of a reconstructed or aligned value names the missing source.
+fn own_notes() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[35] lines = {
+        "struct item { u64 a; u32 x; u32 y; }",
+        "fn stale_range(u64 n) u64 {",
+        "    u64[16] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ w = b[2..128];",
+        "    u32* p = cast(w.ptr, u32*);",
+        "    u32 v = *p;",
+        "    u64 mut k = 0;",
+        "    u64 mut sum = cast(v, u64);",
+        "    while (k < n) {",
+        "        u8@ x = b[0..k];",
+        "        sum += x.len;",
+        "        k += 1;",
+        "    }",
+        "    return sum;",
+        "}",
+        "fn el_recon_aligned(bool c, u64 bits, u64 i) u32 {",
+        "    u64[16] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ w = b[0..128];",
+        "    item* mut q = cast(w.ptr, item*);",
+        "    if (c) { q = cast(bits, item*); }",
+        "    item@ s = q[0..4];",
+        "    return s[i].x;",
+        "}",
+        "fn el_none_misaligned(bool c, u64 i) u32 {",
+        "    u64[16] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ w = b[2..128];",
+        "    item* q = cast(w.ptr, item*);",
+        "    item@ mut s = q[0..4];",
+        "    item@ e = {};",
+        "    if (c) { s = e; }",
+        "    return s[i].x;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.violation(&c, "stale_range", "p",
+        "typed access alignment remains unproved", 7);
+    ownership_raw_source_env.first_unproved(&c, "stale_range", "raw access remains unproved",
+        11);
+    ownership_source_raw.context* r = ownership_raw_source_env.raw(&c, "el_recon_aligned");
+    if (r->unproved_len != 2 || r->unproved[1].source.line != 24 ||
+        r->unproved[1].text != "raw access needs a proved original source") {
+        eprintln("el_recon_aligned: ", r->unproved_len, " failures");
+        ownership_raw_source_env.mismatch(&c);
+    }
+    ownership_raw_source_env.unproved(&c, "el_none_misaligned",
+        "element alignment remains unproved", 34);
+    ownership_raw_source_env.report(&c, "own notes");
+}
+
+// A note names its reasons as certain only when each represented path fails and a witness
+// validates the violation (toolchain 4.2). A failure with a path that does not fail exactly,
+// or with no witness, names the same reasons as possible.
+fn conditional_notes() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[92] lines = {
+        "struct item { u64 a; u32 x; u32 y; }",
+        "extern fn ext_item() item*;",
+        "fn tick() void { println(\"t\"); }",
+        "fn el_recon_bytewindow(bool c, u64 bits, u64 i) u32 {",
+        "    u8[128] bytes = {};",
+        "    u8* b = cast(&bytes, u8*);",
+        "    item* mut q = cast(b, item*);",
+        "    if (c) { q = cast(bits, item*); }",
+        "    item@ s = q[0..4];",
+        "    return s[i].x;",
+        "}",
+        "fn el_recon_foreign(u64 k, u64 bits, u64 i) u32 {",
+        "    u64[16] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ w = b[2..128];",
+        "    item* mut q = cast(w.ptr, item*);",
+        "    if (k == 1) { q = cast(bits, item*); }",
+        "    if (k == 2) { q = ext_item(); }",
+        "    item@ s = q[0..4];",
+        "    return s[i].x;",
+        "}",
+        "fn el_none_recon(u64 k, u64 bits, u64 i) u32 {",
+        "    u64[16] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ w = b[2..128];",
+        "    item* mut q = cast(w.ptr, item*);",
+        "    if (k == 1) { q = cast(bits, item*); }",
+        "    item@ mut s = q[0..4];",
+        "    item@ e = {};",
+        "    if (k == 2) { s = e; }",
+        "    return s[i].x;",
+        "}",
+        "fn access_four(u64 k, u64 bits) u32 {",
+        "    u64[16] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ short = b[0..2];",
+        "    u8@ odd = b[2..128];",
+        "    u8@ both = b[1..3];",
+        "    u32* mut p = cast(short.ptr, u32*);",
+        "    if (k == 1) { p = cast(odd.ptr, u32*); }",
+        "    if (k == 2) { p = cast(both.ptr, u32*); }",
+        "    if (k == 3) { p = cast(bits, u32*); }",
+        "    return *p;",
+        "}",
+        "fn range_bounds_all(u64 k, u64 bits) u64 {",
+        "    u64[2] words = {};",
+        "    u64[4] more = {};",
+        "    u8* mut b = cast(&words, u8*);",
+        "    if (k == 1) { b = cast(&more, u8*); }",
+        "    if (k == 2) { b = cast(bits, u8*); }",
+        "    if (k == 3) { b = null; }",
+        "    u64 lo = 4;",
+        "    u64 hi = 2;",
+        "    u8@ w = b[lo..hi];",
+        "    return w.len;",
+        "}",
+        "fn range_storage_some(bool c) u64 {",
+        "    u64[2] words = {};",
+        "    u64[8] more = {};",
+        "    u8* mut b = cast(&words, u8*);",
+        "    if (c) { b = cast(&more, u8*); }",
+        "    u8@ w = b[0..40];",
+        "    return w.len;",
+        "}",
+        "fn derive_three(u64 k, u64 bits) u64 {",
+        "    u32 small = 7;",
+        "    item* mut p = cast(&small, item*);",
+        "    if (k == 1) { p = cast(bits, item*); }",
+        "    if (k == 2) { p = null; }",
+        "    u32* q = &p->x;",
+        "    return cast(q, u64);",
+        "}",
+        "fn el_three_residues(u64 k, u64 bits, u64 i) u32 {",
+        "    u64[16] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ mut w = b[1..128];",
+        "    if (k == 1) { w = b[2..128]; }",
+        "    if (k == 2) { w = b[3..128]; }",
+        "    item* mut q = cast(w.ptr, item*);",
+        "    if (k == 3) { q = cast(bits, item*); }",
+        "    item@ s = q[0..4];",
+        "    return s[i].x;",
+        "}",
+        "fn mixed_no_witness(bool c) u32 {",
+        "    u64[16] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ mut w = b[0..2];",
+        "    if (c) { w = b[2..128]; }",
+        "    u32* p = cast(w.ptr, u32*);",
+        "    tick();",
+        "    return *p;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.unproved_record(&c, "el_recon_bytewindow", 1,
+        "unproved: a proved source, or the element alignment", 10);
+    ownership_raw_source_env.unproved_record(&c, "el_recon_foreign", 1,
+        "unproved: a proved source, or the element alignment", 20);
+    ownership_raw_source_env.unproved_record(&c, "el_none_recon", 1,
+        "unproved: a proved source, or the element alignment", 31);
+    ownership_raw_source_env.violation(&c, "access_four", "p",
+        "each path fails: no proved source, a short window, or misalignment", 43);
+    ownership_raw_source_env.violation(&c, "range_bounds_all", "b",
+        "each path fails: no proved source, or the range bounds are invalid", 54);
+    // One path fits, so the reason is possible, not certain.
+    ownership_raw_source_env.unproved(&c, "range_storage_some",
+        "raw range storage remains unproved", 62);
+    ownership_raw_source_env.violation(&c, "derive_three", "p",
+        "each path fails: no proved source, or a field past its window", 70);
+    ownership_raw_source_env.violation(&c, "el_three_residues", "s",
+        "each path fails: no proved source, or the element is misaligned", 82);
+    ownership_raw_source_env.unproved(&c, "mixed_no_witness",
+        "unproved: the access window, or the access alignment", 91);
+    ownership_raw_source_env.report(&c, "conditional notes");
+}
+
+// A failure without a witness names even one reason as possible: a reason that states a
+// failure ("exceeds") is certain wording, and only a validated violation may use it.
+fn possible_notes() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[16] lines = {
+        "fn tick() void { println(\"t\"); }",
+        "fn single_no_witness() u32 {",
+        "    u64[16] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    u8@ w = b[0..2];",
+        "    u32* p = cast(w.ptr, u32*);",
+        "    tick();",
+        "    return *p;",
+        "}",
+        "fn range_no_witness() u64 {",
+        "    u64[2] words = {};",
+        "    u8* b = cast(&words, u8*);",
+        "    tick();",
+        "    u8@ w = b[0..40];",
+        "    return w.len;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.unproved(&c, "single_no_witness",
+        "typed access window remains unproved", 8);
+    ownership_raw_source_env.unproved(&c, "range_no_witness",
+        "raw range storage remains unproved", 14);
+    ownership_raw_source_env.report(&c, "possible notes");
+}
+
+fn main() i32 {
+    witnesses();
+    order();
+    work_refusal();
+    report_refusal();
+    residual();
+    residual_bound();
+    mixed_notes();
+    own_notes();
+    conditional_notes();
+    possible_notes();
+    return 0;
+}

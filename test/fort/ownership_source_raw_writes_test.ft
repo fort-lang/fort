@@ -1,0 +1,238 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| derivations ok
+//| writes ok
+//| owner neighbours ok
+//| span part writes ok
+/// Holds the raw verdicts of derivations through a pointer and of byte writes.
+import ownership_raw_source_env;
+import ownership_source_raw;
+
+// An address of a subobject through a dereference needs the subobject inside each window.
+// The new address has the window of that subobject.
+fn derivations() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[39] lines = {
+        "struct pair { i32 a; i64 b; u8* p; }",
+        "struct small { u8 tag; }",
+        "fn field_address() i64 {",
+        "    pair s = pair{1, 2, null};",
+        "    pair* p = &s;",
+        "    i64* q = &p->b;",
+        "    return *q;",
+        "}",
+        "fn field_from_small() i64 {",
+        "    small t = small{1};",
+        "    pair* p = cast(&t, pair*);",
+        "    i64* q = &p->b;",
+        "    return 0;",
+        "}",
+        "fn array_through_pointer() u8 {",
+        "    u8[8] mut a = {};",
+        "    u8[8]* p = &a;",
+        "    u8@ s = (*p)[2..4];",
+        "    return s[1];",
+        "}",
+        "fn constant_element() u8 {",
+        "    u8[4] mut a = {};",
+        "    u8[4]* p = &a;",
+        "    u8* e = &(*p)[3];",
+        "    return *e;",
+        "}",
+        "fn variable_element(u64 i) u8 {",
+        "    u8[4] mut a = {};",
+        "    u8[4]* p = &a;",
+        "    return (*p)[i];",
+        "}",
+        "fn field_then_wide() u64 {",
+        "    pair s = pair{1, 2, null};",
+        "    pair* p = &s;",
+        "    i32* a = &p->a;",
+        "    u64* w = cast(a, u64*);",
+        "    return *w;",
+        "}",
+        "fn through_parameter(pair* p) i64* { return &p->b; }",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.proved(&c, "field_address");
+    ownership_raw_source_env.counts(&c, "field_address", 2, 0, 1, 0, 0, 0);
+    ownership_raw_source_env.violation(&c, "field_from_small", "p",
+        "selected byte window remains unproved", 12);
+    ownership_raw_source_env.proved(&c, "array_through_pointer");
+    ownership_raw_source_env.proved(&c, "constant_element");
+    ownership_raw_source_env.proved(&c, "variable_element");
+    ownership_raw_source_env.violation(&c, "field_then_wide", "w",
+        "typed access exceeds its inherited window", 37);
+    ownership_raw_source_env.outside(&c, "through_parameter",
+        ownership_source_raw.missing.caller_origin);
+    ownership_raw_source_env.report(&c, "derivations");
+}
+
+// A write through a view of another type is a byte write when it overlaps a reference
+// leaf of the original layout. Over an owning leaf it needs the old owner empty: no fact
+// proves that here, so the body leaves the declared scope.
+fn writes() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[50] lines = {
+        "struct pair { i32 a; i64 b; u8* p; }",
+        "struct owner_box { i32 mut* own p; }",
+        "fn scalar_bytes() void {",
+        "    pair mut s = pair{1, 2, null};",
+        "    u8 mut* b = cast(&s, u8 mut*);",
+        "    *b = 0;",
+        "}",
+        "fn borrowed_leaf() void {",
+        "    pair mut s = pair{1, 2, null};",
+        "    u8 mut* b = cast(&s.p, u8 mut*);",
+        "    *b = 0;",
+        "}",
+        "fn owner_leaf() void {",
+        "    owner_box mut o = owner_box{null};",
+        "    u8 mut* b = cast(&o, u8 mut*);",
+        "    *b = 0;",
+        "}",
+        "fn typed_replacement() void {",
+        "    pair mut s = pair{1, 2, null};",
+        "    u8 x = 1;",
+        "    pair mut* p = &s;",
+        "    p->p = &x;",
+        "}",
+        "fn punned_span() void {",
+        "    pair mut s = pair{1, 2, null};",
+        "    u8 mut* b = cast(&s, u8 mut*);",
+        "    u8 mut@ v = b[0..24];",
+        "    v[16] = 1;",
+        "}",
+        "fn owner_span() void {",
+        "    owner_box mut o = owner_box{null};",
+        "    u8 mut* b = cast(&o, u8 mut*);",
+        "    u8 mut@ v = b[0..8];",
+        "    v[0] = 1;",
+        "}",
+        "fn wide_write() void {",
+        "    u8 mut tag = 1;",
+        "    u64 mut* w = cast(&tag, u64 mut*);",
+        "    *w = 5;",
+        "}",
+        "fn typed_span_write() void {",
+        "    u8 mut@ own s = new(u8, 4);",
+        "    defer del(s);",
+        "    s[1] = 3;",
+        "}",
+        "fn whole_struct_write() void {",
+        "    pair mut s = pair{1, 2, null};",
+        "    pair mut* p = &s;",
+        "    *p = pair{3, 4, null};",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.proved(&c, "scalar_bytes");
+    ownership_raw_source_env.counts(&c, "scalar_bytes", 1, 0, 1, 1, 0, 0);
+    ownership_raw_source_env.proved(&c, "borrowed_leaf");
+    ownership_raw_source_env.counts(&c, "borrowed_leaf", 1, 0, 1, 1, 1, 0);
+    ownership_raw_source_env.outside(&c, "owner_leaf",
+        ownership_source_raw.missing.owner_overlap);
+    ownership_raw_source_env.counts(&c, "owner_leaf", 1, 0, 1, 1, 1, 0);
+    ownership_raw_source_env.proved(&c, "typed_replacement");
+    ownership_raw_source_env.counts(&c, "typed_replacement", 1, 0, 2, 0, 0, 0);
+    ownership_raw_source_env.proved(&c, "punned_span");
+    ownership_raw_source_env.counts(&c, "punned_span", 0, 1, 1, 1, 1, 0);
+    ownership_raw_source_env.outside(&c, "owner_span",
+        ownership_source_raw.missing.owner_overlap);
+    ownership_raw_source_env.violation(&c, "wide_write", "w",
+        "typed access exceeds its inherited window", 39);
+    ownership_raw_source_env.proved(&c, "typed_span_write");
+    ownership_raw_source_env.counts(&c, "typed_span_write", 0, 0, 1, 0, 0, 0);
+    ownership_raw_source_env.proved(&c, "whole_struct_write");
+    ownership_raw_source_env.report(&c, "writes");
+}
+
+// A byte write classifies the bytes that it writes, not the whole element: the bytes next to
+// an owning leaf need no owner fact, and the first and last bytes of that leaf do.
+fn owner_neighbours() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[21] lines = {
+        "struct counted_box { u64 n; i32 mut* own p; u64 m; }",
+        "fn last_byte_before_owner() void {",
+        "    counted_box mut o = counted_box{1, null, 2};",
+        "    u8[8] mut* a = cast(&o.n, u8[8] mut*);",
+        "    (*a)[7] = 1;",
+        "}",
+        "fn first_byte_after_owner() void {",
+        "    counted_box mut o = counted_box{1, null, 2};",
+        "    u8 mut* b = cast(&o.m, u8 mut*);",
+        "    *b = 1;",
+        "}",
+        "fn first_byte_of_owner() void {",
+        "    counted_box mut o = counted_box{1, null, 2};",
+        "    u8[16] mut* a = cast(&o, u8[16] mut*);",
+        "    (*a)[8] = 1;",
+        "}",
+        "fn last_byte_of_owner() void {",
+        "    counted_box mut o = counted_box{1, null, 2};",
+        "    u8[16] mut* a = cast(&o, u8[16] mut*);",
+        "    (*a)[15] = 1;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.proved(&c, "last_byte_before_owner");
+    ownership_raw_source_env.counts(&c, "last_byte_before_owner", 1, 0, 1, 1, 0, 0);
+    ownership_raw_source_env.proved(&c, "first_byte_after_owner");
+    ownership_raw_source_env.counts(&c, "first_byte_after_owner", 1, 0, 1, 1, 0, 0);
+    ownership_raw_source_env.outside(&c, "first_byte_of_owner",
+        ownership_source_raw.missing.owner_overlap);
+    ownership_raw_source_env.counts(&c, "first_byte_of_owner", 1, 0, 1, 1, 1, 0);
+    ownership_raw_source_env.outside(&c, "last_byte_of_owner",
+        ownership_source_raw.missing.owner_overlap);
+    ownership_raw_source_env.report(&c, "owner neighbours");
+}
+
+// A write into a part of a span element is a byte write over the original layout, as a write
+// through a pointer is. A part or a whole element of another type over an owning leaf needs the
+// old owner empty: no fact proves it, so the body leaves the declared scope.
+fn span_part_writes() void {
+    ownership_raw_source_env.closure mut c = ownership_raw_source_env.closure{};
+    string[21] lines = {
+        "struct owner_box { i32 mut* own p; u64 n; }",
+        "struct pair2 { u64 a; u64 b; }",
+        "fn part_over_owner() void {",
+        "    owner_box mut o = owner_box{null, 0};",
+        "    pair2 mut* q = cast(&o, pair2 mut*);",
+        "    pair2 mut@ s = q[0..1];",
+        "    s[0].a = 1;",
+        "}",
+        "fn whole_over_owner() void {",
+        "    owner_box mut o = owner_box{null, 0};",
+        "    pair2 mut* q = cast(&o, pair2 mut*);",
+        "    pair2 mut@ s = q[0..1];",
+        "    s[0] = pair2{1, 2};",
+        "}",
+        "fn part_beside_owner() void {",
+        "    pair2[1] mut words = {};",
+        "    pair2 mut* q = &words[0];",
+        "    pair2 mut@ s = q[0..1];",
+        "    s[0].b = 1;",
+        "    return;",
+        "}",
+    };
+    ownership_raw_source_env.open(&c, lines[..]);
+    defer ownership_raw_source_env.close(&c);
+    ownership_raw_source_env.outside(&c, "part_over_owner",
+        ownership_source_raw.missing.owner_overlap);
+    ownership_raw_source_env.outside(&c, "whole_over_owner",
+        ownership_source_raw.missing.owner_overlap);
+    ownership_raw_source_env.proved(&c, "part_beside_owner");
+    ownership_raw_source_env.report(&c, "span part writes");
+}
+
+fn main() i32 {
+    derivations();
+    writes();
+    owner_neighbours();
+    span_part_writes();
+    return 0;
+}

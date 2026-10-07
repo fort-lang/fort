@@ -1,0 +1,115 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| sweep ok
+//| events ok
+/// Checks the W ledger of the raw analysis at each bound below the work of one body: each
+/// phase that charges work refuses at its own bound, keeps the refusal, and never claims a
+/// complete solver or proof (fir.md 14.1). A bound that covers the work gives the full result.
+import ownership_api;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import ownership_source_raw;
+import std.strbuf;
+
+// One body with each kind of obligation: a range, an element, a derivation, a typed access,
+// a join of two windows, a loop, and a definite failure that needs a witness. The failure comes
+// before the loop, because a witness crosses no back edge.
+string[22] PROGRAM = {
+    "struct pair { i32 a; i64 b; u8* p; }",
+    "fn mixed(bool c) u64 {",
+    "    u64[2] words = {1, 2};",
+    "    u8* b = cast(&words, u8*);",
+    "    u8@ view = b[0..16];",
+    "    u8 first = view[0];",
+    "    pair s = pair{1, 2, null};",
+    "    pair* p = &s;",
+    "    i64* f = &p->b;",
+    "    u64 mut total = cast(*f, u64) +% cast(first, u64);",
+    "    u32 x = 3;",
+    "    u32 y = 4;",
+    "    u32* mut q = &x;",
+    "    if (c) { q = &y; }",
+    "    u8 tag = 1;",
+    "    u64* w = cast(&tag, u64*);",
+    "    total +%= *w;",
+    "    u64 mut i = 0;",
+    "    while (i < 2) { total +%= cast(*q, u64); i += 1; }",
+    "    return total;",
+    "}",
+    "fn root() i32 { return 0; }",
+};
+
+// Analyzes the program with W bound `w` for the body `mixed`, and returns that body.
+fn analyze(ownership_source_env.env mut* e, u64 w) ownership_source.body* {
+    ownership_source_env.open(e);
+    ownership_source_env.runtime(e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut i = 0;
+    while (i < PROGRAM.len) {
+        strbuf.append(&text, PROGRAM[i]);
+        strbuf.push(&text, '\n');
+        i += 1;
+    }
+    assert(ownership_source_env.prepare(e, strbuf.view(&text)));
+    ownership_source.body mut* row = ownership_source_env.find(e, "main", "mixed");
+    if (w != 0) { row->raw.meter.bounds.w = w; }
+    ownership_source.analyze(&e->source);
+    return row;
+}
+
+// Each bound below the work of the body refuses with the W category at that bound. The
+// result keeps the refusal and claims nothing complete.
+fn sweep() void {
+    ownership_source_env.env mut full = ownership_source_env.env{};
+    ownership_source.body* reference = analyze(&full, 0);
+    ownership_source_raw.context* done = &reference->raw;
+    assert(!done->first_refusal.terminal.present);
+    assert(done->violations_len == 1 && done->unproved_len == 0);
+    assert(done->correspondence == ownership_source_local.status.complete);
+    u64 used = done->meter.used.w;
+    assert(used > 20);
+    ownership_source_env.close(&full);
+    u64 mut bound = 1;
+    u64 mut refusals = 0;
+    while (bound <= used) {
+        ownership_source_env.env mut e = ownership_source_env.env{};
+        ownership_source.body* row = analyze(&e, bound);
+        ownership_source_raw.context* r = &row->raw;
+        if (bound < used) {
+            assert(r->first_refusal.terminal.present && r->first_refusal.terminal.limit.present);
+            assert(r->first_refusal.terminal.limit.category == ownership_api.limit_category.w);
+            assert(r->first_refusal.terminal.limit.bound == bound);
+            assert(r->solver == ownership_source_local.status.incomplete);
+            assert(!ownership_api.successful(r->proof));
+            assert(r->violations_len <= 1);
+            refusals += 1;
+        } else {
+            assert(!r->first_refusal.terminal.present && r->violations_len == 1);
+            assert(r->meter.used.w == used);
+        }
+        ownership_source_env.close(&e);
+        bound += 1;
+    }
+    assert(refusals == used - 1);
+    println("sweep ok");
+}
+
+// The raw ledger counts one retained event for each kernel failure, beside the work.
+fn events() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source.body* row = analyze(&e, 0);
+    defer ownership_source_env.close(&e);
+    assert(row->raw.meter.used.v == 1);
+    assert(row->raw.fir_size == row->live.fir_size);
+    assert(row->raw.limits.w == row->live.events.budget.bounds.w);
+    println("events ok");
+}
+
+fn main() i32 {
+    sweep();
+    events();
+    return 0;
+}

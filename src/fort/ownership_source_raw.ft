@@ -1,0 +1,2889 @@
+/// Produces raw-storage effects from verified source FIR and proves them with the raw kernel.
+// The caller keeps this context, its FIR and the checker's types at stable addresses through
+// free. A reference local that no FIR address names has definitions, and each use reads the
+// definitions that reach it. The raw analysis proves the spatial facts of an access: window,
+// alignment, source and header coherence. The local and stored-borrow analyses prove that the
+// source is live, so each source that a kernel check sees is live.
+import ast;
+import diag;
+import fir;
+import fir_flow;
+import ownership_api;
+import ownership_keys;
+import ownership_limits;
+import ownership_raw;
+import ownership_source_local;
+import ownership_state;
+import ownership_transfer;
+import prim;
+import types;
+
+u64 U64_MAX = 18446744073709551615;
+u64 I64_MAX = 9223372036854775807;
+u32 NO_LOCAL = 4294967295;
+
+// Classes of the values that a reference can hold. A value can hold several.
+u32 NONE = 1;
+u32 KNOWN = 2;
+u32 FOREIGN = 4;
+u32 RECONSTRUCTED = 8;
+u32 CALLER = 16;
+u32 STORED = 32;
+u32 CALL = 64;
+u32 UNKNOWN = 128;
+u32 RESIDUAL = 256;
+// The classes whose facts this analysis does not have: a gap (correspondence is incomplete).
+u32 GAPS = CALLER | STORED | CALL | UNKNOWN;
+
+// Value keys of locals use the ordinal of the local plus one. Keys of one statement start
+// here, four for each statement. Three serve: a count, a lower and an upper bound.
+u32 STATEMENT_KEYS = 1073741824;
+u32 COUNT_KEY = 1;
+u32 LOWER_KEY = 2;
+u32 UPPER_KEY = 3;
+// The source ordinal of the trusted foreign origin in one check.
+u32 FOREIGN_ORDINAL = 4294967293;
+
+/// Why the producer supplies no complete raw correspondence for a body.
+enum missing {
+    none,
+    // An obligation goes through a parameter: its window comes from the caller.
+    caller_origin,
+    // An obligation goes through a reference that the body loads from storage.
+    stored_origin,
+    // An obligation goes through the result of a fort call.
+    call_origin,
+    // An obligation goes through a value that the producer does not model.
+    unknown_origin,
+    // A byte write overlaps an owning leaf, and no fact proves the old owner empty.
+    owner_overlap,
+}
+
+// An exact integer plus at most one term `scale * key`. `key` 0 has no term.
+struct affine {
+    ownership_raw.number constant;
+    u32 key;
+    u64 scale;
+}
+
+// A storage object that an address can name: `bytes` bytes of elements of type `element`. Its
+// start is at `residue` modulo `alignment`. The kernel sees the object as bytes: its checks need
+// only the extent and the alignment, and the producer walks the typed layout for byte writes.
+struct object {
+    types.node* element;
+    affine bytes;
+    u64 alignment;
+    u64 residue;
+}
+
+// A known address: the window [begin, end) of an object. The address points at the start of
+// its window.
+struct address {
+    u32 object;
+    affine begin;
+    affine end;
+}
+
+// What one reference local can hold over all its definitions.
+struct value {
+    u32 classes;
+    address mut@ own known;
+    u64 known_len;
+}
+
+enum scalar_kind {
+    unknown_scalar,
+    constant_scalar,
+    version_scalar,
+}
+
+// What one integer local holds: a constant, the stable value of a key, or nothing known.
+struct scalar {
+    scalar_kind kind;
+    ownership_raw.number constant;
+    u32 key;
+}
+
+enum def_kind {
+    // A reference parameter at entry: a symbolic caller source.
+    entry,
+    // A move or a `del` empties the local.
+    empty,
+    // A write of one header field breaks the header.
+    broken,
+    // A write of the whole local.
+    write,
+}
+
+// One definition of a tracked reference local.
+struct definition {
+    def_kind kind;
+    u32 block;
+    u32 gap;
+    u32 local;
+    // The tracked reference local that a write reads, or NO_LOCAL.
+    u32 source;
+    // The object of this statement, or NO_LOCAL.
+    u32 object;
+    // The case counts hold this definition.
+    bool counted;
+    // The definitions of `source` that reach this one, as entries of the input pool. The pool
+    // grows with the work of the body, so its index is a u64.
+    u64 inputs_first;
+    u32 inputs_len;
+}
+
+/// The kinds of raw obligations.
+enum duty {
+    // A read or write of the subobject that a dereference selects.
+    access,
+    // An `addr` or `slice` of a subobject through a dereference.
+    derivation,
+    // `slice_ptr(p, lo, hi)` of a pointer.
+    range,
+    // An index of a span or `string` local.
+    element,
+}
+
+// One raw obligation at a statement (gap < count) or a terminator.
+struct obligation {
+    duty kind;
+    u32 block;
+    u32 gap;
+    // The reference local, or NO_LOCAL for a pointer that the place loads.
+    u32 local;
+    // The classes of a loaded pointer.
+    u32 loaded;
+    // The region from the address: [offset, offset + size).
+    u64 offset;
+    u64 size;
+    // The accessed type, the selected type, or the element type.
+    types.node* ty;
+    // The type that a write stores, or null for a read.
+    types.node* written;
+    // The definitions of `local` that reach the obligation, as entries of the input pool.
+    u64 inputs_first;
+    u32 inputs_len;
+    // A variable index selects the whole array as the region, but the access reads one
+    // element of it, so a region past the window is no exact failure.
+    bool variable;
+    // A field or an index follows the variable index: the access reads a part of an element.
+    bool tail;
+    // The type of the part of storage that the place reads or writes in this region
+    // (part_type). Each alignment test of an access asks part_alignment for it.
+    types.node* part;
+    // The region has no size (selection.unsized).
+    bool unsized;
+}
+
+// The bound of one value key in a check.
+struct key_bound {
+    u32 key;
+    ownership_raw.number lower;
+    ownership_raw.number upper;
+}
+
+enum verdict {
+    passed,
+    gap,
+    unproved,
+    definite,
+    refused,
+}
+
+struct context {
+    fir.func* function;
+    ownership_api.function_id identity;
+    u32 file;
+    string filename;
+    ownership_api.source_position declaration;
+    bool mut@ own tracked;
+    bool mut@ own taken;
+    bool mut@ own cyclic;
+    u32 mut@ own block_first;
+    // The block whose bounds check continues into each block, or NO_LOCAL.
+    u32 mut@ own guard_block;
+    u32 mut@ own defs_count;
+    u32 mut@ own def_block;
+    u32 mut@ own def_gap;
+    scalar mut@ own scalars;
+    u8 mut@ own scalar_state;
+    // The definitions, grouped by local in FIR order: local n owns entries local_first[n] to
+    // local_first[n + 1] - 1. Each definition has one value.
+    definition mut@ own defs;
+    u64 defs_len;
+    value mut@ own values;
+    u32 mut@ own local_first;
+    u32 mut@ own local_fill;
+    // The definitions of each block in FIR order: block b owns entries block_defs[b] to
+    // block_defs[b + 1] - 1 of def_order.
+    u32 mut@ own def_order;
+    u32 mut@ own block_defs;
+    u32 mut@ own block_fill;
+    // The definitions that reach the entry of each block, and the blocks that a path reaches.
+    fir_flow.bits mut@ own reaching;
+    bool mut@ own visited;
+    u32 mut@ own inputs;
+    u64 inputs_len;
+    // The definitions that read each definition, in a compressed row form.
+    u32 mut@ own reader_first;
+    u32 mut@ own readers;
+    object mut@ own objects;
+    u64 objects_len;
+    key_bound mut@ own keys;
+    u64 keys_len;
+    // The entry of each statement key in `keys`, plus one; zero for a key with no bound. A
+    // statement key indexes this table directly, so a lookup never walks `keys`.
+    u32 mut@ own key_slot;
+    obligation mut@ own duties;
+    u64 duties_len;
+    ownership_api.limit_table limits;
+    ownership_limits.meter meter;
+    ownership_api.services services;
+    ownership_api.proof_status first_refusal;
+    u64 fir_size;
+    missing gap;
+    ownership_api.source_position gap_source;
+    // The reason of the current kernel check.
+    bool event_seen;
+    string event_text;
+    // The reasons of the failing values of the current obligation, when the producer knows
+    // them (CAUSE_*): a record names them in the wording of its kind.
+    u32 event_causes;
+    bool records_lost;
+    ownership_source_local.violation mut@ own violations;
+    u64 violations_len;
+    // Incomplete proof at one operation, in the shape of a violation.
+    ownership_source_local.violation mut@ own unproved;
+    u64 unproved_len;
+    // The counts of the raw cases of this body.
+    u64 accesses;
+    u64 ranges;
+    u64 origins;
+    u64 casts;
+    u64 byte_writes;
+    u64 reconstructions;
+    ownership_source_local.status correspondence;
+    ownership_source_local.status solver;
+    ownership_api.proof_status proof;
+    ownership_api.proof_status first_incomplete;
+    bool initialized;
+    bool solved;
+}
+
+fn complete() ownership_api.proof_status {
+    return ownership_api.proof_status{.kind = ownership_api.proof_kind.complete};
+}
+
+fn entity(context* c, ownership_api.entity_kind kind, u32 ordinal) ownership_api.entity_id {
+    return ownership_api.entity_id{c->identity, kind, ordinal};
+}
+
+fn local_type(context* c, u32 local) types.node* {
+    return fir.local_at(c->function, local)->ty;
+}
+
+fn reference_type(types.node* t) bool { return types.type_is_reference(t); }
+
+fn header_type(types.node* t) bool {
+    return t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string;
+}
+
+fn integer_type(types.node* t) bool {
+    return t->kind == types.type_kind.k_prim && prim.prim_is_integer(t->prim);
+}
+
+fn source(context* c, diag.loc at) ownership_api.source_position {
+    if (at.line == 0 || at.col == 0 || at.file != c->filename) { return c->declaration; }
+    return ownership_api.source_position{c->identity.declaration.module, c->file,
+        at.line, at.col, at.end_line, at.end_col, true};
+}
+
+fn position(context* c, u32 block, u32 gap) ownership_api.operation_position {
+    return ownership_api.operation_position{c->identity, block, gap,
+        gap == fir.block_statement_count(c->function, block)};
+}
+
+fn location(context* c, u32 block, u32 gap) diag.loc {
+    if (gap < fir.block_statement_count(c->function, block)) {
+        return fir.block_statement(c->function, block, gap)->loc;
+    }
+    return fir.block_at(c->function, block)->term.loc;
+}
+
+fn note_gap(context mut* c, missing why, u32 block, u32 gap) void {
+    if (c->gap == missing.none) {
+        c->gap = why;
+        c->gap_source = source(c, location(c, block, gap));
+    }
+}
+
+// ---- numbers ------------------------------------------------------------------------------
+
+fn natural(u64 v) ownership_raw.number { return ownership_raw.natural(v); }
+
+fn exact(ownership_raw.number v) affine { return affine{.constant = v}; }
+
+fn invalid() affine { return affine{}; }
+
+fn valid(affine a) bool { return a.constant.valid; }
+
+fn constant_of(affine a) bool { return a.constant.valid && a.key == 0; }
+
+fn term(u32 key, u64 scale) affine {
+    return affine{.constant = natural(0), .key = key, .scale = scale};
+}
+
+// a + b, or invalid when both have a term of other keys or the constant overflows.
+fn add(affine a, affine b) affine {
+    if (!valid(a) || !valid(b)) { return invalid(); }
+    affine mut out = a;
+    out.constant = ownership_raw.plus(a.constant, b.constant);
+    if (b.key != 0) {
+        if (a.key != 0 && a.key != b.key) { return invalid(); }
+        if (a.key == b.key && a.scale > U64_MAX - b.scale) { return invalid(); }
+        out.scale = a.key == b.key ? a.scale + b.scale : b.scale;
+        out.key = b.key;
+    }
+    return out;
+}
+
+// a * k for a byte stride k.
+fn scale_by(affine a, u64 k) affine {
+    if (!valid(a)) { return invalid(); }
+    affine mut out = a;
+    out.constant = ownership_raw.multiply(a.constant, natural(k));
+    if (a.key != 0) {
+        if (k != 0 && a.scale > U64_MAX / k) { return invalid(); }
+        out.scale = a.scale * k;
+        if (out.scale == 0) { out.key = 0; }
+    }
+    return out;
+}
+
+fn same_affine(affine a, affine b) bool {
+    return ownership_raw.same_number(a.constant, b.constant) && a.key == b.key &&
+        (a.key == 0 || a.scale == b.scale);
+}
+
+fn statement_index(context* c, u32 block, u32 gap) u32 { return c->block_first[block] + gap; }
+
+fn statement_key(context* c, u32 block, u32 gap, u32 purpose) u32 {
+    u64 index = cast(statement_index(c, block, gap), u64) * 4 + cast(purpose, u64);
+    // Keys stay below 2^32 for each body with fewer than 3 * 2^28 statements and terminators.
+    // panic-coverage: unreachable: read: that many FIR statements need more than 48 GiB.
+    if (index >= cast(STATEMENT_KEYS, u64) * 3) { panic("ownership_source_raw: key overflow"); }
+    return STATEMENT_KEYS + cast(index, u32);
+}
+
+fn integer_range(types.node* t, ownership_raw.number mut* lower,
+    ownership_raw.number mut* upper) void {
+    u64 bits = cast(prim.prim_size(t->prim), u64) * 8;
+    if (!prim.prim_is_signed(t->prim)) {
+        *lower = natural(0);
+        *upper = natural(bits == 64 ? U64_MAX : (cast(1, u64) << bits) - 1);
+        return;
+    }
+    u64 half = cast(1, u64) << (bits - 1);
+    *lower = ownership_raw.number{half, true, true};
+    *upper = natural(half - 1);
+}
+
+// Records the bound of a statement key. A key has one bound: the first record keeps it.
+fn bound_key(context mut* c, u32 key, ownership_raw.number lower, ownership_raw.number upper)
+    void {
+    u64 at = cast(key - STATEMENT_KEYS, u64);
+    if (c->key_slot[at] != 0) { return; }
+    if (c->keys_len == c->keys.len) {
+        key_bound mut@ own bigger = new(key_bound, c->keys.len * 2 + 8);
+        u64 mut k = 0;
+        while (k < c->keys_len) { bigger[k] = c->keys[k]; k += 1; }
+        del(c->keys);
+        c->keys = move(bigger);
+    }
+    c->keys[c->keys_len] = key_bound{key, lower, upper};
+    c->keys_len += 1;
+    c->key_slot[at] = cast(c->keys_len, u32);
+}
+
+// The bound of a key: the range of the type of its local, or the recorded statement bound.
+fn key_range(context* c, u32 key, key_bound mut* out) bool {
+    if (key < STATEMENT_KEYS) {
+        types.node* t = local_type(c, key - 1);
+        if (!integer_type(t)) { return false; }
+        ownership_raw.number mut lower = natural(0);
+        ownership_raw.number mut upper = natural(0);
+        integer_range(t, &lower, &upper);
+        *out = key_bound{key, lower, upper};
+        return true;
+    }
+    u64 at = cast(key - STATEMENT_KEYS, u64);
+    if (at >= c->key_slot.len || c->key_slot[at] == 0) { return false; }
+    *out = c->keys[cast(c->key_slot[at], u64) - 1];
+    return true;
+}
+
+// ---- budget and events ----------------------------------------------------------------------
+
+fn budget(void mut* opaque_context, ownership_api.charge_request* request)
+    ownership_api.charge_result {
+    context mut* c = cast(opaque_context, context mut*);
+    if (c->first_refusal.terminal.present) {
+        return ownership_api.charge_result{.proof = c->first_refusal,
+            .limit = c->first_refusal.terminal.limit};
+    }
+    ownership_api.charge_result out = ownership_limits.try_charge(&c->meter, request);
+    if (!out.allowed) {
+        c->first_refusal = ownership_api.incomplete(ownership_api.incomplete_reason.work_limit,
+            request->operation, request->source);
+        c->first_refusal.terminal.limit = out.limit;
+        c->first_refusal.terminal.limit.source = request->source;
+    }
+    return out;
+}
+
+// Keeps the reason of the current check. The validation decides what the failure establishes.
+fn event(void mut* opaque_context, ownership_api.event_request* request)
+    ownership_api.event_result {
+    context mut* c = cast(opaque_context, context mut*);
+    ownership_api.event_result mut out = ownership_api.event_result{};
+    out.proof = request->current;
+    out.retained = true;
+    out.stored_key = request->event.key;
+    ownership_api.event_descriptor* e = &request->event;
+    if (!charge_report(c, e->operation, e->source, 1)) {
+        c->records_lost = true;
+        return out;
+    }
+    if (!c->event_seen) {
+        c->event_seen = true;
+        c->event_text = e->text;
+    }
+    return out;
+}
+
+/// Charges retained events and rendered records against the V bound of this ledger.
+fn charge_report(context mut* c, ownership_api.operation_position op,
+    ownership_api.source_position at, u64 amount) bool {
+    ownership_api.charge_item[1] item = {ownership_api.charge_item{
+        ownership_api.limit_category.v, ownership_api.limit_scope.report, amount}};
+    ownership_api.charge_request request = ownership_api.charge_request{
+        ownership_api.work_kind.transfer, op, at, item[..]};
+    ownership_api.charge_result out = ownership_limits.try_charge(&c->meter, &request);
+    if (!out.allowed && !c->first_refusal.terminal.present) {
+        c->first_refusal = ownership_api.incomplete(ownership_api.incomplete_reason.report_limit,
+            op, at);
+        c->first_refusal.terminal.limit = out.limit;
+        c->first_refusal.terminal.limit.source = at;
+    }
+    return out.allowed;
+}
+
+/// Charges one rendered record: its error and its note.
+fn charge_rendered(context mut* c, ownership_source_local.violation* v) bool {
+    return charge_report(c, v->operation, v->source, 2);
+}
+
+// Charges W units of producer work at one position. A W charge carries one unit.
+fn work(context mut* c, u32 block, u32 gap, u64 amount) bool {
+    ownership_api.charge_item[1] item = {ownership_api.charge_item{
+        ownership_api.limit_category.w, ownership_api.limit_scope.computation, 1}};
+    ownership_api.charge_request request = ownership_api.charge_request{
+        ownership_api.work_kind.transfer, position(c, block, gap),
+        source(c, location(c, block, gap)), item[..]};
+    u64 mut i = 0;
+    while (i < amount) {
+        if (!budget(cast(c, void mut*), &request).allowed) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+// ---- cycles ---------------------------------------------------------------------------------
+
+// Marks each block that lies on a cycle of the CFG, in one pass (iterative Tarjan).
+fn mark_cycles(context mut* c) void {
+    fir.func* f = c->function;
+    u32 count = fir.block_count(f);
+    u64 n = cast(count, u64);
+    c->cyclic = new(bool, n);
+    u32 mut@ own index = new(u32, n);
+    defer del(index);
+    u32 mut@ own low = new(u32, n);
+    defer del(low);
+    bool mut@ own on_stack = new(bool, n);
+    defer del(on_stack);
+    u32 mut@ own stack = new(u32, n);
+    defer del(stack);
+    u32 mut@ own call_block = new(u32, n);
+    defer del(call_block);
+    u32 mut@ own call_next = new(u32, n);
+    defer del(call_next);
+    u64 mut stack_len = 0;
+    u32 mut counter = 1;
+    u32 mut root = 0;
+    while (root < count) {
+        if (index[cast(root, u64)] != 0) { root += 1; continue; }
+        u64 mut depth = 0;
+        call_block[0] = root;
+        call_next[0] = 0;
+        index[cast(root, u64)] = counter;
+        low[cast(root, u64)] = counter;
+        counter += 1;
+        stack[stack_len] = root;
+        stack_len += 1;
+        on_stack[cast(root, u64)] = true;
+        depth = 1;
+        while (depth > 0) {
+            u32 b = call_block[depth - 1];
+            fir.block* at = fir.block_at(f, b);
+            u32 mut target = 0;
+            u32 k = call_next[depth - 1];
+            if (at->terminated && fir.term_targets(f, &at->term, k, &target)) {
+                call_next[depth - 1] = k + 1;
+                if (target == b) { c->cyclic[cast(b, u64)] = true; }
+                if (index[cast(target, u64)] == 0) {
+                    index[cast(target, u64)] = counter;
+                    low[cast(target, u64)] = counter;
+                    counter += 1;
+                    stack[stack_len] = target;
+                    stack_len += 1;
+                    on_stack[cast(target, u64)] = true;
+                    call_block[depth] = target;
+                    call_next[depth] = 0;
+                    depth += 1;
+                } else if (on_stack[cast(target, u64)] &&
+                    index[cast(target, u64)] < low[cast(b, u64)]) {
+                    low[cast(b, u64)] = index[cast(target, u64)];
+                }
+                continue;
+            }
+            // Block b is done. A root of a component pops it.
+            if (low[cast(b, u64)] == index[cast(b, u64)]) {
+                u64 mut size = 0;
+                u64 mut i = stack_len;
+                while (i > 0) {
+                    size += 1;
+                    if (stack[i - 1] == b) { break; }
+                    i -= 1;
+                }
+                while (stack_len > 0) {
+                    u32 member = stack[stack_len - 1];
+                    stack_len -= 1;
+                    on_stack[cast(member, u64)] = false;
+                    if (size > 1) { c->cyclic[cast(member, u64)] = true; }
+                    if (member == b) { break; }
+                }
+            }
+            depth -= 1;
+            if (depth > 0) {
+                u32 parent = call_block[depth - 1];
+                if (low[cast(b, u64)] < low[cast(parent, u64)]) {
+                    low[cast(parent, u64)] = low[cast(b, u64)];
+                }
+            }
+        }
+        root += 1;
+    }
+}
+
+// ---- locals and scalars ---------------------------------------------------------------------
+
+fn classify(context mut* c) void {
+    fir.func* f = c->function;
+    u64 count = cast(fir.local_count(f), u64);
+    c->tracked = new(bool, count);
+    c->taken = new(bool, count);
+    c->defs_count = new(u32, count);
+    c->def_block = new(u32, count);
+    c->def_gap = new(u32, count);
+    c->scalars = new(scalar, count);
+    c->scalar_state = new(u8, count);
+    ownership_source_local.mark_taken(f, c->taken);
+    u64 mut n = 0;
+    while (n < count) {
+        fir.local* l = fir.local_at(f, cast(n, u32));
+        c->tracked[n] = reference_type(l->ty) && !c->taken[n];
+        n += 1;
+    }
+    u32 blocks = fir.block_count(f);
+    c->block_first = new(u32, cast(blocks, u64));
+    u32 mut first = 0;
+    u32 mut b = 0;
+    while (b < blocks) {
+        c->block_first[cast(b, u64)] = first;
+        first += fir.block_statement_count(f, b) + 1;
+        b += 1;
+    }
+    // Four keys for each statement and terminator: see statement_key.
+    c->key_slot = new(u32, cast(first, u64) * 4);
+    c->guard_block = new(u32, cast(blocks, u64));
+    b = 0;
+    while (b < blocks) { c->guard_block[cast(b, u64)] = NO_LOCAL; b += 1; }
+    b = 0;
+    while (b < blocks) {
+        fir.block* at = fir.block_at(f, b);
+        if (at->terminated && at->term.kind == fir.term_kind.tk_check &&
+            at->term.check == fir.check_kind.chk_bounds) {
+            c->guard_block[cast(at->term.target, u64)] = b;
+        }
+        b += 1;
+    }
+    b = 0;
+    while (b < blocks) {
+        u32 mut g = 0;
+        while (g < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, g);
+            fir.place mut written = fir.place{};
+            if (s->kind == fir.stmt_kind.st_assign && fir.stmt_writes_place(s, &written) &&
+                written.base == fir.base_kind.bk_local && written.proj_len == 0) {
+                u64 at = cast(written.local, u64);
+                c->defs_count[at] += 1;
+                c->def_block[at] = b;
+                c->def_gap[at] = g;
+            }
+            g += 1;
+        }
+        b += 1;
+    }
+}
+
+// The value of an integer local: a constant, a stable key, or unknown. A definition in a cycle
+// can hold another value on each execution, so it gives no stable key.
+fn scalar_of(context mut* c, u32 local) scalar {
+    u64 at = cast(local, u64);
+    if (c->scalar_state[at] == 2) { return c->scalars[at]; }
+    if (c->scalar_state[at] == 1) { return scalar{}; }
+    c->scalar_state[at] = 1;
+    scalar mut out = scalar{};
+    fir.local* l = fir.local_at(c->function, local);
+    if (integer_type(l->ty) && !c->taken[at]) {
+        if (l->kind == fir.local_kind.lk_param) {
+            // A parameter holds the caller's value until a write reaches a use. Only a
+            // parameter that the body never writes has one value in each use.
+            if (c->defs_count[at] == 0) {
+                out = scalar{.kind = scalar_kind.version_scalar, .key = local + 1};
+            }
+        } else if (c->defs_count[at] == 1) {
+            out = defined_scalar(c, local);
+        }
+    }
+    c->scalars[at] = out;
+    c->scalar_state[at] = 2;
+    return out;
+}
+
+fn defined_scalar(context mut* c, u32 local) scalar {
+    u64 at = cast(local, u64);
+    u32 block = c->def_block[at];
+    fir.statement* s = fir.block_statement(c->function, block, c->def_gap[at]);
+    types.node* t = local_type(c, local);
+    fir.rvalue r = s->value;
+    if ((r.kind == fir.rvalue_kind.rv_use || r.kind == fir.rvalue_kind.rv_cast) &&
+        r.ops_len == 1) {
+        fir.operand o = fir.rvalue_operand(c->function, r, 0);
+        affine v = operand_value(c, o);
+        if (constant_of(v) && fits(t, v.constant)) {
+            return scalar{.kind = scalar_kind.constant_scalar, .constant = v.constant};
+        }
+        if (v.key != 0 && v.scale == 1 && ownership_raw.same_number(v.constant, natural(0)) &&
+            o.kind != fir.operand_kind.ok_const && widens(fir.operand_type(c->function, o), t)) {
+            return scalar{.kind = scalar_kind.version_scalar, .key = v.key};
+        }
+    }
+    if (c->cyclic[cast(block, u64)]) { return scalar{}; }
+    return scalar{.kind = scalar_kind.version_scalar, .key = local + 1};
+}
+
+fn fits(types.node* t, ownership_raw.number v) bool {
+    if (!integer_type(t)) { return false; }
+    ownership_raw.number mut lower = natural(0);
+    ownership_raw.number mut upper = natural(0);
+    integer_range(t, &lower, &upper);
+    return ownership_raw.less_equal(lower, v) && ownership_raw.less_equal(v, upper);
+}
+
+// Whether each value of integer type `from` is a value of integer type `to`.
+fn widens(types.node* from, types.node* to) bool {
+    if (!integer_type(from) || !integer_type(to)) { return false; }
+    ownership_raw.number mut a = natural(0);
+    ownership_raw.number mut b = natural(0);
+    ownership_raw.number mut x = natural(0);
+    ownership_raw.number mut y = natural(0);
+    integer_range(from, &a, &b);
+    integer_range(to, &x, &y);
+    return ownership_raw.less_equal(x, a) && ownership_raw.less_equal(b, y);
+}
+
+// The value of an integer operand.
+fn operand_value(context mut* c, fir.operand o) affine {
+    if (o.kind == fir.operand_kind.ok_const) {
+        if (o.value.kind != fir.const_kind.ck_int) { return invalid(); }
+        if (o.value.value.neg) {
+            return exact(ownership_raw.number{o.value.value.mag, true, true});
+        }
+        return exact(natural(o.value.value.mag));
+    }
+    if (o.place.base != fir.base_kind.bk_local || o.place.proj_len != 0) { return invalid(); }
+    scalar v = scalar_of(c, o.place.local);
+    if (v.kind == scalar_kind.constant_scalar) { return exact(v.constant); }
+    if (v.kind == scalar_kind.version_scalar) { return term(v.key, 1); }
+    return invalid();
+}
+
+// The value of a bound operand of a statement: its value, or a fresh key bounded by its type.
+fn bound_value(context mut* c, u32 block, u32 gap, fir.operand o, u32 purpose) affine {
+    affine v = operand_value(c, o);
+    if (valid(v)) { return v; }
+    // A statement in a CFG cycle runs once in each pass, and one key cannot name the value of
+    // each pass: a window from an earlier pass would meet the bound of a later pass under one
+    // name. So the bound stays unknown there, as a local defined in a cycle does.
+    if (c->cyclic[cast(block, u64)]) { return invalid(); }
+    types.node* t = fir.operand_type(c->function, o);
+    if (!integer_type(t)) { return invalid(); }
+    u32 key = statement_key(c, block, gap, purpose);
+    ownership_raw.number mut lower = natural(0);
+    ownership_raw.number mut upper = natural(0);
+    integer_range(t, &lower, &upper);
+    bound_key(c, key, lower, upper);
+    return term(key, 1);
+}
+
+// ---- types ------------------------------------------------------------------------------------
+
+fn size_of(types.node* t, u64 mut* out) bool {
+    if (t == null || t->kind == types.type_kind.k_void || t->kind == types.type_kind.k_null) {
+        return false;
+    }
+    return types.size_checked(t, out);
+}
+
+// The innermost element of nested arrays and the product of their lengths.
+fn flatten(types.node* t, types.node* mut* element, u64 mut* count) bool {
+    types.node* mut at = t;
+    u64 mut n = 1;
+    while (at->kind == types.type_kind.k_array) {
+        if (at->len != 0 && n > U64_MAX / at->len) { return false; }
+        n *= at->len;
+        at = at->elem;
+    }
+    *element = at;
+    *count = n;
+    return true;
+}
+
+fn field_offset(types.node* t, u32 k) u64 {
+    ast.node* decl = fir.struct_decl(t);
+    u32 mut at = 0;
+    u64 mut i = 0;
+    while (i < ast.ast_len(decl)) {
+        ast.node* field = ast.ast_child(decl, i);
+        if (field->kind == ast.ast_kind.k_field_decl) {
+            if (at == k) { return field->aux; }
+            at += 1;
+        }
+        i += 1;
+    }
+    // panic-coverage: unreachable: read: verified FIR names only fields of the struct (V3).
+    panic("ownership_source_raw: no such field");
+}
+
+// The largest power of two that divides v, or `limit` for 0.
+fn low_bit(u64 v, u64 limit) u64 {
+    if (v == 0) { return limit; }
+    u64 mut bit = 1;
+    while ((v & bit) == 0 && bit < limit) { bit = bit << 1; }
+    return bit < limit ? bit : limit;
+}
+
+// The leaves that a range of a value of type `t` overlaps: bit 1 a borrowed reference, bit 2
+// an owning reference.
+fn overlap(types.node* t, u64 lo, u64 hi) u32 {
+    if (lo >= hi) { return 0; }
+    if (reference_type(t)) { return t->is_own ? 2 : 1; }
+    if (t->kind == types.type_kind.k_array) {
+        u64 mut k = 0;
+        if (!size_of(t->elem, &k)) { return 0; }
+        return range_overlap(t->elem, k, lo, hi);
+    }
+    if (t->kind != types.type_kind.k_struct) { return 0; }
+    u32 mut out = 0;
+    u32 count = fir.struct_field_count(t);
+    u32 mut i = 0;
+    while (i < count) {
+        types.node* field = fir.struct_field_type(t, i);
+        u64 start = field_offset(t, i);
+        u64 mut bytes = 0;
+        if (size_of(field, &bytes) && start < hi && lo < start + bytes) {
+            u64 from = lo > start ? lo - start : 0;
+            u64 to = hi < start + bytes ? hi - start : bytes;
+            out = out | overlap(field, from, to);
+        }
+        i += 1;
+    }
+    return out;
+}
+
+// The leaves that a range of repeated elements of `k` bytes overlaps. It visits at most three
+// elements, because each whole element in the range has the leaves of one element.
+fn range_overlap(types.node* element, u64 k, u64 lo, u64 hi) u32 {
+    if (lo >= hi || k == 0) { return 0; }
+    u64 first = lo / k;
+    u64 last = (hi - 1) / k;
+    u64 start = lo - first * k;
+    u32 mut out = overlap(element, start, last == first ? hi - first * k : k);
+    if (last > first) {
+        if (last > first + 1) { out = out | overlap(element, 0, k); }
+        out = out | overlap(element, 0, hi - last * k);
+    }
+    return out;
+}
+
+// Whether the subobject at [lo, lo + size) of a value of type `t` has type `wanted`.
+fn typed_at(types.node* t, u64 lo, u64 size, types.node* wanted) bool {
+    u64 mut bytes = 0;
+    if (!size_of(t, &bytes)) { return false; }
+    if (lo == 0 && size == bytes && types.type_equal(t, wanted)) { return true; }
+    if (t->kind == types.type_kind.k_array) {
+        u64 mut k = 0;
+        if (!size_of(t->elem, &k) || k == 0) { return false; }
+        return typed_at(t->elem, lo % k, size, wanted) && lo % k + size <= k;
+    }
+    if (t->kind != types.type_kind.k_struct) { return false; }
+    u32 count = fir.struct_field_count(t);
+    u32 mut i = 0;
+    while (i < count) {
+        types.node* field = fir.struct_field_type(t, i);
+        u64 start = field_offset(t, i);
+        u64 mut field_bytes = 0;
+        if (size_of(field, &field_bytes) && start <= lo && lo + size <= start + field_bytes) {
+            return typed_at(field, lo - start, size, wanted);
+        }
+        i += 1;
+    }
+    return false;
+}
+
+// ---- values ---------------------------------------------------------------------------------
+
+fn add_object(context mut* c, types.node* t, affine bytes, u64 alignment, u64 residue) u32 {
+    if (c->objects_len == c->objects.len) {
+        object mut@ own bigger = new(object, c->objects.len * 2 + 8);
+        u64 mut k = 0;
+        while (k < c->objects_len) { bigger[k] = c->objects[k]; k += 1; }
+        del(c->objects);
+        c->objects = move(bigger);
+    }
+    c->objects[c->objects_len] = object{t, bytes, alignment, residue};
+    c->objects_len += 1;
+    c->origins += 1;
+    return cast(c->objects_len - 1, u32);
+}
+
+// The object of a typed storage name: `count` elements of the flattened type `t`.
+fn typed_object(context mut* c, types.node* t) u32 {
+    types.node* mut element = t;
+    u64 mut count = 1;
+    if (!flatten(t, &element, &count)) { return NO_LOCAL; }
+    u64 mut bytes = 0;
+    if (!size_of(t, &bytes)) { return NO_LOCAL; }
+    return add_object(c, element, exact(natural(bytes)), types.type_alignof(element), 0);
+}
+
+// The whole window of an object.
+fn whole(context* c, u32 index) address {
+    return address{index, exact(natural(0)), c->objects[cast(index, u64)].bytes};
+}
+
+fn same_address(address a, address b) bool {
+    return a.object == b.object && same_affine(a.begin, b.begin) && same_affine(a.end, b.end);
+}
+
+// Adds classes and one address to a value. True when the value grows.
+fn insert(context mut* c, value mut* into, u32 classes, address* item) bool {
+    u32 before = into->classes;
+    into->classes = into->classes | classes;
+    bool mut grew = into->classes != before;
+    if (item == null || (into->classes & RESIDUAL) != 0) { return grew; }
+    u64 mut i = 0;
+    while (i < into->known_len) {
+        if (same_address(into->known[i], *item)) { return grew; }
+        i += 1;
+    }
+    // More alternatives than G merge into a residual description (fir.md 14.1).
+    if (into->known_len >= c->limits.g) {
+        into->classes = into->classes | RESIDUAL;
+        return true;
+    }
+    if (into->known_len == into->known.len) {
+        address mut@ own bigger = new(address, into->known.len * 2 + 2);
+        u64 mut k = 0;
+        while (k < into->known_len) { bigger[k] = into->known[k]; k += 1; }
+        del(into->known);
+        into->known = move(bigger);
+    }
+    into->known[into->known_len] = *item;
+    into->known_len += 1;
+    into->classes = into->classes | KNOWN;
+    return true;
+}
+
+fn free_value(value mut* v) void {
+    del(v->known);
+    *v = value{};
+}
+
+// The classes that a place gives when the body loads a reference from it: a by-value
+// parameter holds caller storage, anything else is stored storage.
+fn load_class(context* c, fir.place p) u32 {
+    if (p.base == fir.base_kind.bk_local && !fir.place_indirect(c->function, p) &&
+        fir.local_at(c->function, p.local)->kind == fir.local_kind.lk_param) {
+        return CALLER;
+    }
+    return STORED;
+}
+
+// ---- checked indexes --------------------------------------------------------------------------
+
+// Whether a bounds check that guards `block` tests `index` against `length`. The continuation
+// of a check has one predecessor, the check (rule V11), so the checks above a block form one
+// chain of blocks that each path to it passes. `length` is a constant or the length field of a
+// span local. Each block of the chain charges one W unit.
+fn guarded(context mut* c, u32 block, u32 index, u64 constant, u32 span) bool {
+    u32 mut b = c->guard_block[cast(block, u64)];
+    u32 mut steps = 0;
+    // A chain that no path reaches can close on itself, so the walk stops after each block.
+    while (b != NO_LOCAL && steps < fir.block_count(c->function)) {
+        steps += 1;
+        if (!work(c, b, 0, 1)) { return false; }
+        fir.terminator* t = &fir.block_at(c->function, b)->term;
+        if (t->cond.kind == fir.operand_kind.ok_copy &&
+            t->cond.place.base == fir.base_kind.bk_local && t->cond.place.proj_len == 0 &&
+            guard_test(c, b, t->cond.place.local, index, constant, span)) { return true; }
+        b = c->guard_block[cast(b, u64)];
+    }
+    return false;
+}
+
+fn guard_test(context* c, u32 block, u32 flag, u32 index, u64 constant, u32 span) bool {
+    fir.func* f = c->function;
+    if (c->defs_count[cast(flag, u64)] != 1 || c->def_block[cast(flag, u64)] != block) {
+        return false;
+    }
+    fir.statement* s = fir.block_statement(f, block, c->def_gap[cast(flag, u64)]);
+    if (s->value.kind != fir.rvalue_kind.rv_ge || s->value.ops_len != 2) { return false; }
+    fir.operand left = fir.rvalue_operand(f, s->value, 0);
+    fir.operand right = fir.rvalue_operand(f, s->value, 1);
+    if (left.kind != fir.operand_kind.ok_copy || left.place.base != fir.base_kind.bk_local ||
+        left.place.proj_len != 0 || left.place.local != index) { return false; }
+    if (span == NO_LOCAL) {
+        return right.kind == fir.operand_kind.ok_const &&
+            right.value.kind == fir.const_kind.ck_int && !right.value.value.neg &&
+            right.value.value.mag == constant;
+    }
+    if (right.kind != fir.operand_kind.ok_copy || right.place.base != fir.base_kind.bk_local ||
+        right.place.local != span || right.place.proj_len != 1) { return false; }
+    fir.projection pj = fir.place_projection(f, right.place, 0);
+    return pj.kind == fir.proj_kind.pj_field && pj.field == 1;
+}
+
+// ---- definitions ----------------------------------------------------------------------------
+
+// The value that one definition gives, from the values of the definitions that reach it.
+fn evaluate(context mut* c, u64 index, value mut* out) void {
+    definition mut* d = &c->defs[index];
+    if (d->kind == def_kind.entry) { insert(c, out, CALLER, null); return; }
+    if (d->kind == def_kind.empty) { insert(c, out, NONE, null); return; }
+    if (d->kind == def_kind.broken) { insert(c, out, UNKNOWN, null); return; }
+    value mut in = value{};
+    defer free_value(&in);
+    if (!union_inputs(c, d->block, d->gap, d->inputs_first, d->inputs_len, &in)) { return; }
+    write_value(c, d, &in, out);
+}
+
+// The union of the values of input definitions. Each merged address pays for the addresses that
+// it meets. False when the ledger refuses that work.
+fn union_inputs(context mut* c, u32 block, u32 gap, u64 first, u32 len, value mut* out) bool {
+    u64 mut i = 0;
+    while (i < cast(len, u64)) {
+        value* v = &c->values[cast(c->inputs[first + i], u64)];
+        if (!work(c, block, gap, 1 + v->known_len * (out->known_len + 1))) { return false; }
+        copy_into(c, v, out);
+        i += 1;
+    }
+    return true;
+}
+
+fn copy_into(context mut* c, value* v, value mut* out) void {
+    insert(c, out, v->classes & ~KNOWN, null);
+    u64 mut i = 0;
+    while (i < v->known_len) {
+        address item = v->known[i];
+        insert(c, out, KNOWN, &item);
+        i += 1;
+    }
+}
+
+// The value of a write. `in` holds the value of the tracked local that it reads.
+fn write_value(context mut* c, definition mut* d, value* in, value mut* out) void {
+    fir.func* f = c->function;
+    fir.statement* s = fir.block_statement(f, d->block, d->gap);
+    fir.rvalue r = s->value;
+    types.node* to = local_type(c, d->local);
+    if (r.kind == fir.rvalue_kind.rv_use || r.kind == fir.rvalue_kind.rv_cast) {
+        operand_effect(c, d, fir.rvalue_operand(f, r, 0), r.kind == fir.rvalue_kind.rv_cast, in,
+            out);
+        return;
+    }
+    if (r.kind == fir.rvalue_kind.rv_addr || r.kind == fir.rvalue_kind.rv_slice) {
+        derived(c, d, s, in, out);
+        return;
+    }
+    if (r.kind == fir.rvalue_kind.rv_slice_ptr) {
+        raw_range(c, d, s, in, out);
+        return;
+    }
+    if (r.kind == fir.rvalue_kind.rv_alloc) {
+        if (d->object == NO_LOCAL) { d->object = allocated(c, d, r); }
+        if (d->object == NO_LOCAL) { insert(c, out, UNKNOWN, null); return; }
+        address item = whole(c, d->object);
+        insert(c, out, KNOWN, &item);
+        return;
+    }
+    if (r.kind == fir.rvalue_kind.rv_aggregate && header_type(to) && r.ops_len == 2 &&
+        owned_span(c, d->block, d->gap, r)) {
+        copy_into(c, in, out);
+        return;
+    }
+    if (r.kind == fir.rvalue_kind.rv_call) {
+        if (r.callee == fir.callee_kind.cl_extern) {
+            // A trusted foreign result (D17.13).
+            if (!d->counted) { c->origins += 1; d->counted = true; }
+            insert(c, out, FOREIGN, null);
+            return;
+        }
+        insert(c, out, CALL, null);
+        return;
+    }
+    insert(c, out, UNKNOWN, null);
+}
+
+// The object of `alloc<T>(n)`. Allocation success bounds a symbolic count (D10.2): n times the
+// size fits the largest object.
+fn allocated(context mut* c, definition* d, fir.rvalue r) u32 {
+    affine mut n = operand_value(c, fir.rvalue_operand(c->function, r, 0));
+    // A negative count fails its allocation check, so no allocation exists.
+    if (constant_of(n) && n.constant.negative) { return NO_LOCAL; }
+    types.node* mut element = r.ty;
+    u64 mut inner = 1;
+    u64 mut bytes = 0;
+    if (!flatten(r.ty, &element, &inner) || !size_of(r.ty, &bytes)) { return NO_LOCAL; }
+    affine mut extent = scale_by(n, bytes);
+    if (!constant_of(n) || !valid(extent) || extent.constant.magnitude > I64_MAX) {
+        // The byte count of a successful allocation fits the largest object, so a larger
+        // constant count names no allocation that succeeds: a bounded key stands for it.
+        u32 key = statement_key(c, d->block, d->gap, COUNT_KEY);
+        bound_key(c, key, natural(0), natural(I64_MAX));
+        extent = term(key, 1);
+    }
+    return add_object(c, element, extent, types.type_alignof(element), 0);
+}
+
+// The pattern of new(T, n): `_p = alloc<T>(n)` just before `_d = aggregate T@ own(move _p, n)`.
+fn owned_span(context* c, u32 block, u32 gap, fir.rvalue r) bool {
+    fir.func* f = c->function;
+    if (r.ops_len != 2 || gap == 0) { return false; }
+    fir.operand pointer = fir.rvalue_operand(f, r, 0);
+    fir.operand length = fir.rvalue_operand(f, r, 1);
+    if (pointer.kind != fir.operand_kind.ok_move || pointer.place.base != fir.base_kind.bk_local
+        || pointer.place.proj_len != 0 || !c->tracked[cast(pointer.place.local, u64)]) {
+        return false;
+    }
+    fir.statement* before = fir.block_statement(f, block, gap - 1);
+    if (before->kind != fir.stmt_kind.st_assign ||
+        before->value.kind != fir.rvalue_kind.rv_alloc ||
+        before->place.base != fir.base_kind.bk_local || before->place.proj_len != 0 ||
+        before->place.local != pointer.place.local) { return false; }
+    fir.operand count = fir.rvalue_operand(f, before->value, 0);
+    if (count.kind != length.kind) { return false; }
+    if (count.kind == fir.operand_kind.ok_const) {
+        return count.value.kind == fir.const_kind.ck_int && length.value.kind ==
+            fir.const_kind.ck_int && count.value.value.neg == length.value.value.neg &&
+            count.value.value.mag == length.value.value.mag;
+    }
+    return count.place.base == fir.base_kind.bk_local && count.place.proj_len == 0 &&
+        length.place.base == fir.base_kind.bk_local && length.place.proj_len == 0 &&
+        count.place.local == length.place.local;
+}
+
+fn operand_effect(context mut* c, definition mut* d, fir.operand o, bool cast_operand,
+    value* in, value mut* out) void {
+    fir.func* f = c->function;
+    if (o.kind == fir.operand_kind.ok_const) {
+        fir.const_kind k = o.value.kind;
+        if (k == fir.const_kind.ck_null || k == fir.const_kind.ck_zero) {
+            insert(c, out, NONE, null);
+            return;
+        }
+        if (k == fir.const_kind.ck_string || k == fir.const_kind.ck_bytes) {
+            if (d->object == NO_LOCAL) {
+                types.node* character = types.type_prim(f->tt, prim.prim_kind.prim_char);
+                u64 extra = k == fir.const_kind.ck_bytes ? 1 : 0;
+                d->object = add_object(c, character,
+                    exact(natural(o.value.text.len + extra)), 1, 0);
+            }
+            address item = whole(c, d->object);
+            insert(c, out, KNOWN, &item);
+            return;
+        }
+        if (k == fir.const_kind.ck_int) {
+            // An integer cast to a reference names no source (D17.17).
+            if (!d->counted) { c->reconstructions += 1; d->counted = true; }
+            insert(c, out, RECONSTRUCTED, null);
+            return;
+        }
+        insert(c, out, UNKNOWN, null);
+        return;
+    }
+    fir.place p = o.place;
+    types.node* from = fir.operand_type(f, o);
+    if (!reference_type(from)) {
+        // An integer names no source, wherever the body keeps it: a local, a field, an
+        // element, a global or a loaded value (D17.17). D17.17 names no source for a function
+        // address either, so its proof stays incomplete rather than a violation.
+        if (!integer_type(from)) { insert(c, out, UNKNOWN, null); return; }
+        if (!d->counted) { c->reconstructions += 1; d->counted = true; }
+        insert(c, out, RECONSTRUCTED, null);
+        return;
+    }
+    if (p.base == fir.base_kind.bk_local && p.proj_len == 0) {
+        if (cast_operand && !d->counted) { c->casts += 1; d->counted = true; }
+        if (c->tracked[cast(p.local, u64)]) { copy_into(c, in, out); }
+        else { insert(c, out, STORED, null); }
+        return;
+    }
+    // The pointer field of a span or a `string` local.
+    if (p.base == fir.base_kind.bk_local && p.proj_len == 1 &&
+        header_type(local_type(c, p.local))) {
+        fir.projection pj = fir.place_projection(f, p, 0);
+        if (pj.kind == fir.proj_kind.pj_field && pj.field == 0) {
+            if (c->tracked[cast(p.local, u64)]) { copy_into(c, in, out); }
+            else { insert(c, out, load_class(c, p), null); }
+            return;
+        }
+    }
+    insert(c, out, load_class(c, p), null);
+}
+
+// The address of `addr(p)` or the span of `slice(p, lo, hi)`.
+fn derived(context mut* c, definition mut* d, fir.statement* s, value* in, value mut* out)
+    void {
+    fir.func* f = c->function;
+    fir.rvalue r = s->value;
+    fir.place p = r.place;
+    bool slicing = r.kind == fir.rvalue_kind.rv_slice;
+    if (p.base == fir.base_kind.bk_local && p.proj_len >= 1 &&
+        header_type(local_type(c, p.local)) &&
+        fir.place_projection(f, p, 0).kind == fir.proj_kind.pj_index) {
+        // An element of a span local. Its window needs the index value, which no address
+        // keeps here.
+        if (!c->tracked[cast(p.local, u64)]) { insert(c, out, load_class(c, p), null); return; }
+        insert(c, out, (in->classes & ~KNOWN) | ((in->classes & KNOWN) != 0 ? UNKNOWN : 0),
+            null);
+        return;
+    }
+    if (fir.place_indirect(f, p)) {
+        through_pointer(c, s, in, out);
+        return;
+    }
+    types.node* t = fir.place_type(f, p);
+    if (slicing && header_type(t)) {
+        // A checked slice of a span or a `string` local keeps its storage.
+        if (p.base != fir.base_kind.bk_local || p.proj_len != 0 ||
+            !c->tracked[cast(p.local, u64)]) {
+            insert(c, out, load_class(c, p), null);
+            return;
+        }
+        sliced_span(c, s, in, out);
+        return;
+    }
+    // A direct storage name: the selected subobject is a new object. A variable index needs
+    // the bounds check that guards this block.
+    if (!direct_indexes_checked(c, d->block, p)) { insert(c, out, UNKNOWN, null); return; }
+    if (d->object == NO_LOCAL) {
+        d->object = slicing ? sliced_array(c, s, t) : typed_object(c, t);
+    }
+    if (d->object == NO_LOCAL) { insert(c, out, UNKNOWN, null); return; }
+    address item = whole(c, d->object);
+    insert(c, out, KNOWN, &item);
+}
+
+// Whether each variable index of a direct place has a bounds check that guards `block`.
+fn direct_indexes_checked(context mut* c, u32 block, fir.place p) bool {
+    fir.func* f = c->function;
+    types.node* mut t = fir.base_type(f, p);
+    u32 mut i = 0;
+    while (i < p.proj_len) {
+        fir.projection pj = fir.place_projection(f, p, i);
+        if (pj.kind == fir.proj_kind.pj_index && t->kind == types.type_kind.k_array) {
+            scalar v = scalar_of(c, pj.index);
+            bool known = v.kind == scalar_kind.constant_scalar && !v.constant.negative &&
+                v.constant.magnitude < t->len;
+            if (!known && !guarded(c, block, pj.index, t->len, NO_LOCAL)) { return false; }
+        }
+        t = fir.apply_projection(f, t, pj);
+        i += 1;
+    }
+    return true;
+}
+
+// The object of a checked slice of a direct fixed array: hi - lo elements. The span check
+// traps unless lo <= hi <= len. Symbolic bounds need a relation to the length that no address
+// keeps here.
+fn sliced_array(context mut* c, fir.statement* s, types.node* array) u32 {
+    fir.func* f = c->function;
+    if (array->kind != types.type_kind.k_array || s->value.ops_len != 2) { return NO_LOCAL; }
+    types.node* mut element = array->elem;
+    u64 mut inner = 1;
+    if (!flatten(array->elem, &element, &inner)) { return NO_LOCAL; }
+    affine lo = operand_value(c, fir.rvalue_operand(f, s->value, 0));
+    affine hi = operand_value(c, fir.rvalue_operand(f, s->value, 1));
+    if (!constant_of(lo) || !constant_of(hi) || lo.constant.negative ||
+        !ownership_raw.less_equal(lo.constant, hi.constant) ||
+        hi.constant.magnitude > array->len) { return NO_LOCAL; }
+    u64 mut k = 0;
+    if (!size_of(array->elem, &k)) { return NO_LOCAL; }
+    affine bytes = scale_by(exact(natural(hi.constant.magnitude - lo.constant.magnitude)), k);
+    return add_object(c, element, bytes, types.type_alignof(element), 0);
+}
+
+// A checked slice of a span or `string` local: each window narrows to [lo, hi) of its
+// elements. The span check traps unless lo <= hi <= len, and an empty header has length 0.
+fn sliced_span(context mut* c, fir.statement* s, value* in, value mut* out) void {
+    fir.func* f = c->function;
+    types.node* t = local_type(c, s->value.place.local);
+    types.node* element = t->kind == types.type_kind.k_string ?
+        types.type_prim(f->tt, prim.prim_kind.prim_char) : t->elem;
+    u64 mut k = 0;
+    if (!size_of(element, &k) || s->value.ops_len != 2) { insert(c, out, UNKNOWN, null); return; }
+    affine lo = operand_value(c, fir.rvalue_operand(f, s->value, 0));
+    affine hi = operand_value(c, fir.rvalue_operand(f, s->value, 1));
+    bool constant = constant_of(lo) && constant_of(hi) && !lo.constant.negative &&
+        ownership_raw.less_equal(lo.constant, hi.constant);
+    u32 mut classes = in->classes & ~KNOWN;
+    // A slice of an empty header traps unless hi is 0, and then it stays empty.
+    if (constant && hi.constant.magnitude > 0) { classes = classes & ~NONE; }
+    insert(c, out, classes, null);
+    u64 mut i = 0;
+    while (i < in->known_len) {
+        address mut item = in->known[i];
+        affine begin = add(item.begin, scale_by(lo, k));
+        affine end = add(item.begin, scale_by(hi, k));
+        // The span check traps past the length, so a window past a constant end is dead.
+        bool past = constant_of(end) && constant_of(item.end) &&
+            !ownership_raw.less_equal(end.constant, item.end.constant);
+        if (!constant || !valid(begin) || !valid(end) || past) {
+            insert(c, out, UNKNOWN, null);
+        } else {
+            item.begin = begin;
+            item.end = end;
+            insert(c, out, KNOWN, &item);
+        }
+        i += 1;
+    }
+}
+
+// `addr` or `slice` of a place through a dereference: the window narrows to the selected
+// subobject of each address. The derivation obligation checks the narrowing.
+fn through_pointer(context mut* c, fir.statement* s, value* in, value mut* out) void {
+    fir.func* f = c->function;
+    fir.place p = s->value.place;
+    selection sel = select(c, p);
+    if (!sel.found) { insert(c, out, sel.loaded, null); return; }
+    if (sel.variable) {
+        // A variable index selects an element whose window needs the index value.
+        u32 known = sel.pointer != NO_LOCAL && (in->classes & KNOWN) != 0 ? UNKNOWN : 0;
+        u32 rest = sel.pointer != NO_LOCAL ? in->classes & ~KNOWN : sel.loaded;
+        insert(c, out, rest | known, null);
+        return;
+    }
+    if (sel.pointer == NO_LOCAL) { insert(c, out, sel.loaded, null); return; }
+    if (sel.unsized) {
+        // A region without a size names no window; a value without a source keeps its class.
+        insert(c, out, (in->classes & ~KNOWN) | (in->known_len > 0 ? UNKNOWN : 0), null);
+        return;
+    }
+    u64 mut start = sel.offset;
+    u64 mut bytes = sel.size;
+    if (s->value.kind == fir.rvalue_kind.rv_slice) {
+        types.node* array = fir.place_type(f, p);
+        affine lo = operand_value(c, fir.rvalue_operand(f, s->value, 0));
+        affine hi = operand_value(c, fir.rvalue_operand(f, s->value, 1));
+        u64 mut k = 0;
+        if (array->kind != types.type_kind.k_array || !size_of(array->elem, &k) ||
+            !constant_of(lo) || !constant_of(hi) || lo.constant.negative ||
+            !ownership_raw.less_equal(lo.constant, hi.constant) ||
+            hi.constant.magnitude > array->len) {
+            insert(c, out, UNKNOWN, null);
+            return;
+        }
+        bytes = 0;
+        if (!offset_plus(&start, lo.constant.magnitude, k) ||
+            !offset_plus(&bytes, hi.constant.magnitude - lo.constant.magnitude, k)) {
+            insert(c, out, UNKNOWN, null);
+            return;
+        }
+    }
+    u64 mut stop = start;
+    if (!offset_plus(&stop, bytes, 1)) { insert(c, out, UNKNOWN, null); return; }
+    insert(c, out, in->classes & ~KNOWN, null);
+    u64 mut i = 0;
+    while (i < in->known_len) {
+        address mut item = in->known[i];
+        affine begin = add(item.begin, exact(natural(start)));
+        affine end = add(item.begin, exact(natural(stop)));
+        if (!valid(begin) || !valid(end)) { insert(c, out, UNKNOWN, null); }
+        else {
+            item.begin = begin;
+            item.end = end;
+            insert(c, out, KNOWN, &item);
+        }
+        i += 1;
+    }
+}
+
+// `slice_ptr(a, lo, hi)`: the window narrows to [lo, hi) elements from the address. The range
+// obligation checks the narrowing.
+fn raw_range(context mut* c, definition* d, fir.statement* s, value* in, value mut* out) void {
+    fir.func* f = c->function;
+    fir.operand pointer = fir.rvalue_operand(f, s->value, 0);
+    if (pointer.kind == fir.operand_kind.ok_const || pointer.place.base != fir.base_kind.bk_local
+        || pointer.place.proj_len != 0) {
+        insert(c, out, pointer.kind == fir.operand_kind.ok_const ? UNKNOWN :
+            load_class(c, pointer.place), null);
+        return;
+    }
+    u32 local = pointer.place.local;
+    if (!c->tracked[cast(local, u64)]) { insert(c, out, STORED, null); return; }
+    types.node* element = local_type(c, local)->elem;
+    u64 mut k = 0;
+    bool sized = size_of(element, &k);
+    affine lo = bound_value(c, d->block, d->gap, fir.rvalue_operand(f, s->value, 1), LOWER_KEY);
+    affine hi = bound_value(c, d->block, d->gap, fir.rvalue_operand(f, s->value, 2), UPPER_KEY);
+    insert(c, out, in->classes & ~KNOWN, null);
+    u64 mut i = 0;
+    while (i < in->known_len) {
+        address mut item = in->known[i];
+        affine begin = sized ? add(item.begin, scale_by(lo, k)) : invalid();
+        affine end = sized ? add(item.begin, scale_by(hi, k)) : invalid();
+        if (!valid(begin) || !valid(end)) { insert(c, out, UNKNOWN, null); }
+        else {
+            item.begin = begin;
+            item.end = end;
+            insert(c, out, KNOWN, &item);
+        }
+        i += 1;
+    }
+}
+
+// ---- places ---------------------------------------------------------------------------------
+
+// The pointer and the region that a dereference in a place selects. `pointer` is the reference
+// local, or NO_LOCAL with `loaded` classes for a pointer that the place loads. A variable
+// index of a fixed array selects the whole array.
+struct selection {
+    bool found;
+    u32 pointer;
+    u32 loaded;
+    u64 offset;
+    u64 size;
+    types.node* ty;
+    bool variable;
+    // A projection follows the variable index, so the access reads a part of one element.
+    bool tail;
+    // The region has no size: an element on its path has none, or an offset needs more than a
+    // u64. The pointer stays, so a value without a source still fails.
+    bool unsized;
+}
+
+// Adds `index` elements of `k` bytes to `*at`. False when the sum needs more than a u64.
+fn offset_plus(u64 mut* at, u64 index, u64 k) bool {
+    if (k != 0 && index > (U64_MAX - *at) / k) { return false; }
+    *at += index * k;
+    return true;
+}
+
+// The last dereference of a place and the region after it.
+fn select(context mut* c, fir.place p) selection {
+    fir.func* f = c->function;
+    selection mut out = selection{};
+    types.node* mut t = fir.base_type(f, p);
+    // The checker refuses an array above TYPE_MAX_SIZE bytes behind a reference, so a region
+    // here has a size and each offset fits a u64. The guard stays as defence in depth: a region
+    // whose element has no size, or whose offset needs more than a u64, names no window.
+    bool mut sized = true;
+    u32 mut i = 0;
+    while (i < p.proj_len) {
+        fir.projection pj = fir.place_projection(f, p, i);
+        if (pj.kind == fir.proj_kind.pj_deref) {
+            out = selection{.found = true, .pointer = NO_LOCAL, .ty = t->elem};
+            sized = true;
+            if (i == 0 && p.base == fir.base_kind.bk_local) {
+                if (c->tracked[cast(p.local, u64)]) { out.pointer = p.local; }
+                else { out.loaded = STORED; }
+            } else {
+                out.loaded = load_place_class(c, p, i);
+            }
+            t = t->elem;
+            i += 1;
+            continue;
+        }
+        if (out.found && out.variable) { out.tail = true; }
+        bool header = header_type(t);
+        if (out.found && !out.variable && !header) {
+            if (pj.kind == fir.proj_kind.pj_field) {
+                if (!offset_plus(&out.offset, field_offset(t, pj.field), 1)) { sized = false; }
+                out.ty = fir.struct_field_type(t, pj.field);
+            } else if (pj.kind == fir.proj_kind.pj_index) {
+                scalar v = scalar_of(c, pj.index);
+                u64 mut k = 0;
+                if (!size_of(t->elem, &k)) { sized = false; }
+                if (v.kind == scalar_kind.constant_scalar && !v.constant.negative &&
+                    v.constant.magnitude < t->len) {
+                    if (!offset_plus(&out.offset, v.constant.magnitude, k)) { sized = false; }
+                    out.ty = t->elem;
+                } else {
+                    // The region stays the whole array, which holds each element.
+                    out.variable = true;
+                }
+            }
+        } else if (out.found && header && pj.kind == fir.proj_kind.pj_field && !out.variable) {
+            if (!offset_plus(&out.offset, cast(pj.field, u64), 8)) { sized = false; }
+            out.ty = fir.apply_projection(f, t, pj);
+        } else if (header && pj.kind == fir.proj_kind.pj_index) {
+            // An element of a span that the place reads: other storage.
+            return selection{.found = out.found, .pointer = NO_LOCAL,
+                .loaded = out.found ? STORED : load_place_class(c, p, i), .variable = true};
+        }
+        t = fir.apply_projection(f, t, pj);
+        i += 1;
+    }
+    if (out.found && (!sized || !size_of(out.ty, &out.size))) {
+        out.unsized = true;
+        out.size = 0;
+    }
+    return out;
+}
+
+// The class of a pointer that a place loads before projection `at`.
+fn load_place_class(context* c, fir.place p, u32 at) u32 {
+    fir.func* f = c->function;
+    if (p.base != fir.base_kind.bk_local) { return STORED; }
+    u32 mut i = 0;
+    while (i < at) {
+        fir.projection pj = fir.place_projection(f, p, i);
+        if (pj.kind == fir.proj_kind.pj_deref) { return STORED; }
+        i += 1;
+    }
+    if (fir.local_at(f, p.local)->kind == fir.local_kind.lk_param) { return CALLER; }
+    return STORED;
+}
+
+fn grow_duties(context mut* c) void {
+    if (c->duties_len < c->duties.len) { return; }
+    obligation mut@ own bigger = new(obligation, c->duties.len * 2 + 8);
+    u64 mut k = 0;
+    while (k < c->duties_len) { bigger[k] = c->duties[k]; k += 1; }
+    del(c->duties);
+    c->duties = move(bigger);
+}
+
+fn add_duty(context mut* c, obligation item) void {
+    grow_duties(c);
+    c->duties[c->duties_len] = item;
+    c->duties_len += 1;
+    if (item.kind == duty.access || item.kind == duty.derivation) { c->accesses += 1; }
+    if (item.kind == duty.range) { c->ranges += 1; }
+}
+
+// The type of the part of storage that a place reads or writes in the region that ends before
+// projection `end`: the type of that prefix of the place. A typed access needs the alignment
+// of this type and no more (memory model 2.8.2). Within an element it is at an offset that is a
+// multiple of its alignment, and an element size is a multiple of it too, so the part has the
+// residue of the region start in each element that a variable index can select.
+fn part_type(fir.func* f, fir.place p, u32 end) types.node* {
+    fir.place mut prefix = p;
+    prefix.proj_len = end;
+    return fir.place_type(f, prefix);
+}
+
+// The alignment that an obligation needs: the alignment of its part. This is the one place
+// that measures the alignment of an access.
+fn part_alignment(obligation* o) u64 {
+    u64 mut bytes = 0;
+    if (o->part == null || !size_of(o->part, &bytes)) { return 1; }
+    return types.type_alignof(o->part);
+}
+
+// The end of the region that starts at projection `from`: the next dereference, or the next
+// index of a span or `string` value. `t` is the type before projection `from`.
+fn region_end(fir.func* f, fir.place p, u32 from, types.node* t) u32 {
+    u32 mut j = from;
+    types.node* mut u = t;
+    while (j < p.proj_len) {
+        fir.projection next = fir.place_projection(f, p, j);
+        if (next.kind == fir.proj_kind.pj_deref ||
+            (next.kind == fir.proj_kind.pj_index && header_type(u))) { break; }
+        u = fir.apply_projection(f, u, next);
+        j += 1;
+    }
+    return j;
+}
+
+// The obligations of one place: each dereference reads a pointer and accesses a region, and
+// each index of a span or `string` value accesses an element. `mode` 0 reads, 1 writes and 2
+// derives the last region.
+fn place_duties(context mut* c, u32 block, u32 gap, fir.place p, u32 mode) void {
+    fir.func* f = c->function;
+    types.node* mut t = fir.base_type(f, p);
+    u32 mut i = 0;
+    while (i < p.proj_len) {
+        fir.projection pj = fir.place_projection(f, p, i);
+        if (pj.kind == fir.proj_kind.pj_deref) {
+            // The region of this dereference ends at the next indirection.
+            u32 j = region_end(f, p, i + 1, t->elem);
+            fir.place mut prefix = p;
+            prefix.proj_len = j;
+            selection sel = select(c, prefix);
+            types.node* part = part_type(f, p, j);
+            bool last = j == p.proj_len;
+            duty kind = last && mode == 2 ? duty.derivation : duty.access;
+            types.node* written = last && mode == 1 ? part : null;
+            add_duty(c, obligation{kind, block, gap, sel.pointer, sel.loaded, sel.offset,
+                sel.size, sel.ty, written, 0, 0, sel.variable, sel.tail, part, sel.unsized});
+            t = part;
+            i = j;
+            continue;
+        }
+        if (pj.kind == fir.proj_kind.pj_index && header_type(t)) {
+            u32 mut local = NO_LOCAL;
+            u32 mut loaded = 0;
+            if (i == 0 && p.base == fir.base_kind.bk_local) {
+                if (c->tracked[cast(p.local, u64)]) { local = p.local; }
+                else { loaded = STORED; }
+            } else { loaded = load_place_class(c, p, i); }
+            types.node* element = fir.apply_projection(f, t, pj);
+            u64 mut k = 0;
+            // An element without a size gives k = 0, which no check of an element reads. Since
+            // b172e3e9 the checker refuses a span of such elements, so no checked source has one.
+            size_of(element, &k);
+            // The element region ends at the next indirection; a field or an index in it
+            // selects the part of the element that the place reads.
+            u32 j = region_end(f, p, i + 1, element);
+            types.node* part = part_type(f, p, j);
+            types.node* written = j == p.proj_len && mode == 1 ? part : null;
+            add_duty(c, obligation{duty.element, block, gap, local, loaded, 0, k, element,
+                written, 0, 0, false, false, part, false});
+        }
+        t = fir.apply_projection(f, t, pj);
+        i += 1;
+    }
+}
+
+fn operand_duties(context mut* c, u32 block, u32 gap, fir.operand o) void {
+    if (o.kind == fir.operand_kind.ok_const) { return; }
+    place_duties(c, block, gap, o.place, 0);
+}
+
+fn statement_duties(context mut* c, u32 block, u32 gap) void {
+    fir.func* f = c->function;
+    fir.statement* s = fir.block_statement(f, block, gap);
+    if (s->kind == fir.stmt_kind.st_del) {
+        place_duties(c, block, gap, s->place, 0);
+        return;
+    }
+    if (s->kind != fir.stmt_kind.st_assign) { return; }
+    fir.rvalue r = s->value;
+    if (r.kind == fir.rvalue_kind.rv_call && r.callee == fir.callee_kind.cl_value) {
+        operand_duties(c, block, gap, r.callee_op);
+    }
+    if (r.kind == fir.rvalue_kind.rv_addr) {
+        place_duties(c, block, gap, r.place, 2);
+    } else if (r.kind == fir.rvalue_kind.rv_slice) {
+        // A slice of a fixed array derives it. A slice of a span reads its header.
+        place_duties(c, block, gap, r.place, header_type(fir.place_type(f, r.place)) ? 0 : 2);
+    }
+    if (r.kind == fir.rvalue_kind.rv_slice_ptr) {
+        fir.operand pointer = fir.rvalue_operand(f, r, 0);
+        u32 mut local = NO_LOCAL;
+        u32 mut loaded = UNKNOWN;
+        if (pointer.kind != fir.operand_kind.ok_const && pointer.place.base ==
+            fir.base_kind.bk_local && pointer.place.proj_len == 0) {
+            if (c->tracked[cast(pointer.place.local, u64)]) { local = pointer.place.local; }
+            else { loaded = STORED; }
+        } else if (pointer.kind != fir.operand_kind.ok_const) {
+            loaded = load_class(c, pointer.place);
+        }
+        types.node* t = fir.operand_type(f, pointer);
+        add_duty(c, obligation{.kind = duty.range, .block = block, .gap = gap, .local = local,
+            .loaded = loaded, .ty = t->kind == types.type_kind.k_ptr ? t->elem : null});
+    }
+    u32 mut k = 0;
+    while (k < r.ops_len) {
+        operand_duties(c, block, gap, fir.rvalue_operand(f, r, k));
+        k += 1;
+    }
+    place_duties(c, block, gap, s->place, 1);
+}
+
+fn terminator_duties(context mut* c, u32 block) void {
+    fir.func* f = c->function;
+    fir.block* b = fir.block_at(f, block);
+    u32 gap = fir.block_statement_count(f, block);
+    if (b->term.kind == fir.term_kind.tk_switch || b->term.kind == fir.term_kind.tk_check) {
+        operand_duties(c, block, gap, b->term.cond);
+    }
+    if (b->term.kind == fir.term_kind.tk_check || b->term.kind == fir.term_kind.tk_fail) {
+        u32 mut k = 0;
+        while (k < b->term.args_len) {
+            operand_duties(c, block, gap, fir.operand_at(f, b->term.args_first + k));
+            k += 1;
+        }
+    }
+    if (b->term.kind == fir.term_kind.tk_check_overwrite) {
+        place_duties(c, block, gap, b->term.place, 0);
+    }
+}
+
+// ---- the definition graph ---------------------------------------------------------------------
+
+// The tracked reference local that a write reads for its value, or NO_LOCAL.
+fn read_local(context* c, fir.rvalue r) u32 {
+    fir.func* f = c->function;
+    if (r.kind == fir.rvalue_kind.rv_addr || r.kind == fir.rvalue_kind.rv_slice) {
+        fir.place p = r.place;
+        if (p.base != fir.base_kind.bk_local || !c->tracked[cast(p.local, u64)]) {
+            return NO_LOCAL;
+        }
+        // The sliced span itself, or the pointer that the place dereferences first.
+        if (p.proj_len == 0) { return p.local; }
+        fir.projection pj = fir.place_projection(f, p, 0);
+        if (pj.kind == fir.proj_kind.pj_deref || pj.kind == fir.proj_kind.pj_index) {
+            return p.local;
+        }
+        return NO_LOCAL;
+    }
+    if (r.kind == fir.rvalue_kind.rv_call || r.ops_len == 0) { return NO_LOCAL; }
+    fir.operand o = fir.rvalue_operand(f, r, 0);
+    if (o.kind == fir.operand_kind.ok_const || o.place.base != fir.base_kind.bk_local) {
+        return NO_LOCAL;
+    }
+    return c->tracked[cast(o.place.local, u64)] ? o.place.local : NO_LOCAL;
+}
+
+// Counts (`fill` false) or stores one definition.
+fn emit(context mut* c, bool fill, def_kind kind, u32 block, u32 gap, u32 local, u32 source)
+    void {
+    u64 l = cast(local, u64);
+    bool ordered = kind != def_kind.entry;
+    if (!fill) {
+        c->local_first[l + 1] += 1;
+        if (ordered) { c->block_defs[cast(block, u64) + 1] += 1; }
+        return;
+    }
+    u64 at = cast(c->local_first[l], u64) + cast(c->local_fill[l], u64);
+    c->local_fill[l] += 1;
+    c->defs[at] = definition{kind, block, gap, local, source, NO_LOCAL, false, 0, 0};
+    if (ordered) {
+        u64 b = cast(block, u64);
+        u64 slot = cast(c->block_defs[b], u64) + cast(c->block_fill[b], u64);
+        c->block_fill[b] += 1;
+        c->def_order[slot] = cast(at, u32);
+    }
+}
+
+fn whole_tracked(context* c, fir.place p) bool {
+    return p.base == fir.base_kind.bk_local && p.proj_len == 0 && c->tracked[cast(p.local, u64)];
+}
+
+// The definitions of one statement in their order: a move or a `del` empties its local before
+// the write of the statement.
+fn statement_defs(context mut* c, u32 block, u32 gap, bool fill) void {
+    fir.func* f = c->function;
+    fir.statement* s = fir.block_statement(f, block, gap);
+    if (s->kind == fir.stmt_kind.st_del) {
+        if (whole_tracked(c, s->place)) {
+            emit(c, fill, def_kind.empty, block, gap, s->place.local, NO_LOCAL);
+        }
+        return;
+    }
+    if (s->kind != fir.stmt_kind.st_assign) { return; }
+    u32 mut k = 0;
+    while (k < s->value.ops_len) {
+        fir.operand o = fir.rvalue_operand(f, s->value, k);
+        if (o.kind == fir.operand_kind.ok_move && whole_tracked(c, o.place)) {
+            emit(c, fill, def_kind.empty, block, gap, o.place.local, NO_LOCAL);
+        }
+        k += 1;
+    }
+    fir.place to = s->place;
+    if (to.base == fir.base_kind.bk_local && c->tracked[cast(to.local, u64)]) {
+        if (to.proj_len == 0) {
+            emit(c, fill, def_kind.write, block, gap, to.local, read_local(c, s->value));
+        } else if (to.proj_len == 1 &&
+            fir.place_projection(f, to, 0).kind == fir.proj_kind.pj_field) {
+            // A write of a header field changes the local. A write through the reference
+            // (a dereference, a span element, or the target of the pointer field) leaves the
+            // local as it is.
+            emit(c, fill, def_kind.broken, block, gap, to.local, NO_LOCAL);
+        }
+    }
+}
+
+// Collects the definitions, grouped by local and listed by block in FIR order. Each reference
+// parameter has one entry definition.
+fn collect_defs(context mut* c) void {
+    fir.func* f = c->function;
+    u64 locals = cast(fir.local_count(f), u64);
+    u32 blocks = fir.block_count(f);
+    c->local_first = new(u32, locals + 1);
+    c->local_fill = new(u32, locals);
+    c->block_defs = new(u32, cast(blocks, u64) + 1);
+    c->block_fill = new(u32, cast(blocks, u64));
+    u32 mut pass = 0;
+    while (pass < 2) {
+        bool fill = pass == 1;
+        u32 mut n = 1;
+        while (cast(n, u64) < locals) {
+            if (c->tracked[cast(n, u64)] &&
+                fir.local_at(f, n)->kind == fir.local_kind.lk_param) {
+                emit(c, fill, def_kind.entry, 0, 0, n, NO_LOCAL);
+            }
+            n += 1;
+        }
+        u32 mut b = 0;
+        while (b < blocks) {
+            u32 mut g = 0;
+            while (g < fir.block_statement_count(f, b)) {
+                statement_defs(c, b, g, fill);
+                g += 1;
+            }
+            b += 1;
+        }
+        if (!fill) {
+            u64 mut i = 0;
+            while (i < locals) { c->local_first[i + 1] += c->local_first[i]; i += 1; }
+            i = 0;
+            while (i < cast(blocks, u64)) { c->block_defs[i + 1] += c->block_defs[i]; i += 1; }
+            c->defs_len = cast(c->local_first[locals], u64);
+            c->defs = new(definition, c->defs_len);
+            c->values = new(value, c->defs_len);
+            c->def_order = new(u32, cast(c->block_defs[cast(blocks, u64)], u64));
+        }
+        pass += 1;
+    }
+}
+
+// Clears the bits of the definitions of one local.
+fn clear_local(context* c, fir_flow.bits mut* set, u32 local) void {
+    u32 mut i = c->local_first[cast(local, u64)];
+    u32 end = c->local_first[cast(local, u64) + 1];
+    while (i < end) {
+        if ((i & 63) == 0 && i + 64 <= end) {
+            set->words[cast(i, u64) / 64] = 0;
+            i += 64;
+            continue;
+        }
+        fir_flow.bits_clear(set, i);
+        i += 1;
+    }
+}
+
+// Adds `src` to `dst`. True when `dst` grows.
+fn union_grows(fir_flow.bits mut* dst, fir_flow.bits* src) bool {
+    bool mut grew = false;
+    u64 mut w = 0;
+    while (w < dst->words.len) {
+        u64 next = dst->words[w] | src->words[w];
+        if (next != dst->words[w]) { grew = true; dst->words[w] = next; }
+        w += 1;
+    }
+    return grew;
+}
+
+// The definitions that reach each block entry: a forward union over the edges that a constant
+// switch can take. A block that no such path reaches stays unvisited, as in ownership_flow.
+fn reach(context mut* c) bool {
+    fir.func* f = c->function;
+    u32 blocks = fir.block_count(f);
+    u32 total = cast(c->defs_len, u32);
+    c->reaching = new(fir_flow.bits, cast(blocks, u64));
+    c->visited = new(bool, cast(blocks, u64));
+    u32 mut b = 0;
+    while (b < blocks) { c->reaching[cast(b, u64)] = fir_flow.bits_new(total); b += 1; }
+    u64 mut i = 0;
+    while (i < c->defs_len) {
+        if (c->defs[i].kind == def_kind.entry) { fir_flow.bits_set(&c->reaching[0], cast(i, u32)); }
+        i += 1;
+    }
+    fir_flow.bits mut out = fir_flow.bits_new(total);
+    defer fir_flow.bits_free(&out);
+    u32 mut@ own queue = new(u32, cast(blocks, u64));
+    defer del(queue);
+    bool mut@ own queued = new(bool, cast(blocks, u64));
+    defer del(queued);
+    u64 mut head = 0;
+    u64 mut len = 1;
+    queued[0] = true;
+    u64 words = out.words.len;
+    while (len > 0) {
+        u32 at = queue[head];
+        head = head + 1 == cast(blocks, u64) ? 0 : head + 1;
+        len -= 1;
+        queued[cast(at, u64)] = false;
+        c->visited[cast(at, u64)] = true;
+        if (!work(c, at, 0, 1 + words / 64)) { return false; }
+        fir_flow.bits_copy(&out, &c->reaching[cast(at, u64)]);
+        u64 mut k = cast(c->block_defs[cast(at, u64)], u64);
+        u64 end = cast(c->block_defs[cast(at, u64) + 1], u64);
+        while (k < end) {
+            u32 d = c->def_order[k];
+            clear_local(c, &out, c->defs[cast(d, u64)].local);
+            fir_flow.bits_set(&out, d);
+            k += 1;
+        }
+        fir.block* here = fir.block_at(f, at);
+        u32 mut index = 0;
+        u32 mut target = 0;
+        while (here->terminated && fir_flow.reachable_target(f, &here->term, index, &target)) {
+            bool grew = union_grows(&c->reaching[cast(target, u64)], &out);
+            if ((grew || !c->visited[cast(target, u64)]) && !queued[cast(target, u64)]) {
+                queued[cast(target, u64)] = true;
+                queue[(head + len) % cast(blocks, u64)] = target;
+                len += 1;
+            }
+            index += 1;
+        }
+    }
+    return true;
+}
+
+fn push_input(context mut* c, u32 def) void {
+    if (c->inputs_len == c->inputs.len) {
+        u32 mut@ own bigger = new(u32, c->inputs.len * 2 + 16);
+        u64 mut k = 0;
+        while (k < c->inputs_len) { bigger[k] = c->inputs[k]; k += 1; }
+        del(c->inputs);
+        c->inputs = move(bigger);
+    }
+    c->inputs[c->inputs_len] = def;
+    c->inputs_len += 1;
+}
+
+// The definitions of `local` that reach the current position, into the input pool. `last`
+// holds the last definition of each local in the current block.
+fn query(context mut* c, u32 block, u32 local, u32 mut@ last, u64 mut* first, u32 mut* len)
+    bool {
+    u64 start = c->inputs_len;
+    *first = start;
+    if (last[cast(local, u64)] != NO_LOCAL) {
+        push_input(c, last[cast(local, u64)]);
+    } else {
+        u32 mut i = c->local_first[cast(local, u64)];
+        u32 end = c->local_first[cast(local, u64) + 1];
+        while (i < end) {
+            if (fir_flow.bits_get(&c->reaching[cast(block, u64)], i)) { push_input(c, i); }
+            i += 1;
+        }
+    }
+    *len = cast(c->inputs_len - start, u32);
+    return work(c, block, 0, 1 + cast(*len, u64));
+}
+
+fn query_duties(context mut* c, u32 block, u64 from, u32 mut@ last) bool {
+    u64 mut i = from;
+    while (i < c->duties_len) {
+        obligation mut* o = &c->duties[i];
+        if (o->local != NO_LOCAL) {
+            u64 mut first = 0;
+            u32 mut len = 0;
+            if (!query(c, block, o->local, last, &first, &len)) { return false; }
+            c->duties[i].inputs_first = first;
+            c->duties[i].inputs_len = len;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// One pass over the blocks: it collects the obligations and binds each definition and each
+// obligation to the definitions that reach it.
+fn bind(context mut* c) bool {
+    fir.func* f = c->function;
+    u64 locals = cast(fir.local_count(f), u64);
+    u32 mut@ own last = new(u32, locals);
+    defer del(last);
+    u64 mut n = 0;
+    while (n < locals) { last[n] = NO_LOCAL; n += 1; }
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        // A block that no path reaches holds no obligation.
+        if (!c->visited[cast(b, u64)]) { b += 1; continue; }
+        u64 mut k = cast(c->block_defs[cast(b, u64)], u64);
+        u64 end = cast(c->block_defs[cast(b, u64) + 1], u64);
+        u32 count = fir.block_statement_count(f, b);
+        u32 mut g = 0;
+        while (g < count) {
+            if (!work(c, b, g, 1)) { return false; }
+            u64 from = c->duties_len;
+            statement_duties(c, b, g);
+            if (!query_duties(c, b, from, last)) { return false; }
+            // The reads of a statement come before its definitions.
+            u64 mut scan = k;
+            while (scan < end && c->defs[cast(c->def_order[scan], u64)].gap == g) {
+                u64 d = cast(c->def_order[scan], u64);
+                if (c->defs[d].kind == def_kind.write && c->defs[d].source != NO_LOCAL) {
+                    u64 mut first = 0;
+                    u32 mut len = 0;
+                    if (!query(c, b, c->defs[d].source, last, &first, &len)) { return false; }
+                    c->defs[d].inputs_first = first;
+                    c->defs[d].inputs_len = len;
+                }
+                scan += 1;
+            }
+            while (k < scan) {
+                u32 d = c->def_order[k];
+                last[cast(c->defs[cast(d, u64)].local, u64)] = d;
+                k += 1;
+            }
+            g += 1;
+        }
+        u64 from = c->duties_len;
+        terminator_duties(c, b);
+        if (!query_duties(c, b, from, last)) { return false; }
+        // Reset the last definitions of this block.
+        u64 mut r = cast(c->block_defs[cast(b, u64)], u64);
+        while (r < end) {
+            last[cast(c->defs[cast(c->def_order[r], u64)].local, u64)] = NO_LOCAL;
+            r += 1;
+        }
+        b += 1;
+    }
+    return true;
+}
+
+// Each definition lists the definitions that read it.
+fn link_readers(context mut* c) void {
+    c->reader_first = new(u32, c->defs_len + 1);
+    u64 mut i = 0;
+    while (i < c->defs_len) {
+        u64 mut k = 0;
+        while (k < cast(c->defs[i].inputs_len, u64)) {
+            u64 input = cast(c->inputs[c->defs[i].inputs_first + k], u64);
+            c->reader_first[input + 1] += 1;
+            k += 1;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < c->defs_len) { c->reader_first[i + 1] += c->reader_first[i]; i += 1; }
+    c->readers = new(u32, cast(c->reader_first[c->defs_len], u64));
+    u32 mut@ own fill = new(u32, c->defs_len);
+    defer del(fill);
+    i = 0;
+    while (i < c->defs_len) {
+        u64 mut k = 0;
+        while (k < cast(c->defs[i].inputs_len, u64)) {
+            u64 input = cast(c->inputs[c->defs[i].inputs_first + k], u64);
+            c->readers[cast(c->reader_first[input] + fill[input], u64)] = cast(i, u32);
+            fill[input] += 1;
+            k += 1;
+        }
+        i += 1;
+    }
+}
+
+// Iterates the definitions to a fixed point. A definition runs again only when a definition
+// that reaches it grows, and each value grows a bounded number of times.
+fn propagate(context mut* c) bool {
+    u32 mut@ own queue = new(u32, c->defs_len);
+    defer del(queue);
+    bool mut@ own queued = new(bool, c->defs_len);
+    defer del(queued);
+    u64 mut head = 0;
+    u64 mut len = c->defs_len;
+    u64 mut i = 0;
+    while (i < c->defs_len) { queue[i] = cast(i, u32); queued[i] = true; i += 1; }
+    while (len > 0) {
+        u64 at = cast(queue[head], u64);
+        head = head + 1 == c->defs_len ? 0 : head + 1;
+        len -= 1;
+        queued[at] = false;
+        definition d = c->defs[at];
+        if (!work(c, d.block, d.gap, 2 + c->values[at].known_len)) { return false; }
+        value mut next = value{};
+        evaluate(c, at, &next);
+        if (c->first_refusal.terminal.present ||
+            !work(c, d.block, d.gap, next.known_len * (c->values[at].known_len + 1))) {
+            free_value(&next);
+            return false;
+        }
+        bool mut grew = insert(c, &c->values[at], next.classes & ~KNOWN, null);
+        u64 mut k = 0;
+        while (k < next.known_len) {
+            address item = next.known[k];
+            if (insert(c, &c->values[at], KNOWN, &item)) { grew = true; }
+            k += 1;
+        }
+        free_value(&next);
+        if (!grew) { continue; }
+        u64 mut r = cast(c->reader_first[at], u64);
+        u64 end = cast(c->reader_first[at + 1], u64);
+        while (r < end) {
+            u64 reader = cast(c->readers[r], u64);
+            if (!queued[reader]) {
+                queued[reader] = true;
+                queue[(head + len) % c->defs_len] = cast(reader, u32);
+                len += 1;
+            }
+            r += 1;
+        }
+    }
+    return true;
+}
+
+// ---- checks -----------------------------------------------------------------------------------
+
+// The proved alignment of the start of a window: (alignment, residue).
+fn window_alignment(context* c, address item, u64 mut* alignment, u64 mut* residue) void {
+    object o = c->objects[cast(item.object, u64)];
+    u64 mut a = o.alignment;
+    u64 mut r = o.residue;
+    if (item.begin.key != 0) { a = low_bit(item.begin.scale, a); }
+    ownership_raw.number b = item.begin.constant;
+    u64 mut shift = b.magnitude % a;
+    if (b.negative && shift != 0) { shift = a - shift; }
+    r = (r + shift) % a;
+    *alignment = a;
+    *residue = r;
+}
+
+// The value of an obligation's pointer: the union of the definitions that reach it, or the
+// classes of a pointer that the place loads.
+fn duty_value(context mut* c, obligation* o, value mut* out) bool {
+    if (o->local == NO_LOCAL) {
+        insert(c, out, o->loaded, null);
+        return true;
+    }
+    return union_inputs(c, o->block, o->gap, o->inputs_first, o->inputs_len, out);
+}
+
+// The reasons that make a failure exact, one bit each. The note of a validated violation names
+// each reason that holds on some represented path, so it names the invalid source of the path
+// that the witness takes (toolchain 4.2).
+u32 CAUSE_SOURCE = 1;
+u32 CAUSE_WINDOW = 2;
+u32 CAUSE_ALIGNMENT = 4;
+u32 CAUSE_SELECTION = 8;
+u32 CAUSE_BOUNDS = 16;
+u32 CAUSE_STORAGE = 32;
+
+// The notes of two or three reasons. Each value of the reference fails for one of them, so
+// the wording is unconditional (toolchain 4.2).
+string MIXED_SOURCE_WINDOW = "each path fails: no proved source, or the access exceeds its window";
+string MIXED_SOURCE_ALIGNMENT = "each path fails: no proved source, or the access is misaligned";
+string MIXED_SOURCE_ELEMENT = "each path fails: no proved source, or the element is misaligned";
+string MIXED_WINDOW_ALIGNMENT = "each path fails: the access exceeds its window, or is misaligned";
+string MIXED_ACCESS = "each path fails: no proved source, a short window, or misalignment";
+string MIXED_SOURCE_SELECTION = "each path fails: no proved source, or a field past its window";
+string MIXED_SOURCE_BOUNDS = "each path fails: no proved source, or the range bounds are invalid";
+string MIXED_SOURCE_STORAGE = "each path fails: no proved source, or the range exceeds its storage";
+
+// The two single reasons whose kernel text states a failure, and their possible wording.
+string WINDOW_TEXT = "typed access exceeds its inherited window";
+string WINDOW_MAYBE = "typed access window remains unproved";
+string STORAGE_TEXT = "raw range exceeds proved storage";
+string STORAGE_MAYBE = "raw range storage remains unproved";
+
+// The note of a kernel reason in the wording of a failure that no witness validates, or that
+// some path does not show: a reason that states a failure becomes a possible one.
+fn possible_text(string text) string {
+    if (text == WINDOW_TEXT) { return WINDOW_MAYBE; }
+    if (text == STORAGE_TEXT) { return STORAGE_MAYBE; }
+    return text;
+}
+
+// The same reasons for a failure that no witness validates, or that some path does not show:
+// the wording names them as possible, not as certain.
+string MAYBE_SOURCE_WINDOW = "unproved: a proved source, or the access window";
+string MAYBE_SOURCE_ALIGNMENT = "unproved: a proved source, or the access alignment";
+string MAYBE_SOURCE_ELEMENT = "unproved: a proved source, or the element alignment";
+string MAYBE_WINDOW_ALIGNMENT = "unproved: the access window, or the access alignment";
+string MAYBE_ACCESS = "unproved: a proved source, the access window, or its alignment";
+string MAYBE_SOURCE_SELECTION = "unproved: a proved source, or the selected field window";
+string MAYBE_SOURCE_BOUNDS = "unproved: a proved source, or the range bounds";
+string MAYBE_SOURCE_STORAGE = "unproved: a proved source, or the range storage";
+
+// The note of a set of reasons, in certain wording when `certain` holds. An access fails by its
+// window or its alignment, a field address by its window, a range by its bounds or its
+// storage, a span element by its alignment, and each of them by a missing source. The bounds of
+// a range are the same for each value, so they fail for each window or for none, and no set
+// holds both the bounds and the storage. So the sets below are each set that a check gives; any
+// other set gets a general note rather than a stop of the compiler.
+fn cause_text(obligation* o, u32 causes, bool certain) string {
+    bool element = o->kind == duty.element;
+    if (causes == CAUSE_SOURCE) { return "raw access needs a proved original source"; }
+    if (causes == CAUSE_WINDOW) { return certain ? WINDOW_TEXT : WINDOW_MAYBE; }
+    if (causes == CAUSE_ALIGNMENT) {
+        return element ? "element alignment remains unproved" :
+            "typed access alignment remains unproved";
+    }
+    if (causes == CAUSE_SELECTION) { return "selected byte window remains unproved"; }
+    if (causes == CAUSE_BOUNDS) { return "raw range bounds remain unproved"; }
+    if (causes == CAUSE_STORAGE) { return certain ? STORAGE_TEXT : STORAGE_MAYBE; }
+    if (causes == (CAUSE_SOURCE | CAUSE_WINDOW)) {
+        return certain ? MIXED_SOURCE_WINDOW : MAYBE_SOURCE_WINDOW;
+    }
+    if (causes == (CAUSE_SOURCE | CAUSE_ALIGNMENT) && element) {
+        return certain ? MIXED_SOURCE_ELEMENT : MAYBE_SOURCE_ELEMENT;
+    }
+    if (causes == (CAUSE_SOURCE | CAUSE_ALIGNMENT)) {
+        return certain ? MIXED_SOURCE_ALIGNMENT : MAYBE_SOURCE_ALIGNMENT;
+    }
+    if (causes == (CAUSE_WINDOW | CAUSE_ALIGNMENT)) {
+        return certain ? MIXED_WINDOW_ALIGNMENT : MAYBE_WINDOW_ALIGNMENT;
+    }
+    if (causes == (CAUSE_SOURCE | CAUSE_WINDOW | CAUSE_ALIGNMENT)) {
+        return certain ? MIXED_ACCESS : MAYBE_ACCESS;
+    }
+    if (causes == (CAUSE_SOURCE | CAUSE_SELECTION)) {
+        return certain ? MIXED_SOURCE_SELECTION : MAYBE_SOURCE_SELECTION;
+    }
+    if (causes == (CAUSE_SOURCE | CAUSE_BOUNDS)) {
+        return certain ? MIXED_SOURCE_BOUNDS : MAYBE_SOURCE_BOUNDS;
+    }
+    if (causes == (CAUSE_SOURCE | CAUSE_STORAGE)) {
+        return certain ? MIXED_SOURCE_STORAGE : MAYBE_SOURCE_STORAGE;
+    }
+    return certain ? "each address of the reference fails this access" :
+        "raw access remains unproved";
+}
+
+// Adds the reason of one more failing value to a set of reasons.
+fn with_cause(u32 causes, u32 why) u32 { return causes | why; }
+
+// Whether begin + offset + size exceeds end, in exact arithmetic: no u64 sum wraps. A window
+// bound comes from a program value and can be near 2^64 - 1.
+fn past_end(u64 begin, u64 offset, u64 size, u64 end) bool {
+    if (begin > end) { return true; }
+    u64 room = end - begin;
+    if (offset > room) { return true; }
+    return size > room - offset;
+}
+
+// The reason that the failure of one known address holds for each concrete state, or none.
+fn exact_failure(context* c, obligation* o, address item, affine lower, affine upper) u32 {
+    u64 mut a = 0;
+    u64 mut r = 0;
+    window_alignment(c, item, &a, &r);
+    bool window = constant_of(item.begin) && constant_of(item.end) &&
+        !item.begin.constant.negative && !item.end.constant.negative;
+    if (o->kind == duty.access || o->kind == duty.derivation) {
+        u32 extent = o->kind == duty.derivation ? CAUSE_SELECTION : CAUSE_WINDOW;
+        if (window && !o->variable && past_end(item.begin.constant.magnitude, o->offset,
+            o->size, item.end.constant.magnitude)) { return extent; }
+        // A variable index as the last projection reads one whole element. When element 0
+        // already ends past the window, each later element does too, so that failure is
+        // exact. A field or an index after it reads a part of an element, which can fit.
+        u64 mut first = 0;
+        if (window && o->variable && !o->tail && o->ty != null &&
+            o->ty->kind == types.type_kind.k_array &&
+            size_of(o->ty->elem, &first) && past_end(item.begin.constant.magnitude, o->offset,
+            first, item.end.constant.magnitude)) { return extent; }
+        if (o->kind == duty.derivation) { return 0; }
+        // The part has the residue of the region start in each element (part_type).
+        u64 need = part_alignment(o);
+        // An offset can come near 2^64 in a pointed-to type without a size, and a window with a
+        // symbolic end skips the extent test above, so r + offset can wrap: add residues only.
+        if (need <= a && (r % need + o->offset % need) % need != 0) { return CAUSE_ALIGNMENT; }
+        return 0;
+    }
+    if (o->kind == duty.range) {
+        if (!constant_of(lower) || !constant_of(upper)) { return 0; }
+        if (lower.constant.negative || !ownership_raw.less_equal(lower.constant,
+            upper.constant)) { return CAUSE_BOUNDS; }
+        u64 mut k = 0;
+        if (!window || o->ty == null || !size_of(o->ty, &k)) { return 0; }
+        if (k != 0 && upper.constant.magnitude > U64_MAX / k) { return CAUSE_STORAGE; }
+        if (past_end(item.begin.constant.magnitude, upper.constant.magnitude * k, 0,
+            item.end.constant.magnitude)) { return CAUSE_STORAGE; }
+        return 0;
+    }
+    u64 need = part_alignment(o);
+    if (need <= a && r % need != 0) { return CAUSE_ALIGNMENT; }
+    return 0;
+}
+
+// The kernel bound of a key, in its type range or recorded bound.
+fn add_bound(context* c, u32 key, ownership_raw.captured_bound mut@ bounds, u64 mut* used)
+    bool {
+    if (key == 0) { return true; }
+    u64 mut i = 0;
+    while (i < *used) {
+        if (bounds[i].version.ordinal == key) { return true; }
+        i += 1;
+    }
+    key_bound mut found = key_bound{};
+    if (!key_range(c, key, &found) || *used >= bounds.len) { return false; }
+    bounds[*used] = ownership_raw.captured_bound{entity(c, ownership_api.entity_kind.value, key),
+        found.lower, found.upper};
+    *used += 1;
+    return true;
+}
+
+// The kernel expression of an affine value. `slot` holds its term.
+fn expression(context* c, affine a, ownership_raw.term mut@ slot) ownership_raw.expression {
+    ownership_raw.expression mut out = ownership_raw.literal(0);
+    out.constant = a.constant;
+    if (a.key != 0) {
+        slot[0] = ownership_raw.term{entity(c, ownership_api.entity_kind.value, a.key),
+            natural(a.scale)};
+        out.terms = slot[..1];
+    }
+    return out;
+}
+
+// One kernel check of an obligation over its known, foreign and reconstructed values.
+struct check {
+    ownership_state.state core;
+    ownership_raw.origin mut@ own origins;
+    u32 mut@ own object_of;
+    ownership_raw.captured_bound mut@ own bounds;
+    u64 bounds_len;
+    ownership_raw.relation mut@ own relations;
+    u64 relations_len;
+    ownership_raw.term mut@ own terms;
+    u64 terms_len;
+    ownership_raw.address mut@ own values;
+    u64 values_len;
+    // The distinct objects: entries 0 to objects - 1 of object_of.
+    u64 objects;
+    ownership_raw.result captured;
+}
+
+fn free_check(check mut* k) void {
+    ownership_raw.free_result(&k->captured);
+    ownership_state.free(&k->core);
+    del(k->origins);
+    del(k->object_of);
+    del(k->bounds);
+    del(k->relations);
+    del(k->terms);
+    del(k->values);
+}
+
+fn next_term(check mut* k) ownership_raw.term mut@ {
+    u64 at = k->terms_len;
+    k->terms_len += 1;
+    return k->terms[at..at + 1];
+}
+
+fn object_slot(check* k, u64 count, u32 index) u64 {
+    u64 mut i = 0;
+    while (i < count) {
+        if (k->object_of[i] == index) { return i; }
+        i += 1;
+    }
+    return U64_MAX;
+}
+
+// The kernel request of an obligation with its event route.
+fn request_for(context* c, obligation* o, ownership_transfer.event_binding mut@ binding)
+    ownership_raw.request {
+    ownership_api.operation_position op = position(c, o->block, o->gap);
+    binding[0] = ownership_transfer.event_binding{op,
+        entity(c, ownership_api.entity_kind.event, 1)};
+    ownership_raw.request mut out = ownership_raw.request{};
+    out.base.kind = ownership_transfer.action.use;
+    out.base.operation = op;
+    out.base.source_position = source(c, location(c, o->block, o->gap));
+    out.base.event_bindings = binding[..1];
+    out.base.event_map_complete_proved = true;
+    out.base.direct_source_proved = true;
+    out.base.direct_destination_proved = true;
+    out.limits = c->limits;
+    out.alternatives_complete = true;
+    out.captured_values = true;
+    return out;
+}
+
+// Builds the private core state and captures one origin for each object of the addresses.
+fn capture(context mut* c, obligation* o, address@ known, bool foreign, check mut* k,
+    ownership_raw.request* req, affine lower, affine upper) ownership_api.proof_status {
+    u64 slots = known.len + 1;
+    k->core = ownership_state.empty();
+    k->origins = new(ownership_raw.origin, slots);
+    k->object_of = new(u32, slots);
+    k->bounds = new(ownership_raw.captured_bound, 3 * slots + 4);
+    k->relations = new(ownership_raw.relation, slots);
+    k->terms = new(ownership_raw.term, 8 * slots + 4);
+    // One value for each window, one for the foreign values and one for the reconstructed.
+    k->values = new(ownership_raw.address, known.len + 2);
+    u64 mut count = 0;
+    u64 mut i = 0;
+    while (i < known.len) {
+        u32 index = known[i].object;
+        if (object_slot(k, count, index) == U64_MAX) {
+            k->object_of[count] = index;
+            count += 1;
+        }
+        i += 1;
+    }
+    k->objects = count;
+    types.node* byte = types.type_prim(c->function->tt, prim.prim_kind.prim_u8);
+    i = 0;
+    while (i < count) {
+        object item = c->objects[cast(k->object_of[i], u64)];
+        u32 ordinal = cast(i, u32) + 1;
+        ownership_api.entity_id key = entity(c, ownership_api.entity_kind.source, ordinal);
+        bool repeated = !constant_of(item.bytes) || item.bytes.constant.magnitude != 1;
+        ownership_api.entity_id mut allocation = ownership_api.entity_id{};
+        if (repeated) {
+            allocation = entity(c, ownership_api.entity_kind.allocation, ordinal);
+            ownership_api.scalar_fact mut length = ownership_api.scalar_fact{
+                .kind = ownership_api.fact_kind.exact,
+                .value = cast(item.bytes.constant.magnitude, i64)};
+            if (item.bytes.key != 0) {
+                length = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.symbolic,
+                    .symbol = entity(c, ownership_api.entity_kind.value, item.bytes.key)};
+            }
+            ownership_api.allocation_fact mut fact = ownership_api.allocation_fact{.key =
+                allocation, .site = allocation, .validity = ownership_api.validity_kind.live,
+                .logical_length = length};
+            fact.count.one = true;
+            ownership_state.append_allocations(&k->core, fact);
+        }
+        ownership_state.append_sources(&k->core, ownership_api.source_fact{.key = key,
+            .kind = ownership_api.source_kind.static_storage,
+            .validity = ownership_api.validity_kind.live, .allocation = allocation});
+        u64 base = item.residue == 0 ? item.alignment : low_bit(item.residue, item.alignment);
+        if (!add_bound(c, item.bytes.key, k->bounds, &k->bounds_len)) {
+            return ownership_api.incomplete(ownership_api.incomplete_reason.missing_capture,
+                req->base.operation, req->base.source_position);
+        }
+        k->origins[i] = ownership_raw.origin{.source = key, .allocation = allocation,
+            .place = ownership_api.place_path{.root = entity(c, ownership_api.entity_kind.slot,
+            ordinal)}, .layout = byte, .count = expression(c, item.bytes, next_term(k)),
+            .begin = ownership_raw.literal(0), .end = expression(c, item.bytes, next_term(k)),
+            .alignment = base, .repeated = repeated, .correspondence = true};
+        i += 1;
+    }
+    if (foreign) {
+        ownership_api.entity_id key = entity(c, ownership_api.entity_kind.source,
+            FOREIGN_ORDINAL);
+        ownership_state.append_sources(&k->core, ownership_api.source_fact{.key = key,
+            .kind = ownership_api.source_kind.trusted_foreign,
+            .validity = ownership_api.validity_kind.live});
+        k->origins[count] = ownership_raw.origin{.source = key, .place =
+            ownership_api.place_path{.root = entity(c, ownership_api.entity_kind.slot,
+            FOREIGN_ORDINAL)}, .layout = byte, .count = ownership_raw.literal(0),
+            .begin = ownership_raw.literal(0), .end = ownership_raw.literal(0), .alignment = 1,
+            .correspondence = true};
+        count += 1;
+    }
+    // Each window lies in its object: its producer or the obligation that narrowed it proves
+    // that. A symbolic end keeps that fact as a relation.
+    i = 0;
+    while (i < known.len) {
+        address item = known[i];
+        if (!add_bound(c, item.begin.key, k->bounds, &k->bounds_len) ||
+            !add_bound(c, item.end.key, k->bounds, &k->bounds_len)) {
+            return ownership_api.incomplete(ownership_api.incomplete_reason.missing_capture,
+                req->base.operation, req->base.source_position);
+        }
+        object whole_object = c->objects[cast(item.object, u64)];
+        if ((item.end.key != 0 || whole_object.bytes.key != 0) &&
+            k->relations_len < k->relations.len) {
+            k->relations[k->relations_len] = ownership_raw.relation{expression(c, item.end,
+                next_term(k)), expression(c, whole_object.bytes, next_term(k))};
+            k->relations_len += 1;
+        }
+        i += 1;
+    }
+    if (!add_bound(c, lower.key, k->bounds, &k->bounds_len) ||
+        !add_bound(c, upper.key, k->bounds, &k->bounds_len)) {
+        return ownership_api.incomplete(ownership_api.incomplete_reason.missing_capture,
+            req->base.operation, req->base.source_position);
+    }
+    if (count == 0) {
+        // Only reconstructed values: the kernel gives their context (D17.17).
+        k->captured = ownership_raw.reconstruct_integer(&k->core, &c->services, req);
+        return k->captured.proof;
+    }
+    k->captured = ownership_raw.capture_origins(&k->core, &c->services, k->origins[..count],
+        k->bounds[..k->bounds_len], k->relations[..k->relations_len], req);
+    return k->captured.proof;
+}
+
+// The kernel addresses of the values: each window, and the foreign and reconstructed values.
+fn kernel_values(context mut* c, obligation* o, address@ known, u32 classes, check mut* k)
+    void {
+    u64 mut i = 0;
+    while (i < known.len) {
+        address item = known[i];
+        u64 slot = object_slot(k, k->objects, item.object);
+        ownership_raw.address origin = k->captured.addresses[slot];
+        ownership_raw.address mut out = origin;
+        out.begin = expression(c, item.begin, next_term(k));
+        out.end = expression(c, item.end, next_term(k));
+        out.offset = expression(c, add(item.begin, exact(natural(o->offset))), next_term(k));
+        k->values[k->values_len] = out;
+        k->values_len += 1;
+        i += 1;
+    }
+    if ((classes & FOREIGN) != 0) {
+        k->values[k->values_len] = k->captured.addresses[k->captured.addresses.len - 1];
+        k->values_len += 1;
+    }
+    if ((classes & RECONSTRUCTED) != 0) {
+        // Integer reconstruction and null supply no source, so the address has none (D17.17).
+        k->values[k->values_len] = ownership_raw.address{.offset = ownership_raw.literal(0),
+            .begin = ownership_raw.literal(0), .end = ownership_raw.literal(0)};
+        k->values_len += 1;
+    }
+}
+
+// Runs the kernel operation of one obligation.
+fn kernel(context mut* c, obligation* o, check mut* k, ownership_raw.request* req,
+    affine lower, affine upper) ownership_api.proof_status {
+    ownership_raw.address@ values = k->values[..k->values_len];
+    if (o->kind == duty.access) {
+        return ownership_raw.access(&k->captured.storage, &c->services, values, o->ty, req);
+    }
+    if (o->kind == duty.derivation) {
+        u64 mut i = 0;
+        ownership_api.proof_status mut proof = complete();
+        // Each window narrows from its own start, so each value derives on its own. A trusted
+        // foreign value has no static window to narrow (D17.13).
+        while (i < values.len && ownership_api.successful(proof)) {
+            if (values[i].source.ordinal == FOREIGN_ORDINAL) { i += 1; continue; }
+            ownership_raw.expression low = values[i].offset;
+            ownership_raw.expression mut high = values[i].offset;
+            high.constant = ownership_raw.plus(low.constant, natural(o->size));
+            ownership_raw.result mut derived_value = ownership_raw.derive_address(
+                &k->captured.storage, &c->services, values[i..i + 1], low, high, o->ty, req);
+            proof = derived_value.proof;
+            ownership_raw.free_result(&derived_value);
+            i += 1;
+        }
+        return proof;
+    }
+    ownership_raw.term[2] mut slot = {};
+    ownership_raw.expression lo = expression(c, lower, slot[0..1]);
+    ownership_raw.expression hi = expression(c, upper, slot[1..2]);
+    ownership_raw.result mut out = ownership_raw.slice_ptr(&k->captured.storage, &c->services,
+        values, lo, hi, o->ty, req);
+    ownership_api.proof_status proof = out.proof;
+    ownership_raw.free_result(&out);
+    return proof;
+}
+
+// The bounds of a range obligation.
+fn range_bounds(context mut* c, obligation* o, affine mut* lower, affine mut* upper) void {
+    fir.statement* s = fir.block_statement(c->function, o->block, o->gap);
+    *lower = bound_value(c, o->block, o->gap, fir.rvalue_operand(c->function, s->value, 1),
+        LOWER_KEY);
+    *upper = bound_value(c, o->block, o->gap, fir.rvalue_operand(c->function, s->value, 2),
+        UPPER_KEY);
+}
+
+// The verdict of one obligation. A gap needs facts that other analyses own.
+fn decide(context mut* c, obligation* o) verdict {
+    // Each record names a reason of its own obligation, so no note survives from the last one.
+    c->event_seen = false;
+    c->event_text = "";
+    c->event_causes = 0;
+    value mut pointer = value{};
+    defer free_value(&pointer);
+    if (!duty_value(c, o, &pointer)) { return verdict.refused; }
+    u32 mut classes = pointer.classes;
+    address@ known = pointer.known[..pointer.known_len];
+    if ((classes & GAPS) != 0) {
+        missing why = (classes & CALLER) != 0 ? missing.caller_origin :
+            (classes & STORED) != 0 ? missing.stored_origin :
+            (classes & CALL) != 0 ? missing.call_origin : missing.unknown_origin;
+        note_gap(c, why, o->block, o->gap);
+        return verdict.gap;
+    }
+    if ((classes & RESIDUAL) != 0) { return verdict.unproved; }
+    // A null value has no source. The local analysis owns a typed access through it ("empty
+    // reference has no element"). A derivation or a raw range needs a source window, so null
+    // fails there as an integer reconstruction does (memory model 2.8.1, 2.8.2, 2.8.5).
+    u32 mut open = FOREIGN | NONE;
+    if (o->kind == duty.derivation || o->kind == duty.range) {
+        if ((classes & NONE) != 0) { classes = classes | RECONSTRUCTED; }
+        open = FOREIGN;
+    }
+    // A region, or a range of elements, without a size names no extent, so no window can hold
+    // it. Since b172e3e9 the checker refuses such a type behind a reference, so no checked
+    // source reaches this guard; it stays as defence in depth and claims nothing.
+    u64 mut stride = 0;
+    bool range_unsized = o->kind == duty.range && (o->ty == null || !size_of(o->ty, &stride));
+    if (o->unsized || range_unsized) { return verdict.unproved; }
+    if (o->written != null && !byte_write(c, o, known)) { return verdict.gap; }
+    if (o->kind == duty.element) { return element_verdict(c, o, known, classes); }
+    if (known.len == 0 && (classes & (FOREIGN | RECONSTRUCTED)) == 0) { return verdict.passed; }
+    affine mut lower = exact(natural(0));
+    affine mut upper = exact(natural(0));
+    if (o->kind == duty.range) {
+        range_bounds(c, o, &lower, &upper);
+        if (!valid(lower) || !valid(upper)) { return verdict.unproved; }
+    }
+    if (!work(c, o->block, o->gap, 1 + known.len)) { return verdict.refused; }
+    // Each window gets a check of its own. The fact that a window lies in its object holds
+    // only on the path that made the window, so it must not prove another window of the same
+    // object. The last check holds the foreign and the sourceless values.
+    u32 others = classes & (FOREIGN | RECONSTRUCTED);
+    ownership_api.proof_status mut proof = complete();
+    u64 mut i = 0;
+    while (i < known.len || (i == known.len && others != 0)) {
+        address@ one = i < known.len ? known[i..i + 1] : known[0..0];
+        u32 extra = i < known.len ? 0 : others;
+        check mut k = check{};
+        defer free_check(&k);
+        ownership_transfer.event_binding[1] mut binding = {};
+        ownership_raw.request req = request_for(c, o, binding[..]);
+        proof = capture(c, o, one, (extra & FOREIGN) != 0, &k, &req, lower, upper);
+        if (c->first_refusal.terminal.present) { return verdict.refused; }
+        if (!ownership_api.successful(proof)) { return verdict.unproved; }
+        kernel_values(c, o, one, extra, &k);
+        proof = kernel(c, o, &k, &req, lower, upper);
+        if (c->first_refusal.terminal.present) { return verdict.refused; }
+        if (!ownership_api.successful(proof)) { break; }
+        i += 1;
+    }
+    if (ownership_api.successful(proof)) { return verdict.passed; }
+    if ((classes & open) != 0) { return verdict.unproved; }
+    // The note names the reasons that hold on the paths, not the first reason of the kernel.
+    u32 mut causes = (classes & RECONSTRUCTED) != 0 ? CAUSE_SOURCE : 0;
+    i = 0;
+    while (i < known.len) {
+        u32 why = exact_failure(c, o, known[i], lower, upper);
+        if (why == 0) { return verdict.unproved; }
+        causes = with_cause(causes, why);
+        i += 1;
+    }
+    c->event_causes = causes;
+    return verdict.definite;
+}
+
+// An index of a span local: a coherent header and an aligned element (the bounds check
+// stays). The kernel has no span index operation, so the producer decides it.
+fn element_verdict(context mut* c, obligation* o, address@ known, u32 classes) verdict {
+    if (!work(c, o->block, o->gap, 1 + known.len)) { return verdict.refused; }
+    // `failing` holds the reasons of the values that fail; `causes` those that fail exactly.
+    u32 mut failing = (classes & RECONSTRUCTED) != 0 ? CAUSE_SOURCE : 0;
+    bool mut every = (classes & (NONE | FOREIGN)) == 0;
+    u32 mut causes = failing;
+    // The element needs the alignment of the part that the place reads (part_type).
+    u64 need = part_alignment(o);
+    u64 mut i = 0;
+    while (i < known.len) {
+        u64 mut a = 0;
+        u64 mut r = 0;
+        window_alignment(c, known[i], &a, &r);
+        bool aligned = need <= a && r % need == 0;
+        if (!aligned) { failing = with_cause(failing, CAUSE_ALIGNMENT); }
+        u32 why = aligned ? 0 : exact_failure(c, o, known[i], invalid(), invalid());
+        if (why == 0) { every = false; }
+        else { causes = with_cause(causes, why); }
+        i += 1;
+    }
+    if (failing == 0) { return verdict.passed; }
+    if (every) {
+        c->event_causes = causes;
+        return verdict.definite;
+    }
+    c->event_causes = failing;
+    return verdict.unproved;
+}
+
+// A write classifies its overlap with the original layout. A write over an owning leaf that
+// is no complete typed replacement needs the old owner empty: no fact proves it here. An
+// element write can land on any element of its window.
+fn byte_write(context mut* c, obligation* o, address@ known) bool {
+    u64 mut i = 0;
+    bool mut counted = false;
+    while (i < known.len) {
+        address item = known[i];
+        object whole_object = c->objects[cast(item.object, u64)];
+        types.node* element = whole_object.element;
+        u64 mut k = 0;
+        size_of(element, &k);
+        bool element_write = o->kind == duty.element;
+        u64 shift = element_write ? 0 : o->offset;
+        // A start that no u64 holds is no constant region: the write covers each element.
+        bool constant = constant_of(item.begin) && !item.begin.constant.negative && k != 0 &&
+            item.begin.constant.magnitude <= U64_MAX - shift;
+        u64 lo = constant ? item.begin.constant.magnitude + shift : 0;
+        bool bounded = constant && (!element_write || (constant_of(item.end) &&
+            !item.end.constant.negative));
+        // The end stops at the largest u64: past it, the region only grows.
+        u64 last = o->size > U64_MAX - lo ? U64_MAX : lo + o->size;
+        u64 hi = !bounded ? 0 : element_write ? item.end.constant.magnitude : last;
+        u32 leaves = bounded ? range_overlap(element, k, lo, hi) : overlap(element, 0, k);
+        bool mut typed = false;
+        if (element_write) {
+            // Each element of the window is one element of the object.
+            ownership_raw.number start = item.begin.constant;
+            typed = types.type_equal(element, o->ty) && k != 0 && !start.negative &&
+                start.magnitude % k == 0 && (item.begin.key == 0 || item.begin.scale % k == 0);
+        } else if (bounded && hi > lo && lo / k == (hi - 1) / k) {
+            typed = typed_at(element, lo % k, o->size, o->ty);
+        }
+        if (leaves != 0 && !typed) {
+            if (!counted) { c->byte_writes += 1; counted = true; }
+            if ((leaves & 2) != 0) {
+                note_gap(c, missing.owner_overlap, o->block, o->gap);
+                return false;
+            }
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// ---- validation -------------------------------------------------------------------------------
+
+fn name_of(context* c, u32 local, bool mut* quoted) string {
+    if (local == NO_LOCAL) {
+        *quoted = false;
+        return "a loaded reference";
+    }
+    string name = fir.local_name(fir.local_at(c->function, local));
+    *quoted = name.len > 0;
+    if (name.len == 0) { return "a temporary value"; }
+    return name;
+}
+
+fn push_violation(context mut* c, ownership_source_local.violation item) void {
+    if (c->violations_len == c->violations.len) {
+        ownership_source_local.violation mut@ own bigger = new(ownership_source_local.violation,
+            c->violations.len * 2 + 4);
+        u64 mut i = 0;
+        while (i < c->violations_len) { bigger[i] = c->violations[i]; i += 1; }
+        del(c->violations);
+        c->violations = move(bigger);
+    }
+    c->violations[c->violations_len] = item;
+    c->violations_len += 1;
+}
+
+fn push_unproved(context mut* c, ownership_source_local.violation item) void {
+    if (c->unproved_len == c->unproved.len) {
+        ownership_source_local.violation mut@ own bigger = new(ownership_source_local.violation,
+            c->unproved.len * 2 + 4);
+        u64 mut i = 0;
+        while (i < c->unproved_len) { bigger[i] = c->unproved[i]; i += 1; }
+        del(c->unproved);
+        c->unproved = move(bigger);
+    }
+    c->unproved[c->unproved_len] = item;
+    c->unproved_len += 1;
+}
+
+fn record(context mut* c, obligation* o, ownership_api.event_kind kind)
+    ownership_source_local.violation {
+    bool mut quoted = false;
+    string name = name_of(c, o->local, &quoted);
+    // A validated violation names its reasons as certain; a failure without a witness, or with a
+    // path that does not fail, names them as possible (toolchain 4.2).
+    bool certain = kind == ownership_api.event_kind.invalid_use;
+    string mut text = c->event_seen ? c->event_text : "raw access remains unproved";
+    if (!certain) { text = possible_text(text); }
+    if (c->event_causes != 0) { text = cause_text(o, c->event_causes, certain); }
+    return ownership_source_local.violation{position(c, o->block, o->gap),
+        source(c, location(c, o->block, o->gap)), kind, text, name, quoted,
+        entity(c, ownership_api.entity_kind.slot, o->local == NO_LOCAL ? 0 : o->local)};
+}
+
+// Toolchain 4.2 orders events by source range, operation key, event class and relation key.
+fn before(ownership_source_local.violation* a, ownership_source_local.violation* b) bool {
+    i32 by_source = ownership_keys.source(a->source, b->source);
+    if (by_source != 0) { return by_source < 0; }
+    i32 by_operation = ownership_keys.operation(a->operation, b->operation);
+    if (by_operation != 0) { return by_operation < 0; }
+    if (a->kind != b->kind) { return cast(a->kind, i32) < cast(b->kind, i32); }
+    return ownership_keys.entity(a->relation, b->relation) < 0;
+}
+
+fn sort_records(ownership_source_local.violation mut@ items, u64 len) void {
+    u64 mut i = 1;
+    while (i < len) {
+        ownership_source_local.violation item = items[i];
+        u64 mut j = i;
+        while (j > 0 && before(&item, &items[j - 1])) {
+            items[j] = items[j - 1];
+            j -= 1;
+        }
+        items[j] = item;
+        i += 1;
+    }
+}
+
+// Decides each obligation. A definite failure needs a witness path (toolchain 4.2).
+fn validate(context mut* c) void {
+    fir.pred_table mut preds = fir.pred_table{};
+    bool mut built = false;
+    u64 mut i = 0;
+    while (i < c->duties_len) {
+        obligation o = c->duties[i];
+        verdict v = decide(c, &o);
+        if (v == verdict.refused) { break; }
+        if (v == verdict.definite && !c->records_lost) {
+            if (!built) {
+                preds = fir.func_predecessors(c->function);
+                built = true;
+            }
+            if (ownership_source_local.witness_in(c->function, c->identity, c->declaration,
+                &c->taken, &c->meter, &c->first_refusal, &preds, o.block, o.gap)) {
+                push_violation(c, record(c, &o, ownership_api.event_kind.invalid_use));
+                i += 1;
+                continue;
+            }
+            if (c->first_refusal.terminal.present) { break; }
+        }
+        if (v == verdict.definite || v == verdict.unproved) {
+            push_unproved(c, record(c, &o, ownership_api.event_kind.incomplete_proof));
+        }
+        i += 1;
+    }
+    if (built) { fir.pred_table_free(&preds); }
+    sort_records(c->violations, c->violations_len);
+    sort_records(c->unproved, c->unproved_len);
+}
+
+// ---- entry points -----------------------------------------------------------------------------
+
+fn configure(ownership_limits.meter mut* m, ownership_api.limit_table* limits) void {
+    if (!ownership_limits.configure(m, limits)) {
+        // panic-coverage: unreachable: read: computation() returns the valid version 1 table.
+        panic("ownership_source_raw: production limits are invalid");
+    }
+}
+
+/// Binds one verified body and its ledger. The analysis runs in solve.
+fn prepare(context mut* c, fir.func* function, ownership_api.function_id identity, u32 file,
+    string filename, ownership_api.source_position declaration) void {
+    if (c->initialized) { panic("ownership_source_raw: context is already prepared"); }
+    c->function = function;
+    c->identity = identity;
+    c->file = file;
+    c->filename = filename;
+    c->declaration = declaration;
+    c->initialized = true;
+    c->fir_size = ownership_limits.fir_size(function);
+    c->limits = ownership_limits.computation(c->fir_size);
+    configure(&c->meter, &c->limits);
+    c->services.budget_context = cast(c, void mut*);
+    c->services.budget = budget;
+    c->services.event_context = cast(c, void mut*);
+    c->services.event = event;
+}
+
+fn first_reason(context mut* c) void {
+    if (c->first_refusal.terminal.present) {
+        c->first_incomplete = c->first_refusal;
+        return;
+    }
+    if (c->unproved_len > 0) {
+        ownership_source_local.violation* u = &c->unproved[0];
+        c->first_incomplete = ownership_api.incomplete(
+            ownership_api.incomplete_reason.unknown_effect, u->operation, u->source);
+        return;
+    }
+    if (c->gap != missing.none) {
+        c->first_incomplete = ownership_api.incomplete(
+            ownership_api.incomplete_reason.missing_correspondence,
+            ownership_api.operation_position{.function = c->identity}, c->gap_source);
+    }
+}
+
+/// Produces the raw effects of the body, proves each obligation and validates its failures.
+fn solve(context mut* c) void {
+    if (!c->initialized || c->solved) { panic("ownership_source_raw: invalid solve order"); }
+    c->solved = true;
+    classify(c);
+    mark_cycles(c);
+    collect_defs(c);
+    bool ran = reach(c) && bind(c);
+    if (ran) {
+        link_readers(c);
+        if (propagate(c)) { validate(c); }
+    }
+    first_reason(c);
+    c->correspondence = c->gap == missing.none ? ownership_source_local.status.complete :
+        ownership_source_local.status.incomplete;
+    c->solver = !c->first_refusal.terminal.present && !c->records_lost ?
+        ownership_source_local.status.complete : ownership_source_local.status.incomplete;
+    if (c->violations_len > 0) {
+        c->proof = complete();
+        c->proof.failed = true;
+    } else if (c->correspondence == ownership_source_local.status.complete &&
+        c->solver == ownership_source_local.status.complete && c->unproved_len == 0) {
+        c->proof = complete();
+    } else {
+        c->proof = c->first_incomplete;
+        if (!c->proof.terminal.present) {
+            c->proof = ownership_api.incomplete(ownership_api.incomplete_reason.missing_path,
+                ownership_api.operation_position{.function = c->identity}, c->declaration);
+        }
+    }
+    release_work(c);
+}
+
+// Releases the producer state. Results stay for the report.
+fn release_work(context mut* c) void {
+    u64 mut i = 0;
+    while (i < c->values.len) { free_value(&c->values[i]); i += 1; }
+    i = 0;
+    while (i < c->reaching.len) { fir_flow.bits_free(&c->reaching[i]); i += 1; }
+    del(c->values);
+    del(c->reaching);
+    del(c->visited);
+    del(c->tracked);
+    del(c->taken);
+    del(c->cyclic);
+    del(c->block_first);
+    del(c->guard_block);
+    del(c->defs_count);
+    del(c->def_block);
+    del(c->def_gap);
+    del(c->scalars);
+    del(c->scalar_state);
+    del(c->defs);
+    del(c->local_first);
+    del(c->local_fill);
+    del(c->def_order);
+    del(c->block_defs);
+    del(c->block_fill);
+    del(c->inputs);
+    del(c->reader_first);
+    del(c->readers);
+    del(c->objects);
+    del(c->keys);
+    del(c->key_slot);
+    del(c->duties);
+    c->defs_len = 0;
+    c->inputs_len = 0;
+    c->objects_len = 0;
+    c->keys_len = 0;
+    c->duties_len = 0;
+}
+
+fn free(context mut* c) void {
+    release_work(c);
+    del(c->violations);
+    del(c->unproved);
+    *c = context{};
+}
