@@ -1,0 +1,92 @@
+{
+  "comment": [
+    "One row for each rule of the unknown origin of a call result, and of the join of call",
+    "results that it relies on (D17.18).",
+    "The product compiler does not import ownership_summary_body.ft or ownership_summary.ft, so",
+    "a mutant changes no compiler binary. The build writes the LLVM IR of the origin test,",
+    "which compiles both modules from src/fort, and the runner compares that file. The stages",
+    "compile the mutant through the flags of each test. Build the debug preset first, on a",
+    "Darwin host, and run with --runner 'bash -c'."
+  ],
+  "sources": [
+    "src/fort/ownership_summary_body.ft",
+    "src/fort/ownership_summary.ft"
+  ],
+  "binary": "build/Darwin/debug/mutate/ownership_calls_origins_test.ll",
+  "build": "mkdir -p build/Darwin/debug/mutate && build/Darwin/debug/fort --std-dir build/Darwin/debug/std -I src/fort -I test/fort/support -S -o build/Darwin/debug/mutate/ownership_calls_origins_test.ll test/fort/ownership_calls_origins_test.ft",
+  "stages": [
+    {
+      "name": "the origin suite",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Darwin/debug/fort --std-dir build/Darwin/debug/std --cc /opt/homebrew/bin/clang --target arm64-apple-macosx11.0.0 -j 10 ownership_calls_origins"
+    },
+    {
+      "name": "the summary suites",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Darwin/debug/fort --std-dir build/Darwin/debug/std --cc /opt/homebrew/bin/clang --target arm64-apple-macosx11.0.0 -j 10 ownership_calls_ ownership_recursive ownership_indirect ownership_summary_"
+    }
+  ],
+  "mutations": [
+    {
+      "decision": "D17.18-unknown-origin",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    if (out->unknown[held]) {\n        if (!out->lost_requirement) {",
+      "new": "    if (false && out->unknown[held]) {\n        if (!out->lost_requirement) {",
+      "what": "an unknown origin drops its requirement without a record"
+    },
+    {
+      "decision": "D17.18-lost-publish",
+      "file": "src/fort/ownership_summary.ft",
+      "old": "    if (program->lost_requirement) {\n        out.proof = ownership_api.incomplete(ownership_api.incomplete_reason.missing_path,",
+      "new": "    if (false && program->lost_requirement) {\n        out.proof = ownership_api.incomplete(ownership_api.incomplete_reason.missing_path,",
+      "what": "a lost requirement leaves the published summary complete"
+    },
+    {
+      "decision": "D17.18-loaded-origin",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        if (root.kind == ownership_summary_model.root_kind.loaded_source &&\n            ownership_summary_model.same(root.source, formal_source)) {\n            return mapped_origin{.unknown = true};",
+      "new": "        if (root.kind == ownership_summary_model.root_kind.loaded_source &&\n            ownership_summary_model.same(root.source, formal_source)) {\n            return mapped_origin{};",
+      "what": "a result that the callee loaded from caller storage names no source"
+    },
+    {
+      "decision": "D17.18-argument-mark",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "            return mapped_origin{out->origins[argument.place.local],\n                out->unknown[argument.place.local]};",
+      "new": "            return mapped_origin{out->origins[argument.place.local],\n                false};",
+      "what": "an argument with an unknown origin gives the result a known origin"
+    },
+    {
+      "decision": "D17.18-blank-origin",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    if (blank && scan.origin.kind != ownership_api.entity_kind.none) {",
+      "new": "    if (false && blank && scan.origin.kind != ownership_api.entity_kind.none) {",
+      "what": "a result that can name a caller source or no source keeps the caller source"
+    },
+    {
+      "decision": "D17.18-refuted-origin",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        return mapped_origin{scan_origin(in, out, rv, targets, args, false).origin, false};",
+      "new": "        origin_scan open = scan_origin(in, out, rv, targets, args, false);\n        return mapped_origin{open.origin, open.unknown};",
+      "what": "a call whose normal cases the arguments refute marks its result unknown"
+    },
+    {
+      "decision": "D17.18-header-mark",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "                out->origins[dst] = out->origins[input_operand.place.local];\n                out->unknown[dst] = marked;",
+      "new": "                out->origins[dst] = out->origins[input_operand.place.local];\n                out->unknown[dst] = false;",
+      "what": "the pointer field of a span drops the unknown mark of the span"
+    },
+    {
+      "decision": "D17.18-entry-mark",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        out->unknown[i] = out->entry_unknown[base + i];",
+      "new": "        out->unknown[i] = false;",
+      "what": "a block entry drops the unknown mark of its parent block"
+    },
+    {
+      "decision": "D17.18-result-join",
+      "file": "src/fort/ownership_summary.ft",
+      "old": "fn same_window(ownership_api.borrow_relation a, ownership_api.borrow_relation b) bool {\n    return ownership_summary_model.same(a.source, b.source) &&\n        ownership_state.same_place(a.containing, b.containing) &&\n        a.representation_complete == b.representation_complete &&\n        ownership_state.same_region(a.range, b.range);\n}",
+      "new": "fn same_window(ownership_api.borrow_relation a, ownership_api.borrow_relation b) bool {\n    ownership_api.region mut left = a.range;\n    left.key = b.range.key;\n    left.source = b.range.source;\n    return ownership_state.same_place(a.containing, b.containing) &&\n        a.representation_complete == b.representation_complete &&\n        ownership_state.same_region(left, b.range);\n}",
+      "what": "the join of two call results ignores their sources and region keys"
+    }
+  ]
+}

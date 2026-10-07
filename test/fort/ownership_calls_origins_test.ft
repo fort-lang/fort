@@ -1,0 +1,299 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| call result origins ok
+/// Checks the origin of a reference call result that a later copy or read needs (D17.18).
+/// A result whose origin is unknown can designate caller storage that no origin names. The
+/// summary then records incomplete proof at the copy or read. It never drops the requirement,
+/// and flow still checks the body for a proved independent error.
+import fir;
+import ownership_api;
+import ownership_call_bodies;
+import ownership_summary_body;
+import ownership_summary_model;
+
+// Flow knows `b == 1` on the path of the call, so it applies only the case that returns `p`.
+// Extraction reads no path atom, so both cases stay and the origin of the result is unknown.
+// The copies into `x` and `y` then need a source that no origin names.
+string[3] PATH_SELECTED = {
+    "fn sel(i32* p, i32* q, bool b) i32* { if (b) { return p; } return q; }",
+    "fn top(i32* p, i32* q, bool b) i32 {",
+    "    if (b) { i32* x = sel(p, q, b); i32* y = x; return 0; } return 1; }",
+};
+
+// The exact `true` refutes the case that returns `q`, so the result designates `p`.
+string[3] EXACT_SELECTED = {
+    "fn sel(i32* p, i32* q, bool b) i32* { if (b) { return p; } return q; }",
+    "fn top(i32* p, i32* q, bool b) i32 {",
+    "    if (b) { i32* x = sel(p, q, true); i32* y = x; return 0; } return 1; }",
+};
+
+// `mid` releases its owner and then copies the selected view. `top` passes a view of that
+// owner as `p`, so the copy in `mid` reads released storage.
+string[6] RELEASED_SELECTED = {
+    "fn sel(i32* p, i32* q, bool b) i32* { if (b) { return p; } return q; }",
+    "fn mid(i32 mut* own a, i32* p, i32* q, bool b) bool {",
+    "    if (b) { i32* x = sel(p, q, b); del(a); i32* y = x; return true; }",
+    "    del(a); return false; }",
+    "fn top() bool { i32 mut* own a = new(i32); i32* v = a; i32 mut* own w = new(i32); i32* r = w;",
+    "    bool n = mid(move(a), v, r, true); del(w); return n; }",
+};
+
+// Each body consumes the result right after the call: a comparison reads it, a return
+// copies it into the result, a literal copies it into a field, and a store copies it into
+// caller storage.
+string[2] COMPARED = {
+    "fn sel(i32* p, i32* q, bool b) i32* { if (b) { return p; } return q; }",
+    "fn top(i32* p, i32* q, bool b) bool { if (b) { return sel(p, q, b) != null; } return false; }",
+};
+
+string[2] RETURNED = {
+    "fn sel(i32* p, i32* q, bool b) i32* { if (b) { return p; } return q; }",
+    "fn top(i32* p, i32* q, bool b) i32* { if (b) { return sel(p, q, b); } return q; }",
+};
+
+string[4] LITERAL = {
+    "struct view_box { i32* ptr; }",
+    "fn sel(i32* p, i32* q, bool b) i32* { if (b) { return p; } return q; }",
+    "fn top(i32* p, i32* q, bool b) view_box {",
+    "    if (b) { return view_box{sel(p, q, b)}; } return view_box{q}; }",
+};
+
+string[3] STORED = {
+    "fn sel(i32* p, i32* q, bool b) i32* { if (b) { return p; } return q; }",
+    "fn top(i32* mut* out, i32* p, i32* q, bool b) void {",
+    "    if (b) { *out = sel(p, q, b); return; } }",
+};
+
+// `load` returns a reference that it loaded from caller storage. `top` passes a local that
+// holds `p`, so flow binds the result to `p`. No formal of `load` names that source.
+string[2] LOADED = {
+    "fn load(i32** pp) i32* { return *pp; }",
+    "fn top(i32* p) i32 { i32* mut s = p; i32* x = load(&s); i32* y = x; return 0; }",
+};
+
+// The inner call passes its unknown result to the outer call, whose case returns it.
+string[3] NESTED = {
+    "fn sel(i32* p, i32* q, bool b) i32* { if (b) { return p; } return q; }",
+    "fn top(i32* p, i32* q, bool b) i32 {",
+    "    if (b) { i32* x = sel(sel(p, q, b), q, true); return 0; } return 1; }",
+};
+
+// The pointer field of the span result keeps the unknown origin of the span. The copy of
+// that pointer then needs it.
+string[3] HEADER = {
+    "fn sels(i32@ p, i32@ q, bool b) i32@ { if (b) { return p; } return q; }",
+    "fn top(i32@ s, i32@ t, bool b) i32 {",
+    "    if (b) { i32* p = sels(s, t, b).ptr; i32* q = p; return 0; } return 1; }",
+};
+
+// One case returns the moved owner and the other a fresh allocation. The result can name a
+// caller source or no source, so it has no one origin.
+string[4] MIXED = {
+    "fn mix(i32 mut* own p, bool b) i32 mut* own {",
+    "    if (b) { return p; } del(p); return new(i32); }",
+    "fn top(i32 mut* own a, bool b) void {",
+    "    if (b) { i32 mut* own x = mix(move(a), b); del(x); return; } del(a); }",
+};
+
+// A use of a released view comes before or after the copy of the selected view. Flow proves
+// that use invalid, independent of the unknown origin (`spec/toolchain.md` 4.2).
+string[3] ERROR_BEFORE = {
+    "fn sel(i32* p, i32* q, bool b) i32* { if (b) { return p; } return q; }",
+    "fn top(i32* p, i32* q, bool b) i32 { if (b) { i32 mut* own a = new(i32); i32* v = a;",
+    "    del(a); i32 k = *v; i32* x = sel(p, q, b); i32* y = x; return k; } return 0; }",
+};
+
+string[3] ERROR_AFTER = {
+    "fn sel(i32* p, i32* q, bool b) i32* { if (b) { return p; } return q; }",
+    "fn top(i32* p, i32* q, bool b) i32 { if (b) { i32* x = sel(p, q, b); i32* y = x;",
+    "    i32 mut* own a = new(i32); i32* v = a; del(a); i32 k = *v; return k; } return 0; }",
+};
+
+// A constant argument is null or static storage, so the result needs no caller requirement
+// and gets no unknown mark. Flow binds no constant argument and keeps the call unknown.
+string[2] CONSTANT = {
+    "fn id(i32* p) i32* { return p; }",
+    "fn top() i32 { i32* x = id(null); i32* y = x; return 0; }",
+};
+
+// The exact `true` refutes each normal case of `pick`, so flow ends the path at the abort
+// case. No value of the call reaches the copy, and the two normal origins are not unknown.
+string[3] REFUTED = {
+    "fn pick(i32* p, i32* q, bool b, bool z) i32* {",
+    "    if (z) { panic(\"z\"); } if (b) { return p; } return q; }",
+    "fn top(i32* p, i32* q, bool b) i32 { i32* v = pick(p, q, b, true); i32* w = v; return 0; }",
+};
+
+fn bodies(ownership_call_bodies.bodies mut* b, string@ text, string@ names) void {
+    ownership_call_bodies.open(b, text, names);
+    ownership_call_bodies.infer_all(b);
+}
+
+// The gap of the first call statement in `block` of body `index`.
+fn call_gap(ownership_call_bodies.bodies* b, u64 index, u32 block) u32 {
+    fir.func* f = &b->functions[index];
+    u32 mut gap = 0;
+    while (gap < fir.block_statement_count(f, block)) {
+        fir.statement* stmt = fir.block_statement(f, block, gap);
+        if (stmt->kind == fir.stmt_kind.st_assign &&
+            stmt->value.kind == fir.rvalue_kind.rv_call) { return gap; }
+        gap += 1;
+    }
+    panic("ownership_calls_origins_test: no call in the block");
+}
+
+// The live requirements of summary `s` on `source`.
+fn live_requirements(ownership_summary_model.summary* s, ownership_api.entity_id source) u64 {
+    u64 mut found = 0;
+    u64 mut r = 0;
+    while (r < s->requirements.len) {
+        ownership_summary_model.requirement row = s->requirements[r];
+        if (row.kind == ownership_summary_model.requirement_kind.live_source &&
+            ownership_summary_model.same(row.source, source)) { found += 1; }
+        r += 1;
+    }
+    return found;
+}
+
+// The summary of the last body is incomplete with `missing_path` at the statement `after`
+// gaps after the call in `block`. The body records no event, so nothing claims a definite
+// error (D17.18).
+fn stops_after_call(string@ text, string@ names, u32 block, u32 after) void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    bodies(&b, text, names);
+    defer ownership_call_bodies.close(&b);
+    u64 last = names.len - 1;
+    assert(ownership_api.successful(ownership_call_bodies.summary(&b, 0)->proof));
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, last);
+    assert(s->proof.kind == ownership_api.proof_kind.incomplete && s->cases.len == 0);
+    assert(s->residual_effects && s->requirements.len == 0);
+    assert(s->proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(s->proof.terminal.operation.block == block);
+    assert(s->proof.terminal.operation.operation == call_gap(&b, last, block) + after);
+    assert(!s->proof.terminal.operation.terminator);
+    assert(b.services.counts.events == 0);
+}
+
+// Flow applies one case, but the copy of the call result has no source to require. Before
+// this rule the summary of `top` was complete with the one requirement that the call exports,
+// and it had no requirement for either copy. The exact selection keeps all three.
+fn path_selected() void {
+    string[2] names = {"sel", "top"};
+    stops_after_call(PATH_SELECTED[..], names[..], 1, 1);
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    bodies(&b, EXACT_SELECTED[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 1);
+    assert(ownership_api.successful(s->proof) && s->cases.len == 2);
+    ownership_api.entity_id p = ownership_summary_body.designated(&b.inputs[1], 1);
+    assert(live_requirements(s, p) == 3 && s->requirements.len == 3);
+    assert(b.services.counts.events == 0);
+}
+
+// `mid` is incomplete at the first copy of the call result, before `del(a)`. Its caller then
+// gets no complete summary, so the caller cannot pass. Before this rule `mid` was complete
+// without a requirement for either copy, and only the replay of its copy effects in `top`
+// found the released view. Now `top` records one incomplete proof and no definite error.
+fn released_selected() void {
+    string[3] names = {"sel", "mid", "top"};
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    bodies(&b, RELEASED_SELECTED[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_summary_model.summary* mid = ownership_call_bodies.summary(&b, 1);
+    assert(mid->proof.kind == ownership_api.proof_kind.incomplete && mid->cases.len == 0);
+    assert(mid->proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(mid->proof.terminal.operation.block == 1);
+    assert(mid->proof.terminal.operation.operation == call_gap(&b, 1, 1) + 1);
+    ownership_summary_model.summary* top = ownership_call_bodies.summary(&b, 2);
+    assert(top->proof.kind == ownership_api.proof_kind.incomplete && top->cases.len == 0);
+    assert(!ownership_api.successful(top->proof));
+    assert(b.services.counts.events == 1);
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.incomplete_proof));
+}
+
+// Each consumer of the result checks its origin: a read, a copy into the result, a copy into
+// a literal field, and a copy into caller storage.
+fn consumers() void {
+    string[2] names = {"sel", "top"};
+    stops_after_call(COMPARED[..], names[..], 1, 1);
+    stops_after_call(RETURNED[..], names[..], 1, 1);
+    stops_after_call(LITERAL[..], names[..], 1, 1);
+    stops_after_call(STORED[..], names[..], 1, 1);
+}
+
+// A loaded source, an argument with an unknown origin, a span pointer field, and a result
+// that can name no source each give an unknown origin.
+fn mapped_sources() void {
+    string[2] loaded = {"load", "top"};
+    stops_after_call(LOADED[..], loaded[..], 0, 1);
+    string[2] names = {"sel", "top"};
+    stops_after_call(NESTED[..], names[..], 1, 2);
+    string[2] header = {"sels", "top"};
+    stops_after_call(HEADER[..], header[..], 1, 3);
+    string[2] mixed = {"mix", "top"};
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    bodies(&b, MIXED[..], mixed[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_summary_model.summary* mix = ownership_call_bodies.summary(&b, 0);
+    assert(ownership_api.successful(mix->proof) && mix->cases.len == 2);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 1);
+    assert(s->proof.kind == ownership_api.proof_kind.incomplete && s->cases.len == 0);
+    assert(s->proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(b.services.counts.events == 0);
+}
+
+// When the exact arguments refute each normal case, the copy after the call does not run.
+// The origin is not unknown there, so `top` proves its one abort case.
+fn refuted() void {
+    string[2] names = {"pick", "top"};
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    bodies(&b, REFUTED[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    assert(ownership_call_bodies.summary(&b, 0)->cases.len == 3);
+    ownership_summary_model.case_record row = ownership_call_bodies.only_case(&b, 1);
+    assert(row.outcome.kind == ownership_api.outcome_kind.abort);
+    assert(b.services.counts.events == 0);
+}
+
+// The unknown origin keeps the summary incomplete, but flow still runs. So the read of the
+// released view stays a definite invalid use with unconditional evidence on its one path,
+// before the copy of the selected view and after it.
+fn independent_error(string@ text) void {
+    string[2] names = {"sel", "top"};
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    bodies(&b, text, names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 1);
+    assert(s->proof.kind == ownership_api.proof_kind.complete && s->proof.failed);
+    assert(s->cases.len == 0 && b.services.counts.events == 1);
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.invalid_use));
+    assert(b.services.counts.last.evidence == ownership_api.evidence_kind.unconditional);
+}
+
+// The call with a constant argument stays unknown in flow, so flow records incomplete proof
+// at the copy of its result. The summary keeps that reason, not `missing_path`.
+fn constant_argument() void {
+    string[2] names = {"id", "top"};
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    bodies(&b, CONSTANT[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 1);
+    assert(s->proof.kind == ownership_api.proof_kind.incomplete && s->cases.len == 0);
+    assert(s->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(s->proof.terminal.operation.operation == call_gap(&b, 1, 0) + 1);
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.incomplete_proof));
+}
+
+fn main() i32 {
+    path_selected();
+    released_selected();
+    consumers();
+    mapped_sources();
+    refuted();
+    independent_error(ERROR_BEFORE[..]);
+    independent_error(ERROR_AFTER[..]);
+    constant_argument();
+    println("call result origins ok");
+    return 0;
+}

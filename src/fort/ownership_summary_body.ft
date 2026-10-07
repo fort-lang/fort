@@ -91,6 +91,10 @@ struct body_program {
     ownership_summary_model.effect_node mut@ own effects;
     ownership_summary_model.provenance mut@ own provenance_records;
     ownership_api.entity_id mut@ own origins;
+    // A reference local whose origin is unknown: a call result can designate caller storage
+    // that its origin does not name. An origin of kind none without this mark needs no caller
+    // requirement: the value is null, static storage, or storage of a call (D17.18).
+    bool mut@ own unknown;
     ownership_api.scalar_fact mut@ own scalars;
     // A local whose storage this body addresses. A store through that address can change
     // it, so it keeps no scalar fact, no value edge and no capture in the whole body.
@@ -106,6 +110,7 @@ struct body_program {
     u32 mut@ own parents;
     bool mut@ own reached;
     ownership_api.entity_id mut@ own entry_origins;
+    bool mut@ own entry_unknown;
     ownership_api.scalar_fact mut@ own entry_scalars;
     ownership_flow.value_edge mut@ own values;
     u64 values_len;
@@ -140,6 +145,11 @@ struct body_program {
     ownership_api.source_position uncovered_source;
     // A provisional call ended a path without an exit.
     bool vacuous;
+    // A copy or read needed the source of a value whose origin is unknown. Flow still checks
+    // the body. The published summary stays incomplete at the first such operation.
+    bool lost_requirement;
+    ownership_api.operation_position lost_operation;
+    ownership_api.source_position lost_source;
 }
 
 fn free(body_program mut* out) void {
@@ -155,6 +165,7 @@ fn free(body_program mut* out) void {
     del(owned.effects);
     del(owned.provenance_records);
     del(owned.origins);
+    del(owned.unknown);
     del(owned.scalars);
     del(owned.addressed);
     del(owned.calls);
@@ -163,6 +174,7 @@ fn free(body_program mut* out) void {
     del(owned.parents);
     del(owned.reached);
     del(owned.entry_origins);
+    del(owned.entry_unknown);
     del(owned.entry_scalars);
     del(owned.values);
     del(owned.holding);
@@ -416,6 +428,9 @@ fn caller_source(body_program mut* out, ownership_api.entity_id pointed) bool {
     return caller;
 }
 
+// A requirement on a caller source of this body. Flow checks the storage of the body itself,
+// so another source needs no requirement. An origin of kind none names no source here: an
+// unknown origin stays at `origin_requirement` and never reaches this function (D17.18).
 fn requirement(body_input* in, body_program mut* out, ownership_api.entity_id pointed,
     ownership_api.place_path mut place_at, i64 bytes, ownership_summary_model.requirement_kind kind,
     u64 align) void {
@@ -435,6 +450,29 @@ fn requirement(body_input* in, body_program mut* out, ownership_api.entity_id po
         .key = key, .kind = kind, .path = place_at, .source = pointed, .range = needed,
         .operation = out->context.operation};
     out->requirements_len += 1;
+}
+
+// A requirement on the origin of local `held`. An unknown origin names no source, but the
+// value can designate caller storage. A summary without that requirement drops it, so the
+// published summary records incomplete proof at the first such operation instead (D17.18).
+// Extraction goes on, so flow still finds a proved independent error (toolchain 4.2).
+fn origin_requirement(body_input* in, body_program mut* out, u32 held,
+    ownership_api.place_path place_at, ownership_summary_model.requirement_kind kind) void {
+    if (out->unknown[held]) {
+        if (!out->lost_requirement) {
+            out->lost_requirement = true;
+            out->lost_operation = out->context.operation;
+            out->lost_source = out->context.source;
+        }
+        return;
+    }
+    requirement(in, out, out->origins[held], place_at, 0, kind, 1);
+}
+
+// A copy or a read of reference local `src` needs its source live (D17.14).
+fn live_requirement(body_input* in, body_program mut* out, u32 src) void {
+    origin_requirement(in, out, src, slot(in, src),
+        ownership_summary_model.requirement_kind.live_source);
 }
 
 fn emit(body_input* in, body_program mut* out, ownership_transfer.request mut req,
@@ -699,8 +737,7 @@ fn add_read(body_input* in, body_program mut* out, fir.place place_at, u32 block
     ownership_api.region mut typed = ownership_api.region{};
     if (reference(fir.local_at(in->function.body, place_at.local)->ty)) {
         req.source_key = out->origins[place_at.local];
-        requirement(in, out, req.source_key, req.source, 0,
-            ownership_summary_model.requirement_kind.live_source, 1);
+        live_requirement(in, out, place_at.local);
         types.node* base = fir.local_at(in->function.body, place_at.local)->ty;
         bool header = place_at.proj_len == 1 &&
             (base->kind == types.type_kind.k_span || base->kind == types.type_kind.k_string) &&
@@ -1159,8 +1196,7 @@ fn retain(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
     if (input_operand.kind == fir.operand_kind.ok_copy && direct(input_operand.place) &&
         reference(fir.local_at(f, input_operand.place.local)->ty)) {
         u32 src = input_operand.place.local;
-        requirement(in, out, out->origins[src], slot(in, src), 0,
-            ownership_summary_model.requirement_kind.live_source, 1);
+        live_requirement(in, out, src);
         req.kind = ownership_transfer.action.copy;
         req.source = slot(in, src);
         req.source_key = out->origins[src];
@@ -1308,11 +1344,24 @@ fn call_capacity(body_input* in, body_program mut* out, fir.statement* stmt, u32
 struct origin_scan {
     ownership_api.entity_id origin;
     u64 normals;
+    // A possible result can designate caller storage that `origin` does not name.
+    bool unknown;
+}
+
+// The source in this body that a callee result source designates (D17.18). A formal source
+// gives the origin of its argument, and a constant argument is null or static storage. A
+// source that the callee loaded from caller storage is unknown. So is a formal source without
+// a direct argument. Any other source is storage of the call, and flow checks it here.
+struct mapped_origin {
+    ownership_api.entity_id origin;
+    bool unknown;
 }
 
 fn scan_origin(body_input* in, body_program mut* out, fir.rvalue rv, call_target@ targets,
     ownership_api.scalar_fact@ args, bool guarded) origin_scan {
     origin_scan mut scan = origin_scan{};
+    // A possible result names no caller source.
+    bool mut blank = false;
     u64 mut t = 0;
     while (t < targets.len) {
         ownership_summary_model.summary_view* summary = targets[t].binding.summary;
@@ -1333,15 +1382,19 @@ fn scan_origin(body_input* in, body_program mut* out, fir.rvalue rv, call_target
                     if (!work(out, 1)) { return origin_scan{}; }
                     ownership_summary_model.relation result = summary->results[r];
                     if (ownership_summary_model.same(result.key, row.results[k])) {
-                        ownership_api.entity_id origin = argument_origin(in, out, rv, summary,
+                        mapped_origin mapped = argument_origin(in, out, rv, summary,
                             result.borrow.source);
-                        if (origin.kind == ownership_api.entity_kind.none ||
-                            (scan.origin.kind != ownership_api.entity_kind.none &&
-                                !ownership_summary_model.same(scan.origin, origin))) {
-                            scan.origin = ownership_api.entity_id{};
-                            return scan;
+                        if (mapped.unknown ||
+                            (mapped.origin.kind != ownership_api.entity_kind.none &&
+                                scan.origin.kind != ownership_api.entity_kind.none &&
+                                !ownership_summary_model.same(scan.origin, mapped.origin))) {
+                            return origin_scan{.normals = scan.normals, .unknown = true};
                         }
-                        scan.origin = origin;
+                        if (mapped.origin.kind == ownership_api.entity_kind.none) {
+                            blank = true;
+                        } else {
+                            scan.origin = mapped.origin;
+                        }
                     }
                     r += 1;
                 }
@@ -1351,45 +1404,58 @@ fn scan_origin(body_input* in, body_program mut* out, fir.rvalue rv, call_target
         }
         t += 1;
     }
+    // A result that can name a caller source or no source has no one origin.
+    if (blank && scan.origin.kind != ownership_api.entity_kind.none) {
+        return origin_scan{.normals = scan.normals, .unknown = true};
+    }
     return scan;
 }
 
 // The callee result designates the source of one argument in each normal case of each
-// target that the call can run. Any other result keeps an unknown origin, so a later read
-// cannot export a requirement. A refuted case does not run (D17.18). When the exact
-// arguments refute each normal case, flow applies no normal case at the call. Then it ends
-// the path at an abort case, it ends the path for the round at a provisional target, or it
-// keeps an unresolved call with an unknown result. A read after the call proves nothing from
-// its origin there, so the origin reads each normal case, and the read does not stop the
-// extraction of the body.
+// target that the call can run. A result that can designate other caller storage gives an
+// unknown origin, so a later copy or read records incomplete proof (`live_requirement`). A
+// refuted case does not run (D17.18). When the exact arguments refute each normal case, flow
+// applies no normal case at the call. Then it ends the path at an abort case, it ends the
+// path for the round at a provisional target, or it keeps an unresolved call with an unknown
+// result, which keeps the summary incomplete. No value of the call reaches a later operation
+// of a complete summary, so the origin reads each normal case and is not unknown. A read
+// after the call then does not stop the extraction of the body.
 fn call_origin(body_input* in, body_program mut* out, fir.rvalue rv, call_target@ targets,
-    ownership_api.scalar_fact@ args) ownership_api.entity_id {
+    ownership_api.scalar_fact@ args) mapped_origin {
     origin_scan scan = scan_origin(in, out, rv, targets, args, true);
     if (scan.normals == 0 && ownership_api.successful(out->proof)) {
-        return scan_origin(in, out, rv, targets, args, false).origin;
+        return mapped_origin{scan_origin(in, out, rv, targets, args, false).origin, false};
     }
-    return scan.origin;
+    return mapped_origin{scan.origin, scan.unknown};
 }
 
 fn argument_origin(body_input* in, body_program mut* out, fir.rvalue rv,
     ownership_summary_model.summary_view* summary, ownership_api.entity_id formal_source)
-    ownership_api.entity_id {
+    mapped_origin {
     u64 mut i = 0;
     while (i < summary->roots.len) {
-        if (!work(out, 1)) { return ownership_api.entity_id{}; }
+        if (!work(out, 1)) { return mapped_origin{}; }
         ownership_summary_model.symbolic_root root = summary->roots[i];
-        if (root.kind == ownership_summary_model.root_kind.caller_source && root.formal > 0 &&
-            root.formal <= rv.ops_len &&
+        if (root.kind == ownership_summary_model.root_kind.caller_source &&
             ownership_summary_model.same(root.source, formal_source)) {
-            fir.operand argument = fir.rvalue_operand(in->function.body, rv, root.formal - 1);
-            if (argument.kind == fir.operand_kind.ok_const || !direct(argument.place)) {
-                return ownership_api.entity_id{};
+            if (root.formal == 0 || root.formal > rv.ops_len) {
+                return mapped_origin{.unknown = true};
             }
-            return out->origins[argument.place.local];
+            fir.operand argument = fir.rvalue_operand(in->function.body, rv, root.formal - 1);
+            // Flow binds no constant argument and keeps the call unknown, so this rule
+            // changes no published result. A constant names no caller source.
+            if (argument.kind == fir.operand_kind.ok_const) { return mapped_origin{}; }
+            if (!direct(argument.place)) { return mapped_origin{.unknown = true}; }
+            return mapped_origin{out->origins[argument.place.local],
+                out->unknown[argument.place.local]};
+        }
+        if (root.kind == ownership_summary_model.root_kind.loaded_source &&
+            ownership_summary_model.same(root.source, formal_source)) {
+            return mapped_origin{.unknown = true};
         }
         i += 1;
     }
-    return ownership_api.entity_id{};
+    return mapped_origin{};
 }
 
 // The type of field `number` of a resolved struct, or null.
@@ -1510,8 +1576,7 @@ fn aggregate_value(body_input* in, body_program mut* out, fir.statement* stmt, u
                 reject(out, ownership_api.incomplete_reason.unknown_effect);
                 return;
             } else {
-                requirement(in, out, out->origins[src], slot(in, src), 0,
-                    ownership_summary_model.requirement_kind.live_source, 1);
+                live_requirement(in, out, src);
             }
             emit(in, out, req, block, gap, i + 1, payload, stmt->loc, stmt->exit_loc,
                 stmt->stmt, ownership_api.place_path{.root = next(out,
@@ -1670,10 +1735,12 @@ fn call(body_input* in, body_program mut* out, fir.statement* stmt, u32 block, u
         .operation = at, .source = location(in, out, stmt->loc)};
     out->steps_len += 1;
     out->scalars[dst] = ownership_api.scalar_fact{};
-    out->origins[dst] = reference(dst_ty) && count > 0 ?
+    // An unresolved call keeps the summary incomplete in flow, so its result is not unknown.
+    mapped_origin result = reference(dst_ty) && count > 0 ?
         call_origin(in, out, rv, out->targets[first_target..first_target + count],
-            out->call_args[args_first..args_first + cast(rv.ops_len, u64)]) :
-        ownership_api.entity_id{};
+            out->call_args[args_first..args_first + cast(rv.ops_len, u64)]) : mapped_origin{};
+    out->origins[dst] = result.origin;
+    out->unknown[dst] = result.unknown;
 }
 
 fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block, u32 gap)
@@ -1711,6 +1778,17 @@ fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
     }
     u32 dst = stmt->place.local;
     types.node* dst_ty = fir.local_at(f, dst)->ty;
+    // The new value replaces the unknown mark of `dst`. A copy or a move of a local, the
+    // pointer field of a span local, and a span built from a pointer local keep the mark of
+    // their first operand.
+    bool mut marked = false;
+    if (rv.ops_len > 0) {
+        fir.operand first = fir.rvalue_operand(f, rv, 0);
+        marked = first.kind != fir.operand_kind.ok_const &&
+            first.place.base == fir.base_kind.bk_local &&
+            cast(first.place.local, u64) < out->unknown.len && out->unknown[first.place.local];
+    }
+    out->unknown[dst] = false;
     ownership_transfer.request mut req = basic(in, dst, dst, ownership_transfer.action.assignment);
     req.value = empty(slot(in, dst), dst_ty->is_own);
     ownership_summary_model.payload_kind mut payload =
@@ -1731,10 +1809,8 @@ fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
                 ownership_summary_model.payload_kind.move
                     : ownership_summary_model.payload_kind.copy;
             out->origins[dst] = out->origins[src];
-            if (reference(dst_ty)) {
-                requirement(in, out, out->origins[src], slot(in, src), 0,
-                    ownership_summary_model.requirement_kind.live_source, 1);
-            }
+            out->unknown[dst] = marked;
+            if (reference(dst_ty)) { live_requirement(in, out, src); }
             if (rv.kind == fir.rvalue_kind.rv_cast &&
                 (!types.type_cast_allowed(dst_ty, fir.operand_type(f, input_operand)) ||
                 types.type_cast_adds_own(dst_ty, fir.operand_type(f, input_operand)) ||
@@ -1753,6 +1829,7 @@ fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
                 req = basic(in, input_operand.place.local, dst, ownership_transfer.action.copy);
                 payload = ownership_summary_model.payload_kind.copy;
                 out->origins[dst] = out->origins[input_operand.place.local];
+                out->unknown[dst] = marked;
             } else if (!header) {
                 if (reference(dst_ty) && dst_ty->is_own &&
                     input_operand.kind == fir.operand_kind.ok_move) {
@@ -1860,6 +1937,9 @@ fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
         req = basic(in, pointer.place.local, dst, ownership_transfer.action.move_owner);
         payload = ownership_summary_model.payload_kind.move;
         out->origins[dst] = out->origins[pointer.place.local];
+        // A defensive mark: the pointer of a span literal holds a matched allocation, so no
+        // input reaches this line with an unknown origin.
+        out->unknown[dst] = marked;
     } else if (rv.kind == fir.rvalue_kind.rv_addr) {
         if (!direct(rv.place)) {
             if (rv.place.base == fir.base_kind.bk_local &&
@@ -2003,6 +2083,7 @@ fn restore_entry(body_program mut* out, u32 block, u64 locals) bool {
     u64 mut i = 0;
     while (i < locals) {
         out->origins[i] = out->entry_origins[base + i];
+        out->unknown[i] = out->entry_unknown[base + i];
         out->scalars[i] = out->entry_scalars[base + i];
         out->holding[i] = out->entry_holding[base + i];
         i += 1;
@@ -2038,6 +2119,7 @@ fn follow_targets(body_input* in, body_program mut* out, u32 block, fir.terminat
         u64 mut i = 0;
         while (i < locals) {
             out->entry_origins[base + i] = out->origins[i];
+            out->entry_unknown[base + i] = out->unknown[i];
             out->entry_scalars[base + i] = out->scalars[i];
             out->entry_holding[base + i] = out->holding[i];
             i += 1;
@@ -2177,6 +2259,7 @@ fn extract(body_input* in) body_program {
     out.effects = new(ownership_summary_model.effect_node, cap);
     out.provenance_records = new(ownership_summary_model.provenance, cap);
     out.origins = new(ownership_api.entity_id, locals);
+    out.unknown = new(bool, locals);
     out.scalars = new(ownership_api.scalar_fact, locals);
     out.holding = new(u8, locals);
     out.calls = new(call_site, count);
@@ -2199,6 +2282,7 @@ fn extract(body_input* in) body_program {
     out.parents = new(u32, blocks);
     out.reached = new(bool, blocks);
     out.entry_origins = new(ownership_api.entity_id, blocks * locals);
+    out.entry_unknown = new(bool, blocks * locals);
     out.entry_scalars = new(ownership_api.scalar_fact, blocks * locals);
     out.entry_holding = new(u8, blocks * locals);
     out.values = new(ownership_flow.value_edge, blocks * 2);
@@ -2243,9 +2327,12 @@ fn extract(body_input* in) body_program {
                 types.node* ty = fir.place_type(f, stmt->place);
                 req.source_key = out.origins[stmt->place.local];
                 req.leaves_empty_proved = reference(ty) && ty->elem != null;
+                // A defensive check: no complete callee summary returns an owner of owning
+                // storage with an unknown origin, so no input reaches this line with the mark.
                 if (req.leaves_empty_proved && fir.type_owning(ty->elem)) {
-                    requirement(in, &out, req.source_key, caller_slot(in, stmt->place.local), 0,
-                        ownership_summary_model.requirement_kind.empty_children, 1);
+                    origin_requirement(in, &out, stmt->place.local,
+                        caller_slot(in, stmt->place.local),
+                        ownership_summary_model.requirement_kind.empty_children);
                 }
                 emit(in, &out, req, b, gap, 0, ownership_summary_model.payload_kind.release,
                     stmt->loc, stmt->exit_loc, stmt->stmt, req.destination);

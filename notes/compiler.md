@@ -1585,6 +1585,23 @@ came here.
   (`guarded_origins`, `abort_origins`, `refuted_origin`, `unread_guard`),
   `ownership_recursive_test.ft` (`refuted_round`), `ownership_indirect_test.ft` (R06) and
   `ownership_calls_coverage_test.ft` (`refuted_operands`) hold these rules.
+  An unknown origin is a mark, not a missing source (D17.18). The result of a call is unknown
+  when a possible normal case can designate caller storage and the cases name no one source:
+  two sources, a source that the callee loaded, an argument with an unknown origin, or a
+  source beside a case that names no source. The mark follows copies, the pointer field of a
+  span, and block entries. The first copy or read of a marked value records a lost requirement
+  (`ownership_summary_body.origin_requirement`). Extraction and flow go on, so a proved
+  independent error of the body stays a definite error (`spec/toolchain.md` 4.2). Otherwise
+  `publish` gives incomplete proof with `missing_path` at that operation. Before,
+  `requirement()` returned without a record, so flow, which reads the path atom of a branch on
+  the guard, applied one case, and the summary was complete without the copy requirements. A
+  null value, static storage, and a fresh allocation of the call need no caller requirement,
+  so they give no mark. When the operands refute each normal case, no value of the call
+  reaches a later operation of a complete summary, so that origin gives no mark either.
+  The unknown mark adds no W charge: 5 bodies of the recursive and calls suites use the same
+  W on 445f214c and with the mark. `ownership_calls_origins_test.ft` and
+  `tools/mutations/ownership_summary.json` (9 rows) hold these rules. A constant argument gets
+  no mark, but flow binds no constant argument, so that rule changes no published result.
   An abort case records an abort exit. Normal cases join into one continuation. When the normal
   cases of a target cover each captured value (`ownership_calls.covered`), their case atoms leave
   the continuations before the join, so the join loses no atom. Result rows that differ only in

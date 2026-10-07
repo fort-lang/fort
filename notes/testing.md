@@ -887,8 +887,8 @@ bullet at a time and without a rewrite.
   `bootstrap0/src/check.c` and `src/fort/check.ft` that reverted T-128's fix. Nothing in the
   repository said the tree was mutated. Three rules follow.
   Run `tools/mutate.py <table> --check` before the round, not after it rots.
-  **Seven tables exist today**, and they cover 19 files:
-  `ls tools/mutations/*.json | wc -l` prints 7.
+  **Eight tables exist today**, and they cover 21 files:
+  `ls tools/mutations/*.json | wc -l` prints 8.
   `grep -o 'bootstrap0/src/[a-z_]*\.c' tools/mutations/emitter_bootstrap.json | sort -u` prints
   the four files of the C emitter, and the same command over
   `tools/mutations/checker_bootstrap.json` prints `check.c` and `check_stmt.c`.
@@ -909,6 +909,13 @@ bullet at a time and without a rewrite.
   proof. No compiler binary holds that module, so its `build` compiles the case-group test and
   its `binary` is that test program; the md5 of a mutant then differs. Run it on a darwin
   host with `--runner 'bash -c'`.
+  `tools/mutations/ownership_summary.json` holds `ownership_summary_body.ft`,
+  `ownership_summary.ft` and 9 rows for the unknown origin of a call result and the join of
+  call results. The product compiler imports neither module, so a
+  table whose binary is `build/<host>/debug/fort` reads `stale` on each of its rows. Its build
+  writes the LLVM IR of `test/fort/ownership_calls_origins_test.ft`, and the runner compares
+  that file. Run it on a Darwin host with `--runner 'bash -c'` after
+  `cmake --build --preset debug`: 9 rounds cost 119 s.
   Each list is the `"sources"` list the runner saves. Two earlier changes
   mutated `src/fort/check.ft`, and then both compilers, by hand, because no table covered either
   file. No table covers the fort checker today.
