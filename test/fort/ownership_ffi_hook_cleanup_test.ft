@@ -1,0 +1,119 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| accept hook_success_cleanup
+//| accept hook_middle_refusal_cleanup
+//| accept hook_last_refusal_cleanup
+//| accept hook_choice_cleanup
+//| accept hook_choice_refusal_cleanup
+//| accept hook_take_cleanup
+/// Tests that each hook path gives back every block it takes.
+import ownership_api;
+import ownership_ffi;
+import ownership_ffi_hook_env as env;
+import ownership_ffi_storage_env;
+import ownership_state;
+import types;
+import heap;
+
+ownership_api.entity_id NO_GUARD = {};
+
+fn single(env.env mut* e) void {
+    env.open(e, 70, "foreign_take_two_make");
+    env.foreign_owner(e);
+    env.add_source(e, 1, ownership_api.source_kind.heap, true);
+    env.add_owner(e, 1, env.slot(1), env.exact(4));
+    env.add_view(e, env.slot(1), 1, 11, env.exact(4));
+    env.add_empty(e, env.slot(3), 30);
+    env.bind(e, env.slot(9), env.parameter(e, 0));
+    env.bind(e, env.slot(1), env.parameter(e, 1));
+    env.bind(e, env.slot(3), env.result_type(e));
+    env.operand_at(e, 0, env.slot(9), env.parameter(e, 0));
+    env.operand_at(e, 1, env.slot(1), env.parameter(e, 1));
+    env.choose(e, 0, env.slot(3), NO_GUARD, false);
+}
+fn choices(env.env mut* e) void {
+    env.open(e, 71, "foreign_take_make");
+    types.node* own_pointer = env.parameter(e, 0);
+    env.bind(e, env.slot(3), types.type_array(&e->b.raw.table, own_pointer, 2));
+    ownership_api.place_path first = env.index(e, 3, 0);
+    ownership_api.place_path second = env.index(e, 3, 1);
+    env.add_source(e, 1, ownership_api.source_kind.heap, true);
+    env.add_owner(e, 1, first, env.exact(1));
+    env.add_view(e, first, 1, 11, env.exact(1));
+    env.add_empty(e, second, 30);
+    env.operand_at(e, 0, first, own_pointer);
+    env.choose(e, 0, first, env.guard_key(70), false);
+    env.fact(e, 0, 0, 80, false);
+    env.choose(e, 1, second, env.guard_key(71), false);
+    env.fact(e, 1, 0, 81, false);
+}
+fn one_round(env.env mut* e, u32 mode, u64 deny, u64 objects) void {
+    u64 mut i = 0;
+    while (i < objects) {
+        env.reset(e, deny);
+        ownership_api.ffi_result out = env.call(e);
+        if (deny == 0) {
+            assert(ownership_api.successful(out.proof) && e->store.retained != null);
+            if (mode == 5) {
+                ownership_ffi.successor mut* own taken = ownership_ffi.take_successor(&e->store);
+                assert(taken != null && e->store.retained == null);
+                env.detached(&taken->states[0], 1);
+                ownership_ffi.free_successor(taken);
+                del(taken);
+            }
+        } else {
+            assert(!ownership_api.successful(out.proof) && out.proof.terminal.limit.present);
+            assert(e->b.raw.budget.calls == deny);
+        }
+        i += 1;
+    }
+}
+fn cleanup(u32 mode, u64 objects) void {
+    env.env mut e = {};
+    if (mode == 3 || mode == 4) { choices(&e); } else { single(&e); }
+    defer env.close(&e);
+    env.finish(&e);
+    env.reset(&e, 0);
+    assert(ownership_api.successful(env.call(&e).proof));
+    u64 total = e.b.raw.budget.calls;
+    u64 mut deny = 0;
+    if (mode == 1 || mode == 4) { deny = total / 2; }
+    if (mode == 2) { deny = total; }
+    u64 mut round = 0;
+    while (round < 192) {
+        one_round(&e, mode, deny, objects);
+        ownership_ffi_storage_env.live_bytes();
+        heap.system_view();
+        round += 1;
+    }
+    one_round(&e, mode, deny, objects);
+    u64 before_live = ownership_ffi_storage_env.live_bytes();
+    u64 before_system = heap.system_view();
+    u64 mut best_live = ownership_api.U64_MAX;
+    u64 mut best_system = ownership_api.U64_MAX;
+    round = 0;
+    while (round < 256) {
+        one_round(&e, mode, deny, objects);
+        u64 live = heap.distance(before_live, ownership_ffi_storage_env.live_bytes());
+        u64 system = heap.distance(before_system, heap.system_view());
+        if (round >= 240 && live < best_live) { best_live = live; }
+        if (round >= 240 && system < best_system) { best_system = system; }
+        round += 1;
+    }
+    u64 bound = heap.ADDRESS_IS_A_VIEW ? 2048 : 256;
+    if (best_live >= bound || best_system >= (heap.ADDRESS_IS_A_VIEW ? 1 : 256)) {
+        eprintln("mode ", mode, " live ", best_live, " system ", best_system);
+    }
+    assert(best_live < bound);
+    assert(best_system < (heap.ADDRESS_IS_A_VIEW ? 1 : 256));
+}
+fn main() i32 {
+    cleanup(0, 2); println("accept hook_success_cleanup");
+    cleanup(1, 2); println("accept hook_middle_refusal_cleanup");
+    cleanup(2, 2); println("accept hook_last_refusal_cleanup");
+    cleanup(3, 2); println("accept hook_choice_cleanup");
+    cleanup(4, 2); println("accept hook_choice_refusal_cleanup");
+    cleanup(5, 2); println("accept hook_take_cleanup");
+    return 0;
+}

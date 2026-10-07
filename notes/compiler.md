@@ -353,7 +353,44 @@ came here.
   A failed preparation releases its partial plan. It preserves caller facts and retained results.
   Unknown source or owner correspondence supplies no unconditional diagnostic witness.
   Preparation creates no transfer, fresh foreign source, foreign outcome, or public result view.
-  The foreign signature hook and driver integration remain separate compiler work.
+  A captured empty owner can have no value version, because a transfer writes it so.
+- **The signature hook applies the trusted extern boundary** (D17.13).
+  `ownership_ffi.apply_boundary` runs preparation first. It then copies the input core with
+  counted work and never writes the input.
+  Each selected allocation transfers once. Its obligation becomes false and its owner detached.
+  The transfer keeps allocation and source validity. It adds a transfer history entry.
+  It adds no release.
+  The holding operand of an own argument becomes canonical empty.
+  A borrowed argument changes no fact. A symbol name changes no fact: an extern named `free`
+  or `memmove` gets no release and no byte effect.
+  The producer supplies the result choices, their guards and facts, and the fresh keys.
+  One choice is unconditional. Two or more choices need distinct new guards and new fact keys.
+  The hook adds the guard and the facts of a choice to that choice's state only, as
+  `ownership_regions.retain_choice` does. So `ownership_flow.refine_edge` reads the null test of
+  each alternative from its own fact. The caller state cannot already hold a nullness fact on the
+  fresh value version. The hook refuses a fresh source, allocation, value, or relation key that
+  exists.
+  An owning result needs a nonempty choice. An empty choice needs a nullness fact on the fresh
+  version with `lower` exact 0 and no fact with exact 1. A nonempty owning choice cannot hold a
+  null fact.
+  The result write checks the state after the transfers. An equal live owner refuses with lost
+  ownership. A prefix or residual overlap refuses with incomplete proof. Distinct exact fields and
+  indices do not overlap. A live owner at one of several choices has no validated witness.
+  A borrowed pointer result gets one fresh trusted source. It has no allocation and no relation to
+  an argument. A nonempty owning result also gets one fresh allocation: count one, the owner at
+  the destination, and an unknown length. An empty choice writes canonical empty contents.
+  The hook adds no nullness fact of its own. A scalar result writes scalar contents with no source.
+  The outcome is `unresolved_foreign`. Only `noreturn` removes the possible caller return.
+  Cleanup stays required and unproved. Hidden foreign effects stay outside the proof.
+  Only a complete call replaces the retained result. A refusal reports one event. It keeps the
+  input core and the prior result.
+  `ownership_ffi.adapter_call` serves `ownership_api.foreign`. Its context holds the private inputs
+  that the frozen request has no field for.
+  The hook suites probe supplied facts. They establish no source producer: the driver reports
+  `missing_producer` for the three example 19 programs.
+  `ownership_flow.unknown_call` (read, not probed) makes each non-trusted source validity unknown
+  after an `unresolved_foreign` outcome. D17.13 keeps known fort facts across the call, so the
+  integration applies the hook successor states instead.
 - **Raw storage retains its typed source facts** (T-275, D17.17).
   `spec/memory-model.md` 2.8 defines source objects, byte offsets, access windows, alignment, and
   reference representation effects. Pointer casts preserve those facts through void pointers.

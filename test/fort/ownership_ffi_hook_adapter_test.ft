@@ -1,0 +1,203 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| reject missing hook
+//| accept P21
+//| reject dispatch refusal
+//| accept P22
+//| accept P23
+//| reject stale public view
+//| accept taken choice facts
+/// Tests the public foreign callback and the lifetime of its retained result.
+import ownership_api;
+import ownership_ffi;
+import ownership_ffi_hook_env as env;
+import ownership_ffi_storage_env;
+import ownership_state;
+import std.str;
+
+ownership_api.entity_id NO_GUARD = {};
+
+fn take_make(env.env mut* e, u32 number) void {
+    env.open(e, number, "foreign_take_make");
+    env.foreign_owner(e);
+    env.bind(e, env.slot(9), env.parameter(e, 0));
+    env.bind(e, env.slot(2), env.result_type(e));
+    env.operand_at(e, 0, env.slot(9), env.parameter(e, 0));
+    env.choose(e, 0, env.slot(2), NO_GUARD, false);
+    env.finish(e);
+    e->b.request.call.before = ownership_state.view(env.state(e));
+    e->request.boundary = e->b.request;
+}
+// The frozen request has no field for the private inputs. The adapter context holds them.
+fn connect(env.env mut* e, ownership_ffi.adapter mut* a) void {
+    a->request = e->request;
+    a->services = &e->b.raw.local.service;
+    a->storage.retained = move(e->store.retained);
+    e->b.raw.local.service.ffi_context = cast(a, void mut*);
+    e->b.raw.local.service.ffi = ownership_ffi.adapter_call;
+}
+fn dispatch(env.env mut* e) ownership_api.ffi_result {
+    env.at_call(e);
+    e->b.events_seen = 0;
+    return ownership_api.foreign(&e->b.raw.local.service, &e->b.request.call);
+}
+fn missing_hook() void {
+    env.env mut e = {};
+    take_make(&e, 1);
+    defer env.close(&e);
+    ownership_api.ffi_result out = dispatch(&e);
+    assert(!ownership_api.successful(out.proof) && out.proof.failed);
+    assert(out.proof.terminal.reason == ownership_api.incomplete_reason.missing_ffi);
+    // A missing hook grants no trust and no empty-effect fact.
+    assert(!out.hidden_effects_outside_proof && out.trusted_sources.len == 0);
+    assert(e.b.raw.budget.calls == 0);
+    assert(ownership_state.equal(env.state(&e), &e.b.baseline->core->states[0]));
+    assert(ownership_ffi_storage_env.same_result(e.b.prior_baseline, e.store.retained));
+    println("reject missing hook");
+}
+fn public_callback() void {
+    env.env mut e = {};
+    take_make(&e, 2);
+    defer env.close(&e);
+    ownership_ffi.adapter mut a = {};
+    defer ownership_ffi.clear(&a.storage);
+    connect(&e, &a);
+    ownership_api.ffi_result out = dispatch(&e);
+    assert(ownership_api.successful(out.proof) && out.hidden_effects_outside_proof);
+    assert(e.b.events_seen == 0 && a.storage.retained != null);
+    // The public result borrows the arrays of the retained internal result.
+    ownership_ffi.result* r = a.storage.retained;
+    ownership_api.ffi_result held = ownership_ffi.public_view(r);
+    assert(out.trusted_sources.len == 1 && &out.trusted_sources[0] == &held.trusted_sources[0]);
+    assert(out.signature_transfers.len == 1 &&
+        &out.signature_transfers[0] == &held.signature_transfers[0]);
+    assert(out.outcomes.len == 1 && &out.outcomes[0] == &held.outcomes[0]);
+    assert(out.outcomes[0].effects.len == 1);
+    env.detached(&r->core->states[0], 9);
+    env.foreign_result(&r->core->states[0], env.slot(2), true);
+    assert(ownership_state.equal(env.state(&e), &e.b.baseline->core->states[0]));
+    println("accept P21");
+}
+fn dispatch_refusal() void {
+    env.env mut e = {};
+    take_make(&e, 3);
+    defer env.close(&e);
+    ownership_ffi.adapter mut a = {};
+    defer ownership_ffi.clear(&a.storage);
+    connect(&e, &a);
+    env.reset(&e, 1);
+    ownership_api.ffi_result out = dispatch(&e);
+    assert(!ownership_api.successful(out.proof) && out.proof.terminal.limit.present);
+    assert(e.b.raw.budget.calls == 1 && e.b.events_seen == 0);
+    assert(ownership_ffi_storage_env.same_result(e.b.prior_baseline, a.storage.retained));
+    println("reject dispatch refusal");
+}
+fn failed_replacement() void {
+    env.env mut e = {};
+    take_make(&e, 4);
+    defer env.close(&e);
+    ownership_ffi.adapter mut a = {};
+    connect(&e, &a);
+    ownership_api.ffi_result first = dispatch(&e);
+    assert(ownership_api.successful(first.proof));
+    u64 total = e.b.raw.budget.calls;
+    ownership_ffi.result* kept = a.storage.retained;
+    ownership_api.place_path owner = first.signature_transfers[0].place;
+    // The next call fails at its last charge. The first result and its paths stay.
+    env.reset(&e, total);
+    ownership_api.ffi_result late = dispatch(&e);
+    assert(!ownership_api.successful(late.proof) && e.b.raw.budget.calls == total);
+    ownership_ffi.result* current = a.storage.retained;
+    assert(current == kept && e.b.events_seen == 1);
+    ownership_api.ffi_result view = ownership_ffi.public_view(a.storage.retained);
+    assert(&view.signature_transfers[0] == &first.signature_transfers[0]);
+    assert(ownership_state.same_place(view.signature_transfers[0].place, owner));
+    env.foreign_result(&kept->core->states[0], env.slot(2), true);
+    ownership_ffi.clear(&a.storage);
+    assert(a.storage.retained == null);
+    ownership_ffi.clear(&a.storage);
+    assert(a.storage.retained == null);
+    println("accept P22");
+}
+fn successful_replacement() void {
+    env.env mut e = {};
+    take_make(&e, 5);
+    defer env.close(&e);
+    ownership_ffi.adapter mut a = {};
+    connect(&e, &a);
+    assert(ownership_api.successful(dispatch(&e).proof));
+    ownership_ffi.result* first = a.storage.retained;
+    env.reset(&e, 0);
+    ownership_api.ffi_result second = dispatch(&e);
+    assert(ownership_api.successful(second.proof) && a.storage.retained != null);
+    assert(&second.outcomes[0] == &ownership_ffi.public_view(a.storage.retained).outcomes[0]);
+    ownership_ffi.successor mut* own taken = ownership_ffi.take_successor(&a.storage);
+    assert(a.storage.retained == null && taken != null && taken->len == 1);
+    ownership_ffi.clear(&a.storage);
+    // The taken successor keeps its own states after the context is free.
+    env.detached(&taken->states[0], 9);
+    env.foreign_result(&taken->states[0], env.slot(2), true);
+    ownership_ffi.free_successor(taken);
+    del(taken);
+    assert(first != null);
+    println("accept P23");
+}
+fn stale_view() void {
+    env.env mut e = {};
+    take_make(&e, 6);
+    defer env.close(&e);
+    ownership_ffi.adapter mut a = {};
+    defer ownership_ffi.clear(&a.storage);
+    connect(&e, &a);
+    // The public view must name the arrays of the paired core state.
+    e.b.request.call.before.contents = e.b.request.call.before.contents[..1];
+    ownership_api.ffi_result out = dispatch(&e);
+    assert(!ownership_api.successful(out.proof) && out.proof.failed);
+    assert(out.trusted_sources.len == 0 && !out.hidden_effects_outside_proof);
+    assert(e.b.events_seen == 1);
+    assert(ownership_ffi_storage_env.same_result(e.b.prior_baseline, a.storage.retained));
+    assert(ownership_state.equal(env.state(&e), &e.b.baseline->core->states[0]));
+    println("reject stale public view");
+}
+// A taken successor keeps each alternative's own guard and facts after the context is free.
+fn taken_choice_facts() void {
+    env.env mut e = {};
+    env.open(&e, 7, "foreign_make");
+    defer env.close(&e);
+    env.foreign_owner(&e);
+    env.add_scalar(&e, env.slot(10), 100);
+    env.operand_at(&e, 0, env.slot(10), env.parameter(&e, 0));
+    env.bind(&e, env.slot(2), env.result_type(&e));
+    env.choose(&e, 0, env.slot(2), env.guard_key(70), false);
+    env.fact(&e, 0, 0, 70, false);
+    env.choose(&e, 1, env.slot(2), env.guard_key(71), true);
+    env.fact(&e, 1, 0, 71, true);
+    env.finish(&e);
+    e.b.request.call.before = ownership_state.view(env.state(&e));
+    e.request.boundary = e.b.request;
+    ownership_ffi.adapter mut a = {};
+    connect(&e, &a);
+    assert(ownership_api.successful(dispatch(&e).proof));
+    ownership_ffi.successor mut* own taken = ownership_ffi.take_successor(&a.storage);
+    ownership_ffi.clear(&a.storage);
+    assert(taken != null && taken->len == 2);
+    assert(taken->guards[0].ordinal == 70 && taken->guards[1].ordinal == 71);
+    env.foreign_result(&taken->states[0], env.slot(2), true);
+    env.local_facts(&taken->states[0], 70, 70, true);
+    env.empty_at(&taken->states[1], env.slot(2));
+    env.local_facts(&taken->states[1], 71, 71, true);
+    ownership_ffi.free_successor(taken);
+    del(taken);
+    println("accept taken choice facts");
+}
+fn main() i32 {
+    missing_hook();
+    public_callback();
+    dispatch_refusal();
+    failed_replacement();
+    successful_replacement();
+    stale_view();
+    taken_choice_facts();
+    return 0;
+}
