@@ -191,13 +191,18 @@ fn actual_source_exhausts_the_production_service_ledger() void {
     assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
     ownership_source.body mut* row = ownership_source_env.find(&e, "main", "many_locals");
     ownership_source.analyze(&e.source);
-    ownership_api.limit_table limits = ownership_limits.production();
+    // One body is one computation. Its W bound follows its FIR size, 1200 stores and one block.
+    assert(row->live.fir_size == ownership_limits.fir_size(&row->function));
+    assert(row->live.fir_size == 1201);
+    ownership_api.limit_table limits = ownership_limits.computation(row->live.fir_size);
+    assert(limits.w == ownership_limits.PRODUCTION_W + ownership_limits.PRODUCTION_W_SCALE * 1201);
     assert(row->live.events.budget.bounds.w == limits.w);
     assert(row->live.events.budget.used.w == limits.w);
     assert(row->liveness_solver == ownership_source.status.incomplete);
     assert(row->live.first_refusal.terminal.reason == ownership_api.incomplete_reason.work_limit);
     assert(row->live.first_refusal.terminal.source.filename_present);
-    assert(row->live.first_refusal.terminal.source.line == 2);
+    // Under the bound of 1201 FIR units the liveness work runs out at the store on line 201.
+    assert(row->live.first_refusal.terminal.source.line == 201);
     assert(row->live.first_refusal.terminal.source.file == row->source.file);
     ownership_api.proof_status first = row->live.first_refusal;
     ownership_api.charge_result again = ownership_api.charge_work(&row->live.services,
@@ -207,6 +212,19 @@ fn actual_source_exhausts_the_production_service_ledger() void {
     assert(ownership_keys.source(again.proof.terminal.source, first.terminal.source) == 0);
     assert(again.proof.terminal.limit.used == first.terminal.limit.used);
     assert(row->live.events.budget.used.w == limits.w);
+    // A fresh meter on the same computation cannot publish a refused result.
+    assert(ownership_limits.configure(&row->live.events.budget, &limits));
+    assert(row->live.events.budget.used.w == 0);
+    ownership_api.charge_result fresh = ownership_api.charge_work(&row->live.services,
+        ownership_api.work_kind.transfer, ownership_api.operation_position{.function = row->key},
+        ownership_api.source_position{});
+    assert(!fresh.allowed && row->live.events.budget.used.w == 0);
+    assert(fresh.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(fresh.proof.terminal.limit.bound == limits.w);
+    assert(fresh.proof.terminal.limit.used == limits.w);
+    assert(ownership_keys.source(fresh.proof.terminal.source, first.terminal.source) == 0);
+    assert(row->liveness_proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(row->live.result.proof.terminal.limit.bound == limits.w);
 }
 
 fn mixed_targets_preserve_fort_effect_obligations() void {
@@ -248,20 +266,24 @@ fn mixed_targets_preserve_fort_effect_obligations() void {
     assert(fort_answer.targets.len == 1 && !fort_answer.residual_fort);
     assert(ownership_keys.function(fort_answer.targets[0].function,
         ownership_source_env.find(&e, "main", "target")->key) == 0);
-    assert(e.source.graph.work == private_before + 1);
-    assert(row->live.events.budget.used.w == services_before + 2);
+    // The known target is one unit of the asking body's ledger. The graph ledger stays.
+    assert(e.source.graph.work == private_before);
+    assert(row->live.events.budget.used.w == services_before + 3);
     assert(row->live.correspondence.terminal.reason ==
         ownership_api.incomplete_reason.unknown_effect);
     assert(!ownership_api.successful(row->ownership));
 }
 
+// The liveness of each body is its own computation. Its target queries charge its own ledger.
+// A refusal there leaves the graph build ledger and the ledger of every other body unchanged.
 fn private_query_refusal_preserves_its_meter_and_source() void {
     ownership_source_env.env mut e = ownership_source_env.env{};
     ownership_source_env.open(&e);
     defer ownership_source_env.close(&e);
     assert(ownership_source_env.prepare(&e,
-        "fn target() void {}\nfn caller() void { target(); }\n"));
+        "fn target() void {}\nfn caller() void { target(); }\nfn other() void { target(); }\n"));
     ownership_source.body mut* row = ownership_source_env.find(&e, "main", "caller");
+    ownership_source.body mut* other = ownership_source_env.find(&e, "main", "other");
     ownership_source.analyze(&e.source);
     ownership_api.entity_id[64] mut selections = {};
     u64 mut i = 0;
@@ -274,28 +296,120 @@ fn private_query_refusal_preserves_its_meter_and_source() void {
     ownership_api.graph_request request = ownership_api.graph_request{
         .query = ownership_api.graph_query_kind.targets, .operation = row->live.calls[0].operation,
         .selections = selections[..]};
-    u64 services_before = row->live.events.budget.used.w;
+    // The graph build of the whole closure is one computation with a bound from its FIR size.
+    assert(e.source.graph.fir_size == ownership_graph.closure_size(e.source.graph.bodies));
+    assert(e.source.graph.limits.w == ownership_limits.work_bound(e.source.graph.fir_size));
+    u64 build = e.source.graph.work;
+    u64 bound = row->live.events.budget.bounds.w;
+    assert(bound == ownership_limits.work_bound(row->live.fir_size));
+    // Each query pays one dispatch unit, one known target, and 64 selections.
+    u64 cap = bound / 66 + 1;
     u64 mut queries = 0;
-    while (!e.source.graph_first_refusal.terminal.present) {
+    while (!row->live.first_refusal.terminal.present) {
         ownership_api.graph_result answer = ownership_api.graph(&row->live.services, &request);
         queries += 1;
-        assert(queries < 1100);
+        assert(queries <= cap);
         if (!ownership_api.successful(answer.proof)) {
             assert(answer.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
         }
     }
-    ownership_api.proof_status first = e.source.graph_first_refusal;
-    assert(first.terminal.limit.bound == ownership_limits.PRODUCTION_W);
-    assert(first.terminal.limit.used == e.source.graph.work);
+    assert(queries + 1 >= cap);
+    ownership_api.proof_status first = row->live.first_refusal;
+    assert(first.terminal.limit.category == ownership_api.limit_category.w);
+    assert(first.terminal.limit.bound == bound && first.terminal.limit.used == bound);
+    assert(row->live.events.budget.used.w == bound);
     assert(first.terminal.source.file == row->source.file);
     assert(first.terminal.source.line == 2 && first.terminal.source.filename_present);
-    assert(!row->live.first_refusal.terminal.present);
-    assert(row->live.events.budget.used.w == services_before + queries);
+    assert(!e.source.graph_first_refusal.terminal.present && e.source.graph.work == build);
     ownership_api.graph_result again = ownership_api.graph(&row->live.services, &request);
     assert(!ownership_api.successful(again.proof));
     assert(ownership_keys.source(first.terminal.source, again.proof.terminal.source) == 0);
     assert(first.terminal.limit.used == again.proof.terminal.limit.used);
-    assert(e.source.graph.work == first.terminal.limit.used);
+    // Another body continues within its own budget.
+    ownership_api.graph_request mut asked = request;
+    asked.operation = other->live.calls[0].operation;
+    u64 other_before = other->live.events.budget.used.w;
+    ownership_api.graph_result answer = ownership_api.graph(&other->live.services, &asked);
+    assert(ownership_api.successful(answer.proof) && answer.targets.len == 1);
+    assert(other->live.events.budget.used.w == other_before + 66);
+    assert(!other->live.first_refusal.terminal.present && e.source.graph.work == build);
+    // A fresh ledger for the refused body cannot publish a result.
+    ownership_api.limit_table limits = ownership_limits.computation(row->live.fir_size);
+    assert(ownership_limits.configure(&row->live.events.budget, &limits));
+    ownership_api.graph_result fresh = ownership_api.graph(&row->live.services, &request);
+    assert(!ownership_api.successful(fresh.proof) && fresh.residual_fort);
+    assert(fresh.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(fresh.proof.terminal.limit.used == first.terminal.limit.used);
+    assert(row->live.events.budget.used.w == 0 && fresh.targets.len == 0);
+}
+
+// The members of one recursive component keep separate liveness ledgers, each with the bound
+// of its own FIR size. The component size is the sum of both.
+// A refused graph build is one computation's refusal. Every body's queries then get it, and
+// no body pays more than the dispatch unit for it.
+fn build_refusal_reaches_every_body() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    assert(ownership_source_env.prepare(&e,
+        "fn target() void {}\nfn caller() void { target(); }\nfn other() void { target(); }\n"));
+    ownership_source.analyze(&e.source);
+    ownership_source.body mut* caller = ownership_source_env.find(&e, "main", "caller");
+    ownership_source.body mut* other = ownership_source_env.find(&e, "main", "other");
+    ownership_api.proof_status mut refusal = ownership_api.incomplete(
+        ownership_api.incomplete_reason.work_limit, caller->live.calls[0].operation,
+        caller->source);
+    refusal.terminal.limit = ownership_api.exhaustion{.present = true,
+        .category = ownership_api.limit_category.w,
+        .scope = ownership_api.limit_scope.computation, .used = e.source.graph.limits.w,
+        .bound = e.source.graph.limits.w};
+    e.source.graph_first_refusal = refusal;
+    ownership_source.body mut*[2] rows = {caller, other};
+    u64 mut i = 0;
+    while (i < rows.len) {
+        ownership_source.body mut* row = rows[i];
+        u64 before = row->live.events.budget.used.w;
+        ownership_api.graph_request request = ownership_api.graph_request{
+            .query = ownership_api.graph_query_kind.targets,
+            .operation = row->live.calls[0].operation};
+        ownership_api.graph_result answer = ownership_api.graph(&row->live.services, &request);
+        assert(!ownership_api.successful(answer.proof) && answer.residual_fort);
+        assert(answer.proof.terminal.limit.bound == e.source.graph.limits.w);
+        assert(row->live.events.budget.used.w == before + 1);
+        assert(!row->live.first_refusal.terminal.present);
+        i += 1;
+    }
+}
+
+fn recursive_members_keep_their_own_ledgers() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    strbuf.append(&text, "fn even(bool stop) void { if (!stop) { odd(true); } }\n");
+    strbuf.append(&text, "fn odd(bool stop) void { even(stop); }\n");
+    assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+    ownership_source.analyze(&e.source);
+    assert(e.source.graph_built && ownership_api.successful(e.source.graph.proof));
+    ownership_source.body mut* even = ownership_source_env.find(&e, "main", "even");
+    ownership_source.body mut* odd = ownership_source_env.find(&e, "main", "odd");
+    u32 component = ownership_graph.component_of(&e.source.graph, even->key);
+    assert(component == ownership_graph.component_of(&e.source.graph, odd->key));
+    assert(ownership_graph.recursive_component(&e.source.graph, component));
+    assert(ownership_graph.component_size(&e.source.graph, component) ==
+        even->live.fir_size + odd->live.fir_size);
+    ownership_source.body*[2] members = {even, odd};
+    u64 mut i = 0;
+    while (i < members.len) {
+        ownership_source.body* row = members[i];
+        assert(row->live.fir_size == ownership_limits.fir_size(&row->function));
+        assert(row->live.events.budget.bounds.w ==
+            ownership_limits.work_bound(row->live.fir_size));
+        assert(row->live.events.budget.used.w > 0);
+        i += 1;
+    }
+    assert(&even->live.events.budget != &odd->live.events.budget);
 }
 
 fn unresolved_function_value_preserves_fort_targets() void {
@@ -384,6 +498,8 @@ fn main() i32 {
     println("calls ok");
     actual_source_exhausts_the_production_service_ledger();
     private_query_refusal_preserves_its_meter_and_source();
+    recursive_members_keep_their_own_ledgers();
+    build_refusal_reaches_every_body();
     println("meters ok");
     teardown_releases_success_failure_and_refusal_storage();
     println("cleanup ok");

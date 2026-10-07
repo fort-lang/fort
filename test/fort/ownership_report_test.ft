@@ -5,6 +5,7 @@
 //| reasons ok
 //| outcomes ok
 //| rendering ok
+//| computation bounds ok
 /// Checks report outcomes and supplementary report-rendering boundary controls.
 import diag;
 import json;
@@ -119,8 +120,18 @@ fn graph_refusal_keeps_the_original_category_counts_and_location() void {
     defer diag.free(&diagnostics);
     ownership_report.diagnose(&e.source, &diagnostics, "main.ft");
     assert(diag.count(&diagnostics) == 1);
-    assert(diag.record_at(&diagnostics, 0).msg ==
-        "ownership proof is incomplete (graph: work_limit; category W; used 65536; bound 65536)");
+    // The graph bound is the W bound of the closure's FIR size, not the base value.
+    u64 bound = ownership_limits.work_bound(e.source.graph.fir_size);
+    assert(e.source.graph.fir_size > 0 && e.source.graph.limits.w == bound);
+    assert(bound > ownership_limits.PRODUCTION_W);
+    strbuf.str_buf mut expected = strbuf.create();
+    defer strbuf.free(&expected);
+    strbuf.append(&expected, "ownership proof is incomplete (graph: work_limit; category W; used ");
+    strbuf.append_u64(&expected, bound);
+    strbuf.append(&expected, "; bound ");
+    strbuf.append_u64(&expected, bound);
+    strbuf.append(&expected, ")");
+    assert(diag.record_at(&diagnostics, 0).msg == strbuf.view(&expected));
 }
 
 fn internal_verifier_failure_exits_two() void {
@@ -304,6 +315,79 @@ fn report_refusal_keeps_the_first_work_reason_and_stops_later_rows() void {
     assert(first->live.events.rendered == 1 && second->live.events.rendered == 0);
 }
 
+fn contains(strbuf.str_buf* text, string expected) void {
+    if (str.find(strbuf.view(text), expected) < 0) {
+        eprintln("missing: ", expected);
+        assert(false);
+    }
+}
+
+fn count_text(strbuf.str_buf mut* out, string category, string scope) void {
+    strbuf.clear(out);
+    strbuf.append(out, "{\"category\":\"");
+    strbuf.append(out, category);
+    strbuf.append(out, "\",\"scope\":\"");
+    strbuf.append(out, scope);
+    strbuf.append(out, "\",\"used\":");
+}
+
+// The report publishes W_scale, each ledger's FIR size, and the W bound that follows from both.
+fn computation_bounds_are_published() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    assert(ownership_source_env.prepare(&e,
+        "fn leaf() void {}\nfn root() void { i32 x = 1; leaf(); }\n"));
+    ownership_source.analyze(&e.source);
+    ownership_source.body mut* row = ownership_source_env.find(&e, "main", "root");
+    ownership_source.body mut* leaf = ownership_source_env.find(&e, "main", "leaf");
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    ownership_report.invocation call = ownership_report.invocation{};
+    ownership_report.build(&out, &e.source, &call, 1);
+    strbuf.str_buf mut expected = strbuf.create();
+    defer strbuf.free(&expected);
+    strbuf.append(&expected, "{\"kind\":\"fort-ownership-report\",\"version\":2,");
+    contains(&out, strbuf.view(&expected));
+    strbuf.clear(&expected);
+    strbuf.append(&expected, "\"limits\":{\"version\":2,");
+    contains(&out, strbuf.view(&expected));
+    strbuf.clear(&expected);
+    strbuf.append(&expected, "\"w\":65536,\"w_scale\":");
+    strbuf.append_u64(&expected, ownership_limits.PRODUCTION_W_SCALE);
+    strbuf.append(&expected, ",\"v\":512}");
+    contains(&out, strbuf.view(&expected));
+    u64[2] sizes = {e.source.graph.fir_size, row->live.fir_size};
+    assert(sizes[1] == ownership_limits.fir_size(&row->function));
+    assert(sizes[0] == sizes[1] + ownership_limits.fir_size(&leaf->function));
+    u64 mut i = 0;
+    while (i < sizes.len) {
+        strbuf.clear(&expected);
+        strbuf.append(&expected, "\"fir_size\":");
+        strbuf.append_u64(&expected, sizes[i]);
+        strbuf.append(&expected, ",\"counts\":[");
+        contains(&out, strbuf.view(&expected));
+        strbuf.clear(&expected);
+        strbuf.append(&expected, "{\"category\":\"W\",\"scope\":\"computation\",\"used\":");
+        contains(&out, strbuf.view(&expected));
+        strbuf.clear(&expected);
+        strbuf.append(&expected, ",\"bound\":");
+        strbuf.append_u64(&expected, ownership_limits.work_bound(sizes[i]));
+        strbuf.append(&expected, "}");
+        contains(&out, strbuf.view(&expected));
+        i += 1;
+    }
+    // Each scope name follows ownership_api.scope_of: H counts one computation.
+    count_text(&expected, "H", "computation");
+    contains(&out, strbuf.view(&expected));
+    count_text(&expected, "T", "call");
+    contains(&out, strbuf.view(&expected));
+    count_text(&expected, "E", "function");
+    contains(&out, strbuf.view(&expected));
+    assert(str.find(strbuf.view(&out), "\"scope\":\"other\"") < 0);
+    println("computation bounds ok");
+}
+
 fn main() i32 {
     proof_failure_flag_does_not_mean_internal_failure();
     zero_bodies_retain_missing_producers_and_no_body_meter();
@@ -322,5 +406,6 @@ fn main() i32 {
     minimum_report_bound_permits_its_last_normal_record();
     report_refusal_keeps_the_first_work_reason_and_stops_later_rows();
     println("rendering ok");
+    computation_bounds_are_published();
     return 0;
 }

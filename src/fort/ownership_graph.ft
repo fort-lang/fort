@@ -3,6 +3,7 @@ import ast;
 import fir;
 import ownership_api;
 import ownership_keys;
+import ownership_limits;
 import std.str;
 import types;
 
@@ -78,6 +79,7 @@ struct graph {
     ownership_api.entity_id mut@ own query_targets;
     u32 component_count;
     ownership_api.proof_status proof;
+    u64 fir_size;
     u64 work;
     ownership_api.operation_position active_operation;
     ownership_api.source_position active_source;
@@ -137,6 +139,24 @@ fn charge_query(graph mut* g, u64 known, u64 selections)
         return work_failure(g, attempted, false);
     }
     g->work += attempted;
+    return complete();
+}
+
+// Charges a query to the ledger of the computation that asks, one W unit for each target.
+fn charge_ledger(ownership_api.services* budget, ownership_api.graph_request* request,
+    u64 known, u64 selections) ownership_api.proof_status {
+    u64[2] counts = {known, selections};
+    u64 mut part = 0;
+    while (part < counts.len) {
+        u64 mut i = 0;
+        while (i < counts[part]) {
+            ownership_api.charge_result charged = ownership_api.charge_work(budget,
+                ownership_api.work_kind.substitution, request->operation, request->source);
+            if (!charged.allowed) { return charged.proof; }
+            i += 1;
+        }
+        part += 1;
+    }
     return complete();
 }
 
@@ -836,12 +856,42 @@ fn components(graph mut* g) void {
     }
 }
 
+/// Returns the FIR size of a graph build over these bodies.
+fn closure_size(body_input@ bodies) u64 {
+    u64 mut size = 0;
+    u64 mut i = 0;
+    while (i < bodies.len) {
+        if (bodies[i].body != null) {
+            size = ownership_limits.saturating_sum(size, ownership_limits.fir_size(bodies[i].body));
+        }
+        i += 1;
+    }
+    return size;
+}
+
+/// Returns the FIR size of one component, the W computation of a recursive summary.
+fn component_size(graph* g, u32 component) u64 {
+    u64 mut size = 0;
+    if (!ownership_api.successful(g->proof) || component >= g->component_count) { return size; }
+    u64 mut i = 0;
+    while (i < g->bodies.len) {
+        if (g->components[i] == component) {
+            size = ownership_limits.saturating_sum(size,
+                ownership_limits.fir_size(g->bodies[i].body));
+        }
+        i += 1;
+    }
+    return size;
+}
+
 /// Accepts sorted, distinct function keys and structurally verified FIR bodies.
 fn build(body_input@ bodies, ownership_api.limit_table limits) graph {
     graph mut g = graph{};
     g.bodies = bodies;
     g.limits = limits;
     g.proof = complete();
+    // A refused build still reports the size of its computation.
+    g.fir_size = closure_size(bodies);
     if (!ownership_api.valid_limits(&limits) || bodies.len > cast(ROOT, u64)) {
         g.proof = incomplete(ownership_api.incomplete_reason.invalid_input);
         return g;
@@ -927,15 +977,23 @@ fn recursive_component(graph* g, u32 component) bool {
         g->recursive[component];
 }
 
+/// Answers a target query and charges the graph's own ledger.
 fn query(void mut* opaque, ownership_api.graph_request* request)
     ownership_api.graph_result {
+    if (opaque == null) { return query_for(null, null, request); }
+    return query_for(cast(opaque, graph mut*), null, request);
+}
+
+/// Answers a target query and charges `budget`, the ledger of the computation that asks.
+/// A null budget charges the graph's own ledger. The graph build keeps its own W.
+fn query_for(graph mut* g, ownership_api.services* budget, ownership_api.graph_request* request)
+    ownership_api.graph_result {
     ownership_api.graph_result mut out = ownership_api.graph_result{};
-    if (opaque == null || request == null) {
+    if (g == null || request == null) {
         out.proof = incomplete(ownership_api.incomplete_reason.invalid_input);
         out.residual_fort = true;
         return out;
     }
-    graph mut* g = cast(opaque, graph mut*);
     if (request->query != ownership_api.graph_query_kind.targets) {
         out.proof = incomplete(ownership_api.incomplete_reason.missing_graph);
         out.residual_fort = true;
@@ -953,7 +1011,9 @@ fn query(void mut* opaque, ownership_api.graph_request* request)
         out.residual_fort = true;
         return out;
     }
-    out.proof = charge_query(g, targets.fort_targets.len, request->selections.len);
+    out.proof = budget == null ?
+        charge_query(g, targets.fort_targets.len, request->selections.len) :
+        charge_ledger(budget, request, targets.fort_targets.len, request->selections.len);
     if (!ownership_api.successful(out.proof)) {
         out.residual_fort = true;
         return out;
