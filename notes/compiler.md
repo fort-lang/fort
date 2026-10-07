@@ -1198,10 +1198,20 @@ came here.
   It separates by-value storage from the parameter's designated source.
   A local whose address the body takes keeps no scalar fact, so a store through that address
   leaves no stale index. A cast keeps an exact value only when its type holds the value (D17.17).
-  It keeps unsupported calls, projections, owning aggregates, and control flow incomplete.
+  It keeps unsupported calls, loaded references, owning aggregates, and control flow incomplete.
   A read with multiple projections stays incomplete until the producer tracks each loaded reference.
-  A projected address stays incomplete until the producer tracks its designated source.
+  A selected address keeps its designated source and checked byte window.
+  The producer retains a generated address temporary's field path.
+  Each selected owner leaf has one private direct flow slot.
+  The exported effect keeps its canonical field or fixed-index path.
+  The existing projected-place consumer applies that effect to the caller state.
   An indirect parameter address does not designate the parameter slot.
+  An output requirement checks the selected old owner before replacement.
+  A prior release supplies an ordered valid-owner requirement instead of an empty-entry requirement.
+  Distinct selected leaves retain distinct obligations.
+  A selected address cannot widen its original argument window.
+  Binding can refuse a residual alias before application copies caller state.
+  That refusal preserves the borrowed input. It does not supply a populated result state.
   `ownership_summary.infer` copies normal exits after defers and parameter boundary checks.
   It publishes one proved return with ordered effects and caller requirements.
   An intrinsic parameter escape remains a callee failure when a definite normal-return suffix

@@ -239,7 +239,10 @@ fn call_request(fixture mut* f, ownership_summary_model.summary_view* summary, u
                 && ownership_summary_body.direct(input_operand.place));
             ownership_api.contents_fact input = contents(f, input_operand.place.local);
             assert(input.borrows.len == 1);
-            f->aliases[f->aliases_len] = ownership_api.alias_binding{row.slot, input.place,
+            ownership_api.place_path actual = ownership_calls.output_root(summary, row.slot) ?
+                ownership_summary_body.caller_slot(&f->inputs[1], input_operand.place.local) :
+                input.place;
+            f->aliases[f->aliases_len] = ownership_api.alias_binding{row.slot, actual,
                 input.value_version};
             f->aliases_len += 1;
             u64 source = ownership_state.source_index(&f->caller, input.borrows[0].source);
@@ -320,6 +323,12 @@ fn caller_operation(fixture mut* f, fir.statement* instruction, u32 block, u32 g
     req.event_bindings = events[..];
     if (instruction->kind == fir.stmt_kind.st_del) {
         req.kind = ownership_transfer.action.release;
+        if (instruction->place.proj_len != 0) {
+            assert(instruction->place.proj_len == 1 && fir.place_projection(&f->functions[1],
+                instruction->place, 0).kind == fir.proj_kind.pj_deref);
+            req.source = ownership_summary_body.caller_slot(input, local);
+            req.destination = req.source;
+        }
         req.leaves_empty_proved = true;
     } else if (instruction->kind == fir.stmt_kind.st_dead) {
         req.kind = ownership_transfer.action.dead;
