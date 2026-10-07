@@ -5,9 +5,13 @@
 //| flag steps ok
 //| flag edges ok
 //| invalid inputs ok
-/// Checks the flag steps and the flag edges of ownership_flow. A flag is a bool local: a path
-/// keeps its known value until the next write of it. A switch edge refutes a path that knows
-/// the other value (spec/fir.md 14.1).
+//| site identities ok
+//| site renames ok
+//| site refusals ok
+/// Checks the flag steps, the flag edges and the earlier site identities of ownership_flow.
+/// A flag is a bool local: a path keeps its known value until the next write of it. A switch
+/// edge refutes a path that knows the other value (spec/fir.md 14.1). An allocation site that
+/// runs again gives its earlier allocation the earlier identities of the site (D17.16).
 import fir;
 import fir_env;
 import fir_parse;
@@ -17,6 +21,7 @@ import ownership_flow;
 import ownership_limits;
 import ownership_local_env;
 import ownership_state;
+import ownership_transfer;
 import std.strbuf;
 
 struct fixture {
@@ -590,10 +595,504 @@ fn invalid_inputs() void {
     println("invalid inputs ok");
 }
 
+fn local_step(ownership_local_env.env mut* e, ownership_transfer.action kind,
+    u32 slot_number, u32 block, u32 gap, u32 order) ownership_flow.step {
+    ownership_flow.step mut out = ownership_flow.step{};
+    out.kind = ownership_flow.step_kind.local_effect;
+    out.block = block;
+    out.gap = gap;
+    out.order = order;
+    out.local = ownership_local_env.req(e, kind, slot_number, slot_number);
+    out.local.operation.block = block;
+    e->event_bindings[e->event_bindings_len - 1].operation = out.local.operation;
+    out.operation = out.local.operation;
+    out.source = out.local.source_position;
+    return out;
+}
+
+// The allocation step of slot 2 at gap `gap` of bb2: site 1, source 101 and value version 1.
+// Its earlier identities are allocation 51, source 151, value 51 and relation 51.
+fn site_step(ownership_local_env.env mut* e, u32 gap, bool earlier,
+    ownership_api.borrow_relation mut@ borrow) ownership_flow.step {
+    ownership_flow.step mut s = local_step(e, ownership_transfer.action.allocation, 2, 2, gap,
+        0);
+    s.local.allocation = ownership_local_env.allocation(1, 1, 2, 1);
+    s.local.fresh_source = ownership_local_env.source(101, ownership_api.source_kind.heap,
+        s.local.allocation.key);
+    s.local.source_key = s.local.fresh_source.key;
+    borrow[0] = ownership_local_env.borrow(s.local.fresh_source.key, 1, slot(2));
+    s.local.value = ownership_local_env.reference(1, s.local.fresh_source.key, borrow);
+    if (earlier) {
+        s.earlier = ownership_flow.site_identity{id(ownership_api.entity_kind.allocation, 51),
+            id(ownership_api.entity_kind.source, 151), id(ownership_api.entity_kind.value, 51),
+            id(ownership_api.entity_kind.relation, 51)};
+    }
+    return s;
+}
+
+fn moved(ownership_local_env.env mut* e, u32 from, u32 to, u32 gap) ownership_flow.step {
+    ownership_flow.step mut s = local_step(e, ownership_transfer.action.move_owner, from, 2,
+        gap, 0);
+    s.local.destination = slot(to);
+    return s;
+}
+
+fn copied(ownership_local_env.env mut* e, u32 from, u32 to, u32 gap) ownership_flow.step {
+    ownership_flow.step mut s = local_step(e, ownership_transfer.action.copy, from, 2, gap, 0);
+    s.local.destination = slot(to);
+    return s;
+}
+
+fn released(ownership_local_env.env mut* e, u32 owner, u32 gap) ownership_flow.step {
+    ownership_flow.step mut s = local_step(e, ownership_transfer.action.release, owner, 2,
+        gap, 0);
+    s.local.leaves_empty_proved = true;
+    return s;
+}
+
+struct site_result {
+    u64 failures;
+    u64 returns;
+    // At the exit block: the most allocations and the most retired allocations of one path,
+    // and whether a path holds the earlier allocation with each fact renamed.
+    u64 allocations;
+    u64 retired;
+    bool renamed;
+}
+
+// Whether path `p` holds allocation 51 with source 151, its history and a view of it.
+fn renamed_in(ownership_flow.path* p) bool {
+    u64 a = ownership_state.allocation_index(&p->facts,
+        id(ownership_api.entity_kind.allocation, 51));
+    u64 s = ownership_state.source_index(&p->facts, id(ownership_api.entity_kind.source, 151));
+    if (a == 18446744073709551615 || s == 18446744073709551615) { return false; }
+    ownership_api.allocation_fact earlier = p->facts.allocations[a];
+    if (earlier.site.ordinal != 1 || earlier.history.len == 0 ||
+        earlier.validity != ownership_api.validity_kind.live ||
+        p->facts.sources[s].allocation.ordinal != 51) { return false; }
+    u64 mut h = 0;
+    while (h < earlier.history.len) {
+        if (earlier.history[h].allocation.ordinal != 51) { return false; }
+        h += 1;
+    }
+    u64 mut views = 0;
+    u64 mut c = 0;
+    while (c < p->facts.contents_len) {
+        ownership_api.contents_fact value = p->facts.contents[c];
+        if (value.borrows.len == 1 && value.borrows[0].source.ordinal == 151) {
+            if (value.borrows[0].value_version.ordinal != 51 ||
+                value.borrows[0].key.ordinal != 51 || value.value_version.ordinal != 51) {
+                return false;
+            }
+            views += 1;
+        }
+        if (value.borrows.len == 1 && value.borrows[0].source.ordinal == 101 &&
+            value.value_version.ordinal != 1) { return false; }
+        c += 1;
+    }
+    // The owner y and the view v name the earlier allocation.
+    return views == 2;
+}
+
+// One loop over bb2, which allocates into x (slot 2). The shapes:
+// 0: y releases its value, takes x, and v views y; then x allocates again.
+// 1: z takes y, y takes x, and x allocates: y and z keep two earlier allocations live.
+// 2: v views y, y releases its value and takes x, and x allocates: v keeps a released one.
+fn site_loop(bool earlier, u32 shape) site_result {
+    fixture mut f = fixture{};
+    // The first entry declares two more locals. Block bb2 takes the entries 3 and 4.
+    string[6] mut blocks = {
+        "let _4 (v): i32 mut*; let _5 (z): i32 mut* own;",
+        "bb0: { goto bb1; }",
+        "bb1: { switch(copy _1) -> [true: bb2, otherwise: bb3]; }",
+        "",
+        "_2 = alloc<i32>(const u64 1); goto bb1; }",
+        "bb3: { _0 = const i32 0; return; }",
+    };
+    if (shape == 0) {
+        blocks[3] = "bb2: { del(move _3); _3 = move _2; _4 = copy _3;";
+    } else if (shape == 1) {
+        blocks[3] = "bb2: { _5 = move _3; _3 = move _2;";
+    } else {
+        blocks[3] = "bb2: { _4 = copy _3; del(move _3); _3 = move _2;";
+    }
+    fir.func* function = open(&f, "let _2 (x): i32 mut* own; let _3 (y): i32 mut* own;",
+        blocks[..]);
+    defer close(&f);
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    defer ownership_local_env.free(&e);
+    u32 mut n = 2;
+    while (n <= 5) {
+        ownership_api.contents_fact mut empty = ownership_local_env.empty_value();
+        empty.place = slot(n);
+        if (n != 4) { ownership_state.append_contents(&e.state, empty); }
+        n += 1;
+    }
+    ownership_api.borrow_relation[1] mut borrow = {};
+    ownership_flow.step[4] mut steps = {};
+    u64 mut count = 4;
+    u64 mut site = 3;
+    if (shape == 0) {
+        steps[0] = released(&e, 3, 0);
+        steps[1] = moved(&e, 2, 3, 1);
+        steps[2] = copied(&e, 3, 4, 2);
+        steps[3] = site_step(&e, 3, earlier, borrow[..]);
+    } else if (shape == 1) {
+        steps[0] = moved(&e, 3, 5, 0);
+        steps[1] = moved(&e, 2, 3, 1);
+        steps[2] = site_step(&e, 2, earlier, borrow[..]);
+        count = 3;
+        site = 2;
+    } else {
+        steps[0] = copied(&e, 3, 4, 0);
+        steps[1] = released(&e, 3, 1);
+        steps[2] = moved(&e, 2, 3, 2);
+        steps[3] = site_step(&e, 3, earlier, borrow[..]);
+    }
+    ownership_flow.program mut input = input_of(&f, function, &e.state);
+    input.services = &e.service;
+    input.steps = steps[0..count];
+    ownership_flow.event_binding[1] events = {ownership_flow.event_binding{
+        steps[site].operation, ownership_api.event_kind.incomplete_proof,
+        steps[site].local.allocation.key, id(ownership_api.entity_kind.event, 90)}};
+    input.events = events[..];
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    defer ownership_flow.free(&result);
+    site_result mut out = site_result{.failures = result.failures,
+        .returns = result.normal_returns};
+    u64 mut i = 0;
+    while (i < result.blocks[3].len) {
+        ownership_flow.path* p = &result.blocks[3].paths[i];
+        if (p->facts.allocations_len > out.allocations) {
+            out.allocations = p->facts.allocations_len;
+        }
+        if (p->retired.allocations_len > out.retired) {
+            out.retired = p->retired.allocations_len;
+        }
+        if (renamed_in(p)) { out.renamed = true; }
+        i += 1;
+    }
+    return out;
+}
+
+fn site_identities() void {
+    // The allocation in y has a view when x allocates again. One identity cannot name both
+    // allocations: the path stops at the allocation.
+    site_result one = site_loop(false, 0);
+    assert(one.failures == 1);
+    // With earlier identities, the allocation in y, its view and its history take them. The
+    // next iteration releases it, and its view moves to the new allocation, so it leaves to
+    // the retired state and the loop reaches its fixed point.
+    site_result two = site_loop(true, 0);
+    assert(two.failures == 0 && two.returns >= 3);
+    assert(two.allocations == 2 && two.renamed && two.retired == 1);
+    // Two earlier allocations stay live in y and z: the earlier identities hold one of them.
+    site_result three = site_loop(true, 1);
+    assert(three.failures >= 1 && !three.renamed);
+    // The view in v keeps the released earlier allocation: the identities stay taken.
+    site_result stale = site_loop(true, 2);
+    assert(stale.failures >= 1);
+    println("site identities ok");
+}
+
+fn value_id(u32 ordinal) ownership_api.entity_id {
+    return id(ownership_api.entity_kind.value, ordinal);
+}
+
+// The facts of one live allocation of site 1 in slot 3 and its view in slot 4: allocation 1,
+// source 101, value version 1, relation 1, one history entry and a null fact on the value. A
+// symbolic length names the value version.
+fn site_facts(ownership_state.state mut* s, bool symbolic) void {
+    ownership_api.allocation_fact mut a = ownership_local_env.allocation(1, 1, 3, 1);
+    ownership_api.history_fact[1] history = {ownership_api.history_fact{.allocation = a.key,
+        .kind = ownership_api.effect_kind.transfer}};
+    a.history = history[..];
+    ownership_api.scalar_fact length = ownership_api.scalar_fact{
+        .kind = ownership_api.fact_kind.symbolic, .symbol = value_id(1)};
+    if (symbolic) { a.logical_length = length; }
+    ownership_state.append_allocations(s, a);
+    ownership_api.source_fact source = ownership_local_env.source(101,
+        ownership_api.source_kind.heap, a.key);
+    ownership_state.append_sources(s, source);
+    u32 mut n = 3;
+    while (n <= 4) {
+        ownership_api.borrow_relation[1] mut borrows = {
+            ownership_local_env.borrow(source.key, 1, slot(n)),
+        };
+        borrows[0].range.source = source.key;
+        ownership_api.contents_fact mut value = ownership_local_env.reference(1, source.key,
+            borrows[..]);
+        value.place = slot(n);
+        if (symbolic) { value.span_length = length; }
+        ownership_state.append_contents(s, value);
+        n += 1;
+    }
+    ownership_api.predicate_atom mut atom = ownership_api.predicate_atom{};
+    atom.kind = ownership_api.predicate_kind.nullness;
+    atom.left = value_id(1);
+    atom.lower = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.exact, .value = 1};
+    ownership_state.append_predicates(s, atom);
+}
+
+// The allocation of slot 2 by an earlier allocation of site 1: the facts that site_facts
+// built. `earlier` names allocation 51, source 151, value 51 and relation 51.
+struct site_fixture {
+    fixture f;
+    ownership_local_env.env e;
+    ownership_flow.program input;
+    ownership_flow.step s;
+    ownership_api.borrow_relation[1] borrow;
+    ownership_flow.event_binding[1] events;
+}
+
+fn site_open(site_fixture mut* x, bool earlier) void {
+    string[1] blocks = {"bb0: { _0 = const i32 0; return; }"};
+    fir.func* function = open(&x->f, "", blocks[..]);
+    ownership_local_env.init(&x->e);
+    x->input = input_of(&x->f, function, &x->e.state);
+    x->input.services = &x->e.service;
+    x->s = site_step(&x->e, 0, earlier, x->borrow[..]);
+    x->events[0] = ownership_flow.event_binding{x->s.operation,
+        ownership_api.event_kind.incomplete_proof, x->s.local.allocation.key,
+        id(ownership_api.entity_kind.event, 90)};
+    x->input.events = x->events[..];
+}
+
+fn site_close(site_fixture mut* x) void {
+    ownership_local_env.free(&x->e);
+    close(&x->f);
+}
+
+fn separated(site_fixture mut* x, ownership_flow.path mut* p) bool {
+    return ownership_api.successful(ownership_flow.retire_released_site(&x->input, p, &x->s));
+}
+
+// Whether the last event says that the site identities stay one.
+fn refused(site_fixture* x, ownership_api.proof_status proof) bool {
+    return !ownership_api.successful(proof) && x->e.counts.last_reason ==
+        ownership_api.incomplete_reason.missing_path && x->e.counts.last_relation.ordinal == 1 &&
+        x->e.counts.last_relation.kind == ownership_api.entity_kind.allocation;
+}
+
+fn contents_of(ownership_state.state* s, u32 slot_number) ownership_api.contents_fact {
+    u64 mut i = 0;
+    while (i < s->contents_len) {
+        if (s->contents[i].place.root.ordinal == slot_number) { return s->contents[i]; }
+        i += 1;
+    }
+    panic("ownership_flow_flags_test: no contents for the slot");
+}
+
+// The earlier allocation keeps its owner, view, history and lengths under the new keys.
+fn renames(bool symbolic) void {
+    site_fixture mut x = site_fixture{};
+    site_open(&x, true);
+    defer site_close(&x);
+    site_facts(&x.e.state, symbolic);
+    // A view in slot 9 of another source names no identity of the site.
+    ownership_api.borrow_relation[1] other = {
+        ownership_local_env.borrow(id(ownership_api.entity_kind.source, 300), 7, slot(9)),
+    };
+    ownership_api.contents_fact mut unrelated = ownership_local_env.reference(7,
+        other[0].source, other[..]);
+    unrelated.place = slot(9);
+    ownership_state.append_contents(&x.e.state, unrelated);
+    ownership_flow.path mut p = path_with(&x.e.state);
+    defer free_path(&p);
+    ownership_api.borrow_relation* kept = &contents_of(&p.facts, 9).borrows[0];
+    ownership_api.borrow_relation* changed = &contents_of(&p.facts, 3).borrows[0];
+    u64 charges = x.e.counts.charges;
+    assert(separated(&x, &p));
+    // One W unit pays for the rename.
+    assert(x.e.counts.charges == charges + 1);
+    ownership_state.state* facts = &p.facts;
+    // The rename gives new borrow storage only to the facts that name the site.
+    assert(&contents_of(facts, 9).borrows[0] == kept);
+    assert(&contents_of(facts, 3).borrows[0] != changed);
+    assert(contents_of(facts, 9).borrows[0].source.ordinal == 300);
+    assert(contents_of(facts, 9).value_version.ordinal == 7);
+    assert(facts->allocations_len == 1 && facts->sources_len == 1);
+    ownership_api.allocation_fact a = facts->allocations[0];
+    assert(a.key.ordinal == 51 && a.site.ordinal == 1 && a.owner.place.root.ordinal == 3);
+    assert(a.history.len == 1 && a.history[0].allocation.ordinal == 51);
+    assert(a.obligation && a.validity == ownership_api.validity_kind.live);
+    assert(facts->sources[0].key.ordinal == 151 && facts->sources[0].allocation.ordinal == 51);
+    u32 mut n = 3;
+    while (n <= 4) {
+        ownership_api.contents_fact value = contents_of(facts, n);
+        assert(value.value_version.ordinal == 51 && value.borrows.len == 1);
+        ownership_api.borrow_relation b = value.borrows[0];
+        assert(b.source.ordinal == 151 && b.range.source.ordinal == 151);
+        assert(b.key.ordinal == 51 && b.value_version.ordinal == 51);
+        assert(b.containing.root.ordinal == n);
+        if (symbolic) {
+            assert(value.span_length.kind == ownership_api.fact_kind.symbolic);
+            assert(value.span_length.symbol.ordinal == 51);
+        } else {
+            assert(value.span_length.kind == ownership_api.fact_kind.exact);
+        }
+        n += 1;
+    }
+    if (symbolic) {
+        assert(a.logical_length.symbol.ordinal == 51);
+    } else {
+        assert(a.logical_length.kind == ownership_api.fact_kind.exact);
+    }
+    assert(facts->predicates_len == 1 && facts->predicates[0].left.ordinal == 51);
+    // The input state still names the site identities: the path owns renamed copies.
+    assert(x.e.state.allocations[0].key.ordinal == 1);
+    assert(x.e.state.contents[0].borrows[0].source.ordinal == 101);
+    assert(p.retired.allocations_len == 0);
+}
+
+// An allocation that holds the earlier identities leaves first when it is released and no
+// contents fact borrows it. It keeps its record in the retired state.
+fn retires_released_earlier() void {
+    site_fixture mut x = site_fixture{};
+    site_open(&x, true);
+    defer site_close(&x);
+    site_facts(&x.e.state, false);
+    ownership_api.allocation_fact mut old = ownership_local_env.allocation(51, 1, 3, 1);
+    old.obligation = false;
+    old.validity = ownership_api.validity_kind.released;
+    old.owner = ownership_api.owner_location{};
+    ownership_state.append_allocations(&x.e.state, old);
+    ownership_api.source_fact mut gone = ownership_local_env.source(151,
+        ownership_api.source_kind.heap, old.key);
+    gone.validity = ownership_api.validity_kind.released;
+    ownership_state.append_sources(&x.e.state, gone);
+    ownership_flow.path mut p = path_with(&x.e.state);
+    defer free_path(&p);
+    assert(separated(&x, &p));
+    assert(p.retired.allocations_len == 1 && p.retired.allocations[0].key.ordinal == 51);
+    assert(p.retired.allocations[0].validity == ownership_api.validity_kind.released);
+    assert(p.facts.allocations_len == 1 && p.facts.allocations[0].key.ordinal == 51);
+    assert(p.facts.allocations[0].validity == ownership_api.validity_kind.live);
+    assert(p.facts.sources_len == 1 && p.facts.sources[0].key.ordinal == 151);
+    assert(p.facts.sources[0].validity == ownership_api.validity_kind.live);
+    // The retirement records one lost R fact for the site.
+    assert(p.facts.losses_len == 1 && p.facts.losses[0].category == ownership_api.limit_category.r);
+    assert(p.facts.losses[0].relation.ordinal == 1);
+}
+
+// A released allocation of the site that nothing borrows leaves, with or without earlier
+// identities, and the identities stay unused.
+fn retires_without_views(bool earlier) void {
+    site_fixture mut x = site_fixture{};
+    site_open(&x, earlier);
+    defer site_close(&x);
+    ownership_api.allocation_fact mut a = ownership_local_env.allocation(1, 1, 3, 1);
+    a.obligation = false;
+    a.validity = ownership_api.validity_kind.released;
+    ownership_state.append_allocations(&x.e.state, a);
+    ownership_api.source_fact mut source = ownership_local_env.source(101,
+        ownership_api.source_kind.heap, a.key);
+    source.validity = ownership_api.validity_kind.released;
+    ownership_state.append_sources(&x.e.state, source);
+    ownership_flow.path mut p = path_with(&x.e.state);
+    defer free_path(&p);
+    assert(separated(&x, &p));
+    assert(p.facts.allocations_len == 0 && p.facts.sources_len == 0);
+    assert(p.retired.allocations_len == 1 && p.retired.allocations[0].key.ordinal == 1);
+}
+
+fn site_renames() void {
+    renames(false);
+    renames(true);
+    retires_released_earlier();
+    retires_without_views(true);
+    retires_without_views(false);
+    println("site renames ok");
+}
+
+// One case that refuses the separation. `shape` selects what the facts hold besides the live
+// allocation of the site and its view.
+fn refusal(u32 shape) bool {
+    site_fixture mut x = site_fixture{};
+    site_open(&x, shape != 0);
+    defer site_close(&x);
+    site_facts(&x.e.state, false);
+    if (shape == 1 || shape == 2 || shape == 3) {
+        // An allocation that holds the earlier identities: live in slot 5, released with a
+        // view in slot 6, or without its source.
+        ownership_api.allocation_fact mut old = ownership_local_env.allocation(51, 1, 5, 1);
+        if (shape == 2) {
+            old.obligation = false;
+            old.validity = ownership_api.validity_kind.released;
+        }
+        ownership_state.append_allocations(&x.e.state, old);
+        if (shape != 3) {
+            ownership_api.source_fact mut gone = ownership_local_env.source(151,
+                ownership_api.source_kind.heap, old.key);
+            if (shape == 2) { gone.validity = ownership_api.validity_kind.released; }
+            ownership_state.append_sources(&x.e.state, gone);
+        }
+        if (shape == 2) {
+            ownership_api.borrow_relation[1] borrows = {
+                ownership_local_env.borrow(id(ownership_api.entity_kind.source, 151), 51,
+                    slot(6)),
+            };
+            ownership_api.contents_fact mut view = ownership_local_env.reference(51,
+                borrows[0].source, borrows[..]);
+            view.place = slot(6);
+            ownership_state.append_contents(&x.e.state, view);
+        }
+    } else if (shape == 4) {
+        // A fact that already names the earlier value version.
+        ownership_api.contents_fact mut stray = ownership_local_env.empty_value();
+        stray.place = slot(7);
+        stray.value_version = value_id(51);
+        ownership_state.append_contents(&x.e.state, stray);
+    } else if (shape == 5) {
+        ownership_api.guard_fact guard = ownership_api.guard_fact{
+            .key = id(ownership_api.entity_kind.guard, 1)};
+        ownership_state.append_guards(&x.e.state, guard);
+    }
+    ownership_flow.path mut p = path_with(&x.e.state);
+    defer free_path(&p);
+    if (shape == 6) {
+        ownership_api.contents_fact mut alias = ownership_local_env.empty_value();
+        alias.place = slot(8);
+        ownership_state.append_contents(&p.aliases, alias);
+    }
+    if (shape == 7) { x.e.counts.deny = true; }
+    ownership_api.proof_status proof = ownership_flow.retire_released_site(&x.input, &p, &x.s);
+    if (shape == 7) {
+        // The W charge of the rename is refused: the path stops before any rename.
+        return !ownership_api.successful(proof) && p.facts.allocations[0].key.ordinal == 1;
+    }
+    // A refusal changes no fact of the path.
+    return refused(&x, proof) && p.facts.allocations[0].key.ordinal == 1 &&
+        p.facts.sources[0].key.ordinal == 101;
+}
+
+fn site_refusals() void {
+    // Without earlier identities a live allocation keeps the one identity.
+    assert(refusal(0));
+    // A live allocation already holds the earlier identities.
+    assert(refusal(1));
+    // A view keeps the released holder of the earlier identities.
+    assert(refusal(2));
+    // The holder has no source fact.
+    assert(refusal(3));
+    // Another fact names the earlier value version.
+    assert(refusal(4));
+    // Guarded alternatives and place aliases are outside the rename.
+    assert(refusal(5));
+    assert(refusal(6));
+    // A refused W charge.
+    assert(refusal(7));
+    println("site refusals ok");
+}
+
 fn main() i32 {
     null_decisions();
     flag_steps();
     flag_edges();
     invalid_inputs();
+    site_identities();
+    site_renames();
+    site_refusals();
     return 0;
 }

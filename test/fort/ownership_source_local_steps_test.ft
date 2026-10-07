@@ -23,7 +23,7 @@ import ownership_source_local;
 import ownership_transfer;
 import std.strbuf;
 
-string[13] SOURCE = {
+string[14] SOURCE = {
     "extern fn foreign_text() char*;",
     "fn helper(i32* p) i32 { return *p; }",
     "fn take(i32 mut* own p) void { del(p); }",
@@ -37,6 +37,7 @@ string[13] SOURCE = {
     "fn written(i32 mut* p) void { *p = 3; }",
     "fn compared(i32* p) bool { return p == null; }",
     "fn root() i32 { return 0; }",
+    "fn owned_view() i32* { i32 mut* own p = new(i32); i32* q = p; del(p); return q; }",
 };
 
 fn action_name(ownership_transfer.action effect) string {
@@ -316,6 +317,52 @@ fn bindings(ownership_source_env.env mut* e) void {
         i += 1;
     }
     assert(bound);
+    // Each allocation step names the earlier identities of its site at EARLIER_BASE + i, in the
+    // identity of its function. Other steps name none.
+    u64 mut allocations = 0;
+    i = 0;
+    while (i < c->steps_len) {
+        ownership_flow.step* s = &c->steps[i];
+        if (s->kind == ownership_flow.step_kind.local_effect &&
+            s->local.kind == ownership_transfer.action.allocation) {
+            u32 ordinal = ownership_source_local.EARLIER_BASE + cast(i, u32);
+            assert(s->earlier.allocation.kind == ownership_api.entity_kind.allocation);
+            assert(s->earlier.source.kind == ownership_api.entity_kind.source);
+            assert(s->earlier.value.kind == ownership_api.entity_kind.value);
+            assert(s->earlier.relation.kind == ownership_api.entity_kind.relation);
+            assert(s->earlier.allocation.ordinal == ordinal && s->earlier.source.ordinal ==
+                ordinal && s->earlier.value.ordinal == ordinal &&
+                s->earlier.relation.ordinal == ordinal);
+            assert(ownership_keys.function(s->earlier.allocation.function, released->key) == 0);
+            allocations += 1;
+        } else {
+            assert(s->earlier.allocation.kind == ownership_api.entity_kind.none);
+        }
+        i += 1;
+    }
+    assert(allocations == 1);
+    // A reference result binds each entry source twice, and each allocation's source and its
+    // earlier source twice too. The allocation step binds its own failure.
+    ownership_source.body* viewed = ownership_source_env.find(e, "main", "owned_view");
+    ownership_source_local.context* v = &viewed->local;
+    assert(v->events_len == 1 + 2 * v->entry.sources_len + 4 + 1);
+    u64 mut earlier_bound = 0;
+    i = 0;
+    while (i < v->events_len) {
+        u32 ordinal = v->events[i].relation.ordinal;
+        if (ordinal >= ownership_source_local.EARLIER_BASE &&
+            ordinal < ownership_source_local.STATIC_ORDINAL &&
+            v->events[i].relation.kind == ownership_api.entity_kind.source) {
+            assert(v->event_info[i].at_return);
+            earlier_bound += 1;
+        }
+        i += 1;
+    }
+    assert(earlier_bound == 2);
+    // The earlier ordinal of the last step that one body can hold.
+    assert(ownership_source_local.earlier_ordinal(0) == ownership_source_local.EARLIER_BASE);
+    assert(ownership_source_local.earlier_ordinal(1073741821) ==
+        ownership_source_local.STATIC_ORDINAL - 1);
     println("bindings ok");
 }
 

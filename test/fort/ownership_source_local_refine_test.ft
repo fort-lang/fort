@@ -5,8 +5,10 @@
 //| null tests ok
 //| null branches ok
 //| flags ok
-/// Checks the null tests and flags of the local analysis. A null test or a known flag refutes
-/// each switch edge that a path cannot take (spec/fir.md 14.1).
+//| loop sites ok
+/// Checks the two refinements of the local analysis. A null test or a known flag refutes each
+/// switch edge that a path cannot take (spec/fir.md 14.1). An earlier allocation of a loop site
+/// takes the earlier identities of its site, so two iterations keep apart (D17.16).
 import ownership_api;
 import ownership_flow;
 import ownership_report;
@@ -18,9 +20,14 @@ import std.strbuf;
 u32 NULL_BRANCH_LINE = 63;
 u32 FREED_BRANCH_LINE = 70;
 u32 REWRITTEN_LINE = 77;
+u32 KEEP_TWO_LEAK_LINE = 130;
+u32 THREE_LIVE_LINE = 140;
+u32 STALE_VIEW_LINE = 172;
 u32 FREED_FLAG_LINE = 217;
 u32 GONE_TWICE_LINE = 225;
 u32 WRONG_ARM_LINE = 270;
+u32 ROTATE_LINE = 277;
+u32 KEEP_FIRST_LINE = 291;
 u32 FIELD_OF_NULL_LINE = 326;
 u32 HIDDEN_LEAK_LINE = 334;
 u32 OWNER_FIELD_LINE = 339;
@@ -699,6 +706,37 @@ fn flag_edges() void {
     println("flag edges ok");
 }
 
+// Two iterations of one allocation site.
+fn loop_sites(ownership_source_env.env mut* e) void {
+    // The allocations of two iterations are live at once in a and b, and each is released.
+    proved(e, "keep_two");
+    // b keeps the allocation of an earlier iteration: its storage ends with a live owner.
+    // The leak needs two back edges, so no witness validates it (toolchain 4.2).
+    ownership_source.body* leak = row(e, "keep_two_leak", "complete", "incomplete");
+    assert(leak->local.unvalidated == 1);
+    assert(leak->local.first_incomplete.terminal.source.line == KEEP_TWO_LEAK_LINE);
+    // Three iterations keep three allocations live: the site has only two identities.
+    declared(e, "three_live", THREE_LIVE_LINE);
+    // A view of the earlier allocation follows it to its earlier identities.
+    proved(e, "good_view");
+    // The view reads the earlier allocation after its release.
+    declared(e, "stale_view", STALE_VIEW_LINE);
+    // The earlier allocation in b meets the next move into b, and it leaks after two
+    // iterations. Both events need back edges, and the move comes first in source order.
+    declared(e, "rotate", ROTATE_LINE);
+    // first keeps the allocation of the first iteration: its storage ends with a live owner.
+    // The test of first is not null after that iteration, so no later store overwrites it.
+    declared(e, "keep_first", KEEP_FIRST_LINE);
+    // Spans of a symbolic length keep apart: a view reads the earlier span before its release.
+    proved(e, "span_views");
+    proved(e, "span_reads");
+    // The pattern of the loop that once allocated a borrows array in each iteration leaves
+    // the declared scope. Its view `storage->items[..]` slices a span that the block holds,
+    // so the view has no source that local proof knows (D17.17).
+    unknown(e, "old_pattern");
+    println("loop sites ok");
+}
+
 fn main() i32 {
     ownership_source_env.env mut environment = ownership_source_env.env{};
     strbuf.str_buf mut text = strbuf.create();
@@ -710,5 +748,6 @@ fn main() i32 {
     null_tests(&environment);
     null_branches(&environment);
     flags(&environment);
+    loop_sites(&environment);
     return 0;
 }

@@ -62,6 +62,16 @@ struct flag_edge {
     bool keep;
 }
 
+// The identities that the earlier allocation of one site takes when the site runs again while
+// that allocation stays in the path facts (D17.16). The keys are finite: one set for each site.
+// An allocation step without them keeps one identity for its site.
+struct site_identity {
+    ownership_api.entity_id allocation;
+    ownership_api.entity_id source;
+    ownership_api.entity_id value;
+    ownership_api.entity_id relation;
+}
+
 // A direct-call handler applies one published callee summary to the path facts (D17.18).
 // `continues` keeps the replaced facts as the one normal continuation. `unknown` keeps an
 // unresolved continuation with its obligations. Neither flag ends the path without proof.
@@ -86,6 +96,8 @@ struct step {
     bool outcomes_complete;
     // The effect of a `flag` step.
     flag_effect flag;
+    // The earlier identities of the site of an allocation step.
+    site_identity earlier;
 }
 
 // The source producer establishes which branch tests one value version.
@@ -1157,42 +1169,65 @@ fn direct_call(program* in, analysis mut* out, path mut* p, step* s) bool {
     return verdict.continues;
 }
 
-// Reuse a site identity only after its released source has no retained relation.
+// Whether some contents fact of `s` borrows `source`.
+fn borrowed(ownership_state.state* s, ownership_api.entity_id source) bool {
+    u64 mut c = 0;
+    while (c < s->contents_len) {
+        ownership_api.contents_fact value = s->contents[c];
+        u64 mut b = 0;
+        while (b < value.borrows.len) {
+            if (same_entity(value.borrows[b].source, source)) { return true; }
+            b += 1;
+        }
+        c += 1;
+    }
+    return false;
+}
+
+// A detached allocation escaped from local proof: storage outside it owns its obligation.
+fn escaped_at(ownership_state.state* s, u64 a) bool {
+    return s->allocations[a].obligation && s->allocations[a].owner.detached;
+}
+
+fn released_at(ownership_state.state* s, u64 a, u64 source) bool {
+    return !s->allocations[a].obligation &&
+        s->allocations[a].validity == ownership_api.validity_kind.released &&
+        s->sources[source].validity == ownership_api.validity_kind.released;
+}
+
+fn site_failure(program* in, step* s, string message) ownership_api.proof_status {
+    return failure(in, s->operation, s->source, ownership_api.event_kind.incomplete_proof,
+        ownership_api.incomplete_reason.missing_path, s->local.allocation.key, message);
+}
+
+// Reuse a site identity only after its released source has no retained relation. With earlier
+// identities, a live or borrowed allocation of the site takes them instead (D17.16).
 fn retire_released_site(program* in, path mut* p, step* s)
     ownership_api.proof_status {
     ownership_transfer.request* selected = &s->local;
     u64 a = ownership_state.allocation_index(&p->facts, selected->allocation.key);
     u64 source = ownership_state.source_index(&p->facts, selected->fresh_source.key);
     if (a == U64_MAX && source == U64_MAX) { return complete(); }
-    // A detached allocation escaped from local proof: storage outside it owns its obligation.
-    bool escaped = a != U64_MAX && p->facts.allocations[a].obligation &&
-        p->facts.allocations[a].owner.detached;
-    bool released = a != U64_MAX && source != U64_MAX && !p->facts.allocations[a].obligation &&
-        p->facts.allocations[a].validity == ownership_api.validity_kind.released &&
-        p->facts.sources[source].validity == ownership_api.validity_kind.released;
-    if (a == U64_MAX || source == U64_MAX || !(escaped || released) ||
-        p->facts.nodes_len > 0 || p->facts.edges_len > 0 ||
-        p->facts.regions_len > 0 || p->facts.shapes_len > 0) {
-        return failure(in, s->operation, s->source,
-            ownership_api.event_kind.incomplete_proof,
-            ownership_api.incomplete_reason.missing_path, selected->allocation.key,
-            "cannot separate repeated allocation site identities");
+    if (a == U64_MAX || source == U64_MAX || p->facts.nodes_len > 0 ||
+        p->facts.edges_len > 0 || p->facts.regions_len > 0 || p->facts.shapes_len > 0) {
+        return site_failure(in, s, "cannot separate repeated allocation site identities");
     }
-    u64 mut c = 0;
-    while (c < p->facts.contents_len) {
-        ownership_api.contents_fact value = p->facts.contents[c];
-        u64 mut b = 0;
-        while (b < value.borrows.len) {
-            if (same_entity(value.borrows[b].source, selected->fresh_source.key)) {
-                return failure(in, s->operation, s->source,
-                    ownership_api.event_kind.incomplete_proof,
-                    ownership_api.incomplete_reason.missing_path, selected->allocation.key,
-                    "old borrow keeps a released site identity");
-            }
-            b += 1;
-        }
-        c += 1;
+    bool retirable = escaped_at(&p->facts, a) || released_at(&p->facts, a, source);
+    bool views = borrowed(&p->facts, selected->fresh_source.key);
+    if (retirable && !views) { return retire(in, p, s, a, source); }
+    if (s->earlier.allocation.kind == ownership_api.entity_kind.allocation) {
+        return rekey(in, p, s);
     }
+    if (!retirable) {
+        return site_failure(in, s, "cannot separate repeated allocation site identities");
+    }
+    return site_failure(in, s, "old borrow keeps a released site identity");
+}
+
+// Moves the allocation at `a` and its source out of the path facts into the retired state.
+fn retire(program* in, path mut* p, step* s, u64 a, u64 source)
+    ownership_api.proof_status {
+    ownership_transfer.request* selected = &s->local;
     ownership_api.charge_result charged = ownership_api.charge_work(in->services,
         ownership_api.work_kind.transfer, s->operation, s->source);
     if (!charged.allowed) {
@@ -1242,6 +1277,177 @@ fn retire_released_site(program* in, path mut* p, step* s)
     }
     ownership_state.append_losses(&p->facts, retired);
     return complete();
+}
+
+// Whether some allocation, source, contents or predicate fact of `s` names `key`.
+fn names_entity(ownership_state.state* s, ownership_api.entity_id key) bool {
+    u64 mut i = 0;
+    while (i < s->allocations_len) {
+        ownership_api.allocation_fact fact = s->allocations[i];
+        if (same_entity(fact.key, key) || same_entity(fact.logical_length.symbol, key)) {
+            return true;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < s->sources_len) {
+        if (same_entity(s->sources[i].key, key) || same_entity(s->sources[i].allocation, key)) {
+            return true;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < s->contents_len) {
+        ownership_api.contents_fact value = s->contents[i];
+        if (same_entity(value.value_version, key) ||
+            same_entity(value.span_length.symbol, key)) { return true; }
+        u64 mut b = 0;
+        while (b < value.borrows.len) {
+            ownership_api.borrow_relation relation = value.borrows[b];
+            if (same_entity(relation.key, key) || same_entity(relation.value_version, key) ||
+                same_entity(relation.source, key) || same_entity(relation.range.source, key)) {
+                return true;
+            }
+            b += 1;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < s->predicates_len) {
+        if (same_entity(s->predicates[i].left, key) ||
+            same_entity(s->predicates[i].right, key)) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+// Gives the earlier allocation of a site its earlier identities, so that the new allocation
+// takes the site identities (D17.16). An allocation that holds the earlier identities leaves
+// first. It leaves only when it is released or escaped and no contents fact borrows it.
+// Otherwise two earlier allocations would need one identity, and the proof stays incomplete.
+fn rekey(program* in, path mut* p, step* s) ownership_api.proof_status {
+    site_identity e = s->earlier;
+    if (p->facts.guards_len > 0 || p->facts.correlations_len > 0 || active_loans(p) ||
+        p->aliases.contents_len > 0 || p->aliases.sources_len > 0) {
+        return site_failure(in, s, "cannot separate repeated allocation site identities");
+    }
+    u64 ea = ownership_state.allocation_index(&p->facts, e.allocation);
+    u64 es = ownership_state.source_index(&p->facts, e.source);
+    if (ea != U64_MAX || es != U64_MAX) {
+        if (ea == U64_MAX || es == U64_MAX ||
+            !(escaped_at(&p->facts, ea) || released_at(&p->facts, ea, es)) ||
+            borrowed(&p->facts, e.source)) {
+            return site_failure(in, s, "cannot separate repeated allocation site identities");
+        }
+        ownership_api.proof_status left = retire(in, p, s, ea, es);
+        if (!ownership_api.successful(left)) { return left; }
+    }
+    ownership_transfer.request* selected = &s->local;
+    u64 a = ownership_state.allocation_index(&p->facts, selected->allocation.key);
+    u64 source = ownership_state.source_index(&p->facts, selected->fresh_source.key);
+    if (names_entity(&p->facts, e.allocation) || names_entity(&p->facts, e.source) ||
+        names_entity(&p->facts, e.value) || names_entity(&p->facts, e.relation)) {
+        return site_failure(in, s, "cannot separate repeated allocation site identities");
+    }
+    ownership_api.charge_result charged = ownership_api.charge_work(in->services,
+        ownership_api.work_kind.transfer, s->operation, s->source);
+    if (!charged.allowed) {
+        return charged_failure(in, charged.proof, s->operation, s->source);
+    }
+    rename_site(&p->facts, s, a, source);
+    return complete();
+}
+
+fn renamed(ownership_api.entity_id key, ownership_api.entity_id from,
+    ownership_api.entity_id to) ownership_api.entity_id {
+    if (same_entity(key, from)) { return to; }
+    return key;
+}
+
+fn renamed_length(ownership_api.scalar_fact length, ownership_api.entity_id from,
+    ownership_api.entity_id to) ownership_api.scalar_fact {
+    ownership_api.scalar_fact mut out = length;
+    if (out.kind == ownership_api.fact_kind.symbolic) {
+        out.symbol = renamed(out.symbol, from, to);
+    }
+    return out;
+}
+
+// Whether a borrow of `borrows` names the relation, the value version or the source of a site.
+fn borrows_name(ownership_api.borrow_relation@ borrows, ownership_api.entity_id relation,
+    ownership_api.entity_id version, ownership_api.entity_id fresh) bool {
+    u64 mut b = 0;
+    while (b < borrows.len) {
+        ownership_api.borrow_relation item = borrows[b];
+        if (same_entity(item.key, relation) || same_entity(item.value_version, version) ||
+            same_entity(item.source, fresh) || same_entity(item.range.source, fresh)) {
+            return true;
+        }
+        b += 1;
+    }
+    return false;
+}
+
+// Renames the site identities of step `s` to its earlier identities in every fact that names
+// them: the allocation and its history, the source, the value version, and each borrow. The
+// renamed facts describe the same storage, so the path keeps every obligation and relation.
+fn rename_site(ownership_state.state mut* facts, step* s, u64 a, u64 source) void {
+    site_identity e = s->earlier;
+    ownership_transfer.request* selected = &s->local;
+    ownership_api.entity_id key = selected->allocation.key;
+    ownership_api.entity_id fresh = selected->fresh_source.key;
+    ownership_api.entity_id version = selected->value.value_version;
+    ownership_api.entity_id mut relation = ownership_api.entity_id{};
+    if (selected->value.borrows.len == 1) { relation = selected->value.borrows[0].key; }
+    ownership_api.allocation_fact mut allocation = facts->allocations[a];
+    allocation.key = e.allocation;
+    allocation.logical_length = renamed_length(allocation.logical_length, version, e.value);
+    ownership_api.history_fact mut@ own history =
+        new(ownership_api.history_fact, allocation.history.len);
+    defer del(history);
+    u64 mut i = 0;
+    while (i < history.len) {
+        history[i] = allocation.history[i];
+        history[i].allocation = renamed(history[i].allocation, key, e.allocation);
+        i += 1;
+    }
+    allocation.history = ownership_state.copy_histories(facts, history[..]);
+    facts->allocations[a] = allocation;
+    facts->sources[source].key = e.source;
+    facts->sources[source].allocation = e.allocation;
+    i = 0;
+    while (i < facts->contents_len) {
+        ownership_api.contents_fact mut value = facts->contents[i];
+        value.value_version = renamed(value.value_version, version, e.value);
+        value.span_length = renamed_length(value.span_length, version, e.value);
+        // Only a fact whose borrows name the site gets new borrow storage.
+        if (!borrows_name(value.borrows, relation, version, fresh)) {
+            facts->contents[i] = value;
+            i += 1;
+            continue;
+        }
+        ownership_api.borrow_relation mut@ own borrows =
+            new(ownership_api.borrow_relation, value.borrows.len);
+        u64 mut b = 0;
+        while (b < borrows.len) {
+            borrows[b] = value.borrows[b];
+            borrows[b].key = renamed(borrows[b].key, relation, e.relation);
+            borrows[b].value_version = renamed(borrows[b].value_version, version, e.value);
+            borrows[b].source = renamed(borrows[b].source, fresh, e.source);
+            borrows[b].range.source = renamed(borrows[b].range.source, fresh, e.source);
+            b += 1;
+        }
+        value.borrows = ownership_state.copy_borrows(facts, borrows[..]);
+        del(borrows);
+        facts->contents[i] = value;
+        i += 1;
+    }
+    i = 0;
+    while (i < facts->predicates_len) {
+        facts->predicates[i].left = renamed(facts->predicates[i].left, version, e.value);
+        facts->predicates[i].right = renamed(facts->predicates[i].right, version, e.value);
+        i += 1;
+    }
 }
 
 fn apply_steps(program* in, analysis mut* out, path mut* p, u32 block) bool {
