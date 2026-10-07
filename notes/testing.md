@@ -872,8 +872,8 @@ bullet at a time and without a rewrite.
   `bootstrap0/src/check.c` and `src/fort/check.ft` that reverted T-128's fix. Nothing in the
   repository said the tree was mutated. Three rules follow.
   Run `tools/mutate.py <table> --check` before the round, not after it rots.
-  **Four tables exist today**, and they cover 16 files:
-  `ls tools/mutations/*.json | wc -l` prints 4.
+  **Five tables exist today**, and they cover 17 files:
+  `ls tools/mutations/*.json | wc -l` prints 5.
   `grep -o 'bootstrap0/src/[a-z_]*\.c' tools/mutations/emitter_bootstrap.json | sort -u` prints
   the four files of the C emitter, and the same command over
   `tools/mutations/checker_bootstrap.json` prints `check.c` and `check_stmt.c`.
@@ -882,6 +882,11 @@ bullet at a time and without a rewrite.
   and `gen_fir.ft`. The same command over `tools/mutations/ownership_local.json` prints the four
   ownership files of the local increment: `ownership_flow.ft`, `ownership_report.ft`,
   `ownership_source_local.ft` and `ownership_transfer.ft`, with one row for each local check.
+  `tools/mutations/ownership_driver.json` adds `driver.ft` and covers `fir_lower.ft` and
+  `ownership_report.ft` again, with one row for each behavior of the selected driver groundwork:
+  the failed report close, the selected build, the C compiler, the brace range, the imported
+  uncalled bodies and the FIR ownership pass. Its one stage runs every targeted test, so the log
+  of a row names each test that goes red, and not only the first.
   Each list is the `"sources"` list the runner saves. Two earlier changes
   mutated `src/fort/check.ft`, and then both compilers, by hand, because no table covered either
   file. No table covers the fort checker today.
