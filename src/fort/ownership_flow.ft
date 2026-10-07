@@ -19,6 +19,47 @@ enum step_kind {
     invalidate_value,
     call_outcome,
     direct_call,
+    flag,
+}
+
+// What one write of a bool local (a flag) tells a path about its value. A path keeps a known
+// value as an equality predicate on the slot of the flag until the next write of the flag.
+// The producer supplies a flag step for each write of a flag that no address names.
+enum flag_kind {
+    // The write stores a value that the path does not know.
+    clear,
+    // The write stores `value`.
+    constant,
+    // The write copies the flag `from`.
+    copy,
+    // The write stores the negation of the flag `from`.
+    negate,
+    // The write compares the reference in the whole slot `from` with null. The flag holds
+    // `value` when that reference is null, and the other value when it is not null.
+    null_test,
+}
+
+// `offset` marks a null test of a slot that an address or a slice through an indirection can
+// fill. Such an address is past a null base and is not null, so an empty owner there decides
+// nothing. A heap source still decides that the reference is not null.
+struct flag_effect {
+    flag_kind kind;
+    ownership_api.entity_id flag;
+    ownership_api.entity_id from;
+    bool value;
+    bool offset;
+}
+
+// The producer establishes that a switch takes this edge only when the flag holds `value`.
+// The edge refutes a path that knows the other value. With `keep` the edge adds the value to a
+// path that does not know it, for a later read. Without `keep` the edge removes the value,
+// because no read of the flag follows before its next write.
+struct flag_edge {
+    u32 block;
+    u32 target_index;
+    ownership_api.entity_id flag;
+    bool value;
+    bool keep;
 }
 
 // A direct-call handler applies one published callee summary to the path facts (D17.18).
@@ -43,6 +84,8 @@ struct step {
     ownership_api.entity_id invalidates;
     ownership_api.outcome_fact@ outcomes;
     bool outcomes_complete;
+    // The effect of a `flag` step.
+    flag_effect flag;
 }
 
 // The source producer establishes which branch tests one value version.
@@ -118,6 +161,7 @@ struct program {
     place_binding@ places;
     edge_fact@ edges;
     value_edge@ values;
+    flag_edge@ flags;
     parameter@ parameters;
     event_binding@ events;
     source_file_binding@ source_files;
@@ -446,6 +490,22 @@ fn valid(program* in) bool {
             (in->steps[i - 1].block == s.block &&
             (in->steps[i - 1].gap > s.gap ||
             (in->steps[i - 1].gap == s.gap && in->steps[i - 1].order >= s.order)))))) {
+            return false;
+        }
+        if (s.kind == step_kind.flag && (s.flag.flag.kind != ownership_api.entity_kind.slot ||
+            (s.flag.kind != flag_kind.clear && s.flag.kind != flag_kind.constant &&
+            s.flag.from.kind != ownership_api.entity_kind.slot))) { return false; }
+        i += 1;
+    }
+    i = 0;
+    while (i < in->flags.len) {
+        flag_edge edge = in->flags[i];
+        if (edge.block >= fir.block_count(in->function) ||
+            edge.flag.kind != ownership_api.entity_kind.slot) { return false; }
+        fir.block* from = fir.block_at(in->function, edge.block);
+        u32 mut target = 0;
+        if (!from->terminated || from->term.kind != fir.term_kind.tk_switch ||
+            !fir.term_targets(in->function, &from->term, edge.target_index, &target)) {
             return false;
         }
         i += 1;
@@ -1261,6 +1321,8 @@ fn apply_steps(program* in, analysis mut* out, path mut* p, u32 block) bool {
                     }
                 } else if (s.kind == step_kind.invalidate_value) {
                     invalidate_version(p, s.invalidates);
+                } else if (s.kind == step_kind.flag) {
+                    proof = apply_flag(in, p, &s);
                 } else if (s.kind == step_kind.direct_call) {
                     // A failed application stops the path, so it records the stop too.
                     u64 before = out->failures;
@@ -1556,6 +1618,131 @@ fn equal_value(program* in, path mut* p, u32 block, value_edge fact)
     return complete();
 }
 
+// The value that path `p` knows for `flag`: an exact equality predicate on the flag slot.
+fn flag_known(path* p, ownership_api.entity_id flag, bool mut* value) bool {
+    u64 mut i = 0;
+    while (i < p->facts.predicates_len) {
+        ownership_api.predicate_atom atom = p->facts.predicates[i];
+        if (atom.kind == ownership_api.predicate_kind.equality && same_entity(atom.left, flag) &&
+            atom.right.kind == ownership_api.entity_kind.none &&
+            atom.lower.kind == ownership_api.fact_kind.exact) {
+            *value = atom.lower.value != 0;
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+// Removes what path `p` knows about `flag`.
+fn forget_flag(path mut* p, ownership_api.entity_id flag) void {
+    u64 mut i = 0;
+    while (i < p->facts.predicates_len) {
+        if (p->facts.predicates[i].kind == ownership_api.predicate_kind.equality &&
+            same_entity(p->facts.predicates[i].left, flag)) {
+            u64 mut j = i + 1;
+            while (j < p->facts.predicates_len) {
+                p->facts.predicates[j - 1] = p->facts.predicates[j];
+                j += 1;
+            }
+            p->facts.predicates_len -= 1;
+        } else { i += 1; }
+    }
+}
+
+// Adds a known flag value to a path that knows none. At the bound P the path records a lost
+// fact and continues without the value, which only loses precision.
+fn learn_flag(program* in, path mut* p, ownership_api.entity_id flag, bool value,
+    ownership_api.operation_position op, ownership_api.source_position at)
+    ownership_api.proof_status {
+    if (p->facts.predicates_len >= in->limits->p) {
+        u64 mut lost = 0;
+        while (lost < p->facts.losses_len) {
+            if (p->facts.losses[lost].category == ownership_api.limit_category.p &&
+                same_entity(p->facts.losses[lost].relation, flag)) { return complete(); }
+            lost += 1;
+        }
+        ownership_api.lost_fact record = ownership_api.lost_fact{
+            ownership_api.limit_category.p, in->limits->p, at, flag,
+            ownership_api.incomplete_reason.work_limit};
+        event_bridge mut bridge = event_bridge{};
+        ownership_api.services mapped = mapped_services(in, &bridge);
+        ownership_api.mutation_result added = ownership_state.add_loss(&p->facts,
+            &mapped, record, op, at);
+        return added.proof;
+    }
+    ownership_api.predicate_atom mut atom = ownership_api.predicate_atom{};
+    atom.key = ownership_api.entity_id{flag.function, ownership_api.entity_kind.predicate,
+        flag.ordinal};
+    atom.kind = ownership_api.predicate_kind.equality;
+    atom.left = flag;
+    atom.lower = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.exact,
+        .value = value ? 1 : 0};
+    atom.upper = atom.lower;
+    ownership_state.append_predicates(&p->facts, atom);
+    return complete();
+}
+
+// Whether the contents of the whole slot `slot` decide a null test, and its result in
+// `is_null`. An empty owner is null. A reference whose every borrow names a heap source is not
+// null: each allocation has at least one byte (D10.2), and a copy, a cast or an address in
+// the referent keeps that. Two alternatives for the slot decide nothing.
+fn reference_null(ownership_state.state* s, ownership_api.entity_id slot, bool mut* is_null)
+    bool {
+    u64 mut found = U64_MAX;
+    u64 mut i = 0;
+    while (i < s->contents_len) {
+        ownership_api.place_path place = s->contents[i].place;
+        if (same_entity(place.root, slot)) {
+            if (found != U64_MAX || place.projections.len != 0 ||
+                ownership_state.has_residual(place)) { return false; }
+            found = i;
+        }
+        i += 1;
+    }
+    if (found == U64_MAX) { return false; }
+    ownership_api.contents_fact value = s->contents[found];
+    if (value.kind == ownership_api.contents_kind.empty_owner && value.owner_empty) {
+        *is_null = true;
+        return true;
+    }
+    if (value.kind != ownership_api.contents_kind.reference || value.owner_empty ||
+        value.borrows.len == 0) { return false; }
+    i = 0;
+    while (i < value.borrows.len) {
+        ownership_api.borrow_relation relation = value.borrows[i];
+        u64 source = ownership_state.source_index(s, relation.source);
+        if (!relation.representation_complete || source == U64_MAX ||
+            s->sources[source].kind != ownership_api.source_kind.heap) { return false; }
+        i += 1;
+    }
+    *is_null = false;
+    return true;
+}
+
+// Applies one flag step: the flag takes the value that the write stores when the path knows
+// it, and no value otherwise. No other fact changes.
+fn apply_flag(program* in, path mut* p, step* s) ownership_api.proof_status {
+    flag_effect effect = s->flag;
+    bool mut known = false;
+    bool mut value = false;
+    if (effect.kind == flag_kind.constant) {
+        known = true;
+        value = effect.value;
+    } else if (effect.kind == flag_kind.copy || effect.kind == flag_kind.negate) {
+        known = flag_known(p, effect.from, &value);
+        if (effect.kind == flag_kind.negate) { value = !value; }
+    } else if (effect.kind == flag_kind.null_test) {
+        bool mut empty = false;
+        known = reference_null(&p->facts, effect.from, &empty);
+        if (known && empty && effect.offset) { known = false; }
+        value = empty ? effect.value : !effect.value;
+    }
+    forget_flag(p, effect.flag);
+    if (!known) { return complete(); }
+    return learn_flag(in, p, effect.flag, value, s->operation, s->source);
+}
+
 fn refine_edge(program* in, path mut* p, u32 block, u32 index)
     ownership_api.proof_status {
     u64 mut v = 0;
@@ -1612,6 +1799,26 @@ fn refine_edge(program* in, path mut* p, u32 block, u32 index)
             ownership_state.append_predicates(&p->facts, atom);
         }
         i += 1;
+    }
+    u64 mut f = 0;
+    while (f < in->flags.len) {
+        flag_edge fact = in->flags[f];
+        if (fact.block == block && fact.target_index == index) {
+            bool mut value = false;
+            if (flag_known(p, fact.flag, &value)) {
+                if (value != fact.value) {
+                    ownership_api.proof_status mut bottom = ownership_api.proof_status{};
+                    bottom.kind = ownership_api.proof_kind.bottom;
+                    return bottom;
+                }
+                if (!fact.keep) { forget_flag(p, fact.flag); }
+            } else if (fact.keep) {
+                ownership_api.proof_status kept = learn_flag(in, p, fact.flag, fact.value,
+                    return_position(in, block), return_source(in, block));
+                if (!ownership_api.successful(kept)) { return kept; }
+            }
+        }
+        f += 1;
     }
     return complete();
 }

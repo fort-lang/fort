@@ -1454,6 +1454,27 @@ all executions of a smaller state. A join contains both predecessors, including 
 Possible sources, effects, invalidation, and obligations combine by union or a sound abstraction.
 A universal fact survives only if it holds in all represented alternatives.
 Null tests refine a matching value version until an overlapping write invalidates that correlation.
+A flag is a bool local that no address names and that a switch tests, directly or through copies
+and negations. A path state holds at most one known value for each flag.
+A write of a flag sets that value when the path knows the written value: a bool constant, a copy
+or a negation of a flag with a known value, or a comparison of a pointer local with null that the
+contents of the local decide. Any other write of the flag, and its storage end, remove the value.
+No other statement changes it.
+An address or a slice through a pointer designates storage in the referent of that pointer only
+when no dereference and no index of a span or a string follows its first dereference or index,
+and a slice there cuts no span or string header. Otherwise it designates the storage of a
+reference that it loads, and its value has no source that the analysis knows (D17.17).
+An empty owner decides that a pointer local is null only when no address or slice through an
+indirection can fill the local, directly or through copies, moves, casts and views. An address
+at a non-zero offset from a null base is not null.
+A reference whose every borrow names the source of an allocation and designates storage in that
+allocation decides that the pointer is not null, because each allocation has at least one byte
+(D10.2). Other contents decide nothing, and two contents alternatives for the local decide
+nothing.
+A switch edge whose arm needs the other value of a known flag reaches no execution.
+An edge adds the value that its arm needs only where a read of the flag can follow before its next
+write. Elsewhere the edge removes the value. A join keeps a flag value only when each predecessor
+holds it.
 An empty owner on one predecessor alone causes no error and supplies no proof about other paths.
 
 Transfer functions are monotone in this order. They model the exact operation before abstraction.

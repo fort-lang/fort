@@ -857,6 +857,16 @@ came here.
   `ownership_flow.solve` consumes verified FIR and complete supplied effects.
   It follows reachable edges and keeps null facts by value version until a write invalidates them.
   A known call invalidates its supplied value versions. An unknown fort call removes all null facts.
+  A flag step keeps the value of a bool local (a flag) on a path as an equality predicate on the
+  slot of the flag, until the next write of that flag. A null test reads the contents of the whole
+  tested slot. An empty owner decides null only when the step has no `offset` mark: an address or
+  a slice through an indirection can fill a marked slot, and an address at a non-zero offset from
+  a null base is not null. A reference whose every borrow names a heap source designates storage
+  in that allocation, because the producer gives no borrow to a value that it loads, so it is not
+  null: each allocation has at least one byte (D10.2). Two alternatives, a residual place and any
+  other source decide nothing. A flag edge refutes a path that knows the other value of its flag.
+  It keeps the value for a later read only where the producer says so
+  (`test/fort/ownership_flow_flags_test.ft`).
   The worklist keeps path alternatives up to G, then widens while it retains ownership obligations.
   At P, the pass records a lost predicate and keeps the successor.
   It reports an error only if a later operation needs the lost fact.
@@ -889,6 +899,22 @@ came here.
   storage and trusted foreign storage keep their facts. A move of a TL into other storage is
   an `escape`; its detached obligation leaves local proof. An integer cast to a reference
   names no proved source (D17.17); only `null` and `zero` constants empty a reference.
+  A flag is a bool local that no address names and that a switch tests, directly or through
+  copies and negations. Each write of a flag gives a flag step after the steps of its
+  statement: a bool constant, a copy, a negation, a null test of a whole pointer TL, or no
+  known value. So a null test reads the TL before a transient ends. A TL that an address or a
+  slice through an indirection can fill, directly or through copies, moves, casts and views,
+  carries a mark. A null test of a marked TL decides only "not null": `&r->b` of a null `r` is
+  not null (`field_of_null` and the other probes of `_refine_test.ft`). An address or a slice
+  through a TL copies the sources of the TL only when it designates storage in its referent: no
+  dereference and no span or string index follows the first one, and a slice there cuts no span
+  or string header. Otherwise, as for `&h->p->a`, `&(*pp)->a`, `&arr[0]->a` and `h->s[..]`, the
+  producer gives a temporal use of the TL and unknown contents (D17.17). Each switch on a flag gives
+  a flag edge for each arm, and for an otherwise target that one bool value takes. An edge keeps
+  the value only where the flag is live at its target, so a dead flag splits no paths. A dead
+  marker of a flag removes its value. The value survives a later write of the tested pointer:
+  `ok = p != null; del(p); if (ok) { *p = 1; }` is a validated violation.
+  `test/fort/ownership_source_local_refine_test.ft` holds these rules.
   A violation counts only when each path state that reached the operation failed it, no path
   stopped or passed an unknown fort call before it, and a witness path reaches it
   (`spec/toolchain.md` 4.2). Otherwise it is incomplete proof. The witness walk starts at the
@@ -919,13 +945,18 @@ came here.
   Scoped CI rejects each local violation and each declared body without complete local proof.
   `tools/ownership_audit.py enforce --scope local` reports the declared bodies of each root and
   each problem. A declared body has complete local correspondence.
-  These legal shapes give incomplete proof in the declared scope, so scoped CI rejects them:
-  a null test that the flow does not refine; a loop whose allocation site runs again while
-  its earlier allocation is live (D17.16); flags that test one condition twice; a loop that
-  exhausts the transfer history E (256); a path that needs a back edge, a short-circuit
-  condition or a second choice of one parameter. The flow also stops a path at its first
-  failure, so a later independent obligation on that path is not examined: the corpus file
-  `fail/ownership/054` expects line 12, and local proof reports line 11 only.
+  These legal shapes give incomplete proof in the declared scope, so scoped CI rejects them.
+  Correlated tests stay a limit where no flag carries the correlation: a condition that the
+  body computes twice (`if (n > 0)` twice), a test of an integer, and a null test of a
+  parameter, a trusted foreign result or a loaded value, whose contents decide nothing. A flag
+  value lives in one path state, so a widening at G drops a value that one side lacks. A loop
+  whose allocation site runs again while its earlier allocation is live stays a limit (D17.16).
+  So does a loop that exhausts the transfer history E (256 of 256), and a path that needs a back
+  edge, a short-circuit condition or a second choice of one parameter. The flow also stops a
+  path at its first failure, so a later independent obligation on that path is not examined: the
+  corpus file `fail/ownership/054` expects line 12, and local proof reports line 11 only. Null
+  tests of a TL whose contents decide them and one flag tested twice are no longer limits
+  (`_refine_test.ft`).
   `bind_fresh_source` in `ownership_calls.ft` had such a shape: it allocated a borrows array
   in a loop and stored views of each. Its exact second pass failed 32 times with "old borrow
   keeps a released site identity" (D17.16). It now allocates one array outside every loop and

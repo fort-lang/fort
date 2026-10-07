@@ -8,6 +8,7 @@
 //| integer addresses ok
 /// Pins the steps of the rvalue and terminator forms that the producer maps, and the
 /// source line of each gap that leaves local correspondence incomplete.
+import flag_steps;
 import ownership_api;
 import ownership_flow;
 import ownership_source;
@@ -42,6 +43,10 @@ fn describe(ownership_source_local.context* c, u64 i, strbuf.str_buf mut* out) v
     strbuf.append_u64(out, cast(s->order, u64));
     if (s->kind == ownership_flow.step_kind.call_outcome) {
         strbuf.append(out, " trusted call");
+        return;
+    }
+    if (s->kind == ownership_flow.step_kind.flag) {
+        flag_steps.describe_flag(s, out);
         return;
     }
     ownership_transfer.request* r = &s->local;
@@ -99,7 +104,7 @@ fn open(ownership_source_env.env mut* e, strbuf.str_buf mut* text, string@ lines
     assert(ownership_source_env.prepare(e, strbuf.view(text)));
 }
 
-string[12] FORMS = {
+string[17] FORMS = {
     "extern fn foreign_count(char* p) i32;",
     "fn helper() void {}",
     "fn function_value() fn () void { return helper; }",
@@ -112,6 +117,11 @@ string[12] FORMS = {
     "fn checked_index(u8@ s, u64 i) u8 { return s[i]; }",
     "fn foreign_borrow(char* p) i32 { return foreign_count(p); }",
     "fn header_length(u8@ s) u64 { return s.len; }",
+    "struct link { link* next; u8@ bytes; i64 v; }",
+    "fn field_address(link* r) i64* { return &r->v; }",
+    "fn loaded_address(link* r) i64* { return &r->next->v; }",
+    "fn element_address(u8@ s) u8* { return &s[1]; }",
+    "fn loaded_slice(link* r) u8@ { return r->bytes[1..]; }",
 };
 
 fn value_forms(ownership_source_env.env mut* e) void {
@@ -160,7 +170,9 @@ fn reference_forms(ownership_source_env.env mut* e) void {
     string[1] header_pointer = {"0.0.0 copy 1->0"};
     expect(e, "header_pointer", header_pointer[..]);
     // The null test reads the pointer. The branch reads through it.
-    string[2] switch_pointer = {"0.0.0 inspect 1->1", "2.0.0 use 1->1 temporal"};
+    // The null test of a parameter gives a flag step that the path cannot decide.
+    string[3] switch_pointer = {"0.0.0 inspect 1->1", "0.0.1 flag null 2<-1 true",
+        "2.0.0 use 1->1 temporal"};
     expect(e, "switch_pointer", switch_pointer[..]);
     // The bounds check reads only the length. The element read checks the source.
     string[1] checked_index = {"1.0.0 use 1->1 temporal"};
@@ -168,6 +180,42 @@ fn reference_forms(ownership_source_env.env mut* e) void {
     // A trusted call reads its borrowed argument and keeps every known fact.
     string[2] foreign_borrow = {"0.0.0 inspect 1->1", "0.0.1 trusted call"};
     expect(e, "foreign_borrow", foreign_borrow[..]);
+    // A field address and a span element address designate storage in the referent of the
+    // pointer, so they copy its source.
+    string[3] field_address = {
+        "0.0.0 copy 1->2",
+        "0.1.0 copy 2->0",
+        "0.1.1 assignment 2->2 empty",
+    };
+    expect(e, "field_address", field_address[..]);
+    string[3] element_address = {
+        "1.0.0 copy 1->5",
+        "1.1.0 copy 5->0",
+        "1.1.1 assignment 5->5 empty",
+    };
+    expect(e, "element_address", element_address[..]);
+    // A field address after a second dereference designates the storage of r->next: a
+    // temporal use of r, then unknown contents (D17.17).
+    string[4] loaded_address = {
+        "0.0.0 use 1->1 temporal",
+        "0.0.1 assignment 2->2 opaque",
+        "0.1.0 copy 2->0",
+        "0.1.1 assignment 2->2 empty",
+    };
+    expect(e, "loaded_address", loaded_address[..]);
+    // A slice of the span that the referent of r holds: each length read and the slice read
+    // through r, and the slice has unknown contents.
+    string[8] loaded_slice = {
+        "0.1.0 use 1->1 temporal",
+        "0.2.0 use 1->1 temporal",
+        "0.2.1 use 1->1 temporal",
+        "0.5.0 use 1->1 temporal",
+        "0.6.0 use 1->1 temporal",
+        "1.0.0 use 1->1 temporal",
+        "1.0.1 use 1->1 temporal",
+        "1.0.2 assignment 0->0 opaque",
+    };
+    expect(e, "loaded_slice", loaded_slice[..]);
     println("reference forms ok");
 }
 
