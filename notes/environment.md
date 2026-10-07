@@ -581,9 +581,24 @@ without a rewrite.
 
 - `main` is pushed to `fort-lang/fort`, a public repository, and CI runs there (T-261).
   `.github/workflows/ci.yml` calls `bootstrap0.yml` and `fort.yml` and holds the job `ci-status`.
-  A ruleset on `main` requires `ci-status` and nothing else. `ci-status` fails when any job of
+  The ruleset on `main` holds two rules. `required_status_checks` requires `ci-status` and no
+  other check, with `strict_required_status_checks_policy` false. `merge_queue` sets
+  `merge_method` `REBASE`, `check_response_timeout_minutes` 180, `grouping_strategy` `ALLGREEN`
+  and `max_entries_to_build` 5. One CI cycle takes 1 to 1.5 h, so the UI default timeout of 60
+  minutes drops every PR. The ruleset has no bypass actors. `ci-status` fails when any job of
   either called workflow ends in a result other than `success`, so a new job in a component
   workflow joins the gate with no edit to `ci.yml`.
+- `main` merges through a GitHub merge queue. `ci.yml` triggers on `merge_group`, so `ci-status`
+  reports on the merge-group commit, which holds `main` plus the queued PRs. The concurrency group
+  holds the event name and, for `merge_group` and `schedule`, the commit SHA. Only a
+  `pull_request` run cancels an older run, so nothing cancels a merge-group run or a scheduled
+  run, and neither shares a group with a PR run. No job tests `github.event_name`, and every
+  matrix is static, so each event runs every job. On `merge_group` the source audit records
+  `github.sha` as both `PR_HEAD` and `TESTED_REVISION`.
+- `main` gets no push run. GitHub moves `main` to the commit that the queue tested, and the
+  checks of that commit already belong to its SHA. A scheduled run (`cron: '17 9 * * *'`, 09:17
+  UTC) runs the full matrix on `main` each night. It finds flaky tests and drift of the
+  environment: a runner image, a toolchain or a mirror.
 - `fort.yml` builds and tests the language server in its job `lsp`, apart from the job
   `bootstrap` (T-264). `bootstrap` builds the default targets except `fort_lsp` and the C unit
   suites, and runs the label `fort`; `lsp` builds `fort_lsp` and runs the label `lsp`. Each job
