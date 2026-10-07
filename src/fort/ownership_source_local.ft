@@ -15,6 +15,7 @@ import prim;
 import types;
 
 u64 U64_MAX = 18446744073709551615;
+u32 U32_MAX = 4294967295;
 // Parameter entities use this base so that they never meet a step ordinal.
 u32 PARAMETER_BASE = 2147483648;
 u32 STATIC_ORDINAL = 4294967294;
@@ -96,6 +97,19 @@ struct context {
     // A borrowed temporary that one statement writes and a later statement of its block reads
     // once. Its value has no use after that read.
     bool mut@ own transient;
+    // A bool local that no address names and that a switch tests, directly or through copies
+    // and negations. Each write of a flag gives a flag step (spec/fir.md 14.1).
+    bool mut@ own flag;
+    u32 mut@ own flag_index;
+    // flag_live[k] holds the blocks at whose entry flag k is live: a read of it can follow
+    // before its next write.
+    fir_flow.bits mut@ own flag_live;
+    ownership_flow.flag_edge mut@ own flag_edges;
+    u64 flag_edges_len;
+    // A TL that an address or a slice through an indirection can fill, directly or through
+    // copies and moves. Its empty contents prove no null pointer: `&r->f` of a null `r` is not
+    // null. So a null test of it decides only "not null".
+    bool mut@ own offset;
     ownership_flow.step mut@ own steps;
     u64 steps_len;
     // The step of each unknown fort call. A violation after one has no validated path.
@@ -317,6 +331,209 @@ fn classify(context mut* c) void {
     }
 }
 
+// ---- flags ------------------------------------------------------------------------------------
+
+fn flag_type(types.node* t) bool {
+    return t->kind == types.type_kind.k_prim && t->prim == prim.prim_kind.prim_bool;
+}
+
+// The bool local that operand `o` copies whole, or U32_MAX.
+fn flag_operand(context* c, fir.operand o) u32 {
+    if (o.kind != fir.operand_kind.ok_copy || o.place.base != fir.base_kind.bk_local ||
+        o.place.proj_len != 0 || c->taken[cast(o.place.local, u64)] ||
+        !flag_type(local_type(c, o.place.local))) { return U32_MAX; }
+    return o.place.local;
+}
+
+// The flag that the whole-local write `s` stores into, or U32_MAX.
+fn flag_written(context* c, fir.statement* s) u32 {
+    if (s->kind != fir.stmt_kind.st_assign || s->place.base != fir.base_kind.bk_local ||
+        s->place.proj_len != 0 || !c->flag[cast(s->place.local, u64)]) { return U32_MAX; }
+    return s->place.local;
+}
+
+// Marks the flags: the bool locals that a switch tests, then the bool locals that a copy or a
+// negation stores into a flag, until no new flag appears.
+fn classify_flags(context mut* c) void {
+    fir.func* f = c->function;
+    u64 count = cast(fir.local_count(f), u64);
+    c->flag = new(bool, count);
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        fir.block* at = fir.block_at(f, b);
+        if (at->terminated && at->term.kind == fir.term_kind.tk_switch) {
+            u32 tested = flag_operand(c, at->term.cond);
+            if (tested != U32_MAX) { c->flag[cast(tested, u64)] = true; }
+        }
+        b += 1;
+    }
+    bool mut changed = true;
+    while (changed) {
+        changed = false;
+        b = 0;
+        while (b < fir.block_count(f)) {
+            u32 mut g = 0;
+            while (g < fir.block_statement_count(f, b)) {
+                fir.statement* s = fir.block_statement(f, b, g);
+                if (flag_written(c, s) != U32_MAX && s->value.ops_len == 1 &&
+                    (s->value.kind == fir.rvalue_kind.rv_use ||
+                    s->value.kind == fir.rvalue_kind.rv_not)) {
+                    u32 from = flag_operand(c, fir.rvalue_operand(f, s->value, 0));
+                    if (from != U32_MAX && !c->flag[cast(from, u64)]) {
+                        c->flag[cast(from, u64)] = true;
+                        changed = true;
+                    }
+                }
+                g += 1;
+            }
+            b += 1;
+        }
+    }
+    flag_liveness(c);
+}
+
+// Finds the blocks where each flag is live at entry. A block that reads a flag before it writes
+// it starts the search, which then goes back through each predecessor that does not write it.
+fn flag_liveness(context mut* c) void {
+    fir.func* f = c->function;
+    u64 locals = cast(fir.local_count(f), u64);
+    u32 blocks = fir.block_count(f);
+    c->flag_index = new(u32, locals);
+    u32 mut flags = 0;
+    u64 mut n = 0;
+    while (n < locals) {
+        c->flag_index[n] = U32_MAX;
+        if (c->flag[n]) {
+            c->flag_index[n] = flags;
+            flags += 1;
+        }
+        n += 1;
+    }
+    c->flag_live = new(fir_flow.bits, cast(flags, u64));
+    fir_flow.bits mut@ own writes = new(fir_flow.bits, cast(flags, u64));
+    defer del(writes);
+    u64 mut k = 0;
+    while (k < cast(flags, u64)) {
+        c->flag_live[k] = fir_flow.bits_new(blocks);
+        writes[k] = fir_flow.bits_new(blocks);
+        k += 1;
+    }
+    u32 mut b = 0;
+    while (b < blocks) {
+        u32 len = fir.block_statement_count(f, b);
+        u32 mut g = 0;
+        while (g <= len) {
+            fir.read mut value = fir.read{};
+            u32 mut i = 0;
+            while (g < len ? fir.stmt_read(f, fir.block_statement(f, b, g), i, &value) :
+                fir.term_read(f, &fir.block_at(f, b)->term, i, &value)) {
+                if (value.place.base == fir.base_kind.bk_local) {
+                    u32 index = c->flag_index[cast(value.place.local, u64)];
+                    if (index != U32_MAX && !fir_flow.bits_get(&writes[cast(index, u64)], b)) {
+                        fir_flow.bits_set(&c->flag_live[cast(index, u64)], b);
+                    }
+                }
+                i += 1;
+            }
+            if (g < len) {
+                u32 written = flag_written(c, fir.block_statement(f, b, g));
+                if (written != U32_MAX) {
+                    fir_flow.bits_set(&writes[cast(c->flag_index[cast(written, u64)], u64)], b);
+                }
+            }
+            g += 1;
+        }
+        b += 1;
+    }
+    fir.pred_table mut preds = fir.func_predecessors(f);
+    defer fir.pred_table_free(&preds);
+    u32 mut@ own work = new(u32, cast(blocks, u64));
+    defer del(work);
+    k = 0;
+    while (k < cast(flags, u64)) {
+        u64 mut len = 0;
+        b = 0;
+        while (b < blocks) {
+            if (fir_flow.bits_get(&c->flag_live[k], b)) { work[len] = b; len += 1; }
+            b += 1;
+        }
+        while (len > 0) {
+            len -= 1;
+            u32 at = work[len];
+            u32 mut i = 0;
+            while (i < fir.pred_count(&preds, at)) {
+                u32 from = fir.pred_at(&preds, at, i);
+                if (!fir_flow.bits_get(&c->flag_live[k], from) &&
+                    !fir_flow.bits_get(&writes[k], from)) {
+                    fir_flow.bits_set(&c->flag_live[k], from);
+                    work[len] = from;
+                    len += 1;
+                }
+                i += 1;
+            }
+        }
+        fir_flow.bits_free(&writes[k]);
+        k += 1;
+    }
+}
+
+// The TL whose contents a write copies from operand `o`, or U32_MAX: a whole TL, and for a
+// use or a cast also the pointer of a span TL, as `write_operand` copies them.
+fn copied_local(context* c, fir.operand o, bool pointer) u32 {
+    if (o.kind == fir.operand_kind.ok_const) { return U32_MAX; }
+    access a = place_access(c, o.place);
+    if (!a.tracked || !(a.whole || (pointer && a.pointer))) { return U32_MAX; }
+    return a.local;
+}
+
+// Marks the TLs that an address or a slice through a TL fills, then each TL that a copy, a
+// move, a cast or a view of a marked TL fills, until no new mark appears. The marks cover every
+// path, so they can only remove a null decision.
+fn mark_offsets(context mut* c) void {
+    fir.func* f = c->function;
+    c->offset = new(bool, cast(fir.local_count(f), u64));
+    bool mut changed = true;
+    while (changed) {
+        changed = false;
+        u32 mut b = 0;
+        while (b < fir.block_count(f)) {
+            u32 mut g = 0;
+            while (g < fir.block_statement_count(f, b)) {
+                fir.statement* s = fir.block_statement(f, b, g);
+                access to = s->kind == fir.stmt_kind.st_assign ? place_access(c, s->place) :
+                    access{};
+                bool mut marked = false;
+                if (to.tracked && to.whole && !c->offset[cast(to.local, u64)]) {
+                    fir.rvalue r = s->value;
+                    if (r.kind == fir.rvalue_kind.rv_addr || r.kind == fir.rvalue_kind.rv_slice) {
+                        access a = place_access(c, r.place);
+                        marked = a.tracked && (a.indirect || (a.whole &&
+                            r.kind == fir.rvalue_kind.rv_slice));
+                    } else if ((r.kind == fir.rvalue_kind.rv_use ||
+                        r.kind == fir.rvalue_kind.rv_cast ||
+                        r.kind == fir.rvalue_kind.rv_slice_ptr ||
+                        r.kind == fir.rvalue_kind.rv_aggregate) && r.ops_len > 0) {
+                        bool use = r.kind == fir.rvalue_kind.rv_use ||
+                            r.kind == fir.rvalue_kind.rv_cast;
+                        u32 from = copied_local(c, fir.rvalue_operand(f, r, 0), use);
+                        marked = from != U32_MAX && c->offset[cast(from, u64)];
+                    }
+                }
+                if (marked) {
+                    c->offset[cast(to.local, u64)] = true;
+                    changed = true;
+                }
+                g += 1;
+            }
+            b += 1;
+        }
+    }
+}
+
+fn flag_live_at(context* c, u32 local, u32 block) bool {
+    return fir_flow.bits_get(&c->flag_live[cast(c->flag_index[cast(local, u64)], u64)], block);
+}
+
 fn note_gap(context mut* c, missing why, ownership_api.source_position at) void {
     if (c->gap == missing.none) {
         c->gap = why;
@@ -365,6 +582,27 @@ fn place_access(context* c, fir.place p) access {
         i += 1;
     }
     return out;
+}
+
+// Whether an address or a slice of `p` designates storage in the referent of its TL. It does
+// when no dereference and no index of a span or a string follows the first one, and a slice
+// after that first one cuts a fixed array and not a span or string header. Otherwise the place
+// loads another reference, and the result designates the storage of that reference (D17.17).
+fn same_referent(context* c, fir.place p, fir.rvalue_kind kind) bool {
+    types.node* mut t = local_type(c, p.local);
+    bool mut through = false;
+    u32 mut i = 0;
+    while (i < p.proj_len) {
+        fir.projection pj = fir.place_projection(c->function, p, i);
+        if (pj.kind == fir.proj_kind.pj_deref ||
+            (pj.kind == fir.proj_kind.pj_index && header_type(t))) {
+            if (through) { return false; }
+            through = true;
+        }
+        t = fir.apply_projection(c->function, t, pj);
+        i += 1;
+    }
+    return !(kind == fir.rvalue_kind.rv_slice && through && header_type(t));
 }
 
 // ---- steps ----------------------------------------------------------------------------------
@@ -579,6 +817,122 @@ fn outside_step(context mut* c, u32 block, u32 gap, bool unknown_call) void {
     c->barrier[i] = unknown_call;
 }
 
+fn flag_step(context mut* c, u32 block, u32 gap, u32 written, ownership_flow.flag_kind kind,
+    u32 from, bool value) void {
+    u64 i = add_step(c, block, gap, ownership_flow.step_kind.flag,
+        ownership_transfer.action.inspect, written, written);
+    bool offset = kind == ownership_flow.flag_kind.null_test && c->offset[cast(from, u64)];
+    c->steps[i].flag = ownership_flow.flag_effect{kind,
+        entity(c, ownership_api.entity_kind.slot, written),
+        entity(c, ownership_api.entity_kind.slot, from), value, offset};
+}
+
+// Whether operand `o` is a null constant of a reference type.
+fn null_constant(fir.operand o) bool {
+    if (o.kind != fir.operand_kind.ok_const) { return false; }
+    return o.value.kind == fir.const_kind.ck_null || (o.value.kind == fir.const_kind.ck_zero &&
+        o.value.ty != null && types.type_is_reference(o.value.ty));
+}
+
+// The pointer TL that a comparison with null reads whole, or U32_MAX.
+fn null_tested(context* c, fir.rvalue r) u32 {
+    if ((r.kind != fir.rvalue_kind.rv_eq && r.kind != fir.rvalue_kind.rv_ne) || r.ops_len != 2) {
+        return U32_MAX;
+    }
+    fir.operand a = fir.rvalue_operand(c->function, r, 0);
+    fir.operand b = fir.rvalue_operand(c->function, r, 1);
+    fir.operand tested = null_constant(b) ? a : b;
+    if (!null_constant(a) && !null_constant(b)) { return U32_MAX; }
+    if (tested.kind != fir.operand_kind.ok_copy || !whole_tracked(c, tested)) { return U32_MAX; }
+    types.node* t = local_type(c, tested.place.local);
+    if (t->kind != types.type_kind.k_ptr && t->kind != types.type_kind.k_voidptr) {
+        return U32_MAX;
+    }
+    return tested.place.local;
+}
+
+// The flag step of a write into a flag. The step comes after the steps of the statement, so a
+// null test reads the contents after the read of its operand.
+fn flag_write(context mut* c, u32 block, u32 gap, fir.statement* s) void {
+    u32 written = flag_written(c, s);
+    if (written == U32_MAX) { return; }
+    fir.rvalue r = s->value;
+    ownership_flow.flag_kind mut kind = ownership_flow.flag_kind.clear;
+    u32 mut from = written;
+    bool mut value = false;
+    if ((r.kind == fir.rvalue_kind.rv_use || r.kind == fir.rvalue_kind.rv_not) &&
+        r.ops_len == 1) {
+        fir.operand o = fir.rvalue_operand(c->function, r, 0);
+        bool constant = o.kind == fir.operand_kind.ok_const &&
+            o.value.kind == fir.const_kind.ck_bool && r.kind == fir.rvalue_kind.rv_use;
+        u32 copied = flag_operand(c, o);
+        if (constant) {
+            kind = ownership_flow.flag_kind.constant;
+            value = o.value.value.mag == 1;
+        } else if (copied != U32_MAX && c->flag[cast(copied, u64)]) {
+            kind = r.kind == fir.rvalue_kind.rv_use ? ownership_flow.flag_kind.copy :
+                ownership_flow.flag_kind.negate;
+            from = copied;
+        }
+    } else {
+        u32 tested = null_tested(c, r);
+        if (tested != U32_MAX) {
+            kind = ownership_flow.flag_kind.null_test;
+            from = tested;
+            value = r.kind == fir.rvalue_kind.rv_eq;
+        }
+    }
+    flag_step(c, block, gap, written, kind, from, value);
+}
+
+fn add_flag_edge(context mut* c, ownership_flow.flag_edge edge) void {
+    if (c->flag_edges_len == c->flag_edges.len) {
+        u64 cap = c->flag_edges.len * 2 + 4;
+        ownership_flow.flag_edge mut@ own bigger = new(ownership_flow.flag_edge, cap);
+        u64 mut i = 0;
+        while (i < c->flag_edges_len) { bigger[i] = c->flag_edges[i]; i += 1; }
+        del(c->flag_edges);
+        c->flag_edges = move(bigger);
+    }
+    c->flag_edges[c->flag_edges_len] = edge;
+    c->flag_edges_len += 1;
+}
+
+// The edges of a switch on a flag. An arm takes the edge when the flag holds its value. The
+// otherwise target takes it when the flag holds the one bool value that no arm names. Each edge
+// keeps the value only where the flag is live at the target.
+fn switch_flag_edges(context mut* c, u32 block) void {
+    fir.func* f = c->function;
+    fir.terminator* t = &fir.block_at(f, block)->term;
+    u32 tested = flag_operand(c, t->cond);
+    if (tested == U32_MAX || !c->flag[cast(tested, u64)]) { return; }
+    ownership_api.entity_id flag = entity(c, ownership_api.entity_kind.slot, tested);
+    bool mut named_true = false;
+    bool mut named_false = false;
+    u32 mut i = 0;
+    while (i <= t->arms_len) {
+        bool otherwise = i == t->arms_len;
+        bool mut value = false;
+        bool mut known = true;
+        u32 target = otherwise ? t->otherwise : fir.term_arm(f, t, i).target;
+        if (!otherwise) {
+            consts.cval v = fir.term_arm(f, t, i).value;
+            known = v.kind == consts.cval_kind.cv_bool;
+            value = v.mag == 1;
+            if (known && value) { named_true = true; }
+            if (known && !value) { named_false = true; }
+        } else {
+            known = named_true != named_false;
+            value = named_false;
+        }
+        if (known) {
+            add_flag_edge(c, ownership_flow.flag_edge{block, i, flag, value,
+                flag_live_at(c, tested, target)});
+        }
+        i += 1;
+    }
+}
+
 // ---- statements -------------------------------------------------------------------------------
 
 // The operand a write consumes as its value, or none.
@@ -689,6 +1043,13 @@ fn write_tracked(context mut* c, u32 block, u32 gap, u32 to, fir.rvalue r) consu
     if (r.kind == fir.rvalue_kind.rv_addr || r.kind == fir.rvalue_kind.rv_slice) {
         access a = place_access(c, r.place);
         if (a.tracked && (a.indirect || (a.whole && r.kind == fir.rvalue_kind.rv_slice))) {
+            if (!same_referent(c, r.place, r.kind)) {
+                // The place loads through the TL. Its result has no source that local proof
+                // knows, so a null test of it decides nothing.
+                dereference(c, block, gap, a.local);
+                opaque(c, block, gap, to, missing.unknown_source);
+                return consumed{};
+            }
             copy_step(c, block, gap, a.local, to);
             return consumed{true, r.place};
         }
@@ -748,6 +1109,9 @@ fn statement_effects(context mut* c, u32 block, u32 gap) void {
             if (c->owning[cast(s->local, u64)]) { end_step(c, block, gap, s->local); }
             else { assign_empty(c, block, gap, s->local); }
         }
+        if (c->flag[cast(s->local, u64)]) {
+            flag_step(c, block, gap, s->local, ownership_flow.flag_kind.clear, s->local, false);
+        }
         return;
     case fir.stmt_kind.st_loan_begin, fir.stmt_kind.st_loan_end:
         note_gap(c, missing.range_loan, source(c, s->loc));
@@ -764,6 +1128,7 @@ fn statement_effects(context mut* c, u32 block, u32 gap) void {
         return;
     case fir.stmt_kind.st_assign:
         assignment_effects(c, block, gap, s);
+        flag_write(c, block, gap, s);
         return;
     }
 }
@@ -816,7 +1181,8 @@ fn assignment_effects(context mut* c, u32 block, u32 gap, fir.statement* s) void
     if (r.kind == fir.rvalue_kind.rv_addr || r.kind == fir.rvalue_kind.rv_slice) {
         access a = place_access(c, r.place);
         if (a.tracked && (a.indirect || (a.whole && r.kind == fir.rvalue_kind.rv_slice))) {
-            inspect(c, block, gap, a.local);
+            if (same_referent(c, r.place, r.kind)) { inspect(c, block, gap, a.local); }
+            else { dereference(c, block, gap, a.local); }
         }
     }
     if (r.kind == fir.rvalue_kind.rv_alloc) {
@@ -873,6 +1239,7 @@ fn terminator_effects(context mut* c, u32 block) void {
     if (b->term.kind == fir.term_kind.tk_switch || b->term.kind == fir.term_kind.tk_check) {
         read_operand(c, block, gap, b->term.cond, none);
     }
+    if (b->term.kind == fir.term_kind.tk_switch) { switch_flag_edges(c, block); }
     if (b->term.kind == fir.term_kind.tk_check || b->term.kind == fir.term_kind.tk_fail) {
         u32 mut k = 0;
         while (k < b->term.args_len) {
@@ -1142,6 +1509,8 @@ fn prepare(context mut* c, fir.func* function, ownership_api.function_id identit
         n += 1;
     }
     transients(c);
+    classify_flags(c);
+    mark_offsets(c);
     u32 mut block = 0;
     while (block < fir.block_count(function)) {
         u32 count = fir.block_statement_count(function, block);
@@ -1319,9 +1688,9 @@ fn passes_without_failure(context mut* c, ownership_flow.step@ kept,
     classifying.event = classify_event;
     ownership_flow.program input = ownership_flow.program{.function = c->function,
         .identity = c->identity, .entry = &c->entry, .services = &classifying,
-        .limits = limits, .steps = kept, .events = c->events[..c->events_len],
-        .source_files = c->files[..], .result_slot = c->result_slot,
-        .supplied_complete = true, .verified_fir = true};
+        .limits = limits, .steps = kept, .flags = c->flag_edges[..c->flag_edges_len],
+        .events = c->events[..c->events_len], .source_files = c->files[..],
+        .result_slot = c->result_slot, .supplied_complete = true, .verified_fir = true};
     ownership_flow.analysis mut pass = ownership_flow.solve(&input);
     defer ownership_flow.free(&pass);
     return !c->classify_refusal.terminal.present && !pass.stops_lost &&
@@ -2096,6 +2465,7 @@ fn solve(context mut* c) void {
     ownership_flow.program input = ownership_flow.program{.function = c->function,
         .identity = c->identity, .entry = &c->entry, .services = &c->services,
         .limits = &c->limits, .steps = c->steps[..c->steps_len],
+        .flags = c->flag_edges[..c->flag_edges_len],
         .events = c->events[..c->events_len], .source_files = c->files[..],
         .result_slot = c->result_slot, .supplied_complete = true, .verified_fir = true,
         .observed = &seen};
@@ -2147,9 +2517,11 @@ fn release_work(context mut* c) void {
     del(c->step_uncertain);
     del(c->return_attempts);
     del(c->return_uncertain);
+    del(c->flag_edges);
     c->steps_len = 0;
     c->events_len = 0;
     c->records_len = 0;
+    c->flag_edges_len = 0;
 }
 
 fn free(context mut* c) void {
@@ -2158,6 +2530,12 @@ fn free(context mut* c) void {
     del(c->owning);
     del(c->taken);
     del(c->transient);
+    del(c->flag);
+    del(c->flag_index);
+    del(c->offset);
+    u64 mut k = 0;
+    while (k < c->flag_live.len) { fir_flow.bits_free(&c->flag_live[k]); k += 1; }
+    del(c->flag_live);
     del(c->violations);
     *c = context{};
 }

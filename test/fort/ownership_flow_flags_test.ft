@@ -1,0 +1,599 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| null decisions ok
+//| flag steps ok
+//| flag edges ok
+//| invalid inputs ok
+/// Checks the flag steps and the flag edges of ownership_flow. A flag is a bool local: a path
+/// keeps its known value until the next write of it. A switch edge refutes a path that knows
+/// the other value (spec/fir.md 14.1).
+import fir;
+import fir_env;
+import fir_parse;
+import fir_verify;
+import ownership_api;
+import ownership_flow;
+import ownership_limits;
+import ownership_local_env;
+import ownership_state;
+import std.strbuf;
+
+struct fixture {
+    fir_env.env environment;
+    fir.module module;
+    ownership_limits.meter meter;
+    ownership_api.limit_table limits;
+    ownership_api.services services;
+    u64 events;
+    ownership_flow.source_file_binding[4] source_files;
+}
+
+fn event(void mut* opaque, ownership_api.event_request* request)
+    ownership_api.event_result {
+    u64 mut* count = cast(opaque, u64 mut*);
+    *count += 1;
+    ownership_api.event_result mut out = ownership_api.event_result{};
+    out.proof = request->current;
+    out.retained = true;
+    return out;
+}
+
+fn open(fixture mut* f, string lets, string@ blocks) fir.func* {
+    fir_env.open(&f->environment);
+    f->limits = ownership_limits.production();
+    assert(ownership_limits.configure(&f->meter, &f->limits));
+    f->services.budget_context = cast(&f->meter, void mut*);
+    f->services.budget = ownership_limits.callback;
+    f->services.event_context = cast(&f->events, void mut*);
+    f->services.event = event;
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    strbuf.append(&text, "fn main.f(_1 (c): bool) -> i32 {\n");
+    strbuf.append(&text, lets);
+    strbuf.push(&text, '\n');
+    u64 mut i = 0;
+    while (i < blocks.len) {
+        strbuf.append(&text, blocks[i]);
+        strbuf.push(&text, '\n');
+        i += 1;
+    }
+    strbuf.append(&text, "}\n");
+    u64 before = fir_env.errors(&f->environment);
+    f->module = fir_parse.parse_module(&f->environment.c.m.s, "flags.fir", strbuf.view(&text),
+        fir_env.prelude(&f->environment));
+    if (fir_env.errors(&f->environment) != before) {
+        eprintln(strbuf.view(&text));
+        panic("ownership_flow_flags_test.open: FIR text does not parse");
+    }
+    return fir.module_function_at(&f->module, 0);
+}
+
+fn close(fixture mut* f) void {
+    fir.module_free(&f->module);
+    fir_env.close(&f->environment);
+}
+
+fn input_of(fixture mut* f, fir.func* function, ownership_state.state mut* entry)
+    ownership_flow.program {
+    fir_verify.runtime rt = fir_verify.runtime_of(&f->environment.c.ck);
+    strbuf.str_buf mut report = strbuf.create();
+    defer strbuf.free(&report);
+    if (!fir_verify.verify_report(function, &rt, &report)) {
+        eprintln(strbuf.view(&report));
+        panic("ownership_flow_flags_test: FIR fixture is invalid");
+    }
+    ownership_flow.program mut input = ownership_flow.program{};
+    input.function = function;
+    input.entry = entry;
+    input.services = &f->services;
+    input.limits = &f->limits;
+    u64 mut files = 0;
+    string filename = fir.block_at(function, 0)->term.loc.file;
+    if (filename.len > 0) {
+        f->source_files[0] = ownership_flow.source_file_binding{1, 1, filename};
+        files = 1;
+    }
+    input.source_files = f->source_files[0..files];
+    input.supplied_complete = true;
+    input.verified_fir = true;
+    return input;
+}
+
+fn id(ownership_api.entity_kind kind, u32 ordinal) ownership_api.entity_id {
+    ownership_api.entity_id mut out = ownership_api.entity_id{};
+    out.kind = kind;
+    out.ordinal = ordinal;
+    return out;
+}
+
+fn slot(u32 ordinal) ownership_api.place_path {
+    return ownership_local_env.place(ordinal);
+}
+
+fn flag_of(u32 ordinal) ownership_api.entity_id {
+    return id(ownership_api.entity_kind.slot, ordinal);
+}
+
+// A state with one contents fact at slot 1 and the sources that it borrows.
+fn reference_in(ownership_state.state mut* s, ownership_api.source_kind kind,
+    bool complete) void {
+    ownership_api.source_fact source = ownership_local_env.source(7, kind,
+        ownership_api.entity_id{});
+    ownership_state.append_sources(s, source);
+    ownership_api.borrow_relation[1] mut borrows = {
+        ownership_local_env.borrow(source.key, 3, slot(1)),
+    };
+    borrows[0].representation_complete = complete;
+    ownership_api.contents_fact mut value = ownership_local_env.reference(3, source.key,
+        borrows[..]);
+    value.place = slot(1);
+    ownership_state.append_contents(s, value);
+}
+
+fn decides(ownership_state.state* s, bool mut* is_null) bool {
+    return ownership_flow.reference_null(s, flag_of(1), is_null);
+}
+
+// The contents of a whole slot decide a null test only when they are one exact fact.
+fn null_decisions() void {
+    bool mut is_null = false;
+    ownership_state.state mut s = ownership_state.empty();
+    // No contents: the test is open.
+    assert(!decides(&s, &is_null));
+    // An empty owner is null.
+    ownership_api.contents_fact mut empty = ownership_local_env.empty_value();
+    empty.place = slot(1);
+    ownership_state.append_contents(&s, empty);
+    assert(decides(&s, &is_null) && is_null);
+    // Two alternatives decide nothing.
+    reference_in(&s, ownership_api.source_kind.heap, true);
+    assert(!decides(&s, &is_null));
+    ownership_state.free(&s);
+    // A heap source is an allocation of at least one byte: the reference is not null.
+    s = ownership_state.empty();
+    reference_in(&s, ownership_api.source_kind.heap, true);
+    is_null = true;
+    assert(decides(&s, &is_null) && !is_null);
+    // Another slot decides nothing about slot 1.
+    assert(!ownership_flow.reference_null(&s, flag_of(2), &is_null));
+    ownership_state.free(&s);
+    // Static, caller, foreign and stack sources can be null or decide nothing here.
+    ownership_api.source_kind[4] open_kinds = {ownership_api.source_kind.static_storage,
+        ownership_api.source_kind.symbolic_caller, ownership_api.source_kind.trusted_foreign,
+        ownership_api.source_kind.stack};
+    u64 mut k = 0;
+    while (k < open_kinds.len) {
+        s = ownership_state.empty();
+        reference_in(&s, open_kinds[k], true);
+        assert(!decides(&s, &is_null));
+        ownership_state.free(&s);
+        k += 1;
+    }
+    // A borrow without its complete representation decides nothing.
+    s = ownership_state.empty();
+    reference_in(&s, ownership_api.source_kind.heap, false);
+    assert(!decides(&s, &is_null));
+    ownership_state.free(&s);
+    // A borrow whose source is not in the facts decides nothing.
+    s = ownership_state.empty();
+    reference_in(&s, ownership_api.source_kind.heap, true);
+    s.sources_len = 0;
+    assert(!decides(&s, &is_null));
+    ownership_state.free(&s);
+    // A reference without borrows and an unknown value decide nothing.
+    s = ownership_state.empty();
+    ownership_api.contents_fact mut bare = ownership_api.contents_fact{};
+    bare.place = slot(1);
+    bare.kind = ownership_api.contents_kind.reference;
+    ownership_state.append_contents(&s, bare);
+    assert(!decides(&s, &is_null));
+    s.contents[0].kind = ownership_api.contents_kind.unknown;
+    assert(!decides(&s, &is_null));
+    // An empty kind without the empty owner mark decides nothing.
+    s.contents[0].kind = ownership_api.contents_kind.empty_owner;
+    assert(!decides(&s, &is_null));
+    ownership_state.free(&s);
+    // A projected or residual place decides nothing about the whole slot.
+    s = ownership_state.empty();
+    empty.place = slot(1);
+    empty.place.residual = true;
+    ownership_state.append_contents(&s, empty);
+    assert(!decides(&s, &is_null));
+    ownership_state.free(&s);
+    println("null decisions ok");
+}
+
+fn path_with(ownership_state.state* facts) ownership_flow.path {
+    ownership_flow.path mut p = ownership_flow.path{};
+    p.facts = ownership_state.clone(facts);
+    p.retired = ownership_state.empty();
+    p.aliases = ownership_state.empty();
+    return p;
+}
+
+fn free_path(ownership_flow.path mut* p) void {
+    ownership_state.free(&p->facts);
+    ownership_state.free(&p->retired);
+    ownership_state.free(&p->aliases);
+}
+
+fn flag_step(ownership_flow.flag_kind kind, u32 flag, u32 from, bool value)
+    ownership_flow.step {
+    ownership_flow.step mut s = ownership_flow.step{};
+    s.kind = ownership_flow.step_kind.flag;
+    s.flag = ownership_flow.flag_effect{kind, flag_of(flag), flag_of(from), value, false};
+    return s;
+}
+
+fn known(ownership_flow.path* p, u32 flag, bool expected) bool {
+    bool mut value = !expected;
+    return ownership_flow.flag_known(p, flag_of(flag), &value) && value == expected;
+}
+
+fn unknown(ownership_flow.path* p, u32 flag) bool {
+    bool mut value = false;
+    return !ownership_flow.flag_known(p, flag_of(flag), &value);
+}
+
+fn apply(ownership_flow.program* in, ownership_flow.path mut* p, ownership_flow.step s)
+    void {
+    assert(ownership_api.successful(ownership_flow.apply_flag(in, p, &s)));
+}
+
+// Each flag step replaces what the path knows about its flag and changes no other fact.
+fn flag_steps() void {
+    fixture mut f = fixture{};
+    string[1] blocks = {"bb0: { _0 = const i32 0; return; }"};
+    fir.func* function = open(&f, "", blocks[..]);
+    defer close(&f);
+    ownership_state.state mut entry = ownership_state.empty();
+    defer ownership_state.free(&entry);
+    ownership_api.contents_fact mut empty = ownership_local_env.empty_value();
+    empty.place = slot(4);
+    ownership_state.append_contents(&entry, empty);
+    ownership_flow.program mut input = input_of(&f, function, &entry);
+    ownership_flow.path mut p = path_with(&entry);
+    defer free_path(&p);
+    apply(&input, &p, flag_step(ownership_flow.flag_kind.constant, 2, 2, true));
+    assert(known(&p, 2, true) && p.facts.predicates_len == 1);
+    // A second write replaces the value: it never adds a second one.
+    apply(&input, &p, flag_step(ownership_flow.flag_kind.constant, 2, 2, false));
+    assert(known(&p, 2, false) && p.facts.predicates_len == 1);
+    apply(&input, &p, flag_step(ownership_flow.flag_kind.copy, 3, 2, false));
+    assert(known(&p, 3, false) && known(&p, 2, false));
+    apply(&input, &p, flag_step(ownership_flow.flag_kind.negate, 3, 3, false));
+    assert(known(&p, 3, true));
+    // A copy of an unknown flag removes the old value.
+    apply(&input, &p, flag_step(ownership_flow.flag_kind.copy, 3, 9, false));
+    assert(unknown(&p, 3) && known(&p, 2, false));
+    apply(&input, &p, flag_step(ownership_flow.flag_kind.negate, 3, 9, false));
+    assert(unknown(&p, 3));
+    // `eq(x, null)` holds true for the empty owner in slot 4; `ne` holds false.
+    apply(&input, &p, flag_step(ownership_flow.flag_kind.null_test, 5, 4, true));
+    assert(known(&p, 5, true));
+    apply(&input, &p, flag_step(ownership_flow.flag_kind.null_test, 5, 4, false));
+    assert(known(&p, 5, false));
+    // A slot without contents leaves the test open.
+    apply(&input, &p, flag_step(ownership_flow.flag_kind.null_test, 5, 8, true));
+    assert(unknown(&p, 5));
+    // An address through a null pointer can fill the slot: its empty owner decides nothing.
+    ownership_flow.step mut past = flag_step(ownership_flow.flag_kind.null_test, 5, 4, true);
+    past.flag.offset = true;
+    apply(&input, &p, past);
+    assert(unknown(&p, 5));
+    // The same test of a reference to a heap source still decides "not null".
+    ownership_state.state mut heap = ownership_state.empty();
+    defer ownership_state.free(&heap);
+    reference_in(&heap, ownership_api.source_kind.heap, true);
+    ownership_flow.path mut q = path_with(&heap);
+    defer free_path(&q);
+    ownership_flow.step mut through = flag_step(ownership_flow.flag_kind.null_test, 5, 1, true);
+    through.flag.offset = true;
+    apply(&input, &q, through);
+    assert(known(&q, 5, false));
+    // With the mark, other sources and two alternatives still decide nothing.
+    ownership_api.source_kind[3] open_kinds = {ownership_api.source_kind.static_storage,
+        ownership_api.source_kind.symbolic_caller, ownership_api.source_kind.trusted_foreign};
+    u64 mut k = 0;
+    while (k < open_kinds.len) {
+        ownership_state.state mut other = ownership_state.empty();
+        reference_in(&other, open_kinds[k], true);
+        ownership_flow.path mut o = path_with(&other);
+        apply(&input, &o, through);
+        assert(unknown(&o, 5));
+        free_path(&o);
+        ownership_state.free(&other);
+        k += 1;
+    }
+    ownership_state.state mut both = ownership_state.empty();
+    defer ownership_state.free(&both);
+    ownership_api.contents_fact mut gone = ownership_local_env.empty_value();
+    gone.place = slot(1);
+    ownership_state.append_contents(&both, gone);
+    reference_in(&both, ownership_api.source_kind.heap, true);
+    ownership_flow.path mut either = path_with(&both);
+    defer free_path(&either);
+    apply(&input, &either, through);
+    assert(unknown(&either, 5));
+    // The mark changes nothing for a flag step of another kind.
+    ownership_flow.step mut constant = flag_step(ownership_flow.flag_kind.constant, 6, 6, true);
+    constant.flag.offset = true;
+    apply(&input, &either, constant);
+    assert(known(&either, 6, true));
+    apply(&input, &p, flag_step(ownership_flow.flag_kind.clear, 2, 2, true));
+    assert(unknown(&p, 2) && p.facts.predicates_len == 0);
+    assert(p.facts.contents_len == 1);
+    // The predicate of a flag names the flag slot and its own key.
+    apply(&input, &p, flag_step(ownership_flow.flag_kind.constant, 6, 6, true));
+    ownership_api.predicate_atom atom = p.facts.predicates[0];
+    assert(atom.kind == ownership_api.predicate_kind.equality);
+    assert(atom.key.kind == ownership_api.entity_kind.predicate && atom.key.ordinal == 6);
+    assert(atom.lower.kind == ownership_api.fact_kind.exact && atom.lower.value == 1);
+    assert(atom.upper.value == 1 && atom.right.kind == ownership_api.entity_kind.none);
+    // At the bound P the path records one lost fact and keeps no value.
+    ownership_api.limit_table mut small = f.limits;
+    small.p = 1;
+    input.limits = &small;
+    apply(&input, &p, flag_step(ownership_flow.flag_kind.constant, 7, 7, true));
+    assert(unknown(&p, 7) && p.facts.predicates_len == 1 && p.facts.losses_len == 1);
+    assert(p.facts.losses[0].category == ownership_api.limit_category.p);
+    apply(&input, &p, flag_step(ownership_flow.flag_kind.constant, 7, 7, false));
+    assert(p.facts.losses_len == 1);
+    // At the bound, a write of the flag that the path knows replaces its value.
+    apply(&input, &p, flag_step(ownership_flow.flag_kind.constant, 6, 6, false));
+    assert(known(&p, 6, false));
+    println("flag steps ok");
+}
+
+fn solve_flags(fixture mut* f, fir.func* function, ownership_flow.step@ steps,
+    ownership_flow.flag_edge@ edges) ownership_flow.analysis {
+    ownership_state.state mut entry = ownership_state.empty();
+    defer ownership_state.free(&entry);
+    ownership_flow.program mut input = input_of(f, function, &entry);
+    input.steps = steps;
+    input.flags = edges;
+    return ownership_flow.solve(&input);
+}
+
+// The switch of bb0 tests the flag c, parameter 1. bb3 tests it again.
+string[6] TWICE = {
+    "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+    "bb1: { goto bb3; }",
+    "bb2: { goto bb3; }",
+    "bb3: { switch(copy _1) -> [true: bb4, otherwise: bb5]; }",
+    "bb4: { _0 = const i32 1; return; }",
+    "bb5: { _0 = const i32 2; return; }",
+};
+
+// `keep` keeps the value of the first switch for the second. `written` stores true on the
+// path through bb2, which knew false.
+fn edges_case(bool keep, bool written) void {
+    fixture mut f = fixture{};
+    fir.func* function = open(&f, "", TWICE[..]);
+    defer close(&f);
+    ownership_flow.flag_edge[4] edges = {
+        ownership_flow.flag_edge{0, 0, flag_of(1), true, keep},
+        ownership_flow.flag_edge{0, 1, flag_of(1), false, keep},
+        ownership_flow.flag_edge{3, 0, flag_of(1), true, false},
+        ownership_flow.flag_edge{3, 1, flag_of(1), false, false},
+    };
+    ownership_flow.step[1] mut steps = {flag_step(ownership_flow.flag_kind.constant, 1, 1,
+        true)};
+    steps[0].block = 2;
+    steps[0].operation.block = 2;
+    ownership_flow.analysis mut result = solve_flags(&f, function,
+        written ? steps[..] : steps[0..0], edges[..]);
+    defer ownership_flow.free(&result);
+    assert(result.failures == 0);
+    if (written) {
+        // Both paths know true at bb3, so they are one, and the otherwise arm is refuted.
+        assert(result.blocks[3].len == 1 && result.blocks[4].len == 1);
+        assert(result.blocks[5].len == 0 && result.normal_returns == 1);
+    } else {
+        // A kept value makes two alternatives at bb3. Each reaches only its own arm.
+        assert(result.blocks[3].len == (keep ? cast(2, u64) : cast(1, u64)));
+        assert(result.blocks[4].len == 1 && result.blocks[5].len == 1);
+        assert(result.normal_returns == 2);
+    }
+    // An edge without keep removes the value, so no path at bb4 or bb5 knows the flag.
+    u32 mut b = 4;
+    while (b <= 5) {
+        u64 mut i = 0;
+        while (i < result.blocks[cast(b, u64)].len) {
+            assert(result.blocks[cast(b, u64)].paths[i].facts.predicates_len == 0);
+            i += 1;
+        }
+        b += 1;
+    }
+}
+
+// At the bound P an edge cannot keep the value: it records one lost fact, and the second
+// switch then reaches both arms.
+fn bound_case() void {
+    fixture mut f = fixture{};
+    fir.func* function = open(&f, "", TWICE[..]);
+    defer close(&f);
+    ownership_state.state mut entry = ownership_state.empty();
+    defer ownership_state.free(&entry);
+    ownership_api.predicate_atom mut other = ownership_api.predicate_atom{};
+    other.kind = ownership_api.predicate_kind.nullness;
+    other.left = id(ownership_api.entity_kind.value, 9);
+    ownership_state.append_predicates(&entry, other);
+    ownership_flow.program mut input = input_of(&f, function, &entry);
+    ownership_api.limit_table mut small = f.limits;
+    small.p = 1;
+    input.limits = &small;
+    ownership_flow.flag_edge[4] edges = {
+        ownership_flow.flag_edge{0, 0, flag_of(1), true, true},
+        ownership_flow.flag_edge{0, 1, flag_of(1), false, true},
+        ownership_flow.flag_edge{3, 0, flag_of(1), true, false},
+        ownership_flow.flag_edge{3, 1, flag_of(1), false, false},
+    };
+    input.flags = edges[..];
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    defer ownership_flow.free(&result);
+    assert(result.failures == 0 && result.normal_returns == 2);
+    // Both paths reach bb3 with one lost P fact and no flag value, so they are one path.
+    assert(result.blocks[3].len == 1);
+    ownership_flow.path* p = &result.blocks[3].paths[0];
+    assert(p->facts.predicates_len == 1 && p->facts.losses_len == 1);
+    assert(p->facts.losses[0].category == ownership_api.limit_category.p);
+    assert(p->facts.losses[0].relation.ordinal == 1);
+    assert(result.blocks[4].len == 1 && result.blocks[5].len == 1);
+}
+
+// Two edges of one switch can reach one block. Each edge refines its own copy of the path.
+fn shared_target() void {
+    fixture mut f = fixture{};
+    string[2] blocks = {
+        "bb0: { _2 = const false; switch(copy _2) -> [true: bb1, otherwise: bb1]; }",
+        "bb1: { _0 = const i32 1; return; }",
+    };
+    fir.func* function = open(&f, "let _2: bool;", blocks[..]);
+    defer close(&f);
+    ownership_flow.flag_edge[2] edges = {
+        ownership_flow.flag_edge{0, 0, flag_of(2), true, true},
+        ownership_flow.flag_edge{0, 1, flag_of(2), false, true},
+    };
+    ownership_flow.step[1] steps = {flag_step(ownership_flow.flag_kind.constant, 2, 2,
+        false)};
+    ownership_flow.analysis mut result = solve_flags(&f, function, steps[..], edges[..]);
+    defer ownership_flow.free(&result);
+    // The true arm is refuted, so bb1 holds the one path of the otherwise arm.
+    assert(result.blocks[1].len == 1 && result.normal_returns == 1);
+    assert(known(&result.blocks[1].paths[0], 2, false));
+}
+
+// Each flag step charges one W unit of transfer work for each path that applies it.
+fn step_work() void {
+    fixture mut f = fixture{};
+    string[1] blocks = {"bb0: { _0 = const i32 0; return; }"};
+    fir.func* function = open(&f, "", blocks[..]);
+    defer close(&f);
+    ownership_flow.flag_edge[1] spare = {};
+    ownership_flow.step[3] steps = {
+        flag_step(ownership_flow.flag_kind.constant, 2, 2, true),
+        flag_step(ownership_flow.flag_kind.copy, 3, 2, false),
+        flag_step(ownership_flow.flag_kind.clear, 2, 2, false),
+    };
+    u64 mut used = 0;
+    u64 mut k = 0;
+    while (k <= 3) {
+        assert(ownership_limits.configure(&f.meter, &f.limits));
+        ownership_flow.step mut@ own ordered = new(ownership_flow.step, k);
+        defer del(ordered);
+        u64 mut i = 0;
+        while (i < k) {
+            ordered[i] = steps[i];
+            ordered[i].order = cast(i, u32);
+            i += 1;
+        }
+        ownership_flow.analysis mut result = solve_flags(&f, function, ordered[..],
+            spare[0..0]);
+        assert(result.failures == 0 && result.normal_returns == 1);
+        ownership_flow.free(&result);
+        u64 now = f.meter.used.w;
+        if (k > 0) { assert(now == used + 1); }
+        used = now;
+        k += 1;
+    }
+}
+
+// A known value refutes the other arm, keep carries a value to a later switch, and an edge
+// without keep removes it.
+fn flag_edges() void {
+    fixture mut f = fixture{};
+    string[3] blocks = {
+        "bb0: { _2 = const true; switch(copy _2) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _0 = const i32 1; return; }",
+        "bb2: { _0 = const i32 2; return; }",
+    };
+    fir.func* function = open(&f, "let _2: bool;", blocks[..]);
+    defer close(&f);
+    ownership_flow.flag_edge[2] edges = {
+        ownership_flow.flag_edge{0, 0, flag_of(2), true, true},
+        ownership_flow.flag_edge{0, 1, flag_of(2), false, true},
+    };
+    ownership_flow.step[1] steps = {flag_step(ownership_flow.flag_kind.constant, 2, 2, true)};
+    ownership_flow.analysis mut known_true = solve_flags(&f, function, steps[..], edges[..]);
+    assert(known_true.failures == 0 && known_true.normal_returns == 1);
+    assert(known_true.blocks[1].len == 1 && known_true.blocks[2].len == 0);
+    assert(known_true.blocks[1].paths[0].facts.predicates_len == 1);
+    ownership_flow.free(&known_true);
+    // An unknown flag reaches both arms, and each keeps the value of its arm.
+    ownership_flow.analysis mut open_flag = solve_flags(&f, function, steps[0..0], edges[..]);
+    assert(open_flag.normal_returns == 2);
+    assert(open_flag.blocks[1].len == 1 && open_flag.blocks[2].len == 1);
+    ownership_flow.path* yes = &open_flag.blocks[1].paths[0];
+    ownership_flow.path* no = &open_flag.blocks[2].paths[0];
+    assert(known(yes, 2, true) && known(no, 2, false));
+    ownership_flow.free(&open_flag);
+    // Without keep, the edges add nothing.
+    ownership_flow.flag_edge[2] dropped = {
+        ownership_flow.flag_edge{0, 0, flag_of(2), true, false},
+        ownership_flow.flag_edge{0, 1, flag_of(2), false, false},
+    };
+    ownership_flow.analysis mut plain = solve_flags(&f, function, steps[0..0], dropped[..]);
+    assert(plain.blocks[1].paths[0].facts.predicates_len == 0);
+    assert(plain.blocks[2].paths[0].facts.predicates_len == 0);
+    ownership_flow.free(&plain);
+    edges_case(true, false);
+    edges_case(false, false);
+    edges_case(true, true);
+    bound_case();
+    shared_target();
+    step_work();
+    println("flag edges ok");
+}
+
+fn invalid(fixture mut* f, fir.func* function, ownership_flow.step@ steps,
+    ownership_flow.flag_edge@ edges) bool {
+    ownership_flow.analysis mut result = solve_flags(f, function, steps, edges);
+    defer ownership_flow.free(&result);
+    return result.failures == 1 && result.blocks.len == 0 &&
+        result.first_failure.terminal.reason == ownership_api.incomplete_reason.invalid_input;
+}
+
+// Each flag names a slot, and each flag edge names a switch target that exists.
+fn invalid_inputs() void {
+    fixture mut f = fixture{};
+    fir.func* function = open(&f, "", TWICE[..]);
+    defer close(&f);
+    ownership_flow.flag_edge[1] spare = {};
+    ownership_flow.flag_edge@ none = spare[0..0];
+    ownership_flow.step[1] mut steps = {flag_step(ownership_flow.flag_kind.copy, 2, 2, true)};
+    steps[0].flag.from = id(ownership_api.entity_kind.value, 2);
+    assert(invalid(&f, function, steps[..], none));
+    steps[0].flag.from = flag_of(2);
+    assert(!invalid(&f, function, steps[..], none));
+    steps[0].flag.flag = id(ownership_api.entity_kind.value, 2);
+    assert(invalid(&f, function, steps[..], none));
+    // A constant and a clear need no source slot.
+    steps[0] = flag_step(ownership_flow.flag_kind.clear, 2, 2, true);
+    steps[0].flag.from = ownership_api.entity_id{};
+    assert(!invalid(&f, function, steps[..], none));
+    ownership_flow.flag_edge[1] mut edges = {ownership_flow.flag_edge{0, 1, flag_of(2), false,
+        false}};
+    assert(!invalid(&f, function, steps[0..0], edges[..]));
+    // A target index past the otherwise target, a block that does not switch, a block that
+    // does not exist and a flag that is no slot are invalid.
+    edges[0].target_index = 2;
+    assert(invalid(&f, function, steps[0..0], edges[..]));
+    edges[0] = ownership_flow.flag_edge{1, 0, flag_of(2), false, false};
+    assert(invalid(&f, function, steps[0..0], edges[..]));
+    edges[0] = ownership_flow.flag_edge{9, 0, flag_of(2), false, false};
+    assert(invalid(&f, function, steps[0..0], edges[..]));
+    edges[0] = ownership_flow.flag_edge{0, 0, id(ownership_api.entity_kind.value, 2), true,
+        false};
+    assert(invalid(&f, function, steps[0..0], edges[..]));
+    println("invalid inputs ok");
+}
+
+fn main() i32 {
+    null_decisions();
+    flag_steps();
+    flag_edges();
+    invalid_inputs();
+    return 0;
+}

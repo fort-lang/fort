@@ -16,7 +16,7 @@ import ownership_source_env;
 import ownership_source_local;
 import std.strbuf;
 
-string[221] WITNESS = {
+string[228] WITNESS = {
     "extern fn abort() noreturn;",
     "bool mut ready = true;",
     "fn bool_true(bool c) void {",
@@ -238,6 +238,13 @@ string[221] WITNESS = {
     "    return n;",
     "}",
     "extern fn strlen(char* s) u64;",
+    "fn opposite_compared(bool c) void {",
+    "    i32 mut* own p = new(i32);",
+    "    if (c) {",
+    "        if (c == false) { return; }",
+    "    }",
+    "    del(p);",
+    "}",
 };
 
 fn open(ownership_source_env.env mut* e, strbuf.str_buf mut* text) void {
@@ -267,6 +274,17 @@ fn validated(ownership_source_env.env mut* e, string name, ownership_api.event_k
     assert(c->solver == ownership_source_local.status.complete);
     assert(c->proof.failed && !c->proof.terminal.present);
     assert(c->unvalidated == 0);
+}
+
+// The flow refutes each path to the failing operation, so the walk has no record to check.
+fn refuted(ownership_source_env.env mut* e, string name) void {
+    ownership_source.body* row = ownership_source_env.find(e, "main", name);
+    ownership_source_local.context* c = &row->local;
+    if (c->violations_len != 0 || c->unvalidated != 0 || !ownership_api.successful(c->proof)) {
+        eprintln(name, ": ", c->violations_len, " violations, ", c->unvalidated, " unvalidated");
+        assert(false);
+    }
+    assert(c->correspondence == ownership_source_local.status.complete);
 }
 
 // Every represented state fails the operation, yet no witness reaches it.
@@ -338,8 +356,10 @@ fn witnesses() void {
     println("witnesses ok");
     // No u8 value exceeds 255.
     unwitnessed(e, "beyond");
-    // C and !c cannot both hold.
-    unwitnessed(e, "opposite");
+    // C and !c cannot both hold: the flow keeps the value of the flag c and refutes the path.
+    refuted(e, "opposite");
+    // The flow knows no result of c == false, so the walk must refute that path itself.
+    unwitnessed(e, "opposite_compared");
     // N > 5 fixed n, and n < 3 is then false.
     unwitnessed(e, "chosen_conflict");
     // The loop over n = 0 never runs its body (D17.9 dead code).

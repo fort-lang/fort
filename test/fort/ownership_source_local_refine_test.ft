@@ -1,0 +1,714 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| flag edges ok
+//| null tests ok
+//| null branches ok
+//| flags ok
+/// Checks the null tests and flags of the local analysis. A null test or a known flag refutes
+/// each switch edge that a path cannot take (spec/fir.md 14.1).
+import ownership_api;
+import ownership_flow;
+import ownership_report;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import std.strbuf;
+
+u32 NULL_BRANCH_LINE = 63;
+u32 FREED_BRANCH_LINE = 70;
+u32 REWRITTEN_LINE = 77;
+u32 FREED_FLAG_LINE = 217;
+u32 GONE_TWICE_LINE = 225;
+u32 WRONG_ARM_LINE = 270;
+u32 FIELD_OF_NULL_LINE = 326;
+u32 HIDDEN_LEAK_LINE = 334;
+u32 OWNER_FIELD_LINE = 339;
+u32 ARRAY_ELEMENT_LINE = 345;
+u32 FIRST_FIELD_LINE = 351;
+u32 COPIED_FIELD_LINE = 366;
+u32 SLICE_OF_NULL_LINE = 373;
+u32 REVERSED_CHAIN_LINE = 402;
+u32 VOID_OF_FIELD_LINE = 380;
+u32 NULL_READ_LINE = 209;
+
+string[445] SOURCE = {
+    "fn after_test(bool c) void {",
+    "    i32 mut* own mut p = null;",
+    "    if (c) { p = new(i32); }",
+    "    if (p == null) { return; }",
+    "    *p = 1;",
+    "    del(p);",
+    "}",
+    "fn and_test(bool c) void {",
+    "    i32 mut* own mut p = null;",
+    "    if (c) { p = new(i32); }",
+    "    if (p != null && *p == 0) { *p = 1; }",
+    "    del(p);",
+    "}",
+    "fn or_test(bool c) void {",
+    "    i32 mut* own mut p = null;",
+    "    if (c) { p = new(i32); }",
+    "    if (p == null || *p == 0) { del(p); return; }",
+    "    *p = 1;",
+    "    del(p);",
+    "}",
+    "fn negated(bool c) void {",
+    "    i32 mut* own mut p = null;",
+    "    if (c) { p = new(i32); }",
+    "    if (!(p == null)) { *p = 1; }",
+    "    del(p);",
+    "}",
+    "fn reversed(bool c) void {",
+    "    i32 mut* own mut p = null;",
+    "    if (c) { p = new(i32); }",
+    "    if (null != p) { *p = 1; }",
+    "    del(p);",
+    "}",
+    "fn named(bool c) void {",
+    "    i32 mut* own mut p = null;",
+    "    if (c) { p = new(i32); }",
+    "    bool ok = p != null;",
+    "    if (ok) { *p = 1; }",
+    "    del(p);",
+    "}",
+    "fn viewed(bool c) void {",
+    "    i32 mut* own mut p = null;",
+    "    if (c) { p = new(i32); }",
+    "    void* v = cast(p, void*);",
+    "    if (v != null) { *p = 1; }",
+    "    del(p);",
+    "}",
+    "fn guarded_loop(i32 n) void {",
+    "    i32 mut* own mut p = new(i32);",
+    "    i32 mut i = 0;",
+    "    while (p != null) {",
+    "        *p = i;",
+    "        i += 1;",
+    "        if (i == n) { del(p); }",
+    "    }",
+    "}",
+    "fn param_test(i32* q) i32 {",
+    "    if (q == null) { return 0; }",
+    "    return *q;",
+    "}",
+    "fn null_branch(bool c) void {",
+    "    i32 mut* own mut p = null;",
+    "    if (c) { p = new(i32); }",
+    "    if (p == null) { *p = 1; }",
+    "    del(p);",
+    "}",
+    "fn freed_branch() void {",
+    "    i32 mut* own p = new(i32);",
+    "    bool ok = p != null;",
+    "    del(p);",
+    "    if (ok) { *p = 1; }",
+    "}",
+    "fn rewritten(bool c) void {",
+    "    i32 mut* own mut p = null;",
+    "    if (c) { p = new(i32); }",
+    "    bool mut ok = p != null;",
+    "    ok = true;",
+    "    if (ok) { *p = 1; }",
+    "    del(p);",
+    "}",
+    "fn copied(bool c) void {",
+    "    i32 mut* own mut p = null;",
+    "    if (c) { p = new(i32); }",
+    "    bool empty = p == null;",
+    "    bool skip = empty;",
+    "    if (!skip) { *p = 1; }",
+    "    del(p);",
+    "}",
+    "fn constant_flag() void {",
+    "    i32 mut* own p = new(i32);",
+    "    bool mut done = false;",
+    "    if (done) { return; }",
+    "    done = true;",
+    "    del(p);",
+    "}",
+    "fn found_flag(i32 n) void {",
+    "    i32 mut* own p = new(i32);",
+    "    bool mut found = false;",
+    "    i32 mut i = 0;",
+    "    while (i < n) {",
+    "        if (i == 3) { found = true; break; }",
+    "        i += 1;",
+    "    }",
+    "    if (found) { del(p); }",
+    "    if (!found) { del(p); }",
+    "}",
+    "fn keep_two() void {",
+    "    i32 mut* own mut a = null;",
+    "    i32 mut* own mut b = null;",
+    "    i32 mut i = 0;",
+    "    while (i < 2) {",
+    "        del(b);",
+    "        b = move(a);",
+    "        a = new(i32);",
+    "        i += 1;",
+    "    }",
+    "    del(a);",
+    "    del(b);",
+    "}",
+    "fn keep_two_leak() void {",
+    "    i32 mut* own mut a = null;",
+    "    i32 mut* own mut b = null;",
+    "    i32 mut i = 0;",
+    "    while (i < 2) {",
+    "        del(b);",
+    "        b = move(a);",
+    "        a = new(i32);",
+    "        i += 1;",
+    "    }",
+    "    del(a);",
+    "}",
+    "fn three_live() void {",
+    "    i32 mut* own mut a = null;",
+    "    i32 mut* own mut b = null;",
+    "    i32 mut* own mut c = null;",
+    "    i32 mut i = 0;",
+    "    while (i < 3) {",
+    "        del(c);",
+    "        c = move(b);",
+    "        b = move(a);",
+    "        a = new(i32);",
+    "        i += 1;",
+    "    }",
+    "    del(a);",
+    "    del(b);",
+    "    del(c);",
+    "}",
+    "fn good_view(i32 n) i32 {",
+    "    i32 mut* own mut prev = null;",
+    "    i32* mut seen = null;",
+    "    i32 mut t = 0;",
+    "    i32 mut i = 0;",
+    "    while (i < n) {",
+    "        i32 mut* own cur = new(i32);",
+    "        *cur = i;",
+    "        if (seen != null) { t += *seen; }",
+    "        del(prev);",
+    "        seen = cur;",
+    "        prev = move(cur);",
+    "        i += 1;",
+    "    }",
+    "    del(prev);",
+    "    return t;",
+    "}",
+    "fn stale_view(i32 n) i32 {",
+    "    i32 mut* own mut prev = null;",
+    "    i32* mut seen = null;",
+    "    i32 mut t = 0;",
+    "    i32 mut i = 0;",
+    "    while (i < n) {",
+    "        i32 mut* own cur = new(i32);",
+    "        del(prev);",
+    "        if (seen != null) { t += *seen; }",
+    "        seen = cur;",
+    "        prev = move(cur);",
+    "        i += 1;",
+    "    }",
+    "    del(prev);",
+    "    return t;",
+    "}",
+    "struct block { u64 mut@ own items; }",
+    "struct row { u64@ view; }",
+    "fn keep_block(block mut* own b) void { del(b->items); del(b); }",
+    "fn old_pattern(row mut@ rows, u64 count) void {",
+    "    u64 mut i = 0;",
+    "    while (i < rows.len) {",
+    "        if (count > 0) {",
+    "            block mut* own storage = new(block);",
+    "            storage->items = new(u64, count);",
+    "            u64 mut@ items = storage->items[..];",
+    "            keep_block(move(storage));",
+    "            items[0] = 1;",
+    "            rows[i].view = items[..];",
+    "        }",
+    "        i += 1;",
+    "    }",
+    "}",
+    "fn both(bool c, bool d) void {",
+    "    i32 mut* own mut p = null;",
+    "    i32 mut* own mut q = null;",
+    "    if (c) { p = new(i32); }",
+    "    if (d) { q = new(i32); }",
+    "    if (p != null && q != null) { *p = *q; }",
+    "    del(p);",
+    "    del(q);",
+    "}",
+    "fn null_read(bool c) i32 {",
+    "    i32 mut* own mut p = null;",
+    "    if (c) { p = new(i32); }",
+    "    i32 r = p == null ? *p : 0;",
+    "    del(p);",
+    "    return r;",
+    "}",
+    "fn freed_flag(bool c) void {",
+    "    i32 mut* own p = new(i32);",
+    "    bool mut freed = false;",
+    "    if (c) { del(p); freed = true; }",
+    "    if (freed) { *p = 1; }",
+    "    del(p);",
+    "}",
+    "fn gone_twice(bool c) void {",
+    "    i32 mut* own p = new(i32);",
+    "    i32 mut* q = p;",
+    "    bool gone = c;",
+    "    if (gone) { del(p); }",
+    "    if (gone) { *q = 1; }",
+    "    del(p);",
+    "}",
+    "fn else_chain(bool c, bool d) void {",
+    "    i32 mut* own mut p = null;",
+    "    if (c) { p = new(i32); }",
+    "    if (p == null) { return; } else if (d) { *p = 1; } else { *p = 2; }",
+    "    del(p);",
+    "}",
+    "fn counted_walk(i32 n) void {",
+    "    i32 mut* own mut p = new(i32);",
+    "    i32 mut i = 0;",
+    "    while (p != null && i < n) {",
+    "        *p += 1;",
+    "        i += 1;",
+    "        if (*p > 3) { del(p); }",
+    "    }",
+    "    del(p);",
+    "}",
+    "fn nested_and(bool c, bool d) void {",
+    "    i32 mut* own mut p = null;",
+    "    i32 mut* own mut q = null;",
+    "    if (c) { p = new(i32); }",
+    "    if (d) { q = new(i32); }",
+    "    if (p != null) {",
+    "        if (q != null && *q == 0) { *p = *q; }",
+    "    }",
+    "    del(p);",
+    "    del(q);",
+    "}",
+    "fn found_once(i32 n) i32 {",
+    "    i32 mut* own mut found = null;",
+    "    i32 mut i = 0;",
+    "    while (i < n && found == null) {",
+    "        if (i == 2) { found = new(i32); }",
+    "        i += 1;",
+    "    }",
+    "    i32 mut r = 0;",
+    "    if (found != null) { *found = i; r = *found; }",
+    "    del(found);",
+    "    return r;",
+    "}",
+    "fn wrong_arm(bool c) void {",
+    "    i32 mut* own mut p = null;",
+    "    if (c) { p = new(i32); }",
+    "    if (p != null) { del(p); } else { *p = 3; }",
+    "}",
+    "fn rotate(i32 n) void {",
+    "    i32 mut* own mut a = null;",
+    "    i32 mut* own mut b = null;",
+    "    i32 mut i = 0;",
+    "    while (i < n) {",
+    "        b = move(a);",
+    "        a = new(i32);",
+    "        i += 1;",
+    "    }",
+    "    del(a);",
+    "}",
+    "fn keep_first(i32 n) void {",
+    "    i32 mut* own mut first = null;",
+    "    i32 mut i = 0;",
+    "    while (i < n) {",
+    "        i32 mut* own p = new(i32);",
+    "        if (first == null) { first = move(p); } else { del(p); }",
+    "        i += 1;",
+    "    }",
+    "}",
+    "fn span_views(u64 n) u64 {",
+    "    u8 mut@ own mut prev = {};",
+    "    u64 mut total = 0;",
+    "    u64 mut i = 0;",
+    "    while (i < n) {",
+    "        u8 mut@ own cur = new(u8, i + 1);",
+    "        u8@ view = prev;",
+    "        total += view.len;",
+    "        del(prev);",
+    "        prev = move(cur);",
+    "        i += 1;",
+    "    }",
+    "    del(prev);",
+    "    return total;",
+    "}",
+    "fn span_reads(u64 n) u8 {",
+    "    u8 mut@ own mut prev = new(u8, 1);",
+    "    u8 mut t = 0;",
+    "    u64 mut i = 0;",
+    "    while (i < n) {",
+    "        u8 mut@ own cur = new(u8, n + 1);",
+    "        u8@ view = prev;",
+    "        t = view[0];",
+    "        del(prev);",
+    "        prev = move(cur);",
+    "        i += 1;",
+    "    }",
+    "    del(prev);",
+    "    return t;",
+    "}",
+    "struct pair { i64 a; i64 b; }",
+    "fn field_of_null() i64 {",
+    "    pair* r = null;",
+    "    i64* q = &r->b;",
+    "    if (q != null) { return *q; }",
+    "    return 0;",
+    "}",
+    "fn hidden_leak() void {",
+    "    pair* r = null;",
+    "    i64* q = &r->b;",
+    "    if (q == null) { return; }",
+    "    u8 mut@ own buf = new(u8, 4);",
+    "}",
+    "fn owner_field() i64 {",
+    "    pair mut* own p = new(pair);",
+    "    del(p);",
+    "    i64* q = &p->b;",
+    "    if (q != null) { return *q; }",
+    "    return 0;",
+    "}",
+    "fn array_element() i64 {",
+    "    i64[4]* r = null;",
+    "    i64* q = &(*r)[3];",
+    "    if (q != null) { return *q; }",
+    "    return 0;",
+    "}",
+    "fn first_field() i64 {",
+    "    pair* r = null;",
+    "    i64* q = &r->a;",
+    "    if (q != null) { return *q; }",
+    "    return 0;",
+    "}",
+    "fn heap_field() i64 {",
+    "    pair mut* own p = new(pair);",
+    "    i64* q = &p->b;",
+    "    if (q == null) { return 0; }",
+    "    i64 v = *q;",
+    "    del(p);",
+    "    return v;",
+    "}",
+    "fn copied_field() i64 {",
+    "    pair* r = null;",
+    "    i64* q = &r->b;",
+    "    i64* w = q;",
+    "    if (w != null) { return *w; }",
+    "    return 0;",
+    "}",
+    "fn slice_of_null() i64 {",
+    "    i64[4]* r = null;",
+    "    i64@ s = (*r)[1..];",
+    "    i64* q = s.ptr;",
+    "    if (q != null) { return *q; }",
+    "    return 0;",
+    "}",
+    "fn void_of_field() i64 {",
+    "    pair* r = null;",
+    "    i64* q = &r->b;",
+    "    void* v = cast(q, void*);",
+    "    if (v != null) { return *q; }",
+    "    return 0;",
+    "}",
+    "fn heap_through_cast() i64 {",
+    "    pair mut* own p = new(pair);",
+    "    i64* q = &p->b;",
+    "    void* v = cast(q, void*);",
+    "    if (v == null) { return 0; }",
+    "    i64 x = *q;",
+    "    del(p);",
+    "    return x;",
+    "}",
+    "fn reversed_chain(i32 n) i64 {",
+    "    pair* r = null;",
+    "    i64* mut q = null;",
+    "    i64* mut w = null;",
+    "    i32 mut i = 0;",
+    "    while (i < n) {",
+    "        w = q;",
+    "        q = &r->b;",
+    "        i += 1;",
+    "    }",
+    "    if (w != null) { return *w; }",
+    "    return 0;",
+    "}",
+    "struct holder { pair* p; }",
+    "struct spans { u8@ s; }",
+    "fn field_of_field() i32 {",
+    "    holder mut* own h = new(holder);",
+    "    i64* q = &h->p->a;",
+    "    if (q == null) { return 1; }",
+    "    del(h);",
+    "    return 0;",
+    "}",
+    "fn cell_of_null() i32 {",
+    "    pair* mut* own pp = new(pair*);",
+    "    i64* q = &(*pp)->a;",
+    "    if (q == null) { return 1; }",
+    "    del(pp);",
+    "    return 0;",
+    "}",
+    "fn element_of_null() i32 {",
+    "    pair* mut@ own arr = new(pair*, 2);",
+    "    i64* q = &arr[0]->a;",
+    "    if (q == null) { return 1; }",
+    "    del(arr);",
+    "    return 0;",
+    "}",
+    "fn span_field() i32 {",
+    "    spans mut* own h = new(spans);",
+    "    u8@ v = h->s[..];",
+    "    u8* q = v.ptr;",
+    "    if (q == null) { return 1; }",
+    "    del(h);",
+    "    return 0;",
+    "}",
+    "fn uaf_through_field() i64 {",
+    "    pair mut* own t = new(pair);",
+    "    holder mut* own h = new(holder);",
+    "    h->p = t;",
+    "    i64* q = &h->p->a;",
+    "    del(t);",
+    "    i64 x = *q;",
+    "    del(h);",
+    "    return x;",
+    "}",
+};
+
+fn open(ownership_source_env.env mut* e, strbuf.str_buf mut* text) void {
+    u64 mut i = 0;
+    while (i < SOURCE.len) {
+        strbuf.append(text, SOURCE[i]);
+        strbuf.push(text, '\n');
+        i += 1;
+    }
+    strbuf.append(text, "fn root() i32 { return 0; }\n");
+    ownership_source_env.open(e);
+    ownership_source_env.runtime(e);
+    assert(ownership_source_env.prepare(e, strbuf.view(text)));
+}
+
+fn row(ownership_source_env.env mut* e, string name, string correspondence, string proof)
+    ownership_source.body* {
+    ownership_source.body* found = ownership_source_env.find(e, "main", name);
+    string got = ownership_report.analysis_status(found, ownership_report.LOCAL, 0);
+    string result = ownership_report.analysis_status(found, ownership_report.LOCAL, 2);
+    if (got != correspondence || result != proof) {
+        eprintln(name, ": correspondence ", got, ", proof ", result);
+        assert(false);
+    }
+    return found;
+}
+
+fn proved(ownership_source_env.env mut* e, string name) void {
+    ownership_source.body* found = row(e, name, "complete", "complete");
+    assert(found->local.violations_len == 0 && found->local.unvalidated == 0);
+}
+
+fn validated(ownership_source_env.env mut* e, string name, ownership_api.event_kind kind,
+    string text, u32 line) void {
+    ownership_source.body* found = row(e, name, "complete", "violated");
+    assert(found->local.violations_len == 1 && found->local.unvalidated == 0);
+    ownership_source_local.violation v = found->local.violations[0];
+    if (v.kind != kind || v.name != "p" || !v.quoted || v.text != text ||
+        v.source.line != line) {
+        eprintln(name, ": ", v.name, " at line ", v.source.line, ": ", v.text);
+        assert(false);
+    }
+}
+
+// A body outside the declared scope because a value has no source that local proof knows.
+fn unknown(ownership_source_env.env mut* e, string name) void {
+    ownership_source.body* found = row(e, name, "incomplete", "incomplete");
+    assert(found->local.violations_len == 0);
+    assert(found->local.gap == ownership_source_local.missing.unknown_source);
+}
+
+// A declared body whose first incomplete operation is on `line`: scoped CI rejects it there.
+fn declared(ownership_source_env.env mut* e, string name, u32 line) void {
+    ownership_source.body* found = row(e, name, "complete", "incomplete");
+    assert(found->local.violations_len == 0);
+    ownership_api.proof_status first = found->local.first_incomplete;
+    if (!first.terminal.present || first.terminal.source.line != line) {
+        eprintln(name, ": first incomplete line ", first.terminal.source.line);
+        assert(false);
+    }
+}
+
+// A read after a test that the value is not null.
+fn null_tests(ownership_source_env.env mut* e) void {
+    // The early return takes the null path: the read below has a live allocation.
+    proved(e, "after_test");
+    // The right operand of && runs only when p is not null, and so does the body. The path
+    // that skips the right operand knows that the flag is false at the second switch.
+    proved(e, "and_test");
+    // The right operand of || runs only when p is not null. The path from the left operand
+    // knows that the flag is true at the second switch, so it takes the early return.
+    proved(e, "or_test");
+    // A negation of the test and a null on the left test the same value.
+    proved(e, "negated");
+    proved(e, "reversed");
+    // A named flag keeps the result of the test until its next write.
+    proved(e, "named");
+    // A cast keeps the source, so the test of the copy decides it for p too.
+    proved(e, "viewed");
+    // The loop test refutes the body after the release.
+    proved(e, "guarded_loop");
+    // Two null tests joined by && decide both owners.
+    proved(e, "both");
+    // The early return of an else-if chain takes the null path.
+    proved(e, "else_chain");
+    // The loop test refutes the body after the release in an earlier iteration.
+    proved(e, "counted_walk");
+    // A null test inside the arm of another keeps both owners decided.
+    proved(e, "nested_and");
+    // The loop runs only while found is null, so the store over found finds it empty.
+    proved(e, "found_once");
+    // The address of a field in a heap allocation is not null: the test refutes the return
+    // that would leak p.
+    proved(e, "heap_field");
+    // A cast keeps the heap source, so the test of the cast refutes the leaking return too.
+    proved(e, "heap_through_cast");
+    // A parameter can be null: the test decides nothing, and the read keeps its caller source.
+    proved(e, "param_test");
+    println("null tests ok");
+}
+
+// A read on the path where the test proved the value null.
+fn null_branches(ownership_source_env.env mut* e) void {
+    // Only the path without the allocation reaches the read, and a witness takes c = false.
+    validated(e, "null_branch", ownership_api.event_kind.invalid_use,
+        "empty reference has no element", NULL_BRANCH_LINE);
+    // The flag keeps the value that the test stored before the release (spec/fir.md 14.1).
+    validated(e, "freed_branch", ownership_api.event_kind.invalid_use,
+        "empty reference has no element", FREED_BRANCH_LINE);
+    // The arm of a conditional expression that the null test selects reads null.
+    validated(e, "null_read", ownership_api.event_kind.invalid_use,
+        "empty reference has no element", NULL_READ_LINE);
+    // The else arm of a test that p is not null reads null.
+    validated(e, "wrong_arm", ownership_api.event_kind.invalid_use,
+        "empty reference has no element", WRONG_ARM_LINE);
+    // `&r->b` of a null r is r plus 8 bytes, which is not null. So an empty owner in a
+    // pointer that an address through a pointer fills decides no null test. Each read through
+    // q stays unproved, and the program faults at run time.
+    declared(e, "field_of_null", FIELD_OF_NULL_LINE);
+    declared(e, "owner_field", OWNER_FIELD_LINE);
+    declared(e, "array_element", ARRAY_ELEMENT_LINE);
+    // A copy of such a pointer keeps the mark.
+    declared(e, "copied_field", COPIED_FIELD_LINE);
+    // The return does not hide the leak of buf behind a test that q can pass.
+    declared(e, "hidden_leak", HIDDEN_LEAK_LINE);
+    // The first field has offset 0, but the rule stays conservative for each address.
+    declared(e, "first_field", FIRST_FIELD_LINE);
+    // A slice through a null array pointer starts past null, and its pointer keeps the mark.
+    declared(e, "slice_of_null", SLICE_OF_NULL_LINE);
+    // A cast to a void pointer keeps the mark too.
+    declared(e, "void_of_field", VOID_OF_FIELD_LINE);
+    // A second dereference, or a span header that the referent holds, designates the storage
+    // of another reference (D17.17). Such an address or slice has no known source, so its null
+    // test decides nothing: each q here is null at run time, and the early return leaks.
+    unknown(e, "field_of_field");
+    unknown(e, "cell_of_null");
+    unknown(e, "element_of_null");
+    unknown(e, "span_field");
+    // q points into t and not into h, so its read after del(t) is a use after release. The
+    // read has no proved source and stays unproved.
+    unknown(e, "uaf_through_field");
+    // w copies q before the loop body gives q its address, so the mark of w needs a second
+    // pass over the statements. After two iterations w is r plus 8 bytes.
+    declared(e, "reversed_chain", REVERSED_CHAIN_LINE);
+    println("null branches ok");
+}
+
+fn flags(ownership_source_env.env mut* e) void {
+    // The constant write replaces the stored test, so the null path reaches the read.
+    ownership_source.body* again = row(e, "rewritten", "complete", "incomplete");
+    assert(again->local.unvalidated == 1);
+    assert(again->local.first_incomplete.terminal.source.line == REWRITTEN_LINE);
+    // A copy keeps the value of its flag, and a negation inverts it.
+    proved(e, "copied");
+    // A constant flag refutes the early return that would leak p.
+    proved(e, "constant_flag");
+    // The value of found leaves the loop on each path, and each path releases p once.
+    proved(e, "found_flag");
+    // A flag hides no release: the write through p after del stays unproved. The witness
+    // takes c = false at the first test, so it does not reach the write.
+    declared(e, "freed_flag", FREED_FLAG_LINE);
+    // A copy of the parameter c keeps the correlation, so only the path that released p
+    // reaches the write through q. The witness takes the other arm first, as above.
+    declared(e, "gone_twice", GONE_TWICE_LINE);
+    println("flags ok");
+}
+
+fn flag_name(ownership_source_local.context* c, u64 i, strbuf.str_buf mut* out) void {
+    ownership_flow.flag_edge edge = c->flag_edges[i];
+    strbuf.clear(out);
+    strbuf.append_u64(out, cast(edge.block, u64));
+    strbuf.push(out, '.');
+    strbuf.append_u64(out, cast(edge.target_index, u64));
+    strbuf.push(out, ' ');
+    strbuf.append_u64(out, cast(edge.flag.ordinal, u64));
+    strbuf.append(out, edge.value ? " true" : " false");
+    if (edge.keep) { strbuf.append(out, " keep"); }
+}
+
+// The edges of the switches of and_test. Only the edge that skips the right operand of &&
+// keeps the flag: the second switch reads it. The right operand writes the flag first.
+fn flag_edges() void {
+    ownership_source_env.env mut environment = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&environment, &text);
+    defer ownership_source_env.close(&environment);
+    ownership_source.body* found = ownership_source_env.find(&environment, "main", "and_test");
+    ownership_source_local.context* c = &found->local;
+    string[6] expected = {"1.0 1 true", "1.1 1 false", "3.0 5 true", "3.1 5 false keep",
+        "6.0 5 true", "6.1 5 false"};
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    bool mut same = c->flag_edges_len == expected.len;
+    u64 mut i = 0;
+    while (i < c->flag_edges_len) {
+        flag_name(c, i, &got);
+        if (i >= expected.len || strbuf.view(&got) != expected[i]) { same = false; }
+        i += 1;
+    }
+    if (!same) {
+        i = 0;
+        while (i < c->flag_edges_len) {
+            flag_name(c, i, &got);
+            eprintln("    \"", strbuf.view(&got), "\",");
+            i += 1;
+        }
+        assert(false);
+    }
+    // The comparison and the copies into the flag are its writes. The parameter c has none.
+    u64 mut writes = 0;
+    i = 0;
+    while (i < c->steps_len) {
+        if (c->steps[i].kind == ownership_flow.step_kind.flag) { writes += 1; }
+        i += 1;
+    }
+    assert(writes == 4);
+    assert(c->flag[1] && c->flag[5] && c->flag[6] && c->flag[7] && !c->flag[2]);
+    println("flag edges ok");
+}
+
+fn main() i32 {
+    ownership_source_env.env mut environment = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    flag_edges();
+    open(&environment, &text);
+    defer ownership_source_env.close(&environment);
+    ownership_source.analyze(&environment.source);
+    null_tests(&environment);
+    null_branches(&environment);
+    flags(&environment);
+    return 0;
+}

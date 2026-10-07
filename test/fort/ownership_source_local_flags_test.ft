@@ -1,0 +1,461 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| flag locals ok
+//| flag steps ok
+//| flag edges ok
+//| flag liveness ok
+//| offset marks ok
+/// Pins the flags that the local producer finds, the flag step of each write of a flag, the
+/// flag edges of each switch on a flag and the blocks where each flag is live (spec/fir.md 14.1).
+/// A step reads `block.gap.order flag kind flag`, then `<-from` and the value where it has them.
+/// An edge reads `block.index flag value`, then `keep`.
+import fir;
+import flag_steps;
+import ownership_flow;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import std.strbuf;
+
+string[116] SOURCE = {
+    "extern fn ext() bool;",
+    "fn probe() bool { return true; }",
+    "fn chained(i32* p) i32 {",
+    "    bool a = p == null;",
+    "    bool b = a;",
+    "    bool c = !b;",
+    "    if (c) { return *p; }",
+    "    return 0;",
+    "}",
+    "fn taken(bool c) i32 {",
+    "    bool mut b = c;",
+    "    bool mut* pb = &b;",
+    "    *pb = true;",
+    "    if (b) { return 1; }",
+    "    return 0;",
+    "}",
+    "fn returned(bool c) bool {",
+    "    bool b = !c;",
+    "    return b;",
+    "}",
+    "fn integer(i32 k) i32 {",
+    "    switch (k) {",
+    "    case 0: return 1;",
+    "    default: return 2;",
+    "    }",
+    "}",
+    "fn writes(i32* p, i32* q, i32 n) i32 {",
+    "    bool mut ok = true;",
+    "    ok = false;",
+    "    ok = p == null;",
+    "    ok = null != p;",
+    "    ok = p == q;",
+    "    ok = probe();",
+    "    ok = ext();",
+    "    ok = n < 3;",
+    "    if (ok) { return 1; }",
+    "    return 0;",
+    "}",
+    "fn casted(i32 mut* own p) bool {",
+    "    void* v = cast(p, void*);",
+    "    bool empty = v == null;",
+    "    del(p);",
+    "    return empty;",
+    "}",
+    "fn scoped(bool c) i32 {",
+    "    i32 mut r = 0;",
+    "    {",
+    "        bool inner = !c;",
+    "        if (inner) { r = 1; }",
+    "    }",
+    "    return r;",
+    "}",
+    "fn twice(bool c) i32 {",
+    "    i32 mut r = 0;",
+    "    if (c) { r = 1; }",
+    "    if (c) { r += 1; }",
+    "    return r;",
+    "}",
+    "fn looped(bool c, i32 n) i32 {",
+    "    i32 mut r = 0;",
+    "    i32 mut i = 0;",
+    "    while (i < n) {",
+    "        if (c) { r += 1; }",
+    "        i += 1;",
+    "    }",
+    "    return r;",
+    "}",
+    "fn ored(i32* p, bool c) i32 {",
+    "    if (p == null || c) { return 0; }",
+    "    return *p;",
+    "}",
+    "fn picked(i32* p) i32 {",
+    "    return p != null ? *p : 0;",
+    "}",
+    "fn negated(bool c) i32 {",
+    "    if (!c) { return 1; }",
+    "    return 0;",
+    "}",
+    "struct cell { i64 a; i64 b; }",
+    "fn addressed(cell* r) i64 {",
+    "    i64* q = &r->b;",
+    "    i64* w = q;",
+    "    if (w == null) { return 0; }",
+    "    return *w;",
+    "}",
+    "fn sliced(i64[4]* r) i64 {",
+    "    i64@ s = (*r)[1..];",
+    "    i64* q = s.ptr;",
+    "    void* v = cast(q, void*);",
+    "    i64@ whole = s[..];",
+    "    if (v == null) { return 0; }",
+    "    return *q + whole[0];",
+    "}",
+    "i64 counter = 3;",
+    "fn plain(cell* r, u8@ bytes, cell mut* own p) i64 {",
+    "    cell* copy = r;",
+    "    i64* global = &counter;",
+    "    u8* first = bytes.ptr;",
+    "    cell* view = p;",
+    "    i64 x = copy == null || global == null || first == null || view == null ? 0 : view->a;",
+    "    del(p);",
+    "    return x;",
+    "}",
+    "fn reversed_chain(i32 n) i64 {",
+    "    cell* r = null;",
+    "    i64* mut q = null;",
+    "    i64* mut w = null;",
+    "    i32 mut i = 0;",
+    "    while (i < n) {",
+    "        w = q;",
+    "        q = &r->b;",
+    "        i += 1;",
+    "    }",
+    "    if (w != null) { return *w; }",
+    "    return 0;",
+    "}",
+};
+
+fn open(ownership_source_env.env mut* e, strbuf.str_buf mut* text) void {
+    u64 mut i = 0;
+    while (i < SOURCE.len) {
+        strbuf.append(text, SOURCE[i]);
+        strbuf.push(text, '\n');
+        i += 1;
+    }
+    strbuf.append(text, "fn root() i32 { return 0; }\n");
+    ownership_source_env.open(e);
+    ownership_source_env.runtime(e);
+    assert(ownership_source_env.prepare(e, strbuf.view(text)));
+}
+
+fn context(ownership_source_env.env mut* e, string name) ownership_source_local.context* {
+    ownership_source.body* row = ownership_source_env.find(e, "main", name);
+    assert(row->local.initialized && !row->local.solved);
+    return &row->local;
+}
+
+fn describe_step(ownership_flow.step* s, strbuf.str_buf mut* out) void {
+    strbuf.clear(out);
+    strbuf.append_u64(out, cast(s->block, u64));
+    strbuf.push(out, '.');
+    strbuf.append_u64(out, cast(s->gap, u64));
+    strbuf.push(out, '.');
+    strbuf.append_u64(out, cast(s->order, u64));
+    flag_steps.describe_flag(s, out);
+}
+
+fn describe_edge(ownership_flow.flag_edge edge, strbuf.str_buf mut* out) void {
+    strbuf.clear(out);
+    strbuf.append_u64(out, cast(edge.block, u64));
+    strbuf.push(out, '.');
+    strbuf.append_u64(out, cast(edge.target_index, u64));
+    strbuf.push(out, ' ');
+    strbuf.append_u64(out, cast(edge.flag.ordinal, u64));
+    strbuf.append(out, edge.value ? " true" : " false");
+    if (edge.keep) { strbuf.append(out, " keep"); }
+}
+
+// Prints the flag steps and flag edges of `name` when they differ from `steps` and `edges`.
+fn expect(ownership_source_env.env mut* e, string name, string@ steps, string@ edges) void {
+    ownership_source_local.context* c = context(e, name);
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    bool mut same = true;
+    u64 mut n = 0;
+    u64 mut i = 0;
+    while (i < c->steps_len) {
+        if (c->steps[i].kind == ownership_flow.step_kind.flag) {
+            describe_step(&c->steps[i], &got);
+            if (n >= steps.len || strbuf.view(&got) != steps[n]) { same = false; }
+            n += 1;
+        }
+        i += 1;
+    }
+    if (n != steps.len || c->flag_edges_len != edges.len) { same = false; }
+    i = 0;
+    while (i < c->flag_edges_len) {
+        describe_edge(c->flag_edges[i], &got);
+        if (i >= edges.len || strbuf.view(&got) != edges[i]) { same = false; }
+        i += 1;
+    }
+    if (same) { return; }
+    eprintln(name, " steps:");
+    i = 0;
+    while (i < c->steps_len) {
+        if (c->steps[i].kind == ownership_flow.step_kind.flag) {
+            describe_step(&c->steps[i], &got);
+            eprintln("    \"", strbuf.view(&got), "\",");
+        }
+        i += 1;
+    }
+    eprintln(name, " edges:");
+    i = 0;
+    while (i < c->flag_edges_len) {
+        describe_edge(c->flag_edges[i], &got);
+        eprintln("    \"", strbuf.view(&got), "\",");
+        i += 1;
+    }
+    assert(false);
+}
+
+fn flag_set(ownership_source_local.context* c, u32@ expected) bool {
+    u64 mut count = 0;
+    u64 mut n = 0;
+    while (n < c->flag.len) {
+        if (c->flag[n]) { count += 1; }
+        n += 1;
+    }
+    if (count != expected.len) { return false; }
+    u64 mut i = 0;
+    while (i < expected.len) {
+        if (!c->flag[cast(expected[i], u64)]) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+// The flags of each body: the bool locals that a switch tests, and the bool locals that a copy
+// or a negation stores into a flag.
+fn flag_locals(ownership_source_env.env mut* e) void {
+    // c is the switch condition; b reaches it through a negation, a through a copy, and the
+    // comparison temporary _5 through a copy into a.
+    u32[5] chained = {2, 3, 4, 5, 6};
+    assert(flag_set(context(e, "chained"), chained[..]));
+    // An address names b, so no step can follow its writes: it is no flag.
+    u32[1] none = {0};
+    assert(flag_set(context(e, "taken"), none[0..0]));
+    // No switch reads b or c: a return reads them.
+    assert(flag_set(context(e, "returned"), none[0..0]));
+    // An integer switch tests no flag.
+    assert(flag_set(context(e, "integer"), none[0..0]));
+    assert(flag_set(context(e, "casted"), none[0..0]));
+    // Each temporary that ok copies is a flag too.
+    u32[7] writes = {4, 5, 6, 7, 8, 9, 10};
+    assert(flag_set(context(e, "writes"), writes[..]));
+    // The parameter c is a flag through the negation into _4.
+    u32[3] scoped = {1, 3, 4};
+    assert(flag_set(context(e, "scoped"), scoped[..]));
+    u32[1] twice = {1};
+    assert(flag_set(context(e, "twice"), twice[..]));
+    u32[2] looped = {1, 5};
+    assert(flag_set(context(e, "looped"), looped[..]));
+    // The && temporary _3 takes both the test of p and the parameter c.
+    u32[3] ored = {2, 3, 4};
+    assert(flag_set(context(e, "ored"), ored[..]));
+    // The address temporary _4, q (_2) and w (_3) can hold an address past a null pointer. The
+    // parameter r (_1) and the flag _5 cannot.
+    ownership_source_local.context* addressed = context(e, "addressed");
+    assert(addressed->offset[4] && addressed->offset[2] && addressed->offset[3]);
+    assert(!addressed->offset[1] && !addressed->offset[5]);
+    u32[1] tested = {5};
+    assert(flag_set(addressed, tested[..]));
+    // A parameter tested for null carries no mark.
+    assert(!context(e, "chained")->offset[1]);
+    println("flag locals ok");
+}
+
+fn flag_steps_and_edges(ownership_source_env.env mut* e) void {
+    string[1] none = {""};
+    // A null test follows the read of its pointer at its gap. Each dead marker clears a flag.
+    string[11] chained_steps = {
+        "0.1.1 flag null 5<-1 true",
+        "0.2.0 flag copy 2<-5",
+        "0.4.0 flag copy 3<-2",
+        "0.6.0 flag negate 6<-3",
+        "0.7.0 flag copy 4<-6",
+        "1.1.0 flag clear 2",
+        "1.2.0 flag clear 3",
+        "1.3.0 flag clear 4",
+        "2.1.0 flag clear 2",
+        "2.2.0 flag clear 3",
+        "2.3.0 flag clear 4",
+    };
+    string[2] chained_edges = {"0.0 4 true", "0.1 4 false"};
+    expect(e, "chained", chained_steps[..], chained_edges[..]);
+    // Bodies without a flag have no flag step and no flag edge.
+    expect(e, "taken", none[0..0], none[0..0]);
+    expect(e, "returned", none[0..0], none[0..0]);
+    expect(e, "integer", none[0..0], none[0..0]);
+    expect(e, "casted", none[0..0], none[0..0]);
+    expect(e, "probe", none[0..0], none[0..0]);
+    // Each write form: two constants, == null and null != with the pointer on either side, a
+    // pointer comparison, a fort call, an extern call and an integer test. Each stored value
+    // reaches ok through a copy. A call result comes after the call's own step.
+    string[16] writes_steps = {
+        "0.1.0 flag constant 4 true",
+        "0.2.0 flag constant 4 false",
+        "0.3.1 flag null 5<-1 true",
+        "0.4.0 flag copy 4<-5",
+        "0.5.1 flag null 6<-1 false",
+        "0.6.0 flag copy 4<-6",
+        "0.7.2 flag clear 7",
+        "0.8.0 flag copy 4<-7",
+        "0.9.1 flag clear 8",
+        "0.10.0 flag copy 4<-8",
+        "0.11.1 flag clear 9",
+        "0.12.0 flag copy 4<-9",
+        "0.13.0 flag clear 10",
+        "0.14.0 flag copy 4<-10",
+        "1.1.0 flag clear 4",
+        "2.1.0 flag clear 4",
+    };
+    string[2] writes_edges = {"0.0 4 true", "0.1 4 false"};
+    expect(e, "writes", writes_steps[..], writes_edges[..]);
+    // The scope of inner ends at its dead marker before the return.
+    string[3] scoped_steps = {"0.3.0 flag negate 4<-1", "0.4.0 flag copy 3<-4",
+        "2.0.0 flag clear 3"};
+    string[2] scoped_edges = {"0.0 3 true", "0.1 3 false"};
+    expect(e, "scoped", scoped_steps[..], scoped_edges[..]);
+    // The first test of c keeps its value for the second, which keeps nothing.
+    string[4] twice_edges = {"0.0 1 true keep", "0.1 1 false keep", "2.0 1 true",
+        "2.1 1 false"};
+    expect(e, "twice", none[0..0], twice_edges[..]);
+    // The loop test is written before each read. The test of c in the body keeps its value,
+    // because the next iteration reads c again.
+    string[1] looped_steps = {"1.0.0 flag clear 5"};
+    string[4] looped_edges = {"1.0 5 true", "1.1 5 false", "2.0 1 true keep",
+        "2.1 1 false keep"};
+    expect(e, "looped", looped_steps[..], looped_edges[..]);
+    // The || temporary keeps true for the second switch. Its otherwise target writes it first.
+    string[3] ored_steps = {"0.0.1 flag null 4<-1 true", "0.1.0 flag copy 3<-4",
+        "1.0.0 flag copy 3<-2"};
+    string[4] ored_edges = {"0.0 3 true keep", "0.1 3 false", "2.0 3 true", "2.1 3 false"};
+    expect(e, "ored", ored_steps[..], ored_edges[..]);
+    // A conditional expression switches on the test itself.
+    string[1] picked_steps = {"0.0.1 flag null 2<-1 false"};
+    string[2] picked_edges = {"0.0 2 true", "0.1 2 false"};
+    expect(e, "picked", picked_steps[..], picked_edges[..]);
+    // The address of a field fills q, and w copies q: the null test of w decides only "not
+    // null".
+    string[1] addressed_steps = {"0.5.1 flag null 5<-3 true offset"};
+    string[2] addressed_edges = {"0.0 5 true", "0.1 5 false"};
+    expect(e, "addressed", addressed_steps[..], addressed_edges[..]);
+    string[1] negated_steps = {"0.0.0 flag negate 2<-1"};
+    string[2] negated_edges = {"0.0 2 true", "0.1 2 false"};
+    expect(e, "negated", negated_steps[..], negated_edges[..]);
+    println("flag steps ok");
+    println("flag edges ok");
+}
+
+fn live_blocks(ownership_source_local.context* c, u32 local, bool@ expected) bool {
+    u64 mut b = 0;
+    while (b < expected.len) {
+        if (ownership_source_local.flag_live_at(c, local, cast(b, u32)) != expected[b]) {
+            eprintln("flag ", local, " block ", b);
+            return false;
+        }
+        b += 1;
+    }
+    return true;
+}
+
+// A flag is live at the entry of a block when a read of it can follow before its next write.
+fn flag_liveness(ownership_source_env.env mut* e) void {
+    // c: read by the switches of bb0 and bb2, so live at bb0, bb1 and bb2 and dead after.
+    bool[6] twice = {true, true, true, false, false, false};
+    assert(live_blocks(context(e, "twice"), 1, twice[..]));
+    // c: each block of the loop reaches the test of c in bb2; the exit bb3 does not.
+    bool[8] looped_c = {true, true, true, false, true, true, true, true};
+    assert(live_blocks(context(e, "looped"), 1, looped_c[..]));
+    // The loop test _5: bb1 writes it before the switch reads it, so it is live nowhere.
+    bool[8] looped_test = {false, false, false, false, false, false, false, false};
+    assert(live_blocks(context(e, "looped"), 5, looped_test[..]));
+    // The || temporary: the second switch in bb2 reads it, and bb1 writes it first.
+    bool[5] ored = {false, false, true, false, false};
+    assert(live_blocks(context(e, "ored"), 3, ored[..]));
+    // The parameter c of ored: bb1 copies it into the temporary.
+    bool[5] ored_c = {true, true, false, false, false};
+    assert(live_blocks(context(e, "ored"), 2, ored_c[..]));
+    println("flag liveness ok");
+}
+
+// Whether the named local of the body carries the offset mark.
+fn mark_of(ownership_source_local.context* c, string name) bool {
+    u32 mut n = 0;
+    while (n < fir.local_count(c->function)) {
+        if (fir.local_name(fir.local_at(c->function, n)) == name) {
+            return c->offset[cast(n, u64)];
+        }
+        n += 1;
+    }
+    panic("ownership_source_local_flags_test: local is absent");
+}
+
+// The offset marks follow each copy that the producer makes: a slice through a pointer marks
+// its span, the pointer of a marked span is marked, and so are a cast and a whole slice of a
+// marked value. A plain copy, a global address, the pointer of an unmarked span and a view of
+// a heap owner stay unmarked.
+fn offset_marks(ownership_source_env.env mut* e) void {
+    ownership_source_local.context* sliced = context(e, "sliced");
+    assert(mark_of(sliced, "s") && mark_of(sliced, "q") && mark_of(sliced, "v"));
+    assert(mark_of(sliced, "whole") && !mark_of(sliced, "r"));
+    ownership_source_local.context* plain = context(e, "plain");
+    assert(!mark_of(plain, "copy") && !mark_of(plain, "global") && !mark_of(plain, "first"));
+    assert(!mark_of(plain, "view") && !mark_of(plain, "r") && !mark_of(plain, "p"));
+    // Each null test of plain reads an unmarked pointer, so none has the offset mark.
+    u64 mut tests = 0;
+    u64 mut i = 0;
+    while (i < plain->steps_len) {
+        ownership_flow.step* s = &plain->steps[i];
+        if (s->kind == ownership_flow.step_kind.flag &&
+            s->flag.kind == ownership_flow.flag_kind.null_test) {
+            assert(!s->flag.offset);
+            tests += 1;
+        }
+        i += 1;
+    }
+    assert(tests == 4);
+    // The test of the cast v in sliced decides only "not null".
+    string[1] sliced_steps = {"2.1.1 flag null 18<-4 true offset"};
+    string[2] sliced_edges = {"2.0 18 true", "2.1 18 false"};
+    expect(e, "sliced", sliced_steps[..], sliced_edges[..]);
+    // In the loop, w copies q before q takes the address of a field. The mark reaches w in the
+    // second pass, and the null test of w carries it.
+    ownership_source_local.context* chain = context(e, "reversed_chain");
+    assert(mark_of(chain, "q") && mark_of(chain, "w") && !mark_of(chain, "r"));
+    u64 mut offset_tests = 0;
+    i = 0;
+    while (i < chain->steps_len) {
+        if (chain->steps[i].kind == ownership_flow.step_kind.flag &&
+            chain->steps[i].flag.kind == ownership_flow.flag_kind.null_test &&
+            chain->steps[i].flag.offset) { offset_tests += 1; }
+        i += 1;
+    }
+    assert(offset_tests == 1);
+    println("offset marks ok");
+}
+
+fn main() i32 {
+    ownership_source_env.env mut environment = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&environment, &text);
+    defer ownership_source_env.close(&environment);
+    flag_locals(&environment);
+    flag_steps_and_edges(&environment);
+    flag_liveness(&environment);
+    offset_marks(&environment);
+    return 0;
+}
