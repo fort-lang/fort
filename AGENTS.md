@@ -105,14 +105,13 @@ new `main` and silently reverts its newer commits). A feature branch made of sev
 units of work (for example the language design, or a compiler pass plus its tests plus its
 documentation) keeps its individual commits.
 GitHub PR CI supplies the merge gate (2026-10-01, T-306). Local final gates are not required.
-Push the branch and open a PR against `main`. Require green PR `ci-status`.
-Require enforced `ci-status` and an up-to-date branch. Permit no ruleset bypass actors.
-The coordinator verifies these requirements before merging. Never bypass them.
-GitHub has no `--ff-only` PR option. Rebase merge preserves linear history.
-Merge only through GitHub. Do not merge or push `main` locally.
-Use `gh pr merge <number> --rebase --match-head-commit <reviewed-head-sha>` without `--admin`.
-Record the reviewed PR head, CI run, tested revision, and merged `main` SHA separately.
-Delete the branch after GitHub reports the merge. A red `ci-status` on `main` blocks the next merge.
+Push the branch and open a PR against `main`. Require green PR `ci-status` and the merge queue.
+Never merge or push `main` locally. Permit no ruleset bypass actors; never bypass the ruleset.
+`gh pr merge <number> --rebase --match-head-commit <reviewed-head-sha>` queues the PR; never add
+`--admin`. The ruleset's merge method decides the merge; `--match-head-commit` pins the head. The
+queue tests `main` plus the queued PRs as one commit, merges them in order and moves `main` to that
+commit, so `main` gets no push run. A nightly run of the full matrix tests `main`. Queue no PR while
+the latest `ci-status` on `main` (the queue run of its head or the nightly run) is red.
 
 ### Tickets
 - Keep one markdown ticket per deliverable in `.tickets/` in the main checkout, not a worktree.
@@ -196,14 +195,15 @@ Delete the branch after GitHub reports the merge. A red `ci-status` on `main` bl
 - Reviewer: follows its TOML. Check tests, citations, commits, scope, xfail, and the ticket.
   Pending PR CI remains pending. Never edit or merge. Route learning below.
 - Coordinator: require zero open must-fix findings and green PR `ci-status` for the current head.
-  Record the PR URL, head SHA, tested revision, base SHA, CI run URL, and relevant job counts.
-  Local test results do not replace PR CI. A new head invalidates the previous CI result.
-  If `main` moves, update the branch and require fresh PR CI. Review again if behavior changes.
-  Read `git diff --stat main...HEAD` and new files. Merge through GitHub as specified above.
-  Record merged SHA and agent tokens. Tick merge criteria after GitHub reports merged state.
-  Move the ticket to `done/`. Remove its worktree and branch. Assign newly ready tickets.
-  Preserve CI evidence before removal. Record job results, self-hosted counts, and ctest totals.
-  Re-read each count constant that two branches change. Run the tool that owns each count.
+  Record the PR URL, head and base SHA, job counts, the PR CI run (on the PR merge ref) and the
+  merge-group CI run (on the merge-group commit). A new head invalidates the old CI result. If the
+  queue drops a PR, record the failed merge-group run. After a flaky or timed-out run, queue the PR
+  again unchanged. After a conflict, rebase, require fresh PR CI, and queue the new head SHA.
+  Read `git diff --stat main...HEAD` and new files. Then queue the PR as above. Record merged SHA
+  and agent tokens. Tick merge criteria after GitHub reports merged state. Move the ticket to
+  `done/`. Remove its worktree and branch. Assign newly ready tickets. Preserve CI evidence before
+  removal. Record job results, self-hosted counts, and ctest totals. Re-read each count constant
+  that two branches change. Run the tool that owns each count.
 
 ### Self-Updating Context (the routing rule)
 
