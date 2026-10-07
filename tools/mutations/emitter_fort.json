@@ -1,0 +1,861 @@
+{
+  "comment": [
+    "The fort emitter's table. src/fort/gen.ft, gen_expr.ft, gen_stmt.ft and",
+    "gen_data.ft cited 86 decisions, D16 (5 bare citations), 19 items of",
+    "spec/toolchain.md 6 and 2 sections of that file at a3e0c95d, the last",
+    "tree with citations. gen_fir.ft cites toolchain.md 1 today. Each has a",
+    "row here, except D2.4 and D9.5: no emitter line implements them (the",
+    "lexer refuses a reserved word, and modules.ft refuses an import cycle).",
+    "Rows whose name ends in a letter are further facets; D10.8 stands",
+    "outside the cited universe. b0606efa replaced the direct emitter by the",
+    "FIR path, so each row names the current line that decides the rule.",
+    "D4.4 and D17.8 are probes that panic when reached; both lines are dead,",
+    "because flt_from_int never fails for an integer constant and the",
+    "checker refuses a discarded `move`. The stages are targeted: the FIR",
+    "corpus, the gen_ and fir_ module suites, the driver_ module suites and",
+    "four areas of the language corpus. The table runs on a darwin host with",
+    "--runner 'bash -c'; ZERO_AR_DATE=1 keeps the md5 guard."
+  ],
+  "sources": [
+    "src/fort/fir.ft",
+    "src/fort/fir_llvm.ft",
+    "src/fort/fir_lower.ft",
+    "src/fort/gen.ft",
+    "src/fort/gen_data.ft",
+    "src/fort/gen_fir.ft"
+  ],
+  "binary": "build/Darwin/debug/fort",
+  "build": "ZERO_AR_DATE=1 ninja -C build/Darwin/debug fort",
+  "stages": [
+    {
+      "name": "the FIR corpus",
+      "command": "python3 test/fir/run_tests.py --fort build/Darwin/debug/fort --std-dir build/Darwin/debug/std"
+    },
+    {
+      "name": "the emitter suites",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Darwin/debug/fort --std-dir build/Darwin/debug/std --cc /opt/homebrew/bin/clang --target arm64-apple-macosx11.0.0 --opt /opt/homebrew/bin/opt --verify-ir -j 10 gen_ fir_"
+    },
+    {
+      "name": "the driver suites",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Darwin/debug/fort --std-dir build/Darwin/debug/std --cc /opt/homebrew/bin/clang --target arm64-apple-macosx11.0.0 --opt /opt/homebrew/bin/opt --verify-ir -j 10 driver_"
+    },
+    {
+      "name": "the targeted language areas",
+      "command": "python3 test/lang/run_tests.py --fort build/Darwin/debug/fort --std-dir build/Darwin/debug/std --cc /opt/homebrew/bin/clang --target arm64-apple-macosx11.0.0 --opt /opt/homebrew/bin/opt --verify-ir -j 10 --xfail test/lang/xfail.txt run/globals/ run/ffi/ run/modes/ run/builtins/"
+    }
+  ],
+  "mutations": [
+    {
+      "decision": "D2.10",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    case lexer.tok_kind.caret:\n        return fir.rvalue_kind.rv_xor;",
+      "new": "    case lexer.tok_kind.caret:\n        return fir.rvalue_kind.rv_or;",
+      "what": "the token `^` lowers to `or` and not to `xor`"
+    },
+    {
+      "decision": "D3.1",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "        if (sign) {\n            return \"slt\";",
+      "new": "        if (sign) {\n            return \"ult\";",
+      "what": "`<` on a signed type is an unsigned compare"
+    },
+    {
+      "decision": "D3.2",
+      "file": "src/fort/gen.ft",
+      "old": "    return t->kind == types.type_kind.k_prim && prim.prim_is_signed(t->prim);\n}",
+      "new": "    return t->kind == types.type_kind.k_prim\n        && (prim.prim_is_signed(t->prim) || t->prim == prim.prim_kind.prim_char);\n}",
+      "what": "`char` is signed: it compares, widens and prints as a signed byte"
+    },
+    {
+      "decision": "D3.3",
+      "file": "src/fort/gen.ft",
+      "old": "    if (t->prim == prim.prim_kind.prim_bool) {\n        return 1;",
+      "new": "    if (t->prim == prim.prim_kind.prim_bool) {\n        return 8;",
+      "what": "`bool` is 8 bits as a value instead of 1"
+    },
+    {
+      "decision": "D3.4",
+      "file": "src/fort/fir_lower.ft",
+      "old": "        if (n->name == \"len\") {\n            return fir.place_field(lw->f, base, LEN_FIELD);\n        }\n        return fir.place_field(lw->f, base, PTR_FIELD);",
+      "new": "        if (n->name == \"len\") {\n            return fir.place_field(lw->f, base, PTR_FIELD);\n        }\n        return fir.place_field(lw->f, base, LEN_FIELD);",
+      "what": "`.len` and `.ptr` pseudo-fields swapped"
+    },
+    {
+      "decision": "D3.5",
+      "file": "src/fort/gen.ft",
+      "old": "u64 SPAN_FIELD_PTR = 0;\nu64 SPAN_FIELD_LEN = 1;",
+      "new": "u64 SPAN_FIELD_PTR = 1;\nu64 SPAN_FIELD_LEN = 0;",
+      "what": "the span header's two fields swapped where the emitter writes and reads them"
+    },
+    {
+      "decision": "D3.6",
+      "file": "src/fort/gen.ft",
+      "old": "    strbuf.append_u64(&g->scratch, t->len);\n    strbuf.append(&g->scratch, \" x \");",
+      "new": "    strbuf.append_u64(&g->scratch, t->len + 1);\n    strbuf.append(&g->scratch, \" x \");",
+      "what": "`[N x T]` printed as `[N+1 x T]`"
+    },
+    {
+      "decision": "D3.7",
+      "file": "src/fort/fir.ft",
+      "old": "        if (t->kind == types.type_kind.k_string) {\n            return types.type_prim(f->tt, prim.prim_kind.prim_char);",
+      "new": "        if (t->kind == types.type_kind.k_string) {\n            return types.type_prim(f->tt, prim.prim_kind.prim_u8);",
+      "what": "an element of a `string` is `u8` and not `char`"
+    },
+    {
+      "decision": "D3.7b",
+      "file": "src/fort/gen_data.ft",
+      "old": "    strbuf.append(out, \"\\\\00\\\"\");",
+      "new": "    strbuf.append(out, \"\\\"\");",
+      "what": "a string constant loses the trailing NUL that its length excludes"
+    },
+    {
+      "decision": "D3.8",
+      "file": "src/fort/gen_fir.ft",
+      "old": "            strbuf.append(&g->named, gen.gen_mem_type(g, f->ty));",
+      "new": "            if (f->ty->kind == types.type_kind.k_ptr) {\n                strbuf.append(&g->named, \"i64\");\n            } else {\n                strbuf.append(&g->named, gen.gen_mem_type(g, f->ty));\n            }",
+      "what": "a pointer field of a named struct type prints as `i64`: same size, same offsets, other text"
+    },
+    {
+      "decision": "D3.9",
+      "file": "src/fort/gen.ft",
+      "old": "        return cast(4 * prim.PRIM_BITS_PER_BYTE, u32);",
+      "new": "        return cast(8 * prim.PRIM_BITS_PER_BYTE, u32);",
+      "what": "an enum is 64 bits wide as a value and not 32"
+    },
+    {
+      "decision": "D3.10",
+      "file": "src/fort/gen.ft",
+      "old": "    case types.type_kind.k_ptr, types.type_kind.k_voidptr, types.type_kind.k_fn:\n        return \"ptr\";",
+      "new": "    case types.type_kind.k_fn:\n        return \"i64\";\n    case types.type_kind.k_ptr, types.type_kind.k_voidptr:\n        return \"ptr\";",
+      "what": "a function pointer is `i64` and not `ptr`"
+    },
+    {
+      "decision": "D3.11",
+      "file": "src/fort/gen.ft",
+      "old": "    case types.type_kind.k_ptr, types.type_kind.k_voidptr, types.type_kind.k_fn:\n        return \"ptr\";",
+      "new": "    case types.type_kind.k_voidptr:\n        return \"i64\";\n    case types.type_kind.k_ptr, types.type_kind.k_fn:\n        return \"ptr\";",
+      "what": "`void*` is `i64` and not `ptr`"
+    },
+    {
+      "decision": "D3.14",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "    return gen.gen_resize(g, v, from_bits, gen.gen_value_type(g, to), to_bits,\n                          gen.gen_is_signed(from));",
+      "new": "    return gen.gen_resize(g, v, from_bits, gen.gen_value_type(g, to), to_bits,\n                          false);",
+      "what": "a widening cast zero-extends a signed source"
+    },
+    {
+      "decision": "D3.15",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "    gen.gen_memcpy(t->g, to, align, from, align, types.type_sizeof(ty));",
+      "new": "    gen.gen_memcpy(t->g, to, align, from, align, types.type_sizeof(ty) - 1);",
+      "what": "an aggregate copy moves one byte less than `sizeof` of its type; the checker folds `sizeof` itself, and this copy is one place where the emitter uses the D3.15 size"
+    },
+    {
+      "decision": "D4.3",
+      "file": "src/fort/gen.ft",
+      "old": "    return const_bits(g, ty, consts.cv_bits(consts.cv_as_int(v)), gen_int_bits(t),",
+      "new": "    u64 mut code = consts.cv_bits(consts.cv_as_int(v));\n    if (v.kind == consts.cval_kind.cv_char) {\n        code = 63;\n    }\n    return const_bits(g, ty, code, gen_int_bits(t),",
+      "what": "a `char` constant emits 63 and not its code point"
+    },
+    {
+      "decision": "D4.4",
+      "file": "src/fort/gen.ft",
+      "old": "            gen_todo(g, diag.loc{}, \"a float constant that is not finite\");",
+      "new": "            panic(\"gen.gen_const_float: reachability probe\");",
+      "what": "a probe: the guard for a float constant that is not finite panics when reached"
+    },
+    {
+      "decision": "D4.6",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    if ((n->ann & check.ANN_CONST) != 0) {\n        *out = fir.operand_const(constant_of(n->ty, check.check_node_value(lw->ck, n)));",
+      "new": "    if ((n->ann & check.ANN_CONST) != 0 && false) {\n        *out = fir.operand_const(constant_of(n->ty, check.check_node_value(lw->ck, n)));",
+      "what": "a scalar constant expression is lowered as code and not as its value"
+    },
+    {
+      "decision": "D5.4",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "        // nothing for pointer to pointer or a dropped mark\n        return v;",
+      "new": "        // nothing for pointer to pointer or a dropped mark\n        gen.gen_val word = gen.gen_cast_op(g, \"ptrtoint\", v, \"i64\");\n        return gen.gen_cast_op(g, \"inttoptr\", word, gen.gen_value_type(g, to));",
+      "what": "a pointer-to-pointer cast emits two instructions instead of none"
+    },
+    {
+      "decision": "D6.2",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "        if (sign) {\n            return \"ashr\";\n        }\n        return \"lshr\";",
+      "new": "        if (sign) {\n            return \"lshr\";\n        }\n        return \"ashr\";",
+      "what": "`>>` is logical for a signed type and arithmetic for an unsigned one"
+    },
+    {
+      "decision": "D6.3",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    u64 mut i = first;\n    while (i < ast.ast_len(n)) {\n        if (!lower_print_arg(lw, ast.ast_child(n, i), fd)) {\n            return false;\n        }\n        i += 1;\n    }",
+      "new": "    u64 mut i = ast.ast_len(n);\n    while (i > first) {\n        i -= 1;\n        if (!lower_print_arg(lw, ast.ast_child(n, i), fd)) {\n            return false;\n        }\n    }",
+      "what": "the print family evaluates its arguments right to left"
+    },
+    {
+      "decision": "D6.5",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "    if (r.zeroed) {\n        memset_at(t, at, ty);\n    }",
+      "new": "    if (r.zeroed && false) {\n        memset_at(t, at, ty);\n    }",
+      "what": "a designated literal does not zero its destination first"
+    },
+    {
+      "decision": "D6.6",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    branch(lw, c, then_block, else_block, n->loc);\n    lw->block = then_block;\n    if (!lower_arm_value(lw, n->b, t, done, n->loc)) {",
+      "new": "    branch(lw, c, else_block, then_block, n->loc);\n    lw->block = then_block;\n    if (!lower_arm_value(lw, n->b, t, done, n->loc)) {",
+      "what": "a scalar `c ? a : b` takes `b` when `c` holds"
+    },
+    {
+      "decision": "D6.7",
+      "file": "src/fort/fir_lower.ft",
+      "old": "        return cast(n->op, lexer.tok_kind) == lexer.tok_kind.star;\n    default:\n        return false;",
+      "new": "        return false;\n    default:\n        return false;",
+      "what": "`*p` does not designate storage"
+    },
+    {
+      "decision": "D6.8",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    fir.rvalue past = fir.rvalue_binary(lw->f, fir.rvalue_kind.rv_ge, index, len);",
+      "new": "    fir.rvalue past = fir.rvalue_binary(lw->f, fir.rvalue_kind.rv_gt, index, len);",
+      "what": "the index bound is off by one: `e[len]` passes"
+    },
+    {
+      "decision": "D6.9",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    fir.rvalue high_len = fir.rvalue_binary(lw->f, fir.rvalue_kind.rv_gt, hi, len);",
+      "new": "    fir.rvalue high_len = fir.rvalue_binary(lw->f, fir.rvalue_kind.rv_ge, hi, len);",
+      "what": "the span bound is off by one: `s[0..len]` fails"
+    },
+    {
+      "decision": "D6.10",
+      "file": "src/fort/fir_lower.ft",
+      "old": "        fir.place mut target = fir.place{};\n        if (!deref_place(lw, n->a, &target)) {",
+      "new": "        fir.place mut target = fir.place{};\n        if (!lower_place(lw, n->a, &target)) {",
+      "what": "`p->f` takes the field of the pointer's own storage and not of its target"
+    },
+    {
+      "decision": "D6.11",
+      "file": "src/fort/fir_lower.ft",
+      "old": "        && (s->kind == ast.sym_kind.s_fn || s->kind == ast.sym_kind.s_extern_fn);",
+      "new": "        && s->kind == ast.sym_kind.s_extern_fn;",
+      "what": "a call of a fort function goes through a function value"
+    },
+    {
+      "decision": "D6.12",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "        if (float) {\n            return \"une\";",
+      "new": "        if (float) {\n            return \"one\";",
+      "what": "`!=` on floats is ordered: `NaN != NaN` is false"
+    },
+    {
+      "decision": "D6.13",
+      "file": "src/fort/fir_lower.ft",
+      "old": "        fir.operand minus_one = int_const(t, true, 1);",
+      "new": "        fir.operand minus_one = int_const(t, true, 2);",
+      "what": "the MIN / -1 check compares against -2"
+    },
+    {
+      "decision": "D7.1",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    return lower_into(lw, n->b, fir.place_local(x));\n}",
+      "new": "    return true;\n}",
+      "what": "a declaration's initializer is not stored"
+    },
+    {
+      "decision": "D7.2",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    case lexer.tok_kind.plus_assign:\n        return lexer.tok_kind.plus;",
+      "new": "    case lexer.tok_kind.plus_assign:\n        return lexer.tok_kind.minus;",
+      "what": "`+=` subtracts"
+    },
+    {
+      "decision": "D7.3",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    case ast.ast_kind.k_call_stmt:\n        ok = lower_call_stmt(lw, n->a);",
+      "new": "    case ast.ast_kind.k_call_stmt:\n        ok = true;",
+      "what": "an expression statement lowers to nothing"
+    },
+    {
+      "decision": "D7.4",
+      "file": "src/fort/fir_lower.ft",
+      "old": "        lw->block = else_block;\n        if (!lower_arm(lw, n->c, done, n->loc)) {\n            return false;\n        }",
+      "new": "        lw->block = else_block;\n        jump(lw, done, n->loc);",
+      "what": "an `else` branch lowers to nothing"
+    },
+    {
+      "decision": "D7.5",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    if (n->b == null) {\n        jump(lw, body, n->loc);",
+      "new": "    if (n->b == null) {\n        jump(lw, done, n->loc);",
+      "what": "`for (;;)` never enters its body"
+    },
+    {
+      "decision": "D7.6",
+      "file": "src/fort/fir_lower.ft",
+      "old": "        return kind == scope_kind.sc_loop || kind == scope_kind.sc_case;",
+      "new": "        return kind == scope_kind.sc_loop;",
+      "what": "`break` in a `switch` clause does not stop at the clause"
+    },
+    {
+      "decision": "D7.7",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    bool fails = fallback == clauses && ot->kind == types.type_kind.k_enum;",
+      "new": "    bool fails = false;",
+      "what": "an exhaustive enum `switch` gets no generated failure default"
+    },
+    {
+      "decision": "D7.8",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    u64 mut i = defers_end(lw, depth);\n    u64 saved_floor = lw->floor;\n    diag.loc saved_exit = lw->exit_at;\n    lw->floor = lw->scopes.len;\n    lw->exit_at = at;\n    bool mut ok = true;\n    while (ok && i > first && !terminated(lw)) {\n        i -= 1;\n        ok = lower_stmt(lw, gen.refs_at(&lw->defers, i)->a);\n    }",
+      "new": "    u64 end = defers_end(lw, depth);\n    u64 mut i = first;\n    u64 saved_floor = lw->floor;\n    diag.loc saved_exit = lw->exit_at;\n    lw->floor = lw->scopes.len;\n    lw->exit_at = at;\n    bool mut ok = true;\n    while (ok && i < end && !terminated(lw)) {\n        ok = lower_stmt(lw, gen.refs_at(&lw->defers, i)->a);\n        i += 1;\n    }",
+      "what": "deferred statements run in source order and not in reverse"
+    },
+    {
+      "decision": "D7.10",
+      "file": "src/fort/gen_data.ft",
+      "old": "    if (s->kind == ast.sym_kind.s_global) {\n        strbuf.append(&g->globals, \" = dso_local global \");\n    } else {\n        strbuf.append(&g->globals, \" = dso_local constant \");",
+      "new": "    if (s->kind == ast.sym_kind.s_global) {\n        strbuf.append(&g->globals, \" = dso_local constant \");\n    } else {\n        strbuf.append(&g->globals, \" = dso_local global \");",
+      "what": "a `mut` global is emitted `constant` and a constant `global`"
+    },
+    {
+      "decision": "D8.2",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    bool through = n->a != null && fir.type_aggregate(rt) && lw->defers.len > 0;",
+      "new": "    bool through = false;",
+      "what": "an aggregate result is written into the `sret` storage before the deferred code runs"
+    },
+    {
+      "decision": "D8.4",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    } else {\n        terminate(lw, fir.term_unreachable(brace, 0));\n    }",
+      "new": "    } else {\n    }",
+      "what": "the last block of a body that cannot fall off its end has no terminator"
+    },
+    {
+      "decision": "D8.5",
+      "file": "src/fort/fir_lower.ft",
+      "old": "        terminate(lw, fir.term_trap(brace, 0));",
+      "new": "        terminate(lw, fir.term_unreachable(brace, 0));",
+      "what": "a `noreturn` body ends in `unreachable` and not in the trap"
+    },
+    {
+      "decision": "D9.1",
+      "file": "src/fort/gen.ft",
+      "old": "    if (byte == '-' || byte == '$' || byte == '.' || byte == '_') {",
+      "new": "    if (byte == '-' || byte == '$' || byte == '_') {",
+      "what": "a dotted name is not plain, so a named type and an enum table are quoted"
+    },
+    {
+      "decision": "D9.4",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    bool named = n->kind == ast.ast_kind.k_ident || n->kind == ast.ast_kind.k_field;",
+      "new": "    bool named = n->kind == ast.ast_kind.k_ident;",
+      "what": "`m.f` does not name the function's address"
+    },
+    {
+      "decision": "D9.7",
+      "file": "src/fort/gen.ft",
+      "old": "    // quoting is spelling only. The ELF symbol is unchanged\n    gen_append_name(&g->scratch, \"\", name, true);",
+      "new": "    // quoting is spelling only. The ELF symbol is unchanged\n    gen_append_name(&g->scratch, \"\", name, false);",
+      "what": "a mangled fort name is not quoted"
+    },
+    {
+      "decision": "D9.8",
+      "file": "src/fort/gen.ft",
+      "old": "        s.variadic = ext->node != null && (ext->node->flags & ast.FLAG_VARIADIC) != 0;",
+      "new": "        s.variadic = false;",
+      "what": "an `extern` with a variable tail is declared and called with a fixed signature"
+    },
+    {
+      "decision": "D9.8f",
+      "file": "src/fort/gen_data.ft",
+      "old": "    strbuf.append(out, \" nobuiltin\");",
+      "new": "    strbuf.append(out, \"\");",
+      "what": "an extern declaration loses `nobuiltin`"
+    },
+    {
+      "decision": "D9.8g",
+      "file": "src/fort/gen.ft",
+      "old": "        gen_use_attr(g, ATTR_NOBUILTIN);\n        gen_text_append(g, \" #3\");",
+      "new": "        gen_use_attr(g, ATTR_NOBUILTIN);\n        gen_text_append(g, \"\");",
+      "what": "an extern call site loses its `nobuiltin` call group"
+    },
+    {
+      "decision": "D9.9",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "        gen.gen_args_add_ext(&text, dst, gen.sret_attr(g, &sig));",
+      "new": "        gen.gen_args_add(&text, dst);",
+      "what": "the result pointer of an aggregate call carries no `sret`"
+    },
+    {
+      "decision": "D9.10",
+      "file": "src/fort/gen_fir.ft",
+      "old": "    while (i < modules.count(set)) {\n        gen_module(g, &fp, modules.at(set, i));",
+      "new": "    while (i + 1 < modules.count(set)) {\n        gen_module(g, &fp, modules.at(set, i));",
+      "what": "the last module of the closure is not emitted"
+    },
+    {
+      "decision": "D10.2",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "    u64 size = types.type_sizeof(s->value.ty);",
+      "new": "    u64 size = types.type_sizeof(s->value.ty) + 1;",
+      "what": "`alloc` is asked for one byte per element too many"
+    },
+    {
+      "decision": "D10.3",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "    gen.gen_args_add(&args, ptr);\n    gen.gen_call_rt(t->g, runtime_sig.rt_entry.rt_free, &args);",
+      "new": "    gen.gen_args_add(&args, ptr);",
+      "what": "`del` frees nothing"
+    },
+    {
+      "decision": "D10.4",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "    gen.gen_val base = gen.gen_gep_element(t->g, elem, p, lo);",
+      "new": "    gen.gen_val base = gen.gen_gep_element(t->g, elem, p, hi);",
+      "what": "a span of a pointer starts at its high bound"
+    },
+    {
+      "decision": "D10.5",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "    case fir.const_kind.ck_null:\n        return gen.gen_literal(g, \"ptr\", \"null\");",
+      "new": "    case fir.const_kind.ck_null:\n        return gen.gen_literal(g, \"ptr\", \"inttoptr (i64 8 to ptr)\");",
+      "what": "the `null` constant of a function body is the address 8"
+    },
+    {
+      "decision": "D10.5b",
+      "file": "src/fort/gen.ft",
+      "old": "    if (v.kind == consts.cval_kind.cv_null) {\n        return gen_literal(g, ty, \"null\");",
+      "new": "    if (v.kind == consts.cval_kind.cv_null) {\n        return gen_literal(g, ty, \"inttoptr (i64 8 to ptr)\");",
+      "what": "the `null` value of a folded constant (an initializer, a switch arm) is the address 8"
+    },
+    {
+      "decision": "D10.6",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    if (prim.prim_is_signed(n->b->ty->prim)) {",
+      "new": "    if (prim.prim_is_signed(n->b->ty->prim) && false) {",
+      "what": "a negative allocation count is not checked"
+    },
+    {
+      "decision": "D10.7",
+      "file": "src/fort/fir_lower.ft",
+      "old": "        u32 reported = fir.operand_push(lw->f, value);\n        fir.operand_push(lw->f, fir.operand_const(fir.const_bytes(ot->name)));",
+      "new": "        u32 reported = fir.operand_push(lw->f, fir.operand_const(fir.const_bytes(ot->name)));\n        fir.operand_push(lw->f, value);",
+      "what": "the enum failure reports its two arguments in the other order"
+    },
+    {
+      "decision": "D10.8",
+      "file": "src/fort/gen_data.ft",
+      "old": "    if (which == gen.ATTR_FN) {\n        return \"nounwind \\\"frame-pointer\\\"=\\\"all\\\" \\\"probe-stack\\\"=\\\"inline-asm\\\"\";",
+      "new": "    if (which == gen.ATTR_FN) {\n        return \"nounwind \\\"frame-pointer\\\"=\\\"all\\\"\";",
+      "what": "ordinary definitions lose the stack probe (outside the cited universe)"
+    },
+    {
+      "decision": "D11.1",
+      "file": "src/fort/fir.ft",
+      "old": "    case check_kind.chk_overflow, check_kind.chk_shift, check_kind.chk_overwrite:\n        return release;",
+      "new": "    case check_kind.chk_overflow:\n        return !release;\n    case check_kind.chk_shift, check_kind.chk_overwrite:\n        return release;",
+      "what": "the debug mode drops the overflow check and the release mode keeps it"
+    },
+    {
+      "decision": "D11.2",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    case lexer.tok_kind.plus_wrap:\n        return fir.rvalue_kind.rv_add;",
+      "new": "    case lexer.tok_kind.plus_wrap:\n        return fir.rvalue_kind.rv_sub;",
+      "what": "`+%` subtracts"
+    },
+    {
+      "decision": "D11.3",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    fir.rvalue zero = fir.rvalue_binary(lw->f, fir.rvalue_kind.rv_eq, b, int_const(t, false, 0));",
+      "new": "    fir.rvalue zero = fir.rvalue_binary(lw->f, fir.rvalue_kind.rv_ne, b, int_const(t, false, 0));",
+      "what": "the division-by-zero check is inverted"
+    },
+    {
+      "decision": "D11.4",
+      "file": "src/fort/gen.ft",
+      "old": "    gen_args_add(args, gen_const_unsigned(g, \"i32\", cast(at.line, u64)));\n    gen_args_add(args, gen_const_unsigned(g, \"i32\", cast(at.col, u64)));",
+      "new": "    gen_args_add(args, gen_const_unsigned(g, \"i32\", cast(at.col, u64)));\n    gen_args_add(args, gen_const_unsigned(g, \"i32\", cast(at.line, u64)));",
+      "what": "a runtime error reports the column as the line"
+    },
+    {
+      "decision": "D11.5",
+      "file": "src/fort/fir_lower.ft",
+      "old": "        u64 mut fd = FD_STDERR;\n        if (out) {\n            fd = FD_STDOUT;",
+      "new": "        u64 mut fd = FD_STDOUT;\n        if (out) {\n            fd = FD_STDERR;",
+      "what": "`print` writes to stderr and `eprint` to stdout"
+    },
+    {
+      "decision": "D11.6",
+      "file": "src/fort/gen.ft",
+      "old": "u64 STATUS_MASK = 255;",
+      "new": "u64 STATUS_MASK = 65535;",
+      "what": "`main` masks its status to two bytes"
+    },
+    {
+      "decision": "D11.6b",
+      "file": "src/fort/gen.ft",
+      "old": "    gen_args_add_ext(&args_args, span, \"sret(%fort.span)\");",
+      "new": "    gen_args_add(&args_args, span);",
+      "what": "the call of `std.rt.args` passes a plain result pointer"
+    },
+    {
+      "decision": "D12.2",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "    if (term->check == fir.check_kind.chk_user) {\n        gen.gen_br_cond(g, cond, next, bad);",
+      "new": "    if (term->check == fir.check_kind.chk_user) {\n        gen.gen_br_cond(g, cond, bad, next);",
+      "what": "`assert` fails when its condition holds"
+    },
+    {
+      "decision": "D13.1",
+      "file": "src/fort/gen.ft",
+      "old": "        if (syms_at(&g->externs, i)->name == name) {",
+      "new": "        if (syms_at(&g->externs, i) == s && name.len > 0) {",
+      "what": "two modules that declare one C function each get a `declare`"
+    },
+    {
+      "decision": "D13.3",
+      "file": "src/fort/gen.ft",
+      "old": "fn records_at(record_vec* v, u64 i) record {\n    if (i >= v->len) {",
+      "new": "fn records_at(record_vec* v, u64 i) record {\n    if (i >= v->items.len) {",
+      "what": "the precondition of gen.records_at no longer panics on a stale slot"
+    },
+    {
+      "decision": "D13.5",
+      "file": "src/fort/gen.ft",
+      "old": "    records_free(&g->files);\n    records_free(&g->strs);",
+      "new": "    records_free(&g->files);",
+      "what": "gen_free does not release the string records"
+    },
+    {
+      "decision": "D14.2",
+      "file": "src/fort/fir_lower.ft",
+      "old": "        if (terminated(lw)) {\n            lw->block = fir.block_new(lw->f);\n        }\n        if (!lower_stmt(lw, ast.ast_child(n, i))) {",
+      "new": "        if (!lower_stmt(lw, ast.ast_child(n, i))) {",
+      "what": "a statement after `return` lands in the terminated block"
+    },
+    {
+      "decision": "D16",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "    case fir.rvalue_kind.rv_add:\n        return \"add\";",
+      "new": "    case fir.rvalue_kind.rv_add:\n        if (sign) {\n            return \"add nsw\";\n        }\n        return \"add\";",
+      "what": "a signed plain `add` carries `nsw`, a poison flag that D16 forbids"
+    },
+    {
+      "decision": "D16b",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "    case fir.rvalue_kind.rv_fadd:\n        return \"fadd\";",
+      "new": "    case fir.rvalue_kind.rv_fadd:\n        return \"fadd fast\";",
+      "what": "a float `fadd` carries the fast-math flag `fast`, which D16 forbids"
+    },
+    {
+      "decision": "D17.3",
+      "file": "src/fort/fir_lower.ft",
+      "old": "        fir.operand count = int_const(u64_ty(lw), false, 1);",
+      "new": "        fir.operand count = int_const(u64_ty(lw), false, 2);",
+      "what": "`new(T)` allocates two elements"
+    },
+    {
+      "decision": "D17.4",
+      "file": "src/fort/fir_lower.ft",
+      "old": "        assign(lw, dst, fir.rvalue_cast(lw->f, n->ty, a), n->loc);\n        return true;\n    case ast.ast_kind.k_ternary:",
+      "new": "        return true;\n    case ast.ast_kind.k_ternary:",
+      "what": "a cast between aggregates writes nothing into its destination"
+    },
+    {
+      "decision": "D17.5",
+      "file": "src/fort/fir_lower.ft",
+      "old": "            assign(lw, dst, fir.rvalue_use(lw->f, fir.operand_move(x)), n->a->loc);",
+      "new": "            assign(lw, dst, fir.rvalue_use(lw->f, fir.operand_copy(x)), n->a->loc);",
+      "what": "`return x` of an `own` local copies it and does not move it"
+    },
+    {
+      "decision": "D17.6",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "    if (!temporary_place(t, o.place)) {\n        gen.gen_zero_owner(t->g, at);\n    }",
+      "new": "    if (!temporary_place(t, o.place) && false) {\n        gen.gen_zero_owner(t->g, at);\n    }",
+      "what": "`move` of a scalar owning place does not empty it"
+    },
+    {
+      "decision": "D17.6b",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "    if (moves) {\n        memset_at(t, from, ty);\n    }",
+      "new": "    if (moves && false) {\n        memset_at(t, from, ty);\n    }",
+      "what": "`move` of an owning aggregate place does not empty it"
+    },
+    {
+      "decision": "D17.7",
+      "file": "src/fort/fir.ft",
+      "old": "    return types.type_is_owning_aggregate(t);\n}",
+      "new": "    return false;\n}",
+      "what": "an owning aggregate is not owning to the lowering and the translator"
+    },
+    {
+      "decision": "D17.8",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    if (name == \"del\") {\n        return lower_del(lw, n);\n    }\n    return unsupported(lw, n);",
+      "new": "    if (name == \"del\") {\n        return lower_del(lw, n);\n    }\n    panic(\"fir_lower.lower_builtin: reachability probe\");",
+      "what": "a probe: a builtin statement that is no print, assert, panic or del (a discarded `move`) panics"
+    },
+    {
+      "decision": "D17.9",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "    if (reg || temporary_place(t, p)) {\n        return;\n    }\n    gen.gen_zero_owner(t->g, gen.gen_place{at, ty});",
+      "new": "    if (reg || temporary_place(t, p)) {\n        return;\n    }",
+      "what": "`del` of an lvalue does not empty it"
+    },
+    {
+      "decision": "D17.10",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    types.node* ty = lent_type(lw, coll->ty);",
+      "new": "    types.node* ty = coll->ty;",
+      "what": "a range `for` copies an owning collection instead of lending it"
+    },
+    {
+      "decision": "D17.11",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    if (op == lexer.tok_kind.assign && own_reference(n->a->ty)) {",
+      "new": "    if (op == lexer.tok_kind.assign && own_reference(n->a->ty) && false) {",
+      "what": "an assignment to an `own` reference carries no overwrite check"
+    },
+    {
+      "decision": "D18.1",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    case prim.prim_kind.prim_f32:\n        return print_kind.pk_f32;",
+      "new": "    case prim.prim_kind.prim_f32:\n        return print_kind.pk_f64;",
+      "what": "an `f32` print argument goes to `print_f64`"
+    },
+    {
+      "decision": "D19.1",
+      "file": "src/fort/gen_data.ft",
+      "old": "string MODULE_HEADER = \"target triple = \\\"x86_64-unknown-linux-gnu\\\"\\n\";",
+      "new": "string MODULE_HEADER = \"target triple = \\\"aarch64-unknown-linux-gnu\\\"\\n\";",
+      "what": "the Linux module header names another target triple"
+    },
+    {
+      "decision": "D19.1b",
+      "file": "src/fort/gen_data.ft",
+      "old": "        strbuf.append(&header, g->opts.target);",
+      "new": "        strbuf.append(&header, \"x86_64-unknown-linux-gnu\");",
+      "what": "a Mac module header loses its selected target"
+    },
+    {
+      "decision": "D19.2",
+      "file": "src/fort/gen.ft",
+      "old": "        return \"i1\";",
+      "new": "        return \"i8\";",
+      "what": "a `bool` value is `i8` and not `i1`"
+    },
+    {
+      "decision": "D19.3",
+      "file": "src/fort/gen.ft",
+      "old": "    return t != null && (t->kind == types.type_kind.k_array ||\n                         t->kind == types.type_kind.k_span ||",
+      "new": "    return t != null && (\n                         t->kind == types.type_kind.k_span ||",
+      "what": "a fixed array is an SSA value and not memory"
+    },
+    {
+      "decision": "D19.4",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "        case storage.sk_param, storage.sk_named:\n            st->addr = dotted(g, name, \"\", n - 1);\n            write_alloca(g, st->addr, l->ty);",
+      "new": "        case storage.sk_param:\n            st->addr = dotted(g, name, \"\", n - 1);\n        case storage.sk_named:\n            st->addr = dotted(g, name, \"\", n - 1);\n            write_alloca(g, st->addr, l->ty);",
+      "what": "a scalar parameter gets no slot in the entry block"
+    },
+    {
+      "decision": "D19.5",
+      "file": "src/fort/gen.ft",
+      "old": "    strbuf.append(&g->scratch, \"%t\");",
+      "new": "    strbuf.append(&g->scratch, \"%v\");",
+      "what": "a temporary is `%vN` and not `%tN`"
+    },
+    {
+      "decision": "D19.6",
+      "file": "src/fort/gen.ft",
+      "old": "    strbuf.append(&g->body, \"  unreachable\\n\");\n    strbuf.append(&g->fail, strbuf.view(&g->body)[mark..]);\n    strbuf.truncate(&g->body, mark);",
+      "new": "    strbuf.append(&g->body, \"  unreachable\\n\");",
+      "what": "a failure block stands among the normal blocks and not after them"
+    },
+    {
+      "decision": "D19.7",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "        strbuf.append(&g->body, \"  call void @llvm.trap()\\n  unreachable\\n\");",
+      "new": "        strbuf.append(&g->body, \"  unreachable\\n\");",
+      "what": "the FIR `trap` is `unreachable` alone, after a `noreturn` call and a `noreturn` body"
+    },
+    {
+      "decision": "D20.4",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    return src[open + 1..close - 1];",
+      "new": "    return \"\";",
+      "what": "`assert` quotes no source text"
+    },
+    {
+      "decision": "D20.5",
+      "file": "src/fort/gen.ft",
+      "old": "    g->ck = null;\n    g->failed = false;",
+      "new": "    g->ck = null;",
+      "what": "a reset emitter keeps the failed state of its last module"
+    },
+    {
+      "decision": "D21.2",
+      "file": "src/fort/fir_lower.ft",
+      "old": "        if ((current->flags & ast.FLAG_SELECT_THEN) != 0) {\n            return current->b;\n        }\n        current = current->c;\n    }\n    return current;",
+      "new": "        if ((current->flags & ast.FLAG_SELECT_THEN) == 0) {\n            return current->b;\n        }\n        current = current->c;\n    }\n    return current;",
+      "what": "a statement `$if` lowers the branch that the checker did not select"
+    },
+    {
+      "decision": "item1",
+      "file": "src/fort/gen_data.ft",
+      "old": "    section(&g->out, strbuf.view(&g->globals));\n    section(&g->out, strbuf.view(&g->funcs));",
+      "new": "    section(&g->out, strbuf.view(&g->funcs));\n    section(&g->out, strbuf.view(&g->globals));",
+      "what": "the functions come before the module-level data"
+    },
+    {
+      "decision": "item2",
+      "file": "src/fort/gen.ft",
+      "old": "        out = gen_cast_op(g, \"zext\", v, \"i8\");",
+      "new": "        out = gen_cast_op(g, \"sext\", v, \"i8\");",
+      "what": "a `bool` stores by `sext`, so `true` is the byte 0xFF"
+    },
+    {
+      "decision": "item3",
+      "file": "src/fort/gen.ft",
+      "old": "    strbuf.append(&g->body, \", i64 0, i64 \");",
+      "new": "    strbuf.append(&g->body, \", i32 0, i64 \");",
+      "what": "an element of a fixed array takes `i32 0` as its first index"
+    },
+    {
+      "decision": "item4",
+      "file": "src/fort/gen.ft",
+      "old": "    strbuf.append(&g->funcs, \"define dso_local \");",
+      "new": "    strbuf.append(&g->funcs, \"define \");",
+      "what": "a fort definition loses `dso_local`"
+    },
+    {
+      "decision": "item5",
+      "file": "src/fort/gen_data.ft",
+      "old": "    strbuf.append(out, name);\n    strbuf.append(out, \" = private unnamed_addr constant [\");",
+      "new": "    strbuf.append(out, name);\n    strbuf.append(out, \" = internal constant [\");",
+      "what": "a file name or a string literal is `internal` and not `private unnamed_addr`"
+    },
+    {
+      "decision": "item7",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "        held h = hold(t, o, fir.operand_type(t->f, o), true);",
+      "new": "        held h = hold(t, o, fir.operand_type(t->f, o), false);",
+      "what": "an aggregate argument passes the caller's place and not a caller-made copy"
+    },
+    {
+      "decision": "item8",
+      "file": "src/fort/gen_data.ft",
+      "old": "    strbuf.append(out, \"declare \");\n    if (sig.ret_attr.len > 0) {",
+      "new": "    strbuf.append(out, \"declare \");\n    if (false) {",
+      "what": "an extern declaration loses the extension attribute of its result"
+    },
+    {
+      "decision": "item9",
+      "file": "src/fort/gen.ft",
+      "old": "        return \"signext\";",
+      "new": "        return \"zeroext\";",
+      "what": "`i8` and `i16` carry `zeroext` and not `signext`"
+    },
+    {
+      "decision": "item10",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "    strbuf.append_u64(&g->allocas, types.type_alignof(ty));",
+      "new": "    strbuf.append_u64(&g->allocas, 1);",
+      "what": "a local's alloca carries `align 1`"
+    },
+    {
+      "decision": "item12",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "        if (gen.gen_is_signed(from)) {\n            return gen.gen_cast_op(g, \"sitofp\", v, ty);",
+      "new": "        if (gen.gen_is_signed(from)) {\n            return gen.gen_cast_op(g, \"uitofp\", v, ty);",
+      "what": "a signed integer converts to a float by `uitofp`"
+    },
+    {
+      "decision": "item14",
+      "file": "src/fort/gen.ft",
+      "old": "    while (i < g->files.len) {\n        if (records_at(&g->files, i).text == file) {",
+      "new": "    while (i < g->files.len) {\n        if (records_at(&g->files, i).text == file && false) {",
+      "what": "each failure call gets a new `@.file.N` and not one for each file"
+    },
+    {
+      "decision": "item15",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "    case fir.rvalue_kind.rv_add_overflows:\n        if (sign) {\n            return gen.OVF_SADD;",
+      "new": "    case fir.rvalue_kind.rv_add_overflows:\n        if (sign) {\n            return gen.OVF_UADD;",
+      "what": "a signed `+` takes the unsigned overflow intrinsic"
+    },
+    {
+      "decision": "item16",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "    gen.gen_val base = element_addr(t, ty, place_addr(t, r.place), lo);\n    gen.gen_val len = gen.gen_binary(t->g, \"sub\", hi, lo);",
+      "new": "    gen.gen_val base = element_addr(t, ty, place_addr(t, r.place), lo);\n    gen.gen_val len = gen.gen_binary(t->g, \"add\", hi, lo);",
+      "what": "the length of `a[lo..hi]` is `hi + lo`"
+    },
+    {
+      "decision": "item17",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "    gen.gen_args_add(&args, gen.gen_const_unsigned(t->g, \"i64\", size));\n    gen.gen_args_add(&args, n);",
+      "new": "    gen.gen_args_add(&args, n);\n    gen.gen_args_add(&args, gen.gen_const_unsigned(t->g, \"i64\", size));",
+      "what": "`std.rt.alloc` takes the count before the element size"
+    },
+    {
+      "decision": "item18",
+      "file": "src/fort/fir_llvm.ft",
+      "old": "    gen.gen_val live = gen.gen_icmp(g, \"ne\", word, gen.gen_literal(g, \"ptr\", \"null\"));",
+      "new": "    gen.gen_val live = gen.gen_icmp(g, \"eq\", word, gen.gen_literal(g, \"ptr\", \"null\"));",
+      "what": "the overwrite check fails on a null owner and passes a live one"
+    },
+    {
+      "decision": "item19",
+      "file": "src/fort/fir_lower.ft",
+      "old": "u64 NEWLINE = 10;",
+      "new": "u64 NEWLINE = 32;",
+      "what": "the `ln` forms of the print family end with a space"
+    },
+    {
+      "decision": "item20",
+      "file": "src/fort/gen.ft",
+      "old": "        gen_use_attr(g, ATTR_FN_NORET);\n        strbuf.append(&g->funcs, \" #1 {\\n\");",
+      "new": "        gen_use_attr(g, ATTR_FN);\n        strbuf.append(&g->funcs, \" #0 {\\n\");",
+      "what": "a `noreturn` definition takes `#0` and loses `noreturn`"
+    },
+    {
+      "decision": "item21",
+      "file": "src/fort/gen_data.ft",
+      "old": "        strbuf.append(out, \"%fort.enum_member { i32 \");\n                strbuf.append_i64(out, cast(consts.cv_bits(check.check_node_value(g->ck, m)), i64));",
+      "new": "        strbuf.append(out, \"%fort.enum_member { i32 \");\n                strbuf.append_i64(out, cast(consts.cv_bits(check.check_node_value(g->ck, m)), i64) + 1);",
+      "what": "an enum table holds each member's value plus one"
+    },
+    {
+      "decision": "item22",
+      "file": "src/fort/gen.ft",
+      "old": "    gen_args mut flush_args = gen_args_init();\n    gen_call_rt(g, runtime_sig.rt_entry.rt_flush_all, &flush_args);",
+      "new": "    gen_args mut flush_args = gen_args_init();",
+      "what": "the C `main` does not call `std.rt.flush_all`"
+    },
+    {
+      "decision": "toolchain-1",
+      "file": "src/fort/gen_fir.ft",
+      "old": "    gen_data.gen_finish(g);\n    return !g->failed;",
+      "new": "    gen_data.gen_finish(g);\n    return true;",
+      "what": "a program with a compile error of the emitter still writes a module"
+    },
+    {
+      "decision": "toolchain-4",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    *out = into_temp(lw, n->ty, operation(lw, op, n->a->ty, a, b, n->loc), n->loc);",
+      "new": "    *out = into_temp(lw, n->ty, operation(lw, op, n->a->ty, a, b, n->a->loc), n->loc);",
+      "what": "a check of a binary operator reports the position of its left operand, not of the operator"
+    },
+    {
+      "decision": "toolchain-5.1",
+      "file": "src/fort/fir_lower.ft",
+      "old": "    fir.operand reported = signed_copy(lw, index, n->loc);",
+      "new": "    fir.operand reported = index;",
+      "what": "the bounds check reports the index as the `u64` it compares and not sign-extended to `i64`"
+    }
+  ]
+}

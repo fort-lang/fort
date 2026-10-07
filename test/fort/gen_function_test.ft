@@ -304,21 +304,24 @@ fn the_c_main_passes_its_own_span_to_a_main_that_takes_one() void {
 // ---- the module -------------------------------------------------------
 
 // The named type of a struct is its fields in declaration order and never `packed`. The two
-// types every module carries stand before it, used or not.
+// types every module carries stand before it, used or not. A pointer field is `ptr` (D3.8). An
+// `i64` in its place keeps every size and offset, so no run test sees it unless a module-level
+// constant of the struct type holds a pointer.
 fn the_named_types_are_the_two_fixed_ones_then_every_struct() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
     strbuf.str_buf mut src = strbuf.create();
     defer strbuf.free(&src);
-    strbuf.append(&src, "struct point {\n    i64 x;\n    u8 flag;\n    string name;\n}\n");
+    strbuf.append(&src, "struct point {\n    i64 x;\n    u8 flag;\n    string name;\n");
+    strbuf.append(&src, "    point* next;\n}\n");
     strbuf.append(&src, "fn main() i32 {\n    return 0;\n}\n");
     assert(gen_env.open_module(&e, strbuf.view(&src)));
     assert(gen_fir.gen_program(&e.g, &e.c.ck, &e.c.m.set));
     string[3] mut want = {
         "%fort.span = type { ptr, i64 }\n",
         "%fort.enum_member = type { i32, ptr }\n",
-        "%struct.main.point = type { i64, i8, %fort.span }\n",
+        "%struct.main.point = type { i64, i8, %fort.span, ptr }\n",
     };
     gen_env.expect_text(gen_env.named(&e), gen_env.join_lines(&e, want[0..3]));
     gen_env.expect_blocks(&e, gen_env.module_text(&e));
@@ -386,6 +389,22 @@ fn the_module_is_the_sections_of_item_one_in_order() void {
     gen_env.expect_blocks(&e, got);
 }
 
+// The module-level data stands after the named types and before the function definitions (item
+// 1). A module with no constant, as above, cannot tell the two sections apart.
+fn the_module_level_data_stands_before_the_functions() void {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    assert(gen_env.open_module(&e, "i32 LIMIT = 100;\nfn main() i32 {\n    return LIMIT;\n}\n"));
+    assert(gen_fir.gen_program(&e.g, &e.c.ck, &e.c.m.set));
+    string got = gen_env.module_text(&e);
+    i64 named = str.find(got, "%fort.enum_member = type { i32, ptr }\n\n");
+    i64 data = str.find(got, "@\"main.LIMIT\" = dso_local constant i32 100, align 4\n\n");
+    i64 code = str.find(got, "define dso_local i32 @\"main.main\"() #0 {\n");
+    assert(named >= 0 && data > named && code > data);
+    gen_env.expect_blocks(&e, got);
+}
+
 // A whole program, module by module, in the dependency order: the emitter
 // walks the closure and the C `main` is emitted in the entry module alone,
 // after every other definition.
@@ -413,9 +432,9 @@ fn a_program_emits_every_module_of_the_closure() void {
 // ---- the structural check itself ---------------------------------------------------
 
 // The structural check runs over every definition and every module these
-// cases emit. Fourteen of the fifteen cases here emit one and call it. The
-// fifteenth is the block check below, which emits no IR at all. So
-// `grep -c '^ *gen_env.expect_blocks('` is 14 and not 15, and the count is
+// cases emit. Fifteen of the sixteen cases here emit one and call it. The
+// sixteenth is the block check below, which emits no IR at all. So
+// `grep -c '^ *gen_env.expect_blocks('` is 15 and not 16, and the count is
 // written here rather than claimed as "every case".
 //
 // The block check uses three texts it must reject. They contain two terminators, an instruction
@@ -479,6 +498,7 @@ fn main() i32 {
     the_named_types_are_the_two_fixed_ones_then_every_struct();
     two_definitions_are_separated_by_one_blank_line();
     the_module_is_the_sections_of_item_one_in_order();
+    the_module_level_data_stands_before_the_functions();
     a_program_emits_every_module_of_the_closure();
     println("module ok");
     println("ok");

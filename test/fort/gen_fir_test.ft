@@ -374,15 +374,23 @@ fn a_declaration_without_a_body_is_not_counted() void {
     assert(e.g.lowered == 1);
 }
 
-// gen_free resets the counts with the rest of the state, so that a reused emitter counts from 0.
+// gen_free resets the counts and the failure of a refused program with the rest of the state
+// (D20.5), so that a reused emitter counts from 0 and writes the next program. PATHS fails in the
+// empty runtime, and the reused emitter then writes `main`.
 fn the_counts_start_at_zero() void {
     gen_env.env mut e = gen_env.env{};
-    emit(&e, PATHS[..], true);
+    assert(!emit(&e, PATHS[..], false));
+    defer gen_env.close(&e);
     assert(e.g.functions > 0);
+    assert(e.g.failed);
     gen.gen_free(&e.g);
     assert(e.g.functions == 0);
     assert(e.g.lowered == 0);
-    gen_env.close(&e);
+    assert(!e.g.failed);
+    gen.gen_init(&e.g, &e.c.m.s, gen.gen_options{});
+    gen_env.emit_function(&e, "main");
+    assert(!e.g.failed);
+    assert(str.find(gen_env.funcs(&e), "define dso_local i32 @\"main.main\"() #0 {\n") >= 0);
 }
 
 // ---- the declarations --------------------------------------------------------------------------
@@ -480,6 +488,32 @@ string[4] MIXED_DECLARATIONS = {
     "declare i32 @puts(ptr) nobuiltin\n",
 };
 
+// Two modules that each declare `abs` hold two symbols of one C name. The module declares the C
+// name once (D9.8, D13.1, spec/toolchain.md 6 item 8), since a second `declare` of one name is an
+// invalid redefinition.
+fn two_modules_that_declare_one_c_function_write_one_declare() void {
+    strbuf.str_buf mut lines = strbuf.create();
+    defer strbuf.free(&lines);
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    strbuf.str_buf mut helper = strbuf.create();
+    defer strbuf.free(&helper);
+    strbuf.append(&helper, "extern fn abs(i32 x) i32;\n");
+    strbuf.append(&helper, "fn one(i32 x) i32 {\n    return abs(x);\n}\n");
+    check_env.add(&e.c, "helper.ft", strbuf.view(&helper));
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    strbuf.append(&src, "import helper;\nextern fn abs(i32 x) i32;\n");
+    strbuf.append(&src, "fn main() i32 {\n    return helper.one(abs(0));\n}\n");
+    assert(gen_env.open_module(&e, strbuf.view(&src)));
+    assert(gen_fir.gen_program(&e.g, &e.c.ck, &e.c.m.set));
+    string text = gen_env.module_text(&e);
+    gen_env.expect_text(declarations(text, &lines), "declare i32 @abs(i32) nobuiltin\n");
+    assert(str.find(definition(text, "main"), "call i32 @abs(i32 0) #3") >= 0);
+    gen_env.expect_blocks(&e, text);
+}
+
 fn the_declarations_follow_the_text_of_a_mixed_module() void {
     strbuf.str_buf mut lines = strbuf.create();
     defer strbuf.free(&lines);
@@ -516,6 +550,7 @@ fn main() i32 {
     the_counts_start_at_zero();
     println("counts ok");
     a_nested_call_declares_the_inner_function_first();
+    two_modules_that_declare_one_c_function_write_one_declare();
     the_declarations_follow_the_text_of_a_mixed_module();
     println("declarations ok");
     println("ok");

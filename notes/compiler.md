@@ -640,7 +640,13 @@ came here.
   `@"main.N" = dso_local constant %struct.main.node { i32 7, ptr @"main.N" }`. Two tests of
   `gen_global_test.c` went red through `verified()`, at `:201` and at `:313`. That window opens
   only for a struct that D7.10 gives a module-level declaration. A struct that appears in no such
-  initializer keeps the weaker guarantee. So one assertion pins a field's IR type in every case:
+  initializer keeps the weaker guarantee. The fort emitter behaves the same. A mutant of
+  `gen_fir.gen_struct_type` wrote a `ptr` field as `i64`. At 49d15a5c all 97 `gen_` and `fir_`
+  suites of `test/fort` stayed green, and so did 800 of the 801 language tests. clang refused
+  `run/globals/008_self_reference.ft` with the same message. Its `node N = node{7, &N}` is the
+  one module-level constant of the corpus whose struct type holds a pointer.
+  `the_named_types_are_the_two_fixed_ones_then_every_struct` in `test/fort/gen_function_test.ft`
+  now asserts a `ptr` field. So one assertion pins a field's IR type in every case:
   the string comparison on `%struct.<name> = type { ... }`. A struct that appears neither in one
   nor in a module-level constant has its field types unchecked. The bootstrap cannot *produce* that
   bug -- `gen_mem_type` is the single fort-type-to-memory-type map and a wrong mapping is wrong in
