@@ -124,12 +124,12 @@ Trusted extern calls need no foreign body or hidden-effect summary (D17.13).
 Apply checked argument rules and signature ownership transfers.
 Keep known fort facts across the call. Do not infer that foreign code has no effects.
 Missing fort-call summaries, indirect correspondence, and unknown fort effects remain incomplete.
-Preserve the first budget refusal and its source location. Do not increase limits to obtain
-acceptance.
+Preserve the first budget refusal and its location. The FIR-size W rule of `spec/fir.md` 14.1
+is the one permitted limit change. Its W bound is not a limit increase. Raise no other limit.
 Use production budget and event services. Do not use permissive test callbacks.
 
-Graph construction and queries use an existing private W ledger.
-Service dispatch and liveness use their actual service ledger.
+Graph construction uses the private W ledger of the graph build.
+Service dispatch, liveness, and the target queries of one body use that body's service ledger.
 Report each ledger and scope separately. Do not claim complete shared graph/liveness accounting.
 Required accounting gaps remain incomplete. Never reset or split a computation to hide refusal.
 A graph callback's unknown foreign-effect flag does not require a foreign body or summary.
@@ -210,7 +210,7 @@ Require complete qualification and source migration before enabling ownership an
 | Known extern without a body | Trust the boundary. Apply argument rules and signature transfers. |
 | Failed checking or lowering | Retain failed rows and unexecuted dependent analysis rows. |
 | Verifier or tool failure | Exit 2. CI rejects the attempt. Preserve available evidence. |
-| Budget refusal | Preserve the first reason and location. No limit increase changes the verdict. |
+| Budget refusal | Keep the first reason and location. Only the FIR-size W rule changes a limit. |
 | Truncated or stale report | CI rejects it. Atomic publication never accepts partial coverage. |
 | Report path names source | Reject the path. Preserve source and compiler output files. |
 | Scoped CI acceptance | It never changes the compiler verdict or establishes complete safety. |

@@ -1413,17 +1413,24 @@ Do not create a new key for each loop iteration, call depth, or concrete allocat
 The implementation publishes a finite positive bound for each category below.
 These bounds control analysis precision. They add no source-language size restriction.
 
-| Bound | Bounded content |
-|---|---|
-| D | Access-path projection depth, including recursive pointer traversals. |
-| R | Distinguished regions, allocation representatives, and region partitions per state. |
-| P | Predicate atoms, including nullness, equality, inequality, and range membership. |
-| G | Guarded alternatives per state, including ownership and source correlations. |
-| H | Structural predicate templates and their bounded parameters. |
-| T | Explicit indirect target alternatives per call. |
-| E | Ordered summary-effect nodes and symbolic summary relations per function. |
-| W | Counted transfer, join, widening, substitution, and summary-solver work. |
-| V | Retained proof events, witness links, and rendered diagnostic records. |
+| Bound | Scope | Bounded content |
+|---|---|---|
+| D | path | Access-path projection depth, including recursive pointer traversals. |
+| R | state | Distinguished regions, allocation representatives, and region partitions. |
+| P | state | Predicate atoms, including nullness, equality, inequality, and range membership. |
+| G | state | Guarded alternatives of contents and of ownership and source combinations. |
+| H | state | Graph edges, structural templates, and their parameters, clauses, and descendants. |
+| T | call | Explicit indirect target alternatives. |
+| E | function | Ordered summary-effect nodes and symbolic summary relations. |
+| W | computation | Counted transfer, join, widening, substitution, and summary-solver work. |
+| V | report | Retained proof events, witness links, and rendered diagnostic records. |
+
+D, R, P, G, H, T, and E count the content that their scope holds now.
+Removed content does not count. Insertion, join, and widening use the same count for a category.
+W is cumulative within one computation.
+A computation is the call-graph build, the liveness or flow analysis of one function, or the
+summary solver of one recursive component. A function in a recursive component keeps its own
+liveness computation.
 
 Keep slot contents, source validity, allocation obligations, and borrowed-source relations separate
 (D17.15). Keep allocation validity and obligation location as independent facts.
@@ -1503,8 +1510,14 @@ Do not confuse missing fort effects with trusted foreign effects.
 Compose mixed target outcomes under their conditions, including actual aliases and result values.
 An abort alternative needs no cleanup. It cannot remove a normal alternative's obligations.
 
-**Deterministic limits.** Use a versioned table of numeric implementation bounds.
-Publish its values and measured effects with reproduction commands before feature qualification.
+**Deterministic limits.** Use a versioned table of numeric implementation bounds for D, R, P, G,
+H, T, E, and V. The W bound of a computation is a function of its FIR size S:
+`W(S) = W_base + W_scale * S`. The same versioned table supplies W_base and W_scale.
+The FIR size of a function is its FIR statement count plus its block count.
+The FIR size of a computation is the sum over its functions. The graph build uses all its bodies.
+Saturate W(S) at the counter maximum. A W bound from this function is not a limit increase.
+Publish the table and each computation's FIR size with reproduction commands.
+Publish measured effects before feature qualification.
 The same compiler, checked input closure, target configuration, and table give the same verdict,
 primary errors, notes, and limit locations.
 Check and build use the same proof inputs and boundaries.
@@ -1521,6 +1534,7 @@ A precision limit marks only the facts that its abstraction loses.
 If retained facts still prove an obligation, accept that operation without a limit error.
 Otherwise emit incomplete proof at the operation that needs the missing fact.
 A work-budget failure stops the affected computation and marks its output incomplete.
+That status stays in the published result. A new meter for the same computation cannot remove it.
 Preserve known obligations and witnesses. Other computations can continue within their budgets.
 Emit a budget error even when no later source use consumes the incomplete output.
 If V prevents normal event storage, retain one terminal incomplete-proof record in reserved space.
