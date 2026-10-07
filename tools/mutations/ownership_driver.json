@@ -1,0 +1,90 @@
+{
+  "comment": [
+    "One row for each behavior that the selected driver groundwork adds or holds: the",
+    "failed report close, the selected build, the C compiler, the brace range, the",
+    "imported uncalled bodies and the FIR ownership pass. The one stage runs every",
+    "targeted test, so the log of a row names each test that the mutant turns red.",
+    "The table runs in the Linux VM with the debug preset, in the slot that built it.",
+    "Configure that build with FORT_ENABLE_BOOTSTRAP0=OFF and a FORT_STAGE1_COMPILER, or",
+    "with the C-started chain. The analysis-after-build-mode mutant needs two edits, an",
+    "import and a call, so it is no row; the pre-transform group holds it by hand."
+  ],
+  "sources": [
+    "src/fort/driver.ft",
+    "src/fort/fir_lower.ft",
+    "src/fort/ownership_report.ft"
+  ],
+  "binary": "build/Linux/debug/fort",
+  "build": "ninja -C build/Linux/debug fort",
+  "stages": [
+    {
+      "name": "driver groundwork tests",
+      "command": "ctest --test-dir build/Linux/debug -R '^(fir|ownership_driver_groups|ownership_report_close)$' --output-on-failure; a=$?; python3 test/lang/run_tests.py --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --cc clang --target x86_64-linux-gnu --opt opt-18 fail/modules/024 fail/modules/025; b=$?; python3 test/lang/run_tests.py --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --cc clang --target x86_64-linux-gnu --opt opt-18 --check-json fail/modules/024 fail/modules/025; c=$?; echo \"stage statuses: ctest $a lang $b lang-json $c\"; exit $((a | b | c))"
+    }
+  ],
+  "mutations": [
+    {
+      "decision": "toolchain-1.1-close",
+      "file": "src/fort/ownership_report.ft",
+      "old": "    bool closed = io.close(fd);\n    if (written && closed && rename(",
+      "new": "    bool closed = io.close(fd) || true;\n    if (written && closed && rename(",
+      "what": "a failed close of the temporary report still publishes it"
+    },
+    {
+      "decision": "D19.8-build-analysis",
+      "file": "src/fort/driver.ft",
+      "old": "    if (opts->ownership_check && status != EXIT_USAGE) {",
+      "new": "    if (opts->ownership_check && opts->check && status != EXIT_USAGE) {",
+      "what": "a selected build skips the analysis that --check runs"
+    },
+    {
+      "decision": "D19.8-no-cc",
+      "file": "src/fort/driver.ft",
+      "old": "    if (status == EXIT_OK && !opts->check) {",
+      "new": "    if ((status == EXIT_OK || opts->ownership_check) && !opts->check) {",
+      "what": "a selected build with an incomplete proof still emits and starts --cc"
+    },
+    {
+      "decision": "D20.4-brace-range",
+      "file": "src/fort/fir_lower.ft",
+      "old": "n->loc.end_col - 1, n->loc.end_line,\n        n->loc.end_col);",
+      "new": "n->loc.end_col - 1, n->loc.end_line,\n        n->loc.end_col - 1);",
+      "what": "a storage end at a closing brace has an empty range"
+    },
+    {
+      "decision": "D17.14-imported-bodies",
+      "file": "src/fort/ownership_report.ft",
+      "old": "        u64 mut k = 0;\n        while (row->local.solved && k < row->local.violations_len) {",
+      "new": "        u64 mut k = 0;\n        if (row->module != modules.entry(c->modules)) { k = row->local.violations_len; }\n        while (row->local.solved && k < row->local.violations_len) {",
+      "what": "violations of imported modules are not rendered"
+    },
+    {
+      "decision": "fir-test-ownership-exit",
+      "file": "src/fort/driver.ft",
+      "old": "    if (errors > 0) {\n        return EXIT_COMPILE_ERROR;",
+      "new": "    if (false) {\n        return EXIT_COMPILE_ERROR;",
+      "what": "the FIR ownership pass writes its errors and exits 0"
+    },
+    {
+      "decision": "fir-test-ownership-panic",
+      "file": "src/fort/driver.ft",
+      "old": "        if (!fir_verify.verify_report(f, rt, &failure)) {\n            error(strbuf.view(&failure));",
+      "new": "        fir_verify.verify(f, rt);\n        if (!fir_verify.verify_report(f, rt, &failure)) {\n            error(strbuf.view(&failure));",
+      "what": "the FIR ownership pass ends with the verifier panic"
+    },
+    {
+      "decision": "fir-test-ownership-order",
+      "file": "src/fort/driver.ft",
+      "old": "        if (passes[k].kind == test_pass_kind.tp_ownership_local && transformed) {",
+      "new": "        if (passes[k].kind == test_pass_kind.tp_ownership_local && transformed && false) {",
+      "what": "the FIR ownership pass runs after the build-mode pass"
+    },
+    {
+      "decision": "fir-test-ownership-incomplete",
+      "file": "src/fort/ownership_report.ft",
+      "old": "    if (errors == 0 && why.present) {",
+      "new": "    if (errors == 0 && why.present && false) {",
+      "what": "an incomplete local proof of a FIR test function gives no error"
+    }
+  ]
+}

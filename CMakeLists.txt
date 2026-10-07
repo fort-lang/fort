@@ -579,6 +579,22 @@ set_tests_properties(ownership_driver_groups PROPERTIES
     LABELS "fort;integration"
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
 
+# Fail the close of the ownership report file through a seccomp probe. Linux is its named host:
+# Darwin has no system call filter that a test can install.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_test(NAME ownership_report_close
+        COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/ownership_report_close_test.py"
+                --fort "${FORT_COMPILER_BINARY}"
+                --std-dir "${FORT_STD_DIR}"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    # A close that no supervisor answers would wait without end. The two cases take about 2 s.
+    set_tests_properties(ownership_report_close PROPERTIES
+        LABELS "fort;integration"
+        TIMEOUT 300
+        SKIP_RETURN_CODE 77
+        ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
+endif()
+
 # Test the comparison of selected and unselected IR with a stand-in and the built compiler.
 add_test(NAME ownership_ir_compare
     COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/ownership_ir_compare_test.py"
