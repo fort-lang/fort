@@ -1,0 +1,115 @@
+/// Infers the summaries of several checked bodies, each callee before its callers.
+import ast;
+import fir;
+import fir_lower;
+import fir_verify;
+import lower_env;
+import ownership_api;
+import ownership_calls_env;
+import ownership_flow;
+import ownership_graph;
+import ownership_limits;
+import ownership_summary;
+import ownership_summary_body;
+import ownership_summary_model;
+
+u64 BODIES = 6;
+
+// The views borrow the summaries. The bindings borrow the views. Nothing here moves.
+// Binding `i` names body `i` after its inference and nothing before it.
+struct bodies {
+    lower_env.env checked;
+    fir.func[6] functions;
+    ownership_summary_body.body_input[6] inputs;
+    ownership_flow.source_file_binding[1] files;
+    ownership_calls_env.env services;
+    ownership_summary_model.summary[6] summaries;
+    ownership_summary_model.summary_view[6] views;
+    ownership_summary_body.callee_binding[6] bindings;
+    u64 count;
+}
+
+/// Lowers and verifies each named function. Function `i` gets declaration key `i + 1`.
+fn open(bodies mut* b, string@ text, string@ names) void {
+    assert(names.len <= BODIES);
+    ownership_calls_env.open(&b->services);
+    lower_env.open(&b->checked);
+    lower_env.check_lines(&b->checked, text, true);
+    u64 mut i = 0;
+    while (i < names.len) {
+        fir_lower.report mut why = fir_lower.report{};
+        assert(fir_lower.lower_function(&b->checked.c.ck, lower_env.decl(&b->checked, names[i]),
+            &b->functions[i], &why));
+        fir_verify.violation mut failure = fir_verify.violation{};
+        assert(!fir_verify.find_violation(&b->functions[i], &b->checked.rt, &failure));
+        b->files[0] = ownership_flow.source_file_binding{1, 1,
+            fir.block_at(&b->functions[i], 0)->term.loc.file};
+        ownership_summary_body.callee_binding@ no_callees = {};
+        b->inputs[i] = ownership_summary_body.body_input{
+            ownership_graph.body_input{ownership_calls_env.function(1, cast(i + 1, u32)),
+                &b->functions[i], true}, b->files[..], &b->services.services,
+            b->services.limits, ownership_summary_model.coverage_status{true, true, false},
+            true, no_callees};
+        i += 1;
+    }
+    b->count = names.len;
+}
+
+/// Infers body `index` in its own computation. Each earlier inferred body is a direct callee.
+/// The new summary then becomes a callee of each later body. A repeat replaces the summary.
+fn infer(bodies mut* b, u64 index) void {
+    assert(index < b->count);
+    b->services.limits = ownership_limits.computation(
+        ownership_limits.fir_size(&b->functions[index]));
+    b->inputs[index].limits = b->services.limits;
+    b->inputs[index].callees = b->bindings[..index];
+    ownership_calls_env.reset(&b->services);
+    b->bindings[index] = ownership_summary_body.callee_binding{};
+    ownership_summary_model.free(&b->summaries[index]);
+    b->summaries[index] = ownership_summary.infer(&b->inputs[index]);
+    b->views[index] = ownership_summary_model.view(&b->summaries[index]);
+    b->bindings[index] = ownership_summary_body.callee_binding{b->functions[index].sym,
+        &b->views[index]};
+}
+
+/// Infers every body in order.
+fn infer_all(bodies mut* b) void {
+    u64 mut i = 0;
+    while (i < b->count) {
+        infer(b, i);
+        i += 1;
+    }
+}
+
+fn close(bodies mut* b) void {
+    u64 mut i = 0;
+    while (i < BODIES) {
+        ownership_summary_model.free(&b->summaries[i]);
+        i += 1;
+    }
+    i = 0;
+    while (i < b->count) {
+        fir.func_free(&b->functions[i]);
+        i += 1;
+    }
+    lower_env.close(&b->checked);
+    ownership_calls_env.close(&b->services);
+}
+
+fn summary(bodies* b, u64 index) ownership_summary_model.summary* {
+    return &b->summaries[index];
+}
+
+/// True when the event store saw an event of `kind` since the last computation started.
+fn saw(bodies* b, ownership_api.event_kind kind) bool {
+    return b->services.counts.events > 0 && b->services.counts.last.kind == kind;
+}
+
+/// The only case of a complete summary, or a failure of the test.
+fn only_case(bodies* b, u64 index) ownership_summary_model.case_record {
+    assert(ownership_api.successful(b->summaries[index].proof));
+    assert(!b->summaries[index].residual_effects && b->summaries[index].cases.len == 1);
+    return b->summaries[index].cases[0];
+}
+
+fn symbol(bodies* b, u64 index) ast.sym* { return b->functions[index].sym; }

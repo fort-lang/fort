@@ -2259,9 +2259,12 @@ fn apply(request* req) application {
     if (!ownership_api.successful(out.proof)) { return out; }
     ownership_summary_model.context mut ctx = ownership_summary_model.context{req->services,
         req->operation, req->source, out.bound.model.event, req->summary->source};
+    ownership_api.outcome_kind ending = out.bound.model.cases.len == 1 ?
+        out.bound.model.cases[0].outcome.kind : ownership_api.outcome_kind.unknown_fort;
     if (out.bound.model.residual_effects || out.bound.model.cases.len != 1 ||
         out.bound.model.cases[0].guard.kind != ownership_api.entity_kind.none ||
-        out.bound.model.cases[0].outcome.kind != ownership_api.outcome_kind.function_return ||
+        (ending != ownership_api.outcome_kind.function_return &&
+        ending != ownership_api.outcome_kind.abort) ||
         out.bound.model.retained.len != 0) {
         out.proof = caller_failure(req, &out, ownership_api.entity_id{}, req->operation,
             ownership_api.incomplete_reason.unknown_effect,
@@ -2289,16 +2292,26 @@ fn apply(request* req) application {
     }
     ownership_transfer.event_binding[1] events = {ownership_transfer.event_binding{
         req->operation, out.bound.model.event}};
+    // Only the effects of the applied case need their requirements. An effect after an abort
+    // never runs, so its requirement cannot fail the call.
+    ownership_api.entity_id@ sequence = out.bound.model.cases[0].effects;
     u64 mut preflight = 0;
-    while (preflight < out.bound.model.effects.len) {
-        if (!ownership_summary_model.work(&ctx, &out.proof, 1) ||
-            !requirements_proved(req, &out, &ctx, out.bound.model.effects[preflight], true)) {
-            return out;
+    while (preflight < sequence.len) {
+        u64 mut at = 0;
+        while (at < out.bound.model.effects.len) {
+            if (!ownership_summary_model.work(&ctx, &out.proof, 1)) { return out; }
+            if (ownership_summary_model.same(sequence[preflight],
+                out.bound.model.effects[at].effect.key)) {
+                if (!requirements_proved(req, &out, &ctx, out.bound.model.effects[at], true)) {
+                    return out;
+                }
+                break;
+            }
+            at += 1;
         }
         preflight += 1;
     }
     if (!seed_locals(req, &out, &ctx, events[..])) { return out; }
-    ownership_api.entity_id@ sequence = out.bound.model.cases[0].effects;
     u64 mut i = 0;
     while (i < sequence.len) {
         u64 mut j = 0;
@@ -2322,8 +2335,11 @@ fn apply(request* req) application {
         }
         i += 1;
     }
-    if (!end_locals(req, &out, &ctx)) { return out; }
+    // A proved abort needs no cleanup. It keeps no normal continuation (D17.18).
+    if (ending == ownership_api.outcome_kind.function_return && !end_locals(req, &out, &ctx)) {
+        return out;
+    }
     out.outcome = out.bound.model.cases[0].outcome;
-    out.normal_continuation = true;
+    out.normal_continuation = ending == ownership_api.outcome_kind.function_return;
     return out;
 }

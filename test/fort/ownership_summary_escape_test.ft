@@ -285,7 +285,8 @@ fn observer_after_exit() void {
     ownership_summary_body.body_program mut body = ownership_summary_body.extract(&f.inputs[0]);
     assert(ownership_api.successful(body.proof));
     ownership_summary.exits mut snapshots = ownership_summary.exits{
-        .context = body.context, .proof = ownership_summary_model.complete()};
+        .context = body.context, .proof = ownership_summary_model.complete(),
+        .relations = &body.relations};
     defer ownership_summary.free_exits(&snapshots);
     ownership_flow.program mut flow_program = ownership_summary_body.flow(&f.inputs[0], &body);
     flow_program.exit_context = cast(&snapshots, void mut*);
@@ -449,13 +450,16 @@ fn body_availability() void {
     defer ownership_calls_fixtures.close(&available);
     assert(ownership_api.successful(available.summary.proof));
     ownership_summary_model.summary_view known = ownership_summary_model.view(&available.summary);
-    ownership_summary_model.summary_view[1] supplied = {known};
+    // The summary belongs to another declaration. It cannot stand for the call of `other`.
+    ownership_summary_body.callee_binding[1] supplied = {ownership_summary_body.callee_binding{
+        available.functions[0].sym, &known}};
     ownership_calls_fixtures.fixture mut unsupported = ownership_calls_fixtures.fixture{};
     ownership_calls_fixtures.open(&unsupported, UNSUPPORTED_CALL[..]);
     defer ownership_calls_fixtures.close(&unsupported);
     assert(unsupported.summary.proof.kind == ownership_api.proof_kind.incomplete);
-    ownership_summary_model.summary mut repair =
-        ownership_summary.infer(&unsupported.inputs[0], supplied[..]);
+    ownership_summary_body.body_input mut wrong = unsupported.inputs[0];
+    wrong.callees = supplied[..];
+    ownership_summary_model.summary mut repair = ownership_summary.infer(&wrong);
     assert(repair.proof.kind == ownership_api.proof_kind.incomplete && repair.residual_effects);
     assert(repair.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
     ownership_summary_model.free(&repair);
@@ -467,7 +471,8 @@ fn body_availability() void {
         if (case_at == 1) { input.correspondence_complete = false; }
         if (case_at == 2) { input.coverage.supplied_complete = false; }
         if (case_at == 3) { input.source_files = no_files; }
-        ownership_summary_model.summary mut refused = ownership_summary.infer(&input, supplied[..]);
+        input.callees = supplied[..];
+        ownership_summary_model.summary mut refused = ownership_summary.infer(&input);
         assert(refused.proof.kind == ownership_api.proof_kind.incomplete
             && refused.residual_effects);
         assert(refused.cases.len == 0 && !refused.coverage.actual_source_complete);
