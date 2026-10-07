@@ -28,8 +28,6 @@ TEST(grouped_types_preserve_identity_and_layout_dependencies, {
     TEST_ASSERT_EQ_STR(type_text(sym_main("TABLE")->type), "(fn (i32) i32)[2]");
     TEST_ASSERT_EQ_UINT64(type_sizeof(sym_main("TABLE")->type), (uint64_t)16);
     TEST_ASSERT_TRUE(check_body("(i32 mut*) own p = new(i32); *p = 1; del(p);"));
-    TEST_ASSERT_FALSE(check_body("(i32****************)***************** p = null;"));
-    TEST_ASSERT_TRUE(said("too many type suffixes"));
     TEST_ASSERT_FALSE(check_src("struct loop { (loop) field; }\nfn main() i32 { return 0; }\n"));
 })
 

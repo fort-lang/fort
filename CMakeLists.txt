@@ -567,6 +567,20 @@ set_tests_properties(ownership_driver PROPERTIES
     LABELS "fort;integration"
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
 
+# Check the deepest nesting of D2.11 under a 1 MB stack. The test gives each
+# compiler of the build the same type of 254 nested groups.
+set(FORT_STACK_DEPTH_COMPILERS --fort "${FORT_COMPILER_BINARY}")
+if(TARGET fort_bootstrap0)
+    list(APPEND FORT_STACK_DEPTH_COMPILERS --fort "$<TARGET_FILE:fort_bootstrap0>")
+endif()
+add_test(NAME stack_depth
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/stack_depth_test.py"
+            ${FORT_STACK_DEPTH_COMPILERS}
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(stack_depth PROPERTIES
+    LABELS "fort;integration"
+    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
+
 # Node's built-in runner tests the VS Code extension in editors/vscode.
 # It converts diagnostic documents into editor shapes.
 # It also converts 1-based byte columns to character offsets.
