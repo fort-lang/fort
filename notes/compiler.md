@@ -1285,6 +1285,15 @@ came here.
   An abort case records an abort exit. Normal cases join into one continuation. With two of them,
   the summary does not export the call result and stays incomplete.
   A projected effect on the caller storage of a symbolic caller stays incomplete in this unit.
+- **A borrow stored into caller storage is retained past the return** (D17.14).
+  A copy of a reference local, or a null store, into caller storage is a store, at a field or at
+  the root. Flow copies it into a private slot, which checks the stored value. A root written
+  through is an output root, so a call binds the storage that it designates.
+  The summary exports a callee copy of one of its parameters into caller storage as a copy from
+  the argument local. Any other callee store into caller storage keeps the summary incomplete.
+  At each normal return, the last store into each caller storage path is a retained relation.
+  A later store at that path, such as a null store, ends it. A retained source that was
+  released or ended fails the body at its return with an invalid use.
 - **A view loaded from an owner field ends when the same body releases that field** (D17.14).
   Flow models a caller owner field as a private empty slot, so its release does not end the
   loaded source. `ownership_summary.publish` checks the exit sequence instead. A later

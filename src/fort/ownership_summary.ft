@@ -361,6 +361,42 @@ fn caller_visible(call_context* c, ownership_api.place_path place,
     return false;
 }
 
+// A callee copy of one of its parameters into caller storage becomes a copy from the argument
+// local of this body (D17.14). Callers replay it into their own storage. Any other callee
+// store into caller storage stays unexported.
+fn export_store(call_context* c, fir.statement* call, ownership_flow.step* s,
+    ownership_summary_model.summary* bound, ownership_summary_model.effect_node node) bool {
+    if (node.payload != ownership_summary_model.payload_kind.copy ||
+        node.operand.projections.len != 0 ||
+        caller_visible(c, node.operand, ownership_api.entity_id{}) ||
+        !caller_visible(c, node.effect.place, ownership_api.entity_id{})) { return false; }
+    u64 mut r = 0;
+    while (r < bound->roots.len) {
+        if (!call_work(c, 1)) { return false; }
+        ownership_summary_model.symbolic_root root = bound->roots[r];
+        if (root.kind == ownership_summary_model.root_kind.by_value_slot &&
+            ownership_summary_model.same(root.slot, node.operand.root) && root.formal > 0 &&
+            root.formal <= call->value.ops_len) {
+            fir.operand argument = fir.rvalue_operand(c->in->function.body, call->value,
+                root.formal - 1);
+            if (argument.kind != fir.operand_kind.ok_copy ||
+                !ownership_summary_body.direct(argument.place)) { return false; }
+            ownership_api.place_path held = ownership_summary_body.slot(c->in,
+                argument.place.local);
+            ownership_summary_body.export_effect(c->in, c->program,
+                ownership_summary_model.effect_node{
+                    .effect = ownership_api.ordered_effect{.kind = ownership_api.effect_kind.write,
+                        .operation = s->operation, .place = node.effect.place,
+                        .source = node.effect.source},
+                    .payload = ownership_summary_model.payload_kind.copy, .operand = held},
+                s->source, call->loc.file);
+            return ownership_api.successful(c->program->proof);
+        }
+        r += 1;
+    }
+    return false;
+}
+
 fn listed(ownership_api.entity_id@ keys, ownership_api.entity_id key) bool {
     u64 mut i = 0;
     while (i < keys.len) {
@@ -410,9 +446,11 @@ fn export_call(call_context* c, ownership_summary_body.call_site site, fir.state
         if (listed(applied_case.effects, node.effect.key) &&
             node.payload != ownership_summary_model.payload_kind.read &&
             (caller_visible(c, node.effect.place, node.effect.allocation) ||
-            caller_visible(c, node.operand, ownership_api.entity_id{}))) {
+            caller_visible(c, node.operand, ownership_api.entity_id{})) &&
+            !export_store(c, call, s, bound, node)) {
             program->call_residual = true;
         }
+        if (!ownership_api.successful(program->proof)) { return false; }
         i += 1;
     }
     u32 mut op = 0;
@@ -909,7 +947,10 @@ struct publication {
     ownership_api.guard_fact mut@ own guards;
     ownership_summary_model.case_record mut@ own cases;
     ownership_summary_model.relation mut@ own relations;
+    ownership_summary_model.relation mut@ own retained;
+    ownership_api.entity_id mut@ own case_retained;
     ownership_api.ordering_constraint mut@ own order;
+    u64 retained_len;
     u64 predicates_len;
     u64 guards_len;
     u64 relations_len;
@@ -928,6 +969,8 @@ fn free_publication(publication mut* out) void {
     del(owned.guards);
     del(owned.cases);
     del(owned.relations);
+    del(owned.retained);
+    del(owned.case_retained);
     del(owned.order);
     *out = publication{};
 }
@@ -974,6 +1017,76 @@ fn exit_guard(ownership_summary_body.body_input* in,
         out->guard_keys[first..out->guard_keys_len], none};
     out->guards_len += 1;
     return key;
+}
+
+fn caller_storage(ownership_summary_body.body_program mut* program,
+    ownership_api.place_path place) bool {
+    u64 mut r = 0;
+    while (r < program->roots_len) {
+        if (!ownership_summary_body.work(program, 1)) { return false; }
+        ownership_summary_model.symbolic_root root = program->roots[r];
+        if (root.kind == ownership_summary_model.root_kind.caller_source &&
+            ownership_summary_model.same(root.slot, place.root)) { return true; }
+        r += 1;
+    }
+    return false;
+}
+
+// The last borrow store into each caller storage path of a normal return retains its source
+// after the return. The summary keeps it as a retained relation. The source must still be
+// live at the return, after deferred effects (D17.14). A later store at that path, such as a
+// null store, ends the relation.
+fn retained_stores(ownership_summary_body.body_program mut* program, exit_snapshot* exit,
+    ownership_api.entity_id@ sequence, u64 index, publication mut* out) bool {
+    u64 first = out->retained_len;
+    u64 mut i = 0;
+    while (i < sequence.len) {
+        u64 at = effect_at(program, sequence[i]);
+        if (at == ownership_api.U64_MAX) { return false; }
+        ownership_summary_model.effect_node node = program->effects[at];
+        bool store = node.payload == ownership_summary_model.payload_kind.copy ||
+            node.payload == ownership_summary_model.payload_kind.replacement;
+        if (store && caller_storage(program, node.effect.place)) {
+            bool mut later = false;
+            u64 mut j = i + 1;
+            while (j < sequence.len && !later) {
+                u64 next_at = effect_at(program, sequence[j]);
+                if (next_at == ownership_api.U64_MAX) { return false; }
+                ownership_summary_model.effect_node next = program->effects[next_at];
+                later = (next.payload == ownership_summary_model.payload_kind.copy ||
+                    next.payload == ownership_summary_model.payload_kind.replacement) &&
+                    ownership_state.same_place(next.effect.place, node.effect.place);
+                j += 1;
+            }
+            ownership_api.entity_id source = node.payload ==
+                ownership_summary_model.payload_kind.copy ? node.effect.source :
+                node.value.borrows.len == 1 ? node.value.borrows[0].source :
+                ownership_api.entity_id{};
+            if (!later && source.kind == ownership_api.entity_kind.source) {
+                u64 known = ownership_state.source_index(&exit->facts, source);
+                if (known != ownership_api.U64_MAX &&
+                    (exit->facts.sources[known].validity == ownership_api.validity_kind.released ||
+                    exit->facts.sources[known].validity == ownership_api.validity_kind.ended)) {
+                    intrinsic_use(program, exit->operation, exit->source, source,
+                        "retained view outlives its source");
+                    return false;
+                }
+                if (!ownership_summary_model.effect_charge(&program->context, &program->proof,
+                    &program->relations) || out->retained_len >= out->retained.len) {
+                    return false;
+                }
+                ownership_api.entity_id key = ownership_summary_body.next(program,
+                    ownership_api.entity_kind.relation);
+                out->retained[out->retained_len] = ownership_summary_model.relation{.key = key,
+                    .borrow = ownership_api.borrow_relation{.key = key,
+                        .containing = node.effect.place, .source = source}};
+                out->case_retained[out->retained_len] = key;
+                out->retained_len += 1;
+            }
+        }
+        i += 1;
+    }
+    return ownership_api.successful(program->proof) && first <= out->retained_len;
 }
 
 // One case for each exit (D17.18). A case keeps the requirements and the effects on the path
@@ -1034,6 +1147,10 @@ fn exit_case(ownership_summary_body.body_input* in,
         }
         i += 1;
     }
+    u64 retained_first = out->retained_len;
+    if (returns && !retained_stores(program, exit, effects[..sequence], index, out)) {
+        return false;
+    }
     ownership_api.entity_id guard = exit_guard(in, program, exit, out);
     // A refused key fails the proof. Each later charge then fails, so this check also covers
     // a refused result relation key.
@@ -1044,7 +1161,8 @@ fn exit_case(ownership_summary_body.body_input* in,
     outcome.guard = guard;
     out->cases[index] = ownership_summary_model.case_record{.key = case_key, .guard = guard,
         .requirements = needed[..kept], .effects = effects[..sequence],
-        .results = out->case_results[results_first..out->results_len], .outcome = outcome,
+        .results = out->case_results[results_first..out->results_len],
+        .retained = out->case_retained[retained_first..out->retained_len], .outcome = outcome,
         .coverage = program->coverage};
     return true;
 }
@@ -1125,6 +1243,8 @@ fn publish(ownership_summary_body.body_input* in,
     built.guards = new(ownership_api.guard_fact, count);
     built.cases = new(ownership_summary_model.case_record, count);
     built.relations = new(ownership_summary_model.relation, results);
+    built.retained = new(ownership_summary_model.relation, count * effects_len);
+    built.case_retained = new(ownership_api.entity_id, count * effects_len);
     built.order = new(ownership_api.ordering_constraint, count * effects_len);
     u64 mut i = 0;
     while (i < count) {
@@ -1150,7 +1270,8 @@ fn publish(ownership_summary_body.body_input* in,
         .effects = program->effects[..program->effects_len], .order = built.order[..unique],
         .predicates = built.predicates[..built.predicates_len],
         .guards = built.guards[..built.guards_len],
-        .results = built.relations[..built.relations_len], .cases = built.cases[..],
+        .results = built.relations[..built.relations_len],
+        .retained = built.retained[..built.retained_len], .cases = built.cases[..],
         .provenance_records = program->provenance_records[..program->provenance_len],
         .coverage = program->coverage, .proof = program->proof,
         .operation = first->operation, .source = first->source,

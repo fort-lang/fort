@@ -1,0 +1,386 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| boundary G08.1
+//| boundary G08.2
+//| boundary G08.3
+//| boundary G08.4
+//| direct-call retention ok
+/// Checks borrows that a call stores into caller storage (D17.14, D17.18).
+import ownership_api;
+import ownership_call_bodies;
+import ownership_calls_env;
+import ownership_summary_body;
+import ownership_summary_model;
+
+string[3] RETAINS = {
+    "struct view_box { i32* ptr; }",
+    "fn callee(view_box mut* out, i32* p) void { out->ptr = p; }",
+    "fn caller(view_box mut* out, i32* p) void { callee(out, p); }",
+};
+
+string[6] CLEARS = {
+    "struct view_box { i32* ptr; }",
+    "fn callee(view_box mut* out, i32* p) void { out->ptr = p; }",
+    "fn caller(view_box mut* out, i32 mut* own p) void {",
+    "    callee(out, p);",
+    "    out->ptr = null; del(p);",
+    "}",
+};
+
+string[3] DANGLES = {
+    "struct view_box { i32* ptr; }",
+    "fn callee(view_box mut* out, i32* p) void { out->ptr = p; }",
+    "fn caller(view_box mut* out, i32 mut* own p) void { callee(out, p); del(p); }",
+};
+
+string[3] ESCAPES = {
+    "struct view_box { i32* ptr; } struct inline_box { i32 value; }",
+    "fn callee(view_box mut* out, inline_box value) void { out->ptr = &value.value; }",
+    "fn caller(view_box mut* out, inline_box value) void { callee(out, value); }",
+};
+
+string[3] DIRECT = {
+    "struct view_box { i32* ptr; }",
+    "fn callee(view_box mut* out, i32 mut* own p) void { out->ptr = p; del(p); }",
+    "fn local(view_box mut* out) void { i32 x = 1; i32* q = &x; out->ptr = q; }",
+};
+
+string[3] STORES_RELEASED = {
+    "struct view_box { i32* ptr; }",
+    "fn callee(view_box mut* out, i32* p) void { out->ptr = p; }",
+    "fn caller(view_box mut* out, i32 mut* own p) void { i32* q = p; del(p); callee(out, q); }",
+};
+
+string[6] TWO_FIELDS = {
+    "struct pair_box { i32* left; i32* right; }",
+    "fn callee(pair_box mut* out, i32* p) void { out->left = p; }",
+    "fn caller(pair_box mut* out, i32 mut* own p) void {",
+    "    callee(out, p);",
+    "    out->right = null; del(p);",
+    "}",
+};
+
+// The store `*pp = q` writes the root of the designated caller storage, not a field of it.
+string[2] ROOT_RETAINS = {
+    "fn callee(i32* mut* pp, i32* q) void { *pp = q; }",
+    "fn caller(i32* mut* pp, i32* p) void { callee(pp, p); }",
+};
+
+string[2] ROOT_DANGLES = {
+    "fn callee(i32* mut* pp, i32* q) void { *pp = q; }",
+    "fn caller(i32* mut* pp, i32 mut* own p) void { callee(pp, p); del(p); }",
+};
+
+string[2] ROOT_LOCAL = {
+    "fn callee(i32* mut* pp, i32* q) void { *pp = q; }",
+    "fn local(i32* mut* pp) void { i32 x = 1; i32* q = &x; *pp = q; }",
+};
+
+// The call stores `p` into the local `v` of the caller. The read of `v` after the release
+// uses that store. Before the release the read is valid, and the dangling local alone is not an
+// error (D17.14).
+string[2] ROOT_READ_AFTER = {
+    "fn callee(i32* mut* pp, i32* q) void { *pp = q; }",
+    "fn caller(i32 mut* own p, i32* r) i32 { i32* mut v = r; callee(&v, p); del(p); return *v; }",
+};
+
+string[3] ROOT_READ_BEFORE = {
+    "fn callee(i32* mut* pp, i32* q) void { *pp = q; }",
+    "fn caller(i32 mut* own p, i32* r) i32 {",
+    "    i32* mut v = r; callee(&v, p); i32 x = *v; del(p); return x; }",
+};
+
+// The callee stores a copy of its local `t`, not of a formal, into caller storage.
+string[3] LOCAL_COPY = {
+    "struct view_box { i32* ptr; }",
+    "fn callee(view_box mut* out, i32* p) void { i32* t = p; out->ptr = t; }",
+    "fn caller(view_box mut* out, i32* p) void { callee(out, p); }",
+};
+
+// The stored view comes from a field of other storage, not from a local of the body.
+string[2] FIELD_COPY = {
+    "struct view_box { i32* ptr; }",
+    "fn callee(view_box mut* out, view_box* other) void { out->ptr = other->ptr; }",
+};
+
+// `&t->b` designates a field of the storage of `t`, not its root.
+string[4] FIELD_STORES = {
+    "struct two { i32* a; i32* b; }",
+    "fn callee(i32* mut* slot, i32* q) void { *slot = q; }",
+    "fn caller(two mut* t, i32 mut* own o, i32* q) void {",
+    "    callee(&t->b, o); callee(&t->a, q); del(o); }",
+};
+
+string[4] FIELD_STORES_SWAPPED = {
+    "struct two { i32* a; i32* b; }",
+    "fn callee(i32* mut* slot, i32* q) void { *slot = q; }",
+    "fn caller(two mut* t, i32 mut* own o, i32* q) void {",
+    "    callee(&t->a, o); callee(&t->b, q); del(o); }",
+};
+
+string[4] FIELD_STORES_DIRECT = {
+    "struct two { i32* a; i32* b; }",
+    "fn callee(i32* mut* slot, i32* q) void { *slot = q; }",
+    "fn caller(two mut* t, i32 mut* own o, i32* q) void {",
+    "    t->b = o; t->a = q; del(o); }",
+};
+
+string[4] FIELD_WRAPPER = {
+    "struct two { i32* a; i32* b; }",
+    "fn keep(i32* mut* slot, i32* q) void { *slot = q; }",
+    "fn mid(two mut* t, i32* q) void { keep(&t->b, q); }",
+    "fn top(two mut* t, i32 mut* own o) void { mid(t, o); del(o); }",
+};
+
+fn bodies(ownership_call_bodies.bodies mut* b, string@ text) void {
+    string[2] names = {"callee", "caller"};
+    ownership_call_bodies.open(b, text, names[..]);
+    ownership_call_bodies.infer_all(b);
+}
+
+// The one retained relation of a complete summary: its source and its containing field.
+fn retained_source(ownership_call_bodies.bodies* b, u64 index) ownership_api.entity_id {
+    ownership_summary_model.case_record row = ownership_call_bodies.only_case(b, index);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(b, index);
+    assert(s->retained.len == 1 && row.retained.len == 1);
+    assert(ownership_summary_model.same(row.retained[0], s->retained[0].key));
+    assert(s->retained[0].borrow.containing.projections.len == 1);
+    return s->retained[0].borrow.source;
+}
+
+fn invalid_at_return(ownership_call_bodies.bodies* b, u64 index) void {
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(b, index);
+    assert(s->proof.failed && !ownership_api.successful(s->proof) && s->cases.len == 0);
+    assert(ownership_call_bodies.saw(b, ownership_api.event_kind.invalid_use));
+    assert(b->services.counts.last.operation.terminator);
+    assert(b->services.counts.last.relation.kind == ownership_api.entity_kind.source);
+}
+
+// The callee stores its parameter into the caller field. Both bodies retain the source of
+// their own parameter. The caller summary exports the store as a copy from its argument.
+fn case_g08_1() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    bodies(&b, RETAINS[..]);
+    defer ownership_call_bodies.close(&b);
+    assert(b.services.counts.events == 0);
+    assert(ownership_summary_model.same(retained_source(&b, 0),
+        ownership_summary_body.designated(&b.inputs[0], 2)));
+    assert(ownership_summary_model.same(retained_source(&b, 1),
+        ownership_summary_body.designated(&b.inputs[1], 2)));
+    ownership_summary_model.summary* caller = ownership_call_bodies.summary(&b, 1);
+    u64 mut copies = 0;
+    u64 mut i = 0;
+    while (i < caller->effects.len) {
+        ownership_summary_model.effect_node node = caller->effects[i];
+        if (node.payload == ownership_summary_model.payload_kind.copy &&
+            node.effect.place.projections.len == 1) {
+            assert(ownership_summary_model.same(node.operand.root,
+                ownership_summary_body.slot(&b.inputs[1], 2).root));
+            copies += 1;
+        }
+        i += 1;
+    }
+    assert(copies == 1);
+    ownership_calls_env.boundary("G08.1", "", "none");
+}
+
+// A null store after the call ends the retained relation, so the later release is valid.
+fn case_g08_2() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    bodies(&b, CLEARS[..]);
+    defer ownership_call_bodies.close(&b);
+    assert(b.services.counts.events == 0);
+    ownership_call_bodies.only_case(&b, 1);
+    assert(ownership_call_bodies.summary(&b, 1)->retained.len == 0);
+    ownership_calls_env.boundary("G08.2", "", "none");
+}
+
+// The caller field still retains the source when the caller releases it. The field outlives
+// the caller, so the caller fails at its return (D17.14).
+fn case_g08_3() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    bodies(&b, DANGLES[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.only_case(&b, 0);
+    invalid_at_return(&b, 1);
+    assert(ownership_summary_model.same(b.services.counts.last.relation,
+        ownership_summary_body.designated(&b.inputs[1], 2)));
+    ownership_calls_env.boundary("G08.3", "", "invalid_use");
+}
+
+// The by-value parameter ends at the callee return. The callee fails at its own store, not
+// the caller, and the caller keeps an unknown call.
+fn case_g08_4() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    bodies(&b, ESCAPES[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer(&b, 0);
+    ownership_summary_model.summary* callee = ownership_call_bodies.summary(&b, 0);
+    assert(callee->proof.failed && !ownership_api.successful(callee->proof));
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.invalid_use));
+    assert(b.services.counts.last.operation.function.declaration.declaration == 1);
+    assert(!b.services.counts.last.operation.terminator);
+    ownership_call_bodies.infer(&b, 1);
+    ownership_summary_model.summary* caller = ownership_call_bodies.summary(&b, 1);
+    assert(caller->proof.kind == ownership_api.proof_kind.incomplete && caller->cases.len == 0);
+    assert(!ownership_call_bodies.saw(&b, ownership_api.event_kind.invalid_use));
+    ownership_calls_env.boundary("G08.4", "", "invalid_use");
+}
+
+// A body that stores and then releases, or stores a view of its own local, fails at its
+// return. A store into another field of the same caller storage does not end the relation.
+fn direct_stores() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"callee", "local"};
+    ownership_call_bodies.open(&b, DIRECT[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer(&b, 0);
+    invalid_at_return(&b, 0);
+    ownership_call_bodies.infer(&b, 1);
+    invalid_at_return(&b, 1);
+    ownership_call_bodies.bodies mut fields = ownership_call_bodies.bodies{};
+    bodies(&fields, TWO_FIELDS[..]);
+    defer ownership_call_bodies.close(&fields);
+    invalid_at_return(&fields, 1);
+}
+
+// The stored view must be live at the store. Its source was released before the call, so the
+// requirement of the store fails at the call.
+fn released_store() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    bodies(&b, STORES_RELEASED[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 1);
+    assert(s->proof.failed && !ownership_api.successful(s->proof));
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.caller_requirement));
+    assert(!b.services.counts.last.operation.terminator);
+}
+
+// A root store retains its source as a field store does. The caller binds the store to the
+// storage that its argument designates, not to the argument slot.
+fn root_stores() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    bodies(&b, ROOT_RETAINS[..]);
+    defer ownership_call_bodies.close(&b);
+    assert(b.services.counts.events == 0);
+    u64 mut i = 0;
+    while (i < 2) {
+        ownership_call_bodies.only_case(&b, i);
+        ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, i);
+        assert(s->retained.len == 1 && s->retained[0].borrow.containing.projections.len == 0);
+        assert(ownership_summary_model.same(s->retained[0].borrow.source,
+            ownership_summary_body.designated(&b.inputs[i], 2)));
+        i += 1;
+    }
+    ownership_call_bodies.bodies mut dangles = ownership_call_bodies.bodies{};
+    bodies(&dangles, ROOT_DANGLES[..]);
+    defer ownership_call_bodies.close(&dangles);
+    invalid_at_return(&dangles, 1);
+    ownership_call_bodies.bodies mut local = ownership_call_bodies.bodies{};
+    string[2] names = {"callee", "local"};
+    ownership_call_bodies.open(&local, ROOT_LOCAL[..], names[..]);
+    defer ownership_call_bodies.close(&local);
+    ownership_call_bodies.infer(&local, 1);
+    invalid_at_return(&local, 1);
+}
+
+// A call that stores into `&t->b` writes a field of the storage of `t`. The binding names a whole
+// root only, so it does not bind that store to the root of `*t`. There two stores would share
+// one path, and the second store would end the retention of the first (G1, G2). The call stays
+// unknown and the caller summary stays incomplete with no false error. The same stores written
+// directly keep their two fields, and the caller fails at its return (G3).
+fn field_root_stores() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    bodies(&b, FIELD_STORES[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 1);
+    assert(s->proof.kind == ownership_api.proof_kind.incomplete && s->cases.len == 0);
+    assert(!ownership_call_bodies.saw(&b, ownership_api.event_kind.invalid_use));
+    ownership_call_bodies.bodies mut swapped = ownership_call_bodies.bodies{};
+    bodies(&swapped, FIELD_STORES_SWAPPED[..]);
+    defer ownership_call_bodies.close(&swapped);
+    ownership_summary_model.summary* other = ownership_call_bodies.summary(&swapped, 1);
+    assert(other->proof.kind == ownership_api.proof_kind.incomplete && other->cases.len == 0);
+    ownership_call_bodies.bodies mut direct = ownership_call_bodies.bodies{};
+    bodies(&direct, FIELD_STORES_DIRECT[..]);
+    defer ownership_call_bodies.close(&direct);
+    invalid_at_return(&direct, 1);
+}
+
+// One store through `&t->b` in a wrapper. The wrapper does not publish a store at the root of
+// `*t`, so its caller does not retain the source there (F1).
+fn field_root_wrapper() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[3] names = {"keep", "mid", "top"};
+    ownership_call_bodies.open(&b, FIELD_WRAPPER[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_call_bodies.only_case(&b, 0);
+    u64 mut i = 1;
+    while (i < 3) {
+        ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, i);
+        assert(s->proof.kind == ownership_api.proof_kind.incomplete && s->cases.len == 0);
+        assert(s->retained.len == 0);
+        i += 1;
+    }
+}
+
+fn root_store_reads() void {
+    ownership_call_bodies.bodies mut after = ownership_call_bodies.bodies{};
+    bodies(&after, ROOT_READ_AFTER[..]);
+    defer ownership_call_bodies.close(&after);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&after, 1);
+    assert(s->proof.failed && !ownership_api.successful(s->proof) && s->cases.len == 0);
+    assert(ownership_call_bodies.saw(&after, ownership_api.event_kind.invalid_use));
+    assert(!after.services.counts.last.operation.terminator);
+    ownership_call_bodies.bodies mut before = ownership_call_bodies.bodies{};
+    bodies(&before, ROOT_READ_BEFORE[..]);
+    defer ownership_call_bodies.close(&before);
+    assert(before.services.counts.events == 0);
+    ownership_call_bodies.only_case(&before, 1);
+}
+
+// The callee retains the source of `p` through its local. The caller has no argument local
+// to export the store from, so its summary stays incomplete and keeps no false relation.
+fn local_copy_store() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    bodies(&b, LOCAL_COPY[..]);
+    defer ownership_call_bodies.close(&b);
+    assert(b.services.counts.events == 0);
+    ownership_call_bodies.only_case(&b, 0);
+    assert(ownership_call_bodies.summary(&b, 0)->retained.len == 1);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 1);
+    assert(s->proof.kind == ownership_api.proof_kind.incomplete && s->cases.len == 0);
+    assert(s->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+}
+
+// A retained store exports a copy from a local or a null store. Another stored value has no
+// exported source, so the body refuses it. It does not record a store of nothing.
+fn field_copy_store() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[1] names = {"callee"};
+    ownership_call_bodies.open(&b, FIELD_COPY[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer(&b, 0);
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 0);
+    assert(s->proof.kind == ownership_api.proof_kind.incomplete && s->cases.len == 0);
+    assert(s->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+}
+
+fn main() i32 {
+    case_g08_1();
+    case_g08_2();
+    case_g08_3();
+    case_g08_4();
+    direct_stores();
+    released_store();
+    root_stores();
+    root_store_reads();
+    field_root_stores();
+    field_root_wrapper();
+    local_copy_store();
+    field_copy_store();
+    println("direct-call retention ok");
+    return 0;
+}

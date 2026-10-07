@@ -1027,8 +1027,12 @@ fn output_root(ownership_summary_model.summary_view* summary,
     }
     i = 0;
     while (i < summary->effects.len) {
-        if (summary->effects[i].payload == ownership_summary_model.payload_kind.reference_load &&
-            ownership_summary_model.same(summary->effects[i].operand.root, root)) { return true; }
+        ownership_summary_model.effect_node node = summary->effects[i];
+        if (node.payload == ownership_summary_model.payload_kind.reference_load &&
+            ownership_summary_model.same(node.operand.root, root)) { return true; }
+        // A store through the pointer writes the storage that it designates.
+        if (node.payload != ownership_summary_model.payload_kind.read &&
+            ownership_summary_model.same(node.effect.place.root, root)) { return true; }
         i += 1;
     }
     return false;
@@ -2401,10 +2405,10 @@ fn apply_selected(request* req, u64 index, bool guarded) application {
         out.bound.model.cases[0].guard.kind == ownership_api.entity_kind.none));
     ownership_api.outcome_kind ending = selectable ?
         out.bound.model.cases[index].outcome.kind : ownership_api.outcome_kind.unknown_fort;
+    // A retained relation records a store that the case effects apply, so it needs no step.
     if (out.bound.model.residual_effects || !selectable ||
         (ending != ownership_api.outcome_kind.function_return &&
-        ending != ownership_api.outcome_kind.abort) ||
-        out.bound.model.retained.len != 0) {
+        ending != ownership_api.outcome_kind.abort)) {
         out.proof = caller_failure(req, &out, ownership_api.entity_id{}, req->operation,
             ownership_api.incomplete_reason.unknown_effect,
                 "linear call has incomplete effects or outcomes");
