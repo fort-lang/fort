@@ -1,0 +1,639 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| records ok
+//| returns ok
+//| effects ok
+//| report bound ok
+//| classification ok
+//| first reason ok
+//| repeated failures ok
+//| order ok
+//| classification events ok
+//| first refusal ok
+//| two passes ok
+/// Checks how the producer validates violations: each reaching path state must fail with
+/// one event, and no stop, barrier or lost record may come before the operation.
+import ownership_api;
+import ownership_flow;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import ownership_transfer;
+import std.strbuf;
+
+fn open(ownership_source_env.env mut* e, strbuf.str_buf mut* text, string@ lines) void {
+    u64 mut i = 0;
+    while (i < lines.len) {
+        strbuf.append(text, lines[i]);
+        strbuf.push(text, '\n');
+        i += 1;
+    }
+    strbuf.append(text, "fn root() i32 { return 0; }\n");
+    ownership_source_env.open(e);
+    ownership_source_env.runtime(e);
+    assert(ownership_source_env.prepare(e, strbuf.view(text)));
+}
+
+// A violation record of step or binding `key`.
+fn invalid(ownership_source_local.context* c, u64 key, string text)
+    ownership_source_local.record {
+    ownership_api.operation_position mut op = ownership_api.operation_position{};
+    ownership_api.source_position mut at = c->declaration;
+    if (key < c->steps_len) {
+        op = c->steps[key].operation;
+        at = c->steps[key].source;
+    }
+    return ownership_source_local.record{key, op, at, ownership_api.event_kind.invalid_use,
+        ownership_api.incomplete_reason.none, ownership_api.entity_id{}, text, true, false};
+}
+
+fn reset(ownership_source_local.context mut* c) void {
+    c->records_len = 0;
+    c->records_lost = false;
+    c->violations_len = 0;
+    c->unvalidated = 0;
+    u64 mut i = 0;
+    while (i < c->steps_len) {
+        c->step_attempts[i] = 0;
+        c->step_uncertain[i] = 0;
+        i += 1;
+    }
+    i = 0;
+    while (i < c->return_attempts.len) {
+        c->return_attempts[i] = 0;
+        c->return_uncertain[i] = 0;
+        i += 1;
+    }
+}
+
+fn add(ownership_source_local.context mut* c, ownership_source_local.record r) void {
+    c->records[c->records_len] = r;
+    c->records_len += 1;
+}
+
+fn index_of(ownership_source_local.context* c, ownership_transfer.action effect) u64 {
+    u64 mut i = 0;
+    while (i < c->steps_len) {
+        if (c->steps[i].kind == ownership_flow.step_kind.local_effect &&
+            c->steps[i].local.kind == effect) { return i; }
+        i += 1;
+    }
+    panic("ownership_source_local_validation_test: step is absent");
+}
+
+string[6] READS = {
+    "fn helper() void {}",
+    "fn reads() i32 {",
+    "    i32 mut* own p = new(i32);",
+    "    i32* q = p; helper(); i32 v = *q;",
+    "    del(p); return v;",
+    "}",
+};
+
+// validate() reads the records, the attempts, the stops and the barriers. These cases set
+// them directly on the prepared steps of one body.
+fn records() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, READS[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source.body mut* row = ownership_source_env.find(&e, "main", "reads");
+    ownership_source_local.context mut* c = &row->local;
+    c->records = new(ownership_source_local.record, 8);
+    // The copy of p into q comes before the call. The read through q comes after it.
+    u64 copy_step = index_of(c, ownership_transfer.action.copy);
+    u64 read_step = index_of(c, ownership_transfer.action.use);
+    assert(copy_step < read_step);
+    assert(!c->barrier[copy_step] && !c->barrier[read_step]);
+    // Two states reached the step and both failed with one event: validated.
+    c->step_attempts[copy_step] = 2;
+    add(c, invalid(c, copy_step, "reference source is no longer live"));
+    add(c, invalid(c, copy_step, "reference source is no longer live"));
+    ownership_source_local.validate(c);
+    assert(c->violations_len == 1 && c->unvalidated == 0);
+    assert(c->records[0].validated && c->records[1].validated);
+    assert(c->violations[0].name == "p");
+    assert(c->violations[0].text == "reference source is no longer live");
+    // One of two states failed: no witness covers the other path.
+    reset(c);
+    c->step_attempts[copy_step] = 2;
+    add(c, invalid(c, copy_step, "reference source is no longer live"));
+    ownership_source_local.validate(c);
+    assert(c->violations_len == 0 && c->unvalidated == 1);
+    assert(!c->records[0].validated);
+    // Two states failed with two events: neither event holds on every path.
+    reset(c);
+    c->step_attempts[copy_step] = 2;
+    add(c, invalid(c, copy_step, "reference source is no longer live"));
+    add(c, invalid(c, copy_step, "empty reference has no element"));
+    ownership_source_local.validate(c);
+    assert(c->violations_len == 0 && c->unvalidated == 2);
+    // A lost record can hide a pass.
+    reset(c);
+    c->step_attempts[copy_step] = 1;
+    add(c, invalid(c, copy_step, "reference source is no longer live"));
+    c->records_lost = true;
+    ownership_source_local.validate(c);
+    assert(c->violations_len == 0 && c->unvalidated == 1);
+    // An attempt after an unknown flow call has only a possible path.
+    reset(c);
+    c->step_attempts[copy_step] = 1;
+    c->step_uncertain[copy_step] = 1;
+    add(c, invalid(c, copy_step, "reference source is no longer live"));
+    ownership_source_local.validate(c);
+    assert(c->violations_len == 0 && c->unvalidated == 1);
+    // The read through q follows the call's barrier, so it is never validated.
+    reset(c);
+    c->step_attempts[read_step] = 1;
+    add(c, invalid(c, read_step, "reference source is no longer live"));
+    ownership_source_local.validate(c);
+    assert(c->violations_len == 0 && c->unvalidated == 1);
+    // A stop at the copy itself does not block it. A stop before it in its gap does.
+    reset(c);
+    ownership_flow.step* at = &c->steps[copy_step];
+    c->result.stops = new(ownership_flow.stop, 2);
+    c->result.stops[0] = ownership_flow.stop{at->block, at->gap, cast(at->order, u64) + 1};
+    c->result.stops_len = 1;
+    c->step_attempts[copy_step] = 1;
+    add(c, invalid(c, copy_step, "reference source is no longer live"));
+    ownership_source_local.validate(c);
+    assert(c->violations_len == 1);
+    reset(c);
+    c->result.stops[1] = ownership_flow.stop{at->block, at->gap, 0};
+    c->result.stops_len = 2;
+    c->step_attempts[copy_step] = 1;
+    add(c, invalid(c, copy_step, "reference source is no longer live"));
+    ownership_source_local.validate(c);
+    assert(c->violations_len == 0 && c->unvalidated == 1);
+    c->result.stops_len = 0;
+    del(c->result.stops);
+    // An incomplete record is no violation and needs no validation.
+    reset(c);
+    ownership_source_local.record mut plain = invalid(c, copy_step, "a fact is missing");
+    plain.kind = ownership_api.event_kind.incomplete_proof;
+    plain.reason = ownership_api.incomplete_reason.unknown_effect;
+    plain.violation = false;
+    add(c, plain);
+    ownership_source_local.validate(c);
+    assert(c->violations_len == 0 && c->unvalidated == 0);
+    // A violation names the slot of its relation when the relation is a slot.
+    reset(c);
+    c->step_attempts[copy_step] = 1;
+    ownership_source_local.record mut named = invalid(c, copy_step, "storage ends");
+    named.kind = ownership_api.event_kind.lost_ownership;
+    named.relation = ownership_api.entity_id{row->key, ownership_api.entity_kind.slot, 2};
+    add(c, named);
+    ownership_source_local.validate(c);
+    assert(c->violations_len == 1 && c->violations[0].name == "q");
+    assert(c->violations[0].kind == ownership_api.event_kind.lost_ownership);
+    println("records ok");
+}
+
+// A return event counts against the states that reached its return block.
+fn returns() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    string[1] lines = {"fn view(i32* p) i32* { return p; }"};
+    open(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source.body mut* row = ownership_source_env.find(&e, "main", "view");
+    ownership_source_local.context mut* c = &row->local;
+    c->records = new(ownership_source_local.record, 4);
+    // The first flow binding is the return binding of block 0.
+    u64 key = c->steps_len;
+    assert(c->event_info[0].at_return && c->event_info[0].block == 0);
+    c->return_attempts[0] = 1;
+    add(c, invalid(c, key, "returned view outlives its source"));
+    ownership_source_local.validate(c);
+    assert(c->violations_len == 1 && c->violations[0].name == "the result");
+    // Two states reached the return and one failed.
+    reset(c);
+    c->return_attempts[0] = 2;
+    add(c, invalid(c, key, "returned view outlives its source"));
+    ownership_source_local.validate(c);
+    assert(c->violations_len == 0 && c->unvalidated == 1);
+    // A state after an unknown flow call reached the return.
+    reset(c);
+    c->return_attempts[0] = 1;
+    c->return_uncertain[0] = 1;
+    add(c, invalid(c, key, "returned view outlives its source"));
+    ownership_source_local.validate(c);
+    assert(c->violations_len == 0 && c->unvalidated == 1);
+    // A stop anywhere in the return block comes before its terminator.
+    reset(c);
+    c->result.stops = new(ownership_flow.stop, 1);
+    c->result.stops[0] = ownership_flow.stop{0, 0, 1};
+    c->result.stops_len = 1;
+    c->return_attempts[0] = 1;
+    add(c, invalid(c, key, "returned view outlives its source"));
+    ownership_source_local.validate(c);
+    assert(c->violations_len == 0 && c->unvalidated == 1);
+    c->result.stops_len = 0;
+    del(c->result.stops);
+    println("returns ok");
+}
+
+// A trusted call and a release through a pointer return normally, so they are no barrier.
+fn effects() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    string[19] lines = {
+        "extern fn foreign_count(char* p) i32;",
+        "struct holder { i32 mut* own p; }",
+        "fn after_trusted(char* t) i32 {",
+        "    i32 mut* own p = new(i32);",
+        "    i32* q = p;",
+        "    del(p);",
+        "    i32 n = foreign_count(t);",
+        "    return *q + n;",
+        "}",
+        "fn after_release(holder mut* h) i32 {",
+        "    i32 mut* own p = new(i32);",
+        "    i32* q = p;",
+        "    del(h->p);",
+        "    del(p);",
+        "    return *q;",
+        "}",
+        "fn helper() void {}",
+        "fn after_unknown() i32 { i32 mut* own p = new(i32); i32* q = p; del(p); helper();",
+        "    return *q; }",
+    };
+    open(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source.analyze(&e.source);
+    ownership_source.body* trusted = ownership_source_env.find(&e, "main", "after_trusted");
+    assert(trusted->local.violations_len == 1);
+    assert(trusted->local.violations[0].source.line == 8);
+    assert(trusted->local.violations[0].name == "q");
+    ownership_source.body* released = ownership_source_env.find(&e, "main", "after_release");
+    assert(released->local.violations_len == 1);
+    assert(released->local.violations[0].source.line == 15);
+    // The same read after an unknown fort call has only a possible path.
+    ownership_source.body* unknown = ownership_source_env.find(&e, "main", "after_unknown");
+    assert(unknown->local.violations_len == 0 && unknown->local.unvalidated == 1);
+    assert(unknown->local.proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(unknown->local.proof.terminal.source.line == 19);
+    println("effects ok");
+}
+
+// Each retained event charges one V unit. A full V bound loses records.
+fn report_bound() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    string[6] lines = {
+        "fn two(bool c) void {",
+        "    i32 mut* own p = new(i32);",
+        "    if (c) { return; }",
+        "    i32 mut* own q = new(i32);",
+        "    return;",
+        "}",
+    };
+    open(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source.body mut* row = ownership_source_env.find(&e, "main", "two");
+    row->local.meter.bounds.v = 1;
+    ownership_source.analyze(&e.source);
+    // The second event finds no V room. The lost record keeps both events unvalidated.
+    assert(row->local.violations_len == 0);
+    assert(row->local.solver == ownership_source_local.status.incomplete);
+    assert(row->local.first_refusal.terminal.reason ==
+        ownership_api.incomplete_reason.report_limit);
+    assert(row->local.first_refusal.terminal.limit.category == ownership_api.limit_category.v);
+    assert(row->local.meter.used.v == 1);
+    assert(!ownership_api.successful(row->local.proof));
+    println("report bound ok");
+}
+
+string[4] CLASSIFIED = {
+    "fn helper() void {}",
+    "fn leak_after_call() void { i32 mut* own p = new(i32); helper(); }",
+    "fn leak_again() void { i32 mut* own p = new(i32); helper(); }",
+    "fn caller_read(i32* v) i32 { helper(); return *v; }",
+};
+
+// The classification run puts a body outside the scope only when that run fails nothing.
+fn classification() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, CLASSIFIED[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source.body mut* refused = ownership_source_env.find(&e, "main", "leak_again");
+    // The second run configures its own ledger from the limits when it starts. The first run
+    // keeps the ledger that prepare configured.
+    refused->local.limits.w = 1;
+    ownership_source.analyze(&e.source);
+    // Without the call the leak stays: the failure is local and the body stays in scope.
+    ownership_source.body* kept = ownership_source_env.find(&e, "main", "leak_after_call");
+    assert(kept->local.correspondence == ownership_source_local.status.complete);
+    assert(kept->local.gap == ownership_source_local.missing.none);
+    assert(kept->local.unvalidated == 1 && kept->local.violations_len == 0);
+    assert(kept->local.solver == ownership_source_local.status.complete);
+    assert(kept->local.classified && !kept->local.classify_refusal.terminal.present);
+    assert(kept->local.classify_meter.used.w > 0);
+    // Without the call the read of v succeeds: call summaries own the failure.
+    ownership_source.body* caller = ownership_source_env.find(&e, "main", "caller_read");
+    assert(caller->local.correspondence == ownership_source_local.status.incomplete);
+    assert(caller->local.gap == ownership_source_local.missing.call_dependent);
+    assert(caller->local.gap_source.line == 4);
+    assert(caller->local.classified);
+    // A refusal of the second run explains no failure, so the body stays in the declared
+    // scope. Its solver is incomplete, and the classification ledger keeps the refusal
+    // (fir.md 14.1). The first ledger has none.
+    assert(refused->local.correspondence == ownership_source_local.status.complete);
+    assert(refused->local.gap == ownership_source_local.missing.none);
+    assert(refused->local.solver == ownership_source_local.status.incomplete);
+    assert(refused->local.classify_refusal.terminal.limit.category ==
+        ownership_api.limit_category.w);
+    assert(refused->local.classify_meter.used.w == 1);
+    assert(!refused->local.first_refusal.terminal.present);
+    assert(refused->local.meter.used.w == kept->local.meter.used.w);
+    // The first reason stays the unvalidated leak.
+    assert(refused->local.proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    // A body with no failure needs no second run.
+    ownership_source.body* helper = ownership_source_env.find(&e, "main", "helper");
+    assert(!helper->local.classified);
+    println("classification ok");
+}
+
+// An unvalidated violation is the first incomplete reason, at its own operation.
+fn first_reason() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    string[8] lines = {
+        "fn one_side(bool c) i32 {",
+        "    i32 mut* own p = new(i32);",
+        "    i32* q = p;",
+        "    if (c) { del(p); }",
+        "    i32 v = *q;",
+        "    del(p);",
+        "    return v;",
+        "}",
+    };
+    open(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source.analyze(&e.source);
+    ownership_source.body* row = ownership_source_env.find(&e, "main", "one_side");
+    assert(row->local.violations_len == 0 && row->local.unvalidated == 1);
+    assert(row->local.proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(row->local.proof.terminal.source.line == 5);
+    assert(row->local.first_incomplete.terminal.source.line == 5);
+    assert(row->local.correspondence == ownership_source_local.status.complete);
+    println("first reason ok");
+}
+
+// A failure that the second run repeats keeps the body in scope, even when another failure
+// of the first run depends on a call (the cd2 shape).
+fn repeated_failures() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    string[29] lines = {
+        "fn g() void {}",
+        "fn before_call(bool c, i32* param) i32 {",
+        "    i32 mut* own p = new(i32);",
+        "    i32 mut* q = p;",
+        "    if (c) { del(p); }",
+        "    *q = 1;",
+        "    del(p);",
+        "    g();",
+        "    return *param;",
+        "}",
+        "fn after_call(i32* param) i32 {",
+        "    i32 mut* own p = new(i32);",
+        "    i32 mut* q = p;",
+        "    g();",
+        "    i32 x = *param;",
+        "    del(p);",
+        "    *q = 1;",
+        "    return x;",
+        "}",
+        "fn no_call(bool c) i32 {",
+        "    i32 mut* own p = new(i32);",
+        "    i32 mut* q = p;",
+        "    if (c) { del(p); }",
+        "    *q = 1;",
+        "    del(p);",
+        "    return 0;",
+        "}",
+        "fn only_call(i32* param) i32 { g(); return *param; }",
+        "fn other() void {}",
+    };
+    open(&e, &text, lines[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source.analyze(&e.source);
+    // The read of param after g() depends on the call. The write through q on path c does
+    // not, so the body stays in scope with incomplete proof.
+    ownership_source.body* before = ownership_source_env.find(&e, "main", "before_call");
+    assert(before->local.correspondence == ownership_source_local.status.complete);
+    assert(before->local.gap == ownership_source_local.missing.none);
+    assert(before->local.classified && before->local.violations_len == 0);
+    assert(before->local.proof.terminal.present);
+    // The read of param after g() stops the first run before the write through q. The second
+    // run reaches that write and fails it, so the body stays in scope (the cd1 shape).
+    ownership_source.body* after = ownership_source_env.find(&e, "main", "after_call");
+    assert(after->local.correspondence == ownership_source_local.status.complete);
+    assert(after->local.violations_len == 0 && after->local.unvalidated == 0);
+    assert(after->local.classified && after->local.proof.terminal.source.line == 15);
+    // With no call at all, no second run is needed.
+    ownership_source.body* plain = ownership_source_env.find(&e, "main", "no_call");
+    assert(plain->local.correspondence == ownership_source_local.status.complete);
+    assert(!plain->local.classified);
+    // Only the call makes the read fail: call summaries own the body.
+    ownership_source.body* only = ownership_source_env.find(&e, "main", "only_call");
+    assert(only->local.gap == ownership_source_local.missing.call_dependent);
+    assert(only->local.classified && !only->local.classify_refusal.terminal.present);
+    println("repeated failures ok");
+}
+
+fn at_line(u32 line, u32 col) ownership_api.source_position {
+    return ownership_api.source_position{.line = line, .col = col, .end_line = line,
+        .end_col = col + 1, .filename_present = true};
+}
+
+fn listed(ownership_api.source_position at, u32 block, u32 operation,
+    ownership_api.event_kind kind, u32 relation) ownership_source_local.violation {
+    return ownership_source_local.violation{
+        .operation = ownership_api.operation_position{.block = block, .operation = operation},
+        .source = at, .kind = kind, .name = "x", .quoted = true,
+        .relation = ownership_api.entity_id{.kind = ownership_api.entity_kind.slot,
+            .ordinal = relation}};
+}
+
+// Toolchain 4.2 orders events by source range, then operation key, event class and source
+// relation key. Arrival order selects nothing.
+fn order() void {
+    ownership_api.event_kind use = ownership_api.event_kind.invalid_use;
+    ownership_api.event_kind lost = ownership_api.event_kind.lost_ownership;
+    ownership_source_local.violation early = listed(at_line(3, 5), 9, 0, use, 0);
+    ownership_source_local.violation late = listed(at_line(7, 1), 1, 0, use, 0);
+    ownership_source_local.violation column = listed(at_line(3, 9), 0, 0, use, 0);
+    assert(ownership_source_local.before(&early, &late));
+    assert(!ownership_source_local.before(&late, &early));
+    assert(ownership_source_local.before(&early, &column));
+    // One source range: the operation key decides, then the event class, then the relation.
+    ownership_source_local.violation first_op = listed(at_line(4, 2), 1, 2, lost, 5);
+    ownership_source_local.violation second_op = listed(at_line(4, 2), 1, 3, use, 0);
+    assert(ownership_source_local.before(&first_op, &second_op));
+    ownership_source_local.violation used = listed(at_line(4, 2), 1, 2, use, 5);
+    assert(ownership_source_local.before(&used, &first_op));
+    ownership_source_local.violation low = listed(at_line(4, 2), 1, 2, use, 1);
+    assert(ownership_source_local.before(&low, &used));
+    assert(!ownership_source_local.before(&used, &used));
+    // The sort keeps that order whatever the arrival order.
+    ownership_source_local.context mut c = ownership_source_local.context{};
+    c.violations = new(ownership_source_local.violation, 6);
+    defer del(c.violations);
+    c.violations[0] = late;
+    c.violations[1] = second_op;
+    c.violations[2] = column;
+    c.violations[3] = used;
+    c.violations[4] = early;
+    c.violations[5] = low;
+    c.violations_len = 6;
+    ownership_source_local.sort_violations(&c);
+    assert(c.violations[0].source.line == 3 && c.violations[0].source.col == 5);
+    assert(c.violations[1].source.line == 3 && c.violations[1].source.col == 9);
+    assert(c.violations[2].relation.ordinal == 1);
+    assert(c.violations[3].relation.ordinal == 5 && c.violations[3].operation.operation == 2);
+    assert(c.violations[4].operation.operation == 3);
+    assert(c.violations[5].source.line == 7);
+    // One violation and none stay as they are.
+    c.violations_len = 1;
+    ownership_source_local.sort_violations(&c);
+    assert(c.violations[0].source.col == 5);
+    c.violations_len = 0;
+    ownership_source_local.sort_violations(&c);
+    println("order ok");
+}
+
+// The second run keeps each event with its own proof and records nothing: it only counts.
+fn classification_events() void {
+    ownership_api.event_request mut request = ownership_api.event_request{};
+    request.event.key = ownership_api.entity_id{.kind = ownership_api.entity_kind.event,
+        .ordinal = 7};
+    request.current = ownership_api.incomplete(ownership_api.incomplete_reason.missing_path,
+        ownership_api.operation_position{.block = 2}, ownership_api.source_position{.line = 3});
+    ownership_source_local.context mut c = ownership_source_local.context{};
+    ownership_api.event_result out = ownership_source_local.classify_event(
+        cast(&c, void mut*), &request);
+    assert(out.retained && out.stored_key.ordinal == 7);
+    assert(out.proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(out.proof.terminal.source.line == 3 && out.proof.terminal.operation.block == 2);
+    assert(c.records_len == 0 && !c.records_lost);
+    println("classification events ok");
+}
+
+// After a refusal of the first run no second run starts: the refusal explains no failure, so
+// the body stays in the declared scope. Without the refusal the same body is call scope.
+fn first_refusal() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, CLASSIFIED[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source.body mut* caller = ownership_source_env.find(&e, "main", "caller_read");
+    caller->local.meter.bounds.w = 1;
+    ownership_source.analyze(&e.source);
+    assert(caller->local.first_refusal.terminal.limit.category ==
+        ownership_api.limit_category.w);
+    assert(!caller->local.classified && caller->local.classify_meter.used.w == 0);
+    assert(caller->local.correspondence == ownership_source_local.status.complete);
+    assert(caller->local.gap == ownership_source_local.missing.none);
+    assert(caller->local.solver == ownership_source_local.status.incomplete);
+    assert(caller->local.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    // A body with its full bound still runs the second run.
+    ownership_source.body* other = ownership_source_env.find(&e, "main", "leak_after_call");
+    assert(other->local.classified && other->local.gap == ownership_source_local.missing.none);
+    println("first refusal ok");
+}
+
+string[20] PASSES = {
+    "fn helper() void {}",
+    "fn branchy(bool a, bool b, bool c, bool d, i32* v) i32 {",
+    "    i32 mut* own p = new(i32);",
+    "    i32 mut* mut q = null;",
+    "    if (a) { q = p; }",
+    "    if (b) { q = null; }",
+    "    if (c) { q = p; }",
+    "    if (d) { q = null; }",
+    "    helper();",
+    "    i32 x = *v;",
+    "    del(p);",
+    "    return x;",
+    "}",
+    "fn joined_fails(bool c, i32* v) i32 {",
+    "    i32 mut* own mut p = null;",
+    "    if (c) { p = new(i32); }",
+    "    helper();",
+    "    i32 x = *v;",
+    "    del(p);",
+    "    return x; }",
+};
+
+// The second run joins every path of a block first (G = 1). A joined pass with no failure
+// classifies the body within its own work. Only a failed joined pass runs the exact pass.
+fn two_passes() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, PASSES[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source.analyze(&e.source);
+    // Four tests give q up to 16 values on exact paths, one joined value per block.
+    ownership_source.body* branchy = ownership_source_env.find(&e, "main", "branchy");
+    assert(branchy->local.gap == ownership_source_local.missing.call_dependent);
+    u64 joined = branchy->local.classify_meter.used.w;
+    assert(joined > 0 && !branchy->local.classify_refusal.terminal.present);
+    // The join makes p maybe empty and maybe an owner at del: the joined pass fails, and the
+    // exact pass, which keeps the two paths apart, classifies the body.
+    ownership_source.body* exact = ownership_source_env.find(&e, "main", "joined_fails");
+    assert(exact->local.gap == ownership_source_local.missing.call_dependent);
+    assert(!exact->local.classify_refusal.terminal.present);
+    bounded_pass(joined, false);
+    bounded_pass(joined - 1, true);
+    println("two passes ok");
+}
+
+// The joined pass of branchy fits a W bound of `bound`, or refuses at it.
+fn bounded_pass(u64 bound, bool refused) void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, PASSES[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source.body mut* branchy = ownership_source_env.find(&e, "main", "branchy");
+    branchy->local.limits.w = bound;
+    ownership_source.analyze(&e.source);
+    assert(branchy->local.classify_refusal.terminal.present == refused);
+    if (refused) {
+        // A refusal explains no failure: the body stays in the declared scope.
+        assert(branchy->local.gap == ownership_source_local.missing.none);
+        assert(branchy->local.correspondence == ownership_source_local.status.complete);
+        assert(branchy->local.solver == ownership_source_local.status.incomplete);
+    } else {
+        assert(branchy->local.gap == ownership_source_local.missing.call_dependent);
+        assert(branchy->local.classify_meter.used.w == bound);
+    }
+}
+
+fn main() i32 {
+    records();
+    returns();
+    effects();
+    report_bound();
+    classification();
+    first_reason();
+    repeated_failures();
+    order();
+    classification_events();
+    first_refusal();
+    two_passes();
+    return 0;
+}

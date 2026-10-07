@@ -1,0 +1,469 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| owner steps ok
+//| borrow steps ok
+//| span steps ok
+//| call steps ok
+//| value steps ok
+//| entry facts ok
+//| bindings ok
+//| paths between positions ok
+//| exit steps ok
+/// Pins the ordered local steps that the producer reads from the FIR of small bodies.
+/// A step reads `block.gap.order action from->to` and then its flags.
+import fir;
+import ownership_api;
+import ownership_flow;
+import ownership_keys;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import ownership_transfer;
+import std.strbuf;
+
+string[13] SOURCE = {
+    "extern fn foreign_text() char*;",
+    "fn helper(i32* p) i32 { return *p; }",
+    "fn take(i32 mut* own p) void { del(p); }",
+    "fn released() void { i32 mut* own p = new(i32); del(p); }",
+    "fn borrowed() i32 { i32 mut* own p = new(i32); i32* q = p; i32 v = *q; del(p); return v; }",
+    "fn spanned(u64 n) u8 { u8 mut@ own s = new(u8, n); u8 v = s[0]; del(s); return v; }",
+    "fn called() i32 { i32 mut* own p = new(i32); i32 r = helper(p); take(move(p)); return r; }",
+    "fn foreign() char* { return foreign_text(); }",
+    "fn literal() string { return \"abc\"; }",
+    "fn parameter(i32* p, u64 n) i32* { return p; }",
+    "fn written(i32 mut* p) void { *p = 3; }",
+    "fn compared(i32* p) bool { return p == null; }",
+    "fn root() i32 { return 0; }",
+};
+
+fn action_name(ownership_transfer.action effect) string {
+    switch (effect) {
+    case ownership_transfer.action.allocation: return "allocation";
+    case ownership_transfer.action.copy: return "copy";
+    case ownership_transfer.action.move_owner: return "move";
+    case ownership_transfer.action.release: return "release";
+    case ownership_transfer.action.assignment: return "assignment";
+    case ownership_transfer.action.address: return "address";
+    case ownership_transfer.action.use: return "use";
+    case ownership_transfer.action.inspect: return "inspect";
+    case ownership_transfer.action.dead: return "dead";
+    case ownership_transfer.action.escape: return "escape";
+    case ownership_transfer.action.outside: return "outside";
+    }
+}
+
+// One step in the pinned form.
+fn describe(ownership_source_local.context* c, u64 i, strbuf.str_buf mut* out) void {
+    ownership_flow.step* s = &c->steps[i];
+    strbuf.clear(out);
+    strbuf.append_u64(out, cast(s->block, u64));
+    strbuf.push(out, '.');
+    strbuf.append_u64(out, cast(s->gap, u64));
+    strbuf.push(out, '.');
+    strbuf.append_u64(out, cast(s->order, u64));
+    if (s->kind == ownership_flow.step_kind.call_outcome) {
+        strbuf.append(out, s->outcomes_complete ? " trusted call" : " unknown call");
+        return;
+    }
+    ownership_transfer.request* r = &s->local;
+    strbuf.push(out, ' ');
+    strbuf.append(out, action_name(r->kind));
+    strbuf.push(out, ' ');
+    strbuf.append_u64(out, cast(r->source.root.ordinal, u64));
+    strbuf.append(out, "->");
+    strbuf.append_u64(out, cast(r->destination.root.ordinal, u64));
+    if (r->temporal_use) { strbuf.append(out, " temporal"); }
+    if (r->private_slot_proved) { strbuf.append(out, " private"); }
+    if (r->leaves_empty_proved) { strbuf.append(out, " leaves"); }
+    if (r->destination_owns) { strbuf.append(out, " owns"); }
+    if (r->opaque_value) { strbuf.append(out, " opaque"); }
+    if (!r->direct_source_proved) { strbuf.append(out, " unsupported"); }
+    if (c->barrier[i]) { strbuf.append(out, " barrier"); }
+    if (r->kind == ownership_transfer.action.assignment && !r->opaque_value) {
+        if (r->value.kind == ownership_api.contents_kind.empty_owner) {
+            strbuf.append(out, " empty");
+        } else if (c->relations[i].source.ordinal == ownership_source_local.STATIC_ORDINAL) {
+            strbuf.append(out, " static");
+        } else {
+            strbuf.append(out, " foreign");
+        }
+    }
+}
+
+fn expect(ownership_source_env.env mut* e, string name, string@ expected) void {
+    ownership_source.body* row = ownership_source_env.find(e, "main", name);
+    assert(row->local.initialized && !row->local.solved);
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    bool mut same = row->local.steps_len == expected.len;
+    u64 mut i = 0;
+    while (i < row->local.steps_len) {
+        describe(&row->local, i, &got);
+        if (i >= expected.len || strbuf.view(&got) != expected[i]) { same = false; }
+        i += 1;
+    }
+    if (!same) {
+        eprintln(name, ":");
+        i = 0;
+        while (i < row->local.steps_len) {
+            describe(&row->local, i, &got);
+            eprintln("    \"", strbuf.view(&got), "\",");
+            i += 1;
+        }
+        assert(false);
+    }
+}
+
+fn open(ownership_source_env.env mut* e, strbuf.str_buf mut* text) void {
+    u64 mut i = 0;
+    while (i < SOURCE.len) {
+        strbuf.append(text, SOURCE[i]);
+        strbuf.push(text, '\n');
+        i += 1;
+    }
+    ownership_source_env.open(e);
+    ownership_source_env.runtime(e);
+    assert(ownership_source_env.prepare(e, strbuf.view(text)));
+}
+
+fn owner_steps(ownership_source_env.env mut* e) void {
+    // The zero store, the allocation into its temporary, the move into p, the release, the
+    // dead marker of p, and the end of each owning slot at the return.
+    string[7] released = {
+        "0.0.0 assignment 1->1 empty",
+        "0.2.0 allocation 2->2",
+        "1.0.0 move 2->1",
+        "1.1.0 release 1->1 leaves",
+        "1.2.0 dead 1->1 private",
+        "1.3.0 dead 1->1 private",
+        "1.3.1 dead 2->2 private",
+    };
+    expect(e, "released", released[..]);
+    // The parameter of take is an own parameter: its release is a step, its end is a gap.
+    string[1] take = {"0.0.0 release 1->1 leaves"};
+    expect(e, "take", take[..]);
+    println("owner steps ok");
+}
+
+fn borrow_steps(ownership_source_env.env mut* e) void {
+    // q copies p's reference. The read through q checks the temporal source. The dead marker
+    // of q clears its borrow; the scalar v has no step.
+    string[10] borrowed = {
+        "0.0.0 assignment 1->1 empty",
+        "0.2.0 allocation 4->4",
+        "1.0.0 move 4->1",
+        "1.2.0 copy 1->2",
+        "1.4.0 use 2->2 temporal",
+        "1.5.0 release 1->1 leaves",
+        "1.7.0 dead 1->1 private",
+        "1.8.0 assignment 2->2 empty",
+        "1.10.0 dead 1->1 private",
+        "1.10.1 dead 4->4 private",
+    };
+    expect(e, "borrowed", borrowed[..]);
+    // A parameter read through the pointer.
+    string[1] helper = {"0.0.0 use 1->1 temporal"};
+    expect(e, "helper", helper[..]);
+    // A write through the pointer reads its source too.
+    string[1] written = {"0.0.0 use 1->1 temporal"};
+    expect(e, "written", written[..]);
+    // A comparison reads the reference value.
+    string[1] compared = {"0.0.0 inspect 1->1"};
+    expect(e, "compared", compared[..]);
+    println("borrow steps ok");
+}
+
+fn span_steps(ownership_source_env.env mut* e) void {
+    // new(u8, n) allocates into a pointer temporary, and the span aggregate moves it on.
+    // Length reads of the bounds check have no step.
+    string[10] spanned = {
+        "0.0.0 assignment 2->2 empty",
+        "0.4.0 allocation 7->7",
+        "0.5.0 move 7->4",
+        "1.0.0 move 4->2",
+        "2.0.0 use 2->2 temporal",
+        "2.1.0 release 2->2 leaves",
+        "2.3.0 dead 2->2 private",
+        "2.5.0 dead 2->2 private",
+        "2.5.1 dead 4->4 private",
+        "2.5.2 dead 7->7 private",
+    };
+    expect(e, "spanned", spanned[..]);
+    println("span steps ok");
+}
+
+fn call_steps(ownership_source_env.env mut* e) void {
+    // The borrowed argument is a read before the call. The moved argument escapes. Each fort
+    // call is an outside effect and a barrier for validation.
+    string[10] called = {
+        "0.0.0 assignment 1->1 empty",
+        "0.2.0 allocation 3->3",
+        "1.0.0 move 3->1",
+        "1.2.0 inspect 1->1",
+        "1.2.1 outside 0->0 barrier",
+        "1.4.0 escape 1->1",
+        "1.4.1 outside 0->0 barrier",
+        "1.6.0 dead 1->1 private",
+        "1.8.0 dead 1->1 private",
+        "1.8.1 dead 3->3 private",
+    };
+    expect(e, "called", called[..]);
+    // A trusted call gives a foreign source. Its temporary ends after its one read.
+    string[3] foreign = {
+        "0.0.0 trusted call",
+        "0.0.1 assignment 1->1 foreign",
+        "0.1.0 copy 1->0",
+    };
+    string[4] with_end = {foreign[0], foreign[1], foreign[2], "0.1.1 assignment 1->1 empty"};
+    expect(e, "foreign", with_end[..]);
+    println("call steps ok");
+}
+
+fn value_steps(ownership_source_env.env mut* e) void {
+    string[1] literal = {"0.0.0 assignment 0->0 static"};
+    expect(e, "literal", literal[..]);
+    string[1] parameter = {"0.0.0 copy 1->0"};
+    expect(e, "parameter", parameter[..]);
+    // A body that only returns a scalar has no step.
+    string[1] none = {""};
+    expect(e, "root", none[0..0]);
+    println("value steps ok");
+}
+
+fn entry_facts(ownership_source_env.env mut* e) void {
+    ownership_source.body* parameter = ownership_source_env.find(e, "main", "parameter");
+    ownership_source_local.context* c = &parameter->local;
+    // Static storage, then one symbolic caller source for the reference parameter p.
+    assert(c->entry.sources_len == 2);
+    assert(c->entry.sources[0].kind == ownership_api.source_kind.static_storage);
+    assert(c->entry.sources[0].key.ordinal == ownership_source_local.STATIC_ORDINAL);
+    assert(c->entry.sources[1].kind == ownership_api.source_kind.symbolic_caller);
+    assert(c->entry.sources[1].key.ordinal == ownership_source_local.PARAMETER_BASE + 1);
+    assert(c->entry.sources[1].validity == ownership_api.validity_kind.live);
+    // p holds a borrow of that source with a symbolic length. The scalar n holds no fact.
+    assert(c->entry.contents_len == 1);
+    ownership_api.contents_fact held = c->entry.contents[0];
+    assert(held.place.root.ordinal == 1 && held.kind == ownership_api.contents_kind.reference);
+    assert(held.borrows.len == 1);
+    assert(ownership_keys.entity(held.borrows[0].source, c->entry.sources[1].key) == 0);
+    assert(ownership_keys.entity(held.borrows[0].value_version, held.value_version) == 0);
+    assert(held.span_length.kind == ownership_api.fact_kind.symbolic);
+    assert(ownership_keys.entity(held.span_length.symbol, held.value_version) == 0);
+    assert(ownership_keys.function(held.place.root.function, parameter->key) == 0);
+    // Each entity carries the body's own function key.
+    assert(ownership_keys.function(c->entry.sources[1].key.function, parameter->key) == 0);
+    // A trusted call adds its foreign source to the entry state.
+    ownership_source.body* foreign = ownership_source_env.find(e, "main", "foreign");
+    assert(foreign->local.entry.sources_len == 2);
+    assert(foreign->local.entry.sources[1].kind == ownership_api.source_kind.trusted_foreign);
+    assert(foreign->local.entry.sources[1].key.ordinal == 1);
+    // An allocation gives its fresh source in its step, not in the entry state.
+    ownership_source.body* released = ownership_source_env.find(e, "main", "released");
+    assert(released->local.entry.sources_len == 1 && released->local.entry.contents_len == 0);
+    ownership_flow.step* allocated = &released->local.steps[1];
+    assert(allocated->local.fresh_source.key.ordinal == 1);
+    assert(allocated->local.allocation.key.ordinal == 1);
+    assert(allocated->local.allocation.site.ordinal == 1);
+    assert(allocated->local.allocation.logical_length.kind == ownership_api.fact_kind.exact);
+    assert(allocated->local.allocation.logical_length.value == 1);
+    println("entry facts ok");
+}
+
+fn bindings(ownership_source_env.env mut* e) void {
+    ownership_source.body* released = ownership_source_env.find(e, "main", "released");
+    ownership_source_local.context* c = &released->local;
+    // One return binding without a result slot, and one retirement binding per allocation.
+    assert(c->events_len == 2);
+    assert(c->event_info[0].at_return && c->event_info[0].block == 1);
+    assert(!c->event_info[1].at_return);
+    assert(c->events[1].kind == ownership_api.event_kind.incomplete_proof);
+    assert(ownership_keys.entity(c->events[1].relation, c->steps[1].local.allocation.key) == 0);
+    // Flow binding keys follow the step keys, so no two keys meet.
+    assert(c->events[0].key.ordinal == cast(c->steps_len, u32));
+    assert(c->events[1].key.ordinal == cast(c->steps_len, u32) + 1);
+    u64 mut i = 0;
+    while (i < c->steps_len) {
+        ownership_flow.step* s = &c->steps[i];
+        assert(s->local.event_bindings.len == 1);
+        assert(s->local.event_bindings[0].key.ordinal == cast(i, u32));
+        assert(ownership_keys.operation(s->local.event_bindings[0].operation, s->operation) ==
+            0);
+        assert(ownership_keys.operation(s->local.operation, s->operation) == 0);
+        assert(ownership_keys.source(s->local.source_position, s->source) == 0);
+        assert(s->source.filename_present && s->source.line == 4);
+        i += 1;
+    }
+    // A reference result binds each source that the result can borrow, twice.
+    ownership_source.body* parameter = ownership_source_env.find(e, "main", "parameter");
+    assert(parameter->local.events_len == 1 + 2 * parameter->local.entry.sources_len);
+    // A call binds the flow failure of its call step.
+    ownership_source.body* foreign = ownership_source_env.find(e, "main", "foreign");
+    bool mut bound = false;
+    i = 0;
+    while (i < foreign->local.events_len) {
+        if (!foreign->local.event_info[i].at_return) {
+            assert(ownership_keys.operation(foreign->local.events[i].operation,
+                foreign->local.steps[0].operation) == 0);
+            bound = true;
+        }
+        i += 1;
+    }
+    assert(bound);
+    println("bindings ok");
+}
+
+fn paths_between_positions(ownership_source_env.env mut* e) void {
+    ownership_source.body mut* released = ownership_source_env.find(e, "main", "released");
+    ownership_source_local.context mut* c = &released->local;
+    // bb0 reaches bb1 through its check. bb1 returns and reaches nothing.
+    assert(ownership_source_local.reaches(c->function, 0, 1));
+    assert(!ownership_source_local.reaches(c->function, 1, 0));
+    assert(!ownership_source_local.reaches(c->function, 1, 1));
+    assert(!ownership_source_local.reaches(c->function, 0, 0));
+    // A position follows an earlier position of its block and any position of an earlier
+    // block that reaches it. Equal positions do not follow each other.
+    assert(ownership_source_local.follows(c, 1, 0, 1, 1, 1, 1));
+    assert(ownership_source_local.follows(c, 1, 1, 1, 1, 1, 2));
+    assert(!ownership_source_local.follows(c, 1, 1, 2, 1, 1, 1));
+    assert(!ownership_source_local.follows(c, 1, 1, 1, 1, 1, 1));
+    assert(ownership_source_local.follows(c, 0, 3, 9, 1, 0, 0));
+    assert(!ownership_source_local.follows(c, 1, 0, 0, 0, 3, 1));
+    // A stop at bb0 blocks validation in bb1. A stop after the position does not.
+    c->result.stops = new(ownership_flow.stop, 2);
+    c->result.stops[0] = ownership_flow.stop{1, 2, 1};
+    c->result.stops_len = 1;
+    assert(ownership_source_local.stopped_before(c, 1, 3, 1));
+    assert(!ownership_source_local.stopped_before(c, 1, 1, 1));
+    assert(!ownership_source_local.stopped_before(c, 1, 2, 1));
+    c->result.stops[1] = ownership_flow.stop{0, 2, 1};
+    c->result.stops_len = 2;
+    assert(ownership_source_local.stopped_before(c, 1, 0, 1));
+    // A lost stop record makes every position unvalidated.
+    c->result.stops_len = 0;
+    assert(!ownership_source_local.stopped_before(c, 1, 0, 1));
+    c->result.stops_lost = true;
+    assert(ownership_source_local.stopped_before(c, 1, 0, 1));
+    c->result.stops_lost = false;
+    del(c->result.stops);
+    // A barrier step blocks validation after it, as a stop does.
+    ownership_source.body mut* called = ownership_source_env.find(e, "main", "called");
+    ownership_source_local.context mut* k = &called->local;
+    assert(ownership_source_local.stopped_before(k, 1, 4, 1));
+    assert(!ownership_source_local.stopped_before(k, 1, 2, 1));
+    assert(!ownership_source_local.stopped_before(k, 1, 2, 2));
+    assert(ownership_source_local.stopped_before(k, 1, 2, 3));
+    // Names come from the source and take quotes. A temporary has no name of its own.
+    bool mut quoted = false;
+    assert(ownership_source_local.name_of(c, 1, &quoted) == "p" && quoted);
+    assert(ownership_source_local.name_of(c, 2, &quoted) == "a temporary value" && !quoted);
+    println("paths between positions ok");
+}
+
+string[6] EXITS = {
+    "fn deferred(bool c) i32 { i32 mut* own p = new(i32); defer del(p);",
+    "    if (c) { return 1; } return 0; }",
+    "fn looped(u64 n) void { u64 mut i = 0;",
+    "    while (i < n) { i32 mut* own p = new(i32); del(p); i += 1; } }",
+    "fn broken(bool c) void { while (true) { i32 mut* own p = new(i32);",
+    "    if (c) { del(p); break; } del(p); } }",
+};
+
+// Each exit runs its deferred release before the dead marker and the end steps. A loop's
+// owner ends at its dead marker on each iteration and on each break.
+fn exit_steps() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut i = 0;
+    while (i < EXITS.len) {
+        strbuf.append(&text, EXITS[i]);
+        strbuf.push(&text, '\n');
+        i += 1;
+    }
+    strbuf.append(&text, "fn root() i32 { return 0; }\n");
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    ownership_source_env.runtime(&e);
+    assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+    string[11] deferred = {
+        "0.0.0 assignment 2->2 empty",
+        "0.2.0 allocation 3->3",
+        "1.0.0 move 3->2",
+        "2.1.0 release 2->2 leaves",
+        "2.2.0 dead 2->2 private",
+        "2.3.0 dead 2->2 private",
+        "2.3.1 dead 3->3 private",
+        "3.1.0 release 2->2 leaves",
+        "3.2.0 dead 2->2 private",
+        "3.3.0 dead 2->2 private",
+        "3.3.1 dead 3->3 private",
+    };
+    expect(&e, "deferred", deferred[..]);
+    // The named owner is zeroed once at entry. Each iteration ends it at its dead marker.
+    string[7] looped = {
+        "0.0.0 assignment 3->3 empty",
+        "2.1.0 allocation 5->5",
+        "3.1.0 dead 3->3 private",
+        "3.1.1 dead 5->5 private",
+        "4.0.0 move 5->3",
+        "4.1.0 release 3->3 leaves",
+        "5.1.0 dead 3->3 private",
+    };
+    expect(&e, "looped", looped[..]);
+    // The constant switch has no step. Both the break and the back edge end p.
+    string[9] broken = {
+        "0.0.0 assignment 2->2 empty",
+        "2.1.0 allocation 3->3",
+        "3.0.0 dead 2->2 private",
+        "3.0.1 dead 3->3 private",
+        "4.0.0 move 3->2",
+        "5.0.0 release 2->2 leaves",
+        "5.1.0 dead 2->2 private",
+        "6.0.0 release 2->2 leaves",
+        "6.1.0 dead 2->2 private",
+    };
+    expect(&e, "broken", broken[..]);
+    // The deferred release expands at each exit: two releases, at two FIR positions.
+    ownership_source.body* row = ownership_source_env.find(&e, "main", "deferred");
+    assert(row->local.steps[3].source.line == 1 && row->local.steps[7].source.line == 1);
+    assert(row->local.steps[3].block != row->local.steps[7].block);
+    // Each return block has its own return binding.
+    u64 mut returns = 0;
+    i = 0;
+    while (i < row->local.events_len) {
+        if (row->local.event_info[i].at_return) { returns += 1; }
+        i += 1;
+    }
+    assert(returns == 2);
+    ownership_source.analyze(&e.source);
+    u64 mut proved = 0;
+    string[3] names = {"deferred", "looped", "broken"};
+    i = 0;
+    while (i < names.len) {
+        ownership_source.body* done = ownership_source_env.find(&e, "main", names[i]);
+        if (ownership_api.successful(done->local.proof)) { proved += 1; }
+        i += 1;
+    }
+    assert(proved == 3);
+    println("exit steps ok");
+}
+
+fn main() i32 {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text);
+    defer ownership_source_env.close(&e);
+    owner_steps(&e);
+    borrow_steps(&e);
+    span_steps(&e);
+    call_steps(&e);
+    value_steps(&e);
+    entry_facts(&e);
+    bindings(&e);
+    paths_between_positions(&e);
+    exit_steps();
+    return 0;
+}

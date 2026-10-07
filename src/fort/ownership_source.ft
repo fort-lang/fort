@@ -13,6 +13,7 @@ import ownership_graph;
 import ownership_keys;
 import ownership_limits;
 import ownership_source_live;
+import ownership_source_local;
 import std.strbuf;
 
 enum status {
@@ -40,6 +41,7 @@ struct body {
     strbuf.str_buf verification_failure;
     fir.func function;
     ownership_source_live.context live;
+    ownership_source_local.context local;
     graph_route route;
     status graph_correspondence;
     status graph_solver;
@@ -262,6 +264,8 @@ fn prepare(context mut* c, check.checker mut* ck, modules.module_set* set,
         row->verification = status.complete;
         ownership_source_live.prepare(&row->live, &row->function, row->key, row->source.file,
             row->source);
+        ownership_source_local.prepare(&row->local, &row->function, row->key, row->source.file,
+            row->module->file, row->source);
         i += 1;
     }
 }
@@ -360,6 +364,7 @@ fn analyze(context mut* c) void {
             row->live.services.graph_context = cast(&row->route, void mut*);
         }
         ownership_source_live.solve(&row->live);
+        ownership_source_local.solve(&row->local);
         row->liveness_correspondence = ownership_api.successful(row->live.correspondence) ?
             status.complete : status.incomplete;
         row->liveness_solver = ownership_api.successful(row->live.result.proof) ?
@@ -392,6 +397,7 @@ fn free(context mut* c) void {
     while (i < c->bodies.len) {
         body mut* row = &c->bodies[i];
         ownership_source_live.free_state(&row->live);
+        ownership_source_local.free(&row->local);
         fir.func_free(&row->function);
         strbuf.free(&row->verification_failure);
         ownership_source_live.free(&row->live);

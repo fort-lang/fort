@@ -1,0 +1,517 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| values ok
+//| distances ok
+//| choices ok
+//| traps ok
+//| unknowns ok
+//| relations ok
+//| parameters ok
+//| picks ok
+//| refused walk ok
+/// Checks the walk that searches a witness path (toolchain 4.2): the values it knows after
+/// each kind of statement, the blocks it searches, and the conditions it can decide.
+import consts;
+import fir;
+import fir_flow;
+import ownership_api;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import std.strbuf;
+
+string[93] WALK = {
+    "extern fn strlen(char* s) u64;",
+    "bool mut ready = true;",
+    "fn helper() void {}",
+    "fn values(u64 n, bool c, i8 small) void {",
+    "    u64 mut a = 7;",
+    "    u64 b = a + 5;",
+    "    u64 d = b * 2 - 3;",
+    "    u64 e = d / 4;",
+    "    u64 r = d % 4;",
+    "    bool lt = a < b;",
+    "    bool eq = a == 7;",
+    "    bool both = lt && eq;",
+    "    bool neg = !eq;",
+    "    u32 narrow = cast(b, u32);",
+    "    u8 wrap = cast(300, u8);",
+    "    bool above = n > 3;",
+    "    bool below = 3 > n;",
+    "    bool flag = c == true;",
+    "    i8 low = small;",
+    "    a = n;",
+    "    u8 mut@ own s = new(u8, 4);",
+    "    u8 mut@ part = s[1..3];",
+    "    u64 len = part.len;",
+    "    u8 mut@ own m = move(s);",
+    "    u64 moved = s.len;",
+    "    del(m);",
+    "    u64 gone = m.len;",
+    "    i32 mut* own p = new(i32);",
+    "    bool live = p != null;",
+    "    del(p);",
+    "    bool dead = p == null;",
+    "    u64 counted = strlen(cast(\"abc\".ptr, char*));",
+    "    helper();",
+    "    u64 after = 1;",
+    "}",
+    "fn shape(bool c, u64 n) u64 {",
+    "    u64 mut t = 0;",
+    "    if (c) {",
+    "        t = 1;",
+    "    } else {",
+    "        t = 2;",
+    "    }",
+    "    u64 mut i = 0;",
+    "    while (i < n) {",
+    "        t += 1;",
+    "        i += 1;",
+    "    }",
+    "    switch (t) {",
+    "    case 1: return 10;",
+    "    case 2: return 20;",
+    "    default: return t;",
+    "    }",
+    "}",
+    "fn traps(bool c) void {",
+    "    i32 mut* own mut p = new(i32);",
+    "    if (c) { p = new(i32); }",
+    "    del(p);",
+    "    u8 mut@ own s = new(u8, 4);",
+    "    del(s);",
+    "    u8 x = s[0];",
+    "}",
+    "fn global_branch() void {",
+    "    u64 mut t = 0;",
+    "    if (ready) { t = 1; }",
+    "    t = 2;",
+    "}",
+    "fn unknown_check(u64 n) void {",
+    "    u64 m = n + 1;",
+    "    u64 t = 2;",
+    "}",
+    "fn relations(i8 x, u8 y, i32 k) void {",
+    "    u64 mut t = 0;",
+    "    if (x < -127) { t = 1; }",
+    "    if (y >= 255) { t = 2; }",
+    "    if (y <= 0) { t = 3; }",
+    "    if (k != 4) { t = 4; }",
+    "    if (y > 255) { t = 5; }",
+    "    t = 6;",
+    "}",
+    "fn params(u64 n, bool c) void {",
+    "    u64 mut m = n;",
+    "    bool d = c;",
+    "    m = 3;",
+    "    u64 mut t = 0;",
+    "    if (m > 2) { t = 1; }",
+    "    if (d) { t = 2; }",
+    "    if (c) { t = 3; } else { t = 4; }",
+    "    t = 5;",
+    "}",
+    "fn asserted(u64 n) void {",
+    "    assert(n > 3);",
+    "    u64 t = n;",
+    "}",
+};
+
+fn open(ownership_source_env.env mut* e, strbuf.str_buf mut* text) void {
+    u64 mut i = 0;
+    while (i < WALK.len) {
+        strbuf.append(text, WALK[i]);
+        strbuf.push(text, '\n');
+        i += 1;
+    }
+    strbuf.append(text, "fn root() i32 { return 0; }\n");
+    ownership_source_env.open(e);
+    ownership_source_env.runtime(e);
+    assert(ownership_source_env.prepare(e, strbuf.view(text)));
+    ownership_source.analyze(&e->source);
+}
+
+fn local_named(ownership_source.body* row, string name) u64 {
+    u32 mut n = 0;
+    while (n < fir.local_count(&row->function)) {
+        if (fir.local_name(fir.local_at(&row->function, n)) == name) { return cast(n, u64); }
+        n += 1;
+    }
+    panic("ownership_source_local_walk_test: local is absent");
+}
+
+// The first statement at `line` and `col`, in block and statement order. Column 0 takes any.
+struct position {
+    u32 block;
+    u32 gap;
+}
+
+fn at(ownership_source.body* row, u32 line, u32 col) position {
+    fir.func* f = &row->function;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut g = 0;
+        while (g < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, g);
+            if (s->loc.line == line && (col == 0 || s->loc.col == col)) { return position{b, g}; }
+            g += 1;
+        }
+        b += 1;
+    }
+    panic("ownership_source_local_walk_test: no statement at that line");
+}
+
+// A walk of one body to one position, with the values that it leaves.
+struct trial {
+    ownership_source.body mut* row;
+    ownership_source_local.walk w;
+    fir.pred_table preds;
+    bool reached;
+}
+
+// The statement that the check at `line` guards: the first one of its continuation.
+fn guarded(ownership_source.body* row, u32 line) position {
+    fir.func* f = &row->function;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        fir.terminator* t = &fir.block_at(f, b)->term;
+        if ((t->kind == fir.term_kind.tk_check || t->kind == fir.term_kind.tk_check_overwrite) &&
+            t->loc.line == line) { return position{t->target, 0}; }
+        b += 1;
+    }
+    panic("ownership_source_local_walk_test: no check at that line");
+}
+
+fn walk_at(ownership_source_env.env mut* e, string name, position p,
+    ownership_source_local.trap kind) trial {
+    trial mut t = trial{.row = ownership_source_env.find(e, "main", name)};
+    t.preds = fir.func_predecessors(&t.row->function);
+    t.reached = ownership_source_local.walk_to(&t.row->local, &t.preds, p.block, p.gap, kind,
+        &t.w);
+    return t;
+}
+
+fn walk(ownership_source_env.env mut* e, string name, u32 line, u32 col,
+    ownership_source_local.trap kind) trial {
+    return walk_at(e, name, at(ownership_source_env.find(e, "main", name), line, col), kind);
+}
+
+fn guarded_reach(ownership_source_env.env mut* e, string name, u32 line,
+    ownership_source_local.trap kind) bool {
+    position p = guarded(ownership_source_env.find(e, "main", name), line);
+    trial mut t = walk_at(e, name, p, kind);
+    finish(&t);
+    return t.reached;
+}
+
+fn reaches(ownership_source_env.env mut* e, string name, u32 line, u32 col) bool {
+    trial mut t = walk(e, name, line, col, ownership_source_local.trap.no_trap);
+    finish(&t);
+    return t.reached;
+}
+
+fn finish(trial mut* t) void {
+    ownership_source_local.walk_free(&t->w);
+    fir.pred_table_free(&t->preds);
+}
+
+fn value(trial* t, string name) ownership_source_local.witness_value {
+    return ownership_source_local.resolve(&t->w, t->w.values[local_named(t->row, name)]);
+}
+
+fn is_constant(ownership_source_local.witness_value v, consts.cval expected) bool {
+    return v.kind == ownership_source_local.witness_kind.constant && consts.cv_eq(v.value,
+        expected);
+}
+
+fn is_number(trial* t, string name, u64 expected) bool {
+    return is_constant(value(t, name), consts.cv_from_u64(expected));
+}
+
+fn is_flag(trial* t, string name, bool expected) bool {
+    return is_constant(value(t, name), consts.cv_from_bool(expected));
+}
+
+fn is_null(trial* t, string name) bool {
+    return is_constant(value(t, name), consts.cv_null());
+}
+
+fn kind_of(trial* t, string name) ownership_source_local.witness_kind {
+    return value(t, name).kind;
+}
+
+fn chosen(trial* t, string name) consts.cval {
+    u64 n = local_named(t->row, name);
+    assert(t->w.chosen[n]);
+    return t->w.choice[n];
+}
+
+fn unchosen(trial* t, string name) bool { return !t->w.chosen[local_named(t->row, name)]; }
+
+// The values that the walk knows when it reaches the fort call of `values`.
+fn values(ownership_source_env.env mut* e) void {
+    trial mut t = walk(e, "values", 33, 0, ownership_source_local.trap.no_trap);
+    defer finish(&t);
+    assert(t.reached);
+    // Exact arithmetic, after the overflow and division checks that it passes.
+    assert(is_number(&t, "b", 12) && is_number(&t, "d", 21));
+    assert(is_number(&t, "e", 5) && is_number(&t, "r", 1));
+    // Comparisons of known values, a short circuit through its branch, and a negation.
+    assert(is_flag(&t, "lt", true) && is_flag(&t, "eq", true));
+    assert(is_flag(&t, "both", true) && is_flag(&t, "neg", false));
+    // A cast that keeps the value, and a constant cast that the lowering folds.
+    assert(is_number(&t, "narrow", 12) && is_number(&t, "wrap", 44));
+    // A comparison of an unchosen parameter with a constant is a relation.
+    ownership_source_local.witness_value above = value(&t, "above");
+    assert(above.kind == ownership_source_local.witness_kind.relation);
+    assert(above.rel == consts.cv_rel.cv_rel_gt && consts.cv_eq(above.value,
+        consts.cv_from_u64(3)));
+    assert(above.param == cast(local_named(t.row, "n"), u32));
+    // A constant on the left mirrors the relation.
+    ownership_source_local.witness_value below = value(&t, "below");
+    assert(below.kind == ownership_source_local.witness_kind.relation);
+    assert(below.rel == consts.cv_rel.cv_rel_lt);
+    // A bool parameter compares for equality only.
+    ownership_source_local.witness_value flag = value(&t, "flag");
+    assert(flag.kind == ownership_source_local.witness_kind.relation);
+    assert(flag.rel == consts.cv_rel.cv_rel_eq && consts.cv_eq(flag.value,
+        consts.cv_from_bool(true)));
+    // A copy of a parameter keeps its entry value. A write of one replaces a constant.
+    assert(kind_of(&t, "low") == ownership_source_local.witness_kind.entry_value);
+    assert(value(&t, "low").param == cast(local_named(t.row, "small"), u32));
+    assert(kind_of(&t, "a") == ownership_source_local.witness_kind.entry_value);
+    // A slice has the length hi - lo. A move and a del leave null, whose length is 0.
+    ownership_source_local.witness_value part = value(&t, "part");
+    assert(part.kind == ownership_source_local.witness_kind.header && part.has_length);
+    assert(consts.cv_eq(part.value, consts.cv_from_u64(2)) && !part.live);
+    assert(is_number(&t, "len", 2));
+    assert(is_null(&t, "s") && is_number(&t, "moved", 0));
+    assert(is_null(&t, "m") && is_number(&t, "gone", 0));
+    // An allocation is not null. After its release, the owner is.
+    assert(is_flag(&t, "live", true) && is_null(&t, "p") && is_flag(&t, "dead", true));
+    // An extern call returns, with a value that the walk does not know.
+    assert(kind_of(&t, "counted") == ownership_source_local.witness_kind.unknown);
+    // No condition chose a parameter on this path.
+    assert(unchosen(&t, "n") && unchosen(&t, "c") && unchosen(&t, "small"));
+    // The fort call can fail to return: the walk does not pass it.
+    assert(!reaches(e, "values", 34, 0));
+    println("values ok");
+}
+
+// The search finds the blocks that reach the target and their fewest edges to it.
+fn distances(ownership_source_env.env mut* e) void {
+    trial mut t = walk(e, "shape", 49, 0, ownership_source_local.trap.no_trap);
+    defer finish(&t);
+    assert(t.reached);
+    position target = at(t.row, 49, 0);
+    assert(fir_flow_get(&t, target.block) && t.w.distance[cast(target.block, u64)] == 0);
+    // The entry goes through an arm, the join, the loop head and the switch.
+    assert(fir_flow_get(&t, 0) && t.w.distance[0] == 5);
+    // The other returns and the unreachable block after the switch cannot reach it.
+    position other = at(t.row, 50, 0);
+    position last = at(t.row, 51, 0);
+    assert(!fir_flow_get(&t, other.block) && !fir_flow_get(&t, last.block));
+    println("distances ok");
+}
+
+fn fir_flow_get(trial* t, u32 block) bool { return fir_flow.bits_get(&t->w.toward, block); }
+
+// A condition on a parameter takes the target nearest to the operation. A loop exit is nearer
+// than its body, so n = 0. One choice is made at each condition: a target that needs the
+// other value of c is not reached.
+fn choices(ownership_source_env.env mut* e) void {
+    trial mut t = walk(e, "shape", 49, 0, ownership_source_local.trap.no_trap);
+    defer finish(&t);
+    assert(t.reached);
+    assert(consts.cv_eq(chosen(&t, "c"), consts.cv_from_bool(true)));
+    assert(consts.cv_eq(chosen(&t, "n"), consts.cv_from_u64(0)));
+    assert(is_number(&t, "t", 1));
+    // Both arms of c reach the join at the same distance. The first arm wins, so t is 1 and
+    // the switch on t never reaches the second or the default return.
+    assert(!reaches(e, "shape", 50, 0));
+    assert(!reaches(e, "shape", 51, 0));
+    // Inside the loop body the body is nearer than the exit: n = 1.
+    trial mut inner = walk(e, "shape", 46, 0, ownership_source_local.trap.no_trap);
+    defer finish(&inner);
+    assert(inner.reached);
+    assert(consts.cv_eq(chosen(&inner, "n"), consts.cv_from_u64(1)));
+    println("choices ok");
+}
+
+// A check that traps ends the path. Only the trap that the event names reaches the guarded
+// statement.
+fn traps(ownership_source_env.env mut* e) void {
+    ownership_source_local.trap none = ownership_source_local.trap.no_trap;
+    ownership_source_local.trap store = ownership_source_local.trap.overwrite_trap;
+    ownership_source_local.trap element = ownership_source_local.trap.element_trap;
+    // The store over a live owner, with c = true: the overwrite check traps first.
+    assert(!guarded_reach(e, "traps", 56, none));
+    assert(guarded_reach(e, "traps", 56, store));
+    assert(!guarded_reach(e, "traps", 56, element));
+    // The read of an emptied span, with c = false: its bounds check traps first. With
+    // c = true the program traps at the overwrite and never reads.
+    assert(!guarded_reach(e, "traps", 60, none));
+    assert(guarded_reach(e, "traps", 60, element));
+    assert(!guarded_reach(e, "traps", 60, store));
+    // The checks of the second allocation pass: its count is 4 and s was empty.
+    assert(guarded_reach(e, "traps", 58, none));
+    // A trap guards the first statement of its continuation only.
+    assert(!reaches(e, "traps", 61, 1));
+    trial mut after = walk(e, "traps", 61, 1, element);
+    defer finish(&after);
+    assert(!after.reached);
+    println("traps ok");
+}
+
+// A global, and an overflow check of a parameter value, are unknown conditions.
+fn unknowns(ownership_source_env.env mut* e) void {
+    assert(!reaches(e, "global_branch", 64, 0));
+    assert(!reaches(e, "global_branch", 65, 0));
+    assert(!reaches(e, "unknown_check", 69, 0));
+    // The statement before the check is still on the path.
+    assert(reaches(e, "unknown_check", 68, 0));
+    println("unknowns ok");
+}
+
+// A relation takes its constant or an integer next to it, in the parameter's type.
+fn relations(ownership_source_env.env mut* e) void {
+    trial mut low = walk(e, "relations", 73, 23, ownership_source_local.trap.no_trap);
+    defer finish(&low);
+    assert(low.reached);
+    assert(consts.cv_eq(chosen(&low, "x"), consts.cv_from_i64(-128)));
+    trial mut top = walk(e, "relations", 74, 23, ownership_source_local.trap.no_trap);
+    defer finish(&top);
+    assert(top.reached);
+    assert(consts.cv_eq(chosen(&top, "y"), consts.cv_from_u64(255)));
+    // The first if took its nearer target, which fixed x = -127.
+    assert(consts.cv_eq(chosen(&top, "x"), consts.cv_from_i64(-127)));
+    trial mut other = walk(e, "relations", 76, 21, ownership_source_local.trap.no_trap);
+    defer finish(&other);
+    assert(other.reached);
+    assert(consts.cv_eq(chosen(&other, "k"), consts.cv_from_u64(5)));
+    // The nearer target of y >= 255 fixed y = 254, so y <= 0 is false after it.
+    assert(!reaches(e, "relations", 75, 21));
+    // No u8 value exceeds 255.
+    assert(!reaches(e, "relations", 77, 22));
+    // Past every if: each takes its otherwise target.
+    trial mut end = walk(e, "relations", 78, 0, ownership_source_local.trap.no_trap);
+    defer finish(&end);
+    assert(end.reached);
+    assert(consts.cv_eq(chosen(&end, "x"), consts.cv_from_i64(-127)));
+    assert(consts.cv_eq(chosen(&end, "y"), consts.cv_from_u64(254)));
+    assert(consts.cv_eq(chosen(&end, "k"), consts.cv_from_u64(4)));
+    println("relations ok");
+}
+
+// A parameter that the body writes has a known value. A copy of one chooses the parameter.
+fn parameters(ownership_source_env.env mut* e) void {
+    assert(reaches(e, "params", 85, 20));
+    trial mut copied = walk(e, "params", 86, 16, ownership_source_local.trap.no_trap);
+    defer finish(&copied);
+    assert(copied.reached);
+    assert(consts.cv_eq(chosen(&copied, "c"), consts.cv_from_bool(true)));
+    assert(is_flag(&copied, "d", true));
+    // The test of d takes its nearer otherwise target and fixes c = false. The second test
+    // of c evaluates that value: its else arm is reached, its then arm is not.
+    trial mut later = walk(e, "params", 87, 32, ownership_source_local.trap.no_trap);
+    defer finish(&later);
+    assert(later.reached);
+    assert(consts.cv_eq(chosen(&later, "c"), consts.cv_from_bool(false)));
+    assert(!reaches(e, "params", 87, 16));
+    // An assertion fixes a value that passes it.
+    trial mut checked = walk(e, "asserted", 92, 0, ownership_source_local.trap.no_trap);
+    defer finish(&checked);
+    assert(checked.reached);
+    assert(consts.cv_eq(chosen(&checked, "n"), consts.cv_from_u64(4)));
+    println("parameters ok");
+}
+
+fn relation_of(trial* t, string param, consts.cv_rel rel, consts.cval k)
+    ownership_source_local.witness_value {
+    return ownership_source_local.witness_value{
+        .kind = ownership_source_local.witness_kind.relation,
+        .param = cast(local_named(t->row, param), u32), .rel = rel, .value = k};
+}
+
+fn picks_value(trial* t, ownership_source_local.witness_value cond, bool wanted,
+    consts.cval expected) bool {
+    consts.cval mut out = consts.cv_none();
+    return ownership_source_local.pick(&t->w, cond, consts.cv_from_bool(wanted), &out) &&
+        consts.cv_eq(out, expected);
+}
+
+fn picks_none(trial* t, ownership_source_local.witness_value cond, bool wanted) bool {
+    consts.cval mut out = consts.cv_none();
+    return !ownership_source_local.pick(&t->w, cond, consts.cv_from_bool(wanted), &out);
+}
+
+// The candidates of a relation: its constant, then the integers above and below it, each in
+// the range of the parameter's type.
+fn picks(ownership_source_env.env mut* e) void {
+    trial mut t = walk(e, "relations", 72, 0, ownership_source_local.trap.no_trap);
+    defer finish(&t);
+    assert(t.reached);
+    consts.cval max = consts.cv_from_u64(255);
+    consts.cval min = consts.cv_from_i64(-128);
+    // y is a u8: nothing exceeds 255, and 255 is the only value at or above it.
+    assert(picks_none(&t, relation_of(&t, "y", consts.cv_rel.cv_rel_gt, max), true));
+    assert(picks_value(&t, relation_of(&t, "y", consts.cv_rel.cv_rel_gt, max), false, max));
+    assert(picks_value(&t, relation_of(&t, "y", consts.cv_rel.cv_rel_ge, max), true, max));
+    assert(picks_value(&t, relation_of(&t, "y", consts.cv_rel.cv_rel_ge, max), false,
+        consts.cv_from_u64(254)));
+    // Nothing is below 0.
+    consts.cval zero = consts.cv_from_u64(0);
+    assert(picks_none(&t, relation_of(&t, "y", consts.cv_rel.cv_rel_lt, zero), true));
+    assert(picks_value(&t, relation_of(&t, "y", consts.cv_rel.cv_rel_le, zero), true, zero));
+    // x is an i8: -128 is the least value, and -129 does not fit.
+    assert(picks_value(&t, relation_of(&t, "x", consts.cv_rel.cv_rel_le, min), true, min));
+    assert(picks_none(&t, relation_of(&t, "x", consts.cv_rel.cv_rel_lt, min), true));
+    assert(picks_value(&t, relation_of(&t, "x", consts.cv_rel.cv_rel_ne, min), true,
+        consts.cv_from_i64(-127)));
+    // An equality takes its constant; an inequality, the integer above it.
+    consts.cval four = consts.cv_from_u64(4);
+    assert(picks_value(&t, relation_of(&t, "k", consts.cv_rel.cv_rel_eq, four), true, four));
+    assert(picks_value(&t, relation_of(&t, "k", consts.cv_rel.cv_rel_ne, four), true,
+        consts.cv_from_u64(5)));
+    // An entry value takes the wanted value when its type holds it.
+    ownership_source_local.witness_value entry = ownership_source_local.witness_value{
+        .kind = ownership_source_local.witness_kind.entry_value,
+        .param = cast(local_named(t.row, "y"), u32)};
+    consts.cval mut out = consts.cv_none();
+    assert(ownership_source_local.pick(&t.w, entry, max, &out) && consts.cv_eq(out, max));
+    assert(!ownership_source_local.pick(&t.w, entry, consts.cv_from_u64(256), &out));
+    assert(!ownership_source_local.pick(&t.w, entry, consts.cv_from_bool(true), &out));
+    // A pick changes nothing: no parameter is fixed.
+    assert(unchosen(&t, "x") && unchosen(&t, "y") && unchosen(&t, "k"));
+    println("picks ok");
+}
+
+// A refused W unit stops the walk: no witness.
+fn refused_walk(ownership_source_env.env mut* e) void {
+    ownership_source.body mut* row = ownership_source_env.find(e, "main", "asserted");
+    u64 bound = row->local.meter.bounds.w;
+    row->local.meter.bounds.w = row->local.meter.used.w;
+    assert(!reaches(e, "asserted", 92, 0));
+    assert(row->local.first_refusal.terminal.limit.category ==
+        ownership_api.limit_category.w);
+    row->local.meter.bounds.w = bound;
+    println("refused walk ok");
+}
+
+fn main() i32 {
+    ownership_source_env.env mut environment = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&environment, &text);
+    defer ownership_source_env.close(&environment);
+    values(&environment);
+    distances(&environment);
+    choices(&environment);
+    traps(&environment);
+    unknowns(&environment);
+    relations(&environment);
+    parameters(&environment);
+    picks(&environment);
+    refused_walk(&environment);
+    return 0;
+}

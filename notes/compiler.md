@@ -877,6 +877,54 @@ came here.
   A named zero pair can coexist with an unnamed source without a false filename.
   The renderer does not call a filename resolver when the source has no filename.
   This pass does not construct source effects.
+- **Local ownership effects come from verified FIR** (D17.14, D17.18, D19.8).
+  `ownership_source_local` reads each verified body and feeds `ownership_flow`.
+  A tracked local slot (TL) is a reference local whose storage no `addr` or array `slice`
+  names. One pass over the statements marks those locals. Only direct FIR writes change a TL,
+  so a TL owner keeps its allocation across any effect outside local proof. Scalars, structs
+  and arrays are not TLs.
+  The producer gives allocations, moves, copies, releases, reads through a TL, and the
+  storage end of TL owners at dead markers and at each return.
+  A fort call and a release through a pointer are `outside` effects: only TL owners, static
+  storage and trusted foreign storage keep their facts. A move of a TL into other storage is
+  an `escape`; its detached obligation leaves local proof. An integer cast to a reference
+  names no proved source (D17.17); only `null` and `zero` constants empty a reference.
+  A violation counts only when each path state that reached the operation failed it, no path
+  stopped or passed an unknown fort call before it, and a witness path reaches it
+  (`spec/toolchain.md` 4.2). Otherwise it is incomplete proof. The witness walk starts at the
+  entry and crosses no back edge and no fort call; an extern call returns (D17.13). It knows
+  constants, exact integer arithmetic, comparisons, value-keeping casts, allocations, span
+  headers, slices, and the null left by a move or a `del`. A condition on a bool or integer
+  parameter that no earlier condition fixed takes a value: the constant of the arm, or the
+  constant of a relation or an integer next to it. The walk makes one choice at each
+  condition, the target nearest to the operation, and never backtracks. A check that traps
+  ends the path, except at the store of an overwrite and the access through an empty
+  reference: there the trap is the event. Each block that the walk searches and each
+  statement that it evaluates charges one W unit of the `local` ledger.
+  `test/fort/ownership_source_local_walk_test.ft` and `_witness_test.ft` hold these rules.
+  A second run without outside effects classifies the failures of a body that has no
+  validated violation and no refusal. When it ends within its budget with no failure, each
+  failure is call scope and local correspondence is incomplete (`call_dependent`). Any
+  failure or refusal of it keeps the body in scope: a refusal explains no failure. Its first
+  pass joins the paths of each block (G = 1). A joined state covers each path, so a joined
+  pass with no failure shows that no path fails. Only a failed joined pass runs the exact
+  pass. Both passes charge one ledger of their own. 978 of 3312 unique bodies of the source
+  audit run it, and none refuses. With the
+  exact pass alone, 4 refused W: `copy_contents` and `scratch` in `ownership_borrows.ft`,
+  `copy_state` in `ownership_ffi.ft` and `copy_view` in `ownership_globals.ft` need 107376 to
+  641461 W, 1.4 to 6.3 times their bounds. Their joined passes need 5083 to 16510 W.
+  Own parameters, own extern results, loads of references from other storage, owning non-TL
+  locals, struct results with reference leaves and range loans also leave it incomplete.
+  These legal shapes give incomplete proof in the declared scope:
+  a null test that the flow does not refine; a loop whose allocation site runs again while
+  its earlier allocation is live (D17.16); flags that test one condition twice; a loop that
+  exhausts the transfer history E (256); a path that needs a back edge, a short-circuit
+  condition or a second choice of one parameter. The flow also stops a path at its first
+  failure, so a later independent obligation on that path is not examined: the corpus file
+  `fail/ownership/054` expects line 12, and local proof reports line 11 only.
+  One compiler body has such a shape: `bind_fresh_source` in `ownership_calls.ft` allocates
+  in a loop and stores views of the allocation. Its exact second pass fails 32 times with "old
+  borrow keeps a released site identity" (D17.16), so it stays in scope.
 - **Dynamic element proof keeps guarded update states** (D17.15).
   `ownership_regions.apply` takes resolved storage paths and exhaustive supplied choices.
   Captured index versions stay separate from local slot names.

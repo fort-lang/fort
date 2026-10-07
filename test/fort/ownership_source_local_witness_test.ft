@@ -1,0 +1,490 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| helpers ok
+//| witnesses ok
+//| no witness ok
+//| witness work ok
+/// Checks the witness paths that validate local violations (toolchain 4.2). A violation needs
+/// a concrete path from the entry: no back edge, no fort call, and each condition evaluated or
+/// decided by a parameter value that no earlier condition fixed.
+import consts;
+import fir;
+import ownership_api;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import std.strbuf;
+
+string[221] WITNESS = {
+    "extern fn abort() noreturn;",
+    "bool mut ready = true;",
+    "fn bool_true(bool c) void {",
+    "    i32 mut* own p = new(i32);",
+    "    if (c) { return; }",
+    "    del(p);",
+    "}",
+    "fn bool_false(bool c) void {",
+    "    i32 mut* own p = new(i32);",
+    "    if (c) { del(p); return; }",
+    "    return;",
+    "}",
+    "fn int_arm(i32 k) void {",
+    "    i32 mut* own p = new(i32);",
+    "    switch (k) {",
+    "    case 7: return;",
+    "    default: del(p);",
+    "    }",
+    "}",
+    "fn int_otherwise(i32 k) void {",
+    "    i32 mut* own p = new(i32);",
+    "    switch (k) {",
+    "    case 0: del(p);",
+    "    case 1: del(p);",
+    "    default: return;",
+    "    }",
+    "}",
+    "fn above(u64 n) void {",
+    "    i32 mut* own p = new(i32);",
+    "    if (n > 5) { return; }",
+    "    del(p);",
+    "}",
+    "fn mirrored(u64 n) void {",
+    "    i32 mut* own p = new(i32);",
+    "    if (5 < n) { return; }",
+    "    del(p);",
+    "}",
+    "fn beyond(u8 x) void {",
+    "    i32 mut* own p = new(i32);",
+    "    if (x > 255) { return; }",
+    "    del(p);",
+    "}",
+    "fn negative(i32 k) void {",
+    "    i32 mut* own p = new(i32);",
+    "    if (k == -3) { return; }",
+    "    del(p);",
+    "}",
+    "fn opposite(bool c) void {",
+    "    i32 mut* own p = new(i32);",
+    "    if (c) {",
+    "        if (!c) { return; }",
+    "    }",
+    "    del(p);",
+    "}",
+    "fn chosen_twice(u64 n) void {",
+    "    i32 mut* own p = new(i32);",
+    "    if (n > 5) {",
+    "        if (n < 10) { return; }",
+    "    }",
+    "    del(p);",
+    "}",
+    "fn chosen_conflict(u64 n) void {",
+    "    i32 mut* own p = new(i32);",
+    "    if (n > 5) {",
+    "        if (n < 3) { return; }",
+    "    }",
+    "    del(p);",
+    "}",
+    "fn counted() void {",
+    "    u64 mut i = 0;",
+    "    while (i < 3) {",
+    "        i32 mut* own p = new(i32);",
+    "        i += 1;",
+    "    }",
+    "}",
+    "fn zero_trip() void {",
+    "    i32 mut* own p = new(i32);",
+    "    i32 mut* q = p;",
+    "    del(p);",
+    "    u64 mut n = 0;",
+    "    u64 mut i = 0;",
+    "    while (i < n) { *q = 1; i += 1; }",
+    "}",
+    "fn after_loop(u64 n) void {",
+    "    i32 mut* own p = new(i32);",
+    "    i32 mut* q = p;",
+    "    u64 mut i = 0;",
+    "    while (i < n) { i += 1; }",
+    "    del(p);",
+    "    *q = 1;",
+    "}",
+    "fn counted_exit() void {",
+    "    i32 mut* own p = new(i32);",
+    "    i32 mut* q = p;",
+    "    u64 mut i = 0;",
+    "    while (i < 2) { i += 1; }",
+    "    del(p);",
+    "    *q = 1;",
+    "}",
+    "fn sum() void {",
+    "    i32 mut* own p = new(i32);",
+    "    i32 mut* q = p;",
+    "    i32 mut x = 1;",
+    "    x += 1;",
+    "    del(p);",
+    "    *q = x;",
+    "}",
+    "fn grow(u64 n) void {",
+    "    i32 mut* own p = new(i32);",
+    "    i32 mut* q = p;",
+    "    u64 m = n + 1;",
+    "    del(p);",
+    "    *q = 1;",
+    "}",
+    "fn asserted(u64 n) void {",
+    "    i32 mut* own p = new(i32);",
+    "    i32 mut* q = p;",
+    "    assert(n > 3);",
+    "    del(p);",
+    "    *q = 1;",
+    "}",
+    "fn index_live() u8 {",
+    "    u8 mut@ own s = new(u8, 4);",
+    "    u8 mut@ v = s;",
+    "    del(s);",
+    "    return v[2];",
+    "}",
+    "fn index_empty() u8 {",
+    "    u8 mut@ own s = new(u8, 4);",
+    "    del(s);",
+    "    return s[0];",
+    "}",
+    "fn index_zero() u8 {",
+    "    u8 mut@ own s = new(u8, 0);",
+    "    u8 mut@ v = s;",
+    "    del(s);",
+    "    return v[0];",
+    "}",
+    "fn overwrite() void {",
+    "    i32 mut* own mut p = new(i32);",
+    "    p = new(i32);",
+    "    del(p);",
+    "}",
+    "fn maybe(bool c) void {",
+    "    i32 mut* own mut p = null;",
+    "    if (c) { p = new(i32); }",
+    "    p = new(i32);",
+    "    del(p);",
+    "}",
+    "fn halted(bool c) void {",
+    "    i32 mut* own p = new(i32);",
+    "    i32 mut* q = p;",
+    "    del(p);",
+    "    if (c) { abort(); }",
+    "    *q = 1;",
+    "}",
+    "fn flagged() void {",
+    "    i32 mut* own p = new(i32);",
+    "    i32 mut* q = p;",
+    "    bool mut skip = false;",
+    "    bool mut* at = &skip;",
+    "    del(p);",
+    "    if (!skip) { *q = 1; }",
+    "}",
+    "fn present() void {",
+    "    i32 mut* own p = new(i32);",
+    "    i32 mut* q = p;",
+    "    if (p != null) {",
+    "        del(p);",
+    "        *q = 1;",
+    "        return;",
+    "    }",
+    "    del(p);",
+    "}",
+    "fn moved() void {",
+    "    i32 mut* own a = new(i32);",
+    "    i32 mut* own b = move(a);",
+    "    if (a == null) { return; }",
+    "    del(b);",
+    "}",
+    "fn global_flag() void {",
+    "    i32 mut* own p = new(i32);",
+    "    if (ready) { return; }",
+    "    del(p);",
+    "}",
+    "fn both(bool a, bool b) void {",
+    "    i32 mut* own p = new(i32);",
+    "    if (a && b) { return; }",
+    "    del(p);",
+    "}",
+    "fn either(bool a, bool b) void {",
+    "    i32 mut* own p = new(i32);",
+    "    if (a || b) { del(p); return; }",
+    "}",
+    "fn picked(bool c) void {",
+    "    i32 mut* own p = new(i32);",
+    "    i32 mut* q = p;",
+    "    del(p);",
+    "    i32 v = c ? 1 : 2;",
+    "    *q = v;",
+    "}",
+    "fn forever() void {",
+    "    while (true) {",
+    "        i32 mut* own p = new(i32);",
+    "        break;",
+    "    }",
+    "}",
+    "fn lowest(i8 x) void {",
+    "    i32 mut* own p = new(i32);",
+    "    if (x <= -128) { return; }",
+    "    del(p);",
+    "}",
+    "fn trusted_call() u64 {",
+    "    i32 mut* own p = new(i32);",
+    "    i32 mut* q = p;",
+    "    del(p);",
+    "    u64 n = strlen(cast(\"ab\".ptr, char*));",
+    "    *q = 1;",
+    "    return n;",
+    "}",
+    "extern fn strlen(char* s) u64;",
+};
+
+fn open(ownership_source_env.env mut* e, strbuf.str_buf mut* text) void {
+    u64 mut i = 0;
+    while (i < WITNESS.len) {
+        strbuf.append(text, WITNESS[i]);
+        strbuf.push(text, '\n');
+        i += 1;
+    }
+    strbuf.append(text, "fn root() i32 { return 0; }\n");
+    ownership_source_env.open(e);
+    ownership_source_env.runtime(e);
+    assert(ownership_source_env.prepare(e, strbuf.view(text)));
+}
+
+fn validated(ownership_source_env.env mut* e, string name, ownership_api.event_kind kind,
+    string slot, u32 line) void {
+    ownership_source.body* row = ownership_source_env.find(e, "main", name);
+    ownership_source_local.context* c = &row->local;
+    if (c->violations_len != 1 || c->violations[0].kind != kind ||
+        c->violations[0].name != slot || c->violations[0].source.line != line) {
+        eprintln(name, ": ", c->violations_len, " violations, ", c->unvalidated, " unvalidated");
+        assert(false);
+    }
+    assert(c->violations[0].quoted);
+    assert(c->correspondence == ownership_source_local.status.complete);
+    assert(c->solver == ownership_source_local.status.complete);
+    assert(c->proof.failed && !c->proof.terminal.present);
+    assert(c->unvalidated == 0);
+}
+
+// Every represented state fails the operation, yet no witness reaches it.
+fn unwitnessed(ownership_source_env.env mut* e, string name) void {
+    ownership_source.body* row = ownership_source_env.find(e, "main", name);
+    ownership_source_local.context* c = &row->local;
+    if (c->violations_len != 0 || c->unvalidated != 1) {
+        eprintln(name, ": ", c->violations_len, " violations, ", c->unvalidated, " unvalidated");
+        assert(false);
+    }
+    assert(c->correspondence == ownership_source_local.status.complete);
+    assert(c->solver == ownership_source_local.status.complete);
+    assert(c->proof.kind == ownership_api.proof_kind.incomplete && c->proof.terminal.present);
+    assert(c->proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+}
+
+fn witnesses() void {
+    ownership_source_env.env mut environment = ownership_source_env.env{};
+    ownership_source_env.env mut* e = &environment;
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(e, &text);
+    defer ownership_source_env.close(e);
+    ownership_source.analyze(&e->source);
+    // A bool parameter takes the value of the arm toward the leak.
+    validated(e, "bool_true", ownership_api.event_kind.lost_ownership, "p", 5);
+    // The otherwise arm of a bool takes the other value.
+    validated(e, "bool_false", ownership_api.event_kind.lost_ownership, "p", 11);
+    // An integer parameter takes the value of its arm.
+    validated(e, "int_arm", ownership_api.event_kind.lost_ownership, "p", 16);
+    // Otherwise takes a value that no arm names.
+    validated(e, "int_otherwise", ownership_api.event_kind.lost_ownership, "p", 25);
+    // A relation to a constant takes a value next to it.
+    validated(e, "above", ownership_api.event_kind.lost_ownership, "p", 30);
+    // A constant on the left mirrors the relation.
+    validated(e, "mirrored", ownership_api.event_kind.lost_ownership, "p", 35);
+    // A negative constant is a value like any other.
+    validated(e, "negative", ownership_api.event_kind.lost_ownership, "p", 45);
+    // A second test of a fixed value evaluates.
+    validated(e, "chosen_twice", ownership_api.event_kind.lost_ownership, "p", 58);
+    // The first iteration of a counted loop enters with known values.
+    validated(e, "counted", ownership_api.event_kind.lost_ownership, "p", 74);
+    // N = 0 leaves the loop with no back edge.
+    validated(e, "after_loop", ownership_api.event_kind.invalid_use, "q", 90);
+    // An overflow check of known values passes.
+    validated(e, "sum", ownership_api.event_kind.invalid_use, "q", 106);
+    // An assertion fixes a value that passes it.
+    validated(e, "asserted", ownership_api.event_kind.invalid_use, "q", 120);
+    // A bounds check of a known length passes.
+    validated(e, "index_live", ownership_api.event_kind.invalid_use, "v", 126);
+    // The bounds trap of an emptied owner is the access.
+    validated(e, "index_empty", ownership_api.event_kind.invalid_use, "s", 131);
+    // The overwrite trap of a live owner is the store.
+    validated(e, "overwrite", ownership_api.event_kind.lost_ownership, "p", 141);
+    // The arm with a noreturn call cannot reach the read.
+    validated(e, "halted", ownership_api.event_kind.invalid_use, "q", 155);
+    // An allocation is never null.
+    validated(e, "present", ownership_api.event_kind.invalid_use, "q", 170);
+    // A move leaves null in its place.
+    validated(e, "moved", ownership_api.event_kind.lost_ownership, "b", 178);
+    // The arm of a conditional expression is a branch like any other.
+    validated(e, "picked", ownership_api.event_kind.invalid_use, "q", 200);
+    // A loop whose condition is the constant true enters with no choice.
+    validated(e, "forever", ownership_api.event_kind.lost_ownership, "p", 205);
+    // The least i8 satisfies x <= -128.
+    validated(e, "lowest", ownership_api.event_kind.lost_ownership, "p", 210);
+    // A trusted extern call returns (D17.13): the walk crosses it.
+    validated(e, "trusted_call", ownership_api.event_kind.invalid_use, "q", 218);
+    println("witnesses ok");
+    // No u8 value exceeds 255.
+    unwitnessed(e, "beyond");
+    // C and !c cannot both hold.
+    unwitnessed(e, "opposite");
+    // N > 5 fixed n, and n < 3 is then false.
+    unwitnessed(e, "chosen_conflict");
+    // The loop over n = 0 never runs its body (D17.9 dead code).
+    unwitnessed(e, "zero_trip");
+    // The exit needs two back edges.
+    unwitnessed(e, "counted_exit");
+    // The overflow check of n + 1 has an unknown outcome.
+    unwitnessed(e, "grow");
+    // The bounds check of a zero-length view traps before any access.
+    unwitnessed(e, "index_zero");
+    // Only one path overwrites a live owner.
+    unwitnessed(e, "maybe");
+    // A mutable global has an unknown value.
+    unwitnessed(e, "global_flag");
+    // An address of a local gives its pointer an unknown source first: the body has a gap.
+    ownership_source.body* flagged = ownership_source_env.find(e, "main", "flagged");
+    assert(flagged->local.correspondence == ownership_source_local.status.incomplete);
+    assert(flagged->local.taken[cast(local_named(flagged, "skip"), u64)]);
+    // The walk makes one choice at each condition, the target nearest to the operation. For
+    // a && b that target fixes a = false, which leaves the join on its false arm, so the
+    // feasible path a = b = true has no witness. The same holds for a || b.
+    unwitnessed(e, "both");
+    unwitnessed(e, "either");
+    println("no witness ok");
+}
+
+fn local_named(ownership_source.body* row, string name) u32 {
+    u32 mut n = 0;
+    while (n < fir.local_count(&row->function)) {
+        if (fir.local_name(fir.local_at(&row->function, n)) == name) { return n; }
+        n += 1;
+    }
+    panic("ownership_source_local_witness_test: local is absent");
+}
+
+fn constant(fir.const_kind kind, consts.cval v) fir.constant {
+    return fir.constant{.kind = kind, .value = v};
+}
+
+fn known(ownership_source_local.witness_value v, consts.cval expected) bool {
+    return v.kind == ownership_source_local.witness_kind.constant && consts.cv_eq(v.value,
+        expected);
+}
+
+fn unknown(ownership_source_local.witness_value v) bool {
+    return v.kind == ownership_source_local.witness_kind.unknown;
+}
+
+// The pure helpers of the walk: relations, constants and exact arithmetic.
+fn helpers() void {
+    // An exchange of operands mirrors an ordering and keeps an equality.
+    assert(ownership_source_local.mirror(consts.cv_rel.cv_rel_lt) == consts.cv_rel.cv_rel_gt);
+    assert(ownership_source_local.mirror(consts.cv_rel.cv_rel_le) == consts.cv_rel.cv_rel_ge);
+    assert(ownership_source_local.mirror(consts.cv_rel.cv_rel_gt) == consts.cv_rel.cv_rel_lt);
+    assert(ownership_source_local.mirror(consts.cv_rel.cv_rel_ge) == consts.cv_rel.cv_rel_le);
+    assert(ownership_source_local.mirror(consts.cv_rel.cv_rel_eq) == consts.cv_rel.cv_rel_eq);
+    assert(ownership_source_local.mirror(consts.cv_rel.cv_rel_ne) == consts.cv_rel.cv_rel_ne);
+    assert(ownership_source_local.relation_of(fir.rvalue_kind.rv_eq) == consts.cv_rel.cv_rel_eq);
+    assert(ownership_source_local.relation_of(fir.rvalue_kind.rv_ne) == consts.cv_rel.cv_rel_ne);
+    assert(ownership_source_local.relation_of(fir.rvalue_kind.rv_lt) == consts.cv_rel.cv_rel_lt);
+    assert(ownership_source_local.relation_of(fir.rvalue_kind.rv_le) == consts.cv_rel.cv_rel_le);
+    assert(ownership_source_local.relation_of(fir.rvalue_kind.rv_gt) == consts.cv_rel.cv_rel_gt);
+    assert(ownership_source_local.relation_of(fir.rvalue_kind.rv_ge) == consts.cv_rel.cv_rel_ge);
+    assert(!ownership_source_local.ordering(consts.cv_rel.cv_rel_eq));
+    assert(!ownership_source_local.ordering(consts.cv_rel.cv_rel_ne));
+    assert(ownership_source_local.ordering(consts.cv_rel.cv_rel_lt));
+    assert(ownership_source_local.ordering(consts.cv_rel.cv_rel_ge));
+    // Integers and chars order. Bools and null only compare for equality.
+    consts.cval two = consts.cv_from_u64(2);
+    consts.cval three = consts.cv_from_u64(3);
+    consts.cval yes = consts.cv_from_bool(true);
+    consts.cval no = consts.cv_from_bool(false);
+    assert(known(ownership_source_local.compare_constants(consts.cv_rel.cv_rel_lt, two, three),
+        yes));
+    assert(known(ownership_source_local.compare_constants(consts.cv_rel.cv_rel_ge, two, three),
+        no));
+    assert(known(ownership_source_local.compare_constants(consts.cv_rel.cv_rel_eq, yes, yes),
+        yes));
+    assert(known(ownership_source_local.compare_constants(consts.cv_rel.cv_rel_ne,
+        consts.cv_null(), consts.cv_null()), no));
+    assert(known(ownership_source_local.compare_constants(consts.cv_rel.cv_rel_gt,
+        consts.cv_from_char(98), consts.cv_from_char(97)), yes));
+    assert(unknown(ownership_source_local.compare_constants(consts.cv_rel.cv_rel_lt, no, yes)));
+    assert(unknown(ownership_source_local.compare_constants(consts.cv_rel.cv_rel_eq, two, yes)));
+    assert(unknown(ownership_source_local.compare_constants(consts.cv_rel.cv_rel_lt,
+        consts.cv_null(), consts.cv_null())));
+    // Exact arithmetic gives no result for a division by zero.
+    consts.cval mut out = consts.cv_none();
+    assert(ownership_source_local.exact(fir.rvalue_kind.rv_add, two, three, &out) &&
+        consts.cv_eq(out, consts.cv_from_u64(5)));
+    assert(ownership_source_local.exact(fir.rvalue_kind.rv_sub_overflows, two, three, &out) &&
+        consts.cv_eq(out, consts.cv_from_i64(-1)));
+    assert(ownership_source_local.exact(fir.rvalue_kind.rv_mul, two, three, &out) &&
+        consts.cv_eq(out, consts.cv_from_u64(6)));
+    assert(ownership_source_local.exact(fir.rvalue_kind.rv_div, three, two, &out) &&
+        consts.cv_eq(out, consts.cv_from_u64(1)));
+    assert(ownership_source_local.exact(fir.rvalue_kind.rv_rem, three, two, &out) &&
+        consts.cv_eq(out, consts.cv_from_u64(1)));
+    assert(!ownership_source_local.exact(fir.rvalue_kind.rv_div, three, consts.cv_from_u64(0),
+        &out));
+    assert(!ownership_source_local.exact(fir.rvalue_kind.rv_shl, three, two, &out));
+    // Integers, bools and null are constants. Text and a typeless zero are not.
+    assert(known(ownership_source_local.constant_of(constant(fir.const_kind.ck_int, two)), two));
+    assert(known(ownership_source_local.constant_of(constant(fir.const_kind.ck_bool, yes)), yes));
+    assert(known(ownership_source_local.constant_of(constant(fir.const_kind.ck_null,
+        consts.cv_none())), consts.cv_null()));
+    assert(unknown(ownership_source_local.constant_of(constant(fir.const_kind.ck_zero, two))));
+    assert(unknown(ownership_source_local.constant_of(constant(fir.const_kind.ck_string,
+        consts.cv_none()))));
+    assert(unknown(ownership_source_local.constant_of(constant(fir.const_kind.ck_float, two))));
+    println("helpers ok");
+}
+
+// The walk charges the local ledger one W unit for each block it searches and each statement
+// and terminator it evaluates. A refused unit leaves the violation unvalidated.
+fn witness_work() void {
+    ownership_source_env.env mut first = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&first, &text);
+    ownership_source.analyze(&first.source);
+    ownership_source.body* measured = ownership_source_env.find(&first, "main", "sum");
+    u64 used = measured->local.meter.used.w;
+    assert(measured->local.violations_len == 1 && !measured->local.classified);
+    ownership_source_env.close(&first);
+    ownership_source_env.env mut second = ownership_source_env.env{};
+    strbuf.str_buf mut again = strbuf.create();
+    defer strbuf.free(&again);
+    open(&second, &again);
+    defer ownership_source_env.close(&second);
+    ownership_source.body mut* refused = ownership_source_env.find(&second, "main", "sum");
+    refused->local.meter.bounds.w = used - 1;
+    ownership_source.analyze(&second.source);
+    assert(refused->local.violations_len == 0 && refused->local.unvalidated == 1);
+    assert(refused->local.meter.used.w == used - 1);
+    assert(refused->local.first_refusal.terminal.limit.category ==
+        ownership_api.limit_category.w);
+    assert(refused->local.solver == ownership_source_local.status.incomplete);
+    assert(refused->local.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    println("witness work ok");
+}
+
+fn main() i32 {
+    helpers();
+    witnesses();
+    witness_work();
+    return 0;
+}
