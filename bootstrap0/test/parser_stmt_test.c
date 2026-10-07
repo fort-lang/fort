@@ -56,6 +56,58 @@ static const char* grouped_suffixes(uint64_t inner, uint64_t outer) {
     return sb_cstr(&deep);
 }
 
+// Appends `n` copies of `text` to `deep`.
+static void repeat(const char* text, uint64_t n) {
+    for (uint64_t i = 0; i < n; i++) {
+        sb_append(&deep, text);
+    }
+}
+
+// `(fn () i32` with `inner` pointer suffixes, then `)` and `outer` pointer suffixes, as a global
+// declaration. The suffixes of the return type and of the group are one written type.
+static const char* fn_return_suffixes(uint64_t inner, uint64_t outer) {
+    sb_clear(&deep);
+    sb_append(&deep, "(fn () i32");
+    repeat("*", inner);
+    sb_append(&deep, ")");
+    repeat("*", outer);
+    sb_append(&deep, " p = null;");
+    return sb_cstr(&deep);
+}
+
+// A global of a function type whose two parameters carry `first` and `second` pointer suffixes.
+// The declaration starts with `fn (`, which is the top-level path to a function type.
+static const char* fn_param_suffixes(uint64_t first, uint64_t second) {
+    sb_clear(&deep);
+    sb_append(&deep, "fn (i32");
+    repeat("*", first);
+    sb_append(&deep, ", i32");
+    repeat("*", second);
+    sb_append(&deep, ") void p = null;");
+    return sb_cstr(&deep);
+}
+
+// A global of `n` function types, each one the return type of the one before.
+static const char* fn_chain(uint64_t n) {
+    sb_clear(&deep);
+    repeat("fn () ", n);
+    sb_append(&deep, "i32 p = null;");
+    return sb_cstr(&deep);
+}
+
+// A global of pointers whose array length holds a type of `inner` pointer suffixes, and whose own
+// type carries `outer` pointer suffixes after the array suffix. The `*` before the array suffix
+// is on the count of the outer type before the length starts.
+static const char* length_type_suffixes(uint64_t inner, uint64_t outer) {
+    sb_clear(&deep);
+    sb_append(&deep, "i32*[sizeof(i32");
+    repeat("*", inner);
+    sb_append(&deep, ")]");
+    repeat("*", outer);
+    sb_append(&deep, " p = null;");
+    return sb_cstr(&deep);
+}
+
 // NOLINTBEGIN(readability-magic-numbers) the sources and the trees they parse
 // to are the test data.
 
@@ -348,7 +400,7 @@ TEST(parameter_lists_take_no_trailing_comma, {
 TEST(nesting_of_256_is_accepted, {
     TEST_ASSERT_NONNULL(parse_text(grouped_suffixes(128, 128)));
     TEST_ASSERT_EQ_STR(parse_diags(), "");
-    TEST_ASSERT_NONNULL(parse_text(nested("", '(', 255, "i32", ')', " x = 0;")));
+    TEST_ASSERT_NONNULL(parse_text(nested("", '(', 256, "i32", ')', " x = 0;")));
     TEST_ASSERT_EQ_STR(parse_diags(), "");
     TEST_ASSERT_NONNULL(parse_text(nested("i32 x = ", '(', 256, "1", ')', ";")));
     TEST_ASSERT_EQ_STR(parse_diags(), "");
@@ -361,7 +413,7 @@ TEST(nesting_of_256_is_accepted, {
 TEST(nesting_deeper_than_256_is_an_error, {
     TEST_ASSERT_NONNULL(
         strstr(parse_fails(grouped_suffixes(128, 129)), "error: nesting deeper than 256\n"));
-    TEST_ASSERT_NONNULL(strstr(parse_fails(nested("", '(', 256, "i32", ')', " x = 0;")),
+    TEST_ASSERT_NONNULL(strstr(parse_fails(nested("", '(', 257, "i32", ')', " x = 0;")),
                                "error: nesting deeper than 256\n"));
     TEST_ASSERT_NONNULL(strstr(parse_fails(nested("i32 x = ", '(', 257, "1", ')', ";")),
                                "error: nesting deeper than 256\n"));
@@ -371,6 +423,109 @@ TEST(nesting_deeper_than_256_is_an_error, {
                                "error: nesting deeper than 256\n"));
     TEST_ASSERT_NONNULL(
         strstr(parse_fails(many_suffixes(257)), "error: nesting deeper than 256\n"));
+})
+
+// A group in a type is one level of nesting, and the type around it is none. In a function body
+// the block is the first level, so 255 groups stand at the limit and the 256th group is past it.
+// The parser reports the limit and not a failed expression.
+TEST(a_type_group_is_one_level_of_nesting, {
+    TEST_ASSERT_NONNULL(
+        parse_text(nested("fn f() void {\n", '(', 255, "i32", ')', " x = 0;\n}\n")));
+    TEST_ASSERT_EQ_STR(parse_diags(), "");
+    TEST_ASSERT_EQ_STR(parse_fails(nested("fn f() void {\n", '(', 256, "i32", ')', " x = 0;\n}\n")),
+                       "t.ft:2:257: error: nesting deeper than 256\n");
+    TEST_ASSERT_NONNULL(
+        parse_text(nested("fn f() void {\n", '(', 255, "i32*", ')', " p = null;\n}\n")));
+    TEST_ASSERT_EQ_STR(parse_diags(), "");
+    TEST_ASSERT_EQ_STR(parse_fails(nested("", '(', 257, "i32", ')', " x = 0;")),
+                       "t.ft:1:258: error: nesting deeper than 256\n");
+})
+
+// The type of `sizeof`, `cast`, `new` and an array literal adds no level to its own groups.
+TEST(an_expression_type_adds_no_level, {
+    TEST_ASSERT_NONNULL(parse_text(nested("u64 x = sizeof(", '(', 255, "i32", ')', ");")));
+    TEST_ASSERT_EQ_STR(parse_diags(), "");
+    TEST_ASSERT_EQ_STR(parse_fails(nested("u64 x = sizeof(", '(', 256, "i32", ')', ");")),
+                       "t.ft:1:272: error: nesting deeper than 256\n");
+    TEST_ASSERT_NONNULL(parse_text(nested("i32 x = cast(1, ", '(', 255, "i32", ')', ");")));
+    TEST_ASSERT_EQ_STR(parse_diags(), "");
+    TEST_ASSERT_NONNULL(strstr(parse_fails(nested("i32 x = cast(1, ", '(', 256, "i32", ')', ");")),
+                               "error: nesting deeper than 256\n"));
+    TEST_ASSERT_NONNULL(parse_text(nested("i32* x = new(", '(', 255, "i32", ')', ");")));
+    TEST_ASSERT_EQ_STR(parse_diags(), "");
+    TEST_ASSERT_NONNULL(strstr(parse_fails(nested("i32* x = new(", '(', 256, "i32", ')', ");")),
+                               "error: nesting deeper than 256\n"));
+    TEST_ASSERT_NONNULL(parse_text(nested("i32[1] x = ", '(', 256, "i32", ')', "[1]{1};")));
+    TEST_ASSERT_EQ_STR(parse_diags(), "");
+    TEST_ASSERT_NONNULL(strstr(parse_fails(nested("i32[1] x = ", '(', 257, "i32", ')', "[1]{1};")),
+                               "error: nesting deeper than 256\n"));
+})
+
+// A type at the deepest level parses, because the type adds no level: a declaration in the 256th
+// block, `sizeof` and `cast` as the 256th level of an expression, and a global with 256 groups.
+// One more level is an error.
+TEST(a_type_at_the_deepest_level_parses, {
+    TEST_ASSERT_NONNULL(
+        parse_text(nested("fn f() void {\n", '{', 255, "i32 x = 0;", '}', "\n}\n")));
+    TEST_ASSERT_EQ_STR(parse_diags(), "");
+    TEST_ASSERT_EQ_STR(parse_fails(nested("fn f() void {\n", '{', 256, "i32 x = 0;", '}', "\n}\n")),
+                       "t.ft:2:257: error: nesting deeper than 256\n");
+    TEST_ASSERT_NONNULL(parse_text(nested("u64 x = ", '(', 255, "sizeof(i32)", ')', ";")));
+    TEST_ASSERT_EQ_STR(parse_diags(), "");
+    TEST_ASSERT_EQ_STR(parse_fails(nested("u64 x = ", '(', 256, "sizeof(i32)", ')', ";")),
+                       "t.ft:1:272: error: nesting deeper than 256\n");
+    TEST_ASSERT_NONNULL(parse_text(nested("i32 x = ", '(', 255, "cast(1, i32)", ')', ";")));
+    TEST_ASSERT_EQ_STR(parse_diags(), "");
+    TEST_ASSERT_EQ_STR(parse_fails(nested("i32 x = ", '(', 256, "cast(1, i32)", ')', ";")),
+                       "t.ft:1:270: error: nesting deeper than 256\n");
+    TEST_ASSERT_NONNULL(parse_text(nested("", '(', 256, "i32", ')', " x = 0;")));
+    TEST_ASSERT_EQ_STR(parse_diags(), "");
+    TEST_ASSERT_EQ_STR(parse_fails(nested("", '(', 257, "i32", ')', " x = 0;")),
+                       "t.ft:1:258: error: nesting deeper than 256\n");
+})
+
+// The suffix count of one written type runs through the return type and the parameter types of a
+// function type in it (D2.11). The 257th suffix reports, at its own token.
+TEST(the_suffix_count_runs_through_a_function_type, {
+    TEST_ASSERT_NONNULL(parse_text(fn_return_suffixes(200, 56)));
+    TEST_ASSERT_EQ_STR(parse_diags(), "");
+    TEST_ASSERT_EQ_STR(parse_fails(fn_return_suffixes(200, 57)),
+                       "t.ft:1:268: error: nesting deeper than 256\n");
+    TEST_ASSERT_EQ_STR(parse_fails(fn_return_suffixes(200, 256)),
+                       "t.ft:1:268: error: nesting deeper than 256\n");
+    TEST_ASSERT_NONNULL(parse_text(fn_return_suffixes(256, 0)));
+    TEST_ASSERT_EQ_STR(parse_diags(), "");
+    TEST_ASSERT_NONNULL(parse_text(fn_param_suffixes(200, 56)));
+    TEST_ASSERT_EQ_STR(parse_diags(), "");
+    TEST_ASSERT_EQ_STR(parse_fails(fn_param_suffixes(200, 57)),
+                       "t.ft:1:269: error: nesting deeper than 256\n");
+    // The global after a refused type starts a count of its own.
+    sb_t two;
+    sb_init(&two);
+    sb_append(&two, fn_param_suffixes(256, 1));
+    sb_append(&two, "\n");
+    sb_append(&two, many_suffixes(256));
+    TEST_ASSERT_EQ_STR(parse_fails(sb_cstr(&two)), "t.ft:1:269: error: nesting deeper than 256\n");
+    sb_free(&two);
+})
+
+// A type in an array length is a written type of its own, so its suffixes do not add to the
+// count of the type around it.
+TEST(a_type_in_an_array_length_counts_on_its_own, {
+    TEST_ASSERT_NONNULL(parse_text(length_type_suffixes(256, 254)));
+    TEST_ASSERT_EQ_STR(parse_diags(), "");
+    TEST_ASSERT_EQ_STR(parse_fails(length_type_suffixes(256, 255)),
+                       "t.ft:1:528: error: nesting deeper than 256\n");
+    TEST_ASSERT_NONNULL(
+        strstr(parse_fails(length_type_suffixes(257, 0)), "error: nesting deeper than 256\n"));
+})
+
+// A function type is one level of nesting: its parameter list and its return type are inside it,
+// so a chain of function types in return position has a bound.
+TEST(a_function_type_is_one_level_of_nesting, {
+    TEST_ASSERT_NONNULL(parse_text(fn_chain(256)));
+    TEST_ASSERT_EQ_STR(parse_diags(), "");
+    TEST_ASSERT_EQ_STR(parse_fails(fn_chain(257)), "t.ft:1:1541: error: nesting deeper than 256\n");
 })
 
 // The end of the file closes nothing: every unterminated construct is
@@ -652,6 +807,12 @@ int main(int argc, char** argv) {
     TEST_RUN(parameter_lists_take_no_trailing_comma);
     TEST_RUN(nesting_of_256_is_accepted);
     TEST_RUN(nesting_deeper_than_256_is_an_error);
+    TEST_RUN(a_type_group_is_one_level_of_nesting);
+    TEST_RUN(an_expression_type_adds_no_level);
+    TEST_RUN(a_type_at_the_deepest_level_parses);
+    TEST_RUN(the_suffix_count_runs_through_a_function_type);
+    TEST_RUN(a_type_in_an_array_length_counts_on_its_own);
+    TEST_RUN(a_function_type_is_one_level_of_nesting);
     TEST_RUN(unterminated_constructs_end_at_the_end_of_the_file);
     TEST_RUN(a_long_else_if_chain_is_not_nesting);
     TEST_RUN(every_broken_statement_is_reported);

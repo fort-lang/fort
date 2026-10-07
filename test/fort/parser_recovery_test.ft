@@ -401,8 +401,8 @@ fn grouped_types_count_towards_the_limit() void {
     defer parse_env.free(&e);
     strbuf.str_buf mut src = strbuf.create();
     defer strbuf.free(&src);
-    u64 mut depth = 255;
-    while (depth <= 256) {
+    u64 mut depth = 256;
+    while (depth <= 257) {
         strbuf.clear(&src);
         u64 mut i = 0;
         while (i < depth) {
@@ -417,11 +417,11 @@ fn grouped_types_count_towards_the_limit() void {
         }
         strbuf.append(&src, " x = 0;\n");
         parse_env.parse(&e, strbuf.view(&src));
-        if (depth == 255) {
+        if (depth == 256) {
             assert(parse_env.errors(&e) == 0);
         } else {
             assert(parse_env.errors(&e) == 1);
-            assert(parse_env.diag_at(&e, 0) == "1:257: error: nesting deeper than 256");
+            assert(parse_env.diag_at(&e, 0) == "1:258: error: nesting deeper than 256");
         }
         depth += 1;
     }
@@ -459,6 +459,179 @@ fn groups_do_not_reset_the_suffix_limit() void {
     }
 }
 
+// Appends `n` copies of `text` to `out`.
+fn repeat(strbuf.str_buf mut* out, string text, u64 n) void {
+    u64 mut i = 0;
+    while (i < n) {
+        strbuf.append(out, text);
+        i += 1;
+    }
+}
+
+// `prefix`, `n` copies of `open`, `core`, `n` copies of `close`, and `suffix`.
+fn wrapped(strbuf.str_buf mut* out, string prefix, string open, u64 n, string core, string close,
+           string suffix) string {
+    strbuf.clear(out);
+    strbuf.append(out, prefix);
+    repeat(out, open, n);
+    strbuf.append(out, core);
+    repeat(out, close, n);
+    strbuf.append(out, suffix);
+    return strbuf.view(out);
+}
+
+// Parses `src`, which must give no error.
+fn accepts(parse_env.env mut* e, string src) void {
+    parse_env.parse(e, src);
+    assert(parse_env.errors(e) == 0);
+}
+
+// Parses `src`, which must give one error, the nesting limit at `pos`.
+fn too_deep_at(parse_env.env mut* e, string src, string pos) void {
+    parse_env.parse(e, src);
+    assert(parse_env.errors(e) == 1);
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    strbuf.append(&want, pos);
+    strbuf.append(&want, ": error: nesting deeper than 256");
+    assert(parse_env.diag_at(e, 0) == strbuf.view(&want));
+}
+
+// A group in a type is one level of nesting, and the type around it is none.
+// In a function body the block is the first level, so 255 groups stand at the
+// limit and the 256th group is past it. The parser reports the limit and not a
+// failed expression.
+fn a_type_group_is_one_level_of_nesting() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    accepts(&e, wrapped(&src, "fn f() void {\n", "(", 255, "i32", ")", " x = 0;\n}\n"));
+    too_deep_at(&e, wrapped(&src, "fn f() void {\n", "(", 256, "i32", ")", " x = 0;\n}\n"),
+                "2:257");
+    accepts(&e, wrapped(&src, "fn f() void {\n", "(", 255, "i32*", ")", " p = null;\n}\n"));
+}
+
+// The type of `sizeof`, `cast`, `new` and an array literal adds no level to its
+// own groups.
+fn an_expression_type_adds_no_level() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    accepts(&e, wrapped(&src, "u64 x = sizeof(", "(", 255, "i32", ")", ");\n"));
+    too_deep_at(&e, wrapped(&src, "u64 x = sizeof(", "(", 256, "i32", ")", ");\n"), "1:272");
+    accepts(&e, wrapped(&src, "i32 x = cast(1, ", "(", 255, "i32", ")", ");\n"));
+    too_deep_at(&e, wrapped(&src, "i32 x = cast(1, ", "(", 256, "i32", ")", ");\n"), "1:273");
+    accepts(&e, wrapped(&src, "i32* x = new(", "(", 255, "i32", ")", ");\n"));
+    too_deep_at(&e, wrapped(&src, "i32* x = new(", "(", 256, "i32", ")", ");\n"), "1:270");
+    accepts(&e, wrapped(&src, "i32[1] x = ", "(", 256, "i32", ")", "[1]{1};\n"));
+    too_deep_at(&e, wrapped(&src, "i32[1] x = ", "(", 257, "i32", ")", "[1]{1};\n"), "1:269");
+}
+
+// A type at the deepest level parses, because the type adds no level: a
+// declaration in the 256th block, `sizeof` and `cast` as the 256th level of an
+// expression, and a global with 256 groups. One more level is an error.
+fn a_type_at_the_deepest_level_parses() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    accepts(&e, wrapped(&src, "fn f() void {\n", "{", 255, "i32 x = 0;", "}", "\n}\n"));
+    too_deep_at(&e, wrapped(&src, "fn f() void {\n", "{", 256, "i32 x = 0;", "}", "\n}\n"),
+                "2:257");
+    accepts(&e, wrapped(&src, "u64 x = ", "(", 255, "sizeof(i32)", ")", ";\n"));
+    too_deep_at(&e, wrapped(&src, "u64 x = ", "(", 256, "sizeof(i32)", ")", ";\n"), "1:272");
+    accepts(&e, wrapped(&src, "i32 x = ", "(", 255, "cast(1, i32)", ")", ";\n"));
+    too_deep_at(&e, wrapped(&src, "i32 x = ", "(", 256, "cast(1, i32)", ")", ";\n"), "1:270");
+    accepts(&e, wrapped(&src, "", "(", 256, "i32", ")", " x = 0;\n"));
+    too_deep_at(&e, wrapped(&src, "", "(", 257, "i32", ")", " x = 0;\n"), "1:258");
+}
+
+// The suffix count of one written type runs through the return type and the
+// parameter types of a function type in it (D2.11). The 257th suffix reports,
+// at its own token.
+fn the_suffix_count_runs_through_a_function_type() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    strbuf.str_buf mut inner = strbuf.create();
+    defer strbuf.free(&inner);
+    strbuf.clear(&inner);
+    repeat(&inner, "*", 200);
+    // `(fn () i32` with 200 suffixes, `)`, and more suffixes.
+    strbuf.clear(&src);
+    strbuf.append(&src, "(fn () i32");
+    strbuf.append(&src, strbuf.view(&inner));
+    strbuf.append(&src, ")");
+    repeat(&src, "*", 56);
+    strbuf.append(&src, " p = null;\n");
+    accepts(&e, strbuf.view(&src));
+    strbuf.clear(&src);
+    strbuf.append(&src, "(fn () i32");
+    strbuf.append(&src, strbuf.view(&inner));
+    strbuf.append(&src, ")");
+    repeat(&src, "*", 256);
+    strbuf.append(&src, " p = null;\n");
+    too_deep_at(&e, strbuf.view(&src), "1:268");
+    // Two parameters of 200 and 56, then 200 and 57, in a global that starts
+    // with `fn (`.
+    strbuf.clear(&src);
+    strbuf.append(&src, "fn (i32");
+    strbuf.append(&src, strbuf.view(&inner));
+    strbuf.append(&src, ", i32");
+    repeat(&src, "*", 56);
+    strbuf.append(&src, ") void p = null;\n");
+    accepts(&e, strbuf.view(&src));
+    strbuf.clear(&src);
+    strbuf.append(&src, "fn (i32");
+    strbuf.append(&src, strbuf.view(&inner));
+    strbuf.append(&src, ", i32");
+    repeat(&src, "*", 57);
+    strbuf.append(&src, ") void p = null;\n");
+    // The global after a refused type starts a count of its own.
+    strbuf.append(&src, "i32");
+    repeat(&src, "*", 256);
+    strbuf.append(&src, " q = null;\n");
+    too_deep_at(&e, strbuf.view(&src), "1:269");
+}
+
+// A type in an array length is a written type of its own, so its suffixes do
+// not add to the count of the type around it. The `*` before the array suffix
+// is on the count of the outer type before the length starts.
+fn a_type_in_an_array_length_counts_on_its_own() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    strbuf.append(&src, "i32*[sizeof(i32");
+    repeat(&src, "*", 256);
+    strbuf.append(&src, ")]");
+    repeat(&src, "*", 254);
+    strbuf.append(&src, " p = null;\n");
+    accepts(&e, strbuf.view(&src));
+    strbuf.clear(&src);
+    strbuf.append(&src, "i32*[sizeof(i32");
+    repeat(&src, "*", 256);
+    strbuf.append(&src, ")]");
+    repeat(&src, "*", 255);
+    strbuf.append(&src, " p = null;\n");
+    too_deep_at(&e, strbuf.view(&src), "1:528");
+}
+
+// A function type is one level of nesting: its parameter list and its return
+// type are inside it, so a chain of function types in return position has a
+// bound.
+fn a_function_type_is_one_level_of_nesting() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    accepts(&e, wrapped(&src, "", "fn () ", 256, "i32 p = null;\n", "", ""));
+    too_deep_at(&e, wrapped(&src, "", "fn () ", 257, "i32 p = null;\n", "", ""), "1:1541");
+}
+
 fn main() i32 {
     a_skip_stops_before_the_next_statement_keyword();
     a_skip_stops_before_the_next_case_keyword();
@@ -482,6 +655,12 @@ fn main() i32 {
     configuration_parentheses_count_towards_the_limit();
     the_suffixes_of_one_type_have_their_own_arm_of_the_limit();
     deep_blocks_count_towards_the_same_limit();
+    a_type_group_is_one_level_of_nesting();
+    an_expression_type_adds_no_level();
+    a_type_at_the_deepest_level_parses();
+    the_suffix_count_runs_through_a_function_type();
+    a_type_in_an_array_length_counts_on_its_own();
+    a_function_type_is_one_level_of_nesting();
     println("ok");
     return 0;
 }

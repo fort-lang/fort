@@ -144,6 +144,16 @@ Sections:
 - owner: `core-language.md` (Lexical structure), `grammar.md` (Lexical grammar).
 - rule: Nesting of blocks, parentheses, brackets, braces and type suffixes deeper than 256 is a
   compile error, so a recursive-descent compiler written in fort never needs an unbounded stack.
+  A function type is one nesting level, and its parameter list and its return type are inside
+  that level. One written type has one suffix count. Every suffix of the written type adds to
+  it: the suffixes in its groups and in the parameter and return types of each function type in
+  it. Sibling types add up, so a function type whose two parameter types carry 200 and 57
+  suffixes is an error. A type in an array length is a written type of its own, with its own
+  count.
+- history: Amended 2026-10-06: the rule did not say whether the suffix count continues through a
+  function type. The user ruled that it does. The coordinator ratified the three readings that
+  the implementation needed: a function type is one level, the count adds every suffix, and a
+  type in an array length has its own count.
 
 ## D3 Types
 

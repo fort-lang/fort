@@ -293,6 +293,11 @@ without a rewrite.
   while `python3` in the guest read 4387308 bytes with no NUL and `llvm-as-18` accepted a copy.
   A program that writes a file for a second tool to read writes each run to a new path, or under
   the guest's own `/tmp`.
+  `tools/mutate.py` writes each source in place (`open(path, "wb")`): a round first restores the
+  source and then writes the mutant over it. Run in the guest, one round failed to build 3 times
+  in a row with `unknown type name 'turn'` in `<built-in>`, and the build of the next round
+  succeeded. The cause is the in-place write and a stale page of the shared folder, as above.
+  The cure is the one above: give the file a new inode, or drop the guest's caches.
 - **A mutation harness must restore on the path it does not plan to take, and must prove the
   restore.** The stale page above was the face of T-125's incident that a cure exists for; the
   face that caused the damage was different. `bash harness.sh | head -8` closed the pipe, SIGPIPE

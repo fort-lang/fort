@@ -134,7 +134,7 @@ TEST(a_group_of_a_bare_void_is_only_a_return_type, {
     TEST_ASSERT_NONNULL(strstr(diags(), "main.ft:1:9: error: 'void' is only a return type"));
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
     TEST_ASSERT_FALSE(check_src("fn f() (void) mut { }\nfn main() i32 {\n    return 0;\n}\n"));
-    TEST_ASSERT_NONNULL(strstr(diags(), "main.ft:1:8: error: 'void' is only a return type"));
+    TEST_ASSERT_NONNULL(strstr(diags(), "main.ft:1:8: error: a return type has no binding"));
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
     TEST_ASSERT_FALSE(check_src("fn f((void)* p) void { }\nfn main() i32 {\n    return 0;\n}\n"));
     TEST_ASSERT_NONNULL(strstr(diags(), "main.ft:1:7: error: 'void' is only a return type"));

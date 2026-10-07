@@ -456,13 +456,16 @@ static bool is_void_group(const ast_node_t* t) {
 
 static check_type_t check_type_at(check_t* ck, ast_node_t* node, type_pos_t pos, bool in_storage);
 
-// Gives each node of a group of a bare `noreturn` the `void` that `noreturn` builds, and returns
-// whether a group in it carries a `mut`. The parser refuses an `own` there.
-static bool noreturn_group_marked(check_t* ck, ast_node_t* t) {
+// Gives each node of a group of a bare `void` or `noreturn` the `void` that it builds. Returns
+// the innermost node of the group that carries a `mut`, or NULL. The parser refuses an `own`
+// there.
+static const ast_node_t* return_group_marked(check_t* ck, ast_node_t* t) {
     const type_t* v = type_void(&ck->types);
-    bool marked = false;
+    const ast_node_t* marked = NULL;
     while (t->kind == AST_TYPE) {
-        marked = marked || ast_is_mut(t);
+        if (ast_is_mut(t)) {
+            marked = t;
+        }
         t->type = v;
         t = t->a;
     }
@@ -596,40 +599,46 @@ static check_type_t check_type_at(check_t* ck, ast_node_t* node, type_pos_t pos,
     // `noreturn`, bare or in groups with no suffix, as the return type itself. This node is the
     // outermost one of that return type, so it checks the groups and reports for all of them.
     const bool return_noreturn = allow_noreturn && is_noreturn(base);
-    bool group_mut = false;
+    // A bare `void` in a return type, in groups or with no suffix on this node: this node checks
+    // the groups too. `void*` and `void mut*` are not in this set.
+    const bool return_void =
+        allow_noreturn && wrapped && is_void_group(base) && (has_group || ast_len(node) == 0);
+    const ast_node_t* marked = NULL;
     const type_t* b = NULL;
-    if (has_group && return_noreturn) {
-        group_mut = noreturn_group_marked(ck, base);
+    if ((has_group && return_noreturn) || return_void) {
+        marked = return_group_marked(ck, base);
         b = base->type;
     } else if (has_group) {
-        grouped = check_type_at(ck,
-                                base,
-                                is_void_group(base) && allow_noreturn ? TYPE_POS_RETURN
-                                                                      : TYPE_POS_BINDING,
-                                stores_base);
+        grouped = check_type_at(ck, base, TYPE_POS_BINDING, stores_base);
         b = grouped.type;
         // A group of a bare `void` is a complete return type and nothing else, as `void` needs its
         // `*` inside the same group: `(void)*` is an error and `(void*)` the opaque pointer
         // (D3.11).
-        if (!check_poisoned(b) && is_void_group(base) && (!allow_noreturn || ast_len(node) > 0)) {
+        if (!check_poisoned(b) && is_void_group(base)) {
             check_error(ck, base->loc, "'void' is only a return type or the base of 'void*'");
             b = type_error(&ck->types);
         }
     } else {
         b = base_type(ck, base, allow_noreturn, stores_base);
     }
-    // A `noreturn` return type takes no suffix (D8.5): `noreturn*` would be `void*`. A `mut` on
-    // it gets the message of `i32 mut` there. In any other position base_type reported the
-    // keyword, so `return_noreturn` keeps this from a second report.
-    if (return_noreturn && wrapped) {
+    // A `noreturn` return type takes no suffix (D8.5): `noreturn*` would be `void*`. A group of a
+    // bare `void` takes none either (D3.11), and the innermost `mut` in the group, or else the
+    // group, reports it. A `mut` on a bare `noreturn` or `void` gets the message of `i32 mut`
+    // there. In any other position base_type reported `noreturn`, so `return_noreturn` keeps this
+    // from a second report.
+    if ((return_noreturn || return_void) && wrapped) {
         const char* what = NULL;
-        if (ast_len(node) > 0) {
+        loc_t report_at = node->loc;
+        if (return_noreturn && ast_len(node) > 0) {
             what = "'noreturn' is a return type";
-        } else if (ast_is_mut(node) || group_mut) {
+        } else if (ast_len(node) > 0) {
+            what = "'void' is only a return type or the base of 'void*'";
+            report_at = marked != NULL ? marked->loc : base->loc;
+        } else if (ast_is_mut(node) || marked != NULL) {
             what = "a return type has no binding: remove the outermost 'mut'";
         }
         if (what != NULL) {
-            check_error(ck, node->loc, what);
+            check_error(ck, report_at, what);
             b = type_error(&ck->types);
         }
     }
