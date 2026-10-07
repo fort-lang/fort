@@ -15,6 +15,12 @@
 //| walker bounds and nested leaves
 //| nested struct and matrix owners
 //| overlap keeps selected owners
+//| untouched rows cost linear work
+//| leaf scans cost linear work
+//| kept sources cost linear work
+//| transfer refusals keep the state
+//| removal passes keep row order
+//| copied rows count each vector
 /// Tests aggregate ownership places and retained source relations.
 import ast;
 import check_env;
@@ -526,6 +532,9 @@ struct budget_probe {
     u64 calls;
     u64 deny_at;
     u64 repeat_after;
+    // The item count of the last refused request. A state mutator's precision request has more
+    // than one item; each charge of the transfer of places has one.
+    u64 denied_items;
 }
 
 fn deny_later_charge(void mut* opaque, ownership_api.charge_request* req)
@@ -534,6 +543,7 @@ fn deny_later_charge(void mut* opaque, ownership_api.charge_request* req)
     probe->calls += 1;
     if (probe->calls == probe->deny_at ||
         (probe->repeat_after != 0 && probe->calls == probe->repeat_after)) {
+        probe->denied_items = req->items.len;
         ownership_api.charge_result mut out = ownership_api.charge_result{};
         out.limit.present = true;
         out.limit.category = ownership_api.limit_category.w;
@@ -570,8 +580,10 @@ fn mapped_failure_events(types.node* scalar_type, types.node* pair_type) void {
     assert(ownership_events.bind(&events, &limits, &e.service));
     budget_probe mut probe = budget_probe{};
     probe.meter = &events.budget;
-    probe.deny_at = 3;
-    probe.repeat_after = 6;
+    // Each move pays 1 dispatch unit and 5 units of its own scans before its first contents
+    // mutator, so calls 7 and 14 refuse inside that mutator, which reports the failure.
+    probe.deny_at = 7;
+    probe.repeat_after = 14;
     e.service.budget_context = cast(&probe, void mut*);
     e.service.budget = deny_later_charge;
     ownership_state.state mut before = ownership_state.clone(&e.state);
@@ -583,7 +595,8 @@ fn mapped_failure_events(types.node* scalar_type, types.node* pair_type) void {
     bad(second_result);
     assert(first_result.terminal.reason == ownership_api.incomplete_reason.work_limit);
     assert(second_result.terminal.reason == ownership_api.incomplete_reason.work_limit);
-    assert(probe.calls == 6 && ownership_state.equal(&e.state, &before));
+    assert(probe.calls == 14 && probe.denied_items == 1);
+    assert(ownership_state.equal(&e.state, &before));
     assert(events.len == 2);
     u64 mut i = 0;
     while (i < events.len) {
@@ -611,14 +624,22 @@ fn mapped_failure_events(types.node* scalar_type, types.node* pair_type) void {
     assert(ownership_events.bind(&owner_events, &owner_limits, &e.service));
     budget_probe mut owner_probe = budget_probe{};
     owner_probe.meter = &owner_events.budget;
-    owner_probe.deny_at = 3;
+    // The move pays 1 dispatch unit and 39 units of its own scans. The first owner move then
+    // pays 3 history units and sends its 3-item request: call 44 refuses that request.
+    owner_probe.deny_at = 44;
     e.service.budget_context = cast(&owner_probe, void mut*);
     e.service.budget = deny_later_charge;
     before = ownership_state.clone(&e.state);
     bad(apply(&e, ownership_places.action.move_value, pair_type, root(1), root(2)));
-    assert(owner_probe.calls == 3 && ownership_state.equal(&e.state, &before));
+    assert(owner_probe.calls == 44 && owner_probe.denied_items == 3);
+    assert(ownership_state.equal(&e.state, &before));
     assert(owner_events.len == 1);
-    assert(ownership_events.at(&owner_events, 0)->limit.present);
+    ownership_api.event_descriptor* owner_event = ownership_events.at(&owner_events, 0);
+    assert(owner_event->limit.present && owner_event->limit.attempted == 1);
+    assert(owner_event->kind == ownership_api.event_kind.work_failure);
+    assert(owner_event->key.ordinal == e.counts.next_operation);
+    assert(owner_event->operation.operation == e.counts.next_operation);
+    assert(ownership_keys.operation(owner_event->limit.operation, owner_event->operation) == 0);
     ownership_state.free(&before);
     ownership_events.free(&owner_events);
     ownership_local_env.free(&e);
@@ -739,6 +760,335 @@ fn overlap_cases(types.node* pair_type, types.node* owner_type) void {
     println("overlap keeps selected owners");
 }
 
+// The move of two owners pays 55 W in its own scans and 76 W in its state mutators. Sixty-four
+// rows add 12 units each (2 leaf scans, 1 copied row, 4 removal passes, 1 copy-loop step and the
+// region scans of 4 contents mutators) and 4 units for the guard counts of those mutators.
+u64 BASE_LEAF_WORK = 131;
+u64 ROW_LEAF_WORK = 772;
+// The control move of the refusal sweep pays 236 W, one unit in each charge.
+u64 REFUSAL_COST = 236;
+
+// Meters one transfer: the store's meter counts W, and deny_at refuses one call (0: none).
+struct work_env {
+    ownership_local_env.env local;
+    ownership_events.store events;
+    budget_probe probe;
+}
+
+fn work_open(work_env mut* w) void {
+    ownership_local_env.init(&w->local);
+    ownership_api.limit_table limits = ownership_limits.production();
+    assert(ownership_events.bind(&w->events, &limits, &w->local.service));
+    w->probe.meter = &w->events.budget;
+    w->local.service.budget_context = cast(&w->probe, void mut*);
+    w->local.service.budget = deny_later_charge;
+}
+
+fn work_close(work_env mut* w) void {
+    ownership_events.free(&w->events);
+    ownership_local_env.free(&w->local);
+}
+
+// Puts the state's rows in place without a mutator, so that the meter counts only the transfer.
+// A scalar row holds slot 1000 + i, an allocation owns slot 3000 + i, and a source is a stack.
+fn unrelated_rows(ownership_local_env.env mut* e, u64 contents, u64 allocations,
+    u64 sources) void {
+    u64 mut i = 0;
+    while (i < contents) {
+        ownership_api.contents_fact mut row = ownership_api.contents_fact{};
+        row.place = root(1000 + cast(i, u32));
+        row.kind = ownership_api.contents_kind.scalar;
+        ownership_state.append_contents(&e->state, row);
+        i += 1;
+    }
+    i = 0;
+    while (i < allocations) {
+        ownership_state.append_allocations(&e->state, ownership_local_env.allocation(
+            2000 + cast(i, u32), 100, 3000 + cast(i, u32), 1));
+        i += 1;
+    }
+    i = 0;
+    while (i < sources) {
+        ownership_state.append_sources(&e->state, ownership_local_env.source(
+            4000 + cast(i, u32), ownership_api.source_kind.stack, ownership_api.entity_id{}));
+        i += 1;
+    }
+}
+
+// The type `big` has no reference leaf, and no fact stands below slot 1 or slot 2, so the move
+// calls no state mutator. Its W is the dispatch unit, three allocation scans (owner cover,
+// destination, owner move), one unit for each row of the copy, four removal passes and the
+// copy loop over the contents: 1 + 3A + (C + A + S) + 4C + C.
+fn untouched_work(types.node* big_type, u64 contents, u64 allocations, u64 sources) u64 {
+    work_env mut w = work_env{};
+    work_open(&w);
+    unrelated_rows(&w.local, contents, allocations, sources);
+    ownership_state.state mut before = ownership_state.clone(&w.local.state);
+    good(apply(&w.local, ownership_places.action.move_value, big_type, root(1), root(2)));
+    // The rows stay in their order, and the meter counts W and nothing else.
+    assert(ownership_state.equal(&w.local.state, &before));
+    assert(w.local.state.contents_len == contents);
+    u64 mut i = 0;
+    while (i < contents) {
+        assert(w.local.state.contents[i].place.root.ordinal == 1000 + cast(i, u32));
+        i += 1;
+    }
+    assert(w.probe.calls == w.events.budget.used.w && w.events.len == 0);
+    u64 used = w.events.budget.used.w;
+    ownership_state.free(&before);
+    work_close(&w);
+    return used;
+}
+
+fn untouched_rows_work(types.node* big_type) void {
+    u64[6][3] sizes = {{0, 0, 0}, {64, 0, 0}, {128, 0, 0}, {0, 32, 0}, {0, 0, 16},
+        {64, 32, 16}};
+    u64 mut i = 0;
+    while (i < sizes.len) {
+        u64 contents = sizes[i][0];
+        u64 allocations = sizes[i][1];
+        u64 sources = sizes[i][2];
+        assert(untouched_work(big_type, contents, allocations, sources) ==
+            1 + 6 * contents + 4 * allocations + sources);
+        i += 1;
+    }
+    // Twice the rows cost twice the increment: the work has no square term.
+    u64 base = untouched_work(big_type, 0, 0, 0);
+    u64 once = untouched_work(big_type, 100, 50, 25);
+    u64 twice = untouched_work(big_type, 200, 100, 50);
+    assert(base == 1 && once == 826 && twice == 1651);
+    assert(twice - once == once - base);
+    println("untouched rows cost linear work");
+}
+
+// Two owners below slot 1 move to slot 2 beside `rows` scalar facts at other slots. Each leaf
+// scans the contents, so each scalar row adds the leaf scans, one copied row, four removal
+// passes and one copy-loop step, and the region scans of the four state mutators.
+fn leaf_work(types.node* pair_type, u64 rows) u64 {
+    work_env mut w = work_env{};
+    work_open(&w);
+    ownership_api.projection[1] mut left_parts = {};
+    ownership_api.projection[1] mut right_parts = {};
+    seed_owner(&w.local, field(1, 0, left_parts[..]), 41, 141);
+    seed_owner(&w.local, field(1, 1, right_parts[..]), 42, 142);
+    unrelated_rows(&w.local, rows, 0, 0);
+    u64 seeded = w.events.budget.used.w;
+    good(apply(&w.local, ownership_places.action.move_value, pair_type, root(1), root(2)));
+    ownership_api.projection[1] mut moved_parts = {};
+    owner_at(&w.local, 41, field(2, 0, moved_parts[..]));
+    owner_at(&w.local, 42, field(2, 1, moved_parts[..]));
+    u64 used = w.events.budget.used.w - seeded;
+    work_close(&w);
+    return used;
+}
+
+fn leaf_rows_work(types.node* pair_type) void {
+    u64 base = leaf_work(pair_type, 0);
+    u64 once = leaf_work(pair_type, 64);
+    u64 twice = leaf_work(pair_type, 128);
+    u64 thrice = leaf_work(pair_type, 192);
+    assert(base == BASE_LEAF_WORK && once - base == ROW_LEAF_WORK);
+    assert(twice - once == once - base && thrice - twice == once - base);
+    println("leaf scans cost linear work");
+}
+
+// A copy of `borrowed` from slot 1 to slot 2 beside `rows` scalar facts. The copy keeps its
+// source, so it clears only the destination: 2 removal passes, and no owner move loop. Its one
+// copied fact pays for its borrow and searches no leaf.
+fn copy_work(types.node* view_type, u64 rows) u64 {
+    work_env mut w = work_env{};
+    work_open(&w);
+    good(ownership_local_env.alloc(&w.local, 9, 31, 131, 1));
+    ownership_api.projection[1] mut source_parts = {};
+    seed_view(&w.local, field(1, 0, source_parts[..]), 131, 41);
+    unrelated_rows(&w.local, rows, 0, 0);
+    u64 seeded = w.events.budget.used.w;
+    good(apply(&w.local, ownership_places.action.copy_value, view_type, root(1), root(2)));
+    ownership_api.projection[1] mut target_parts = {};
+    assert(fact(&w.local, field(2, 0, target_parts[..])).borrows[0].source.ordinal == 131);
+    assert(fact(&w.local, field(1, 0, source_parts[..])).kind ==
+        ownership_api.contents_kind.reference);
+    u64 used = w.events.budget.used.w - seeded;
+    work_close(&w);
+    return used;
+}
+
+// A move of `pair` from slot 1 to slot 1. The source and the destination are the same place,
+// so the move clears only the destination and searches no leaf for an empty source.
+fn same_place_work(types.node* pair_type, u64 rows) u64 {
+    work_env mut w = work_env{};
+    work_open(&w);
+    ownership_api.projection[1] mut left_parts = {};
+    ownership_api.projection[1] mut right_parts = {};
+    seed_owner(&w.local, field(1, 0, left_parts[..]), 71, 171);
+    seed_owner(&w.local, field(1, 1, right_parts[..]), 72, 172);
+    unrelated_rows(&w.local, rows, 0, 0);
+    u64 seeded = w.events.budget.used.w;
+    good(apply(&w.local, ownership_places.action.move_value, pair_type, root(1), root(1)));
+    owner_at(&w.local, 71, field(1, 0, left_parts[..]));
+    owner_at(&w.local, 72, field(1, 1, right_parts[..]));
+    assert(fact(&w.local, field(1, 0, left_parts[..])).kind ==
+        ownership_api.contents_kind.reference);
+    u64 used = w.events.budget.used.w - seeded;
+    work_close(&w);
+    return used;
+}
+
+fn kept_source_work(types.node* pair_type, types.node* view_type) void {
+    // The copy pays 19 W in its own scans and 18 W in one contents mutator. Each row adds 6
+    // units (1 leaf scan, 1 copied row, 2 removal passes, 1 copy-loop step and the region scan
+    // of the mutator), and each 64 rows add 1 guard-count unit.
+    u64 copied = copy_work(view_type, 0);
+    u64 copied_rows = copy_work(view_type, 64);
+    u64 copied_twice = copy_work(view_type, 128);
+    assert(copied == 37 && copied_rows - copied == 64 * 6 + 1);
+    assert(copied_twice - copied_rows == copied_rows - copied);
+    // Each row adds 8 units to the same-place move: 2 leaf scans, 1 copied row, 2 removal
+    // passes, 1 copy-loop step and the region scans of 2 contents mutators.
+    u64 same = same_place_work(pair_type, 0);
+    u64 same_rows = same_place_work(pair_type, 64);
+    u64 same_twice = same_place_work(pair_type, 128);
+    assert(same == 87 && same_rows - same == 64 * 8 + 2);
+    assert(same_twice - same_rows == same_rows - same);
+    println("kept sources cost linear work");
+}
+
+// A refusal at any charge of a transfer leaves the state as it was. A refusal after the
+// dispatch unit reports one work failure, from the transfer's own scans or from a state mutator.
+// Each failure carries the event key and the operation of the transfer's request.
+fn transfer_refusals(types.node* pair_type) void {
+    work_env mut control = work_env{};
+    work_open(&control);
+    ownership_api.projection[1] mut left_parts = {};
+    ownership_api.projection[1] mut right_parts = {};
+    seed_owner(&control.local, field(1, 0, left_parts[..]), 51, 151);
+    seed_owner(&control.local, field(1, 1, right_parts[..]), 52, 152);
+    unrelated_rows(&control.local, 3, 2, 1);
+    u64 seeded = control.probe.calls;
+    u64 seeded_w = control.events.budget.used.w;
+    good(apply(&control.local, ownership_places.action.move_value, pair_type, root(1),
+        root(2)));
+    // Each charge of the transfer carries one W unit.
+    u64 cost = control.probe.calls - seeded;
+    assert(cost == control.events.budget.used.w - seeded_w);
+    work_close(&control);
+    u64 mut delegated = 0;
+    u64 mut cut = 1;
+    while (cut <= cost) {
+        work_env mut w = work_env{};
+        work_open(&w);
+        seed_owner(&w.local, field(1, 0, left_parts[..]), 51, 151);
+        seed_owner(&w.local, field(1, 1, right_parts[..]), 52, 152);
+        unrelated_rows(&w.local, 3, 2, 1);
+        ownership_state.state mut before = ownership_state.clone(&w.local.state);
+        w.probe.deny_at = w.probe.calls + cut;
+        ownership_api.proof_status refused = apply(&w.local, ownership_places.action.move_value,
+            pair_type, root(1), root(2));
+        bad(refused);
+        assert(refused.terminal.reason == ownership_api.incomplete_reason.work_limit);
+        assert(refused.terminal.limit.category == ownership_api.limit_category.w);
+        assert(w.probe.calls == w.probe.deny_at);
+        assert(ownership_state.equal(&w.local.state, &before));
+        if (cut == 1) { assert(w.events.len == 0); }
+        else {
+            // The request of the transfer takes the last operation and event key of the env.
+            u32 operation = w.local.counts.next_operation;
+            assert(w.events.len == 1);
+            ownership_api.event_descriptor* event = ownership_events.at(&w.events, 0);
+            assert(event->kind == ownership_api.event_kind.work_failure);
+            assert(event->key.kind == ownership_api.entity_kind.event);
+            assert(event->key.ordinal == operation && event->operation.operation == operation);
+            assert(event->limit.present && event->limit.attempted == 1);
+            assert(ownership_keys.operation(event->limit.operation, event->operation) == 0);
+            assert(ownership_keys.source(event->limit.source, event->source) == 0);
+        }
+        if (w.probe.denied_items > 1) { delegated += 1; }
+        ownership_state.free(&before);
+        work_close(&w);
+        cut += 1;
+    }
+    // Six precision requests of the state mutators (2 owner moves, 4 contents additions) are
+    // among the cuts, so the sweep checks failures that a mutator reports inside a transfer.
+    assert(cost == REFUSAL_COST && delegated == 6);
+    println("transfer refusals keep the state");
+}
+
+fn places_of(ownership_local_env.env* e, ownership_api.place_path mut@ out) u64 {
+    u64 mut i = 0;
+    while (i < e->state.contents_len && i < out.len) {
+        out[i] = e->state.contents[i].place;
+        i += 1;
+    }
+    return e->state.contents_len;
+}
+
+// The removal passes keep the other rows in their order. The move takes the owner at field 0 of
+// slot 1 to field 0 of slot 2. It removes the destination's fact and the aggregate fact of
+// slot 2 above it, then the source's fact and the aggregate fact of slot 1. It then appends the
+// moved owner and the empty source.
+fn removal_order(types.node* owner_type) void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    ownership_api.projection[1] mut source_parts = {};
+    ownership_api.projection[1] mut target_parts = {};
+    ownership_api.projection[1] mut other_parts = {};
+    ownership_api.place_path source = field(1, 0, source_parts[..]);
+    ownership_api.place_path target = field(2, 0, target_parts[..]);
+    ownership_api.place_path other = field(2, 1, other_parts[..]);
+    seed_scalar(&e, root(5), 61);
+    seed_zero(&e, target);
+    seed_scalar(&e, root(6), 62);
+    seed_aggregate(&e, root(2));
+    seed_owner(&e, source, 63, 163);
+    seed_scalar(&e, root(7), 64);
+    seed_aggregate(&e, root(1));
+    seed_scalar(&e, other, 65);
+    assert(e.state.contents_len == 8);
+    good(apply(&e, ownership_places.action.move_value, owner_type, source, target));
+    ownership_api.place_path[8] mut order = {};
+    assert(places_of(&e, order[..]) == 6);
+    ownership_api.place_path[6] expected = {root(5), root(6), root(7), other, target, source};
+    u64 mut i = 0;
+    while (i < expected.len) {
+        assert(ownership_state.same_place(order[i], expected[i]));
+        i += 1;
+    }
+    owner_at(&e, 63, target);
+    assert(e.state.contents[4].kind == ownership_api.contents_kind.reference);
+    assert(ownership_transfer.empty_owner_proved(e.state.contents[5]));
+    assert(e.state.contents[3].value_version.ordinal == 65);
+    ownership_local_env.free(&e);
+    println("removal passes keep row order");
+}
+
+// One unit for each row of each of the 11 vectors that a copy writes.
+fn copied_rows() void {
+    ownership_state.state mut s = ownership_state.empty();
+    assert(ownership_places.rows(&s) == 0);
+    s.contents_len = 1;
+    s.sources_len = 2;
+    s.allocations_len = 3;
+    s.regions_len = 4;
+    s.nodes_len = 5;
+    s.edges_len = 6;
+    s.shapes_len = 7;
+    s.predicates_len = 8;
+    s.guards_len = 9;
+    s.correlations_len = 10;
+    s.losses_len = 11;
+    assert(ownership_places.rows(&s) == 66);
+    s.losses_len = ownership_transfer.U64_MAX - 60;
+    assert(ownership_places.rows(&s) == ownership_transfer.U64_MAX - 5);
+    // The sum reaches the maximum exactly, then saturates one row above it.
+    s.correlations_len = 15;
+    assert(ownership_places.rows(&s) == ownership_transfer.U64_MAX);
+    s.correlations_len = 16;
+    assert(ownership_places.rows(&s) == ownership_transfer.U64_MAX);
+    s.contents_len = ownership_transfer.U64_MAX;
+    assert(ownership_places.rows(&s) == ownership_transfer.U64_MAX);
+    println("copied rows count each vector");
+}
+
 fn declaration_types(check_env.env mut* e) bool {
     strbuf.str_buf mut text = strbuf.create();
     defer strbuf.free(&text);
@@ -785,6 +1135,12 @@ fn main() i32 {
     walker_bounds(owner_type, matrix_type);
     nested_matrix_move(matrix_type, owner_type);
     overlap_cases(pair_type, owner_type);
+    untouched_rows_work(big_type);
+    leaf_rows_work(pair_type);
+    kept_source_work(pair_type, view_type);
+    transfer_refusals(pair_type);
+    removal_order(owner_type);
+    copied_rows();
     check_env.close(&checked);
     return 0;
 }

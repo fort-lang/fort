@@ -8,8 +8,12 @@
 //| batch counts match sorted counts
 //| batch count work ok
 //| batch settle refusals ok
-/// Tests that the byte owner scan and the paired region count pay W in linear amounts.
+//| semantic move work ok
+//| semantic move refusals ok
+/// Tests that the byte owner scan, the paired region count and the semantic move pay W in
+/// linear amounts.
 import ownership_api;
+import ownership_keys;
 import ownership_raw;
 import ownership_raw_bytes;
 import ownership_raw_bytes_env;
@@ -418,6 +422,153 @@ fn batch_settle_refusals() void {
     println("batch settle refusals ok");
 }
 
+// An allocation that owns its own slot and holds no history.
+fn unrelated_allocation(ownership_raw_bytes_env.env mut* e, u32 key)
+    ownership_api.allocation_fact {
+    ownership_api.allocation_fact mut fact = {};
+    fact.key = ownership_raw_bytes_env.id(e, ownership_api.entity_kind.allocation, key);
+    fact.site = ownership_raw_bytes_env.id(e, ownership_api.entity_kind.allocation, 100 + key);
+    fact.validity = ownership_api.validity_kind.live;
+    fact.count.one = true;
+    fact.obligation = true;
+    fact.owner.place = ownership_raw_bytes_env.place(e, key);
+    fact.logical_length = ownership_raw_bytes_env.exact(12);
+    return fact;
+}
+
+// One move of the record { u8@ own owner; u8@ view; } from slot 1 to slot 2 over the populated
+// owner state of the cleanup suites. The extra rows are scalars at slots 1000 + i, and the extra
+// allocations own slots 2000 + i, so the move reads them but changes none of them.
+fn move_work(u64 rows, u64 allocations) u64 {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.owner_rich(&e, 53);
+    ownership_state.state mut* core = e.paired.states[0].core;
+    u64 mut i = 0;
+    while (i < rows) {
+        ownership_api.contents_fact mut row = {};
+        row.place = ownership_raw_bytes_env.place(&e, 1000 + cast(i, u32));
+        row.kind = ownership_api.contents_kind.scalar;
+        ownership_state.append_contents(core, row);
+        i += 1;
+    }
+    i = 0;
+    while (i < allocations) {
+        ownership_state.append_allocations(core, unrelated_allocation(&e, 2000 + cast(i, u32)));
+        i += 1;
+    }
+    u64 contents = core->contents_len;
+    ownership_raw.request req = ownership_raw_bytes_env.move_request(&e, 1, 2, 133);
+    ownership_raw_bytes_env.reset_budget(&e);
+    ownership_raw_bytes.result mut moved = ownership_raw_bytes.semantic_move(&e.paired.states[0],
+        &e.service, ownership_raw_bytes_env.window(&e, 1, 0, 32, e.selected_type),
+        ownership_raw_bytes_env.window(&e, 2, 0, 32, e.selected_type), &req);
+    defer ownership_raw_bytes.free_result(&moved);
+    assert(ownership_api.successful(moved.proof) && moved.states.len == 1);
+    ownership_state.state* next = moved.states[0].core;
+    assert(next->allocations[0].owner.place.root.ordinal == 2);
+    assert(next->allocations[0].history.len == 33);
+    // The move removes the 3 facts of slot 2 and the 2 facts of slot 1. It appends the 2 moved
+    // leaves and the 2 empty source leaves.
+    assert(next->contents_len == contents - 1 && next->allocations_len == 2 + allocations);
+    // The rows that the move does not touch keep their order, before the 4 appended facts.
+    u64 first = contents - 5 - rows;
+    i = 0;
+    while (i < rows) {
+        assert(next->contents[first + i].place.root.ordinal == 1000 + cast(i, u32));
+        i += 1;
+    }
+    assert(next->contents[first - 1].place.root.ordinal < 1000);
+    return e.budget.meter.used.w;
+}
+
+// At af02a72e the same move paid its copy price times (leaves + 1 + contents + allocations)
+// times 8: 477403 W for the populated state, and each larger state refused at the bound, 589824
+// W. Now the copy pays its price once and the transfer of places pays for each row it reads.
+fn semantic_move_work() void {
+    u64 base = move_work(0, 0);
+    u64 rows = move_work(128, 0);
+    u64 doubled = move_work(256, 0);
+    assert(base == 24643 && rows == 41547 && doubled == 58451);
+    // Twice the rows cost twice the increment: the rows add no square term. Each row adds 132
+    // units: 24 for the copy price, 24 for each of the 4 representations that the move
+    // rewrites, 8 in the scans of places and 4 in the region scans of 4 contents mutators. Those
+    // mutators also pay one guard-count unit for each 64 rows: 8 units.
+    assert(doubled - rows == rows - base && rows - base == 128 * 132 + 8);
+    // Rows and allocations add their costs: no term multiplies one by the other.
+    u64 allocations = move_work(0, 64);
+    u64 both = move_work(128, 64);
+    assert(allocations == 51025 && both == 67929);
+    assert(additive(base, rows, allocations, both));
+    println("semantic move work ok");
+}
+
+// A refusal at any charge of a move publishes no successor and leaves the input as it was.
+// The charge that routes events comes first and reports no event. After it, each W refusal
+// reports one work failure, except the dispatch unit of the transfer of places. Six charges
+// carry a precision request first: the byte kernel's 3 R requests report one event each, and the
+// 3 requests of the state mutators (1 E, 2 R) record a precision loss and no event. Each round
+// takes a new request: `same` makes a request too, and that rewrites the event binding that an
+// older request borrows.
+fn semantic_move_refusals() void {
+    ownership_raw_bytes_env.env mut e = {};
+    defer ownership_raw_bytes_env.close(&e);
+    ownership_raw_bytes_env.owner_setup(&e, 31, false);
+    ownership_raw_bytes.result mut before = ownership_raw_bytes_env.clone_input(&e);
+    defer ownership_raw_bytes.free_result(&before);
+    ownership_raw.request mut req = ownership_raw_bytes_env.move_request(&e, 1, 2, 3100);
+    ownership_raw_bytes.window source = ownership_raw_bytes_env.window(&e, 1, 0, 8,
+        e.selected_type);
+    ownership_raw_bytes.window destination = ownership_raw_bytes_env.window(&e, 2, 0, 8,
+        e.selected_type);
+    ownership_raw.work_cursor mut cursor = {};
+    ownership_raw_bytes_env.reset_budget(&e);
+    assert(ownership_api.successful(ownership_raw.begin_work(e.paired.states[0].core,
+        &e.service, &req, &cursor)));
+    u64 route = e.budget.calls;
+    req = ownership_raw_bytes_env.move_request(&e, 1, 2, 3100);
+    ownership_raw_bytes_env.reset_budget(&e);
+    ownership_raw_bytes.result mut control = ownership_raw_bytes.semantic_move(&e.paired.states[0],
+        &e.service, source, destination, &req);
+    assert(ownership_api.successful(control.proof) && control.states.len == 1);
+    ownership_raw_bytes.free_result(&control);
+    u64 cost = e.budget.calls;
+    assert(cost == 1773 && route == 1);
+    u64 mut silent = 0;
+    u64 mut precision = 0;
+    u64 mut reported = 0;
+    u64 mut cut = 1;
+    while (cut <= cost) {
+        req = ownership_raw_bytes_env.move_request(&e, 1, 2, 3100);
+        ownership_raw_bytes_env.reset_budget(&e);
+        e.budget.events = 0;
+        e.budget.deny_at = cut;
+        ownership_raw_bytes.result mut out = ownership_raw_bytes.semantic_move(
+            &e.paired.states[0], &e.service, source, destination, &req);
+        assert(!ownership_api.successful(out.proof) && out.states.len == 0);
+        assert(out.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+        assert(out.proof.terminal.limit.category == e.budget.denied.category);
+        assert(out.proof.terminal.limit.attempted == e.budget.denied.attempted);
+        assert(e.budget.calls == cut && e.budget.events <= 1);
+        assert(ownership_keys.operation(out.proof.terminal.operation, req.base.operation) == 0);
+        assert(ownership_keys.source(out.proof.terminal.source, req.base.source_position) == 0);
+        if (e.budget.denied.category != ownership_api.limit_category.w) {
+            precision += 1;
+            reported += e.budget.events;
+        } else if (cut <= route) { assert(e.budget.events == 0); }
+        else if (e.budget.events == 0) { silent += 1; }
+        else {
+            assert(out.proof.terminal.limit.attempted == 1);
+            assert(e.budget.last_event.kind == ownership_api.event_kind.work_failure);
+        }
+        ownership_raw_bytes.free_result(&out);
+        ownership_raw_bytes_env.same(&e, &before.states[0]);
+        cut += 1;
+    }
+    assert(silent == 1 && precision == 6 && reported == 3);
+    println("semantic move refusals ok");
+}
+
 fn main() i32 {
     owner_scan_work();
     paired_region_work();
@@ -426,5 +577,7 @@ fn main() i32 {
     batch_matches_sorted();
     batch_count_work();
     batch_settle_refusals();
+    semantic_move_work();
+    semantic_move_refusals();
     return 0;
 }
