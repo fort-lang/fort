@@ -76,6 +76,8 @@ struct graph {
     u64 calls_len;
     u32 mut@ own components;
     bool mut@ own recursive;
+    // The components with each callee component before its callers (D17.18).
+    u32 mut@ own order;
     ownership_api.entity_id mut@ own query_targets;
     u32 component_count;
     ownership_api.proof_status proof;
@@ -854,6 +856,27 @@ fn components(graph mut* g) void {
         if (link.from == link.to) { g->recursive[g->components[link.from]] = true; }
         i += 1;
     }
+    // The second pass finds a caller component before each component that it calls, so the
+    // reverse of that discovery order puts each callee first.
+    if (!charge_work(g, cast(raw_count, u64))) { return; }
+    g->order = new(u32, cast(raw_count, u64));
+    u32 mut r = raw_count;
+    u64 mut placed = 0;
+    while (r > 0) {
+        r -= 1;
+        g->order[placed] = canonical[r];
+        placed += 1;
+    }
+}
+
+/// Returns the components with each callee component before its callers. A graph without a
+/// proof has no order.
+fn callee_first(graph* g) u32@ {
+    if (!ownership_api.successful(g->proof) || g->order.len != cast(g->component_count, u64)) {
+        u32@ none = {};
+        return none;
+    }
+    return g->order[..];
 }
 
 /// Returns the FIR size of a graph build over these bodies.
@@ -1089,6 +1112,7 @@ fn free(graph mut* g) void {
     del(g->last_fact);
     del(g->components);
     del(g->recursive);
+    del(g->order);
     del(g->query_targets);
     *g = graph{};
 }
