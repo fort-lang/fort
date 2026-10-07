@@ -13,7 +13,9 @@
 #include "types.h"
 
 // Blocks, brace initializers, bracketed groups, unary operands, conditional
-// branches and types nest at most this deep.
+// branches and function types nest at most this deep. A type is no level of its
+// own, and a group in it is one. The suffixes of one written type have a limit
+// of their own of the same size.
 enum { PARSE_MAX_DEPTH = 256 };
 
 // The `for` forms the grammar distinguishes after `for (`.
@@ -42,8 +44,13 @@ typedef struct {
     uint64_t ntoks;
     uint64_t pos;
     ast_arena_t* arena;
-    uint32_t depth;    // open nested constructs
-    uint32_t spec;     // running speculative parses; no diagnostic while > 0
+    uint32_t depth; // open nested constructs
+    uint32_t spec;  // running speculative parses; no diagnostic while > 0
+    // The suffix count of D2.11 runs through one written type, through its groups and through
+    // the parameter and return types of each function type in it. `type_open` counts the type
+    // parses that are running, and the outermost one sets `type_suffixes` to 0.
+    uint32_t type_open;
+    uint64_t type_suffixes;
     bool failed;       // unwinding the construct a syntax error hit
     uint64_t fail_pos; // the cursor at the first error of the failed construct
     loc_t last;        // where the last reported error started, for the dedupe
@@ -440,18 +447,13 @@ static bool check_mut_before_array(parser_t* p, const markers_t* m) {
 static ast_node_t* parse_base_type(parser_t* p, bool allow_noreturn);
 static ast_node_t* parse_return_type(parser_t* p);
 
-// fn_type = "fn" "(" [ type { "," type } ] ")" return_type, with the `fn`
-// already parsed: the result comes last, as it does in a declaration.
-static ast_node_t* parse_fn_type_params(parser_t* p, loc_t loc) {
-    ast_node_t* n = node_at(p, AST_TYPE_FN, loc);
-    if (!expect(p, TOK_LPAREN, "'('")) {
-        return NULL;
-    }
+// The parameter types, the `)` and the return type of the function type `n`.
+static bool parse_fn_type_signature(parser_t* p, ast_node_t* n) {
     if (!at(p, TOK_RPAREN)) {
         for (;;) {
             ast_node_t* param = parse_type(p, false);
             if (param == NULL) {
-                return NULL;
+                return false;
             }
             ast_push(n, param);
             if (!at(p, TOK_COMMA)) {
@@ -461,13 +463,24 @@ static ast_node_t* parse_fn_type_params(parser_t* p, loc_t loc) {
         }
     }
     if (!expect(p, TOK_RPAREN, "')'")) {
-        return NULL;
+        return false;
     }
     n->a = parse_return_type(p);
-    if (n->a == NULL) {
+    return n->a != NULL;
+}
+
+// fn_type = "fn" "(" [ type { "," type } ] ")" return_type, with the `fn`
+// already parsed: the result comes last, as it does in a declaration. The
+// parameter list and the return type are one nesting level, so a chain of
+// function types in return position cannot recurse without a bound.
+static ast_node_t* parse_fn_type_params(parser_t* p, loc_t loc) {
+    ast_node_t* n = node_at(p, AST_TYPE_FN, loc);
+    if (!expect(p, TOK_LPAREN, "'('") || !enter(p)) {
         return NULL;
     }
-    return finish(p, n);
+    const bool ok = parse_fn_type_signature(p, n);
+    leave(p);
+    return ok ? finish(p, n) : NULL;
 }
 
 // return_type = type | "void" | "noreturn" | "(" return_type ")"; `void` and
@@ -489,7 +502,12 @@ static ast_node_t* parse_base_type(parser_t* p, bool allow_noreturn) {
     switch (kind(p)) {
     case TOK_LPAREN: {
         bump(p);
+        // A group is a nesting level. The type itself is not one.
+        if (!enter(p)) {
+            return NULL;
+        }
         ast_node_t* inner = parse_type(p, allow_noreturn);
+        leave(p);
         if (inner == NULL || !expect(p, TOK_RPAREN, "')'")) {
             return NULL;
         }
@@ -573,17 +591,6 @@ static const char* base_own_error(const ast_node_t* base) {
     return "an own marks a reference: write it after a '*' or an '@', or on a string";
 }
 
-// Groups do not reset the suffix limit of a complete written type.
-static uint64_t type_suffix_count(const ast_node_t* t) {
-    uint64_t count = 0;
-    const ast_node_t* cur = t;
-    while (cur->kind == AST_TYPE) {
-        count += ast_len(cur);
-        cur = cur->a;
-    }
-    return count;
-}
-
 // Parentheses preserve the outer storage position and its existing markers.
 static bool check_group_markers(parser_t* p, const ast_node_t* base) {
     const uint32_t flags = type_position_flags(base);
@@ -602,16 +609,32 @@ static bool check_group_markers(parser_t* p, const ast_node_t* base) {
     return true;
 }
 
+// Starts a type parse. The outermost one starts the suffix count of a new
+// written type.
+static void type_begin(parser_t* p) {
+    if (p->type_open == 0) {
+        p->type_suffixes = 0;
+    }
+    p->type_open++;
+}
+
+static void type_end(parser_t* p) {
+    p->type_open--;
+}
+
 // Adds one suffix to `t` and counts it against the nesting limit, which covers
-// type suffixes.
+// type suffixes. The count runs through the whole written type: groups do not
+// reset it, and the parameter and return types of a function type add to it
+// (D2.11).
 static bool push_suffix(parser_t* p, ast_node_t* t, ast_node_t* suffix) {
-    if (type_suffix_count(t) >= PARSE_MAX_DEPTH) {
+    if (p->type_suffixes >= PARSE_MAX_DEPTH) {
         msg_begin(&p->msg);
         msg_str(&p->msg, "nesting deeper than ");
         msg_uint(&p->msg, PARSE_MAX_DEPTH);
         report(p, suffix->loc, msg_end(&p->msg));
         return false;
     }
+    p->type_suffixes++;
     ast_push(t, suffix);
     return true;
 }
@@ -653,7 +676,13 @@ static bool parse_array_suffixes(parser_t* p, ast_node_t* t, bool marked) {
         if (!enter(p)) {
             return false;
         }
+        // A type in the length expression is a written type of its own.
+        const uint32_t open = p->type_open;
+        const uint64_t count = p->type_suffixes;
+        p->type_open = 0;
         ast_node_t* len = parse_expr(p);
+        p->type_open = open;
+        p->type_suffixes = count;
         leave(p);
         if (len == NULL || !expect(p, TOK_RBRACKET, "']'")) {
             return false;
@@ -804,11 +833,9 @@ static ast_node_t* parse_type_inner(parser_t* p, bool allow_noreturn) {
 }
 
 static ast_node_t* parse_type(parser_t* p, bool allow_noreturn) {
-    if (!enter(p)) {
-        return NULL;
-    }
+    type_begin(p);
     ast_node_t* t = parse_type_inner(p, allow_noreturn);
-    leave(p);
+    type_end(p);
     return t;
 }
 
@@ -816,9 +843,7 @@ static ast_node_t* parse_type(parser_t* p, bool allow_noreturn) {
 // }: the type of an array literal. It has no base marker, dimension marker,
 // or trailing reference suffix.
 static ast_node_t* parse_array_type(parser_t* p) {
-    if (!enter(p)) {
-        return NULL;
-    }
+    type_begin(p);
     ast_node_t* t = NULL;
     const loc_t loc = here(p);
     ast_node_t* base = parse_base_type(p, false);
@@ -837,7 +862,7 @@ static ast_node_t* parse_array_type(parser_t* p) {
             t = NULL;
         }
     }
-    leave(p);
+    type_end(p);
     return finish(p, t);
 }
 
@@ -903,9 +928,7 @@ static ast_node_t* parse_alloc_type(parser_t* p) {
     if (!check_no_leading_marker(p)) {
         return NULL;
     }
-    if (!enter(p)) {
-        return NULL;
-    }
+    type_begin(p);
     ast_node_t* t = NULL;
     const loc_t loc = here(p);
     ast_node_t* base = parse_base_type(p, false);
@@ -942,7 +965,7 @@ static ast_node_t* parse_alloc_type(parser_t* p) {
             t = NULL;
         }
     }
-    leave(p);
+    type_end(p);
     return finish(p, t);
 }
 
@@ -2226,12 +2249,11 @@ static ast_node_t* parse_fn_top_decl(parser_t* p) {
     if (at(p, TOK_IDENT)) {
         return parse_fn_decl(p, loc);
     }
+    type_begin(p);
     ast_node_t* base = parse_fn_type_params(p, loc);
-    if (base == NULL) {
-        return NULL;
-    }
     ast_node_t* n = node_at(p, AST_VAR_DECL, loc);
-    n->a = parse_type_after_base(p, loc, base);
+    n->a = base == NULL ? NULL : parse_type_after_base(p, loc, base);
+    type_end(p);
     if (n->a == NULL || !expect_name(p, n) || !expect(p, TOK_ASSIGN, "'='")) {
         return NULL;
     }
@@ -2493,6 +2515,8 @@ ast_node_t* parse_module(const char* file,
     p.arena = arena;
     p.depth = 0;
     p.spec = 0;
+    p.type_open = 0;
+    p.type_suffixes = 0;
     p.failed = false;
     p.fail_pos = 0;
     p.last = loc_make(file, 0, 0);

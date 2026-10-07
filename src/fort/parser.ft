@@ -11,7 +11,9 @@ import session;
 import types;
 import std.strbuf;
 
-// Blocks, initializers, groups, unary operands, branches, and types share this depth limit.
+// Blocks, initializers, groups, unary operands, branches, and function types share this depth
+// limit. A type is no level of its own, and a group in it is one. The suffixes of one written
+// type have a limit of their own of the same size.
 u32 PARSE_MAX_DEPTH = 256;
 
 // One `$if` chain has a bounded number of condition nodes. The bound keeps
@@ -71,6 +73,11 @@ struct parser {
     u64 fail_pos; // the cursor at the first error of the failed construct
     diag.loc last; // where the last reported error started, for the dedupe
     strbuf.str_buf msg; // the message under construction
+    // The suffix count of D2.11 runs through one written type, through its groups and through
+    // the parameter and return types of each function type in it. `type_open` counts the type
+    // parses that are running, and the outermost one sets `type_suffixes` to 0.
+    u32 type_open;
+    u64 type_suffixes;
 }
 
 // The state a speculative parse restores when it rewinds.
@@ -460,18 +467,13 @@ fn check_mut_before_array(parser mut* p, markers* m) bool {
     return true;
 }
 
-// fn_type = "fn" "(" [ type { "," type } ] ")" return_type, with the `fn`
-// already parsed: the result comes last, as it does in a declaration.
-fn parse_fn_type_params(parser mut* p, diag.loc at_loc) ast.node mut* {
-    ast.node mut* n = node_at(p, ast.ast_kind.k_type_fn, at_loc);
-    if (!expect(p, lexer.tok_kind.lparen, "'('")) {
-        return null;
-    }
+// The parameter types, the `)` and the return type of the function type `n`.
+fn parse_fn_type_signature(parser mut* p, ast.node mut* n) bool {
     if (!at(p, lexer.tok_kind.rparen)) {
         while (true) {
             ast.node mut* param = parse_type(p, false);
             if (param == null) {
-                return null;
+                return false;
             }
             ast.ast_push(n, param);
             if (!at(p, lexer.tok_kind.comma)) {
@@ -481,10 +483,24 @@ fn parse_fn_type_params(parser mut* p, diag.loc at_loc) ast.node mut* {
         }
     }
     if (!expect(p, lexer.tok_kind.rparen, "')'")) {
-        return null;
+        return false;
     }
     n->a = parse_return_type(p);
-    if (n->a == null) {
+    return n->a != null;
+}
+
+// fn_type = "fn" "(" [ type { "," type } ] ")" return_type, with the `fn`
+// already parsed: the result comes last, as it does in a declaration. The
+// parameter list and the return type are one nesting level, so a chain of
+// function types in return position cannot recurse without a bound.
+fn parse_fn_type_params(parser mut* p, diag.loc at_loc) ast.node mut* {
+    ast.node mut* n = node_at(p, ast.ast_kind.k_type_fn, at_loc);
+    if (!expect(p, lexer.tok_kind.lparen, "'('") || !enter(p)) {
+        return null;
+    }
+    bool ok = parse_fn_type_signature(p, n);
+    leave(p);
+    if (!ok) {
         return null;
     }
     return finish(p, n);
@@ -501,7 +517,12 @@ fn parse_base_type(parser mut* p, bool allow_noreturn) ast.node mut* {
     diag.loc at_loc = here(p);
     if (at(p, lexer.tok_kind.lparen)) {
         bump(p);
+        // A group is a nesting level. The type itself is not one.
+        if (!enter(p)) {
+            return null;
+        }
         ast.node mut* inner = parse_type(p, allow_noreturn);
+        leave(p);
         if (inner == null || !expect(p, lexer.tok_kind.rparen, "')'")) {
             return null;
         }
@@ -594,17 +615,6 @@ fn base_own_error(ast.node* base) string {
     return "an own marks a reference: write it after a '*' or an '@', or on a string";
 }
 
-// Groups do not reset the suffix limit of a complete written type.
-fn type_suffix_count(ast.node* t) u64 {
-    u64 mut count = 0;
-    ast.node* mut cur = t;
-    while (cur->kind == ast.ast_kind.k_type) {
-        count += ast.ast_len(cur);
-        cur = cur->a;
-    }
-    return count;
-}
-
 // Parentheses preserve the outer storage position and its existing markers.
 fn check_group_markers(parser mut* p, ast.node* base) bool {
     u32 flags = type_position_flags(base);
@@ -623,16 +633,32 @@ fn check_group_markers(parser mut* p, ast.node* base) bool {
     return true;
 }
 
+// Starts a type parse. The outermost one starts the suffix count of a new
+// written type.
+fn type_begin(parser mut* p) void {
+    if (p->type_open == 0) {
+        p->type_suffixes = 0;
+    }
+    p->type_open += 1;
+}
+
+fn type_end(parser mut* p) void {
+    p->type_open -= 1;
+}
+
 // Adds one suffix to `t` and counts it against the nesting limit, which covers
-// type suffixes.
+// type suffixes. The count runs through the whole written type: groups do not
+// reset it, and the parameter and return types of a function type add to it
+// (D2.11).
 fn push_suffix(parser mut* p, ast.node mut* t, ast.node mut* suffix) bool {
-    if (type_suffix_count(t) >= cast(PARSE_MAX_DEPTH, u64)) {
+    if (p->type_suffixes >= cast(PARSE_MAX_DEPTH, u64)) {
         msg_begin(p);
         msg_str(p, "nesting deeper than ");
         strbuf.append_u64(&p->msg, cast(PARSE_MAX_DEPTH, u64));
         report(p, suffix->loc, msg_end(p));
         return false;
     }
+    p->type_suffixes += 1;
     ast.ast_push(t, suffix);
     return true;
 }
@@ -678,7 +704,13 @@ fn parse_array_suffixes(parser mut* p, ast.node mut* t, bool marked) bool {
         if (!enter(p)) {
             return false;
         }
+        // A type in the length expression is a written type of its own.
+        u32 open = p->type_open;
+        u64 count = p->type_suffixes;
+        p->type_open = 0;
         ast.node mut* len = parse_expr(p);
+        p->type_open = open;
+        p->type_suffixes = count;
         leave(p);
         if (len == null || !expect(p, lexer.tok_kind.rbracket, "']'")) {
             return false;
@@ -749,11 +781,9 @@ fn parse_type_inner(parser mut* p, bool allow_noreturn) ast.node mut* {
 }
 
 fn parse_type(parser mut* p, bool allow_noreturn) ast.node mut* {
-    if (!enter(p)) {
-        return null;
-    }
+    type_begin(p);
     ast.node mut* t = parse_type_inner(p, allow_noreturn);
-    leave(p);
+    type_end(p);
     return t;
 }
 
@@ -761,9 +791,7 @@ fn parse_type(parser mut* p, bool allow_noreturn) ast.node mut* {
 // }: the type of an array literal. It has no base marker, dimension marker,
 // or trailing reference suffix.
 fn parse_array_type(parser mut* p) ast.node mut* {
-    if (!enter(p)) {
-        return null;
-    }
+    type_begin(p);
     ast.node mut* mut t = null;
     diag.loc at_loc = here(p);
     ast.node mut* base = parse_base_type(p, false);
@@ -782,7 +810,7 @@ fn parse_array_type(parser mut* p) ast.node mut* {
             t = null;
         }
     }
-    leave(p);
+    type_end(p);
     return finish(p, t);
 }
 
@@ -847,9 +875,7 @@ fn parse_alloc_type(parser mut* p) ast.node mut* {
     if (!check_no_leading_marker(p)) {
         return null;
     }
-    if (!enter(p)) {
-        return null;
-    }
+    type_begin(p);
     ast.node mut* mut t = null;
     diag.loc at_loc = here(p);
     ast.node mut* base = parse_base_type(p, false);
@@ -886,7 +912,7 @@ fn parse_alloc_type(parser mut* p) ast.node mut* {
             t = null;
         }
     }
-    leave(p);
+    type_end(p);
     return finish(p, t);
 }
 
@@ -2389,12 +2415,13 @@ fn parse_fn_top_decl(parser mut* p) ast.node mut* {
     if (at(p, lexer.tok_kind.ident)) {
         return parse_fn_decl(p, at_loc);
     }
+    type_begin(p);
     ast.node mut* base = parse_fn_type_params(p, at_loc);
-    if (base == null) {
-        return null;
-    }
     ast.node mut* n = node_at(p, ast.ast_kind.k_var_decl, at_loc);
-    n->a = parse_type_after_base(p, at_loc, base);
+    if (base != null) {
+        n->a = parse_type_after_base(p, at_loc, base);
+    }
+    type_end(p);
     if (n->a == null || !expect_name(p, n) || !expect(p, lexer.tok_kind.assign, "'='")) {
         return null;
     }
@@ -2689,7 +2716,7 @@ fn parse_module(session.session mut* sess, string file, lexer.tok_vec* toks,
         panic("parser.parse_module: the token vector does not end in end of file");
     }
     parser mut p = parser{sess, file, toks, ntoks, 0, ar, 0, 0, false, 0,
-                          diag.loc_make(file, 0, 0), strbuf.create()};
+                          diag.loc_make(file, 0, 0), strbuf.create(), 0, 0};
     defer strbuf.free(&p.msg);
 
     ast.node mut* mod = ast.ast_new(ar, ast.ast_kind.k_module, diag.loc_make(file, 1, 1));

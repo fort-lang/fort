@@ -68,7 +68,8 @@ Notes:
   and unary `*` are the ordinary operators.
 - `1.` and `.5` are not float literals; `1.0` and `0.5` are. `1..5` lexes as `1`, `..`, `5`.
 - `...` is one token. Only an `extern_decl` may use it after its fixed parameter list (D9.8).
-- Nesting depth of `( [ {` and of type suffixes is limited to 256 (D2.11).
+- Nesting depth of `( [ {` and of type suffixes is limited to 256 (D2.11). One written type has
+  one suffix count, through its groups and the parameter and return types of its function types.
 
 ## 2. Module structure
 
@@ -166,6 +167,7 @@ Reading rules (D3.6, D5.2, D5.3):
   `(i32[4])[2]` is two arrays of four. `i32[4][2]` is four arrays of two.
   Grouping preserves type identity and storage positions. Duplicate markers remain errors.
   Groups count toward the nesting limit. They do not reset the type-suffix limit (D2.11).
+  A function type does not reset it either: its parameter and return types add to it (D2.11).
   A return position also permits grouped `void` and `noreturn`.
   `noreturn` remains return-only and accepts no suffix (D8.5).
 - `void` is legal as a `base_type` only when followed by at least one `*` (D3.11).

@@ -1299,6 +1299,81 @@ fn each_group_of_a_noreturn_return_type_has_the_type_of_noreturn() void {
     assert(depth == 5);
 }
 
+// A `mut` on a bare `void` return type gets the message of `i32 mut` and
+// `noreturn mut` there, once and at the start of the return type. In other
+// positions `void mut` keeps the message about `void`.
+fn a_marked_void_return_type_has_no_binding() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    string nb = "a return type has no binding: remove the outermost 'mut'";
+    string nv = "'void' is only a return type or the base of 'void*'";
+    reported_once(&e, "fn f() void mut { }\n", "1:8", nb);
+    reported_once(&e, "fn f() (void) mut { }\n", "1:8", nb);
+    reported_once(&e, "fn f() (void mut) { }\n", "1:8", nb);
+    reported_once(&e, "fn f() ((void) mut) { }\n", "1:8", nb);
+    reported_once(&e, "fn f() ((void mut)) { }\n", "1:8", nb);
+    // The return type of a function type follows the same rule.
+    reported_once(&e, "fn () void mut P = null;\n", "1:7", nb);
+    reported_once(&e, "(fn () (void) mut) Q = null;\n", "1:8", nb);
+    check_env.reopen(&e);
+    assert(!check_env.check_body(&e, "    fn () void mut p = null;"));
+    assert(check_env.reports(&e) == 1);
+    assert(check_env.report_text(&e, 0)
+           == "2:11: a return type has no binding: remove the outermost 'mut'");
+    reported_once(&e, "fn f(void mut p) void { }\n", "1:6", nv);
+    reported_once(&e, "fn f((void) mut p) void { }\n", "1:7", nv);
+}
+
+// `void` needs its `*` inside the same group (D3.11). A `mut` in that group
+// does not make the binding message: the innermost `mut`, or else the group,
+// reports the `void`.
+fn a_suffix_on_a_group_of_void_keeps_the_void_message() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    string nv = "'void' is only a return type or the base of 'void*'";
+    reported_once(&e, "fn f() (void)* {\n    return null;\n}\n", "1:9", nv);
+    reported_once(&e, "fn f() (void mut)* {\n    return null;\n}\n", "1:9", nv);
+    reported_once(&e, "fn f() ((void) mut)* {\n    return null;\n}\n", "1:9", nv);
+    reported_once(&e, "fn f() ((void mut))* {\n    return null;\n}\n", "1:10", nv);
+    reported_once(&e, "fn f() ((void))* {\n    return null;\n}\n", "1:9", nv);
+    reported_once(&e, "fn f() (void)* mut {\n    return null;\n}\n", "1:9", nv);
+    // A `mut` on `void*` itself is the binding of a pointer, which `i32* mut`
+    // reports.
+    reported_once(&e, "fn f() void* mut {\n    return null;\n}\n", "1:8",
+                  "a return type has no binding: remove the outermost 'mut'");
+}
+
+// The outermost type checks the groups of a `void` return type itself, and
+// gives each group and the keyword the type `void`.
+fn each_group_of_a_void_return_type_has_the_type_void() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    strbuf.append(&source, "fn f() ((void)) { }\nfn g() void mut* {\n    return null;\n}\n");
+    strbuf.append(&source, "fn main() i32 {\n    fn () ((void)) h = f;\n    f();\n");
+    strbuf.append(&source, "    println(h);\n    return 0;\n}\n");
+    assert(check_env.check_src(&e, strbuf.view(&source)));
+    assert(check_env.type_text(&e, check_env.sym_main(&e, "f")->ty) == "fn () void");
+    assert(check_env.type_text(&e, check_env.sym_main(&e, "g")->ty) == "fn () void mut*");
+    assert(check_env.decl_type(&e, "h") == "fn () void");
+    ast.node mut* decl = check_env.node_in_main(&e, ast.ast_kind.k_fn_decl, "f");
+    assert(decl != null);
+    u64 mut depth = 0;
+    ast.node mut* mut t = decl->a;
+    while (t != null) {
+        assert(t->ty != null);
+        assert(check_env.type_text(&e, t->ty) == "void");
+        depth = depth + 1;
+        t = t->a;
+    }
+    // The wrapper of the return type, two groups and the keyword.
+    assert(depth == 4);
+}
+
 fn an_array_length_is_a_constant_expression_greater_than_zero() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
@@ -1515,7 +1590,8 @@ fn a_group_of_a_bare_void_is_only_a_return_type() void {
     assert(check_env.errors(&e) == 1);
     check_env.reopen(&e);
     assert(!check_env.check_decls(&e, "fn f() (void) mut { }\n"));
-    assert(check_env.said(&e, void_error));
+    assert(check_env.said(&e, "a return type has no binding"));
+    assert(!check_env.said(&e, void_error));
     check_env.reopen(&e);
     assert(!check_env.check_decls(&e, "fn f((void)* p) void { }\n"));
     assert(void_report_at(&e, "1:7"));
@@ -1711,6 +1787,9 @@ fn main() i32 {
     a_grouped_or_marked_noreturn_is_reported_once();
     a_deeper_group_of_noreturn_is_reported_once();
     each_group_of_a_noreturn_return_type_has_the_type_of_noreturn();
+    a_marked_void_return_type_has_no_binding();
+    a_suffix_on_a_group_of_void_keeps_the_void_message();
+    each_group_of_a_void_return_type_has_the_type_void();
     an_array_length_is_a_constant_expression_greater_than_zero();
     a_struct_records_the_byte_offset_of_every_field();
     a_struct_of_mixed_alignment_pads_to_the_widest_member();

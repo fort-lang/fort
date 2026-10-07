@@ -88,6 +88,11 @@ It takes `...` before `..` before `.`. Only a C extern declaration uses `...` (D
 `%` is never a prefix operator, so `a+%b` is unambiguously `a +% b`. `<<` and `>>` are single
 tokens. Nesting of blocks, parentheses, brackets, braces and type suffixes deeper than 256 is a
 compile error, so a recursive-descent compiler written in fort never needs an unbounded stack.
+A function type is one nesting level, and its parameter list and its return type are inside that
+level. One written type has one suffix count. Every suffix of the written type adds to it: the
+suffixes in its groups and in the parameter and return types of each function type in it.
+Sibling types add up, so a function type whose two parameter types carry 200 and 57 suffixes is
+an error. A type in an array length is a written type of its own, with its own count (D2.11).
 
 ## 3. Declarations and mutability
 
