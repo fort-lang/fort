@@ -93,17 +93,19 @@ fn owner_scan_work() void {
     work_sample both = sample(50, 500);
     // Each zero write completes within the production W of 65536.
     assert(base.completed && allocations.completed && rows.completed && both.completed);
-    assert(base.write == 1550 && allocations.write == 7036);
-    assert(rows.write == 50050 && both.write == 55536);
+    assert(base.write == 1534 && allocations.write == 6584);
+    assert(rows.write == 50034 && both.write == 55084);
     assert(additive(base.write, allocations.write, rows.write, both.write));
     // owner_empty pays the core price once and the path price once for each allocation.
-    assert(base.owner == 436 && allocations.owner == 2345);
-    assert(rows.owner == 12436 && both.owner == 14345);
+    assert(base.owner == 432 && allocations.owner == 2232);
+    assert(rows.owner == 12432 && both.owner == 14232);
     assert(additive(base.owner, allocations.owner, rows.owner, both.owner));
-    // Twice the allocations cost twice the increment, plus the growth of the region storage.
+    // Twice the allocations cost twice the increment, plus 4 units of the region count: its
+    // full fixed array merges once (1 unit) and grows (2 units), and its settle pays for one
+    // more group of 64 rows.
     work_sample doubled = sample(100, 0);
-    assert(doubled.owner == 4261 && doubled.owner - base.owner ==
-        2 * (allocations.owner - base.owner) + 7);
+    assert(doubled.owner == 4036 && doubled.owner - base.owner ==
+        2 * (allocations.owner - base.owner) + 4);
     println("owner scan work ok");
 }
 
@@ -112,12 +114,12 @@ fn paired_region_work() void {
     work_sample allocations = sample(50, 0);
     work_sample rows = sample(0, 500);
     work_sample both = sample(50, 500);
-    assert(base.paired == 178 && allocations.paired == 887);
-    assert(rows.paired == 4678 && both.paired == 5387);
+    assert(base.paired == 174 && allocations.paired == 774);
+    assert(rows.paired == 4674 && both.paired == 5274);
     assert(additive(base.paired, allocations.paired, rows.paired, both.paired));
     work_sample doubled = sample(100, 0);
-    assert(doubled.paired == 1603 && doubled.paired - base.paired ==
-        2 * (allocations.paired - base.paired) + 7);
+    assert(doubled.paired == 1378 && doubled.paired - base.paired ==
+        2 * (allocations.paired - base.paired) + 4);
     println("paired region work ok");
 }
 
@@ -232,11 +234,13 @@ fn next(generator mut* g, u64 range) u64 {
 }
 
 // Gives repeated regions and partitions, and sometimes a missing key, which proves no equality.
-fn identity(ownership_raw_bytes_env.env* e, generator mut* g) ownership_state.region_identity {
+// The regions come from a pool of `pool` keys.
+fn identity(ownership_raw_bytes_env.env* e, generator mut* g, u64 pool)
+    ownership_state.region_identity {
     ownership_state.region_identity mut out = {};
     if (next(g, 10) != 0) {
         out.region = ownership_raw_bytes_env.id(e, ownership_api.entity_kind.region,
-            1 + cast(next(g, 40), u32));
+            1 + cast(next(g, pool), u32));
     }
     if (next(g, 3) == 0) {
         out.partitioned = true;
@@ -270,7 +274,10 @@ fn counter(ownership_raw_bytes_env.env* e, ownership_api.proof_status proof, boo
 
 // A batch count and a count by sorted insertion see the same rows. After the settle both hold
 // the same distinct entries in the same order and the same unknown count. Each fourth round
-// holds more than 64 rows, so its settle runs the merge sort.
+// holds more than 64 rows, so the batch merges its full fixed array and its settle may run the
+// merge sort. Each eighth round draws its regions from 2 keys, so the merged fixed array keeps
+// few entries and takes many more rows. The batch of region identities, with its merges and its
+// settle, pays no more W than sorted insertion of the same rows.
 fn batch_matches_sorted() void {
     ownership_raw_bytes_env.env mut e = {};
     defer ownership_raw_bytes_env.close(&e);
@@ -286,18 +293,28 @@ fn batch_matches_sorted() void {
         ownership_raw_bytes.partition_counter mut ordered = {};
         ownership_raw_bytes.partition_counter mut appended =
             ownership_raw_bytes.partition_counter{.batch = true};
-        u64 rows = round % 4 == 3 ? 65 + next(&g, 100) : next(&g, 64);
+        u64 rows = round % 4 == 3 ? 65 + next(&g, 136) : next(&g, 65);
+        u64 pool = round % 8 == 7 ? 2 : 40;
+        u64 mut sorted_work = 0;
+        u64 mut batch_work = 0;
         u64 mut k = 0;
         while (k < rows) {
-            ownership_state.region_identity item = identity(&e, &g);
+            ownership_state.region_identity item = identity(&e, &g, pool);
+            u64 start = e.budget.meter.used.w;
             assert(ownership_state.region_insert(&sorted, item));
+            u64 middle = e.budget.meter.used.w;
             assert(ownership_state.region_insert(&batch, item));
+            sorted_work += middle - start;
+            batch_work += e.budget.meter.used.w - middle;
             ownership_raw_bytes.byte_partition part = partition(&e, &g);
             assert(ownership_raw_bytes.partition_insert(&current, &ordered, part));
             assert(ownership_raw_bytes.partition_insert(&current, &appended, part));
             k += 1;
         }
+        u64 settling = e.budget.meter.used.w;
         assert(ownership_state.region_settle(&batch));
+        batch_work += e.budget.meter.used.w - settling;
+        assert(batch_work <= sorted_work);
         assert(ownership_raw_bytes.partition_settle(&current, &appended));
         assert(sorted.len == batch.len && sorted.unknown == batch.unknown);
         assert(ordered.len == appended.len && ordered.unknown == appended.unknown);
@@ -323,20 +340,26 @@ fn batch_matches_sorted() void {
     println("batch counts match sorted counts");
 }
 
-// A batch insert pays two W units. Growth from capacity c pays 1 + c, and the settle pays one
-// unit for each 64 rows. Sorted insertion pays one more unit for each row it compares or moves.
-fn batch_cost(u64 rows) u64 {
-    u64 mut cost = 2 * rows;
-    u64 mut capacity = 8;
+fn units(u64 rows) u64 { return rows / 64 + (rows % 64 == 0 ? 0 : 1); }
+
+// A region append pays one W unit. Its fixed array holds 64 rows. When it is full it merges
+// equal rows (1 unit), and these distinct rows stay 64, so it grows. Growth from capacity c pays
+// 1 + units(c). A partition append pays two units. Its storage holds 8 rows, and growth from
+// capacity c pays 1 + c. Each settle pays units(rows). Sorted insertion pays one more unit for
+// each row it compares or moves.
+fn batch_cost(u64 rows, bool regions) u64 {
+    u64 mut cost = regions ? rows : 2 * rows;
+    if (regions && rows > 64) { cost += 1; }
+    u64 mut capacity = regions ? 64 : 8;
     while (capacity < rows) {
-        cost += 1 + capacity;
+        cost += 1 + (regions ? units(capacity) : capacity);
         capacity *= 2;
     }
-    return cost + rows / 64 + (rows % 64 == 0 ? 0 : 1);
+    return cost + units(rows);
 }
 
 fn batch_count_work() void {
-    u64[6] sizes = {0, 1, 8, 64, 65, 200};
+    u64[8] sizes = {0, 1, 8, 9, 64, 65, 129, 200};
     u64 mut i = 0;
     while (i < sizes.len) {
         ownership_raw_bytes_env.env mut e = {};
@@ -356,7 +379,7 @@ fn batch_count_work() void {
         }
         assert(ownership_state.region_settle(&regions) && regions.len == sizes[i]);
         u64 middle = e.budget.meter.used.w;
-        assert(middle - start == batch_cost(sizes[i]));
+        assert(middle - start == batch_cost(sizes[i], true));
         ownership_raw_bytes.partition_counter mut partitions =
             ownership_raw_bytes.partition_counter{.batch = true};
         k = 0;
@@ -368,7 +391,7 @@ fn batch_count_work() void {
         }
         assert(ownership_raw_bytes.partition_settle(&current, &partitions));
         assert(partitions.len == sizes[i]);
-        assert(e.budget.meter.used.w - middle == batch_cost(sizes[i]));
+        assert(e.budget.meter.used.w - middle == batch_cost(sizes[i], false));
         del(regions.identities);
         del(partitions.items);
         ownership_raw_bytes_env.close(&e);
@@ -489,7 +512,7 @@ fn semantic_move_work() void {
     u64 base = move_work(0, 0);
     u64 rows = move_work(128, 0);
     u64 doubled = move_work(256, 0);
-    assert(base == 24643 && rows == 41547 && doubled == 58451);
+    assert(base == 20085 && rows == 36989 && doubled == 53893);
     // Twice the rows cost twice the increment: the rows add no square term. Each row adds 132
     // units: 24 for the copy price, 24 for each of the 4 representations that the move
     // rewrites, 8 in the scans of places and 4 in the region scans of 4 contents mutators. Those
@@ -498,8 +521,17 @@ fn semantic_move_work() void {
     // Rows and allocations add their costs: no term multiplies one by the other.
     u64 allocations = move_work(0, 64);
     u64 both = move_work(128, 64);
-    assert(allocations == 51025 && both == 67929);
+    assert(allocations == 26841 && both == 43745);
     assert(additive(base, rows, allocations, both));
+    // At 921548f4 each contents mutator counted its regions by sorted insertion, and 64 and 128
+    // more allocations cost 51025 and 93402 W: the second 64 added 16 thousand units more than the
+    // first. A batch count pays one unit for each identity it appends, so each 64 allocations add
+    // the same work.
+    u64 more = move_work(0, 128);
+    assert(more == 33597);
+    u64 first = allocations - base;
+    u64 second = more - allocations;
+    assert(first == 6756 && second == first);
     println("semantic move work ok");
 }
 
@@ -533,7 +565,7 @@ fn semantic_move_refusals() void {
     assert(ownership_api.successful(control.proof) && control.states.len == 1);
     ownership_raw_bytes.free_result(&control);
     u64 cost = e.budget.calls;
-    assert(cost == 1773 && route == 1);
+    assert(cost == 1703 && route == 1);
     u64 mut silent = 0;
     u64 mut precision = 0;
     u64 mut reported = 0;

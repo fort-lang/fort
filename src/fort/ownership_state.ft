@@ -488,7 +488,9 @@ struct region_counter {
     ownership_api.operation_position operation;
     ownership_api.source_position source;
     ownership_api.proof_status proof;
-    region_identity[8] local;
+    // A batch keeps its identities in the fixed array while at most 48 of them are distinct
+    // (region_append), so a count of a small state allocates nothing (LOCAL_INDICES = 64).
+    region_identity[LOCAL_INDICES] local;
     region_identity mut@ own identities;
     u64 len;
     u64 unknown;
@@ -502,6 +504,17 @@ fn region_spend(region_counter mut* paid) bool {
         paid->kind, paid->operation, paid->source);
     if (!charged.allowed) { paid->proof = charged.proof; }
     return charged.allowed;
+}
+
+// Pays one W unit for each 64 rows, and one for a last group of fewer rows (row_units).
+fn region_rows(region_counter mut* paid, u64 rows) bool {
+    u64 units = row_units(rows);
+    u64 mut k = 0;
+    while (k < units) {
+        if (!region_spend(paid)) { return false; }
+        k += 1;
+    }
+    return true;
 }
 
 fn region_refuse(region_counter mut* paid) bool {
@@ -521,8 +534,52 @@ fn region_order(region_identity a, region_identity b) i32 {
     return ownership_keys.entity(a.partition, b.partition);
 }
 
+// Doubles the identity storage. Sorted insertion pays one W unit and one for each row it copies.
+// A batch pays one unit and one for each 64 rows, before the copy.
+fn region_grow(region_counter mut* paid) bool {
+    u64 ceiling = (U64_MAX / 2) / sizeof(region_identity);
+    u64 current = paid->identities.len == 0 ? paid->local.len : paid->identities.len;
+    if (!region_spend(paid) || (paid->batch && !region_rows(paid, paid->len))) { return false; }
+    u64 capacity = current <= ceiling / 2 ? current * 2 : ceiling;
+    if (capacity <= paid->len || capacity > ceiling) { return region_refuse(paid); }
+    region_identity mut@ own bigger = new(region_identity, capacity);
+    u64 mut i = 0;
+    while (i < paid->len) {
+        if (!paid->batch && !region_spend(paid)) { del(bigger); return false; }
+        bigger[i] = region_entries(paid)[i];
+        i += 1;
+    }
+    del(paid->identities);
+    paid->identities = move(bigger);
+    return true;
+}
+
+// Appends one keyed identity to a batch; region_insert has paid its one unit. A full fixed array
+// first keeps one entry of each equal run (region_merge, one unit). It grows only when more than
+// three quarters of its entries stay distinct (48 of 64), so each merge frees 16 entries or more,
+// and a count whose identities repeat stays in the fixed array. A full array of distinct entries
+// always grows. Heap storage grows when it is full.
+fn region_append(region_counter mut* paid, region_identity item) bool {
+    u64 ceiling = (U64_MAX / 2) / sizeof(region_identity);
+    if (paid->len >= ceiling) { return region_refuse(paid); }
+    if (paid->identities.len == 0) {
+        u64 crowded = paid->local.len - paid->local.len / 4;
+        if (paid->len == paid->local.len && (!region_merge(paid) ||
+            (paid->len > crowded && !region_grow(paid)))) { return false; }
+    } else if (paid->len == paid->identities.len && !region_grow(paid)) { return false; }
+    region_entries(paid)[paid->len] = item;
+    paid->len += 1;
+    return true;
+}
+
 // Missing keys prove no equality. Keyed entries use canonical order, never addresses.
-// A batch counter appends without a search, so each identity costs a fixed amount of work.
+// Sorted insertion pays one W unit, one for each entry it compares or moves, and one to store,
+// so a keyed identity pays at least two units. No production count uses it: measure_regions and
+// the paired count append in a batch. It stays as the reference of batch_matches_sorted in
+// test/fort/ownership_raw_bytes_work_test.ft, and it takes an insert after a settle.
+// A batch pays one unit for each keyed identity, one for each merge of the fixed array, and its
+// growth and settle (one unit and one for each 64 rows). So n >= 1 keyed identities pay at most
+// 2n units in a batch, and a batch never pays more than sorted insertion of the same identities.
 fn region_insert(region_counter mut* paid, region_identity item) bool {
     if (!region_spend(paid)) { return false; }
     if (item.region.kind == ownership_api.entity_kind.none ||
@@ -531,34 +588,19 @@ fn region_insert(region_counter mut* paid, region_identity item) bool {
         paid->unknown += 1;
         return true;
     }
-    u64 mut index = paid->len;
-    if (!paid->batch) {
-        index = 0;
-        while (index < paid->len) {
-            if (!region_spend(paid)) { return false; }
-            i32 order = region_order(item, region_entries(paid)[index]);
-            if (order == 0) { return true; }
-            if (order < 0) { break; }
-            index += 1;
-        }
+    if (paid->batch) { return region_append(paid, item); }
+    u64 mut index = 0;
+    while (index < paid->len) {
+        if (!region_spend(paid)) { return false; }
+        i32 order = region_order(item, region_entries(paid)[index]);
+        if (order == 0) { return true; }
+        if (order < 0) { break; }
+        index += 1;
     }
     u64 ceiling = (U64_MAX / 2) / sizeof(region_identity);
     if (paid->len >= ceiling) { return region_refuse(paid); }
     u64 current = paid->identities.len == 0 ? paid->local.len : paid->identities.len;
-    if (paid->len == current) {
-        if (!region_spend(paid)) { return false; }
-        u64 capacity = current <= ceiling / 2 ? current * 2 : ceiling;
-        if (capacity <= paid->len || capacity > ceiling) { return region_refuse(paid); }
-        region_identity mut@ own bigger = new(region_identity, capacity);
-        u64 mut i = 0;
-        while (i < paid->len) {
-            if (!region_spend(paid)) { del(bigger); return false; }
-            bigger[i] = region_entries(paid)[i];
-            i += 1;
-        }
-        del(paid->identities);
-        paid->identities = move(bigger);
-    }
+    if (paid->len == current && !region_grow(paid)) { return false; }
     u64 mut i = paid->len;
     while (i > index) {
         if (!region_spend(paid)) { return false; }
@@ -665,22 +707,14 @@ fn sort_identities(region_identity mut@ items) void {
     del(scratch);
 }
 
-/// Ends the batch of a counter: it sorts the identities and keeps one of each equal run, so
-/// len counts distinct identities as region_insert counts them. It pays one W unit for each
-/// 64 identities it sorts. A counter without a batch is already settled.
-fn region_settle(region_counter mut* paid) bool {
-    if (!paid->batch) { return true; }
-    paid->batch = false;
-    u64 units = paid->len / ROWS_PER_UNIT + (paid->len % ROWS_PER_UNIT == 0 ? 0 : 1);
-    u64 mut k = 0;
-    while (k < units) {
-        if (!region_spend(paid)) { return false; }
-        k += 1;
-    }
+/// Sorts the identities and keeps one of each equal run, so len counts distinct identities as
+/// sorted insertion counts them. It pays one W unit for each 64 identities before the sort.
+fn region_merge(region_counter mut* paid) bool {
+    if (!region_rows(paid, paid->len)) { return false; }
     region_identity mut@ items = region_entries(paid)[0..paid->len];
     sort_identities(items);
     u64 mut kept = 0;
-    k = 0;
+    u64 mut k = 0;
     while (k < items.len) {
         if (kept == 0 || region_order(items[kept - 1], items[k]) != 0) {
             items[kept] = items[k];
@@ -692,13 +726,22 @@ fn region_settle(region_counter mut* paid) bool {
     return true;
 }
 
-// Insertion and join covering share this retained-cardinality mapping.
+/// Ends the batch of a counter with one merge (region_merge). A counter without a batch is
+/// already settled.
+fn region_settle(region_counter mut* paid) bool {
+    if (!paid->batch) { return true; }
+    paid->batch = false;
+    return region_merge(paid);
+}
+
+// Insertion and join covering share this retained-cardinality mapping. The count appends each
+// identity and settles once, so its W is linear in the rows it reads (region_settle).
 fn measure_regions(state* s, ownership_api.services* svc, region_candidate candidate,
     ownership_api.work_kind kind, ownership_api.operation_position op,
     ownership_api.source_position at)
     region_measurement {
     region_counter mut paid = region_counter{.service = svc, .kind = kind, .operation = op,
-        .source = at, .proof = s->proof};
+        .source = at, .proof = s->proof, .batch = true};
     defer del(paid.identities);
     if (!ownership_api.successful(paid.proof)) { return region_measurement{paid.proof, 0}; }
     u64 mut i = 0;
@@ -770,6 +813,7 @@ fn measure_regions(state* s, ownership_api.services* svc, region_candidate candi
         ok = region_spend(&paid) && region_range(&paid, candidate.edges[i].range, false);
         i += 1;
     }
+    ok = ok && region_settle(&paid);
     return region_measurement{paid.proof, ok ? plus_count(paid.len, paid.unknown) : 0};
 }
 
@@ -815,8 +859,13 @@ struct unit_counter {
 // reads, so its W grows with its work, and at least one unit when it reads any row.
 u64 ROWS_PER_UNIT = 64;
 
+/// Returns the W units of `rows` rows: one for each 64 rows, and one for a last smaller group.
+fn row_units(u64 rows) u64 {
+    return rows / ROWS_PER_UNIT + (rows % ROWS_PER_UNIT == 0 ? 0 : 1);
+}
+
 fn rows_spend(unit_counter mut* paid, u64 rows) bool {
-    u64 units = rows / ROWS_PER_UNIT + (rows % ROWS_PER_UNIT == 0 ? 0 : 1);
+    u64 units = row_units(rows);
     u64 mut i = 0;
     while (i < units) {
         if (!unit_spend(paid)) { return false; }
