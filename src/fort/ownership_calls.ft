@@ -1,0 +1,795 @@
+/// Substitutes caller storage into ordered symbolic call records.
+import ownership_api;
+import ownership_keys;
+import ownership_state;
+import ownership_summary_model;
+import types;
+
+struct source_binding {
+    ownership_api.entity_id formal;
+    ownership_api.source_fact actual;
+    ownership_api.region range;
+    ownership_api.entity_id value_version;
+    ownership_api.entity_id formal_range;
+}
+
+struct allocation_binding {
+    ownership_api.entity_id formal;
+    ownership_api.allocation_fact actual;
+    bool fresh_proved;
+}
+
+struct capture_binding {
+    ownership_api.entity_id formal;
+    ownership_api.entity_id actual;
+    ownership_api.scalar_fact value;
+}
+
+struct event_binding {
+    ownership_api.operation_position operation;
+    ownership_api.entity_id key;
+}
+
+struct request {
+    ownership_summary_model.summary_view* summary;
+    ownership_api.state_view before;
+    ownership_api.operation_position operation;
+    ownership_api.source_position source;
+    ownership_api.alias_binding@ aliases;
+    source_binding@ sources;
+    allocation_binding@ allocations;
+    capture_binding@ captures;
+    ownership_api.alias_binding@ globals;
+    ownership_api.result_binding result;
+    event_binding@ events;
+    ownership_api.services* services;
+    ownership_api.limit_table limits;
+    ownership_summary_model.coverage_status coverage;
+    bool correspondence_complete;
+    bool event_map_complete;
+}
+
+// Nested paths and ranges use metadata. The model owns its substituted records.
+struct frame {
+    ownership_summary_model.summary model;
+    ownership_state.state metadata;
+    ownership_api.alias_binding mut@ own aliases;
+    source_binding mut@ own sources;
+    allocation_binding mut@ own allocations;
+    capture_binding mut@ own captures;
+    ownership_api.place_path mut@ own destinations;
+    ownership_api.ordered_effect mut@ own result_writes;
+    ownership_api.ordering_constraint mut@ own result_order;
+    u64 destinations_len;
+    ownership_api.result_binding result;
+    ownership_api.outcome_fact outcome;
+    ownership_api.proof_status proof;
+    // The relations of this call, as charged to E. The count starts at the model count.
+    u64 relations;
+    ownership_summary_model.coverage_status coverage;
+    bool residual_overlap;
+}
+
+fn free_frame(frame mut* out) void {
+    frame mut owned = move(*out);
+    ownership_summary_model.free(&owned.model);
+    ownership_state.free(&owned.metadata);
+    del(owned.aliases);
+    del(owned.sources);
+    del(owned.allocations);
+    del(owned.captures);
+    del(owned.destinations);
+    del(owned.result_writes);
+    del(owned.result_order);
+    *out = frame{};
+}
+
+fn work(frame mut* out, ownership_summary_model.context* ctx, u64 amount) bool {
+    return ownership_summary_model.work(ctx, &out->proof, amount);
+}
+
+fn key(frame mut* out, ownership_summary_model.context* ctx,
+    ownership_api.entity_id input) ownership_api.entity_id {
+    {
+        source_binding@ rows_0 = out->sources[..];
+        u64 mut row_index_0 = 0;
+        while (row_index_0 < rows_0.len) {
+            source_binding mut row = rows_0[row_index_0];
+            row_index_0 += 1;
+            if (!work(out, ctx, 1)) { return input; }
+            if (ownership_summary_model.same(row.formal, input)) { return row.actual.key; }
+
+        }
+    }
+    {
+        allocation_binding@ rows_1 = out->allocations[..];
+        u64 mut row_index_1 = 0;
+        while (row_index_1 < rows_1.len) {
+            allocation_binding mut row = rows_1[row_index_1];
+            row_index_1 += 1;
+            if (!work(out, ctx, 1)) { return input; }
+            if (ownership_summary_model.same(row.formal, input)) { return row.actual.key; }
+
+        }
+    }
+    {
+        capture_binding@ rows_2 = out->captures[..];
+        u64 mut row_index_2 = 0;
+        while (row_index_2 < rows_2.len) {
+            capture_binding mut row = rows_2[row_index_2];
+            row_index_2 += 1;
+            if (!work(out, ctx, 1)) { return input; }
+            if (ownership_summary_model.same(row.formal, input)) { return row.actual; }
+
+        }
+    }
+    return input;
+}
+
+fn scalar(frame mut* out, ownership_summary_model.context* ctx,
+    ownership_api.scalar_fact input) ownership_api.scalar_fact {
+    ownership_api.scalar_fact mut result = input;
+    result.symbol = key(out, ctx, input.symbol);
+    if (input.kind == ownership_api.fact_kind.symbolic) {
+        {
+            capture_binding@ rows_3 = out->captures[..];
+            u64 mut row_index_3 = 0;
+            while (row_index_3 < rows_3.len) {
+                capture_binding mut row = rows_3[row_index_3];
+                row_index_3 += 1;
+                if (!work(out, ctx, 1)) { return result; }
+                if (ownership_summary_model.same(row.formal, input.symbol)) { return row.value; }
+
+            }
+        }
+    }
+    return result;
+}
+
+fn path(frame mut* out, ownership_summary_model.context* ctx,
+    ownership_api.place_path input) ownership_api.place_path {
+    ownership_api.place_path mut base = input;
+    bool mut bound = false;
+    {
+        ownership_api.alias_binding@ rows_4 = out->aliases[..];
+        u64 mut row_index_4 = 0;
+        while (row_index_4 < rows_4.len) {
+            ownership_api.alias_binding mut row = rows_4[row_index_4];
+            row_index_4 += 1;
+            if (!work(out, ctx, 1)) { return input; }
+            if (ownership_summary_model.same(row.formal, input.root)) {
+                base = row.actual;
+                bound = true;
+                break;
+            }
+
+        }
+    }
+    if (!bound) {
+        ownership_api.projection@ none = {};
+        base.projections = none;
+    }
+    if (base.projections.len > types.TYPE_MAX_SIZE / sizeof(ownership_api.projection) ||
+        input.projections.len > types.TYPE_MAX_SIZE / sizeof(ownership_api.projection) -
+        base.projections.len) {
+        out->proof = ownership_summary_model.fail(ctx, ownership_api.incomplete_reason.work_limit,
+            input.root);
+        return input;
+    }
+    if (!work(out, ctx, 2) || !work(out, ctx, base.projections.len) ||
+        !work(out, ctx, input.projections.len)) { return input; }
+    ownership_state.slice_block mut* own block = new(ownership_state.slice_block);
+    block->projections = new(ownership_api.projection,
+        base.projections.len + input.projections.len);
+    ownership_api.projection mut@ parts = block->projections[..];
+    ownership_state.keep(&out->metadata, move(block));
+    u64 mut i = 0;
+    while (i < base.projections.len) { parts[i] = base.projections[i]; i += 1; }
+    u64 mut j = 0;
+    while (j < input.projections.len) {
+        if (!work(out, ctx, 1)) { return input; }
+        ownership_api.projection mut part = input.projections[j];
+        part.captured_version = key(out, ctx, part.captured_version);
+        part.index = scalar(out, ctx, part.index);
+        parts[i] = part;
+        i += 1;
+        j += 1;
+    }
+    base.residual = base.residual || input.residual;
+    base.projections = parts[..];
+    return base;
+}
+
+fn range(frame mut* out, ownership_summary_model.context* ctx,
+    ownership_api.region input) ownership_api.region {
+    ownership_api.region mut result = input;
+    u64 mut binding_index = 0;
+    while (binding_index < out->sources.len) {
+        if (!work(out, ctx, 1)) { return input; }
+        source_binding row = out->sources[binding_index];
+        if (ownership_summary_model.same(input.key, row.formal_range)) {
+            if (!ownership_summary_model.same(input.source, row.formal)) {
+                out->proof = ownership_summary_model.fail(ctx,
+                    ownership_api.incomplete_reason.invalid_input, input.key);
+                return input;
+            }
+            result = row.range;
+            break;
+        }
+        binding_index += 1;
+    }
+    result.source = key(out, ctx, input.source);
+    result.offset = scalar(out, ctx, result.offset);
+    result.extent = scalar(out, ctx, result.extent);
+    result.access.begin = scalar(out, ctx, result.access.begin);
+    result.access.end = scalar(out, ctx, result.access.end);
+    if (!ownership_summary_model.region_charge(ctx, &out->proof, result)) { return input; }
+    ownership_state.slice_block mut* own block = new(ownership_state.slice_block);
+    block->leaves = new(ownership_api.layout_leaf, result.leaves.len);
+    block->partitions = new(ownership_api.region_partition, result.partitions.len);
+    ownership_api.layout_leaf mut@ leaves = block->leaves[..];
+    ownership_api.region_partition mut@ partitions = block->partitions[..];
+    ownership_state.keep(&out->metadata, move(block));
+    u64 mut i = 0;
+    while (i < result.leaves.len) {
+        if (!work(out, ctx, 1)) { return input; }
+        leaves[i] = result.leaves[i];
+        leaves[i].bytes.begin = scalar(out, ctx, leaves[i].bytes.begin);
+        leaves[i].bytes.end = scalar(out, ctx, leaves[i].bytes.end);
+        i += 1;
+    }
+    i = 0;
+    while (i < result.partitions.len) {
+        if (!work(out, ctx, 1)) { return input; }
+        partitions[i] = result.partitions[i];
+        partitions[i].membership = key(out, ctx, partitions[i].membership);
+        partitions[i].bytes.begin = scalar(out, ctx, partitions[i].bytes.begin);
+        partitions[i].bytes.end = scalar(out, ctx, partitions[i].bytes.end);
+        i += 1;
+    }
+    result.leaves = leaves[..];
+    result.partitions = partitions[..];
+    return result;
+}
+
+fn bound_key(frame mut* out, ownership_summary_model.context* ctx,
+    ownership_api.entity_id input) bool {
+    if (input.kind == ownership_api.entity_kind.none) { return true; }
+    u64 mut i = 0;
+    while (i < out->sources.len) {
+        if (!work(out, ctx, 1)) { return false; }
+        if (ownership_summary_model.same(out->sources[i].formal, input)) { return true; }
+        i += 1;
+    }
+    i = 0;
+    while (i < out->allocations.len) {
+        if (!work(out, ctx, 1)) { return false; }
+        if (ownership_summary_model.same(out->allocations[i].formal, input)) { return true; }
+        i += 1;
+    }
+    i = 0;
+    while (i < out->captures.len) {
+        if (!work(out, ctx, 1)) { return false; }
+        if (ownership_summary_model.same(out->captures[i].formal, input)) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+fn required_bindings(frame mut* out, ownership_summary_model.context* ctx) bool {
+    u64 mut i = 0;
+    while (i < out->model.roots.len) {
+        if (!work(out, ctx, 1)) { return false; }
+        ownership_summary_model.symbolic_root root = out->model.roots[i];
+        if (root.kind != ownership_summary_model.root_kind.by_value_slot) {
+            bool mut slot_found = root.kind
+                == ownership_summary_model.root_kind.allocation_template;
+            u64 mut j = 0;
+            while (j < out->aliases.len) {
+                if (!work(out, ctx, 1)) { return false; }
+                if (ownership_summary_model.same(root.slot, out->aliases[j].formal)) {
+                    slot_found = true;
+                }
+                j += 1;
+            }
+            if (!slot_found || !bound_key(out, ctx, root.source) ||
+                !bound_key(out, ctx, root.allocation) || !bound_key(out, ctx, root.value_version)) {
+                if (!ownership_api.successful(out->proof)) { return false; }
+                out->proof = ownership_summary_model.fail(ctx,
+                    ownership_api.incomplete_reason.missing_correspondence, root.key);
+                return false;
+            }
+        }
+        i += 1;
+    }
+    return ownership_api.successful(out->proof);
+}
+
+fn borrow_list(frame mut* out, ownership_summary_model.context* ctx,
+    ownership_api.borrow_relation@ input) ownership_api.borrow_relation@ {
+    if (input.len > types.TYPE_MAX_SIZE / sizeof(ownership_api.borrow_relation) ||
+        !work(out, ctx, 2) || !work(out, ctx, input.len)) { return input; }
+    ownership_state.slice_block mut* own block = new(ownership_state.slice_block);
+    block->borrows = new(ownership_api.borrow_relation, input.len);
+    ownership_api.borrow_relation mut@ rows = block->borrows[..];
+    ownership_state.keep(&out->metadata, move(block));
+    u64 mut i = 0;
+    while (i < input.len) {
+        if (!work(out, ctx, 1)) { return rows[..]; }
+        rows[i] = borrow(out, ctx, input[i]);
+        i += 1;
+    }
+    return rows[..];
+}
+
+fn borrow(frame mut* out, ownership_summary_model.context* ctx,
+    ownership_api.borrow_relation input) ownership_api.borrow_relation {
+    ownership_api.borrow_relation mut result = input;
+    result.containing = path(out, ctx, input.containing);
+    result.source = key(out, ctx, input.source);
+    result.value_version = key(out, ctx, input.value_version);
+    result.range = range(out, ctx, input.range);
+    return result;
+}
+
+fn valid_source(request* req, frame mut* out, ownership_summary_model.context* ctx,
+    source_binding row) bool {
+    if (row.formal.kind != ownership_api.entity_kind.source ||
+        row.actual.key.kind != ownership_api.entity_kind.source ||
+        !ownership_summary_model.same(row.range.source, row.actual.key)) { return false; }
+    u64 mut root_index = 0;
+    while (root_index < out->model.roots.len) {
+        if (!work(out, ctx, 1)) { return false; }
+        ownership_summary_model.symbolic_root root = out->model.roots[root_index];
+        if (root.kind == ownership_summary_model.root_kind.by_value_slot &&
+            ownership_summary_model.same(row.formal, root.source)) { return false; }
+        root_index += 1;
+    }
+    {
+        ownership_api.source_fact@ rows_5 = req->before.sources[..];
+        u64 mut row_index_5 = 0;
+        while (row_index_5 < rows_5.len) {
+            ownership_api.source_fact mut known = rows_5[row_index_5];
+            row_index_5 += 1;
+            if (!work(out, ctx, 1)) { return false; }
+            if (ownership_summary_model.same(known.key, row.actual.key)) {
+                return ownership_state.same_source(known, row.actual);
+            }
+
+        }
+    }
+    return false;
+}
+
+fn add_alias(frame mut* out, ownership_summary_model.context* ctx,
+    ownership_api.alias_binding row, u64 index) bool {
+    if (!work(out, ctx, 1) || row.formal.kind != ownership_api.entity_kind.slot ||
+        row.actual.root.kind != ownership_api.entity_kind.slot) { return false; }
+    {
+        ownership_summary_model.symbolic_root@ rows_6 = out->model.roots[..];
+        u64 mut row_index_6 = 0;
+        while (row_index_6 < rows_6.len) {
+            ownership_summary_model.symbolic_root mut root = rows_6[row_index_6];
+            row_index_6 += 1;
+            if (!work(out, ctx, 1)) { return false; }
+            if (root.kind == ownership_summary_model.root_kind.by_value_slot &&
+                ownership_summary_model.same(root.slot, row.formal)) { return false; }
+
+        }
+    }
+    u64 mut i = 0;
+    while (i < index) {
+        if (!work(out, ctx, 1)) { return false; }
+        if (ownership_summary_model.same(out->aliases[i].formal, row.formal)) { return false; }
+        i += 1;
+    }
+    if (!ownership_summary_model.path_charge(ctx, &out->proof, row.actual)) { return false; }
+    ownership_api.alias_binding mut stored = row;
+    stored.actual = ownership_state.copy_place(&out->metadata, row.actual);
+    out->aliases[index] = stored;
+    if (ownership_state.has_residual(row.actual)) { out->residual_overlap = true; }
+    bool mut found = false;
+    i = 0;
+    while (i < out->destinations_len) {
+        if (!work(out, ctx, 1) || !work(out, ctx, row.actual.projections.len) ||
+            !work(out, ctx, out->destinations[i].projections.len)) { return false; }
+        if (ownership_state.same_place(row.actual, out->destinations[i])) { found = true; }
+        i += 1;
+    }
+    if (!found) {
+        out->destinations[out->destinations_len] = stored.actual;
+        out->destinations_len += 1;
+    }
+    return true;
+}
+
+fn copy_bindings(request* req, frame mut* out, ownership_summary_model.context* ctx) bool {
+    u64 maximum = types.TYPE_MAX_SIZE / sizeof(ownership_api.alias_binding);
+    if (req->aliases.len > maximum || req->globals.len > maximum - req->aliases.len ||
+        req->result.aliases.len > maximum - req->aliases.len - req->globals.len ||
+        req->sources.len > types.TYPE_MAX_SIZE / sizeof(source_binding) ||
+        req->allocations.len > types.TYPE_MAX_SIZE / sizeof(allocation_binding) ||
+        req->captures.len > types.TYPE_MAX_SIZE / sizeof(capture_binding)) { return false; }
+    u64 mut count = req->aliases.len + req->globals.len + req->result.aliases.len;
+    u64 mut result_count = 0;
+    {
+        ownership_summary_model.symbolic_root@ rows_7 = out->model.roots[..];
+        u64 mut row_index_7 = 0;
+        while (row_index_7 < rows_7.len) {
+            ownership_summary_model.symbolic_root mut root = rows_7[row_index_7];
+            row_index_7 += 1;
+            if (!work(out, ctx, 1)) { return false; }
+            if (root.kind == ownership_summary_model.root_kind.result) { result_count += 1; }
+
+        }
+    }
+    if (result_count > maximum - count) { return false; }
+    count += result_count;
+    if (!work(out, ctx, 2) || !work(out, ctx, count) || !work(out, ctx, count)) { return false; }
+    out->aliases = new(ownership_api.alias_binding, count);
+    out->destinations = new(ownership_api.place_path, count);
+    u64 mut index = 0;
+    {
+        ownership_api.alias_binding@ rows_8 = req->aliases[..];
+        u64 mut row_index_8 = 0;
+        while (row_index_8 < rows_8.len) {
+            ownership_api.alias_binding mut row = rows_8[row_index_8];
+            row_index_8 += 1;
+            if (!add_alias(out, ctx, row, index)) { return false; }
+            index += 1;
+
+        }
+    }
+    {
+        ownership_api.alias_binding@ rows_9 = req->globals[..];
+        u64 mut row_index_9 = 0;
+        while (row_index_9 < rows_9.len) {
+            ownership_api.alias_binding mut row = rows_9[row_index_9];
+            row_index_9 += 1;
+            if (!add_alias(out, ctx, row, index)) { return false; }
+            index += 1;
+
+        }
+    }
+    {
+        ownership_api.alias_binding@ rows_10 = req->result.aliases[..];
+        u64 mut row_index_10 = 0;
+        while (row_index_10 < rows_10.len) {
+            ownership_api.alias_binding mut row = rows_10[row_index_10];
+            row_index_10 += 1;
+            if (!add_alias(out, ctx, row, index)) { return false; }
+            index += 1;
+
+        }
+    }
+    {
+        ownership_summary_model.symbolic_root@ rows_11 = out->model.roots[..];
+        u64 mut row_index_11 = 0;
+        while (row_index_11 < rows_11.len) {
+            ownership_summary_model.symbolic_root mut root = rows_11[row_index_11];
+            row_index_11 += 1;
+            if (!work(out, ctx, 1)) { return false; }
+            if (root.kind == ownership_summary_model.root_kind.result) {
+                ownership_api.alias_binding row = ownership_api.alias_binding{
+                    root.slot, req->result.actual_slot, req->result.holding_value};
+                if (!add_alias(out, ctx, row, index)) { return false; }
+                index += 1;
+            }
+
+        }
+    }
+    if (!work(out, ctx, 1) || !work(out, ctx, req->sources.len)) { return false; }
+    out->sources = new(source_binding, req->sources.len);
+    index = 0;
+    {
+        source_binding@ rows_12 = req->sources[..];
+        u64 mut row_index_12 = 0;
+        while (row_index_12 < rows_12.len) {
+            source_binding mut row = rows_12[row_index_12];
+            row_index_12 += 1;
+            if (!work(out, ctx, 1) || !valid_source(req, out, ctx, row)) { return false; }
+            u64 mut j = 0;
+            while (j < index) {
+                if (!work(out, ctx, 1) ||
+                    ownership_summary_model.same(out->sources[j].formal,
+                        row.formal)) { return false; }
+                j += 1;
+            }
+            if (!ownership_summary_model.region_charge(ctx, &out->proof,
+                row.range)) { return false; }
+            row.range = ownership_state.copy_region(&out->metadata, row.range);
+            out->sources[index] = row;
+            index += 1;
+
+        }
+    }
+    if (!work(out, ctx, 1) || !work(out, ctx, req->allocations.len)) { return false; }
+    out->allocations = new(allocation_binding, req->allocations.len);
+    index = 0;
+    {
+        allocation_binding@ rows_13 = req->allocations[..];
+        u64 mut row_index_13 = 0;
+        while (row_index_13 < rows_13.len) {
+            allocation_binding mut row = rows_13[row_index_13];
+            row_index_13 += 1;
+            if (!work(out, ctx, 1) || row.formal.kind != ownership_api.entity_kind.allocation ||
+                row.actual.key.kind != ownership_api.entity_kind.allocation) { return false; }
+            u64 mut j = 0;
+            while (j < index) {
+                if (!work(out, ctx, 1) ||
+                    ownership_summary_model.same(out->allocations[j].formal, row.formal)) {
+                    return false;
+                }
+                j += 1;
+            }
+            if (!ownership_summary_model.path_charge(ctx, &out->proof, row.actual.owner.place) ||
+                !work(out, ctx, row.actual.history.len)) { return false; }
+            {
+                ownership_api.history_fact@ rows_14 = row.actual.history[..];
+                u64 mut row_index_14 = 0;
+                while (row_index_14 < rows_14.len) {
+                    ownership_api.history_fact mut history = rows_14[row_index_14];
+                    row_index_14 += 1;
+                    if (!work(out, ctx, 1) ||
+                        !ownership_summary_model.path_charge(ctx, &out->proof,
+                            history.before.place) ||
+                        !ownership_summary_model.path_charge(ctx, &out->proof,
+                            history.after.place)) {
+                        return false;
+                    }
+
+                }
+            }
+            bool mut found = false;
+            {
+                ownership_api.allocation_fact@ rows_15 = req->before.allocations[..];
+                u64 mut row_index_15 = 0;
+                while (row_index_15 < rows_15.len) {
+                    ownership_api.allocation_fact mut known = rows_15[row_index_15];
+                    row_index_15 += 1;
+                    if (!work(out, ctx, 1)) { return false; }
+                    if (ownership_summary_model.same(known.key, row.actual.key)) {
+                        if (row.fresh_proved || !ownership_state.same_allocation(known,
+                            row.actual)) {
+                            return false;
+                        }
+                        found = true;
+                    }
+
+                }
+            }
+            if (!found && !row.fresh_proved) { return false; }
+            if (!ownership_summary_model.path_charge(ctx, &out->proof, row.actual.owner.place) ||
+                !work(out, ctx, 2) || !work(out, ctx, row.actual.history.len)) { return false; }
+            {
+                ownership_api.history_fact@ rows_16 = row.actual.history[..];
+                u64 mut row_index_16 = 0;
+                while (row_index_16 < rows_16.len) {
+                    ownership_api.history_fact mut history = rows_16[row_index_16];
+                    row_index_16 += 1;
+                    if (!work(out, ctx, 1) ||
+                        !ownership_summary_model.path_charge(ctx, &out->proof,
+                            history.before.place) ||
+                        !ownership_summary_model.path_charge(ctx, &out->proof,
+                            history.after.place)) {
+                        return false;
+                    }
+
+                }
+            }
+            row.actual = ownership_state.copy_allocation(&out->metadata, row.actual);
+            out->allocations[index] = row;
+            index += 1;
+
+        }
+    }
+    if (!work(out, ctx, 1) || !work(out, ctx, req->captures.len)) { return false; }
+    out->captures = new(capture_binding, req->captures.len);
+    index = 0;
+    {
+        capture_binding@ rows_17 = req->captures[..];
+        u64 mut row_index_17 = 0;
+        while (row_index_17 < rows_17.len) {
+            capture_binding mut row = rows_17[row_index_17];
+            row_index_17 += 1;
+            if (!work(out, ctx, 1) || row.formal.kind != ownership_api.entity_kind.value ||
+                row.actual.kind != ownership_api.entity_kind.value) { return false; }
+            u64 mut j = 0;
+            while (j < index) {
+                if (!work(out, ctx, 1) ||
+                    ownership_summary_model.same(out->captures[j].formal, row.formal)) {
+                    return false;
+                }
+                j += 1;
+            }
+            out->captures[index] = row;
+            index += 1;
+
+        }
+    }
+    return true;
+}
+
+fn substitute(request* req, frame mut* out, ownership_summary_model.context* ctx) bool {
+    u64 mut i = 0;
+    while (i < out->model.roots.len) {
+        if (!work(out, ctx, 1)) { return false; }
+        ownership_summary_model.symbolic_root mut* root = &out->model.roots[i];
+        ownership_api.place_path mut original = ownership_api.place_path{.root = root->slot};
+        if (root->kind == ownership_summary_model.root_kind.result) {
+            original = req->result.actual_slot;
+            if (original.root.kind != ownership_api.entity_kind.slot) { return false; }
+            if (!ownership_summary_model.path_charge(ctx, &out->proof, original)) { return false; }
+            out->result.actual_slot = ownership_state.copy_place(&out->metadata, original);
+            root->slot = original.root;
+        } else if (root->kind != ownership_summary_model.root_kind.by_value_slot) {
+            root->slot = path(out, ctx, original).root;
+        }
+        root->source = key(out, ctx, root->source);
+        root->allocation = key(out, ctx, root->allocation);
+        root->value_version = key(out, ctx, root->value_version);
+        i += 1;
+    }
+    i = 0;
+    while (i < out->model.requirements.len) {
+        if (!work(out, ctx, 1)) { return false; }
+        ownership_summary_model.requirement mut* row = &out->model.requirements[i];
+        row->path = path(out, ctx, row->path);
+        row->source = key(out, ctx, row->source);
+        row->range = range(out, ctx, row->range);
+        i += 1;
+    }
+    i = 0;
+    while (i < out->model.effects.len) {
+        if (!work(out, ctx, 1)) { return false; }
+        ownership_summary_model.effect_node mut* row = &out->model.effects[i];
+        row->effect.place = path(out, ctx, row->effect.place);
+        row->effect.source = key(out, ctx, row->effect.source);
+        row->effect.allocation = key(out, ctx, row->effect.allocation);
+        row->operand = path(out, ctx, row->operand);
+        row->value.place = path(out, ctx, row->value.place);
+        row->value.value_version = key(out, ctx, row->value.value_version);
+        row->value.span_length = scalar(out, ctx, row->value.span_length);
+        row->range = range(out, ctx, row->range);
+        row->value.borrows = borrow_list(out, ctx, row->value.borrows);
+        i += 1;
+    }
+    i = 0;
+    while (i < out->model.results.len) {
+        if (!work(out, ctx, 1)) { return false; }
+        out->model.results[i].borrow = borrow(out, ctx, out->model.results[i].borrow);
+        i += 1;
+    }
+    i = 0;
+    while (i < out->model.retained.len) {
+        if (!work(out, ctx, 1)) { return false; }
+        out->model.retained[i].borrow = borrow(out, ctx, out->model.retained[i].borrow);
+        i += 1;
+    }
+    i = 0;
+    while (i < out->model.predicates.len) {
+        if (!work(out, ctx, 1)) { return false; }
+        ownership_api.predicate_atom mut* row = &out->model.predicates[i];
+        row->left = key(out, ctx, row->left);
+        row->right = key(out, ctx, row->right);
+        row->lower = scalar(out, ctx, row->lower);
+        row->upper = scalar(out, ctx, row->upper);
+        i += 1;
+    }
+    i = 0;
+    while (i < out->model.correlations.len) {
+        if (!work(out, ctx, 1)) { return false; }
+        out->model.correlations[i].value_version = key(out, ctx,
+            out->model.correlations[i].value_version);
+        i += 1;
+    }
+    effect_blocks(out, ctx);
+    if (req->result.writes.len > types.TYPE_MAX_SIZE / sizeof(ownership_api.ordered_effect) ||
+        req->result.order.len > types.TYPE_MAX_SIZE / sizeof(ownership_api.ordering_constraint) ||
+        !work(out, ctx, 2) || !work(out, ctx, req->result.writes.len) ||
+        !work(out, ctx, req->result.order.len)) { return false; }
+    out->result_writes = new(ownership_api.ordered_effect, req->result.writes.len);
+    out->result_order = new(ownership_api.ordering_constraint, req->result.order.len);
+    i = 0;
+    while (i < req->result.writes.len) {
+        if (!work(out, ctx, 1)) { return false; }
+        out->result_writes[i] = substitute_effect(out, ctx, req->result.writes[i]);
+        i += 1;
+    }
+    i = 0;
+    while (i < req->result.order.len) {
+        if (!work(out, ctx, 1)) { return false; }
+        out->result_order[i] = req->result.order[i];
+        i += 1;
+    }
+    out->result.aliases = out->aliases[..];
+    out->result.holding_value = key(out, ctx, req->result.holding_value);
+    out->result.writes = out->result_writes[..];
+    out->result.order = out->result_order[..];
+    return ownership_api.successful(out->proof);
+}
+
+fn substitute_effect(frame mut* out, ownership_summary_model.context* ctx,
+    ownership_api.ordered_effect input) ownership_api.ordered_effect {
+    ownership_api.ordered_effect mut result = input;
+    result.place = path(out, ctx, input.place);
+    result.source = key(out, ctx, input.source);
+    result.allocation = key(out, ctx, input.allocation);
+    return result;
+}
+
+fn effect_blocks(frame mut* out, ownership_summary_model.context* ctx) void {
+    ownership_summary_model.effect_block mut* mut block = out->model.outcome_blocks;
+    while (block != null) {
+        if (!work(out, ctx, 1)) { return; }
+        u64 mut i = 0;
+        while (i < block->items.len) {
+            if (!work(out, ctx, 1)) { return; }
+            block->items[i] = substitute_effect(out, ctx, block->items[i]);
+            i += 1;
+        }
+        block = block->next;
+    }
+}
+
+fn bind(request* req) frame {
+    frame mut out = frame{};
+    out.proof = ownership_summary_model.complete();
+    out.outcome.kind = ownership_api.outcome_kind.unknown_fort;
+    out.outcome.possible_caller_return = true;
+    out.outcome.cleanup_required = true;
+    ownership_summary_model.context mut ctx = ownership_summary_model.context{
+        req->services, req->operation, req->source, ownership_api.entity_id{},
+        req->summary == null ? ownership_api.source_position{} : req->summary->source};
+    if (req->services == null || req->summary == null) {
+        out.proof = ownership_summary_model.fail(&ctx,
+            ownership_api.incomplete_reason.invalid_input, ctx.event);
+        return out;
+    }
+    u64 mut matches = 0;
+    {
+        event_binding@ rows_18 = req->events[..];
+        u64 mut row_index_18 = 0;
+        while (row_index_18 < rows_18.len) {
+            event_binding mut row = rows_18[row_index_18];
+            row_index_18 += 1;
+            if (!work(&out, &ctx, 1)) { return out; }
+            if (ownership_keys.operation(row.operation, req->operation) == 0) {
+                ctx.event = row.key;
+                matches += 1;
+            }
+
+        }
+    }
+    if (!req->event_map_complete || matches != 1 ||
+        ctx.event.kind != ownership_api.entity_kind.event ||
+        ownership_keys.function(ctx.event.function, ctx.operation.function) != 0 ||
+        !ownership_api.valid_limits(&req->limits) || !req->correspondence_complete) {
+        out.proof = ownership_summary_model.fail(&ctx,
+            ownership_api.incomplete_reason.missing_correspondence, ctx.event);
+        return out;
+    }
+    ownership_summary_model.summary_view mut input = *req->summary;
+    input.operation = req->operation;
+    input.source = req->source;
+    input.event = ctx.event;
+    input.callee_source = req->summary->source;
+    out.model = ownership_summary_model.clone(&input, req->services);
+    out.proof = out.model.proof;
+    out.relations = out.model.relations;
+    out.coverage = req->coverage;
+    out.coverage.actual_source_complete = false;
+    if (!ownership_api.successful(out.proof)) { return out; }
+    if (!copy_bindings(req, &out, &ctx) || !required_bindings(&out, &ctx) ||
+        !substitute(req, &out, &ctx) || out.residual_overlap) {
+        if (ownership_api.successful(out.proof)) {
+            out.proof = ownership_summary_model.fail(&ctx,
+                out.residual_overlap ? ownership_api.incomplete_reason.missing_path :
+            ownership_api.incomplete_reason.invalid_input, ctx.event);
+        }
+        out.model.residual_effects = true;
+        out.proof = ownership_summary_model.report(&ctx, out.proof);
+        out.model.proof = out.proof;
+    }
+    return out;
+}

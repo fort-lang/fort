@@ -1,0 +1,928 @@
+/// Stores ordered symbolic call records without changing emitted program data.
+import ownership_api;
+import ownership_keys;
+import ownership_state;
+import types;
+
+enum root_kind { by_value_slot, caller_source, allocation_template, global, result }
+enum owner_class { unknown, borrowed, owning }
+enum requirement_kind { live_source, extent, empty_output, valid_owner, alias_relation }
+enum payload_kind { read, replacement, copy, move, allocation, release, storage_end, unknown }
+
+// The summary keeps the structural validity and completeness of its inputs.
+// No body inference here qualifies its source, so actual_source_complete stays false.
+struct coverage_status {
+    bool structural_valid;
+    bool supplied_complete;
+    bool actual_source_complete;
+}
+
+struct symbolic_root {
+    ownership_api.entity_id key;
+    root_kind kind;
+    u32 formal;
+    ownership_api.entity_id slot;
+    ownership_api.entity_id source;
+    ownership_api.entity_id allocation;
+    ownership_api.entity_id value_version;
+    owner_class ownership;
+    types.node* ty;
+}
+
+struct requirement {
+    ownership_api.entity_id key;
+    requirement_kind kind;
+    ownership_api.entity_id guard;
+    ownership_api.place_path path;
+    ownership_api.entity_id source;
+    ownership_api.region range;
+    ownership_api.operation_position operation;
+    ownership_api.entity_id provenance;
+}
+
+struct effect_node {
+    ownership_api.ordered_effect effect;
+    payload_kind payload;
+    ownership_api.place_path operand;
+    ownership_api.contents_fact value;
+    ownership_api.region range;
+    ownership_api.entity_id provenance;
+    ownership_api.deferred_occurrence deferred;
+    bool residual;
+}
+
+struct relation {
+    ownership_api.entity_id key;
+    ownership_api.borrow_relation borrow;
+    ownership_api.entity_id guard;
+    ownership_api.entity_id provenance;
+    bool residual;
+}
+
+// Case slices contain stable record keys. Their sequence retains effect order.
+struct case_record {
+    ownership_api.entity_id key;
+    ownership_api.entity_id guard;
+    ownership_api.entity_id@ requirements;
+    ownership_api.entity_id@ effects;
+    ownership_api.entity_id@ results;
+    ownership_api.entity_id@ retained;
+    ownership_api.outcome_fact outcome;
+    coverage_status coverage;
+}
+
+// Checked types and filenames outlive this owner. Temporary slices do not.
+struct provenance {
+    ownership_api.entity_id key;
+    ownership_api.operation_position operation;
+    ownership_api.source_position source;
+    ownership_api.deferred_occurrence deferred;
+    ownership_api.function_id callee;
+    ownership_api.entity_id@ substitutions;
+    ownership_api.entity_id@ witnesses;
+    string filename;
+}
+
+struct summary_view {
+    symbolic_root@ roots;
+    requirement@ requirements;
+    effect_node@ effects;
+    ownership_api.ordering_constraint@ order;
+    ownership_api.predicate_atom@ predicates;
+    ownership_api.guard_fact@ guards;
+    ownership_api.correlation@ correlations;
+    relation@ results;
+    relation@ retained;
+    case_record@ cases;
+    provenance@ provenance_records;
+    ownership_api.witness_link@ witnesses;
+    coverage_status coverage;
+    ownership_api.proof_status proof;
+    bool residual_effects;
+    ownership_api.operation_position operation;
+    ownership_api.source_position source;
+    ownership_api.entity_id event;
+    ownership_api.source_position callee_source;
+}
+
+struct effect_block {
+    ownership_api.ordered_effect mut@ own items;
+    effect_block mut* own next;
+}
+
+// Records borrow nested slices from metadata and outcome_blocks.
+struct summary {
+    symbolic_root mut@ own roots;
+    requirement mut@ own requirements;
+    effect_node mut@ own effects;
+    ownership_api.ordering_constraint mut@ own order;
+    ownership_api.predicate_atom mut@ own predicates;
+    ownership_api.guard_fact mut@ own guards;
+    ownership_api.correlation mut@ own correlations;
+    relation mut@ own results;
+    relation mut@ own retained;
+    case_record mut@ own cases;
+    provenance mut@ own provenance_records;
+    ownership_api.witness_link mut@ own witnesses;
+    ownership_state.state metadata;
+    effect_block mut* own outcome_blocks;
+    coverage_status coverage;
+    ownership_api.proof_status proof;
+    // The relations that this owner retains, as charged to E.
+    u64 relations;
+    bool residual_effects;
+    ownership_api.operation_position operation;
+    ownership_api.source_position source;
+    ownership_api.entity_id event;
+    ownership_api.source_position callee_source;
+}
+
+struct context {
+    ownership_api.services* services;
+    ownership_api.operation_position operation;
+    ownership_api.source_position source;
+    ownership_api.entity_id event;
+    ownership_api.source_position callee_source;
+}
+
+fn complete() ownership_api.proof_status {
+    return ownership_api.proof_status{.kind = ownership_api.proof_kind.complete};
+}
+
+fn same(ownership_api.entity_id a, ownership_api.entity_id b) bool {
+    return ownership_keys.entity(a, b) == 0;
+}
+
+fn free(summary mut* out) void {
+    summary mut owned = move(*out);
+    del(owned.roots);
+    del(owned.requirements);
+    del(owned.effects);
+    del(owned.order);
+    del(owned.predicates);
+    del(owned.guards);
+    del(owned.correlations);
+    del(owned.results);
+    del(owned.retained);
+    del(owned.cases);
+    del(owned.provenance_records);
+    del(owned.witnesses);
+    while (owned.outcome_blocks != null) {
+        effect_block mut* own block = move(owned.outcome_blocks);
+        owned.outcome_blocks = move(block->next);
+        del(block->items);
+        del(block);
+    }
+    ownership_state.free(&owned.metadata);
+    *out = summary{};
+}
+
+fn view(summary* input) summary_view {
+    return summary_view{input->roots[..], input->requirements[..], input->effects[..],
+            input->order[..], input->predicates[..], input->guards[..], input->correlations[..],
+            input->results[..], input->retained[..], input->cases[..],
+            input->provenance_records[..], input->witnesses[..], input->coverage, input->proof,
+        input->residual_effects, input->operation, input->source, input->event,
+            input->callee_source};
+}
+
+fn work(context* ctx, ownership_api.proof_status mut* proof, u64 amount) bool {
+    if (!ownership_api.successful(*proof)) { return false; }
+    u64 mut left = amount;
+    while (left > 0) {
+        ownership_api.charge_result charged = ownership_api.charge_work(ctx->services,
+            ownership_api.work_kind.summary_solver, ctx->operation, ctx->source);
+        if (!charged.allowed) { *proof = charged.proof; return false; }
+        left -= 1;
+    }
+    return true;
+}
+
+// E counts the relations that one owner retains now (D17.18). The request names the
+// prospective count, not an increment, so a copy of the same relations adds no unit.
+// The count grows only after the meter allows it. The meter refuses a saturated count.
+fn effect_charge(context* ctx, ownership_api.proof_status mut* proof, u64 mut* retained) bool {
+    if (!ownership_api.successful(*proof)) { return false; }
+    u64 prospective = *retained < ownership_api.U64_MAX ? *retained + 1 : ownership_api.U64_MAX;
+    ownership_api.charge_item[1] items = {ownership_api.charge_item{
+            ownership_api.limit_category.e, ownership_api.limit_scope.function, prospective}};
+    ownership_api.charge_request req = ownership_api.charge_request{
+        ownership_api.work_kind.summary_solver, ctx->operation, ctx->source, items[..]};
+    ownership_api.charge_result result = ownership_api.charge(ctx->services, &req);
+    if (!result.allowed) { *proof = result.proof; return false; }
+    *retained = prospective;
+    return true;
+}
+
+fn fail(context* ctx, ownership_api.incomplete_reason reason,
+    ownership_api.entity_id key) ownership_api.proof_status {
+    ownership_api.proof_status mut proof = ownership_api.incomplete(reason, ctx->operation,
+        ctx->source);
+    proof.terminal.relation = key;
+    return proof;
+}
+
+fn report(context* ctx, ownership_api.proof_status proof) ownership_api.proof_status {
+    ownership_api.source_position callee = ctx->callee_source.filename_present ?
+        ctx->callee_source : ctx->source;
+    ownership_api.event_note[2] notes = {
+        ownership_api.event_note{.role = ownership_api.note_role.callee,
+                .source = callee, .relation = proof.terminal.relation},
+            ownership_api.event_note{.role = ownership_api.note_role.substitution,
+                .source = ctx->source, .relation = proof.terminal.relation}};
+    ownership_api.event_request mut req = ownership_api.event_request{};
+    req.current = proof;
+    req.event.key = ctx->event;
+    req.event.operation = ctx->operation;
+    req.event.source = ctx->source;
+    req.event.kind = ownership_api.event_kind.incomplete_proof;
+    req.event.evidence = ownership_api.evidence_kind.abstract_possibility;
+    req.event.reason = proof.terminal.reason;
+    req.event.relation = proof.terminal.relation;
+    req.event.notes = notes[..];
+    ownership_api.event_result result = ownership_api.record_event(ctx->services, &req);
+    if (!result.retained || !ownership_api.successful(result.proof)) { return result.proof; }
+    return proof;
+}
+
+fn path_charge(context* ctx, ownership_api.proof_status mut* proof,
+    ownership_api.place_path path) bool {
+    if (path.projections.len > types.TYPE_MAX_SIZE / sizeof(ownership_api.projection)) {
+        *proof = fail(ctx, ownership_api.incomplete_reason.invalid_input, path.root);
+        return false;
+    }
+    return work(ctx, proof, 2) && work(ctx, proof, path.projections.len) &&
+        work(ctx, proof, path.projections.len);
+}
+
+fn region_charge(context* ctx, ownership_api.proof_status mut* proof,
+    ownership_api.region range) bool {
+    if (range.leaves.len > types.TYPE_MAX_SIZE / sizeof(ownership_api.layout_leaf) ||
+        range.partitions.len > types.TYPE_MAX_SIZE / sizeof(ownership_api.region_partition)) {
+        *proof = fail(ctx, ownership_api.incomplete_reason.invalid_input, range.key);
+        return false;
+    }
+    return work(ctx, proof, 3) && work(ctx, proof, range.leaves.len) &&
+        work(ctx, proof, range.leaves.len) && work(ctx, proof, range.partitions.len) &&
+        work(ctx, proof, range.partitions.len);
+}
+
+fn borrow_charge(context* ctx, ownership_api.proof_status mut* proof,
+    ownership_api.borrow_relation value) bool {
+    return path_charge(ctx, proof, value.containing) && region_charge(ctx, proof, value.range);
+}
+
+fn contents_charge(context* ctx, ownership_api.proof_status mut* proof,
+    ownership_api.contents_fact value) bool {
+    if (!path_charge(ctx, proof, value.place) || !work(ctx, proof, 2) ||
+        !work(ctx, proof, value.borrows.len) || !work(ctx, proof, value.borrows.len)) {
+        return false;
+    }
+    {
+        ownership_api.borrow_relation@ rows_0 = value.borrows[..];
+        u64 mut row_index_0 = 0;
+        while (row_index_0 < rows_0.len) {
+            ownership_api.borrow_relation mut row = rows_0[row_index_0];
+            row_index_0 += 1;
+            if (!work(ctx, proof, 1) || !borrow_charge(ctx, proof, row)) { return false; }
+
+        }
+    }
+    return true;
+}
+
+fn keys_charge(context* ctx, ownership_api.proof_status mut* proof,
+    ownership_api.entity_id@ keys) bool {
+    if (keys.len > types.TYPE_MAX_SIZE / sizeof(ownership_api.entity_id)) {
+        *proof = fail(ctx, ownership_api.incomplete_reason.invalid_input,
+            ownership_api.entity_id{});
+        return false;
+    }
+    return work(ctx, proof, 2) && work(ctx, proof, keys.len) && work(ctx, proof, keys.len);
+}
+
+fn canonical(context* ctx, ownership_api.proof_status mut* proof,
+    ownership_api.entity_id previous, ownership_api.entity_id key, u64 index) bool {
+    if (!work(ctx, proof, 1)) { return false; }
+    if (key.kind == ownership_api.entity_kind.none ||
+        (index > 0 && ownership_keys.entity(previous, key) >= 0)) {
+        *proof = fail(ctx, ownership_api.incomplete_reason.invalid_input, key);
+        return false;
+    }
+    return true;
+}
+
+fn copy_outcome(summary mut* out, context* ctx, ownership_api.outcome_fact input)
+    ownership_api.outcome_fact {
+    ownership_api.outcome_fact mut result = input;
+    ownership_api.ordered_effect@ none = {};
+    result.effects = none;
+    if (input.effects.len > types.TYPE_MAX_SIZE / sizeof(ownership_api.ordered_effect)) {
+        out->proof = fail(ctx, ownership_api.incomplete_reason.invalid_input, input.guard);
+        return result;
+    }
+    if (!work(ctx, &out->proof, 2) || !work(ctx, &out->proof, input.effects.len)) {
+        return result;
+    }
+    effect_block mut* own block = new(effect_block);
+    block->items = new(ownership_api.ordered_effect, input.effects.len);
+    block->next = move(out->outcome_blocks);
+    out->outcome_blocks = move(block);
+    u64 mut i = 0;
+    while (i < input.effects.len) {
+        ownership_api.ordered_effect mut row = input.effects[i];
+        if (!work(ctx, &out->proof, 1) || !effect_charge(ctx, &out->proof, &out->relations) ||
+            !path_charge(ctx, &out->proof, row.place)) { return result; }
+        row.place = ownership_state.copy_place(&out->metadata, row.place);
+        out->outcome_blocks->items[i] = row;
+        i += 1;
+    }
+    result.effects = out->outcome_blocks->items[..];
+    return result;
+}
+
+fn clone(summary_view* input, ownership_api.services* svc) summary {
+    context reporting = context{svc, input->operation, input->source, input->event,
+        input->callee_source};
+    context* ctx = &reporting;
+    summary mut out = summary{};
+    out.proof = complete();
+    out.residual_effects = true;
+    out.coverage = input->coverage;
+    out.operation = input->operation;
+    out.source = input->source;
+    out.event = input->event;
+    out.callee_source = input->callee_source;
+    if (ctx->services == null || ctx->event.kind != ownership_api.entity_kind.event ||
+        ownership_keys.function(ctx->event.function, ctx->operation.function) != 0) {
+        out.proof = fail(ctx, ownership_api.incomplete_reason.invalid_input, ctx->event);
+        return out;
+    }
+    if (!copy_records(input, ctx, &out) || !validate(&out, ctx)) {
+        if (ownership_api.successful(out.proof)) {
+            out.proof = fail(ctx, ownership_api.incomplete_reason.invalid_input, ctx->event);
+        }
+        out.proof = report(ctx, out.proof);
+        return out;
+    }
+    out.residual_effects = input->residual_effects || !ownership_api.successful(input->proof);
+    out.proof = input->proof;
+    return out;
+}
+
+fn copy_roots(summary_view* input, context* ctx, summary mut* out) bool {
+    if (input->roots.len > types.TYPE_MAX_SIZE / sizeof(symbolic_root) ||
+        !work(ctx, &out->proof, 1) || !work(ctx, &out->proof, input->roots.len)) {
+        return false;
+    }
+    out->roots = new(symbolic_root, input->roots.len);
+    ownership_api.entity_id mut previous = ownership_api.entity_id{};
+    u64 mut i = 0;
+    while (i < input->roots.len) {
+        symbolic_root mut row = input->roots[i];
+        if (!canonical(ctx, &out->proof, previous, row.key, i)) { return false; }
+
+        out->roots[i] = row;
+        previous = row.key;
+        i += 1;
+    }
+    return true;
+}
+
+fn copy_requirements(summary_view* input, context* ctx, summary mut* out) bool {
+    if (input->requirements.len > types.TYPE_MAX_SIZE / sizeof(requirement) ||
+        !work(ctx, &out->proof, 1) || !work(ctx, &out->proof, input->requirements.len)) {
+        return false;
+    }
+    out->requirements = new(requirement, input->requirements.len);
+    ownership_api.entity_id mut previous = ownership_api.entity_id{};
+    u64 mut i = 0;
+    while (i < input->requirements.len) {
+        requirement mut row = input->requirements[i];
+        if (!canonical(ctx, &out->proof, previous, row.key, i) ||
+            !effect_charge(ctx, &out->proof, &out->relations)) { return false; }
+        if (!path_charge(ctx, &out->proof, row.path) ||
+            !region_charge(ctx, &out->proof, row.range)) { return false; }
+        row.path = ownership_state.copy_place(&out->metadata, row.path);
+        row.range = ownership_state.copy_region(&out->metadata, row.range);
+        out->requirements[i] = row;
+        previous = row.key;
+        i += 1;
+    }
+    return true;
+}
+
+fn copy_effects(summary_view* input, context* ctx, summary mut* out) bool {
+    if (input->effects.len > types.TYPE_MAX_SIZE / sizeof(effect_node) ||
+        !work(ctx, &out->proof, 1) || !work(ctx, &out->proof, input->effects.len)) {
+        return false;
+    }
+    out->effects = new(effect_node, input->effects.len);
+    ownership_api.entity_id mut previous = ownership_api.entity_id{};
+    u64 mut i = 0;
+    while (i < input->effects.len) {
+        effect_node mut row = input->effects[i];
+        if (!canonical(ctx, &out->proof, previous, row.effect.key, i) ||
+            !effect_charge(ctx, &out->proof, &out->relations)) { return false; }
+        if (!path_charge(ctx, &out->proof, row.effect.place) ||
+            !path_charge(ctx, &out->proof, row.operand) ||
+            !contents_charge(ctx, &out->proof, row.value) ||
+            !region_charge(ctx, &out->proof, row.range)) { return false; }
+        row.effect.place = ownership_state.copy_place(&out->metadata, row.effect.place);
+        row.operand = ownership_state.copy_place(&out->metadata, row.operand);
+        row.value = ownership_state.copy_contents(&out->metadata, row.value);
+        row.range = ownership_state.copy_region(&out->metadata, row.range);
+        out->effects[i] = row;
+        previous = row.effect.key;
+        i += 1;
+    }
+    return true;
+}
+
+fn copy_predicates(summary_view* input, context* ctx, summary mut* out) bool {
+    if (input->predicates.len > types.TYPE_MAX_SIZE / sizeof(ownership_api.predicate_atom) ||
+        !work(ctx, &out->proof, 1) || !work(ctx, &out->proof, input->predicates.len)) {
+        return false;
+    }
+    out->predicates = new(ownership_api.predicate_atom, input->predicates.len);
+    ownership_api.entity_id mut previous = ownership_api.entity_id{};
+    u64 mut i = 0;
+    while (i < input->predicates.len) {
+        ownership_api.predicate_atom mut row = input->predicates[i];
+        if (!canonical(ctx, &out->proof, previous, row.key, i)) { return false; }
+
+        out->predicates[i] = row;
+        previous = row.key;
+        i += 1;
+    }
+    return true;
+}
+
+fn copy_guards(summary_view* input, context* ctx, summary mut* out) bool {
+    if (input->guards.len > types.TYPE_MAX_SIZE / sizeof(ownership_api.guard_fact) ||
+        !work(ctx, &out->proof, 1) || !work(ctx, &out->proof, input->guards.len)) {
+        return false;
+    }
+    out->guards = new(ownership_api.guard_fact, input->guards.len);
+    ownership_api.entity_id mut previous = ownership_api.entity_id{};
+    u64 mut i = 0;
+    while (i < input->guards.len) {
+        ownership_api.guard_fact mut row = input->guards[i];
+        if (!canonical(ctx, &out->proof, previous, row.key, i) ||
+            !effect_charge(ctx, &out->proof, &out->relations)) { return false; }
+        if (!keys_charge(ctx, &out->proof, row.positive) ||
+            !keys_charge(ctx, &out->proof, row.negative)) { return false; }
+        row = ownership_state.copy_guard(&out->metadata, row);
+        out->guards[i] = row;
+        previous = row.key;
+        i += 1;
+    }
+    return true;
+}
+
+fn copy_results(summary_view* input, context* ctx, summary mut* out) bool {
+    if (input->results.len > types.TYPE_MAX_SIZE / sizeof(relation) ||
+        !work(ctx, &out->proof, 1) || !work(ctx, &out->proof, input->results.len)) {
+        return false;
+    }
+    out->results = new(relation, input->results.len);
+    ownership_api.entity_id mut previous = ownership_api.entity_id{};
+    u64 mut i = 0;
+    while (i < input->results.len) {
+        relation mut row = input->results[i];
+        if (!canonical(ctx, &out->proof, previous, row.key, i) ||
+            !effect_charge(ctx, &out->proof, &out->relations)) { return false; }
+        if (!borrow_charge(ctx, &out->proof, row.borrow)) { return false; }
+        row.borrow = ownership_state.copy_borrow(&out->metadata, row.borrow);
+        out->results[i] = row;
+        previous = row.key;
+        i += 1;
+    }
+    return true;
+}
+
+fn copy_retained(summary_view* input, context* ctx, summary mut* out) bool {
+    if (input->retained.len > types.TYPE_MAX_SIZE / sizeof(relation) ||
+        !work(ctx, &out->proof, 1) || !work(ctx, &out->proof, input->retained.len)) {
+        return false;
+    }
+    out->retained = new(relation, input->retained.len);
+    ownership_api.entity_id mut previous = ownership_api.entity_id{};
+    u64 mut i = 0;
+    while (i < input->retained.len) {
+        relation mut row = input->retained[i];
+        if (!canonical(ctx, &out->proof, previous, row.key, i) ||
+            !effect_charge(ctx, &out->proof, &out->relations)) { return false; }
+        if (!borrow_charge(ctx, &out->proof, row.borrow)) { return false; }
+        row.borrow = ownership_state.copy_borrow(&out->metadata, row.borrow);
+        out->retained[i] = row;
+        previous = row.key;
+        i += 1;
+    }
+    return true;
+}
+
+fn copy_cases(summary_view* input, context* ctx, summary mut* out) bool {
+    if (input->cases.len > types.TYPE_MAX_SIZE / sizeof(case_record) ||
+        !work(ctx, &out->proof, 1) || !work(ctx, &out->proof, input->cases.len)) {
+        return false;
+    }
+    out->cases = new(case_record, input->cases.len);
+    ownership_api.entity_id mut previous = ownership_api.entity_id{};
+    u64 mut i = 0;
+    while (i < input->cases.len) {
+        case_record mut row = input->cases[i];
+        if (!canonical(ctx, &out->proof, previous, row.key, i) ||
+            !effect_charge(ctx, &out->proof, &out->relations)) { return false; }
+        if (!keys_charge(ctx, &out->proof, row.requirements) ||
+            !keys_charge(ctx, &out->proof, row.effects) ||
+            !keys_charge(ctx, &out->proof, row.results) ||
+            !keys_charge(ctx, &out->proof, row.retained)) { return false; }
+        row.requirements = ownership_state.copy_entities(&out->metadata, row.requirements);
+        row.effects = ownership_state.copy_entities(&out->metadata, row.effects);
+        row.results = ownership_state.copy_entities(&out->metadata, row.results);
+        row.retained = ownership_state.copy_entities(&out->metadata, row.retained);
+        row.outcome = copy_outcome(out, ctx, row.outcome);
+        if (!ownership_api.successful(out->proof)) { return false; }
+        out->cases[i] = row;
+        previous = row.key;
+        i += 1;
+    }
+    return true;
+}
+
+fn copy_provenance_records(summary_view* input, context* ctx, summary mut* out) bool {
+    if (input->provenance_records.len > types.TYPE_MAX_SIZE / sizeof(provenance) ||
+        !work(ctx, &out->proof, 1) || !work(ctx, &out->proof, input->provenance_records.len)) {
+        return false;
+    }
+    out->provenance_records = new(provenance, input->provenance_records.len);
+    ownership_api.entity_id mut previous = ownership_api.entity_id{};
+    u64 mut i = 0;
+    while (i < input->provenance_records.len) {
+        provenance mut row = input->provenance_records[i];
+        if (!canonical(ctx, &out->proof, previous, row.key, i)) { return false; }
+        if (!keys_charge(ctx, &out->proof, row.substitutions) ||
+            !keys_charge(ctx, &out->proof, row.witnesses)) { return false; }
+        row.substitutions = ownership_state.copy_entities(&out->metadata, row.substitutions);
+        row.witnesses = ownership_state.copy_entities(&out->metadata, row.witnesses);
+        out->provenance_records[i] = row;
+        previous = row.key;
+        i += 1;
+    }
+    return true;
+}
+
+fn copy_witnesses(summary_view* input, context* ctx, summary mut* out) bool {
+    if (input->witnesses.len > types.TYPE_MAX_SIZE / sizeof(ownership_api.witness_link) ||
+        !work(ctx, &out->proof, 1) || !work(ctx, &out->proof, input->witnesses.len)) {
+        return false;
+    }
+    out->witnesses = new(ownership_api.witness_link, input->witnesses.len);
+    ownership_api.entity_id mut previous = ownership_api.entity_id{};
+    u64 mut i = 0;
+    while (i < input->witnesses.len) {
+        ownership_api.witness_link mut row = input->witnesses[i];
+        if (!canonical(ctx, &out->proof, previous, row.key, i)) { return false; }
+
+        out->witnesses[i] = row;
+        previous = row.key;
+        i += 1;
+    }
+    return true;
+}
+
+fn copy_records(summary_view* input, context* ctx, summary mut* out) bool {
+    if (!copy_roots(input, ctx, out) || !copy_requirements(input, ctx, out) ||
+        !copy_effects(input, ctx, out) || !copy_predicates(input, ctx, out) ||
+        !copy_guards(input, ctx, out) || !copy_results(input, ctx, out) ||
+        !copy_retained(input, ctx, out) || !copy_cases(input, ctx, out) ||
+        !copy_provenance_records(input, ctx, out) || !copy_witnesses(input, ctx, out)) {
+        return false;
+    }
+    if (input->order.len > types.TYPE_MAX_SIZE / sizeof(ownership_api.ordering_constraint) ||
+        !work(ctx, &out->proof, 1) || !work(ctx, &out->proof, input->order.len)) {
+        return false;
+    }
+    out->order = new(ownership_api.ordering_constraint, input->order.len);
+    u64 mut i = 0;
+    while (i < input->order.len) {
+        if (!work(ctx, &out->proof, 1) || !effect_charge(ctx, &out->proof, &out->relations)) {
+            return false;
+        }
+        out->order[i] = input->order[i];
+        i += 1;
+    }
+    if (input->correlations.len > types.TYPE_MAX_SIZE / sizeof(ownership_api.correlation) ||
+        !work(ctx, &out->proof, 1) || !work(ctx, &out->proof, input->correlations.len)) {
+        return false;
+    }
+    out->correlations = new(ownership_api.correlation, input->correlations.len);
+    i = 0;
+    while (i < input->correlations.len) {
+        if (!work(ctx, &out->proof, 1) || !effect_charge(ctx, &out->proof, &out->relations)) {
+            return false;
+        }
+        out->correlations[i] = input->correlations[i];
+        i += 1;
+    }
+    return true;
+}
+
+enum record_kind { requirement, effect, predicate, guard, result, retained, provenance, witness }
+
+fn record_count(summary* out, record_kind kind) u64 {
+    switch (kind) {
+    case record_kind.requirement: return out->requirements.len;
+    case record_kind.effect: return out->effects.len;
+    case record_kind.predicate: return out->predicates.len;
+    case record_kind.guard: return out->guards.len;
+    case record_kind.result: return out->results.len;
+    case record_kind.retained: return out->retained.len;
+    case record_kind.provenance: return out->provenance_records.len;
+    case record_kind.witness: return out->witnesses.len;
+    }
+    return 0;
+}
+
+fn record_key(summary* out, record_kind kind, u64 index) ownership_api.entity_id {
+    switch (kind) {
+    case record_kind.requirement: return out->requirements[index].key;
+    case record_kind.effect: return out->effects[index].effect.key;
+    case record_kind.predicate: return out->predicates[index].key;
+    case record_kind.guard: return out->guards[index].key;
+    case record_kind.result: return out->results[index].key;
+    case record_kind.retained: return out->retained[index].key;
+    case record_kind.provenance: return out->provenance_records[index].key;
+    case record_kind.witness: return out->witnesses[index].key;
+    }
+    return ownership_api.entity_id{};
+}
+
+// The copy keeps the keys of each record kind strictly increasing (`canonical`), so a binary
+// search finds a key. Each probe costs one W unit, so a lookup costs O(log n) and not O(n).
+fn record_index(summary* out, context* ctx, ownership_api.proof_status mut* proof,
+    ownership_api.entity_id key, record_kind kind) u64 {
+    u64 mut low = 0;
+    u64 mut high = record_count(out, kind);
+    while (low < high) {
+        if (!work(ctx, proof, 1)) { return ownership_api.U64_MAX; }
+        u64 middle = low + (high - low) / 2;
+        i32 order = ownership_keys.entity(record_key(out, kind, middle), key);
+        if (order == 0) { return middle; }
+        if (order < 0) { low = middle + 1; } else { high = middle; }
+    }
+    return ownership_api.U64_MAX;
+}
+
+fn effect_index(summary* out, context* ctx, ownership_api.proof_status mut* proof,
+    ownership_api.entity_id key) u64 {
+    return record_index(out, ctx, proof, key, record_kind.effect);
+}
+
+fn predicate_present(summary* out, context* ctx, ownership_api.proof_status mut* proof,
+    ownership_api.entity_id key) bool {
+    return record_index(out, ctx, proof, key, record_kind.predicate) != ownership_api.U64_MAX;
+}
+
+fn present(summary* out, context* ctx, ownership_api.proof_status mut* proof,
+    ownership_api.entity_id key, record_kind kind) bool {
+    if (key.kind == ownership_api.entity_kind.none) { return true; }
+    return record_index(out, ctx, proof, key, kind) != ownership_api.U64_MAX;
+}
+
+fn references(summary* out, context* ctx, ownership_api.proof_status mut* proof,
+    ownership_api.entity_id@ keys, record_kind kind) bool {
+    {
+        ownership_api.entity_id@ rows_8 = keys[..];
+        u64 mut row_index_8 = 0;
+        while (row_index_8 < rows_8.len) {
+            ownership_api.entity_id mut key = rows_8[row_index_8];
+            row_index_8 += 1;
+            if (!work(ctx, proof, 1) || key.kind == ownership_api.entity_kind.none ||
+                !present(out, ctx, proof, key, kind)) { return false; }
+
+        }
+    }
+    return true;
+}
+
+fn validate_sequences(summary mut* out, context* ctx) bool {
+    u64 mut i = 0;
+    while (i < out->order.len) {
+        if (!work(ctx, &out->proof, 1)) { return false; }
+        if (i > 0) {
+            i32 first = ownership_keys.entity(out->order[i - 1].before, out->order[i].before);
+            if (first > 0 || (first == 0 &&
+                ownership_keys.entity(out->order[i - 1].after, out->order[i].after) >= 0)) {
+                return false;
+            }
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < out->correlations.len) {
+        if (!work(ctx, &out->proof, 1)) { return false; }
+        ownership_api.correlation row = out->correlations[i];
+        if (row.relation.kind == ownership_api.entity_kind.none ||
+            (!present(out, ctx, &out->proof, row.relation, record_kind.result) &&
+            !present(out, ctx, &out->proof, row.relation, record_kind.retained))) { return false; }
+        if (i > 0) {
+            ownership_api.correlation before = out->correlations[i - 1];
+            i32 mut order = ownership_keys.entity(before.guard, row.guard);
+            if (order == 0) { order = ownership_keys.entity(before.value_version,
+                row.value_version); }
+            if (order == 0) { order = ownership_keys.entity(before.relation, row.relation); }
+            if (order >= 0) { return false; }
+        }
+        i += 1;
+    }
+    return true;
+}
+
+fn validate(summary mut* out, context* ctx) bool {
+    if (!validate_sequences(out, ctx)) { return false; }
+    {
+        symbolic_root@ rows_9 = out->roots[..];
+        u64 mut row_index_9 = 0;
+        while (row_index_9 < rows_9.len) {
+            symbolic_root mut root = rows_9[row_index_9];
+            row_index_9 += 1;
+            if (!work(ctx, &out->proof, 1)) { return false; }
+            if (root.kind != root_kind.allocation_template &&
+                root.slot.kind != ownership_api.entity_kind.slot) { return false; }
+            if (root.kind == root_kind.caller_source &&
+                root.source.kind != ownership_api.entity_kind.source) { return false; }
+            if (root.kind == root_kind.allocation_template &&
+                root.allocation.kind != ownership_api.entity_kind.allocation) { return false; }
+
+        }
+    }
+    {
+        requirement@ rows_10 = out->requirements[..];
+        u64 mut row_index_10 = 0;
+        while (row_index_10 < rows_10.len) {
+            requirement mut row = rows_10[row_index_10];
+            row_index_10 += 1;
+            if (!work(ctx, &out->proof, 1) ||
+                !present(out, ctx, &out->proof, row.guard, record_kind.guard) ||
+                !present(out, ctx, &out->proof, row.provenance,
+                    record_kind.provenance)) { return false; }
+
+        }
+    }
+    {
+        effect_node@ rows_11 = out->effects[..];
+        u64 mut row_index_11 = 0;
+        while (row_index_11 < rows_11.len) {
+            effect_node mut row = rows_11[row_index_11];
+            row_index_11 += 1;
+            if (!work(ctx, &out->proof, 1) ||
+                !present(out, ctx, &out->proof, row.effect.guard, record_kind.guard) ||
+                !present(out, ctx, &out->proof, row.provenance,
+                    record_kind.provenance)) { return false; }
+
+        }
+    }
+    {
+        relation@ rows_12 = out->results[..];
+        u64 mut row_index_12 = 0;
+        while (row_index_12 < rows_12.len) {
+            relation mut row = rows_12[row_index_12];
+            row_index_12 += 1;
+            if (!work(ctx, &out->proof, 1) ||
+                !present(out, ctx, &out->proof, row.guard, record_kind.guard) ||
+                !present(out, ctx, &out->proof, row.provenance,
+                    record_kind.provenance)) { return false; }
+
+        }
+    }
+    {
+        relation@ rows_13 = out->retained[..];
+        u64 mut row_index_13 = 0;
+        while (row_index_13 < rows_13.len) {
+            relation mut row = rows_13[row_index_13];
+            row_index_13 += 1;
+            if (!work(ctx, &out->proof, 1) ||
+                !present(out, ctx, &out->proof, row.guard, record_kind.guard) ||
+                !present(out, ctx, &out->proof, row.provenance,
+                    record_kind.provenance)) { return false; }
+
+        }
+    }
+    {
+        ownership_api.correlation@ rows_14 = out->correlations[..];
+        u64 mut row_index_14 = 0;
+        while (row_index_14 < rows_14.len) {
+            ownership_api.correlation mut row = rows_14[row_index_14];
+            row_index_14 += 1;
+            if (!work(ctx, &out->proof, 1) ||
+                !present(out, ctx, &out->proof, row.guard, record_kind.guard)) { return false; }
+
+        }
+    }
+    {
+        provenance@ rows_15 = out->provenance_records[..];
+        u64 mut row_index_15 = 0;
+        while (row_index_15 < rows_15.len) {
+            provenance mut row = rows_15[row_index_15];
+            row_index_15 += 1;
+            if (!work(ctx, &out->proof, 1) ||
+                !references(out, ctx, &out->proof, row.witnesses,
+                    record_kind.witness)) { return false; }
+
+        }
+    }
+    {
+        ownership_api.guard_fact@ rows_16 = out->guards[..];
+        u64 mut row_index_16 = 0;
+        while (row_index_16 < rows_16.len) {
+            ownership_api.guard_fact mut guard = rows_16[row_index_16];
+            row_index_16 += 1;
+            if (!work(ctx, &out->proof, 1)) { return false; }
+            {
+                ownership_api.entity_id@ rows_17 = guard.positive[..];
+                u64 mut row_index_17 = 0;
+                while (row_index_17 < rows_17.len) {
+                    ownership_api.entity_id mut key = rows_17[row_index_17];
+                    row_index_17 += 1;
+                    if (!predicate_present(out, ctx, &out->proof, key)) { return false; }
+
+                }
+            }
+            {
+                ownership_api.entity_id@ rows_18 = guard.negative[..];
+                u64 mut row_index_18 = 0;
+                while (row_index_18 < rows_18.len) {
+                    ownership_api.entity_id mut key = rows_18[row_index_18];
+                    row_index_18 += 1;
+                    if (!predicate_present(out, ctx, &out->proof, key)) { return false; }
+
+                }
+            }
+
+        }
+    }
+    // Each constraint names two distinct effects. Their indices serve every case below.
+    if (out->order.len > types.TYPE_MAX_SIZE / sizeof(u64) / 2 ||
+        out->effects.len > types.TYPE_MAX_SIZE / sizeof(u64) ||
+        !work(ctx, &out->proof, out->order.len * 2 + out->effects.len)) { return false; }
+    u64 mut@ own ordered_at = new(u64, out->order.len * 2);
+    defer del(ordered_at);
+    u64 mut k = 0;
+    while (k < out->order.len) {
+        ownership_api.ordering_constraint ordered = out->order[k];
+        ordered_at[k * 2] = effect_index(out, ctx, &out->proof, ordered.before);
+        ordered_at[k * 2 + 1] = effect_index(out, ctx, &out->proof, ordered.after);
+        if (!work(ctx, &out->proof, 1) || ordered_at[k * 2] == ownership_api.U64_MAX ||
+            ordered_at[k * 2 + 1] == ownership_api.U64_MAX ||
+            same(ordered.before, ordered.after)) { return false; }
+        k += 1;
+    }
+    // A case lists distinct effects. The position of each effect in the case serves the
+    // duplicate test and each proved constraint, so a case costs its length and the constraint
+    // count, not their product.
+    u64 mut@ own positions = new(u64, out->effects.len);
+    defer del(positions);
+    u64 mut p = 0;
+    while (p < positions.len) {
+        positions[p] = ownership_api.U64_MAX;
+        p += 1;
+    }
+    u64 mut c = 0;
+    while (c < out->cases.len) {
+        case_record branch = out->cases[c];
+        if (!work(ctx, &out->proof, 1) ||
+            !present(out, ctx, &out->proof, branch.guard, record_kind.guard) ||
+            !present(out, ctx, &out->proof, branch.outcome.guard, record_kind.guard) ||
+            !references(out, ctx, &out->proof, branch.requirements, record_kind.requirement) ||
+            !references(out, ctx, &out->proof, branch.results, record_kind.result) ||
+            !references(out, ctx, &out->proof, branch.retained,
+                record_kind.retained)) { return false; }
+        u64 mut i = 0;
+        while (i < branch.effects.len) {
+            u64 at = effect_index(out, ctx, &out->proof, branch.effects[i]);
+            if (!work(ctx, &out->proof, 1) || at == ownership_api.U64_MAX ||
+                positions[at] != ownership_api.U64_MAX) { return false; }
+            positions[at] = i;
+            i += 1;
+        }
+        k = 0;
+        while (k < out->order.len) {
+            if (!work(ctx, &out->proof, 1)) { return false; }
+            u64 before = positions[ordered_at[k * 2]];
+            u64 after = positions[ordered_at[k * 2 + 1]];
+            if (out->order[k].proved && before != ownership_api.U64_MAX &&
+                after != ownership_api.U64_MAX && before >= after) { return false; }
+            k += 1;
+        }
+        if (!work(ctx, &out->proof, positions.len)) { return false; }
+        p = 0;
+        while (p < positions.len) {
+            positions[p] = ownership_api.U64_MAX;
+            p += 1;
+        }
+        c += 1;
+    }
+    return true;
+}

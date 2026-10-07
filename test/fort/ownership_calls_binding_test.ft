@@ -1,0 +1,416 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| boundary X01
+//| boundary X02
+//| boundary X03
+//| boundary X04
+//| boundary X26
+//| direct-call binding ok
+/// Checks substituted call storage before effect application.
+import ownership_api;
+import ownership_calls;
+import ownership_calls_env;
+import ownership_keys;
+import ownership_state;
+import ownership_summary_model;
+
+fn emit(string key) void {
+    if (key == "X01") {
+        ownership_calls_env.boundary(key,
+            "3da65b229fa86083355fc6d44602053f050adb54638591bf46e3666db517dbdd", "none");
+    }
+    if (key == "X02") {
+        ownership_calls_env.boundary(key,
+            "0eabd6c014de7e8d4f8f460bd6a2079b931695d9e1d6115e200ac465c7eddb4f", "none");
+    }
+    if (key == "X03") {
+        ownership_calls_env.boundary(key,
+            "ed09f1b3674292d102656a0ec20cde03423ab87875266e02e864c89e6839a723", "none");
+    }
+    if (key == "X04") {
+        ownership_calls_env.boundary(key,
+            "19c40beec9c60702c02d8bc70d3b365a5f3d6bbf012b2bc02a3a2144773ea5bc", "incomplete_proof");
+    }
+    if (key == "X26") {
+        ownership_calls_env.boundary(key,
+            "f06997fd06ad95234c6f0e87eb84d71f71d711ae87f7af6d6046ed7a344eb2e7", "none");
+    }
+}
+
+fn minimal(ownership_calls_env.env mut* e) ownership_calls.request {
+    e->input.roots = e->roots[0..2];
+    ownership_calls.request mut req = ownership_calls_env.request(e);
+    ownership_api.alias_binding@ no_globals = {};
+    req.globals = no_globals;
+    req.sources = e->sources[0..2];
+    return req;
+}
+
+fn case_x01() void {
+    ownership_calls_env.env mut e = ownership_calls_env.env{};
+    ownership_calls_env.open(&e);
+    defer ownership_calls_env.close(&e);
+    ownership_calls.request req = ownership_calls_env.request(&e);
+    ownership_calls.frame mut out = ownership_calls.bind(&req);
+    ownership_calls_env.accepted(out.proof);
+    ownership_calls_env.possible(&out);
+    assert(out.aliases.len == 4 && out.destinations_len == 3);
+    assert(ownership_summary_model.same(out.model.roots[0].source, out.model.roots[1].source));
+    assert(ownership_summary_model.same(out.model.roots[0].source, e.actual_sources[0].key));
+    assert(ownership_summary_model.same(out.model.roots[0].allocation,
+        out.model.roots[1].allocation));
+    assert(ownership_state.same_allocation(out.allocations[0].actual,
+        out.allocations[1].actual));
+    assert(out.allocations[0].actual.obligation && out.allocations[1].actual.obligation);
+    assert(out.allocations[0].actual.count.one && !out.allocations[0].actual.count.many);
+    assert(ownership_summary_model.same(out.model.roots[0].slot, e.aliases[0].actual.root));
+    assert(ownership_summary_model.same(out.model.roots[1].slot, e.aliases[1].actual.root));
+    assert(!ownership_summary_model.same(out.model.roots[0].slot, out.model.roots[1].slot));
+    assert(ownership_summary_model.same(out.model.roots[2].slot, e.roots[2].slot));
+    assert(ownership_summary_model.same(out.model.roots[2].source, e.roots[2].source));
+    assert(out.model.roots[2].ownership == ownership_summary_model.owner_class.owning);
+    assert(ownership_summary_model.same(out.model.roots[3].slot, e.globals[0].actual.root));
+    assert(ownership_summary_model.same(out.model.roots[3].source, e.actual_sources[1].key));
+    assert(ownership_summary_model.same(out.model.roots[4].slot, e.result.actual_slot.root));
+    assert(ownership_state.same_place(out.result.actual_slot, e.result.actual_slot));
+    assert(ownership_summary_model.same(out.model.roots[5].allocation,
+        e.allocations[2].actual.key));
+    assert(out.allocations[2].fresh_proved && out.allocations[2].actual.obligation);
+    assert(out.sources[0].actual.kind == ownership_api.source_kind.heap);
+    assert(out.sources[0].range.extent.value == 16 && out.sources[0].range.access.end.value == 8);
+    assert(out.model.effects[0].effect.kind == ownership_api.effect_kind.read);
+    assert(out.model.effects[1].effect.kind == ownership_api.effect_kind.release);
+    assert(ownership_summary_model.same(out.model.effects[0].effect.source,
+        out.model.effects[1].effect.source));
+    assert(ownership_summary_model.same(out.model.effects[0].effect.allocation,
+        out.model.effects[1].effect.allocation));
+    assert(ownership_summary_model.same(out.model.predicates[0].left,
+        out.model.predicates[0].right));
+    assert(out.model.requirements[0].path.projections.len == 2);
+    assert(
+        out.model.requirements[0].path.projections[1].index.kind == ownership_api.fact_kind.exact);
+    assert(out.model.requirements[0].path.projections[1].index.value == 4);
+    assert(ownership_summary_model.same(
+        out.model.requirements[0].path.projections[1].captured_version,
+        e.captures[0].actual));
+    assert(ownership_summary_model.same(out.model.correlations[0].value_version,
+        e.captures[0].actual));
+    assert(out.model.cases[0].outcome.effects.len == 2);
+    assert(ownership_summary_model.same(out.model.cases[0].outcome.effects[0].source,
+        e.actual_sources[0].key));
+    assert(out.model.cases[0].outcome.kind == ownership_api.outcome_kind.abort);
+    assert(out.model.effects[0].deferred.exit_occurrence == 1);
+    assert(out.model.effects[1].deferred.exit_occurrence == 2);
+    assert(out.model.results[0].borrow.range.leaves[0].ty == e.ty);
+    assert(ownership_summary_model.same(out.model.retained[0].borrow.source,
+        e.actual_sources[0].key));
+    assert(out.model.retained[0].borrow.value_version.kind == ownership_api.entity_kind.value);
+    assert(out.result.order.len == 1 && out.result.order[0].proved);
+    assert(ownership_summary_model.same(out.result.holding_value, e.captures[2].actual));
+    assert(out.result.writes.len == 2
+        && out.result.writes[0].kind == ownership_api.effect_kind.read);
+    assert(out.model.residual_effects);
+    assert(e.actual_allocations[0].obligation && e.contents[0].owner_empty == false);
+    assert(ownership_summary_model.same(e.roots[0].source,
+        ownership_calls_env.id(ownership_api.entity_kind.source, 1)));
+    ownership_calls.free_frame(&out);
+    assert(out.aliases.len == 0 && out.sources.len == 0 && out.allocations.len == 0);
+    assert(out.captures.len == 0 && out.destinations.len == 0 && out.destinations_len == 0);
+    assert(out.result_writes.len == 0 && out.result_order.len == 0);
+    assert(out.metadata.blocks == null && out.model.metadata.blocks == null);
+    assert(out.model.roots.len == 0 && !ownership_api.successful(out.proof));
+    ownership_calls.free_frame(&out);
+    emit("X01");
+}
+
+fn case_x02() void {
+    ownership_calls_env.env mut e = ownership_calls_env.env{};
+    ownership_calls_env.open(&e);
+    defer ownership_calls_env.close(&e);
+    e.parts[0].field = 0;
+    e.sources[1].range = e.sources[0].range;
+    e.aliases[0].actual.projections = e.parts[0..1];
+    e.aliases[1].actual = e.aliases[0].actual;
+    ownership_calls.request req = minimal(&e);
+    ownership_calls.frame mut out = ownership_calls.bind(&req);
+    ownership_calls_env.accepted(out.proof);
+    ownership_calls_env.possible(&out);
+    assert(out.destinations_len == 1);
+    assert(ownership_summary_model.same(out.sources[0].actual.key, out.sources[1].actual.key));
+    assert(ownership_state.same_place(out.aliases[0].actual, out.aliases[1].actual));
+    assert(ownership_summary_model.same(out.aliases[0].captured_version,
+        out.aliases[1].captured_version));
+    assert(out.destinations[0].projections.len == 1
+        && out.destinations[0].projections[0].field == 0);
+    assert(out.model.effects[0].effect.place.projections.len == 1);
+    assert(out.model.requirements[0].path.projections.len == 3);
+    assert(out.model.requirements[1].path.projections.len == 3);
+    ownership_calls.free_frame(&out);
+    emit("X02");
+}
+
+fn case_x03() void {
+    ownership_calls_env.env mut e = ownership_calls_env.env{};
+    ownership_calls_env.open(&e);
+    defer ownership_calls_env.close(&e);
+    e.leaves[0].bytes = ownership_calls_env.window(4, 8);
+    e.partitions[0].bytes = ownership_calls_env.window(4, 8);
+    ownership_calls.request req = minimal(&e);
+    ownership_calls.frame mut out = ownership_calls.bind(&req);
+    ownership_calls_env.accepted(out.proof);
+    ownership_calls_env.possible(&out);
+    assert(out.sources[0].range.access.begin.value == 0
+        && out.sources[0].range.access.end.value == 8);
+    assert(out.sources[1].range.access.begin.value == 4
+        && out.sources[1].range.access.end.value == 12);
+    assert(out.sources.len == 2);
+    assert(out.model.effects[0].range.leaves[0].bytes.begin.value == 4);
+    assert(out.model.effects[0].range.leaves[0].bytes.end.value == 8);
+    assert(out.allocations[0].actual.obligation && e.actual_allocations[0].obligation);
+    assert(e.history[0].kind == ownership_api.effect_kind.transfer);
+    assert(out.model.order.len == 1 && out.model.order[0].proved);
+    ownership_calls.free_frame(&out);
+    emit("X03");
+}
+
+fn case_x04() void {
+    ownership_calls_env.env mut e = ownership_calls_env.env{};
+    ownership_calls_env.open(&e);
+    defer ownership_calls_env.close(&e);
+    e.aliases[1].actual.residual = true;
+    ownership_calls.request req = minimal(&e);
+    ownership_calls.frame mut out = ownership_calls.bind(&req);
+    ownership_calls_env.rejected(out.proof, ownership_api.incomplete_reason.missing_path);
+    ownership_calls_env.possible(&out);
+    assert(out.residual_overlap && out.aliases[1].actual.residual);
+    assert(ownership_state.same_proof(out.model.proof, out.proof));
+    assert(out.model.residual_effects && out.model.effects.len == 2);
+    assert(e.actual_allocations[0].obligation && e.aliases[1].actual.residual);
+    assert(e.counts.events == 1
+        && e.counts.last.reason == ownership_api.incomplete_reason.missing_path);
+    assert(ownership_keys.operation(e.counts.last.operation, req.operation) == 0);
+    assert(ownership_keys.source(e.counts.last.source, req.source) == 0);
+    ownership_calls.free_frame(&out);
+    assert(e.counts.last.source.line == 30 && e.counts.last.operation.operation == 7);
+    ownership_calls.free_frame(&out);
+    emit("X04");
+}
+
+fn case_x26() void {
+    ownership_calls_env.env mut e = ownership_calls_env.env{};
+    ownership_calls_env.open(&e);
+    defer ownership_calls_env.close(&e);
+    e.roots[1].key.function = ownership_calls_env.function(2, 1);
+    e.roots[1].key.ordinal = 1;
+    ownership_summary_model.provenance[2] mut provenance_records = {
+        e.provenance_records[0], e.provenance_records[0]};
+    provenance_records[1].key.function = ownership_calls_env.function(2, 1);
+    provenance_records[1].source.module = 2;
+    provenance_records[1].callee = ownership_calls_env.function(2, 1);
+    provenance_records[1].filename = "b.ft";
+    e.input.provenance_records = provenance_records[..];
+    ownership_calls.request req = minimal(&e);
+    ownership_calls.frame mut out = ownership_calls.bind(&req);
+    ownership_calls_env.accepted(out.proof);
+    ownership_calls_env.possible(&out);
+    assert(out.model.roots[0].key.ordinal == 1 && out.model.roots[1].key.ordinal == 1);
+    assert(out.model.roots[0].key.function.declaration.declaration == 1);
+    assert(out.model.roots[1].key.function.declaration.declaration == 1);
+    assert(ownership_keys.function(out.model.roots[0].key.function,
+        out.model.roots[1].key.function) != 0);
+    assert(out.model.provenance_records[0].filename == "a.ft");
+    assert(out.model.provenance_records[1].filename == "b.ft");
+    assert(ownership_keys.source(out.model.provenance_records[0].source,
+        out.model.provenance_records[1].source) != 0);
+    ownership_calls.free_frame(&out);
+    emit("X26");
+}
+
+fn invalid_bindings() void {
+    u32 mut scenario = 0;
+    while (scenario < 13) {
+        ownership_calls_env.env mut e = ownership_calls_env.env{};
+        ownership_calls_env.open(&e);
+        ownership_calls.request mut req = ownership_calls_env.request(&e);
+        if (scenario == 0) { e.aliases[1].formal = e.aliases[0].formal; }
+        if (scenario == 1) { e.aliases[0].formal = e.roots[2].slot; }
+        if (scenario == 2) { e.sources[0].actual.kind = ownership_api.source_kind.trusted_foreign; }
+        if (scenario == 3) { e.sources[1].formal = e.sources[0].formal; }
+        if (scenario == 4) { e.allocations[1].formal = e.allocations[0].formal; }
+        if (scenario == 5) { e.allocations[2].actual.key = e.actual_allocations[0].key; }
+        if (scenario == 6) { e.allocations[2].fresh_proved = false; }
+        if (scenario == 7) { e.captures[1].formal = e.captures[0].formal; }
+        if (scenario == 8) { e.allocations[0].actual.count.many = true; }
+        if (scenario == 9) { e.sources[0].actual.boundary.operation += 1; }
+        if (scenario == 10) { e.aliases[0].actual.root.kind = ownership_api.entity_kind.source; }
+        if (scenario == 11) { e.captures[0].actual.kind = ownership_api.entity_kind.slot; }
+        // A source binding cannot name the source of a by-value slot of the callee.
+        if (scenario == 12) { e.sources[3].formal = e.roots[2].source; }
+        ownership_calls.frame mut out = ownership_calls.bind(&req);
+        ownership_calls_env.rejected(out.proof, ownership_api.incomplete_reason.invalid_input);
+        ownership_calls_env.possible(&out);
+        assert(e.actual_allocations[0].obligation && !e.actual_allocations[0].count.many);
+        assert(e.actual_sources[0].kind == ownership_api.source_kind.heap);
+        assert(e.counts.events == 1 && e.counts.last.source.line == 30);
+        ownership_calls.free_frame(&out);
+        ownership_calls.free_frame(&out);
+        ownership_calls_env.close(&e);
+        scenario += 1;
+    }
+}
+
+fn protocol_and_source_facts() void {
+    ownership_calls_env.env mut e = ownership_calls_env.env{};
+    ownership_calls_env.open(&e);
+    defer ownership_calls_env.close(&e);
+    ownership_calls.request mut req = ownership_calls_env.request(&e);
+    ownership_calls.event_binding[2] repeated = {e.events[0], e.events[0]};
+    req.events = repeated[..];
+    ownership_calls.frame mut out = ownership_calls.bind(&req);
+    ownership_calls_env.rejected(out.proof, ownership_api.incomplete_reason.missing_correspondence);
+    assert(out.model.roots.len == 0 && out.aliases.len == 0);
+    ownership_calls.free_frame(&out);
+    ownership_calls_env.reset(&e);
+    req = ownership_calls_env.request(&e);
+    req.correspondence_complete = false;
+    out = ownership_calls.bind(&req);
+    ownership_calls_env.rejected(out.proof, ownership_api.incomplete_reason.missing_correspondence);
+    ownership_calls.free_frame(&out);
+    ownership_calls_env.reset(&e);
+    req = ownership_calls_env.request(&e);
+    e.actual_sources[0].kind = ownership_api.source_kind.trusted_foreign;
+    e.sources[0].actual = e.actual_sources[0];
+    e.sources[1].actual = e.actual_sources[0];
+    e.sources[3].actual = e.actual_sources[0];
+    out = ownership_calls.bind(&req);
+    ownership_calls_env.accepted(out.proof);
+    assert(out.sources[0].actual.kind == ownership_api.source_kind.trusted_foreign);
+    assert(out.sources[1].actual.kind == ownership_api.source_kind.trusted_foreign);
+    assert(out.sources[2].actual.kind == ownership_api.source_kind.static_storage);
+    assert(out.sources[0].range.extent.value == 16);
+    ownership_calls.free_frame(&out);
+    ownership_calls_env.reset(&e);
+    e.actual_sources[0].validity = ownership_api.validity_kind.released;
+    e.sources[0].actual = e.actual_sources[0];
+    e.sources[1].actual = e.actual_sources[0];
+    e.sources[3].actual = e.actual_sources[0];
+    req = ownership_calls_env.request(&e);
+    out = ownership_calls.bind(&req);
+    ownership_calls_env.accepted(out.proof);
+    assert(out.sources[0].actual.validity == ownership_api.validity_kind.released);
+    assert(out.outcome.possible_caller_return);
+    ownership_calls.free_frame(&out);
+}
+
+fn projected_result() void {
+    ownership_calls_env.env mut e = ownership_calls_env.env{};
+    ownership_calls_env.open(&e);
+    defer ownership_calls_env.close(&e);
+    e.effects[0].effect.place = ownership_calls_env.path(5);
+    e.effects[0].effect.place.projections = e.parts[0..1];
+    e.result.actual_slot.projections = e.parts[0..1];
+    ownership_calls.request req = ownership_calls_env.request(&e);
+    ownership_calls.frame mut out = ownership_calls.bind(&req);
+    ownership_calls_env.accepted(out.proof);
+    assert(ownership_state.same_place(out.result.actual_slot, e.result.actual_slot));
+    assert(ownership_summary_model.same(out.model.effects[0].effect.place.root,
+        e.result.actual_slot.root));
+    assert(out.model.effects[0].effect.place.projections.len == 2);
+    assert(out.model.effects[0].effect.place.projections[0].field == 3);
+    assert(out.model.effects[0].effect.place.projections[1].field == 3);
+    assert(out.model.order[0].proved && out.model.effects[1].deferred.exit_occurrence == 2);
+    ownership_calls.free_frame(&out);
+}
+
+fn missing_bindings() void {
+    u32 mut scenario = 0;
+    while (scenario < 5) {
+        ownership_calls_env.env mut e = ownership_calls_env.env{};
+        ownership_calls_env.open(&e);
+        ownership_calls.request mut req = ownership_calls_env.request(&e);
+        if (scenario == 0) { req.aliases = e.aliases[0..1]; }
+        if (scenario == 1) { req.sources = e.sources[0..3]; }
+        if (scenario == 2) { req.allocations = e.allocations[0..2]; }
+        if (scenario == 3) { req.captures = e.captures[0..1]; }
+        if (scenario == 4) { req.globals = e.globals[0..0]; }
+        ownership_calls.frame mut out = ownership_calls.bind(&req);
+        ownership_calls_env.rejected(out.proof,
+            ownership_api.incomplete_reason.missing_correspondence);
+        ownership_calls_env.possible(&out);
+        assert(out.model.residual_effects && e.actual_allocations[0].obligation);
+        assert(e.parts[1].index.kind == ownership_api.fact_kind.symbolic);
+        ownership_calls.free_frame(&out);
+        ownership_calls.free_frame(&out);
+        ownership_calls_env.close(&e);
+        scenario += 1;
+    }
+}
+
+fn region_facts() void {
+    ownership_calls_env.env mut e = ownership_calls_env.env{};
+    ownership_calls_env.open(&e);
+    defer ownership_calls_env.close(&e);
+    e.sources[0].range.key = ownership_calls_env.actual(ownership_api.entity_kind.region, 100);
+    e.sources[0].range.offset = ownership_calls_env.integer(12);
+    e.sources[0].range.extent = ownership_calls_env.integer(24);
+    e.sources[1].range.access = ownership_calls_env.window(8, 16);
+    ownership_calls.request req = minimal(&e);
+    ownership_calls.frame mut out = ownership_calls.bind(&req);
+    ownership_calls_env.accepted(out.proof);
+    assert(out.model.requirements[0].range.key.ordinal == 100);
+    assert(out.model.requirements[0].range.offset.value == 12);
+    assert(out.model.requirements[0].range.extent.value == 24);
+    assert(out.model.requirements[0].range.partitions[0].membership.ordinal == 100);
+    assert(out.sources[1].range.access.begin.value == 8);
+    assert(out.sources[1].range.access.end.value == 16);
+    ownership_calls.free_frame(&out);
+    e.sources[1].range.access.arithmetic_proved = false;
+    ownership_calls_env.reset(&e);
+    out = ownership_calls.bind(&req);
+    ownership_calls_env.accepted(out.proof);
+    ownership_calls_env.possible(&out);
+    assert(!out.sources[1].range.access.arithmetic_proved);
+    assert(out.model.residual_effects);
+    ownership_calls.free_frame(&out);
+}
+
+// A call frame retains the 12 model relations. E counts them from the model count, and a
+// binding adds no relation. One unit less refuses the last model relation.
+fn frame_count() void {
+    ownership_calls_env.env mut e = ownership_calls_env.env{};
+    ownership_calls_env.open(&e);
+    defer ownership_calls_env.close(&e);
+    e.limits.e = 12;
+    ownership_calls_env.reset(&e);
+    ownership_calls.request req = ownership_calls_env.request(&e);
+    ownership_calls.frame mut out = ownership_calls.bind(&req);
+    ownership_calls_env.accepted(out.proof);
+    assert(out.model.relations == 12 && out.relations == 12);
+    ownership_calls.free_frame(&out);
+    e.limits.e = 11;
+    ownership_calls_env.reset(&e);
+    ownership_calls.frame mut short = ownership_calls.bind(&req);
+    ownership_calls_env.rejected(short.proof, ownership_api.incomplete_reason.work_limit);
+    assert(short.proof.terminal.limit.category == ownership_api.limit_category.e);
+    assert(short.proof.terminal.limit.used == 11 && short.proof.terminal.limit.attempted == 12);
+    assert(short.model.residual_effects);
+    ownership_calls_env.possible(&short);
+    ownership_calls.free_frame(&short);
+}
+
+fn main() i32 {
+    case_x01();
+    case_x02();
+    case_x03();
+    case_x04();
+    case_x26();
+    invalid_bindings();
+    missing_bindings();
+    region_facts();
+    protocol_and_source_facts();
+    projected_result();
+    frame_count();
+    println("direct-call binding ok");
+    return 0;
+}
