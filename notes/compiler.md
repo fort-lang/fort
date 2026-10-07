@@ -410,6 +410,8 @@ came here.
   A snapshot of a window over F fragments holds up to 2F + 1 parts and no more parts than bytes.
   Paired R counts each part as a partition, so a snapshot never holds more than R parts.
   Shallow release refuses an owner whose place begins with the containing place or is residual.
+  The paired region count refuses two fragments of one window or snapshot that share a byte, so
+  each byte has one answer for every consumer.
   A missing event route refuses at its own effect and reports no other effect's event.
   Canonical zero preserves a proved empty owner. Unknown bytes supply no canonical-zero fact.
   Checked semantic moves transfer original obligations before byte-ledger publication.
@@ -439,6 +441,35 @@ came here.
   Original layout leaves and residual descendants control erased writes and shallow release.
   The byte suites establish supplied ordered effects and transactional storage cleanup.
   These suites do not establish producer integration.
+  `src/fort/ownership_raw_join.ft` joins or widens two paired states into an owned result.
+  The core facts use `ownership_join.join` or `ownership_join.widen` with the mapped event route.
+  A ledger window keeps a byte only when both inputs prove one original value, type, and byte
+  position at it. Equal fragment counts prove nothing. A different split of equal bytes keeps
+  its correspondence. Distinct complete versions can stay as two guarded alternative states.
+  Their G content is the guarded units of both cores plus `alternative_units(2)`. G is a
+  precision bound (FIR 14.1): content within G keeps the alternatives and charges that content
+  before either copy; content above G merges the inputs and records a lost fact of category G for
+  the window. A refusal remains only when the meter bound is below the request. A widen always
+  merges. The core join covers the guarded units of its result: above G, each core row becomes
+  residual and unknown.
+  When an input proved the correspondence of a window and the join loses it, each core row that
+  depends on a stored window place or an origin place of either input becomes unknown. A
+  dependent row lies at, below, or above that place in one storage; a parent past a dereference
+  is other storage. Canonical empty rows stay empty, as in byte publication. A window that no
+  input proved changes no row, so a join of two equal states changes no row.
+  A window of one input keeps no fragment. Two windows of one interval with another stored type,
+  place, alignment, or correspondence flag are both dropped. A lost correspondence and a dropped
+  pair each add a lost fact of category R, with reason `unknown_effect`, for the window source.
+  The joined context keeps an origin with its layout only when both inputs hold an equal origin of
+  that source. One input proves nothing about the window or count of the other path, so raw
+  access to any other source needs a new capture.
+  A captured bound, a relation, or a canonical empty fact stays only when both inputs hold it.
+  A snapshot with one key and one size on both inputs merges into contiguous parts, and each
+  disagreeing part becomes unknown. Other snapshots are dropped.
+  The join pays the copy work of both inputs before it allocates. A later refusal frees each
+  tentative record. The meter charge and the mapped event stay.
+  A bottom input gives a clone of the other input. An incomplete input keeps its own proof.
+  The join suites establish supplied paired states. They do not establish producer integration.
   These rules change no layout, ABI, emitted instruction, arithmetic operator, or runtime check.
 - **An emitter that copies a value and then clears its source needs an intermediate.** `move(lv)`
   writes into a destination the emitter cannot prove distinct from the operand (`s = move(s)`,

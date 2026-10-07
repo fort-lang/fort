@@ -477,6 +477,12 @@ bullet at a time and without a rewrite.
   refused before the clone. A deleted failure-path release stayed green in all four suites.
   Derive each position from one control run with `ownership_raw_bytes_env.watch`. Assert the
   terminal source line of each refusal.
+  **A deleted shared release proves nothing about one operation's records.** The test fixture
+  frees its own states through the same release functions, so the probe goes red for the
+  fixture's leak too. To attribute teardown to one record class, leak that class alone in the
+  release path under test: move it out to a local that is never freed, and keep each other
+  release. `test/fort/ownership_raw_join_cleanup_test.ft` measures its record classes that way,
+  on the refusal path and on the published path.
   **Linux `malloc_info` counts tcache chunks as live.** The metric's own `open_memstream` buffer
   fills one tcache bin of seven chunks. A round that never uses that chunk size then reads 848
   bytes more in each of the first seven measured rounds, 5936 in all, with no leak. The partition
