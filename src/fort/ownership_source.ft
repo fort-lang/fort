@@ -40,6 +40,7 @@ struct body {
     strbuf.str_buf verification_failure;
     fir.func function;
     ownership_source_live.context live;
+    graph_route route;
     status graph_correspondence;
     status graph_solver;
     ownership_api.proof_status graph_proof;
@@ -49,6 +50,12 @@ struct body {
     ownership_api.proof_status ownership;
     analysis_stage first_incomplete_stage;
     ownership_api.proof_status first_incomplete;
+}
+
+// One body's route to the closure graph. Its queries charge that body's own ledger.
+struct graph_route {
+    context mut* owner;
+    body mut* row;
 }
 
 struct context {
@@ -284,15 +291,19 @@ fn locate(context* c, ownership_api.proof_status proof) ownership_api.proof_stat
     return out;
 }
 
+// Each body's liveness is its own computation. Its target queries charge its own ledger, so a
+// refusal there leaves the graph build and every other body within their budgets.
 fn graph_query(void mut* opaque, ownership_api.graph_request* request)
     ownership_api.graph_result {
-    context mut* c = cast(opaque, context mut*);
+    graph_route* route = cast(opaque, graph_route*);
+    context mut* c = route->owner;
     if (c->graph_first_refusal.terminal.present) {
         return ownership_api.graph_result{.proof = c->graph_first_refusal, .residual_fort = true};
     }
     ownership_api.graph_request mut mapped = *request;
     mapped.source = operation_source(c, mapped.operation);
-    ownership_api.graph_result mut out = ownership_graph.query(cast(&c->graph, void mut*), &mapped);
+    ownership_api.graph_result mut out = ownership_graph.query_for(&c->graph,
+        &route->row->live.services, &mapped);
     out.proof = locate(c, out.proof);
     // The target callback uses unknown_effect for hidden foreign effects.
     if (mapped.query == ownership_api.graph_query_kind.targets && !out.residual_fort &&
@@ -300,7 +311,6 @@ fn graph_query(void mut* opaque, ownership_api.graph_request* request)
         out.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect) {
         out.proof = ownership_source_live.complete();
     }
-    if (out.proof.terminal.limit.present) { c->graph_first_refusal = out.proof; }
     return out;
 }
 
@@ -325,7 +335,8 @@ fn analyze(context mut* c) void {
             c->graph_inputs[i] = ownership_graph.body_input{row->key, &row->function, true};
             i += 1;
         }
-        c->graph = ownership_graph.build(c->graph_inputs[..], ownership_limits.production());
+        c->graph = ownership_graph.build(c->graph_inputs[..],
+            ownership_limits.computation(ownership_graph.closure_size(c->graph_inputs[..])));
         c->graph_built = true;
         c->graph.proof = locate(c, c->graph.proof);
         if (c->graph.proof.terminal.limit.present) { c->graph_first_refusal = c->graph.proof; }
@@ -344,8 +355,9 @@ fn analyze(context mut* c) void {
             row->graph_solver = ownership_api.successful(c->graph.proof) ?
                 status.complete : status.incomplete;
             row->graph_proof = c->graph.proof;
+            row->route = graph_route{c, row};
             row->live.services.graph = graph_query;
-            row->live.services.graph_context = cast(c, void mut*);
+            row->live.services.graph_context = cast(&row->route, void mut*);
         }
         ownership_source_live.solve(&row->live);
         row->liveness_correspondence = ownership_api.successful(row->live.correspondence) ?

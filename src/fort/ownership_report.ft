@@ -28,8 +28,8 @@ string[3] STAGE_STATUSES = {"complete", "failed", "unexecuted"};
 string[4] WORK_STATUSES = {"complete", "incomplete", "failed", "unexecuted"};
 string[5] PROOF_STATUSES = {"complete", "violated", "incomplete", "failed", "unexecuted"};
 string[ownership_api.LIMIT_COUNT] CATEGORIES = {"D", "R", "P", "G", "H", "T", "E", "W", "V"};
-string[ownership_api.LIMIT_COUNT] SCOPES = {
-    "path", "state", "state", "state", "computation", "call", "function", "computation", "report"};
+// The names follow the order of ownership_api.limit_scope.
+string[6] SCOPES = {"path", "state", "function", "call", "computation", "report"};
 
 struct invocation {
     string entry;
@@ -430,6 +430,9 @@ fn write_limits(json.writer mut* j, ownership_api.limit_table* limits) void {
     while (i < names.len) {
         ownership_api.limit_category kind = cast(i, ownership_api.limit_category);
         key_uint(j, names[i], ownership_limits.bound(limits, kind));
+        if (kind == ownership_api.limit_category.w) {
+            key_uint(j, "w_scale", ownership_limits.PRODUCTION_W_SCALE);
+        }
         i += 1;
     }
     json.json_object_end(j);
@@ -438,7 +441,8 @@ fn write_limits(json.writer mut* j, ownership_api.limit_table* limits) void {
 fn write_count(json.writer mut* j, u64 category, u64 used, u64 bound) void {
     json.json_object_begin(j);
     key_string(j, "category", CATEGORIES[category]);
-    key_string(j, "scope", SCOPES[category]);
+    key_string(j, "scope",
+        SCOPES[cast(ownership_api.scope_of(cast(category, ownership_api.limit_category)), u64)]);
     key_uint(j, "used", used);
     key_uint(j, "bound", bound);
     json.json_object_end(j);
@@ -453,6 +457,7 @@ fn write_meters(json.writer mut* j, ownership_source.context* c) void {
         key_string(j, "name", "graph_private");
         json.json_key(j, "owner");
         json.json_null(j);
+        key_uint(j, "fir_size", c->graph.fir_size);
         json.json_key(j, "counts");
         json.json_array_begin(j);
         write_count(j, cast(ownership_api.limit_category.w, u64), c->graph.work, c->graph.limits.w);
@@ -471,6 +476,7 @@ fn write_meters(json.writer mut* j, ownership_source.context* c) void {
         key_string(j, "name", "services");
         json.json_key(j, "owner");
         write_key(j, row->key);
+        key_uint(j, "fir_size", row->live.fir_size);
         json.json_key(j, "counts");
         json.json_array_begin(j);
         u64 mut category = 0;
@@ -593,7 +599,8 @@ fn build(strbuf.str_buf mut* out, ownership_source.context* c, invocation* call,
     json.json_init(&j, out);
     json.json_object_begin(&j);
     key_string(&j, "kind", "fort-ownership-report");
-    key_uint(&j, "version", 1);
+    // Version 2 adds the W scale of the limit table and the FIR size of each meter.
+    key_uint(&j, "version", 2);
     key_bool(&j, "complete", true);
     key_string(&j, "compiler_version", call->compiler_version);
     json.json_key(&j, "invocation");

@@ -67,6 +67,9 @@ FAILURE_CODES = (
 )
 U64_MAX = (1 << 64) - 1
 U32_MAX = (1 << 32) - 1
+LIMIT_VERSION = 2
+REPORT_VERSION = 2
+LIMIT_MEMBERS = ("version", "d", "r", "p", "g", "h", "t", "e", "w", "w_scale", "v")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 REVISION = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 
@@ -284,7 +287,20 @@ def source_range(value, files, source_lines, body=False):
     return value
 
 
-def reason(value, files, source_lines, failure=False, limits=None):
+def work_bound(table, fir_size):
+    """Return the W bound of a computation with this FIR size, saturated at u64."""
+    return min(U64_MAX, table["w"] + table["w_scale"] * fir_size)
+
+
+def is_work_bound(table, bound):
+    """Return whether some FIR size gives this W bound."""
+    if bound == U64_MAX:
+        return True
+    return bound >= table["w"] and (bound - table["w"]) % table["w_scale"] == 0
+
+
+def reason(value, files, source_lines, failure=False, limits=None, work=None):
+    """Validate a reason. `work` is the W bound of the ledger that refused, if one is known."""
     if value is None:
         return
     obj(value, ("stage", "code", "source", "limit"), "reason")
@@ -301,7 +317,11 @@ def reason(value, files, source_lines, failure=False, limits=None):
         choice(limit["category"], CATEGORIES, "limit category")
         integer(limit["used"], "limit used")
         integer(limit["bound"], "limit bound")
-        if limits is not None:
+        if limit["category"] == "W" and work is not None:
+            require(limit["bound"] == work, "reason: W bound differs from its ledger")
+        elif limit["category"] == "W" and limits is not None:
+            require(is_work_bound(limits, limit["bound"]), "reason: W bound of no FIR size")
+        elif limits is not None:
             require(
                 limit["bound"] == limits[limit["category"].lower()],
                 "reason: production bound mismatch",
@@ -557,7 +577,9 @@ def validate_report(
         "report",
     )
     require(report["kind"] == "fort-ownership-report", "report: incorrect kind")
-    require(integer(report["version"], "report version") == 1, "report: unknown version")
+    require(
+        integer(report["version"], "report version") == REPORT_VERSION, "report: unknown version"
+    )
     require(boolean(report["complete"], "report complete"), "report: truncated evidence")
     require(string(report["compiler_version"], "compiler version") != "", "compiler: empty version")
     if compiler_version is not None:
@@ -625,12 +647,13 @@ def validate_report(
             row["producer"] != "unavailable" or row["status"] == "incomplete",
             "unavailable producer: false closure outcome",
         )
-    table = obj(
-        report["limits"], ("version", *[category.lower() for category in CATEGORIES]), "limits"
+    table = obj(report["limits"], LIMIT_MEMBERS, "limits")
+    require(
+        integer(table["version"], "limits version") == LIMIT_VERSION, "limits: unsupported version"
     )
-    require(integer(table["version"], "limits version") == 1, "limits: unsupported version")
     for category in CATEGORIES:
         integer(table[category.lower()], "production bound", minimum=1)
+    integer(table["w_scale"], "production W scale", minimum=1)
     if limits is not None:
         require(table == limits, "limits: differs from production table")
     bodies = array(report["bodies"], "bodies")
@@ -674,10 +697,18 @@ def validate_report(
     ]
     require(ordered_keys == sorted(ordered_keys), "keys: body order")
     require(enumeration["selected_bodies"] == len(bodies), "enumeration: body count mismatch")
+    graph_sizes = []
+    body_sizes = 0
     for index, meter in enumerate(array(report["meters"], "meters")):
-        obj(meter, ("id", "name", "owner", "counts", "first_refusal"), "meter")
+        obj(meter, ("id", "name", "owner", "fir_size", "counts", "first_refusal"), "meter")
         require(integer(meter["id"], "meter id") == index, "meters: IDs have gaps")
+        meter_bounds = dict(table)
+        meter_bounds["w"] = work_bound(table, integer(meter["fir_size"], "meter FIR size"))
         choice(meter["name"], ("graph_private", "services"), "meter name")
+        if meter["name"] == "graph_private":
+            graph_sizes.append(meter["fir_size"])
+        else:
+            body_sizes += meter["fir_size"]
         if meter["owner"] is not None:
             owner = obj(meter["owner"], ("module", "declaration", "instance"), "meter owner")
             owner_key = tuple(
@@ -703,11 +734,17 @@ def validate_report(
             count_keys.add(count_key)
             integer(count["used"], "meter used")
             require(
-                integer(count["bound"], "meter bound") == table[count["category"].lower()],
+                integer(count["bound"], "meter bound") == meter_bounds[count["category"].lower()],
                 "meter: bound mismatch",
             )
             require(count["used"] <= count["bound"], "meter: use exceeds bound")
-        reason(meter["first_refusal"], files, source_lines, limits=table)
+        reason(
+            meter["first_refusal"],
+            files,
+            source_lines,
+            limits=meter_bounds,
+            work=meter_bounds["w"],
+        )
         refusal = meter["first_refusal"]
         if meter["name"] == "graph_private" and refusal is not None:
             require(
@@ -715,6 +752,12 @@ def validate_report(
                 and (refusal["limit"] is None or refusal["limit"]["category"] == "W"),
                 "graph private ledger: unsupported refusal category",
             )
+    # The graph build covers each verified body, and each verified body has one ledger.
+    require(len(graph_sizes) <= 1, "meters: two graph ledgers")
+    require(
+        not graph_sizes or graph_sizes[0] == body_sizes,
+        "meters: graph FIR size differs from the body ledgers",
+    )
     totals = derived_totals(bodies)
     validate_totals(report["totals"], totals)
     reason(report["first_incomplete"], files, source_lines, limits=table)
@@ -799,16 +842,16 @@ def production_limits(checkout):
         version_text = api_bytes.decode()
     except (OSError, subprocess.CalledProcessError, UnicodeError) as error:
         raise InvalidEvidence(f"production limits: {error}") from error
-    values = {"version": 1}
+    values = {"version": LIMIT_VERSION}
     require(
-        re.findall(r"^u32 LIMIT_VERSION = ([0-9]+);$", version_text, re.M) == ["1"],
+        re.findall(r"^u32 LIMIT_VERSION = ([0-9]+);$", version_text, re.M) == [str(LIMIT_VERSION)],
         "production limits: unsupported version",
     )
-    for category in CATEGORIES:
-        matches = re.findall(rf"^u64 PRODUCTION_{category} = ([0-9]+);$", text, re.M)
+    for member, name in [(c.lower(), c) for c in CATEGORIES] + [("w_scale", "W_SCALE")]:
+        matches = re.findall(rf"^u64 PRODUCTION_{name} = ([0-9]+);$", text, re.M)
         require(len(matches) == 1, "production limits: missing or duplicate declaration")
-        values[category.lower()] = integer(int(matches[0]), "production bound", minimum=1)
-    return values
+        values[member] = integer(int(matches[0]), "production bound", minimum=1)
+    return {member: values[member] for member in LIMIT_MEMBERS}
 
 
 def provenance(checkout, compiler, compiler_checkout, provenance_path):

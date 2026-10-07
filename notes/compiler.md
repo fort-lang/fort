@@ -670,10 +670,15 @@ came here.
   Source validity changes retain no ordered history row. They consume W without E.
   Join and widening count canonical merged histories with their own W work kinds.
   An E refusal preserves histories and obligations, then marks the result incomplete.
-  W stays cumulative. Each W request item has amount one.
+  W stays cumulative within one computation. Each W request item has amount one.
+  A computation is the graph build, the liveness of one body, or the summary solver of one
+  recursive component. A body in a recursive component keeps its own liveness computation.
+  `ownership_limits.computation` gives its W bound from its FIR size (D17.18).
   A counted multi-unit mutation pays earlier W units before its final mixed request.
   The final mixed request checks all items before any counter changes.
   A refusal keeps earlier paid work. It changes no input state.
+  The call-graph build keeps one fact chain for each body. Its whole-closure scans took 52 s on
+  `src/fort/main.ft` once W scaled, and the chains take 1.1 s for the same W units.
   Keep proof events independent of rendered diagnostic limits. Suppression cannot change a verdict.
   The T-317 event store owns its meter because teardown releases caller state before event storage.
   The seven A01-A07 traces have read evidence. They do not measure current compiler acceptance.

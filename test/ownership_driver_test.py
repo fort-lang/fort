@@ -125,6 +125,9 @@ class OwnershipDriverTest(unittest.TestCase):
         self.assertEqual(diagnostic["symbols"], [])
         self.assertIn("ownership proof is incomplete", diagnostic["diagnostics"][0]["message"])
         self.assertEqual(coverage["kind"], "fort-ownership-report")
+        # The report moved to version 2 with the W scale and the FIR size of each meter.
+        self.assertEqual(coverage["version"], 2)
+        self.assertIn("w_scale", coverage["limits"])
 
     def test_index_still_populates_identifier_records(self):
         self.assertEqual(self.invoke("--index").returncode, 1)
@@ -406,9 +409,13 @@ class OwnershipDriverTest(unittest.TestCase):
         meter = next(row for row in document["meters"] if row["name"] == "services")
         refusal = meter["first_refusal"]
         self.assertEqual(refusal["code"], "work_limit")
-        self.assertEqual(refusal["source"]["line"], 2)
-        self.assertEqual(refusal["limit"]["used"], document["limits"]["w"])
-        self.assertEqual(refusal["limit"]["bound"], document["limits"]["w"])
+        # The body is one computation of 1200 stores in one block. Its W bound follows that size.
+        limits = document["limits"]
+        self.assertEqual(meter["fir_size"], 1201)
+        bound = limits["w"] + limits["w_scale"] * meter["fir_size"]
+        self.assertEqual(refusal["source"]["line"], 201)
+        self.assertEqual(refusal["limit"]["used"], bound)
+        self.assertEqual(refusal["limit"]["bound"], bound)
         self.assertIn(b"liveness: work_limit", self.result.stderr)
         expected = (f"ownership proof is incomplete (liveness: work_limit; category W; "
                     f"used {refusal['limit']['used']}; bound {refusal['limit']['bound']})")
@@ -420,7 +427,7 @@ class OwnershipDriverTest(unittest.TestCase):
         diagnostics = json.loads(self.result.stdout)["diagnostics"]
         matches = [row for row in diagnostics if row["message"] == expected]
         self.assertEqual(len(matches), 1)
-        self.assertEqual(matches[0]["line"], 2)
+        self.assertEqual(matches[0]["line"], 201)
 
     def test_report_can_replace_an_old_report_atomically(self):
         self.report.write_bytes(b"old report\n")

@@ -7,6 +7,7 @@
 //| invalid charges ok
 //| complete charge order ok
 //| production stress matrix ok
+//| computation work bounds ok
 /// Tests each finite bound and the canonical budget callback.
 import ownership_api;
 import ownership_keys;
@@ -255,7 +256,8 @@ fn versions() void {
     assert(ownership_limits.configure(&budget, &valid));
     budget.used.w = 1;
     assert(!ownership_limits.configure(&budget, &unsupported));
-    assert(budget.configured && budget.used.w == 1 && budget.bounds.version == 1);
+    assert(budget.configured && budget.used.w == 1 &&
+        budget.bounds.version == ownership_api.LIMIT_VERSION);
     ownership_api.limit_table production = ownership_limits.production();
     assert(ownership_api.valid_limits(&production));
     println("10 invalid tables ok");
@@ -365,9 +367,9 @@ fn complete_order() void {
 
 fn production_stress() void {
     ownership_api.limit_table table = ownership_limits.production();
-    assert(table.version == 1 && table.d == 16 && table.r == 256 && table.p == 128);
+    assert(table.version == 2 && table.d == 16 && table.r == 256 && table.p == 128);
     assert(table.g == 128 && table.h == 64 && table.t == 64 && table.e == 256);
-    assert(table.w == 65536 && table.v == 512);
+    assert(table.w == 65536 && table.v == 512 && ownership_limits.PRODUCTION_W_SCALE == 64);
     ownership_api.limit_category[9] categories = {
         ownership_api.limit_category.d, ownership_api.limit_category.r,
         ownership_api.limit_category.p, ownership_api.limit_category.g,
@@ -441,6 +443,42 @@ fn production_stress() void {
     println("production stress matrix ok");
 }
 
+// W(S) = PRODUCTION_W + PRODUCTION_W_SCALE * S saturates at the counter maximum.
+fn computation_bounds() void {
+    u64 base = ownership_limits.PRODUCTION_W;
+    u64 scale = ownership_limits.PRODUCTION_W_SCALE;
+    assert(ownership_limits.work_bound(0) == base);
+    assert(ownership_limits.work_bound(1) == base + scale);
+    assert(ownership_limits.work_bound(77579) == base + scale * 77579);
+    u64 last = (ownership_api.U64_MAX - base) / scale;
+    assert(ownership_limits.work_bound(last) == base + scale * last);
+    assert(ownership_limits.work_bound(last) > ownership_api.U64_MAX - scale);
+    assert(ownership_limits.work_bound(last + 1) == ownership_api.U64_MAX);
+    u64 product_limit = ownership_api.U64_MAX / scale;
+    assert(ownership_limits.work_bound(product_limit) == ownership_api.U64_MAX);
+    assert(ownership_limits.work_bound(product_limit + 1) == ownership_api.U64_MAX);
+    assert(ownership_limits.work_bound(ownership_api.U64_MAX) == ownership_api.U64_MAX);
+    assert(ownership_limits.saturating_sum(ownership_api.U64_MAX, 1) == ownership_api.U64_MAX);
+    assert(ownership_limits.saturating_sum(ownership_api.U64_MAX - 1, 1) == ownership_api.U64_MAX);
+    assert(ownership_limits.saturating_sum(2, 3) == 5);
+    // A computation table changes W alone. Each other slot keeps its production value.
+    ownership_api.limit_table production = ownership_limits.production();
+    u64[3] sizes = {0, 1201, ownership_api.U64_MAX};
+    u64 mut i = 0;
+    while (i < sizes.len) {
+        ownership_api.limit_table table = ownership_limits.computation(sizes[i]);
+        assert(ownership_api.valid_limits(&table) && table.version == production.version);
+        assert(table.d == production.d && table.r == production.r && table.p == production.p);
+        assert(table.g == production.g && table.h == production.h && table.t == production.t);
+        assert(table.e == production.e && table.v == production.v);
+        assert(table.w == ownership_limits.work_bound(sizes[i]) && table.w >= production.w);
+        i += 1;
+    }
+    // A larger computation never gets a smaller bound.
+    assert(ownership_limits.work_bound(10) < ownership_limits.work_bound(11));
+    println("computation work bounds ok");
+}
+
 fn main() i32 {
     bounds();
     work();
@@ -448,5 +486,6 @@ fn main() i32 {
     invalid_charges();
     complete_order();
     production_stress();
+    computation_bounds();
     return 0;
 }

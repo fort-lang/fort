@@ -1,4 +1,5 @@
 /// Counts finite ownership analysis work and bounded facts.
+import fir;
 import ownership_api;
 import ownership_keys;
 
@@ -12,7 +13,9 @@ u64 PRODUCTION_G = 128;
 u64 PRODUCTION_H = 64;
 u64 PRODUCTION_T = 64;
 u64 PRODUCTION_E = 256;
+// W is a function of FIR size S: PRODUCTION_W + PRODUCTION_W_SCALE * S, saturated.
 u64 PRODUCTION_W = 65536;
+u64 PRODUCTION_W_SCALE = 64;
 u64 PRODUCTION_V = 512;
 
 struct meter {
@@ -26,6 +29,37 @@ fn production() ownership_api.limit_table {
     return ownership_api.limit_table{ownership_api.LIMIT_VERSION, PRODUCTION_D, PRODUCTION_R,
         PRODUCTION_P, PRODUCTION_G, PRODUCTION_H, PRODUCTION_T, PRODUCTION_E, PRODUCTION_W,
         PRODUCTION_V};
+}
+
+/// Returns the FIR statement count plus the block count of one function.
+fn fir_size(fir.func* f) u64 {
+    u64 mut size = 0;
+    u32 mut block = 0;
+    while (block < fir.block_count(f)) {
+        size = saturating_sum(size, cast(fir.block_statement_count(f, block), u64) + 1);
+        block += 1;
+    }
+    return size;
+}
+
+fn saturating_sum(u64 a, u64 b) u64 {
+    if (b > ownership_api.U64_MAX - a) { return ownership_api.U64_MAX; }
+    return a + b;
+}
+
+/// Returns the W bound of a computation with FIR size `size`.
+fn work_bound(u64 size) u64 {
+    if (size > 0 && PRODUCTION_W_SCALE > ownership_api.U64_MAX / size) {
+        return ownership_api.U64_MAX;
+    }
+    return saturating_sum(PRODUCTION_W, PRODUCTION_W_SCALE * size);
+}
+
+/// Returns the production table of one computation with FIR size `size`.
+fn computation(u64 size) ownership_api.limit_table {
+    ownership_api.limit_table mut out = production();
+    out.w = work_bound(size);
+    return out;
 }
 
 /// Configures a meter only when each bound is positive and the version is supported.

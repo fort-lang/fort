@@ -12,6 +12,9 @@
 //| G09 unknown fort
 //| G10 target limit
 //| G11 body fact chains
+//| G12 computation sizes
+//| G13 call target scope
+//| G14 query ledger
 /// Tests call components and target propagation over verified FIR.
 import ast;
 import check_env;
@@ -661,6 +664,152 @@ fn body_chains() void {
     println("G11 body fact chains");
 }
 
+// The FIR size of a body is its statement count plus its block count. A component sums its members.
+fn statements_and_blocks(fir.func* f) u64 {
+    u64 mut size = 0;
+    u32 mut block = 0;
+    while (block < fir.block_count(f)) {
+        size += cast(fir.block_statement_count(f, block), u64) + 1;
+        block += 1;
+    }
+    return size;
+}
+
+fn computation_sizes() void {
+    fixture mut f = fixture{};
+    string[4] source = {"fn even(u32 n) bool { if (n == 0) { return true; } return odd(n - 1); }",
+        "fn odd(u32 n) bool { if (n == 0) { return false; } return even(n - 1); }",
+        "fn leaf() void {}", "fn root() void { leaf(); even(4); }"};
+    string[4] names = {"even", "odd", "leaf", "root"};
+    open(&f, source[..], names[..], 4);
+    u64 mut total = 0;
+    u64 mut i = 0;
+    while (i < f.functions.len) {
+        u64 size = statements_and_blocks(&f.functions[i]);
+        assert(size > 0 && ownership_limits.fir_size(&f.functions[i]) == size);
+        total += size;
+        i += 1;
+    }
+    assert(statements_and_blocks(&f.functions[2]) == 1);
+    assert(f.graph.fir_size == total);
+    assert(ownership_graph.closure_size(f.inputs[..]) == total);
+    u32 recursive = ownership_graph.component_of(&f.graph, f.inputs[0].key);
+    assert(recursive == ownership_graph.component_of(&f.graph, f.inputs[1].key));
+    assert(ownership_graph.recursive_component(&f.graph, recursive));
+    assert(ownership_graph.component_size(&f.graph, recursive) ==
+        statements_and_blocks(&f.functions[0]) + statements_and_blocks(&f.functions[1]));
+    u32 single = ownership_graph.component_of(&f.graph, f.inputs[2].key);
+    assert(!ownership_graph.recursive_component(&f.graph, single));
+    assert(ownership_graph.component_size(&f.graph, single) == 1);
+    assert(ownership_graph.component_size(&f.graph, f.graph.component_count) == 0);
+    ownership_api.limit_table component = ownership_limits.computation(
+        ownership_graph.component_size(&f.graph, recursive));
+    assert(component.w == ownership_limits.PRODUCTION_W + ownership_limits.PRODUCTION_W_SCALE *
+        ownership_graph.component_size(&f.graph, recursive));
+    // A build that refuses before its first step still reports the size of its computation.
+    ownership_api.limit_table mut tight = ownership_limits.production();
+    tight.w = 1;
+    ownership_graph.graph mut refused = ownership_graph.build(f.inputs[..], tight);
+    assert(!ownership_api.successful(refused.proof) && refused.work == 0);
+    assert(refused.fir_size == total);
+    ownership_graph.free(&refused);
+    close(&f);
+    ownership_graph.body_input@ none = {};
+    assert(ownership_graph.closure_size(none) == 0);
+    println("G12 computation sizes");
+}
+
+// T bounds the targets of one call. Three calls each hold one target under T = 1, and three
+// successive queries at one call each return one target.
+fn call_target_scope() void {
+    fixture mut f = fixture{};
+    string[5] source = {"fn a() void {}", "fn b() void {}", "fn c() void {}",
+        "fn caller() void { a(); b(); c(); }", "fn invoke(fn () void cb) void { cb(); }"};
+    string[5] names = {"a", "b", "c", "caller", "invoke"};
+    open(&f, source[..], names[..], 1);
+    u64 mut i = 0;
+    while (i < 3) {
+        u64 call = nth_call(&f, "caller", i);
+        assert(f.graph.calls[call].targets_len == 1 && !f.graph.calls[call].residual_fort);
+        assert(target(&f, call, cast(i + 1, u32)));
+        i += 1;
+    }
+    u64 indirect = nth_call(&f, "invoke", 0);
+    assert(f.graph.calls[indirect].fort_len == 0 && f.graph.calls[indirect].residual_fort);
+    ownership_api.graph_request mut req = ownership_api.graph_request{};
+    req.query = ownership_api.graph_query_kind.targets;
+    req.operation = f.graph.calls[indirect].position;
+    ownership_api.entity_id[3] mut chosen = {};
+    i = 0;
+    while (i < 3) {
+        chosen[i] = ownership_api.entity_id{f.inputs[i].key, ownership_api.entity_kind.target, 0};
+        req.selections = chosen[i..i + 1];
+        ownership_api.graph_result answer = ownership_graph.query(cast(&f.graph, void mut*),
+            &req);
+        // The call keeps its unknown function value, so the residual target stays.
+        assert(ownership_api.successful(answer.proof) && answer.residual_fort);
+        assert(answer.targets.len == 1 && f.graph.query_targets.len == 1);
+        assert(ownership_keys.entity(answer.targets[0], chosen[i]) == 0);
+        i += 1;
+    }
+    // Two targets at one call pass T = 1: the query keeps one and covers the other as residual.
+    req.selections = chosen[0..2];
+    ownership_api.graph_result over = ownership_graph.query(cast(&f.graph, void mut*), &req);
+    assert(ownership_api.successful(over.proof) && over.residual_fort && over.targets.len == 1);
+    assert(ownership_keys.entity(over.targets[0], chosen[0]) == 0);
+    close(&f);
+    println("G13 call target scope");
+}
+
+fn ledger_event(void mut* opaque, ownership_api.event_request* request)
+    ownership_api.event_result {
+    return ownership_api.event_result{.proof = request->current, .retained = true};
+}
+
+// A query charges the ledger that the asking computation names, one unit for each target.
+// The graph build ledger keeps its work. A refused charge leaves a residual answer.
+fn query_ledger() void {
+    fixture mut f = fixture{};
+    string[2] source = {"fn leaf() void {}", "fn caller() void { leaf(); }"};
+    string[2] names = {"leaf", "caller"};
+    open(&f, source[..], names[..], 4);
+    u64 call = nth_call(&f, "caller", 0);
+    ownership_limits.meter mut ledger = ownership_limits.meter{};
+    ownership_api.limit_table limits = ownership_limits.production();
+    assert(ownership_limits.configure(&ledger, &limits));
+    ownership_api.services svc = ownership_api.services{
+        .budget_context = cast(&ledger, void mut*), .budget = ownership_limits.callback,
+        .event = ledger_event};
+    ownership_api.entity_id[3] mut chosen = {};
+    u64 mut i = 0;
+    while (i < chosen.len) {
+        chosen[i] = ownership_api.entity_id{f.inputs[0].key, ownership_api.entity_kind.target, 0};
+        i += 1;
+    }
+    ownership_api.graph_request mut req = ownership_api.graph_request{};
+    req.query = ownership_api.graph_query_kind.targets;
+    req.operation = f.graph.calls[call].position;
+    req.selections = chosen[..];
+    u64 build = f.graph.work;
+    ownership_api.graph_result answer = ownership_graph.query_for(&f.graph, &svc, &req);
+    assert(ownership_api.successful(answer.proof) && answer.targets.len == 1);
+    assert(ledger.used.w == 4 && f.graph.work == build);
+    ledger.bounds.w = ledger.used.w + 2;
+    ownership_api.graph_result refused = ownership_graph.query_for(&f.graph, &svc, &req);
+    assert(!ownership_api.successful(refused.proof) && refused.residual_fort);
+    assert(refused.proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(refused.proof.terminal.limit.bound == 6 && ledger.used.w == 6);
+    assert(f.graph.work == build && ownership_api.successful(f.graph.proof));
+    ownership_api.graph_result missing = ownership_graph.query_for(null, &svc, &req);
+    assert(missing.proof.terminal.reason == ownership_api.incomplete_reason.invalid_input);
+    assert(missing.residual_fort && ledger.used.w == 6);
+    // The standalone callback still charges the graph's own ledger.
+    ownership_api.graph_result standalone = ownership_graph.query(cast(&f.graph, void mut*), &req);
+    assert(ownership_api.successful(standalone.proof) && f.graph.work == build + 4);
+    close(&f);
+    println("G14 query ledger");
+}
+
 fn main() i32 {
     acyclic();
     self_recursion();
@@ -674,5 +823,8 @@ fn main() i32 {
     query_limits();
     two_targets(1, true);
     body_chains();
+    computation_sizes();
+    call_target_scope();
+    query_ledger();
     return 0;
 }
