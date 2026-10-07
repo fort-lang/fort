@@ -88,6 +88,107 @@ string[2] SAME_RESULT = {
     "fn caller(i32* p, bool b) i32* { return callee(p, b); }",
 };
 
+string[2] OTHER_RESULT = {
+    "fn callee(i32* p, i32* q, bool b) i32* { if (b) { return p; } return q; }",
+    "fn caller(i32* p, i32* q, bool b) i32* { return callee(p, q, b); }",
+};
+
+// Both cases return a field of `s`: one source with two windows.
+string[3] OTHER_WINDOW = {
+    "struct pair { i32 a; i32 b; }",
+    "fn callee(pair* s, bool b) i32* { if (b) { return &s->a; } return &s->b; }",
+    "fn caller(pair* s, bool b) i32* { return callee(s, b); }",
+};
+
+// The caller tests `x` before and after the call. The join of the two covered cases keeps the
+// atom of `x`, so the second test has one branch and `q` is released.
+string[5] KEPT_ATOM = {
+    "fn callee(i32* p, bool b) i32* { if (b) { return p; } return p; }",
+    "fn caller(i32 mut* own q, i32* p, bool x, bool b) void {",
+    "    if (x) { i32* r = callee(p, b); if (x) { del(q); return; } return; }",
+    "    del(q);",
+    "}",
+};
+
+// The normal cases need `b == 1, c == 1` or `b == 0`. The value pair `b == 1, c == 0` aborts.
+string[3] PARTIAL_RESULT = {
+    "fn callee(i32* p, bool b, bool c) i32* {",
+    "    if (b) { if (c) { return p; } panic(\"x\"); } return p; }",
+    "fn caller(i32* p, bool b, bool c) i32* { return callee(p, b, c); }",
+};
+
+// `g` stores `q` in one normal case only. The join of its cases stands for each value of `b`,
+// but the store does not, so `h` cannot export it (D17.18). `top` passes false: `v` keeps `a`
+// and `top` reads it after `del(a)`, so `top` must not pass.
+string[3] ONE_CASE_STORE = {
+    "fn g(i32* mut* pp, i32* q, bool b) void { if (b) { *pp = q; return; } }",
+    "fn h(i32* mut* pp, i32* q, bool b) void { g(pp, q, b); }",
+    "fn top(i32 mut* own a, i32* r) i32 { i32* mut v = a; h(&v, r, false); del(a); return *v; }",
+};
+
+// Both cases return `q`, so the call result has one value. The store still runs in one case.
+string[4] ONE_CASE_RESULT = {
+    "fn g(i32* mut* pp, i32* q, bool b) i32* { if (b) { *pp = q; return q; } return q; }",
+    "fn h(i32* mut* pp, i32* q, bool b) i32* { return g(pp, q, b); }",
+    "fn top(i32 mut* own a, i32* r) i32 {",
+    "    i32* mut v = a; i32* w = h(&v, r, false); del(a); return *v; }",
+};
+
+// No guard names the loaded condition, so each case of `g` runs at the call in `h`.
+string[4] LOADED_STORE = {
+    "fn g(i32* mut* pp, i32* q, i32* sel) void { if (*sel == 0) { *pp = q; return; } }",
+    "fn h(i32* mut* pp, i32* q, i32* sel) void { g(pp, q, sel); }",
+    "fn top(i32 mut* own a, i32* r, i32* s) i32 {",
+    "    i32* mut v = a; h(&v, r, s); del(a); return *v; }",
+};
+
+string[4] LOADED_RESULT = {
+    "fn g(i32* mut* pp, i32* q, i32* sel) i32* { if (*sel == 0) { *pp = q; return q; } return q; }",
+    "fn h(i32* mut* pp, i32* q, i32* sel) i32* { return g(pp, q, sel); }",
+    "fn top(i32 mut* own a, i32* r, i32* s) i32 {",
+    "    i32* mut v = a; i32* w = h(&v, r, s); del(a); return *v; }",
+};
+
+// Only the abort case stores. The export of `h` would reach its normal exit.
+string[3] ABORT_STORE = {
+    "fn g(i32* mut* pp, i32* q, bool b) void { if (b) { *pp = q; panic(\"x\"); } }",
+    "fn h(i32* mut* pp, i32* q, bool b) void { g(pp, q, b); }",
+    "fn top(i32 mut* own a, i32* r) i32 { i32* mut v = a; h(&v, r, false); del(a); return *v; }",
+};
+
+// Each normal case stores once, but two stores of two values: `top` gets `y`, not `x`.
+string[4] OTHER_STORE = {
+    "fn g(i32* mut* pp, i32* q, i32* r, bool b) void { if (b) { *pp = q; return; } *pp = r; }",
+    "fn h(i32* mut* pp, i32* q, i32* r, bool b) void { g(pp, q, r, b); }",
+    "fn top(i32 mut* own a, i32* x) i32 { i32 mut* own y = new(i32); i32* mut v = a;",
+    "    h(&v, x, y, false); del(y); i32 z = *v; del(a); return z; }",
+};
+
+// One store before the branch: both normal cases do it, so `h` exports it once. `top` then
+// reads `t` after `del(t)`, and the export makes that a definite error.
+string[4] SHARED_STORE = {
+    "fn g(i32* mut* pp, i32* q, bool b) void { *pp = q; if (b) { return; } }",
+    "fn h(i32* mut* pp, i32* q, bool b) void { g(pp, q, b); }",
+    "fn top(i32 mut* own a, bool b) i32 { i32 mut* own t = new(i32); i32* mut v = a;",
+    "    h(&v, t, b); del(t); i32 z = *v; del(a); return z; }",
+};
+
+// The abort runs before the store or after it. Each abort store list is a prefix of the
+// normal one, so `h` exports the store.
+string[4] ABORT_BEFORE = {
+    "fn g(i32* mut* pp, i32* q, bool b) void { if (b) { panic(\"x\"); } *pp = q; }",
+    "fn h(i32* mut* pp, i32* q, bool b) void { g(pp, q, b); }",
+    "fn top(i32 mut* own a, bool b) i32 { i32 mut* own t = new(i32); i32* mut v = a;",
+    "    h(&v, t, b); del(t); i32 z = *v; del(a); return z; }",
+};
+
+string[4] ABORT_AFTER = {
+    "fn g(i32* mut* pp, i32* q, bool b) void { *pp = q; if (b) { panic(\"x\"); } }",
+    "fn h(i32* mut* pp, i32* q, bool b) void { g(pp, q, b); }",
+    "fn top(i32 mut* own a, bool b) i32 { i32 mut* own t = new(i32); i32* mut v = a;",
+    "    h(&v, t, b); del(t); i32 z = *v; del(a); return z; }",
+};
+
 string[6] BRANCH_LOAD = {
     "struct owner_box { i32 mut* own item; i32 tag; }",
     "fn callee(owner_box mut* a, owner_box* b, bool read) i32 {",
@@ -390,8 +491,10 @@ fn repeated_guard() void {
     split_on_formal(&b, 1, 2);
 }
 
-// Two normal cases reach one call result. Flow joins them, but one exported write cannot hold
-// two case values at one position, so the caller summary stays incomplete.
+// Two normal cases reach one call result. They cover each value of `b`, so their join drops
+// the case atoms, and both write the source of `p`: the call result has one value, and the
+// caller publishes it (D17.18). Two results of two sources keep two values, and normal cases
+// that leave a value pair to an abort keep their atoms. Both callers stay incomplete.
 fn joined_result() void {
     ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
     string[2] names = {"callee", "caller"};
@@ -399,10 +502,99 @@ fn joined_result() void {
     defer ownership_call_bodies.close(&b);
     ownership_summary_model.summary* callee = ownership_call_bodies.summary(&b, 0);
     assert(ownership_api.successful(callee->proof) && callee->cases.len == 2);
+    ownership_summary_model.case_record row = ownership_call_bodies.only_case(&b, 1);
+    assert(row.guard.kind == ownership_api.entity_kind.none && row.results.len == 1);
     ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 1);
-    assert(s->proof.kind == ownership_api.proof_kind.incomplete && s->cases.len == 0);
-    assert(s->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(ownership_summary_model.same(s->results[0].borrow.source,
+        ownership_summary_body.designated(&b.inputs[1], 1)));
     assert(b.services.counts.events == 0);
+    ownership_call_bodies.bodies mut other = ownership_call_bodies.bodies{};
+    bodies(&other, OTHER_RESULT[..], names[..]);
+    defer ownership_call_bodies.close(&other);
+    ownership_summary_model.summary* two = ownership_call_bodies.summary(&other, 1);
+    assert(two->proof.kind == ownership_api.proof_kind.incomplete && two->cases.len == 0);
+    assert(two->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    ownership_call_bodies.bodies mut partial = ownership_call_bodies.bodies{};
+    bodies(&partial, PARTIAL_RESULT[..], names[..]);
+    defer ownership_call_bodies.close(&partial);
+    assert(ownership_call_bodies.summary(&partial, 0)->cases.len == 3);
+    ownership_summary_model.summary* kept = ownership_call_bodies.summary(&partial, 1);
+    assert(kept->proof.kind == ownership_api.proof_kind.incomplete && kept->cases.len == 0);
+    ownership_call_bodies.bodies mut window = ownership_call_bodies.bodies{};
+    bodies(&window, OTHER_WINDOW[..], names[..]);
+    defer ownership_call_bodies.close(&window);
+    assert(ownership_api.successful(ownership_call_bodies.summary(&window, 0)->proof));
+    ownership_summary_model.summary* windows = ownership_call_bodies.summary(&window, 1);
+    assert(windows->proof.kind == ownership_api.proof_kind.incomplete && windows->cases.len == 0);
+    ownership_call_bodies.bodies mut atom = ownership_call_bodies.bodies{};
+    bodies(&atom, KEPT_ATOM[..], names[..]);
+    defer ownership_call_bodies.close(&atom);
+    ownership_summary_model.summary* tested = ownership_call_bodies.summary(&atom, 1);
+    assert(ownership_api.successful(tested->proof) && tested->cases.len == 2);
+    assert(atom.services.counts.events == 0);
+}
+
+// The copy effects of a summary: each names one store of a borrow.
+fn copies(ownership_summary_model.summary* s) u64 {
+    u64 mut found = 0;
+    u64 mut i = 0;
+    while (i < s->effects.len) {
+        if (s->effects[i].payload == ownership_summary_model.payload_kind.copy) { found += 1; }
+        i += 1;
+    }
+    return found;
+}
+
+// A store that not each case of `g` does keeps `h` incomplete, and `top` cannot pass.
+fn split_store(string@ text) void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[3] names = {"g", "h", "top"};
+    bodies(&b, text, names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_summary_model.summary* g = ownership_call_bodies.summary(&b, 0);
+    assert(ownership_api.successful(g->proof) && g->cases.len == 2);
+    ownership_summary_model.summary* h = ownership_call_bodies.summary(&b, 1);
+    assert(h->proof.kind == ownership_api.proof_kind.incomplete && h->cases.len == 0);
+    assert(h->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    ownership_summary_model.summary* top = ownership_call_bodies.summary(&b, 2);
+    assert(!ownership_api.successful(top->proof) && top->cases.len == 0);
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.incomplete_proof));
+}
+
+// Each normal case of `g` exports the same store, so `h` exports it once and `top` replays it.
+fn shared_store(string@ text, u64 cases) void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[3] names = {"g", "h", "top"};
+    bodies(&b, text, names[..]);
+    defer ownership_call_bodies.close(&b);
+    assert(ownership_call_bodies.summary(&b, 0)->cases.len == 2);
+    ownership_summary_model.summary* h = ownership_call_bodies.summary(&b, 1);
+    assert(ownership_api.successful(h->proof) && h->cases.len == cases);
+    assert(copies(h) == 1 && h->retained.len == 1);
+    ownership_summary_model.summary* top = ownership_call_bodies.summary(&b, 2);
+    assert(top->proof.failed && !ownership_api.successful(top->proof));
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.invalid_use));
+}
+
+// A call export attaches to each exit after the call, so it cannot name one case of the
+// callee. The stores of the applied cases must agree, or the caller stays incomplete.
+fn joined_stores() void {
+    split_store(ONE_CASE_STORE[..]);
+    split_store(ONE_CASE_RESULT[..]);
+    split_store(LOADED_STORE[..]);
+    split_store(LOADED_RESULT[..]);
+    split_store(ABORT_STORE[..]);
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[3] names = {"g", "h", "top"};
+    bodies(&b, OTHER_STORE[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    assert(copies(ownership_call_bodies.summary(&b, 0)) == 2);
+    ownership_summary_model.summary* h = ownership_call_bodies.summary(&b, 1);
+    assert(h->proof.kind == ownership_api.proof_kind.incomplete && h->cases.len == 0);
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.incomplete_proof));
+    shared_store(SHARED_STORE[..], 1);
+    shared_store(ABORT_BEFORE[..], 2);
+    shared_store(ABORT_AFTER[..], 2);
 }
 
 // The view of `b->item` is loaded only on the read branch. The other case does not use it, so
@@ -541,6 +733,7 @@ fn main() i32 {
     merged_branches();
     repeated_guard();
     joined_result();
+    joined_stores();
     branch_load();
     stored_scalars();
     addressed_formal();

@@ -1395,8 +1395,17 @@ came here.
   the call unresolved. Each guard is decided before any case runs. When each guard fails, the
   call also stays unresolved. A formal whose address the body takes has no symbol, so its branch
   adds no value edge and its argument gives no capture.
-  An abort case records an abort exit. Normal cases join into one continuation. With two of them,
-  the summary does not export the call result and stays incomplete.
+  An abort case records an abort exit. Normal cases join into one continuation. When the normal
+  cases of a target cover each captured value (`ownership_calls.covered`), their case atoms leave
+  the continuations before the join, so the join loses no atom. Result rows that differ only in
+  their keys and value versions then become one row, and the summary exports that one value.
+  Normal cases that leave a value to an abort keep their atoms, and the join of two different
+  atoms keeps the summary incomplete. Two result values also keep it incomplete.
+  A store that a call exports attaches to each exit after the call, so it cannot name one case.
+  The store list of each applied case must be a prefix of one list, and each normal case must
+  export all of it; otherwise the summary stays incomplete. A store in one normal case only, or
+  in an abort case only, is the refused form; a store before or after a trap is not.
+  `ownership_calls_guards_test.ft` (`joined_stores`) holds each form.
   A projected effect on the caller storage of a symbolic caller stays incomplete in this unit.
 - **A borrow stored into caller storage is retained past the return** (D17.14).
   A copy of a reference local, or a null store, into caller storage is a store, at a field or at

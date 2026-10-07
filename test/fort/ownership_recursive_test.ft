@@ -33,6 +33,14 @@ string[3] MUTUAL = {
     "fn user(i32* p) i32 { return *f(p, false); }",
 };
 
+// The A03 trace of `spec/fir.md` 14.1: `g` passes its own `b` to `f`. Both cases of `f`
+// return `p` and cover each value of `b`, so each result designates caller storage P.
+string[3] A03 = {
+    "fn f(i32* p, bool b) i32* { if (b) { return p; } return g(p, true); }",
+    "fn g(i32* p, bool b) i32* { return f(p, b); }",
+    "fn user(i32* p, bool b) i32 { return *g(p, b); }",
+};
+
 // The member that calls the other member comes first in key order, so its first round finds
 // only bottom and publishes bottom again.
 string[2] MUTUAL_REVERSED = {
@@ -49,6 +57,12 @@ string[3] PICK = {
     "fn pick(i32* p, bool b) i32* { if (b) { return p; } return pick(p, true); }",
     "fn caller(i32* p) i32* { return pick(p, false); }",
     "fn dangling() i32* { i32 mut* own a = new(i32); i32* v = pick(a, false); del(a); return v; }",
+};
+
+// No guard decides `n == 0`, so both cases of `last` apply at its own call and join.
+string[2] LAST = {
+    "fn last(i32* p, i32 n) i32* { if (n == 0) { return p; } return last(p, n - 1); }",
+    "fn user(i32* p) i32 { return *last(p, 3); }",
 };
 
 // The recursive call swaps its arguments, so its frame binds `q` to the formal `p`: the self
@@ -102,10 +116,11 @@ string[2] LOST = {
     "fn reader(i32* p) i32 { return *lost(p, false); }",
 };
 
-string[3] GROW = {
+string[4] GROW = {
     "fn grow(bool keep) void {",
     "    i32 mut* own p = new(i32); if (keep) { grow(false); del(p); return; } del(p); }",
     "fn caller(i32 mut* own q) void { grow(true); del(q); }",
+    "fn either(i32 mut* own q, bool k) void { grow(k); del(q); }",
 };
 
 string[2] LEAK = {
@@ -275,6 +290,18 @@ fn mutual_recursion() void {
     ownership_recursive_env.complete(&reversed, "g", 1);
     ownership_recursive_env.complete(&reversed, "f", 2);
     assert(ownership_recursive_env.rounds(&reversed, "g") == 3);
+    ownership_recursive_env.closure mut trace = ownership_recursive_env.closure{};
+    ownership_recursive_env.open(&trace, A03[..], names[..]);
+    defer ownership_recursive_env.close(&trace);
+    ownership_recursive_env.solve(&trace);
+    ownership_recursive_env.complete(&trace, "f", 2);
+    ownership_recursive_env.complete(&trace, "g", 1);
+    ownership_summary_model.summary* joined = ownership_recursive_env.summary(&trace, "g");
+    assert(joined->cases[0].guard.kind == ownership_api.entity_kind.none);
+    assert(ownership_summary_model.same(result_source(joined, 0), formal_source(&trace, 1)));
+    ownership_recursive_env.complete(&trace, "user", 1);
+    assert(trace.counts.events == 0);
+    ownership_recursive_env.within_limits(&trace);
     ownership_recursive_env.closure mut spin = ownership_recursive_env.closure{};
     string[2] spin_names = {"f", "g"};
     ownership_recursive_env.open(&spin, MUTUAL_SPIN[..], spin_names[..]);
@@ -334,6 +361,15 @@ fn recursive_borrow_return() void {
     ownership_recursive_env.failed(&casts, "local");
     assert(ownership_recursive_env.saw(&casts, ownership_api.event_kind.invalid_use,
         "local") == 1);
+    ownership_recursive_env.closure mut last = ownership_recursive_env.closure{};
+    string[2] last_names = {"last", "user"};
+    ownership_recursive_env.open(&last, LAST[..], last_names[..]);
+    defer ownership_recursive_env.close(&last);
+    ownership_recursive_env.solve(&last);
+    ownership_recursive_env.complete(&last, "last", 2);
+    ownership_summary_model.summary* walked = ownership_recursive_env.summary(&last, "last");
+    assert(ownership_summary_model.same(result_source(walked, 1), formal_source(&last, 0)));
+    ownership_recursive_env.complete(&last, "user", 1);
     ownership_recursive_env.closure mut lost = ownership_recursive_env.closure{};
     string[2] lost_names = {"lost", "reader"};
     ownership_recursive_env.open(&lost, LOST[..], lost_names[..]);
@@ -350,12 +386,13 @@ fn recursive_borrow_return() void {
 
 fn conditional_ownership_recursion() void {
     ownership_recursive_env.closure mut c = ownership_recursive_env.closure{};
-    string[2] names = {"grow", "caller"};
+    string[3] names = {"grow", "caller", "either"};
     ownership_recursive_env.open(&c, GROW[..], names[..]);
     defer ownership_recursive_env.close(&c);
     ownership_recursive_env.solve(&c);
     ownership_recursive_env.complete(&c, "grow", 2);
     ownership_recursive_env.complete(&c, "caller", 1);
+    ownership_recursive_env.complete(&c, "either", 1);
     assert(c.counts.events == 0);
     ownership_recursive_env.closure mut leak = ownership_recursive_env.closure{};
     string[1] leak_names = {"leak"};
