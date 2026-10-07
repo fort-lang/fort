@@ -1782,6 +1782,17 @@ fn header_type(types.node* t) bool {
     return t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string;
 }
 
+// Whether integer type `to` holds each value of integer type `from`.
+fn holds(types.node* to, types.node* from) bool {
+    if (!integer_type(from)) { return false; }
+    u32 a = prim.prim_size(from->prim);
+    u32 b = prim.prim_size(to->prim);
+    bool signed_from = prim.prim_is_signed(from->prim);
+    bool signed_to = prim.prim_is_signed(to->prim);
+    if (signed_from == signed_to) { return a <= b; }
+    return !signed_from && signed_to && a < b;
+}
+
 // Charges one W unit of validation to the local ledger: a block or a statement of a walk.
 fn charge_work(context mut* c, u32 block) bool {
     ownership_api.charge_item[1] item = {ownership_api.charge_item{
@@ -2012,11 +2023,13 @@ fn rvalue_value(walk* w, fir.statement* s) witness_value {
         }
         return witness_value{};
     }
-    if (k == fir.rvalue_kind.rv_slice) {
-        // `slice(p, lo, hi)` has the length hi - lo. Checks before it hold lo <= hi.
-        if (!header_type(t) || r.ops_len != 2) { return witness_value{}; }
-        witness_value low = operand_value(w, fir.rvalue_operand(f, r, 0));
-        witness_value high = operand_value(w, fir.rvalue_operand(f, r, 1));
+    if (k == fir.rvalue_kind.rv_slice || k == fir.rvalue_kind.rv_slice_ptr) {
+        // `slice(p, lo, hi)` and `slice_ptr(a, lo, hi)` have the length hi - lo. Checks before a
+        // slice hold lo <= hi. A negative length stays unknown.
+        u32 first = k == fir.rvalue_kind.rv_slice ? 0 : 1;
+        if (!header_type(t) || r.ops_len != first + 2) { return witness_value{}; }
+        witness_value low = operand_value(w, fir.rvalue_operand(f, r, first));
+        witness_value high = operand_value(w, fir.rvalue_operand(f, r, first + 1));
         consts.cval mut length = consts.cv_none();
         if (!both_integers(low, high) || !consts.cv_sub(high.value, low.value, &length) ||
             length.neg) { return witness_value{}; }
@@ -2061,6 +2074,9 @@ fn rvalue_value(walk* w, fir.statement* s) witness_value {
         // A cast that keeps the value: any other cast leaves the walk without it.
         if (a.kind == witness_kind.constant && a.value.kind == consts.cval_kind.cv_int &&
             integer_type(t) && consts.int_fits(a.value, t->prim)) { return a; }
+        // The entry value of a parameter stays itself in a type that holds each of its values.
+        if (a.kind == witness_kind.entry_value && integer_type(t) &&
+            holds(t, local_type(w->owner, a.param))) { return a; }
         return witness_value{};
     }
     if (r.ops_len != 2) { return witness_value{}; }
@@ -2564,4 +2580,27 @@ fn free(context mut* c) void {
     del(c->flag_live);
     del(c->violations);
     *c = context{};
+}
+
+/// Whether a witness path reaches position `gap` of `block` in `f`, as witness decides it. Each
+/// searched block and each evaluated statement charges `ledger`. A refusal sets `*refusal`.
+/// `*taken` is the table of mark_taken for `f`: the walk uses it and gives it back, so a caller
+/// that validates many failures marks the body once.
+// Another analysis of the same body uses this walk with a ledger of its own.
+fn witness_in(fir.func* f, ownership_api.function_id identity,
+    ownership_api.source_position declaration, bool mut@ own mut* taken,
+    ownership_limits.meter mut* ledger, ownership_api.proof_status mut* refusal,
+    fir.pred_table* preds, u32 block, u32 gap) bool {
+    context mut c = context{};
+    c.function = f;
+    c.identity = identity;
+    c.declaration = declaration;
+    c.taken = move(*taken);
+    c.meter = *ledger;
+    c.first_refusal = *refusal;
+    bool found = witness(&c, preds, block, gap, trap.no_trap);
+    *ledger = c.meter;
+    *refusal = c.first_refusal;
+    *taken = move(c.taken);
+    return found;
 }
