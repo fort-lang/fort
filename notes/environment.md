@@ -101,9 +101,9 @@ without a rewrite.
   path fallback reads the wrong tree. From inside `.worktrees/fort-<id>`, `../../test/foo.py`
   **is** the main checkout, so `grep X ../../test/foo.py || grep X test/foo.py` never reaches the
   fallback and answers about `main` while the reader believes it answered about the branch. It
-  reported `CORPUS_FILES = 604` off `main` for a branch whose value is 615. Nothing failed; the
-  number was simply wrong. Name the file you mean, and read one tree per command so the output
-  says which tree answered.
+  reported `CORPUS_FILES = 604` off `main` for a branch whose value is 615 (history: the constant
+  left the tests on 2026-10-07). Nothing failed; the number was simply wrong. Name the file you
+  mean, and read one tree per command so the output says which tree answered.
 
   A parent of 1 is an orphan. An elapsed time past 30 minutes on a gate is suspect, because a full
   gate takes about 23 minutes. The working directory in `lsof` says whether the process is yours

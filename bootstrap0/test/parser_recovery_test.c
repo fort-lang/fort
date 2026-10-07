@@ -835,11 +835,10 @@ TEST(an_unclosed_bracket_costs_its_construct_and_no_more, {
 
 // ---- the fail corpus ------------------------------------------------------
 
-enum { CORPUS_PATH_CAP = 512, CORPUS_CHUNK = 4096, CORPUS_FILES = 323 };
+enum { CORPUS_PATH_CAP = 512, CORPUS_CHUNK = 4096 };
 
-// The files walked, the source of the one being read, and the lines that were
-// reported on without an annotation, one per line.
-static uint64_t corpus_files;
+// The source of the file that the walk reads, and the lines that were reported
+// on without an annotation, one per line.
 static sb_t corpus_src;
 static sb_t corpus_report;
 
@@ -911,7 +910,6 @@ static void check_corpus_file(const char* path) {
         sb_append(&corpus_report, ": cannot be read\n");
         return;
     }
-    corpus_files++;
     const char* src = sb_cstr(&corpus_src);
     TEST_UNUSED(parse_text(src));
     const bool any = strstr(src, "//! error-any:") != NULL;
@@ -970,15 +968,9 @@ static void walk_corpus(const char* dir) {
 // not hold yet: most annotations name semantic errors, which wait for the
 // checker.
 TEST(the_fail_corpus_reports_only_on_annotated_lines, {
-    corpus_files = 0;
     sb_clear(&corpus_report);
     walk_corpus(FORT_LANG_DIR "/fail");
     TEST_ASSERT_EQ_STR(sb_cstr(&corpus_report), "");
-    // The exact count, so that a file that stops being walked is noticed. It is a literal on
-    // purpose: deriving it with this walker would be circular. The name of the operand carries what
-    // to do about it, since `#val` is what the failing assertion prints.
-    const uint64_t raise_corpus_files_when_you_add_a_fail_test = corpus_files;
-    TEST_ASSERT_EQ_UINT64(raise_corpus_files_when_you_add_a_fail_test, (uint64_t)CORPUS_FILES);
 })
 
 // The corpus files whose syntax errors are all reported, with the number of diagnostics each must

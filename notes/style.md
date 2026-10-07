@@ -260,9 +260,10 @@ Keep exact identifiers and diagnostic text.
   grep missed every name holding a digit); T-063's "490 programs, 94 one way" (492 and 96);
   T-042's "six count constants" (seven, one sits inside an `enum`); `notes/testing.md`'s own
   command for counting moved constants (it undercounted, and T-045 found it by disagreeing with
-  it); and the coordinator's `CORPUS_FILES = 604`, read off `main` while it believed the number
-  came from a branch. So write the command that produced a number beside the number, and re-run
-  the command rather than copy the number when the text moves. A number with no command is a
+  it); and the coordinator's `CORPUS_FILES = 604` (a constant removed on 2026-10-07), read off
+  `main` while it believed the number came from a branch. So write the command that produced a
+  number beside the number, and re-run the command rather than copy the number when the text moves.
+  A number with no command is a
   claim, not a measurement. *A command written beside a number can count the comment that holds
   it.* T-120 wrote `grep -c 'm->method == ' src/lsp/server.ft` beside the number 9, in a header
   block of that same file, and the grep then read 10: the comment line carrying the command

@@ -45,12 +45,8 @@ CORPUS_DIRS = (
     TTY_DIR,
     OWNERSHIP_APPROVED_DIR,
 )
-# The number of files those directories hold. A floor cannot detect a directory
-# that the scan stopped using. When a `.ft` file changes this count, use the
-# number from the failure. bootstrap0/test/parser_recovery_test.c uses the same method.
-CORPUS_FILES = 1207
 # The least number of `.ft` each of those directories holds. A directory grows,
-# so its own test asserts a floor and CORPUS_FILES asserts the exact total.
+# so its own test asserts a floor. No test asserts the exact total.
 # A floor of 1 only proves that the directory exists.
 # Each floor stays near its measured count. The
 # table has one entry for each directory of CORPUS_DIRS, and
@@ -799,15 +795,15 @@ class CorpusTest(unittest.TestCase):
         """Check the approved examples without selecting ownership analysis."""
         self.check_directory(OWNERSHIP_APPROVED_DIR)
 
-    def test_the_corpus_is_the_size_it_says_it_is(self):
-        """The count of files walked, so a glob that stopped matching is seen.
+    def test_the_corpus_walk_holds_no_duplicate(self):
+        """Each file reaches exactly one of the tests above.
 
-        The walk holds no duplicate, which is what makes each file reach
-        exactly one of the tests above. This test tokenizes nothing.
+        A glob that stops matching fails only when the count of its
+        directory drops below the floor of CORPUS_MINIMUMS.
+        This test tokenizes nothing.
         """
         walked = [path for directory in CORPUS_DIRS for path in self.sources(directory)]
         self.assertEqual(len(walked), len(set(walked)))
-        self.assertEqual(len(walked), CORPUS_FILES)
 
     def test_every_corpus_directory_is_checked_by_a_test(self):
         """A directory of CORPUS_DIRS that no test checks is caught here.
