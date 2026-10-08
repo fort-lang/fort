@@ -927,14 +927,27 @@ the ordinary expression grammar. The condition must be a selection constant expr
 `bool`. `else $if` selects the first true branch. A final `else` supplies the last branch.
 One chain can contain at most 256 conditions. The compiler reports the 257th `$if`.
 
-A condition can use literals, `$cfg`, `sizeof(T)`, fixed-array `.len`, and unconditional immutable
-declarations from the same module. Such a declaration must have an unqualified primitive type or
-plain `string`. It can depend only on the same inputs and on other such declarations. Operators
-use their ordinary constant rules. Pointer, reference, array, and enum values are not available.
+A condition can use literals, `$cfg`, fixed-array `.len`, and unconditional immutable declarations
+from the same module. Such a declaration must have an unqualified primitive type or plain
+`string`. It can depend only on the same inputs and on other such declarations. Operators use
+their ordinary constant rules. Pointer, reference, array, and enum values are not available.
 Imported declarations, conditional declarations, and run-time values are also not available. The
 selector resolves only declarations that a condition reaches. It resolves them lazily and does not
 use source order. A reached cycle reports once, at the reference that closes the cycle. `&&`, `||`,
 and `?:` do not evaluate an operand that the result does not select.
+
+`sizeof` is not available in a condition, and the rule is syntactic. The selector reads each
+condition of a chain before it evaluates the chain. It reports `'sizeof' is not available in a
+$if condition` at the first `sizeof` of a condition, also in an operand that `&&`, `||`, or `?:`
+does not select. It reports the same text at the first `sizeof` of a reached declaration's
+initializer, and of an array length that a fixed-array `.len` evaluates. Use the target keys of
+`$cfg` (5.13) for the facts about the target.
+
+```fort
+$if (true || sizeof(i32) == 4) {      // error: 'sizeof' is not available in a $if condition
+    i32 WORD = 4;
+}
+```
 
 ```fort
 string OS = $cfg(target_os);
