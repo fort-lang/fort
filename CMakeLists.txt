@@ -564,6 +564,48 @@ set_tests_properties(panic_coverage_selftest PROPERTIES
     LABELS "fort;unit"
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
+# Hold each anchor of each table in tools/mutations to its source file. One test for each
+# table runs `tools/mutate.py --check --strict`, which builds nothing. It fails when an anchor
+# does not match its file once, or when the table has no comment. With --strict, a row whose
+# replacement text is in the file is stale too, so a mutation round fails this test. A stage
+# of a table must not run it: the stage of emitter_bootstrap.json that runs `ctest -L unit`
+# excludes it.
+file(GLOB FORT_MUTATION_TABLES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/tools/mutations/*.json")
+if(NOT FORT_MUTATION_TABLES)
+    message(FATAL_ERROR "fort: tools/mutations holds no mutation table")
+endif()
+foreach(table IN LISTS FORT_MUTATION_TABLES)
+    get_filename_component(table_name "${table}" NAME_WE)
+    add_test(NAME mutation_anchors_${table_name}
+        COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/mutate.py" "${table}" --check
+                --strict --root "${CMAKE_SOURCE_DIR}")
+    set_tests_properties(mutation_anchors_${table_name} PROPERTIES
+        LABELS "fort;unit"
+        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+endforeach()
+
+# Hold both readings of a row whose anchor is gone and whose replacement is in the file.
+# The fixture in test/mutate is not in tools/mutations, so the loop above skips it. Plain
+# --check reads the row as applied and exits 0; --check --strict reads it as stale and exits 1.
+# A missing fixture makes both exit 1, so the pair holds only when the row reads as applied.
+set(FORT_MUTATE_FIXTURE_DIR "${FORT_TEST_DIR}/mutate")
+add_test(NAME mutate_check_applied
+    COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/mutate.py" strict_table.json --check
+            --root "${FORT_MUTATE_FIXTURE_DIR}")
+add_test(NAME mutate_check_strict_stale
+    COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/mutate.py" strict_table.json --check
+            --strict --root "${FORT_MUTATE_FIXTURE_DIR}")
+add_test(NAME mutate_strict_needs_check
+    COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/mutate.py" strict_table.json --strict
+            --root "${FORT_MUTATE_FIXTURE_DIR}")
+set_tests_properties(mutate_check_applied mutate_check_strict_stale mutate_strict_needs_check
+    PROPERTIES
+    LABELS "fort;unit"
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+set_tests_properties(mutate_check_strict_stale PROPERTIES WILL_FAIL TRUE)
+set_tests_properties(mutate_strict_needs_check PROPERTIES
+    PASS_REGULAR_EXPRESSION "error: --strict needs --check")
+
 # Test ownership selection and report publication through the built compiler.
 add_test(NAME ownership_driver
     COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/ownership_driver_test.py"
