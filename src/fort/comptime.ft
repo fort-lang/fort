@@ -1062,7 +1062,9 @@ fn eval_ternary(selector mut* s, ast.node mut* n, value mut* out) bool {
     return true;
 }
 
-fn sizeof_base(selector mut* s, ast.node* n, u64 mut* out, bool mut* sized) bool {
+// The size of a base type. An error stands at `report`, the `sizeof` node.
+fn sizeof_base(selector mut* s, ast.node mut* report, ast.node* n, u64 mut* out,
+               bool mut* sized) bool {
     switch (n->kind) {
     case ast.ast_kind.k_type_prim:
         *out = cast(prim.prim_size(cast(n->op, prim.prim_kind)), u64);
@@ -1073,6 +1075,10 @@ fn sizeof_base(selector mut* s, ast.node* n, u64 mut* out, bool mut* sized) bool
         *sized = true;
         return true;
     case ast.ast_kind.k_type_fn:
+        // a function pointer is one word, but D3.4 refuses a part that is too large
+        if (!fn_parts_fit(s, report, n)) {
+            return false;
+        }
         *out = types.PTR_SIZE;
         *sized = true;
         return true;
@@ -1083,6 +1089,27 @@ fn sizeof_base(selector mut* s, ast.node* n, u64 mut* out, bool mut* sized) bool
     default:
         return expression_error(s, n, "invalid type in a $if sizeof expression");
     }
+}
+
+// Whether the result and each parameter of the function type `f` have a size
+// that fits, or no size of their own. type_size reports at `report` otherwise.
+// A struct name has no size here, because selection does not lay out a struct,
+// so this walk does not check an array of a struct.
+// The parser gives each part a type node (parse_type_after_base).
+fn fn_parts_fit(selector mut* s, ast.node mut* report, ast.node* f) bool {
+    u64 mut size = 0;
+    bool mut sized = false;
+    if (f->a != null && !type_size(s, report, f->a, &size, &sized)) {
+        return false;
+    }
+    u64 mut i = 0;
+    while (i < ast.ast_len(f)) {
+        if (!type_size(s, report, ast.ast_child(f, i), &size, &sized)) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
 }
 
 fn eval_array_length(selector mut* s, ast.node* suffix, u64 mut* out) bool {
@@ -1268,7 +1295,7 @@ fn type_size(selector mut* s, ast.node mut* n, ast.node* written, u64 mut* size,
         if (!type_size(s, n, base, size, sized)) {
             return false;
         }
-    } else if (!sizeof_base(s, base, size, sized)) {
+    } else if (!sizeof_base(s, n, base, size, sized)) {
         return false;
     }
     u64 mut i = 0;

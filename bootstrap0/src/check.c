@@ -63,6 +63,11 @@ void check_init(check_t* ck) {
     ck->suffixes = NULL;
     ck->suffix_cap = 0;
     ck->suffix_top = 0;
+    ck->resolve_depth = 0;
+    ck->sized = NULL;
+    ck->sized_cap = 0;
+    ck->sized_len = 0;
+    ck->sized_draining = false;
 }
 
 void check_free(check_t* ck) {
@@ -83,6 +88,10 @@ void check_free(check_t* ck) {
     ck->suffixes = NULL;
     ck->suffix_cap = 0;
     ck->suffix_top = 0;
+    mem_free(ck->sized);
+    ck->sized = NULL;
+    ck->sized_cap = 0;
+    ck->sized_len = 0;
 }
 
 uint64_t check_sym_count(const check_t* ck) {
@@ -278,15 +287,112 @@ static sym_t* nominal_sym(const type_t* t) {
 
 static void resolve_sym(check_t* ck, sym_t* s);
 
-bool check_size_fits(check_t* ck, loc_t loc, const type_t* t) {
-    if (check_poisoned(t) || t->kind == TYPE_VOID || type_size_fits(t)) {
-        return true;
-    }
+static void error_too_large(check_t* ck, loc_t loc, const type_t* t) {
     check_msg_begin(ck);
     msg_str(&ck->msg, "type is too large: ");
     check_msg_type(ck, t);
     check_msg_end(ck, loc);
+}
+
+static const type_t* referenced_too_large(check_t* ck, loc_t loc, const type_t* t, bool behind);
+
+bool check_size_fits(check_t* ck, loc_t loc, const type_t* t) {
+    if (check_poisoned(t) || t->kind == TYPE_VOID) {
+        return true;
+    }
+    const type_t* large = t;
+    if (type_size_fits(t)) {
+        large = referenced_too_large(ck, loc, t, false);
+    }
+    if (large == NULL) {
+        return true;
+    }
+    error_too_large(ck, loc, large);
     return false;
+}
+
+// Keeps an array for sized_drain.
+static void sized_push(check_t* ck, loc_t loc, const type_t* t) {
+    if (ck->sized_len == ck->sized_cap) {
+        const uint64_t cap = mem_grown_cap(ck->sized_cap, mem_add(ck->sized_len, 1));
+        check_sized_t* bigger = mem_alloc(mem_mul(cap, sizeof(check_sized_t)));
+        for (uint64_t i = 0; i < ck->sized_len; i++) {
+            bigger[i] = ck->sized[i];
+        }
+        mem_free(ck->sized);
+        ck->sized = bigger;
+        ck->sized_cap = cap;
+    }
+    ck->sized[ck->sized_len].type = t;
+    ck->sized[ck->sized_len].at = loc;
+    ck->sized_len++;
+}
+
+// The first array in `t` that passes the ceiling behind a reference, or NULL.
+// `behind` says whether a `*`, a `@` or a function type encloses `t`. The walk
+// does not go into a struct, because the struct's declaration checked its own
+// fields. While a resolution is active, the walk puts an array whose struct has
+// no layout yet on the list of sized_drain.
+static const type_t* referenced_too_large(check_t* ck, loc_t loc, const type_t* t, bool behind) {
+    switch (t->kind) {
+    case TYPE_PTR:
+    case TYPE_SPAN:
+        return referenced_too_large(ck, loc, t->elem, true);
+    case TYPE_FN: {
+        // no value stores a parameter or a result, but D3.4 refuses its type too
+        const type_t* result = referenced_too_large(ck, loc, t->elem, true);
+        if (result != NULL) {
+            return result;
+        }
+        for (uint32_t i = 0; i < t->nparams; i++) {
+            const type_t* param = referenced_too_large(ck, loc, t->params[i], true);
+            if (param != NULL) {
+                return param;
+            }
+        }
+        return NULL;
+    }
+    case TYPE_ARRAY:
+        if (!behind) {
+            // the size of `t` covers this array and the arrays in it
+            return referenced_too_large(ck, loc, t->elem, false);
+        }
+        if (type_layout_pending(t) != NULL) {
+            // only arrays and a struct are below this array
+            if (ck->resolve_depth > 0) {
+                sized_push(ck, loc, t);
+                return NULL;
+            }
+            if (!check_layout(ck, t)) {
+                return NULL;
+            }
+        }
+        if (!type_size_fits(t)) {
+            return t;
+        }
+        return referenced_too_large(ck, loc, t->elem, true);
+    default:
+        return NULL;
+    }
+}
+
+// Checks the arrays that check_size_fits kept while a resolution was active.
+// The outermost resolve_sym calls it, so a layout here cannot read a struct
+// that is still resolving. A check can resolve a struct, which can add an
+// entry, so the loop reads the length again on each pass.
+static void sized_drain(check_t* ck) {
+    if (ck->sized_draining) {
+        return;
+    }
+    ck->sized_draining = true;
+    for (uint64_t i = 0; i < ck->sized_len; i++) {
+        const check_sized_t c = ck->sized[i];
+        if (check_layout(ck, c.type) && !type_size_fits(c.type)) {
+            error_too_large(ck, c.at, c.type);
+        }
+    }
+    ck->sized_len = 0;
+    ck->sized_draining = false;
 }
 
 // The struct whose layout a type needs, behind any fixed arrays.
@@ -2933,6 +3039,7 @@ static void resolve_sym(check_t* ck, sym_t* s) {
     }
     ast_node_t* node = (ast_node_t*)s->node;
     node->ann |= CHECK_ANN_RESOLVING;
+    ck->resolve_depth++;
     switch (s->kind) {
     case SYM_STRUCT:
         resolve_struct(ck, s);
@@ -2951,10 +3058,14 @@ static void resolve_sym(check_t* ck, sym_t* s) {
     default:
         break;
     }
+    ck->resolve_depth--;
     node->ann &= ~(uint32_t)CHECK_ANN_RESOLVING;
     node->ann |= CHECK_ANN_RESOLVED;
     node->type = s->type;
     node->sym = s;
+    if (ck->resolve_depth == 0) {
+        sized_drain(ck);
+    }
 }
 
 static void resolve_struct(check_t* ck, sym_t* s) {

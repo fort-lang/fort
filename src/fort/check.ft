@@ -135,6 +135,13 @@ struct expr {
     ast.sym* sym;
 }
 
+// An array behind a reference whose struct element had no layout when the checker
+// read its declaration. sized_drain checks its size when no resolution is active (D3.4).
+struct sized_check {
+    types.node* ty;
+    diag.loc at;
+}
+
 // ---- the context -------------------------------------------------------------------
 
 /// Holds the state for one closure analysis.
@@ -189,6 +196,16 @@ struct checker {
     // small through the 256 suffixes of D2.11 and nested groups.
     types.suffix mut@ own suffixes;
     u64 suffix_top;
+
+    // ---- the sizes that wait for a layout (D3.4) ----
+    // The checker lays out a struct that a reference reaches only when no
+    // resolution is active, because a forced layout can read a struct that is
+    // still resolving as an infinite size (D3.8). check_size_fits keeps such an
+    // array here, and the outermost resolve_sym checks the list when it returns.
+    u64 resolve_depth; // the resolve_sym calls that are active
+    sized_check mut@ own sized;
+    u64 sized_len;
+    bool sized_draining; // sized_drain is active
 }
 
 /// Prepares a checker that reports through `s` and defines the universe symbols.
@@ -225,6 +242,8 @@ fn check_free(checker mut* ck) void {
     types.type_table_free(&ck->types);
     del(ck->suffixes);
     ck->suffix_top = 0;
+    del(ck->sized);
+    ck->sized_len = 0;
 }
 
 // ---- the three vectors -------------------------------------------------------------
@@ -272,6 +291,32 @@ fn values_reserve(checker mut* ck) void {
     }
     del(ck->values);
     ck->values = move(bigger);
+}
+
+// The capacity that the list `sized` grows to from capacity `cap`. A test
+// calls it with a capacity that no allocation can reach.
+fn sized_capacity(u64 cap) u64 {
+    if (cap < VEC_MIN_CAP) {
+        return VEC_MIN_CAP;
+    }
+    if (cap > containers.U64_MAX / 2) {
+        panic("check.sized_capacity: capacity overflow");
+    }
+    return cap * 2;
+}
+
+fn sized_reserve(checker mut* ck) void {
+    if (ck->sized_len < ck->sized.len) {
+        return;
+    }
+    sized_check mut@ own bigger = new(sized_check, sized_capacity(ck->sized.len));
+    u64 mut i = 0;
+    while (i < ck->sized_len) {
+        bigger[i] = ck->sized[i];
+        i += 1;
+    }
+    del(ck->sized);
+    ck->sized = move(bigger);
 }
 
 fn externs_reserve(checker mut* ck) void {
@@ -617,17 +662,100 @@ fn nominal_sym(types.node* t) ast.sym mut* {
     return cast(t->decl, ast.sym mut*);
 }
 
-// Reports "type is too large" at `at` when the size of `t` passes the ceiling
-// and returns whether the type may be used.
-fn check_size_fits(checker mut* ck, diag.loc at, types.node* t) bool {
-    if (check_poisoned(t) || t->kind == types.type_kind.k_void || types.type_size_fits(t)) {
-        return true;
-    }
+fn error_too_large(checker mut* ck, diag.loc at, types.node* t) void {
     check_msg_begin(ck);
     msg_str(ck, "type is too large: ");
     check_msg_type(ck, t);
     check_msg_end(ck, at);
+}
+
+// Reports "type is too large" at `at` when the size of `t`, or of an array that a
+// reference in `t` reaches, passes the ceiling (D3.4). Returns whether the type
+// may be used.
+fn check_size_fits(checker mut* ck, diag.loc at, types.node* t) bool {
+    if (check_poisoned(t) || t->kind == types.type_kind.k_void) {
+        return true;
+    }
+    types.node* mut large = t;
+    if (types.type_size_fits(t)) {
+        large = referenced_too_large(ck, at, t, false);
+    }
+    if (large == null) {
+        return true;
+    }
+    error_too_large(ck, at, large);
     return false;
+}
+
+// The first array in `t` that passes the ceiling behind a reference, or null.
+// `behind` says whether a `*`, a `@` or a function type encloses `t`. The walk
+// does not go into a struct, because the struct's declaration checked its own
+// fields. While a resolution is active, the walk puts an array whose struct has
+// no layout yet on the list of sized_drain.
+fn referenced_too_large(checker mut* ck, diag.loc at, types.node* t, bool behind) types.node* {
+    switch (t->kind) {
+    case types.type_kind.k_ptr, types.type_kind.k_span:
+        return referenced_too_large(ck, at, t->elem, true);
+    case types.type_kind.k_fn:
+        // no value stores a parameter or a result, but D3.4 refuses its type too
+        types.node* result = referenced_too_large(ck, at, t->elem, true);
+        if (result != null) {
+            return result;
+        }
+        u64 mut i = 0;
+        while (i < t->params.len) {
+            types.node* param = referenced_too_large(ck, at, t->params[i], true);
+            if (param != null) {
+                return param;
+            }
+            i += 1;
+        }
+        return null;
+    case types.type_kind.k_array:
+        if (!behind) {
+            // the size of `t` covers this array and the arrays in it
+            return referenced_too_large(ck, at, t->elem, false);
+        }
+        if (types.type_layout_pending(t) != null) {
+            // only arrays and a struct are below this array
+            if (ck->resolve_depth > 0) {
+                sized_reserve(ck);
+                ck->sized[ck->sized_len] = sized_check{t, at};
+                ck->sized_len += 1;
+                return null;
+            }
+            if (!check_layout(ck, t)) {
+                return null;
+            }
+        }
+        if (!types.type_size_fits(t)) {
+            return t;
+        }
+        return referenced_too_large(ck, at, t->elem, true);
+    default:
+        return null;
+    }
+}
+
+// Checks the arrays that check_size_fits kept while a resolution was active.
+// The outermost resolve_sym calls it, so a layout here cannot read a struct
+// that is still resolving. A check can resolve a struct, which can add an
+// entry, so the loop reads the length again on each pass.
+fn sized_drain(checker mut* ck) void {
+    if (ck->sized_draining) {
+        return;
+    }
+    ck->sized_draining = true;
+    u64 mut i = 0;
+    while (i < ck->sized_len) {
+        sized_check c = ck->sized[i];
+        if (check_layout(ck, c.ty) && !types.type_size_fits(c.ty)) {
+            error_too_large(ck, c.at, c.ty);
+        }
+        i += 1;
+    }
+    ck->sized_len = 0;
+    ck->sized_draining = false;
 }
 
 // The struct whose layout a type needs, behind any fixed arrays.
@@ -3788,6 +3916,7 @@ fn resolve_sym(checker mut* ck, ast.sym mut* s) void {
     }
     ast.node mut* n = s->node;
     n->ann |= ANN_RESOLVING;
+    ck->resolve_depth += 1;
     switch (s->kind) {
     case ast.sym_kind.s_struct:
         resolve_struct(ck, s);
@@ -3800,10 +3929,14 @@ fn resolve_sym(checker mut* ck, ast.sym mut* s) void {
     default:
         // a field, a local, a parameter and a builtin are complete
     }
+    ck->resolve_depth -= 1;
     n->ann &= ~ANN_RESOLVING;
     n->ann |= ANN_RESOLVED;
     n->ty = s->ty;
     n->sym = s;
+    if (ck->resolve_depth == 0) {
+        sized_drain(ck);
+    }
 }
 
 fn resolve_struct(checker mut* ck, ast.sym mut* s) void {

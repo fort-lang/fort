@@ -96,6 +96,13 @@ typedef struct {
     const sym_t* sym;
 } expr_t;
 
+// An array behind a reference whose struct element had no layout when the checker
+// read its declaration. sized_drain checks its size when no resolution is active (D3.4).
+typedef struct {
+    const type_t* type;
+    loc_t at;
+} check_sized_t;
+
 typedef struct {
     type_table_t types; // owned: every type the annotations point to
     ptrvec_t syms;      // sym_t*, owned; alive until check_free
@@ -147,6 +154,17 @@ typedef struct {
     type_suffix_t* suffixes; // owned, `suffix_cap` entries
     uint64_t suffix_cap;
     uint64_t suffix_top;
+
+    // ---- the sizes that wait for a layout (D3.4) ----
+    // The checker lays out a struct that a reference reaches only when no
+    // resolution is active, because a forced layout can read a struct that is
+    // still resolving as an infinite size (D3.8). check_size_fits keeps such an
+    // array here, and the outermost resolve_sym checks the list when it returns.
+    uint64_t resolve_depth; // the resolve_sym calls that are active
+    check_sized_t* sized;   // owned, `sized_cap` entries
+    uint64_t sized_cap;
+    uint64_t sized_len;
+    bool sized_draining; // sized_drain is active
 } check_t;
 
 void check_init(check_t* ck);
