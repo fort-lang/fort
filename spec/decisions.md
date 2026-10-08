@@ -3137,15 +3137,24 @@ language server to use them, while the server itself lands after the bootstrap f
 
   A condition must have type `bool` and must be a selection constant expression. Selection
   constant expressions use the ordinary expression grammar and the precedence of D6.1. The first
-  version accepts literals, `$cfg`, `sizeof(T)`, fixed-array `.len`, and unconditional immutable
-  declarations from the same module. Such a declaration must have an unqualified primitive type
-  or plain `string`. It can depend only on the same inputs and on other such declarations.
-  Operators combine these values under the ordinary constant rules. The selector rejects pointer,
+  version accepts literals, `$cfg`, fixed-array `.len`, and unconditional immutable declarations
+  from the same module. Such a declaration must have an unqualified primitive type or plain
+  `string`. It can depend only on the same inputs and on other such declarations. Operators
+  combine these values under the ordinary constant rules. The selector rejects pointer,
   reference, array, and enum values. Imported declarations, declarations inside a `$if`, and
   run-time values are not available to a condition. The selector resolves only declarations that
   a condition reaches. It resolves them lazily and does not use source order. A reached cycle
   reports once, at the reference that closes the cycle. `&&`, `||`, and `?:` do not evaluate an
   operand that the result does not select.
+
+  `sizeof` is not a selection constant expression. The rule is syntactic. Before the selector
+  evaluates a chain, it reads each condition of that chain. A condition that contains `sizeof`
+  reports `'sizeof' is not available in a $if condition` at its first `sizeof` in source order.
+  This includes a `sizeof` in an operand that `&&`, `||`, or `?:` does not select, and a
+  `sizeof` in the condition of an `else $if` after the selected branch. The selector reports the
+  same text at the first `sizeof` of a reached declaration's initializer. It also reports it at
+  the first `sizeof` of an array length that a fixed-array `.len` evaluates. A nested `$if` in an
+  inactive branch reports nothing.
 
   The lexer and parser read all branches. They report lexical and syntax errors in any branch.
   The compiler selects branches before module closure construction and ordinary name collection.
@@ -3156,6 +3165,12 @@ language server to use them, while the server itself lands after the bootstrap f
   A declaration branch contains declarations or nested declaration `$if` forms. A statement
   branch contains statements or nested statement `$if` forms. `$if` is not a field, enum member,
   parameter, type, or expression form.
+- history: Amended 2026-10-08: The first version also accepted `sizeof(T)` in a condition. The
+  selector runs before the checker, so it kept a second copy of the checker's type and size rules
+  to compute `sizeof`. Each difference between the two copies was a defect: an array that is too
+  large behind a pointer, an array of a struct, and a `void` part of a function type. Now the
+  checker alone sizes a type. The target keys of D21.1, as `$cfg(target_arch)`, give the facts
+  about the target.
 
 ### D21.3 Conditional imports
 - owner: `module-system.md` (Import forms and resolution), `grammar.md` (Module structure),

@@ -191,21 +191,14 @@ came here.
   infinite size for `struct outer { inner[2]* p; } struct inner { outer o; }`, and a skip makes
   the two declaration orders of one pair two programs. `check_limits_test.c` and
   `check_limits_test.ft` hold both orders, the self-reference and that cycle.
-- **The checker checks the type of each `$if` `sizeof`** (D3.4, D21.2). The selector
-  (`comptime.ft`) lays out no struct, so it cannot size an array of a struct or enum. It puts
-  each `sizeof` that a condition evaluates on the list `module.sized`. A `sizeof` reached
-  through a constant or a fixed-array `.len` name stays off the list, because the checker checks
-  that declaration already; a second check gave 2 reports and erased its index record. A
-  `sizeof` in an array length of a listed type stays off too, because the outer check reaches
-  it. After `resolve_declarations`, `check_selected_sizes` checks each listed type as
-  `check_sizeof` does, at depth 0, so the one layout engine decides each size and no D3.8 or
-  D7.10 result changes. It then clears the annotations of that type; no other pass annotates a
-  condition, so the `--index` records equal those of a compiler without the check. The selector
-  still reports a size that it can compute. It names the type as the checker does, through
-  `types.type_build` and `types.type_to_str` (`too_large`). `spelled_type` copies the type
-  construction of `check_type_at`, so change the two together. A probe of 23 types gave the
-  checker's text for 21; the 2 others differ before D3.4 (a length of 2^63, `noreturn*`), and so
-  does a result `mut`, as in `fn() (u64[2^62])* mut`, which the selector does not refuse.
+- **The `$if` selector sizes no type** (D21.2). The selector (`comptime.ft`) runs before module
+  closure and name collection, so it cannot use the checker's types or layouts. Until 2026-10-08
+  a condition could use `sizeof(T)`, and the selector kept its own copy of the checker's type and
+  size rules for it. Three differences between the copies were defects: an array too large behind
+  a pointer, an array of a struct, and a `void` part of a function type. Now `refuse_sizeof`
+  reports the first `sizeof` of each condition of a chain before the chain evaluates, and of each
+  reached initializer and `.len` array length. Do not add a rule to the selector that needs a type
+  or a layout: give the facts a `$cfg` key (D21.1) instead. `fail/control/013` holds the forms.
 - **An untyped constant reports at the point a context fixes its type, so every position that is
   no context must ask for its default type.** `untyped()` gives an untyped integer in
   `[2^63, 2^64 - 1]` the error type and reports nothing, because D4.5 leaves that report to the
@@ -258,18 +251,6 @@ came here.
   `EMPTY_READONLY`, an immutable indirection is `EMPTY_IMMUTABLE`, and the read-only memory stops
   at the first indirection. Reading `mut` where `empty` is meant silently lets `move(view[0])`
   through or refuses `del(buf)` on an immutable binding.
-- **`$if` selection repeats the checker's `void` refusals in a function type** (D3.1, D21.2).
-  Selection (`src/fort/comptime.ft`) computes a `sizeof` in a `$if` condition before the
-  checker sees that type (`check_selected_sizes`), and a `void` part can give no size. So
-  `void_part` refuses each `void` part of a function type that the checker refuses, with the
-  checker's text and position: `fn(void) void`, `fn(void[2]) void`,
-  `fn((void)*) void` and `fn() void[2]`. A probe of 29 function types gave the same line,
-  column and text in both: 20 refused and 9 accepted. Change a `void` rule of `check_type_at` or
-  `base_type`, and change `void_part` with it. Selection keeps its own
-  texts outside a function type, as `a span cannot have void elements` for `sizeof((void@))`.
-  It does not repeat the checker's `mut` rules for a result type: the checker reports
-  `fn() void mut` after selection (`fail/control/017`). `fail/functions/024` holds the
-  function-type forms.
 
 ## 5. Modules, the driver and the diagnostics
 

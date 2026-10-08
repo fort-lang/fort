@@ -834,6 +834,10 @@ Compile-time diagnostics (D14.2) are written to stderr. Each one starts with a h
   `a module $if cannot contain both imports and declarations` at its opening `$if`. An import
   selector after a declaration reports `an import comes before every declaration` at its opening
   `$if`, even when its selected branch is empty (D21.3).
+- A `$if` condition that contains `sizeof` reports `'sizeof' is not available in a $if condition`
+  at its first `sizeof`, before the selector evaluates the chain. An operand that the result does
+  not select reports too. A reached declaration and a fixed-array `.len` length report the same
+  text at their first `sizeof` (D21.2).
 - The compiler emits no warnings (D14.2): unused imports, unused variables and statements after
   a terminating statement are not diagnosed.
 
