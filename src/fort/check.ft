@@ -4816,6 +4816,28 @@ fn check_module_decls(checker mut* ck, modules.module* m) void {
     collect_failed_imports(ck, m);
     collect_module(ck, m);
     resolve_declarations(ck, m->ast);
+    check_selected_sizes(ck, m);
+}
+
+// Checks the type of each `sizeof` that a `$if` condition of the module
+// evaluated, as check_sizeof does (D3.4). The selector lays out no struct, so
+// this is where an array of a struct or enum reports "type is too large". The
+// caller has resolved each declaration, so no resolution is active and
+// check_layout reads a finished layout or makes it at once (D3.8, D7.10). No
+// other pass annotates a condition, so clearing the annotations of the type
+// leaves the condition as the selector left it, and the index does not change.
+fn check_selected_sizes(checker mut* ck, modules.module* m) void {
+    u64 mut i = 0;
+    while (i < m->sized.len) {
+        ast.node mut* n = m->sized.items[i];
+        written_type t = check_type(ck, n->a, type_pos.pos_binding);
+        if (!check_poisoned(t.ty) && t.ty->kind != types.type_kind.k_void
+            && check_layout(ck, t.ty)) {
+            check_size_fits(ck, n->loc, t.ty);
+        }
+        clear_annotations(n->a);
+        i += 1;
+    }
 }
 
 // The rule the whole module has to be checked for, and the end of the pass

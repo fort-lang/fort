@@ -40,6 +40,7 @@ struct selector {
     strbuf.str_buf msg;
     bool ok;
     bool imports;
+    ast.node_vec mut* sized; // each `sizeof` of a condition, for check_selected_sizes
 }
 
 fn reserve(selector mut* s) void {
@@ -167,6 +168,12 @@ fn expression_error(selector mut* s, ast.node* n, string text) bool {
     return false;
 }
 
+fn push_sized(selector mut* s, ast.node mut* n) void {
+    ast.list_reserve(s->sized);
+    s->sized->items[s->sized->len] = n;
+    s->sized->len += 1;
+}
+
 fn target_primitive(ast.node* t, prim.prim_kind mut* out) bool {
     u32 mut flags = 0;
     ast.node* u = unwrap_group(t, &flags);
@@ -237,6 +244,10 @@ fn eval_entry(selector mut* s, entry mut* e, diag.loc at, value mut* out) bool {
         return false;
     }
     e->state = entry_state.state_resolving;
+    // The checker checks a constant's own `sizeof` as a declaration, so the
+    // list keeps none of them.
+    u64 start = s->sized->len;
+    defer s->sized->len = start;
     ast.node* t = e->decl->a;
     prim.prim_kind mut target = prim.prim_kind.prim_void;
     bool primitive = target_primitive(t, &target);
@@ -1093,8 +1104,8 @@ fn sizeof_base(selector mut* s, ast.node mut* report, ast.node* n, u64 mut* out,
 
 // Whether the result and each parameter of the function type `f` have a size
 // that fits, or no size of their own. type_size reports at `report` otherwise.
-// A struct name has no size here, because selection does not lay out a struct,
-// so this walk does not check an array of a struct.
+// A struct name has no size here, so the checker sizes an array of it
+// (check_selected_sizes).
 // The parser gives each part a type node (parse_type_after_base).
 fn fn_parts_fit(selector mut* s, ast.node mut* report, ast.node* f) bool {
     u64 mut size = 0;
@@ -1210,7 +1221,13 @@ fn eval_fixed_array_len(selector mut* s, ast.node mut* n, value mut* out) bool {
         return expression_error(s, n, "a fixed-array '.len' cannot use void elements");
     }
     u64 mut length = 0;
-    if (!eval_array_length(s, suffix, &length)) {
+    u64 start = s->sized->len;
+    bool evaluated = eval_array_length(s, suffix, &length);
+    if (n->a->kind == ast.ast_kind.k_ident) {
+        // the checker checks the declaration's type, with each `sizeof` in it
+        s->sized->len = start;
+    }
+    if (!evaluated) {
         if (guarded != null) {
             guarded->state = entry_state.state_failed;
         }
@@ -1235,6 +1252,19 @@ fn has_same_module_type(selector* s, ast.node* name) bool {
         if ((decl->kind == ast.ast_kind.k_struct_decl
              || decl->kind == ast.ast_kind.k_enum_decl)
             && decl->name == name->name) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+// Whether `name` is an unconditional enum of this module.
+fn is_same_module_enum(selector* s, ast.node* name) bool {
+    u64 mut i = 0;
+    while (i < ast.ast_len(s->module)) {
+        ast.node* decl = ast.ast_child(s->module, i);
+        if (decl->kind == ast.ast_kind.k_enum_decl && decl->name == name->name) {
             return true;
         }
         i += 1;
@@ -1366,6 +1396,203 @@ fn group_is_void(ast.node* group) bool {
         && u->a->kind == ast.ast_kind.k_type_void;
 }
 
+// ---- the text of a type that is too large ----------------------------------------
+
+// The `sizeof` type that `too_large` names, built as check_type_at builds it,
+// so that types.type_to_str gives the checker's spelling. A name becomes a
+// struct or enum type with no declaration. Null when an array length does not
+// evaluate, or when a part has no type, as `noreturn*`. This copies the type
+// construction of check.check_type_at: change the two together.
+fn spelled_type(selector mut* s, types.table mut* tt, ast.node* n,
+                bool mut* mut0) types.node* {
+    *mut0 = false;
+    bool wrapped = n->kind == ast.ast_kind.k_type;
+    ast.node* mut base = n;
+    if (wrapped) {
+        base = n->a;
+    }
+    bool has_group = base->kind == ast.ast_kind.k_type;
+    bool mut grouped_mut = false;
+    types.node* mut b = null;
+    if (has_group) {
+        b = spelled_type(s, tt, base, &grouped_mut);
+    } else {
+        b = spelled_base(s, tt, base);
+    }
+    if (b == null) {
+        return null;
+    }
+    u64 mut count = 0;
+    if (wrapped) {
+        count = ast.ast_len(n);
+    }
+    types.suffix mut@ own levels = new(types.suffix, count + 1);
+    defer del(levels);
+    u64 mut i = 0;
+    while (i < count) {
+        ast.node* suffix = ast.ast_child(n, i);
+        levels[i].kind = cast(suffix->op, types.suffix_kind);
+        levels[i].is_own = ast.ast_is_own(suffix);
+        levels[i].is_mut = ast.ast_is_mut(suffix);
+        if (levels[i].kind == types.suffix_kind.s_array
+            && !eval_array_length(s, suffix, &levels[i].len)) {
+            return null;
+        }
+        i += 1;
+    }
+    bool mut base_own = wrapped && ast.ast_is_own(n);
+    bool base_mut = (wrapped && ast.ast_is_mut(n)) || grouped_mut;
+    if (has_group && base_own) {
+        // the marker owns the grouped reference, as in check_type_at
+        if (b->kind == types.type_kind.k_ptr) {
+            b = types.type_ptr(tt, b->elem, true, b->is_mut);
+            base_own = false;
+        } else if (b->kind == types.type_kind.k_voidptr) {
+            b = types.type_voidptr(tt, true, b->is_mut);
+            base_own = false;
+        } else if (b->kind == types.type_kind.k_span) {
+            b = types.type_span(tt, b->elem, true, b->is_mut);
+            base_own = false;
+        } else if (b->kind == types.type_kind.k_string) {
+            b = types.type_string(tt, true);
+            base_own = false;
+        }
+    }
+    types.build_result built = types.type_build(tt, base_own, base_mut, b, levels[0..count]);
+    if (built.built == null) {
+        return null;
+    }
+    *mut0 = built.mut0;
+    return built.built;
+}
+
+// The base of a `sizeof` type, as check.base_type builds it.
+fn spelled_base(selector mut* s, types.table mut* tt, ast.node* n) types.node* {
+    switch (n->kind) {
+    case ast.ast_kind.k_type_prim:
+        prim.prim_kind k = cast(n->op, prim.prim_kind);
+        if (k == prim.prim_kind.prim_void) {
+            return types.type_void(tt);
+        }
+        return types.type_prim(tt, k);
+    case ast.ast_kind.k_type_string:
+        return types.type_string(tt, false);
+    case ast.ast_kind.k_type_void:
+        return types.type_void(tt);
+    case ast.ast_kind.k_type_name:
+        if (is_same_module_enum(s, n)) {
+            return types.type_enum(tt, n->name, null);
+        }
+        return types.type_struct(tt, n->name, null);
+    case ast.ast_kind.k_type_fn:
+        if (n->a == null) {
+            return null;
+        }
+        bool mut ignored = false;
+        bool no_return = returns_noreturn(n->a);
+        types.node* mut ret = null;
+        if (no_return) {
+            // the type spells a `noreturn` result from its flag
+            ret = types.type_void(tt);
+        } else {
+            ret = spelled_type(s, tt, n->a, &ignored);
+        }
+        u64 count = ast.ast_len(n);
+        types.node* mut@ own params = new(types.node*, count + 1);
+        defer del(params);
+        u64 mut i = 0;
+        while (i < count) {
+            params[i] = spelled_type(s, tt, ast.ast_child(n, i), &ignored);
+            if (params[i] == null || params[i]->kind == types.type_kind.k_void) {
+                // the checker refuses a `void` or `noreturn` parameter
+                return null;
+            }
+            i += 1;
+        }
+        if (ret == null) {
+            return null;
+        }
+        return types.type_fn(tt, ret, params[0..count], no_return);
+    default:
+        // `noreturn` has no type of its own outside a function result
+        return null;
+    }
+}
+
+// Whether a function result is `noreturn`, bare or in groups with no suffix,
+// as check.is_noreturn answers it.
+fn returns_noreturn(ast.node* t) bool {
+    ast.node* mut base = t;
+    while (base->kind == ast.ast_kind.k_type && ast.ast_len(base) == 0 && base->a != null) {
+        base = base->a;
+    }
+    return base->kind == ast.ast_kind.k_type_noreturn;
+}
+
+// The first array in `t` that passes the ceiling, as check.referenced_too_large
+// finds it. An array of a name has no layout here, so the walk passes it.
+fn too_large_part(types.node* t, bool behind) types.node* {
+    switch (t->kind) {
+    case types.type_kind.k_ptr, types.type_kind.k_span:
+        return too_large_part(t->elem, true);
+    case types.type_kind.k_fn:
+        types.node* result = too_large_part(t->elem, true);
+        if (result != null) {
+            return result;
+        }
+        u64 mut i = 0;
+        while (i < t->params.len) {
+            types.node* param = too_large_part(t->params[i], true);
+            if (param != null) {
+                return param;
+            }
+            i += 1;
+        }
+        return null;
+    case types.type_kind.k_array:
+        if (!behind) {
+            return too_large_part(t->elem, false);
+        }
+        if (types.type_layout_pending(t) != null) {
+            return null;
+        }
+        if (!types.type_size_fits(t)) {
+            return t;
+        }
+        return too_large_part(t->elem, true);
+    default:
+        return null;
+    }
+}
+
+// Reports "type is too large" at the `sizeof` node `n` with the checker's text
+// (D3.4): the whole type when its own size does not fit, or else the first
+// array behind a reference that does not fit. The walk evaluates an array
+// length that type_size has not reached yet, so it mutes the diagnostics, and
+// a length that does not evaluate leaves the text without the type.
+fn too_large(selector mut* s, ast.node mut* n) bool {
+    types.table mut tt = types.table{};
+    defer types.type_table_free(&tt);
+    diag.mute(session.diags(s->sess));
+    bool mut mut0 = false;
+    types.node* t = spelled_type(s, &tt, n->a, &mut0);
+    diag.unmute(session.diags(s->sess));
+    message_begin(s);
+    message_text(s, "type is too large");
+    if (t != null) {
+        types.node* mut large = t;
+        if (types.type_size_fits(t)) {
+            large = too_large_part(t, false);
+        }
+        if (large != null) {
+            message_text(s, ": ");
+            types.type_to_str(large, &s->msg);
+        }
+    }
+    message_end(s, n->loc);
+    return false;
+}
+
 // Computes the size of one written type into `size`. A group computes its own
 // size first, and the suffixes after its `)` apply to that size. `sized` is
 // false while the type has no size of its own, as for `void` or a name.
@@ -1406,8 +1633,9 @@ fn type_size(selector mut* s, ast.node mut* n, ast.node* written, u64 mut* size,
             if (!eval_array_length(s, suffix, &len)) {
                 return false;
             }
+            // an array of a name has no size here; the checker sizes it
             if (*sized && *size > types.TYPE_MAX_SIZE / len) {
-                return expression_error(s, n, "type is too large");
+                return too_large(s, n);
             }
             if (*sized) {
                 *size *= len;
@@ -1420,8 +1648,10 @@ fn type_size(selector mut* s, ast.node mut* n, ast.node* written, u64 mut* size,
 
 // Computes a type size without ordinary name collection. Selection resolves
 // an unconditional same-module name. Only an indirection can use that name
-// because selection does not compute a named value layout.
+// because selection does not compute a named value layout. The checker checks
+// the type again, with each layout, after it resolves the module (D3.4).
 fn eval_sizeof(selector mut* s, ast.node mut* n, value mut* out) bool {
+    u64 start = s->sized->len;
     ast.node* t = n->a;
     if (t == null || t->kind != ast.ast_kind.k_type || t->a == null) {
         return expression_error(s, n, "invalid type in a $if sizeof expression");
@@ -1442,6 +1672,10 @@ fn eval_sizeof(selector mut* s, ast.node mut* n, value mut* out) bool {
     if (!sized) {
         return expression_error(s, n, "'sizeof' needs a sized selection type");
     }
+    // A `sizeof` in an array length of this type is part of it. The check of
+    // this type checks that one too, so the list holds this node alone.
+    s->sized->len = start;
+    push_sized(s, n);
     *out = value_of(consts.cv_from_u64(size));
     return true;
 }
@@ -1597,9 +1831,11 @@ fn select_tree(selector mut* s, ast.node mut* n) void {
 
 /// Selects each import `$if` before declaration names exist, then selects the
 /// declaration and statement forms. The caller stops before it constructs a
-/// module namespace when this reports an error.
-fn select_module(session.session mut* sess, ast.node mut* module) bool {
-    selector mut s = selector{sess, module, {}, 0, strbuf.create(), true, true};
+/// module namespace when this reports an error. `sized` receives each `sizeof`
+/// that a condition evaluated, and the checker checks the type of each (D3.4).
+fn select_module(session.session mut* sess, ast.node mut* module, ast.node_vec mut* sized) bool {
+    sized->len = 0;
+    selector mut s = selector{sess, module, {}, 0, strbuf.create(), true, true, sized};
     defer del(s.entries);
     defer strbuf.free(&s.msg);
     clear_selection(module);

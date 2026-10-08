@@ -405,6 +405,47 @@ fn a_struct_behind_a_pointer_is_sized_after_its_layout() void {
     assert(one_report_of_two(&e, second, first, "5:5: type is too large: b[4611686018427387904]"));
 }
 
+// The `$if` selector lays out no struct. It lists each `sizeof` that a
+// condition evaluates, and the checker checks its type after it lays out each
+// struct of the module (D3.4). So a struct declared after its use, a struct that
+// reaches itself through a pointer and an enum each give one report at the
+// `sizeof`, and a struct that contains itself by value gives only its infinite
+// size. A constant that a condition reads reports once, as a declaration.
+fn a_selected_sizeof_is_sized_after_each_layout() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    string use = "$if (sizeof(late[576460752303423488]*) == 8) { i32 A = 1; }\n";
+    string fits = "$if (sizeof(late[576460752303423487]*) == 8) { i32 A = 1; }\n";
+    string late = "struct late { u64 a; u64 b; }\n";
+    // 2^59 structs of 16 bytes need 2^63 bytes, one more than fits
+    assert(one_report_of_two(&e, use, late, "1:6: type is too large: late[576460752303423488]"));
+    assert(one_report_of_two(&e, late, use, "2:6: type is too large: late[576460752303423488]"));
+    assert(clean_of_two(&e, fits, late));
+    assert(clean_of_two(&e, late, fits));
+    string node = "struct node { node* next; u64 v; }\n";
+    assert(one_report_of_two(&e, node, "$if (sizeof(node[4611686018427387904]@) == 16) {}\n",
+                             "2:6: type is too large: node[4611686018427387904]"));
+    assert(one_report_of_two(&e, "enum color { red }\n",
+                             "$if (sizeof(fn(color[4611686018427387904]) void) == 8) {}\n",
+                             "2:6: type is too large: color[4611686018427387904]"));
+    // the condition of a statement `$if` reports at its `sizeof` too
+    string body = "fn f() void {\n    $if (sizeof(late[4611686018427387904]*) == 8) {}\n}\n";
+    assert(one_report_of_two(&e, late, body, "3:10: type is too large: late[4611686018427387904]"));
+    // a cycle of value containment reports its infinite size and nothing more
+    string pair = "struct a { b x; }\nstruct b { a y; }\n";
+    string ask = "$if (sizeof(a[4611686018427387904]*) == 8) {}\n";
+    assert(one_report_of_two(&e, ask, pair, "2:1: struct a has infinite size"));
+    assert(one_report_of_two(&e, pair, ask, "1:1: struct a has infinite size"));
+    assert(!check_env.said(&e, "too large"));
+    string constant = "u64 N = sizeof(late[4611686018427387904]*);\n$if (N == 8) {}\n";
+    assert(one_report_of_two(&e, late, constant,
+                             "2:9: type is too large: late[4611686018427387904]"));
+    string length = "u8[sizeof(late[4611686018427387904]*)] X = {};\n$if (X.len == 8) {}\n";
+    assert(one_report_of_two(&e, length, late,
+                             "1:4: type is too large: late[4611686018427387904]"));
+}
+
 fn main() i32 {
     a_struct_of_a_hundred_and_twenty_eight_fields_is_the_last_that_fits();
     a_function_of_a_hundred_and_twenty_nine_parameters_is_refused();
@@ -418,6 +459,7 @@ fn main() i32 {
     a_nested_array_behind_a_pointer_is_named_whole();
     a_declaration_reports_the_type_behind_its_pointer();
     a_struct_behind_a_pointer_is_sized_after_its_layout();
+    a_selected_sizeof_is_sized_after_each_layout();
     println("ok");
     return 0;
 }
