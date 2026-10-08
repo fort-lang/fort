@@ -14,7 +14,8 @@ After all rounds, the tool restores sources and rebuilds the baseline.
 It restores saved bytes and does not use `git checkout`.
 
 The gate does not run mutation rounds. `--check` only verifies that each anchor matches once
-and that the table has a non-empty `comment` list.
+and that the table has a non-empty `comment` list. PR CI adds `--strict`, because no round runs
+there.
 
 A stage must not run tests that validate the mutation table.
 Such tests would observe the active substitution and report a false catch.
@@ -179,10 +180,18 @@ def undo_applied(table, root, applied):
     return text
 
 
-def check_table(table, root):
+def check_table(table, root, strict=False):
     """Reports every anchor that no longer matches its file exactly once,
-    and a table without a non-empty comment list."""
-    applied = mutated_rows(table, root)
+    and a table without a non-empty comment list.
+
+    Without `strict`, a row whose `new` text stands where its `old` text was
+    counts as applied, not stale, so a round in progress does not fail it.
+    The `new` text of 73 of 489 rows already occurs in the clean file. For
+    such a row, a missing anchor reads as applied. With `strict`, no row
+    counts as applied, so each missing anchor is stale. Use `strict` only
+    where no round runs.
+    """
+    applied = [] if strict else mutated_rows(table, root)
     pristine = undo_applied(table, root, applied)
     stale = 0
     comment = table.get("comment")
@@ -348,18 +357,22 @@ def main():
                         help="run this decision alone; repeatable")
     parser.add_argument("--check", action="store_true",
                         help="verify every anchor and build nothing")
+    parser.add_argument("--strict", action="store_true",
+                        help="with --check: no round runs, so no row counts as applied")
     parser.add_argument("--root", default=".", help="the top of the worktree")
     parser.add_argument("--runner", default="tools/vm run",
                         help="how a shell command reaches the build")
     parser.add_argument("--log-dir", default="build/mutate-logs",
                         help="where the whole output of each round is kept")
     args = parser.parse_args()
+    if args.strict and not args.check:
+        parser.error("--strict needs --check")
     root = os.path.abspath(args.root)
     with open(os.path.join(root, args.table) if not os.path.isabs(args.table)
               else args.table) as handle:
         table = json.load(handle)
     if args.check:
-        return check_table(table, root)
+        return check_table(table, root, args.strict)
 
     saved = {name: read(os.path.join(root, name)) for name in table["sources"]}
     guest = Guest(root, args.runner)

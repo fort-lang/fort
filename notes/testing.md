@@ -27,7 +27,9 @@ bullet at a time and without a rewrite.
   server's tests, `lsp-modules` (`test/lsp`) and `lsp-binary`, so a CI job runs them apart from
   the compiler's (T-264). Unit:
   `test/fort` (`fort-modules`), `test/lsp` (`lsp-modules`), `test/fir` (`fir`),
-  `highlight_selftest`, `extension_selftest`, `panic_coverage` and `panic_coverage_selftest`;
+  `highlight_selftest`, `extension_selftest`, `panic_coverage`, `panic_coverage_selftest` and
+  one `mutation_anchors_<table>` test for each table in `tools/mutations`, and the three
+  `mutate_` tests of `--check` over the fixture `test/mutate/strict_table.json`;
   the 71 bootstrap0 C suites. Integration: the corpus (`lang`, `lang-json`), `fixpoint`, `tty`,
   `stack_depth` and `lsp-binary`; bootstrap0 has none, since building bootstrap-1 proves the C
   compiler. `stack_depth` gives each compiler of the build a 1 MB stack and a type of 254
@@ -910,8 +912,8 @@ bullet at a time and without a rewrite.
   `toolchain.md 6 item 3`), and eight second-facet rows: 92 rows.
   `grep -cE 'D[0-9]+\.[0-9]+' bootstrap0/src/*.c` prints 0 for each file, so the coupling rule
   above has no citation to read in `bootstrap0/src`. A bug fix that moves a rule edits the row's
-  anchor, and `--check` finds the row that it breaks. No gate runs `--check`: run it by hand
-  after a change to either file.
+  anchor, and `--check` finds the row that it breaks. PR CI runs `--check` on each table, so
+  the change that breaks the anchor goes red in its own PR.
   **The checker table runs on a darwin host, without the VM.** Run
   `python3 tools/mutate.py tools/mutations/checker_bootstrap.json --runner 'bash -c'` after
   `cmake --preset debug`. A round costs a median of 6.9 s (3.6 s to 60 s), and 85 rounds of one
@@ -957,8 +959,24 @@ bullet at a time and without a rewrite.
   other work; the coordinator restored T-127's two files that way and `md5 -q` then read
   `bbde7b5ca321f3e1834837d6474ae5e0` and `9c18ea9291e8c35bb91cfcda822a6f8f`, which are main's
   (T-134).
-  `--check` is not part of the gate since 2026-09-26; run it by hand (`88 rows, 0 stale` on
-  T-134's tree).
+  **PR CI runs `--check` on each table.** On 2026-10-08 a change to `check_size_fits`
+  made row `D3.1` of `tools/mutations/checker_bootstrap.json` stale, and no gate saw it. The
+  ctest `mutation_anchors_<table>` (labels `fort` and `unit`) runs `tools/mutate.py <table>
+  --check --strict` for each `tools/mutations/*.json`. The `bootstrap` jobs of `fort.yml` run
+  it in PR CI and in the merge queue. It exits 1 for a stale anchor or a table without a
+  `comment`. Run `ctest --preset debug -R '^mutation_anchors_'` after a change to a source.
+  **Plain `--check` lets a stale row pass when the row's `new` text is in the file.** It reads
+  such a row as applied by a round in progress. The `new` text of 73 of 489 rows is in the
+  clean file, and the repointed `D3.1` row is one of them: a scratch edit that moved its anchor
+  left `--check` at exit 0. `--strict` counts no row as applied, so a missing anchor is stale.
+  With one row applied at a time, `--strict` exits 1 for 487 of 489 rows. The other two rows
+  (`D3.8` of `emitter_fort.json` and `fir-test-ownership-panic` of `ownership_driver.json`)
+  keep their anchor inside `new`. So **a stage must not run these tests**: the stage of
+  `emitter_bootstrap.json` that runs `ctest -L unit` excludes them with
+  `-E "^mutation_anchors_"`. Plain `--check` exits 0 for all 489 rows applied one at a time.
+  The fixture `test/mutate/strict_table.json` has one row of this shape. The ctest
+  `mutate_check_applied` requires exit 0 from plain `--check` on it, and
+  `mutate_check_strict_stale` requires a failure from `--check --strict`.
 
 - **An oracle is only an oracle where it derives its answer differently, so say
   for each half of one whether it is independent or shared.** T-064 swept every offset of a
