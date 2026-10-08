@@ -181,6 +181,18 @@ came here.
   only, both declaration orders) beside `node[2][3]` (value containment, an infinite size in both
   orders), which are the two answers the demand graph must tell apart at rank two. A rule stated
   as untestable is worth re-reading whenever the subset grows.
+- **A size behind a reference waits for its layout** (D3.4, D3.8, D7.10). `check_size_fits` walks
+  the type behind each `*`, `@` and function type and asks the size of each array there. The
+  rule above keeps a struct behind a reference unresolved, so such an array can have no layout
+  yet. The checker counts the active `resolve_sym` calls in `resolve_depth`. While
+  `resolve_depth > 0`, no size check forces a layout: `referenced_too_large` puts the array and
+  its position on the list `sized`. The outermost `resolve_sym` drains that list when it returns
+  (`sized_drain`), and only then lays the struct out. A forced layout at depth > 0 reports an
+  infinite size for `struct outer { inner[2]* p; } struct inner { outer o; }`, and a skip makes
+  the two declaration orders of one pair two programs. `check_limits_test.c` and
+  `check_limits_test.ft` hold both orders, the self-reference and that cycle. The `$if` selector
+  (`comptime.ft`) lays out no struct, so it does not check an array of a struct behind a
+  reference.
 - **An untyped constant reports at the point a context fixes its type, so every position that is
   no context must ask for its default type.** `untyped()` gives an untyped integer in
   `[2^63, 2^64 - 1]` the error type and reports nothing, because D4.5 leaves that report to the

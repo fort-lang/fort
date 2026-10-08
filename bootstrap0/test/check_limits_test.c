@@ -1,5 +1,6 @@
 // Tests the suffix limit of D2.11 in the checker: a type takes 256 suffixes, and
-// the parser refuses the 257th before the checker sees the type.
+// the parser refuses the 257th before the checker sees the type. Tests the size
+// ceiling of D3.4 behind a reference too.
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -11,7 +12,8 @@
 
 #include "common/test.h"
 
-// NOLINTBEGIN(readability-magic-numbers) the suffix counts below are the test data.
+// NOLINTBEGIN(readability-magic-numbers) the suffix counts and the source positions below are
+// the test data.
 
 static sb_t deep_src;
 
@@ -123,6 +125,123 @@ TEST(a_group_does_not_reset_the_suffix_count, {
     sb_free(&deep_src);
 })
 
+// ---- sizes behind a reference (D3.4) ------------------------------------------------
+
+// u64[2^62] needs 2^65 bytes, so it is too large behind any reference too. Each
+// test counts the lines, because the corpus cannot see a second report.
+TEST(an_array_behind_a_pointer_that_is_too_large_is_refused, {
+    TEST_ASSERT_FALSE(check_src("u64[4611686018427387904]* BIG = null;\n"
+                                "fn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("main.ft:1:1: error: type is too large: u64[4611686018427387904]"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+})
+
+TEST(an_array_behind_a_pointer_that_fits_is_accepted, {
+    // 2^60 - 1 values of 8 bytes need 2^63 - 8 bytes; 2^63 - 1 bytes fit exactly
+    TEST_ASSERT_TRUE(check_src("u64[1152921504606846975]* WORDS = null;\n"
+                               "u8[9223372036854775807]* BYTES = null;\n"
+                               "fn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_FALSE(check_src("u16[4611686018427387904]* HALVES = null;\n"
+                                "fn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("main.ft:1:1: error: type is too large: u16[4611686018427387904]"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+})
+
+TEST(a_parameter_and_a_result_behind_a_pointer_are_refused, {
+    TEST_ASSERT_FALSE(check_src("fn f(u64[4611686018427387904]* p) void {\n}\n"
+                                "fn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("main.ft:1:6: error: type is too large: u64[4611686018427387904]"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    TEST_ASSERT_FALSE(check_src("fn f() u64[4611686018427387904]* {\n    return null;\n}\n"
+                                "fn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("main.ft:1:8: error: type is too large: u64[4611686018427387904]"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+})
+
+TEST(a_function_type_that_names_a_type_too_large_is_refused, {
+    // no value stores a parameter of a function type, but D3.4 refuses its type
+    TEST_ASSERT_FALSE(check_src("fn(u64[4611686018427387904]) void OP = null;\n"
+                                "fn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("main.ft:1:1: error: type is too large: u64[4611686018427387904]"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+})
+
+TEST(a_field_behind_a_pointer_that_is_too_large_is_refused, {
+    TEST_ASSERT_FALSE(check_src("struct holder {\n    u64[4611686018427387904]* p;\n}\n"
+                                "fn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("main.ft:2:5: error: type is too large: u64[4611686018427387904]"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+})
+
+TEST(a_struct_behind_a_pointer_is_sized_in_either_declaration_order, {
+    // The struct `late` is laid out after `early` resolves, so both orders are
+    // one program (D7.10) and each reports once.
+    TEST_ASSERT_FALSE(check_src("struct early {\n    late[4611686018427387904]* p;\n}\n"
+                                "struct late {\n    u64 a;\n}\n"
+                                "fn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("main.ft:2:5: error: type is too large: late[4611686018427387904]"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    TEST_ASSERT_FALSE(check_src("struct late {\n    u64 a;\n}\n"
+                                "struct early {\n    late[4611686018427387904]* p;\n}\n"
+                                "fn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("main.ft:5:5: error: type is too large: late[4611686018427387904]"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+})
+
+TEST(a_struct_behind_its_own_pointer_is_sized_after_its_layout, {
+    TEST_ASSERT_FALSE(check_src("struct self {\n    self[4611686018427387904]* next;\n}\n"
+                                "fn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("main.ft:2:5: error: type is too large: self[4611686018427387904]"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    TEST_ASSERT_TRUE(check_src("struct self {\n    self[2]* next;\n}\n"
+                               "fn main() i32 {\n    return 0;\n}\n"));
+})
+
+TEST(a_value_cycle_behind_a_pointer_is_not_an_infinite_size, {
+    // `inner` contains `outer` by value. A forced layout of `inner` from the field
+    // of `outer` would read `outer` as resolving and report an infinite size (D3.8).
+    TEST_ASSERT_TRUE(check_src("struct outer {\n    inner[2]* p;\n}\n"
+                               "struct inner {\n    outer o;\n}\n"
+                               "fn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_FALSE(check_src("struct outer {\n    inner[4611686018427387904]* p;\n}\n"
+                                "struct inner {\n    outer o;\n    u64 x;\n}\n"
+                                "fn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("main.ft:2:5: error: type is too large: inner[4611686018427387904]"));
+    TEST_ASSERT_FALSE(said("infinite size"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+})
+
+// Two structs each reach the other through a large array. The field of the second
+// struct reports and fails its struct, and the failed struct silences the waiting
+// entry of the first, so one error stays one error in both orders.
+TEST(two_structs_that_reach_each_other_report_once_in_either_order, {
+    TEST_ASSERT_FALSE(check_src("struct a {\n    b[4611686018427387904]* p;\n}\n"
+                                "struct b {\n    a[4611686018427387904]* q;\n}\n"
+                                "fn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("main.ft:5:5: error: type is too large: a[4611686018427387904]"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    TEST_ASSERT_FALSE(check_src("struct b {\n    a[4611686018427387904]* q;\n}\n"
+                                "struct a {\n    b[4611686018427387904]* p;\n}\n"
+                                "fn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_TRUE(said("main.ft:5:5: error: type is too large: b[4611686018427387904]"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+})
+
+TEST(a_local_a_cast_and_sizeof_behind_a_pointer_are_refused, {
+    TEST_ASSERT_FALSE(check_body("    u64[4611686018427387904]* p = null;"));
+    TEST_ASSERT_TRUE(said("main.ft:2:5: error: type is too large: u64[4611686018427387904]"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    TEST_ASSERT_FALSE(check_body("    u64[2] w = {};\n"
+                                 "    u64 c = (*cast(&w, u64[4611686018427387904]*))[0];\n"
+                                 "    println(c);"));
+    TEST_ASSERT_TRUE(said("main.ft:3:15: error: type is too large: u64[4611686018427387904]"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    TEST_ASSERT_FALSE(
+        check_body("    u64 z = sizeof(u64[4611686018427387904]*);\n    println(z);"));
+    TEST_ASSERT_TRUE(said("main.ft:2:13: error: type is too large: u64[4611686018427387904]"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+})
+
 // NOLINTEND(readability-magic-numbers)
 
 int main(int argc, char** argv) {
@@ -131,6 +250,16 @@ int main(int argc, char** argv) {
     TEST_RUN(a_type_in_an_array_length_grows_the_suffix_stack);
     TEST_RUN(a_failed_type_closes_its_suffix_frame);
     TEST_RUN(a_group_does_not_reset_the_suffix_count);
+    TEST_RUN(an_array_behind_a_pointer_that_is_too_large_is_refused);
+    TEST_RUN(an_array_behind_a_pointer_that_fits_is_accepted);
+    TEST_RUN(a_parameter_and_a_result_behind_a_pointer_are_refused);
+    TEST_RUN(a_function_type_that_names_a_type_too_large_is_refused);
+    TEST_RUN(a_field_behind_a_pointer_that_is_too_large_is_refused);
+    TEST_RUN(a_struct_behind_a_pointer_is_sized_in_either_declaration_order);
+    TEST_RUN(a_struct_behind_its_own_pointer_is_sized_after_its_layout);
+    TEST_RUN(a_value_cycle_behind_a_pointer_is_not_an_infinite_size);
+    TEST_RUN(two_structs_that_reach_each_other_report_once_in_either_order);
+    TEST_RUN(a_local_a_cast_and_sizeof_behind_a_pointer_are_refused);
     check_reset();
     done();
     TEST_EXIT();
