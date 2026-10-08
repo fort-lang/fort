@@ -58,6 +58,7 @@ struct module {
     scope.scope names; // the module namespace
     bool parsed;       // no diagnostic was reported while lexing and parsing it
     bool selected;     // compile-time selection completed without a diagnostic
+    ast.node_vec sized; // the `sizeof` nodes of `$if` conditions, for the checker (D3.4)
     bool entry; // the module named on the command line
     module_state state;
 }
@@ -687,7 +688,7 @@ fn load_module(session.session mut* s, module_set mut* set, string path, string 
     if (!m->parsed) {
         return null;
     }
-    m->selected = comptime.select_module(s, m->ast);
+    m->selected = comptime.select_module(s, m->ast, &m->sized);
     if (!m->selected) {
         return null;
     }
@@ -755,13 +756,16 @@ fn prefix_declares(session.session mut* s, module_set mut* set, string path, str
     defer ast.ast_arena_free(&ar);
     lexer.tok_vec mut toks = lexer.tokvec_create();
     defer lexer.tokvec_free(&toks);
+    // no checker reads the `sizeof` list of a probed file
+    ast.node_vec mut sized = ast.node_vec{};
+    defer ast.list_free(&sized);
     diag.mute(session.diags(s));
     u64 before = session.error_count(s);
     // a file that reported anything declares nothing
     lexer.lex_file(s, file, source, &toks);
     ast.node mut* probed = parser.parse_module(s, file, &toks, &ar);
     if (probed != null && session.error_count(s) == before
-        && comptime.select_module(s, probed)) {
+        && comptime.select_module(s, probed, &sized)) {
         declares = selected_declares(probed, name);
     }
     diag.unmute(session.diags(s));
@@ -964,6 +968,7 @@ fn free(module_set mut* set) void {
     while (i < set->modules.len) {
         module mut* own m = move(set->modules.items[i]);
         scope.free(&m->names);
+        ast.list_free(&m->sized);
         del(m);
         i += 1;
     }

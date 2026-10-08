@@ -255,6 +255,54 @@ fn the_module_holds_no_inactive_content() void {
     assert(str.find(user_main, "  br i1 ") < 0);
 }
 
+// ---- the size of an array of a named type ----------------------------------------
+
+// Selection lists each `sizeof` that a condition evaluates, and the checker
+// sizes an array of a struct after the struct's layout (D3.4, D7.10): one
+// report, at the `sizeof`, with the struct declared after its use. An operand
+// that `||` skips is not evaluated, so it reports nothing (D21.2).
+fn a_condition_size_reports_once_from_the_checker() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "$if (sizeof(late[4611686018427387904]*) == 8) { i32 A = 1; }\n");
+    strbuf.append(&b, "struct late { u64 a; u64 b; }\nfn main() i32 { return A; }\n");
+    write_file("sized.ft", strbuf.view(&b));
+    string[3] mut check = {"fort", "--check", "sized.ft"};
+    assert(run(check[0..3]) == EXIT_COMPILE_ERROR);
+    assert(error_count() == 1);
+    assert(err_has("sized.ft:1:6: error: type is too large: late[4611686018427387904]"));
+    strbuf.clear(&b);
+    strbuf.append(&b, "$if (true || sizeof(late[4611686018427387904]*) == 8) { i32 A = 1; }\n");
+    strbuf.append(&b, "struct late { u64 a; u64 b; }\nfn main() i32 { return A; }\n");
+    write_file("skipped_size.ft", strbuf.view(&b));
+    string[3] mut skipped = {"fort", "--check", "skipped_size.ft"};
+    assert(run(skipped[0..3]) == EXIT_OK);
+}
+
+// The checker clears the annotations of a type it checks for a condition, so
+// the index records no struct occurrence in `late[2]*` or `late*`, as before
+// the checker checked them. A constant that a condition reads keeps its
+// occurrence of `late`, because the checker checks it as a declaration and the
+// selector does not list its `sizeof`. So `late` has two records: the
+// declaration and the constant's use.
+fn a_sized_condition_adds_no_index_occurrence() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "struct late { u64 a; }\n$if (sizeof(late[2]*) == 8) { i32 A = 1; }\n");
+    strbuf.append(&b, "$if (sizeof(late*) == 8 && N == 8) { i32 B = 1; }\n");
+    strbuf.append(&b, "u64 N = sizeof(late[2]*);\n");
+    strbuf.append(&b, "fn main() i32 {\n    return A + B;\n}\n");
+    write_file("sized_index.ft", strbuf.view(&b));
+    string[3] mut index = {"fort", "--index", "sized_index.ft"};
+    assert(run(index[0..3]) == EXIT_OK);
+    string own document = captured_out();
+    defer del(document);
+    assert(count(document, "\"name\":\"late\"") == 2);
+    string use = "\"line\":4,\"col\":16,\"end_line\":4,\"end_col\":20,\"name\":\"late\"";
+    assert(str.find(document, use) >= 0);
+    assert(count(document, "\"name\":\"A\"") == 2);
+}
+
 fn main() i32 {
     write_runtime();
     a_chain_accepts_the_limit_and_rejects_one_more();
@@ -264,6 +312,8 @@ fn main() i32 {
     println("cycles ok");
     the_index_holds_the_selected_names_only();
     the_module_holds_no_inactive_content();
+    a_condition_size_reports_once_from_the_checker();
+    a_sized_condition_adds_no_index_occurrence();
     println("output ok");
     println("ok");
     return 0;
