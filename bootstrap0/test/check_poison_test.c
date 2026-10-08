@@ -147,6 +147,56 @@ TEST(a_group_of_a_bare_void_is_only_a_return_type, {
     TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
 })
 
+// `void` is only a return type or the base of `void*` (D3.1), so it is not a parameter of a
+// function type (D3.10). Each body writes the function type in one position. The checker reports
+// the parameter once, at its first column, and does not build the function type.
+static const char* const VOID_PARAMETERS[] = {
+    "fn(void) void f = null;",
+    "fn(i32, void) void f = null;",
+    "(fn(void) void)* f = null;",
+    "fn(fn(void) void) void f = null;",
+    "fn() fn(void) void f = null;",
+    "u64 n = cast(cast(main, fn(void) void), u64);",
+    "u64 n = sizeof(fn(void) void);",
+};
+static const char* const VOID_PARAMETER_AT[] = {
+    "main.ft:2:4: ",
+    "main.ft:2:9: ",
+    "main.ft:2:5: ",
+    "main.ft:2:7: ",
+    "main.ft:2:9: ",
+    "main.ft:2:28: ",
+    "main.ft:2:19: ",
+};
+
+TEST(a_void_parameter_of_a_function_type_is_reported_once, {
+    TEST_ASSERT_EQ_SIZE(sizeof VOID_PARAMETERS / sizeof VOID_PARAMETERS[0],
+                        sizeof VOID_PARAMETER_AT / sizeof VOID_PARAMETER_AT[0]);
+    for (uint64_t i = 0; i < sizeof VOID_PARAMETERS / sizeof VOID_PARAMETERS[0]; i++) {
+        TEST_ASSERT_FALSE(check_body(VOID_PARAMETERS[i]));
+        TEST_ASSERT_NONNULL(strstr(diags(), VOID_PARAMETER_AT[i]));
+        TEST_ASSERT_TRUE(said("'void' is only a return type or the base of 'void*'"));
+        TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    }
+    TEST_ASSERT_FALSE(check_src("fn(void) void G = null;\nfn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_NONNULL(strstr(diags(), "main.ft:1:4: error: 'void' is only a return type"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    TEST_ASSERT_FALSE(
+        check_src("struct s { fn(void) i32 f; }\nfn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_NONNULL(strstr(diags(), "main.ft:1:15: error: 'void' is only a return type"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    TEST_ASSERT_FALSE(
+        check_src("fn g(fn(void) void f) void { }\nfn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_NONNULL(strstr(diags(), "main.ft:1:9: error: 'void' is only a return type"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    TEST_ASSERT_FALSE(check_src("fn g() fn(void) void {\n    return null;\n}\n"
+                                "fn main() i32 {\n    return 0;\n}\n"));
+    TEST_ASSERT_NONNULL(strstr(diags(), "main.ft:1:11: error: 'void' is only a return type"));
+    TEST_ASSERT_EQ_UINT64(diag_lines(), (uint64_t)1);
+    // `void*` is a parameter type, so the opaque pointer stays legal
+    TEST_ASSERT_TRUE(check_body("fn(void*, void mut*) void f = null;"));
+})
+
 // The return operands whose diagnostic needs the return type. Under a failed
 // return type each one reports nothing more (D14.2).
 static const char* const RETURNS[] = {
@@ -185,6 +235,7 @@ TEST(a_return_operand_under_a_failed_return_type_reports_its_own_errors, {
 int main(int argc, char** argv) {
     TEST_INIT("check_poison", argc, argv);
     TEST_RUN(a_group_of_a_bare_void_is_only_a_return_type);
+    TEST_RUN(a_void_parameter_of_a_function_type_is_reported_once);
     TEST_RUN(a_context_that_meets_a_poisoned_constant_says_nothing_more);
     TEST_RUN(every_position_that_drops_its_operand_reports_once);
     TEST_RUN(the_other_end_of_the_range_is_silenced_as_well);

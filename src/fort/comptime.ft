@@ -1270,6 +1270,93 @@ fn type_has_unresolved_name(selector* s, ast.node* t) bool {
     return false;
 }
 
+// The first node in `t` where the checker refuses a `void` part of a function
+// type, or null. Selection does not check a `sizeof` type, so it repeats these
+// refusals of the checker with its text and its position (D3.1, D21.2). The
+// result comes before the parameters, as in the checker.
+fn void_part(ast.node* t) ast.node* {
+    if (t == null) {
+        return null;
+    }
+    if (t->kind == ast.ast_kind.k_type) {
+        return void_part(t->a);
+    }
+    if (t->kind != ast.ast_kind.k_type_fn) {
+        return null;
+    }
+    if (t->a != null) {
+        ast.node* in_result = void_result(t->a);
+        if (in_result != null) {
+            return in_result;
+        }
+    }
+    u64 mut i = 0;
+    while (i < ast.ast_len(t)) {
+        ast.node* in_parameter = void_binding(ast.ast_child(t, i));
+        if (in_parameter != null) {
+            return in_parameter;
+        }
+        i += 1;
+    }
+    return null;
+}
+
+// Whether the written type `t`, whose base is `void`, is `void*` or `void mut*`.
+fn void_pointer(ast.node* t) bool {
+    return ast.ast_len(t) > 0 && !ast.ast_is_own(t)
+        && cast(ast.ast_child(t, 0)->op, types.suffix_kind) == types.suffix_kind.s_ptr;
+}
+
+// Where the checker refuses `void` in a parameter type, or in a group: `void`,
+// `void mut`, `void[2]` and the `void` of `(void)*`. A nested function type
+// reports its own parts.
+fn void_binding(ast.node* t) ast.node* {
+    if (t->kind == ast.ast_kind.k_type_void) {
+        return t;
+    }
+    if (t->kind != ast.ast_kind.k_type) {
+        return void_part(t);
+    }
+    if (t->a->kind == ast.ast_kind.k_type_void) {
+        if (void_pointer(t)) {
+            return null;
+        }
+        return t;
+    }
+    return void_binding(t->a);
+}
+
+// Where the checker refuses `void` in a result type. A bare `void` and a group
+// of it are results. A suffix after a group of a bare `void`, as in `(void)*`,
+// stands at the innermost group with a `mut`, or else at the outermost group.
+fn void_result(ast.node* t) ast.node* {
+    if (t->kind != ast.ast_kind.k_type) {
+        return void_part(t);
+    }
+    ast.node* base = t->a;
+    if (base->kind == ast.ast_kind.k_type_void) {
+        if (ast.ast_len(t) == 0 || void_pointer(t)) {
+            return null;
+        }
+        return t;
+    }
+    if (base->kind != ast.ast_kind.k_type || !group_is_void(base)) {
+        return void_binding(base);
+    }
+    if (ast.ast_len(t) == 0) {
+        return null;
+    }
+    ast.node* mut at = base;
+    ast.node* mut cur = base;
+    while (cur->kind == ast.ast_kind.k_type) {
+        if (ast.ast_is_mut(cur)) {
+            at = cur;
+        }
+        cur = cur->a;
+    }
+    return at;
+}
+
 // Whether a group holds a bare `void`. Such a group is only a return type, so
 // `(void)*` is an error and `(void*)` is the opaque pointer (D3.11).
 fn group_is_void(ast.node* group) bool {
@@ -1341,6 +1428,11 @@ fn eval_sizeof(selector mut* s, ast.node mut* n, value mut* out) bool {
     }
     if (type_has_unresolved_name(s, t)) {
         return expression_error(s, n, "'sizeof' cannot use an unresolved named type");
+    }
+    ast.node* in_function = void_part(t);
+    if (in_function != null) {
+        return expression_error(s, in_function,
+                                "'void' is only a return type or the base of 'void*'");
     }
     u64 mut size = 0;
     bool mut sized = false;
