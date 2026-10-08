@@ -454,6 +454,16 @@ static bool is_void_group(const ast_node_t* t) {
     return t->kind == AST_TYPE_VOID;
 }
 
+// Reports a parameter whose checked type is `void` at `loc`, and returns whether it did. Only a
+// bare `void` reaches this type: `void mut` and `(void)` fail before it (D3.1).
+static bool void_parameter_refused(check_t* ck, loc_t loc, const type_t* t) {
+    if (t->kind != TYPE_VOID) {
+        return false;
+    }
+    check_error(ck, loc, "'void' is only a return type or the base of 'void*'");
+    return true;
+}
+
 static check_type_t check_type_at(check_t* ck, ast_node_t* node, type_pos_t pos, bool in_storage);
 
 // Gives each node of a group of a bare `void` or `noreturn` the `void` that it builds. Returns
@@ -519,9 +529,13 @@ static const type_t* base_type(check_t* ck, ast_node_t* n, bool allow_noreturn, 
         bool ok = !check_poisoned(ret.type);
         for (uint64_t i = 0; i < count; i++) {
             // a binding-level `mut` is not part of the type
-            const check_type_t p = check_type_at(ck, ast_child(n, i), TYPE_POS_BINDING, false);
+            ast_node_t* written = ast_child(n, i);
+            const check_type_t p = check_type_at(ck, written, TYPE_POS_BINDING, false);
             params[i] = p.type;
             ok = ok && !check_poisoned(p.type);
+            if (void_parameter_refused(ck, written->loc, p.type)) {
+                ok = false;
+            }
         }
         if (ok) {
             t = type_fn(&ck->types, ret.type, params, (uint32_t)count, is_noreturn(n->a));
@@ -3400,8 +3414,7 @@ static void resolve_fn(check_t* ck, sym_t* s) {
             ok = false;
             continue;
         }
-        if (pt.type->kind == TYPE_VOID) {
-            check_error(ck, p->loc, "'void' is only a return type or the base of 'void*'");
+        if (void_parameter_refused(ck, p->loc, pt.type)) {
             sym_fail(ck, ps);
             ok = false;
             continue;

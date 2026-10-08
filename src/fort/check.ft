@@ -828,6 +828,16 @@ fn is_void_group(ast.node* t) bool {
     return base->kind == ast.ast_kind.k_type_void;
 }
 
+// Reports a parameter whose checked type is `void` at `at`, and returns whether it did. Only a
+// bare `void` reaches this type: `void mut` and `(void)` fail before it (D3.1).
+fn void_parameter_refused(checker mut* ck, diag.loc at, types.node* t) bool {
+    if (t->kind != types.type_kind.k_void) {
+        return false;
+    }
+    check_error(ck, at, "'void' is only a return type or the base of 'void*'");
+    return true;
+}
+
 // Gives each node of a group of a bare `void` or `noreturn` the `void` that it builds. Returns
 // the innermost node of the group that carries a `mut`, or null. The parser refuses an `own`
 // there.
@@ -883,10 +893,13 @@ fn base_type(checker mut* ck, ast.node mut* n, bool allow_noreturn, bool stores_
             u64 mut i = 0;
             while (i < count) {
                 // a binding-level `mut` is not part of the type
-                written_type p = check_type_at(ck, ast_child_mut(n, i), type_pos.pos_binding,
-                                               false);
+                ast.node mut* written = ast_child_mut(n, i);
+                written_type p = check_type_at(ck, written, type_pos.pos_binding, false);
                 params[i] = p.ty;
                 ok = ok && !check_poisoned(p.ty);
+                if (void_parameter_refused(ck, written->loc, p.ty)) {
+                    ok = false;
+                }
                 i += 1;
             }
             if (ok) {
@@ -4252,8 +4265,7 @@ fn resolve_fn(checker mut* ck, ast.sym mut* s) void {
             ok = false;
             continue;
         }
-        if (pt.ty->kind == types.type_kind.k_void) {
-            check_error(ck, p->loc, "'void' is only a return type or the base of 'void*'");
+        if (void_parameter_refused(ck, p->loc, pt.ty)) {
             sym_fail(ck, ps);
             ok = false;
             continue;

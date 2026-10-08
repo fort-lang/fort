@@ -233,6 +233,16 @@ came here.
   `EMPTY_READONLY`, an immutable indirection is `EMPTY_IMMUTABLE`, and the read-only memory stops
   at the first indirection. Reading `mut` where `empty` is meant silently lets `move(view[0])`
   through or refuses `del(buf)` on an immutable binding.
+- **`$if` selection repeats the checker's `void` refusals in a function type** (D3.1, D21.2).
+  Selection (`src/fort/comptime.ft`) computes a `sizeof` in a `$if` condition, and the checker
+  never sees that type. So `void_part` refuses each `void` part of a function type that the
+  checker refuses, with the checker's text and position: `fn(void) void`, `fn(void[2]) void`,
+  `fn((void)*) void` and `fn() void[2]`. A probe of 29 function types gave the same line,
+  column and text in both: 20 refused and 9 accepted. Change a `void` rule of `check_type_at` or
+  `base_type`, and change `void_part` with it. Selection keeps its own
+  texts outside a function type, as `a span cannot have void elements` for `sizeof((void@))`,
+  and does not repeat the checker's `mut` rules for a result type: `fn() void mut` passes.
+  `fail/functions/024` holds the function-type forms.
 
 ## 5. Modules, the driver and the diagnostics
 
