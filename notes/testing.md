@@ -872,12 +872,13 @@ bullet at a time and without a rewrite.
   source file carries this trap; ask what it does while the file is broken on purpose, and ask it
   for every row rather than for a representative one.
   **Couple the row count to the sources on purpose.** A ticket that adds or removes a `Dn.m`
-  citation in the four files has three ways out. It adds a row and runs it
+  citation in the files of `tools/mutations/emitter_bootstrap.json` has three ways out. It adds
+  a row and runs it
   (`python3 tools/mutate.py tools/mutations/emitter_bootstrap.json --only D6.14`). Or it adds a
   row that records why the rule needs no mutation. Or, if the citation sits on a line that
   implements no rule, it says so in the row and moves the citation. The coupling is what stops an
   audit going stale. T-046 froze `bootstrap0/src` on 2026-09-14, so from that date the count moves
-  only when a bug fix adds or removes a `Dn.m` citation in one of the four files.
+  only when a bug fix adds or removes a `Dn.m` citation in one of its files.
   **Mutate through `tools/mutate.py`, and never leave a mutated source across a tool call.** The
   runner restores in a `finally`, reads the copy it saved rather than `git checkout`, and ends a
   run by rebuilding and comparing the md5 with the baseline, except after a timeout row, where it
@@ -887,37 +888,13 @@ bullet at a time and without a rewrite.
   `bootstrap0/src/check.c` and `src/fort/check.ft` that reverted T-128's fix. Nothing in the
   repository said the tree was mutated. Three rules follow.
   Run `tools/mutate.py <table> --check` before the round, not after it rots.
-  **Eight tables exist today**, and they cover 21 files:
-  `ls tools/mutations/*.json | wc -l` prints 8.
-  `grep -o 'bootstrap0/src/[a-z_]*\.c' tools/mutations/emitter_bootstrap.json | sort -u` prints
-  the four files of the C emitter, and the same command over
-  `tools/mutations/checker_bootstrap.json` prints `check.c` and `check_stmt.c`.
-  `grep -o 'src/fort/[a-z_]*\.ft' tools/mutations/emitter_fort.json | sort -u` prints the six
-  files of the fort emitter: `fir.ft`, `fir_llvm.ft`, `fir_lower.ft`, `gen.ft`, `gen_data.ft`
-  and `gen_fir.ft`. The same command over `tools/mutations/ownership_local.json` prints the four
-  ownership files of the local increment: `ownership_flow.ft`, `ownership_report.ft`,
-  `ownership_source_local.ft` and `ownership_transfer.ft`, with one row for each local check.
-  `tools/mutations/ownership_driver.json` adds `driver.ft` and covers `fir_lower.ft` and
-  `ownership_report.ft` again, with one row for each behavior of the selected driver groundwork:
-  the failed report close, the selected build, the C compiler, the brace range, the imported
-  uncalled bodies and the FIR ownership pass. Its one stage runs every targeted test, so the log
-  of a row names each test that goes red, and not only the first.
-  Over `tools/mutations/ownership_graph.json` it prints `ownership_graph.ft`: 4 rows on the
-  edges and the fact flow of a call with a residual fort target. That table runs on a darwin
-  host with `--runner 'bash -c'`; one run took 72 s.
-  `tools/mutations/ownership_heap.json` prints `ownership_heap.ft`, with 69 rows of the heap
-  proof. No compiler binary holds that module, so its `build` compiles the case-group test and
-  its `binary` is that test program; the md5 of a mutant then differs. Run it on a darwin
-  host with `--runner 'bash -c'`.
-  `tools/mutations/ownership_summary.json` holds `ownership_summary_body.ft`,
-  `ownership_summary.ft` and 10 rows: 9 for the unknown origin of a call result and the join
-  of call results, and 1 for the check kind that is true on success. The product compiler
-  imports neither module, so a
-  table whose binary is `build/<host>/debug/fort` reads `stale` on each of its rows. Its build
-  writes the LLVM IR of `test/fort/ownership_calls_origins_test.ft`, and the runner compares
-  that file. Run it on a Darwin host with `--runner 'bash -c'` after
-  `cmake --build --preset debug`: 9 rounds cost 119 s.
-  Each list is the `"sources"` list the runner saves. Two earlier changes
+  **Each table describes itself.** `ls tools/mutations/*.json` lists the tables.
+  `jq -r '[input_filename] + .sources | join(" ")' tools/mutations/*.json` prints each table and
+  the files that it covers. That is the `"sources"` list that the runner saves. The `comment` list
+  at the head of a table says what its rows cover, which `binary` its md5 guard reads, and how to
+  run it: the host, the build and the `--runner`. Write a fact about one table into its
+  `comment`, not into this file. `--check` exits 1 for a table whose `comment` list is empty or
+  absent. Two earlier changes
   mutated `src/fort/check.ft`, and then both compilers, by hand, because no table covered either
   file. No table covers the fort checker today.
   **The first row of a VM run can read `stale`.** The host writes the mutant, and the guest

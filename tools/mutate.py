@@ -13,7 +13,8 @@ The built binary must differ from the baseline, or the round reports STALE.
 After all rounds, the tool restores sources and rebuilds the baseline.
 It restores saved bytes and does not use `git checkout`.
 
-The gate does not run mutation rounds. `--check` only verifies that each anchor matches once.
+The gate does not run mutation rounds. `--check` only verifies that each anchor matches once
+and that the table has a non-empty `comment` list.
 
 A stage must not run tests that validate the mutation table.
 Such tests would observe the active substitution and report a false catch.
@@ -179,10 +180,16 @@ def undo_applied(table, root, applied):
 
 
 def check_table(table, root):
-    """Reports every anchor that no longer matches its file exactly once."""
+    """Reports every anchor that no longer matches its file exactly once,
+    and a table without a non-empty comment list."""
     applied = mutated_rows(table, root)
     pristine = undo_applied(table, root, applied)
     stale = 0
+    comment = table.get("comment")
+    described = isinstance(comment, list) and any(
+        isinstance(line, str) and line.strip() for line in comment)
+    if not described:
+        print("mutate: the table has no comment that describes it")
     for mutation in table["mutations"]:
         name = mutation["file"]
         if name not in pristine:
@@ -200,7 +207,7 @@ def check_table(table, root):
     if applied:
         print("mutate: a round is in progress: %s" % ", ".join(applied))
     print("mutate: %d rows, %d stale" % (len(table["mutations"]), stale))
-    return 1 if stale > 0 else 0
+    return 1 if stale > 0 or not described else 0
 
 
 def run_round(table, guest, root, saved, mutation, baseline, log_dir):
