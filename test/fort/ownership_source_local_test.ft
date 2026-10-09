@@ -382,9 +382,10 @@ fn effects_of_calls() void {
     assert(count(row, ownership_transfer.action.inspect) >= 1);
     assert(count(row, ownership_transfer.action.escape) == 1);
     assert(step_of(row, ownership_transfer.action.escape, p)->local.source.root.ordinal == p);
-    // Two fort calls are outside effects and barriers. The two extern calls are trusted calls.
+    // Two fort calls are outside effects. The call of take, whose parameter owns, is a
+    // barrier; the call of callee is not (D17.9, D3.14). The two extern calls are trusted.
     assert(count(row, ownership_transfer.action.outside) == 2);
-    assert(barriers(row) == 2);
+    assert(barriers(row) == 1);
     assert(calls(row) == 2);
     // The scalar results need no facts, so correspondence stays complete.
     in_scope(row);
@@ -562,7 +563,7 @@ fn path_dependent_failures_stay_unproved() void {
     ownership_source_env.env mut e = ownership_source_env.env{};
     strbuf.str_buf mut text = strbuf.create();
     defer strbuf.free(&text);
-    string[24] source = {
+    string[28] source = {
         "fn conditional_release(bool release) i32 {",
         "    i32 mut* own p = new(i32);",
         "    i32* view = p;",
@@ -583,10 +584,14 @@ fn path_dependent_failures_stay_unproved() void {
         "}",
         "fn after_unknown_call() void {",
         "    i32 mut* own p = new(i32);",
-        "    root();",
+        "    drop(null);",
         "}",
         "fn root() i32 { return 0; }",
-        "fn other() void {}",
+        "fn drop(i32 mut* own q) void { del(q); }",
+        "fn after_lending_call() void {",
+        "    i32 mut* own p = new(i32);",
+        "    root();",
+        "}",
     };
     open(&e, lines(&text, source[..]));
     defer ownership_source_env.close(&e);
@@ -601,12 +606,17 @@ fn path_dependent_failures_stay_unproved() void {
         "storage ends with a live owner", 11);
     // The null test of p is false, so the flow refutes the path to the read (D17.9).
     complete(body(&e, "null_test"));
-    // After an unknown call the end of p has only a possible continuation (A06).
+    // After a call of a callee with an owning parameter the end of p has only a possible
+    // continuation (A06).
     ownership_source.body* after = body(&e, "after_unknown_call");
     unproved(after);
     assert(after->local.unvalidated == 1);
     // The failure does not need the call's havoc, so it stays in the declared scope.
     in_scope(after);
+    // A callee without an owning parameter takes no ownership (D17.9, D3.14): the walk takes
+    // its normal return, and the leak after it is validated.
+    violated(body(&e, "after_lending_call"), ownership_api.event_kind.lost_ownership, "p",
+        "storage ends with a live owner", 28);
 }
 
 fn stops_off_the_walk_leave_validation() void {

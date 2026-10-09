@@ -2,6 +2,7 @@
 //! flags: -I ../../src/fort -I support
 //! stdout:
 //| casts ok
+//| calls ok
 //| slices ok
 //| ledger ok
 /// Checks the witness walk that another analysis runs with a ledger of its own: a parameter
@@ -16,8 +17,10 @@ import ownership_source_env;
 import ownership_source_local;
 import std.strbuf;
 
-string[70] WALK = {
+string[72] WALK = {
     "extern fn marker() void;",
+    "fn plain() void {}",
+    "fn after_fort_call() void { plain(); marker(); }",
     "fn same_width(u64 n) void {",
     "    u64 m = cast(n, u64);",
     "    if (m == 3) { marker(); }",
@@ -184,6 +187,16 @@ fn casts() void {
     println("casts ok");
 }
 
+// The walk of another analysis crosses no fort call: only the local and stored runs take the
+// return of a callee without an owning parameter.
+fn calls() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    open(&e);
+    defer ownership_source_env.close(&e);
+    assert(!reaches(&e, "after_fort_call"));
+    println("calls ok");
+}
+
 // `slice_ptr(a, lo, hi)` has the length hi - lo, as a checked slice has. A negative length
 // stays unknown.
 fn slices() void {
@@ -226,6 +239,7 @@ fn ledger() void {
 
 fn main() i32 {
     casts();
+    calls();
     slices();
     ledger();
     return 0;

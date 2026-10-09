@@ -11,6 +11,7 @@
 //| picks ok
 //| refused walk ok
 //| lengths ok
+//| calls ok
 /// Checks the walk that searches a witness path (toolchain 4.2): the values it knows after
 /// each kind of statement, the blocks it searches, and the conditions it can decide.
 import consts;
@@ -22,7 +23,7 @@ import ownership_source_env;
 import ownership_source_local;
 import std.strbuf;
 
-string[102] WALK = {
+string[115] WALK = {
     "extern fn strlen(char* s) u64;",
     "bool mut ready = true;",
     "fn helper() void {}",
@@ -125,6 +126,19 @@ string[102] WALK = {
     "    u64 after = k;",
     "    del(s);",
     "}",
+    "fn take(i32 mut* own p) void { del(p); }",
+    "fn stop() noreturn { while (true) {} }",
+    "fn crossings() void {",
+    "    helper();",
+    "    u64 a = 1;",
+    "    take(null);",
+    "    u64 b = 2;",
+    "}",
+    "fn through_value(fn () void f) void {",
+    "    f();",
+    "    u64 a = 1;",
+    "}",
+    "fn never() void { stop(); }",
 };
 
 fn open(ownership_source_env.env mut* e, strbuf.str_buf mut* text) void {
@@ -303,8 +317,8 @@ fn values(ownership_source_env.env mut* e) void {
     assert(kind_of(&t, "counted") == ownership_source_local.witness_kind.unknown);
     // No condition chose a parameter on this path.
     assert(unchosen(&t, "n") && unchosen(&t, "c") && unchosen(&t, "small"));
-    // The fort call can fail to return: the walk does not pass it.
-    assert(!reaches(e, "values", 34, 0));
+    // The fort callee has no owning parameter: the walk takes its normal return.
+    assert(reaches(e, "values", 34, 0));
     println("values ok");
 }
 
@@ -531,6 +545,26 @@ fn lengths(ownership_source_env.env mut* e) void {
     println("lengths ok");
 }
 
+// The walk crosses a direct fort call whose callee has no owning parameter (D17.9, D3.14).
+// It does not cross a callee with an owning parameter, a noreturn callee or a call through a
+// value.
+fn calls(ownership_source_env.env mut* e) void {
+    assert(reaches(e, "crossings", 107, 0));
+    assert(!reaches(e, "crossings", 109, 0));
+    assert(!reaches(e, "through_value", 113, 0));
+    // The block of the noreturn call ends after the call: no walk reaches its end.
+    ownership_source.body* never = ownership_source_env.find(e, "main", "never");
+    u32 count = fir.block_statement_count(&never->function, 0);
+    trial mut t = walk_at(e, "never", position{0, count}, ownership_source_local.trap.no_trap);
+    finish(&t);
+    assert(!t.reached);
+    trial mut before = walk_at(e, "never", position{0, count - 1},
+        ownership_source_local.trap.no_trap);
+    finish(&before);
+    assert(before.reached);
+    println("calls ok");
+}
+
 fn main() i32 {
     ownership_source_env.env mut environment = ownership_source_env.env{};
     strbuf.str_buf mut text = strbuf.create();
@@ -547,5 +581,6 @@ fn main() i32 {
     picks(&environment);
     refused_walk(&environment);
     lengths(&environment);
+    calls(&environment);
     return 0;
 }

@@ -84,11 +84,12 @@ fn index_of(ownership_source_local.context* c, ownership_transfer.action effect)
     panic("ownership_source_local_validation_test: step is absent");
 }
 
+// The parameter of helper owns, so its call is a barrier (D17.9, D3.14).
 string[6] READS = {
-    "fn helper() void {}",
+    "fn helper(i32 mut* own x) void { del(x); }",
     "fn reads() i32 {",
     "    i32 mut* own p = new(i32);",
-    "    i32* q = p; helper(); i32 v = *q;",
+    "    i32* q = p; helper(null); i32 v = *q;",
     "    del(p); return v;",
     "}",
 };
@@ -299,11 +300,12 @@ fn stops_off_the_walk() void {
 }
 
 // A trusted call and a release through a pointer return normally, so they are no barrier.
+// Nor is a fort callee without an owning parameter (D17.9, D3.14). A callee with one is.
 fn effects() void {
     ownership_source_env.env mut e = ownership_source_env.env{};
     strbuf.str_buf mut text = strbuf.create();
     defer strbuf.free(&text);
-    string[19] lines = {
+    string[22] lines = {
         "extern fn foreign_count(char* p) i32;",
         "struct holder { i32 mut* own p; }",
         "fn after_trusted(char* t) i32 {",
@@ -323,6 +325,9 @@ fn effects() void {
         "fn helper() void {}",
         "fn after_unknown() i32 { i32 mut* own p = new(i32); i32* q = p; del(p); helper();",
         "    return *q; }",
+        "fn owning(i32 mut* own x) void { del(x); }",
+        "fn after_owning() i32 { i32 mut* own p = new(i32); i32* q = p; del(p); owning(null);",
+        "    return *q; }",
     };
     open(&e, &text, lines[..]);
     defer ownership_source_env.close(&e);
@@ -334,11 +339,16 @@ fn effects() void {
     ownership_source.body* released = ownership_source_env.find(&e, "main", "after_release");
     assert(released->local.violations_len == 1);
     assert(released->local.violations[0].source.line == 15);
-    // The same read after an unknown fort call has only a possible path.
+    // The same read after a fort call without an owning parameter: the walk takes its normal
+    // return.
     ownership_source.body* unknown = ownership_source_env.find(&e, "main", "after_unknown");
-    assert(unknown->local.violations_len == 0 && unknown->local.unvalidated == 1);
-    assert(unknown->local.proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
-    assert(unknown->local.proof.terminal.source.line == 19);
+    assert(unknown->local.violations_len == 1 && unknown->local.unvalidated == 0);
+    assert(unknown->local.violations[0].source.line == 19);
+    // After a call of a callee with an owning parameter the read has only a possible path.
+    ownership_source.body* owning = ownership_source_env.find(&e, "main", "after_owning");
+    assert(owning->local.violations_len == 0 && owning->local.unvalidated == 1);
+    assert(owning->local.proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(owning->local.proof.terminal.source.line == 22);
     println("effects ok");
 }
 
@@ -371,11 +381,15 @@ fn report_bound() void {
     println("report bound ok");
 }
 
-string[4] CLASSIFIED = {
-    "fn helper() void {}",
-    "fn leak_after_call() void { i32 mut* own p = new(i32); helper(); }",
-    "fn leak_again() void { i32 mut* own p = new(i32); helper(); }",
-    "fn caller_read(i32* v) i32 { helper(); return *v; }",
+// The parameter of helper owns, so each call of it is a barrier (D17.9, D3.14). The walk
+// crosses the call of plain, which has no parameter.
+string[6] CLASSIFIED = {
+    "fn helper(i32 mut* own x) void { del(x); }",
+    "fn leak_after_call() void { i32 mut* own p = new(i32); helper(null); }",
+    "fn leak_again() void { i32 mut* own p = new(i32); helper(null); }",
+    "fn caller_read(i32* v) i32 { helper(null); return *v; }",
+    "fn plain() void {}",
+    "fn caller_read_after_plain(i32* v) i32 { plain(); return *v; }",
 };
 
 // The classification run puts a body outside the scope only when that run fails nothing.
@@ -404,6 +418,13 @@ fn classification() void {
     assert(caller->local.gap == ownership_source_local.missing.call_dependent);
     assert(caller->local.gap_source.line == 4);
     assert(caller->local.classified);
+    // The same read after a call that the walk crosses: the call still makes the caller source
+    // unknown, so the failure is call scope and no violation.
+    ownership_source.body* plain = ownership_source_env.find(&e, "main",
+        "caller_read_after_plain");
+    assert(plain->local.correspondence == ownership_source_local.status.incomplete);
+    assert(plain->local.gap == ownership_source_local.missing.call_dependent);
+    assert(plain->local.violations_len == 0 && plain->local.classified);
     // A refusal of the second run explains no failure, so the body stays in the declared
     // scope. Its solver is incomplete, and the classification ledger keeps the refusal
     // (fir.md 14.1). The first ledger has none.

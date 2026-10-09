@@ -464,7 +464,7 @@ fn loops() void {
 
 fn calls() void {
     closure mut c = closure{};
-    string[47] lines = {
+    string[48] lines = {
         "extern fn foreign_count(char* p) i32;",
         "extern fn foreign_text() char*;",
         "extern fn foreign_owner() i32 mut* own;",
@@ -512,6 +512,7 @@ fn calls() void {
         "    helper();",
         "    return v;",
         "}",
+        "fn leak_after_owning_call() void { i32 mut* own p = new(i32); take(null); }",
     };
     open(&c, lines[..]);
     defer close(&c);
@@ -519,8 +520,12 @@ fn calls() void {
     proved(&c, "around_call");
     proved(&c, "scalar_result");
     proved(&c, "read_after_call");
-    // The call may never return, so the leak after it has no validated path (A06).
-    declared_unproved(&c, "leak_after_call");
+    // A callee without an owning parameter takes no ownership (D17.9, D3.14): the walk takes
+    // its normal return, and the leak after it is validated.
+    violation(&c, "leak_after_call", ownership_api.event_kind.lost_ownership, "p",
+        "storage ends with a live owner", 18);
+    // A callee with an owning parameter keeps the barrier: no validated path (A06).
+    declared_unproved(&c, "leak_after_owning_call");
     proved(&c, "handed");
     // The callee owns the allocation now and may release it: cross-call scope.
     outside(&c, "handed_view", ownership_source_local.missing.call_dependent);

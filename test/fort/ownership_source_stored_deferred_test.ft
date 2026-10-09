@@ -65,6 +65,21 @@ fn excluded(ownership_source_env.env mut* e, counts mut* n, string name, string 
     n->excluded += 1;
 }
 
+// The local row validates one violation for each of `slots`, in order. The stored run meets
+// the same events and excludes them.
+fn excluded_many(ownership_source_env.env mut* e, counts mut* n, string name, string@ slots)
+    void {
+    ownership_source.body* row = stored_row(e, name, "complete", "incomplete");
+    assert(row->stored.violations_len == 0);
+    assert(row->local.violations_len == slots.len);
+    u64 mut k = 0;
+    while (k < slots.len) {
+        assert(row->local.violations[k].name == slots[k]);
+        k += 1;
+    }
+    n->excluded += 1;
+}
+
 // Incomplete proof in both rows and no violation in either.
 fn declared(ownership_source_env.env mut* e, counts mut* n, string name) void {
     ownership_source.body* row = stored_row(e, name, "complete", "incomplete");
@@ -104,7 +119,8 @@ fn f047(counts mut* n) void {
     excluded(&e, n, "main", "a");
 }
 
-// The leak follows print calls, which may not return.
+// The leak follows print calls, which the walk crosses: their callees have no owning
+// parameter (D17.9, D3.14). The deferred test expects the error on line 12.
 fn f048(counts mut* n) void {
     string[13] lines = {
         "",
@@ -126,10 +142,11 @@ fn f048(counts mut* n) void {
     defer strbuf.free(&text);
     analyze(&e, &text, lines[..]);
     defer ownership_source_env.close(&e);
-    declared(&e, n, "main");
+    excluded(&e, n, "main", "b");
 }
 
-// The leaks follow a print call.
+// The leaks follow print calls, which the walk crosses. The deferred test expects the errors
+// on lines 9 and 11.
 fn f049(counts mut* n) void {
     string[16] lines = {
         "",
@@ -154,7 +171,8 @@ fn f049(counts mut* n) void {
     defer strbuf.free(&text);
     analyze(&e, &text, lines[..]);
     defer ownership_source_env.close(&e);
-    declared(&e, n, "show");
+    string[2] slots = {"s", "a"};
+    excluded_many(&e, n, "show", slots[..]);
     proved(&e, n, "main");
 }
 
@@ -259,8 +277,7 @@ fn f053(counts mut* n) void {
 
 // The corpus expects errors on lines 11 and 12. Line 11 is validated. The read does not
 // relate b, so the path goes on and examines the leak of b on line 12 (toolchain 4.2). The
-// print calls of line 11 are fort calls: no witness crosses them, so line 12 stays an
-// unvalidated record and the first incomplete reason. The body stays rejected.
+// walk crosses the print calls of line 11, so line 12 is validated too.
 fn f054(counts mut* n) void {
     string[13] lines = {
         "",
@@ -282,17 +299,15 @@ fn f054(counts mut* n) void {
     defer strbuf.free(&text);
     analyze(&e, &text, lines[..]);
     defer ownership_source_env.close(&e);
-    excluded(&e, n, "main", "a");
+    string[2] slots = {"a", "b"};
+    excluded_many(&e, n, "main", slots[..]);
     ownership_source.body* row = ownership_source_env.find(&e, "main", "main");
-    assert(row->local.unvalidated == 1);
-    assert(row->local.first_incomplete.terminal.present);
-    assert(row->local.first_incomplete.terminal.source.line == 12);
-    assert(row->local.first_incomplete.terminal.reason ==
-        ownership_api.incomplete_reason.missing_path);
+    assert(row->local.unvalidated == 0);
     assert(row->local.proof.failed);
 }
 
-// The leak follows a print call.
+// The leak follows a print call, which the walk crosses. The deferred test expects the error
+// on line 8.
 fn f055(counts mut* n) void {
     string[11] lines = {
         "",
@@ -312,7 +327,7 @@ fn f055(counts mut* n) void {
     defer strbuf.free(&text);
     analyze(&e, &text, lines[..]);
     defer ownership_source_env.close(&e);
-    declared(&e, n, "main");
+    excluded(&e, n, "main", "s");
 }
 
 // The deferred test expects the error on line 9.
@@ -404,7 +419,8 @@ fn f059(counts mut* n) void {
     excluded(&e, n, "main", "a");
 }
 
-// The leak follows a print call.
+// The leak follows a print call, which the walk crosses. The deferred test expects the error
+// on line 9.
 fn f060(counts mut* n) void {
     string[11] lines = {
         "",
@@ -424,7 +440,7 @@ fn f060(counts mut* n) void {
     defer strbuf.free(&text);
     analyze(&e, &text, lines[..]);
     defer ownership_source_env.close(&e);
-    declared(&e, n, "main");
+    excluded(&e, n, "main", "p");
 }
 
 // Only a later iteration overwrites: no witness validates it.
@@ -624,9 +640,9 @@ fn main() i32 {
     f065(&n);
     f066(&n);
     println("deferred fail tests ok");
-    // 20 programs hold 27 bodies. The local row validates 9 events and the stored row repeats
-    // none of them.
-    assert(n.excluded == 9 && n.declared == 8 && n.outside == 4 && n.proved == 6);
+    // 20 programs hold 27 bodies. The local row validates 15 events in 13 bodies and the
+    // stored row repeats none of them.
+    assert(n.excluded == 13 && n.declared == 4 && n.outside == 4 && n.proved == 6);
     println("totals ok");
     return 0;
 }
