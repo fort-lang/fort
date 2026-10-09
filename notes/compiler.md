@@ -1179,7 +1179,10 @@ came here.
   untracked references took 72 stored and 161 local bodies out of the scopes when it came
   (756 and 781 before). `src/fort/main.ft` takes 15.0 s and 874 MB with the local, stored
   and raw runs (12.1 s and 748 MB before the raw run; `/usr/bin/time -v`, debug build, Linux
-  VM). One body outside the scope refuses a stored ledger: `ownership_events.clone` (W).
+  VM). The stored ledgers of `ownership_events.clone`, `fir.func_clone` and
+  `ownership_state.measure_regions` refused W or V on earlier trees. They now complete with no
+  refusal: `test_compiler_bodies_keep_their_stored_ledgers` in `test/ownership_driver_test.py`
+  holds this for these three bodies.
   On the 512 run tests of `test/lang`, no local, stored or raw row has a violation.
 - **Raw-storage effects come from verified FIR** (D17.17, D17.18, D19.8).
   `ownership_source_raw` reads each verified body and proves its raw obligations with
