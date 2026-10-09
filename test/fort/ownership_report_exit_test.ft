@@ -1,0 +1,204 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| rendering ok
+//| boundary record ok
+//| document ok
+//| closure ok
+//| budget error ok
+//| render refusal ok
+/// Checks how the report carries the process-exit analysis: its diagnostics in toolchain 4.2
+/// order, its row, its ledger and the boundary member of version 6.
+import diag;
+import ownership_exit_source_env as env;
+import ownership_report;
+import ownership_source;
+import ownership_source_exit;
+import std.str;
+import std.strbuf;
+
+string[6] LEAK = {
+    "import std.libc;",
+    "fn leak_at_exit() void {",
+    "    u8 mut@ own p = new(u8, 1);",
+    "    libc.exit(0);",
+    "}",
+    "fn main() i32 { return 0; }",
+};
+
+// A validated violation renders as lost ownership, an unproved declared obligation as "cannot
+// prove ... is empty". Each has its note, and the closure reason follows them.
+fn rendering() void {
+    env.closure mut c = env.closure{};
+    env.open(&c, LEAK[..]);
+    defer env.close(&c);
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.diagnose(&c.e.source, &found, "main.ft");
+    assert(diag.count(&found) == 3 && diag.record_count(&found) == 5);
+    assert(diag.record_at(&found, 0).msg == "lost ownership of 'p'");
+    assert(diag.record_at(&found, 0).loc.line == 4);
+    assert(diag.record_at(&found, 1).msg == ownership_source_exit.EXIT_LOST);
+    assert(diag.record_at(&found, 2).msg == "cannot prove that 'args_store' is empty");
+    assert(diag.record_at(&found, 2).loc.line == 4);
+    assert(diag.record_at(&found, 3).msg == ownership_source_exit.EXIT_UNPROVED);
+    assert(str.find(diag.record_at(&found, 4).msg, "ownership proof is incomplete") == 0);
+    println("rendering ok");
+}
+
+// A boundary failure renders at the declaration of its global, after the body records.
+fn boundary_record() void {
+    env.closure mut c = env.closure{};
+    string[1] lines = {"fn main() i32 { return 0; }"};
+    env.open_with(&c, lines[..], env.runtime.no_shutdown);
+    defer env.close(&c);
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.diagnose(&c.e.source, &found, "main.ft");
+    // std.rt.exit has its own unproved record; the boundary record follows the body records.
+    u64 mut at = 0;
+    while (at < diag.record_count(&found) &&
+        diag.record_at(&found, at).msg != ownership_source_exit.BOUNDARY_EXECUTABLE) {
+        at += 1;
+    }
+    assert(at > 0 && at < diag.record_count(&found));
+    diag.record boundary = diag.record_at(&found, at - 1);
+    assert(boundary.msg == "cannot prove that 'args_store' is empty");
+    assert(str.find(boundary.loc.file, "rt.ft") >= 0);
+    println("boundary record ok");
+}
+
+fn contains(strbuf.str_buf* out, string text) void {
+    if (str.find(strbuf.view(out), text) < 0) {
+        eprintln("missing: ", text);
+        assert(false);
+    }
+}
+
+// Version 6 integrates the process-exit analysis. Each verified body has one process_exit
+// ledger with the FIR size of its service ledger, and the totals count its violations. The
+// call-graph step of the boundary has one closure ledger, `process_exit_fills`, after the graph
+// ledger: no owner, W only, the summed FIR size of the process_exit ledgers.
+fn document() void {
+    env.closure mut c = env.closure{};
+    env.open(&c, LEAK[..]);
+    defer env.close(&c);
+    ownership_source.body* row = ownership_source_env_find(&c, "leak_at_exit");
+    u64 stage = ownership_report.PROCESS_EXIT;
+    assert(ownership_report.integrated(stage));
+    assert(!ownership_report.integrated(stage - 1));
+    assert(ownership_report.analysis_status(row, stage, 0) == "complete");
+    assert(ownership_report.analysis_status(row, stage, 1) == "complete");
+    assert(ownership_report.analysis_status(row, stage, 2) == "violated");
+    assert(ownership_report.analysis_violations(row, stage) == 1);
+    assert(ownership_report.body_violations(row) == 1);
+    assert(ownership_report.body_ownership(row) == "violated");
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    ownership_report.invocation call = ownership_report.invocation{};
+    ownership_report.build(&out, &c.e.source, &call, 1);
+    contains(&out, "{\"kind\":\"fort-ownership-report\",\"version\":6,");
+    contains(&out, "{\"name\":\"process_exit\",\"producer\":\"integrated\"");
+    contains(&out, "{\"name\":\"process_exit\",\"correspondence\":\"complete\",");
+    contains(&out, "\"name\":\"process_exit\",\"owner\":");
+    ownership_source_exit.closure* x = &c.e.source.exit;
+    assert(x->fills_meter.used.w > 0 && !x->fills_refusal.terminal.present);
+    strbuf.str_buf mut fills = strbuf.create();
+    defer strbuf.free(&fills);
+    strbuf.append(&fills, "{\"id\":1,\"name\":\"process_exit_fills\",\"owner\":null,");
+    strbuf.append(&fills, "\"fir_size\":");
+    strbuf.append_u64(&fills, x->fills_fir_size);
+    strbuf.append(&fills, ",\"counts\":[{\"category\":\"W\",\"scope\":\"computation\",");
+    strbuf.append(&fills, "\"used\":");
+    strbuf.append_u64(&fills, x->fills_meter.used.w);
+    contains(&out, strbuf.view(&fills));
+    contains(&out, "\"first_refusal\":null},{\"id\":2,\"name\":\"services\",");
+    contains(&out, "\"boundary\":{\"kind\":\"executable\",\"leaves\":1,");
+    contains(&out, "\"correspondence\":\"complete\",\"proof\":\"complete\",");
+    contains(&out, "\"first_incomplete\":null}");
+    println("document ok");
+}
+
+fn ownership_source_env_find(env.closure mut* c, string name) ownership_source.body* {
+    u64 mut i = 0;
+    while (i < c->e.source.bodies.len) {
+        ownership_source.body* row = &c->e.source.bodies[i];
+        if (row->module->path == "main" && row->declaration->name == name) { return row; }
+        i += 1;
+    }
+    panic("ownership_report_exit_test: body is absent");
+}
+
+// The process_exit closure holds the boundary: complete bodies with a proved boundary make it
+// complete, and an unproved boundary keeps it incomplete with a reason that names the boundary.
+fn closure() void {
+    env.closure mut c = env.closure{};
+    string[1] lines = {"fn main() i32 { return 0; }"};
+    env.open(&c, lines[..]);
+    assert(ownership_report.closure_status(&c.e.source, ownership_report.PROCESS_EXIT) ==
+        "complete");
+    env.close(&c);
+    c = env.closure{};
+    env.open_with(&c, lines[..], env.runtime.no_shutdown);
+    defer env.close(&c);
+    assert(ownership_report.closure_status(&c.e.source, ownership_report.PROCESS_EXIT) ==
+        "incomplete");
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    ownership_report.invocation call = ownership_report.invocation{};
+    ownership_report.build(&out, &c.e.source, &call, 1);
+    contains(&out, "\"correspondence\":\"complete\",\"proof\":\"incomplete\",");
+    contains(&out, "\"first_incomplete\":{\"stage\":\"process_exit\",");
+    contains(&out, "\"code\":\"missing_boundary\"");
+    println("closure ok");
+}
+
+// A W refusal of a process-exit ledger is a budget error even when no later use needs its
+// result (fir.md 14.1).
+fn budget_error() void {
+    env.closure mut c = env.closure{};
+    env.prepare_with(&c, LEAK[..], env.runtime.release_last);
+    env.prepared(&c, "leak_at_exit")->meter.bounds.w = 3;
+    env.analyze(&c);
+    defer env.close(&c);
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.diagnose(&c.e.source, &found, "main.ft");
+    bool mut seen = false;
+    u64 mut i = 0;
+    while (i < diag.record_count(&found)) {
+        string text = diag.record_at(&found, i).msg;
+        if (str.find(text, "(process exit: work_limit; category W; used 3; bound 3)") >= 0) {
+            seen = true;
+        }
+        i += 1;
+    }
+    assert(seen);
+    println("budget error ok");
+}
+
+// A V refusal of the process-exit ledger keeps one terminal error and stops the later records.
+fn render_refusal() void {
+    env.closure mut c = env.closure{};
+    env.prepare_with(&c, LEAK[..], env.runtime.release_last);
+    env.prepared(&c, "leak_at_exit")->meter.bounds.v = 3;
+    env.analyze(&c);
+    defer env.close(&c);
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.diagnose(&c.e.source, &found, "main.ft");
+    assert(diag.record_count(&found) == 3);
+    assert(diag.record_at(&found, 0).msg == "lost ownership of 'p'");
+    assert(str.find(diag.record_at(&found, 2).msg, "within the report bound 3") >= 0);
+    println("render refusal ok");
+}
+
+fn main() i32 {
+    rendering();
+    boundary_record();
+    document();
+    closure();
+    budget_error();
+    render_refusal();
+    return 0;
+}

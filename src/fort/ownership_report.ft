@@ -9,6 +9,7 @@ import ownership_events;
 import ownership_keys;
 import ownership_limits;
 import ownership_source;
+import ownership_source_exit;
 import ownership_source_leaves;
 import ownership_source_local;
 import ownership_source_raw;
@@ -29,6 +30,7 @@ u64 ANALYSIS_COUNT = 7;
 u64 LOCAL = 2;
 u64 STORED_BORROWS = 3;
 u64 RAW = 4;
+u64 PROCESS_EXIT = 6;
 string[ANALYSIS_COUNT] ANALYSES = {
     "graph", "liveness", "local", "stored_borrows", "raw", "calls_heap", "process_exit"};
 string[3] STAGES = {"checking", "lowering", "verification"};
@@ -78,8 +80,9 @@ fn local_status(ownership_source_local.status value) string {
     }
 }
 
-// The graph, liveness, local, stored-borrow and raw analyses have source producers.
-fn integrated(u64 stage) bool { return stage <= RAW; }
+// The graph, liveness, local, stored-borrow, raw and process-exit analyses have source
+// producers.
+fn integrated(u64 stage) bool { return stage <= RAW || stage == PROCESS_EXIT; }
 
 // The local and the stored-borrow analyses are flow runs of one producer.
 fn flow_stage(u64 stage) bool { return stage == LOCAL || stage == STORED_BORROWS; }
@@ -89,11 +92,14 @@ fn flow_run(ownership_source.body* row, u64 stage) ownership_source_local.contex
     return &row->local;
 }
 
-// Whether a source producer runs the analysis of a stage per body: local, stored borrows or
-// raw.
-fn producer_stage(u64 stage) bool { return flow_stage(stage) || stage == RAW; }
+// Whether a source producer runs the analysis of a stage per body: local, stored borrows, raw
+// or process exit.
+fn producer_stage(u64 stage) bool {
+    return flow_stage(stage) || stage == RAW || stage == PROCESS_EXIT;
+}
 
-// The analysis of a stage that a source producer runs per body: local, stored borrows or raw.
+// The analysis of a stage that a source producer runs per body: local, stored borrows, raw or
+// process exit.
 fn producer_row(ownership_source.body* row, u64 stage, bool mut* solved,
     ownership_source_local.status mut* correspondence, ownership_source_local.status mut* solver,
     ownership_api.proof_status mut* proof, u64 mut* violations) void {
@@ -104,6 +110,14 @@ fn producer_row(ownership_source.body* row, u64 stage, bool mut* solved,
         *solver = run->solver;
         *proof = run->proof;
         *violations = run->violations_len;
+        return;
+    }
+    if (stage == PROCESS_EXIT) {
+        *solved = row->exit.solved;
+        *correspondence = row->exit.correspondence;
+        *solver = row->exit.solver;
+        *proof = row->exit.proof;
+        *violations = row->exit.violations_len;
         return;
     }
     *solved = row->raw.solved;
@@ -210,6 +224,17 @@ fn body_ownership(ownership_source.body* row) string {
     return "unexecuted";
 }
 
+// The proof of a stage that a source producer runs per body.
+fn producer_proof(ownership_source.body* row, u64 stage) ownership_api.proof_status {
+    bool mut solved = false;
+    ownership_source_local.status mut correspondence = ownership_source_local.status.unexecuted;
+    ownership_source_local.status mut solver = ownership_source_local.status.unexecuted;
+    ownership_api.proof_status mut proof = ownership_api.proof_status{};
+    u64 mut violations = 0;
+    producer_row(row, stage, &solved, &correspondence, &solver, &proof, &violations);
+    return solved ? proof : ownership_api.proof_status{};
+}
+
 // The first reason in analysis order. The first analysis without a producer ends the order.
 fn body_reason(ownership_source.body* row) reason {
     if (!prerequisites(row)) { return reason{}; }
@@ -219,8 +244,7 @@ fn body_reason(ownership_source.body* row) reason {
     u64 mut stage = LOCAL;
     while (stage < ANALYSIS_COUNT && integrated(stage)) {
         if (analysis_status(row, stage, 2) == "incomplete") {
-            reason got = proof_reason(ANALYSES[stage], flow_stage(stage) ?
-                flow_run(row, stage)->proof : row->raw.proof);
+            reason got = proof_reason(ANALYSES[stage], producer_proof(row, stage));
             if (got.present) { return got; }
         }
         stage += 1;
@@ -255,14 +279,28 @@ fn analysis_violations(ownership_source.body* row, u64 stage) u64 {
     return solved ? violations : 0;
 }
 
-// The local, stored-borrow and raw analyses report violations. The stored run drops each
-// violation that the local run validated, so the sum counts each diagnostic once.
+// The local, stored-borrow, raw and process-exit analyses report violations. The stored run
+// drops each violation that the local run validated, so the sum counts each diagnostic once.
+// The process-exit analysis checks global owners and exits, which no other analysis checks.
 fn body_violations(ownership_source.body* row) u64 {
     return analysis_violations(row, LOCAL) + analysis_violations(row, STORED_BORROWS) +
-        analysis_violations(row, RAW);
+        analysis_violations(row, RAW) + analysis_violations(row, PROCESS_EXIT);
+}
+
+fn status_word(ownership_source_local.status value) string { return local_status(value); }
+
+// The process-exit closure holds its bodies and the boundary, a fact outside each body.
+fn exit_closure(ownership_source.context* c) string {
+    string bodies = producer_closure(c, PROCESS_EXIT);
+    if (bodies == "failed") { return "failed"; }
+    string boundary = status_word(c->exit.boundary_proof);
+    if (bodies == "complete" && boundary == "complete") { return "complete"; }
+    if (bodies == "unexecuted" && boundary == "unexecuted") { return "unexecuted"; }
+    return "incomplete";
 }
 
 fn closure_status(ownership_source.context* c, u64 stage) string {
+    if (stage == PROCESS_EXIT) { return exit_closure(c); }
     if (producer_stage(stage)) { return producer_closure(c, stage); }
     if (!integrated(stage)) { return "incomplete"; }
     bool mut executed = stage == 0 && c->graph_built;
@@ -288,15 +326,16 @@ fn first_incomplete(ownership_source.context* c) reason {
             ownership_api.proof_status mut value = stage == 0 ? row->graph_proof :
                 row->liveness_proof;
             if (producer_stage(stage)) {
-                bool flow = flow_stage(stage);
-                bool solved = flow ? flow_run(row, stage)->solved : row->raw.solved;
-                value = solved && analysis_status(row, stage, 2) == "incomplete" ?
-                    (flow ? flow_run(row, stage)->proof : row->raw.proof) :
-                    ownership_api.proof_status{};
+                value = analysis_status(row, stage, 2) == "incomplete" ?
+                    producer_proof(row, stage) : ownership_api.proof_status{};
             }
             reason got = proof_reason(ANALYSES[stage], value);
             if (got.present) { return got; }
             i += 1;
+        }
+        if (stage == PROCESS_EXIT) {
+            reason got = proof_reason(ANALYSES[stage], c->exit.boundary_first);
+            if (got.present) { return got; }
         }
         if (closure_status(c, stage) == "incomplete") {
             return fallback_reason(ANALYSES[stage], "source_coverage",
@@ -435,11 +474,16 @@ fn report_limit_message(u64 bound, strbuf.str_buf mut* message) void {
     strbuf.append_u64(message, bound);
 }
 
-// The text of the error of a validated violation, or of a raw failure without a witness. Its
+// What a failure without a witness cannot prove: raw access, or an empty owner (process exit).
+string UNPROVED_ACCESS = " designates the accessed storage";
+string UNPROVED_EMPTY = " is empty";
+
+// The text of the error of a validated violation, or of a failure without a witness. Its
 // note is the violation text. A leaf of a named aggregate reads `b.p` or `a[1]`: flow run
-// `run` names it. A raw record names a whole local, so its `run` is null (`record_run`).
+// `run` names it. A raw or a process-exit record names a whole local or a global, so its `run`
+// is null (`record_run`). `unproved` ends the text of a failure without a witness.
 fn violation_message(ownership_source_local.context* run, ownership_source_local.violation* v,
-    strbuf.str_buf mut* message) void {
+    string unproved, strbuf.str_buf mut* message) void {
     if (v->kind == ownership_api.event_kind.incomplete_proof) {
         strbuf.append(message, "cannot prove that ");
     } else {
@@ -454,12 +498,13 @@ fn violation_message(ownership_source_local.context* run, ownership_source_local
     }
     if (v->quoted) { strbuf.push(message, '\''); }
     if (v->kind == ownership_api.event_kind.incomplete_proof) {
-        strbuf.append(message, " designates the accessed storage");
+        strbuf.append(message, unproved);
     }
 }
 
 // The flow run whose leaves name the records of list `from`: 0 local, 1 stored borrows. A raw
-// record (lists 2 and 3) names a whole local and no leaf, so it has no run.
+// record (lists 2 and 3) names a whole local and no leaf, and a process-exit record (lists 4
+// and 5) a whole local or a global, so neither has a run.
 fn record_run(ownership_source.body* row, u64 from, ownership_source_local.violation* v)
     ownership_source_local.context* {
     if (from == 0) { return &row->local; }
@@ -471,11 +516,12 @@ fn record_run(ownership_source.body* row, u64 from, ownership_source_local.viola
 }
 
 // Charges one rendered record to the ledger of its list: 0 local, 1 stored borrows, 2 and 3
-// raw.
+// raw, 4 and 5 process exit.
 fn charge_record(ownership_source.body mut* row, u64 from, ownership_source_local.violation* v)
     bool {
     if (from == 0) { return ownership_source_local.charge_rendered(&row->local, v); }
     if (from == 1) { return ownership_source_local.charge_rendered(&row->stored, v); }
+    if (from >= 4) { return ownership_source_exit.charge_rendered(&row->exit, v); }
     return ownership_source_raw.charge_rendered(&row->raw, v);
 }
 
@@ -483,17 +529,19 @@ fn charge_record(ownership_source.body mut* row, u64 from, ownership_source_loca
 fn record_bound(ownership_source.body* row, u64 from) u64 {
     if (from == 0) { return row->local.meter.bounds.v; }
     if (from == 1) { return row->stored.meter.bounds.v; }
+    if (from >= 4) { return row->exit.meter.bounds.v; }
     return row->raw.meter.bounds.v;
 }
 
 // The next record of a body in toolchain 4.2 order: local violations, stored-borrow
-// violations, raw violations and raw failures without a witness, each list already in that
-// order. `from` names its list. On equal keys the earlier list comes first.
+// violations, raw violations, raw failures without a witness, process-exit violations and
+// process-exit failures without a witness, each list already in that order. `from` names its
+// list. On equal keys the earlier list comes first.
 fn next_record(ownership_source.body* row, u64 mut@ cursor, u64 mut* from)
     ownership_source_local.violation* {
     ownership_source_local.violation* mut best = null;
     u64 mut list = 0;
-    while (list < 4) {
+    while (list < 6) {
         u64 at = cursor[list];
         ownership_source_local.violation* mut item = null;
         if (list == 0 && row->local.solved && at < row->local.violations_len) {
@@ -504,6 +552,10 @@ fn next_record(ownership_source.body* row, u64 mut@ cursor, u64 mut* from)
             item = &row->raw.violations[at];
         } else if (list == 3 && row->raw.solved && at < row->raw.unproved_len) {
             item = &row->raw.unproved[at];
+        } else if (list == 4 && row->exit.solved && at < row->exit.violations_len) {
+            item = &row->exit.violations[at];
+        } else if (list == 5 && row->exit.solved && at < row->exit.unproved_len) {
+            item = &row->exit.unproved[at];
         }
         if (item != null && (best == null || ownership_source_local.before(item, best))) {
             best = item;
@@ -521,7 +573,7 @@ fn violations(ownership_source.context mut* c, diag.sink mut* diagnostics, strin
     u64 mut i = 0;
     while (i < c->bodies.len) {
         ownership_source.body mut* row = &c->bodies[i];
-        u64[4] mut cursor = {0, 0, 0, 0};
+        u64[6] mut cursor = {0, 0, 0, 0, 0, 0};
         while (true) {
             u64 mut from = 0;
             ownership_source_local.violation* v = next_record(row, cursor[..], &from);
@@ -536,11 +588,43 @@ fn violations(ownership_source.context mut* c, diag.sink mut* diagnostics, strin
             }
             strbuf.str_buf mut message = strbuf.create();
             defer strbuf.free(&message);
-            violation_message(record_run(row, from, v), v, &message);
+            violation_message(record_run(row, from, v), v,
+                from >= 4 ? UNPROVED_EMPTY : UNPROVED_ACCESS, &message);
             diag.loc at = location(c, v->source, entry);
             diag.error(diagnostics, at, strbuf.view(&message));
             diag.note(diagnostics, at, v->text);
         }
+        i += 1;
+    }
+    return boundary_records(c, diagnostics, entry);
+}
+
+// Renders each boundary failure at the declaration of its global, after the records of the
+// bodies. The first process-exit ledger in body order pays its V units.
+fn boundary_records(ownership_source.context mut* c, diag.sink mut* diagnostics, string entry)
+    bool {
+    ownership_source_exit.context mut* mut ledger = null;
+    u64 mut i = 0;
+    while (i < c->bodies.len && ledger == null) {
+        if (c->bodies[i].exit.solved) { ledger = &c->bodies[i].exit; }
+        i += 1;
+    }
+    i = 0;
+    while (i < c->exit.boundary_unproved_len) {
+        ownership_source_local.violation* v = &c->exit.boundary_unproved[i];
+        diag.loc at = location(c, v->source, entry);
+        if (ledger != null && !ownership_source_exit.charge_rendered(ledger, v)) {
+            strbuf.str_buf mut limit = strbuf.create();
+            defer strbuf.free(&limit);
+            report_limit_message(ledger->meter.bounds.v, &limit);
+            diag.error(diagnostics, at, strbuf.view(&limit));
+            return false;
+        }
+        strbuf.str_buf mut message = strbuf.create();
+        defer strbuf.free(&message);
+        violation_message(null, v, UNPROVED_EMPTY, &message);
+        diag.error(diagnostics, at, strbuf.view(&message));
+        diag.note(diagnostics, at, v->text);
         i += 1;
     }
     return true;
@@ -585,6 +669,10 @@ fn diagnose(ownership_source.context mut* c, diag.sink mut* diagnostics, string 
             first)) {
             return;
         }
+        if (!ledger_budget(c, diagnostics, entry, row, PROCESS_EXIT, row->exit.first_refusal,
+            "process exit", first)) {
+            return;
+        }
         i += 1;
     }
 }
@@ -614,7 +702,7 @@ fn fir_test_local(fir.func* f, u32 index, diag.sink mut* diagnostics, string fil
             diag.error(diagnostics, at, strbuf.view(&message));
             return errors + 1;
         }
-        violation_message(&local, v, &message);
+        violation_message(&local, v, UNPROVED_ACCESS, &message);
         diag.error(diagnostics, at, strbuf.view(&message));
         diag.note(diagnostics, at, v->text);
         errors += 1;
@@ -686,6 +774,9 @@ fn ledger_budget(ownership_source.context mut* c, diag.sink mut* diagnostics, st
 fn charge_ledger(ownership_source.body mut* row, u64 stage, ownership_api.operation_position op,
     ownership_api.source_position at) bool {
     if (stage == RAW) { return ownership_source_raw.charge_report(&row->raw, op, at, 1); }
+    if (stage == PROCESS_EXIT) {
+        return ownership_source_exit.charge_report(&row->exit, op, at, 1);
+    }
     if (stage == STORED_BORROWS) {
         return ownership_source_local.charge_report(&row->stored, op, at, 1);
     }
@@ -838,6 +929,25 @@ fn write_meters(json.writer mut* j, ownership_source.context* c) void {
         json.json_object_end(j);
         id += 1;
     }
+    // The call-graph step of the process-exit boundary: one closure ledger that counts W only.
+    if (c->exit.fills_decided) {
+        json.json_object_begin(j);
+        key_uint(j, "id", id);
+        key_string(j, "name", "process_exit_fills");
+        json.json_key(j, "owner");
+        json.json_null(j);
+        key_uint(j, "fir_size", c->exit.fills_fir_size);
+        json.json_key(j, "counts");
+        json.json_array_begin(j);
+        write_count(j, cast(ownership_api.limit_category.w, u64),
+            ownership_limits.used(&c->exit.fills_meter.used, ownership_api.limit_category.w),
+            ownership_limits.bound(&c->exit.fills_meter.bounds, ownership_api.limit_category.w));
+        json.json_array_end(j);
+        json.json_key(j, "first_refusal");
+        write_reason(j, proof_reason("process_exit", c->exit.fills_refusal));
+        json.json_object_end(j);
+        id += 1;
+    }
     u64 mut i = 0;
     while (i < c->bodies.len) {
         ownership_source.body* row = &c->bodies[i];
@@ -875,6 +985,11 @@ fn write_producer_meters(json.writer mut* j, ownership_source.body* row, u64 id)
     if (row->raw.initialized) {
         write_local_meter(j, row, next, "raw", &row->raw.meter, row->raw.first_refusal,
             row->raw.fir_size, "raw");
+        next += 1;
+    }
+    if (row->exit.initialized) {
+        write_local_meter(j, row, next, "process_exit", &row->exit.meter,
+            row->exit.first_refusal, row->exit.fir_size, "process_exit");
         next += 1;
     }
     return next;
@@ -1005,6 +1120,18 @@ fn stage_violations(ownership_source.context* c, u64 stage) u64 {
     return total;
 }
 
+// The process-exit boundary: the generated executable sequence or the library cleanup.
+fn write_boundary(json.writer mut* j, ownership_source.context* c) void {
+    json.json_object_begin(j);
+    key_string(j, "kind", c->exit.executable ? "executable" : "library");
+    key_uint(j, "leaves", c->exit.leaves_len);
+    key_string(j, "correspondence", status_word(c->exit.boundary_correspondence));
+    key_string(j, "proof", status_word(c->exit.boundary_proof));
+    json.json_key(j, "first_incomplete");
+    write_reason(j, proof_reason("process_exit", c->exit.boundary_first));
+    json.json_object_end(j);
+}
+
 fn write_totals(json.writer mut* j, ownership_source.context* c) void {
     json.json_object_begin(j);
     key_uint(j, "bodies", c->bodies.len);
@@ -1048,7 +1175,9 @@ fn build(strbuf.str_buf mut* out, ownership_source.context* c, invocation* call,
     // Version 3 adds the integrated local analysis and its `local` ledgers.
     // Version 4 adds the integrated raw analysis and its `raw` ledgers.
     // Version 5 adds the integrated stored-borrow analysis and its `stored_borrows` ledgers.
-    key_uint(&j, "version", 5);
+    // Version 6 adds the integrated process-exit analysis, its `process_exit` ledgers and the
+    // boundary member.
+    key_uint(&j, "version", 6);
     key_bool(&j, "complete", true);
     key_string(&j, "compiler_version", call->compiler_version);
     json.json_key(&j, "invocation");
@@ -1085,6 +1214,8 @@ fn build(strbuf.str_buf mut* out, ownership_source.context* c, invocation* call,
     json.json_array_end(&j);
     json.json_key(&j, "totals");
     write_totals(&j, c);
+    json.json_key(&j, "boundary");
+    write_boundary(&j, c);
     json.json_key(&j, "first_incomplete");
     write_reason(&j, first_incomplete(c));
     json.json_key(&j, "failure");

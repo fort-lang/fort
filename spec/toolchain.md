@@ -338,7 +338,7 @@ temporary directory for the intermediate IR file (D19.1).
 
 ### 1.1 Ownership coverage reports (D19.8)
 
-The compiler report is a JSON version 5 document. The audit attestation is a JSON version 1
+The compiler report is a JSON version 6 document. The audit attestation is a JSON version 1
 document.
 Neither document changes the diagnostic JSON of section 4.1.
 The compiler writes one report for one checked closure. The runner attests the invocation and bytes.
@@ -354,7 +354,7 @@ Count overflow gives report failure, not wrapped totals.
 | Member | Type and meaning |
 |---|---|
 | `kind` | String `fort-ownership-report`. |
-| `version` | Integer 5. Version 2 adds `limits.w_scale` and `fir_size`; 3 local; 4 raw; 5 stored. |
+| `version` | Integer 6. Version 2 adds `w_scale`, `fir_size`; 3 local; 4 raw; 5 stored; 6 exit. |
 | `complete` | Boolean true; the report is complete, not necessarily its proof. |
 | `compiler_version` | The string that --version identifies. |
 | `invocation` | Entry, working directory, arguments, target, configuration, and mode. |
@@ -365,6 +365,7 @@ Count overflow gives report failure, not wrapped totals.
 | `meters` | Actual counted ledgers and their separate scopes. |
 | `bodies` | One row for each discovered selected fort body. |
 | `totals` | Counts derived from the body rows. |
+| `boundary` | The process-exit boundary of the closure: its kind and its proof. |
 | `first_incomplete` | The first incomplete reason, or null. |
 | `failure` | The first front-end, lowering, verification, analysis, or tool failure, or null. |
 | `verdict` | String `accepted`, `rejected`, or `failed`. |
@@ -431,6 +432,13 @@ A stored violation that the local run validates at the same operation counts onc
 `local` row.
 The raw increment adds one `raw` ledger for each verified body: its raw computation.
 A `raw` ledger has an owner. Its FIR size equals the FIR size of that body's service ledger.
+The process-exit increment adds one `process_exit` ledger for each verified body: its first
+pass, its second pass and the witness walks of its definite failures. It has an owner, and its
+FIR size equals the FIR size of that body's service ledger.
+It also adds one `process_exit_fills` ledger when the boundary runs, that is when enumeration,
+checking, lowering and verification of each body succeed: the call-graph step that decides which
+bodies can fill an owning global. That ledger has no owner, counts W only, and has the sum of the
+FIR sizes of the `process_exit` ledgers.
 The graph FIR size is the sum of the service ledgers only.
 Graph construction uses the graph's retained private W ledger.
 Service dispatch, liveness, and the target queries of one body charge that body's service ledger.
@@ -477,6 +485,39 @@ counter objects, plus integer `violations`.
 Each status counter object's counts sum to the selected body count.
 The body count equals the row count and `enumeration.selected_bodies`.
 These totals count context-body occurrences. They do not combine proofs from overlapping closures.
+
+`boundary` contains string `kind`, integer `leaves`, string `correspondence`, string `proof`,
+and `first_incomplete`. Kind is `executable` when the entry module has a selected `main`, and
+`library` otherwise (D17.19, D20.1). Checking failure does not change the kind. Leaves counts
+the owning global leaves of the closure. The elements of one fixed array count as one leaf.
+Correspondence and proof use `complete`, `incomplete`, or `unexecuted`.
+A cleanup body of a leaf leaves it empty at each normal return. In that body, each release or
+move of the leaf has the owned descendants of its value proved empty, and each store into the
+leaf finds it empty. The body has no hand-out. A hand-out moves a value that can hold an
+allocation out of the frame: into an owning global, an indirect owning place or a fort call
+argument; through a fort call while an owner of the frame whose address the body takes can hold
+an allocation; or into an extern call through an argument whose type reaches a writable owning
+slot, because D17.13 applies that signature transfer. Two cleanups could otherwise pass one
+allocation between leaves. The body alone decides these rules, with each fort call in it taken
+as unknown. No fort function that the body reaches through fort calls can fill an owning
+global: none has a hand-out, none has a first pass that a limit refused, and none makes an
+indirect fort call. The closure decides this over its call graph as one computation with its own
+W bound (D17.18). A refused computation proves no cleanup and gives the first boundary reason. A
+fort function that foreign code calls back stays outside these rules, and so does an address
+that foreign code retains from an earlier call. D17.13 keeps hidden foreign retention, writes
+and callback effects outside proof, and keeps known fort facts across an extern call. So a
+callback, or a later extern call through a retained address, can fill a leaf after a cleanup.
+An executable boundary follows the generated call of `std.rt.shutdown` after source main. It
+proves a leaf when `std.rt.shutdown` is a cleanup body of that leaf.
+A library boundary proves a leaf when some body of the closure is a cleanup body of that leaf.
+A leaf that the boundary does not prove then needs a summary: of source main in an executable,
+or of a cleanup wrapper in a library. Such a leaf outside std.rt makes correspondence
+incomplete. Such a std.rt leaf keeps correspondence complete and makes proof incomplete, because
+the runtime cleanup must prove it. Proof is complete only with complete correspondence and each
+leaf proved. Unexecuted means that enumeration, checking, lowering, or verification of a body
+failed. First incomplete is a reason object with stage `process_exit`, or null.
+The `process_exit` closure status is complete only when each body proof and the boundary proof
+are complete.
 
 Each reason object contains `stage`, `code`, `source`, and `limit`.
 Stage is `enumeration`, `checking`, `lowering`, `verification`, `tool`, or an analysis name.
@@ -561,6 +602,10 @@ It also rejects each declared body whose `stored_borrows` proof is not complete.
 The raw scope declares a body when that body's `raw` correspondence is complete.
 Scoped raw enforcement rejects each raw violation in any body.
 It also rejects each declared body whose `raw` proof is not complete.
+The process-exit scope declares a body when its `process_exit` correspondence is complete.
+Scoped process-exit enforcement rejects each `process_exit` violation in any body.
+It also rejects each declared body whose `process_exit` proof is not complete.
+It also rejects a boundary whose correspondence is complete and whose proof is not complete.
 Later scoped enforcement reads the same reports and requires complete proof within its declared
 scope.
 It never converts exit 1 into accepted complete compiler proof.

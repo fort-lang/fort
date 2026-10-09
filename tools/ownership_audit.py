@@ -68,15 +68,20 @@ FAILURE_CODES = (
 U64_MAX = (1 << 64) - 1
 U32_MAX = (1 << 32) - 1
 LIMIT_VERSION = 2
-REPORT_VERSION = 5
+REPORT_VERSION = 6
 # The producer analyses with a ledger for each verified body, and the classification ledgers
 # of the two flow analyses among them.
-BODY_LEDGERS = ("local", "stored_borrows", "raw")
+BODY_LEDGERS = ("local", "stored_borrows", "raw", "process_exit")
 CLASSIFICATION_LEDGERS = {
     "local_classification": "local",
     "stored_borrows_classification": "stored_borrows",
 }
-LEDGER_LABELS = {"local": "local", "stored_borrows": "stored", "raw": "raw"}
+LEDGER_LABELS = {
+    "local": "local",
+    "stored_borrows": "stored",
+    "raw": "raw",
+    "process_exit": "process exit",
+}
 METER_NAMES = (
     "graph_private",
     "services",
@@ -85,7 +90,11 @@ METER_NAMES = (
     "stored_borrows",
     "stored_borrows_classification",
     "raw",
+    "process_exit",
+    "process_exit_fills",
 )
+BOUNDARY_KINDS = ("executable", "library")
+BOUNDARY_STATUSES = ("complete", "incomplete", "unexecuted")
 LIMIT_MEMBERS = ("version", "d", "r", "p", "g", "h", "t", "e", "w", "w_scale", "v")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 REVISION = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
@@ -350,6 +359,41 @@ def reason(value, files, source_lines, failure=False, limits=None, work=None):
         )
 
 
+def validate_boundary(value, enumeration, bodies, analyses, files, source_lines, limits):
+    """Validate the process-exit boundary of one closure (toolchain.md 1.1)."""
+    boundary = obj(
+        value, ("kind", "leaves", "correspondence", "proof", "first_incomplete"), "boundary"
+    )
+    choice(boundary["kind"], BOUNDARY_KINDS, "boundary kind")
+    integer(boundary["leaves"], "boundary leaves")
+    correspondence = choice(boundary["correspondence"], BOUNDARY_STATUSES, "boundary status")
+    proof = choice(boundary["proof"], BOUNDARY_STATUSES, "boundary status")
+    # The boundary reads every body, so only a failed enumeration or body leaves it unexecuted.
+    # Such a report fails the audit through its other members.
+    executed = enumeration["complete"] and all(
+        body["verification"] == "complete" for body in bodies
+    )
+    require(
+        (correspondence == "unexecuted") == (proof == "unexecuted"),
+        "boundary: half executed",
+    )
+    require(correspondence != "unexecuted" or not executed, "boundary: unexecuted after success")
+    require(proof != "complete" or correspondence == "complete", "boundary: proof without facts")
+    reason(boundary["first_incomplete"], files, source_lines, limits=limits)
+    if proof == "incomplete":
+        require(boundary["first_incomplete"] is not None, "boundary: missing reason")
+        require(
+            boundary["first_incomplete"]["stage"] == "process_exit", "boundary: reason stage"
+        )
+    else:
+        require(boundary["first_incomplete"] is None, "boundary: reason without failure")
+    closure = analyses[ANALYSES.index("process_exit")]
+    require(
+        closure["status"] != "complete" or proof == "complete",
+        "boundary: process_exit closure claims the boundary",
+    )
+
+
 def named_rows(value, members, where):
     rows = array(value, where)
     require(len(rows) == len(ANALYSES), f"{where}: missing analysis rows")
@@ -586,6 +630,7 @@ def validate_report(
             "meters",
             "bodies",
             "totals",
+            "boundary",
             "first_incomplete",
             "failure",
             "verdict",
@@ -715,6 +760,7 @@ def validate_report(
     require(ordered_keys == sorted(ordered_keys), "keys: body order")
     require(enumeration["selected_bodies"] == len(bodies), "enumeration: body count mismatch")
     graph_sizes = []
+    fills_sizes = []
     body_sizes = 0
     service_sizes = {}
     # The producer analyses keep one ledger for each verified body. A flow analysis also keeps
@@ -733,6 +779,9 @@ def validate_report(
         )
         if meter["name"] == "graph_private":
             graph_sizes.append(meter["fir_size"])
+        elif meter["name"] == "process_exit_fills":
+            require(meter["owner"] is None, "process exit fills ledger: owner")
+            fills_sizes.append(meter["fir_size"])
         elif meter["name"] == "services":
             body_sizes += meter["fir_size"]
         owner_key = None
@@ -771,6 +820,10 @@ def validate_report(
             require(
                 meter["name"] != "graph_private" or count["category"] == "W",
                 "graph private ledger: unsupported category",
+            )
+            require(
+                meter["name"] != "process_exit_fills" or count["category"] == "W",
+                "process exit fills ledger: unsupported category",
             )
             count_key = (count["category"], count["scope"])
             require(count_key not in count_keys, "meter: duplicate category and scope")
@@ -816,8 +869,16 @@ def validate_report(
         not graph_sizes or graph_sizes[0] == body_sizes,
         "meters: graph FIR size differs from the body ledgers",
     )
+    # The call-graph step of the process-exit boundary covers each body with a process_exit
+    # ledger.
+    require(len(fills_sizes) <= 1, "meters: two process exit fills ledgers")
+    require(
+        not fills_sizes or fills_sizes[0] == sum(ledger_sizes["process_exit"].values()),
+        "meters: process exit fills FIR size differs from the process_exit ledgers",
+    )
     totals = derived_totals(bodies)
     validate_totals(report["totals"], totals)
+    validate_boundary(report["boundary"], enumeration, bodies, analyses, files, source_lines, table)
     reason(report["first_incomplete"], files, source_lines, limits=table)
     reason(report["failure"], files, source_lines, failure=True, limits=table)
     # Version 3 integrates the local analysis, version 4 the raw analysis and version 5 the
@@ -1333,14 +1394,15 @@ def validate_audit(path, *, checkout, compiler, compiler_checkout, compiler_prov
 
 
 # The scopes that a CI gate can enforce. Each names its analysis row.
-ENFORCED_SCOPES = ("local", "stored_borrows", "raw")
+ENFORCED_SCOPES = ("local", "stored_borrows", "raw", "process_exit")
 
 
 def scope_problems(report, scope, checkout):
     """Return the declared bodies of one report and the problems of its enforced scope.
 
     A body declares its obligations when the scope's correspondence is complete. A declared
-    body needs complete proof. A violation in any body is a problem.
+    body needs complete proof. A violation in any body is a problem. The process-exit scope
+    also declares the boundary when its correspondence is complete, and then needs its proof.
     """
     index = ANALYSES.index(scope)
     files = report["files"]
@@ -1361,6 +1423,10 @@ def scope_problems(report, scope, checkout):
             declared += 1
             if row["proof"] != "complete" and not row["violations"]:
                 problems.append(f"{where}: incomplete declared {scope} obligation ({row['proof']})")
+    boundary = report["boundary"]
+    if scope == "process_exit" and boundary["correspondence"] == "complete":
+        if boundary["proof"] != "complete":
+            problems.append(f"{report['invocation']['entry']}: incomplete declared boundary")
     return declared, problems
 
 
