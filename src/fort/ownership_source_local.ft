@@ -209,6 +209,8 @@ struct context {
     ownership_api.proof_status first_incomplete;
     bool initialized;
     bool solved;
+    // The witness walk takes each overwrite check as removed, as a release build removes it.
+    bool overwrite_removed;
 }
 
 fn complete() ownership_api.proof_status {
@@ -3918,7 +3920,8 @@ fn walk_to(context mut* c, fir.pred_table* preds, u32 block, u32 gap, trap kind,
         } else if (t->kind == fir.term_kind.tk_check ||
             t->kind == fir.term_kind.tk_check_overwrite) {
             bool overwrite = t->kind == fir.term_kind.tk_check_overwrite;
-            outcome result = overwrite ? overwrite_outcome(w, t) : check_outcome(w, t);
+            outcome mut result = overwrite ? overwrite_outcome(w, t) : check_outcome(w, t);
+            if (overwrite && c->overwrite_removed) { result = outcome.passes; }
             if (result == outcome.fails) {
                 trap expected = overwrite ? trap.overwrite_trap : trap.element_trap;
                 return kind == expected && t->target == block && gap == 0;
@@ -4284,6 +4287,17 @@ fn witness_in(fir.func* f, ownership_api.function_id identity,
     ownership_api.source_position declaration, bool mut@ own mut* taken,
     ownership_limits.meter mut* ledger, ownership_api.proof_status mut* refusal,
     fir.pred_table* preds, u32 block, u32 gap) bool {
+    return witness_mode_in(f, identity, declaration, taken, ledger, refusal, preds, block, gap,
+        false);
+}
+
+/// witness_in, with each overwrite check taken as removed when `removed` is set. The walk then
+/// follows the release build, which runs a store that the checked build traps before (D19.8:
+/// a verdict rests on no check that a mode removes).
+fn witness_mode_in(fir.func* f, ownership_api.function_id identity,
+    ownership_api.source_position declaration, bool mut@ own mut* taken,
+    ownership_limits.meter mut* ledger, ownership_api.proof_status mut* refusal,
+    fir.pred_table* preds, u32 block, u32 gap, bool removed) bool {
     context mut c = context{};
     c.function = f;
     c.identity = identity;
@@ -4291,6 +4305,7 @@ fn witness_in(fir.func* f, ownership_api.function_id identity,
     c.taken = move(*taken);
     c.meter = *ledger;
     c.first_refusal = *refusal;
+    c.overwrite_removed = removed;
     bool found = witness(&c, preds, block, gap, trap.no_trap);
     *ledger = c.meter;
     *refusal = c.first_refusal;

@@ -1,0 +1,1050 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| initializer addresses ok
+//| global pointers ok
+//| cleanup releases ok
+//| cleanup moves ok
+//| cleanup stores ok
+//| cleanup budget ok
+//| cleanup cycles ok
+//| cleanup exports ok
+//| cleanup callees ok
+//| cleanup call cycles ok
+//| cleanup out parameters ok
+//| cleanup foreign callbacks ok
+//| cleanup foreign retention ok
+//| slots behind pointers ok
+//| slot search work ok
+//| fills budget ok
+//| frame aliases ok
+/// Holds the rules that the reviews of the process-exit producer found unheld: an address in a
+/// global initializer, a dereference through a global pointer, a cleanup whose release, move or
+/// store leaves a leaf unproved, a cleanup that hands a value out of its frame, calls a body
+/// that can fill a global or passes an owning slot to an extern, and the owners of the frame
+/// that an alias can write (D17.13, D17.16, D17.18, D17.19).
+import fir;
+import ownership_api;
+import ownership_exit_source_env as env;
+import ownership_limits;
+import ownership_source_exit;
+import ownership_source_local;
+
+// An initializer can hold the address of an owning global. The store through it can fill the
+// global, so no later store and no exit fact may assume the global empty. The line of each
+// case is its line in `lines`, from 1.
+fn initializer_addresses() void {
+    env.closure mut c = env.closure{};
+    string[16] lines = {
+        "u8 mut@ own mut g = {};",
+        "u8 mut@ own mut* mut pg = &g;",
+        "u8 mut@ own mut kept = {};",
+        "fn sneaky() void {",
+        "    del(g);",
+        "    *pg = new(u8, 1);",
+        "    g = new(u8, 2);",
+        "    del(g);",
+        "}",
+        "fn cleanup() void {",
+        "    del(g);",
+        "    *pg = new(u8, 1);",
+        "}",
+        "fn clear_kept() void { del(kept); *pg = new(u8, 1); }",
+        "fn none() void {}",
+        "fn other() void {}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    ownership_source_exit.closure* x = env.shared(&c);
+    assert(x->leaves[env.leaf_of(&c, "g")].escaped);
+    assert(!x->leaves[env.leaf_of(&c, "kept")].escaped);
+    assert(x->initializer_escapes == 1);
+    // The checked build traps at line 7 and the release build leaks: never a complete proof.
+    env.unproved(&c, "sneaky", "g", ownership_source_exit.STORE_UNPROVED, 7);
+    // `cleanup` can leave `g` filled through `pg`: it is no cleanup of `g`.
+    assert(!env.empties(&c, "main", "cleanup", "g"));
+    // `clear_kept` empties `kept`, but its write through `pg` hands an allocation out of its
+    // frame, so it is no cleanup of any leaf.
+    assert(env.empties(&c, "main", "clear_kept", "kept"));
+    assert(env.body(&c, "clear_kept")->exports && !cleans(&c, "clear_kept", "kept"));
+    // `sneaky` ends with a release of `g`, but its store on line 7 can drop the allocation of
+    // the write through `pg`, so it is no cleanup of `g`. No body cleans `g`, on line 1.
+    assert(env.empties(&c, "main", "sneaky", "g"));
+    assert(!cleans(&c, "sneaky", "g"));
+    env.boundary(&c, "incomplete", "incomplete");
+    assert(env.shared(&c)->boundary_gap_source.line == 1);
+    env.finish(&c, "initializer addresses ok");
+}
+
+// A dereference through a global pointer reads a reference, so it is indirect storage even
+// though the pointer global holds no owner. A release or a move through it can empty `g`, so
+// the next store is unproved, never lost ownership.
+fn global_pointers() void {
+    env.closure mut c = env.closure{};
+    string[27] lines = {
+        "import std.libc;",
+        "u8 mut@ own mut g = {};",
+        "u8 mut@ own mut* mut pg = null;",
+        "fn release_through_alias() void {",
+        "    pg = &g;",
+        "    del(g);",
+        "    g = new(u8, 1);",
+        "    del(*pg);",
+        "    g = new(u8, 2);",
+        "    del(g);",
+        "}",
+        "fn move_through_alias() void {",
+        "    pg = &g;",
+        "    del(g);",
+        "    g = new(u8, 1);",
+        "    u8 mut@ own x = move(*pg);",
+        "    del(x);",
+        "    g = new(u8, 2);",
+        "    del(g);",
+        "}",
+        "fn exit_after_alias_release(i32 s) void {",
+        "    pg = &g;",
+        "    del(g);",
+        "    g = new(u8, 1);",
+        "    del(*pg);",
+        "    libc.exit(s);",
+        "}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    env.unproved(&c, "release_through_alias", "g", ownership_source_exit.STORE_UNPROVED, 9);
+    env.unproved(&c, "move_through_alias", "g", ownership_source_exit.STORE_UNPROVED, 18);
+    ownership_source_exit.context* x = env.body(&c, "exit_after_alias_release");
+    assert(x->violations_len == 0 && x->unproved_len == 2);
+    env.finish(&c, "global pointers ok");
+}
+
+// Whether body `name` is a cleanup of global `owner` for the boundary (toolchain.md 1.1).
+fn cleans(env.closure mut* c, string name, string owner) bool {
+    return ownership_source_exit.cleans(env.body(c, name), env.leaf_of(c, owner));
+}
+
+// A library cleanup must discharge the leaf: a shallow release whose owned descendants only heap
+// facts prove is no proved cleanup, even when the leaf is empty after it (D17.16). The rule
+// holds for each leaf, so a body that also releases a plain leaf still cleans that leaf.
+fn cleanup_releases() void {
+    env.closure mut c = env.closure{};
+    string[15] lines = {
+        "struct entry { u8 mut@ own name; u64 size; }",
+        "entry mut@ own mut table = {};",
+        "u8 mut@ own mut bytes = {};",
+        "fn reset() void {",
+        "    del(table);",
+        "}",
+        "fn reset_bytes() void {",
+        "    del(bytes);",
+        "}",
+        "fn reset_both() void {",
+        "    del(bytes);",
+        "    del(table);",
+        "}",
+        "fn none() void {}",
+        "fn other() void {}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    ownership_source_exit.closure* x = env.shared(&c);
+    assert(x->leaves[env.leaf_of(&c, "table")].deep);
+    assert(!x->leaves[env.leaf_of(&c, "bytes")].deep);
+    assert(env.empties(&c, "main", "reset", "table"));
+    assert(!cleans(&c, "reset", "table") && cleans(&c, "reset_bytes", "bytes"));
+    // One body empties both leaves: the deep `table` has no cleanup, and `bytes` is cleaned.
+    assert(env.empties(&c, "main", "reset_both", "table"));
+    assert(cleans(&c, "reset_both", "bytes") && !cleans(&c, "reset_both", "table"));
+    // `bytes` has a proved cleanup, `table` has none: the boundary stays incomplete.
+    env.boundary(&c, "incomplete", "incomplete");
+    assert(env.shared(&c)->boundary_gap_source.line == 2);
+    env.finish(&c, "cleanup releases ok");
+}
+
+// A move out of a deep leaf hands its owned descendants to a receiver that this analysis does
+// not follow, so the body is no cleanup of that leaf (D17.16). That holds for a move into a
+// local, through a resolved address and out of a global aggregate. A move out of a plain leaf
+// transfers the whole obligation, so that body stays a cleanup. The moves add no record to
+// the process-exit ledger of a body.
+fn cleanup_moves() void {
+    env.closure mut c = env.closure{};
+    string[26] lines = {
+        "struct entry { u8 mut@ own name; u64 size; }",
+        "struct holder { entry mut@ own items; u64 count; }",
+        "entry mut@ own mut table = {};",
+        "holder mut h = {};",
+        "u8 mut@ own mut bytes = {};",
+        "fn take_table() void {",
+        "    entry mut@ own t = move(table);",
+        "    del(t);",
+        "}",
+        "fn take_through() void {",
+        "    entry mut@ own mut* q = &table;",
+        "    entry mut@ own t = move(*q);",
+        "    del(t);",
+        "}",
+        "fn take_holder() void {",
+        "    holder mut x = move(h);",
+        "    del(x.items);",
+        "}",
+        "fn take_bytes() void {",
+        "    u8 mut@ own t = move(bytes);",
+        "    del(t);",
+        "}",
+        "fn none() void {}",
+        "fn other() void {}",
+        "fn third() void {}",
+        "fn fourth() void {}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    assert(env.shared(&c)->leaves[env.leaf_of(&c, "table")].deep);
+    assert(env.shared(&c)->leaves[env.leaf_of(&c, "h")].deep);
+    assert(!env.shared(&c)->leaves[env.leaf_of(&c, "bytes")].deep);
+    assert(env.empties(&c, "main", "take_table", "table"));
+    assert(env.empties(&c, "main", "take_through", "table"));
+    assert(env.empties(&c, "main", "take_holder", "h"));
+    assert(env.empties(&c, "main", "take_bytes", "bytes"));
+    assert(!cleans(&c, "take_table", "table"));
+    assert(!cleans(&c, "take_through", "table"));
+    assert(!cleans(&c, "take_holder", "h"));
+    assert(cleans(&c, "take_bytes", "bytes"));
+    env.proved(&c, "take_table");
+    env.proved(&c, "take_through");
+    env.proved(&c, "take_bytes");
+    assert(env.body(&c, "take_table")->global_moves == 1);
+    // No body cleans `table`, the first user leaf, on line 3.
+    env.boundary(&c, "incomplete", "incomplete");
+    assert(env.shared(&c)->boundary_gap_source.line == 3);
+    env.finish(&c, "cleanup moves ok");
+}
+
+// A store drops the old value of a leaf. A store over a value that can hold an allocation is no
+// cleanup of that leaf, also when the body leaves it empty. The facts come from the first pass,
+// so a store after a call sees the callee's leaves as unknown: `wrap_bytes` is no cleanup,
+// although its second pass sees `bytes` empty after `drop_bytes`. A store over a released leaf
+// keeps the body a cleanup. The flag holds for each leaf, so `drop_more` blocks `more` and
+// leaves `bytes` cleaned.
+fn cleanup_stores() void {
+    env.closure mut c = env.closure{};
+    string[38] lines = {
+        "struct entry { u8 mut@ own name; u64 size; }",
+        "entry mut@ own mut table = {};",
+        "u8 mut@ own mut bytes = {};",
+        "u8 mut@ own mut more = {};",
+        "fn take() void {",
+        "    entry mut@ own t = move(table);",
+        "    del(t);",
+        "}",
+        "fn wrapped() void {",
+        "    take();",
+        "    entry mut@ own e = {};",
+        "    table = move(e);",
+        "}",
+        "fn drop_bytes() void {",
+        "    u8 mut@ own e = {};",
+        "    bytes = move(e);",
+        "}",
+        "fn clear_bytes() void {",
+        "    del(bytes);",
+        "    u8 mut@ own e = {};",
+        "    bytes = move(e);",
+        "}",
+        "fn drop_more() void {",
+        "    del(bytes);",
+        "    u8 mut@ own e = {};",
+        "    more = move(e);",
+        "}",
+        "fn clear_more() void {",
+        "    clear_bytes();",
+        "    del(more);",
+        "}",
+        "fn wrap_bytes() void {",
+        "    drop_bytes();",
+        "    u8 mut@ own e = {};",
+        "    bytes = move(e);",
+        "}",
+        "fn none() void {}",
+        "fn other() void {}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    u64 more = env.leaf_of(&c, "more");
+    u64 bytes = env.leaf_of(&c, "bytes");
+    // The second pass sees `table` empty after `take`, so the ledger of `wrapped` is proved.
+    assert(env.empties(&c, "main", "wrapped", "table"));
+    assert(!cleans(&c, "wrapped", "table"));
+    env.proved(&c, "wrapped");
+    assert(env.empties(&c, "main", "drop_bytes", "bytes") && !cleans(&c, "drop_bytes", "bytes"));
+    env.outside(&c, "drop_bytes", ownership_source_exit.missing.caller_state, 16);
+    assert(cleans(&c, "clear_bytes", "bytes"));
+    ownership_source_exit.context* drop = env.body(&c, "drop_more");
+    assert(drop->unclean[more] && !drop->unclean[bytes]);
+    assert(cleans(&c, "drop_more", "bytes") && !cleans(&c, "drop_more", "more"));
+    assert(cleans(&c, "clear_more", "more") && !cleans(&c, "clear_more", "bytes"));
+    // The ledger of `wrap_bytes` is proved, and its first pass still marks the store.
+    ownership_source_exit.context* wrap = env.body(&c, "wrap_bytes");
+    assert(env.empties(&c, "main", "wrap_bytes", "bytes") && wrap->unclean[bytes]);
+    assert(!wrap->exports && !cleans(&c, "wrap_bytes", "bytes"));
+    env.proved(&c, "wrap_bytes");
+    // `table` has no cleanup; `bytes` and `more` have one each.
+    env.boundary(&c, "incomplete", "incomplete");
+    assert(env.shared(&c)->boundary_gap_source.line == 2);
+    env.finish(&c, "cleanup stores ok");
+}
+
+// Each W bound below the work of a body that passes `g` into `h`. A bound that refuses the
+// first pass gives no exit fact. A bound that refuses only the second pass keeps the facts of
+// the first pass, the hand-out included, so no bound proves the cleanup (D17.18, D17.19).
+fn cleanup_budget() void {
+    string[6] lines = {
+        "u8 mut@ own mut g = {};",
+        "u8 mut@ own mut h = {};",
+        "fn pass() void {",
+        "    del(h);",
+        "    h = move(g);",
+        "}",
+    };
+    env.closure mut full = env.closure{};
+    env.open(&full, lines[..]);
+    u64 used = env.body(&full, "pass")->meter.used.w;
+    assert(env.body(&full, "pass")->exports && !cleans(&full, "pass", "g"));
+    env.close(&full);
+    u64 mut bound = 1;
+    u64 mut second_refused = 0;
+    while (bound < used) {
+        env.closure mut c = env.closure{};
+        env.prepare_with(&c, lines[..], env.runtime.release_last);
+        env.prepared(&c, "pass")->meter.bounds.w = bound;
+        env.analyze(&c);
+        ownership_source_exit.context* x = env.body(&c, "pass");
+        assert(x->first_refusal.terminal.present);
+        if (x->fact_ready) {
+            assert(x->exit_empty[env.leaf_of(&c, "g")] && x->exports);
+            second_refused += 1;
+        }
+        assert(!cleans(&c, "pass", "g"));
+        ownership_source_exit.closure* shared = env.shared(&c);
+        assert(shared->boundary_proof == ownership_source_local.status.incomplete);
+        env.close(&c);
+        bound += 1;
+    }
+    assert(second_refused > 0);
+    println("cleanup budget ok");
+}
+
+// Two cleanups can pass one allocation between plain leaves: each empties its own leaf, and no
+// call order empties both. A body that moves a value that can hold an allocation into an owning
+// global is no cleanup of any leaf, also between two fields of one global (D17.19, memory
+// model 2.9). The ledger of each body stays proved.
+fn cleanup_cycles() void {
+    env.closure mut c = env.closure{};
+    string[22] lines = {
+        "struct pair { u8 mut@ own a; u8 mut@ own b; }",
+        "u8 mut@ own mut g = {};",
+        "u8 mut@ own mut h = {};",
+        "pair mut gp = {};",
+        "fn clean_g() void {",
+        "    del(h);",
+        "    h = move(g);",
+        "}",
+        "fn clean_h() void {",
+        "    del(g);",
+        "    g = move(h);",
+        "}",
+        "fn clean_a() void {",
+        "    del(gp.b);",
+        "    gp.b = move(gp.a);",
+        "}",
+        "fn clean_b() void {",
+        "    del(gp.a);",
+        "    gp.a = move(gp.b);",
+        "}",
+        "fn none() void {}",
+        "fn other() void {}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    string[4] bodies = {"clean_g", "clean_h", "clean_a", "clean_b"};
+    u64 mut i = 0;
+    while (i < 4) {
+        assert(env.body(&c, bodies[i])->exports);
+        env.proved(&c, bodies[i]);
+        i += 1;
+    }
+    assert(env.empties(&c, "main", "clean_g", "g") && !cleans(&c, "clean_g", "g"));
+    assert(env.empties(&c, "main", "clean_h", "h") && !cleans(&c, "clean_h", "h"));
+    // `gp.a` is the first leaf of `gp`, and `clean_a` empties it.
+    assert(env.empties(&c, "main", "clean_a", "gp") && !cleans(&c, "clean_a", "gp"));
+    env.boundary(&c, "incomplete", "incomplete");
+    assert(env.shared(&c)->boundary_gap_source.line == 2);
+    env.finish(&c, "cleanup cycles ok");
+}
+
+// Each way that a value can leave the frame of a body into storage that outlives it: a store
+// through a reference (`stash`), a fort call argument (`hand_g`), and a fort call that reaches an
+// owner of the frame through its parked address (`park_h`). An empty argument, an empty parked
+// owner, a store of an empty value and a return to the caller hand out nothing, so those bodies
+// stay cleanups and the boundary is complete (D17.19; spec/toolchain.md 1.1, the cleanup body).
+fn cleanup_exports() void {
+    env.closure mut c = env.closure{};
+    string[57] lines = {
+        "u8 mut@ own mut g = {};",
+        "u8 mut@ own mut h = {};",
+        "u8 mut@ own mut* mut parked = null;",
+        "fn stash(u8 mut@ own mut* slot) void {",
+        "    del(*slot);",
+        "    *slot = move(g);",
+        "}",
+        "fn into_h(u8 mut@ own v) void {",
+        "    del(h);",
+        "    h = move(v);",
+        "}",
+        "fn hand_g() void {",
+        "    into_h(move(g));",
+        "    del(g);",
+        "}",
+        "fn park(u8 mut@ own mut* slot) void {",
+        "    parked = slot;",
+        "}",
+        "fn into_g() void {",
+        "    del(g);",
+        "    g = move(*parked);",
+        "}",
+        "fn park_h() void {",
+        "    u8 mut@ own mut t = {};",
+        "    park(&t);",
+        "    t = move(h);",
+        "    into_g();",
+        "    del(h);",
+        "    del(t);",
+        "}",
+        "fn keep(u8 mut@ own v) void {",
+        "    del(v);",
+        "}",
+        "fn pass_empty() void {",
+        "    u8 mut@ own e = {};",
+        "    keep(move(e));",
+        "    del(g);",
+        "}",
+        "fn park_empty() void {",
+        "    u8 mut@ own mut t = {};",
+        "    park(&t);",
+        "    del(g);",
+        "    del(t);",
+        "}",
+        "fn take() u8 mut@ own {",
+        "    return move(h);",
+        "}",
+        "fn clear_both() void {",
+        "    del(h);",
+        "    u8 mut@ own e = {};",
+        "    h = move(e);",
+        "    del(g);",
+        "}",
+        "fn none() void {}",
+        "fn other() void {}",
+        "fn third() void {}",
+        "fn fourth() void {}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    assert(env.body(&c, "stash")->exports && env.empties(&c, "main", "stash", "g"));
+    assert(!cleans(&c, "stash", "g"));
+    assert(env.body(&c, "hand_g")->exports && env.empties(&c, "main", "hand_g", "g"));
+    assert(!cleans(&c, "hand_g", "g"));
+    assert(env.body(&c, "park_h")->exports && env.empties(&c, "main", "park_h", "h"));
+    assert(!cleans(&c, "park_h", "h"));
+    assert(env.body(&c, "into_h")->exports && env.body(&c, "into_g")->exports);
+    assert(!env.body(&c, "park")->exports && !env.body(&c, "keep")->exports);
+    assert(!env.body(&c, "pass_empty")->exports && cleans(&c, "pass_empty", "g"));
+    assert(!env.body(&c, "park_empty")->exports && cleans(&c, "park_empty", "g"));
+    assert(!env.body(&c, "take")->exports && cleans(&c, "take", "h"));
+    assert(!env.body(&c, "clear_both")->exports);
+    assert(cleans(&c, "clear_both", "g") && cleans(&c, "clear_both", "h"));
+    env.boundary(&c, "complete", "complete");
+    env.finish(&c, "cleanup exports ok");
+}
+
+// Whether body `name` can fill an owning global, by itself or through a callee.
+fn fills(env.closure mut* c, string name) bool { return env.body(c, name)->fills; }
+
+// A body fills an owning global by a hand-out of its own, through a fort callee at any depth, or
+// by an indirect fort call. A cleanup body needs neither: `clean_g` reaches `fill_h` through
+// `relay_h`, and `call_value` calls a function value. A callee that fills nothing keeps the
+// cleanup: `quiet_g` calls `tidy` (D17.19).
+fn cleanup_callees() void {
+    env.closure mut c = env.closure{};
+    string[33] lines = {
+        "u8 mut@ own mut g = {};",
+        "u8 mut@ own mut h = {};",
+        "fn fill_g() void {",
+        "    del(g);",
+        "    g = new(u8, 4);",
+        "}",
+        "fn fill_h() void {",
+        "    del(h);",
+        "    h = new(u8, 4);",
+        "}",
+        "fn relay_h() void { fill_h(); }",
+        "fn clean_g() void {",
+        "    relay_h();",
+        "    del(g);",
+        "}",
+        "fn clean_h() void {",
+        "    fill_g();",
+        "    del(h);",
+        "}",
+        "fn tidy() void {",
+        "    u64 mut n = 0;",
+        "    n += 1;",
+        "}",
+        "fn quiet_g() void {",
+        "    tidy();",
+        "    del(g);",
+        "}",
+        "fn call_value(fn () void f) void {",
+        "    f();",
+        "    del(h);",
+        "}",
+        "fn none() void {}",
+        "fn other() void {}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    assert(fills(&c, "fill_g") && fills(&c, "fill_h") && fills(&c, "relay_h"));
+    assert(fills(&c, "clean_g") && fills(&c, "clean_h") && fills(&c, "call_value"));
+    assert(!fills(&c, "tidy") && !fills(&c, "quiet_g") && !fills(&c, "none"));
+    // The two cleanups hand nothing out of their own frames: their callees fill.
+    assert(!env.body(&c, "clean_g")->exports && !env.body(&c, "clean_h")->exports);
+    assert(env.empties(&c, "main", "clean_g", "g") && !cleans(&c, "clean_g", "g"));
+    assert(env.empties(&c, "main", "clean_h", "h") && !cleans(&c, "clean_h", "h"));
+    assert(env.empties(&c, "main", "call_value", "h") && !cleans(&c, "call_value", "h"));
+    assert(cleans(&c, "quiet_g", "g"));
+    // `g` has the cleanup `quiet_g`; `h`, on line 2, has none.
+    env.boundary(&c, "incomplete", "incomplete");
+    assert(env.shared(&c)->boundary_gap_source.line == 2);
+    env.finish(&c, "cleanup callees ok");
+}
+
+// Opens `lines` as a library and holds its boundary verdict and the line of its first gap.
+fn library_boundary(string@ lines, string verdict, u32 line) void {
+    env.closure mut c = env.closure{};
+    env.open(&c, lines);
+    defer env.close(&c);
+    env.boundary(&c, verdict, verdict);
+    assert(env.shared(&c)->boundary_gap_source.line == line);
+    assert(c.mismatches == 0);
+}
+
+// Cleanups that refill each other through callees: two bodies and three bodies. No
+// call order empties every leaf, so each boundary is incomplete. Cleanups that call a body that
+// fills nothing keep a complete boundary. A callee whose first pass the W bound refuses has no
+// facts, so it can fill (D17.18, D17.19).
+fn cleanup_call_cycles() void {
+    string[16] two = {
+        "u8 mut@ own mut g = {};",
+        "u8 mut@ own mut h = {};",
+        "fn fill_g() void {",
+        "    del(g);",
+        "    g = new(u8, 4);",
+        "}",
+        "fn fill_h() void {",
+        "    del(h);",
+        "    h = new(u8, 4);",
+        "}",
+        "fn clean_g() void {",
+        "    fill_h();",
+        "    del(g);",
+        "}",
+        "fn clean_h() void { fill_g(); del(h); }",
+        "fn none() void {}",
+    };
+    library_boundary(two[..], "incomplete", 1);
+    string[18] three = {
+        "u8 mut@ own mut a = {};",
+        "u8 mut@ own mut b = {};",
+        "u8 mut@ own mut c = {};",
+        "fn fill_a() void { del(a); a = new(u8, 4); }",
+        "fn fill_b() void { del(b); b = new(u8, 4); }",
+        "fn fill_c() void { del(c); c = new(u8, 4); }",
+        "fn clean_a() void {",
+        "    fill_b();",
+        "    del(a);",
+        "}",
+        "fn clean_b() void {",
+        "    fill_c();",
+        "    del(b);",
+        "}",
+        "fn clean_c() void {",
+        "    fill_a();",
+        "    del(c);",
+        "}",
+    };
+    library_boundary(three[..], "incomplete", 1);
+    string[12] control = {
+        "u8 mut@ own mut g = {};",
+        "u8 mut@ own mut h = {};",
+        "u64 mut flushed = 0;",
+        "fn flush() void { flushed += 1; }",
+        "fn clean_g() void {",
+        "    flush();",
+        "    del(g);",
+        "}",
+        "fn clean_h() void {",
+        "    flush();",
+        "    del(h);",
+        "}",
+    };
+    library_boundary(control[..], "complete", 0);
+    // Recursion: two cleanups that call each other and fill nothing stay cleanups. A body that
+    // calls itself fills only by its own hand-out: `clean_g` cleans `g`, and `clean_h`, which
+    // stores into `g`, cleans nothing.
+    string[14] mutual = {
+        "u8 mut@ own mut g = {};",
+        "u8 mut@ own mut h = {};",
+        "bool mut busy = false;",
+        "fn clean_g() void {",
+        "    if (!busy) { busy = true; clean_h(); busy = false; }",
+        "    del(g);",
+        "}",
+        "fn clean_h() void {",
+        "    if (!busy) { busy = true; clean_g(); busy = false; }",
+        "    del(h);",
+        "}",
+        "fn fill_g() void { del(g); g = new(u8, 4); }",
+        "fn none() void {}",
+        "fn other() void {}",
+    };
+    library_boundary(mutual[..], "complete", 0);
+    string[13] self = {
+        "u8 mut@ own mut g = {};",
+        "u8 mut@ own mut h = {};",
+        "fn clean_g(u64 n) void {",
+        "    if (n > 0) { clean_g(n - 1); }",
+        "    del(g);",
+        "}",
+        "fn clean_h(u64 n) void {",
+        "    if (n > 0) { clean_h(n - 1); } else { del(g); g = new(u8, 4); }",
+        "    del(h);",
+        "}",
+        "fn none() void {}",
+        "fn other() void {}",
+        "fn third() void {}",
+    };
+    env.closure mut r = env.closure{};
+    env.open(&r, self[..]);
+    assert(!fills(&r, "clean_g") && cleans(&r, "clean_g", "g"));
+    assert(fills(&r, "clean_h") && !cleans(&r, "clean_h", "h"));
+    env.boundary(&r, "incomplete", "incomplete");
+    assert(env.shared(&r)->boundary_gap_source.line == 2 && r.mismatches == 0);
+    env.close(&r);
+    string[10] refused = {
+        "u8 mut@ own mut g = {};",
+        "u8 mut@ own mut h = {};",
+        "fn fill_h() void {",
+        "    del(h);",
+        "    h = new(u8, 4);",
+        "}",
+        "fn clean_g() void {",
+        "    fill_h();",
+        "    del(g);",
+        "}",
+    };
+    env.closure mut c = env.closure{};
+    env.prepare_with(&c, refused[..], env.runtime.release_last);
+    env.prepared(&c, "fill_h")->meter.bounds.w = 1;
+    env.analyze(&c);
+    ownership_source_exit.context* fill = env.body(&c, "fill_h");
+    assert(!fill->fact_ready && !fill->exports && fill->fills);
+    assert(fills(&c, "clean_g") && !cleans(&c, "clean_g", "g"));
+    env.close(&c);
+    println("cleanup call cycles ok");
+}
+
+// An extern call can store a fresh allocation into each owning slot that an argument type names,
+// because D17.13 applies signature ownership transfers. A body that passes such a slot hands a
+// value out, and the slot keeps its old state or takes a fresh owner or null. An extern takes
+// a scalar, an enum, a pointer, a void pointer or a function value, so a slot comes through a
+// pointer: a mutable pointer to an owner or to a struct that holds one, and a pointer to a
+// pointer or to a struct whose field reaches one (a mutable pointer or span of owners). A const
+// pointer to an owner, a void pointer and a recursive struct with no owner name no slot. Two
+// cleanups that pass each other's leaf to the extern refill each other, so the boundary is
+// incomplete.
+fn cleanup_out_params() void {
+    env.closure mut c = env.closure{};
+    string[59] lines = {
+        "struct pair { u8 mut* own a; u64 n; }",
+        "struct link { link mut* next; u64 v; }",
+        "struct holder { u8 mut* own mut* slot; }",
+        "struct bag { u8 mut* own mut@ items; }",
+        "u8 mut* own mut g = null;",
+        "u8 mut* own mut h = null;",
+        "extern fn alloc_into(u8 mut* own mut* out) i32;",
+        "extern fn fill_pair(pair mut* p) void;",
+        "extern fn fill_bag(bag* b) void;",
+        "extern fn fill_through(u8 mut* own mut** pp) void;",
+        "extern fn fill_holder(holder* hd) void;",
+        "extern fn read_owner(u8 mut* own* p) void;",
+        "extern fn walk(link mut* l) void;",
+        "extern fn raw(void mut* p) void;",
+        "fn clean_g() void {",
+        "    del(h);",
+        "    alloc_into(&h);",
+        "    del(g);",
+        "}",
+        "fn clean_h() void {",
+        "    del(g);",
+        "    alloc_into(&g);",
+        "    del(h);",
+        "}",
+        "fn frame_fill() void {",
+        "    del(h);",
+        "    u8 mut* own mut x = null;",
+        "    alloc_into(&x);",
+        "    h = move(x);",
+        "}",
+        "fn pass_pair() void { pair mut p = {}; fill_pair(&p); del(p.a); }",
+        "fn pass_bag() void {",
+        "    u8 mut* own[2] mut items = {};",
+        "    bag b = bag{items[..]};",
+        "    fill_bag(&b);",
+        "    del(items[0]);",
+        "    del(items[1]);",
+        "}",
+        "fn pass_through() void {",
+        "    u8 mut* own mut x = null;",
+        "    u8 mut* own mut* q = &x;",
+        "    fill_through(&q);",
+        "    del(x);",
+        "}",
+        "fn pass_holder() void {",
+        "    u8 mut* own mut x = null;",
+        "    holder hd = holder{&x};",
+        "    fill_holder(&hd);",
+        "    del(x);",
+        "}",
+        "fn pass_read() void { u8 mut* own* r = &g; read_owner(r); del(h); }",
+        "fn pass_walk() void { link mut l = {}; walk(&l); del(h); }",
+        "fn pass_raw() void {",
+        "    u8[4] mut buf = {};",
+        "    raw(cast(&buf, void mut*));",
+        "    del(h);",
+        "}",
+        "fn none() void {}",
+        "fn other() void {}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    // The extern can refill the other leaf: no body cleans one.
+    assert(env.body(&c, "clean_g")->exports && fills(&c, "clean_g"));
+    assert(env.empties(&c, "main", "clean_g", "g") && !cleans(&c, "clean_g", "g"));
+    assert(!env.empties(&c, "main", "clean_g", "h"));
+    // The extern can fill `x`, so the store into `h` holds a fresh owner, not an empty one.
+    assert(!env.empties(&c, "main", "frame_fill", "h") && !cleans(&c, "frame_fill", "h"));
+    string[4] slots = {"pass_pair", "pass_bag", "pass_through", "pass_holder"};
+    for (string name : slots) { assert(env.body(&c, name)->exports); }
+    string[3] plain = {"pass_read", "pass_walk", "pass_raw"};
+    for (string name : plain) {
+        assert(!env.body(&c, name)->exports && cleans(&c, name, "h"));
+    }
+    env.boundary(&c, "incomplete", "incomplete");
+    assert(env.shared(&c)->boundary_gap_source.line == 5);
+    env.finish(&c, "cleanup out parameters ok");
+}
+
+// The documented limit of D17.13: callback effects stay outside proof, and known fort facts
+// stay across an extern call. A fort wrapper passes a callback to an extern sort, and each
+// callback fills the other leaf. Each cleanup reaches its callback only through foreign code, so
+// neither fills, and the boundary is complete although no call order empties both leaves. The
+// standard wrapper std.sort.sort_i64 has the same shape.
+fn cleanup_foreign_callbacks() void {
+    env.closure mut c = env.closure{};
+    string[21] lines = {
+        "u8 mut@ own mut g = {};",
+        "u8 mut@ own mut h = {};",
+        "extern fn qsort(void mut* base, u64 n, u64 size, fn (void*, void*) i32 cmp) void;",
+        "fn sort_pair(fn (void*, void*) i32 cmp) void {",
+        "    i32[2] mut arr = {2, 1};",
+        "    qsort(cast(&arr, void mut*), 2, 4, cmp);",
+        "}",
+        "fn fill_h(void* a, void* b) i32 { del(h); h = new(u8, 4); return 0; }",
+        "fn fill_g(void* a, void* b) i32 { del(g); g = new(u8, 4); return 0; }",
+        "fn clean_g() void {",
+        "    sort_pair(fill_h);",
+        "    del(g);",
+        "}",
+        "fn clean_h() void {",
+        "    sort_pair(fill_g);",
+        "    del(h);",
+        "}",
+        "fn none() void {}",
+        "fn other() void {}",
+        "fn third() void {}",
+        "fn fourth() void {}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    assert(fills(&c, "fill_g") && fills(&c, "fill_h") && !fills(&c, "sort_pair"));
+    assert(cleans(&c, "clean_g", "g") && cleans(&c, "clean_h", "h"));
+    env.boundary(&c, "complete", "complete");
+    env.finish(&c, "cleanup foreign callbacks ok");
+}
+
+// The documented limit of D17.13 for retention: "hidden foreign aliases, retention, releases,
+// writes, and callback effects remain outside the proof", and known fort facts stay across an
+// extern call. `main` registers the address of `gs` with `reg`, and the extern keeps it. In
+// `finish`, a later extern call with no argument can fill `h` through `gs.slot`, after the
+// release. The analysis keeps `h` empty across that call, so the ledger of `finish` is proved.
+fn cleanup_foreign_retention() void {
+    env.closure mut c = env.closure{};
+    string[19] lines = {
+        "import std.libc;",
+        "import std.rt;",
+        "struct S { u8 mut* own mut* slot; }",
+        "u8 mut* own mut h = null;",
+        "S mut gs = {};",
+        "extern fn reg(S* p) void;",
+        "extern fn trigger() void;",
+        "fn finish() void {",
+        "    rt.shutdown();",
+        "    del(h);",
+        "    trigger();",
+        "    libc.exit(0);",
+        "}",
+        "fn main() i32 {",
+        "    gs.slot = &h;",
+        "    reg(&gs);",
+        "    finish();",
+        "    return 0;",
+        "}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    env.proved(&c, "finish");
+    // `reg` can fill `h` at once, so `main` hands a value out; `finish` passes no slot.
+    assert(env.body(&c, "main")->exports && !env.body(&c, "finish")->exports);
+    env.finish(&c, "cleanup foreign retention ok");
+}
+
+// An extern can write a slot that a pointer field of its argument reaches: `fill_s(&gs)` can
+// fill `h` through `gs.slot`, also when the address of `gs` resolves to the global. So `h` can
+// hold an allocation at the exit call, and the exit fact of `helper` keeps `h` unknown, so the
+// store of `user` needs a summary (D17.13, D17.19).
+fn slots_behind_pointers() void {
+    env.closure mut c = env.closure{};
+    string[15] lines = {
+        "import std.libc;",
+        "import std.rt;",
+        "struct S { u8 mut* own mut* slot; u8 mut* own o; }",
+        "u8 mut* own mut h = null;",
+        "S mut gs = {};",
+        "extern fn fill_s(S mut* p) void;",
+        "fn finish() void {",
+        "    rt.shutdown();",
+        "    del(h);",
+        "    del(gs.o);",
+        "    fill_s(&gs);",
+        "    del(gs.o);",
+        "    libc.exit(0);",
+        "}",
+        "fn aim() void { gs.slot = &h; }",
+    };
+    env.open(&c, lines[..]);
+    env.unproved(&c, "finish", "h", ownership_source_exit.EXIT_UNPROVED, 13);
+    assert(env.body(&c, "finish")->unproved_len == 1);
+    env.close(&c);
+    env.closure mut d = env.closure{};
+    string[15] stored = {
+        "struct S { u8 mut@ own mut* slot; u8 mut@ own o; }",
+        "u8 mut@ own mut h = {};",
+        "S mut gs = {};",
+        "extern fn fill_s(S mut* p) void;",
+        "fn setup() void { gs.slot = &h; }",
+        "fn helper() void {",
+        "    del(h);",
+        "    fill_s(&gs);",
+        "}",
+        "fn user() void {",
+        "    helper();",
+        "    h = new(u8, 4);",
+        "}",
+        "fn none() void {}",
+        "fn other() void {}",
+    };
+    env.open(&d, stored[..]);
+    assert(!env.empties(&d, "main", "helper", "h"));
+    env.outside(&d, "user", ownership_source_exit.missing.caller_state, 12);
+    env.finish(&d, "slots behind pointers ok");
+    env.close(&d);
+}
+
+// The search for an owning slot enters each struct type once, so a type graph whose paths
+// double at each of 12 levels costs W in the count of its nodes, not of its paths. Each step of
+// the search costs one W of the body ledger (D17.18).
+fn slot_search_work() void {
+    env.closure mut c = env.closure{};
+    string[21] lines = {
+        "struct s12 { u64 a; u64 b; }",
+        "struct s11 { s12 x; s12 y; }",
+        "struct s10 { s11 x; s11 y; }",
+        "struct s9 { s10 x; s10 y; }",
+        "struct s8 { s9 x; s9 y; }",
+        "struct s7 { s8 x; s8 y; }",
+        "struct s6 { s7 x; s7 y; }",
+        "struct s5 { s6 x; s6 y; }",
+        "struct s4 { s5 x; s5 y; }",
+        "struct s3 { s4 x; s4 y; }",
+        "struct s2 { s3 x; s3 y; }",
+        "struct s1 { s2 x; s2 y; }",
+        "struct s0 { s1 x; s1 y; }",
+        "u8 mut* own mut h = null;",
+        "extern fn look(s0* p) void;",
+        "extern fn tick(u64 n) void;",
+        "fn touch(s0* p) void { del(h); look(p); }",
+        "fn plain(s0* p) void { del(h); tick(1); }",
+        "fn none() void {}",
+        "fn other() void {}",
+        "fn third() void {}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    ownership_source_exit.context* touch = env.body(&c, "touch");
+    u64 searched = touch->meter.used.w;
+    u64 base = env.body(&c, "plain")->meter.used.w;
+    assert(!touch->first_refusal.terminal.present && !touch->exports);
+    // Each pass enters each of the 13 structs once.
+    assert(searched >= base + 13);
+    // A search of each path would enter more than 4096 structs in each pass.
+    assert(searched < base + 1000);
+    env.finish(&c, "slot search work ok");
+}
+
+// The call-graph step that decides `fills` is one computation with a W ledger of its own: one W
+// for each statement of each of its two walks and one for each call edge it follows (D17.18).
+// Each bound below its work refuses it. Then no body is known to fill nothing, no cleanup is
+// proved, and the refusal is the first reason of the boundary.
+fn fills_budget() void {
+    string[6] lines = {
+        "u8 mut@ own mut g = {};",
+        "fn fill_g() void { del(g); g = new(u8, 4); }",
+        "fn relay() void { fill_g(); }",
+        "fn clean_g() void { del(g); }",
+        "fn none() void {}",
+        "fn other() void {}",
+    };
+    env.closure mut full = env.closure{};
+    env.open(&full, lines[..]);
+    ownership_source_exit.closure* x = env.shared(&full);
+    u64 mut statements = 0;
+    u64 mut b = 0;
+    while (b < x->bodies_len) {
+        fir.func* f = x->bodies[b]->function;
+        u32 mut k = 0;
+        while (k < fir.block_count(f)) {
+            statements += cast(fir.block_statement_count(f, k), u64);
+            k += 1;
+        }
+        b += 1;
+    }
+    u64 used = x->fills_meter.used.w;
+    // Two walks of each statement, and at least the edge from `relay` to `fill_g`.
+    assert(statements > 0 && used >= 2 * statements + 1);
+    assert(!x->fills_refusal.terminal.present && cleans(&full, "clean_g", "g"));
+    env.boundary(&full, "complete", "complete");
+    assert(full.mismatches == 0);
+    env.close(&full);
+    // A bound of `statements + 1` stops the step in its second walk.
+    u64[4] bounds = {1, statements + 1, 2 * statements, used - 1};
+    for (u64 bound : bounds) {
+        env.closure mut c = env.closure{};
+        env.prepare_with(&c, lines[..], env.runtime.release_last);
+        ownership_api.limit_table mut limits = ownership_limits.computation(1);
+        limits.w = bound;
+        assert(ownership_limits.configure(&c.e.source.exit.fills_meter, &limits));
+        env.analyze(&c);
+        ownership_source_exit.closure* y = env.shared(&c);
+        assert(y->fills_refusal.terminal.present);
+        assert(y->boundary_proof == ownership_source_local.status.incomplete);
+        assert(y->boundary_first.terminal.reason == ownership_api.incomplete_reason.work_limit);
+        assert(fills(&c, "clean_g") && !cleans(&c, "clean_g", "g"));
+        env.close(&c);
+    }
+    println("fills budget ok");
+}
+
+// An owner of the frame whose address the body takes can be filled through that address, and a
+// pointer local whose own address the body takes can be retargeted, so it resolves to nothing.
+// A write of one part of an aggregate owner keeps the state of its other parts.
+fn frame_aliases() void {
+    env.closure mut c = env.closure{};
+    string[34] lines = {
+        "import std.libc;",
+        "import std.rt;",
+        "struct pair { u8 mut@ own a; u8 mut@ own b; }",
+        "u8 mut@ own mut g = {};",
+        "u8 mut@ own mut other = {};",
+        "fn alias_fill(i32 s) void {",
+        "    rt.shutdown();",
+        "    u8 mut@ own mut p = {};",
+        "    u8 mut@ own mut* q = &p;",
+        "    *q = new(u8, 1);",
+        "    libc.exit(s);",
+        "}",
+        "fn retarget() void {",
+        "    del(g);",
+        "    g = new(u8, 1);",
+        "    u8 mut@ own mut* mut t = &g;",
+        "    u8 mut@ own mut* mut* tt = &t;",
+        "    *tt = &other;",
+        "    del(*t);",
+        "    g = new(u8, 2);",
+        "    del(g);",
+        "}",
+        "fn half_filled(i32 s) void {",
+        "    rt.shutdown();",
+        "    pair mut p = {};",
+        "    p.a = new(u8, 1);",
+        "    u8 mut@ own e = {};",
+        "    p.b = move(e);",
+        "    libc.exit(s);",
+        "}",
+        "fn main() i32 { return 0; }",
+        "fn none() void {}",
+        "fn third() void {}",
+        "fn fourth() void {}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    // `p` holds the allocation that the write through `q` stored. The user globals come from
+    // the caller at the exit call, so the frame record is the first record.
+    ownership_source_exit.context* fill = env.body(&c, "alias_fill");
+    assert(fill->unproved_len >= 1 && fill->unproved[0].name == "p");
+    env.unproved(&c, "retarget", "g", ownership_source_exit.STORE_UNPROVED, 20);
+    ownership_source_exit.context* half = env.body(&c, "half_filled");
+    assert(half->unproved_len >= 1 && half->unproved[0].name == "p");
+    assert(half->violations_len == 0);
+    env.finish(&c, "frame aliases ok");
+}
+
+fn main() i32 {
+    initializer_addresses();
+    global_pointers();
+    cleanup_releases();
+    cleanup_moves();
+    cleanup_stores();
+    cleanup_budget();
+    cleanup_cycles();
+    cleanup_exports();
+    cleanup_callees();
+    cleanup_call_cycles();
+    cleanup_out_params();
+    cleanup_foreign_callbacks();
+    cleanup_foreign_retention();
+    slots_behind_pointers();
+    slot_search_work();
+    fills_budget();
+    frame_aliases();
+    return 0;
+}

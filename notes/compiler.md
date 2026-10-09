@@ -1393,6 +1393,65 @@ came here.
   join, for a typed access, a field address and a raw range. A check keeps one kernel value
   for each window, one for the foreign values and one for the sourceless values; the pair of a
   foreign and a reconstructed value needs the last two.
+- **Process-exit obligations come from verified FIR** (D17.19, D17.18, D19.8).
+  `ownership_source_exit` runs one forward analysis for each verified body. A unit is an owning
+  global leaf of the closure (the elements of a fixed array share one weak leaf) or an owning
+  local of the body. Its state is a set of EMPTY, LIVE and SYMBOLIC; SYMBOLIC marks a LIVE from
+  the body entry or a fort call, which only a call summary decides. The lowering stores into an
+  owning global through `addr(global G)` in a temporary, and copies and `addr((*t).f)` of such a
+  temporary, so a one-definition local that holds that address resolves to `G`. Any other use
+  of the address marks the leaf escaped, and an owning write through an unresolved reference or
+  into an aggregate `_0` then weakens it. A global initializer can take an address too
+  (`T mut* p = &g;`), so `collect` marks each owning global that an initializer names. A place
+  that reads a reference on its way is indirect, also through a global that holds no owner
+  (`*pg`).
+  A store into a leaf needs it EMPTY after the right-side effects; a call result needs a summary,
+  because the callee writes `_0` in place. A known normal exit (`ownership_ffi.termination`)
+  needs each frame owner and each leaf EMPTY. A fort call while a frame owner can be LIVE stays
+  incomplete: only the callee's outcome summary says whether it ends the process. The checker
+  refuses an extern function as a value, so no indirect call is extern `exit`.
+  A first pass gives each body its exit fact: the leaves EMPTY at each normal return, with each
+  fort call unknown. The exit fact needs no call summary: it holds no ordered effect, alias,
+  requirement or outcome, and it comes from the callee's own FIR. It is sound only with a
+  complete escape set, because an unresolved write can refill an escaped leaf after its release.
+  The second pass reads the exit fact of a direct callee after the call. The generated `main`
+  boundary reads the exit fact of `std.rt.shutdown`; a library needs a cleanup body for each
+  leaf. A deep leaf (its referent holds owning leaves) has no cleanup, because only heap facts
+  prove its owned descendants empty after a release or a move. The first pass also marks a leaf
+  unclean at a store over it that can drop an allocation. It marks the body as one that exports
+  when a value that can hold an allocation leaves the frame: into an owning global, an indirect
+  owning place or a fort call argument, or through a fort call while an owner of the frame whose
+  address the body takes can hold one. A cleanup body has the leaf in its exit fact, not
+  unclean, and does not export; otherwise two cleanups can pass one allocation between leaves.
+  A refused first pass gives none of these facts. The second pass still reads the plain exit
+  fact, because the rows of the callee or of the receiver report a value that leaves a leaf
+  unproved. An extern call whose argument type reaches a writable owning slot (`names_slot`) is
+  a hand-out too, as D17.13 applies signature transfers. The slot can sit behind a pointer field
+  of the argument, so each escaped leaf and each taken frame owner keeps its old state or takes a
+  fresh owner or null; the escape pass marks each address that a call receives. The search
+  enters each struct type once and charges one W of the body ledger for each step. After the
+  first passes, `decide_fills` decides for each body whether it can fill an owning global: by a
+  hand-out of its own, with no exit fact, by an indirect fort call, or through a fort callee that
+  fills. The fact spreads along reversed call edges, each body once. The step is one D17.18
+  computation with its own W ledger, as the graph build of `ownership_graph` is; a refusal makes
+  each body fill and is the first boundary reason. A cleanup body needs the fact false, so no
+  fort callee refills a leaf that another cleanup empties. A fort callback that an extern call
+  runs adds nothing, and neither does an address that foreign code retains from an earlier call:
+  D17.13 keeps hidden foreign retention and callback effects outside proof. So a cleanup that
+  sorts with a filling callback through `std.sort` stays a cleanup, and so does a cleanup that
+  calls an extern after an earlier call registered a slot (the documented limits). The call-graph
+  step writes its own `process_exit_fills` ledger in the report. `std.rt.shutdown`
+  calls no extern with an owning slot and reaches no callback, so it stays the cleanup of
+  `args_store`. A `std.rt` leaf is declared at each known normal exit, so the exiting body must
+  run the runtime cleanup itself. The witness walk of a violation takes each overwrite check as
+  removed (`ownership_source_local.witness_mode_in`), as a release build removes it.
+  Measured on 2026-10-08 (Darwin and Linux) with a harness that runs `ownership_source.prepare`
+  and `analyze` on the `main.ft` closure: 3205 bodies, 2960 declared and proved, 245 with a
+  frame owner at a fort call, 0 violations, the boundary complete, at most 3855 W in one body.
+  All 67 `src/fort` roots give a complete boundary.
+  `ownership_globals`, the consumer of supplied global inputs, encodes D17.19 too. Both
+  encodings stand until call summaries join the consumer with the actual producers.
+  `test/fort/ownership_source_exit_*_test.ft` hold these rules.
 - **Dynamic element proof keeps guarded update states** (D17.15).
   `ownership_regions.apply` takes resolved storage paths and exhaustive supplied choices.
   Captured index versions stay separate from local slot names.

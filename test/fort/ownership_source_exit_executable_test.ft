@@ -1,0 +1,159 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| return ok
+//| exits ok
+//| runtime order ok
+//| runtime order ok
+//| runtime order ok
+//| user globals ok
+/// Holds the process-exit verdicts of closures whose entry module has a `main` (D11.6, D17.19).
+import ownership_exit_source_env as env;
+import ownership_source_exit;
+
+// X1 and X6: generated startup, source main, then std.rt.shutdown. The exit fact of shutdown
+// proves the runtime owner empty at the final boundary.
+fn plain_return() void {
+    env.closure mut c = env.closure{};
+    string[3] lines = {
+        "fn main() i32 {",
+        "    return 0;",
+        "}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    assert(env.shared(&c)->executable);
+    env.proved(&c, "main");
+    env.proved_in(&c, "std.rt", "exit");
+    env.boundary(&c, "complete", "complete");
+    env.finish(&c, "return ok");
+}
+
+// D17.19: a direct call of extern `exit` is the final boundary, and abort is no boundary.
+// The line of each case is its line in `lines`, from 1.
+fn exits() void {
+    env.closure mut c = env.closure{};
+    string[30] lines = {
+        "import std.libc;",
+        "import std.rt;",
+        "fn leak_at_exit() void {",
+        "    u8 mut@ own p = new(u8, 1);",
+        "    libc.exit(0);",
+        "}",
+        "fn release_then_exit() void {",
+        "    u8 mut@ own p = new(u8, 1);",
+        "    del(p);",
+        "    rt.shutdown();",
+        "    libc.exit(0);",
+        "}",
+        "fn runtime_left() void {",
+        "    libc.exit(0);",
+        "}",
+        "fn abort_with_owner() void {",
+        "    u8 mut@ own p = new(u8, 1);",
+        "    libc.abort();",
+        "}",
+        "fn foreign_end() void {",
+        "    u8 mut@ own p = new(u8, 1);",
+        "    libc._exit(1);",
+        "}",
+        "fn parameter_at_exit(u8 mut@ own p) void {",
+        "    rt.shutdown();",
+        "    libc.exit(0);",
+        "}",
+        "fn main() i32 {",
+        "    return 0;",
+        "}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    // The local owner holds an allocation on each path to the exit call (memory model X3).
+    env.violation(&c, "leak_at_exit", "p", ownership_source_exit.EXIT_LOST, 5);
+    env.proved(&c, "release_then_exit");
+    // A runtime leaf is declared: the exiting body must run the runtime cleanup (X1, X2).
+    env.unproved(&c, "runtime_left", "args_store", ownership_source_exit.EXIT_UNPROVED, 14);
+    // Abort needs no cleanup (X4). `_exit` stays outside proof under D17.13 (X5).
+    env.proved(&c, "abort_with_owner");
+    env.proved(&c, "foreign_end");
+    assert(env.body(&c, "foreign_end")->foreign_ends == 1);
+    assert(env.body(&c, "abort_with_owner")->abort_calls == 1);
+    // A by-value owning parameter can hold an allocation during the call of rt.shutdown, which
+    // a callee summary must classify (D17.18). At the exit call it comes from the caller.
+    env.outside(&c, "parameter_at_exit", ownership_source_exit.missing.suspended_owner, 25);
+    env.finish(&c, "exits ok");
+}
+
+// The order of the runtime cleanup. A fort call after the release, or an exit that skips the
+// release, leaves the runtime owner unproved at the boundary (D11.6, D17.19).
+fn runtime_order(env.runtime kind, string boundary_proof) void {
+    env.closure mut c = env.closure{};
+    string[3] lines = {
+        "fn main() i32 {",
+        "    return 0;",
+        "}",
+    };
+    env.open_with(&c, lines[..], kind);
+    defer env.close(&c);
+    env.boundary(&c, "complete", boundary_proof);
+    env.unproved_in(&c, "std.rt", "exit", "args_store", ownership_source_exit.EXIT_UNPROVED, 0);
+    if (kind == env.runtime.flush_last) {
+        assert(!env.empties(&c, "std.rt", "shutdown", "args_store"));
+    }
+    if (kind == env.runtime.no_shutdown) {
+        assert(env.shared(&c)->boundary_unproved_len == 1);
+        assert(env.shared(&c)->boundary_unproved[0].text ==
+            ownership_source_exit.BOUNDARY_EXECUTABLE);
+    }
+    env.finish(&c, "runtime order ok");
+}
+
+// A user owning global at the final boundary needs the summary of source main: the boundary
+// stays outside the declared scope (G3). A definite owner at a direct exit is lost ownership.
+fn user_globals() void {
+    env.closure mut c = env.closure{};
+    string[22] lines = {
+        "import std.libc;",
+        "import std.rt;",
+        "u8 mut@ own mut pool = {};",
+        "fn leak_global() void {",
+        "    del(pool);",
+        "    pool = new(u8, 4);",
+        "    libc.exit(0);",
+        "}",
+        "fn keep() void {",
+        "    del(pool);",
+        "    pool = new(u8, 4);",
+        "    rt.shutdown();",
+        "    libc.exit(0);",
+        "}",
+        "fn clear() void {",
+        "    del(pool);",
+        "    rt.shutdown();",
+        "    libc.exit(0);",
+        "}",
+        "fn main() i32 {",
+        "    return 0;",
+        "}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    // Each path stores an allocation into `pool` and reaches the exit call (memory model X2).
+    env.violation(&c, "leak_global", "pool", ownership_source_exit.EXIT_LOST, 7);
+    assert(env.body(&c, "leak_global")->unproved_len == 1);
+    // The call of rt.shutdown is a fort call: after it `pool` comes from that callee.
+    env.outside(&c, "keep", ownership_source_exit.missing.boundary_state, 13);
+    env.outside(&c, "clear", ownership_source_exit.missing.boundary_state, 18);
+    env.boundary(&c, "incomplete", "incomplete");
+    assert(env.shared(&c)->boundary_gap == ownership_source_exit.missing.boundary_state);
+    env.finish(&c, "user globals ok");
+}
+
+fn main() i32 {
+    plain_return();
+    exits();
+    runtime_order(env.runtime.flush_last, "incomplete");
+    runtime_order(env.runtime.no_shutdown, "incomplete");
+    runtime_order(env.runtime.exit_without_cleanup, "complete");
+    user_globals();
+    return 0;
+}
