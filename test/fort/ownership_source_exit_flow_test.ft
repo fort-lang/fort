@@ -1,0 +1,161 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| returns ok
+//| loops ok
+//| aborts ok
+/// Holds how the process-exit analysis follows FIR control flow: several returns, loops,
+/// constant switches, abort paths and deferred releases (D17.18, D17.19, fir.md 14.1).
+import ownership_exit_source_env as env;
+import ownership_source_exit;
+
+// The exit fact needs EMPTY at each reachable normal return. A body that never returns gives
+// no fact. The line of each case is its line in `lines`, from 1.
+fn returns() void {
+    env.closure mut c = env.closure{};
+    string[34] lines = {
+        "u8 mut@ own mut pool = {};",
+        "fn both_returns(bool b) void {",
+        "    del(pool);",
+        "    if (b) { return; }",
+        "    del(pool);",
+        "}",
+        "fn one_return_live(bool b) void {",
+        "    del(pool);",
+        "    if (b) { pool = new(u8, 1); return; }",
+        "}",
+        "fn never_returns() void {",
+        "    del(pool);",
+        "    while (true) {}",
+        "}",
+        "fn deferred() void {",
+        "    defer del(pool);",
+        "    u64 mut i = 0;",
+        "    i += 1;",
+        "}",
+        "fn deferred_after_store() void {",
+        "    del(pool);",
+        "    defer del(pool);",
+        "    pool = new(u8, 1);",
+        "}",
+        "fn constant_branch() void {",
+        "    del(pool);",
+        "    if (false) { pool = new(u8, 1); }",
+        "}",
+        "fn constant_switch() void {",
+        "    del(pool);",
+        "    switch (1) { case 2: pool = new(u8, 1); default: return; }",
+        "}",
+        "fn main() i32 { return 0; }",
+        "fn none() void {}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    assert(env.empties(&c, "main", "both_returns", "pool"));
+    assert(!env.empties(&c, "main", "one_return_live", "pool"));
+    assert(!env.empties(&c, "main", "never_returns", "pool"));
+    // A deferred release runs on each return path (D7.8).
+    assert(env.empties(&c, "main", "deferred", "pool"));
+    env.proved(&c, "deferred_after_store");
+    assert(env.empties(&c, "main", "deferred_after_store", "pool"));
+    // A constant switch reaches only its selected edge (V9).
+    assert(env.empties(&c, "main", "constant_branch", "pool"));
+    assert(env.empties(&c, "main", "constant_switch", "pool"));
+    env.finish(&c, "returns ok");
+}
+
+// A loop joins the states of each iteration. A store that the loop repeats replaces the
+// allocation of the previous iteration.
+fn loops() void {
+    env.closure mut c = env.closure{};
+    string[30] lines = {
+        "u8 mut@ own mut pool = {};",
+        "fn store_in_a_loop(u64 n) void {",
+        "    del(pool);",
+        "    for (u64 mut i = 0; i < n; i++) {",
+        "        pool = new(u8, 1);",
+        "    }",
+        "}",
+        "fn release_in_a_loop(u64 n) void {",
+        "    del(pool);",
+        "    for (u64 mut i = 0; i < n; i++) {",
+        "        pool = new(u8, 1);",
+        "        del(pool);",
+        "    }",
+        "}",
+        "fn local_in_a_loop(u64 n) void {",
+        "    for (u64 mut i = 0; i < n; i++) {",
+        "        u8 mut@ own p = new(u8, 1);",
+        "        del(p);",
+        "        helper();",
+        "    }",
+        "}",
+        "fn local_over_a_loop(u64 n) void {",
+        "    u8 mut@ own p = new(u8, 1);",
+        "    for (u64 mut i = 0; i < n; i++) { helper(); }",
+        "    del(p);",
+        "}",
+        "fn helper() void {}",
+        "fn main() i32 { return 0; }",
+        "fn none() void {}",
+        "fn other() void {}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    // The second iteration finds the first allocation: EMPTY and LIVE join at the loop head.
+    env.unproved(&c, "store_in_a_loop", "pool", ownership_source_exit.STORE_UNPROVED, 5);
+    env.proved(&c, "release_in_a_loop");
+    assert(env.empties(&c, "main", "release_in_a_loop", "pool"));
+    // The storage of `p` ends in each iteration, so the call holds no owner.
+    env.proved(&c, "local_in_a_loop");
+    env.outside(&c, "local_over_a_loop", ownership_source_exit.missing.suspended_owner, 24);
+    env.finish(&c, "loops ok");
+}
+
+// An abort path needs no cleanup and ends its path: a runtime check that fails, a panic and a
+// failed assertion (D17.19, X4).
+fn aborts() void {
+    env.closure mut c = env.closure{};
+    string[22] lines = {
+        "import std.libc;",
+        "u8 mut@ own mut pool = {};",
+        "fn panic_path(bool b) void {",
+        "    u8 mut@ own p = new(u8, 1);",
+        "    if (b) { panic(\"stop\"); }",
+        "    del(p);",
+        "}",
+        "fn checked_index(u8@ s, u64 i) void {",
+        "    del(pool);",
+        "    u8 x = s[i];",
+        "}",
+        "fn aborted_owner(bool b) void {",
+        "    u8 mut@ own p = new(u8, 1);",
+        "    if (b) { libc.abort(); }",
+        "    del(p);",
+        "}",
+        "fn store_then_panic() void {",
+        "    del(pool);",
+        "    pool = new(u8, 1);",
+        "    panic(\"stop\");",
+        "}",
+        "fn main() i32 { return 0; }",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    env.proved(&c, "panic_path");
+    env.proved(&c, "checked_index");
+    assert(env.empties(&c, "main", "checked_index", "pool"));
+    env.proved(&c, "aborted_owner");
+    assert(env.body(&c, "aborted_owner")->abort_calls == 1);
+    // G4: the owner stays live, and the path aborts without a normal return.
+    env.proved(&c, "store_then_panic");
+    assert(!env.empties(&c, "main", "store_then_panic", "pool"));
+    env.finish(&c, "aborts ok");
+}
+
+fn main() i32 {
+    returns();
+    loops();
+    aborts();
+    return 0;
+}

@@ -1,0 +1,146 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| resolved ok
+//| escaped ok
+//| result slot ok
+/// Holds how the process-exit analysis follows the address of an owning global: the store
+/// pattern of the lowering resolves to the global, and each other use lets an unresolved owning
+/// write reach it (D17.19 "taking a global address creates no escape exemption").
+import ownership_exit_source_env as env;
+import ownership_source_exit;
+
+// A local with one definition holds one address: of the global, of a field through such a
+// local, or a copy of such a local. A release and a store through it reach the global. The
+// line of each case is its line in `lines`, from 1.
+fn resolved() void {
+    env.closure mut c = env.closure{};
+    string[26] lines = {
+        "struct pair { u8 mut@ own a; u8 mut@ own c; }",
+        "pair mut both = {};",
+        "u8 mut@ own mut pool = {};",
+        "fn through_field_pointer() void {",
+        "    u8 mut@ own mut* p = &both.a;",
+        "    del(*p);",
+        "    *p = new(u8, 1);",
+        "}",
+        "fn through_struct_pointer() void {",
+        "    pair mut* q = &both;",
+        "    del(q->c);",
+        "    q->c = new(u8, 1);",
+        "    q->c = new(u8, 2);",
+        "}",
+        "fn through_copy() void {",
+        "    u8 mut@ own mut* p = &pool;",
+        "    u8 mut@ own mut* r = p;",
+        "    del(*r);",
+        "}",
+        "fn reassigned(bool b) void {",
+        "    u8 mut@ own mut* mut p = &pool;",
+        "    if (b) { p = &both.a; }",
+        "    del(*p);",
+        "}",
+        "fn main() i32 { return 0; }",
+        "fn none() void {}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    ownership_source_exit.closure* x = env.shared(&c);
+    env.proved(&c, "through_field_pointer");
+    assert(env.body(&c, "through_field_pointer")->global_stores == 1);
+    env.violation(&c, "through_struct_pointer", "both", ownership_source_exit.STORE_LOST, 13);
+    env.proved(&c, "through_copy");
+    assert(env.empties(&c, "main", "through_copy", "pool"));
+    // A local with two definitions holds no one address: its release names no global.
+    assert(env.body(&c, "reassigned")->global_releases == 0);
+    assert(!env.empties(&c, "main", "reassigned", "pool"));
+    // Two addresses leave their patterns in `reassigned`: each global escapes.
+    assert(x->leaves[env.leaf_of(&c, "pool")].escaped);
+    env.finish(&c, "resolved ok");
+}
+
+// An address in storage, a returned address and a slice of a global array leave the store
+// patterns. A later owning write through an unresolved reference reaches the global.
+fn escaped() void {
+    env.closure mut c = env.closure{};
+    string[24] lines = {
+        "u8 mut@ own mut kept = {};",
+        "u8 mut@ own mut stored = {};",
+        "u8 mut@ own mut* mut where = null;",
+        "u8 mut@ own[2] mut slots = {};",
+        "fn remember() void {",
+        "    where = &stored;",
+        "}",
+        "fn view_slots() u8 mut@ own mut@ {",
+        "    return slots[..];",
+        "}",
+        "fn write_through(u8 mut@ own mut* p) void {",
+        "    *p = new(u8, 1);",
+        "}",
+        "fn clear_stored(u8 mut@ own mut* p) void {",
+        "    del(stored);",
+        "    *p = new(u8, 1);",
+        "}",
+        "fn clear_kept(u8 mut@ own mut* p) void {",
+        "    del(kept);",
+        "    *p = new(u8, 1);",
+        "}",
+        "fn main() i32 { return 0; }",
+        "fn none() void {}",
+        "fn other() void {}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    ownership_source_exit.closure* x = env.shared(&c);
+    assert(x->leaves[env.leaf_of(&c, "stored")].escaped);
+    assert(!x->leaves[env.leaf_of(&c, "kept")].escaped);
+    assert(x->leaves[env.leaf_of(&c, "slots")].escaped);
+    assert(x->leaves[env.leaf_of(&c, "slots")].weak);
+    assert(env.body(&c, "remember")->escapes == 1);
+    assert(env.body(&c, "view_slots")->escapes == 1);
+    // The write through `p` can reach `stored`, never `kept`.
+    assert(!env.empties(&c, "main", "clear_stored", "stored"));
+    assert(env.empties(&c, "main", "clear_kept", "kept"));
+    env.finish(&c, "escaped ok");
+}
+
+// A callee writes an aggregate result in place, so a global destination of such a call
+// escapes, and each owning write into an aggregate `_0` can reach it (D17.15).
+fn result_slot() void {
+    env.closure mut c = env.closure{};
+    string[17] lines = {
+        "struct box { u8 mut@ own a; }",
+        "box mut held = {};",
+        "box mut other = {};",
+        "fn make() box {",
+        "    del(held.a);",
+        "    box b = box{new(u8, 1)};",
+        "    return b;",
+        "}",
+        "fn refill() void {",
+        "    del(held.a);",
+        "    held = make();",
+        "}",
+        "fn clear_other() box {",
+        "    del(other.a);",
+        "    return box{};",
+        "}",
+        "fn main() i32 { return 0; }",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    ownership_source_exit.closure* x = env.shared(&c);
+    assert(x->leaves[env.leaf_of(&c, "held")].escaped);
+    assert(!x->leaves[env.leaf_of(&c, "other")].escaped);
+    // `make` releases `held` and then writes `_0`, which can be `held`: no exit fact.
+    assert(!env.empties(&c, "main", "make", "held"));
+    assert(env.empties(&c, "main", "clear_other", "other"));
+    env.finish(&c, "result slot ok");
+}
+
+fn main() i32 {
+    resolved();
+    escaped();
+    result_slot();
+    return 0;
+}
