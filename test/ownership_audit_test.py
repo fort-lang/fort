@@ -35,8 +35,8 @@ LIMITS = {
 W_BASE = LIMITS["w"]
 W_SCALE = LIMITS["w_scale"]
 TARGET = "x86_64-linux-gnu"
-# The analyses that version 5 integrates in each report, beside the graph and liveness.
-PRODUCERS = ("local", "stored_borrows", "raw")
+# The analyses that version 6 integrates in each report, beside the graph and liveness.
+PRODUCERS = ("local", "stored_borrows", "raw", "process_exit")
 
 
 def incomplete(stage="graph", code="missing_producer", source=None, limit=None):
@@ -96,7 +96,7 @@ def make_report(argv, cwd, *, accepted=False, files=None):
             )
     report = {
         "kind": "fort-ownership-report",
-        "version": 5,
+        "version": 6,
         "complete": True,
         "compiler_version": "fort synthetic 1",
         "invocation": {
@@ -129,6 +129,13 @@ def make_report(argv, cwd, *, accepted=False, files=None):
         "meters": [],
         "bodies": bodies,
         "totals": audit.derived_totals(bodies),
+        "boundary": {
+            "kind": "library",
+            "leaves": 0,
+            "correspondence": "complete",
+            "proof": "complete",
+            "first_incomplete": None,
+        },
         "first_incomplete": None if accepted else incomplete(),
         "failure": None,
         "verdict": "accepted" if accepted else "rejected",
@@ -217,6 +224,18 @@ def localize(report, root, kind, stage=2):
         proofs = [value["proof"] for value in body["analyses"]]
         body["ownership"] = "violated" if "violated" in proofs else "incomplete"
     report["totals"] = audit.derived_totals(report["bodies"])
+
+
+def unprove_boundary(report, declared):
+    """Leave the boundary unproved: inside the declared scope, or outside it."""
+    report["analyses"][6].update(producer="integrated", status="incomplete")
+    report["boundary"].update(
+        kind="executable",
+        leaves=1,
+        correspondence="complete" if declared else "incomplete",
+        proof="incomplete",
+        first_incomplete=incomplete("process_exit", "missing_boundary"),
+    )
 
 
 class RepositoryFixture(unittest.TestCase):
@@ -362,6 +381,12 @@ if mode.startswith("stored_"):
 if mode.startswith("raw_"):
     from ownership_audit_test import localize
     localize(report, root, mode[len("raw_"):], stage=4)
+if mode.startswith("exit_"):
+    from ownership_audit_test import localize
+    localize(report, root, mode[len("exit_"):], stage=6)
+if mode.startswith("boundary_"):
+    from ownership_audit_test import unprove_boundary
+    unprove_boundary(report, declared=mode == "boundary_unproved")
 if mode == "incomplete":
     report["enumeration"]["complete"] = False
     report["first_incomplete"] = {{"stage": "enumeration", "code": "source_coverage",
@@ -462,14 +487,93 @@ class SchemaTests(RepositoryFixture):
                 self.reject(lambda value, select=select: select(value).update(extra=0))
 
     def test_unknown_versions_and_invalid_complete_types(self):
-        # Version 3 adds local ledgers, version 4 raw ledgers and version 5 stored ledgers.
-        # Earlier versions lack them.
-        for version in (0, 1, 2, 3, 4, 6, True, -1, 5.0, "5", audit.U64_MAX + 1):
+        # Version 3 adds local ledgers, version 4 raw ledgers, version 5 stored ledgers and
+        # version 6 process-exit ledgers and the boundary. Earlier versions lack them.
+        for version in (0, 1, 2, 3, 4, 5, 7, True, -1, 6.0, "6", audit.U64_MAX + 1):
             with self.subTest(version=version):
                 self.reject(lambda value: value.update(version=version))
         for complete in (False, 0, 1, "true", None):
             with self.subTest(complete=complete):
                 self.reject(lambda value: value.update(complete=complete))
+
+    def test_boundary_member_follows_its_closure(self):
+        self.validate()
+
+        def boundary(**changes):
+            return lambda value: value["boundary"].update(**changes)
+
+        self.reject(lambda value: value.pop("boundary"), "incorrect members")
+        self.reject(boundary(kind="program"), "boundary kind")
+        self.reject(boundary(leaves=-1), "boundary leaves")
+        self.reject(boundary(leaves=True), "boundary leaves")
+        self.reject(boundary(proof="unexecuted"), "half executed")
+        self.reject(boundary(correspondence="unexecuted", proof="unexecuted"), "unexecuted")
+        self.reject(boundary(correspondence="incomplete"), "proof without facts")
+        self.reject(boundary(proof="incomplete"), "missing reason")
+        reason = incomplete("raw", "missing_boundary")
+        self.reject(boundary(proof="incomplete", first_incomplete=reason), "reason stage")
+        reason = incomplete("process_exit", "missing_boundary")
+        self.reject(boundary(first_incomplete=reason), "reason without failure")
+        self.reject(boundary(extra=0), "boundary: incorrect members")
+        # An incomplete boundary keeps the process_exit closure incomplete.
+        self.report["boundary"].update(proof="incomplete", first_incomplete=reason)
+        self.validate()
+        self.reject(lambda value: value["analyses"][6].update(status="complete"), "claims")
+        # A failed prerequisite leaves the boundary unexecuted.
+        self.report["boundary"].update(
+            correspondence="unexecuted", proof="unexecuted", first_incomplete=None
+        )
+        self.reject(lambda value: value, "unexecuted after success")
+
+    def test_process_exit_ledger_is_one_for_each_verified_body(self):
+        self.validate()
+        exit_ledgers = [m for m in self.report["meters"] if m["name"] == "process_exit"]
+        self.assertGreater(len(exit_ledgers), 0)
+        at = self.report["meters"].index(exit_ledgers[0])
+
+        def drop(value):
+            value["meters"].pop(at)
+            for index, meter in enumerate(value["meters"]):
+                meter["id"] = index
+
+        self.reject(drop, "exactly one process exit ledger")
+
+        def resize(value):
+            value["meters"][at]["fir_size"] += 1
+            value["meters"][at]["counts"][0]["bound"] += W_SCALE
+
+        self.reject(resize, "process exit ledger: FIR size differs")
+
+    def test_process_exit_fills_ledger_is_one_closure_ledger(self):
+        self.validate()
+        exit_sizes = [m["fir_size"] for m in self.report["meters"] if m["name"] == "process_exit"]
+        self.assertGreater(len(exit_sizes), 0)
+        size = sum(exit_sizes)
+        bound = W_BASE + W_SCALE * size
+
+        def fills(index, owner=None, fir_size=size, category="W"):
+            return {
+                "id": index,
+                "name": "process_exit_fills",
+                "owner": owner,
+                "fir_size": fir_size,
+                "counts": [{"category": category, "scope": "computation", "used": 0,
+                            "bound": W_BASE + W_SCALE * fir_size}],
+                "first_refusal": None,
+            }
+
+        self.report["meters"].append(fills(len(self.report["meters"])))
+        self.validate()
+        at = len(self.report["meters"]) - 1
+        key = dict(self.report["bodies"][0]["key"])
+        self.reject(lambda value: value["meters"][at].update(owner=key), "fills ledger: owner")
+        self.reject(lambda value: value["meters"][at].update(fir_size=size + 1, counts=[
+            {"category": "W", "scope": "computation", "used": 0, "bound": bound + W_SCALE}]),
+            "fills FIR size differs")
+        self.reject(lambda value: value["meters"].append(fills(at + 1)), "two process exit fills")
+        self.reject(lambda value: value["meters"][at]["counts"].__setitem__(0, {
+            "category": "V", "scope": "report", "used": 0, "bound": LIMITS["v"]}),
+            "fills ledger: unsupported category")
 
     def test_integer_boundaries(self):
         paths = [
@@ -917,6 +1021,7 @@ class SchemaTests(RepositoryFixture):
                 )
                 if index < len(raw_sizes):
                     meters.append(ledger(len(meters), "raw", owners[index], raw_sizes[index]))
+                meters.append(ledger(len(meters), "process_exit", dict(body["key"]), sizes[index]))
             self.report["meters"] = meters
 
         # The raw ledger is the raw computation of its body: the FIR size of that body.
@@ -2395,6 +2500,34 @@ class EnforcementTests(RepositoryFixture):
         self.assertEqual(problems, ["src/fort/shared.ft:1: shared: 1 raw violation(s)"])
         self.assertEqual(summary["problems"], 1)
 
+    def test_process_exit_scope_rejects_violations_and_incomplete_declared_obligations(self):
+        summary, problems = self.enforce("exit_clean", scope="process_exit")
+        self.assertEqual((problems, summary["scope"]), ([], "process_exit"))
+        self.assertGreater(summary["declared_context_bodies"], 0)
+        self.assertLess(summary["declared_context_bodies"], summary["context_bodies"])
+        summary, problems = self.enforce("exit_violation", scope="process_exit")
+        self.assertEqual(problems, ["src/fort/main.ft:1: main: 1 process_exit violation(s)"])
+        summary, problems = self.enforce("exit_incomplete", scope="process_exit")
+        expected = (
+            "src/fort/main.ft:1: main: incomplete declared process_exit obligation (incomplete)"
+        )
+        self.assertEqual(problems, [expected])
+        summary, problems = self.enforce("exit_shared_violation", scope="process_exit")
+        self.assertEqual(problems, ["src/fort/shared.ft:1: shared: 1 process_exit violation(s)"])
+
+    def test_process_exit_scope_rejects_a_declared_unproved_boundary(self):
+        # Each root reports the boundary of its own closure.
+        summary, problems = self.enforce("boundary_unproved", scope="process_exit")
+        self.assertEqual(len(problems), summary["problems"])
+        self.assertGreater(len(problems), 0)
+        self.assertTrue(all(p.endswith(": incomplete declared boundary") for p in problems))
+        # A boundary that needs a call summary stays outside the scope.
+        summary, problems = self.enforce("boundary_outside", scope="process_exit")
+        self.assertEqual(problems, [])
+        # Another scope never reads the boundary.
+        summary, problems = self.enforce("boundary_unproved", scope="local")
+        self.assertEqual(problems, [])
+
     def test_each_scope_reads_only_its_own_row(self):
         # A problem of one scope declares nothing in another scope.
         pairs = (
@@ -2404,6 +2537,8 @@ class EnforcementTests(RepositoryFixture):
             ("stored_violation", "local"),
             ("stored_violation", "raw"),
             ("raw_violation", "stored_borrows"),
+            ("exit_violation", "raw"),
+            ("raw_violation", "process_exit"),
         )
         for mode, scope in pairs:
             with self.subTest(mode=mode, scope=scope):

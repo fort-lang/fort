@@ -120,11 +120,21 @@ class OwnershipDriverTest(unittest.TestCase):
                                                    "status": "complete"})
         self.assertEqual(document["analyses"][4], {"name": "raw", "producer": "integrated",
                                                    "status": "complete"})
-        self.assertEqual([row["producer"] for row in document["analyses"]][5:],
-                         ["unavailable"] * 2)
-        self.assertEqual([row["status"] for row in document["analyses"]][5:],
-                         ["incomplete"] * 2)
-        self.assertEqual([row["name"] for row in document["meters"]], ["graph_private"])
+        self.assertEqual(document["analyses"][5], {"name": "calls_heap",
+                                                   "producer": "unavailable",
+                                                   "status": "incomplete"})
+        # The process-exit closure holds the boundary too. A library closure without an owning
+        # global needs no cleanup body.
+        self.assertEqual(document["analyses"][6], {"name": "process_exit",
+                                                   "producer": "integrated",
+                                                   "status": "complete"})
+        self.assertEqual(document["boundary"], {"kind": "library", "leaves": 0,
+                                                "correspondence": "complete",
+                                                "proof": "complete",
+                                                "first_incomplete": None})
+        # The call-graph step of the boundary runs on the empty closure, as the graph build does.
+        self.assertEqual([row["name"] for row in document["meters"]],
+                         ["graph_private", "process_exit_fills"])
 
     def test_diagnostic_document_stays_version_one(self):
         self.assertEqual(self.invoke("--json").returncode, 1)
@@ -136,8 +146,9 @@ class OwnershipDriverTest(unittest.TestCase):
         self.assertIn("ownership proof is incomplete", diagnostic["diagnostics"][0]["message"])
         self.assertEqual(coverage["kind"], "fort-ownership-report")
         # Version 2 added the W scale and FIR sizes, version 3 the local ledgers, version 4 the
-        # raw ledgers and version 5 the stored-borrow ledgers.
-        self.assertEqual(coverage["version"], 5)
+        # raw ledgers, version 5 the stored-borrow ledgers and version 6 the process-exit
+        # ledgers and the boundary.
+        self.assertEqual(coverage["version"], 6)
         self.assertIn("w_scale", coverage["limits"])
 
     def test_index_still_populates_identifier_records(self):
@@ -387,10 +398,12 @@ class OwnershipDriverTest(unittest.TestCase):
         self.assertEqual(document["bodies"], [])
         self.assertEqual(document["meters"], [])
         self.assertEqual([row["status"] for row in document["analyses"]][3:],
-                         ["unexecuted", "unexecuted", "incomplete", "incomplete"])
-        # The local, stored-borrow and raw analyses ran on no body and the denominator is
-        # incomplete.
+                         ["unexecuted", "unexecuted", "incomplete", "unexecuted"])
+        # The local, stored-borrow, raw and process-exit analyses ran on no body and the
+        # denominator is incomplete. The boundary reads every body, so it did not run either.
         self.assertEqual(document["analyses"][2]["status"], "unexecuted")
+        self.assertEqual((document["boundary"]["correspondence"], document["boundary"]["proof"]),
+                         ("unexecuted", "unexecuted"))
 
     def test_actual_verifier_failure_exits_two_and_retains_unexecuted_rows(self):
         # The empty runtime lacks the checked arithmetic trap entry.
@@ -692,6 +705,115 @@ class OwnershipDriverTest(unittest.TestCase):
         self.assertEqual(self.raw_row(document, "safe")["proof"], "complete")
         self.assertEqual(document["analyses"][4]["producer"], "integrated")
         self.assertEqual(document["analyses"][4]["status"], "incomplete")
+
+    # Process exit with the real runtime (D17.19): a direct extern exit with a live owner, the
+    # runtime cleanup before extern exit, and the std.sys.exit wrapper.
+    EXIT_CASES = (
+        "import std.libc;\n"
+        "import std.rt;\n"
+        "import std.sys;\n"
+        "fn leak_at_exit() void {\n"
+        "    u8 mut@ own p = new(u8, 1);\n"
+        "    libc.exit(0);\n"
+        "}\n"
+        "fn clean_exit() void {\n"
+        "    rt.shutdown();\n"
+        "    libc.exit(0);\n"
+        "}\n"
+        "fn wrapped_exit(i32 status) void {\n"
+        "    sys.exit(status);\n"
+        "}\n"
+        "fn main() i32 {\n"
+        "    return 0;\n"
+        "}\n"
+    )
+
+    def exit_row(self, document, name):
+        return self.body(document, name)["analyses"][6]
+
+    def test_process_exit_with_the_real_runtime(self):
+        self.entry.write_text(self.EXIT_CASES)
+        self.assertEqual(self.invoke(standard=Path(OPTIONS.std_dir)).returncode, 1)
+        document = self.evidence()
+        stderr = self.result.stderr.decode()
+        self.assertIn(":6:14: error: lost ownership of 'p'", stderr)
+        self.assertIn("normal process exit ends the process while this owner holds an allocation",
+                      stderr)
+        self.assertIn(":6:14: error: cannot prove that 'args_store' is empty", stderr)
+        self.assertEqual(self.exit_row(document, "leak_at_exit"),
+                         {"name": "process_exit", "correspondence": "complete",
+                          "solver": "complete", "proof": "violated", "violations": 1})
+        for name in ("clean_exit", "wrapped_exit", "main"):
+            with self.subTest(name=name):
+                self.assertEqual(self.exit_row(document, name)["proof"], "complete")
+        # The runtime cleanup std.rt.shutdown empties args_store before std.rt.exit ends the
+        # process, and before the generated return of main.
+        runtime = [body for body in document["bodies"] if body["source"]["module"] == "std.rt"]
+        for name in ("shutdown", "exit", "args_init", "args"):
+            with self.subTest(name=name):
+                row = next(body for body in runtime if body["source"]["name"] == name)
+                self.assertEqual(row["analyses"][6]["proof"], "complete")
+        self.assertEqual(document["boundary"], {"kind": "executable", "leaves": 1,
+                                                "correspondence": "complete",
+                                                "proof": "complete",
+                                                "first_incomplete": None})
+        self.assertEqual(document["analyses"][6]["producer"], "integrated")
+        self.assertEqual(document["totals"]["analyses"][6]["violations"], 1)
+        self.assertEqual(document["totals"]["violations"], 1)
+        # The violated body rendered two records, each an error and a note.
+        services = {json.dumps(row["owner"], sort_keys=True): row
+                    for row in document["meters"] if row["name"] == "services"}
+        ledgers = [row for row in document["meters"] if row["name"] == "process_exit"]
+        self.assertEqual(len(ledgers), len(services))
+        for row in ledgers:
+            self.assertEqual(row["fir_size"],
+                             services[json.dumps(row["owner"], sort_keys=True)]["fir_size"])
+        key = self.body(document, "leak_at_exit")["key"]
+        ledger = next(row for row in ledgers if row["owner"] == key)
+        used = {count["category"]: count["used"] for count in ledger["counts"]}
+        self.assertEqual(used["V"], 4)
+        self.assertGreater(used["W"], 0)
+        # The call-graph step of the boundary has one closure ledger: no owner, W only, and the
+        # summed FIR size of the process_exit ledgers.
+        fills = [row for row in document["meters"] if row["name"] == "process_exit_fills"]
+        self.assertEqual(len(fills), 1)
+        self.assertIsNone(fills[0]["owner"])
+        self.assertEqual(fills[0]["fir_size"], sum(row["fir_size"] for row in ledgers))
+        self.assertEqual([count["category"] for count in fills[0]["counts"]], ["W"])
+        self.assertGreater(fills[0]["counts"][0]["used"], 0)
+        self.assertIsNone(fills[0]["first_refusal"])
+
+    def test_process_exit_verdicts_stay_identical_in_every_mode(self):
+        self.entry.write_text(self.EXIT_CASES)
+        projections = []
+        for check in (True, False):
+            for flags in ((), ("--release",), ("--no-bounds-check",),
+                          ("--release", "--no-bounds-check")):
+                with self.subTest(check=check, flags=flags):
+                    result = self.invoke(*flags, check=check, standard=Path(OPTIONS.std_dir))
+                    self.assertEqual(result.returncode, 1)
+                    document = self.evidence()
+                    projections.append(([row["analyses"][6] for row in document["bodies"]],
+                                        document["boundary"], self.result.stderr))
+        self.assertTrue(all(value == projections[0] for value in projections))
+
+    def test_library_boundary_finds_the_runtime_cleanup(self):
+        self.entry.write_text("fn helper() u64 { return 1; }\n")
+        self.assertEqual(self.invoke(standard=Path(OPTIONS.std_dir)).returncode, 1)
+        document = self.evidence()
+        self.assertEqual(document["boundary"]["kind"], "library")
+        self.assertEqual(document["boundary"]["proof"], "complete")
+        self.assertNotIn("is empty", self.result.stderr.decode())
+
+    def test_process_exit_diagnostics_keep_json_version_one(self):
+        self.entry.write_text(self.EXIT_CASES)
+        self.assertEqual(self.invoke("--json", standard=Path(OPTIONS.std_dir)).returncode, 1)
+        self.evidence()
+        diagnostic = json.loads(self.result.stdout)
+        self.assertEqual(diagnostic["version"], 1)
+        messages = [(row["line"], row["message"]) for row in diagnostic["diagnostics"]]
+        self.assertIn((6, "lost ownership of 'p'"), messages)
+        self.assertIn((6, "cannot prove that 'args_store' is empty"), messages)
 
     def test_raw_ledgers_pair_with_service_ledgers(self):
         self.entry.write_text(self.RAW_CASES)
