@@ -9,13 +9,19 @@
 //| unnamed ok
 //| budget error ok
 //| raw reason ok
+//| mixed records ok
+//| record ties ok
+//| reason order ok
+//| checked addition ok
 /// Checks how the report carries the raw analysis: its diagnostics in toolchain 4.2 order, its
-/// row and ledger in version 4, and the analysis order of reasons.
+/// row and ledger in report version 5, and the analysis order of reasons.
 import diag;
 import ownership_api;
+import ownership_keys;
 import ownership_report;
 import ownership_source;
 import ownership_source_env;
+import ownership_source_local;
 import std.str;
 import std.strbuf;
 
@@ -277,6 +283,172 @@ fn raw_reason() void {
     println("raw reason ok");
 }
 
+// One body has a local, a stored and a raw record, in that source order. The report renders
+// each once and in that order. The stored run also reaches the use of 'a' and drops it,
+// because the local run validated it (toolchain 1.1). The raw record has no witness, so the
+// raw row is incomplete and gives the body reason after two violated rows.
+fn mixed_records() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    string[16] lines = {
+        "struct box {",
+        "    i32 mut* own ptr;",
+        "}",
+        "fn mixed(bool c) u64 {",
+        "    i32 mut* own a = new(i32);",
+        "    del(a);",
+        "    i32 k = *a;",
+        "    box mut value = {new(i32)};",
+        "    value = box{new(i32)};",
+        "    del(value.ptr);",
+        "    u8 tag = 1;",
+        "    u8* mut r = null;",
+        "    if (c) { r = &tag; }",
+        "    u64* s = cast(r, u64*);",
+        "    return *s +% cast(k, u64);",
+        "}",
+    };
+    open_program(&e, lines[..]);
+    defer ownership_source_env.close(&e);
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.diagnose(&e.source, &found, "main.ft");
+    assert(diag.count(&found) == 4 && diag.record_count(&found) == 7);
+    assert(diag.record_at(&found, 0).msg == "invalid use of 'a'");
+    assert(diag.record_at(&found, 0).loc.line == 7);
+    assert(diag.record_at(&found, 2).msg == "lost ownership of 'value.ptr'");
+    assert(diag.record_at(&found, 2).loc.line == 9);
+    assert(diag.record_at(&found, 4).msg ==
+        "cannot prove that 's' designates the accessed storage");
+    assert(diag.record_at(&found, 4).loc.line == 15);
+    assert(diag.record_at(&found, 5).msg == WINDOW_MAYBE);
+    assert(str.find(diag.record_at(&found, 6).msg, "ownership proof is incomplete") == 0);
+    ownership_source.body mut* row = ownership_source_env.find(&e, "main", "mixed");
+    assert(ownership_report.analysis_violations(row, ownership_report.LOCAL) == 1);
+    assert(ownership_report.analysis_violations(row, ownership_report.STORED_BORROWS) == 1);
+    assert(ownership_report.analysis_status(row, ownership_report.RAW, 2) == "incomplete");
+    assert(ownership_report.body_violations(row) == 2);
+    row->first_incomplete = ownership_api.proof_status{};
+    ownership_report.reason why = ownership_report.body_reason(row);
+    assert(why.present && why.stage == "raw" && why.code == "unknown_effect");
+    assert(why.source.line == 15);
+    println("mixed records ok");
+}
+
+fn tied(string name) ownership_source_local.violation mut@ own {
+    ownership_source_local.violation mut@ own items = new(ownership_source_local.violation, 1);
+    items[0] = ownership_source_local.violation{.source = ownership_api.source_position{0, 0, 3,
+        5, 3, 9, true}, .kind = ownership_api.event_kind.invalid_use, .text = "same key",
+        .name = name, .quoted = true, .leaf = ownership_source_local.WHOLE};
+    return items;
+}
+
+// Four records with one key, one in each list, merge in list order: local, stored borrows,
+// raw violations, raw failures without a witness (toolchain 4.2 gives no further key).
+fn record_ties() void {
+    ownership_source.body mut row = ownership_source.body{};
+    row.local.solved = true;
+    row.local.violations = tied("local");
+    row.local.violations_len = 1;
+    row.stored.solved = true;
+    row.stored.violations = tied("stored");
+    row.stored.violations_len = 1;
+    row.raw.solved = true;
+    row.raw.violations = tied("raw");
+    row.raw.violations_len = 1;
+    row.raw.unproved = tied("unproved");
+    row.raw.unproved_len = 1;
+    defer del(row.local.violations);
+    defer del(row.stored.violations);
+    defer del(row.raw.violations);
+    defer del(row.raw.unproved);
+    string[4] names = {"local", "stored", "raw", "unproved"};
+    u64[4] mut cursor = {0, 0, 0, 0};
+    u64 mut list = 0;
+    while (list < 4) {
+        u64 mut from = 9;
+        ownership_source_local.violation* v = ownership_report.next_record(&row, cursor[..],
+            &from);
+        assert(v != null && from == list && v->name == names[list]);
+        cursor[from] += 1;
+        list += 1;
+    }
+    u64 mut from = 9;
+    assert(ownership_report.next_record(&row, cursor[..], &from) == null && from == 9);
+    println("record ties ok");
+}
+
+// The body reason follows analysis order, not source order: with the stored and the raw rows
+// incomplete, the stored reason comes first though the raw reason stands earlier.
+fn reason_order() void {
+    ownership_source.body mut row = ownership_source.body{};
+    row.verification = ownership_source.status.complete;
+    row.local.solved = true;
+    row.local.proof = ownership_api.proof_status{.kind = ownership_api.proof_kind.complete};
+    row.stored.solved = true;
+    row.stored.proof = ownership_api.incomplete(ownership_api.incomplete_reason.missing_path,
+        ownership_api.operation_position{}, ownership_api.source_position{0, 0, 4, 5, 4, 9,
+        true});
+    row.raw.solved = true;
+    row.raw.proof = ownership_api.incomplete(ownership_api.incomplete_reason.unknown_effect,
+        ownership_api.operation_position{}, ownership_api.source_position{0, 0, 2, 5, 2, 9,
+        true});
+    assert(ownership_report.analysis_status(&row, ownership_report.LOCAL, 2) == "complete");
+    assert(ownership_report.analysis_status(&row, ownership_report.STORED_BORROWS, 2) ==
+        "incomplete");
+    assert(ownership_report.analysis_status(&row, ownership_report.RAW, 2) == "incomplete");
+    ownership_report.reason why = ownership_report.body_reason(&row);
+    assert(why.present && why.stage == "stored_borrows" && why.code == "missing_path");
+    assert(why.source.line == 4);
+    row.stored.proof = ownership_api.proof_status{.kind = ownership_api.proof_kind.complete};
+    ownership_report.reason next = ownership_report.body_reason(&row);
+    assert(next.present && next.stage == "raw" && next.code == "unknown_effect");
+    println("reason order ok");
+}
+
+// A checked addition reads `*q` twice: in `add_overflows` and, after its overflow check, in
+// `add`. These are two FIR operations with one source range. A witness reaches the first. The
+// walk cannot decide the overflow check, so the second has no witness and is unproved.
+// Toolchain 4.2 suppresses a dependent cascade only for the same operation, so both records
+// render, in operation-key order.
+fn checked_addition() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    string[10] lines = {
+        "struct holder {",
+        "    u8* p;",
+        "}",
+        "fn k() u8 {",
+        "    u8 mut* own b = new(u8);",
+        "    holder h = {b};",
+        "    del(b);",
+        "    u8* q = cast(cast(h.p, u64), u8*);",
+        "    return *q + *h.p;",
+        "}",
+    };
+    open_program(&e, lines[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* row = ownership_source_env.find(&e, "main", "k");
+    assert(row->raw.violations_len == 1 && row->raw.unproved_len == 1);
+    ownership_source_local.violation* first = &row->raw.violations[0];
+    ownership_source_local.violation* second = &row->raw.unproved[0];
+    assert(ownership_keys.source(first->source, second->source) == 0);
+    assert(ownership_keys.operation(first->operation, second->operation) < 0);
+    assert(ownership_keys.entity(first->relation, second->relation) == 0);
+    assert(first->text == second->text);
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.diagnose(&e.source, &found, "main.ft");
+    assert(diag.count(&found) == 4 && diag.record_count(&found) == 7);
+    assert(diag.record_at(&found, 0).msg == "invalid use of 'h.p'");
+    assert(diag.record_at(&found, 0).loc.line == 8);
+    assert(diag.record_at(&found, 2).msg == "invalid use of 'q'");
+    assert(diag.record_at(&found, 2).loc.line == 9);
+    assert(diag.record_at(&found, 4).msg ==
+        "cannot prove that 'q' designates the accessed storage");
+    assert(diag.record_at(&found, 4).loc.line == 9);
+    assert(diag.record_at(&found, 4).loc.col == diag.record_at(&found, 2).loc.col);
+    println("checked addition ok");
+}
+
 fn main() i32 {
     rendering();
     interleaving();
@@ -286,5 +458,9 @@ fn main() i32 {
     unnamed();
     budget_error();
     raw_reason();
+    mixed_records();
+    record_ties();
+    reason_order();
+    checked_addition();
     return 0;
 }
