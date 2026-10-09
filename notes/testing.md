@@ -494,7 +494,27 @@ bullet at a time and without a rewrite.
   fills one tcache bin of seven chunks. A round that never uses that chunk size then reads 848
   bytes more in each of the first seven measured rounds, 5936 in all, with no leak. The partition
   counter probe failed CI that way on both Linux jobs. Call the metric in every warm round too.
-  **Neither view sees a leak of a block above 128 KB while the round frees no other block of that
+  **A round that frees a block above 128 KB makes the Linux break a view of the heap shape.**
+  glibc keeps free memory at the top of the heap below its trim threshold. A free of an mmap'd
+  chunk raises the mmap threshold to the chunk size and the trim threshold to twice that
+  (`mallopt(3)`). A probe copy of `ownership_source_live_test.ft` printed the break after each
+  round. It read a distance of 1007616 bytes with no leak after the second or third refused round,
+  where the test itself aborted at its bound of 4096 bytes. That happened in 1 of 30 working
+  directories on main b9d3b591, and in 2 of 30 after a change to `ownership_source_local.ft` (VM,
+  release preset). Only the length of the directory name changed between the runs.
+  `malloc_trim(0)` gave 974848 of those bytes back. The glibc count of live bytes is no cure: it
+  rose by 0 to 2720 bytes between the samples in the same 60 runs. With
+  `GLIBC_TUNABLES=glibc.malloc.tcache_count=0` it read 82624 bytes after rounds 7 and 23 in 7 of
+  7 directories, so that rise is tcache content.
+  **Count the blocks of a window instead.** `test/fort/support/window_alloc.c` interposes
+  `calloc` and `free`. Its end call returns the requested bytes of the blocks that `calloc` gave
+  out after the begin call and that `free` did not take back. The heap shape does not move that
+  count, so it sees a leaked block of any size: a mutant that keeps the refused body's storage
+  left 65964528 bytes. `ownership_source_live_test.ft` opens its window after round 7 and reads 0
+  on both targets. The count misses three things: a block from `malloc` or `realloc`, which the
+  fort runtime does not call (`std/rt.ft`); an allocation inside libc that does not call this
+  `calloc`; and a leak in a round before the window opens, rounds 0 to 7 in that test.
+  **No heap view sees a leak of a block above 128 KB while the round frees no other block of that
   size.** glibc serves an allocation above `M_MMAP_THRESHOLD`, 131072 by default, by mmap, so the
   program break does not move; and a round large enough to ask for one is a round whose block view
   is already off. The condition is the whole rule: glibc raises that threshold to the size of any

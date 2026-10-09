@@ -1,0 +1,91 @@
+//! run
+//! link: support/window_alloc.c
+//! stdout:
+//| edges ok
+//| blocks ok
+/// Checks the window count of support/window_alloc.c, which leak probes link.
+
+extern fn fort_window_alloc_begin() void;
+extern fn fort_window_alloc_end() u64;
+
+// The first table has 65536 slots and grows at half load, so this many blocks grow it twice.
+u64 BLOCKS = 100000;
+// Each block of this period stays live to the end of its window.
+u64 KEPT_PERIOD = 1000;
+
+fn empty_window_counts_nothing() void {
+    fort_window_alloc_begin();
+    assert(fort_window_alloc_end() == 0);
+}
+
+// A block from before the window passes through free, so the count does not go below zero.
+fn release_of_an_earlier_block_counts_nothing() void {
+    u8 mut@ own early = new(u8, 64);
+    fort_window_alloc_begin();
+    del(early);
+    assert(fort_window_alloc_end() == 0);
+}
+
+// The count holds the requested bytes. The runtime asks for one byte for an empty span.
+fn kept_blocks_count_their_requested_bytes() void {
+    fort_window_alloc_begin();
+    u8 mut@ own bytes = new(u8, 40);
+    u64 mut@ own words = new(u64, 5);
+    u8 mut@ own empty = new(u8, 0);
+    u8 mut@ own released = new(u8, 1000);
+    del(released);
+    assert(fort_window_alloc_end() == 81);
+    // The window forgot its blocks, so these releases pass through the next window.
+    fort_window_alloc_begin();
+    del(bytes);
+    del(words);
+    del(empty);
+    assert(fort_window_alloc_end() == 0);
+}
+
+// Releases the odd blocks in order and then the even ones from the end, so each deletion meets
+// another run of slots. A block that a broken run hides from free stays in the count.
+fn many_blocks_release_in_any_order() void {
+    u64 mut* own mut@ own blocks = new(u64 mut* own, BLOCKS);
+    defer del(blocks);
+    fort_window_alloc_begin();
+    u64 mut i = 0;
+    while (i < BLOCKS) {
+        blocks[i] = new(u64);
+        *blocks[i] = i;
+        i += 1;
+    }
+    i = 1;
+    while (i < BLOCKS) {
+        u64 mut* own block = move(blocks[i]);
+        assert(*block == i);
+        del(block);
+        i += 2;
+    }
+    i = BLOCKS;
+    while (i > 0) {
+        i -= 2;
+        if (i % KEPT_PERIOD != 0) {
+            u64 mut* own block = move(blocks[i]);
+            del(block);
+        }
+    }
+    assert(fort_window_alloc_end() == BLOCKS / KEPT_PERIOD * 8);
+    i = 0;
+    while (i < BLOCKS) {
+        u64 mut* own block = move(blocks[i]);
+        assert(*block == i);
+        del(block);
+        i += KEPT_PERIOD;
+    }
+}
+
+fn main() i32 {
+    empty_window_counts_nothing();
+    release_of_an_earlier_block_counts_nothing();
+    kept_blocks_count_their_requested_bytes();
+    println("edges ok");
+    many_blocks_release_in_any_order();
+    println("blocks ok");
+    return 0;
+}

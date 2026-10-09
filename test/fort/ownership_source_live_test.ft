@@ -1,5 +1,6 @@
 //! run
 //! flags: -I ../../src/fort -I support
+//! link: support/window_alloc.c
 //! stdout:
 //| direct ok
 //| indirect ok
@@ -8,7 +9,6 @@
 //| cleanup ok
 /// Checks source-derived liveness inputs with production services.
 import fir;
-import heap;
 import ownership_api;
 import ownership_graph;
 import ownership_keys;
@@ -22,6 +22,11 @@ import std.strbuf;
 // A body of this many scalar declarations exhausts its liveness W bound (`spec/fir.md` 14.1).
 // Its liveness work grows with the square of the declarations, and its bound with their count.
 u64 REFUSED_LOCALS = 4000;
+
+// support/window_alloc.c: the bytes of the blocks that calloc gives out after the begin call
+// and that free does not take back before the end call.
+extern fn fort_window_alloc_begin() void;
+extern fn fort_window_alloc_end() u64;
 
 fn direct_reads_writes_moves_branches_and_loops() void {
     ownership_source_env.env mut e = ownership_source_env.env{};
@@ -479,7 +484,6 @@ fn teardown_releases_success_failure_and_refusal_storage() void {
     }
     strbuf.append(&refused_source, "}\n");
     u64 mut round = 0;
-    u64 mut early = 0;
     while (round < 24) {
         {
             ownership_source_env.env mut e = ownership_source_env.env{};
@@ -506,7 +510,6 @@ fn teardown_releases_success_failure_and_refusal_storage() void {
             ownership_source_env.close(&e);
         }
         // The refused body costs about 0.5 s, so it runs in rounds 7, 15 and 23 only.
-        // Each sample follows a refused round, so the work before both samples is the same.
         if (round % 8 == 7) {
             ownership_source_env.env mut e = ownership_source_env.env{};
             ownership_source_env.open(&e);
@@ -515,10 +518,13 @@ fn teardown_releases_success_failure_and_refusal_storage() void {
             assert(e.source.bodies[0].live.first_refusal.terminal.present);
             ownership_source_env.close(&e);
         }
-        if (round == 7) { early = heap.system_view(); }
+        // The window holds the rounds 8 to 23, two refused rounds among them. It counts blocks
+        // and not the heap, because free memory at the top of the Linux heap and the glibc
+        // tcache move each heap view when nothing leaks.
+        if (round == 7) { fort_window_alloc_begin(); }
         round += 1;
     }
-    assert(heap.distance(early, heap.system_view()) < 4096);
+    assert(fort_window_alloc_end() == 0);
 }
 
 fn main() i32 {
