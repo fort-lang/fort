@@ -10,6 +10,7 @@
 //| parameters ok
 //| picks ok
 //| refused walk ok
+//| lengths ok
 /// Checks the walk that searches a witness path (toolchain 4.2): the values it knows after
 /// each kind of statement, the blocks it searches, and the conditions it can decide.
 import consts;
@@ -21,7 +22,7 @@ import ownership_source_env;
 import ownership_source_local;
 import std.strbuf;
 
-string[93] WALK = {
+string[102] WALK = {
     "extern fn strlen(char* s) u64;",
     "bool mut ready = true;",
     "fn helper() void {}",
@@ -114,6 +115,15 @@ string[93] WALK = {
     "fn asserted(u64 n) void {",
     "    assert(n > 3);",
     "    u64 t = n;",
+    "}",
+    "fn lengths(u64 n) void {",
+    "    u8 mut@ own s = new(u8, n);",
+    "    u8 small = cast(n, u8);",
+    "    u8@ v = cast(s, u8@);",
+    "    u64 k = v.len;",
+    "    u8 x = s[1];",
+    "    u64 after = k;",
+    "    del(s);",
     "}",
 };
 
@@ -498,6 +508,29 @@ fn refused_walk(ownership_source_env.env mut* e) void {
     println("refused walk ok");
 }
 
+// The length of an allocation of n elements is the entry value of n: the casts of the count
+// to i64 and back keep each value that fits i64. A cast of the span to a view keeps its
+// length (D3.14). The bounds check of s[1] then chooses n = 2, which decides each of them.
+fn lengths(ownership_source_env.env mut* e) void {
+    trial mut t = walk(e, "lengths", 100, 0, ownership_source_local.trap.no_trap);
+    defer finish(&t);
+    assert(t.reached);
+    assert(consts.cv_eq(chosen(&t, "n"), consts.cv_from_u64(2)));
+    ownership_source_local.witness_value s = t.w.values[local_named(t.row, "s")];
+    assert(s.kind == ownership_source_local.witness_kind.header);
+    assert(s.param_length && !s.has_length && !s.live);
+    assert(s.param == cast(local_named(t.row, "n"), u32));
+    ownership_source_local.witness_value v = t.w.values[local_named(t.row, "v")];
+    assert(v.kind == ownership_source_local.witness_kind.header && v.param_length);
+    assert(is_number(&t, "k", 2));
+    // The cast to u8 keeps n = 2, which fits u8.
+    assert(t.w.values[local_named(t.row, "small")].fits != 0);
+    assert(is_number(&t, "small", 2));
+    // An element read gives no value.
+    assert(kind_of(&t, "x") == ownership_source_local.witness_kind.unknown);
+    println("lengths ok");
+}
+
 fn main() i32 {
     ownership_source_env.env mut environment = ownership_source_env.env{};
     strbuf.str_buf mut text = strbuf.create();
@@ -513,5 +546,6 @@ fn main() i32 {
     parameters(&environment);
     picks(&environment);
     refused_walk(&environment);
+    lengths(&environment);
     return 0;
 }

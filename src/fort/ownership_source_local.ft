@@ -139,7 +139,8 @@ struct context {
     bool mut@ own offset;
     ownership_flow.step mut@ own steps;
     u64 steps_len;
-    // The step of each unknown fort call. A violation after one has no validated path.
+    // The step of each unknown fort call. The witness walk does not cross one, so a violation
+    // after one on that walk has no validated path.
     bool mut@ own barrier;
     u32 mut@ own step_slot;
     ownership_transfer.event_binding mut@ own step_events;
@@ -2698,75 +2699,6 @@ fn prepare(context mut* c, fir.func* function, ownership_api.function_id identit
     c->correspondence = c->gap == missing.none ? status.complete : status.incomplete;
 }
 
-// ---- stops -------------------------------------------------------------------------------------
-
-// Whether block `to` follows block `from` on a path of at least one edge.
-fn reaches(fir.func* f, u32 from, u32 to) bool {
-    fir_flow.bits mut seen = fir_flow.bits_new(fir.block_count(f));
-    defer fir_flow.bits_free(&seen);
-    u32 mut@ own work = new(u32, cast(fir.block_count(f), u64));
-    defer del(work);
-    u64 mut len = 0;
-    u32 mut index = 0;
-    u32 mut target = 0;
-    fir.block* start = fir.block_at(f, from);
-    while (start->terminated && fir_flow.next_reachable_target(f, &start->term, &index,
-        &target)) {
-        if (!fir_flow.bits_get(&seen, target)) {
-            fir_flow.bits_set(&seen, target);
-            work[len] = target;
-            len += 1;
-        }
-        index += 1;
-    }
-    while (len > 0) {
-        len -= 1;
-        u32 b = work[len];
-        if (b == to) { return true; }
-        fir.block* at = fir.block_at(f, b);
-        index = 0;
-        while (at->terminated && fir_flow.next_reachable_target(f, &at->term, &index,
-            &target)) {
-            if (!fir_flow.bits_get(&seen, target)) {
-                fir_flow.bits_set(&seen, target);
-                work[len] = target;
-                len += 1;
-            }
-            index += 1;
-        }
-    }
-    return false;
-}
-
-// Whether a path from position (from_block, from_gap, from_rank) can reach position
-// (block, gap, rank) after it. A loop can bring a later position of one block back.
-fn follows(context* c, u32 from_block, u32 from_gap, u64 from_rank, u32 block, u32 gap,
-    u64 rank) bool {
-    if (from_block == block && from_gap == gap && from_rank == rank) { return false; }
-    bool earlier = from_block == block &&
-        (from_gap < gap || (from_gap == gap && from_rank < rank));
-    return earlier || reaches(c->function, from_block, block);
-}
-
-// Whether a path stopped, or passed an unknown fort call, before (block, gap, rank).
-fn stopped_before(context* c, u32 block, u32 gap, u64 rank) bool {
-    if (c->result.stops_lost) { return true; }
-    u64 mut i = 0;
-    while (i < c->result.stops_len) {
-        ownership_flow.stop at = c->result.stops[i];
-        if (follows(c, at.block, at.gap, at.rank, block, gap, rank)) { return true; }
-        i += 1;
-    }
-    i = 0;
-    while (i < c->steps_len) {
-        ownership_flow.step* b = &c->steps[i];
-        if (c->barrier[i] && follows(c, b->block, b->gap, cast(b->order, u64) + 1, block, gap,
-            rank)) { return true; }
-        i += 1;
-    }
-    return false;
-}
-
 // ---- classification ---------------------------------------------------------------------------
 
 // A second run classifies the failures of a body. It drops the outside steps, so calls and
@@ -2870,7 +2802,8 @@ enum witness_kind {
     relation,
     // A pointer to an allocation of at least one element.
     allocated,
-    // A span or a string. `value` is its length when `has_length` is set. `live` says that its
+    // A span or a string. `value` is its length when `has_length` is set. When `param_length`
+    // is set, the length is the entry value of `param` under `fits`. `live` says that its
     // pointer designates an allocation of at least one element.
     header,
 }
@@ -2882,6 +2815,11 @@ struct witness_value {
     consts.cv_rel rel;
     bool has_length;
     bool live;
+    // The integer types that casts took the entry value of `param` through: bit k for the
+    // prim kind of ordinal k. A cast keeps a value that fits its type, so the value is the
+    // entry value only when that value fits each of these types (D3.14).
+    u32 fits;
+    bool param_length;
 }
 
 // One concrete path from the entry toward one block. `toward` holds the blocks that can reach
@@ -2889,6 +2827,8 @@ struct witness_value {
 // condition fixed the entry value of parameter `p` to `choice[p]`.
 struct walk {
     context mut* owner;
+    // The blocks that the walk entered.
+    fir_flow.bits passed;
     witness_value mut@ own values;
     // The value of each TA leaf in the stored run.
     witness_value mut@ own leaf_values;
@@ -2992,15 +2932,37 @@ fn walk_free(walk mut* w) void {
     del(w->choice);
     del(w->distance);
     fir_flow.bits_free(&w->toward);
+    fir_flow.bits_free(&w->passed);
 }
 
-// The value of `v` after the conditions that chose its parameter.
+// Whether the integer `x` fits each integer type of the set `fits` (witness_value.fits).
+fn fits_all(consts.cval x, u32 fits) bool {
+    u32 mut k = 0;
+    while (k <= cast(prim.prim_ord(prim.prim_kind.prim_u64), u32)) {
+        if ((fits & (cast(1, u32) << k)) != 0 &&
+            (x.kind != consts.cval_kind.cv_int || !consts.int_fits(x, cast(k, prim.prim_kind)))) {
+            return false;
+        }
+        k += 1;
+    }
+    return true;
+}
+
+// The value of `v` after the conditions that chose its parameter. A choice that does not fit
+// a cast of `v` leaves the cast result unknown.
 fn resolve(walk* w, witness_value v) witness_value {
     if (v.kind != witness_kind.entry_value && v.kind != witness_kind.relation) { return v; }
     u64 p = cast(v.param, u64);
     if (!w->chosen[p]) { return v; }
+    if (!fits_all(w->choice[p], v.fits)) { return witness_value{}; }
     if (v.kind == witness_kind.entry_value) { return constant_value(w->choice[p]); }
     return constant_value(consts.cv_compare(v.rel, w->choice[p], v.value));
+}
+
+// The length of a header whose length is the entry value of a parameter.
+fn header_length(walk* w, witness_value v) witness_value {
+    return resolve(w, witness_value{.kind = witness_kind.entry_value, .param = v.param,
+        .fits = v.fits});
 }
 
 fn constant_of(fir.constant k) witness_value {
@@ -3031,6 +2993,7 @@ fn place_value(walk* w, fir.place p) witness_value {
             return constant_value(consts.cv_from_u64(0));
         }
         if (v.kind == witness_kind.header && v.has_length) { return constant_value(v.value); }
+        if (v.kind == witness_kind.header && v.param_length) { return header_length(w, v); }
         return witness_value{};
     }
     if (l.kind != ownership_source_leaves.access_kind.none) { return witness_value{}; }
@@ -3043,6 +3006,7 @@ fn place_value(walk* w, fir.place p) witness_value {
         return constant_value(consts.cv_from_u64(0));
     }
     if (v.kind == witness_kind.header && v.has_length) { return constant_value(v.value); }
+    if (v.kind == witness_kind.header && v.param_length) { return header_length(w, v); }
     return witness_value{};
 }
 
@@ -3143,7 +3107,7 @@ fn parameter_relation(walk* w, consts.cv_rel rel, witness_value x, witness_value
     bool flag = !integer_type(t) && k.value.kind == consts.cval_kind.cv_bool && !ordering(rel);
     if (!integer && !flag) { return witness_value{}; }
     return witness_value{.kind = witness_kind.relation, .param = x.param, .rel = rel,
-        .value = k.value};
+        .value = k.value, .fits = x.fits};
 }
 
 fn comparison(walk* w, fir.rvalue r) witness_value {
@@ -3230,8 +3194,12 @@ fn rvalue_value(walk* w, fir.statement* s) witness_value {
         witness_value length = operand_value(w, fir.rvalue_operand(f, r, 1));
         bool known = length.kind == witness_kind.constant &&
             length.value.kind == consts.cval_kind.cv_int;
+        // An entry value stays the length; a later choice of its parameter decides it.
+        bool symbolic = length.kind == witness_kind.entry_value &&
+            integer_type(local_type(w->owner, length.param));
         return witness_value{.kind = witness_kind.header, .value = length.value,
-            .has_length = known, .live = pointer.kind == witness_kind.allocated};
+            .has_length = known, .live = pointer.kind == witness_kind.allocated,
+            .param = length.param, .fits = length.fits, .param_length = symbolic};
     }
     if (r.ops_len != 1 && r.ops_len != 2) { return witness_value{}; }
     witness_value a = operand_value(w, fir.rvalue_operand(f, r, 0));
@@ -3240,8 +3208,19 @@ fn rvalue_value(walk* w, fir.statement* s) witness_value {
         if (a.kind == witness_kind.constant && a.value.kind == consts.cval_kind.cv_int &&
             integer_type(t) && consts.int_fits(a.value, t->prim)) { return a; }
         // The entry value of a parameter stays itself in a type that holds each of its values.
-        if (a.kind == witness_kind.entry_value && integer_type(t) &&
-            holds(t, local_type(w->owner, a.param))) { return a; }
+        // In another integer type it stays itself for each entry value that fits that type:
+        // the type joins `fits`, and a choice must fit it (resolve, pick).
+        types.node* from = a.kind == witness_kind.entry_value ?
+            local_type(w->owner, a.param) : t;
+        if (a.kind == witness_kind.entry_value && integer_type(t) && integer_type(from)) {
+            if (holds(t, from)) { return a; }
+            witness_value mut narrowed = a;
+            narrowed.fits = a.fits | (cast(1, u32) << cast(prim.prim_ord(t->prim), u32));
+            return narrowed;
+        }
+        // A cast from a span or a string to a span or a string keeps the length and the
+        // pointer: the element size never changes (D3.14).
+        if (a.kind == witness_kind.header && header_type(t)) { return a; }
         return witness_value{};
     }
     if (r.ops_len != 2) { return witness_value{}; }
@@ -3355,7 +3334,8 @@ fn pick(walk* w, witness_value cond, consts.cval wanted, consts.cval mut* out) b
     types.node* t = local_type(w->owner, cond.param);
     if (cond.kind == witness_kind.entry_value) {
         bool fits = integer_type(t) ? wanted.kind == consts.cval_kind.cv_int &&
-            consts.int_fits(wanted, t->prim) : wanted.kind == consts.cval_kind.cv_bool;
+            consts.int_fits(wanted, t->prim) && fits_all(wanted, cond.fits) :
+            wanted.kind == consts.cval_kind.cv_bool;
         if (fits) { *out = wanted; }
         return fits;
     }
@@ -3376,7 +3356,8 @@ fn pick(walk* w, witness_value cond, consts.cval wanted, consts.cval mut* out) b
     while (i < candidates.len) {
         consts.cval x = candidates[i];
         bool fits = integer_type(t) ? x.kind == consts.cval_kind.cv_int &&
-            consts.int_fits(x, t->prim) : x.kind == consts.cval_kind.cv_bool;
+            consts.int_fits(x, t->prim) && fits_all(x, cond.fits) :
+            x.kind == consts.cval_kind.cv_bool;
         if (fits && consts.cv_eq(consts.cv_compare(cond.rel, x, cond.value), wanted)) {
             *out = x;
             return true;
@@ -3521,12 +3502,11 @@ fn walk_to(context mut* c, fir.pred_table* preds, u32 block, u32 gap, trap kind,
     walk mut* w) bool {
     fir.func* f = c->function;
     if (!walk_start(c, preds, block, w)) { return false; }
-    fir_flow.bits mut visited = fir_flow.bits_new(fir.block_count(f));
-    defer fir_flow.bits_free(&visited);
+    w->passed = fir_flow.bits_new(fir.block_count(f));
     u32 mut at = 0;
     while (true) {
-        if (fir_flow.bits_get(&visited, at)) { return false; }
-        fir_flow.bits_set(&visited, at);
+        if (fir_flow.bits_get(&w->passed, at)) { return false; }
+        fir_flow.bits_set(&w->passed, at);
         u32 last = at == block ? gap : fir.block_statement_count(f, at);
         u32 mut i = 0;
         while (i < last) {
@@ -3560,6 +3540,45 @@ fn walk_to(context mut* c, fir.pred_table* preds, u32 block, u32 gap, trap kind,
         at = next;
     }
     return false;
+}
+
+// Whether position (at_block, at_gap, at_rank) lies on walk `w` before position (block, gap,
+// rank). The walk leaves each block that it entered before `block`, so each position of such
+// a block lies on it. In `block`, only an earlier position does.
+fn on_walk(walk* w, u32 at_block, u32 at_gap, u64 at_rank, u32 block, u32 gap, u64 rank)
+    bool {
+    if (at_block == block) { return at_gap < gap || (at_gap == gap && at_rank < rank); }
+    return fir_flow.bits_get(&w->passed, at_block);
+}
+
+// Whether a path stopped, or a barrier stands, on walk `w` before (block, gap, rank). The flow
+// covers each execution that the walk takes only when no path stopped on it: a stop elsewhere
+// stops paths that the walk does not take.
+fn stopped_on(context* c, walk* w, u32 block, u32 gap, u64 rank) bool {
+    if (c->result.stops_lost) { return true; }
+    u64 mut i = 0;
+    while (i < c->result.stops_len) {
+        ownership_flow.stop at = c->result.stops[i];
+        if (on_walk(w, at.block, at.gap, at.rank, block, gap, rank)) { return true; }
+        i += 1;
+    }
+    i = 0;
+    while (i < c->steps_len) {
+        ownership_flow.step* b = &c->steps[i];
+        if (c->barrier[i] && on_walk(w, b->block, b->gap, cast(b->order, u64) + 1, block, gap,
+            rank)) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+/// Whether a witness path reaches rank `rank` of position `gap` of `block`, and no path
+/// stopped and no barrier stands on it before that rank (toolchain 4.2).
+fn witnessed(context mut* c, fir.pred_table* preds, u32 block, u32 gap, u64 rank, trap kind)
+    bool {
+    walk mut w = walk{};
+    defer walk_free(&w);
+    return walk_to(c, preds, block, gap, kind, &w) && !stopped_on(c, &w, block, gap, rank);
 }
 
 // ---- validation -------------------------------------------------------------------------------
@@ -3616,8 +3635,8 @@ fn sort_violations(context mut* c) void {
     }
 }
 
-// A violation counts when each path state that reached it reported the same event, no stop
-// or unknown call comes before it, and a witness path reaches it (toolchain 4.2).
+// A violation counts when each path state that reached it reported the same event, and a
+// witness path reaches it with no stop and no barrier before it on that path (toolchain 4.2).
 fn validate(context mut* c) void {
     fir.pred_table mut preds = fir.pred_table{};
     bool mut built = false;
@@ -3650,11 +3669,12 @@ fn validate(context mut* c) void {
         u64 mut leaf = WHOLE;
         u32 mut block = 0;
         u32 mut gap = 0;
+        u64 mut rank = 0;
         if (r->key < c->steps_len) {
             ownership_flow.step* s = &c->steps[r->key];
             valid = valid && !c->barrier[r->key] && same == c->step_attempts[r->key] &&
-                c->step_uncertain[r->key] == 0 &&
-                !stopped_before(c, s->block, s->gap, cast(s->order, u64) + 1);
+                c->step_uncertain[r->key] == 0;
+            rank = cast(s->order, u64) + 1;
             u32 mut named = r->relation.kind == ownership_api.entity_kind.slot ?
                 r->relation.ordinal : c->step_slot[r->key];
             // A leaf names the place: the destination of a lost owner, else the source.
@@ -3669,8 +3689,8 @@ fn validate(context mut* c) void {
             block = info.block;
             gap = fir.block_statement_count(c->function, block);
             valid = valid && info.at_return && same == c->return_attempts[cast(block, u64)] &&
-                c->return_uncertain[cast(block, u64)] == 0 &&
-                !stopped_before(c, block, gap, ownership_flow.STOP_AFTER - 1);
+                c->return_uncertain[cast(block, u64)] == 0;
+            rank = ownership_flow.STOP_AFTER - 1;
             name = c->result_slot.kind == ownership_api.entity_kind.slot ? "the result" : "";
         }
         if (valid && !built) {
@@ -3683,7 +3703,7 @@ fn validate(context mut* c) void {
         } else if (r->kind == ownership_api.event_kind.invalid_use && r->text == EMPTY_ELEMENT) {
             kind = trap.element_trap;
         }
-        if (valid && witness(c, &preds, block, gap, kind)) {
+        if (valid && witnessed(c, &preds, block, gap, rank, kind)) {
             add_violation(c, r, name, quoted, leaf);
             j = 0;
             while (j < c->records_len) {

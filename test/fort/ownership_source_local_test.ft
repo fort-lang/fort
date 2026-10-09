@@ -609,7 +609,7 @@ fn path_dependent_failures_stay_unproved() void {
     in_scope(after);
 }
 
-fn stops_before_a_violation_block_its_validation() void {
+fn stops_off_the_walk_leave_validation() void {
     ownership_source_env.env mut e = ownership_source_env.env{};
     strbuf.str_buf mut text = strbuf.create();
     defer strbuf.free(&text);
@@ -630,11 +630,12 @@ fn stops_before_a_violation_block_its_validation() void {
     open(&e, lines(&text, source[..]));
     defer ownership_source_env.close(&e);
     ownership_source.analyze(&e.source);
-    // The load into r stops one path before the read of q. That path never reached the read,
-    // so the read of q fails on every attempt yet stays unvalidated.
+    // The load into r stops one path before the read of q. The walk to the read takes
+    // c = false, which skips that load, so the read of q after del(p) is validated on it.
     ownership_source.body* row = body(&e, "guarded");
-    unproved(row);
-    assert(row->local.unvalidated == 1);
+    violated(row, ownership_api.event_kind.invalid_use, "q", "reference source is no longer live",
+        10);
+    assert(row->local.unvalidated == 0);
     assert(row->local.correspondence == ownership_source_local.status.incomplete);
 }
 
@@ -791,7 +792,7 @@ fn main() i32 {
     validated_violations();
     println("violations ok");
     path_dependent_failures_stay_unproved();
-    stops_before_a_violation_block_its_validation();
+    stops_off_the_walk_leave_validation();
     println("validation ok");
     classification_separates_call_failures();
     transient_borrows_end_after_their_read();

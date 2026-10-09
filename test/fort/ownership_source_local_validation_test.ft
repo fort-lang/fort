@@ -3,6 +3,7 @@
 //! stdout:
 //| records ok
 //| returns ok
+//| stops off the walk ok
 //| effects ok
 //| report bound ok
 //| classification ok
@@ -13,7 +14,8 @@
 //| first refusal ok
 //| two passes ok
 /// Checks how the producer validates violations: each reaching path state must fail with
-/// one event, and no stop, barrier or lost record may come before the operation.
+/// one event, and no stop, barrier or lost record may come before the operation on the walk.
+import fir;
 import ownership_api;
 import ownership_flow;
 import ownership_source;
@@ -234,6 +236,66 @@ fn returns() void {
     c->result.stops_len = 0;
     del(c->result.stops);
     println("returns ok");
+}
+
+string[8] BRANCHY = {
+    "fn branchy(bool c) i32 {",
+    "    i32 mut* own p = new(i32);",
+    "    i32* q = p;",
+    "    i32 mut v = 0;",
+    "    if (c) { v = 1; }",
+    "    del(p);",
+    "    return *q + v;",
+    "}",
+};
+
+// The block that holds the first statement at source line `line`.
+fn block_at_line(ownership_source_local.context* c, u32 line) u32 {
+    u32 mut b = 0;
+    while (b < fir.block_count(c->function)) {
+        u32 mut g = 0;
+        while (g < fir.block_statement_count(c->function, b)) {
+            if (fir.block_statement(c->function, b, g)->loc.line == line) { return b; }
+            g += 1;
+        }
+        b += 1;
+    }
+    panic("ownership_source_local_validation_test: no statement at that line");
+}
+
+// A stop blocks a validation only on the walk to the operation. The walk to the read of q
+// takes c = false, so it skips the block of line 5 and passes the entry block.
+fn stops_off_the_walk() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, BRANCHY[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source.body mut* row = ownership_source_env.find(&e, "main", "branchy");
+    ownership_source_local.context mut* c = &row->local;
+    c->records = new(ownership_source_local.record, 4);
+    u64 read_step = index_of(c, ownership_transfer.action.use);
+    u32 skipped = block_at_line(c, 5);
+    assert(skipped != 0 && skipped != c->steps[read_step].block);
+    c->result.stops = new(ownership_flow.stop, 1);
+    c->result.stops_len = 1;
+    // A stop in the block that c = false skips.
+    c->result.stops[0] = ownership_flow.stop{skipped, 0, 0};
+    c->step_attempts[read_step] = 1;
+    add(c, invalid(c, read_step, "reference source is no longer live"));
+    ownership_source_local.validate(c);
+    assert(c->violations_len == 1 && c->unvalidated == 0);
+    assert(c->violations[0].name == "q");
+    // A stop in the entry block, which the walk leaves.
+    reset(c);
+    c->result.stops[0] = ownership_flow.stop{0, 0, 0};
+    c->step_attempts[read_step] = 1;
+    add(c, invalid(c, read_step, "reference source is no longer live"));
+    ownership_source_local.validate(c);
+    assert(c->violations_len == 0 && c->unvalidated == 1);
+    c->result.stops_len = 0;
+    del(c->result.stops);
+    println("stops off the walk ok");
 }
 
 // A trusted call and a release through a pointer return normally, so they are no barrier.
@@ -626,6 +688,7 @@ fn bounded_pass(u64 bound, bool refused) void {
 fn main() i32 {
     records();
     returns();
+    stops_off_the_walk();
     effects();
     report_bound();
     classification();

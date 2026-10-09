@@ -2681,6 +2681,124 @@ fn loan_result_storage(u32 variant) void {
     ownership_flow.free(&result);
 }
 
+// A call that no step describes forgets the address facts. A loan that begins after it
+// keeps its collection only when no pointer can name the collection: a path without a
+// dereference from a local whose address FIR never exposes. Variant 0 lends `_1`. Variant 1
+// lends `_1` after `_3 = &_1` names it. Variant 2 lends `*_3` after `_3 = &_1`, where no
+// address names `_3`: the forgotten address facts no longer say what `*_3` is. Variants 1
+// and 2 give incomplete proof at the capture.
+fn loan_capture_after_unknown_call(u32 variant) void {
+    fixture mut f = fixture{};
+    init(&f);
+    defer close(&f);
+    types.table mut* tt = fir_env.tt(&f.environment);
+    types.node* span = types.type_span(tt, types.type_prim(tt, prim.prim_kind.prim_i32),
+        false, true);
+    types.node* pointer = types.type_ptr(tt, span, false, true);
+    types.node*[1] params = {span};
+    fir.func mut function = fir.func_new(tt, null,
+        types.type_fn(tt, types.type_void(tt), params[..], false));
+    defer fir.func_free(&function);
+    diag.loc where = diag.loc{};
+    assert(fir.local_add(&function, span, fir.local_kind.lk_temp, null, where) == 2);
+    assert(fir.local_add(&function, pointer, fir.local_kind.lk_temp, null, where) == 3);
+    assert(fir.local_add(&function, types.type_void(tt), fir.local_kind.lk_temp, null, where) == 4);
+    if (variant > 0) {
+        fir.block_append(&function, 0, fir.stmt_assign(fir.place_local(3),
+            fir.rvalue_addr(&function, fir.place_local(1), true), where, 0));
+    }
+    fir.place collection = variant == 2 ? fir.place_deref(&function, fir.place_local(3)) :
+        fir.place_local(1);
+    ast.sym callee = ast.sym{.ty = types.type_fn(tt, types.type_void(tt), params[0..0], false)};
+    fir.block_append(&function, 0, fir.stmt_assign(fir.place_local(4),
+        fir.rvalue_call_extern(&callee, 0, 0), where, 1));
+    fir.block_append(&function, 0, fir.stmt_assign(fir.place_local(2),
+        fir.rvalue_use(&function, fir.operand_copy(collection)), where, 2));
+    fir.block_append(&function, 0, fir.stmt_loan_begin(1, collection, 2, where, 3));
+    fir.block_append(&function, 0, fir.stmt_loan_end(1, where, 4));
+    fir.block_set_terminator(&function, 0, fir.term_return(where, 5));
+    ownership_state.state mut entry = ownership_state.empty();
+    defer ownership_state.free(&entry);
+    ownership_flow.program mut input = input_of(&f, &function, &entry);
+    ownership_api.projection[1] dereference = {
+        ownership_api.projection{.kind = ownership_api.projection_kind.dereference},
+    };
+    ownership_flow.place_binding[1] bindings = {
+        ownership_flow.place_binding{.place = collection, .storage =
+            ownership_api.place_path{slot(3).root, dereference[..], false}, .complete = true},
+    };
+    if (variant == 2) { input.places = bindings[..]; }
+    ownership_flow.event_binding[16] mut events = {};
+    u32 mut i = 0;
+    while (i < fir.block_statement_count(&function, 0)) {
+        ownership_api.operation_position op = ownership_api.operation_position{.operation = i};
+        events[cast(i * 2, u64)] = flow_event(op, ownership_api.event_kind.invalid_use,
+            ownership_api.entity_id{}, i * 2 + 1);
+        events[cast(i * 2 + 1, u64)] = flow_event(op, ownership_api.event_kind.incomplete_proof,
+            ownership_api.entity_id{}, i * 2 + 2);
+        i += 1;
+    }
+    input.events = events[0..cast(i * 2, u64)];
+    ownership_flow.analysis mut result = ownership_flow.solve(&input);
+    if (variant > 0) {
+        assert(result.failures == 1 && result.normal_returns == 0);
+        assert(result.first_failure.kind == ownership_api.proof_kind.incomplete);
+        assert(result.first_failure.terminal.operation.operation == 3);
+    } else {
+        assert(result.failures == 0 && result.normal_returns == 1);
+    }
+    ownership_flow.free(&result);
+}
+
+// The path of a fixed collection stays in the storage of a local that FIR never exposes. No
+// producer binds a captured index, a residual projection or a residual tail today, so this
+// test builds each path directly. `_2` has no address; `_3 = &_1` exposes `_1`.
+fn fixed_storage_paths() void {
+    fixture mut f = fixture{};
+    init(&f);
+    defer close(&f);
+    types.table mut* tt = fir_env.tt(&f.environment);
+    types.node* span = types.type_span(tt, types.type_prim(tt, prim.prim_kind.prim_i32),
+        false, true);
+    types.node* pointer = types.type_ptr(tt, span, false, true);
+    types.node*[1] params = {span};
+    fir.func mut function = fir.func_new(tt, null,
+        types.type_fn(tt, types.type_void(tt), params[..], false));
+    defer fir.func_free(&function);
+    diag.loc where = diag.loc{};
+    assert(fir.local_add(&function, span, fir.local_kind.lk_temp, null, where) == 2);
+    assert(fir.local_add(&function, pointer, fir.local_kind.lk_temp, null, where) == 3);
+    fir.block_append(&function, 0, fir.stmt_assign(fir.place_local(3),
+        fir.rvalue_addr(&function, fir.place_local(1), true), where, 0));
+    fir.block_set_terminator(&function, 0, fir.term_return(where, 1));
+    ownership_state.state mut entry = ownership_state.empty();
+    defer ownership_state.free(&entry);
+    ownership_flow.program mut input = input_of(&f, &function, &entry);
+    bool mut@ own exposed = ownership_flow.exposed_locals(&function);
+    defer del(exposed);
+    assert(exposed[1] && !exposed[2] && !exposed[3]);
+    // Without the table no local counts as private.
+    assert(!ownership_flow.fixed_storage(&input, slot(2)));
+    input.exposed = exposed[..];
+    assert(ownership_flow.fixed_storage(&input, slot(2)));
+    assert(!ownership_flow.fixed_storage(&input, slot(1)));
+    ownership_api.projection_kind[5] kinds = {ownership_api.projection_kind.field,
+        ownership_api.projection_kind.fixed_index, ownership_api.projection_kind.captured_index,
+        ownership_api.projection_kind.dereference, ownership_api.projection_kind.residual};
+    bool[5] fixed = {true, true, false, false, false};
+    u64 mut k = 0;
+    while (k < kinds.len) {
+        ownership_api.projection[1] one = {ownership_api.projection{.kind = kinds[k]}};
+        ownership_api.place_path path = ownership_api.place_path{slot(2).root, one[..], false};
+        assert(ownership_flow.fixed_storage(&input, path) == fixed[k]);
+        k += 1;
+    }
+    // A residual tail covers any projection.
+    ownership_api.place_path mut tail = slot(2);
+    tail.residual = true;
+    assert(!ownership_flow.fixed_storage(&input, tail));
+}
+
 fn loan_direct_work_requires_permission() void {
     fixture mut f = fixture{};
     init(&f);
@@ -2816,6 +2934,10 @@ fn main() i32 {
     loan_alias_retargeting(4);
     loan_alias_retargeting(5);
     loan_alias_retargeting(6);
+    loan_capture_after_unknown_call(0);
+    loan_capture_after_unknown_call(1);
+    loan_capture_after_unknown_call(2);
+    fixed_storage_paths();
     loan_direct_work_requires_permission();
     loan_accepts_a_proved_call();
     loan_refuses_a_call_that_releases_the_collection();

@@ -1,12 +1,14 @@
 //! run
 //! flags: -I ../../src/fort -I support
 //! stdout:
-//| loan limits ok
+//| fixed loans ok
 //| event limits ok
 /// Holds the known limits of the stored run on programs of test/lang/run: each body has
 /// complete stored correspondence, incomplete stored proof and no violation in any row. A
 /// change in the flow that proves one of them changes this test. Each program keeps its file
-/// lines, so a line here is the line of that file; a directive line is empty.
+/// lines, so a line here is the line of that file; a directive line is empty. Four former
+/// limits prove now: a print call before the loop cannot move a collection that no address
+/// names, so the loan begins (D17.10).
 import ownership_api;
 import ownership_source;
 import ownership_source_env;
@@ -37,20 +39,15 @@ fn limited(ownership_source_env.env mut* e) ownership_source_local.context* {
     return c;
 }
 
-// The flow refuses the loan that begins at `line`: the effect before it may keep an alias of
-// the collection that the flow cannot follow. The refusal is incomplete proof, not an event.
-fn loan_refused(ownership_source_env.env mut* e, u32 line) void {
-    ownership_source_local.context* c = limited(e);
-    ownership_api.terminal_failure t = c->proof.terminal;
-    if (t.reason != ownership_api.incomplete_reason.missing_correspondence ||
-        t.source.line != line || c->unvalidated != 0 || t.limit.present) {
-        eprintln("loan at ", line, ": reason ", cast(t.reason, u64), " at ", t.source.line);
-        assert(false);
-    }
-    // The local row has no loan proof: the gap range_loan at the same loop.
+// The stored row of main proves the loans that begin after print calls. The local row
+// still leaves each loan to the stored run.
+fn loan_proved(ownership_source_env.env mut* e) void {
     ownership_source.body* row = ownership_source_env.find(e, "main", "main");
+    ownership_source_local.context* c = &row->stored;
+    assert(c->solved && c->correspondence == ownership_source_local.status.complete);
+    assert(ownership_api.successful(c->proof) && c->violations_len == 0);
+    assert(row->local.violations_len == 0);
     assert(row->local.gap == ownership_source_local.missing.range_loan);
-    assert(row->local.gap_source.line == line);
 }
 
 // The flow meets one event at `line` and validates none.
@@ -59,8 +56,8 @@ fn event_unwitnessed(ownership_source_env.env mut* e, u32 line) void {
     assert(c->unvalidated == 1 && c->proof.terminal.source.line == line);
 }
 
-// A range loop over a string constant after print calls. A print call writes storage that
-// the flow cannot name, so it cannot prove that a later loan keeps its collection.
+// A range loop over a fixed array and a string constant after print calls. A print call
+// writes storage that the flow cannot name, but no pointer names these collections.
 fn range_for() void {
     string[31] lines = {
         "",
@@ -100,10 +97,12 @@ fn range_for() void {
     defer strbuf.free(&text);
     analyze(&e, &text, lines[..]);
     defer ownership_source_env.close(&e);
-    loan_refused(&e, 16);
+    loan_proved(&e);
 }
 
-// The same limit at a loop over an empty string constant.
+// The loop over an empty string constant after a print call. The loan begins, but the flow
+// does not know that the loop never runs: the element read of the empty string fails. The
+// walk knows no length of a string constant, so that event stays unvalidated.
 fn range_for_copies() void {
     string[27] lines = {
         "",
@@ -139,7 +138,7 @@ fn range_for_copies() void {
     defer strbuf.free(&text);
     analyze(&e, &text, lines[..]);
     defer ownership_source_env.close(&e);
-    loan_refused(&e, 22);
+    event_unwitnessed(&e, 22);
 }
 
 // A loop over a string view of a span owner, after extern reads and a print call.
@@ -183,7 +182,7 @@ fn read_stdin() void {
     defer strbuf.free(&text);
     analyze(&e, &text, lines[..]);
     defer ownership_source_env.close(&e);
-    loan_refused(&e, 25);
+    loan_proved(&e);
 }
 
 // A loop over a span owner of arrays, after print calls.
@@ -218,7 +217,7 @@ fn multidim_new() void {
     defer strbuf.free(&text);
     analyze(&e, &text, lines[..]);
     defer ownership_source_env.close(&e);
-    loan_refused(&e, 14);
+    loan_proved(&e);
 }
 
 // A loop over a span owner of floats, after print calls.
@@ -255,7 +254,7 @@ fn float_span_writes() void {
     defer strbuf.free(&text);
     analyze(&e, &text, lines[..]);
     defer ownership_source_env.close(&e);
-    loan_refused(&e, 19);
+    loan_proved(&e);
 }
 
 // The program overwrites a live owner and traps at run time. The flow meets the event, but
@@ -291,11 +290,11 @@ fn overwrite_own_element() void {
 
 fn main() i32 {
     range_for();
-    range_for_copies();
     read_stdin();
     multidim_new();
     float_span_writes();
-    println("loan limits ok");
+    println("fixed loans ok");
+    range_for_copies();
     overwrite_own_element();
     println("event limits ok");
     return 0;
