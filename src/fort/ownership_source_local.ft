@@ -137,6 +137,19 @@ struct context {
     // copies and moves. Its empty contents prove no null pointer: `&r->f` of a null `r` is not
     // null. So a null test of it decides only "not null".
     bool mut@ own offset;
+    // A borrowed pointer parameter TL that no statement writes, moves, releases or marks: it
+    // holds its entry value at each position (loaded parameter sources).
+    bool mut@ own stable;
+    // dirty[b]: a write of storage outside this frame can reach the entry of block b.
+    // first_write[b]: the position of the first such write in block b, or U32_MAX.
+    bool mut@ own dirty;
+    u32 mut@ own first_write;
+    // The references in parameter referents that clean loads name, each with its symbolic
+    // caller source: a place of a stable parameter, a `deref` and then fields.
+    fir.place mut@ own loaded;
+    u64 loaded_len;
+    // The switch of loaded sources (loaded_bound). The caller sets it before prepare.
+    bool callers_bind_loaded;
     ownership_flow.step mut@ own steps;
     u64 steps_len;
     // The step of each fort call that the witness walk cannot cross (returns). A violation
@@ -1308,10 +1321,19 @@ fn write_tracked_at(context mut* c, u32 block, u32 gap, spot to, fir.rvalue r) c
         access a = place_access(c, r.place);
         if (a.tracked && (a.indirect || (a.whole && r.kind == fir.rvalue_kind.rv_slice))) {
             if (!same_referent(c, r.place, r.kind)) {
-                // The place loads through the TL. Its result has no source that local proof
-                // knows, so a null test of it decides nothing.
+                // The place loads through the TL. A clean load from the referent of a stable
+                // parameter names the caller source of the loaded reference (D17.15, D17.17).
+                // Another result has no source that local proof knows, so a null test of it
+                // decides nothing.
                 dereference(c, block, gap, a.local);
-                opaque_at(c, block, gap, to, missing.unknown_source);
+                u32 depth = loaded_depth(c, block, gap, r.place, r.kind);
+                ownership_api.entity_id key = depth == U32_MAX ? ownership_api.entity_id{} :
+                    loaded_key(c, r.place, depth);
+                if (key.kind == ownership_api.entity_kind.source) {
+                    reference_at(c, block, gap, to, key, unknown_length());
+                } else {
+                    opaque_at(c, block, gap, to, missing.unknown_source);
+                }
                 return consumed{};
             }
             copy_at(c, block, gap, whole(a.local), to);
@@ -2152,6 +2174,17 @@ fn entry_facts(context mut* c) void {
         }
         i += 1;
     }
+    // Each loaded reference of a parameter referent designates caller storage. The body
+    // requires it live at entry, and only a caller can satisfy that (loaded_bound).
+    ownership_api.validity_kind entry = loaded_bound(c) ? ownership_api.validity_kind.live :
+        ownership_api.validity_kind.unknown;
+    i = 0;
+    while (i < c->loaded_len) {
+        ownership_state.append_sources(&c->entry, ownership_api.source_fact{
+            .key = loaded_source(c, i), .kind = ownership_api.source_kind.symbolic_caller,
+            .validity = entry});
+        i += 1;
+    }
     u32 mut n = 1;
     while (n < fir.local_count(c->function)) {
         fir.local* l = fir.local_at(c->function, n);
@@ -2325,6 +2358,233 @@ fn link(context mut* c) void {
     }
 }
 
+// ---- loaded parameter sources -------------------------------------------------------------------
+
+// Whether a write of place `p` can change storage outside this frame: a place through a `deref`
+// or an index of a span or a string, a global, or an aggregate `_0`, which is caller storage
+// (D17.15). The other locals of this frame begin at entry, so no caller storage is among them.
+fn outside_frame(context* c, fir.place p) bool {
+    if (fir.place_indirect(c->function, p) || p.base == fir.base_kind.bk_global) { return true; }
+    types.node* t = local_type(c, p.local);
+    return p.local == 0 &&
+        (t->kind == types.type_kind.k_struct || t->kind == types.type_kind.k_array);
+}
+
+// Whether statement `s` can write storage outside this frame. Each call and each `del` can. So
+// can a store into such storage and a move out of it, because a move empties its place. An
+// extern call counts too, though D17.13 puts hidden foreign writes outside proof.
+fn writes_outside(context* c, fir.statement* s) bool {
+    if (s->kind == fir.stmt_kind.st_del) { return true; }
+    if (s->kind != fir.stmt_kind.st_assign) { return false; }
+    fir.rvalue r = s->value;
+    if (r.kind == fir.rvalue_kind.rv_call || outside_frame(c, s->place)) { return true; }
+    u32 mut k = 0;
+    while (k < r.ops_len) {
+        fir.operand o = fir.rvalue_operand(c->function, r, k);
+        if (o.kind == fir.operand_kind.ok_move && outside_frame(c, o.place)) { return true; }
+        k += 1;
+    }
+    return false;
+}
+
+// Clears the stable mark of the local whose slot place `p` names, with no indirection first.
+fn unstable_place(context mut* c, fir.place p) void {
+    if (p.base == fir.base_kind.bk_local && !fir.place_indirect(c->function, p)) {
+        c->stable[cast(p.local, u64)] = false;
+    }
+}
+
+// Clears the stable mark of each local whose slot statement `s` writes, moves, releases or
+// marks. A write through the local changes its referent, not its slot. A callee value is no
+// pointer parameter, so its move needs no mark.
+fn unstable(context mut* c, fir.statement* s) void {
+    switch (s->kind) {
+    case fir.stmt_kind.st_assign:
+        unstable_place(c, s->place);
+        fir.rvalue r = s->value;
+        u32 mut k = 0;
+        while (k < r.ops_len) {
+            fir.operand o = fir.rvalue_operand(c->function, r, k);
+            if (o.kind == fir.operand_kind.ok_move) { unstable_place(c, o.place); }
+            k += 1;
+        }
+    case fir.stmt_kind.st_del:
+        unstable_place(c, s->place);
+    case fir.stmt_kind.st_live, fir.stmt_kind.st_dead:
+        c->stable[cast(s->local, u64)] = false;
+    case fir.stmt_kind.st_loan_begin, fir.stmt_kind.st_loan_end:
+        return;
+    }
+}
+
+fn mark_dirty(context mut* c, u32 b, u32 mut@ work, u64 mut* len) void {
+    if (c->dirty[cast(b, u64)]) { return; }
+    c->dirty[cast(b, u64)] = true;
+    work[*len] = b;
+    *len += 1;
+}
+
+fn dirty_targets(context mut* c, u32 b, u32 mut@ work, u64 mut* len) void {
+    fir.block* at = fir.block_at(c->function, b);
+    u32 mut index = 0;
+    u32 mut target = 0;
+    while (at->terminated && fir_flow.next_reachable_target(c->function, &at->term, &index,
+        &target)) {
+        mark_dirty(c, target, work, len);
+        index += 1;
+    }
+}
+
+// Marks the stable parameters, the first write outside this frame in each block, and each
+// block whose entry such a write can reach on some path (loaded parameter sources).
+fn parameter_writes(context mut* c) void {
+    fir.func* f = c->function;
+    u64 count = cast(fir.local_count(f), u64);
+    u32 blocks = fir.block_count(f);
+    c->stable = new(bool, count);
+    c->dirty = new(bool, cast(blocks, u64));
+    c->first_write = new(u32, cast(blocks, u64));
+    u64 mut n = 1;
+    u64 mut statements = 0;
+    while (n < count) {
+        fir.local* l = fir.local_at(f, cast(n, u32));
+        c->stable[n] = l->kind == fir.local_kind.lk_param && c->tracked[n] && !c->owning[n] &&
+            l->ty->kind == types.type_kind.k_ptr;
+        n += 1;
+    }
+    u32 mut b = 0;
+    while (b < blocks) {
+        c->first_write[cast(b, u64)] = U32_MAX;
+        u32 mut g = 0;
+        while (g < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, g);
+            if (c->first_write[cast(b, u64)] == U32_MAX && writes_outside(c, s)) {
+                c->first_write[cast(b, u64)] = g;
+            }
+            unstable(c, s);
+            g += 1;
+        }
+        statements += cast(fir.block_statement_count(f, b), u64);
+        b += 1;
+    }
+    // Each statement adds at most one loaded reference.
+    c->loaded = new(fir.place, statements);
+    u32 mut@ own work = new(u32, cast(blocks, u64));
+    defer del(work);
+    u64 mut len = 0;
+    b = 0;
+    while (b < blocks) {
+        if (c->first_write[cast(b, u64)] != U32_MAX) { dirty_targets(c, b, work, &len); }
+        b += 1;
+    }
+    while (len > 0) {
+        len -= 1;
+        dirty_targets(c, work[len], work, &len);
+    }
+}
+
+// The depth of the reference that an address or a slice of `p` loads from the referent of a
+// stable parameter at a clean position, or U32_MAX. The place starts with the `deref` of the
+// parameter and then has only fields. Then either the second indirection follows, with no
+// indirection after it and no span or string header for a slice to cut, or the place is a
+// slice that cuts such a header. A clean position has no write outside this frame before it on
+// any path from entry, so that reference still holds its entry value there.
+fn loaded_depth(context* c, u32 block, u32 gap, fir.place p, fir.rvalue_kind kind) u32 {
+    if (p.base != fir.base_kind.bk_local || !c->stable[cast(p.local, u64)] ||
+        p.proj_len == 0) { return U32_MAX; }
+    u32 first = c->first_write[cast(block, u64)];
+    if (c->dirty[cast(block, u64)] || (first != U32_MAX && gap > first)) { return U32_MAX; }
+    fir.func* f = c->function;
+    fir.projection start = fir.place_projection(f, p, 0);
+    if (start.kind != fir.proj_kind.pj_deref) { return U32_MAX; }
+    types.node* mut t = fir.apply_projection(f, local_type(c, p.local), start);
+    u32 mut i = 1;
+    while (i < p.proj_len) {
+        fir.projection pj = fir.place_projection(f, p, i);
+        if (pj.kind == fir.proj_kind.pj_deref ||
+            (pj.kind == fir.proj_kind.pj_index && header_type(t))) { break; }
+        if (pj.kind != fir.proj_kind.pj_field) { return U32_MAX; }
+        t = fir.apply_projection(f, t, pj);
+        i += 1;
+    }
+    if (i == p.proj_len) {
+        return kind == fir.rvalue_kind.rv_slice && header_type(t) ? p.proj_len : U32_MAX;
+    }
+    u32 depth = i;
+    t = fir.apply_projection(f, t, fir.place_projection(f, p, i));
+    i += 1;
+    while (i < p.proj_len) {
+        fir.projection pj = fir.place_projection(f, p, i);
+        if (pj.kind == fir.proj_kind.pj_deref ||
+            (pj.kind == fir.proj_kind.pj_index && header_type(t))) { return U32_MAX; }
+        t = fir.apply_projection(f, t, pj);
+        i += 1;
+    }
+    if (kind == fir.rvalue_kind.rv_slice && header_type(t)) { return U32_MAX; }
+    return depth;
+}
+
+// Whether statement `s` loads a reference from a parameter referent into a destination that
+// write_tracked_at fills: a whole TL, or a TA leaf in the stored run. The depth of that
+// reference comes in `*depth`.
+fn loaded_statement(context* c, u32 block, u32 gap, fir.statement* s, u32 mut* depth) bool {
+    if (s->kind != fir.stmt_kind.st_assign || (s->value.kind != fir.rvalue_kind.rv_addr &&
+        s->value.kind != fir.rvalue_kind.rv_slice)) { return false; }
+    access to = place_access(c, s->place);
+    if (!(to.tracked && to.whole) &&
+        leaf_access(c, s->place).kind != ownership_source_leaves.access_kind.leaf) {
+        return false;
+    }
+    *depth = loaded_depth(c, block, gap, s->value.place, s->value.kind);
+    return *depth != U32_MAX;
+}
+
+// The switch of loaded sources: whether callers bind their requirement. A body that uses a
+// loaded source requires it live at entry, and the caller must satisfy that at each call
+// (fir.md 14, Calls). No caller checks it yet, so the switch is off in the compiler: the read
+// of each load stays the gap unknown_source in untracked_loads, and each loaded source is
+// unknown at entry. The calls increment turns the switch on through
+// ownership_source.context.callers_bind_loaded when its summaries record the requirement and
+// check it at each call. Then the source is live at entry and its read is no gap.
+fn loaded_bound(context* c) bool { return c->callers_bind_loaded; }
+
+// The symbolic caller source of the reference at the first `depth` projections of `p`, one for
+// each parameter and field path (loaded_source).
+fn loaded_key(context mut* c, fir.place p, u32 depth) ownership_api.entity_id {
+    fir.func* f = c->function;
+    u64 mut i = 0;
+    while (i < c->loaded_len) {
+        fir.place e = c->loaded[i];
+        bool mut same = e.local == p.local && e.proj_len == depth;
+        u32 mut k = 0;
+        while (same && k < depth) {
+            fir.projection a = fir.place_projection(f, e, k);
+            fir.projection b = fir.place_projection(f, p, k);
+            same = a.kind == b.kind && a.field == b.field;
+            k += 1;
+        }
+        if (same) { break; }
+        i += 1;
+    }
+    ownership_api.entity_id key = loaded_source(c, i);
+    if (key.kind == ownership_api.entity_kind.source && i == c->loaded_len) {
+        fir.place mut prefix = p;
+        prefix.proj_len = depth;
+        c->loaded[i] = prefix;
+        c->loaded_len += 1;
+    }
+    return key;
+}
+
+// The source of loaded reference `i`. Its ordinal follows the retired stack keys and stays
+// below EARLIER_BASE; past that it is an invalid entity.
+fn loaded_source(context* c, u64 i) ownership_api.entity_id {
+    u64 ordinal = cast(leaf_parameter_ordinal(c, c->leaves.leaves_len), u64) +
+        2 * cast(fir.local_count(c->function), u64) + i;
+    if (ordinal >= cast(EARLIER_BASE, u64)) { return ownership_api.entity_id{}; }
+    return entity(c, ownership_api.entity_kind.source, cast(ordinal, u32));
+}
+
 // ---- untracked loads ----------------------------------------------------------------------------
 
 // Whether the reference at the first `depth` projections of `p` is one that the run tracks: a
@@ -2408,7 +2668,10 @@ fn note_untracked_read(context mut* c, fir.place p, diag.loc at) void {
 // place of a slice of a span or a `string`, and the pointers that an address or a destination
 // loads. So the verdict on such a reference does not depend on how lowering writes the load,
 // and no body uses or reads a reference that such storage keeps, in a read that FIR reports,
-// without this gap; a borrow that a body writes there needs no gap of its own.
+// without this gap; a borrow that a body writes there needs no gap of its own. The one
+// exception is the read of a clean load through a stable parameter (loaded_statement), whose
+// step names the caller source of that reference, and only when callers bind the requirement
+// of that source (loaded_bound).
 fn untracked_loads(context mut* c) void {
     fir.func* f = c->function;
     u32 mut b = 0;
@@ -2418,11 +2681,22 @@ fn untracked_loads(context mut* c) void {
             fir.statement* s = fir.block_statement(f, b, i);
             // Every read of the statement, in the walk of fir.stmt_read: the operands, the
             // callee, the place of a slice of a span or a `string`, a released place, and the
-            // pointers that an address or the destination loads. Each read is a use.
+            // pointers that an address or the destination loads. Each read is a use. A clean
+            // load from a parameter referent reads a reference whose caller source the step
+            // names (write_tracked_at): no write reached it, so that source is live there when
+            // callers bind its requirement (loaded_bound). Until then the read is the gap.
+            u32 mut depth = U32_MAX;
+            bool loaded = loaded_bound(c) && loaded_statement(c, b, i, s, &depth);
             fir.read mut got = fir.read{};
             u32 mut k = 0;
             while (fir.stmt_read(f, s, k, &got)) {
-                note_untracked_read(c, got.place, s->loc);
+                if (loaded && fir.same_base(got.place, s->value.place) &&
+                    got.place.proj_first == s->value.place.proj_first &&
+                    got.place.proj_len == depth) {
+                    note_untracked(c, got.place, s->loc);
+                } else {
+                    note_untracked_read(c, got.place, s->loc);
+                }
                 k += 1;
             }
             i += 1;
@@ -2670,6 +2944,7 @@ fn prepare(context mut* c, fir.func* function, ownership_api.function_id identit
         stack_borrows(c);
         loans(c);
     }
+    parameter_writes(c);
     untracked_loads(c);
     transients(c);
     classify_flags(c);
@@ -3987,6 +4262,10 @@ fn free(context mut* c) void {
     del(c->flag);
     del(c->flag_index);
     del(c->offset);
+    del(c->stable);
+    del(c->dirty);
+    del(c->first_write);
+    del(c->loaded);
     u64 mut k = 0;
     while (k < c->flag_live.len) { fir_flow.bits_free(&c->flag_live[k]); k += 1; }
     del(c->flag_live);

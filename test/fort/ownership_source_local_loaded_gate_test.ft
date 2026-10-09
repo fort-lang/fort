@@ -1,0 +1,286 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| record ok
+//| gated ok
+//| bound ok
+/// Tests the switch of loaded parameter sources (ownership_source_local.loaded_bound). A body
+/// that loads a reference out of a parameter referent requires that reference's source live at
+/// entry, and only a caller can satisfy that (spec/fir.md 14.1). No caller checks it yet, so
+/// the compiler keeps the switch off and each such load stays the gap unknown_source. A line
+/// here is a line of SOURCE.
+import ownership_api;
+import ownership_keys;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import std.strbuf;
+
+u32 READ_LINE = 14;
+u32 READ2_LINE = 24;
+u32 USEL_LINE = 50;
+u32 CHAIN_MAIN_LINE = 18;
+u32 CHAIN2_MAIN_LINE = 25;
+u32 CHAIN4_MAIN_LINE = 28;
+u32 CALLER_LOCAL_LINE = 36;
+u32 VIEW_LINE = 53;
+u32 VIEW_CALLER_LINE = 54;
+u32 LEGAL_CALLER_LINE = 62;
+u32 BLOCK_AT_LINE = 52;
+
+string[70] SOURCE = {
+    "struct holder { u8@ s; }",
+    "struct cell { i64 a; }",
+    "struct ph { cell* p; }",
+    "struct block { u32 n; }",
+    "struct block_vec { block mut@ own items; u64 len; }",
+    "struct func { block_vec blocks; u64 len; }",
+    "holder mut GH = holder{{}};",
+    "ph mut GPH = ph{null};",
+    "fn stash(holder mut* h) void {",
+    "    u8 mut@ own b = new(u8, 4);",
+    "    h->s = b[..4];",
+    "    del(b);",
+    "}",
+    "fn read(holder* h) u8 {",
+    "    u8@ v = h->s[..];",
+    "    return v[0];",
+    "}",
+    "fn chain_main() u8 {",
+    "    holder mut h = holder{{}};",
+    "    stash(&h);",
+    "    return read(&h);",
+    "}",
+    "fn stash2(ph mut* h) void { cell mut* own b = new(cell); h->p = b; del(b); }",
+    "fn read2(ph* h) i64 { i64* q = &h->p->a; return *q; }",
+    "fn chain2_main() i64 { ph mut h = ph{null}; stash2(&h); return read2(&h); }",
+    "fn gstash() void { u8 mut@ own b = new(u8, 4); GH.s = b[..4]; del(b); }",
+    "fn chain3_main() u8 { gstash(); return read(&GH); }",
+    "fn chain4_main() u8 {",
+    "    u8 mut@ own b = new(u8, 4);",
+    "    holder mut h = holder{{}};",
+    "    h.s = b[..4];",
+    "    del(b);",
+    "    return read(&h);",
+    "}",
+    "fn set(holder mut* h, u8@ s) void { h->s = s; }",
+    "fn caller_local() u8 {",
+    "    u8 mut@ own b = new(u8, 4);",
+    "    holder mut h = holder{{}};",
+    "    set(&h, b[..4]);",
+    "    del(b);",
+    "    return read(&h);",
+    "}",
+    "fn caller_global() u8 {",
+    "    u8 mut@ own b = new(u8, 4);",
+    "    set(&GH, b[..4]);",
+    "    del(b);",
+    "    return read(&GH);",
+    "}",
+    "fn gset2() void { cell mut* own b = new(cell); GPH.p = b; del(b); }",
+    "fn usel(ph* h) i64 { i64* q = &h->p->a; return *q; }",
+    "fn use_loaded_main() i64 { gset2(); return usel(&GPH); }",
+    "fn block_at(func* f, u32 b) block* { return &f->blocks.items[cast(b, u64)]; }",
+    "fn view(holder* h) u8@ { return h->s[..]; }",
+    "fn view_caller() u8 {",
+    "    u8 mut@ own b = new(u8, 4);",
+    "    holder mut h = holder{{}};",
+    "    h.s = b[..4];",
+    "    u8@ v = view(&h);",
+    "    del(b);",
+    "    return v[0];",
+    "}",
+    "fn legal_caller() u8 {",
+    "    u8 mut@ own b = new(u8, 4);",
+    "    holder mut h = holder{{}};",
+    "    h.s = b[..4];",
+    "    u8@ v = view(&h);",
+    "    u8 x = v[0];",
+    "    del(b);",
+    "    return x;",
+    "}",
+};
+
+fn open(ownership_source_env.env mut* e, strbuf.str_buf mut* text, bool bound) void {
+    u64 mut i = 0;
+    while (i < SOURCE.len) {
+        strbuf.append(text, SOURCE[i]);
+        strbuf.push(text, '\n');
+        i += 1;
+    }
+    strbuf.append(text, "fn root() i32 { return 0; }\n");
+    ownership_source_env.open(e);
+    ownership_source_env.runtime(e);
+    // The compiler leaves the switch off: a fresh source context holds false.
+    assert(!e->source.callers_bind_loaded);
+    e->source.callers_bind_loaded = bound;
+    assert(ownership_source_env.prepare(e, strbuf.view(text)));
+}
+
+fn row(ownership_source_env.env mut* e, string name) ownership_source.body mut* {
+    return ownership_source_env.find(e, "main", name);
+}
+
+fn gap_in(string name, string run, ownership_source_local.context* c,
+    ownership_source_local.missing why, u32 line) void {
+    if (c->gap != why || c->gap_source.line != line ||
+        c->correspondence != ownership_source_local.status.incomplete) {
+        eprintln(name, " ", run, ": gap ", cast(c->gap, u64), " at ", c->gap_source.line);
+        assert(false);
+    }
+    assert(c->violations_len == 0 && !ownership_api.successful(c->proof));
+}
+
+// The read of the load is the gap in both rows: no row proves the use.
+fn gap(ownership_source_env.env mut* e, string name, u32 line) void {
+    ownership_source.body mut* found = row(e, name);
+    gap_in(name, "local", &found->local, ownership_source_local.missing.unknown_source, line);
+    gap_in(name, "stored", &found->stored, ownership_source_local.missing.unknown_source, line);
+}
+
+fn proved_in(string name, string run, ownership_source_local.context* c) void {
+    if (c->correspondence != ownership_source_local.status.complete ||
+        !ownership_api.successful(c->proof) || c->violations_len != 0) {
+        eprintln(name, " ", run, ": not proved, gap ", cast(c->gap, u64), " at ",
+            c->gap_source.line);
+        assert(false);
+    }
+}
+
+fn proved(ownership_source_env.env mut* e, string name) void {
+    ownership_source.body mut* found = row(e, name);
+    proved_in(name, "local", &found->local);
+    proved_in(name, "stored", &found->stored);
+}
+
+// A caller that proves in the stored row only: its local row has the gap of `&h` at `line`.
+fn stored_only(ownership_source_env.env mut* e, string name, u32 line) void {
+    ownership_source.body mut* found = row(e, name);
+    proved_in(name, "stored", &found->stored);
+    gap_in(name, "local", &found->local, ownership_source_local.missing.unknown_source, line);
+}
+
+// A caller of view: the call result is the gap fort_call in the stored row, and `&h` is the gap
+// of the local row, both at the call on `line`.
+fn returned(ownership_source_env.env mut* e, string name, u32 line) void {
+    ownership_source.body mut* found = row(e, name);
+    gap_in(name, "stored", &found->stored, ownership_source_local.missing.fort_call, line);
+    gap_in(name, "local", &found->local, ownership_source_local.missing.unknown_source, line);
+}
+
+// The switch reaches both runs of each body.
+fn switched(ownership_source_env.env mut* e, bool bound) void {
+    string[4] names = {"read", "read2", "usel", "block_at"};
+    for (string name : names) {
+        assert(row(e, name)->local.callers_bind_loaded == bound);
+        assert(row(e, name)->stored.callers_bind_loaded == bound);
+    }
+}
+
+// With the switch off the producer keeps the requirement record: the step of the load still
+// names the loaded source, and that source is unknown at entry, not live.
+fn record(ownership_source_env.env mut* e) void {
+    ownership_source_local.context* c = &row(e, "read")->local;
+    assert(c->initialized && !c->solved && c->loaded_len == 1);
+    ownership_api.entity_id key = ownership_source_local.loaded_source(c, 0);
+    u64 mut found = 0;
+    u64 mut k = 0;
+    while (k < c->entry.sources_len) {
+        if (ownership_keys.entity(c->entry.sources[k].key, key) == 0) {
+            assert(c->entry.sources[k].kind == ownership_api.source_kind.symbolic_caller);
+            assert(c->entry.sources[k].validity == ownership_api.validity_kind.unknown);
+            found += 1;
+        }
+        k += 1;
+    }
+    assert(found == 1);
+    u64 mut steps = 0;
+    u64 mut i = 0;
+    while (i < c->steps_len) {
+        if (c->relations[i].key.kind == ownership_api.entity_kind.relation &&
+            ownership_keys.entity(c->relations[i].source, key) == 0) {
+            assert(!c->steps[i].local.opaque_value);
+            steps += 1;
+        }
+        i += 1;
+    }
+    assert(steps == 1);
+    println("record ok");
+}
+
+// The review probes: a borrow that a body stores into caller storage or a global, released
+// before a reader loads it. No caller checks that the loaded source is live at the call, so
+// each reader is the gap in both rows, and no row proves the use of freed memory. The bodies
+// that store the borrow need no gap of their own (a heap or caller borrow in untracked storage):
+// that rule rests on the gap of each reader until the calls increment binds the requirement.
+fn gated(ownership_source_env.env mut* e) void {
+    switched(e, false);
+    // stash and chain_main, stash2 and chain2_main, gstash and chain3_main, chain4_main in one
+    // caller, set with caller_local and caller_global, gset2 and use_loaded_main.
+    gap(e, "read", READ_LINE + 1);
+    gap(e, "read2", READ2_LINE);
+    gap(e, "usel", USEL_LINE);
+    proved(e, "stash");
+    proved(e, "stash2");
+    proved(e, "gstash");
+    proved(e, "set");
+    proved(e, "gset2");
+    // The shape of fir.block_at keeps the gap until callers bind the requirement.
+    gap(e, "block_at", BLOCK_AT_LINE);
+    gap(e, "view", VIEW_LINE);
+    println("gated ok");
+}
+
+// With the switch on, each reader proves, while its caller releases the buffer before the
+// call. That is why the switch stays off. Before the calls increment turns it on, its summaries
+// must reject these callers at the call to the reader: chain_main, chain2_main, chain3_main,
+// chain4_main, caller_local, caller_global and use_loaded_main.
+fn bound(ownership_source_env.env mut* e) void {
+    switched(e, true);
+    proved(e, "read");
+    proved(e, "read2");
+    proved(e, "usel");
+    proved(e, "block_at");
+    proved(e, "view");
+    // These callers pass the dangling buffer and prove in both rows already.
+    proved(e, "chain3_main");
+    proved(e, "caller_global");
+    proved(e, "use_loaded_main");
+    // These four prove in the stored row, which tracks the stack source of h. The local run
+    // tracks no aggregate, so `&h` is its gap. The calls increment must turn each of them into
+    // a violation or a gap in the stored row before it turns the switch on.
+    stored_only(e, "chain_main", CHAIN_MAIN_LINE + 2);
+    stored_only(e, "chain2_main", CHAIN2_MAIN_LINE);
+    stored_only(e, "chain4_main", CHAIN4_MAIN_LINE + 5);
+    stored_only(e, "caller_local", CALLER_LOCAL_LINE + 3);
+    // A returned loaded source: view returns `h->s[..]`, which borrows the caller source of
+    // h->s. view_caller releases b and then reads the result; legal_caller reads it first.
+    // Today a fort call result has no source, so both are the gap fort_call in the stored row.
+    // The calls increment must map the returned source to the source of the caller's
+    // reference h.s, the allocation of b, and not to the parameter's own source, the stack
+    // source of h. Then view_caller is a use after release, and legal_caller must still prove.
+    returned(e, "view_caller", VIEW_CALLER_LINE + 4);
+    returned(e, "legal_caller", LEGAL_CALLER_LINE + 4);
+    println("bound ok");
+}
+
+fn main() i32 {
+    ownership_source_env.env mut off = ownership_source_env.env{};
+    // A zero source context, as the compiler driver makes it, holds the switch off.
+    assert(!off.source.callers_bind_loaded);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&off, &text, false);
+    record(&off);
+    ownership_source.analyze(&off.source);
+    gated(&off);
+    ownership_source_env.close(&off);
+    ownership_source_env.env mut on = ownership_source_env.env{};
+    strbuf.str_buf mut again = strbuf.create();
+    defer strbuf.free(&again);
+    open(&on, &again, true);
+    ownership_source.analyze(&on.source);
+    bound(&on);
+    ownership_source_env.close(&on);
+    return 0;
+}

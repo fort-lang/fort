@@ -895,6 +895,54 @@ class OwnershipDriverTest(unittest.TestCase):
                     self.assertEqual(stored["name"], "stored_borrows")
                     self.assertEqual((stored["solver"], stored["violations"]), ("complete", 0))
 
+    # Loads out of the referent of a pointer parameter (spec/fir.md 14.1). A clean load borrows
+    # the caller source of the loaded reference. The body requires that source live at entry,
+    # and no caller checks that yet, so the compiler keeps each such load the gap: `row_at` and
+    # `name` stay outside both scopes, as do a load after a store through the parameter, a
+    # second loaded level, a use through the loaded reference and a load before a call.
+    LOADED_CASES = (
+        "struct item { u32 n; }\n"
+        "struct items { item mut@ own data; u64 len; }\n"
+        "struct table { items rows; u8@ name; }\n"
+        "struct cell { i64 a; }\n"
+        "struct holder { cell* p; }\n"
+        "struct chain { holder* h; }\n"
+        "fn helper() void {}\n"
+        "fn row_at(table* t, u64 i) item* {\n"
+        "    if (i >= t->rows.len) { panic(\"index out of range\"); }\n"
+        "    return &t->rows.data[i];\n"
+        "}\n"
+        "fn name(table* t) u8@ { return t->name[..]; }\n"
+        "fn stored(holder mut* h, cell* c) i64* { h->p = c; return &h->p->a; }\n"
+        "fn deeper(chain* c) i64* { return &c->h->p->a; }\n"
+        "fn used(holder* h) i64 { return h->p->a; }\n"
+        "fn called(holder* h) i64 { i64* q = &h->p->a; helper(); return *q; }\n"
+        "fn main() i32 { return 0; }\n"
+    )
+
+    def test_loaded_parameter_sources_stay_gated_in_every_mode(self):
+        self.entry.write_text(self.LOADED_CASES)
+        names = ("row_at", "name", "stored", "deeper", "used", "called")
+        projections = []
+        for flags in ((), ("--release",), ("--no-bounds-check",),
+                      ("--release", "--no-bounds-check")):
+            with self.subTest(flags=flags):
+                self.assertEqual(self.invoke(*flags, standard=Path(OPTIONS.std_dir)).returncode,
+                                 1)
+                document = self.evidence()
+                self.assertEqual(document["totals"]["violations"], 0)
+                rows = {}
+                for name in names:
+                    local = self.local_row(document, name)
+                    stored = self.stored_row(document, name)
+                    rows[name] = ((local["correspondence"], local["proof"]),
+                                  (stored["correspondence"], stored["proof"]))
+                projections.append(rows)
+        # The release and bounds-check options remove checks from the FIR, and the verdicts stay.
+        self.assertTrue(all(value == projections[0] for value in projections))
+        outside = (("incomplete", "incomplete"), ("incomplete", "incomplete"))
+        self.assertEqual(projections[0], {name: outside for name in names})
+
     def test_report_can_replace_an_old_report_atomically(self):
         self.report.write_bytes(b"old report\n")
         self.assertEqual(self.invoke().returncode, 1)
