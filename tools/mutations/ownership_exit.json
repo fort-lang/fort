@@ -1,0 +1,528 @@
+{
+  "comment": [
+    "One row for each rule of the process-exit producer (src/fort/ownership_source_exit.ft),",
+    "the termination classes of the FFI hook (src/fort/ownership_ffi.ft), the runtime cleanup",
+    "(std/rt.ft), the report (src/fort/ownership_report.ft) and the witness walk mode",
+    "(src/fort/ownership_source_local.ft). A row names the line that holds the rule and the",
+    "text that breaks it. The build compiles working-tree HEAD with the mutant, and the module",
+    "tests compile src/fort and std with the mutant too. The stages run the process-exit, FFI",
+    "termination, runtime shutdown and report tests, then the ownership driver test. Run it in",
+    "the Linux VM with the debug preset. The stage logs, not the `tests` field, name the",
+    "catching test: these stages run test/lang/run_tests.py."
+  ],
+  "sources": [
+    "src/fort/ownership_ffi.ft",
+    "src/fort/ownership_report.ft",
+    "src/fort/ownership_source_exit.ft",
+    "src/fort/ownership_source_local.ft",
+    "std/rt.ft"
+  ],
+  "binary": "build/Linux/debug/fort",
+  "build": "ninja -C build/Linux/debug fort fort_std",
+  "stages": [
+    {
+      "name": "process-exit module tests",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 900 -j 6 ownership_source_exit ownership_ffi_termination ownership_report_exit ownership_source_local_witness_mode"
+    },
+    {
+      "name": "runtime shutdown",
+      "command": "python3 test/lang/run_tests.py --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --cc /usr/bin/clang -j 6 run/stdlib/121_rt_shutdown"
+    },
+    {
+      "name": "ownership driver",
+      "command": "python3 test/ownership_driver_test.py --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --cc /usr/bin/clang --opt /usr/bin/opt-18"
+    }
+  ],
+  "mutations": [
+    {
+      "decision": "D11.6-shutdown-release",
+      "file": "std/rt.ft",
+      "old": "fn shutdown() void {\n    flush_all();\n    del(args_store);\n}",
+      "new": "fn shutdown() void {\n    flush_all();\n}",
+      "what": "the runtime cleanup flushes and keeps the argument headers"
+    },
+    {
+      "decision": "D11.6-exit-cleanup",
+      "file": "std/rt.ft",
+      "old": "fn exit(i32 status) noreturn {\n    shutdown();",
+      "new": "fn exit(i32 status) noreturn {\n    flush_all();",
+      "what": "std.rt.exit flushes and skips the release"
+    },
+    {
+      "decision": "D17.19-exit-class",
+      "file": "src/fort/ownership_ffi.ft",
+      "old": "        if (code->kind == types.type_kind.k_prim && code->prim == prim.prim_kind.prim_i32) {",
+      "new": "        if (code->kind == types.type_kind.k_prim) {",
+      "what": "an extern exit of any integer parameter type is normal process exit"
+    },
+    {
+      "decision": "D17.19-abort-class",
+      "file": "src/fort/ownership_ffi.ft",
+      "old": "    if (symbol->name == \"abort\" && ty->params.len == 0) {\n        return ownership_api.outcome_kind.abort;",
+      "new": "    if (symbol->name == \"abort\" && ty->params.len == 0) {\n        return unresolved;",
+      "what": "extern abort stays unresolved foreign termination"
+    },
+    {
+      "decision": "D9.8-variable-tail",
+      "file": "src/fort/ownership_ffi.ft",
+      "old": "    if (symbol->node != null && (symbol->node->flags & ast.FLAG_VARIADIC) != 0) {\n        return unresolved;",
+      "new": "    if (false) {\n        return unresolved;",
+      "what": "a declaration with a variable tail shares the class of exit"
+    },
+    {
+      "decision": "D17.19-abort-cleanup",
+      "file": "src/fort/ownership_ffi.ft",
+      "old": "    outcomes[0].cleanup_required = outcomes[0].kind != ownership_api.outcome_kind.abort;",
+      "new": "    outcomes[0].cleanup_required = true;",
+      "what": "abort keeps a cleanup requirement"
+    },
+    {
+      "decision": "D17.19-global-store",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "fn check_store(context mut* c, u8@ s, u32 block, u32 gap, target t) void {\n    if (!c->recording) { return; }",
+      "new": "fn check_store(context mut* c, u8@ s, u32 block, u32 gap, target t) void {\n    if (true) { return; }",
+      "what": "a store into an owning global needs no empty old leaf"
+    },
+    {
+      "decision": "D17.19-symbolic-entry",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "    while (i < c->shared->leaves_len) { s[i] = UNKNOWN; i += 1; }\n    i = 0;\n    while (i < c->frames_len) {\n        fir.local* l",
+      "new": "    while (i < c->shared->leaves_len) { s[i] = EMPTY; i += 1; }\n    i = 0;\n    while (i < c->frames_len) {\n        fir.local* l",
+      "what": "an owning global is empty at the entry of each body"
+    },
+    {
+      "decision": "D17.18-fort-call-effects",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "fn fort_call(context mut* c, u8 mut@ s, fir.rvalue r, bool second) void {\n    u64 mut i = 0;\n    while (i < c->shared->leaves_len) { s[i] = UNKNOWN; i += 1; }",
+      "new": "fn fort_call(context mut* c, u8 mut@ s, fir.rvalue r, bool second) void {\n    u64 mut i = 0;",
+      "what": "a fort call keeps the states of the owning globals"
+    },
+    {
+      "decision": "D17.19-exit-fact",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "                if (callee->exit_empty[i]) { s[i] = EMPTY; }",
+      "new": "                if (false) { s[i] = EMPTY; }",
+      "what": "the second pass reads no exit fact of a direct callee"
+    },
+    {
+      "decision": "D17.19-runtime-declared",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "            if ((state & SYMBOLIC) != 0 && !runtime) {",
+      "new": "            if ((state & SYMBOLIC) != 0) {",
+      "what": "a runtime leaf at a known normal exit leaves the declared scope"
+    },
+    {
+      "decision": "D17.18-suspended-owner",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "        c->suspended_calls += 1;\n        note_gap(c, missing.suspended_owner, block, gap);",
+      "new": "        c->suspended_calls += 1;",
+      "what": "a fort call while a frame owner can be live proves the frame"
+    },
+    {
+      "decision": "D17.19-taken-frame",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "        if (c->taken[cast(c->frames[i], u64)]) { s[c->shared->leaves_len + i] = UNKNOWN; }",
+      "new": "        if (false) { s[c->shared->leaves_len + i] = UNKNOWN; }",
+      "what": "a fort call cannot fill a frame owner whose address the body takes"
+    },
+    {
+      "decision": "D17.19-escaped-weaken",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "        if (c->shared->leaves[i].escaped) { s[i] = s[i] | value; }",
+      "new": "        if (false) { s[i] = s[i] | value; }",
+      "what": "an unresolved owning write cannot reach an escaped global"
+    },
+    {
+      "decision": "D17.19-address-escape",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "    if (n != NO_UNIT && c->resolved[cast(n, u64)] != 0) {\n        escape(c,",
+      "new": "    if (false) {\n        escape(c,",
+      "what": "a copy of a resolved address keeps the global from escaping"
+    },
+    {
+      "decision": "D17.19-address-copy",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "    } else if (r.kind == fir.rvalue_kind.rv_use) {\n        u32 from = whole_local(fir.rvalue_operand(f, r, 0));",
+      "new": "    } else if (false) {\n        u32 from = whole_local(fir.rvalue_operand(f, r, 0));",
+      "what": "a copy of a resolved address does not resolve"
+    },
+    {
+      "decision": "D17.15-result-in-place",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "                    if (t.kind == target_kind.global) {\n                        u64 mut l = 0;",
+      "new": "                    if (false) {\n                        u64 mut l = 0;",
+      "what": "a global call destination keeps the leaves from escaping"
+    },
+    {
+      "decision": "D17.16-owned-descendants",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "    if (holds_deep(c, t)) { note_gap(c, missing.owned_descendants, block, gap); }",
+      "new": "    if (holds_deep(c, t)) { }",
+      "what": "a shallow release of a global proves its owned descendants empty"
+    },
+    {
+      "decision": "D19.8-removed-check",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "        &c->taken, &c->meter, &c->first_refusal, preds, block, gap, true);",
+      "new": "        &c->taken, &c->meter, &c->first_refusal, preds, block, gap, false);",
+      "what": "the witness walk of a store keeps each overwrite check"
+    },
+    {
+      "decision": "D19.8-walk-mode",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "            if (overwrite && c->overwrite_removed) { result = outcome.passes; }",
+      "new": "            if (false) { result = outcome.passes; }",
+      "what": "the release mode of the walk evaluates each overwrite check"
+    },
+    {
+      "decision": "D17.19-executable-boundary",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "            proved = cleans(x->shutdown, i);",
+      "new": "            proved = true;",
+      "what": "the executable boundary needs no runtime cleanup"
+    },
+    {
+      "decision": "D17.19-library-cleanup",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "                proved = cleans(x->bodies[b], i);",
+      "new": "                proved = false;",
+      "what": "a library cleanup body proves no leaf"
+    },
+    {
+      "decision": "D17.19-normal-exit",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "            if (kind == ownership_api.outcome_kind.normal_process_exit) {\n                check_exit(c, s, block, gap);",
+      "new": "            if (kind == ownership_api.outcome_kind.normal_process_exit) {",
+      "what": "a known normal exit needs no empty owners"
+    },
+    {
+      "decision": "D17.19-taken-frame-write",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "        if (c->taken[cast(c->frames[i], u64)]) {\n            u64 at = c->shared->leaves_len + i;\n            s[at] = s[at] | value;",
+      "new": "        if (false) {\n            u64 at = c->shared->leaves_len + i;\n            s[at] = s[at] | value;",
+      "what": "an unresolved owning write cannot reach a frame owner whose address the body takes"
+    },
+    {
+      "decision": "D17.19-taken-pointer",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "            if (c->resolved[n] == 0 && defs[n] == 1 && !c->taken[n] &&",
+      "new": "            if (c->resolved[n] == 0 && defs[n] == 1 &&",
+      "what": "a pointer local whose own address the body takes still resolves to its one address"
+    },
+    {
+      "decision": "D17.15-frame-part",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "        s[at] = c->tracked[frame_index(c, t.unit)] ? UNKNOWN : s[at] | value;",
+      "new": "        s[at] = c->tracked[frame_index(c, t.unit)] ? UNKNOWN : value;",
+      "what": "a write of one part of an aggregate owner replaces the state of each part"
+    },
+    {
+      "decision": "D17.19-initializer-address",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "            while (k < o->count) { x->leaves[o->first + k].escaped = true; k += 1; }",
+      "new": "            while (k < o->count) { k += 1; }",
+      "what": "an address in a global initializer keeps the global from escaping"
+    },
+    {
+      "decision": "D17.19-global-pointer",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "    u32[257] mut path = {};\n    u64 mut depth = 0;\n    while (depth < start.len) {\n        path[depth] = c->address_steps[start.first + depth];\n        depth += 1;\n    }\n    types.node* mut t = start.ty;\n    bool mut weak = start.weak;\n    if (!extend(c, p, from, path[..], &depth, &t, &weak)) {\n        return target{.kind = target_kind.indirect,",
+      "new": "    if (o == null) { return target{}; }\n    u32[257] mut path = {};\n    u64 mut depth = 0;\n    while (depth < start.len) {\n        path[depth] = c->address_steps[start.first + depth];\n        depth += 1;\n    }\n    types.node* mut t = start.ty;\n    bool mut weak = start.weak;\n    if (!extend(c, p, from, path[..], &depth, &t, &weak)) {\n        return target{.kind = target_kind.indirect,",
+      "what": "a dereference through a global that holds no owner designates nothing"
+    },
+    {
+      "decision": "D17.16-deep-leaf",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "        item.deep = owns_descendants(t);",
+      "new": "        item.deep = false;",
+      "what": "no leaf has a referent with owning leaves"
+    },
+    {
+      "decision": "D17.19-cleanup-overwrite",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "        overwrite(c, s, t);\n        hand_out(c, value);",
+      "new": "        hand_out(c, value);",
+      "what": "a store over a value that can hold an allocation keeps the body a cleanup"
+    },
+    {
+      "decision": "D17.19-cleanup-unclean",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "        !b->shared->leaves[i].deep && !b->unclean[i];",
+      "new": "        !b->shared->leaves[i].deep;",
+      "what": "a store that can drop an allocation keeps the body a cleanup of the leaf"
+    },
+    {
+      "decision": "D17.19-cleanup-store-leaf",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "        if ((s[at] & LIVE) != 0) { c->unclean[at] = true; }",
+      "new": "        if ((s[at] & LIVE) != 0) { u64 mut k = 0; while (k < c->shared->leaves_len) { c->unclean[k] = true; k += 1; } }",
+      "what": "an unproved store blocks the cleanup of each leaf of the body"
+    },
+    {
+      "decision": "D17.19-cleanup-store-first-pass",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "        if ((s[at] & LIVE) != 0) { c->unclean[at] = true; }",
+      "new": "        if ((s[at] & LIVE) != 0 && c->recording) { c->unclean[at] = true; }",
+      "what": "only the final sweep marks a store, after the exit facts of callees"
+    },
+    {
+      "decision": "D17.18-back-edge",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "            if (next < c->restart) { c->restart = next; }",
+      "new": "            if (false) { c->restart = next; }",
+      "what": "a back edge that grows a loop head does not revisit it"
+    },
+    {
+      "decision": "toolchain-1.1-exit-integrated",
+      "file": "src/fort/ownership_report.ft",
+      "old": "fn integrated(u64 stage) bool { return stage <= RAW || stage == PROCESS_EXIT; }",
+      "new": "fn integrated(u64 stage) bool { return stage <= RAW; }",
+      "what": "the report keeps process_exit unavailable"
+    },
+    {
+      "decision": "toolchain-1.1-exit-violations",
+      "file": "src/fort/ownership_report.ft",
+      "old": "        analysis_violations(row, RAW) + analysis_violations(row, PROCESS_EXIT);",
+      "new": "        analysis_violations(row, RAW);",
+      "what": "body violations omit process-exit violations"
+    },
+    {
+      "decision": "toolchain-1.1-exit-boundary",
+      "file": "src/fort/ownership_report.ft",
+      "old": "    if (bodies == \"complete\" && boundary == \"complete\") { return \"complete\"; }",
+      "new": "    if (bodies == \"complete\") { return \"complete\"; }",
+      "what": "the process_exit closure ignores the boundary"
+    },
+    {
+      "decision": "toolchain-4.2-exit-records",
+      "file": "src/fort/ownership_report.ft",
+      "old": "        } else if (list == 4 && row->exit.solved && at < row->exit.violations_len) {",
+      "new": "        } else if (false) {",
+      "what": "process-exit violations are not rendered"
+    },
+    {
+      "decision": "toolchain-4.2-boundary-records",
+      "file": "src/fort/ownership_report.ft",
+      "old": "    return boundary_records(c, diagnostics, entry);",
+      "new": "    return true;",
+      "what": "boundary failures are not rendered"
+    },
+    {
+      "decision": "D17.16-cleanup-deep",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "        !b->shared->leaves[i].deep && !b->unclean[i];",
+      "new": "        !b->unclean[i];",
+      "what": "a release or a move of a deep leaf keeps the body a cleanup"
+    },
+    {
+      "decision": "D17.19-cleanup-fills",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "    return b != null && b->fact_ready && !b->fills && b->exit_empty[i] &&",
+      "new": "    return b != null && b->fact_ready && b->exit_empty[i] &&",
+      "what": "a body that can fill an owning global stays a cleanup"
+    },
+    {
+      "decision": "D17.19-export-global",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "        hand_out(c, value);\n        check_store(c, s, block, gap, t);",
+      "new": "        check_store(c, s, block, gap, t);",
+      "what": "a move into an owning global hands nothing out of the frame"
+    },
+    {
+      "decision": "D17.19-export-indirect",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "        hand_out(c, value);\n        weaken(c, s, value);",
+      "new": "        weaken(c, s, value);",
+      "what": "a move into an indirect owning place hands nothing out of the frame"
+    },
+    {
+      "decision": "D17.19-export-argument",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "        if (owning_type(fir.operand_type(f, o))) { hand_out(c, operand_state(c, s, o)); }",
+      "new": "        if (false) { hand_out(c, operand_state(c, s, o)); }",
+      "what": "an owning argument of a fort call stays in the frame"
+    },
+    {
+      "decision": "D17.19-export-taken",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "        if (c->taken[cast(c->frames[i], u64)]) { hand_out(c, s[c->shared->leaves_len + i]); }",
+      "new": "        if (false) { hand_out(c, s[c->shared->leaves_len + i]); }",
+      "what": "a fort call cannot reach a frame owner through its taken address"
+    },
+    {
+      "decision": "D17.19-export-live",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "    if ((value & LIVE) != 0) { c->exports = true; }",
+      "new": "    c->exports = true;",
+      "what": "an empty value hands an allocation out of the frame"
+    },
+    {
+      "decision": "D17.19-export-first-pass",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "    if ((value & LIVE) != 0) { c->exports = true; }",
+      "new": "    if ((value & LIVE) != 0 && c->recording) { c->exports = true; }",
+      "what": "only the final sweep marks a hand-out, which a refusal can skip"
+    },
+    {
+      "decision": "D17.19-fills-exports",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "        c->fills = !c->fact_ready || c->exports;",
+      "new": "        c->fills = !c->fact_ready;",
+      "what": "a hand-out of the body itself fills no global"
+    },
+    {
+      "decision": "D17.18-fills-refused",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "        c->fills = !c->fact_ready || c->exports;",
+      "new": "        c->fills = c->exports;",
+      "what": "a body whose first pass is refused fills no global"
+    },
+    {
+      "decision": "D17.19-fills-indirect",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "                if (to == x->bodies_len) {\n                    c->fills = true;",
+      "new": "                if (to == x->bodies_len) {\n                    c->fills = c->fills;",
+      "what": "an indirect fort call fills no global"
+    },
+    {
+      "decision": "D17.19-fills-callee",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "            if (!caller->fills) {\n                caller->fills = true;",
+      "new": "            if (false) {\n                caller->fills = true;",
+      "what": "a caller of a body that fills fills no global"
+    },
+    {
+      "decision": "D17.19-fills-transitive",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "\n                work[len] = callers[k];\n                len += 1;",
+      "new": "",
+      "what": "the fact reaches the direct callers of a filling body only"
+    },
+    {
+      "decision": "D17.13-out-param",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "            fill_out_params(c, s, r, block, gap);\n",
+      "new": "",
+      "what": "an extern call fills no owning slot that an argument names"
+    },
+    {
+      "decision": "D17.13-out-param-hand-out",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "            hand_out(c, FOREIGN);",
+      "new": "            hand_out(c, EMPTY);",
+      "what": "an owning slot passed to an extern hands nothing out of the frame"
+    },
+    {
+      "decision": "D17.13-out-param-weaken",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "            hand_out(c, FOREIGN);\n            weaken(c, s, FOREIGN);",
+      "new": "            hand_out(c, FOREIGN);\n            weaken(c, s, EMPTY);",
+      "what": "an extern keeps each slot that an argument can reach empty"
+    },
+    {
+      "decision": "D17.13-slot-mut",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "        if (t->is_mut && owning_type(t->elem)) { return true; }",
+      "new": "        if (owning_type(t->elem)) { return true; }",
+      "what": "a const pointer to an owner names a writable slot"
+    },
+    {
+      "decision": "D17.13-slot-reference",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "        return names_slot(c, t->elem, seen, block, gap);",
+      "new": "        return false;",
+      "what": "a pointer to a pointer or a struct reaches no slot"
+    },
+    {
+      "decision": "D17.13-slot-field",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "        if (names_slot(c, fir.struct_field_type(t, k), seen, block, gap)) { return true; }",
+      "new": "        if (false) { return true; }",
+      "what": "a struct field reaches no slot"
+    },
+    {
+      "decision": "D17.13-slot-cycle",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "        if (seen->items[i] == t) { return false; }",
+      "new": "        if (false) { return false; }",
+      "what": "a recursive struct is searched again until the W bound refuses the search"
+    },
+    {
+      "decision": "D17.19-fills-recursion",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "                u64 to = r.callee == fir.callee_kind.cl_fn ? body_index(x, r.callee_sym) :",
+      "new": "                u64 to = r.callee == fir.callee_kind.cl_fn && r.callee_sym != f->sym ?\n                    body_index(x, r.callee_sym) :",
+      "what": "a body that calls itself fills"
+    },
+    {
+      "decision": "D17.13-out-param-resolved",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "            weaken(c, s, FOREIGN);",
+      "new": "            if (whole_local(o) == NO_UNIT || c->resolved[cast(whole_local(o), u64)] == 0) {\n                weaken(c, s, FOREIGN);\n            }",
+      "what": "a resolved global address reaches no slot behind a pointer field"
+    },
+    {
+      "decision": "D17.18-slot-charge",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "    if (!work(c, block, gap)) { return true; }\n",
+      "new": "",
+      "what": "the search for an owning slot charges no W"
+    },
+    {
+      "decision": "D17.18-slot-visited",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "        if (names_slot(c, fir.struct_field_type(t, k), seen, block, gap)) { return true; }\n        k += 1;\n    }\n    return false;\n}",
+      "new": "        if (names_slot(c, fir.struct_field_type(t, k), seen, block, gap)) { return true; }\n        k += 1;\n    }\n    seen->len -= 1;\n    return false;\n}",
+      "what": "the search enters a struct once for each path"
+    },
+    {
+      "decision": "D17.18-fills-charge-walk",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "            if (!charge_fills(x, c)) { return false; }\n",
+      "new": "",
+      "what": "the call-graph step charges no W for a statement"
+    },
+    {
+      "decision": "D17.18-fills-charge-edge",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "            if (!charge_fills(x, caller)) { fill_all(x); return; }\n",
+      "new": "",
+      "what": "the call-graph step charges no W for a call edge"
+    },
+    {
+      "decision": "D17.18-fills-refusal",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "    if (x->fills_refusal.terminal.present) {\n        x->boundary_proof",
+      "new": "    if (false) {\n        x->boundary_proof",
+      "what": "a refused call-graph step is no boundary reason"
+    },
+    {
+      "decision": "D17.18-fills-fill-all",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "        if (!call_edges(x, b, first, first, false)) { fill_all(x); return; }",
+      "new": "        if (!call_edges(x, b, first, first, false)) { return; }",
+      "what": "a refused call-graph step keeps the facts of its first bodies"
+    },
+    {
+      "decision": "D17.18-fills-fill-all-second",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "        if (!call_edges(x, b, next, callers, true)) { fill_all(x); return; }",
+      "new": "        if (!call_edges(x, b, next, callers, true)) { return; }",
+      "what": "a step refused in its second walk keeps the facts of its first walk"
+    },
+    {
+      "decision": "D17.18-fills-gate",
+      "file": "src/fort/ownership_source_exit.ft",
+      "old": "    if (complete) { decide_fills(x); }",
+      "new": "    decide_fills(x);",
+      "what": "the call-graph step runs on a closure whose boundary is unexecuted"
+    },
+    {
+      "decision": "toolchain-1.1-fills-ledger",
+      "file": "src/fort/ownership_report.ft",
+      "old": "    if (c->exit.fills_decided) {\n        json.json_object_begin(j);",
+      "new": "    if (false) {\n        json.json_object_begin(j);",
+      "what": "the report keeps the ledger of the call-graph step out of meters"
+    }
+  ]
+}
