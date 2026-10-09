@@ -1258,18 +1258,58 @@ struct read {
     bool is_use;
 }
 
+/// The reads of one statement or terminator, in the order of stmt_read and term_read:
+/// `items[..len]`. `items.len` is the capacity. stmt_read_all and term_read_all fill it in one
+/// walk and keep its storage, so one list serves every item of a pass. read_list_free frees it.
+struct read_list {
+    read mut@ own items;
+    u64 len;
+}
+
+/// Frees the storage of `l`.
+fn read_list_free(read_list mut* l) void {
+    del(l->items);
+    l->len = 0;
+}
+
+// Appends `r` to `l`, growing as grown_capacity says.
+fn read_list_push(read_list mut* l, read r) void {
+    if (l->len == l->items.len) {
+        u64 cap = grown_capacity(l->items.len, "fir.read_list_push: capacity overflow");
+        read mut@ own bigger = new(read, cap);
+        u64 mut i = 0;
+        while (i < l->len) {
+            bigger[i] = l->items[i];
+            i += 1;
+        }
+        del(l->items);
+        l->items = move(bigger);
+    }
+    l->items[l->len] = r;
+    l->len += 1;
+}
+
+// The `want` of a walk that keeps every read in its list: no item has that many reads, so the
+// walk never stops early.
+u32 READ_ALL = 4294967295;
+
 // The walk of stmt_read and term_read: it counts the reads it visits and keeps visit `want`.
+// When `list` is not null, the walk appends each read to it as well.
 struct read_cursor {
     u32 want;
     u32 seen;
     read found;
     bool done;
+    read_list mut* list;
 }
 
 fn read_mark(read_cursor mut* c, place p, bool empties, bool is_use) void {
     if (!c->done && c->seen == c->want) {
         c->found = read{p, empties, is_use};
         c->done = true;
+    }
+    if (c->list != null) {
+        read_list_push(c->list, read{p, empties, is_use});
     }
     c->seen += 1;
 }
@@ -1363,38 +1403,52 @@ fn stmt_reads_place(func* f, statement* s, u32 i, place mut* out) bool {
     return true;
 }
 
+// Visits the reads of `s` in the order of stmt_reads_place.
+fn stmt_walk(func* f, statement* s, read_cursor mut* c) void {
+    switch (s->kind) {
+    case stmt_kind.st_assign:
+        read_index_locals(f, c, s->place);
+        rvalue r = s->value;
+        if (r.kind == rvalue_kind.rv_call && r.callee == callee_kind.cl_value) {
+            read_operand(f, c, r.callee_op);
+        }
+        if (r.kind == rvalue_kind.rv_addr) {
+            read_address(f, c, r.place);
+        } else if (r.kind == rvalue_kind.rv_slice) {
+            read_slice(f, c, r.place);
+        }
+        u32 mut k = 0;
+        while (k < r.ops_len && !c->done) {
+            read_operand(f, c, rvalue_operand(f, r, k));
+            k += 1;
+        }
+        read_pointers(f, c, s->place);
+    case stmt_kind.st_del:
+        read_index_locals(f, c, s->place);
+        read_mark(c, s->place, true, true);
+    case stmt_kind.st_live, stmt_kind.st_dead, stmt_kind.st_loan_begin, stmt_kind.st_loan_end:
+        return;
+    }
+}
+
 /// Read `i` of `s` in the order of stmt_reads_place, with the place of a `move` operand or of a
 /// `del` marked as emptied. Every read of a statement is a use.
 fn stmt_read(func* f, statement* s, u32 i, read mut* out) bool {
     read_cursor mut c = read_cursor{.want = i};
-    switch (s->kind) {
-    case stmt_kind.st_assign:
-        read_index_locals(f, &c, s->place);
-        rvalue r = s->value;
-        if (r.kind == rvalue_kind.rv_call && r.callee == callee_kind.cl_value) {
-            read_operand(f, &c, r.callee_op);
-        }
-        if (r.kind == rvalue_kind.rv_addr) {
-            read_address(f, &c, r.place);
-        } else if (r.kind == rvalue_kind.rv_slice) {
-            read_slice(f, &c, r.place);
-        }
-        u32 mut k = 0;
-        while (k < r.ops_len && !c.done) {
-            read_operand(f, &c, rvalue_operand(f, r, k));
-            k += 1;
-        }
-        read_pointers(f, &c, s->place);
-    case stmt_kind.st_del:
-        read_index_locals(f, &c, s->place);
-        read_mark(&c, s->place, true, true);
-    case stmt_kind.st_live, stmt_kind.st_dead, stmt_kind.st_loan_begin, stmt_kind.st_loan_end:
-        return false;
-    }
+    stmt_walk(f, s, &c);
     if (c.done) {
         *out = c.found;
     }
     return c.done;
+}
+
+/// Replaces the contents of `out` with every read of `s`, in the order and the shape of
+/// stmt_read: item `i` of `out` is what stmt_read gives for `i`. It walks `s` once, where a loop
+/// over stmt_read walks it once for each read.
+fn stmt_read_all(func* f, statement* s, read_list mut* out) void {
+    out->len = 0;
+    read_cursor mut c = read_cursor{.want = READ_ALL, .list = out};
+    stmt_walk(f, s, &c);
 }
 
 // ---- terminators --------------------------------------------------------------------------
@@ -1619,28 +1673,41 @@ fn term_reads_place(func* f, terminator* t, u32 i, place mut* out) bool {
 /// the pointers that the address of that place loads included.
 fn term_read(func* f, terminator* t, u32 i, read mut* out) bool {
     read_cursor mut c = read_cursor{.want = i};
-    switch (t->kind) {
-    case term_kind.tk_switch:
-        read_operand(f, &c, t->cond);
-    case term_kind.tk_check:
-        read_operand(f, &c, t->cond);
-        read_term_args(f, &c, t);
-    case term_kind.tk_fail:
-        read_term_args(f, &c, t);
-    case term_kind.tk_check_overwrite:
-        read_address(f, &c, t->place);
-        read_mark(&c, t->place, false, false);
-    case term_kind.tk_return:
-        if (local_at(f, 0)->ty->kind != types.type_kind.k_void) {
-            read_visit(&c, place_local(0));
-        }
-    case term_kind.tk_goto, term_kind.tk_trap, term_kind.tk_unreachable:
-        return false;
-    }
+    term_walk(f, t, &c);
     if (c.done) {
         *out = c.found;
     }
     return c.done;
+}
+
+/// Replaces the contents of `out` with every read of `t`, in the order and the shape of
+/// term_read, as stmt_read_all does for a statement.
+fn term_read_all(func* f, terminator* t, read_list mut* out) void {
+    out->len = 0;
+    read_cursor mut c = read_cursor{.want = READ_ALL, .list = out};
+    term_walk(f, t, &c);
+}
+
+// Visits the reads of `t` in the order of term_reads_place.
+fn term_walk(func* f, terminator* t, read_cursor mut* c) void {
+    switch (t->kind) {
+    case term_kind.tk_switch:
+        read_operand(f, c, t->cond);
+    case term_kind.tk_check:
+        read_operand(f, c, t->cond);
+        read_term_args(f, c, t);
+    case term_kind.tk_fail:
+        read_term_args(f, c, t);
+    case term_kind.tk_check_overwrite:
+        read_address(f, c, t->place);
+        read_mark(c, t->place, false, false);
+    case term_kind.tk_return:
+        if (local_at(f, 0)->ty->kind != types.type_kind.k_void) {
+            read_visit(c, place_local(0));
+        }
+    case term_kind.tk_goto, term_kind.tk_trap, term_kind.tk_unreachable:
+        return;
+    }
 }
 
 // Visits the reported operands of a `check` or a `fail`.
