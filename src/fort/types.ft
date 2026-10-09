@@ -24,6 +24,14 @@ u64 NODE_MIN_CAP = 16;
 // against.
 u64 U64_MAX = 18446744073709551615;
 
+// The first non-zero slot count of the intern index; growth doubles from there.
+// The count stays a power of two, so a hash selects a slot with a mask.
+u64 INDEX_MIN_SLOTS = 64;
+
+// The 64-bit FNV-1a offset basis and prime, which key_hash mixes words with.
+u64 HASH_BASIS = 0xcbf29ce484222325;
+u64 HASH_PRIME = 0x100000001b3;
+
 /// Identifies a represented type.
 // Member names use short prefixes to distinguish them from constructor names.
 enum type_kind {
@@ -99,6 +107,11 @@ struct table {
     // One slot per primitive kind. PRIM_COUNT sizes this array. Adding an enum
     // kind therefore updates the array without a second size edit.
     node*[prim.PRIM_COUNT] prims;
+    // The intern index: an open-addressing hash set over every node that is
+    // not nominal, with linear probing. A null slot is empty. The slot count
+    // is 0 or a power of two, and at most half the slots are full.
+    node* mut@ own index;
+    u64 indexed; // the count of full slots
 }
 
 // ---- table and interning -------------------------------------------------------
@@ -120,6 +133,8 @@ fn type_table_free(table mut* tt) void {
     }
     del(tt->nodes);
     tt->count = 0;
+    del(tt->index);
+    tt->indexed = 0;
     tt->void_type = null;
     tt->null_type = null;
     tt->error_type = null;
@@ -190,15 +205,143 @@ fn node_same(node* t, key* k) bool {
     return true;
 }
 
-// The interned node equal to `k`, or a fresh copy of it.
-fn intern(table mut* tt, key* k) node* {
+// Mixes the word `v` into the hash `h`, as one FNV-1a step over a whole word.
+fn hash_word(u64 h, u64 v) u64 {
+    return (h ^ v) *% HASH_PRIME;
+}
+
+// The hash of the fields of `k` that node_same compares. Children are interned,
+// so a child enters the hash by its address, as node_same compares it.
+fn key_hash(key* k) u64 {
+    u64 mut h = HASH_BASIS;
+    h = hash_word(h, cast(k->kind, u64));
+    h = hash_word(h, cast(k->prim, u64));
+    u64 mut flags = 0;
+    if (k->is_mut) {
+        flags |= 1;
+    }
+    if (k->is_own) {
+        flags |= 2;
+    }
+    if (k->is_noreturn) {
+        flags |= 4;
+    }
+    h = hash_word(h, flags);
+    h = hash_word(h, cast(k->elem, u64));
+    h = hash_word(h, k->len);
+    h = hash_word(h, k->params.len);
     u64 mut i = 0;
-    while (i < tt->count) {
-        node* t = tt->nodes[i];
+    while (i < k->params.len) {
+        h = hash_word(h, cast(k->params[i], u64));
+        i += 1;
+    }
+    // FNV leaves the low bits weak for aligned addresses; fold the high bits
+    // down, because the slot mask reads the low bits.
+    h ^= h >> 32;
+    h *%= HASH_PRIME;
+    h ^= h >> 29;
+    return h;
+}
+
+// The key whose fields equal those of the interned node `t`.
+fn key_of_node(node* t) key {
+    key mut k = key{};
+    k.kind = t->kind;
+    k.prim = t->prim;
+    k.is_mut = t->is_mut;
+    k.is_own = t->is_own;
+    k.is_noreturn = t->is_noreturn;
+    k.elem = t->elem;
+    k.len = t->len;
+    k.params = t->params;
+    return k;
+}
+
+// Puts the node `t` into the first empty slot of its probe sequence. The
+// caller makes sure that an empty slot exists.
+fn index_put(table mut* tt, node* t) void {
+    key k = key_of_node(t);
+    u64 mask = tt->index.len - 1;
+    u64 mut at = key_hash(&k) & mask;
+    while (tt->index[at] != null) {
+        at = (at + 1) & mask;
+    }
+    tt->index[at] = t;
+    tt->indexed += 1;
+}
+
+/// The slot count that an intern index of `slots` slots grows to: INDEX_MIN_SLOTS, then twice
+/// the count. The function panics when twice the count does not fit u64.
+fn index_grown(u64 slots) u64 {
+    if (slots < INDEX_MIN_SLOTS) {
+        return INDEX_MIN_SLOTS;
+    }
+    // nothing here may detect an overflow by performing one
+    if (slots > U64_MAX / 2) {
+        panic("types.index_grown: capacity overflow");
+    }
+    return slots * 2;
+}
+
+// Ensures room for one more node in the intern index: at most half the slots
+// are full after the insertion. Growth doubles the slot count and puts every
+// node of the old index again.
+fn index_reserve(table mut* tt) void {
+    if ((tt->indexed + 1) * 2 <= tt->index.len) {
+        return;
+    }
+    node* mut@ own old = move(tt->index);
+    tt->index = new(node*, index_grown(old.len));
+    tt->indexed = 0;
+    u64 mut i = 0;
+    while (i < old.len) {
+        if (old[i] != null) {
+            index_put(tt, old[i]);
+        }
+        i += 1;
+    }
+    del(old);
+}
+
+// Adds the node `t` of type_void, type_null, type_error or type_prim, whose
+// fields are final, to the intern index, unless the index holds a node equal to
+// it. That earlier node stays the one that a key finds. Every constructor that
+// makes a node that is not nominal without `intern` must call this function.
+// Otherwise `intern` does not find that node, and it makes a second equal node.
+fn index_add(table mut* tt, node* t) void {
+    key k = key_of_node(t);
+    if (index_find(tt, &k) == null) {
+        index_reserve(tt);
+        index_put(tt, t);
+    }
+}
+
+// The node of the index equal to `k`, or null. The index holds, for each key,
+// the first node equal to it that the table made, and no other node equal to
+// it: `intern` adds a node only when the index has none equal to it, and so
+// does index_add. Nominal nodes stay out, and node_same matches none of them.
+// So the function finds what a walk over every node in creation order finds.
+fn index_find(table* tt, key* k) node* {
+    if (tt->index.len == 0) {
+        return null;
+    }
+    u64 mask = tt->index.len - 1;
+    u64 mut at = key_hash(k) & mask;
+    while (tt->index[at] != null) {
+        node* t = tt->index[at];
         if (node_same(t, k)) {
             return t;
         }
-        i += 1;
+        at = (at + 1) & mask;
+    }
+    return null;
+}
+
+// The interned node equal to `k`, or a fresh copy of it.
+fn intern(table mut* tt, key* k) node* {
+    node* found = index_find(tt, k);
+    if (found != null) {
+        return found;
     }
     node mut* t = node_new(tt, k->kind);
     t->prim = k->prim;
@@ -216,6 +359,8 @@ fn intern(table mut* tt, key* k) node* {
         }
         t->params = move(params);
     }
+    index_reserve(tt);
+    index_put(tt, t);
     return t;
 }
 
@@ -235,6 +380,7 @@ fn key_of(type_kind kind) key {
 fn type_void(table mut* tt) node* {
     if (tt->void_type == null) {
         tt->void_type = node_new(tt, type_kind.k_void);
+        index_add(tt, tt->void_type);
     }
     return tt->void_type;
 }
@@ -242,6 +388,7 @@ fn type_void(table mut* tt) node* {
 fn type_null(table mut* tt) node* {
     if (tt->null_type == null) {
         tt->null_type = node_new(tt, type_kind.k_null);
+        index_add(tt, tt->null_type);
     }
     return tt->null_type;
 }
@@ -249,6 +396,7 @@ fn type_null(table mut* tt) node* {
 fn type_error(table mut* tt) node* {
     if (tt->error_type == null) {
         tt->error_type = node_new(tt, type_kind.k_error);
+        index_add(tt, tt->error_type);
     }
     return tt->error_type;
 }
@@ -263,6 +411,7 @@ fn type_prim(table mut* tt, prim.prim_kind k) node* {
         node mut* t = node_new(tt, type_kind.k_prim);
         t->prim = k;
         tt->prims[slot] = t;
+        index_add(tt, t);
     }
     return tt->prims[slot];
 }

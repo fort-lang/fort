@@ -80,6 +80,14 @@ came here.
 
 ## 4. The checker
 
+- **Every type node that is not nominal must enter the intern index.** `types.intern` finds an
+  equal node through the hash index of the table (`src/fort/types.ft`), not through a walk over
+  every node. `intern` adds each node that it makes. `type_void`, `type_null`, `type_error` and
+  `type_prim` make their node without `intern`, so each of them calls `index_add`. A new
+  constructor of a node that is not nominal must call `index_add` too. Otherwise `intern` does
+  not find that node and makes a second equal node, and two equal types then compare unequal by
+  address. `index_add` keeps the first equal node, so a lookup finds the node that a walk in
+  creation order finds. `test/fort/types_intern_index_test.ft` holds the index against that walk.
 - **Checker annotations**: `type`, `sym`, `aux` and the `CHECK_ANN_*` bits of `ann` belong to
   the checker (`check.h`); `check_module` clears them before it writes them, so checking one
   module twice starts from the tree the parser left rather than reading symbols of a checker
