@@ -1,0 +1,346 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| lowered ok
+//| parsed ok
+//| list ok
+/// Checks stmt_read_all and term_read_all against stmt_read and term_read. A walk that fills a
+/// list must give, at each index, the read that a walk for that index alone gives, and no read
+/// past the last one. The cases are the functions of a fort source after the lowering and the
+/// functions of a FIR text with forms that the lowering writes rarely.
+import fir;
+import fir_lower;
+import lower_env;
+import pass_env;
+
+// Whether `a` and `b` are one read: the same place, part by part, the same emptying and the same
+// use.
+fn same_read(fir.read a, fir.read b) bool {
+    fir.place p = a.place;
+    fir.place q = b.place;
+    return p.base == q.base && p.local == q.local && p.global == q.global
+        && p.proj_first == q.proj_first && p.proj_len == q.proj_len && a.empties == b.empties
+        && a.is_use == b.is_use;
+}
+
+// The counts that a run of holds_for gathers over its functions.
+struct tally {
+    u64 items; // statements and terminators
+    u64 reads;
+    u64 most; // the most reads of one item
+    u64 empties; // the reads that a `move` or a `del` empties
+    u64 not_uses; // the reads that are no use
+}
+
+fn count(tally mut* t, fir.read_list* l) void {
+    t->items += 1;
+    t->reads += l->len;
+    if (l->len > t->most) {
+        t->most = l->len;
+    }
+    u64 mut k = 0;
+    while (k < l->len) {
+        if (l->items[k].empties) {
+            t->empties += 1;
+        }
+        if (!l->items[k].is_use) {
+            t->not_uses += 1;
+        }
+        k += 1;
+    }
+}
+
+// Holds the list `l` against stmt_read on `s`: one read for each index, equal to the read that
+// stmt_read gives there, and no read at the index past the list.
+fn statement_agrees(fir.func* f, fir.statement* s, fir.read_list* l) void {
+    fir.read mut r = fir.read{};
+    u32 mut k = 0;
+    while (fir.stmt_read(f, s, k, &r)) {
+        assert(cast(k, u64) < l->len);
+        assert(same_read(l->items[cast(k, u64)], r));
+        k += 1;
+    }
+    assert(cast(k, u64) == l->len);
+}
+
+// The same for the terminator `t` and term_read.
+fn terminator_agrees(fir.func* f, fir.terminator* t, fir.read_list* l) void {
+    fir.read mut r = fir.read{};
+    u32 mut k = 0;
+    while (fir.term_read(f, t, k, &r)) {
+        assert(cast(k, u64) < l->len);
+        assert(same_read(l->items[cast(k, u64)], r));
+        k += 1;
+    }
+    assert(cast(k, u64) == l->len);
+}
+
+// Holds both walks against each other on every item of `f`. One list serves every item, so each
+// fill must replace what the fill before it left.
+fn holds_for(fir.func* f, fir.read_list mut* l, tally mut* t) void {
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, i);
+            fir.stmt_read_all(f, s, l);
+            statement_agrees(f, s, l);
+            count(t, l);
+            i += 1;
+        }
+        fir.terminator* term = &fir.block_at(f, b)->term;
+        fir.term_read_all(f, term, l);
+        terminator_agrees(f, term, l);
+        count(t, l);
+        b += 1;
+    }
+}
+
+// ---- the lowered functions -----------------------------------------------------------------
+
+u64 SOURCE_LINES = 64;
+
+string[SOURCE_LINES] SOURCE = {
+    "struct pair {",
+    "    i32 a;",
+    "    u64 b;",
+    "}",
+    "struct holder {",
+    "    u8 mut* own p;",
+    "    u64 n;",
+    "}",
+    "fn wide(i32 a0, i32 a1, i32 a2, i32 a3, i32 a4, i32 a5, i32 a6, i32 a7, i32 a8, i32 a9,",
+    "        i32 b0, i32 b1, i32 b2, i32 b3, i32 b4, i32 b5, i32 b6, i32 b7, i32 b8,",
+    "        i32 b9) i32 {",
+    "    return a0;",
+    "}",
+    "fn call_wide(i32@ xs, u64 i) i32 {",
+    "    return wide(xs[i], xs[i], xs[i], xs[i], xs[i], xs[i], xs[i], xs[i], xs[i], xs[i],",
+    "                xs[0], xs[1], xs[2], xs[3], xs[4], xs[5], xs[6], xs[7], xs[8], xs[9]);",
+    "}",
+    "fn sum(i32@ xs) i64 {",
+    "    i64 mut s = 0;",
+    "    for (i32 x : xs) {",
+    "        s += cast(x, i64);",
+    "    }",
+    "    return s;",
+    "}",
+    "fn pick(i32[4] mut* arr, u64 i, string t) char {",
+    "    (*arr)[i] = 1;",
+    "    (*arr)[i + 1] = (*arr)[i];",
+    "    return t[i];",
+    "}",
+    "fn fill(pair mut* p, i32@ xs) void {",
+    "    p->a = xs[1];",
+    "    p->b = xs.len;",
+    "}",
+    "fn apply(fn (i32) i32 g, i32 v) i32 {",
+    "    return g(v) + g(g(v));",
+    "}",
+    "fn owner() u64 {",
+    "    holder mut h = holder{new(u8), 1};",
+    "    u8 mut* own q = move(h.p);",
+    "    h.p = move(q);",
+    "    u64 n = h.n;",
+    "    del(h.p);",
+    "    return n;",
+    "}",
+    "fn view(u8 mut@ buf, string s) u8@ {",
+    "    string t = s[1..2];",
+    "    return buf[1..3];",
+    "}",
+    "fn branch(i32 v, bool c) i32 {",
+    "    i32 mut r = 0;",
+    "    if (c && v > 3) {",
+    "        r = v / 2;",
+    "    } else {",
+    "        r = v << 1;",
+    "    }",
+    "    while (r > 100) {",
+    "        r -= 7;",
+    "    }",
+    "    return r;",
+    "}",
+    "fn local_array(u64 i) i32 {",
+    "    i32[4] mut a = {1, 2, 3, 4};",
+    "    return a[i];",
+    "}",
+};
+
+u64 NAME_COUNT = 9;
+
+string[NAME_COUNT] NAMES = {
+    "call_wide", "sum", "pick", "fill", "apply", "owner", "view", "branch", "local_array",
+};
+
+fn the_lists_of_lowered_functions_agree() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, SOURCE[..], true);
+    fir.read_list mut l = fir.read_list{};
+    defer fir.read_list_free(&l);
+    tally mut t = tally{};
+    u64 mut n = 0;
+    while (n < NAME_COUNT) {
+        fir.func mut f = fir.func{};
+        fir_lower.report mut why = fir_lower.report{};
+        assert(fir_lower.lower_function(&e.c.ck, lower_env.decl(&e, NAMES[n]), &f, &why));
+        holds_for(&f, &l, &t);
+        fir.func_free(&f);
+        n += 1;
+    }
+    // the call of `wide` reads twenty arguments and the index local of each, so the list grows
+    // past its first capacity
+    assert(t.most > 16);
+    assert(t.items > 100);
+    assert(t.empties > 0);
+}
+
+// ---- the parsed functions ------------------------------------------------------------------
+
+u64 PRELUDE_LINES = 12;
+
+string[PRELUDE_LINES] PRELUDE = {
+    "struct pair {",
+    "    i32 a;",
+    "    u64 b;",
+    "}",
+    "fn take(u8 mut* own p) void {",
+    "    del(p);",
+    "}",
+    "fn grab() u8 mut* own {",
+    "    return new(u8);",
+    "}",
+    "fn two(i32 a, i32 b) void {",
+    "}",
+};
+
+u64 TEXT_LINES = 32;
+
+// A `check` with reported operands, `check(overwrite: p)` through a deref, `fail`, a `switch`, a
+// `return` of a value and of `void`, a call through a value, a `del`, a slice of a span and of
+// an array, an `addr` through a deref, and `live` and `dead`, which read nothing.
+string[TEXT_LINES] TEXT = {
+    "fn main.f(_1 (xs): i32@, _2 (i): u64, _3 (p): pair mut*) -> i32 {",
+    "    let _4: i32;",
+    "    let _5: bool;",
+    "    let _6: u64;",
+    "    let _7 (a): i32[4];",
+    "    let _8: i32@;",
+    "    let _9: i32 mut*;",
+    "    bb0: {",
+    "        live(_7);",
+    "        _6 = copy _1.1;",
+    "        _5 = lt(copy _2, copy _6);",
+    "        check(copy _5, bounds, copy _2, copy _6) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _4 = copy _1[_2];",
+    "        (*_3).0 = copy _4;",
+    "        _7[_2] = copy (*_3).0;",
+    "        _8 = slice(_1, const u64 0, copy _2);",
+    "        _9 = addr mut((*_3).0);",
+    "        switch(copy _5) -> [true: bb2, otherwise: bb3];",
+    "    }",
+    "    bb2: {",
+    "        dead(_7);",
+    "        _0 = copy _7[_2];",
+    "        return;",
+    "    }",
+    "    bb3: {",
+    "        fail(panic, const bytes \"m\", copy _6);",
+    "    }",
+    "}",
+    "fn main.g(_1 (h): fn (i32, i32) void, _2 (q): u8 mut* own*, _3 (r): u8 mut* own) -> void {",
+    "    let _4: void;",
+};
+
+u64 TEXT_TAIL_LINES = 9;
+
+string[TEXT_TAIL_LINES] TEXT_TAIL = {
+    "    let _5: u8 mut* own;",
+    "    bb0: {",
+    "        _4 = call copy _1(const i32 1, const i32 2);",
+    "        check(overwrite: (*_2)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_2) = move _3;",
+    "        return;",
+    "    }",
+};
+
+fn the_lists_of_parsed_functions_agree() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[TEXT_LINES + TEXT_TAIL_LINES + 1] mut lines = {};
+    u64 mut k = 0;
+    while (k < TEXT_LINES) {
+        lines[k] = TEXT[k];
+        k += 1;
+    }
+    u64 mut j = 0;
+    while (j < TEXT_TAIL_LINES) {
+        lines[k] = TEXT_TAIL[j];
+        k += 1;
+        j += 1;
+    }
+    lines[k] = "}";
+    fir.module mut m = pass_env.parse(&e, PRELUDE[..], lines[..]);
+    defer fir.module_free(&m);
+    fir.read_list mut l = fir.read_list{};
+    defer fir.read_list_free(&l);
+    tally mut t = tally{};
+    u64 mut n = 0;
+    while (n < fir.module_function_count(&m)) {
+        holds_for(fir.module_function_at(&m, n), &l, &t);
+        n += 1;
+    }
+    assert(fir.module_function_count(&m) == 2);
+    // the overwrite check reads its place with no use, and the store empties `_3`
+    assert(t.not_uses == 1);
+    assert(t.empties == 1);
+    assert(t.reads > 20);
+}
+
+// ---- the list ------------------------------------------------------------------------------
+
+// A fill replaces the list, keeps its storage, and grows it by doubling past VEC_MIN_CAP.
+fn a_list_keeps_its_storage_across_fills() void {
+    fir.read_list mut l = fir.read_list{};
+    assert(l.len == 0 && l.items.len == 0);
+    fir.read r = fir.read{fir.place_local(3), true, false};
+    u64 mut k = 0;
+    while (k < 40) {
+        fir.read_list_push(&l, r);
+        k += 1;
+    }
+    assert(l.len == 40);
+    assert(l.items.len == 64);
+    k = 0;
+    while (k < 40) {
+        assert(same_read(l.items[k], r));
+        k += 1;
+    }
+    fir.read_list_free(&l);
+    assert(l.len == 0 && l.items.len == 0);
+    // a statement that reads nothing empties a list that held reads
+    fir.read_list_push(&l, r);
+    fir.statement live = fir.stmt_live(1, fir.statement{}.loc, 1);
+    fir.func f = fir.func{};
+    fir.stmt_read_all(&f, &live, &l);
+    assert(l.len == 0);
+    assert(l.items.len == 16);
+    fir.read_list_free(&l);
+}
+
+fn main() i32 {
+    the_lists_of_lowered_functions_agree();
+    println("lowered ok");
+    the_lists_of_parsed_functions_agree();
+    println("parsed ok");
+    a_list_keeps_its_storage_across_fills();
+    println("list ok");
+    return 0;
+}
