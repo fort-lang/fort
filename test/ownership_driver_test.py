@@ -40,7 +40,7 @@ class OwnershipDriverTest(unittest.TestCase):
         return path
 
     def invoke(self, *flags, selected=True, report=True, check=True, standard=None, entry=None,
-               process_setup=None):
+               process_setup=None, sources=()):
         self.standard_used = standard or self.standard
         self.entry_used = entry or self.entry
         argv = [OPTIONS.fort, "--std-dir", str(self.standard_used)]
@@ -53,7 +53,7 @@ class OwnershipDriverTest(unittest.TestCase):
         argv.extend(flags)
         argv.append(str(self.entry_used))
         self.argv = argv
-        self.candidates = audit.snapshot([self.root, self.standard_used])
+        self.candidates = audit.snapshot([self.root, self.standard_used, *sources])
         self.result = subprocess.run(
             argv, cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
             timeout=120, preexec_fn=process_setup,
@@ -66,7 +66,8 @@ class OwnershipDriverTest(unittest.TestCase):
         self.assertTrue(self.report.is_file(), self.result.stderr.decode())
         document = audit.read_json(self.report)[0]
         arguments = dict(
-            argv=self.argv, cwd=self.root, root=str(self.entry_used.resolve()),
+            argv=self.argv, cwd=self.root,
+            root=audit.normalize(str(self.entry_used), self.root, CHECKOUT, self.standard_used),
             target=target or self.target,
             cfg=audit.effective_configuration(target or self.target, cfg), checkout=CHECKOUT,
             standard=self.standard_used, exit_status=self.result.returncode,
@@ -812,6 +813,42 @@ class OwnershipDriverTest(unittest.TestCase):
                                     self.result.stderr))
         self.assertTrue(all(value == projections[0] for value in projections))
         self.assertEqual(projections[0][1], 4)
+
+    # Three compiler bodies: the root, the module and the declaration. At W_scale 64 the stored
+    # ledger of ownership_events.clone refused W: it needs 107761 W and 64 gave it 97600.
+    LEDGER_BODIES = (
+        ("ownership_events.ft", "ownership_events", "clone"),
+        ("ownership_events.ft", "fir", "func_clone"),
+        ("ownership_state.ft", "ownership_state", "measure_regions"),
+    )
+
+    def test_compiler_bodies_keep_their_stored_ledgers(self):
+        source = CHECKOUT / "src" / "fort"
+        for root in sorted({row[0] for row in self.LEDGER_BODIES}):
+            with self.subTest(root=root):
+                self.assertEqual(self.invoke(standard=Path(OPTIONS.std_dir), entry=source / root,
+                                             sources=(source,)).returncode, 1)
+                document = self.evidence()
+                limits = document["limits"]
+                for _, module, declaration in (r for r in self.LEDGER_BODIES if r[0] == root):
+                    rows = [row for row in document["bodies"]
+                            if row["source"]["module"] == module
+                            and row["source"]["name"] == declaration]
+                    self.assertEqual(len(rows), 1, declaration)
+                    ledgers = [meter for meter in document["meters"]
+                               if meter["name"] == "stored_borrows"
+                               and meter["owner"] == rows[0]["key"]]
+                    self.assertEqual(len(ledgers), 1, declaration)
+                    self.assertIsNone(ledgers[0]["first_refusal"], declaration)
+                    counts = {count["category"]: count for count in ledgers[0]["counts"]}
+                    self.assertEqual(counts["W"]["bound"], limits["w"] + limits["w_scale"] *
+                                     ledgers[0]["fir_size"])
+                    self.assertGreater(counts["W"]["used"], 0, declaration)
+                    self.assertLess(counts["W"]["used"], counts["W"]["bound"], declaration)
+                    self.assertLess(counts["V"]["used"], counts["V"]["bound"], declaration)
+                    stored = rows[0]["analyses"][3]
+                    self.assertEqual(stored["name"], "stored_borrows")
+                    self.assertEqual((stored["solver"], stored["violations"]), ("complete", 0))
 
     def test_report_can_replace_an_old_report_atomically(self):
         self.report.write_bytes(b"old report\n")
