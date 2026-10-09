@@ -115,6 +115,16 @@ fn bits_union(bits mut* dst, bits* src) void {
     }
 }
 
+/// Removes from `dst` the numbers that `src` holds. The function panics when the counts differ.
+fn bits_subtract(bits mut* dst, bits* src) void {
+    same_count(dst, src, "fir_flow.bits_subtract: the counts differ");
+    u64 mut w = 0;
+    while (w < dst->words.len) {
+        dst->words[w] &= ~src->words[w];
+        w += 1;
+    }
+}
+
 /// Whether `a` and `b` hold the same numbers. The function panics when the counts differ.
 fn bits_equal(bits* a, bits* b) bool {
     same_count(a, b, "fir_flow.bits_equal: the counts differ");
@@ -262,6 +272,28 @@ fn dataflow_forward(fir.func* f, dataflow mut* d) void {
 // Each out-set starts at the identity of the join and moves in one direction under a monotone
 // transfer, so it changes at most once for each number, and the loop ends.
 fn dataflow_forward_with(fir.func* f, fir.pred_table* pt, dataflow mut* d) void {
+    bits@ none = {};
+    forward(f, pt, d, none, none, false);
+}
+
+/// Runs the dataflow `d` as dataflow_forward_with does, with a transfer that two sets give:
+/// the transfer of block `b` removes the numbers of `kills[b]` and then adds those of `gens[b]`.
+/// It does not call `d->transfer`. Such a transfer is monotone. `gens` and `kills` hold one set of
+/// `d->count` numbers for each block of `f`. The function panics when either holds another count
+/// of sets.
+fn dataflow_forward_sets(fir.func* f, fir.pred_table* pt, dataflow mut* d, bits@ gens,
+                         bits@ kills) void {
+    u64 blocks = cast(fir.block_count(f), u64);
+    if (gens.len != blocks || kills.len != blocks) {
+        panic("fir_flow.dataflow_forward_sets: the set counts differ from the block count");
+    }
+    forward(f, pt, d, gens, kills, true);
+}
+
+// The loop of dataflow_forward_with and dataflow_forward_sets. `by_sets` selects the transfer
+// that `gens` and `kills` give over `d->transfer`.
+fn forward(fir.func* f, fir.pred_table* pt, dataflow mut* d, bits@ gens, bits@ kills,
+           bool by_sets) void {
     results_free(d);
     u32 n = fir.block_count(f);
     u64 size = cast(n, u64);
@@ -287,7 +319,12 @@ fn dataflow_forward_with(fir.func* f, fir.pred_table* pt, dataflow mut* d) void 
         u32 at = work_pop(&wl);
         block_in(d, pt, at);
         bits_copy(&next, &d->ins[cast(at, u64)]);
-        d->transfer(f, at, &next);
+        if (by_sets) {
+            bits_subtract(&next, &kills[cast(at, u64)]);
+            bits_union(&next, &gens[cast(at, u64)]);
+        } else {
+            d->transfer(f, at, &next);
+        }
         d->steps += 1;
         if (!bits_equal(&next, &d->outs[cast(at, u64)])) {
             bits_copy(&d->outs[cast(at, u64)], &next);

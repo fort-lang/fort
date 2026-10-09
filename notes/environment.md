@@ -78,6 +78,11 @@ without a rewrite.
   so it counted the pause. Print `uptime` before and after any measurement
   you will quote, and compare the two "up N min" values with the wall time. The same command at
   the same guest load measured 35.33 s (T-094).
+  Host load from other agents also makes a guest measurement noisy without a pause. T-269 timed
+  one compiler phase five times in the VM while the host load average was 16 to 19. The runs
+  spread from 2962 to 5494 ms. A second run at a lower host load spread from 2960 to 3106 ms. To
+  compare two compilers, interleave the runs of the base and the branch in one session, run the
+  set twice, and quote the run with the smaller spread (T-269).
 - **Before you call a failure contention, look for your own abandoned processes.** A dedicated VM
   stops one agent competing with another. It does nothing about an agent competing with itself,
   and that is what a whole afternoon of "contention from other worktrees" was on 2026-09-12. Two
