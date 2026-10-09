@@ -1,0 +1,184 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| registry ok
+//| tool ok
+//| witnesses ok
+/// Holds the process-exit verdicts of small programs that use owning globals as compiler code
+/// does: a registry that a library fills and cleans, and a command-line tool that ends through
+/// the runtime exit (D11.6, D17.18, D17.19).
+import ownership_exit_source_env as env;
+import ownership_source_exit;
+
+// A library registry: an owning table, a count, and an explicit cleanup. The library retains
+// its owners between calls, and `reset` is its cleanup (G5, X7). The line of each case is its
+// line in `lines`, from 1.
+fn registry() void {
+    env.closure mut c = env.closure{};
+    string[38] lines = {
+        "struct entry { u8 mut@ own name; u64 size; }",
+        "struct table { entry mut@ own items; u64 len; }",
+        "table mut registry = {};",
+        "fn open(u64 capacity) void {",
+        "    del(registry.items);",
+        "    registry.items = new(entry, capacity);",
+        "    registry.len = 0;",
+        "}",
+        "fn count() u64 {",
+        "    return registry.len;",
+        "}",
+        "fn grow(u64 capacity) void {",
+        "    entry mut@ own bigger = new(entry, capacity);",
+        "    entry mut@ own old = move(registry.items);",
+        "    del(old);",
+        "    registry.items = move(bigger);",
+        "}",
+        "fn reopen_without_release(u64 capacity) void {",
+        "    registry.items = new(entry, capacity);",
+        "}",
+        "fn reset() void {",
+        "    del(registry.items);",
+        "    registry.len = 0;",
+        "}",
+        "fn handover() entry mut@ own {",
+        "    registry.len = 0;",
+        "    return move(registry.items);",
+        "}",
+        "fn reset_twice() void {",
+        "    reset();",
+        "    del(registry.items);",
+        "}",
+        "fn first_size() u64 {",
+        "    if (registry.len == 0) { return 0; }",
+        "    return registry.items[0].size;",
+        "}",
+        "fn none() void {}",
+        "fn other() void {}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    assert(!env.shared(&c)->executable);
+    // Shallow del of `entry mut@ own` needs each `name` empty: heap facts decide it.
+    env.outside(&c, "open", ownership_source_exit.missing.owned_descendants, 5);
+    env.proved(&c, "count");
+    // `grow` moves the old table out before the store, so the store finds the field empty.
+    env.proved(&c, "grow");
+    assert(env.body(&c, "grow")->global_moves == 1 && env.body(&c, "grow")->global_stores == 1);
+    // The table of a caller is a caller requirement: only a summary checks it.
+    env.outside(&c, "reopen_without_release", ownership_source_exit.missing.caller_state, 19);
+    env.outside(&c, "reset", ownership_source_exit.missing.owned_descendants, 22);
+    env.proved(&c, "handover");
+    assert(env.empties(&c, "main", "handover", "registry"));
+    assert(env.empties(&c, "main", "reset", "registry"));
+    env.outside(&c, "reset_twice", ownership_source_exit.missing.owned_descendants, 31);
+    env.proved(&c, "first_size");
+    // `handover` and `reset` each empty the one leaf of the registry. Its entries own names,
+    // and only heap facts prove them released or transferred, so neither body is a cleanup of
+    // the registry (D17.16). The runtime has `shutdown`.
+    assert(!ownership_source_exit.cleans(env.body(&c, "handover"), env.leaf_of(&c, "registry")));
+    assert(!ownership_source_exit.cleans(env.body(&c, "reset"), env.leaf_of(&c, "registry")));
+    env.boundary(&c, "incomplete", "incomplete");
+    assert(env.shared(&c)->boundary_gap_source.line == 3);
+    env.finish(&c, "registry ok");
+}
+
+// A command-line tool: its owners are released before the runtime exit, or the exit is the
+// final boundary with a live owner (X2, X3).
+fn tool() void {
+    env.closure mut c = env.closure{};
+    string[34] lines = {
+        "import std.libc;",
+        "import std.rt;",
+        "u8 mut@ own mut buffer = {};",
+        "fn fail_cleanly(i32 status) void {",
+        "    del(buffer);",
+        "    rt.exit(status);",
+        "}",
+        "fn fail_with_buffer(i32 status) void {",
+        "    u8 mut@ own scratch = new(u8, 16);",
+        "    rt.exit(status);",
+        "}",
+        "fn fail_directly(i32 status) void {",
+        "    del(buffer);",
+        "    rt.shutdown();",
+        "    libc.exit(status);",
+        "}",
+        "fn load(u64 n) void {",
+        "    del(buffer);",
+        "    buffer = new(u8, n);",
+        "}",
+        "fn process() u64 {",
+        "    u64 total = buffer.len;",
+        "    return total;",
+        "}",
+        "fn main() i32 {",
+        "    load(4);",
+        "    u64 n = process();",
+        "    if (n == 0) { fail_cleanly(2); }",
+        "    del(buffer);",
+        "    return 0;",
+        "}",
+        "fn none() void {}",
+        "fn other() void {}",
+        "fn third() void {}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    assert(env.shared(&c)->executable);
+    // The frame holds nothing at the call of rt.exit. The runtime exit itself needs `buffer`
+    // empty, which only a summary of its callers can prove.
+    env.proved(&c, "fail_cleanly");
+    // `scratch` is live over a call that can end the process: a summary of rt.exit decides it.
+    env.outside(&c, "fail_with_buffer", ownership_source_exit.missing.suspended_owner, 10);
+    // After rt.shutdown the user global comes from that callee: a summary decides it.
+    env.outside(&c, "fail_directly", ownership_source_exit.missing.boundary_state, 15);
+    env.proved(&c, "load");
+    env.proved(&c, "process");
+    env.proved(&c, "main");
+    env.outside_in(&c, "std.rt", "exit", ownership_source_exit.missing.boundary_state, 0);
+    // The generated boundary needs the summary of main for `buffer`.
+    env.boundary(&c, "incomplete", "incomplete");
+    env.finish(&c, "tool ok");
+}
+
+// A violation needs a witness path that the walk can follow: a branch on a value that only a
+// call gives has no witness, so the declared obligation stays unproved.
+fn witnesses() void {
+    env.closure mut c = env.closure{};
+    string[20] lines = {
+        "import std.libc;",
+        "extern fn foreign_value() u64;",
+        "fn after_a_foreign_branch() void {",
+        "    u8 mut@ own p = new(u8, 1);",
+        "    if (foreign_value() == 7) {",
+        "        libc.exit(1);",
+        "    }",
+        "    del(p);",
+        "}",
+        "fn after_a_parameter_branch(u64 n) void {",
+        "    u8 mut@ own p = new(u8, 1);",
+        "    if (n == 7) {",
+        "        libc.exit(1);",
+        "    }",
+        "    del(p);",
+        "}",
+        "fn main() i32 { return 0; }",
+        "fn none() void {}",
+        "fn other() void {}",
+        "fn third() void {}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    // The walk does not know the foreign result, so no witness reaches the exit call.
+    env.unproved(&c, "after_a_foreign_branch", "p", ownership_source_exit.EXIT_UNPROVED, 6);
+    // A parameter value that no earlier condition fixed lets the walk take the branch.
+    env.violation(&c, "after_a_parameter_branch", "p", ownership_source_exit.EXIT_LOST, 13);
+    env.finish(&c, "witnesses ok");
+}
+
+fn main() i32 {
+    registry();
+    tool();
+    witnesses();
+    return 0;
+}
