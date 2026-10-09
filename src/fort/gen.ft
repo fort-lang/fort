@@ -1521,8 +1521,9 @@ u64 STATUS_MASK = 255;
 /// `main_sym`. It takes C's `argc` and `argv` and returns C's `int`.
 // It is a definition of this module like any other and carries `dso_local` and `#0`. It calls
 // `std.rt.args_init`, then `std.rt.args`, which builds the span in this frame, then the program's
-// `main`, then `std.rt.flush_all`, and returns the low status byte. `args_init` runs first, since
-// `args` hands out what it built.
+// `main`, then `std.rt.shutdown`, and returns the low status byte. `args_init` runs first, since
+// `args` hands out what it built. `shutdown` flushes and then releases the argument headers, so
+// the final obligation boundary before `ret` finds the runtime owner empty (D11.6, D17.19).
 fn gen_main(emitter mut* g, ast.sym* main_sym) void {
     function_begin(g);
     gen_use_attr(g, ATTR_FN);
@@ -1558,9 +1559,9 @@ fn gen_main(emitter mut* g, ast.sym* main_sym) void {
     gen_val callee = gen_literal(g, "ptr", gen_symbol_ref(g, main_sym));
     gen_val status = gen_call_sig(g, &s, callee, false, &main_args);
     gen_args_free(&main_args);
-    gen_args mut flush_args = gen_args_init();
-    gen_call_rt(g, runtime_sig.rt_entry.rt_flush_all, &flush_args);
-    gen_args_free(&flush_args);
+    gen_args mut shutdown_args = gen_args_init();
+    gen_call_rt(g, runtime_sig.rt_entry.rt_shutdown, &shutdown_args);
+    gen_args_free(&shutdown_args);
     gen_val masked = gen_binary(g, "and", status, gen_const_unsigned(g, "i32", STATUS_MASK));
     strbuf.append(&g->body, "  ret i32 ");
     strbuf.append(&g->body, masked.val);

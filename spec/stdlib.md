@@ -1239,12 +1239,16 @@ fn exit(i32 status) noreturn;
   The runtime owns the header allocation and borrows the argv bytes.
   Final normal-exit cleanup releases that allocation after source execution and applicable defers
   (D17.19).
+  A call of the runtime cleanup `std.rt.shutdown` before `main` returns releases it early: each
+  view that `args()` or `main`'s parameter gave ends there, and a later element read reads
+  released storage.
 - `flush`: writes out the runtime's buffer for one descriptor, if it has one, and is a
   no-op otherwise. `io.close` and `io.flush` call it, as D11.5 specifies.
 - `flush_all`: writes out every runtime buffer. The library does not call it; it is
-  there for programs that write through `libc.write` after printing (2.2), and the `main` the
-  compiler emits calls it at exit (D11.6).
-- `exit`: flushes every runtime buffer, then releases runtime-owned argument-header storage.
+  there for programs that write through `libc.write` after printing (2.2), and the runtime
+  cleanup `shutdown` that the `main` the compiler emits calls at exit calls it first (D11.6).
+- `exit`: calls the runtime cleanup `shutdown` (`toolchain.md` 5.1). That flushes every runtime
+  buffer, then releases runtime-owned argument-header storage.
   It exits with status & 0xFF. sys.exit calls it.
   It does not run caller defers or automatically delete user globals.
   The final normal-exit boundary follows its cleanup effects (D17.19).

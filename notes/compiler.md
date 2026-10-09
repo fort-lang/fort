@@ -1978,6 +1978,13 @@ came here.
 
 ## 7. The runtime and the standard library
 
+- **`std.rt.shutdown` is the runtime cleanup before normal exit** (D11.6, D17.19).
+  It calls `flush_all` and then `del(args_store)`. The emitted `main` calls it after the
+  program's `main` returns, in place of `flush_all`, and `std.rt.exit` calls it before
+  `libc.exit`. A second call finds `args_store` empty and releases nothing
+  (`run/stdlib/121_rt_shutdown`). The pinned compilers still emit `flush_all` in their `main`,
+  so `flush_all` keeps its entry point.
+
 - **Extern declarations keep allocator failure calls** (T-149).
   Apple clang `-O1` removes a `calloc` and matching `free` when the caller reads
   no storage, even with `#3 nobuiltin` at the call site. The emitter adds

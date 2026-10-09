@@ -1348,7 +1348,8 @@ Release that allocation and empty args_store before normal executable terminatio
 This requirement also applies when source main has no argument parameter.
 Account for the generated startup and shutdown sequence outside source-function FIR.
 Checking only source-function returns does not prove this sequence.
-The rule fixes no new runtime ABI helper or runtime ownership representation.
+The runtime function `std.rt.shutdown` performs the flush and then the release (D11.6). The
+generated main and `std.rt.exit` call it. The rule adds no runtime ownership representation.
 The proof must not replace an absent implementation effect with the intended runtime behavior.
 
 **Libraries.** A library can retain owners between ordinary calls (D17.19).

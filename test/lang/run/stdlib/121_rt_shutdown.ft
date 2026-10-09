@@ -1,0 +1,35 @@
+//! run
+//! args: alpha beta
+//! stdout:
+//| 3 buffered before shutdown
+//| written after shutdown
+//| 0 true
+//| 0 true
+//| last line
+import std.libc;
+import std.rt;
+
+// shutdown is the runtime cleanup before normal process exit (D11.6, D17.19,
+// toolchain.md 5.1). It flushes every buffer first and then releases the
+// argument headers. The first line goes into the stdout buffer, and the second
+// goes straight to the descriptor through libc.write. The second line can come
+// after the first only if shutdown flushed the buffer before it returned.
+// After the release the runtime owner is empty: args() is the zero span. A
+// second call finds the owner empty, which is legal (D17.9), and the main that
+// the compiler emits calls shutdown a third time after this main returns. The
+// last line is in the buffer when this main returns, so that call flushes it.
+//
+// The span main received views the released headers, so this main copies the
+// count first and reads argv no more after the first call.
+fn main(string@ argv) i32 {
+    u64 count = argv.len;
+    println(count, " buffered before shutdown");
+    rt.shutdown();
+    string direct = "written after shutdown\n";
+    libc.write(1, cast(direct.ptr, u8*), direct.len);
+    println(rt.args().len, " ", rt.args().ptr == null);
+    rt.shutdown();
+    println(rt.args().len, " ", rt.args().ptr == null);
+    println("last line");
+    return 0;
+}

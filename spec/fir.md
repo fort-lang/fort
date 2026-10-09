@@ -815,7 +815,7 @@ the verifier excuses no kind. A `fail` always needs its entry. Only a stub `std.
 an old `--std-dir` meets either error of a runtime entry. The compiler tests the entries of these
 errors alone: the print functions, `str_eq` and the entry of each check kind. It assumes the
 other `std.rt` functions that the translator calls, such as `alloc`, `free`, `args_init`,
-`args` and `flush_all`.
+`args` and `shutdown`.
 
 ## 10. The verifier
 
