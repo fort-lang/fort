@@ -1,0 +1,179 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| values ok
+//| aggregates ok
+//| foreign ok
+/// Holds the value that each right side gives to an owning destination: an allocation, a moved
+/// local, a cast, an aggregate, a fort call result and a foreign result (D17.13, D17.19).
+import ownership_exit_source_env as env;
+import ownership_source_exit;
+
+// The state of the stored value decides the exit fact and the next store. The line of each
+// case is its line in `lines`, from 1.
+fn values() void {
+    env.closure mut c = env.closure{};
+    string[42] lines = {
+        "u8 mut@ own mut pool = {};",
+        "fn make() u8 mut@ own { return new(u8, 1); }",
+        "fn allocated() void {",
+        "    del(pool);",
+        "    pool = new(u8, 1);",
+        "}",
+        "fn empty_local() void {",
+        "    del(pool);",
+        "    u8 mut@ own e = {};",
+        "    pool = move(e);",
+        "}",
+        "fn released_local() void {",
+        "    del(pool);",
+        "    u8 mut@ own e = new(u8, 2);",
+        "    del(e);",
+        "    pool = move(e);",
+        "}",
+        "fn twice_from_locals() void {",
+        "    del(pool);",
+        "    u8 mut@ own a = new(u8, 1);",
+        "    pool = move(a);",
+        "    u8 mut@ own b = new(u8, 2);",
+        "    pool = move(b);",
+        "}",
+        "fn from_a_call() void {",
+        "    del(pool);",
+        "    pool = make();",
+        "}",
+        "fn after_a_call_result() void {",
+        "    del(pool);",
+        "    u8 mut@ own r = make();",
+        "    pool = move(r);",
+        "    u8 mut@ own s = new(u8, 1);",
+        "    pool = move(s);",
+        "}",
+        "fn moved_out_then_stored() void {",
+        "    u8 mut@ own old = move(pool);",
+        "    pool = new(u8, 3);",
+        "    del(old);",
+        "}",
+        "fn main() i32 { return 0; }",
+        "fn none() void {}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    env.proved(&c, "allocated");
+    assert(!env.empties(&c, "main", "allocated", "pool"));
+    // A local that holds nothing gives an empty owner, released or never filled.
+    env.proved(&c, "empty_local");
+    assert(env.empties(&c, "main", "empty_local", "pool"));
+    env.proved(&c, "released_local");
+    assert(env.empties(&c, "main", "released_local", "pool"));
+    // The first store fills the owner from a local that holds an allocation.
+    env.violation(&c, "twice_from_locals", "pool", ownership_source_exit.STORE_LOST, 23);
+    // A fort call writes its result after its effects, so a summary decides the old leaf.
+    env.outside(&c, "from_a_call", ownership_source_exit.missing.caller_state, 27);
+    // The callee can write the global, so the store after the call needs a summary. The
+    // destination of the call held nothing before the call, so the call suspends no owner.
+    env.outside(&c, "after_a_call_result", ownership_source_exit.missing.caller_state, 32);
+    // A move out empties the global, so the store needs no release first (D17.19).
+    env.proved(&c, "moved_out_then_stored");
+    assert(env.body(&c, "moved_out_then_stored")->global_moves == 1);
+    env.finish(&c, "values ok");
+}
+
+// A struct value takes any state of its owning members. A whole move of a global aggregate
+// empties each of its leaves; a whole store checks each old leaf (D17.15).
+fn aggregates() void {
+    env.closure mut c = env.closure{};
+    string[30] lines = {
+        "struct pair { u8 mut@ own a; u8* b; u8 mut@ own c; }",
+        "pair mut both = {};",
+        "fn take_all() pair { return move(both); }",
+        "fn refill_one() void {",
+        "    del(both.a);",
+        "    both.a = new(u8, 1);",
+        "    both.a = new(u8, 2);",
+        "}",
+        "fn fields_apart() void {",
+        "    del(both.a);",
+        "    both.a = new(u8, 1);",
+        "    del(both.c);",
+        "    both.c = new(u8, 1);",
+        "}",
+        "fn whole_store_after_take() void {",
+        "    pair old = move(both);",
+        "    both = pair{new(u8, 1), null, new(u8, 2)};",
+        "    del(old.a);",
+        "    del(old.c);",
+        "}",
+        "fn whole_store_over_one() void {",
+        "    del(both.a);",
+        "    both = pair{new(u8, 1), null, new(u8, 2)};",
+        "}",
+        "fn empty_value() void {",
+        "    del(both.a);",
+        "    del(both.c);",
+        "    both = pair{};",
+        "}",
+        "fn main() i32 { return 0; }",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    env.proved(&c, "take_all");
+    // The second store into the same field replaces the allocation of the first.
+    env.violation(&c, "refill_one", "both", ownership_source_exit.STORE_LOST, 7);
+    // Two fields are two leaves: the store into `c` needs only the release of `c`.
+    env.proved(&c, "fields_apart");
+    env.proved(&c, "whole_store_after_take");
+    // A whole store writes `c` too, whose old state comes from the caller.
+    env.outside(&c, "whole_store_over_one", ownership_source_exit.missing.caller_state, 23);
+    env.proved(&c, "empty_value");
+    assert(env.empties(&c, "main", "empty_value", "both"));
+    env.finish(&c, "aggregates ok");
+}
+
+// A foreign result is a trusted fresh obligation or null (D17.13): no summary decides which,
+// so the obligation stays declared. Extern calls keep the known facts of fort storage.
+fn foreign() void {
+    env.closure mut c = env.closure{};
+    string[25] lines = {
+        "extern fn foreign_make(u64 n) u8 mut* own;",
+        "extern fn foreign_touch() void;",
+        "extern fn foreign_take(u8 mut* own p) void;",
+        "u8 mut* own mut held = null;",
+        "fn kept_across_extern() void {",
+        "    del(held);",
+        "    foreign_touch();",
+        "    held = new(u8);",
+        "}",
+        "fn foreign_twice() void {",
+        "    del(held);",
+        "    held = foreign_make(1);",
+        "    held = foreign_make(2);",
+        "}",
+        "fn handed_over() void {",
+        "    foreign_take(move(held));",
+        "    held = foreign_make(1);",
+        "}",
+        "fn foreign_into_local() void {",
+        "    u8 mut* own p = foreign_make(1);",
+        "    foreign_take(move(p));",
+        "    foreign_touch();",
+        "}",
+        "fn main() i32 { return 0; }",
+        "fn none() void {}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    env.proved(&c, "kept_across_extern");
+    env.unproved(&c, "foreign_twice", "held", ownership_source_exit.STORE_UNPROVED, 13);
+    // An own argument transfers the owner: the move empties the global (D17.13).
+    env.proved(&c, "handed_over");
+    env.proved(&c, "foreign_into_local");
+    env.finish(&c, "foreign ok");
+}
+
+fn main() i32 {
+    values();
+    aggregates();
+    foreign();
+    return 0;
+}
