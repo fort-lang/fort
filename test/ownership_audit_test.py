@@ -970,7 +970,9 @@ class SchemaTests(RepositoryFixture):
         self.assertEqual(audit.work_bound(LIMITS, 0), 65536)
         self.assertEqual(audit.work_bound(LIMITS, 77579), W_BASE + W_SCALE * 77579)
         self.assertEqual(audit.work_bound(LIMITS, audit.U64_MAX), audit.U64_MAX)
-        self.assertEqual(audit.work_bound(LIMITS, (audit.U64_MAX - W_BASE) // W_SCALE + 1), audit.U64_MAX)
+        self.assertEqual(
+            audit.work_bound(LIMITS, (audit.U64_MAX - W_BASE) // W_SCALE + 1), audit.U64_MAX
+        )
         owner = self.report["bodies"][0]["key"]
         self.report["analyses"][1]["producer"] = "integrated"
         self.report["bodies"][0]["analyses"][1].update(
@@ -1013,7 +1015,10 @@ class SchemaTests(RepositoryFixture):
         self.validate()
         for mutation, pattern in (
             (lambda r: r["meters"][0].update(fir_size=1200), "meter: bound mismatch"),
-            (lambda r: r["meters"][1]["counts"][1].update(bound=256 + 64 * 1201), "bound mismatch"),
+            (
+                lambda r: r["meters"][1]["counts"][1].update(bound=256 + W_SCALE * 1201),
+                "bound mismatch",
+            ),
             (
                 lambda r: r["meters"][1]["first_refusal"]["limit"].update(bound=65536),
                 "differs from its ledger",

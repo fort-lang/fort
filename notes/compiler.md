@@ -1776,8 +1776,8 @@ came here.
   `walk` after k scalar declarations uses 15990, 30519 and 48070 W for k = 1, 2 and 3, in 3
   rounds and one publication round. That is 4.7 to 5.7 times the 3384, 5708 and 8486 W of
   the same body that calls another body. At k = 4 the self call reached its bound of 67520
-  under W_scale 64 and published `work_limit`; the plain body uses 11683. These measurements
-  used W_scale 64. The production W_scale is 1024 since 2026-10-08.
+  under W_scale 64 and published `work_limit`; the plain body uses 11683. The production
+  W_scale is 1024 (the 2026-10-07 ruling).
 - **A branch on a captured formal gives guarded cases** (D17.18).
   Extraction walks each reached block of a forward tree and keeps the origins and scalars at each
   block entry. A back edge or a second parent keeps the body unsupported, so an `if` whose
