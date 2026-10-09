@@ -639,7 +639,9 @@ fn round_scaled(bignum mut* value, i64 e, bool neg, bool is_f32, u64 mut* out) b
 }
 
 // The 128-bit product of two u64 values, in halves: the mantissas a
-// multiplication folds are 53 bits each and their product is 106.
+// multiplication folds are 53 bits each and their product is 106. The two
+// helpers keep each body below the effect bound of the ownership summary
+// (`spec/fir.md` 14.1); no sum or product here can overflow.
 fn mul_u64(u64 a, u64 b, u64 mut* hi, u64 mut* lo) void {
     u64 a0 = a & LIMB_MASK;
     u64 a1 = a >> LIMB_BITS;
@@ -648,10 +650,19 @@ fn mul_u64(u64 a, u64 b, u64 mut* hi, u64 mut* lo) void {
     u64 low = a0 * b0;
     u64 cross1 = a0 * b1;
     u64 cross2 = a1 * b0;
-    u64 high = a1 * b1;
-    u64 mid = (low >> LIMB_BITS) + (cross1 & LIMB_MASK) + (cross2 & LIMB_MASK);
+    u64 mid = mid_sum(low, cross1, cross2);
     *lo = (low & LIMB_MASK) | ((mid & LIMB_MASK) << LIMB_BITS);
-    *hi = high + (cross1 >> LIMB_BITS) + (cross2 >> LIMB_BITS) + (mid >> LIMB_BITS);
+    *hi = high_half(a1 * b1, cross1, cross2, mid);
+}
+
+// The middle limb of the product, with its carry above LIMB_BITS.
+fn mid_sum(u64 low, u64 cross1, u64 cross2) u64 {
+    return (low >> LIMB_BITS) + (cross1 & LIMB_MASK) + (cross2 & LIMB_MASK);
+}
+
+// The high half of the product from its high limb, cross terms and middle limb.
+fn high_half(u64 high, u64 cross1, u64 cross2, u64 mid) u64 {
+    return high + (cross1 >> LIMB_BITS) + (cross2 >> LIMB_BITS) + (mid >> LIMB_BITS);
 }
 
 /// Returns true for positive or negative zero.
