@@ -1046,11 +1046,38 @@ came here.
   through a TL copies the sources of the TL only when it designates storage in its referent: no
   dereference and no span or string index follows the first one, and a slice there cuts no span
   or string header. Otherwise, as for `&h->p->a`, `&(*pp)->a`, `&arr[0]->a` and `h->s[..]`, the
-  producer gives a temporal use of the TL and unknown contents (D17.17). Each switch on a flag gives
-  a flag edge for each arm, and for an otherwise target that one bool value takes. An edge keeps
-  the value only where the flag is live at its target, so a dead flag splits no paths. A dead
-  marker of a flag removes its value. The value survives a later write of the tested pointer:
-  `ok = p != null; del(p); if (ok) { *p = 1; }` is a validated violation.
+  producer gives a temporal use of the TL and unknown contents (D17.17).
+  A clean load through a stable parameter names a source of its own (fir.md 14.1). A stable
+  parameter is a borrowed pointer parameter TL that no statement writes, moves or releases and that
+  no scope marker names (`parameter_writes`). A clean position is one that no write outside the
+  frame can reach from entry: a call, a `del`, or a store into or move out of storage behind a
+  `deref` or a span index, a global, or an aggregate `_0`. An extern call counts too. The `del` and
+  move clauses are conservative choices: a `del` through a pointer is an outside step and a move out
+  of caller storage is the gap anyway. `loaded_depth` accepts `&f->a.b[i]` and `f->a.s[..]`: the
+  first `deref`, then only fields, then one more indirection or a header that the slice cuts. The
+  destination, a whole TL or a TA leaf, then borrows a symbolic caller source of its own, one for
+  each parameter and field path (`loaded_key`). The body requires that source live at entry, and
+  only a caller can satisfy that: the caller must prove the reference in its own storage live at the
+  call. **No caller checks it yet, so the rule is gated.** `ownership_source_local.loaded_bound` is
+  the one switch: it reads `callers_bind_loaded`, which `ownership_source.context` passes to both
+  runs before they prepare and which the compiler leaves off. `ownership_report.fir_test_local`
+  (`--fir-test`) prepares a local run from a zero context and copies no switch, so it stays off
+  there too. Off, the read of each load stays the gap `unknown_source` in `untracked_loads`, and
+  `entry_facts` gives each loaded source unknown validity: the body stays outside the declared
+  scopes, as before the rule. The calls increment turns the switch on when its summaries record the
+  requirement and check it at each call. A returned loaded source must then map to the source of the
+  caller's reference, not to the parameter's own source (`view_caller` in `_loaded_gate_test.ft`).
+  On, the source is live at entry, and at a clean position no outside step has made it unknown, so
+  the read is no gap. An outside step after the load makes the source unknown, so a later use is
+  incomplete proof. A copy of the loaded reference, a use through it, a third indirection, an index
+  before the loaded reference, a span parameter and a slice stored straight into untracked storage
+  keep the gap. `test/fort/ownership_source_local_loaded_test.ft` holds the rule with the switch on,
+  and `_loaded_gate_test.ft` holds the gate: with the switch off, the readers of a borrow that a
+  caller released first are the gap in both rows (`read`, `read2`, `usel`).
+  Each switch on a flag gives a flag edge for each arm, and for an otherwise target that one bool
+  value takes. An edge keeps the value only where the flag is live at its target, so a dead flag
+  splits no paths. A dead marker of a flag removes its value. The value survives a later write of
+  the tested pointer: `ok = p != null; del(p); if (ok) { *p = 1; }` is a validated violation.
   Each allocation step names the earlier identities of its site, ordinal `EARLIER_BASE + i` for
   step i, so the flow keeps the allocations of two iterations apart (D17.16). A leak of an
   earlier iteration's allocation is then rejected as incomplete proof at its storage end: its
@@ -1206,12 +1233,20 @@ came here.
   check is no use (fir.md 14) and is no read of a value here. So the verdict on such a
   reference does not depend on how lowering writes the load. A copy of a constant global's
   own reference into a TL is also the gap, though a use straight through it is proved: that
-  difference is in the safe direction. So no body uses or reads a reference that untracked
-  storage keeps, in a read that FIR reports, without the gap. A heap, global or caller borrow
-  that a body writes there, or a stack borrow that a callee receives, needs no gap of its
-  own: in
+  difference is in the safe direction. With the switch of loaded sources on, a clean load
+  through a stable parameter reads the reference without the gap, and its step names that
+  reference's caller source (see the local entry). The compiler leaves that switch off, so no
+  body uses or reads a reference that untracked storage keeps, in a read that FIR reports,
+  without the gap. A heap, global or caller borrow that a body writes there, or a stack borrow
+  that a callee receives, needs no gap of its own: in
   `test/fort/ownership_source_local_stored_untracked_test.ft` the chain `make_ptr`,
-  `stash_ptr`, `use_it` stops at `use_it`, and `**GP` for `GP = &GM` is the gap.
+  `stash_ptr`, `use_it` stops at `use_it`, and `**GP` for `GP = &GM` is the gap. That rule
+  rests on one premise: each reader of such a reference is the gap. The gate of loaded sources
+  keeps the premise while the switch is off. With the switch on, a check at each caller replaces
+  it: the calls increment must prove the loaded reference live at each call before it turns the
+  switch on. Without that check, a body that stores a heap borrow into caller storage and
+  releases it, and a reader that loads it, both prove (`_loaded_gate_test.ft`, section
+  `bound`).
   The flow proves a range loan whose collection is a whole local or a field leaf and whose
   region writes only whole locals and calls no fort function; another loan is `range_loan`.
   An unknown call before the loan makes the flow forget its address facts. The capture still

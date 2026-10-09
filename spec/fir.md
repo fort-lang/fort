@@ -1463,7 +1463,21 @@ No other statement changes it.
 An address or a slice through a pointer designates storage in the referent of that pointer only
 when no dereference and no index of a span or a string follows its first dereference or index,
 and a slice there cuts no span or string header. Otherwise it designates the storage of a
-reference that it loads, and its value has no source that the analysis knows (D17.17).
+reference that it loads (D17.17).
+Such a value has a source only when it loads one reference out of the referent of a parameter.
+The base is a borrowed pointer parameter that no statement writes, moves or releases, and that
+no scope marker names. The place starts with its dereference, and only fields come before the
+second dereference or index of a span or a string. No dereference and no such index follows that
+one, and a slice there cuts no span or string header. A slice that cuts a span or string header
+in the referent itself loads that header.
+No write outside the frame can come before the load on a path from entry: no call, no `del`, and
+no store into or move out of storage behind a dereference or such an index, a global, or an
+aggregate `_0` (D17.15). So the loaded reference still holds its entry value. The value borrows
+the symbolic caller source of that reference, one source for each parameter and field path.
+The function requires that source live at entry. The caller satisfies that requirement at the
+call, as for its other input requirements (section 14, Calls). Until the caller summaries bind
+it, the source has unknown validity at entry, and the read of the load is incomplete proof.
+Other such values have no source that the analysis knows.
 An empty owner decides that a pointer local is null only when no address or slice through an
 indirection can fill the local, directly or through copies, moves, casts and views. An address
 at a non-zero offset from a null base is not null.

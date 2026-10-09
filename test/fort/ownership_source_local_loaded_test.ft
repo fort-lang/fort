@@ -1,0 +1,780 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| shapes ok
+//| steps ok
+//| dirty blocks ok
+//| sources ok
+//| writes ok
+//| proved ok
+//| unclean ok
+//| kept gaps ok
+//| violations ok
+/// Tests loaded parameter sources in the local and the stored run (D17.15, D17.17). An address
+/// or a slice that loads a reference out of the referent of a pointer parameter borrows the
+/// symbolic caller source of that reference, when no write outside the frame can reach the
+/// load and no statement writes the parameter, and callers bind the requirement that the
+/// source is live at entry (the switch, on here). Any other such load keeps the gap
+/// unknown_source. A line here is a line of SOURCE.
+import fir;
+import flag_steps;
+import ownership_api;
+import ownership_flow;
+import ownership_keys;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import ownership_transfer;
+import std.strbuf;
+
+u32 LEAF_LINE = 29;
+u32 SLEAF_LINE = 30;
+u32 AFTER_STORE_LINE = 42;
+u32 UAF_PARAM_LINE = 43;
+u32 JOINED_LINE = 46;
+u32 LOOPED_LINE = 47;
+u32 GLOBAL_FIRST_LINE = 50;
+u32 OTHER_FIRST_LINE = 51;
+u32 CALL_FIRST_LINE = 52;
+u32 DEL_FIRST_LINE = 53;
+u32 WALK_STORE_LINE = 54;
+u32 REWRITTEN_LINE = 57;
+u32 LOAD_THEN_CALL_LINE = 58;
+u32 RELEASED_LINE = 59;
+u32 DEEPER_LINE = 60;
+u32 INDEXED_LINE = 61;
+u32 SPANS_LINE = 62;
+u32 HEADER_AFTER_LINE = 63;
+u32 COPIED_LINE = 64;
+u32 USED_LINE = 65;
+u32 KEPT_SLICE_LINE = 66;
+u32 OWNED_LINE = 67;
+
+u32 MIXED_LINE = 73;
+u32 LOOP_CALL_LINE = 78;
+u32 BRANCH_CALL_LINE = 81;
+u32 KEPT_OWNER_LINE = 85;
+u32 LEAK_AFTER_LOAD_LINE = 86;
+u32 UAF_AFTER_LOAD_LINE = 90;
+u32 RELEASED_WITH_LOAD_LINE = 96;
+u32 LEAF_USE_LINE = 101;
+u32 LEAF_CALL_LINE = 102;
+string[106] SOURCE = {
+    "struct block { u32 n; }",
+    "struct block_vec { block mut@ own items; u64 len; }",
+    "struct func { block_vec blocks; u8@ data; u64 len; }",
+    "struct pair { i64 a; i64 b; }",
+    "struct holder { pair* p; u8 mut@ own s; i64 n; }",
+    "struct inner { u8 mut@ own s; }",
+    "struct outer { inner in; pair*[2] arr; }",
+    "struct ref { i64* p; i64 n; }",
+    "struct sref { u8@ s; u64 n; }",
+    "struct arrs { u8[4] a; u8@ s; }",
+    "struct hold2 { arrs* p; }",
+    "struct chain { holder* h; }",
+    "struct pr { i64 a; i64 b; }",
+    "i64 mut G = 0;",
+    "fn g() void {}",
+    "fn count(block@ a, u8@ b) u64 { return a.len + b.len; }",
+    "fn sum(u8@ a, u8@ b) u64 { return a.len + b.len; }",
+    "fn block_at(func* f, u32 b) block* {",
+    "    if (cast(b, u64) >= f->blocks.len) { panic(\"index out of range\"); }",
+    "    return &f->blocks.items[cast(b, u64)];",
+    "}",
+    "fn block_mut(func mut* f, u32 b) block mut* { return &f->blocks.items[cast(b, u64)]; }",
+    "fn items(func* f) block@ { return f->blocks.items[..f->blocks.len]; }",
+    "fn view(func* f) string { return cast(f->data[..f->len], string); }",
+    "fn two(func* f) u64 { return sum(f->data[..], f->data[..]); }",
+    "fn both(func* f) u64 { return count(f->blocks.items[..], f->data[..]); }",
+    "fn either(func* f, bool c) u8@ { return c ? f->data[..] : f->data[1..]; }",
+    "fn fixed(hold2* h) u8@ { return h->p->a[1..]; }",
+    "fn leaf(holder* h) i64 { ref mut r = ref{null, 0}; r.p = &h->p->a; return *r.p; }",
+    "fn sleaf(func* f) u64 { sref mut r = sref{{}, 0}; r.s = f->data[..]; return r.s.len; }",
+    "fn load_then_store(holder mut* h, pair* t) i64 { i64* q = &h->p->a; h->p = t; return *q; }",
+    "fn fresh_after(holder* h) i64 {",
+    "    i64* q = &h->p->a; pair mut* own t = new(pair); del(t); return *q;",
+    "}",
+    "fn walk(holder* h, u64 n) i64 {",
+    "    u64 mut i = 0; i64 mut s = 0;",
+    "    while (i < n) { u8* q = &h->s[i]; s += cast(*q, i64); i += 1; }",
+    "    return s;",
+    "}",
+    "fn tested(holder* h) i32 { i64* q = &h->p->a; if (q == null) { return 1; } return 0; }",
+    "fn kept_address(holder* h, i64* mut* out) void { *out = &h->p->a; }",
+    "fn after_store(holder mut* h, pair* t) i64 { h->p = t; i64* q = &h->p->a; return *q; }",
+    "fn uaf_param(holder mut* h) i64 {",
+    "    pair mut* own t = new(pair); h->p = t; i64* q = &h->p->a; del(t); return *q;",
+    "}",
+    "fn joined(holder mut* h, pair* t, bool c) i64* { if (c) { h->p = t; } return &h->p->a; }",
+    "fn looped(holder mut* h, pair* t, u64 n) i64* {",
+    "    h->p = t; u64 mut i = 0; while (i < n) { i += 1; } return &h->p->a;",
+    "}",
+    "fn global_first(holder* h) i64* { G = 1; return &h->p->a; }",
+    "fn other_first(holder* h, holder mut* k) i64* { k->n = 1; return &h->p->a; }",
+    "fn call_first(holder* h) i64* { g(); return &h->p->a; }",
+    "fn del_first(holder* h) i64* { pair mut* own t = new(pair); del(t); return &h->p->a; }",
+    "fn walk_store(holder* h, u64 n) void {",
+    "    u64 mut i = 0; while (i < n) { u8 mut* q = &h->s[i]; *q = 0; i += 1; }",
+    "}",
+    "fn rewritten(holder* mut h, holder* k) i64* { h = k; return &h->p->a; }",
+    "fn load_then_call(holder* h) i64 { i64* q = &h->p->a; g(); return *q; }",
+    "fn released(outer mut* h) u8 { u8* q = &h->in.s[0]; del(h->in.s); return *q; }",
+    "fn deeper(chain* c) i64* { return &c->h->p->a; }",
+    "fn indexed(outer* o, u64 i) i64* { return &o->arr[i]->a; }",
+    "fn spans(holder@ hs) u8* { return &hs[0].s[0]; }",
+    "fn header_after(hold2* h) u8@ { return h->p->s[..]; }",
+    "fn copied(holder* h) pair* { return h->p; }",
+    "fn used(holder* h) i64 { return h->p->a; }",
+    "fn kept_slice(func* f, u8@ mut* out) void { *out = f->data[..]; }",
+    "fn owned(holder* own h) void { i64* q = &h->p->a; del(h); }",
+    "fn result(holder* h) pr { return pr{1, 2}; }",
+    "fn scalar() i64 { return 1; }",
+    "fn moved(holder mut* h) void { u8 mut@ own x = move(h->s); del(x); }",
+    "fn taken() i64 { i64 mut x = 0; i64 mut* p = &x; x = 2; return *p; }",
+    "fn pick(func* a, func* b, bool c) u8@ { return c ? a->data[..] : b->data[..]; }",
+    "fn mixed(holder mut* h, pair* t, bool c) u8@ {",
+    "    if (c) { return h->s[..]; }",
+    "    h->p = t;",
+    "    return h->s[1..];",
+    "}",
+    "fn loop_call(holder* h, u64 n) void {",
+    "    u64 mut i = 0; while (i < n) { u8* q = &h->s[i]; g(); i += 1; }",
+    "}",
+    "fn branch_call(holder* h, bool c) i64 { i64* q = &h->p->a; if (c) { g(); } return *q; }",
+    "fn empty_view(func* f) u8@ { return f->data[0..0]; }",
+    "fn keep_leaf(func* f) u64 { sref r = sref{f->data[..], 0}; return r.s.len; }",
+    "fn two_views(func* f) u64 { u8@ a = f->data[..]; u8@ b = f->data[1..]; return b.len; }",
+    "fn kept_owner(holder* own h) i64* { return &h->p->a; }",
+    "fn leak_after_load(holder* h) i64* {",
+    "    pair mut* own t = new(pair);",
+    "    return &h->p->a;",
+    "}",
+    "fn uaf_after_load(holder* h) i64 {",
+    "    i64* q = &h->p->a;",
+    "    pair mut* own t = new(pair);",
+    "    del(t);",
+    "    return t->a + *q;",
+    "}",
+    "fn released_with_load(func* f) u8@ {",
+    "    u8 mut* own p = new(u8);",
+    "    del(p);",
+    "    return f->data[..];",
+    "}",
+    "fn leaf_use(func* f) u8 { sref r = sref{f->data[..], 0}; return r.s[0]; }",
+    "fn leaf_call(func* f) u8 { sref r = sref{f->data[..], 0}; g(); return r.s[0]; }",
+    "fn span_ref(u8@* p) u8@ { return (*p)[1..]; }",
+    "fn span_cell(u8@* p) u8* { return &(*p)[0]; }",
+    "fn chars(named* n) string { return n->s[1..]; }",
+    "struct named { string s; }",
+};
+
+fn row(ownership_source_env.env mut* e, string name) ownership_source.body mut* {
+    return ownership_source_env.find(e, "main", name);
+}
+
+// The depth that loaded_depth gives each address and slice through a parameter of `name`, in
+// block and statement order: a digit, or `-` for no loaded reference.
+fn depths(ownership_source_env.env mut* e, string name, string want) void {
+    ownership_source.body mut* found = row(e, name);
+    ownership_source_local.context* c = &found->local;
+    assert(c->initialized && !c->solved);
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    fir.func* f = &found->function;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut g = 0;
+        while (g < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, g);
+            fir.rvalue r = s->value;
+            if (s->kind == fir.stmt_kind.st_assign && (r.kind == fir.rvalue_kind.rv_addr ||
+                r.kind == fir.rvalue_kind.rv_slice) && r.place.base == fir.base_kind.bk_local &&
+                fir.local_at(f, r.place.local)->kind == fir.local_kind.lk_param &&
+                r.place.proj_len > 0) {
+                u32 d = ownership_source_local.loaded_depth(c, b, g, r.place, r.kind);
+                if (d == ownership_source_local.U32_MAX) { strbuf.push(&got, '-'); }
+                else { strbuf.append_u64(&got, cast(d, u64)); }
+            }
+            g += 1;
+        }
+        b += 1;
+    }
+    if (strbuf.view(&got) != want) {
+        eprintln(name, ": depths ", strbuf.view(&got), ", expected ", want);
+        assert(false);
+    }
+}
+
+// The address or slice through the first deref and fields names the reference that it loads:
+// its depth is the projection count before the second indirection, or the whole place for a
+// slice of a span that the referent holds. Other places load no reference that a source names.
+fn shapes(ownership_source_env.env mut* e) void {
+    // `&f->blocks.items[b]`: deref, field, field, then the index of the span.
+    depths(e, "block_at", "3");
+    depths(e, "block_mut", "3");
+    // A slice of the span `(*f).blocks.items` reads its header: the whole place.
+    depths(e, "items", "3");
+    depths(e, "view", "2");
+    depths(e, "two", "22");
+    depths(e, "both", "32");
+    depths(e, "either", "22");
+    // A slice of a fixed array after the second deref designates storage in that referent.
+    depths(e, "fixed", "2");
+    depths(e, "load_then_store", "2");
+    depths(e, "walk", "2");
+    depths(e, "kept_address", "2");
+    depths(e, "kept_slice", "2");
+    // A store through the parameter comes first in the block, on one arm, or before a loop.
+    depths(e, "after_store", "-");
+    depths(e, "uaf_param", "-");
+    depths(e, "joined", "-");
+    depths(e, "looped", "-");
+    // A store into a global, through another parameter, a call and a del come first.
+    depths(e, "global_first", "-");
+    depths(e, "other_first", "-");
+    depths(e, "call_first", "-");
+    depths(e, "del_first", "-");
+    // The store through q in the loop reaches the load on the back edge.
+    depths(e, "walk_store", "-");
+    // The body writes the parameter itself.
+    depths(e, "rewritten", "-");
+    // A third indirection, an index before the loaded reference, a span parameter, and a slice
+    // that cuts the header of a second loaded reference.
+    depths(e, "deeper", "-");
+    depths(e, "indexed", "-");
+    depths(e, "spans", "-");
+    depths(e, "header_after", "-");
+    // An own parameter is no stable parameter.
+    depths(e, "owned", "-");
+    // The load comes before the call and the release.
+    depths(e, "load_then_call", "2");
+    depths(e, "released", "3");
+    // Two parameters, and one arm before a store and one after it.
+    depths(e, "pick", "22");
+    depths(e, "mixed", "2-");
+    // A call in the loop reaches the load of each iteration, the first one too.
+    depths(e, "loop_call", "-");
+    depths(e, "branch_call", "2");
+    depths(e, "empty_view", "2");
+    depths(e, "keep_leaf", "2");
+    depths(e, "two_views", "22");
+    // An own parameter that no statement releases or moves is still no stable parameter.
+    depths(e, "kept_owner", "-");
+    // The least depth: the parameter points at a span, so its referent is the loaded
+    // reference itself. A string header loads as a span header does.
+    depths(e, "span_ref", "1");
+    depths(e, "span_cell", "1");
+    depths(e, "chars", "2");
+    println("shapes ok");
+}
+
+fn action_name(ownership_transfer.action effect) string {
+    switch (effect) {
+    case ownership_transfer.action.allocation: return "allocation";
+    case ownership_transfer.action.copy: return "copy";
+    case ownership_transfer.action.move_owner: return "move";
+    case ownership_transfer.action.release: return "release";
+    case ownership_transfer.action.assignment: return "assignment";
+    case ownership_transfer.action.address: return "address";
+    case ownership_transfer.action.use: return "use";
+    case ownership_transfer.action.inspect: return "inspect";
+    case ownership_transfer.action.dead: return "dead";
+    case ownership_transfer.action.escape: return "escape";
+    case ownership_transfer.action.outside: return "outside";
+    case ownership_transfer.action.stack_begin: return "stack begin";
+    case ownership_transfer.action.stack_end: return "stack end";
+    case ownership_transfer.action.weak_store: return "weak store";
+    }
+}
+
+// Appends the source that `key` names: `L<k>` for loaded reference k, `P<n>` for parameter n,
+// or `S<ordinal>` for another source.
+fn source_name(ownership_source_local.context* c, ownership_api.entity_id key,
+    strbuf.str_buf mut* out) void {
+    u64 mut k = 0;
+    while (k < c->loaded_len) {
+        if (ownership_keys.entity(ownership_source_local.loaded_source(c, k), key) == 0) {
+            strbuf.push(out, 'L');
+            strbuf.append_u64(out, k);
+            return;
+        }
+        k += 1;
+    }
+    u32 base = ownership_source_local.PARAMETER_BASE;
+    if (key.ordinal >= base && key.ordinal - base < fir.local_count(c->function)) {
+        strbuf.push(out, 'P');
+        strbuf.append_u64(out, cast(key.ordinal - base, u64));
+        return;
+    }
+    strbuf.push(out, 'S');
+    strbuf.append_u64(out, cast(key.ordinal, u64));
+}
+
+// Step i as `block.gap.order action from->to`, then ` temporal`, ` opaque`, ` empty` and the
+// source that a written reference borrows, ` <- L0`.
+fn step_text(ownership_source_local.context* c, u64 i, strbuf.str_buf mut* out) void {
+    ownership_flow.step* s = &c->steps[i];
+    strbuf.clear(out);
+    strbuf.append_u64(out, cast(s->block, u64));
+    strbuf.push(out, '.');
+    strbuf.append_u64(out, cast(s->gap, u64));
+    strbuf.push(out, '.');
+    strbuf.append_u64(out, cast(s->order, u64));
+    if (s->kind == ownership_flow.step_kind.flag) {
+        flag_steps.describe_flag(s, out);
+        return;
+    }
+    ownership_transfer.request* r = &s->local;
+    strbuf.push(out, ' ');
+    strbuf.append(out, action_name(r->kind));
+    strbuf.push(out, ' ');
+    strbuf.append_u64(out, cast(r->source.root.ordinal, u64));
+    strbuf.append(out, "->");
+    strbuf.append_u64(out, cast(r->destination.root.ordinal, u64));
+    if (r->temporal_use) { strbuf.append(out, " temporal"); }
+    if (r->opaque_value) { strbuf.append(out, " opaque"); }
+    if (r->kind == ownership_transfer.action.assignment && !r->opaque_value &&
+        r->value.kind == ownership_api.contents_kind.empty_owner) {
+        strbuf.append(out, " empty");
+    }
+    if (c->relations[i].key.kind == ownership_api.entity_kind.relation) {
+        strbuf.append(out, " <- ");
+        source_name(c, c->relations[i].source, out);
+    }
+}
+
+fn expect_steps(ownership_source_env.env mut* e, string name, string@ expected) void {
+    ownership_source_local.context* c = &row(e, name)->local;
+    assert(c->initialized && !c->solved);
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    bool mut same = c->steps_len == expected.len;
+    u64 mut i = 0;
+    while (i < c->steps_len) {
+        step_text(c, i, &got);
+        if (i >= expected.len || strbuf.view(&got) != expected[i]) { same = false; }
+        i += 1;
+    }
+    if (!same) {
+        eprintln(name, ":");
+        i = 0;
+        while (i < c->steps_len) {
+            step_text(c, i, &got);
+            eprintln("    \"", strbuf.view(&got), "\",");
+            i += 1;
+        }
+        assert(false);
+    }
+}
+
+// The local steps of four loads. A clean load is a temporal use of the parameter, then a
+// write of the destination that borrows the loaded source L0; a copy into the result keeps
+// that source. The reads of a span length through f are uses of f alone. A third
+// dereference writes unknown contents instead.
+fn steps(ownership_source_env.env mut* e) void {
+    string[8] block_at = {
+        "0.1.0 use 1->1 temporal",
+        "0.1.1 flag clear 4",
+        "2.2.0 use 1->1 temporal",
+        "2.4.0 use 1->1 temporal",
+        "3.0.0 use 1->1 temporal",
+        "3.0.1 assignment 9->9 <- L0",
+        "3.1.0 copy 9->0",
+        "3.1.1 assignment 9->9 empty",
+    };
+    expect_steps(e, "block_at", block_at[..]);
+    string[5] items = {
+        "0.0.0 use 1->1 temporal",
+        "0.2.0 use 1->1 temporal",
+        "0.6.0 use 1->1 temporal",
+        "1.0.0 use 1->1 temporal",
+        "1.0.1 assignment 0->0 <- L0",
+    };
+    expect_steps(e, "items", items[..]);
+    string[2] fixed = {
+        "1.0.0 use 1->1 temporal",
+        "1.0.1 assignment 0->0 <- L0",
+    };
+    expect_steps(e, "fixed", fixed[..]);
+    string[4] deeper = {
+        "0.0.0 use 1->1 temporal",
+        "0.0.1 assignment 2->2 opaque",
+        "0.1.0 copy 2->0",
+        "0.1.1 assignment 2->2 empty",
+    };
+    expect_steps(e, "deeper", deeper[..]);
+    println("steps ok");
+}
+
+// Each block of `name` as one character: `d` when a write outside the frame can reach its
+// entry, else `w` when the block holds such a write, else `.`.
+fn blocks(ownership_source_env.env mut* e, string name, string want) void {
+    ownership_source.body mut* found = row(e, name);
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    u32 mut b = 0;
+    while (b < fir.block_count(&found->function)) {
+        u64 at = cast(b, u64);
+        // Both runs compute the same marks from the same FIR.
+        assert(found->local.dirty[at] == found->stored.dirty[at]);
+        assert(found->local.first_write[at] == found->stored.first_write[at]);
+        if (found->local.dirty[at]) { strbuf.push(&got, 'd'); }
+        else if (found->local.first_write[at] != ownership_source_local.U32_MAX) {
+            strbuf.push(&got, 'w');
+        } else { strbuf.push(&got, '.'); }
+        b += 1;
+    }
+    if (strbuf.view(&got) != want) {
+        eprintln(name, ": blocks ", strbuf.view(&got), ", expected ", want);
+        assert(false);
+    }
+}
+
+// A write marks the blocks that it reaches. Blocks before it and on other arms stay clean.
+fn dirty_blocks(ownership_source_env.env mut* e) void {
+    blocks(e, "block_at", "....");
+    blocks(e, "joined", ".wd");
+    blocks(e, "mixed", "..w.d");
+    blocks(e, "walk_store", ".ddddd");
+    blocks(e, "loop_call", ".ddddd");
+    blocks(e, "branch_call", ".wd");
+    blocks(e, "walk", ".......");
+    println("dirty blocks ok");
+}
+
+// The index of the step whose relation names `key`, or U64_MAX.
+fn relation_step(ownership_source_local.context* c, ownership_api.entity_id key) u64 {
+    u64 mut i = 0;
+    while (i < c->steps_len) {
+        if (c->relations[i].key.kind == ownership_api.entity_kind.relation &&
+            ownership_keys.entity(c->relations[i].source, key) == 0) { return i; }
+        i += 1;
+    }
+    return ownership_source_local.U64_MAX;
+}
+
+// Body `name` names `count` loaded references in the run `c`. Each has a live symbolic caller
+// source at entry, and a step borrows it.
+fn loaded_in(string name, ownership_source_local.context* c, u64 count) void {
+    if (c->loaded_len != count) {
+        eprintln(name, ": ", c->loaded_len, " loaded references");
+        assert(false);
+    }
+    u64 mut i = 0;
+    while (i < count) {
+        ownership_api.entity_id key = ownership_source_local.loaded_source(c, i);
+        assert(key.kind == ownership_api.entity_kind.source);
+        u64 mut found = 0;
+        u64 mut k = 0;
+        while (k < c->entry.sources_len) {
+            ownership_api.source_fact s = c->entry.sources[k];
+            if (ownership_keys.entity(s.key, key) == 0) {
+                assert(s.kind == ownership_api.source_kind.symbolic_caller);
+                assert(s.validity == ownership_api.validity_kind.live);
+                found += 1;
+            }
+            k += 1;
+        }
+        assert(found == 1);
+        u64 step = relation_step(c, key);
+        assert(step != ownership_source_local.U64_MAX);
+        assert(c->steps[step].local.kind == ownership_transfer.action.assignment);
+        assert(!c->steps[step].local.opaque_value);
+        i += 1;
+    }
+}
+
+fn loaded(ownership_source_env.env mut* e, string name, u64 count) void {
+    ownership_source.body mut* found = row(e, name);
+    loaded_in(name, &found->local, count);
+    loaded_in(name, &found->stored, count);
+}
+
+// One source for each parameter and field path. Two loads of one path share it.
+fn sources(ownership_source_env.env mut* e) void {
+    loaded(e, "block_at", 1);
+    loaded(e, "items", 1);
+    loaded(e, "two", 1);
+    loaded(e, "either", 1);
+    loaded(e, "both", 2);
+    loaded(e, "walk", 1);
+    loaded(e, "after_store", 0);
+    loaded(e, "deeper", 0);
+    // The same path of two parameters gives two sources.
+    loaded(e, "pick", 2);
+    ownership_source_local.context* picked = &row(e, "pick")->local;
+    assert(picked->loaded[0].local == 1 && picked->loaded[1].local == 2);
+    loaded(e, "two_views", 1);
+    loaded(e, "mixed", 1);
+    loaded(e, "empty_view", 1);
+    loaded(e, "span_ref", 1);
+    loaded(e, "span_cell", 1);
+    loaded(e, "chars", 1);
+    // The local run tracks no aggregate, so the slice into r.s has no destination there.
+    ownership_source.body mut* sleaf = row(e, "sleaf");
+    loaded_in("sleaf", &sleaf->local, 0);
+    loaded_in("sleaf", &sleaf->stored, 1);
+    // The keys follow the retired stack keys and stay below the earlier identities.
+    ownership_source_local.context* c = &row(e, "block_at")->local;
+    u64 base = cast(ownership_source_local.leaf_parameter_ordinal(c, c->leaves.leaves_len),
+        u64) + 2 * cast(fir.local_count(c->function), u64);
+    assert(cast(ownership_source_local.loaded_source(c, 0).ordinal, u64) == base);
+    u64 room = cast(ownership_source_local.EARLIER_BASE, u64) - base;
+    ownership_api.entity_id last = ownership_source_local.loaded_source(c, room - 1);
+    assert(last.kind == ownership_api.entity_kind.source);
+    assert(last.ordinal == ownership_source_local.EARLIER_BASE - 1);
+    assert(ownership_source_local.loaded_source(c, room).kind ==
+        ownership_api.entity_kind.none);
+    println("sources ok");
+}
+
+// Whether statement `s` of `name` writes storage outside the frame (writes_outside).
+fn writes_at(ownership_source_env.env mut* e, string name, u32 block, u32 gap, bool want)
+    void {
+    ownership_source.body mut* found = row(e, name);
+    fir.statement* s = fir.block_statement(&found->function, block, gap);
+    if (ownership_source_local.writes_outside(&found->local, s) != want) {
+        eprintln(name, ": statement ", block, ".", gap, " writes outside: ", !want);
+        assert(false);
+    }
+}
+
+fn stable(ownership_source_env.env mut* e, string name, u32 local, bool want) void {
+    assert(row(e, name)->local.stable[cast(local, u64)] == want);
+    assert(row(e, name)->stored.stable[cast(local, u64)] == want);
+}
+
+// The statements that can change storage outside the frame, and the parameters that stay.
+fn writes(ownership_source_env.env mut* e) void {
+    // The aggregate result is caller storage (D17.15). A scalar result is no storage there.
+    writes_at(e, "result", 0, 0, true);
+    writes_at(e, "scalar", 0, 0, false);
+    // A move out of caller storage empties it; the del of the local owner counts too.
+    writes_at(e, "moved", 0, 2, true);
+    writes_at(e, "moved", 1, 0, false);
+    writes_at(e, "moved", 1, 1, true);
+    // A store into a taken local is private: caller storage is no local of this frame.
+    writes_at(e, "taken", 0, 5, false);
+    writes_at(e, "taken", 0, 6, false);
+    // A store through a pointer, into a global, and a call.
+    writes_at(e, "after_store", 0, 0, true);
+    writes_at(e, "global_first", 0, 0, true);
+    writes_at(e, "call_first", 0, 0, true);
+    // The allocation is no write; its release is.
+    writes_at(e, "del_first", 0, 2, false);
+    writes_at(e, "del_first", 1, 1, true);
+    stable(e, "block_at", 1, true);
+    stable(e, "block_at", 2, false);
+    stable(e, "rewritten", 1, false);
+    stable(e, "rewritten", 2, true);
+    stable(e, "owned", 1, false);
+    stable(e, "kept_owner", 1, false);
+    stable(e, "spans", 1, false);
+    // A store through the parameter changes its referent, not its slot.
+    stable(e, "after_store", 1, true);
+    // The store before the loop reaches each block after it.
+    ownership_source.body mut* looped = row(e, "looped");
+    u32 mut b = 1;
+    while (b < fir.block_count(&looped->function)) {
+        assert(looped->local.dirty[cast(b, u64)]);
+        b += 1;
+    }
+    assert(!looped->local.dirty[0]);
+    assert(looped->local.first_write[0] == 0);
+    println("writes ok");
+}
+
+fn proved_in(string name, string run, ownership_source_local.context* c) void {
+    if (c->correspondence != ownership_source_local.status.complete ||
+        !ownership_api.successful(c->proof) || c->violations_len != 0) {
+        eprintln(name, " ", run, ": not proved, gap ", cast(c->gap, u64), " at ",
+            c->gap_source.line);
+        assert(false);
+    }
+}
+
+fn proved(ownership_source_env.env mut* e, string name) void {
+    ownership_source.body mut* found = row(e, name);
+    proved_in(name, "local", &found->local);
+    proved_in(name, "stored", &found->stored);
+}
+
+fn gap_in(string name, string run, ownership_source_local.context* c,
+    ownership_source_local.missing why, u32 line) void {
+    if (c->gap != why || c->gap_source.line != line ||
+        c->correspondence != ownership_source_local.status.incomplete) {
+        eprintln(name, " ", run, ": gap ", cast(c->gap, u64), " at ", c->gap_source.line);
+        assert(false);
+    }
+    assert(c->violations_len == 0 && !ownership_api.successful(c->proof));
+}
+
+fn gap(ownership_source_env.env mut* e, string name, ownership_source_local.missing why,
+    u32 line) void {
+    ownership_source.body mut* found = row(e, name);
+    gap_in(name, "local", &found->local, why, line);
+    gap_in(name, "stored", &found->stored, why, line);
+}
+
+fn unknown(ownership_source_env.env mut* e, string name, u32 line) void {
+    gap(e, name, ownership_source_local.missing.unknown_source, line);
+}
+
+// Each body returns or keeps an address or a slice in a buffer that a reference in the
+// parameter's referent designates, and proves in both rows.
+fn proved_bodies(ownership_source_env.env mut* e) void {
+    proved(e, "block_at");
+    proved(e, "block_mut");
+    proved(e, "items");
+    proved(e, "view");
+    proved(e, "two");
+    proved(e, "both");
+    proved(e, "either");
+    proved(e, "fixed");
+    // A store after the load leaves the buffer of the entry value live.
+    proved(e, "load_then_store");
+    // The release of a fresh allocation ends no caller storage (D17.16).
+    proved(e, "fresh_after");
+    proved(e, "walk");
+    // A null test of a caller source decides nothing, and no path holds an obligation.
+    proved(e, "tested");
+    // A caller borrow that a temporary stores into caller storage needs no gap of its own.
+    proved(e, "kept_address");
+    proved(e, "pick");
+    // A zero-length slice still borrows the loaded source.
+    proved(e, "empty_view");
+    // An aggregate literal copies the borrow of a temporary into its leaf.
+    proved(e, "keep_leaf");
+    proved(e, "two_views");
+    proved(e, "span_ref");
+    proved(e, "span_cell");
+    proved(e, "chars");
+    // The stored run tracks the leaf of r; the local run tracks no aggregate.
+    ownership_source.body mut* leaf = row(e, "leaf");
+    proved_in("leaf", "stored", &leaf->stored);
+    gap_in("leaf", "local", &leaf->local, ownership_source_local.missing.unknown_source,
+        LEAF_LINE);
+    ownership_source.body mut* sleaf = row(e, "sleaf");
+    proved_in("sleaf", "stored", &sleaf->stored);
+    gap_in("sleaf", "local", &sleaf->local, ownership_source_local.missing.unknown_source,
+        SLEAF_LINE);
+    println("proved ok");
+}
+
+// A write that can change the reference reaches the load, so the load names no source: the
+// stores of uaf_through_field through a parameter, an arm, a loop, a global, another
+// parameter, a call, a del and a store in the loop. A body that writes the parameter too.
+fn unclean(ownership_source_env.env mut* e) void {
+    unknown(e, "after_store", AFTER_STORE_LINE);
+    unknown(e, "uaf_param", UAF_PARAM_LINE + 1);
+    unknown(e, "joined", JOINED_LINE);
+    unknown(e, "looped", LOOPED_LINE + 1);
+    unknown(e, "global_first", GLOBAL_FIRST_LINE);
+    unknown(e, "other_first", OTHER_FIRST_LINE);
+    unknown(e, "call_first", CALL_FIRST_LINE);
+    unknown(e, "del_first", DEL_FIRST_LINE);
+    unknown(e, "walk_store", WALK_STORE_LINE + 1);
+    unknown(e, "rewritten", REWRITTEN_LINE);
+    // A call after the load can end the buffer: its use is call scope, not proof.
+    ownership_source.body mut* call = row(e, "load_then_call");
+    gap_in("load_then_call", "local", &call->local, ownership_source_local.missing.call_dependent,
+        LOAD_THEN_CALL_LINE);
+    gap_in("load_then_call", "stored", &call->stored,
+        ownership_source_local.missing.call_dependent, LOAD_THEN_CALL_LINE);
+    // `&h->in.s[0]` after its release: the del reads the owner out of caller storage.
+    unknown(e, "released", RELEASED_LINE);
+    // The slice after the store is the gap; the slice on the other arm is clean.
+    unknown(e, "mixed", MIXED_LINE + 3);
+    unknown(e, "loop_call", LOOP_CALL_LINE + 1);
+    unknown(e, "kept_owner", KEPT_OWNER_LINE);
+    // A call on one arm after the load: the use after the join is call scope.
+    ownership_source.body mut* branch = row(e, "branch_call");
+    gap_in("branch_call", "local", &branch->local,
+        ownership_source_local.missing.call_dependent, BRANCH_CALL_LINE);
+    gap_in("branch_call", "stored", &branch->stored,
+        ownership_source_local.missing.call_dependent, BRANCH_CALL_LINE);
+    println("unclean ok");
+}
+
+// Loads that this rule does not name keep the gap: a second loaded level, an element that a
+// variable index selects, a span parameter, a slice of a second loaded header, a copy of the
+// loaded reference, a use through it, a slice stored straight into caller storage, and a load
+// through an own parameter.
+fn kept_gaps(ownership_source_env.env mut* e) void {
+    unknown(e, "deeper", DEEPER_LINE);
+    unknown(e, "indexed", INDEXED_LINE);
+    unknown(e, "spans", SPANS_LINE);
+    unknown(e, "header_after", HEADER_AFTER_LINE);
+    unknown(e, "copied", COPIED_LINE);
+    unknown(e, "used", USED_LINE);
+    unknown(e, "kept_slice", KEPT_SLICE_LINE);
+    // The own parameter is no stable parameter, so its load is the first gap of the body.
+    unknown(e, "owned", OWNED_LINE);
+    println("kept gaps ok");
+}
+
+// A clean load leaves the local scope declared, so a real error in the same body validates
+// (spec/toolchain.md 4.2). Before, the gap of the load hid both errors. The stored row leaves
+// a violation that the local run validated to the local row.
+fn violations(ownership_source_env.env mut* e) void {
+    ownership_source.body mut* leak = row(e, "leak_after_load");
+    assert(leak->local.violations_len == 1 && leak->local.unvalidated == 0);
+    ownership_source_local.violation lost = leak->local.violations[0];
+    assert(lost.kind == ownership_api.event_kind.lost_ownership && lost.name == "t");
+    assert(lost.source.line == LEAK_AFTER_LOAD_LINE + 2);
+    assert(leak->stored.violations_len == 0 && !ownership_api.successful(leak->stored.proof));
+    ownership_source.body mut* uaf = row(e, "uaf_after_load");
+    assert(uaf->local.violations_len == 1 && uaf->local.unvalidated == 0);
+    ownership_source_local.violation used = uaf->local.violations[0];
+    assert(used.kind == ownership_api.event_kind.invalid_use && used.name == "t");
+    assert(used.text == "empty reference has no element");
+    assert(used.source.line == UAF_AFTER_LOAD_LINE + 4);
+    // The conservative reading: the del of a local owner counts as a write too, so the load
+    // after it keeps the gap (Open questions of the change).
+    unknown(e, "released_with_load", RELEASED_WITH_LOAD_LINE + 3);
+    // The stored run keeps the loaded source in the leaf of r, and a use through it is proved.
+    // A call before the use makes the source unknown: call scope. The local run tracks no
+    // aggregate, so both uses through r.s are the gap there.
+    ownership_source.body mut* leaf = row(e, "leaf_use");
+    proved_in("leaf_use", "stored", &leaf->stored);
+    gap_in("leaf_use", "local", &leaf->local, ownership_source_local.missing.unknown_source,
+        LEAF_USE_LINE);
+    ownership_source.body mut* call = row(e, "leaf_call");
+    gap_in("leaf_call", "stored", &call->stored, ownership_source_local.missing.call_dependent,
+        LEAF_CALL_LINE);
+    gap_in("leaf_call", "local", &call->local, ownership_source_local.missing.unknown_source,
+        LEAF_CALL_LINE);
+    println("violations ok");
+}
+
+fn main() i32 {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut i = 0;
+    while (i < SOURCE.len) {
+        strbuf.append(&text, SOURCE[i]);
+        strbuf.push(&text, '\n');
+        i += 1;
+    }
+    strbuf.append(&text, "fn root() i32 { return 0; }\n");
+    ownership_source_env.open(&e);
+    ownership_source_env.runtime(&e);
+    // These sections test the rule as the calls increment will use it: callers bind the
+    // live-at-entry requirement. The compiler keeps the switch off until then
+    // (ownership_source_local_loaded_gate_test.ft).
+    e.source.callers_bind_loaded = true;
+    assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+    defer ownership_source_env.close(&e);
+    shapes(&e);
+    steps(&e);
+    dirty_blocks(&e);
+    sources(&e);
+    writes(&e);
+    ownership_source.analyze(&e.source);
+    proved_bodies(&e);
+    unclean(&e);
+    kept_gaps(&e);
+    violations(&e);
+    return 0;
+}

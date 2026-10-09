@@ -107,7 +107,7 @@ fn open(ownership_source_env.env mut* e, strbuf.str_buf mut* text, string@ lines
     assert(ownership_source_env.prepare(e, strbuf.view(text)));
 }
 
-string[17] FORMS = {
+string[18] FORMS = {
     "extern fn foreign_count(char* p) i32;",
     "fn helper() void {}",
     "fn function_value() fn () void { return helper; }",
@@ -125,6 +125,7 @@ string[17] FORMS = {
     "fn loaded_address(link* r) i64* { return &r->next->v; }",
     "fn element_address(u8@ s) u8* { return &s[1]; }",
     "fn loaded_slice(link* r) u8@ { return r->bytes[1..]; }",
+    "fn deeper_address(link* r) i64* { return &r->next->next->v; }",
 };
 
 fn value_forms(ownership_source_env.env mut* e) void {
@@ -198,16 +199,18 @@ fn reference_forms(ownership_source_env.env mut* e) void {
     };
     expect(e, "element_address", element_address[..]);
     // A field address after a second dereference designates the storage of r->next: a
-    // temporal use of r, then unknown contents (D17.17).
+    // temporal use of r, then a borrow of the caller source of r->next, because no write
+    // comes before the load (D17.15, D17.17). No caller binds that source yet, so it is
+    // unknown at entry and the read of the load stays the gap (loaded_bound).
     string[4] loaded_address = {
         "0.0.0 use 1->1 temporal",
-        "0.0.1 assignment 2->2 opaque",
+        "0.0.1 assignment 2->2",
         "0.1.0 copy 2->0",
         "0.1.1 assignment 2->2 empty",
     };
     expect(e, "loaded_address", loaded_address[..]);
     // A slice of the span that the referent of r holds: each length read and the slice read
-    // through r, and the slice has unknown contents.
+    // through r, and the slice borrows the caller source of r->bytes.
     string[8] loaded_slice = {
         "0.1.0 use 1->1 temporal",
         "0.2.0 use 1->1 temporal",
@@ -216,9 +219,18 @@ fn reference_forms(ownership_source_env.env mut* e) void {
         "0.6.0 use 1->1 temporal",
         "1.0.0 use 1->1 temporal",
         "1.0.1 use 1->1 temporal",
-        "1.0.2 assignment 0->0 opaque",
+        "1.0.2 assignment 0->0",
     };
     expect(e, "loaded_slice", loaded_slice[..]);
+    // A third dereference loads a reference out of caller storage that no source names: a
+    // temporal use of r, then unknown contents.
+    string[4] deeper_address = {
+        "0.0.0 use 1->1 temporal",
+        "0.0.1 assignment 2->2 opaque",
+        "0.1.0 copy 2->0",
+        "0.1.1 assignment 2->2 empty",
+    };
+    expect(e, "deeper_address", deeper_address[..]);
     println("reference forms ok");
 }
 

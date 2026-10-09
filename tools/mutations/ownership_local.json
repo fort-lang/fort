@@ -13,7 +13,8 @@
     "src/fort/ownership_transfer.ft",
     "src/fort/ownership_flow.ft",
     "src/fort/ownership_source_local.ft",
-    "src/fort/ownership_report.ft"
+    "src/fort/ownership_report.ft",
+    "src/fort/ownership_source.ft"
   ],
   "binary": "build/Linux/debug/fort",
   "build": "ninja -C build/Linux/debug fort",
@@ -171,8 +172,8 @@
     {
       "decision": "D17.14-untracked-local-run",
       "file": "src/fort/ownership_source_local.ft",
-      "old": "    }\n    untracked_loads(c);\n    transients(c);",
-      "new": "    }\n    if (c->stored) { untracked_loads(c); }\n    transients(c);",
+      "old": "    parameter_writes(c);\n    untracked_loads(c);\n    transients(c);",
+      "new": "    parameter_writes(c);\n    if (c->stored) { untracked_loads(c); }\n    transients(c);",
       "what": "the local run follows a reference that untracked storage holds"
     },
     {
@@ -1000,6 +1001,202 @@
       "old": "        if (place.root.kind == ownership_api.entity_kind.slot && place.root.ordinal == local &&\n            ownership_keys.function(place.root.function, in->identity) == 0) {",
       "new": "        if (place.root.kind == ownership_api.entity_kind.slot && place.root.ordinal == local) {",
       "what": "an overwritten slot clears a slot of another function"
+    },
+    {
+      "decision": "D17.15-loaded-source",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "                    reference_at(c, block, gap, to, key, unknown_length());",
+      "new": "                    opaque_at(c, block, gap, to, missing.unknown_source);",
+      "what": "a clean load through a parameter names no caller source"
+    },
+    {
+      "decision": "D17.15-loaded-entry",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    while (i < c->loaded_len) {\n        ownership_state.append_sources(",
+      "new": "    while (false && i < c->loaded_len) {\n        ownership_state.append_sources(",
+      "what": "a loaded caller source is not live at entry"
+    },
+    {
+      "decision": "D17.15-loaded-exempt",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "                if (loaded && fir.same_base(got.place, s->value.place) &&",
+      "new": "                if (false && fir.same_base(got.place, s->value.place) &&",
+      "what": "the read of a clean load through a parameter stays the gap"
+    },
+    {
+      "decision": "D17.15-loaded-clean-block",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    if (c->dirty[cast(block, u64)] || (first != U32_MAX && gap > first)) { return U32_MAX; }",
+      "new": "    if (first != U32_MAX && gap > first) { return U32_MAX; }",
+      "what": "a write in an earlier block leaves the load clean"
+    },
+    {
+      "decision": "D17.15-loaded-clean-gap",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    if (c->dirty[cast(block, u64)] || (first != U32_MAX && gap > first)) { return U32_MAX; }",
+      "new": "    if (c->dirty[cast(block, u64)]) { return U32_MAX; }",
+      "what": "a write earlier in the block leaves the load clean"
+    },
+    {
+      "decision": "D17.15-loaded-propagate",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        dirty_targets(c, work[len], work, &len);",
+      "new": "        mark_dirty(c, work[len], work, &len);",
+      "what": "a write reaches only the successors of its own block"
+    },
+    {
+      "decision": "D17.15-loaded-stable",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    if (p.base != fir.base_kind.bk_local || !c->stable[cast(p.local, u64)] ||",
+      "new": "    if (p.base != fir.base_kind.bk_local || !c->tracked[cast(p.local, u64)] ||",
+      "what": "a load through any TL names a caller source"
+    },
+    {
+      "decision": "D17.15-loaded-written",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        c->stable[cast(p.local, u64)] = false;",
+      "new": "        c->stable[cast(p.local, u64)] = c->stable[cast(p.local, u64)];",
+      "what": "a written parameter stays stable"
+    },
+    {
+      "decision": "D17.15-loaded-owning",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        c->stable[n] = l->kind == fir.local_kind.lk_param && c->tracked[n] && !c->owning[n] &&",
+      "new": "        c->stable[n] = l->kind == fir.local_kind.lk_param && c->tracked[n] &&",
+      "what": "an own parameter is stable"
+    },
+    {
+      "decision": "D17.15-loaded-pointer",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "            l->ty->kind == types.type_kind.k_ptr;",
+      "new": "            true;",
+      "what": "a span parameter is stable"
+    },
+    {
+      "decision": "D17.15-loaded-fields",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        if (pj.kind != fir.proj_kind.pj_field) { return U32_MAX; }",
+      "new": "        if (false) { return U32_MAX; }",
+      "what": "an index before the loaded reference keeps one source for every element"
+    },
+    {
+      "decision": "D17.15-loaded-third",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "            (pj.kind == fir.proj_kind.pj_index && header_type(t))) { return U32_MAX; }",
+      "new": "            (pj.kind == fir.proj_kind.pj_index && header_type(t))) { break; }",
+      "what": "a second loaded level borrows the first loaded source"
+    },
+    {
+      "decision": "D17.15-loaded-header-slice",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    if (kind == fir.rvalue_kind.rv_slice && header_type(t)) { return U32_MAX; }",
+      "new": "    if (false) { return U32_MAX; }",
+      "what": "a slice of a second loaded header borrows the first loaded source"
+    },
+    {
+      "decision": "D17.15-loaded-header",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        return kind == fir.rvalue_kind.rv_slice && header_type(t) ? p.proj_len : U32_MAX;",
+      "new": "        return U32_MAX;",
+      "what": "a slice of a header in the parameter referent names no caller source"
+    },
+    {
+      "decision": "D17.15-loaded-writes-call",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    if (r.kind == fir.rvalue_kind.rv_call || outside_frame(c, s->place)) { return true; }",
+      "new": "    if (outside_frame(c, s->place)) { return true; }",
+      "what": "a call before the load writes nothing"
+    },
+    {
+      "decision": "D17.15-loaded-writes-store",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    if (r.kind == fir.rvalue_kind.rv_call || outside_frame(c, s->place)) { return true; }",
+      "new": "    if (r.kind == fir.rvalue_kind.rv_call) { return true; }",
+      "what": "a store through a pointer before the load writes nothing"
+    },
+    {
+      "decision": "D17.15-loaded-writes-del",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    if (s->kind == fir.stmt_kind.st_del) { return true; }",
+      "new": "    if (false) { return true; }",
+      "what": "a del before the load writes nothing"
+    },
+    {
+      "decision": "D17.15-loaded-writes-move",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        if (o.kind == fir.operand_kind.ok_move && outside_frame(c, o.place)) { return true; }",
+      "new": "        if (false) { return true; }",
+      "what": "a move out of caller storage writes nothing"
+    },
+    {
+      "decision": "D17.15-loaded-writes-global",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    if (fir.place_indirect(c->function, p) || p.base == fir.base_kind.bk_global) { return true; }",
+      "new": "    if (fir.place_indirect(c->function, p)) { return true; }",
+      "what": "a store into a global writes nothing outside the frame"
+    },
+    {
+      "decision": "D17.15-loaded-writes-result",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    return p.local == 0 &&",
+      "new": "    return false &&",
+      "what": "an aggregate result is private storage"
+    },
+    {
+      "decision": "D17.15-loaded-destination",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    if (!(to.tracked && to.whole) &&",
+      "new": "    if (false &&",
+      "what": "a load into untracked storage reads its reference without the gap"
+    },
+    {
+      "decision": "D17.15-loaded-dedupe",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        if (same) { break; }",
+      "new": "        if (false) { break; }",
+      "what": "two loads of one path get two caller sources"
+    },
+    {
+      "decision": "D17.15-loaded-key-range",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    if (ordinal >= cast(EARLIER_BASE, u64)) { return ownership_api.entity_id{}; }",
+      "new": "    if (false) { return ownership_api.entity_id{}; }",
+      "what": "a loaded key past the parameter range meets the earlier identities"
+    },
+    {
+      "decision": "D17.15-loaded-gate-switch",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "fn loaded_bound(context* c) bool { return c->callers_bind_loaded; }",
+      "new": "fn loaded_bound(context* c) bool { return true; }",
+      "what": "the compiler binds the requirement of loaded sources that no caller checks"
+    },
+    {
+      "decision": "D17.15-loaded-gate-read",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "            bool loaded = loaded_bound(c) && loaded_statement(c, b, i, s, &depth);",
+      "new": "            bool loaded = loaded_statement(c, b, i, s, &depth);",
+      "what": "the read of a load is no gap while no caller binds its source"
+    },
+    {
+      "decision": "D17.15-loaded-gate-entry",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    ownership_api.validity_kind entry = loaded_bound(c) ? ownership_api.validity_kind.live :",
+      "new": "    ownership_api.validity_kind entry = true ? ownership_api.validity_kind.live :",
+      "what": "a loaded source is live at entry while no caller binds it"
+    },
+    {
+      "decision": "D17.15-loaded-gate-local-run",
+      "file": "src/fort/ownership_source.ft",
+      "old": "        row->local.callers_bind_loaded = c->callers_bind_loaded;",
+      "new": "        row->local.callers_bind_loaded = true;",
+      "what": "the local run binds loaded sources that the compiler leaves unbound"
+    },
+    {
+      "decision": "D17.15-loaded-gate-stored-run",
+      "file": "src/fort/ownership_source.ft",
+      "old": "        row->stored.callers_bind_loaded = c->callers_bind_loaded;",
+      "new": "        row->stored.callers_bind_loaded = true;",
+      "what": "the stored run binds loaded sources that the compiler leaves unbound"
     }
   ]
 }
