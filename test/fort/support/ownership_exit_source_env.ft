@@ -1,0 +1,263 @@
+/// Checks small actual programs and reads the process-exit outcome of their bodies.
+import lower_env;
+import ownership_api;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_exit;
+import ownership_source_local;
+import check_env;
+import std.strbuf;
+
+// The sandbox std.libc: the two D17.19 termination leaves and the low-level exit.
+string[3] LIBC = {
+    "extern fn exit(i32 code) noreturn;",
+    "extern fn abort() noreturn;",
+    "extern fn _exit(i32 status) noreturn;",
+};
+
+/// The runtime cleanup of the sandbox std.rt. `release_last` is the order of std/rt.ft.
+enum runtime {
+    release_last,
+    // shutdown releases first and flushes after: a fort call follows the release.
+    flush_last,
+    // std.rt has no shutdown.
+    no_shutdown,
+    // exit flushes and calls extern exit, with no release.
+    exit_without_cleanup,
+}
+
+struct closure {
+    ownership_source_env.env e;
+    strbuf.str_buf text;
+    strbuf.str_buf rt;
+    strbuf.str_buf libc;
+    // Mismatches print and count, so one run lists each wrong case.
+    u64 mismatches;
+}
+
+fn line(strbuf.str_buf mut* b, string text) void {
+    strbuf.append(b, text);
+    strbuf.push(b, '\n');
+}
+
+// The sandbox std/rt.ft: the check entries of lower_env, the argument owner, its startup and
+// the runtime cleanup of `kind`.
+fn write_runtime(closure mut* c, runtime kind) void {
+    strbuf.str_buf mut* b = &c->rt;
+    line(b, "import std.libc;");
+    for (string text : lower_env.RUNTIME) { line(b, text); }
+    line(b, "string mut@ own mut args_store = {};");
+    line(b, "fn flush_all() void {}");
+    line(b, "fn args_init(i32 argc, char* mut* argv) void {");
+    line(b, "    del(args_store);");
+    line(b, "    if (argc <= 0) { return; }");
+    line(b, "    string mut@ own a = new(string, cast(argc, u64));");
+    line(b, "    args_store = move(a);");
+    line(b, "}");
+    line(b, "fn args() string@ { return args_store; }");
+    if (kind == runtime.release_last || kind == runtime.exit_without_cleanup) {
+        line(b, "fn shutdown() void { flush_all(); del(args_store); }");
+    } else if (kind == runtime.flush_last) {
+        line(b, "fn shutdown() void { del(args_store); flush_all(); }");
+    }
+    if (kind == runtime.exit_without_cleanup || kind == runtime.no_shutdown) {
+        line(b, "fn exit(i32 status) noreturn { flush_all(); libc.exit(status); }");
+    } else {
+        line(b, "fn exit(i32 status) noreturn { shutdown(); libc.exit(status); }");
+    }
+}
+
+/// Checks and analyzes `lines` as module `main`, over the runtime `kind`.
+fn open_with(closure mut* c, string@ lines, runtime kind) void {
+    prepare_with(c, lines, kind);
+    ownership_source.analyze(&c->e.source);
+}
+
+/// Checks and prepares `lines` as module `main`, over the runtime `kind`. The caller can change
+/// a ledger before it runs analyze.
+fn prepare_with(closure mut* c, string@ lines, runtime kind) void {
+    c->text = strbuf.create();
+    c->rt = strbuf.create();
+    c->libc = strbuf.create();
+    for (string text : LIBC) { line(&c->libc, text); }
+    u64 mut i = 0;
+    while (i < lines.len) {
+        line(&c->text, lines[i]);
+        i += 1;
+    }
+    ownership_source_env.open(&c->e);
+    write_runtime(c, kind);
+    check_env.add(&c->e.checked, "std/rt.ft", strbuf.view(&c->rt));
+    check_env.add(&c->e.checked, "std/libc.ft", strbuf.view(&c->libc));
+    if (!ownership_source_env.prepare(&c->e, strbuf.view(&c->text))) {
+        eprintln(strbuf.view(&c->text));
+        panic("ownership_exit_source_env: the program does not check");
+    }
+}
+
+fn analyze(closure mut* c) void { ownership_source.analyze(&c->e.source); }
+
+/// The prepared context of body `name` of module `main`, before analyze.
+fn prepared(closure mut* c, string name) ownership_source_exit.context mut* {
+    return &ownership_source_env.find(&c->e, "main", name)->exit;
+}
+
+fn open(closure mut* c, string@ lines) void { open_with(c, lines, runtime.release_last); }
+
+fn close(closure mut* c) void {
+    ownership_source_env.close(&c->e);
+    strbuf.free(&c->text);
+    strbuf.free(&c->rt);
+    strbuf.free(&c->libc);
+}
+
+fn mismatch(closure mut* c) void { c->mismatches += 1; }
+
+fn shared(closure mut* c) ownership_source_exit.closure* { return &c->e.source.exit; }
+
+fn exit_of(closure mut* c, string module, string name) ownership_source_exit.context* {
+    ownership_source.body* found = ownership_source_env.find(&c->e, module, name);
+    assert(found->verification == ownership_source.status.complete);
+    assert(found->exit.solved);
+    return &found->exit;
+}
+
+fn body(closure mut* c, string name) ownership_source_exit.context* {
+    return exit_of(c, "main", name);
+}
+
+fn status_text(ownership_source_local.status value) string {
+    switch (value) {
+    case ownership_source_local.status.unexecuted: return "unexecuted";
+    case ownership_source_local.status.complete: return "complete";
+    case ownership_source_local.status.incomplete: return "incomplete";
+    case ownership_source_local.status.failed: return "failed";
+    }
+}
+
+/// The process-exit proof of a solved context, in the words of the report rows.
+fn proof_text(ownership_source_exit.context* x) string {
+    if (x->violations_len > 0) { return "violated"; }
+    if (ownership_api.successful(x->proof)) { return "complete"; }
+    return "incomplete";
+}
+
+fn outcome_of(closure mut* c, string module, string name, string correspondence, string proof)
+    bool {
+    ownership_source_exit.context* x = exit_of(c, module, name);
+    string got_correspondence = status_text(x->correspondence);
+    string got_proof = proof_text(x);
+    if (got_correspondence != correspondence || got_proof != proof) {
+        eprintln(module, ".", name, ": correspondence ", got_correspondence, ", proof ",
+            got_proof, ", gap ", cast(x->gap, i32), ", records ", x->violations_len, " ",
+            x->unproved_len);
+        mismatch(c);
+        return false;
+    }
+    return true;
+}
+
+/// A body that proves its process-exit obligations.
+fn proved(closure mut* c, string name) void { proved_in(c, "main", name); }
+
+fn proved_in(closure mut* c, string module, string name) void {
+    if (!outcome_of(c, module, name, "complete", "complete")) { return; }
+    ownership_source_exit.context* x = exit_of(c, module, name);
+    assert(x->violations_len == 0 && x->unproved_len == 0);
+    assert(x->solver == ownership_source_local.status.complete);
+}
+
+/// A body outside the declared scope, with the first gap that put it there and its line.
+fn outside(closure mut* c, string name, ownership_source_exit.missing why, u32 line) void {
+    outside_in(c, "main", name, why, line);
+}
+
+/// The same for a body of any module. Line 0 accepts any line of another file.
+fn outside_in(closure mut* c, string module, string name, ownership_source_exit.missing why,
+    u32 line) void {
+    ownership_source_exit.context* x = exit_of(c, module, name);
+    if (x->gap != why || (line != 0 && x->gap_source.line != line)) {
+        eprintln(module, ".", name, ": gap ", cast(x->gap, i32), " at line ",
+            x->gap_source.line, ", wanted ", cast(why, i32), " at line ", line);
+        mismatch(c);
+        return;
+    }
+    if (x->violations_len > 0) {
+        outcome_of(c, module, name, "incomplete", "violated");
+        return;
+    }
+    outcome_of(c, module, name, "incomplete", "incomplete");
+}
+
+/// A declared body with incomplete proof: its first record has the note `text` on `line` and
+/// names `owner`. Line 0 accepts any line of another file.
+fn unproved(closure mut* c, string name, string owner, string text, u32 line) void {
+    unproved_in(c, "main", name, owner, text, line);
+}
+
+fn unproved_in(closure mut* c, string module, string name, string owner, string text,
+    u32 line) void {
+    if (!outcome_of(c, module, name, "complete", "incomplete")) { return; }
+    ownership_source_exit.context* x = exit_of(c, module, name);
+    ownership_source_local.violation u = x->unproved[0];
+    if (u.text != text || u.name != owner || (line != 0 && u.source.line != line) ||
+        u.kind != ownership_api.event_kind.incomplete_proof) {
+        eprintln(module, ".", name, ": ", u.name, " ", u.text, " at line ", u.source.line);
+        mismatch(c);
+    }
+}
+
+/// One validated violation of `owner` on `line` with the note `text`, in a body of any scope.
+fn violation(closure mut* c, string name, string owner, string text, u32 line) void {
+    ownership_source_exit.context* x = body(c, name);
+    if (x->violations_len != 1) {
+        eprintln(name, ": ", x->violations_len, " violations, ", x->unproved_len, " unproved");
+        mismatch(c);
+        return;
+    }
+    ownership_source_local.violation v = x->violations[0];
+    if (v.kind != ownership_api.event_kind.lost_ownership || v.name != owner || v.text != text ||
+        v.source.line != line) {
+        eprintln(name, ": ", v.name, " ", v.text, " at line ", v.source.line);
+        mismatch(c);
+    }
+}
+
+/// The index of the leaf of global `name`, which must have one leaf.
+fn leaf_of(closure mut* c, string name) u64 {
+    ownership_source_exit.closure* x = shared(c);
+    u64 mut i = 0;
+    while (i < x->leaves_len) {
+        if (x->leaves[i].global->name == name) { return i; }
+        i += 1;
+    }
+    panic("ownership_exit_source_env: leaf is absent");
+}
+
+/// Whether body `name` leaves global `owner` empty at each normal return (its exit fact).
+fn empties(closure mut* c, string module, string name, string owner) bool {
+    ownership_source_exit.context* x = exit_of(c, module, name);
+    assert(x->fact_ready);
+    return x->exit_empty[leaf_of(c, owner)];
+}
+
+/// The boundary verdict in the words of the report member.
+fn boundary(closure mut* c, string correspondence, string proof) void {
+    ownership_source_exit.closure* x = shared(c);
+    string got_correspondence = status_text(x->boundary_correspondence);
+    string got_proof = status_text(x->boundary_proof);
+    if (got_correspondence != correspondence || got_proof != proof) {
+        eprintln("boundary: correspondence ", got_correspondence, ", proof ", got_proof,
+            ", gap ", cast(x->boundary_gap, i32), ", records ", x->boundary_unproved_len);
+        mismatch(c);
+    }
+}
+
+/// Fails the run when a case did not match.
+fn finish(closure mut* c, string done) void {
+    if (c->mismatches > 0) {
+        eprintln(c->mismatches, " mismatches");
+        panic("ownership_exit_source_env: mismatches");
+    }
+    println(done);
+}

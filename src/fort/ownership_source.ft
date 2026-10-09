@@ -12,6 +12,7 @@ import ownership_api;
 import ownership_graph;
 import ownership_keys;
 import ownership_limits;
+import ownership_source_exit;
 import ownership_source_live;
 import ownership_source_local;
 import ownership_source_raw;
@@ -47,6 +48,8 @@ struct body {
     // range loans (toolchain 1.1, `stored_borrows`).
     ownership_source_local.context stored;
     ownership_source_raw.context raw;
+    // The process-exit analysis (toolchain 1.1, `process_exit`).
+    ownership_source_exit.context exit;
     graph_route route;
     status graph_correspondence;
     status graph_solver;
@@ -82,6 +85,8 @@ struct context {
     // (ownership_source_local.loaded_bound). Off: no call summary checks it yet. The calls
     // increment turns it on when its summaries check it at each call.
     bool callers_bind_loaded;
+    // The owning globals and the final boundary of the process-exit analysis.
+    ownership_source_exit.closure exit;
 }
 
 fn file_id(context* c, string filename) u32 {
@@ -237,6 +242,8 @@ fn prepare(context mut* c, check.checker mut* ck, modules.module_set* set,
         i += 1;
     }
     c->bodies = new(body, declarations.len);
+    ownership_source_exit.classify(&c->exit, set);
+    if (checked) { ownership_source_exit.collect(&c->exit, set); }
     fir_verify.runtime rt = fir_verify.runtime_of(ck);
     i = 0;
     while (i < declarations.len) {
@@ -281,6 +288,8 @@ fn prepare(context mut* c, check.checker mut* ck, modules.module_set* set,
             row->source.file, row->module->file, row->source);
         ownership_source_raw.prepare(&row->raw, &row->function, row->key, row->source.file,
             row->module->file, row->source);
+        ownership_source_exit.prepare(&row->exit, &c->exit, &row->function, row->key,
+            row->source.file, row->module->file, row->source, row->module->path);
         i += 1;
     }
 }
@@ -406,6 +415,22 @@ fn analyze(context mut* c) void {
         row->ownership = row->first_incomplete;
         i += 1;
     }
+    // The process-exit analysis reads the exit facts of every body before it proves any.
+    if (c->exit.collected) {
+        ownership_source_exit.context mut* mut@ own exits =
+            new(ownership_source_exit.context mut*, count);
+        defer del(exits);
+        u64 mut n = 0;
+        i = 0;
+        while (i < c->bodies.len) {
+            if (c->bodies[i].verification == status.complete) {
+                exits[n] = &c->bodies[i].exit;
+                n += 1;
+            }
+            i += 1;
+        }
+        ownership_source_exit.solve_closure(&c->exit, exits[..n], prerequisites);
+    }
 }
 
 fn free(context mut* c) void {
@@ -419,11 +444,13 @@ fn free(context mut* c) void {
         ownership_source_local.free(&row->local);
         ownership_source_local.free(&row->stored);
         ownership_source_raw.free(&row->raw);
+        ownership_source_exit.free(&row->exit);
         fir.func_free(&row->function);
         strbuf.free(&row->verification_failure);
         ownership_source_live.free(&row->live);
         i += 1;
     }
     del(c->bodies);
+    ownership_source_exit.free_closure(&c->exit);
     *c = context{};
 }

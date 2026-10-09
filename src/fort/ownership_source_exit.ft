@@ -1,0 +1,1897 @@
+/// Produces process-exit obligations from verified source FIR and proves the summary-free ones.
+// The caller keeps the checker, the module set, the FIR of each body and these contexts at stable
+// addresses through free. One forward analysis runs for each verified body. Its state holds one
+// set for each unit: each owning global leaf of the closure and each owning local of the body.
+// A set holds EMPTY, LIVE and SYMBOLIC; SYMBOLIC marks a LIVE that comes from storage the body
+// does not see, its entry or a fort call. A join is the union (D17.18). The analysis checks
+// stores into owning globals, releases of them, and each known normal exit (D17.19). A fort call
+// while an owner of the frame can be live needs the outcome summary of the callee: that
+// obligation stays incomplete for call summaries to prove. The module uses no dispatch table.
+import ast;
+import diag;
+import fir;
+import fir_flow;
+import fir_lower;
+import gen_fir;
+import modules;
+import ownership_api;
+import ownership_ffi;
+import ownership_keys;
+import ownership_limits;
+import ownership_source_local;
+import types;
+
+u64 U64_MAX = 18446744073709551615;
+u32 NO_UNIT = 4294967295;
+// A step of a leaf path: a field number, or any element of a fixed array.
+u32 ELEMENT = 4294967295;
+
+u8 EMPTY = 1;
+u8 LIVE = 2;
+u8 SYMBOLIC = 4;
+u8 UNKNOWN = 7;
+// A foreign result is a trusted fresh obligation or null (D17.13): no summary decides which.
+u8 FOREIGN = 3;
+
+string RUNTIME_MODULE = "std.rt";
+string SHUTDOWN = "shutdown";
+
+/// Why a body or the boundary has no complete process-exit correspondence. Each gap needs facts
+/// that call summaries supply (D17.18, D17.19).
+enum missing {
+    none,
+    // A store into an owning global leaf whose old contents come from the caller or a callee.
+    caller_state,
+    // The release of an owning global whose referent holds owning leaves: heap facts decide it.
+    owned_descendants,
+    // A fort call while an owner of the frame can hold an allocation. The callee can end the
+    // process normally, and only its outcome summary says whether it does.
+    suspended_owner,
+    // A known normal exit where an owning global or an owner of the frame comes from the caller
+    // or a callee.
+    boundary_state,
+}
+
+/// One owning global leaf of the closure. A path crosses fields and fixed-array elements.
+struct leaf {
+    ast.sym* global;
+    u64 path_first;
+    u64 path_len;
+    // The path crosses an element of a fixed array, so one leaf stands for every element.
+    bool weak;
+    // The global stands in std.rt: the runtime cleanup must empty it (D11.6, D17.19).
+    bool runtime;
+    // An address that no store pattern consumes reaches it, so an indirect write can change it.
+    bool escaped;
+    // Its referent holds owning leaves: only heap facts prove them empty when the value of the
+    // leaf is released or moved out (D17.16).
+    bool deep;
+    ownership_api.source_position declaration;
+}
+
+// One owning global: its leaves are entries first to first + count - 1 of `leaves`.
+struct owner {
+    u64 key;
+    ast.sym* global;
+    u64 first;
+    u64 count;
+}
+
+/// The place that one FIR place designates for this analysis.
+enum target_kind {
+    none,
+    // A whole owning local of the frame.
+    frame_whole,
+    // A part of an owning local of the frame.
+    frame_part,
+    // Inline storage of an owning global: the leaves [first, first + count).
+    global,
+    // Storage that the place reaches through a reference the analysis does not resolve.
+    indirect,
+}
+
+struct target {
+    target_kind kind;
+    u32 unit;
+    u64 first;
+    u64 count;
+    // The selection crosses an element, so a write is a weak update.
+    bool weak;
+    // The written part holds an owning leaf.
+    bool owning;
+}
+
+/// The closure facts that every body reads, and the final boundary verdict.
+struct closure {
+    leaf mut@ own leaves;
+    u64 leaves_len;
+    u32 mut@ own steps;
+    u64 steps_len;
+    owner mut@ own owners;
+    u64 owners_len;
+    // Owning constants: their initializer is their contents for good, so they hold no allocation.
+    u64 constant_owners;
+    // The entry module has a `main`: the generated executable sequence applies (D11.6).
+    bool executable;
+    // The mentions of an owning global in an initializer: each takes its address (D17.19).
+    u64 initializer_escapes;
+    // The bodies, sorted by the address of their function symbol.
+    context mut* mut@ own bodies;
+    u64 bodies_len;
+    context mut* shutdown;
+    bool prerequisites;
+    bool collected;
+    bool solved;
+    ownership_source_local.status boundary_correspondence;
+    ownership_source_local.status boundary_proof;
+    missing boundary_gap;
+    ownership_api.source_position boundary_gap_source;
+    ownership_source_local.violation mut@ own boundary_unproved;
+    u64 boundary_unproved_len;
+    ownership_api.proof_status boundary_first;
+    // The W ledger of the call-graph step that decides `fills`, one computation (D17.18). A test
+    // can configure it before the closure is solved; else its bound follows the FIR size of the
+    // bodies. Its first refusal makes each body fill and is the first boundary reason.
+    ownership_limits.meter fills_meter;
+    ownership_api.proof_status fills_refusal;
+    // The FIR size of that step: the sum of the FIR sizes of the bodies it covers.
+    u64 fills_fir_size;
+    // The step ran: each body of the closure is verified, so the boundary runs too.
+    bool fills_decided;
+}
+
+/// The process-exit analysis of one verified body.
+struct context {
+    fir.func* function;
+    ownership_api.function_id identity;
+    u32 file;
+    string filename;
+    ownership_api.source_position declaration;
+    closure mut* shared;
+    // The body is a function of std.rt.
+    bool runtime;
+    // The unit of each local, or NO_UNIT; the local of each frame unit.
+    u32 mut@ own unit_of;
+    u32 mut@ own frames;
+    bool mut@ own tracked;
+    u64 frames_len;
+    bool mut@ own taken;
+    // For a local that holds one address of global storage: its entry in `addresses` plus one,
+    // else 0.
+    u32 mut@ own resolved;
+    address mut@ own addresses;
+    u64 addresses_len;
+    u32 mut@ own address_steps;
+    u64 address_steps_len;
+    u8 mut@ own states;
+    bool mut@ own reached;
+    u8 mut@ own scratch;
+    u8 mut@ own returned;
+    // The lowest block that the current step made pending, or the block count.
+    u32 restart;
+    // The predecessors of each block, built once for the witness walks of the body.
+    fir.pred_table preds;
+    bool preds_built;
+    bool returns;
+    // The leaves that the body leaves EMPTY at each normal return, from the first pass.
+    bool mut@ own exit_empty;
+    bool fact_ready;
+    // The leaves that a store in the body can find holding an allocation. The store drops it, so
+    // the body is no cleanup of such a leaf (D17.19).
+    bool mut@ own unclean;
+    // The body hands a value that can hold an allocation to storage outside its frame: an owning
+    // global, an indirect owning place, a fort call argument, or a fort call that can reach an
+    // owner of the frame through its address. Two such bodies can pass one allocation between
+    // leaves, so the body is no cleanup of any leaf (D17.19).
+    // Each pass sets both facts with no gate. A later pass finds no more, because its states are
+    // no larger, so the first pass decides them.
+    bool exports;
+    // The body can fill an owning global: it hands a value out of its frame, it has no exit
+    // fact, it makes an indirect fort call or a call that resolves to no verified body, or a fort
+    // callee fills. `decide_fills` decides it for the closure after the first passes. A cleanup
+    // body needs it false, so no callee refills a leaf that another cleanup empties (D17.19).
+    bool fills;
+    ownership_api.limit_table limits;
+    ownership_limits.meter meter;
+    ownership_api.proof_status first_refusal;
+    u64 fir_size;
+    missing gap;
+    ownership_api.source_position gap_source;
+    ownership_source_local.violation mut@ own violations;
+    u64 violations_len;
+    ownership_source_local.violation mut@ own unproved;
+    u64 unproved_len;
+    // Each address use of an owning global that no store pattern consumes (D17.19).
+    u64 escapes;
+    // The counts of the cases of this body, from the final sweep.
+    u64 global_stores;
+    u64 global_releases;
+    u64 global_moves;
+    u64 global_lends;
+    u64 global_addresses;
+    u64 exit_calls;
+    u64 abort_calls;
+    u64 foreign_ends;
+    u64 fort_calls;
+    u64 suspended_calls;
+    ownership_source_local.status correspondence;
+    ownership_source_local.status solver;
+    ownership_api.proof_status proof;
+    ownership_api.proof_status first_incomplete;
+    bool initialized;
+    bool solved;
+    bool recording;
+    bool refused;
+}
+
+fn complete() ownership_api.proof_status {
+    return ownership_api.proof_status{.kind = ownership_api.proof_kind.complete};
+}
+
+fn entity(context* c, ownership_api.entity_kind kind, u32 ordinal) ownership_api.entity_id {
+    return ownership_api.entity_id{c->identity, kind, ordinal};
+}
+
+fn local_type(context* c, u32 local) types.node* {
+    return fir.local_at(c->function, local)->ty;
+}
+
+fn owning_type(types.node* t) bool {
+    if (t == null || t->kind == types.type_kind.k_void) { return false; }
+    return ownership_source_local.owning_type(t);
+}
+
+fn own_reference(types.node* t) bool {
+    return t != null && types.type_is_reference(t) && t->is_own;
+}
+
+// Whether the referent of the owning reference `t` holds owning leaves (D17.16).
+fn owns_descendants(types.node* t) bool {
+    return own_reference(t) && t->kind != types.type_kind.k_string &&
+        t->kind != types.type_kind.k_voidptr && owning_type(t->elem);
+}
+
+fn source(context* c, diag.loc at) ownership_api.source_position {
+    if (at.line == 0 || at.col == 0 || at.file != c->filename) { return c->declaration; }
+    return ownership_api.source_position{c->identity.declaration.module, c->file,
+        at.line, at.col, at.end_line, at.end_col, true};
+}
+
+fn position(context* c, u32 block, u32 gap) ownership_api.operation_position {
+    return ownership_api.operation_position{c->identity, block, gap,
+        gap == fir.block_statement_count(c->function, block)};
+}
+
+fn location(context* c, u32 block, u32 gap) diag.loc {
+    if (gap < fir.block_statement_count(c->function, block)) {
+        return fir.block_statement(c->function, block, gap)->loc;
+    }
+    return fir.block_at(c->function, block)->term.loc;
+}
+
+fn note_gap(context mut* c, missing why, u32 block, u32 gap) void {
+    if (!c->recording) { return; }
+    if (c->gap == missing.none) {
+        c->gap = why;
+        c->gap_source = source(c, location(c, block, gap));
+    }
+}
+
+// ---- budget ---------------------------------------------------------------------------------
+
+fn work(context mut* c, u32 block, u32 gap) bool {
+    if (c->refused) { return false; }
+    ownership_api.charge_item[1] item = {ownership_api.charge_item{
+        ownership_api.limit_category.w, ownership_api.limit_scope.computation, 1}};
+    ownership_api.source_position at = source(c, location(c, block, gap));
+    ownership_api.charge_request request = ownership_api.charge_request{
+        ownership_api.work_kind.transfer, position(c, block, gap), at, item[..]};
+    ownership_api.charge_result out = ownership_limits.try_charge(&c->meter, &request);
+    if (!out.allowed) {
+        c->refused = true;
+        if (!c->first_refusal.terminal.present) {
+            c->first_refusal = ownership_api.incomplete(ownership_api.incomplete_reason.work_limit,
+                request.operation, at);
+            c->first_refusal.terminal.limit = out.limit;
+            c->first_refusal.terminal.limit.source = at;
+        }
+    }
+    return out.allowed;
+}
+
+/// Charges retained records and rendered records against the V bound of this ledger.
+fn charge_report(context mut* c, ownership_api.operation_position op,
+    ownership_api.source_position at, u64 amount) bool {
+    ownership_api.charge_item[1] item = {ownership_api.charge_item{
+        ownership_api.limit_category.v, ownership_api.limit_scope.report, amount}};
+    ownership_api.charge_request request = ownership_api.charge_request{
+        ownership_api.work_kind.transfer, op, at, item[..]};
+    ownership_api.charge_result out = ownership_limits.try_charge(&c->meter, &request);
+    if (!out.allowed && !c->first_refusal.terminal.present) {
+        c->first_refusal = ownership_api.incomplete(ownership_api.incomplete_reason.report_limit,
+            op, at);
+        c->first_refusal.terminal.limit = out.limit;
+        c->first_refusal.terminal.limit.source = at;
+    }
+    return out.allowed;
+}
+
+/// Charges one rendered record: its error and its note.
+fn charge_rendered(context mut* c, ownership_source_local.violation* v) bool {
+    return charge_report(c, v->operation, v->source, 2);
+}
+
+// ---- closure facts --------------------------------------------------------------------------
+
+fn file_id(modules.module_set* set, string filename) u32 {
+    u64 mut i = 0;
+    while (i < modules.file_count(set)) {
+        if (modules.file_at(set, i) == filename) {
+            // panic-coverage: unreachable: read: a closure holds fewer than 2^32 files.
+            if (i > fir.U32_LIMIT) { panic("ownership_source_exit: file key overflow"); }
+            return cast(i, u32);
+        }
+        i += 1;
+    }
+    // panic-coverage: unreachable: read: a checked declaration names a file of its closure.
+    panic("ownership_source_exit: source file is absent");
+}
+
+fn grow_steps(closure mut* x, u64 more) void {
+    if (x->steps_len + more <= x->steps.len) { return; }
+    u32 mut@ own bigger = new(u32, (x->steps_len + more) * 2 + 8);
+    u64 mut i = 0;
+    while (i < x->steps_len) { bigger[i] = x->steps[i]; i += 1; }
+    del(x->steps);
+    x->steps = move(bigger);
+}
+
+fn grow_leaves(closure mut* x) void {
+    if (x->leaves_len < x->leaves.len) { return; }
+    leaf mut@ own bigger = new(leaf, x->leaves.len * 2 + 4);
+    u64 mut i = 0;
+    while (i < x->leaves_len) { bigger[i] = x->leaves[i]; i += 1; }
+    del(x->leaves);
+    x->leaves = move(bigger);
+}
+
+// Appends the leaves of a value of type `t` at the path `path`, in field order (D17.15).
+fn add_leaves(closure mut* x, leaf* base, types.node* t, u32 mut@ path, u64 depth, bool weak)
+    void {
+    if (own_reference(t)) {
+        grow_leaves(x);
+        grow_steps(x, depth);
+        leaf mut item = *base;
+        item.path_first = x->steps_len;
+        item.path_len = depth;
+        item.weak = weak;
+        item.deep = owns_descendants(t);
+        u64 mut i = 0;
+        while (i < depth) { x->steps[x->steps_len] = path[i]; x->steps_len += 1; i += 1; }
+        x->leaves[x->leaves_len] = item;
+        x->leaves_len += 1;
+        return;
+    }
+    if (!types.type_is_owning_aggregate(t)) { return; }
+    if (depth >= path.len) {
+        // panic-coverage: unreachable: read: D2.11 bounds the nesting of a declared type by 256.
+        panic("ownership_source_exit: leaf path too deep");
+    }
+    if (t->kind == types.type_kind.k_array) {
+        path[depth] = ELEMENT;
+        add_leaves(x, base, t->elem, path, depth + 1, true);
+        return;
+    }
+    u32 count = fir.struct_field_count(t);
+    u32 mut k = 0;
+    while (k < count) {
+        path[depth] = k;
+        add_leaves(x, base, fir.struct_field_type(t, k), path, depth + 1, weak);
+        k += 1;
+    }
+}
+
+fn add_owner(closure mut* x, modules.module_set* set, u32 module, modules.module* m,
+    ast.node* declaration) void {
+    ast.sym* g = declaration->sym;
+    if (g == null || g->error || g->ty == null || !owning_type(g->ty)) { return; }
+    if (g->kind != ast.sym_kind.s_global) {
+        x->constant_owners += 1;
+        return;
+    }
+    leaf mut base = leaf{};
+    base.global = g;
+    base.runtime = m->path == RUNTIME_MODULE;
+    diag.loc at = declaration->name_loc;
+    base.declaration = ownership_api.source_position{module, file_id(set, at.file), at.line,
+        at.col, at.end_line, at.end_col, true};
+    u32[257] mut path = {};
+    u64 first = x->leaves_len;
+    add_leaves(x, &base, g->ty, path[..], 0, false);
+    if (x->owners_len == x->owners.len) {
+        owner mut@ own bigger = new(owner, x->owners.len * 2 + 4);
+        u64 mut i = 0;
+        while (i < x->owners_len) { bigger[i] = x->owners[i]; i += 1; }
+        del(x->owners);
+        x->owners = move(bigger);
+    }
+    x->owners[x->owners_len] = owner{cast(g, u64), g, first, x->leaves_len - first};
+    x->owners_len += 1;
+}
+
+fn walk_declarations(closure mut* x, modules.module_set* set, u32 module, modules.module* m,
+    ast.node* list) void {
+    u64 mut i = 0;
+    while (list != null && i < ast.ast_len(list)) {
+        ast.node* declaration = ast.ast_child(list, i);
+        if (declaration->kind == ast.ast_kind.k_compile_if) {
+            walk_declarations(x, set, module, m, fir_lower.selected_branch(declaration));
+        } else if (declaration->kind == ast.ast_kind.k_var_decl) {
+            add_owner(x, set, module, m, declaration);
+        }
+        i += 1;
+    }
+}
+
+fn sort_owners(closure mut* x) void {
+    u64 mut i = 1;
+    while (i < x->owners_len) {
+        owner item = x->owners[i];
+        u64 mut j = i;
+        while (j > 0 && x->owners[j - 1].key > item.key) {
+            x->owners[j] = x->owners[j - 1];
+            j -= 1;
+        }
+        x->owners[j] = item;
+        i += 1;
+    }
+}
+
+/// Collects the owning globals of a checked closure and the globals whose address an
+/// initializer holds.
+fn collect(closure mut* x, modules.module_set* set) void {
+    if (x->collected) { panic("ownership_source_exit: closure is already collected"); }
+    x->collected = true;
+    u64 mut i = 0;
+    while (i < modules.count(set)) {
+        modules.module* m = modules.at(set, i);
+        // panic-coverage: unreachable: read: a closure holds fewer than 2^32 modules.
+        if (i > fir.U32_LIMIT) { panic("ownership_source_exit: module key overflow"); }
+        if (m->selected) { walk_declarations(x, set, cast(i, u32), m, m->ast); }
+        i += 1;
+    }
+    sort_owners(x);
+    // Each owner is known now, so an initializer can name one that a later module declares.
+    i = 0;
+    while (i < modules.count(set)) {
+        modules.module* m = modules.at(set, i);
+        if (m->selected) { escape_initializers(x, m->ast); }
+        i += 1;
+    }
+}
+
+/// Decides the kind of the boundary: executable when the entry module has a selected `main`,
+/// the rule of gen_fir.find_main, in check and build modes (D20.1). It also runs when checking
+/// failed, so a failed report names the kind of its closure.
+fn classify(closure mut* x, modules.module_set* set) void {
+    modules.module* entry = modules.entry(set);
+    x->executable = entry != null && entry->ast != null && gen_fir.find_main(entry->ast) != null;
+}
+
+// An initializer is a constant expression, so it can name an owning global only to take its
+// address (`T mut* p = &g;`). That address leaves every store pattern, so each owning global
+// that an initializer names escapes (D17.19 "taking a global address creates no escape
+// exemption").
+fn escape_initializers(closure mut* x, ast.node* list) void {
+    u64 mut i = 0;
+    while (list != null && i < ast.ast_len(list)) {
+        ast.node* declaration = ast.ast_child(list, i);
+        if (declaration->kind == ast.ast_kind.k_compile_if) {
+            escape_initializers(x, fir_lower.selected_branch(declaration));
+        } else if (declaration->kind == ast.ast_kind.k_var_decl) {
+            escape_mentions(x, declaration->b);
+        }
+        i += 1;
+    }
+}
+
+// Marks each owning global that the expression `n` names as escaped.
+fn escape_mentions(closure mut* x, ast.node* n) void {
+    if (n == null) { return; }
+    if (n->sym != null && n->sym->kind == ast.sym_kind.s_global) {
+        owner* o = owner_of(x, n->sym);
+        if (o != null) {
+            u64 mut k = 0;
+            while (k < o->count) { x->leaves[o->first + k].escaped = true; k += 1; }
+            x->initializer_escapes += 1;
+        }
+    }
+    escape_mentions(x, n->a);
+    escape_mentions(x, n->b);
+    escape_mentions(x, n->c);
+    escape_mentions(x, n->d);
+    u64 mut i = 0;
+    while (i < ast.ast_len(n)) { escape_mentions(x, ast.ast_child(n, i)); i += 1; }
+}
+
+fn owner_of(closure* x, ast.sym* g) owner* {
+    u64 key = cast(g, u64);
+    u64 mut lo = 0;
+    u64 mut hi = x->owners_len;
+    while (lo < hi) {
+        u64 mid = lo + (hi - lo) / 2;
+        if (x->owners[mid].key < key) { lo = mid + 1; }
+        else { hi = mid; }
+    }
+    if (lo < x->owners_len && x->owners[lo].key == key) { return &x->owners[lo]; }
+    return null;
+}
+
+fn body_of(closure* x, ast.sym* f) context mut* {
+    u64 at = body_index(x, f);
+    if (at == x->bodies_len) { return null; }
+    return x->bodies[at];
+}
+
+// The index of the body of function `f` in the sorted bodies, or the body count.
+fn body_index(closure* x, ast.sym* f) u64 {
+    u64 key = cast(f, u64);
+    u64 mut lo = 0;
+    u64 mut hi = x->bodies_len;
+    while (lo < hi) {
+        u64 mid = lo + (hi - lo) / 2;
+        if (cast(x->bodies[mid]->function->sym, u64) < key) { lo = mid + 1; }
+        else { hi = mid; }
+    }
+    if (f != null && lo < x->bodies_len && x->bodies[lo]->function->sym == f) { return lo; }
+    return x->bodies_len;
+}
+
+// ---- places ---------------------------------------------------------------------------------
+
+// The leaves of global `g` under the path of the first `depth` steps in `path`.
+fn select_leaves(closure* x, owner* o, u32@ path, u64 depth, target mut* out) void {
+    u64 mut first = U64_MAX;
+    u64 mut count = 0;
+    u64 mut i = 0;
+    while (i < o->count) {
+        leaf* item = &x->leaves[o->first + i];
+        bool mut under = item->path_len >= depth;
+        u64 mut k = 0;
+        while (under && k < depth) {
+            if (x->steps[item->path_first + k] != path[k]) { under = false; }
+            k += 1;
+        }
+        if (under) {
+            if (first == U64_MAX) { first = o->first + i; }
+            count += 1;
+        }
+        i += 1;
+    }
+    out->first = first == U64_MAX ? 0 : first;
+    out->count = count;
+    out->owning = count > 0;
+}
+
+// A resolved address: the storage of `global` at the path of `len` steps from `first` in the
+// address steps of the context, with type `ty`. `weak` says that the path crosses an element.
+struct address {
+    ast.sym* global;
+    u64 first;
+    u64 len;
+    bool weak;
+    types.node* ty;
+}
+
+fn start_of(ast.sym* g) address { return address{g, 0, 0, false, g->ty}; }
+
+// Applies projections `from` to the end of `p` to the path `path[..*depth]` of type `*t`. False
+// when a projection reads a reference: the rest is storage that a reference designates.
+fn extend(context* c, fir.place p, u32 from, u32 mut@ path, u64 mut* depth,
+    types.node* mut* t, bool mut* weak) bool {
+    fir.func* f = c->function;
+    u32 mut i = from;
+    while (i < p.proj_len) {
+        fir.projection pj = fir.place_projection(f, p, i);
+        types.node* now = *t;
+        if (pj.kind == fir.proj_kind.pj_deref || (pj.kind == fir.proj_kind.pj_index &&
+            (now->kind == types.type_kind.k_span || now->kind == types.type_kind.k_string))) {
+            return false;
+        }
+        if (*depth >= path.len) {
+            // panic-coverage: unreachable: read: a place nests no deeper than its type.
+            panic("ownership_source_exit: place path too deep");
+        }
+        if (pj.kind == fir.proj_kind.pj_index) {
+            path[*depth] = ELEMENT;
+            *weak = true;
+        } else {
+            path[*depth] = pj.field;
+        }
+        *depth += 1;
+        *t = fir.apply_projection(f, now, pj);
+        i += 1;
+    }
+    return true;
+}
+
+// Resolves the place `p` from projection `from`, which designates the storage of `start`. A
+// place that reads a reference on its way is indirect, also when the global holds no owner:
+// `*pg` for a global pointer `pg` can be the storage of an owning global.
+fn global_place(context* c, address start, fir.place p, u32 from) target {
+    owner* o = owner_of(c->shared, start.global);
+    u32[257] mut path = {};
+    u64 mut depth = 0;
+    while (depth < start.len) {
+        path[depth] = c->address_steps[start.first + depth];
+        depth += 1;
+    }
+    types.node* mut t = start.ty;
+    bool mut weak = start.weak;
+    if (!extend(c, p, from, path[..], &depth, &t, &weak)) {
+        return target{.kind = target_kind.indirect,
+            .owning = owning_type(fir.place_type(c->function, p))};
+    }
+    // Inline storage of a global without an owning leaf holds no obligation.
+    if (o == null) { return target{}; }
+    target mut out = target{.kind = target_kind.global, .weak = weak};
+    select_leaves(c->shared, o, path[..], depth, &out);
+    return out;
+}
+
+/// What the place `p` designates for the process-exit analysis.
+fn resolve(context* c, fir.place p) target {
+    fir.func* f = c->function;
+    if (p.base == fir.base_kind.bk_global) { return global_place(c, start_of(p.global), p, 0); }
+    u64 n = cast(p.local, u64);
+    if (p.proj_len > 0 && fir.place_projection(f, p, 0).kind == fir.proj_kind.pj_deref &&
+        c->resolved[n] != 0) {
+        return global_place(c, c->addresses[cast(c->resolved[n], u64) - 1], p, 1);
+    }
+    if (fir.place_indirect(f, p)) {
+        return target{.kind = target_kind.indirect, .owning = owning_type(fir.place_type(f, p))};
+    }
+    u32 unit = c->unit_of[n];
+    if (unit == NO_UNIT) { return target{}; }
+    if (p.proj_len == 0) {
+        return target{.kind = target_kind.frame_whole, .unit = unit, .owning = true};
+    }
+    return target{.kind = target_kind.frame_part, .unit = unit,
+        .owning = owning_type(fir.place_type(f, p))};
+}
+
+// The address that the place `q` of an `addr` names when it is global storage: a global place,
+// or a place through a resolved address. False for any other place.
+fn address_of(context mut* c, fir.place q, address mut* out) bool {
+    fir.func* f = c->function;
+    address mut start = address{};
+    u32 mut from = 0;
+    if (q.base == fir.base_kind.bk_global) {
+        start = start_of(q.global);
+    } else if (q.proj_len > 0 && fir.place_projection(f, q, 0).kind == fir.proj_kind.pj_deref &&
+        c->resolved[cast(q.local, u64)] != 0) {
+        start = c->addresses[cast(c->resolved[cast(q.local, u64)], u64) - 1];
+        from = 1;
+    } else {
+        return false;
+    }
+    u32[257] mut path = {};
+    u64 mut depth = 0;
+    while (depth < start.len) {
+        path[depth] = c->address_steps[start.first + depth];
+        depth += 1;
+    }
+    types.node* mut t = start.ty;
+    bool mut weak = start.weak;
+    if (!extend(c, q, from, path[..], &depth, &t, &weak)) { return false; }
+    if (c->address_steps_len + depth > c->address_steps.len) {
+        u32 mut@ own bigger = new(u32, (c->address_steps_len + depth) * 2 + 8);
+        u64 mut i = 0;
+        while (i < c->address_steps_len) { bigger[i] = c->address_steps[i]; i += 1; }
+        del(c->address_steps);
+        c->address_steps = move(bigger);
+    }
+    *out = address{start.global, c->address_steps_len, depth, weak, t};
+    u64 mut k = 0;
+    while (k < depth) {
+        c->address_steps[c->address_steps_len] = path[k];
+        c->address_steps_len += 1;
+        k += 1;
+    }
+    return true;
+}
+
+// The local that operand `o` copies or moves whole, or NO_UNIT.
+fn whole_local(fir.operand o) u32 {
+    if (o.kind == fir.operand_kind.ok_const || o.place.base != fir.base_kind.bk_local ||
+        o.place.proj_len != 0) { return NO_UNIT; }
+    return o.place.local;
+}
+
+// Resolves one candidate local from its one definition. True when it resolves now.
+fn resolve_one(context mut* c, u64 n, fir.statement* s) bool {
+    fir.func* f = c->function;
+    fir.rvalue r = s->value;
+    address mut found = address{};
+    if (r.kind == fir.rvalue_kind.rv_addr) {
+        if (!address_of(c, r.place, &found)) { return false; }
+    } else if (r.kind == fir.rvalue_kind.rv_use) {
+        u32 from = whole_local(fir.rvalue_operand(f, r, 0));
+        if (from == NO_UNIT || c->resolved[cast(from, u64)] == 0) { return false; }
+        found = c->addresses[cast(c->resolved[cast(from, u64)], u64) - 1];
+    } else {
+        return false;
+    }
+    c->addresses[c->addresses_len] = found;
+    c->addresses_len += 1;
+    c->resolved[n] = cast(c->addresses_len, u32);
+    return true;
+}
+
+// Finds each local that holds one address of global storage: one definition, an `addr` of
+// global storage, an `addr` through such a local, or a copy of such a local. No address names
+// its own storage. A dereference of it resolves to that storage (D17.19). The lowering takes the
+// address of an owning global for each store into it.
+fn resolve_addresses(context mut* c) void {
+    fir.func* f = c->function;
+    u64 count = cast(fir.local_count(f), u64);
+    u32 mut@ own defs = new(u32, count);
+    defer del(defs);
+    fir.statement* mut@ own definition = new(fir.statement*, count);
+    defer del(definition);
+    c->resolved = new(u32, count);
+    c->addresses = new(address, count);
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, i);
+            if (s->kind == fir.stmt_kind.st_assign && s->place.base == fir.base_kind.bk_local &&
+                s->place.proj_len == 0) {
+                u64 n = cast(s->place.local, u64);
+                defs[n] += 1;
+                definition[n] = s;
+            }
+            i += 1;
+        }
+        b += 1;
+    }
+    // A chain resolves in definition order; each round resolves at least one local or stops.
+    bool mut changed = true;
+    while (changed) {
+        changed = false;
+        u64 mut n = 0;
+        while (n < count) {
+            fir.local_kind kind = fir.local_at(f, cast(n, u32))->kind;
+            if (c->resolved[n] == 0 && defs[n] == 1 && !c->taken[n] &&
+                kind != fir.local_kind.lk_param && kind != fir.local_kind.lk_return &&
+                resolve_one(c, n, definition[n])) { changed = true; }
+            n += 1;
+        }
+    }
+}
+
+// Marks the leaves under `a` escaped: an address of that storage leaves the store patterns.
+fn escape(context mut* c, address a) void {
+    target t = global_place(c, a, fir.place{}, 0);
+    if (t.kind != target_kind.global) { return; }
+    u64 mut i = 0;
+    while (i < t.count) { c->shared->leaves[t.first + i].escaped = true; i += 1; }
+    c->escapes += 1;
+}
+
+// A copy of a resolved address hands the global storage to code that the body does not see.
+// A function value holds no extern `exit`: the checker refuses an extern function as a value.
+fn escape_operand(context mut* c, fir.operand o) void {
+    u32 n = whole_local(o);
+    if (n != NO_UNIT && c->resolved[cast(n, u64)] != 0) {
+        escape(c, c->addresses[cast(c->resolved[cast(n, u64)], u64) - 1]);
+    }
+}
+
+/// Finds the addresses of owning global storage that leave the body's store patterns, and the
+/// result destinations that a callee can write through its `_0` (D17.15). It runs before the first
+/// pass of any body.
+fn escapes(context mut* c) void {
+    fir.func* f = c->function;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, i);
+            fir.rvalue r = s->value;
+            // The definition of a resolved local stays inside the store pattern.
+            bool internal = s->kind == fir.stmt_kind.st_assign &&
+                s->place.base == fir.base_kind.bk_local && s->place.proj_len == 0 &&
+                c->resolved[cast(s->place.local, u64)] != 0;
+            if (s->kind == fir.stmt_kind.st_assign && !internal) {
+                address mut a = address{};
+                // A slice of a span or a string reads its header and names no global storage.
+                bool names = r.kind == fir.rvalue_kind.rv_addr ||
+                    (r.kind == fir.rvalue_kind.rv_slice &&
+                    fir.place_type(f, r.place)->kind == types.type_kind.k_array);
+                if (names && address_of(c, r.place, &a)) { escape(c, a); }
+                if (r.kind == fir.rvalue_kind.rv_call && r.callee == fir.callee_kind.cl_value) {
+                    escape_operand(c, r.callee_op);
+                }
+                u32 mut k = 0;
+                while (k < r.ops_len) { escape_operand(c, fir.rvalue_operand(f, r, k)); k += 1; }
+                // A callee writes an aggregate result in place, so its `_0` is this storage.
+                if (r.kind == fir.rvalue_kind.rv_call &&
+                    types.type_is_owning_aggregate(fir.place_type(f, s->place))) {
+                    target t = resolve(c, s->place);
+                    if (t.kind == target_kind.global) {
+                        u64 mut l = 0;
+                        while (l < t.count) {
+                            c->shared->leaves[t.first + l].escaped = true;
+                            l += 1;
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+        b += 1;
+    }
+}
+
+// ---- preparation ----------------------------------------------------------------------------
+
+fn configure(ownership_limits.meter mut* m, ownership_api.limit_table* limits) void {
+    if (!ownership_limits.configure(m, limits)) {
+        // panic-coverage: unreachable: read: computation() returns the valid version 1 table.
+        panic("ownership_source_exit: production limits are invalid");
+    }
+}
+
+/// Binds one verified body, its ledger and its closure. The analysis runs in solve.
+fn prepare(context mut* c, closure mut* shared, fir.func* function,
+    ownership_api.function_id identity, u32 file, string filename,
+    ownership_api.source_position declaration, string module) void {
+    if (c->initialized) { panic("ownership_source_exit: context is already prepared"); }
+    if (!shared->collected) { panic("ownership_source_exit: closure is not collected"); }
+    c->function = function;
+    c->identity = identity;
+    c->file = file;
+    c->filename = filename;
+    c->declaration = declaration;
+    c->shared = shared;
+    c->runtime = module == RUNTIME_MODULE;
+    c->initialized = true;
+    c->fir_size = ownership_limits.fir_size(function);
+    c->limits = ownership_limits.computation(c->fir_size);
+    configure(&c->meter, &c->limits);
+    fir.func* f = function;
+    u64 count = cast(fir.local_count(f), u64);
+    c->taken = new(bool, count);
+    ownership_source_local.mark_taken(f, c->taken);
+    c->unit_of = new(u32, count);
+    c->frames = new(u32, count);
+    c->tracked = new(bool, count);
+    u64 mut n = 0;
+    while (n < count) {
+        types.node* t = local_type(c, cast(n, u32));
+        c->unit_of[n] = NO_UNIT;
+        if (owning_type(t)) {
+            c->unit_of[n] = cast(shared->leaves_len + c->frames_len, u32);
+            c->frames[c->frames_len] = cast(n, u32);
+            c->tracked[c->frames_len] = own_reference(t) && !c->taken[n];
+            c->frames_len += 1;
+        }
+        n += 1;
+    }
+    resolve_addresses(c);
+    c->exit_empty = new(bool, shared->leaves_len);
+    c->unclean = new(bool, shared->leaves_len);
+}
+
+// ---- states ---------------------------------------------------------------------------------
+
+fn units(context* c) u64 { return c->shared->leaves_len + c->frames_len; }
+
+// A write of `value` into leaves. A leaf that stands for many elements keeps its old state too.
+fn set_leaves(context* c, u8 mut@ s, target t, u8 value) void {
+    u64 mut i = 0;
+    while (i < t.count) {
+        u64 at = t.first + i;
+        if (t.weak || c->shared->leaves[at].weak) { s[at] = s[at] | value; }
+        else { s[at] = value; }
+        i += 1;
+    }
+}
+
+// The state of the value that operand `o` gives, read before the moves of the statement.
+fn operand_state(context* c, u8@ s, fir.operand o) u8 {
+    if (o.kind == fir.operand_kind.ok_const) {
+        if (o.value.kind == fir.const_kind.ck_null || o.value.kind == fir.const_kind.ck_zero) {
+            return EMPTY;
+        }
+        return UNKNOWN;
+    }
+    if (o.kind != fir.operand_kind.ok_move) { return UNKNOWN; }
+    target t = resolve(c, o.place);
+    if (t.kind == target_kind.frame_whole) { return s[cast(t.unit, u64)]; }
+    if (t.kind == target_kind.global) {
+        // A move of a whole aggregate gives any state of its leaves.
+        if (t.count == 0) { return EMPTY; }
+        u8 mut out = 0;
+        u64 mut i = 0;
+        while (i < t.count) { out = out | s[t.first + i]; i += 1; }
+        return out;
+    }
+    return UNKNOWN;
+}
+
+// The state of the value that rvalue `r` gives to a destination of an owning type.
+fn value_state(context* c, u8@ s, fir.rvalue r) u8 {
+    fir.func* f = c->function;
+    if (r.kind == fir.rvalue_kind.rv_use || r.kind == fir.rvalue_kind.rv_cast) {
+        return operand_state(c, s, fir.rvalue_operand(f, r, 0));
+    }
+    if (r.kind == fir.rvalue_kind.rv_alloc) {
+        // An allocation succeeds or traps, and a zero-element one still owns (D10.2, D17.17).
+        return LIVE;
+    }
+    if (r.kind == fir.rvalue_kind.rv_aggregate) {
+        // An owning span or string takes the state of its pointer, operand 0. A struct or an
+        // array takes any state of its owning members.
+        if (own_reference(r.ty)) { return operand_state(c, s, fir.rvalue_operand(f, r, 0)); }
+        u8 mut out = EMPTY;
+        u32 mut k = 0;
+        while (k < r.ops_len) {
+            types.node* member = r.ty->kind == types.type_kind.k_struct ?
+                fir.struct_field_type(r.ty, k) : r.ty->elem;
+            if (owning_type(member)) {
+                out = out | operand_state(c, s, fir.rvalue_operand(f, r, k));
+            }
+            k += 1;
+        }
+        return out;
+    }
+    if (r.kind == fir.rvalue_kind.rv_call) {
+        return r.callee == fir.callee_kind.cl_extern ? FOREIGN : UNKNOWN;
+    }
+    return UNKNOWN;
+}
+
+// Empties the place of each `move` operand of `r` (D17.6, D17.19 "moving from a global empties
+// its selected place"). Counts the moves out of owning globals in the final sweep.
+fn move_operands(context mut* c, u8 mut@ s, fir.rvalue r) void {
+    fir.func* f = c->function;
+    u32 mut k = 0;
+    while (k < r.ops_len) {
+        fir.operand o = fir.rvalue_operand(f, r, k);
+        if (o.kind == fir.operand_kind.ok_move) { empty_place(c, s, o.place, true); }
+        else if (o.kind == fir.operand_kind.ok_copy && c->recording) {
+            target t = resolve(c, o.place);
+            if (t.kind == target_kind.global && t.owning) { c->global_lends += 1; }
+        }
+        k += 1;
+    }
+}
+
+fn frame_index(context* c, u32 unit) u64 {
+    return cast(unit, u64) - c->shared->leaves_len;
+}
+
+fn empty_place(context mut* c, u8 mut@ s, fir.place p, bool moved) void {
+    target t = resolve(c, p);
+    if (t.kind == target_kind.frame_whole) {
+        s[cast(t.unit, u64)] = EMPTY;
+    } else if (t.kind == target_kind.frame_part && c->tracked[frame_index(c, t.unit)]) {
+        s[cast(t.unit, u64)] = UNKNOWN;
+    } else if (t.kind == target_kind.global && t.owning) {
+        set_leaves(c, s, t, EMPTY);
+        if (moved && c->recording) { c->global_moves += 1; }
+    } else if (t.kind == target_kind.indirect && t.owning) {
+        weaken(c, s, EMPTY);
+    }
+}
+
+// Whether a leaf of `t` is deep.
+fn holds_deep(context* c, target t) bool {
+    u64 mut i = 0;
+    while (i < t.count) {
+        if (c->shared->leaves[t.first + i].deep) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+// A store can drop the old value of each leaf of `t` that can hold an allocation, so the body
+// is no cleanup of that leaf (D17.19).
+fn overwrite(context mut* c, u8@ s, target t) void {
+    u64 mut i = 0;
+    while (i < t.count) {
+        u64 at = t.first + i;
+        if ((s[at] & LIVE) != 0) { c->unclean[at] = true; }
+        i += 1;
+    }
+}
+
+// A value in state `value` leaves the frame into storage that outlives the body.
+fn hand_out(context mut* c, u8 value) void {
+    if ((value & LIVE) != 0) { c->exports = true; }
+}
+
+// The struct types that one search for an owning slot has entered. Each answers once.
+struct visited {
+    types.node* mut@ own items;
+    u64 len;
+}
+
+// Whether foreign code that receives a value of type `t` can write an owning slot through it:
+// a mutable pointer or span whose referent holds owning leaves, or a reference, an array or a
+// struct that reaches one. A void pointer names no slot, and neither does a function value: its
+// callback effects stay outside proof (D17.13). A struct that the search entered before answers
+// false, because its first visit decides it. So the search visits each type node of the graph
+// once and charges one W for each visit (D17.18). A refused charge answers true; the pass is
+// refused then and proves nothing.
+fn names_slot(context mut* c, types.node* t, visited mut* seen, u32 block, u32 gap) bool {
+    if (t == null) { return false; }
+    if (!work(c, block, gap)) { return true; }
+    if (t->kind == types.type_kind.k_ptr || t->kind == types.type_kind.k_span) {
+        if (t->is_mut && owning_type(t->elem)) { return true; }
+        return names_slot(c, t->elem, seen, block, gap);
+    }
+    if (t->kind == types.type_kind.k_array) { return names_slot(c, t->elem, seen, block, gap); }
+    if (t->kind != types.type_kind.k_struct) { return false; }
+    // The src/fort and std sources of one target declare 490 structs (`grep -cE` for
+    // `^\s*(pub )?struct` over src/fort, std and std/darwin), so a linear search is enough.
+    u64 mut i = 0;
+    while (i < seen->len) {
+        if (seen->items[i] == t) { return false; }
+        i += 1;
+    }
+    if (seen->len == seen->items.len) {
+        types.node* mut@ own bigger = new(types.node*, seen->items.len * 2 + 8);
+        u64 mut k = 0;
+        while (k < seen->len) { bigger[k] = seen->items[k]; k += 1; }
+        del(seen->items);
+        seen->items = move(bigger);
+    }
+    seen->items[seen->len] = t;
+    seen->len += 1;
+    u32 count = fir.struct_field_count(t);
+    u32 mut k = 0;
+    while (k < count) {
+        if (names_slot(c, fir.struct_field_type(t, k), seen, block, gap)) { return true; }
+        k += 1;
+    }
+    return false;
+}
+
+// An extern call can store a fresh allocation into each owning slot that an argument names,
+// because D17.13 applies signature ownership transfers. The body hands a value out (D17.19).
+// A slot can be a leaf of the global that the argument addresses, or a leaf or a frame owner
+// that a pointer field of that storage reaches. The escape pass marks each address that a call
+// receives, so an unresolved owning write reaches each such slot: each escaped leaf and each
+// taken frame owner keeps its old state or takes a fresh owner or null.
+fn fill_out_params(context mut* c, u8 mut@ s, fir.rvalue r, u32 block, u32 gap) void {
+    fir.func* f = c->function;
+    visited mut seen = visited{};
+    defer del(seen.items);
+    u32 mut k = 0;
+    while (k < r.ops_len) {
+        fir.operand o = fir.rvalue_operand(f, r, k);
+        seen.len = 0;
+        if (names_slot(c, fir.operand_type(f, o), &seen, block, gap)) {
+            hand_out(c, FOREIGN);
+            weaken(c, s, FOREIGN);
+        }
+        k += 1;
+    }
+}
+
+// A fort call takes each owning argument out of the frame. It can also reach each owner of the
+// frame whose address the body takes, and move that value anywhere (D17.19).
+fn hand_out_call(context mut* c, u8@ s, fir.rvalue r) void {
+    fir.func* f = c->function;
+    u32 mut k = 0;
+    while (k < r.ops_len) {
+        fir.operand o = fir.rvalue_operand(f, r, k);
+        if (owning_type(fir.operand_type(f, o))) { hand_out(c, operand_state(c, s, o)); }
+        k += 1;
+    }
+    u64 mut i = 0;
+    while (i < c->frames_len) {
+        if (c->taken[cast(c->frames[i], u64)]) { hand_out(c, s[c->shared->leaves_len + i]); }
+        i += 1;
+    }
+}
+
+// An owning write through a reference that the analysis does not resolve can reach each escaped
+// global leaf and each frame owner whose address the body takes.
+fn weaken(context* c, u8 mut@ s, u8 value) void {
+    u64 mut i = 0;
+    while (i < c->shared->leaves_len) {
+        if (c->shared->leaves[i].escaped) { s[i] = s[i] | value; }
+        i += 1;
+    }
+    i = 0;
+    while (i < c->frames_len) {
+        if (c->taken[cast(c->frames[i], u64)]) {
+            u64 at = c->shared->leaves_len + i;
+            s[at] = s[at] | value;
+        }
+        i += 1;
+    }
+}
+
+// ---- records --------------------------------------------------------------------------------
+
+fn global_name(context* c, ast.sym* g) string { return g->name; }
+
+fn grow_records(ownership_source_local.violation mut@ own mut* items, u64 len) void {
+    if (len < items->len) { return; }
+    ownership_source_local.violation mut@ own bigger = new(ownership_source_local.violation,
+        items->len * 2 + 4);
+    u64 mut i = 0;
+    while (i < len) { bigger[i] = (*items)[i]; i += 1; }
+    del(*items);
+    *items = move(bigger);
+}
+
+fn push_violation(context mut* c, ownership_source_local.violation item) void {
+    grow_records(&c->violations, c->violations_len);
+    c->violations[c->violations_len] = item;
+    c->violations_len += 1;
+}
+
+fn push_unproved(context mut* c, ownership_source_local.violation item) void {
+    grow_records(&c->unproved, c->unproved_len);
+    c->unproved[c->unproved_len] = item;
+    c->unproved_len += 1;
+}
+
+// The text of the note of a record: what the operation needs and, for a violation, what holds.
+string STORE_LOST = "this store replaces the allocation that the owning global holds";
+string STORE_UNPROVED = "this store needs the old owning global empty";
+string EXIT_LOST = "normal process exit ends the process while this owner holds an allocation";
+string EXIT_UNPROVED = "normal process exit needs each owner empty";
+
+fn record(context* c, u32 block, u32 gap, ownership_api.event_kind kind, string text,
+    string name, bool quoted, ownership_api.entity_id relation) ownership_source_local.violation {
+    return ownership_source_local.violation{position(c, block, gap),
+        source(c, location(c, block, gap)), kind, text, name, quoted, relation,
+        ownership_source_local.WHOLE};
+}
+
+fn unit_name(context* c, u64 unit, bool mut* quoted) string {
+    if (unit < c->shared->leaves_len) {
+        *quoted = true;
+        return global_name(c, c->shared->leaves[unit].global);
+    }
+    u32 local = c->frames[unit - c->shared->leaves_len];
+    string name = fir.local_name(fir.local_at(c->function, local));
+    *quoted = name.len > 0;
+    if (name.len == 0) { return "a temporary value"; }
+    return name;
+}
+
+fn unit_relation(context* c, u64 unit) ownership_api.entity_id {
+    if (unit < c->shared->leaves_len) {
+        return entity(c, ownership_api.entity_kind.region, cast(unit, u32));
+    }
+    return entity(c, ownership_api.entity_kind.slot, c->frames[unit - c->shared->leaves_len]);
+}
+
+// Whether a witness path reaches position `gap` of `block` (toolchain 4.2). The walk takes each
+// overwrite check as removed: a release build removes it, and no verdict rests on a check that
+// a mode removes (D19.8). The walk cannot read an old owner through the address of a global, so
+// with the checks it stops at the first store into an owning global.
+fn witnessed(context mut* c, fir.pred_table* preds, u32 block, u32 gap) bool {
+    return ownership_source_local.witness_mode_in(c->function, c->identity, c->declaration,
+        &c->taken, &c->meter, &c->first_refusal, preds, block, gap, true);
+}
+
+// A state without SYMBOLIC holds only facts of this body. LIVE alone holds on every reaching
+// path, so a witness path that reaches the operation validates the failure (toolchain 4.2).
+fn definite(context mut* c, u32 block, u32 gap, u64 unit, u8 state, string lost,
+    string unproved) void {
+    bool mut quoted = false;
+    string name = unit_name(c, unit, &quoted);
+    ownership_api.entity_id relation = unit_relation(c, unit);
+    if (state == LIVE) {
+        if (!c->preds_built) {
+            c->preds = fir.func_predecessors(c->function);
+            c->preds_built = true;
+        }
+        bool found = witnessed(c, &c->preds, block, gap);
+        if (c->first_refusal.terminal.present) { c->refused = true; }
+        if (found) {
+            push_violation(c, record(c, block, gap, ownership_api.event_kind.lost_ownership, lost,
+                name, quoted, relation));
+            return;
+        }
+    }
+    push_unproved(c, record(c, block, gap, ownership_api.event_kind.incomplete_proof, unproved,
+        name, quoted, relation));
+}
+
+// A store into owning global leaves: each old leaf must be empty after right-side effects (D17.19).
+fn check_store(context mut* c, u8@ s, u32 block, u32 gap, target t) void {
+    if (!c->recording) { return; }
+    c->global_stores += 1;
+    u64 mut i = 0;
+    while (i < t.count) {
+        u64 at = t.first + i;
+        u8 state = s[at];
+        if ((state & LIVE) != 0) {
+            if ((state & SYMBOLIC) != 0) {
+                note_gap(c, missing.caller_state, block, gap);
+            } else {
+                definite(c, block, gap, at, state, STORE_LOST, STORE_UNPROVED);
+            }
+        }
+        i += 1;
+    }
+}
+
+// A release of owning global leaves: shallow `del` needs each owned descendant empty, which
+// only heap facts prove (D17.9, D17.16).
+fn check_release(context mut* c, u32 block, u32 gap, target t) void {
+    if (!c->recording) { return; }
+    c->global_releases += 1;
+    if (holds_deep(c, t)) { note_gap(c, missing.owned_descendants, block, gap); }
+}
+
+// A known normal process exit: each frame owner and each owning global leaf must be empty (D17.19).
+// A runtime leaf is declared even with a SYMBOLIC state: the exiting path must run the runtime
+// cleanup itself (D11.6, D17.19).
+fn check_exit(context mut* c, u8@ s, u32 block, u32 gap) void {
+    if (!c->recording) { return; }
+    c->exit_calls += 1;
+    u64 mut at = 0;
+    while (at < units(c)) {
+        u8 state = s[at];
+        bool runtime = at < c->shared->leaves_len && c->shared->leaves[at].runtime;
+        if ((state & LIVE) != 0) {
+            if ((state & SYMBOLIC) != 0 && !runtime) {
+                note_gap(c, missing.boundary_state, block, gap);
+            } else {
+                definite(c, block, gap, at, state, EXIT_LOST, EXIT_UNPROVED);
+            }
+        }
+        at += 1;
+    }
+}
+
+// Whether a unit of the frame can hold an allocation.
+fn frame_live(context* c, u8@ s) bool {
+    u64 mut i = 0;
+    while (i < c->frames_len) {
+        if ((s[c->shared->leaves_len + i] & LIVE) != 0) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+// A fort call while a frame owner can be live: the callee can end the process (D17.18). An
+// indirect call names a fort function or foreign bits: the checker refuses an extern function
+// as a value, and foreign bits stay outside proof (D17.13).
+fn check_call(context mut* c, u8@ s, u32 block, u32 gap) void {
+    if (!c->recording) { return; }
+    c->fort_calls += 1;
+    if (frame_live(c, s)) {
+        c->suspended_calls += 1;
+        note_gap(c, missing.suspended_owner, block, gap);
+    }
+}
+
+// ---- transfer -------------------------------------------------------------------------------
+
+// The effect of a fort call on the leaves: the callee can write each global, and a direct
+// callee's exit fact leaves its leaves EMPTY at its normal return.
+fn fort_call(context mut* c, u8 mut@ s, fir.rvalue r, bool second) void {
+    u64 mut i = 0;
+    while (i < c->shared->leaves_len) { s[i] = UNKNOWN; i += 1; }
+    if (second && r.callee == fir.callee_kind.cl_fn && r.callee_sym != null) {
+        context* callee = body_of(c->shared, r.callee_sym);
+        if (callee != null && callee->fact_ready) {
+            i = 0;
+            while (i < c->shared->leaves_len) {
+                if (callee->exit_empty[i]) { s[i] = EMPTY; }
+                i += 1;
+            }
+        }
+    }
+    // A callee can write each frame owner whose address the body takes.
+    i = 0;
+    while (i < c->frames_len) {
+        if (c->taken[cast(c->frames[i], u64)]) { s[c->shared->leaves_len + i] = UNKNOWN; }
+        i += 1;
+    }
+}
+
+fn write_target(context mut* c, u8 mut@ s, u32 block, u32 gap, target t, u8 value,
+    bool fort_result) void {
+    if (t.kind == target_kind.frame_whole) {
+        s[cast(t.unit, u64)] = value;
+    } else if (t.kind == target_kind.frame_part) {
+        u64 at = cast(t.unit, u64);
+        s[at] = c->tracked[frame_index(c, t.unit)] ? UNKNOWN : s[at] | value;
+    } else if (t.kind == target_kind.global && t.owning) {
+        // A callee writes its result in place, so no exit fact proves the old leaves (D17.15).
+        if (fort_result) { set_leaves(c, s, t, UNKNOWN); }
+        overwrite(c, s, t);
+        hand_out(c, value);
+        check_store(c, s, block, gap, t);
+        set_leaves(c, s, t, value);
+    } else if (t.kind == target_kind.indirect && t.owning) {
+        hand_out(c, value);
+        weaken(c, s, value);
+    }
+}
+
+fn assignment(context mut* c, u8 mut@ s, u32 block, u32 gap, fir.statement* st, bool second)
+    void {
+    fir.func* f = c->function;
+    fir.rvalue r = st->value;
+    target destination = resolve(c, st->place);
+    types.node* destination_type = fir.place_type(f, st->place);
+    u8 value = owning_type(destination_type) ? value_state(c, s, r) : EMPTY;
+    if (r.kind == fir.rvalue_kind.rv_addr && r.place.base == fir.base_kind.bk_global &&
+        c->recording && owning_type(fir.place_type(f, r.place))) { c->global_addresses += 1; }
+    if (r.kind == fir.rvalue_kind.rv_call && r.callee != fir.callee_kind.cl_extern) {
+        hand_out_call(c, s, r);
+    }
+    move_operands(c, s, r);
+    bool mut fort_result = false;
+    if (r.kind == fir.rvalue_kind.rv_call) {
+        if (r.callee == fir.callee_kind.cl_extern) {
+            types.node* callee = fir.callee_type(f, r);
+            ownership_api.outcome_kind kind = ownership_ffi.termination(r.callee_sym, callee);
+            if (kind == ownership_api.outcome_kind.normal_process_exit) {
+                check_exit(c, s, block, gap);
+            } else if (kind == ownership_api.outcome_kind.abort) {
+                if (c->recording) { c->abort_calls += 1; }
+            } else if (callee != null && callee->is_noreturn && c->recording) {
+                c->foreign_ends += 1;
+            }
+            fill_out_params(c, s, r, block, gap);
+        } else {
+            check_call(c, s, block, gap);
+            fort_call(c, s, r, second);
+            fort_result = true;
+        }
+    }
+    write_target(c, s, block, gap, destination, value, fort_result);
+    // A write into an aggregate `_0` can reach the caller's destination, a global included.
+    if (st->place.base == fir.base_kind.bk_local && st->place.local == 0 &&
+        types.type_is_owning_aggregate(local_type(c, 0))) { weaken(c, s, value | EMPTY); }
+}
+
+fn statement(context mut* c, u8 mut@ s, u32 block, u32 gap, bool second) void {
+    fir.statement* st = fir.block_statement(c->function, block, gap);
+    switch (st->kind) {
+    case fir.stmt_kind.st_assign:
+        assignment(c, s, block, gap, st, second);
+    case fir.stmt_kind.st_del:
+        target t = resolve(c, st->place);
+        if (t.kind == target_kind.global && t.owning) { check_release(c, block, gap, t); }
+        empty_place(c, s, st->place, false);
+    case fir.stmt_kind.st_live, fir.stmt_kind.st_dead:
+        u32 unit = c->unit_of[cast(st->local, u64)];
+        if (unit != NO_UNIT) { s[cast(unit, u64)] = EMPTY; }
+    case fir.stmt_kind.st_loan_begin, fir.stmt_kind.st_loan_end:
+        return;
+    }
+}
+
+fn entry_state(context* c, u8 mut@ s) void {
+    u64 mut i = 0;
+    while (i < c->shared->leaves_len) { s[i] = UNKNOWN; i += 1; }
+    i = 0;
+    while (i < c->frames_len) {
+        fir.local* l = fir.local_at(c->function, c->frames[i]);
+        s[c->shared->leaves_len + i] = l->kind == fir.local_kind.lk_param ? UNKNOWN : EMPTY;
+        i += 1;
+    }
+}
+
+// Joins `s` into the in-state of `block`. True when the in-state grows.
+fn join(context mut* c, u8@ s, u32 block) bool {
+    u64 n = units(c);
+    u64 base = cast(block, u64) * n;
+    bool mut grew = !c->reached[cast(block, u64)];
+    c->reached[cast(block, u64)] = true;
+    u64 mut i = 0;
+    while (i < n) {
+        u8 joined = c->states[base + i] | s[i];
+        if (joined != c->states[base + i]) { grew = true; }
+        c->states[base + i] = joined;
+        i += 1;
+    }
+    return grew;
+}
+
+// Applies one block to its in-state and joins the out-state into its successors. A return
+// joins into the state of the normal returns. False after a refused W charge.
+fn process(context mut* c, u32 block, fir_flow.bits mut* pending, bool second) bool {
+    fir.func* f = c->function;
+    u64 n = units(c);
+    u64 base = cast(block, u64) * n;
+    u8 mut@ s = c->scratch[..n];
+    u64 mut i = 0;
+    while (i < n) { s[i] = c->states[base + i]; i += 1; }
+    u32 mut gap = 0;
+    while (gap < fir.block_statement_count(f, block)) {
+        if (!work(c, block, gap)) { return false; }
+        statement(c, s, block, gap, second);
+        gap += 1;
+    }
+    if (!work(c, block, gap)) { return false; }
+    fir.terminator* term = &fir.block_at(f, block)->term;
+    if (term->kind == fir.term_kind.tk_return) {
+        c->returns = true;
+        i = 0;
+        while (i < n) { c->returned[i] = c->returned[i] | s[i]; i += 1; }
+        return true;
+    }
+    u32 mut index = 0;
+    u32 mut next = 0;
+    while (fir_flow.next_reachable_target(f, term, &index, &next)) {
+        if (join(c, s, next) && pending != null) {
+            fir_flow.bits_set(pending, next);
+            if (next < c->restart) { c->restart = next; }
+        }
+        index += 1;
+    }
+    return true;
+}
+
+// Solves the states to a fixed point, in block order. The second pass reads the exit facts of
+// direct callees. False after a refused W charge.
+fn run(context mut* c, bool second) bool {
+    fir.func* f = c->function;
+    u32 count = fir.block_count(f);
+    u64 n = units(c);
+    del(c->states);
+    del(c->reached);
+    del(c->returned);
+    del(c->scratch);
+    c->states = new(u8, cast(count, u64) * n + 1);
+    c->reached = new(bool, cast(count, u64));
+    c->returned = new(u8, n + 1);
+    c->scratch = new(u8, n + 1);
+    c->returns = false;
+    c->recording = false;
+    u8 mut@ own entry = new(u8, n + 1);
+    defer del(entry);
+    entry_state(c, entry[..n]);
+    if (count == 0) { return true; }
+    join(c, entry[..n], 0);
+    fir_flow.bits mut pending = fir_flow.bits_new(count);
+    defer fir_flow.bits_free(&pending);
+    fir_flow.bits_set(&pending, 0);
+    u32 mut block = 0;
+    while (block < count) {
+        if (!fir_flow.bits_get(&pending, block)) {
+            // A scan step over a block that waits for nothing is work too (D17.18).
+            if (!work(c, block, 0)) { return false; }
+            block += 1;
+            continue;
+        }
+        fir_flow.bits_clear(&pending, block);
+        c->restart = count;
+        if (!process(c, block, &pending, second)) { return false; }
+        // Go on after this block, or back to the lowest block that a back edge made pending.
+        block = c->restart < block + 1 ? c->restart : block + 1;
+    }
+    return true;
+}
+
+// The exit fact: each leaf whose state is EMPTY at each reachable normal return.
+fn exit_fact(context mut* c) void {
+    u64 mut i = 0;
+    while (i < c->shared->leaves_len) {
+        c->exit_empty[i] = c->returns && c->returned[i] == EMPTY;
+        i += 1;
+    }
+    c->fact_ready = true;
+}
+
+// The final sweep: each reached block once, with the fixed-point states, recording each
+// obligation and each case.
+fn sweep(context mut* c) bool {
+    fir.func* f = c->function;
+    c->recording = true;
+    u32 mut block = 0;
+    while (block < fir.block_count(f)) {
+        if (c->reached[cast(block, u64)] && !process(c, block, null, true)) {
+            c->recording = false;
+            return false;
+        }
+        block += 1;
+    }
+    c->recording = false;
+    return true;
+}
+
+/// The first pass of one body: its exit fact, with each fort call as unknown. It runs for each
+/// body before the second pass of any body.
+fn first(context mut* c) void {
+    if (!c->initialized || c->solved) { panic("ownership_source_exit: invalid first pass order"); }
+    if (run(c, false)) { exit_fact(c); }
+}
+
+// Toolchain 4.2 orders events by source range, operation key, event class and relation key.
+fn before(ownership_source_local.violation* a, ownership_source_local.violation* b) bool {
+    i32 by_source = ownership_keys.source(a->source, b->source);
+    if (by_source != 0) { return by_source < 0; }
+    i32 by_operation = ownership_keys.operation(a->operation, b->operation);
+    if (by_operation != 0) { return by_operation < 0; }
+    if (a->kind != b->kind) { return cast(a->kind, i32) < cast(b->kind, i32); }
+    return ownership_keys.entity(a->relation, b->relation) < 0;
+}
+
+fn sort_records(ownership_source_local.violation mut@ items, u64 len) void {
+    u64 mut i = 1;
+    while (i < len) {
+        ownership_source_local.violation item = items[i];
+        u64 mut j = i;
+        while (j > 0 && before(&item, &items[j - 1])) {
+            items[j] = items[j - 1];
+            j -= 1;
+        }
+        items[j] = item;
+        i += 1;
+    }
+}
+
+fn first_reason(context mut* c) void {
+    if (c->first_refusal.terminal.present) {
+        c->first_incomplete = c->first_refusal;
+        return;
+    }
+    if (c->unproved_len > 0) {
+        ownership_source_local.violation* u = &c->unproved[0];
+        c->first_incomplete = ownership_api.incomplete(
+            ownership_api.incomplete_reason.missing_boundary, u->operation, u->source);
+        return;
+    }
+    if (c->gap != missing.none) {
+        ownership_api.incomplete_reason why = c->gap == missing.suspended_owner ?
+            ownership_api.incomplete_reason.unknown_effect :
+            ownership_api.incomplete_reason.missing_correspondence;
+        c->first_incomplete = ownership_api.incomplete(why,
+            ownership_api.operation_position{.function = c->identity}, c->gap_source);
+    }
+}
+
+/// The second pass of one body: the fixed point with the exit facts of direct callees, then
+/// the final sweep that records each obligation and validates each definite failure.
+fn solve(context mut* c) void {
+    if (!c->initialized || c->solved) { panic("ownership_source_exit: invalid solve order"); }
+    c->solved = true;
+    bool ran = !c->refused && run(c, true) && sweep(c);
+    sort_records(c->violations, c->violations_len);
+    sort_records(c->unproved, c->unproved_len);
+    first_reason(c);
+    c->correspondence = c->gap == missing.none ? ownership_source_local.status.complete :
+        ownership_source_local.status.incomplete;
+    c->solver = ran && !c->first_refusal.terminal.present ?
+        ownership_source_local.status.complete : ownership_source_local.status.incomplete;
+    if (c->violations_len > 0) {
+        c->proof = complete();
+        c->proof.failed = true;
+    } else if (c->correspondence == ownership_source_local.status.complete &&
+        c->solver == ownership_source_local.status.complete && c->unproved_len == 0) {
+        c->proof = complete();
+    } else {
+        c->proof = c->first_incomplete;
+        if (!c->proof.terminal.present) {
+            c->proof = ownership_api.incomplete(ownership_api.incomplete_reason.missing_path,
+                ownership_api.operation_position{.function = c->identity}, c->declaration);
+        }
+    }
+    release_work(c);
+}
+
+// ---- the closure ----------------------------------------------------------------------------
+
+fn sort_bodies(closure mut* x) void {
+    u64 mut i = 1;
+    while (i < x->bodies_len) {
+        context mut* item = x->bodies[i];
+        u64 mut j = i;
+        while (j > 0 && cast(x->bodies[j - 1]->function->sym, u64) >
+            cast(item->function->sym, u64)) {
+            x->bodies[j] = x->bodies[j - 1];
+            j -= 1;
+        }
+        x->bodies[j] = item;
+        i += 1;
+    }
+}
+
+fn boundary_gap(closure mut* x, missing why, ownership_api.source_position at) void {
+    if (x->boundary_gap == missing.none) {
+        x->boundary_gap = why;
+        x->boundary_gap_source = at;
+    }
+}
+
+fn push_boundary(closure mut* x, ownership_source_local.violation item) void {
+    grow_records(&x->boundary_unproved, x->boundary_unproved_len);
+    x->boundary_unproved[x->boundary_unproved_len] = item;
+    x->boundary_unproved_len += 1;
+}
+
+// The note of a boundary record names the cleanup that must empty the leaf.
+string BOUNDARY_EXECUTABLE = "normal exit follows the return of main and std.rt.shutdown";
+string BOUNDARY_LIBRARY = "no callable fort function empties this owner at each return";
+
+// Whether body `b` cleans leaf `i`, from the facts of the first passes: the leaf is EMPTY at
+// each normal return, no store drops a value of it, and neither the body nor a callee it can
+// reach can fill an owning global (D17.19). A deep leaf has no cleanup: only heap facts prove
+// its owned descendants empty after a release or a move (D17.16). A refused first pass
+// publishes no fact; a refused second pass changes none.
+fn cleans(context* b, u64 i) bool {
+    return b != null && b->fact_ready && !b->fills && b->exit_empty[i] &&
+        !b->shared->leaves[i].deep && !b->unclean[i];
+}
+
+// Charges one W unit of the call-graph step at the declaration of body `c`. False after a
+// refusal, which the closure keeps.
+fn charge_fills(closure mut* x, context* c) bool {
+    if (x->fills_refusal.terminal.present) { return false; }
+    ownership_api.charge_item[1] item = {ownership_api.charge_item{
+        ownership_api.limit_category.w, ownership_api.limit_scope.computation, 1}};
+    ownership_api.operation_position op = ownership_api.operation_position{.function = c->identity};
+    ownership_api.charge_request request = ownership_api.charge_request{
+        ownership_api.work_kind.transfer, op, c->declaration, item[..]};
+    ownership_api.charge_result out = ownership_limits.try_charge(&x->fills_meter, &request);
+    if (!out.allowed) {
+        x->fills_refusal = ownership_api.incomplete(ownership_api.incomplete_reason.work_limit, op,
+            c->declaration);
+        x->fills_refusal.terminal.limit = out.limit;
+        x->fills_refusal.terminal.limit.source = c->declaration;
+    }
+    return out.allowed;
+}
+
+// Visits each call statement of body `b`. A direct fort call to a verified body adds one edge:
+// the caller `b` goes to slot `next[callee]` of `callers` when `place` is set, else the count of
+// the callee grows. An indirect fort call, or a direct one that resolves to no verified body,
+// makes `b` fill. Each block counts, reached or not. Each statement costs one W. False after a
+// refused charge.
+fn call_edges(closure mut* x, u64 b, u64 mut@ next, u64 mut@ callers, bool place) bool {
+    context mut* c = x->bodies[b];
+    fir.func* f = c->function;
+    u32 mut block = 0;
+    while (block < fir.block_count(f)) {
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, block)) {
+            if (!charge_fills(x, c)) { return false; }
+            fir.statement* st = fir.block_statement(f, block, i);
+            fir.rvalue r = st->value;
+            if (st->kind == fir.stmt_kind.st_assign && r.kind == fir.rvalue_kind.rv_call &&
+                r.callee != fir.callee_kind.cl_extern) {
+                u64 to = r.callee == fir.callee_kind.cl_fn ? body_index(x, r.callee_sym) :
+                    x->bodies_len;
+                if (to == x->bodies_len) {
+                    c->fills = true;
+                } else if (place) {
+                    callers[next[to]] = b;
+                    next[to] += 1;
+                } else {
+                    next[to + 1] += 1;
+                }
+            }
+            i += 1;
+        }
+        block += 1;
+    }
+    return true;
+}
+
+/// Decides `fills` for each body. A body fills by its own first pass (no exit fact, or a value
+/// handed out of its frame), by an indirect or unresolved fort call, or through a fort callee
+/// that fills. The fact spreads from each callee to its callers along the reversed call edges,
+/// and each body enters the work list once, so the step is linear in the call edges. A fort
+/// callback that an extern call runs adds nothing: its effects stay outside proof (D17.13).
+/// The step is one computation of D17.18, as the call-graph build of ownership_graph is: it
+/// charges one W for each statement of each walk and for each call edge. A refused charge makes
+/// each body fill, so the boundary proves no cleanup.
+fn decide_fills(closure mut* x) void {
+    x->fills_decided = true;
+    u64 n = x->bodies_len;
+    u64 mut size = 0;
+    u64 mut i = 0;
+    while (i < n) {
+        size = ownership_limits.saturating_sum(size, x->bodies[i]->fir_size);
+        i += 1;
+    }
+    x->fills_fir_size = size;
+    if (!x->fills_meter.configured) {
+        ownership_api.limit_table limits = ownership_limits.computation(size);
+        configure(&x->fills_meter, &limits);
+    }
+    u64 mut@ own first = new(u64, n + 2);
+    defer del(first);
+    u64 mut b = 0;
+    while (b < n) {
+        context mut* c = x->bodies[b];
+        c->fills = !c->fact_ready || c->exports;
+        b += 1;
+    }
+    b = 0;
+    while (b < n) {
+        if (!call_edges(x, b, first, first, false)) { fill_all(x); return; }
+        b += 1;
+    }
+    b = 0;
+    while (b < n) {
+        first[b + 1] += first[b];
+        b += 1;
+    }
+    u64 mut@ own next = new(u64, n + 1);
+    defer del(next);
+    u64 mut@ own callers = new(u64, first[n] + 1);
+    defer del(callers);
+    b = 0;
+    while (b < n) { next[b] = first[b]; b += 1; }
+    b = 0;
+    while (b < n) {
+        if (!call_edges(x, b, next, callers, true)) { fill_all(x); return; }
+        b += 1;
+    }
+    u64 mut@ own work = new(u64, n + 1);
+    defer del(work);
+    u64 mut len = 0;
+    b = 0;
+    while (b < n) {
+        if (x->bodies[b]->fills) { work[len] = b; len += 1; }
+        b += 1;
+    }
+    while (len > 0) {
+        len -= 1;
+        u64 callee = work[len];
+        u64 mut k = first[callee];
+        while (k < first[callee + 1]) {
+            context mut* caller = x->bodies[callers[k]];
+            if (!charge_fills(x, caller)) { fill_all(x); return; }
+            if (!caller->fills) {
+                caller->fills = true;
+                work[len] = callers[k];
+                len += 1;
+            }
+            k += 1;
+        }
+    }
+}
+
+// After a refused charge, no body is known to fill nothing.
+fn fill_all(closure mut* x) void {
+    u64 mut b = 0;
+    while (b < x->bodies_len) { x->bodies[b]->fills = true; b += 1; }
+}
+
+// Decides the final boundary of an executable or the library cleanup from the exit facts
+// (toolchain.md 1.1).
+fn boundary(closure mut* x) void {
+    x->boundary_correspondence = ownership_source_local.status.unexecuted;
+    x->boundary_proof = ownership_source_local.status.unexecuted;
+    if (!x->prerequisites) { return; }
+    u64 mut i = 0;
+    while (i < x->leaves_len) {
+        leaf* item = &x->leaves[i];
+        bool mut proved = false;
+        if (x->executable) {
+            proved = cleans(x->shutdown, i);
+        } else {
+            u64 mut b = 0;
+            while (b < x->bodies_len && !proved) {
+                proved = cleans(x->bodies[b], i);
+                b += 1;
+            }
+        }
+        if (!proved) {
+            if (item->runtime) {
+                ownership_api.function_id none = ownership_api.function_id{};
+                push_boundary(x, ownership_source_local.violation{
+                    ownership_api.operation_position{.function = none}, item->declaration,
+                    ownership_api.event_kind.incomplete_proof,
+                    x->executable ? BOUNDARY_EXECUTABLE : BOUNDARY_LIBRARY,
+                    item->global->name, true,
+                    ownership_api.entity_id{none, ownership_api.entity_kind.region,
+                        cast(i, u32)}, ownership_source_local.WHOLE});
+            } else {
+                boundary_gap(x, missing.boundary_state, item->declaration);
+            }
+        }
+        i += 1;
+    }
+    x->boundary_correspondence = x->boundary_gap == missing.none ?
+        ownership_source_local.status.complete : ownership_source_local.status.incomplete;
+    bool proved = x->boundary_gap == missing.none && x->boundary_unproved_len == 0;
+    x->boundary_proof = proved ? ownership_source_local.status.complete :
+        ownership_source_local.status.incomplete;
+    if (x->fills_refusal.terminal.present) {
+        x->boundary_proof = ownership_source_local.status.incomplete;
+        x->boundary_first = x->fills_refusal;
+    } else if (x->boundary_unproved_len > 0) {
+        x->boundary_first = ownership_api.incomplete(
+            ownership_api.incomplete_reason.missing_boundary, x->boundary_unproved[0].operation,
+            x->boundary_unproved[0].source);
+    } else if (x->boundary_gap != missing.none) {
+        x->boundary_first = ownership_api.incomplete(
+            ownership_api.incomplete_reason.missing_boundary, ownership_api.operation_position{},
+            x->boundary_gap_source);
+    } else {
+        x->boundary_first = complete();
+    }
+}
+
+/// Runs the escape pass and the first pass of each body, then the second pass of each body,
+/// then the boundary. `bodies` holds the prepared context of each verified body. `complete`
+/// says that enumeration and verification succeeded for every body of the closure.
+fn solve_closure(closure mut* x, context mut* @ bodies, bool complete) void {
+    if (!x->collected || x->solved) { panic("ownership_source_exit: invalid closure order"); }
+    x->solved = true;
+    x->prerequisites = complete;
+    x->bodies = new(context mut*, bodies.len);
+    u64 mut i = 0;
+    while (i < bodies.len) {
+        x->bodies[i] = bodies[i];
+        i += 1;
+    }
+    x->bodies_len = bodies.len;
+    sort_bodies(x);
+    i = 0;
+    while (i < bodies.len) {
+        context mut* c = bodies[i];
+        escapes(c);
+        ast.sym* s = c->function->sym;
+        if (c->runtime && s != null && s->name == SHUTDOWN) { x->shutdown = c; }
+        i += 1;
+    }
+    i = 0;
+    while (i < bodies.len) { first(bodies[i]); i += 1; }
+    // Only the boundary reads `fills`, and it runs only on a complete closure.
+    if (complete) { decide_fills(x); }
+    i = 0;
+    while (i < bodies.len) { solve(bodies[i]); i += 1; }
+    boundary(x);
+}
+
+// Releases the analysis state. The exit fact, the records and the counts stay for the report.
+fn release_work(context mut* c) void {
+    del(c->states);
+    del(c->reached);
+    del(c->returned);
+    del(c->scratch);
+    del(c->unit_of);
+    del(c->frames);
+    del(c->tracked);
+    del(c->taken);
+    del(c->resolved);
+    del(c->addresses);
+    del(c->address_steps);
+    if (c->preds_built) {
+        fir.pred_table_free(&c->preds);
+        c->preds_built = false;
+    }
+    c->addresses_len = 0;
+    c->address_steps_len = 0;
+}
+
+fn free(context mut* c) void {
+    release_work(c);
+    del(c->exit_empty);
+    del(c->unclean);
+    del(c->violations);
+    del(c->unproved);
+    *c = context{};
+}
+
+fn free_closure(closure mut* x) void {
+    del(x->leaves);
+    del(x->steps);
+    del(x->owners);
+    del(x->bodies);
+    del(x->boundary_unproved);
+    *x = closure{};
+}

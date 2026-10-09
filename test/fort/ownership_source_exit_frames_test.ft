@@ -1,0 +1,166 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| frames ok
+//| witnesses ok
+//| targets ok
+/// Holds the frame-owner obligations at fort calls and the witness rule (D17.13, D17.18, D17.19).
+import ownership_exit_source_env as env;
+import ownership_source_exit;
+
+// A fort call needs an outcome summary only while an owner of the frame can hold an allocation.
+// The line of each case is its line in `lines`, from 1.
+fn frames() void {
+    env.closure mut c = env.closure{};
+    string[49] lines = {
+        "fn helper() void {}",
+        "fn make() u8 mut@ own { return new(u8, 1); }",
+        "fn before_and_after() void {",
+        "    helper();",
+        "    u8 mut@ own p = new(u8, 1);",
+        "    del(p);",
+        "    helper();",
+        "}",
+        "fn held_over_a_call() void {",
+        "    u8 mut@ own p = new(u8, 1);",
+        "    defer del(p);",
+        "    helper();",
+        "}",
+        "fn moved_before_a_call() u8 mut@ own {",
+        "    u8 mut@ own p = new(u8, 1);",
+        "    u8 mut@ own q = move(p);",
+        "    return q;",
+        "}",
+        "fn result_held() u8 mut@ own {",
+        "    u8 mut@ own p = make();",
+        "    helper();",
+        "    return p;",
+        "}",
+        "fn parameter_held(u8 mut@ own p) void {",
+        "    helper();",
+        "    del(p);",
+        "}",
+        "fn parameter_released(u8 mut@ own p) void {",
+        "    del(p);",
+        "    helper();",
+        "}",
+        "fn fill(u8 mut* own mut* out) void {}",
+        "fn taken_before_a_call() void {",
+        "    u8 mut* own mut p = null;",
+        "    fill(&p);",
+        "    del(p);",
+        "}",
+        "fn taken_over_a_call() void {",
+        "    u8 mut* own mut p = null;",
+        "    fill(&p);",
+        "    helper();",
+        "    del(p);",
+        "}",
+        "struct pair { u8 mut@ own a; u8 mut@ own b; }",
+        "fn aggregate_held() void {",
+        "    pair mut both = pair{new(u8, 1), new(u8, 2)};",
+        "    helper();",
+        "    del(both.a); del(both.b);",
+        "}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    env.proved(&c, "before_and_after");
+    env.outside(&c, "held_over_a_call", ownership_source_exit.missing.suspended_owner, 12);
+    env.proved(&c, "moved_before_a_call");
+    // A fort call result can hold an allocation (SYMBOLIC); a later call keeps it suspended.
+    env.outside(&c, "result_held", ownership_source_exit.missing.suspended_owner, 21);
+    env.outside(&c, "parameter_held", ownership_source_exit.missing.suspended_owner, 25);
+    env.proved(&c, "parameter_released");
+    // An owner is empty when its address leaves the body; after the call the callee can fill it.
+    env.proved(&c, "taken_before_a_call");
+    env.outside(&c, "taken_over_a_call", ownership_source_exit.missing.suspended_owner, 41);
+    env.outside(&c, "aggregate_held", ownership_source_exit.missing.suspended_owner, 47);
+    assert(env.body(&c, "held_over_a_call")->suspended_calls == 1);
+    assert(env.body(&c, "before_and_after")->fort_calls == 2);
+    env.finish(&c, "frames ok");
+}
+
+// A violation needs LIVE on each reaching path and a witness path to the operation (toolchain
+// 4.2). Otherwise the declared obligation stays unproved.
+fn witnesses() void {
+    env.closure mut c = env.closure{};
+    string[23] lines = {
+        "import std.libc;",
+        "import std.rt;",
+        "fn on_one_path(bool b) void {",
+        "    u8 mut@ own p = new(u8, 1);",
+        "    if (b) { del(p); }",
+        "    rt.shutdown();",
+        "    libc.exit(0);",
+        "}",
+        "fn after_a_loop(u64 n) void {",
+        "    u8 mut@ own p = new(u8, 1);",
+        "    for (u64 mut i = 0; i < n; i++) { helper(); }",
+        "    libc.exit(0);",
+        "}",
+        "fn in_dead_code() void {",
+        "    u8 mut@ own p = new(u8, 1);",
+        "    if (false) { libc.exit(0); }",
+        "    del(p);",
+        "}",
+        "fn zero_length() void {",
+        "    u8 mut@ own p = new(u8, 0);",
+        "    libc.exit(0);",
+        "}",
+        "fn helper() void {}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    // EMPTY on one path and LIVE on the other: the call of rt.shutdown keeps it suspended.
+    env.outside(&c, "on_one_path", ownership_source_exit.missing.suspended_owner, 6);
+    env.outside(&c, "after_a_loop", ownership_source_exit.missing.suspended_owner, 11);
+    // A constant switch reaches no exit call, so nothing holds at it.
+    env.proved(&c, "in_dead_code");
+    // A zero-element allocation still has its obligation (D17.17).
+    env.violation(&c, "zero_length", "p", ownership_source_exit.EXIT_LOST, 21);
+    env.finish(&c, "witnesses ok");
+}
+
+// An owning result that a callee writes in place, and an indirect call (D17.15, D17.19). The
+// checker refuses an extern function as a value, so an indirect call names a fort function or
+// foreign bits.
+fn targets() void {
+    env.closure mut c = env.closure{};
+    string[15] lines = {
+        "import std.libc;",
+        "import std.rt;",
+        "struct box { u8 mut@ own a; }",
+        "box mut held = {};",
+        "fn make_box() box { return box{new(u8, 1)}; }",
+        "fn refill() void {",
+        "    del(held.a);",
+        "    held = make_box();",
+        "}",
+        "fn call_helper(fn () void f) void {",
+        "    u8 mut@ own p = new(u8, 1);",
+        "    del(p);",
+        "    f();",
+        "}",
+        "fn main() i32 { return 0; }",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    ownership_source_exit.closure* x = env.shared(&c);
+    // The callee's `_0` is the destination, so the old leaf needs a summary (D17.15).
+    env.outside(&c, "refill", ownership_source_exit.missing.caller_state, 8);
+    assert(x->leaves[env.leaf_of(&c, "held")].escaped);
+    assert(env.body(&c, "refill")->global_releases == 1);
+    assert(env.body(&c, "refill")->global_stores == 1);
+    // No frame owner is live at the indirect call.
+    env.proved(&c, "call_helper");
+    assert(env.body(&c, "call_helper")->fort_calls == 1);
+    env.finish(&c, "targets ok");
+}
+
+fn main() i32 {
+    frames();
+    witnesses();
+    targets();
+    return 0;
+}

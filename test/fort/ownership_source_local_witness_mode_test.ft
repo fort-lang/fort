@@ -1,0 +1,117 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| checked mode ok
+//| release mode ok
+/// Checks the witness walk in each mode of its overwrite checks. The default walk evaluates
+/// each overwrite check: a check that traps ends the path, and a check whose old owner it cannot
+/// read gives no witness. The release mode takes each overwrite check as removed, as a release
+/// build removes it (D19.8), so the walk reaches the operation after it.
+import fir;
+import ownership_api;
+import ownership_limits;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import std.strbuf;
+
+string[17] WALK = {
+    "extern fn marker() void;",
+    "u8 mut@ own mut pool = {};",
+    "fn after_a_global_store() void {",
+    "    pool = new(u8, 1);",
+    "    marker();",
+    "}",
+    "fn after_a_failing_check() void {",
+    "    u8 mut@ own mut p = new(u8, 1);",
+    "    p = new(u8, 2);",
+    "    marker();",
+    "    del(p);",
+    "}",
+    "fn plain() void {",
+    "    marker();",
+    "}",
+    "fn root() i32 { return 0; }",
+    "fn none() void {}",
+};
+
+// Whether the walk in mode `removed` reaches the call of `marker` in body `name`.
+fn reaches(ownership_source_env.env mut* e, string name, bool removed) bool {
+    ownership_source.body* row = ownership_source_env.find(e, "main", name);
+    fir.func* f = &row->function;
+    ownership_api.limit_table limits = ownership_limits.computation(ownership_limits.fir_size(f));
+    ownership_limits.meter mut ledger = ownership_limits.meter{};
+    assert(ownership_limits.configure(&ledger, &limits));
+    ownership_api.proof_status mut refusal = ownership_api.proof_status{};
+    fir.pred_table mut preds = fir.func_predecessors(f);
+    defer fir.pred_table_free(&preds);
+    bool mut@ own mut taken = new(bool, cast(fir.local_count(f), u64));
+    defer del(taken);
+    ownership_source_local.mark_taken(f, taken);
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut g = 0;
+        while (g < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, g);
+            if (s->kind == fir.stmt_kind.st_assign &&
+                s->value.kind == fir.rvalue_kind.rv_call &&
+                s->value.callee == fir.callee_kind.cl_extern) {
+                bool found = ownership_source_local.witness_mode_in(f, row->key, row->source,
+                    &taken, &ledger, &refusal, &preds, b, g, removed);
+                assert(!refusal.terminal.present && ledger.used.w > 0);
+                assert(taken.len == cast(fir.local_count(f), u64));
+                // The default mode is the walk of witness_in.
+                if (!removed) {
+                    assert(found == ownership_source_local.witness_in(f, row->key,
+                        row->source, &taken, &ledger, &refusal, &preds, b, g));
+                }
+                return found;
+            }
+            g += 1;
+        }
+        b += 1;
+    }
+    panic("ownership_source_local_witness_mode_test: no marker");
+}
+
+fn open(ownership_source_env.env mut* e) void {
+    ownership_source_env.open(e);
+    ownership_source_env.runtime(e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut i = 0;
+    while (i < WALK.len) {
+        strbuf.append(&text, WALK[i]);
+        strbuf.push(&text, '\n');
+        i += 1;
+    }
+    assert(ownership_source_env.prepare(e, strbuf.view(&text)));
+    ownership_source.analyze(&e->source);
+}
+
+// The old owner of a global is unknown to the walk, and the second store into `p` traps.
+fn checked_mode() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    open(&e);
+    defer ownership_source_env.close(&e);
+    assert(!reaches(&e, "after_a_global_store", false));
+    assert(!reaches(&e, "after_a_failing_check", false));
+    assert(reaches(&e, "plain", false));
+    println("checked mode ok");
+}
+
+fn release_mode() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    open(&e);
+    defer ownership_source_env.close(&e);
+    assert(reaches(&e, "after_a_global_store", true));
+    assert(reaches(&e, "after_a_failing_check", true));
+    assert(reaches(&e, "plain", true));
+    println("release mode ok");
+}
+
+fn main() i32 {
+    checked_mode();
+    release_mode();
+    return 0;
+}

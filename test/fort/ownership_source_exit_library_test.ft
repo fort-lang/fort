@@ -1,0 +1,161 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| library ok
+//| no cleanup ok
+//| aggregates ok
+//| escapes ok
+/// Holds the process-exit verdicts of library closures: no entry `main` (D17.19; toolchain.md 1.1).
+import ownership_exit_source_env as env;
+import ownership_source_exit;
+
+// A library retains its owners between calls and provides an explicit cleanup (memory model
+// 2.9, G5). The line of each case is its line in `lines`, from 1.
+fn library() void {
+    env.closure mut c = env.closure{};
+    string[24] lines = {
+        "u8 mut@ own mut pool = {};",
+        "fn put(u8 mut@ own value) void {",
+        "    pool = move(value);",
+        "}",
+        "fn clear() void {",
+        "    del(pool);",
+        "}",
+        "fn replace() void {",
+        "    pool = new(u8, 4);",
+        "    pool = new(u8, 8);",
+        "}",
+        "fn reset() void {",
+        "    del(pool);",
+        "    pool = new(u8, 4);",
+        "}",
+        "fn clear_twice() void {",
+        "    clear();",
+        "}",
+        "fn take() u8 mut@ own {",
+        "    return move(pool);",
+        "}",
+        "fn size() u64 {",
+        "    return pool.len;",
+        "}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    // G5: the old contents of `pool` come from the caller, so the store is a caller requirement.
+    env.outside(&c, "put", ownership_source_exit.missing.caller_state, 3);
+    // An ordinary return keeps the owner: no obligation of the library return.
+    env.proved(&c, "clear");
+    assert(env.empties(&c, "main", "clear", "pool"));
+    // G2: the second store replaces the allocation of the first (lost ownership).
+    env.violation(&c, "replace", "pool", ownership_source_exit.STORE_LOST, 10);
+    env.outside(&c, "replace", ownership_source_exit.missing.caller_state, 9);
+    // A release first proves the old owner empty.
+    env.proved(&c, "reset");
+    assert(!env.empties(&c, "main", "reset", "pool"));
+    // The first pass treats a fort call as unknown: no exit fact through a wrapper.
+    env.proved(&c, "clear_twice");
+    assert(!env.empties(&c, "main", "clear_twice", "pool"));
+    // A move out empties the global and transfers its obligation (D17.19).
+    env.proved(&c, "take");
+    assert(env.empties(&c, "main", "take", "pool"));
+    // A read of the length is no exit obligation.
+    env.proved(&c, "size");
+    // The runtime cleanup empties args_store; `clear` and `take` empty `pool`.
+    assert(env.empties(&c, "std.rt", "shutdown", "args_store"));
+    assert(!env.shared(&c)->executable);
+    env.boundary(&c, "complete", "complete");
+    // args_init stores after its release: the resolved address of the global proves the store.
+    env.proved_in(&c, "std.rt", "args_init");
+    env.proved_in(&c, "std.rt", "shutdown");
+    // The known normal exit of std.rt.exit needs `pool` empty too, and its state there comes
+    // from the callers: a summary decides it (D17.19).
+    env.outside_in(&c, "std.rt", "exit", ownership_source_exit.missing.boundary_state, 0);
+    env.finish(&c, "library ok");
+}
+
+// A library owner with no cleanup body keeps the boundary incomplete: a cleanup through calls
+// needs a summary, so the gap stays outside the declared scope.
+fn no_cleanup() void {
+    env.closure mut c = env.closure{};
+    string[3] lines = {
+        "u8 mut@ own mut pool = {};",
+        "fn put(u8 mut@ own value) void { del(pool); pool = move(value); }",
+        "fn clear() void { put(new(u8, 0)); }",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    env.proved(&c, "put");
+    env.boundary(&c, "incomplete", "incomplete");
+    assert(env.shared(&c)->boundary_gap == ownership_source_exit.missing.boundary_state);
+    assert(env.shared(&c)->boundary_gap_source.line == 1);
+    env.finish(&c, "no cleanup ok");
+}
+
+// The leaves of aggregate globals: a field leaf is exact, the elements of a fixed array are one
+// weak leaf, and a constant owner holds no allocation (D7.10, D17.15).
+fn aggregates() void {
+    env.closure mut c = env.closure{};
+    string[17] lines = {
+        "struct pair { u8 mut@ own a; u8* b; u8 mut@ own c; }",
+        "pair mut both = {};",
+        "u8 mut@ own[2] mut slots = {};",
+        "u8* own NOTHING = null;",
+        "fn drop() void {",
+        "    del(both.a);",
+        "    del(both.c);",
+        "}",
+        "fn refill() void {",
+        "    del(both.a);",
+        "    both.a = new(u8, 1);",
+        "}",
+        "fn fill(u64 i) void {",
+        "    del(slots[i]);",
+        "    slots[i] = new(u8, 1);",
+        "}",
+        "fn drop_slots() void { del(slots[0]); del(slots[1]); }",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    ownership_source_exit.closure* x = env.shared(&c);
+    // args_store, both.a, both.c and one leaf for the elements of slots.
+    assert(x->leaves_len == 4 && x->owners_len == 3 && x->constant_owners == 1);
+    env.proved(&c, "drop");
+    env.proved(&c, "refill");
+    // One leaf stands for both elements, so a release of one element proves no store.
+    env.outside(&c, "fill", ownership_source_exit.missing.caller_state, 15);
+    env.proved(&c, "drop_slots");
+    env.boundary(&c, "incomplete", "incomplete");
+    env.finish(&c, "aggregates ok");
+}
+
+// An address that leaves the store pattern lets an indirect owning write reach the global (D17.19).
+fn escapes() void {
+    env.closure mut c = env.closure{};
+    string[11] lines = {
+        "u8 mut@ own mut pool = {};",
+        "fn handle() u8 mut@ own mut* { return &pool; }",
+        "fn clear_then_write(u8 mut@ own mut* p) void {",
+        "    del(pool);",
+        "    del(*p);",
+        "    *p = new(u8, 1);",
+        "}",
+        "fn clear_then_view(u8 mut@ own mut* p) u64 {",
+        "    del(pool);",
+        "    return p->len;",
+        "}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    assert(env.shared(&c)->leaves[env.leaf_of(&c, "pool")].escaped);
+    assert(!env.empties(&c, "main", "clear_then_write", "pool"));
+    assert(env.empties(&c, "main", "clear_then_view", "pool"));
+    env.finish(&c, "escapes ok");
+}
+
+fn main() i32 {
+    library();
+    no_cleanup();
+    aggregates();
+    escapes();
+    return 0;
+}

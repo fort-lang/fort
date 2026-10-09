@@ -1,0 +1,100 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| sweep ok
+//| records ok
+/// Checks the W ledger of the process-exit analysis at each bound below the work of one body:
+/// each refusal keeps its first reason, and the result claims no complete solver or proof
+/// (fir.md 14.1). A bound that covers the work gives the full result.
+import ownership_api;
+import ownership_exit_source_env as env;
+import ownership_source_exit;
+import ownership_source_local;
+
+// One body with a store after a release, a loop, two definite owners at a known normal exit
+// and the runtime owner, which the body leaves unproved. The witness walk of each owner takes
+// work too.
+string[12] PROGRAM = {
+    "import std.libc;",
+    "u8 mut@ own mut pool = {};",
+    "fn mixed(u64 n) void {",
+    "    del(pool);",
+    "    pool = new(u8, 4);",
+    "    u64 mut i = 0;",
+    "    while (i < n) { i += 1; }",
+    "    u8 mut@ own p = new(u8, 1);",
+    "    libc.exit(0);",
+    "}",
+    "fn clear() void { del(pool); }",
+    "fn main() i32 { return 0; }",
+};
+
+// Analyzes the program with W bound `w` for the body `mixed`; 0 keeps the production bound.
+fn analyze(env.closure mut* c, u64 w) ownership_source_exit.context* {
+    env.prepare_with(c, PROGRAM[..], env.runtime.release_last);
+    if (w != 0) { env.prepared(c, "mixed")->meter.bounds.w = w; }
+    env.analyze(c);
+    return env.body(c, "mixed");
+}
+
+fn sweep() void {
+    env.closure mut full = env.closure{};
+    ownership_source_exit.context* done = analyze(&full, 0);
+    assert(!done->first_refusal.terminal.present);
+    assert(done->violations_len == 2 && done->unproved_len == 1);
+    assert(done->correspondence == ownership_source_local.status.complete);
+    assert(done->solver == ownership_source_local.status.complete);
+    u64 used = done->meter.used.w;
+    assert(used > 20);
+    assert(done->fir_size > 0 && done->limits.w > used);
+    env.close(&full);
+    u64 mut bound = 1;
+    u64 mut refusals = 0;
+    while (bound <= used) {
+        env.closure mut c = env.closure{};
+        ownership_source_exit.context* x = analyze(&c, bound);
+        if (bound < used) {
+            assert(x->first_refusal.terminal.present && x->first_refusal.terminal.limit.present);
+            assert(x->first_refusal.terminal.limit.category == ownership_api.limit_category.w);
+            assert(x->first_refusal.terminal.limit.bound == bound);
+            assert(x->first_refusal.terminal.reason == ownership_api.incomplete_reason.work_limit);
+            assert(x->solver == ownership_source_local.status.incomplete);
+            assert(!ownership_api.successful(x->proof));
+            assert(x->violations_len <= 2);
+            // A refused first pass publishes no exit fact.
+            refusals += 1;
+        } else {
+            assert(!x->first_refusal.terminal.present && x->violations_len == 2);
+            assert(x->meter.used.w == used);
+        }
+        env.close(&c);
+        bound += 1;
+    }
+    assert(refusals == used - 1);
+    println("sweep ok");
+}
+
+// Each body has its own ledger at the FIR size of its body. The report charges V when it
+// renders a record; the analysis retains records without V.
+fn records() void {
+    env.closure mut c = env.closure{};
+    analyze(&c, 0);
+    defer env.close(&c);
+    ownership_source_exit.context mut* x = env.prepared(&c, "mixed");
+    assert(x->meter.used.v == 0);
+    assert(ownership_source_exit.charge_rendered(x, &x->violations[0]));
+    assert(x->meter.used.v == 2);
+    x->meter.bounds.v = 3;
+    assert(!ownership_source_exit.charge_rendered(x, &x->violations[1]));
+    assert(x->first_refusal.terminal.reason == ownership_api.incomplete_reason.report_limit);
+    assert(x->first_refusal.terminal.limit.category == ownership_api.limit_category.v);
+    // A cleanup body that holds no fort call keeps its exit fact.
+    assert(env.empties(&c, "main", "clear", "pool"));
+    println("records ok");
+}
+
+fn main() i32 {
+    sweep();
+    records();
+    return 0;
+}
