@@ -482,7 +482,8 @@ fn f047() void {
     violated(&e, "main", ownership_api.event_kind.invalid_use, "a", 7);
 }
 
-// The leak follows print calls, which may not return.
+// The leak follows print calls. Each print callee has no owning parameter, so the walk takes
+// its return (D17.9, D3.14): the deferred test expects the error on line 12.
 fn f048() void {
     string[13] lines = {
         "",
@@ -504,10 +505,11 @@ fn f048() void {
     defer strbuf.free(&text);
     analyze(&e, &text, lines[..]);
     defer ownership_source_env.close(&e);
-    declared(&e, "main");
+    violated(&e, "main", ownership_api.event_kind.lost_ownership, "b", 12);
 }
 
-// The leaks follow a print call.
+// The leaks follow print calls, which the walk crosses: the deferred test expects the errors
+// on lines 9 and 11.
 fn f049() void {
     string[16] lines = {
         "",
@@ -532,8 +534,21 @@ fn f049() void {
     defer strbuf.free(&text);
     analyze(&e, &text, lines[..]);
     defer ownership_source_env.close(&e);
-    declared(&e, "show");
+    ownership_source.body* row = local_row(&e, "show", "complete", "violated");
+    assert(row->local.violations_len == 2);
+    has(row, 0, ownership_api.event_kind.lost_ownership, "s", 9);
+    has(row, 1, ownership_api.event_kind.lost_ownership, "a", 11);
     proved(&e, "main");
+}
+
+// Violation `k` of a row is of `kind`, names `slot` and stands at `line`.
+fn has(ownership_source.body* row, u64 k, ownership_api.event_kind kind, string slot, u32 line)
+    void {
+    ownership_source_local.violation v = row->local.violations[k];
+    if (v.kind != kind || v.name != slot || v.source.line != line) {
+        eprintln("violation ", k, ": ", v.name, " at line ", v.source.line);
+        assert(false);
+    }
 }
 
 // The deferred test expects the error on line 7.
@@ -637,8 +652,8 @@ fn f053() void {
 
 // The corpus expects errors on lines 11 and 12. Line 11 is validated. The read does not
 // relate b, so the path goes on and examines the leak of b on line 12 (toolchain 4.2). The
-// print calls of line 11 are fort calls: no witness crosses them, so line 12 stays an
-// unvalidated record and the first incomplete reason. The body stays rejected.
+// print calls of line 11 have no owning parameter, so the walk crosses them and line 12 is
+// validated too.
 fn f054() void {
     string[13] lines = {
         "",
@@ -660,17 +675,15 @@ fn f054() void {
     defer strbuf.free(&text);
     analyze(&e, &text, lines[..]);
     defer ownership_source_env.close(&e);
-    violated(&e, "main", ownership_api.event_kind.invalid_use, "a", 11);
-    ownership_source.body* row = ownership_source_env.find(&e, "main", "main");
-    assert(row->local.unvalidated == 1);
-    assert(row->local.first_incomplete.terminal.present);
-    assert(row->local.first_incomplete.terminal.source.line == 12);
-    assert(row->local.first_incomplete.terminal.reason ==
-        ownership_api.incomplete_reason.missing_path);
+    ownership_source.body* row = local_row(&e, "main", "complete", "violated");
+    assert(row->local.violations_len == 2 && row->local.unvalidated == 0);
+    has(row, 0, ownership_api.event_kind.invalid_use, "a", 11);
+    has(row, 1, ownership_api.event_kind.lost_ownership, "b", 12);
     assert(row->local.proof.failed);
 }
 
-// The leak follows a print call.
+// The leak follows a print call, which the walk crosses: the deferred test expects the
+// error on line 8.
 fn f055() void {
     string[11] lines = {
         "",
@@ -690,7 +703,7 @@ fn f055() void {
     defer strbuf.free(&text);
     analyze(&e, &text, lines[..]);
     defer ownership_source_env.close(&e);
-    declared(&e, "main");
+    violated(&e, "main", ownership_api.event_kind.lost_ownership, "s", 8);
 }
 
 // The deferred test expects the error on line 9.
@@ -782,7 +795,8 @@ fn f059() void {
     violated(&e, "main", ownership_api.event_kind.invalid_use, "a", 7);
 }
 
-// The leak follows a print call.
+// The leak follows a print call, which the walk crosses: the deferred test expects the
+// error on line 9.
 fn f060() void {
     string[11] lines = {
         "",
@@ -802,7 +816,7 @@ fn f060() void {
     defer strbuf.free(&text);
     analyze(&e, &text, lines[..]);
     defer ownership_source_env.close(&e);
-    declared(&e, "main");
+    violated(&e, "main", ownership_api.event_kind.lost_ownership, "p", 9);
 }
 
 // Only a later iteration overwrites: no witness validates it.

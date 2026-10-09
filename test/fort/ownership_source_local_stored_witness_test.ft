@@ -14,7 +14,7 @@ import ownership_source_env;
 import ownership_source_local;
 import std.strbuf;
 
-string[41] SOURCE = {
+string[45] SOURCE = {
     "struct pair { i32 mut* own a; i32 mut* own b; }",
     "struct box { i32 mut* p; i32 n; }",
     "struct view { u8@ bytes; u64 at; }",
@@ -55,6 +55,10 @@ string[41] SOURCE = {
     "}",
     "fn mixed(bool c) void {",
     "    pair s = pair{new(i32), new(i32)}; if (c) { del(s.a); } del(s.b);",
+    "}",
+    "fn owning_helper(i32 mut* own q) void { del(q); }",
+    "fn after_owning_call() i32 {",
+    "    i32 mut* own p = new(i32); box b = box{p, 0}; del(p); owning_helper(null); return *b.p;",
     "}",
 };
 
@@ -113,8 +117,11 @@ fn parameter_choices(ownership_source_env.env mut* e) void {
 fn unknown_conditions(ownership_source_env.env mut* e) void {
     // A scalar field that a parameter fills is unknown to the walk.
     unwitnessed(e, "by_field");
-    // A fort call before the use can fail to return (A06), so no witness crosses it.
-    unwitnessed(e, "after_call");
+    // A callee without an owning parameter takes no ownership (D17.9, D3.14): the walk takes
+    // its normal return, so the use after it is the event.
+    validated(e, "after_call", ownership_api.event_kind.invalid_use, 25);
+    // A callee with an owning parameter keeps the barrier: no witness crosses it (A06).
+    unwitnessed(e, "after_owning_call");
     // An element read after a weak store has no single value: incomplete, no event.
     ownership_source_local.context* weak = row(e, "weak_then_use");
     assert(weak->violations_len == 0 && !ownership_api.successful(weak->proof));

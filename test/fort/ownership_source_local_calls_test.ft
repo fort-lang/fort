@@ -1,0 +1,457 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| view calls ok
+//| narrowed calls ok
+//| memory calls ok
+//| barriers ok
+/// Holds the local outcome of programs that call a fort function before a leak or a use. A
+/// callee without an owning parameter cannot take ownership from its caller (D17.9, D3.14),
+/// so the caller's release obligation stays exact across the call. The witness walk takes the
+/// normal return that an unknown fort outcome keeps (D17.14), and the call is no barrier. The
+/// callee can abort for some values, so the walk takes no branch on a parameter that such a
+/// call can read, and crosses no such call after a branch on a parameter (fir.md 14.1, A06).
+/// The call can read its arguments and each value that the body stored before it outside a
+/// local that no FIR address names. A callee with an owning parameter, a noreturn callee and
+/// a call through a value keep the barrier. A line here is a line of CALLS.
+import ownership_api;
+import ownership_report;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import std.strbuf;
+
+string[239] CALLS = {
+    "fn consume(u8@ buf) u64 {",
+    "    return buf.len;",
+    "}",
+    "fn fill(u8 mut@ buf, u64 n) void {",
+    "    for (u64 mut i = 0; i < buf.len; i++) {",
+    "        buf[i] = cast(i, u8);",
+    "    }",
+    "}",
+    "fn take(u8 mut@ own buf) void {",
+    "    del(buf);",
+    "}",
+    "fn tick() void {}",
+    "fn stop() noreturn {",
+    "    while (true) {}",
+    "}",
+    "fn view_call(u64 n) i32 {",
+    "    u8 mut@ own mut buf = new(u8, n);",
+    "    consume(buf);",
+    "    return 0;",
+    "}",
+    "fn view_call_released(u64 n) i32 {",
+    "    u8 mut@ own mut buf = new(u8, n);",
+    "    consume(buf);",
+    "    del(buf);",
+    "    return 0;",
+    "}",
+    "fn fill_then_loop(u64 n) void {",
+    "    u8 mut@ own mut buf = new(u8, n);",
+    "    fill(buf, n);",
+    "    for (u8 a : buf) {",
+    "        println(\"thing: \", a);",
+    "    }",
+    "}",
+    "fn fill_then_release(u64 n) void {",
+    "    u8 mut@ own mut buf = new(u8, n);",
+    "    fill(buf, n);",
+    "    for (u8 a : buf) {",
+    "        println(\"thing: \", a);",
+    "    }",
+    "    del(buf);",
+    "}",
+    "fn own_call_other(u64 n) void {",
+    "    u8 mut@ own mut buf = new(u8, n);",
+    "    u8 mut@ own mut other = new(u8, n);",
+    "    take(move(other));",
+    "}",
+    "fn own_call_moved(u64 n) void {",
+    "    u8 mut@ own mut buf = new(u8, n);",
+    "    take(move(buf));",
+    "}",
+    "fn noreturn_call(u64 n) void {",
+    "    u8 mut@ own mut buf = new(u8, n);",
+    "    stop();",
+    "}",
+    "fn value_call(fn (u8@) u64 f, u64 n) void {",
+    "    u8 mut@ own mut buf = new(u8, n);",
+    "    f(buf);",
+    "}",
+    "fn use_after_call(u64 n) u8 {",
+    "    u8 mut@ own mut buf = new(u8, n);",
+    "    u8@ v = buf;",
+    "    del(buf);",
+    "    tick();",
+    "    return v[0];",
+    "}",
+    "fn release_after_call(u64 n) u8 {",
+    "    u8 mut@ own mut buf = new(u8, n);",
+    "    u8@ v = buf;",
+    "    u64 k = consume(buf);",
+    "    del(buf);",
+    "    return v[0];",
+    "}",
+    "struct holder { u8 mut@ own data; }",
+    "fn eat(holder h) void {",
+    "    holder mut k = move(h);",
+    "    del(k.data);",
+    "}",
+    "fn aggregate_call(u64 n) void {",
+    "    u8 mut@ own mut buf = new(u8, n);",
+    "    eat(holder{.data = new(u8, 2)});",
+    "    buf[0] = 1;",
+    "}",
+    "fn require(bool ok) void { if (!ok) { panic(\"bad\"); } }",
+    "fn require_then_return(u64 n) void {",
+    "    u8 mut@ own buf = new(u8, n);",
+    "    require(n < 100);",
+    "    if (n >= 100) { return; }",
+    "    del(buf);",
+    "}",
+    "fn require_flag(bool keep) void {",
+    "    u8 mut@ own buf = new(u8, 4);",
+    "    require(keep);",
+    "    if (keep) { del(buf); return; }",
+    "}",
+    "fn require_other_parameter(u64 n, bool keep) void {",
+    "    u8 mut@ own buf = new(u8, 4);",
+    "    require(n < 100);",
+    "    if (keep) { del(buf); return; }",
+    "}",
+    "fn require_before_use(bool early) u8 {",
+    "    u8 mut@ own buf = new(u8, 4);",
+    "    u8@ v = buf;",
+    "    require(!early);",
+    "    if (early) { del(buf); return v[0]; }",
+    "    del(buf);",
+    "    return 0;",
+    "}",
+    "fn require_after_branch(u64 n, bool keep) void {",
+    "    u8 mut@ own buf = new(u8, n);",
+    "    if (keep) { del(buf); return; }",
+    "    require(keep);",
+    "}",
+    "fn require_after_skipped_write(u64 n) void {",
+    "    u8 mut@ own buf = new(u8, 4);",
+    "    bool mut big = false;",
+    "    if (n > 5) { big = true; }",
+    "    require(big);",
+    "    if (n > 5) { del(buf); return; }",
+    "}",
+    "struct cfg { u64 n; }",
+    "struct ref { u64* p; }",
+    "u64 mut LIMIT = 0;",
+    "extern fn fill_byte(u8 mut* dst, i32 v, u64 n) u8 mut*;",
+    "fn validate(cfg* c) void { if (c->n >= 100) { panic(\"bad\"); } }",
+    "fn check_at(u64* p) void { if (*p >= 100) { panic(\"bad\"); } }",
+    "fn check_val(u64 v) void { if (v >= 100) { panic(\"bad\"); } }",
+    "fn check_byte(u8 v) void { if (v >= 100) { panic(\"bad\"); } }",
+    "fn check_first(u8@ b) void { if (b[0] >= 100) { panic(\"bad\"); } }",
+    "fn check_all(u64@ xs) void { if (xs[0] >= 100) { panic(\"bad\"); } }",
+    "fn check_limit() void { if (LIMIT >= 100) { panic(\"bad\"); } }",
+    "fn check_ref(ref r) void { if (*r.p >= 100) { panic(\"bad\"); } }",
+    "fn memory_struct_pointer(u64 n) void {",
+    "    u8 mut@ own buf = new(u8, 4);",
+    "    cfg c = cfg{.n = n};",
+    "    validate(&c);",
+    "    if (n >= 100) { return; }",
+    "    del(buf);",
+    "}",
+    "fn memory_value_pointer(u64 n) void {",
+    "    u8 mut@ own buf = new(u8, 4);",
+    "    u64 m = n;",
+    "    check_at(&m);",
+    "    if (n >= 100) { return; }",
+    "    del(buf);",
+    "}",
+    "fn memory_global(u64 n) void {",
+    "    u8 mut@ own buf = new(u8, 4);",
+    "    LIMIT = n;",
+    "    check_limit();",
+    "    if (n >= 100) { return; }",
+    "    del(buf);",
+    "}",
+    "fn memory_array_slice(u64 n) void {",
+    "    u8 mut@ own buf = new(u8, 4);",
+    "    u64[1] a = {n};",
+    "    check_all(a[..]);",
+    "    if (n >= 100) { return; }",
+    "    del(buf);",
+    "}",
+    "fn memory_view_store(u8 x) void {",
+    "    u8 mut@ own buf = new(u8, 4);",
+    "    u8 mut@ v = buf;",
+    "    v[0] = x;",
+    "    check_first(buf);",
+    "    if (x >= 100) { return; }",
+    "    del(buf);",
+    "}",
+    "fn memory_pointer_store(u64 n) void {",
+    "    u8 mut@ own buf = new(u8, 4);",
+    "    u64 mut m = 0;",
+    "    u64 mut* p = &m;",
+    "    *p = n;",
+    "    check_val(m);",
+    "    if (n >= 100) { return; }",
+    "    del(buf);",
+    "}",
+    "fn memory_heap_slice(u64 n) void {",
+    "    u8 mut@ own buf = new(u8, 4);",
+    "    u64 mut@ own w = new(u64, 1);",
+    "    u64 mut@ v = w;",
+    "    v[0] = n;",
+    "    check_all(w);",
+    "    del(w);",
+    "    if (n >= 100) { return; }",
+    "    del(buf);",
+    "}",
+    "fn memory_extern_store(u8 n) void {",
+    "    u8 mut@ own buf = new(u8, 4);",
+    "    u8 mut m = 0;",
+    "    fill_byte(&m, cast(n, i32), 1);",
+    "    check_byte(m);",
+    "    if (n >= 100) { return; }",
+    "    del(buf);",
+    "}",
+    "fn memory_store_after_address(u64 n) void {",
+    "    u8 mut@ own buf = new(u8, 4);",
+    "    u64 mut m = 0;",
+    "    u64* p = &m;",
+    "    m = n;",
+    "    check_at(p);",
+    "    if (n >= 100) { return; }",
+    "    del(buf);",
+    "}",
+    "fn memory_address_in_struct(u64 n) void {",
+    "    u8 mut@ own buf = new(u8, 4);",
+    "    u64 m = n;",
+    "    check_ref(ref{.p = &m});",
+    "    if (n >= 100) { return; }",
+    "    del(buf);",
+    "}",
+    "fn memory_constant_leak(u64 n) void {",
+    "    u8 mut@ own buf = new(u8, 4);",
+    "    LIMIT = 5;",
+    "    check_limit();",
+    "    if (n >= 100) { return; }",
+    "    del(buf);",
+    "}",
+    "fn memory_other_parameter_leak(u64 n, u64 k) void {",
+    "    u8 mut@ own buf = new(u8, 4);",
+    "    u64 m = k;",
+    "    check_at(&m);",
+    "    if (n >= 100) { return; }",
+    "    del(buf);",
+    "}",
+    "fn set_big(u64 mut* p) void { *p = 200; }",
+    "fn taken_fort_write() void {",
+    "    u8 mut@ own buf = new(u8, 4);",
+    "    u64 mut m = 5;",
+    "    set_big(&m);",
+    "    if (m < 100) { return; }",
+    "    del(buf);",
+    "}",
+    "fn taken_extern_write() void {",
+    "    u8 mut@ own buf = new(u8, 4);",
+    "    u8 mut m = 5;",
+    "    fill_byte(&m, 200, 1);",
+    "    if (m < 100) { return; }",
+    "    del(buf);",
+    "}",
+};
+
+fn analyze(ownership_source_env.env mut* e, strbuf.str_buf mut* text) void {
+    u64 mut i = 0;
+    while (i < CALLS.len) {
+        strbuf.append(text, CALLS[i]);
+        strbuf.push(text, '\n');
+        i += 1;
+    }
+    strbuf.append(text, "fn root() i32 { return 0; }\n");
+    ownership_source_env.open(e);
+    ownership_source_env.runtime(e);
+    assert(ownership_source_env.prepare(e, strbuf.view(text)));
+    ownership_source.analyze(&e->source);
+}
+
+fn row(ownership_source_env.env mut* e, string name, string correspondence, string proof)
+    ownership_source.body* {
+    ownership_source.body* found = ownership_source_env.find(e, "main", name);
+    string got_correspondence = ownership_report.analysis_status(found, ownership_report.LOCAL,
+        0);
+    string got_proof = ownership_report.analysis_status(found, ownership_report.LOCAL, 2);
+    if (got_correspondence != correspondence || got_proof != proof) {
+        eprintln(name, ": correspondence ", got_correspondence, ", proof ", got_proof);
+        assert(false);
+    }
+    return found;
+}
+
+fn violated(ownership_source_env.env mut* e, string name, string correspondence,
+    ownership_api.event_kind kind, string slot, u32 line) void {
+    ownership_source.body* found = row(e, name, correspondence, "violated");
+    if (found->local.violations_len != 1) {
+        eprintln(name, ": ", found->local.violations_len, " violations");
+        assert(false);
+    }
+    ownership_source_local.violation v = found->local.violations[0];
+    if (v.kind != kind || v.name != slot || v.source.line != line || !v.quoted) {
+        eprintln(name, ": ", v.name, " at line ", v.source.line);
+        assert(false);
+    }
+}
+
+fn proved(ownership_source_env.env mut* e, string name) void {
+    row(e, name, "complete", "complete");
+}
+
+// A body that neither the local row nor the stored row proves, with no violation in either.
+fn no_violation(ownership_source_env.env mut* e, string name) void {
+    ownership_source.body* found = ownership_source_env.find(e, "main", name);
+    if (found->local.violations_len != 0 || ownership_api.successful(found->local.proof) ||
+        found->stored.violations_len != 0 || ownership_api.successful(found->stored.proof)) {
+        eprintln(name, ": ", found->local.violations_len, " local and ",
+            found->stored.violations_len, " stored violations");
+        assert(false);
+    }
+}
+
+// Cannot prove: the event (a leak or a use after del) exists in the stored row when `stored`
+// is set, else in the local row, and has no witness. Neither row reports a violation, and
+// neither row proves the body.
+fn cannot_prove_in(ownership_source_env.env mut* e, string name, bool stored) void {
+    no_violation(e, name);
+    ownership_source.body* found = ownership_source_env.find(e, "main", name);
+    u64 unvalidated = stored ? found->stored.unvalidated : found->local.unvalidated;
+    if (unvalidated == 0) {
+        eprintln(name, ": no unvalidated event, stored ", stored);
+        assert(false);
+    }
+}
+
+fn cannot_prove(ownership_source_env.env mut* e, string name) void {
+    cannot_prove_in(e, name, false);
+}
+
+// The stored row validates the loss of buf at `line`.
+fn stored_lost_at(ownership_source_env.env mut* e, string name, u32 line) void {
+    ownership_source.body* found = ownership_source_env.find(e, "main", name);
+    if (found->stored.violations_len != 1) {
+        eprintln(name, ": ", found->stored.violations_len, " stored violations");
+        assert(false);
+    }
+    ownership_source_local.violation v = found->stored.violations[0];
+    if (v.kind != ownership_api.event_kind.lost_ownership || v.name != "buf" ||
+        v.source.line != line) {
+        eprintln(name, ": ", v.name, " at line ", v.source.line);
+        assert(false);
+    }
+}
+
+// A declared body with an unvalidated event and no violation.
+fn unwitnessed(ownership_source_env.env mut* e, string name) void {
+    ownership_source.body* found = row(e, name, "complete", "incomplete");
+    assert(found->local.violations_len == 0 && found->local.unvalidated == 1);
+}
+
+// A call that lends buf leaves its obligation: the leak at the return validates. With
+// del(buf) after the call the body proves. A call with no parameter before a read of a
+// released span keeps the use validated.
+fn view_calls(ownership_source_env.env mut* e) void {
+    lost_at(e, "view_call", "complete", 19);
+    proved(e, "view_call_released");
+    ownership_source.body* released = row(e, "fill_then_release", "incomplete", "incomplete");
+    assert(released->local.violations_len == 0);
+    violated(e, "use_after_call", "complete", ownership_api.event_kind.invalid_use, "v", 64);
+    println("view calls ok");
+}
+
+// A lending call reads values that a later branch also reads: fill and consume read buf, whose
+// length is n, and the loop test or the bounds check reads n too. The callee can abort for the
+// value that the branch chooses, so the event is incomplete proof (ruling of 2026-10-09).
+// The require family: a precondition helper aborts for the values that the leak path needs.
+// Without the narrowing, each require shape but require_other_parameter gives a false
+// violation.
+fn narrowed_calls(ownership_source_env.env mut* e) void {
+    // The user's program: a lending call, then a loop over buf with print calls in its body.
+    // The user ruled on 2026-10-09 to keep it "cannot prove" until a call summary proves that
+    // fill returns. Neither a violation nor a proof may appear here without that summary.
+    cannot_prove(e, "fill_then_loop");
+    // A use of v after del: consume reads buf, and the bounds check of v[0] reads n.
+    cannot_prove(e, "release_after_call");
+    // A branch after the call on a parameter that the call reads: n, a bool, and a bool that
+    // the call reads through `!early` before a use after del.
+    cannot_prove(e, "require_then_return");
+    cannot_prove(e, "require_flag");
+    cannot_prove(e, "require_before_use");
+    // A branch before the call on a parameter that the call then reads.
+    cannot_prove(e, "require_after_branch");
+    // big is false for n <= 5 because the branch skipped its write: the call depends on n.
+    cannot_prove(e, "require_after_skipped_write");
+    // The call reads n and the leak branch reads keep only: the leak is real and validates.
+    lost_at(e, "require_other_parameter", "complete", 99);
+    println("narrowed calls ok");
+}
+
+// The callee reads n outside its arguments: through a pointer to a struct or to a copy of n,
+// through a global, a slice of a fixed array, a view of the heap or a pointer store, through a
+// byte that an extern call stored, and through an address inside a struct argument. Each
+// callee aborts for n >= 100, so a leak on the path n >= 100 is no violation. The two
+// controls store no value of n, so their leaks validate.
+fn memory_calls(ownership_source_env.env mut* e) void {
+    cannot_prove_in(e, "memory_struct_pointer", true);
+    cannot_prove_in(e, "memory_value_pointer", true);
+    cannot_prove_in(e, "memory_global", false);
+    cannot_prove_in(e, "memory_array_slice", true);
+    cannot_prove_in(e, "memory_view_store", false);
+    cannot_prove_in(e, "memory_pointer_store", true);
+    cannot_prove_in(e, "memory_heap_slice", false);
+    cannot_prove_in(e, "memory_extern_store", true);
+    cannot_prove_in(e, "memory_store_after_address", true);
+    cannot_prove_in(e, "memory_address_in_struct", true);
+    // In memory_constant_leak LIMIT holds 5. In memory_other_parameter_leak the call reads k,
+    // not n.
+    lost_at(e, "memory_constant_leak", "complete", 215);
+    stored_lost_at(e, "memory_other_parameter_leak", 222);
+    // A fort callee and an extern callee write 200 into m through its address, so the path
+    // m < 100 never runs. The walk knows no value of a local that an address names, so it does
+    // not take that path with the 5 that m held before the call.
+    cannot_prove_in(e, "taken_fort_write", true);
+    cannot_prove_in(e, "taken_extern_write", true);
+    println("memory calls ok");
+}
+
+fn lost_at(ownership_source_env.env mut* e, string name, string correspondence, u32 line)
+    void {
+    violated(e, name, correspondence, ownership_api.event_kind.lost_ownership, "buf", line);
+}
+
+// A callee with an owning parameter can take ownership: the leak of buf after it stays
+// unvalidated, as before this rule. A noreturn callee proves no return, and a call through a
+// value names no callee.
+fn barrier_calls(ownership_source_env.env mut* e) void {
+    unwitnessed(e, "own_call_other");
+    proved(e, "own_call_moved");
+    proved(e, "noreturn_call");
+    unwitnessed(e, "value_call");
+    // A by-value parameter of an owning aggregate type can own a value: a barrier too.
+    ownership_source.body* aggregate = ownership_source_env.find(e, "main", "aggregate_call");
+    assert(aggregate->local.violations_len == 0 && aggregate->local.unvalidated >= 1);
+    println("barriers ok");
+}
+
+fn main() i32 {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text);
+    defer ownership_source_env.close(&e);
+    view_calls(&e);
+    narrowed_calls(&e);
+    memory_calls(&e);
+    barrier_calls(&e);
+    return 0;
+}

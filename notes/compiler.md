@@ -1064,7 +1064,40 @@ came here.
   take. So a stop in a loop body leaves a leak after the loop validated on the path with no
   iteration (`failure_in_a_loop` of `_separate_test.ft`), and before this rule any stop that
   could reach the operation blocked it. The witness walk starts at the
-  entry and crosses no back edge and no fort call; an extern call returns (D17.13). It knows
+  entry and crosses no back edge; an extern call returns (D17.13). In the local and stored runs
+  it crosses a direct fort call whose callee has no owning parameter. Such a parameter cannot
+  own its argument (D17.9, D3.14). So the obligations of TL owners and TA leaf owners stay
+  exact across the call: no FIR address names their storage. The analysis follows no other
+  owner, so a release in the heap, in a global or through an address needs no rule here. The
+  walk takes the normal return that an unknown fort outcome keeps (D17.14), and the call is
+  no barrier. A callee with an owning parameter, a noreturn callee and a call through a value
+  stay barriers. The walk of `witness_in` crosses no fort call. The user ruled this on
+  2026-10-08 for a call that lends an owner (`consume(buf)` with a `u8@` parameter). D17.18
+  and fir.md 14.1 trace A06 say it since. A callee that never returns normally makes such a
+  violation false. So a function that never returns should have a noreturn type, and nothing
+  checks that (`_calls_test.ft`, `walk_test.ft` `calls`). On 2026-10-09 the user ruled to
+  narrow the walk. A precondition helper such as `require(n < 100)` aborts for some values
+  only. A later `if (n >= 100) { return; }` then made a false lost owner. The walk keeps, for
+  each local, the parameters that the writes of the local read (`depends`). In `memory` it
+  keeps the parameters of each value that a later callee can read outside its arguments
+  (`expose`). A store through a pointer or a view adds its reads. So does a store into a
+  global or into a local that a FIR address names, and so does each call, an extern call too.
+  A branch adds the parameters of its terminator to `decided`. A crossed call adds `memory`,
+  which holds its own reads, to `crossed`. The walk crosses no fort call after a branch on a
+  parameter. The reason: an argument depends on each earlier branch, through the writes that
+  the branch skipped. The walk stops when `decided` and `crossed` meet, so the event stays
+  incomplete proof. A local that a FIR address names has no value on the walk (`place_value`).
+  So the address of a parameter needs no rule. `taken_fort_write` and `taken_extern_write`
+  hold that test. Before `memory`, a callee could read n through `&c`, a view, a pointer store,
+  a fixed-array slice or a global. Each gave a false lost owner (`memory_calls` of
+  `_calls_test.ft`). The rule costs real leaks too. A runtime check that reads a parameter is a
+  branch, such as the bounds check of `buf[0]` for `new(u8, n)`. So a print call after it
+  stops the walk. The rule also stops the walk of the user's program that calls `fill(buf, n)`
+  before its loop over buf. The loop test reads n, and `fill` reads n too. `memory` costs real
+  leaks of its own. A store of n into the heap makes each later call read n. So
+  `buf[0] = n; tick(); if (n >= 100) { return; }` stays incomplete. A local that a FIR address
+  names counts for the whole body. So a store of n into m before a call counts, even when `&m`
+  comes after the call. The walk knows
   constants, exact integer arithmetic, comparisons, value-keeping casts, allocations, span
   headers, slices and `slice_ptr` lengths, and the null left by a move or a `del`. A cast keeps
   the entry value of a parameter when the new type holds each value of the parameter type.
@@ -1121,9 +1154,9 @@ came here.
   then traps. The walk computes no slice length from a parameter length (`buf[1..]`) and no
   element of an allocation, so the overwrite check of an owner element (`bufs[0] = new(u8)`)
   stays unknown (`limits` of `_elements_test.ft`). After a definite failure the path
-  checks the unrelated owners, so `fail/ownership/054` examines its line-12 leak. Its line-11
-  print calls are fort calls, so no witness reaches line 12: local proof reports line 11 as a
-  violation and line 12 as incomplete. A witness walk crosses an earlier failed operation as an
+  checks the unrelated owners, so `fail/ownership/054` examines its line-12 leak. The walk
+  crosses its line-11 print calls, so local proof reports both lines as violations; before the
+  call rule line 12 stayed incomplete. A witness walk crosses an earlier failed operation as an
   ordinary statement, so a later violation holds when that operation is repaired without an
   effect on the later owner. `test/fort/ownership_source_local_separate_test.ft` holds the
   source shapes. Null tests of a
@@ -1197,8 +1230,8 @@ came here.
   paths into one operation reach; an owning weak store, whose obligation rests at the array
   root; a range loan of a collection that a pointer can name, after a write that the flow
   cannot name, such as a print call.
-  Measured on the source audit of 66 roots: 3871 unique bodies, 754 declare stored
-  obligations and all 754 prove them, 679 declare local obligations and all 679 prove them,
+  Measured on the source audit of 66 roots: 3876 unique bodies, 756 declare stored
+  obligations and all 756 prove them, 681 declare local obligations and all 681 prove them,
   0 violations (3867, 752 and 678 on 7fbb6e5b, before the walk kept parameter lengths; the
   bodies that change adds and removes account for each difference). The reads of reference
   values out of untracked storage took 17 local and 10 stored bodies out of the scopes (662
@@ -1210,7 +1243,9 @@ came here.
   `ownership_state.measure_regions` refused W or V on earlier trees. They now complete with no
   refusal: `test_compiler_bodies_keep_their_stored_ledgers` in `test/ownership_driver_test.py`
   holds this for these three bodies.
-  On the 512 run tests of `test/lang`, no local, stored or raw row has a violation.
+  On the 493 entries of `test/lang/run`, no local or raw row has a violation. One stored row
+  has one: `errors/031_overwrite_own_element.ft` overwrites a live owner and traps there on
+  purpose, and the walk crosses the print call before the store.
 - **Raw-storage effects come from verified FIR** (D17.17, D17.18, D19.8).
   `ownership_source_raw` reads each verified body and proves its raw obligations with
   `ownership_raw`. A reference local that no FIR address names has definitions: writes, moves,

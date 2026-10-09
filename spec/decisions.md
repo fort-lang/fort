@@ -2532,6 +2532,25 @@ says ownership is "by convention", this section supersedes it.
   Otherwise report the affected obligation as incomplete proof. A work-budget failure is an error.
   A validated reaching-path witness can establish an invalid operation.
   An abstract possibility without that witness establishes only failure to prove safety.
+  A witness can cross a direct call of a fort callee that has a returning type and no parameter
+  that can own a value. It assumes that the callee returns (fir.md 14.1, A06).
+  An entry value is the value that a parameter of the checked function has when it starts.
+  A parameter depends on its own entry value. A statement depends on each entry value that a
+  place it reads depends on: an operand, the index of an element, or a pointer that its
+  destination loads. A value that the statement writes depends on the same entry values.
+  A crossed call can read each entry value that its own statement depends on.
+  It can also read each entry value that an earlier statement of the function depends on, when
+  that statement stores outside a local whose storage no FIR address names. A store through a
+  pointer or a view and a store into a global count. So does each earlier call, an extern call
+  too, because the callee can store what it reads.
+  After a crossed call the witness takes no branch whose condition depends on an entry value
+  that the call can read. After a branch whose condition depends on any entry value, the
+  witness crosses no fort call. Such a branch or call leaves the event incomplete proof.
+  The witness knows no value in a global, behind a pointer, or in a local whose storage a FIR
+  address names. So no branch that it takes reads such a value.
+  A crossed call that does not return for the inputs that it gets on the witness path makes a
+  violation after it false. A function that never returns is such a callee. Give such a
+  function a noreturn type; the compiler does not check this.
   Use canonical scheduling, stable event keys, and counted work for repeated-input determinism.
   Publish the implementation's numeric limits, measured coverage, and reproduction commands.
   A report limit cannot convert incomplete analysis into a successful verdict.
@@ -2546,6 +2565,17 @@ says ownership is "by convention", this section supersedes it.
   The work bound scales with the FIR size of each computation.
   Note 2026-10-08: The user ruled on 2026-10-07 that the production W_scale is 1024, in
   place of 64. The rule does not change.
+  Amended 2026-10-08: A witness crossed no unresolved fort call. The user ruled that a callee
+  without a parameter that can own a value cannot release or transfer a caller owner that is
+  a local slot, or a leaf of a local struct or array, when no FIR address names that storage
+  (D17.9, D3.14). So that owner's obligation stays exact across the call. The analysis
+  follows no other owner across the call: a callee can release an owner in the heap, in a
+  global, or behind an address. A callee that never returns normally makes such a violation
+  false. The cost is a false violation, never a missed one.
+  Amended 2026-10-09: The user ruled to narrow the walk, in place of accepting a false
+  violation for a callee that aborts for some values only, such as `require(n < 100)` before a
+  branch on n. The witness takes no branch on an entry value that a crossed call can read,
+  through its arguments or through a value that the function stored before the call.
 
 ### D17.19 Global ownership and process boundaries
 - owner: `memory-model.md` (2.9), `toolchain.md` (2.1), `module-system.md` (11),

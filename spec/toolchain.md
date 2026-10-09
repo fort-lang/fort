@@ -941,6 +941,18 @@ ordered FIR effects that reach the invalid operation.
 Validate its alias substitutions, branch conditions, source identities, and effect order.
 A witness can cross loops or recursive summaries only with a validated path or inductive argument.
 A collection of independent may-facts does not supply that validation.
+A witness can also cross an unresolved direct call of a fort callee that has a returning type and
+no parameter that can own a value, a recursive callee included. It assumes that the callee
+returns (D17.18, fir.md 14.1 A06): that is the one input condition that it does not prove.
+After that call it takes no branch whose condition depends on an entry value that the call can
+read (D17.18): through an argument, or through a value that the function stored before the call
+outside a local whose storage no FIR address names. An argument of an earlier call counts as
+stored. After a branch whose condition depends on any entry value, it crosses no fort call.
+Such a branch or call leaves the event incomplete proof.
+Amended 2026-10-08: a witness crossed no unresolved fort call. A callee that never returns
+normally makes such a witness false. The cost is a false violation, never a missed one.
+Amended 2026-10-09: a witness took each branch after a crossed call. A callee that aborts for
+some values only, such as `require(n < 100)`, then gave a false violation.
 
 A validated witness permits a path-dependent error: the operation fails on that reaching path.
 Use unconditional wording only when the invalidity holds on all represented reaching paths.

@@ -150,8 +150,8 @@
     {
       "decision": "D17.18-call-havoc",
       "file": "src/fort/ownership_source_local.ft",
-      "old": "        } else {\n            outside_step(c, block, gap, true);\n        }",
-      "new": "        } else {\n        }",
+      "old": "        } else {\n            // A call that the witness walk crosses is no barrier.\n            outside_step(c, block, gap, !returns(c, r));\n        }",
+      "new": "        } else {\n            // A call that the witness walk crosses is no barrier.\n        }",
       "what": "a fort call has no outside effect"
     },
     {
@@ -248,9 +248,142 @@
     {
       "decision": "toolchain-4.2-fort-call",
       "file": "src/fort/ownership_source_local.ft",
-      "old": "    if (r.callee != fir.callee_kind.cl_extern) { return false; }",
+      "old": "    if (owning_type(t->params[k])) { return false; }",
+      "new": "    if (false && owning_type(t->params[k])) { return false; }",
+      "what": "a witness path can cross a fort call that takes ownership"
+    },
+    {
+      "decision": "D17.9-lending-barrier",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "            outside_step(c, block, gap, !returns(c, r));",
+      "new": "            outside_step(c, block, gap, true);",
+      "what": "a call that the witness walk crosses is a barrier"
+    },
+    {
+      "decision": "D17.9-lending-noreturn",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    if (t == null || t->is_noreturn) { return false; }",
+      "new": "    if (t == null) { return false; }",
+      "what": "a witness path crosses a noreturn call"
+    },
+    {
+      "decision": "D17.9-lending-value",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    if (r.callee == fir.callee_kind.cl_value) { return false; }",
       "new": "    if (false) { return false; }",
-      "what": "a witness path can cross a fort call"
+      "what": "a witness path crosses a call through a value"
+    },
+    {
+      "decision": "D17.9-lending-runs",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    c->lending_calls = true;",
+      "new": "    c->lending_calls = false;",
+      "what": "the local and stored walks cross no fort call"
+    },
+    {
+      "decision": "D17.9-lending-aggregate",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    if (owning_type(t->params[k])) { return false; }",
+      "new": "    if (reference_type(t->params[k]) && t->params[k]->is_own) { return false; }",
+      "what": "a by-value parameter of an owning aggregate type does not stop the witness walk"
+    },
+    {
+      "decision": "D17.18-narrow-call",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    w->crossed = w->crossed | w->memory;\n    return w->decided == 0;",
+      "new": "    w->crossed = w->crossed | w->memory;\n    return true;",
+      "what": "the witness crosses a lending call after a branch on a parameter"
+    },
+    {
+      "decision": "D17.18-narrow-branch",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    w->decided = w->decided | read;\n    return (w->crossed & w->decided) == 0;",
+      "new": "    w->decided = w->decided | read;\n    return true;",
+      "what": "the witness takes a branch on a parameter that a crossed lending call reads"
+    },
+    {
+      "decision": "D17.18-narrow-memory",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    w->crossed = w->crossed | w->memory;",
+      "new": "    w->crossed = w->crossed;",
+      "what": "a crossed call reads neither its arguments nor a value that the body stored"
+    },
+    {
+      "decision": "D17.18-narrow-order",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    expose(w, s, read);\n    if (s->value.kind == fir.rvalue_kind.rv_call && s->value.callee == fir.callee_kind.cl_fn &&\n        !narrow_call(w)) { return false; }",
+      "new": "    if (s->value.kind == fir.rvalue_kind.rv_call && s->value.callee == fir.callee_kind.cl_fn &&\n        !narrow_call(w)) { return false; }\n    expose(w, s, read);",
+      "what": "a crossed call reads memory before expose adds the reads of the call"
+    },
+    {
+      "decision": "D17.18-taken-value",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    if (p.base != fir.base_kind.bk_local || c->taken[cast(p.local, u64)]) {\n        return witness_value{};",
+      "new": "    if (p.base != fir.base_kind.bk_local) {\n        return witness_value{};",
+      "what": "the walk reads the value of a local that a FIR address names"
+    },
+    {
+      "decision": "D17.18-narrow-memory-store",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    if (!local_only || s->value.kind == fir.rvalue_kind.rv_call) {",
+      "new": "    if (s->value.kind == fir.rvalue_kind.rv_call) {",
+      "what": "a store through a pointer, a view or a global exposes no value to a later call"
+    },
+    {
+      "decision": "D17.18-narrow-memory-call",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    if (!local_only || s->value.kind == fir.rvalue_kind.rv_call) {",
+      "new": "    if (!local_only) {",
+      "what": "an extern call stores no value that it reads where a later call can read it"
+    },
+    {
+      "decision": "D17.18-narrow-memory-taken",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        !c->taken[cast(s->place.local, u64)];",
+      "new": "        true;",
+      "what": "a store into a local that a FIR address names exposes no value"
+    },
+    {
+      "decision": "D17.18-narrow-memory-indirect",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        names_storage(c->function, s->place, fir.rvalue_kind.rv_addr) &&\n        !c->taken",
+      "new": "        true &&\n        !c->taken",
+      "what": "a store through a pointer or a view into the heap exposes no value"
+    },
+    {
+      "decision": "D17.18-narrow-memory-global",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    bool local_only = s->place.base == fir.base_kind.bk_local &&",
+      "new": "    bool local_only = (s->place.base == fir.base_kind.bk_local || true) &&",
+      "what": "a store into a global exposes no value"
+    },
+    {
+      "decision": "D17.18-narrow-data",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        w->depends[at] = (s->place.proj_len == 0 ? 0 : w->depends[at]) | read;",
+      "new": "        w->depends[at] = (s->place.proj_len == 0 ? 0 : w->depends[at]);",
+      "what": "a written value depends on no parameter that its statement reads"
+    },
+    {
+      "decision": "D17.18-narrow-terminator",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        if (t->kind != fir.term_kind.tk_goto && !narrow_branch(w, terminator_depends(w, t))) {",
+      "new": "        if (false && !narrow_branch(w, terminator_depends(w, t))) {",
+      "what": "a switch or a check of the walk is no branch for the narrowing"
+    },
+    {
+      "decision": "D17.18-narrow-site",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        !narrow_call(w)) { return false; }",
+      "new": "        !narrow_call(w) && false) { return false; }",
+      "what": "a crossed lending call is no call for the narrowing"
+    },
+    {
+      "decision": "D17.18-narrow-parameter",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "            w->depends[n] = cast(1, u64) << (ordinal < 63 ? ordinal : 63);",
+      "new": "            w->depends[n] = cast(0, u64) << (ordinal < 63 ? ordinal : 63);",
+      "what": "a parameter depends on no parameter"
     },
     {
       "decision": "toolchain-4.2-unknown-condition",

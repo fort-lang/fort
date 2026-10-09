@@ -209,13 +209,14 @@ fn span_steps(ownership_source_env.env mut* e) void {
 
 fn call_steps(ownership_source_env.env mut* e) void {
     // The borrowed argument is a read before the call. The moved argument escapes. Each fort
-    // call is an outside effect and a barrier for validation.
+    // call is an outside effect. The call of take, whose parameter owns, is a barrier for
+    // validation; the call of helper is not (D17.9, D3.14).
     string[10] called = {
         "0.0.0 assignment 1->1 empty",
         "0.2.0 allocation 3->3",
         "1.0.0 move 3->1",
         "1.2.0 inspect 1->1",
-        "1.2.1 outside 0->0 barrier",
+        "1.2.1 outside 0->0",
         "1.4.0 escape 1->1",
         "1.4.1 outside 0->0 barrier",
         "1.6.0 dead 1->1 private",
@@ -419,23 +420,24 @@ fn stops_on_the_walk(ownership_source_env.env mut* e) void {
     assert(ownership_source_local.stopped_on(c, &w, 4, count, rank));
     c->result.stops_lost = false;
     del(c->result.stops);
-    // called: bb1 calls helper at statement 2 and take at statement 4. The outside step of the
-    // helper call is its second step, so it stands at rank 2 of that statement.
+    // called: bb1 calls helper at statement 2 and take at statement 4. The walk crosses the
+    // call of helper. The call of take is a barrier: its outside step is the second step of
+    // statement 4, so it stands at rank 2 there.
     ownership_source.body mut* called = ownership_source_env.find(e, "main", "called");
     ownership_source_local.context mut* k = &called->local;
     fir.pred_table mut called_preds = fir.func_predecessors(k->function);
     defer fir.pred_table_free(&called_preds);
     ownership_source_local.walk mut to_call = ownership_source_local.walk{};
     defer ownership_source_local.walk_free(&to_call);
-    assert(ownership_source_local.walk_to(k, &called_preds, 1, 2,
+    assert(ownership_source_local.walk_to(k, &called_preds, 1, 4,
         ownership_source_local.trap.no_trap, &to_call));
-    assert(!ownership_source_local.stopped_on(k, &to_call, 1, 2, 1));
-    assert(!ownership_source_local.stopped_on(k, &to_call, 1, 2, 2));
-    assert(ownership_source_local.stopped_on(k, &to_call, 1, 2, 3));
-    // The walk does not cross the call, so no walk reaches the statement after it.
+    assert(!ownership_source_local.stopped_on(k, &to_call, 1, 4, 1));
+    assert(!ownership_source_local.stopped_on(k, &to_call, 1, 4, 2));
+    assert(ownership_source_local.stopped_on(k, &to_call, 1, 4, 3));
+    // The walk does not cross the call of take, so no walk reaches the statement after it.
     ownership_source_local.walk mut past = ownership_source_local.walk{};
     defer ownership_source_local.walk_free(&past);
-    assert(!ownership_source_local.walk_to(k, &called_preds, 1, 3,
+    assert(!ownership_source_local.walk_to(k, &called_preds, 1, 5,
         ownership_source_local.trap.no_trap, &past));
     // Names come from the source and take quotes. A temporary has no name of its own.
     ownership_source.body mut* released = ownership_source_env.find(e, "main", "released");

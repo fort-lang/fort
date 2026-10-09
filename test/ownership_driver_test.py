@@ -559,14 +559,15 @@ class OwnershipDriverTest(unittest.TestCase):
         self.assertEqual(projections[0][1], 3)
 
     def test_local_failures_after_unknown_calls_stay_unproved(self):
+        # The parameter of helper owns, so each call of it is a barrier (D17.9, D3.14).
         self.entry.write_text(
-            "fn helper() void {}\n"
+            "fn helper(i32 mut* own x) void { del(x); }\n"
             "fn after_call() void {\n"
             "    i32 mut* own p = new(i32);\n"
-            "    helper();\n"
+            "    helper(null);\n"
             "}\n"
             "fn caller_storage(i32* v) i32 {\n"
-            "    helper();\n"
+            "    helper(null);\n"
             "    return *v;\n"
             "}\n"
             "fn main() i32 { return 0; }\n"
@@ -583,6 +584,50 @@ class OwnershipDriverTest(unittest.TestCase):
         caller = self.local_row(document, "caller_storage")
         self.assertEqual((caller["correspondence"], caller["proof"]),
                          ("incomplete", "incomplete"))
+
+    def test_caller_storage_after_a_lending_call_stays_unproved(self):
+        # The text of this test before the call rule: helper has no parameter, so the walk
+        # crosses it. The leak after it is a violation, and the read of caller storage after
+        # it still fails only because of the call: call scope, no violation.
+        self.entry.write_text(
+            "fn helper() void {}\n"
+            "fn after_call() void {\n"
+            "    i32 mut* own p = new(i32);\n"
+            "    helper();\n"
+            "}\n"
+            "fn caller_storage(i32* v) i32 {\n"
+            "    helper();\n"
+            "    return *v;\n"
+            "}\n"
+            "fn main() i32 { return 0; }\n"
+        )
+        self.assertEqual(self.invoke(standard=Path(OPTIONS.std_dir)).returncode, 1)
+        document = self.evidence()
+        self.assertEqual(document["totals"]["violations"], 1)
+        self.assertIn(b"lost ownership of 'p'", self.result.stderr)
+        after = self.local_row(document, "after_call")
+        self.assertEqual((after["correspondence"], after["proof"]), ("complete", "violated"))
+        caller = self.local_row(document, "caller_storage")
+        self.assertEqual((caller["correspondence"], caller["proof"]),
+                         ("incomplete", "incomplete"))
+
+    def test_local_leak_after_a_lending_call_is_a_violation(self):
+        # A callee without an owning parameter takes no ownership (D17.9, D3.14): the walk
+        # takes its normal return, and the leak after the call is a validated violation.
+        self.entry.write_text(
+            "fn consume(u8@ buf) u64 { return buf.len; }\n"
+            "fn main() i32 {\n"
+            "    u8 mut@ own buf = new(u8, 16);\n"
+            "    consume(buf);\n"
+            "    return 0;\n"
+            "}\n"
+        )
+        self.assertEqual(self.invoke(standard=Path(OPTIONS.std_dir)).returncode, 1)
+        document = self.evidence()
+        self.assertEqual(document["totals"]["violations"], 1)
+        self.assertIn(b"lost ownership of 'buf'", self.result.stderr)
+        row = self.local_row(document, "main")
+        self.assertEqual((row["correspondence"], row["proof"]), ("complete", "violated"))
 
     RAW_CASES = (
         "fn reconstruct() i32 {\n"

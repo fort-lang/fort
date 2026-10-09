@@ -139,8 +139,8 @@ struct context {
     bool mut@ own offset;
     ownership_flow.step mut@ own steps;
     u64 steps_len;
-    // The step of each unknown fort call. The witness walk does not cross one, so a violation
-    // after one on that walk has no validated path.
+    // The step of each fort call that the witness walk cannot cross (returns). A violation
+    // after one has no validated path.
     bool mut@ own barrier;
     u32 mut@ own step_slot;
     ownership_transfer.event_binding mut@ own step_events;
@@ -154,6 +154,9 @@ struct context {
     ownership_api.entity_id result_slot;
     // The stored run (spec/toolchain.md 1.1).
     bool stored;
+    // The local and stored runs: the witness walk crosses a direct fort call without an
+    // owning parameter (returns). The walk of witness_in leaves it unset.
+    bool lending_calls;
     ownership_source_leaves.table leaves;
     // `stack_units[u]`: TL or TA leaf `u` can hold a borrow of local storage (stack_borrows).
     bool mut@ own stack_units;
@@ -879,7 +882,7 @@ fn call_step(context mut* c, u32 block, u32 gap) void {
     c->steps[i].outcomes_complete = true;
 }
 
-// Only slot owners keep their facts. An unknown call can also fail to return (D17.18).
+// Only slot owners keep their facts. A barrier is a call that the witness walk cannot cross.
 fn outside_step(context mut* c, u32 block, u32 gap, bool unknown_call) void {
     u64 i = local_step(c, block, gap, ownership_transfer.action.outside, 0, 0);
     c->barrier[i] = unknown_call;
@@ -1468,7 +1471,8 @@ fn assignment_effects(context mut* c, u32 block, u32 gap, fir.statement* s) void
             // Foreign code can release an own argument at any time after the call.
             if (escaped) { outside_step(c, block, gap, false); }
         } else {
-            outside_step(c, block, gap, true);
+            // A call that the witness walk crosses is no barrier.
+            outside_step(c, block, gap, !returns(c, r));
         }
         if (into_tracked) { write_tracked(c, block, gap, destination.local, r); }
         else if (destination.tracked && destination.indirect) {
@@ -2640,6 +2644,7 @@ fn prepare(context mut* c, fir.func* function, ownership_api.function_id identit
     c->filename = filename;
     c->declaration = declaration;
     c->initialized = true;
+    c->lending_calls = true;
     c->trusted_return[0] = ownership_api.outcome_fact{
         .kind = ownership_api.outcome_kind.function_return, .possible_caller_return = true};
     c->files[0] = ownership_flow.source_file_binding{identity.declaration.module, file,
@@ -2836,6 +2841,19 @@ struct walk {
     consts.cval mut@ own choice;
     fir_flow.bits toward;
     u32 mut@ own distance;
+    // The parameters that the value of each local depends on: each parameter that a write of
+    // the local read. Bit k is the parameter of ordinal k, and bit 63 also each later one. A
+    // TA leaf takes the set of its local. The walk crosses no fort call after a branch on a
+    // parameter (narrow_call).
+    u64 mut@ own depends;
+    // The parameters of each value that a fort callee can read outside its arguments (expose).
+    // A store outside a local that no FIR address names adds its reads. Each call adds its
+    // reads.
+    u64 memory;
+    // The parameters that a branch on the walk read, and those that a crossed fort call read.
+    // The walk stops when the two meet (narrow_call, narrow_branch).
+    u64 decided;
+    u64 crossed;
 }
 
 fn constant_value(consts.cval v) witness_value {
@@ -2890,11 +2908,17 @@ fn walk_start(context mut* c, fir.pred_table* preds, u32 block, walk mut* w) boo
     w->chosen = new(bool, locals);
     w->choice = new(consts.cval, locals);
     w->toward = fir_flow.bits_new(count);
+    w->depends = new(u64, locals);
+    u64 mut ordinal = 0;
     u64 mut n = 0;
     while (n < locals) {
         fir.local* l = fir.local_at(f, cast(n, u32));
         if (l->kind == fir.local_kind.lk_param && !c->taken[n] && choosable(l->ty)) {
             w->values[n] = witness_value{.kind = witness_kind.entry_value, .param = cast(n, u32)};
+        }
+        if (l->kind == fir.local_kind.lk_param) {
+            w->depends[n] = cast(1, u64) << (ordinal < 63 ? ordinal : 63);
+            ordinal += 1;
         }
         n += 1;
     }
@@ -2931,8 +2955,73 @@ fn walk_free(walk mut* w) void {
     del(w->chosen);
     del(w->choice);
     del(w->distance);
+    del(w->depends);
     fir_flow.bits_free(&w->toward);
     fir_flow.bits_free(&w->passed);
+}
+
+// The parameters that place `p` depends on: those of its local. A global or memory behind a
+// pointer gives the walk no value, so no branch of the walk reads one.
+fn place_depends(walk* w, fir.place p) u64 {
+    if (p.base != fir.base_kind.bk_local || cast(p.local, u64) >= w->depends.len) { return 0; }
+    return w->depends[cast(p.local, u64)];
+}
+
+// The parameters that statement `s` reads: each read that fir.stmt_read reports, index locals
+// included.
+fn statement_depends(walk* w, fir.statement* s) u64 {
+    fir.read mut got = fir.read{};
+    u64 mut out = 0;
+    u32 mut k = 0;
+    while (fir.stmt_read(w->owner->function, s, k, &got)) {
+        out = out | place_depends(w, got.place);
+        k += 1;
+    }
+    return out;
+}
+
+// The parameters that terminator `t` reads: its condition and each other operand or place.
+fn terminator_depends(walk* w, fir.terminator* t) u64 {
+    fir.read mut got = fir.read{};
+    u64 mut out = 0;
+    u32 mut k = 0;
+    while (fir.term_read(w->owner->function, t, k, &got)) {
+        out = out | place_depends(w, got.place);
+        k += 1;
+    }
+    return out;
+}
+
+// Adds to `memory` the parameters that statement `s` makes readable to a later fort callee.
+// `read` holds the parameters that `s` reads. A store outside a local that no FIR address
+// names can reach a callee through a pointer, a view or a global. A call can store what it
+// reads, an extern call too. A store into a local that no FIR address names reaches a callee
+// only as an argument, which `read` of that call holds. The walk knows no value of a local
+// that an address names (place_value), so the address of a parameter needs no rule.
+fn expose(walk mut* w, fir.statement* s, u64 read) void {
+    context* c = w->owner;
+    bool local_only = s->place.base == fir.base_kind.bk_local &&
+        names_storage(c->function, s->place, fir.rvalue_kind.rv_addr) &&
+        !c->taken[cast(s->place.local, u64)];
+    if (!local_only || s->value.kind == fir.rvalue_kind.rv_call) {
+        w->memory = w->memory | read;
+    }
+}
+
+// A crossed fort call reads `memory`, which holds the reads of the call, because expose runs
+// first. The walk assumes that the callee returns. So it takes no branch on a parameter that
+// the call can read: the callee can abort for those values (fir.md 14.1, A06). An argument
+// also depends on each earlier branch, through the writes that the branch skipped. So false
+// when an earlier branch read any parameter.
+fn narrow_call(walk mut* w) bool {
+    w->crossed = w->crossed | w->memory;
+    return w->decided == 0;
+}
+
+// A branch reads `read`. False when a crossed fort call read one of those parameters.
+fn narrow_branch(walk mut* w, u64 read) bool {
+    w->decided = w->decided | read;
+    return (w->crossed & w->decided) == 0;
 }
 
 // Whether the integer `x` fits each integer type of the set `fits` (witness_value.fits).
@@ -3238,11 +3327,23 @@ fn rvalue_value(walk* w, fir.statement* s) witness_value {
 }
 
 // Whether the walk can cross a call. An extern declaration is trusted to return as its
-// signature says (D17.13). A fort callee can fail to return, and local proof has no summary.
-fn returns(fir.func* f, fir.rvalue r) bool {
-    if (r.callee != fir.callee_kind.cl_extern) { return false; }
-    types.node* t = fir.callee_type(f, r);
-    return t != null && !t->is_noreturn;
+// signature says (D17.13). In the local and stored runs, a direct fort callee without an
+// owning parameter takes no ownership from this body: a parameter without `own` cannot own
+// its argument (D17.9, D3.14). The walk then takes the normal return that an unknown fort
+// outcome keeps (D17.14). A noreturn type proves that the call does not return. A call
+// through a value names no callee.
+fn returns(context* c, fir.rvalue r) bool {
+    if (r.callee == fir.callee_kind.cl_value) { return false; }
+    types.node* t = fir.callee_type(c->function, r);
+    if (t == null || t->is_noreturn) { return false; }
+    if (r.callee == fir.callee_kind.cl_extern) { return true; }
+    if (!c->lending_calls) { return false; }
+    u64 mut k = 0;
+    while (k < t->params.len) {
+        if (owning_type(t->params[k])) { return false; }
+        k += 1;
+    }
+    return true;
 }
 
 // Applies one statement to the walk. False when the walk cannot cross it.
@@ -3308,7 +3409,19 @@ fn walk_statement(walk mut* w, fir.statement* s) bool {
         return true;
     }
     if (s->kind != fir.stmt_kind.st_assign) { return true; }
-    if (s->value.kind == fir.rvalue_kind.rv_call && !returns(f, s->value)) { return false; }
+    if (s->value.kind == fir.rvalue_kind.rv_call && !returns(w->owner, s->value)) {
+        return false;
+    }
+    u64 read = statement_depends(w, s);
+    expose(w, s, read);
+    if (s->value.kind == fir.rvalue_kind.rv_call && s->value.callee == fir.callee_kind.cl_fn &&
+        !narrow_call(w)) { return false; }
+    // The written value depends on what the statement reads. A write into a part of a local
+    // keeps the parameters of the rest.
+    if (s->place.base == fir.base_kind.bk_local) {
+        u64 at = cast(s->place.local, u64);
+        w->depends[at] = (s->place.proj_len == 0 ? 0 : w->depends[at]) | read;
+    }
     if (walk_aggregate(w, s)) { return true; }
     witness_value v = s->value.kind == fir.rvalue_kind.rv_call ? witness_value{} :
         rvalue_value(w, s);
@@ -3486,10 +3599,10 @@ enum trap {
 string EMPTY_ELEMENT = "empty reference has no element";
 
 /// Whether a concrete path reaches position `gap` of `block` from the entry (toolchain 4.2).
-/// The path crosses no back edge and no fort call, and each condition on it evaluates or
-/// takes a parameter value that no earlier condition fixed. An unknown condition gives no
-/// witness. A check that traps ends the path. It reaches the operation only when the trap is
-/// the event `kind` names and the operation is the statement that the check guards.
+/// The path crosses no back edge and only the calls of `returns`, and each condition on it
+/// evaluates or takes a parameter value that no earlier condition fixed. An unknown condition
+/// gives no witness. A check that traps ends the path. It reaches the operation only when the
+/// trap is the event `kind` names and the operation is the statement that the check guards.
 fn witness(context mut* c, fir.pred_table* preds, u32 block, u32 gap, trap kind) bool {
     walk mut w = walk{};
     defer walk_free(&w);
@@ -3519,6 +3632,10 @@ fn walk_to(context mut* c, fir.pred_table* preds, u32 block, u32 gap, trap kind,
         if (!charge_work(c, at)) { return false; }
         fir.terminator* t = &fir.block_at(f, at)->term;
         u32 mut next = 0;
+        // A switch or a check is a branch: it reads its terminator (narrow_branch).
+        if (t->kind != fir.term_kind.tk_goto && !narrow_branch(w, terminator_depends(w, t))) {
+            return false;
+        }
         if (t->kind == fir.term_kind.tk_goto) {
             next = t->target;
         } else if (t->kind == fir.term_kind.tk_switch) {

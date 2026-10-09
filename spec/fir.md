@@ -1617,6 +1617,33 @@ Report cannot prove completed cleanup at that return; note the unresolved recurs
 Missing return entries prove no abort or divergence.
 A recursive component that reaches a complete no-return proof can remove the return continuation.
 It must still apply any proved normal-process-termination requirements.
+This verdict holds when a parameter of the callee can own a value, or when the call goes through
+a value. A witness crosses a direct call of a fort callee that has a returning type and no
+parameter that can own a value: it assumes that the callee returns (D17.18). After that call, a
+caller return that lacks cleanup of A is a lost owner, a violation, when A's owner is a local
+slot or a leaf of a local struct or array, and no FIR address names that storage.
+The witness takes no branch after the call whose condition depends on an entry value that the
+call can read (D17.18). The call can read an entry value through an argument that depends on
+it. It can also read one through a value that the caller stored before the call, except in a
+local whose storage no FIR address names. An argument of an earlier call, an extern call too,
+counts as stored. After a branch whose condition depends on any entry value, the witness
+crosses no fort call. Such a branch or call leaves the event incomplete proof. So
+`require(n < 100)` before `if (n >= 100) { return; }` gives incomplete proof at that return.
+So does a validator that reads n through a pointer, a view or a global that the caller wrote.
+A callee that does not return for the inputs that it gets on the witness path still makes a
+violation after its call false. Give a function that never returns a noreturn type; the
+compiler does not check this.
+Amended 2026-10-08: A06 made each leak after an unresolved fort call incomplete proof. The user
+ruled that a callee without a parameter that can own a value cannot release or transfer A when
+A's owner is a local slot or a leaf of a local struct or array, and no FIR address names that
+storage (D17.9, D3.14). So the obligation of A stays exact across the call. The analysis
+follows no other owner across the call. So `release(&buf)` with a `u8 mut@ own mut*`
+parameter, a release through a `holder mut*` parameter of an owner in the heap, and a release
+of a global owner give no such witness. A callee that never returns normally makes the
+reported violation false. The cost is a false violation, never a missed one.
+Amended 2026-10-09: The user ruled to narrow the walk, in place of accepting a false violation
+for a callee that aborts for some values only. The witness takes no branch on an entry value
+that a crossed call can read, through its arguments or through a value that the caller stored.
 
 A07: Mixed outcomes. The caller owns A. Under c, a complete target summary returns without change.
 Under !c, another complete target summary aborts. A deferred del(p) belongs to caller return.
