@@ -350,7 +350,10 @@ without a rewrite.
   keeps it in `build/<Host>/<preset>/bootstrap/CMakeFiles`) and build again. A `git checkout`
   between commits gives the same stale mtime: on 2026-10-08, 3 of 6 per-commit builds of one
   branch ran no stage build until the guest ran `touch src/fort/*.ft` before `ninja`; the binary
-  `md5sum` of each build shows which commits built. A mutation experiment
+  `md5sum` of each build shows which commits built. A native Darwin build has the same trap
+  when an edit lands while ninja builds: on 2026-10-08 `ownership_limits.ft` changed during a
+  background build, and each later `cmake --build` published the binary of the old text
+  until `touch src/fort/ownership_limits.ft`. A mutation experiment
   -- break a rule in the compiler, watch the test go red, restore it, watch it go green -- runs into
   this more than anything else, because every step rewrites a file the last step just built from,
   and a stale mtime makes the next step report the previous binary's colours. Edit and restore
