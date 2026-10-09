@@ -19,6 +19,10 @@ import ownership_source_env;
 import ownership_source_live;
 import std.strbuf;
 
+// A body of this many scalar declarations exhausts its liveness W bound (`spec/fir.md` 14.1).
+// Its liveness work grows with the square of the declarations, and its bound with their count.
+u64 REFUSED_LOCALS = 4000;
+
 fn direct_reads_writes_moves_branches_and_loops() void {
     ownership_source_env.env mut e = ownership_source_env.env{};
     ownership_source_env.open(&e);
@@ -173,7 +177,10 @@ fn fort_calls_remain_incomplete_and_extern_calls_keep_trust() void {
     assert(extern_call->liveness_solver == ownership_source.status.complete);
 }
 
-fn actual_source_exhausts_the_production_service_ledger() void {
+// A body of 400 scalar declarations needs 151205 W units of liveness. Its FIR size is 1201.
+// The bound 65536 + 64 * 1201 = 142400 refused it at the store on line 201. The production
+// bound 65536 + 1024 * 1201 = 1295360 completes it (`spec/fir.md` 14.1).
+fn actual_source_completes_under_the_production_scale() void {
     ownership_source_env.env mut e = ownership_source_env.env{};
     ownership_source_env.open(&e);
     defer ownership_source_env.close(&e);
@@ -191,18 +198,44 @@ fn actual_source_exhausts_the_production_service_ledger() void {
     assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
     ownership_source.body mut* row = ownership_source_env.find(&e, "main", "many_locals");
     ownership_source.analyze(&e.source);
-    // One body is one computation. Its W bound follows its FIR size, 1200 stores and one block.
-    assert(row->live.fir_size == ownership_limits.fir_size(&row->function));
     assert(row->live.fir_size == 1201);
+    assert(row->live.events.budget.bounds.w == 1295360);
+    assert(row->live.events.budget.used.w == 151205);
+    assert(row->live.events.budget.used.w > 65536 + 64 * 1201);
+    assert(!row->live.first_refusal.terminal.present);
+    assert(row->liveness_solver == ownership_source.status.complete);
+}
+
+fn actual_source_exhausts_the_production_service_ledger() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    strbuf.append(&text, "fn many_locals() void {\n");
+    u64 mut i = 0;
+    while (i < REFUSED_LOCALS) {
+        strbuf.append(&text, "i32 local");
+        strbuf.append_u64(&text, i);
+        strbuf.append(&text, " = 0;\n");
+        i += 1;
+    }
+    strbuf.append(&text, "}\n");
+    assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+    ownership_source.body mut* row = ownership_source_env.find(&e, "main", "many_locals");
+    ownership_source.analyze(&e.source);
+    // One body is one computation. Its W bound follows its FIR size, 12000 stores and one block.
+    assert(row->live.fir_size == ownership_limits.fir_size(&row->function));
+    assert(row->live.fir_size == 12001);
     ownership_api.limit_table limits = ownership_limits.computation(row->live.fir_size);
-    assert(limits.w == ownership_limits.PRODUCTION_W + ownership_limits.PRODUCTION_W_SCALE * 1201);
+    assert(limits.w == ownership_limits.PRODUCTION_W + ownership_limits.PRODUCTION_W_SCALE * 12001);
     assert(row->live.events.budget.bounds.w == limits.w);
     assert(row->live.events.budget.used.w == limits.w);
     assert(row->liveness_solver == ownership_source.status.incomplete);
     assert(row->live.first_refusal.terminal.reason == ownership_api.incomplete_reason.work_limit);
     assert(row->live.first_refusal.terminal.source.filename_present);
-    // Under the bound of 1201 FIR units the liveness work runs out at the store on line 201.
-    assert(row->live.first_refusal.terminal.source.line == 201);
+    // Under the bound of 12001 FIR units the liveness work runs out at the store on line 2763.
+    assert(row->live.first_refusal.terminal.source.line == 2763);
     assert(row->live.first_refusal.terminal.source.file == row->source.file);
     ownership_api.proof_status first = row->live.first_refusal;
     ownership_api.charge_result again = ownership_api.charge_work(&row->live.services,
@@ -438,7 +471,7 @@ fn teardown_releases_success_failure_and_refusal_storage() void {
     defer strbuf.free(&refused_source);
     strbuf.append(&refused_source, "fn refused() void {\n");
     u64 mut local = 0;
-    while (local < 400) {
+    while (local < REFUSED_LOCALS) {
         strbuf.append(&refused_source, "i32 local");
         strbuf.append_u64(&refused_source, local);
         strbuf.append(&refused_source, " = 0;\n");
@@ -496,6 +529,7 @@ fn main() i32 {
     mixed_targets_preserve_fort_effect_obligations();
     unresolved_function_value_preserves_fort_targets();
     println("calls ok");
+    actual_source_completes_under_the_production_scale();
     actual_source_exhausts_the_production_service_ledger();
     private_query_refusal_preserves_its_meter_and_source();
     recursive_members_keep_their_own_ledgers();

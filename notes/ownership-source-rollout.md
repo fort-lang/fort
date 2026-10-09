@@ -126,6 +126,7 @@ Keep known fort facts across the call. Do not infer that foreign code has no eff
 Missing fort-call summaries, indirect correspondence, and unknown fort effects remain incomplete.
 Preserve the first budget refusal and its location. The FIR-size W rule of `spec/fir.md` 14.1
 is the one permitted limit change. Its W bound is not a limit increase. Raise no other limit.
+The user rules W_scale 1024 in place of 64 on 2026-10-07. That ruling sets the W function.
 Use production budget and event services. Do not use permissive test callbacks.
 
 Graph construction uses the private W ledger of the graph build.
