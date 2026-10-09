@@ -437,7 +437,7 @@ fn report_limit_message(u64 bound, strbuf.str_buf mut* message) void {
 
 // The text of the error of a validated violation, or of a raw failure without a witness. Its
 // note is the violation text. A leaf of a named aggregate reads `b.p` or `a[1]`: flow run
-// `run` names it. A raw record names a whole local, so its leaf is WHOLE.
+// `run` names it. A raw record names a whole local, so its `run` is null (`record_run`).
 fn violation_message(ownership_source_local.context* run, ownership_source_local.violation* v,
     strbuf.str_buf mut* message) void {
     if (v->kind == ownership_api.event_kind.incomplete_proof) {
@@ -456,6 +456,18 @@ fn violation_message(ownership_source_local.context* run, ownership_source_local
     if (v->kind == ownership_api.event_kind.incomplete_proof) {
         strbuf.append(message, " designates the accessed storage");
     }
+}
+
+// The flow run whose leaves name the records of list `from`: 0 local, 1 stored borrows. A raw
+// record (lists 2 and 3) names a whole local and no leaf, so it has no run.
+fn record_run(ownership_source.body* row, u64 from, ownership_source_local.violation* v)
+    ownership_source_local.context* {
+    if (from == 0) { return &row->local; }
+    if (from == 1) { return &row->stored; }
+    if (v->leaf != ownership_source_local.WHOLE) {
+        panic("ownership_report.record_run: a raw record names a leaf");
+    }
+    return null;
 }
 
 // Charges one rendered record to the ledger of its list: 0 local, 1 stored borrows, 2 and 3
@@ -493,7 +505,7 @@ fn next_record(ownership_source.body* row, u64 mut@ cursor, u64 mut* from)
         } else if (list == 3 && row->raw.solved && at < row->raw.unproved_len) {
             item = &row->raw.unproved[at];
         }
-        if (item != null && (best == null || ownership_source_raw.before(item, best))) {
+        if (item != null && (best == null || ownership_source_local.before(item, best))) {
             best = item;
             *from = list;
         }
@@ -524,7 +536,7 @@ fn violations(ownership_source.context mut* c, diag.sink mut* diagnostics, strin
             }
             strbuf.str_buf mut message = strbuf.create();
             defer strbuf.free(&message);
-            violation_message(from == 1 ? &row->stored : &row->local, v, &message);
+            violation_message(record_run(row, from, v), v, &message);
             diag.loc at = location(c, v->source, entry);
             diag.error(diagnostics, at, strbuf.view(&message));
             diag.note(diagnostics, at, v->text);
@@ -554,8 +566,8 @@ fn diagnose(ownership_source.context mut* c, diag.sink mut* diagnostics, string 
              why.limit.category == ownership_api.limit_category.v)) {
             if (!diagnostic(c, diagnostics, entry, why, row)) { return; }
         }
-        if (!local_budget(c, diagnostics, entry, row, row->local.first_refusal, "local",
-            first)) {
+        if (!ledger_budget(c, diagnostics, entry, row, LOCAL, row->local.first_refusal,
+            "local", first)) {
             return;
         }
         // Two ledgers that refuse one operation for one category give one error (4.2).
@@ -564,12 +576,13 @@ fn diagnose(ownership_source.context mut* c, diag.sink mut* diagnostics, string 
         bool repeated = primary.present && second.present && primary.limit.present &&
             second.limit.present && primary.limit.category == second.limit.category &&
             ownership_keys.operation(primary.operation, second.operation) == 0;
-        if (!repeated && !local_budget(c, diagnostics, entry, row,
+        if (!repeated && !ledger_budget(c, diagnostics, entry, row, LOCAL,
             row->local.classify_refusal, "local classification", first)) {
             return;
         }
         if (!stored_budgets(c, diagnostics, entry, row, first)) { return; }
-        if (!local_budget(c, diagnostics, entry, row, row->raw.first_refusal, "raw", first)) {
+        if (!ledger_budget(c, diagnostics, entry, row, RAW, row->raw.first_refusal, "raw",
+            first)) {
             return;
         }
         i += 1;
@@ -649,20 +662,11 @@ fn same_reason(reason a, reason b) bool {
         a.limit.used == b.limit.used && a.limit.bound == b.limit.bound;
 }
 
-// A W, E or V refusal of a local ledger is a budget error even when no later use needs its
-// result (fir.md 14.1). The error charges one V unit of the local ledger. A V refusal renders
-// as it is. `label` names the ledger in the error: "local", "local classification" or "raw";
-// a "raw" error charges the raw ledger.
-fn local_budget(ownership_source.context mut* c, diag.sink mut* diagnostics, string entry,
-    ownership_source.body mut* row, ownership_api.proof_status refusal, string label,
-    reason shown) bool {
-    return ledger_budget(c, diagnostics, entry, row, label == "raw" ? RAW : LOCAL, refusal,
-        label, shown);
-}
-
 // The budget error of one ledger of the analysis of `stage`, which charges the V bound of that
 // analysis. `stage` names the analysis row, so a refusal that is already the shown reason is
-// no second error.
+// no second error. `label` names the ledger in the error, for example "local classification".
+// A W, E or V refusal is a budget error even when no later use needs its result (fir.md 14.1).
+// A V refusal renders as it is.
 fn ledger_budget(ownership_source.context mut* c, diag.sink mut* diagnostics, string entry,
     ownership_source.body mut* row, u64 stage, ownership_api.proof_status refusal, string label,
     reason shown) bool {
