@@ -140,7 +140,6 @@ fn closure() void {
     env.close(&c);
     c = env.closure{};
     env.open_with(&c, lines[..], env.runtime.no_shutdown);
-    defer env.close(&c);
     assert(ownership_report.closure_status(&c.e.source, ownership_report.PROCESS_EXIT) ==
         "incomplete");
     strbuf.str_buf mut out = strbuf.create();
@@ -150,6 +149,22 @@ fn closure() void {
     contains(&out, "\"correspondence\":\"complete\",\"proof\":\"incomplete\",");
     contains(&out, "\"first_incomplete\":{\"stage\":\"process_exit\",");
     contains(&out, "\"code\":\"missing_boundary\"");
+    env.close(&c);
+    // Each body proves its obligations, and no body empties the runtime owner: the boundary
+    // alone keeps the closure incomplete. A library names the missing cleanup.
+    c = env.closure{};
+    string[1] library = {"fn helper() u64 { return 1; }"};
+    env.open_with(&c, library[..], env.runtime.no_cleanup);
+    u64 mut i = 0;
+    while (i < c.e.source.bodies.len) {
+        assert(ownership_report.analysis_status(&c.e.source.bodies[i],
+            ownership_report.PROCESS_EXIT, 2) == "complete");
+        i += 1;
+    }
+    assert(ownership_report.closure_status(&c.e.source, ownership_report.PROCESS_EXIT) ==
+        "incomplete");
+    assert(c.e.source.exit.boundary_unproved_len == 1);
+    assert(c.e.source.exit.boundary_unproved[0].text == ownership_source_exit.BOUNDARY_LIBRARY);
     println("closure ok");
 }
 

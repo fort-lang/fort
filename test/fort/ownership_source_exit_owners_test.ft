@@ -1,0 +1,127 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| parameters ok
+//| results ok
+//| storage ok
+/// Holds the owners of the frame that a fort call suspends: parameters, the result slot, owning
+/// aggregates and storage ends (D17.19 "residual allocation obligations in suspended caller
+/// storage").
+import ownership_exit_source_env as env;
+import ownership_source_exit;
+
+// A by-value owning parameter comes from the caller and can hold an allocation. A release or a
+// move before the call empties it. The line of each case is its line in `lines`, from 1.
+fn parameters() void {
+    env.closure mut c = env.closure{};
+    string[24] lines = {
+        "struct pair { u8 mut@ own a; u8 mut@ own b; }",
+        "fn helper() void {}",
+        "fn keep(u8 mut@ own p) void { del(p); }",
+        "fn moved_first(u8 mut@ own p) void {",
+        "    keep(move(p));",
+        "    helper();",
+        "}",
+        "fn released_first(pair q) void {",
+        "    del(q.a);",
+        "    helper();",
+        "    del(q.b);",
+        "}",
+        "fn moved_whole(pair q) pair {",
+        "    pair r = move(q);",
+        "    return r;",
+        "}",
+        "fn borrowed(u8 mut@ p) void {",
+        "    helper();",
+        "}",
+        "fn pointer_to_owner(u8 mut@ own mut* p) void {",
+        "    helper();",
+        "}",
+        "fn main() i32 { return 0; }",
+        "fn none() void {}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    // The argument moves before the callee runs, so the frame holds nothing at either call.
+    env.proved(&c, "moved_first");
+    // One field of an owning aggregate stays live over the call.
+    env.outside(&c, "released_first", ownership_source_exit.missing.suspended_owner, 10);
+    env.proved(&c, "moved_whole");
+    // A borrowed parameter and a pointer to an owner hold no obligation of this frame.
+    env.proved(&c, "borrowed");
+    env.proved(&c, "pointer_to_owner");
+    env.finish(&c, "parameters ok");
+}
+
+// The result slot `_0` is an owner of the frame once the body writes it: a deferred call after
+// the write suspends it.
+fn results() void {
+    env.closure mut c = env.closure{};
+    string[17] lines = {
+        "fn helper() void {}",
+        "fn written_last() u8 mut@ own {",
+        "    helper();",
+        "    return new(u8, 1);",
+        "}",
+        "fn deferred_call() u8 mut@ own {",
+        "    defer helper();",
+        "    return new(u8, 1);",
+        "}",
+        "fn built_then_called() u8 mut@ own {",
+        "    u8 mut@ own p = new(u8, 1);",
+        "    helper();",
+        "    return p;",
+        "}",
+        "fn main() i32 { return 0; }",
+        "fn none() void {}",
+        "fn other() void {}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    env.proved(&c, "written_last");
+    env.outside(&c, "deferred_call", ownership_source_exit.missing.suspended_owner, 7);
+    env.outside(&c, "built_then_called", ownership_source_exit.missing.suspended_owner, 12);
+    env.finish(&c, "results ok");
+}
+
+// A storage end empties the owner of the frame: the local analysis checks its residual there
+// (D17.14). A scope that ends before the call leaves nothing to suspend.
+fn storage() void {
+    env.closure mut c = env.closure{};
+    string[19] lines = {
+        "fn helper() void {}",
+        "fn scoped() void {",
+        "    {",
+        "        u8 mut@ own p = new(u8, 1);",
+        "        del(p);",
+        "    }",
+        "    helper();",
+        "}",
+        "fn branch_owner(bool b) void {",
+        "    if (b) {",
+        "        u8 mut@ own p = new(u8, 1);",
+        "        helper();",
+        "        del(p);",
+        "    }",
+        "    helper();",
+        "}",
+        "fn main() i32 { return 0; }",
+        "fn none() void {}",
+        "fn other() void {}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    env.proved(&c, "scoped");
+    // The first call holds `p`; the second call follows its storage end.
+    env.outside(&c, "branch_owner", ownership_source_exit.missing.suspended_owner, 12);
+    assert(env.body(&c, "branch_owner")->suspended_calls == 1);
+    assert(env.body(&c, "branch_owner")->fort_calls == 2);
+    env.finish(&c, "storage ok");
+}
+
+fn main() i32 {
+    parameters();
+    results();
+    storage();
+    return 0;
+}

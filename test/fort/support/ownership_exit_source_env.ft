@@ -24,6 +24,8 @@ enum runtime {
     no_shutdown,
     // exit flushes and calls extern exit, with no release.
     exit_without_cleanup,
+    // std.rt has the argument owner and no shutdown and no exit: nothing empties it.
+    no_cleanup,
 }
 
 struct closure {
@@ -31,6 +33,9 @@ struct closure {
     strbuf.str_buf text;
     strbuf.str_buf rt;
     strbuf.str_buf libc;
+    // A sandbox module beside `main` for the next prepare: its path and its text.
+    string extra;
+    string extra_text;
     // Mismatches print and count, so one run lists each wrong case.
     u64 mismatches;
 }
@@ -62,7 +67,7 @@ fn write_runtime(closure mut* c, runtime kind) void {
     }
     if (kind == runtime.exit_without_cleanup || kind == runtime.no_shutdown) {
         line(b, "fn exit(i32 status) noreturn { flush_all(); libc.exit(status); }");
-    } else {
+    } else if (kind != runtime.no_cleanup) {
         line(b, "fn exit(i32 status) noreturn { shutdown(); libc.exit(status); }");
     }
 }
@@ -70,6 +75,24 @@ fn write_runtime(closure mut* c, runtime kind) void {
 /// Checks and analyzes `lines` as module `main`, over the runtime `kind`.
 fn open_with(closure mut* c, string@ lines, runtime kind) void {
     prepare_with(c, lines, kind);
+    ownership_source.analyze(&c->e.source);
+}
+
+/// Checks and analyzes `lines` as module `main`, which can import the sandbox module `rel`
+/// written from `module_lines`.
+fn open_with_module(closure mut* c, string rel, string@ module_lines, string@ lines) void {
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut i = 0;
+    while (i < module_lines.len) {
+        line(&text, module_lines[i]);
+        i += 1;
+    }
+    c->extra = rel;
+    c->extra_text = strbuf.view(&text);
+    prepare_with(c, lines, runtime.release_last);
+    c->extra = "";
+    c->extra_text = "";
     ownership_source.analyze(&c->e.source);
 }
 
@@ -89,6 +112,7 @@ fn prepare_with(closure mut* c, string@ lines, runtime kind) void {
     write_runtime(c, kind);
     check_env.add(&c->e.checked, "std/rt.ft", strbuf.view(&c->rt));
     check_env.add(&c->e.checked, "std/libc.ft", strbuf.view(&c->libc));
+    if (c->extra.len > 0) { check_env.add(&c->e.checked, c->extra, c->extra_text); }
     if (!ownership_source_env.prepare(&c->e, strbuf.view(&c->text))) {
         eprintln(strbuf.view(&c->text));
         panic("ownership_exit_source_env: the program does not check");
