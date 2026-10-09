@@ -6,7 +6,7 @@
 //| evidence classes
 //| one event for each operation and owner
 //| a precision stop records its event
-//| a call that can fail to return clears the witness
+//| a call that can fail to return keeps the witness
 //| heap events ok
 /// Checks the events of the heap proof (`spec/toolchain.md` 4.2): the owner that each names, its
 /// position, its evidence class, and its key.
@@ -212,11 +212,11 @@ fn stops() void {
 }
 
 // A branch gives its witness back where its paths rejoin only if the branch itself was reached
-// with a witness at its terminator. A call before the branch that can fail to return clears it
-// (`spec/toolchain.md` 4.2).
+// with a witness at its terminator. A call before the branch keeps it: the witness assumes that
+// the callee returns, and the event names the call (D17.18, `spec/toolchain.md` 4.2).
 fn exit_witness() void {
-    println("a call that can fail to return clears the witness");
-    string[8] text = {
+    println("a call that can fail to return keeps the witness");
+    string[11] text = {
         "struct node { node mut* own next; u64 count; }",
         "fn spin(u64 k) void { while (k != 0) { } }",
         "fn after_spin(bool flag) u64 { node mut* own a = new(node); node* v = a; del(a);",
@@ -224,23 +224,36 @@ fn exit_witness() void {
         "    return v->count + x; }",
         "fn before_spin(bool flag) u64 { node mut* own a = new(node); node* v = a; del(a);",
         "    u64 mut x = 0; if (flag) { x = 1; } else { x = 2; } return v->count + x; }",
+        "fn after_value(fn () void g, bool flag) u64 { node mut* own a = new(node); node* v = a;",
+        "    del(a); g(); u64 mut x = 0; if (flag) { x = 1; } else { x = 2; }",
+        "    return v->count + x; }",
         "fn unused() void { }",
     };
-    string[3] bodies = {"spin", "after_spin", "before_spin"};
+    string[4] bodies = {"spin", "after_spin", "before_spin", "after_value"};
     ownership_heap_env.closure mut c = ownership_heap_env.closure{};
     defer ownership_heap_env.close(&c);
     ownership_heap_env.run(&c, text[..], bodies[..]);
     assert(ownership_heap_env.proved(&c, "spin"));
     assert(!ownership_heap_env.summary(&c, "spin")->witness);
-    // `spin` can loop forever, so the read after the branch has no validated path.
-    assert(ownership_heap_env.unproved(&c, "after_spin",
-        ownership_api.incomplete_reason.missing_path));
-    assert(ownership_heap_env.saw(&c, "after_spin", ownership_api.event_kind.invalid_use,
-        ownership_api.evidence_kind.unconditional) == 0);
+    assert(ownership_heap_env.failed(&c, "after_spin"));
+    ownership_heap_env.event_row spun = ownership_heap_env.first(&c, "after_spin");
+    // `spin` can loop forever. The witness assumes that it returns, and the event names the
+    // call (D17.18): the branch after it gives its witness back.
+    assert(spun.kind == ownership_api.event_kind.invalid_use);
+    assert(spun.evidence == ownership_api.evidence_kind.unconditional);
+    assert(spun.line == 5 && ownership_heap_env.assumes(&spun, 1, 4,
+        "this path needs 'spin' to return here"));
     // With no call before it, the branch gives its witness back.
     assert(ownership_heap_env.failed(&c, "before_spin"));
     assert(ownership_heap_env.first(&c, "before_spin").evidence ==
         ownership_api.evidence_kind.unconditional);
+    // A call of a function value in the block of the branch clears the witness (A06), so the
+    // rejoin gives back the witness of the terminator, not the one of the block entry.
+    assert(!ownership_heap_env.failed(&c, "after_value"));
+    assert(ownership_heap_env.saw(&c, "after_value", ownership_api.event_kind.invalid_use,
+        ownership_api.evidence_kind.unconditional) == 0);
+    assert(ownership_heap_env.first(&c, "after_value").kind ==
+        ownership_api.event_kind.incomplete_proof);
 }
 
 fn main() i32 {

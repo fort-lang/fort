@@ -7,6 +7,7 @@
 //| recursive calls need strict parts and a covered return
 //| unknown effects keep obligations unproved
 //| views at a call
+//| a released root keeps no obligation
 //| aggregates and pointers to owners
 //| heap calls ok
 /// Checks heap summaries at calls (D17.16, D17.18, `spec/fir.md` 14 Calls).
@@ -269,6 +270,40 @@ fn unknown_effects() void {
     // A call of a function value is unknown to this module.
     assert(ownership_heap_env.unproved(&c, "fnptr",
         ownership_api.incomplete_reason.unknown_effect));
+    unknown_returns();
+}
+
+// An unknown fort callee can fail to return, so a loss after it has no validated witness: the
+// cleanup stays unproved (`spec/fir.md` 14.1, A06). A known callee keeps the witness. An extern
+// call returns (D17.13), so it keeps the witness too.
+fn unknown_returns() void {
+    string[9] text = {
+        "struct node { node mut* own next; i32 v; }",
+        "extern fn ext() void;",
+        "fn noop() void { }",
+        "fn lossy() void { node mut* own x = new(node); }",
+        "fn value_call(fn () void g) void { node mut* own a = new(node); g(); }",
+        "fn fort_call() void { node mut* own a = new(node); lossy(); }",
+        "fn known_call() void { node mut* own a = new(node); noop(); }",
+        "fn extern_call() void { node mut* own a = new(node); ext(); }",
+        "fn released(fn () void g) void { node mut* own a = new(node); g(); del(a); }",
+    };
+    string[7] names = {"noop", "lossy", "value_call", "fort_call", "known_call",
+        "extern_call", "released"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    assert(ownership_heap_env.unproved(&c, "value_call",
+        ownership_api.incomplete_reason.missing_path));
+    assert(ownership_heap_env.saw(&c, "value_call", ownership_api.event_kind.lost_ownership,
+        ownership_api.evidence_kind.validated_path) == 0);
+    // `lossy` loses its own owner, so its summary has no proof and its caller cannot use it.
+    assert(ownership_heap_env.failed(&c, "lossy"));
+    assert(ownership_heap_env.unproved(&c, "fort_call",
+        ownership_api.incomplete_reason.missing_path));
+    assert(ownership_heap_env.failed(&c, "known_call"));
+    assert(ownership_heap_env.failed(&c, "extern_call"));
+    assert(!ownership_heap_env.failed(&c, "released"));
 }
 
 // A callee that reads storage that an argument designates needs that storage live at the call.
@@ -336,6 +371,57 @@ fn views_at_call() void {
     assert(ownership_heap_env.failed(&c, "returned_escape"));
 }
 
+// A callee that releases its argument and returns the tail moves the members of the argument
+// into the result. An address of a field of the argument cell stays in the caller state after
+// the call, but the released root holds no obligation (D17.14). Without that rule each body
+// below that calls `keep_tail` loses the root with a definite event.
+fn released_root() void {
+    println("a released root keeps no obligation");
+    string[13] text = {
+        "struct node { node mut* own next; i32 v; }",
+        "fn keep_tail(node mut* own n) node mut* own { node mut* own t = move(n->next);",
+        "    del(n); return move(t); }",
+        "fn tail_freed() void { node mut* own a = new(node); a->next = new(node);",
+        "    node mut* own t = keep_tail(move(a)); del(t); }",
+        "fn tail_read() i32 { node mut* own a = new(node); a->next = new(node);",
+        "    node mut* own t = keep_tail(move(a)); i32 r = t->v; del(t->next); del(t); return r; }",
+        "fn tail_moved() void { node mut* own a = new(node); node mut* own b = new(node);",
+        "    a->next = move(b); node mut* own t = keep_tail(move(a)); del(t->next); del(t); }",
+        "fn tail_kept() void { node mut* own a = new(node); a->next = new(node);",
+        "    node mut* own t = keep_tail(move(a)); }",
+        "fn root_kept() node mut* own { node mut* own a = new(node); a->next = new(node);",
+        "    return move(a); }",
+    };
+    string[6] names = {"keep_tail", "tail_freed", "tail_read", "tail_moved", "tail_kept",
+        "root_kept"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    assert(ownership_heap_env.proved(&c, "keep_tail"));
+    // The shape of the returned tail is unknown, so each release of it loses a possible
+    // member: incomplete proof, and no violation.
+    assert(ownership_heap_env.unproved(&c, "tail_freed",
+        ownership_api.incomplete_reason.missing_path));
+    assert(ownership_heap_env.unproved(&c, "tail_read",
+        ownership_api.incomplete_reason.missing_path));
+    assert(ownership_heap_env.unproved(&c, "tail_moved",
+        ownership_api.incomplete_reason.missing_path));
+    assert(ownership_heap_env.events(&c, "tail_freed") == 1);
+    assert(ownership_heap_env.saw(&c, "tail_read", ownership_api.event_kind.lost_ownership,
+        ownership_api.evidence_kind.unconditional) == 0);
+    assert(ownership_heap_env.saw(&c, "tail_moved", ownership_api.event_kind.lost_ownership,
+        ownership_api.evidence_kind.unconditional) == 0);
+    assert(ownership_heap_env.first_text(&c, "tail_freed") == "t->next");
+    assert(ownership_heap_env.first_text(&c, "tail_read") == "t->next->next");
+    assert(ownership_heap_env.first_text(&c, "tail_moved") == "t->next->next");
+    // The result of the call holds the obligation.
+    assert(ownership_heap_env.unproved(&c, "tail_kept",
+        ownership_api.incomplete_reason.missing_path));
+    assert(ownership_heap_env.first_text(&c, "tail_kept") == "t");
+    assert(ownership_heap_env.first(&c, "tail_kept").line == 11);
+    assert(ownership_heap_env.proved(&c, "root_kept"));
+}
+
 fn is_invalid(ownership_heap_env.event_row row) bool {
     return row.kind == ownership_api.event_kind.invalid_use &&
         row.evidence == ownership_api.evidence_kind.unconditional;
@@ -380,6 +466,7 @@ fn main() i32 {
     recursion();
     unknown_effects();
     views_at_call();
+    released_root();
     aggregates();
     println("heap calls ok");
     return 0;

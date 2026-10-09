@@ -1741,6 +1741,18 @@ struct inference {
     ownership_api.proof_status refusal;
 }
 
+// Whether the first failure of flow stops at an obligation that the facts of the body name:
+// a definite failure, or a failure without proof whose reason is a lost path, capture or
+// boundary. A failure for an unknown effect or a missing correspondence lacks a fact.
+fn obligation_failure(ownership_api.proof_status first) bool {
+    if (!first.terminal.present) { return true; }
+    ownership_api.incomplete_reason why = first.terminal.reason;
+    return why == ownership_api.incomplete_reason.none ||
+        why == ownership_api.incomplete_reason.missing_path ||
+        why == ownership_api.incomplete_reason.missing_capture ||
+        why == ownership_api.incomplete_reason.missing_boundary;
+}
+
 fn infer_watched(ownership_summary_body.body_input* in, budget_watch* watch) inference {
     inference mut out = inference{};
     ownership_summary_body.body_program mut program = ownership_summary_body.extract(in);
@@ -1766,6 +1778,7 @@ fn infer_watched(ownership_summary_body.body_input* in, budget_watch* watch) inf
     if (solved.failures != 0) {
         program.proof = solved.first_failure;
         out.summary = failed(&program);
+        out.summary.obligation = obligation_failure(solved.first_failure);
         return out;
     }
     if (!ownership_api.successful(observations.proof)) {

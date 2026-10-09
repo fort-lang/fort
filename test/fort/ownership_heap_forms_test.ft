@@ -12,6 +12,7 @@
 //| heap forms ok
 /// Checks the FIR forms that the heap proof reads (D17.16, `spec/fir.md` 5 to 8): spans, fixed
 /// arrays, globals, casts, deferred statements, loop exits, templates, and scalar branches.
+import fir;
 import ownership_api;
 import ownership_heap;
 import ownership_heap_env;
@@ -289,10 +290,11 @@ fn borrowed() void {
 }
 
 // A branch on a scalar that the proof does not track clears the witness but proves cleanup on
-// each path; a check that no build mode removes does the same (`spec/toolchain.md` 4.2).
+// each path. A kept check on a value that the state does not know keeps the witness, and one
+// that fails for a known value ends the path (`spec/toolchain.md` 4.2).
 fn scalars() void {
     println("scalar branches and checks");
-    string[14] text = {
+    string[20] text = {
         "struct node { node mut* own next; i32 v; }",
         "enum mode { keep, drop, swap }",
         "fn by_mode(mode m) void { node mut* own a = new(node); switch (m) {",
@@ -307,9 +309,16 @@ fn scalars() void {
         "fn leak_after_assert(i32 x) void { node mut* own a = new(node); assert(x > 0); }",
         "fn constant_branch() void { node mut* own a = new(node); if (true) { del(a); } }",
         "fn constant_leak() void { node mut* own a = new(node); if (false) { del(a); } }",
+        "fn known_assert() void { node mut* own a = new(node); i32 y = 1; assert(y > 2); }",
+        "fn known_pass() void { node mut* own a = new(node); i32 y = 3; assert(y > 2); }",
+        "fn complement() void { node mut* own a = new(node); i32 y = 1; i32 z = ~y;",
+        "    assert(z != 1); }",
+        "fn half_known(bool b) void { node mut* own a = new(node); if (b) { i32 y = 1;",
+        "    assert(y > 2); } del(a); }",
     };
-    string[7] names = {"by_mode", "by_mode_leak", "asserted", "divided", "leak_after_assert",
-        "constant_branch", "constant_leak"};
+    string[11] names = {"by_mode", "by_mode_leak", "asserted", "divided", "leak_after_assert",
+        "constant_branch", "constant_leak", "known_assert", "known_pass", "complement",
+        "half_known"};
     ownership_heap_env.closure mut c = ownership_heap_env.closure{};
     defer ownership_heap_env.close(&c);
     ownership_heap_env.run(&c, text[..], names[..]);
@@ -318,9 +327,21 @@ fn scalars() void {
         ownership_api.incomplete_reason.missing_path));
     assert(ownership_heap_env.proved(&c, "asserted"));
     assert(ownership_heap_env.proved(&c, "divided"));
-    // The assert can abort, so no validated path reaches the loss after it.
-    assert(ownership_heap_env.unproved(&c, "leak_after_assert",
-        ownership_api.incomplete_reason.missing_path));
+    // The assert holds for some value of the parameter, so the loss after it is validated.
+    assert(ownership_heap_env.failed(&c, "leak_after_assert"));
+    assert(is(ownership_heap_env.first(&c, "leak_after_assert"),
+        ownership_api.event_kind.lost_ownership, ownership_api.evidence_kind.unconditional));
+    // An assert that fails for a known value ends the path: no execution reaches the loss. One
+    // that holds for it keeps the path.
+    assert(ownership_heap_env.proved(&c, "known_assert"));
+    assert(!ownership_heap_env.summary(&c, "known_assert")->returns);
+    assert(ownership_heap_env.failed(&c, "known_pass"));
+    // `~` on an integer complements each bit, so `z` is not known: the assert keeps the path
+    // and the loss is validated.
+    assert(ownership_heap_env.failed(&c, "complement"));
+    // A known failure on one path ends that path only: the other path returns.
+    assert(ownership_heap_env.proved(&c, "half_known"));
+    assert(ownership_heap_env.summary(&c, "half_known")->returns);
     // A constant condition selects one edge and keeps the witness.
     assert(ownership_heap_env.proved(&c, "constant_branch"));
     assert(ownership_heap_env.failed(&c, "constant_leak"));
@@ -365,6 +386,12 @@ fn pops() void {
     assert(ownership_heap_env.failed(&c, "view_after"));
     assert(ownership_heap_env.first(&c, "view_after").kind ==
         ownership_api.event_kind.invalid_use);
+    ownership_heap_env.event_row read = ownership_heap_env.first(&c, "view_after");
+    // `free_list` loops; the witness assumes that it and `push` return (D17.18).
+    assert(read.line == 13 && ownership_heap_env.assumes(&read, 2, 12,
+        "this path needs 'push' to return here"));
+    assert(ownership_heap_env.names_call(&read, 1, "free_list"));
+    assert(read.notes[1].line == 13);
 }
 
 fn main() i32 {

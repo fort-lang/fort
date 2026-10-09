@@ -986,20 +986,56 @@ JSON version 1 gains no ownership-specific fields.
 **Evidence classes.** A concrete reaching-path witness identifies feasible input conditions and
 ordered FIR effects that reach the invalid operation.
 Validate its alias substitutions, branch conditions, source identities, and effect order.
-A witness can cross loops or recursive summaries only with a validated path or inductive argument.
+A witness can cross a loop of its own function only with a validated path or an inductive argument.
 A collection of independent may-facts does not supply that validation.
+A witness can cross a call of a fort callee whose summary the analysis applies, a recursive callee
+included. It assumes that the callee returns (D17.18): nothing proves that input condition.
+After the call it has the facts that each returning path of the summary gives for the actual
+arguments. The call ends the path when the summary has no returning path. It also ends the path
+when each returning path has an input null where its argument is nonnull.
+A failed caller requirement is no such contradiction: the call goes on.
+No assumed fact removes a path (D17.18). Only a fact that a test, an assignment or an allocation
+establishes can end a path or a branch. A nonnull root at a dereference is an assumed fact. An
+address computation establishes no fact about its base. A proved empty owner that reaches a
+dereference in a callee is a failed caller requirement (D10.7).
+The summary of a member of the component under solution proves no absent return. There, a call
+of a summary without a returning path gives incomplete proof.
+A witness can cross a kept check on a value that the analysis does not know: it assumes that the
+check passes (D17.18). A kept check is each check other than an overflow, shift or overwrite check.
+A kept check that fails for known values ends the path. Any other check keeps the witness.
+A dereference that reads or writes storage is a null check (D17.18). A dereference of a pointer
+that the analysis knows is null ends the path. At a pointer whose nullness the analysis does not
+know, the witness assumes that the pointer is not null. An address computation is no null check.
+An extern call keeps the witness without a note (D17.13).
+Code can write where the analysis does not follow the write (D17.18). Such code is an unknown or
+extern call, a store through a pointer that the analysis does not follow, or a callee with such
+code. Each storage that a pointer can designate then has no known reference or scalar value.
+That is each local whose storage a FIR address names, each caller storage and each allocation.
+A store into the storage of a global writes none of that storage.
+A store through a pointer of another type than its target leaves the target no fact. A read
+through such a pointer gives no known value. A call with such a pointer argument applies no
+summary (D17.18).
 A witness can also cross an unresolved direct call of a fort callee that has a returning type and
 no parameter that can own a value, a recursive callee included. It assumes that the callee
 returns (D17.18, fir.md 14.1 A06): that is the one input condition that it does not prove.
 After that call it takes no branch whose condition depends on an entry value that the call can
 read (D17.18): through an argument, or through a value that the function stored before the call
 outside a local whose storage no FIR address names. An argument of an earlier call counts as
-stored. After a branch whose condition depends on any entry value, it crosses no fort call.
-Such a branch or call leaves the event incomplete proof.
+stored. After a branch whose condition depends on any entry value, it crosses no unresolved fort
+call. Such a branch or call leaves the event incomplete proof.
 Amended 2026-10-08: a witness crossed no unresolved fort call. A callee that never returns
 normally makes such a witness false. The cost is a false violation, never a missed one.
 Amended 2026-10-09: a witness took each branch after a crossed call. A callee that aborts for
 some values only, such as `require(n < 100)`, then gave a false violation.
+Amended 2026-10-09: a witness crossed loops or recursive summaries only with a validated path or
+inductive argument. That proof missed a callee that aborts in each review round. So the user
+ruled that a witness assumes that a call with an applied summary returns, and the event notes it.
+Amended 2026-10-10: a kept check on an unknown value kept the witness with no note. The user ruled
+that the event names the check as an assumption. The ruling names null, so a dereference is a
+null check under it. The user ruled that each assumption note gives the fact and its outcome in
+one pattern. Review also found facts that a write which the analysis does not follow made stale.
+Now such a write clears the facts of each storage that a pointer can designate. A design review
+found that assumed nonnull roots removed paths; now none does.
 
 A validated witness permits a path-dependent error: the operation fails on that reaching path.
 Use unconditional wording only when the invalidity holds on all represented reaching paths.
@@ -1024,6 +1060,40 @@ These internal events are compiler interfaces. They require no source or foreign
 Attach notes for allocation, lending, release, transfer, or storage end when they explain the error.
 An unsatisfied caller requirement notes the callee operation and the substituted caller source or
 alias. A deferred-effect note includes its registration range and the applicable exit range.
+A validated event notes each assumption of a witnessed path to it. A crossed call with an applied
+summary is an assumption. So is a crossed kept check on an unknown value. So is a crossed null
+check on a pointer of unknown nullness.
+The call of a failed caller requirement is such a call too.
+Each assumption note has one pattern: `<place>: note: this path needs <subject> <fact> here;
+<outcome>`. One table, keyed by the kind of the assumption, gives the subject, the fact and the
+outcome. A new kind of assumption adds one row.
+
+| kind | subject | fact | outcome |
+|---|---|---|---|
+| call | `'f'`, the callee | to return | if it does not return, and the outcome of the event |
+| check | the `k` check (fir.md 8) | to pass | if it fails, the program stops |
+| null | `'p'`, the pointer place | to be non-null | a null `'p'` faults at this read first |
+
+A null note names a write for a dereference that writes, and "the pointer" for a pointer without
+a source name. In a call note the event gives the outcome. Lost ownership gives `'x' does not
+leak`. An invalid use gives `this use of 'x' does not happen`. A failed caller requirement gives
+`this call does not fail its requirement`. `'x'` is the place of the event, and a phrase stays
+without quotes. Three examples follow, one for each kind:
+
+```sh
+case.ft:6:14: note: this path needs 'p' to be non-null here; a null 'p' faults at this read first
+case.ft:9:9: note: this path needs 'check' to return here; if it does not return, 'b' does not leak
+case.ft:13:12: note: this path needs the bounds check to pass here; if it fails, the program stops
+```
+
+A check or a dereference inside a callee with an applied summary has no note: the call note
+covers it.
+Each note has the source range that FIR gives its call, its check or its dereference. For a call
+in the source, that is its argument list in parentheses. A call that the lowering adds has the
+range of its argument. The event keeps one note for each assumption, in source order, so both
+forms show them. An incomplete-proof event notes no assumption. A witness keeps a fixed number of
+assumptions of each kind together. A witness that needs one more ends there, as at a branch that
+it cannot decide. No limit category of fir.md 14.1 counts it.
 A limit note states what the abstraction loses. Do not state that widening releases storage.
 Use "cannot prove" for missing proof. Do not use "use after release" without validated invalidity.
 
@@ -1036,6 +1106,10 @@ case.ft:9:5: error: ownership analysis exceeds the transfer-work bound 2
 case.ft:9:5: note: 2 work units complete; this operation needs another work unit
 case.ft:12:5: error: cannot prove completed cleanup at this return
 case.ft:7:5: note: this incomplete fort summary preserves a possible caller return
+case.ft:15:1: error: lost ownership of an allocation on this path
+case.ft:15:1: note: p
+case.ft:13:12: note: this path needs the bounds check to pass here; if it fails, the program stops
+case.ft:14:9: note: this path needs 'check' to return here; if it does not return, 'p' does not leak
 ```
 
 The numbers in these examples illustrate event rendering. They select no production limit.

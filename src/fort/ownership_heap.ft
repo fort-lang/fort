@@ -36,6 +36,8 @@ u64 FIELD_LIMIT = 32;
 u32 WIDEN_AFTER = 4;
 // A recursive component runs at most this many rounds before it publishes. W bounds them too.
 u64 ROUND_LIMIT = 16;
+// A heap witness names at most this many crossed calls (crossed_call[8]).
+u32 CROSS_LIMIT = 8;
 
 /// The nullness of a root pointer (spec/memory-model.md 2.7). `free` is an input choice of the
 /// caller, so each value is feasible. `joined` is an abstraction that lost the path of each value.
@@ -138,6 +140,11 @@ struct atom {
     // find its current source. NONE otherwise.
     u32 into;
     bool used;
+    // The witness assumed at a dereference that the root is not null (`null_check`).
+    bool assumed_nonnull;
+    // The root is nonnull only because an unfold assumed it: a dereference or a release of a
+    // root whose nullness the state did not know. Such a root removes no path (D17.18).
+    bool unfold_nonnull;
 }
 
 struct slot_key {
@@ -185,6 +192,91 @@ struct slot {
     value v;
 }
 
+// An assumption of a witness. A fort call that the witness crossed is one: the witness assumes
+// that it returns. A kept check on a value that the state does not know is one: the witness
+// assumes that it passes. A dereference of a pointer of unknown nullness is one: the witness
+// assumes that the pointer is not null. The event that it validates names each one (D17.18,
+// `spec/toolchain.md` 4.2).
+struct crossed_call {
+    ownership_api.source_position source;
+    string callee;
+    // A kept check of kind `kind`, in place of a call.
+    bool check;
+    fir.check_kind kind;
+    // A dereference of a pointer whose nullness the state does not know, in place of a call.
+    // `named` says that the pointer is in slot `pointer`, whose name the note gives.
+    bool nonnull;
+    bool named;
+    slot_key pointer;
+    // The dereference writes storage; otherwise it reads it.
+    bool write;
+}
+
+// The kind of an assumption: the row of its note in `note_row` (`spec/toolchain.md` 4.2).
+enum assumption_kind {
+    call_returns,
+    check_passes,
+    nonnull,
+}
+
+fn assumption_of(crossed_call item) assumption_kind {
+    if (item.check) { return assumption_kind.check_passes; }
+    return item.nonnull ? assumption_kind.nonnull : assumption_kind.call_returns;
+}
+
+// One row of the note table: the fact that the path needs, and the head of the outcome when
+// the fact does not hold. A new kind of assumption adds one row.
+struct note_phrase {
+    string fact;
+    string outcome;
+}
+
+fn note_row(assumption_kind k) note_phrase {
+    switch (k) {
+    case assumption_kind.call_returns:
+        return note_phrase{.fact = "to return", .outcome = "if it does not return, "};
+    case assumption_kind.check_passes:
+        return note_phrase{.fact = "to pass", .outcome = "if it fails, the program stops"};
+    case assumption_kind.nonnull:
+        return note_phrase{.fact = "to be non-null", .outcome = "a null "};
+    }
+}
+
+// An event text as a note names it: a place name in quotes, or a phrase as it is.
+fn append_subject(strbuf.str_buf mut* out, string text) void {
+    if (text.len == 0) {
+        strbuf.append(out, "the storage that this operation uses");
+        return;
+    }
+    bool mut phrase = false;
+    u64 mut i = 0;
+    while (i < text.len) {
+        if (text[i] == ' ') { phrase = true; }
+        i += 1;
+    }
+    if (!phrase) { strbuf.push(out, '\''); }
+    strbuf.append(out, text);
+    if (!phrase) { strbuf.push(out, '\''); }
+}
+
+// What does not happen when a crossed call does not return: the event itself.
+fn append_event_outcome(strbuf.str_buf mut* out, ownership_api.event_kind kind, string text)
+    void {
+    switch (kind) {
+    case ownership_api.event_kind.lost_ownership:
+        append_subject(out, text);
+        strbuf.append(out, " does not leak");
+    case ownership_api.event_kind.invalid_use:
+        strbuf.append(out, "this use of ");
+        append_subject(out, text);
+        strbuf.append(out, " does not happen");
+    case ownership_api.event_kind.caller_requirement:
+        strbuf.append(out, "this call does not fail its requirement");
+    default:
+        strbuf.append(out, "this error does not happen");
+    }
+}
+
 // Each block keeps one joined state. A state that no path reaches is bottom.
 struct state {
     bool reached;
@@ -199,6 +291,25 @@ struct state {
     u64 released;
     bool lossy;
     ownership_api.lost_fact loss;
+    // The empty owners that each path into this state requires of its caller (`spec/fir.md` 14
+    // Calls): bit i of `required_null` for interface atom i, and bit f of `required_fields[i]`
+    // for its owned field f. A join keeps a requirement only when both paths have it, so the
+    // exit state names the requirements of each returning path.
+    u64 required_null;
+    u64[64] required_fields;
+    // The assumptions that the paths into this state crossed, in source order, each once. A
+    // kept check counts on a path without a witness too, because a rejoin can give the witness
+    // back after it; `assumptions_full` says that one did not fit, so no witness comes back.
+    crossed_call[8] crossed;
+    u32 crossed_len;
+    bool assumptions_full;
+    // The caller storage entries whose pointer the witness assumed to be not null at a
+    // dereference, one bit each (`null_check`).
+    u64 nonnull_callers;
+    // The interface atoms that this path dereferenced with a nullness that the state did not
+    // know, one bit each. A join keeps the bits of both paths, so the exit state names the
+    // inputs that each returning path dereferences (D10.7).
+    u64 deref_handles;
 }
 
 struct shape {
@@ -239,6 +350,13 @@ struct summary {
     bool witness;
     // An unknown effect changed caller-visible facts, so no caller can apply this summary.
     bool residual;
+    // The body, or a callee of it, writes through a pointer that the proof does not follow, or
+    // makes an unknown call. Such a write can reach storage of a caller that the summary does
+    // not name.
+    bool writes_untracked;
+    // The interface atoms that some path of the body dereferences with a nullness that it does
+    // not know, one bit each (D10.7).
+    u64 deref_inputs;
     interface_entry mut@ own interface;
     caller_entry mut@ own callers;
     // The parameters whose designated storage the body reads, one bit each. `reads_high`
@@ -264,6 +382,13 @@ struct location {
     u32 count;
     u32[8] sources;
     bool external;
+    // An unknown location that a pointer of another type than its target designates (a cast):
+    // `key` names that target, whose storage a store changes in a way that the proof does not
+    // follow.
+    bool retyped;
+    // The place reads a pointer to find its storage (`fir.place_indirect`). An unknown location
+    // without it is storage of a global, or a field of tracked storage that has no slot.
+    bool indirect;
 }
 
 // One leaf of an aggregate value, relative to the aggregate.
@@ -310,6 +435,8 @@ struct context {
     u64 needs_shape;
     u64 view_reads;
     bool reads_high;
+    // The top-level locals whose storage a FIR address names: a call can write them.
+    bool mut@ own addressed;
     // The empty owners that the caller supplies (`spec/fir.md` 14 Calls), one entry for each
     // interface atom.
     bool mut@ own require_null;
@@ -325,7 +452,16 @@ struct context {
     // The last pass over the stable block states: returns build the exit state.
     bool final_pass;
     bool reporting;
+    // An `addr` or a `slice` resolves its place: it computes an address and reads no storage
+    // there, so its dereferences are no null checks.
+    bool addressing;
+    // The place that `resolve` resolves is the destination of a store.
+    bool writing;
     bool residual;
+    // See `summary.writes_untracked`. No pass clears it, as no pass clears `residual`.
+    bool writes_untracked;
+    // See `summary.deref_inputs`.
+    u64 deref_inputs;
     bool stopped;
     bool failed_any;
     bool incomplete_any;
@@ -338,6 +474,8 @@ struct context {
     u64 notes;
     ownership_api.operation_position op;
     diag.loc at;
+    // The exit that expanded the current deferred statement, or the empty range.
+    diag.loc exit_at;
     strbuf.str_buf text;
     // The loss of a precision stop, for its event.
     bool stop_lossy;
@@ -587,6 +725,13 @@ fn clone(state* s) state {
     out.released = s->released;
     out.lossy = s->lossy;
     out.loss = s->loss;
+    out.required_null = s->required_null;
+    out.required_fields = s->required_fields;
+    out.crossed = s->crossed;
+    out.crossed_len = s->crossed_len;
+    out.nonnull_callers = s->nonnull_callers;
+    out.deref_handles = s->deref_handles;
+    out.assumptions_full = s->assumptions_full;
     out.slots = new(slot, s->slots_len);
     u64 mut i = 0;
     while (i < s->slots_len) { out.slots[i] = s->slots[i]; i += 1; }
@@ -599,6 +744,58 @@ fn clone(state* s) state {
     i = 0;
     while (i < s->ended.len) { out.ended[i] = s->ended[i]; i += 1; }
     return out;
+}
+
+// The rank of an assumption at one source: a call, then a dereference, then a check.
+fn crossed_rank(crossed_call a) u32 {
+    if (a.check) { return 2; }
+    return a.nonnull ? 1 : 0;
+}
+
+// The order of two assumptions: by source, then by rank; two dereferences at one source by
+// their pointer.
+fn crossed_order(crossed_call a, crossed_call b) i32 {
+    i32 mut c = ownership_keys.source(a.source, b.source);
+    if (c == 0) { c = ownership_keys.number(crossed_rank(a), crossed_rank(b)); }
+    if (c == 0 && a.nonnull) {
+        c = ownership_keys.number(a.named ? 1 : 0, b.named ? 1 : 0);
+        if (c == 0 && a.named) { c = key_order(a.pointer, b.pointer); }
+    }
+    return c;
+}
+
+// The name of a check kind in `spec/fir.md` 8.
+fn check_name(fir.check_kind k) string {
+    switch (k) {
+    case fir.check_kind.chk_overflow: return "overflow";
+    case fir.check_kind.chk_shift: return "shift";
+    case fir.check_kind.chk_div_zero: return "div_zero";
+    case fir.check_kind.chk_div_overflow: return "div_overflow";
+    case fir.check_kind.chk_bounds: return "bounds";
+    case fir.check_kind.chk_span: return "span";
+    case fir.check_kind.chk_alloc_count: return "alloc_count";
+    case fir.check_kind.chk_overwrite: return "overwrite";
+    case fir.check_kind.chk_enum: return "enum";
+    case fir.check_kind.chk_user: return "user";
+    case fir.check_kind.chk_panic: return "panic";
+    }
+}
+
+// Adds an assumption to state `s` in source order, once. False when the state names as many
+// assumptions as it can.
+fn add_crossed(state mut* s, crossed_call item) bool {
+    u32 mut at = 0;
+    while (at < s->crossed_len && crossed_order(s->crossed[at], item) < 0) { at += 1; }
+    if (at < s->crossed_len && crossed_order(s->crossed[at], item) == 0) { return true; }
+    if (s->crossed_len >= CROSS_LIMIT) { return false; }
+    u32 mut k = s->crossed_len;
+    while (k > at) {
+        s->crossed[k] = s->crossed[k - 1];
+        k -= 1;
+    }
+    s->crossed[at] = item;
+    s->crossed_len += 1;
+    return true;
 }
 
 fn replace(state mut* dst, state mut* src) void {
@@ -1007,6 +1204,80 @@ fn record(context mut* c, state* s, ownership_api.event_kind kind,
         .key = ownership_api.entity_id{c->key, ownership_api.entity_kind.witness, c->events},
         .event = event.key, .validated = true}};
     if (evidence == ownership_api.evidence_kind.validated_path) { event.witnesses = link[..]; }
+    // A deferred statement runs at each exit, so its event notes the registration range and
+    // the exit range (`spec/toolchain.md` 4.2).
+    ownership_api.event_note[10] mut notes = {};
+    u64 mut count = 0;
+    if (c->exit_at.file.len > 0) {
+        notes[0] = ownership_api.event_note{.role = ownership_api.note_role.defer_registration,
+            .source = at};
+        notes[1] = ownership_api.event_note{.role = ownership_api.note_role.defer_exit,
+            .source = source(c, c->exit_at)};
+        count = 2;
+    }
+    // A validated event names each assumption of its witness, at its source: the event holds
+    // when each crossed call returns, each crossed kept check passes and each dereferenced
+    // pointer is not null (D17.18). Each note reads "this path needs <subject> <fact> here;
+    // <outcome>", from the row of its kind (`note_row`, `spec/toolchain.md` 4.2).
+    strbuf.str_buf mut assumed = strbuf.create();
+    defer strbuf.free(&assumed);
+    u64[8] mut ends = {};
+    u32 crossed = s == null || evidence == ownership_api.evidence_kind.abstract_possibility ? 0 :
+        s->crossed_len;
+    u32 mut k = 0;
+    while (k < crossed) {
+        crossed_call item = s->crossed[k];
+        note_phrase row = note_row(assumption_of(item));
+        // A local without a source name, or a pointer outside a slot, has no spelling.
+        bool spelled = item.named && (item.pointer.base != base_kind.local ||
+            item.pointer.depth > 0 || (item.pointer.id < fir.local_count(c->f) &&
+            fir.local_name(fir.local_at(c->f, item.pointer.id)).len > 0));
+        strbuf.append(&assumed, "this path needs ");
+        if (item.check) {
+            strbuf.append(&assumed, "the ");
+            strbuf.append(&assumed, check_name(item.kind));
+            strbuf.append(&assumed, " check");
+        } else if (item.nonnull && spelled) {
+            strbuf.push(&assumed, '\'');
+            append_name(c, s, item.pointer, 4, &assumed);
+            strbuf.push(&assumed, '\'');
+        } else if (item.nonnull) {
+            strbuf.append(&assumed, "the pointer");
+        } else {
+            strbuf.push(&assumed, '\'');
+            strbuf.append(&assumed, item.callee);
+            strbuf.push(&assumed, '\'');
+        }
+        strbuf.push(&assumed, ' ');
+        strbuf.append(&assumed, row.fact);
+        strbuf.append(&assumed, " here; ");
+        strbuf.append(&assumed, row.outcome);
+        if (item.nonnull && spelled) {
+            strbuf.push(&assumed, '\'');
+            append_name(c, s, item.pointer, 4, &assumed);
+            strbuf.push(&assumed, '\'');
+        } else if (item.nonnull) {
+            strbuf.append(&assumed, "pointer");
+        }
+        if (item.nonnull) {
+            strbuf.append(&assumed, item.write ? " faults at this write first" :
+                " faults at this read first");
+        } else if (!item.check) {
+            append_event_outcome(&assumed, kind, text);
+        }
+        ends[k] = strbuf.view(&assumed).len;
+        k += 1;
+    }
+    string all = strbuf.view(&assumed);
+    k = 0;
+    while (k < crossed) {
+        u64 from = k == 0 ? 0 : ends[k - 1];
+        notes[count] = ownership_api.event_note{.role = ownership_api.note_role.assumption,
+            .source = s->crossed[k].source, .text = all[from..ends[k]]};
+        count += 1;
+        k += 1;
+    }
+    event.notes = notes[0..count];
     ownership_api.event_request request = ownership_api.event_request{event, proof};
     ownership_api.record_event(c->svc, &request);
 }
@@ -1067,37 +1338,40 @@ fn owner_of(state* s, u32 a) u64 {
     return U64_MAX;
 }
 
-// Writes the source spelling of slot `k` into the text buffer: `p.f`, `p->f`, or `*p` forms.
-fn append_name(context mut* c, state* s, slot_key k, u32 depth_left) void {
+// Writes the source spelling of slot `k` into `out`: `p.f`, `p->f`, or `*p` forms.
+fn append_name(context* c, state* s, slot_key k, u32 depth_left, strbuf.str_buf mut* out) void {
     types.node* mut t = null;
     if (k.base == base_kind.local) {
         if (k.id < fir.local_count(c->f)) {
             fir.local* l = fir.local_at(c->f, k.id);
-            string name = fir.local_name(l);
-            strbuf.append(&c->text, name);
+            string mut name = fir.local_name(l);
+            // A local without a source name is the result or a temporary: the event names it
+            // as the local analysis does (toolchain 4.2).
+            if (name.len == 0) { name = k.id == 0 ? "the result" : "a temporary value"; }
+            strbuf.append(out, name);
             t = l->ty;
         }
     } else if (k.base == base_kind.caller) {
         if (cast(k.id, u64) < c->callers_len) {
             fir.local* l = fir.local_at(c->f, c->callers[cast(k.id, u64)].param);
-            if (k.depth == 0) { strbuf.push(&c->text, '*'); }
-            strbuf.append(&c->text, fir.local_name(l));
+            if (k.depth == 0) { strbuf.push(out, '*'); }
+            strbuf.append(out, fir.local_name(l));
             t = c->callers[cast(k.id, u64)].pointee;
         }
     } else {
         u64 owner = depth_left == 0 ? U64_MAX : owner_of(s, k.id);
         if (owner == U64_MAX) {
-            strbuf.append(&c->text, "(heap)");
+            strbuf.append(out, "(heap)");
         } else {
-            append_name(c, s, s->slots[owner].key, depth_left - 1);
+            append_name(c, s, s->slots[owner].key, depth_left - 1, out);
         }
         if (cast(k.id, u64) < s->atoms_len) { t = s->atoms[cast(k.id, u64)].ty; }
     }
     u32 mut i = 0;
     while (i < k.depth) {
         bool arrow = i == 0 && k.base != base_kind.local;
-        strbuf.append(&c->text, arrow ? "->" : ".");
-        strbuf.append(&c->text, field_name(t, k.path[i]));
+        strbuf.append(out, arrow ? "->" : ".");
+        strbuf.append(out, field_name(t, k.path[i]));
         t = t != null && t->kind == types.type_kind.k_struct ?
             fir.struct_field_type(t, k.path[i]) : null;
         i += 1;
@@ -1106,14 +1380,14 @@ fn append_name(context mut* c, state* s, slot_key k, u32 depth_left) void {
 
 fn name(context mut* c, state* s, slot_key k) string {
     strbuf.clear(&c->text);
-    append_name(c, s, k, 4);
+    append_name(c, s, k, 4, &c->text);
     return strbuf.view(&c->text);
 }
 
 // The spelling of field slot `field` of the cell that slot `owner` held: `p->f`.
 fn name_below(context mut* c, state* s, slot_key owner, slot_key field, types.node* t) string {
     strbuf.clear(&c->text);
-    append_name(c, s, owner, 4);
+    append_name(c, s, owner, 4, &c->text);
     types.node* mut at = t;
     u32 mut i = 0;
     while (i < field.depth) {
@@ -1182,6 +1456,8 @@ fn unfold(context mut* c, state mut* s, u32 a) bool {
         (parent.handle != NONE && parent.handle_field == NONE));
     atom mut* root = &s->atoms[cast(a, u64)];
     root->kind = atom_kind.cell;
+    // A root whose nullness the state does not know is nonnull here by assumption only.
+    root->unfold_nonnull = parent.root != root_kind.nonnull || parent.unfold_nonnull;
     root->root = root_kind.nonnull;
     root->empty_leaves = false;
     // The borrowed fields of the root become slots again, and they hold no reference that the
@@ -1291,7 +1567,20 @@ fn absorb(state mut* s, u32 parent, u32 child) void {
     redirect(s, child, parent, false);
     s->atoms[cast(child, u64)].used = false;
     s->atoms[cast(child, u64)].into = parent;
+    // An address of a field of the child still names it. The parent holds its obligation now,
+    // and the proof does not follow that storage through the address (`spec/toolchain.md` 4.2).
+    unowned(s, child);
     drop_cell_slots(s, child);
+}
+
+// Atom `a` no longer holds an obligation: its storage now belongs to another atom, or it left
+// the proof. An address of one of its fields can still name it, so `canonical` can keep its
+// record. A use through that address finds no live record and gives incomplete proof.
+fn unowned(state mut* s, u32 a) void {
+    atom_status was = s->atoms[cast(a, u64)].status;
+    if (was == atom_status.live || was == atom_status.unknown) {
+        s->atoms[cast(a, u64)].status = atom_status.escaped;
+    }
 }
 
 // Folds a foldable cell bottom-up. The root keeps its identity, so an exact view of it stays.
@@ -1825,6 +2114,11 @@ fn canonical(context mut* c, state mut* s) bool {
     while (i < s->atoms_len) {
         if (map[i] != NONE && (keep[i] || i < c->interface_len)) {
             atom mut item = s->atoms[i];
+            // A record without its storage can come back only through an address of one of
+            // its fields (a fold, a graft or a join gave the storage to another record). It
+            // holds no obligation (`spec/toolchain.md` 4.2).
+            if (!item.used && keep[i] && (item.status == atom_status.live ||
+                item.status == atom_status.unknown)) { item.status = atom_status.escaped; }
             item.used = keep[i];
             atoms[cast(map[i], u64)] = item;
         }
@@ -1856,7 +2150,8 @@ fn same_atom(atom a, atom b) bool {
         a.root == b.root && a.origin == b.origin && a.fresh == b.fresh && a.strict == b.strict &&
         a.choice == b.choice && a.exposed == b.exposed && a.handle == b.handle &&
         a.handle_field == b.handle_field && a.empty_leaves == b.empty_leaves &&
-        a.borrows == b.borrows && a.params == b.params && a.used == b.used;
+        a.borrows == b.borrows && a.params == b.params && a.used == b.used &&
+        a.assumed_nonnull == b.assumed_nonnull && a.unfold_nonnull == b.unfold_nonnull;
 }
 
 /// Compares two canonical states. Each compared row pays one W unit.
@@ -1869,9 +2164,25 @@ fn equal(context mut* c, state* a, state* b, bool mut* same) bool {
         return true;
     }
     if (a->witness != b->witness || a->released != b->released || a->lossy != b->lossy ||
-        a->slots_len != b->slots_len || a->atoms_len != b->atoms_len ||
-        a->ended.len != b->ended.len) { return true; }
+        a->required_null != b->required_null || a->slots_len != b->slots_len ||
+        a->atoms_len != b->atoms_len || a->ended.len != b->ended.len ||
+        a->crossed_len != b->crossed_len || a->assumptions_full != b->assumptions_full ||
+        a->nonnull_callers != b->nonnull_callers || a->deref_handles != b->deref_handles) {
+        return true;
+    }
     u64 mut i = 0;
+    while (i < cast(a->crossed_len, u64)) {
+        if (crossed_order(a->crossed[i], b->crossed[i]) != 0) {
+            return true;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < a->required_fields.len) {
+        if (a->required_fields[i] != b->required_fields[i]) { return true; }
+        i += 1;
+    }
+    i = 0;
     while (i < a->ended.len) {
         if (a->ended[i] != b->ended[i]) { return true; }
         i += 1;
@@ -1902,7 +2213,7 @@ fn join_status(atom_status a, atom_status b) atom_status {
 
 // Joins two records of one atom. A root that each witnessed side refined from one free input choice
 // stays a free choice: each of its values is feasible on a witnessed path (`spec/toolchain.md`
-// 4.2).
+// 4.2). `join` keeps that rule only when one atom of the two states takes it (`choice_split`).
 fn join_atom(atom a, atom b, bool witness_a, bool witness_b) atom {
     atom mut out = a;
     if (a.kind != b.kind) {
@@ -1922,6 +2233,8 @@ fn join_atom(atom a, atom b, bool witness_a, bool witness_b) atom {
     out.strict = a.strict && b.strict;
     out.choice = a.choice && b.choice;
     out.exposed = a.exposed || b.exposed;
+    out.assumed_nonnull = a.assumed_nonnull && b.assumed_nonnull;
+    out.unfold_nonnull = a.unfold_nonnull || b.unfold_nonnull;
     // A null root has no leaves, so only the other side says whether they are empty.
     bool leaves_a = a.empty_leaves || a.root == root_kind.null_root;
     bool leaves_b = b.empty_leaves || b.root == root_kind.null_root;
@@ -1935,6 +2248,13 @@ fn join_atom(atom a, atom b, bool witness_a, bool witness_b) atom {
     }
     out.used = true;
     return out;
+}
+
+// Whether `join_atom` keeps a free root for two records whose roots differ: each value comes
+// from a free input choice on a witnessed path.
+fn choice_split(atom a, atom b, bool witness_a, bool witness_b) bool {
+    return a.choice && b.choice && witness_a && witness_b && a.root != root_kind.joined &&
+        b.root != root_kind.joined && a.root != b.root;
 }
 
 fn cell_slot(state* s, u32 a, slot_key k) u64 {
@@ -2255,6 +2575,28 @@ fn join(context mut* c, state* a, state* b, bool widen, state mut* out) bool {
     joined.released = x.released | y.released;
     joined.lossy = x.lossy || y.lossy;
     joined.loss = x.lossy ? x.loss : y.loss;
+    // A requirement of one path only is a requirement of some paths: no caller can validate a
+    // failure of it.
+    joined.required_null = x.required_null & y.required_null;
+    // The witness of the join takes the path of one side, so it can cross the calls of either.
+    joined.crossed = x.crossed;
+    joined.crossed_len = x.crossed_len;
+    joined.assumptions_full = x.assumptions_full || y.assumptions_full;
+    joined.nonnull_callers = x.nonnull_callers & y.nonnull_callers;
+    joined.deref_handles = x.deref_handles & y.deref_handles;
+    i = 0;
+    while (i < cast(y.crossed_len, u64)) {
+        if (!add_crossed(&joined, y.crossed[i])) {
+            joined.witness = false;
+            joined.assumptions_full = true;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < joined.required_fields.len) {
+        joined.required_fields[i] = x.required_fields[i] & y.required_fields[i];
+        i += 1;
+    }
     joined.ended = new(u8, x.ended.len);
     i = 0;
     while (i < x.ended.len) {
@@ -2268,6 +2610,8 @@ fn join(context mut* c, state* a, state* b, bool widen, state mut* out) bool {
     defer del(from_x);
     bool mut@ own from_y = new(bool, total);
     defer del(from_y);
+    bool mut@ own fork = new(bool, total);
+    defer del(fork);
     i = 0;
     while (i < x.atoms_len) {
         u32 o = p.px[i];
@@ -2282,10 +2626,27 @@ fn join(context mut* c, state* a, state* b, bool widen, state mut* out) bool {
         u32 o = p.py[i];
         if (o != NONE && y.atoms[i].used) {
             u64 at = cast(o, u64);
+            fork[at] = from_x[at] &&
+                choice_split(joined.atoms[at], y.atoms[i], x.witness, y.witness);
             joined.atoms[at] = from_x[at] ?
                 join_atom(joined.atoms[at], y.atoms[i], x.witness, y.witness) : y.atoms[i];
             from_y[at] = true;
         }
+        i += 1;
+    }
+    // A free root of a join holds each value of one input on a witnessed path, but not each
+    // combination of values of two inputs: two inputs that differ between the paths can be
+    // correlated, so neither stays a free choice (`spec/toolchain.md` 4.2, "A collection of
+    // independent may-facts does not supply that validation").
+    u64 mut forks = 0;
+    i = 0;
+    while (i < total) {
+        if (fork[i]) { forks += 1; }
+        i += 1;
+    }
+    i = 0;
+    while (i < total && forks > 1) {
+        if (fork[i]) { joined.atoms[i].root = root_kind.joined; }
         i += 1;
     }
     i = 0;
@@ -2414,6 +2775,24 @@ fn lay_out(context mut* c) bool {
     u32 n = fir.local_count(c->f);
     c->local_first = new(u32, cast(n, u64));
     c->local_count = new(u32, cast(n, u64));
+    c->addressed = new(bool, cast(n, u64));
+    // An `addr` or a `slice` of a fixed place on a local names the storage of that local. A
+    // place that reads a pointer names the storage of its target (`fir.place_fixed`).
+    u32 mut b = 0;
+    while (b < fir.block_count(c->f)) {
+        u32 mut k = 0;
+        while (k < fir.block_statement_count(c->f, b)) {
+            fir.statement* stmt = fir.block_statement(c->f, b, k);
+            if (stmt->kind == fir.stmt_kind.st_assign &&
+                (stmt->value.kind == fir.rvalue_kind.rv_addr ||
+                stmt->value.kind == fir.rvalue_kind.rv_slice) &&
+                fir.place_fixed(c->f, stmt->value.place) && stmt->value.place.local < n) {
+                c->addressed[cast(stmt->value.place.local, u64)] = true;
+            }
+            k += 1;
+        }
+        b += 1;
+    }
     leaf_list mut list = leaf_list{};
     defer free_leaves(&list);
     u32 mut i = 0;
@@ -2712,11 +3091,109 @@ fn deref_value(context mut* c, state mut* s, value v, bool owning, string what) 
     }
 }
 
+// The type of the storage that slot key `k` names: a local, caller storage or a cell, and the
+// fields of its path. Null when a step is no field of a struct.
+fn key_type(context* c, state* s, slot_key k) types.node* {
+    types.node* mut t = null;
+    u64 id = cast(k.id, u64);
+    if (k.base == base_kind.local && k.id < fir.local_count(c->f)) {
+        t = fir.local_at(c->f, k.id)->ty;
+    } else if (k.base == base_kind.caller && id < c->callers_len) {
+        t = c->callers[id].pointee;
+    } else if (k.base == base_kind.cell && id < s->atoms_len) {
+        t = s->atoms[id].ty;
+    }
+    u32 mut d = 0;
+    while (d < k.depth && t != null) {
+        if (t->kind != types.type_kind.k_struct || !resolved_struct(t)) { return null; }
+        t = fir.struct_field_type(t, k.path[d]);
+        d += 1;
+    }
+    return t;
+}
+
+// The atom whose root decides the nullness of pointer value `v`, or NONE.
+fn root_atom(value v) u32 {
+    if (v.kind == value_kind.owned) { return v.atom; }
+    if (v.kind == value_kind.view && v.exact && v.count == 1 && !v.external) {
+        return v.sources[0];
+    }
+    return NONE;
+}
+
+// What the state knows of the nullness of pointer value `v`: `null_root`, `nonnull`, or `free`
+// when it does not know it. A pointer to caller storage is the pointer that a parameter got,
+// so it can be null. A pointer that the witness assumed not null at a dereference is not null.
+fn pointer_root(state* s, value v) root_kind {
+    root_kind mut r = root_kind.free;
+    u32 a = root_atom(v);
+    if (v.kind == value_kind.empty) {
+        r = root_kind.null_root;
+    } else if (v.kind == value_kind.address) {
+        r = root_kind.nonnull;
+        if (v.target.base == base_kind.caller && (v.target.id >= 64 ||
+            (s->nonnull_callers & bit(cast(v.target.id, u64))) == 0)) { r = root_kind.free; }
+    } else if (a != NONE) {
+        r = s->atoms[cast(a, u64)].root;
+        // A root that an unfold assumed is no known nullness until the witness assumes it at a
+        // dereference.
+        if (r == root_kind.nonnull && s->atoms[cast(a, u64)].unfold_nonnull) {
+            r = root_kind.free;
+        }
+        if (r != root_kind.null_root && s->atoms[cast(a, u64)].assumed_nonnull) {
+            r = root_kind.nonnull;
+        }
+    } else if (v.kind == value_kind.view || v.kind == value_kind.unknown) {
+        r = v.nullness;
+    }
+    if (r == root_kind.null_root && v.kind == value_kind.unknown) { return root_kind.free; }
+    if (r == root_kind.null_root || r == root_kind.nonnull) { return r; }
+    return root_kind.free;
+}
+
+// A dereference that reads or writes storage is a null check (D17.18). A pointer that the state
+// knows is null ends the path, as the fault ends the program. At one whose nullness the state
+// does not know, the witness assumes that it is not null, and an event that it validates names
+// it. The assumption counts on a path without a witness too, as a kept check does. The state
+// keeps the assumed fact, so a later dereference of that pointer is no new assumption. `at` is
+// the slot of the pointer, or U64_MAX.
+fn null_check(context mut* c, state mut* s, value pointer, u64 at, slot_key k) void {
+    root_kind known = pointer_root(s, pointer);
+    if (known == root_kind.nonnull) { return; }
+    if (known == root_kind.null_root) {
+        s->reached = false;
+        return;
+    }
+    if (!add_crossed(s, crossed_call{.source = source(c, c->at), .nonnull = true,
+        .named = at != U64_MAX, .pointer = k, .write = c->writing})) {
+        s->witness = false;
+        s->assumptions_full = true;
+    }
+    u32 a = root_atom(pointer);
+    // A dereference of an input owner whose nullness this body does not know: a caller that
+    // passes a proved empty owner fails a requirement (D10.7).
+    if (a != NONE && s->atoms[cast(a, u64)].handle != NONE &&
+        s->atoms[cast(a, u64)].handle_field == NONE && s->atoms[cast(a, u64)].handle < 64) {
+        u64 input = bit(cast(s->atoms[cast(a, u64)].handle, u64));
+        s->deref_handles = s->deref_handles | input;
+        c->deref_inputs = c->deref_inputs | input;
+    }
+    if (pointer.kind == value_kind.address && pointer.target.base == base_kind.caller &&
+        pointer.target.id < 64) {
+        s->nonnull_callers = s->nonnull_callers | bit(cast(pointer.target.id, u64));
+    } else if (a != NONE) {
+        s->atoms[cast(a, u64)].assumed_nonnull = true;
+    } else if (at != U64_MAX) {
+        s->slots[at].v.nullness = root_kind.nonnull;
+    }
+}
+
 /// Resolves a FIR place to a location (`spec/fir.md` 5.5). A dereference reads its pointer first.
 fn resolve(context mut* c, state mut* s, fir.place p, location mut* out, types.node* mut* ty)
     void {
     *out = unknown_location();
     *ty = fir.place_type(c->f, p);
+    out->indirect = fir.place_indirect(c->f, p);
     if (p.base == fir.base_kind.bk_global) { return; }
     location mut loc = location{};
     loc.kind = location_kind.slots;
@@ -2749,7 +3226,44 @@ fn resolve(context mut* c, state mut* s, fir.place p, location mut* out, types.n
             } else if (loc.kind == location_kind.element) {
                 use_sources(c, s, loc.count, loc.sources, "read through a released source");
             }
-            loc = deref_value(c, s, pointer, pointer_owns, name(c, s, loc.key));
+            slot_key pointer_key = loc.key;
+            u64 mut pointer_slot = loc.kind == location_kind.slots ? find_slot(s, loc.key) :
+                U64_MAX;
+            if (pointer_slot != U64_MAX && s->slots[pointer_slot].array) { pointer_slot = U64_MAX; }
+            // The check reads the nullness before the dereference unfolds the target. Only the
+            // last dereference of a destination writes; each one before it reads a pointer.
+            bool storing = c->writing;
+            u32 mut later = i + 1;
+            while (later < p.proj_len) {
+                if (fir.place_projection(c->f, p, later).kind == fir.proj_kind.pj_deref) {
+                    c->writing = false;
+                }
+                later += 1;
+            }
+            if (!c->addressing) { null_check(c, s, pointer, pointer_slot, pointer_key); }
+            c->writing = storing;
+            // An address computation reads no storage, so it gives no fact about its base. A
+            // null base is no error (`spec/fir.md` 14.1). The unfold of a base whose nullness
+            // the state does not know marks its root as assumed (`unfold_nonnull`). Such a root
+            // removes no path (D17.18).
+            u32 base = root_atom(pointer);
+            if (c->addressing && (pointer.kind == value_kind.empty || (base != NONE &&
+                s->atoms[cast(base, u64)].root == root_kind.null_root))) {
+                loc = unknown_location();
+            } else {
+                loc = deref_value(c, s, pointer, pointer_owns, name(c, s, pointer_key));
+            }
+            // A pointer of another type than its target (a cast) designates storage whose facts
+            // are no facts of the place: reads through it give unknown values, and a store
+            // changes the target (`write_at`). A target below a field of another type than a
+            // struct has no type here, so it is of another type too (review round 7).
+            if (loc.kind == location_kind.slots &&
+                key_type(c, s, loc.key) != fir.apply_projection(c->f, t, pj)) {
+                slot_key retyped = loc.key;
+                loc = unknown_location();
+                loc.key = retyped;
+                loc.retyped = true;
+            }
         case fir.proj_kind.pj_index:
             if (t->kind == types.type_kind.k_array) {
                 if (loc.kind == location_kind.slots) {
@@ -2790,6 +3304,7 @@ fn resolve(context mut* c, state mut* s, fir.place p, location mut* out, types.n
         t = fir.apply_projection(c->f, t, pj);
         i += 1;
     }
+    loc.indirect = out->indirect;
     *out = loc;
 }
 
@@ -2872,6 +3387,9 @@ fn operand(context mut* c, state mut* s, fir.operand op) value {
             return v;
         }
     }
+    // A move through a pointer of another type changes its target in a way that the proof does
+    // not follow.
+    if (loc.retyped) { havoc_prefix(s, key_of(loc.key.base, loc.key.id)); }
     if (owned_leaf(t)) {
         unproved(c, s, untracked(s, loc), NONE,
             "the ownership that a move takes from untracked storage");
@@ -2883,7 +3401,9 @@ fn operand(context mut* c, state mut* s, fir.operand op) value {
 // An owner whose entry value the caller chose freely loses nothing when the caller supplies it
 // empty: the summary records that requirement, and the state takes the empty entry value
 // (`spec/fir.md` 14 Calls, "empty output owners"). False when the atom has no such handle.
-fn require_empty(context mut* c, state mut* s, u32 a) bool {
+// `settled` says that this path stores over the owner: a store of this body does, and a call
+// does when each returning path of its callee does. The path then keeps the requirement.
+fn require_empty(context mut* c, state mut* s, u32 a, bool settled) bool {
     atom item = s->atoms[cast(a, u64)];
     if (item.handle == NONE || !item.choice || item.root != root_kind.free ||
         item.status != atom_status.live || cast(item.handle, u64) >= c->interface_len) {
@@ -2892,8 +3412,11 @@ fn require_empty(context mut* c, state mut* s, u32 a) bool {
     u64 at = cast(item.handle, u64);
     if (item.handle_field == NONE) {
         c->require_null[at] = true;
+        if (settled) { s->required_null = s->required_null | bit(at); }
     } else if (cast(item.handle_field, u64) < 64) {
-        c->require_fields[at] = c->require_fields[at] | bit(cast(item.handle_field, u64));
+        u64 field = bit(cast(item.handle_field, u64));
+        c->require_fields[at] = c->require_fields[at] | field;
+        if (settled) { s->required_fields[at] = s->required_fields[at] | field; }
     } else {
         return false;
     }
@@ -2914,7 +3437,7 @@ fn check_overwrite(context mut* c, state mut* s, value old, slot_key k) void {
         item.status == atom_status.escaped) { return; }
     if (item.status == atom_status.unknown) {
         unproved(c, s, ownership_api.incomplete_reason.unknown_effect, old.atom, name(c, s, k));
-    } else if (require_empty(c, s, old.atom)) {
+    } else if (require_empty(c, s, old.atom, true)) {
         return;
     } else {
         violation(c, s, ownership_api.event_kind.lost_ownership, certainty_of(item.root),
@@ -2923,10 +3446,26 @@ fn check_overwrite(context mut* c, state mut* s, value old, slot_key k) void {
     mark_leaked(s, old.atom);
 }
 
+// A store through a location that the proof does not follow. A pointer of another type than
+// its target (a cast) writes bytes that the proof does not follow, perhaps beyond one slot. So
+// the storage of the target loses its facts, its owners too. A pointer that the proof does not
+// follow can write each storage that a pointer can designate (`havoc_reachable`,
+// `spec/toolchain.md` 4.2). A store into a global, or into a field without a slot, writes no
+// slot. `owners` says that the store can write over an owner.
+fn untracked_store(context mut* c, state mut* s, location loc, bool owners) void {
+    if (loc.retyped) { havoc_prefix(s, key_of(loc.key.base, loc.key.id)); }
+    if (!loc.indirect) { return; }
+    c->writes_untracked = true;
+    havoc_reachable(c, s, owners);
+}
+
 // Writes a value into a location. An owned value written into storage that the proof does not
 // track leaves the proof with incomplete proof (D17.13, D17.18).
-fn write_at(context mut* c, state mut* s, location loc, types.node* t, value v) void {
+fn write_at(context mut* c, state mut* s, location place, types.node* t, value v) void {
     value stored = !is_reference(t) || v.kind != value_kind.owned ? v : as_view(s, v);
+    location loc = place;
+    bool owners = v.kind == value_kind.owned || owned_leaf(t);
+    if (loc.kind == location_kind.unknown) { untracked_store(c, s, loc, owners); }
     if (loc.kind == location_kind.slots) {
         u64 at = find_slot(s, loc.key);
         if (at != U64_MAX && !s->slots[at].array) {
@@ -2948,6 +3487,15 @@ fn write_at(context mut* c, state mut* s, location loc, types.node* t, value v) 
     if (loc.kind == location_kind.length) { return; }
     if (loc.kind == location_kind.element) {
         use_sources(c, s, loc.count, loc.sources, "write through a released source");
+        // A view that does not designate one cell exactly can write any field of each cell that
+        // it can designate: the store does not name the field. Storage of the caller that no
+        // slot follows is storage that the proof does not follow.
+        if (loc.external) { untracked_store(c, s, loc, owners); }
+        u32 mut j = 0;
+        while (j < loc.count) {
+            havoc_cell(s, loc.sources[j], owners);
+            j += 1;
+        }
         // A field without a slot keeps the stored reference in the facts of its atoms.
         if (is_reference(t) && v.kind != value_kind.owned) {
             u32 mut i = 0;
@@ -3019,6 +3567,8 @@ fn place_leaves(context mut* c, state mut* s, fir.place p, bool moving, leaf_lis
 }
 
 fn write_leaves(context mut* c, state mut* s, location loc, leaf_list* list) void {
+    // A value without a leaf still writes its bytes.
+    if (list->len == 0 && loc.kind == location_kind.unknown) { untracked_store(c, s, loc, false); }
     u64 mut i = 0;
     while (i < list->len) {
         leaf item = list->items[i];
@@ -3093,11 +3643,16 @@ fn null_test(context mut* c, state mut* s, fir.operand a, fir.operand b, bool eq
         out.known = true;
         out.truth = equal_test;
     } else if (seen.kind == value_kind.address) {
-        out.known = true;
-        out.truth = !equal_test;
+        // A pointer to caller storage is the pointer that a parameter got, so it can be null:
+        // the test decides nothing, and no assumed fact removes either edge (D17.18).
+        if (seen.target.base != base_kind.caller) {
+            out.known = true;
+            out.truth = !equal_test;
+        }
     } else if (seen.kind == value_kind.view && seen.exact && seen.count == 1 && !seen.external) {
         atom item = s->atoms[cast(seen.sources[0], u64)];
-        if (item.root == root_kind.null_root || item.root == root_kind.nonnull) {
+        if (item.root == root_kind.null_root ||
+            (item.root == root_kind.nonnull && !item.unfold_nonnull)) {
             out.known = true;
             out.truth = (item.root == root_kind.nonnull) != equal_test;
         } else {
@@ -3117,6 +3672,25 @@ fn numbered_in(i64 number, types.node* t) value {
         out.numbered = true;
         out.number = number;
     }
+    return out;
+}
+
+// The truth value of `a` and `b`, or of `a` or `b` when `either` is true. A known side that
+// decides alone gives the result, and a known side that does not decide gives the other side.
+fn combined(value a, value b, bool either) value {
+    value mut out = scalar_value();
+    if ((a.known && a.truth == either) || (b.known && b.truth == either)) {
+        out.known = true;
+        out.truth = either;
+        return out;
+    }
+    if (a.known && b.known) {
+        out.known = true;
+        out.truth = !either;
+        return out;
+    }
+    if (a.known) { return b; }
+    if (b.known) { return a; }
     return out;
 }
 
@@ -3140,6 +3714,10 @@ fn compare(context mut* c, state mut* s, fir.rvalue rv) value {
     default: out.known = false;
     }
     return out;
+}
+
+fn boolean_type(types.node* t) bool {
+    return t != null && t->kind == types.type_kind.k_prim && t->prim == prim.prim_kind.prim_bool;
 }
 
 /// Evaluates a scalar or reference rvalue.
@@ -3170,9 +3748,16 @@ fn rvalue_value(context mut* c, state mut* s, fir.rvalue rv, types.node* t) valu
             sum = numbered_in(exact, t);
         }
         return sum;
+    case fir.rvalue_kind.rv_and, fir.rvalue_kind.rv_or:
+        value first_side = operand(c, s, fir.rvalue_operand(c->f, rv, 0));
+        value second_side = operand(c, s, fir.rvalue_operand(c->f, rv, 1));
+        // On an integer type the operation works on each bit, and the result is not known here.
+        if (!boolean_type(t)) { return scalar_value(); }
+        return combined(first_side, second_side, rv.kind == fir.rvalue_kind.rv_or);
     case fir.rvalue_kind.rv_not:
         value mut flipped = operand(c, s, fir.rvalue_operand(c->f, rv, 0));
-        if (flipped.kind != value_kind.scalar) { return scalar_value(); }
+        // On an integer type `not` complements each bit, so no known number stays.
+        if (flipped.kind != value_kind.scalar || !boolean_type(t)) { return scalar_value(); }
         flipped.test_nonnull = !flipped.test_nonnull;
         flipped.truth = !flipped.truth;
         return flipped;
@@ -3188,7 +3773,9 @@ fn rvalue_value(context mut* c, state mut* s, fir.rvalue rv, types.node* t) valu
     case fir.rvalue_kind.rv_addr:
         location mut loc = location{};
         types.node* mut place_ty = null;
+        c->addressing = true;
         resolve(c, s, rv.place, &loc, &place_ty);
+        c->addressing = false;
         if (loc.kind == location_kind.slots) { return address_value(loc.key); }
         if (loc.kind == location_kind.element) {
             value mut inner = empty_value();
@@ -3205,7 +3792,9 @@ fn rvalue_value(context mut* c, state mut* s, fir.rvalue rv, types.node* t) valu
         operand(c, s, fir.rvalue_operand(c->f, rv, 1));
         location mut sliced = location{};
         types.node* mut sliced_ty = null;
+        c->addressing = true;
         resolve(c, s, rv.place, &sliced, &sliced_ty);
+        c->addressing = false;
         if (sliced_ty->kind == types.type_kind.k_array) {
             if (sliced.kind == location_kind.slots || sliced.kind == location_kind.length) {
                 return address_value(sliced.key);
@@ -3340,14 +3929,18 @@ fn assign(context mut* c, state mut* s, fir.statement* stmt) void {
         rvalue_leaves(c, s, stmt->value, t, &list);
         location mut loc = location{};
         types.node* mut dst_ty = null;
+        c->writing = true;
         resolve(c, s, stmt->place, &loc, &dst_ty);
+        c->writing = false;
         write_leaves(c, s, loc, &list);
         return;
     }
     value v = rvalue_value(c, s, stmt->value, t);
     location mut loc = location{};
     types.node* mut dst_ty = null;
+    c->writing = true;
     resolve(c, s, stmt->place, &loc, &dst_ty);
+    c->writing = false;
     write_at(c, s, loc, t, v);
 }
 
@@ -3544,7 +4137,8 @@ fn escape(state mut* s, u32 a, atom_status status) void {
 }
 
 // Gives each slot below `prefix` an unknown value. An owned leaf keeps an obligation of unknown
-// shape, and its old atom escapes. Returns true when a tracked fact changed.
+// shape, and its old atom escapes. A scalar loses its known value. Returns true when a tracked
+// fact changed.
 fn havoc_prefix(state mut* s, slot_key prefix) bool {
     bool mut changed = false;
     u64 mut i = 0;
@@ -3563,6 +4157,8 @@ fn havoc_prefix(state mut* s, slot_key prefix) bool {
                 changed = true;
             } else if (is_reference(item.ty) || item.array) {
                 s->slots[i].v = effect_value();
+            } else if (item.v.kind == value_kind.scalar) {
+                s->slots[i].v = scalar_value();
             }
         }
         i += 1;
@@ -3602,12 +4198,61 @@ fn havoc_value(state mut* s, value v) bool {
     return changed;
 }
 
+// Gives slot `i` the value that a write which the proof does not follow can leave there: a
+// reference or an array leaf takes an unknown effect value, and a scalar loses its known value.
+// An owner keeps its value unless `owners` is true. A store over an owner that the proof does
+// not follow gives incomplete proof where it happens (`write_at`). So a callee with a usable
+// summary made no such store.
+fn havoc_slot(state mut* s, u64 i, bool owners) void {
+    slot item = s->slots[i];
+    if (item.owning) {
+        if (!owners) { return; }
+        if (item.v.kind == value_kind.owned) { escape(s, item.v.atom, atom_status.escaped); }
+        s->slots[i].v = fresh_unknown_owner(s);
+    } else if (is_reference(item.ty) || item.array) {
+        s->slots[i].v = effect_value();
+    } else if (item.v.kind == value_kind.scalar) {
+        s->slots[i].v = scalar_value();
+    }
+}
+
+// A write that the proof does not follow into a field of cell `a`. An atom that is no cell has
+// no slot.
+fn havoc_cell(state mut* s, u32 a, bool owners) void {
+    if (s->atoms[cast(a, u64)].kind != atom_kind.cell) { return; }
+    u64 mut i = 0;
+    while (i < s->slots_len) {
+        if (s->slots[i].key.base == base_kind.cell && s->slots[i].key.id == a) {
+            havoc_slot(s, i, owners);
+        }
+        i += 1;
+    }
+}
+
+// A write that the proof does not follow, in this body, in a callee or in an unknown call. A
+// pointer designates a local only when a FIR address names the storage of that local
+// (`addressed`). So the write can reach each such local, each caller storage and each cell.
+// Each other slot is of a local that no pointer designates (`spec/toolchain.md` 4.2).
+fn havoc_reachable(context* c, state mut* s, bool owners) void {
+    u64 mut i = 0;
+    while (i < s->slots_len) {
+        slot_key k = s->slots[i].key;
+        if (k.base != base_kind.local ||
+            (cast(k.id, u64) < c->addressed.len && c->addressed[cast(k.id, u64)])) {
+            havoc_slot(s, i, owners);
+        }
+        i += 1;
+    }
+}
+
 /// A call without a complete summary (D17.13, D17.18). It takes each owned argument, and it can
 /// change the storage that each reference argument designates, each caller storage, and each
-/// exposed atom. The result is an obligation of unknown shape. `report` records incomplete proof at
+/// exposed atom. Each other storage that a pointer can designate loses its references and its
+/// scalars. The result is an obligation of unknown shape. `report` records incomplete proof at
 /// the call when a tracked fact changes; a fort callee without a proof reported its own error.
 fn unknown_call(context mut* c, state mut* s, argument@ args, leaf_list* arg_leaves,
     types.node* t, leaf_list mut* out, bool report) void {
+    c->writes_untracked = true;
     bool mut changed = false;
     u64 mut i = 0;
     while (i < args.len) {
@@ -3641,6 +4286,10 @@ fn unknown_call(context mut* c, state mut* s, argument@ args, leaf_list* arg_lea
         }
         i += 1;
     }
+    // The effect can also write each other storage that a pointer can designate. The owners
+    // there keep their facts: D17.13 keeps known ownership facts across an extern call, and a
+    // fort callee without a usable summary clears the witness.
+    havoc_reachable(c, s, false);
     if (changed) {
         c->residual = true;
         s->witness = false;
@@ -3800,9 +4449,9 @@ fn uncertain_source(state mut* s) u32 {
     return push_atom(s, doubt);
 }
 
-// Adds a possibly released source to each member view of `a`: the callee released a member that
-// the summary does not name.
-fn doubt_members(state mut* s, u32 a) void {
+// Adds a possibly released source to each member view of an atom of `part`: the callee released
+// a member that the summary does not name.
+fn doubt_members(state mut* s, bool@ part) void {
     u32 mut doubt = NONE;
     u64 mut i = 0;
     while (i < s->slots_len) {
@@ -3811,7 +4460,8 @@ fn doubt_members(state mut* s, u32 a) void {
             u32 mut j = 0;
             bool mut member = false;
             while (j < v->count) {
-                if (v->sources[j] == a) { member = true; }
+                u64 source_at = cast(v->sources[j], u64);
+                if (source_at < part.len && part[source_at]) { member = true; }
                 j += 1;
             }
             if (member) {
@@ -3998,8 +4648,15 @@ fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list
             !designated(s, args[param - 1].v, &prefixes[k])) { return false; }
         k += 1;
     }
-    // The caller storage must have the layout that the callee reads: each exit slot of the
-    // callee names a caller slot of the same type. A cast pointer that disagrees stays unknown.
+    // The caller storage must have the type that the callee reads. A cast pointer argument of
+    // another type designates storage whose layout the summary does not describe, though no
+    // slot of the summary names it: a struct of scalars has none (review round 7). Each exit
+    // slot of the callee must also name a caller slot of the same type.
+    k = 0;
+    while (k < prefixes.len) {
+        if (key_type(c, s, prefixes[k]) != sum->callers[k].pointee) { return false; }
+        k += 1;
+    }
     u64 mut q = 0;
     while (q < sum->post.slots_len) {
         slot item = sum->post.slots[q];
@@ -4077,16 +4734,56 @@ fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list
         k += 1;
     }
     if (!separate(c, s, sum, args, arg_leaves, prefixes[..], bound[..])) { return false; }
+    // The witness crosses the call: it assumes that the callee returns, and nothing proves it.
+    // Each event that it validates from here on names the call, a failed requirement of this
+    // call too (D17.18, `spec/toolchain.md` 4.2). A witness that crosses more calls than it
+    // can name validates nothing.
+    if (s->witness && !add_crossed(s, crossed_call{.source = source(c, c->at),
+        .callee = target->symbol == null ? "" : target->symbol->name})) {
+        s->witness = false;
+        s->assumptions_full = true;
+    }
     // The empty owners that the callee requires (`spec/fir.md` 14 Calls, "empty output
     // owners"). A caller owner that is its own entry value passes the requirement on to its own
     // caller. A failed requirement reports the owner that the callee overwrites and marks it
     // lost. The call then applies: the callee stores over the owner and returns in the same way,
-    // so a later independent error keeps its own event (`spec/toolchain.md` 4.2).
+    // so a later independent error keeps its own event (`spec/toolchain.md` 4.2). A failure is
+    // validated only when each returning path of the callee stores over the owner; otherwise it
+    // is incomplete proof.
     i = 0;
     while (i < interfaces) {
         interface_entry e = sum->interface[i];
         if (bound[i] != NONE && (e.require_null || e.require_fields != 0)) {
-            check_required(c, s, bound[i], e);
+            bool settled_null = (sum->post.required_null & bit(i)) != 0;
+            u64 settled_fields = sum->post.required_fields[i];
+            check_required(c, s, bound[i], e, settled_null, settled_fields);
+        }
+        i += 1;
+    }
+    // A proved empty owner that reaches a dereference in the callee is a failed caller
+    // requirement (D10.7). It ends no path: the call goes on as for another failed requirement.
+    // The failure is validated only when each returning path of the callee dereferences the
+    // input; otherwise it is incomplete proof. An owner that is empty on some path into this
+    // state (a joined root) gives incomplete proof. An input of this body whose nullness it does
+    // not know passes the requirement on to its own callers.
+    i = 0;
+    while (i < interfaces && i < 64) {
+        if ((sum->deref_inputs & bit(i)) != 0) {
+            bool must = (sum->post.deref_handles & bit(i)) != 0;
+            atom held = bound[i] == NONE ? atom{} : s->atoms[cast(bound[i], u64)];
+            if (bound[i] == NONE || held.root == root_kind.null_root) {
+                violation(c, s, ownership_api.event_kind.caller_requirement,
+                    must ? certainty.definite : certainty.possible, NONE,
+                    "the empty owner that the callee dereferences");
+            } else if (held.root == root_kind.joined) {
+                violation(c, s, ownership_api.event_kind.caller_requirement, certainty.possible,
+                    bound[i], "the owner that the callee dereferences");
+            } else if (held.root == root_kind.free && held.handle != NONE &&
+                held.handle_field == NONE && held.handle < 64) {
+                u64 input = bit(cast(held.handle, u64));
+                if (must) { s->deref_handles = s->deref_handles | input; }
+                c->deref_inputs = c->deref_inputs | input;
+            }
         }
         i += 1;
     }
@@ -4159,7 +4856,6 @@ fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list
         s->reached = false;
         return true;
     }
-    s->witness = s->witness && sum->witness;
     // A reference of the callee's inputs that it keeps in a field without a slot is, here, a
     // reference that the arguments reach: an argument itself, a reference in storage that it
     // designates, or one in an owned argument. `arg_body` says that one of those can be a
@@ -4188,16 +4884,24 @@ fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list
         }
         i += 1;
     }
-    // A contradiction first: the callee returns only when a nonnull caller root is null. A
-    // required empty owner has a null exit root because the callee stores over it, not because
-    // a return needs it: a caller that breaks the requirement still returns.
+    // A contradiction first: the exit record of an input is its entry value on each returning path.
+    // Each returning path can have that input null while this body passes a root that it
+    // established nonnull. The callee then does not return for these arguments, and the path ends
+    // (`spec/fir.md` 14.1, A06: a complete no-return proof removes the return continuation). A
+    // nonnull exit root can come from an unfold that the callee assumed, so a null argument ends no
+    // path (D17.18: no assumed fact removes a path). A required empty owner has a null exit root
+    // because the callee stores over it, not because a return needs it: a caller that breaks the
+    // requirement still returns. A free input choice of this body needs no refinement here: no exit
+    // slot owns a null root, so the graft below gives the argument a null root.
     i = 0;
     while (i < interfaces) {
         atom p = sum->post.atoms[i];
-        if (bound[i] != NONE && p.used && p.root == root_kind.null_root &&
-            !sum->interface[i].require_null) {
-            atom x = s->atoms[cast(bound[i], u64)];
-            if (x.root == root_kind.nonnull || x.kind == atom_kind.cell) {
+        if (p.used && !sum->interface[i].require_null) {
+            u32 b = bound[i];
+            bool nonnull_here = b != NONE && !s->atoms[cast(b, u64)].unfold_nonnull &&
+                (s->atoms[cast(b, u64)].root == root_kind.nonnull ||
+                s->atoms[cast(b, u64)].kind == atom_kind.cell);
+            if (p.root == root_kind.null_root && nonnull_here) {
                 if (target->member && c->reporting) {
                     unproved(c, s, ownership_api.incomplete_reason.unknown_effect, NONE,
                         "a return of this recursive call");
@@ -4219,7 +4923,23 @@ fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list
                 // A drop of the slots of a cell bound to an opaque entry reads them first.
                 bool slot_borrows = member_refs(s, b, false);
                 bool slot_params = member_refs(s, b, true);
-                if (sum->interface[i].needs_shape) { drop_cell_slots(s, b); }
+                // A cell bound to a region entry is folded above, and one bound to a flat entry
+                // owns nothing. A cell bound to an opaque entry can still own members when the
+                // callee released the entry: a member of the component under solution applies
+                // without a proof. Those members belong to `b` in the exit facts (`retire`).
+                if (sum->interface[i].needs_shape) {
+                    bool mut@ own part = new(bool, s->atoms_len);
+                    owned_from(s, b, part);
+                    part[cast(b, u64)] = false;
+                    k = 0;
+                    while (k < part.len) {
+                        if (part[k]) { redirect_add(s, cast(k, u32), b); }
+                        k += 1;
+                    }
+                    retire(s, part[..], NONE, true, (sum->post.released & bit(i)) != 0, false);
+                    del(part);
+                    drop_cell_slots(s, b);
+                }
                 atom mut* x = &s->atoms[cast(b, u64)];
                 if (sum->interface[i].needs_shape) {
                     x->kind = p.kind;
@@ -4237,10 +4957,19 @@ fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list
                     // The callee changed the fields, so a later unfold names no entry field.
                     x->handle = NONE;
                 }
+                // A `joined` exit root says that the returning paths of the callee do not take
+                // each value of this input apart from the values of another, so a free input
+                // choice of this body is no free choice after the call (`choice_split`,
+                // `spec/toolchain.md` 4.2).
                 if (p.root == root_kind.nonnull) {
+                    // A root that the callee assumed at an unfold stays an assumed root here.
+                    bool known_here = x->root == root_kind.nonnull && !x->unfold_nonnull;
                     x->root = root_kind.nonnull;
+                    x->unfold_nonnull = !known_here && p.unfold_nonnull;
                 } else if (sum->interface[i].needs_shape) {
                     x->root = join_root(x->root, root_kind.joined);
+                } else if (p.root == root_kind.joined && x->root == root_kind.free) {
+                    x->root = root_kind.joined;
                 }
             }
         } else if (p.used) {
@@ -4277,33 +5006,37 @@ fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list
     }
     // An interface atom that no exit slot owns: its members stay in the exit atoms that name
     // it in their origin, or the callee released them, or each returning path had a null root.
+    // The exit state joins each returning path, so `released` there is a fact of each path and
+    // `maybe_released` or a bit of `released` is a fact of some path (`spec/toolchain.md` 4.2).
     i = 0;
     while (i < interfaces) {
         u32 b = bound[i];
         if (b != NONE) {
             atom rec = sum->post.atoms[i];
+            bool rel_root = rec.used && rec.status == atom_status.released;
             bool rel = (sum->post.released & bit(i)) != 0 || (rec.used &&
                 (rec.status == atom_status.released || rec.status == atom_status.maybe_released));
             if (!owned_in_post[i]) {
+                // The interface atom holds `b` and each atom that `b` owns here.
+                bool mut@ own part = new(bool, s->atoms_len);
+                owned_from(s, b, part);
                 u64 mut kept = 0;
                 u64 mut j = 0;
                 while (j < origins) {
                     atom other = sum->post.atoms[j];
                     if (j != i && other.used && other.root != root_kind.null_root &&
                         (other.origin & bit(i)) != 0 && map[j] != NONE) {
-                        redirect_add(s, b, map[j]);
+                        k = 0;
+                        while (k < part.len) {
+                            if (part[k]) { redirect_add(s, cast(k, u32), map[j]); }
+                            k += 1;
+                        }
                         kept += 1;
                     }
                     j += 1;
                 }
-                if (kept > 0) {
-                    if (rel) { doubt_members(s, b); }
-                    redirect(s, b, NONE, false);
-                    drop_cell_slots(s, b);
-                    s->atoms[cast(b, u64)].used = false;
-                } else if (rel) {
-                    drop_cell_slots(s, b);
-                    s->atoms[cast(b, u64)].status = atom_status.released;
+                if (kept > 0 || rel) {
+                    retire(s, part[..], b, kept > 0, rel, rel_root);
                 } else if (rec.used && rec.status == atom_status.leaked) {
                     mark_leaked(s, b);
                 } else if (s->atoms[cast(b, u64)].status != atom_status.leaked &&
@@ -4311,8 +5044,12 @@ fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list
                     // A lost owner that the callee stored over keeps its allocation.
                     s->atoms[cast(b, u64)].root = root_kind.null_root;
                 }
+                del(part);
             } else if (rel) {
-                doubt_members(s, b);
+                bool mut@ own one = new(bool, s->atoms_len);
+                one[cast(b, u64)] = true;
+                doubt_members(s, one[..]);
+                del(one);
             }
         }
         i += 1;
@@ -4391,10 +5128,50 @@ fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list
     return true;
 }
 
+// Retires `b` and each atom of `part`, which holds `b` and the atoms that `b` owns. The callee
+// moved some of their storage into the exit atoms that name `b` in their origin (`moved`), or
+// released some of it (`released`). No record of them holds an obligation from here on:
+// `canonical` keeps a record only for an address of one of its fields.
+// When no exit atom holds any of their storage, each returning path released it or had a null
+// root: a move keeps the origin, and a callee that loses an owner has no usable summary. So
+// each record is released. Otherwise the root is released when each returning path released it
+// (`root_released`); a record is possibly released when some path released a member, and it
+// left the proof with its storage when no path did (`spec/toolchain.md` 4.2).
+fn retire(state mut* s, bool@ part, u32 b, bool moved, bool released, bool root_released) void {
+    if (moved) {
+        if (released) { doubt_members(s, part); }
+        u64 mut k = 0;
+        while (k < part.len) {
+            if (part[k]) { redirect(s, cast(k, u32), NONE, false); }
+            k += 1;
+        }
+    }
+    u64 mut k = 0;
+    while (k < part.len) {
+        if (part[k]) {
+            u32 r = cast(k, u32);
+            drop_cell_slots(s, r);
+            atom_status was = s->atoms[k].status;
+            if (was == atom_status.live || was == atom_status.unknown) {
+                if (!moved || (r == b && root_released)) {
+                    s->atoms[k].status = atom_status.released;
+                } else if (released) {
+                    s->atoms[k].status = atom_status.maybe_released;
+                } else {
+                    s->atoms[k].status = atom_status.escaped;
+                }
+            }
+            if (moved || r != b) { s->atoms[k].used = false; }
+        }
+        k += 1;
+    }
+}
+
 // One empty owner that a callee requires: the bound atom, or one owned field of its root. False
 // when the requirement fails: the event names the owner, and the owner is lost because the
-// callee stores over it.
-fn require_one(context mut* c, state mut* s, u32 a, string text) bool {
+// callee stores over it. `settled` says that each returning path of the callee stores over it.
+// Without it, no path of this body validates the failure.
+fn require_one(context mut* c, state mut* s, u32 a, bool settled, string text) bool {
     atom item = s->atoms[cast(a, u64)];
     if (item.root == root_kind.null_root || item.status == atom_status.leaked ||
         item.status == atom_status.escaped) { return true; }
@@ -4403,16 +5180,18 @@ fn require_one(context mut* c, state mut* s, u32 a, string text) bool {
         mark_leaked(s, a);
         return false;
     }
-    if (require_empty(c, s, a)) { return true; }
-    violation(c, s, ownership_api.event_kind.caller_requirement,
-        item.kind == atom_kind.cell ? certainty.definite : certainty_of(item.root), a, text);
+    if (require_empty(c, s, a, settled)) { return true; }
+    certainty how = !settled ? certainty.possible :
+        (item.kind == atom_kind.cell ? certainty.definite : certainty_of(item.root));
+    violation(c, s, ownership_api.event_kind.caller_requirement, how, a, text);
     mark_leaked(s, a);
     return false;
 }
 
-fn check_required(context mut* c, state mut* s, u32 b, interface_entry e) void {
+fn check_required(context mut* c, state mut* s, u32 b, interface_entry e, bool settled_null,
+    u64 settled_fields) void {
     if (e.require_null) {
-        require_one(c, s, b, "an empty owner that this call requires");
+        require_one(c, s, b, settled_null, "an empty owner that this call requires");
         return;
     }
     // A lost field leaves the field: the callee stores over it, so the shape that the callee
@@ -4425,6 +5204,7 @@ fn check_required(context mut* c, state mut* s, u32 b, interface_entry e) void {
             item.status == atom_status.live && cast(item.handle, u64) < c->interface_len) {
             u64 at = cast(item.handle, u64);
             c->require_fields[at] = c->require_fields[at] | e.require_fields;
+            s->required_fields[at] = s->required_fields[at] | (e.require_fields & settled_fields);
             return;
         }
         unproved(c, s, ownership_api.incomplete_reason.missing_graph, b,
@@ -4437,7 +5217,8 @@ fn check_required(context mut* c, state mut* s, u32 b, interface_entry e) void {
         if (field.key.base == base_kind.cell && field.key.id == b && field.key.depth == 1 &&
             field.key.path[0] < 64 && (e.require_fields & bit(cast(field.key.path[0], u64))) != 0) {
             if (field.v.kind == value_kind.owned) {
-                if (!require_one(c, s, field.v.atom,
+                bool settled = (settled_fields & bit(cast(field.key.path[0], u64))) != 0;
+                if (!require_one(c, s, field.v.atom, settled,
                     "an empty owned field that this call requires")) {
                     s->slots[i].v = empty_value();
                 }
@@ -4518,15 +5299,29 @@ fn call(context mut* c, state mut* s, fir.rvalue rv, types.node* t, leaf_list mu
         // A published fort body without a proof reported its own error (`spec/fir.md` 14.1).
         bool own_error = sum != null && sum->known && !usable && !target->member;
         u64 before = c->notes;
-        if (usable && apply(c, s, target, args[..], &arg_leaves, t, out, false)) { return; }
+        if (usable && apply(c, s, target, args[..], &arg_leaves, t, out, false)) {
+            // A callee that writes untracked can write each storage that a pointer can
+            // designate, and its summary does not name that write.
+            if (sum->writes_untracked) {
+                c->writes_untracked = true;
+                havoc_reachable(c, s, false);
+            }
+            return;
+        }
         // A member call still checks its binding, so its own reason names the call.
         if (!usable && target->member && sum != null && sum->known) {
             apply(c, s, target, args[..], &arg_leaves, t, out, true);
         }
         reset(out);
+        // A fort callee without a usable summary can fail to return, so no later operation of
+        // this path has a validated witness (`spec/fir.md` 14.1, A06).
+        s->witness = false;
         unknown_call(c, s, args[..], &arg_leaves, t, out, !own_error && c->notes == before);
         return;
     }
+    // A call of a function value is a call of unknown fort targets here. An extern call
+    // returns (D17.13), so it keeps the witness.
+    if (rv.callee != fir.callee_kind.cl_extern) { s->witness = false; }
     unknown_call(c, s, args[..], &arg_leaves, t, out, true);
 }
 
@@ -4546,6 +5341,14 @@ fn refine(state mut* s, value cond, bool truth) bool {
         if (a->root == root_kind.null_root) { return false; }
         if (a->root == root_kind.joined) { s->witness = false; }
         a->root = root_kind.nonnull;
+        // The test establishes what an unfold assumed.
+        a->unfold_nonnull = false;
+        return true;
+    }
+    // A root that an unfold assumed nonnull removes no path: the null edge stays, without a
+    // witness, because the state still holds the unfolded cell (D17.18).
+    if (a->unfold_nonnull) {
+        s->witness = false;
         return true;
     }
     if (a->root == root_kind.nonnull || a->kind == atom_kind.cell) { return false; }
@@ -4554,11 +5357,13 @@ fn refine(state mut* s, value cond, bool truth) bool {
     return true;
 }
 
-// The checks that a build mode removes (`spec/fir.md` 8). Their continuation stays feasible in
-// that mode, so it keeps the witness.
+// The checks that `--release` removes: overflow, shift and overwrite (`spec/fir.md` 8). Their
+// continuation stays feasible in that build, so a failure keeps the witness. `--no-bounds-check`
+// removes bounds and span checks too, but that flag is unsafe (D10.6), so those stay kept
+// checks. A kept check ends the path only when it fails for the values that the state knows
+// (`spec/toolchain.md` 4.2).
 fn removable(fir.check_kind k) bool {
     return k == fir.check_kind.chk_overflow || k == fir.check_kind.chk_shift ||
-        k == fir.check_kind.chk_bounds || k == fir.check_kind.chk_span ||
         k == fir.check_kind.chk_overwrite;
 }
 
@@ -4698,6 +5503,9 @@ fn finish_return(context mut* c, state mut* s) void {
         }
         i += 1;
     }
+    // The assumptions that this body crossed are no fact of its exit state.
+    copy.crossed_len = 0;
+    copy.assumptions_full = false;
     if (!canonical(c, &copy) || !charge_content(c, &copy)) { return; }
     state mut joined = state{};
     defer free_state(&joined);
@@ -4707,8 +5515,9 @@ fn finish_return(context mut* c, state mut* s) void {
 
 // ---- witnesses across branches ---------------------------------------------------------------
 
-// The successors of block `b` in the post-dominator graph. A return, an abort, and a check that
-// no build mode removes reach the virtual exit `n`.
+// The successors of block `b` in the post-dominator graph. A return and an abort reach the
+// virtual exit `n`. A check does not: one that fails for known values ends its path in
+// `run_block`, so no state of that path reaches a later block.
 fn successors(fir.func* f, u32 b, u32 n, u32 mut@ out) u32 {
     fir.terminator* t = &fir.block_at(f, b)->term;
     u32 mut count = 0;
@@ -4722,8 +5531,7 @@ fn successors(fir.func* f, u32 b, u32 n, u32 mut@ out) u32 {
         i += 1;
     }
     bool exits = t->kind == fir.term_kind.tk_return || t->kind == fir.term_kind.tk_fail ||
-        t->kind == fir.term_kind.tk_trap || t->kind == fir.term_kind.tk_unreachable ||
-        (t->kind == fir.term_kind.tk_check && !removable(t->check));
+        t->kind == fir.term_kind.tk_trap || t->kind == fir.term_kind.tk_unreachable;
     if (exits && cast(count, u64) < out.len) {
         out[cast(count, u64)] = n;
         count += 1;
@@ -4784,8 +5592,8 @@ fn region_clean(fir.func* f, u32 b, u32 m, u32 n) bool {
 }
 
 /// Finds, for each branch, the block where all of its paths return (`spec/toolchain.md` 4.2). The
-/// post-dominators use a virtual exit after each return, abort, and check that no build mode
-/// removes. Each block pays one W unit in each round.
+/// post-dominators use a virtual exit after each return and abort (`successors`). Each block
+/// pays one W unit in each round.
 fn lay_out_rejoins(context mut* c) bool {
     u32 n = fir.block_count(c->f);
     c->rejoin = new(u32, cast(n, u64));
@@ -4864,7 +5672,7 @@ fn lay_out_rejoins(context mut* c) bool {
 // paths is feasible (`spec/toolchain.md` 4.2). The branch gives its witness at its terminator,
 // so a call in the branch block that can fail to return clears it.
 fn restore_witness(context* c, u32 b, state mut* s) void {
-    if (s->witness) { return; }
+    if (s->witness || s->assumptions_full) { return; }
     u64 mut x = 0;
     while (x < c->rejoin.len && x < c->left.len) {
         if (c->rejoin[x] == b && c->left[x]) {
@@ -4887,6 +5695,7 @@ fn run_block(context mut* c, u32 b) void {
         fir.statement* stmt = fir.block_statement(c->f, b, i);
         c->op = position(c, b, i, false);
         c->at = stmt->loc;
+        c->exit_at = stmt->exit_loc;
         if (!pay(c, 1)) { return; }
         statement(c, &s, stmt);
         if (!charge_content(c, &s)) { return; }
@@ -4896,6 +5705,7 @@ fn run_block(context mut* c, u32 b) void {
     fir.terminator* term = &blk->term;
     c->op = position(c, b, count, true);
     c->at = term->loc;
+    c->exit_at = diag.loc{};
     if (!pay(c, 1)) { return; }
     c->left[cast(b, u64)] = s.witness;
     switch (term->kind) {
@@ -4933,9 +5743,20 @@ fn run_block(context mut* c, u32 b) void {
             operand(c, &s, fir.operand_at(c->f, term->args_first + arg));
             arg += 1;
         }
-        bool passes = term->check == fir.check_kind.chk_user ?
-            checked.known && checked.truth : checked.known && !checked.truth;
-        if (!removable(term->check) && !passes) { s.witness = false; }
+        // A kept check fails for the values that this state knows only when its condition is
+        // known. It then fails on each path into this state, so the path ends as an abort ends
+        // it. On a value that this state does not know, the witness goes on and assumes that
+        // the check passes. An event that it validates names the check (D17.18,
+        // `spec/toolchain.md` 4.2). The condition of `user` holds on success, and each other
+        // condition holds on failure (`spec/fir.md` 8).
+        if (!removable(term->check) && checked.known &&
+            checked.truth != (term->check == fir.check_kind.chk_user)) { return; }
+        if (!removable(term->check) && !checked.known &&
+            !add_crossed(&s, crossed_call{.source = source(c, c->at), .check = true,
+            .kind = term->check})) {
+            s.witness = false;
+            s.assumptions_full = true;
+        }
         propagate(c, term->target, &s);
     case fir.term_kind.tk_check_overwrite:
         location mut loc = location{};
@@ -4943,6 +5764,7 @@ fn run_block(context mut* c, u32 b) void {
         resolve(c, &s, term->place, &loc, &checked_ty);
         propagate(c, term->target, &s);
     default:
+        // An abort, a trap, or an unreachable terminator that the path reaches: no return.
         return;
     }
 }
@@ -4980,6 +5802,7 @@ fn free_context(context mut* c) void {
     del(c->interface);
     del(c->require_null);
     del(c->require_fields);
+    del(c->addressed);
     del(c->seen);
     strbuf.free(&c->text);
 }
@@ -5087,6 +5910,8 @@ fn take_summary(context mut* c) summary {
     out.returns = c->exit.reached && !c->stopped;
     out.witness = c->exit.witness;
     out.residual = c->residual || c->stopped;
+    out.writes_untracked = c->writes_untracked;
+    out.deref_inputs = c->deref_inputs;
     out.interface = new(interface_entry, c->interface_len);
     u64 mut i = 0;
     while (i < c->interface_len) {
@@ -5114,7 +5939,9 @@ fn take_summary(context mut* c) summary {
 fn same_summary(context mut* c, summary* a, summary* b, bool mut* same) bool {
     *same = false;
     if (a->known != b->known || a->returns != b->returns || a->witness != b->witness ||
-        a->residual != b->residual || a->view_reads != b->view_reads ||
+        a->residual != b->residual || a->writes_untracked != b->writes_untracked ||
+        a->deref_inputs != b->deref_inputs ||
+        a->view_reads != b->view_reads ||
         a->reads_high != b->reads_high ||
         a->proof.kind != b->proof.kind || a->proof.failed != b->proof.failed ||
         a->interface.len != b->interface.len) { return true; }

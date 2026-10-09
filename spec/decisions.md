@@ -2536,22 +2536,64 @@ says ownership is "by convention", this section supersedes it.
   Otherwise report the affected obligation as incomplete proof. A work-budget failure is an error.
   A validated reaching-path witness can establish an invalid operation.
   An abstract possibility without that witness establishes only failure to prove safety.
-  A witness can cross a direct call of a fort callee that has a returning type and no parameter
-  that can own a value. It assumes that the callee returns (fir.md 14.1, A06).
+  A witness can cross a call of a fort callee whose summary the analysis applies. That summary
+  is complete, or it is the current summary of a member of the component under solution.
+  The witness assumes that the callee returns. Nothing has to prove that the callee returns.
+  After the call the witness has the facts that each returning path of the summary gives for
+  the actual arguments. The call ends the path when the summary has no returning path.
+  It also ends the path when each returning path has an input null where its argument is nonnull.
+  A failed caller requirement is no such contradiction: the call goes on (fir.md 14 Calls).
+  The analysis removes a path only with a fact that holds on each execution that the state
+  represents. A test, an assignment or an allocation establishes such a fact. A fact that the
+  analysis assumes removes no path. A nonnull root at a dereference is such a fact. An address
+  computation reads no storage. It establishes no fact about its base. A call ends a caller path
+  only when each returning path of the summary contradicts an established fact of the
+  arguments. A proved empty owner that reaches a dereference in a callee is a failed caller
+  requirement (D10.7).
+  The summary of a member of the component proves no absent return. There, a call of a summary
+  without a returning path gives incomplete proof.
+  A witness can cross a kept check on a value that the analysis does not know. It assumes that
+  the check passes. A kept check is each check other than an overflow, shift or overwrite check.
+  A kept check that fails for known values ends the path.
+  A check of another kind keeps the witness for any value, because `--release` removes it.
+  A dereference that reads or writes storage is a null check. A dereference of a pointer that
+  the analysis knows is null ends the path. At a pointer whose nullness the analysis does not
+  know, the witness assumes that the pointer is not null. A parameter can be null.
+  Each crossed call with an applied summary, each crossed kept check and each crossed null check
+  on a pointer of unknown nullness is an assumption.
+  A kept check or a null check inside such a callee is no assumption of its own: the assumption
+  that the callee returns covers it.
+  A validated violation names each assumption of each witnessed path to it, in a note at the
+  call, the check or the dereference (toolchain.md 4.2).
+  A witness keeps a fixed number of assumptions. A witness that needs one more ends there.
+  An extern call keeps the witness and is no assumption, because D17.13 trusts it.
+  Code can write where the analysis does not follow the write. Such code is an unknown or extern
+  call, a store through a pointer that the analysis does not follow, or a callee with such code.
+  A pointer can designate a local only when a FIR address names the storage of that local.
+  So such code can write each such local, each caller storage and each allocation.
+  After such code, no reference and no scalar value in that storage is known.
+  A store into the storage of a global, or into a field without a tracked value, changes no
+  tracked value.
+  A store through a pointer of another type than the target storage leaves that storage no fact.
+  A read through such a pointer gives no known value. A call with such a pointer argument
+  applies no summary: the summary does not describe that storage.
+  A witness can also cross an unresolved direct call of a fort callee with a returning type and
+  no parameter that can own a value. It assumes that the callee returns (fir.md 14.1, A06).
   An entry value is the value that a parameter of the checked function has when it starts.
   A parameter depends on its own entry value. A statement depends on each entry value that a
   place it reads depends on: an operand, the index of an element, or a pointer that its
   destination loads. A value that the statement writes depends on the same entry values.
-  A crossed call can read each entry value that its own statement depends on.
+  A crossed unresolved call can read each entry value that its own statement depends on.
   It can also read each entry value that an earlier statement of the function depends on, when
   that statement stores outside a local whose storage no FIR address names. A store through a
   pointer or a view and a store into a global count. So does each earlier call, an extern call
   too, because the callee can store what it reads.
-  After a crossed call the witness takes no branch whose condition depends on an entry value
-  that the call can read. After a branch whose condition depends on any entry value, the
-  witness crosses no fort call. Such a branch or call leaves the event incomplete proof.
-  The witness knows no value in a global, behind a pointer, or in a local whose storage a FIR
-  address names. So no branch that it takes reads such a value.
+  After a crossed unresolved call the witness takes no branch whose condition depends on an
+  entry value that the call can read. After a branch whose condition depends on any entry value,
+  the witness crosses no unresolved fort call. Such a branch or call leaves the event incomplete
+  proof. A witness that crosses unresolved calls knows no value in a global, behind a pointer,
+  or in a local whose storage a FIR address names. So no branch that it takes reads such a
+  value.
   A crossed call that does not return for the inputs that it gets on the witness path makes a
   violation after it false. A function that never returns is such a callee. Give such a
   function a noreturn type; the compiler does not check this.
@@ -2580,6 +2622,21 @@ says ownership is "by convention", this section supersedes it.
   violation for a callee that aborts for some values only, such as `require(n < 100)` before a
   branch on n. The witness takes no branch on an entry value that a crossed call can read,
   through its arguments or through a value that the function stored before the call.
+  Amended 2026-10-09: A witness crossed a call with an applied summary only with a validated
+  path or an inductive argument (toolchain.md 4.2). The analysis read that as a proof that the
+  callee returns for the actual arguments. Each review round of that proof found a callee that
+  aborts and still kept the witness. The user ruled "Assume calls return". The witness assumes
+  that each such call returns, and the violation names each call that it assumes. A callee
+  that aborts then gives a false violation with that note, never a missed one.
+  Amended 2026-10-10: A witness crossed a kept check on an unknown value with no note. The user
+  ruled "Assume it passes, note it". So the violation names each such check too. The ruling
+  names null, so a dereference is a null check under it (coordinator ruling). Review also found
+  facts that a write outside the analysis made stale: a view behind an address in a global, and
+  a slot written through a cast pointer. Now such a write clears the facts of each storage that
+  a pointer can designate. A call with a cast pointer argument applied its summary; now it does
+  not. A design review then found that the heap solver alone proved four bodies with a real
+  error: a nonnull root from an address computation or a dereference, and a null argument against
+  such a root, removed paths. Now no assumed fact removes a path.
 
 ### D17.19 Global ownership and process boundaries
 - owner: `memory-model.md` (2.9), `toolchain.md` (2.1), `module-system.md` (11),

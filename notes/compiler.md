@@ -854,8 +854,10 @@ came here.
   witnessed path is unconditional, a free choice gives a validated path, and anything else is
   incomplete proof. A branch whose paths all reach one block with no call and no cycle restores
   the witness there (post-dominators over a virtual exit after each return and abort). The
-  branch gives the witness that it holds at its terminator, after the calls of its own block:
-  a call before the branch that can fail to return clears it (`after_spin`).
+  branch gives the witness that it holds at its terminator, after the calls of its own block.
+  A call with an applied summary keeps the witness: it assumes that the callee returns, and
+  the event names the call (D17.18; `after_spin` crosses a loop that never ends). Before, a
+  callee whose own exit had no witness cleared it.
   `del` frees and then zeroes its place (`spec/toolchain.md` 6 item 17), so the release sees the
   place full: `del(view->next)` of an owned self-cycle loses a live leaf (H05).
   A summary keeps the exit state of the result and of caller storage. An owner whose entry value

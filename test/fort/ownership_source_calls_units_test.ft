@@ -1,0 +1,243 @@
+//! run
+//! flags: -I ../../src/fort
+//! stdout:
+//| limits ok
+//| retention ok
+//| validation ok
+//| events ok
+//| diagnostics ok
+/// Holds the classification helpers and the event service of the calls_heap producer: which
+/// refusal is a budget error, which heap reason is a missing fact, and the V bound of kept
+/// events, and the records that stay one diagnostic (`spec/fir.md` 14.1, toolchain 1.1 and 4.2).
+import ownership_api;
+import ownership_events;
+import ownership_graph;
+import ownership_limits;
+import ownership_source_calls;
+
+fn refusal(ownership_api.limit_category kind) ownership_api.proof_status {
+    ownership_api.proof_status mut out = ownership_api.incomplete(
+        ownership_api.incomplete_reason.work_limit, ownership_api.operation_position{},
+        ownership_api.source_position{});
+    out.terminal.limit.present = true;
+    out.terminal.limit.category = kind;
+    return out;
+}
+
+fn reason(ownership_api.incomplete_reason why) ownership_api.proof_status {
+    return ownership_api.incomplete(why, ownership_api.operation_position{},
+        ownership_api.source_position{});
+}
+
+// A refused W, E or V charge is a budget error. A refused precision bound is not: the solver
+// goes on without the lost facts, and a heap proof that stops there lacks a fact.
+fn limits() void {
+    assert(ownership_source_calls.limited(refusal(ownership_api.limit_category.w)));
+    assert(ownership_source_calls.limited(refusal(ownership_api.limit_category.e)));
+    assert(ownership_source_calls.limited(refusal(ownership_api.limit_category.v)));
+    assert(!ownership_source_calls.limited(refusal(ownership_api.limit_category.r)));
+    assert(!ownership_source_calls.limited(refusal(ownership_api.limit_category.d)));
+    assert(!ownership_source_calls.limited(reason(ownership_api.incomplete_reason.unknown_effect)));
+    assert(ownership_source_calls.heap_gap(refusal(ownership_api.limit_category.r)));
+    assert(ownership_source_calls.heap_gap(refusal(ownership_api.limit_category.h)));
+    assert(!ownership_source_calls.heap_gap(refusal(ownership_api.limit_category.w)));
+    assert(ownership_source_calls.heap_gap(reason(ownership_api.incomplete_reason.missing_graph)));
+    assert(ownership_source_calls.heap_gap(
+        reason(ownership_api.incomplete_reason.unknown_effect)));
+    assert(!ownership_source_calls.heap_gap(reason(ownership_api.incomplete_reason.missing_path)));
+    ownership_api.proof_status mut definite = ownership_api.proof_status{
+        .kind = ownership_api.proof_kind.complete};
+    definite.failed = true;
+    assert(!ownership_source_calls.heap_gap(definite));
+    assert(!ownership_source_calls.heap_gap(ownership_api.proof_status{
+        .kind = ownership_api.proof_kind.complete}));
+    println("limits ok");
+}
+
+// Each kept event charges one V unit of the running ledger. A refused charge keeps no event
+// and records the V refusal, which a later precision refusal does not hide.
+fn retention() void {
+    ownership_source_calls.context mut c = ownership_source_calls.context{};
+    c.ledgers = new(ownership_source_calls.ledger, 1);
+    defer del(c.ledgers);
+    c.ledgers_len = 1;
+    ownership_api.limit_table mut table = ownership_limits.production();
+    table.v = 1;
+    assert(ownership_limits.configure(&c.ledgers[0].meter, &table));
+    c.current = 0;
+    ownership_api.event_descriptor e = ownership_api.event_descriptor{
+        .source = ownership_api.source_position{0, 0, 3, 5, 3, 9, true}};
+    assert(ownership_source_calls.charge_retained(&c, &e));
+    assert(!ownership_source_calls.charge_retained(&c, &e));
+    ownership_source_calls.ledger* l = &c.ledgers[0];
+    assert(l->report_refusal.terminal.present);
+    assert(l->report_refusal.terminal.limit.category == ownership_api.limit_category.v);
+    assert(l->first_refusal.terminal.limit.category == ownership_api.limit_category.v);
+    assert(l->report_refusal.terminal.source.line == 3);
+    assert(!l->work_refusal.terminal.present);
+    // A row of this ledger lost an event, so its proof cannot be complete.
+    ownership_source_calls.row mut r = ownership_source_calls.row{};
+    assert(ownership_source_calls.lost_reports(&c, &r));
+    c.ledgers[0].report_refusal = ownership_api.proof_status{};
+    assert(!ownership_source_calls.lost_reports(&c, &r));
+    println("retention ok");
+}
+
+// A violation needs a validated event of invalid use, lost ownership or a failed caller
+// requirement: unconditional evidence, or a validated path with a validated witness, and no
+// residual path (toolchain 4.2). Any other event is unproved.
+fn validation() void {
+    ownership_api.event_descriptor mut e = ownership_api.event_descriptor{
+        .kind = ownership_api.event_kind.invalid_use,
+        .evidence = ownership_api.evidence_kind.unconditional};
+    assert(ownership_source_calls.validated(&e));
+    e.kind = ownership_api.event_kind.lost_ownership;
+    assert(ownership_source_calls.validated(&e));
+    e.kind = ownership_api.event_kind.caller_requirement;
+    assert(ownership_source_calls.validated(&e));
+    e.kind = ownership_api.event_kind.incomplete_proof;
+    assert(!ownership_source_calls.validated(&e));
+    e.kind = ownership_api.event_kind.invalid_use;
+    e.evidence = ownership_api.evidence_kind.abstract_possibility;
+    assert(!ownership_source_calls.validated(&e));
+    e.evidence = ownership_api.evidence_kind.validated_path;
+    assert(!ownership_source_calls.validated(&e));
+    ownership_api.witness_link[1] mut link = {ownership_api.witness_link{.validated = true}};
+    e.witnesses = link[..];
+    assert(ownership_source_calls.validated(&e));
+    e.source_path.residual = true;
+    assert(!ownership_source_calls.validated(&e));
+    println("validation ok");
+}
+
+fn key(u32 declaration) ownership_api.function_id {
+    return ownership_api.function_id{ownership_api.declaration_id{1, declaration}, 0};
+}
+
+fn sent(ownership_source_calls.context mut* c, ownership_api.event_descriptor e) void {
+    ownership_api.event_request request = ownership_api.event_request{e,
+        ownership_api.proof_status{.kind = ownership_api.proof_kind.complete}};
+    assert(ownership_source_calls.event(cast(c, void mut*), &request).retained);
+}
+
+// The event service keeps a validated event of the heap solver as a record, and each event of
+// the summary solver as an unproved event: its flow marks a failure unconditional, but it
+// decides no condition on the path (toolchain 4.2). Each kept event charges one V unit of the
+// running ledger. An event that names no body goes to the first member of the component.
+fn events() void {
+    ownership_graph.body_input[2] bodies = {ownership_graph.body_input{.key = key(1)},
+        ownership_graph.body_input{.key = key(2)}};
+    ownership_graph.graph mut g = ownership_graph.graph{.bodies = bodies[..]};
+    ownership_source_calls.context mut c = ownership_source_calls.context{.graph = &g};
+    defer ownership_source_calls.free(&c);
+    c.rows = new(ownership_source_calls.row, 2);
+    // The one component holds both bodies, and body 1 is its first member.
+    c.members = new(u64, 2);
+    c.members[0] = 1;
+    c.members_first = new(u64, 2);
+    c.members_first[1] = 2;
+    c.ledgers = new(ownership_source_calls.ledger, 2);
+    c.ledgers_len = 2;
+    ownership_api.limit_table table = ownership_limits.production();
+    assert(ownership_limits.configure(&c.ledgers[0].meter, &table));
+    assert(ownership_limits.configure(&c.ledgers[1].meter, &table));
+    ownership_api.event_descriptor mut e = ownership_api.event_descriptor{
+        .kind = ownership_api.event_kind.invalid_use,
+        .evidence = ownership_api.evidence_kind.unconditional,
+        .source = ownership_api.source_position{0, 0, 4, 1, 4, 2, true}};
+    e.operation.function = key(2);
+    c.running = ownership_source_calls.solver_kind.summary;
+    c.current = 0;
+    sent(&c, e);
+    ownership_source_calls.row* second = &c.rows[1];
+    assert(second->records_len == 0 && second->has_first_summary);
+    assert(second->first_summary.value.kind == ownership_api.event_kind.invalid_use);
+    assert(c.ledgers[0].meter.used.v == 1);
+    // A later summary event of the same body is counted, not kept.
+    e.source.line = 5;
+    sent(&c, e);
+    assert(second->first_summary.value.source.line == 4 && second->dropped == 1);
+    assert(c.ledgers[0].meter.used.v == 1);
+    // The heap solver keeps the same event as a violation, on its own ledger.
+    c.running = ownership_source_calls.solver_kind.heap;
+    c.current = 1;
+    sent(&c, e);
+    assert(second->records_len == 1 && !second->has_first_heap);
+    assert(c.ledgers[1].meter.used.v == 1);
+    // An event without a body of the closure goes to the first member of the component.
+    e.operation.function = key(7);
+    e.kind = ownership_api.event_kind.incomplete_proof;
+    e.evidence = ownership_api.evidence_kind.abstract_possibility;
+    sent(&c, e);
+    assert(second->has_first_heap && second->first_heap.value.source.line == 5);
+    assert(!c.rows[0].has_first_heap && !c.rows[0].has_first_summary);
+    assert(c.ledgers[1].meter.used.v == 2);
+    println("events ok");
+}
+
+fn kept(ownership_source_calls.row mut* r, ownership_api.event_descriptor e) void {
+    ownership_source_calls.grow_records(r);
+    r->records[r->records_len] = ownership_source_calls.record{ownership_events.clone(&e)};
+    r->records_len += 1;
+}
+
+// Toolchain 4.2 suppresses a record only for the same operation, class, source relation and
+// reason. Two records of one source range at two operations stay two diagnostics (a deferred
+// call at two exits), and a repeat goes wherever it stands in the list.
+fn diagnostics() void {
+    ownership_api.event_descriptor mut a = ownership_api.event_descriptor{
+        .kind = ownership_api.event_kind.invalid_use,
+        .evidence = ownership_api.evidence_kind.unconditional,
+        .source = ownership_api.source_position{0, 0, 4, 1, 4, 2, true}};
+    a.operation = ownership_api.operation_position{key(1), 2, 3, false};
+    a.relation = ownership_api.entity_id{key(1), ownership_api.entity_kind.allocation, 1};
+    a.text = "v";
+    ownership_api.event_descriptor mut exit = a;
+    exit.operation.block = 5;
+    assert(!ownership_source_calls.same_diagnostic(&a, &exit));
+    ownership_api.event_descriptor mut lost = a;
+    lost.kind = ownership_api.event_kind.lost_ownership;
+    assert(!ownership_source_calls.same_diagnostic(&a, &lost));
+    ownership_api.event_descriptor mut other = a;
+    other.relation.ordinal = 2;
+    assert(!ownership_source_calls.same_diagnostic(&a, &other));
+    ownership_api.event_descriptor mut why = a;
+    why.reason = ownership_api.incomplete_reason.missing_path;
+    assert(!ownership_source_calls.same_diagnostic(&a, &why));
+    ownership_api.event_descriptor mut again = a;
+    again.text = "w";
+    again.source.col = 9;
+    assert(ownership_source_calls.same_diagnostic(&a, &again));
+    ownership_graph.body_input[1] bodies = {ownership_graph.body_input{.key = key(1)}};
+    ownership_graph.graph mut g = ownership_graph.graph{.bodies = bodies[..]};
+    ownership_source_calls.context mut c = ownership_source_calls.context{.graph = &g};
+    defer ownership_source_calls.free(&c);
+    c.rows = new(ownership_source_calls.row, 1);
+    ownership_source_calls.row mut* r = &c.rows[0];
+    kept(r, a);
+    kept(r, exit);
+    kept(r, other);
+    kept(r, again);
+    kept(r, lost);
+    ownership_source_calls.keep_one_per_diagnostic(r);
+    assert(r->records_len == 4);
+    assert(r->records[0].event.value.operation.block == 2);
+    assert(r->records[1].event.value.operation.block == 5);
+    assert(r->records[2].event.value.relation.ordinal == 2);
+    assert(r->records[3].event.value.kind == ownership_api.event_kind.lost_ownership);
+    // The first removed record names the operation of the repeat.
+    assert(r->has_removed && r->removed.terminal.operation.block == 2);
+    // A second pass removes nothing.
+    ownership_source_calls.keep_one_per_diagnostic(r);
+    assert(r->records_len == 4);
+    println("diagnostics ok");
+}
+
+fn main() i32 {
+    limits();
+    retention();
+    validation();
+    events();
+    diagnostics();
+    return 0;
+}

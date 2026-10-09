@@ -12,6 +12,11 @@
 //| precision covers
 //| null tests
 //| caller requirements
+//| records without storage
+//| retired arguments
+//| crossed calls
+//| values that a call can write
+//| joins of refined inputs
 //| branch rejoins
 //| heap state ok
 /// Checks the state operations of the heap proof one at a time (D17.16, D17.18, fir.md 14.1).
@@ -22,7 +27,7 @@ import ownership_heap_env;
 import ownership_limits;
 import types;
 
-string[16] HOST = {
+string[20] HOST = {
     "struct node { node mut* own next; u8 mut@ own bytes; i32 v; }",
     "struct holder { node mut* own first; node mut* own second; }",
     "fn host(node mut* own p, node mut* own q, holder mut* h, u8@ view) void {",
@@ -39,10 +44,14 @@ string[16] HOST = {
     "fn checked(u8 x) u8 { return x + 1; }",
     "fn unused() void { }",
     "fn empty() void { }",
+    "fn addressed(u64 i) u64 { u64 mut j = 5; u64* p = &j; u64 k = 7; return i + j + k; }",
+    "fn divide_arm(bool c, i32 d) i32 { i32 mut x = 0; if (c) { x = 10 / d; } return x; }",
+    "fn index_arm(bool c, u64 i) u64 { u64[2] a = {1, 2}; u64 mut x = 0;",
+    "    if (c) { x = a[i]; } return x; }",
 };
 
-string[11] NAMES = {"host", "diamond", "looping", "aborting", "calling", "leaf", "nested",
-    "asserting", "checked", "unused", "empty"};
+string[14] NAMES = {"host", "diamond", "looping", "aborting", "calling", "leaf", "nested",
+    "asserting", "checked", "unused", "empty", "addressed", "divide_arm", "index_arm"};
 
 struct fixture {
     ownership_heap_env.closure c;
@@ -299,6 +308,22 @@ fn integers() void {
     assert(ownership_heap.numbered_in(-9223372036854775807 - 1, sign).numbered);
     assert(!ownership_heap.numbered_in(1, null).numbered);
     assert(ownership_heap.numbered_in(4, sign).number == 4);
+    // `and` and `or` of known truth values; a known side that does not decide gives the other.
+    ownership_heap.value yes = known(true);
+    ownership_heap.value no = known(false);
+    ownership_heap.value open_value = ownership_heap.scalar_value();
+    assert(ownership_heap.combined(yes, yes, false).known);
+    assert(ownership_heap.combined(yes, yes, false).truth);
+    assert(ownership_heap.combined(yes, no, false).known);
+    assert(!ownership_heap.combined(yes, no, false).truth);
+    assert(ownership_heap.combined(no, open_value, false).known);
+    assert(!ownership_heap.combined(no, open_value, false).truth);
+    assert(ownership_heap.combined(open_value, yes, true).known);
+    assert(ownership_heap.combined(open_value, yes, true).truth);
+    assert(ownership_heap.combined(no, no, true).known);
+    assert(!ownership_heap.combined(no, no, true).truth);
+    assert(!ownership_heap.combined(open_value, no, true).known);
+    assert(!ownership_heap.combined(yes, open_value, false).known);
 }
 
 fn entry_state() void {
@@ -676,10 +701,17 @@ fn tests() void {
     joined.atoms[0].root = ownership_heap.root_kind.joined;
     assert(ownership_heap.refine(&joined, cond, true));
     assert(!joined.witness);
-    // A cell has a nonnull root.
+    // An unfold of a free root assumes that the root is nonnull. That assumption removes no
+    // path: the null edge stays, without a witness (D17.18). A test that establishes the root
+    // nonnull clears the mark, and the null edge then contradicts the state.
     ownership_heap.state mut cell = ownership_heap.clone(&s);
     defer ownership_heap.free_state(&cell);
     assert(ownership_heap.unfold(ctx, &cell, 0));
+    assert(cell.atoms[0].unfold_nonnull);
+    ownership_heap.state mut assumed = ownership_heap.clone(&cell);
+    defer ownership_heap.free_state(&assumed);
+    assert(ownership_heap.refine(&assumed, cond, false) && !assumed.witness);
+    assert(ownership_heap.refine(&cell, cond, true) && !cell.atoms[0].unfold_nonnull);
     assert(!ownership_heap.refine(&cell, cond, false));
     // A known truth value selects one edge; an untracked one clears each witness.
     ownership_heap.value mut known = ownership_heap.scalar_value();
@@ -699,24 +731,326 @@ fn requirements() void {
     ownership_heap.context mut* ctx = &x.ctx;
     ownership_heap.state mut s = ownership_heap.initial(ctx);
     defer ownership_heap.free_state(&s);
-    // The entry value of q becomes a requirement and an empty root.
-    assert(ownership_heap.require_empty(ctx, &s, 1));
+    ownership_heap.state mut entry = ownership_heap.clone(&s);
+    defer ownership_heap.free_state(&entry);
+    // The entry value of q becomes a requirement and an empty root. A store of the body settles
+    // it on this path.
+    assert(ownership_heap.require_empty(ctx, &s, 1, true));
     assert(ctx->require_null[1] && s.atoms[1].root == ownership_heap.root_kind.null_root);
-    // The entry next field of p becomes a field requirement.
+    assert(s.required_null == 2);
+    // The entry next field of p becomes a field requirement. A callee that stores over it on
+    // some paths only records it for the caller: this path does not settle it.
     assert(ownership_heap.unfold(ctx, &s, 0));
     ownership_heap.value next = value_at(&s, field_key(ownership_heap.base_kind.cell, 0, 0));
-    assert(ownership_heap.require_empty(ctx, &s, next.atom));
+    assert(ownership_heap.require_empty(ctx, &s, next.atom, false));
     assert(ctx->require_fields[0] == 1 && !ctx->require_null[0]);
+    assert(s.required_fields[0] == 0 && s.required_null == 2);
     // A field of a field is no entry field: no requirement names it.
     ownership_heap.value bytes = value_at(&s, field_key(ownership_heap.base_kind.cell, 0, 1));
     s.atoms[bytes.atom].root = ownership_heap.root_kind.nonnull;
-    assert(!ownership_heap.require_empty(ctx, &s, bytes.atom));
+    assert(!ownership_heap.require_empty(ctx, &s, bytes.atom, true));
     s.atoms[bytes.atom].root = ownership_heap.root_kind.free;
     s.atoms[bytes.atom].status = ownership_heap.atom_status.unknown;
-    assert(!ownership_heap.require_empty(ctx, &s, bytes.atom));
+    assert(!ownership_heap.require_empty(ctx, &s, bytes.atom, true));
+    assert(s.required_fields[1] == 0);
     // A fresh allocation is no input choice.
     u32 made = fresh_cell(ctx, &s, 5);
-    assert(!ownership_heap.require_empty(ctx, &s, made));
+    assert(!ownership_heap.require_empty(ctx, &s, made, true));
+    // A join keeps a requirement only when each path has it, so one path that stores over q
+    // does not settle it for the caller. Equal states need equal requirements.
+    ownership_heap.state mut stored = ownership_heap.clone(&entry);
+    defer ownership_heap.free_state(&stored);
+    assert(ownership_heap.require_empty(ctx, &stored, 1, true));
+    assert(ownership_heap.canonical(ctx, &stored));
+    assert(ownership_heap.canonical(ctx, &entry));
+    ownership_heap.state mut one = ownership_heap.state{};
+    defer ownership_heap.free_state(&one);
+    assert(ownership_heap.join(ctx, &entry, &stored, false, &one));
+    assert(one.required_null == 0);
+    ownership_heap.state mut both = ownership_heap.state{};
+    defer ownership_heap.free_state(&both);
+    assert(ownership_heap.join(ctx, &stored, &stored, false, &both));
+    assert(both.required_null == 2);
+    ownership_heap.state mut fields = ownership_heap.clone(&stored);
+    defer ownership_heap.free_state(&fields);
+    fields.required_fields[63] = 4;
+    assert(!same(ctx, &fields, &stored));
+    ownership_heap.state mut kept = ownership_heap.state{};
+    defer ownership_heap.free_state(&kept);
+    assert(ownership_heap.join(ctx, &fields, &fields, false, &kept));
+    assert(kept.required_fields[63] == 4);
+    ownership_heap.state mut dropped = ownership_heap.state{};
+    defer ownership_heap.free_state(&dropped);
+    assert(ownership_heap.join(ctx, &fields, &stored, false, &dropped));
+    assert(dropped.required_fields[63] == 0 && dropped.required_null == 2);
+    // A join with bottom keeps the requirements of the other side.
+    ownership_heap.state mut none = ownership_heap.bottom(stored.ended.len);
+    defer ownership_heap.free_state(&none);
+    ownership_heap.state mut lone = ownership_heap.state{};
+    defer ownership_heap.free_state(&lone);
+    assert(ownership_heap.join(ctx, &none, &fields, false, &lone));
+    assert(lone.required_null == 2 && lone.required_fields[63] == 4);
+}
+
+// A record whose storage a fold or a graft gives to another record holds no obligation. An
+// address of one of its fields can keep it in canonical form, and a use through that address
+// finds no live record (`spec/toolchain.md` 4.2).
+fn retired_records() void {
+    println("records without storage");
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "host");
+    ownership_heap.context mut* ctx = &x.ctx;
+    ownership_heap.state mut s = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&s);
+    // A fold absorbs the inner cell; the address of its field keeps the record, unowned.
+    u32 parent = fresh_cell(ctx, &s, 5);
+    u32 inner = fresh_cell(ctx, &s, 6);
+    set_value(&s, local(6), ownership_heap.empty_value());
+    set_value(&s, field_key(ownership_heap.base_kind.cell, parent, 0),
+        ownership_heap.own_value(inner));
+    set_value(&s, local(7), ownership_heap.address_value(
+        field_key(ownership_heap.base_kind.cell, inner, 2)));
+    u64 count = obligations(&s);
+    assert(ownership_heap.fold(ctx, &s, parent));
+    assert(!s.atoms[inner].used && s.atoms[inner].into == parent);
+    assert(s.atoms[inner].status == ownership_heap.atom_status.escaped);
+    assert(obligations(&s) == count - 1);
+    assert(ownership_heap.canonical(ctx, &s));
+    ownership_heap.value kept = value_at(&s, local(7));
+    assert(kept.kind == ownership_heap.value_kind.address);
+    assert(s.atoms[kept.target.id].used);
+    assert(s.atoms[kept.target.id].status == ownership_heap.atom_status.escaped);
+    assert(obligations(&s) == count - 1);
+    // An unowned record that an address brings back keeps no obligation, whatever made it.
+    s.atoms[kept.target.id].used = false;
+    s.atoms[kept.target.id].status = ownership_heap.atom_status.live;
+    assert(ownership_heap.canonical(ctx, &s));
+    assert(s.atoms[value_at(&s, local(7)).target.id].status ==
+        ownership_heap.atom_status.escaped);
+    assert(obligations(&s) == count - 1);
+    // A released record stays released.
+    s.atoms[value_at(&s, local(7)).target.id].used = false;
+    s.atoms[value_at(&s, local(7)).target.id].status = ownership_heap.atom_status.released;
+    assert(ownership_heap.canonical(ctx, &s));
+    assert(s.atoms[value_at(&s, local(7)).target.id].status ==
+        ownership_heap.atom_status.released);
+    // `unowned` changes a live or unknown record only.
+    s.atoms[parent].status = ownership_heap.atom_status.leaked;
+    ownership_heap.unowned(&s, parent);
+    assert(s.atoms[parent].status == ownership_heap.atom_status.leaked);
+    s.atoms[parent].status = ownership_heap.atom_status.unknown;
+    ownership_heap.unowned(&s, parent);
+    assert(s.atoms[parent].status == ownership_heap.atom_status.escaped);
+}
+
+// The statuses that a retired argument takes, by the facts of the callee exit.
+fn retire_case(bool moved, bool released, bool root_released, ownership_heap.atom_status root,
+    ownership_heap.atom_status member) void {
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "host");
+    ownership_heap.context mut* ctx = &x.ctx;
+    ownership_heap.state mut s = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&s);
+    u32 b = fresh_cell(ctx, &s, 5);
+    u32 m = fresh_cell(ctx, &s, 6);
+    set_value(&s, local(6), ownership_heap.empty_value());
+    set_value(&s, field_key(ownership_heap.base_kind.cell, b, 0), ownership_heap.own_value(m));
+    ownership_heap.value mut view = ownership_heap.empty_value();
+    view.kind = ownership_heap.value_kind.view;
+    assert(ownership_heap.add_source(&view, m));
+    set_value(&s, local(7), view);
+    bool mut@ own part = new(bool, s.atoms_len);
+    defer del(part);
+    ownership_heap.owned_from(&s, b, part);
+    assert(part[b] && part[m]);
+    ownership_heap.retire(&s, part[..], b, moved, released, root_released);
+    assert(s.atoms[b].status == root && s.atoms[m].status == member);
+    assert(s.atoms[b].used == !moved && !s.atoms[m].used);
+    assert(ownership_heap.find_slot(&s, field_key(ownership_heap.base_kind.cell, b, 0)) ==
+        ownership_heap.U64_MAX);
+    assert(ownership_heap.find_slot(&s, field_key(ownership_heap.base_kind.cell, m, 0)) ==
+        ownership_heap.U64_MAX);
+    // A moved record leaves each view; a member view of a released one gains a doubt.
+    ownership_heap.value after = value_at(&s, local(7));
+    if (moved && !released) {
+        assert(after.kind == ownership_heap.value_kind.unknown);
+    } else if (moved) {
+        assert(after.kind == ownership_heap.value_kind.view && after.count == 1);
+        assert(s.atoms[after.sources[0]].status == ownership_heap.atom_status.maybe_released);
+    } else {
+        assert(after.kind == ownership_heap.value_kind.view && after.sources[0] == m);
+    }
+    assert(obligations(&s) == 4);
+}
+
+fn retired_arguments() void {
+    println("retired arguments");
+    // The storage moved, and no path released any of it.
+    retire_case(true, false, false, ownership_heap.atom_status.escaped,
+        ownership_heap.atom_status.escaped);
+    // Some path released a member or the root.
+    retire_case(true, true, false, ownership_heap.atom_status.maybe_released,
+        ownership_heap.atom_status.maybe_released);
+    // Each path released the root.
+    retire_case(true, true, true, ownership_heap.atom_status.released,
+        ownership_heap.atom_status.maybe_released);
+    // No exit atom holds the storage: each path released it.
+    retire_case(false, true, false, ownership_heap.atom_status.released,
+        ownership_heap.atom_status.released);
+}
+
+fn known(bool truth) ownership_heap.value {
+    ownership_heap.value mut v = ownership_heap.scalar_value();
+    v.known = true;
+    v.truth = truth;
+    return v;
+}
+
+fn number(i64 n) ownership_heap.value {
+    ownership_heap.value mut v = ownership_heap.scalar_value();
+    v.numbered = true;
+    v.number = n;
+    return v;
+}
+
+fn call_at(u32 line, string callee) ownership_heap.crossed_call {
+    return ownership_heap.crossed_call{.source = ownership_api.source_position{0, 0, line, 5,
+        line, 9, true}, .callee = callee};
+}
+
+// A witness crosses each fort call whose summary applies, and it names each crossed call: a
+// state keeps them in source order, each once, and at most CROSS_LIMIT of them (D17.18). A join
+// names the calls of both sides, and a state that would name more validates nothing.
+fn crossed_calls() void {
+    println("crossed calls");
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "host");
+    ownership_heap.context mut* ctx = &x.ctx;
+    ownership_heap.state mut s = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&s);
+    assert(s.crossed_len == 0);
+    assert(ownership_heap.add_crossed(&s, call_at(7, "late")));
+    assert(ownership_heap.add_crossed(&s, call_at(3, "early")));
+    assert(ownership_heap.add_crossed(&s, call_at(7, "late")));
+    assert(s.crossed_len == 2 && s.crossed[0].source.line == 3 && s.crossed[1].source.line == 7);
+    assert(s.crossed[0].callee == "early");
+    // A copy keeps the calls; another call makes it a different state.
+    ownership_heap.state mut other = ownership_heap.clone(&s);
+    defer ownership_heap.free_state(&other);
+    assert(other.crossed_len == 2 && same(ctx, &s, &other));
+    assert(ownership_heap.add_crossed(&other, call_at(5, "middle")));
+    assert(!same(ctx, &s, &other));
+    // A state that crosses one call more, after the others, differs too.
+    ownership_heap.state mut longer = ownership_heap.clone(&s);
+    defer ownership_heap.free_state(&longer);
+    assert(ownership_heap.add_crossed(&longer, call_at(9, "after")));
+    assert(longer.crossed_len == 3 && !same(ctx, &s, &longer));
+    // The join names the calls of each side, in source order.
+    ownership_heap.state mut joined = ownership_heap.state{};
+    defer ownership_heap.free_state(&joined);
+    assert(ownership_heap.join(ctx, &s, &other, false, &joined));
+    assert(joined.witness && joined.crossed_len == 3 && joined.crossed[1].callee == "middle");
+    // The limit: one call more than a state can name.
+    u32 mut k = other.crossed_len;
+    while (k < ownership_heap.CROSS_LIMIT) {
+        assert(ownership_heap.add_crossed(&other, call_at(20 + k, "more")));
+        k += 1;
+    }
+    assert(other.crossed_len == ownership_heap.CROSS_LIMIT);
+    assert(!ownership_heap.add_crossed(&other, call_at(99, "last")));
+    assert(ownership_heap.add_crossed(&other, call_at(3, "early")));
+    assert(ownership_heap.add_crossed(&s, call_at(98, "other")));
+    ownership_heap.state mut full = ownership_heap.state{};
+    defer ownership_heap.free_state(&full);
+    assert(ownership_heap.join(ctx, &other, &s, false, &full));
+    assert(!full.witness);
+}
+
+// A write that the proof does not follow can write each top-level scalar local whose storage a
+// FIR address names. So the state forgets the known value of each such local there
+// (`havoc_reachable`). Any other local keeps its value.
+fn addressed_values() void {
+    println("values that a call can write");
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "addressed");
+    ownership_heap.context mut* ctx = &x.ctx;
+    // Local 1 is the parameter, 2 is `j`, whose address `p` (3) holds, and 4 is `k`.
+    assert(!ctx->addressed[1] && ctx->addressed[2] && !ctx->addressed[3] && !ctx->addressed[4]);
+    ownership_heap.state mut s = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&s);
+    set_value(&s, local(1), number(4));
+    set_value(&s, local(2), number(5));
+    set_value(&s, local(4), number(7));
+    ownership_heap.havoc_reachable(ctx, &s, false);
+    assert(!value_at(&s, local(2)).numbered);
+    assert(value_at(&s, local(1)).number == 4 && value_at(&s, local(4)).number == 7);
+    // A known truth value of an addressed local goes too.
+    set_value(&s, local(2), known(true));
+    ownership_heap.havoc_reachable(ctx, &s, false);
+    assert(!value_at(&s, local(2)).known);
+    // An unknown effect through the address of a local forgets its value, as each slot below
+    // the address gets an unknown value. Another local keeps its value.
+    set_value(&s, local(2), number(5));
+    assert(!ownership_heap.havoc_prefix(&s, local(2)));
+    assert(!value_at(&s, local(2)).numbered);
+    assert(value_at(&s, local(4)).number == 7);
+}
+
+// A join keeps a free root by the choice rule only when one choice atom differs between the
+// two paths: the joined state then holds each value of that input with the rest of each path.
+// Two differing inputs can be correlated, so both become joined (`spec/toolchain.md` 4.2).
+fn forks() void {
+    println("joins of refined inputs");
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "host");
+    ownership_heap.context mut* ctx = &x.ctx;
+    ownership_heap.state mut a = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&a);
+    assert(ownership_heap.canonical(ctx, &a));
+    ownership_heap.atom p = a.atoms[0];
+    ownership_heap.atom mut q = a.atoms[0];
+    q.root = ownership_heap.root_kind.nonnull;
+    assert(ownership_heap.choice_split(p, q, true, true));
+    assert(!ownership_heap.choice_split(p, q, true, false));
+    assert(!ownership_heap.choice_split(p, p, true, true));
+    ownership_heap.atom mut lost = q;
+    lost.root = ownership_heap.root_kind.joined;
+    assert(!ownership_heap.choice_split(p, lost, true, true));
+    ownership_heap.atom mut fresh = q;
+    fresh.choice = false;
+    assert(!ownership_heap.choice_split(p, fresh, true, true));
+    // One input differs: it stays a free choice.
+    ownership_heap.state mut one = ownership_heap.clone(&a);
+    defer ownership_heap.free_state(&one);
+    one.atoms[0].root = ownership_heap.root_kind.nonnull;
+    ownership_heap.state mut single = ownership_heap.state{};
+    defer ownership_heap.free_state(&single);
+    assert(ownership_heap.join(ctx, &a, &one, false, &single));
+    assert(single.atoms[0].root == ownership_heap.root_kind.free);
+    assert(single.atoms[1].root == ownership_heap.root_kind.free);
+    // Two inputs differ: neither stays free.
+    ownership_heap.state mut two = ownership_heap.clone(&one);
+    defer ownership_heap.free_state(&two);
+    two.atoms[1].root = ownership_heap.root_kind.nonnull;
+    ownership_heap.state mut both = ownership_heap.state{};
+    defer ownership_heap.free_state(&both);
+    assert(ownership_heap.join(ctx, &a, &two, false, &both));
+    assert(both.atoms[0].root == ownership_heap.root_kind.joined);
+    assert(both.atoms[1].root == ownership_heap.root_kind.joined);
+    assert(both.atoms[2].root == ownership_heap.root_kind.free);
+    // A side without a witness takes no choice rule at all.
+    ownership_heap.state mut blind = ownership_heap.clone(&one);
+    defer ownership_heap.free_state(&blind);
+    blind.witness = false;
+    ownership_heap.state mut seen = ownership_heap.state{};
+    defer ownership_heap.free_state(&seen);
+    assert(ownership_heap.join(ctx, &a, &blind, false, &seen));
+    assert(seen.atoms[0].root == ownership_heap.root_kind.joined);
 }
 
 fn rejoin_of(string name, u32 block) u32 {
@@ -757,8 +1091,17 @@ fn rejoins() void {
         b += 1;
     }
     assert(found == 2);
-    // An assert that no mode removes ends its block with an abort edge.
+    // A check has no edge to the exit: a check that fails for known values ends its path when
+    // the state reaches it, so a branch around one rejoins.
+    fixture mut a = fixture{};
+    defer close(&a);
+    open(&a, "asserting");
+    u32[4] mut out = {};
+    assert(ownership_heap.successors(a.ctx.f, 0, fir.block_count(a.ctx.f), out[..]) == 1);
+    assert(out[0] != fir.block_count(a.ctx.f));
     assert(rejoin_of("asserting", 0) == ownership_heap.NONE);
+    assert(rejoin_of("divide_arm", 0) != ownership_heap.NONE);
+    assert(rejoin_of("index_arm", 0) != ownership_heap.NONE);
 }
 
 fn main() i32 {
@@ -773,6 +1116,11 @@ fn main() i32 {
     covers();
     tests();
     requirements();
+    retired_records();
+    retired_arguments();
+    crossed_calls();
+    addressed_values();
+    forks();
     rejoins();
     println("heap state ok");
     return 0;
