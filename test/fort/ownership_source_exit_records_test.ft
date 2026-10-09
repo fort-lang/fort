@@ -1,0 +1,113 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| names ok
+//| order ok
+//| reasons ok
+/// Holds the records and reasons of the process-exit analysis: the names a record gives, the
+/// toolchain 4.2 order of the records of one operation, and the first reason of a body.
+import ownership_api;
+import ownership_exit_source_env as env;
+import ownership_source_exit;
+import ownership_source_local;
+
+// A record names a source local or a global and quotes it. Each names the exit call as its
+// operation.
+fn names() void {
+    env.closure mut c = env.closure{};
+    string[8] lines = {
+        "import std.libc;",
+        "fn named() void {",
+        "    u8 mut@ own p = new(u8, 1);",
+        "    libc.exit(0);",
+        "}",
+        "fn main() i32 { return 0; }",
+        "fn none() void {}",
+        "fn other() void {}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    ownership_source_exit.context* x = env.body(&c, "named");
+    assert(x->violations_len == 1);
+    ownership_source_local.violation v = x->violations[0];
+    assert(v.name == "p" && v.quoted && v.leaf == ownership_source_local.WHOLE);
+    assert(v.relation.kind == ownership_api.entity_kind.slot);
+    assert(v.operation.function.declaration.declaration == x->identity.declaration.declaration);
+    // The runtime leaf names the global and relates a region of the closure.
+    ownership_source_local.violation u = x->unproved[0];
+    assert(u.name == "args_store" && u.quoted);
+    assert(u.relation.kind == ownership_api.entity_kind.region);
+    env.finish(&c, "names ok");
+}
+
+// Several owners at one exit call give one record each, sorted by source, operation, class and
+// relation (toolchain 4.2): the violations of the frame, then the unproved runtime leaf.
+fn order() void {
+    env.closure mut c = env.closure{};
+    string[9] lines = {
+        "import std.libc;",
+        "fn two_owners() void {",
+        "    u8 mut@ own a = new(u8, 1);",
+        "    u8 mut@ own b = new(u8, 2);",
+        "    libc.exit(0);",
+        "}",
+        "fn main() i32 { return 0; }",
+        "fn none() void {}",
+        "fn other() void {}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    ownership_source_exit.context* x = env.body(&c, "two_owners");
+    assert(x->violations_len == 2 && x->unproved_len == 1);
+    assert(x->violations[0].name == "a" && x->violations[1].name == "b");
+    assert(x->violations[0].relation.ordinal < x->violations[1].relation.ordinal);
+    assert(x->violations[0].source.line == 5 && x->violations[1].source.line == 5);
+    assert(x->unproved[0].name == "args_store");
+    assert(x->proof.failed && x->proof.kind == ownership_api.proof_kind.complete);
+    env.finish(&c, "order ok");
+}
+
+// The first reason names the first gap or the first unproved record: a suspended owner needs
+// an unknown callee effect, and other gaps need missing facts.
+fn reasons() void {
+    env.closure mut c = env.closure{};
+    string[17] lines = {
+        "import std.libc;",
+        "u8 mut@ own mut pool = {};",
+        "fn helper() void {}",
+        "fn suspended() void {",
+        "    u8 mut@ own p = new(u8, 1);",
+        "    helper();",
+        "    del(p);",
+        "}",
+        "fn caller_state() void {",
+        "    pool = new(u8, 1);",
+        "}",
+        "fn unproved() void {",
+        "    libc.exit(0);",
+        "}",
+        "fn main() i32 { return 0; }",
+        "fn none() void {}",
+        "fn other() void {}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    ownership_api.terminal_failure s = env.body(&c, "suspended")->proof.terminal;
+    assert(s.present && s.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(s.source.line == 6);
+    ownership_api.terminal_failure g = env.body(&c, "caller_state")->proof.terminal;
+    assert(g.present && g.reason == ownership_api.incomplete_reason.missing_correspondence);
+    assert(g.source.line == 10);
+    // An unproved record of the runtime leaf comes before the gap of `pool`.
+    ownership_api.terminal_failure u = env.body(&c, "unproved")->proof.terminal;
+    assert(u.present && u.reason == ownership_api.incomplete_reason.missing_boundary);
+    assert(u.source.line == 13);
+    env.finish(&c, "reasons ok");
+}
+
+fn main() i32 {
+    names();
+    order();
+    reasons();
+    return 0;
+}

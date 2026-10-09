@@ -1,0 +1,139 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| leaves ok
+//| selection ok
+//| modules ok
+/// Holds the closure facts of the process-exit analysis: the owning global leaves and their
+/// paths, the runtime leaves, compile-time selection, the boundary kind and globals of another
+/// module (D7.10, D17.19; toolchain.md 1.1).
+import ownership_exit_source_env as env;
+import ownership_source_exit;
+
+// The leaves of each owning global in field order. A nested struct adds the leaves of its
+// fields; the elements of a fixed array share one weak leaf; a borrowed field adds none.
+fn leaves() void {
+    env.closure mut c = env.closure{};
+    string[9] lines = {
+        "struct inner { u8 mut* own p; u8* view; }",
+        "struct outer { inner first; u8 mut@ own bytes; inner[3] rows; }",
+        "outer mut nest = {};",
+        "u8* mut borrowed = null;",
+        "u64 mut count = 0;",
+        "u8 mut* own CONSTANT_NOTHING = null;",
+        "fn touch() void { del(nest.first.p); del(nest.bytes); }",
+        "fn none() void {}",
+        "fn other() void {}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    ownership_source_exit.closure* x = env.shared(&c);
+    // args_store, then nest.first.p, nest.bytes and the one leaf of nest.rows[*].p. The owning
+    // constant holds its null initializer for good and adds no leaf.
+    if (x->owners_len != 2 || x->leaves_len != 4 || x->constant_owners != 1) {
+        eprintln(x->owners_len, " owners, ", x->leaves_len, " leaves, ", x->constant_owners,
+            " constants");
+        assert(false);
+    }
+    u64 mut user = 0;
+    u64 mut runtime = 0;
+    u64 mut weak = 0;
+    u64 mut i = 0;
+    while (i < x->leaves_len) {
+        if (x->leaves[i].runtime) { runtime += 1; } else { user += 1; }
+        if (x->leaves[i].weak) { weak += 1; }
+        i += 1;
+    }
+    assert(runtime == 1 && user == 3 && weak == 1);
+    // A leaf path names fields and elements; the first leaf of nest has the path 0.0.
+    u64 at = env.leaf_of(&c, "nest");
+    assert(x->leaves[at].path_len == 2);
+    assert(x->steps[x->leaves[at].path_first] == 0);
+    assert(x->steps[x->leaves[at].path_first + 1] == 0);
+    assert(x->leaves[at + 1].path_len == 1 && x->steps[x->leaves[at + 1].path_first] == 1);
+    assert(x->leaves[at + 2].path_len == 3 && x->leaves[at + 2].weak);
+    assert(x->steps[x->leaves[at + 2].path_first + 1] == ownership_source_exit.ELEMENT);
+    // A body that releases two of the leaves empties those two only.
+    env.proved(&c, "touch");
+    assert(env.body(&c, "touch")->exit_empty[at]);
+    assert(env.body(&c, "touch")->exit_empty[at + 1]);
+    assert(!env.body(&c, "touch")->exit_empty[at + 2]);
+    assert(env.body(&c, "touch")->global_releases == 2);
+    env.finish(&c, "leaves ok");
+}
+
+// Compile-time selection decides which globals exist (D21.2). An owning constant holds its
+// initializer for good, so it is no leaf (D7.10).
+fn selection() void {
+    env.closure mut c = env.closure{};
+    string[11] lines = {
+        "$if (true) {",
+        "    u8 mut@ own mut chosen = {};",
+        "} else {",
+        "    u8 mut@ own mut dropped = {};",
+        "}",
+        "u8 mut* own NONE = null;",
+        "$if (false) {",
+        "    fn main() i32 { return 0; }",
+        "}",
+        "fn clear() void { del(chosen); }",
+        "fn none() void {}",
+    };
+    env.open(&c, lines[..]);
+    defer env.close(&c);
+    ownership_source_exit.closure* x = env.shared(&c);
+    assert(x->owners_len == 2 && x->leaves_len == 2 && x->constant_owners == 1);
+    assert(x->leaves[env.leaf_of(&c, "chosen")].global->name == "chosen");
+    // The `main` stands in an inactive branch, so the closure is a library.
+    assert(!x->executable);
+    env.boundary(&c, "complete", "complete");
+    env.finish(&c, "selection ok");
+}
+
+// A global of another module is a leaf of the closure. The exit fact of a callee in that
+// module empties it after the call, so a store after the call needs no summary.
+fn modules() void {
+    env.closure mut c = env.closure{};
+    string[8] library = {
+        "u8 mut@ own mut pool = {};",
+        "fn clear() void { del(pool); }",
+        "fn fill() void {",
+        "    del(pool);",
+        "    pool = new(u8, 1);",
+        "}",
+        "fn size() u64 { return pool.len; }",
+        "fn none() void {}",
+    };
+    string[13] lines = {
+        "import lib;",
+        "fn refill() void {",
+        "    lib.clear();",
+        "    lib.pool = new(u8, 2);",
+        "}",
+        "fn refill_without_cleanup() void {",
+        "    lib.size();",
+        "    lib.pool = new(u8, 2);",
+        "}",
+        "fn main() i32 {",
+        "    lib.clear();",
+        "    return 0;",
+        "}",
+    };
+    env.open_with_module(&c, "lib.ft", library[..], lines[..]);
+    defer env.close(&c);
+    env.proved(&c, "refill");
+    env.outside(&c, "refill_without_cleanup", ownership_source_exit.missing.caller_state, 8);
+    env.proved_in(&c, "lib", "fill");
+    assert(env.empties(&c, "lib", "clear", "pool"));
+    // The executable boundary needs the summary of main for `lib.pool`.
+    assert(env.shared(&c)->executable);
+    env.boundary(&c, "incomplete", "incomplete");
+    env.finish(&c, "modules ok");
+}
+
+fn main() i32 {
+    leaves();
+    selection();
+    modules();
+    return 0;
+}
