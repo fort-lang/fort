@@ -1,0 +1,121 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| accept normal exit
+//| accept abort
+//| accept low-level exit
+//| accept foreign noreturn
+//| accept classes
+/// Tests the termination class that the trusted signature hook gives an extern call (D17.19).
+import ast;
+import ownership_api;
+import ownership_ffi;
+import ownership_ffi_hook_env as env;
+import types;
+
+// `exit(status)` with a live caller owner. The hook gives normal process exit. The call does not
+// return, and the final boundary still needs its cleanup: no fact here proves the owner empty.
+fn normal_exit() void {
+    env.env mut e = {};
+    env.open(&e, 40, "exit");
+    defer env.close(&e);
+    env.heap_owner(&e);
+    u64 code = env.add_scalar(&e, env.slot(10), 100);
+    env.operand(&e, 0, code, env.parameter(&e, 0));
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted_as(&e, out, ownership_api.outcome_kind.normal_process_exit);
+    assert(!out.outcomes[0].possible_caller_return);
+    // The hook keeps the caller's owner: the class proves no cleanup.
+    env.obligated(env.after(&e, 0), 1, env.slot(1));
+    println("accept normal exit");
+}
+
+// `abort()` with a live caller owner. Abort needs no cleanup (D17.19, memory model X4).
+fn abort_call() void {
+    env.env mut e = {};
+    env.open(&e, 41, "abort");
+    defer env.close(&e);
+    env.heap_owner(&e);
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted_as(&e, out, ownership_api.outcome_kind.abort);
+    assert(!out.outcomes[0].possible_caller_return);
+    env.obligated(env.after(&e, 0), 1, env.slot(1));
+    println("accept abort");
+}
+
+// `_exit(status)` is no D17.19 leaf. It stays unresolved foreign termination with its cleanup
+// requirement (memory model X5).
+fn low_level_exit() void {
+    env.env mut e = {};
+    env.open(&e, 42, "_exit");
+    defer env.close(&e);
+    env.heap_owner(&e);
+    u64 code = env.add_scalar(&e, env.slot(10), 100);
+    env.operand(&e, 0, code, env.parameter(&e, 0));
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted_as(&e, out, ownership_api.outcome_kind.unresolved_foreign);
+    assert(!out.outcomes[0].possible_caller_return);
+    println("accept low-level exit");
+}
+
+// A noreturn extern of another name is unresolved too. Noreturn proves no class (D17.19).
+fn foreign_noreturn() void {
+    env.env mut e = {};
+    env.open(&e, 43, "foreign_stop");
+    defer env.close(&e);
+    env.finish(&e);
+    ownership_api.ffi_result out = env.call(&e);
+    env.accepted_as(&e, out, ownership_api.outcome_kind.unresolved_foreign);
+    assert(!out.outcomes[0].possible_caller_return);
+    println("accept foreign noreturn");
+}
+
+// The class needs the C symbol, the extern kind, the D17.19 type and a fixed parameter list.
+fn classes() void {
+    env.env mut e = {};
+    env.open(&e, 44, "exit");
+    defer env.close(&e);
+    ast.sym* exit_sym = e.b.request.call.declaration.symbol;
+    types.node* exit_type = e.b.request.call.declaration.ty;
+    env.declaration(&e, "abort");
+    ast.sym* abort_sym = e.b.request.call.declaration.symbol;
+    types.node* abort_type = e.b.request.call.declaration.ty;
+    env.declaration(&e, "foreign_bits");
+    types.node* bits_type = e.b.request.call.declaration.ty;
+    env.declaration(&e, "foreign_log");
+    ast.sym* log_sym = e.b.request.call.declaration.symbol;
+    env.declaration(&e, "foreign_take_stop");
+    types.node* take_stop_type = e.b.request.call.declaration.ty;
+    ownership_api.outcome_kind unresolved = ownership_api.outcome_kind.unresolved_foreign;
+    assert(ownership_ffi.termination(exit_sym, exit_type) ==
+        ownership_api.outcome_kind.normal_process_exit);
+    assert(ownership_ffi.termination(abort_sym, abort_type) == ownership_api.outcome_kind.abort);
+    // The other symbol's type, a type that returns, and a parameter of another type.
+    assert(ownership_ffi.termination(exit_sym, abort_type) == unresolved);
+    assert(ownership_ffi.termination(abort_sym, exit_type) == unresolved);
+    assert(ownership_ffi.termination(exit_sym, bits_type) == unresolved);
+    assert(ownership_ffi.termination(exit_sym, take_stop_type) == unresolved);
+    // A fort function named `exit` has a body to analyze; it is no foreign leaf.
+    ast.sym mut fort_exit = *exit_sym;
+    fort_exit.kind = ast.sym_kind.s_fn;
+    assert(ownership_ffi.termination(&fort_exit, exit_type) == unresolved);
+    // A declaration with a variable tail is another C identity (D9.8).
+    ast.sym mut tail_exit = *exit_sym;
+    tail_exit.node = log_sym->node;
+    assert(ownership_ffi.termination(&tail_exit, exit_type) == unresolved);
+    assert(ownership_ffi.termination(null, exit_type) == unresolved);
+    assert(ownership_ffi.termination(exit_sym, null) == unresolved);
+    println("accept classes");
+}
+
+fn main() i32 {
+    normal_exit();
+    abort_call();
+    low_level_exit();
+    foreign_noreturn();
+    classes();
+    return 0;
+}

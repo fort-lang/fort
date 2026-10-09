@@ -4,6 +4,7 @@ import ownership_keys;
 import ownership_state;
 import ownership_summary_model;
 import ast;
+import prim;
 import types;
 
 struct alternative {
@@ -2153,6 +2154,30 @@ fn hook_results(hook_context mut* h) bool {
     }
     return true;
 }
+/// The termination class of a call of the extern `symbol` with checked type `ty` (D17.19).
+/// The std.libc declarations `exit(i32) noreturn` and `abort() noreturn` give normal process
+/// exit and abort. A compatible declaration of the same C symbol shares that class, and D9.8
+/// makes each declaration of one C symbol compatible. Every other foreign call, `_exit` and a
+/// fort function named `exit` included, is unresolved foreign termination (D17.13).
+fn termination(ast.sym* symbol, types.node* ty) ownership_api.outcome_kind {
+    ownership_api.outcome_kind unresolved = ownership_api.outcome_kind.unresolved_foreign;
+    if (symbol == null || ty == null || symbol->kind != ast.sym_kind.s_extern_fn ||
+        ty->kind != types.type_kind.k_fn || !ty->is_noreturn) { return unresolved; }
+    // A variable tail is part of the identity of a C symbol (D9.8).
+    if (symbol->node != null && (symbol->node->flags & ast.FLAG_VARIADIC) != 0) {
+        return unresolved;
+    }
+    if (symbol->name == "abort" && ty->params.len == 0) {
+        return ownership_api.outcome_kind.abort;
+    }
+    if (symbol->name == "exit" && ty->params.len == 1) {
+        types.node* code = ty->params[0];
+        if (code->kind == types.type_kind.k_prim && code->prim == prim.prim_kind.prim_i32) {
+            return ownership_api.outcome_kind.normal_process_exit;
+        }
+    }
+    return unresolved;
+}
 fn hook_publish(storage_context mut* store, hook_context mut* h) ownership_api.ffi_result {
     ownership_api.ffi_result mut out = {};
     hook_request* r = h->request;
@@ -2179,9 +2204,11 @@ fn hook_publish(storage_context mut* store, hook_context mut* h) ownership_api.f
     i = 0;
     while (i < operands) { arguments[i] = h->plan->operands[i].value; i += 1; }
     ownership_api.outcome_fact[1] mut outcomes = {};
-    outcomes[0].kind = ownership_api.outcome_kind.unresolved_foreign;
+    // Normal process exit needs its final cleanup; abort needs none (D17.19).
+    outcomes[0].kind = termination(r->boundary.call.declaration.symbol,
+        r->boundary.call.declaration.ty);
     outcomes[0].possible_caller_return = !r->boundary.call.declaration.ty->is_noreturn;
-    outcomes[0].cleanup_required = true;
+    outcomes[0].cleanup_required = outcomes[0].kind != ownership_api.outcome_kind.abort;
     outcomes[0].effects = h->transfers[..h->transfers_len];
     storage_request mut stored = {};
     stored.operation = h->prep.metadata.operation;
