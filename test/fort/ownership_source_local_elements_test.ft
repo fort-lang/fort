@@ -1,0 +1,288 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| element leaks ok
+//| loop leaks ok
+//| releases ok
+//| leaves ok
+//| limits ok
+/// Holds the local and stored outcome of programs that reach the elements of an owned span.
+/// An element access uses the owner and touches the allocation, which holds no owner of
+/// that allocation. So the access changes no ownership fact, and a later leak or use after
+/// release of the owner is a validated violation (D17.14, spec/toolchain.md 4.2). A line
+/// here is a line of ELEMENTS.
+import ownership_api;
+import ownership_report;
+import ownership_source;
+import ownership_source_env;
+import ownership_source_local;
+import std.strbuf;
+
+string[104] ELEMENTS = {
+    "struct holder { u8 mut@ own data; }",
+    "fn helper() void {}",
+    "fn element_store(u64 n) void {",
+    "    u8 mut@ own mut buf = new(u8, n);",
+    "    buf[0] = 1;",
+    "}",
+    "fn element_read(u64 n) u8 {",
+    "    u8 mut@ own mut buf = new(u8, n);",
+    "    return buf[0];",
+    "}",
+    "fn view_store(u64 n) void {",
+    "    u8 mut@ own mut buf = new(u8, n);",
+    "    u8 mut@ v = buf;",
+    "    v[0] = 1;",
+    "}",
+    "fn cast_view(u64 n) u8 {",
+    "    char mut@ own mut buf = new(char, n);",
+    "    u8@ v = cast(buf, u8@);",
+    "    return v[0];",
+    "}",
+    "fn range_loop(u64 n) void {",
+    "    u8 mut@ own mut buf = new(u8, n);",
+    "    for (u8 a : buf) {",
+    "        u8 b = a;",
+    "    }",
+    "}",
+    "fn range_loop_call(u64 n) void {",
+    "    u8 mut@ own mut buf = new(u8, n);",
+    "    for (u8 a : buf) {",
+    "        println(\"thing: \", a);",
+    "    }",
+    "}",
+    "fn no_element(u64 n) void {",
+    "    u8 mut@ own mut buf = new(u8, n);",
+    "}",
+    "fn length_only(u64 n) u64 {",
+    "    u8 mut@ own mut buf = new(u8, n);",
+    "    return buf.len;",
+    "}",
+    "fn store_then_release(u64 n) void {",
+    "    u8 mut@ own mut buf = new(u8, n);",
+    "    buf[0] = 1;",
+    "    del(buf);",
+    "}",
+    "fn loop_then_release(u64 n) void {",
+    "    u8 mut@ own mut buf = new(u8, n);",
+    "    buf[0] = 1;",
+    "    for (u8 a : buf) {",
+    "        u8 b = a;",
+    "    }",
+    "    del(buf);",
+    "}",
+    "fn read_after_release(u64 n) u8 {",
+    "    u8 mut@ own mut buf = new(u8, n);",
+    "    u8@ v = buf;",
+    "    del(buf);",
+    "    return v[0];",
+    "}",
+    "fn leaf_store(u64 n) void {",
+    "    holder mut h = holder{new(u8, n)};",
+    "    h.data[0] = 1;",
+    "}",
+    "fn leaf_released(u64 n) void {",
+    "    holder mut h = holder{new(u8, n)};",
+    "    h.data[0] = 1;",
+    "    del(h.data);",
+    "}",
+    "fn owner_elements(u64 n) void {",
+    "    u8 mut* own mut@ own mut bufs = new(u8 mut* own, n);",
+    "    bufs[0] = new(u8);",
+    "    del(bufs[0]);",
+    "    del(bufs);",
+    "}",
+    "fn owner_element_store(u64 n) void {",
+    "    u8 mut* own mut@ own mut bufs = new(u8 mut* own, n);",
+    "    bufs[0] = new(u8);",
+    "}",
+    "fn sliced(u64 n) u8 {",
+    "    u8 mut@ own mut buf = new(u8, n);",
+    "    u8@ v = buf[1..];",
+    "    return v[0];",
+    "}",
+    "fn signed_count(i32 n) void {",
+    "    u8 mut@ own mut buf = new(u8, n);",
+    "    buf[0] = 1;",
+    "}",
+    "fn call_before_loop(u64 n) void {",
+    "    u8 mut@ own mut buf = new(u8, n);",
+    "    helper();",
+    "    for (u8 a : buf) {",
+    "        u8 b = a;",
+    "    }",
+    "    del(buf);",
+    "}",
+    "fn index_past_end() void {",
+    "    u8 mut@ own mut buf = new(u8, 2);",
+    "    buf[2] = 1;",
+    "}",
+    "fn zero_length_loop() void {",
+    "    u8 mut@ own mut buf = new(u8, 0);",
+    "    for (u8 a : buf) {",
+    "        u8 b = a;",
+    "    }",
+    "}",
+};
+
+fn analyze(ownership_source_env.env mut* e, strbuf.str_buf mut* text) void {
+    u64 mut i = 0;
+    while (i < ELEMENTS.len) {
+        strbuf.append(text, ELEMENTS[i]);
+        strbuf.push(text, '\n');
+        i += 1;
+    }
+    strbuf.append(text, "fn root() i32 { return 0; }\n");
+    ownership_source_env.open(e);
+    ownership_source_env.runtime(e);
+    assert(ownership_source_env.prepare(e, strbuf.view(text)));
+    ownership_source.analyze(&e->source);
+}
+
+// The row of `analysis` (ownership_report.LOCAL or STORED_BORROWS) of body `name`.
+fn row(ownership_source_env.env mut* e, string name, u64 analysis, string correspondence,
+    string proof) ownership_source.body* {
+    ownership_source.body* found = ownership_source_env.find(e, "main", name);
+    string got_correspondence = ownership_report.analysis_status(found, analysis, 0);
+    string got_proof = ownership_report.analysis_status(found, analysis, 2);
+    if (got_correspondence != correspondence || got_proof != proof) {
+        eprintln(name, ": correspondence ", got_correspondence, ", proof ", got_proof);
+        assert(false);
+    }
+    return found;
+}
+
+// One validated violation of `kind`, named `slot`, at line `line` of ELEMENTS.
+fn one_violation(ownership_source_local.context* c, string name,
+    ownership_api.event_kind kind, string slot, u32 line) void {
+    if (c->violations_len != 1) {
+        eprintln(name, ": ", c->violations_len, " violations");
+        assert(false);
+    }
+    ownership_source_local.violation v = c->violations[0];
+    if (v.kind != kind || v.name != slot || v.source.line != line || !v.quoted) {
+        eprintln(name, ": ", v.name, " at line ", v.source.line);
+        assert(false);
+    }
+}
+
+// A local violation in a body whose local correspondence is `correspondence`.
+fn violated(ownership_source_env.env mut* e, string name, string correspondence,
+    ownership_api.event_kind kind, string slot, u32 line) void {
+    ownership_source.body* found = row(e, name, ownership_report.LOCAL, correspondence,
+        "violated");
+    one_violation(&found->local, name, kind, slot, line);
+}
+
+fn lost(ownership_source_env.env mut* e, string name, u32 line) void {
+    violated(e, name, "complete", ownership_api.event_kind.lost_ownership, "buf", line);
+}
+
+// A declared local body without proof and without a violation: scoped CI rejects it.
+fn declared(ownership_source_env.env mut* e, string name) void {
+    ownership_source.body* found = row(e, name, ownership_report.LOCAL, "complete",
+        "incomplete");
+    assert(found->local.violations_len == 0);
+}
+
+fn outside(ownership_source_env.env mut* e, string name, ownership_source_local.missing why)
+    void {
+    ownership_source.body* found = row(e, name, ownership_report.LOCAL, "incomplete",
+        "incomplete");
+    assert(found->local.violations_len == 0);
+    if (found->local.gap != why) {
+        eprintln(name, ": gap ", cast(found->local.gap, i32));
+        assert(false);
+    }
+}
+
+fn stored_proved(ownership_source_env.env mut* e, string name) void {
+    row(e, name, ownership_report.STORED_BORROWS, "complete", "complete");
+}
+
+// A store into an element, a read of one, and an element through a view or a cast of the
+// owner leave the leak at the storage end of buf validated. The bounds check of index 0
+// chooses n = 1, which the casts of the count keep (D3.14).
+fn element_leaks(ownership_source_env.env mut* e) void {
+    lost(e, "element_store", 6);
+    lost(e, "element_read", 9);
+    lost(e, "view_store", 15);
+    lost(e, "cast_view", 19);
+    // Without an element access the leak was already validated.
+    lost(e, "no_element", 35);
+    lost(e, "length_only", 38);
+    // A read of an element after the release of its allocation.
+    violated(e, "read_after_release", "complete", ownership_api.event_kind.invalid_use, "v",
+        57);
+    println("element leaks ok");
+}
+
+// A range loop over buf: the local run leaves the loan to the stored run (range_loan), and
+// its walk takes n = 0, the path with no iteration, to the storage end of buf. The calls in
+// the loop body stop only the paths through that body, which the walk does not take.
+fn loop_leaks(ownership_source_env.env mut* e) void {
+    violated(e, "range_loop", "incomplete", ownership_api.event_kind.lost_ownership, "buf", 26);
+    violated(e, "range_loop_call", "incomplete", ownership_api.event_kind.lost_ownership,
+        "buf", 32);
+    // A zero-element allocation still has an obligation (D17.9).
+    violated(e, "zero_length_loop", "incomplete", ownership_api.event_kind.lost_ownership,
+        "buf", 104);
+    println("loop leaks ok");
+}
+
+// A release after the element access, and after the loop, proves: no false violation.
+fn releases(ownership_source_env.env mut* e) void {
+    ownership_source.body* stored = row(e, "store_then_release", ownership_report.LOCAL,
+        "complete", "complete");
+    assert(stored->local.violations_len == 0);
+    stored_proved(e, "store_then_release");
+    outside(e, "loop_then_release", ownership_source_local.missing.range_loan);
+    stored_proved(e, "loop_then_release");
+    // A fort call before the loop changes no address that can name buf, so the loan begins.
+    outside(e, "call_before_loop", ownership_source_local.missing.range_loan);
+    stored_proved(e, "call_before_loop");
+    println("releases ok");
+}
+
+// The stored run follows a span in a field of a private aggregate. An owner element of a
+// span is no owner of the span's own allocation.
+fn leaves(ownership_source_env.env mut* e) void {
+    ownership_source.body* leaf = row(e, "leaf_store", ownership_report.STORED_BORROWS,
+        "complete", "violated");
+    assert(leaf->stored.violations_len == 1);
+    ownership_source_local.violation v = leaf->stored.violations[0];
+    assert(v.kind == ownership_api.event_kind.lost_ownership && v.name == "h");
+    assert(v.leaf != ownership_source_local.WHOLE && v.source.line == 62);
+    stored_proved(e, "leaf_released");
+    // The release of an owner element reads that owner out of the heap: the gap
+    // unknown_source. The release of the span then needs its owner elements empty.
+    outside(e, "owner_elements", ownership_source_local.missing.unknown_source);
+    println("leaves ok");
+}
+
+// Shapes that stay incomplete proof, with no false violation.
+fn limits(ownership_source_env.env mut* e) void {
+    // The overwrite check of the element reads the allocation, which the walk does not know.
+    declared(e, "owner_element_store");
+    // The length of the slice is the parameter less one, which the walk does not compute.
+    declared(e, "sliced");
+    // The check of the signed count chooses n = 0, and then the bounds check traps.
+    declared(e, "signed_count");
+    // Index 2 of two elements traps on each path, so no path reaches the leak.
+    declared(e, "index_past_end");
+    println("limits ok");
+}
+
+fn main() i32 {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    analyze(&e, &text);
+    defer ownership_source_env.close(&e);
+    element_leaks(&e);
+    loop_leaks(&e);
+    releases(&e);
+    leaves(&e);
+    limits(&e);
+    return 0;
+}

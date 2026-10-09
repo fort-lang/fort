@@ -412,7 +412,8 @@ fn related_owners() void {
 }
 
 // A failure inside a loop still stops its path: a path that came back to the failed read
-// would hide that read. The leak after the loop stays unvalidated.
+// would hide that read. The walk to the leak takes n = 0 and passes no stop, so the leak
+// after the loop is validated too.
 fn failure_in_a_loop() void {
     string[10] lines = {
         "fn demo(i32 n) i32 {",
@@ -432,9 +433,9 @@ fn failure_in_a_loop() void {
     analyze(&e, &text, lines[..]);
     defer ownership_source_env.close(&e);
     ownership_source.body* row = row_of(&e, "demo", "complete", "violated");
-    assert(row->local.violations_len == 1 && row->local.unvalidated == 1);
+    assert(row->local.violations_len == 2 && row->local.unvalidated == 0);
     has(row, 0, ownership_api.event_kind.invalid_use, "a", 6);
-    assert(row->local.first_incomplete.terminal.source.line == 9);
+    has(row, 1, ownership_api.event_kind.lost_ownership, "b", 9);
 }
 
 // An incomplete failure still stops its path: the copy of an unknown pointer on line 3 has
@@ -460,8 +461,8 @@ fn incomplete_first() void {
 }
 
 // The loop body ends in a branch on a constant: the flow takes only its selected arm. The
-// body is still on a cycle, so the read stops its path as in failure_in_a_loop, and the stop
-// comes before the leak of b, which stays unvalidated.
+// body is still on a cycle, so the read stops its path as in failure_in_a_loop. The walk to
+// the leak of b takes n = 0 and passes no stop, so that leak is validated too.
 fn failure_in_a_loop_with_a_constant_branch() void {
     string[11] lines = {
         "fn demo(i32 n) i32 {",
@@ -482,9 +483,9 @@ fn failure_in_a_loop_with_a_constant_branch() void {
     analyze(&e, &text, lines[..]);
     defer ownership_source_env.close(&e);
     ownership_source.body* row = row_of(&e, "demo", "complete", "violated");
-    assert(row->local.violations_len == 1 && row->local.unvalidated == 1);
+    assert(row->local.violations_len == 2 && row->local.unvalidated == 0);
     has(row, 0, ownership_api.event_kind.invalid_use, "a", 6);
-    assert(row->local.first_incomplete.terminal.source.line == 10);
+    has(row, 1, ownership_api.event_kind.lost_ownership, "b", 10);
 }
 
 fn stopped_paths() void {

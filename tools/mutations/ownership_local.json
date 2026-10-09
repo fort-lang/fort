@@ -6,7 +6,8 @@
     "src/fort with the mutant too. The stages run from the narrowest tests to the",
     "driver test. The table runs in the Linux VM with the debug preset.",
     "The md5 guard reads the product compiler that the build links. Use the",
-    "default runner."
+    "default runner.",
+    "The first stage runs ownership_flow_test for the loan capture rows (D17.10)."
   ],
   "sources": [
     "src/fort/ownership_transfer.ft",
@@ -19,7 +20,7 @@
   "stages": [
     {
       "name": "local module tests",
-      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 900 -j 6 ownership_transfer_local ownership_flow_observer ownership_flow_separate ownership_flow_flags ownership_source_local ownership_report_local ownership_report_test"
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 900 -j 6 ownership_transfer_local ownership_flow_observer ownership_flow_separate ownership_flow_flags ownership_flow_test ownership_source_local ownership_report_local ownership_report_test"
     },
     {
       "name": "ownership driver",
@@ -128,9 +129,9 @@
     {
       "decision": "D17.18-stopped-before",
       "file": "src/fort/ownership_source_local.ft",
-      "old": "        if (follows(c, at.block, at.gap, at.rank, block, gap, rank)) { return true; }",
+      "old": "        if (on_walk(w, at.block, at.gap, at.rank, block, gap, rank)) { return true; }",
       "new": "        if (false) { return true; }",
-      "what": "an earlier stopped path does not block validation"
+      "what": "a stopped path on the witness walk does not block validation"
     },
     {
       "decision": "D19.8-classification",
@@ -233,14 +234,14 @@
     {
       "decision": "toolchain-4.2-witness",
       "file": "src/fort/ownership_source_local.ft",
-      "old": "        if (valid && witness(c, &preds, block, gap, kind)) {",
+      "old": "        if (valid && witnessed(c, &preds, block, gap, rank, kind)) {",
       "new": "        if (valid) {",
       "what": "a violation needs no witness path"
     },
     {
       "decision": "toolchain-4.2-back-edge",
       "file": "src/fort/ownership_source_local.ft",
-      "old": "        if (fir_flow.bits_get(&visited, at)) { return false; }",
+      "old": "        if (fir_flow.bits_get(&w->passed, at)) { return false; }",
       "new": "        if (false) { return false; }",
       "what": "a witness path can cross a back edge"
     },
@@ -679,18 +680,130 @@
       "what": "the cycle search stops at an unselected arm of a constant switch"
     },
     {
-      "decision": "toolchain-4.2-stop-skip-start",
+      "decision": "toolchain-4.2-stop-left-block",
       "file": "src/fort/ownership_source_local.ft",
-      "old": "    while (start->terminated && fir_flow.next_reachable_target(f, &start->term, &index,\n        &target)) {",
-      "new": "    while (start->terminated && fir_flow.reachable_target(f, &start->term, index, &target)) {",
-      "what": "the stop search stops at an unselected arm of its first block"
+      "old": "    return fir_flow.bits_get(&w->passed, at_block);",
+      "new": "    return fir_flow.bits_get(&w->passed, at_block) && false;",
+      "what": "a stop in a block that the witness walk left does not block validation"
     },
     {
-      "decision": "toolchain-4.2-stop-skip-later",
+      "decision": "toolchain-4.2-stop-off-walk",
       "file": "src/fort/ownership_source_local.ft",
-      "old": "        while (at->terminated && fir_flow.next_reachable_target(f, &at->term, &index,\n            &target)) {",
-      "new": "        while (at->terminated && fir_flow.reachable_target(f, &at->term, index, &target)) {",
-      "what": "the stop search stops at an unselected arm of a later block"
+      "old": "    return fir_flow.bits_get(&w->passed, at_block);",
+      "new": "    return fir_flow.bits_get(&w->passed, at_block) || true;",
+      "what": "a stop in a block off the witness walk blocks validation"
+    },
+    {
+      "decision": "toolchain-4.2-stop-own-rank",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    if (at_block == block) { return at_gap < gap || (at_gap == gap && at_rank < rank); }",
+      "new": "    if (at_block == block) { return at_gap < gap || (at_gap == gap && at_rank <= rank); }",
+      "what": "the stop of the operation itself blocks its validation"
+    },
+    {
+      "decision": "D3.14-cast-fits",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "            narrowed.fits = a.fits | (cast(1, u32) << cast(prim.prim_ord(t->prim), u32));",
+      "new": "            narrowed.fits = a.fits;",
+      "what": "a narrowing cast of an entry value leaves the choice free"
+    },
+    {
+      "decision": "D3.14-fits-relation",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        .value = k.value, .fits = x.fits};",
+      "new": "        .value = k.value};",
+      "what": "a relation forgets the casts of its entry value"
+    },
+    {
+      "decision": "D3.14-fits-pick-entry",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "            consts.int_fits(wanted, t->prim) && fits_all(wanted, cond.fits) :",
+      "new": "            consts.int_fits(wanted, t->prim) :",
+      "what": "an entry value takes a choice that does not fit its casts"
+    },
+    {
+      "decision": "D3.14-fits-pick-relation",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "            consts.int_fits(x, t->prim) && fits_all(x, cond.fits) :",
+      "new": "            consts.int_fits(x, t->prim) :",
+      "what": "a relation takes a choice that does not fit its casts"
+    },
+    {
+      "decision": "D3.14-fits-resolve",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    if (!fits_all(w->choice[p], v.fits)) { return witness_value{}; }",
+      "new": "    if (false) { return witness_value{}; }",
+      "what": "a cast result takes a choice that does not fit the cast"
+    },
+    {
+      "decision": "D3.14-fits-all",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        if ((fits & (cast(1, u32) << k)) != 0 &&",
+      "new": "        if ((fits & (cast(1, u32) << k)) != 0 && false &&",
+      "what": "each choice fits each cast"
+    },
+    {
+      "decision": "D3.14-header-cast",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "        if (a.kind == witness_kind.header && header_type(t)) { return a; }",
+      "new": "        if (false && header_type(t)) { return a; }",
+      "what": "a cast of a span or a string to a view loses its length"
+    },
+    {
+      "decision": "D17.14-header-length",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "            .param = length.param, .fits = length.fits, .param_length = symbolic};",
+      "new": "            .param = length.param, .fits = length.fits, .param_length = false};",
+      "what": "an allocation of a parameter count has no known length"
+    },
+    {
+      "decision": "D17.14-header-length-read",
+      "file": "src/fort/ownership_source_local.ft",
+      "old": "    if (v.kind == witness_kind.header && v.param_length) { return header_length(w, v); }\n    return witness_value{};\n}\n\nfn operand_value(",
+      "new": "    return witness_value{};\n}\n\nfn operand_value(",
+      "what": "the length field of a span local with a parameter length is unknown"
+    },
+    {
+      "decision": "D17.10-fixed-capture",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "            if (p->loan_sources_unknown && !(known && fixed_storage(in, storage))) {",
+      "new": "            if (p->loan_sources_unknown) {",
+      "what": "an unknown call before a loan refuses the capture of any collection"
+    },
+    {
+      "decision": "D17.10-fixed-any",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "            if (p->loan_sources_unknown && !(known && fixed_storage(in, storage))) {",
+      "new": "            if (p->loan_sources_unknown && !known) {",
+      "what": "an unknown call before a loan keeps the capture of a collection that a pointer names"
+    },
+    {
+      "decision": "D17.10-fixed-projection",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "            k != ownership_api.projection_kind.fixed_index) { return false; }",
+      "new": "            k != ownership_api.projection_kind.fixed_index && false) { return false; }",
+      "what": "a collection path that leaves the root storage counts as fixed storage"
+    },
+    {
+      "decision": "D17.10-fixed-residual",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "    if (storage.residual) { return false; }",
+      "new": "    if (false) { return false; }",
+      "what": "a collection path with a residual tail counts as fixed storage"
+    },
+    {
+      "decision": "D17.10-fixed-private",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "    return private_local(in, ownership_api.place_path{.root = storage.root});",
+      "new": "    return private_local(in, ownership_api.place_path{.root = storage.root}) || true;",
+      "what": "a collection in an exposed local counts as fixed storage"
+    },
+    {
+      "decision": "D17.10-exposed-locals",
+      "file": "src/fort/ownership_flow.ft",
+      "old": "                out[cast(operation_value->value.place.local, u64)] = true;",
+      "new": "                out[cast(operation_value->value.place.local, u64)] = false;",
+      "what": "no addr or slice exposes a local"
     },
     {
       "decision": "toolchain-4.2-separate-flag-kind",

@@ -1016,9 +1016,9 @@ came here.
   These keep the stop: an incomplete failure, a failure on a cycle (a settled path that came
   back would skip the step and hide its failure), a loan, a null or value edge, a parameter
   check, a call handler, an exit observer, a W refusal of the relation (one unit for each
-  round), and a fact that names no whole slot of the function. The cycle search and `reaches`
-  in `ownership_source_local` skip the unselected arm of a constant switch through
-  `fir_flow.next_reachable_target`; a loop that stopped at that arm missed the other target.
+  round), and a fact that names no whole slot of the function. The cycle search skips the
+  unselected arm of a constant switch through `fir_flow.next_reachable_target`; a loop that
+  stopped at that arm missed the other target.
   Only the main local run sets the option; the classification run and the summaries keep the
   stop.
   `test/fort/ownership_flow_separate_test.ft` holds each case.
@@ -1056,13 +1056,27 @@ came here.
   earlier iteration's allocation is then rejected as incomplete proof at its storage end: its
   witness needs a back edge (`keep_two_leak`, line 130 of `_refine_test.ft`).
   `test/fort/ownership_source_local_refine_test.ft` holds both rules.
-  A violation counts only when each path state that reached the operation failed it, no path
-  stopped or passed an unknown fort call before it, and a witness path reaches it
-  (`spec/toolchain.md` 4.2). Otherwise it is incomplete proof. The witness walk starts at the
+  A violation counts only when each path state that reached the operation failed it, a witness
+  path reaches it, and no path stopped and no unknown fort call stands on that witness path
+  before it (`spec/toolchain.md` 4.2). Otherwise it is incomplete proof. The flow covers each
+  execution that the walk takes when no path stopped in a block that the walk entered or
+  earlier in the block of the operation: a stop elsewhere ends paths that the walk does not
+  take. So a stop in a loop body leaves a leak after the loop validated on the path with no
+  iteration (`failure_in_a_loop` of `_separate_test.ft`), and before this rule any stop that
+  could reach the operation blocked it. The witness walk starts at the
   entry and crosses no back edge and no fort call; an extern call returns (D17.13). It knows
   constants, exact integer arithmetic, comparisons, value-keeping casts, allocations, span
   headers, slices and `slice_ptr` lengths, and the null left by a move or a `del`. A cast keeps
   the entry value of a parameter when the new type holds each value of the parameter type.
+  A cast to another integer type keeps it for each value that fits that type (D3.14): the type
+  joins the set `fits` of the value, a choice must fit each type of the set, and a choice that
+  does not fit leaves the cast result unknown. The length of `new(T, n)` is then the entry
+  value of n, through the casts of the count to i64 and back, so the bounds check of `buf[0]`
+  chooses n = 1 and the loop over buf chooses n = 0. A cast between two span or string types
+  keeps the header. Before these rules, an element access or a range loop through an owned
+  span with a parameter length made a later leak of the span incomplete proof: a program that
+  stored into `buf[0]` of `new(u8, n)`, or looped over buf, and then lost buf passed with no
+  error in its file (`ownership_source_local_elements_test.ft`).
   A condition on a bool or integer
   parameter that no earlier condition fixed takes a value: the constant of the arm, or the
   constant of a relation or an integer next to it. The walk makes one choice at each
@@ -1102,7 +1116,11 @@ came here.
   site whose allocations of two earlier iterations stay in the facts at once, or whose released
   earlier allocation a view keeps, has no third identity (D17.16). A loop that exhausts the
   transfer history E (256 of 256) stays a limit. So does a path that needs a back edge, a
-  short-circuit condition or a second choice of one parameter. After a definite failure the path
+  short-circuit condition or a second choice of one parameter. A signed count is such a case:
+  the check of `new(u8, n)` for an i32 n chooses n = 0, and a later bounds check of index 0
+  then traps. The walk computes no slice length from a parameter length (`buf[1..]`) and no
+  element of an allocation, so the overwrite check of an owner element (`bufs[0] = new(u8)`)
+  stays unknown (`limits` of `_elements_test.ft`). After a definite failure the path
   checks the unrelated owners, so `fail/ownership/054` examines its line-12 leak. Its line-11
   print calls are fort calls, so no witness reaches line 12: local proof reports line 11 as a
   violation and line 12 as incomplete. A witness walk crosses an earlier failed operation as an
@@ -1163,6 +1181,13 @@ came here.
   `stash_ptr`, `use_it` stops at `use_it`, and `**GP` for `GP = &GM` is the gap.
   The flow proves a range loan whose collection is a whole local or a field leaf and whose
   region writes only whole locals and calls no fort function; another loan is `range_loan`.
+  An unknown call before the loan makes the flow forget its address facts. The capture still
+  begins when no pointer can name the collection: its path holds only fields and indices of
+  inline arrays, and FIR names no address of its root local (`fixed_storage` in `ownership_flow`).
+  `solve` finds the exposed locals in one pass over the FIR, so this test costs no scan.
+  Before that rule a print call before the loop refused the capture
+  (`loan_capture_after_unknown_call` and `fixed_storage_paths` of `ownership_flow_test.ft`,
+  and the four fixed loans of `_stored_limits_test.ft`).
   The checker's range-call guard rejects a fort call in a range loop, so no FIR has one.
   The witness walk knows leaf values, so a lost owner at a field store validates.
   The stored row drops a violation that the local run validated at the same operation.
@@ -1170,12 +1195,14 @@ came here.
   these rules. Five known limits stay incomplete proof in the stored scope: a null test of a
   leaf; a read of an element after a weak store of another value; a failure that only some
   paths into one operation reach; an owning weak store, whose obligation rests at the array
-  root; a range loan that begins after a write that the flow cannot name, such as a print
-  call.
-  Measured on the source audit of 66 roots: 3868 unique bodies, 751 declare stored
-  obligations and all 751 prove them, 677 declare local obligations and all 677 prove them,
-  0 violations. The reads of reference values out of untracked storage took 17 local and 10
-  stored bodies out of the scopes (662 and 728 before, on 3730 bodies). The rule for
+  root; a range loan of a collection that a pointer can name, after a write that the flow
+  cannot name, such as a print call.
+  Measured on the source audit of 66 roots: 3871 unique bodies, 754 declare stored
+  obligations and all 754 prove them, 679 declare local obligations and all 679 prove them,
+  0 violations (3867, 752 and 678 on 7fbb6e5b, before the walk kept parameter lengths; the
+  bodies that change adds and removes account for each difference). The reads of reference
+  values out of untracked storage took 17 local and 10 stored bodies out of the scopes (662
+  and 728 before, on 3730 bodies). The rule for
   untracked references took 72 stored and 161 local bodies out of the scopes when it came
   (756 and 781 before). `src/fort/main.ft` takes 15.0 s and 874 MB with the local, stored
   and raw runs (12.1 s and 748 MB before the raw run; `/usr/bin/time -v`, debug build, Linux

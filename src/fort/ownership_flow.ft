@@ -195,6 +195,9 @@ struct program {
     // settles the slots that the failure relates to, and continues to check the other owners
     // (toolchain 4.2). `continues_after` names the cases that still stop the path.
     bool continue_separate;
+    // exposed[n]: an `addr` or a `slice` of local n stands in the function, so a pointer can
+    // name its storage. solve fills it once from the FIR (exposed_locals).
+    bool@ exposed;
 }
 
 struct path {
@@ -748,28 +751,54 @@ fn protected_target(ownership_api.place_path target, ownership_api.place_path co
     return true;
 }
 
-// An unknown pointer cannot name a local whose address FIR never exposes.
-fn private_local(program* in, ownership_api.place_path place) bool {
-    if (place.projections.len != 0 || place.root.kind != ownership_api.entity_kind.slot ||
-        ownership_keys.function(place.root.function, in->identity) != 0 ||
-        place.root.ordinal >= fir.local_count(in->function)) { return false; }
-    types.node* result_type = in->function->ty->elem;
-    if (place.root.ordinal == 0 && fir.type_aggregate(result_type)) { return false; }
+// Whether no pointer can name `storage`: its path stays in the storage of its root local, and
+// FIR never exposes the address of that local. So an unknown address change leaves it in
+// place. A field and an index of an inline array (fixed_index) stay in the root storage. A
+// captured index selects an element through a span or string header, a dereference loads a
+// pointer, and a residual tail covers any projection, so each of them leaves it.
+fn fixed_storage(program* in, ownership_api.place_path storage) bool {
+    if (storage.residual) { return false; }
+    u64 mut i = 0;
+    while (i < storage.projections.len) {
+        ownership_api.projection_kind k = storage.projections[i].kind;
+        if (k != ownership_api.projection_kind.field &&
+            k != ownership_api.projection_kind.fixed_index) { return false; }
+        i += 1;
+    }
+    return private_local(in, ownership_api.place_path{.root = storage.root});
+}
+
+// The locals of `f` that an `addr` or a `slice` names, in one pass over the statements.
+fn exposed_locals(fir.func* f) bool mut@ own {
+    bool mut@ own out = new(bool, cast(fir.local_count(f), u64));
     u32 mut b = 0;
-    while (b < fir.block_count(in->function)) {
+    while (b < fir.block_count(f)) {
         u32 mut i = 0;
-        while (i < fir.block_statement_count(in->function, b)) {
-            fir.statement* operation_value = fir.block_statement(in->function, b, i);
+        while (i < fir.block_statement_count(f, b)) {
+            fir.statement* operation_value = fir.block_statement(f, b, i);
             if (operation_value->kind == fir.stmt_kind.st_assign &&
                 (operation_value->value.kind == fir.rvalue_kind.rv_addr ||
                 operation_value->value.kind == fir.rvalue_kind.rv_slice) &&
-                operation_value->value.place.base == fir.base_kind.bk_local &&
-                operation_value->value.place.local == place.root.ordinal) { return false; }
+                operation_value->value.place.base == fir.base_kind.bk_local) {
+                out[cast(operation_value->value.place.local, u64)] = true;
+            }
             i += 1;
         }
         b += 1;
     }
-    return true;
+    return out;
+}
+
+// An unknown pointer cannot name a local whose address FIR never exposes. Without the table
+// of exposed locals no local counts as private, which each caller reads as the cautious case.
+fn private_local(program* in, ownership_api.place_path place) bool {
+    if (place.projections.len != 0 || place.root.kind != ownership_api.entity_kind.slot ||
+        ownership_keys.function(place.root.function, in->identity) != 0 ||
+        place.root.ordinal >= fir.local_count(in->function) ||
+        cast(place.root.ordinal, u64) >= in->exposed.len) { return false; }
+    types.node* result_type = in->function->ty->elem;
+    if (place.root.ordinal == 0 && fir.type_aggregate(result_type)) { return false; }
+    return !in->exposed[cast(place.root.ordinal, u64)];
 }
 
 fn check_target(program* in, path mut* p, ownership_api.place_path target,
@@ -960,14 +989,18 @@ fn direct_effect(program* in, path mut* p, u32 block, u32 gap)
         u32 index = loan_index(in->function, operation_value->loan);
         if (index == 4294967295) { return invalid_input(in); }
         if (operation_value->kind == fir.stmt_kind.st_loan_begin) {
-            if (p->loan_sources_unknown) { return loan_failure(in, op, at, false); }
+            ownership_api.place_path mut storage = ownership_api.place_path{};
+            bool known = storage_place(in, operation_value->place, &storage);
+            // Unknown address changes cannot move a collection that no pointer can name.
+            if (p->loan_sources_unknown && !(known && fixed_storage(in, storage))) {
+                return loan_failure(in, op, at, false);
+            }
             fir_flow.bits_set(&p->loans, index);
             loan_state mut* held = &p->held[cast(index, u64)];
             ownership_state.free(&held->facts);
             held->facts = ownership_state.clone(&p->facts);
             held->begin = operation_value;
-            ownership_api.place_path mut storage = ownership_api.place_path{};
-            held->known = storage_place(in, operation_value->place, &storage);
+            held->known = known;
             held->original = ownership_state.copy_place(&held->facts, storage);
             held->place = ownership_state.copy_place(&held->facts, resolve_alias(p, storage));
             if (unknown_address(p, storage) || unknown_address(p, held->place)) {
@@ -2259,9 +2292,16 @@ fn observe_exit(program* in, analysis mut* out, path* p, u32 block,
 }
 
 /// Runs a canonical worklist. The caller frees the analysis and retains the program facts.
-fn solve(program* in) analysis {
+fn solve(program* given) analysis {
     analysis mut out = analysis{};
-    if (!valid(in)) { note_failure(&out, invalid_input(in)); return out; }
+    if (!valid(given)) { note_failure(&out, invalid_input(given)); return out; }
+    // The table of exposed locals: one pass over the FIR for the whole computation, in place
+    // of a pass at each question about a private local.
+    bool mut@ own exposed = exposed_locals(given->function);
+    defer del(exposed);
+    program mut run = *given;
+    run.exposed = exposed[..];
+    program* in = &run;
     u32 count = fir.block_count(in->function);
     out.step_first = new(u64, cast(count, u64) + 1);
     u64 mut step_at = 0;

@@ -5,7 +5,7 @@
 //| slices ok
 //| ledger ok
 /// Checks the witness walk that another analysis runs with a ledger of its own: a parameter
-/// keeps its entry value through a cast to a type that holds each of its values, the walk reads
+/// keeps its entry value through a cast for each value that fits the cast type, the walk reads
 /// the length of `slice_ptr`, each searched block and statement charges the given ledger, and
 /// the walk gives back the table of address-taken locals that it borrows.
 import fir;
@@ -16,7 +16,7 @@ import ownership_source_env;
 import ownership_source_local;
 import std.strbuf;
 
-string[48] WALK = {
+string[70] WALK = {
     "extern fn marker() void;",
     "fn same_width(u64 n) void {",
     "    u64 m = cast(n, u64);",
@@ -45,6 +45,28 @@ string[48] WALK = {
     "fn same_size_into_signed(u64 n) void {",
     "    i64 m = cast(n, i64);",
     "    if (m == 3) { marker(); }",
+    "}",
+    "fn round_trip(u64 n) void {",
+    "    i64 s = cast(n, i64);",
+    "    u64 back = cast(s, u64);",
+    "    if (back == 9) { marker(); }",
+    "}",
+    "fn mask_in_pick(i64 n) void {",
+    "    u8 m = cast(n, u8);",
+    "    if (m <= 255) { return; }",
+    "    marker();",
+    "}",
+    "fn sign_mask(u64 n) void {",
+    "    i64 m = cast(n, i64);",
+    "    if (n > 9223372036854775807) {",
+    "        if (m > 0) { marker(); }",
+    "    }",
+    "}",
+    "fn mask_in_resolve(i64 n) void {",
+    "    u8 m = cast(n, u8);",
+    "    if (n == 256) {",
+    "        if (m != 0) { marker(); }",
+    "    }",
     "}",
     "fn raw_range_length() void {",
     "    u8[4] mut bytes = {1, 2, 3, 4};",
@@ -102,6 +124,22 @@ fn reaches(ownership_source_env.env mut* e, string name) bool {
     panic("ownership_source_local_witness_in_test: no marker");
 }
 
+// A switch on a cast of n to i8 with an arm for -128 and for each of 0 to 127. The values
+// 0 to 128 that the otherwise target can try then leave only 128, which fits the type of n
+// but not i8: the cast gives -128, and that arm returns.
+fn mask_in_switch(strbuf.str_buf mut* text) void {
+    strbuf.append(text, "fn mask_in_switch(i64 n) void {\n    i8 m = cast(n, i8);\n");
+    strbuf.append(text, "    switch (m) {\n    case -128: return;\n");
+    u64 mut k = 0;
+    while (k < 128) {
+        strbuf.append(text, "    case ");
+        strbuf.append_u64(text, k);
+        strbuf.append(text, ": return;\n");
+        k += 1;
+    }
+    strbuf.append(text, "    default: marker();\n    }\n}\n");
+}
+
 fn open(ownership_source_env.env mut* e) void {
     ownership_source_env.open(e);
     ownership_source_env.runtime(e);
@@ -113,12 +151,15 @@ fn open(ownership_source_env.env mut* e) void {
         strbuf.push(&text, '\n');
         i += 1;
     }
+    mask_in_switch(&text);
     assert(ownership_source_env.prepare(e, strbuf.view(&text)));
     ownership_source.analyze(&e->source);
 }
 
 // A cast keeps the entry value when the target type holds each value of the parameter type:
 // the same type, a wider type of the same sign, or a signed type wider than an unsigned one.
+// Another integer cast keeps it for each value that fits the target type, so a choice must fit
+// each cast that the value went through (D3.14).
 fn casts() void {
     ownership_source_env.env mut e = ownership_source_env.env{};
     open(&e);
@@ -127,9 +168,19 @@ fn casts() void {
     assert(reaches(&e, "wider"));
     assert(reaches(&e, "signed_wider"));
     assert(reaches(&e, "unsigned_into_signed"));
-    assert(!reaches(&e, "narrower"));
-    assert(!reaches(&e, "signed_into_unsigned"));
-    assert(!reaches(&e, "same_size_into_signed"));
+    // n = 3 fits u8, u64 and i64, so the cast results equal 3.
+    assert(reaches(&e, "narrower"));
+    assert(reaches(&e, "signed_into_unsigned"));
+    assert(reaches(&e, "same_size_into_signed"));
+    assert(reaches(&e, "round_trip"));
+    // m > 255 needs n = 256, which does not fit u8: no choice makes m exceed 255.
+    assert(!reaches(&e, "mask_in_pick"));
+    // n = 256 makes the cast result 0, which the walk does not compute: it knows no value.
+    assert(!reaches(&e, "mask_in_resolve"));
+    // No value that fits i8 reaches the otherwise target.
+    assert(!reaches(&e, "mask_in_switch"));
+    // n = 2^63 does not fit i64, which holds no u64 above 2^63 - 1: the cast gives -2^63.
+    assert(!reaches(&e, "sign_mask"));
     println("casts ok");
 }
 
