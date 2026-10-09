@@ -125,6 +125,15 @@ without a rewrite.
   never appear -- and each looked exactly like a job still running. A marker waiter is the
   fallback for a job you did not start, and it needs a second condition that ends it.
 
+- **A host git can write an index that the guest git refuses.** On 2026-10-08, after many
+  `checkout --detach`, `commit --amend` and `cherry-pick` runs of host git 2.53 in one worktree,
+  guest git 2.43 stopped with `index uses ... extension, which we do not understand` and `fatal:
+  index file corrupt`, and `tools/ownership_audit.py run` exited on its `git ls-files`. Both
+  sides read the same bytes (equal md5). On a clean tree, rebuild the index on the host with
+  `git read-tree HEAD`, then run the guest command, and do not run host git in that worktree
+  while it runs. On 2026-10-09 the guest still gave `fatal: index file corrupt` after a
+  `git read-tree HEAD`, and it read the index after a drop of the guest page cache (section 2).
+  So drop the cache after the rebuild, before the guest command.
 - **Do not run a binary in the slot that did not build it.** The two slots share one build
   directory through the VirtualBox shared folder, and the folder serves an executable's pages from
   a cache that `md5sum` does not read. T-135 built `build/Linux/debug/fort` in slot 1 and ran it in
