@@ -415,18 +415,21 @@ class OwnershipDriverTest(unittest.TestCase):
         self.assertTrue(all(value["solver"] == "unexecuted" for value in row["analyses"]))
 
     def test_actual_service_work_refusal_keeps_the_first_location(self):
-        locals_text = "".join(f"i32 local{index} = 0;\n" for index in range(400))
+        # Liveness work grows with the square of the declarations, and the W bound with their
+        # count, so 4000 declarations exhaust the bound of their FIR size.
+        locals_text = "".join(f"i32 local{index} = 0;\n" for index in range(4000))
         self.entry.write_text("fn many_locals() void {\n" + locals_text + "}\n")
         self.assertEqual(self.invoke().returncode, 1)
         document = self.evidence()
         meter = next(row for row in document["meters"] if row["name"] == "services")
         refusal = meter["first_refusal"]
         self.assertEqual(refusal["code"], "work_limit")
-        # The body is one computation of 1200 stores in one block. Its W bound follows that size.
+        # The body is one computation of 12000 stores in one block. Its W bound follows that
+        # size.
         limits = document["limits"]
-        self.assertEqual(meter["fir_size"], 1201)
+        self.assertEqual(meter["fir_size"], 12001)
         bound = limits["w"] + limits["w_scale"] * meter["fir_size"]
-        self.assertEqual(refusal["source"]["line"], 201)
+        self.assertEqual(refusal["source"]["line"], 2763)
         self.assertEqual(refusal["limit"]["used"], bound)
         self.assertEqual(refusal["limit"]["bound"], bound)
         self.assertIn(b"liveness: work_limit", self.result.stderr)
@@ -440,7 +443,7 @@ class OwnershipDriverTest(unittest.TestCase):
         diagnostics = json.loads(self.result.stdout)["diagnostics"]
         matches = [row for row in diagnostics if row["message"] == expected]
         self.assertEqual(len(matches), 1)
-        self.assertEqual(matches[0]["line"], 201)
+        self.assertEqual(matches[0]["line"], 2763)
 
     LOCAL_CASES = (
         "fn leak() void {\n"

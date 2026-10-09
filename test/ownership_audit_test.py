@@ -29,9 +29,11 @@ LIMITS = {
     "t": 64,
     "e": 256,
     "w": 65536,
-    "w_scale": 64,
+    "w_scale": 1024,
     "v": 512,
 }
+W_BASE = LIMITS["w"]
+W_SCALE = LIMITS["w_scale"]
 TARGET = "x86_64-linux-gnu"
 # The analyses that version 5 integrates in each report, beside the graph and liveness.
 PRODUCERS = ("local", "stored_borrows", "raw")
@@ -697,12 +699,12 @@ class SchemaTests(RepositoryFixture):
     def test_work_bound_values_follow_the_fir_size_function(self):
         for bound, expected in (
             (65536, True),
-            (65536 + 64, True),
-            (65536 + 64 * 77579, True),
+            (W_BASE + W_SCALE, True),
+            (W_BASE + W_SCALE * 77579, True),
             (audit.U64_MAX, True),
             (65535, False),
             (65537, False),
-            (65536 + 63, False),
+            (W_BASE + W_SCALE - 1, False),
             (0, False),
         ):
             with self.subTest(bound=bound):
@@ -712,9 +714,9 @@ class SchemaTests(RepositoryFixture):
         path = self.checkout / "src/fort/ownership_limits.ft"
         original = path.read_text()
         for text in (
-            original.replace("u64 PRODUCTION_W_SCALE = 64;\n", ""),
-            original + "u64 PRODUCTION_W_SCALE = 64;\n",
-            original.replace("PRODUCTION_W_SCALE = 64", "PRODUCTION_W_SCALE = 0"),
+            original.replace(f"u64 PRODUCTION_W_SCALE = {W_SCALE};\n", ""),
+            original + f"u64 PRODUCTION_W_SCALE = {W_SCALE};\n",
+            original.replace(f"PRODUCTION_W_SCALE = {W_SCALE}", "PRODUCTION_W_SCALE = 0"),
         ):
             with self.subTest(text=text[-40:]):
                 path.write_text(text)
@@ -723,7 +725,7 @@ class SchemaTests(RepositoryFixture):
                     audit.production_limits(self.checkout)
         path.write_text(original)
         self.commit()
-        self.assertEqual(audit.production_limits(self.checkout)["w_scale"], 64)
+        self.assertEqual(audit.production_limits(self.checkout)["w_scale"], W_SCALE)
 
     def test_graph_fir_size_is_the_sum_of_every_body_ledger(self):
         sizes = [3, 5, 9]
@@ -734,7 +736,7 @@ class SchemaTests(RepositoryFixture):
         self.report["totals"] = audit.derived_totals(self.report["bodies"])
 
         def ledger(index, name, owner, size):
-            bound = 65536 + 64 * size
+            bound = W_BASE + W_SCALE * size
             return {
                 "id": index,
                 "name": name,
@@ -755,12 +757,12 @@ class SchemaTests(RepositoryFixture):
             self.validate()
         self.report["meters"].pop()
         self.report["meters"][1]["fir_size"] = sizes[2]
-        self.report["meters"][1]["counts"][0]["bound"] = 65536 + 64 * sizes[2]
+        self.report["meters"][1]["counts"][0]["bound"] = W_BASE + W_SCALE * sizes[2]
         # The producer ledgers of that body follow its service ledger.
         for meter in self.report["meters"]:
             if meter["name"] in PRODUCERS and meter["owner"] == bodies[0]["key"]:
                 meter["fir_size"] = sizes[2]
-                meter["counts"][0]["bound"] = 65536 + 64 * sizes[2]
+                meter["counts"][0]["bound"] = W_BASE + W_SCALE * sizes[2]
         with self.assertRaisesRegex(audit.InvalidEvidence, "graph FIR size differs"):
             self.validate()
         self.report["meters"] = self.report["meters"][1:]
@@ -792,7 +794,7 @@ class SchemaTests(RepositoryFixture):
         self.report["totals"] = audit.derived_totals(self.report["bodies"])
 
         def ledger(index, name, owner, size, refusal=None):
-            bound = 65536 + 64 * size
+            bound = W_BASE + W_SCALE * size
             used = bound if refusal else 0
             return {
                 "id": index,
@@ -871,13 +873,13 @@ class SchemaTests(RepositoryFixture):
             if not (meter["name"] == "services" and meter["owner"] == bodies[1]["key"])
         ]
         self.report["meters"][0]["fir_size"] = sizes[0]
-        self.report["meters"][0]["counts"][0]["bound"] = 65536 + 64 * sizes[0]
+        self.report["meters"][0]["counts"][0]["bound"] = W_BASE + W_SCALE * sizes[0]
         for index, meter in enumerate(self.report["meters"]):
             meter["id"] = index
         with self.assertRaisesRegex(audit.InvalidEvidence, "differs from the service ledger"):
             self.validate()
         # A W refusal needs an incomplete closure and body row of its analysis.
-        bound = 65536 + 64 * sizes[0]
+        bound = W_BASE + W_SCALE * sizes[0]
         refusal = incomplete(
             flow, "work_limit", limit={"category": "W", "used": bound, "bound": bound}
         )
@@ -893,7 +895,7 @@ class SchemaTests(RepositoryFixture):
         bodies = self.report["bodies"][:2]
 
         def ledger(index, name, owner, size, refusal=None):
-            bound = 65536 + 64 * size
+            bound = W_BASE + W_SCALE * size
             used = bound if refusal else 0
             return {
                 "id": index,
@@ -940,7 +942,7 @@ class SchemaTests(RepositoryFixture):
         with self.assertRaisesRegex(audit.InvalidEvidence, "raw analysis: producer"):
             self.validate(report)
         # A raw W refusal needs an incomplete raw closure and body row.
-        bound = 65536 + 64 * sizes[0]
+        bound = W_BASE + W_SCALE * sizes[0]
         refusal = incomplete(
             "raw", "work_limit", limit={"category": "W", "used": bound, "bound": bound}
         )
@@ -963,19 +965,19 @@ class SchemaTests(RepositoryFixture):
     def test_meter_w_bound_scales_with_its_fir_size(self):
         def grow_graph(report, size):
             report["meters"][0]["fir_size"] = size
-            report["meters"][0]["counts"][0]["bound"] = 65536 + 64 * size
+            report["meters"][0]["counts"][0]["bound"] = W_BASE + W_SCALE * size
 
         self.assertEqual(audit.work_bound(LIMITS, 0), 65536)
-        self.assertEqual(audit.work_bound(LIMITS, 77579), 65536 + 64 * 77579)
+        self.assertEqual(audit.work_bound(LIMITS, 77579), W_BASE + W_SCALE * 77579)
         self.assertEqual(audit.work_bound(LIMITS, audit.U64_MAX), audit.U64_MAX)
-        self.assertEqual(audit.work_bound(LIMITS, (audit.U64_MAX - 65536) // 64 + 1), audit.U64_MAX)
+        self.assertEqual(audit.work_bound(LIMITS, (audit.U64_MAX - W_BASE) // W_SCALE + 1), audit.U64_MAX)
         owner = self.report["bodies"][0]["key"]
         self.report["analyses"][1]["producer"] = "integrated"
         self.report["bodies"][0]["analyses"][1].update(
             correspondence="complete", solver="incomplete"
         )
         self.report["totals"] = audit.derived_totals(self.report["bodies"])
-        bound = 65536 + 64 * 1201
+        bound = W_BASE + W_SCALE * 1201
         refusal = incomplete(
             "liveness", "work_limit", limit={"category": "W", "used": bound, "bound": bound}
         )
@@ -990,7 +992,7 @@ class SchemaTests(RepositoryFixture):
                         "category": "W",
                         "scope": "computation",
                         "used": 9000,
-                        "bound": 65536 + 64 * 1201,
+                        "bound": W_BASE + W_SCALE * 1201,
                     }
                 ],
                 "first_refusal": None,
@@ -1026,7 +1028,7 @@ class SchemaTests(RepositoryFixture):
             (lambda r: r["meters"][1].pop("fir_size"), "incorrect members"),
             (lambda r: r["limits"].pop("w_scale"), "incorrect members"),
             (lambda r: r["limits"].update(w_scale=0), "W scale"),
-            (lambda r: r["limits"].update(w_scale=65), "differs from production table"),
+            (lambda r: r["limits"].update(w_scale=W_SCALE + 1), "differs from production table"),
         ):
             self.reject(mutation, pattern)
 
@@ -1112,7 +1114,7 @@ class SchemaTests(RepositoryFixture):
             lambda value: value["first_incomplete"]["limit"].update(bound=65535),
             "W bound of no FIR size",
         )
-        self.report["first_incomplete"]["limit"]["bound"] = 65536 + 64 * 3
+        self.report["first_incomplete"]["limit"]["bound"] = W_BASE + W_SCALE * 3
         self.validate()
         self.report["first_incomplete"]["limit"]["bound"] = audit.U64_MAX
         self.validate()

@@ -2544,6 +2544,9 @@ says ownership is "by convention", this section supersedes it.
   alternatives, templates, and targets accumulated over all insertions. One fixed work bound
   applied to every computation. Now each precision bound counts current content in its scope.
   The work bound scales with the FIR size of each computation.
+  Note 2026-10-08: The user rules a production W_scale of 1024 in place of 64 (2026-10-07).
+  The rule does not change. On the closure of `src/fort/main.ft`, 27 of 2798 summary-solver
+  computations and 21 of 2798 heap computations refused W at 64, and none refuse at 1024.
 
 ### D17.19 Global ownership and process boundaries
 - owner: `memory-model.md` (2.9), `toolchain.md` (2.1), `module-system.md` (11),
