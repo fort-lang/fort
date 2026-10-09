@@ -338,7 +338,7 @@ temporary directory for the intermediate IR file (D19.1).
 
 ### 1.1 Ownership coverage reports (D19.8)
 
-The compiler report is a JSON version 6 document. The audit attestation is a JSON version 1
+The compiler report is a JSON version 7 document. The audit attestation is a JSON version 1
 document.
 Neither document changes the diagnostic JSON of section 4.1.
 The compiler writes one report for one checked closure. The runner attests the invocation and bytes.
@@ -354,7 +354,7 @@ Count overflow gives report failure, not wrapped totals.
 | Member | Type and meaning |
 |---|---|
 | `kind` | String `fort-ownership-report`. |
-| `version` | Integer 6. Version 2 adds `w_scale`, `fir_size`; 3 local; 4 raw; 5 stored; 6 exit. |
+| `version` | Integer 7. 2 adds `w_scale`, `fir_size`; 3 local; 4 raw; 5 stored; 6 exit; 7 calls. |
 | `complete` | Boolean true; the report is complete, not necessarily its proof. |
 | `compiler_version` | The string that --version identifies. |
 | `invocation` | Entry, working directory, arguments, target, configuration, and mode. |
@@ -439,6 +439,21 @@ It also adds one `process_exit_fills` ledger when the boundary runs, that is whe
 checking, lowering and verification of each body succeed: the call-graph step that decides which
 bodies can fill an owning global. That ledger has no owner, counts W only, and has the sum of the
 FIR sizes of the `process_exit` ledgers.
+The calls_heap increment runs two solvers over the call graph: the summary solver and the heap
+solver. Each solves each component of the graph in one computation, callee components first.
+It adds one `calls_summary` ledger for each component computation of the summary solver and one
+`calls_heap` ledger for each component computation of the heap solver.
+A component ledger has an owner: the key of the first member of its component in key order.
+Its FIR size is the sum of the FIR sizes of the members. So the FIR sizes of the ledgers of one
+solver sum to the graph FIR size.
+The `calls_heap` correspondence of a body is complete when each solver has each fact of the
+body. Each call of the body must also reach only fort targets that are members of its own
+component or have two complete summaries. A residual fort target or a callee without two
+complete summaries leaves it incomplete.
+A validated event of the heap solver is a `calls_heap` violation, unless the local, stored-borrow
+or raw row validated a violation at the same operation. That violation counts once, in the
+earlier row. An event of the summary solver is no violation: its flow validates no witness path
+(section 4.2). It is incomplete proof.
 The graph FIR size is the sum of the service ledgers only.
 Graph construction uses the graph's retained private W ledger.
 Service dispatch, liveness, and the target queries of one body charge that body's service ledger.
@@ -606,6 +621,9 @@ The process-exit scope declares a body when its `process_exit` correspondence is
 Scoped process-exit enforcement rejects each `process_exit` violation in any body.
 It also rejects each declared body whose `process_exit` proof is not complete.
 It also rejects a boundary whose correspondence is complete and whose proof is not complete.
+The calls_heap scope declares a body when its `calls_heap` correspondence is complete.
+Scoped calls_heap enforcement rejects each `calls_heap` violation in any body.
+It also rejects each declared body whose `calls_heap` proof is not complete.
 Later scoped enforcement reads the same reports and requires complete proof within its declared
 scope.
 It never converts exit 1 into accepted complete compiler proof.

@@ -1,0 +1,74 @@
+/// Runs the heap solver alone over one source file and prints the verdict of each function.
+///
+/// Usage: heap_alone <file.ft>. Run it in a directory of its own that holds `std` (a link to the
+/// standard library of the repository): the test environment reads `std` there and writes its
+/// sandboxes there.
+/// Each line of output is `<name> proved`, `<name> failed` or `<name> unproved`. The program reads
+/// the heap summary of each body without the summary solver. A test uses it to check that the
+/// heap solver alone proves no faulty body (`test/ownership_driver_test.py`).
+import ownership_heap_env;
+import std.io;
+import std.strbuf;
+import std.sys;
+
+/// The name of the function that `line` declares at its start, or "".
+fn declared(string line) string {
+    if (line.len < 4 || line[0..3] != "fn ") { return ""; }
+    u64 mut end = 3;
+    while (end < line.len && line[end] != '(' && line[end] != ' ') { end += 1; }
+    return line[3..end];
+}
+
+fn main() i32 {
+    string@ args = sys.args();
+    if (args.len != 2) {
+        eprintln("usage: heap_alone <file.ft>");
+        return 2;
+    }
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    if (!io.read_file(args[1], &text)) {
+        eprintln("heap_alone: cannot read ", args[1]);
+        return 2;
+    }
+    string all = strbuf.view(&text);
+    string[512] mut lines = {};
+    string[32] mut names = {};
+    u64 mut count = 0;
+    u64 mut bodies = 0;
+    u64 mut from = 0;
+    u64 mut i = 0;
+    while (i <= all.len) {
+        if (i == all.len || all[i] == '\n') {
+            if (count == lines.len) {
+                eprintln("heap_alone: more than 512 lines");
+                return 2;
+            }
+            string line = all[from..i];
+            lines[count] = line;
+            count += 1;
+            string name = declared(line);
+            if (name.len > 0) {
+                if (bodies == names.len) {
+                    eprintln("heap_alone: more than 32 functions");
+                    return 2;
+                }
+                names[bodies] = name;
+                bodies += 1;
+            }
+            from = i + 1;
+        }
+        i += 1;
+    }
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, lines[..count], names[..bodies]);
+    u64 mut k = 0;
+    while (k < bodies) {
+        string verdict = ownership_heap_env.proved(&c, names[k]) ? "proved" :
+            (ownership_heap_env.failed(&c, names[k]) ? "failed" : "unproved");
+        println(names[k], " ", verdict);
+        k += 1;
+    }
+    return 0;
+}

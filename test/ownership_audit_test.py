@@ -35,8 +35,10 @@ LIMITS = {
 W_BASE = LIMITS["w"]
 W_SCALE = LIMITS["w_scale"]
 TARGET = "x86_64-linux-gnu"
-# The analyses that version 6 integrates in each report, beside the graph and liveness.
+# The analyses that version 7 integrates in each report, beside the graph and liveness. The
+# producers among them keep one ledger for each verified body.
 PRODUCERS = ("local", "stored_borrows", "raw", "process_exit")
+INTEGRATED = (*PRODUCERS, "calls_heap")
 
 
 def incomplete(stage="graph", code="missing_producer", source=None, limit=None):
@@ -96,7 +98,7 @@ def make_report(argv, cwd, *, accepted=False, files=None):
             )
     report = {
         "kind": "fort-ownership-report",
-        "version": 6,
+        "version": 7,
         "complete": True,
         "compiler_version": "fort synthetic 1",
         "invocation": {
@@ -120,7 +122,7 @@ def make_report(argv, cwd, *, accepted=False, files=None):
         "analyses": [
             {
                 "name": name,
-                "producer": "integrated" if accepted or name in PRODUCERS else "unavailable",
+                "producer": "integrated" if accepted or name in INTEGRATED else "unavailable",
                 "status": "complete" if accepted else "incomplete",
             }
             for name in audit.ANALYSES
@@ -387,6 +389,9 @@ if mode.startswith("exit_"):
 if mode.startswith("boundary_"):
     from ownership_audit_test import unprove_boundary
     unprove_boundary(report, declared=mode == "boundary_unproved")
+if mode.startswith("calls_"):
+    from ownership_audit_test import localize
+    localize(report, root, mode[len("calls_"):], stage=5)
 if mode == "incomplete":
     report["enumeration"]["complete"] = False
     report["first_incomplete"] = {{"stage": "enumeration", "code": "source_coverage",
@@ -488,8 +493,9 @@ class SchemaTests(RepositoryFixture):
 
     def test_unknown_versions_and_invalid_complete_types(self):
         # Version 3 adds local ledgers, version 4 raw ledgers, version 5 stored ledgers and
-        # version 6 process-exit ledgers and the boundary. Earlier versions lack them.
-        for version in (0, 1, 2, 3, 4, 5, 7, True, -1, 6.0, "6", audit.U64_MAX + 1):
+        # version 6 process-exit ledgers and the boundary, and version 7 the calls_heap ledgers.
+        # Earlier versions lack them.
+        for version in (0, 1, 2, 3, 4, 5, 6, 8, True, -1, 7.0, "7", audit.U64_MAX + 1):
             with self.subTest(version=version):
                 self.reject(lambda value: value.update(version=version))
         for complete in (False, 0, 1, "true", None):
@@ -873,6 +879,55 @@ class SchemaTests(RepositoryFixture):
         for index, meter in enumerate(self.report["meters"]):
             meter["id"] = index
         self.validate()
+
+    def test_calls_heap_ledgers_partition_the_graph(self):
+        # Each calls_heap solver solves each component once, so the FIR sizes of its ledgers
+        # sum to the graph FIR size. A ledger is owned by the first member of its component.
+        sizes = [3, 5]
+        bodies = self.report["bodies"][:2]
+        self.report["analyses"][1]["producer"] = "integrated"
+        for body in self.report["bodies"]:
+            body["analyses"][1].update(correspondence="complete", solver="incomplete")
+        self.report["totals"] = audit.derived_totals(self.report["bodies"])
+        others = self.report["bodies"][2:]
+        self.report["meters"] = [
+            body_ledger(0, "graph_private", bodies[0]["key"], sum(sizes), LIMITS),
+            *[
+                body_ledger(index + 1, "services", body["key"], sizes[index], LIMITS)
+                for index, body in enumerate(bodies)
+            ],
+        ]
+        self.report["meters"][0]["owner"] = None
+        fit_local_ledgers(self.report)
+        # The other verified bodies have FIR size 0, so one component of FIR size 8 can hold
+        # them all beside the two sized bodies.
+        self.assertTrue(all(body["verification"] == "complete" for body in others))
+
+        def component(name, owner, size):
+            return body_ledger(len(self.report["meters"]), name, owner["key"], size, LIMITS)
+
+        for name in audit.COMPONENT_LEDGERS:
+            self.report["meters"].append(component(name, bodies[0], sizes[0]))
+            self.report["meters"].append(component(name, bodies[1], sizes[1]))
+        self.validate()
+        cases = (
+            (lambda meters: meters[-1].update(fir_size=4), "differ from the graph ledger"),
+            (lambda meters: meters[-1].update(owner=None), "missing owner"),
+            (lambda meters: meters[-1].update(owner=dict(bodies[0]["key"])), "duplicate owner"),
+            (lambda meters: meters.pop() and meters.pop(), "one solver without ledgers"),
+            (
+                lambda meters: (meters[-1].update(fir_size=4), meters[-2].update(fir_size=4)),
+                "below its owner",
+            ),
+        )
+        for mutate, pattern in cases:
+            with self.subTest(pattern=pattern):
+                report = copy.deepcopy(self.report)
+                mutate(report["meters"])
+                for meter in report["meters"]:
+                    meter["counts"][0]["bound"] = audit.work_bound(LIMITS, meter["fir_size"])
+                with self.assertRaisesRegex(audit.InvalidEvidence, pattern):
+                    self.validate(report)
 
     def test_local_ledgers_follow_the_service_ledger_of_their_body(self):
         self.check_flow_ledgers("local")
@@ -2528,6 +2583,22 @@ class EnforcementTests(RepositoryFixture):
         summary, problems = self.enforce("boundary_unproved", scope="local")
         self.assertEqual(problems, [])
 
+    def test_calls_heap_scope_rejects_violations_and_incomplete_declared_obligations(self):
+        summary, problems = self.enforce("calls_clean", scope="calls_heap")
+        self.assertEqual((problems, summary["scope"]), ([], "calls_heap"))
+        self.assertGreater(summary["declared_context_bodies"], 0)
+        self.assertLess(summary["declared_context_bodies"], summary["context_bodies"])
+        summary, problems = self.enforce("calls_violation", scope="calls_heap")
+        self.assertEqual(problems, ["src/fort/main.ft:1: main: 1 calls_heap violation(s)"])
+        summary, problems = self.enforce("calls_incomplete", scope="calls_heap")
+        expected = (
+            "src/fort/main.ft:1: main: incomplete declared calls_heap obligation (incomplete)"
+        )
+        self.assertEqual(problems, [expected])
+        summary, problems = self.enforce("calls_shared_violation", scope="calls_heap")
+        self.assertEqual(problems, ["src/fort/shared.ft:1: shared: 1 calls_heap violation(s)"])
+        self.assertEqual(summary["problems"], 1)
+
     def test_each_scope_reads_only_its_own_row(self):
         # A problem of one scope declares nothing in another scope.
         pairs = (
@@ -2539,6 +2610,11 @@ class EnforcementTests(RepositoryFixture):
             ("raw_violation", "stored_borrows"),
             ("exit_violation", "raw"),
             ("raw_violation", "process_exit"),
+            ("calls_violation", "local"),
+            ("local_violation", "calls_heap"),
+            ("raw_violation", "calls_heap"),
+            ("calls_violation", "process_exit"),
+            ("exit_violation", "calls_heap"),
         )
         for mode, scope in pairs:
             with self.subTest(mode=mode, scope=scope):
@@ -2565,7 +2641,7 @@ class EnforcementTests(RepositoryFixture):
                 compiler_provenance=self.provenance,
             )
         with self.assertRaisesRegex(audit.InvalidEvidence, "unknown scope"):
-            audit.enforce_audit(self.base / "out/audit.json", scope="calls_heap")
+            audit.enforce_audit(self.base / "out/audit.json", scope="graph")
 
     def test_cli_returns_one_for_problems_and_zero_for_a_clean_scope(self):
         common = [
@@ -2601,7 +2677,7 @@ class EnforcementTests(RepositoryFixture):
                 self.assertEqual(json.loads(stdout.getvalue())["problems"], status)
                 self.assertEqual(len(errors.getvalue().splitlines()), status)
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            audit.main(["enforce", "--scope", "calls_heap", *common, str(self.base / "x.json")])
+            audit.main(["enforce", "--scope", "graph", *common, str(self.base / "x.json")])
 
 
 class AttestationTests(RepositoryFixture):

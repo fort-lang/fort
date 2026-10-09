@@ -196,10 +196,12 @@ class DriverGroupsTest(unittest.TestCase):
                     document = self.selected(*flags, check=check)
                     # Each ledger records the FIR size of the body that its computation
                     # reads. The stored, raw and process-exit analyses read the lowered FIR as
-                    # the local one does.
+                    # the local one does. `count` is the one member of its call component, so the
+                    # component computations of the two calls_heap solvers read it alone.
                     self.assertEqual(self.ledger_sizes(document, "count"),
                                      {"services": lowered, "local": lowered,
                                       "stored_borrows": lowered, "raw": lowered,
+                                      "calls_summary": lowered, "calls_heap": lowered,
                                       "process_exit": lowered})
                     projection = ({key: document[key] for key in PROOF_KEYS},
                                   self.result.stderr)

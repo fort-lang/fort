@@ -20,6 +20,7 @@ import ownership_api;
 import ownership_keys;
 import ownership_report;
 import ownership_source;
+import ownership_source_calls;
 import ownership_source_env;
 import ownership_source_local;
 import std.str;
@@ -131,15 +132,18 @@ fn document() void {
     assert(ownership_report.body_ownership(row) == "violated");
     assert(ownership_report.integrated(ownership_report.RAW));
     assert(ownership_report.integrated(ownership_report.STORED_BORROWS));
-    assert(!ownership_report.integrated(ownership_report.RAW + 1));
+    assert(ownership_report.integrated(ownership_report.CALLS_HEAP));
+    assert(ownership_report.integrated(ownership_report.PROCESS_EXIT));
+    assert(!ownership_report.integrated(ownership_report.ANALYSIS_COUNT));
     strbuf.str_buf mut out = strbuf.create();
     defer strbuf.free(&out);
     ownership_report.invocation call = ownership_report.invocation{};
     ownership_report.build(&out, &e.source, &call, 1);
-    contains(&out, "{\"kind\":\"fort-ownership-report\",\"version\":6,");
+    contains(&out, "{\"kind\":\"fort-ownership-report\",\"version\":7,");
     contains(&out, "{\"name\":\"raw\",\"producer\":\"integrated\",\"status\":\"incomplete\"}");
     contains(&out, "{\"name\":\"stored_borrows\",\"producer\":\"integrated\"");
-    contains(&out, "{\"name\":\"calls_heap\",\"producer\":\"unavailable\"");
+    contains(&out, "{\"name\":\"calls_heap\",\"producer\":\"integrated\"");
+    contains(&out, "{\"name\":\"process_exit\",\"producer\":\"integrated\"");
     strbuf.str_buf mut expected = strbuf.create();
     defer strbuf.free(&expected);
     strbuf.append(&expected, "\"name\":\"raw\",\"owner\":{\"module\":");
@@ -172,8 +176,10 @@ fn render_refusal() void {
     println("render refusal ok");
 }
 
-// The body reason follows analysis order: local, stored borrows, raw, then the first analysis
-// without a producer. A violated raw row gives no reason, so the reason names calls_heap.
+// The body reason follows analysis order: local, stored borrows, raw, calls_heap, then the
+// first analysis without a producer. A violated raw row gives no reason, so the reason names
+// the fact that the calls_heap row lacks: the summary solver has no fact for the string
+// constant on line 2.
 fn reasons() void {
     ownership_source_env.env mut e = ownership_source_env.env{};
     string[6] lines = {
@@ -193,7 +199,8 @@ fn reasons() void {
         "complete");
     assert(ownership_report.analysis_status(row, ownership_report.RAW, 2) == "violated");
     ownership_report.reason why = ownership_report.body_reason(row);
-    assert(why.present && why.stage == "calls_heap" && why.code == "missing_producer");
+    assert(why.present && why.stage == "calls_heap" && why.code == "unknown_effect");
+    assert(why.source.line == 2);
     assert(ownership_report.closure_status(&e.source, ownership_report.RAW) == "incomplete");
     println("reasons ok");
 }
@@ -346,8 +353,9 @@ fn tied(string name) ownership_source_local.violation mut@ own {
 }
 
 // Six records with one key, one in each list, merge in list order: local, stored borrows,
-// raw violations, raw failures without a witness, process-exit violations and process-exit
-// failures without a witness (toolchain 4.2 gives no further key).
+// raw violations, raw failures without a witness, calls_heap records, process-exit violations
+// and process-exit failures without a witness (toolchain 4.2 gives no further key). The fifth
+// list, the calls_heap records, is empty: the body has no calls_heap row.
 fn record_ties() void {
     ownership_source.body mut row = ownership_source.body{};
     row.local.solved = true;
@@ -373,13 +381,14 @@ fn record_ties() void {
     defer del(row.exit.violations);
     defer del(row.exit.unproved);
     string[6] names = {"local", "stored", "raw", "unproved", "exit", "exit unproved"};
-    u64[6] mut cursor = {0, 0, 0, 0, 0, 0};
+    u64[6] lists = {0, 1, 2, 3, 5, 6};
+    u64[7] mut cursor = {0, 0, 0, 0, 0, 0, 0};
     u64 mut list = 0;
     while (list < 6) {
         u64 mut from = 9;
         ownership_source_local.violation* v = ownership_report.next_record(&row, cursor[..],
             &from);
-        assert(v != null && from == list && v->name == names[list]);
+        assert(v != null && from == lists[list] && v->name == names[list]);
         cursor[from] += 1;
         list += 1;
     }
@@ -448,15 +457,32 @@ fn checked_addition() void {
     diag.sink mut found = diag.sink{};
     defer diag.free(&found);
     ownership_report.diagnose(&e.source, &found, "main.ft");
-    assert(diag.count(&found) == 4 && diag.record_count(&found) == 7);
+    // The heap solver validates the read `*h.p` after `del(b)` at each of the two operations.
+    // The raw record of `*q` excludes the heap record of the first operation (`exclude`). The
+    // record of the second operation stays: toolchain 4.2 suppresses a record only at the same
+    // operation. It sorts between the two raw records of `*q`.
+    ownership_source_calls.row* calls = row->calls;
+    assert(calls->correspondence == ownership_source_local.status.incomplete);
+    assert(calls->violations == 1 && calls->shown_len == 1);
+    assert(ownership_keys.operation(calls->records[0].event.value.operation,
+        first->operation) > 0);
+    assert(calls->records[0].event.value.text == "h.p");
+    assert(diag.count(&found) == 5 && diag.record_count(&found) == 10);
     assert(diag.record_at(&found, 0).msg == "invalid use of 'h.p'");
     assert(diag.record_at(&found, 0).loc.line == 8);
     assert(diag.record_at(&found, 2).msg == "invalid use of 'q'");
     assert(diag.record_at(&found, 2).loc.line == 9);
-    assert(diag.record_at(&found, 4).msg ==
-        "cannot prove that 'q' designates the accessed storage");
+    assert(diag.record_at(&found, 4).msg == "invalid use of storage");
     assert(diag.record_at(&found, 4).loc.line == 9);
-    assert(diag.record_at(&found, 4).loc.col == diag.record_at(&found, 2).loc.col);
+    assert(diag.record_at(&found, 5).msg == "h.p");
+    // `*q` reads through a pointer whose nullness the heap solver does not know, before the
+    // read of `*h.p`: the heap event assumes that `q` is not null and names it.
+    assert(diag.record_at(&found, 6).msg ==
+        "this path needs 'q' to be non-null here; a null 'q' faults at this read first");
+    assert(diag.record_at(&found, 7).msg ==
+        "cannot prove that 'q' designates the accessed storage");
+    assert(diag.record_at(&found, 7).loc.line == 9);
+    assert(diag.record_at(&found, 7).loc.col == diag.record_at(&found, 2).loc.col);
     println("checked addition ok");
 }
 

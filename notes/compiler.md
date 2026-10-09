@@ -836,8 +836,9 @@ came here.
   A transferred child keeps its identity and obligation outside the old container's cleanup region.
   Retained pool views preserve their payload sources through pool growth and lose validity at
   payload release. A refilled pool cannot revive an earlier view.
-  `src/fort/ownership_heap.ft` implements this proof over verified FIR. The driver does not
-  select it yet. Its tests lower fort source and solve the closure through the call graph.
+  `src/fort/ownership_heap.ft` implements this proof over verified FIR. The calls_heap
+  producer runs it on the checked closure (entry below). Its tests lower fort source and solve
+  the closure through the call graph.
   A state maps slots (the reference leaves of locals, of caller storage, and of heap cells) to
   values, and keeps atoms: a cell, a region of a template, a flat allocation, or an opaque one.
   A template is a struct whose owned fields are its own pointer type or flat references.
@@ -1454,6 +1455,167 @@ came here.
   `ownership_globals`, the consumer of supplied global inputs, encodes D17.19 too. Both
   encodings stand until call summaries join the consumer with the actual producers.
   `test/fort/ownership_source_exit_*_test.ft` hold these rules.
+- **Call and heap effects come from the summaries of verified FIR** (D17.14 to D17.18, D19.8).
+  `ownership_source_calls` runs `ownership_recursive.solve` (the summary solver) and
+  `ownership_heap.solve` (the heap solver) over the graph of the verified closure, after the
+  local, stored and raw runs. Each solver solves each component in one computation, callee
+  components first, with a fresh meter of the FIR size of the component: its ledger,
+  `calls_summary` or `calls_heap`, owned by the first member in key order.
+  The event service keeps each validated event of invalid use, lost ownership or a failed
+  caller requirement of the heap solver, and, for each solver, the first unproved event of each
+  body in the canonical event order (`ownership_keys.event`). It counts each other event and
+  keeps none, because no other event changes a verdict. Each kept event charges one V unit of
+  its ledger. No event of the summary solver is a violation: `ownership_flow.failure` marks
+  each failure without a reason unconditional, but the flow keeps the obligation of an owner
+  that a callee with an incomplete summary takes, and it does not decide a null test of an
+  owner. The heap solver marks an event validated when its state keeps a witness and the
+  fact is definite on that path (toolchain 4.2). Before, two correct programs of the
+  qualification corpus (`059` and `063`) gave validated losses;
+  `test_qualification_accept_cases_have_no_violation` of `test/ownership_driver_test.py` holds
+  its 72 accept cases at 0 violations, and
+  `test_qualification_reject_cases_never_prove_the_faulty_body` holds no complete calls_heap
+  proof for the faulty body of each of the 37 reject cases.
+  A summary has one exit state for all inputs, the join of each returning path. A caller takes
+  a definite fact from it only when each returning path has the fact. The witness crosses the
+  call and assumes that the callee returns: nothing proves it (D17.18; the user ruled "Assume
+  calls return" on 2026-10-09). A callee that loops, panics or dereferences a null pointer for
+  these arguments keeps the witness, so a violation after it can be false. So the event names
+  each crossed call in a note at the call, "this path needs 'f' to return here; if it does not
+  return, 'x' does not leak". A join keeps the calls of
+  both paths, and the exit state keeps none. The crossing comes before the requirement check of
+  the call, so a failed requirement names its own call. An extern call keeps the witness without
+  a note (D17.13). The exit record of an input is its entry value on each returning path: a
+  nonnull argument where each returning path has a null input ends the path, and a `joined` exit
+  root makes a free input of the caller `joined`. Before the ruling, the caller
+  kept its witness only after a callee that the solver proved to return for the arguments:
+  totality, and dereference and check demands. Four review rounds each found a callee that
+  aborts and still kept the witness.
+  A kept check is one that `--release` keeps, bounds and span checks included: only the unsafe
+  `--no-bounds-check` removes those (D10.6). An overflow, shift or overwrite check keeps the
+  witness for any value (`removable`). Inside one body, a kept check that fails for a known
+  value ends the path, as an abort does. At a kept check on a value that the state does not
+  know, the witness goes on and assumes that the check passes. The event names the check:
+  "this path needs the bounds check to pass here; if it fails, the program stops" (the user
+  ruled "Assume it passes, note it" on
+  2026-10-10). So `arr[i]` after `set5(&i)` gives a violation that names the check, though the
+  check aborts there. A check assumption counts on a path without a witness too: a rejoin can
+  give the witness back after it (`restore_witness`). The state names at most `CROSS_LIMIT`, 8,
+  assumptions, calls and checks together, in source order. One more clears the witness and sets
+  `assumptions_full`, so no rejoin gives it back. A check is no exit of the post-dominator
+  graph, and a branch around one rejoins.
+  A dereference that reads or writes storage is a null check under the same ruling (the
+  coordinator ruled so in review round 7: the ruling names null). `null_check` reads the
+  nullness before `deref_value` unfolds the target. A pointer that the state knows is null ends
+  the path (`s->reached = false`). At one whose nullness the state does not know, the witness
+  assumes that it is not null. The note reads "this path needs 'p' to be non-null here; a null
+  'p' faults at this read first". A parameter can be
+  null, so a pointer to caller storage needs the note too. The state keeps the assumed fact
+  (`nonnull_callers`, `atom.assumed_nonnull`, the nullness of a slot value), so a second
+  dereference of the pointer is no new assumption. An `addr` or a `slice` reads no storage, so
+  it is no null check (`addressing`). Before, `fn f(node* p) { b = pass(new(node)); p->v; }`
+  validated the leak of `b` with only the note of `pass` (review round 7, p6b).
+  Each assumption note follows one pattern from one table (`note_row`, keyed by
+  `assumption_kind`; the user ruled on 2026-10-10 for precise notes): "this path needs
+  <subject> <fact> here; <outcome>". A call note takes its outcome from the event:
+  `append_event_outcome`. The subject of a call is the callee name, and a check names its kind:
+  the producer has no source text of a call or of an operand.
+  No assumed fact removes a path (D17.18; rule P1 of a design review, 2026-10-10). Six kinds of
+  site end a path or a branch: the null dereference end (`null_check`), a callee without a
+  return and the exit contradiction (`apply`), `refine`, a kept check that fails for known values,
+  and an abort, trap or unreachable terminator. `grep -cE 'reached = false;|return cond\.truth ==
+  truth;|if \(a->root == root_kind\.null_root\) \{ return false; \}|a->kind ==
+  atom_kind\.cell\) \{ return false; \}|checked\.truth != \(term->check|An abort, a trap, or an
+  unreachable terminator' src/fort/ownership_heap.ft` gives 8 lines. Each reads only a fact that
+  a test, an assignment or an allocation establishes. An unfold of a root whose nullness the state
+  does not know marks it `unfold_nonnull`: `null_test` knows no truth there, `refine` keeps the
+  null edge without a witness, the contradiction does not count it, and the graft keeps the
+  mark. A null test of a pointer to caller storage decides nothing, because a parameter can be
+  null. An address computation of a null base is no error. A proved empty owner that a callee
+  dereferences on some path is a failed caller requirement (D10.7): `state.deref_handles` (each
+  path, joined by intersection) and `summary.deref_inputs` (some path) name the dereferenced
+  inputs. An owner that is empty on some path into the call gives incomplete proof, and an input
+  of unknown nullness passes the requirement on. Before, the heap solver alone proved f4
+  `free_param` (main too), f4 `null_local`, f1 `caller_null` and f5 `null_read`, and the faulty
+  `main` of linear cases 062 and 063; `test_heap_solver_alone_proves_no_faulty_reject_body` of
+  `test/ownership_driver_test.py` runs `test/ownership/heap_alone.ft` over the 37 reject cases.
+  Writes that the proof does not follow (review round 6). `set0(&i)` forgets the known value of
+  `i`: `set0` writes through a pointer that its summary does not follow (`writes_untracked`).
+  Before, the call kept a stale 5 (review round 5, e4 to e6). Round 5 forgot each addressed scalar
+  at each call (`forget_addressed`); the rule below covers that, so it went in round 6 (its
+  mutation row survived). An `addr` or a `slice` names the storage of a local only for a fixed
+  place (`fir.place_fixed`). So `*hi = id(2)` takes the address of `*hi`, and `hi` keeps its
+  value. A write that the proof does not follow can reach each storage that a pointer can
+  designate (`havoc_reachable`). That is each addressed local, each caller storage and each cell;
+  no other slot has a pointer to it. Three kinds of code make such a write. The first is a store
+  through a pointer that the proof does not follow (`untracked_store`, when `fir.place_indirect`
+  holds). The second is an unknown or extern call. The third is a call of a summary with
+  `writes_untracked`. References and scalars there lose their facts. Owners keep theirs, except at
+  a store of an owner, which is incomplete proof of its own. Before, `GP = &p; clear_g();` kept
+  the view of `p` (n4). A first fix kept bits of escaped storage, and six probes still gave a
+  false validated loss. Their stores go through a joined address, an array slot, an integer, a
+  span over a pointer, a field without a slot, or an extern. `forgotten` of
+  `test/fort/ownership_heap_witness_test.ft` holds them. A store into the storage of a global
+  changes no slot: `G = 1` keeps each fact. A store through a pointer of another type than its
+  target (a cast) leaves the storage of the target no fact. A read through one gives an unknown
+  value: `resolve` compares `key_type` with the pointee type, and a key without a type (below a
+  scalar) counts as another type. `apply` applies no summary when the type of the storage that an
+  argument designates is not the pointee type of its parameter. Before, `set_first(cast(&y, duo
+  mut*))` applied a summary that names no slot of `y` (review round 7, p1 to p4r). Before,
+  `*cast(&i, u8 mut*) = 1` made 1 the value of a `u32` (n9). A store through a view of several
+  cells loses the fields of each (`havoc_cell`).
+  Inside one body, a join keeps a refined root a free choice only when one choice atom differs
+  between its two paths: two differing inputs can be correlated, so both become `joined`
+  (`choice_split`; toolchain 4.2, "A collection of independent may-facts does not supply that
+  validation"). A requirement fails with a validated event only when each
+  returning path stores over the owner (`required_null` and `required_fields` of the state,
+  joined by intersection). A root is released when each path released it, or when no exit atom
+  holds its storage; it is possibly released when some path released a member. A record whose
+  storage a fold, a graft or a join gave to another record holds no obligation: an address can
+  keep it, and a use through that address is unproved (`retire`, `unowned`, `canonical`).
+  Before, a store on one callee path, a release on one callee path, a member cell kept by an
+  address, and a second test of two inputs that a join correlated each gave a validated
+  violation in a correct program (`test/fort/ownership_heap_witness_test.ft`). On the 109
+  qualification cases and on the 119 declared calls_heap bodies of the compiler source the
+  assumption changes no verdict. Each event of a deferred statement notes its registration and
+  its exit.
+  A charge of the summary model can name no source: its refusal then names the declaration.
+  Correspondence of a body is complete when no fact is missing. A fact is missing when a call
+  of the body has a residual fort target or a target outside its component without two
+  complete summaries, or when a summary has no proof and no `obligation`, or when the heap
+  proof stops at `missing_graph`, `unknown_effect` or a precision limit. An extern call keeps
+  its caller out through `missing_ffi` of the summary extraction until the solvers apply D17.13.
+  `ownership_summary_model.summary` sets `obligation` when flow failed an operation (a
+  definite failure, or a lost path, capture or boundary:
+  `ownership_summary.obligation_failure`) or when the solver withdrew the proof of a recursive
+  component. Before that flag, a read through a parameter (`return s->errors`)
+  that the summary cannot export counted as an unproved obligation: 49 of 316 accepted bodies
+  of `src/fort/main.ft`.
+  The local, stored and raw rows come first: a calls_heap record at an operation where one of
+  them validated a violation goes (`exclude`), and so does a first unproved event or a terminal
+  at that operation or at its source range. A row left with nothing to render keeps incomplete
+  proof there. `settle` derives the proof again from `decided` after each `exclude`. A row
+  keeps one record of each operation, class, source relation and reason (toolchain 4.2), so a
+  deferred call at two exits, or one read that two operations make, gives two records.
+  A declared body without proof renders its first
+  unproved event as incomplete proof whatever its kind, or one terminal record when it keeps
+  none. The members of a withdrawn component share one terminal, and the member that holds its
+  operation renders it.
+  The heap solver crosses no call without an applied summary: after a call of a fort target
+  without a usable summary, or of a function value, it clears the witness, because the effects
+  of the call are unknown, so a loss after it is unproved, not validated (`spec/fir.md` 14.1,
+  A06). Before, `keep(g, p) { g(); }` reported "lost ownership of 'p'" as a validated
+  violation. An extern call keeps the witness (D17.13), a callback that panics included.
+  A graft that retires an interface atom gives each record of it the status above: an address
+  of a field of its cell can keep it in the state, and before, `canonical` kept it live, so
+  `t = keep_tail(move(a)); del(t);` lost the released root with a definite event.
+  An event of a local without a source name names "the result" or "a temporary value".
+  `test/fort/ownership_source_calls_test.ft` and `ownership_heap_calls_test.ft`
+  (`unknown_returns`, `released_root`) hold these rules.
+  The summary model charges about 3 E units for each FIR statement, so a body of about 80
+  statements refuses E (a straight-line body of 13 checked operations, `flt.mul_u64`, needed
+  more than 256). A refused W, E or V charge is a budget error, so the solver of the body is
+  incomplete. A refused precision bound, such as R (256 regions of the heap solver), is a
+  missing fact, so the body leaves the declared scope.
 - **Dynamic element proof keeps guarded update states** (D17.15).
   `ownership_regions.apply` takes resolved storage paths and exhaustive supplied choices.
   Captured index versions stay separate from local slot names.
