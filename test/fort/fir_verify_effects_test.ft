@@ -1,0 +1,467 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| effects ok
+//| sets ok
+//| order ok
+//| verdicts ok
+//| loans ok
+/// Checks the effect list of V12 and V13 and the sets that it gives the dataflow, and the early
+/// return of V14 for a function with no loan statement. The list and the sets replace a walk of
+/// every block at every transfer, so each case holds them against what that walk did: the effects
+/// in item order, and a transfer as sets that equals the effects applied in order.
+import fir;
+import fir_flow;
+import fir_verify;
+import lower_env;
+import pass_env;
+import std.strbuf;
+
+u64 PRELUDE_LINES = 13;
+
+string[PRELUDE_LINES] PRELUDE = {
+    "struct pair {",
+    "    i32 a;",
+    "    u64 b;",
+    "}",
+    "fn grab() u8 mut* own {",
+    "    return new(u8);",
+    "}",
+    "fn take(u8 mut* own p) void {",
+    "    del(p);",
+    "}",
+    "fn look(u8 mut* p) void {",
+    "}",
+    "i32 LIMIT = 7;",
+};
+
+// Writes each effect of `e` as ` bb<b>.<position>:<kind><local>`, the kind as `r` for a read, `e`
+// for an emptying and `f` for a fill.
+fn effects_text(fir_verify.effects* e, u32 blocks, strbuf.str_buf mut* out) void {
+    strbuf.clear(out);
+    u32 mut b = 0;
+    while (b < blocks) {
+        u64 mut k = e->first[cast(b, u64)];
+        while (k < e->first[cast(b, u64) + 1]) {
+            fir_verify.effect ef = e->items[k];
+            strbuf.append(out, " bb");
+            strbuf.append_u64(out, cast(b, u64));
+            strbuf.push(out, '.');
+            strbuf.append_u64(out, cast(ef.position, u64));
+            strbuf.push(out, ':');
+            if (ef.kind == fir_verify.effect_kind.ef_read) {
+                strbuf.push(out, 'r');
+            } else if (ef.kind == fir_verify.effect_kind.ef_empty) {
+                strbuf.push(out, 'e');
+            } else {
+                strbuf.push(out, 'f');
+            }
+            strbuf.append_u64(out, cast(ef.local, u64));
+            k += 1;
+        }
+        b += 1;
+    }
+}
+
+// Parses the lines `text` against PRELUDE. The module stays valid until the caller frees it.
+fn parse(lower_env.env mut* e, string@ text) fir.module {
+    return pass_env.parse(e, PRELUDE[..], text);
+}
+
+// Holds the effects of the only function of `text` against `want`.
+fn expect_effects(lower_env.env mut* e, string@ text, string want) void {
+    string[1] parts = {want};
+    expect_effects_of(e, text, parts[..]);
+}
+
+// Holds the effects of the only function of `text` against the parts of `want` joined.
+fn expect_effects_of(lower_env.env mut* e, string@ text, string@ want_parts) void {
+    strbuf.str_buf mut wanted = strbuf.create();
+    defer strbuf.free(&wanted);
+    u64 mut p = 0;
+    while (p < want_parts.len) {
+        strbuf.append(&wanted, want_parts[p]);
+        p += 1;
+    }
+    string want = strbuf.view(&wanted);
+    fir.module mut m = parse(e, text);
+    defer fir.module_free(&m);
+    fir.func* f = fir.module_function_at(&m, 0);
+    fir_verify.effects mut ef = fir_verify.effects_of(f);
+    defer fir_verify.effects_free(&ef);
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    effects_text(&ef, fir.block_count(f), &got);
+    if (strbuf.view(&got) != want) {
+        eprintln("got: ", strbuf.view(&got));
+        eprintln("want:", want);
+        panic("fir_verify_effects_test: the effects differ");
+    }
+    // the last entry of `first` closes the list
+    assert(ef.first[cast(fir.block_count(f), u64)] == ef.len);
+}
+
+// ---- the effect list -----------------------------------------------------------------------
+
+fn the_effects_follow_the_items_in_order() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    // a fill, a move that reads and empties before the fill of its destination, a write into a
+    // part that fills nothing, a move into a named local, and a `del` of a named local, which
+    // is no temporary
+    string[11] moves = {
+        "fn main.f() -> void {",
+        "    let _1: u8 mut* own; let _2: u8 mut* own; let _3 (n): u8 mut* own; let _4: pair;",
+        "    bb0: {",
+        "        _1 = call fn main.grab(); _2 = move _1; _4.0 = const i32 1;",
+        "        _3 = move _2; goto bb1;",
+        "    }",
+        "    bb1: {",
+        "        del(move _3); return;",
+        "    }",
+        "}",
+        "",
+    };
+    expect_effects(&e, moves[..], " bb0.0:f1 bb0.1:r1 bb0.1:e1 bb0.1:f2 bb0.3:r2 bb0.3:e2");
+    // an index local and a deref pointer are reads; a move through a deref empties nothing; a
+    // terminator reads at the position after the last statement
+    string[11] places = {
+        "fn main.f() -> i32 {",
+        "    let _1: u64; let _2 (a): i32[4]; let _3: i32 mut*; let _4: i32; let _5: bool;",
+        "    bb0: {",
+        "        _1 = const u64 1; _2[_1] = const i32 3; _3 = addr mut(_2[_1]);",
+        "        _4 = copy (*_3); _5 = lt(copy _4, const i32 9);",
+        "        switch(copy _5) -> [true: bb1, otherwise: bb1];",
+        "    }",
+        "    bb1: {",
+        "        _0 = copy _4; return;",
+        "    }",
+        "}",
+    };
+    string[2] places_want = {
+        " bb0.0:f1 bb0.1:r1 bb0.2:r1 bb0.2:f3 bb0.3:r3 bb0.3:f4 bb0.4:r4 bb0.4:f5",
+        " bb0.5:r5 bb1.0:r4",
+    };
+    expect_effects_of(&e, places[..], places_want[..]);
+    // a move of a part empties the temporary, a move through a deref does not, and a global is
+    // no temporary
+    string[11] parts = {
+        "fn main.f() -> void {",
+        "    let _1: u8 mut* own*; let _2: u8 mut* own; let _3: i32; let _4: void;",
+        "    let _5 (h): u8 mut* own;",
+        "    bb0: {",
+        "        _5 = call fn main.grab(); _1 = addr(_5); _2 = move (*_1);",
+        "        _3 = copy global main.LIMIT; _4 = call fn main.take(move _2);",
+        "        return;",
+        "    }",
+        "}",
+        "",
+        "",
+    };
+    expect_effects(&e, parts[..],
+                   " bb0.1:f1 bb0.2:r1 bb0.2:f2 bb0.3:f3 bb0.4:r2 bb0.4:e2 bb0.4:f4");
+}
+
+// ---- the sets ------------------------------------------------------------------------------
+
+// An effect list of one block, built by hand.
+fn one_block(fir_verify.effects mut* e) void {
+    e->first = new(u64, 2);
+}
+
+fn close_block(fir_verify.effects mut* e) void {
+    e->first[1] = e->len;
+}
+
+// The gen set and the kill set of `rule` for the only block of `e`, as text.
+fn sets_text(fir_verify.effects* e, u32 rule, strbuf.str_buf mut* out) void {
+    fir_flow.bits[1] mut gens = {};
+    fir_flow.bits[1] mut kills = {};
+    fir_verify.transfer_sets(e, rule, 1, 4, gens[..], kills[..]);
+    strbuf.clear(out);
+    strbuf.append(out, "gen");
+    u32 mut i = 0;
+    while (i < 4) {
+        if (fir_flow.bits_get(&gens[0], i)) {
+            strbuf.push(out, ' ');
+            strbuf.append_u64(out, cast(i, u64));
+        }
+        i += 1;
+    }
+    strbuf.append(out, " kill");
+    i = 0;
+    while (i < 4) {
+        if (fir_flow.bits_get(&kills[0], i)) {
+            strbuf.push(out, ' ');
+            strbuf.append_u64(out, cast(i, u64));
+        }
+        i += 1;
+    }
+    fir_flow.bits_free(&gens[0]);
+    fir_flow.bits_free(&kills[0]);
+}
+
+fn expect_sets(fir_verify.effects* e, u32 rule, string want) void {
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    sets_text(e, rule, &got);
+    if (strbuf.view(&got) != want) {
+        eprintln("rule ", rule, " got: ", strbuf.view(&got), " want: ", want);
+        panic("fir_verify_effects_test: the sets differ");
+    }
+}
+
+// The last effect that decides a temporary decides it for the block. V13 ignores an emptying,
+// so a block that only empties a temporary changes nothing for V13.
+fn the_last_deciding_effect_decides_the_block() void {
+    fir_verify.effects mut e = fir_verify.effects{};
+    defer fir_verify.effects_free(&e);
+    one_block(&e);
+    // _1: fill then empty; _2: empty then fill; _3: empty alone; _0: read alone
+    fir_verify.effect_push(&e, fir_verify.effect_kind.ef_fill, 1, 0);
+    fir_verify.effect_push(&e, fir_verify.effect_kind.ef_read, 1, 1);
+    fir_verify.effect_push(&e, fir_verify.effect_kind.ef_empty, 1, 1);
+    fir_verify.effect_push(&e, fir_verify.effect_kind.ef_empty, 2, 2);
+    fir_verify.effect_push(&e, fir_verify.effect_kind.ef_fill, 2, 3);
+    fir_verify.effect_push(&e, fir_verify.effect_kind.ef_empty, 3, 4);
+    fir_verify.effect_push(&e, fir_verify.effect_kind.ef_read, 0, 5);
+    close_block(&e);
+    expect_sets(&e, 12, "gen 1 3 kill 1 2 3");
+    expect_sets(&e, 13, "gen 1 2 kill 1 2");
+}
+
+// Whether the rule decides at each kind: V12 at an emptying and a fill, V13 at a fill.
+fn each_rule_decides_at_its_own_effects() void {
+    assert(fir_verify.effect_decides(12, fir_verify.effect_kind.ef_empty));
+    assert(fir_verify.effect_decides(12, fir_verify.effect_kind.ef_fill));
+    assert(!fir_verify.effect_decides(12, fir_verify.effect_kind.ef_read));
+    assert(!fir_verify.effect_decides(13, fir_verify.effect_kind.ef_empty));
+    assert(fir_verify.effect_decides(13, fir_verify.effect_kind.ef_fill));
+    assert(!fir_verify.effect_decides(13, fir_verify.effect_kind.ef_read));
+    assert(fir_verify.effect_adds(12, fir_verify.effect_kind.ef_empty));
+    assert(!fir_verify.effect_adds(12, fir_verify.effect_kind.ef_fill));
+    assert(fir_verify.effect_adds(13, fir_verify.effect_kind.ef_fill));
+}
+
+// ---- the sets against the effects in order -------------------------------------------------
+
+// A generator of pseudo-random numbers, so that the cases are the same on every run.
+struct lcg {
+    u64 state;
+}
+
+fn next(lcg mut* g, u64 below) u64 {
+    g->state = g->state *% 6364136223846793005 +% 1442695040888963407;
+    return (g->state >> 33) % below;
+}
+
+u32 LOCALS = 6;
+
+// For 300 blocks of up to 12 random effects on six temporaries, and four random in-sets each,
+// applying the effects in order gives what the sets give: the in-set less the kill set, with
+// the gen set added. The case holds both rules.
+fn the_sets_equal_the_effects_applied_in_order() void {
+    lcg mut g = lcg{20261009};
+    u64 mut round = 0;
+    u64 mut decided = 0;
+    while (round < 300) {
+        fir_verify.effects mut e = fir_verify.effects{};
+        one_block(&e);
+        u64 n = next(&g, 13);
+        u64 mut k = 0;
+        while (k < n) {
+            fir_verify.effect_kind kind = cast(next(&g, 3), fir_verify.effect_kind);
+            fir_verify.effect_push(&e, kind, cast(next(&g, cast(LOCALS, u64)), u32),
+                                   cast(k, u32));
+            k += 1;
+        }
+        close_block(&e);
+        u32 mut rule = 12;
+        while (rule <= 13) {
+            fir_flow.bits[1] mut gens = {};
+            fir_flow.bits[1] mut kills = {};
+            fir_verify.transfer_sets(&e, rule, 1, LOCALS, gens[..], kills[..]);
+            u64 mut trial = 0;
+            while (trial < 4) {
+                fir_flow.bits mut walked = fir_flow.bits_new(LOCALS);
+                fir_flow.bits mut by_sets = fir_flow.bits_new(LOCALS);
+                u32 mut i = 0;
+                while (i < LOCALS) {
+                    if (next(&g, 2) == 1) {
+                        fir_flow.bits_set(&walked, i);
+                        fir_flow.bits_set(&by_sets, i);
+                    }
+                    i += 1;
+                }
+                u64 mut j = 0;
+                while (j < e.len) {
+                    fir_verify.apply_effect(rule, e.items[j], &walked);
+                    j += 1;
+                }
+                fir_flow.bits_subtract(&by_sets, &kills[0]);
+                fir_flow.bits_union(&by_sets, &gens[0]);
+                assert(fir_flow.bits_equal(&walked, &by_sets));
+                fir_flow.bits_free(&walked);
+                fir_flow.bits_free(&by_sets);
+                trial += 1;
+            }
+            u32 mut l = 0;
+            while (l < LOCALS) {
+                if (fir_flow.bits_get(&kills[0], l)) {
+                    decided += 1;
+                }
+                l += 1;
+            }
+            fir_flow.bits_free(&gens[0]);
+            fir_flow.bits_free(&kills[0]);
+            rule += 1;
+        }
+        fir_verify.effects_free(&e);
+        round += 1;
+    }
+    // the cases decided temporaries, so the sets were not empty throughout
+    assert(decided > 500);
+}
+
+// ---- the verdicts --------------------------------------------------------------------------
+
+// The rule and the position of the violation of the only function of `text`, as
+// `V<rule> bb<b> <position>`, or `none`.
+fn verdict(lower_env.env mut* e, string@ text, strbuf.str_buf mut* out) void {
+    fir.module mut m = parse(e, text);
+    defer fir.module_free(&m);
+    fir_verify.violation mut v = fir_verify.violation{};
+    strbuf.clear(out);
+    if (!fir_verify.find_violation(fir.module_function_at(&m, 0), &e->rt, &v)) {
+        strbuf.append(out, "none");
+        return;
+    }
+    strbuf.push(out, 'V');
+    strbuf.append_u64(out, cast(v.rule, u64));
+    strbuf.append(out, " bb");
+    strbuf.append_u64(out, cast(v.block, u64));
+    strbuf.push(out, ' ');
+    strbuf.append_u64(out, cast(v.position, u64));
+}
+
+fn expect_verdict(lower_env.env mut* e, string@ text, string want) void {
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    verdict(e, text, &got);
+    if (strbuf.view(&got) != want) {
+        eprintln("got: ", strbuf.view(&got), " want: ", want);
+        panic("fir_verify_effects_test: the verdict differs");
+    }
+}
+
+string LETS = "    let _1: u8 mut* own; let _2: u8 mut* own; let _3: u8 mut*; let _4: void;";
+
+// The order of the effects inside a block decides what the next block finds.
+fn a_block_hands_on_the_state_its_last_effect_left() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    // moved and then filled again: the next block reads a filled temporary
+    string[8] refilled = {
+        "fn main.f() -> void {", LETS,
+        "    bb0: { _1 = call fn main.grab(); _2 = move _1; _1 = call fn main.grab(); goto bb1; }",
+        "    bb1: { _3 = copy _1; _4 = call fn main.take(move _1);",
+        "           _4 = call fn main.take(move _2); return; }",
+        "}", "", "",
+    };
+    expect_verdict(&e, refilled[..], "none");
+    // filled and then moved: the next block reads an emptied temporary
+    string[8] emptied = {
+        "fn main.f() -> void {", LETS,
+        "    bb0: { _1 = call fn main.grab(); _2 = move _1; goto bb1; }",
+        "    bb1: { _3 = copy _1; _4 = call fn main.take(move _2); return; }",
+        "}", "", "", "",
+    };
+    expect_verdict(&e, emptied[..], "V12 bb1 0");
+    // one arm moves and the join reads, through a block that changes nothing
+    string[9] arm = {
+        "fn main.f() -> void {", LETS, "    let _5: bool;",
+        "    bb0: { _1 = call fn main.grab(); _5 = const true;",
+        "           switch(copy _5) -> [true: bb1, otherwise: bb2]; }",
+        "    bb1: { _2 = move _1; _4 = call fn main.take(move _2); goto bb2; }",
+        "    bb2: { _3 = copy _1; goto bb3; }",
+        "    bb3: { _4 = call fn main.take(move _1); return; }",
+        "}",
+    };
+    expect_verdict(&e, arm[..], "V12 bb2 0");
+    // a temporary that one arm fills is unassigned at the join for V13
+    string[9] fill = {
+        "fn main.f() -> void {", "    let _1: i32; let _2: i32; let _3: bool;",
+        "    bb0: { _3 = const true; switch(copy _3) -> [true: bb1, otherwise: bb2]; }",
+        "    bb1: { _1 = const i32 1; goto bb3; }",
+        "    bb2: { goto bb3; }",
+        "    bb3: { _2 = copy _1; return; }",
+        "}", "", "",
+    };
+    expect_verdict(&e, fill[..], "V13 bb3 0");
+    // both arms fill it, one of them after a move out of it: V13 counts the fill
+    string[9] both = {
+        "fn main.f() -> void {", LETS, "    let _5: bool;",
+        "    bb0: { _5 = const true; switch(copy _5) -> [true: bb1, otherwise: bb2]; }",
+        "    bb1: { _1 = call fn main.grab(); _2 = move _1; _1 = move _2; goto bb3; }",
+        "    bb2: { _1 = call fn main.grab(); goto bb3; }",
+        "    bb3: { _3 = copy _1; _4 = call fn main.take(move _1); return; }",
+        "}", "",
+    };
+    expect_verdict(&e, both[..], "none");
+}
+
+// ---- V14 -----------------------------------------------------------------------------------
+
+fn a_loan_statement_is_found_in_any_block() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[6] none = {
+        "fn main.f(_1 (xs): i32@) -> void {", "    let _2: u64;",
+        "    bb0: { _2 = copy _1.1; goto bb1; }", "    bb1: { return; }", "}", "",
+    };
+    fir.module mut m = parse(&e, none[..]);
+    assert(!fir_verify.has_loan_statement(fir.module_function_at(&m, 0)));
+    fir.module_free(&m);
+    string[6] end_only = {
+        "fn main.f(_1 (xs): i32@) -> void {", "    let _2: u64;",
+        "    bb0: { _2 = copy _1.1; goto bb1; }", "    bb1: { loan_end 1; return; }", "}", "",
+    };
+    m = parse(&e, end_only[..]);
+    assert(fir_verify.has_loan_statement(fir.module_function_at(&m, 0)));
+    fir.module_free(&m);
+    // an end with no begin still breaks V14: the early return needs no loan statement at all
+    expect_verdict(&e, end_only[..], "V14 bb1 0");
+    string[6] begin = {
+        "fn main.f(_1 (xs): i32@) -> void {", "    let _2: u64;",
+        "    bb0: { _2 = copy _1.1; goto bb1; }",
+        "    bb1: { loan_begin 1 _1; loan_end 1; return; }", "}", "",
+    };
+    m = parse(&e, begin[..]);
+    assert(fir_verify.has_loan_statement(fir.module_function_at(&m, 0)));
+    fir.module_free(&m);
+    expect_verdict(&e, begin[..], "none");
+    // a loan that stays open at the return breaks V14 in a block after the first
+    string[6] open_loan = {
+        "fn main.f(_1 (xs): i32@) -> void {", "    let _2: u64;",
+        "    bb0: { _2 = copy _1.1; goto bb1; }", "    bb1: { loan_begin 1 _1; return; }", "}", "",
+    };
+    expect_verdict(&e, open_loan[..], "V14 bb1 1");
+}
+
+fn main() i32 {
+    the_effects_follow_the_items_in_order();
+    println("effects ok");
+    the_last_deciding_effect_decides_the_block();
+    each_rule_decides_at_its_own_effects();
+    println("sets ok");
+    the_sets_equal_the_effects_applied_in_order();
+    println("order ok");
+    a_block_hands_on_the_state_its_last_effect_left();
+    println("verdicts ok");
+    a_loan_statement_is_found_in_any_block();
+    println("loans ok");
+    return 0;
+}

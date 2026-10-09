@@ -1,0 +1,286 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| subtract ok
+//| sets ok
+/// Checks bits_subtract and dataflow_forward_sets. The transfer that a gen set and a kill set give
+/// must reach the fixpoint that the same transfer reaches as a function: the same in-set and
+/// out-set at each block, after the same count of transfers, under each join.
+import fir;
+import fir_env;
+import fir_flow;
+import fir_parse;
+import std.strbuf;
+
+// The set of the numbers of `list`, below `count`.
+fn set_of(u32 count, u32@ list) fir_flow.bits {
+    fir_flow.bits mut s = fir_flow.bits_new(count);
+    u64 mut i = 0;
+    while (i < list.len) {
+        fir_flow.bits_set(&s, list[i]);
+        i += 1;
+    }
+    return s;
+}
+
+// ---- bits_subtract -------------------------------------------------------------------------
+
+fn subtract_removes_the_numbers_of_the_source_word_by_word() void {
+    u32[5] a_list = {0, 1, 63, 64, 129};
+    u32[4] b_list = {1, 64, 100, 129};
+    fir_flow.bits mut a = set_of(130, a_list[..]);
+    defer fir_flow.bits_free(&a);
+    fir_flow.bits mut b = set_of(130, b_list[..]);
+    fir_flow.bits_subtract(&a, &b);
+    u32[2] want_list = {0, 63};
+    fir_flow.bits mut want = set_of(130, want_list[..]);
+    assert(fir_flow.bits_equal(&a, &want));
+    // the source keeps its numbers
+    assert(fir_flow.bits_get(&b, 100) && fir_flow.bits_get(&b, 1));
+    // a set less itself is empty, and less the empty set is itself
+    fir_flow.bits mut c = set_of(130, a_list[..]);
+    fir_flow.bits_subtract(&c, &c);
+    fir_flow.bits mut empty = fir_flow.bits_new(130);
+    assert(fir_flow.bits_equal(&c, &empty));
+    fir_flow.bits mut full = fir_flow.bits_new(130);
+    fir_flow.bits_fill(&full);
+    fir_flow.bits_subtract(&full, &empty);
+    fir_flow.bits mut all = fir_flow.bits_new(130);
+    fir_flow.bits_fill(&all);
+    assert(fir_flow.bits_equal(&full, &all));
+    // the bits past the count stay 0, so the full set less a member equals a set built so
+    fir_flow.bits_subtract(&full, &want);
+    fir_flow.bits_clear(&all, 0);
+    fir_flow.bits_clear(&all, 63);
+    assert(fir_flow.bits_equal(&full, &all));
+    fir_flow.bits_free(&b);
+    fir_flow.bits_free(&want);
+    fir_flow.bits_free(&c);
+    fir_flow.bits_free(&empty);
+    fir_flow.bits_free(&full);
+    fir_flow.bits_free(&all);
+}
+
+// ---- the dataflow --------------------------------------------------------------------------
+
+// The transfer that adds the local of each `live` and removes the local of each `dead`, in
+// statement order.
+fn scope_marks(fir.func* f, u32 b, fir_flow.bits mut* set) void {
+    u32 count = fir.block_statement_count(f, b);
+    u32 mut i = 0;
+    while (i < count) {
+        fir.statement* s = fir.block_statement(f, b, i);
+        if (s->kind == fir.stmt_kind.st_live) {
+            fir_flow.bits_set(set, s->local);
+        } else if (s->kind == fir.stmt_kind.st_dead) {
+            fir_flow.bits_clear(set, s->local);
+        }
+        i += 1;
+    }
+}
+
+// A transfer that dataflow_forward_sets must never call.
+fn refused(fir.func* f, u32 b, fir_flow.bits mut* set) void {
+    panic("fir_flow_sets_test: the set transfer called the function transfer");
+}
+
+// The gen set and the kill set of scope_marks for block `b`: the last `live` or `dead` of a
+// local decides it, a `live` last puts it in the gen set, and each local that one of them names
+// is in the kill set.
+fn scope_sets(fir.func* f, u32 b, fir_flow.bits mut* gen, fir_flow.bits mut* kill) void {
+    u32 count = fir.block_statement_count(f, b);
+    u32 mut i = 0;
+    while (i < count) {
+        fir.statement* s = fir.block_statement(f, b, i);
+        if (s->kind == fir.stmt_kind.st_live) {
+            fir_flow.bits_set(gen, s->local);
+            fir_flow.bits_set(kill, s->local);
+        } else if (s->kind == fir.stmt_kind.st_dead) {
+            fir_flow.bits_clear(gen, s->local);
+            fir_flow.bits_set(kill, s->local);
+        }
+        i += 1;
+    }
+}
+
+struct env {
+    fir_env.env fx;
+    fir.module m;
+}
+
+fn open(env mut* e) void {
+    fir_env.open(&e->fx);
+}
+
+fn close(env mut* e) void {
+    fir.module_free(&e->m);
+    fir_env.close(&e->fx);
+}
+
+// Parses the fixture's `f`, which takes `_1 (c): bool` and returns `i32`, with the `let` lines
+// `lets` and the blocks `blocks`. The function stays valid until the next call.
+fn parse(env mut* e, string lets, string@ blocks) fir.func* {
+    fir.module_free(&e->m);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "fn main.f(_1 (c): bool) -> i32 {\n");
+    strbuf.append(&b, lets);
+    strbuf.push(&b, '\n');
+    u64 mut k = 0;
+    while (k < blocks.len) {
+        strbuf.append(&b, blocks[k]);
+        strbuf.push(&b, '\n');
+        k += 1;
+    }
+    strbuf.append(&b, "}\n");
+    u64 before = fir_env.errors(&e->fx);
+    e->m = fir_parse.parse_module(&e->fx.c.m.s, "t.fir", strbuf.view(&b), fir_env.prelude(&e->fx));
+    if (fir_env.errors(&e->fx) != before) {
+        eprintln(strbuf.view(&b));
+        panic("fir_flow_sets_test.parse: a text does not parse");
+    }
+    return fir.module_function_at(&e->m, 0);
+}
+
+// Runs the dataflow of `join` over `f` twice, with scope_marks as a function and as sets, and
+// holds that the two reach one fixpoint after one count of transfers. Returns that count.
+fn agree(fir.func* f, u32 count, fir_flow.join_kind join, bool full_entry) u64 {
+    fir.pred_table mut pt = fir.func_predecessors(f);
+    defer fir.pred_table_free(&pt);
+    fir_flow.dataflow mut by_fn = fir_flow.dataflow_new(count, join, scope_marks);
+    defer fir_flow.dataflow_free(&by_fn);
+    fir_flow.dataflow mut by_sets = fir_flow.dataflow_new(count, join, refused);
+    defer fir_flow.dataflow_free(&by_sets);
+    if (join == fir_flow.join_kind.join_intersect) {
+        fir_flow.bits_fill(&by_fn.init);
+        fir_flow.bits_fill(&by_sets.init);
+    }
+    if (full_entry) {
+        fir_flow.bits_fill(&by_fn.entry);
+        fir_flow.bits_fill(&by_sets.entry);
+    }
+    u32 n = fir.block_count(f);
+    fir_flow.bits mut@ own gens = new(fir_flow.bits, cast(n, u64));
+    fir_flow.bits mut@ own kills = new(fir_flow.bits, cast(n, u64));
+    u32 mut b = 0;
+    while (b < n) {
+        gens[cast(b, u64)] = fir_flow.bits_new(count);
+        kills[cast(b, u64)] = fir_flow.bits_new(count);
+        scope_sets(f, b, &gens[cast(b, u64)], &kills[cast(b, u64)]);
+        b += 1;
+    }
+    fir_flow.dataflow_forward_with(f, &pt, &by_fn);
+    fir_flow.dataflow_forward_sets(f, &pt, &by_sets, gens, kills);
+    assert(by_fn.steps == by_sets.steps);
+    b = 0;
+    while (b < n) {
+        u64 at = cast(b, u64);
+        assert(fir_flow.bits_equal(&by_fn.ins[at], &by_sets.ins[at]));
+        assert(fir_flow.bits_equal(&by_fn.outs[at], &by_sets.outs[at]));
+        fir_flow.bits_free(&gens[at]);
+        fir_flow.bits_free(&kills[at]);
+        b += 1;
+    }
+    del(gens);
+    del(kills);
+    return by_fn.steps;
+}
+
+// Runs agree under both joins, from an empty and from a full entry set.
+fn agree_all(fir.func* f, u32 count) void {
+    assert(agree(f, count, fir_flow.join_kind.join_intersect, false) > 0);
+    assert(agree(f, count, fir_flow.join_kind.join_union, false) > 0);
+    assert(agree(f, count, fir_flow.join_kind.join_intersect, true) > 0);
+    assert(agree(f, count, fir_flow.join_kind.join_union, true) > 0);
+}
+
+string LETS = "let _2 (x): i32; let _3 (y): i32; let _4 (z): i32;";
+
+fn the_set_transfer_reaches_the_fixpoint_of_the_function_transfer() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    // a kill on one arm of a diamond, and a block that ends and then starts one local
+    string[4] diamond = {
+        "bb0: { live(_2); switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { dead(_2); live(_3); goto bb3; }",
+        "bb2: { live(_4); dead(_4); live(_2); goto bb3; }",
+        "bb3: { unreachable; }",
+    };
+    agree_all(parse(&e, LETS, diamond[..]), 5);
+    // a kill carried around a back edge, and a gen that the loop body undoes
+    string[4] loop = {
+        "bb0: { live(_2); live(_3); goto bb1; }",
+        "bb1: { switch(copy _1) -> [true: bb2, otherwise: bb3]; }",
+        "bb2: { dead(_2); live(_4); dead(_3); live(_3); goto bb1; }",
+        "bb3: { unreachable; }",
+    };
+    agree_all(parse(&e, LETS, loop[..]), 5);
+    // two entries into one loop
+    string[4] irreducible = {
+        "bb0: { live(_4); switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { dead(_4); live(_2); goto bb2; }",
+        "bb2: { live(_3); switch(copy _1) -> [true: bb1, otherwise: bb3]; }",
+        "bb3: { dead(_3); unreachable; }",
+    };
+    agree_all(parse(&e, LETS, irreducible[..]), 5);
+    // a block that nothing names, and a block that loops to itself
+    string[4] apart = {
+        "bb0: { live(_2); goto bb2; }",
+        "bb1: { dead(_2); live(_3); goto bb2; }",
+        "bb2: { dead(_2); switch(copy _1) -> [true: bb2, otherwise: bb3]; }",
+        "bb3: { live(_2); unreachable; }",
+    };
+    agree_all(parse(&e, LETS, apart[..]), 5);
+    // nested loops
+    string[6] nested = {
+        "bb0: { live(_2); goto bb1; }",
+        "bb1: { switch(copy _1) -> [true: bb2, otherwise: bb5]; }",
+        "bb2: { live(_3); switch(copy _1) -> [true: bb3, otherwise: bb4]; }",
+        "bb3: { dead(_2); goto bb2; }",
+        "bb4: { live(_2); dead(_3); goto bb1; }",
+        "bb5: { unreachable; }",
+    };
+    agree_all(parse(&e, LETS, nested[..]), 5);
+}
+
+// A second run with sets replaces the result of the first.
+fn a_second_run_with_sets_replaces_the_result() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    string[2] blocks = {"bb0: { live(_2); goto bb1; }", "bb1: { unreachable; }"};
+    fir.func* f = parse(&e, LETS, blocks[..]);
+    fir.pred_table mut pt = fir.func_predecessors(f);
+    defer fir.pred_table_free(&pt);
+    fir_flow.dataflow mut d = fir_flow.dataflow_new(5, fir_flow.join_kind.join_union, refused);
+    defer fir_flow.dataflow_free(&d);
+    fir_flow.bits[2] mut gens = {fir_flow.bits_new(5), fir_flow.bits_new(5)};
+    fir_flow.bits[2] mut kills = {fir_flow.bits_new(5), fir_flow.bits_new(5)};
+    fir_flow.bits_set(&gens[0], 2);
+    fir_flow.dataflow_forward_sets(f, &pt, &d, gens[..], kills[..]);
+    assert(fir_flow.bits_get(&d.ins[1], 2));
+    // the second run kills `_2` in bb0 and generates `_3`
+    fir_flow.bits_clear(&gens[0], 2);
+    fir_flow.bits_set(&gens[0], 3);
+    fir_flow.bits_set(&kills[0], 2);
+    fir_flow.dataflow_forward_sets(f, &pt, &d, gens[..], kills[..]);
+    assert(!fir_flow.bits_get(&d.ins[1], 2));
+    assert(fir_flow.bits_get(&d.ins[1], 3));
+    assert(d.steps == 2);
+    u64 mut i = 0;
+    while (i < 2) {
+        fir_flow.bits_free(&gens[i]);
+        fir_flow.bits_free(&kills[i]);
+        i += 1;
+    }
+}
+
+fn main() i32 {
+    subtract_removes_the_numbers_of_the_source_word_by_word();
+    println("subtract ok");
+    the_set_transfer_reaches_the_fixpoint_of_the_function_transfer();
+    a_second_run_with_sets_replaces_the_result();
+    println("sets ok");
+    return 0;
+}

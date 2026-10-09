@@ -3,8 +3,9 @@
 /// the rule, the function, the block and the statement. `verify_report` writes the violation and
 /// returns.
 //
-// The module uses switches and no function-pointer dispatch table; it passes V12 and V13 to the
-// dataflow of fir_flow as transfer functions. The module holds no module-level mutable state.
+// The module uses switches and no function-pointer dispatch table; it gives the dataflow of
+// fir_flow the transfers of V12 and V13 as gen and kill sets, which one list of the effects of
+// the items on the temporaries gives. The module holds no module-level mutable state.
 // The local rules V1 to V8 and V10 run first, in number order, and each walks the whole function:
 // the blocks in order, and in each block the statements in order and then the terminator. The
 // flow rules V9, V11, V12 and V13 run after them, in number order, over one predecessor table.
@@ -1148,15 +1149,51 @@ fn v11_continuations(walk mut* w, fir.pred_table* pt) bool {
 
 // ---- V12 and V13 ---------------------------------------------------------------------------
 
-// The walk of V12 or V13 over the items of one block. `set` holds the temporaries that a `move`
-// emptied (V12) or that an assignment filled (V13). When `test` is set, each read of a temporary
-// tests the set, and `broken` records a read that breaks the rule.
-struct scan {
-    fir.func* f;
-    u32 rule;
-    fir_flow.bits mut* set;
-    bool test;
-    bool broken;
+// What an item does to a temporary, as V12 and V13 see it.
+enum effect_kind {
+    ef_read, // a read of the temporary: V12 refuses it after a move, V13 before an assignment
+    ef_empty, // a `move` or a `del` that empties the temporary after its read (V12)
+    ef_fill, // an assignment of the whole temporary: V12 forgets its move, V13 counts it
+}
+
+// One effect on the temporary `local`, made by the item at `position` of its block.
+struct effect {
+    effect_kind kind;
+    u32 local;
+    u32 position;
+}
+
+// The effects of the items of every block of one function, in block order and, in each block,
+// in item order. The effects of block `b` are `items[first[b]..first[b + 1]]`, and `items.len`
+// is the capacity. effects_of builds the list once, and V12 and V13 both read it.
+struct effects {
+    effect mut@ own items;
+    u64 len;
+    u64 mut@ own first;
+}
+
+// Frees the storage of `e`.
+fn effects_free(effects mut* e) void {
+    del(e->items);
+    del(e->first);
+    e->len = 0;
+}
+
+// Appends the effect `kind` on `local` at `position`, growing as fir.grown_capacity says.
+fn effect_push(effects mut* e, effect_kind kind, u32 local, u32 position) void {
+    if (e->len == e->items.len) {
+        u64 cap = fir.grown_capacity(e->items.len, "fir_verify.effect_push: capacity overflow");
+        effect mut@ own bigger = new(effect, cap);
+        u64 mut i = 0;
+        while (i < e->len) {
+            bigger[i] = e->items[i];
+            i += 1;
+        }
+        del(e->items);
+        e->items = move(bigger);
+    }
+    e->items[e->len] = effect{kind, local, position};
+    e->len += 1;
 }
 
 // Whether local `n` of `f` is a temporary of the lowering. V12 and V13 test no other local.
@@ -1164,151 +1201,182 @@ fn is_temp(fir.func* f, u32 n) bool {
     return fir.local_at(f, n)->kind == fir.local_kind.lk_temp;
 }
 
-// A read of local `n`: V12 refuses an emptied temporary and V13 a temporary not yet assigned.
-fn scan_local(scan mut* sc, u32 n) void {
-    if (!sc->test || !is_temp(sc->f, n)) {
+// The effects of the reads in `reads`, in order: a read of the temporary at the base of each
+// place, then, for a `move` or a `del`, the emptying of that temporary when the place is fixed
+// storage, a part of the temporary included. A `move` through a deref or a span index empties
+// memory that the temporary points to, and not the temporary.
+fn read_effects(fir.func* f, fir.read_list* reads, u32 position, effects mut* e) void {
+    u64 mut k = 0;
+    while (k < reads->len) {
+        fir.place p = reads->items[k].place;
+        if (p.base == fir.base_kind.bk_local && is_temp(f, p.local)) {
+            effect_push(e, effect_kind.ef_read, p.local, position);
+            if (reads->items[k].empties && fir.place_fixed(f, p)) {
+                effect_push(e, effect_kind.ef_empty, p.local, position);
+            }
+        }
+        k += 1;
+    }
+}
+
+// The effects of every item of `f`. A statement has the effects of each read that fir.stmt_read
+// gives, in evaluation order, then the fill of an assignment into a whole temporary. A write
+// into a part of a temporary fills nothing. A terminator has the effects of each read that
+// fir.term_read gives: V6 lets no `move` stand in a terminator, and its place empties all the
+// same. A read that is no use still loads the storage, so it is a read here too.
+fn effects_of(fir.func* f) effects {
+    u32 n = fir.block_count(f);
+    effects mut e = effects{};
+    e.first = new(u64, cast(n, u64) + 1);
+    fir.read_list mut reads = fir.read_list{};
+    defer fir.read_list_free(&reads);
+    u32 mut b = 0;
+    while (b < n) {
+        e.first[cast(b, u64)] = e.len;
+        u32 count = fir.block_statement_count(f, b);
+        u32 mut i = 0;
+        while (i < count) {
+            fir.statement* s = fir.block_statement(f, b, i);
+            fir.stmt_read_all(f, s, &reads);
+            read_effects(f, &reads, i, &e);
+            fir.place p = s->place;
+            bool whole = p.base == fir.base_kind.bk_local && p.proj_len == 0;
+            if (s->kind == fir.stmt_kind.st_assign && whole && is_temp(f, p.local)) {
+                effect_push(&e, effect_kind.ef_fill, p.local, i);
+            }
+            i += 1;
+        }
+        fir.term_read_all(f, &fir.block_at(f, b)->term, &reads);
+        read_effects(f, &reads, count, &e);
+        b += 1;
+    }
+    e.first[cast(n, u64)] = e.len;
+    return e;
+}
+
+// Whether an effect of `kind` decides a temporary for `rule`, so that it adds the temporary to
+// the set of the rule or removes it. V12 decides at an emptying and at a fill. V13 decides at a
+// fill and ignores an emptying. A read decides nothing.
+fn effect_decides(u32 rule, effect_kind kind) bool {
+    if (kind == effect_kind.ef_fill) {
+        return true;
+    }
+    return rule == RULE_V12 && kind == effect_kind.ef_empty;
+}
+
+// Whether an effect of `kind` that decides a temporary for `rule` adds it to the set of the rule:
+// the set of V12 holds the emptied temporaries and the set of V13 the filled ones.
+fn effect_adds(u32 rule, effect_kind kind) bool {
+    if (rule == RULE_V12) {
+        return kind == effect_kind.ef_empty;
+    }
+    return kind == effect_kind.ef_fill;
+}
+
+// Applies the effect `ef` of `rule` to `set`, which holds the temporaries that a `move` emptied
+// (V12) or that an assignment filled (V13).
+fn apply_effect(u32 rule, effect ef, fir_flow.bits mut* set) void {
+    if (!effect_decides(rule, ef.kind)) {
         return;
     }
-    bool held = fir_flow.bits_get(sc->set, n);
-    if ((sc->rule == RULE_V12 && held) || (sc->rule == RULE_V13 && !held)) {
-        sc->broken = true;
-    }
-}
-
-// A read of the place `p`, which reads the local at its base.
-fn scan_base(scan mut* sc, fir.place p) void {
-    if (p.base == fir.base_kind.bk_local) {
-        scan_local(sc, p.local);
-    }
-}
-
-// A `move` or a `del` of `p`, after its read. For V12 it empties the temporary at the base of
-// `p` when `p` is fixed storage, a part of the temporary included. A `move` through a deref or a
-// span index empties memory that the temporary points to, and not the temporary.
-fn scan_empty(scan mut* sc, fir.place p) void {
-    bool temp = p.base == fir.base_kind.bk_local && is_temp(sc->f, p.local);
-    if (sc->rule == RULE_V12 && temp && fir.place_fixed(sc->f, p)) {
-        fir_flow.bits_set(sc->set, p.local);
-    }
-}
-
-// An assignment into `p`. Only an assignment of the whole temporary fills it: V12 then forgets
-// its move, and V13 counts it as assigned. A write into a part of a temporary fills neither set.
-fn scan_assign(scan mut* sc, fir.place p) void {
-    if (p.base != fir.base_kind.bk_local || p.proj_len != 0 || !is_temp(sc->f, p.local)) {
-        return;
-    }
-    if (sc->rule == RULE_V12) {
-        fir_flow.bits_clear(sc->set, p.local);
+    if (effect_adds(rule, ef.kind)) {
+        fir_flow.bits_set(set, ef.local);
     } else {
-        fir_flow.bits_set(sc->set, p.local);
+        fir_flow.bits_clear(set, ef.local);
     }
 }
 
-// The effects of a statement in evaluation order: each read that fir.stmt_read gives, and the
-// `move` or the `del` that empties the place of a read after it (spec/fir.md 6), then the
-// assignment. A read that is no use still loads the storage, so V12 and V13 test it.
-fn scan_statement(scan mut* sc, fir.statement* s) void {
-    fir.read mut r = fir.read{};
-    u32 mut k = 0;
-    while (fir.stmt_read(sc->f, s, k, &r)) {
-        scan_base(sc, r.place);
-        if (r.empties) {
-            scan_empty(sc, r.place);
+// The transfer of `rule` for each block, as two sets: the transfer removes the temporaries of
+// `kills[b]` and adds those of `gens[b]`. The last effect of a block that decides a temporary
+// decides it for the block: a temporary that such an effect adds last is in `gens[b]`, and every
+// temporary that such an effect decides is in `kills[b]`. A read decides nothing.
+fn transfer_sets(effects* e, u32 rule, u32 n, u32 count, fir_flow.bits mut@ gens,
+                 fir_flow.bits mut@ kills) void {
+    u32 mut b = 0;
+    while (b < n) {
+        fir_flow.bits mut* gen = &gens[cast(b, u64)];
+        fir_flow.bits mut* kill = &kills[cast(b, u64)];
+        *gen = fir_flow.bits_new(count);
+        *kill = fir_flow.bits_new(count);
+        u64 mut k = e->first[cast(b, u64)];
+        while (k < e->first[cast(b, u64) + 1]) {
+            effect ef = e->items[k];
+            if (effect_decides(rule, ef.kind)) {
+                apply_effect(rule, ef, gen);
+                fir_flow.bits_set(kill, ef.local);
+            }
+            k += 1;
         }
-        k += 1;
-    }
-    if (s->kind == fir.stmt_kind.st_assign) {
-        scan_assign(sc, s->place);
+        b += 1;
     }
 }
 
-// The effects of a terminator: each read that fir.term_read gives. V6 lets no `move` stand in a
-// terminator, and the scan empties its place all the same.
-fn scan_terminator(scan mut* sc, fir.terminator* t) void {
-    fir.read mut r = fir.read{};
-    u32 mut k = 0;
-    while (fir.term_read(sc->f, t, k, &r)) {
-        scan_base(sc, r.place);
-        if (r.empties) {
-            scan_empty(sc, r.place);
-        }
-        k += 1;
-    }
-}
-
-// Walks the items of block `b` in order with `sc`. Returns true when a read breaks the rule, with
-// the position of that item in *position.
-fn scan_block(scan mut* sc, u32 b, u32 mut* position) bool {
-    u32 count = fir.block_statement_count(sc->f, b);
-    u32 mut i = 0;
-    while (i < count) {
-        scan_statement(sc, fir.block_statement(sc->f, b, i));
-        if (sc->broken) {
-            *position = i;
-            return true;
-        }
-        i += 1;
-    }
-    scan_terminator(sc, &fir.block_at(sc->f, b)->term);
-    *position = count;
-    return sc->broken;
-}
-
-// The transfer of V12: a `move` or a `del` adds its temporary, an assignment of the whole
-// temporary removes it.
-fn v12_transfer(fir.func* f, u32 b, fir_flow.bits mut* set) void {
-    scan mut sc = scan{f, RULE_V12, set, false, false};
-    u32 mut position = 0;
-    scan_block(&sc, b, &position);
-}
-
-// The transfer of V13: an assignment of the whole temporary adds it.
-fn v13_transfer(fir.func* f, u32 b, fir_flow.bits mut* set) void {
-    scan mut sc = scan{f, RULE_V13, set, false, false};
-    u32 mut position = 0;
-    scan_block(&sc, b, &position);
-}
-
-// Runs the dataflow `d` of `rule` and then scans each block from its in-set, in block order. The
-// first read that breaks the rule is the violation `what`.
-fn test_flow(walk mut* w, fir.pred_table* pt, u32 rule, fir_flow.dataflow mut* d,
+// Runs the dataflow `d` of `rule` over the effects `e` and then tests each block from its
+// in-set, in block order. The first read of a temporary that breaks the rule is the violation
+// `what`, at the position of its item: V12 refuses a read of a temporary in the set, and V13 a
+// read of a temporary not in the set.
+fn test_flow(walk mut* w, fir.pred_table* pt, effects* e, u32 rule, fir_flow.dataflow mut* d,
              string what) bool {
-    fir_flow.dataflow_forward_with(w->f, pt, d);
+    u32 n = fir.block_count(w->f);
+    fir_flow.bits mut@ own gens = new(fir_flow.bits, cast(n, u64));
+    fir_flow.bits mut@ own kills = new(fir_flow.bits, cast(n, u64));
+    defer {
+        u64 mut i = 0;
+        while (i < gens.len) {
+            fir_flow.bits_free(&gens[i]);
+            fir_flow.bits_free(&kills[i]);
+            i += 1;
+        }
+        del(gens);
+        del(kills);
+    }
+    transfer_sets(e, rule, n, d->count, gens, kills);
+    fir_flow.dataflow_forward_sets(w->f, pt, d, gens, kills);
     fir_flow.bits mut at = fir_flow.bits_new(d->count);
     defer fir_flow.bits_free(&at);
-    u32 n = fir.block_count(w->f);
     u32 mut b = 0;
     while (b < n) {
         fir_flow.bits_copy(&at, &d->ins[cast(b, u64)]);
-        scan mut sc = scan{w->f, rule, &at, true, false};
-        u32 mut position = 0;
-        if (scan_block(&sc, b, &position)) {
-            return fail(w, rule, what, b, position);
+        u64 mut k = e->first[cast(b, u64)];
+        while (k < e->first[cast(b, u64) + 1]) {
+            effect ef = e->items[k];
+            if (ef.kind == effect_kind.ef_read) {
+                bool held = fir_flow.bits_get(&at, ef.local);
+                if ((rule == RULE_V12 && held) || (rule == RULE_V13 && !held)) {
+                    return fail(w, rule, what, b, ef.position);
+                }
+            } else {
+                apply_effect(rule, ef, &at);
+            }
+            k += 1;
         }
         b += 1;
     }
     return true;
 }
 
+// The transfer that dataflow_new takes. test_flow gives the transfer as sets and never calls it.
+fn no_transfer(fir.func* f, u32 b, fir_flow.bits mut* set) void {
+}
+
 // V12: the emptied temporaries, joined by union from empty sets, because V12 holds on any path.
-fn v12_moves(walk mut* w, fir.pred_table* pt) bool {
+fn v12_moves(walk mut* w, fir.pred_table* pt, effects* e) bool {
     fir_flow.dataflow mut d = fir_flow.dataflow_new(fir.local_count(w->f),
-                                                    fir_flow.join_kind.join_union, v12_transfer);
+                                                    fir_flow.join_kind.join_union, no_transfer);
     defer fir_flow.dataflow_free(&d);
-    return test_flow(w, pt, RULE_V12, &d, V12_MOVED);
+    return test_flow(w, pt, e, RULE_V12, &d, V12_MOVED);
 }
 
 // V13: the assigned temporaries, joined by intersection. `bb0` starts empty and every other
 // block full, so a block that no edge reaches keeps the rule. The dataflow follows every edge,
 // the edge that V9 prunes on a constant switch included.
-fn v13_assignments(walk mut* w, fir.pred_table* pt) bool {
+fn v13_assignments(walk mut* w, fir.pred_table* pt, effects* e) bool {
     fir_flow.dataflow mut d = fir_flow.dataflow_new(fir.local_count(w->f),
                                                     fir_flow.join_kind.join_intersect,
-                                                    v13_transfer);
+                                                    no_transfer);
     defer fir_flow.dataflow_free(&d);
     fir_flow.bits_fill(&d.init);
-    return test_flow(w, pt, RULE_V13, &d, V13_UNASSIGNED);
+    return test_flow(w, pt, e, RULE_V13, &d, V13_UNASSIGNED);
 }
 
 // ---- the rules in order --------------------------------------------------------------------
@@ -1425,6 +1493,18 @@ fn loan_header_open(loan_entry@ loans, fir_flow.bits* state, fir.place p) bool {
     return true;
 }
 
+// Whether loan_header_open holds for the place of each read in `reads`.
+fn loan_headers_open(loan_entry@ loans, fir_flow.bits* state, fir.read_list* reads) bool {
+    u64 mut k = 0;
+    while (k < reads->len) {
+        if (!loan_header_open(loans, state, reads->items[k].place)) {
+            return false;
+        }
+        k += 1;
+    }
+    return true;
+}
+
 fn loan_top(loan_entry@ loans, fir_flow.bits* state) u32 {
     u32 mut top = 0;
     u32 mut i = 0;
@@ -1437,9 +1517,32 @@ fn loan_top(loan_entry@ loans, fir_flow.bits* state) u32 {
     return top;
 }
 
+// Whether a statement of `f` begins or ends a loan.
+fn has_loan_statement(fir.func* f) bool {
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, b)) {
+            fir.stmt_kind k = fir.block_statement(f, b, i)->kind;
+            if (k == fir.stmt_kind.st_loan_begin || k == fir.stmt_kind.st_loan_end) {
+                return true;
+            }
+            i += 1;
+        }
+        b += 1;
+    }
+    return false;
+}
+
 // V14 follows selected FIR edges and propagates exact open-loan sets.
+// A function with no loan statement keeps V14: it opens no loan, so every loan header read finds
+// no closed loan, every `return` finds no open loan, and every incoming state is the empty set.
+// The walk below would find the same, so the function returns before it.
 fn v14_flow(walk mut* w) bool {
     fir.func* f = w->f;
+    if (!has_loan_statement(f)) {
+        return true;
+    }
     u32 blocks = fir.block_count(f);
     fir_flow.bits mut reachable = fir_flow.bits_new(blocks);
     defer fir_flow.bits_free(&reachable);
@@ -1505,6 +1608,8 @@ fn v14_flow(walk mut* w) bool {
     defer fir_flow.bits_free(&seen);
     fir_flow.bits mut state = fir_flow.bits_new(cast(count, u32));
     defer fir_flow.bits_free(&state);
+    fir.read_list mut reads = fir.read_list{};
+    defer fir.read_list_free(&reads);
     top = 0;
     reach(&seen, stack, &top, 0);
     while (top > 0) {
@@ -1527,27 +1632,19 @@ fn v14_flow(walk mut* w) bool {
                     fir_flow.bits_set(&state, index);
                 } else { fir_flow.bits_clear(&state, index); }
             } else {
-                u32 mut r = 0;
-                fir.read mut read_value = fir.read{};
-                while (fir.stmt_read(f, s, r, &read_value)) {
-                    if (!loan_header_open(loans, &state, read_value.place)) {
-                        return fail(w, RULE_V14,
-                            "a read of a loan header while the loan is closed", b, i);
-                    }
-                    r += 1;
+                fir.stmt_read_all(f, s, &reads);
+                if (!loan_headers_open(loans, &state, &reads)) {
+                    return fail(w, RULE_V14,
+                        "a read of a loan header while the loan is closed", b, i);
                 }
             }
             i += 1;
         }
         fir.terminator* t = &fir.block_at(f, b)->term;
-        u32 mut r = 0;
-        fir.read mut read_value = fir.read{};
-        while (fir.term_read(f, t, r, &read_value)) {
-            if (!loan_header_open(loans, &state, read_value.place)) {
-                return fail(w, RULE_V14,
-                    "a read of a loan header while the loan is closed", b, i);
-            }
-            r += 1;
+        fir.term_read_all(f, t, &reads);
+        if (!loan_headers_open(loans, &state, &reads)) {
+            return fail(w, RULE_V14,
+                "a read of a loan header while the loan is closed", b, i);
         }
         if (t->kind == fir.term_kind.tk_return && loan_top(loans, &state) != 0) {
             return fail(w, RULE_V14, "a return with an open loan", b, i);
@@ -1585,8 +1682,13 @@ fn find_violation(fir.func* f, runtime* rt, violation mut* out) bool {
     if (ok) {
         // V2 holds, so every target names a block and the table builds; the flow rules share it
         fir.pred_table mut pt = fir.func_predecessors(f);
-        ok = v9_reachable(&w) && v11_continuations(&w, &pt) && v12_moves(&w, &pt)
-            && v13_assignments(&w, &pt);
+        ok = v9_reachable(&w) && v11_continuations(&w, &pt);
+        if (ok) {
+            // V12 and V13 read one list of the effects of the items on the temporaries
+            effects mut e = effects_of(f);
+            ok = v12_moves(&w, &pt, &e) && v13_assignments(&w, &pt, &e);
+            effects_free(&e);
+        }
         fir.pred_table_free(&pt);
     }
     if (ok) { ok = v14_flow(&w); }
