@@ -255,7 +255,7 @@ The proof adds no runtime ownership checks. It preserves the representations and
   signature (`spec/fir.md` 9.8). For the entry of a check kind, another form is other parameters
   than rule V7 requires. A check that the selected mode removes needs no entry.
   The compiler assumes the other `std.rt` functions that it calls (`alloc`, `free`, `args_init`,
-  `args`, `flush_all`) and does not test them.
+  `args`, `shutdown`) and does not test them.
   `--fir-stats` then writes one line to stdout after the module is written, `lowered N of M`: N
   functions that the translator wrote of M definitions of fort functions in the closure, the
   compiler-emitted `main` not counted. A refusal is a compile error, so in a line that a build
@@ -655,7 +655,8 @@ Account for static global initialization, runtime args_init, args, and source ma
 The runtime argument-owning global exists even when source main has no argument parameter.
 Positive argc allocates its headers. Nonpositive argc leaves it empty.
 On source main return, apply its defers before its normal-return checks.
-Then flush runtime buffers and release runtime-owned argument-header storage.
+Then the generated call of `std.rt.shutdown` flushes runtime buffers and releases the
+runtime-owned argument-header storage, in that order.
 Check final owning-global emptiness before the generated C return.
 Include imported library and runtime globals, and live owned descendants of their allocations.
 Generated startup and shutdown can lie outside source-function FIR.
@@ -676,7 +677,8 @@ Noreturn alone supplies no normal-exit or abort classification.
 Unresolved foreign termination uses D17.13 trust and establishes no proved final boundary.
 Unknown fort bodies receive no such exemption.
 Library cleanup requirements and external host limits appear in memory-model.md 2.9.
-These rules change no ABI representation and prescribe no new runtime entry-point signature.
+These rules change no ABI representation. The runtime cleanup is the entry point
+`std.rt.shutdown` of section 5.1: the generated `main` and `std.rt.exit` call it (D11.6).
 
 ## 3. Build modes
 
@@ -1125,15 +1127,19 @@ fn flush_all() void;
 // module (section 6 item 22): it calls `args_init`, which builds the argument
 // span from `argv` (one string per argument, NUL-terminated, since it is the
 // `argv` byte sequence itself), then `args`, then the entry module's `main`,
-// then flush_all and final argument-header cleanup. It returns status & 0xFF.
+// then `shutdown`. It returns status & 0xFF.
 // args() lends the span during source execution and applicable source defers.
-// Final normal termination releases its runtime-owned header allocation.
-// The strings borrow argv bytes; cleanup does not release those bytes.
-// exit performs the runtime cleanup before foreign exit with status & 0xFF.
-// sys.exit calls it. Neither path automatically deletes user globals.
-// exit does not run caller defers. Section 2.1 fixes the final obligation boundary.
+// shutdown is the runtime cleanup. It flushes every buffer first. Then it
+// releases the runtime-owned header allocation and leaves args_store empty.
+// The strings borrow argv bytes; shutdown does not release those bytes.
+// A call that finds args_store empty releases nothing.
+// exit calls shutdown, then ends the process through foreign exit with
+// status & 0xFF. sys.exit calls exit. Neither path automatically deletes user
+// globals. exit does not run caller defers. Section 2.1 fixes the final
+// obligation boundary.
 fn args_init(i32 argc, char* mut* argv) void;
 fn args() string@;
+fn shutdown() void;
 fn exit(i32 status) noreturn;
 ```
 
@@ -1241,11 +1247,12 @@ and must pass `opt -passes=verify` (D19.1).
 The two worked examples illustrate LLVM types, calls, data, and runtime checks.
 They use hand-written runtime stubs instead of the complete std.rt module (item 8, D9.10, D13.1).
 Their args_init stubs allocate no argument headers. Their args stubs return an empty span.
-Their flush-only entries therefore retain no runtime argument owner.
+Their `shutdown` stubs release nothing, and they retain no runtime argument owner.
 Production startup with positive argc creates that owner and requires final cleanup (D17.19).
 The examples omit production allocation and cleanup effects. They are not exact complete compiler
 output.
-Item 22 defines the required production entry sequence without selecting a cleanup helper.
+Item 22 defines the required production entry sequence and its cleanup call, `std.rt.shutdown`
+(section 5.1).
 A change to the emitter's text is a change here.
 
 1. **Form and module header.** One textual module (`.ll`, LLVM 18 syntax, opaque pointers) holds
@@ -1707,15 +1714,15 @@ A change to the emitter's text is a change here.
     built in its own frame. That span is the caller-made copy of item 7, so the callee uses it in
     place and no second copy exists (item 10).
     The following Linux ABI fragments show startup and source-entry calls.
-    Final runtime argument cleanup follows the flush (section 2.1).
-    These fragments prescribe no cleanup helper or new ABI signature.
+    The call of `std.rt.shutdown` is the runtime cleanup of section 2.1. It flushes and then
+    releases the argument headers, before the final obligation boundary and `ret`.
 
     ```llvm
       %args = alloca %fort.span, align 8
       call void @"std.rt.args_init"(i32 %argc, ptr %argv)
       call void @"std.rt.args"(ptr sret(%fort.span) %args)
       %t0 = call i32 @"main.main"(ptr %args)
-      call void @"std.rt.flush_all"()
+      call void @"std.rt.shutdown"()
     ```
 
     When the entry module's `main` takes no parameter, the call passes no argument and the rest
@@ -1726,7 +1733,7 @@ A change to the emitter's text is a change here.
       call void @"std.rt.args_init"(i32 %argc, ptr %argv)
       call void @"std.rt.args"(ptr sret(%fort.span) %args)
       %t0 = call i32 @"main.main"()
-      call void @"std.rt.flush_all"()
+      call void @"std.rt.shutdown"()
     ```
 
     `std.rt.args` returns an aggregate, so it takes the destination as the hidden result pointer
@@ -1782,7 +1789,8 @@ fn main() i32 { println("hello, world!"); return 0; }
 
 The following standalone Linux module illustrates `main.ft`.
 Its argument stubs create no owner, including when argc is positive.
-Its entry omits production argument cleanup. Production normal return follows item 22 (D17.19).
+Its `shutdown` stub only returns, because no stub allocates. Production `shutdown` follows item
+22 (D17.19).
 
 ```llvm
 target triple = "x86_64-unknown-linux-gnu"
@@ -1818,7 +1826,7 @@ entry:
   ret void
 }
 
-define dso_local void @"std.rt.flush_all"() #0 {
+define dso_local void @"std.rt.shutdown"() #0 {
 entry:
   ret void
 }
@@ -1836,7 +1844,7 @@ entry:
   call void @"std.rt.args_init"(i32 %argc, ptr %argv)
   call void @"std.rt.args"(ptr sret(%fort.span) %args)
   %t0 = call i32 @"main.main"()
-  call void @"std.rt.flush_all"()
+  call void @"std.rt.shutdown"()
   %t1 = and i32 %t0, 255
   ret i32 %t1
 }
@@ -1853,11 +1861,12 @@ The five runtime definitions let this module link on its own through the C libra
 The source function, quoted names, private data, and attributes illustrate items 4, 5, 7, and 19.
 A production module includes the complete runtime closure (D9.10, D13.1).
 Its args_init creates header storage for positive argc even when source main takes no arguments.
-After source main returns, the production entry flushes and releases that storage before its final
-normal-exit boundary and masked return (D11.6, D17.19).
+After source main returns, the production entry calls `std.rt.shutdown`. It flushes and releases
+that storage before the final normal-exit boundary and the masked return (D11.6, D17.19).
 The empty stubs above model neither that allocation nor its release.
 The illustrated entry is not the complete production entry of item 22.
-This example prescribes no cleanup helper or new ABI signature.
+Section 5.1 fixes the cleanup entry point `std.rt.shutdown`; this example adds no ABI
+signature.
 
 ### 6.2 A program with a check
 
@@ -1872,8 +1881,8 @@ fn main() i32 {
 
 The following standalone Linux module illustrates `abort.ft` with the fault position at 12:13.
 Its module path is abort (D9.1). Its source main symbol is abort.main (D9.7).
-It uses the same empty argument stubs as section 6.1. They create no runtime argument owner.
-Its flush-only normal return omits production argument cleanup (item 22, D17.19).
+It uses the same empty argument and `shutdown` stubs as section 6.1. They create and release no
+runtime argument owner (item 22, D17.19).
 
 ```llvm
 target triple = "x86_64-unknown-linux-gnu"
@@ -1909,7 +1918,7 @@ entry:
   ret void
 }
 
-define dso_local void @"std.rt.flush_all"() #0 {
+define dso_local void @"std.rt.shutdown"() #0 {
 entry:
   ret void
 }
@@ -1950,7 +1959,7 @@ entry:
   call void @"std.rt.args_init"(i32 %argc, ptr %argv)
   call void @"std.rt.args"(ptr sret(%fort.span) %args)
   %t0 = call i32 @"abort.main"()
-  call void @"std.rt.flush_all"()
+  call void @"std.rt.shutdown"()
   %t1 = and i32 %t0, 255
   ret i32 %t1
 }
@@ -1982,9 +1991,9 @@ the `llvm.trap` of item 20 after its call to a C function declared `noreturn` no
 program prints `before`, then `abort.ft:12:13: runtime error: index 5 out of range for length 3`,
 and dies with SIGABRT (D11.4).
 That abort path requires no cleanup (D17.19).
-A production normal return still requires argument-storage release after flush and before the final
-boundary and return. The illustrated entry omits that effect because its stubs allocate no owner.
-This example prescribes no cleanup helper or new ABI signature.
+A production normal return calls `std.rt.shutdown`, which releases the argument storage after the
+flush and before the final boundary and return. The `shutdown` stub here releases nothing, because
+its stubs allocate no owner.
 
 ## 7. Testing
 

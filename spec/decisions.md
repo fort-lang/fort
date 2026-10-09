@@ -1461,11 +1461,12 @@ Sections:
   `main` calls `std.rt.args_init(argc, argv)`, which builds the `string@` of arguments from `argv`,
   then `std.rt.args()`, which writes that span into the frame of the emitted `main`. It then calls
   the entry module's `main` (D8.6): with the span when that `main` declares the parameter, and with
-  no argument when it does not. On return, it flushes runtime buffers.
-  It releases the runtime-owned argument headers before the final normal-exit boundary (D17.19).
+  no argument when it does not. On return, it calls `std.rt.shutdown`, the runtime cleanup.
+  `shutdown` flushes runtime buffers first. It then releases the runtime-owned argument headers,
+  before the final normal-exit boundary (D17.19).
   Argument bytes remain borrowed from C startup storage. The entry returns `status & 0xFF`.
   The compiler accounts for this generated sequence even when it lies outside source-function FIR.
-  `std.rt.exit` performs the same runtime cleanup before foreign process termination.
+  `std.rt.exit` calls `std.rt.shutdown` before foreign process termination.
   It does not execute caller defers or automatically delete user globals.
   The span goes by pointer, which is D9.9's internal convention for an aggregate parameter. The
   span in the frame of the emitted `main` is the caller-made copy of that convention, so no second
@@ -1485,6 +1486,9 @@ Sections:
   module's `main` itself and passes its own span, which D9.9 already makes the caller-made copy.
   Amended 2026-10-02 (T-277): Normal exit previously flushed without an argument-storage cleanup
   requirement. Final runtime cleanup now precedes the D17.19 obligation boundary.
+  Amended 2026-10-08: the rule named no function for the runtime cleanup, and the emitted `main`
+  called `std.rt.flush_all` only. The user chose one runtime shutdown function that flushes and
+  then releases. The emitted `main` and `std.rt.exit` call it, and toolchain.md 5.1 lists it.
 
 ### D11.7 How the print family writes a value
 - owner: `memory-model.md` (Runtime errors), `toolchain.md` (Build modes, runtime).
