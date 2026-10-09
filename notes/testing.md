@@ -320,6 +320,11 @@ bullet at a time and without a rewrite.
   diagnostics as well. `check_env.reopen` is `bootstrap0/test/common/check_helpers.h`'s `begin()`
   and goes between the assertions about one source and the next check. The C helpers reset per
   check, so a translated suite that drops the reset is the failure mode to look for.
+- **Count the steps, barriers and records of an ownership producer before it solves.**
+  `ownership_source_local.release_work` frees them when `ownership_source.analyze` ends, so a
+  count read after `analyze` is 0 whatever the producer made. A draft of
+  `ownership_source_local_calls_test.ft` counted barriers after `analyze` and failed for that
+  reason; `ownership_source_local_test.ft` counts them on the prepared context.
 - **Run a `test/fort` binary from a scratch directory, never from `test/fort`.**
   `check_env.open` and `modules_env.open` create `sandbox<n>/` **relative to the working
   directory** (`test/fort/support/modules_env.ft:56`) and `close` never removes it (`:64`), so a
@@ -932,6 +937,14 @@ bullet at a time and without a rewrite.
   writes the modification time of each object into the binary. Without it two builds of one
   source gave two md5 values, so the last line of the runner would read `MISMATCH`. With it,
   two builds gave one value.
+  **The ownership tables also run on a darwin host, from a copy outside the repository.** Their
+  commands name `build/Linux/debug`. In the copy, `binary`, `build` and each stage name
+  `build/Darwin/debug`, the build sets `ZERO_AR_DATE=1`, and each `run_tests.py` stage passes
+  `--cc`, `--target arm64-apple-macosx11.0.0` and `--opt`. On 2026-10-08 such copies of
+  `ownership_local.json`, `ownership_stored.json` and `ownership_raw.json` ran 32 rows with
+  `--runner 'bash -c'` and restored the md5 each time. A local round cost about 6 min, because
+  its first stage runs about 35 suites. Change no file of the worktree while a round runs: a
+  build or a test there reads the mutant.
   **The fort emitter table reads its citations from history and its lines from today.** Commit
   c9b834a7 deleted the citations of `src/fort/gen.ft`, `gen_expr.ft`, `gen_stmt.ft` and
   `gen_data.ft`, and b0606efa then replaced the direct path by FIR. At `a3e0c95d` those files
