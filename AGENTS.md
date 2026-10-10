@@ -2,31 +2,9 @@
 A safe(r) C-like systems programming language.
 
 ## Writing: ASD-STE100 everywhere
-- **Write in ASD-STE100**, the ASD Simplified Technical English specification. Name it in
-  full: the standard is ASD-STE100, not "ASD-STE". The user asked for this on 2026-09-11 and
-  then said "use it everywhere", so it governs **all** the text this project writes: replies to
-  the user, code comments, commit messages, ticket text, the prompts that go to agents, and the
-  specification documents in `spec/`. There is no exempt category.
-- The rules:
-  - Write short sentences. Put one idea in each. Keep an instruction to 20 words and a
-    description to 25.
-  - Use the active voice. Say who does the action: "the agent refused the instruction", not
-    "the instruction was refused".
-  - Use the simple present where it works.
-  - Give a word one meaning, and use the same word for that thing every time. A gate is a gate.
-    Do not call it "the check" in the next sentence.
-  - Use plain words: *use*, not *utilise*; *start*, not *initiate*; *before*, not *prior to*;
-    *about*, not *approximately*.
-  - Do not use idiom or metaphor. "The test went red" is jargon this project keeps, because it
-    names one thing exactly; "bitten by", "load-bearing" and "throat-clearing" are not.
-  - Cut the opening noise: "it is worth noting that", "as we can see", "interestingly".
-  - Write a number, a command or a file path instead of an adjective. "The gate exited 1" says
-    more than "the gate had a problem". "395 of 666 files" says more than "most files".
-- **Exactness wins over simplicity.** A rule in `spec/` must stay exact. If a short sentence
-  would change what a decision means, write two short sentences. Do not drop a condition to make
-  a sentence shorter.
-- The rule applies to text you write or change. It does not ask anyone to rewrite the documents
-  that are already there; that sweep is its own ticket if the user wants it.
+Write all text in ASD-STE100, the ASD Simplified Technical English specification: replies,
+comments, commits, tickets, agent prompts and `spec/`. `notes/style.md` 7 holds the rules (the
+user asked for this on 2026-09-11 and said "use it everywhere").
 
 ## Naming
 - The language is `fort`. Source files use the extension `.ft`. The compiler binary is `fort`.
@@ -195,6 +173,9 @@ the latest `ci-status` on `main` (the queue run of its head or the nightly run) 
   A source fix needs new PR CI. Review again if behavior changes.
 - Reviewer: follows its TOML. Check tests, citations, commits, scope, xfail, and the ticket.
   Pending PR CI remains pending. Never edit or merge. Route learning below.
+- Coordinator: send a finding class that 2 review rounds find to the user as a rule question, not
+  to a third fix round (PR 103: rounds 2 to 5 found one class). Split a ticket that reaches review
+  round 3 into tickets that each merge in one PR. PR 103 ran 8 rounds; PR 98 merged in 2 h.
 - Coordinator: require zero open must-fix findings and green PR `ci-status` for the current head.
   Record the PR URL, head and base SHA, job counts, the PR CI run (on the PR merge ref) and the
   merge-group CI run (on the merge-group commit). A new head invalidates the old CI result. If the
@@ -234,19 +215,16 @@ and "What checks `.ft` source" is the tests' as well.
 `AGENTS.md` keeps three kinds of knowledge -- the project layout, the process rules, and this
 routing table -- and links to the rest. Its budget is 150 lines. T-099 moved the
 `## Environment`, `## Build and test` and `## Technical Standards` sections into the four
-`notes/` files above and routed each bullet by this table; the file measured 1538 lines before
-that move and 223 after it. The 73 lines above the budget have one candidate and one only:
-`## Writing: ASD-STE100 everywhere` is 27 lines and this table sends a text convention to
-`notes/style.md`. Everything else here is the layout, the process or this table, so a move that
-closes the last 46 lines would put process knowledge outside `AGENTS.md`. The user decides which
-of the two the budget means; until then the number stands as a target and not as a rule (T-099).
-The lint holds that number: `BUDGET_LIMIT` in `agents/knowledge_lint.py` is 252, the measured
-value, so any growth trips it; `BUDGET_TARGET` is 150 and no test reads it (T-103).
+`notes/` files above; the file measured 1538 lines before that move and 223 after it. On
+2026-10-10 the user ruled that the rules of `## Writing: ASD-STE100 everywhere` move to
+`notes/style.md` 7. A 3-line pointer stays here. The file measured 252 lines before that move and
+230 after it. `BUDGET_LIMIT` in `agents/knowledge_lint.py` holds 230, so any growth trips it;
+`BUDGET_TARGET` is 150 and no test reads it (T-103).
 
 Five rules for an entry:
 - Say what happened in one sentence, with a number, a command or a file path.
 - Say what to do in one sentence or two.
-- Cite the ticket, as `T-098`.
+- Cite a PR number, a SHA, a path or a decision; no local ticket ID (AGENTS.md line 108).
 - Match the shape of the neighbours in that section.
 - **Read the section before you append.** Extend the entry that is already there rather than add
   a second entry on the same subject.
