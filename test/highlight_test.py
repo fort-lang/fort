@@ -31,6 +31,7 @@ LSP_TESTS_DIR = ROOT / "test" / "lsp"
 TTY_DIR = ROOT / "test" / "tty"
 OWNERSHIP_APPROVED_DIR = ROOT / "test" / "ownership" / "approved"
 OWNERSHIP_QUALIFICATION_DIR = ROOT / "test" / "ownership" / "qualification"
+OWNERSHIP_PROBES_DIR = ROOT / "test" / "ownership" / "probes"
 EDITOR_FIXTURE_DIR = ROOT / "editors" / "vscode" / "test" / "fixtures"
 
 # Every directory of fort the grammar is held over. `src/fort` is the only one
@@ -46,6 +47,13 @@ CORPUS_DIRS = (
     TTY_DIR,
     OWNERSHIP_APPROVED_DIR,
     OWNERSHIP_QUALIFICATION_DIR,
+    OWNERSHIP_PROBES_DIR,
+)
+# The single `.ft` files the grammar is held over, each in a directory that holds other
+# corpus directories: the two soundness gate programs of test/ownership.
+CORPUS_FILES = (
+    ROOT / "test" / "ownership" / "heap_rows.ft",
+    ROOT / "test" / "ownership" / "solvers_alone.ft",
 )
 # The least number of `.ft` each of those directories holds. A directory grows,
 # so its own test asserts a floor. No test asserts the exact total.
@@ -65,6 +73,7 @@ CORPUS_MINIMUMS = {
     TTY_DIR: 2,
     OWNERSHIP_APPROVED_DIR: 10,
     OWNERSHIP_QUALIFICATION_DIR: 20,
+    OWNERSHIP_PROBES_DIR: 10,
 }
 # The `.ft` of the repository that are deliberately outside the corpus, each
 # because it is meant to hold a lexical error.
@@ -755,6 +764,13 @@ class CorpusTest(unittest.TestCase):
         self.check(paths)
         return paths
 
+    def check_files(self, paths):
+        """Check files of CORPUS_FILES. A missing file fails."""
+        for path in paths:
+            self.assertTrue(path.is_file(), f"{path} is missing")
+        self.check(paths)
+        return paths
+
     def test_the_language_corpus_holds_the_lexical_tests(self):
         """The lexical tests are the hardest fort the grammar meets, and
         test_every_language_test_spells_correctly checks them with the rest of
@@ -802,6 +818,14 @@ class CorpusTest(unittest.TestCase):
         """Check the counterparts and probes that the qualification matrix runs."""
         self.check_directory(OWNERSHIP_QUALIFICATION_DIR)
 
+    def test_every_ownership_probe_spells_correctly(self):
+        """Check the probe programs whose faulty bodies the soundness gates run."""
+        self.check_directory(OWNERSHIP_PROBES_DIR)
+
+    def test_every_ownership_gate_program_spells_correctly(self):
+        """Check the two soundness gate programs of test/ownership."""
+        self.check_files(list(CORPUS_FILES))
+
     def test_the_corpus_walk_holds_no_duplicate(self):
         """Each file reaches exactly one of the tests above.
 
@@ -810,10 +834,11 @@ class CorpusTest(unittest.TestCase):
         This test tokenizes nothing.
         """
         walked = [path for directory in CORPUS_DIRS for path in self.sources(directory)]
+        walked += list(CORPUS_FILES)
         self.assertEqual(len(walked), len(set(walked)))
 
     def test_every_corpus_directory_is_checked_by_a_test(self):
-        """A directory of CORPUS_DIRS that no test checks is caught here.
+        """A directory of CORPUS_DIRS or a file of CORPUS_FILES that no test checks is caught here.
 
         This test records directory checks and tokenizes nothing.
         It runs each test of this class with check_directory recording its
@@ -823,10 +848,15 @@ class CorpusTest(unittest.TestCase):
         its own reason also fails here. This is the cost of running them.
         """
         checked = []
+        files = []
 
         def record(directory):
             checked.append(directory)
             return self.sources(directory)
+
+        def record_files(paths):
+            files.extend(paths)
+            return paths
 
         for name in unittest.defaultTestLoader.getTestCaseNames(CorpusTest):
             if name == self._testMethodName:
@@ -834,16 +864,18 @@ class CorpusTest(unittest.TestCase):
             case = CorpusTest(name)
             case.setUp()
             case.check_directory = record
+            case.check_files = record_files
             try:
                 getattr(case, name)()
             except unittest.SkipTest:
                 pass
         self.assertEqual(sorted(checked, key=str), sorted(CORPUS_DIRS, key=str))
+        self.assertEqual(sorted(files, key=str), sorted(CORPUS_FILES, key=str))
 
     def test_every_fort_source_in_the_repository_is_walked_or_excluded(self):
         """No directory of fort can be missed in silence.
 
-        A new `.ft` outside CORPUS_DIRS and EXCLUDED_DIRS fails here. Thus, an
+        A new `.ft` outside CORPUS_DIRS, CORPUS_FILES and EXCLUDED_DIRS fails here. Thus, an
         unknown corpus causes a red test instead of an unseen gap.
         """
         stray = []
@@ -852,6 +884,8 @@ class CorpusTest(unittest.TestCase):
             if any(part.startswith(".") or part in IGNORED_DIRS for part in parts):
                 continue
             if any(path.is_relative_to(d) for d in CORPUS_DIRS + EXCLUDED_DIRS):
+                continue
+            if path in CORPUS_FILES:
                 continue
             stray.append(path.relative_to(ROOT).as_posix())
         self.assertEqual(stray, [], "fort in no corpus of highlight_test.py")

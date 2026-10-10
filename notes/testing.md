@@ -726,6 +726,45 @@ bullet at a time and without a rewrite.
     joins that file when its rendered conditions name a step that fails on the run. A false
     violation whose conditions all hold on the run is a checker bug, and it is must-fix
     (2026-10-10).
+- **Two soundness gates hold the heap solver and the summary solver alone** (D17.14, D17.18).
+  No module imports `ownership_heap`, so outside its 11 test programs only these gates run it.
+  `SoundnessGateTest` in `test/ownership_driver_test.py` builds both programs once with
+  `-I src/fort -I test/fort/support`. It runs each input in an empty directory of its own, because
+  `lower_env` writes its sandboxes into the working directory.
+  `test/ownership/heap_rows.ft` prints one row for each function of a file: the verdict, the
+  incomplete reason, `returns`, the interface length, the post slots, the post atoms and the events.
+  The test compares 784 rows of 211 inputs with `test/ownership/heap_rows.txt`. The inputs are 107
+  of the 109 manifest programs, the 10 programs of `test/ownership/probes`, and 94 texts that
+  `heap_texts` takes from the 11 `test/fort/ownership_heap*_test.ft` programs. `HEAP_ROWS_SKIPPED`
+  names the other 2 manifest programs with the reason: each imports `std.str`, and the sandbox
+  `std` holds only a runtime. A skipped program that `heap_rows` reads fails the test. Run the
+  test with `--bless` to write the golden, and read the diff of the golden before the commit.
+  `test/ownership/solvers_alone.ft` prints the summary and the heap verdict of 62 faulty bodies:
+  the faulty body of each of the 37 reject cases (the last function at or before an error line)
+  and the 25 bodies of `test/ownership/solvers/faulty.json`. A body is faulty because its source
+  has the expected error: the error line of a reject case, or the `faulty.json` entry of a probe.
+  The summary solver must prove 0. The heap solver may prove only the entries of
+  `test/ownership/solvers/false_accepts.txt`, and each entry must still prove. The ledger has one
+  line `# at most N entries`, and a ledger with more entries fails the test. A change lowers N
+  when it deletes an entry, so each step down is a one-line diff; a raise of N is the only way to
+  add an entry, and review refuses it. On 2026-10-10 N is 13: 4 entries of class A, 3 of B, 1 of D
+  and 5 of E. The empty ledger is the goal, and the test passes with a ledger of comments only.
+  Measured runs of the 10 probe programs on darwin, built with `build/Darwin/debug/fort --cc
+  /opt/homebrew/bin/clang --std-dir build/Darwin/debug/std -o <probe> <probe>.ft`: `round8_a3`
+  exits 134 (the assertion of `chk_addr`), `round8_d2` exits 139, and the other 8 exit 0.
+  `leaks --atExit -- ./<probe>` finds 2 leaks in `review_f1`, `review_f2`, `review_f4` and
+  `round8_a1`, 4 in `round8_a2`, 5 in `round8_a3` and 1 in `round8_a4`. `review_f5` and `round8_d1`
+  exit 0 with 0 leaks: clang removes the dead load of `null_read` and `null_next`, so a run shows
+  no error in those 2 bodies. A run measures only the bodies that `main` of the probe calls.
+  What the gates miss. The golden holds a change and not a verdict: a blessed row that goes from
+  `failed` to `proved` passes, so the diff is the review. `heap_texts` takes only a `string[N]`
+  array of literals, and it joins a `tail` to a base only through a joiner function that the
+  function of the `tail` calls; a text that a test builds in another way is no input. A faulty
+  body is faulty only because its source says so, and a body with two faults counts once. A
+  `proved` verdict also needs `known` and no residual flag, so a successful proof with a residual
+  flag prints `unproved`, and the gate does not see a false accept of that kind. On 2026-10-10
+  0 of the 62 faulty bodies had one.
+  The gates judge each solver alone and not the `calls_heap` row that joins them.
 
 ## 6. Generated code
 
