@@ -10,8 +10,10 @@ import gen;
 import modules;
 import ownership_api;
 import ownership_graph;
+import ownership_flow;
 import ownership_keys;
 import ownership_limits;
+import ownership_source_calls;
 import ownership_source_exit;
 import ownership_source_live;
 import ownership_source_local;
@@ -50,6 +52,9 @@ struct body {
     ownership_source_raw.context raw;
     // The process-exit analysis (toolchain 1.1, `process_exit`).
     ownership_source_exit.context exit;
+    // The calls_heap row of the body, or null when the closure has no graph. The calls context
+    // of the closure owns it.
+    ownership_source_calls.row* calls;
     graph_route route;
     status graph_correspondence;
     status graph_solver;
@@ -75,6 +80,10 @@ struct context {
     ownership_graph.body_input mut@ own graph_inputs;
     ownership_graph.graph graph;
     ownership_api.proof_status graph_first_refusal;
+    // The calls_heap analysis of the closure: body i of the graph is body i here. Its inputs
+    // borrow `call_files[i]`, the source file of body i.
+    ownership_source_calls.context calls;
+    ownership_flow.source_file_binding mut@ own call_files;
     bool enumeration_complete;
     u64 inactive_declarations;
     bool prepared;
@@ -431,9 +440,48 @@ fn analyze(context mut* c) void {
         }
         ownership_source_exit.solve_closure(&c->exit, exits[..n], prerequisites);
     }
+    // The call and heap solvers read the whole closure, so they run after every body.
+    if (c->graph_built) {
+        c->call_files = new(ownership_flow.source_file_binding, c->bodies.len);
+        ownership_api.source_position mut@ own declarations = new(ownership_api.source_position,
+            c->bodies.len);
+        defer del(declarations);
+        i = 0;
+        while (i < c->bodies.len) {
+            body* row = &c->bodies[i];
+            c->call_files[i] = ownership_flow.source_file_binding{row->key.declaration.module,
+                row->source.file, row->module->file};
+            declarations[i] = row->source;
+            i += 1;
+        }
+        ownership_source_calls.solve(&c->calls, &c->graph, c->call_files[..], declarations[..]);
+        // A violation that the local, stored-borrow or raw run validated counts once, there.
+        i = 0;
+        while (i < c->bodies.len) {
+            body* row = &c->bodies[i];
+            ownership_source_calls.exclude(&c->calls, i,
+                row->local.violations[..row->local.violations_len]);
+            ownership_source_calls.exclude(&c->calls, i,
+                row->stored.violations[..row->stored.violations_len]);
+            ownership_source_calls.exclude(&c->calls, i,
+                row->raw.violations[..row->raw.violations_len]);
+            i += 1;
+        }
+        ownership_source_calls.finish(&c->calls);
+        if (ownership_source_calls.executed(&c->calls)) {
+            i = 0;
+            while (i < c->bodies.len) {
+                c->bodies[i].calls = &c->calls.rows[i];
+                i += 1;
+            }
+        }
+    }
 }
 
 fn free(context mut* c) void {
+    // The call and heap summaries borrow the graph and FIR. Release them first.
+    ownership_source_calls.free(&c->calls);
+    del(c->call_files);
     // Graph queries retain symbols and FIR. Release them before the bodies.
     ownership_graph.free(&c->graph);
     del(c->graph_inputs);

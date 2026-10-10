@@ -32,6 +32,16 @@ struct event_row {
     bool budget;
     u8[64] text;
     u64 text_len;
+    // The notes that name a crossed call: their count and the first 8 of them.
+    u32 assumed;
+    note_row[8] notes;
+}
+
+// One note of an event that names a crossed call: its text and its line.
+struct note_row {
+    u8[160] text;
+    u64 len;
+    u32 line;
 }
 
 // The meter of the computation that runs now and every event of the whole solve.
@@ -133,6 +143,22 @@ fn event(void mut* opaque, ownership_api.event_request* req) ownership_api.event
             i += 1;
         }
         row.text_len = i;
+        u64 mut k = 0;
+        while (k < req->event.notes.len) {
+            ownership_api.event_note* note = &req->event.notes[k];
+            u64 at = cast(row.assumed, u64);
+            if (note->role == ownership_api.note_role.assumption && at < row.notes.len) {
+                u64 mut j = 0;
+                while (j < note->text.len && j < row.notes[at].text.len) {
+                    row.notes[at].text[j] = cast(note->text[j], u8);
+                    j += 1;
+                }
+                row.notes[at].len = j;
+                row.notes[at].line = note->source.line;
+            }
+            if (note->role == ownership_api.note_role.assumption) { row.assumed += 1; }
+            k += 1;
+        }
         counts->rows[counts->events] = row;
     }
     counts->events += 1;
@@ -324,8 +350,74 @@ fn first(closure* c, string name) event_row {
     return event_row{};
 }
 
+/// The first event of `kind` in body `name`, or a zero row.
+fn first_of(closure* c, string name, ownership_api.event_kind kind) event_row {
+    u32 declaration = cast(index(c, name) + 1, u32);
+    u64 mut i = 0;
+    while (i < c->counts.events && i < c->counts.rows.len) {
+        event_row row = c->counts.rows[i];
+        if (row.kind == kind && row.operation.function.declaration.declaration == declaration) {
+            return row;
+        }
+        i += 1;
+    }
+    return event_row{};
+}
+
 fn text(event_row* row) string {
     return cast(row->text[0..row->text_len], string);
+}
+
+/// The text of note `k` of `row` that names a crossed call, or "".
+fn assumption(event_row* row, u64 k) string {
+    if (k >= row->notes.len) { return ""; }
+    return cast(row->notes[k].text[0..row->notes[k].len], string);
+}
+
+/// Whether note `k` of `row` starts with `head`.
+fn needs(event_row* row, u64 k, string head) bool {
+    string t = assumption(row, k);
+    return t.len >= head.len && t[0..head.len] == head;
+}
+
+/// Whether note `k` of `row` names a crossed call of `callee`: "this path needs 'callee' to
+/// return here; ...".
+fn names_call(event_row* row, u64 k, string callee) bool {
+    string t = assumption(row, k);
+    string head = "this path needs '";
+    string tail = "' to return here; ";
+    u64 end = head.len + callee.len;
+    return t.len >= end + tail.len && t[0..head.len] == head && t[head.len..end] == callee &&
+        t[end..end + tail.len] == tail;
+}
+
+/// Whether note `k` of `row` names a crossed kept check of FIR kind `kind`: "this path needs
+/// the kind check to pass here; ...".
+fn names_check(event_row* row, u64 k, string kind) bool {
+    string t = assumption(row, k);
+    string head = "this path needs the ";
+    string tail = " check to pass here; ";
+    u64 end = head.len + kind.len;
+    return t.len >= end + tail.len && t[0..head.len] == head && t[head.len..end] == kind &&
+        t[end..end + tail.len] == tail;
+}
+
+/// Whether note `k` of `row` names a pointer `place` that the witness assumes to be non-null:
+/// "this path needs 'place' to be non-null here; ...".
+fn names_null(event_row* row, u64 k, string place) bool {
+    string t = assumption(row, k);
+    string head = "this path needs '";
+    string tail = "' to be non-null here; ";
+    u64 end = head.len + place.len;
+    return t.len >= end + tail.len && t[0..head.len] == head && t[head.len..end] == place &&
+        t[end..end + tail.len] == tail;
+}
+
+/// Whether the notes of `row` name exactly `count` assumptions, the first at `line` with a text
+/// that starts with `head`.
+fn assumes(event_row* row, u32 count, u32 line, string head) bool {
+    if (row->assumed != count) { return false; }
+    return count == 0 || (row->notes[0].line == line && needs(row, 0, head));
 }
 
 /// The text of the first event of body `name`, or "".
@@ -360,6 +452,11 @@ fn dump(closure* c) void {
         eprintln("event body ", row.operation.function.declaration.declaration, " kind ",
             cast(row.kind, u32), " evidence ", cast(row.evidence, u32), " reason ",
             cast(row.reason, u32), " at ", row.line, ":", row.col, " ", text(&row));
+        u64 mut k = 0;
+        while (k < cast(row.assumed, u64) && k < row.notes.len) {
+            eprintln("  note at ", row.notes[k].line, ": ", assumption(&row, k));
+            k += 1;
+        }
         i += 1;
     }
 }

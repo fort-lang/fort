@@ -68,7 +68,7 @@ FAILURE_CODES = (
 U64_MAX = (1 << 64) - 1
 U32_MAX = (1 << 32) - 1
 LIMIT_VERSION = 2
-REPORT_VERSION = 6
+REPORT_VERSION = 7
 # The producer analyses with a ledger for each verified body, and the classification ledgers
 # of the two flow analyses among them.
 BODY_LEDGERS = ("local", "stored_borrows", "raw", "process_exit")
@@ -82,6 +82,9 @@ LEDGER_LABELS = {
     "raw": "raw",
     "process_exit": "process exit",
 }
+# The calls_heap analysis keeps one ledger for each component computation of each of its two
+# solvers. Its owner keys the first member of the component.
+COMPONENT_LEDGERS = ("calls_summary", "calls_heap")
 METER_NAMES = (
     "graph_private",
     "services",
@@ -92,6 +95,7 @@ METER_NAMES = (
     "raw",
     "process_exit",
     "process_exit_fills",
+    *COMPONENT_LEDGERS,
 )
 BOUNDARY_KINDS = ("executable", "library")
 BOUNDARY_STATUSES = ("complete", "incomplete", "unexecuted")
@@ -767,6 +771,7 @@ def validate_report(
     # a classification ledger of the same FIR size when the body needs one.
     ledger_sizes = {name: {} for name in BODY_LEDGERS}
     classification_sizes = {name: {} for name in CLASSIFICATION_LEDGERS.values()}
+    component_sizes = {name: {} for name in COMPONENT_LEDGERS}
     for index, meter in enumerate(array(report["meters"], "meters")):
         obj(meter, ("id", "name", "owner", "fir_size", "counts", "first_refusal"), "meter")
         require(integer(meter["id"], "meter id") == index, "meters: IDs have gaps")
@@ -806,6 +811,11 @@ def validate_report(
             require(owner_key is not None, f"{label} ledger: missing owner")
             require(owner_key not in classification_sizes[flow], f"{label} ledger: duplicate owner")
             classification_sizes[flow][owner_key] = meter["fir_size"]
+        elif meter["name"] in COMPONENT_LEDGERS:
+            sizes = component_sizes[meter["name"]]
+            require(owner_key is not None, "calls_heap ledger: missing owner")
+            require(owner_key not in sizes, "calls_heap ledger: duplicate owner")
+            sizes[owner_key] = meter["fir_size"]
         elif meter["name"] == "services" and owner_key is not None:
             service_sizes[owner_key] = meter["fir_size"]
         count_keys = set()
@@ -875,6 +885,23 @@ def validate_report(
     require(
         not fills_sizes or fills_sizes[0] == sum(ledger_sizes["process_exit"].values()),
         "meters: process exit fills FIR size differs from the process_exit ledgers",
+    )
+    # The components of the graph partition its bodies. Each calls_heap solver solves each
+    # component once, so the FIR sizes of its ledgers sum to the graph FIR size. A ledger is
+    # the computation of the component of its owner, whose FIR size holds that of the owner.
+    for name, sizes in component_sizes.items():
+        require(
+            not sizes or (graph_sizes and sum(sizes.values()) == graph_sizes[0]),
+            "calls_heap ledger: FIR sizes differ from the graph ledger",
+        )
+        for owner_key, size in sizes.items():
+            require(
+                size >= service_sizes.get(owner_key, U64_MAX),
+                "calls_heap ledger: FIR size below its owner",
+            )
+    require(
+        bool(component_sizes["calls_summary"]) == bool(component_sizes["calls_heap"]),
+        "calls_heap ledger: one solver without ledgers",
     )
     totals = derived_totals(bodies)
     validate_totals(report["totals"], totals)
@@ -1394,7 +1421,7 @@ def validate_audit(path, *, checkout, compiler, compiler_checkout, compiler_prov
 
 
 # The scopes that a CI gate can enforce. Each names its analysis row.
-ENFORCED_SCOPES = ("local", "stored_borrows", "raw", "process_exit")
+ENFORCED_SCOPES = ("local", "stored_borrows", "raw", "calls_heap", "process_exit")
 
 
 def scope_problems(report, scope, checkout):

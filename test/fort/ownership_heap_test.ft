@@ -436,14 +436,32 @@ fn retained_view() void {
     ownership_heap_env.run(&c, text[0..n], names[..]);
     pool_proved(&c);
     assert(ownership_heap_env.proved(&c, "growth"));
+    // The witness crosses each call and assumes that it returns, `pool_free` and its loop too,
+    // and it assumes that each bounds check of `view[0]` passes (D17.18). The event names each
+    // assumption, in source order: the check of the faulty read too.
     assert(ownership_heap_env.failed(&c, "view_after"));
     ownership_heap_env.event_row row = ownership_heap_env.first(&c, "view_after");
     assert(row.kind == ownership_api.event_kind.invalid_use);
     assert(row.evidence == ownership_api.evidence_kind.unconditional);
     assert(row.line == 33 && ownership_heap_env.text(&row) == "view");
+    assert(ownership_heap_env.assumes(&row, 5, 32,
+        "this path needs 'pool_add_block' to return here"));
+    assert(ownership_heap_env.names_call(&row, 1, "pool_add_block"));
+    assert(ownership_heap_env.names_check(&row, 2, "bounds"));
+    assert(ownership_heap_env.names_call(&row, 3, "pool_free"));
+    assert(ownership_heap_env.names_check(&row, 4, "bounds"));
+    assert(row.notes[1].line == 33 && row.notes[4].line == 33);
     // A refilled pool has fresh identities: it does not revive the earlier view.
     assert(ownership_heap_env.failed(&c, "refill"));
-    assert(ownership_heap_env.first(&c, "refill").kind == ownership_api.event_kind.invalid_use);
+    ownership_heap_env.event_row stale = ownership_heap_env.first(&c, "refill");
+    assert(stale.kind == ownership_api.event_kind.invalid_use);
+    // The read crosses three calls and its own bounds check; the last `pool_free` comes after
+    // it.
+    assert(ownership_heap_env.assumes(&stale, 4, 37,
+        "this path needs 'pool_add_block' to return here"));
+    assert(ownership_heap_env.names_call(&stale, 1, "pool_free"));
+    assert(ownership_heap_env.names_check(&stale, 3, "bounds"));
+    assert(stale.line == 38 && stale.notes[3].line == 38);
 }
 
 fn main() i32 {

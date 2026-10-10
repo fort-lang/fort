@@ -2,7 +2,9 @@
 """Check actual compiler ownership reports and selected driver behavior."""
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
+import re
 import os
 from pathlib import Path
 import resource
@@ -104,7 +106,7 @@ class OwnershipDriverTest(unittest.TestCase):
         self.assertEqual(document["verdict"], "rejected")
         self.assertEqual(document["totals"]["violations"], 0)
 
-    def test_empty_closure_keeps_unavailable_producers(self):
+    def test_empty_closure_runs_each_producer(self):
         self.entry.write_text("i32 VALUE = 1;\n")
         self.assertEqual(self.invoke().returncode, 1)
         document = self.evidence()
@@ -120,9 +122,10 @@ class OwnershipDriverTest(unittest.TestCase):
                                                    "status": "complete"})
         self.assertEqual(document["analyses"][4], {"name": "raw", "producer": "integrated",
                                                    "status": "complete"})
+        # The calls_heap solvers run on the empty closure and solve no component.
         self.assertEqual(document["analyses"][5], {"name": "calls_heap",
-                                                   "producer": "unavailable",
-                                                   "status": "incomplete"})
+                                                   "producer": "integrated",
+                                                   "status": "complete"})
         # The process-exit closure holds the boundary too. A library closure without an owning
         # global needs no cleanup body.
         self.assertEqual(document["analyses"][6], {"name": "process_exit",
@@ -146,9 +149,9 @@ class OwnershipDriverTest(unittest.TestCase):
         self.assertIn("ownership proof is incomplete", diagnostic["diagnostics"][0]["message"])
         self.assertEqual(coverage["kind"], "fort-ownership-report")
         # Version 2 added the W scale and FIR sizes, version 3 the local ledgers, version 4 the
-        # raw ledgers, version 5 the stored-borrow ledgers and version 6 the process-exit
-        # ledgers and the boundary.
-        self.assertEqual(coverage["version"], 6)
+        # raw ledgers, version 5 the stored-borrow ledgers, version 6 the process-exit ledgers
+        # and the boundary, and version 7 the calls_heap ledgers.
+        self.assertEqual(coverage["version"], 7)
         self.assertIn("w_scale", coverage["limits"])
 
     def test_index_still_populates_identifier_records(self):
@@ -398,9 +401,9 @@ class OwnershipDriverTest(unittest.TestCase):
         self.assertEqual(document["bodies"], [])
         self.assertEqual(document["meters"], [])
         self.assertEqual([row["status"] for row in document["analyses"]][3:],
-                         ["unexecuted", "unexecuted", "incomplete", "unexecuted"])
-        # The local, stored-borrow, raw and process-exit analyses ran on no body and the
-        # denominator is incomplete. The boundary reads every body, so it did not run either.
+                         ["unexecuted", "unexecuted", "unexecuted", "unexecuted"])
+        # The local, stored-borrow, raw, calls_heap and process-exit analyses ran on no body and
+        # the denominator is incomplete. The boundary reads every body, so it did not run either.
         self.assertEqual(document["analyses"][2]["status"], "unexecuted")
         self.assertEqual((document["boundary"]["correspondence"], document["boundary"]["proof"]),
                          ("unexecuted", "unexecuted"))
@@ -587,12 +590,18 @@ class OwnershipDriverTest(unittest.TestCase):
         )
         self.assertEqual(self.invoke(standard=Path(OPTIONS.std_dir)).returncode, 1)
         document = self.evidence()
-        self.assertEqual(document["totals"]["violations"], 0)
-        self.assertNotIn(b"lost ownership", self.result.stderr)
-        # The leak after an unknown call has only a possible continuation. The failure stays
-        # in the local scope, because it fails without the call's effects too.
+        # For the local analysis the leak after a fort call has only a possible
+        # continuation. The failure stays in the local scope, because it fails without the
+        # call's effects too.
         after = self.local_row(document, "after_call")
         self.assertEqual((after["correspondence"], after["proof"]), ("complete", "incomplete"))
+        # The calls_heap analysis applies the complete summary of `helper`, so it validates
+        # the leak: the one violation of the program.
+        calls = self.body(document, "after_call")["analyses"][5]
+        self.assertEqual((calls["correspondence"], calls["proof"], calls["violations"]),
+                         ("complete", "violated", 1))
+        self.assertEqual(document["totals"]["violations"], 1)
+        self.assertIn(b"main.ft:5:1: error: lost ownership", self.result.stderr)
         # The read of caller storage fails only because of the call: that is call scope.
         caller = self.local_row(document, "caller_storage")
         self.assertEqual((caller["correspondence"], caller["proof"]),
@@ -641,6 +650,427 @@ class OwnershipDriverTest(unittest.TestCase):
         self.assertIn(b"lost ownership of 'buf'", self.result.stderr)
         row = self.local_row(document, "main")
         self.assertEqual((row["correspondence"], row["proof"]), ("complete", "violated"))
+
+    CALLS_CASES = (
+        "fn reader(i32* p) i32 { return *p; }\n"
+        "fn released(i32 mut* own p) i32 { i32* v = p; del(p); return reader(v); }\n"
+        "fn releaser(i32 mut* own p) void { del(p); }\n"
+        "fn cross(i32 mut* own p) i32 { i32* v = p; releaser(move(p)); return *v; }\n"
+        "fn noop() void { }\n"
+        "fn known(i32 mut* own p) void { noop(); }\n"
+        "fn sw(i32* p, i32* q, bool b) i32* { if (b) { return p; } return sw(q, p, true); }\n"
+        "fn same(i32 mut* own a) i32 { i32* v = sw(a, a, false); del(a); return *v; }\n"
+        "fn keep(fn () void g, i32 mut* own p) void { g(); }\n"
+        "fn main() i32 { return 0; }\n"
+    )
+
+    def test_calls_heap_validates_cross_call_violations(self):
+        self.entry.write_text(self.CALLS_CASES)
+        self.assertEqual(self.invoke(standard=Path(OPTIONS.std_dir)).returncode, 1)
+        document = self.evidence()
+        stderr = self.result.stderr.decode()
+        # Each violation that only call summaries can see: a callee reads released storage, a
+        # callee releases the owner of a view, and a known callee keeps the obligation.
+        expected = (
+            ("released", "2:68: error: invalid use of storage"),
+            ("cross", "4:70: error: invalid use of storage"),
+            ("known", "6:41: error: lost ownership of an allocation"),
+        )
+        for name, text in expected:
+            with self.subTest(body=name):
+                row = self.body(document, name)["analyses"][5]
+                self.assertEqual((row["proof"], row["violations"]), ("violated", 1))
+                self.assertEqual(self.local_row(document, name)["violations"], 0)
+                self.assertIn("main.ft:" + text, stderr)
+        # The heap witness crosses `releaser` and `noop` and assumes that each returns, so each
+        # event names its call in a note at the call (D17.18, toolchain 4.2). Each note gives
+        # the fact that the path needs and what happens without it, from the row of its kind.
+        self.assertIn("main.ft:4:52: note: this path needs 'releaser' to return here; if it does"
+                      " not return, this use of 'v' does not happen\n", stderr)
+        self.assertIn("main.ft:4:70: note: this path needs 'v' to be non-null here; a null 'v'"
+                      " faults at this read first\n", stderr)
+        self.assertIn("main.ft:6:37: note: this path needs 'noop' to return here; if it does not"
+                      " return, 'p' does not leak\n", stderr)
+        self.assertNotIn("this path needs 'reader'", stderr)
+        # An alias of two formals designates one allocation, but only the summary solver sees
+        # it. The summary flow decides no condition and no call on the path, so its event is
+        # not a violation (toolchain 4.2). The heap summary of `sw` is incomplete, so `same`
+        # also leaves the declared scope and renders no record.
+        same = self.body(document, "same")["analyses"][5]
+        self.assertEqual((same["correspondence"], same["proof"], same["violations"]),
+                         ("incomplete", "incomplete", 0))
+        self.assertNotIn("main.ft:8:", stderr)
+        self.assertEqual(document["totals"]["analyses"][5]["violations"], 3)
+        self.assertEqual(document["totals"]["violations"], 3)
+        # The unknown call of `keep` keeps a possible return: its loss is not validated.
+        keep = self.body(document, "keep")["analyses"][5]
+        self.assertEqual((keep["correspondence"], keep["proof"], keep["violations"]),
+                         ("incomplete", "incomplete", 0))
+        self.assertNotIn("main.ft:9:", stderr)
+        self.assertEqual(document["analyses"][5]["producer"], "integrated")
+
+    def test_calls_heap_verdicts_stay_identical_in_every_mode(self):
+        # The solvers read FIR before the build-mode pass, so the calls_heap rows, the ledgers
+        # and the rendered records do not change with the mode (D19.8).
+        self.entry.write_text(self.CALLS_CASES)
+        projections = []
+        for flags in ((), ("--release",), ("--no-bounds-check",),
+                      ("--release", "--no-bounds-check")):
+            with self.subTest(flags=flags):
+                self.assertEqual(self.invoke(*flags, standard=Path(OPTIONS.std_dir)).returncode,
+                                 1)
+                document = self.evidence()
+                ledgers = [(row["name"], row["owner"], row["fir_size"])
+                           for row in document["meters"]
+                           if row["name"] in ("calls_summary", "calls_heap")]
+                projections.append(([row["analyses"][5] for row in document["bodies"]],
+                                    ledgers, document["totals"]["violations"],
+                                    self.result.stderr))
+        self.assertTrue(all(value == projections[0] for value in projections))
+        self.assertEqual(projections[0][2], 3)
+
+    def test_calls_heap_totals_count_each_body_and_component(self):
+        # `apply` calls a residual fort target, and `through` calls `apply`: both lack a fact
+        # and leave the declared scope. The totals count each body once, and each component
+        # has one ledger of each solver.
+        self.entry.write_text(
+            "fn apply(fn (i32*) i32 g, i32* p) i32 { return g(p); }\n"
+            "fn reader(i32* p) i32 { return *p; }\n"
+            "fn through(i32 mut* own q) void { apply(reader, q); del(q); }\n"
+            "fn main() i32 { return 0; }\n"
+        )
+        self.assertEqual(self.invoke(standard=Path(OPTIONS.std_dir)).returncode, 1)
+        document = self.evidence()
+        through = self.body(document, "through")
+        self.assertEqual(through["analyses"][5]["correspondence"], "incomplete")
+        totals = document["totals"]["analyses"][5]
+        self.assertEqual(totals["name"], "calls_heap")
+        self.assertEqual(sum(totals["correspondence"].values()), len(document["bodies"]))
+        self.assertGreaterEqual(totals["correspondence"]["incomplete"], 2)
+        self.assertEqual(self.body(document, "apply")["analyses"][5]["correspondence"],
+                         "incomplete")
+        summaries = [row for row in document["meters"] if row["name"] == "calls_summary"]
+        self.assertEqual(len(summaries), len([row for row in document["meters"]
+                                              if row["name"] == "calls_heap"]))
+
+    def test_calls_heap_renders_a_withdrawn_component_once(self):
+        # `f` and `g` call each other with false, so no case covers the call: the component
+        # publishes no proof, and the member that holds the uncovered call renders it. The
+        # prefix of `h` reads a view after its release before the uncovered self call.
+        self.entry.write_text(
+            "fn f(bool b) void { if (b) { return; } g(false); }\n"
+            "fn g(bool b) void { f(b); }\n"
+            "fn h(i32 mut* own p, i32* q, bool b) i32 { i32 x = *q;\n"
+            "    if (b) { del(p); return x; } i32* v = p; del(p); return h(new(i32), v, false); }\n"
+            "fn main() i32 { return 0; }\n"
+        )
+        self.assertEqual(self.invoke(standard=Path(OPTIONS.std_dir)).returncode, 1)
+        document = self.evidence()
+        stderr = self.result.stderr.decode()
+        self.assertEqual(stderr.count("main.ft:1:41: error: cannot prove the call and heap "
+                                      "obligations here"), 1)
+        self.assertEqual(stderr.count("main.ft:4:62: error: cannot prove the call and heap "
+                                      "obligations here"), 1)
+        self.assertEqual(stderr.count("main.ft:2:"), 0)
+        for name in ("f", "g", "h"):
+            row = self.body(document, name)["analyses"][5]
+            self.assertEqual((row["correspondence"], row["proof"]), ("complete", "incomplete"))
+
+    def test_calls_heap_budget_refusals_are_errors(self):
+        # Fifty scalar declarations and one read exhaust the E bound of the summary. A self
+        # call after forty declarations exhausts the E bound first and then the W bound of its
+        # component. No refusal records an event, so each one renders a budget error. A W
+        # charge of the solver names no source, so its error stands at the declaration.
+        declarations = " ".join(f"i32 x{k} = 0;" for k in range(50))
+        steps = " ".join(f"i32 y{k} = y{k - 1} + 1;" for k in range(1, 40))
+        self.entry.write_text(
+            f"fn many(i32* p) i32 {{ {declarations} return *p; }}\n"
+            f"fn walk(i32* p, bool b) i32 {{ i32 y0 = *p; {steps} if (b) {{ return y39; }}"
+            " return walk(p, true); }\n"
+            "fn main() i32 { return 0; }\n"
+        )
+        self.assertEqual(self.invoke(standard=Path(OPTIONS.std_dir)).returncode, 1)
+        document = self.evidence()
+        stderr = self.result.stderr.decode()
+        self.assertRegex(stderr, r"main\.ft:1:[0-9]+: error: ownership proof is incomplete "
+                                 r"\(calls summary: work_limit; category E; used 256; bound "
+                                 r"256\)")
+        self.assertRegex(stderr, r"main\.ft:2:4: error: ownership proof is incomplete \(calls "
+                                 r"summary: work_limit; category W; used ([0-9]+); bound \1\)")
+        walk = self.body(document, "walk")["analyses"][5]
+        self.assertEqual((walk["correspondence"], walk["solver"], walk["proof"]),
+                         ("complete", "incomplete", "incomplete"))
+        refused = [row for row in document["meters"] if row["name"] == "calls_summary"
+                   and row["first_refusal"] is not None]
+        self.assertEqual(sorted(row["first_refusal"]["limit"]["category"] for row in refused),
+                         ["E", "E"])
+        counts = {count["category"]: count for count in refused[1]["counts"]}
+        self.assertEqual(counts["W"]["used"], counts["W"]["bound"])
+
+    WITNESS_CASES = (
+        "i32 mut freed = 0;\n"
+        "fn drop(i32 mut* own p) void { del(p); freed += 1; }\n"
+        "fn moved() void { i32 mut* own a = new(i32); drop(move(a)); }\n"
+        "fn deferred() i32 { i32 mut* own a = new(i32); defer drop(move(a)); return 1; }\n"
+        "fn tested(i32 mut* own p) void { if (p == null) { return; } del(p); }\n"
+        "struct node { node mut* own next; i32 v; }\n"
+        "fn keep_tail(node mut* own n) node mut* own { node mut* own t = move(n->next); del(n);\n"
+        "    return move(t); }\n"
+        "fn tail() i32 { node mut* own a = new(node); a->next = new(node);\n"
+        "    node mut* own t = keep_tail(move(a)); i32 r = t->v; del(t->next); del(t); "
+        "return r; }\n"
+        "fn passthru(i32* p) i32* { return p; }\n"
+        "fn outer() i32* { i32 x = 1; return passthru(&x); }\n"
+        "fn grow(i32 mut@ own mut* s) void { i32 mut@ own n = new(i32, 8); del(*s);\n"
+        "    *s = move(n); }\n"
+        "fn stale() i32 { i32 mut@ own mut buf = new(i32, 4); i32@ v = buf; grow(&buf);\n"
+        "    i32 r = v[0]; del(buf); return r; }\n"
+        "fn main() i32 { return 0; }\n"
+    )
+
+    def test_calls_heap_violations_need_a_witness_path(self):
+        # A violation needs a validated path to its operation (toolchain 4.2). The summary
+        # flow keeps the obligation of an owner that a call with an incomplete summary takes,
+        # and it does not decide a null test of an owner, so no summary event is a violation.
+        # A heap call that releases its argument and returns the tail keeps no obligation of
+        # the released root.
+        self.entry.write_text(self.WITNESS_CASES)
+        self.assertEqual(self.invoke(standard=Path(OPTIONS.std_dir)).returncode, 1)
+        document = self.evidence()
+        stderr = self.result.stderr.decode()
+        for name in ("moved", "deferred", "tested", "tail"):
+            with self.subTest(body=name):
+                row = self.body(document, name)["analyses"][5]
+                self.assertEqual((row["proof"], row["violations"]), ("incomplete", 0))
+        self.assertNotIn("lost ownership", stderr)
+        # The summary of `tested` is complete except for its own event, so the report renders
+        # that event as incomplete proof with its own text.
+        tested = self.body(document, "tested")["analyses"][5]
+        self.assertEqual(tested["correspondence"], "complete")
+        self.assertIn("main.ft:5:51: error: cannot prove the call and heap obligations here\n",
+                      stderr)
+        self.assertIn("main.ft:5:51: note: parameter storage ends with a live owner", stderr)
+        # A validated event without a source name names the result (toolchain 4.2).
+        outer = self.body(document, "outer")["analyses"][5]
+        self.assertEqual((outer["proof"], outer["violations"]), ("violated", 1))
+        self.assertIn("main.ft:12:30: error: invalid use of storage\n", stderr)
+        self.assertIn("main.ft:12:30: note: the result\n", stderr)
+        # The two solvers validate one source read: one diagnostic and one violation.
+        stale = self.body(document, "stale")["analyses"][5]
+        self.assertEqual((stale["proof"], stale["violations"]), ("violated", 1))
+        self.assertEqual(stderr.count("main.ft:16:14: error: invalid use of storage"), 1)
+        self.assertEqual(document["totals"]["violations"], 2)
+
+    def test_calls_heap_deferred_records_name_their_exit(self):
+        # A deferred call runs at each exit, so one source read gives one record at each exit
+        # operation. Each record notes the deferred statement and its own exit (toolchain 4.2).
+        self.entry.write_text(
+            "fn releaser(i32 mut* own p) void { del(p); }\n"
+            "fn touch(i32* q) i32 { return *q; }\n"
+            "fn dd(i32 mut* own p, i32 mut* own q) i32 { i32* v = p; defer touch(v);\n"
+            "    releaser(move(p)); if (q == null) { return 1; } del(q); return 2; }\n"
+            "fn main() i32 { return 0; }\n"
+        )
+        self.assertEqual(self.invoke(standard=Path(OPTIONS.std_dir)).returncode, 1)
+        document = self.evidence()
+        stderr = self.result.stderr.decode()
+        row = self.body(document, "dd")["analyses"][5]
+        self.assertEqual((row["proof"], row["violations"]), ("violated", 2))
+        self.assertEqual(stderr.count("main.ft:3:68: error: invalid use of storage\n"), 2)
+        self.assertEqual(stderr.count("main.ft:3:68: note: the deferred statement\n"), 2)
+        self.assertIn("main.ft:4:41: note: the exit that runs the deferred statement\n", stderr)
+        self.assertIn("main.ft:4:61: note: the exit that runs the deferred statement\n", stderr)
+
+    def test_calls_heap_names_each_crossed_call(self):
+        # The witness crosses a call of a fort callee and assumes that the callee returns:
+        # nothing proves it, so a callee that panics keeps the witness too (D17.18). The error
+        # names each crossed call in a note at the call, in source order. An extern call keeps
+        # the witness without a note (D17.13). A kept check on a value that the analysis does
+        # not know is assumed to pass, and its note names its kind.
+        self.entry.write_text(
+            "extern fn ext() void;\n"
+            "fn stop(i32 x) void { if (x > 0) { panic(\"stop\"); } }\n"
+            "fn noop() void { }\n"
+            "fn leaky(i32 mut* own p) void { noop(); stop(1); }\n"
+            "fn trusted(i32 mut* own p) void { ext(); }\n"
+            "fn checked(u64 i, i32 mut* own p) void { u64[2] arr = {1, 2}; u64 x = arr[i]; }\n"
+            "fn main() i32 { return 0; }\n"
+        )
+        self.assertEqual(self.invoke(standard=Path(OPTIONS.std_dir)).returncode, 1)
+        document = self.evidence()
+        stderr = self.result.stderr.decode()
+        for name in ("leaky", "trusted"):
+            with self.subTest(body=name):
+                row = self.body(document, name)["analyses"][5]
+                self.assertEqual((row["proof"], row["violations"]), ("violated", 1))
+        lines = [line[line.index("main.ft:"):] for line in stderr.splitlines()
+                 if "main.ft:" in line]
+        first = lines.index("main.ft:4:50: error: lost ownership of an allocation on this path")
+        self.assertEqual(lines[first + 1:first + 4], [
+            "main.ft:4:50: note: p",
+            "main.ft:4:37: note: this path needs 'noop' to return here; if it does not return,"
+            " 'p' does not leak",
+            "main.ft:4:45: note: this path needs 'stop' to return here; if it does not return,"
+            " 'p' does not leak",
+        ])
+        self.assertIn("main.ft:5:42: error: lost ownership of an allocation on this path\n",
+                      stderr)
+        self.assertNotIn("this path needs 'ext'", stderr)
+        first = lines.index("main.ft:6:79: error: lost ownership of an allocation on this path")
+        self.assertEqual(lines[first + 1:first + 3], [
+            "main.ft:6:79: note: p",
+            "main.ft:6:74: note: this path needs the bounds check to pass here; if it fails, the"
+            " program stops",
+        ])
+
+    def test_check_failure_renders_no_empty_incomplete_reason(self):
+        # A program that fails checking has its own errors. When no analysis gives a reason of
+        # incomplete proof, the report adds no incomplete-proof error; before, it wrote
+        # "ownership proof is incomplete (: )" at 1:1.
+        self.entry.write_text(
+            "extern fn ext() void;\n"
+            "fn f(i32 mut* own p) void { (fn () void) g = ext; del(p); }\n"
+            "fn main() i32 { return 0; }\n"
+        )
+        self.assertEqual(self.invoke(standard=Path(OPTIONS.std_dir)).returncode, 1)
+        stderr = self.result.stderr.decode()
+        self.assertIn("main.ft:2:46: error: 'ext' is an extern function, which is not a value",
+                      stderr)
+        self.assertNotIn("ownership proof is incomplete", stderr)
+        self.assertNotIn(": )", stderr)
+
+    def qualification_cases(self):
+        """The 109 qualification cases: (path, expected verdict, error lines). An approved
+        fixture names its error positions; a linear or zero-element case marks them with
+        `//! error:`."""
+        qualification = CHECKOUT / "test" / "ownership" / "qualification" / "manifest.json"
+        approved = CHECKOUT / "test" / "ownership" / "approved"
+        fixtures = {}
+        for name in ("manifest-01-10.json", "manifest-11-20.json"):
+            for fixture in json.loads((approved / name).read_text())["fixtures"]:
+                fixtures[fixture["file"][:-3]] = fixture
+        out = []
+        for case in json.loads(qualification.read_text())["cases"]:
+            path = CHECKOUT / case["path"]
+            lines = path.read_text().splitlines()
+            fixture = fixtures.get(case["id"])
+            verdict = None if fixture is None else fixture["expected_verdict"]
+            if fixture is not None:
+                errors = [p["line"] for p in fixture["expected_positions"] if p["kind"] == "error"]
+            else:
+                errors = [n + 1 for n, line in enumerate(lines) if "//! error:" in line]
+            if verdict is None and case["group"] == "counterpart":
+                verdict = "accept"
+            if verdict is None and lines[0].strip() == "//! run":
+                verdict = "accept"
+            if verdict is None and lines[0].strip() == "//! fail":
+                verdict = "reject"
+            out.append((path, verdict, errors))
+        return out
+
+    def qualification_report(self, path):
+        directory = self.root / path.stem
+        directory.mkdir()
+        entry = directory / path.name
+        entry.write_bytes(path.read_bytes())
+        report = directory / "report.json"
+        result = subprocess.run(
+            [OPTIONS.fort, "--std-dir", OPTIONS.std_dir, "--check", "--ownership-check",
+             "--ownership-report", str(report), str(entry)],
+            cwd=directory, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            timeout=120)
+        self.assertIn(result.returncode, (0, 1), path.name)
+        return audit.read_json(report)[0]
+
+    def test_qualification_accept_cases_have_no_violation(self):
+        # Each case that the qualification expects to accept gives no violation in any
+        # analysis. A case can still give incomplete proof (toolchain 4.2).
+        cases = self.qualification_cases()
+        accept = [path for path, verdict, _ in cases if verdict == "accept"]
+        self.assertEqual((len(cases), len(accept)), (109, 72))
+
+        def violations(path):
+            return path.stem, self.qualification_report(path)["totals"]["violations"]
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            found = dict(pool.map(violations, accept))
+        self.assertEqual({name: count for name, count in found.items() if count != 0}, {})
+
+    def test_qualification_reject_cases_never_prove_the_faulty_body(self):
+        # Each case that the qualification expects to reject holds a fault in the body of each
+        # error line. Each case exits 1 for an unrelated gap of the closure, so the exit status
+        # shows nothing: the calls_heap row of each faulty body must not be a complete proof
+        # (D17.14, D17.18). It can be a violation or incomplete proof.
+        cases = self.qualification_cases()
+        reject = [(path, errors) for path, verdict, errors in cases if verdict == "reject"]
+        self.assertEqual(len(reject), 37)
+        self.assertTrue(all(errors for _, errors in reject))
+
+        def rows(item):
+            path, errors = item
+            report = self.qualification_report(path)
+            bodies = sorted((body["source"]["line"], body["source"]["name"],
+                             body["analyses"][5]["proof"])
+                            for body in report["bodies"]
+                            if body["source"]["module"] == path.stem)
+            faulty = []
+            for line in errors:
+                owners = [body for body in bodies if body[0] <= line]
+                self.assertTrue(owners, f"{path.name}:{line}")
+                faulty.append(owners[-1])
+            return path.stem, faulty
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            found = dict(pool.map(rows, reject))
+        proved = {name: [body for body in faulty if body[2] == "complete"]
+                  for name, faulty in found.items()}
+        self.assertEqual({name: bodies for name, bodies in proved.items() if bodies}, {})
+        verdicts = sorted(body[2] for faulty in found.values() for body in faulty)
+        self.assertEqual(set(verdicts), {"incomplete", "violated"})
+
+    def test_heap_solver_alone_proves_no_faulty_reject_body(self):
+        # The calls_heap row joins the summary solver and the heap solver, so the row of a
+        # faulty body can be incomplete because of the summary solver alone. This test runs the
+        # heap solver alone (`test/ownership/heap_alone.ft`) over each reject case: it proves no
+        # body that holds a fault (D17.18: no assumed fact removes a path). Before, it proved the
+        # faulty `main` of linear cases 062 and 063, which pass an empty owner to a callee that
+        # reads through it (D10.7).
+        harness = self.root / "heap_alone"
+        built = subprocess.run(
+            [OPTIONS.fort, "--cc", OPTIONS.cc, "--std-dir", OPTIONS.std_dir,
+             "-I", str(CHECKOUT / "src" / "fort"),
+             "-I", str(CHECKOUT / "test" / "fort" / "support"),
+             "-o", str(harness), str(CHECKOUT / "test" / "ownership" / "heap_alone.ft")],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=600)
+        self.assertEqual(built.returncode, 0, built.stderr.decode())
+        cases = self.qualification_cases()
+        reject = [(path, errors) for path, verdict, errors in cases if verdict == "reject"]
+        self.assertEqual(len(reject), 37)
+
+        def verdicts(item):
+            path, errors = item
+            lines = path.read_text().splitlines()
+            declared = [(n + 1, match.group(1)) for n, line in enumerate(lines)
+                        for match in [re.match(r"fn (\w+)", line)] if match]
+            faulty = sorted({[d for d in declared if d[0] <= line][-1][1] for line in errors})
+            # The test environment writes its sandboxes into the working directory and reads
+            # `std` there, so each case runs in a directory of its own.
+            where = self.root / ("alone-" + path.stem)
+            where.mkdir()
+            (where / "std").symlink_to(CHECKOUT / "std")
+            run = subprocess.run([str(harness), str(path)], cwd=where, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, check=False, timeout=120)
+            self.assertEqual(run.returncode, 0, f"{path.name}: {run.stderr.decode()}")
+            found = dict(line.split()[:2] for line in run.stdout.decode().splitlines())
+            return path.stem, {name: found.get(name, "missing") for name in faulty}
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            found = dict(pool.map(verdicts, reject))
+        self.assertEqual(sum(len(faulty) for faulty in found.values()), 37)
+        proved = {name: faulty for name, faulty in found.items() if "proved" in faulty.values()}
+        self.assertEqual(proved, {})
+        self.assertEqual({verdict for faulty in found.values() for verdict in faulty.values()},
+                         {"failed", "unproved"})
 
     RAW_CASES = (
         "fn reconstruct() i32 {\n"
@@ -923,6 +1353,12 @@ class OwnershipDriverTest(unittest.TestCase):
         "ex09_retained_field.ft": ("demo", None),
         "ex18_retained_key.ft": ("demo", None),
     }
+    # The stored analysis cannot follow a view that a call stores. The calls_heap analysis
+    # applies the heap summary of the call and validates the use after the release.
+    APPROVED_CALLS = {
+        "ex09_retained_field.ft": "12:12: error: invalid use of storage",
+        "ex18_retained_key.ft": "12:12: error: invalid use of storage",
+    }
 
     def test_stored_diagnostics_of_the_approved_examples(self):
         approved = CHECKOUT / "test" / "ownership" / "approved"
@@ -934,10 +1370,13 @@ class OwnershipDriverTest(unittest.TestCase):
                 stderr = self.result.stderr.decode()
                 row = self.stored_row(document, body)
                 if expected is None:
-                    self.assertNotIn("invalid use", stderr)
                     self.assertEqual((row["correspondence"], row["proof"]),
                                      ("incomplete", "incomplete"))
-                    self.assertEqual(document["totals"]["violations"], 0)
+                    calls = self.body(document, body)["analyses"][5]
+                    self.assertEqual((calls["proof"], calls["violations"]), ("violated", 1))
+                    self.assertIn("main.ft:" + self.APPROVED_CALLS[name], stderr)
+                    self.assertEqual(stderr.count(": error: invalid use"), 1)
+                    self.assertEqual(document["totals"]["violations"], 1)
                     continue
                 self.assertIn("main.ft:" + expected, stderr)
                 self.assertEqual(stderr.count(": error: invalid use") +

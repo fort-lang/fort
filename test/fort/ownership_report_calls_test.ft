@@ -1,0 +1,388 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| records ok
+//| places ok
+//| terminal ok
+//| document ok
+//| budget ok
+//| report bound ok
+//| missing fact ok
+//| missing graph ok
+/// Holds the calls_heap part of the coverage report and of its diagnostics: the records of
+/// validated events, the terminal of a withdrawn component, the component ledgers, the budget
+/// errors, the V bound of rendered records, and a closure without a graph (toolchain 1.1, 4.2).
+import diag;
+import ownership_api;
+import ownership_keys;
+import ownership_report;
+import ownership_source;
+import ownership_source_calls;
+import ownership_source_env;
+import std.str;
+import std.strbuf;
+
+string[7] CALLS = {
+    "fn reader(i32* p) i32 { return *p; }",
+    "fn released(i32 mut* own p) i32 { i32* v = p; del(p); return reader(v); }",
+    "fn releaser(i32 mut* own p) void { del(p); }",
+    "fn cross(i32 mut* own p) i32 { i32* v = p; releaser(move(p)); return *v; }",
+    "fn noop() void { }",
+    "fn known(i32 mut* own p) void { noop(); }",
+    "fn mf(bool b) void { if (b) { return; } mg(false); }",
+};
+
+fn open(ownership_source_env.env mut* e, string@ lines) void {
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut i = 0;
+    while (i < lines.len) {
+        strbuf.append(&text, lines[i]);
+        strbuf.push(&text, '\n');
+        i += 1;
+    }
+    ownership_source_env.open(e);
+    ownership_source_env.runtime(e);
+    ownership_source_env.prepare(e, strbuf.view(&text));
+    ownership_source.analyze(&e->source);
+}
+
+fn contains(strbuf.str_buf* text, string expected) void {
+    if (str.find(strbuf.view(text), expected) < 0) {
+        eprintln("missing: ", expected);
+        assert(false);
+    }
+}
+
+fn occurrences(string text, string wanted) u64 {
+    u64 mut total = 0;
+    u64 mut at = 0;
+    while (at + wanted.len <= text.len) {
+        if (text[at..at + wanted.len] == wanted) { total += 1; }
+        at += 1;
+    }
+    return total;
+}
+
+// The index of the first error record whose message starts with `prefix`, or the count.
+fn error_at(diag.sink* found, string prefix) u64 {
+    u64 mut i = 0;
+    while (i < diag.record_count(found)) {
+        diag.record r = diag.record_at(found, i);
+        if (r.severity == diag.severity.error && str.find(r.msg, prefix) == 0) { return i; }
+        i += 1;
+    }
+    return diag.record_count(found);
+}
+
+// Each validated calls_heap event renders as one error and a note with its text, in the
+// canonical order of its body. The local run validates none of these.
+fn records() void {
+    string[8] lines = {CALLS[0], CALLS[1], CALLS[2], CALLS[3], CALLS[4], CALLS[5],
+        "fn mg(bool b) void { if (b) { return; } }", "fn root() void { }"};
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    open(&e, lines[..]);
+    defer ownership_source_env.close(&e);
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.diagnose(&e.source, &found, "main.ft");
+    u64 released = error_at(&found, "invalid use of storage");
+    assert(released < diag.record_count(&found));
+    assert(diag.record_at(&found, released).loc.line == 2);
+    assert(diag.record_at(&found, released + 1).severity == diag.severity.note);
+    assert(diag.record_at(&found, released + 1).msg == "storage that this call reads");
+    diag.record cross = diag.record_at(&found, released + 2);
+    assert(cross.severity == diag.severity.error && cross.loc.line == 4);
+    assert(cross.msg == "invalid use of storage");
+    // The summary event of the read follows a fort call, so no witness path validates it;
+    // the heap event names the view.
+    assert(diag.record_at(&found, released + 3).msg == "v");
+    // The heap witness crosses `releaser` and assumes that it returns, so a note at the call
+    // names that assumption (D17.18, toolchain 4.2). The read at `reader(v)` is a check of the
+    // call itself, before the witness crosses it, so it has no such note.
+    diag.record assumed = diag.record_at(&found, released + 4);
+    string head = "this path needs 'releaser' to return here; ";
+    string tail = "if it does not return, this use of 'v' does not happen";
+    assert(assumed.severity == diag.severity.note && assumed.msg.len == head.len + tail.len &&
+        assumed.msg[0..head.len] == head && assumed.msg[head.len..assumed.msg.len] == tail);
+    // The note stands at the source position of the call, its open parenthesis.
+    assert(assumed.loc.line == 4 && assumed.loc.col == 52);
+    // `*v` is a null check of a view of `p`, whose nullness the state does not know: the
+    // witness assumes that `v` is not null, and a note at the dereference names it.
+    diag.record deref = diag.record_at(&found, released + 5);
+    string null_v = "this path needs 'v' to be non-null here; a null 'v' faults at this read first";
+    assert(deref.severity == diag.severity.note && deref.msg == null_v);
+    assert(deref.loc.line == 4 && deref.loc.col > assumed.loc.col);
+    diag.record known = diag.record_at(&found, released + 6);
+    assert(known.loc.line == 6 && known.msg == "lost ownership of an allocation on this path");
+    assert(diag.record_at(&found, released + 7).msg == "p");
+    diag.record noop = diag.record_at(&found, released + 8);
+    string returns = "this path needs 'noop' to return here; ";
+    string leaks = "if it does not return, 'p' does not leak";
+    assert(noop.severity == diag.severity.note && noop.msg.len == returns.len + leaks.len &&
+        noop.msg[0..returns.len] == returns && noop.msg[returns.len..noop.msg.len] == leaks);
+    assert(noop.loc.line == 6 && noop.loc.col == 37);
+    // Three bodies with one violation each.
+    ownership_source.body* b = ownership_source_env.find(&e, "main", "released");
+    assert(ownership_report.analysis_status(b, ownership_report.CALLS_HEAP, 2) == "violated");
+    assert(ownership_report.analysis_violations(b, ownership_report.CALLS_HEAP) == 1);
+    assert(ownership_report.body_violations(b) == 1);
+    assert(ownership_report.body_ownership(b) == "violated");
+    println("records ok");
+}
+
+// A validated heap event names its place in its note: an address of a local that the result
+// keeps names the result. An event without a text names its operation. A summary event that
+// its flow marks unconditional is not validated, so it renders as incomplete proof with its
+// own text (toolchain 4.2).
+fn places() void {
+    string[4] lines = {"fn passthru(i32* p) i32* { return p; }",
+        "fn outer() i32* { i32 x = 1; return passthru(&x); }",
+        "fn two(i32 mut* own p, i32 mut* own q, bool b) void { if (b) { return; } del(p); }",
+        "fn root() void { }"};
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    open(&e, lines[..]);
+    defer ownership_source_env.close(&e);
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.diagnose(&e.source, &found, "main.ft");
+    u64 at = error_at(&found, "invalid use of storage");
+    assert(at < diag.record_count(&found) && diag.record_at(&found, at).loc.line == 2);
+    assert(diag.record_at(&found, at + 1).msg == "the result");
+    u64 two = error_at(&found, "cannot prove the call and heap obligations here");
+    assert(two < diag.record_count(&found) && diag.record_at(&found, two).loc.line == 3);
+    assert(diag.record_at(&found, two + 1).msg == "parameter storage ends with a live owner");
+    assert(error_at(&found, "lost ownership") == diag.record_count(&found));
+    ownership_source.body* outer = ownership_source_env.find(&e, "main", "outer");
+    assert(outer->calls->shown_len == 1 && outer->calls->records_len == 1);
+    u64 mut i = 0;
+    while (cast(&e.source.bodies[i], ownership_source.body*) != outer) { i += 1; }
+    e.source.calls.rows[i].records[0].event.value.text = "";
+    diag.sink mut again = diag.sink{};
+    defer diag.free(&again);
+    ownership_report.diagnose(&e.source, &again, "main.ft");
+    u64 bare = error_at(&again, "invalid use of storage");
+    assert(diag.record_at(&again, bare + 1).msg == "the storage that this operation uses");
+    println("places ok");
+}
+
+// A withdrawn recursive component renders one "cannot prove" record at its uncovered call,
+// with its reason in the note. The member that does not hold the call renders nothing.
+fn terminal() void {
+    string[3] lines = {CALLS[6], "fn mg(bool b) void { mf(b); }", "fn root() void { }"};
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    open(&e, lines[..]);
+    defer ownership_source_env.close(&e);
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.diagnose(&e.source, &found, "main.ft");
+    u64 at = error_at(&found, "cannot prove the call and heap obligations here");
+    assert(at < diag.record_count(&found));
+    assert(diag.record_at(&found, at).loc.line == 1 && diag.record_at(&found, at).loc.col == 43);
+    assert(diag.record_at(&found, at + 1).msg == "calls_heap: unknown_effect");
+    u64 mut shown = 0;
+    u64 mut i = 0;
+    while (i < diag.record_count(&found)) {
+        if (diag.record_at(&found, i).msg == "cannot prove the call and heap obligations here") {
+            shown += 1;
+        }
+        i += 1;
+    }
+    assert(shown == 1);
+    ownership_source.body* mg = ownership_source_env.find(&e, "main", "mg");
+    assert(ownership_report.analysis_status(mg, ownership_report.CALLS_HEAP, 0) == "complete");
+    assert(ownership_report.analysis_status(mg, ownership_report.CALLS_HEAP, 2) == "incomplete");
+    // With no earlier reason, the body reason of `mg` is its calls_heap terminal.
+    ownership_source.body mut* row = ownership_source_env.find(&e, "main", "mg");
+    row->first_incomplete = ownership_api.proof_status{};
+    ownership_report.reason why = ownership_report.body_reason(row);
+    assert(why.present && why.stage == "calls_heap" && why.code == "unknown_effect");
+    assert(why.source.line == 1);
+    println("terminal ok");
+}
+
+// The report lists one calls_summary and one calls_heap ledger for each component, owned by
+// its first member, and the calls_heap row is integrated.
+fn document() void {
+    string[8] lines = {CALLS[0], CALLS[1], CALLS[2], CALLS[3], CALLS[4], CALLS[5], CALLS[6],
+        "fn mg(bool b) void { mf(b); }"};
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    open(&e, lines[..]);
+    defer ownership_source_env.close(&e);
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    ownership_report.invocation call = ownership_report.invocation{};
+    ownership_report.build(&out, &e.source, &call, 1);
+    contains(&out, "{\"kind\":\"fort-ownership-report\",\"version\":7,");
+    contains(&out,
+        "{\"name\":\"calls_heap\",\"producer\":\"integrated\",\"status\":\"incomplete\"}");
+    u64 components = cast(e.source.graph.component_count, u64);
+    assert(occurrences(strbuf.view(&out), "\"name\":\"calls_summary\",\"owner\":") == components);
+    assert(occurrences(strbuf.view(&out), "\"name\":\"calls_heap\",\"owner\":") == components);
+    assert(components == e.source.calls.ledgers_len / 2);
+    // `mf` and `mg` share one component, so the bodies outnumber the components by one.
+    assert(components + 1 == e.source.bodies.len);
+    strbuf.str_buf mut row = strbuf.create();
+    defer strbuf.free(&row);
+    strbuf.append(&row, "{\"name\":\"calls_heap\",\"correspondence\":\"complete\",");
+    strbuf.append(&row, "\"solver\":\"complete\",\"proof\":\"violated\",\"violations\":1}");
+    assert(occurrences(strbuf.view(&out), strbuf.view(&row)) == 3);
+    println("document ok");
+}
+
+// A refused W charge stops a component computation: the report renders its budget error at
+// the declaration, because the solver charge names no source. A refused E charge renders at
+// its own operation.
+fn budget() void {
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    strbuf.append(&text, "fn walk(i32* p, bool b) i32 { i32 x0 = *p;");
+    u64 mut k = 1;
+    while (k < 40) {
+        strbuf.append(&text, " i32 x");
+        strbuf.append_u64(&text, k);
+        strbuf.append(&text, " = x");
+        strbuf.append_u64(&text, k - 1);
+        strbuf.append(&text, " + 1;");
+        k += 1;
+    }
+    strbuf.append(&text, " if (b) { return x39; } return walk(p, true); }");
+    string[1] lines = {strbuf.view(&text)};
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    open(&e, lines[..]);
+    defer ownership_source_env.close(&e);
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.diagnose(&e.source, &found, "main.ft");
+    u64 e_at = error_at(&found,
+        "ownership proof is incomplete (calls summary: work_limit; category E;");
+    u64 w_at = error_at(&found,
+        "ownership proof is incomplete (calls summary: work_limit; category W;");
+    assert(e_at < diag.record_count(&found) && w_at < diag.record_count(&found));
+    assert(diag.record_at(&found, w_at).loc.line == 1 && diag.record_at(&found, w_at).loc.col == 4);
+    assert(e_at < w_at);
+    println("budget ok");
+}
+
+// A refused V charge for a rendered record keeps one terminal error and stops later records.
+fn report_bound() void {
+    string[7] lines = {CALLS[0], CALLS[1], CALLS[2], CALLS[3], CALLS[4], CALLS[5],
+        "fn root() void { }"};
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    open(&e, lines[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* released = ownership_source_env.find(&e, "main", "released");
+    ownership_source_calls.ledger mut* l =
+        &e.source.calls.ledgers[released->calls->summary_ledger];
+    l->meter.bounds.v = l->meter.used.v + 1;
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.diagnose(&e.source, &found, "main.ft");
+    u64 at = error_at(&found, "cannot prove complete ownership reporting within the report bound");
+    assert(at < diag.record_count(&found));
+    assert(diag.record_at(&found, at).loc.line == 2);
+    assert(error_at(&found, "invalid use of storage") == diag.record_count(&found));
+    assert(l->first_refusal.terminal.limit.category == ownership_api.limit_category.v);
+    lost_event();
+    println("report bound ok");
+}
+
+// A ledger that refused V for a kept event lost that event. After a precision refusal of the
+// same ledger, its V refusal still renders as a budget error.
+fn lost_event() void {
+    string[2] lines = {CALLS[0], "fn root() void { }"};
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    open(&e, lines[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* reader = ownership_source_env.find(&e, "main", "reader");
+    ownership_source_calls.ledger mut* l = &e.source.calls.ledgers[reader->calls->heap_ledger];
+    ownership_api.proof_status mut precision = ownership_api.incomplete(
+        ownership_api.incomplete_reason.work_limit, ownership_api.operation_position{
+            .function = reader->key}, reader->source);
+    precision.terminal.limit.present = true;
+    precision.terminal.limit.category = ownership_api.limit_category.r;
+    precision.terminal.limit.used = 256;
+    precision.terminal.limit.bound = 256;
+    ownership_api.proof_status mut report = precision;
+    report.terminal.reason = ownership_api.incomplete_reason.report_limit;
+    report.terminal.limit.category = ownership_api.limit_category.v;
+    report.terminal.limit.used = 512;
+    report.terminal.limit.bound = 512;
+    l->first_refusal = precision;
+    l->report_refusal = report;
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.diagnose(&e.source, &found, "main.ft");
+    assert(error_at(&found, "ownership proof is incomplete (calls heap: report_limit; category V;")
+        < diag.record_count(&found));
+    assert(error_at(&found, "ownership proof is incomplete (calls heap: work_limit; category R;")
+        == diag.record_count(&found));
+}
+
+// A body outside the declared scope gives its missing fact as its calls_heap reason: the call
+// of a callee without a complete summary, at that call.
+fn missing_fact() void {
+    string[3] lines = {"fn apply(fn (i32*) i32 g, i32* p) i32 { return g(p); }", CALLS[0],
+        "fn through(i32 mut* own q) void { apply(reader, q); del(q); }"};
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    open(&e, lines[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source.body mut* through = ownership_source_env.find(&e, "main", "through");
+    assert(ownership_report.analysis_status(through, ownership_report.CALLS_HEAP, 0) ==
+        "incomplete");
+    // The local row comes first in the body reason, so the calls_heap reason stands alone.
+    ownership_report.reason why = ownership_report.proof_reason("calls_heap",
+        ownership_report.calls_proof(through));
+    assert(why.present && why.code == "unknown_effect");
+    assert(why.source.line == 3 && why.source.col == 40);
+    assert(ownership_keys.source(why.source, through->calls->gap.terminal.source) == 0);
+    assert(ownership_keys.source(why.source, through->calls->proof.terminal.source) != 0);
+    println("missing fact ok");
+}
+
+// A closure whose graph is not built runs no solver: each verified body has an unexecuted
+// calls_heap row and no component ledger.
+fn missing_graph() void {
+    string[2] lines = {"fn good() i32 { return 1; }", "fn unsupported() void { println(1); }"};
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    ownership_source_env.open(&e);
+    defer ownership_source_env.close(&e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    strbuf.append(&text, lines[0]);
+    strbuf.push(&text, '\n');
+    strbuf.append(&text, lines[1]);
+    strbuf.push(&text, '\n');
+    assert(ownership_source_env.prepare(&e, strbuf.view(&text)));
+    ownership_source.analyze(&e.source);
+    assert(!e.source.graph_built);
+    assert(!ownership_source_calls.executed(&e.source.calls));
+    ownership_source.body mut* good = ownership_source_env.find(&e, "main", "good");
+    assert(good->calls == null);
+    assert(ownership_report.analysis_status(good, ownership_report.CALLS_HEAP, 0) ==
+        "unexecuted");
+    assert(ownership_report.analysis_status(good, ownership_report.CALLS_HEAP, 2) ==
+        "incomplete");
+    good->first_incomplete = ownership_api.proof_status{};
+    ownership_report.reason why = ownership_report.body_reason(good);
+    assert(why.present && why.stage == "calls_heap" && why.code == "missing_graph");
+    // No body ran the solvers, so the closure outcome is unexecuted, as for the local row.
+    assert(ownership_report.closure_status(&e.source, ownership_report.CALLS_HEAP) ==
+        "unexecuted");
+    assert(ownership_report.closure_status(&e.source, ownership_report.LOCAL) ==
+        "incomplete");
+    assert(e.source.calls.ledgers_len == 0);
+    println("missing graph ok");
+}
+
+fn main() i32 {
+    records();
+    places();
+    terminal();
+    document();
+    budget();
+    report_bound();
+    missing_fact();
+    missing_graph();
+    return 0;
+}

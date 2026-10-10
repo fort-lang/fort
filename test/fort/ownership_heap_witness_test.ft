@@ -1,0 +1,1350 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| requirements of some callee paths
+//| field requirements of some callee paths
+//| roots that some callee paths release
+//| members that an address keeps
+//| exit nullness against the arguments
+//| no assumed fact removes a path
+//| correlated inputs
+//| calls that the witness crosses
+//| dereferences after a call
+//| checks after a call
+//| values that a call can write
+//| callee shapes of review round 5
+//| storage that a call can write untracked
+//| stores through references that the state does not follow
+//| null checks at a dereference
+//| stores and reads through a cast pointer
+//| the limit of assumptions
+//| heap witness ok
+/// Checks that a heap violation after a call rests on a fact of each returning path of the
+/// callee, checked against the actual arguments (`spec/toolchain.md` 4.2, D17.18). A fact of some
+/// callee paths gives incomplete proof. The witness assumes that each crossed call returns, and
+/// the event names each of those calls.
+import ownership_api;
+import ownership_heap;
+import ownership_heap_env;
+
+string DROP = "fn drop_list(node mut* own n) void { if (n == null) { return; }";
+string DROP_REST = "    drop_list(move(n->next)); del(n); }";
+
+// A callee that stores over a caller owner on some paths only exports a requirement that no
+// caller can validate: its failure is incomplete proof. A store on each returning path settles
+// the requirement, and a caller that breaks it fails. A caller that passes its own entry owner
+// on passes the requirement up with the same settled state.
+fn requirements() void {
+    println("requirements of some callee paths");
+    string[17] text = {
+        "fn put(i32 mut* own mut* slot, i32 mut* own p, bool f) void {",
+        "    if (f) { *slot = move(p); } else { del(p); } }",
+        "fn set(i32 mut* own mut* slot, i32 mut* own p) void { *slot = move(p); }",
+        "fn putq(i32 mut* own mut* slot, i32 mut* own p, i32* q) void {",
+        "    if (q == null) { *slot = move(p); } else { del(p); } }",
+        "fn req_ok() i32 { i32 mut* own mut s = new(i32); *s = 3; put(&s, new(i32), false);",
+        "    i32 r = *s; del(s); return r; }",
+        "fn req_bad() void { i32 mut* own mut s = new(i32); set(&s, new(i32)); del(s); }",
+        "fn reqq_ok() i32 { i32 x = 1; i32 mut* own mut s = new(i32); *s = 3;",
+        "    putq(&s, new(i32), &x); i32 r = *s; del(s); return r; }",
+        "fn req_empty() void { i32 mut* own mut s = null; set(&s, new(i32)); del(s); }",
+        "fn pass_set(i32 mut* own mut* slot) void { set(slot, new(i32)); }",
+        "fn pass_put(i32 mut* own mut* slot, bool f) void { put(slot, new(i32), f); }",
+        "fn up_bad() void { i32 mut* own mut s = new(i32); pass_set(&s); del(s); }",
+        "fn up_ok() i32 { i32 mut* own mut s = new(i32); *s = 1; pass_put(&s, false); i32 r = *s;",
+        "    del(s); return r; }",
+        "fn up_empty() void { i32 mut* own mut s = null; pass_set(&s); del(s); }",
+    };
+    string[12] names = {"put", "set", "putq", "req_ok", "req_bad", "reqq_ok", "req_empty",
+        "pass_set", "pass_put", "up_bad", "up_ok", "up_empty"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    // Interface atom 0 is `p`, and interface atom 1 is the owner that `slot` designates.
+    assert(ownership_heap_env.proved(&c, "put"));
+    assert(ownership_heap_env.summary(&c, "put")->interface[1].require_null);
+    assert(ownership_heap_env.summary(&c, "put")->post.required_null == 0);
+    assert(ownership_heap_env.proved(&c, "set"));
+    assert(ownership_heap_env.summary(&c, "set")->interface[1].require_null);
+    assert(ownership_heap_env.summary(&c, "set")->post.required_null == 2);
+    // A null test of the caller argument witnesses its store path, but not for this caller.
+    assert(ownership_heap_env.proved(&c, "putq"));
+    assert(ownership_heap_env.summary(&c, "putq")->interface[1].require_null);
+    assert(ownership_heap_env.summary(&c, "putq")->post.required_null == 0);
+    assert(ownership_heap_env.unproved(&c, "req_ok", ownership_api.incomplete_reason.missing_path));
+    assert(ownership_heap_env.saw(&c, "req_ok", ownership_api.event_kind.caller_requirement,
+        ownership_api.evidence_kind.unconditional) == 0);
+    assert(ownership_heap_env.first(&c, "req_ok").kind ==
+        ownership_api.event_kind.incomplete_proof);
+    assert(ownership_heap_env.first_text(&c, "req_ok") == "an empty owner that this call requires");
+    assert(ownership_heap_env.unproved(&c, "reqq_ok",
+        ownership_api.incomplete_reason.missing_path));
+    assert(ownership_heap_env.failed(&c, "req_bad"));
+    assert(ownership_heap_env.saw(&c, "req_bad", ownership_api.event_kind.caller_requirement,
+        ownership_api.evidence_kind.unconditional) == 1);
+    // The failure assumes that the callee returns, so the event names its own call.
+    ownership_heap_env.event_row bad = ownership_heap_env.first(&c, "req_bad");
+    assert(bad.line == 8 && ownership_heap_env.assumes(&bad, 1, 8,
+        "this path needs 'set' to return here"));
+    assert(ownership_heap_env.proved(&c, "req_empty"));
+    // A settled requirement passes up settled; one of some paths passes up unsettled.
+    assert(ownership_heap_env.proved(&c, "pass_set"));
+    assert(ownership_heap_env.summary(&c, "pass_set")->interface[0].require_null);
+    assert(ownership_heap_env.summary(&c, "pass_set")->post.required_null == 1);
+    assert(ownership_heap_env.proved(&c, "pass_put"));
+    assert(ownership_heap_env.summary(&c, "pass_put")->interface[0].require_null);
+    assert(ownership_heap_env.summary(&c, "pass_put")->post.required_null == 0);
+    assert(ownership_heap_env.failed(&c, "up_bad"));
+    ownership_heap_env.event_row up = ownership_heap_env.first(&c, "up_bad");
+    assert(up.kind == ownership_api.event_kind.caller_requirement);
+    assert(ownership_heap_env.assumes(&up, 1, 14, "this path needs 'pass_set' to return here"));
+    assert(ownership_heap_env.unproved(&c, "up_ok", ownership_api.incomplete_reason.missing_path));
+    assert(ownership_heap_env.saw(&c, "up_ok", ownership_api.event_kind.caller_requirement,
+        ownership_api.evidence_kind.unconditional) == 0);
+    assert(ownership_heap_env.proved(&c, "up_empty"));
+}
+
+// The same rule holds for an empty owned field that a callee requires of a cell argument.
+fn field_requirements() void {
+    println("field requirements of some callee paths");
+    string[17] text = {
+        "struct node { node mut* own next; i32 v; }",
+        DROP,
+        DROP_REST,
+        "fn link(node mut* own n, node mut* own t) node mut* own { n->next = move(t); return n; }",
+        "fn link_if(node mut* own n, node mut* own t, bool f) node mut* own {",
+        "    if (f) { n->next = move(t); } else { drop_list(move(t)); } return n; }",
+        "fn link_bad() void { node mut* own a = new(node); a->next = new(node);",
+        "    drop_list(link(move(a), new(node))); }",
+        "fn link_some() void { node mut* own a = new(node); a->next = new(node);",
+        "    drop_list(link_if(move(a), new(node), false)); }",
+        "fn pass_link(node mut* own n) node mut* own { return link(move(n), new(node)); }",
+        "fn pass_link_if(node mut* own n, bool f) node mut* own {",
+        "    return link_if(move(n), new(node), f); }",
+        "fn fill_if(node mut* own n, bool f) node mut* own { n->v = 1;",
+        "    if (f) { n->next = new(node); } return n; }",
+        "fn fill_some() void { node mut* own a = new(node); a->next = new(node);",
+        "    drop_list(fill_if(move(a), false)); }",
+    };
+    string[9] names = {"drop_list", "link", "link_if", "link_bad", "link_some", "pass_link",
+        "pass_link_if", "fill_if", "fill_some"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    assert(ownership_heap_env.proved(&c, "link"));
+    assert(ownership_heap_env.summary(&c, "link")->interface[0].require_fields == 1);
+    assert(ownership_heap_env.summary(&c, "link")->post.required_fields[0] == 1);
+    assert(ownership_heap_env.proved(&c, "link_if"));
+    assert(ownership_heap_env.summary(&c, "link_if")->interface[0].require_fields == 1);
+    assert(ownership_heap_env.summary(&c, "link_if")->post.required_fields[0] == 0);
+    assert(ownership_heap_env.failed(&c, "link_bad"));
+    assert(ownership_heap_env.first(&c, "link_bad").kind ==
+        ownership_api.event_kind.caller_requirement);
+    assert(ownership_heap_env.first_text(&c, "link_bad") ==
+        "an empty owned field that this call requires");
+    ownership_heap_env.event_row linked = ownership_heap_env.first(&c, "link_bad");
+    assert(ownership_heap_env.assumes(&linked, 1, 8, "this path needs 'link' to return here"));
+    assert(!ownership_heap_env.failed(&c, "link_some"));
+    assert(!ownership_heap_env.proved(&c, "link_some"));
+    assert(ownership_heap_env.saw(&c, "link_some", ownership_api.event_kind.caller_requirement,
+        ownership_api.evidence_kind.unconditional) == 0);
+    // `fill_if` makes no call and reads its argument on each path, so a witnessed path returns
+    // for each nonnull argument: only the paths that store over the field decide that
+    // `fill_some` has no validated failure.
+    assert(ownership_heap_env.proved(&c, "fill_if"));
+    assert(ownership_heap_env.summary(&c, "fill_if")->witness);
+    assert(ownership_heap_env.summary(&c, "fill_if")->post.atoms[0].root ==
+        ownership_heap.root_kind.nonnull);
+    assert(ownership_heap_env.summary(&c, "fill_if")->interface[0].require_fields == 1);
+    assert(ownership_heap_env.summary(&c, "fill_if")->post.required_fields[0] == 0);
+    assert(!ownership_heap_env.failed(&c, "fill_some"));
+    assert(ownership_heap_env.unproved(&c, "fill_some",
+        ownership_api.incomplete_reason.missing_path));
+    assert(ownership_heap_env.first(&c, "fill_some").kind ==
+        ownership_api.event_kind.incomplete_proof);
+    // An unchanged entry region passes the field requirement up, settled as its callee has it.
+    assert(ownership_heap_env.proved(&c, "pass_link"));
+    assert(ownership_heap_env.summary(&c, "pass_link")->interface[0].require_fields == 1);
+    assert(ownership_heap_env.summary(&c, "pass_link")->post.required_fields[0] == 1);
+    assert(ownership_heap_env.proved(&c, "pass_link_if"));
+    assert(ownership_heap_env.summary(&c, "pass_link_if")->interface[0].require_fields == 1);
+    assert(ownership_heap_env.summary(&c, "pass_link_if")->post.required_fields[0] == 0);
+}
+
+// The exit state joins each returning path, so a root that some paths release is only possibly
+// released after the call. A root that each path releases is released, and so is the storage of
+// an argument that no exit atom holds: each path released it or had a null root.
+fn released_roots() void {
+    println("roots that some callee paths release");
+    string[19] text = {
+        "struct node { node mut* own next; i32 v; }",
+        DROP,
+        DROP_REST,
+        "fn pick_tail(node mut* own n, bool drop_head) node mut* own {",
+        "    node mut* own mut out = null;",
+        "    if (drop_head) { out = move(n->next); del(n); } else { out = move(n); }",
+        "    return move(out); }",
+        "fn keep_tail(node mut* own n) node mut* own { node mut* own t = move(n->next); del(n);",
+        "    return move(t); }",
+        "fn keep_head() i32 { node mut* own a = new(node); a->v = 5; a->next = new(node);",
+        "    i32* pv = &a->v; node mut* own t = pick_tail(move(a), false); i32 r = *pv;",
+        "    drop_list(move(t)); return r; }",
+        "fn keep_head_view() i32 { node mut* own a = new(node); node* f = a;",
+        "    node mut* own t = pick_tail(move(a), false); i32 r = f->v; drop_list(move(t));",
+        "    return r; }",
+        "fn addr_uaf() i32 { node mut* own a = new(node); a->next = new(node); i32* pv = &a->v;",
+        "    node mut* own t = keep_tail(move(a)); i32 r = *pv; drop_list(move(t)); return r; }",
+        "fn drained() i32 { node mut* own a = new(node); i32* pv = &a->v; drop_list(move(a));",
+        "    return *pv; }",
+    };
+    string[7] names = {"drop_list", "pick_tail", "keep_tail", "keep_head", "keep_head_view",
+        "addr_uaf", "drained"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    assert(ownership_heap_env.proved(&c, "pick_tail"));
+    assert(ownership_heap_env.proved(&c, "keep_tail"));
+    // Some paths of `pick_tail` release the root: a read through its address is unproved.
+    assert(!ownership_heap_env.failed(&c, "keep_head"));
+    assert(ownership_heap_env.unproved(&c, "keep_head",
+        ownership_api.incomplete_reason.missing_path));
+    assert(ownership_heap_env.saw(&c, "keep_head", ownership_api.event_kind.invalid_use,
+        ownership_api.evidence_kind.unconditional) == 0);
+    assert(ownership_heap_env.saw(&c, "keep_head", ownership_api.event_kind.lost_ownership,
+        ownership_api.evidence_kind.unconditional) == 0);
+    assert(!ownership_heap_env.failed(&c, "keep_head_view"));
+    // Each path of `keep_tail` releases the root.
+    assert(ownership_heap_env.failed(&c, "addr_uaf"));
+    assert(ownership_heap_env.first(&c, "addr_uaf").kind == ownership_api.event_kind.invalid_use);
+    assert(ownership_heap_env.first_text(&c, "addr_uaf") == "pv");
+    ownership_heap_env.event_row read = ownership_heap_env.first(&c, "addr_uaf");
+    assert(ownership_heap_env.assumes(&read, 1, 17, "this path needs 'keep_tail' to return here"));
+    // No exit atom of `drop_list` holds its argument: each path released it or had a null root.
+    assert(ownership_heap_env.failed(&c, "drained"));
+    ownership_heap_env.event_row late = ownership_heap_env.first(&c, "drained");
+    assert(late.kind == ownership_api.event_kind.invalid_use && late.line == 19);
+    assert(ownership_heap_env.assumes(&late, 1, 18, "this path needs 'drop_list' to return here"));
+}
+
+// A member cell of an argument that the callee moves into an exit atom, or that a fold absorbs,
+// keeps no obligation of its own: an address of one of its fields can keep its record, but its
+// storage belongs to the exit atom. A use through that address is unproved.
+fn members() void {
+    println("members that an address keeps");
+    string[18] text = {
+        "struct node { node mut* own next; i32 v; }",
+        DROP,
+        DROP_REST,
+        "fn keep_tail(node mut* own n) node mut* own { node mut* own t = move(n->next); del(n);",
+        "    return move(t); }",
+        "fn same(node mut* own n) node mut* own { i32 x = n->v; return move(n); }",
+        "fn addr_ok() i32 { node mut* own a = new(node); a->next = new(node); a->next->v = 7;",
+        "    i32* pv = &a->next->v; node mut* own t = keep_tail(move(a)); i32 r = *pv;",
+        "    drop_list(move(t)); return r; }",
+        "fn member_uaf() i32 { node mut* own a = new(node); a->next = new(node);",
+        "    i32* pv = &a->next->v; node mut* own t = keep_tail(move(a)); drop_list(move(t));",
+        "    return *pv; }",
+        "fn fold_addr() i32 { node mut* own a = new(node); a->next = new(node);",
+        "    i32* pv = &a->next->v; node mut* own t = same(move(a)); i32 r = *pv;",
+        "    drop_list(move(t)); return r; }",
+        "fn fold_uaf() i32 { node mut* own a = new(node); a->next = new(node);",
+        "    i32* pv = &a->next->v; node mut* own t = same(move(a)); drop_list(move(t));",
+        "    return *pv; }",
+    };
+    string[7] names = {"drop_list", "keep_tail", "same", "addr_ok", "member_uaf", "fold_addr",
+        "fold_uaf"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    assert(ownership_heap_env.proved(&c, "same"));
+    string[4] bodies = {"addr_ok", "member_uaf", "fold_addr", "fold_uaf"};
+    u64 mut i = 0;
+    while (i < bodies.len) {
+        assert(!ownership_heap_env.failed(&c, bodies[i]));
+        assert(!ownership_heap_env.proved(&c, bodies[i]));
+        assert(ownership_heap_env.saw(&c, bodies[i], ownership_api.event_kind.lost_ownership,
+            ownership_api.evidence_kind.unconditional) == 0);
+        assert(ownership_heap_env.first_text(&c, bodies[i]) == "pv");
+        i += 1;
+    }
+}
+
+// The exit record of an input is its entry value on each returning path of the callee. A nonnull
+// argument to a callee that returns only for a null input ends the path: the call cannot return
+// for it (`spec/fir.md` 14.1, A06). A null argument to a callee whose returning paths have the
+// input nonnull ends no path: that nonnull root can be an assumption of the callee, and no
+// assumed fact removes a path (D17.18). A proved empty owner that the callee dereferences is a
+// failed caller requirement (D10.7). Any other argument keeps the witness, which assumes that the
+// callee returns and names the call (D17.18), though the callee can panic for that argument.
+fn exit_nullness() void {
+    println("exit nullness against the arguments");
+    string[32] text = {
+        "struct node { node mut* own next; i32 v; }",
+        DROP,
+        DROP_REST,
+        "fn need(node mut* own p) node mut* own { if (p == null) { panic(\"null\"); }",
+        "    return move(p); }",
+        "fn need_next(node mut* own n) node mut* own { if (n->next == null) { panic(\"x\"); }",
+        "    return move(n); }",
+        "fn empty_only(node mut* own p) node mut* own { if (p != null) { panic(\"x\"); }",
+        "    return move(p); }",
+        "fn null_arg() void { node mut* own leak = new(node); drop_list(need(null)); }",
+        "fn joined_arg(i32 x) void { node mut* own mut q = null; if (x > x) { q = new(node); }",
+        "    node mut* own leak = new(node); drop_list(need(move(q))); }",
+        "fn free_arg(node mut* own p) void { node mut* own leak = new(node);",
+        "    drop_list(need(move(p))); }",
+        "fn member_arg() void { node mut* own a = new(node); node mut* own leak = new(node);",
+        "    drop_list(need_next(move(a))); }",
+        "fn nonnull_arg() void { node mut* own leak = new(node); drop_list(need(new(node))); }",
+        "fn free_null(node mut* own p) void { drop_list(empty_only(move(p))); }",
+        "fn free_keep(node mut* own p) void { node mut* own r = empty_only(move(p)); }",
+        "fn full_arg() void { node mut* own leak = new(node); drop_list(empty_only(new(node))); }",
+        "fn first_v(node mut* own p) node mut* own { p->v = 1; return move(p); }",
+        "fn second_v(node mut* own p) node mut* own { p->next->v = 1; return move(p); }",
+        "fn keep(node mut* own p) node mut* own { return move(p); }",
+        "fn keep_free(node mut* own p) void { node mut* own leak = new(node);",
+        "    drop_list(keep(move(p))); }",
+        "fn keep_null() void { node mut* own leak = new(node); drop_list(keep(null)); }",
+        "fn deref_new() void { node mut* own leak = new(node); drop_list(first_v(new(node))); }",
+        "fn deref_null() void { node mut* own leak = new(node); drop_list(first_v(null)); }",
+        "fn member_new() void { node mut* own a = new(node); a->next = new(node);",
+        "    node mut* own leak = new(node); drop_list(second_v(move(a))); }",
+        "fn after_drop(node mut* own p) void { node mut* own leak = new(node);",
+        "    drop_list(move(p)); }",
+    };
+    string[21] names = {"drop_list", "need", "need_next", "empty_only", "null_arg", "joined_arg",
+        "free_arg", "member_arg", "nonnull_arg", "free_null", "free_keep", "full_arg", "first_v",
+        "second_v", "keep", "keep_free", "keep_null", "deref_new", "deref_null", "member_new",
+        "after_drop"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    assert(ownership_heap_env.proved(&c, "need"));
+    assert(ownership_heap_env.summary(&c, "need")->post.atoms[0].root ==
+        ownership_heap.root_kind.nonnull);
+    assert(ownership_heap_env.summary(&c, "first_v")->post.atoms[0].root ==
+        ownership_heap.root_kind.nonnull);
+    assert(ownership_heap_env.summary(&c, "empty_only")->post.atoms[0].root ==
+        ownership_heap.root_kind.null_root);
+    // A new node to `empty_only` ends the path, and so does a free input that `empty_only`
+    // needs empty: nothing is lost after the call.
+    string[3] ended = {"full_arg", "free_null", "free_keep"};
+    u64 mut i = 0;
+    while (i < ended.len) {
+        assert(ownership_heap_env.proved(&c, ended[i]));
+        assert(ownership_heap_env.events(&c, ended[i]) == 0);
+        i += 1;
+    }
+    assert(!ownership_heap_env.summary(&c, "full_arg")->returns);
+    // A null argument to `need` keeps the path, so the loss after the call is reported. Before,
+    // the path ended and the heap solver proved the body (review of the design: f1, f4).
+    assert(!ownership_heap_env.proved(&c, "null_arg"));
+    assert(ownership_heap_env.first_of(&c, "null_arg",
+        ownership_api.event_kind.lost_ownership).line == 10);
+    // `first_v` dereferences its input on each returning path, so a null argument fails its
+    // requirement at the call (D10.7). Before, the path ended, and the body was proved (f5).
+    assert(!ownership_heap_env.proved(&c, "deref_null"));
+    ownership_heap_env.event_row deref = ownership_heap_env.first_of(&c, "deref_null",
+        ownership_api.event_kind.caller_requirement);
+    assert(deref.line == 28 && deref.evidence == ownership_api.evidence_kind.unconditional);
+    assert(ownership_heap_env.text(&deref) == "the empty owner that the callee dereferences");
+    assert(ownership_heap_env.summary(&c, "first_v")->deref_inputs == 1);
+    assert(ownership_heap_env.summary(&c, "first_v")->post.deref_handles == 1);
+    // Each other argument keeps the witness, though `need` panics for a joined argument that
+    // is null and `need_next` for the empty member of a new node.
+    string[9] seen = {"joined_arg", "free_arg", "member_arg", "nonnull_arg", "keep_free",
+        "keep_null", "deref_new", "member_new", "after_drop"};
+    string[9] callee = {"need", "need", "need_next", "need", "keep", "keep", "first_v",
+        "second_v", ""};
+    i = 0;
+    while (i < seen.len) {
+        assert(ownership_heap_env.failed(&c, seen[i]));
+        ownership_heap_env.event_row row = ownership_heap_env.first(&c, seen[i]);
+        assert(row.kind == ownership_api.event_kind.lost_ownership);
+        assert(ownership_heap_env.text(&row) == "leak");
+        // The notes follow the source: the outer `drop_list` comes first.
+        assert(ownership_heap_env.names_call(&row, 0, "drop_list"));
+        assert(row.notes[0].line == row.line);
+        if (callee[i].len > 0) {
+            assert(row.assumed == 2 && ownership_heap_env.names_call(&row, 1, callee[i]));
+        } else {
+            assert(row.assumed == 1);
+        }
+        i += 1;
+    }
+}
+
+// Two inputs that a join correlates: each value of each input is feasible, but not each pair.
+// No validated event may rest on two such facts (`spec/toolchain.md` 4.2). Inside one body the
+// join makes both roots `joined`. Across a call a `joined` exit root makes the free input of the
+// caller `joined` too. A callee that panics for some arguments keeps the witness, which assumes
+// that the call returns (D17.18).
+fn correlated_inputs() void {
+    println("correlated inputs");
+    string[25] text = {
+        "fn corr(i32 mut* own p, i32 mut* own q) void {",
+        "    if (p == null) { if (q != null) { panic(\"both\"); } } del(p); del(q); }",
+        "fn call_corr() i32 { i32 mut* own leak = new(i32); corr(null, new(i32)); return 0; }",
+        "fn single(i32 mut* own p, i32 mut* own q) void {",
+        "    if (p == null) { if (q != null) { panic(\"x\"); } }",
+        "    i32 mut* own leak = new(i32);",
+        "    if (p == null) { if (q != null) { return; } }",
+        "    del(leak); del(p); del(q); }",
+        "fn one_input(i32 mut* own p) void { i32 mut x = 0;",
+        "    if (p == null) { x = 1; } else { x = 2; }",
+        "    i32 mut* own leak = new(i32); if (p != null) { del(p); return; } }",
+        "fn chk(i32 mut* own mut* a, i32 mut* own mut* b) void {",
+        "    if (*a == null) { if (*b != null) { panic(\"ab\"); } } }",
+        "fn after(i32 mut* own mut* a, i32 mut* own mut* b) void { i32 mut* own leak = new(i32);",
+        "    chk(a, b); if (*a == null) { if (*b != null) { return; } } del(leak); }",
+        "fn put_corr(i32 mut* own mut* slot, i32 mut* own p, i32 mut* own q,",
+        "    i32 mut* own r) void { if (q == null) { if (r != null) { panic(\"qr\"); } }",
+        "    del(q); del(r); *slot = move(p); }",
+        "fn pc_call() i32 { i32 mut* own mut s = new(i32); put_corr(&s, new(i32), null, new(i32));",
+        "    del(s); return 0; }",
+        "fn put_if(i32 mut* own mut* slot, i32 mut* own p, i32* q) void {",
+        "    if (q != null) { *slot = move(p); return; } *slot = move(p); }",
+        "fn pi_bad() void { i32 x = 1; i32 mut* own mut s = new(i32); put_if(&s, new(i32), &x);",
+        "    del(s); }",
+        "fn unused() void { }",
+    };
+    string[11] names = {"corr", "call_corr", "single", "one_input", "chk", "after", "put_corr",
+        "pc_call", "put_if", "pi_bad", "unused"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    // `single` returns early only on the pair that panicked, and `chk` returns only on the pairs
+    // that `after` does not test: neither loss is validated.
+    string[2] blind = {"single", "after"};
+    u64 mut i = 0;
+    while (i < blind.len) {
+        assert(!ownership_heap_env.failed(&c, blind[i]));
+        assert(!ownership_heap_env.proved(&c, blind[i]));
+        assert(ownership_heap_env.first(&c, blind[i]).kind ==
+            ownership_api.event_kind.incomplete_proof);
+        i += 1;
+    }
+    ownership_heap.summary* checking = ownership_heap_env.summary(&c, "chk");
+    assert(checking->post.atoms[0].root == ownership_heap.root_kind.joined);
+    assert(checking->post.atoms[1].root == ownership_heap.root_kind.joined);
+    // One input that a join refines stays a free choice: the loss in `one_input` is validated.
+    assert(ownership_heap_env.failed(&c, "one_input"));
+    assert(ownership_heap_env.first_text(&c, "one_input") == "leak");
+    // `corr(null, ...)` and `put_corr` panic for these arguments. The witness assumes that each
+    // call returns, and the event names it: a loss, and two failed requirements.
+    ownership_heap_env.event_row lost = ownership_heap_env.first(&c, "call_corr");
+    assert(ownership_heap_env.failed(&c, "call_corr"));
+    assert(lost.kind == ownership_api.event_kind.lost_ownership);
+    assert(lost.line == 3 && ownership_heap_env.assumes(&lost, 1, 3,
+        "this path needs 'corr' to return here"));
+    string[2] required = {"pc_call", "pi_bad"};
+    string[2] callee = {"put_corr", "put_if"};
+    u32[2] lines = {19, 23};
+    i = 0;
+    while (i < required.len) {
+        assert(ownership_heap_env.failed(&c, required[i]));
+        ownership_heap_env.event_row row = ownership_heap_env.first(&c, required[i]);
+        assert(row.kind == ownership_api.event_kind.caller_requirement);
+        assert(row.line == lines[i] && row.assumed == 1 && row.notes[0].line == lines[i]);
+        assert(ownership_heap_env.names_call(&row, 0, callee[i]));
+        i += 1;
+    }
+}
+
+// The witness crosses each call of a fort callee whose summary applies, and it assumes that the
+// callee returns: nothing proves it (D17.18). A loop, a panic or a recursion of the callee keeps
+// the witness, and the event names each crossed call once, at the call. An extern call keeps the
+// witness and needs no note (D17.13), though it can call back a fort function that panics. A
+// call of a function value, or of a fort callee without a usable summary, clears the witness
+// (`spec/fir.md` 14.1, A06). A witness that crosses more calls than it can name validates
+// nothing.
+fn crossings() void {
+    println("calls that the witness crosses");
+    string[25] text = {
+        "struct node { node mut* own next; i32 v; }",
+        DROP,
+        DROP_REST,
+        "extern fn ext() void;",
+        "extern fn run_cb(fn (i32) i32 f) void;",
+        "fn loops(i32 n) i32 { i32 mut i = 0; while (i < n) { i += 1; } return i; }",
+        "fn aborts(i32 x) void { if (x > 0) { panic(\"x\"); } }",
+        "fn spin(node mut* own n) void { spin(move(n)); }",
+        "fn cb_die(i32 x) i32 { panic(\"cb\"); }",
+        "fn lossy() void { i32 mut* own x = new(i32); }",
+        "fn f() void { }",
+        "fn c_loops() void { node mut* own leak = new(node); i32 k = loops(3); }",
+        "fn c_aborts() void { node mut* own leak = new(node); aborts(1); }",
+        "fn c_spin() void { node mut* own leak = new(node); spin(new(node)); }",
+        "fn c_ext() void { node mut* own leak = new(node); ext(); }",
+        "fn c_callback() void { node mut* own leak = new(node); run_cb(cb_die); }",
+        "fn c_value(fn () void g) void { node mut* own leak = new(node); g(); }",
+        "fn c_lossy() void { node mut* own leak = new(node); lossy(); }",
+        "fn c_twice() void { node mut* own leak = new(node); f(); f(); }",
+        "fn c_eight() void { node mut* own leak = new(node); f(); f(); f(); f();",
+        "    f(); f(); f(); f(); }",
+        "fn c_nine() void { node mut* own leak = new(node); f(); f(); f(); f();",
+        "    f(); f(); f(); f(); f(); }",
+        "fn c_branch(node mut* own p) void { node mut* own leak = new(node);",
+        "    if (p == null) { f(); } else { drop_list(move(p)); } }",
+    };
+    string[18] names = {"drop_list", "loops", "aborts", "spin", "cb_die", "lossy", "f",
+        "c_loops", "c_aborts", "c_spin", "c_ext", "c_callback", "c_value", "c_lossy", "c_twice",
+        "c_eight", "c_nine", "c_branch"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    // A loop and a panic of the callee keep the witness; the event names the call.
+    string[2] crossed = {"c_loops", "c_aborts"};
+    string[2] callee = {"loops", "aborts"};
+    u32[2] lines = {12, 13};
+    u64 mut i = 0;
+    while (i < crossed.len) {
+        assert(ownership_heap_env.failed(&c, crossed[i]));
+        ownership_heap_env.event_row row = ownership_heap_env.first(&c, crossed[i]);
+        assert(row.kind == ownership_api.event_kind.lost_ownership);
+        assert(row.line == lines[i] && row.assumed == 1 && row.notes[0].line == lines[i]);
+        assert(ownership_heap_env.names_call(&row, 0, callee[i]));
+        i += 1;
+    }
+    // The exit state of a body names no call that the body crossed.
+    assert(ownership_heap_env.summary(&c, "c_loops")->post.crossed_len == 0);
+    // An extern call keeps the witness and needs no note, a callback that panics too.
+    string[2] trusted = {"c_ext", "c_callback"};
+    i = 0;
+    while (i < trusted.len) {
+        assert(ownership_heap_env.failed(&c, trusted[i]));
+        assert(ownership_heap_env.first(&c, trusted[i]).assumed == 0);
+        i += 1;
+    }
+    // `spin` publishes no return, so it has no usable summary; a function value and a callee
+    // with its own error have none either. Each clears the witness (A06).
+    assert(!ownership_heap_env.proved(&c, "spin"));
+    assert(ownership_heap_env.failed(&c, "lossy"));
+    string[4] blind = {"c_spin", "c_value", "c_lossy", "c_nine"};
+    i = 0;
+    while (i < blind.len) {
+        assert(!ownership_heap_env.failed(&c, blind[i]));
+        assert(!ownership_heap_env.proved(&c, blind[i]));
+        assert(ownership_heap_env.first(&c, blind[i]).kind ==
+            ownership_api.event_kind.incomplete_proof);
+        assert(ownership_heap_env.first_text(&c, blind[i]) == "leak");
+        // An incomplete-proof event names no assumption, also after eight crossed calls.
+        assert(ownership_heap_env.first(&c, blind[i]).assumed == 0);
+        i += 1;
+    }
+    // Each call is one note, also of one callee: two calls give two notes, eight calls give
+    // eight, and a ninth leaves the witness without a name for each call (`c_nine` above).
+    ownership_heap_env.event_row twice = ownership_heap_env.first(&c, "c_twice");
+    assert(ownership_heap_env.failed(&c, "c_twice"));
+    assert(ownership_heap_env.assumes(&twice, 2, 19, "this path needs 'f' to return here"));
+    assert(twice.notes[1].line == 19 && ownership_heap_env.names_call(&twice, 1, "f"));
+    ownership_heap_env.event_row eight = ownership_heap_env.first(&c, "c_eight");
+    assert(ownership_heap_env.failed(&c, "c_eight"));
+    assert(eight.assumed == ownership_heap.CROSS_LIMIT);
+    assert(eight.notes[3].line == 20 && eight.notes[4].line == 21);
+    assert(eight.notes[7].line == 21 && ownership_heap_env.names_call(&eight, 7, "f"));
+    // A join of two witnessed paths names the calls of both.
+    ownership_heap_env.event_row joined = ownership_heap_env.first(&c, "c_branch");
+    assert(ownership_heap_env.failed(&c, "c_branch"));
+    assert(ownership_heap_env.assumes(&joined, 2, 25, "this path needs 'f' to return here"));
+    assert(ownership_heap_env.names_call(&joined, 1, "drop_list"));
+}
+
+// A callee that dereferences a member or a borrowed pointer that the caller tested null or left
+// null keeps the witness: it assumes that the callee returns (D17.18; review round 4: d1, d2, d8).
+// The event names the call, so the dereference that ends the process is in the diagnostic.
+fn dereferences() void {
+    println("dereferences after a call");
+    string[18] text = {
+        "struct node { node mut* own next; i32 v; }",
+        DROP,
+        DROP_REST,
+        "fn fold_after(node mut* own n) void { n->next->v = 5; drop_list(move(n)); }",
+        "fn touch(node mut* own t) node mut* own { t->v = 1; return move(t); }",
+        "fn pass_member(node mut* own n) node mut* own { node mut* own mut t = move(n->next);",
+        "    t = touch(move(t)); n->next = move(t); return move(n); }",
+        "fn m_tested(node mut* own a) void { if (a->next == null) {",
+        "    node mut* own leak = new(node); fold_after(move(a)); return; } drop_list(move(a)); }",
+        "fn m_fresh() void { node mut* own leak = new(node); fold_after(new(node)); }",
+        "fn m_passed(node mut* own a) void { if (a->next == null) {",
+        "    node mut* own leak = new(node); drop_list(pass_member(move(a))); return; }",
+        "    drop_list(move(a)); }",
+        "fn m_joined(i32 x) void { node mut* own mut q = null; if (x > x) { q = new(node); }",
+        "    node mut* own leak = new(node); drop_list(touch(move(q))); }",
+        "fn first_read(i32* p) i32 { return *p; }",
+        "fn view_null() void { node mut* own leak = new(node); first_read(null); }",
+        "fn view_on(i32* p) void { node mut* own leak = new(node); first_read(p); }",
+    };
+    string[11] names = {"drop_list", "fold_after", "touch", "pass_member", "m_tested", "m_fresh",
+        "m_passed", "m_joined", "first_read", "view_null", "view_on"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    // Each loss after the call is validated, and its last note names the callee that
+    // dereferences the null pointer. `a->next` reads through the parameter `a` first, so the
+    // first note of `m_tested` and `m_passed` assumes that `a` is not null.
+    string[6] seen = {"m_tested", "m_fresh", "m_passed", "m_joined", "view_null", "view_on"};
+    string[6] callee = {"fold_after", "fold_after", "pass_member", "touch", "first_read",
+        "first_read"};
+    u32[6] lines = {9, 10, 12, 15, 17, 18};
+    u32[6] first_line = {8, 10, 11, 15, 17, 18};
+    u64 mut i = 0;
+    while (i < seen.len) {
+        assert(!ownership_heap_env.proved(&c, seen[i]));
+        ownership_heap_env.event_row row = ownership_heap_env.first_of(&c, seen[i],
+            ownership_api.event_kind.lost_ownership);
+        assert(row.evidence == ownership_api.evidence_kind.unconditional);
+        assert(row.line == lines[i] && ownership_heap_env.text(&row) == "leak");
+        assert(row.assumed >= 1 && row.notes[0].line == first_line[i]);
+        assert(ownership_heap_env.names_call(&row, cast(row.assumed - 1, u64), callee[i]));
+        if (first_line[i] != lines[i]) {
+            assert(ownership_heap_env.names_null(&row, 0, "a"));
+        }
+        i += 1;
+    }
+    // `q` of `m_joined` is null on the path that skips the allocation, and `touch` dereferences
+    // its input: a failed requirement on that path, so incomplete proof at the call (D10.7).
+    ownership_heap_env.event_row joined = ownership_heap_env.first(&c, "m_joined");
+    assert(joined.kind == ownership_api.event_kind.incomplete_proof && joined.line == 15);
+    assert(ownership_heap_env.text(&joined) == "the owner that the callee dereferences");
+}
+
+// A kept check of a callee that fails for the arguments keeps the witness: it assumes that the
+// callee returns (D17.18; review round 4: d4 `b_bounds`). Inside one body, a kept check that
+// fails for a known value ends the path, and one on a value that the state does not know keeps
+// the path and its witness. A check is no exit of the post-dominator graph, so a branch around a
+// division rejoins.
+fn checks() void {
+    println("checks after a call");
+    string[30] text = {
+        "struct node { node mut* own next; i32 v; }",
+        DROP,
+        DROP_REST,
+        "fn pick(u64 i, node mut* own k) node mut* own { u64[2] mut arr = {1, 2};",
+        "    k->v = cast(arr[i], i32); return move(k); }",
+        "fn forward(u64 i, node mut* own k) node mut* own { return pick(i, move(k)); }",
+        "fn pick_signed(i32 i, node mut* own k) node mut* own { u64[2] mut arr = {1, 2};",
+        "    k->v = cast(arr[i], i32); return move(k); }",
+        "fn dv(i32 a, i32 b, node mut* own k) node mut* own { k->v = a / b; return move(k); }",
+        "fn far() void { node mut* own leak = new(node); drop_list(pick(5, new(node))); }",
+        "fn near() void { node mut* own leak = new(node); drop_list(pick(1, new(node))); }",
+        "fn fwd_far() void { node mut* own leak = new(node); drop_list(forward(9, new(node))); }",
+        "fn on(u64 i) void { node mut* own leak = new(node); drop_list(pick(i, new(node))); }",
+        "fn negative() void { node mut* own leak = new(node);",
+        "    drop_list(pick_signed(-1, new(node))); }",
+        "fn zero() void { node mut* own leak = new(node); drop_list(dv(5, 0, new(node))); }",
+        "fn local_far() void { node mut* own leak = new(node); u64[2] arr = {1, 2}; u64 i = 5;",
+        "    u64 y = arr[i]; }",
+        "fn local_on(u64 i) void { node mut* own leak = new(node); u64[2] arr = {1, 2};",
+        "    u64 y = arr[i]; }",
+        "fn arm(bool c, i32 d) void { node mut* own leak = new(node); i32 mut x = 0;",
+        "    if (c) { x = 10 / d; } }",
+        "fn both_known() void { node mut* own leak = new(node); i32 y = 1;",
+        "    assert(y > 2 && y > 0); }",
+        "fn either_known() void { node mut* own leak = new(node); i32 y = 1;",
+        "    assert(y > 2 || y > 0); }",
+        "fn least_local() void { node mut* own leak = new(node); i32 a = -2147483648;",
+        "    i32 b = -1; i32 q = a / b; }",
+        "fn five_local() void { node mut* own leak = new(node); i32 a = -2147483648;",
+        "    i32 b = 5; i32 q = a / b; }",
+    };
+    string[18] names = {"drop_list", "pick", "forward", "pick_signed", "dv", "far", "near",
+        "fwd_far", "on", "negative", "zero", "local_far", "local_on", "arm", "both_known",
+        "either_known", "least_local", "five_local"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    // A check of the callee that fails for the arguments, or that holds for them, or whose value
+    // the caller does not know: each loss is validated, and it names the callee.
+    string[6] seen = {"far", "near", "fwd_far", "on", "negative", "zero"};
+    string[6] callee = {"pick", "pick", "forward", "pick", "pick_signed", "dv"};
+    u32[6] lines = {10, 11, 12, 13, 15, 16};
+    u64 mut i = 0;
+    while (i < seen.len) {
+        assert(ownership_heap_env.failed(&c, seen[i]));
+        ownership_heap_env.event_row row = ownership_heap_env.first(&c, seen[i]);
+        assert(row.line == lines[i] && ownership_heap_env.text(&row) == "leak");
+        assert(row.assumed == 2 && ownership_heap_env.names_call(&row, 0, "drop_list"));
+        assert(ownership_heap_env.names_call(&row, 1, callee[i]));
+        i += 1;
+    }
+    // A check that fails for a value set from a constant ends the path: no execution reaches
+    // the loss after it. `&&` of a known false side is known false as well. The overflow check
+    // of `a / b` tests `b == -1 and a == MIN`: both known true fail it (`least_local`), and one
+    // known false side passes it (`five_local`).
+    assert(ownership_heap_env.proved(&c, "local_far"));
+    assert(ownership_heap_env.proved(&c, "both_known"));
+    assert(ownership_heap_env.proved(&c, "least_local"));
+    assert(ownership_heap_env.failed(&c, "five_local"));
+    assert(ownership_heap_env.first(&c, "five_local").assumed == 0);
+    // A check on a value that the state does not know keeps the witness. The witness assumes
+    // that the check passes and names it (`local_on`, the divisor of `arm`). A branch around a
+    // division rejoins, and the join keeps the check of its one path. `||` with a known true
+    // side is known true: no assumption.
+    string[3] local = {"local_on", "arm", "either_known"};
+    string[3] checked = {"bounds", "div_zero", ""};
+    u32[3] at = {20, 22, 0};
+    i = 0;
+    while (i < local.len) {
+        assert(ownership_heap_env.failed(&c, local[i]));
+        ownership_heap_env.event_row row = ownership_heap_env.first(&c, local[i]);
+        if (checked[i].len == 0) {
+            assert(row.assumed == 0);
+        } else {
+            assert(row.assumed == 1 && row.notes[0].line == at[i]);
+            assert(ownership_heap_env.names_check(&row, 0, checked[i]));
+        }
+        i += 1;
+    }
+    // The note of a check gives its kind and what happens when it fails.
+    ownership_heap_env.event_row bounds = ownership_heap_env.first(&c, "local_on");
+    assert(ownership_heap_env.assumption(&bounds, 0) ==
+        "this path needs the bounds check to pass here; if it fails, the program stops");
+}
+
+// A call can write each scalar local whose storage a FIR address names: through that address,
+// through a pointer that holds it, or in an extern callee. So each call forgets the known value
+// of each such local, and so does a store through storage that the proof does not follow. A
+// kept check on a value that a call wrote keeps the witness, and a branch on it clears the
+// witness (review round 5: e4, e5, e6).
+fn written_values() void {
+    println("values that a call can write");
+    string[23] text = {
+        "struct node { node mut* own next; i32 v; }",
+        "u64 mut* mut gp = null;",
+        "extern fn ext_write(u64 mut* p) void;",
+        "fn set0(u64 mut* p) void { *p = 0; }",
+        "fn set5(u64 mut* p) void { *p = 5; }",
+        "fn fort_write() void { u64 mut i = 5; set0(&i); u64[2] arr = {1, 2}; u64 x = arr[i];",
+        "    node mut* own leak = new(node); }",
+        "fn extern_write() void { u64 mut i = 5; ext_write(&i); u64[2] arr = {1, 2};",
+        "    u64 x = arr[i]; node mut* own leak = new(node); }",
+        "fn known_fail() void { u64 i = 5; u64[2] arr = {1, 2}; u64 x = arr[i];",
+        "    node mut* own leak = new(node); }",
+        "fn other_local() void { u64 mut i = 5; u64 mut j = 0; set0(&j); u64[2] arr = {1, 2};",
+        "    u64 x = arr[i]; node mut* own leak = new(node); }",
+        "fn through_pointer() void { u64 mut i = 5; u64 mut* p = &i; set0(p);",
+        "    u64[2] arr = {1, 2}; u64 x = arr[i]; node mut* own leak = new(node); }",
+        "fn param_write(u64 mut i) void { set5(&i); u64[2] arr = {1, 2}; u64 x = arr[i];",
+        "    node mut* own leak = new(node); }",
+        "fn zero_write() void { u64 mut i = 0; set5(&i); u64[2] arr = {1, 2}; u64 x = arr[i];",
+        "    node mut* own leak = new(node); }",
+        "fn stale_branch() void { u64 mut i = 0; set5(&i); if (i == 0) { return; }",
+        "    node mut* own leak = new(node); }",
+        "fn via_global() void { u64 mut i = 5; gp = &i; *gp = 0; u64[2] arr = {1, 2};",
+        "    u64 x = arr[i]; node mut* own leak = new(node); }",
+    };
+    string[11] names = {"set0", "set5", "fort_write", "extern_write", "known_fail",
+        "other_local", "through_pointer", "param_write", "zero_write", "stale_branch",
+        "via_global"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    // The call forgets `i`, so the bounds check reads a value that the state does not know, and
+    // the loss after it is validated (e4 `h_fort_write`, `h_extern_write`; e5 `c_fort_five`,
+    // `c_ext_five`). Before, the known 5 ended the path at the check.
+    // The witness assumes that the call returns and that the bounds check passes.
+    string[4] seen = {"fort_write", "through_pointer", "param_write", "zero_write"};
+    string[4] callee = {"set0", "set0", "set5", "set5"};
+    u32[4] lines = {7, 15, 17, 19};
+    u32[4] checks = {6, 15, 16, 18};
+    u64 mut i = 0;
+    while (i < seen.len) {
+        assert(ownership_heap_env.failed(&c, seen[i]));
+        ownership_heap_env.event_row row = ownership_heap_env.first(&c, seen[i]);
+        assert(row.line == lines[i] && ownership_heap_env.text(&row) == "leak");
+        assert(row.assumed == 2 && row.notes[0].line == lines[i] - 1);
+        assert(ownership_heap_env.names_call(&row, 0, callee[i]));
+        assert(row.notes[1].line == checks[i] && ownership_heap_env.names_check(&row, 1, "bounds"));
+        i += 1;
+    }
+    // `zero_write` aborts at the check, because `set5` writes 5: the state does not follow the
+    // value that a call writes, so the witness assumes that the check passes, and the note says
+    // so (Open questions 14). An extern call needs no note; its check does.
+    assert(ownership_heap_env.failed(&c, "extern_write"));
+    ownership_heap_env.event_row foreign = ownership_heap_env.first(&c, "extern_write");
+    assert(foreign.assumed == 1 && ownership_heap_env.names_check(&foreign, 0, "bounds"));
+    // A local that no address names keeps its known 5: the check fails and ends the path.
+    assert(ownership_heap_env.proved(&c, "known_fail"));
+    assert(ownership_heap_env.proved(&c, "other_local"));
+    // A branch on a value that a call wrote clears the witness (e6 `b_stale`).
+    assert(!ownership_heap_env.failed(&c, "stale_branch"));
+    assert(ownership_heap_env.unproved(&c, "stale_branch",
+        ownership_api.incomplete_reason.missing_path));
+    // A store through a global is a store that the proof does not follow: it forgets `i` too.
+    // The store of the address into the global is incomplete proof of its own.
+    assert(ownership_heap_env.saw(&c, "via_global", ownership_api.event_kind.lost_ownership,
+        ownership_api.evidence_kind.unconditional) == 1);
+    assert(ownership_heap_env.saw(&c, "via_global", ownership_api.event_kind.incomplete_proof,
+        ownership_api.evidence_kind.abstract_possibility) == 1);
+}
+
+// The callee shapes of review round 5 (e1, e2, e3, e8): a null field of a by-value struct, a null
+// global, a span at an index out of range, a computed index, an index from a field, and a
+// callback from a struct field under an extern call. Each callee aborts for its arguments, and
+// the witness assumes that it returns: each loss after the call is validated and names the call.
+// The extern call needs no note (D17.13).
+fn shapes() void {
+    println("callee shapes of review round 5");
+    string[20] text = {
+        "struct node { node mut* own next; i32 v; }",
+        "struct holder { i32* p; u64 x; }",
+        "struct boxed { fn (i32) i32 f; }",
+        "i32* mut g = null;",
+        "extern fn run_box(boxed* b) void;",
+        "fn die(i32 x) i32 { panic(\"cb\"); }",
+        "fn by_field(holder h) i32 { return *h.p; }",
+        "fn by_global() i32 { return *g; }",
+        "fn at(u64@ s, u64 i) u64 { return s[i]; }",
+        "fn offset(u64 i) u64 { u64[2] arr = {1, 2}; return arr[i + 3]; }",
+        "fn from_field(holder h) u64 { u64[2] arr = {1, 2}; return arr[h.x]; }",
+        "fn s_field() void { node mut* own leak = new(node); holder mut h = holder{}; h.p = null;",
+        "    i32 k = by_field(h); }",
+        "fn s_global() void { g = null; node mut* own leak = new(node); i32 k = by_global(); }",
+        "fn s_span() void { u64[2] arr = {1, 2}; node mut* own leak = new(node);",
+        "    u64 k = at(arr[..], 5); }",
+        "fn s_offset() void { node mut* own leak = new(node); u64 k = offset(0); }",
+        "fn s_struct() void { holder mut h = holder{}; h.x = 5; node mut* own leak = new(node);",
+        "    u64 k = from_field(h); }",
+        "fn s_box() void { boxed b = boxed{die}; node mut* own leak = new(node); run_box(&b); }",
+    };
+    string[12] names = {"die", "by_field", "by_global", "at", "offset", "from_field", "s_field",
+        "s_global", "s_span", "s_offset", "s_struct", "s_box"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    string[5] seen = {"s_field", "s_global", "s_span", "s_offset", "s_struct"};
+    string[5] callee = {"by_field", "by_global", "at", "offset", "from_field"};
+    u32[5] lines = {13, 14, 16, 17, 19};
+    u64 mut i = 0;
+    while (i < seen.len) {
+        assert(ownership_heap_env.failed(&c, seen[i]));
+        ownership_heap_env.event_row row = ownership_heap_env.first(&c, seen[i]);
+        assert(row.kind == ownership_api.event_kind.lost_ownership);
+        assert(row.line == lines[i] && ownership_heap_env.text(&row) == "leak");
+        assert(row.assumed == 1 && row.notes[0].line == lines[i]);
+        assert(ownership_heap_env.names_call(&row, 0, callee[i]));
+        i += 1;
+    }
+    assert(ownership_heap_env.failed(&c, "s_box"));
+    assert(ownership_heap_env.first(&c, "s_box").assumed == 0);
+}
+
+// A write through a pointer that the proof does not follow can write each storage that a
+// pointer can designate: each local whose storage a FIR address names, each caller storage and
+// each cell. So can a callee that makes such a write, and an unknown call. After it, that storage
+// has no known reference and no known scalar. A callee that writes nothing untracked keeps those
+// facts (review round 6, n4 and n10).
+fn escapes() void {
+    println("storage that a call can write untracked");
+    string[36] text = {
+        "struct node { node mut* own next; node* peer; i32 v; }",
+        "struct link { node mut* p; }",
+        "struct pair { link* h; }",
+        "node* mut* mut GP = null;",
+        "extern fn ext() void;",
+        "extern fn ext_ptr(pair* q) void;",
+        "fn clear_g() void { *GP = null; }",
+        "fn keep_g() void { }",
+        "fn cut(link l) void { l.p->peer = null; }",
+        "fn view_false() void { node mut* own a = new(node); node* mut p = a; GP = &p;",
+        "    clear_g(); if (p == null) { del(a); return; } }",
+        "fn view_kept() void { node mut* own a = new(node); node* mut p = a; GP = &p;",
+        "    keep_g(); if (p == null) { del(a); return; } }",
+        "fn view_extern() void { node mut* own a = new(node); node* mut p = a; GP = &p;",
+        "    ext(); if (p == null) { del(a); return; } }",
+        "fn through_leaf() void { node mut* own a = new(node); node mut* own b = new(node);",
+        "    a->peer = b; link l = link{a}; cut(l);",
+        "    if (a->peer == null) { del(b); del(a); return; }",
+        "    del(a); }",
+        "fn through_extern() void { node mut* own a = new(node); link mut l = link{}; l.p = a;",
+        "    pair mut q = pair{}; q.h = &l; ext_ptr(&q); if (l.p == null) { del(a); return; } }",
+        "fn plain_leaf() void { node mut* own a = new(node); node mut* own b = new(node);",
+        "    a->peer = b; link l = link{a}; keep_g();",
+        "    if (a->peer == null) { del(b); del(a); return; }",
+        "    del(a); }",
+        "fn inexact(bool b) void { node mut* own x = new(node); node mut* own y = new(node);",
+        "    node mut* own z = new(node); x->peer = z; node mut* mut v = x; if (b) { v = y; }",
+        "    v->peer = null; if (x->peer == null) { del(z); } del(x); del(y); }",
+        "extern fn reg(node* mut* pp) void;",
+        "extern fn fire() void;",
+        "fn relay() void { clear_g(); }",
+        "fn retained() void { node mut* own a = new(node); node* mut p = null; reg(&p); p = a;",
+        "    fire(); if (p == null) { del(a); return; } }",
+        "fn retyped_move() void { node mut* own mut a = new(node);",
+        "    u8 mut* own x = move(*cast(&a, u8 mut* own mut*)); del(x); }",
+        "fn unused() void { }",
+    };
+    string[14] names = {"clear_g", "keep_g", "cut", "view_false", "view_kept", "view_extern",
+        "through_leaf", "through_extern", "plain_leaf", "inexact", "relay", "retained",
+        "retyped_move", "unused"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    // A store through a pointer in a global, or in a leaf of a by-value aggregate, is
+    // untracked; a body without one writes nothing untracked.
+    assert(ownership_heap_env.summary(&c, "clear_g")->writes_untracked);
+    assert(ownership_heap_env.summary(&c, "cut")->writes_untracked);
+    assert(!ownership_heap_env.summary(&c, "keep_g")->writes_untracked);
+    // An extern call writes untracked, and so does a caller of a body that writes untracked.
+    assert(ownership_heap_env.summary(&c, "view_extern")->writes_untracked);
+    assert(ownership_heap_env.summary(&c, "relay")->writes_untracked);
+    assert(ownership_heap_env.proved(&c, "clear_g") && ownership_heap_env.proved(&c, "cut"));
+    // `p` and `l` are locals whose storage a FIR address names, and `a` is a cell. So
+    // `clear_g`, `cut` and the extern calls can write them, and no loss after the call is
+    // validated.
+    // `reg` can keep `&p`, so `fire` can write `p` after `p = a`; a move through a cast pointer
+    // takes `a` in a way that the proof does not follow.
+    string[6] blind = {"view_false", "view_extern", "through_leaf", "through_extern", "retained",
+        "retyped_move"};
+    u64 mut i = 0;
+    while (i < blind.len) {
+        assert(!ownership_heap_env.failed(&c, blind[i]));
+        assert(ownership_heap_env.saw(&c, blind[i], ownership_api.event_kind.lost_ownership,
+            ownership_api.evidence_kind.validated_path) == 0);
+        assert(ownership_heap_env.saw(&c, blind[i], ownership_api.event_kind.lost_ownership,
+            ownership_api.evidence_kind.unconditional) == 0);
+        i += 1;
+    }
+    // `keep_g` writes nothing untracked, so the view and the peer keep their facts. The loss is
+    // validated; the store into the global is incomplete proof of its own.
+    assert(ownership_heap_env.saw(&c, "view_kept", ownership_api.event_kind.lost_ownership,
+        ownership_api.evidence_kind.unconditional) == 1);
+    assert(ownership_heap_env.failed(&c, "plain_leaf"));
+    ownership_heap_env.event_row kept = ownership_heap_env.first(&c, "plain_leaf");
+    assert(kept.line == 25 && ownership_heap_env.text(&kept) == "b");
+    assert(ownership_heap_env.assumes(&kept, 1, 23, "this path needs 'keep_g' to return here"));
+    assert(ownership_heap_env.assumption(&kept, 0) ==
+        "this path needs 'keep_g' to return here; if it does not return, 'b' does not leak");
+    // A store through a view of two cells writes a field of one of them: the field of each
+    // loses its fact, so the branch on `x->peer` clears the witness.
+    assert(!ownership_heap_env.failed(&c, "inexact"));
+    assert(ownership_heap_env.saw(&c, "inexact", ownership_api.event_kind.lost_ownership,
+        ownership_api.evidence_kind.unconditional) == 0);
+    assert(ownership_heap_env.saw(&c, "inexact", ownership_api.event_kind.lost_ownership,
+        ownership_api.evidence_kind.validated_path) == 0);
+}
+
+// A reference that the state does not follow can still designate tracked storage. It can come
+// from a join of two addresses, an array slot, an integer or a span over a pointer. It can stay
+// in a field without a slot, or an extern can keep it. A store through it writes such storage,
+// so no loss after it is validated (review round 6). A store into the storage of a global keeps
+// each fact. So does a local whose address only a pointer place takes.
+fn forgotten() void {
+    println("stores through references that the state does not follow");
+    string[34] text = {
+        "struct node { node mut* own next; node* peer; i32 v; }",
+        "struct link { node mut* p; }",
+        "struct pair { link* h; }",
+        "struct holder { node* mut* mut@ own items; }",
+        "extern fn ext_ptr(pair* q) void;",
+        "extern fn fire() void;",
+        "extern fn back(u64 bits) void mut*;",
+        "u64 mut G_count = 0;",
+        "fn join_addr(bool b) void { node mut* own a = new(node); node* mut p = a;",
+        "    node* mut q = a; node* mut* mut r = &p; if (b) { r = &q; } *r = null;",
+        "    if (p == null) { del(a); return; } if (q == null) { del(a); return; } }",
+        "fn arr_addr() void { node mut* own a = new(node); node* mut p = a;",
+        "    node* mut*[1] mut arr = {null}; arr[0] = &p; *arr[0] = null;",
+        "    if (p == null) { del(a); return; } }",
+        "fn int_addr() void { node mut* own a = new(node); node* mut p = a;",
+        "    node* mut* q = cast(back(cast(&p, u64)), node* mut*); *q = null;",
+        "    if (p == null) { del(a); return; } }",
+        "fn slice_ptr() void { node mut* own a = new(node); node* mut p = a; node* mut* q = &p;",
+        "    node* mut@ s = q[0..1]; s[0] = null; if (p == null) { del(a); return; } }",
+        "fn fill(holder mut* h, node* mut* pp) void { h->items[0] = pp; }",
+        "fn stash_span() void { node mut* own a = new(node); node* mut p = a;",
+        "    holder mut h = holder{new(node* mut*, 1)}; fill(&h, &p); *h.items[0] = null;",
+        "    del(h.items); if (p == null) { del(a); return; } }",
+        "fn closure_escape() void { node mut* own a = new(node); link mut l = link{};",
+        "    pair mut q = pair{}; q.h = &l; ext_ptr(&q); l.p = a; fire();",
+        "    if (l.p == null) { del(a); return; } }",
+        "fn global_own() void { node mut* own a = new(node); node* mut p = a; G_count = 1;",
+        "    if (p == null) { del(a); return; } }",
+        "fn id(u64 x) u64 { return x; }",
+        "fn out_scalar(u64 mut* hi, u64 mut* lo) void { *lo = 1; *hi = id(2); }",
+        "i32 mut* mut GV = null;",
+        "fn local_scalar() void { node mut* own a = new(node); i32 mut v = 5; GV = &v; *GV = 0;",
+        "    if (v == 0) { del(a); return; } }",
+        "fn unused() void { }",
+    };
+    string[12] names = {"join_addr", "arr_addr", "int_addr", "slice_ptr", "fill", "stash_span",
+        "closure_escape", "global_own", "id", "out_scalar", "local_scalar", "unused"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    // Each store writes `p`, `q`, `l.p` or `v` on each execution, so `a` is freed. Before, each
+    // of the first six gave a validated loss of `a` (review round 6, probes g1 to g6). The store
+    // through `GV` writes the scalar local `v`.
+    string[7] blind = {"join_addr", "arr_addr", "int_addr", "slice_ptr", "stash_span",
+        "closure_escape", "local_scalar"};
+    u64 mut i = 0;
+    while (i < blind.len) {
+        assert(!ownership_heap_env.failed(&c, blind[i]));
+        assert(ownership_heap_env.saw(&c, blind[i], ownership_api.event_kind.lost_ownership,
+            ownership_api.evidence_kind.validated_path) == 0);
+        assert(ownership_heap_env.saw(&c, blind[i], ownership_api.event_kind.lost_ownership,
+            ownership_api.evidence_kind.unconditional) == 0);
+        i += 1;
+    }
+    // A store into the storage of a global writes no slot: `p` keeps its view, and the loss is
+    // validated.
+    assert(ownership_heap_env.failed(&c, "global_own"));
+    ownership_heap_env.event_row kept = ownership_heap_env.first(&c, "global_own");
+    assert(kept.line == 28 && ownership_heap_env.text(&kept) == "a");
+    assert(!ownership_heap_env.summary(&c, "global_own")->writes_untracked);
+    // `*hi = id(2)` takes the address of `*hi`, not of `hi`: `hi` keeps its value across the
+    // untracked store through `lo`, and the body is proved. That store is untracked, because no
+    // caller storage of the summary follows a `u64`.
+    assert(ownership_heap_env.proved(&c, "out_scalar"));
+    assert(ownership_heap_env.summary(&c, "out_scalar")->writes_untracked);
+}
+
+// No assumed fact removes a path (D17.18). Only a fact that a test, an assignment or an
+// allocation establishes ends a path or a branch. An address computation reads no storage and
+// gives no fact about its base. The unfold of a root that the state does not know nonnull
+// marks that root as assumed. A proved empty owner that a callee dereferences is a failed caller
+// requirement (D10.7). Before, the heap solver alone proved `free_param`, `null_local`,
+// `caller_null` and `null_read`, and each has a real error (review of the design: f1, f4, f5).
+fn no_assumed_pruning() void {
+    println("no assumed fact removes a path");
+    string[28] text = {
+        "struct node { node mut* own next; i32 v; }",
+        DROP,
+        DROP_REST,
+        "fn addr_only(node mut* own n) node mut* own { i32 mut* q = &n->v; return move(n); }",
+        "fn free_param(node mut* own x) void { i32 mut* own extra = new(i32);",
+        "    node mut* own y = addr_only(move(x)); if (y == null) { return; } del(extra);",
+        "    drop_list(move(y)); }",
+        "fn null_local() void { i32 mut* own extra = new(i32); node mut* own y = addr_only(null);",
+        "    if (y == null) { return; } del(extra); drop_list(move(y)); }",
+        "fn caller_null() void { i32 mut* own extra = new(i32); node mut* own x = null;",
+        "    node mut* own y = addr_only(move(x)); if (y == null) { return; } del(extra);",
+        "    drop_list(move(y)); }",
+        "fn read_node(node mut* own n) node mut* own { i32 w = n->v; return move(n); }",
+        "fn null_read() void { node mut* own y = read_node(null); drop_list(move(y)); }",
+        "fn deref_test(node mut* own n) void { i32 mut* own extra = new(i32); i32 w = n->v;",
+        "    if (n == null) { return; } del(extra); drop_list(move(n)); }",
+        "fn empty_only(node mut* own p) node mut* own { if (p != null) { panic(\"x\"); }",
+        "    return move(p); }",
+        "fn deref_only_null(node mut* own x) void { i32 mut* own e = new(i32); i32 w = x->v;",
+        "    drop_list(empty_only(move(x))); }",
+        "fn addr_then_read(node mut* own n) i32 { i32 mut* own e = new(i32); i32 mut* q = &n->v;",
+        "    i32 w = n->v; drop_list(move(n)); return w; }",
+        "fn param_test(node* p) void { i32 mut* own e = new(i32); if (p == null) { return; }",
+        "    del(e); }",
+        "fn addr_null() void { node mut* own n = null; i32 mut* q = &n->v; }",
+        "fn wrap(node mut* own n) node mut* own { return read_node(move(n)); }",
+        "fn wrap_null() void { node mut* own y = wrap(null); drop_list(move(y)); }",
+        "fn unused() void { }",
+    };
+    string[16] names = {"drop_list", "addr_only", "free_param", "null_local", "caller_null",
+        "read_node", "null_read", "deref_test", "empty_only", "deref_only_null", "addr_then_read",
+        "param_test", "addr_null", "wrap", "wrap_null", "unused"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    // The four bodies of the review come first. Then a test after a dereference, a call after a
+    // dereference, and a test of a pointer parameter, which can be null. Each has a path that
+    // the state can only assume away, so none is proved.
+    string[7] kept = {"free_param", "null_local", "caller_null", "null_read", "deref_test",
+        "deref_only_null", "param_test"};
+    u64 mut i = 0;
+    while (i < kept.len) {
+        assert(!ownership_heap_env.proved(&c, kept[i]));
+        assert(ownership_heap_env.summary(&c, kept[i])->returns);
+        i += 1;
+    }
+    // `&n->v` makes the root of `n` an assumed root. The exit record of `addr_only` keeps that
+    // mark, so the null branch after the call stays.
+    assert(ownership_heap_env.summary(&c, "addr_only")->post.atoms[0].unfold_nonnull);
+    assert(ownership_heap_env.summary(&c, "addr_only")->deref_inputs == 0);
+    // `read_node(null)` fails its requirement at the call: `read_node` reads `n->v` on each
+    // returning path.
+    ownership_heap_env.event_row read = ownership_heap_env.first_of(&c, "null_read",
+        ownership_api.event_kind.caller_requirement);
+    assert(read.line == 14 && read.evidence == ownership_api.evidence_kind.unconditional);
+    // An address computation is no null check, so the read after it is the first assumption.
+    ownership_heap_env.event_row lost = ownership_heap_env.first_of(&c, "addr_then_read",
+        ownership_api.event_kind.lost_ownership);
+    assert(lost.line == 22 && lost.assumed >= 1 && lost.notes[0].line == 22);
+    assert(ownership_heap_env.names_null(&lost, 0, "n"));
+    // An address computation of a null base is no error (`spec/fir.md` 14.1).
+    assert(ownership_heap_env.proved(&c, "addr_null"));
+    // `wrap` passes its input on to `read_node`, so it dereferences that input too: a null
+    // argument to `wrap` fails the requirement at the call.
+    assert(ownership_heap_env.summary(&c, "wrap")->deref_inputs == 1);
+    ownership_heap_env.event_row wrapped = ownership_heap_env.first_of(&c, "wrap_null",
+        ownership_api.event_kind.caller_requirement);
+    assert(wrapped.line == 27 && wrapped.evidence == ownership_api.evidence_kind.unconditional);
+}
+
+// A dereference that reads or writes storage is a null check (D17.18; coordinator ruling of
+// review round 7). At a pointer whose nullness the state does not know, the witness assumes
+// that it is not null, and the event names it. The state keeps that fact, so a second
+// dereference of the pointer is no new assumption. A pointer that the state knows is null ends
+// the path. An address computation reads no storage, so it is no null check. The call note
+// covers a dereference inside a callee with an applied summary.
+fn null_checks() void {
+    println("null checks at a dereference");
+    string[25] text = {
+        "struct node { node mut* own next; i32 v; }",
+        "extern fn get() node*;",
+        "fn deref_leak(node* p) i32 { node mut* own b = new(node); return p->v; }",
+        "fn twice(node* p) i32 { node mut* own b = new(node); i32 x = p->v;",
+        "    i32 y = p->v; return 0; }",
+        "fn owner_twice(node mut* own q) void { node mut* own b = new(node); i32 x = q->v;",
+        "    i32 y = q->v; del(q); }",
+        "fn unknown_twice() void { node mut* own b = new(node); node* g = get(); i32 x = g->v;",
+        "    i32 y = g->v; }",
+        "fn two_at_once(node* p, node* q) i32 { node mut* own b = new(node);",
+        "    i32 x = p->v - q->v; return 0; }",
+        "fn temporary() i32 { node mut* own b = new(node); return get()->v; }",
+        "fn null_end() void { node* p = null; node mut* own b = new(node); i32 x = p->v; }",
+        "fn null_after() void { node* p = null; node mut* own b = new(node);",
+        "    if (p == null) { return; } i32 x = p->v; del(b); }",
+        "fn address_only(node* p) void { node mut* own b = new(node); i32* a = &p->v; }",
+        "fn rd(node* p) i32 { return p->v; }",
+        "fn via_call(node* p) i32 { node mut* own b = new(node); return rd(p); }",
+        "fn tested(node mut* own q) void {",
+        "    if (q != null) { i32 x = q->v; node mut* own b = new(node); } del(q); }",
+        "struct box { node* p; i32 v; }",
+        "fn cell_twice(box mut* own q) void { node mut* own b = new(node); i32 x = q->v;",
+        "    i32 y = q->v; del(q); }",
+        "fn store_leak(node mut* p) void { node mut* own b = new(node); p->v = 1; }",
+        "fn unused() void { }",
+    };
+    string[15] names = {"deref_leak", "twice", "owner_twice", "unknown_twice", "two_at_once",
+        "temporary", "null_end", "null_after", "address_only", "rd", "via_call", "tested",
+        "cell_twice", "store_leak", "unused"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    // A parameter can be null, so the read of `p->v` is an assumption (review round 7, p6b).
+    assert(ownership_heap_env.failed(&c, "deref_leak"));
+    ownership_heap_env.event_row leak = ownership_heap_env.first(&c, "deref_leak");
+    assert(leak.line == 3 && ownership_heap_env.text(&leak) == "b");
+    assert(ownership_heap_env.assumes(&leak, 1, 3, "this path needs 'p' to be non-null here"));
+    // The note gives the fact, the place and what happens without the fact, from the row of the
+    // null kind (`spec/toolchain.md` 4.2). A store through the pointer faults at the write.
+    assert(ownership_heap_env.assumption(&leak, 0) ==
+        "this path needs 'p' to be non-null here; a null 'p' faults at this read first");
+    ownership_heap_env.event_row stored = ownership_heap_env.first(&c, "store_leak");
+    assert(ownership_heap_env.assumption(&stored, 0) ==
+        "this path needs 'p' to be non-null here; a null 'p' faults at this write first");
+    // The second read of a pointer that the witness assumed not null is no new assumption:
+    // through a parameter, an owner, a value that an extern gave and an owner of a struct
+    // without an owned field, whose dereference does not unfold it. A read through the
+    // extern's value is incomplete proof of its own, and the loss after it is validated.
+    string[4] again = {"twice", "owner_twice", "unknown_twice", "cell_twice"};
+    string[4] pointer = {"p", "q", "g", "q"};
+    u64 mut i = 0;
+    while (i < again.len) {
+        ownership_heap_env.event_row row = ownership_heap_env.first_of(&c, again[i],
+            ownership_api.event_kind.lost_ownership);
+        assert(ownership_heap_env.text(&row) == "b" || ownership_heap_env.text(&row) == "q->next");
+        assert(row.assumed == 1 && ownership_heap_env.names_null(&row, 0, pointer[i]));
+        i += 1;
+    }
+    assert(ownership_heap_env.failed(&c, "twice") && ownership_heap_env.failed(&c, "owner_twice"));
+    // Two pointers at one source are two assumptions, in the order of their slots.
+    ownership_heap_env.event_row both = ownership_heap_env.first(&c, "two_at_once");
+    assert(both.assumed == 2 && both.notes[0].line == 11 && both.notes[1].line == 11);
+    assert(ownership_heap_env.names_null(&both, 0, "p"));
+    assert(ownership_heap_env.names_null(&both, 1, "q"));
+    // A temporary has no source name.
+    ownership_heap_env.event_row temp = ownership_heap_env.first_of(&c, "temporary",
+        ownership_api.event_kind.lost_ownership);
+    assert(ownership_heap_env.assumes(&temp, 1, 12,
+        "this path needs the pointer to be non-null here"));
+    // A pointer that the state knows is null ends the path at its dereference: the leak after
+    // it is on no path. After the null test, the branch that dereferences is not taken.
+    assert(!ownership_heap_env.failed(&c, "null_end"));
+    assert(ownership_heap_env.saw(&c, "null_end", ownership_api.event_kind.lost_ownership,
+        ownership_api.evidence_kind.unconditional) == 0);
+    assert(ownership_heap_env.failed(&c, "null_after"));
+    assert(ownership_heap_env.first(&c, "null_after").assumed == 0);
+    // `&p->v` computes an address and reads nothing: no assumption.
+    assert(ownership_heap_env.failed(&c, "address_only"));
+    assert(ownership_heap_env.first(&c, "address_only").assumed == 0);
+    // The dereference inside `rd` is part of the assumption that `rd` returns.
+    ownership_heap_env.event_row called = ownership_heap_env.first(&c, "via_call");
+    assert(ownership_heap_env.assumes(&called, 1, 18, "this path needs 'rd' to return here"));
+    // After the test `q != null`, the state knows that `q` is not null: the read of `q->v` is
+    // no assumption, and the loss of `b` names none.
+    ownership_heap_env.event_row inside = ownership_heap_env.first_of(&c, "tested",
+        ownership_api.event_kind.lost_ownership);
+    assert(ownership_heap_env.text(&inside) == "b" && inside.assumed == 0);
+}
+
+// A store or a read through a pointer of another type than its slot (a cast) is no fact of the
+// slot: a store gives the slot an unknown value, and a read gives an unknown value (review
+// round 6, n1, n7, n9).
+fn casts() void {
+    println("stores and reads through a cast pointer");
+    string[48] text = {
+        "struct node { node mut* own next; i32 v; }",
+        "struct pa { node* x; }",
+        "struct pd { u64 n; }",
+        "fn reinterpret() void { i32 mut i = 0; u32 mut* p = cast(&i, u32 mut*); *p = 4294967295;",
+        "    assert(i < 0); node mut* own leak = new(node); }",
+        "fn narrow() void { u32 mut i = 256; u8 mut* p = cast(&i, u8 mut*); *p = 1;",
+        "    u64[2] arr = {1, 2}; u64 x = arr[i]; node mut* own leak = new(node); }",
+        "fn narrow_branch() void { node mut* own a = new(node); u32 mut i = 256;",
+        "    u8 mut* p = cast(&i, u8 mut*); *p = 1; if (i == 257) { del(a); return; } }",
+        "fn narrow_read_branch() void { node mut* own a = new(node); u32 mut i = 257;",
+        "    u8* q = cast(&i, u8*); u8 x = *q; if (x == 1) { del(a); return; } }",
+        "fn same_type() void { i32 mut i = 0; i32 mut* p = &i; *p = -1; assert(i < 0);",
+        "    node mut* own leak = new(node); }",
+        "fn view_store() void { node mut* own a = new(node); node* mut p = a;",
+        "    u64 mut* q = cast(&p, u64 mut*); *q = 0; if (p == null) { del(a); return; } }",
+        "fn view_read() void { node mut* own a = new(node); node* mut p = null;",
+        "    node* mut* r = &p; u64* q = cast(r, u64*); u64 x = *q;",
+        "    if (p == null) { del(a); return; } }",
+        "fn struct_store() void { node mut* own a = new(node); pa mut s = pa{}; s.x = a;",
+        "    pd mut* q = cast(&s, pd mut*); *q = pd{0}; if (s.x == null) { del(a); return; } }",
+        "fn retyped_owner() void { node mut* own mut a = new(node);",
+        "    u64 mut* q = cast(&a, u64 mut*); *q = 0; del(a); }",
+        "struct duo { i64 a; i64 b; }",
+        "struct one { i64 x; }",
+        "struct small { u8 a; node* b; }",
+        "struct big { u8[16] a; node* b; }",
+        "fn first(duo mut* s) i64 mut* { return &s->a; }",
+        "fn graft_scalar() void { node mut* own a = new(node); i64 mut y = 3;",
+        "    i64 mut* r = first(cast(&y, duo mut*)); *r = 7; if (y == 3) { return; } del(a); }",
+        "fn direct_scalar() void { node mut* own a = new(node); i64 mut y = 3;",
+        "    duo mut* d = cast(&y, duo mut*); i64 mut* r = &d->a; *r = 7;",
+        "    if (y == 3) { return; } del(a); }",
+        "fn at0(one mut* s) i64 mut* { return &s->x; }",
+        "fn graft_reference() void { node mut* own a = new(node); node* mut q = a;",
+        "    i64 mut* r = at0(cast(&q, one mut*)); *r = 0; if (q == null) { del(a); return; } }",
+        "fn set_first(duo mut* s) void { s->a = 7; }",
+        "fn field_store() void { node mut* own a = new(node); i64 mut y = 3;",
+        "    set_first(cast(&y, duo mut*)); if (y == 3) { return; } del(a); }",
+        "fn clearb(small mut* s) void { s->b = null; }",
+        "fn layout() void { node mut* own a = new(node); big mut u = {}; u.b = a;",
+        "    clearb(cast(&u, small mut*)); if (u.b == null) { return; } del(a); }",
+        "fn getb(small* s) node* { return s->b; }",
+        "fn layout_read() void { node mut* own a = new(node); big mut u = {}; u.b = a;",
+        "    if (getb(cast(&u, small*)) == null) { del(a); return; } }",
+        "fn clear_x(pa mut* s) void { s->x = null; }",
+        "fn same_call() void { node mut* own a = new(node); pa mut s = pa{}; s.x = a; clear_x(&s);",
+        "    if (s.x == null) { return; } del(a); }",
+        "fn unused() void { }",
+    };
+    string[22] names = {"reinterpret", "narrow", "narrow_branch", "narrow_read_branch",
+        "same_type", "view_store", "view_read", "struct_store", "retyped_owner", "first",
+        "graft_scalar", "direct_scalar", "at0", "graft_reference", "set_first", "field_store",
+        "clearb", "layout", "getb", "layout_read", "clear_x", "same_call"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    // A store of a `u32` into an `i32`, or of a byte into a `u32`, makes the value unknown: the
+    // check after it is assumed to pass and named. `i` is -1 in `reinterpret`, a real leak, and
+    // 257 in `narrow`, where the bounds check aborts: a false violation with its note.
+    string[2] crossed = {"reinterpret", "narrow"};
+    string[2] kind = {"user", "bounds"};
+    u32[2] lines = {5, 7};
+    u64 mut i = 0;
+    while (i < crossed.len) {
+        assert(ownership_heap_env.failed(&c, crossed[i]));
+        ownership_heap_env.event_row row = ownership_heap_env.first(&c, crossed[i]);
+        assert(row.line == lines[i] && ownership_heap_env.text(&row) == "leak");
+        assert(row.assumed == 1 && ownership_heap_env.names_check(&row, 0, kind[i]));
+        i += 1;
+    }
+    // A branch on the value that a cast store or read gives clears the witness. So does a
+    // branch on a view that a cast store wrote. So does one on a field that a store of another
+    // struct type wrote, though no leaf of that type names it. Before, the slot kept its old
+    // fact (review round 6, n9).
+    string[4] blind = {"narrow_branch", "narrow_read_branch", "view_store", "struct_store"};
+    i = 0;
+    while (i < blind.len) {
+        assert(!ownership_heap_env.failed(&c, blind[i]));
+        assert(!ownership_heap_env.proved(&c, blind[i]));
+        i += 1;
+    }
+    // A store through a pointer of the slot's own type stays exact: the assert passes for the
+    // known -1, and no note names it. A read through a cast pointer writes nothing.
+    assert(ownership_heap_env.failed(&c, "same_type"));
+    assert(ownership_heap_env.first(&c, "same_type").assumed == 0);
+    assert(ownership_heap_env.proved(&c, "view_read"));
+    // A cast store of a scalar over an owner takes the owner: `del(a)` releases an unknown
+    // owner, and the leak of the first node is incomplete proof, not a proof.
+    assert(!ownership_heap_env.proved(&c, "retyped_owner"));
+    assert(!ownership_heap_env.failed(&c, "retyped_owner"));
+    // A cast pointer argument of another type than the parameter designates storage whose
+    // layout the summary does not describe: the call is unknown, though no slot of the summary
+    // names that storage (review round 7, p1 to p4r). So is a pointer below a scalar. Each run
+    // frees `a`, so no loss is validated.
+    string[6] untyped = {"graft_scalar", "direct_scalar", "graft_reference", "field_store",
+        "layout", "layout_read"};
+    i = 0;
+    while (i < untyped.len) {
+        assert(!ownership_heap_env.failed(&c, untyped[i]));
+        assert(ownership_heap_env.saw(&c, untyped[i], ownership_api.event_kind.lost_ownership,
+            ownership_api.evidence_kind.validated_path) == 0);
+        assert(ownership_heap_env.saw(&c, untyped[i], ownership_api.event_kind.lost_ownership,
+            ownership_api.evidence_kind.unconditional) == 0);
+        i += 1;
+    }
+    // A pointer of the parameter's own type keeps the summary: `clear_x` writes null over
+    // `s.x`, so the return leaks `a`, and the loss is validated with the call note.
+    assert(ownership_heap_env.failed(&c, "same_call"));
+    ownership_heap_env.event_row cleared = ownership_heap_env.first(&c, "same_call");
+    assert(cleared.line == 47 && ownership_heap_env.text(&cleared) == "a");
+    assert(ownership_heap_env.assumes(&cleared, 1, 46, "this path needs 'clear_x' to return here"));
+}
+
+// A witness names at most 8 assumptions, calls and kept checks together. A kept check inside a
+// branch that rejoins counts too: the rejoin gives the witness back with its note, and one
+// assumption more gives no witness back.
+fn assumption_limit() void {
+    println("the limit of assumptions");
+    string[8] text = {
+        "fn f() void { }",
+        "fn rejoin_eight(bool b, u64 i) void { i32 mut* own leak = new(i32);",
+        "    u64[4] arr = {1, 2, 3, 4}; f(); f(); f(); f(); f(); f(); f();",
+        "    if (b) { u64 x = arr[i]; } }",
+        "fn rejoin_nine(bool b, u64 i, u64 j) void { i32 mut* own leak = new(i32);",
+        "    u64[4] arr = {1, 2, 3, 4}; f(); f(); f(); f(); f(); f(); f();",
+        "    if (b) { u64 x = arr[i]; u64 y = arr[j]; } }",
+        "fn unused() void { }",
+    };
+    string[3] names = {"f", "rejoin_eight", "rejoin_nine"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    assert(ownership_heap_env.failed(&c, "rejoin_eight"));
+    ownership_heap_env.event_row eight = ownership_heap_env.first(&c, "rejoin_eight");
+    assert(ownership_heap_env.assumes(&eight, ownership_heap.CROSS_LIMIT, 3,
+        "this path needs 'f' to return here"));
+    assert(eight.notes[7].line == 4 && ownership_heap_env.names_check(&eight, 7, "bounds"));
+    // A ninth assumption fills the state: the rejoin gives no witness back.
+    assert(!ownership_heap_env.failed(&c, "rejoin_nine"));
+    assert(ownership_heap_env.first(&c, "rejoin_nine").kind ==
+        ownership_api.event_kind.incomplete_proof);
+    assert(ownership_heap_env.first(&c, "rejoin_nine").assumed == 0);
+}
+
+fn main() i32 {
+    requirements();
+    field_requirements();
+    released_roots();
+    members();
+    exit_nullness();
+    no_assumed_pruning();
+    correlated_inputs();
+    crossings();
+    dereferences();
+    checks();
+    written_values();
+    shapes();
+    escapes();
+    forgotten();
+    null_checks();
+    casts();
+    assumption_limit();
+    println("heap witness ok");
+    return 0;
+}

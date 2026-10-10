@@ -1641,12 +1641,14 @@ call can read (D17.18). The call can read an entry value through an argument tha
 it. It can also read one through a value that the caller stored before the call, except in a
 local whose storage no FIR address names. An argument of an earlier call, an extern call too,
 counts as stored. After a branch whose condition depends on any entry value, the witness
-crosses no fort call. Such a branch or call leaves the event incomplete proof. So
+crosses no unresolved fort call. Such a branch or call leaves the event incomplete proof. So
 `require(n < 100)` before `if (n >= 100) { return; }` gives incomplete proof at that return.
 So does a validator that reads n through a pointer, a view or a global that the caller wrote.
 A callee that does not return for the inputs that it gets on the witness path still makes a
 violation after its call false. Give a function that never returns a noreturn type; the
 compiler does not check this.
+A call whose summary the analysis applies is not unresolved. A witness crosses it and assumes that
+the callee returns, and the violation notes that call (D17.18, toolchain.md 4.2).
 Amended 2026-10-08: A06 made each leak after an unresolved fort call incomplete proof. The user
 ruled that a callee without a parameter that can own a value cannot release or transfer A when
 A's owner is a local slot or a leaf of a local struct or array, and no FIR address names that

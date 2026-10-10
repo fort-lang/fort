@@ -1,0 +1,472 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| cross-call cases ok
+//| alias cases ok
+//| unknown effect cases ok
+//| recursion cases ok
+//| extern cases ok
+//| ledgers ok
+//| exclusion ok
+//| retention ok
+//| obligation reasons ok
+//| work refusal ok
+//| teardown ok
+/// Holds the calls_heap row of small programs: cross-call uses, caller aliases, unknown fort
+/// effects, recursive components, extern calls, the ledger of each component computation, and
+/// the exclusion of violations that another analysis validated (D17.14 to D17.18). A line
+/// here is a line of SOURCE.
+import heap;
+import ownership_api;
+import ownership_keys;
+import ownership_source;
+import ownership_source_calls;
+import ownership_source_env;
+import ownership_source_local;
+import ownership_summary;
+import ownership_summary_model;
+import std.strbuf;
+
+string[40] SOURCE = {
+    "fn reader(i32* p) i32 { return *p; }",
+    "fn released(i32 mut* own p) i32 { i32* v = p; del(p); return reader(v); }",
+    "fn fine(i32 mut* own p) i32 { i32 x = reader(p); del(p); return x; }",
+    "fn releaser(i32 mut* own p) void { del(p); }",
+    "fn cross(i32 mut* own p) i32 { i32* v = p; releaser(move(p)); return *v; }",
+    "fn moved(i32 mut* own p) i32 { i32 x = reader(p); releaser(move(p)); return x; }",
+    "fn noop() void { }",
+    "fn known(i32 mut* own p) void { noop(); }",
+    "fn leak() void { i32 mut* own p = new(i32); }",
+    "fn sw(i32* p, i32* q, bool b) i32* { if (b) { return p; } return sw(q, p, true); }",
+    "fn same(i32 mut* own a) i32 { i32* v = sw(a, a, false); del(a); return *v; }",
+    "fn other(i32 mut* own a, i32* r) i32 { i32* v = sw(r, a, false); del(a); return *v; }",
+    "fn kept(i32 mut* own a, i32* r) i32 { i32* v = sw(a, r, false); del(a); return *v; }",
+    "struct holder { i32* ptr; }",
+    "fn wrap(i32* p) holder { return holder{p}; }",
+    "fn use_wrap(i32 mut* own a) i32 { holder h = wrap(a); del(a); return *h.ptr; }",
+    "fn keep(fn () void g, i32 mut* own p) void { g(); }",
+    "fn invoke(fn () void g, i32 mut* own p) void { g(); del(p); }",
+    "fn apply(fn (i32*) i32 g, i32* p) i32 { return g(p); }",
+    "fn through(i32 mut* own q) void { apply(reader, q); del(q); }",
+    "fn f(i32 mut* own p, i32* q, bool b) i32 { i32 x = *q;",
+    "    if (b) { del(p); return x; } i32* v = p; del(p); return f(new(i32), v, false); }",
+    "fn mf(bool b) void { if (b) { return; } mg(false); }",
+    "fn mg(bool b) void { mf(b); }",
+    "fn spin(bool b) void { if (b) { return; } spin(false); }",
+    "fn owner(i32 mut* own p) void { spin(false); }",
+    "extern fn ext() void;",
+    "fn direct(i32 mut* own p) i32 { i32* v = p; del(p); ext(); return *v; }",
+    "fn ext_ok(i32* p) i32 { ext(); return *p; }",
+    "fn two(i32 mut* own p, i32 mut* own q, bool b) void {",
+    "    if (b) { return; } del(p); }",
+    "fn zero(i32* p) i32 { return 0; }",
+    "fn two_targets(i32 mut* own p) i32 {",
+    "    i32* v = p; del(p); (fn (i32*) i32) mut f = reader; f = zero; return f(v); }",
+    "fn root() i32 { return 0; }",
+    "fn twice(i32 mut* own q) void { i32 mut* own mut r = new(i32);",
+    "    apply(reader, q); apply(reader, r); del(q); del(r); }",
+    "struct node { node mut* own next; i32 v; }",
+    "fn shallow(node mut* own n) void { del(n); }",
+    "fn shallow_caller(node mut* own n) void { shallow(move(n)); }",
+};
+
+fn open(ownership_source_env.env mut* e, string@ lines) void {
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut i = 0;
+    while (i < lines.len) {
+        strbuf.append(&text, lines[i]);
+        strbuf.push(&text, '\n');
+        i += 1;
+    }
+    ownership_source_env.open(e);
+    ownership_source_env.runtime(e);
+    assert(ownership_source_env.prepare(e, strbuf.view(&text)));
+    ownership_source.analyze(&e->source);
+    assert(ownership_source_calls.executed(&e->source.calls));
+}
+
+fn row(ownership_source_env.env mut* e, string name) ownership_source_calls.row* {
+    ownership_source.body* found = ownership_source_env.find(e, "main", name);
+    assert(found->calls != null);
+    return found->calls;
+}
+
+fn index_of(ownership_source_env.env mut* e, string name) u64 {
+    ownership_source.body* found = ownership_source_env.find(e, "main", name);
+    u64 mut i = 0;
+    while (i < e->source.bodies.len) {
+        ownership_source.body* candidate = &e->source.bodies[i];
+        if (candidate == found) { return i; }
+        i += 1;
+    }
+    panic("ownership_source_calls_test: body is absent");
+}
+
+// A declared body with complete proof: its correspondence, solver and proof are complete.
+fn proved(ownership_source_env.env mut* e, string name) void {
+    ownership_source_calls.row* r = row(e, name);
+    if (r->correspondence != ownership_source_local.status.complete ||
+        r->solver != ownership_source_local.status.complete ||
+        !ownership_api.successful(r->proof) || r->violations != 0 || r->shown_len != 0) {
+        eprintln(name, ": not proved, reason ", cast(r->proof.terminal.reason, u64),
+            ", gap ", cast(r->gap.terminal.reason, u64), ", violations ", r->violations);
+        assert(false);
+    }
+}
+
+// One validated violation of `kind` on `line`, which the report renders.
+fn violated(ownership_source_env.env mut* e, string name, ownership_api.event_kind kind,
+    u32 line) void {
+    ownership_source_calls.row* r = row(e, name);
+    if (r->violations != 1 || r->records_len != 1 || r->shown_len != 1 ||
+        r->records[0].event.value.kind != kind ||
+        r->records[0].event.value.source.line != line || ownership_api.successful(r->proof) ||
+        !r->proof.failed) {
+        eprintln(name, ": ", r->violations, " violations, ", r->shown_len, " shown");
+        assert(false);
+    }
+}
+
+// A body without a validated violation whose proof is not complete.
+fn unproved(ownership_source_env.env mut* e, string name) ownership_source_calls.row* {
+    ownership_source_calls.row* r = row(e, name);
+    if (r->violations != 0 || ownership_api.successful(r->proof)) {
+        eprintln(name, ": ", r->violations, " violations, proof complete ",
+            ownership_api.successful(r->proof));
+        assert(false);
+    }
+    return r;
+}
+
+// A body outside the declared scope: a fact of the body or of a callee is missing.
+fn outside(ownership_source_env.env mut* e, string name, ownership_api.incomplete_reason why)
+    ownership_source_calls.row* {
+    ownership_source_calls.row* r = row(e, name);
+    if (r->correspondence != ownership_source_local.status.incomplete ||
+        !r->gap.terminal.present || r->gap.terminal.reason != why) {
+        eprintln(name, ": correspondence ", cast(r->correspondence, u64), ", gap ",
+            cast(r->gap.terminal.reason, u64));
+        assert(false);
+    }
+    return r;
+}
+
+// The local run of the body validates no violation, so only calls_heap can report it.
+fn local_silent(ownership_source_env.env mut* e, string name) void {
+    assert(ownership_source_env.find(e, "main", name)->local.violations_len == 0);
+}
+
+fn cross_call_cases(ownership_source_env.env mut* e) void {
+    proved(e, "reader");
+    proved(e, "noop");
+    // A callee reads storage that the caller released before the call (D17.14).
+    violated(e, "released", ownership_api.event_kind.invalid_use, 2);
+    local_silent(e, "released");
+    proved(e, "fine");
+    // The callee releases the moved owner, and the caller reads its view after the call.
+    violated(e, "cross", ownership_api.event_kind.invalid_use, 5);
+    local_silent(e, "cross");
+    // Each of two targets of a call of a function value is a possibility only (fir.md 14.1,
+    // A04): the failed requirement of `reader` is unproved, not a violation, and it is the
+    // first unproved event that the body keeps.
+    ownership_source_calls.row* two = unproved(e, "two_targets");
+    assert(two->has_first_summary && two->first_summary.value.source.line == 34);
+    assert(two->first_summary.value.kind == ownership_api.event_kind.incomplete_proof);
+    assert(two->first_summary.value.evidence == ownership_api.evidence_kind.abstract_possibility);
+    assert(two->violations == 0 && two->records_len == 0);
+    // A known callee without effects keeps the obligation, so the leak at return validates.
+    violated(e, "known", ownership_api.event_kind.lost_ownership, 8);
+    local_silent(e, "known");
+    // The summary cannot export the move of an owning argument, so the facts of `moved` are
+    // incomplete for its callers: it leaves the declared scope.
+    ownership_source_calls.row* r = outside(e, "moved",
+        ownership_api.incomplete_reason.unknown_effect);
+    assert(r->violations == 0 && r->shown_len == 0);
+    println("cross-call cases ok");
+}
+
+// The solver substitutes the actual arguments before the callee effects and the result write
+// (D17.15, D19.8): two formals can name one caller allocation, and the result can name either.
+fn alias_cases(ownership_source_env.env mut* e) void {
+    // `sw(a, a, false)` returns `a`, so the read after `del(a)` is invalid, and `sw(r, a,
+    // false)` swaps its arguments in its self call and returns `a`. Only the summary solver
+    // sees each read. Its flow marks the failure unconditional, but no witness path decides
+    // the call, so the event is not a violation (toolchain 4.2). It is the first unproved
+    // event of the summary solver.
+    string[2] aliases = {"same", "other"};
+    u32[2] alias_lines = {11, 12};
+    u64 mut k = 0;
+    while (k < 2) {
+        ownership_source_calls.row* r = outside(e, aliases[k],
+            ownership_api.incomplete_reason.unknown_effect);
+        assert(r->violations == 0 && r->records_len == 0 && r->shown_len == 0);
+        assert(r->has_first_summary && r->first_summary.value.source.line == alias_lines[k]);
+        assert(r->first_summary.value.kind == ownership_api.event_kind.invalid_use);
+        assert(r->first_summary.value.evidence == ownership_api.evidence_kind.unconditional);
+        k += 1;
+    }
+    // The summary of `sw` is complete, but the heap solver loses the facts of its result: its
+    // own heap proof stops at an unknown reference, a missing fact of the body itself.
+    ownership_source_calls.row* sw = outside(e, "sw",
+        ownership_api.incomplete_reason.unknown_effect);
+    assert(ownership_api.successful(e->source.calls.summaries.summaries[index_of(e, "sw")].proof));
+    assert(sw->gap.terminal.source.line == 10);
+    // The proof of `sw` is its heap proof: complete summary proof does not make it complete.
+    assert(!ownership_api.successful(sw->proof));
+    assert(sw->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    // `sw(a, r, false)` returns `r`, so the release of `a` changes nothing that it reads. The
+    // heap summary of `sw` is not complete, so `kept` leaves the declared scope.
+    ownership_source_calls.row* kept = outside(e, "kept",
+        ownership_api.incomplete_reason.unknown_effect);
+    assert(kept->violations == 0);
+    // The aggregate result of `wrap` binds to `h` in the caller, and its leaf keeps `a`.
+    violated(e, "use_wrap", ownership_api.event_kind.invalid_use, 16);
+    local_silent(e, "use_wrap");
+    println("alias cases ok");
+}
+
+// An unknown fort effect keeps a possible normal return and each obligation (D17.18, fir.md
+// 14.1 A06): the cleanup after it is unproved, not a validated loss, and no release is assumed.
+fn unknown_effect_cases(ownership_source_env.env mut* e) void {
+    ownership_source_calls.row* keep = outside(e, "keep",
+        ownership_api.incomplete_reason.unknown_effect);
+    assert(keep->violations == 0 && !ownership_api.successful(keep->proof));
+    assert(!ownership_api.successful(e->source.calls.summaries.summaries[index_of(e,
+        "keep")].proof));
+    assert(!ownership_api.successful(e->source.calls.heaps.summaries[index_of(e, "keep")].proof));
+    ownership_source_calls.row* invoke = outside(e, "invoke",
+        ownership_api.incomplete_reason.unknown_effect);
+    assert(invoke->violations == 0);
+    // A callee with a residual fort target has no complete summary, so its caller lacks it.
+    outside(e, "apply", ownership_api.incomplete_reason.unknown_effect);
+    ownership_source_calls.row* through = outside(e, "through",
+        ownership_api.incomplete_reason.unknown_effect);
+    assert(through->violations == 0 && through->gap.terminal.source.line == 20);
+    // Two calls lack the facts of `apply`: the gap names the first one, on line 37.
+    ownership_source_calls.row* twice = outside(e, "twice",
+        ownership_api.incomplete_reason.unknown_effect);
+    assert(twice->gap.terminal.source.line == 37 && twice->gap.terminal.source.col < 23);
+    // `shallow` loses `n->next`: its summary is complete, and only its heap proof fails. The
+    // callee reports its own error, so the heap proof of its caller stays complete, and the
+    // call is the missing fact of the caller.
+    violated(e, "shallow", ownership_api.event_kind.lost_ownership, 39);
+    assert(ownership_api.successful(
+        e->source.calls.summaries.summaries[index_of(e, "shallow")].proof));
+    assert(ownership_api.successful(
+        e->source.calls.heaps.summaries[index_of(e, "shallow_caller")].proof));
+    ownership_source_calls.row* shallow_caller = outside(e, "shallow_caller",
+        ownership_api.incomplete_reason.unknown_effect);
+    assert(shallow_caller->gap.terminal.source.line == 40);
+    // `spin(false)` publishes no summary proof, so `owner` keeps its obligation past the call.
+    // The heap witness crosses the call and assumes that it returns (D17.18), though this one
+    // never does: the leak at the return is a validated violation, and it names the call.
+    violated(e, "owner", ownership_api.event_kind.lost_ownership, 26);
+    ownership_source_calls.row* owner = row(e, "owner");
+    assert(owner->correspondence == ownership_source_local.status.incomplete);
+    ownership_api.event_note@ notes = owner->records[0].event.value.notes;
+    string head = "this path needs 'spin' to return here; if it does not return, ";
+    assert(notes.len == 1 && notes[0].text.len > head.len &&
+        notes[0].text[0..head.len] == head);
+    assert(notes[0].role == ownership_api.note_role.assumption && notes[0].source.line == 26);
+    // The flow of each of `keep` and `owner` fails at the cleanup after the unknown call: a lost
+    // path, so its summary stops at an obligation, not at a missing fact.
+    ownership_summary_model.summary* kept_summary =
+        &e->source.calls.summaries.summaries[index_of(e, "keep")];
+    assert(kept_summary->proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(kept_summary->obligation);
+    assert(e->source.calls.summaries.summaries[index_of(e, "owner")].obligation);
+    println("unknown effect cases ok");
+}
+
+// A recursive component publishes its summaries only at a covered fixed point. A withdrawn
+// member with complete correspondence renders one record at its uncovered call (Open
+// question 1 of the calls_heap increment).
+fn recursion_cases(ownership_source_env.env mut* e) void {
+    ownership_source_calls.row* f = unproved(e, "f");
+    assert(f->correspondence == ownership_source_local.status.complete);
+    assert(e->source.calls.summaries.summaries[index_of(e, "f")].obligation);
+    assert(f->shown_len == 1 && f->shown_records[0].order.source.line == 22);
+    assert(f->shown_records[0].order.kind == ownership_api.event_kind.incomplete_proof);
+    ownership_source_calls.row* mf = unproved(e, "mf");
+    ownership_source_calls.row* mg = unproved(e, "mg");
+    assert(mf->correspondence == ownership_source_local.status.complete);
+    assert(mg->correspondence == ownership_source_local.status.complete);
+    // Both members share the terminal at the call `mg(false)`: `mf` holds it and renders it.
+    assert(mf->shown_len == 1 && mf->shown_records[0].event == null);
+    assert(mf->shown_records[0].order.source.line == 23);
+    assert(mg->shown_len == 0);
+    assert(mf->summary_ledger == mg->summary_ledger && mf->heap_ledger == mg->heap_ledger);
+    ownership_source_calls.row* spin = unproved(e, "spin");
+    assert(spin->shown_len == 1 && spin->shown_records[0].order.source.line == 25);
+    println("recursion cases ok");
+}
+
+// Until the extern boundary joins the solvers, a body with an extern call lacks the facts of
+// that call (D17.13). The local run validates the use after release in `direct` on its own.
+fn extern_cases(ownership_source_env.env mut* e) void {
+    ownership_source_calls.row* direct = outside(e, "direct",
+        ownership_api.incomplete_reason.missing_ffi);
+    assert(direct->gap.terminal.source.line == 28);
+    outside(e, "ext_ok", ownership_api.incomplete_reason.missing_ffi);
+    println("extern cases ok");
+}
+
+// Each component computation of each solver has one ledger, owned by its first member, with
+// the FIR size of all its members (toolchain 1.1).
+fn ledger_cases(ownership_source_env.env mut* e) void {
+    ownership_source_calls.context* c = &e->source.calls;
+    u64 components = cast(e->source.graph.component_count, u64);
+    assert(c->ledgers_len == 2 * components);
+    u64 mut summary_size = 0;
+    u64 mut heap_size = 0;
+    u64 mut i = 0;
+    while (i < c->ledgers_len) {
+        ownership_source_calls.ledger* l = &c->ledgers[i];
+        assert(l->solver == (i < components ? ownership_source_calls.solver_kind.summary :
+            ownership_source_calls.solver_kind.heap));
+        assert(l->meter.bounds.w == 65536 + 1024 * l->fir_size);
+        if (i < components) { summary_size += l->fir_size; } else { heap_size += l->fir_size; }
+        i += 1;
+    }
+    assert(summary_size == e->source.graph.fir_size && heap_size == summary_size);
+    ownership_source_calls.row* mf = row(e, "mf");
+    ownership_source_calls.ledger* pair = &c->ledgers[mf->summary_ledger];
+    ownership_source.body* first = ownership_source_env.find(e, "main", "mf");
+    ownership_source.body* second = ownership_source_env.find(e, "main", "mg");
+    assert(ownership_keys.function(pair->owner, first->key) == 0);
+    assert(pair->fir_size == first->live.fir_size + second->live.fir_size);
+    println("ledgers ok");
+}
+
+// The local run validates the leak, so the calls_heap row drops its own records of it and
+// renders nothing more: its proof stays incomplete at that operation (toolchain 1.1).
+fn exclusion_cases(ownership_source_env.env mut* e) void {
+    ownership_source.body* found = ownership_source_env.find(e, "main", "leak");
+    assert(found->local.violations_len == 1);
+    ownership_source_calls.row* r = unproved(e, "leak");
+    assert(r->excluded && r->shown_len == 0 && r->records_len == 0);
+    assert(r->proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(r->proof.terminal.source.line == 9);
+    println("exclusion ok");
+}
+
+// Each body keeps its validated events and, for each solver, its first unproved event in the
+// canonical event order. It counts the other events and keeps none (toolchain 4.2).
+fn retention_cases(ownership_source_env.env mut* e) void {
+    ownership_source_calls.row* r = unproved(e, "two");
+    // The early return loses `p` and `q`, and the end loses `q`: the heap proves no loss
+    // without a witness of `b`, so each loss is unproved there. The summary flow marks each
+    // loss unconditional, but it decides no condition on the path, so none is a violation:
+    // each solver keeps its first event and counts the others (toolchain 4.2).
+    assert(r->records_len == 0 && r->correspondence == ownership_source_local.status.complete);
+    assert(r->has_first_heap && r->first_heap.value.text == "p");
+    assert(r->first_heap.value.source.line == 31);
+    assert(r->has_first_summary &&
+        r->first_summary.value.kind == ownership_api.event_kind.lost_ownership);
+    assert(r->first_summary.value.evidence == ownership_api.evidence_kind.unconditional);
+    assert(r->dropped == 4);
+    // The report renders the first unproved event of the summary solver as incomplete proof.
+    assert(r->shown_len == 1 && r->shown_records[0].event == &r->first_summary);
+    assert(r->shown_records[0].order.kind == ownership_api.event_kind.incomplete_proof);
+    assert(r->proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    println("retention ok");
+}
+
+// A flow failure stops at an obligation when the facts of the body name it: a definite
+// failure, or an unproved one for a lost path, capture or boundary. An unknown effect or a
+// missing correspondence is a missing fact (toolchain 1.1).
+fn obligation_reasons() void {
+    ownership_api.operation_position op = ownership_api.operation_position{};
+    ownership_api.source_position at = ownership_api.source_position{};
+    ownership_api.proof_status mut definite = ownership_api.proof_status{
+        .kind = ownership_api.proof_kind.complete};
+    definite.failed = true;
+    assert(ownership_summary.obligation_failure(definite));
+    assert(ownership_summary.obligation_failure(ownership_api.incomplete(
+        ownership_api.incomplete_reason.missing_path, op, at)));
+    assert(ownership_summary.obligation_failure(ownership_api.incomplete(
+        ownership_api.incomplete_reason.missing_capture, op, at)));
+    assert(ownership_summary.obligation_failure(ownership_api.incomplete(
+        ownership_api.incomplete_reason.missing_boundary, op, at)));
+    assert(!ownership_summary.obligation_failure(ownership_api.incomplete(
+        ownership_api.incomplete_reason.unknown_effect, op, at)));
+    assert(!ownership_summary.obligation_failure(ownership_api.incomplete(
+        ownership_api.incomplete_reason.missing_correspondence, op, at)));
+    assert(!ownership_summary.obligation_failure(ownership_api.incomplete(
+        ownership_api.incomplete_reason.missing_ffi, op, at)));
+    println("obligation reasons ok");
+}
+
+// A self call after 40 scalar declarations needs more summary work than the bound of its
+// FIR size. The refusal stops the computation: the solver is incomplete, the ledger keeps
+// the first refusal, and the report renders it as a budget error, not as a record.
+fn work_refusal_cases() void {
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    strbuf.append(&text, "fn walk(i32* p, bool b) i32 { i32 x0 = *p;");
+    u64 mut k = 1;
+    while (k < 40) {
+        strbuf.append(&text, " i32 x");
+        strbuf.append_u64(&text, k);
+        strbuf.append(&text, " = x");
+        strbuf.append_u64(&text, k - 1);
+        strbuf.append(&text, " + 1;");
+        k += 1;
+    }
+    strbuf.append(&text, " if (b) { return x39; } return walk(p, true); }");
+    string[1] lines = {strbuf.view(&text)};
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    open(&e, lines[..]);
+    defer ownership_source_env.close(&e);
+    ownership_source_calls.row* r = row(&e, "walk");
+    assert(r->correspondence == ownership_source_local.status.complete);
+    assert(r->solver == ownership_source_local.status.incomplete);
+    assert(r->proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(r->proof.terminal.limit.category == ownership_api.limit_category.w);
+    assert(r->shown_len == 0 && r->violations == 0);
+    ownership_source_calls.ledger* l = &e.source.calls.ledgers[r->summary_ledger];
+    assert(l->work_refusal.terminal.limit.category == ownership_api.limit_category.w);
+    assert(l->first_refusal.terminal.present);
+    assert(l->meter.used.w == l->meter.bounds.w);
+    assert(l->meter.bounds.w == 65536 + 1024 * l->fir_size);
+    println("work refusal ok");
+}
+
+// The producer releases its summaries, rows, kept events and ledgers. Repeated analyses of
+// programs with violations, withdrawn components and refusals keep the heap flat.
+fn teardown_cases() void {
+    u64 mut round = 0;
+    u64 mut early = 0;
+    while (round < 12) {
+        {
+            ownership_source_env.env mut e = ownership_source_env.env{};
+            open(&e, SOURCE[..]);
+            assert(e.source.calls.ledgers_len > 0);
+            ownership_source_env.close(&e);
+            assert(e.source.calls.rows.len == 0 && e.source.calls.ledgers_len == 0);
+        }
+        if (round == 4) { early = heap.system_view(); }
+        round += 1;
+    }
+    assert(heap.distance(early, heap.system_view()) < 4096);
+    println("teardown ok");
+}
+
+fn main() i32 {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    open(&e, SOURCE[..]);
+    defer ownership_source_env.close(&e);
+    cross_call_cases(&e);
+    alias_cases(&e);
+    unknown_effect_cases(&e);
+    recursion_cases(&e);
+    extern_cases(&e);
+    ledger_cases(&e);
+    exclusion_cases(&e);
+    retention_cases(&e);
+    obligation_reasons();
+    work_refusal_cases();
+    teardown_cases();
+    return 0;
+}

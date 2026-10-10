@@ -424,7 +424,7 @@ fn effects() void {
     ownership_heap_env.closure mut c = ownership_heap_env.closure{};
     defer ownership_heap_env.close(&c);
     cross(&c);
-    assert(texts(&c, "lost_ret", "") == 1);
+    assert(texts(&c, "lost_ret", "the result") == 1);
     assert(texts(&c, "uncovered", "h->p") == 1);
     assert(texts(&c, "covered", "h->p") == 0);
 }
@@ -786,6 +786,20 @@ fn drained_storage() void {
     assert(ownership_heap_env.failed(&c, "leak_drain"));
     assert(ownership_heap_env.first_text(&c, "leak_drain") == "z");
     assert(ownership_heap_env.failed(&c, "param_drain"));
+    ownership_heap_env.event_row view = ownership_heap_env.first(&c, "view_drain");
+    // `drain` loops; the witness assumes that it returns, and each event names the call.
+    assert(view.line == 7 && ownership_heap_env.assumes(&view, 1, 7,
+        "this path needs 'drain' to return here"));
+    ownership_heap_env.event_row lost = ownership_heap_env.first(&c, "leak_drain");
+    assert(lost.line == 9 && ownership_heap_env.assumes(&lost, 1, 8,
+        "this path needs 'drain' to return here"));
+    // `l->head` reads through the parameter first, and `v->v` through the head that it read:
+    // the witness assumes that each is not null.
+    ownership_heap_env.event_row param = ownership_heap_env.first(&c, "param_drain");
+    assert(param.line == 11 &&
+        ownership_heap_env.assumes(&param, 3, 11, "this path needs 'l' to be non-null here"));
+    assert(ownership_heap_env.names_call(&param, 1, "drain"));
+    assert(ownership_heap_env.names_null(&param, 2, "v"));
 }
 
 // An owner of unknown status that ends loses its obligation with an incomplete-proof event. Its
