@@ -29,6 +29,7 @@ SOURCE_SETS = (
     ("test/fort/*.ft", ("src", "src/fort", "test/fort/support")),
     ("test/fort/support/*.ft", ("src", "src/fort", "test/fort/support")),
     ("test/lsp/*.ft", ("src", "src/fort", "test/fort/support")),
+    ("test/ownership/*.ft", ("src", "src/fort", "test/fort/support")),
 )
 SOURCE_GLOBS = tuple(glob for glob, _ in SOURCE_SETS)
 TARGETS = ("linux", "darwin")

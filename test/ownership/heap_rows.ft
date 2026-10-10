@@ -1,0 +1,42 @@
+/// Prints the heap summary of each function of one source file, as the heap solver alone solves
+/// the closure of every function of the file (D17.16, D17.18).
+///
+/// Usage: heap_rows <file.ft>. Run it in an empty directory of its own: the test environment
+/// writes its sandboxes there. The file must check with no diagnostic in a sandbox whose `std`
+/// holds only a runtime, so it can import no module. Each line of output is one row:
+/// `<name> <verdict> <reason> <returns> <interface> <post slots> <post atoms> <events>`.
+/// The verdict is `proved`, `failed` or `unproved`; the reason is the incomplete reason of the
+/// proof; `<interface>` counts the interface atoms; the post counts are of the exit state; and
+/// `<events>` counts the events of the summary. `test/ownership_driver_test.py` compares the rows
+/// with `test/ownership/heap_rows.txt`.
+import ownership_gate_env;
+import ownership_heap;
+import ownership_heap_env;
+import std.sys;
+
+fn main() i32 {
+    string@ args = sys.args();
+    if (args.len != 2) {
+        eprintln("usage: heap_rows <file.ft>");
+        return 2;
+    }
+    ownership_gate_env.source mut file = ownership_gate_env.source{};
+    defer ownership_gate_env.close(&file);
+    if (!ownership_gate_env.read(&file, args[1])) {
+        eprintln("heap_rows: cannot read ", args[1]);
+        return 2;
+    }
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, file.lines[..], file.names[..]);
+    u64 mut i = 0;
+    while (i < file.names.len) {
+        string name = file.names[i];
+        ownership_heap.summary* s = ownership_heap_env.summary(&c, name);
+        println(name, " ", ownership_gate_env.heap_verdict(&c, name), " ",
+            ownership_gate_env.reason_name(s->proof.terminal.reason), " ", s->returns, " ",
+            s->interface.len, " ", s->post.slots_len, " ", s->post.atoms_len, " ", s->events);
+        i += 1;
+    }
+    return 0;
+}

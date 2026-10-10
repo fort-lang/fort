@@ -10,7 +10,6 @@ import ownership_heap;
 import ownership_keys;
 import ownership_limits;
 
-u64 BODIES = 32;
 u64 EVENTS = 64;
 u64 TEXT = 64;
 
@@ -66,11 +65,12 @@ fn finish(counters mut* counts) void {
 }
 
 // Function i gets declaration key i + 1, so the graph keeps the names in their given order.
+// Open allocates one entry of each span for each named function, and close frees them.
 struct closure {
     lower_env.env checked;
-    fir.func[32] functions;
-    ownership_graph.body_input[32] graph_inputs;
-    ownership_heap.body_input[32] inputs;
+    fir.func mut@ own functions;
+    ownership_graph.body_input mut@ own graph_inputs;
+    ownership_heap.body_input mut@ own inputs;
     ownership_flow.source_file_binding[1] files;
     ownership_api.services services;
     counters counts;
@@ -160,8 +160,10 @@ fn begin(void mut* opaque, u64 size, ownership_api.limit_table mut* limits) bool
 
 /// Lowers and verifies each named function, then builds the call graph of all of them.
 fn open(closure mut* c, string@ text, string@ names) void {
-    assert(names.len <= BODIES);
     lower_env.open(&c->checked);
+    c->functions = new(fir.func, names.len);
+    c->graph_inputs = new(ownership_graph.body_input, names.len);
+    c->inputs = new(ownership_heap.body_input, names.len);
     lower_env.check_lines(&c->checked, text, true);
     c->services.budget_context = cast(&c->counts, void mut*);
     c->services.event_context = cast(&c->counts, void mut*);
@@ -224,6 +226,9 @@ fn close(closure mut* c) void {
         fir.func_free(&c->functions[i]);
         i += 1;
     }
+    del(c->functions);
+    del(c->graph_inputs);
+    del(c->inputs);
     lower_env.close(&c->checked);
 }
 

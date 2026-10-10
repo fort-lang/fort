@@ -2,9 +2,12 @@
 """Check actual compiler ownership reports and selected driver behavior."""
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
+import difflib
 import json
 import os
 from pathlib import Path
+import re
 import resource
 import signal
 import subprocess
@@ -18,6 +21,163 @@ import ownership_audit as audit
 
 CHECKOUT = Path(__file__).resolve().parents[1]
 OPTIONS = None
+
+
+# The soundness gates of the solvers alone: test/ownership/heap_rows.ft prints the heap summary of
+# each function of a file, and test/ownership/solvers_alone.ft prints the verdict of each solver
+# alone for each faulty body (D17.14, D17.18).
+OWNERSHIP = CHECKOUT / "test" / "ownership"
+HEAP_ROWS_GOLDEN = OWNERSHIP / "heap_rows.txt"
+FAULTY_PROBES = OWNERSHIP / "solvers" / "faulty.json"
+FALSE_ACCEPTS = OWNERSHIP / "solvers" / "false_accepts.txt"
+HEAP_ROWS_COLUMNS = "# name verdict reason returns interface post_slots post_atoms events\n"
+# The manifest programs that heap_rows cannot read, each with its reason. lower_env checks a
+# text in a sandbox whose `std` holds only a runtime. A skipped program that heap_rows reads
+# fails the test, as a listed pass of test/lang/xfail.txt does.
+HEAP_ROWS_SKIPPED = {
+    "test/ownership/qualification/counterparts/range_owning_string_ok.ft": "imports std.str",
+    "test/lang/run/ownership/056_own_string_round_trip.ft": "imports std.str",
+}
+SOLVERS = ("summary", "heap")
+LEDGER_CLASSES = ("A", "B", "D", "E")
+TEXT_ARRAY = re.compile(r"^(\s*)string\[[^\]]*\] (?:mut )?(\w+) = \{(.*)$")
+STRING_LITERAL = re.compile(r'"((?:[^"\\]|\\.)*)"')
+# A function of a heap test that copies a base text and then a tail into `out`.
+TEXT_JOINER = re.compile(r"^fn (\w+)\(string@ tail, string mut@ out\) u64 \{\n"
+                         r"    u64 mut n = 0;\n    while \(n < (\w+)\.len\)", re.M)
+LEDGER_ENTRY = re.compile(r"^(\S+):(\w+) (\w+) # (\w+)$")
+LEDGER_BOUND = re.compile(r"^# at most (\d+) entries$", re.M)
+
+
+def unescape(literal):
+    """The text of the body of one fort string literal."""
+    return re.sub(r"\\(.)", lambda m: {"n": "\n", "t": "\t"}.get(m.group(1), m.group(1)),
+                  literal)
+
+
+def heap_texts(source):
+    """The source texts of one heap test, as (label, lines) in source order.
+
+    A text is a `string[N]` array whose literals are not all identifiers (a list of names is all
+    identifiers). A top-level array has its name as label; an array inside a function has the
+    label `<function>.<name>`. A local array named `tail` goes to a joiner function, which puts
+    a top-level base text before it, so its text is the base and then the tail. The first call
+    that takes `tail[..]` before the `}` that ends the function names the joiner.
+    """
+    joiners = dict(TEXT_JOINER.findall(source))
+    lines = source.splitlines()
+    owner = None
+    arrays = []
+    i = 0
+    while i < len(lines):
+        declared = re.match(r"fn (\w+)", lines[i])
+        if declared:
+            owner = declared.group(1)
+        start = TEXT_ARRAY.match(lines[i])
+        if not start:
+            i += 1
+            continue
+        indent, name, rest = start.groups()
+        body = [rest]
+        while not re.search(r"\}\s*;\s*$", body[-1]):
+            i += 1
+            body.append(lines[i])
+        elements = [unescape(text) for part in body for text in STRING_LITERAL.findall(part)]
+        base = None
+        if indent and name == "tail":
+            end = next((n for n in range(i + 1, len(lines)) if lines[n].startswith("}")),
+                       len(lines))
+            calls = [m.group(1) for line in lines[i + 1:end]
+                     for m in [re.search(r"(\w+)\(tail\[\.\.\]", line)] if m]
+            if not calls or calls[0] not in joiners:
+                raise ValueError(f"{owner}.tail: no joiner takes it")
+            base = joiners[calls[0]]
+        if elements and not all(re.fullmatch(r"\w*", text) for text in elements):
+            arrays.append((owner if indent else None, name, elements, base))
+        i += 1
+    top = {name: elements for owner, name, elements, _ in arrays if owner is None}
+    out = []
+    for owner, name, elements, base in arrays:
+        label = name if owner is None else f"{owner}.{name}"
+        if label in (known for known, _ in out):
+            raise ValueError(f"{label}: two texts have this label")
+        out.append((label, (top[base] if base else []) + elements))
+    return out
+
+
+def faulty_bodies(lines, errors):
+    """The sorted names of the functions that hold the error lines: for each line, the last
+    function that a line at or before it declares."""
+    declared = [(n + 1, m.group(1)) for n, line in enumerate(lines)
+                for m in [re.match(r"fn (\w+)", line)] if m]
+    out = set()
+    for line in errors:
+        owners = [name for at, name in declared if at <= line]
+        if not owners:
+            raise ValueError(f"line {line}: no function holds it")
+        out.add(owners[-1])
+    return sorted(out)
+
+
+def read_ledger(text):
+    """The entries of a false-accept ledger: {(file, body, solver): class}.
+
+    A line is blank, a `#` comment, or `<file>:<body> <solver> # <class>`. Any other line, an
+    unknown solver or class, and a repeated entry raise ValueError.
+    """
+    out = {}
+    for number, line in enumerate(text.splitlines(), 1):
+        if not line.strip() or line.startswith("#"):
+            continue
+        entry = LEDGER_ENTRY.match(line)
+        if not entry:
+            raise ValueError(f"line {number}: not '<file>:<body> <solver> # <class>'")
+        path, body, solver, kind = entry.groups()
+        if solver not in SOLVERS:
+            raise ValueError(f"line {number}: unknown solver {solver}")
+        if kind not in LEDGER_CLASSES:
+            raise ValueError(f"line {number}: unknown class {kind}")
+        if (path, body, solver) in out:
+            raise ValueError(f"line {number}: repeated entry")
+        out[(path, body, solver)] = kind
+    return out
+
+
+def ledger_bound(text):
+    """The N of the one `# at most N entries` line of a ledger. The bound only falls, so a
+    change that lowers it is a one-line diff, and a ledger longer than N fails."""
+    bounds = LEDGER_BOUND.findall(text)
+    if len(bounds) != 1:
+        raise ValueError("the ledger needs one '# at most N entries' line")
+    return int(bounds[0])
+
+
+def qualification_cases():
+    """The cases of the qualification manifest: (path, expected verdict, error lines). An
+    approved fixture names its error positions; a linear or zero-element case marks them with
+    a `//! error:` directive."""
+    fixtures = {}
+    for name in json.loads((OWNERSHIP / "qualification" / "manifest.json").read_text())[
+            "approved_manifests"]:
+        for fixture in json.loads((CHECKOUT / name).read_text())["fixtures"]:
+            fixtures[fixture["file"][:-3]] = fixture
+    out = []
+    for case in json.loads((OWNERSHIP / "qualification" / "manifest.json").read_text())["cases"]:
+        lines = (CHECKOUT / case["path"]).read_text().splitlines()
+        fixture = fixtures.get(case["id"])
+        verdict = None if fixture is None else fixture["expected_verdict"]
+        if fixture is not None:
+            errors = [p["line"] for p in fixture["expected_positions"] if p["kind"] == "error"]
+        else:
+            errors = [n + 1 for n, line in enumerate(lines) if "//! error:" in line]
+        if verdict is None and case["group"] == "counterpart":
+            verdict = "accept"
+        if verdict is None and lines[0].strip() == "//! run":
+            verdict = "accept"
+        if verdict is None and lines[0].strip() == "//! fail":
+            verdict = "reject"
+        out.append((case["path"], verdict, errors))
+    return out
 
 
 class OwnershipDriverTest(unittest.TestCase):
@@ -1313,6 +1473,227 @@ class OwnershipDriverTest(unittest.TestCase):
             os.environ[key] = value
 
 
+class GateInputTest(unittest.TestCase):
+    """The pure helpers of the soundness gates, without a compiler."""
+
+    HEAP_TEST = (
+        "string[2] BASE = {\n"
+        '    "struct node { i32 v; }",\n'
+        '    "fn base() void { }",\n'
+        "};\n"
+        "fn joined(string@ tail, string mut@ out) u64 {\n"
+        "    u64 mut n = 0;\n"
+        "    while (n < BASE.len) { out[n] = BASE[n]; n += 1; }\n"
+        "    return n;\n"
+        "}\n"
+        "fn first() void {\n"
+        '    string[1] tail = {"fn one() void { panic(\\"no\\"); }"};\n'
+        "    string[4] mut text = {};\n"
+        "    u64 n = joined(tail[..], text[..]);\n"
+        '    string[2] names = {"base", "one"};\n'
+        "}\n"
+        "fn second() void {\n"
+        "    string[1] text = {\n"
+        '        "fn two() void { }",\n'
+        "    };\n"
+        "}\n"
+    )
+
+    def test_heap_texts_join_each_tail_to_its_base(self):
+        texts = heap_texts(self.HEAP_TEST)
+        self.assertEqual([label for label, _ in texts], ["BASE", "first.tail", "second.text"])
+        self.assertEqual(texts[1][1], ["struct node { i32 v; }", "fn base() void { }",
+                                       'fn one() void { panic("no"); }'])
+        self.assertEqual(texts[2][1], ["fn two() void { }"])
+
+    def test_heap_texts_refuse_a_tail_without_a_joiner(self):
+        text = self.HEAP_TEST.replace("joined(tail", "other(tail")
+        with self.assertRaisesRegex(ValueError, "first.tail: no joiner takes it"):
+            heap_texts(text)
+
+    def test_heap_texts_look_for_the_joiner_only_in_the_function_of_the_tail(self):
+        text = self.HEAP_TEST.replace("    u64 n = joined(tail[..], text[..]);\n", "")
+        text += "fn later() void {\n    u64 n = joined(tail[..], text[..]);\n}\n"
+        with self.assertRaisesRegex(ValueError, "first.tail: no joiner takes it"):
+            heap_texts(text)
+
+    def test_heap_texts_refuse_two_texts_with_one_label(self):
+        text = self.HEAP_TEST.replace("fn second()", "fn first()")
+        with self.assertRaisesRegex(ValueError, "first.text: two texts have this label"):
+            heap_texts(text + text[text.index("fn first() void {\n    string[1] text"):])
+
+    def test_heap_texts_skip_a_list_of_names(self):
+        texts = heap_texts('string[2] NAMES = {"base", ""};\n')
+        self.assertEqual(texts, [])
+
+    def test_faulty_bodies_take_the_last_function_at_or_before_each_error(self):
+        lines = ["struct s { i32 v; }", "fn a() void {", "}", "fn b() void {", "}"]
+        self.assertEqual(faulty_bodies(lines, [2, 3]), ["a"])
+        self.assertEqual(faulty_bodies(lines, [5, 3]), ["a", "b"])
+        with self.assertRaisesRegex(ValueError, "line 1: no function holds it"):
+            faulty_bodies(lines, [1])
+
+    def test_ledger_reads_entries_and_skips_comments(self):
+        ledger = read_ledger("# rule\n\nf.ft:main heap # E\ng.ft:x summary # A\n")
+        self.assertEqual(ledger, {("f.ft", "main", "heap"): "E", ("g.ft", "x", "summary"): "A"})
+
+    def test_ledger_refuses_a_bad_line(self):
+        for text, message in (("f.ft:main heap\n", "line 1: not"),
+                              ("f.ft:main both # A\n", "line 1: unknown solver both"),
+                              ("f.ft:main heap # C\n", "line 1: unknown class C"),
+                              ("f.ft:m heap # A\nf.ft:m heap # B\n", "line 2: repeated entry")):
+            with self.subTest(text=text):
+                with self.assertRaisesRegex(ValueError, message):
+                    read_ledger(text)
+
+    def test_ledger_of_comments_only_is_empty(self):
+        self.assertEqual(read_ledger("# rule\n# at most 0 entries\n\n"), {})
+        self.assertEqual(ledger_bound("# rule\n# at most 0 entries\n\n"), 0)
+
+    def test_ledger_bound_needs_one_line(self):
+        self.assertEqual(ledger_bound("# at most 13 entries\nf.ft:m heap # A\n"), 13)
+        for text in ("f.ft:m heap # A\n", "# at most 1 entries\n# at most 2 entries\n"):
+            with self.subTest(text=text):
+                with self.assertRaisesRegex(ValueError, "one '# at most N entries' line"):
+                    ledger_bound(text)
+
+    def test_the_checked_in_ledger_stays_within_its_bound(self):
+        text = FALSE_ACCEPTS.read_text()
+        self.assertLessEqual(len(read_ledger(text)), ledger_bound(text))
+
+    def test_each_probe_program_has_its_faulty_bodies(self):
+        probes = json.loads(FAULTY_PROBES.read_text())["faulty"]
+        files = sorted(path.name for path in (OWNERSHIP / "probes").glob("*.ft"))
+        self.assertEqual(sorted(probes), files)
+        for name, bodies in probes.items():
+            lines = (OWNERSHIP / "probes" / name).read_text().splitlines()
+            names = {m.group(1) for line in lines for m in [re.match(r"fn (\w+)", line)] if m}
+            with self.subTest(probe=name):
+                self.assertTrue(bodies)
+                self.assertLessEqual(set(bodies), names)
+
+
+class SoundnessGateTest(unittest.TestCase):
+    """Builds the two gate programs once and runs them over their inputs."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temporary = tempfile.TemporaryDirectory(prefix="fort-ownership-gates-")
+        cls.root = Path(cls.temporary.name)
+        cls.programs = {}
+        for name in ("heap_rows", "solvers_alone"):
+            binary = cls.root / name
+            built = subprocess.run(
+                [OPTIONS.fort, "--cc", OPTIONS.cc, "--std-dir", OPTIONS.std_dir,
+                 "-I", str(CHECKOUT / "src" / "fort"),
+                 "-I", str(CHECKOUT / "test" / "fort" / "support"),
+                 "-o", str(binary), str(OWNERSHIP / f"{name}.ft")],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=900)
+            if built.returncode != 0:
+                cls.temporary.cleanup()
+                raise AssertionError(f"{name}.ft does not build: {built.stderr.decode()}")
+            cls.programs[name] = binary
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temporary.cleanup()
+
+    def run_gate(self, name, path, *bodies):
+        """Runs gate program `name` over `path`. The test environment writes its sandboxes into
+        the working directory, so each run gets a directory."""
+        where = Path(tempfile.mkdtemp(dir=self.root))
+        return subprocess.run([str(self.programs[name]), str(path), *bodies], cwd=where,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+                              timeout=600)
+
+    def gate(self, name, path, *bodies):
+        """The stdout of run_gate, which must exit 0."""
+        run = self.run_gate(name, path, *bodies)
+        self.assertEqual(run.returncode, 0, f"{name} {path}: {run.stderr.decode()}")
+        return run.stdout.decode()
+
+    def heap_rows_inputs(self):
+        """(label, path) of each input of heap_rows: the programs of the qualification manifest
+        but HEAP_ROWS_SKIPPED, the probe programs, and each text of the 11 heap tests."""
+        programs = sorted(path for path, _, _ in qualification_cases())
+        self.assertEqual(len(programs), 109)
+        self.assertTrue(set(HEAP_ROWS_SKIPPED) <= set(programs))
+        out = [(path, CHECKOUT / path) for path in programs if path not in HEAP_ROWS_SKIPPED]
+        probes = sorted((OWNERSHIP / "probes").glob("*.ft"))
+        self.assertEqual(len(probes), 10)
+        out += [(path.relative_to(CHECKOUT).as_posix(), path) for path in probes]
+        heap_tests = sorted((CHECKOUT / "test" / "fort").glob("ownership_heap*_test.ft"))
+        self.assertEqual(len(heap_tests), 11)
+        texts = self.root / "texts"
+        texts.mkdir(exist_ok=True)
+        for test in heap_tests:
+            found = heap_texts(test.read_text())
+            self.assertTrue(found, test.name)
+            for label, lines in found:
+                text = texts / f"{test.stem}.{label}.ft"
+                text.write_text("".join(line + "\n" for line in lines))
+                out.append((f"{test.relative_to(CHECKOUT).as_posix()}:{label}", text))
+        return out
+
+    def test_heap_rows_match_the_golden(self):
+        # Each row is the heap summary of one function. A change of the heap solver changes
+        # rows, and the diff of the golden shows each changed verdict. `--bless` writes it.
+        inputs = self.heap_rows_inputs()
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            rows = list(pool.map(lambda item: self.gate("heap_rows", item[1]), inputs))
+        found = HEAP_ROWS_COLUMNS + "".join(
+            f"== {label}\n{text}" for (label, _), text in zip(inputs, rows))
+        self.assertTrue(all(text for text in rows))
+        if OPTIONS.bless:
+            HEAP_ROWS_GOLDEN.write_text(found)
+        expected = HEAP_ROWS_GOLDEN.read_text()
+        diff = "".join(difflib.unified_diff(expected.splitlines(True), found.splitlines(True),
+                                            "heap_rows.txt", "found", n=1))
+        self.assertEqual(diff, "", "heap_rows changed; rerun with --bless and read the diff")
+
+    def test_heap_rows_still_cannot_read_each_skipped_program(self):
+        # A skip whose program heap_rows reads is stale: delete it and bless its rows.
+        for path, reason in HEAP_ROWS_SKIPPED.items():
+            with self.subTest(path=path):
+                run = self.run_gate("heap_rows", CHECKOUT / path)
+                self.assertNotEqual(run.returncode, 0, f"{path} reads; drop its skip")
+                self.assertIn("not found", run.stderr.decode(), reason)
+
+    def test_solvers_alone_prove_only_the_ledger(self):
+        # A body is faulty because its source has the expected error: the error line of a
+        # reject case, or the entry of faulty.json for a probe. Neither solver alone may prove
+        # one outside the ledger, each entry must still prove, and the ledger holds at most the
+        # entries that its bound line names.
+        cases = [(path, errors) for path, verdict, errors in qualification_cases()
+                 if verdict == "reject"]
+        self.assertEqual(len(cases), 37)
+        items = [(path, faulty_bodies((CHECKOUT / path).read_text().splitlines(), errors))
+                 for path, errors in cases]
+        self.assertEqual(sum(len(bodies) for _, bodies in items), 37)
+        probes = json.loads(FAULTY_PROBES.read_text())["faulty"]
+        items += [(f"test/ownership/probes/{name}", bodies) for name, bodies in probes.items()]
+        self.assertEqual(sum(len(bodies) for _, bodies in items), 62)
+
+        def verdicts(item):
+            path, bodies = item
+            rows = [line.split() for line in self.gate("solvers_alone", CHECKOUT / path,
+                                                       *bodies).splitlines()]
+            self.assertEqual([row[0] for row in rows], bodies, path)
+            return [(path, row[0], solver, verdict) for row in rows
+                    for solver, verdict in zip(SOLVERS, row[1:])]
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            found = [row for rows in pool.map(verdicts, items) for row in rows]
+        self.assertEqual(len(found), 2 * 62)
+        proved = {(path, body, solver) for path, body, solver, verdict in found
+                  if verdict == "proved"}
+        ledger = read_ledger(FALSE_ACCEPTS.read_text())
+        self.assertLessEqual(len(ledger), ledger_bound(FALSE_ACCEPTS.read_text()))
+        self.assertEqual({entry for entry in proved if entry[2] == "summary"}, set())
+        self.assertEqual(sorted(proved - set(ledger)), [], "a false accept outside the ledger")
+        self.assertEqual(sorted(set(ledger) - proved), [], "a ledger entry no longer proves")
+
+
 def main():
     global OPTIONS
     parser = argparse.ArgumentParser(description=__doc__)
@@ -1320,6 +1701,8 @@ def main():
     parser.add_argument("--std-dir", required=True)
     parser.add_argument("--cc", required=True)
     parser.add_argument("--opt", required=True)
+    parser.add_argument("--bless", action="store_true",
+                        help="write test/ownership/heap_rows.txt from the rows of heap_rows")
     OPTIONS, remaining = parser.parse_known_args()
     OPTIONS.fort = str(Path(OPTIONS.fort).resolve())
     OPTIONS.std_dir = str(Path(OPTIONS.std_dir).resolve())
