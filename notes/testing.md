@@ -700,6 +700,32 @@ bullet at a time and without a rewrite.
   `validate` holds the manifest counts and the approved hashes without a compiler.
   CI runs only `ownership_matrix_selftest`, over a fake compiler. No CI test runs the matrix yet.
   Register the matrix only with the complete ownership feature.
+- **Each solver alone runs over every faulty body before a producer enters CI.** PR 103 ran 8
+  review rounds, and no round looked for a false accept before round 8. No test ran a solver alone.
+  Round 8 found that the heap solver alone proves at least 14 bodies with real errors. Most of
+  those classes were on main already. So a test runs each solver alone over every faulty body.
+  That test passes before any producer of that solver joins CI. Every review round carries a
+  counted false-accept set: a number from that test, not a sample (PR 103, 2026-10-10).
+- **Every ownership PR carries the counted false-accept set and the gate of its kind.** The
+  soundness-gate PR adds `test/ownership/solvers_alone.ft`. It runs over the 62 faulty bodies.
+  It prints four numbers: the bodies that the heap solver proves, the bodies that the summary
+  solver proves, the ledger size and the new false accepts. The same PR adds the ledger
+  `test/ownership/solvers/false_accepts.txt` in the shape of `test/lang/xfail.txt`
+  (`file:body solver # class`). New false accepts = 0 in every PR. The same PR also adds
+  `test/ownership/heap_rows.ft`, one row per body, and its golden `test/ownership/heap_rows.txt`.
+  Each PR kind has its own gate:
+  - A refactor PR: the corpus diff is empty, and the `heap_rows` diff is empty. One step is the
+    exception: the step that removes the prover's witness changes only the verdict column, from
+    failed to unproved.
+  - A soundness PR: a row changes only from proved to unproved. The ledger shrinks by named
+    entries.
+  - A coverage PR: a row may change from incomplete to complete. The ledger does not change. One
+    probe for each trust class comes before the fix.
+  - A witness PR: a violation in the 72 accept cases or in the compiler closure is must-fix. The
+    witness PR adds `test/ownership/witness/false_violations.txt`. A false violation on a probe
+    joins that file when its rendered conditions name a step that fails on the run. A false
+    violation whose conditions all hold on the run is a checker bug, and it is must-fix
+    (2026-10-10).
 
 ## 6. Generated code
 

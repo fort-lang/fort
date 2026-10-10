@@ -8,6 +8,7 @@ Section 1 holds the comment policy. T-099 moved the convention
 bullets of the `## Technical Standards` section of `AGENTS.md` into the headings after it. The
 test bullets of that section went to `notes/testing.md` and the JavaScript conventions of the
 extension went to `editors/README.md`, as the routing table of `AGENTS.md` sends them.
+Section 7 holds the ASD-STE100 rules. They moved from `AGENTS.md` on 2026-10-10.
 
 ## 1. Comments and documentation
 
@@ -25,7 +26,7 @@ only restates the code.
 
 Use ASD-STE100 as practical writing guidance. Write concise, direct, and natural sentences. Use
 the exact technical term when it is the clearest term. Do not remove a necessary condition to
-make a sentence shorter.
+make a sentence shorter. Section 7 gives the rules; they apply to all text.
 
 Code documentation explains the code. It does not record project history. Remove decision tags,
 ticket tags, numbered specification items, and similar provenance. Keep useful references to code
@@ -311,3 +312,31 @@ Keep exact identifiers and diagnostic text.
   without asking, which is what this sentence is for. T-111 then shipped a commit that carried the
   trailer, and a reviewer caught it, not the gate. Nothing in the gate reads a commit message, so
   the sentence reaches only the implementor who reads it before committing.
+
+## 7. Writing: ASD-STE100 everywhere
+
+- **Write in ASD-STE100**, the ASD Simplified Technical English specification. Name it in
+  full: the standard is ASD-STE100, not "ASD-STE". The user asked for this on 2026-09-11 and
+  then said "use it everywhere", so it governs **all** the text this project writes: replies to
+  the user, code comments, commit messages, ticket text, the prompts that go to agents, and the
+  specification documents in `spec/`. There is no exempt category.
+- The rules:
+  - Write short sentences. Put one idea in each. Keep an instruction to 20 words and a
+    description to 25.
+  - Use the active voice. Say who does the action: "the agent refused the instruction", not
+    "the instruction was refused".
+  - Use the simple present where it works.
+  - Give a word one meaning, and use the same word for that thing every time. A gate is a gate.
+    Do not call it "the check" in the next sentence.
+  - Use plain words: *use*, not *utilise*; *start*, not *initiate*; *before*, not *prior to*;
+    *about*, not *approximately*.
+  - Do not use idiom or metaphor. "The test went red" is jargon this project keeps, because it
+    names one thing exactly; "bitten by", "load-bearing" and "throat-clearing" are not.
+  - Cut the opening noise: "it is worth noting that", "as we can see", "interestingly".
+  - Write a number, a command or a file path instead of an adjective. "The gate exited 1" says
+    more than "the gate had a problem". "395 of 666 files" says more than "most files".
+- **Exactness wins over simplicity.** A rule in `spec/` must stay exact. If a short sentence
+  would change what a decision means, write two short sentences. Do not drop a condition to make
+  a sentence shorter.
+- The rule applies to text you write or change. It does not ask anyone to rewrite the documents
+  that are already there; that sweep is its own ticket if the user wants it.
