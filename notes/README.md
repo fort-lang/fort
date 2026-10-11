@@ -34,7 +34,7 @@ The files below stand in `spec/`. Each one implements the decisions it cites and
 
 ## Engineering knowledge
 
-These four files describe the machine, the tests, the compiler and the conventions. They describe
+These files describe the machine, the tests, the compiler, and the conventions. They describe
 the implementation; a difference between one of them and the code is a bug in one of the two.
 
 | file | holds |
@@ -42,6 +42,7 @@ the implementation; a difference between one of them and the code is a bug in on
 | `environment.md` | the VM, `tools/vm`, the shared folder, the cross toolchain, the build |
 | `testing.md` | the merge gate, each test corpus, how to write a test, what a test cannot see |
 | `compiler.md` | the invariant of each pass, and the rules of the port to fort |
+| `calls-heap-proof-gaps.md` | measured proof gaps for declared `calls_heap` bodies |
 | `style.md` | comments, C and fort conventions, markdown, shell, commit messages |
 
 T-098 created `environment.md`, `testing.md`, `compiler.md` and `style.md`; T-099 moved the text
