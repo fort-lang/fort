@@ -716,8 +716,8 @@ bullet at a time and without a rewrite.
   `test/ownership/heap_rows.ft`, one row per body, and its golden `test/ownership/heap_rows.txt`.
   Each PR kind has its own gate:
   - A refactor PR: the corpus diff is empty, and the `heap_rows` diff is empty. One step is the
-    exception: the step that removes the prover's witness changes only the verdict column, from
-    failed to unproved.
+    exception: the step that removes the prover's witness changes only the verdict and reason
+    columns, from `failed none` to `unproved missing_path`.
   - A soundness PR: a row changes only from proved to unproved. The ledger shrinks by named
     entries.
   - A coverage PR: a row may change from incomplete to complete. The ledger does not change. One

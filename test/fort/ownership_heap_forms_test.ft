@@ -16,9 +16,11 @@ import ownership_api;
 import ownership_heap;
 import ownership_heap_env;
 
+// The row is a candidate of `kind` and certainty `how`. The environment checks the candidate form
+// of each event.
 fn is(ownership_heap_env.event_row row, ownership_api.event_kind kind,
-    ownership_api.evidence_kind evidence) bool {
-    return row.kind == kind && row.evidence == evidence;
+    ownership_api.certainty how) bool {
+    return row.kind == kind && row.certainty == how;
 }
 
 // An owned span is a flat atom: one allocation with no owned leaf. A slice and an index read
@@ -46,14 +48,14 @@ fn spans() void {
     ownership_heap_env.run(&c, text[..], names[..]);
     // The count check of `new(u8, n + 1)` aborts on a negative count; that path needs no cleanup.
     assert(ownership_heap_env.proved(&c, "fill"));
-    assert(ownership_heap_env.failed(&c, "slice_after"));
+    assert(ownership_heap_env.candidate(&c, "slice_after", ownership_api.event_kind.invalid_use));
     ownership_heap_env.event_row row = ownership_heap_env.first(&c, "slice_after");
     assert(is(row, ownership_api.event_kind.invalid_use,
-        ownership_api.evidence_kind.unconditional));
+        ownership_api.certainty.definite));
     assert(ownership_heap_env.text(&row) == "s");
     assert(ownership_heap_env.proved(&c, "slice_before"));
     assert(ownership_heap_env.proved(&c, "zero"));
-    assert(ownership_heap_env.failed(&c, "zero_lost"));
+    assert(ownership_heap_env.candidate(&c, "zero_lost", ownership_api.event_kind.lost_ownership));
     assert(ownership_heap_env.proved(&c, "moved_span"));
     // The length of a view lives in its own header, so a read of it needs no live allocation.
     assert(ownership_heap_env.proved(&c, "length_after"));
@@ -114,11 +116,13 @@ fn casts() void {
     ownership_heap_env.run(&c, text[..], names[..]);
     assert(ownership_heap_env.proved(&c, "erased"));
     // Type erasure does not hide the owned child from the shallow release (D17.17).
-    assert(ownership_heap_env.failed(&c, "erased_child"));
+    assert(ownership_heap_env.candidate(&c, "erased_child",
+        ownership_api.event_kind.lost_ownership));
     assert(ownership_heap_env.first(&c, "erased_child").kind ==
         ownership_api.event_kind.lost_ownership);
     assert(ownership_heap_env.proved(&c, "view_cast"));
-    assert(ownership_heap_env.failed(&c, "view_cast_after"));
+    assert(ownership_heap_env.candidate(&c, "view_cast_after",
+        ownership_api.event_kind.invalid_use));
     // Integer bits name no source (D17.17).
     assert(ownership_heap_env.unproved(&c, "from_bits",
         ownership_api.incomplete_reason.unknown_effect));
@@ -182,7 +186,7 @@ fn exits() void {
     ownership_heap.summary* slot_summary = ownership_heap_env.summary(&c, "clear_slot");
     assert(slot_summary->interface[0].needs_shape && (slot_summary->post.released.bits & 1) == 1);
     // A pop that forgets the popped node loses it at its storage end.
-    assert(ownership_heap_env.failed(&c, "pop_one"));
+    assert(ownership_heap_env.candidate(&c, "pop_one", ownership_api.event_kind.lost_ownership));
     assert(ownership_heap_env.first_text(&c, "pop_one") == "n");
 }
 
@@ -224,10 +228,10 @@ fn shapes() void {
         ownership_heap.atom_kind.region);
     // The release loses the omitted payload, an input choice of the caller. That error is the
     // body's own, so no requirement goes to the caller (`spec/fir.md` 14.1).
-    assert(ownership_heap_env.failed(&c, "half_box"));
+    assert(ownership_heap_env.candidate(&c, "half_box", ownership_api.event_kind.lost_ownership));
     ownership_heap_env.event_row half = ownership_heap_env.first(&c, "half_box");
     assert(half.kind == ownership_api.event_kind.lost_ownership);
-    assert(half.evidence == ownership_api.evidence_kind.validated_path);
+    assert(half.certainty == ownership_api.certainty.choice);
     assert(ownership_heap_env.text(&half) == "b->y");
     assert(ownership_heap_env.summary(&c, "half_box")->interface[0].require_fields == 0);
     assert(!ownership_heap_env.proved(&c, "use_half"));
@@ -276,20 +280,21 @@ fn borrowed() void {
     // An address of caller storage stays live after the return.
     assert(ownership_heap_env.proved(&c, "field_address"));
     // An address into a released cell is no live result.
-    assert(ownership_heap_env.failed(&c, "local_field"));
+    assert(ownership_heap_env.candidate(&c, "local_field", ownership_api.event_kind.invalid_use));
     assert(ownership_heap_env.proved(&c, "read_twice"));
     assert(ownership_heap_env.proved(&c, "caller_reads"));
     // An address stored into caller storage keeps its source after the return. A dangling
     // field that nothing reads is no use (D17.16); a read through it is invalid.
     assert(ownership_heap_env.proved(&c, "retained"));
     assert(ownership_heap_env.proved(&c, "keep_view"));
-    assert(ownership_heap_env.failed(&c, "read_kept"));
+    assert(ownership_heap_env.candidate(&c, "read_kept", ownership_api.event_kind.invalid_use));
     assert(is(ownership_heap_env.first(&c, "read_kept"), ownership_api.event_kind.invalid_use,
-        ownership_api.evidence_kind.unconditional));
+        ownership_api.certainty.definite));
 }
 
-// A branch on a scalar that the proof does not track clears the witness but proves cleanup on
-// each path; a check that no build mode removes does the same (`spec/toolchain.md` 4.2).
+// A branch on a scalar that the proof does not track proves cleanup on each path; a check that no
+// build mode removes does the same. Neither changes the certainty of a loss after it
+// (`spec/toolchain.md` 4.2).
 fn scalars() void {
     println("scalar branches and checks");
     string[14] text = {
@@ -316,16 +321,22 @@ fn scalars() void {
     assert(ownership_heap_env.proved(&c, "by_mode"));
     assert(ownership_heap_env.unproved(&c, "by_mode_leak",
         ownership_api.incomplete_reason.missing_path));
+    assert(ownership_heap_env.candidate(&c, "by_mode_leak",
+        ownership_api.event_kind.lost_ownership));
     assert(ownership_heap_env.proved(&c, "asserted"));
     assert(ownership_heap_env.proved(&c, "divided"));
-    // The assert can abort, so no validated path reaches the loss after it.
+    // The assert can abort. The loss after it is still a definite candidate: a checker decides
+    // if a path reaches it.
     assert(ownership_heap_env.unproved(&c, "leak_after_assert",
         ownership_api.incomplete_reason.missing_path));
-    // A constant condition selects one edge and keeps the witness.
+    assert(is(ownership_heap_env.first(&c, "leak_after_assert"),
+        ownership_api.event_kind.lost_ownership, ownership_api.certainty.definite));
+    // A constant condition selects one edge.
     assert(ownership_heap_env.proved(&c, "constant_branch"));
-    assert(ownership_heap_env.failed(&c, "constant_leak"));
+    assert(ownership_heap_env.candidate(&c, "constant_leak",
+        ownership_api.event_kind.lost_ownership));
     assert(is(ownership_heap_env.first(&c, "constant_leak"),
-        ownership_api.event_kind.lost_ownership, ownership_api.evidence_kind.unconditional));
+        ownership_api.event_kind.lost_ownership, ownership_api.certainty.definite));
 }
 
 // A pop moves the next field out before it returns the node, so the node it returns owns
@@ -357,12 +368,15 @@ fn pops() void {
     assert(ownership_heap_env.proved(&c, "free_list"));
     assert(ownership_heap_env.proved(&c, "use_list"));
     assert(ownership_heap_env.summary(&c, "use_list")->returns);
-    // The popped node is lost when the list held a node: no witness counts the pushes.
+    // The popped node is lost when the list held a node: a possible fact, because no fact counts
+    // the pushes.
     assert(ownership_heap_env.unproved(&c, "use_pop_leak",
         ownership_api.incomplete_reason.missing_path));
+    assert(ownership_heap_env.candidates(&c, "use_pop_leak",
+        ownership_api.event_kind.lost_ownership, ownership_api.certainty.possible) == 1);
     assert(ownership_heap_env.first_text(&c, "use_pop_leak") == "n");
     // The list release ends the node that the view designates.
-    assert(ownership_heap_env.failed(&c, "view_after"));
+    assert(ownership_heap_env.candidate(&c, "view_after", ownership_api.event_kind.invalid_use));
     assert(ownership_heap_env.first(&c, "view_after").kind ==
         ownership_api.event_kind.invalid_use);
 }

@@ -42,9 +42,11 @@ fn joined(string@ tail, string mut@ out) u64 {
     return n;
 }
 
+// The row is a candidate of `kind` and certainty `how`. The environment checks the candidate form
+// of each event.
 fn is(ownership_heap_env.event_row row, ownership_api.event_kind kind,
-    ownership_api.evidence_kind evidence) bool {
-    return row.kind == kind && row.evidence == evidence;
+    ownership_api.certainty how) bool {
+    return row.kind == kind && row.certainty == how;
 }
 
 // H01: an empty root takes the zero-iteration path and needs no release, twice.
@@ -98,14 +100,15 @@ fn h02() void {
     assert(ownership_heap_env.proved(&c, "payload_out"));
     ownership_heap.summary* out = ownership_heap_env.summary(&c, "payload_out");
     assert(out->interface.len == 1 && out->interface[0].kind == ownership_heap.atom_kind.flat);
-    assert(ownership_heap_env.failed(&c, "payload_lost"));
+    assert(ownership_heap_env.candidate(&c, "payload_lost",
+        ownership_api.event_kind.lost_ownership));
     ownership_heap_env.event_row lost = ownership_heap_env.first(&c, "payload_lost");
     assert(is(lost, ownership_api.event_kind.lost_ownership,
-        ownership_api.evidence_kind.unconditional));
+        ownership_api.certainty.definite));
     assert(ownership_heap_env.text(&lost) == "a->bytes");
     // A zero-element allocation keeps its obligation (D17.17).
     assert(ownership_heap_env.proved(&c, "zero_payload"));
-    assert(ownership_heap_env.failed(&c, "zero_lost"));
+    assert(ownership_heap_env.candidate(&c, "zero_lost", ownership_api.event_kind.lost_ownership));
 }
 
 // H03: a partial traversal keeps its remaining chain. One node release cannot clear `many`.
@@ -134,12 +137,19 @@ fn h03() void {
     assert(ownership_heap_env.proved(&c, "rest_kept"));
     assert(ownership_heap_env.unproved(&c, "rest_lost",
         ownership_api.incomplete_reason.missing_path));
+    assert(ownership_heap_env.candidates(&c, "rest_lost", ownership_api.event_kind.lost_ownership,
+        ownership_api.certainty.possible) == 1);
     assert(ownership_heap_env.proved(&c, "stop_early"));
-    // A break out of the loop leaves the input chain at a storage end: a free input choice
-    // validates the loss of a nonnull remainder.
-    assert(ownership_heap_env.failed(&c, "early_lost"));
-    assert(ownership_heap_env.saw(&c, "early_lost", ownership_api.event_kind.lost_ownership,
-        ownership_api.evidence_kind.validated_path) == 1);
+    // A break out of the loop leaves the input chain at a storage end. The exit joins the root
+    // that the loop test refined to nonnull with the root that it refined to null: a joined root,
+    // so the loss of a nonnull remainder is a candidate of certainty `possible`.
+    assert(ownership_heap_env.unproved(&c, "early_lost",
+        ownership_api.incomplete_reason.missing_path));
+    assert(!ownership_heap_env.candidate(&c, "early_lost",
+        ownership_api.event_kind.lost_ownership));
+    assert(ownership_heap_env.candidates(&c, "early_lost", ownership_api.event_kind.lost_ownership,
+        ownership_api.certainty.possible) == 1);
+    assert(ownership_heap_env.events(&c, "early_lost") == 1);
     // The result of drop_head keeps a member of the input: the fate of the input is mixed.
     ownership_heap.summary* head = ownership_heap_env.summary(&c, "drop_head");
     assert((head->post.released.bits & 1) == 1);
@@ -176,7 +186,7 @@ fn h04() void {
     assert(ownership_heap_env.unproved(&c, "unknown_kids",
         ownership_api.incomplete_reason.unknown_effect));
     // The moved left child keeps its obligation after the parent cleanup.
-    assert(ownership_heap_env.failed(&c, "one_side"));
+    assert(ownership_heap_env.candidate(&c, "one_side", ownership_api.event_kind.lost_ownership));
     assert(ownership_heap_env.first_text(&c, "one_side") == "l");
 }
 
@@ -201,18 +211,19 @@ fn h05() void {
     ownership_heap_env.closure mut c = ownership_heap_env.closure{};
     defer ownership_heap_env.close(&c);
     ownership_heap_env.run(&c, text[..], names[..]);
-    assert(ownership_heap_env.failed(&c, "uncut"));
+    assert(ownership_heap_env.candidate(&c, "uncut", ownership_api.event_kind.lost_ownership));
     assert(is(ownership_heap_env.first(&c, "uncut"), ownership_api.event_kind.lost_ownership,
-        ownership_api.evidence_kind.unconditional));
+        ownership_api.certainty.definite));
     // `del(view->next)` cannot release A while A holds that live owned leaf.
-    assert(ownership_heap_env.failed(&c, "release_through_cycle"));
+    assert(ownership_heap_env.candidate(&c, "release_through_cycle",
+        ownership_api.event_kind.lost_ownership));
     assert(ownership_heap_env.first(&c, "release_through_cycle").kind ==
         ownership_api.event_kind.lost_ownership);
     assert(ownership_heap_env.proved(&c, "proved_cut"));
-    assert(ownership_heap_env.failed(&c, "late_use"));
+    assert(ownership_heap_env.candidate(&c, "late_use", ownership_api.event_kind.invalid_use));
     ownership_heap_env.event_row late = ownership_heap_env.first(&c, "late_use");
     assert(is(late, ownership_api.event_kind.invalid_use,
-        ownership_api.evidence_kind.unconditional));
+        ownership_api.certainty.definite));
     assert(late.line == 11);
 }
 
@@ -237,10 +248,10 @@ fn h06() void {
     ownership_heap_env.run(&c, text[..], names[..]);
     assert(ownership_heap_env.proved(&c, "both"));
     assert(ownership_heap_env.proved(&c, "through_owned"));
-    assert(ownership_heap_env.failed(&c, "read_back"));
+    assert(ownership_heap_env.candidate(&c, "read_back", ownership_api.event_kind.invalid_use));
     assert(is(ownership_heap_env.first(&c, "read_back"), ownership_api.event_kind.invalid_use,
-        ownership_api.evidence_kind.unconditional));
-    assert(ownership_heap_env.failed(&c, "keep_one"));
+        ownership_api.certainty.definite));
+    assert(ownership_heap_env.candidate(&c, "keep_one", ownership_api.event_kind.lost_ownership));
     assert(ownership_heap_env.first_text(&c, "keep_one") == "b");
 }
 
@@ -263,9 +274,9 @@ fn h07() void {
     defer ownership_heap_env.close(&c);
     ownership_heap_env.run(&c, text[..], names[..]);
     assert(ownership_heap_env.proved(&c, "keeps_b"));
-    assert(ownership_heap_env.failed(&c, "revive"));
+    assert(ownership_heap_env.candidate(&c, "revive", ownership_api.event_kind.invalid_use));
     assert(is(ownership_heap_env.first(&c, "revive"), ownership_api.event_kind.invalid_use,
-        ownership_api.evidence_kind.unconditional));
+        ownership_api.certainty.definite));
     assert(ownership_heap_env.proved(&c, "loop_site"));
 }
 
@@ -290,12 +301,13 @@ fn h08() void {
     defer ownership_heap_env.close(&c);
     ownership_heap_env.run(&c, text[..], names[..]);
     assert(ownership_heap_env.proved(&c, "moved"));
-    assert(ownership_heap_env.failed(&c, "released_first"));
+    assert(ownership_heap_env.candidate(&c, "released_first",
+        ownership_api.event_kind.invalid_use));
     ownership_heap_env.event_row late = ownership_heap_env.first(&c, "released_first");
     assert(is(late, ownership_api.event_kind.invalid_use,
-        ownership_api.evidence_kind.unconditional));
+        ownership_api.certainty.definite));
     assert(late.line == 9 && ownership_heap_env.text(&late) == "view");
-    assert(ownership_heap_env.failed(&c, "out_lost"));
+    assert(ownership_heap_env.candidate(&c, "out_lost", ownership_api.event_kind.lost_ownership));
     assert(ownership_heap_env.first_text(&c, "out_lost") == "out");
 }
 
@@ -320,21 +332,23 @@ fn h09() void {
     ownership_heap_env.closure mut c = ownership_heap_env.closure{};
     defer ownership_heap_env.close(&c);
     ownership_heap_env.run(&c, text[..], names[..]);
-    assert(ownership_heap_env.failed(&c, "demo"));
+    assert(ownership_heap_env.candidate(&c, "demo", ownership_api.event_kind.lost_ownership));
     ownership_heap_env.event_row row = ownership_heap_env.first(&c, "demo");
     assert(is(row, ownership_api.event_kind.lost_ownership,
-        ownership_api.evidence_kind.unconditional));
+        ownership_api.certainty.definite));
     // The approved diagnostic of ex13 names this line, column, and owner.
     assert(row.line == 3 && row.col == 31 && ownership_heap_env.text(&row) == "parent->child");
     assert(ownership_heap_env.events(&c, "demo") == 1);
     assert(ownership_heap_env.proved(&c, "moved_out"));
-    assert(ownership_heap_env.failed(&c, "moved_lost"));
-    // A parameter's child is a free input choice, so its release loses that child on a validated
-    // path. A caller requirement cannot repair this error of the body (`spec/fir.md` 14.1).
-    assert(ownership_heap_env.failed(&c, "param_child"));
+    assert(ownership_heap_env.candidate(&c, "moved_lost", ownership_api.event_kind.lost_ownership));
+    // A parameter's child is a free input choice, so the loss of that child at its release is a
+    // candidate of that choice. A caller requirement cannot repair this error of the body
+    // (`spec/fir.md` 14.1).
+    assert(ownership_heap_env.candidate(&c, "param_child",
+        ownership_api.event_kind.lost_ownership));
     ownership_heap_env.event_row lost = ownership_heap_env.first(&c, "param_child");
     assert(is(lost, ownership_api.event_kind.lost_ownership,
-        ownership_api.evidence_kind.validated_path));
+        ownership_api.certainty.choice));
     assert(ownership_heap_env.text(&lost) == "parent->child");
     ownership_heap.summary* s = ownership_heap_env.summary(&c, "param_child");
     assert(s->interface[0].require_fields == 0 && !s->interface[0].require_null);
@@ -389,11 +403,12 @@ fn h10() void {
     assert(ownership_heap_env.proved(&c, "grown"));
     assert(ownership_heap_env.proved(&c, "four"));
     assert(ownership_heap_env.proved(&c, "half"));
-    assert(ownership_heap_env.failed(&c, "stale"));
+    assert(ownership_heap_env.candidate(&c, "stale", ownership_api.event_kind.invalid_use));
     assert(is(ownership_heap_env.first(&c, "stale"), ownership_api.event_kind.invalid_use,
-        ownership_api.evidence_kind.unconditional));
+        ownership_api.certainty.definite));
     // Counting only block allocations gives no proof of pool cleanup.
-    assert(ownership_heap_env.failed(&c, "blocks_only"));
+    assert(ownership_heap_env.candidate(&c, "blocks_only",
+        ownership_api.event_kind.lost_ownership));
     assert(ownership_heap_env.first_text(&c, "blocks_only") == "b->bytes");
     // kept_head keeps the head block and releases the rest: the head payload view stays
     // proved only through the kept cell, and a view into the released rest cannot pass.
@@ -436,45 +451,50 @@ fn operations() void {
     ownership_heap_env.closure mut c = ownership_heap_env.closure{};
     defer ownership_heap_env.close(&c);
     ownership_heap_env.run(&c, text[..], names[..]);
-    assert(ownership_heap_env.failed(&c, "overwrite"));
+    assert(ownership_heap_env.candidate(&c, "overwrite", ownership_api.event_kind.lost_ownership));
     ownership_heap_env.event_row row = ownership_heap_env.first(&c, "overwrite");
     assert(is(row, ownership_api.event_kind.lost_ownership,
-        ownership_api.evidence_kind.unconditional));
+        ownership_api.certainty.definite));
     assert(row.line == 3 && ownership_heap_env.text(&row) == "a->child");
     assert(ownership_heap_env.proved(&c, "overwrite_empty"));
-    assert(ownership_heap_env.failed(&c, "empty_deref"));
+    assert(ownership_heap_env.candidate(&c, "empty_deref", ownership_api.event_kind.invalid_use));
     assert(is(ownership_heap_env.first(&c, "empty_deref"), ownership_api.event_kind.invalid_use,
-        ownership_api.evidence_kind.unconditional));
-    assert(ownership_heap_env.failed(&c, "dangling"));
+        ownership_api.certainty.definite));
+    assert(ownership_heap_env.candidate(&c, "dangling", ownership_api.event_kind.invalid_use));
     assert(is(ownership_heap_env.first(&c, "dangling"), ownership_api.event_kind.invalid_use,
-        ownership_api.evidence_kind.unconditional));
-    assert(ownership_heap_env.failed(&c, "local_address"));
+        ownership_api.certainty.definite));
+    assert(ownership_heap_env.candidate(&c, "local_address", ownership_api.event_kind.invalid_use));
     assert(ownership_heap_env.proved(&c, "kept_view"));
     // An output owner that the callee overwrites must be empty at the call (`spec/fir.md` 14
     // Calls).
     assert(ownership_heap_env.proved(&c, "require_out"));
     assert(ownership_heap_env.summary(&c, "require_out")->interface[0].require_null);
     assert(ownership_heap_env.proved(&c, "fill_out"));
-    assert(ownership_heap_env.failed(&c, "full_out"));
+    assert(ownership_heap_env.candidate(&c, "full_out",
+        ownership_api.event_kind.caller_requirement));
     assert(is(ownership_heap_env.first(&c, "full_out"), ownership_api.event_kind.caller_requirement,
-        ownership_api.evidence_kind.unconditional));
+        ownership_api.certainty.definite));
     // The dead marker of an inner scope ends its owner there, before the return (D17.14).
-    assert(ownership_heap_env.failed(&c, "scoped"));
+    assert(ownership_heap_env.candidate(&c, "scoped", ownership_api.event_kind.lost_ownership));
     ownership_heap_env.event_row inner = ownership_heap_env.first(&c, "scoped");
     assert(is(inner, ownership_api.event_kind.lost_ownership,
-        ownership_api.evidence_kind.unconditional));
+        ownership_api.certainty.definite));
     assert(inner.line == 15 && ownership_heap_env.text(&inner) == "a");
     assert(ownership_heap_env.events(&c, "scoped") == 1);
     // An address of a local after its scope ends designates no live storage.
-    assert(ownership_heap_env.failed(&c, "stale_local"));
+    assert(ownership_heap_env.candidate(&c, "stale_local", ownership_api.event_kind.invalid_use));
     assert(is(ownership_heap_env.first(&c, "stale_local"), ownership_api.event_kind.invalid_use,
-        ownership_api.evidence_kind.unconditional));
-    // A join keeps the obligation that one path holds; the untracked branch gives no witness.
+        ownership_api.certainty.definite));
+    // A join keeps the obligation that one path holds, so the loss is a possible fact.
     assert(ownership_heap_env.unproved(&c, "maybe_leak",
         ownership_api.incomplete_reason.missing_path));
+    assert(ownership_heap_env.candidates(&c, "maybe_leak", ownership_api.event_kind.lost_ownership,
+        ownership_api.certainty.possible) == 1);
     assert(ownership_heap_env.first_text(&c, "maybe_leak") == "a");
     assert(ownership_heap_env.unproved(&c, "maybe_free",
         ownership_api.incomplete_reason.missing_path));
+    assert(ownership_heap_env.candidates(&c, "maybe_free", ownership_api.event_kind.lost_ownership,
+        ownership_api.certainty.possible) == 1);
     assert(ownership_heap_env.proved(&c, "both_free"));
 }
 

@@ -85,7 +85,8 @@ fn caller_storage() void {
     assert(ownership_heap_env.proved(&c, "stashed"));
     assert(ownership_heap_env.proved(&c, "stash_twice"));
     // The second owner of the holder stays full when the holder ends.
-    assert(ownership_heap_env.failed(&c, "half_cleared"));
+    assert(ownership_heap_env.candidate(&c, "half_cleared",
+        ownership_api.event_kind.lost_ownership));
     ownership_heap_env.event_row row = ownership_heap_env.first(&c, "half_cleared");
     assert(row.kind == ownership_api.event_kind.lost_ownership);
     assert(ownership_heap_env.text(&row) == "h.second");
@@ -132,7 +133,7 @@ fn separate_instances() void {
     base_proved(&c);
     // The view of the kept argument stays live; the view of the released one does not.
     assert(ownership_heap_env.proved(&c, "pair_ok"));
-    assert(ownership_heap_env.failed(&c, "pair_bad"));
+    assert(ownership_heap_env.candidate(&c, "pair_bad", ownership_api.event_kind.invalid_use));
     ownership_heap_env.event_row bad = ownership_heap_env.first(&c, "pair_bad");
     assert(bad.kind == ownership_api.event_kind.invalid_use && bad.line == 18);
     assert(ownership_heap_env.proved(&c, "both"));
@@ -171,7 +172,7 @@ fn shape_requirements() void {
     ownership_heap_env.run(&c, text[0..n], names[0..m]);
     assert(ownership_heap_env.proved(&c, "fresh_cells"));
     // An owned cycle with no external owner is lost at the return.
-    assert(ownership_heap_env.failed(&c, "cyclic"));
+    assert(ownership_heap_env.candidate(&c, "cyclic", ownership_api.event_kind.lost_ownership));
     // An owned collection of owners is an opaque atom: its release cannot prove empty leaves.
     assert(ownership_heap_env.unproved(&c, "kids_free",
         ownership_api.incomplete_reason.missing_graph));
@@ -218,6 +219,13 @@ fn recursion() void {
     ownership_heap_env.run(&c, text[..], names[..]);
     assert(ownership_heap_env.unproved(&c, "same", ownership_api.incomplete_reason.unknown_effect));
     assert(!ownership_heap_env.proved(&c, "whole"));
+    // `whole` loses `k->next` before the call on its whole input. Its proof names the call and not
+    // the earlier candidate, because a checker of candidates removes no other reason.
+    assert(ownership_heap_env.unproved(&c, "whole", ownership_api.incomplete_reason.missing_graph));
+    assert(ownership_heap_env.candidates(&c, "whole", ownership_api.event_kind.lost_ownership,
+        ownership_api.certainty.choice) == 1);
+    assert(ownership_heap_env.first(&c, "whole").kind == ownership_api.event_kind.lost_ownership);
+    assert(ownership_heap_env.events(&c, "whole") == 2);
     assert(ownership_heap_env.proved(&c, "even"));
     assert(ownership_heap_env.proved(&c, "odd"));
     assert(ownership_heap_env.rounds(&c, "even") == ownership_heap_env.rounds(&c, "odd"));
@@ -272,7 +280,7 @@ fn unknown_effects() void {
     assert(ownership_heap_env.proved(&c, "scalar_only"));
     // The callee reports its own loss. Its caller records no event at the call, but its own
     // summary cannot use the callee's.
-    assert(ownership_heap_env.failed(&c, "bad_callee"));
+    assert(ownership_heap_env.candidate(&c, "bad_callee", ownership_api.event_kind.lost_ownership));
     assert(ownership_heap_env.events(&c, "after_bad") == 0);
     assert(ownership_heap_env.summary(&c, "after_bad")->residual);
     // A call of a function value is unknown to this module.
@@ -323,7 +331,7 @@ fn views_at_call() void {
     assert((ownership_heap_env.summary(&c, "read")->view_reads & 2) == 2);
     assert(ownership_heap_env.summary(&c, "ignore")->view_reads == 0);
     assert(ownership_heap_env.proved(&c, "live_read"));
-    assert(ownership_heap_env.failed(&c, "stale_read"));
+    assert(ownership_heap_env.candidate(&c, "stale_read", ownership_api.event_kind.invalid_use));
     assert(ownership_heap_env.first(&c, "stale_read").kind == ownership_api.event_kind.invalid_use);
     // Passing a dangling view to a callee that never reads it is no use (D17.14).
     assert(ownership_heap_env.proved(&c, "stale_pass"));
@@ -333,21 +341,22 @@ fn views_at_call() void {
     // A returned view of a parameter designates the caller's argument, not storage that stays
     // live: its release invalidates the view (D17.14).
     assert(ownership_heap_env.proved(&c, "identity"));
-    assert(ownership_heap_env.failed(&c, "returned_view"));
+    assert(ownership_heap_env.candidate(&c, "returned_view", ownership_api.event_kind.invalid_use));
     assert(is_invalid(ownership_heap_env.first(&c, "returned_view")));
     assert(ownership_heap_env.proved(&c, "returned_live"));
-    assert(ownership_heap_env.failed(&c, "returned_span"));
+    assert(ownership_heap_env.candidate(&c, "returned_span", ownership_api.event_kind.invalid_use));
     assert(is_invalid(ownership_heap_env.first(&c, "returned_span")));
     // A string constant is static storage on each side of the call.
     assert(ownership_heap_env.proved(&c, "static_text"));
     // An address of a local returns through the call as that address.
     assert(ownership_heap_env.proved(&c, "returned_local"));
-    assert(ownership_heap_env.failed(&c, "returned_escape"));
+    assert(ownership_heap_env.candidate(&c, "returned_escape",
+        ownership_api.event_kind.invalid_use));
 }
 
 fn is_invalid(ownership_heap_env.event_row row) bool {
     return row.kind == ownership_api.event_kind.invalid_use &&
-        row.evidence == ownership_api.evidence_kind.unconditional;
+        row.certainty == ownership_api.certainty.definite;
 }
 
 // Aggregates carry their owned leaves through by-value parameters and results; a pointer to an
@@ -375,7 +384,7 @@ fn aggregates() void {
     ownership_heap_env.run(&c, text[..], names[..]);
     assert(ownership_heap_env.proved(&c, "make_pair"));
     assert(ownership_heap_env.proved(&c, "drop_pair"));
-    assert(ownership_heap_env.failed(&c, "half_pair"));
+    assert(ownership_heap_env.candidate(&c, "half_pair", ownership_api.event_kind.lost_ownership));
     assert(ownership_heap_env.first_text(&c, "half_pair") == "p.b");
     assert(ownership_heap_env.proved(&c, "round_trip"));
     assert(ownership_heap_env.proved(&c, "swap"));

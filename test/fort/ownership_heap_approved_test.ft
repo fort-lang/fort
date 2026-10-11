@@ -315,6 +315,7 @@ fn run(example* e, ownership_heap_env.closure mut* c) void {
     ownership_heap_env.run(c, e->lines, e->names[0..e->bodies]);
 }
 
+
 fn rejected() void {
     println("rejected examples get no proof");
     example[16] all = {
@@ -335,21 +336,37 @@ fn rejected() void {
         example{"ex18", EX18_RETAINED_KEY[..], "demo", 2, {"put", "demo", "", ""}},
         example{"ex20", EX20_RAW_LOST[..], "bad", 1, {"bad", "", "", ""}},
     };
-    u64 mut definite = 0;
+    // The candidate kind of each example. Incomplete proof names an example without a candidate.
+    ownership_api.event_kind[16] kinds = {
+        ownership_api.event_kind.invalid_use, ownership_api.event_kind.invalid_use,
+        ownership_api.event_kind.invalid_use, ownership_api.event_kind.invalid_use,
+        ownership_api.event_kind.invalid_use, ownership_api.event_kind.invalid_use,
+        ownership_api.event_kind.invalid_use, ownership_api.event_kind.incomplete_proof,
+        ownership_api.event_kind.invalid_use, ownership_api.event_kind.lost_ownership,
+        ownership_api.event_kind.lost_ownership, ownership_api.event_kind.incomplete_proof,
+        ownership_api.event_kind.lost_ownership, ownership_api.event_kind.invalid_use,
+        ownership_api.event_kind.invalid_use, ownership_api.event_kind.incomplete_proof,
+    };
+    u64 mut found = 0;
     u64 mut i = 0;
     while (i < all.len) {
         ownership_heap_env.closure mut c = ownership_heap_env.closure{};
         run(&all[i], &c);
         assert(!ownership_heap_env.proved(&c, all[i].error_body));
         assert(ownership_heap_env.events(&c, all[i].error_body) >= 1);
-        if (ownership_heap_env.failed(&c, all[i].error_body)) { definite += 1; }
+        if (kinds[i] == ownership_api.event_kind.incomplete_proof) {
+            assert(ownership_heap_env.violations(&c, all[i].error_body) == 0);
+        } else {
+            assert(ownership_heap_env.candidate(&c, all[i].error_body, kinds[i]));
+            found += 1;
+        }
         ownership_heap_env.close(&c);
         i += 1;
     }
-    // Twelve of the sixteen give a definite violation here. Four give incomplete proof: ex10
-    // (one storage passed twice), ex15 (one branch releases), ex16 (an untracked loop
-    // condition), and ex20 (integer bits name no source).
-    assert(definite == 12);
+    // Thirteen of the sixteen give a candidate here, ex16 too: its untracked loop condition
+    // changes no fact of the leak. Three give incomplete proof: ex10 (one storage passed twice),
+    // ex15 (one branch releases), and ex20 (integer bits name no source).
+    assert(found == 13);
 }
 
 fn accepted() void {
@@ -376,7 +393,7 @@ fn accepted() void {
             assert(ownership_heap_env.proved(&c, all[i].error_body));
         } else {
             assert(!ownership_heap_env.proved(&c, all[i].error_body));
-            assert(!ownership_heap_env.failed(&c, all[i].error_body));
+            assert(ownership_heap_env.violations(&c, all[i].error_body) == 0);
         }
         ownership_heap_env.close(&c);
         i += 1;

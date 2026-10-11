@@ -10,8 +10,8 @@ import ast;
 import consts;
 import diag;
 import fir;
-import fir_flow;
 import ownership_api;
+import ownership_api.{certainty};
 import ownership_facts;
 import ownership_facts.{atom_status, may_set, nullness, provenance, root_kind, status_fact};
 import ownership_flow;
@@ -176,7 +176,6 @@ struct slot {
 // Each block keeps one joined state. A state that no path reaches is bottom.
 struct state {
     bool reached; // join: may
-    bool witness; // join: may
     slot mut@ own slots; // join: owner
     u64 slots_len; // join: owner
     atom mut@ own atoms; // join: owner
@@ -224,7 +223,6 @@ struct summary {
     ownership_api.proof_status proof; // join: none
     bool known; // join: none
     bool returns; // join: may
-    bool witness; // join: may
     // An unknown effect changed caller-visible facts, so no caller can apply this summary.
     bool residual; // join: may
     interface_entry mut@ own interface; // join: owner
@@ -305,19 +303,15 @@ struct context {
     state mut@ own entry;
     u32 mut@ own joins;
     bool mut@ own pending;
-    // For each block with a branch, the block where each of its paths returns, or NONE.
-    u32 mut@ own rejoin;
-    // The witness of each block at its terminator, after the calls of the block.
-    bool mut@ own left;
     state exit;
     // The last pass over the stable block states: returns build the exit state.
     bool final_pass;
     bool reporting;
     bool residual;
     bool stopped;
-    bool failed_any;
+    bool candidate_any;
     bool incomplete_any;
-    ownership_api.proof_status first_failure;
+    ownership_api.proof_status first_candidate;
     ownership_api.proof_status first_incomplete;
     reported mut@ own seen;
     u64 seen_len;
@@ -589,7 +583,6 @@ fn bottom(u64 locals) state {
 fn clone(state* s) state {
     state mut out = state{};
     out.reached = s->reached;
-    out.witness = s->witness;
     out.released = s->released;
     out.lossy = s->lossy;
     out.loss = s->loss;
@@ -946,38 +939,31 @@ fn pay(context mut* c, u64 n) bool {
     return true;
 }
 
-enum certainty {
-    definite,
-    choice,
-    possible,
-}
-
-fn note_proof(context mut* c, ownership_api.proof_status proof) void {
+// Each event of this module is incomplete proof. The proof of a body names its first reason that
+// is not a candidate. Only a body with no such reason names its first candidate. A checker of
+// candidates cannot remove the other reasons.
+fn note_proof(context mut* c, ownership_api.proof_status proof, bool candidate) void {
     c->notes += 1;
-    if (proof.kind == ownership_api.proof_kind.incomplete) {
+    if (candidate) {
+        if (!c->candidate_any) { c->first_candidate = proof; }
+        c->candidate_any = true;
+    } else {
         if (!c->incomplete_any) { c->first_incomplete = proof; }
         c->incomplete_any = true;
-    } else {
-        if (!c->failed_any) { c->first_failure = proof; }
-        c->failed_any = true;
     }
 }
 
-// Records one event. Each round notes the proof. Only a reporting pass records the event, once
-// for each operation, kind, and relation.
+// Records one event with abstract possibility evidence: this module validates no path to an
+// operation (`spec/toolchain.md` 4.2). The event keeps the certainty of its fact. Each round notes
+// the proof. Only a reporting pass records the event, once for each operation, kind and relation.
 fn record(context mut* c, state* s, ownership_api.event_kind kind,
-    ownership_api.evidence_kind evidence, ownership_api.incomplete_reason reason, u32 relation,
-    string text) void {
+    ownership_api.incomplete_reason reason, certainty how, u32 relation, string text) void {
     ownership_api.source_position at = source(c, c->at);
-    ownership_api.proof_status mut proof = complete();
-    proof.failed = true;
-    if (reason != ownership_api.incomplete_reason.none) {
-        proof = ownership_api.incomplete(reason, c->op, at);
-    }
+    ownership_api.proof_status mut proof = ownership_api.incomplete(reason, c->op, at);
     ownership_api.entity_id related = relation == NONE ? ownership_api.entity_id{} :
         ownership_api.entity_id{c->key, ownership_api.entity_kind.allocation, relation + 1};
     proof.terminal.relation = related;
-    note_proof(c, proof);
+    note_proof(c, proof, kind != ownership_api.event_kind.incomplete_proof);
     if (!c->reporting) { return; }
     u64 mut i = 0;
     while (i < c->seen_len) {
@@ -1002,41 +988,29 @@ fn record(context mut* c, state* s, ownership_api.event_kind kind,
     event.operation = c->op;
     event.source = at;
     event.kind = kind;
-    event.evidence = evidence;
+    event.evidence = ownership_api.evidence_kind.abstract_possibility;
+    event.certainty = how;
     event.reason = reason;
     event.relation = related;
     event.text = text;
-    if (reason != ownership_api.incomplete_reason.none && s != null && s->lossy) {
-        event.precision = s->loss;
-    }
-    ownership_api.witness_link[1] link = {ownership_api.witness_link{
-        .key = ownership_api.entity_id{c->key, ownership_api.entity_kind.witness, c->events},
-        .event = event.key, .validated = true}};
-    if (evidence == ownership_api.evidence_kind.validated_path) { event.witnesses = link[..]; }
+    if (s != null && s->lossy) { event.precision = s->loss; }
     ownership_api.event_request request = ownership_api.event_request{event, proof};
     ownership_api.record_event(c->svc, &request);
 }
 
-// A violation needs a witnessed path. A definite violation on that path is unconditional. A
-// violation that a free input choice gives is a validated path. Anything else is incomplete
-// proof with abstract possibility evidence (`spec/toolchain.md` 4.2).
+// A violation gives a candidate event of `kind`: an invalid fact that the proof cannot clear. This
+// module finds no path to it. The event has the reason `missing_path` and keeps the certainty of
+// the fact, definite, a free input choice, or possible. A separate checker reads the kind and the
+// certainty before it validates or rejects the candidate (`spec/toolchain.md` 4.2).
 fn violation(context mut* c, state* s, ownership_api.event_kind kind, certainty how,
     u32 relation, string text) void {
-    if (!s->witness || how == certainty.possible) {
-        record(c, s, ownership_api.event_kind.incomplete_proof,
-            ownership_api.evidence_kind.abstract_possibility,
-            ownership_api.incomplete_reason.missing_path, relation, text);
-        return;
-    }
-    ownership_api.evidence_kind evidence = how == certainty.definite ?
-        ownership_api.evidence_kind.unconditional : ownership_api.evidence_kind.validated_path;
-    record(c, s, kind, evidence, ownership_api.incomplete_reason.none, relation, text);
+    record(c, s, kind, ownership_api.incomplete_reason.missing_path, how, relation, text);
 }
 
 fn unproved(context mut* c, state* s, ownership_api.incomplete_reason reason, u32 relation,
     string text) void {
-    record(c, s, ownership_api.event_kind.incomplete_proof,
-        ownership_api.evidence_kind.abstract_possibility, reason, relation, text);
+    record(c, s, ownership_api.event_kind.incomplete_proof, reason, certainty.possible, relation,
+        text);
 }
 
 fn certainty_of(root_kind r) certainty {
@@ -1884,7 +1858,7 @@ fn equal(context mut* c, state* a, state* b, bool mut* same) bool {
         *same = true;
         return true;
     }
-    if (a->witness != b->witness || a->released.bits != b->released.bits ||
+    if (a->released.bits != b->released.bits ||
         a->lossy != b->lossy || a->slots_len != b->slots_len || a->atoms_len != b->atoms_len ||
         a->ended.len != b->ended.len) { return true; }
     u64 mut i = 0;
@@ -1907,10 +1881,8 @@ fn equal(context mut* c, state* a, state* b, bool mut* same) bool {
     return true;
 }
 
-// Joins two records of one atom. A root that each witnessed side refined from one free input choice
-// stays a free choice: each of its values is feasible on a witnessed path (`spec/toolchain.md`
-// 4.2).
-fn join_atom(atom a, atom b, bool witness_a, bool witness_b) atom {
+// Joins two records of one atom.
+fn join_atom(atom a, atom b) atom {
     // The join starts from `a`, and it assigns each fact below.
     atom mut out = a; // join: copy
     if (a.kind != b.kind) {
@@ -1925,10 +1897,6 @@ fn join_atom(atom a, atom b, bool witness_a, bool witness_b) atom {
     out.status = ownership_facts.join_status_fact(null_a && !null_b ? b.status : a.status,
         null_b ? a.status : b.status);
     out.root = ownership_facts.join_nullness(a.root, b.root);
-    if (a.choice && b.choice && witness_a && witness_b && a.root.value != root_kind.joined &&
-        b.root.value != root_kind.joined) {
-        out.root.value = a.root.value == b.root.value ? a.root.value : root_kind.free;
-    }
     out.origin = a.origin | b.origin;
     out.fresh = a.fresh || b.fresh;
     out.strict = a.strict && b.strict;
@@ -2266,7 +2234,6 @@ fn join(context mut* c, state* a, state* b, bool widen, state mut* out) bool {
     }
     state mut joined = state{};
     joined.reached = x.reached || y.reached;
-    joined.witness = x.witness || y.witness;
     joined.released = ownership_facts.join_may_set(x.released, y.released);
     joined.lossy = x.lossy || y.lossy;
     joined.loss = x.lossy ? x.loss : y.loss;
@@ -2298,7 +2265,7 @@ fn join(context mut* c, state* a, state* b, bool widen, state mut* out) bool {
         if (o != NONE && y.atoms[i].used) {
             u64 at = cast(o, u64);
             joined.atoms[at] = from_x[at] ?
-                join_atom(joined.atoms[at], y.atoms[i], x.witness, y.witness) :
+                join_atom(joined.atoms[at], y.atoms[i]) :
                 y.atoms[i]; // join: copy
             from_y[at] = true;
         }
@@ -2509,7 +2476,6 @@ fn caller_of(context* c, u32 param) u32 {
 fn initial(context mut* c) state {
     state mut s = bottom(cast(fir.local_count(c->f), u64));
     s.reached = true;
-    s.witness = true;
     u64 mut i = 0;
     while (i < c->fixed_len) {
         push_slot(&s, c->fixed[i]);
@@ -3675,7 +3641,6 @@ fn unknown_call(context mut* c, state mut* s, argument@ args, leaf_list* arg_lea
     }
     if (changed) {
         c->residual = true;
-        s->witness = false;
         if (report) {
             unproved(c, s, ownership_api.incomplete_reason.unknown_effect, NONE,
                 "the effects of this call on tracked heap obligations");
@@ -4201,7 +4166,6 @@ fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list
         s->reached = false;
         return true;
     }
-    s->witness = s->witness && sum->witness;
     // A reference of the callee's inputs that it keeps in a field without a slot is, here, a
     // reference that the arguments reach: an argument itself, a reference in storage that it
     // designates, or one in an owned argument. `arg_body` says that one of those can be a
@@ -4582,34 +4546,21 @@ fn call(context mut* c, state mut* s, fir.rvalue rv, types.node* t, leaf_list mu
 // ---- blocks, returns, and the body -----------------------------------------------------------
 
 // Refines one edge of a null test (`spec/toolchain.md` 4.2). False when the edge contradicts the
-// state. A test of a joined root, or of an untracked condition, clears the witness of the edge.
+// state. An untracked condition refines nothing.
 fn refine(state mut* s, value cond, bool truth) bool {
     if (cond.kind == value_kind.scalar && cond.known) { return cond.truth == truth; }
-    if (cond.kind != value_kind.scalar || cond.test == NONE) {
-        s->witness = false;
-        return true;
-    }
+    if (cond.kind != value_kind.scalar || cond.test == NONE) { return true; }
     atom mut* a = &s->atoms[cast(cond.test, u64)];
     bool nonnull = truth == cond.test_nonnull;
     if (nonnull) {
         if (a->root.value == root_kind.null_root) { return false; }
-        if (a->root.value == root_kind.joined) { s->witness = false; }
         // The edge establishes the root that its test read.
         a->root = nullness{root_kind.nonnull, provenance.established};
         return true;
     }
     if (a->root.value == root_kind.nonnull || a->kind == atom_kind.cell) { return false; }
-    if (a->root.value == root_kind.joined) { s->witness = false; }
     a->root = nullness{root_kind.null_root, provenance.established};
     return true;
-}
-
-// The checks that a build mode removes (`spec/fir.md` 8). Their continuation stays feasible in
-// that mode, so it keeps the witness.
-fn removable(fir.check_kind k) bool {
-    return k == fir.check_kind.chk_overflow || k == fir.check_kind.chk_shift ||
-        k == fir.check_kind.chk_bounds || k == fir.check_kind.chk_span ||
-        k == fir.check_kind.chk_overwrite;
 }
 
 // Joins a state into the entry of block `to`. A block that changes waits for another visit.
@@ -4755,181 +4706,9 @@ fn finish_return(context mut* c, state mut* s) void {
     replace(&c->exit, &joined);
 }
 
-// ---- witnesses across branches ---------------------------------------------------------------
-
-// The successors of block `b` in the post-dominator graph. A return, an abort, and a check that
-// no build mode removes reach the virtual exit `n`.
-fn successors(fir.func* f, u32 b, u32 n, u32 mut@ out) u32 {
-    fir.terminator* t = &fir.block_at(f, b)->term;
-    u32 mut count = 0;
-    u32 mut i = 0;
-    u32 mut target = 0;
-    while (fir_flow.reachable_target(f, t, i, &target) || fir.term_targets(f, t, i, &target)) {
-        if (fir_flow.reachable_target(f, t, i, &target) && cast(count, u64) < out.len) {
-            out[cast(count, u64)] = target;
-            count += 1;
-        }
-        i += 1;
-    }
-    bool exits = t->kind == fir.term_kind.tk_return || t->kind == fir.term_kind.tk_fail ||
-        t->kind == fir.term_kind.tk_trap || t->kind == fir.term_kind.tk_unreachable ||
-        (t->kind == fir.term_kind.tk_check && !removable(t->check));
-    if (exits && cast(count, u64) < out.len) {
-        out[cast(count, u64)] = n;
-        count += 1;
-    }
-    return count;
-}
-
-fn has_call(fir.func* f, u32 b) bool {
-    u32 count = fir.block_statement_count(f, b);
-    u32 mut i = 0;
-    while (i < count) {
-        fir.statement* stmt = fir.block_statement(f, b, i);
-        if (stmt->kind == fir.stmt_kind.st_assign &&
-            stmt->value.kind == fir.rvalue_kind.rv_call) { return true; }
-        i += 1;
-    }
-    return false;
-}
-
-// Whether each path from the successors of `b` reaches `m` in finite steps: no block of the
-// region between them calls a function, and no path returns to a block that it left.
-fn region_clean(fir.func* f, u32 b, u32 m, u32 n) bool {
-    bool mut@ own seen = new(bool, cast(n, u64) + 1);
-    defer del(seen);
-    bool mut@ own active = new(bool, cast(n, u64) + 1);
-    defer del(active);
-    u32 mut@ own stack = new(u32, cast(n, u64) * 2 + 2);
-    defer del(stack);
-    u32 mut@ own next = new(u32, cast(n, u64) * 2 + 2);
-    defer del(next);
-    u32 mut@ own succ = new(u32, cast(n, u64) + 2);
-    defer del(succ);
-    u64 mut top = 1;
-    stack[0] = b;
-    next[0] = 0;
-    active[cast(b, u64)] = true;
-    while (top > 0) {
-        u32 x = stack[top - 1];
-        u32 count = successors(f, x, n, succ);
-        if (next[top - 1] >= count) {
-            active[cast(x, u64)] = false;
-            top -= 1;
-            continue;
-        }
-        u32 y = succ[cast(next[top - 1], u64)];
-        next[top - 1] += 1;
-        if (y == m) { continue; }
-        if (y == n || active[cast(y, u64)]) { return false; }
-        if (seen[cast(y, u64)]) { continue; }
-        seen[cast(y, u64)] = true;
-        if (has_call(f, y)) { return false; }
-        active[cast(y, u64)] = true;
-        stack[top] = y;
-        next[top] = 0;
-        top += 1;
-    }
-    return true;
-}
-
-/// Finds, for each branch, the block where all of its paths return (`spec/toolchain.md` 4.2). The
-/// post-dominators use a virtual exit after each return, abort, and check that no build mode
-/// removes. Each block pays one W unit in each round.
-fn lay_out_rejoins(context mut* c) bool {
-    u32 n = fir.block_count(c->f);
-    c->rejoin = new(u32, cast(n, u64));
-    u32 mut@ own succ = new(u32, cast(n, u64) + 2);
-    defer del(succ);
-    fir_flow.bits mut@ own pdom = new(fir_flow.bits, cast(n, u64) + 1);
-    defer {
-        u64 mut f = 0;
-        while (f < pdom.len) { fir_flow.bits_free(&pdom[f]); f += 1; }
-        del(pdom);
-    }
-    u32 mut b = 0;
-    while (b <= n) {
-        pdom[cast(b, u64)] = fir_flow.bits_new(n + 1);
-        if (b == n) {
-            fir_flow.bits_set(&pdom[cast(b, u64)], n);
-        } else {
-            fir_flow.bits_fill(&pdom[cast(b, u64)]);
-        }
-        b += 1;
-    }
-    fir_flow.bits mut work = fir_flow.bits_new(n + 1);
-    defer fir_flow.bits_free(&work);
-    bool mut changed = true;
-    while (changed) {
-        changed = false;
-        b = n;
-        while (b > 0) {
-            b -= 1;
-            if (!pay(c, 1)) { return false; }
-            u32 count = successors(c->f, b, n, succ);
-            fir_flow.bits_fill(&work);
-            u32 mut k = 0;
-            while (k < count) {
-                fir_flow.bits_intersect(&work, &pdom[cast(succ[cast(k, u64)], u64)]);
-                k += 1;
-            }
-            if (count == 0) { fir_flow.bits_fill(&work); }
-            fir_flow.bits_set(&work, b);
-            if (!fir_flow.bits_equal(&work, &pdom[cast(b, u64)])) {
-                fir_flow.bits_copy(&pdom[cast(b, u64)], &work);
-                changed = true;
-            }
-        }
-    }
-    b = 0;
-    while (b < n) {
-        c->rejoin[cast(b, u64)] = NONE;
-        u32 count = successors(c->f, b, n, succ);
-        if (count > 1) {
-            // The nearest strict post-dominator has every other strict one as its own.
-            u32 mut m = 0;
-            while (m < n) {
-                if (m != b && fir_flow.bits_get(&pdom[cast(b, u64)], m)) {
-                    bool mut nearest = true;
-                    u32 mut o = 0;
-                    while (o < n && nearest) {
-                        if (o != b && o != m && fir_flow.bits_get(&pdom[cast(b, u64)], o) &&
-                            !fir_flow.bits_get(&pdom[cast(m, u64)], o)) { nearest = false; }
-                        o += 1;
-                    }
-                    if (nearest) {
-                        if (region_clean(c->f, b, m, n)) { c->rejoin[cast(b, u64)] = m; }
-                        break;
-                    }
-                }
-                m += 1;
-            }
-        }
-        b += 1;
-    }
-    return true;
-}
-
-// A block where each path of a witnessed branch returns gets a witness again: one of those
-// paths is feasible (`spec/toolchain.md` 4.2). The branch gives its witness at its terminator,
-// so a call in the branch block that can fail to return clears it.
-fn restore_witness(context* c, u32 b, state mut* s) void {
-    if (s->witness) { return; }
-    u64 mut x = 0;
-    while (x < c->rejoin.len && x < c->left.len) {
-        if (c->rejoin[x] == b && c->left[x]) {
-            s->witness = true;
-            return;
-        }
-        x += 1;
-    }
-}
-
 fn run_block(context mut* c, u32 b) void {
-    c->left[cast(b, u64)] = false;
     state mut s = clone(&c->entry[cast(b, u64)]);
     defer free_state(&s);
-    restore_witness(c, b, &s);
     fir.block* blk = fir.block_at(c->f, b);
     u32 count = fir.block_statement_count(c->f, b);
     u32 mut i = 0;
@@ -4947,7 +4726,6 @@ fn run_block(context mut* c, u32 b) void {
     c->op = position(c, b, count, true);
     c->at = term->loc;
     if (!pay(c, 1)) { return; }
-    c->left[cast(b, u64)] = s.witness;
     switch (term->kind) {
     case fir.term_kind.tk_goto:
         propagate(c, term->target, &s);
@@ -4966,7 +4744,6 @@ fn run_block(context mut* c, u32 b) void {
             defer free_state(&other);
             if (refine(&other, cond, !truth)) { propagate(c, term->otherwise, &other); }
         } else {
-            if (term->arms_len > 0) { s.witness = false; }
             u32 mut a = 0;
             while (a < term->arms_len) {
                 propagate(c, fir.term_arm(c->f, term, a).target, &s);
@@ -4977,15 +4754,12 @@ fn run_block(context mut* c, u32 b) void {
     case fir.term_kind.tk_return:
         finish_return(c, &s);
     case fir.term_kind.tk_check:
-        value checked = operand(c, &s, term->cond);
+        operand(c, &s, term->cond);
         u32 mut arg = 0;
         while (arg < term->args_len) {
             operand(c, &s, fir.operand_at(c->f, term->args_first + arg));
             arg += 1;
         }
-        bool passes = term->check == fir.check_kind.chk_user ?
-            checked.known && checked.truth : checked.known && !checked.truth;
-        if (!removable(term->check) && !passes) { s.witness = false; }
         propagate(c, term->target, &s);
     case fir.term_kind.tk_check_overwrite:
         location mut loc = location{};
@@ -5004,7 +4778,7 @@ fn body_proof(context* c) ownership_api.proof_status {
         out.failed = true;
         return out;
     }
-    if (c->failed_any) { return c->first_failure; }
+    if (c->candidate_any) { return c->first_candidate; }
     return complete();
 }
 
@@ -5017,8 +4791,6 @@ fn free_context(context mut* c) void {
     del(c->entry);
     del(c->joins);
     del(c->pending);
-    del(c->rejoin);
-    del(c->left);
     free_state(&c->exit);
     del(c->shapes);
     del(c->fixed);
@@ -5049,8 +4821,7 @@ fn record_stop(context mut* c, bool reporting) void {
     held.loss = c->stop_loss;
     ownership_api.incomplete_reason reason = why.terminal.present ? why.terminal.reason :
         ownership_api.incomplete_reason.missing_graph;
-    record(c, &held, ownership_api.event_kind.incomplete_proof,
-        ownership_api.evidence_kind.abstract_possibility, reason, NONE,
+    record(c, &held, ownership_api.event_kind.incomplete_proof, reason, certainty.possible, NONE,
         "the state within its precision bounds");
     free_state(&held);
 }
@@ -5059,7 +4830,6 @@ fn analyze(context mut* c, bool reporting) void {
     u32 blocks = fir.block_count(c->f);
     c->entry = new(state, cast(blocks, u64));
     c->joins = new(u32, cast(blocks, u64));
-    c->left = new(bool, cast(blocks, u64));
     c->pending = new(bool, cast(blocks, u64));
     u64 locals = cast(fir.local_count(c->f), u64);
     u64 mut b = 0;
@@ -5082,10 +4852,6 @@ fn analyze(context mut* c, bool reporting) void {
         return;
     }
     if (blocks == 0) { return; }
-    if (!lay_out_rejoins(c)) {
-        record_stop(c, reporting);
-        return;
-    }
     state mut start = initial(c);
     defer free_state(&start);
     if (!canonical(c, &start)) {
@@ -5112,7 +4878,7 @@ fn analyze(context mut* c, bool reporting) void {
         record_stop(c, reporting);
         return;
     }
-    c->failed_any = false;
+    c->candidate_any = false;
     c->incomplete_any = false;
     c->final_pass = true;
     c->reporting = reporting;
@@ -5135,7 +4901,6 @@ fn take_summary(context mut* c) summary {
     out.proof = body_proof(c);
     out.known = true;
     out.returns = c->exit.reached && !c->stopped;
-    out.witness = c->exit.witness;
     out.residual = c->residual || c->stopped;
     out.interface = new(interface_entry, c->interface_len);
     u64 mut i = 0;
@@ -5163,9 +4928,8 @@ fn take_summary(context mut* c) summary {
 
 fn same_summary(context mut* c, summary* a, summary* b, bool mut* same) bool {
     *same = false;
-    if (a->known != b->known || a->returns != b->returns || a->witness != b->witness ||
-        a->residual != b->residual || a->view_reads != b->view_reads ||
-        a->reads_high != b->reads_high ||
+    if (a->known != b->known || a->returns != b->returns || a->residual != b->residual ||
+        a->view_reads != b->view_reads || a->reads_high != b->reads_high ||
         a->proof.kind != b->proof.kind || a->proof.failed != b->proof.failed ||
         a->interface.len != b->interface.len) { return true; }
     u64 mut i = 0;
@@ -5194,7 +4958,7 @@ fn open(context mut* c, body_input* input, ownership_api.services* svc, callee@ 
     c->files = input->files;
     c->svc = svc;
     c->callees = callees;
-    c->first_failure = complete();
+    c->first_candidate = complete();
     c->first_incomplete = complete();
 }
 

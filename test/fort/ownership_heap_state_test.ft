@@ -12,7 +12,7 @@
 //| precision covers
 //| null tests
 //| caller requirements
-//| branch rejoins
+//| branch forms
 //| heap state ok
 /// Checks the state operations of the heap proof one at a time (D17.16, D17.18, fir.md 14.1).
 import fir;
@@ -172,33 +172,36 @@ fn tables() void {
     assert(ownership_facts.join_status(ownership_facts.atom_status.leaked,
         ownership_facts.atom_status.released) == ownership_facts.atom_status.released);
     assert(ownership_heap.certainty_of(ownership_facts.root_kind.nonnull) ==
-        ownership_heap.certainty.definite);
+        ownership_api.certainty.definite);
     assert(ownership_heap.certainty_of(ownership_facts.root_kind.free) ==
-        ownership_heap.certainty.choice);
+        ownership_api.certainty.choice);
     assert(ownership_heap.certainty_of(ownership_facts.root_kind.joined) ==
-        ownership_heap.certainty.possible);
+        ownership_api.certainty.possible);
+    // The zero of a certainty claims nothing.
+    ownership_api.event_descriptor zero = ownership_api.event_descriptor{};
+    assert(zero.certainty == ownership_api.certainty.possible);
     assert(ownership_heap.bit(0) == 1 && ownership_heap.bit(63) != 0);
     assert(ownership_heap.bit(64) == 0);
     assert(ownership_heap.grow(0, 1) == 8 && ownership_heap.grow(8, 9) == 16);
     assert(ownership_heap.grow(16, 3) == 16);
-    // A join of two refined values of one free choice stays a free choice only when both sides
-    // are witnessed.
+    // A join of two refined values of one free choice is a joined root: the join keeps no
+    // choice that a path selected.
     ownership_heap.atom mut x = ownership_heap.new_atom(ownership_heap.atom_kind.region, null, 0,
         ownership_facts.root_kind.nonnull, ownership_facts.provenance.established);
     x.choice = true;
     ownership_heap.atom mut y = x;
     y.root.value = ownership_facts.root_kind.null_root;
-    assert(ownership_heap.join_atom(x, y, true, true).root.value ==
-        ownership_facts.root_kind.free);
-    assert(ownership_heap.join_atom(x, y, true, false).root.value ==
-        ownership_facts.root_kind.joined);
+    assert(ownership_heap.join_atom(x, y).root.value == ownership_facts.root_kind.joined);
+    assert(ownership_heap.join_atom(x, y).choice);
+    y.root.value = ownership_facts.root_kind.free;
+    assert(ownership_heap.join_atom(x, y).root.value == ownership_facts.root_kind.joined);
+    y.root.value = ownership_facts.root_kind.null_root;
     y.choice = false;
-    assert(ownership_heap.join_atom(x, y, true, true).root.value ==
-        ownership_facts.root_kind.joined);
+    assert(ownership_heap.join_atom(x, y).root.value == ownership_facts.root_kind.joined);
     // A null root holds no allocation, so the other side gives the status.
     ownership_heap.atom mut gone = x;
     gone.status.value = ownership_facts.atom_status.released;
-    assert(ownership_heap.join_atom(gone, y, true, true).status.value ==
+    assert(ownership_heap.join_atom(gone, y).status.value ==
         ownership_facts.atom_status.released);
     // A new atom takes one provenance for its root and its status. A join keeps the weaker
     // provenance of each fact, and a null root gives no status provenance to the join.
@@ -207,28 +210,28 @@ fn tables() void {
     ownership_heap.atom mut weak = x;
     weak.root.how = ownership_facts.provenance.assumed;
     weak.status.how = ownership_facts.provenance.imported;
-    ownership_heap.atom both = ownership_heap.join_atom(x, weak, true, true);
+    ownership_heap.atom both = ownership_heap.join_atom(x, weak);
     assert(both.root.how == ownership_facts.provenance.assumed);
     assert(both.status.how == ownership_facts.provenance.imported);
-    assert(ownership_heap.join_atom(x, x, true, true).root.how ==
+    assert(ownership_heap.join_atom(x, x).root.how ==
         ownership_facts.provenance.established);
     y.status.how = ownership_facts.provenance.assumed;
-    ownership_heap.atom kept = ownership_heap.join_atom(gone, y, true, true);
+    ownership_heap.atom kept = ownership_heap.join_atom(gone, y);
     assert(kept.status.value == ownership_facts.atom_status.released);
     assert(kept.status.how == ownership_facts.provenance.established);
-    assert(ownership_heap.join_atom(y, gone, true, true).status.how ==
+    assert(ownership_heap.join_atom(y, gone).status.how ==
         ownership_facts.provenance.established);
     // Different kinds join to an opaque atom with no template.
     ownership_heap.atom mut f = ownership_heap.new_atom(ownership_heap.atom_kind.flat, null, 0,
         ownership_facts.root_kind.nonnull, ownership_facts.provenance.established);
-    ownership_heap.atom k = ownership_heap.join_atom(x, f, true, true);
+    ownership_heap.atom k = ownership_heap.join_atom(x, f);
     assert(k.kind == ownership_heap.atom_kind.opaque && k.shape == 0);
     // Handles survive only when both sides name one entry value.
     x.handle = 2;
     x.handle_field = ownership_heap.NONE;
     f.handle = 3;
-    assert(ownership_heap.join_atom(x, f, true, true).handle == ownership_heap.NONE);
-    assert(ownership_heap.join_atom(x, x, true, true).handle == 2);
+    assert(ownership_heap.join_atom(x, f).handle == ownership_heap.NONE);
+    assert(ownership_heap.join_atom(x, x).handle == 2);
 }
 
 fn keys() void {
@@ -366,7 +369,7 @@ fn entry_state() void {
     assert(ctx->interface[2].key.depth == 1 && ctx->interface[2].key.path[0] == 0);
     ownership_heap.state mut s = ownership_heap.initial(ctx);
     defer ownership_heap.free_state(&s);
-    assert(s.reached && s.witness && s.atoms_len == 4);
+    assert(s.reached && s.atoms_len == 4);
     u64 mut i = 0;
     while (i < 4) {
         ownership_heap.atom a = s.atoms[i];
@@ -662,18 +665,26 @@ fn joins() void {
     assert(value_at(&either, local(2)).kind == ownership_heap.value_kind.owned);
     // A release on one path is a possible release after the join.
     assert(either.released.bits == 2 && a.released.bits == 0);
-    // The witness of a join holds when one side has it.
-    ownership_heap.state mut blind = ownership_heap.clone(&a);
-    defer ownership_heap.free_state(&blind);
-    blind.witness = false;
-    ownership_heap.state mut seen = ownership_heap.state{};
-    defer ownership_heap.free_state(&seen);
-    assert(ownership_heap.join(ctx, &blind, &a, false, &seen));
-    assert(seen.witness);
-    ownership_heap.state mut neither = ownership_heap.state{};
-    defer ownership_heap.free_state(&neither);
-    assert(ownership_heap.join(ctx, &blind, &blind, false, &neither));
-    assert(!neither.witness);
+    // A free input choice that one path refined to nonnull and the other to null is a joined
+    // root after the join: the join keeps no choice that a path selected.
+    ownership_heap.state mut nonnull = ownership_heap.clone(&a);
+    defer ownership_heap.free_state(&nonnull);
+    nonnull.atoms[0].root = ownership_facts.nullness{ownership_facts.root_kind.nonnull,
+        ownership_facts.provenance.established};
+    ownership_heap.state mut null_side = ownership_heap.clone(&a);
+    defer ownership_heap.free_state(&null_side);
+    null_side.atoms[0].root = ownership_facts.nullness{ownership_facts.root_kind.null_root,
+        ownership_facts.provenance.established};
+    ownership_heap.state mut tested = ownership_heap.state{};
+    defer ownership_heap.free_state(&tested);
+    assert(ownership_heap.join(ctx, &nonnull, &null_side, false, &tested));
+    assert(a.atoms[0].choice && tested.atoms[0].choice);
+    assert(tested.atoms[0].root.value == ownership_facts.root_kind.joined);
+    // A refined root and the free root of the other path join to a joined root too.
+    ownership_heap.state mut half_tested = ownership_heap.state{};
+    defer ownership_heap.free_state(&half_tested);
+    assert(ownership_heap.join(ctx, &a, &nonnull, false, &half_tested));
+    assert(half_tested.atoms[0].root.value == ownership_facts.root_kind.joined);
     // A local that one path ended is possibly ended after the join.
     ownership_heap.state mut ended = ownership_heap.clone(&a);
     defer ownership_heap.free_state(&ended);
@@ -788,36 +799,36 @@ fn tests() void {
     ownership_heap.state mut yes = ownership_heap.clone(&s);
     defer ownership_heap.free_state(&yes);
     assert(ownership_heap.refine(&yes, cond, true));
-    assert(yes.atoms[0].root.value == ownership_facts.root_kind.nonnull && yes.witness);
+    assert(yes.atoms[0].root.value == ownership_facts.root_kind.nonnull);
     // The edge establishes the root that its test read.
     assert(yes.atoms[0].root.how == ownership_facts.provenance.established);
     ownership_heap.state mut no = ownership_heap.clone(&s);
     defer ownership_heap.free_state(&no);
     assert(ownership_heap.refine(&no, cond, false));
-    assert(no.atoms[0].root.value == ownership_facts.root_kind.null_root && no.witness);
+    assert(no.atoms[0].root.value == ownership_facts.root_kind.null_root);
     assert(no.atoms[0].root.how == ownership_facts.provenance.established);
     // A refined root contradicts the other edge.
     assert(!ownership_heap.refine(&yes, cond, false));
     assert(!ownership_heap.refine(&no, cond, true));
-    // A joined root refines but clears the witness of the edge.
+    // A joined root refines as a free root does.
     ownership_heap.state mut joined = ownership_heap.clone(&s);
     defer ownership_heap.free_state(&joined);
     joined.atoms[0].root.value = ownership_facts.root_kind.joined;
     assert(ownership_heap.refine(&joined, cond, true));
-    assert(!joined.witness);
+    assert(joined.atoms[0].root.value == ownership_facts.root_kind.nonnull);
     // A cell has a nonnull root.
     ownership_heap.state mut cell = ownership_heap.clone(&s);
     defer ownership_heap.free_state(&cell);
     assert(ownership_heap.unfold(ctx, &cell, 0));
     assert(!ownership_heap.refine(&cell, cond, false));
-    // A known truth value selects one edge; an untracked one clears each witness.
+    // A known truth value selects one edge; an untracked one takes each edge and refines nothing.
     ownership_heap.value mut known = ownership_heap.scalar_value();
     known.known = true;
     known.truth = false;
     assert(ownership_heap.refine(&s, known, false) && !ownership_heap.refine(&s, known, true));
-    assert(s.witness);
     assert(ownership_heap.refine(&s, ownership_heap.scalar_value(), true));
-    assert(!s.witness);
+    assert(ownership_heap.refine(&s, ownership_heap.scalar_value(), false));
+    assert(s.atoms[0].root.value == ownership_facts.root_kind.free);
 }
 
 fn requirements() void {
@@ -850,46 +861,23 @@ fn requirements() void {
     assert(!ownership_heap.require_empty(ctx, &s, made));
 }
 
-fn rejoin_of(string name, u32 block) u32 {
-    fixture mut x = fixture{};
-    defer close(&x);
-    open(&x, name);
-    assert(ownership_heap.lay_out_rejoins(&x.ctx));
-    return x.ctx.rejoin[cast(block, u64)];
-}
-
-fn rejoins() void {
-    println("branch rejoins");
-    // A diamond rejoins at the block after both arms.
-    u32 diamond = rejoin_of("diamond", 0);
-    assert(diamond != ownership_heap.NONE && diamond > 0);
-    // A loop on an untracked condition has a cycle, so its branch rejoins nowhere.
-    fixture mut l = fixture{};
-    defer close(&l);
-    open(&l, "looping");
-    assert(ownership_heap.lay_out_rejoins(&l.ctx));
-    u64 mut b = 0;
-    while (b < l.ctx.rejoin.len) {
-        assert(l.ctx.rejoin[b] == ownership_heap.NONE);
-        b += 1;
+// The heap proof keeps no path, so a body with a branch, a loop, an abort, a call, an assert or
+// a check proves with no event, as straight code does (`spec/toolchain.md` 4.2). The entry
+// values of `host` stay owned at its return: two candidates of a free input choice.
+fn branch_forms() void {
+    println("branch forms");
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, HOST[..], NAMES[..]);
+    u64 mut i = 1;
+    while (i < NAMES.len) {
+        assert(ownership_heap_env.proved(&c, NAMES[i]));
+        assert(ownership_heap_env.events(&c, NAMES[i]) == 0);
+        i += 1;
     }
-    // A branch with an aborting arm, or with a call, rejoins nowhere.
-    assert(rejoin_of("aborting", 0) == ownership_heap.NONE);
-    assert(rejoin_of("calling", 0) == ownership_heap.NONE);
-    // A nested branch rejoins inside its outer arm, and the outer branch rejoins after it.
-    fixture mut n = fixture{};
-    defer close(&n);
-    open(&n, "nested");
-    assert(ownership_heap.lay_out_rejoins(&n.ctx));
-    u64 mut found = 0;
-    b = 0;
-    while (b < n.ctx.rejoin.len) {
-        if (n.ctx.rejoin[b] != ownership_heap.NONE) { found += 1; }
-        b += 1;
-    }
-    assert(found == 2);
-    // An assert that no mode removes ends its block with an abort edge.
-    assert(rejoin_of("asserting", 0) == ownership_heap.NONE);
+    assert(ownership_heap_env.candidate(&c, "host", ownership_api.event_kind.lost_ownership));
+    assert(ownership_heap_env.candidates(&c, "host", ownership_api.event_kind.lost_ownership,
+        ownership_api.certainty.choice) == 2);
 }
 
 fn main() i32 {
@@ -904,7 +892,7 @@ fn main() i32 {
     covers();
     tests();
     requirements();
-    rejoins();
+    branch_forms();
     println("heap state ok");
     return 0;
 }
