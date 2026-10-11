@@ -4,6 +4,11 @@
 //| owned spans and their views
 //| fixed arrays and globals keep their obligations unproved
 //| casts keep the atom
+//| stores and reads through a pointer of another type
+//| a cast store in a loop, through a region, and before a typed store
+//| arrays, caller storage and joins through a cast
+//| a cast pointer that leaves the body
+//| unmatched storage through a cast
 //| deferred releases and loop exits
 //| the supported shapes
 //| borrowed fields and views of caller storage
@@ -127,6 +132,523 @@ fn casts() void {
     // Integer bits name no source (D17.17).
     assert(ownership_heap_env.unproved(&c, "from_bits",
         ownership_api.incomplete_reason.unknown_effect));
+}
+
+// The proof of `name` has candidates only, and the first one loses `extra`.
+fn leaks(ownership_heap_env.closure* c, string name) bool {
+    return ownership_heap_env.candidate(c, name, ownership_api.event_kind.lost_ownership) &&
+        ownership_heap_env.first_text(c, name) == "extra";
+}
+
+// The text of the event of a mutable cast whose storage type the proof cannot match.
+string LOST_VIEW = "the storage of another type that this cast can write";
+
+// The first event of `name` is incomplete proof for a store that can write past its storage. The
+// proof does not know which bytes the store writes, so it records no violation.
+fn past_end(ownership_heap_env.closure* c, string name) bool {
+    ownership_heap_env.event_row row = ownership_heap_env.first(c, name);
+    return ownership_heap_env.unproved(c, name, ownership_api.incomplete_reason.unknown_effect) &&
+        ownership_heap_env.violations(c, name) == 0 &&
+        row.kind == ownership_api.event_kind.incomplete_proof &&
+        ownership_heap_env.text(&row) ==
+        "the storage past the end that a store through a cast can write";
+}
+
+// The first event of `name` is incomplete proof for the owner `owner`, which a store can overwrite.
+fn overwrites(ownership_heap_env.closure* c, string name, string owner) bool {
+    ownership_heap_env.event_row row = ownership_heap_env.first(c, name);
+    return ownership_heap_env.unproved(c, name, ownership_api.incomplete_reason.unknown_effect) &&
+        row.kind == ownership_api.event_kind.incomplete_proof &&
+        ownership_heap_env.text(&row) == owner;
+}
+
+// A cast keeps the address and can change the pointee type (D17.17). A pointer whose pointee is
+// not the type of its storage reads unknown values, and a store through it forgets each fact of
+// that whole storage. Each `extra` leaks on the path that a stale fact would remove.
+fn retyped() void {
+    println("stores and reads through a pointer of another type");
+    string[56] text = {
+        "struct node { node mut* own next; i32 v; }",
+        "struct holder { node mut* own first; }",
+        "struct flag { bool f; }",
+        "struct two { u8 lo; u8 hi; }",
+        "struct four { u8[4] b; }",
+        "struct five { u8[5] b; }",
+        "struct word { u64 bits; }",
+        "struct refs { i32*[2] r; node mut* own p; }",
+        "struct d6 { i32 v; }",
+        "struct d5 { d6 in; } struct d4 { d5 in; } struct d3 { d4 in; } struct d2 { d3 in; }",
+        "struct d1 { d2 in; } struct d0 { d1 in; }",
+        "fn drop_list(node mut* own n) void { if (n == null) { return; }",
+        "    drop_list(move(n->next)); del(n); }",
+        "fn no_field() void { i32 mut* own extra = new(i32); bool mut b = false;",
+        "    flag mut* f = cast(&b, flag mut*); f->f = true; if (b) { return; } del(extra); }",
+        "fn narrow() void { i32 mut* own extra = new(i32); i32 mut x = 256;",
+        "    u8 mut* q = cast(&x, u8 mut*); *q = 1; if (x == 1) { del(extra); return; } }",
+        "fn narrow_kept() void { i32 mut* own extra = new(i32); i32 mut x = 256;",
+        "    u8 mut* q = cast(&x, u8 mut*); *q = 1; if (x == 256) { del(extra); return; } }",
+        "fn whole_two() void { i32 mut* own extra = new(i32); u16 mut x = 256;",
+        "    two mut* q = cast(&x, two mut*); *q = two{}; if (x == 256) { del(extra); return; } }",
+        "fn null_address() void { i32 mut* own extra = new(i32); i32 mut x = 0;",
+        "    i32 mut* mut q = &x; word mut* w = cast(&q, word mut*); w->bits = 0;",
+        "    if (q == null) { return; } del(extra); }",
+        "fn wide() void { u8 mut x = 0; u32 mut* q = cast(&x, u32 mut*); *q = 1; }",
+        "fn same_size() void { u32 mut x = 0; four mut* q = cast(&x, four mut*); q->b[0] = 1; }",
+        "fn one_past() void { u32 mut x = 0; five mut* q = cast(&x, five mut*); q->b[0] = 1; }",
+        "fn array_byte() void { u32[4] mut a = {}; u8 mut* q = cast(&a, u8 mut*); *q = 1; }",
+        "fn array_wide() void { u32[4] mut a = {}; u64 mut* q = cast(&a, u64 mut*); *q = 1; }",
+        "fn array_element(i32* r) void { refs mut s = refs{}; s.p = new(node);",
+        "    i32* mut* q = &s.r[1]; *q = r; del(s.p); }",
+        "fn deep() void { d0 mut s = d0{}; d6 mut* q = &s.in.in.in.in.in.in; *q = d6{}; }",
+        "fn deep_cast() void { d0 mut s = d0{};",
+        "    u8 mut* q = cast(&s.in.in.in.in.in.in, u8 mut*); *q = 1; }",
+        "fn read_narrow() void { i32 mut* own extra = new(i32); i32 x = 256;",
+        "    u8* q = cast(&x, u8*); if (*q == 0) { return; } del(extra); }",
+        "fn read_owner() u64 { node mut* own p = new(node); u64* w = cast(&p, u64*); u64 b = *w;",
+        "    del(p); return b; }",
+        "fn local_owner() void { node mut* own mut p = new(node);",
+        "    u64 mut* w = cast(&p, u64 mut*); *w = 0; del(p); }",
+        "fn empty_owner() void { node mut* own mut p = null;",
+        "    u64 mut* w = cast(&p, u64 mut*); *w = 0; }",
+        "fn caller_owner(holder mut* h) void { u64 mut* w = cast(h, u64 mut*); *w = 0; }",
+        "fn caller_typed(holder mut* h) void { drop_list(move(h->first)); }",
+        "fn cell_owner() void { node mut* own n = new(node); n->next = new(node);",
+        "    u64 mut* w = cast(n, u64 mut*); *w = 0; drop_list(move(n)); }",
+        "fn marks_only() void { node mut* own mut p = new(node);",
+        "    node mut* mut* q = cast(&p, node mut* mut*); *q = null; }",
+        "fn round_trip() void { i32 mut* own extra = new(i32); i32 mut x = 0;",
+        "    void mut* v = cast(&x, void mut*); i32 mut* p = cast(v, i32 mut*); *p = 7;",
+        "    if (x == 7) { del(extra); return; } }",
+        "fn joined_cast(bool c) void { node mut* own a = new(node); node mut* own b = new(node);",
+        "    a->next = new(node); node mut* mut w = a; if (c) { w = b; }",
+        "    u64 mut* p = cast(w, u64 mut*); *p = 0; drop_list(move(a)); del(b); }",
+        "fn joined_store(bool c) void { node mut* own a = new(node); node mut* own b = new(node);",
+        "    node mut* mut w = a; if (c) { w = b; } i32 mut* p = &w->v; *p = 4; del(a); del(b); }",
+    };
+    string[25] names = {"drop_list", "no_field", "narrow", "narrow_kept", "whole_two",
+        "null_address", "wide", "same_size", "one_past", "array_byte", "array_wide",
+        "array_element", "deep", "deep_cast", "read_narrow", "read_owner", "local_owner",
+        "empty_owner", "caller_owner", "caller_typed", "cell_owner", "marks_only", "round_trip",
+        "joined_cast", "joined_store"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    // A store to a field that the storage type does not have, a narrow store and an aggregate
+    // store without reference leaves forget the old value: the leak of `extra` stays.
+    assert(leaks(&c, "no_field"));
+    assert(leaks(&c, "narrow"));
+    assert(leaks(&c, "narrow_kept"));
+    assert(leaks(&c, "whole_two"));
+    // A store over a pointer local forgets its established address, so the null test keeps both
+    // edges.
+    assert(leaks(&c, "null_address"));
+    // A wider store can write past its storage. One byte more than the storage is too much. An
+    // address in an array can designate its last element, so the bound is one element.
+    assert(past_end(&c, "wide"));
+    assert(ownership_heap_env.proved(&c, "same_size"));
+    assert(past_end(&c, "one_past"));
+    assert(ownership_heap_env.proved(&c, "array_byte"));
+    assert(past_end(&c, "array_wide"));
+    // A pointer to an element of an array of references designates the array leaf, so the store
+    // follows that leaf, and the owner beside it keeps its fact.
+    assert(ownership_heap_env.proved(&c, "array_element"));
+    // An address below the path bound can designate each field of its leaf. A typed store
+    // follows the leaf; a store of another type can write past the field.
+    assert(ownership_heap_env.proved(&c, "deep"));
+    assert(past_end(&c, "deep_cast"));
+    // A read through a cast gives an unknown value, not the value of the storage.
+    assert(leaks(&c, "read_narrow"));
+    // A read changes no fact, so the owner keeps its allocation.
+    assert(ownership_heap_env.proved(&c, "read_owner"));
+    // A store over an owner can lose its obligation: in a local, in caller storage and in a heap
+    // cell. The first event names the owner.
+    assert(overwrites(&c, "local_owner", "p"));
+    assert(overwrites(&c, "caller_owner", "h->first"));
+    assert(overwrites(&c, "cell_owner", "n->next"));
+    // An empty owner loses nothing at the store, but it holds unknown bits at its end.
+    assert(ownership_heap_env.unproved(&c, "empty_owner",
+        ownership_api.incomplete_reason.unknown_effect));
+    assert(ownership_heap_env.events(&c, "empty_owner") == 2);
+    // A move through caller storage of its own type follows the slot.
+    assert(ownership_heap_env.proved(&c, "caller_typed"));
+    // A dropped `own` mark does not match owning storage. The write gives incomplete proof.
+    assert(overwrites(&c, "marks_only", "p"));
+    // A round trip through `void*` gives the type of the storage back: the store follows it.
+    assert(ownership_heap_env.proved(&c, "round_trip"));
+    // A view into a cell or a region keeps no type, so a cast to another pointee type loses it
+    // and gives incomplete proof. Without a cast, the address of a field keeps its view.
+    assert(ownership_heap_env.unproved(&c, "joined_cast",
+        ownership_api.incomplete_reason.unknown_effect));
+    assert(ownership_heap_env.first_text(&c, "joined_cast") == LOST_VIEW);
+    assert(ownership_heap_env.proved(&c, "joined_store"));
+}
+
+// A store through a cast forgets its storage on each path, in a loop too, and only the storage of
+// its base. A later typed store gives the value back. A move, a release or a read of a pointer
+// through a cast reaches storage that the proof does not follow.
+fn retyped_flow() void {
+    println("a cast store in a loop, through a region, and before a typed store");
+    string[22] text = {
+        "struct node { node mut* own next; i32 v; }",
+        "struct leaf { leaf mut* own child; }",
+        "fn drop_list(node mut* own n) void { if (n == null) { return; }",
+        "    drop_list(move(n->next)); del(n); }",
+        "fn in_loop(u64 n) void { i32 mut* own extra = new(i32); u32 mut x = 7; u64 mut i = 0;",
+        "    while (i < n) { u8 mut* q = cast(&x, u8 mut*); *q = 1; i += 1; }",
+        "    if (x == 7) { del(extra); return; } }",
+        "fn region_param(node mut* own n) void { u64 mut* w = cast(n, u64 mut*); *w = 0;",
+        "    drop_list(move(n)); }",
+        "fn moved_through(node mut* own mut p) void {",
+        "    leaf mut* own mut* w = cast(&p, leaf mut* own mut*); leaf mut* own k = move(*w);",
+        "    del(k); }",
+        "fn released_through(node mut* own mut p) void {",
+        "    leaf mut* own mut* w = cast(&p, leaf mut* own mut*); del(*w); }",
+        "fn restored() void { i32 mut* own extra = new(i32); i32 mut x = 256;",
+        "    u8 mut* q = cast(&x, u8 mut*); *q = 1; x = 5; if (x == 5) { del(extra); return; } }",
+        "fn other_base() void { i32 mut* own extra = new(i32); i32 mut x = 256; i32 mut y = 3;",
+        "    u8 mut* q = cast(&x, u8 mut*); *q = 1; if (y == 3) { del(extra); return; } }",
+        "fn read_pointer() i32 { u64 mut bits = 0; node** pp = cast(&bits, node**);",
+        "    node* n = *pp; return n->v; }",
+        "fn bits_read(i32 mut* own p) u64 { u64* w = cast(&p, u64*); u64 b = *w; del(p);",
+        "    return b; }",
+    };
+    string[9] names = {"drop_list", "in_loop", "region_param", "moved_through",
+        "released_through", "restored", "other_base", "read_pointer", "bits_read"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    // The loop head joins the forgotten value, so the leak of `extra` stays.
+    assert(leaks(&c, "in_loop"));
+    // A store through a cast of a region root forgets its owned child, a free input choice.
+    assert(overwrites(&c, "region_param", "n->next"));
+    // A move and a release through a cast take an owner from storage that the proof does not
+    // follow: incomplete proof first, and no proof of the owner of the other type.
+    ownership_heap_env.event_row moved = ownership_heap_env.first(&c, "moved_through");
+    assert(moved.kind == ownership_api.event_kind.incomplete_proof);
+    assert(ownership_heap_env.text(&moved) ==
+        "the ownership that a move takes from untracked storage");
+    ownership_heap_env.event_row released = ownership_heap_env.first(&c, "released_through");
+    assert(released.kind == ownership_api.event_kind.incomplete_proof);
+    assert(ownership_heap_env.text(&released) ==
+        "the release of storage that the proof does not track");
+    // A typed store after the cast store gives the value back, and a local of another base keeps
+    // its value.
+    assert(ownership_heap_env.proved(&c, "restored"));
+    assert(ownership_heap_env.proved(&c, "other_base"));
+    // A pointer read through a cast from scalar storage has no source.
+    assert(ownership_heap_env.unproved(&c, "read_pointer",
+        ownership_api.incomplete_reason.unknown_effect));
+    assert(ownership_heap_env.first_text(&c, "read_pointer") == "n");
+    // A scalar read through a cast of an owner changes no fact of the owner.
+    assert(ownership_heap_env.proved(&c, "bits_read"));
+}
+
+// The type check reads nested arrays and caller storage, and a join keeps a forgotten value.
+fn retyped_edges() void {
+    println("arrays, caller storage and joins through a cast");
+    string[24] text = {
+        "struct node { node mut* own next; i32 v; }",
+        "struct holder { node mut* own first; }",
+        "struct flag { bool f; }",
+        "struct grid { i32*[2][2] r; node mut* own p; }",
+        "fn drop_list(node mut* own n) void { if (n == null) { return; }",
+        "    drop_list(move(n->next)); del(n); }",
+        "fn nested_element(i32* r) void { grid mut g = grid{}; g.p = new(node);",
+        "    i32* mut* q = &g.r[1][0]; *q = r; drop_list(move(g.p)); }",
+        "fn nested_wide() void { u32[2][2] mut a = {}; u64 mut* q = cast(&a, u64 mut*); *q = 1; }",
+        "fn caller_wide(flag mut* f) void { u64 mut* w = cast(f, u64 mut*); *w = 0; }",
+        "fn caller_fits(flag mut* f) void { u8 mut* w = cast(f, u8 mut*); *w = 0; }",
+        "fn identity() void { holder mut h = holder{}; holder mut* q = cast(&h, holder mut*);",
+        "    q->first = new(node); drop_list(move(h.first)); }",
+        "fn one_branch(bool c) void { i32 mut* own extra = new(i32); i32 mut x = 256; if (c) {",
+        "    u8 mut* q = cast(&x, u8 mut*); *q = 1; } if (x == 256) { del(extra); return; } }",
+        "fn first_field() i32 { holder mut h = holder{}; h.first = new(node);",
+        "    node** q = cast(&h, node**); node* n = *q; i32 v = n->v; drop_list(move(h.first));",
+        "    return v; }",
+        "fn flat_join(bool c) void { u8 mut@ own a = new(u8, 8); u8 mut@ own b = new(u8, 8);",
+        "    u8 mut* mut p = a.ptr; if (c) { p = b.ptr; } u32 mut* w = cast(p, u32 mut*); *w = 1;",
+        "    del(a); del(b); }",
+        "fn joined_read(bool c) u64 { node mut* own a = new(node); node mut* own b = new(node);",
+        "    node mut* mut w = a; if (c) { w = b; } u64* p = cast(w, u64*); u64 r = *p;",
+        "    del(a); del(b); return r; }",
+    };
+    string[10] names = {"drop_list", "nested_element", "nested_wide", "caller_wide",
+        "caller_fits", "identity", "one_branch", "first_field", "flat_join", "joined_read"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    // An element of an array of arrays of references is that storage too, so the owner beside it
+    // keeps its fact. A store into an array of arrays is bound by one innermost element.
+    assert(ownership_heap_env.proved(&c, "nested_element"));
+    assert(past_end(&c, "nested_wide"));
+    // Caller storage has the pointee type of its parameter: 8 bytes do not fit 1, 1 byte does.
+    assert(past_end(&c, "caller_wide"));
+    assert(ownership_heap_env.proved(&c, "caller_fits"));
+    // A cast to the same pointee type changes nothing: the store follows the owner.
+    assert(ownership_heap_env.proved(&c, "identity"));
+    // A join of the forgotten value and the known value knows nothing, so the leak stays.
+    assert(leaks(&c, "one_branch"));
+    // A pointer read through a cast of a struct to its first field has no source.
+    assert(ownership_heap_env.unproved(&c, "first_field",
+        ownership_api.incomplete_reason.unknown_effect));
+    assert(ownership_heap_env.first_text(&c, "first_field") == "n");
+    // A flat allocation holds no owner, so a cast keeps a joined view of two of them. A cast of
+    // a joined view of two cells gives incomplete proof, also for a read (a precision limit).
+    assert(ownership_heap_env.proved(&c, "flat_join"));
+    assert(ownership_heap_env.unproved(&c, "joined_read",
+        ownership_api.incomplete_reason.unknown_effect));
+    assert(ownership_heap_env.first_text(&c, "joined_read") == "p");
+}
+
+// A pointer of another pointee type than its storage leaves the body at a call argument, at a
+// store outside a local of the body, and at a return. Then a callee or a caller can write the
+// storage, so the storage forgets each fact there, and a live owner gives incomplete proof.
+fn retyped_escape() void {
+    println("a cast pointer that leaves the body");
+    string[37] text = {
+        "struct node { node mut* own next; i32 v; }",
+        "struct holder { node mut* own first; }",
+        "struct carrier { u64 mut* w; }",
+        "struct side { i32 n; node mut* own p; }",
+        "struct pair16 { u64 lo; u64 hi; }",
+        "fn drop_list(node mut* own n) void { if (n == null) { return; }",
+        "    drop_list(move(n->next)); del(n); }",
+        "fn poke(u64 mut* w) void { *w = 0; }",
+        "fn take(carrier k) void { *k.w = 0; }",
+        "fn zap16(pair16 mut* w) void { w->lo = 0; w->hi = 0; }",
+        "fn keep(void* v) void { }",
+        "fn bump(i32 mut* x) void { *x += 1; }",
+        "fn peek(i32 mut* own* pp) i32 { return **pp; }",
+        "fn cast_arg() void { node mut* own mut p = new(node); poke(cast(&p, u64 mut*)); del(p); }",
+        "fn cast_field() void { node mut* own mut p = new(node); carrier mut k = carrier{};",
+        "    k.w = cast(&p, u64 mut*); take(k); del(p); }",
+        "fn cast_aggregate() void { node mut* own mut p = new(node);",
+        "    carrier k = carrier{cast(&p, u64 mut*)}; take(k); del(p); }",
+        "fn cast_side() void { side mut s = side{}; s.p = new(node);",
+        "    zap16(cast(&s, pair16 mut*)); del(s.p); }",
+        "fn typed_arg() void { node mut* own p = new(node); i32 mut v = 0; bump(&v); del(p); }",
+        "fn typed_owner() void { i32 mut* own p = new(i32); i32 v = peek(&p); del(p); }",
+        "fn void_arg() void { node mut* own mut p = new(node); keep(cast(&p, void*)); del(p); }",
+        "fn wide_arg() void { u8 mut b = 0; poke(cast(&b, u64 mut*)); }",
+        "fn give(holder mut* h) u64 mut* { return cast(h, u64 mut*); }",
+        "fn local_copy() void { node mut* own mut p = new(node);",
+        "    u64 mut* w = cast(&p, u64 mut*); u64 mut* v = w; del(p); }",
+        "fn cell_arg() void { node mut* own n = new(node); n->next = new(node);",
+        "    poke(cast(n, u64 mut*)); drop_list(move(n)); }",
+        "fn array_store() void { node mut* own mut p = new(node); u64 mut*[1] mut ws = {};",
+        "    ws[0] = cast(&p, u64 mut*); del(p); }",
+        "fn empty_arg() void { node mut* own mut p = null; poke(cast(&p, u64 mut*)); }",
+        "fn renewed() void { node mut* own mut p = null; carrier mut k = carrier{};",
+        "    k.w = cast(&p, u64 mut*); p = new(node); take(k); del(p); }",
+        "fn joined_arg(bool c) void { node mut* own a = new(node); node mut* own b = new(node);",
+        "    a->next = new(node); node mut* mut w = a; if (c) { w = b; }",
+        "    poke(cast(w, u64 mut*)); drop_list(move(a)); del(b); }",
+    };
+    string[22] names = {"drop_list", "poke", "take", "zap16", "keep", "bump", "peek", "cast_arg",
+        "cast_field", "cast_aggregate", "cast_side", "typed_arg", "typed_owner", "void_arg",
+        "wide_arg", "give", "local_copy", "cell_arg", "array_store", "empty_arg", "renewed",
+        "joined_arg"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    // A cast pointer goes to a call, a store into a struct field, an aggregate, and an array: the
+    // owner of its storage can lose its allocation, so each one gives incomplete proof there.
+    assert(overwrites(&c, "cast_arg", "p"));
+    assert(overwrites(&c, "cast_field", "p"));
+    assert(overwrites(&c, "cast_aggregate", "p"));
+    assert(overwrites(&c, "array_store", "p"));
+    // The storage is the whole local, so an owner beside the bytes of the pointee counts too.
+    assert(overwrites(&c, "cast_side", "s.p"));
+    // A heap cell and caller storage at a return leave the body in the same way.
+    assert(overwrites(&c, "cell_arg", "n->next"));
+    assert(overwrites(&c, "give", "h->first"));
+    // A read-only `void*` cannot write its storage, so it does not make the owner escape.
+    assert(ownership_heap_env.proved(&c, "void_arg"));
+    // A wider pointer can let a callee write past the storage.
+    assert(past_end(&c, "wide_arg"));
+    // A pointer of the type of its storage, and a copy into a local of the body, leave nothing.
+    assert(ownership_heap_env.proved(&c, "typed_arg"));
+    assert(ownership_heap_env.proved(&c, "typed_owner"));
+    assert(ownership_heap_env.proved(&c, "local_copy"));
+    // An empty owner loses nothing at the call, but it holds unknown bits at its end. An owner
+    // that a store renews after the escape gives incomplete proof at that store.
+    assert(ownership_heap_env.unproved(&c, "empty_arg",
+        ownership_api.incomplete_reason.unknown_effect));
+    assert(ownership_heap_env.events(&c, "empty_arg") == 2);
+    assert(ownership_heap_env.unproved(&c, "renewed",
+        ownership_api.incomplete_reason.unknown_effect));
+    assert(ownership_heap_env.events(&c, "renewed") == 2);
+    // A cast loses a view into a cell or a region, so no later escape can name its storage.
+    assert(ownership_heap_env.first_text(&c, "joined_arg") == LOST_VIEW);
+}
+
+// An external view, an opaque atom, an `own` mismatch and a joined storage type do not supply an
+// exact storage type. A mutable cast gives incomplete proof before it can change an owner.
+fn retyped_review() void {
+    println("unmatched storage through a cast");
+    string[97] text = {
+        "struct node { node mut* own next; i32 v; }",
+        "struct holder { node mut* own mut* w; }",
+        "struct pairo { node mut* own[2] kids; i32 tag; }",
+        "struct ta { node mut* own o; }",
+        "struct tb { u32 lo; u32 hi; }",
+        "struct side { i32 n; node mut* own p; }",
+        "struct pair16 { u64 lo; u64 hi; }",
+        "struct views { node* first; node* second; }",
+        "struct aliases { node* first; node* second; }",
+        "struct overlap_base { u64 pad; node mut* own p; }",
+        "struct overlap_view { u64 pad; u32 gap; u32 at; }",
+        "struct nested_frame { u64[3] pad; node mut* own p; node mut* own q; }",
+        "struct nested_alias { u64 head; u64 at; }",
+        "struct array_side { u64 n; node mut* own p; }",
+        "struct borrow_node { i32* p; }",
+        "struct borrow_hold { u64 pad; borrow_node mut* link; }",
+        "struct offset_base { u64 pad; u64 n; node mut* own p; }",
+        "struct offset_view { u32 lo; u32 hi; u64[2] a; }",
+        "extern fn ext_write(u64 mut* p) void;",
+        "extern fn ext_write32(u32 mut* p) void;",
+        "extern fn ext_hold(borrow_hold mut* h) void;",
+        "fn take(holder h) void { *cast(h.w, u64 mut*) = 0; }",
+        "fn zap_owned(node mut* own mut@ own mut* xsp) void {",
+        "    u64 mut* q = cast(&(*xsp)[0], u64 mut*); *q = 0; }",
+        "fn fake(node mut* n) node mut* own { node mut* own mut p = null;",
+        "    node mut* mut* q = cast(&p, node mut* mut*); *q = n; return move(p); }",
+        "fn struct_arr_null(pairo mut* p) void {",
+        "    node* mut* q = cast(&p->kids[0], node* mut*); *q = null; }",
+        "fn joined_ret(bool c) tb mut* own { void mut* own mut v = null;",
+        "    if (c) { v = cast(new(tb), void mut* own); } else {",
+        "        ta mut* own a = new(ta); a->o = new(node);",
+        "        v = cast(move(a), void mut* own); }",
+        "    tb mut* own b = cast(move(v), tb mut* own); b->hi = 7; return move(b); }",
+        "fn joined_ret_ab(bool c) tb mut* own { void mut* own mut v = null;",
+        "    if (c) { ta mut* own a = new(ta); a->o = new(node);",
+        "        v = cast(move(a), void mut* own); } else {",
+        "        v = cast(new(tb), void mut* own); }",
+        "    tb mut* own b = cast(move(v), tb mut* own); b->hi = 7; return move(b); }",
+        "fn single_ret() tb mut* own { ta mut* own a = new(ta); a->o = new(node);",
+        "    void mut* own v = cast(move(a), void mut* own);",
+        "    tb mut* own b = cast(move(v), tb mut* own); b->hi = 7; return move(b); }",
+        "fn addr_extern() void { side mut s = side{}; s.p = new(node);",
+        "    pair16 mut* q = cast(&s, pair16 mut*); ext_write(&q->hi); del(s.p); }",
+        "fn hash(u8* b, u64 n) u64 { return n; }",
+        "fn hash_owner() u64 { node mut* own p = new(node);",
+        "    u64 h = hash(cast(&p, u8*), 8); del(p); return h; }",
+        "fn hash_side() u64 { side mut s = side{}; s.p = new(node);",
+        "    u64 h = hash(cast(&s, u8*), 16); del(s.p); return h; }",
+        "fn void_read(void* v) u8 { return *cast(v, u8*); }",
+        "fn slice_place() void { node mut* own mut p = new(node);",
+        "    u8 mut@ bytes = (*cast(&p, u8[8] mut*))[..]; del(p); }",
+        "fn slice_pointer() void { node mut* own mut p = new(node);",
+        "    u8 mut@ bytes = cast(&p, u8 mut*)[0..8]; del(p); }",
+        "fn offset_second() i32 { node mut* own a = new(node); node mut* own b = new(node);",
+        "    views mut s = views{}; s.first = a; s.second = b;",
+        "    aliases mut* q = cast(&s, aliases mut*); node* mut* at = &q->second;",
+        "    del(b); i32 out = (*at)->v; del(a); return out; }",
+        "fn offset_overlap() void { overlap_base mut s = overlap_base{}; s.p = new(node);",
+        "    overlap_view mut* q = cast(&s, overlap_view mut*); ext_write32(&q->at); del(s.p); }",
+        "fn offset_saved() void { overlap_base mut s = overlap_base{}; s.p = new(node);",
+        "    overlap_view mut* q = cast(&s, overlap_view mut*); u32 mut* at = &q->at;",
+        "    *at = 0; del(s.p); }",
+        "fn nested_offset() void { nested_frame mut s = nested_frame{};",
+        "    s.p = new(node); s.q = new(node);",
+        "    nested_alias mut* q = cast(&s, nested_alias mut*);",
+        "    nested_frame mut* r = cast(&q->at, nested_frame mut*);",
+        "    r->p = null; del(s.p); del(s.q); }",
+        "fn array_offset() void { array_side mut s = array_side{}; s.p = new(node);",
+        "    u64[2] mut* q = cast(&s, u64[2] mut*);",
+        "    u64 mut* at = &(*q)[1]; array_side mut* r = cast(at, array_side mut*);",
+        "    r->n = 0; del(s.p); }",
+        "fn clear_borrow_target() i32 { borrow_node mut* own n = new(borrow_node);",
+        "    i32 mut* own a = new(i32); n->p = a; borrow_hold mut h = borrow_hold{0, n};",
+        "    *cast(&h.pad, u32 mut*) = 0; ext_hold(&h); i32 out = *n->p;",
+        "    del(a); del(n); return out; }",
+        "fn unknown_offset_escape() void { offset_base mut s = offset_base{}; s.p = new(node);",
+        "    offset_view mut* q = cast(&s, offset_view mut*); ext_write(&q->a[1]);",
+        "    del(s.p); }",
+        "fn cast_before_join(bool c) tb mut* own {",
+        "    tb mut* own mut b = null;",
+        "    if (c) {",
+        "        b = new(tb);",
+        "    } else {",
+        "        ta mut* own a = new(ta);",
+        "        a->o = new(node);",
+        "        b = cast(move(a), tb mut* own); }",
+        "    b->lo = 0; return move(b); }",
+        "fn cast_before_join_ab(bool c) tb mut* own {",
+        "    tb mut* own mut b = null;",
+        "    if (c) {",
+        "        ta mut* own a = new(ta);",
+        "        a->o = new(node);",
+        "        b = cast(move(a), tb mut* own);",
+        "    } else {",
+        "        b = new(tb); }",
+        "    b->lo = 0; return move(b); }",
+        "fn main() i32 { return 0; }",
+    };
+    string[24] names = {"take", "zap_owned", "fake", "struct_arr_null", "joined_ret",
+        "joined_ret_ab", "single_ret", "addr_extern", "hash", "hash_owner", "hash_side",
+        "void_read", "slice_place", "slice_pointer", "offset_second", "offset_overlap",
+        "offset_saved", "nested_offset", "array_offset", "clear_borrow_target",
+        "unknown_offset_escape", "cast_before_join", "cast_before_join_ab", "main"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    assert(ownership_heap_env.unproved(&c, "take",
+        ownership_api.incomplete_reason.unknown_effect));
+    assert(ownership_heap_env.unproved(&c, "zap_owned",
+        ownership_api.incomplete_reason.unknown_effect));
+    assert(ownership_heap_env.unproved(&c, "fake",
+        ownership_api.incomplete_reason.unknown_effect));
+    assert(ownership_heap_env.unproved(&c, "struct_arr_null",
+        ownership_api.incomplete_reason.unknown_effect));
+    assert(ownership_heap_env.unproved(&c, "joined_ret",
+        ownership_api.incomplete_reason.unknown_effect));
+    assert(ownership_heap_env.unproved(&c, "joined_ret_ab",
+        ownership_api.incomplete_reason.unknown_effect));
+    assert(ownership_heap_env.unproved(&c, "single_ret",
+        ownership_api.incomplete_reason.unknown_effect));
+    assert(ownership_heap_env.unproved(&c, "addr_extern",
+        ownership_api.incomplete_reason.unknown_effect));
+    assert(ownership_heap_env.proved(&c, "hash_owner"));
+    assert(ownership_heap_env.proved(&c, "hash_side"));
+    assert(ownership_heap_env.proved(&c, "void_read"));
+    assert(ownership_heap_env.unproved(&c, "slice_place",
+        ownership_api.incomplete_reason.unknown_effect));
+    assert(ownership_heap_env.unproved(&c, "slice_pointer",
+        ownership_api.incomplete_reason.unknown_effect));
+    assert(ownership_heap_env.candidate(&c, "offset_second",
+        ownership_api.event_kind.invalid_use));
+    // The view field starts at byte 12. Its four bytes overlap the owner at byte 8.
+    assert(ownership_heap_env.unproved(&c, "offset_overlap",
+        ownership_api.incomplete_reason.unknown_effect));
+    assert(ownership_heap_env.unproved(&c, "offset_saved",
+        ownership_api.incomplete_reason.unknown_effect));
+    // `q->at` is 8 bytes into `s`. Thus, `r->p` can write `s.q`, not `s.p`.
+    // The first cast makes the address offset unknown.
+    // The second cast must keep that fact until the write.
+    assert(ownership_heap_env.unproved(&c, "nested_offset",
+        ownership_api.incomplete_reason.unknown_effect));
+    // Element one starts at byte 8. A second cast must not treat it as byte 0 of `s`.
+    assert(ownership_heap_env.unproved(&c, "array_offset",
+        ownership_api.incomplete_reason.unknown_effect));
+    assert(ownership_heap_env.unproved(&c, "clear_borrow_target",
+        ownership_api.incomplete_reason.unknown_effect));
+    // The later read records one incomplete event after the call frame reaches its target.
+    assert(ownership_heap_env.events(&c, "clear_borrow_target") ==
+        1);
+    assert(ownership_heap_env.unproved(&c, "unknown_offset_escape",
+        ownership_api.incomplete_reason.unknown_effect));
+    // The escape records the storage bound and the owner that the unknown offset can select.
+    assert(ownership_heap_env.events(&c, "unknown_offset_escape") ==
+        2);
+    assert(ownership_heap_env.unproved(&c, "cast_before_join",
+        ownership_api.incomplete_reason.missing_graph));
+    assert(ownership_heap_env.events(&c, "cast_before_join") == 1);
+    // Both branch orders make the joined allocation opaque.
+    // The scalar write can change an absorbed owner in either order.
+    assert(ownership_heap_env.unproved(&c, "cast_before_join_ab",
+        ownership_api.incomplete_reason.missing_graph));
+    assert(ownership_heap_env.events(&c, "cast_before_join_ab") == 1);
 }
 
 // Deferred releases run at each exit in FIR order; `break` and `continue` keep the remaining
@@ -387,6 +909,11 @@ fn main() i32 {
     spans();
     untracked();
     casts();
+    retyped();
+    retyped_flow();
+    retyped_edges();
+    retyped_escape();
+    retyped_review();
     exits();
     shapes();
     borrowed();

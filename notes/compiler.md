@@ -972,10 +972,9 @@ came here.
   other member, because their summaries rest on each other.
   A lost owner of live status becomes leaked: it stays allocated, so its views stay valid. A
   lost owner of unknown status becomes escaped, so a read through its views stays unproved.
-  `tools/mutations/ownership_heap.json` holds 143 rows of the core rules: 25 of them hold the
-  caller requirement of a dereference (`D10.7-requirement-*`, `D10.7-lost-*`), 15 hold rule P1 of
-  D17.18, 3 hold `not` of an integer, 28 hold the frame of a call (`D17.18-frame-*`), and its
-  stage `provenance` runs
+  `tools/mutations/ownership_heap.json` holds 184 rows of the core rules. Of these rows, 41
+  hold the cast rule of D17.17 below, 28 hold the frame of a call, 14 hold rule P1 of D17.18,
+  and 3 hold `not` of an integer. The `provenance` stage runs
   `ownership_heap_provenance_test.ft`.
   A known integer keeps a number only through a copy (`rv_use`), `add`, `sub`, `cast` and `not`.
   Each one computes the exact result in its type, and a result that does not fit has no number.
@@ -1100,6 +1099,38 @@ came here.
   or a new callee effect changes a table. A new fact type adds one row to `FACT_JOINS` and one
   join function. No join function writes a part of a typed field, so the lint reports no partial
   write.
+- **A pointer of another pointee type than its storage reads and writes no fact of it** (D17.17).
+  A cast keeps the address. Each dereference compares the pointee type with its storage type.
+  `key_type` finds the type of local, caller or cell storage. It then follows each field path.
+  A `mut` mark does not change this match. Each `own` mark must match (`same_owned`).
+  An array element uses the element storage type (`holds`).
+  A join of different atom types keeps no storage type (`join_atom`).
+  Another type makes the location unknown (`retype`). A read then gives an unknown value.
+  A store forgets each fact of the complete base storage (`clear_retyped`, `clear_storage`).
+  A scalar forgets its value. A reference forgets its source.
+  It keeps one possible storage target for a later call frame.
+  An owner loses its obligation.
+  That owner then holds unknown bits. The write gives incomplete proof for each owning leaf.
+  A store past the heap proof's storage bound also gives incomplete proof (`stays_in`).
+  The raw analysis proves the full access extent and alignment.
+  An external view, an opaque atom and a partial cell or region view have no matching type.
+  A cast of such a view to another pointee type loses the view (`unmatched`).
+  A mutable cast gives incomplete proof because no later escape can name that storage.
+  A read-only cast cannot write and does not escape.
+  `rv_addr` keeps the storage key of a place reached through a cast.
+  Thus, a later mutable escape can forget that storage.
+  An escaping mutable address with an unknown byte offset forgets its complete base.
+  A mutable cast pointer can leave at a call, a store or a return (`escape_cast`).
+  The named storage then forgets each fact. A complete region has no slot to forget.
+  A mismatched region escape gives incomplete proof for its possible owning members.
+  Before this rule, the heap solver proved the 7 class G ledger bodies and `cast_escape`.
+  Round-1 review added external, opaque, ownership-mark, joined-type and address cases.
+  The `retyped` groups of `ownership_heap_forms_test.ft` hold these cases.
+  `retyped` and `escapes` of `ownership_heap_state_test.ft` hold the helpers alone.
+  Precision limits remain. The proof forgets the complete base, including an adjacent owner.
+  An empty owner gets unknown bits after a mismatched write. Its later use is unproved.
+  The heap bound uses one innermost array element. It does not prove the full access extent.
+  The raw analysis rejects an access past an inherited window (D17.17).
 - **Finite ownership proof preserves obligations when precision ends** (T-276, D17.18).
   `spec/fir.md` 14.1 defines the finite domain, canonical solving, and counted budgets.
   Publish numeric limits and reproduction commands before qualification. This rule ticket chooses

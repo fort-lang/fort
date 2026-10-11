@@ -88,9 +88,9 @@ enum location_kind {
 struct atom {
     atom_kind kind; // join: same
     status_fact status;
-    // A cell or region: the struct type. A flat or opaque atom: its element type. A join keeps
-    // the type of its first side.
-    types.node* ty; // join: none
+    // A cell or region: the struct type. A flat or opaque atom: its element type. A join of two
+    // types that differ has no type, so the proof matches no pointee type with it (D17.17).
+    types.node* ty; // join: same
     // The index of the template + 1, or 0.
     u32 shape; // join: same
     nullness root;
@@ -170,6 +170,8 @@ struct value {
     bool retained_target; // join: may
     // An erased view or a join lost another target. A later unknown call gets incomplete proof.
     bool lost_target; // join: may
+    // An address whose byte offset from `target` the proof does not know.
+    bool offset_unknown; // join: may
     // A scalar that tests the root of `test`, or NONE. True means a nonnull root when
     // `test_nonnull` is true. A known scalar has the truth value `truth`. A join of two scalars
     // drops these facts and `number`.
@@ -286,6 +288,13 @@ struct location {
     bool external;
     // The parameter whose designated storage this location reaches, or NONE.
     u32 param;
+    // The pointee type of a pointer that designates storage of another type (a cast, D17.17),
+    // or null. Such a location has the kind `unknown`, so a read gives an unknown value, and
+    // `key` keeps the storage for a store.
+    types.node* retyped;
+    // A field projection after a cast has no matching field offset in the storage type. The key
+    // still names storage that a write must clear, but it does not name the projected address.
+    bool offset_unknown;
 }
 
 // One leaf of an aggregate value, relative to the aggregate.
@@ -587,6 +596,7 @@ fn same_value(value a, value b) bool {
         return true;
     case value_kind.address:
         return same_key(a.target, b.target) && a.param == b.param &&
+            a.offset_unknown == b.offset_unknown &&
             a.nullness.value == b.nullness.value && a.nullness.how == b.nullness.how;
     }
 }
@@ -2027,6 +2037,7 @@ fn join_atom(atom a, atom b) atom {
         out.shape = 0;
     }
     if (a.shape != b.shape) { out.shape = 0; }
+    if (a.ty != b.ty) { out.ty = null; }
     // A null root holds no allocation, so its status says nothing about the other side: that side
     // takes the status of the other record.
     bool null_a = a.root.value == root_kind.null_root;
@@ -2102,7 +2113,8 @@ fn harmonize(context mut* c, state mut* x, state mut* y, value vx, value vy, u32
             }
             return true;
         }
-        if (ax.kind != ay.kind || ax.shape != ay.shape) {
+        // Two cells of two types pair no slot: each holds owners at its own offsets.
+        if (ax.kind != ay.kind || ax.shape != ay.shape || ax.ty != ay.ty) {
             make_opaque(x, vx.atom);
             make_opaque(y, vy.atom);
         }
@@ -2350,6 +2362,7 @@ fn join_values(state mut* out, pairing* p, value vx, value vy) value {
             value mut joined_address = address_value(tx,
                 ownership_facts.join_nullness(vx.nullness, vy.nullness));
             joined_address.param = vx.param == vy.param ? vx.param : ANY_PARAM;
+            joined_address.offset_unknown = vx.offset_unknown || vy.offset_unknown;
             return joined_address;
         }
     }
@@ -3003,9 +3016,10 @@ fn deref_value(context mut* c, state mut* s, value v, bool owning, bool reads, s
             if (reads) { require_entry(c, s, v.target.id, true); }
         }
         location mut loc = location{};
-        loc.kind = location_kind.slots;
+        loc.kind = v.offset_unknown ? location_kind.unknown : location_kind.slots;
         loc.key = v.target;
         loc.param = v.param;
+        loc.offset_unknown = v.offset_unknown;
         return loc;
     case value_kind.owned:
         return deref_atom(c, s, v.atom, reads, what);
@@ -3026,6 +3040,148 @@ fn deref_value(context mut* c, state mut* s, value v, bool owning, bool reads, s
         unproved(c, s, ownership_api.incomplete_reason.unknown_effect, NONE, what);
         return unknown_location();
     }
+}
+
+// The type of the storage that slot key `k` names: a local, the caller storage of a parameter, or
+// a cell, and then each field of its path. Null when a step is no field of a resolved struct.
+fn key_type(context* c, state* s, slot_key k) types.node* {
+    types.node* mut t = null;
+    u64 id = cast(k.id, u64);
+    if (k.base == base_kind.local && k.id < fir.local_count(c->f)) {
+        t = fir.local_at(c->f, k.id)->ty;
+    } else if (k.base == base_kind.caller && id < c->callers_len) {
+        t = c->callers[id].pointee;
+    } else if (k.base == base_kind.cell && id < s->atoms_len) {
+        t = s->atoms[id].ty;
+    }
+    u32 mut d = 0;
+    while (d < k.depth && t != null) {
+        if (!resolved_struct(t) || k.path[d] >= fir.struct_field_count(t)) { return null; }
+        t = fir.struct_field_type(t, k.path[d]);
+        d += 1;
+    }
+    return t;
+}
+
+// Writes the byte offset of field `k` in a resolved struct. False means that the type or field
+// does not have a complete layout.
+fn field_offset(types.node* t, u32 k, u64 mut* out) bool {
+    if (!resolved_struct(t)) { return false; }
+    ast.node* decl = fir.struct_decl(t);
+    u32 mut at = 0;
+    u64 mut i = 0;
+    while (i < ast.ast_len(decl)) {
+        ast.node* field = ast.ast_child(decl, i);
+        if (field->kind == ast.ast_kind.k_field_decl) {
+            if (at == k) {
+                *out = field->aux;
+                return true;
+            }
+            at += 1;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+// Follows a field after a pointee-changing cast when both layouts put a field at the same byte
+// offset. Otherwise, the location keeps the storage key only for a conservative write clear.
+fn project_retyped_field(context* c, state* s, location mut* loc, types.node* logical,
+    u32 field) void {
+    if (loc->offset_unknown) { return; }
+    types.node* storage = key_type(c, s, loc->key);
+    u64 mut target = 0;
+    if (!field_offset(logical, field, &target) || !resolved_struct(storage)) {
+        loc->offset_unknown = true;
+        return;
+    }
+    u32 count = fir.struct_field_count(storage);
+    u32 mut original = 0;
+    while (original < count) {
+        u64 mut start = 0;
+        if (field_offset(storage, original, &start) && start == target) {
+            if (!extend(&loc->key, original)) {
+                loc->offset_unknown = true;
+                return;
+            }
+            types.node* projected = fir.struct_field_type(logical, field);
+            loc->retyped = projected;
+            if (holds(key_type(c, s, loc->key), projected)) {
+                loc->kind = location_kind.slots;
+                loc->retyped = null;
+            }
+            return;
+        }
+        original += 1;
+    }
+    loc->offset_unknown = true;
+}
+
+// Whether types `a` and `b` have one shape and one `own` mark at each level. A `mut` mark does
+// not count: a cast only drops it (D3.14). An `own` mark counts: a pointer without it writes a
+// value that no owner holds into an owner (D17.17).
+fn same_owned(types.node* a, types.node* b) bool {
+    if (!types.type_same_shape(a, b)) { return false; }
+    types.node* mut x = a;
+    types.node* mut y = b;
+    while (x != null && y != null) {
+        if (is_reference(x) && x->is_own != y->is_own) { return false; }
+        if (!is_reference(x) && x->kind != types.type_kind.k_array) { return true; }
+        x = x->elem;
+        y = y->elem;
+    }
+    return true;
+}
+
+// Whether a pointer to `pointee` matches storage of type `storage` exactly (D17.17): the whole
+// storage or one element of an array, with the same `own` marks (`same_owned`).
+fn holds(types.node* storage, types.node* pointee) bool {
+    types.node* mut t = storage;
+    while (t != null && pointee != null) {
+        if (same_owned(t, pointee)) { return true; }
+        if (t->kind != types.type_kind.k_array) { return false; }
+        t = t->elem;
+    }
+    return false;
+}
+
+// A cast keeps the address and changes the pointee type, so a pointer can designate storage of
+// another type (D17.17). The proof does not follow such bytes: the location becomes unknown and
+// keeps its storage for a store (`clear_retyped`). A location in an atom keeps no type, so the
+// cast itself loses a view that the proof cannot match (`unmatched`, `rv_cast`).
+fn retype(context* c, state* s, location mut* loc, types.node* pointee) void {
+    // An address can retain its base without its byte offset. A later store must clear that base.
+    if (loc->offset_unknown) {
+        loc->retyped = pointee;
+        return;
+    }
+    if (loc->kind != location_kind.slots || holds(key_type(c, s, loc->key), pointee)) { return; }
+    loc->kind = location_kind.unknown;
+    loc->retyped = pointee;
+}
+
+// Whether the proof cannot match the storage that view `v` designates with a pointee type
+// (D17.17): storage outside the body (an external view), an opaque atom, or a member of a cell or
+// a region at an offset that the proof does not keep. A flat atom holds no owner. A view of a
+// whole cell or region matches the key of the cell at its dereference (`retype`).
+fn unmatched(state* s, value v) bool {
+    if (v.kind != value_kind.view) { return false; }
+    if (v.external) { return true; }
+    bool whole = v.exact && v.count == 1;
+    u32 mut i = 0;
+    while (i < v.count) {
+        atom_kind kind = s->atoms[cast(v.sources[i], u64)].kind;
+        if (kind == atom_kind.opaque || (!whole && kind != atom_kind.flat)) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+// Whether local `index` has the known scalar value zero.
+fn zero_index(state* s, u32 index) bool {
+    u64 at = find_slot(s, key_of(base_kind.local, index));
+    return at != U64_MAX && !s->slots[at].array && s->slots[at].v.numbered &&
+        s->slots[at].v.number == 0;
 }
 
 /// Resolves a FIR place to a location (`spec/fir.md` 5.5). A dereference reads its pointer first.
@@ -3072,7 +3228,9 @@ fn resolve_place(context mut* c, state mut* s, fir.place p, bool address, locati
         switch (pj.kind) {
         case fir.proj_kind.pj_field:
             if (t->kind == types.type_kind.k_struct) {
-                if (loc.kind == location_kind.slots && find_slot(s, loc.key) != U64_MAX &&
+                if (loc.retyped != null) {
+                    project_retyped_field(c, s, &loc, t, pj.field);
+                } else if (loc.kind == location_kind.slots && find_slot(s, loc.key) != U64_MAX &&
                     s->slots[find_slot(s, loc.key)].array) {
                     // A field of a struct below the path bound stays in its array leaf.
                 } else if (loc.kind == location_kind.slots && !extend(&loc.key, pj.field)) {
@@ -3094,9 +3252,14 @@ fn resolve_place(context mut* c, state mut* s, fir.place p, bool address, locati
                 use_sources(c, s, loc.count, loc.sources, "read through a released source");
             }
             loc = deref_value(c, s, pointer, pointer_owns, i != computed, name(c, s, loc.key));
+            retype(c, s, &loc, fir.apply_projection(c->f, t, pj));
         case fir.proj_kind.pj_index:
             if (t->kind == types.type_kind.k_array) {
-                if (loc.kind == location_kind.slots) {
+                if (loc.retyped != null) {
+                    // Only index zero keeps the base address after a pointee-changing cast.
+                    // Another index can select bytes of a different storage field.
+                    if (!zero_index(s, pj.index)) { loc.offset_unknown = true; }
+                } else if (loc.kind == location_kind.slots) {
                     u64 at = find_slot(s, loc.key);
                     if (at == U64_MAX) { loc.kind = location_kind.length; }
                 }
@@ -3258,14 +3421,131 @@ fn check_overwrite(context mut* c, state mut* s, value old, slot_key k) void {
     mark_leaked(s, old.atom, provenance.established);
 }
 
+// The size of type `t` in bytes, or false for a type without a size. A pointer to `void` reads
+// and writes no byte.
+fn byte_size(types.node* t, u64 mut* out) bool {
+    if (t == null || t->kind == types.type_kind.k_null) { return false; }
+    if (t->kind == types.type_kind.k_void) {
+        *out = 0;
+        return true;
+    }
+    return types.size_checked(t, out);
+}
+
+// Whether a store of `pointee` at slot key `k` can stay in the storage that `k` names: a bound
+// that the heap proof keeps for its own facts. The raw analysis proves the extent (D17.17). An
+// address in an array can designate each element, so the bound is the size of one element of the
+// innermost array. An address in a struct leaf below the path bound has no bound.
+fn stays_in(context* c, state* s, slot_key k, types.node* pointee) bool {
+    types.node* mut storage = key_type(c, s, k);
+    u64 at = find_slot(s, k);
+    if (storage == null || (at != U64_MAX && s->slots[at].array &&
+        storage->kind != types.type_kind.k_array)) { return false; }
+    while (storage->kind == types.type_kind.k_array) { storage = storage->elem; }
+    u64 mut want = 0;
+    u64 mut have = 0;
+    return byte_size(pointee, &want) && byte_size(storage, &have) && want <= have;
+}
+
+// Forgets each fact of the storage below `prefix` after a write whose bytes the proof does not
+// follow. A scalar forgets its value. A reference becomes unknown but keeps a possible storage
+// target for a later call frame. Such a write changes no owning leaf without incomplete proof
+// (D17.17): an owner, also an empty one, gives incomplete proof, loses its obligation and holds
+// unknown bits.
+fn clear_storage(context mut* c, state mut* s, slot_key prefix) void {
+    u64 mut i = 0;
+    while (i < s->slots_len) {
+        slot item = s->slots[i];
+        if (prefix_of(prefix, item.key)) {
+            if (item.owning) {
+                unproved(c, s, ownership_api.incomplete_reason.unknown_effect,
+                    item.v.kind == value_kind.owned ? item.v.atom : NONE, name(c, s, item.key));
+                if (item.v.kind == value_kind.owned) {
+                    mark_leaked(s, item.v.atom, provenance.established);
+                }
+                s->slots[i].v = fresh_unknown_owner(s);
+            } else if (is_reference(item.ty) || item.array) {
+                // Keep a possible target. A later call frame must still reach storage through
+                // this slot after the cast store removes its reference facts.
+                s->slots[i].v = forgotten_value(item.v);
+            } else {
+                s->slots[i].v = scalar_value();
+            }
+        }
+        i += 1;
+    }
+}
+
+// A store through a pointer of another pointee type than its storage (D17.17). The proof does not
+// follow its bytes, so it forgets each fact of the whole storage. A store past the end of that
+// storage gives incomplete proof.
+fn clear_retyped(context mut* c, state mut* s, location loc) void {
+    if (loc.retyped == null) { return; }
+    if (!stays_in(c, s, loc.key, loc.retyped)) {
+        unproved(c, s, ownership_api.incomplete_reason.unknown_effect, NONE,
+            "the storage past the end that a store through a cast can write");
+    }
+    clear_storage(c, s, key_of(loc.key.base, loc.key.id));
+}
+
+// A pointer whose pointee type is not the type of its storage leaves the body at a call argument,
+// at a store outside a local of the body, and at a return. A callee or a caller can then write
+// that storage through it, so the storage forgets each fact, as at a store through it (D17.17).
+// A pointer without `mut` cannot write, and a cast adds no `mut` (D3.14). An address names its
+// storage, and a view of a whole cell names the cell. An unknown address offset can select any
+// part of its base, so its escape forgets the complete base. A region has no slot, so a view of a
+// whole region gives incomplete proof.
+fn escape_cast(context mut* c, state mut* s, value v, types.node* t) void {
+    if (t == null || !types.is_ptr_like(t) || !t->is_mut) { return; }
+    location mut loc = location{};
+    loc.kind = location_kind.unknown;
+    loc.retyped = t->elem;
+    if (v.kind == value_kind.address) {
+        loc.key = v.target;
+    } else if (v.kind == value_kind.view && v.exact && v.count == 1 && !v.external) {
+        atom item = s->atoms[cast(v.sources[0], u64)];
+        if (item.kind == atom_kind.region && !holds(item.ty, t->elem)) {
+            unproved(c, s, ownership_api.incomplete_reason.unknown_effect, v.sources[0],
+                "the owned members that a cast pointer can write");
+        }
+        if (item.kind != atom_kind.cell) { return; }
+        loc.key = key_of(base_kind.cell, v.sources[0]);
+    } else {
+        return;
+    }
+    if (v.offset_unknown || !holds(key_type(c, s, loc.key), t->elem)) {
+        clear_retyped(c, s, loc);
+    }
+}
+
+// Whether a store to `loc` keeps its value in the body: the whole slot of a local that is not the
+// result and not an array leaf. Each other store can let a pointer leave the body.
+fn own_local(state* s, location loc) bool {
+    if (loc.kind != location_kind.slots || loc.key.base != base_kind.local ||
+        loc.key.depth != 0 || loc.key.id == 0) { return false; }
+    u64 at = find_slot(s, loc.key);
+    return at != U64_MAX && !s->slots[at].array;
+}
+
 // Writes a value into a location. An owned value written into storage that the proof does not
 // track leaves the proof with incomplete proof (D17.13, D17.18).
 fn write_at(context mut* c, state mut* s, location loc, types.node* t, value v) void {
     value stored = !is_reference(t) || v.kind != value_kind.owned ? v : as_view(s, v);
+    // The storage decides, not the type of the place: a store into an owning slot is a store
+    // over an owner (D17.17).
+    bool mut owning_slot = false;
     if (loc.kind == location_kind.slots) {
         u64 at = find_slot(s, loc.key);
+        owning_slot = at != U64_MAX && s->slots[at].owning;
         if (at != U64_MAX && !s->slots[at].array) {
-            if (s->slots[at].owning) { check_overwrite(c, s, s->slots[at].v, loc.key); }
+            if (s->slots[at].owning) {
+                check_overwrite(c, s, s->slots[at].v, loc.key);
+                // An owner holds an owner or nothing. Another value is a write of another type.
+                if (v.kind != value_kind.owned && v.kind != value_kind.empty) {
+                    unproved(c, s, ownership_api.incomplete_reason.unknown_effect, NONE,
+                        name(c, s, loc.key));
+                }
+            }
             s->slots[at].v = v;
             if (!s->slots[at].owning && v.kind == value_kind.owned) {
                 s->slots[at].v = as_view(s, v);
@@ -3283,6 +3563,11 @@ fn write_at(context mut* c, state mut* s, location loc, types.node* t, value v) 
     if (loc.kind == location_kind.length) { return; }
     if (loc.kind == location_kind.element) {
         use_sources(c, s, loc.count, loc.sources, "write through a released source");
+        // An opaque allocation can contain absorbed owners at offsets that the proof lost.
+        if (untracked(s, loc) == ownership_api.incomplete_reason.missing_graph) {
+            unproved(c, s, ownership_api.incomplete_reason.missing_graph, NONE,
+                "the owned leaves that this write can change");
+        }
         // A field without a slot keeps the stored reference in the facts of its atoms.
         if (is_reference(t) && v.kind != value_kind.owned) {
             u32 mut i = 0;
@@ -3302,7 +3587,7 @@ fn write_at(context mut* c, state mut* s, location loc, types.node* t, value v) 
         unproved(c, s, ownership_api.incomplete_reason.unknown_effect, NONE,
             "the reference that this store puts into storage that the proof does not track");
     }
-    if (v.kind == value_kind.owned || owned_leaf(t)) {
+    if (v.kind == value_kind.owned || owned_leaf(t) || owning_slot) {
         unproved(c, s, untracked(s, loc), v.kind == value_kind.owned ? v.atom : NONE,
             "the ownership that this store puts into storage that the proof does not track");
         if (v.kind == value_kind.owned) {
@@ -3457,7 +3742,8 @@ fn null_test(context mut* c, state mut* s, fir.operand a, fir.operand b, bool eq
 // Marks each atom whose storage location `loc` names as `addressed`: the cell of a slot key, or
 // each source of an element. An address of a local needs no mark: `context.named` holds it.
 fn mark_addressed(state mut* s, location loc) void {
-    if (loc.kind == location_kind.slots && loc.key.base == base_kind.cell &&
+    if ((loc.kind == location_kind.slots || loc.retyped != null) &&
+        loc.key.base == base_kind.cell &&
         cast(loc.key.id, u64) < s->atoms_len) {
         s->atoms[cast(loc.key.id, u64)].addressed = true;
     } else if (loc.kind == location_kind.element) {
@@ -3556,16 +3842,36 @@ fn rvalue_value(context mut* c, state mut* s, fir.rvalue rv, types.node* t) valu
             return scalar_value();
         }
         if (!is_reference(from)) { return unknown_value(); }
+        if (!types.is_ptr_like(from) || !types.is_ptr_like(t) || same_owned(from->elem, t->elem)) {
+            return converted;
+        }
+        // A read-only recovery from `void*` keeps the source of a type-erased reference.
+        // The raw analysis proves its access window and alignment (D17.17).
+        if (from->kind == types.type_kind.k_voidptr && !t->is_mut) { return converted; }
+        // The proof cannot match the storage of an unmatched view or of an opaque owner with the
+        // new pointee type, and no later escape can name it (`escape_cast`). So a cast that can
+        // write gives incomplete proof (D17.17), and the view is lost.
+        bool lost = unmatched(s, converted);
+        bool opaque = converted.kind == value_kind.owned &&
+            s->atoms[cast(converted.atom, u64)].kind == atom_kind.opaque;
+        if ((lost || opaque) && t->is_mut) {
+            unproved(c, s, ownership_api.incomplete_reason.unknown_effect, NONE,
+                "the storage of another type that this cast can write");
+        }
+        if (lost) { return unknown_value(); }
         return converted;
     case fir.rvalue_kind.rv_addr:
         location mut loc = location{};
         types.node* mut place_ty = null;
         resolve_place(c, s, rv.place, true, &loc, &place_ty);
         mark_addressed(s, loc);
-        if (loc.kind == location_kind.slots) {
-            value mut address = address_value(loc.key, address_fact(s, loc.key));
-            address.param = loc.param;
-            return address;
+        // A place of another type keeps the key of its storage, so an escape of its address
+        // names that storage (`escape_cast`).
+        if (loc.kind == location_kind.slots || loc.retyped != null) {
+            value mut out = address_value(loc.key, address_fact(s, loc.key));
+            out.param = loc.param;
+            out.offset_unknown = loc.offset_unknown;
+            return out;
         }
         if (loc.kind == location_kind.element) {
             value mut inner = empty_value();
@@ -3587,6 +3893,15 @@ fn rvalue_value(context mut* c, state mut* s, fir.rvalue rv, types.node* t) valu
         // A slice of a fixed array is an address; a slice of a span or a string loads its header.
         bool array = fir.place_type(c->f, rv.place)->kind == types.type_kind.k_array;
         resolve_place(c, s, rv.place, array, &sliced, &sliced_ty);
+        // A slice of a place of another type can write that storage in a way that no escape
+        // names.
+        if (sliced.retyped != null) {
+            if (t->is_mut) {
+                unproved(c, s, ownership_api.incomplete_reason.unknown_effect, NONE,
+                    "the storage of another type that this slice can write");
+            }
+            return unknown_value();
+        }
         if (sliced_ty->kind == types.type_kind.k_array) {
             mark_addressed(s, sliced);
             if (sliced.kind == location_kind.slots || sliced.kind == location_kind.length) {
@@ -3600,7 +3915,11 @@ fn rvalue_value(context mut* c, state mut* s, fir.rvalue rv, types.node* t) valu
     case fir.rvalue_kind.rv_slice_ptr:
         u32 mut k = 0;
         while (k < rv.ops_len) {
-            operand(c, s, fir.rvalue_operand(c->f, rv, k));
+            value part = operand(c, s, fir.rvalue_operand(c->f, rv, k));
+            // The range leaves the proof with its pointer: an escape of a cast pointer.
+            if (k == 0) {
+                escape_cast(c, s, part, fir.operand_type(c->f, fir.rvalue_operand(c->f, rv, 0)));
+            }
             k += 1;
         }
         return unknown_value();
@@ -3722,16 +4041,29 @@ fn assign(context mut* c, state mut* s, fir.statement* stmt) void {
         leaf_list mut list = leaf_list{};
         defer free_leaves(&list);
         rvalue_leaves(c, s, stmt->value, t, &list);
+        if (!s->reached) { return; }
         location mut loc = location{};
         types.node* mut dst_ty = null;
         resolve(c, s, stmt->place, &loc, &dst_ty);
+        // An aggregate without reference leaves writes no leaf, but its bytes still change the
+        // storage of a pointer of another type.
+        clear_retyped(c, s, loc);
+        u64 mut i = 0;
+        while (i < list.len) {
+            escape_cast(c, s, list.items[i].v, list.items[i].ty);
+            i += 1;
+        }
         write_leaves(c, s, loc, &list);
         return;
     }
     value v = rvalue_value(c, s, stmt->value, t);
+    // A call in the value can end this path. Do not inspect or change the destination after it.
+    if (!s->reached) { return; }
     location mut loc = location{};
     types.node* mut dst_ty = null;
     resolve(c, s, stmt->place, &loc, &dst_ty);
+    clear_retyped(c, s, loc);
+    if (!own_local(s, loc)) { escape_cast(c, s, v, t); }
     write_at(c, s, loc, t, v);
 }
 
@@ -4159,6 +4491,7 @@ fn translate_value(context* c, state* s, value v, u32@ map, slot_key@ prefixes, 
             }
             value mut address = address_value(k, address_fact(s, k));
             address.param = argument_source(v.param, args);
+            address.offset_unknown = v.offset_unknown;
             return address;
         }
         if (v.target.base == base_kind.cell) {
@@ -4190,7 +4523,7 @@ fn translate_value(context* c, state* s, value v, u32@ map, slot_key@ prefixes, 
 
 // The prefix of the caller storage that an argument designates, or false.
 fn designated(state* s, value v, slot_key mut* out) bool {
-    if (v.kind == value_kind.address) {
+    if (v.kind == value_kind.address && !v.offset_unknown) {
         *out = v.target;
         return true;
     }
@@ -5261,6 +5594,13 @@ fn call(context mut* c, state mut* s, fir.rvalue rv, types.node* t, leaf_list mu
     // effect. Atom and slot indices stay stable across the frame.
     state mut entry = clone(s);
     defer free_state(&entry);
+    // A leaf of an aggregate argument left the body at its store into that aggregate.
+    u64 mut k = 0;
+    while (k < args.len) {
+        if (!args[k].aggregate) { escape_cast(c, s, args[k].v, args[k].ty); }
+        k += 1;
+    }
+    if (c->stopped) { return; }
     // Each callee effect below, a summary or an unknown call, follows this one frame.
     forget_frame(c, s);
     if (c->stopped) { return; }

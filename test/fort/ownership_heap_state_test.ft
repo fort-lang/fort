@@ -16,6 +16,8 @@
 //| requirement joins
 //| requirement checks
 //| lost requirements
+//| storage of another type
+//| a cast pointer that leaves the body
 //| branch forms
 //| heap state ok
 /// Checks the state operations of the heap proof one at a time (D17.16, D17.18, fir.md 14.1).
@@ -688,6 +690,22 @@ fn joins() void {
     ownership_heap.state mut a = ownership_heap.initial(ctx);
     defer ownership_heap.free_state(&a);
     assert(ownership_heap.canonical(ctx, &a));
+    // A join of different storage types keeps no type. Harmonization makes the two cells opaque
+    // before their slots can pair.
+    types.node* other_ty = fir.local_at(ctx->f, 10)->ty;
+    ownership_heap.atom mut different = a.atoms[0];
+    different.ty = other_ty;
+    assert(ownership_heap.join_atom(a.atoms[0], different).ty == null);
+    assert(ownership_heap.join_atom(different, a.atoms[0]).ty == null);
+    ownership_heap.state mut type_left = ownership_heap.clone(&a);
+    defer ownership_heap.free_state(&type_left);
+    ownership_heap.state mut type_right = ownership_heap.clone(&a);
+    defer ownership_heap.free_state(&type_right);
+    type_right.atoms[0].ty = other_ty;
+    assert(ownership_heap.harmonize(ctx, &type_left, &type_right,
+        value_at(&type_left, local(1)), value_at(&type_right, local(1)), 0));
+    assert(type_left.atoms[0].kind == ownership_heap.atom_kind.opaque);
+    assert(type_right.atoms[0].kind == ownership_heap.atom_kind.opaque);
     // A join with itself changes nothing.
     ownership_heap.state mut self_join = ownership_heap.state{};
     defer ownership_heap.free_state(&self_join);
@@ -1641,6 +1659,235 @@ fn lost_requirements() void {
     assert(addressed.required.len == 0);
 }
 
+// A pointer whose pointee type is not the type of its storage designates no slot of it (D17.17).
+// The location becomes unknown, and a store through it forgets each fact of that storage.
+fn retyped() void {
+    println("storage of another type");
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "host");
+    ownership_heap.context mut* ctx = &x.ctx;
+    ownership_heap.state mut s = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&s);
+    types.node* owner = fir.local_at(ctx->f, 1)->ty;
+    types.node* view = fir.local_at(ctx->f, 7)->ty;
+    types.node* small = fir.local_at(ctx->f, 8)->ty;
+    types.node* tiny = fir.local_at(ctx->f, 9)->ty;
+    types.node* wide = fir.local_at(ctx->f, 10)->ty;
+    types.node* sign = fir.local_at(ctx->f, 11)->ty;
+    assert(types.type_sizeof(small) == 1 && types.type_sizeof(tiny) == 1);
+    assert(types.type_sizeof(wide) == 8 && types.type_sizeof(sign) == 8);
+    ownership_heap.slot_key storage = ownership_heap.key_of(ownership_heap.base_kind.caller, 0);
+    // The storage of a key: a local, caller storage and its field, and a cell. A step into a
+    // field of a pointer, a caller past the parameters and a cell past the atoms name nothing.
+    assert(ownership_heap.key_type(ctx, &s, local(8)) == small);
+    assert(ownership_heap.key_type(ctx, &s, local(1)) == owner);
+    types.node* holder = ownership_heap.key_type(ctx, &s, storage);
+    assert(holder != null && holder->kind == types.type_kind.k_struct);
+    ownership_heap.slot_key first = field_key(ownership_heap.base_kind.caller, 0, 0);
+    assert(ownership_heap.key_type(ctx, &s, first) == fir.struct_field_type(holder, 0));
+    assert(ownership_heap.key_type(ctx, &s, ownership_heap.key_of(ownership_heap.base_kind.cell,
+        0)) == owner->elem);
+    ownership_heap.slot_key mut below = first;
+    assert(ownership_heap.extend(&below, 0));
+    assert(ownership_heap.key_type(ctx, &s, below) == null);
+    assert(ownership_heap.key_type(ctx, &s, ownership_heap.key_of(ownership_heap.base_kind.caller,
+        1)) == null);
+    assert(ownership_heap.key_type(ctx, &s, ownership_heap.key_of(ownership_heap.base_kind.cell,
+        99)) == null);
+    // A `mut` mark does not count. An `own` mark and the storage type do count.
+    assert(!ownership_heap.holds(owner, view) && ownership_heap.holds(owner, owner));
+    assert(ownership_heap.holds(small, small));
+    assert(!ownership_heap.holds(small, tiny) && !ownership_heap.holds(small, wide));
+    assert(!ownership_heap.holds(null, small) && !ownership_heap.holds(small, null));
+    // A store stays in its storage up to the size of that storage, and not one byte past it.
+    assert(ownership_heap.stays_in(ctx, &s, local(10), small));
+    assert(ownership_heap.stays_in(ctx, &s, local(10), sign));
+    assert(!ownership_heap.stays_in(ctx, &s, local(8), wide));
+    assert(!ownership_heap.stays_in(ctx, &s, below, small));
+    // A slot location of another type becomes unknown and keeps its key. A location of its own
+    // type, and a location in an atom, stay as they are.
+    ownership_heap.location mut same_type = ownership_heap.location{};
+    same_type.kind = ownership_heap.location_kind.slots;
+    same_type.key = local(8);
+    ownership_heap.retype(ctx, &s, &same_type, small);
+    assert(same_type.kind == ownership_heap.location_kind.slots && same_type.retyped == null);
+    ownership_heap.location mut other = same_type;
+    ownership_heap.retype(ctx, &s, &other, wide);
+    assert(other.kind == ownership_heap.location_kind.unknown && other.retyped == wide);
+    assert(ownership_heap.same_key(other.key, local(8)));
+    u32[8] mut one = {};
+    ownership_heap.location mut inside = ownership_heap.element_of(1, one, false,
+        ownership_heap.NONE);
+    ownership_heap.retype(ctx, &s, &inside, wide);
+    assert(inside.kind == ownership_heap.location_kind.element && inside.retyped == null);
+    // A scalar forgets its value and a reference forgets its source. A write of unmatched bits
+    // into an owning leaf gives incomplete proof, also when the old owner is empty.
+    ownership_heap.value mut five = ownership_heap.scalar_value();
+    five.numbered = true;
+    five.number = 5;
+    set_value(&s, local(8), five);
+    set_value(&s, local(7), ownership_heap.address_value(local(8),
+        ownership_heap.address_fact(&s, local(8))));
+    u64 before = ctx->notes;
+    ownership_heap.clear_storage(ctx, &s, local(8));
+    ownership_heap.clear_storage(ctx, &s, local(7));
+    ownership_heap.clear_storage(ctx, &s, local(5));
+    assert(ctx->notes == before + 1);
+    assert(value_at(&s, local(8)).kind == ownership_heap.value_kind.scalar);
+    assert(!value_at(&s, local(8)).numbered);
+    assert(value_at(&s, local(7)).kind == ownership_heap.value_kind.unknown);
+    assert(!value_at(&s, local(7)).external);
+    assert(value_at(&s, local(7)).retained_target);
+    assert(ownership_heap.same_key(value_at(&s, local(7)).retained, local(8)));
+    ownership_heap.value bits = value_at(&s, local(5));
+    assert(bits.kind == ownership_heap.value_kind.owned);
+    assert(s.atoms[cast(bits.atom, u64)].status.value == ownership_facts.atom_status.unknown);
+    // Each owner of caller storage can hold an obligation: each one records an event, loses it,
+    // and holds unknown bits. The other slots keep their facts.
+    u32 kept = value_at(&s, local(1)).atom;
+    ownership_heap.clear_storage(ctx, &s, storage);
+    assert(ctx->notes == before + 3 && ctx->incomplete_any);
+    assert(s.atoms[2].status.value == ownership_facts.atom_status.leaked);
+    assert(s.atoms[3].status.value == ownership_facts.atom_status.leaked);
+    ownership_heap.value lost = value_at(&s, first);
+    assert(lost.kind == ownership_heap.value_kind.owned && lost.atom > 3);
+    assert(s.atoms[cast(lost.atom, u64)].status.value == ownership_facts.atom_status.unknown);
+    assert(value_at(&s, local(1)).atom == kept);
+    assert(s.atoms[0].status.value == ownership_facts.atom_status.live);
+    // A location without a cast clears nothing. A store past the end records its own event.
+    ownership_heap.clear_retyped(ctx, &s, same_type);
+    assert(ctx->notes == before + 3);
+    ownership_heap.clear_retyped(ctx, &s, other);
+    assert(ctx->notes == before + 4);
+    // A member of a cell or region and an external or opaque view have no matching storage type.
+    // A whole known cell, a flat view and an owner keep their source facts.
+    u32 made = fresh_cell(ctx, &s, 6);
+    ownership_heap.location mut plain_cell = ownership_heap.location{};
+    plain_cell.kind = ownership_heap.location_kind.slots;
+    plain_cell.key = ownership_heap.key_of(ownership_heap.base_kind.cell, made);
+    ownership_heap.mark_addressed(&s, plain_cell);
+    assert(s.atoms[cast(made, u64)].addressed);
+    s.atoms[cast(made, u64)].addressed = false;
+    ownership_heap.location mut cast_cell = other;
+    cast_cell.key = ownership_heap.key_of(ownership_heap.base_kind.cell, made);
+    ownership_heap.mark_addressed(&s, cast_cell);
+    assert(s.atoms[cast(made, u64)].addressed);
+    s.atoms[cast(made, u64)].addressed = false;
+    cast_cell.offset_unknown = true;
+    ownership_heap.mark_addressed(&s, cast_cell);
+    assert(s.atoms[cast(made, u64)].addressed);
+    s.atoms[cast(made, u64)].addressed = false;
+    ownership_heap.location mut unknown_cell = cast_cell;
+    unknown_cell.retyped = null;
+    ownership_heap.mark_addressed(&s, unknown_cell);
+    assert(!s.atoms[cast(made, u64)].addressed);
+    ownership_heap.value whole = ownership_heap.as_view(&s, value_at(&s, local(6)));
+    assert(whole.exact && whole.count == 1 && !ownership_heap.unmatched(&s, whole));
+    ownership_heap.value mut member = whole;
+    member.exact = false;
+    assert(ownership_heap.unmatched(&s, member));
+    ownership_heap.value mut both = whole;
+    assert(ownership_heap.add_source(&both, 0));
+    both.exact = false;
+    assert(both.count == 2 && ownership_heap.unmatched(&s, both));
+    s.atoms[cast(made, u64)].kind = ownership_heap.atom_kind.flat;
+    assert(!ownership_heap.unmatched(&s, member));
+    assert(!ownership_heap.unmatched(&s, value_at(&s, local(6))));
+    assert(ownership_heap.unmatched(&s, ownership_heap.external_view()));
+    s.atoms[cast(made, u64)].kind = ownership_heap.atom_kind.opaque;
+    assert(ownership_heap.unmatched(&s, member));
+    // A `void` pointee reads no byte; a type without a size has no bound.
+    types.node* none = fir.local_at(ctx->f, 0)->ty;
+    assert(none->kind == types.type_kind.k_void);
+    u64 mut size = 9;
+    assert(ownership_heap.byte_size(none, &size) && size == 0);
+    assert(!ownership_heap.byte_size(null, &size));
+    // A store keeps its value in the body only in the whole slot of a local that is not the
+    // result: not in a field, the result, caller storage, an atom or untracked storage.
+    ownership_heap.location mut own_slot = ownership_heap.location{};
+    own_slot.kind = ownership_heap.location_kind.slots;
+    own_slot.key = local(5);
+    assert(ownership_heap.own_local(&s, own_slot));
+    ownership_heap.location mut result = own_slot;
+    result.key = local(0);
+    assert(!ownership_heap.own_local(&s, result));
+    ownership_heap.location mut field = own_slot;
+    field.key = first;
+    assert(!ownership_heap.own_local(&s, field));
+    assert(!ownership_heap.own_local(&s, inside) && !ownership_heap.own_local(&s, other));
+    // The storage mark controls an untracked write. A non-own scalar type cannot hide an owning
+    // array slot.
+    u64 own_at = ownership_heap.find_slot(&s, local(5));
+    assert(own_at != ownership_heap.U64_MAX && s.slots[own_at].owning);
+    s.slots[own_at].array = true;
+    u64 write_before = ctx->notes;
+    ownership_heap.write_at(ctx, &s, own_slot, wide, ownership_heap.scalar_value());
+    assert(ctx->notes == write_before + 1);
+}
+
+// A cast pointer that leaves the body forgets the facts of its storage (D17.17): an address names
+// its slot key, a view of a whole cell names the cell, and a pointer of the type of its storage, a
+// view into an atom and a value that is no pointer leave nothing.
+fn escapes() void {
+    println("a cast pointer that leaves the body");
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "host");
+    ownership_heap.context mut* ctx = &x.ctx;
+    ownership_heap.state mut s = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&s);
+    types.node* owner = fir.local_at(ctx->f, 1)->ty;
+    types.node* view = fir.local_at(ctx->f, 7)->ty;
+    types.node* writable = fir.local_at(ctx->f, 3)->ty;
+    types.node* wide = fir.local_at(ctx->f, 10)->ty;
+    ownership_heap.value p = ownership_heap.address_value(local(1),
+        ownership_heap.address_fact(&s, local(1)));
+    u64 before = ctx->notes;
+    // No pointer type, so nothing leaves.
+    ownership_heap.escape_cast(ctx, &s, p, wide);
+    assert(ctx->notes == before && value_at(&s, local(1)).atom == 0);
+    // A read-only pointer cannot write. A writable pointer of another type can write past the
+    // owner slot and can lose its allocation: two events.
+    ownership_heap.escape_cast(ctx, &s, p, view);
+    assert(ctx->notes == before && value_at(&s, local(1)).atom == 0);
+    ownership_heap.escape_cast(ctx, &s, p, writable);
+    assert(ctx->notes == before + 2);
+    assert(s.atoms[0].status.value == ownership_facts.atom_status.leaked);
+    ownership_heap.value bits = value_at(&s, local(1));
+    assert(bits.kind == ownership_heap.value_kind.owned && bits.atom != 0);
+    // A view of a whole cell has the type of the cell; a view of a member names no storage.
+    u32 made = fresh_cell(ctx, &s, 6);
+    ownership_heap.value whole = ownership_heap.as_view(&s, value_at(&s, local(6)));
+    set_value(&s, field_key(ownership_heap.base_kind.cell, made, 0), value_at(&s, local(2)));
+    ownership_heap.escape_cast(ctx, &s, whole, view);
+    assert(ctx->notes == before + 2);
+    ownership_heap.value mut member = whole;
+    member.exact = false;
+    types.node* other = writable;
+    assert(other->kind == types.type_kind.k_ptr && other->elem != view->elem);
+    ownership_heap.escape_cast(ctx, &s, member, other);
+    assert(ctx->notes == before + 2);
+    // The same whole cell through another type changes no owning leaf without incomplete proof.
+    // The live owner and the empty owning span each record one event.
+    ownership_heap.escape_cast(ctx, &s, whole, other);
+    assert(ctx->notes == before + 4);
+    assert(s.atoms[1].status.value == ownership_facts.atom_status.leaked);
+    // Caller storage through a wider pointer of another type: one bound event, and both entry
+    // owners of h can lose their allocations. A store there is no store into a local.
+    ownership_heap.value h = value_at(&s, local(3));
+    assert(h.kind == ownership_heap.value_kind.address);
+    assert(h.target.base == ownership_heap.base_kind.caller);
+    ownership_heap.escape_cast(ctx, &s, h, owner);
+    assert(ctx->notes == before + 7);
+    assert(s.atoms[2].status.value == ownership_facts.atom_status.leaked);
+    assert(s.atoms[3].status.value == ownership_facts.atom_status.leaked);
+    ownership_heap.location mut caller = ownership_heap.location{};
+    caller.kind = ownership_heap.location_kind.slots;
+    caller.key = h.target;
+    assert(!ownership_heap.own_local(&s, caller));
+}
+
 // The heap proof keeps no path, so a body with a branch, a loop, an abort, a call, an assert or
 // a check proves with no event, as straight code does (`spec/toolchain.md` 4.2). The entry
 // values of `host` stay owned at its return: two candidates of a free input choice.
@@ -1676,6 +1923,8 @@ fn main() i32 {
     requirement_joins();
     requirement_checks();
     lost_requirements();
+    retyped();
+    escapes();
     branch_forms();
     println("heap state ok");
     return 0;
