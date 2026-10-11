@@ -33,10 +33,11 @@ No test reads a provenance before a rule prunes on it, so this tool holds the pr
 - `may_prune` and `may_prune_truth` occur only in the functions of PRUNING_SITES, each exactly as
   often as the table says. Each site that removes a path reads one of them (D17.18), so a site
   that drops its predicate, or a new site, is a change of this table.
-- A known scalar is a fact too. `forget_scalars` occurs only in the functions of FORGET_SITES,
-  and each callee effect, a call of `apply` or `unknown_call`, only in those of EFFECT_SITES, each
-  exactly as often as the table says. In each function of EFFECT_SITES the forget comes before
-  the first callee effect, so each callee effect follows the one forget.
+- The frame of a call forgets each fact that a callee can write through an address of a local.
+  `forget_frame` occurs only in the functions of FORGET_SITES, and each callee effect, a call of
+  `apply` or `unknown_call`, only in those of EFFECT_SITES, each exactly as often as the table
+  says. In each function of EFFECT_SITES the frame comes before the first callee effect, so each
+  callee effect follows the one frame.
 
 The report has one row for each field. The tool fails for each of these problems:
 
@@ -55,8 +56,8 @@ The report has one row for each field. The tool fails for each of these problems
   function and its predicate;
 - a graft function without an assignment of GRAFT_ASSUMES;
 - an occurrence of `provenance.established`, `null_value()`, a pruning predicate,
-  `forget_scalars`, `apply` or `unknown_call` that its table does not count;
-- a function of EFFECT_SITES whose first callee effect comes before its forget;
+  `forget_frame`, `apply` or `unknown_call` that its table does not count;
+- a function of EFFECT_SITES whose first callee effect comes before its frame;
 - a struct of STRUCTS, or a join function, that the file does not declare.
 
 A new fact type adds one row to FACT_JOINS and one join function to `ownership_facts.ft`.
@@ -161,13 +162,13 @@ PRUNING_SITES = {
     "refine": 2,
     "apply": 2,
 }
-# The functions that may call `forget_scalars`, and how often: a call forgets each scalar local
-# that a callee can write before any callee effect.
+# The functions that may call `forget_frame`, and how often: a call forgets each fact that a
+# callee can write through an address of a local before any callee effect (D17.18).
 FORGET_SITES = {
     "call": 1,
 }
 # The functions that may apply a callee effect, a call of `apply` or `unknown_call`, and how often.
-# Each of them comes after the forget of FORGET_SITES in the same function.
+# Each of them comes after the frame of FORGET_SITES in the same function.
 EFFECT_SITES = {
     "call": 4,
 }
@@ -552,17 +553,18 @@ def count_sites(bodies, lines, pattern, table, what, problems):
 
 
 def check_forget_order(bodies, effects, problems):
-    """Hold that each function of `effects` forgets its scalars before its first callee effect."""
+    """Hold that each function of `effects` applies its frame before its first callee effect."""
     for name in sorted(effects):
         body = bodies.get(name)
         if body is None:
             continue
         code = without_strings("\n".join(code_of(line) for line in body.lines[1:]))
-        forget = re.search(r"\bforget_scalars\(", code)
+        forget = re.search(r"\bforget_frame\(", code)
         effect = re.search(r"\b(?:apply|unknown_call)\(", code)
         if effect is not None and (forget is None or forget.start() > effect.start()):
-            problems.append("%s:%d: %s applies a callee effect before forget_scalars, so a callee "
-                            "can change a known scalar" % (SOURCE, body.first, name))
+            problems.append("%s:%d: %s applies a callee effect before forget_frame, so a fact "
+                            "that a callee can write survives the call" % (SOURCE, body.first,
+                                                                           name))
 
 
 def report(structs, out):
@@ -614,9 +616,9 @@ def check(text, established=None, null_values=None, pruning=None, forget=None, e
         count_sites(bodies, lines, r"\bmay_prune(?:_truth)?\(",
                     PRUNING_SITES if pruning is None else pruning,
                     "pruning predicate", problems),
-        count_sites(bodies, lines, r"\bforget_scalars\(",
+        count_sites(bodies, lines, r"\bforget_frame\(",
                     FORGET_SITES if forget is None else forget,
-                    "forget_scalars", problems),
+                    "forget_frame", problems),
         count_sites(bodies, lines, r"\b(?:apply|unknown_call)\(",
                     EFFECT_SITES if effects is None else effects,
                     "callee effect", problems),
@@ -631,7 +633,7 @@ def run(text, out, err, established=None, null_values=None, pruning=None, forget
     structs, problems, sites = check(text, established, null_values, pruning, forget, effects)
     report(structs, out)
     out.write("fact_joins: %d provenance.established, %d null_value(), %d pruning predicates, "
-              "%d forget_scalars, %d callee effects in their functions\n" % sites)
+              "%d forget_frame, %d callee effects in their functions\n" % sites)
     out.flush()
     for item in problems:
         err.write("fact_joins: error: %s\n" % item)

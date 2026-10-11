@@ -18,6 +18,7 @@ import ownership_api;
 import ownership_facts;
 import ownership_heap;
 import ownership_heap_env;
+import fir;
 
 // The pool of `src/fort/containers.ft`: a chain of blocks, each with one byte payload.
 string[30] POOL = {
@@ -466,6 +467,50 @@ fn retained_view() void {
     assert(ownership_heap_env.first(&c, "refill").kind == ownership_api.event_kind.invalid_use);
 }
 
+string[5] FRAME_STOP = {
+    "struct frame_node { i32 value; }",
+    "fn invoke(fn (frame_node mut* own mut*) frame_node mut* own f) frame_node mut* own {",
+    "    frame_node mut* own mut p = null;",
+    "    return f(&p);",
+    "}",
+};
+
+// A refused frame unit stops the call before the result effect creates a leaf.
+fn frame_stop() void {
+    string[1] names = {"invoke"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.open(&c, FRAME_STOP[..], names[..]);
+    ownership_heap.context mut ctx = ownership_heap.context{};
+    ownership_heap_env.context_of(&c, "invoke", &ctx);
+    defer ownership_heap.free_context(&ctx);
+    ownership_heap.state mut s = ownership_heap.initial(&ctx);
+    defer ownership_heap.free_state(&s);
+    ownership_heap.leaf_list mut out = ownership_heap.leaf_list{};
+    defer ownership_heap.free_leaves(&out);
+    bool mut found = false;
+    u32 mut b = 0;
+    while (b < fir.block_count(ctx.f)) {
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(ctx.f, b)) {
+            fir.statement* stmt = fir.block_statement(ctx.f, b, i);
+            if (stmt->kind == fir.stmt_kind.st_assign &&
+                stmt->value.kind == fir.rvalue_kind.rv_call) {
+                ctx.op = ownership_heap.position(&ctx, b, i, false);
+                ctx.at = stmt->loc;
+                c.counts.deny_at = c.counts.total_calls + 1;
+                ownership_heap.call(&ctx, &s, stmt->value,
+                    fir.rvalue_type(ctx.f, stmt->value), &out);
+                assert(ctx.stopped && out.len == 0);
+                found = true;
+            }
+            i += 1;
+        }
+        b += 1;
+    }
+    assert(found);
+}
+
 fn main() i32 {
     empty_pool();
     one_block();
@@ -476,6 +521,7 @@ fn main() i32 {
     repeated_site();
     unsupported_cycle();
     retained_view();
+    frame_stop();
     println("heap cleanup ok");
     return 0;
 }

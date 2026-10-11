@@ -105,6 +105,9 @@ struct atom {
     // A view or an address of the atom reached an unknown effect, so a later unknown effect can
     // change it too.
     bool exposed; // join: may
+    // An address of the atom storage, or of a member, left a slot. A callee can write the
+    // storage through that address, so each call frame forgets its facts.
+    bool addressed; // join: may
     // The atom is the entry value of the owner at the entry path of the atom: the owned-field
     // path `handle_path[..handle_depth]` below the entry value of interface atom `handle`
     // (`spec/fir.md` 14 Calls). `handle` is NONE, and the path empty, for any other atom. An
@@ -161,6 +164,12 @@ struct value {
     bool external; // join: may
     nullness nullness;
     slot_key target; // join: same
+    // A call erased an address or source relation. The unknown reference can still designate
+    // this storage.
+    slot_key retained; // join: same
+    bool retained_target; // join: may
+    // An erased view or a join lost another target. A later unknown call gets incomplete proof.
+    bool lost_target; // join: may
     // A scalar that tests the root of `test`, or NONE. True means a nonnull root when
     // `test_nonnull` is true. A known scalar has the truth value `truth`. A join of two scalars
     // drops these facts and `number`.
@@ -406,6 +415,27 @@ fn unknown_value() value {
     return v;
 }
 
+// An unknown reference that can still designate storage from an erased address or source relation.
+fn forgotten_value(value old) value {
+    value mut v = unknown_value();
+    v.param = old.param;
+    if (old.kind == value_kind.address) {
+        v.retained = old.target;
+        v.retained_target = true;
+    } else if (old.kind == value_kind.view) {
+        if (old.count > 0) {
+            v.retained = key_of(base_kind.cell, old.sources[0]);
+            v.retained_target = true;
+            v.lost_target = old.count > 1;
+        }
+    } else if (old.kind == value_kind.unknown) {
+        v.retained = old.retained;
+        v.retained_target = old.retained_target;
+        v.lost_target = old.lost_target;
+    }
+    return v;
+}
+
 // A reference that needs no check at a return and that the proof does not follow. Its target
 // names no slot.
 fn input_value() value {
@@ -535,7 +565,10 @@ fn same_value(value a, value b) bool {
         return a.nullness.value == b.nullness.value && a.nullness.how == b.nullness.how;
     case value_kind.unknown:
         return a.external == b.external && a.exact == b.exact &&
-            (!a.external || (same_key(a.target, b.target) && a.param == b.param));
+            a.param == b.param && (!a.external || same_key(a.target, b.target)) &&
+            a.retained_target == b.retained_target &&
+            (!a.retained_target || same_key(a.retained, b.retained)) &&
+            a.lost_target == b.lost_target;
     case value_kind.scalar:
         return a.test == b.test && (a.test == NONE || a.test_nonnull == b.test_nonnull) &&
             a.known == b.known && (!a.known || a.truth == b.truth) &&
@@ -693,8 +726,8 @@ fn drop_cell_slots(state mut* s, u32 a) void {
     s->slots_len = kept;
 }
 
-// Replaces source `from` by `to` in each view. `to` NONE removes it. Each changed view becomes a
-// member view, because `to` holds more than the root of `from`.
+// Replaces atom `from` by `to` in each stored reference. `to` NONE removes an exact target. Each
+// changed view becomes a member view, because `to` holds more than the root of `from`.
 fn redirect(state mut* s, u32 from, u32 to, bool keep_exact) void {
     u64 mut i = 0;
     while (i < s->slots_len) {
@@ -715,6 +748,14 @@ fn redirect(state mut* s, u32 from, u32 to, bool keep_exact) void {
                     sort_sources(v);
                     if (v->count == 0 && !v->external) { *v = unknown_value(); }
                 }
+            }
+        } else if (v->kind == value_kind.unknown && v->retained_target &&
+            v->retained.base == base_kind.cell && v->retained.id == from) {
+            if (to == NONE) {
+                v->retained_target = false;
+                v->lost_target = true;
+            } else {
+                v->retained.id = to;
             }
         }
         i += 1;
@@ -1235,6 +1276,8 @@ fn unfold(context mut* c, state mut* s, u32 a) bool {
                 child.choice = parent.choice;
                 child.borrows = parent.borrows;
                 child.params = parent.params;
+                // An address of a member of the parent can name a member of the child.
+                child.addressed = parent.addressed;
                 // An owned field of an entry value is an entry value one field deeper, down to
                 // the path bound (D10.7, D17.18).
                 if (parent.handle != NONE && cast(parent.handle_depth, u64) < PATH_DEPTH) {
@@ -1319,6 +1362,7 @@ fn absorb(state mut* s, u32 parent, u32 child) void {
     p->fresh = p->fresh || from.fresh;
     p->strict = p->strict && from.strict;
     p->exposed = p->exposed || from.exposed;
+    p->addressed = p->addressed || from.addressed;
     p->borrows = p->borrows || from.borrows;
     p->params = p->params || from.params;
     p->choice = false;
@@ -1720,6 +1764,15 @@ fn map_value(value v, u32@ map) value {
         u32 to = map[cast(v.target.id, u64)];
         if (to == NONE) { return unknown_value(); }
         out.target.id = to;
+    } else if (v.kind == value_kind.unknown && v.retained_target &&
+        v.retained.base == base_kind.cell) {
+        u64 id = cast(v.retained.id, u64);
+        if (id >= map.len || map[id] == NONE) {
+            out.retained_target = false;
+            out.lost_target = true;
+        } else {
+            out.retained.id = map[id];
+        }
     } else if (v.kind == value_kind.scalar && v.test != NONE) {
         out.test = map[cast(v.test, u64)];
     }
@@ -1811,6 +1864,12 @@ fn canonical(context mut* c, state mut* s) bool {
                 if (v.kind == value_kind.address && v.target.base == base_kind.cell &&
                     !keep[cast(v.target.id, u64)]) {
                     keep[cast(v.target.id, u64)] = true;
+                    changed = true;
+                }
+                if (v.kind == value_kind.unknown && v.retained_target &&
+                    v.retained.base == base_kind.cell && cast(v.retained.id, u64) < keep.len &&
+                    !keep[cast(v.retained.id, u64)]) {
+                    keep[cast(v.retained.id, u64)] = true;
                     changed = true;
                 }
             }
@@ -1906,7 +1965,8 @@ fn same_atom(atom a, atom b) bool {
         a.status.how == b.status.how && a.ty == b.ty && a.shape == b.shape &&
         a.root.value == b.root.value && a.root.how == b.root.how && a.origin == b.origin &&
         a.fresh == b.fresh && a.strict == b.strict && a.choice == b.choice &&
-        a.exposed == b.exposed && same_entry(a, b) && a.entry_required == b.entry_required &&
+        a.exposed == b.exposed && a.addressed == b.addressed && same_entry(a, b) &&
+        a.entry_required == b.entry_required &&
         a.empty_leaves == b.empty_leaves && a.borrows == b.borrows && a.params == b.params &&
         a.used == b.used;
 }
@@ -1979,6 +2039,7 @@ fn join_atom(atom a, atom b) atom {
     out.strict = a.strict && b.strict;
     out.choice = a.choice && b.choice;
     out.exposed = a.exposed || b.exposed;
+    out.addressed = a.addressed || b.addressed;
     // A null root has no leaves, so only the other side says whether they are empty.
     bool leaves_a = a.empty_leaves || a.root.value == root_kind.null_root;
     bool leaves_b = b.empty_leaves || b.root.value == root_kind.null_root;
@@ -2079,6 +2140,53 @@ fn fresh_id(pairing mut* p) u32 {
     return out;
 }
 
+// Adds one possible storage target to an unknown joined reference.
+fn add_retained_key(slot_key key, u32@ map, value mut* out) void {
+    slot_key mut kept = key;
+    if (kept.base == base_kind.cell) {
+        u64 id = cast(kept.id, u64);
+        if (id >= map.len || map[id] == NONE) {
+            out->lost_target = true;
+            return;
+        }
+        kept.id = map[id];
+    }
+    if (!out->retained_target) {
+        out->retained = kept;
+        out->retained_target = true;
+    } else if (!same_key(out->retained, kept)) {
+        out->lost_target = true;
+    }
+}
+
+// Adds each storage target that one predecessor reference can designate.
+fn add_retained_value(value v, u32@ map, value mut* out) void {
+    if (v.kind == value_kind.address) {
+        add_retained_key(v.target, map, out);
+    } else if (v.kind == value_kind.view) {
+        u32 mut i = 0;
+        while (i < v.count) {
+            add_retained_key(key_of(base_kind.cell, v.sources[i]), map, out);
+            i += 1;
+        }
+    } else if (v.kind == value_kind.unknown) {
+        if (v.retained_target) { add_retained_key(v.retained, map, out); }
+        out->lost_target = out->lost_target || v.lost_target;
+    }
+}
+
+// The parameter source of a join. Different sources become the conservative source set.
+fn joined_parameter(u32 a, u32 b) u32 { return a == b ? a : ANY_PARAM; }
+
+// Makes an unknown reference that keeps the possible storage targets of both predecessors.
+fn unknown_join_value(pairing* p, value vx, value vy) value {
+    value mut out = unknown_value();
+    out.param = joined_parameter(vx.param, vy.param);
+    add_retained_value(vx, p->px[..], &out);
+    add_retained_value(vy, p->py[..], &out);
+    return out;
+}
+
 // Pairs the atoms of two owned values. Phase 1 pairs two owned atoms. Phase 2 pairs an owned
 // atom with an empty slot. An interface atom keeps its index only when both sides hold it, or
 // when the empty side proved its root null; otherwise its identity splits (`spec/fir.md` 14 Calls).
@@ -2137,15 +2245,23 @@ fn pair_values(state* x, state* y, pairing mut* p, value vx, value vy, u32 depth
 fn join_values(state mut* out, pairing* p, value vx, value vy) value {
     if (vx.kind == value_kind.empty && vy.kind == value_kind.empty) { return empty_value(); }
     if (vx.kind == value_kind.unknown && vy.kind == value_kind.unknown) {
+        value mut joined = unknown_value();
         if (vx.external && vy.external) {
             if (same_key(vx.target, vy.target) && vx.param == vy.param) {
-                return vx; // join: copy
+                joined = vx; // join: copy
+            } else {
+                joined = input_value();
+                if (vx.param != NONE || vy.param != NONE) { joined.param = ANY_PARAM; }
             }
-            value mut either = input_value();
-            if (vx.param != NONE || vy.param != NONE) { either.param = ANY_PARAM; }
-            return either;
+        } else if (vx.exact && vy.exact) {
+            joined = effect_value();
         }
-        return vx.exact && vy.exact ? effect_value() : unknown_value();
+        joined.retained_target = false || false;
+        joined.lost_target = false || false;
+        joined.param = joined_parameter(vx.param, vy.param);
+        add_retained_value(vx, p->px[..], &joined); // join: copy
+        add_retained_value(vy, p->py[..], &joined); // join: copy
+        return joined;
     }
     if (vx.kind == value_kind.owned || vy.kind == value_kind.owned) {
         u32 ox = vx.kind == value_kind.owned ? p->px[cast(vx.atom, u64)] : NONE;
@@ -2173,12 +2289,16 @@ fn join_values(state mut* out, pairing* p, value vx, value vy) value {
         v.nullness = ownership_facts.join_nullness(vx.nullness, vy.nullness);
         u32 mut i = 0;
         while (i < vx.count) {
-            if (!add_source(&v, p->px[cast(vx.sources[i], u64)])) { return unknown_value(); }
+            if (!add_source(&v, p->px[cast(vx.sources[i], u64)])) {
+                return unknown_join_value(p, vx, vy); // join: copy
+            }
             i += 1;
         }
         i = 0;
         while (i < vy.count) {
-            if (!add_source(&v, p->py[cast(vy.sources[i], u64)])) { return unknown_value(); }
+            if (!add_source(&v, p->py[cast(vy.sources[i], u64)])) {
+                return unknown_join_value(p, vx, vy); // join: copy
+            }
             i += 1;
         }
         sort_sources(&v);
@@ -2198,7 +2318,9 @@ fn join_values(state mut* out, pairing* p, value vx, value vy) value {
         value w = vx.kind == value_kind.view ? vx : vy; // join: copy
         u32@ wmap = vx.kind == value_kind.view ? p->px[..] : p->py[..];
         u32@ amap = vx.kind == value_kind.address ? p->px[..] : p->py[..];
-        if (a.target.base == base_kind.local) { return unknown_value(); }
+        if (a.target.base == base_kind.local) {
+            return unknown_join_value(p, vx, vy); // join: copy
+        }
         value mut v = empty_value();
         v.kind = value_kind.view;
         v.external = w.external || a.target.base == base_kind.caller;
@@ -2207,11 +2329,13 @@ fn join_values(state mut* out, pairing* p, value vx, value vy) value {
             nullness{root_kind.nonnull, a.nullness.how});
         v.param = a.param == w.param ? a.param : ANY_PARAM;
         if (a.target.base == base_kind.cell && !add_source(&v, amap[cast(a.target.id, u64)])) {
-            return unknown_value();
+            return unknown_join_value(p, vx, vy); // join: copy
         }
         u32 mut i = 0;
         while (i < w.count) {
-            if (!add_source(&v, wmap[cast(w.sources[i], u64)])) { return unknown_value(); }
+            if (!add_source(&v, wmap[cast(w.sources[i], u64)])) {
+                return unknown_join_value(p, vx, vy); // join: copy
+            }
             i += 1;
         }
         sort_sources(&v);
@@ -2229,7 +2353,7 @@ fn join_values(state mut* out, pairing* p, value vx, value vy) value {
             return joined_address;
         }
     }
-    return unknown_value();
+    return unknown_join_value(p, vx, vy); // join: copy
 }
 
 // Folds each foldable cell and makes each other cell opaque, so a widened state has no cell.
@@ -2483,8 +2607,29 @@ fn param_count(fir.func* f) u32 {
     return n;
 }
 
+// Whether an `addr` or a slice of place `p` of a local names storage of that local: no
+// projection dereferences a pointer or indexes a span, and a slice takes a fixed array. A
+// dereference, a span index and a slice of a span name the storage that the local designates.
+fn in_local_storage(fir.func* f, fir.rvalue rv) bool {
+    fir.place p = rv.place;
+    if (rv.kind == fir.rvalue_kind.rv_slice &&
+        fir.place_type(f, p)->kind != types.type_kind.k_array) { return false; }
+    types.node* mut t = fir.local_at(f, p.local)->ty;
+    u32 mut i = 0;
+    while (i < p.proj_len) {
+        fir.projection pj = fir.place_projection(f, p, i);
+        if (pj.kind == fir.proj_kind.pj_deref) { return false; }
+        if (pj.kind == fir.proj_kind.pj_index && t->kind != types.type_kind.k_array) {
+            return false;
+        }
+        t = fir.apply_projection(f, t, pj);
+        i += 1;
+    }
+    return true;
+}
+
 // Marks each local whose storage a FIR address or slice can name: the base of the place of an
-// `addr` or a slice. A mark of a local that the place only reads through is no loss of soundness.
+// `addr` or a slice that stays in the storage of that local (D17.18).
 fn mark_named(fir.func* f, bool mut@ named) void {
     u32 mut b = 0;
     while (b < fir.block_count(f)) {
@@ -2496,7 +2641,8 @@ fn mark_named(fir.func* f, bool mut@ named) void {
                 (stmt->value.kind == fir.rvalue_kind.rv_addr ||
                 stmt->value.kind == fir.rvalue_kind.rv_slice) &&
                 stmt->value.place.base == fir.base_kind.bk_local &&
-                cast(stmt->value.place.local, u64) < named.len) {
+                cast(stmt->value.place.local, u64) < named.len &&
+                in_local_storage(f, stmt->value)) {
                 named[cast(stmt->value.place.local, u64)] = true;
             }
             i += 1;
@@ -3308,6 +3454,21 @@ fn null_test(context mut* c, state mut* s, fir.operand a, fir.operand b, bool eq
     return out;
 }
 
+// Marks each atom whose storage location `loc` names as `addressed`: the cell of a slot key, or
+// each source of an element. An address of a local needs no mark: `context.named` holds it.
+fn mark_addressed(state mut* s, location loc) void {
+    if (loc.kind == location_kind.slots && loc.key.base == base_kind.cell &&
+        cast(loc.key.id, u64) < s->atoms_len) {
+        s->atoms[cast(loc.key.id, u64)].addressed = true;
+    } else if (loc.kind == location_kind.element) {
+        u32 mut i = 0;
+        while (i < loc.count) {
+            s->atoms[cast(loc.sources[i], u64)].addressed = true;
+            i += 1;
+        }
+    }
+}
+
 // A known integer keeps its value only in an integer type that holds it.
 fn numbered_in(i64 number, types.node* t) value {
     value mut out = scalar_value();
@@ -3400,6 +3561,7 @@ fn rvalue_value(context mut* c, state mut* s, fir.rvalue rv, types.node* t) valu
         location mut loc = location{};
         types.node* mut place_ty = null;
         resolve_place(c, s, rv.place, true, &loc, &place_ty);
+        mark_addressed(s, loc);
         if (loc.kind == location_kind.slots) {
             value mut address = address_value(loc.key, address_fact(s, loc.key));
             address.param = loc.param;
@@ -3426,6 +3588,7 @@ fn rvalue_value(context mut* c, state mut* s, fir.rvalue rv, types.node* t) valu
         bool array = fir.place_type(c->f, rv.place)->kind == types.type_kind.k_array;
         resolve_place(c, s, rv.place, array, &sliced, &sliced_ty);
         if (sliced_ty->kind == types.type_kind.k_array) {
+            mark_addressed(s, sliced);
             if (sliced.kind == location_kind.slots || sliced.kind == location_kind.length) {
                 value mut address = address_value(sliced.key, address_fact(s, sliced.key));
                 address.param = sliced.param;
@@ -3822,6 +3985,14 @@ fn havoc_value(state mut* s, value v) bool {
         if (v.target.base == base_kind.cell) {
             s->atoms[cast(v.target.id, u64)].exposed = true;
         }
+    } else if (v.kind == value_kind.unknown) {
+        if (v.retained_target) {
+            if (havoc_prefix(s, v.retained)) { changed = true; }
+            if (v.retained.base == base_kind.cell) {
+                s->atoms[cast(v.retained.id, u64)].exposed = true;
+            }
+        }
+        if (v.lost_target) { changed = true; }
     }
     return changed;
 }
@@ -4137,6 +4308,9 @@ fn current_value(state* s, value v) value {
         sort_sources(&out);
     } else if (v.kind == value_kind.address && v.target.base == base_kind.cell) {
         out.target.id = current_atom(s, v.target.id);
+    } else if (v.kind == value_kind.unknown && v.retained_target &&
+        v.retained.base == base_kind.cell) {
+        out.retained.id = current_atom(s, v.retained.id);
     }
     return out;
 }
@@ -4155,6 +4329,11 @@ fn designated_atoms(value v, u32 mut@ out, u64 mut* n) bool {
     } else if (v.kind == value_kind.address && v.target.base == base_kind.cell) {
         if (*n >= out.len) { return false; }
         out[*n] = v.target.id;
+        *n += 1;
+    } else if (v.kind == value_kind.unknown && v.retained_target &&
+        v.retained.base == base_kind.cell) {
+        if (*n >= out.len) { return false; }
+        out[*n] = v.retained.id;
         *n += 1;
     }
     return true;
@@ -4229,8 +4408,8 @@ fn separate(context mut* c, state mut* s, summary* sum, argument@ args, leaf_lis
 /// Applies a summary at a call (D17.16, `spec/fir.md` 14 Calls). The caller binds each interface
 /// atom to its actual atom, checks the shape that the callee needs, and grafts the exit facts of
 /// caller storage and of the result. False keeps the call unknown.
-fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list* arg_leaves,
-    types.node* t, leaf_list mut* out, bool check_only) bool {
+fn apply(context mut* c, state mut* s, state* entry, callee* target, argument@ args,
+    leaf_list* arg_leaves, types.node* t, leaf_list mut* out, bool check_only) bool {
     summary* sum = target->published;
     u64 interfaces = sum->interface.len;
     if (!pay(c, sum->post.slots_len + sum->post.atoms_len + interfaces +
@@ -4344,7 +4523,7 @@ fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list
     if (!separate(c, s, sum, args, arg_leaves, prefixes[..], bound[..])) { return false; }
     // The owners that the callee dereferences and the empty owners that it requires (D10.7,
     // `spec/fir.md` 14 Calls).
-    check_requirements(c, s, sum, bound[..]);
+    check_requirements_at(c, s, entry, sum, bound[..]);
     // The shape that the callee needs (`spec/memory-model.md` 2.7).
     i = 0;
     while (i < interfaces) {
@@ -4808,7 +4987,8 @@ fn requires_empty_root(summary* sum, u32 i) bool {
 // dereferences come first, because they read the owners before the callee stores over any. A
 // failed empty owner is lost and leaves its field: the callee stores over it and returns in the
 // same way, so a later independent error keeps its own event (`spec/toolchain.md` 4.2).
-fn check_requirements(context mut* c, state mut* s, summary* sum, u32@ bound) void {
+fn check_requirements_at(context mut* c, state mut* s, state* entry, summary* sum,
+    u32@ bound) void {
     // The callee accessed an owner of an input without its entry path: no requirement names it.
     if (sum->lost_required != 0) {
         unproved(c, s, ownership_api.incomplete_reason.missing_graph, NONE,
@@ -4824,12 +5004,12 @@ fn check_requirements(context mut* c, state mut* s, summary* sum, u32@ bound) vo
                 cast(r.entry, u64) < sum->interface.len) {
                 bool each = ownership_facts.has_requirement(sum->post.required.items[..],
                     sum->post.required.len, r);
-                requirement_walk w = walk_requirement(s, bound[cast(r.entry, u64)],
+                requirement_walk w = walk_requirement(entry, bound[cast(r.entry, u64)],
                     sum->interface[cast(r.entry, u64)].ty, r);
                 if (needs == root_kind.nonnull) {
-                    check_dereference(c, s, w, each);
+                    check_dereference(c, s, entry, w, each);
                 } else {
-                    check_empty(c, s, w, each);
+                    check_empty(c, s, entry, w, each);
                 }
             }
             i += 1;
@@ -4838,12 +5018,18 @@ fn check_requirements(context mut* c, state mut* s, summary* sum, u32@ bound) vo
     }
 }
 
+// Checks requirements when no call frame separates the entry facts from the changed state.
+fn check_requirements(context mut* c, state mut* s, summary* sum, u32@ bound) void {
+    check_requirements_at(c, s, s, sum, bound);
+}
+
 // One owner that the callee dereferences. A failure ends no path: the call goes on as after
 // another failed requirement.
-fn check_dereference(context mut* c, state mut* s, requirement_walk w, bool each) void {
+fn check_dereference(context mut* c, state mut* s, state* entry, requirement_walk w,
+    bool each) void {
     if (w.test == requirement_test.fails) {
         violation(c, s, ownership_api.event_kind.caller_requirement,
-            requirement_certainty(s, w, root_kind.nonnull, each), w.owner,
+            requirement_certainty(entry, w, root_kind.nonnull, each), w.owner,
             "the empty owner that the callee dereferences");
     } else if (w.test == requirement_test.unknown) {
         violation(c, s, ownership_api.event_kind.caller_requirement, certainty.possible, w.owner,
@@ -4856,7 +5042,7 @@ fn check_dereference(context mut* c, state mut* s, requirement_walk w, bool each
 }
 
 // One empty owner that the callee requires.
-fn check_empty(context mut* c, state mut* s, requirement_walk w, bool each) void {
+fn check_empty(context mut* c, state mut* s, state* entry, requirement_walk w, bool each) void {
     string text = w.holder == U64_MAX ? "an empty owner that this call requires" :
         "an empty owned field that this call requires";
     if (w.test == requirement_test.passed) {
@@ -4875,7 +5061,7 @@ fn check_empty(context mut* c, state mut* s, requirement_walk w, bool each) void
         unproved(c, s, w.why, w.owner, text);
     } else if (w.test == requirement_test.fails) {
         violation(c, s, ownership_api.event_kind.caller_requirement,
-            requirement_certainty(s, w, root_kind.null_root, each), w.owner, text);
+            requirement_certainty(entry, w, root_kind.null_root, each), w.owner, text);
     } else {
         return;
     }
@@ -4908,21 +5094,132 @@ fn redirect_add(state mut* s, u32 from, u32 to) void {
     }
 }
 
-// A known scalar is a fact too (D17.18). A heap proof keeps a scalar only in a slot of a whole
-// scalar local. A callee can write such a local through an address argument, a pointer that an
-// argument holds, or a global, and each of them needs a FIR address of the local first. So each
-// call forgets the value of each scalar local whose storage a FIR address names. A summary keeps
-// no scalar fact (`translate_value`), and an unknown call writes what its pointers reach.
-fn forget_scalars(context* c, state mut* s) void {
+// Whether the base of key `k` is a marked local or a marked cell.
+fn reached_key(slot_key k, bool@ locals, bool@ atoms) bool {
+    u64 id = cast(k.id, u64);
+    if (k.base == base_kind.local) { return id < locals.len && locals[id]; }
+    if (k.base == base_kind.cell) { return id < atoms.len && atoms[id]; }
+    return false;
+}
+
+// Marks the storage that value `v` reaches: the atom of an owner, each source of a view, and the
+// local or cell of an address. A lost target marks each local and atom. True when a mark is new.
+fn reach_value(value v, bool mut@ locals, bool mut@ atoms) bool {
+    bool mut grew = false;
+    if (v.kind == value_kind.owned && !atoms[cast(v.atom, u64)]) {
+        atoms[cast(v.atom, u64)] = true;
+        grew = true;
+    } else if (v.kind == value_kind.view) {
+        u32 mut j = 0;
+        while (j < v.count) {
+            if (!atoms[cast(v.sources[j], u64)]) {
+                atoms[cast(v.sources[j], u64)] = true;
+                grew = true;
+            }
+            j += 1;
+        }
+    } else if (v.kind == value_kind.address ||
+        (v.kind == value_kind.unknown && v.retained_target)) {
+        slot_key target = v.kind == value_kind.address ? v.target : v.retained;
+        u64 id = cast(target.id, u64);
+        if (target.base == base_kind.local && id < locals.len && !locals[id]) {
+            locals[id] = true;
+            grew = true;
+        } else if (target.base == base_kind.cell && id < atoms.len && !atoms[id]) {
+            atoms[id] = true;
+            grew = true;
+        }
+    }
+    if (v.kind == value_kind.unknown && v.lost_target) {
+        u64 mut i = 0;
+        while (i < locals.len) {
+            if (!locals[i]) {
+                locals[i] = true;
+                grew = true;
+            }
+            i += 1;
+        }
+        i = 0;
+        while (i < atoms.len) {
+            if (!atoms[i]) {
+                atoms[i] = true;
+                grew = true;
+            }
+            i += 1;
+        }
+    }
+    return grew;
+}
+
+/// The frame of a call (D17.18). A callee can write each local whose storage a FIR address names
+/// (`context.named`), and each atom whose storage an address named (`atom.addressed`): through
+/// an address argument, through a global, or through an address that an earlier call kept.
+/// Through that storage it reaches each atom that the storage owns or views, and each local or
+/// cell whose address the storage holds, and it can write their storage too. So before each
+/// callee effect, the storage of that closure keeps no fact that can remove a path. A scalar slot
+/// has no known value. A reference slot that does not own holds an unknown reference. An empty
+/// owner keeps an assumed null. Each reached atom keeps its root and its status as assumed facts,
+/// and no scalar tests its root. Each obligation stays where it is. Each round of the closure
+/// pays one W unit for each slot; a state with no named local and no addressed atom pays nothing.
+fn forget_frame(context mut* c, state mut* s) void {
+    bool mut@ own locals = new(bool, c->named.len);
+    defer del(locals);
+    bool mut@ own atoms = new(bool, s->atoms_len);
+    defer del(atoms);
+    bool mut seeded = false;
+    u64 mut n = 0;
+    while (n < locals.len) {
+        locals[n] = c->named[n];
+        seeded = seeded || locals[n];
+        n += 1;
+    }
+    n = 0;
+    while (n < atoms.len) {
+        atoms[n] = s->atoms[n].addressed;
+        seeded = seeded || atoms[n];
+        n += 1;
+    }
+    if (!seeded) { return; }
+    bool mut grew = true;
+    while (grew) {
+        // A refused unit stops the computation, and its result keeps the incomplete status.
+        if (!pay(c, s->slots_len + 1)) { return; }
+        grew = false;
+        u64 mut i = 0;
+        while (i < s->slots_len) {
+            if (reached_key(s->slots[i].key, locals[..], atoms[..]) &&
+                reach_value(s->slots[i].v, locals, atoms)) { grew = true; }
+            i += 1;
+        }
+    }
     u64 mut i = 0;
     while (i < s->slots_len) {
         slot item = s->slots[i];
-        if (item.key.base == base_kind.local && item.key.depth == 0 &&
-            item.v.kind == value_kind.scalar && cast(item.key.id, u64) < c->named.len &&
-            c->named[cast(item.key.id, u64)]) {
-            s->slots[i].v = scalar_value();
+        if (reached_key(item.key, locals[..], atoms[..])) {
+            if (item.owning) {
+                if (item.v.kind == value_kind.empty) { s->slots[i].v = empty_value(); }
+            } else if (item.v.kind == value_kind.scalar) {
+                s->slots[i].v = scalar_value();
+            } else if (is_reference(item.ty) || item.array) {
+                s->slots[i].v = forgotten_value(item.v);
+            }
+        } else if (item.v.kind == value_kind.scalar && item.v.test != NONE &&
+            atoms[cast(item.v.test, u64)]) {
+            // The test read a root that the callee can change.
+            s->slots[i].v.test = NONE;
         }
         i += 1;
+    }
+    u64 mut a = 0;
+    while (a < atoms.len) {
+        if (atoms[a]) {
+            // A callee can keep an address that it reads through reached storage. A later call
+            // must reach that allocation after this frame clears the reference that led to it.
+            s->atoms[a].addressed = true;
+            s->atoms[a].root = ownership_facts.assume(s->atoms[a].root);
+            s->atoms[a].status = ownership_facts.assume_status(s->atoms[a].status);
+        }
+        a += 1;
     }
 }
 
@@ -4960,8 +5257,13 @@ fn call(context mut* c, state mut* s, fir.rvalue rv, types.node* t, leaf_list mu
     }
     reset(out);
     if (c->stopped || !s->reached) { return; }
-    // Each callee effect below, a summary or an unknown call, follows this one forget.
-    forget_scalars(c, s);
+    // Caller requirements read the entry facts. The frame then removes facts before the callee
+    // effect. Atom and slot indices stay stable across the frame.
+    state mut entry = clone(s);
+    defer free_state(&entry);
+    // Each callee effect below, a summary or an unknown call, follows this one frame.
+    forget_frame(c, s);
+    if (c->stopped) { return; }
     u64 found = rv.callee == fir.callee_kind.cl_fn ? find_callee(c, rv.callee_sym) : U64_MAX;
     if (found != U64_MAX) {
         callee* target = &c->callees[found];
@@ -4971,10 +5273,12 @@ fn call(context mut* c, state mut* s, fir.rvalue rv, types.node* t, leaf_list mu
         // A published fort body without a proof reported its own error (`spec/fir.md` 14.1).
         bool own_error = sum != null && sum->known && !usable && !target->member;
         u64 before = c->notes;
-        if (usable && apply(c, s, target, args[..], &arg_leaves, t, out, false)) { return; }
+        if (usable && apply(c, s, &entry, target, args[..], &arg_leaves, t, out, false)) {
+            return;
+        }
         // A member call still checks its binding, so its own reason names the call.
         if (!usable && target->member && sum != null && sum->known) {
-            apply(c, s, target, args[..], &arg_leaves, t, out, true);
+            apply(c, s, &entry, target, args[..], &arg_leaves, t, out, true);
         }
         reset(out);
         unknown_call(c, s, args[..], &arg_leaves, t, out, !own_error && c->notes == before);
@@ -5026,7 +5330,7 @@ fn null_descendants(state mut* s, u32 a) void {
 
 // Whether a condition has a truth that may remove an edge (D17.18): a known scalar that a null
 // test of an established root, or a constant or comparison of this body, gave. No call changes
-// it: a call forgets each scalar local that a callee can write (`forget_scalars`).
+// it: a call forgets each scalar that a callee can write (`forget_frame`).
 fn may_prune_truth(value cond) bool {
     return cond.kind == value_kind.scalar && cond.known;
 }

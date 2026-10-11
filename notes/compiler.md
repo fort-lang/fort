@@ -972,9 +972,10 @@ came here.
   other member, because their summaries rest on each other.
   A lost owner of live status becomes leaked: it stays allocated, so its views stay valid. A
   lost owner of unknown status becomes escaped, so a read through its views stays unproved.
-  `tools/mutations/ownership_heap.json` holds 114 rows of the core rules: 25 of them hold the
+  `tools/mutations/ownership_heap.json` holds 143 rows of the core rules: 25 of them hold the
   caller requirement of a dereference (`D10.7-requirement-*`, `D10.7-lost-*`), 15 hold rule P1 of
-  D17.18, 3 hold `not` of an integer, and its stage `provenance` runs
+  D17.18, 3 hold `not` of an integer, 28 hold the frame of a call (`D17.18-frame-*`), and its
+  stage `provenance` runs
   `ownership_heap_provenance_test.ft`.
   A known integer keeps a number only through a copy (`rv_use`), `add`, `sub`, `cast` and `not`.
   Each one computes the exact result in its type, and a result that does not fit has no number.
@@ -1033,15 +1034,47 @@ came here.
   publishes no stronger fact than one call. A fold keeps the null root of a cell that a null edge
   made null.
   A known scalar is a fact too, and the heap proof keeps one only in the slot of a whole scalar
-  local. A callee can write such a local through an address argument, a pointer that an argument
-  holds, or a global, and each way needs a FIR address of the local first. So `call` forgets the
-  value of each scalar local whose storage a FIR address or slice names (`forget_scalars`,
-  `context.named`) before it applies a summary or an unknown call. Before that rule the heap solver
-  alone proved 9 faulty bodies whose callee wrote such a local (`test/ownership/probes/review_p*`).
-  Three gaps stay in the ledger by a ruling of the user (2026-10-11), each for a later change: a
-  pointer local whose address escaped keeps its root fact over a call (class F), a cast that
-  changes the pointee type keeps the address, so a store through it is lost or widened (G), and
-  `rv_not` keeps the number of a scalar (H).
+  local. **A call forgets each fact that a callee can write through an address of a local**
+  (`forget_frame`, D17.18). A callee writes a local through an address argument, a pointer that
+  an argument holds, a global, or an address that an earlier call kept, and each way needs a FIR
+  address of the local first. `context.named` marks each local whose own storage an `addr` or a
+  slice names (`mark_named`): `&p->f` and a span index name the storage that p designates, so they
+  mark no local. They mark the atom of that storage instead (`atom.addressed`, `mark_addressed`):
+  a by-value struct or an earlier call can carry the address to a callee. Through a marked local
+  or atom the callee also reaches each atom that it owns or views and each local or cell whose
+  address it holds, and so on. Before `apply` and `unknown_call`, `call` takes that closure once:
+  a scalar slot loses its known value, and a reference slot that does not own becomes unknown.
+  The unknown reference keeps one possible storage target. Multiple targets also set
+  `lost_target`. A mixed-kind join maps targets from both paths. A different target sets
+  `lost_target`. A reached `lost_target` marks each local and atom in the frame. Canonical form
+  and joins remap a retained cell target with the atom map. The
+  retained target also keeps its cell record. An empty owner takes `empty_value()`. Each reached
+  atom takes `assume` of its root and status. A scalar that tested a reached atom loses `test`.
+  Thus, a later edge establishes no root that the call can change. Each closure round pays one
+  W unit for each slot. A state with no marked local and no marked atom pays nothing. Each
+  obligation stays: a fort
+  callee with a complete proof releases no owner, and stores no owner and no reference of its own,
+  through storage that its proof does not track (`write_at`, `release_place`, a move from
+  untracked storage), and the graft applies its effects on the storage that a pointer argument
+  designates. So a summary that fills an empty owner of the caller still applies. Two stores of a
+  callee with a complete proof stay outside the summary and the frame, each a ledger class for a
+  later change of the write footprint: a store through a global into the storage that a parameter
+  designates (class K: the frame does not reach caller storage), and a store through a pointer
+  leaf of a by-value aggregate (class L: the graft applies no store through such a leaf). Before
+  the frame the heap solver alone proved 9 faulty bodies whose callee wrote a scalar local
+  (`test/ownership/probes/review_p*`) and 19 whose callee wrote a pointer, an owner or a cell
+  field (`review_q06_ptr_local.ft`, `frame_f1_pointers.ft`, `frame_f2_owners.ft`). The frame
+  costs 0 earlier proofs of `heap_rows` (2026-10-11): an earlier mark of each base of an `addr`,
+  also through a dereference, in place of `atom.addressed` costs 8, and a frame that gives each
+  owner of a marked local a new unknown owner costs 23 to 33, with approved and accepted programs
+  among them. The frame does
+  not see a callee without a complete proof that releases or fills an owner through a kept
+  address: a view of the released allocation stays valid, and the filled owner stays empty. Each
+  such callee reports its own incomplete proof. The ledger holds both shapes as class I by a
+  ruling of the user (2026-10-11), for a later change that adds a summary bit for each parameter
+  whose address escapes. One more gap stays in the ledger by a ruling of the user (2026-10-11),
+  for a later change: a cast that changes the pointee type keeps the address, so a store through
+  it is lost or widened (G).
   Precision limits, each measured by a variant that makes the site precise and gives no changed
   row of `heap_rows` (2026-10-10): the join of two empty values, a fold, the empty side of a
   pairing and the null children of an unfold of `empty_leaves` assume their facts; an unfold
@@ -1060,12 +1093,12 @@ came here.
   side gives carries the tag `// join: copy`. A graft function reads a callee fact only through
   `assume`, `import_nullness`, `assume_status`, `may_prune` or a join, and it keeps its 3 import
   and assume assignments. `provenance.established`, `null_value()`, a pruning predicate
-  (`may_prune`, `may_prune_truth`), `forget_scalars` and a callee effect (`apply`,
+  (`may_prune`, `may_prune_truth`), `forget_frame` and a callee effect (`apply`,
   `unknown_call`) occur only in the functions of `ESTABLISHED_SITES`, `NULL_VALUE_SITES`,
   `PRUNING_SITES`, `FORGET_SITES` and `EFFECT_SITES`, as often as the table says, and `call`
-  forgets before its first callee effect. So a new established fact, a new pruning site or a new
-  callee effect changes a table. A new fact type adds one row to `FACT_JOINS` and one join
-  function. No join function writes a part of a typed field, so the lint reports no partial
+  takes its frame before its first callee effect. So a new established fact, a new pruning site
+  or a new callee effect changes a table. A new fact type adds one row to `FACT_JOINS` and one
+  join function. No join function writes a part of a typed field, so the lint reports no partial
   write.
 - **Finite ownership proof preserves obligations when precision ends** (T-276, D17.18).
   `spec/fir.md` 14.1 defines the finite domain, canonical solving, and counted budgets.

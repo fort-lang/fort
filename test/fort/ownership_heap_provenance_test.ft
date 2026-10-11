@@ -9,6 +9,7 @@
 //| assumed requirements
 //| known scalars
 //| requirements
+//| address-taken frame
 //| heap provenance ok
 /// Checks that only an established fact removes a path of the heap proof (D17.18, rule P1): a
 /// null test, both edges of a refinement, and the exit contradiction of a call.
@@ -388,6 +389,280 @@ string[60] SCALARS = {
     "    *p = false;",
     "    if (b) { return; }",
     "    del(extra);",
+    "}",
+};
+
+// The frame of a call.
+string[270] FRAME = {
+    "struct pair { i32 mut* a; i32 b; }",
+    "struct node { i32 v; node mut* own next; }",
+    "struct peer { i32 v; i32 mut* p; }",
+    "struct node_holder { node mut* own mut* pp; }",
+    "struct holder { i32 mut* mut* pp; }",
+    "struct peer_holder { peer mut* own mut* pp; }",
+    "i32 mut* mut* mut saved = null;",
+    "pair mut* mut saved_pair = null;",
+    "node mut* own mut* mut saved_node = null;",
+    "peer mut* own mut* mut saved_peer = null;",
+    "fn stash_pp(i32 mut* mut* pp) void { saved = pp; }",
+    "fn clear_pp() void { *saved = null; }",
+    "fn stash_pair(pair mut* p) void { saved_pair = p; }",
+    "fn clear_pair() void { saved_pair->a = null; }",
+    "fn keep_node(node_holder* h) void { saved_node = h->pp; }",
+    "fn take_node() void { if (saved_node != null) { del(*saved_node); } }",
+    "fn keep_peer(peer_holder* h) void { saved_peer = h->pp; }",
+    "fn clear_peer() void { (*saved_peer)->p = null; }",
+    "fn nothing() void { }",
+    "fn touch(i32 mut* p) void { *p = 1; }",
+    "fn fill(node mut* own mut* out) void { *out = new(node); }",
+    "peer mut* mut* mut saved_view = null;",
+    "fn fill_node() void {",
+    "    if (saved_node != null && *saved_node == null) { *saved_node = new(node); } }",
+    "fn stash_view(peer mut* mut* pp) void { saved_view = pp; }",
+    "fn clear_view() void { (*saved_view)->p = null; }",
+    "fn clear_through(holder h) void { *h.pp = null; }",
+    "fn clear_arg(peer mut* p) void { p->p = null; }",
+    "i32 mut* mut* mut* mut saved_rr = null;",
+    "fn stash_rr(i32 mut* mut* mut* pp) void { saved_rr = pp; }",
+    "fn clear_rr() void { **saved_rr = null; }",
+    "fn addr_of(peer mut* p) i32 mut* mut* { return &p->p; }",
+    "fn pointer_local() void {",
+    "    i32 mut* own extra = new(i32);",
+    "    i32 mut x = 1;",
+    "    i32 mut* mut q = null;",
+    "    stash_pp(&q);",
+    "    q = &x;",
+    "    clear_pp();",
+    "    if (q != null) { del(extra); return; }",
+    "}",
+    "fn pointer_field() void {",
+    "    i32 mut* own extra = new(i32);",
+    "    i32 mut x = 1;",
+    "    pair mut pr = pair{};",
+    "    stash_pair(&pr);",
+    "    pr.a = &x;",
+    "    clear_pair();",
+    "    if (pr.a != null) { del(extra); return; }",
+    "}",
+    "fn owner_root() void {",
+    "    i32 mut* own extra = new(i32);",
+    "    node mut* own mut m = new(node);",
+    "    node_holder mut h = node_holder{};",
+    "    h.pp = &m;",
+    "    keep_node(&h);",
+    "    take_node();",
+    "    if (m == null) { return; }",
+    "    del(m);",
+    "    del(extra);",
+    "}",
+    "fn owner_cell() void {",
+    "    i32 mut* own extra = new(i32);",
+    "    i32 mut x = 1;",
+    "    peer mut* own mut m = new(peer);",
+    "    m->p = &x;",
+    "    peer_holder mut h = peer_holder{};",
+    "    h.pp = &m;",
+    "    keep_peer(&h);",
+    "    clear_peer();",
+    "    if (m->p != null) { del(extra); }",
+    "    m->p = null;",
+    "    del(m);",
+    "}",
+    "fn owner_link() void {",
+    "    i32 mut* own extra = new(i32);",
+    "    node mut* own mut m = new(node);",
+    "    node_holder mut h = node_holder{};",
+    "    h.pp = &m;",
+    "    keep_node(&h);",
+    "    bool t = m == null;",
+    "    take_node();",
+    "    if (t) { del(extra); del(m); return; }",
+    "    if (m == null) { return; }",
+    "    del(extra);",
+    "    del(m);",
+    "}",
+    "fn owner_empty() void {",
+    "    i32 mut* own extra = new(i32);",
+    "    node mut* own mut m = null;",
+    "    node_holder mut h = node_holder{};",
+    "    h.pp = &m;",
+    "    keep_node(&h);",
+    "    fill_node();",
+    "    if (m == null) { del(extra); return; }",
+    "    del(m);",
+    "}",
+    "fn view_cell() void {",
+    "    i32 mut* own extra = new(i32);",
+    "    i32 mut x = 1;",
+    "    peer mut* own m = new(peer);",
+    "    m->p = &x;",
+    "    peer mut* mut q = m;",
+    "    stash_view(&q);",
+    "    clear_view();",
+    "    if (m->p != null) { del(extra); }",
+    "    m->p = null;",
+    "    del(m);",
+    "}",
+    "fn struct_by_value() void {",
+    "    i32 mut* own extra = new(i32);",
+    "    i32 mut x = 1;",
+    "    peer mut* own m = new(peer);",
+    "    m->p = &x;",
+    "    holder mut h = holder{};",
+    "    h.pp = &m->p;",
+    "    clear_through(h);",
+    "    if (m->p != null) { del(extra); }",
+    "    m->p = null;",
+    "    del(m);",
+    "}",
+    "fn returned_address() void {",
+    "    i32 mut* own extra = new(i32);",
+    "    i32 mut x = 1;",
+    "    peer mut* own m = new(peer);",
+    "    i32 mut* mut* mut r = null;",
+    "    stash_rr(&r);",
+    "    r = addr_of(m);",
+    "    m->p = &x;",
+    "    clear_rr();",
+    "    if (m->p != null) { del(extra); }",
+    "    m->p = null;",
+    "    del(m);",
+    "}",
+    "fn unnamed_pointer() void {",
+    "    i32 mut* own extra = new(i32);",
+    "    i32 mut* q = null;",
+    "    nothing();",
+    "    if (q != null) { return; }",
+    "    del(extra);",
+    "}",
+    "fn through_pointer() void {",
+    "    i32 mut* own extra = new(i32);",
+    "    pair mut pr = pair{};",
+    "    pair mut* p = &pr;",
+    "    touch(&p->b);",
+    "    nothing();",
+    "    if (p == null) { return; }",
+    "    del(extra);",
+    "}",
+    "fn kept_owner() void {",
+    "    node mut* own mut m = null;",
+    "    fill(&m);",
+    "    nothing();",
+    "    del(m);",
+    "}",
+    "fn kept_leak() void {",
+    "    node mut* own mut m = null;",
+    "    fill(&m);",
+    "    nothing();",
+    "}",
+    "fn retained_view(fn (peer mut*) void f) void {",
+    "    i32 mut* own extra = new(i32);",
+    "    i32 mut x = 1;",
+    "    peer mut* own m = new(peer);",
+    "    peer mut* mut q = m;",
+    "    peer mut* mut* address = &q;",
+    "    nothing();",
+    "    m->p = &x;",
+    "    f(q);",
+    "    if (m->p != null) { del(extra); }",
+    "    m->p = null;",
+    "    del(m);",
+    "}",
+    "fn retained_cleared_view() void {",
+    "    i32 mut* own extra = new(i32);",
+    "    i32 mut x = 1;",
+    "    peer mut* own m = new(peer);",
+    "    peer mut* mut q = m;",
+    "    peer mut* mut* address = &q;",
+    "    nothing();",
+    "    q = null;",
+    "    m->p = &x;",
+    "    nothing();",
+    "    if (m->p != null) { del(extra); }",
+    "    m->p = null;",
+    "    del(m);",
+    "}",
+    "fn retained_owner(fn (node mut* own mut*) void f) void {",
+    "    node mut* own mut p = null;",
+    "    node mut* own mut* mut q = &p;",
+    "    node mut* own mut* mut* address = &q;",
+    "    nothing();",
+    "    f(q);",
+    "}",
+    "fn retained_view_write(fn (node mut*) void f) void {",
+    "    node mut* own p = new(node);",
+    "    node mut* mut q = p;",
+    "    node mut* mut* address = &q;",
+    "    nothing();",
+    "    f(q);",
+    "    del(p);",
+    "}",
+    "fn retained_join(bool flag, fn (node mut* own mut*) void f) void {",
+    "    node mut* own mut p = null;",
+    "    node mut* own mut* mut q = &p;",
+    "    node mut* own mut* mut* address = &q;",
+    "    if (flag) { nothing(); }",
+    "    f(q);",
+    "}",
+    "fn retained_residual(bool flag) void {",
+    "    i32 mut* own extra = new(i32);",
+    "    i32 mut x = 1;",
+    "    peer mut local = peer{};",
+    "    peer mut* own m = new(peer);",
+    "    peer mut* mut q = null;",
+    "    peer mut* mut* address = &q;",
+    "    if (flag) { q = &local; } else { q = m; }",
+    "    m->p = &x;",
+    "    nothing();",
+    "    if (m->p != null) { del(extra); }",
+    "    m->p = null;",
+    "    del(m);",
+    "}",
+    "fn retained_remap(bool flag, fn (node mut*) void f) void {",
+    "    node mut* own first = new(node);",
+    "    node mut* own second = new(node);",
+    "    node mut* mut q = second;",
+    "    node mut* mut* address = &q;",
+    "    nothing();",
+    "    del(first);",
+    "    if (flag) { second->v = 1; } else { second->v = 2; }",
+    "    f(q);",
+    "    del(second);",
+    "}",
+    "extern fn foreign_read(i32* p) void;",
+    "fn retained_param(i32* p, bool flag) void {",
+    "    i32* mut q = p;",
+    "    i32* mut* address = &q;",
+    "    nothing();",
+    "    i32 mut marker = 0;",
+    "    if (flag) { marker = 1; } else { marker = 2; }",
+    "    foreign_read(q);",
+    "}",
+    "fn retained_param_caller() void {",
+    "    i32 mut* own p = new(i32);",
+    "    i32* q = p; del(p); retained_param(q, true);",
+    "}",
+    "fn retained_param_mixed(i32* p, bool flag) void {",
+    "    i32* mut q = p;",
+    "    i32* mut* address = &q;",
+    "    if (flag) { nothing(); }",
+    "    foreign_read(q);",
+    "}",
+    "fn retained_param_mixed_caller() void {",
+    "    i32 mut* own p = new(i32);",
+    "    i32* q = p; del(p); retained_param_mixed(q, true);",
+    "}",
+    "fn retained_param_choice(i32* a, i32* b, bool flag) void {",
+    "    i32* mut q = null;",
+    "    i32* mut* address = &q;",
+    "    if (flag) { q = a; nothing(); }",
+    "    else { q = b; nothing(); }",
+    "    foreign_read(q);",
+    "}",
+    "fn retained_param_choice_caller(bool flag) void {",
+    "    i32 mut* own a = new(i32); i32 mut* own b = new(i32);",
+    "    i32* x = a; i32* y = b;",
+    "    del(b); retained_param_choice(x, y, flag); del(a);",
     "}",
 };
 
@@ -1077,6 +1352,106 @@ fn scalars() void {
     assert(ownership_heap_env.events(&c, "written_here") == 0);
 }
 
+// The frame of a call (D17.18). A callee can write each local whose storage a FIR address names,
+// also through an address that an earlier call kept, and the storage that such a local reaches.
+// So a call forgets each fact of that storage, and the paths that the fact removed come back.
+// The obligations stay, and a local that no address names keeps its facts.
+fn frame() void {
+    println("address-taken frame");
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    string[45] names = {"stash_pp", "clear_pp", "stash_pair", "clear_pair", "keep_node",
+        "take_node", "keep_peer", "clear_peer", "nothing", "touch", "fill", "fill_node",
+        "stash_view", "clear_view", "clear_through", "stash_rr", "clear_rr", "addr_of",
+        "pointer_local", "pointer_field", "owner_root", "owner_cell", "owner_link", "owner_empty",
+        "view_cell", "struct_by_value", "returned_address", "unnamed_pointer", "through_pointer",
+        "kept_owner", "kept_leak", "clear_arg", "retained_view", "retained_cleared_view",
+        "retained_owner", "retained_view_write", "retained_join", "retained_residual",
+        "retained_remap", "retained_param", "retained_param_caller", "retained_param_mixed",
+        "retained_param_mixed_caller", "retained_param_choice", "retained_param_choice_caller"};
+    ownership_heap_env.run(&c, FRAME[..], names[..]);
+    // A callee with a complete proof clears a pointer local through a global, so the address
+    // of the local keeps no fact over the call: the leak on the null path stays.
+    assert(ownership_heap_env.proved(&c, "clear_pp"));
+    assert(!ownership_heap_env.proved(&c, "pointer_local"));
+    assert(loses(&c, "pointer_local", "extra"));
+    // The same for a field of an address-taken struct.
+    assert(ownership_heap_env.proved(&c, "clear_pair"));
+    assert(!ownership_heap_env.proved(&c, "pointer_field"));
+    assert(loses(&c, "pointer_field", "extra"));
+    // A callee releases the owner through the kept address: its allocation root is assumed.
+    assert(!ownership_heap_env.proved(&c, "owner_root"));
+    assert(loses(&c, "owner_root", "extra"));
+    // A callee with a complete proof clears a field of the cell that the owner holds.
+    assert(ownership_heap_env.proved(&c, "clear_peer"));
+    assert(!ownership_heap_env.proved(&c, "owner_cell"));
+    assert(loses(&c, "owner_cell", "extra"));
+    // A scalar that tested the owner before the call establishes no root after it.
+    assert(!ownership_heap_env.proved(&c, "owner_link"));
+    assert(loses(&c, "owner_link", "extra"));
+    // A callee fills an empty owner through the kept address: its null is assumed.
+    assert(!ownership_heap_env.proved(&c, "owner_empty"));
+    assert(loses(&c, "owner_empty", "extra"));
+    // A pointer local views the cell, and the callee clears a field of the cell through the kept
+    // address of the pointer.
+    assert(ownership_heap_env.proved(&c, "clear_view"));
+    assert(!ownership_heap_env.proved(&c, "view_cell"));
+    assert(loses(&c, "view_cell", "extra"));
+    // A by-value struct carries `&m->p` to a callee with a complete proof that clears the field:
+    // the address marks the cell, so each call forgets its facts.
+    assert(ownership_heap_env.proved(&c, "clear_through"));
+    assert(!ownership_heap_env.proved(&c, "struct_by_value"));
+    assert(loses(&c, "struct_by_value", "extra"));
+    // A callee returns the address of a cell field into a pointer local whose address an earlier
+    // call kept: the frame reaches the cell through the address that the local holds.
+    assert(ownership_heap_env.proved(&c, "clear_rr") && ownership_heap_env.proved(&c, "addr_of"));
+    assert(!ownership_heap_env.proved(&c, "returned_address"));
+    assert(loses(&c, "returned_address", "extra"));
+    // No address names q, so its established null removes the early return.
+    assert(ownership_heap_env.proved(&c, "unnamed_pointer"));
+    assert(ownership_heap_env.events(&c, "unnamed_pointer") == 0);
+    // `&p->b` names the storage that p designates, not the storage of p.
+    assert(ownership_heap_env.proved(&c, "through_pointer"));
+    assert(ownership_heap_env.events(&c, "through_pointer") == 0);
+    // The owner keeps its obligation over the call: a release proves and a leak stays.
+    assert(ownership_heap_env.proved(&c, "kept_owner"));
+    assert(!ownership_heap_env.proved(&c, "kept_leak"));
+    assert(loses(&c, "kept_leak", "m"));
+    // The first call can retain the cell that q views. The second call reaches that cell after
+    // the first frame clears q, so the possible clear of m->p keeps the leak path.
+    assert(ownership_heap_env.proved(&c, "clear_arg"));
+    assert(!ownership_heap_env.proved(&c, "retained_view"));
+    assert(loses(&c, "retained_view", "extra"));
+    // A local overwrite removes its retained target. The reached cell remains addressable.
+    assert(!ownership_heap_env.proved(&c, "retained_cleared_view"));
+    assert(loses(&c, "retained_cleared_view", "extra"));
+    // The first call can retain the path to an empty owning local. A later unknown call can fill
+    // that owner after the first frame clears the reference that led to it.
+    assert(!ownership_heap_env.proved(&c, "retained_owner"));
+    // A forgotten view still keeps the cell that it can designate.
+    assert(!ownership_heap_env.proved(&c, "retained_view_write"));
+    // A join keeps a target when one path has its address and one path forgot the address.
+    assert(!ownership_heap_env.proved(&c, "retained_join"));
+    // A residual target reaches each possible local and cell.
+    assert(!ownership_heap_env.proved(&c, "retained_residual"));
+    assert(loses(&c, "retained_residual", "extra"));
+    // Canonical atom numbering also updates the retained cell target.
+    assert(!ownership_heap_env.proved(&c, "retained_remap"));
+    // A forgotten pointer keeps its parameter source. A later extern read makes the caller
+    // prove that the designated allocation stays live.
+    assert(ownership_heap_env.proved(&c, "retained_param"));
+    assert((ownership_heap_env.summary(&c, "retained_param")->view_reads & 2) == 2);
+    assert(!ownership_heap_env.proved(&c, "retained_param_caller"));
+    // A join of a forgotten parameter and its live view keeps the same parameter source.
+    assert(ownership_heap_env.proved(&c, "retained_param_mixed"));
+    assert((ownership_heap_env.summary(&c, "retained_param_mixed")->view_reads & 2) == 2);
+    assert(!ownership_heap_env.proved(&c, "retained_param_mixed_caller"));
+    // Two forgotten inputs differ only by their parameter source. Their join reads both inputs.
+    assert(ownership_heap_env.proved(&c, "retained_param_choice"));
+    assert((ownership_heap_env.summary(&c, "retained_param_choice")->view_reads & 6) == 6);
+    assert(!ownership_heap_env.proved(&c, "retained_param_choice_caller"));
+}
+
 // A requirement makes the entry owner an assumed null, which removes no edge: the store over an
 // empty owner proves, and the nonnull edge of a later test keeps its leak.
 fn assumed_requirements() void {
@@ -1403,6 +1778,7 @@ fn main() i32 {
     assumed_requirements();
     scalars();
     requirements();
+    frame();
     println("heap provenance ok");
     return 0;
 }

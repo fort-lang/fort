@@ -573,8 +573,22 @@ fn unfold_fold() void {
     s.atoms[inner].status.value = ownership_facts.atom_status.released;
     assert(!ownership_heap.fold(ctx, &s, parent));
     s.atoms[inner].status.value = ownership_facts.atom_status.live;
+    ownership_heap.value mut child_view = ownership_heap.empty_value();
+    child_view.kind = ownership_heap.value_kind.view;
+    assert(ownership_heap.add_source(&child_view, inner));
+    set_value(&s, local(7), ownership_heap.forgotten_value(child_view));
+    u64 before_fold = obligations(&s);
     assert(ownership_heap.fold(ctx, &s, parent));
     assert(s.atoms[parent].fresh && !s.atoms[inner].used);
+    ownership_heap.value mut retained = value_at(&s, local(7));
+    assert(retained.retained_target && retained.retained.id == parent);
+    // Canonical form keeps one obligation for this two-node cleanup. It does not restore the
+    // absorbed child through the forgotten view.
+    assert(ownership_heap.canonical(ctx, &s));
+    retained = value_at(&s, local(7));
+    ownership_heap.value folded = value_at(&s, local(6));
+    assert(retained.retained_target && retained.retained.id == folded.atom);
+    assert(obligations(&s) == before_fold - 1);
     // An opaque payload never folds.
     u32 boxed = fresh_cell(ctx, &s, 6);
     ownership_heap.atom mut blob = ownership_heap.new_atom(ownership_heap.atom_kind.opaque, null, 0,
@@ -643,6 +657,26 @@ fn canonical_form() void {
     ownership_heap.value seen = value_at(&again, local(7));
     assert(seen.count == 1 && again.atoms[seen.sources[0]].status.value ==
         ownership_facts.atom_status.released);
+    // A retained cell target keeps its record and follows the canonical atom map.
+    ownership_heap.atom mut skipped = dead;
+    u32 skipped_at = ownership_heap.push_atom(&again, skipped);
+    u32 retained_at = ownership_heap.push_atom(&again, dead);
+    ownership_heap.value mut retained = ownership_heap.forgotten_value(
+        ownership_heap.address_value(
+            ownership_heap.key_of(ownership_heap.base_kind.cell, retained_at),
+            ownership_facts.nullness{ownership_facts.root_kind.nonnull,
+                ownership_facts.provenance.established}));
+    set_value(&again, local(7), retained);
+    u64 atoms_before = again.atoms_len;
+    assert(ownership_heap.canonical(ctx, &again));
+    retained = value_at(&again, local(7));
+    assert(retained.kind == ownership_heap.value_kind.unknown && retained.retained_target);
+    assert(retained.retained.base == ownership_heap.base_kind.cell);
+    assert(cast(retained.retained.id, u64) < again.atoms_len &&
+        retained.retained.id != retained_at);
+    assert(again.atoms[retained.retained.id].status.value ==
+        ownership_facts.atom_status.released);
+    assert(again.atoms_len == atoms_before - 2 && skipped_at != retained_at);
 }
 
 fn joins() void {
@@ -755,6 +789,37 @@ fn joins() void {
     defer ownership_heap.free_state(&maybe);
     assert(ownership_heap.join(ctx, &a, &ended, false, &maybe));
     assert(maybe.ended[5] == 2);
+    // A mixed join maps the retained cell target into the joined atom numbering.
+    ownership_heap.state mut left = ownership_heap.clone(&a);
+    defer ownership_heap.free_state(&left);
+    ownership_heap.state mut right = ownership_heap.clone(&a);
+    defer ownership_heap.free_state(&right);
+    u32 left_target = fresh_cell(ctx, &left, 6);
+    u32 right_extra = fresh_cell(ctx, &right, 5);
+    u32 right_target = fresh_cell(ctx, &right, 6);
+    ownership_heap.value mut left_view = ownership_heap.empty_value();
+    left_view.kind = ownership_heap.value_kind.view;
+    assert(ownership_heap.add_source(&left_view, left_target));
+    set_value(&left, local(7), left_view);
+    ownership_heap.value right_unknown = ownership_heap.forgotten_value(
+        ownership_heap.address_value(
+            ownership_heap.key_of(ownership_heap.base_kind.cell, right_target),
+            ownership_facts.nullness{ownership_facts.root_kind.nonnull,
+                ownership_facts.provenance.established}));
+    set_value(&right, local(7), right_unknown);
+    assert(ownership_heap.canonical(ctx, &left));
+    assert(ownership_heap.canonical(ctx, &right));
+    ownership_heap.state mut mixed = ownership_heap.state{};
+    defer ownership_heap.free_state(&mixed);
+    assert(ownership_heap.join(ctx, &left, &right, false, &mixed));
+    ownership_heap.value mixed_value = value_at(&mixed, local(7));
+    u32 mixed_target = value_at(&mixed, local(6)).atom;
+    u32 mixed_extra = value_at(&mixed, local(5)).atom;
+    assert(mixed_value.kind == ownership_heap.value_kind.unknown);
+    assert(mixed_value.retained_target && !mixed_value.lost_target);
+    assert(mixed_value.retained.base == ownership_heap.base_kind.cell);
+    assert(mixed_value.retained.id == mixed_target && mixed_target != mixed_extra);
+    assert(right_extra != right_target);
 }
 
 fn widening() void {

@@ -162,7 +162,7 @@
     {
       "decision": "D17.18-requirement",
       "file": "src/fort/ownership_heap.ft",
-      "old": "                } else {\n                    check_empty(c, s, w, each);\n                }\n",
+      "old": "                } else {\n                    check_empty(c, s, entry, w, each);\n                }\n",
       "new": "                }\n",
       "what": "a caller supplies no required empty owner"
     },
@@ -372,8 +372,8 @@
     {
       "decision": "D17.14-lost-join",
       "file": "src/fort/ownership_heap.ft",
-      "old": "        return vx.exact && vy.exact ? effect_value() : unknown_value();",
-      "new": "        return input_value();",
+      "old": "        } else if (vx.exact && vy.exact) {\n            joined = effect_value();\n        }\n        joined.retained_target = false || false;",
+      "new": "        } else if (vx.exact && vy.exact) {\n            joined = effect_value();\n        } else {\n            joined = input_value();\n        }\n        joined.retained_target = false || false;",
       "what": "a join of an input reference and a lost one is an input"
     },
     {
@@ -671,13 +671,6 @@
       "what": "a fold of a cell that a null edge made null gives a nonnull region"
     },
     {
-      "decision": "D17.18-p1-call-scalars",
-      "file": "src/fort/ownership_heap.ft",
-      "old": "    forget_scalars(c, s);\n",
-      "new": "",
-      "what": "a call keeps the known value of each scalar local that a callee can write"
-    },
-    {
       "decision": "D17.18-p1-named-locals",
       "file": "src/fort/ownership_heap.ft",
       "old": "                named[cast(stmt->value.place.local, u64)] = true;\n",
@@ -879,6 +872,202 @@
       "old": "            address.param = argument_source(v.param, args);\n",
       "new": "",
       "what": "a returned caller-storage address loses its parameter source"
+    },
+    {
+      "decision": "D17.18-frame-call",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    forget_frame(c, s);\n",
+      "new": "",
+      "what": "a call keeps each fact that a callee can write through an address of a local"
+    },
+    {
+      "decision": "D17.18-frame-entry-requirements",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    check_requirements_at(c, s, entry, sum, bound[..]);\n",
+      "new": "    check_requirements(c, s, sum, bound[..]);\n",
+      "what": "a caller requirement reads facts after the call frame removes them"
+    },
+    {
+      "decision": "D17.18-frame-scalar",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "            } else if (item.v.kind == value_kind.scalar) {\n                s->slots[i].v = scalar_value();\n            } else if (is_reference(item.ty) || item.array) {\n                s->slots[i].v = forgotten_value(item.v);\n",
+      "new": "            } else if (is_reference(item.ty) || item.array) {\n                s->slots[i].v = forgotten_value(item.v);\n",
+      "what": "a call keeps the known value of a scalar local that a callee can write"
+    },
+    {
+      "decision": "D17.18-frame-reference",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "            } else if (is_reference(item.ty) || item.array) {\n                s->slots[i].v = forgotten_value(item.v);\n            }\n        } else if (item.v.kind == value_kind.scalar && item.v.test != NONE &&\n",
+      "new": "            } else if (is_reference(item.ty) || item.array) {\n            }\n        } else if (item.v.kind == value_kind.scalar && item.v.test != NONE &&\n",
+      "what": "a pointer that a callee can write keeps its value over the call"
+    },
+    {
+      "decision": "D17.18-frame-empty-owner",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "                if (item.v.kind == value_kind.empty) { s->slots[i].v = empty_value(); }\n",
+      "new": "",
+      "what": "an empty owner that a callee can fill keeps its established null"
+    },
+    {
+      "decision": "D17.18-frame-root",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "            s->atoms[a].root = ownership_facts.assume(s->atoms[a].root);\n",
+      "new": "",
+      "what": "an atom that a callee can release keeps its established root"
+    },
+    {
+      "decision": "D17.18-frame-owned",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        atoms[cast(v.atom, u64)] = true;\n        grew = true;\n    } else if (v.kind == value_kind.view) {\n",
+      "new": "    } else if (v.kind == value_kind.view) {\n",
+      "what": "the frame does not reach the atom of an owner"
+    },
+    {
+      "decision": "D17.18-frame-views",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    } else if (v.kind == value_kind.view) {\n        u32 mut j = 0;\n        while (j < v.count) {\n            if (!atoms[cast(v.sources[j], u64)]) {\n                atoms[cast(v.sources[j], u64)] = true;\n                grew = true;\n            }\n            j += 1;\n        }\n    } else if (v.kind == value_kind.address ||\n        (v.kind == value_kind.unknown && v.retained_target)) {\n",
+      "new": "    } else if (v.kind == value_kind.address ||\n        (v.kind == value_kind.unknown && v.retained_target)) {\n",
+      "what": "the frame does not reach the cell that a pointer views"
+    },
+    {
+      "decision": "D17.18-frame-cells",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    if (k.base == base_kind.cell) { return id < atoms.len && atoms[id]; }\n",
+      "new": "",
+      "what": "the frame keeps the slots of a cell that a named local reaches"
+    },
+    {
+      "decision": "D17.18-frame-test-link",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "            s->slots[i].v.test = NONE;\n",
+      "new": "",
+      "what": "a scalar that tested a root that a callee can change still refines it"
+    },
+    {
+      "decision": "D17.18-frame-own-storage",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        if (pj.kind == fir.proj_kind.pj_deref) { return false; }\n",
+      "new": "",
+      "what": "an address through a dereference marks the pointer local, which then loses its facts"
+    },
+    {
+      "decision": "D17.18-frame-addressed",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        atoms[n] = s->atoms[n].addressed;\n",
+      "new": "        atoms[n] = false;\n",
+      "what": "the frame does not reach an atom whose storage an address named"
+    },
+    {
+      "decision": "D17.18-frame-mark",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        mark_addressed(s, loc);\n",
+      "new": "",
+      "what": "an address of a cell field leaves the cell unmarked"
+    },
+    {
+      "decision": "D17.18-frame-cell-address",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        } else if (target.base == base_kind.cell && id < atoms.len && !atoms[id]) {\n            atoms[id] = true;\n            grew = true;\n        }\n",
+      "new": "        }\n",
+      "what": "the frame does not reach the cell of an address that a reached slot holds"
+    },
+    {
+      "decision": "D17.18-frame-retained-storage",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "            s->atoms[a].addressed = true;\n            s->atoms[a].root = ownership_facts.assume(s->atoms[a].root);\n",
+      "new": "            s->atoms[a].root = ownership_facts.assume(s->atoms[a].root);\n",
+      "what": "a later call does not reach storage that an earlier frame reached"
+    },
+    {
+      "decision": "D17.18-frame-stop",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    forget_frame(c, s);\n    if (c->stopped) { return; }\n",
+      "new": "    forget_frame(c, s);\n",
+      "what": "a call applies callee effects after its frame stops on a work refusal"
+    },
+    {
+      "decision": "D17.18-frame-retained-local-effect",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "                s->slots[i].v = forgotten_value(item.v);\n",
+      "new": "                s->slots[i].v = unknown_value();\n",
+      "what": "a later unknown call does not change local storage whose address an earlier call retained"
+    },
+    {
+      "decision": "D17.18-frame-retained-view",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    } else if (old.kind == value_kind.view) {\n        if (old.count > 0) {\n",
+      "new": "    } else if (false && old.kind == value_kind.view) {\n        if (old.count > 0) {\n",
+      "what": "a forgotten view keeps no possible storage target"
+    },
+    {
+      "decision": "D17.18-frame-retained-mixed-join",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    }\n    return unknown_join_value(p, vx, vy); // join: copy\n}\n\n// Folds each foldable cell",
+      "new": "    }\n    return unknown_value();\n}\n\n// Folds each foldable cell",
+      "what": "a mixed-kind join keeps no possible storage target"
+    },
+    {
+      "decision": "D17.18-frame-retained-canonical-map",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        } else {\n            out.retained.id = map[id];\n        }\n",
+      "new": "        }\n",
+      "what": "canonical atom numbering does not update a retained cell target"
+    },
+    {
+      "decision": "D17.18-frame-retained-canonical-keep",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "                if (v.kind == value_kind.unknown && v.retained_target &&\n                    v.retained.base == base_kind.cell && cast(v.retained.id, u64) < keep.len &&\n                    !keep[cast(v.retained.id, u64)]) {\n                    keep[cast(v.retained.id, u64)] = true;\n                    changed = true;\n                }\n",
+      "new": "",
+      "what": "canonical form drops a cell that only a retained target reaches"
+    },
+    {
+      "decision": "D17.18-frame-retained-join-map",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        kept.id = map[id];\n    }\n    if (!out->retained_target) {\n",
+      "new": "    }\n    if (!out->retained_target) {\n",
+      "what": "a join keeps a predecessor atom number in a retained cell target"
+    },
+    {
+      "decision": "D17.18-frame-retained-residual",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    if (v.kind == value_kind.unknown && v.lost_target) {\n",
+      "new": "    if (false && v.kind == value_kind.unknown && v.lost_target) {\n",
+      "what": "a frame reaches no omitted target of an unknown reference"
+    },
+    {
+      "decision": "D17.18-frame-retained-absorb",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        } else if (v->kind == value_kind.unknown && v->retained_target &&\n            v->retained.base == base_kind.cell && v->retained.id == from) {\n",
+      "new": "        } else if (false && v->kind == value_kind.unknown && v->retained_target &&\n            v->retained.base == base_kind.cell && v->retained.id == from) {\n",
+      "what": "an absorbed child stays as the target of a forgotten view"
+    },
+    {
+      "decision": "D17.18-frame-parameter-source",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    value mut v = unknown_value();\n    v.param = old.param;\n    if (old.kind == value_kind.address) {\n",
+      "new": "    value mut v = unknown_value();\n    if (old.kind == value_kind.address) {\n",
+      "what": "a forgotten pointer loses the parameter source that a later call reads"
+    },
+    {
+      "decision": "D17.18-frame-parameter-equality",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "            a.param == b.param && (!a.external || same_key(a.target, b.target)) &&\n",
+      "new": "            (!a.external || same_key(a.target, b.target)) &&\n",
+      "what": "two forgotten inputs with different parameter sources compare equal"
+    },
+    {
+      "decision": "D17.18-frame-parameter-mixed-join",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    value mut out = unknown_value();\n    out.param = joined_parameter(vx.param, vy.param);\n    add_retained_value(vx, p->px[..], &out);\n",
+      "new": "    value mut out = unknown_value();\n    add_retained_value(vx, p->px[..], &out);\n",
+      "what": "a mixed-kind join loses its parameter source"
+    },
+    {
+      "decision": "D17.18-frame-parameter-unknown-join",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        joined.lost_target = false || false;\n        joined.param = joined_parameter(vx.param, vy.param);\n        add_retained_value(vx, p->px[..], &joined); // join: copy\n",
+      "new": "        joined.lost_target = false || false;\n        add_retained_value(vx, p->px[..], &joined); // join: copy\n",
+      "what": "a join of forgotten references loses its parameter source"
     }
   ]
 }
