@@ -925,8 +925,15 @@ came here.
   other member, because their summaries rest on each other.
   A lost owner of live status becomes leaked: it stays allocated, so its views stay valid. A
   lost owner of unknown status becomes escaped, so a read through its views stays unproved.
-  `tools/mutations/ownership_heap.json` holds 86 rows of the core rules: 15 of them hold rule P1
-  of D17.18, and its stage `provenance` runs `ownership_heap_provenance_test.ft`.
+  `tools/mutations/ownership_heap.json` holds 89 rows of the core rules: 15 of them hold rule P1
+  of D17.18, 3 hold `not` of an integer, and its stage `provenance` runs
+  `ownership_heap_provenance_test.ft`.
+  A known integer keeps a number only through a copy (`rv_use`), `add`, `sub`, `cast` and `not`.
+  Each one computes the exact result in its type, and a result that does not fit has no number.
+  `add` and `sub` give a number only when each operand lies strictly between -2^40 and 2^40
+  (`rvalue_value` in `src/fort/ownership_heap.ft`). `not` inverts the bits in the width of the
+  type, so `~5` of an `i32` is -6 and `~0` of a `u8` is 255. Each other arithmetic, bitwise or
+  shift operator gives no number. An integer comparison gives a known truth only from two numbers.
   Precision limits (measured in the heap tests): a mixed callee fate (some members released,
   some kept) makes each member view of the caller atom unproved (`rest_view`, H10); a view of a
   heap atom in a borrowed field of a returned region is incomplete proof, so

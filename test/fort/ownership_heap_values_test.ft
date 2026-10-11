@@ -2,6 +2,7 @@
 //! flags: -I ../../src/fort -I support
 //! stdout:
 //| null tests and known values
+//| bitwise not
 //| casts and addresses
 //| allocations of each kind
 //| aggregate values
@@ -71,6 +72,83 @@ fn tests() void {
     // A second test of one refined root has one feasible edge.
     assert(ownership_heap_env.proved(&c, "both_ways"));
     assert(ownership_heap_env.proved(&c, "same_twice"));
+}
+
+// `~x` of a known integer is its bit inverse in the width of its type (`spec/fir.md` 6). Each
+// `exact` body tests the value that a run gives, so its known value removes the leak edge. Each
+// `old` body tests the value of x: the run never takes that edge, and `extra` leaks.
+fn inversions() void {
+    println("bitwise not");
+    string[28] text = {
+        "fn i32_exact() void { i32 mut* own extra = new(i32); i32 x = 5; i32 y = ~x;",
+        "    if (y == -6) { del(extra); } }",
+        "fn i32_old() void { i32 mut* own extra = new(i32); i32 x = 5; i32 y = ~x;",
+        "    if (y == 5) { del(extra); return; } }",
+        "fn i8_exact() void { i32 mut* own extra = new(i32); i8 x = -128; i8 y = ~x;",
+        "    if (y == 127) { del(extra); } }",
+        "fn u8_exact() void { i32 mut* own extra = new(i32); u8 x = 0; u8 y = ~x;",
+        "    if (y == 255) { del(extra); } }",
+        "fn u8_middle() void { i32 mut* own extra = new(i32); u8 x = 200; u8 y = ~x;",
+        "    if (y == 55) { del(extra); } }",
+        "fn u8_old() void { i32 mut* own extra = new(i32); u8 x = 0; u8 y = ~x;",
+        "    if (y < 1) { del(extra); return; } }",
+        "fn u16_exact() void { i32 mut* own extra = new(i32); u16 x = 255; u16 y = ~x;",
+        "    if (y == 65280) { del(extra); } }",
+        "fn u32_exact() void { i32 mut* own extra = new(i32); u32 x = 7; u32 y = ~x;",
+        "    if (y == 4294967288) { del(extra); } }",
+        "fn u64_high() void { i32 mut* own extra = new(i32); u64 x = 5; u64 y = ~x;",
+        "    if (y == 18446744073709551610) { del(extra); } }",
+        "fn u64_old() void { i32 mut* own extra = new(i32); u64 x = 5; u64 y = ~x;",
+        "    if (y == 5) { del(extra); return; } }",
+        "fn i64_low() void { i32 mut* own extra = new(i32); i64 x = -9223372036854775807 - 1;",
+        "    i64 y = ~x; if (y == 9223372036854775807) { del(extra); } }",
+        "fn unknown_not(i32 k) void { i32 mut* own extra = new(i32); i32 y = ~k;",
+        "    if (y == -1) { del(extra); return; } }",
+        "fn bool_not() void { i32 mut* own extra = new(i32); bool b = false; bool y = !b;",
+        "    if (y) { del(extra); } }",
+        "fn unused() void { }",
+        "fn again() void { }",
+    };
+    string[13] bodies = {"i32_exact", "i32_old", "i8_exact", "u8_exact", "u8_middle", "u8_old",
+        "u16_exact", "u32_exact", "u64_high", "u64_old", "i64_low", "unknown_not", "bool_not"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], bodies[..]);
+    // This program computes each inverse at run time; the texts above test the same values.
+    i32 five = 5;
+    i8 low8 = -128;
+    u8 zero8 = 0;
+    u8 mid8 = 200;
+    u16 low16 = 255;
+    u32 seven32 = 7;
+    u64 five64 = 5;
+    i64 low64 = -9223372036854775807 - 1;
+    assert(~five == -6 && ~low8 == 127 && ~zero8 == 255 && ~mid8 == 55);
+    // `~7` of a u32 is above the i32 range and inside the i64 range.
+    assert(~low16 == 65280 && ~seven32 == 4294967288);
+    assert(~five64 == 18446744073709551610 && ~low64 == 9223372036854775807);
+    assert(ownership_heap_env.proved(&c, "i32_exact"));
+    assert(ownership_heap_env.proved(&c, "i8_exact"));
+    assert(ownership_heap_env.proved(&c, "u8_exact"));
+    assert(ownership_heap_env.proved(&c, "u8_middle"));
+    assert(ownership_heap_env.proved(&c, "u16_exact"));
+    assert(ownership_heap_env.proved(&c, "u32_exact"));
+    assert(ownership_heap_env.proved(&c, "i64_low"));
+    // Each of these bodies leaks `extra` on a run. `~x` does not keep the number of x, so the
+    // `old` bodies keep the edge that tests it. A u64 inverse above the i64 maximum and the
+    // inverse of a parameter have no known number, so their bodies keep both edges.
+    string[5] leaks = {"i32_old", "u8_old", "u64_high", "u64_old", "unknown_not"};
+    u64 mut i = 0;
+    while (i < leaks.len) {
+        assert(ownership_heap_env.unproved(&c, leaks[i],
+            ownership_api.incomplete_reason.missing_path));
+        assert(ownership_heap_env.violations(&c, leaks[i]) == 1);
+        assert(ownership_heap_env.first(&c, leaks[i]).kind ==
+            ownership_api.event_kind.lost_ownership);
+        i += 1;
+    }
+    // `!` of a known bool has the inverse truth.
+    assert(ownership_heap_env.proved(&c, "bool_not"));
 }
 
 // A cast keeps the value of a reference; integer bits name no source; an address designates
@@ -201,6 +279,7 @@ fn aggregates() void {
 
 fn main() i32 {
     tests();
+    inversions();
     casts();
     allocations();
     aggregates();

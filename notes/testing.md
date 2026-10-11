@@ -734,8 +734,8 @@ bullet at a time and without a rewrite.
   `lower_env` writes its sandboxes into the working directory.
   `test/ownership/heap_rows.ft` prints one row for each function of a file: the verdict, the
   incomplete reason, `returns`, the interface length, the post slots, the post atoms and the events.
-  The test compares 929 rows of 237 inputs with `test/ownership/heap_rows.txt`. The inputs are 107
-  of the 109 manifest programs, the 24 programs of `test/ownership/probes`, and 106 texts that
+  The test compares 944 rows of 238 inputs with `test/ownership/heap_rows.txt`. The inputs are 107
+  of the 109 manifest programs, the 24 programs of `test/ownership/probes`, and 107 texts that
   `heap_texts` takes from the 12 `test/fort/ownership_heap*_test.ft` programs. `HEAP_ROWS_SKIPPED`
   names the other 2 manifest programs with the reason: each imports `std.str`, and the sandbox
   `std` holds only a runtime. A skipped program that `heap_rows` reads fails the test. Run the
