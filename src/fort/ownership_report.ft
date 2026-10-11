@@ -64,6 +64,15 @@ struct reason {
     ownership_api.exhaustion limit;
 }
 
+// One calls_heap budget refusal, located and ready for canonical ordering. `solver` supplies the
+// diagnostic label. `ledger` supplies its V meter.
+struct call_refusal {
+    u64 ledger;
+    ownership_source_calls.solver_kind solver;
+    ownership_api.proof_status refusal;
+    ownership_source_calls.unproved order;
+}
+
 fn work_status(ownership_source.status value) string {
     switch (value) {
     case ownership_source.status.unexecuted: return "unexecuted";
@@ -526,8 +535,8 @@ fn violation_message(ownership_source_local.context* run, ownership_source_local
 }
 
 // The flow run whose leaves name the records of list `from`: 0 local, 1 stored borrows. A raw
-// record (lists 2 and 3) names a whole local and no leaf, and a process-exit record (lists 4
-// and 5) a whole local or a global, so neither has a run.
+// record (lists 2 and 3) names a whole local and no leaf, and a process-exit record (lists 5
+// and 6) a whole local or a global, so neither has a run. List 4 renders in `calls_record`.
 fn record_run(ownership_source.body* row, u64 from, ownership_source_local.violation* v)
     ownership_source_local.context* {
     if (from == 0) { return &row->local; }
@@ -539,12 +548,12 @@ fn record_run(ownership_source.body* row, u64 from, ownership_source_local.viola
 }
 
 // Charges one rendered record to the ledger of its list: 0 local, 1 stored borrows, 2 and 3
-// raw, 4 and 5 process exit.
+// raw, 5 and 6 process exit. List 4 charges in `calls_record`.
 fn charge_record(ownership_source.body mut* row, u64 from, ownership_source_local.violation* v)
     bool {
     if (from == 0) { return ownership_source_local.charge_rendered(&row->local, v); }
     if (from == 1) { return ownership_source_local.charge_rendered(&row->stored, v); }
-    if (from >= 4) { return ownership_source_exit.charge_rendered(&row->exit, v); }
+    if (from >= 5) { return ownership_source_exit.charge_rendered(&row->exit, v); }
     return ownership_source_raw.charge_rendered(&row->raw, v);
 }
 
@@ -552,19 +561,20 @@ fn charge_record(ownership_source.body mut* row, u64 from, ownership_source_loca
 fn record_bound(ownership_source.body* row, u64 from) u64 {
     if (from == 0) { return row->local.meter.bounds.v; }
     if (from == 1) { return row->stored.meter.bounds.v; }
-    if (from >= 4) { return row->exit.meter.bounds.v; }
+    if (from >= 5) { return row->exit.meter.bounds.v; }
     return row->raw.meter.bounds.v;
 }
 
 // The next record of a body in toolchain 4.2 order: local violations, stored-borrow
-// violations, raw violations, raw failures without a witness, process-exit violations and
-// process-exit failures without a witness, each list already in that order. `from` names its
-// list. On equal keys the earlier list comes first.
-fn next_record(ownership_source.body* row, u64 mut@ cursor, u64 mut* from)
-    ownership_source_local.violation* {
+// violations, raw violations, raw failures without a witness, the calls_heap record `calls`
+// (null when the body has none), process-exit violations and process-exit failures without a
+// witness, each list already in that order. `from` names its list. On equal keys the earlier
+// list comes first.
+fn next_record(ownership_source.body* row, u64 mut@ cursor, u64 mut* from,
+    ownership_source_local.violation* calls) ownership_source_local.violation* {
     ownership_source_local.violation* mut best = null;
     u64 mut list = 0;
-    while (list < 6) {
+    while (list < 7) {
         u64 at = cursor[list];
         ownership_source_local.violation* mut item = null;
         if (list == 0 && row->local.solved && at < row->local.violations_len) {
@@ -575,9 +585,11 @@ fn next_record(ownership_source.body* row, u64 mut@ cursor, u64 mut* from)
             item = &row->raw.violations[at];
         } else if (list == 3 && row->raw.solved && at < row->raw.unproved_len) {
             item = &row->raw.unproved[at];
-        } else if (list == 4 && row->exit.solved && at < row->exit.violations_len) {
+        } else if (list == 4 && calls != null && at < 1) {
+            item = calls;
+        } else if (list == 5 && row->exit.solved && at < row->exit.violations_len) {
             item = &row->exit.violations[at];
-        } else if (list == 5 && row->exit.solved && at < row->exit.unproved_len) {
+        } else if (list == 6 && row->exit.solved && at < row->exit.unproved_len) {
             item = &row->exit.unproved[at];
         }
         if (item != null && (best == null || ownership_source_local.before(item, best))) {
@@ -589,19 +601,36 @@ fn next_record(ownership_source.body* row, u64 mut@ cursor, u64 mut* from)
     return best;
 }
 
-// Renders validated violations and raw failures in canonical body order and, inside a body,
-// in toolchain 4.2 order across the local, stored-borrow and raw analyses.
-// A V refusal keeps one terminal error and stops the later records.
-fn violations(ownership_source.context mut* c, diag.sink mut* diagnostics, string entry) bool {
+// Renders body records and call refusals in one canonical event sequence. A refused call-record
+// charge or a call V refusal stops records that use that call ledger. Other ledgers can continue.
+fn violations(ownership_source.context mut* c, diag.sink mut* diagnostics, string entry,
+    reason shown, call_refusal@ refusals, bool mut@ stopped) bool {
+    u64 mut refusal = 0;
     u64 mut i = 0;
     while (i < c->bodies.len) {
         ownership_source.body mut* row = &c->bodies[i];
-        u64[6] mut cursor = {0, 0, 0, 0, 0, 0};
+        u64[7] mut cursor = {0, 0, 0, 0, 0, 0, 0};
+        bool shows = row->calls != null && ownership_source_calls.shows_record(&c->calls, i);
+        ownership_source_local.violation calls = shows ? calls_order(row->calls) :
+            ownership_source_local.violation{};
         while (true) {
             u64 mut from = 0;
-            ownership_source_local.violation* v = next_record(row, cursor[..], &from);
+            ownership_source_local.violation* v = next_record(row, cursor[..], &from,
+                shows ? &calls : null);
+            while (refusal < refusals.len &&
+                call_refusal_before_body(&refusals[refusal], row, v)) {
+                render_call_refusal(c, diagnostics, entry, refusals, refusal, stopped, shown);
+                refusal += 1;
+            }
             if (v == null) { break; }
             cursor[from] += 1;
+            if (from == 4) {
+                u64 ledger = row->calls->summary_ledger;
+                if (!stopped[ledger] && !calls_record(c, diagnostics, entry, i, shown)) {
+                    stopped[ledger] = true;
+                }
+                continue;
+            }
             if (!charge_record(row, from, v)) {
                 strbuf.str_buf mut limit = strbuf.create();
                 defer strbuf.free(&limit);
@@ -612,12 +641,16 @@ fn violations(ownership_source.context mut* c, diag.sink mut* diagnostics, strin
             strbuf.str_buf mut message = strbuf.create();
             defer strbuf.free(&message);
             violation_message(record_run(row, from, v), v,
-                from >= 4 ? UNPROVED_EMPTY : UNPROVED_ACCESS, &message);
+                from >= 5 ? UNPROVED_EMPTY : UNPROVED_ACCESS, &message);
             diag.loc at = location(c, v->source, entry);
             diag.error(diagnostics, at, strbuf.view(&message));
             diag.note(diagnostics, at, v->text);
         }
         i += 1;
+    }
+    while (refusal < refusals.len) {
+        render_call_refusal(c, diagnostics, entry, refusals, refusal, stopped, shown);
+        refusal += 1;
     }
     return boundary_records(c, diagnostics, entry);
 }
@@ -653,19 +686,270 @@ fn boundary_records(ownership_source.context mut* c, diag.sink mut* diagnostics,
     return true;
 }
 
+// The message of the record of a declared body without calls_heap proof (toolchain 4.2).
+string CALLS_UNPROVED = "cannot prove the call and heap obligations here";
+
+// The terminal of the calls_heap proof of a body, with the declaration of the body when the
+// terminal has no source.
+fn calls_source(ownership_source_calls.row* r) ownership_api.source_position {
+    ownership_api.source_position at = r->proof.terminal.source;
+    return at.filename_present ? at : r->source;
+}
+
+// The canonical order of the calls_heap record of a body: an incomplete-proof event at the
+// terminal of its proof.
+fn calls_order(ownership_source_calls.row* r) ownership_source_local.violation {
+    ownership_api.terminal_failure t = r->proof.terminal;
+    return ownership_source_local.violation{.operation = t.operation, .source = calls_source(r),
+        .kind = ownership_api.event_kind.incomplete_proof, .relation = t.relation,
+        .leaf = ownership_source_local.WHOLE};
+}
+
+// Whether `calls_budgets` renders refusal `p` for ledger `index`: the first refusal of the
+// ledger, each member's first E refusal, its first W refusal or its first V refusal.
+fn ledger_shows(ownership_source_calls.context* calls, u64 index, ownership_api.proof_status p)
+    bool {
+    if (index == ownership_source_calls.NONE) { return false; }
+    ownership_source_calls.ledger* l = &calls->ledgers[index];
+    ownership_api.terminal_failure t = p.terminal;
+    if ((ownership_source_calls.limited(l->first_refusal) &&
+        same_refusal(l->first_refusal.terminal, t)) || same_refusal(l->work_refusal.terminal, t) ||
+        same_refusal(l->report_refusal.terminal, t)) { return true; }
+    u64 mut m = calls->members_first[l->component];
+    while (m < calls->members_first[l->component + 1]) {
+        ownership_source_calls.row* r = &calls->rows[calls->members[m]];
+        ownership_api.proof_status e = l->solver == ownership_source_calls.solver_kind.summary ?
+            r->summary_e_refusal : r->heap_e_refusal;
+        if (same_refusal(e.terminal, t)) { return true; }
+        m += 1;
+    }
+    return false;
+}
+
+// Renders the one record of declared body `body` without calls_heap proof. A proof that a
+// budget error stopped renders as that budget error. It renders nothing when a ledger of the
+// body or the shown reason already renders that refusal, because one obligation gets one
+// record (toolchain 4.2). Any other proof renders "cannot prove" at its terminal and a note
+// with its reason. The summary ledger of the body pays one V unit for each line. A refused
+// charge renders one terminal error and stops the later records.
+fn calls_record(ownership_source.context mut* c, diag.sink mut* diagnostics, string entry,
+    u64 body, reason shown) bool {
+    ownership_source_calls.context mut* calls = &c->calls;
+    ownership_source_calls.row* r = &calls->rows[body];
+    u64 summary = ownership_source_calls.ledger_of(calls, body,
+        ownership_source_calls.solver_kind.summary);
+    u64 heap = ownership_source_calls.ledger_of(calls, body,
+        ownership_source_calls.solver_kind.heap);
+    reason mut why = proof_reason("calls_heap", r->proof);
+    why.source = calls_source(r);
+    bool budget = ownership_source_calls.limited(r->proof);
+    if (budget && (ledger_shows(calls, summary, r->proof) || ledger_shows(calls, heap, r->proof) ||
+        same_reason(why, shown))) {
+        return true;
+    }
+    diag.loc at = location(c, why.source, entry);
+    strbuf.str_buf mut message = strbuf.create();
+    defer strbuf.free(&message);
+    if (!ownership_source_calls.charge_report(calls, summary, r->proof.terminal.operation,
+        why.source, budget ? 1 : 2)) {
+        report_limit_message(calls->ledgers[summary].meter.bounds.v, &message);
+        diag.error(diagnostics, at, strbuf.view(&message));
+        return false;
+    }
+    if (budget) {
+        incomplete_message(why, &message);
+        diag.error(diagnostics, at, strbuf.view(&message));
+        return true;
+    }
+    diag.error(diagnostics, at, CALLS_UNPROVED);
+    strbuf.append(&message, "calls_heap: ");
+    strbuf.append(&message, why.code);
+    diag.note(diagnostics, at, strbuf.view(&message));
+    return true;
+}
+
+// Whether refusal `p` is a call budget error.
+fn is_call_refusal(ownership_api.proof_status p) bool {
+    return ownership_source_calls.limited(p);
+}
+
+// The number of call budget errors, before duplicate selection against the shown reason.
+fn call_refusal_count(ownership_source_calls.context* calls) u64 {
+    u64 mut count = 0;
+    u64 mut i = 0;
+    while (i < calls->ledgers_len) {
+        ownership_source_calls.ledger l = calls->ledgers[i];
+        if (is_call_refusal(l.first_refusal)) { count += 1; }
+        u64 mut m = calls->members_first[l.component];
+        while (m < calls->members_first[l.component + 1]) {
+            ownership_source_calls.row* r = &calls->rows[calls->members[m]];
+            ownership_api.proof_status e =
+                l.solver == ownership_source_calls.solver_kind.summary ?
+                r->summary_e_refusal : r->heap_e_refusal;
+            if (is_call_refusal(e)) { count += 1; }
+            m += 1;
+        }
+        if (is_call_refusal(l.work_refusal)) { count += 1; }
+        if (is_call_refusal(l.report_refusal)) { count += 1; }
+        i += 1;
+    }
+    return count;
+}
+
+// Appends one kept refusal after it gets the source of its ledger owner when it has no source.
+fn add_call_refusal(ownership_source_calls.context* calls, call_refusal mut@ items, u64 mut* len,
+    u64 ledger, ownership_api.proof_status refusal) void {
+    if (!is_call_refusal(refusal)) { return; }
+    ownership_api.proof_status at = ownership_source_calls.ledger_refusal(calls, ledger, refusal);
+    ownership_api.terminal_failure t = at.terminal;
+    ownership_source_calls.unproved order = ownership_source_calls.unproved{.present = true,
+        .operation = t.operation, .source = t.source, .reason = t.reason, .relation = t.relation,
+        .kind = ownership_api.event_kind.incomplete_proof};
+    items[*len] = call_refusal{ledger, calls->ledgers[ledger].solver, at, order};
+    *len += 1;
+}
+
+// Collects the budget errors of each call component computation. It keeps the meter ledger order
+// only as the stable order of equal event keys.
+fn collect_call_refusals(ownership_source_calls.context* calls, call_refusal mut@ items) void {
+    u64 mut len = 0;
+    u64 mut i = 0;
+    while (i < calls->ledgers_len) {
+        ownership_source_calls.ledger l = calls->ledgers[i];
+        add_call_refusal(calls, items, &len, i, l.first_refusal);
+        u64 mut m = calls->members_first[l.component];
+        while (m < calls->members_first[l.component + 1]) {
+            ownership_source_calls.row* r = &calls->rows[calls->members[m]];
+            ownership_api.proof_status e =
+                l.solver == ownership_source_calls.solver_kind.summary ?
+                r->summary_e_refusal : r->heap_e_refusal;
+            add_call_refusal(calls, items, &len, i, e);
+            m += 1;
+        }
+        add_call_refusal(calls, items, &len, i, l.work_refusal);
+        add_call_refusal(calls, items, &len, i, l.report_refusal);
+        i += 1;
+    }
+    if (len != items.len) { panic("ownership_report.collect_call_refusals: incorrect count"); }
+}
+
+fn call_refusal_before(call_refusal* a, call_refusal* b) bool {
+    return ownership_source_calls.before(&a->order, &b->order);
+}
+
+fn sort_call_refusals(call_refusal mut@ items) void {
+    u64 mut i = 1;
+    while (i < items.len) {
+        call_refusal item = items[i];
+        u64 mut j = i;
+        while (j > 0 && call_refusal_before(&item, &items[j - 1])) {
+            items[j] = items[j - 1];
+            j -= 1;
+        }
+        items[j] = item;
+        i += 1;
+    }
+}
+
+// Whether an earlier canonical record from the same ledger represents the same refusal.
+fn duplicate_call_refusal(call_refusal@ items, u64 index) bool {
+    u64 mut i = 0;
+    while (i < index) {
+        if (items[i].ledger == items[index].ledger &&
+            same_refusal(items[i].refusal.terminal, items[index].refusal.terminal)) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+// Whether a call refusal precedes the next body record. A null record places all remaining call
+// refusals of this function before the next function.
+fn call_refusal_before_body(call_refusal* item, ownership_source.body* row,
+    ownership_source_local.violation* record) bool {
+    if (record == null) {
+        return ownership_keys.function(item->order.operation.function, row->key) <= 0;
+    }
+    ownership_source_calls.unproved mut order = ownership_source_calls.unproved{.present = true,
+        .operation = record->operation, .source = record->source, .relation = record->relation,
+        .kind = record->kind};
+    order.operation.function = row->key;
+    return ownership_source_calls.before(&item->order, &order);
+}
+
+// Renders one canonical call refusal unless an earlier event stopped its ledger. A V refusal or a
+// refused V charge stops later records from that ledger. False records a refused V charge.
+fn render_call_refusal(ownership_source.context mut* c, diag.sink mut* diagnostics, string entry,
+    call_refusal@ items, u64 index, bool mut@ stopped, reason shown) bool {
+    call_refusal* item = &items[index];
+    if (stopped[item->ledger] || duplicate_call_refusal(items, index)) { return true; }
+    string label = item->solver == ownership_source_calls.solver_kind.summary ?
+        "calls summary" : "calls heap";
+    bool allowed = calls_budget(c, diagnostics, entry, item->ledger, item->refusal, label, shown);
+    if (!allowed || item->refusal.terminal.limit.category == ownership_api.limit_category.v) {
+        stopped[item->ledger] = true;
+    }
+    return allowed;
+}
+
+// The budget errors of the calls_heap ledgers in canonical event order (toolchain 4.2). Meter
+// serialization keeps ledger order. A refusal that is already the shown reason is no second error.
+fn calls_budgets(ownership_source.context mut* c, diag.sink mut* diagnostics, string entry,
+    reason shown) bool {
+    u64 count = call_refusal_count(&c->calls);
+    call_refusal mut@ own items = new(call_refusal, count);
+    defer del(items);
+    collect_call_refusals(&c->calls, items[..]);
+    sort_call_refusals(items[..]);
+    bool mut@ own stopped = new(bool, c->calls.ledgers_len);
+    defer del(stopped);
+    bool mut allowed = true;
+    u64 mut i = 0;
+    while (i < items.len) {
+        allowed = render_call_refusal(c, diagnostics, entry, items[..], i, stopped[..], shown) &&
+            allowed;
+        i += 1;
+    }
+    return allowed;
+}
+
+// The budget error of one located calls_heap refusal. A W or E error charges one V unit of the
+// ledger. A refused charge keeps that error as the terminal record and stops the later errors.
+fn calls_budget(ownership_source.context mut* c, diag.sink mut* diagnostics, string entry,
+    u64 index, ownership_api.proof_status refusal, string label, reason shown) bool {
+    if (!ownership_source_calls.limited(refusal)) { return true; }
+    reason mut why = proof_reason("calls_heap", refusal);
+    if (same_reason(why, shown)) { return true; }
+    why.stage = label;
+    bool allowed = why.limit.category == ownership_api.limit_category.v ||
+        ownership_source_calls.charge_report(&c->calls, index, refusal.terminal.operation,
+            why.source, 1);
+    return diagnostic(c, diagnostics, entry, why, null) && allowed;
+}
+
 /// Emits closure and service errors. V refusal stops normal errors and keeps one terminal error.
 fn diagnose(ownership_source.context mut* c, diag.sink mut* diagnostics, string entry) void {
-    if (!violations(c, diagnostics, entry)) { return; }
+    // The records charge only V, and no reason reads a V count, so the closure reason is the
+    // same before and after them.
+    reason mut first = first_incomplete(c);
+    // A closure without an incomplete reason gives its failure reason: a rejection is a
+    // compilation error (toolchain 4.2), also when each body fails before its analyses run.
+    if (!first.present) { first = failure(c, 1); }
+    u64 count = call_refusal_count(&c->calls);
+    call_refusal mut@ own refusals = new(call_refusal, count);
+    defer del(refusals);
+    collect_call_refusals(&c->calls, refusals[..]);
+    sort_call_refusals(refusals[..]);
+    bool mut@ own stopped = new(bool, c->calls.ledgers_len);
+    defer del(stopped);
+    if (!violations(c, diagnostics, entry, first, refusals[..], stopped[..])) { return; }
     ownership_source.body mut* mut charged = null;
     u64 mut i = 0;
     while (i < c->bodies.len) {
         if (c->bodies[i].live.initialized) { charged = &c->bodies[i]; break; }
         i += 1;
     }
-    reason mut first = first_incomplete(c);
-    // A closure without an incomplete reason gives its failure reason: a rejection is a
-    // compilation error (toolchain 4.2), also when each body fails before its analyses run.
-    if (!first.present) { first = failure(c, 1); }
     if (first.present && !diagnostic(c, diagnostics, entry, first, charged)) { return; }
     i = 0;
     while (i < c->bodies.len) {
@@ -1000,6 +1284,18 @@ fn write_meters(json.writer mut* j, ownership_source.context* c) void {
         id = write_producer_meters(j, row, id + 1);
         i += 1;
     }
+    // One ledger for each component computation of each calls_heap solver, in solve order. A
+    // refusal without a source names a declaration, as its budget error does.
+    i = 0;
+    while (i < c->calls.ledgers_len) {
+        ownership_source_calls.ledger* l = &c->calls.ledgers[i];
+        write_ledger(j, id, l->solver == ownership_source_calls.solver_kind.summary ?
+            "calls_summary" : "calls_heap", l->owner, &l->meter,
+            ownership_source_calls.ledger_refusal(&c->calls, i, l->first_refusal), l->fir_size,
+            "calls_heap");
+        id += 1;
+        i += 1;
+    }
     json.json_array_end(j);
 }
 
@@ -1009,12 +1305,12 @@ fn write_producer_meters(json.writer mut* j, ownership_source.body* row, u64 id)
     next = write_flow_meters(j, row, &row->stored, next, "stored_borrows",
         "stored_borrows_classification");
     if (row->raw.initialized) {
-        write_local_meter(j, row, next, "raw", &row->raw.meter, row->raw.first_refusal,
+        write_ledger(j, next, "raw", row->key, &row->raw.meter, row->raw.first_refusal,
             row->raw.fir_size, "raw");
         next += 1;
     }
     if (row->exit.initialized) {
-        write_local_meter(j, row, next, "process_exit", &row->exit.meter,
+        write_ledger(j, next, "process_exit", row->key, &row->exit.meter,
             row->exit.first_refusal, row->exit.fir_size, "process_exit");
         next += 1;
     }
@@ -1027,23 +1323,25 @@ fn write_flow_meters(json.writer mut* j, ownership_source.body* row,
     ownership_source_local.context* run, u64 id, string name, string classification) u64 {
     if (!run->initialized) { return id; }
     string stage = run->stored ? "stored_borrows" : "local";
-    write_local_meter(j, row, id, name, &run->meter, run->first_refusal, run->fir_size, stage);
+    write_ledger(j, id, name, row->key, &run->meter, run->first_refusal, run->fir_size, stage);
     if (!run->classified) { return id + 1; }
-    write_local_meter(j, row, id + 1, classification, &run->classify_meter,
+    write_ledger(j, id + 1, classification, row->key, &run->classify_meter,
         run->classify_refusal, run->fir_size, stage);
     return id + 2;
 }
 
-// Each computation of one body keeps its own ledger (D17.18): the local run, the stored run,
-// the classification run of either when the body needed one, and the raw analysis.
-fn write_local_meter(json.writer mut* j, ownership_source.body* row, u64 id, string name,
+// Each computation keeps its own ledger (D17.18): the local run, the stored run, the
+// classification run of either when the body needed one, the raw and the process-exit analysis
+// of one body, and each component computation of a calls_heap solver. `owner` keys the body or
+// the first member of the component.
+fn write_ledger(json.writer mut* j, u64 id, string name, ownership_api.function_id owner,
     ownership_limits.meter* ledger, ownership_api.proof_status refusal, u64 fir_size,
     string stage) void {
     json.json_object_begin(j);
     key_uint(j, "id", id);
     key_string(j, "name", name);
     json.json_key(j, "owner");
-    write_key(j, row->key);
+    write_key(j, owner);
     key_uint(j, "fir_size", fir_size);
     json.json_key(j, "counts");
     json.json_array_begin(j);
@@ -1203,7 +1501,8 @@ fn build(strbuf.str_buf mut* out, ownership_source.context* c, invocation* call,
     // Version 5 adds the integrated stored-borrow analysis and its `stored_borrows` ledgers.
     // Version 6 adds the integrated process-exit analysis, its `process_exit` ledgers and the
     // boundary member.
-    key_uint(&j, "version", 6);
+    // Version 7 adds the `calls_summary` and `calls_heap` ledgers of the calls_heap analysis.
+    key_uint(&j, "version", 7);
     key_bool(&j, "complete", true);
     key_string(&j, "compiler_version", call->compiler_version);
     json.json_key(&j, "invocation");

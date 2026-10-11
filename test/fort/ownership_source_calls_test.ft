@@ -475,7 +475,7 @@ fn charge(ownership_source_calls.context mut* c, ownership_api.limit_category ki
 fn bit(ownership_api.limit_category kind) u32 { return cast(1, u32) << cast(kind, u32); }
 
 // The ledger keeps its first refusal, its first W refusal and its first V refusal. The row of
-// the body that a refused charge names keeps its category for the running solver.
+// the body that a refused charge names keeps its category. It also keeps its first E refusal.
 fn ledger_refusals() void {
     println("ledger refusals");
     ownership_source_calls_env.closure mut e = ownership_source_calls_env.closure{};
@@ -521,6 +521,24 @@ fn ledger_refusals() void {
     assert(!charge(c, ownership_api.limit_category.w, 1, none));
     assert(l->work_refusal.terminal.limit.used == 2 && l->meter.used.w == 2);
     assert(noop->summary_refused == bit(ownership_api.limit_category.w));
+    // One recursive component can refuse E for more than one member.
+    ownership_source_calls.row mut* even = ownership_source_calls_env.row_of(&e, "even");
+    ownership_source_calls.row mut* odd = ownership_source_calls_env.row_of(&e, "odd");
+    assert(even->summary_ledger == odd->summary_ledger);
+    c->current = even->summary_ledger;
+    ownership_source_calls.ledger mut* shared = &c->ledgers[c->current];
+    table = ownership_limits.production();
+    table.e = 1;
+    assert(ownership_limits.configure(&shared->meter, &table));
+    assert(!charge(c, ownership_api.limit_category.e, 2, even->operation.function));
+    assert(!charge(c, ownership_api.limit_category.e, 2, odd->operation.function));
+    assert(even->summary_refused == bit(ownership_api.limit_category.e));
+    assert(odd->summary_refused == bit(ownership_api.limit_category.e));
+    assert(ownership_keys.function(even->summary_e_refusal.terminal.operation.function,
+        even->operation.function) == 0);
+    assert(ownership_keys.function(odd->summary_e_refusal.terminal.operation.function,
+        odd->operation.function) == 0);
+    assert(!even->heap_e_refusal.terminal.present && !odd->heap_e_refusal.terminal.present);
     c->current = ownership_source_calls.NONE;
 }
 

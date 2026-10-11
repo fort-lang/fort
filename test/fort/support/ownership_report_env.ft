@@ -1,0 +1,27 @@
+/// Renders the diagnostics of a closure without its calls_heap records.
+import diag;
+import ownership_report;
+import ownership_source;
+
+/// Renders the diagnostics of `c` into `out` without the calls_heap records: each error
+/// `ownership_report.CALLS_UNPROVED` and the note after it. The runtime of a closure, and most
+/// of its bodies, are declared calls_heap bodies without proof, so a test of another analysis
+/// reads its own records through this filter. Returns the number of records that it dropped.
+fn diagnose(ownership_source.context mut* c, diag.sink mut* out, string entry) u64 {
+    diag.sink mut all = diag.sink{};
+    defer diag.free(&all);
+    ownership_report.diagnose(c, &all, entry);
+    u64 mut dropped = 0;
+    u64 mut i = 0;
+    while (i < diag.record_count(&all)) {
+        diag.record r = diag.record_at(&all, i);
+        if (r.severity == diag.severity.error && r.msg == ownership_report.CALLS_UNPROVED) {
+            dropped += 2;
+            i += 2;
+            continue;
+        }
+        diag.report(out, r.loc, r.severity, r.msg);
+        i += 1;
+    }
+    return dropped;
+}

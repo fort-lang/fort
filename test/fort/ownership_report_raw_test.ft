@@ -19,6 +19,7 @@ import diag;
 import ownership_api;
 import ownership_keys;
 import ownership_report;
+import ownership_report_env;
 import ownership_source;
 import ownership_source_env;
 import ownership_source_local;
@@ -66,7 +67,7 @@ fn rendering() void {
     defer ownership_source_env.close(&e);
     diag.sink mut found = diag.sink{};
     defer diag.free(&found);
-    ownership_report.diagnose(&e.source, &found, "main.ft");
+    ownership_report_env.diagnose(&e.source, &found, "main.ft");
     assert(diag.count(&found) == 3 && diag.record_count(&found) == 5);
     assert(diag.record_at(&found, 0).msg ==
         "cannot prove that 's' designates the accessed storage");
@@ -98,7 +99,7 @@ fn interleaving() void {
     defer ownership_source_env.close(&e);
     diag.sink mut found = diag.sink{};
     defer diag.free(&found);
-    ownership_report.diagnose(&e.source, &found, "main.ft");
+    ownership_report_env.diagnose(&e.source, &found, "main.ft");
     assert(diag.count(&found) == 3 && diag.record_count(&found) == 5);
     assert(diag.record_at(&found, 0).msg == "invalid use of 'q'");
     assert(diag.record_at(&found, 0).loc.line == 5);
@@ -135,7 +136,7 @@ fn document() void {
     defer strbuf.free(&out);
     ownership_report.invocation call = ownership_report.invocation{};
     ownership_report.build(&out, &e.source, &call, 1);
-    contains(&out, "{\"kind\":\"fort-ownership-report\",\"version\":6,");
+    contains(&out, "{\"kind\":\"fort-ownership-report\",\"version\":7,");
     contains(&out, "{\"name\":\"raw\",\"producer\":\"integrated\",\"status\":\"incomplete\"}");
     contains(&out, "{\"name\":\"stored_borrows\",\"producer\":\"integrated\"");
     contains(&out, "{\"name\":\"calls_heap\",\"producer\":\"integrated\"");
@@ -161,7 +162,7 @@ fn render_refusal() void {
     row->raw.meter.bounds.v = row->raw.meter.used.v + 3;
     diag.sink mut found = diag.sink{};
     defer diag.free(&found);
-    ownership_report.diagnose(&e.source, &found, "main.ft");
+    ownership_report_env.diagnose(&e.source, &found, "main.ft");
     assert(diag.count(&found) == 2 && diag.record_count(&found) == 3);
     assert(diag.record_at(&found, 0).loc.line == 6);
     assert(str.find(diag.record_at(&found, 2).msg,
@@ -219,7 +220,7 @@ fn unnamed() void {
     defer ownership_source_env.close(&e);
     diag.sink mut found = diag.sink{};
     defer diag.free(&found);
-    ownership_report.diagnose(&e.source, &found, "main.ft");
+    ownership_report_env.diagnose(&e.source, &found, "main.ft");
     assert(diag.record_count(&found) >= 4);
     assert(diag.record_at(&found, 0).msg == "invalid use of a temporary value");
     assert(diag.record_at(&found, 0).loc.line == 3);
@@ -247,7 +248,7 @@ fn budget_error() void {
     assert(ownership_report.analysis_status(row, ownership_report.RAW, 2) == "incomplete");
     diag.sink mut found = diag.sink{};
     defer diag.free(&found);
-    ownership_report.diagnose(&e.source, &found, "main.ft");
+    ownership_report_env.diagnose(&e.source, &found, "main.ft");
     bool mut seen = false;
     u64 mut i = 0;
     while (i < diag.record_count(&found)) {
@@ -315,7 +316,7 @@ fn mixed_records() void {
     defer ownership_source_env.close(&e);
     diag.sink mut found = diag.sink{};
     defer diag.free(&found);
-    ownership_report.diagnose(&e.source, &found, "main.ft");
+    ownership_report_env.diagnose(&e.source, &found, "main.ft");
     assert(diag.count(&found) == 4 && diag.record_count(&found) == 7);
     assert(diag.record_at(&found, 0).msg == "invalid use of 'a'");
     assert(diag.record_at(&found, 0).loc.line == 7);
@@ -346,9 +347,9 @@ fn tied(string name) ownership_source_local.violation mut@ own {
     return items;
 }
 
-// Six records with one key, one in each list, merge in list order: local, stored borrows,
-// raw violations, raw failures without a witness, process-exit violations and process-exit
-// failures without a witness (toolchain 4.2 gives no further key).
+// Seven records with one key, one in each list, merge in list order: local, stored borrows,
+// raw violations, raw failures without a witness, the calls_heap record, process-exit
+// violations and process-exit failures without a witness (toolchain 4.2 gives no further key).
 fn record_ties() void {
     ownership_source.body mut row = ownership_source.body{};
     row.local.solved = true;
@@ -373,19 +374,25 @@ fn record_ties() void {
     defer del(row.raw.unproved);
     defer del(row.exit.violations);
     defer del(row.exit.unproved);
-    string[6] names = {"local", "stored", "raw", "unproved", "exit", "exit unproved"};
-    u64[6] mut cursor = {0, 0, 0, 0, 0, 0};
+    ownership_source_local.violation mut@ own calls = tied("calls");
+    defer del(calls);
+    string[7] names = {"local", "stored", "raw", "unproved", "calls", "exit", "exit unproved"};
+    u64[7] mut cursor = {0, 0, 0, 0, 0, 0, 0};
     u64 mut list = 0;
-    while (list < 6) {
+    while (list < 7) {
         u64 mut from = 9;
         ownership_source_local.violation* v = ownership_report.next_record(&row, cursor[..],
-            &from);
+            &from, &calls[0]);
         assert(v != null && from == list && v->name == names[list]);
         cursor[from] += 1;
         list += 1;
     }
     u64 mut from = 9;
-    assert(ownership_report.next_record(&row, cursor[..], &from) == null && from == 9);
+    assert(ownership_report.next_record(&row, cursor[..], &from, &calls[0]) == null &&
+        from == 9);
+    // Without a calls_heap record, list 4 gives none.
+    u64[7] mut empty = {1, 1, 1, 1, 0, 1, 1};
+    assert(ownership_report.next_record(&row, empty[..], &from, null) == null && from == 9);
     println("record ties ok");
 }
 
@@ -448,7 +455,7 @@ fn checked_addition() void {
     assert(first->text == second->text);
     diag.sink mut found = diag.sink{};
     defer diag.free(&found);
-    ownership_report.diagnose(&e.source, &found, "main.ft");
+    ownership_report_env.diagnose(&e.source, &found, "main.ft");
     assert(diag.count(&found) == 4 && diag.record_count(&found) == 7);
     assert(diag.record_at(&found, 0).msg == "invalid use of 'h.p'");
     assert(diag.record_at(&found, 0).loc.line == 8);
