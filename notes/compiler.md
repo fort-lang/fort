@@ -923,6 +923,49 @@ came here.
   numbers in each canonical form, join, and graft, so that fact needs its own renaming there.
   Extern calls are unknown effects in this module, with no D17.13 trust.
   Keep `del` shallow and add no runtime identity data.
+- **Each heap fact has a type, a provenance and one join** (D17.16, D17.18).
+  `src/fort/ownership_facts.ft` holds the fact types of the heap proof and their joins. A
+  `nullness` (a root value) and a `status_fact` (an allocation status) hold on each path that the
+  state represents. Each has a provenance: `established` (an operation of this body observed the
+  fact), `imported` (a callee summary gives it) or `assumed`. Today each graft writes `assumed`,
+  and no site writes `imported`; the next step decides when a graft fact is `imported`. A join
+  keeps the weaker provenance, the earlier member of the enum. A `may_set` keeps a member of some
+  path and joins by union; a `must_set` keeps a member of each path and joins by intersection.
+  `atom.root`, `atom.status`, `value.nullness` and `state.released` have these types, and
+  `join_atom`, `join_values` and `join` assign each of them from the join of its type.
+  The constructors fix the provenance. `null_value` is established: a null constant, a move, a new
+  allocation, a storage end, a release that zeroes its place, and the locals at a return.
+  `empty_value` is assumed: a graft, a join of two empty values, a failed caller requirement.
+  `new_atom` takes the provenance of its operation: an allocation establishes it; the entry state,
+  an unfold, a lost identity and the result of an unknown call assume it. A null test edge
+  establishes its root. An unfold, a fold, a P cover, a caller requirement and a graft write
+  assumed facts. `address_value` takes the fact of its base from `address_fact`: a local base is
+  `{nonnull, established}`, a caller base `{free, assumed}`, a cell base the root fact of its
+  cell, and an element address `{nonnull, assumed}`. A status that an operation of the body sets
+  (a release, a loss, an unknown effect) is established; a status that a summary gives is assumed.
+  No rule reads a provenance yet. `same_atom`, `same_value`, `equal` and `measure` compare the
+  values only, so fixpoints, W counts, events and verdicts do not change. `may_prune` is the
+  predicate of a rule that removes a path: an established null or nonnull root. Nothing calls it.
+  One limit follows from this: `propagate` keeps the entry state of a block when the join is equal
+  by value. So a loop head can keep a stronger provenance than the join of its predecessors; a
+  loop that calls a callee can publish an established empty owner where one call gives an
+  assumed one. The step that puts `how` into `equal` removes this limit.
+  The zero of `provenance` is `assumed`, so a fact that a constructor forgets to set claims no
+  observation and removes no path. `ownership_facts_test.ft` holds the zero.
+  `tools/fact_joins.py` (the ctests `fact_joins` and `fact_joins_selftest`) holds these rules,
+  because no test reads a provenance yet. It reads the structs `atom`, `value`, `state`, `summary`
+  and `interface_entry` of the heap module. Each field has a fact type or one tag
+  `// join: same|owner|none|may|must`. A `may` or `must` tag names a path flag that has no fact
+  type yet, and its join assignment uses `||` or `&&`; a `same`, `owner` or `none` field uses
+  neither. In a join function, each typed field joins through the join of its type: each
+  assignment of the whole field calls that join, and each read of the whole field is one of its
+  arguments. No join function writes `how`. A whole record that one side gives carries the tag
+  `// join: copy`. A graft function reads a callee fact only through `assume`, `assume_status` or
+  a join, and it keeps its `assume` assignments. `provenance.established` and `null_value()` occur
+  only in the functions of `ESTABLISHED_SITES` and `NULL_VALUE_SITES`, as often as the table says,
+  so a new established fact changes the table. A new fact type adds one row to `FACT_JOINS` and
+  one join function. The witness rule of `join_atom` writes `out.root.value` after the join, so the
+  lint reports one partial write of `atom.root`.
 - **Finite ownership proof preserves obligations when precision ends** (T-276, D17.18).
   `spec/fir.md` 14.1 defines the finite domain, canonical solving, and counted budgets.
   Publish numeric limits and reproduction commands before qualification. This rule ticket chooses

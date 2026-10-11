@@ -17,6 +17,7 @@
 /// Checks the state operations of the heap proof one at a time (D17.16, D17.18, fir.md 14.1).
 import fir;
 import ownership_api;
+import ownership_facts;
 import ownership_heap;
 import ownership_heap_env;
 import ownership_limits;
@@ -89,9 +90,9 @@ fn obligations(ownership_heap.state* s) u64 {
     u64 mut i = 0;
     while (i < s->atoms_len) {
         ownership_heap.atom a = s->atoms[i];
-        if (a.used && a.root != ownership_heap.root_kind.null_root &&
-            (a.status == ownership_heap.atom_status.live ||
-            a.status == ownership_heap.atom_status.unknown)) { n += 1; }
+        if (a.used && a.root.value != ownership_facts.root_kind.null_root &&
+            (a.status.value == ownership_facts.atom_status.live ||
+            a.status.value == ownership_facts.atom_status.unknown)) { n += 1; }
         i += 1;
     }
     return n;
@@ -117,7 +118,8 @@ fn same(ownership_heap.context mut* ctx, ownership_heap.state* a, ownership_heap
 fn fresh_cell(ownership_heap.context mut* ctx, ownership_heap.state mut* s, u32 n) u32 {
     types.node* t = s->atoms[0].ty;
     ownership_heap.atom mut a = ownership_heap.new_atom(ownership_heap.atom_kind.cell, t,
-        ownership_heap.shape_of(ctx, t), ownership_heap.root_kind.nonnull);
+        ownership_heap.shape_of(ctx, t), ownership_facts.root_kind.nonnull,
+        ownership_facts.provenance.established);
     a.fresh = true;
     u32 made = ownership_heap.push_atom(s, a);
     ownership_heap.add_cell_slots(ctx, s, made, t);
@@ -127,53 +129,53 @@ fn fresh_cell(ownership_heap.context mut* ctx, ownership_heap.state mut* s, u32 
 
 fn tables() void {
     println("lattice tables");
-    ownership_heap.root_kind[4] roots = {ownership_heap.root_kind.null_root,
-        ownership_heap.root_kind.nonnull, ownership_heap.root_kind.free,
-        ownership_heap.root_kind.joined};
+    ownership_facts.root_kind[4] roots = {ownership_facts.root_kind.null_root,
+        ownership_facts.root_kind.nonnull, ownership_facts.root_kind.free,
+        ownership_facts.root_kind.joined};
     u64 mut i = 0;
     while (i < roots.len) {
         u64 mut j = 0;
         while (j < roots.len) {
-            ownership_heap.root_kind r = ownership_heap.join_root(roots[i], roots[j]);
+            ownership_facts.root_kind r = ownership_facts.join_root(roots[i], roots[j]);
             if (i == j) {
                 assert(r == roots[i]);
             } else {
-                assert(r == ownership_heap.root_kind.joined);
+                assert(r == ownership_facts.root_kind.joined);
             }
-            assert(r == ownership_heap.join_root(roots[j], roots[i]));
+            assert(r == ownership_facts.join_root(roots[j], roots[i]));
             j += 1;
         }
         i += 1;
     }
-    ownership_heap.atom_status[6] all = {ownership_heap.atom_status.live,
-        ownership_heap.atom_status.released, ownership_heap.atom_status.maybe_released,
-        ownership_heap.atom_status.leaked, ownership_heap.atom_status.escaped,
-        ownership_heap.atom_status.unknown};
+    ownership_facts.atom_status[6] all = {ownership_facts.atom_status.live,
+        ownership_facts.atom_status.released, ownership_facts.atom_status.maybe_released,
+        ownership_facts.atom_status.leaked, ownership_facts.atom_status.escaped,
+        ownership_facts.atom_status.unknown};
     i = 0;
     while (i < all.len) {
         u64 mut j = 0;
         while (j < all.len) {
-            ownership_heap.atom_status st = ownership_heap.join_status(all[i], all[j]);
-            assert(st == ownership_heap.join_status(all[j], all[i]));
+            ownership_facts.atom_status st = ownership_facts.join_status(all[i], all[j]);
+            assert(st == ownership_facts.join_status(all[j], all[i]));
             if (i == j) { assert(st == all[i]); }
             j += 1;
         }
         i += 1;
     }
     // A release on one path and a live allocation on the other is a possible release.
-    assert(ownership_heap.join_status(ownership_heap.atom_status.live,
-        ownership_heap.atom_status.released) == ownership_heap.atom_status.maybe_released);
+    assert(ownership_facts.join_status(ownership_facts.atom_status.live,
+        ownership_facts.atom_status.released) == ownership_facts.atom_status.maybe_released);
     // An unknown or escaped side makes the join unknown.
-    assert(ownership_heap.join_status(ownership_heap.atom_status.escaped,
-        ownership_heap.atom_status.live) == ownership_heap.atom_status.unknown);
+    assert(ownership_facts.join_status(ownership_facts.atom_status.escaped,
+        ownership_facts.atom_status.live) == ownership_facts.atom_status.unknown);
     // A reported loss on one side keeps the other side checked.
-    assert(ownership_heap.join_status(ownership_heap.atom_status.leaked,
-        ownership_heap.atom_status.released) == ownership_heap.atom_status.released);
-    assert(ownership_heap.certainty_of(ownership_heap.root_kind.nonnull) ==
+    assert(ownership_facts.join_status(ownership_facts.atom_status.leaked,
+        ownership_facts.atom_status.released) == ownership_facts.atom_status.released);
+    assert(ownership_heap.certainty_of(ownership_facts.root_kind.nonnull) ==
         ownership_heap.certainty.definite);
-    assert(ownership_heap.certainty_of(ownership_heap.root_kind.free) ==
+    assert(ownership_heap.certainty_of(ownership_facts.root_kind.free) ==
         ownership_heap.certainty.choice);
-    assert(ownership_heap.certainty_of(ownership_heap.root_kind.joined) ==
+    assert(ownership_heap.certainty_of(ownership_facts.root_kind.joined) ==
         ownership_heap.certainty.possible);
     assert(ownership_heap.bit(0) == 1 && ownership_heap.bit(63) != 0);
     assert(ownership_heap.bit(64) == 0);
@@ -182,22 +184,43 @@ fn tables() void {
     // A join of two refined values of one free choice stays a free choice only when both sides
     // are witnessed.
     ownership_heap.atom mut x = ownership_heap.new_atom(ownership_heap.atom_kind.region, null, 0,
-        ownership_heap.root_kind.nonnull);
+        ownership_facts.root_kind.nonnull, ownership_facts.provenance.established);
     x.choice = true;
     ownership_heap.atom mut y = x;
-    y.root = ownership_heap.root_kind.null_root;
-    assert(ownership_heap.join_atom(x, y, true, true).root == ownership_heap.root_kind.free);
-    assert(ownership_heap.join_atom(x, y, true, false).root == ownership_heap.root_kind.joined);
+    y.root.value = ownership_facts.root_kind.null_root;
+    assert(ownership_heap.join_atom(x, y, true, true).root.value ==
+        ownership_facts.root_kind.free);
+    assert(ownership_heap.join_atom(x, y, true, false).root.value ==
+        ownership_facts.root_kind.joined);
     y.choice = false;
-    assert(ownership_heap.join_atom(x, y, true, true).root == ownership_heap.root_kind.joined);
+    assert(ownership_heap.join_atom(x, y, true, true).root.value ==
+        ownership_facts.root_kind.joined);
     // A null root holds no allocation, so the other side gives the status.
     ownership_heap.atom mut gone = x;
-    gone.status = ownership_heap.atom_status.released;
-    assert(ownership_heap.join_atom(gone, y, true, true).status ==
-        ownership_heap.atom_status.released);
+    gone.status.value = ownership_facts.atom_status.released;
+    assert(ownership_heap.join_atom(gone, y, true, true).status.value ==
+        ownership_facts.atom_status.released);
+    // A new atom takes one provenance for its root and its status. A join keeps the weaker
+    // provenance of each fact, and a null root gives no status provenance to the join.
+    assert(x.root.how == ownership_facts.provenance.established);
+    assert(x.status.how == ownership_facts.provenance.established);
+    ownership_heap.atom mut weak = x;
+    weak.root.how = ownership_facts.provenance.assumed;
+    weak.status.how = ownership_facts.provenance.imported;
+    ownership_heap.atom both = ownership_heap.join_atom(x, weak, true, true);
+    assert(both.root.how == ownership_facts.provenance.assumed);
+    assert(both.status.how == ownership_facts.provenance.imported);
+    assert(ownership_heap.join_atom(x, x, true, true).root.how ==
+        ownership_facts.provenance.established);
+    y.status.how = ownership_facts.provenance.assumed;
+    ownership_heap.atom kept = ownership_heap.join_atom(gone, y, true, true);
+    assert(kept.status.value == ownership_facts.atom_status.released);
+    assert(kept.status.how == ownership_facts.provenance.established);
+    assert(ownership_heap.join_atom(y, gone, true, true).status.how ==
+        ownership_facts.provenance.established);
     // Different kinds join to an opaque atom with no template.
     ownership_heap.atom mut f = ownership_heap.new_atom(ownership_heap.atom_kind.flat, null, 0,
-        ownership_heap.root_kind.nonnull);
+        ownership_facts.root_kind.nonnull, ownership_facts.provenance.established);
     ownership_heap.atom k = ownership_heap.join_atom(x, f, true, true);
     assert(k.kind == ownership_heap.atom_kind.opaque && k.shape == 0);
     // Handles survive only when both sides name one entry value.
@@ -265,6 +288,35 @@ fn keys() void {
     assert(!ownership_heap.same_value(ownership_heap.own_value(3), ownership_heap.own_value(4)));
     assert(!ownership_heap.same_value(ownership_heap.empty_value(),
         ownership_heap.unknown_value()));
+    // An empty value has a null root. An operation of the body establishes it for `null_value`;
+    // `empty_value` assumes it. No comparison reads a provenance.
+    ownership_heap.value assumed_empty = ownership_heap.empty_value();
+    ownership_heap.value null_empty = ownership_heap.null_value();
+    assert(assumed_empty.nullness.value == ownership_facts.root_kind.null_root);
+    assert(assumed_empty.nullness.how == ownership_facts.provenance.assumed);
+    assert(null_empty.kind == ownership_heap.value_kind.empty);
+    assert(null_empty.nullness.value == ownership_facts.root_kind.null_root);
+    assert(null_empty.nullness.how == ownership_facts.provenance.established);
+    assert(ownership_heap.same_value(assumed_empty, null_empty));
+    ownership_heap.value outside = ownership_heap.external_view();
+    assert(outside.nullness.value == ownership_facts.root_kind.joined);
+    assert(outside.nullness.how == ownership_facts.provenance.assumed);
+    w = v;
+    w.nullness.how = ownership_facts.provenance.established;
+    assert(ownership_heap.same_value(v, w));
+    w.nullness.value = ownership_facts.root_kind.nonnull;
+    assert(!ownership_heap.same_value(v, w));
+    // An address keeps the fact that it gets, and a comparison of addresses does not read it.
+    ownership_facts.nullness fact = ownership_facts.nullness{ownership_facts.root_kind.nonnull,
+        ownership_facts.provenance.established};
+    ownership_heap.value at = ownership_heap.address_value(local(2), fact);
+    assert(at.kind == ownership_heap.value_kind.address);
+    assert(ownership_heap.same_key(at.target, local(2)));
+    assert(at.nullness.value == fact.value && at.nullness.how == fact.how);
+    ownership_heap.value mut other = at;
+    other.nullness = ownership_facts.nullness{ownership_facts.root_kind.free,
+        ownership_facts.provenance.assumed};
+    assert(ownership_heap.same_value(at, other));
     ownership_heap.value mut t1 = ownership_heap.scalar_value();
     t1.known = true;
     t1.truth = true;
@@ -318,7 +370,10 @@ fn entry_state() void {
     u64 mut i = 0;
     while (i < 4) {
         ownership_heap.atom a = s.atoms[i];
-        assert(a.root == ownership_heap.root_kind.free && a.choice);
+        assert(a.root.value == ownership_facts.root_kind.free && a.choice);
+        // An entry fact is an input of the caller, so the proof assumes it.
+        assert(a.root.how == ownership_facts.provenance.assumed);
+        assert(a.status.how == ownership_facts.provenance.assumed);
         assert(a.origin == ownership_heap.bit(i));
         assert(a.handle == cast(i, u32) && a.handle_field == ownership_heap.NONE && !a.strict);
         i += 1;
@@ -327,17 +382,53 @@ fn entry_state() void {
     ownership_heap.value h = value_at(&s, local(3));
     assert(h.kind == ownership_heap.value_kind.address && h.param == 3);
     assert(h.target.base == ownership_heap.base_kind.caller && h.target.id == 0);
+    assert(h.nullness.value == ownership_facts.root_kind.free);
+    assert(h.nullness.how == ownership_facts.provenance.assumed);
     ownership_heap.value view = value_at(&s, local(4));
     assert(view.kind == ownership_heap.value_kind.view && view.external && view.param == 4);
+    assert(view.nullness.value == ownership_facts.root_kind.free);
+    assert(view.nullness.how == ownership_facts.provenance.assumed);
     assert(value_at(&s, local(5)).kind == ownership_heap.value_kind.empty);
+    assert(value_at(&s, local(5)).nullness.how == ownership_facts.provenance.assumed);
+    // The address of a local is nonnull. The storage that a parameter designates is an input
+    // choice. A cell index past the atoms names no cell.
+    ownership_facts.nullness own_address = ownership_heap.address_fact(&s, local(5));
+    assert(own_address.value == ownership_facts.root_kind.nonnull);
+    assert(own_address.how == ownership_facts.provenance.established);
+    ownership_facts.nullness param_address = ownership_heap.address_fact(&s,
+        ownership_heap.key_of(ownership_heap.base_kind.caller, 0));
+    assert(param_address.value == ownership_facts.root_kind.free);
+    assert(param_address.how == ownership_facts.provenance.assumed);
+    ownership_facts.nullness lost_address = ownership_heap.address_fact(&s,
+        ownership_heap.key_of(ownership_heap.base_kind.cell, 4));
+    assert(lost_address.value == ownership_facts.root_kind.free);
+    assert(lost_address.how == ownership_facts.provenance.assumed);
     assert(value_at(&s, local(8)).kind == ownership_heap.value_kind.scalar);
     // A copy of the state is equal to it and owns separate storage.
     ownership_heap.state mut copy = ownership_heap.clone(&s);
     defer ownership_heap.free_state(&copy);
     assert(same(ctx, &s, &copy));
-    copy.atoms[0].root = ownership_heap.root_kind.nonnull;
+    copy.atoms[0].root.value = ownership_facts.root_kind.nonnull;
     assert(!same(ctx, &s, &copy));
-    assert(s.atoms[0].root == ownership_heap.root_kind.free);
+    assert(s.atoms[0].root.value == ownership_facts.root_kind.free);
+    // A graft keeps the value of each nullness fact that a callee gives, and the caller assumes
+    // it.
+    u32[1] no_atoms = {};
+    ownership_heap.slot_key[1] no_storage = {};
+    ownership_heap.argument@ no_arguments = {};
+    ownership_heap.value empty = ownership_heap.graft_value(ctx, &s, ownership_heap.null_value(),
+        no_atoms[..], no_storage[..], no_arguments);
+    assert(empty.kind == ownership_heap.value_kind.empty);
+    assert(empty.nullness.value == ownership_facts.root_kind.null_root);
+    assert(empty.nullness.how == ownership_facts.provenance.assumed);
+    ownership_heap.value mut text = ownership_heap.external_view();
+    text.nullness = ownership_facts.nullness{ownership_facts.root_kind.nonnull,
+        ownership_facts.provenance.established};
+    ownership_heap.value seen = ownership_heap.graft_value(ctx, &s, text, no_atoms[..],
+        no_storage[..], no_arguments);
+    assert(seen.kind == ownership_heap.value_kind.view && seen.external);
+    assert(seen.nullness.value == ownership_facts.root_kind.nonnull);
+    assert(seen.nullness.how == ownership_facts.provenance.assumed);
 }
 
 fn unfold_fold() void {
@@ -354,14 +445,22 @@ fn unfold_fold() void {
     assert(m.r == 4 && m.h == 6 && m.p == 0 && m.d == 1);
     assert(ownership_heap.unfold(ctx, &s, 0));
     assert(s.atoms[0].kind == ownership_heap.atom_kind.cell);
-    assert(s.atoms[0].root == ownership_heap.root_kind.nonnull);
+    assert(s.atoms[0].root.value == ownership_facts.root_kind.nonnull);
+    // The unfold assumes its nonnull root; a cell address takes the fact of its cell.
+    assert(s.atoms[0].root.how == ownership_facts.provenance.assumed);
+    ownership_facts.nullness cell_address = ownership_heap.address_fact(&s,
+        field_key(ownership_heap.base_kind.cell, 0, 0));
+    assert(cell_address.value == ownership_facts.root_kind.nonnull);
+    assert(cell_address.how == ownership_facts.provenance.assumed);
     ownership_heap.value next = value_at(&s, field_key(ownership_heap.base_kind.cell, 0, 0));
     ownership_heap.value bytes = value_at(&s, field_key(ownership_heap.base_kind.cell, 0, 1));
     assert(next.kind == ownership_heap.value_kind.owned);
     assert(bytes.kind == ownership_heap.value_kind.owned);
     ownership_heap.atom child = s.atoms[next.atom];
     assert(child.kind == ownership_heap.atom_kind.region);
-    assert(child.root == ownership_heap.root_kind.free);
+    assert(child.root.value == ownership_facts.root_kind.free);
+    assert(child.root.how == ownership_facts.provenance.assumed);
+    assert(child.status.how == ownership_facts.provenance.assumed);
     assert(child.strict && child.choice && child.origin == 1);
     assert(child.handle == 0 && child.handle_field == 0);
     ownership_heap.atom payload = s.atoms[bytes.atom];
@@ -370,9 +469,9 @@ fn unfold_fold() void {
     // cell is no refined fact: its kind gives it.
     m = ownership_heap.measure(ctx, &s);
     assert(m.r == 6 && m.h == 8 && m.p == 0);
-    s.atoms[1].root = ownership_heap.root_kind.null_root;
+    s.atoms[1].root.value = ownership_facts.root_kind.null_root;
     assert(ownership_heap.measure(ctx, &s).p == 1);
-    s.atoms[1].root = ownership_heap.root_kind.free;
+    s.atoms[1].root.value = ownership_facts.root_kind.free;
     // A child of a strict child is strict and has no handle: it is no entry field.
     assert(ownership_heap.unfold(ctx, &s, next.atom));
     ownership_heap.value deeper = value_at(&s,
@@ -386,6 +485,8 @@ fn unfold_fold() void {
     // The fold puts the children back into p, clears its handle, and keeps its identity.
     assert(ownership_heap.fold(ctx, &s, 0));
     assert(s.atoms[0].kind == ownership_heap.atom_kind.region);
+    assert(s.atoms[0].root.value == ownership_facts.root_kind.nonnull);
+    assert(s.atoms[0].root.how == ownership_facts.provenance.assumed);
     assert(s.atoms[0].handle == ownership_heap.NONE && s.atoms[0].origin == 1);
     assert(!s.atoms[next.atom].used && !s.atoms[bytes.atom].used && !s.atoms[deeper.atom].used);
     assert(!s.atoms[0].strict);
@@ -404,15 +505,15 @@ fn unfold_fold() void {
     set_value(&s, local(7), ownership_heap.empty_value());
     set_value(&s, field_key(ownership_heap.base_kind.cell, parent, 0),
         ownership_heap.own_value(inner));
-    s.atoms[inner].status = ownership_heap.atom_status.released;
+    s.atoms[inner].status.value = ownership_facts.atom_status.released;
     assert(!ownership_heap.fold(ctx, &s, parent));
-    s.atoms[inner].status = ownership_heap.atom_status.live;
+    s.atoms[inner].status.value = ownership_facts.atom_status.live;
     assert(ownership_heap.fold(ctx, &s, parent));
     assert(s.atoms[parent].fresh && !s.atoms[inner].used);
     // An opaque payload never folds.
     u32 boxed = fresh_cell(ctx, &s, 6);
     ownership_heap.atom mut blob = ownership_heap.new_atom(ownership_heap.atom_kind.opaque, null, 0,
-        ownership_heap.root_kind.nonnull);
+        ownership_facts.root_kind.nonnull, ownership_facts.provenance.established);
     u32 blob_at = ownership_heap.push_atom(&s, blob);
     set_value(&s, field_key(ownership_heap.base_kind.cell, boxed, 1),
         ownership_heap.own_value(blob_at));
@@ -445,26 +546,28 @@ fn canonical_form() void {
     assert(ownership_heap.canonical(ctx, &again));
     assert(same(ctx, &a, &again));
     // A null root leaves its slot; a released record with no view goes.
-    again.atoms[0].root = ownership_heap.root_kind.null_root;
+    again.atoms[0].root = ownership_facts.nullness{ownership_facts.root_kind.null_root,
+        ownership_facts.provenance.established};
     u32 last = value_at(&again, local(6)).atom;
-    again.atoms[last].status = ownership_heap.atom_status.released;
+    again.atoms[last].status.value = ownership_facts.atom_status.released;
     set_value(&again, local(6), ownership_heap.empty_value());
     u64 before = again.atoms_len;
     assert(ownership_heap.canonical(ctx, &again));
     assert(value_at(&again, local(1)).kind == ownership_heap.value_kind.empty);
+    assert(value_at(&again, local(1)).nullness.how == ownership_facts.provenance.established);
     assert(again.atoms_len == before - 1);
     // An interface record keeps its index even when no slot owns it.
     assert(again.atoms[0].kind == ownership_heap.atom_kind.region);
     // A live atom that no slot owns stays: an obligation is never dropped.
     ownership_heap.atom mut orphan = ownership_heap.new_atom(ownership_heap.atom_kind.flat, null, 0,
-        ownership_heap.root_kind.nonnull);
+        ownership_facts.root_kind.nonnull, ownership_facts.provenance.established);
     ownership_heap.push_atom(&again, orphan);
     u64 count = obligations(&again);
     assert(ownership_heap.canonical(ctx, &again));
     assert(obligations(&again) == count);
     // A released record that a view names stays for that view.
     ownership_heap.atom mut dead = orphan;
-    dead.status = ownership_heap.atom_status.released;
+    dead.status.value = ownership_facts.atom_status.released;
     u32 dead_at = ownership_heap.push_atom(&again, dead);
     ownership_heap.value mut v = ownership_heap.empty_value();
     v.kind = ownership_heap.value_kind.view;
@@ -473,8 +576,8 @@ fn canonical_form() void {
     set_value(&again, local(7), v);
     assert(ownership_heap.canonical(ctx, &again));
     ownership_heap.value seen = value_at(&again, local(7));
-    assert(seen.count == 1 && again.atoms[seen.sources[0]].status ==
-        ownership_heap.atom_status.released);
+    assert(seen.count == 1 && again.atoms[seen.sources[0]].status.value ==
+        ownership_facts.atom_status.released);
 }
 
 fn joins() void {
@@ -507,7 +610,25 @@ fn joins() void {
     assert(obligations(&ab) == obligations(&b));
     ownership_heap.value kept = value_at(&ab, local(5));
     assert(kept.kind == ownership_heap.value_kind.owned);
-    assert(ab.atoms[kept.atom].root == ownership_heap.root_kind.joined);
+    assert(ab.atoms[kept.atom].root.value == ownership_facts.root_kind.joined);
+    // The fold of the cell assumes its nonnull root.
+    assert(ab.atoms[kept.atom].root.how == ownership_facts.provenance.assumed);
+    // An empty owner on one side gives an assumed null root, so the joined root of a flat atom
+    // is assumed even when the other side established its root.
+    ownership_heap.state mut flat = ownership_heap.clone(&a);
+    defer ownership_heap.free_state(&flat);
+    ownership_heap.atom bytes = ownership_heap.new_atom(ownership_heap.atom_kind.flat, null, 0,
+        ownership_facts.root_kind.nonnull, ownership_facts.provenance.established);
+    set_value(&flat, local(5), ownership_heap.own_value(ownership_heap.push_atom(&flat, bytes)));
+    assert(ownership_heap.canonical(ctx, &flat));
+    ownership_heap.state mut half = ownership_heap.state{};
+    defer ownership_heap.free_state(&half);
+    assert(ownership_heap.join(ctx, &a, &flat, false, &half));
+    ownership_heap.value one = value_at(&half, local(5));
+    assert(one.kind == ownership_heap.value_kind.owned);
+    assert(half.atoms[one.atom].kind == ownership_heap.atom_kind.flat);
+    assert(half.atoms[one.atom].root.value == ownership_facts.root_kind.joined);
+    assert(half.atoms[one.atom].root.how == ownership_facts.provenance.assumed);
     // The cell met an empty slot, so it folded into its template.
     assert(ab.atoms[kept.atom].kind == ownership_heap.atom_kind.region && made >= 4);
     // A join with bottom is the other side.
@@ -532,12 +653,15 @@ fn joins() void {
     // A released interface record on one path and a live one on the other is a possible release.
     ownership_heap.state mut gone = ownership_heap.clone(&a);
     defer ownership_heap.free_state(&gone);
-    gone.atoms[1].status = ownership_heap.atom_status.released;
+    gone.atoms[1].status.value = ownership_facts.atom_status.released;
     set_value(&gone, local(2), ownership_heap.empty_value());
+    gone.released.bits = 2;
     ownership_heap.state mut either = ownership_heap.state{};
     defer ownership_heap.free_state(&either);
     assert(ownership_heap.join(ctx, &a, &gone, false, &either));
     assert(value_at(&either, local(2)).kind == ownership_heap.value_kind.owned);
+    // A release on one path is a possible release after the join.
+    assert(either.released.bits == 2 && a.released.bits == 0);
     // The witness of a join holds when one side has it.
     ownership_heap.state mut blind = ownership_heap.clone(&a);
     defer ownership_heap.free_state(&blind);
@@ -575,7 +699,7 @@ fn widening() void {
     while (k < 2) {
         ownership_heap.atom mut c = ownership_heap.new_atom(ownership_heap.atom_kind.cell,
             a.atoms[0].ty, ownership_heap.shape_of(ctx, a.atoms[0].ty),
-            ownership_heap.root_kind.nonnull);
+            ownership_facts.root_kind.nonnull, ownership_facts.provenance.established);
         c.fresh = true;
         u32 made = ownership_heap.push_atom(&a, c);
         ownership_heap.add_cell_slots(ctx, &a, made, a.atoms[0].ty);
@@ -642,9 +766,11 @@ fn covers() void {
     ownership_heap.content m = ownership_heap.measure(ctx, &s);
     assert(m.h == 0 && m.r == 5);
     // A P cover keeps each atom and joins each refined root.
-    s.atoms[1].root = ownership_heap.root_kind.nonnull;
+    s.atoms[1].root = ownership_facts.nullness{ownership_facts.root_kind.nonnull,
+        ownership_facts.provenance.established};
     ownership_heap.cover_roots(&s);
-    assert(s.atoms[1].root == ownership_heap.root_kind.joined);
+    assert(s.atoms[1].root.value == ownership_facts.root_kind.joined);
+    assert(s.atoms[1].root.how == ownership_facts.provenance.assumed);
     assert(obligations(&s) == 5 + owners);
 }
 
@@ -662,18 +788,21 @@ fn tests() void {
     ownership_heap.state mut yes = ownership_heap.clone(&s);
     defer ownership_heap.free_state(&yes);
     assert(ownership_heap.refine(&yes, cond, true));
-    assert(yes.atoms[0].root == ownership_heap.root_kind.nonnull && yes.witness);
+    assert(yes.atoms[0].root.value == ownership_facts.root_kind.nonnull && yes.witness);
+    // The edge establishes the root that its test read.
+    assert(yes.atoms[0].root.how == ownership_facts.provenance.established);
     ownership_heap.state mut no = ownership_heap.clone(&s);
     defer ownership_heap.free_state(&no);
     assert(ownership_heap.refine(&no, cond, false));
-    assert(no.atoms[0].root == ownership_heap.root_kind.null_root && no.witness);
+    assert(no.atoms[0].root.value == ownership_facts.root_kind.null_root && no.witness);
+    assert(no.atoms[0].root.how == ownership_facts.provenance.established);
     // A refined root contradicts the other edge.
     assert(!ownership_heap.refine(&yes, cond, false));
     assert(!ownership_heap.refine(&no, cond, true));
     // A joined root refines but clears the witness of the edge.
     ownership_heap.state mut joined = ownership_heap.clone(&s);
     defer ownership_heap.free_state(&joined);
-    joined.atoms[0].root = ownership_heap.root_kind.joined;
+    joined.atoms[0].root.value = ownership_facts.root_kind.joined;
     assert(ownership_heap.refine(&joined, cond, true));
     assert(!joined.witness);
     // A cell has a nonnull root.
@@ -701,7 +830,9 @@ fn requirements() void {
     defer ownership_heap.free_state(&s);
     // The entry value of q becomes a requirement and an empty root.
     assert(ownership_heap.require_empty(ctx, &s, 1));
-    assert(ctx->require_null[1] && s.atoms[1].root == ownership_heap.root_kind.null_root);
+    assert(ctx->require_null[1] && s.atoms[1].root.value == ownership_facts.root_kind.null_root);
+    // The caller supplies the empty owner, so the body assumes its null root.
+    assert(s.atoms[1].root.how == ownership_facts.provenance.assumed);
     // The entry next field of p becomes a field requirement.
     assert(ownership_heap.unfold(ctx, &s, 0));
     ownership_heap.value next = value_at(&s, field_key(ownership_heap.base_kind.cell, 0, 0));
@@ -709,10 +840,10 @@ fn requirements() void {
     assert(ctx->require_fields[0] == 1 && !ctx->require_null[0]);
     // A field of a field is no entry field: no requirement names it.
     ownership_heap.value bytes = value_at(&s, field_key(ownership_heap.base_kind.cell, 0, 1));
-    s.atoms[bytes.atom].root = ownership_heap.root_kind.nonnull;
+    s.atoms[bytes.atom].root.value = ownership_facts.root_kind.nonnull;
     assert(!ownership_heap.require_empty(ctx, &s, bytes.atom));
-    s.atoms[bytes.atom].root = ownership_heap.root_kind.free;
-    s.atoms[bytes.atom].status = ownership_heap.atom_status.unknown;
+    s.atoms[bytes.atom].root.value = ownership_facts.root_kind.free;
+    s.atoms[bytes.atom].status.value = ownership_facts.atom_status.unknown;
     assert(!ownership_heap.require_empty(ctx, &s, bytes.atom));
     // A fresh allocation is no input choice.
     u32 made = fresh_cell(ctx, &s, 5);

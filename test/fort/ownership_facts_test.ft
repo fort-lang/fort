@@ -1,0 +1,242 @@
+//! run
+//! flags: -I ../../src/fort
+//! stdout:
+//| provenance order
+//| root facts
+//| status facts
+//| sets
+//| pruning
+//| ownership facts ok
+/// Checks the fact types of the heap proof and the join of each type (D17.16, D17.18).
+import ownership_facts;
+
+ownership_facts.provenance[3] PROVENANCES = {ownership_facts.provenance.established,
+    ownership_facts.provenance.imported, ownership_facts.provenance.assumed};
+
+ownership_facts.root_kind[4] ROOTS = {ownership_facts.root_kind.null_root,
+    ownership_facts.root_kind.nonnull, ownership_facts.root_kind.free,
+    ownership_facts.root_kind.joined};
+
+ownership_facts.atom_status[6] STATUSES = {ownership_facts.atom_status.live,
+    ownership_facts.atom_status.released, ownership_facts.atom_status.maybe_released,
+    ownership_facts.atom_status.leaked, ownership_facts.atom_status.escaped,
+    ownership_facts.atom_status.unknown};
+
+fn order() void {
+    println("provenance order");
+    ownership_facts.provenance[3] all = PROVENANCES;
+    u64 mut i = 0;
+    while (i < all.len) {
+        u64 mut j = 0;
+        while (j < all.len) {
+            ownership_facts.provenance w = ownership_facts.weaker(all[i], all[j]);
+            // The weaker provenance is the later member of PROVENANCES, in either order.
+            assert(w == all[i > j ? i : j]);
+            assert(w == ownership_facts.weaker(all[j], all[i]));
+            j += 1;
+        }
+        // A provenance joined with itself stays.
+        assert(ownership_facts.weaker(all[i], all[i]) == all[i]);
+        // `established` changes nothing, and `assumed` takes everything.
+        assert(ownership_facts.weaker(all[i], ownership_facts.provenance.established) == all[i]);
+        assert(ownership_facts.weaker(ownership_facts.provenance.assumed, all[i]) ==
+            ownership_facts.provenance.assumed);
+        i += 1;
+    }
+    assert(ownership_facts.weaker(ownership_facts.provenance.imported,
+        ownership_facts.provenance.established) == ownership_facts.provenance.imported);
+    // The zero of a provenance is `assumed`, so a fact that no constructor sets claims no
+    // observation and removes no path.
+    ownership_facts.nullness zero = ownership_facts.nullness{};
+    assert(zero.value == ownership_facts.root_kind.null_root);
+    assert(zero.how == ownership_facts.provenance.assumed);
+    assert(!ownership_facts.may_prune(zero));
+    ownership_facts.status_fact no_status = ownership_facts.status_fact{};
+    assert(no_status.how == ownership_facts.provenance.assumed);
+}
+
+fn root_facts() void {
+    println("root facts");
+    ownership_facts.root_kind[4] values = ROOTS;
+    ownership_facts.provenance[3] hows = PROVENANCES;
+    u64 mut joins = 0;
+    u64 mut i = 0;
+    while (i < values.len) {
+        u64 mut j = 0;
+        while (j < values.len) {
+            ownership_facts.root_kind r = ownership_facts.join_root(values[i], values[j]);
+            // Two equal values stay; any other pair loses its path to `joined`.
+            if (i == j) {
+                assert(r == values[i]);
+            } else {
+                assert(r == ownership_facts.root_kind.joined);
+            }
+            assert(r == ownership_facts.join_root(values[j], values[i]));
+            u64 mut p = 0;
+            while (p < hows.len) {
+                u64 mut q = 0;
+                while (q < hows.len) {
+                    ownership_facts.nullness a = ownership_facts.nullness{values[i], hows[p]};
+                    ownership_facts.nullness b = ownership_facts.nullness{values[j], hows[q]};
+                    ownership_facts.nullness c = ownership_facts.join_nullness(a, b);
+                    ownership_facts.nullness d = ownership_facts.join_nullness(b, a);
+                    assert(c.value == r && c.how == ownership_facts.weaker(hows[p], hows[q]));
+                    assert(d.value == c.value && d.how == c.how);
+                    joins += 1;
+                    q += 1;
+                }
+                p += 1;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    assert(joins == 144);
+    // `joined` absorbs each value, and the join is associative on a sample of three facts.
+    ownership_facts.nullness lost = ownership_facts.nullness{ownership_facts.root_kind.joined,
+        ownership_facts.provenance.established};
+    ownership_facts.nullness some = ownership_facts.nullness{ownership_facts.root_kind.nonnull,
+        ownership_facts.provenance.imported};
+    ownership_facts.nullness none = ownership_facts.nullness{ownership_facts.root_kind.null_root,
+        ownership_facts.provenance.assumed};
+    ownership_facts.nullness left = ownership_facts.join_nullness(
+        ownership_facts.join_nullness(lost, some), none);
+    ownership_facts.nullness right = ownership_facts.join_nullness(lost,
+        ownership_facts.join_nullness(some, none));
+    assert(left.value == right.value && left.how == right.how);
+    assert(left.value == ownership_facts.root_kind.joined);
+    assert(left.how == ownership_facts.provenance.assumed);
+    // `assume` keeps the value and weakens the provenance to `assumed`.
+    ownership_facts.nullness kept = ownership_facts.assume(some);
+    assert(kept.value == ownership_facts.root_kind.nonnull);
+    assert(kept.how == ownership_facts.provenance.assumed);
+    assert(ownership_facts.assume(none).how == ownership_facts.provenance.assumed);
+}
+
+fn status_facts() void {
+    println("status facts");
+    ownership_facts.atom_status[6] values = STATUSES;
+    ownership_facts.provenance[3] hows = PROVENANCES;
+    u64 mut joins = 0;
+    u64 mut i = 0;
+    while (i < values.len) {
+        u64 mut j = 0;
+        while (j < values.len) {
+            ownership_facts.atom_status st = ownership_facts.join_status(values[i], values[j]);
+            assert(st == ownership_facts.join_status(values[j], values[i]));
+            if (i == j) { assert(st == values[i]); }
+            u64 mut p = 0;
+            while (p < hows.len) {
+                u64 mut q = 0;
+                while (q < hows.len) {
+                    ownership_facts.status_fact a = ownership_facts.status_fact{values[i],
+                        hows[p]};
+                    ownership_facts.status_fact b = ownership_facts.status_fact{values[j],
+                        hows[q]};
+                    ownership_facts.status_fact c = ownership_facts.join_status_fact(a, b);
+                    assert(c.value == st && c.how == ownership_facts.weaker(hows[p], hows[q]));
+                    joins += 1;
+                    q += 1;
+                }
+                p += 1;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    assert(joins == 324);
+    // A release on one path and a live allocation on the other is a possible release.
+    assert(ownership_facts.join_status(ownership_facts.atom_status.live,
+        ownership_facts.atom_status.released) == ownership_facts.atom_status.maybe_released);
+    // An unknown or escaped side makes the join unknown.
+    assert(ownership_facts.join_status(ownership_facts.atom_status.escaped,
+        ownership_facts.atom_status.live) == ownership_facts.atom_status.unknown);
+    assert(ownership_facts.join_status(ownership_facts.atom_status.leaked,
+        ownership_facts.atom_status.unknown) == ownership_facts.atom_status.unknown);
+    // A reported loss on one side gives the other side.
+    assert(ownership_facts.join_status(ownership_facts.atom_status.leaked,
+        ownership_facts.atom_status.released) == ownership_facts.atom_status.released);
+    assert(ownership_facts.join_status(ownership_facts.atom_status.maybe_released,
+        ownership_facts.atom_status.leaked) == ownership_facts.atom_status.maybe_released);
+    ownership_facts.status_fact gone = ownership_facts.status_fact{
+        ownership_facts.atom_status.released, ownership_facts.provenance.established};
+    ownership_facts.status_fact kept = ownership_facts.assume_status(gone);
+    assert(kept.value == ownership_facts.atom_status.released);
+    assert(kept.how == ownership_facts.provenance.assumed);
+}
+
+fn sets() void {
+    println("sets");
+    ownership_facts.may_set nothing = ownership_facts.may_set{0};
+    ownership_facts.may_set low = ownership_facts.may_set{1};
+    ownership_facts.may_set high = ownership_facts.may_set{9223372036854775808};
+    ownership_facts.may_set every = ownership_facts.may_set{18446744073709551615};
+    // A may-set keeps a member of either side: the first and the last bit, and each bit.
+    assert(ownership_facts.join_may_set(low, high).bits == 9223372036854775809);
+    assert(ownership_facts.join_may_set(high, low).bits == 9223372036854775809);
+    assert(ownership_facts.join_may_set(nothing, low).bits == 1);
+    assert(ownership_facts.join_may_set(low, low).bits == 1);
+    assert(ownership_facts.join_may_set(every, nothing).bits == 18446744073709551615);
+    assert(ownership_facts.join_may_set(nothing, nothing).bits == 0);
+    ownership_facts.must_set none = ownership_facts.must_set{0};
+    ownership_facts.must_set first = ownership_facts.must_set{1};
+    ownership_facts.must_set last = ownership_facts.must_set{9223372036854775808};
+    ownership_facts.must_set all = ownership_facts.must_set{18446744073709551615};
+    // A must-set keeps a member of both sides only.
+    assert(ownership_facts.join_must_set(first, last).bits == 0);
+    assert(ownership_facts.join_must_set(last, first).bits == 0);
+    assert(ownership_facts.join_must_set(all, first).bits == 1);
+    assert(ownership_facts.join_must_set(last, all).bits == 9223372036854775808);
+    assert(ownership_facts.join_must_set(all, all).bits == 18446744073709551615);
+    assert(ownership_facts.join_must_set(none, all).bits == 0);
+    // The two joins differ on the same bits: the may-set keeps 3, the must-set keeps 1.
+    assert(ownership_facts.join_may_set(ownership_facts.may_set{1},
+        ownership_facts.may_set{3}).bits == 3);
+    assert(ownership_facts.join_must_set(ownership_facts.must_set{1},
+        ownership_facts.must_set{3}).bits == 1);
+}
+
+fn pruning() void {
+    println("pruning");
+    ownership_facts.root_kind[4] values = ROOTS;
+    ownership_facts.provenance[3] hows = PROVENANCES;
+    u64 mut pruning_facts = 0;
+    u64 mut i = 0;
+    while (i < values.len) {
+        u64 mut p = 0;
+        while (p < hows.len) {
+            bool prunes = ownership_facts.may_prune(ownership_facts.nullness{values[i], hows[p]});
+            if (prunes) {
+                // Only an established null or nonnull root removes a path.
+                assert(hows[p] == ownership_facts.provenance.established);
+                assert(values[i] == ownership_facts.root_kind.null_root ||
+                    values[i] == ownership_facts.root_kind.nonnull);
+                pruning_facts += 1;
+            }
+            p += 1;
+        }
+        i += 1;
+    }
+    assert(pruning_facts == 2);
+    assert(!ownership_facts.may_prune(ownership_facts.nullness{
+        ownership_facts.root_kind.nonnull, ownership_facts.provenance.imported}));
+    assert(!ownership_facts.may_prune(ownership_facts.nullness{
+        ownership_facts.root_kind.free, ownership_facts.provenance.established}));
+    // A join with an assumed fact removes no path any more.
+    ownership_facts.nullness seen = ownership_facts.nullness{ownership_facts.root_kind.null_root,
+        ownership_facts.provenance.established};
+    assert(ownership_facts.may_prune(seen));
+    assert(!ownership_facts.may_prune(ownership_facts.join_nullness(seen,
+        ownership_facts.nullness{ownership_facts.root_kind.null_root,
+        ownership_facts.provenance.assumed})));
+}
+
+fn main() i32 {
+    order();
+    root_facts();
+    status_facts();
+    sets();
+    pruning();
+    println("ownership facts ok");
+    return 0;
+}

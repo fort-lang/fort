@@ -11,6 +11,7 @@
 //| heap calls ok
 /// Checks heap summaries at calls (D17.16, D17.18, `spec/fir.md` 14 Calls).
 import ownership_api;
+import ownership_facts;
 import ownership_heap;
 import ownership_heap_env;
 
@@ -90,8 +91,16 @@ fn caller_storage() void {
     assert(ownership_heap_env.text(&row) == "h.second");
     // The summary of clear releases both caller owners and leaves them empty.
     ownership_heap.summary* s = ownership_heap_env.summary(&c, "clear");
-    assert(s->interface.len == 2 && (s->post.released & 3) == 3);
+    assert(s->interface.len == 2 && (s->post.released.bits & 3) == 3);
     assert(s->interface[0].needs_shape && s->interface[1].needs_shape);
+    // The release of drop_list is its own operation. Clear takes it from a summary, so clear
+    // assumes it.
+    ownership_heap.summary* drop = ownership_heap_env.summary(&c, "drop_list");
+    assert(drop->post.atoms[0].status.value == ownership_facts.atom_status.released);
+    assert(drop->post.atoms[0].status.how == ownership_facts.provenance.established);
+    assert(s->post.atoms[0].status.value == ownership_facts.atom_status.released);
+    assert(s->post.atoms[0].status.how == ownership_facts.provenance.assumed);
+    assert(s->post.atoms[1].status.how == ownership_facts.provenance.assumed);
 }
 
 // Each argument binds its own atom. Two arguments that designate one caller storage cannot

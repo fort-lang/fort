@@ -15,6 +15,7 @@
 /// Each group holds a proof that covers each chain length: a loop invariant or a recursive
 /// summary at a fixed point, never a bounded unrolling.
 import ownership_api;
+import ownership_facts;
 import ownership_heap;
 import ownership_heap_env;
 
@@ -94,11 +95,11 @@ fn empty_pool() void {
     assert(s->interface.len == 1 && s->callers.len == 1);
     assert(s->interface[0].kind == ownership_heap.atom_kind.region);
     assert(interface_needs(&c, "pool_free", 0));
-    assert((s->post.released & 1) == 1);
+    assert((s->post.released.bits & 1) == 1);
     assert(s->returns && s->witness && !s->residual);
     // pool_add_block moves the old head into the new block without its shape.
     assert(!interface_needs(&c, "pool_add_block", 0));
-    assert((ownership_heap_env.summary(&c, "pool_add_block")->post.released & 1) == 0);
+    assert((ownership_heap_env.summary(&c, "pool_add_block")->post.released.bits & 1) == 0);
     // The returned head of an emptied pool is null, so no obligation leaves with it.
     ownership_heap.summary* left = ownership_heap_env.summary(&c, "left_empty");
     assert(left->post.slots[0].v.kind == ownership_heap.value_kind.empty);
@@ -182,14 +183,14 @@ fn unbounded_chain() void {
     assert(ownership_heap_env.proved(&c, "two_chains"));
     ownership_heap.summary* drop = ownership_heap_env.summary(&c, "drop_chain");
     assert(drop->interface.len == 1 && drop->interface[0].kind == ownership_heap.atom_kind.region);
-    assert(drop->interface[0].needs_shape && (drop->post.released & 1) == 1);
+    assert(drop->interface[0].needs_shape && (drop->post.released.bits & 1) == 1);
     // The result of build is one region: a summary group of fresh nodes and payloads.
     ownership_heap.summary* made = ownership_heap_env.summary(&c, "build");
     u64 result = cast(made->post.slots[0].v.atom, u64);
     assert(made->post.slots[0].v.kind == ownership_heap.value_kind.owned);
     assert(made->post.atoms[result].kind == ownership_heap.atom_kind.region);
     assert(made->post.atoms[result].fresh);
-    assert(made->post.atoms[result].root == ownership_heap.root_kind.joined);
+    assert(made->post.atoms[result].root.value == ownership_facts.root_kind.joined);
     assert(ownership_heap_env.within_limits(&c) > 0);
 }
 
@@ -230,7 +231,7 @@ fn recursive_cleanup() void {
     assert(ownership_heap_env.rounds(&c, "tail_first") == 3);
     assert(ownership_heap_env.rounds(&c, "use_list") == 0);
     ownership_heap.summary* list = ownership_heap_env.summary(&c, "drop_list");
-    assert(list->interface[0].needs_shape && (list->post.released & 1) == 1);
+    assert(list->interface[0].needs_shape && (list->post.released.bits & 1) == 1);
 }
 
 // A transferred payload stays live at its new owner while the loop releases each node. The
@@ -272,7 +273,7 @@ fn transferred_child() void {
     assert(ownership_heap_env.unproved(&c, "lose_last",
         ownership_api.incomplete_reason.missing_path));
     ownership_heap.summary* keep = ownership_heap_env.summary(&c, "keep_last");
-    assert(keep->interface[0].needs_shape && (keep->post.released & 1) == 1);
+    assert(keep->interface[0].needs_shape && (keep->post.released.bits & 1) == 1);
     u64 result = cast(keep->post.slots[0].v.atom, u64);
     assert(keep->post.slots[0].v.kind == ownership_heap.value_kind.owned);
     assert(keep->post.atoms[result].kind == ownership_heap.atom_kind.flat);
@@ -347,6 +348,19 @@ fn repeated_site() void {
     defer ownership_heap_env.close(&c);
     ownership_heap_env.run(&c, text[..], names[..]);
     assert(ownership_heap_env.proved(&c, "make"));
+    // An allocation establishes its nonnull root, its live status, and its empty fields.
+    ownership_heap.summary* fresh = ownership_heap_env.summary(&c, "make");
+    u32 cell = fresh->post.slots[0].v.atom;
+    assert(fresh->post.atoms[cast(cell, u64)].root.value == ownership_facts.root_kind.nonnull);
+    assert(fresh->post.atoms[cast(cell, u64)].root.how == ownership_facts.provenance.established);
+    assert(fresh->post.atoms[cast(cell, u64)].status.how ==
+        ownership_facts.provenance.established);
+    ownership_heap.slot_key mut next = ownership_heap.key_of(ownership_heap.base_kind.cell, cell);
+    assert(ownership_heap.extend(&next, 0));
+    u64 at = ownership_heap.find_slot(&fresh->post, next);
+    assert(at != ownership_heap.U64_MAX);
+    assert(fresh->post.slots[at].v.kind == ownership_heap.value_kind.empty);
+    assert(fresh->post.slots[at].v.nullness.how == ownership_facts.provenance.established);
     assert(ownership_heap_env.failed(&c, "two"));
     ownership_heap_env.event_row lost = ownership_heap_env.first(&c, "two");
     assert(lost.kind == ownership_api.event_kind.lost_ownership);
