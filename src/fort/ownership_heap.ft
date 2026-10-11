@@ -12,6 +12,8 @@ import diag;
 import fir;
 import fir_flow;
 import ownership_api;
+import ownership_facts;
+import ownership_facts.{atom_status, may_set, nullness, provenance, root_kind, status_fact};
 import ownership_flow;
 import ownership_graph;
 import ownership_keys;
@@ -37,35 +39,11 @@ u32 WIDEN_AFTER = 4;
 // A recursive component runs at most this many rounds before it publishes. W bounds them too.
 u64 ROUND_LIMIT = 16;
 
-/// The nullness of a root pointer (spec/memory-model.md 2.7). `free` is an input choice of the
-/// caller, so each value is feasible. `joined` is an abstraction that lost the path of each value.
-enum root_kind {
-    null_root,
-    nonnull,
-    free,
-    joined,
-}
-
 enum atom_kind {
     cell,
     region,
     flat,
     opaque,
-}
-
-/// What the proof knows about the allocations of an atom. `released` holds when the root is
-/// nonnull, because a null root has no allocation. `leaked` names an obligation that an event
-/// reported lost: its storage stays allocated, so its views stay valid. `escaped` names an
-/// obligation that left the proof after an incomplete-proof event: an unknown effect took it,
-/// or its owner ended while its status was unknown. The proof does not know if its storage
-/// stays allocated. `unknown` names an obligation that an unknown effect can change.
-enum atom_status {
-    live,
-    released,
-    maybe_released,
-    leaked,
-    escaped,
-    unknown,
 }
 
 enum base_kind {
@@ -99,45 +77,53 @@ enum location_kind {
     unknown,
 }
 
+// Each field of `atom`, `value`, `state`, `summary` and `interface_entry` has a fact type of
+// `ownership_facts`, and the join of its struct calls the join of that type, or the field has
+// one tag `// join: <kind>`. `same`: an identity that a join keeps only when both sides agree.
+// `owner`: a container or an index whose records the join of the struct pairs. `none`: no path
+// fact, or a fact that the join drops. `may` and `must`: a flag that holds on some path or on
+// each path, which has no fact type yet. A join function marks a record that one side gives with
+// `// join: copy`. `tools/fact_joins.py` holds these rules.
 struct atom {
-    atom_kind kind;
-    atom_status status;
-    // A cell or region: the struct type. A flat or opaque atom: its element type.
-    types.node* ty;
+    atom_kind kind; // join: same
+    status_fact status;
+    // A cell or region: the struct type. A flat or opaque atom: its element type. A join keeps
+    // the type of its first side.
+    types.node* ty; // join: none
     // The index of the template + 1, or 0.
-    u32 shape;
-    root_kind root;
+    u32 shape; // join: same
+    nullness root;
     // The interface atoms whose members this atom holds, one bit each.
-    u64 origin;
+    u64 origin; // join: may
     // The atom holds an allocation of this computation.
-    bool fresh;
+    bool fresh; // join: may
     // Each member belongs to an interface atom, and the root of none is a member.
-    bool strict;
+    bool strict; // join: must
     // The members are a free input choice of the caller.
-    bool choice;
+    bool choice; // join: must
     // A view or an address of the atom reached an unknown effect, so a later unknown effect can
     // change it too.
-    bool exposed;
+    bool exposed; // join: may
     // The atom is the entry value of interface atom `handle`, or of its owned field
     // `handle_field` when that field is not NONE (`spec/fir.md` 14 Calls). NONE otherwise.
-    u32 handle;
-    u32 handle_field;
+    u32 handle; // join: same
+    u32 handle_field; // join: same
     // A region whose root node, when nonnull, has each owned field empty: a fold of a node with
     // no owned child keeps that fact, and an unfold gives empty children.
-    bool empty_leaves;
+    bool empty_leaves; // join: must
     // A member can keep, in a borrowed field that has no slot, a reference that this body made.
     // A new atom has the fact; only an operation that proves the stored references clears it:
     // an allocation (its storage is zero), a fold or a cover that reads each slot that it drops,
     // an unfold that gives each child the fact of its parent, and the graft of a summary.
-    bool borrows;
+    bool borrows; // join: may
     // A member can keep, in a borrowed field that has no slot, a reference to storage that a
     // parameter designates. That storage outlives this body, but in a caller it is storage that
     // an argument reaches. A new atom has this fact too.
-    bool params;
+    bool params; // join: may
     // An absorbed atom names the atom that holds it now, so a value copied before a fold can
     // find its current source. NONE otherwise.
-    u32 into;
-    bool used;
+    u32 into; // join: none
+    bool used; // join: none
 }
 
 struct slot_key {
@@ -154,26 +140,28 @@ struct slot_key {
 // region whose fold proved each such field external. Its `target`, when its base is
 // `caller`, names the caller slot whose entry value it is. An unknown value with `exact` is
 // the work of an unknown effect. Any other unknown reference lost its facts in this body.
+// An empty value has a null root: `empty_value` and `null_value` give its nullness fact.
 struct value {
-    value_kind kind;
-    u32 atom;
-    u32 count;
-    u32[8] sources;
-    bool exact;
-    bool external;
-    root_kind nullness;
-    slot_key target;
+    value_kind kind; // join: same
+    u32 atom; // join: owner
+    u32 count; // join: owner
+    u32[8] sources; // join: owner
+    bool exact; // join: must
+    bool external; // join: may
+    nullness nullness;
+    slot_key target; // join: same
     // A scalar that tests the root of `test`, or NONE. True means a nonnull root when
-    // `test_nonnull` is true. A known scalar has the truth value `truth`.
-    u32 test;
-    bool test_nonnull;
-    bool known;
-    bool truth;
+    // `test_nonnull` is true. A known scalar has the truth value `truth`. A join of two scalars
+    // drops these facts and `number`.
+    u32 test; // join: none
+    bool test_nonnull; // join: none
+    bool known; // join: none
+    bool truth; // join: none
     // A scalar with the known integer value `number`.
-    bool numbered;
-    i64 number;
+    bool numbered; // join: none
+    i64 number; // join: none
     // The parameter whose designated storage a view or an address reaches, NONE, or ANY_PARAM.
-    u32 param;
+    u32 param; // join: same
 }
 
 struct slot {
@@ -187,18 +175,18 @@ struct slot {
 
 // Each block keeps one joined state. A state that no path reaches is bottom.
 struct state {
-    bool reached;
-    bool witness;
-    slot mut@ own slots;
-    u64 slots_len;
-    atom mut@ own atoms;
-    u64 atoms_len;
+    bool reached; // join: may
+    bool witness; // join: may
+    slot mut@ own slots; // join: owner
+    u64 slots_len; // join: owner
+    atom mut@ own atoms; // join: owner
+    u64 atoms_len; // join: owner
     // For each local: 0 live, 1 ended, 2 possibly ended.
-    u8 mut@ own ended;
+    u8 mut@ own ended; // join: owner
     // The interface atoms with a possibly released member.
-    u64 released;
-    bool lossy;
-    ownership_api.lost_fact loss;
+    may_set released;
+    bool lossy; // join: may
+    ownership_api.lost_fact loss; // join: none
 }
 
 struct shape {
@@ -213,15 +201,15 @@ struct shape {
 /// One interface atom of a summary: an owned leaf of a by-value parameter (a local base) or of
 /// caller storage (a caller base).
 struct interface_entry {
-    slot_key key;
-    atom_kind kind;
-    types.node* ty;
-    u32 shape;
-    bool needs_shape;
+    slot_key key; // join: same
+    atom_kind kind; // join: same
+    types.node* ty; // join: same
+    u32 shape; // join: same
+    bool needs_shape; // join: may
     // The caller supplies an empty owner here, or an empty owned field of its root (`spec/fir.md`
     // 14 Calls).
-    bool require_null;
-    u64 require_fields;
+    bool require_null; // join: may
+    u64 require_fields; // join: may
 }
 
 /// The caller storage that a borrowed pointer parameter designates.
@@ -233,21 +221,21 @@ struct caller_entry {
 /// The heap summary of one body. `post` keeps the exit state: the slots of caller storage and of
 /// the result, and the atoms that they reach. Interface atom i keeps index i.
 struct summary {
-    ownership_api.proof_status proof;
-    bool known;
-    bool returns;
-    bool witness;
+    ownership_api.proof_status proof; // join: none
+    bool known; // join: none
+    bool returns; // join: may
+    bool witness; // join: may
     // An unknown effect changed caller-visible facts, so no caller can apply this summary.
-    bool residual;
-    interface_entry mut@ own interface;
-    caller_entry mut@ own callers;
+    bool residual; // join: may
+    interface_entry mut@ own interface; // join: owner
+    caller_entry mut@ own callers; // join: owner
     // The parameters whose designated storage the body reads, one bit each. `reads_high`
     // stands for each parameter from 64 on, which no bit can name.
-    u64 view_reads;
-    bool reads_high;
+    u64 view_reads; // join: may
+    bool reads_high; // join: may
     // The events that the computation of this summary recorded.
-    u32 events;
-    state post;
+    u32 events; // join: none
+    state post; // join: owner
 }
 
 /// A published summary that a call can apply. A member of the component under solution is
@@ -362,19 +350,24 @@ fn grow(u64 cap, u64 need) u64 {
     return next;
 }
 
-fn join_root(root_kind a, root_kind b) root_kind {
-    if (a == b) { return a; }
-    return root_kind.joined;
-}
-
 fn bit(u64 i) u64 { return i < 64 ? cast(1, u64) << i : 0; }
 
+// An empty value whose null root the proof assumes. Each other value constructor starts from it.
 fn empty_value() value {
     value mut v = value{};
     v.kind = value_kind.empty;
+    v.nullness = nullness{root_kind.null_root, provenance.assumed};
     v.test = NONE;
     v.atom = NONE;
     v.param = NONE;
+    return v;
+}
+
+// An empty value whose null root an operation of this body establishes: a null constant, a
+// move, a new allocation, the end of a storage, or a release that zeroes its place.
+fn null_value() value {
+    value mut v = empty_value();
+    v.nullness = nullness{root_kind.null_root, provenance.established};
     return v;
 }
 
@@ -425,15 +418,28 @@ fn external_view() value {
     value mut v = empty_value();
     v.kind = value_kind.view;
     v.external = true;
-    v.nullness = root_kind.joined;
+    v.nullness = nullness{root_kind.joined, provenance.assumed};
     return v;
 }
 
-fn address_value(slot_key target) value {
+// The address of slot `target`, with the nullness fact of that address.
+fn address_value(slot_key target, nullness fact) value {
     value mut v = empty_value();
     v.kind = value_kind.address;
     v.target = target;
+    v.nullness = fact;
     return v;
+}
+
+// The nullness of the address of slot `k`. The storage of a local has an address. The storage
+// that a parameter designates has the input choice of the caller. A cell slot has the root fact
+// of its cell.
+fn address_fact(state* s, slot_key k) nullness {
+    if (k.base == base_kind.local) { return nullness{root_kind.nonnull, provenance.established}; }
+    if (k.base == base_kind.cell && cast(k.id, u64) < s->atoms_len) {
+        return s->atoms[cast(k.id, u64)].root;
+    }
+    return nullness{root_kind.free, provenance.assumed};
 }
 
 fn key_of(base_kind base, u32 id) slot_key {
@@ -513,7 +519,7 @@ fn same_value(value a, value b) bool {
         return a.atom == b.atom;
     case value_kind.view:
         if (a.count != b.count || a.exact != b.exact || a.external != b.external ||
-            a.nullness != b.nullness || a.param != b.param) { return false; }
+            a.nullness.value != b.nullness.value || a.param != b.param) { return false; }
         u32 mut i = 0;
         while (i < a.count) {
             if (a.sources[i] != b.sources[i]) { return false; }
@@ -1128,13 +1134,16 @@ fn name_below(context mut* c, state* s, slot_key owner, slot_key field, types.no
 
 // ---- atoms -----------------------------------------------------------------------------------
 
-fn new_atom(atom_kind kind, types.node* ty, u32 shape_index, root_kind root) atom {
+// A new live atom. Its root and its status take the provenance `how` of the operation that
+// makes it.
+fn new_atom(atom_kind kind, types.node* ty, u32 shape_index, root_kind root, provenance how)
+    atom {
     atom mut a = atom{};
     a.kind = kind;
-    a.status = atom_status.live;
+    a.status = status_fact{atom_status.live, how};
     a.ty = ty;
     a.shape = shape_index;
-    a.root = root;
+    a.root = nullness{root, how};
     a.handle = NONE;
     a.handle_field = NONE;
     a.into = NONE;
@@ -1182,7 +1191,7 @@ fn unfold(context mut* c, state mut* s, u32 a) bool {
         (parent.handle != NONE && parent.handle_field == NONE));
     atom mut* root = &s->atoms[cast(a, u64)];
     root->kind = atom_kind.cell;
-    root->root = root_kind.nonnull;
+    root->root = nullness{root_kind.nonnull, provenance.assumed};
     root->empty_leaves = false;
     // The borrowed fields of the root become slots again, and they hold no reference that the
     // proof follows; the children keep the fact.
@@ -1198,7 +1207,8 @@ fn unfold(context mut* c, state mut* s, u32 a) bool {
                 item.key.depth == 1) {
                 atom mut child = new_atom(role == field_role.recursive ? atom_kind.region :
                     atom_kind.flat, role == field_role.recursive ? parent.ty : item.ty->elem,
-                    role == field_role.recursive ? parent.shape : 0, child_root);
+                    role == field_role.recursive ? parent.shape : 0, child_root,
+                    provenance.assumed);
                 child.origin = parent.origin;
                 child.fresh = parent.fresh;
                 child.strict = child_strict;
@@ -1245,7 +1255,7 @@ fn unfold(context mut* c, state mut* s, u32 a) bool {
 // the template, a foldable cell, or nothing, and each payload field holds a flat atom or nothing.
 fn foldable(context mut* c, state* s, u32 a, u32 depth) bool {
     atom item = s->atoms[cast(a, u64)];
-    if (item.kind != atom_kind.cell || item.status != atom_status.live || item.shape == 0 ||
+    if (item.kind != atom_kind.cell || item.status.value != atom_status.live || item.shape == 0 ||
         depth > 64) { return false; }
     u64 mut i = 0;
     while (i < s->slots_len) {
@@ -1256,7 +1266,7 @@ fn foldable(context mut* c, state* s, u32 a, u32 depth) bool {
                 (role != field_role.recursive && role != field_role.payload)) { return false; }
             if (field.v.kind == value_kind.owned) {
                 atom child = s->atoms[cast(field.v.atom, u64)];
-                if (child.status != atom_status.live || field.v.atom == a) { return false; }
+                if (child.status.value != atom_status.live || field.v.atom == a) { return false; }
                 if (role == field_role.recursive) {
                     if (child.kind == atom_kind.cell) {
                         if (child.ty != item.ty || !foldable(c, s, field.v.atom, depth + 1)) {
@@ -1310,7 +1320,7 @@ fn fold_now(context mut* c, state mut* s, u32 a) void {
     }
     atom mut* root = &s->atoms[cast(a, u64)];
     root->kind = atom_kind.region;
-    root->root = root_kind.nonnull;
+    root->root = nullness{root_kind.nonnull, provenance.assumed};
     root->choice = false;
     // A later unfold names the current fields, not the entry fields.
     root->handle = NONE;
@@ -1509,8 +1519,8 @@ fn measure(context* c, state* s) content {
         atom item = s->atoms[i];
         if (item.used) {
             out.r += 1;
-            if (item.kind != atom_kind.cell && (item.root == root_kind.null_root ||
-                item.root == root_kind.nonnull)) { out.p += 1; }
+            if (item.kind != atom_kind.cell && (item.root.value == root_kind.null_root ||
+                item.root.value == root_kind.nonnull)) { out.p += 1; }
         }
         i += 1;
     }
@@ -1568,8 +1578,9 @@ fn cover(state mut* s) void {
     i = 0;
     while (i < s->atoms_len) {
         atom item = s->atoms[i];
-        if (item.used && (item.status == atom_status.released ||
-            item.status == atom_status.maybe_released) && owner_of(s, cast(i, u32)) == U64_MAX) {
+        if (item.used && (item.status.value == atom_status.released ||
+            item.status.value == atom_status.maybe_released) &&
+            owner_of(s, cast(i, u32)) == U64_MAX) {
             s->atoms[i].used = false;
         }
         i += 1;
@@ -1582,9 +1593,9 @@ fn cover_roots(state mut* s) void {
     u64 mut i = 0;
     while (i < s->atoms_len) {
         atom item = s->atoms[i];
-        if (item.used && item.kind != atom_kind.cell && (item.root == root_kind.null_root ||
-            item.root == root_kind.nonnull)) {
-            s->atoms[i].root = root_kind.joined;
+        if (item.used && item.kind != atom_kind.cell && (item.root.value == root_kind.null_root ||
+            item.root.value == root_kind.nonnull)) {
+            s->atoms[i].root = nullness{root_kind.joined, provenance.assumed};
         }
         i += 1;
     }
@@ -1715,13 +1726,16 @@ fn canonical(context mut* c, state mut* s) bool {
     while (i < s->slots_len) {
         value mut* v = &s->slots[i].v;
         if (v->kind == value_kind.owned &&
-            s->atoms[cast(v->atom, u64)].root == root_kind.null_root &&
+            s->atoms[cast(v->atom, u64)].root.value == root_kind.null_root &&
             s->atoms[cast(v->atom, u64)].kind != atom_kind.cell) {
+            // The empty owner keeps the null fact of its atom.
+            nullness gone = s->atoms[cast(v->atom, u64)].root;
             *v = empty_value();
+            v->nullness = gone;
         } else if (v->kind == value_kind.view) {
             u32 mut j = 0;
             while (j < v->count) {
-                if (s->atoms[cast(v->sources[j], u64)].root == root_kind.null_root) {
+                if (s->atoms[cast(v->sources[j], u64)].root.value == root_kind.null_root) {
                     remove_source(v, v->sources[j]);
                     continue;
                 }
@@ -1739,8 +1753,8 @@ fn canonical(context mut* c, state mut* s) bool {
         atom item = s->atoms[i];
         // A null root has no allocation, so only a view or an interface index keeps it.
         keep[i] = item.used && (i < c->interface_len ||
-            ((item.status == atom_status.live || item.status == atom_status.unknown) &&
-            item.root != root_kind.null_root));
+            ((item.status.value == atom_status.live || item.status.value == atom_status.unknown) &&
+            item.root.value != root_kind.null_root));
         i += 1;
     }
     bool mut changed = true;
@@ -1851,12 +1865,14 @@ fn canonical(context mut* c, state mut* s) bool {
     return true;
 }
 
+// A provenance changes no comparison: the joins keep it, and no rule reads it.
 fn same_atom(atom a, atom b) bool {
-    return a.kind == b.kind && a.status == b.status && a.ty == b.ty && a.shape == b.shape &&
-        a.root == b.root && a.origin == b.origin && a.fresh == b.fresh && a.strict == b.strict &&
-        a.choice == b.choice && a.exposed == b.exposed && a.handle == b.handle &&
-        a.handle_field == b.handle_field && a.empty_leaves == b.empty_leaves &&
-        a.borrows == b.borrows && a.params == b.params && a.used == b.used;
+    return a.kind == b.kind && a.status.value == b.status.value && a.ty == b.ty &&
+        a.shape == b.shape && a.root.value == b.root.value && a.origin == b.origin &&
+        a.fresh == b.fresh && a.strict == b.strict && a.choice == b.choice &&
+        a.exposed == b.exposed && a.handle == b.handle && a.handle_field == b.handle_field &&
+        a.empty_leaves == b.empty_leaves && a.borrows == b.borrows && a.params == b.params &&
+        a.used == b.used;
 }
 
 /// Compares two canonical states. Each compared row pays one W unit.
@@ -1868,8 +1884,8 @@ fn equal(context mut* c, state* a, state* b, bool mut* same) bool {
         *same = true;
         return true;
     }
-    if (a->witness != b->witness || a->released != b->released || a->lossy != b->lossy ||
-        a->slots_len != b->slots_len || a->atoms_len != b->atoms_len ||
+    if (a->witness != b->witness || a->released.bits != b->released.bits ||
+        a->lossy != b->lossy || a->slots_len != b->slots_len || a->atoms_len != b->atoms_len ||
         a->ended.len != b->ended.len) { return true; }
     u64 mut i = 0;
     while (i < a->ended.len) {
@@ -1891,40 +1907,36 @@ fn equal(context mut* c, state* a, state* b, bool mut* same) bool {
     return true;
 }
 
-fn join_status(atom_status a, atom_status b) atom_status {
-    if (a == b) { return a; }
-    if (a == atom_status.unknown || b == atom_status.unknown ||
-        a == atom_status.escaped || b == atom_status.escaped) { return atom_status.unknown; }
-    if (a == atom_status.leaked) { return b; }
-    if (b == atom_status.leaked) { return a; }
-    return atom_status.maybe_released;
-}
-
 // Joins two records of one atom. A root that each witnessed side refined from one free input choice
 // stays a free choice: each of its values is feasible on a witnessed path (`spec/toolchain.md`
 // 4.2).
 fn join_atom(atom a, atom b, bool witness_a, bool witness_b) atom {
-    atom mut out = a;
+    // The join starts from `a`, and it assigns each fact below.
+    atom mut out = a; // join: copy
     if (a.kind != b.kind) {
         out.kind = atom_kind.opaque;
         out.shape = 0;
     }
     if (a.shape != b.shape) { out.shape = 0; }
-    // A null root holds no allocation, so its status says nothing about the other side.
-    out.status = join_status(a.status, b.status);
-    if (a.root == root_kind.null_root) { out.status = b.status; }
-    if (b.root == root_kind.null_root) { out.status = a.status; }
-    out.root = join_root(a.root, b.root);
-    if (a.choice && b.choice && witness_a && witness_b && a.root != root_kind.joined &&
-        b.root != root_kind.joined) { out.root = a.root == b.root ? a.root : root_kind.free; }
+    // A null root holds no allocation, so its status says nothing about the other side: that side
+    // takes the status of the other record.
+    bool null_a = a.root.value == root_kind.null_root;
+    bool null_b = b.root.value == root_kind.null_root;
+    out.status = ownership_facts.join_status_fact(null_a && !null_b ? b.status : a.status,
+        null_b ? a.status : b.status);
+    out.root = ownership_facts.join_nullness(a.root, b.root);
+    if (a.choice && b.choice && witness_a && witness_b && a.root.value != root_kind.joined &&
+        b.root.value != root_kind.joined) {
+        out.root.value = a.root.value == b.root.value ? a.root.value : root_kind.free;
+    }
     out.origin = a.origin | b.origin;
     out.fresh = a.fresh || b.fresh;
     out.strict = a.strict && b.strict;
     out.choice = a.choice && b.choice;
     out.exposed = a.exposed || b.exposed;
     // A null root has no leaves, so only the other side says whether they are empty.
-    bool leaves_a = a.empty_leaves || a.root == root_kind.null_root;
-    bool leaves_b = b.empty_leaves || b.root == root_kind.null_root;
+    bool leaves_a = a.empty_leaves || a.root.value == root_kind.null_root;
+    bool leaves_b = b.empty_leaves || b.root.value == root_kind.null_root;
     out.empty_leaves = leaves_a && leaves_b && out.kind == atom_kind.region &&
         (a.empty_leaves || b.empty_leaves);
     out.borrows = a.borrows || b.borrows;
@@ -2055,7 +2067,7 @@ fn pair_values(state* x, state* y, pairing mut* p, value vx, value vy, u32 depth
         u64 a = cast(vx.atom, u64);
         if (p->px[a] != NONE) { return; }
         bool keep = a < p->interface_len && p->py[a] == NONE && a < y->atoms_len &&
-            y->atoms[a].root == root_kind.null_root;
+            y->atoms[a].root.value == root_kind.null_root;
         u32 o = keep ? cast(a, u32) : fresh_id(p);
         p->px[a] = o;
         if (keep) { p->py[a] = o; }
@@ -2065,7 +2077,7 @@ fn pair_values(state* x, state* y, pairing mut* p, value vx, value vy, u32 depth
         u64 b = cast(vy.atom, u64);
         if (p->py[b] != NONE) { return; }
         bool keep = b < p->interface_len && p->px[b] == NONE && b < x->atoms_len &&
-            x->atoms[b].root == root_kind.null_root;
+            x->atoms[b].root.value == root_kind.null_root;
         u32 o = keep ? cast(b, u32) : fresh_id(p);
         p->py[b] = o;
         if (keep) { p->px[b] = o; }
@@ -2077,7 +2089,9 @@ fn join_values(state mut* out, pairing* p, value vx, value vy) value {
     if (vx.kind == value_kind.empty && vy.kind == value_kind.empty) { return empty_value(); }
     if (vx.kind == value_kind.unknown && vy.kind == value_kind.unknown) {
         if (vx.external && vy.external) {
-            if (same_key(vx.target, vy.target) && vx.param == vy.param) { return vx; }
+            if (same_key(vx.target, vy.target) && vx.param == vy.param) {
+                return vx; // join: copy
+            }
             value mut either = input_value();
             if (vx.param != NONE || vy.param != NONE) { either.param = ANY_PARAM; }
             return either;
@@ -2097,9 +2111,7 @@ fn join_values(state mut* out, pairing* p, value vx, value vy) value {
             return own_value(oy);
         }
         // Different identities at one owner: keep one obligation of unknown shape.
-        atom mut lost = new_atom(atom_kind.opaque, null, 0, root_kind.joined);
-        lost.status = atom_status.unknown;
-        return own_value(push_atom(out, lost));
+        return fresh_unknown_owner(out);
     }
     if (vx.kind == value_kind.scalar && vy.kind == value_kind.scalar) { return scalar_value(); }
     bool vx_view = vx.kind == value_kind.view || vx.kind == value_kind.empty;
@@ -2108,8 +2120,8 @@ fn join_values(state mut* out, pairing* p, value vx, value vy) value {
         value mut v = empty_value();
         v.kind = value_kind.view;
         v.external = vx.external || vy.external;
-        v.nullness = join_root(vx.kind == value_kind.empty ? root_kind.null_root : vx.nullness,
-            vy.kind == value_kind.empty ? root_kind.null_root : vy.nullness);
+        // An empty side has a null root fact.
+        v.nullness = ownership_facts.join_nullness(vx.nullness, vy.nullness);
         u32 mut i = 0;
         while (i < vx.count) {
             if (!add_source(&v, p->px[cast(vx.sources[i], u64)])) { return unknown_value(); }
@@ -2133,15 +2145,17 @@ fn join_values(state mut* out, pairing* p, value vx, value vy) value {
         (vx.kind == value_kind.view && vy.kind == value_kind.address)) {
         // An address of caller storage stays live for the call; an address of a cell is a
         // member of that cell. An address of local storage keeps no fact.
-        value a = vx.kind == value_kind.address ? vx : vy;
-        value w = vx.kind == value_kind.view ? vx : vy;
+        value a = vx.kind == value_kind.address ? vx : vy; // join: copy
+        value w = vx.kind == value_kind.view ? vx : vy; // join: copy
         u32@ wmap = vx.kind == value_kind.view ? p->px[..] : p->py[..];
         u32@ amap = vx.kind == value_kind.address ? p->px[..] : p->py[..];
         if (a.target.base == base_kind.local) { return unknown_value(); }
         value mut v = empty_value();
         v.kind = value_kind.view;
         v.external = w.external || a.target.base == base_kind.caller;
-        v.nullness = join_root(w.nullness, root_kind.nonnull);
+        // The view reads the address as a nonnull root with the provenance of the address.
+        v.nullness = ownership_facts.join_nullness(w.nullness,
+            nullness{root_kind.nonnull, a.nullness.how});
         v.param = a.param == w.param ? a.param : ANY_PARAM;
         if (a.target.base == base_kind.cell && !add_source(&v, amap[cast(a.target.id, u64)])) {
             return unknown_value();
@@ -2160,7 +2174,8 @@ fn join_values(state mut* out, pairing* p, value vx, value vy) value {
         if (tx.base == base_kind.cell) { tx.id = p->px[cast(tx.id, u64)]; }
         if (ty.base == base_kind.cell) { ty.id = p->py[cast(ty.id, u64)]; }
         if (same_key(tx, ty)) {
-            value mut joined_address = address_value(tx);
+            value mut joined_address = address_value(tx,
+                ownership_facts.join_nullness(vx.nullness, vy.nullness));
             joined_address.param = vx.param == vy.param ? vx.param : ANY_PARAM;
             return joined_address;
         }
@@ -2250,9 +2265,9 @@ fn join(context mut* c, state* a, state* b, bool widen, state mut* out) bool {
         i += 1;
     }
     state mut joined = state{};
-    joined.reached = true;
+    joined.reached = x.reached || y.reached;
     joined.witness = x.witness || y.witness;
-    joined.released = x.released | y.released;
+    joined.released = ownership_facts.join_may_set(x.released, y.released);
     joined.lossy = x.lossy || y.lossy;
     joined.loss = x.lossy ? x.loss : y.loss;
     joined.ended = new(u8, x.ended.len);
@@ -2272,7 +2287,7 @@ fn join(context mut* c, state* a, state* b, bool widen, state mut* out) bool {
     while (i < x.atoms_len) {
         u32 o = p.px[i];
         if (o != NONE && x.atoms[i].used) {
-            joined.atoms[cast(o, u64)] = x.atoms[i];
+            joined.atoms[cast(o, u64)] = x.atoms[i]; // join: copy
             from_x[cast(o, u64)] = true;
         }
         i += 1;
@@ -2283,20 +2298,25 @@ fn join(context mut* c, state* a, state* b, bool widen, state mut* out) bool {
         if (o != NONE && y.atoms[i].used) {
             u64 at = cast(o, u64);
             joined.atoms[at] = from_x[at] ?
-                join_atom(joined.atoms[at], y.atoms[i], x.witness, y.witness) : y.atoms[i];
+                join_atom(joined.atoms[at], y.atoms[i], x.witness, y.witness) :
+                y.atoms[i]; // join: copy
             from_y[at] = true;
         }
         i += 1;
     }
     i = 0;
     while (i < total) {
+        // The other side held an empty owner, whose null root the pairing keeps as assumed.
         if ((from_x[i] != from_y[i]) && p.nullside[i]) {
-            joined.atoms[i].root = join_root(joined.atoms[i].root, root_kind.null_root);
+            joined.atoms[i].root = ownership_facts.join_nullness(joined.atoms[i].root,
+                nullness{root_kind.null_root, provenance.assumed});
         }
         if (i < c->interface_len && !(from_x[i] || from_y[i])) {
-            // Each side keeps the identity of this interface atom elsewhere.
-            atom mut split = x.atoms[i];
-            split.status = join_status(x.atoms[i].status, y.atoms[i].status);
+            // Each side keeps the identity of this interface atom elsewhere. The unused record
+            // keeps the root of x.
+            atom mut split = x.atoms[i]; // join: copy
+            split.status = ownership_facts.join_status_fact(x.atoms[i].status,
+                y.atoms[i].status);
             split.used = false;
             joined.atoms[i] = split;
         }
@@ -2498,7 +2518,7 @@ fn initial(context mut* c) state {
     i = 0;
     while (i < c->interface_len) {
         interface_entry e = c->interface[i];
-        atom mut a = new_atom(e.kind, e.ty, e.shape, root_kind.free);
+        atom mut a = new_atom(e.kind, e.ty, e.shape, root_kind.free, provenance.assumed);
         a.origin = bit(i);
         a.choice = e.kind == atom_kind.region || e.kind == atom_kind.flat;
         a.handle = cast(i, u32);
@@ -2517,12 +2537,13 @@ fn initial(context mut* c) state {
             !item.owning) {
             u32 caller = item.key.depth == 0 ? caller_of(c, item.key.id) : NONE;
             if (caller != NONE) {
-                value mut designated = address_value(key_of(base_kind.caller, caller));
+                slot_key storage = key_of(base_kind.caller, caller);
+                value mut designated = address_value(storage, address_fact(&s, storage));
                 designated.param = item.key.id;
                 s.slots[i].v = designated;
             } else if (is_reference(item.ty) || item.array) {
                 value mut v = external_view();
-                v.nullness = root_kind.free;
+                v.nullness = nullness{root_kind.free, provenance.assumed};
                 v.param = item.key.id;
                 s.slots[i].v = v;
             }
@@ -2554,13 +2575,14 @@ fn use_sources(context mut* c, state mut* s, u32 count, u32[8] sources, string w
     u32 mut i = 0;
     while (i < count) {
         atom item = s->atoms[cast(sources[i], u64)];
-        if (item.status == atom_status.released) {
+        if (item.status.value == atom_status.released) {
             released += 1;
             if (first == NONE) { first = sources[i]; }
-        } else if (item.status == atom_status.unknown || item.status == atom_status.escaped) {
+        } else if (item.status.value == atom_status.unknown ||
+            item.status.value == atom_status.escaped) {
             unknown += 1;
             if (first == NONE) { first = sources[i]; }
-        } else if (item.status == atom_status.maybe_released) {
+        } else if (item.status.value == atom_status.maybe_released) {
             doubtful += 1;
             if (first == NONE) { first = sources[i]; }
         }
@@ -2612,19 +2634,19 @@ fn deref_atom(context mut* c, state mut* s, u32 a, string what) location {
     atom item = s->atoms[cast(a, u64)];
     u32[8] mut one = {};
     one[0] = a;
-    if (item.status == atom_status.released) {
+    if (item.status.value == atom_status.released) {
         violation(c, s, ownership_api.event_kind.invalid_use, certainty.definite, a, what);
         return unknown_location();
     }
-    if (item.status == atom_status.unknown || item.status == atom_status.escaped) {
+    if (item.status.value == atom_status.unknown || item.status.value == atom_status.escaped) {
         unproved(c, s, ownership_api.incomplete_reason.unknown_effect, a, what);
         return unknown_location();
     }
-    if (item.status == atom_status.maybe_released) {
+    if (item.status.value == atom_status.maybe_released) {
         unproved(c, s, ownership_api.incomplete_reason.missing_path, a, what);
         return unknown_location();
     }
-    if (item.root == root_kind.null_root) {
+    if (item.root.value == root_kind.null_root) {
         violation(c, s, ownership_api.event_kind.invalid_use, certainty.definite, a, what);
         return unknown_location();
     }
@@ -2681,7 +2703,7 @@ fn deref_value(context mut* c, state mut* s, value v, bool owning, string what) 
             }
         } else if (v.target.base == base_kind.cell) {
             atom item = s->atoms[cast(v.target.id, u64)];
-            if (item.status != atom_status.live && item.status != atom_status.leaked) {
+            if (item.status.value != atom_status.live && item.status.value != atom_status.leaked) {
                 u32[8] mut one = {};
                 one[0] = v.target.id;
                 use_sources(c, s, 1, one, what);
@@ -2810,7 +2832,7 @@ fn read_at(context mut* c, state mut* s, location loc, types.node* t) value {
             member.kind = value_kind.view;
             member.count = loc.count;
             member.sources = loc.sources;
-            member.nullness = root_kind.joined;
+            member.nullness = nullness{root_kind.joined, provenance.assumed};
             return member;
         }
     }
@@ -2829,8 +2851,8 @@ fn as_view(state* s, value v) value {
 }
 
 fn fresh_unknown_owner(state mut* s) value {
-    atom mut lost = new_atom(atom_kind.opaque, null, 0, root_kind.joined);
-    lost.status = atom_status.unknown;
+    atom mut lost = new_atom(atom_kind.opaque, null, 0, root_kind.joined, provenance.assumed);
+    lost.status = status_fact{atom_status.unknown, provenance.assumed};
     return own_value(push_atom(s, lost));
 }
 
@@ -2840,10 +2862,10 @@ fn operand(context mut* c, state mut* s, fir.operand op) value {
     if (op.kind == fir.operand_kind.ok_const) {
         switch (op.value.kind) {
         case fir.const_kind.ck_null, fir.const_kind.ck_zero:
-            return empty_value();
+            return null_value();
         case fir.const_kind.ck_string, fir.const_kind.ck_bytes, fir.const_kind.ck_enum_table:
             value mut text = external_view();
-            text.nullness = root_kind.nonnull;
+            text.nullness = nullness{root_kind.nonnull, provenance.established};
             return text;
         case fir.const_kind.ck_bool:
             value mut flag = scalar_value();
@@ -2868,7 +2890,7 @@ fn operand(context mut* c, state mut* s, fir.operand op) value {
     if (loc.kind == location_kind.slots) {
         u64 at = find_slot(s, loc.key);
         if (at != U64_MAX && !s->slots[at].array) {
-            s->slots[at].v = empty_value();
+            s->slots[at].v = null_value();
             return v;
         }
     }
@@ -2885,8 +2907,8 @@ fn operand(context mut* c, state mut* s, fir.operand op) value {
 // (`spec/fir.md` 14 Calls, "empty output owners"). False when the atom has no such handle.
 fn require_empty(context mut* c, state mut* s, u32 a) bool {
     atom item = s->atoms[cast(a, u64)];
-    if (item.handle == NONE || !item.choice || item.root != root_kind.free ||
-        item.status != atom_status.live || cast(item.handle, u64) >= c->interface_len) {
+    if (item.handle == NONE || !item.choice || item.root.value != root_kind.free ||
+        item.status.value != atom_status.live || cast(item.handle, u64) >= c->interface_len) {
         return false;
     }
     u64 at = cast(item.handle, u64);
@@ -2897,7 +2919,7 @@ fn require_empty(context mut* c, state mut* s, u32 a) bool {
     } else {
         return false;
     }
-    s->atoms[cast(a, u64)].root = root_kind.null_root;
+    s->atoms[cast(a, u64)].root = nullness{root_kind.null_root, provenance.assumed};
     return true;
 }
 
@@ -2910,17 +2932,17 @@ fn check_overwrite(context mut* c, state mut* s, value old, slot_key k) void {
         return;
     }
     atom item = s->atoms[cast(old.atom, u64)];
-    if (item.root == root_kind.null_root || item.status == atom_status.leaked ||
-        item.status == atom_status.escaped) { return; }
-    if (item.status == atom_status.unknown) {
+    if (item.root.value == root_kind.null_root || item.status.value == atom_status.leaked ||
+        item.status.value == atom_status.escaped) { return; }
+    if (item.status.value == atom_status.unknown) {
         unproved(c, s, ownership_api.incomplete_reason.unknown_effect, old.atom, name(c, s, k));
     } else if (require_empty(c, s, old.atom)) {
         return;
     } else {
-        violation(c, s, ownership_api.event_kind.lost_ownership, certainty_of(item.root),
+        violation(c, s, ownership_api.event_kind.lost_ownership, certainty_of(item.root.value),
             old.atom, name(c, s, k));
     }
-    mark_leaked(s, old.atom);
+    mark_leaked(s, old.atom, provenance.established);
 }
 
 // Writes a value into a location. An owned value written into storage that the proof does not
@@ -2971,7 +2993,8 @@ fn write_at(context mut* c, state mut* s, location loc, types.node* t, value v) 
         unproved(c, s, untracked(s, loc), v.kind == value_kind.owned ? v.atom : NONE,
             "the ownership that this store puts into storage that the proof does not track");
         if (v.kind == value_kind.owned) {
-            s->atoms[cast(v.atom, u64)].status = atom_status.escaped;
+            s->atoms[cast(v.atom, u64)].status =
+                status_fact{atom_status.escaped, provenance.established};
         }
     }
 }
@@ -2991,7 +3014,7 @@ fn place_leaves(context mut* c, state mut* s, fir.place p, bool moving, leaf_lis
             u64 at = rebase(loc.key, item->depth, item->path, &k) ? find_slot(s, k) : U64_MAX;
             if (at != U64_MAX && !s->slots[at].array) {
                 item->v = s->slots[at].v;
-                if (moving) { s->slots[at].v = empty_value(); }
+                if (moving) { s->slots[at].v = null_value(); }
                 if (!moving) { item->v = as_view(s, item->v); }
             } else if (item->owning && moving) {
                 unproved(c, s, ownership_api.incomplete_reason.unknown_effect, NONE,
@@ -3051,7 +3074,8 @@ fn const_one(fir.operand op) bool {
 fn allocate(context mut* c, state mut* s, types.node* t, fir.operand count) value {
     operand(c, s, count);
     if (resolved_struct(t) && const_one(count)) {
-        atom mut a = new_atom(atom_kind.cell, t, shape_of(c, t), root_kind.nonnull);
+        atom mut a = new_atom(atom_kind.cell, t, shape_of(c, t), root_kind.nonnull,
+            provenance.established);
         a.fresh = true;
         a.borrows = false;
         a.params = false;
@@ -3059,15 +3083,16 @@ fn allocate(context mut* c, state mut* s, types.node* t, fir.operand count) valu
         add_cell_slots(c, s, made, t);
         u64 mut i = 0;
         while (i < s->slots_len) {
+            // The runtime zeroes a new allocation.
             if (s->slots[i].key.base == base_kind.cell && s->slots[i].key.id == made) {
-                s->slots[i].v = empty_value();
+                s->slots[i].v = null_value();
             }
             i += 1;
         }
         return own_value(made);
     }
     atom mut a = new_atom(owned_leaf(t) ? atom_kind.opaque : atom_kind.flat, t, 0,
-        root_kind.nonnull);
+        root_kind.nonnull, provenance.established);
     a.fresh = true;
     // The runtime zeroes a new allocation, so it keeps no reference.
     a.borrows = false;
@@ -3097,9 +3122,9 @@ fn null_test(context mut* c, state mut* s, fir.operand a, fir.operand b, bool eq
         out.truth = !equal_test;
     } else if (seen.kind == value_kind.view && seen.exact && seen.count == 1 && !seen.external) {
         atom item = s->atoms[cast(seen.sources[0], u64)];
-        if (item.root == root_kind.null_root || item.root == root_kind.nonnull) {
+        if (item.root.value == root_kind.null_root || item.root.value == root_kind.nonnull) {
             out.known = true;
-            out.truth = (item.root == root_kind.nonnull) != equal_test;
+            out.truth = (item.root.value == root_kind.nonnull) != equal_test;
         } else {
             out.test = seen.sources[0];
             out.test_nonnull = !equal_test;
@@ -3189,14 +3214,17 @@ fn rvalue_value(context mut* c, state mut* s, fir.rvalue rv, types.node* t) valu
         location mut loc = location{};
         types.node* mut place_ty = null;
         resolve(c, s, rv.place, &loc, &place_ty);
-        if (loc.kind == location_kind.slots) { return address_value(loc.key); }
+        if (loc.kind == location_kind.slots) {
+            return address_value(loc.key, address_fact(s, loc.key));
+        }
         if (loc.kind == location_kind.element) {
             value mut inner = empty_value();
             inner.kind = value_kind.view;
             inner.count = loc.count;
             inner.sources = loc.sources;
             inner.external = loc.external;
-            inner.nullness = root_kind.nonnull;
+            // An element address is nonnull when its storage exists, which the proof assumes.
+            inner.nullness = nullness{root_kind.nonnull, provenance.assumed};
             return inner;
         }
         return unknown_value();
@@ -3208,7 +3236,7 @@ fn rvalue_value(context mut* c, state mut* s, fir.rvalue rv, types.node* t) valu
         resolve(c, s, rv.place, &sliced, &sliced_ty);
         if (sliced_ty->kind == types.type_kind.k_array) {
             if (sliced.kind == location_kind.slots || sliced.kind == location_kind.length) {
-                return address_value(sliced.key);
+                return address_value(sliced.key, address_fact(s, sliced.key));
             }
             return unknown_value();
         }
@@ -3361,10 +3389,10 @@ fn release(context mut* c, state mut* s, value v, slot_key k) void {
     }
     u32 a = v.atom;
     atom item = s->atoms[cast(a, u64)];
-    if (item.root == root_kind.null_root) { return; }
-    if (item.status != atom_status.live) {
+    if (item.root.value == root_kind.null_root) { return; }
+    if (item.status.value != atom_status.live) {
         unproved(c, s, ownership_api.incomplete_reason.unknown_effect, a, name(c, s, k));
-        s->atoms[cast(a, u64)].status = atom_status.escaped;
+        s->atoms[cast(a, u64)].status = status_fact{atom_status.escaped, provenance.established};
         return;
     }
     c->needs_shape = c->needs_shape | item.origin;
@@ -3385,20 +3413,20 @@ fn release(context mut* c, state mut* s, value v, slot_key k) void {
                         // An owned self-cycle: the leaf still holds the released allocation.
                         violation(c, s, ownership_api.event_kind.lost_ownership,
                             certainty.definite, a, name_below(c, s, k, field.key, item.ty));
-                    } else if (child.root != root_kind.null_root &&
-                        child.status != atom_status.leaked &&
-                        child.status != atom_status.escaped) {
+                    } else if (child.root.value != root_kind.null_root &&
+                        child.status.value != atom_status.leaked &&
+                        child.status.value != atom_status.escaped) {
                         string text = name_below(c, s, k, field.key, item.ty);
-                        if (child.status == atom_status.unknown) {
+                        if (child.status.value == atom_status.unknown) {
                             unproved(c, s, ownership_api.incomplete_reason.unknown_effect,
                                 field.v.atom, text);
-                            mark_leaked(s, field.v.atom);
+                            mark_leaked(s, field.v.atom, provenance.established);
                         } else {
                             // A caller requirement cannot repair this intrinsic error of the
                             // body (`spec/fir.md` 14.1): the release itself loses the leaf.
                             violation(c, s, ownership_api.event_kind.lost_ownership,
-                                certainty_of(child.root), field.v.atom, text);
-                            mark_leaked(s, field.v.atom);
+                                certainty_of(child.root.value), field.v.atom, text);
+                            mark_leaked(s, field.v.atom, provenance.established);
                         }
                     }
                 } else if (field.v.kind != value_kind.empty) {
@@ -3410,8 +3438,8 @@ fn release(context mut* c, state mut* s, value v, slot_key k) void {
         }
         drop_cell_slots(s, a);
     }
-    s->atoms[cast(a, u64)].status = atom_status.released;
-    s->released = s->released | item.origin;
+    s->atoms[cast(a, u64)].status = status_fact{atom_status.released, provenance.established};
+    s->released.bits = s->released.bits | item.origin;
 }
 
 fn release_place(context mut* c, state mut* s, fir.place p) void {
@@ -3432,7 +3460,7 @@ fn release_place(context mut* c, state mut* s, fir.place p) void {
                     v.kind == value_kind.owned ? v.atom : NONE, name(c, s, loc.key));
                 return;
             }
-            s->slots[after].v = empty_value();
+            s->slots[after].v = null_value();
             return;
         }
     }
@@ -3444,17 +3472,17 @@ fn release_place(context mut* c, state mut* s, fir.place p) void {
 // transfer of the operation, not a rendering choice (`spec/toolchain.md` 4.2): after the loss no
 // owner holds the obligation, so no later operation loses it again. A live atom stays allocated,
 // so it becomes leaked and its views stay valid. An unknown atom can be released, so it becomes
-// escaped and a read through its views stays unproved.
-fn mark_leaked(state mut* s, u32 a) void {
+// escaped and a read through its views stays unproved. Each new status has the provenance `how`.
+fn mark_leaked(state mut* s, u32 a, provenance how) void {
     bool mut@ own seen = new(bool, s->atoms_len);
     defer del(seen);
     owned_from(s, a, seen);
     u64 mut k = 0;
     while (k < seen.len) {
-        if (seen[k] && s->atoms[k].status == atom_status.live) {
-            s->atoms[k].status = atom_status.leaked;
-        } else if (seen[k] && s->atoms[k].status == atom_status.unknown) {
-            s->atoms[k].status = atom_status.escaped;
+        if (seen[k] && s->atoms[k].status.value == atom_status.live) {
+            s->atoms[k].status = status_fact{atom_status.leaked, how};
+        } else if (seen[k] && s->atoms[k].status.value == atom_status.unknown) {
+            s->atoms[k].status = status_fact{atom_status.escaped, how};
         }
         k += 1;
     }
@@ -3466,22 +3494,22 @@ fn end_slot(context mut* c, state mut* s, u64 at) void {
     if (!item.owning) { return; }
     if (item.v.kind == value_kind.owned) {
         atom a = s->atoms[cast(item.v.atom, u64)];
-        if (a.root != root_kind.null_root && (a.status == atom_status.live ||
-            a.status == atom_status.unknown)) {
-            if (a.status == atom_status.unknown) {
+        if (a.root.value != root_kind.null_root && (a.status.value == atom_status.live ||
+            a.status.value == atom_status.unknown)) {
+            if (a.status.value == atom_status.unknown) {
                 unproved(c, s, ownership_api.incomplete_reason.unknown_effect, item.v.atom,
                     name(c, s, item.key));
             } else {
                 violation(c, s, ownership_api.event_kind.lost_ownership,
-                    a.kind == atom_kind.cell ? certainty.definite : certainty_of(a.root),
+                    a.kind == atom_kind.cell ? certainty.definite : certainty_of(a.root.value),
                     item.v.atom, name(c, s, item.key));
             }
-            mark_leaked(s, item.v.atom);
+            mark_leaked(s, item.v.atom, provenance.established);
         }
     } else if (item.v.kind != value_kind.empty) {
         unproved(c, s, ownership_api.incomplete_reason.unknown_effect, NONE, name(c, s, item.key));
     }
-    s->slots[at].v = empty_value();
+    s->slots[at].v = null_value();
 }
 
 fn end_local(context mut* c, state mut* s, u32 n) void {
@@ -3536,7 +3564,9 @@ fn escape(state mut* s, u32 a, atom_status status) void {
     u64 mut k = 0;
     while (k < seen.len) {
         if (seen[k]) {
-            if (s->atoms[k].status == atom_status.live) { s->atoms[k].status = status; }
+            if (s->atoms[k].status.value == atom_status.live) {
+                s->atoms[k].status = status_fact{status, provenance.established};
+            }
             s->atoms[k].exposed = true;
         }
         k += 1;
@@ -3553,7 +3583,7 @@ fn havoc_prefix(state mut* s, slot_key prefix) bool {
         if (prefix_of(prefix, item.key)) {
             if (item.v.kind == value_kind.owned) {
                 atom a = s->atoms[cast(item.v.atom, u64)];
-                if (a.status == atom_status.live && a.root != root_kind.null_root) {
+                if (a.status.value == atom_status.live && a.root.value != root_kind.null_root) {
                     changed = true;
                 }
                 escape(s, item.v.atom, atom_status.escaped);
@@ -3580,7 +3610,7 @@ fn havoc_value(state mut* s, value v) bool {
         u32 mut i = 0;
         while (i < v.count) {
             u32 a = v.sources[i];
-            if (s->atoms[cast(a, u64)].status == atom_status.live) { changed = true; }
+            if (s->atoms[cast(a, u64)].status.value == atom_status.live) { changed = true; }
             s->atoms[cast(a, u64)].exposed = true;
             // An unknown effect can store any reference in the fields of the atom.
             s->atoms[cast(a, u64)].borrows = true;
@@ -3588,8 +3618,9 @@ fn havoc_value(state mut* s, value v) bool {
             if (s->atoms[cast(a, u64)].kind == atom_kind.cell) {
                 if (havoc_prefix(s, key_of(base_kind.cell, a))) { changed = true; }
             }
-            if (s->atoms[cast(a, u64)].status == atom_status.live) {
-                s->atoms[cast(a, u64)].status = atom_status.unknown;
+            if (s->atoms[cast(a, u64)].status.value == atom_status.live) {
+                s->atoms[cast(a, u64)].status =
+                    status_fact{atom_status.unknown, provenance.established};
             }
             i += 1;
         }
@@ -3631,10 +3662,11 @@ fn unknown_call(context mut* c, state mut* s, argument@ args, leaf_list* arg_lea
     while (i < s->atoms_len) {
         atom a = s->atoms[i];
         // An escaped atom left the proof with its storage: its slots change nothing here.
-        if (a.used && a.exposed && a.kind == atom_kind.cell && a.status != atom_status.escaped &&
+        if (a.used && a.exposed && a.kind == atom_kind.cell &&
+            a.status.value != atom_status.escaped &&
             havoc_prefix(s, key_of(base_kind.cell, cast(i, u32)))) { changed = true; }
-        if (a.used && a.exposed && a.status == atom_status.live) {
-            s->atoms[i].status = atom_status.unknown;
+        if (a.used && a.exposed && a.status.value == atom_status.live) {
+            s->atoms[i].status = status_fact{atom_status.unknown, provenance.established};
             s->atoms[i].borrows = true;
             s->atoms[i].params = true;
             changed = true;
@@ -3664,7 +3696,8 @@ fn unknown_call(context mut* c, state mut* s, argument@ args, leaf_list* arg_lea
     i = 0;
     while (i < out->len) {
         if (out->items[i].owning) {
-            atom mut result = new_atom(atom_kind.opaque, out->items[i].ty, 0, root_kind.joined);
+            atom mut result = new_atom(atom_kind.opaque, out->items[i].ty, 0, root_kind.joined,
+                provenance.assumed);
             result.fresh = true;
             out->items[i].v = own_value(push_atom(s, result));
         } else if (is_reference(out->items[i].ty) || out->items[i].array) {
@@ -3702,7 +3735,16 @@ fn argument_view(value v, value mut* out, argument@ args) bool {
     return a.kind == value_kind.empty;
 }
 
+// The value of callee exit value `v` in the caller. The caller assumes each nullness fact that
+// the summary gives.
 fn graft_value(context* c, state* s, value v, u32@ map, slot_key@ prefixes, argument@ args)
+    value {
+    value mut out = translate_value(c, s, v, map, prefixes, args);
+    out.nullness = ownership_facts.assume(out.nullness);
+    return out;
+}
+
+fn translate_value(context* c, state* s, value v, u32@ map, slot_key@ prefixes, argument@ args)
     value {
     value mut out = v;
     out.param = NONE;
@@ -3740,7 +3782,7 @@ fn graft_value(context* c, state* s, value v, u32@ map, slot_key@ prefixes, argu
             if (!rebase(prefixes[cast(v.target.id, u64)], v.target.depth, v.target.path, &k)) {
                 return unknown_value();
             }
-            return address_value(k);
+            return address_value(k, address_fact(s, k));
         }
         if (v.target.base == base_kind.cell) {
             u32 cell_at = map[cast(v.target.id, u64)];
@@ -3779,7 +3821,7 @@ fn designated(state* s, value v, slot_key mut* out) bool {
         v.kind == value_kind.owned) {
         u32 a = v.kind == value_kind.owned ? v.atom : v.sources[0];
         if (s->atoms[cast(a, u64)].kind == atom_kind.cell &&
-            s->atoms[cast(a, u64)].status == atom_status.live) {
+            s->atoms[cast(a, u64)].status.value == atom_status.live) {
             *out = key_of(base_kind.cell, a);
             return true;
         }
@@ -3795,8 +3837,8 @@ fn reaches(state* s, u32 from, u32 to) bool {
 }
 
 fn uncertain_source(state mut* s) u32 {
-    atom mut doubt = new_atom(atom_kind.flat, null, 0, root_kind.nonnull);
-    doubt.status = atom_status.maybe_released;
+    atom mut doubt = new_atom(atom_kind.flat, null, 0, root_kind.nonnull, provenance.assumed);
+    doubt.status = status_fact{atom_status.maybe_released, provenance.assumed};
     return push_atom(s, doubt);
 }
 
@@ -3938,7 +3980,7 @@ fn separate(context mut* c, state mut* s, summary* sum, argument@ args, leaf_lis
         }
         u64 mut i = 0;
         while (i < bound.len) {
-            bool releases = i < 64 && (sum->post.released & bit(i)) != 0;
+            bool releases = i < 64 && (sum->post.released.bits & bit(i)) != 0;
             if (bound[i] != NONE && (storage || releases)) {
                 if (!complete) {
                     unproved(c, s, ownership_api.incomplete_reason.unknown_effect, bound[i],
@@ -4096,7 +4138,7 @@ fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list
         interface_entry e = sum->interface[i];
         if (bound[i] != NONE && e.needs_shape) {
             u32 a = bound[i];
-            if (s->atoms[cast(a, u64)].status != atom_status.live) {
+            if (s->atoms[cast(a, u64)].status.value != atom_status.live) {
                 unproved(c, s, ownership_api.incomplete_reason.unknown_effect, a,
                     "the allocation that this call needs");
                 return false;
@@ -4183,7 +4225,7 @@ fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list
     u64 mut released_here = 0;
     i = 0;
     while (i < interfaces) {
-        if (bound[i] != NONE && (sum->post.released & bit(i)) != 0) {
+        if (bound[i] != NONE && (sum->post.released.bits & bit(i)) != 0) {
             released_here = released_here | s->atoms[cast(bound[i], u64)].origin;
         }
         i += 1;
@@ -4194,10 +4236,10 @@ fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list
     i = 0;
     while (i < interfaces) {
         atom p = sum->post.atoms[i];
-        if (bound[i] != NONE && p.used && p.root == root_kind.null_root &&
+        if (bound[i] != NONE && p.used && p.root.value == root_kind.null_root &&
             !sum->interface[i].require_null) {
             atom x = s->atoms[cast(bound[i], u64)];
-            if (x.root == root_kind.nonnull || x.kind == atom_kind.cell) {
+            if (x.root.value == root_kind.nonnull || x.kind == atom_kind.cell) {
                 if (target->member && c->reporting) {
                     unproved(c, s, ownership_api.incomplete_reason.unknown_effect, NONE,
                         "a return of this recursive call");
@@ -4226,7 +4268,7 @@ fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list
                     x->ty = p.ty;
                     // Template indices belong to one context, so the caller finds its own.
                     x->shape = p.shape == 0 ? 0 : shape_of(c, p.ty);
-                    x->status = p.status;
+                    x->status = ownership_facts.assume_status(p.status);
                     x->fresh = x->fresh || p.fresh;
                     x->strict = x->strict && p.strict;
                     x->choice = false;
@@ -4237,10 +4279,12 @@ fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list
                     // The callee changed the fields, so a later unfold names no entry field.
                     x->handle = NONE;
                 }
-                if (p.root == root_kind.nonnull) {
-                    x->root = root_kind.nonnull;
+                // The caller assumes each root fact that the summary gives.
+                if (p.root.value == root_kind.nonnull) {
+                    x->root = nullness{root_kind.nonnull, provenance.assumed};
                 } else if (sum->interface[i].needs_shape) {
-                    x->root = join_root(x->root, root_kind.joined);
+                    x->root = ownership_facts.join_nullness(x->root,
+                        nullness{root_kind.joined, provenance.assumed});
                 }
             }
         } else if (p.used) {
@@ -4263,7 +4307,10 @@ fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list
                 b += 1;
             }
             if (!any) { made.strict = false; }
-            if (made.root == root_kind.free) { made.root = root_kind.joined; }
+            // The caller assumes each fact of an atom that the summary gives.
+            made.root = ownership_facts.assume(p.root);
+            made.status = ownership_facts.assume_status(p.status);
+            if (made.root.value == root_kind.free) { made.root.value = root_kind.joined; }
             made.shape = p.shape == 0 ? 0 : shape_of(c, p.ty);
             made.choice = false;
             made.exposed = false;
@@ -4282,14 +4329,15 @@ fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list
         u32 b = bound[i];
         if (b != NONE) {
             atom rec = sum->post.atoms[i];
-            bool rel = (sum->post.released & bit(i)) != 0 || (rec.used &&
-                (rec.status == atom_status.released || rec.status == atom_status.maybe_released));
+            bool rel = (sum->post.released.bits & bit(i)) != 0 || (rec.used &&
+                (rec.status.value == atom_status.released ||
+                rec.status.value == atom_status.maybe_released));
             if (!owned_in_post[i]) {
                 u64 mut kept = 0;
                 u64 mut j = 0;
                 while (j < origins) {
                     atom other = sum->post.atoms[j];
-                    if (j != i && other.used && other.root != root_kind.null_root &&
+                    if (j != i && other.used && other.root.value != root_kind.null_root &&
                         (other.origin & bit(i)) != 0 && map[j] != NONE) {
                         redirect_add(s, b, map[j]);
                         kept += 1;
@@ -4303,13 +4351,14 @@ fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list
                     s->atoms[cast(b, u64)].used = false;
                 } else if (rel) {
                     drop_cell_slots(s, b);
-                    s->atoms[cast(b, u64)].status = atom_status.released;
-                } else if (rec.used && rec.status == atom_status.leaked) {
-                    mark_leaked(s, b);
-                } else if (s->atoms[cast(b, u64)].status != atom_status.leaked &&
-                    s->atoms[cast(b, u64)].status != atom_status.escaped) {
+                    s->atoms[cast(b, u64)].status =
+                        status_fact{atom_status.released, provenance.assumed};
+                } else if (rec.used && rec.status.value == atom_status.leaked) {
+                    mark_leaked(s, b, provenance.assumed);
+                } else if (s->atoms[cast(b, u64)].status.value != atom_status.leaked &&
+                    s->atoms[cast(b, u64)].status.value != atom_status.escaped) {
                     // A lost owner that the callee stored over keeps its allocation.
-                    s->atoms[cast(b, u64)].root = root_kind.null_root;
+                    s->atoms[cast(b, u64)].root = nullness{root_kind.null_root, provenance.assumed};
                 }
             } else if (rel) {
                 doubt_members(s, b);
@@ -4317,7 +4366,7 @@ fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list
         }
         i += 1;
     }
-    s->released = s->released | released_here;
+    s->released.bits = s->released.bits | released_here;
     // Cell slots of grafted cells.
     i = c->fixed_len;
     u64 post_fixed = sum->post.slots_len;
@@ -4396,17 +4445,17 @@ fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list
 // callee stores over it.
 fn require_one(context mut* c, state mut* s, u32 a, string text) bool {
     atom item = s->atoms[cast(a, u64)];
-    if (item.root == root_kind.null_root || item.status == atom_status.leaked ||
-        item.status == atom_status.escaped) { return true; }
-    if (item.status == atom_status.unknown) {
+    if (item.root.value == root_kind.null_root || item.status.value == atom_status.leaked ||
+        item.status.value == atom_status.escaped) { return true; }
+    if (item.status.value == atom_status.unknown) {
         unproved(c, s, ownership_api.incomplete_reason.unknown_effect, a, text);
-        mark_leaked(s, a);
+        mark_leaked(s, a, provenance.established);
         return false;
     }
     if (require_empty(c, s, a)) { return true; }
     violation(c, s, ownership_api.event_kind.caller_requirement,
-        item.kind == atom_kind.cell ? certainty.definite : certainty_of(item.root), a, text);
-    mark_leaked(s, a);
+        item.kind == atom_kind.cell ? certainty.definite : certainty_of(item.root.value), a, text);
+    mark_leaked(s, a, provenance.established);
     return false;
 }
 
@@ -4418,11 +4467,11 @@ fn check_required(context mut* c, state mut* s, u32 b, interface_entry e) void {
     // A lost field leaves the field: the callee stores over it, so the shape that the callee
     // needs no longer holds it.
     atom item = s->atoms[cast(b, u64)];
-    if (item.root == root_kind.null_root) { return; }
+    if (item.root.value == root_kind.null_root) { return; }
     if (item.kind != atom_kind.cell) {
         // The fields of an unchanged entry value of the caller are its own entry fields.
         if (item.handle != NONE && item.handle_field == NONE && item.choice &&
-            item.status == atom_status.live && cast(item.handle, u64) < c->interface_len) {
+            item.status.value == atom_status.live && cast(item.handle, u64) < c->interface_len) {
             u64 at = cast(item.handle, u64);
             c->require_fields[at] = c->require_fields[at] | e.require_fields;
             return;
@@ -4543,14 +4592,15 @@ fn refine(state mut* s, value cond, bool truth) bool {
     atom mut* a = &s->atoms[cast(cond.test, u64)];
     bool nonnull = truth == cond.test_nonnull;
     if (nonnull) {
-        if (a->root == root_kind.null_root) { return false; }
-        if (a->root == root_kind.joined) { s->witness = false; }
-        a->root = root_kind.nonnull;
+        if (a->root.value == root_kind.null_root) { return false; }
+        if (a->root.value == root_kind.joined) { s->witness = false; }
+        // The edge establishes the root that its test read.
+        a->root = nullness{root_kind.nonnull, provenance.established};
         return true;
     }
-    if (a->root == root_kind.nonnull || a->kind == atom_kind.cell) { return false; }
-    if (a->root == root_kind.joined) { s->witness = false; }
-    a->root = root_kind.null_root;
+    if (a->root.value == root_kind.nonnull || a->kind == atom_kind.cell) { return false; }
+    if (a->root.value == root_kind.joined) { s->witness = false; }
+    a->root = nullness{root_kind.null_root, provenance.established};
     return true;
 }
 
@@ -4663,8 +4713,8 @@ fn finish_return(context mut* c, state mut* s) void {
     while (i < s->atoms_len) {
         atom a = s->atoms[i];
         if (reached[i] && a.used && a.borrows &&
-            a.root != root_kind.null_root &&
-            (a.status == atom_status.live || a.status == atom_status.unknown)) {
+            a.root.value != root_kind.null_root &&
+            (a.status.value == atom_status.live || a.status.value == atom_status.unknown)) {
             unproved(c, s, ownership_api.incomplete_reason.unknown_effect, cast(i, u32),
                 "the borrowed fields that this allocation keeps");
         }
@@ -4673,18 +4723,18 @@ fn finish_return(context mut* c, state mut* s) void {
     i = 0;
     while (i < s->atoms_len) {
         atom a = s->atoms[i];
-        bool obligation = a.used && !reached[i] && a.root != root_kind.null_root &&
-            (a.status == atom_status.live || a.status == atom_status.unknown);
+        bool obligation = a.used && !reached[i] && a.root.value != root_kind.null_root &&
+            (a.status.value == atom_status.live || a.status.value == atom_status.unknown);
         if (obligation) {
-            if (a.status == atom_status.unknown) {
+            if (a.status.value == atom_status.unknown) {
                 unproved(c, s, ownership_api.incomplete_reason.unknown_effect, cast(i, u32),
                     "completed cleanup at this return");
             } else {
                 violation(c, s, ownership_api.event_kind.lost_ownership,
-                    a.kind == atom_kind.cell ? certainty.definite : certainty_of(a.root),
+                    a.kind == atom_kind.cell ? certainty.definite : certainty_of(a.root.value),
                     cast(i, u32), "an allocation that no caller-visible owner holds");
             }
-            mark_leaked(s, cast(i, u32));
+            mark_leaked(s, cast(i, u32), provenance.established);
         }
         i += 1;
     }
@@ -4694,7 +4744,7 @@ fn finish_return(context mut* c, state mut* s) void {
     while (i < copy.slots_len) {
         slot item = copy.slots[i];
         if (item.key.base == base_kind.local && item.key.id != 0) {
-            copy.slots[i].v = item.v.kind == value_kind.scalar ? scalar_value() : empty_value();
+            copy.slots[i].v = item.v.kind == value_kind.scalar ? scalar_value() : null_value();
         }
         i += 1;
     }

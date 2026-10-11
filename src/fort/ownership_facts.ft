@@ -1,0 +1,124 @@
+/// The facts of the heap proof and the join of each fact type (D17.16, D17.18). A path fact has a
+/// value and a provenance. A join keeps each path of both inputs: it joins the two values and
+/// keeps the weaker provenance.
+// The heap solver imports this module. A witness checker can import it too; this module imports
+// no ownership module, so it adds no import cycle. A new fact type adds a join function here and
+// one row in the table of `tools/fact_joins.py`.
+
+/// The source of a fact. `established`: an operation of this body observed the fact on each
+/// execution that the state represents. `imported`: a callee summary gives the fact; each graft
+/// writes `assumed` today, and no site writes `imported` yet. `assumed`: the proof assumes the
+/// fact: an input of the caller, a lost precision, or a fact that an operation copies without a
+/// proof of its own. An earlier member is weaker. The zero is `assumed`, so a fact that no
+/// constructor sets claims no observation.
+enum provenance {
+    assumed,
+    imported,
+    established,
+}
+
+/// The nullness of a root pointer (spec/memory-model.md 2.7). `free` is an input choice of the
+/// caller, so each value is feasible. `joined` is an abstraction that lost the path of each value.
+enum root_kind {
+    null_root,
+    nonnull,
+    free,
+    joined,
+}
+
+/// What the proof knows about the allocations of an atom. `released` holds when the root is
+/// nonnull, because a null root has no allocation. `leaked` names an obligation that an event
+/// reported lost: its storage stays allocated, so its views stay valid. `escaped` names an
+/// obligation that left the proof after an incomplete-proof event: an unknown effect took it,
+/// or its owner ended while its status was unknown. The proof does not know if its storage
+/// stays allocated. `unknown` names an obligation that an unknown effect can change.
+enum atom_status {
+    live,
+    released,
+    maybe_released,
+    leaked,
+    escaped,
+    unknown,
+}
+
+/// A root nullness that holds on each path that the state represents.
+struct nullness {
+    root_kind value;
+    provenance how;
+}
+
+/// An allocation status that holds on each path that the state represents.
+struct status_fact {
+    atom_status value;
+    provenance how;
+}
+
+/// A set whose member holds on at least one path. A join takes the union.
+struct may_set {
+    u64 bits;
+}
+
+/// A set whose member holds on each path. A join takes the intersection.
+struct must_set {
+    u64 bits;
+}
+
+/// The weaker of two provenances: the earlier member of `provenance`.
+fn weaker(provenance a, provenance b) provenance {
+    return cast(a, u32) <= cast(b, u32) ? a : b;
+}
+
+/// The join of two root values: the value when both sides have it, otherwise `joined`.
+fn join_root(root_kind a, root_kind b) root_kind {
+    if (a == b) { return a; }
+    return root_kind.joined;
+}
+
+/// The join of two allocation statuses. A release on one side and a live allocation on the other
+/// is a possible release; an unknown or escaped side makes the join unknown; a reported loss on
+/// one side gives the other side.
+fn join_status(atom_status a, atom_status b) atom_status {
+    if (a == b) { return a; }
+    if (a == atom_status.unknown || b == atom_status.unknown ||
+        a == atom_status.escaped || b == atom_status.escaped) { return atom_status.unknown; }
+    if (a == atom_status.leaked) { return b; }
+    if (b == atom_status.leaked) { return a; }
+    return atom_status.maybe_released;
+}
+
+/// The join of two root facts: `join_root` of the values and the weaker provenance.
+fn join_nullness(nullness a, nullness b) nullness {
+    return nullness{join_root(a.value, b.value), weaker(a.how, b.how)};
+}
+
+/// The join of two status facts: `join_status` of the values and the weaker provenance.
+fn join_status_fact(status_fact a, status_fact b) status_fact {
+    return status_fact{join_status(a.value, b.value), weaker(a.how, b.how)};
+}
+
+/// The join of two may-sets: a member of either side.
+fn join_may_set(may_set a, may_set b) may_set {
+    return may_set{a.bits | b.bits};
+}
+
+/// The join of two must-sets: a member of both sides.
+fn join_must_set(must_set a, must_set b) must_set {
+    return must_set{a.bits & b.bits};
+}
+
+/// The same root fact with the provenance `assumed`.
+fn assume(nullness f) nullness {
+    return nullness{f.value, provenance.assumed};
+}
+
+/// The same status fact with the provenance `assumed`.
+fn assume_status(status_fact f) status_fact {
+    return status_fact{f.value, provenance.assumed};
+}
+
+/// Whether a root fact can remove a path: an established null or nonnull root. An imported or
+/// assumed fact, a free choice, and a joined root remove no path.
+fn may_prune(nullness f) bool {
+    return f.how == provenance.established &&
+        (f.value == root_kind.null_root || f.value == root_kind.nonnull);
+}

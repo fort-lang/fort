@@ -27,9 +27,10 @@ bullet at a time and without a rewrite.
   server's tests, `lsp-modules` (`test/lsp`) and `lsp-binary`, so a CI job runs them apart from
   the compiler's (T-264). Unit:
   `test/fort` (`fort-modules`), `test/lsp` (`lsp-modules`), `test/fir` (`fir`),
-  `highlight_selftest`, `extension_selftest`, `panic_coverage`, `panic_coverage_selftest` and
-  one `mutation_anchors_<table>` test for each table in `tools/mutations`, and the three
-  `mutate_` tests of `--check` over the fixture `test/mutate/strict_table.json`;
+  `highlight_selftest`, `extension_selftest`, `panic_coverage`, `panic_coverage_selftest`,
+  `fact_joins`, `fact_joins_selftest` and one `mutation_anchors_<table>` test for each table in
+  `tools/mutations`, and the three `mutate_` tests of `--check` over the fixture
+  `test/mutate/strict_table.json`;
   the 71 bootstrap0 C suites. Integration: the corpus (`lang`, `lang-json`), `fixpoint`, `tty`,
   `stack_depth` and `lsp-binary`; bootstrap0 has none, since building bootstrap-1 proves the C
   compiler. `stack_depth` gives each compiler of the build a 1 MB stack and a type of 254
