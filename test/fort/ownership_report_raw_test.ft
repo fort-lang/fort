@@ -131,7 +131,6 @@ fn document() void {
     assert(ownership_report.body_ownership(row) == "violated");
     assert(ownership_report.integrated(ownership_report.RAW));
     assert(ownership_report.integrated(ownership_report.STORED_BORROWS));
-    assert(!ownership_report.integrated(ownership_report.RAW + 1));
     strbuf.str_buf mut out = strbuf.create();
     defer strbuf.free(&out);
     ownership_report.invocation call = ownership_report.invocation{};
@@ -139,7 +138,7 @@ fn document() void {
     contains(&out, "{\"kind\":\"fort-ownership-report\",\"version\":6,");
     contains(&out, "{\"name\":\"raw\",\"producer\":\"integrated\",\"status\":\"incomplete\"}");
     contains(&out, "{\"name\":\"stored_borrows\",\"producer\":\"integrated\"");
-    contains(&out, "{\"name\":\"calls_heap\",\"producer\":\"unavailable\"");
+    contains(&out, "{\"name\":\"calls_heap\",\"producer\":\"integrated\"");
     strbuf.str_buf mut expected = strbuf.create();
     defer strbuf.free(&expected);
     strbuf.append(&expected, "\"name\":\"raw\",\"owner\":{\"module\":");
@@ -172,8 +171,8 @@ fn render_refusal() void {
     println("render refusal ok");
 }
 
-// The body reason follows analysis order: local, stored borrows, raw, then the first analysis
-// without a producer. A violated raw row gives no reason, so the reason names calls_heap.
+// The body reason follows analysis order: local, stored borrows, raw, calls_heap. A violated raw
+// row gives no reason, so the reason names the first incomplete row after it.
 fn reasons() void {
     ownership_source_env.env mut e = ownership_source_env.env{};
     string[6] lines = {
@@ -193,7 +192,9 @@ fn reasons() void {
         "complete");
     assert(ownership_report.analysis_status(row, ownership_report.RAW, 2) == "violated");
     ownership_report.reason why = ownership_report.body_reason(row);
-    assert(why.present && why.stage == "calls_heap" && why.code == "missing_producer");
+    assert(ownership_report.analysis_status(row, ownership_report.CALLS_HEAP, 2) == "incomplete");
+    assert(why.present && why.stage == "calls_heap" && why.code == "unknown_effect");
+    assert(why.source.line == 2 && why.source.col == 16);
     assert(ownership_report.closure_status(&e.source, ownership_report.RAW) == "incomplete");
     println("reasons ok");
 }

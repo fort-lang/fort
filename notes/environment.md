@@ -324,6 +324,12 @@ without a rewrite.
   in a row with `unknown type name 'turn'` in `<built-in>`, and the build of the next round
   succeeded. The cause is the in-place write and a stale page of the shared folder, as above.
   The cure is the one above: give the file a new inode, or drop the guest's caches.
+  The first round after the baseline build can report `stale` with no build step in its log:
+  `decide-correspondence` of `tools/mutations/ownership_calls.json` did so 3 times on 2026-10-11,
+  also with a drop of the caches, while the other 28 rows rebuilt. The rebuilt baseline binary
+  reaches the host after the mutant is written, so ninja finds the binary newer than the source.
+  A `--runner` script that runs `tools/vm run "<command>; s=$?; sync; exit $s"` and then
+  `sleep 3` on the host fixed it: run a stale first row again with such a runner.
 - **A mutation harness must restore on the path it does not plan to take, and must prove the
   restore.** The stale page above was the face of T-125's incident that a cure exists for; the
   face that caused the damage was different. `bash harness.sh | head -8` closed the pipe, SIGPIPE

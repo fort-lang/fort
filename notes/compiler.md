@@ -836,8 +836,9 @@ came here.
   A transferred child keeps its identity and obligation outside the old container's cleanup region.
   Retained pool views preserve their payload sources through pool growth and lose validity at
   payload release. A refilled pool cannot revive an earlier view.
-  `src/fort/ownership_heap.ft` implements this proof over verified FIR. The driver does not
-  select it yet. Its tests lower fort source and solve the closure through the call graph.
+  `src/fort/ownership_heap.ft` implements this proof over verified FIR. The driver runs it
+  through `ownership_source_calls`, for the calls_heap row of each body. Its tests lower fort
+  source and solve the closure through the call graph.
   A state maps slots (the reference leaves of locals, of caller storage, and of heap cells) to
   values, and keeps atoms: a cell, a region of a template, a flat allocation, or an opaque one.
   A template is a struct whose owned fields are its own pointer type or flat references.
@@ -1546,6 +1547,80 @@ came here.
   `ownership_globals`, the consumer of supplied global inputs, encodes D17.19 too. Both
   encodings stand until call summaries join the consumer with the actual producers.
   `test/fort/ownership_source_exit_*_test.ft` hold these rules.
+- **Call and heap obligations come from the summaries of verified FIR** (D17.14 to D17.19,
+  D19.8). `ownership_source_calls` runs after the body loop of `ownership_source.analyze`, when
+  the graph is built: `ownership_recursive.solve` and then `ownership_heap.solve` solve each
+  component of the call graph, callee first. Each component computation of each solver has one
+  ledger: its meter, `ownership_limits.computation` of the component FIR size, owned by the first
+  member in key order. `begin` panics when a solver starts a component that is not the next one in
+  `ownership_graph.callee_first`, because the ledger of each member names its component. The
+  producer frees the summary solution before the heap solver starts and the heap solution after it
+  copies the proofs, so a row keeps proofs, four events and its gaps. The summary layout charges
+  the graph ledger (`ownership_recursive.lay_out`), so the `graph_private` W count grows by
+  n + calls + components + 1. A refusal there leaves the graph without a proof: it is the first
+  refusal of that ledger (`graph_first_refusal`), and each row takes it as both proofs, never
+  `invalid_input` (which would give exit 2).
+  No event is a violation: no producer validates a witness for these solvers yet, so each event is
+  an incomplete-proof event at its operation. A body keeps its first event of each solver in the
+  canonical order (`before`; the class orders none), and the first kept event pays one V unit of
+  the running ledger. An event that names no body goes to the first member of the running
+  component. The event service returns the proof of the solver, so the producer changes no solver
+  outcome. Both solvers pay W one unit at a time (59 million units on the `main.ft` closure), so
+  `budget` takes an allowed unit without the checks of `ownership_limits.try_charge`.
+  Correspondence is complete when no call of the body lacks callee facts: no residual fort target,
+  no fort target without a body, no foreign or residual foreign target (neither solver trusts an
+  extern call yet), and each target outside the component of the body has a summary and a heap
+  summary that a caller can apply. A caller can apply a summary with a successful proof and no
+  residual effect, and a heap summary with a successful proof, `known` and no `residual`, as the
+  solver-alone gate reads `proved`. A call of a member of its own component keeps its facts: the
+  solver of that component decides them. A body is outside the declared scope too when a budget
+  error stopped its own summary or heap summary (`coverage_gap`): a refused E, W or V charge whose
+  limit the proof carries (`spec/fir.md` 14.1). A precision limit (D, R, P, G, H, T) excludes no
+  body: the heap solver covers the state at R and goes on. `summary_refused` and `heap_refused`
+  record each refused category of a body; the scope does not read them. No other reason excludes
+  a body: an unknown effect at a call, a missing path, a missing correspondence and a definite
+  failure keep it declared, so CI sees its incomplete proof. A closure without a graph proof runs
+  no solver, and each of its rows stays unexecuted. An earlier rule also excluded an unknown
+  effect; it moved a real overflow across a call out of each scope (`write8(cast(new(i32), i64
+  mut*))` after a branch: the summary had an unknown effect and no event), and the user ruled on
+  2026-10-11 to keep such a body declared. A candidate event of either solver, or an event that V
+  lost, keeps a body with a budget error declared too: an incomplete proof is never silent. A
+  candidate (`candidate`) is a violation event or an event for a missing path, which both solvers
+  give to a possible violation without a witness. Each body keeps the first candidate of each
+  solver beside its first event, and each pays one V unit. `row.gap` keeps the first gap kind
+  (calls in graph order, then the own proof), `gap_proof` its incomplete proof, and `gaps` one
+  bit for each kind.
+  The solver is incomplete when a W, E or V refusal stopped a summary of the body, or when V
+  refused an event of the body; a D, R, P, G, H or T refusal is a precision limit. The proof is
+  complete when a caller can apply both summaries, the row lost no event and the correspondence
+  is complete (a row with a gap keeps the proof of its first gap). Otherwise the summary
+  solver gives the terminal before the heap solver: a proof with a terminal keeps it, a definite
+  failure is incomplete proof (`missing_path`, or the reason of the event) at the first kept event
+  of that solver, and a terminal without a source names the declaration of the body of its
+  operation. So `fn shallow(node mut* own n) void { del(n); }` has a proved summary and an
+  incomplete row at the `del`.
+  The report reads the row through `ownership_source.body.calls`, null when the solvers did not
+  run. Report version 6 lists no calls ledger and renders no calls_heap record and no budget error
+  of the two solvers yet. The graph reason stays the first reason of each body, so the diagnostics
+  of a checked closure do not change. A closure whose analyses are all unexecuted has no first
+  incomplete reason, and the report renders its failure reason (`checking: source_error`,
+  `lowering: unsupported_lowering`) instead: a rejection is a compilation error.
+  Measured on 2026-10-11 over the 69 `src/fort` roots of `tools/ownership_audit.py run`, in the
+  Linux VM, which runs the x86-64 compiler under emulation: 4046 unique bodies, 819 declared, 117
+  declared and proved, 0 violations. Of the 702 declared bodies without proof, the summary has an
+  unknown effect in 513, a missing path in 183 and a missing correspondence in 6; none stops on a
+  candidate. A callee without a summary proof keeps 3213 bodies out, a callee without a heap proof
+  2313, an extern call 45, a budget error 23 (each a summary E limit; 1 alone; no W) and a
+  residual target 17 (a body counts once for each kind). 1085 bodies have a refused R charge, a
+  precision limit, and 5 of them are declared. The summary solver proves 117 bodies and the heap
+  solver 1325.
+  The audit took 1682.6 s of user time against 283.6 s before the producer, and 1.30 GB of
+  maximum RSS against 1.00 GB; in PR CI (ubuntu-24.04, native) the audit step took 409 s against
+  74 s on main. The summary solver spends 7.9 s on `flt.mul_u64` (82744 W, FIR size 106) in each
+  root that reaches it.
+  `test/fort/ownership_source_calls_test.ft` and four `ownership_source_calls_*_panic_test.ft`
+  hold these rules, and `ownership_report_calls_test.ft` holds the report of the row;
+  `test/ownership/solvers_alone.ft` prints the row as its third column.
 - **Dynamic element proof keeps guarded update states** (D17.15).
   `ownership_regions.apply` takes resolved storage paths and exhaustive supplied choices.
   Captured index versions stay separate from local slot names.
