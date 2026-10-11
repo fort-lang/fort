@@ -2541,7 +2541,9 @@ says ownership is "by convention", this section supersedes it.
   an assignment, a move, a release, the end of a storage, or an allocation. The address of a
   local or of static data is not null.
   A fact that the analysis assumes removes no path. A nonnull root at a dereference is such a
-  fact. An address computation reads no storage. It establishes no fact about its base.
+  fact. An address computation reads no storage. It establishes no fact about its base. An
+  address-only projection records no caller read. Its result keeps the parameter source for a later
+  access.
   The known value of a scalar is a fact of the same kind as a root. A call can write each local
   whose storage a FIR address names. After a call, a scalar local of that kind has no known
   value. The heap analysis does not yet forget the root fact of a pointer local of that kind
@@ -2552,6 +2554,39 @@ says ownership is "by convention", this section supersedes it.
   nonnull.
   A summary has no returning path only when each path of the callee ends by these rules, at an
   abort, or in a loop that does not end.
+  A caller requirement is a fact about the input of a callee, and it removes no path. An entry owner
+  is the value that an owned leaf of a parameter, or of caller storage that a borrowed parameter
+  designates, has when the function starts. An owned field of an entry owner is an entry owner too,
+  down to 6 fields, while the analysis keeps its identity. A fold, a join with another owner, a
+  join with an empty owner, or a callee that changes the fields of its parent ends that identity.
+  A read or a write through an
+  entry owner requires it nonnull when the body did not establish its nonnull root (D10.7). An owner
+  without that identity can still hold members of an input. An access through such an owner has no
+  requirement that a summary can name when the body did not establish its nonnull root. A view that
+  does not name one exact internal owner follows the same rule when its root is not established
+  nonnull. The summary then records a lost requirement, and each call of it gives incomplete proof.
+  The proof of the body itself does not change. An earlier access, or a
+  test edge that established the root, covers that root on its path: a later access there needs
+  nothing. A join with an empty owner keeps no earlier access cover. An address computation reads
+  no storage, so its last dereference requires nothing. An access through the address that it
+  computed requires that owner. An index through a fixed-array slice is such an access. At a call,
+  a callee read through
+  an exact internal view or address argument requires its caller owner on some path. A proved empty
+  argument gives a possible candidate. A store over an entry owner that is a free choice requires
+  it empty. The summary keeps each requirement of some path, and its exit
+  state keeps each requirement of each returning path. At a call, an owner of the caller fails a
+  requirement when it can be empty where the callee needs it nonnull, or nonempty where the callee
+  needs it empty. A failed requirement of each returning path gives a candidate with the certainty
+  of the caller fact. A failed requirement of some path only gives a possible candidate. A field
+  that the caller state does not hold gives a possible candidate for a nonnull requirement. It gives
+  incomplete proof for an empty requirement, as an owner of unknown status does. An empty owner
+  above the end of the path holds the requirement. The callee reaches the end only through an access
+  through that owner. That access has a requirement of its own, or a test of the callee established
+  the owner nonnull before it. Only an established nonnull root or an earlier covered root meets a
+  nonnull requirement. An assumed or imported nonnull root does not. An entry owner of the caller
+  passes the requirement on, with its own path. A state keeps at most 8 requirements of each path
+  and drops a new one. A body keeps at most 16 requirements of some path. One more gives incomplete
+  proof, and no caller applies its summary.
   A witness can cross a direct call of a fort callee that has a returning type and no parameter
   that can own a value. It assumes that the callee returns (fir.md 14.1, A06).
   An entry value is the value that a parameter of the checked function has when it starts.
@@ -2601,6 +2636,17 @@ says ownership is "by convention", this section supersedes it.
   cell at the exit contradiction of a call. The heap solver alone proved 8 faulty bodies, each
   with a leak on a null path. A review found 9 more, where a callee wrote a scalar local whose
   known value then removed a path. Now only an established fact removes a path (rule P1).
+  Amended 2026-10-11: The heap analysis had no caller requirement for a dereference of an
+  entry owner (D10.7). The heap solver alone proved 5 faulty bodies whose callee dereferenced an
+  empty owner of the caller, at the root or in an owned field (class E of
+  `test/ownership/solvers/false_accepts.txt`). Now such a callee requires the owner nonnull.
+  A read through an owner that lost its identity (depth 7, a join with another owner, a fold)
+  first required nothing, and the heap solver alone proved 3 faulty callers
+  (`test/ownership/probes/lost_*.ft`). The user ruled that correctness comes first: such a
+  summary now records a lost requirement, and each caller gets incomplete proof. Review then found
+  7 more faulty callers. They covered view and address arguments, assumed roots, an empty argument,
+  and a changed parent. The heap solver proved all 7 with the solver from 04b3c943. It proves none
+  with these rules.
 
 ### D17.19 Global ownership and process boundaries
 - owner: `memory-model.md` (2.9), `toolchain.md` (2.1), `module-system.md` (11),

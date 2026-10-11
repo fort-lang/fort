@@ -880,6 +880,52 @@ came here.
   callee error (`spec/fir.md` 14.1): `del(n)` of a parameter node with an owned field fails.
   A failed requirement reports the owner, marks it lost, and applies the call: the callee
   stores over the owner and returns, so a later independent error keeps its own event.
+  A read or a write through an entry owner requires it nonnull (D10.7, D17.18), and one
+  `requirement` record of `ownership_facts.ft` serves both kinds: `needs = nonnull` for a
+  dereference and `needs = null_root` for an empty output owner (`require_empty`). An atom keeps its
+  entry path: `handle` names the interface atom and `handle_path[..handle_depth]` the owned fields
+  below it, at most 6. An unfold extends the path of its parent; a fold, a graft that changes the
+  fields, an opaque atom and a join of two other paths clear it. `require_entry` records a
+  requirement when the atom has an entry path and `requirement_met` is false. This helper accepts
+  only an established nonnull root or an earlier cover (`entry_required`). An assumed or imported
+  nonnull root meets no requirement. A root is covered after an access on each path, after
+  the nonnull edge of a test (`refine`), and before the unfold of an address computation through an
+  established root. A join keeps the fact when each side has it or holds no member of an input, and
+  a fold keeps it, because it is a fact of the root. `deref_atom` calls it for each dereference that
+  reads or writes. The last dereference of an address computation reads nothing (`resolve_place`,
+  `last_load`), so `&n->v` requires nothing, and `deref_value` calls it when an access goes through
+  the address of a cell field. Measured: without that call, `put2` of
+  `ownership_heap_provenance_test.ft` stores into `n->next->next` and requires `n` and
+  `n->next->next` but not `n->next`. An unfold assumes a nonnull root, so only `entry_required`
+  tells an accessed cell from one that an address unfolded. A callee read through an exact internal
+  view or address argument calls `require_entry` for some path. An empty argument gives a possible
+  caller-requirement candidate. A view that does not name one exact internal atom follows the lost
+  requirement rule. An address-only projection records no parameter read. Its result keeps the
+  parameter source through summary translation, so a later access records the read. An unknown
+  call records a read for each reference argument. `state.required` holds the requirements of
+  each path, at most 8, joined by
+  intersection, and a full list drops a new one.
+  `summary.required_some` holds those of some path, at most 16; one more gives incomplete proof and
+  a residual summary. At a call `check_requirements` walks each requirement through the caller state
+  (`walk_requirement`), the dereferences before the empty owners. A failed requirement of each
+  returning path gives a candidate with the certainty of the caller fact; one of some path only
+  gives a possible candidate. An empty owner above the end of the path holds, because the callee
+  reaches the end only through a read of that owner. An unchanged entry owner of the caller passes
+  the requirement on with its own path (`passed`). An assumed or imported root does not meet the
+  requirement; an entry owner passes it on. Before this rule the heap solver alone proved 12
+  faulty bodies: 5 class-E ledger bodies and the 7 bodies of the first 4 `review_r*` probes. An
+  through an owner that lost
+  its entry path (a join with another owner, a fold, a field below depth 6) but holds members of an
+  input (`origin`), or through a view that does not name one exact internal atom, with a root that
+  is not established nonnull, has no requirement that a summary can name. The body sets
+  `lost_required`, keeps its own proof, and `check_requirements` gives each caller incomplete proof
+  (`missing_graph`). Before this
+  rule the heap solver alone proved the 3 callers of `test/ownership/probes/lost_*.ft`. A recursive
+  callee that reads without a test passes its requirement one field deeper each round, and below
+  depth 6 its caller gets a possible candidate.
+  A join of an owner with an empty side clears its entry path and its earlier access cover. A later
+  access marks the requirement lost. An index through a fixed-array slice uses the address access
+  rules. It checks the target status and records a requirement when the target is an entry cell.
   The entry record of an interface atom describes the entry value on each path or on none. A
   join keeps a record that one side split as a split record, so a loop that drains caller
   storage gives no null root and its callers go on after the call (`drained_storage`).
@@ -926,8 +972,9 @@ came here.
   other member, because their summaries rest on each other.
   A lost owner of live status becomes leaked: it stays allocated, so its views stay valid. A
   lost owner of unknown status becomes escaped, so a read through its views stays unproved.
-  `tools/mutations/ownership_heap.json` holds 89 rows of the core rules: 15 of them hold rule P1
-  of D17.18, 3 hold `not` of an integer, and its stage `provenance` runs
+  `tools/mutations/ownership_heap.json` holds 114 rows of the core rules: 25 of them hold the
+  caller requirement of a dereference (`D10.7-requirement-*`, `D10.7-lost-*`), 15 hold rule P1 of
+  D17.18, 3 hold `not` of an integer, and its stage `provenance` runs
   `ownership_heap_provenance_test.ft`.
   A known integer keeps a number only through a copy (`rv_use`), `add`, `sub`, `cast` and `not`.
   Each one computes the exact result in its type, and a result that does not fit has no number.
@@ -953,7 +1000,9 @@ came here.
   keeps a member of some path and joins by union; a `must_set` keeps a member of each path and
   joins by intersection.
   `atom.root`, `atom.status`, `value.nullness` and `state.released` have these types, and
-  `join_atom`, `join_values` and `join` assign each of them from the join of its type.
+  `join_atom`, `join_values` and `join` assign each of them from the join of its type. A
+  `requirement_list` keeps the caller requirements of each path (D10.7), at most 8, and its join
+  `join_requirement_list` keeps a requirement of both sides; `state.required` has this type.
   The constructors fix the provenance. `null_value` is established: a null constant, a move, a new
   allocation, a storage end, a release that zeroes its place, and the locals at a return.
   `empty_value` is assumed: a graft, a join of two empty values, a failed caller requirement.

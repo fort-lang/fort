@@ -64,6 +64,25 @@ struct must_set {
     u64 bits;
 }
 
+/// A requirement that a caller meets at a call (D10.7, D17.18). The owner at the owned-field path
+/// `path[..depth]` below the entry value of interface atom `entry` of the callee has the root
+/// `needs` when the callee starts: `nonnull` for an owner that the callee dereferences, and
+/// `null_root` for an output owner that the callee stores over. A path holds at most 6 fields.
+struct requirement {
+    u32 entry;
+    u32 depth;
+    u32[6] path;
+    root_kind needs;
+}
+
+/// The requirements of each path that a state represents, in `requirement_order`. A join keeps
+/// each requirement of both sides. A full list drops a new requirement: the list can omit a
+/// requirement of each path, but it never names a requirement of some path only.
+struct requirement_list {
+    requirement[8] items;
+    u32 len;
+}
+
 /// The weaker of two provenances: the earlier member of `provenance`.
 fn weaker(provenance a, provenance b) provenance {
     return cast(a, u32) <= cast(b, u32) ? a : b;
@@ -107,6 +126,67 @@ fn join_must_set(must_set a, must_set b) must_set {
     return must_set{a.bits & b.bits};
 }
 
+/// Orders two owned-field paths by their first `depth` fields. A field past the depth is no part
+/// of a path.
+fn path_order(u32[6] a, u32[6] b, u32 depth) i32 {
+    u32 mut i = 0;
+    while (i < depth && i < 6) {
+        if (a[i] != b[i]) { return a[i] < b[i] ? -1 : 1; }
+        i += 1;
+    }
+    return 0;
+}
+
+/// Orders two requirements by entry, depth, path, and need.
+fn requirement_order(requirement a, requirement b) i32 {
+    if (a.entry != b.entry) { return a.entry < b.entry ? -1 : 1; }
+    if (a.depth != b.depth) { return a.depth < b.depth ? -1 : 1; }
+    i32 c = path_order(a.path, b.path, a.depth);
+    if (c != 0) { return c; }
+    if (a.needs != b.needs) { return cast(a.needs, u32) < cast(b.needs, u32) ? -1 : 1; }
+    return 0;
+}
+
+/// Whether `r` is one of the first `len` members of `items`.
+fn has_requirement(requirement@ items, u32 len, requirement r) bool {
+    u32 mut i = 0;
+    while (i < len && cast(i, u64) < items.len) {
+        if (requirement_order(items[i], r) == 0) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+/// Inserts `r` into the first `*len` members of `items`, which keep `requirement_order`. The
+/// result is 1 when `r` is new, 0 when it is a member already, and -1 when `items` is full.
+fn insert_requirement(requirement mut@ items, u32 mut* len, requirement r) i32 {
+    u32 mut at = 0;
+    while (at < *len && requirement_order(items[at], r) < 0) { at += 1; }
+    if (at < *len && requirement_order(items[at], r) == 0) { return 0; }
+    if (cast(*len, u64) >= items.len) { return -1; }
+    u32 mut k = *len;
+    while (k > at) {
+        items[k] = items[k - 1];
+        k -= 1;
+    }
+    items[at] = r;
+    *len += 1;
+    return 1;
+}
+
+/// The join of two requirement lists: each requirement of both sides.
+fn join_requirement_list(requirement_list a, requirement_list b) requirement_list {
+    requirement_list mut out = requirement_list{};
+    u32 mut i = 0;
+    while (i < a.len) {
+        if (has_requirement(b.items[..], b.len, a.items[i])) {
+            insert_requirement(out.items[..], &out.len, a.items[i]);
+        }
+        i += 1;
+    }
+    return out;
+}
+
 /// The same root fact with the provenance `assumed`.
 fn assume(nullness f) nullness {
     return nullness{f.value, provenance.assumed};
@@ -122,6 +202,12 @@ fn assume_status(status_fact f) status_fact {
 fn import_nullness(nullness f) nullness {
     if (f.how == provenance.assumed) { return f; }
     return nullness{f.value, provenance.imported};
+}
+
+/// Whether a root fact is a nonnull root that an operation of this body observed. A dereference of
+/// such a root needs no caller requirement (D10.7); any other root at a dereference does.
+fn established_nonnull(nullness f) bool {
+    return f.how == provenance.established && f.value == root_kind.nonnull;
 }
 
 /// Whether a root fact can remove a path: an established null or nonnull root (D17.18). An

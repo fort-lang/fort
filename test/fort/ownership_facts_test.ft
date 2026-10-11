@@ -6,6 +6,7 @@
 //| status facts
 //| sets
 //| pruning
+//| requirements
 //| ownership facts ok
 /// Checks the fact types of the heap proof and the join of each type (D17.16, D17.18).
 import ownership_facts;
@@ -231,12 +232,119 @@ fn pruning() void {
         ownership_facts.provenance.assumed})));
 }
 
+// A requirement on entry `entry` at the path of `depth` fields, each field `field`.
+fn need(u32 entry, u32 depth, u32 field, ownership_facts.root_kind needs)
+    ownership_facts.requirement {
+    ownership_facts.requirement mut r = ownership_facts.requirement{};
+    r.entry = entry;
+    r.depth = depth;
+    u32 mut i = 0;
+    while (i < depth) {
+        r.path[i] = field;
+        i += 1;
+    }
+    r.needs = needs;
+    return r;
+}
+
+fn list_of(ownership_facts.requirement@ items) ownership_facts.requirement_list {
+    ownership_facts.requirement_list mut out = ownership_facts.requirement_list{};
+    u64 mut i = 0;
+    while (i < items.len) {
+        ownership_facts.insert_requirement(out.items[..], &out.len, items[i]);
+        i += 1;
+    }
+    return out;
+}
+
+fn requirements() void {
+    println("requirements");
+    ownership_facts.root_kind full = ownership_facts.root_kind.nonnull;
+    ownership_facts.root_kind empty = ownership_facts.root_kind.null_root;
+    // The order: entry, then depth, then each field of the path, then the need.
+    assert(ownership_facts.requirement_order(need(0, 3, 9, full), need(1, 0, 0, empty)) < 0);
+    assert(ownership_facts.requirement_order(need(1, 0, 0, empty), need(0, 3, 9, full)) > 0);
+    assert(ownership_facts.requirement_order(need(2, 1, 9, full), need(2, 2, 0, full)) < 0);
+    assert(ownership_facts.requirement_order(need(2, 2, 1, full), need(2, 2, 0, full)) > 0);
+    assert(ownership_facts.requirement_order(need(2, 1, 4, empty), need(2, 1, 4, full)) < 0);
+    assert(ownership_facts.requirement_order(need(2, 1, 4, full), need(2, 1, 4, full)) == 0);
+    // A field below the depth is no part of the path.
+    ownership_facts.requirement mut deep = need(3, 1, 5, full);
+    deep.path[4] = 7;
+    assert(ownership_facts.requirement_order(deep, need(3, 1, 5, full)) == 0);
+    // The deepest path: 6 fields, the last one differs.
+    ownership_facts.requirement mut six = need(0, 6, 1, full);
+    six.path[5] = 2;
+    assert(ownership_facts.requirement_order(need(0, 6, 1, full), six) < 0);
+    // An insert keeps the order and one member for each requirement; a full span refuses.
+    ownership_facts.requirement[3] mut room = {};
+    u32 mut len = 0;
+    assert(ownership_facts.insert_requirement(room[..], &len, need(5, 0, 0, full)) == 1);
+    assert(ownership_facts.insert_requirement(room[..], &len, need(1, 0, 0, full)) == 1);
+    assert(ownership_facts.insert_requirement(room[..], &len, need(1, 0, 0, full)) == 0);
+    assert(ownership_facts.insert_requirement(room[..], &len, need(3, 0, 0, full)) == 1);
+    assert(len == 3 && room[0].entry == 1 && room[1].entry == 3 && room[2].entry == 5);
+    assert(ownership_facts.insert_requirement(room[..], &len, need(4, 0, 0, full)) == -1);
+    assert(ownership_facts.insert_requirement(room[..], &len, need(3, 0, 0, full)) == 0);
+    assert(len == 3);
+    assert(ownership_facts.has_requirement(room[..], len, need(5, 0, 0, full)));
+    assert(!ownership_facts.has_requirement(room[..], 2, need(5, 0, 0, full)));
+    assert(!ownership_facts.has_requirement(room[..], len, need(5, 0, 0, empty)));
+    // The join keeps a requirement of both sides only, in order.
+    ownership_facts.requirement[3] left_items = {need(0, 0, 0, full), need(1, 1, 2, full),
+        need(4, 0, 0, empty)};
+    ownership_facts.requirement[3] right_items = {need(4, 0, 0, empty), need(0, 0, 0, full),
+        need(1, 1, 3, full)};
+    ownership_facts.requirement_list left = list_of(left_items[..]);
+    ownership_facts.requirement_list right = list_of(right_items[..]);
+    ownership_facts.requirement_list both = ownership_facts.join_requirement_list(left, right);
+    assert(both.len == 2);
+    assert(ownership_facts.requirement_order(both.items[0], need(0, 0, 0, full)) == 0);
+    assert(ownership_facts.requirement_order(both.items[1], need(4, 0, 0, empty)) == 0);
+    assert(ownership_facts.join_requirement_list(right, left).len == 2);
+    // An empty side gives an empty join; a side joined with itself stays.
+    ownership_facts.requirement_list none = ownership_facts.requirement_list{};
+    assert(ownership_facts.join_requirement_list(left, none).len == 0);
+    assert(ownership_facts.join_requirement_list(none, left).len == 0);
+    assert(ownership_facts.join_requirement_list(left, left).len == 3);
+    // A full list of 8 refuses a ninth member.
+    ownership_facts.requirement_list mut full_list = ownership_facts.requirement_list{};
+    u32 mut k = 0;
+    while (k < 8) {
+        assert(ownership_facts.insert_requirement(full_list.items[..], &full_list.len,
+            need(k, 0, 0, full)) == 1);
+        k += 1;
+    }
+    assert(ownership_facts.insert_requirement(full_list.items[..], &full_list.len,
+        need(8, 0, 0, full)) == -1);
+    assert(full_list.len == 8);
+    // Only an established nonnull root covers a dereference.
+    u64 mut covered = 0;
+    ownership_facts.root_kind[4] values = ROOTS;
+    ownership_facts.provenance[3] hows = PROVENANCES;
+    u64 mut i = 0;
+    while (i < values.len) {
+        u64 mut j = 0;
+        while (j < hows.len) {
+            if (ownership_facts.established_nonnull(ownership_facts.nullness{values[i],
+                hows[j]})) {
+                assert(values[i] == full && hows[j] == ownership_facts.provenance.established);
+                covered += 1;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    assert(covered == 1);
+}
+
 fn main() i32 {
     order();
     root_facts();
     status_facts();
     sets();
     pruning();
+    requirements();
     println("ownership facts ok");
     return 0;
 }

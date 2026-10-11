@@ -13,7 +13,8 @@ import fir;
 import ownership_api;
 import ownership_api.{certainty};
 import ownership_facts;
-import ownership_facts.{atom_status, may_set, nullness, provenance, root_kind, status_fact};
+import ownership_facts.{atom_status, may_set, nullness, provenance, requirement, root_kind,
+    status_fact};
 import ownership_flow;
 import ownership_graph;
 import ownership_keys;
@@ -104,10 +105,20 @@ struct atom {
     // A view or an address of the atom reached an unknown effect, so a later unknown effect can
     // change it too.
     bool exposed; // join: may
-    // The atom is the entry value of interface atom `handle`, or of its owned field
-    // `handle_field` when that field is not NONE (`spec/fir.md` 14 Calls). NONE otherwise.
+    // The atom is the entry value of the owner at the entry path of the atom: the owned-field
+    // path `handle_path[..handle_depth]` below the entry value of interface atom `handle`
+    // (`spec/fir.md` 14 Calls). `handle` is NONE, and the path empty, for any other atom. An
+    // unfold extends the path of its parent; a fold, a graft that changes the fields, and an
+    // opaque atom clear it, because the fields are no entry values then.
     u32 handle; // join: same
-    u32 handle_field; // join: same
+    u32 handle_depth; // join: same
+    u32[6] handle_path; // join: same
+    // An access through this atom needs nothing of its own: on each path, an earlier access
+    // required its nonnull root or marked it lost, or the body had established that root then.
+    // An unfold assumes the nonnull root of a cell, so only this fact tells such a cell from one
+    // that an address computation unfolded (D10.7). The fact is about the root, so a fold and a
+    // lost entry path keep it.
+    bool entry_required; // join: must
     // A region whose root node, when nonnull, has each owned field empty: a fold of a node with
     // no owned child keeps that fact, and an unfold gives empty children.
     bool empty_leaves; // join: must
@@ -184,8 +195,18 @@ struct state {
     u8 mut@ own ended; // join: owner
     // The interface atoms with a possibly released member.
     may_set released;
+    // The requirements that each path that the state represents has (D10.7).
+    ownership_facts.requirement_list required;
     bool lossy; // join: may
     ownership_api.lost_fact loss; // join: none
+}
+
+// The requirements that some path of a body has, in `ownership_facts.requirement_order`
+// (D10.7). A body whose list is full gives incomplete proof, because its summary cannot name
+// each requirement.
+struct requirement_set {
+    requirement[16] items;
+    u32 len;
 }
 
 struct shape {
@@ -205,10 +226,6 @@ struct interface_entry {
     types.node* ty; // join: same
     u32 shape; // join: same
     bool needs_shape; // join: may
-    // The caller supplies an empty owner here, or an empty owned field of its root (`spec/fir.md`
-    // 14 Calls).
-    bool require_null; // join: may
-    u64 require_fields; // join: may
 }
 
 /// The caller storage that a borrowed pointer parameter designates.
@@ -223,7 +240,8 @@ struct summary {
     ownership_api.proof_status proof; // join: none
     bool known; // join: none
     bool returns; // join: may
-    // An unknown effect changed caller-visible facts, so no caller can apply this summary.
+    // An unknown effect changed caller-visible facts, or the body has more requirements than its
+    // list holds, so no caller can apply this summary.
     bool residual; // join: may
     interface_entry mut@ own interface; // join: owner
     caller_entry mut@ own callers; // join: owner
@@ -231,6 +249,13 @@ struct summary {
     // stands for each parameter from 64 on, which no bit can name.
     u64 view_reads; // join: may
     bool reads_high; // join: may
+    // The requirements that some path of the body has. `post.required` holds those that each
+    // returning path has.
+    requirement_set required_some; // join: may
+    // The interface atoms, one bit each, whose members the body accesses through an owner that
+    // lost its entry path, with a root that the body did not establish nonnull. The summary
+    // cannot name that requirement, so each call of it gives incomplete proof (D10.7, D17.18).
+    u64 lost_required; // join: may
     // The events that the computation of this summary recorded.
     u32 events; // join: none
     state post; // join: owner
@@ -250,6 +275,8 @@ struct location {
     u32 count;
     u32[8] sources;
     bool external;
+    // The parameter whose designated storage this location reaches, or NONE.
+    u32 param;
 }
 
 // One leaf of an aggregate value, relative to the aggregate.
@@ -298,10 +325,10 @@ struct context {
     u64 needs_shape;
     u64 view_reads;
     bool reads_high;
-    // The empty owners that the caller supplies (`spec/fir.md` 14 Calls), one entry for each
-    // interface atom.
-    bool mut@ own require_null;
-    u64 mut@ own require_fields;
+    // See `summary.required_some`. Each pass adds to it, as each pass adds to `needs_shape`.
+    requirement_set required_some;
+    // See `summary.lost_required`.
+    u64 lost_required;
     state mut@ own entry;
     u32 mut@ own joins;
     bool mut@ own pending;
@@ -590,6 +617,7 @@ fn clone(state* s) state {
     state mut out = state{};
     out.reached = s->reached;
     out.released = s->released;
+    out.required = s->required;
     out.lossy = s->lossy;
     out.loss = s->loss;
     out.slots = new(slot, s->slots_len);
@@ -1125,11 +1153,23 @@ fn new_atom(atom_kind kind, types.node* ty, u32 shape_index, root_kind root, pro
     a.shape = shape_index;
     a.root = nullness{root, how};
     a.handle = NONE;
-    a.handle_field = NONE;
     a.into = NONE;
     a.borrows = true;
     a.params = true;
     return a;
+}
+
+// Makes atom `a` no entry value: its fields can differ from the entry fields now.
+fn clear_handle(atom mut* a) void {
+    a->handle = NONE;
+    a->handle_depth = 0;
+    u32[6] none = {};
+    a->handle_path = none;
+}
+
+// The requirement that the entry value of atom `a` has the root `needs`. The atom has a handle.
+fn requirement_of(atom a, root_kind needs) requirement {
+    return requirement{a.handle, a.handle_depth, a.handle_path, needs};
 }
 
 // Adds the slots of cell `a` of struct type `t`, each with value `initial`.
@@ -1168,7 +1208,7 @@ fn unfold(context mut* c, state mut* s, u32 a) bool {
     // an interface atom. A fold of other members clears both facts, so a child never holds the
     // root of an interface atom.
     bool child_strict = !parent.fresh && (parent.strict ||
-        (parent.handle != NONE && parent.handle_field == NONE));
+        (parent.handle != NONE && parent.handle_depth == 0));
     atom mut* root = &s->atoms[cast(a, u64)];
     root->kind = atom_kind.cell;
     root->root = nullness{root_kind.nonnull, provenance.assumed};
@@ -1195,9 +1235,13 @@ fn unfold(context mut* c, state mut* s, u32 a) bool {
                 child.choice = parent.choice;
                 child.borrows = parent.borrows;
                 child.params = parent.params;
-                if (parent.handle != NONE && parent.handle_field == NONE) {
+                // An owned field of an entry value is an entry value one field deeper, down to
+                // the path bound (D10.7, D17.18).
+                if (parent.handle != NONE && cast(parent.handle_depth, u64) < PATH_DEPTH) {
                     child.handle = parent.handle;
-                    child.handle_field = item.key.path[0];
+                    child.handle_depth = parent.handle_depth + 1;
+                    child.handle_path = parent.handle_path;
+                    child.handle_path[cast(parent.handle_depth, u64)] = item.key.path[0];
                 }
                 u32 made = push_atom(s, child);
                 s->slots[i].v = own_value(made);
@@ -1307,7 +1351,7 @@ fn fold_now(context mut* c, state mut* s, u32 a) void {
     }
     root->choice = false;
     // A later unfold names the current fields, not the entry fields.
-    root->handle = NONE;
+    clear_handle(root);
     u32 mut@ own children = new(u32, s->slots_len + 1);
     defer del(children);
     u64 mut n = 0;
@@ -1480,7 +1524,7 @@ fn make_opaque(state mut* s, u32 a) void {
     item->kind = atom_kind.opaque;
     item->shape = 0;
     item->choice = false;
-    item->handle = NONE;
+    clear_handle(item);
     item->empty_leaves = false;
     item->borrows = borrows;
     item->params = params;
@@ -1849,6 +1893,12 @@ fn canonical(context mut* c, state mut* s) bool {
     return true;
 }
 
+// Whether two records name one entry path.
+fn same_entry(atom a, atom b) bool {
+    return a.handle == b.handle && a.handle_depth == b.handle_depth &&
+        ownership_facts.path_order(a.handle_path, b.handle_path, a.handle_depth) == 0;
+}
+
 // A provenance is part of each fact, so a weaker provenance is a change: a block entry that a
 // join weakens runs again (D17.18).
 fn same_atom(atom a, atom b) bool {
@@ -1856,9 +1906,20 @@ fn same_atom(atom a, atom b) bool {
         a.status.how == b.status.how && a.ty == b.ty && a.shape == b.shape &&
         a.root.value == b.root.value && a.root.how == b.root.how && a.origin == b.origin &&
         a.fresh == b.fresh && a.strict == b.strict && a.choice == b.choice &&
-        a.exposed == b.exposed && a.handle == b.handle && a.handle_field == b.handle_field &&
+        a.exposed == b.exposed && same_entry(a, b) && a.entry_required == b.entry_required &&
         a.empty_leaves == b.empty_leaves && a.borrows == b.borrows && a.params == b.params &&
         a.used == b.used;
+}
+
+// Whether two requirement lists hold the same members in the same order.
+fn same_requirements(requirement@ a, requirement@ b) bool {
+    if (a.len != b.len) { return false; }
+    u64 mut i = 0;
+    while (i < a.len) {
+        if (ownership_facts.requirement_order(a[i], b[i]) != 0) { return false; }
+        i += 1;
+    }
+    return true;
 }
 
 /// Compares two canonical states, each fact with its provenance (`same_atom`, `same_value`), so a
@@ -1874,7 +1935,9 @@ fn equal(context mut* c, state* a, state* b, bool mut* same) bool {
     }
     if (a->released.bits != b->released.bits ||
         a->lossy != b->lossy || a->slots_len != b->slots_len || a->atoms_len != b->atoms_len ||
-        a->ended.len != b->ended.len) { return true; }
+        a->ended.len != b->ended.len ||
+        !same_requirements(a->required.items[..a->required.len],
+        b->required.items[..b->required.len])) { return true; }
     u64 mut i = 0;
     while (i < a->ended.len) {
         if (a->ended[i] != b->ended[i]) { return true; }
@@ -1923,9 +1986,13 @@ fn join_atom(atom a, atom b) atom {
         (a.empty_leaves || b.empty_leaves);
     out.borrows = a.borrows || b.borrows;
     out.params = a.params || b.params;
-    if (a.handle != b.handle || a.handle_field != b.handle_field) {
-        out.handle = NONE;
-        out.handle_field = NONE;
+    // A side whose atom holds no member of an input needs nothing on its paths.
+    out.entry_required = (a.entry_required || (a.handle == NONE && a.origin == 0)) &&
+        (b.entry_required || (b.handle == NONE && b.origin == 0));
+    // Two records keep one entry path only when both name it.
+    if (a.handle != b.handle || a.handle_depth != b.handle_depth ||
+        ownership_facts.path_order(a.handle_path, b.handle_path, a.handle_depth) != 0) {
+        clear_handle(&out);
     }
     out.used = true;
     return out;
@@ -2249,6 +2316,7 @@ fn join(context mut* c, state* a, state* b, bool widen, state mut* out) bool {
     state mut joined = state{};
     joined.reached = x.reached || y.reached;
     joined.released = ownership_facts.join_may_set(x.released, y.released);
+    joined.required = ownership_facts.join_requirement_list(x.required, y.required);
     joined.lossy = x.lossy || y.lossy;
     joined.loss = x.lossy ? x.loss : y.loss;
     joined.ended = new(u8, x.ended.len);
@@ -2291,6 +2359,13 @@ fn join(context mut* c, state* a, state* b, bool widen, state mut* out) bool {
         if ((from_x[i] != from_y[i]) && p.nullside[i]) {
             joined.atoms[i].root = ownership_facts.join_nullness(joined.atoms[i].root,
                 nullness{root_kind.null_root, provenance.assumed});
+            // One path holds no owner. It cannot keep the entry identity or the access cover of
+            // the path that holds the owner.
+            joined.atoms[i].handle = NONE;
+            joined.atoms[i].handle_depth = 0;
+            u32[6] no_path = {};
+            joined.atoms[i].handle_path = no_path;
+            joined.atoms[i].entry_required = false;
         }
         if (i < c->interface_len && !(from_x[i] || from_y[i])) {
             // Each side keeps the identity of this interface atom elsewhere. The unused record
@@ -2475,8 +2550,6 @@ fn lay_out(context mut* c) bool {
     }
     if (count > INTERFACE_LIMIT) { return false; }
     c->interface = new(interface_entry, count);
-    c->require_null = new(bool, count);
-    c->require_fields = new(u64, count);
     k = 0;
     while (k < c->fixed_len) {
         slot item = c->fixed[k];
@@ -2565,6 +2638,7 @@ fn initial(context mut* c) state {
 fn unknown_location() location {
     location mut loc = location{};
     loc.kind = location_kind.unknown;
+    loc.param = NONE;
     return loc;
 }
 
@@ -2622,19 +2696,79 @@ fn untracked(state* s, location loc) ownership_api.incomplete_reason {
     return ownership_api.incomplete_reason.unknown_effect;
 }
 
-fn element_of(u32 count, u32[8] sources, bool external) location {
+fn element_of(u32 count, u32[8] sources, bool external, u32 param) location {
     location mut loc = location{};
     loc.kind = location_kind.element;
     loc.count = count;
     loc.sources = sources;
     loc.external = external;
+    loc.param = param;
     return loc;
+}
+
+// Adds requirement `r` (D10.7, `spec/fir.md` 14 Calls). The body keeps each requirement of some
+// path for its summary, and the state keeps it when `each` says that it holds on each path that
+// the state represents. A full list of the state drops it: the summary then names it for some
+// path only. A full list of the body gives incomplete proof, and no caller applies the summary,
+// because it cannot name each requirement.
+fn require(context mut* c, state mut* s, requirement r, bool each) void {
+    if (each) { ownership_facts.insert_requirement(s->required.items[..], &s->required.len, r); }
+    if (ownership_facts.insert_requirement(c->required_some.items[..], &c->required_some.len,
+        r) < 0) {
+        c->residual = true;
+        unproved(c, s, ownership_api.incomplete_reason.unknown_effect, NONE,
+            "each requirement of this body within its list");
+    }
+}
+
+// An access through atom `a`, a read or a write of its storage. When `a` is an entry value whose
+// nonnull root this body did not establish, the access is a caller requirement (D10.7): the
+// caller supplies a nonnull owner there. The requirement is no fact of the state, so it removes
+// no path (D17.18). One access covers each later one (`entry_required`). An atom that holds
+// members of an input but lost its entry path (a join with another owner, a fold, a field below
+// depth 6) has no requirement that a summary can name: the body marks its inputs lost
+// (`lost_required`), and each caller gets incomplete proof. The proof of the body stays.
+// `each` says that the access happens on each path that the state represents. Only such an
+// access covers the root.
+fn require_entry(context mut* c, state mut* s, u32 a, bool each) void {
+    atom item = s->atoms[cast(a, u64)];
+    // An atom that holds no member of an input needs nothing, so it keeps no fact either.
+    if (item.handle == NONE && item.origin == 0) { return; }
+    if (!requirement_met(item)) {
+        if (item.handle != NONE) {
+            require(c, s, requirement_of(item, root_kind.nonnull), each);
+        } else {
+            c->lost_required = c->lost_required | item.origin;
+        }
+    }
+    if (each) { s->atoms[cast(a, u64)].entry_required = true; }
+}
+
+// Whether an access through atom `a` needs no requirement of its own: the body established its
+// nonnull root, or an earlier access covered it (`entry_required`). An assumed or an imported
+// root is no fact, so it meets no requirement (D17.18, rule P1).
+fn requirement_met(atom a) bool {
+    return ownership_facts.established_nonnull(a.root) || a.entry_required;
+}
+
+// An access through a view that names no one exact atom: the owners of an input that it can
+// reach have no entry path for it, unless the body established the view nonnull (D10.7).
+fn lose_view(context mut* c, state* s, value v) void {
+    if (ownership_facts.established_nonnull(v.nullness)) { return; }
+    u32 mut k = 0;
+    while (k < v.count) {
+        c->lost_required = c->lost_required | s->atoms[cast(v.sources[k], u64)].origin;
+        k += 1;
+    }
 }
 
 // The storage that atom `a` designates (`spec/memory-model.md` 2.7). A region root unfolds; a null
 // dereference is undefined behavior outside the proof (memory model 8), so the unfold assumes a
-// nonnull root.
-fn deref_atom(context mut* c, state mut* s, u32 a, string what) location {
+// nonnull root. A dereference that reads or writes through the atom requires it
+// (`require_entry`). `reads` is false for the last dereference of an address computation, which
+// reads no storage (D17.18, `spec/fir.md` 14.1): it requires nothing, and a later access through
+// the address requires the atom of its cell, unless the root was established before the unfold.
+fn deref_atom(context mut* c, state mut* s, u32 a, bool reads, string what) location {
     atom item = s->atoms[cast(a, u64)];
     u32[8] mut one = {};
     one[0] = a;
@@ -2654,10 +2788,14 @@ fn deref_atom(context mut* c, state mut* s, u32 a, string what) location {
         violation(c, s, ownership_api.event_kind.invalid_use, certainty.definite, a, what);
         return unknown_location();
     }
+    // An address computation requires nothing. But its unfold makes an established root assumed,
+    // so it covers that root first: a later access through the address needs nothing.
+    if (reads || ownership_facts.established_nonnull(item.root)) { require_entry(c, s, a, true); }
     if (item.kind == atom_kind.cell) {
         location mut loc = location{};
         loc.kind = location_kind.slots;
         loc.key = key_of(base_kind.cell, a);
+        loc.param = NONE;
         return loc;
     }
     if (item.kind == atom_kind.region) {
@@ -2666,9 +2804,10 @@ fn deref_atom(context mut* c, state mut* s, u32 a, string what) location {
         location mut loc = location{};
         loc.kind = location_kind.slots;
         loc.key = key_of(base_kind.cell, a);
+        loc.param = NONE;
         return loc;
     }
-    return element_of(1, one, false);
+    return element_of(1, one, false, NONE);
 }
 
 // Notes that the body reads storage that a parameter designates, so each caller checks that
@@ -2690,8 +2829,9 @@ fn reads_param(summary* sum, u64 param) bool {
     return (sum->view_reads & bit(param)) != 0;
 }
 
-fn deref_value(context mut* c, state mut* s, value v, bool owning, string what) location {
-    note_param_read(c, v.param);
+fn deref_value(context mut* c, state mut* s, value v, bool owning, bool reads, string what)
+    location {
+    if (reads) { note_param_read(c, v.param); }
     switch (v.kind) {
     case value_kind.address:
         if (v.target.base == base_kind.local) {
@@ -2713,19 +2853,23 @@ fn deref_value(context mut* c, state mut* s, value v, bool owning, string what) 
                 use_sources(c, s, 1, one, what);
                 return unknown_location();
             }
+            // An access through the address of a cell field is an access through the cell.
+            if (reads) { require_entry(c, s, v.target.id, true); }
         }
         location mut loc = location{};
         loc.kind = location_kind.slots;
         loc.key = v.target;
+        loc.param = v.param;
         return loc;
     case value_kind.owned:
-        return deref_atom(c, s, v.atom, what);
+        return deref_atom(c, s, v.atom, reads, what);
     case value_kind.view:
         if (v.exact && v.count == 1 && !v.external) {
-            return deref_atom(c, s, v.sources[0], what);
+            return deref_atom(c, s, v.sources[0], reads, what);
         }
+        if (reads) { lose_view(c, s, v); }
         if (!use_sources(c, s, v.count, v.sources, what)) { return unknown_location(); }
-        return element_of(v.count, v.sources, v.external);
+        return element_of(v.count, v.sources, v.external, v.param);
     case value_kind.empty:
         if (owning) {
             violation(c, s, ownership_api.event_kind.invalid_use, certainty.definite, NONE, what);
@@ -2741,12 +2885,40 @@ fn deref_value(context mut* c, state mut* s, value v, bool owning, string what) 
 /// Resolves a FIR place to a location (`spec/fir.md` 5.5). A dereference reads its pointer first.
 fn resolve(context mut* c, state mut* s, fir.place p, location mut* out, types.node* mut* ty)
     void {
+    resolve_place(c, s, p, false, out, ty);
+}
+
+// The index of the last projection of place `p` that loads through a pointer: a dereference or
+// an index of a span or a string. `p.proj_len` when no projection loads.
+fn last_load(context* c, fir.place p) u32 {
+    if (p.base == fir.base_kind.bk_global) { return p.proj_len; }
+    types.node* mut t = fir.local_at(c->f, p.local)->ty;
+    u32 mut last = p.proj_len;
+    u32 mut i = 0;
+    while (i < p.proj_len) {
+        fir.projection pj = fir.place_projection(c->f, p, i);
+        if (pj.kind == fir.proj_kind.pj_deref ||
+            (pj.kind == fir.proj_kind.pj_index && t->kind != types.type_kind.k_array)) {
+            last = i;
+        }
+        t = fir.apply_projection(c->f, t, pj);
+        i += 1;
+    }
+    return last;
+}
+
+// Resolves place `p`. `address` says that an address computation takes the place: its last load
+// computes the address and reads no storage through its pointer (D17.18, `spec/fir.md` 14.1).
+fn resolve_place(context mut* c, state mut* s, fir.place p, bool address, location mut* out,
+    types.node* mut* ty) void {
     *out = unknown_location();
     *ty = fir.place_type(c->f, p);
     if (p.base == fir.base_kind.bk_global) { return; }
+    u32 computed = address ? last_load(c, p) : p.proj_len;
     location mut loc = location{};
     loc.kind = location_kind.slots;
     loc.key = key_of(base_kind.local, p.local);
+    loc.param = NONE;
     types.node* mut t = fir.local_at(c->f, p.local)->ty;
     u32 mut i = 0;
     while (i < p.proj_len) {
@@ -2775,7 +2947,7 @@ fn resolve(context mut* c, state mut* s, fir.place p, location mut* out, types.n
             } else if (loc.kind == location_kind.element) {
                 use_sources(c, s, loc.count, loc.sources, "read through a released source");
             }
-            loc = deref_value(c, s, pointer, pointer_owns, name(c, s, loc.key));
+            loc = deref_value(c, s, pointer, pointer_owns, i != computed, name(c, s, loc.key));
         case fir.proj_kind.pj_index:
             if (t->kind == types.type_kind.k_array) {
                 if (loc.kind == location_kind.slots) {
@@ -2793,22 +2965,19 @@ fn resolve(context mut* c, state mut* s, fir.place p, location mut* out, types.n
                     }
                 }
                 if (header.kind == value_kind.address) {
-                    note_param_read(c, header.param);
-                    location mut target = location{};
-                    target.kind = location_kind.slots;
-                    target.key = header.target;
-                    u64 at = find_slot(s, header.target);
-                    if (at == U64_MAX) { target.kind = location_kind.length; }
-                    loc = target;
+                    loc = deref_value(c, s, header, header_owns, i != computed,
+                        name(c, s, loc.key));
                 } else if (header.kind == value_kind.owned) {
-                    location found = deref_atom(c, s, header.atom, name(c, s, loc.key));
+                    location found = deref_atom(c, s, header.atom, i != computed,
+                        name(c, s, loc.key));
                     if (found.kind == location_kind.slots) {
                         loc = unknown_location();
                     } else {
                         loc = found;
                     }
                 } else {
-                    loc = deref_value(c, s, header, header_owns, name(c, s, loc.key));
+                    loc = deref_value(c, s, header, header_owns, i != computed,
+                        name(c, s, loc.key));
                     if (loc.kind == location_kind.slots) { loc = unknown_location(); }
                 }
             }
@@ -2907,22 +3076,16 @@ fn operand(context mut* c, state mut* s, fir.operand op) value {
 }
 
 // An owner whose entry value the caller chose freely loses nothing when the caller supplies it
-// empty: the summary records that requirement, and the state takes the empty entry value
-// (`spec/fir.md` 14 Calls, "empty output owners"). False when the atom has no such handle.
-fn require_empty(context mut* c, state mut* s, u32 a) bool {
+// empty: the body records that requirement, and the state takes the empty entry value
+// (`spec/fir.md` 14 Calls, "empty output owners"). `each` says that the requirement holds on
+// each path that the state represents. False when the atom has no such entry path.
+fn require_empty(context mut* c, state mut* s, u32 a, bool each) bool {
     atom item = s->atoms[cast(a, u64)];
     if (item.handle == NONE || !item.choice || item.root.value != root_kind.free ||
         item.status.value != atom_status.live || cast(item.handle, u64) >= c->interface_len) {
         return false;
     }
-    u64 at = cast(item.handle, u64);
-    if (item.handle_field == NONE) {
-        c->require_null[at] = true;
-    } else if (cast(item.handle_field, u64) < 64) {
-        c->require_fields[at] = c->require_fields[at] | bit(cast(item.handle_field, u64));
-    } else {
-        return false;
-    }
+    require(c, s, requirement_of(item, root_kind.null_root), each);
     s->atoms[cast(a, u64)].root = nullness{root_kind.null_root, provenance.assumed};
     return true;
 }
@@ -2940,7 +3103,7 @@ fn check_overwrite(context mut* c, state mut* s, value old, slot_key k) void {
         item.status.value == atom_status.escaped) { return; }
     if (item.status.value == atom_status.unknown) {
         unproved(c, s, ownership_api.incomplete_reason.unknown_effect, old.atom, name(c, s, k));
-    } else if (require_empty(c, s, old.atom)) {
+    } else if (require_empty(c, s, old.atom, true)) {
         return;
     } else {
         violation(c, s, ownership_api.event_kind.lost_ownership, certainty_of(item.root.value),
@@ -3236,9 +3399,11 @@ fn rvalue_value(context mut* c, state mut* s, fir.rvalue rv, types.node* t) valu
     case fir.rvalue_kind.rv_addr:
         location mut loc = location{};
         types.node* mut place_ty = null;
-        resolve(c, s, rv.place, &loc, &place_ty);
+        resolve_place(c, s, rv.place, true, &loc, &place_ty);
         if (loc.kind == location_kind.slots) {
-            return address_value(loc.key, address_fact(s, loc.key));
+            value mut address = address_value(loc.key, address_fact(s, loc.key));
+            address.param = loc.param;
+            return address;
         }
         if (loc.kind == location_kind.element) {
             value mut inner = empty_value();
@@ -3246,6 +3411,7 @@ fn rvalue_value(context mut* c, state mut* s, fir.rvalue rv, types.node* t) valu
             inner.count = loc.count;
             inner.sources = loc.sources;
             inner.external = loc.external;
+            inner.param = loc.param;
             // An element address is nonnull when its storage exists, which the proof assumes.
             inner.nullness = nullness{root_kind.nonnull, provenance.assumed};
             return inner;
@@ -3256,10 +3422,14 @@ fn rvalue_value(context mut* c, state mut* s, fir.rvalue rv, types.node* t) valu
         operand(c, s, fir.rvalue_operand(c->f, rv, 1));
         location mut sliced = location{};
         types.node* mut sliced_ty = null;
-        resolve(c, s, rv.place, &sliced, &sliced_ty);
+        // A slice of a fixed array is an address; a slice of a span or a string loads its header.
+        bool array = fir.place_type(c->f, rv.place)->kind == types.type_kind.k_array;
+        resolve_place(c, s, rv.place, array, &sliced, &sliced_ty);
         if (sliced_ty->kind == types.type_kind.k_array) {
             if (sliced.kind == location_kind.slots || sliced.kind == location_kind.length) {
-                return address_value(sliced.key, address_fact(s, sliced.key));
+                value mut address = address_value(sliced.key, address_fact(s, sliced.key));
+                address.param = sliced.param;
+                return address;
             }
             return unknown_value();
         }
@@ -3668,11 +3838,14 @@ fn unknown_call(context mut* c, state mut* s, argument@ args, leaf_list* arg_lea
         if (args[i].aggregate) {
             u64 mut j = 0;
             while (j < args[i].count) {
-                if (havoc_value(s, arg_leaves->items[args[i].first + j].v)) { changed = true; }
+                value v = arg_leaves->items[args[i].first + j].v;
+                note_param_read(c, v.param);
+                if (havoc_value(s, v)) { changed = true; }
                 j += 1;
             }
-        } else if (havoc_value(s, args[i].v)) {
-            changed = true;
+        } else {
+            note_param_read(c, args[i].v.param);
+            if (havoc_value(s, args[i].v)) { changed = true; }
         }
         i += 1;
     }
@@ -3757,6 +3930,14 @@ fn argument_view(value v, value mut* out, argument@ args) bool {
     return a.kind == value_kind.empty;
 }
 
+// Maps a callee parameter source to the parameter source of its caller argument.
+fn argument_source(u32 param, argument@ args) u32 {
+    if (param == NONE) { return NONE; }
+    if (param == ANY_PARAM || param == 0 || cast(param, u64) > args.len ||
+        args[cast(param - 1, u64)].aggregate) { return ANY_PARAM; }
+    return args[cast(param - 1, u64)].v.param;
+}
+
 // The value of callee exit value `v` in the caller. The caller imports each nullness fact that
 // the summary gives: a fact that the callee established or imported is imported here, and it
 // removes no path of the caller (D17.18).
@@ -3805,7 +3986,9 @@ fn translate_value(context* c, state* s, value v, u32@ map, slot_key@ prefixes, 
             if (!rebase(prefixes[cast(v.target.id, u64)], v.target.depth, v.target.path, &k)) {
                 return unknown_value();
             }
-            return address_value(k, address_fact(s, k));
+            value mut address = address_value(k, address_fact(s, k));
+            address.param = argument_source(v.param, args);
+            return address;
         }
         if (v.target.base == base_kind.cell) {
             u32 cell_at = map[cast(v.target.id, u64)];
@@ -3891,14 +4074,30 @@ fn doubt_members(state mut* s, u32 a) void {
 }
 
 // A read through one value needs each of its sources live (D17.14).
+// The callee reads through the argument on some path, so an owner of the caller that the argument
+// designates carries a requirement of some path, as an access in this body does (D10.7).
 fn read_live(context mut* c, state mut* s, value v) bool {
     note_param_read(c, v.param);
     if (v.kind == value_kind.view) {
+        if (v.exact && v.count == 1 && !v.external) {
+            require_entry(c, s, v.sources[0], false);
+        } else {
+            lose_view(c, s, v);
+        }
         return use_sources(c, s, v.count, v.sources, "storage that this call reads");
     }
     if (v.kind == value_kind.address) {
-        location loc = deref_value(c, s, v, false, "storage that this call reads");
+        location loc = deref_value(c, s, v, false, false, "storage that this call reads");
+        if (loc.kind != location_kind.unknown && v.target.base == base_kind.cell) {
+            require_entry(c, s, v.target.id, false);
+        }
         return loc.kind != location_kind.unknown;
+    }
+    // A proved empty owner, or null, that the callee reads through.
+    if (v.kind == value_kind.empty) {
+        violation(c, s, ownership_api.event_kind.caller_requirement, certainty.possible, NONE,
+            "the empty owner that the callee reads");
+        return true;
     }
     // A reference that the proof does not follow can designate released storage, as a read of
     // it in this body would (D17.14).
@@ -4034,7 +4233,8 @@ fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list
     types.node* t, leaf_list mut* out, bool check_only) bool {
     summary* sum = target->published;
     u64 interfaces = sum->interface.len;
-    if (!pay(c, sum->post.slots_len + sum->post.atoms_len + interfaces + 1)) { return true; }
+    if (!pay(c, sum->post.slots_len + sum->post.atoms_len + interfaces +
+        cast(sum->required_some.len, u64) + 1)) { return true; }
     // Each argument whose storage the callee reads must be live at the call (D17.14), and so
     // must each reference leaf of a by-value aggregate argument.
     u64 mut r = 0;
@@ -4142,19 +4342,9 @@ fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list
         k += 1;
     }
     if (!separate(c, s, sum, args, arg_leaves, prefixes[..], bound[..])) { return false; }
-    // The empty owners that the callee requires (`spec/fir.md` 14 Calls, "empty output
-    // owners"). A caller owner that is its own entry value passes the requirement on to its own
-    // caller. A failed requirement reports the owner that the callee overwrites and marks it
-    // lost. The call then applies: the callee stores over the owner and returns in the same way,
-    // so a later independent error keeps its own event (`spec/toolchain.md` 4.2).
-    i = 0;
-    while (i < interfaces) {
-        interface_entry e = sum->interface[i];
-        if (bound[i] != NONE && (e.require_null || e.require_fields != 0)) {
-            check_required(c, s, bound[i], e);
-        }
-        i += 1;
-    }
+    // The owners that the callee dereferences and the empty owners that it requires (D10.7,
+    // `spec/fir.md` 14 Calls).
+    check_requirements(c, s, sum, bound[..]);
     // The shape that the callee needs (`spec/memory-model.md` 2.7).
     i = 0;
     while (i < interfaces) {
@@ -4261,7 +4451,7 @@ fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list
     while (i < interfaces) {
         atom p = sum->post.atoms[i];
         if (bound[i] != NONE && p.used && p.root.value == root_kind.null_root &&
-            !sum->interface[i].require_null) {
+            !requires_empty_root(sum, cast(i, u32))) {
             atom x = s->atoms[cast(bound[i], u64)];
             if (ownership_facts.may_prune(p.root) && x.root.value == root_kind.nonnull &&
                 ownership_facts.may_prune(x.root)) {
@@ -4302,7 +4492,7 @@ fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list
                     x->borrows = x->borrows || slot_borrows || p.borrows || (p.params && arg_body);
                     x->params = x->params || slot_params || p.params;
                     // The callee changed the fields, so a later unfold names no entry field.
-                    x->handle = NONE;
+                    clear_handle(x);
                 }
                 // The caller imports each root fact that the summary gives.
                 if (p.root.value == root_kind.nonnull) {
@@ -4341,8 +4531,7 @@ fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list
             made.choice = false;
             made.exposed = false;
             // A handle of the callee names the callee's interface, never the caller's.
-            made.handle = NONE;
-            made.handle_field = NONE;
+            clear_handle(&made);
             made.into = NONE;
             map[i] = push_atom(s, made);
         }
@@ -4466,63 +4655,232 @@ fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list
     return true;
 }
 
-// One empty owner that a callee requires: the bound atom, or one owned field of its root. False
-// when the requirement fails: the event names the owner, and the owner is lost because the
-// callee stores over it.
-fn require_one(context mut* c, state mut* s, u32 a, string text) bool {
-    atom item = s->atoms[cast(a, u64)];
-    if (item.root.value == root_kind.null_root || item.status.value == atom_status.leaked ||
-        item.status.value == atom_status.escaped) { return true; }
-    if (item.status.value == atom_status.unknown) {
-        unproved(c, s, ownership_api.incomplete_reason.unknown_effect, a, text);
-        mark_leaked(s, a, provenance.established);
-        return false;
-    }
-    if (require_empty(c, s, a)) { return true; }
-    violation(c, s, ownership_api.event_kind.caller_requirement,
-        item.kind == atom_kind.cell ? certainty.definite : certainty_of(item.root.value), a, text);
-    mark_leaked(s, a, provenance.established);
-    return false;
+// What a caller state gives for one requirement of a callee (D10.7).
+enum requirement_test {
+    holds,
+    fails,
+    unknown,
+    passed,
+    lost,
 }
 
-fn check_required(context mut* c, state mut* s, u32 b, interface_entry e) void {
-    if (e.require_null) {
-        require_one(c, s, b, "an empty owner that this call requires");
+// One walk of a callee requirement through the state of its caller.
+struct requirement_walk {
+    requirement_test test;
+    // The caller atom of the owner of the requirement, or NONE for an empty owner. For
+    // `unknown` and `passed` before the end of the path: the atom where the walk stopped.
+    u32 owner;
+    // The walk reached the owner at the end of the path.
+    bool at_owner;
+    // The cell slot that holds the owner, or U64_MAX for the atom that the call binds.
+    u64 holder;
+    // The requirement that an entry value of the caller passes on to its own callers.
+    requirement passed;
+    // The reason of `unknown`.
+    ownership_api.incomplete_reason why;
+}
+
+// Follows requirement `r` of a callee through the caller state, from atom `start` that the call
+// binds to the interface atom of `r`, or NONE for an empty owner. Each atom above the end of the
+// path has the struct type `ty`. An empty owner or a null root above the end holds: the callee
+// reads through that owner to reach the end, and that read is a requirement of its own, or the
+// callee tested the owner nonnull before it. An unchanged entry value of the caller passes the
+// rest of the path on, when the joined path holds at most 6 fields. A field that the caller
+// state does not know gives `unknown`.
+fn walk_requirement(state* s, u32 start, types.node* ty, requirement r) requirement_walk {
+    requirement_walk mut out = requirement_walk{};
+    out.test = requirement_test.unknown;
+    out.owner = start;
+    out.holder = U64_MAX;
+    out.why = ownership_api.incomplete_reason.missing_graph;
+    u32 mut step = 0;
+    while (step < r.depth) {
+        if (out.owner == NONE) {
+            out.test = requirement_test.holds;
+            return out;
+        }
+        atom item = s->atoms[cast(out.owner, u64)];
+        if (item.root.value == root_kind.null_root) {
+            out.test = requirement_test.holds;
+            return out;
+        }
+        if (item.ty != ty) { return out; }
+        if (item.kind == atom_kind.cell) {
+            slot_key mut field = key_of(base_kind.cell, out.owner);
+            field.depth = 1;
+            field.path[0] = r.path[cast(step, u64)];
+            u64 at = find_slot(s, field);
+            if (at == U64_MAX) { return out; }
+            value v = s->slots[at].v;
+            if (v.kind == value_kind.empty) {
+                out.owner = NONE;
+            } else if (v.kind == value_kind.owned) {
+                out.owner = v.atom;
+            } else {
+                out.why = ownership_api.incomplete_reason.unknown_effect;
+                return out;
+            }
+            out.holder = at;
+        } else if (item.handle != NONE && item.choice &&
+            item.status.value == atom_status.live &&
+            cast(item.handle_depth + r.depth - step, u64) <= PATH_DEPTH) {
+            out.passed = requirement_of(item, r.needs);
+            while (step < r.depth) {
+                out.passed.path[cast(out.passed.depth, u64)] = r.path[cast(step, u64)];
+                out.passed.depth += 1;
+                step += 1;
+            }
+            out.test = requirement_test.passed;
+            return out;
+        } else {
+            return out;
+        }
+        step += 1;
+    }
+    out.at_owner = true;
+    if (out.owner == NONE) {
+        out.test = r.needs == root_kind.nonnull ? requirement_test.fails : requirement_test.holds;
+        return out;
+    }
+    atom item = s->atoms[cast(out.owner, u64)];
+    bool entry = item.handle != NONE && item.root.value == root_kind.free &&
+        item.status.value == atom_status.live;
+    if (r.needs == root_kind.nonnull) {
+        // An entry owner whose root is a free choice, or nonnull only because an unfold or a
+        // callee assumed it, passes the requirement on (rule P1). Without an entry path, an owner
+        // of an input loses it.
+        bool unmet = item.root.value == root_kind.free || item.root.value == root_kind.nonnull;
+        if (requirement_met(item)) {
+            out.test = requirement_test.holds;
+        } else if (unmet && item.handle != NONE && item.status.value == atom_status.live) {
+            out.passed = requirement_of(item, root_kind.nonnull);
+            out.test = requirement_test.passed;
+        } else if (item.root.value == root_kind.nonnull && item.origin != 0) {
+            out.test = requirement_test.lost;
+        } else {
+            out.test = requirement_test.fails;
+        }
+        return out;
+    }
+    if (item.root.value == root_kind.null_root || item.status.value == atom_status.leaked ||
+        item.status.value == atom_status.escaped) {
+        out.test = requirement_test.holds;
+    } else if (item.status.value == atom_status.unknown) {
+        out.why = ownership_api.incomplete_reason.unknown_effect;
+    } else if (entry && item.choice) {
+        out.passed = requirement_of(item, root_kind.null_root);
+        out.test = requirement_test.passed;
+    } else {
+        out.test = requirement_test.fails;
+    }
+    return out;
+}
+
+// The certainty of a failed requirement: the certainty of the caller fact when the callee has
+// the requirement on each returning path, and `possible` when it has it on some path only.
+fn requirement_certainty(state* s, requirement_walk w, root_kind needs, bool each) certainty {
+    if (!each) { return certainty.possible; }
+    if (w.owner == NONE) { return certainty.definite; }
+    atom item = s->atoms[cast(w.owner, u64)];
+    if (needs == root_kind.nonnull) {
+        if (item.root.value == root_kind.null_root) { return certainty.definite; }
+        if (item.root.value == root_kind.free) { return certainty.choice; }
+        return certainty.possible;
+    }
+    if (item.kind == atom_kind.cell) { return certainty.definite; }
+    return certainty_of(item.root.value);
+}
+
+// Whether the callee requires the entry value of interface atom `i` empty.
+fn requires_empty_root(summary* sum, u32 i) bool {
+    requirement mut r = requirement{};
+    r.entry = i;
+    r.needs = root_kind.null_root;
+    return ownership_facts.has_requirement(sum->required_some.items[..], sum->required_some.len,
+        r);
+}
+
+// Checks each requirement of a callee at a call (D10.7, `spec/fir.md` 14 Calls). A requirement
+// that each returning path of the callee has is in `post.required`; another one is a requirement
+// of some path. An owner that fails a requirement gives a candidate with the certainty of
+// `requirement_certainty`. An entry value of the caller passes the requirement on: the caller
+// records it with its own entry path, for each path or for some path as the callee has it. The
+// dereferences come first, because they read the owners before the callee stores over any. A
+// failed empty owner is lost and leaves its field: the callee stores over it and returns in the
+// same way, so a later independent error keeps its own event (`spec/toolchain.md` 4.2).
+fn check_requirements(context mut* c, state mut* s, summary* sum, u32@ bound) void {
+    // The callee accessed an owner of an input without its entry path: no requirement names it.
+    if (sum->lost_required != 0) {
+        unproved(c, s, ownership_api.incomplete_reason.missing_graph, NONE,
+            "an owner that the callee accesses without its entry path");
+    }
+    u32 mut round = 0;
+    while (round < 2) {
+        root_kind needs = round == 0 ? root_kind.nonnull : root_kind.null_root;
+        u32 mut i = 0;
+        while (i < sum->required_some.len) {
+            requirement r = sum->required_some.items[cast(i, u64)];
+            if (r.needs == needs && cast(r.entry, u64) < bound.len &&
+                cast(r.entry, u64) < sum->interface.len) {
+                bool each = ownership_facts.has_requirement(sum->post.required.items[..],
+                    sum->post.required.len, r);
+                requirement_walk w = walk_requirement(s, bound[cast(r.entry, u64)],
+                    sum->interface[cast(r.entry, u64)].ty, r);
+                if (needs == root_kind.nonnull) {
+                    check_dereference(c, s, w, each);
+                } else {
+                    check_empty(c, s, w, each);
+                }
+            }
+            i += 1;
+        }
+        round += 1;
+    }
+}
+
+// One owner that the callee dereferences. A failure ends no path: the call goes on as after
+// another failed requirement.
+fn check_dereference(context mut* c, state mut* s, requirement_walk w, bool each) void {
+    if (w.test == requirement_test.fails) {
+        violation(c, s, ownership_api.event_kind.caller_requirement,
+            requirement_certainty(s, w, root_kind.nonnull, each), w.owner,
+            "the empty owner that the callee dereferences");
+    } else if (w.test == requirement_test.unknown) {
+        violation(c, s, ownership_api.event_kind.caller_requirement, certainty.possible, w.owner,
+            "the owner that the callee dereferences");
+    } else if (w.test == requirement_test.passed) {
+        require(c, s, w.passed, each);
+    } else if (w.test == requirement_test.lost) {
+        c->lost_required = c->lost_required | s->atoms[cast(w.owner, u64)].origin;
+    }
+}
+
+// One empty owner that the callee requires.
+fn check_empty(context mut* c, state mut* s, requirement_walk w, bool each) void {
+    string text = w.holder == U64_MAX ? "an empty owner that this call requires" :
+        "an empty owned field that this call requires";
+    if (w.test == requirement_test.passed) {
+        if (w.at_owner) {
+            require_empty(c, s, w.owner, each);
+        } else {
+            require(c, s, w.passed, each);
+        }
         return;
     }
-    // A lost field leaves the field: the callee stores over it, so the shape that the callee
-    // needs no longer holds it.
-    atom item = s->atoms[cast(b, u64)];
-    if (item.root.value == root_kind.null_root) { return; }
-    if (item.kind != atom_kind.cell) {
-        // The fields of an unchanged entry value of the caller are its own entry fields.
-        if (item.handle != NONE && item.handle_field == NONE && item.choice &&
-            item.status.value == atom_status.live && cast(item.handle, u64) < c->interface_len) {
-            u64 at = cast(item.handle, u64);
-            c->require_fields[at] = c->require_fields[at] | e.require_fields;
+    if (w.test == requirement_test.unknown) {
+        if (!w.at_owner) {
+            unproved(c, s, w.why, w.owner, "the empty owned fields that this call requires");
             return;
         }
-        unproved(c, s, ownership_api.incomplete_reason.missing_graph, b,
-            "the empty owned fields that this call requires");
+        unproved(c, s, w.why, w.owner, text);
+    } else if (w.test == requirement_test.fails) {
+        violation(c, s, ownership_api.event_kind.caller_requirement,
+            requirement_certainty(s, w, root_kind.null_root, each), w.owner, text);
+    } else {
         return;
     }
-    u64 mut i = 0;
-    while (i < s->slots_len) {
-        slot field = s->slots[i];
-        if (field.key.base == base_kind.cell && field.key.id == b && field.key.depth == 1 &&
-            field.key.path[0] < 64 && (e.require_fields & bit(cast(field.key.path[0], u64))) != 0) {
-            if (field.v.kind == value_kind.owned) {
-                if (!require_one(c, s, field.v.atom,
-                    "an empty owned field that this call requires")) {
-                    s->slots[i].v = empty_value();
-                }
-            } else if (field.v.kind != value_kind.empty) {
-                unproved(c, s, ownership_api.incomplete_reason.unknown_effect, b,
-                    "the empty owned fields that this call requires");
-            }
-        }
-        i += 1;
-    }
+    mark_leaked(s, w.owner, provenance.established);
+    if (w.holder != U64_MAX) { s->slots[w.holder].v = empty_value(); }
 }
 
 // Adds source `to` to each view that has source `from`.
@@ -4640,8 +4998,10 @@ fn refine(state mut* s, value cond, bool truth) bool {
     bool decided = ownership_facts.may_prune(a->root);
     if (nonnull) {
         if (a->root.value == root_kind.null_root && decided) { return false; }
-        // The edge establishes the root that its test read.
+        // The edge establishes the root that its test read. It covers that root too, so an access
+        // on this path needs no requirement, also after a fold assumes the root (D10.7).
         a->root = nullness{root_kind.nonnull, provenance.established};
+        if (a->handle != NONE || a->origin != 0) { a->entry_required = true; }
         return true;
     }
     if (a->root.value == root_kind.nonnull && decided) { return false; }
@@ -4909,8 +5269,6 @@ fn free_context(context mut* c) void {
     del(c->caller_count);
     del(c->callers);
     del(c->interface);
-    del(c->require_null);
-    del(c->require_fields);
     del(c->seen);
     strbuf.free(&c->text);
 }
@@ -5016,8 +5374,6 @@ fn take_summary(context mut* c) summary {
     while (i < c->interface_len) {
         interface_entry mut e = c->interface[i];
         e.needs_shape = (c->needs_shape & bit(i)) != 0;
-        e.require_null = c->require_null[i];
-        e.require_fields = c->require_fields[i];
         out.interface[i] = e;
         i += 1;
     }
@@ -5029,6 +5385,8 @@ fn take_summary(context mut* c) summary {
     }
     out.view_reads = c->view_reads;
     out.reads_high = c->reads_high;
+    out.required_some = c->required_some;
+    out.lost_required = c->lost_required;
     out.events = c->events;
     out.post = move(c->exit);
     c->exit = bottom(cast(fir.local_count(c->f), u64));
@@ -5040,12 +5398,12 @@ fn same_summary(context mut* c, summary* a, summary* b, bool mut* same) bool {
     if (a->known != b->known || a->returns != b->returns || a->residual != b->residual ||
         a->view_reads != b->view_reads || a->reads_high != b->reads_high ||
         a->proof.kind != b->proof.kind || a->proof.failed != b->proof.failed ||
-        a->interface.len != b->interface.len) { return true; }
+        a->interface.len != b->interface.len || a->lost_required != b->lost_required ||
+        !same_requirements(a->required_some.items[..a->required_some.len],
+        b->required_some.items[..b->required_some.len])) { return true; }
     u64 mut i = 0;
     while (i < a->interface.len) {
-        if (a->interface[i].needs_shape != b->interface[i].needs_shape ||
-            a->interface[i].require_null != b->interface[i].require_null ||
-            a->interface[i].require_fields != b->interface[i].require_fields) { return true; }
+        if (a->interface[i].needs_shape != b->interface[i].needs_shape) { return true; }
         i += 1;
     }
     return equal(c, &a->post, &b->post, same);
