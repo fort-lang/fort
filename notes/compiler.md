@@ -850,12 +850,25 @@ came here.
   A stable loop head is the inductive invariant: `ownership_heap_test.ft` holds nine case
   groups, and no group unrolls a fixed depth. Recursion starts at bottom; a member call needs a
   strict part of the input and a covered return.
-  A root nullness is null, nonnull, free (an input choice), or joined. A definite violation on a
-  witnessed path is unconditional, a free choice gives a validated path, and anything else is
-  incomplete proof. A branch whose paths all reach one block with no call and no cycle restores
-  the witness there (post-dominators over a virtual exit after each return and abort). The
-  branch gives the witness that it holds at its terminator, after the calls of its own block:
-  a call before the branch that can fail to return clears it (`after_spin`).
+  A root nullness is null, nonnull, free (an input choice), or joined. A join of two roots that
+  differ is joined, also for a free input choice that two paths refined.
+  The proof publishes candidates and validates nothing: it keeps no witness and no path
+  (`spec/toolchain.md` 4.2). A violation records a candidate event with abstract possibility
+  evidence and the reason `missing_path`. The event keeps its violation kind and the certainty of
+  its fact in `ownership_api.event_descriptor.certainty`. The certainty is `definite` for: a use
+  whose each source is released, a dereference of a released atom, of a null root, of an empty
+  owner or of the address of an ended local, a release of an owned self-cycle, a release whose
+  zeroing finds its place gone, a returned or retained address of a local, and the loss or the
+  failed requirement of a cell or of a nonnull root. It is `choice` for the loss or the failed
+  requirement of a free root (some value of a free input of the caller), and `possible` for a
+  joined root. So no heap proof fails as complete, and a heap row never prints `failed`. An
+  incomplete-proof event keeps its own reason, for example an unknown effect, a missing graph or
+  a source that is possibly released. A separate checker
+  validates or rejects each candidate. Calls and branches before an operation change no
+  candidate (`after_spin`). The proof of a body names its first reason that is not a candidate,
+  and its first candidate only when it has no other reason, because a checker of candidates
+  cannot remove another reason (`whole`). `ownership_heap_env.candidate_form` holds the form of
+  each heap event in the 11 heap tests.
   `del` frees and then zeroes its place (`spec/toolchain.md` 6 item 17), so the release sees the
   place full: `del(view->next)` of an owned self-cycle loses a live leaf (H05).
   A summary keeps the exit state of the result and of caller storage. An owner whose entry value
@@ -912,11 +925,10 @@ came here.
   other member, because their summaries rest on each other.
   A lost owner of live status becomes leaked: it stays allocated, so its views stay valid. A
   lost owner of unknown status becomes escaped, so a read through its views stays unproved.
-  `tools/mutations/ownership_heap.json` holds 69 rows of the core rules.
+  `tools/mutations/ownership_heap.json` holds 71 rows of the core rules.
   Precision limits (measured in the heap tests): a mixed callee fate (some members released,
-  some kept) makes each member view of the caller atom unproved (`rest_view`, H10); a loop on an
-  untracked scalar clears the witness, so a leak in its body is incomplete proof (`loop_leak`,
-  G7); a view of a heap atom in a borrowed field of a returned region is incomplete proof, so
+  some kept) makes each member view of the caller atom unproved (`rest_view`, H10); a view of a
+  heap atom in a borrowed field of a returned region is incomplete proof, so
   a doubly linked list that a loop builds and returns (`dlist`) and a tree whose nodes keep a
   parent pointer are incomplete proof. The coordinator ratified this limit in review round 3.
   A fact that names the outside atoms of each region would prove them; atoms change their
@@ -964,8 +976,8 @@ came here.
   a join, and it keeps its `assume` assignments. `provenance.established` and `null_value()` occur
   only in the functions of `ESTABLISHED_SITES` and `NULL_VALUE_SITES`, as often as the table says,
   so a new established fact changes the table. A new fact type adds one row to `FACT_JOINS` and
-  one join function. The witness rule of `join_atom` writes `out.root.value` after the join, so the
-  lint reports one partial write of `atom.root`.
+  one join function. No join function writes a part of a typed field, so the lint reports no
+  partial write.
 - **Finite ownership proof preserves obligations when precision ends** (T-276, D17.18).
   `spec/fir.md` 14.1 defines the finite domain, canonical solving, and counted budgets.
   Publish numeric limits and reproduction commands before qualification. This rule ticket chooses

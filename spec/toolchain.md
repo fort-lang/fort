@@ -1017,6 +1017,10 @@ Loss of witness precision cannot remove the safety obligation or produce success
 
 Each event retains the responsible function and operation key, source range, reason, and evidence
 class. It also retains the relevant source and owner paths, conditions, and finite witness links.
+It retains the certainty of its invalid fact. `definite` means that the fact holds on each
+execution that the producer's state represents. `choice` means that the fact holds for some value
+of a free input of the caller. `possible` means that the fact can hold on some represented
+execution, or on none.
 A precision-limit event names its category, numeric bound, and first source point that loses the
 required fact. A work-budget event records its used count and the attempted operation.
 These internal events are compiler interfaces. They require no source or foreign contract syntax.

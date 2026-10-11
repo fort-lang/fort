@@ -50,8 +50,7 @@ fn work() void {
         assert(s->residual && s->proof.terminal.limit.present);
         assert(s->proof.terminal.limit.category == ownership_api.limit_category.w);
         assert(s->proof.terminal.limit.bound == 20);
-        assert(ownership_heap_env.saw(&c, name, ownership_api.event_kind.lost_ownership,
-            ownership_api.evidence_kind.unconditional) == 0);
+        assert(ownership_heap_env.violations(&c, name) == 0);
     }
     assert(ownership_heap_env.budget_events(&c) == 4);
     assert(c.counts.events == 4);
@@ -122,8 +121,8 @@ fn atoms() void {
     assert(c.counts.most_r <= ownership_limits.PRODUCTION_R);
 }
 
-// A refused P request joins each refined root. An operation that needs a null root then gives
-// incomplete proof with the lost category; the production P keeps both facts.
+// A refused P request joins each refined root. An operation that needs a null root then gives a
+// candidate of certainty `possible` with the lost category; the production P keeps both facts.
 fn roots() void {
     println("P covers the refined roots");
     string[4] text = {
@@ -143,7 +142,8 @@ fn roots() void {
     ownership_heap_env.solve(&c);
     assert(!ownership_heap_env.proved(&c, "pair_null"));
     ownership_heap_env.event_row row = ownership_heap_env.first(&c, "pair_null");
-    assert(row.kind == ownership_api.event_kind.incomplete_proof);
+    assert(row.kind == ownership_api.event_kind.lost_ownership);
+    assert(row.certainty == ownership_api.certainty.possible);
     assert(row.lossy && row.lost == ownership_api.limit_category.p && row.lost_bound == 1);
 }
 
@@ -164,6 +164,8 @@ fn production() void {
         i += 1;
     }
     assert(ownership_heap_env.unproved(&c, "leak", ownership_api.incomplete_reason.missing_path));
+    assert(ownership_heap_env.candidates(&c, "leak", ownership_api.event_kind.lost_ownership,
+        ownership_api.certainty.possible) == 1);
 }
 
 // Canonical scheduling gives the same verdicts and the same events in each solve.

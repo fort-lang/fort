@@ -3,20 +3,22 @@
 //! stdout:
 //| owner names
 //| event keys and positions
-//| evidence classes
+//| candidate certainties
 //| one event for each operation and owner
 //| a precision stop records its event
-//| a call that can fail to return clears the witness
+//| a call that can fail to return changes no candidate
 //| heap events ok
 /// Checks the events of the heap proof (`spec/toolchain.md` 4.2): the owner that each names, its
-/// position, its evidence class, and its key.
+/// position, its certainty, and its key.
 import ownership_api;
 import ownership_heap;
 import ownership_heap_env;
 
+// The row is a candidate of `kind` and certainty `how`. The environment checks the candidate form
+// of each event.
 fn is(ownership_heap_env.event_row row, ownership_api.event_kind kind,
-    ownership_api.evidence_kind evidence) bool {
-    return row.kind == kind && row.evidence == evidence;
+    ownership_api.certainty how) bool {
+    return row.kind == kind && row.certainty == how;
 }
 
 // The owner of a lost obligation is named as the source spells it: a local, a field of a
@@ -84,7 +86,7 @@ fn positions() void {
     ownership_heap_env.run(&c, text[..], bodies[..]);
     ownership_heap_env.event_row row = ownership_heap_env.first(&c, "two_losses");
     assert(is(row, ownership_api.event_kind.lost_ownership,
-        ownership_api.evidence_kind.unconditional));
+        ownership_api.certainty.definite));
     // The dead marker of `b` stands at the closing brace of its scope.
     assert(row.line == 5 && row.col == 1 && ownership_heap_env.text(&row) == "b");
     assert(row.operation.function.declaration.declaration == 1);
@@ -95,11 +97,13 @@ fn positions() void {
     assert(ownership_heap_env.events(&c, "quiet") == 0);
 }
 
-// A definite violation on a witnessed path is unconditional; a free input choice gives a
-// validated path with a witness link; any other is incomplete proof with abstract possibility
-// evidence (`spec/toolchain.md` 4.2).
+// The heap proof validates no path, so each violation is a candidate with abstract possibility
+// evidence (`spec/toolchain.md` 4.2). A definite fact gives a candidate of certainty `definite`,
+// a free input choice one of certainty `choice`, and a possible fact one of certainty
+// `possible`. Each keeps its violation kind. Calls and branches before an operation change no
+// certainty.
 fn evidence() void {
-    println("evidence classes");
+    println("candidate certainties");
     string[13] text = {
         "struct leaf { i32 mut* own child; }",
         "fn definite() void { leaf mut* own a = new(leaf); a->child = new(i32); del(a); }",
@@ -121,33 +125,37 @@ fn evidence() void {
     defer ownership_heap_env.close(&c);
     ownership_heap_env.run(&c, text[..], bodies[..]);
     ownership_heap_env.event_row hard = ownership_heap_env.first(&c, "definite");
-    assert(is(hard, ownership_api.event_kind.lost_ownership,
-        ownership_api.evidence_kind.unconditional));
-    assert(!hard.witness);
+    assert(ownership_heap_env.candidate(&c, "definite", ownership_api.event_kind.lost_ownership));
+    assert(is(hard, ownership_api.event_kind.lost_ownership, ownership_api.certainty.definite));
+    assert(hard.evidence == ownership_api.evidence_kind.abstract_possibility);
+    assert(hard.reason == ownership_api.incomplete_reason.missing_path);
+    assert(ownership_heap_env.unproved(&c, "definite",
+        ownership_api.incomplete_reason.missing_path));
     // `b` holds the entry value of `a`, a free choice of the caller, so the release that loses
-    // its child is a validated path with a witness link. A caller requirement cannot repair
-    // this error of the body (`spec/fir.md` 14.1).
+    // its child is a candidate of that choice. A caller requirement cannot repair this error of
+    // the body (`spec/fir.md` 14.1).
     ownership_heap_env.event_row chose = ownership_heap_env.first(&c, "chosen");
-    assert(is(chose, ownership_api.event_kind.lost_ownership,
-        ownership_api.evidence_kind.validated_path));
-    assert(chose.witness && ownership_heap_env.text(&chose) == "b->child");
+    assert(is(chose, ownership_api.event_kind.lost_ownership, ownership_api.certainty.choice));
+    assert(ownership_heap_env.text(&chose) == "b->child");
     assert(ownership_heap_env.summary(&c, "chosen")->interface[0].require_fields == 0);
     assert(ownership_heap_env.unproved(&c, "joined", ownership_api.incomplete_reason.missing_path));
     ownership_heap_env.event_row soft = ownership_heap_env.first(&c, "joined");
-    assert(is(soft, ownership_api.event_kind.incomplete_proof,
-        ownership_api.evidence_kind.abstract_possibility));
-    // The branch on an untracked scalar clears the witness of the loss inside it.
-    assert(ownership_heap_env.unproved(&c, "unwitnessed",
-        ownership_api.incomplete_reason.missing_path));
-    // A null test on a free choice keeps the witness of the loss after it.
+    assert(is(soft, ownership_api.event_kind.lost_ownership, ownership_api.certainty.possible));
+    assert(soft.reason == ownership_api.incomplete_reason.missing_path);
+    assert(!ownership_heap_env.candidate(&c, "joined", ownership_api.event_kind.lost_ownership));
+    assert(ownership_heap_env.violations(&c, "joined") == 1);
+    // A branch on an untracked scalar changes no fact of the loss inside it: a definite candidate.
+    assert(ownership_heap_env.candidate(&c, "unwitnessed",
+        ownership_api.event_kind.lost_ownership));
+    assert(is(ownership_heap_env.first(&c, "unwitnessed"), ownership_api.event_kind.lost_ownership,
+        ownership_api.certainty.definite));
+    // A null test on a free choice keeps the choice of the loss after it.
     ownership_heap_env.event_row tested = ownership_heap_env.first(&c, "witnessed_branch");
-    assert(is(tested, ownership_api.event_kind.lost_ownership,
-        ownership_api.evidence_kind.validated_path));
-    assert(tested.witness);
-    // Both arms of the diamond reach the loss with no call and no cycle: the witness returns.
-    assert(ownership_heap_env.failed(&c, "diamond"));
+    assert(is(tested, ownership_api.event_kind.lost_ownership, ownership_api.certainty.choice));
+    // Both arms of the diamond reach the loss: a definite candidate.
+    assert(ownership_heap_env.candidate(&c, "diamond", ownership_api.event_kind.lost_ownership));
     assert(is(ownership_heap_env.first(&c, "diamond"), ownership_api.event_kind.lost_ownership,
-        ownership_api.evidence_kind.unconditional));
+        ownership_api.certainty.definite));
 }
 
 // One operation with one lost owner gives one event, also when its loss repeats in a loop or on
@@ -204,18 +212,18 @@ fn stops() void {
         ownership_api.incomplete_reason.missing_graph));
     assert(ownership_heap_env.events(&c, "three") == 1);
     ownership_heap_env.event_row stop = ownership_heap_env.first(&c, "three");
-    assert(is(stop, ownership_api.event_kind.incomplete_proof,
-        ownership_api.evidence_kind.abstract_possibility));
+    assert(is(stop, ownership_api.event_kind.incomplete_proof, ownership_api.certainty.possible));
     assert(stop.line == 3 && ownership_heap_env.text(&stop) ==
         "the state within its precision bounds");
     assert(ownership_heap_env.proved(&c, "caller"));
 }
 
-// A branch gives its witness back where its paths rejoin only if the branch itself was reached
-// with a witness at its terminator. A call before the branch that can fail to return clears it
-// (`spec/toolchain.md` 4.2).
+// The heap proof keeps no path, so a call before a branch changes no candidate after it, also
+// when the call can fail to return. A later checker decides if a path reaches the operation
+// (`spec/toolchain.md` 4.2). The name of this group is the label of its text in the golden
+// `test/ownership/heap_rows.txt`.
 fn exit_witness() void {
-    println("a call that can fail to return clears the witness");
+    println("a call that can fail to return changes no candidate");
     string[8] text = {
         "struct node { node mut* own next; u64 count; }",
         "fn spin(u64 k) void { while (k != 0) { } }",
@@ -231,16 +239,17 @@ fn exit_witness() void {
     defer ownership_heap_env.close(&c);
     ownership_heap_env.run(&c, text[..], bodies[..]);
     assert(ownership_heap_env.proved(&c, "spin"));
-    assert(!ownership_heap_env.summary(&c, "spin")->witness);
-    // `spin` can loop forever, so the read after the branch has no validated path.
+    assert(ownership_heap_env.summary(&c, "spin")->returns);
+    // `spin` can loop forever. The read after it is the same definite candidate as the read in a
+    // body with no call: a checker of candidates finds no path through `spin(5)`.
     assert(ownership_heap_env.unproved(&c, "after_spin",
         ownership_api.incomplete_reason.missing_path));
-    assert(ownership_heap_env.saw(&c, "after_spin", ownership_api.event_kind.invalid_use,
-        ownership_api.evidence_kind.unconditional) == 0);
-    // With no call before it, the branch gives its witness back.
-    assert(ownership_heap_env.failed(&c, "before_spin"));
-    assert(ownership_heap_env.first(&c, "before_spin").evidence ==
-        ownership_api.evidence_kind.unconditional);
+    assert(ownership_heap_env.candidate(&c, "after_spin", ownership_api.event_kind.invalid_use));
+    assert(ownership_heap_env.candidates(&c, "after_spin", ownership_api.event_kind.invalid_use,
+        ownership_api.certainty.definite) == 2);
+    assert(ownership_heap_env.candidate(&c, "before_spin", ownership_api.event_kind.invalid_use));
+    assert(ownership_heap_env.candidates(&c, "before_spin", ownership_api.event_kind.invalid_use,
+        ownership_api.certainty.definite) == 2);
 }
 
 fn main() i32 {

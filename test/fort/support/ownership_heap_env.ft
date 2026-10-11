@@ -17,6 +17,7 @@ u64 TEXT = 64;
 struct event_row {
     ownership_api.event_kind kind;
     ownership_api.evidence_kind evidence;
+    ownership_api.certainty certainty;
     ownership_api.incomplete_reason reason;
     ownership_api.operation_position operation;
     u32 line;
@@ -25,8 +26,6 @@ struct event_row {
     bool lossy;
     ownership_api.limit_category lost;
     u64 lost_bound;
-    // The event has a validated witness link.
-    bool witness;
     // The event or its proof names an exhaustion of the W bound.
     bool budget;
     u8[64] text;
@@ -110,14 +109,31 @@ fn budget(void mut* opaque, ownership_api.charge_request* req) ownership_api.cha
     return ownership_limits.try_charge(&counts->meter, req);
 }
 
+// The heap proof validates no path (`spec/toolchain.md` 4.2). So each of its events has abstract
+// possibility evidence, a reason and no witness link, and its proof is incomplete. An event of a
+// violation kind is a candidate with the reason `missing_path` and any certainty. An incomplete
+// proof or a work failure has the certainty `possible`.
+fn candidate_form(ownership_api.event_descriptor* e) bool {
+    if (e->evidence != ownership_api.evidence_kind.abstract_possibility || e->witnesses.len != 0 ||
+        e->reason == ownership_api.incomplete_reason.none) { return false; }
+    if (e->kind == ownership_api.event_kind.incomplete_proof ||
+        e->kind == ownership_api.event_kind.work_failure) {
+        return e->certainty == ownership_api.certainty.possible;
+    }
+    return e->reason == ownership_api.incomplete_reason.missing_path;
+}
+
 fn event(void mut* opaque, ownership_api.event_request* req) ownership_api.event_result {
     counters mut* counts = cast(opaque, counters mut*);
+    assert(req->current.kind == ownership_api.proof_kind.incomplete);
+    assert(candidate_form(&req->event));
     if (counts->events < counts->rows.len) {
         ownership_api.exhaustion limit = req->event.limit.present ? req->event.limit :
             req->current.terminal.limit;
         event_row mut row = event_row{};
         row.kind = req->event.kind;
         row.evidence = req->event.evidence;
+        row.certainty = req->event.certainty;
         row.reason = req->event.reason;
         row.operation = req->event.operation;
         row.line = req->event.source.line;
@@ -125,7 +141,6 @@ fn event(void mut* opaque, ownership_api.event_request* req) ownership_api.event
         row.lossy = req->event.precision.bound != 0;
         row.lost = req->event.precision.category;
         row.lost_bound = req->event.precision.bound;
-        row.witness = req->event.witnesses.len > 0 && req->event.witnesses[0].validated;
         row.budget = limit.present && limit.category == ownership_api.limit_category.w;
         u64 mut i = 0;
         while (i < req->event.text.len && i < TEXT) {
@@ -272,10 +287,43 @@ fn proved(closure* c, string name) bool {
     return ownership_api.successful(s->proof) && s->known && !s->residual;
 }
 
-/// The heap proof of `name` failed with a definite error of its own body.
-fn failed(closure* c, string name) bool {
+/// The number of candidate events of `kind` and certainty `how` in body `name`: a violation that
+/// the proof found and that no path validates (`missing_path`).
+fn candidates(closure* c, string name, ownership_api.event_kind kind,
+    ownership_api.certainty how) u64 {
+    u32 declaration = cast(index(c, name) + 1, u32);
+    u64 mut found = 0;
+    u64 mut i = 0;
+    while (i < c->counts.events && i < c->counts.rows.len) {
+        event_row row = c->counts.rows[i];
+        if (row.kind == kind && row.certainty == how &&
+            row.evidence == ownership_api.evidence_kind.abstract_possibility &&
+            row.reason == ownership_api.incomplete_reason.missing_path &&
+            row.operation.function.declaration.declaration == declaration) {
+            found += 1;
+        }
+        i += 1;
+    }
+    return found;
+}
+
+/// The number of events of a violation kind in body `name`, of any certainty.
+fn violations(closure* c, string name) u64 {
+    return events(c, name) - saw(c, name, ownership_api.event_kind.incomplete_proof,
+        ownership_api.evidence_kind.abstract_possibility) - saw(c, name,
+        ownership_api.event_kind.work_failure, ownership_api.evidence_kind.abstract_possibility);
+}
+
+/// The heap proof of `name` is incomplete for candidates alone, and its body records a candidate
+/// of `kind`, definite or from a free input choice. The body has no other reason: no
+/// incomplete-proof or work-failure event. A later checker validates or rejects each candidate.
+fn candidate(closure* c, string name, ownership_api.event_kind kind) bool {
     ownership_heap.summary* s = summary(c, name);
-    return s->proof.kind == ownership_api.proof_kind.complete && s->proof.failed;
+    if (s->proof.kind != ownership_api.proof_kind.incomplete || !s->proof.failed ||
+        s->proof.terminal.reason != ownership_api.incomplete_reason.missing_path) { return false; }
+    if (violations(c, name) != events(c, name)) { return false; }
+    return candidates(c, name, kind, ownership_api.certainty.definite) +
+        candidates(c, name, kind, ownership_api.certainty.choice) > 0;
 }
 
 /// The heap proof of `name` is incomplete for `why`.
@@ -363,8 +411,9 @@ fn dump(closure* c) void {
     while (i < c->counts.events && i < c->counts.rows.len) {
         event_row row = c->counts.rows[i];
         eprintln("event body ", row.operation.function.declaration.declaration, " kind ",
-            cast(row.kind, u32), " evidence ", cast(row.evidence, u32), " reason ",
-            cast(row.reason, u32), " at ", row.line, ":", row.col, " ", text(&row));
+            cast(row.kind, u32), " evidence ", cast(row.evidence, u32), " certainty ",
+            cast(row.certainty, u32), " reason ", cast(row.reason, u32), " at ", row.line, ":",
+            row.col, " ", text(&row));
         i += 1;
     }
 }

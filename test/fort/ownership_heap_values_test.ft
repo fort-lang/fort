@@ -12,9 +12,11 @@ import ownership_api;
 import ownership_heap;
 import ownership_heap_env;
 
+// The row is a candidate of `kind` and certainty `how`. The environment checks the candidate form
+// of each event.
 fn is(ownership_heap_env.event_row row, ownership_api.event_kind kind,
-    ownership_api.evidence_kind evidence) bool {
-    return row.kind == kind && row.evidence == evidence;
+    ownership_api.certainty how) bool {
+    return row.kind == kind && row.certainty == how;
 }
 
 // A comparison with null tests the root of an atom; a known value selects one edge.
@@ -63,6 +65,8 @@ fn tests() void {
     // An integer that the proof does not know leaves both edges: a possible loss.
     assert(ownership_heap_env.unproved(&c, "unknown_int",
         ownership_api.incomplete_reason.missing_path));
+    assert(ownership_heap_env.candidates(&c, "unknown_int", ownership_api.event_kind.lost_ownership,
+        ownership_api.certainty.possible) == 1);
     // A second test of one refined root has one feasible edge.
     assert(ownership_heap_env.proved(&c, "both_ways"));
     assert(ownership_heap_env.proved(&c, "same_twice"));
@@ -95,9 +99,9 @@ fn casts() void {
     defer ownership_heap_env.close(&c);
     ownership_heap_env.run(&c, text[..], bodies[..]);
     assert(ownership_heap_env.proved(&c, "scoped_address"));
-    assert(ownership_heap_env.failed(&c, "after_scope"));
+    assert(ownership_heap_env.candidate(&c, "after_scope", ownership_api.event_kind.invalid_use));
     assert(is(ownership_heap_env.first(&c, "after_scope"), ownership_api.event_kind.invalid_use,
-        ownership_api.evidence_kind.unconditional));
+        ownership_api.certainty.definite));
     // The join of two addresses keeps neither: the read through it is unproved, never passed.
     assert(ownership_heap_env.unproved(&c, "maybe_scope",
         ownership_api.incomplete_reason.unknown_effect));
@@ -105,11 +109,11 @@ fn casts() void {
     assert(ownership_heap_env.unproved(&c, "bits_round",
         ownership_api.incomplete_reason.unknown_effect));
     assert(ownership_heap_env.proved(&c, "array_view"));
-    assert(ownership_heap_env.failed(&c, "array_escape"));
+    assert(ownership_heap_env.candidate(&c, "array_escape", ownership_api.event_kind.invalid_use));
     assert(ownership_heap_env.proved(&c, "span_view"));
     // A raw pointer range has no proved extent here: incomplete proof.
     assert(!ownership_heap_env.proved(&c, "raw_range"));
-    assert(!ownership_heap_env.failed(&c, "raw_range"));
+    assert(ownership_heap_env.violations(&c, "raw_range") == 0);
 }
 
 // One struct is a cell; an allocation without owned leaves is flat; an array of structs with
@@ -180,14 +184,16 @@ fn aggregates() void {
     // A whole move empties each owned leaf of its source.
     assert(ownership_heap_env.proved(&c, "moved_whole"));
     // A copied view keeps its source: its read after the release is invalid.
-    assert(ownership_heap_env.failed(&c, "copied_view"));
+    assert(ownership_heap_env.candidate(&c, "copied_view", ownership_api.event_kind.invalid_use));
     assert(ownership_heap_env.proved(&c, "nested_literal"));
-    assert(ownership_heap_env.failed(&c, "nested_lost"));
+    assert(ownership_heap_env.candidate(&c, "nested_lost",
+        ownership_api.event_kind.lost_ownership));
     assert(ownership_heap_env.first_text(&c, "nested_lost") == "o.p.a");
     assert(ownership_heap_env.proved(&c, "make"));
     assert(ownership_heap_env.proved(&c, "taken"));
     // A whole store over a struct checks each old owned leaf (D17.11, ex14).
-    assert(ownership_heap_env.failed(&c, "overwritten"));
+    assert(ownership_heap_env.candidate(&c, "overwritten",
+        ownership_api.event_kind.lost_ownership));
     assert(ownership_heap_env.first_text(&c, "overwritten") == "p.a");
     assert(ownership_heap_env.proved(&c, "zeroed"));
 }

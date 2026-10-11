@@ -129,7 +129,7 @@ fn aggregate_leaves() void {
     assert(ownership_heap_env.proved(&c, "rd_agg"));
     assert(ownership_heap_env.proved(&c, "rd_agg_del"));
     // The leaf designates released storage at the call: the call reads it on each path.
-    assert(ownership_heap_env.failed(&c, "use_agg"));
+    assert(ownership_heap_env.candidate(&c, "use_agg", ownership_api.event_kind.invalid_use));
     ownership_heap_env.event_row read = ownership_heap_env.first(&c, "use_agg");
     assert(read.kind == ownership_api.event_kind.invalid_use && read.line == 4);
     assert(ownership_heap_env.text(&read) == "storage that this call reads");
@@ -264,7 +264,7 @@ fn folded_borrows() void {
     defer ownership_heap_env.close(&c);
     ownership_heap_env.run(&c, text[..], names[..]);
     // An unfolded node shows its borrowed field, so its dangling view fails.
-    assert(ownership_heap_env.failed(&c, "cell_ret"));
+    assert(ownership_heap_env.candidate(&c, "cell_ret", ownership_api.event_kind.invalid_use));
     // Each node of the loop keeps a view of `t`, which ends before the return.
     assert(ownership_heap_env.unproved(&c, "loop_ret",
         ownership_api.incomplete_reason.unknown_effect));
@@ -379,7 +379,7 @@ fn entry_values() void {
     ownership_heap_env.closure mut c = ownership_heap_env.closure{};
     defer ownership_heap_env.close(&c);
     cross(&c);
-    assert(ownership_heap_env.failed(&c, "keep_dangling"));
+    assert(ownership_heap_env.candidate(&c, "keep_dangling", ownership_api.event_kind.invalid_use));
     assert(ownership_heap_env.first(&c, "keep_dangling").kind ==
         ownership_api.event_kind.invalid_use);
     assert(ownership_heap_env.first_text(&c, "keep_dangling") == "g->p");
@@ -524,7 +524,7 @@ fn entry_folds() void {
     stores(&c);
     assert(texts(&c, "slot_fold", KEPT) == 1);
     assert(ownership_heap_env.proved(&c, "wrap"));
-    assert(ownership_heap_env.failed(&c, "slot_cell"));
+    assert(ownership_heap_env.candidate(&c, "slot_cell", ownership_api.event_kind.invalid_use));
     // Caller storage that keeps a reference of the body before the call marks the result.
     assert(texts(&c, "store_then_wrap", KEPT) == 1);
     assert(ownership_heap_env.proved(&c, "wrap_input"));
@@ -560,7 +560,7 @@ fn cover_marks() void {
     defer ownership_heap_env.close(&c);
     stores(&c);
     // With room for its slots, the dangling field of `covered` shows itself.
-    assert(ownership_heap_env.failed(&c, "covered"));
+    assert(ownership_heap_env.candidate(&c, "covered", ownership_api.event_kind.invalid_use));
     ownership_heap_env.closure mut d = ownership_heap_env.closure{};
     defer ownership_heap_env.close(&d);
     d.counts.h = 1;
@@ -646,10 +646,10 @@ fn wide_parameters() void {
     assert(ownership_heap_env.summary(&c, "wide")->reads_high);
     assert(!ownership_heap_env.summary(&c, "narrow")->reads_high);
     // Parameter 64 reads the released allocation, as parameter 1 of `narrow` does.
-    assert(ownership_heap_env.failed(&c, "use_wide"));
+    assert(ownership_heap_env.candidate(&c, "use_wide", ownership_api.event_kind.invalid_use));
     assert(ownership_heap_env.first(&c, "use_wide").kind ==
         ownership_api.event_kind.invalid_use);
-    assert(ownership_heap_env.failed(&c, "use_narrow"));
+    assert(ownership_heap_env.candidate(&c, "use_narrow", ownership_api.event_kind.invalid_use));
     assert(ownership_heap_env.proved(&c, "live_wide"));
 }
 
@@ -690,23 +690,25 @@ fn failed_requirements() void {
     assert(ownership_heap_env.proved(&c, "link"));
     assert(ownership_heap_env.proved(&c, "field_ok"));
     // The requirement fails at the call, the call returns, and the later leak of `z` keeps its
-    // own event on a witnessed path.
-    assert(ownership_heap_env.failed(&c, "bad_then_leak"));
+    // own candidate.
+    assert(ownership_heap_env.candidate(&c, "bad_then_leak",
+        ownership_api.event_kind.caller_requirement));
     assert(ownership_heap_env.summary(&c, "bad_then_leak")->returns);
     assert(ownership_heap_env.events(&c, "bad_then_leak") == 2);
-    assert(ownership_heap_env.saw(&c, "bad_then_leak",
-        ownership_api.event_kind.caller_requirement,
-        ownership_api.evidence_kind.unconditional) == 1);
-    assert(ownership_heap_env.saw(&c, "bad_then_leak", ownership_api.event_kind.lost_ownership,
-        ownership_api.evidence_kind.unconditional) == 1);
-    assert(ownership_heap_env.failed(&c, "leak_only"));
+    assert(ownership_heap_env.candidates(&c, "bad_then_leak",
+        ownership_api.event_kind.caller_requirement, ownership_api.certainty.definite) == 1);
+    assert(ownership_heap_env.candidates(&c, "bad_then_leak",
+        ownership_api.event_kind.lost_ownership, ownership_api.certainty.definite) == 1);
+    assert(ownership_heap_env.candidate(&c, "leak_only", ownership_api.event_kind.lost_ownership));
     // The lost owner stays allocated, so its view stays valid: one event, at the call.
-    assert(ownership_heap_env.failed(&c, "view_old"));
+    assert(ownership_heap_env.candidate(&c, "view_old",
+        ownership_api.event_kind.caller_requirement));
     assert(ownership_heap_env.events(&c, "view_old") == 1);
     assert(ownership_heap_env.first(&c, "view_old").kind ==
         ownership_api.event_kind.caller_requirement);
     // A lost field leaves its parent, so the shape that the callee needs still holds.
-    assert(ownership_heap_env.failed(&c, "field_bad"));
+    assert(ownership_heap_env.candidate(&c, "field_bad",
+        ownership_api.event_kind.caller_requirement));
     assert(ownership_heap_env.events(&c, "field_bad") == 1);
     assert(ownership_heap_env.first(&c, "field_bad").kind ==
         ownership_api.event_kind.caller_requirement);
@@ -742,9 +744,9 @@ fn flat_cells() void {
     assert(ownership_heap_env.proved(&c, "give"));
     assert(ownership_heap_env.proved(&c, "give_local"));
     assert(ownership_heap_env.proved(&c, "read_first"));
-    assert(ownership_heap_env.failed(&c, "addr_after"));
+    assert(ownership_heap_env.candidate(&c, "addr_after", ownership_api.event_kind.invalid_use));
     assert(ownership_heap_env.first(&c, "addr_after").line == 8);
-    assert(ownership_heap_env.failed(&c, "view_after"));
+    assert(ownership_heap_env.candidate(&c, "view_after", ownership_api.event_kind.invalid_use));
     assert(ownership_heap_env.first(&c, "view_after").line == 10);
     assert(ownership_heap_env.proved(&c, "addr_keep"));
 }
@@ -780,12 +782,12 @@ fn drained_storage() void {
     assert(ownership_heap_env.summary(&c, "use_drain")->returns);
     assert(ownership_heap_env.proved(&c, "use_empty"));
     // The view of the drained node and the later leak each keep their event.
-    assert(ownership_heap_env.failed(&c, "view_drain"));
+    assert(ownership_heap_env.candidate(&c, "view_drain", ownership_api.event_kind.invalid_use));
     assert(ownership_heap_env.first(&c, "view_drain").kind ==
         ownership_api.event_kind.invalid_use);
-    assert(ownership_heap_env.failed(&c, "leak_drain"));
+    assert(ownership_heap_env.candidate(&c, "leak_drain", ownership_api.event_kind.lost_ownership));
     assert(ownership_heap_env.first_text(&c, "leak_drain") == "z");
-    assert(ownership_heap_env.failed(&c, "param_drain"));
+    assert(ownership_heap_env.candidate(&c, "param_drain", ownership_api.event_kind.invalid_use));
 }
 
 // An owner of unknown status that ends loses its obligation with an incomplete-proof event. Its

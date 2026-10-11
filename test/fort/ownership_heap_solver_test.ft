@@ -103,13 +103,13 @@ fn rounds() void {
     defer ownership_heap_env.close(&c);
     ownership_heap_env.run(&c, text[..], bodies[..]);
     // `half` releases its node with the payload still owned, an input choice of the caller: one
-    // loss on a validated path, recorded once in the publication round.
-    assert(ownership_heap_env.failed(&c, "half"));
+    // candidate of that choice, recorded once in the publication round.
+    assert(ownership_heap_env.candidate(&c, "half", ownership_api.event_kind.lost_ownership));
     assert(ownership_heap_env.events(&c, "half") == 1);
     assert(ownership_heap_env.first(&c, "half").line == 2);
     assert(ownership_heap_env.first_text(&c, "half") == "n->bytes");
     // `lost_in` loses a fresh node in each frame: one event at its scope end.
-    assert(ownership_heap_env.failed(&c, "lost_in"));
+    assert(ownership_heap_env.candidate(&c, "lost_in", ownership_api.event_kind.lost_ownership));
     assert(ownership_heap_env.events(&c, "lost_in") == 1);
     assert(ownership_heap_env.first_text(&c, "lost_in") == "k");
 }
@@ -142,7 +142,7 @@ fn summaries() void {
     assert(w->callers[0].param == 2);
     // `del(a)` of a free region loses its next field: an error of the body, not a requirement.
     // The caller storage stays free.
-    assert(ownership_heap_env.failed(&c, "wide"));
+    assert(ownership_heap_env.candidate(&c, "wide", ownership_api.event_kind.lost_ownership));
     assert(w->interface[0].require_fields == 0 && w->interface[1].require_fields == 0);
     assert(!w->interface[2].needs_shape && !w->interface[3].needs_shape);
     assert(ownership_heap_env.summary(&c, "none")->interface.len == 0);
@@ -178,16 +178,18 @@ fn withdrawal() void {
     defer ownership_heap_env.close(&c);
     ownership_heap_env.run(&c, text[..], bodies[..]);
     // `odd` loses its right subtree: its own error stays its verdict.
-    assert(ownership_heap_env.failed(&c, "odd"));
+    assert(ownership_heap_env.candidate(&c, "odd", ownership_api.event_kind.lost_ownership));
     assert(ownership_heap_env.first_text(&c, "odd") == "t->r");
     // `even` used the summary of `odd`, so its proof goes.
     assert(ownership_heap_env.unproved(&c, "even", ownership_api.incomplete_reason.missing_graph));
     assert(ownership_heap_env.events(&c, "even") == 1);
     assert(ownership_heap_env.first_text(&c, "even") ==
         "a recursive component in which a member has no proof");
-    // An incomplete member withdraws the other member in the same way. `pong` can lose `extra`
-    // on a path that no witness validates.
+    // An incomplete member withdraws the other member in the same way. `pong` can lose `extra`:
+    // a possible fact.
     assert(ownership_heap_env.unproved(&c, "pong", ownership_api.incomplete_reason.missing_path));
+    assert(ownership_heap_env.candidates(&c, "pong", ownership_api.event_kind.lost_ownership,
+        ownership_api.certainty.possible) == 1);
     assert(!ownership_heap_env.summary(&c, "pong")->residual);
     assert(ownership_heap_env.unproved(&c, "ping", ownership_api.incomplete_reason.missing_graph));
     assert(ownership_heap_env.events(&c, "ping") == 1);
