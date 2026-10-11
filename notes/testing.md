@@ -728,7 +728,8 @@ bullet at a time and without a rewrite.
     violation whose conditions all hold on the run is a checker bug, and it is must-fix
     (2026-10-10).
 - **Two soundness gates hold the heap solver and the summary solver alone** (D17.14, D17.18).
-  No module imports `ownership_heap`, so outside its 12 test programs only these gates run it.
+  Outside its 12 test programs, only `ownership_source_calls` imports `ownership_heap`, and it
+  joins the two solvers. These gates run each solver alone.
   `SoundnessGateTest` in `test/ownership_driver_test.py` builds both programs once with
   `-I src/fort -I test/fort/support`. It runs each input in an empty directory of its own, because
   `lower_env` writes its sandboxes into the working directory.
@@ -740,13 +741,16 @@ bullet at a time and without a rewrite.
   names the other 2 manifest programs with the reason: each imports `std.str`, and the sandbox
   `std` holds only a runtime. A skipped program that `heap_rows` reads fails the test. Run the
   test with `--bless` to write the golden, and read the diff of the golden before the commit.
-  `test/ownership/solvers_alone.ft` prints the summary and the heap verdict of 100 faulty bodies:
+  `test/ownership/solvers_alone.ft` prints the summary verdict, the heap verdict and the verdict
+  of the calls_heap row (`ownership_source_calls_env.verdict`) of 100 faulty bodies:
   the faulty body of each of the 37 reject cases (the last function at or before an error line)
   and the 63 bodies of `test/ownership/solvers/faulty.json`. A body is faulty because its source
   has the expected error: the error line of a reject case, or the `faulty.json` entry of a probe.
-  The summary solver must prove 0. The heap solver may prove only the entries of
-  `test/ownership/solvers/false_accepts.txt`, and each entry must still prove. The ledger has one
-  line `# at most N entries`, and a ledger with more entries fails the test. A change lowers N
+  The summary solver must prove 0, and the calls_heap row must prove 0 and fail 0: it needs both
+  proofs and validates no event. No ledger entry names the row. The heap solver may prove only the
+  entries of `test/ownership/solvers/false_accepts.txt`, and each entry must still prove. The
+  ledger has one line `# at most N entries`, and a ledger with more entries fails the test. A
+  change lowers N
   when it deletes an entry, so each step down is a one-line diff; a raise of N is the only way to
   add an entry, and review refuses it. On 2026-10-10 N was 13: 4 entries of class A, 3 of B, 1 of
   D and 5 of E. Rule P1 of D17.18 (only an established fact removes a path) deleted the 8 entries
@@ -775,7 +779,9 @@ bullet at a time and without a rewrite.
   `proved` verdict also needs `known` and no residual flag, so a successful proof with a residual
   flag prints `unproved`, and the gate does not see a false accept of that kind. On 2026-10-10
   0 of the 62 faulty bodies had one.
-  The gates judge each solver alone and not the `calls_heap` row that joins them.
+  The third column judges the calls_heap row with the rules of `ownership_source_calls`, over the
+  closure of the file alone. It needs both proofs, so it proves no body that the summary solver
+  alone does not prove; on 2026-10-11 it gave 100 of 100 unproved.
 
 ## 6. Generated code
 

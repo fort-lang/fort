@@ -31,7 +31,7 @@ fn proof_failure_flag_does_not_mean_internal_failure() void {
         .kind = ownership_api.proof_kind.complete}) == "complete");
 }
 
-fn zero_bodies_retain_missing_producers_and_no_body_meter() void {
+fn zero_bodies_need_no_body_meter() void {
     ownership_source_env.env mut e = ownership_source_env.env{};
     ownership_source_env.open(&e);
     defer ownership_source_env.close(&e);
@@ -39,15 +39,14 @@ fn zero_bodies_retain_missing_producers_and_no_body_meter() void {
     ownership_source.analyze(&e.source);
     assert(e.source.bodies.len == 0);
     assert(ownership_report.verdict(&e.source) == 1);
-    // The local and raw analyses have no closure facts outside bodies, so no body means no
-    // gap of theirs. Each analysis without a producer stays incomplete.
+    // The local, raw and calls_heap analyses have no closure facts outside bodies, so no body
+    // means no gap of theirs. Each analysis has a producer.
     assert(ownership_report.closure_status(&e.source, ownership_report.LOCAL) == "complete");
     assert(ownership_report.closure_status(&e.source, ownership_report.RAW) == "complete");
-    u64 mut stage = ownership_report.STORED_BORROWS;
+    assert(ownership_report.closure_status(&e.source, ownership_report.CALLS_HEAP) == "complete");
+    u64 mut stage = 0;
     while (stage < ownership_report.ANALYSIS_COUNT) {
-        if (!ownership_report.integrated(stage)) {
-            assert(ownership_report.closure_status(&e.source, stage) == "incomplete");
-        }
+        assert(ownership_report.integrated(stage));
         stage += 1;
     }
     diag.sink mut diagnostics = diag.sink{};
@@ -60,7 +59,7 @@ fn zero_bodies_retain_missing_producers_and_no_body_meter() void {
     ownership_report.build(&out, &e.source, &call, 1);
     assert(str.find(strbuf.view(&out), "\"name\":\"services\"") < 0);
     assert(str.find(strbuf.view(&out), "\"bodies\":[]") >= 0);
-    assert(str.find(strbuf.view(&out), "\"producer\":\"unavailable\"") >= 0);
+    assert(str.find(strbuf.view(&out), "\"producer\":\"unavailable\"") < 0);
 }
 
 fn failure_before_any_body_ledger_keeps_unexecuted_analyses() void {
@@ -80,15 +79,21 @@ fn failure_before_any_body_ledger_keeps_unexecuted_analyses() void {
         stage += 1;
     }
     assert(ownership_report.failure(&e.source, 1).code == "source_error");
+    // Each analysis is unexecuted, so the closure has no incomplete reason. The report gives its
+    // failure reason instead: a rejection is a compilation error.
+    assert(!ownership_report.first_incomplete(&e.source).present);
     diag.sink mut diagnostics = diag.sink{};
     defer diag.free(&diagnostics);
     ownership_report.diagnose(&e.source, &diagnostics, "main.ft");
     assert(diag.count(&diagnostics) == 1);
+    assert(diag.record_at(&diagnostics, 0).msg ==
+        "ownership proof is incomplete (checking: source_error)");
     assert(row->live.events.budget.used.v == 0);
 }
 
-// The first analysis without a producer gives the reason when the earlier ones have none.
-fn missing_reason_uses_an_explicit_missing_producer() void {
+// Each analysis has a producer. A body whose rows are complete has no reason. An incomplete row
+// without a reason of its own names its source coverage at the declaration.
+fn missing_reason_names_source_coverage() void {
     ownership_source_env.env mut e = ownership_source_env.env{};
     ownership_source_env.open(&e);
     defer ownership_source_env.close(&e);
@@ -96,18 +101,24 @@ fn missing_reason_uses_an_explicit_missing_producer() void {
     ownership_source.analyze(&e.source);
     ownership_source.body mut* row = &e.source.bodies[0];
     row->first_incomplete = ownership_api.proof_status{};
-    assert(ownership_report.analysis_status(row, ownership_report.LOCAL, 2) == "complete");
-    assert(ownership_report.analysis_status(row, ownership_report.STORED_BORROWS, 2) ==
-        "complete");
-    assert(ownership_report.analysis_status(row, ownership_report.RAW, 2) == "complete");
+    u64 mut stage = ownership_report.LOCAL;
+    while (stage < ownership_report.ANALYSIS_COUNT) {
+        assert(ownership_report.analysis_status(row, stage, 2) == "complete");
+        stage += 1;
+    }
+    assert(!ownership_report.body_reason(row).present);
+    e.source.calls.rows[0].proof = ownership_api.proof_status{
+        .kind = ownership_api.proof_kind.incomplete};
+    assert(ownership_report.analysis_status(row, ownership_report.CALLS_HEAP, 2) ==
+        "incomplete");
     ownership_report.reason why = ownership_report.body_reason(row);
-    assert(why.present && why.stage == "calls_heap" && why.code == "missing_producer");
+    assert(why.present && why.stage == "calls_heap" && why.code == "source_coverage");
     assert(why.source.filename_present && !why.limit.present);
     assert(why.source.line == 1 && why.source.col == 4);
 }
 
-// An incomplete local proof gives the body reason before the analyses without a producer.
-fn local_reason_comes_before_a_missing_producer() void {
+// An incomplete local proof gives the body reason before the later analyses.
+fn local_reason_comes_before_later_analyses() void {
     ownership_source_env.env mut e = ownership_source_env.env{};
     ownership_source_env.open(&e);
     defer ownership_source_env.close(&e);
@@ -425,11 +436,11 @@ fn computation_bounds_are_published() void {
 
 fn main() i32 {
     proof_failure_flag_does_not_mean_internal_failure();
-    zero_bodies_retain_missing_producers_and_no_body_meter();
+    zero_bodies_need_no_body_meter();
     failure_before_any_body_ledger_keeps_unexecuted_analyses();
     println("statuses ok");
-    missing_reason_uses_an_explicit_missing_producer();
-    local_reason_comes_before_a_missing_producer();
+    missing_reason_names_source_coverage();
+    local_reason_comes_before_later_analyses();
     graph_refusal_keeps_the_original_category_counts_and_location();
     println("reasons ok");
     internal_verifier_failure_exits_two();

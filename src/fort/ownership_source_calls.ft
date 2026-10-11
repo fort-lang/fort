@@ -1,0 +1,649 @@
+/// Proves the call and heap obligations of the verified closure with the summary solver and the
+/// heap solver.
+// Both solvers solve the call graph, each component callee first (`spec/fir.md` 14.1). One
+// computation of one solver solves one component, and its meter is its ledger. No event is a
+// violation: no producer validates a witness for an event of these solvers yet, so each event is
+// an incomplete-proof event at its operation (`spec/toolchain.md` 4.2). Each body keeps, for each
+// solver, its first event and its first candidate in the canonical event order, and counts the
+// other events. Three cases take a body out of the declared scope: a call gap, a budget error that
+// stopped its proof, and a closure without a graph proof, whose rows stay unexecuted.
+import ownership_api;
+import ownership_flow;
+import ownership_graph;
+import ownership_heap;
+import ownership_keys;
+import ownership_limits;
+import ownership_recursive;
+import ownership_source_local;
+import ownership_summary_body;
+import ownership_summary_model;
+
+u64 NONE = 18446744073709551615;
+
+/// The two solvers of the calls_heap analysis.
+enum solver_kind {
+    summary,
+    heap,
+}
+
+/// The ledger of one component computation of one solver. `owner` is the key of the first
+/// member of the component, and `fir_size` is the sum over its members.
+struct ledger {
+    solver_kind solver;
+    u64 component;
+    ownership_api.function_id owner;
+    u64 fir_size;
+    ownership_limits.meter meter;
+    ownership_api.proof_status first_refusal;
+    ownership_api.proof_status work_refusal;
+    ownership_api.proof_status report_refusal;
+}
+
+/// The fields of one kept event that the row reads.
+struct unproved {
+    bool present;
+    ownership_api.entity_id key;
+    ownership_api.operation_position operation;
+    ownership_api.source_position source;
+    ownership_api.incomplete_reason reason;
+    ownership_api.entity_id relation;
+    ownership_api.event_kind kind;
+}
+
+/// What keeps a body out of the declared scope: a call of the body that lacks callee facts.
+enum gap_kind {
+    none,
+    // A residual fort target.
+    residual_target,
+    // A fort target that names no body of the closure.
+    unknown_target,
+    // A foreign target or a residual foreign target. Neither solver trusts one yet.
+    extern_call,
+    // A target outside the component of the body whose summary a caller cannot apply.
+    callee_summary,
+    // A target outside the component of the body whose heap summary a caller cannot apply.
+    callee_heap,
+    // A budget error (a refused E, W or V charge) stopped the own summary or heap summary.
+    own_proof,
+}
+
+/// The calls_heap outcome of one body.
+struct row {
+    ownership_source_local.status correspondence;
+    ownership_source_local.status solver;
+    ownership_api.proof_status proof;
+    // No event is a violation, so this count stays 0.
+    u64 violations;
+    // The published proof of each solver, and whether a caller can apply that summary.
+    ownership_api.proof_status summary_proof;
+    ownership_api.proof_status heap_proof;
+    bool summary_proved;
+    bool heap_proved;
+    unproved first_summary;
+    unproved first_heap;
+    // The first candidate event of each solver in the canonical order: a possible violation that
+    // no witness decides yet (`candidate`).
+    unproved summary_candidate;
+    unproved heap_candidate;
+    // The events that the row counted and did not keep.
+    u64 dropped;
+    // The refused V charge of an event of this body that the row could not keep.
+    ownership_api.proof_status lost;
+    // Bit k for each limit category k of a refused charge that names this body, for each solver:
+    // the record of its budget errors and precision limits. The scope reads the proofs only.
+    u32 summary_refused;
+    u32 heap_refused;
+    u64 summary_ledger;
+    u64 heap_ledger;
+    // The kind of the first call without callee facts, in graph order, and its incomplete proof
+    // at that call. `gaps` has bit k for each gap kind k that a call of the body has.
+    gap_kind gap;
+    ownership_api.proof_status gap_proof;
+    u32 gaps;
+    // The declaration of the body, for a proof without a position.
+    ownership_api.operation_position operation;
+    ownership_api.source_position source;
+}
+
+struct context {
+    ownership_graph.graph mut* graph;
+    // The members of component k are `members[members_first[k]]` up to
+    // `members[members_first[k + 1]]`, in key order.
+    u64 mut@ own members;
+    u64 mut@ own members_first;
+    ledger mut@ own ledgers;
+    u64 ledgers_len;
+    // The ledger of the computation that runs now, or NONE.
+    u64 current;
+    // The computations that the running solver began.
+    u64 begun;
+    solver_kind running;
+    row mut@ own rows;
+    ownership_api.services services;
+    bool solved;
+    bool executed;
+}
+
+fn complete() ownership_api.proof_status {
+    return ownership_api.proof_status{.kind = ownership_api.proof_kind.complete};
+}
+
+fn grow_ledgers(context mut* c) void {
+    if (c->ledgers_len < c->ledgers.len) { return; }
+    u64 cap = c->ledgers.len == 0 ? 64 : c->ledgers.len * 2;
+    ledger mut@ own bigger = new(ledger, cap);
+    u64 mut i = 0;
+    while (i < c->ledgers_len) {
+        bigger[i] = c->ledgers[i];
+        i += 1;
+    }
+    del(c->ledgers);
+    c->ledgers = move(bigger);
+}
+
+// The body of `key` in the graph, or NONE. The graph keeps its bodies in increasing key order.
+// A self call names a renamed instance of its own function, so a declaration match is enough.
+fn body_of(context* c, ownership_api.function_id key) u64 {
+    ownership_graph.graph* g = c->graph;
+    u64 mut low = 0;
+    u64 mut high = g->bodies.len;
+    while (low < high) {
+        u64 middle = low + (high - low) / 2;
+        i32 order = ownership_keys.declaration(g->bodies[middle].key.declaration,
+            key.declaration);
+        if (order == 0) { return middle; }
+        if (order < 0) { low = middle + 1; } else { high = middle; }
+    }
+    return NONE;
+}
+
+// The ledger of the computation that runs now. Each solver charges and records events inside a
+// computation only.
+fn running(context mut* c) ledger mut* {
+    if (c->current >= c->ledgers_len) {
+        panic("ownership_source_calls: no computation runs");
+    }
+    return &c->ledgers[c->current];
+}
+
+// Keeps the first refusal of the running ledger, its first W refusal and its first V refusal.
+// Each charge goes to the meter unchanged, so a refused E charge of one member does not refuse
+// the next member. Both solvers pay W one unit at a time, about 59 million units on the
+// `main.ft` closure, so an allowed unit takes the result of `ownership_limits.try_charge`
+// without its checks: the meter of a running ledger is configured and valid.
+fn budget(void mut* opaque, ownership_api.charge_request* req) ownership_api.charge_result {
+    context mut* c = cast(opaque, context mut*);
+    ledger mut* l = running(c);
+    if (req->items.len == 1 && req->items[0].category == ownership_api.limit_category.w &&
+        req->items[0].scope == ownership_api.limit_scope.computation &&
+        req->items[0].amount == 1 && l->meter.used.w < l->meter.bounds.w) {
+        l->meter.used.w += 1;
+        return ownership_api.charge_result{.allowed = true, .proof = complete()};
+    }
+    ownership_api.charge_result out = ownership_limits.try_charge(&l->meter, req);
+    if (out.allowed || !out.limit.present) { return out; }
+    ownership_api.proof_status mut refusal = out.proof;
+    if (!refusal.terminal.present) {
+        refusal = ownership_api.incomplete(ownership_api.incomplete_reason.work_limit,
+            req->operation, out.limit.source);
+    }
+    refusal.terminal.limit = out.limit;
+    u64 body = body_of(c, req->operation.function);
+    if (body != NONE) {
+        u32 kind = cast(1, u32) << cast(out.limit.category, u32);
+        row mut* r = &c->rows[body];
+        if (c->running == solver_kind.summary) { r->summary_refused = r->summary_refused | kind; }
+        else { r->heap_refused = r->heap_refused | kind; }
+    }
+    if (!l->first_refusal.terminal.present) { l->first_refusal = refusal; }
+    if (out.limit.category == ownership_api.limit_category.w &&
+        !l->work_refusal.terminal.present) {
+        l->work_refusal = refusal;
+    }
+    if (out.limit.category == ownership_api.limit_category.v &&
+        !l->report_refusal.terminal.present) {
+        l->report_refusal = refusal;
+    }
+    return out;
+}
+
+// Charges one kept event to the V bound of the running ledger. A refusal gives its proof.
+fn charge_kept(context mut* c, ownership_api.event_descriptor* e,
+    ownership_api.proof_status mut* refusal) bool {
+    ownership_api.charge_item[1] item = {ownership_api.charge_item{
+        ownership_api.limit_category.v, ownership_api.limit_scope.report, 1}};
+    ownership_api.charge_request request = ownership_api.charge_request{
+        ownership_api.work_kind.transfer, e->operation, e->source, item[..]};
+    ownership_api.charge_result out = budget(cast(c, void mut*), &request);
+    if (out.allowed) { return true; }
+    // `try_charge` gives a refused V charge its terminal and its limit.
+    *refusal = out.proof;
+    return false;
+}
+
+fn unproved_of(ownership_api.event_descriptor* e) unproved {
+    return unproved{true, e->key, e->operation, e->source, e->reason, e->relation, e->kind};
+}
+
+/// Whether event `e` is a candidate: a possible violation of the body, which the witness checker
+/// decides later. A violation event is one, and so is an event for a missing path: the solvers
+/// give that reason to a possible violation without a witness. A summary that extraction rejects
+/// for a missing path records no event, because its body has a shape that the summary does not
+/// support.
+fn candidate(ownership_api.event_descriptor* e) bool {
+    return e->reason == ownership_api.incomplete_reason.missing_path ||
+        e->kind == ownership_api.event_kind.invalid_use ||
+        e->kind == ownership_api.event_kind.lost_ownership ||
+        e->kind == ownership_api.event_kind.caller_requirement;
+}
+
+// Keeps `next` in `kept` when it comes first in the canonical order. The first kept event pays
+// one V unit of the running ledger; a refusal loses it. False when the row keeps no new event.
+fn keep(context mut* c, row mut* r, unproved mut* kept, unproved next,
+    ownership_api.event_descriptor* e) bool {
+    if (kept->present) {
+        if (!before(&next, kept)) { return false; }
+        *kept = next;
+        return true;
+    }
+    ownership_api.proof_status mut refusal = complete();
+    if (!charge_kept(c, e, &refusal)) {
+        if (!r->lost.terminal.present) { r->lost = refusal; }
+        return false;
+    }
+    *kept = next;
+    return true;
+}
+
+/// Whether `a` comes before `b` in the canonical event order (`spec/toolchain.md` 4.2). Each is
+/// an incomplete-proof event, so the event class orders neither.
+fn before(unproved* a, unproved* b) bool {
+    i32 mut order = ownership_keys.function(a->operation.function, b->operation.function);
+    if (order == 0) { order = ownership_keys.source(a->source, b->source); }
+    if (order == 0) { order = ownership_keys.operation(a->operation, b->operation); }
+    if (order == 0) { order = ownership_keys.entity(a->relation, b->relation); }
+    if (order == 0) { order = ownership_keys.entity(a->key, b->key); }
+    return order < 0;
+}
+
+// Keeps the first event and the first candidate event of the running solver for the body that it
+// names, in the canonical order. An event that names no body of the closure goes to the first
+// member of the running component. Each first kept event pays one V unit of the running ledger;
+// a later event that comes before it takes its place and pays nothing. `dropped` counts the events
+// that are not the first event. The result keeps the proof of the solver, so the producer changes
+// no solver outcome.
+fn event(void mut* opaque, ownership_api.event_request* req) ownership_api.event_result {
+    context mut* c = cast(opaque, context mut*);
+    ownership_api.event_result out = ownership_api.event_result{.proof = req->current,
+        .retained = true, .stored_key = req->event.key};
+    ownership_api.event_descriptor* e = &req->event;
+    u64 component = running(c)->component;
+    u64 mut body = body_of(c, e->operation.function);
+    if (body == NONE) { body = c->members[c->members_first[component]]; }
+    row mut* r = &c->rows[body];
+    bool summary = c->running == solver_kind.summary;
+    unproved mut* first = summary ? &r->first_summary : &r->first_heap;
+    unproved next = unproved_of(e);
+    bool was = first->present;
+    if (!keep(c, r, first, next, e) || was) { r->dropped += 1; }
+    if (candidate(e)) {
+        keep(c, r, summary ? &r->summary_candidate : &r->heap_candidate, next, e);
+    }
+    return out;
+}
+
+// Starts the next component computation of the running solver. Both solvers start the
+// components in the order of `ownership_graph.callee_first`, once each, so the ledger of each
+// member names its own component. A false result refuses the computation.
+fn begin(void mut* opaque, u64 size, ownership_api.limit_table mut* limits) bool {
+    context mut* c = cast(opaque, context mut*);
+    u32@ order = ownership_graph.callee_first(c->graph);
+    bool ordered = c->begun < order.len;
+    u64 component = ordered ? cast(order[c->begun], u64) : 0;
+    u64 mut fir_size = 0;
+    u64 mut m = ordered ? c->members_first[component] : 0;
+    while (ordered && m < c->members_first[component + 1]) {
+        fir_size = ownership_limits.saturating_sum(fir_size,
+            ownership_limits.fir_size(c->graph->bodies[c->members[m]].body));
+        m += 1;
+    }
+    if (!ordered || fir_size != size) {
+        panic("ownership_source_calls: a computation that the graph does not order");
+    }
+    c->begun += 1;
+    grow_ledgers(c);
+    u64 index = c->ledgers_len;
+    c->ledgers_len += 1;
+    ledger mut* l = &c->ledgers[index];
+    *l = ledger{};
+    l->solver = c->running;
+    l->component = component;
+    l->owner = c->graph->bodies[c->members[c->members_first[component]]].key;
+    l->fir_size = size;
+    l->first_refusal = complete();
+    l->work_refusal = complete();
+    l->report_refusal = complete();
+    *limits = ownership_limits.computation(size);
+    m = c->members_first[component];
+    while (m < c->members_first[component + 1]) {
+        row mut* r = &c->rows[c->members[m]];
+        if (c->running == solver_kind.summary) { r->summary_ledger = index; }
+        else { r->heap_ledger = index; }
+        m += 1;
+    }
+    c->current = index;
+    return ownership_limits.configure(&l->meter, limits);
+}
+
+// Lays out the members of each component in key order.
+fn lay_out_members(context mut* c) void {
+    ownership_graph.graph* g = c->graph;
+    u64 n = g->bodies.len;
+    u64 components = cast(g->component_count, u64);
+    c->members = new(u64, n);
+    c->members_first = new(u64, components + 1);
+    u64 mut i = 0;
+    while (i < n) {
+        c->members_first[cast(g->components[i], u64) + 1] += 1;
+        i += 1;
+    }
+    i = 0;
+    while (i < components) {
+        c->members_first[i + 1] += c->members_first[i];
+        i += 1;
+    }
+    u64 mut@ own place = new(u64, components);
+    defer del(place);
+    i = 0;
+    while (i < components) { place[i] = c->members_first[i]; i += 1; }
+    i = 0;
+    while (i < n) {
+        u64 component = cast(g->components[i], u64);
+        c->members[place[component]] = i;
+        place[component] += 1;
+        i += 1;
+    }
+}
+
+/// A refused W, E or V charge: a budget error that stops a computation, the summary of one
+/// function or the events that it keeps (`spec/fir.md` 14.1). A refused D, R, P, G, H or T
+/// charge is a precision limit: the solver goes on without the facts that it lost.
+fn limited(ownership_api.proof_status p) bool {
+    if (!p.terminal.present || !p.terminal.limit.present) { return false; }
+    ownership_api.limit_category kind = p.terminal.limit.category;
+    return kind == ownership_api.limit_category.w || kind == ownership_api.limit_category.e ||
+        kind == ownership_api.limit_category.v;
+}
+
+// Adds gap `why` to row `r`. The first gap gives the proof.
+fn note_gap(row mut* r, gap_kind why, ownership_api.proof_status proof) void {
+    r->gaps = r->gaps | (cast(1, u32) << cast(why, u32));
+    if (r->gap != gap_kind.none) { return; }
+    r->gap = why;
+    r->gap_proof = proof;
+}
+
+// Adds gap `why` of the call at `site` to row `r`, with incomplete proof at the call.
+fn add_gap(row mut* r, gap_kind why, ownership_graph.call_site* site) void {
+    ownership_api.incomplete_reason mut reason = ownership_api.incomplete_reason.unknown_effect;
+    if (why == gap_kind.extern_call) { reason = ownership_api.incomplete_reason.missing_ffi; }
+    note_gap(r, why, ownership_api.incomplete(reason, site->position, site->source));
+}
+
+/// Whether a summary that a caller cannot apply keeps its body outside the declared scope: a
+/// budget error stopped it, that is a refused E, W or V charge whose limit its proof carries
+/// (`spec/fir.md` 14.1). No other reason does: an unknown effect at a call, a missing path, a
+/// missing correspondence, a definite failure and a precision limit (D, R, P, G, H, T), after
+/// which the solver goes on, keep the body declared, so its incomplete proof stays in the scope.
+/// A candidate of the body (`with_candidate`, a lost event included) keeps it declared too: an
+/// incomplete proof is never silent.
+fn coverage_gap(ownership_api.proof_status p, bool with_candidate) bool {
+    return !with_candidate && limited(p);
+}
+
+/// Whether a caller can apply this summary: a proof and no residual effect.
+fn summary_applies(ownership_summary_model.summary* s) bool {
+    return ownership_api.successful(s->proof) && !s->residual_effects;
+}
+
+/// Whether a caller can apply this heap summary: a proof of a known body and no residual effect.
+fn heap_applies(ownership_heap.summary* s) bool {
+    return ownership_api.successful(s->proof) && s->known && !s->residual;
+}
+
+// Marks each call whose callee facts are missing: a residual fort target, a target that names no
+// body, an extern call, or a target outside the component of the body whose summary or heap
+// summary a caller cannot apply. A call of a member of its own component keeps its facts: the
+// solver of that component decides them. A call gives its gaps in this order.
+fn mark_dependent_calls(context mut* c) void {
+    ownership_graph.graph* g = c->graph;
+    u64 mut k = 0;
+    while (k < g->calls_len) {
+        ownership_graph.call_site* site = &g->calls[k];
+        u64 b = cast(site->body, u64);
+        row mut* r = &c->rows[b];
+        if (site->residual_fort) { add_gap(r, gap_kind.residual_target, site); }
+        bool mut unknown = false;
+        bool mut summary = false;
+        bool mut heap = false;
+        u64 mut t = 0;
+        while (t < site->fort_len) {
+            u64 target = body_of(c, site->fort_targets[t].function);
+            if (target == NONE) {
+                unknown = true;
+            } else if (g->components[target] != g->components[b]) {
+                summary = summary || !c->rows[target].summary_proved;
+                heap = heap || !c->rows[target].heap_proved;
+            }
+            t += 1;
+        }
+        if (unknown) { add_gap(r, gap_kind.unknown_target, site); }
+        if (site->foreign_len > 0 || site->residual_foreign) {
+            add_gap(r, gap_kind.extern_call, site);
+        }
+        if (summary) { add_gap(r, gap_kind.callee_summary, site); }
+        if (heap) { add_gap(r, gap_kind.callee_heap, site); }
+        k += 1;
+    }
+}
+
+// A terminal without a source names the declaration of the body of its operation, or of the
+// row when the closure has no such body.
+fn locate(context* c, row* r, ownership_api.proof_status p) ownership_api.proof_status {
+    ownership_api.proof_status mut out = p;
+    if (!out.terminal.present || out.terminal.source.filename_present) { return out; }
+    u64 body = body_of(c, out.terminal.operation.function);
+    out.terminal.source = body == NONE ? r->source : c->rows[body].source;
+    if (out.terminal.limit.present && !out.terminal.limit.source.filename_present) {
+        out.terminal.limit.source = out.terminal.source;
+    }
+    return out;
+}
+
+// The incomplete proof of one solver that has no proof for row `r`. A proof with a terminal
+// keeps it. A definite failure is an incomplete-proof event at the first kept event of that
+// solver, or at the declaration when the row kept none. A proved summary that a caller cannot
+// apply has unknown effects.
+fn unproved_proof(context* c, row* r, ownership_api.proof_status p, unproved* first)
+    ownership_api.proof_status {
+    if (p.terminal.present) { return locate(c, r, p); }
+    if (first->present) {
+        ownership_api.incomplete_reason why = first->reason ==
+            ownership_api.incomplete_reason.none ? ownership_api.incomplete_reason.missing_path :
+            first->reason;
+        ownership_api.proof_status mut out = ownership_api.incomplete(why, first->operation,
+            first->source);
+        out.terminal.relation = first->relation;
+        return locate(c, r, out);
+    }
+    if (ownership_api.successful(p)) {
+        return ownership_api.incomplete(ownership_api.incomplete_reason.unknown_effect,
+            r->operation, r->source);
+    }
+    return ownership_api.incomplete(ownership_api.incomplete_reason.missing_path, r->operation,
+        r->source);
+}
+
+// The calls_heap row of each body (`spec/toolchain.md` 1.1). Correspondence is complete when
+// no call of the body lacks callee facts and no budget refusal cut an own summary of the body
+// (`coverage_gap`). The solver is incomplete when a W, E or V refusal stopped a summary of the
+// body, or when V refused an event of the body. Proof is complete when a caller can apply both
+// summaries of the body, the row lost no event and the correspondence is complete. Otherwise
+// the summary solver gives the terminal before the heap solver, in the order in which they run,
+// and a row with both summaries keeps the proof of its first gap.
+fn decide(context mut* c) void {
+    mark_dependent_calls(c);
+    u64 mut i = 0;
+    while (i < c->rows.len) {
+        row mut* r = &c->rows[i];
+        // A candidate of either solver keeps the body declared, and so does an event that V lost:
+        // it can be a candidate.
+        bool candidates = r->summary_candidate.present || r->heap_candidate.present ||
+            r->lost.terminal.present;
+        if (!r->summary_proved && coverage_gap(r->summary_proof, candidates)) {
+            note_gap(r, gap_kind.own_proof,
+                unproved_proof(c, r, r->summary_proof, &r->first_summary));
+        }
+        if (!r->heap_proved && coverage_gap(r->heap_proof, candidates)) {
+            note_gap(r, gap_kind.own_proof, unproved_proof(c, r, r->heap_proof, &r->first_heap));
+        }
+        r->correspondence = r->gap == gap_kind.none ? ownership_source_local.status.complete :
+            ownership_source_local.status.incomplete;
+        bool refused = limited(r->summary_proof) || limited(r->heap_proof) ||
+            r->lost.terminal.present;
+        r->solver = refused ? ownership_source_local.status.incomplete :
+            ownership_source_local.status.complete;
+        if (!r->summary_proved) {
+            r->proof = unproved_proof(c, r, r->summary_proof, &r->first_summary);
+        } else if (!r->heap_proved) {
+            r->proof = unproved_proof(c, r, r->heap_proof, &r->first_heap);
+        } else if (r->lost.terminal.present) {
+            r->proof = locate(c, r, r->lost);
+        } else if (r->gap != gap_kind.none) {
+            // Complete proof needs complete correspondence (`spec/toolchain.md` 1.1).
+            r->proof = r->gap_proof;
+        } else {
+            r->proof = complete();
+        }
+        i += 1;
+    }
+}
+
+// A summary layout that the graph ledger refused leaves the graph without a proof, so neither
+// solver has a published summary to give: each body takes that refusal as both proofs.
+fn refuse_rows(context mut* c, ownership_api.proof_status refusal) void {
+    u64 mut i = 0;
+    while (i < c->rows.len) {
+        c->rows[i].summary_proof = refusal;
+        c->rows[i].heap_proof = refusal;
+        i += 1;
+    }
+}
+
+// Solves the summary of each body and keeps, for each row, its proof and whether a caller can
+// apply it. The solution goes before the heap solver starts.
+fn solve_summaries(context mut* c, ownership_flow.source_file_binding@ files) void {
+    ownership_graph.graph mut* g = c->graph;
+    u64 n = g->bodies.len;
+    ownership_summary_body.body_input mut@ own inputs = new(ownership_summary_body.body_input, n);
+    defer del(inputs);
+    u64 mut i = 0;
+    while (i < n) {
+        ownership_summary_body.callee_binding@ no_callees = {};
+        ownership_summary_body.call_targets@ no_targets = {};
+        inputs[i] = ownership_summary_body.body_input{g->bodies[i], files[i..i + 1],
+            &c->services, ownership_limits.production(),
+            ownership_summary_model.coverage_status{true, true, false}, true, no_callees,
+            no_targets};
+        i += 1;
+    }
+    c->running = solver_kind.summary;
+    c->begun = 0;
+    ownership_recursive.solution mut solved = ownership_recursive.solve(g, inputs[..],
+        &c->services, ownership_recursive.computation_hook{cast(c, void mut*), begin});
+    defer ownership_recursive.free(&solved);
+    c->current = NONE;
+    i = 0;
+    while (i < n) {
+        ownership_summary_model.summary* s = &solved.summaries[i];
+        c->rows[i].summary_proof = s->proof;
+        c->rows[i].summary_proved = summary_applies(s);
+        i += 1;
+    }
+}
+
+// Solves the heap summary of each body and keeps, for each row, its proof and whether a caller
+// can apply it.
+fn solve_heaps(context mut* c, ownership_flow.source_file_binding@ files) void {
+    ownership_graph.graph mut* g = c->graph;
+    u64 n = g->bodies.len;
+    ownership_heap.body_input mut@ own inputs = new(ownership_heap.body_input, n);
+    defer del(inputs);
+    u64 mut i = 0;
+    while (i < n) {
+        inputs[i] = ownership_heap.body_input{g->bodies[i].key, g->bodies[i].body,
+            files[i..i + 1]};
+        i += 1;
+    }
+    c->running = solver_kind.heap;
+    c->begun = 0;
+    ownership_heap.solution mut solved = ownership_heap.solve(g, inputs[..], &c->services,
+        ownership_heap.computation_hook{cast(c, void mut*), begin});
+    defer ownership_heap.free(&solved);
+    c->current = NONE;
+    i = 0;
+    while (i < n) {
+        ownership_heap.summary* s = &solved.summaries[i];
+        c->rows[i].heap_proof = s->proof;
+        c->rows[i].heap_proved = heap_applies(s);
+        i += 1;
+    }
+}
+
+/// Solves the call and heap obligations of the bodies of `g`. `files[i]` names the source file
+/// of body i, and `declarations[i]` the name range of its declaration. A graph without a
+/// complete proof leaves each row unexecuted.
+fn solve(context mut* c, ownership_graph.graph mut* g, ownership_flow.source_file_binding@ files,
+    ownership_api.source_position@ declarations) void {
+    if (c->solved) { panic("ownership_source_calls: context is already solved"); }
+    c->solved = true;
+    c->graph = g;
+    c->current = NONE;
+    u64 n = g->bodies.len;
+    if (files.len != n || declarations.len != n) {
+        panic("ownership_source_calls: a body has no file or no declaration");
+    }
+    c->rows = new(row, n);
+    u64 mut i = 0;
+    while (i < n) {
+        c->rows[i].operation = ownership_api.operation_position{.function = g->bodies[i].key};
+        c->rows[i].source = declarations[i];
+        i += 1;
+    }
+    if (!ownership_api.successful(g->proof)) { return; }
+    lay_out_members(c);
+    c->services.budget_context = cast(c, void mut*);
+    c->services.budget = budget;
+    c->services.event_context = cast(c, void mut*);
+    c->services.event = event;
+    solve_summaries(c, files);
+    // The summary layout charges the graph ledger, so a refusal there leaves no graph proof.
+    if (ownership_api.successful(g->proof)) {
+        solve_heaps(c, files);
+    } else {
+        refuse_rows(c, g->proof);
+    }
+    decide(c);
+    c->executed = true;
+}
+
+/// Whether `solve` reached the solvers for the bodies of the graph.
+fn executed(context* c) bool { return c->executed; }
+
+fn free(context mut* c) void {
+    del(c->rows);
+    del(c->members);
+    del(c->members_first);
+    del(c->ledgers);
+    *c = context{};
+}

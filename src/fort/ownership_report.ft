@@ -9,6 +9,7 @@ import ownership_events;
 import ownership_keys;
 import ownership_limits;
 import ownership_source;
+import ownership_source_calls;
 import ownership_source_exit;
 import ownership_source_leaves;
 import ownership_source_local;
@@ -30,6 +31,7 @@ u64 ANALYSIS_COUNT = 7;
 u64 LOCAL = 2;
 u64 STORED_BORROWS = 3;
 u64 RAW = 4;
+u64 CALLS_HEAP = 5;
 u64 PROCESS_EXIT = 6;
 string[ANALYSIS_COUNT] ANALYSES = {
     "graph", "liveness", "local", "stored_borrows", "raw", "calls_heap", "process_exit"};
@@ -80,9 +82,11 @@ fn local_status(ownership_source_local.status value) string {
     }
 }
 
-// The graph, liveness, local, stored-borrow, raw and process-exit analyses have source
-// producers.
-fn integrated(u64 stage) bool { return stage <= RAW || stage == PROCESS_EXIT; }
+// Each of the seven analyses has a source producer: graph, liveness, local, stored borrows, raw,
+// calls_heap and process exit.
+fn integrated(u64 stage) bool {
+    return stage <= RAW || stage == CALLS_HEAP || stage == PROCESS_EXIT;
+}
 
 // The local and the stored-borrow analyses are flow runs of one producer.
 fn flow_stage(u64 stage) bool { return stage == LOCAL || stage == STORED_BORROWS; }
@@ -92,17 +96,27 @@ fn flow_run(ownership_source.body* row, u64 stage) ownership_source_local.contex
     return &row->local;
 }
 
-// Whether a source producer runs the analysis of a stage per body: local, stored borrows, raw
-// or process exit.
+// Whether a source producer runs the analysis of a stage per body: local, stored borrows, raw,
+// calls_heap or process exit.
 fn producer_stage(u64 stage) bool {
-    return flow_stage(stage) || stage == RAW || stage == PROCESS_EXIT;
+    return flow_stage(stage) || stage == RAW || stage == CALLS_HEAP || stage == PROCESS_EXIT;
 }
 
-// The analysis of a stage that a source producer runs per body: local, stored borrows, raw or
-// process exit.
+// The analysis of a stage that a source producer runs per body: local, stored borrows, raw,
+// calls_heap or process exit. The calls_heap solvers run only over a closure with a graph.
 fn producer_row(ownership_source.body* row, u64 stage, bool mut* solved,
     ownership_source_local.status mut* correspondence, ownership_source_local.status mut* solver,
     ownership_api.proof_status mut* proof, u64 mut* violations) void {
+    if (stage == CALLS_HEAP) {
+        ownership_source_calls.row* calls = row->calls;
+        *solved = calls != null;
+        if (calls == null) { return; }
+        *correspondence = calls->correspondence;
+        *solver = calls->solver;
+        *proof = calls->proof;
+        *violations = calls->violations;
+        return;
+    }
     if (flow_stage(stage)) {
         ownership_source_local.context* run = flow_run(row, stage);
         *solved = run->solved;
@@ -235,21 +249,28 @@ fn producer_proof(ownership_source.body* row, u64 stage) ownership_api.proof_sta
     return solved ? proof : ownership_api.proof_status{};
 }
 
-// The first reason in analysis order. The first analysis without a producer ends the order.
+// The first reason in analysis order. Each analysis has a producer, so an incomplete row
+// without a reason of its own names its source coverage, and a body without an incomplete row
+// has no reason.
 fn body_reason(ownership_source.body* row) reason {
     if (!prerequisites(row)) { return reason{}; }
     reason first = proof_reason(row->first_incomplete_stage ==
         ownership_source.analysis_stage.graph ? "graph" : "liveness", row->first_incomplete);
     if (first.present) { return first; }
     u64 mut stage = LOCAL;
+    u64 mut open = ANALYSIS_COUNT;
     while (stage < ANALYSIS_COUNT && integrated(stage)) {
         if (analysis_status(row, stage, 2) == "incomplete") {
             reason got = proof_reason(ANALYSES[stage], producer_proof(row, stage));
             if (got.present) { return got; }
+            if (open == ANALYSIS_COUNT) { open = stage; }
         }
         stage += 1;
     }
-    return fallback_reason(ANALYSES[stage], "missing_producer", row->source);
+    if (open < ANALYSIS_COUNT) {
+        return fallback_reason(ANALYSES[open], "source_coverage", row->source);
+    }
+    return reason{};
 }
 
 // The local, stored-borrow and raw analyses have no closure facts outside their bodies.
@@ -279,12 +300,14 @@ fn analysis_violations(ownership_source.body* row, u64 stage) u64 {
     return solved ? violations : 0;
 }
 
-// The local, stored-borrow, raw and process-exit analyses report violations. The stored run
-// drops each violation that the local run validated, so the sum counts each diagnostic once.
-// The process-exit analysis checks global owners and exits, which no other analysis checks.
+// The local, stored-borrow, raw, calls_heap and process-exit analyses report violations. The
+// stored run drops each violation that the local run validated, so the sum counts each
+// diagnostic once. The calls_heap row has no violation. The process-exit analysis checks global
+// owners and exits, which no other analysis checks.
 fn body_violations(ownership_source.body* row) u64 {
     return analysis_violations(row, LOCAL) + analysis_violations(row, STORED_BORROWS) +
-        analysis_violations(row, RAW) + analysis_violations(row, PROCESS_EXIT);
+        analysis_violations(row, RAW) + analysis_violations(row, CALLS_HEAP) +
+        analysis_violations(row, PROCESS_EXIT);
 }
 
 fn status_word(ownership_source_local.status value) string { return local_status(value); }
@@ -343,8 +366,8 @@ fn first_incomplete(ownership_source.context* c) reason {
         }
         stage += 1;
     }
-    return fallback_reason(ANALYSES[stage], "missing_producer",
-        ownership_api.source_position{});
+    // Each analysis has a producer, and no closure outcome is incomplete.
+    return reason{};
 }
 
 fn failure(ownership_source.context* c, i32 exit_status) reason {
@@ -639,8 +662,11 @@ fn diagnose(ownership_source.context mut* c, diag.sink mut* diagnostics, string 
         if (c->bodies[i].live.initialized) { charged = &c->bodies[i]; break; }
         i += 1;
     }
-    reason first = first_incomplete(c);
-    if (!diagnostic(c, diagnostics, entry, first, charged)) { return; }
+    reason mut first = first_incomplete(c);
+    // A closure without an incomplete reason gives its failure reason: a rejection is a
+    // compilation error (toolchain 4.2), also when each body fails before its analyses run.
+    if (!first.present) { first = failure(c, 1); }
+    if (first.present && !diagnostic(c, diagnostics, entry, first, charged)) { return; }
     i = 0;
     while (i < c->bodies.len) {
         ownership_source.body mut* row = &c->bodies[i];

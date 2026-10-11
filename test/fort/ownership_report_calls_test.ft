@@ -1,0 +1,287 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| rows ok
+//| document ok
+//| diagnostics ok
+//| no graph ok
+//| reasons ok
+//| lowering failure ok
+//| graph refusal ok
+//| graph without proof ok
+/// Checks how the report carries the integrated calls_heap analysis.
+import diag;
+import ownership_api;
+import ownership_report;
+import ownership_source;
+import ownership_source_calls;
+import ownership_source_env;
+import ownership_source_local;
+import std.str;
+import std.strbuf;
+
+string[4] PROGRAM = {
+    "fn noop() void {}",
+    "fn leak() void { i32 mut* own p = new(i32); }",
+    "fn caller() void { leak(); }",
+    "fn calls_noop() void { noop(); }",
+};
+
+fn open(ownership_source_env.env mut* e, strbuf.str_buf mut* text, string@ lines, bool runtime)
+    void {
+    strbuf.clear(text);
+    u64 mut i = 0;
+    while (i < lines.len) {
+        strbuf.append(text, lines[i]);
+        strbuf.push(text, '\n');
+        i += 1;
+    }
+    ownership_source_env.open(e);
+    if (runtime) { ownership_source_env.runtime(e); }
+    assert(ownership_source_env.prepare(e, strbuf.view(text)));
+    ownership_source.analyze(&e->source);
+}
+
+fn contains(strbuf.str_buf* text, string expected) void {
+    if (str.find(strbuf.view(text), expected) < 0) {
+        eprintln("missing: ", expected);
+        assert(false);
+    }
+}
+
+fn status(ownership_source.body* row, u64 field) string {
+    return ownership_report.analysis_status(row, ownership_report.CALLS_HEAP, field);
+}
+
+// Each verified body of a closure with a graph has a calls_heap row. Its correspondence, solver
+// and proof are the row of the producer, and it adds no violation.
+fn rows() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, PROGRAM[..], true);
+    defer ownership_source_env.close(&e);
+    assert(ownership_report.integrated(ownership_report.CALLS_HEAP));
+    assert(ownership_report.producer_stage(ownership_report.CALLS_HEAP));
+    assert(ownership_source_calls.executed(&e.source.calls));
+    u64 mut i = 0;
+    while (i < e.source.bodies.len) {
+        ownership_source.body* row = &e.source.bodies[i];
+        ownership_source_calls.row* expected = &e.source.calls.rows[i];
+        assert(row->calls == expected);
+        assert(ownership_report.analysis_violations(row, ownership_report.CALLS_HEAP) == 0);
+        i += 1;
+    }
+    ownership_source.body* noop = ownership_source_env.find(&e, "main", "noop");
+    assert(status(noop, 0) == "complete" && status(noop, 1) == "complete");
+    assert(status(noop, 2) == "complete");
+    ownership_source.body* calls_noop = ownership_source_env.find(&e, "main", "calls_noop");
+    assert(status(calls_noop, 0) == "complete" && status(calls_noop, 2) == "complete");
+    // The leak is a local violation and incomplete calls_heap proof: the body counts the local
+    // violation once.
+    ownership_source.body* leak = ownership_source_env.find(&e, "main", "leak");
+    assert(ownership_report.analysis_status(leak, ownership_report.LOCAL, 2) == "violated");
+    assert(status(leak, 0) == "complete" && status(leak, 1) == "complete");
+    assert(status(leak, 2) == "incomplete");
+    assert(ownership_report.body_violations(leak) ==
+        ownership_report.analysis_violations(leak, ownership_report.LOCAL));
+    assert(ownership_report.body_ownership(leak) == "violated");
+    // The caller of the leak has no callee summary to apply, so it leaves the declared scope.
+    ownership_source.body* caller = ownership_source_env.find(&e, "main", "caller");
+    assert(status(caller, 0) == "incomplete" && status(caller, 1) == "complete");
+    assert(status(caller, 2) == "incomplete");
+    assert(caller->calls->gap == ownership_source_calls.gap_kind.callee_summary);
+    // Each body proof is not complete, so the closure is incomplete and the verdict rejects.
+    assert(ownership_report.closure_status(&e.source, ownership_report.CALLS_HEAP) ==
+        "incomplete");
+    assert(ownership_report.verdict(&e.source) == 1);
+    println("rows ok");
+}
+
+// The document names calls_heap as an integrated analysis and writes each row. Version 6 lists
+// no calls_heap ledger.
+fn document() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, PROGRAM[..], true);
+    defer ownership_source_env.close(&e);
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    ownership_report.invocation call = ownership_report.invocation{};
+    ownership_report.build(&out, &e.source, &call, 1);
+    contains(&out, "{\"kind\":\"fort-ownership-report\",\"version\":6,");
+    strbuf.str_buf mut row = strbuf.create();
+    defer strbuf.free(&row);
+    strbuf.append(&row, "{\"name\":\"calls_heap\",\"producer\":\"integrated\",");
+    strbuf.append(&row, "\"status\":\"incomplete\"}");
+    contains(&out, strbuf.view(&row));
+    assert(str.find(strbuf.view(&out), "\"producer\":\"unavailable\"") < 0);
+    strbuf.clear(&row);
+    strbuf.append(&row, "{\"name\":\"calls_heap\",\"correspondence\":\"complete\",");
+    strbuf.append(&row, "\"solver\":\"complete\",\"proof\":\"complete\",\"violations\":0}");
+    contains(&out, strbuf.view(&row));
+    strbuf.clear(&row);
+    strbuf.append(&row, "{\"name\":\"calls_heap\",\"correspondence\":\"incomplete\",");
+    strbuf.append(&row, "\"solver\":\"complete\",\"proof\":\"incomplete\",\"violations\":0}");
+    contains(&out, strbuf.view(&row));
+    assert(str.find(strbuf.view(&out), "\"name\":\"calls_heap\",\"owner\"") < 0);
+    assert(str.find(strbuf.view(&out), "missing_producer") < 0);
+    println("document ok");
+}
+
+// The calls_heap row renders no record yet: the diagnostics are the local violation and the
+// one closure reason of the graph.
+fn diagnostics() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, PROGRAM[..], true);
+    defer ownership_source_env.close(&e);
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.diagnose(&e.source, &found, "main.ft");
+    assert(diag.count(&found) == 2);
+    assert(str.find(diag.record_at(&found, 0).msg, "lost ownership of ") == 0);
+    u64 last = diag.record_count(&found) - 1;
+    assert(str.find(diag.record_at(&found, last).msg,
+        "ownership proof is incomplete (graph: source_coverage)") == 0);
+    println("diagnostics ok");
+}
+
+// A closure with a body that fails lowering builds no graph, so the solvers do not run: each
+// verified body keeps an unexecuted row. Without the print entries of a runtime, println does not
+// lower.
+fn no_graph() void {
+    string[2] lines = {"fn good() void {}", "fn unsupported() void { println(1); }"};
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, lines[..], false);
+    defer ownership_source_env.close(&e);
+    assert(!e.source.graph_built && !ownership_source_calls.executed(&e.source.calls));
+    ownership_source.body* good = ownership_source_env.find(&e, "main", "good");
+    assert(good->verification == ownership_source.status.complete && good->calls == null);
+    assert(status(good, 0) == "unexecuted" && status(good, 1) == "unexecuted");
+    assert(status(good, 2) == "incomplete");
+    ownership_source.body* bad = ownership_source_env.find(&e, "main", "unsupported");
+    assert(status(bad, 0) == "unexecuted" && status(bad, 2) == "unexecuted");
+    assert(ownership_report.closure_status(&e.source, ownership_report.CALLS_HEAP) ==
+        "unexecuted");
+    println("no graph ok");
+}
+
+// A calls_heap proof gives the body reason only after the local, stored-borrow and raw rows,
+// and a terminal of its own names the calls_heap stage.
+fn reasons() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, PROGRAM[..], true);
+    defer ownership_source_env.close(&e);
+    ownership_source.body mut* caller = ownership_source_env.find(&e, "main", "caller");
+    caller->first_incomplete = ownership_api.proof_status{};
+    assert(ownership_report.analysis_status(caller, ownership_report.LOCAL, 2) == "complete");
+    ownership_report.reason why = ownership_report.body_reason(caller);
+    assert(why.present && why.stage == "calls_heap");
+    assert(why.code == "unknown_effect" && why.source.line == 3);
+    println("reasons ok");
+}
+
+// When each body fails lowering, no analysis runs and the closure has no incomplete reason. The
+// report then gives the failure reason at the failed body: a rejection is a compilation error.
+fn lowering_failure() void {
+    string[1] lines = {"fn unsupported() void { println(1); }"};
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, lines[..], false);
+    defer ownership_source_env.close(&e);
+    assert(!ownership_report.first_incomplete(&e.source).present);
+    assert(ownership_report.verdict(&e.source) == 1);
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.diagnose(&e.source, &found, "main.ft");
+    assert(diag.count(&found) == 1);
+    assert(diag.record_at(&found, 0).msg ==
+        "ownership proof is incomplete (lowering: unsupported_lowering)");
+    assert(diag.record_at(&found, 0).loc.line == 1);
+    println("lowering failure ok");
+}
+
+// A summary layout that the graph ledger refuses is the first refusal of that ledger: the report
+// names it as the first reason and in the graph meter.
+fn graph_refusal() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, PROGRAM[..], true);
+    defer ownership_source_env.close(&e);
+    assert(!e.source.graph_first_refusal.terminal.present);
+    ownership_source_calls.free(&e.source.calls);
+    e.source.graph.limits.w = e.source.graph.work;
+    ownership_source.solve_calls(&e.source);
+    ownership_api.proof_status refusal = e.source.graph_first_refusal;
+    assert(refusal.terminal.present && refusal.terminal.limit.present);
+    assert(refusal.terminal.limit.category == ownership_api.limit_category.w);
+    assert(refusal.terminal.source.filename_present);
+    ownership_report.reason why = ownership_report.first_incomplete(&e.source);
+    assert(why.present && why.stage == "graph" && why.code == "work_limit" && why.limit.present);
+    // Each verified body keeps a calls_heap row with that refusal.
+    ownership_source.body* noop = ownership_source_env.find(&e, "main", "noop");
+    assert(noop->calls != null && status(noop, 1) == "incomplete");
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    ownership_report.invocation call = ownership_report.invocation{};
+    ownership_report.build(&out, &e.source, &call, 1);
+    string doc = strbuf.view(&out);
+    i64 meter = str.find(doc, "\"name\":\"graph_private\"");
+    assert(meter >= 0);
+    string rest = doc[cast(meter, u64)..];
+    assert(str.find(rest, "\"first_refusal\":{\"stage\":\"graph\",\"code\":\"work_limit\"") >= 0);
+    println("graph refusal ok");
+}
+
+// A graph without a proof leaves the solvers unrun: each body keeps a null calls_heap row, which
+// the report shows as unexecuted, as for a closure that builds no graph.
+fn graph_without_proof() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, PROGRAM[..], true);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* noop = ownership_source_env.find(&e, "main", "noop");
+    assert(noop->calls != null);
+    ownership_source_calls.free(&e.source.calls);
+    ownership_api.proof_status mut refused = ownership_api.incomplete(
+        ownership_api.incomplete_reason.work_limit,
+        ownership_api.operation_position{.function = noop->key}, noop->source);
+    refused.terminal.limit = ownership_api.exhaustion{.present = true,
+        .category = ownership_api.limit_category.w, .used = 1, .bound = 1, .attempted = 1};
+    e.source.graph.proof = refused;
+    ownership_source.solve_calls(&e.source);
+    assert(!ownership_source_calls.executed(&e.source.calls));
+    u64 mut i = 0;
+    while (i < e.source.bodies.len) {
+        ownership_source.body* row = &e.source.bodies[i];
+        assert(row->calls == null);
+        assert(status(row, 0) == "unexecuted" && status(row, 1) == "unexecuted");
+        assert(status(row, 2) == "incomplete");
+        i += 1;
+    }
+    assert(e.source.graph_first_refusal.terminal.limit.category ==
+        ownership_api.limit_category.w);
+    println("graph without proof ok");
+}
+
+fn main() i32 {
+    rows();
+    document();
+    diagnostics();
+    no_graph();
+    reasons();
+    lowering_failure();
+    graph_refusal();
+    graph_without_proof();
+    return 0;
+}

@@ -1,0 +1,810 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| proved rows
+//| ledgers
+//| events are incomplete proof
+//| summaries that apply
+//| correspondence gaps
+//| a target without a body
+//| a residual foreign target
+//| an overflow stays declared
+//| refusals
+//| ledger refusals
+//| coverage reasons
+//| kept events
+//| graph refusals
+//| empty closure
+//| event order
+//| calls ok
+/// Checks the calls_heap rows that the summary solver and the heap solver give together.
+import ownership_api;
+import ownership_graph;
+import ownership_heap;
+import ownership_keys;
+import ownership_limits;
+import ownership_source_calls;
+import ownership_source_calls_env;
+import ownership_source_local;
+import ownership_summary_model;
+
+string[18] TEXT = {
+    "struct node { node mut* own next; i32 v; }",
+    "fn noop() void {}",
+    "fn reader(i32* p) i32 { return *p; }",
+    "fn leak() void { i32 mut* own p = new(i32); }",
+    "fn caller() void { leak(); }",
+    "fn freer(i32 mut* own p) void { del(p); }",
+    "fn passes() void { i32 mut* own p = new(i32); freer(move(p)); }",
+    "extern fn ext() void;",
+    "fn calls_ext() void { ext(); }",
+    "fn apply(fn () void f) void { f(); }",
+    "fn even(i32 n) bool { if (n == 0) { return true; } return odd(n - 1); }",
+    "fn odd(i32 n) bool { if (n == 0) { return false; } leak(); return even(n - 1); }",
+    "fn shallow(node mut* own n) void { del(n); }",
+    "fn reads_after(i32 mut* own p) i32 { i32* v = p; freer(move(p)); return *v; }",
+    "fn uses_reader() i32 { i32 x = 1; return reader(&x); }",
+    "fn calls_noop() void { noop(); }",
+    "fn twice(i32 mut* own p) void { del(p); }",
+    "fn calls_shallow() void { node mut* own n = new(node); shallow(move(n)); }",
+};
+
+string[16] NAMES = {"noop", "reader", "leak", "caller", "freer", "passes", "calls_ext", "apply",
+    "even", "odd", "shallow", "reads_after", "uses_reader", "calls_noop", "twice", "calls_shallow"};
+
+fn complete(ownership_source_local.status s) bool {
+    return s == ownership_source_local.status.complete;
+}
+
+fn incomplete(ownership_source_local.status s) bool {
+    return s == ownership_source_local.status.incomplete;
+}
+
+fn at(ownership_api.proof_status p, u32 line, u32 col) bool {
+    return p.kind == ownership_api.proof_kind.incomplete && p.terminal.present &&
+        p.terminal.source.filename_present && p.terminal.source.line == line &&
+        p.terminal.source.col == col;
+}
+
+fn limit_proof(ownership_api.limit_category kind, ownership_api.function_id key)
+    ownership_api.proof_status {
+    ownership_api.proof_status mut out = ownership_api.incomplete(
+        ownership_api.incomplete_reason.work_limit, ownership_api.operation_position{
+            .function = key}, ownership_api.source_position{});
+    out.terminal.limit = ownership_api.exhaustion{.present = true, .category = kind,
+        .used = 3, .bound = 3, .attempted = 1};
+    return out;
+}
+
+// A body that both solvers prove has a complete row, and its first events stay absent.
+fn proved_rows() void {
+    println("proved rows");
+    ownership_source_calls_env.closure mut c = ownership_source_calls_env.closure{};
+    defer ownership_source_calls_env.close(&c);
+    ownership_source_calls_env.run(&c, TEXT[..], NAMES[..]);
+    assert(ownership_source_calls.executed(&c.calls));
+    string[6] proved = {"noop", "reader", "freer", "uses_reader", "calls_noop", "twice"};
+    for (string name : proved) {
+        ownership_source_calls.row* r = ownership_source_calls_env.row_of(&c, name);
+        assert(ownership_source_calls_env.verdict(&c, name) == "proved");
+        assert(complete(r->correspondence) && complete(r->solver));
+        assert(ownership_api.successful(r->proof) && r->violations == 0);
+        assert(r->summary_proved && r->heap_proved);
+        assert(!r->first_summary.present && !r->first_heap.present && r->dropped == 0);
+        assert(r->gap == ownership_source_calls.gap_kind.none && r->gaps == 0);
+        assert(!r->lost.terminal.present);
+    }
+    // The summary solver alone proves no move into a callee that releases it. An unknown effect
+    // is no coverage reason, so passes stays declared with incomplete proof.
+    ownership_source_calls.row* r = ownership_source_calls_env.row_of(&c, "passes");
+    assert(complete(r->correspondence) && complete(r->solver) && r->gaps == 0);
+    assert(!r->summary_proved && r->heap_proved && at(r->proof, 7, 63));
+    assert(r->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(ownership_source_calls_env.verdict(&c, "passes") == "unproved");
+}
+
+// One ledger for each component computation of each solver, owned by the first member.
+fn ledgers() void {
+    println("ledgers");
+    ownership_source_calls_env.closure mut c = ownership_source_calls_env.closure{};
+    defer ownership_source_calls_env.close(&c);
+    ownership_source_calls_env.run(&c, TEXT[..], NAMES[..]);
+    // 16 bodies: even and odd form one component, so 15 components and 30 computations.
+    assert(c.graph.component_count == 15);
+    assert(c.calls.ledgers_len == 30);
+    u64 mut summaries = 0;
+    u64 mut i = 0;
+    while (i < c.calls.ledgers_len) {
+        ownership_source_calls.ledger* l = &c.calls.ledgers[i];
+        if (l->solver == ownership_source_calls.solver_kind.summary) { summaries += 1; }
+        // Each solver begins the components in the callee-first order.
+        u64 order = i < 15 ? i : i - 15;
+        assert(l->component == cast(ownership_graph.callee_first(&c.graph)[order], u64));
+        assert(l->fir_size == ownership_graph.component_size(&c.graph, cast(l->component, u32)));
+        assert(l->meter.bounds.w == ownership_limits.work_bound(l->fir_size));
+        assert(l->meter.used.w <= l->meter.bounds.w);
+        assert(!l->first_refusal.terminal.present && !l->work_refusal.terminal.present);
+        assert(!l->report_refusal.terminal.present);
+        i += 1;
+    }
+    assert(summaries == 15);
+    string[3] names = {"noop", "even", "odd"};
+    for (string name : names) {
+        ownership_source_calls.ledger* s = ownership_source_calls_env.ledger_of(&c, name,
+            ownership_source_calls.solver_kind.summary);
+        ownership_source_calls.ledger* h = ownership_source_calls_env.ledger_of(&c, name,
+            ownership_source_calls.solver_kind.heap);
+        assert(s->solver == ownership_source_calls.solver_kind.summary);
+        assert(h->solver == ownership_source_calls.solver_kind.heap);
+        assert(s->component == h->component);
+        assert(cast(s->component, u32) ==
+            c.graph.components[ownership_source_calls_env.index(&c, name)]);
+    }
+    // The members of a recursive component share its two ledgers; the first member owns them.
+    ownership_source_calls.ledger* shared = ownership_source_calls_env.ledger_of(&c, "odd",
+        ownership_source_calls.solver_kind.heap);
+    assert(shared == ownership_source_calls_env.ledger_of(&c, "even",
+        ownership_source_calls.solver_kind.heap));
+    assert(shared->owner.declaration.declaration ==
+        cast(ownership_source_calls_env.index(&c, "even") + 1, u32));
+    ownership_source_calls.ledger* single = ownership_source_calls_env.ledger_of(&c, "noop",
+        ownership_source_calls.solver_kind.heap);
+    assert(single->owner.declaration.declaration == 1 && single->meter.used.v == 0);
+    // Each kept heap event pays one V unit of the ledger of its computation: the release of
+    // shallow is its first event and its first candidate.
+    assert(ownership_source_calls_env.ledger_of(&c, "shallow",
+        ownership_source_calls.solver_kind.heap)->meter.used.v == 2);
+}
+
+// No event is a violation. A definite failure of either solver is incomplete proof at the
+// first kept event of that solver. The summary solver gives the terminal first.
+fn events_are_incomplete_proof() void {
+    println("events are incomplete proof");
+    ownership_source_calls_env.closure mut c = ownership_source_calls_env.closure{};
+    defer ownership_source_calls_env.close(&c);
+    ownership_source_calls_env.run(&c, TEXT[..], NAMES[..]);
+    u64 mut i = 0;
+    while (i < c.calls.rows.len) {
+        assert(c.calls.rows[i].violations == 0);
+        i += 1;
+    }
+    // The leak fails the summary solver definitely and is a heap candidate; the storage end of
+    // `p` is the first event of each, and the summary solver gives it.
+    ownership_source_calls.row* leak = ownership_source_calls_env.row_of(&c, "leak");
+    assert(leak->summary_proof.kind == ownership_api.proof_kind.complete);
+    assert(leak->summary_proof.failed && !leak->summary_proof.terminal.present);
+    assert(leak->heap_proof.terminal.present && leak->heap_proof.terminal.reason ==
+        ownership_api.incomplete_reason.missing_path);
+    assert(leak->first_summary.present && leak->first_heap.present);
+    assert(leak->summary_candidate.present && leak->heap_candidate.present);
+    assert(leak->heap_candidate.kind == ownership_api.event_kind.lost_ownership);
+    assert(leak->first_heap.source.line == 4);
+    assert(at(leak->proof, 4, 45));
+    assert(leak->proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(ownership_source_calls_env.verdict(&c, "leak") == "unproved");
+    assert(complete(leak->correspondence) && complete(leak->solver));
+    // The summary solver proves a shallow release; the heap solver gives a candidate there.
+    ownership_source_calls.row* shallow = ownership_source_calls_env.row_of(&c, "shallow");
+    assert(shallow->summary_proved && !shallow->heap_proved);
+    assert(shallow->heap_proof.terminal.present && shallow->heap_candidate.present);
+    assert(shallow->heap_candidate.source.line == 13);
+    assert(at(shallow->proof, 13, 36));
+    assert(shallow->proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(shallow->proof.terminal.operation.function.declaration.declaration ==
+        cast(ownership_source_calls_env.index(&c, "shallow") + 1, u32));
+    assert(ownership_source_calls_env.verdict(&c, "shallow") == "unproved");
+    // A read after a release in a callee fails both solvers; it stays incomplete proof.
+    ownership_source_calls.row* after = ownership_source_calls_env.row_of(&c, "reads_after");
+    assert(at(after->proof, 14, 73) && after->violations == 0);
+    // The heap solver proves the caller of shallow, but its summary keeps the unknown effects of
+    // that call, so no caller can apply it. Such a proof is incomplete at the declaration.
+    ownership_source_calls.row* calls = ownership_source_calls_env.row_of(&c, "calls_shallow");
+    assert(ownership_api.successful(calls->heap_proof) && !calls->heap_proved);
+    assert(calls->gap == ownership_source_calls.gap_kind.callee_heap);
+    assert(at(calls->gap_proof, 18, 63) && incomplete(calls->correspondence));
+    ownership_source_calls.unproved absent = ownership_source_calls.unproved{};
+    ownership_api.proof_status mut p = ownership_source_calls.unproved_proof(&c.calls, calls,
+        calls->heap_proof, &absent);
+    assert(at(p, 18, 4) && p.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    // A definite failure without a kept event is incomplete proof at the declaration.
+    ownership_api.proof_status failed = ownership_api.proof_status{
+        .kind = ownership_api.proof_kind.complete, .failed = true};
+    p = ownership_source_calls.unproved_proof(&c.calls, calls, failed, &absent);
+    assert(at(p, 18, 4) && p.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    // A definite failure stops at its first kept event, with the reason of that event when it has
+    // one, and with a missing path when it has none.
+    ownership_source_calls.unproved mut kept = ownership_source_calls.unproved{.present = true,
+        .operation = calls->operation, .reason = ownership_api.incomplete_reason.unknown_effect,
+        .source = ownership_api.source_position{1, 1, 18, 30, 18, 33, true}};
+    p = ownership_source_calls.unproved_proof(&c.calls, calls, failed, &kept);
+    assert(at(p, 18, 30) && p.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    kept.reason = ownership_api.incomplete_reason.none;
+    p = ownership_source_calls.unproved_proof(&c.calls, calls, failed, &kept);
+    assert(at(p, 18, 30) && p.terminal.reason == ownership_api.incomplete_reason.missing_path);
+}
+
+// A caller can apply a summary with a proof and no residual effect, and a heap summary with a
+// proof of a known body and no residual effect (the strict reading of 2026-10-10).
+fn summaries_that_apply() void {
+    println("summaries that apply");
+    ownership_api.proof_status proved = ownership_api.proof_status{
+        .kind = ownership_api.proof_kind.complete};
+    ownership_summary_model.summary mut s = ownership_summary_model.summary{.proof = proved};
+    assert(ownership_source_calls.summary_applies(&s));
+    s.residual_effects = true;
+    assert(!ownership_source_calls.summary_applies(&s));
+    s.residual_effects = false;
+    s.proof = proof_with(ownership_api.incomplete_reason.unknown_effect);
+    assert(!ownership_source_calls.summary_applies(&s));
+    ownership_heap.summary mut h = ownership_heap.summary{.proof = proved, .known = true};
+    assert(ownership_source_calls.heap_applies(&h));
+    h.known = false;
+    assert(!ownership_source_calls.heap_applies(&h));
+    h.known = true;
+    h.residual = true;
+    assert(!ownership_source_calls.heap_applies(&h));
+    h.residual = false;
+    h.proof = proof_with(ownership_api.incomplete_reason.missing_path);
+    assert(!ownership_source_calls.heap_applies(&h));
+}
+
+fn has(ownership_source_calls_env.closure mut* c, string name,
+    ownership_source_calls.gap_kind why) bool {
+    return ownership_source_calls_env.has_gap(c, name, why);
+}
+
+// A call without callee facts keeps its body out of the declared scope. The first such call
+// in graph order gives the gap proof.
+fn correspondence_gaps() void {
+    println("correspondence gaps");
+    ownership_source_calls_env.closure mut c = ownership_source_calls_env.closure{};
+    defer ownership_source_calls_env.close(&c);
+    ownership_source_calls_env.run(&c, TEXT[..], NAMES[..]);
+    // A callee outside the component without a summary or a heap proof that a caller applies.
+    ownership_source_calls.row* mut r = ownership_source_calls_env.row_of(&c, "caller");
+    assert(incomplete(r->correspondence) && complete(r->solver));
+    assert(r->gap == ownership_source_calls.gap_kind.callee_summary);
+    assert(has(&c, "caller", ownership_source_calls.gap_kind.callee_summary));
+    assert(has(&c, "caller", ownership_source_calls.gap_kind.callee_heap));
+    assert(!has(&c, "caller", ownership_source_calls.gap_kind.residual_target));
+    assert(!has(&c, "caller", ownership_source_calls.gap_kind.extern_call));
+    assert(at(r->gap_proof, 5, 24));
+    assert(r->gap_proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    // The call of an extern function: neither solver trusts it yet.
+    r = ownership_source_calls_env.row_of(&c, "calls_ext");
+    assert(r->gap == ownership_source_calls.gap_kind.extern_call && incomplete(r->correspondence));
+    assert(r->gaps == cast(1, u32) << cast(ownership_source_calls.gap_kind.extern_call, u32));
+    assert(at(r->gap_proof, 9, 26));
+    assert(r->gap_proof.terminal.reason == ownership_api.incomplete_reason.missing_ffi);
+    // A call of a function value parameter has a residual fort target.
+    r = ownership_source_calls_env.row_of(&c, "apply");
+    assert(r->gap == ownership_source_calls.gap_kind.residual_target);
+    assert(r->gaps == cast(1, u32) << cast(ownership_source_calls.gap_kind.residual_target, u32));
+    assert(at(r->gap_proof, 10, 32) && incomplete(r->correspondence));
+    // A call of a member of its own component keeps its facts, even when that member has no
+    // proof; the call of leak from odd leaves the component. The withdrawn summary of even is an
+    // unknown effect, no coverage reason, so even stays declared with incomplete proof.
+    r = ownership_source_calls_env.row_of(&c, "even");
+    assert(complete(r->correspondence) && r->gaps == 0 && at(r->proof, 11, 62));
+    assert(!ownership_source_calls_env.row_of(&c, "odd")->summary_proved);
+    r = ownership_source_calls_env.row_of(&c, "odd");
+    assert(r->gap == ownership_source_calls.gap_kind.callee_summary);
+    assert(at(r->gap_proof, 12, 56) && incomplete(r->correspondence));
+    // Callees with both proofs keep the correspondence of the caller complete. A definite failure,
+    // a candidate and an unknown effect of the body are no coverage reason.
+    string[6] declared = {"uses_reader", "calls_noop", "leak", "shallow", "reads_after", "passes"};
+    for (string name : declared) {
+        assert(complete(ownership_source_calls_env.row_of(&c, name)->correspondence));
+        assert(ownership_source_calls_env.row_of(&c, name)->gaps == 0);
+    }
+}
+
+// A fort target that names no body of the closure is a gap of its own.
+fn target_without_body() void {
+    println("a target without a body");
+    ownership_source_calls_env.closure mut c = ownership_source_calls_env.closure{};
+    defer ownership_source_calls_env.close(&c);
+    ownership_source_calls_env.lower(&c, TEXT[..], NAMES[..]);
+    ownership_source_calls_env.build(&c, 0);
+    u32 caller = cast(ownership_source_calls_env.index(&c, "calls_noop"), u32);
+    u64 mut k = 0;
+    while (c.graph.calls[k].body != caller) { k += 1; }
+    assert(c.graph.calls[k].fort_len == 1);
+    c.graph.calls[k].fort_targets[0].function.declaration.declaration = 99;
+    ownership_source_calls_env.solve(&c);
+    ownership_source_calls.row* r = ownership_source_calls_env.row_of(&c, "calls_noop");
+    assert(r->gap == ownership_source_calls.gap_kind.unknown_target);
+    assert(r->gaps == cast(1, u32) << cast(ownership_source_calls.gap_kind.unknown_target, u32));
+    assert(at(r->gap_proof, 16, 28) && incomplete(r->correspondence));
+}
+
+// A residual foreign target alone is an extern call: neither solver trusts one yet.
+fn residual_foreign_target() void {
+    println("a residual foreign target");
+    ownership_source_calls_env.closure mut c = ownership_source_calls_env.closure{};
+    defer ownership_source_calls_env.close(&c);
+    ownership_source_calls_env.lower(&c, TEXT[..], NAMES[..]);
+    ownership_source_calls_env.build(&c, 0);
+    u32 caller = cast(ownership_source_calls_env.index(&c, "calls_noop"), u32);
+    u64 mut k = 0;
+    while (c.graph.calls[k].body != caller) { k += 1; }
+    assert(c.graph.calls[k].foreign_len == 0 && !c.graph.calls[k].residual_foreign);
+    c.graph.calls[k].residual_foreign = true;
+    ownership_source_calls_env.solve(&c);
+    ownership_source_calls.row* r = ownership_source_calls_env.row_of(&c, "calls_noop");
+    assert(r->gaps == cast(1, u32) << cast(ownership_source_calls.gap_kind.extern_call, u32));
+    assert(at(r->gap_proof, 16, 28) && incomplete(r->correspondence));
+    assert(r->gap_proof.terminal.reason == ownership_api.incomplete_reason.missing_ffi);
+}
+
+string[4] OVERFLOW = {
+    "fn write8(i64 mut* q) void { *q = 5; }",
+    "fn wsmall_late(bool c) void { i32 mut* own p = new(i32); i64 mut x = 0; if (c) { x = 1; }",
+    "    write8(cast(p, i64 mut*)); del(p); }",
+    "fn wsmall_early() void { i32 mut* own p = new(i32); write8(cast(p, i64 mut*)); del(p); }",
+};
+
+// A write of 8 bytes into a 4-byte allocation across a call. After the branch the summary has an
+// unknown effect at the call and records no event; the heap solver proves the body. It stays
+// declared with incomplete proof, so the scope does not hide the overflow.
+fn overflow_stays_declared() void {
+    println("an overflow stays declared");
+    string[3] names = {"write8", "wsmall_late", "wsmall_early"};
+    ownership_source_calls_env.closure mut c = ownership_source_calls_env.closure{};
+    defer ownership_source_calls_env.close(&c);
+    ownership_source_calls_env.run(&c, OVERFLOW[..], names[..]);
+    ownership_source_calls.row* late = ownership_source_calls_env.row_of(&c, "wsmall_late");
+    assert(complete(late->correspondence) && late->gaps == 0);
+    assert(!ownership_api.successful(late->proof) && late->violations == 0);
+    assert(ownership_source_calls_env.verdict(&c, "wsmall_late") == "unproved");
+    ownership_source_calls.row* early = ownership_source_calls_env.row_of(&c, "wsmall_early");
+    assert(complete(early->correspondence) && early->gaps == 0);
+    assert(ownership_source_calls_env.verdict(&c, "wsmall_early") == "unproved");
+}
+
+// A W, E or V limit in a summary of the body is a budget error: its solver is incomplete and the
+// body leaves the declared scope (gap own_proof), unless a candidate keeps it declared. A
+// precision limit (R, D) leaves both complete. Its callers lose a callee summary.
+fn refusals() void {
+    println("refusals");
+    ownership_source_calls_env.closure mut c = ownership_source_calls_env.closure{};
+    defer ownership_source_calls_env.close(&c);
+    ownership_source_calls_env.run(&c, TEXT[..], NAMES[..]);
+    assert(ownership_source_calls.limited(limit_proof(ownership_api.limit_category.w,
+        ownership_api.function_id{})));
+    assert(ownership_source_calls.limited(limit_proof(ownership_api.limit_category.e,
+        ownership_api.function_id{})));
+    assert(ownership_source_calls.limited(limit_proof(ownership_api.limit_category.v,
+        ownership_api.function_id{})));
+    assert(!ownership_source_calls.limited(limit_proof(ownership_api.limit_category.r,
+        ownership_api.function_id{})));
+    assert(!ownership_source_calls.limited(limit_proof(ownership_api.limit_category.d,
+        ownership_api.function_id{})));
+    assert(!ownership_source_calls.limited(ownership_api.incomplete(
+        ownership_api.incomplete_reason.work_limit, ownership_api.operation_position{},
+        ownership_api.source_position{})));
+    ownership_source_calls.row mut* noop = ownership_source_calls_env.row_of(&c, "noop");
+    noop->summary_proof = limit_proof(ownership_api.limit_category.w, noop->operation.function);
+    noop->summary_proved = false;
+    ownership_source_calls.row mut* reader = ownership_source_calls_env.row_of(&c, "reader");
+    reader->heap_proof = limit_proof(ownership_api.limit_category.e, reader->operation.function);
+    reader->heap_proved = false;
+    ownership_source_calls.row mut* twice = ownership_source_calls_env.row_of(&c, "twice");
+    twice->heap_proof = limit_proof(ownership_api.limit_category.r, twice->operation.function);
+    twice->heap_proved = false;
+    // A D limit and a missing correspondence are no coverage reason.
+    ownership_source_calls.row mut* freer = ownership_source_calls_env.row_of(&c, "freer");
+    freer->heap_proof = limit_proof(ownership_api.limit_category.d, freer->operation.function);
+    freer->heap_proved = false;
+    ownership_source_calls.row mut* calls_noop = ownership_source_calls_env.row_of(&c,
+        "calls_noop");
+    calls_noop->summary_proof = ownership_api.incomplete(
+        ownership_api.incomplete_reason.missing_correspondence, calls_noop->operation,
+        calls_noop->source);
+    calls_noop->summary_proved = false;
+    // A missing path is no coverage reason, with or without a candidate event.
+    ownership_source_calls.row mut* passes = ownership_source_calls_env.row_of(&c, "passes");
+    passes->summary_proof = ownership_api.incomplete(ownership_api.incomplete_reason.missing_path,
+        passes->operation, passes->source);
+    ownership_source_calls.row mut* calls_ext = ownership_source_calls_env.row_of(&c,
+        "calls_ext");
+    calls_ext->summary_candidate = ownership_source_calls.unproved{.present = true};
+    // A summary candidate keeps calls_ext declared against a W limit that stopped its summary.
+    calls_ext->summary_proof = limit_proof(ownership_api.limit_category.w,
+        calls_ext->operation.function);
+    // A candidate keeps a body declared against a budget error too: shallow has a heap
+    // candidate and a W limit in its summary proof.
+    ownership_source_calls.row mut* shallow = ownership_source_calls_env.row_of(&c, "shallow");
+    shallow->summary_proof = limit_proof(ownership_api.limit_category.w,
+        shallow->operation.function);
+    shallow->summary_proved = false;
+    assert(!shallow->summary_candidate.present && shallow->heap_candidate.present);
+    // An R refusal that names the body is no budget error: the heap solver goes on after it.
+    ownership_source_calls.row mut* even = ownership_source_calls_env.row_of(&c, "even");
+    assert(even->heap_proved && !even->summary_proved && even->summary_refused == 0);
+    even->heap_proof = proof_with(ownership_api.incomplete_reason.missing_graph);
+    even->heap_proved = false;
+    even->heap_refused = bit(ownership_api.limit_category.r);
+    ownership_source_calls.decide(&c.calls);
+    // passes calls freer, whose heap summary no longer applies; its own missing path adds no gap.
+    assert(passes->gaps == cast(1, u32) << cast(ownership_source_calls.gap_kind.callee_heap, u32));
+    assert(calls_ext->gaps == cast(1, u32) << cast(ownership_source_calls.gap_kind.extern_call,
+        u32));
+    assert(complete(shallow->correspondence) && shallow->gaps == 0);
+    assert(complete(even->correspondence) && even->gaps == 0 && complete(even->solver));
+    // A budget error (a W or E limit in its own proof) excludes the body.
+    assert(incomplete(noop->correspondence) && incomplete(noop->solver));
+    assert(noop->gap == ownership_source_calls.gap_kind.own_proof);
+    assert(reader->gap == ownership_source_calls.gap_kind.own_proof);
+    // An R limit in the heap proof of twice is a precision limit: twice stays declared.
+    assert(complete(twice->correspondence) && twice->gaps == 0);
+    assert(complete(freer->correspondence) && complete(freer->solver) && at(freer->proof, 6, 4));
+    assert(calls_noop->gaps == cast(1, u32) << cast(ownership_source_calls.gap_kind.callee_summary,
+        u32));
+    // The proof keeps the refusal, and a refusal without a source names the declaration.
+    assert(at(noop->proof, 2, 4) && noop->proof.terminal.limit.present);
+    assert(noop->proof.terminal.limit.category == ownership_api.limit_category.w);
+    assert(noop->proof.terminal.limit.source.line == 2);
+    assert(incomplete(reader->solver) && at(reader->proof, 3, 4));
+    assert(complete(twice->solver) && at(twice->proof, 17, 4));
+    assert(twice->proof.terminal.limit.category == ownership_api.limit_category.r);
+    // The caller of noop loses its callee summary, and the caller of reader its heap summary.
+    ownership_source_calls.row* mut r = ownership_source_calls_env.row_of(&c, "calls_noop");
+    assert(r->gap == ownership_source_calls.gap_kind.callee_summary);
+    assert(!has(&c, "calls_noop", ownership_source_calls.gap_kind.callee_heap));
+    r = ownership_source_calls_env.row_of(&c, "uses_reader");
+    assert(r->gap == ownership_source_calls.gap_kind.callee_heap);
+    assert(!has(&c, "uses_reader", ownership_source_calls.gap_kind.callee_summary));
+    // Both summaries of uses_reader apply, but complete proof needs complete correspondence: the
+    // row keeps the proof of its gap.
+    assert(incomplete(r->correspondence) && r->summary_proved && r->heap_proved);
+    assert(!ownership_api.successful(r->proof) && at(r->proof, 15, 48));
+    assert(ownership_keys.source(r->proof.terminal.source, r->gap_proof.terminal.source) == 0);
+}
+
+fn charge(ownership_source_calls.context mut* c, ownership_api.limit_category kind, u64 amount,
+    ownership_api.function_id key) bool {
+    ownership_api.charge_item[1] item = {ownership_api.charge_item{kind,
+        ownership_api.scope_of(kind), amount}};
+    ownership_api.charge_request request = ownership_api.charge_request{
+        ownership_api.work_kind.transfer, ownership_api.operation_position{.function = key},
+        ownership_api.source_position{1, 1, 7, 3, 7, 9, true}, item[..]};
+    return ownership_source_calls.budget(cast(c, void mut*), &request).allowed;
+}
+
+fn bit(ownership_api.limit_category kind) u32 { return cast(1, u32) << cast(kind, u32); }
+
+// The ledger keeps its first refusal, its first W refusal and its first V refusal. The row of
+// the body that a refused charge names keeps its category for the running solver.
+fn ledger_refusals() void {
+    println("ledger refusals");
+    ownership_source_calls_env.closure mut e = ownership_source_calls_env.closure{};
+    defer ownership_source_calls_env.close(&e);
+    ownership_source_calls_env.run(&e, TEXT[..], NAMES[..]);
+    ownership_source_calls.context mut* c = &e.calls;
+    c->current = 0;
+    c->running = ownership_source_calls.solver_kind.heap;
+    ownership_source_calls.ledger mut* l = &c->ledgers[0];
+    l->first_refusal = ownership_api.proof_status{.kind = ownership_api.proof_kind.complete};
+    l->work_refusal = l->first_refusal;
+    l->report_refusal = l->first_refusal;
+    ownership_api.limit_table mut table = ownership_limits.production();
+    table.w = 2;
+    table.v = 1;
+    table.r = 4;
+    assert(ownership_limits.configure(&l->meter, &table));
+    ownership_source_calls.row mut* noop = ownership_source_calls_env.row_of(&e, "noop");
+    ownership_api.function_id none = ownership_api.function_id{};
+    // A refused precision charge is the first refusal and neither the W nor the V refusal.
+    assert(!charge(c, ownership_api.limit_category.r, 5, noop->operation.function));
+    assert(l->first_refusal.terminal.present && l->first_refusal.terminal.limit.present);
+    assert(l->first_refusal.terminal.limit.category == ownership_api.limit_category.r);
+    assert(l->first_refusal.terminal.source.line == 7);
+    assert(!l->work_refusal.terminal.present && !l->report_refusal.terminal.present);
+    assert(noop->heap_refused == bit(ownership_api.limit_category.r) && noop->summary_refused == 0);
+    // The last allowed unit and the first refused one: each allowed unit counts once.
+    assert(charge(c, ownership_api.limit_category.w, 1, none));
+    assert(l->meter.used.w == 1);
+    assert(charge(c, ownership_api.limit_category.w, 1, none));
+    assert(l->meter.used.w == 2 && !l->work_refusal.terminal.present);
+    c->running = ownership_source_calls.solver_kind.summary;
+    assert(!charge(c, ownership_api.limit_category.w, 1, noop->operation.function));
+    assert(noop->summary_refused == bit(ownership_api.limit_category.w));
+    assert(l->work_refusal.terminal.limit.category == ownership_api.limit_category.w);
+    assert(l->work_refusal.terminal.limit.used == 2 && l->work_refusal.terminal.limit.bound == 2);
+    assert(l->first_refusal.terminal.limit.category == ownership_api.limit_category.r);
+    assert(charge(c, ownership_api.limit_category.v, 1, none));
+    assert(!charge(c, ownership_api.limit_category.v, 1, none));
+    assert(l->report_refusal.terminal.limit.category == ownership_api.limit_category.v);
+    assert(l->report_refusal.terminal.reason == ownership_api.incomplete_reason.report_limit);
+    // A later refusal keeps the first one of each kind; a key without a body marks no row.
+    assert(!charge(c, ownership_api.limit_category.w, 1, none));
+    assert(l->work_refusal.terminal.limit.used == 2 && l->meter.used.w == 2);
+    assert(noop->summary_refused == bit(ownership_api.limit_category.w));
+    c->current = ownership_source_calls.NONE;
+}
+
+fn proof_with(ownership_api.incomplete_reason why) ownership_api.proof_status {
+    return ownership_api.incomplete(why, ownership_api.operation_position{},
+        ownership_api.source_position{});
+}
+
+fn gap(ownership_api.proof_status p) bool {
+    return ownership_source_calls.coverage_gap(p, false);
+}
+
+fn event_of(ownership_api.event_kind kind, ownership_api.incomplete_reason why)
+    ownership_api.event_descriptor {
+    return ownership_api.event_descriptor{.kind = kind, .reason = why};
+}
+
+// Only a budget error that stopped the proof keeps a body outside the declared scope: an E, W or
+// V limit in its proof. An unknown effect, a missing path, a missing correspondence, a missing
+// graph, a definite failure, a proved summary with residual effects and a precision limit (R, D,
+// H) keep it declared, and so does a candidate.
+fn coverage_reasons() void {
+    println("coverage reasons");
+    ownership_api.function_id key = ownership_api.function_id{};
+    assert(!gap(proof_with(ownership_api.incomplete_reason.unknown_effect)));
+    assert(!gap(proof_with(ownership_api.incomplete_reason.missing_path)));
+    assert(!gap(proof_with(ownership_api.incomplete_reason.missing_correspondence)));
+    assert(!gap(proof_with(ownership_api.incomplete_reason.missing_graph)));
+    assert(!gap(proof_with(ownership_api.incomplete_reason.missing_ffi)));
+    assert(gap(limit_proof(ownership_api.limit_category.e, key)));
+    assert(gap(limit_proof(ownership_api.limit_category.w, key)));
+    assert(gap(limit_proof(ownership_api.limit_category.v, key)));
+    assert(!gap(limit_proof(ownership_api.limit_category.r, key)));
+    assert(!gap(limit_proof(ownership_api.limit_category.d, key)));
+    assert(!gap(limit_proof(ownership_api.limit_category.h, key)));
+    assert(!gap(ownership_api.proof_status{.kind = ownership_api.proof_kind.complete,
+        .failed = true}));
+    assert(!gap(ownership_api.proof_status{.kind = ownership_api.proof_kind.complete}));
+    // A candidate keeps the body declared against a budget error.
+    assert(!ownership_source_calls.coverage_gap(limit_proof(ownership_api.limit_category.w, key),
+        true));
+    assert(!ownership_source_calls.coverage_gap(limit_proof(ownership_api.limit_category.e, key),
+        true));
+    // A candidate: a violation event, or an event for a missing path.
+    ownership_api.event_descriptor mut e = event_of(ownership_api.event_kind.incomplete_proof,
+        ownership_api.incomplete_reason.missing_path);
+    assert(ownership_source_calls.candidate(&e));
+    e = event_of(ownership_api.event_kind.lost_ownership, ownership_api.incomplete_reason.none);
+    assert(ownership_source_calls.candidate(&e));
+    e = event_of(ownership_api.event_kind.invalid_use, ownership_api.incomplete_reason.none);
+    assert(ownership_source_calls.candidate(&e));
+    e = event_of(ownership_api.event_kind.caller_requirement,
+        ownership_api.incomplete_reason.none);
+    assert(ownership_source_calls.candidate(&e));
+    e = event_of(ownership_api.event_kind.incomplete_proof,
+        ownership_api.incomplete_reason.unknown_effect);
+    assert(!ownership_source_calls.candidate(&e));
+    e = event_of(ownership_api.event_kind.incomplete_proof,
+        ownership_api.incomplete_reason.missing_graph);
+    assert(!ownership_source_calls.candidate(&e));
+    e = event_of(ownership_api.event_kind.work_failure, ownership_api.incomplete_reason.work_limit);
+    assert(!ownership_source_calls.candidate(&e));
+}
+
+fn send_kind(ownership_source_calls_env.closure mut* c, ownership_api.function_id key, u32 line,
+    u32 ordinal, ownership_api.event_kind kind, ownership_api.incomplete_reason why) void {
+    ownership_api.event_request mut req = ownership_api.event_request{};
+    req.event.key = ownership_api.entity_id{key, ownership_api.entity_kind.event, ordinal};
+    req.event.operation = ownership_api.operation_position{key, 0, ordinal, false};
+    req.event.source = ownership_api.source_position{1, 1, line, 5, line, 9, true};
+    req.event.kind = kind;
+    req.event.reason = why;
+    req.event.evidence = ownership_api.evidence_kind.abstract_possibility;
+    req.current = ownership_api.incomplete(ownership_api.incomplete_reason.missing_path,
+        req.event.operation, req.event.source);
+    ownership_api.event_result out = ownership_source_calls.event(cast(&c->calls, void mut*),
+        &req);
+    // The result keeps the proof of the solver.
+    assert(out.retained && out.proof.terminal.reason ==
+        ownership_api.incomplete_reason.missing_path);
+}
+
+// Sends an event that is no candidate: an unknown effect.
+fn send(ownership_source_calls_env.closure mut* c, ownership_api.function_id key, u32 line,
+    u32 ordinal) void {
+    send_kind(c, key, line, ordinal, ownership_api.event_kind.incomplete_proof,
+        ownership_api.incomplete_reason.unknown_effect);
+}
+
+// A body keeps its first event and its first candidate event of each solver in the canonical
+// order. Each first kept event pays one V unit; a refused V charge loses the event and leaves the
+// solver incomplete.
+fn kept_events() void {
+    println("kept events");
+    ownership_source_calls_env.closure mut c = ownership_source_calls_env.closure{};
+    defer ownership_source_calls_env.close(&c);
+    ownership_source_calls_env.run(&c, TEXT[..], NAMES[..]);
+    ownership_source_calls.row mut* noop = ownership_source_calls_env.row_of(&c, "noop");
+    c.calls.current = noop->heap_ledger;
+    c.calls.running = ownership_source_calls.solver_kind.heap;
+    ownership_source_calls.ledger* mut l = &c.calls.ledgers[noop->heap_ledger];
+    u64 v = l->meter.used.v;
+    ownership_api.function_id key = noop->operation.function;
+    send(&c, key, 30, 3);
+    assert(noop->first_heap.present && noop->first_heap.source.line == 30);
+    assert(l->meter.used.v == v + 1 && noop->dropped == 0);
+    // An earlier source takes the place of the kept event and pays nothing.
+    send(&c, key, 20, 4);
+    assert(noop->first_heap.source.line == 20 && noop->first_heap.key.ordinal == 4);
+    assert(l->meter.used.v == v + 1 && noop->dropped == 1);
+    send(&c, key, 40, 5);
+    assert(noop->first_heap.source.line == 20 && noop->dropped == 2);
+    // At one source, the operation decides.
+    send(&c, key, 20, 2);
+    assert(noop->first_heap.key.ordinal == 2 && noop->dropped == 3);
+    assert(!noop->first_summary.present);
+    // An event that names no body goes to the first member of the running component. Its
+    // function key sorts after the key of that member.
+    send(&c, ownership_api.function_id{ownership_api.declaration_id{9, 99}, 0}, 10, 1);
+    assert(noop->first_heap.key.ordinal == 2 && noop->dropped == 4);
+    assert(!noop->heap_candidate.present && l->meter.used.v == v + 1);
+    // A candidate is also kept apart, as the first candidate of its solver; it pays one V unit.
+    send_kind(&c, key, 35, 6, ownership_api.event_kind.lost_ownership,
+        ownership_api.incomplete_reason.none);
+    assert(noop->heap_candidate.present && noop->heap_candidate.source.line == 35);
+    assert(noop->heap_candidate.kind == ownership_api.event_kind.lost_ownership);
+    assert(noop->first_heap.key.ordinal == 2 && noop->dropped == 5 && l->meter.used.v == v + 2);
+    send_kind(&c, key, 25, 7, ownership_api.event_kind.incomplete_proof,
+        ownership_api.incomplete_reason.missing_path);
+    assert(noop->heap_candidate.source.line == 25 && noop->heap_candidate.key.ordinal == 7);
+    assert(noop->heap_candidate.kind == ownership_api.event_kind.incomplete_proof);
+    assert(l->meter.used.v == v + 2 && !noop->summary_candidate.present);
+    send(&c, key, 15, 8);
+    assert(noop->first_heap.source.line == 15 && noop->heap_candidate.source.line == 25);
+    assert(noop->dropped == 7);
+    // In the computation of twice, which is not body 0, an event that names no body goes to twice.
+    ownership_source_calls.row mut* twice = ownership_source_calls_env.row_of(&c, "twice");
+    assert(ownership_source_calls_env.index(&c, "twice") != 0 && !twice->first_heap.present);
+    c.calls.current = twice->heap_ledger;
+    send(&c, ownership_api.function_id{ownership_api.declaration_id{9, 99}, 0}, 10, 9);
+    assert(twice->first_heap.present && twice->first_heap.source.line == 10);
+    assert(noop->dropped == 7);
+    c.calls.current = noop->heap_ledger;
+    // With V spent, the first event of another body is lost.
+    l = &c.calls.ledgers[noop->heap_ledger];
+    c.calls.ledgers[noop->heap_ledger].meter.used.v = l->meter.bounds.v;
+    ownership_source_calls.row mut* reader = ownership_source_calls_env.row_of(&c, "reader");
+    send(&c, reader->operation.function, 50, 1);
+    assert(!reader->first_heap.present && reader->dropped == 1);
+    assert(reader->lost.terminal.present && reader->lost.terminal.limit.present);
+    assert(reader->lost.terminal.limit.category == ownership_api.limit_category.v);
+    assert(reader->lost.terminal.reason == ownership_api.incomplete_reason.report_limit);
+    assert(l->report_refusal.terminal.present);
+    assert(reader->heap_refused == bit(ownership_api.limit_category.v));
+    c.calls.current = ownership_source_calls.NONE;
+    ownership_source_calls.decide(&c.calls);
+    assert(incomplete(reader->solver) && complete(reader->correspondence));
+    assert(at(reader->proof, 50, 5));
+    assert(reader->proof.terminal.reason == ownership_api.incomplete_reason.report_limit);
+    // The lost event can be a candidate, so a V limit in its heap proof does not exclude
+    // reader.
+    reader->heap_proof = limit_proof(ownership_api.limit_category.v, reader->operation.function);
+    reader->heap_proved = false;
+    ownership_source_calls.decide(&c.calls);
+    assert(complete(reader->correspondence) && reader->gaps == 0);
+}
+
+// A summary layout that the graph ledger refuses leaves each row with that W refusal, never with
+// invalid input. A graph without a proof leaves each row unexecuted.
+fn graph_refusals() void {
+    println("graph refusals");
+    ownership_source_calls_env.closure mut c = ownership_source_calls_env.closure{};
+    defer ownership_source_calls_env.close(&c);
+    ownership_source_calls_env.lower(&c, TEXT[..], NAMES[..]);
+    ownership_source_calls_env.build(&c, 0);
+    u64 work = c.graph.work;
+    ownership_graph.free(&c.graph);
+    ownership_source_calls_env.build(&c, work);
+    assert(ownership_api.successful(c.graph.proof) && c.graph.work == work);
+    ownership_source_calls_env.solve(&c);
+    assert(!ownership_api.successful(c.graph.proof));
+    assert(ownership_source_calls.executed(&c.calls));
+    u64 mut i = 0;
+    while (i < c.calls.rows.len) {
+        ownership_source_calls.row* r = &c.calls.rows[i];
+        assert(!r->summary_proved && !r->heap_proved && incomplete(r->solver));
+        // The heap solver did not run, so the heap proof is the graph refusal too.
+        assert(r->heap_proof.terminal.present && r->heap_proof.terminal.limit.present);
+        assert(r->heap_proof.terminal.limit.category == ownership_api.limit_category.w);
+        assert(r->summary_proof.terminal.limit.category == ownership_api.limit_category.w);
+        assert(r->proof.terminal.present && r->proof.terminal.limit.present);
+        assert(r->proof.terminal.limit.category == ownership_api.limit_category.w);
+        assert(r->proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+        assert(r->proof.terminal.source.filename_present);
+        i += 1;
+    }
+    // The summary solver refused before its first computation, and the heap solver did not run.
+    assert(c.calls.ledgers_len == 0);
+    // The W refusal is a coverage reason of each body; a call gap comes first.
+    assert(ownership_source_calls_env.row_of(&c, "noop")->gap ==
+        ownership_source_calls.gap_kind.own_proof);
+    assert(ownership_source_calls_env.row_of(&c, "calls_noop")->gap ==
+        ownership_source_calls.gap_kind.callee_summary);
+    i = 0;
+    while (i < c.calls.rows.len) {
+        assert(incomplete(c.calls.rows[i].correspondence));
+        i += 1;
+    }
+    ownership_source_calls_env.closure mut d = ownership_source_calls_env.closure{};
+    defer ownership_source_calls_env.close(&d);
+    ownership_source_calls_env.lower(&d, TEXT[..], NAMES[..]);
+    ownership_source_calls_env.build(&d, 1);
+    assert(!ownership_api.successful(d.graph.proof));
+    ownership_source_calls_env.solve(&d);
+    assert(!ownership_source_calls.executed(&d.calls) && d.calls.rows.len == 16);
+    assert(d.calls.ledgers_len == 0);
+    i = 0;
+    while (i < d.calls.rows.len) {
+        ownership_source_calls.row* r = &d.calls.rows[i];
+        assert(r->correspondence == ownership_source_local.status.unexecuted);
+        assert(r->solver == ownership_source_local.status.unexecuted);
+        assert(r->source.filename_present && r->source.line > 1);
+        i += 1;
+    }
+}
+
+// A closure without a body solves no component.
+fn empty_closure() void {
+    println("empty closure");
+    string[1] text = {"struct node { node mut* own next; }"};
+    string@ none = {};
+    ownership_source_calls_env.closure mut c = ownership_source_calls_env.closure{};
+    defer ownership_source_calls_env.close(&c);
+    ownership_source_calls_env.run(&c, text[..], none);
+    assert(ownership_source_calls.executed(&c.calls));
+    assert(c.calls.rows.len == 0 && c.calls.ledgers_len == 0);
+}
+
+fn record(u32 module, u32 line, u32 operation, u32 relation, u32 ordinal)
+    ownership_source_calls.unproved {
+    ownership_api.function_id key = ownership_api.function_id{
+        ownership_api.declaration_id{module, 1}, 0};
+    return ownership_source_calls.unproved{true,
+        ownership_api.entity_id{key, ownership_api.entity_kind.event, ordinal},
+        ownership_api.operation_position{key, 0, operation, false},
+        ownership_api.source_position{module, 1, line, 1, line, 2, true},
+        ownership_api.incomplete_reason.none,
+        ownership_api.entity_id{key, ownership_api.entity_kind.allocation, relation},
+        ownership_api.event_kind.incomplete_proof};
+}
+
+// The canonical order: function, source, operation, source relation, then event key.
+fn event_order() void {
+    println("event order");
+    ownership_source_calls.unproved a = record(1, 9, 9, 9, 9);
+    ownership_source_calls.unproved b = record(2, 1, 1, 1, 1);
+    assert(ownership_source_calls.before(&a, &b) && !ownership_source_calls.before(&b, &a));
+    ownership_source_calls.unproved c = record(1, 8, 9, 9, 9);
+    assert(ownership_source_calls.before(&c, &a) && !ownership_source_calls.before(&a, &c));
+    ownership_source_calls.unproved d = record(1, 9, 8, 9, 9);
+    assert(ownership_source_calls.before(&d, &a) && !ownership_source_calls.before(&a, &d));
+    ownership_source_calls.unproved e = record(1, 9, 9, 8, 9);
+    assert(ownership_source_calls.before(&e, &a) && !ownership_source_calls.before(&a, &e));
+    ownership_source_calls.unproved f = record(1, 9, 9, 9, 8);
+    assert(ownership_source_calls.before(&f, &a) && !ownership_source_calls.before(&a, &f));
+    assert(!ownership_source_calls.before(&a, &a));
+}
+
+fn main() i32 {
+    proved_rows();
+    ledgers();
+    events_are_incomplete_proof();
+    summaries_that_apply();
+    correspondence_gaps();
+    target_without_body();
+    residual_foreign_target();
+    overflow_stays_declared();
+    refusals();
+    ledger_refusals();
+    coverage_reasons();
+    kept_events();
+    graph_refusals();
+    empty_closure();
+    event_order();
+    println("calls ok");
+    return 0;
+}

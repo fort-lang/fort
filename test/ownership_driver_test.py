@@ -39,6 +39,9 @@ HEAP_ROWS_SKIPPED = {
     "test/lang/run/ownership/056_own_string_round_trip.ft": "imports std.str",
 }
 SOLVERS = ("summary", "heap")
+# The columns of solvers_alone: each solver alone, then the calls_heap row that joins them. No
+# ledger entry names the calls_heap row: it proves no faulty body.
+GATE_COLUMNS = (*SOLVERS, "calls_heap")
 LEDGER_CLASSES = ("A", "B", "D", "E", "F", "G", "H")
 TEXT_ARRAY = re.compile(r"^(\s*)string\[[^\]]*\] (?:mut )?(\w+) = \{(.*)$")
 STRING_LITERAL = re.compile(r'"((?:[^"\\]|\\.)*)"')
@@ -264,7 +267,7 @@ class OwnershipDriverTest(unittest.TestCase):
         self.assertEqual(document["verdict"], "rejected")
         self.assertEqual(document["totals"]["violations"], 0)
 
-    def test_empty_closure_keeps_unavailable_producers(self):
+    def test_empty_closure_runs_each_producer(self):
         self.entry.write_text("i32 VALUE = 1;\n")
         self.assertEqual(self.invoke().returncode, 1)
         document = self.evidence()
@@ -280,9 +283,10 @@ class OwnershipDriverTest(unittest.TestCase):
                                                    "status": "complete"})
         self.assertEqual(document["analyses"][4], {"name": "raw", "producer": "integrated",
                                                    "status": "complete"})
+        # The calls_heap solvers run on the empty closure and solve no component.
         self.assertEqual(document["analyses"][5], {"name": "calls_heap",
-                                                   "producer": "unavailable",
-                                                   "status": "incomplete"})
+                                                   "producer": "integrated",
+                                                   "status": "complete"})
         # The process-exit closure holds the boundary too. A library closure without an owning
         # global needs no cleanup body.
         self.assertEqual(document["analyses"][6], {"name": "process_exit",
@@ -558,9 +562,12 @@ class OwnershipDriverTest(unittest.TestCase):
         self.assertEqual(document["bodies"], [])
         self.assertEqual(document["meters"], [])
         self.assertEqual([row["status"] for row in document["analyses"]][3:],
-                         ["unexecuted", "unexecuted", "incomplete", "unexecuted"])
-        # The local, stored-borrow, raw and process-exit analyses ran on no body and the
-        # denominator is incomplete. The boundary reads every body, so it did not run either.
+                         ["unexecuted", "unexecuted", "unexecuted", "unexecuted"])
+        # The local, stored-borrow, raw, calls_heap and process-exit analyses ran on no body and
+        # the denominator is incomplete. The boundary reads every body, so it did not run either.
+        # No closure outcome is incomplete, so the report has no first incomplete reason.
+        self.assertIsNone(document["first_incomplete"])
+        self.assertEqual(document["failure"]["code"], "source_error")
         self.assertEqual(document["analyses"][2]["status"], "unexecuted")
         self.assertEqual((document["boundary"]["correspondence"], document["boundary"]["proof"]),
                          ("unexecuted", "unexecuted"))
@@ -1666,7 +1673,8 @@ class SoundnessGateTest(unittest.TestCase):
         # A body is faulty because its source has the expected error: the error line of a
         # reject case, or the entry of faulty.json for a probe. Neither solver alone may prove
         # one outside the ledger, each entry must still prove, and the ledger holds at most the
-        # entries that its bound line names.
+        # entries that its bound line names. The calls_heap row needs both solvers, so it
+        # proves no faulty body.
         cases = [(path, errors) for path, verdict, errors in qualification_cases()
                  if verdict == "reject"]
         self.assertEqual(len(cases), 37)
@@ -1682,17 +1690,22 @@ class SoundnessGateTest(unittest.TestCase):
             rows = [line.split() for line in self.gate("solvers_alone", CHECKOUT / path,
                                                        *bodies).splitlines()]
             self.assertEqual([row[0] for row in rows], bodies, path)
+            self.assertTrue(all(len(row) == 1 + len(GATE_COLUMNS) for row in rows), path)
             return [(path, row[0], solver, verdict) for row in rows
-                    for solver, verdict in zip(SOLVERS, row[1:])]
+                    for solver, verdict in zip(GATE_COLUMNS, row[1:])]
 
         with ThreadPoolExecutor(max_workers=4) as pool:
             found = [row for rows in pool.map(verdicts, items) for row in rows]
-        self.assertEqual(len(found), 2 * 100)
+        self.assertEqual(len(found), len(GATE_COLUMNS) * 100)
         proved = {(path, body, solver) for path, body, solver, verdict in found
                   if verdict == "proved"}
         ledger = read_ledger(FALSE_ACCEPTS.read_text())
         self.assertLessEqual(len(ledger), ledger_bound(FALSE_ACCEPTS.read_text()))
         self.assertEqual({entry for entry in proved if entry[2] == "summary"}, set())
+        self.assertEqual({entry for entry in proved if entry[2] == "calls_heap"}, set())
+        # No faulty body is a violation of the calls_heap row: it validates no event.
+        self.assertEqual([row for row in found if row[2] == "calls_heap" and row[3] == "failed"],
+                         [])
         self.assertEqual(sorted(proved - set(ledger)), [], "a false accept outside the ledger")
         self.assertEqual(sorted(set(ledger) - proved), [], "a ledger entry no longer proves")
 

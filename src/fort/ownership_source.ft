@@ -9,9 +9,11 @@ import fir_verify;
 import gen;
 import modules;
 import ownership_api;
+import ownership_flow;
 import ownership_graph;
 import ownership_keys;
 import ownership_limits;
+import ownership_source_calls;
 import ownership_source_exit;
 import ownership_source_live;
 import ownership_source_local;
@@ -50,6 +52,9 @@ struct body {
     ownership_source_raw.context raw;
     // The process-exit analysis (toolchain 1.1, `process_exit`).
     ownership_source_exit.context exit;
+    // The calls_heap row of the body, or null when the solvers did not run. The calls context
+    // of the closure owns it.
+    ownership_source_calls.row* calls;
     graph_route route;
     status graph_correspondence;
     status graph_solver;
@@ -87,6 +92,8 @@ struct context {
     bool callers_bind_loaded;
     // The owning globals and the final boundary of the process-exit analysis.
     ownership_source_exit.closure exit;
+    // The calls_heap analysis of the closure: body i of the graph is body i here.
+    ownership_source_calls.context calls;
 }
 
 fn file_id(context* c, string filename) u32 {
@@ -431,9 +438,44 @@ fn analyze(context mut* c) void {
         }
         ownership_source_exit.solve_closure(&c->exit, exits[..n], prerequisites);
     }
+    // The call and heap solvers apply the summaries of callees, so they run over the whole
+    // closure after the body loop.
+    if (c->graph_built) { solve_calls(c); }
+}
+
+// Runs the calls_heap analysis over the graph bodies, which are the bodies of the closure.
+fn solve_calls(context mut* c) void {
+    ownership_flow.source_file_binding mut@ own files = new(ownership_flow.source_file_binding,
+        c->bodies.len);
+    defer del(files);
+    ownership_api.source_position mut@ own declarations = new(ownership_api.source_position,
+        c->bodies.len);
+    defer del(declarations);
+    u64 mut i = 0;
+    while (i < c->bodies.len) {
+        body* row = &c->bodies[i];
+        files[i] = ownership_flow.source_file_binding{row->key.declaration.module,
+            row->source.file, row->module->file};
+        declarations[i] = row->source;
+        i += 1;
+    }
+    ownership_source_calls.solve(&c->calls, &c->graph, files[..], declarations[..]);
+    // The summary layout charges the graph ledger, so a refusal there is the first refusal of
+    // that ledger (toolchain 1.1).
+    if (c->graph.proof.terminal.limit.present && !c->graph_first_refusal.terminal.present) {
+        c->graph_first_refusal = locate(c, c->graph.proof);
+    }
+    bool executed = ownership_source_calls.executed(&c->calls);
+    i = 0;
+    while (i < c->bodies.len) {
+        c->bodies[i].calls = executed ? &c->calls.rows[i] : null;
+        i += 1;
+    }
 }
 
 fn free(context mut* c) void {
+    // The calls rows name the graph bodies. Release them before the graph.
+    ownership_source_calls.free(&c->calls);
     // Graph queries retain symbols and FIR. Release them before the bodies.
     ownership_graph.free(&c->graph);
     del(c->graph_inputs);
