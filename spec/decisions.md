@@ -2536,6 +2536,22 @@ says ownership is "by convention", this section supersedes it.
   Otherwise report the affected obligation as incomplete proof. A work-budget failure is an error.
   A validated reaching-path witness can establish an invalid operation.
   An abstract possibility without that witness establishes only failure to prove safety.
+  The analysis removes a path only with a fact that holds on each execution that the state
+  represents. Only an operation of the analyzed function establishes such a fact: a null test,
+  an assignment, a move, a release, the end of a storage, or an allocation. The address of a
+  local or of static data is not null.
+  A fact that the analysis assumes removes no path. A nonnull root at a dereference is such a
+  fact. An address computation reads no storage. It establishes no fact about its base.
+  The known value of a scalar is a fact of the same kind as a root. A call can write each local
+  whose storage a FIR address names. After a call, a scalar local of that kind has no known
+  value. The heap analysis does not yet forget the root fact of a pointer local of that kind
+  (class F of `test/ownership/solvers/false_accepts.txt`).
+  A fact that the caller state takes from a callee summary removes no path of the caller.
+  A call itself ends a caller path only in two cases. The summary has no returning path. Or the
+  callee established a null root on each returning path, and the caller established that root
+  nonnull.
+  A summary has no returning path only when each path of the callee ends by these rules, at an
+  abort, or in a loop that does not end.
   A witness can cross a direct call of a fort callee that has a returning type and no parameter
   that can own a value. It assumes that the callee returns (fir.md 14.1, A06).
   An entry value is the value that a parameter of the checked function has when it starts.
@@ -2580,6 +2596,11 @@ says ownership is "by convention", this section supersedes it.
   violation for a callee that aborts for some values only, such as `require(n < 100)` before a
   branch on n. The witness takes no branch on an entry value that a crossed call can read,
   through its arguments or through a value that the function stored before the call.
+  Amended 2026-10-10: The heap analysis removed a path with facts that it only assumed: the
+  nonnull root of an unfold for an address computation, a root that a callee summary gave, and a
+  cell at the exit contradiction of a call. The heap solver alone proved 8 faulty bodies, each
+  with a leak on a null path. A review found 9 more, where a callee wrote a scalar local whose
+  known value then removed a path. Now only an established fact removes a path (rule P1).
 
 ### D17.19 Global ownership and process boundaries
 - owner: `memory-model.md` (2.9), `toolchain.md` (2.1), `module-system.md` (11),

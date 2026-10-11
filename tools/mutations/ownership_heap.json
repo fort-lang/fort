@@ -3,7 +3,7 @@
     "One row for each core rule of the heap proof (src/fort/ownership_heap.ft).",
     "The heap module is not part of the compiler binary: its tests compile it from source.",
     "So the build compiles the case-group test, and that test binary is the measured binary.",
-    "The stages run the case groups, then the other ten heap test programs.",
+    "The stages run the case groups, the provenance test, then the other ten heap test programs.",
     "Run it on a darwin host with --runner 'bash -c' after cmake --preset debug,",
     "or in the Linux VM with the default runner. ZERO_AR_DATE=1 keeps the darwin md5 stable.",
     "Each stage runs from test/fort, where the tests write their sandbox directories.",
@@ -21,6 +21,10 @@
     {
       "name": "case groups",
       "command": "cd test/fort && ../../build/$(uname -s)/debug/heap-mutate/ownership_heap_test"
+    },
+    {
+      "name": "provenance",
+      "command": "mkdir -p build/$(uname -s)/debug/heap-mutate && cd test/fort && ZERO_AR_DATE=1 ../../build/$(uname -s)/debug/fort -I ../../src/fort -I support ownership_heap_provenance_test.ft -o ../../build/$(uname -s)/debug/heap-mutate/ownership_heap_provenance_test && ../../build/$(uname -s)/debug/heap-mutate/ownership_heap_provenance_test"
     },
     {
       "name": "traces",
@@ -319,9 +323,9 @@
     {
       "decision": "toolchain-4.2-requirement-return",
       "file": "src/fort/ownership_heap.ft",
-      "old": "        if (bound[i] != NONE && p.used && p.root.value == root_kind.null_root &&\n            !sum->interface[i].require_null) {",
-      "new": "        if (bound[i] != NONE && p.used && p.root.value == root_kind.null_root) {",
-      "what": "a failed requirement ends the caller path"
+      "old": "        if (bound[i] != NONE && p.used && p.root.value == root_kind.null_root &&\n            !sum->interface[i].require_null) {\n            atom x = s->atoms[cast(bound[i], u64)];\n            if (ownership_facts.may_prune(p.root) && x.root.value == root_kind.nonnull &&\n",
+      "new": "        if (bound[i] != NONE && p.used && p.root.value == root_kind.null_root) {\n            atom x = s->atoms[cast(bound[i], u64)];\n            if (x.root.value == root_kind.nonnull &&\n",
+      "what": "a failed requirement, whose null the callee assumes, ends the caller path"
     },
     {
       "decision": "toolchain-4.2-lost-field",
@@ -560,6 +564,111 @@
       "old": "    if (is_reference(t) && v.kind != value_kind.owned && !static_reference(stored) &&",
       "new": "    if (false && is_reference(t) && v.kind != value_kind.owned && !static_reference(stored) &&",
       "what": "a store of a reference into storage that the proof does not track passes"
+    },
+    {
+      "decision": "D17.18-p1-address-guard",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        if (ownership_facts.may_prune(seen.nullness)) {\n            out.known = true;\n            out.truth = (seen.nullness.value == root_kind.nonnull) != equal_test;\n        }\n",
+      "new": "        out.known = true;\n        out.truth = !equal_test;\n",
+      "what": "an address decides its null test, whatever the fact of its base"
+    },
+    {
+      "decision": "D17.18-p1-null-test-empty",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        if (ownership_facts.may_prune(seen.nullness)) {\n            out.known = true;\n            out.truth = equal_test;\n        }\n",
+      "new": "        out.known = true;\n        out.truth = equal_test;\n",
+      "what": "an empty value that the proof assumes or imports decides its null test"
+    },
+    {
+      "decision": "D17.18-p1-null-test-view",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        if (ownership_facts.may_prune(item.root)) {\n",
+      "new": "        if (item.root.value == root_kind.null_root || item.root.value == root_kind.nonnull) {\n",
+      "what": "an assumed or imported root decides the null test of its view"
+    },
+    {
+      "decision": "D17.18-p1-refine-null-edge",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    if (a->root.value == root_kind.nonnull && decided) { return false; }\n",
+      "new": "    if (a->root.value == root_kind.nonnull || a->kind == atom_kind.cell) { return false; }\n",
+      "what": "an assumed nonnull root or a cell removes the null edge"
+    },
+    {
+      "decision": "D17.18-p1-refine-nonnull-edge",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        if (a->root.value == root_kind.null_root && decided) { return false; }\n",
+      "new": "        if (a->root.value == root_kind.null_root) { return false; }\n",
+      "what": "an assumed or imported null root removes the nonnull edge"
+    },
+    {
+      "decision": "D17.18-p1-null-descendants",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        if (seen[k]) { s->atoms[k].root = nullness{root_kind.null_root, provenance.established}; }\n",
+      "new": "        if (k == cast(a, u64)) {\n            s->atoms[k].root = nullness{root_kind.null_root, provenance.established};\n        }\n",
+      "what": "the null edge of a cell keeps the allocations of the atoms that it owns"
+    },
+    {
+      "decision": "D17.18-p1-contradiction-caller",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "            if (ownership_facts.may_prune(p.root) && x.root.value == root_kind.nonnull &&\n                ownership_facts.may_prune(x.root)) {\n",
+      "new": "            if (ownership_facts.may_prune(p.root) && (x.root.value == root_kind.nonnull ||\n                x.kind == atom_kind.cell)) {\n",
+      "what": "an assumed or imported caller root, or a cell, contradicts a null exit root"
+    },
+    {
+      "decision": "D17.18-p1-graft-import",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    out.nullness = ownership_facts.import_nullness(out.nullness);\n",
+      "new": "",
+      "what": "a grafted value keeps the provenance that the callee gave it"
+    },
+    {
+      "decision": "D17.18-p1-graft-root",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "            made.root = ownership_facts.import_nullness(p.root);\n",
+      "new": "            made.root = p.root;\n",
+      "what": "a grafted atom keeps the root provenance that the callee gave it"
+    },
+    {
+      "decision": "D17.18-p1-compare-empty",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        return a.nullness.value == b.nullness.value && a.nullness.how == b.nullness.how;\n",
+      "new": "        return a.nullness.value == b.nullness.value;\n",
+      "what": "a loop head keeps an empty value whose provenance a join weakened"
+    },
+    {
+      "decision": "D17.18-p1-compare-atom",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        a.root.value == b.root.value && a.root.how == b.root.how && a.origin == b.origin &&\n",
+      "new": "        a.root.value == b.root.value && a.origin == b.origin &&\n",
+      "what": "a block entry keeps an atom whose root provenance a join weakened"
+    },
+    {
+      "decision": "D17.18-p1-fold-null",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    if (root->root.value == root_kind.nonnull) {\n        root->root = nullness{root_kind.nonnull, provenance.assumed};\n    }\n",
+      "new": "    root->root = nullness{root_kind.nonnull, provenance.assumed};\n",
+      "what": "a fold of a cell that a null edge made null gives a nonnull region"
+    },
+    {
+      "decision": "D17.18-p1-call-scalars",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    forget_scalars(c, s);\n",
+      "new": "",
+      "what": "a call keeps the known value of each scalar local that a callee can write"
+    },
+    {
+      "decision": "D17.18-p1-named-locals",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "                named[cast(stmt->value.place.local, u64)] = true;\n",
+      "new": "",
+      "what": "a local whose storage a FIR address names keeps its known value at a call"
+    },
+    {
+      "decision": "D17.18-p1-truth-guard",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    return cond.kind == value_kind.scalar && cond.known;\n",
+      "new": "    return false;\n",
+      "what": "a known truth removes no edge"
     }
   ]
 }

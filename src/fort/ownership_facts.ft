@@ -6,11 +6,12 @@
 // one row in the table of `tools/fact_joins.py`.
 
 /// The source of a fact. `established`: an operation of this body observed the fact on each
-/// execution that the state represents. `imported`: a callee summary gives the fact; each graft
-/// writes `assumed` today, and no site writes `imported` yet. `assumed`: the proof assumes the
-/// fact: an input of the caller, a lost precision, or a fact that an operation copies without a
-/// proof of its own. An earlier member is weaker. The zero is `assumed`, so a fact that no
-/// constructor sets claims no observation.
+/// execution that the state represents. `imported`: a callee summary gives the fact, and the
+/// callee established or imported it; a graft writes it (`import_nullness`). `assumed`: the proof
+/// assumes the fact: an input of the caller, a lost precision, or a fact that an operation copies
+/// without a proof of its own. An earlier member is weaker. The zero is `assumed`, so a fact that
+/// no constructor sets claims no observation. Only an established fact removes a path
+/// (`may_prune`, D17.18).
 enum provenance {
     assumed,
     imported,
@@ -116,8 +117,21 @@ fn assume_status(status_fact f) status_fact {
     return status_fact{f.value, provenance.assumed};
 }
 
-/// Whether a root fact can remove a path: an established null or nonnull root. An imported or
-/// assumed fact, a free choice, and a joined root remove no path.
+/// The fact of a callee summary in its caller: the same value, `imported` when the callee
+/// established or imported it, and `assumed` when the callee assumed it.
+fn import_nullness(nullness f) nullness {
+    if (f.how == provenance.assumed) { return f; }
+    return nullness{f.value, provenance.imported};
+}
+
+/// Whether a root fact can remove a path: an established null or nonnull root (D17.18). An
+/// imported or assumed fact, a free choice, and a joined root remove no path. A test, a null
+/// constant, a move, an allocation and a release establish a root; an address computation, a
+/// dereference, an unfold, a fold and a graft do not. Each pruning site of the heap proof that
+/// reads a root reads this predicate: the truth of a null test, both root edges of `refine`, and
+/// the exit contradiction of a call. The known-truth edge of `refine` reads `may_prune_truth` of
+/// the heap module instead. A callee without a return ends a caller path only because its own
+/// paths ended at these sites, at an abort, or in a loop.
 fn may_prune(nullness f) bool {
     return f.how == provenance.established &&
         (f.value == root_kind.null_root || f.value == root_kind.nonnull);

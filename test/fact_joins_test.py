@@ -13,7 +13,7 @@ joins = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(joins)
 
 # A heap module that holds each rule: each struct of STRUCTS, each join function, each graft
-# function, each fact type, and one established site of each table.
+# function, each fact type, and one site of each table.
 GOOD = """\
 import ownership_facts;
 import ownership_facts.{nullness, status_fact, may_set};
@@ -89,15 +89,37 @@ fn join(state* a, state* b, state mut* out) bool {
 
 fn graft_value(value v) value {
     value mut out = v;
-    out.nullness = ownership_facts.assume(out.nullness);
+    out.nullness = ownership_facts.import_nullness(out.nullness);
     return out;
 }
 
 fn apply(state mut* s, atom p) void {
+    // A callee fact that only decides a contradiction is read by the predicate.
+    if (ownership_facts.may_prune(p.root)) { s->reached = false; }
     atom mut made = p;
-    made.root = ownership_facts.assume(p.root);
+    made.root = ownership_facts.import_nullness(p.root);
     made.status = ownership_facts.assume_status(p.status);
     s->atoms[0].root = nullness{root_kind.nonnull, provenance.assumed};
+}
+
+fn refine(state mut* s, atom a, value cond) bool {
+    // may_prune(a.root) in a comment is no call.
+    if (may_prune_truth(cond)) { return true; }
+    return may_prune(a.root);
+}
+
+fn forget_scalars(state mut* s) void {
+    s->reached = s->reached;
+}
+
+fn call(state mut* s) void {
+    forget_scalars(s);
+    if (s->reached) { apply(s, s->atoms[0]); return; }
+    unknown_call(s);
+}
+
+fn unknown_call(state mut* s) void {
+    s->reached = true;
 }
 
 fn null_value() value {
@@ -120,15 +142,21 @@ fn moved(state mut* s) void {
 # The tables of allowed sites for GOOD.
 ESTABLISHED = {"null_value": 1, "release": 1}
 NULL_VALUES = {"moved": 1}
+PRUNING = {"apply": 1, "refine": 2}
+FORGET = {"call": 1}
+EFFECTS = {"call": 2}
 
 
-def run(text, established=None, null_values=None):
+def run(text, established=None, null_values=None, pruning=None, forget=None, effects=None):
     """The exit status, the report and the problems of the tool over one source text."""
     out = io.StringIO()
     err = io.StringIO()
     status = joins.run(text, out, err,
                        ESTABLISHED if established is None else established,
-                       NULL_VALUES if null_values is None else null_values)
+                       NULL_VALUES if null_values is None else null_values,
+                       PRUNING if pruning is None else pruning,
+                       FORGET if forget is None else forget,
+                       EFFECTS if effects is None else effects)
     return status, out.getvalue(), err.getvalue()
 
 
@@ -143,8 +171,8 @@ class GoodTest(unittest.TestCase):
         self.assertEqual(status, 0, err)
         self.assertEqual(err, "")
         self.assertIn("fact_joins: 17 fields, 5 typed, 12 tagged, 0 untagged\n", out)
-        self.assertIn("fact_joins: 2 provenance.established, 1 null_value() in their "
-                      "functions\n", out)
+        self.assertIn("fact_joins: 2 provenance.established, 1 null_value(), 3 pruning "
+                      "predicates, 1 forget_scalars, 2 callee effects in their functions\n", out)
         self.assertTrue(out.endswith("fact_joins: no problems\n"))
 
     def test_each_field_has_one_row_in_declaration_order(self):
@@ -184,9 +212,17 @@ class GoodTest(unittest.TestCase):
         for row in ("atom.root: nullness", "atom.status: status_fact", "value.nullness: nullness",
                     "state.released: may_set"):
             self.assertIn(row, out.getvalue())
-        self.assertIn("fact_joins: %d provenance.established, %d null_value() in their "
-                      "functions\n" % (sum(joins.ESTABLISHED_SITES.values()),
-                                       sum(joins.NULL_VALUE_SITES.values())), out.getvalue())
+        self.assertIn("fact_joins: %d provenance.established, %d null_value(), %d pruning "
+                      "predicates, %d forget_scalars, %d callee effects in their functions\n"
+                      % (sum(joins.ESTABLISHED_SITES.values()),
+                         sum(joins.NULL_VALUE_SITES.values()),
+                         sum(joins.PRUNING_SITES.values()), sum(joins.FORGET_SITES.values()),
+                         sum(joins.EFFECT_SITES.values())), out.getvalue())
+        # Each site that removes a path reads a predicate (D17.18), and each callee effect of
+        # `call` follows its one forget of the scalars that a callee can write.
+        self.assertEqual(joins.PRUNING_SITES, {"null_test": 3, "refine": 2, "apply": 2})
+        self.assertEqual(joins.FORGET_SITES, {"call": 1})
+        self.assertEqual(joins.EFFECT_SITES, {"call": 4})
 
 
 class FieldTest(unittest.TestCase):
@@ -416,12 +452,36 @@ class RecordTest(unittest.TestCase):
 
 
 class GraftTest(unittest.TestCase):
-    def test_a_callee_fact_without_assume_fails(self):
-        status, _, err = run(replace("    made.root = ownership_facts.assume(p.root);\n",
+    def test_a_callee_fact_without_import_fails(self):
+        status, _, err = run(replace("    made.root = ownership_facts.import_nullness(p.root);\n",
                                      "    made.root = p.root;\n"))
         self.assertEqual(status, 1)
-        self.assertIn("apply reads atom.root outside join_nullness or assume; the caller "
-                      "assumes each callee fact", err)
+        self.assertIn("apply reads atom.root outside join_nullness or assume or import_nullness "
+                      "or may_prune; the caller imports or assumes each callee fact", err)
+
+    def test_a_callee_fact_through_assume_or_import_passes(self):
+        status, _, err = run(replace("    made.root = ownership_facts.import_nullness(p.root);\n",
+                                     "    made.root = ownership_facts.import_nullness(p.root);\n"
+                                     "    made.root = ownership_facts.assume(p.root);\n"))
+        self.assertEqual(status, 0, err)
+
+    def test_a_callee_fact_that_a_predicate_reads_passes(self):
+        # The predicate decides a contradiction and copies no fact into the caller.
+        status, _, err = run(GOOD)
+        self.assertEqual(status, 0, err)
+        self.assertNotIn("apply reads atom.root", err)
+        status, _, err = run(replace(
+            "    if (ownership_facts.may_prune(p.root)) { s->reached = false; }\n",
+            "    if (p.root.how == provenance.imported) { s->reached = false; }\n"))
+        self.assertEqual(status, 1)
+        self.assertIn("apply has 0 pruning predicate, and the table allows 1", err)
+
+    def test_a_callee_fact_beside_a_predicate_fails(self):
+        status, _, err = run(replace(
+            "    if (ownership_facts.may_prune(p.root)) { s->reached = false; }\n",
+            "    if (ownership_facts.may_prune(p.root)) { s->atoms[1].root = p.root; }\n"))
+        self.assertEqual(status, 1)
+        self.assertIn("apply reads atom.root outside", err)
 
     def test_a_callee_status_without_assume_fails(self):
         status, _, err = run(replace("    made.status = ownership_facts.assume_status(p.status);\n",
@@ -429,18 +489,28 @@ class GraftTest(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("apply reads atom.status outside join_status_fact or assume_status", err)
 
-    def test_a_grafted_value_without_assume_fails(self):
-        status, _, err = run(replace("    out.nullness = ownership_facts.assume(out.nullness);\n",
-                                     "    out.nullness = out.nullness;\n"))
+    def test_a_grafted_value_without_import_fails(self):
+        status, _, err = run(replace(
+            "    out.nullness = ownership_facts.import_nullness(out.nullness);\n",
+            "    out.nullness = out.nullness;\n"))
         self.assertEqual(status, 1)
         self.assertIn("graft_value reads value.nullness outside join_nullness or assume", err)
 
-    def test_a_graft_without_its_assume_fails(self):
-        status, _, err = run(replace("    out.nullness = ownership_facts.assume(out.nullness);\n",
-                                     ""))
+    def test_a_graft_without_its_import_fails(self):
+        status, _, err = run(replace(
+            "    out.nullness = ownership_facts.import_nullness(out.nullness);\n", ""))
         self.assertEqual(status, 1)
-        self.assertIn("graft_value assigns no nullness from assume, so a callee fact can pass "
-                      "as it is", err)
+        self.assertIn("graft_value assigns no nullness from import_nullness, so a callee fact "
+                      "can pass as it is", err)
+        status, _, err = run(replace(
+            "    out.nullness = ownership_facts.import_nullness(out.nullness);\n",
+            "    out.nullness = ownership_facts.assume(out.nullness);\n"))
+        self.assertEqual(status, 1)
+        self.assertIn("graft_value assigns no nullness from import_nullness", err)
+        status, _, err = run(replace("    made.root = ownership_facts.import_nullness(p.root);\n",
+                                     "    made.root = ownership_facts.assume(p.root);\n"))
+        self.assertEqual(status, 1)
+        self.assertIn("apply assigns no root from import_nullness", err)
         status, _, err = run(replace("    made.status = ownership_facts.assume_status(p.status);\n",
                                      ""))
         self.assertEqual(status, 1)
@@ -491,7 +561,87 @@ class SiteTest(unittest.TestCase):
     def test_the_declaration_of_null_value_is_no_call(self):
         status, out, err = run(GOOD)
         self.assertEqual(status, 0, err)
-        self.assertIn(" 1 null_value() in their functions", out)
+        self.assertIn(" 1 null_value(), ", out)
+
+    def test_a_pruning_site_without_the_predicate_fails(self):
+        status, _, err = run(replace("    return may_prune(a.root);\n",
+                                     "    return a.root.value == root_kind.nonnull;\n"))
+        self.assertEqual(status, 1)
+        self.assertIn("refine has 1 pruning predicate, and the table allows 2", err)
+        # A known truth needs its guard too.
+        status, _, err = run(replace("    if (may_prune_truth(cond)) { return true; }\n",
+                                     "    if (cond.known) { return true; }\n"))
+        self.assertEqual(status, 1)
+        self.assertIn("refine has 1 pruning predicate, and the table allows 2", err)
+
+    def test_a_predicate_outside_the_table_fails(self):
+        status, _, err = run(replace("    s->slots[0].v = null_value();\n",
+                                     "    s->slots[0].v = null_value();\n"
+                                     "    if (ownership_facts.may_prune(s->atoms[0].root)) { }\n"))
+        self.assertEqual(status, 1)
+        self.assertIn("moved has 1 pruning predicate, and the table allows 0", err)
+        status, _, err = run(replace("    s->slots[0].v = null_value();\n",
+                                     "    s->slots[0].v = null_value();\n"
+                                     "    if (may_prune_truth(s->slots[1].v)) { }\n"))
+        self.assertEqual(status, 1)
+        self.assertIn("moved has 1 pruning predicate, and the table allows 0", err)
+
+    def test_a_second_predicate_in_a_site_fails(self):
+        status, _, err = run(replace("    return may_prune(a.root);\n",
+                                     "    return may_prune(a.root) || may_prune(a.root);\n"))
+        self.assertEqual(status, 1)
+        self.assertIn("refine has 3 pruning predicate, and the table allows 2", err)
+
+    def test_a_table_site_that_the_file_lacks_fails(self):
+        status, _, err = run(GOOD, pruning={"apply": 1, "refine": 2, "null_test": 3})
+        self.assertEqual(status, 1)
+        self.assertIn("null_test has 0 pruning predicate, and the table allows 3", err)
+
+    def test_a_predicate_in_a_comment_counts_nothing(self):
+        status, out, err = run(GOOD)
+        self.assertEqual(status, 0, err)
+        self.assertIn(" 3 pruning predicates, ", out)
+
+
+class ScalarTest(unittest.TestCase):
+    def test_a_call_that_forgets_before_its_effects_passes(self):
+        status, _, err = run(GOOD)
+        self.assertEqual(status, 0, err)
+
+    def test_an_effect_without_the_forget_fails(self):
+        status, _, err = run(replace("    forget_scalars(s);\n    if (s->reached)",
+                                     "    if (s->reached)"))
+        self.assertEqual(status, 1)
+        self.assertIn("call has 0 forget_scalars, and the table allows 1", err)
+        self.assertIn("call applies a callee effect before forget_scalars", err)
+
+    def test_a_forget_after_an_effect_fails(self):
+        status, _, err = run(replace("    forget_scalars(s);\n    if (s->reached) { apply(s, "
+                                     "s->atoms[0]); return; }\n",
+                                     "    if (s->reached) { apply(s, s->atoms[0]); return; }\n"
+                                     "    forget_scalars(s);\n"))
+        self.assertEqual(status, 1)
+        self.assertIn("call applies a callee effect before forget_scalars, so a callee can "
+                      "change a known scalar", err)
+
+    def test_an_effect_outside_the_table_fails(self):
+        status, _, err = run(replace("    s->slots[0].v = null_value();\n",
+                                     "    s->slots[0].v = null_value();\n"
+                                     "    unknown_call(s);\n"))
+        self.assertEqual(status, 1)
+        self.assertIn("moved has 1 callee effect, and the table allows 0", err)
+
+    def test_a_second_forget_site_fails(self):
+        status, _, err = run(replace("    s->slots[0].v = null_value();\n",
+                                     "    s->slots[0].v = null_value();\n"
+                                     "    forget_scalars(s);\n"))
+        self.assertEqual(status, 1)
+        self.assertIn("moved has 1 forget_scalars, and the table allows 0", err)
+
+    def test_the_declarations_are_no_calls(self):
+        status, out, err = run(GOOD)
+        self.assertEqual(status, 0, err)
+        self.assertIn(" 1 forget_scalars, 2 callee effects in their functions", out)
 
 
 class ArgumentTest(unittest.TestCase):

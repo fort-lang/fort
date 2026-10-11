@@ -292,7 +292,8 @@ fn keys() void {
     assert(!ownership_heap.same_value(ownership_heap.empty_value(),
         ownership_heap.unknown_value()));
     // An empty value has a null root. An operation of the body establishes it for `null_value`;
-    // `empty_value` assumes it. No comparison reads a provenance.
+    // `empty_value` assumes it. A comparison reads the provenance, so a weaker fact is a change
+    // that runs a block again (D17.18).
     ownership_heap.value assumed_empty = ownership_heap.empty_value();
     ownership_heap.value null_empty = ownership_heap.null_value();
     assert(assumed_empty.nullness.value == ownership_facts.root_kind.null_root);
@@ -300,16 +301,24 @@ fn keys() void {
     assert(null_empty.kind == ownership_heap.value_kind.empty);
     assert(null_empty.nullness.value == ownership_facts.root_kind.null_root);
     assert(null_empty.nullness.how == ownership_facts.provenance.established);
-    assert(ownership_heap.same_value(assumed_empty, null_empty));
+    assert(!ownership_heap.same_value(assumed_empty, null_empty));
+    assert(!ownership_heap.same_value(null_empty, assumed_empty));
+    assert(ownership_heap.same_value(null_empty, ownership_heap.null_value()));
+    ownership_heap.value mut imported_empty = null_empty;
+    imported_empty.nullness.how = ownership_facts.provenance.imported;
+    assert(!ownership_heap.same_value(imported_empty, null_empty));
+    assert(!ownership_heap.same_value(imported_empty, assumed_empty));
     ownership_heap.value outside = ownership_heap.external_view();
     assert(outside.nullness.value == ownership_facts.root_kind.joined);
     assert(outside.nullness.how == ownership_facts.provenance.assumed);
     w = v;
     w.nullness.how = ownership_facts.provenance.established;
+    assert(!ownership_heap.same_value(v, w));
+    w.nullness.how = v.nullness.how;
     assert(ownership_heap.same_value(v, w));
     w.nullness.value = ownership_facts.root_kind.nonnull;
     assert(!ownership_heap.same_value(v, w));
-    // An address keeps the fact that it gets, and a comparison of addresses does not read it.
+    // An address keeps the fact that it gets, and a comparison of addresses reads it.
     ownership_facts.nullness fact = ownership_facts.nullness{ownership_facts.root_kind.nonnull,
         ownership_facts.provenance.established};
     ownership_heap.value at = ownership_heap.address_value(local(2), fact);
@@ -317,9 +326,14 @@ fn keys() void {
     assert(ownership_heap.same_key(at.target, local(2)));
     assert(at.nullness.value == fact.value && at.nullness.how == fact.how);
     ownership_heap.value mut other = at;
+    assert(ownership_heap.same_value(at, other));
     other.nullness = ownership_facts.nullness{ownership_facts.root_kind.free,
         ownership_facts.provenance.assumed};
-    assert(ownership_heap.same_value(at, other));
+    assert(!ownership_heap.same_value(at, other));
+    other.nullness = ownership_facts.nullness{ownership_facts.root_kind.nonnull,
+        ownership_facts.provenance.assumed};
+    assert(!ownership_heap.same_value(at, other));
+    assert(!ownership_heap.same_value(other, at));
     ownership_heap.value mut t1 = ownership_heap.scalar_value();
     t1.known = true;
     t1.truth = true;
@@ -414,8 +428,8 @@ fn entry_state() void {
     copy.atoms[0].root.value = ownership_facts.root_kind.nonnull;
     assert(!same(ctx, &s, &copy));
     assert(s.atoms[0].root.value == ownership_facts.root_kind.free);
-    // A graft keeps the value of each nullness fact that a callee gives, and the caller assumes
-    // it.
+    // A graft keeps the value of each nullness fact that a callee gives. The caller imports a
+    // fact that the callee established, and it assumes a fact that the callee assumed.
     u32[1] no_atoms = {};
     ownership_heap.slot_key[1] no_storage = {};
     ownership_heap.argument@ no_arguments = {};
@@ -423,7 +437,11 @@ fn entry_state() void {
         no_atoms[..], no_storage[..], no_arguments);
     assert(empty.kind == ownership_heap.value_kind.empty);
     assert(empty.nullness.value == ownership_facts.root_kind.null_root);
-    assert(empty.nullness.how == ownership_facts.provenance.assumed);
+    assert(empty.nullness.how == ownership_facts.provenance.imported);
+    ownership_heap.value guess = ownership_heap.graft_value(ctx, &s, ownership_heap.empty_value(),
+        no_atoms[..], no_storage[..], no_arguments);
+    assert(guess.nullness.value == ownership_facts.root_kind.null_root);
+    assert(guess.nullness.how == ownership_facts.provenance.assumed);
     ownership_heap.value mut text = ownership_heap.external_view();
     text.nullness = ownership_facts.nullness{ownership_facts.root_kind.nonnull,
         ownership_facts.provenance.established};
@@ -431,7 +449,7 @@ fn entry_state() void {
         no_storage[..], no_arguments);
     assert(seen.kind == ownership_heap.value_kind.view && seen.external);
     assert(seen.nullness.value == ownership_facts.root_kind.nonnull);
-    assert(seen.nullness.how == ownership_facts.provenance.assumed);
+    assert(seen.nullness.how == ownership_facts.provenance.imported);
 }
 
 fn unfold_fold() void {
@@ -816,11 +834,14 @@ fn tests() void {
     joined.atoms[0].root.value = ownership_facts.root_kind.joined;
     assert(ownership_heap.refine(&joined, cond, true));
     assert(joined.atoms[0].root.value == ownership_facts.root_kind.nonnull);
-    // A cell has a nonnull root.
+    // An unfold assumes the nonnull root of a cell, so the null edge stays (D17.18). The edge
+    // establishes the null root of the cell.
     ownership_heap.state mut cell = ownership_heap.clone(&s);
     defer ownership_heap.free_state(&cell);
     assert(ownership_heap.unfold(ctx, &cell, 0));
-    assert(!ownership_heap.refine(&cell, cond, false));
+    assert(ownership_heap.refine(&cell, cond, false));
+    assert(cell.atoms[0].root.value == ownership_facts.root_kind.null_root);
+    assert(cell.atoms[0].root.how == ownership_facts.provenance.established);
     // A known truth value selects one edge; an untracked one takes each edge and refines nothing.
     ownership_heap.value mut known = ownership_heap.scalar_value();
     known.known = true;

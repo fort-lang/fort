@@ -287,6 +287,8 @@ struct context {
     u64 fixed_len;
     u32 mut@ own local_first;
     u32 mut@ own local_count;
+    // For each local: a FIR address or slice names its storage, so a call can write it.
+    bool mut@ own named;
     u32 mut@ own caller_first;
     u32 mut@ own caller_count;
     caller_entry mut@ own callers;
@@ -497,11 +499,13 @@ fn rebase(slot_key head, u32 depth, u32[6] path, slot_key mut* out) bool {
     return true;
 }
 
+// A value compares its nullness fact, the provenance too, where a rule reads it: an empty value,
+// a view and an address.
 fn same_value(value a, value b) bool {
     if (a.kind != b.kind) { return false; }
     switch (a.kind) {
     case value_kind.empty:
-        return true;
+        return a.nullness.value == b.nullness.value && a.nullness.how == b.nullness.how;
     case value_kind.unknown:
         return a.external == b.external && a.exact == b.exact &&
             (!a.external || (same_key(a.target, b.target) && a.param == b.param));
@@ -513,7 +517,8 @@ fn same_value(value a, value b) bool {
         return a.atom == b.atom;
     case value_kind.view:
         if (a.count != b.count || a.exact != b.exact || a.external != b.external ||
-            a.nullness.value != b.nullness.value || a.param != b.param) { return false; }
+            a.nullness.value != b.nullness.value || a.nullness.how != b.nullness.how ||
+            a.param != b.param) { return false; }
         u32 mut i = 0;
         while (i < a.count) {
             if (a.sources[i] != b.sources[i]) { return false; }
@@ -521,7 +526,8 @@ fn same_value(value a, value b) bool {
         }
         return true;
     case value_kind.address:
-        return same_key(a.target, b.target) && a.param == b.param;
+        return same_key(a.target, b.target) && a.param == b.param &&
+            a.nullness.value == b.nullness.value && a.nullness.how == b.nullness.how;
     }
 }
 
@@ -1294,7 +1300,11 @@ fn fold_now(context mut* c, state mut* s, u32 a) void {
     }
     atom mut* root = &s->atoms[cast(a, u64)];
     root->kind = atom_kind.region;
-    root->root = nullness{root_kind.nonnull, provenance.assumed};
+    // A cell that the null edge of a test made null stays null; a nonnull cell gives the region a
+    // nonnull root that the proof assumes.
+    if (root->root.value == root_kind.nonnull) {
+        root->root = nullness{root_kind.nonnull, provenance.assumed};
+    }
     root->choice = false;
     // A later unfold names the current fields, not the entry fields.
     root->handle = NONE;
@@ -1839,17 +1849,21 @@ fn canonical(context mut* c, state mut* s) bool {
     return true;
 }
 
-// A provenance changes no comparison: the joins keep it, and no rule reads it.
+// A provenance is part of each fact, so a weaker provenance is a change: a block entry that a
+// join weakens runs again (D17.18).
 fn same_atom(atom a, atom b) bool {
-    return a.kind == b.kind && a.status.value == b.status.value && a.ty == b.ty &&
-        a.shape == b.shape && a.root.value == b.root.value && a.origin == b.origin &&
+    return a.kind == b.kind && a.status.value == b.status.value &&
+        a.status.how == b.status.how && a.ty == b.ty && a.shape == b.shape &&
+        a.root.value == b.root.value && a.root.how == b.root.how && a.origin == b.origin &&
         a.fresh == b.fresh && a.strict == b.strict && a.choice == b.choice &&
         a.exposed == b.exposed && a.handle == b.handle && a.handle_field == b.handle_field &&
         a.empty_leaves == b.empty_leaves && a.borrows == b.borrows && a.params == b.params &&
         a.used == b.used;
 }
 
-/// Compares two canonical states. Each compared row pays one W unit.
+/// Compares two canonical states, each fact with its provenance (`same_atom`, `same_value`), so a
+/// state that only weakens a provenance replaces the entry state in `propagate`. Each compared
+/// row pays one W unit.
 fn equal(context mut* c, state* a, state* b, bool mut* same) bool {
     *same = false;
     if (!pay(c, a->slots_len + a->atoms_len + 1)) { return false; }
@@ -2394,6 +2408,28 @@ fn param_count(fir.func* f) u32 {
     return n;
 }
 
+// Marks each local whose storage a FIR address or slice can name: the base of the place of an
+// `addr` or a slice. A mark of a local that the place only reads through is no loss of soundness.
+fn mark_named(fir.func* f, bool mut@ named) void {
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 count = fir.block_statement_count(f, b);
+        u32 mut i = 0;
+        while (i < count) {
+            fir.statement* stmt = fir.block_statement(f, b, i);
+            if (stmt->kind == fir.stmt_kind.st_assign &&
+                (stmt->value.kind == fir.rvalue_kind.rv_addr ||
+                stmt->value.kind == fir.rvalue_kind.rv_slice) &&
+                stmt->value.place.base == fir.base_kind.bk_local &&
+                cast(stmt->value.place.local, u64) < named.len) {
+                named[cast(stmt->value.place.local, u64)] = true;
+            }
+            i += 1;
+        }
+        b += 1;
+    }
+}
+
 // Lays out the fixed slots: the leaves of each local, then the leaves of the caller storage of
 // each borrowed pointer parameter. Each owned leaf of a parameter or of caller storage is an
 // interface atom (`spec/fir.md` 14 Calls). False when the interface exceeds its bit set.
@@ -2401,6 +2437,8 @@ fn lay_out(context mut* c) bool {
     u32 n = fir.local_count(c->f);
     c->local_first = new(u32, cast(n, u64));
     c->local_count = new(u32, cast(n, u64));
+    c->named = new(bool, cast(n, u64));
+    mark_named(c->f, c->named[..]);
     leaf_list mut list = leaf_list{};
     defer free_leaves(&list);
     u32 mut i = 0;
@@ -3072,6 +3110,7 @@ fn is_null_constant(fir.operand op) bool {
 }
 
 // A comparison of a reference with null tests the root of its atom (`spec/toolchain.md` 4.2).
+// The truth is known only from a fact that may remove a path (D17.18): an established root.
 fn null_test(context mut* c, state mut* s, fir.operand a, fir.operand b, bool equal_test)
     value {
     fir.operand subject = is_null_constant(a) ? b : a;
@@ -3081,14 +3120,21 @@ fn null_test(context mut* c, state mut* s, fir.operand a, fir.operand b, bool eq
     value mut out = scalar_value();
     if (!is_null_constant(other)) { return out; }
     if (seen.kind == value_kind.empty) {
-        out.known = true;
-        out.truth = equal_test;
+        if (ownership_facts.may_prune(seen.nullness)) {
+            out.known = true;
+            out.truth = equal_test;
+        }
     } else if (seen.kind == value_kind.address) {
-        out.known = true;
-        out.truth = !equal_test;
+        // An address has the fact of its base (`address_fact`): a local is an established
+        // nonnull, caller storage a free choice of the caller, and a cell its root fact. So a
+        // test of caller storage, or of a cell that only an unfold made nonnull, decides nothing.
+        if (ownership_facts.may_prune(seen.nullness)) {
+            out.known = true;
+            out.truth = (seen.nullness.value == root_kind.nonnull) != equal_test;
+        }
     } else if (seen.kind == value_kind.view && seen.exact && seen.count == 1 && !seen.external) {
         atom item = s->atoms[cast(seen.sources[0], u64)];
-        if (item.root.value == root_kind.null_root || item.root.value == root_kind.nonnull) {
+        if (ownership_facts.may_prune(item.root)) {
             out.known = true;
             out.truth = (item.root.value == root_kind.nonnull) != equal_test;
         } else {
@@ -3700,12 +3746,13 @@ fn argument_view(value v, value mut* out, argument@ args) bool {
     return a.kind == value_kind.empty;
 }
 
-// The value of callee exit value `v` in the caller. The caller assumes each nullness fact that
-// the summary gives.
+// The value of callee exit value `v` in the caller. The caller imports each nullness fact that
+// the summary gives: a fact that the callee established or imported is imported here, and it
+// removes no path of the caller (D17.18).
 fn graft_value(context* c, state* s, value v, u32@ map, slot_key@ prefixes, argument@ args)
     value {
     value mut out = translate_value(c, s, v, map, prefixes, args);
-    out.nullness = ownership_facts.assume(out.nullness);
+    out.nullness = ownership_facts.import_nullness(out.nullness);
     return out;
 }
 
@@ -4196,14 +4243,17 @@ fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list
     }
     // A contradiction first: the callee returns only when a nonnull caller root is null. A
     // required empty owner has a null exit root because the callee stores over it, not because
-    // a return needs it: a caller that breaks the requirement still returns.
+    // a return needs it: a caller that breaks the requirement still returns. Both facts must be
+    // established (D17.18): the callee's null on each returning path and the caller's nonnull.
+    // A cell that an unfold made nonnull, or a root that a graft gave, ends no path.
     i = 0;
     while (i < interfaces) {
         atom p = sum->post.atoms[i];
         if (bound[i] != NONE && p.used && p.root.value == root_kind.null_root &&
             !sum->interface[i].require_null) {
             atom x = s->atoms[cast(bound[i], u64)];
-            if (x.root.value == root_kind.nonnull || x.kind == atom_kind.cell) {
+            if (ownership_facts.may_prune(p.root) && x.root.value == root_kind.nonnull &&
+                ownership_facts.may_prune(x.root)) {
                 if (target->member && c->reporting) {
                     unproved(c, s, ownership_api.incomplete_reason.unknown_effect, NONE,
                         "a return of this recursive call");
@@ -4243,9 +4293,9 @@ fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list
                     // The callee changed the fields, so a later unfold names no entry field.
                     x->handle = NONE;
                 }
-                // The caller assumes each root fact that the summary gives.
+                // The caller imports each root fact that the summary gives.
                 if (p.root.value == root_kind.nonnull) {
-                    x->root = nullness{root_kind.nonnull, provenance.assumed};
+                    x->root = ownership_facts.import_nullness(p.root);
                 } else if (sum->interface[i].needs_shape) {
                     x->root = ownership_facts.join_nullness(x->root,
                         nullness{root_kind.joined, provenance.assumed});
@@ -4271,8 +4321,9 @@ fn apply(context mut* c, state mut* s, callee* target, argument@ args, leaf_list
                 b += 1;
             }
             if (!any) { made.strict = false; }
-            // The caller assumes each fact of an atom that the summary gives.
-            made.root = ownership_facts.assume(p.root);
+            // The caller imports the root fact of an atom that the summary gives, and it assumes
+            // the status (no rule reads a status provenance).
+            made.root = ownership_facts.import_nullness(p.root);
             made.status = ownership_facts.assume_status(p.status);
             if (made.root.value == root_kind.free) { made.root.value = root_kind.joined; }
             made.shape = p.shape == 0 ? 0 : shape_of(c, p.ty);
@@ -4488,6 +4539,24 @@ fn redirect_add(state mut* s, u32 from, u32 to) void {
     }
 }
 
+// A known scalar is a fact too (D17.18). A heap proof keeps a scalar only in a slot of a whole
+// scalar local. A callee can write such a local through an address argument, a pointer that an
+// argument holds, or a global, and each of them needs a FIR address of the local first. So each
+// call forgets the value of each scalar local whose storage a FIR address names. A summary keeps
+// no scalar fact (`translate_value`), and an unknown call writes what its pointers reach.
+fn forget_scalars(context* c, state mut* s) void {
+    u64 mut i = 0;
+    while (i < s->slots_len) {
+        slot item = s->slots[i];
+        if (item.key.base == base_kind.local && item.key.depth == 0 &&
+            item.v.kind == value_kind.scalar && cast(item.key.id, u64) < c->named.len &&
+            c->named[cast(item.key.id, u64)]) {
+            s->slots[i].v = scalar_value();
+        }
+        i += 1;
+    }
+}
+
 /// Evaluates a call (`spec/fir.md` 6). The arguments are read in order, then a complete
 /// summary applies, or the call is unknown (D17.13, D17.18).
 fn call(context mut* c, state mut* s, fir.rvalue rv, types.node* t, leaf_list mut* out) void {
@@ -4522,6 +4591,8 @@ fn call(context mut* c, state mut* s, fir.rvalue rv, types.node* t, leaf_list mu
     }
     reset(out);
     if (c->stopped || !s->reached) { return; }
+    // Each callee effect below, a summary or an unknown call, follows this one forget.
+    forget_scalars(c, s);
     u64 found = rv.callee == fir.callee_kind.cl_fn ? find_callee(c, rv.callee_sym) : U64_MAX;
     if (found != U64_MAX) {
         callee* target = &c->callees[found];
@@ -4546,21 +4617,47 @@ fn call(context mut* c, state mut* s, fir.rvalue rv, types.node* t, leaf_list mu
 // ---- blocks, returns, and the body -----------------------------------------------------------
 
 // Refines one edge of a null test (`spec/toolchain.md` 4.2). False when the edge contradicts the
-// state. An untracked condition refines nothing.
+// state. An untracked condition refines nothing. Only an established root contradicts an edge
+// (D17.18): an assumed or imported root keeps both edges, and each edge establishes the root that
+// its test read. A known truth comes from a null test of an established fact (`null_test`) or
+// from constants of this body.
 fn refine(state mut* s, value cond, bool truth) bool {
-    if (cond.kind == value_kind.scalar && cond.known) { return cond.truth == truth; }
+    if (may_prune_truth(cond)) { return cond.truth == truth; }
     if (cond.kind != value_kind.scalar || cond.test == NONE) { return true; }
     atom mut* a = &s->atoms[cast(cond.test, u64)];
     bool nonnull = truth == cond.test_nonnull;
+    bool decided = ownership_facts.may_prune(a->root);
     if (nonnull) {
-        if (a->root.value == root_kind.null_root) { return false; }
+        if (a->root.value == root_kind.null_root && decided) { return false; }
         // The edge establishes the root that its test read.
         a->root = nullness{root_kind.nonnull, provenance.established};
         return true;
     }
-    if (a->root.value == root_kind.nonnull || a->kind == atom_kind.cell) { return false; }
-    a->root = nullness{root_kind.null_root, provenance.established};
+    if (a->root.value == root_kind.nonnull && decided) { return false; }
+    null_descendants(s, cond.test);
     return true;
+}
+
+// The null edge of a test of atom `a`: `a` and each atom that it owns take an established null
+// root. A cell that an unfold made has no storage on this edge, so the children of the unfold and
+// each owner that its fields took hold no allocation here. A read or a store through a null cell
+// is undefined behavior (D10.7) outside the proof, so it adds no execution to this edge.
+fn null_descendants(state mut* s, u32 a) void {
+    bool mut@ own seen = new(bool, s->atoms_len);
+    defer del(seen);
+    owned_from(s, a, seen);
+    u64 mut k = 0;
+    while (k < seen.len) {
+        if (seen[k]) { s->atoms[k].root = nullness{root_kind.null_root, provenance.established}; }
+        k += 1;
+    }
+}
+
+// Whether a condition has a truth that may remove an edge (D17.18): a known scalar that a null
+// test of an established root, or a constant or comparison of this body, gave. No call changes
+// it: a call forgets each scalar local that a callee can write (`forget_scalars`).
+fn may_prune_truth(value cond) bool {
+    return cond.kind == value_kind.scalar && cond.known;
 }
 
 // Joins a state into the entry of block `to`. A block that changes waits for another visit.
@@ -4796,6 +4893,7 @@ fn free_context(context mut* c) void {
     del(c->fixed);
     del(c->local_first);
     del(c->local_count);
+    del(c->named);
     del(c->caller_first);
     del(c->caller_count);
     del(c->callers);

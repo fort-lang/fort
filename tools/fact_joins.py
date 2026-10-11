@@ -24,11 +24,19 @@ No test reads a provenance before a rule prunes on it, so this tool holds the pr
   RECORD_PARAMETERS, only as an argument of its join, or on a line with the tag
   `// join: copy`: one side gives the record.
 - A graft function (GRAFT_FUNCTIONS) reads a whole typed field of a callee only as an argument of
-  the join of its type or of its ASSUMES function: the caller assumes each callee fact. Each
-  assignment of GRAFT_ASSUMES stays, so a callee fact cannot pass without one.
+  the join of its type, of its ASSUMES or IMPORTS function, or of its PRUNES predicate: the
+  caller imports or assumes each callee fact, and a predicate copies none. Each assignment of
+  GRAFT_ASSUMES stays, so a callee fact cannot pass without one.
 - `provenance.established` and a call of `null_value()` occur only in the functions of
   ESTABLISHED_SITES and NULL_VALUE_SITES, each exactly as often as the table says. A new
   established fact is a change of this table, so review sees it.
+- `may_prune` and `may_prune_truth` occur only in the functions of PRUNING_SITES, each exactly as
+  often as the table says. Each site that removes a path reads one of them (D17.18), so a site
+  that drops its predicate, or a new site, is a change of this table.
+- A known scalar is a fact too. `forget_scalars` occurs only in the functions of FORGET_SITES,
+  and each callee effect, a call of `apply` or `unknown_call`, only in those of EFFECT_SITES, each
+  exactly as often as the table says. In each function of EFFECT_SITES the forget comes before
+  the first callee effect, so each callee effect follows the one forget.
 
 The report has one row for each field. The tool fails for each of these problems:
 
@@ -43,9 +51,12 @@ The report has one row for each field. The tool fails for each of these problems
 - a `may` or `must` field with no join assignment, or with an assignment of the other operator;
 - a `same`, `owner` or `none` field with a join assignment that uses `||`, `|`, `&&` or `&`;
 - a whole record read in a join function outside its join and without the tag `// join: copy`;
-- a read of a whole typed field in a graft function outside its join and its assume function;
+- a read of a whole typed field in a graft function outside its join, its assume or import
+  function and its predicate;
 - a graft function without an assignment of GRAFT_ASSUMES;
-- an occurrence of `provenance.established` or `null_value()` that its table does not count;
+- an occurrence of `provenance.established`, `null_value()`, a pruning predicate,
+  `forget_scalars`, `apply` or `unknown_call` that its table does not count;
+- a function of EFFECT_SITES whose first callee effect comes before its forget;
 - a struct of STRUCTS, or a join function, that the file does not declare.
 
 A new fact type adds one row to FACT_JOINS and one join function to `ownership_facts.ft`.
@@ -74,6 +85,15 @@ ASSUMES = {
     "nullness": "assume",
     "status_fact": "assume_status",
 }
+# The function that gives a callee fact of a type its provenance in the caller: `imported` for a
+# fact that the callee established or imported, `assumed` otherwise.
+IMPORTS = {
+    "nullness": "import_nullness",
+}
+# The predicate that reads a fact of a type to decide whether it removes a path. It copies no fact.
+PRUNES = {
+    "nullness": "may_prune",
+}
 # The function that joins two records of a struct. A struct that no join function names has no
 # typed field.
 JOIN_FUNCTIONS = {
@@ -92,11 +112,12 @@ RECORD_PARAMETERS = {
 }
 # The functions that put the facts of a callee summary into the state of its caller.
 GRAFT_FUNCTIONS = ("apply", "graft_value")
-# The assignments that make the facts of a callee assumed in its caller: a graft function, a
-# typed field, and the ASSUMES function that each graft assigns it from.
+# The assignments that give the facts of a callee their provenance in its caller: a graft
+# function, a typed field, and the IMPORTS or ASSUMES function that each graft assigns it from.
+# A root fact is imported; a status is assumed, because no rule reads a status provenance.
 GRAFT_ASSUMES = (
-    ("graft_value", "nullness", "assume"),
-    ("apply", "root", "assume"),
+    ("graft_value", "nullness", "import_nullness"),
+    ("apply", "root", "import_nullness"),
     ("apply", "status", "assume_status"),
 )
 # The functions that may write `provenance.established`, and how often. Each one is an operation
@@ -107,7 +128,8 @@ ESTABLISHED_SITES = {
     "address_fact": 1,
     "operand": 1,
     "allocate": 2,
-    "refine": 2,
+    "refine": 1,
+    "null_descendants": 1,
     "release": 4,
     "write_at": 1,
     "escape": 1,
@@ -126,6 +148,27 @@ NULL_VALUE_SITES = {
     "release_place": 1,
     "end_slot": 1,
     "finish_return": 1,
+}
+# The functions that may call `may_prune` or `may_prune_truth`, and how often: each site that
+# removes a path (D17.18). null_test: an empty value, an address and the atom of a view. refine:
+# a known truth, and one root result for the null and the nonnull edge. apply: the null exit
+# root of the callee and the nonnull caller root of the exit contradiction. A callee without a
+# return removes a caller path only because its own paths ended at these sites, so that site
+# reads no fact.
+PRUNING_SITES = {
+    "null_test": 3,
+    "refine": 2,
+    "apply": 2,
+}
+# The functions that may call `forget_scalars`, and how often: a call forgets each scalar local
+# that a callee can write before any callee effect.
+FORGET_SITES = {
+    "call": 1,
+}
+# The functions that may apply a callee effect, a call of `apply` or `unknown_call`, and how often.
+# Each of them comes after the forget of FORGET_SITES in the same function.
+EFFECT_SITES = {
+    "call": 4,
 }
 # same: an identity that a join keeps only when both sides agree. owner: a container or an index
 # whose records the join of the struct pairs. none: no path fact, or a fact that the join drops.
@@ -463,15 +506,16 @@ def check_grafts(structs, bodies, problems):
             continue
         for field in typed:
             names = [FACT_JOINS[field.fact]]
-            if field.fact in ASSUMES:
-                names.append(ASSUMES[field.fact])
+            for table in (ASSUMES, IMPORTS, PRUNES):
+                if field.fact in table:
+                    names.append(table[field.fact])
             spans = body.spans(names)
             for offset, write, _ in field_uses(body.code, field.name):
                 if not write and not inside(offset, spans):
-                    problems.append("%s:%d: %s reads %s.%s outside %s; the caller assumes "
-                                    "each callee fact" % (SOURCE, body.number_at(offset),
-                                                          function, field.struct, field.name,
-                                                          " or ".join(names)))
+                    problems.append("%s:%d: %s reads %s.%s outside %s; the caller imports or "
+                                    "assumes each callee fact"
+                                    % (SOURCE, body.number_at(offset), function, field.struct,
+                                       field.name, " or ".join(names)))
 
 
 def check_graft_assumes(bodies, problems):
@@ -506,6 +550,20 @@ def count_sites(bodies, lines, pattern, table, what, problems):
     return sum(found.values())
 
 
+def check_forget_order(bodies, effects, problems):
+    """Hold that each function of `effects` forgets its scalars before its first callee effect."""
+    for name in sorted(effects):
+        body = bodies.get(name)
+        if body is None:
+            continue
+        code = without_strings("\n".join(code_of(line) for line in body.lines[1:]))
+        forget = re.search(r"\bforget_scalars\(", code)
+        effect = re.search(r"\b(?:apply|unknown_call)\(", code)
+        if effect is not None and (forget is None or forget.start() > effect.start()):
+            problems.append("%s:%d: %s applies a callee effect before forget_scalars, so a callee "
+                            "can change a known scalar" % (SOURCE, body.first, name))
+
+
 def report(structs, out):
     """Write one row for each field, then the totals."""
     count = typed = 0
@@ -532,9 +590,10 @@ def report(structs, out):
               % (count, typed, count - typed - untagged, untagged))
 
 
-def check(text, established=None, null_values=None):
-    """The parsed structs, the problems and the site counts of one source text. The two tables
-    default to ESTABLISHED_SITES and NULL_VALUE_SITES."""
+def check(text, established=None, null_values=None, pruning=None, forget=None, effects=None):
+    """The parsed structs, the problems and the site counts of one source text. The tables
+    default to ESTABLISHED_SITES, NULL_VALUE_SITES, PRUNING_SITES, FORGET_SITES and
+    EFFECT_SITES."""
     lines = text.splitlines()
     problems = []
     structs = parse_structs(lines, problems)
@@ -551,16 +610,27 @@ def check(text, established=None, null_values=None):
         count_sites(bodies, lines, r"\bnull_value\(\)",
                     NULL_VALUE_SITES if null_values is None else null_values,
                     "null_value()", problems),
+        count_sites(bodies, lines, r"\bmay_prune(?:_truth)?\(",
+                    PRUNING_SITES if pruning is None else pruning,
+                    "pruning predicate", problems),
+        count_sites(bodies, lines, r"\bforget_scalars\(",
+                    FORGET_SITES if forget is None else forget,
+                    "forget_scalars", problems),
+        count_sites(bodies, lines, r"\b(?:apply|unknown_call)\(",
+                    EFFECT_SITES if effects is None else effects,
+                    "callee effect", problems),
     )
+    check_forget_order(bodies, EFFECT_SITES if effects is None else effects, problems)
     return structs, problems, sites
 
 
-def run(text, out, err, established=None, null_values=None):
+def run(text, out, err, established=None, null_values=None, pruning=None, forget=None,
+        effects=None):
     """Check one source text, write the report and the problems, and give the exit status."""
-    structs, problems, sites = check(text, established, null_values)
+    structs, problems, sites = check(text, established, null_values, pruning, forget, effects)
     report(structs, out)
-    out.write("fact_joins: %d provenance.established, %d null_value() in their functions\n"
-              % sites)
+    out.write("fact_joins: %d provenance.established, %d null_value(), %d pruning predicates, "
+              "%d forget_scalars, %d callee effects in their functions\n" % sites)
     out.flush()
     for item in problems:
         err.write("fact_joins: error: %s\n" % item)
