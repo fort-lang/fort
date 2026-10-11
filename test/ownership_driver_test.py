@@ -310,9 +310,9 @@ class OwnershipDriverTest(unittest.TestCase):
         self.assertIn("ownership proof is incomplete", diagnostic["diagnostics"][0]["message"])
         self.assertEqual(coverage["kind"], "fort-ownership-report")
         # Version 2 added the W scale and FIR sizes, version 3 the local ledgers, version 4 the
-        # raw ledgers, version 5 the stored-borrow ledgers and version 6 the process-exit
-        # ledgers and the boundary.
-        self.assertEqual(coverage["version"], 6)
+        # raw ledgers, version 5 the stored-borrow ledgers, version 6 the process-exit
+        # ledgers and the boundary, and version 7 the calls_summary and calls_heap ledgers.
+        self.assertEqual(coverage["version"], 7)
         self.assertIn("w_scale", coverage["limits"])
 
     def test_index_still_populates_identifier_records(self):
@@ -708,6 +708,38 @@ class OwnershipDriverTest(unittest.TestCase):
         used = {count["category"]: count["used"] for count in ledger["counts"]}
         self.assertEqual(used["V"], 3)
         self.assertGreater(used["W"], 0)
+
+    def test_calls_ledgers_cover_the_graph_and_unproved_bodies_render(self):
+        self.entry.write_text(self.LOCAL_CASES)
+        self.assertEqual(self.invoke("--json", standard=Path(OPTIONS.std_dir)).returncode, 1)
+        document = self.evidence()
+        graph = [row for row in document["meters"] if row["name"] == "graph_private"]
+        self.assertEqual(len(graph), 1)
+        # Each solver solves each component once, so the FIR sizes of its ledgers sum to the
+        # graph FIR size, and both solvers have one ledger for each component owner.
+        owners = {}
+        for name in ("calls_summary", "calls_heap"):
+            rows = [row for row in document["meters"] if row["name"] == name]
+            self.assertGreater(len(rows), 0, name)
+            self.assertEqual(sum(row["fir_size"] for row in rows), graph[0]["fir_size"], name)
+            owners[name] = sorted(json.dumps(row["owner"], sort_keys=True) for row in rows)
+        self.assertEqual(owners["calls_summary"], owners["calls_heap"])
+        # Each declared body without calls_heap proof renders one record and its note.
+        declared = [
+            body for body in document["bodies"]
+            if body["analyses"][5]["correspondence"] == "complete"
+            and body["analyses"][5]["proof"] != "complete"
+        ]
+        diagnostic = json.loads(self.result.stdout)["diagnostics"]
+        records = [row for row in diagnostic
+                   if row["message"] == "cannot prove the call and heap obligations here"]
+        self.assertEqual(len(records), len(declared))
+        self.assertIn("leak", {body["source"]["name"] for body in declared})
+        leak = [row for row in records
+                if row["line"] == 3 and row["file"].endswith(self.entry.name)]
+        self.assertEqual(len(leak), 1)
+        self.assertEqual([note["message"] for note in leak[0]["notes"]],
+                         ["calls_heap: missing_path"])
 
     def test_local_diagnostics_keep_json_version_one(self):
         self.entry.write_text(self.LOCAL_CASES)

@@ -96,7 +96,7 @@ def make_report(argv, cwd, *, accepted=False, files=None):
             )
     report = {
         "kind": "fort-ownership-report",
-        "version": 6,
+        "version": 7,
         "complete": True,
         "compiler_version": "fort synthetic 1",
         "invocation": {
@@ -150,7 +150,7 @@ def body_ledger(index, name, owner, size, limits):
     return {
         "id": index,
         "name": name,
-        "owner": dict(owner),
+        "owner": None if owner is None else dict(owner),
         "fir_size": size,
         "counts": [{"category": "W", "scope": "computation", "used": 0, "bound": bound}],
         "first_refusal": None,
@@ -162,11 +162,11 @@ def owner_key(owner):
 
 
 def fit_local_ledgers(report):
-    """Give each verified body of a report its service ledger and one ledger of each producer.
+    """Give each verified body its service, producer, and synthetic call component ledgers.
 
     A body ledger of a key that names no verified body goes. A verified body without a service
-    ledger gets one of FIR size 0, so a graph sum keeps its value. The other meters keep their
-    order, and the IDs follow it.
+    ledger gets one of FIR size 0. A started call computation gets singleton components. The
+    other meters keep their order, and the IDs follow it.
     """
     verified = [
         body["key"]
@@ -177,7 +177,7 @@ def fit_local_ledgers(report):
     meters = [
         meter
         for meter in report["meters"]
-        if meter["name"] not in ("services",) + PRODUCERS
+        if meter["name"] not in ("services",) + PRODUCERS + audit.COMPONENT_LEDGERS
         or meter["owner"] is None
         or owner_key(meter["owner"]) in keys
     ]
@@ -195,6 +195,20 @@ def fit_local_ledgers(report):
                 meters.append(body_ledger(0, "services", key, 0, report["limits"]))
                 services[owner_key(key)] = 0
             meters.append(body_ledger(0, name, key, services[owner_key(key)], report["limits"]))
+    calls_index = audit.ANALYSES.index("calls_heap")
+    calls_started = any(
+        body["analyses"][calls_index]["solver"] != "unexecuted" for body in report["bodies"]
+    )
+    has_calls_ledgers = any(meter["name"] in audit.COMPONENT_LEDGERS for meter in meters)
+    if calls_started and not has_calls_ledgers:
+        if not any(meter["name"] == "graph_private" for meter in meters):
+            size = sum(services.values())
+            meters.append(body_ledger(0, "graph_private", None, size, report["limits"]))
+        for name in audit.COMPONENT_LEDGERS:
+            for key in verified:
+                meters.append(
+                    body_ledger(0, name, key, services[owner_key(key)], report["limits"])
+                )
     for index, meter in enumerate(meters):
         meter["id"] = index
     report["meters"] = meters
@@ -487,9 +501,11 @@ class SchemaTests(RepositoryFixture):
                 self.reject(lambda value, select=select: select(value).update(extra=0))
 
     def test_unknown_versions_and_invalid_complete_types(self):
-        # Version 3 adds local ledgers, version 4 raw ledgers, version 5 stored ledgers and
-        # version 6 process-exit ledgers and the boundary. Earlier versions lack them.
-        for version in (0, 1, 2, 3, 4, 5, 7, True, -1, 6.0, "6", audit.U64_MAX + 1):
+        # Version 3 adds local ledgers, version 4 raw ledgers, version 5 stored ledgers,
+        # version 6 process-exit ledgers and the boundary, and version 7 the calls_heap ledgers.
+        # The audit accepts version 7 only.
+        self.assertEqual(audit.REPORT_VERSION, 7)
+        for version in (0, 1, 2, 3, 4, 5, 6, 8, True, -1, 7.0, "7", audit.U64_MAX + 1):
             with self.subTest(version=version):
                 self.reject(lambda value: value.update(version=version))
         for complete in (False, 0, 1, "true", None):
@@ -873,6 +889,167 @@ class SchemaTests(RepositoryFixture):
         for index, meter in enumerate(self.report["meters"]):
             meter["id"] = index
         self.validate()
+
+    def test_calls_ledgers_sum_to_the_graph_fir_size(self):
+        # Each calls_heap solver keeps one ledger for each component of the graph, owned by its
+        # first member. The components partition the graph bodies. Here {0, 2} has size 5, and
+        # {1} has size 3.
+        extra = self.write("src/fort/extra.ft", "fn extra() void {}\n")
+        self.report = make_report(
+            self.argv,
+            self.checkout,
+            files=[
+                str(self.checkout / "src/fort/main.ft"),
+                str(self.standard / "rt.ft"),
+                str(extra),
+            ],
+        )
+        sizes = [2, 3, 3]
+        components = [sizes[0] + sizes[2], sizes[1]]
+        bodies = self.report["bodies"]
+        self.assertEqual(len(bodies), 3)
+        keys = [dict(body["key"]) for body in bodies]
+
+        def ledger(name, owner, size, refusal=None):
+            return {
+                "id": 0,
+                "name": name,
+                "owner": owner,
+                "fir_size": size,
+                "counts": [{"category": "W", "scope": "computation", "used": 0,
+                            "bound": W_BASE + W_SCALE * size}],
+                "first_refusal": refusal,
+            }
+
+        def number(meters):
+            for index, meter in enumerate(meters):
+                meter["id"] = index
+
+        self.report["meters"] = [ledger("graph_private", None, sum(sizes))] + [
+            ledger("services", key, size) for key, size in zip(keys, sizes)
+        ]
+        fit_local_ledgers(self.report)
+        calls_index = audit.ANALYSES.index("calls_heap")
+        self.report["analyses"][calls_index]["producer"] = "integrated"
+        for body in bodies:
+            body["analyses"][calls_index].update(correspondence="complete", solver="complete")
+        self.report["totals"] = audit.derived_totals(bodies)
+        refusal = incomplete("calls_heap", "work_limit",
+                             limit={"category": "E", "used": LIMITS["e"], "bound": LIMITS["e"]})
+        for name in audit.COMPONENT_LEDGERS:
+            self.report["meters"].append(ledger(name, keys[0], components[0], refusal))
+            self.report["meters"].append(ledger(name, keys[1], components[1]))
+        number(self.report["meters"])
+        self.validate()
+        at = {
+            (meter["name"], json.dumps(meter["owner"], sort_keys=True)): index
+            for index, meter in enumerate(self.report["meters"])
+            if meter["name"] in audit.COMPONENT_LEDGERS
+        }
+        first = at[("calls_summary", json.dumps(keys[0], sort_keys=True))]
+        second = at[("calls_summary", json.dumps(keys[1], sort_keys=True))]
+        heap = at[("calls_heap", json.dumps(keys[1], sort_keys=True))]
+
+        def resize(value, index, size):
+            value["meters"][index].update(fir_size=size)
+            value["meters"][index]["counts"][0]["bound"] = W_BASE + W_SCALE * size
+
+        # A sum that differs from the graph FIR size, by one unit either way.
+        for size in (components[1] - 1, components[1] + 1):
+            with self.subTest(size=size):
+                self.reject(lambda value, size=size: resize(value, second, size),
+                            "calls_heap ledger: FIR sizes differ from the graph ledger")
+        self.reject(lambda value: resize(value, heap, components[1] + 1),
+                    "calls_heap ledger: FIR sizes differ from the graph ledger")
+
+        # Without a graph ledger, no sum holds.
+        def drop_graph(value):
+            value["meters"].pop(0)
+            number(value["meters"])
+
+        self.reject(drop_graph, "calls_heap ledger: FIR sizes differ from the graph ledger")
+
+        # The ledger of a component holds the FIR size of its owner.
+        def below(value):
+            resize(value, first, sizes[0] - 1)
+            resize(value, second, sum(sizes) - sizes[0] + 1)
+
+        self.reject(below, "calls_heap ledger: FIR size below its owner")
+        self.reject(lambda value: value["meters"][second].update(owner=dict(keys[0])),
+                    "calls_heap ledger: duplicate owner")
+        self.reject(lambda value: value["meters"][second].update(owner=None),
+                    "calls_heap ledger: missing owner")
+        unknown = dict(keys[1], declaration=keys[1]["declaration"] + 1000)
+        self.reject(lambda value: value["meters"][second].update(owner=unknown),
+                    "meter: unknown owner")
+        # Both solvers solve the same components, so their owners agree.
+        def one_heap_component(value):
+            value["meters"] = [m for m in value["meters"] if m["name"] != "calls_heap"]
+            value["meters"].append(ledger("calls_heap", dict(keys[0]), sum(sizes)))
+            number(value["meters"])
+
+        self.reject(one_heap_component,
+                    "calls_heap ledger: the two solvers have different components")
+
+        def summary_only(value):
+            value["meters"] = [m for m in value["meters"] if m["name"] != "calls_heap"]
+            number(value["meters"])
+
+        self.reject(summary_only, "calls_heap ledger: the two solvers have different components")
+
+        # Both solvers use the same FIR size for each component, not only the same total.
+        def conflicting_sizes(value):
+            heap_ledgers = [
+                meter for meter in value["meters"] if meter["name"] == "calls_heap"
+            ]
+            resize(value, value["meters"].index(heap_ledgers[0]), components[0] - 1)
+            resize(value, value["meters"].index(heap_ledgers[1]), components[1] + 1)
+
+        self.reject(
+            conflicting_sizes,
+            "calls_heap ledger: the two solvers have different component FIR sizes",
+        )
+
+        # Completed solver rows require both component maps. Rows whose solver did not run can
+        # have no component ledger.
+        def no_ledgers(value):
+            value["meters"] = [
+                m for m in value["meters"] if m["name"] not in audit.COMPONENT_LEDGERS
+            ]
+            number(value["meters"])
+
+        self.reject(
+            no_ledgers,
+            "calls_heap ledger: started computation has no component ledger",
+        )
+        report = copy.deepcopy(self.report)
+        for body in report["bodies"]:
+            body["analyses"][calls_index]["solver"] = "incomplete"
+        no_ledgers(report)
+        report["totals"] = audit.derived_totals(report["bodies"])
+        with self.assertRaisesRegex(
+            audit.InvalidEvidence, "calls_heap ledger: started computation has no component ledger"
+        ):
+            self.validate(report)
+
+        # A graph W refusal stops summary layout before a component computation starts. Its
+        # incomplete body rows need no component ledger.
+        graph = report["meters"][0]
+        bound = graph["counts"][0]["bound"]
+        graph["counts"][0]["used"] = bound
+        graph["first_refusal"] = incomplete(
+            "graph", "work_limit", limit={"category": "W", "used": bound, "bound": bound}
+        )
+        self.validate(report)
+
+        report = copy.deepcopy(self.report)
+        no_ledgers(report)
+        for body in report["bodies"]:
+            body["analyses"][calls_index].update(
+                correspondence="unexecuted", solver="unexecuted"
+            )
+        report["totals"] = audit.derived_totals(report["bodies"])
+        self.validate(report)
 
     def test_local_ledgers_follow_the_service_ledger_of_their_body(self):
         self.check_flow_ledgers("local")
@@ -1736,6 +1913,14 @@ class BudgetTests(RepositoryFixture):
                 with self.subTest(ledger=ledger, used=used, code=code):
                     self.meter(used=used, code=code)
                     self.report["meters"][0]["name"] = ledger
+                    if ledger == "graph_private":
+                        self.report["meters"] = [
+                            meter
+                            for index, meter in enumerate(self.report["meters"])
+                            if index == 0 or meter["name"] != "graph_private"
+                        ]
+                        for index, meter in enumerate(self.report["meters"]):
+                            meter["id"] = index
                     with self.assertRaisesRegex(audit.InvalidEvidence, "budget refusal: accepted"):
                         self.validate(exit_status=0)
 

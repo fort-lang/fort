@@ -3,7 +3,23 @@
 //! stdout:
 //| rows ok
 //| document ok
+//| ledgers ok
 //| diagnostics ok
+//| record order ok
+//| record refusal ok
+//| budget record ok
+//| shown budget record ok
+//| ledger budgets ok
+//| member budgets ok
+//| caller budget order ok
+//| solver budget order ok
+//| duplicate budget order ok
+//| body budget order ok
+//| event class order ok
+//| ledger terminal order ok
+//| shared ledger terminal ok
+//| budget charge refusal ok
+//| report charge ok
 //| no graph ok
 //| reasons ok
 //| lowering failure ok
@@ -12,6 +28,7 @@
 /// Checks how the report carries the integrated calls_heap analysis.
 import diag;
 import ownership_api;
+import ownership_keys;
 import ownership_report;
 import ownership_source;
 import ownership_source_calls;
@@ -25,6 +42,16 @@ string[4] PROGRAM = {
     "fn leak() void { i32 mut* own p = new(i32); }",
     "fn caller() void { leak(); }",
     "fn calls_noop() void { noop(); }",
+};
+
+string[2] MUTUAL = {
+    "fn left(bool b) void { if (b) { right(false); } }",
+    "fn right(bool b) void { if (b) { left(false); } }",
+};
+
+string[2] ORDER = {
+    "fn caller() void { callee(); }",
+    "fn callee() void {}",
 };
 
 fn open(ownership_source_env.env mut* e, strbuf.str_buf mut* text, string@ lines, bool runtime)
@@ -98,8 +125,7 @@ fn rows() void {
     println("rows ok");
 }
 
-// The document names calls_heap as an integrated analysis and writes each row. Version 6 lists
-// no calls_heap ledger.
+// The document names calls_heap as an integrated analysis and writes each row.
 fn document() void {
     ownership_source_env.env mut e = ownership_source_env.env{};
     strbuf.str_buf mut text = strbuf.create();
@@ -110,7 +136,7 @@ fn document() void {
     defer strbuf.free(&out);
     ownership_report.invocation call = ownership_report.invocation{};
     ownership_report.build(&out, &e.source, &call, 1);
-    contains(&out, "{\"kind\":\"fort-ownership-report\",\"version\":6,");
+    contains(&out, "{\"kind\":\"fort-ownership-report\",\"version\":7,");
     strbuf.str_buf mut row = strbuf.create();
     defer strbuf.free(&row);
     strbuf.append(&row, "{\"name\":\"calls_heap\",\"producer\":\"integrated\",");
@@ -125,28 +151,736 @@ fn document() void {
     strbuf.append(&row, "{\"name\":\"calls_heap\",\"correspondence\":\"incomplete\",");
     strbuf.append(&row, "\"solver\":\"complete\",\"proof\":\"incomplete\",\"violations\":0}");
     contains(&out, strbuf.view(&row));
-    assert(str.find(strbuf.view(&out), "\"name\":\"calls_heap\",\"owner\"") < 0);
     assert(str.find(strbuf.view(&out), "missing_producer") < 0);
     println("document ok");
 }
 
-// The calls_heap row renders no record yet: the diagnostics are the local violation and the
-// one closure reason of the graph.
+// The number of times that `part` occurs in `text`.
+fn occurrences(string text, string part) u64 {
+    u64 mut count = 0;
+    u64 mut from = 0;
+    while (from <= text.len) {
+        i64 at = str.find(text[from..], part);
+        if (at < 0) { break; }
+        count += 1;
+        from += cast(at, u64) + part.len;
+    }
+    return count;
+}
+
+// The sum of the FIR sizes of the ledgers of one solver.
+fn solver_size(ownership_source_calls.context* calls, ownership_source_calls.solver_kind solver)
+    u64 {
+    u64 mut size = 0;
+    u64 mut i = 0;
+    while (i < calls->ledgers_len) {
+        if (calls->ledgers[i].solver == solver) { size += calls->ledgers[i].fir_size; }
+        i += 1;
+    }
+    return size;
+}
+
+// Version 7 lists one calls_summary and one calls_heap ledger for each component, after the
+// ledgers of the bodies. The FIR sizes of the ledgers of each solver sum to the graph FIR size.
+// A refusal without a source stands at the declaration of the owner of its ledger.
+fn ledgers() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, PROGRAM[..], true);
+    defer ownership_source_env.close(&e);
+    ownership_source_calls.context* calls = &e.source.calls;
+    u64 components = cast(e.source.graph.component_count, u64);
+    assert(components > 0 && calls->ledgers_len == 2 * components);
+    assert(solver_size(calls, ownership_source_calls.solver_kind.summary) ==
+        e.source.graph.fir_size);
+    assert(solver_size(calls, ownership_source_calls.solver_kind.heap) ==
+        e.source.graph.fir_size);
+    ownership_source.body* leak = ownership_source_env.find(&e, "main", "leak");
+    u64 at = leak->calls->summary_ledger;
+    ownership_source_calls.ledger mut* l = &e.source.calls.ledgers[at];
+    assert(l->solver == ownership_source_calls.solver_kind.summary);
+    // The operation names no body of the closure.
+    ownership_api.function_id outside = ownership_api.function_id{
+        ownership_api.declaration_id{4000000, 0}, 0};
+    ownership_api.proof_status mut refused = ownership_api.incomplete(
+        ownership_api.incomplete_reason.work_limit,
+        ownership_api.operation_position{.function = outside}, ownership_api.source_position{});
+    refused.terminal.limit = ownership_api.exhaustion{.present = true,
+        .category = ownership_api.limit_category.e, .used = 3, .bound = 3, .attempted = 1};
+    l->first_refusal = refused;
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    ownership_report.invocation call = ownership_report.invocation{};
+    ownership_report.build(&out, &e.source, &call, 1);
+    string doc = strbuf.view(&out);
+    assert(occurrences(doc, "\"name\":\"calls_summary\",\"owner\":{") == components);
+    assert(occurrences(doc, "\"name\":\"calls_heap\",\"owner\":{") == components);
+    // The calls ledgers follow the ledgers of the last body.
+    i64 first = str.find(doc, "\"name\":\"calls_summary\"");
+    assert(first > 0);
+    string rest = doc[cast(first, u64)..];
+    assert(str.find(rest, "\"name\":\"process_exit\",\"owner\"") < 0);
+    assert(str.find(rest, "\"name\":\"services\",\"owner\"") < 0);
+    strbuf.str_buf mut ledger = strbuf.create();
+    defer strbuf.free(&ledger);
+    strbuf.append(&ledger, "\"first_refusal\":{\"stage\":\"calls_heap\",");
+    strbuf.append(&ledger, "\"code\":\"work_limit\",");
+    strbuf.append(&ledger, "\"source\":{\"file\":");
+    contains(&out, strbuf.view(&ledger));
+    ownership_api.proof_status located = ownership_source_calls.ledger_refusal(calls, at, refused);
+    assert(located.terminal.source.line == leak->source.line);
+    assert(located.terminal.source.col == leak->source.col);
+    println("ledgers ok");
+}
+
+// The number of bodies of the closure that render a calls_heap record.
+fn shown_bodies(ownership_source.context* c) u64 {
+    u64 mut count = 0;
+    u64 mut i = 0;
+    while (i < c->bodies.len) {
+        if (ownership_source_calls.shows_record(&c->calls, i)) { count += 1; }
+        i += 1;
+    }
+    return count;
+}
+
+// The index of body `name` of module main.
+fn body_index(ownership_source_env.env mut* e, string name) u64 {
+    ownership_source.body* row = ownership_source_env.find(e, "main", name);
+    u64 mut i = 0;
+    while (true) {
+        ownership_source.body* at = &e->source.bodies[i];
+        if (at == row) { return i; }
+        i += 1;
+    }
+}
+
+// The calls_heap row of body `name` of module main, which a test can change.
+fn calls_row(ownership_source_env.env mut* e, string name) ownership_source_calls.row mut* {
+    return &e->source.calls.rows[body_index(e, name)];
+}
+
+// A declared body without calls_heap proof renders one record at the terminal of its proof:
+// "cannot prove the call and heap obligations here", and a note with the reason. A body outside
+// the declared scope and a proved body render none. Each line of a record charges one V unit of
+// the summary ledger of the body.
 fn diagnostics() void {
     ownership_source_env.env mut e = ownership_source_env.env{};
     strbuf.str_buf mut text = strbuf.create();
     defer strbuf.free(&text);
     open(&e, &text, PROGRAM[..], true);
     defer ownership_source_env.close(&e);
+    ownership_source_calls.context* calls = &e.source.calls;
+    assert(ownership_source_calls.shows_record(calls, body_index(&e, "leak")));
+    assert(!ownership_source_calls.shows_record(calls, body_index(&e, "caller")));
+    assert(!ownership_source_calls.shows_record(calls, body_index(&e, "noop")));
+    assert(!ownership_source_calls.shows_record(calls, body_index(&e, "calls_noop")));
+    assert(!ownership_source_calls.shows_record(calls, e.source.bodies.len));
+    ownership_source.body* leak = ownership_source_env.find(&e, "main", "leak");
+    ownership_source_calls.ledger* summary = &calls->ledgers[leak->calls->summary_ledger];
+    u64 before = summary->meter.used.v;
     diag.sink mut found = diag.sink{};
     defer diag.free(&found);
     ownership_report.diagnose(&e.source, &found, "main.ft");
-    assert(diag.count(&found) == 2);
-    assert(str.find(diag.record_at(&found, 0).msg, "lost ownership of ") == 0);
+    assert(summary->meter.used.v == before + 2);
+    u64 mut shown = 0;
+    u64 mut i = 0;
+    while (i < diag.record_count(&found)) {
+        diag.record r = diag.record_at(&found, i);
+        if (r.msg == "cannot prove the call and heap obligations here") {
+            assert(r.msg == ownership_report.CALLS_UNPROVED);
+            assert(r.severity == diag.severity.error);
+            diag.record note = diag.record_at(&found, i + 1);
+            assert(note.severity == diag.severity.note);
+            assert(str.find(note.msg, "calls_heap: ") == 0);
+            assert(note.loc.line == r.loc.line && note.loc.col == r.loc.col);
+            shown += 1;
+        }
+        i += 1;
+    }
+    assert(shown == shown_bodies(&e.source) && shown >= 1);
+    // The record of the leak stands at its first unproved event, after the local violation at
+    // the same place.
+    u64 lost = find_record(&found, "lost ownership of 'p'");
+    assert(lost + 3 < diag.record_count(&found));
+    diag.record at_leak = diag.record_at(&found, lost + 2);
+    diag.record violation = diag.record_at(&found, lost);
+    assert(at_leak.msg == ownership_report.CALLS_UNPROVED);
+    assert(at_leak.loc.file == violation.loc.file);
+    assert(at_leak.loc.line == 2 && at_leak.loc.col == 45 && violation.loc.col == 45);
+    assert(diag.record_at(&found, lost + 3).msg == "calls_heap: missing_path");
     u64 last = diag.record_count(&found) - 1;
     assert(str.find(diag.record_at(&found, last).msg,
         "ownership proof is incomplete (graph: source_coverage)") == 0);
     println("diagnostics ok");
+}
+
+// The calls_heap record of a body merges with the records of the other analyses in source
+// order: a record at line 1 comes before a raw failure at line 2.
+fn record_order() void {
+    ownership_source.body mut row = ownership_source.body{};
+    row.raw.solved = true;
+    row.raw.unproved = new(ownership_source_local.violation, 1);
+    defer del(row.raw.unproved);
+    row.raw.unproved[0] = ownership_source_local.violation{.source =
+        ownership_api.source_position{0, 0, 2, 1, 2, 3, true},
+        .kind = ownership_api.event_kind.incomplete_proof, .name = "raw",
+        .leaf = ownership_source_local.WHOLE};
+    row.raw.unproved_len = 1;
+    ownership_source_calls.row mut calls_row = ownership_source_calls.row{};
+    calls_row.proof = ownership_api.incomplete(ownership_api.incomplete_reason.missing_path,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    calls_row.source = ownership_api.source_position{0, 0, 1, 4, 1, 8, true};
+    // A terminal without a source stands at the declaration of the body.
+    ownership_source_local.violation calls = ownership_report.calls_order(&calls_row);
+    assert(calls.source.line == 1 && calls.source.col == 4);
+    assert(calls.kind == ownership_api.event_kind.incomplete_proof);
+    u64[7] mut cursor = {0, 0, 0, 0, 0, 0, 0};
+    u64 mut from = 9;
+    assert(ownership_report.next_record(&row, cursor[..], &from, &calls)->source.line == 1);
+    assert(from == 4);
+    cursor[4] += 1;
+    assert(ownership_report.next_record(&row, cursor[..], &from, &calls)->name == "raw");
+    assert(from == 3);
+    println("record order ok");
+}
+
+// A refused V charge of a calls_heap record renders one terminal error at the record with the V
+// bound of the summary ledger. It stops later records from that ledger. Other ledgers continue.
+fn record_refusal() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, PROGRAM[..], true);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* leak = ownership_source_env.find(&e, "main", "leak");
+    ownership_source_calls.ledger mut* summary =
+        &e.source.calls.ledgers[leak->calls->summary_ledger];
+    summary->meter.bounds.v = summary->meter.used.v + 1;
+    u64 bound = summary->meter.bounds.v;
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.diagnose(&e.source, &found, "main.ft");
+    strbuf.str_buf mut expected = strbuf.create();
+    defer strbuf.free(&expected);
+    strbuf.append(&expected, "cannot prove complete ownership reporting within the report bound ");
+    strbuf.append_u64(&expected, bound);
+    u64 at = find_record(&found, strbuf.view(&expected));
+    assert(at < diag.record_count(&found));
+    diag.record terminal = diag.record_at(&found, at);
+    assert(terminal.loc.line == 2 && terminal.loc.col == 45);
+    assert(summary->first_refusal.terminal.reason == ownership_api.incomplete_reason.report_limit);
+    assert(summary->first_refusal.terminal.limit.category == ownership_api.limit_category.v);
+    assert(summary->report_refusal.terminal.limit.category == ownership_api.limit_category.v);
+    assert(summary->meter.used.v == bound - 1);
+    println("record refusal ok");
+}
+
+// An E refusal with a limit on the operation of the leak.
+fn e_refusal(ownership_source.body* leak) ownership_api.proof_status {
+    ownership_api.proof_status mut out = ownership_api.incomplete(
+        ownership_api.incomplete_reason.work_limit,
+        ownership_api.operation_position{.function = leak->key}, leak->source);
+    out.terminal.limit = ownership_api.exhaustion{.present = true,
+        .category = ownership_api.limit_category.e, .used = 4, .bound = 4, .attempted = 1};
+    return out;
+}
+
+// An incomplete non-budget call proof at the body declaration.
+fn missing_proof(ownership_source.body* row) ownership_api.proof_status {
+    return ownership_api.incomplete(ownership_api.incomplete_reason.missing_path,
+        ownership_api.operation_position{.function = row->key}, row->source);
+}
+
+// A reserved V refusal at the body declaration.
+fn v_refusal(ownership_source.body* row) ownership_api.proof_status {
+    ownership_api.proof_status mut out = e_refusal(row);
+    out.terminal.reason = ownership_api.incomplete_reason.report_limit;
+    out.terminal.limit.category = ownership_api.limit_category.v;
+    return out;
+}
+
+// The index of the first record with message `msg`, or the record count.
+fn find_record(diag.sink* found, string msg) u64 {
+    u64 mut i = 0;
+    while (i < diag.record_count(found) && diag.record_at(found, i).msg != msg) { i += 1; }
+    return i;
+}
+
+// The number of matching records at one source line.
+fn record_count_at(diag.sink* found, string msg, string file, u32 line) u64 {
+    u64 mut count = 0;
+    u64 mut i = 0;
+    while (i < diag.record_count(found)) {
+        diag.record item = diag.record_at(found, i);
+        if (item.msg == msg && str.ends_with(item.loc.file, file) && item.loc.line == line) {
+            count += 1;
+        }
+        i += 1;
+    }
+    return count;
+}
+
+string LEAK_BUDGET =
+    "ownership proof is incomplete (calls_heap: work_limit; category E; used 4; bound 4)";
+string SUMMARY_BUDGET =
+    "ownership proof is incomplete (calls summary: work_limit; category E; used 4; bound 4)";
+string HEAP_BUDGET =
+    "ownership proof is incomplete (calls heap: work_limit; category E; used 4; bound 4)";
+string SUMMARY_REPORT =
+    "ownership proof is incomplete (calls summary: report_limit; category V; used 4; bound 4)";
+
+// A declared body whose proof a budget error stopped renders that budget error, with one V
+// unit, and no "cannot prove" record. When a ledger of the body renders the same refusal, the
+// body renders nothing, and the refusal renders once, as the error of the ledger.
+fn budget_record() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, PROGRAM[..], true);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* leak = ownership_source_env.find(&e, "main", "leak");
+    calls_row(&e, "leak")->proof = e_refusal(leak);
+    ownership_source_calls.ledger mut* summary =
+        &e.source.calls.ledgers[leak->calls->summary_ledger];
+    u64 before = summary->meter.used.v;
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.diagnose(&e.source, &found, "main.ft");
+    u64 mut at = find_record(&found, LEAK_BUDGET);
+    assert(at < diag.record_count(&found));
+    assert(diag.record_at(&found, at).loc.line == leak->source.line);
+    assert(find_record(&found, SUMMARY_BUDGET) == diag.record_count(&found));
+    assert(summary->meter.used.v == before + 1);
+    // The leak renders no "cannot prove" record now.
+    u64 mut unproved = 0;
+    u64 mut i = 0;
+    while (i < diag.record_count(&found)) {
+        if (diag.record_at(&found, i).msg == ownership_report.CALLS_UNPROVED) { unproved += 1; }
+        i += 1;
+    }
+    assert(unproved + 1 == shown_bodies(&e.source));
+    // The summary ledger refuses the same charge first: only its own error renders.
+    summary->first_refusal = e_refusal(leak);
+    diag.sink mut again = diag.sink{};
+    defer diag.free(&again);
+    ownership_report.diagnose(&e.source, &again, "main.ft");
+    assert(find_record(&again, LEAK_BUDGET) == diag.record_count(&again));
+    at = find_record(&again, SUMMARY_BUDGET);
+    assert(at < diag.record_count(&again));
+    assert(find_record(&again, SUMMARY_BUDGET) == at);
+    u64 mut count = 0;
+    i = 0;
+    while (i < diag.record_count(&again)) {
+        if (diag.record_at(&again, i).msg == SUMMARY_BUDGET) { count += 1; }
+        i += 1;
+    }
+    assert(count == 1);
+    println("budget record ok");
+}
+
+// A budget record that is already the shown reason renders nothing and charges nothing. A
+// "cannot prove" record renders also when the shown reason names it, as each other record does.
+fn shown_budget_record() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, PROGRAM[..], true);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* leak = ownership_source_env.find(&e, "main", "leak");
+    u64 index = body_index(&e, "leak");
+    ownership_source_calls.ledger* summary = &e.source.calls.ledgers[leak->calls->summary_ledger];
+    ownership_report.reason unproved = ownership_report.proof_reason("calls_heap",
+        leak->calls->proof);
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    u64 before = summary->meter.used.v;
+    assert(ownership_report.calls_record(&e.source, &found, "main.ft", index, unproved));
+    assert(diag.record_count(&found) == 2 && summary->meter.used.v == before + 2);
+    calls_row(&e, "leak")->proof = e_refusal(leak);
+    ownership_report.reason shown = ownership_report.proof_reason("calls_heap",
+        leak->calls->proof);
+    assert(ownership_report.calls_record(&e.source, &found, "main.ft", index, shown));
+    assert(diag.record_count(&found) == 2 && summary->meter.used.v == before + 2);
+    println("shown budget record ok");
+}
+
+// The budget errors of a ledger: its first refusal when it is a W, E or V refusal, its first W
+// refusal and its first V refusal when another refusal came first. A precision limit renders
+// nothing. The label names the solver, and a W or E error charges one V unit of its ledger.
+fn ledger_budgets() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, PROGRAM[..], true);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* leak = ownership_source_env.find(&e, "main", "leak");
+    ownership_source_calls.ledger mut* heap = &e.source.calls.ledgers[leak->calls->heap_ledger];
+    assert(heap->solver == ownership_source_calls.solver_kind.heap);
+    ownership_api.proof_status mut precision = e_refusal(leak);
+    precision.terminal.limit.category = ownership_api.limit_category.r;
+    heap->first_refusal = precision;
+    ownership_api.proof_status mut work = e_refusal(leak);
+    work.terminal.limit.category = ownership_api.limit_category.w;
+    heap->work_refusal = work;
+    ownership_api.proof_status mut report = e_refusal(leak);
+    report.terminal.reason = ownership_api.incomplete_reason.report_limit;
+    report.terminal.limit.category = ownership_api.limit_category.v;
+    report.terminal.operation.block = 1;
+    heap->report_refusal = report;
+    u64 before = heap->meter.used.v;
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.reason none = ownership_report.reason{};
+    assert(ownership_report.calls_budgets(&e.source, &found, "main.ft", none));
+    assert(diag.record_count(&found) == 2);
+    assert(diag.record_at(&found, 0).msg ==
+        "ownership proof is incomplete (calls heap: work_limit; category W; used 4; bound 4)");
+    assert(diag.record_at(&found, 1).msg ==
+        "ownership proof is incomplete (calls heap: report_limit; category V; used 4; bound 4)");
+    assert(diag.record_at(&found, 0).loc.line == 2);
+    // The W error paid one V unit, and the V error none.
+    assert(heap->meter.used.v == before + 1);
+    // A W refusal that is the first refusal renders once.
+    heap->first_refusal = work;
+    heap->report_refusal = ownership_api.proof_status{};
+    diag.sink mut once = diag.sink{};
+    defer diag.free(&once);
+    assert(ownership_report.calls_budgets(&e.source, &once, "main.ft", none));
+    assert(diag.record_count(&once) == 1);
+    // A refusal that is the shown reason renders no second error.
+    ownership_report.reason shown = ownership_report.proof_reason("calls_heap",
+        ownership_source_calls.ledger_refusal(&e.source.calls, leak->calls->heap_ledger, work));
+    diag.sink mut quiet = diag.sink{};
+    defer diag.free(&quiet);
+    assert(ownership_report.calls_budgets(&e.source, &quiet, "main.ft", shown));
+    assert(diag.record_count(&quiet) == 0);
+    println("ledger budgets ok");
+}
+
+// Each function-scoped E refusal of one recursive component renders once, in member order.
+fn member_budgets() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, MUTUAL[..], true);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* left = ownership_source_env.find(&e, "main", "left");
+    ownership_source.body* right = ownership_source_env.find(&e, "main", "right");
+    ownership_source_calls.row mut* left_row = calls_row(&e, "left");
+    ownership_source_calls.row mut* right_row = calls_row(&e, "right");
+    assert(left_row->summary_ledger == right_row->summary_ledger);
+    u64 index = left_row->summary_ledger;
+    ownership_source_calls.ledger mut* summary = &e.source.calls.ledgers[index];
+    ownership_api.proof_status left_e = e_refusal(left);
+    ownership_api.proof_status right_e = e_refusal(right);
+    summary->first_refusal = left_e;
+    left_row->summary_e_refusal = left_e;
+    right_row->summary_e_refusal = right_e;
+    assert(ownership_report.ledger_shows(&e.source.calls, index, left_e));
+    assert(ownership_report.ledger_shows(&e.source.calls, index, right_e));
+    u64 before = summary->meter.used.v;
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.reason none = ownership_report.reason{};
+    assert(ownership_report.calls_budgets(&e.source, &found, "main.ft", none));
+    assert(diag.record_count(&found) == 2);
+    assert(diag.record_at(&found, 0).msg == SUMMARY_BUDGET);
+    assert(diag.record_at(&found, 1).msg == SUMMARY_BUDGET);
+    assert(diag.record_at(&found, 0).loc.line == 1);
+    assert(diag.record_at(&found, 1).loc.line == 2);
+    assert(summary->meter.used.v == before + 2);
+    println("member budgets ok");
+}
+
+// Canonical function order puts a caller that is declared first before its callee. Component
+// solve order visits the callee first, but budget diagnostics follow the function keys.
+fn caller_budget_order() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, ORDER[..], true);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* caller = ownership_source_env.find(&e, "main", "caller");
+    ownership_source.body* callee = ownership_source_env.find(&e, "main", "callee");
+    ownership_source_calls.ledger mut* caller_summary =
+        &e.source.calls.ledgers[caller->calls->summary_ledger];
+    ownership_source_calls.ledger mut* callee_summary =
+        &e.source.calls.ledgers[callee->calls->summary_ledger];
+    assert(callee->calls->summary_ledger < caller->calls->summary_ledger);
+    caller_summary->first_refusal = e_refusal(caller);
+    callee_summary->first_refusal = e_refusal(callee);
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.reason none = ownership_report.reason{};
+    assert(ownership_report.calls_budgets(&e.source, &found, "main.ft", none));
+    assert(diag.record_count(&found) == 2);
+    assert(diag.record_at(&found, 0).loc.line == 1);
+    assert(diag.record_at(&found, 1).loc.line == 2);
+    println("caller budget order ok");
+}
+
+// Canonical event order also crosses solver groups. A heap refusal in the caller precedes a
+// summary refusal in the callee, although solve order stores the summary ledger first.
+fn solver_budget_order() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, ORDER[..], true);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* caller = ownership_source_env.find(&e, "main", "caller");
+    ownership_source.body* callee = ownership_source_env.find(&e, "main", "callee");
+    u64 summary_at = callee->calls->summary_ledger;
+    u64 heap_at = caller->calls->heap_ledger;
+    assert(summary_at < heap_at);
+    e.source.calls.ledgers[summary_at].first_refusal = e_refusal(callee);
+    e.source.calls.ledgers[heap_at].first_refusal = e_refusal(caller);
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.reason none = ownership_report.reason{};
+    assert(ownership_report.calls_budgets(&e.source, &found, "main.ft", none));
+    assert(diag.record_count(&found) == 2);
+    assert(diag.record_at(&found, 0).msg == HEAP_BUDGET);
+    assert(diag.record_at(&found, 0).loc.line == 1);
+    assert(diag.record_at(&found, 1).msg == SUMMARY_BUDGET);
+    assert(diag.record_at(&found, 1).loc.line == 2);
+    println("solver budget order ok");
+}
+
+// Canonical order selects the first of two records for the same ledger, operation, and category.
+// This synthetic pair puts the member record before the ledger's first refusal by source range.
+fn duplicate_budget_order() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, ORDER[..], true);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* caller = ownership_source_env.find(&e, "main", "caller");
+    ownership_source.body* callee = ownership_source_env.find(&e, "main", "callee");
+    u64 ledger = callee->calls->summary_ledger;
+    ownership_api.proof_status first = e_refusal(callee);
+    ownership_api.proof_status mut member = e_refusal(callee);
+    member.terminal.source = caller->source;
+    e.source.calls.ledgers[ledger].first_refusal = first;
+    calls_row(&e, "callee")->summary_e_refusal = member;
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.reason none = ownership_report.reason{};
+    assert(ownership_report.calls_budgets(&e.source, &found, "main.ft", none));
+    assert(diag.record_count(&found) == 1);
+    assert(diag.record_at(&found, 0).loc.line == 1);
+    println("duplicate budget order ok");
+}
+
+// One event sequence puts the caller's refusal before the later body record of its callee.
+fn body_budget_order() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, ORDER[..], true);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* caller = ownership_source_env.find(&e, "main", "caller");
+    ownership_source.body* callee = ownership_source_env.find(&e, "main", "callee");
+    ownership_source_calls.row mut* callee_row = calls_row(&e, "callee");
+    callee_row->correspondence = ownership_source_local.status.complete;
+    callee_row->proof = missing_proof(callee);
+    e.source.calls.ledgers[caller->calls->summary_ledger].first_refusal = e_refusal(caller);
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.diagnose(&e.source, &found, "main.ft");
+    u64 budget = find_record(&found, SUMMARY_BUDGET);
+    u64 mut body = budget + 1;
+    while (body < diag.record_count(&found) &&
+        (diag.record_at(&found, body).msg != ownership_report.CALLS_UNPROVED ||
+         diag.record_at(&found, body).loc.line != 2)) { body += 1; }
+    assert(budget < body && body < diag.record_count(&found));
+    assert(record_count_at(&found, SUMMARY_BUDGET, "main.ft", 1) == 1);
+    assert(record_count_at(&found, ownership_report.CALLS_UNPROVED, "main.ft", 2) == 1);
+    assert(record_count_at(&found, SUMMARY_BUDGET, "main.ft", 2) == 0);
+    assert(record_count_at(&found, ownership_report.CALLS_UNPROVED, "main.ft", 1) == 0);
+    assert(diag.record_at(&found, budget).loc.line == 1);
+    assert(diag.record_at(&found, body).loc.line == 2);
+    println("body budget order ok");
+}
+
+// Event class puts a lost-ownership record before an incomplete call refusal. The records share
+// one function, source range, and operation. Their source relations have the opposite order.
+fn event_class_order() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, PROGRAM[..], true);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* leak = ownership_source_env.find(&e, "main", "leak");
+    u64 mut i = 0;
+    while (i < leak->local.violations_len &&
+        leak->local.violations[i].kind != ownership_api.event_kind.lost_ownership) { i += 1; }
+    assert(i < leak->local.violations_len);
+    ownership_source_local.violation* lost = &leak->local.violations[i];
+    ownership_api.proof_status mut refusal = e_refusal(leak);
+    refusal.terminal.operation = lost->operation;
+    refusal.terminal.source = lost->source;
+    assert(ownership_keys.entity(refusal.terminal.relation, lost->relation) < 0);
+    e.source.calls.ledgers[leak->calls->summary_ledger].first_refusal = refusal;
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.diagnose(&e.source, &found, "main.ft");
+    u64 lost_record = find_record(&found, "lost ownership of 'p'");
+    u64 budget_record = find_record(&found, SUMMARY_BUDGET);
+    assert(lost_record < budget_record && budget_record < diag.record_count(&found));
+    assert(diag.record_at(&found, lost_record).loc.line ==
+        diag.record_at(&found, budget_record).loc.line);
+    assert(diag.record_at(&found, lost_record).loc.col ==
+        diag.record_at(&found, budget_record).loc.col);
+    println("event class order ok");
+}
+
+// A reserved V terminal stops a later E refusal from the same recursive summary ledger.
+fn ledger_terminal_order() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, MUTUAL[..], true);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* left = ownership_source_env.find(&e, "main", "left");
+    ownership_source.body* right = ownership_source_env.find(&e, "main", "right");
+    u64 ledger = left->calls->summary_ledger;
+    assert(ledger == right->calls->summary_ledger);
+    e.source.calls.ledgers[ledger].report_refusal = v_refusal(left);
+    calls_row(&e, "right")->summary_e_refusal = e_refusal(right);
+    u64 used = e.source.calls.ledgers[ledger].meter.used.v;
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.reason none = ownership_report.reason{};
+    assert(ownership_report.calls_budgets(&e.source, &found, "main.ft", none));
+    assert(diag.record_count(&found) == 1);
+    assert(record_count_at(&found, SUMMARY_REPORT, "main.ft", 1) == 1);
+    assert(record_count_at(&found, SUMMARY_BUDGET, "main.ft", 2) == 0);
+    assert(diag.record_at(&found, 0).msg == SUMMARY_REPORT);
+    assert(diag.record_at(&found, 0).loc.line == 1);
+    assert(e.source.calls.ledgers[ledger].report_refusal.terminal.present);
+    assert(e.source.calls.ledgers[ledger].report_refusal.terminal.limit.category ==
+        ownership_api.limit_category.v);
+    assert(calls_row(&e, "right")->summary_e_refusal.terminal.limit.category ==
+        ownership_api.limit_category.e);
+    assert(e.source.calls.ledgers[ledger].meter.used.v == used);
+    println("ledger terminal order ok");
+}
+
+// Two recursive body records share one summary ledger. The first record fills V. The second
+// record emits its V terminal. A later E refusal from that ledger does not render.
+fn shared_ledger_terminal() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, MUTUAL[..], true);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* left = ownership_source_env.find(&e, "main", "left");
+    ownership_source.body* right = ownership_source_env.find(&e, "main", "right");
+    ownership_source_calls.row mut* left_row = calls_row(&e, "left");
+    ownership_source_calls.row mut* right_row = calls_row(&e, "right");
+    assert(left_row->summary_ledger == right_row->summary_ledger);
+    u64 ledger = left_row->summary_ledger;
+    left_row->correspondence = ownership_source_local.status.complete;
+    left_row->proof = missing_proof(left);
+    right_row->correspondence = ownership_source_local.status.complete;
+    right_row->proof = missing_proof(right);
+    ownership_api.proof_status mut later = e_refusal(right);
+    later.terminal.operation.block = 1;
+    right_row->summary_e_refusal = later;
+    ownership_source_calls.ledger mut* summary = &e.source.calls.ledgers[ledger];
+    summary->meter.bounds.v = summary->meter.used.v + 2;
+    u64 bound = summary->meter.bounds.v;
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.diagnose(&e.source, &found, "main.ft");
+    strbuf.str_buf mut terminal = strbuf.create();
+    defer strbuf.free(&terminal);
+    strbuf.append(&terminal, "cannot prove complete ownership reporting within the report bound ");
+    strbuf.append_u64(&terminal, bound);
+    assert(record_count_at(&found, ownership_report.CALLS_UNPROVED, "main.ft", 1) == 1);
+    assert(record_count_at(&found, ownership_report.CALLS_UNPROVED, "main.ft", 2) == 0);
+    assert(record_count_at(&found, strbuf.view(&terminal), "main.ft", 2) == 1);
+    assert(record_count_at(&found, SUMMARY_BUDGET, "main.ft", 2) == 0);
+    assert(record_count_at(&found, strbuf.view(&terminal), "main.ft", 1) == 0);
+    assert(summary->report_refusal.terminal.present);
+    assert(summary->meter.used.v == bound);
+    assert(right_row->summary_e_refusal.terminal.present);
+    assert(right_row->summary_e_refusal.terminal.limit.category == ownership_api.limit_category.e);
+    assert(summary->report_refusal.terminal.limit.category == ownership_api.limit_category.v);
+    assert(summary->report_refusal.terminal.reason == ownership_api.incomplete_reason.report_limit);
+    println("shared ledger terminal ok");
+}
+
+// A W or E budget error whose V charge the ledger refuses still renders, and it stops the
+// later errors.
+fn budget_charge_refusal() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, PROGRAM[..], true);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* leak = ownership_source_env.find(&e, "main", "leak");
+    ownership_source_calls.ledger mut* summary =
+        &e.source.calls.ledgers[leak->calls->summary_ledger];
+    summary->first_refusal = e_refusal(leak);
+    summary->meter.bounds.v = summary->meter.used.v;
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.reason none = ownership_report.reason{};
+    assert(!ownership_report.calls_budgets(&e.source, &found, "main.ft", none));
+    assert(diag.record_count(&found) == 1 && diag.record_at(&found, 0).msg == SUMMARY_BUDGET);
+    println("budget charge refusal ok");
+}
+
+// `charge_report` pays V units of one ledger. Its first refused charge becomes the first refusal
+// and the first V refusal of the ledger, with the limit at the charged place. A ledger that
+// already has a refusal keeps it. A body has no heap ledger when the heap solver did not run.
+fn report_charge() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, PROGRAM[..], true);
+    defer ownership_source_env.close(&e);
+    ownership_source.body* leak = ownership_source_env.find(&e, "main", "leak");
+    u64 index = body_index(&e, "leak");
+    ownership_source_calls.context mut* calls = &e.source.calls;
+    u64 at = ownership_source_calls.ledger_of(calls, index,
+        ownership_source_calls.solver_kind.summary);
+    assert(at == leak->calls->summary_ledger);
+    assert(ownership_source_calls.ledger_of(calls, index,
+        ownership_source_calls.solver_kind.heap) == leak->calls->heap_ledger);
+    ownership_source_calls.ledger mut* l = &calls->ledgers[at];
+    l->first_refusal = ownership_api.proof_status{};
+    l->report_refusal = ownership_api.proof_status{};
+    l->meter.bounds.v = l->meter.used.v + 1;
+    ownership_api.operation_position op = ownership_api.operation_position{.function = leak->key};
+    assert(ownership_source_calls.charge_report(calls, at, op, leak->source, 1));
+    assert(!ownership_source_calls.charge_report(calls, at, op, leak->source, 1));
+    assert(l->first_refusal.terminal.reason == ownership_api.incomplete_reason.report_limit);
+    assert(l->first_refusal.terminal.limit.source.line == leak->source.line);
+    assert(l->report_refusal.terminal.limit.category == ownership_api.limit_category.v);
+    l->first_refusal = e_refusal(leak);
+    l->report_refusal = ownership_api.proof_status{};
+    assert(!ownership_source_calls.charge_report(calls, at, op, leak->source, 1));
+    assert(l->first_refusal.terminal.limit.category == ownership_api.limit_category.e);
+    assert(l->report_refusal.terminal.reason == ownership_api.incomplete_reason.report_limit);
+    // A heap ledger index that names a summary ledger, or no ledger, is no heap ledger.
+    ownership_source_calls.row mut* calls_entry = calls_row(&e, "leak");
+    calls_entry->heap_ledger = at;
+    assert(ownership_source_calls.ledger_of(calls, index,
+        ownership_source_calls.solver_kind.heap) == ownership_source_calls.NONE);
+    calls_entry->heap_ledger = calls->ledgers_len;
+    assert(ownership_source_calls.ledger_of(calls, index,
+        ownership_source_calls.solver_kind.heap) == ownership_source_calls.NONE);
+    // The summary ledger of another component is no ledger of this body.
+    ownership_source.body* noop = ownership_source_env.find(&e, "main", "noop");
+    calls_entry->summary_ledger = noop->calls->summary_ledger;
+    assert(ownership_source_calls.ledger_of(calls, index,
+        ownership_source_calls.solver_kind.summary) == ownership_source_calls.NONE);
+    assert(!ownership_source_calls.shows_record(calls, index));
+    println("report charge ok");
 }
 
 // A closure with a body that fails lowering builds no graph, so the solvers do not run: each
@@ -277,7 +1011,23 @@ fn graph_without_proof() void {
 fn main() i32 {
     rows();
     document();
+    ledgers();
     diagnostics();
+    record_order();
+    record_refusal();
+    budget_record();
+    shown_budget_record();
+    ledger_budgets();
+    member_budgets();
+    caller_budget_order();
+    solver_budget_order();
+    duplicate_budget_order();
+    body_budget_order();
+    event_class_order();
+    ledger_terminal_order();
+    shared_ledger_terminal();
+    budget_charge_refusal();
+    report_charge();
     no_graph();
     reasons();
     lowering_failure();

@@ -22,6 +22,7 @@ import check_env;
 import diag;
 import ownership_api;
 import ownership_report;
+import ownership_report_env;
 import ownership_source;
 import ownership_source_env;
 import ownership_source_local;
@@ -179,7 +180,7 @@ fn document() void {
     defer strbuf.free(&out);
     ownership_report.invocation call = ownership_report.invocation{};
     ownership_report.build(&out, &e.source, &call, 1);
-    contains(&out, "{\"kind\":\"fort-ownership-report\",\"version\":6,");
+    contains(&out, "{\"kind\":\"fort-ownership-report\",\"version\":7,");
     contains(&out, "{\"name\":\"local\",\"producer\":\"integrated\",\"status\":\"incomplete\"}");
     contains(&out, "{\"name\":\"stored_borrows\",\"producer\":\"integrated\"");
     contains(&out, "{\"name\":\"raw\",\"producer\":\"integrated\"");
@@ -231,7 +232,7 @@ fn diagnostics() void {
     defer ownership_source_env.close(&e);
     diag.sink mut found = diag.sink{};
     defer diag.free(&found);
-    ownership_report.diagnose(&e.source, &found, "main.ft");
+    ownership_report_env.diagnose(&e.source, &found, "main.ft");
     // Three violations give an error and a note each. The closure reason follows them.
     assert(diag.count(&found) == 4 && diag.record_count(&found) == 7);
     assert(diag.record_at(&found, 0).msg == "lost ownership of 'p'");
@@ -258,7 +259,7 @@ fn report_bound() void {
     leak->local.meter.bounds.v = 2;
     diag.sink mut found = diag.sink{};
     defer diag.free(&found);
-    ownership_report.diagnose(&e.source, &found, "main.ft");
+    ownership_report_env.diagnose(&e.source, &found, "main.ft");
     // The refusal keeps one terminal error at the violation and stops later records.
     assert(diag.count(&found) == 1 && diag.record_count(&found) == 1);
     assert(diag.record_at(&found, 0).msg ==
@@ -363,7 +364,7 @@ fn module_order() void {
     ownership_source.analyze(&e.source);
     diag.sink mut found = diag.sink{};
     defer diag.free(&found);
-    ownership_report.diagnose(&e.source, &found, "main.ft");
+    ownership_report_env.diagnose(&e.source, &found, "main.ft");
     assert(diag.record_count(&found) == 5);
     assert(diag.record_at(&found, 0).msg == "lost ownership of 'p'");
     assert(str.find(diag.record_at(&found, 0).loc.file, "other.ft") >= 0);
@@ -396,7 +397,7 @@ fn bound_between_violations() void {
     two->local.meter.bounds.v = 4;
     diag.sink mut found = diag.sink{};
     defer diag.free(&found);
-    ownership_report.diagnose(&e.source, &found, "main.ft");
+    ownership_report_env.diagnose(&e.source, &found, "main.ft");
     assert(diag.record_count(&found) == 3);
     assert(diag.record_at(&found, 0).msg == "lost ownership of 'p'");
     assert(diag.record_at(&found, 1).msg == "storage ends with a live owner");
@@ -431,7 +432,7 @@ fn source_order() void {
     assert(late->local.violations[1].source.line == 6);
     diag.sink mut found = diag.sink{};
     defer diag.free(&found);
-    ownership_report.diagnose(&e.source, &found, "main.ft");
+    ownership_report_env.diagnose(&e.source, &found, "main.ft");
     assert(diag.record_at(&found, 0).msg == "invalid use of 'q'");
     assert(diag.record_at(&found, 0).loc.line == 5 && diag.record_at(&found, 0).loc.col == 14);
     assert(diag.record_at(&found, 2).msg == "invalid use of 'q'");
@@ -459,7 +460,7 @@ fn subjects() void {
     assert(bad->local.violations_len == 1 && !bad->local.violations[0].quoted);
     diag.sink mut found = diag.sink{};
     defer diag.free(&found);
-    ownership_report.diagnose(&e.source, &found, "main.ft");
+    ownership_report_env.diagnose(&e.source, &found, "main.ft");
     assert(diag.record_at(&found, 0).msg == "invalid use of the result");
     assert(diag.record_at(&found, 0).loc.line == 5);
     assert(diag.record_at(&found, 1).msg == "returned view outlives its source");
@@ -495,7 +496,7 @@ fn budget_errors() void {
     u64 before = swapped->local.meter.used.v;
     diag.sink mut found = diag.sink{};
     defer diag.free(&found);
-    ownership_report.diagnose(&e.source, &found, "main.ft");
+    ownership_report_env.diagnose(&e.source, &found, "main.ft");
     u64 mut seen = 0;
     u64 mut i = 0;
     while (i < diag.record_count(&found)) {
@@ -541,7 +542,7 @@ fn classification_ledger() void {
     contains(&out, "\"limit\":{\"category\":\"W\",\"used\":1,\"bound\":1}");
     diag.sink mut found = diag.sink{};
     defer diag.free(&found);
-    ownership_report.diagnose(&e.source, &found, "main.ft");
+    ownership_report_env.diagnose(&e.source, &found, "main.ft");
     // The error names the classification ledger, not the first one.
     assert(count_errors(&found, CLASSIFICATION_W) == 1);
     assert(count_errors(&found, FIRST_W) == 0);
@@ -588,14 +589,14 @@ fn one_error_for_two_ledgers() void {
     leak->local.first_refusal = leak->local.classify_refusal;
     diag.sink mut found = diag.sink{};
     defer diag.free(&found);
-    ownership_report.diagnose(&e.source, &found, "main.ft");
+    ownership_report_env.diagnose(&e.source, &found, "main.ft");
     assert(count_errors(&found, FIRST_W) == 1);
     assert(count_errors(&found, CLASSIFICATION_W) == 0);
     // At another operation both errors stay.
     leak->local.first_refusal.terminal.operation.operation += 1;
     diag.sink mut both = diag.sink{};
     defer diag.free(&both);
-    ownership_report.diagnose(&e.source, &both, "main.ft");
+    ownership_report_env.diagnose(&e.source, &both, "main.ft");
     assert(count_errors(&both, FIRST_W) == 1);
     assert(count_errors(&both, CLASSIFICATION_W) == 1);
     println("one error for two ledgers ok");
@@ -626,7 +627,7 @@ fn terminal_budget_error() void {
     swapped->local.meter.bounds.v = swapped->local.meter.used.v;
     diag.sink mut found = diag.sink{};
     defer diag.free(&found);
-    ownership_report.diagnose(&e.source, &found, "main.ft");
+    ownership_report_env.diagnose(&e.source, &found, "main.ft");
     u64 last = diag.record_count(&found) - 1;
     assert(str.find(diag.record_at(&found, last).msg, "category E; used 256; bound 256)") > 0);
     assert(diag.record_at(&found, last).loc.line == 6);

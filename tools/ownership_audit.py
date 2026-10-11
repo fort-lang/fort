@@ -68,7 +68,7 @@ FAILURE_CODES = (
 U64_MAX = (1 << 64) - 1
 U32_MAX = (1 << 32) - 1
 LIMIT_VERSION = 2
-REPORT_VERSION = 6
+REPORT_VERSION = 7
 # The producer analyses with a ledger for each verified body, and the classification ledgers
 # of the two flow analyses among them.
 BODY_LEDGERS = ("local", "stored_borrows", "raw", "process_exit")
@@ -82,6 +82,9 @@ LEDGER_LABELS = {
     "raw": "raw",
     "process_exit": "process exit",
 }
+# The calls_heap analysis keeps one ledger for each component computation of each of its two
+# solvers. Its owner keys the first member of the component.
+COMPONENT_LEDGERS = ("calls_summary", "calls_heap")
 METER_NAMES = (
     "graph_private",
     "services",
@@ -92,6 +95,7 @@ METER_NAMES = (
     "raw",
     "process_exit",
     "process_exit_fills",
+    *COMPONENT_LEDGERS,
 )
 BOUNDARY_KINDS = ("executable", "library")
 BOUNDARY_STATUSES = ("complete", "incomplete", "unexecuted")
@@ -760,6 +764,7 @@ def validate_report(
     require(ordered_keys == sorted(ordered_keys), "keys: body order")
     require(enumeration["selected_bodies"] == len(bodies), "enumeration: body count mismatch")
     graph_sizes = []
+    graph_refusals = []
     fills_sizes = []
     body_sizes = 0
     service_sizes = {}
@@ -767,6 +772,7 @@ def validate_report(
     # a classification ledger of the same FIR size when the body needs one.
     ledger_sizes = {name: {} for name in BODY_LEDGERS}
     classification_sizes = {name: {} for name in CLASSIFICATION_LEDGERS.values()}
+    component_sizes = {name: {} for name in COMPONENT_LEDGERS}
     for index, meter in enumerate(array(report["meters"], "meters")):
         obj(meter, ("id", "name", "owner", "fir_size", "counts", "first_refusal"), "meter")
         require(integer(meter["id"], "meter id") == index, "meters: IDs have gaps")
@@ -806,6 +812,11 @@ def validate_report(
             require(owner_key is not None, f"{label} ledger: missing owner")
             require(owner_key not in classification_sizes[flow], f"{label} ledger: duplicate owner")
             classification_sizes[flow][owner_key] = meter["fir_size"]
+        elif meter["name"] in COMPONENT_LEDGERS:
+            sizes = component_sizes[meter["name"]]
+            require(owner_key is not None, "calls_heap ledger: missing owner")
+            require(owner_key not in sizes, "calls_heap ledger: duplicate owner")
+            sizes[owner_key] = meter["fir_size"]
         elif meter["name"] == "services" and owner_key is not None:
             service_sizes[owner_key] = meter["fir_size"]
         count_keys = set()
@@ -848,6 +859,8 @@ def validate_report(
                 and (refusal["limit"] is None or refusal["limit"]["category"] == "W"),
                 "graph private ledger: unsupported refusal category",
             )
+        if meter["name"] == "graph_private":
+            graph_refusals.append(refusal)
     for analysis in BODY_LEDGERS:
         label = LEDGER_LABELS[analysis]
         for owner_key, size in ledger_sizes[analysis].items():
@@ -875,6 +888,42 @@ def validate_report(
     require(
         not fills_sizes or fills_sizes[0] == sum(ledger_sizes["process_exit"].values()),
         "meters: process exit fills FIR size differs from the process_exit ledgers",
+    )
+    # The components of the graph partition its bodies, and each calls_heap solver solves each
+    # component once. So the FIR sizes of the ledgers of one solver sum to the graph FIR size,
+    # and the ledger of a component holds at least the FIR size of its owner. A graph W refusal
+    # can stop summary layout before either component computation starts.
+    calls_index = ANALYSES.index("calls_heap")
+    graph_refused_before_calls = any(
+        refusal is not None
+        and refusal["code"] == "work_limit"
+        and (refusal["limit"] is None or refusal["limit"]["category"] == "W")
+        for refusal in graph_refusals
+    ) and all(body["analyses"][calls_index]["solver"] != "complete" for body in bodies)
+    component_started = any(
+        body["analyses"][calls_index]["solver"] != "unexecuted" for body in bodies
+    ) and not graph_refused_before_calls
+    for sizes in component_sizes.values():
+        require(
+            not sizes or (graph_sizes and sum(sizes.values()) == graph_sizes[0]),
+            "calls_heap ledger: FIR sizes differ from the graph ledger",
+        )
+        for owner_key, size in sizes.items():
+            require(
+                owner_key in service_sizes and size >= service_sizes[owner_key],
+                "calls_heap ledger: FIR size below its owner",
+            )
+    require(
+        set(component_sizes["calls_summary"]) == set(component_sizes["calls_heap"]),
+        "calls_heap ledger: the two solvers have different components",
+    )
+    require(
+        component_sizes["calls_summary"] == component_sizes["calls_heap"],
+        "calls_heap ledger: the two solvers have different component FIR sizes",
+    )
+    require(
+        not component_started or component_sizes["calls_summary"],
+        "calls_heap ledger: started computation has no component ledger",
     )
     totals = derived_totals(bodies)
     validate_totals(report["totals"], totals)

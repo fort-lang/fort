@@ -93,6 +93,10 @@ struct row {
     // the record of its budget errors and precision limits. The scope reads the proofs only.
     u32 summary_refused;
     u32 heap_refused;
+    // The first function-scoped E refusal of this body, for each solver. A component can have
+    // more than one such refusal because one refusal does not stop its other members.
+    ownership_api.proof_status summary_e_refusal;
+    ownership_api.proof_status heap_e_refusal;
     u64 summary_ledger;
     u64 heap_ledger;
     // The kind of the first call without callee facts, in graph order, and its incomplete proof
@@ -192,8 +196,15 @@ fn budget(void mut* opaque, ownership_api.charge_request* req) ownership_api.cha
     if (body != NONE) {
         u32 kind = cast(1, u32) << cast(out.limit.category, u32);
         row mut* r = &c->rows[body];
-        if (c->running == solver_kind.summary) { r->summary_refused = r->summary_refused | kind; }
-        else { r->heap_refused = r->heap_refused | kind; }
+        if (c->running == solver_kind.summary) {
+            r->summary_refused = r->summary_refused | kind;
+            if (out.limit.category == ownership_api.limit_category.e &&
+                !r->summary_e_refusal.terminal.present) { r->summary_e_refusal = refusal; }
+        } else {
+            r->heap_refused = r->heap_refused | kind;
+            if (out.limit.category == ownership_api.limit_category.e &&
+                !r->heap_e_refusal.terminal.present) { r->heap_e_refusal = refusal; }
+        }
     }
     if (!l->first_refusal.terminal.present) { l->first_refusal = refusal; }
     if (out.limit.category == ownership_api.limit_category.w &&
@@ -255,12 +266,14 @@ fn keep(context mut* c, row mut* r, unproved mut* kept, unproved next,
     return true;
 }
 
-/// Whether `a` comes before `b` in the canonical event order (`spec/toolchain.md` 4.2). Each is
-/// an incomplete-proof event, so the event class orders neither.
+/// Whether `a` comes before `b` in the canonical event order (`spec/toolchain.md` 4.2).
 fn before(unproved* a, unproved* b) bool {
     i32 mut order = ownership_keys.function(a->operation.function, b->operation.function);
     if (order == 0) { order = ownership_keys.source(a->source, b->source); }
     if (order == 0) { order = ownership_keys.operation(a->operation, b->operation); }
+    if (order == 0 && a->kind != b->kind) {
+        order = cast(a->kind, i32) - cast(b->kind, i32);
+    }
     if (order == 0) { order = ownership_keys.entity(a->relation, b->relation); }
     if (order == 0) { order = ownership_keys.entity(a->key, b->key); }
     return order < 0;
@@ -639,6 +652,59 @@ fn solve(context mut* c, ownership_graph.graph mut* g, ownership_flow.source_fil
 
 /// Whether `solve` reached the solvers for the bodies of the graph.
 fn executed(context* c) bool { return c->executed; }
+
+/// The ledger of `solver` for the component of body `body`, or NONE. A refused summary layout
+/// begins no computation, and then the heap solver does not run.
+fn ledger_of(context* c, u64 body, solver_kind solver) u64 {
+    if (!c->executed || body >= c->rows.len) { return NONE; }
+    row* r = &c->rows[body];
+    u64 index = solver == solver_kind.summary ? r->summary_ledger : r->heap_ledger;
+    if (index >= c->ledgers_len) { return NONE; }
+    ledger* l = &c->ledgers[index];
+    if (l->solver != solver || l->component != cast(c->graph->components[body], u64)) {
+        return NONE;
+    }
+    return index;
+}
+
+/// Whether body `body` renders one terminal record (`spec/toolchain.md` 4.2): it is declared,
+/// that is its correspondence is complete, and its proof is not complete. The summary ledger of
+/// the body pays for the record. A declared body has that ledger: without it, no event is kept
+/// and each proof carries the refusal of the graph, a budget error that excludes the body.
+fn shows_record(context* c, u64 body) bool {
+    if (ledger_of(c, body, solver_kind.summary) == NONE) { return false; }
+    row* r = &c->rows[body];
+    return r->correspondence == ownership_source_local.status.complete &&
+        !ownership_api.successful(r->proof);
+}
+
+/// The refusal `p` of ledger `index` with a source: a terminal without a source names the
+/// declaration of the body of its operation, or of the owner of the ledger.
+fn ledger_refusal(context* c, u64 index, ownership_api.proof_status p) ownership_api.proof_status {
+    ledger* l = &c->ledgers[index];
+    u64 owner = c->members[c->members_first[l->component]];
+    return locate(c, &c->rows[owner], p);
+}
+
+/// Charges `amount` rendered lines to the V bound of ledger `index`. The first refused charge
+/// becomes the first refusal and the first V refusal of the ledger when it has none.
+fn charge_report(context mut* c, u64 index, ownership_api.operation_position op,
+    ownership_api.source_position at, u64 amount) bool {
+    ledger mut* l = &c->ledgers[index];
+    ownership_api.charge_item[1] item = {ownership_api.charge_item{
+        ownership_api.limit_category.v, ownership_api.limit_scope.report, amount}};
+    ownership_api.charge_request request = ownership_api.charge_request{
+        ownership_api.work_kind.transfer, op, at, item[..]};
+    ownership_api.charge_result out = ownership_limits.try_charge(&l->meter, &request);
+    if (out.allowed) { return true; }
+    ownership_api.proof_status mut refusal = ownership_api.incomplete(
+        ownership_api.incomplete_reason.report_limit, op, at);
+    refusal.terminal.limit = out.limit;
+    refusal.terminal.limit.source = at;
+    if (!l->first_refusal.terminal.present) { l->first_refusal = refusal; }
+    if (!l->report_refusal.terminal.present) { l->report_refusal = refusal; }
+    return false;
+}
 
 fn free(context mut* c) void {
     del(c->rows);
