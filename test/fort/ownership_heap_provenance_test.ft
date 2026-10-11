@@ -1,0 +1,810 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| addresses
+//| calls
+//| kept pruning
+//| counted loops
+//| edges
+//| assumed requirements
+//| known scalars
+//| heap provenance ok
+/// Checks that only an established fact removes a path of the heap proof (D17.18, rule P1): a
+/// null test, both edges of a refinement, and the exit contradiction of a call.
+import ownership_api;
+import ownership_facts;
+import ownership_heap;
+import ownership_heap_env;
+
+// Round8_a1.
+string[18] A1 = {
+    "struct node { i32 v; node mut* own next; }",
+    "fn drop_list(node mut* own n) void { if (n == null) { return; }",
+    "    drop_list(move(n->next)); del(n); }",
+    "fn first_addr(node mut* own n) void {",
+    "    i32 mut* own extra = new(i32);",
+    "    i32 mut* q = &n->v;",
+    "    if (q == null) { return; }",
+    "    del(extra);",
+    "    drop_list(move(n));",
+    "}",
+    "fn local_addr() void {",
+    "    i32 mut* own extra = new(i32);",
+    "    node mut* own n = null;",
+    "    i32 mut* q = &n->v;",
+    "    if (q == null) { return; }",
+    "    del(extra);",
+    "    drop_list(move(n));",
+    "}",
+};
+
+// Round8_a2.
+string[33] A2 = {
+    "struct node { i32 v; node mut* own next; }",
+    "fn drop_list(node mut* own n) void { if (n == null) { return; }",
+    "    drop_list(move(n->next)); del(n); }",
+    "fn stop(node mut* own n) node mut* own {",
+    "    i32 mut* q = &n->v;",
+    "    if (q != null) { panic(\"stop\"); }",
+    "    return move(n);",
+    "}",
+    "fn caller() void {",
+    "    i32 mut* own extra = new(i32);",
+    "    node mut* own y = stop(null);",
+    "    drop_list(move(y));",
+    "}",
+    "fn caller2(node mut* own x) void {",
+    "    i32 mut* own extra = new(i32);",
+    "    node mut* own y = stop(move(x));",
+    "    drop_list(move(y));",
+    "}",
+    "fn child_addr() void {",
+    "    i32 mut* own extra = new(i32);",
+    "    node mut* own n = new(node);",
+    "    i32 mut* q = &n->next->v;",
+    "    if (q == null) { del(n); return; }",
+    "    del(extra);",
+    "    drop_list(move(n));",
+    "}",
+    "fn whole_addr(node mut* own n) void {",
+    "    i32 mut* own extra = new(i32);",
+    "    node mut* r = &*n;",
+    "    if (r == null) { return; }",
+    "    del(extra);",
+    "    drop_list(move(n));",
+    "}",
+};
+
+// Round8_a3.
+string[40] A3 = {
+    "struct node { i32 v; node mut* own next; }",
+    "fn drop_list(node mut* own n) void { if (n == null) { return; }",
+    "    drop_list(move(n->next)); del(n); }",
+    "fn chk_addr(node mut* own n) void {",
+    "    i32 mut* own extra = new(i32);",
+    "    i32 mut* q = &n->v;",
+    "    assert(q != null);",
+    "    del(extra);",
+    "    drop_list(move(n));",
+    "}",
+    "fn join_addr(node mut* own n, bool f) void {",
+    "    i32 mut* own extra = new(i32);",
+    "    i32 mut* mut q = null;",
+    "    if (f) { q = &n->v; } else { q = &n->v; }",
+    "    if (q == null) { drop_list(move(n)); return; }",
+    "    del(extra);",
+    "    drop_list(move(n));",
+    "}",
+    "fn loop_addr(node mut* own n, i32 k) void {",
+    "    i32 mut* own extra = new(i32);",
+    "    i32 mut i = 0;",
+    "    while (i < k) {",
+    "        i32 mut* q = &n->v;",
+    "        if (q == null) { drop_list(move(n)); return; }",
+    "        i += 1;",
+    "    }",
+    "    del(extra);",
+    "    drop_list(move(n));",
+    "}",
+    "fn two_stop(node mut* own n) node mut* own {",
+    "    i32 mut* q = &n->v;",
+    "    if (q != null) { panic(\"stop\"); }",
+    "    return move(n);",
+    "}",
+    "fn two_mid(node mut* own n) node mut* own { return two_stop(move(n)); }",
+    "fn two_user() void {",
+    "    i32 mut* own extra = new(i32);",
+    "    node mut* own y = two_mid(null);",
+    "    drop_list(move(y));",
+    "}",
+};
+
+// Round8_a4 and a borrowed pointer parameter.
+string[14] A4 = {
+    "struct node { i32 v; node mut* own next; }",
+    "fn drop_list(node mut* own n) void { if (n == null) { return; }",
+    "    drop_list(move(n->next)); del(n); }",
+    "fn chk_addr(node mut* own n) void {",
+    "    i32 mut* own extra = new(i32);",
+    "    i32 mut* q = &n->v;",
+    "    assert(q == null);",
+    "    drop_list(move(n));",
+    "}",
+    "fn param_test(node* p) void {",
+    "    i32 mut* own extra = new(i32);",
+    "    if (p == null) { return; }",
+    "    del(extra);",
+    "}",
+};
+
+// Review_f1.
+string[20] F1 = {
+    "struct node { node mut* own next; i32 v; }",
+    "fn addr_only(node mut* own n) node mut* own {",
+    "    i32 mut* q = &n->v;",
+    "    return move(n);",
+    "}",
+    "fn caller_free(node mut* own x) void {",
+    "    i32 mut* own extra = new(i32);",
+    "    node mut* own y = addr_only(move(x));",
+    "    if (y == null) { return; }",
+    "    del(extra);",
+    "    del(y);",
+    "}",
+    "fn caller_null() void {",
+    "    i32 mut* own extra = new(i32);",
+    "    node mut* own x = null;",
+    "    node mut* own y = addr_only(move(x));",
+    "    if (y == null) { return; }",
+    "    del(extra);",
+    "    del(y);",
+    "}",
+};
+
+// Review_f2.
+string[33] F2 = {
+    "struct node { node mut* own next; i32 v; }",
+    "struct flat { i32 v; }",
+    "fn addr_flat(flat mut* own n) flat mut* own {",
+    "    i32 mut* q = &n->v;",
+    "    return move(n);",
+    "}",
+    "fn read_flat(flat mut* own n) flat mut* own {",
+    "    i32 w = n->v;",
+    "    return move(n);",
+    "}",
+    "fn free_param(flat mut* own x) void {",
+    "    i32 mut* own extra = new(i32);",
+    "    flat mut* own y = addr_flat(move(x));",
+    "    if (y == null) { return; }",
+    "    del(extra);",
+    "    del(y);",
+    "}",
+    "fn null_flat() void {",
+    "    i32 mut* own extra = new(i32);",
+    "    flat mut* own x = null;",
+    "    flat mut* own y = addr_flat(move(x));",
+    "    if (y == null) { return; }",
+    "    del(extra);",
+    "    del(y);",
+    "}",
+    "fn read_null() void {",
+    "    i32 mut* own extra = new(i32);",
+    "    flat mut* own x = null;",
+    "    flat mut* own y = read_flat(move(x));",
+    "    if (y == null) { return; }",
+    "    del(extra);",
+    "    del(y);",
+    "}",
+};
+
+// Review_f4.
+string[21] F4 = {
+    "struct node { node mut* own next; i32 v; }",
+    "fn drop_list(node mut* own n) void { if (n == null) { return; }",
+    "    drop_list(move(n->next)); del(n); }",
+    "fn addr_only(node mut* own n) node mut* own {",
+    "    i32 mut* q = &n->v;",
+    "    return move(n);",
+    "}",
+    "fn free_param(node mut* own x) void {",
+    "    i32 mut* own extra = new(i32);",
+    "    node mut* own y = addr_only(move(x));",
+    "    if (y == null) { return; }",
+    "    del(extra);",
+    "    drop_list(move(y));",
+    "}",
+    "fn null_local() void {",
+    "    i32 mut* own extra = new(i32);",
+    "    node mut* own y = addr_only(null);",
+    "    if (y == null) { return; }",
+    "    del(extra);",
+    "    drop_list(move(y));",
+    "}",
+};
+
+// The exit contradiction of main.
+string[35] D3 = {
+    "struct node { node mut* own next; i32 v; }",
+    "fn drop_list(node mut* own n) void { if (n == null) { return; }",
+    "    drop_list(move(n->next)); del(n); }",
+    "fn need_null(node mut* own n) node mut* own {",
+    "    if (n != null) { panic(\"need\"); }",
+    "    return move(n);",
+    "}",
+    "fn fresh_arg() void {",
+    "    i32 mut* own extra = new(i32);",
+    "    node mut* own y = need_null(new(node));",
+    "    drop_list(move(y));",
+    "}",
+    "fn tested_arg(node mut* own n) void {",
+    "    if (n == null) { return; }",
+    "    i32 mut* own extra = new(i32);",
+    "    node mut* own y = need_null(move(n));",
+    "    drop_list(move(y));",
+    "}",
+    "fn unfolded_arg(node mut* own n) void {",
+    "    i32 mut* own extra = new(i32);",
+    "    i32 mut* q = &n->v;",
+    "    node mut* own y = need_null(move(n));",
+    "    drop_list(move(y));",
+    "}",
+    "fn free_arg(node mut* own n) void {",
+    "    i32 mut* own extra = new(i32);",
+    "    node mut* own y = need_null(move(n));",
+    "    drop_list(move(y));",
+    "}",
+    "fn returned_arg() void {",
+    "    i32 mut* own extra = new(i32);",
+    "    node mut* own y = need_null(fresh());",
+    "    drop_list(move(y));",
+    "}",
+    "fn fresh() node mut* own { return new(node); }",
+};
+
+// Established tests.
+string[44] KEPT = {
+    "struct node { node mut* own next; i32 v; }",
+    "fn drop_list(node mut* own n) void { if (n == null) { return; }",
+    "    drop_list(move(n->next)); del(n); }",
+    "fn twice(node mut* own n) void {",
+    "    if (n == null) { return; }",
+    "    if (n == null) { i32 mut* own extra = new(i32); return; }",
+    "    drop_list(move(n));",
+    "}",
+    "fn null_constant() void {",
+    "    node mut* own n = null;",
+    "    if (n != null) { i32 mut* own extra = new(i32); return; }",
+    "}",
+    "fn moved_out(node mut* own n) void {",
+    "    node mut* own m = move(n);",
+    "    if (n != null) { i32 mut* own extra = new(i32); }",
+    "    drop_list(move(m));",
+    "}",
+    "fn allocated() void {",
+    "    node mut* own n = new(node);",
+    "    if (n == null) { i32 mut* own extra = new(i32); return; }",
+    "    drop_list(move(n));",
+    "}",
+    "fn local_address() void {",
+    "    i32 mut x = 1;",
+    "    i32 mut* p = &x;",
+    "    if (p == null) { i32 mut* own extra = new(i32); return; }",
+    "}",
+    "fn allocated_field() void {",
+    "    node mut* own n = new(node);",
+    "    i32 mut* q = &n->v;",
+    "    if (q == null) { i32 mut* own extra = new(i32); return; }",
+    "    drop_list(move(n));",
+    "}",
+    "fn tested_field(node mut* own n) void {",
+    "    if (n == null) { return; }",
+    "    i32 mut* q = &n->v;",
+    "    if (q == null) { i32 mut* own extra = new(i32); return; }",
+    "    drop_list(move(n));",
+    "}",
+    "fn read_then_test(node mut* own n) void {",
+    "    i32 w = n->v;",
+    "    if (n == null) { i32 mut* own extra = new(i32); return; }",
+    "    drop_list(move(n));",
+    "}",
+};
+
+// The counted probe.
+string[12] COUNTED = {
+    "struct node { i32 v; }",
+    "struct holder { node mut* own first; }",
+    "fn clear_first(holder mut* h) void { del(move(h->first)); }",
+    "fn straight(holder mut* h) void { del(move(h->first)); h->first = null; clear_first(h); }",
+    "fn looped(holder mut* h, i32 n) void { del(move(h->first)); h->first = null;",
+    "    i32 mut i = 0; while (i < n) { clear_first(h); i += 1; } }",
+    "fn plain(holder mut* h, i32 n) void { del(move(h->first)); h->first = null;",
+    "    i32 mut i = 0; while (i < n) { i += 1; } }",
+    "fn counted(holder mut* h, i32 mut* n) void { del(move(h->first)); h->first = null;",
+    "    while (*n > 0) { clear_first(h); *n -= 1; } }",
+    "fn after(holder mut* h) void { clear_first(h);",
+    "    if (h->first != null) { i32 mut* own extra = new(i32); } }",
+};
+
+// Known scalars across calls.
+string[60] SCALARS = {
+    "extern fn poke(bool mut* p) void;",
+    "fn set(bool mut* p) void { *p = true; }",
+    "fn count(i32 mut* p) void { *p = 1; }",
+    "fn clear(bool mut* p) void { *p = false; }",
+    "fn nothing() void { }",
+    "fn set_direct() void {",
+    "    i32 mut* own extra = new(i32);",
+    "    bool mut b = false;",
+    "    set(&b);",
+    "    if (b) { return; }",
+    "    del(extra);",
+    "}",
+    "fn count_direct() void {",
+    "    i32 mut* own extra = new(i32);",
+    "    i32 mut k = 0;",
+    "    count(&k);",
+    "    if (k == 1) { return; }",
+    "    del(extra);",
+    "}",
+    "fn poked() void {",
+    "    i32 mut* own extra = new(i32);",
+    "    bool mut b = false;",
+    "    bool mut* p = &b;",
+    "    poke(p);",
+    "    if (b) { return; }",
+    "    del(extra);",
+    "}",
+    "fn stop() void {",
+    "    bool mut b = true;",
+    "    clear(&b);",
+    "    if (b) { panic(\"stop\"); }",
+    "}",
+    "fn after_stop() void {",
+    "    i32 mut* own extra = new(i32);",
+    "    stop();",
+    "}",
+    "fn unnamed() void {",
+    "    i32 mut* own extra = new(i32);",
+    "    bool mut b = false;",
+    "    nothing();",
+    "    if (b) { return; }",
+    "    del(extra);",
+    "}",
+    "fn named_only() void {",
+    "    i32 mut* own extra = new(i32);",
+    "    bool mut b = false;",
+    "    bool mut* p = &b;",
+    "    nothing();",
+    "    if (b) { return; }",
+    "    del(extra);",
+    "}",
+    "fn written_here() void {",
+    "    i32 mut* own extra = new(i32);",
+    "    bool mut b = false;",
+    "    bool mut* p = &b;",
+    "    nothing();",
+    "    *p = false;",
+    "    if (b) { return; }",
+    "    del(extra);",
+    "}",
+};
+
+// State edges.
+string[9] EDGES = {
+    "struct node { node mut* own next; u8 mut@ own bytes; i32 v; }",
+    "struct holder { node mut* own first; }",
+    "fn host(node mut* own p, node mut* own q, holder mut* h) void {",
+    "    node mut* own a = null; node* w = null; }",
+    "fn peek_fill(holder mut* h) void {",
+    "    node* old = h->first;",
+    "    h->first = new(node);",
+    "    if (old != null) { i32 mut* own extra = new(i32); }",
+    "}",
+};
+
+// Whether an event of body `name` names the leak of `what`: a lost ownership, or an incomplete
+// proof of that ownership.
+fn loses(ownership_heap_env.closure* c, string name, string what) bool {
+    u32 declaration = cast(ownership_heap_env.index(c, name) + 1, u32);
+    u64 mut i = 0;
+    while (i < c->counts.events && i < c->counts.rows.len) {
+        ownership_heap_env.event_row row = c->counts.rows[i];
+        if (row.operation.function.declaration.declaration == declaration &&
+            (row.kind == ownership_api.event_kind.lost_ownership ||
+            row.kind == ownership_api.event_kind.incomplete_proof) &&
+            ownership_heap_env.text(&row) == what) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+fn returns(ownership_heap_env.closure* c, string name) bool {
+    return ownership_heap_env.summary(c, name)->returns;
+}
+
+// The nullness fact of the owned caller slot of the exit state of `name`.
+fn caller_owner(ownership_heap_env.closure* c, string name) ownership_facts.nullness {
+    ownership_heap.summary* s = ownership_heap_env.summary(c, name);
+    u64 mut i = 0;
+    while (i < s->post.slots_len) {
+        ownership_heap.slot item = s->post.slots[i];
+        if (item.key.base == ownership_heap.base_kind.caller && item.owning) {
+            assert(item.v.kind == ownership_heap.value_kind.empty);
+            return item.v.nullness;
+        }
+        i += 1;
+    }
+    panic("no owned caller slot");
+}
+
+// a1 to a4 (`test/ownership/probes/round8_a*.ft`): an address computation reads no storage, so
+// it gives no fact about its base (D17.18). The address of a cell that an unfold made has the
+// assumed root of that cell, and the address of caller storage is a free choice of the caller:
+// a null test of either decides nothing, and a leak on the null path stays.
+fn addresses() void {
+    println("addresses");
+    ownership_heap_env.closure mut a1 = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&a1);
+    string[3] names1 = {"drop_list", "first_addr", "local_addr"};
+    ownership_heap_env.run(&a1, A1[..], names1[..]);
+    assert(ownership_heap_env.proved(&a1, "drop_list"));
+    // v is at offset 0, so q is null when n is null: `extra` leaks.
+    assert(!ownership_heap_env.proved(&a1, "first_addr"));
+    assert(loses(&a1, "first_addr", "extra"));
+    // A dereference of a null constant is an invalid use.
+    assert(!ownership_heap_env.proved(&a1, "local_addr"));
+    assert(ownership_heap_env.first(&a1, "local_addr").kind ==
+        ownership_api.event_kind.invalid_use);
+
+    ownership_heap_env.closure mut a2 = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&a2);
+    string[6] names2 = {"drop_list", "stop", "caller", "caller2", "child_addr", "whole_addr"};
+    ownership_heap_env.run(&a2, A2[..], names2[..]);
+    // A test of the address of n keeps both edges, so `stop` returns when n is null.
+    assert(ownership_heap_env.proved(&a2, "stop") && returns(&a2, "stop"));
+    assert(!ownership_heap_env.proved(&a2, "caller") && returns(&a2, "caller"));
+    assert(loses(&a2, "caller", "extra"));
+    assert(!ownership_heap_env.proved(&a2, "caller2") && returns(&a2, "caller2"));
+    assert(loses(&a2, "caller2", "extra"));
+    // The child of a new node is a null constant of the allocation: its field is no storage.
+    assert(!ownership_heap_env.proved(&a2, "child_addr"));
+    // `&*n` is the address of the cell of n.
+    assert(!ownership_heap_env.proved(&a2, "whole_addr"));
+    assert(loses(&a2, "whole_addr", "extra"));
+
+    ownership_heap_env.closure mut a3 = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&a3);
+    string[7] names3 = {"drop_list", "chk_addr", "join_addr", "loop_addr", "two_stop", "two_mid",
+        "two_user"};
+    ownership_heap_env.run(&a3, A3[..], names3[..]);
+    // An assert that fails ends the process, so its null path holds no leak.
+    assert(ownership_heap_env.proved(&a3, "chk_addr"));
+    // A join of two addresses of one cell keeps the assumed fact of the cell.
+    assert(!ownership_heap_env.proved(&a3, "join_addr"));
+    assert(loses(&a3, "join_addr", "extra"));
+    assert(!ownership_heap_env.proved(&a3, "loop_addr"));
+    assert(loses(&a3, "loop_addr", "extra"));
+    // No callee on the chain loses its return, so the caller keeps its path and its leak.
+    assert(returns(&a3, "two_stop") && returns(&a3, "two_mid"));
+    assert(!ownership_heap_env.proved(&a3, "two_user") && returns(&a3, "two_user"));
+    assert(loses(&a3, "two_user", "extra"));
+
+    ownership_heap_env.closure mut a4 = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&a4);
+    string[3] names4 = {"drop_list", "chk_addr", "param_test"};
+    ownership_heap_env.run(&a4, A4[..], names4[..]);
+    // The assert passes for a null n, and `extra` leaks then.
+    assert(!ownership_heap_env.proved(&a4, "chk_addr"));
+    // A null test of a pointer to caller storage decides nothing: a parameter can be null.
+    assert(!ownership_heap_env.proved(&a4, "param_test"));
+    assert(loses(&a4, "param_test", "extra"));
+}
+
+// f1, f2 and f4 (`test/ownership/probes/review_f*.ft`) and d3. A graft imports each callee root
+// fact, and an imported fact removes no caller path. The exit contradiction ends a caller path
+// only when the callee's null and the caller's nonnull are both established.
+fn calls() void {
+    println("calls");
+    ownership_heap_env.closure mut f1 = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&f1);
+    string[3] names1 = {"addr_only", "caller_free", "caller_null"};
+    ownership_heap_env.run(&f1, F1[..], names1[..]);
+    assert(ownership_heap_env.proved(&f1, "addr_only") && returns(&f1, "addr_only"));
+    // The exit root of n is the assumed root of an unfold.
+    ownership_heap.summary* addr = ownership_heap_env.summary(&f1, "addr_only");
+    assert(addr->post.atoms[0].root.value == ownership_facts.root_kind.nonnull);
+    assert(addr->post.atoms[0].root.how == ownership_facts.provenance.assumed);
+    assert(!ownership_heap_env.proved(&f1, "caller_free"));
+    assert(loses(&f1, "caller_free", "extra"));
+    assert(!ownership_heap_env.proved(&f1, "caller_null"));
+    assert(loses(&f1, "caller_null", "extra"));
+
+    ownership_heap_env.closure mut f2 = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&f2);
+    string[5] names2 = {"addr_flat", "read_flat", "free_param", "null_flat", "read_null"};
+    ownership_heap_env.run(&f2, F2[..], names2[..]);
+    assert(ownership_heap_env.proved(&f2, "addr_flat") && ownership_heap_env.proved(&f2,
+        "read_flat"));
+    assert(!ownership_heap_env.proved(&f2, "free_param"));
+    assert(loses(&f2, "free_param", "extra"));
+    // An empty argument binds no callee atom: the result is an empty value that the caller
+    // assumes, so its null test decides nothing.
+    assert(!ownership_heap_env.proved(&f2, "null_flat"));
+    assert(loses(&f2, "null_flat", "extra"));
+    assert(!ownership_heap_env.proved(&f2, "read_null"));
+    assert(loses(&f2, "read_null", "extra"));
+
+    ownership_heap_env.closure mut f4 = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&f4);
+    string[4] names4 = {"drop_list", "addr_only", "free_param", "null_local"};
+    ownership_heap_env.run(&f4, F4[..], names4[..]);
+    // The caller root of x takes the callee's assumed nonnull, so the null edge stays.
+    assert(!ownership_heap_env.proved(&f4, "free_param"));
+    assert(loses(&f4, "free_param", "extra"));
+    assert(!ownership_heap_env.proved(&f4, "null_local"));
+
+    ownership_heap_env.closure mut d3 = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&d3);
+    string[8] names3 = {"drop_list", "need_null", "fresh_arg", "tested_arg", "unfolded_arg",
+        "free_arg", "returned_arg", "fresh"};
+    ownership_heap_env.run(&d3, D3[..], names3[..]);
+    // The test of n establishes its null root on the one returning path.
+    assert(ownership_heap_env.proved(&d3, "need_null") && returns(&d3, "need_null"));
+    ownership_heap.summary* need = ownership_heap_env.summary(&d3, "need_null");
+    assert(need->post.atoms[0].root.value == ownership_facts.root_kind.null_root);
+    assert(need->post.atoms[0].root.how == ownership_facts.provenance.established);
+    // An allocation establishes a nonnull argument: the call does not return, and the leak of
+    // `extra` after it is on no path.
+    assert(ownership_heap_env.proved(&d3, "fresh_arg") && !returns(&d3, "fresh_arg"));
+    // A test establishes n: its nonnull path ends at the call, and the null path returns.
+    assert(ownership_heap_env.proved(&d3, "tested_arg") && returns(&d3, "tested_arg"));
+    // An unfold only assumes the nonnull root of its cell: need_null(null) returns, and `extra`
+    // leaks.
+    assert(!ownership_heap_env.proved(&d3, "unfolded_arg") && returns(&d3, "unfolded_arg"));
+    assert(loses(&d3, "unfolded_arg", "extra"));
+    assert(!ownership_heap_env.proved(&d3, "free_arg") && returns(&d3, "free_arg"));
+    // A callee result has an imported root, so the contradiction keeps the path.
+    assert(ownership_heap_env.proved(&d3, "fresh"));
+    assert(ownership_heap_env.summary(&d3, "fresh")->post.atoms[0].root.how ==
+        ownership_facts.provenance.established);
+    assert(!ownership_heap_env.proved(&d3, "returned_arg") && returns(&d3, "returned_arg"));
+}
+
+// An established fact still removes a path: a test, a null constant, a move, an allocation and
+// the address of a local or of an allocated cell.
+fn kept() void {
+    println("kept pruning");
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    string[9] names = {"drop_list", "twice", "null_constant", "moved_out", "allocated",
+        "local_address", "allocated_field", "tested_field", "read_then_test"};
+    ownership_heap_env.run(&c, KEPT[..], names[..]);
+    u64 mut i = 0;
+    while (i < 7) {
+        assert(ownership_heap_env.proved(&c, names[i]));
+        assert(ownership_heap_env.events(&c, names[i]) == 0 && returns(&c, names[i]));
+        i += 1;
+    }
+    // Precision limit: an unfold assumes the nonnull root of its cell, also after a test that
+    // established it. So the address of a field of a tested owner decides nothing.
+    assert(!ownership_heap_env.proved(&c, "tested_field"));
+    assert(loses(&c, "tested_field", "extra"));
+    // A read through a null n is undefined behavior (D10.7), which the proof does not follow:
+    // the dereference assumes the nonnull root, so the null edge stays with its leak.
+    assert(!ownership_heap_env.proved(&c, "read_then_test"));
+    assert(loses(&c, "read_then_test", "extra"));
+}
+
+// The probe `counted` (review of the typed facts): a block entry that a join only weakens runs
+// again, so a loop that calls a callee publishes the provenance of one call.
+fn counted() void {
+    println("counted loops");
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    string[6] names = {"clear_first", "straight", "looped", "plain", "counted", "after"};
+    ownership_heap_env.run(&c, COUNTED[..], names[..]);
+    u64 mut i = 0;
+    while (i < 5) {
+        assert(ownership_heap_env.proved(&c, names[i]));
+        assert(caller_owner(&c, names[i]).value == ownership_facts.root_kind.null_root);
+        i += 1;
+    }
+    // A move establishes the null of the callee, and one call imports it.
+    assert(caller_owner(&c, "clear_first").how == ownership_facts.provenance.established);
+    assert(caller_owner(&c, "straight").how == ownership_facts.provenance.imported);
+    // A loop head joins the null of the entry with the null of the back edge. The join of two
+    // empty values assumes its null (`join_values`), and the weaker head runs again, so a loop
+    // publishes no stronger fact than one call: with a call or without one.
+    assert(caller_owner(&c, "looped").how == ownership_facts.provenance.assumed);
+    assert(caller_owner(&c, "counted").how == ownership_facts.provenance.assumed);
+    assert(caller_owner(&c, "plain").how == ownership_facts.provenance.assumed);
+    // An imported null removes no path: the nonnull edge of the test keeps its leak.
+    assert(!ownership_heap_env.proved(&c, "after"));
+    assert(loses(&c, "after", "extra"));
+}
+
+fn atom_of(ownership_heap.state* s, ownership_heap.slot_key k) u32 {
+    u64 at = ownership_heap.find_slot(s, k);
+    assert(at != ownership_heap.U64_MAX && s->slots[at].v.kind == ownership_heap.value_kind.owned);
+    return s->slots[at].v.atom;
+}
+
+fn field(u32 cell, u32 k) ownership_heap.slot_key {
+    ownership_heap.slot_key mut key = ownership_heap.key_of(ownership_heap.base_kind.cell, cell);
+    assert(ownership_heap.extend(&key, k));
+    return key;
+}
+
+fn test_of(u32 a) ownership_heap.value {
+    ownership_heap.value mut cond = ownership_heap.scalar_value();
+    cond.test = a;
+    cond.test_nonnull = true;
+    return cond;
+}
+
+fn is_root(ownership_heap.atom a, ownership_facts.root_kind value,
+    ownership_facts.provenance how) bool {
+    return a.root.value == value && a.root.how == how;
+}
+
+// The two edges of `refine` one at a time (D17.18): only an established root removes an edge.
+fn edges() void {
+    println("edges");
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    string[2] names = {"host", "peek_fill"};
+    ownership_heap_env.open(&c, EDGES[..], names[..]);
+    ownership_heap.context mut ctx = ownership_heap.context{};
+    ownership_heap_env.context_of(&c, "host", &ctx);
+    defer ownership_heap.free_context(&ctx);
+    ownership_heap.state mut s = ownership_heap.initial(&ctx);
+    defer ownership_heap.free_state(&s);
+    ownership_heap.value cond = test_of(0);
+    // An unfold assumes a nonnull root. Its null edge stays, and the cell, its child region and
+    // its payload take an established null root: on that edge they hold no allocation.
+    ownership_heap.state mut cell = ownership_heap.clone(&s);
+    defer ownership_heap.free_state(&cell);
+    assert(ownership_heap.unfold(&ctx, &cell, 0));
+    assert(is_root(cell.atoms[0], ownership_facts.root_kind.nonnull,
+        ownership_facts.provenance.assumed));
+    u32 next = atom_of(&cell, field(0, 0));
+    u32 bytes = atom_of(&cell, field(0, 1));
+    assert(cell.atoms[next].root.value == ownership_facts.root_kind.free);
+    ownership_heap.state mut null_edge = ownership_heap.clone(&cell);
+    defer ownership_heap.free_state(&null_edge);
+    assert(ownership_heap.refine(&null_edge, cond, false));
+    assert(is_root(null_edge.atoms[0], ownership_facts.root_kind.null_root,
+        ownership_facts.provenance.established));
+    assert(is_root(null_edge.atoms[next], ownership_facts.root_kind.null_root,
+        ownership_facts.provenance.established));
+    assert(is_root(null_edge.atoms[bytes], ownership_facts.root_kind.null_root,
+        ownership_facts.provenance.established));
+    // An atom that the cell does not own keeps its root.
+    assert(is_root(null_edge.atoms[1], ownership_facts.root_kind.free,
+        ownership_facts.provenance.assumed));
+    // The established null now removes the nonnull edge, and the established nonnull of the
+    // other edge removes the null edge.
+    assert(!ownership_heap.refine(&null_edge, cond, true));
+    ownership_heap.state mut nonnull_edge = ownership_heap.clone(&cell);
+    defer ownership_heap.free_state(&nonnull_edge);
+    assert(ownership_heap.refine(&nonnull_edge, cond, true));
+    assert(is_root(nonnull_edge.atoms[0], ownership_facts.root_kind.nonnull,
+        ownership_facts.provenance.established));
+    assert(nonnull_edge.atoms[next].root.value == ownership_facts.root_kind.free);
+    assert(!ownership_heap.refine(&nonnull_edge, cond, false));
+    // A fold of the null cell keeps its null root; a fold of a nonnull cell assumes it.
+    assert(ownership_heap.fold(&ctx, &null_edge, 0));
+    assert(null_edge.atoms[0].kind == ownership_heap.atom_kind.region);
+    assert(is_root(null_edge.atoms[0], ownership_facts.root_kind.null_root,
+        ownership_facts.provenance.established));
+    assert(ownership_heap.fold(&ctx, &nonnull_edge, 0));
+    assert(is_root(nonnull_edge.atoms[0], ownership_facts.root_kind.nonnull,
+        ownership_facts.provenance.assumed));
+    // An assumed or imported root keeps both edges; each edge establishes its root.
+    ownership_facts.root_kind[2] values = {ownership_facts.root_kind.null_root,
+        ownership_facts.root_kind.nonnull};
+    ownership_facts.provenance[3] hows = {ownership_facts.provenance.assumed,
+        ownership_facts.provenance.imported, ownership_facts.provenance.established};
+    u64 mut kept = 0;
+    u64 mut i = 0;
+    while (i < values.len) {
+        u64 mut j = 0;
+        while (j < hows.len) {
+            bool mut k = false;
+            while (true) {
+                ownership_heap.state mut t = ownership_heap.clone(&s);
+                t.atoms[1].root = ownership_facts.nullness{values[i], hows[j]};
+                bool stays = ownership_heap.refine(&t, test_of(1), k);
+                bool contrary = (values[i] == ownership_facts.root_kind.nonnull) != k;
+                assert(stays == (!contrary || hows[j] != ownership_facts.provenance.established));
+                if (stays) {
+                    kept += 1;
+                    assert(is_root(t.atoms[1], k ? ownership_facts.root_kind.nonnull :
+                        ownership_facts.root_kind.null_root,
+                        ownership_facts.provenance.established));
+                }
+                ownership_heap.free_state(&t);
+                if (k) { break; }
+                k = true;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+    // 12 edges: the 2 contrary edges of an established root go, the 10 others stay.
+    assert(kept == 10);
+    // A weaker provenance of a root or a status is a change of the atom.
+    ownership_heap.atom base = s.atoms[1];
+    ownership_heap.atom mut weak = base;
+    assert(ownership_heap.same_atom(base, weak));
+    weak.root.how = ownership_facts.provenance.imported;
+    assert(!ownership_heap.same_atom(base, weak));
+    weak = base;
+    weak.status.how = ownership_facts.provenance.established;
+    assert(!ownership_heap.same_atom(base, weak));
+    ownership_heap.state mut weaker = ownership_heap.clone(&s);
+    defer ownership_heap.free_state(&weaker);
+    weaker.atoms[1].root.how = ownership_facts.provenance.imported;
+    bool mut same = true;
+    assert(ownership_heap.equal(&ctx, &s, &weaker, &same) && !same);
+}
+
+// A known scalar is a fact too (D17.18). A callee can write a scalar local whose storage a FIR
+// address names, so each call forgets its value; a local that no address names keeps it.
+fn scalars() void {
+    println("known scalars");
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    string[12] names = {"set", "count", "clear", "nothing", "set_direct", "count_direct",
+        "poked", "stop", "after_stop", "unnamed", "named_only", "written_here"};
+    ownership_heap_env.run(&c, SCALARS[..], names[..]);
+    // The callee writes the local through its address, and `extra` leaks on the written value.
+    assert(!ownership_heap_env.proved(&c, "set_direct"));
+    assert(loses(&c, "set_direct", "extra"));
+    assert(!ownership_heap_env.proved(&c, "count_direct"));
+    assert(loses(&c, "count_direct", "extra"));
+    // An extern call writes what its pointer argument designates (D17.13).
+    assert(!ownership_heap_env.proved(&c, "poked"));
+    assert(loses(&c, "poked", "extra"));
+    // `stop` returns because `clear` empties its flag, so its caller keeps its path and its leak.
+    assert(ownership_heap_env.proved(&c, "stop") && returns(&c, "stop"));
+    assert(!ownership_heap_env.proved(&c, "after_stop") && returns(&c, "after_stop"));
+    assert(loses(&c, "after_stop", "extra"));
+    // No address names b, so no callee can write it: the known false removes the early return.
+    assert(ownership_heap_env.proved(&c, "unnamed"));
+    assert(ownership_heap_env.events(&c, "unnamed") == 0);
+    // A local that an address names loses its value at any call, also at a call that does not
+    // take the address.
+    assert(!ownership_heap_env.proved(&c, "named_only"));
+    assert(loses(&c, "named_only", "extra"));
+    // A store through the address after the call gives the value back.
+    assert(ownership_heap_env.proved(&c, "written_here"));
+    assert(ownership_heap_env.events(&c, "written_here") == 0);
+}
+
+// A requirement makes the entry owner an assumed null, which removes no edge: the store over an
+// empty owner proves, and the nonnull edge of a later test keeps its leak.
+fn requirements() void {
+    println("assumed requirements");
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    string[2] names = {"host", "peek_fill"};
+    ownership_heap_env.run(&c, EDGES[..], names[..]);
+    ownership_heap.summary* s = ownership_heap_env.summary(&c, "peek_fill");
+    assert(s->interface.len == 1 && s->interface[0].require_null);
+    assert(!ownership_heap_env.proved(&c, "peek_fill"));
+    assert(loses(&c, "peek_fill", "extra"));
+}
+
+fn main() i32 {
+    addresses();
+    calls();
+    kept();
+    counted();
+    edges();
+    requirements();
+    scalars();
+    println("heap provenance ok");
+    return 0;
+}

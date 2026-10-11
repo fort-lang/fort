@@ -39,7 +39,7 @@ HEAP_ROWS_SKIPPED = {
     "test/lang/run/ownership/056_own_string_round_trip.ft": "imports std.str",
 }
 SOLVERS = ("summary", "heap")
-LEDGER_CLASSES = ("A", "B", "D", "E")
+LEDGER_CLASSES = ("A", "B", "D", "E", "F", "G", "H")
 TEXT_ARRAY = re.compile(r"^(\s*)string\[[^\]]*\] (?:mut )?(\w+) = \{(.*)$")
 STRING_LITERAL = re.compile(r'"((?:[^"\\]|\\.)*)"')
 # A function of a heap test that copies a base text and then a tail into `out`.
@@ -1536,6 +1536,9 @@ class GateInputTest(unittest.TestCase):
     def test_ledger_reads_entries_and_skips_comments(self):
         ledger = read_ledger("# rule\n\nf.ft:main heap # E\ng.ft:x summary # A\n")
         self.assertEqual(ledger, {("f.ft", "main", "heap"): "E", ("g.ft", "x", "summary"): "A"})
+        # The classes of 2026-10-11: F, G and H.
+        ledger = read_ledger("f.ft:a heap # F\nf.ft:b heap # G\nf.ft:c heap # H\n")
+        self.assertEqual(sorted(ledger.values()), ["F", "G", "H"])
 
     def test_ledger_refuses_a_bad_line(self):
         for text, message in (("f.ft:main heap\n", "line 1: not"),
@@ -1614,16 +1617,16 @@ class SoundnessGateTest(unittest.TestCase):
 
     def heap_rows_inputs(self):
         """(label, path) of each input of heap_rows: the programs of the qualification manifest
-        but HEAP_ROWS_SKIPPED, the probe programs, and each text of the 11 heap tests."""
+        but HEAP_ROWS_SKIPPED, the probe programs, and each text of the 12 heap tests."""
         programs = sorted(path for path, _, _ in qualification_cases())
         self.assertEqual(len(programs), 109)
         self.assertTrue(set(HEAP_ROWS_SKIPPED) <= set(programs))
         out = [(path, CHECKOUT / path) for path in programs if path not in HEAP_ROWS_SKIPPED]
         probes = sorted((OWNERSHIP / "probes").glob("*.ft"))
-        self.assertEqual(len(probes), 10)
+        self.assertEqual(len(probes), 24)
         out += [(path.relative_to(CHECKOUT).as_posix(), path) for path in probes]
         heap_tests = sorted((CHECKOUT / "test" / "fort").glob("ownership_heap*_test.ft"))
-        self.assertEqual(len(heap_tests), 11)
+        self.assertEqual(len(heap_tests), 12)
         texts = self.root / "texts"
         texts.mkdir(exist_ok=True)
         for test in heap_tests:
@@ -1672,7 +1675,7 @@ class SoundnessGateTest(unittest.TestCase):
         self.assertEqual(sum(len(bodies) for _, bodies in items), 37)
         probes = json.loads(FAULTY_PROBES.read_text())["faulty"]
         items += [(f"test/ownership/probes/{name}", bodies) for name, bodies in probes.items()]
-        self.assertEqual(sum(len(bodies) for _, bodies in items), 62)
+        self.assertEqual(sum(len(bodies) for _, bodies in items), 100)
 
         def verdicts(item):
             path, bodies = item
@@ -1684,7 +1687,7 @@ class SoundnessGateTest(unittest.TestCase):
 
         with ThreadPoolExecutor(max_workers=4) as pool:
             found = [row for rows in pool.map(verdicts, items) for row in rows]
-        self.assertEqual(len(found), 2 * 62)
+        self.assertEqual(len(found), 2 * 100)
         proved = {(path, body, solver) for path, body, solver, verdict in found
                   if verdict == "proved"}
         ledger = read_ledger(FALSE_ACCEPTS.read_text())

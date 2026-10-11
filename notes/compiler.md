@@ -925,7 +925,8 @@ came here.
   other member, because their summaries rest on each other.
   A lost owner of live status becomes leaked: it stays allocated, so its views stay valid. A
   lost owner of unknown status becomes escaped, so a read through its views stays unproved.
-  `tools/mutations/ownership_heap.json` holds 71 rows of the core rules.
+  `tools/mutations/ownership_heap.json` holds 86 rows of the core rules: 15 of them hold rule P1
+  of D17.18, and its stage `provenance` runs `ownership_heap_provenance_test.ft`.
   Precision limits (measured in the heap tests): a mixed callee fate (some members released,
   some kept) makes each member view of the caller atom unproved (`rest_view`, H10); a view of a
   heap atom in a borrowed field of a returned region is incomplete proof, so
@@ -939,10 +940,10 @@ came here.
   `src/fort/ownership_facts.ft` holds the fact types of the heap proof and their joins. A
   `nullness` (a root value) and a `status_fact` (an allocation status) hold on each path that the
   state represents. Each has a provenance: `established` (an operation of this body observed the
-  fact), `imported` (a callee summary gives it) or `assumed`. Today each graft writes `assumed`,
-  and no site writes `imported`; the next step decides when a graft fact is `imported`. A join
-  keeps the weaker provenance, the earlier member of the enum. A `may_set` keeps a member of some
-  path and joins by union; a `must_set` keeps a member of each path and joins by intersection.
+  fact), `imported` (a callee summary gives it, and the callee established or imported it) or
+  `assumed`. A join keeps the weaker provenance, the earlier member of the enum. A `may_set`
+  keeps a member of some path and joins by union; a `must_set` keeps a member of each path and
+  joins by intersection.
   `atom.root`, `atom.status`, `value.nullness` and `state.released` have these types, and
   `join_atom`, `join_values` and `join` assign each of them from the join of its type.
   The constructors fix the provenance. `null_value` is established: a null constant, a move, a new
@@ -950,34 +951,65 @@ came here.
   `empty_value` is assumed: a graft, a join of two empty values, a failed caller requirement.
   `new_atom` takes the provenance of its operation: an allocation establishes it; the entry state,
   an unfold, a lost identity and the result of an unknown call assume it. A null test edge
-  establishes its root. An unfold, a fold, a P cover, a caller requirement and a graft write
-  assumed facts. `address_value` takes the fact of its base from `address_fact`: a local base is
-  `{nonnull, established}`, a caller base `{free, assumed}`, a cell base the root fact of its
-  cell, and an element address `{nonnull, assumed}`. A status that an operation of the body sets
-  (a release, a loss, an unknown effect) is established; a status that a summary gives is assumed.
-  No rule reads a provenance yet. `same_atom`, `same_value`, `equal` and `measure` compare the
-  values only, so fixpoints, W counts, events and verdicts do not change. `may_prune` is the
-  predicate of a rule that removes a path: an established null or nonnull root. Nothing calls it.
-  One limit follows from this: `propagate` keeps the entry state of a block when the join is equal
-  by value. So a loop head can keep a stronger provenance than the join of its predecessors; a
-  loop that calls a callee can publish an established empty owner where one call gives an
-  assumed one. The step that puts `how` into `equal` removes this limit.
+  establishes its root; the null edge gives each atom that the tested atom owns an established
+  null root too (`null_descendants`), because a cell holds no storage there. An unfold, a fold, a
+  P cover and a caller requirement write assumed facts. A graft imports each root fact that a
+  summary gives (`import_nullness`): `imported` when the callee established or imported it,
+  `assumed` otherwise. `address_value` takes the fact of its base from `address_fact`: a local
+  base is `{nonnull, established}`, a caller base `{free, assumed}`, a cell base the root fact of
+  its cell, and an element address `{nonnull, assumed}`. A status that an operation of the body
+  sets (a release, a loss, an unknown effect) is established; a status that a summary gives is
+  assumed, because no rule reads a status provenance.
+  **Only an established fact removes a path** (D17.18). `may_prune` is true only for an
+  established null or nonnull root, and `may_prune_truth` only for a known scalar. Each site that
+  removes a path reads one of them: the truth of a null test of an empty value, an address or the
+  atom of an exact view (`null_test`), the known truth and each root edge of `refine`, and both
+  roots of the exit contradiction (`apply`). A callee without a return ends a caller path only
+  because each of its own paths ended at these sites, at an abort, or in a loop.
+  So a test of the address of an unfolded cell, of caller storage, or of a root that an unfold or
+  a graft gave keeps both edges, and a leak on the null path stays an event. The address of a
+  local and a string constant are established nonnull: an `alloca` and `@.str.N` are never null
+  (`fir_llvm.ft`). A move of a temporary writes an established null, although the translator
+  prints no zero for it: rule V12 (`spec/fir.md` 10, `fir_verify.ft`) holds that no item reads a
+  moved temporary, so no null test reads that fact. `same_atom` and `same_value` compare the
+  provenance, so a block entry that a join only weakens runs again in `propagate`; a loop
+  publishes no stronger fact than one call. A fold keeps the null root of a cell that a null edge
+  made null.
+  A known scalar is a fact too, and the heap proof keeps one only in the slot of a whole scalar
+  local. A callee can write such a local through an address argument, a pointer that an argument
+  holds, or a global, and each way needs a FIR address of the local first. So `call` forgets the
+  value of each scalar local whose storage a FIR address or slice names (`forget_scalars`,
+  `context.named`) before it applies a summary or an unknown call. Before that rule the heap solver
+  alone proved 9 faulty bodies whose callee wrote such a local (`test/ownership/probes/review_p*`).
+  Three gaps stay in the ledger by a ruling of the user (2026-10-11), each for a later change: a
+  pointer local whose address escaped keeps its root fact over a call (class F), a cast that
+  changes the pointee type keeps the address, so a store through it is lost or widened (G), and
+  `rv_not` keeps the number of a scalar (H).
+  Precision limits, each measured by a variant that makes the site precise and gives no changed
+  row of `heap_rows` (2026-10-10): the join of two empty values, a fold, the empty side of a
+  pairing and the null children of an unfold of `empty_leaves` assume their facts; an unfold
+  assumes the nonnull root also after a test established it (`tested_field` of
+  `ownership_heap_provenance_test.ft`); an imported fact removes no path (`after`, `returned_arg`).
   The zero of `provenance` is `assumed`, so a fact that a constructor forgets to set claims no
   observation and removes no path. `ownership_facts_test.ft` holds the zero.
-  `tools/fact_joins.py` (the ctests `fact_joins` and `fact_joins_selftest`) holds these rules,
-  because no test reads a provenance yet. It reads the structs `atom`, `value`, `state`, `summary`
-  and `interface_entry` of the heap module. Each field has a fact type or one tag
-  `// join: same|owner|none|may|must`. A `may` or `must` tag names a path flag that has no fact
-  type yet, and its join assignment uses `||` or `&&`; a `same`, `owner` or `none` field uses
-  neither. In a join function, each typed field joins through the join of its type: each
-  assignment of the whole field calls that join, and each read of the whole field is one of its
-  arguments. No join function writes `how`. A whole record that one side gives carries the tag
-  `// join: copy`. A graft function reads a callee fact only through `assume`, `assume_status` or
-  a join, and it keeps its `assume` assignments. `provenance.established` and `null_value()` occur
-  only in the functions of `ESTABLISHED_SITES` and `NULL_VALUE_SITES`, as often as the table says,
-  so a new established fact changes the table. A new fact type adds one row to `FACT_JOINS` and
-  one join function. No join function writes a part of a typed field, so the lint reports no
-  partial write.
+  `tools/fact_joins.py` (the ctests `fact_joins` and `fact_joins_selftest`) holds these rules. A
+  test sees a provenance only where a rule reads it, so the lint holds each site. It reads the
+  structs `atom`, `value`, `state`, `summary` and `interface_entry` of the heap module. Each field
+  has a fact type or one tag `// join: same|owner|none|may|must`. A `may` or `must` tag names a
+  path flag that has no fact type yet, and its join assignment uses `||` or `&&`; a `same`,
+  `owner` or `none` field uses neither. In a join function, each typed field joins through the
+  join of its type: each assignment of the whole field calls that join, and each read of the
+  whole field is one of its arguments. No join function writes `how`. A whole record that one
+  side gives carries the tag `// join: copy`. A graft function reads a callee fact only through
+  `assume`, `import_nullness`, `assume_status`, `may_prune` or a join, and it keeps its 3 import
+  and assume assignments. `provenance.established`, `null_value()`, a pruning predicate
+  (`may_prune`, `may_prune_truth`), `forget_scalars` and a callee effect (`apply`,
+  `unknown_call`) occur only in the functions of `ESTABLISHED_SITES`, `NULL_VALUE_SITES`,
+  `PRUNING_SITES`, `FORGET_SITES` and `EFFECT_SITES`, as often as the table says, and `call`
+  forgets before its first callee effect. So a new established fact, a new pruning site or a new
+  callee effect changes a table. A new fact type adds one row to `FACT_JOINS` and one join
+  function. No join function writes a part of a typed field, so the lint reports no partial
+  write.
 - **Finite ownership proof preserves obligations when precision ends** (T-276, D17.18).
   `spec/fir.md` 14.1 defines the finite domain, canonical solving, and counted budgets.
   Publish numeric limits and reproduction commands before qualification. This rule ticket chooses
