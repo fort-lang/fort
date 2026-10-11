@@ -4,6 +4,7 @@ import fir_lower;
 import fir_verify;
 import lower_env;
 import ownership_api;
+import ownership_facts;
 import ownership_flow;
 import ownership_graph;
 import ownership_heap;
@@ -285,6 +286,47 @@ fn rounds(closure* c, string name) u64 { return c->solution.rounds[index(c, name
 fn proved(closure* c, string name) bool {
     ownership_heap.summary* s = summary(c, name);
     return ownership_api.successful(s->proof) && s->known && !s->residual;
+}
+
+/// The requirement that the owner at owned-field path `path[..depth]` below the entry value of
+/// interface atom `entry` has the root `needs` (D10.7).
+fn requirement(u32 entry, u32 depth, u32[6] path, ownership_facts.root_kind needs)
+    ownership_facts.requirement {
+    return ownership_facts.requirement{entry, depth, path, needs};
+}
+
+/// The requirement that the entry value of interface atom `entry` has the root `needs`.
+fn root_requirement(u32 entry, ownership_facts.root_kind needs) ownership_facts.requirement {
+    ownership_facts.requirement mut r = ownership_facts.requirement{};
+    r.entry = entry;
+    r.needs = needs;
+    return r;
+}
+
+/// Whether some path of body `name` has requirement `r`.
+fn requires(closure* c, string name, ownership_facts.requirement r) bool {
+    ownership_heap.summary* s = summary(c, name);
+    return ownership_facts.has_requirement(s->required_some.items[..], s->required_some.len, r);
+}
+
+/// Whether each returning path of body `name` has requirement `r`.
+fn requires_each(closure* c, string name, ownership_facts.requirement r) bool {
+    ownership_heap.summary* s = summary(c, name);
+    return ownership_facts.has_requirement(s->post.required.items[..], s->post.required.len, r);
+}
+
+/// The number of requirements of body `name` with the root `needs` on owned fields below the entry
+/// value of interface atom `entry`, at any depth.
+fn field_requirements(closure* c, string name, u32 entry, ownership_facts.root_kind needs) u64 {
+    ownership_heap.summary* s = summary(c, name);
+    u64 mut found = 0;
+    u32 mut i = 0;
+    while (i < s->required_some.len) {
+        ownership_facts.requirement r = s->required_some.items[cast(i, u64)];
+        if (r.entry == entry && r.depth > 0 && r.needs == needs) { found += 1; }
+        i += 1;
+    }
+    return found;
 }
 
 /// The number of candidate events of `kind` and certainty `how` in body `name`: a violation that

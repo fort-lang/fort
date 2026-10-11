@@ -8,6 +8,7 @@
 //| edges
 //| assumed requirements
 //| known scalars
+//| requirements
 //| heap provenance ok
 /// Checks that only an established fact removes a path of the heap proof (D17.18, rule P1): a
 /// null test, both edges of a refinement, and the exit contradiction of a call.
@@ -403,6 +404,299 @@ string[9] EDGES = {
     "}",
 };
 
+// Round8_d1.
+string[21] D1 = {
+    "struct node { i32 v; node mut* own next; }",
+    "fn drop_list(node mut* own n) void { if (n == null) { return; }",
+    "    drop_list(move(n->next)); del(n); }",
+    "fn read_next(node mut* own n) node mut* own {",
+    "    i32 w = n->next->v;",
+    "    return move(n);",
+    "}",
+    "fn read_root(node mut* own n) node mut* own {",
+    "    i32 w = n->v;",
+    "    return move(n);",
+    "}",
+    "fn null_next() void {",
+    "    node mut* own n = new(node);",
+    "    node mut* own m = read_next(move(n));",
+    "    drop_list(move(m));",
+    "}",
+    "fn null_root() void {",
+    "    node mut* own n = null;",
+    "    node mut* own m = read_root(move(n));",
+    "    drop_list(move(m));",
+    "}",
+};
+
+// Round8_d2.
+string[29] D2 = {
+    "struct holder { i32 mut* own p; i32 k; }",
+    "fn read_p(holder mut* own h) holder mut* own {",
+    "    i32 w = *h->p;",
+    "    return move(h);",
+    "}",
+    "fn read_p_borrow(holder* h) i32 {",
+    "    return *h->p;",
+    "}",
+    "fn get_p(holder mut* own h) i32 {",
+    "    i32 w = *h->p;",
+    "    del(h->p);",
+    "    del(h);",
+    "    return w;",
+    "}",
+    "fn null_field() void {",
+    "    holder mut* own h = new(holder);",
+    "    holder mut* own g = read_p(move(h));",
+    "    del(g);",
+    "}",
+    "fn null_field_borrow() i32 {",
+    "    holder mut* own h = new(holder);",
+    "    i32 w = read_p_borrow(h);",
+    "    del(h);",
+    "    return w;",
+    "}",
+    "fn null_field_get() i32 {",
+    "    holder mut* own h = new(holder);",
+    "    return get_p(move(h));",
+    "}",
+};
+
+// Review_f5.
+string[15] F5 = {
+    "struct node { node mut* own next; i32 v; }",
+    "fn drop_list(node mut* own n) void { if (n == null) { return; }",
+    "    drop_list(move(n->next)); del(n); }",
+    "fn read_node(node mut* own n) node mut* own {",
+    "    i32 w = n->v;",
+    "    return move(n);",
+    "}",
+    "fn null_read() void {",
+    "    node mut* own y = read_node(null);",
+    "    drop_list(move(y));",
+    "}",
+    "fn local_read() i32 {",
+    "    node mut* own y = null;",
+    "    return y->v;",
+    "}",
+};
+
+// The rules of the caller requirement (D10.7), one body each.
+string[24] NEEDS = {
+    "struct node { i32 v; node mut* own next; }",
+    "fn drop_list(node mut* own n) void { if (n == null) { return; }",
+    "    drop_list(move(n->next)); del(n); }",
+    "fn read_root(node mut* own n) node mut* own { i32 w = n->v; return move(n); }",
+    "fn maybe(node mut* own n, bool c) node mut* own { if (c) { i32 w = n->v; }",
+    "    return move(n); }",
+    "fn maybe_null() void { node mut* own m = maybe(null, true); drop_list(move(m)); }",
+    "fn wrap(node mut* own n) node mut* own { return read_root(move(n)); }",
+    "fn wrap_null() void { node mut* own m = wrap(null); drop_list(move(m)); }",
+    "fn skip(node mut* own n) node mut* own { n->next = read_root(move(n->next));",
+    "    return move(n); }",
+    "fn skip_short() void { node mut* own a = new(node); node mut* own b = skip(move(a));",
+    "    drop_list(move(b)); }",
+    "fn skip_long() void { node mut* own a = new(node); a->next = new(node);",
+    "    node mut* own b = skip(move(a)); drop_list(move(b)); }",
+    "fn tested_next(node mut* own n) node mut* own {",
+    "    if (n != null) { i32 w = n->next->v; } return move(n); }",
+    "fn tested_null() void { node mut* own m = tested_next(null); drop_list(move(m)); }",
+    "fn addr(node mut* own n) node mut* own { i32 mut* q = &n->v; return move(n); }",
+    "fn addr_null() void { node mut* own m = addr(null); drop_list(move(m)); }",
+    "fn addr_read(node mut* own n) node mut* own { i32 mut* q = &n->v; i32 w = n->v;",
+    "    return move(n); }",
+    "fn maybe_empty(bool c) void { node mut* own p = new(node); if (c) { del(p); }",
+    "    node mut* own m = read_root(move(p)); drop_list(move(m)); }",
+};
+
+// Requirements below one field, of a recursive callee, of caller storage, and of an owner of
+// unknown status.
+string[23] DEEP = {
+    "struct node { i32 v; node mut* own next; }",
+    "struct holder { node mut* own first; }",
+    "struct list { node mut* own head; }",
+    "fn drop_list(node mut* own n) void { if (n == null) { return; }",
+    "    drop_list(move(n->next)); del(n); }",
+    "fn put2(node mut* own n) node mut* own { n->next->next = new(node); return move(n); }",
+    "fn put2_empty() void { node mut* own a = new(node); a->next = new(node);",
+    "    node mut* own b = put2(move(a)); drop_list(move(b)); }",
+    "fn put2_full() void { node mut* own a = new(node); a->next = new(node);",
+    "    a->next->next = new(node); node mut* own b = put2(move(a)); drop_list(move(b)); }",
+    "fn put2_short() void { node mut* own a = new(node); node mut* own b = put2(move(a));",
+    "    drop_list(move(b)); }",
+    "fn walk_all(node mut* own n, i32 k) node mut* own { i32 w = n->v;",
+    "    if (k > 0) { n->next = walk_all(move(n->next), k - 1); } return move(n); }",
+    "fn read_first(holder* h) i32 { return h->first->v; }",
+    "fn wrap_first(holder* h) i32 { return read_first(h); }",
+    "fn empty_first() i32 { holder mut g = holder{}; i32 r = wrap_first(&g); return r; }",
+    "fn full_first() i32 { holder mut g = holder{}; g.first = new(node); i32 r = wrap_first(&g);",
+    "    drop_list(move(g.first)); return r; }",
+    "fn set(list mut* l, node mut* own n) void { l->head = move(n); }",
+    "extern fn touch(node* n) void;",
+    "fn touched() void { list mut l = list{}; l.head = new(node); touch(l.head);",
+    "    set(&l, new(node)); drop_list(move(l.head)); }",
+};
+
+// `test/ownership/probes/lost_*.ft`: a read through an owner that lost its entry path at depth 7,
+// at a join with another owner, and at a fold. And a join whose read follows a test.
+string[50] LOST = {
+    "struct node { i32 v; node mut* own next; }",
+    "fn drop_list(node mut* own n) void { if (n == null) { return; }",
+    "    drop_list(move(n->next)); del(n); }",
+    "fn read7(node mut* own n) node mut* own {",
+    "    i32 w = n->next->next->next->next->next->next->next->v;",
+    "    return move(n);",
+    "}",
+    "fn null7(node mut* own n) void {",
+    "    if (n == null) { return; }",
+    "    if (n->next == null) { drop_list(move(n)); return; }",
+    "    if (n->next->next == null) { drop_list(move(n)); return; }",
+    "    if (n->next->next->next == null) { drop_list(move(n)); return; }",
+    "    if (n->next->next->next->next == null) { drop_list(move(n)); return; }",
+    "    if (n->next->next->next->next->next == null) { drop_list(move(n)); return; }",
+    "    if (n->next->next->next->next->next->next == null) { drop_list(move(n)); return; }",
+    "    if (n->next->next->next->next->next->next->next != null) { drop_list(move(n)); return; }",
+    "    node mut* own m = read7(move(n));",
+    "    drop_list(move(m));",
+    "}",
+    "fn either(node mut* own a, bool c) i32 {",
+    "    node mut* own mut m = null;",
+    "    if (c) { m = new(node); } else { m = move(a); }",
+    "    i32 w = m->v;",
+    "    drop_list(move(m));",
+    "    drop_list(move(a));",
+    "    return w;",
+    "}",
+    "fn either_null() i32 { return either(null, false); }",
+    "fn fold_read(node mut* own n, bool c) node mut* own {",
+    "    if (c) { i32 x = n->v; }",
+    "    i32 w = n->next->v;",
+    "    return move(n);",
+    "}",
+    "fn fold_null() void {",
+    "    node mut* own n = new(node);",
+    "    node mut* own m = fold_read(move(n), false);",
+    "    drop_list(move(m));",
+    "}",
+    "fn test_join(node mut* own a, bool c) i32 {",
+    "    node mut* own mut m = null;",
+    "    if (c) { m = new(node); } else { m = move(a); }",
+    "    i32 mut w = 0;",
+    "    if (m != null) { w = m->v; }",
+    "    drop_list(move(m));",
+    "    drop_list(move(a));",
+    "    return w;",
+    "}",
+    "fn test_null() i32 { return test_join(null, false); }",
+    "fn tested_store(node mut* own n) node mut* own { if (n != null) { n->v = 1; }",
+    "    return move(n); }",
+};
+
+// Review cases for view arguments, assumed roots, address arguments, empty arguments, and a
+// callee that changes the fields of a parent.
+string[33] REPAIRS = {
+    "struct node { i32 v; node mut* own next; }",
+    "fn drop_list(node mut* own n) void { if (n == null) { return; }",
+    "    drop_list(move(n->next)); del(n); }",
+    "fn read_b(node* p) i32 { return p->v; }",
+    "fn addr_then(node mut* own n) i32 { i32* q = &n->v; i32 w = read_b(n);",
+    "    drop_list(move(n)); return w; }",
+    "fn null_addr_then() i32 { return addr_then(null); }",
+    "fn touch(node mut* own n) node mut* own { i32* q = &n->v; return move(n); }",
+    "fn touched(node mut* own n) i32 { node mut* own m = touch(move(n));",
+    "    i32 w = read_b(m); drop_list(move(m)); return w; }",
+    "fn null_touched() i32 { return touched(null); }",
+    "fn child_view(node mut* own n) i32 { i32* q = &n->next->v;",
+    "    i32 w = read_b(n->next); drop_list(move(n)); return w; }",
+    "fn null_child_view() i32 { node mut* own n = new(node); return child_view(move(n)); }",
+    "fn read_root(node mut* own n) node mut* own { i32 w = n->v; return move(n); }",
+    "fn addr_pass(node mut* own n) void { i32* q = &n->v;",
+    "    node mut* own m = read_root(move(n)); drop_list(move(m)); }",
+    "fn null_addr_pass() void { addr_pass(null); }",
+    "fn read_next(node mut* own n) node mut* own { i32 w = n->next->v; return move(n); }",
+    "fn addr_pass_next(node mut* own n) void { i32* q = &n->v;",
+    "    node mut* own m = read_next(move(n)); drop_list(move(m)); }",
+    "fn null_addr_pass_next() void { addr_pass_next(null); }",
+    "fn addr_arg(node mut* own n) i32 { i32 w = read_b(&*n);",
+    "    drop_list(move(n)); return w; }",
+    "fn null_addr_arg() i32 { return addr_arg(null); }",
+    "fn null_borrow() i32 { node mut* own m = null; return read_b(m); }",
+    "fn maybe_cut(node mut* own n, bool c) node mut* own {",
+    "    if (c) { node mut* own t = move(n->next); drop_list(move(t)); }",
+    "    return move(n); }",
+    "fn after_cut(node mut* own n) i32 { node mut* own m = maybe_cut(move(n), true);",
+    "    i32 w = m->next->v; drop_list(move(m)); return w; }",
+    "fn caller_cut() i32 { node mut* own a = new(node); a->next = new(node);",
+    "    return after_cut(move(a)); }",
+};
+
+// Review cases for a null-side join, a fixed-array slice, and address source propagation.
+string[39] REVIEW2 = {
+    "struct node { i32 v; }",
+    "fn read_release_read(node mut* own n, bool cut) node mut* own {",
+    "    if (n == null) { return null; }",
+    "    i32 first = n->v;",
+    "    if (cut) { del(n); }",
+    "    i32 second = n->v;",
+    "    return move(n);",
+    "}",
+    "fn joined_caller(bool cut) node mut* own {",
+    "    node mut* own n = new(node);",
+    "    return read_release_read(move(n), cut);",
+    "}",
+    "struct box { box mut* own next; u8[4] data; }",
+    "fn index_slice(box mut* own b) box mut* own {",
+    "    u8 mut@ s = b->data[0..4];",
+    "    u8 x = s[0];",
+    "    return move(b);",
+    "}",
+    "fn stale_index() u8 {",
+    "    box mut* own b = new(box);",
+    "    u8 mut@ s = b->data[0..4];",
+    "    del(b);",
+    "    return s[0];",
+    "}",
+    "fn addr_only(i32* p) void { i32* q = &*p; }",
+    "fn null_addr_only() void { addr_only(null); }",
+    "fn addr_use(i32* p) i32 { i32* q = &*p; return *q; }",
+    "fn null_addr_use() i32 { return addr_use(null); }",
+    "struct cell { i32 v; }",
+    "fn field_only(cell* p) void { i32* q = &p->v; }",
+    "fn null_field_only() void { field_only(null); }",
+    "fn field_use(cell* p) i32 { i32* q = &p->v; return *q; }",
+    "fn null_field_use() i32 { return field_use(null); }",
+    "extern fn foreign_read(i32* p) void;",
+    "fn forward_unknown(i32* p) void { foreign_read(&*p); }",
+    "fn null_forward_unknown() void { forward_unknown(null); }",
+    "fn field_addr(cell* p) i32* { return &p->v; }",
+    "fn returned_field_use(cell* p) i32 { i32* q = field_addr(p); return *q; }",
+    "fn null_returned_field_use() i32 { return returned_field_use(null); }",
+};
+
+// The two lists of requirements: 8 for each path of a state, 16 for some path of a body.
+string[20] LISTS = {
+    "fn nine(i32 mut* own a0, i32 mut* own a1, i32 mut* own a2, i32 mut* own a3,",
+    "    i32 mut* own a4, i32 mut* own a5, i32 mut* own a6, i32 mut* own a7,",
+    "    i32 mut* own a8) i32 {",
+    "    i32 r = *a0 + *a1 + *a2 + *a3 + *a4 + *a5 + *a6 + *a7 + *a8;",
+    "    del(a0); del(a1); del(a2); del(a3); del(a4); del(a5); del(a6); del(a7); del(a8);",
+    "    return r; }",
+    "fn many(i32 mut* own a0, i32 mut* own a1, i32 mut* own a2, i32 mut* own a3,",
+    "    i32 mut* own a4, i32 mut* own a5, i32 mut* own a6, i32 mut* own a7,",
+    "    i32 mut* own a8, i32 mut* own a9, i32 mut* own a10, i32 mut* own a11,",
+    "    i32 mut* own a12, i32 mut* own a13, i32 mut* own a14, i32 mut* own a15,",
+    "    i32 mut* own a16) i32 {",
+    "    i32 r = *a0 + *a1 + *a2 + *a3 + *a4 + *a5 + *a6 + *a7 + *a8 + *a9 + *a10 + *a11 +",
+    "        *a12 + *a13 + *a14 + *a15 + *a16;",
+    "    del(a0); del(a1); del(a2); del(a3); del(a4); del(a5); del(a6); del(a7); del(a8);",
+    "    del(a9); del(a10); del(a11); del(a12); del(a13); del(a14); del(a15); del(a16);",
+    "    return r; }",
+    "fn last_null() i32 { return nine(new(i32), new(i32), new(i32), new(i32), new(i32),",
+    "    new(i32), new(i32), new(i32), null); }",
+    "fn first_null() i32 { return nine(null, new(i32), new(i32), new(i32), new(i32),",
+    "    new(i32), new(i32), new(i32), new(i32)); }",
+};
+
 // Whether an event of body `name` names the leak of `what`: a lost ownership, or an incomplete
 // proof of that ownership.
 fn loses(ownership_heap_env.closure* c, string name, string what) bool {
@@ -785,16 +1079,319 @@ fn scalars() void {
 
 // A requirement makes the entry owner an assumed null, which removes no edge: the store over an
 // empty owner proves, and the nonnull edge of a later test keeps its leak.
-fn requirements() void {
+fn assumed_requirements() void {
     println("assumed requirements");
     ownership_heap_env.closure mut c = ownership_heap_env.closure{};
     defer ownership_heap_env.close(&c);
     string[2] names = {"host", "peek_fill"};
     ownership_heap_env.run(&c, EDGES[..], names[..]);
     ownership_heap.summary* s = ownership_heap_env.summary(&c, "peek_fill");
-    assert(s->interface.len == 1 && s->interface[0].require_null);
+    assert(s->interface.len == 1 && ownership_heap_env.requires(&c, "peek_fill",
+        ownership_heap_env.root_requirement(0, ownership_facts.root_kind.null_root)));
     assert(!ownership_heap_env.proved(&c, "peek_fill"));
     assert(loses(&c, "peek_fill", "extra"));
+}
+
+fn caller_requirements(ownership_heap_env.closure* c, string name, ownership_api.certainty how)
+    u64 {
+    return ownership_heap_env.candidates(c, name, ownership_api.event_kind.caller_requirement,
+        how);
+}
+
+fn requirement_events(ownership_heap_env.closure* c, string name) u64 {
+    return ownership_heap_env.saw(c, name, ownership_api.event_kind.caller_requirement,
+        ownership_api.evidence_kind.abstract_possibility);
+}
+
+fn nonnull_at(u32 entry, u32 depth, u32 field) ownership_facts.requirement {
+    u32[6] mut path = {};
+    path[0] = field;
+    return ownership_heap_env.requirement(entry, depth, path,
+        ownership_facts.root_kind.nonnull);
+}
+
+// d1, d2, f5 and f2 (`test/ownership/probes`): a callee that dereferences an owner, at the root or
+// in an owned field, requires it nonnull, and a caller that passes a proved empty owner there
+// fails that requirement (D10.7). The requirement is no fact: the call goes on, and each earlier
+// event stays.
+fn requirements() void {
+    println("requirements");
+    ownership_facts.root_kind full = ownership_facts.root_kind.nonnull;
+    ownership_api.certainty definite = ownership_api.certainty.definite;
+    ownership_api.certainty possible = ownership_api.certainty.possible;
+    ownership_heap_env.closure mut d1 = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&d1);
+    string[5] names1 = {"drop_list", "read_next", "read_root", "null_next", "null_root"};
+    ownership_heap_env.run(&d1, D1[..], names1[..]);
+    // read_next reads n->next->v: it requires n and n->next on each returning path.
+    assert(ownership_heap_env.proved(&d1, "read_next"));
+    assert(ownership_heap_env.requires_each(&d1, "read_next",
+        ownership_heap_env.root_requirement(0, full)));
+    assert(ownership_heap_env.requires_each(&d1, "read_next", nonnull_at(0, 1, 1)));
+    assert(ownership_heap_env.summary(&d1, "read_next")->required_some.len == 2);
+    // drop_list tests n before each read, so it requires nothing.
+    assert(ownership_heap_env.summary(&d1, "drop_list")->required_some.len == 0);
+    // A new node has an empty next field: a definite candidate at the call.
+    assert(ownership_heap_env.candidate(&d1, "null_next",
+        ownership_api.event_kind.caller_requirement));
+    assert(caller_requirements(&d1, "null_next", definite) == 1);
+    assert(ownership_heap_env.first(&d1, "null_next").line == 14);
+    assert(ownership_heap_env.first_text(&d1, "null_next") ==
+        "the empty owner that the callee dereferences");
+    // The empty argument itself: a definite candidate, and the earlier event stays.
+    assert(caller_requirements(&d1, "null_root", definite) == 1);
+    assert(ownership_heap_env.events(&d1, "null_root") == 2);
+
+    ownership_heap_env.closure mut d2 = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&d2);
+    string[6] names2 = {"read_p", "read_p_borrow", "get_p", "null_field", "null_field_borrow",
+        "null_field_get"};
+    ownership_heap_env.run(&d2, D2[..], names2[..]);
+    // An owned field of an owned parameter, and an owned leaf of caller storage.
+    assert(ownership_heap_env.requires_each(&d2, "read_p", nonnull_at(0, 1, 0)));
+    assert(ownership_heap_env.requires_each(&d2, "read_p_borrow",
+        ownership_heap_env.root_requirement(0, full)));
+    assert(ownership_heap_env.requires_each(&d2, "get_p", nonnull_at(0, 1, 0)));
+    assert(caller_requirements(&d2, "null_field", definite) == 1);
+    assert(caller_requirements(&d2, "null_field_borrow", definite) == 1);
+    assert(ownership_heap_env.candidate(&d2, "null_field_borrow",
+        ownership_api.event_kind.caller_requirement));
+    assert(caller_requirements(&d2, "null_field_get", definite) == 1);
+    assert(ownership_heap_env.candidate(&d2, "null_field_get",
+        ownership_api.event_kind.caller_requirement));
+
+    ownership_heap_env.closure mut f5 = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&f5);
+    string[4] names5 = {"drop_list", "read_node", "null_read", "local_read"};
+    ownership_heap_env.run(&f5, F5[..], names5[..]);
+    assert(caller_requirements(&f5, "null_read", definite) == 1);
+    // A dereference of its own empty local is an invalid use of the body, not a requirement.
+    assert(ownership_heap_env.first(&f5, "local_read").kind ==
+        ownership_api.event_kind.invalid_use);
+    assert(requirement_events(&f5, "local_read") == 0);
+
+    ownership_heap_env.closure mut f2 = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&f2);
+    string[5] names_f2 = {"addr_flat", "read_flat", "free_param", "null_flat", "read_null"};
+    ownership_heap_env.run(&f2, F2[..], names_f2[..]);
+    // A flat owner is dereferenced without an unfold. Its leak stays an event of its own.
+    assert(ownership_heap_env.requires_each(&f2, "read_flat",
+        ownership_heap_env.root_requirement(0, full)));
+    assert(caller_requirements(&f2, "read_null", definite) == 1);
+    assert(loses(&f2, "read_null", "extra"));
+    // An address computation reads no storage: addr_flat requires nothing (D17.18).
+    assert(ownership_heap_env.summary(&f2, "addr_flat")->required_some.len == 0);
+    assert(requirement_events(&f2, "null_flat") == 0);
+
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    string[15] names = {"drop_list", "read_root", "maybe", "maybe_null", "wrap", "wrap_null",
+        "skip", "skip_short", "skip_long", "tested_next", "tested_null", "addr", "addr_null",
+        "addr_read", "maybe_empty"};
+    ownership_heap_env.run(&c, NEEDS[..], names[..]);
+    // A requirement of some path only: the join of the two edges keeps it out of the exit
+    // state, so the candidate is possible.
+    assert(ownership_heap_env.requires(&c, "maybe", ownership_heap_env.root_requirement(0, full)));
+    assert(!ownership_heap_env.requires_each(&c, "maybe",
+        ownership_heap_env.root_requirement(0, full)));
+    assert(caller_requirements(&c, "maybe_null", possible) == 1);
+    assert(caller_requirements(&c, "maybe_null", definite) == 0);
+    // An entry value of the caller passes the requirement on, with the path of the caller.
+    assert(ownership_heap_env.proved(&c, "wrap"));
+    assert(ownership_heap_env.requires_each(&c, "wrap",
+        ownership_heap_env.root_requirement(0, full)));
+    assert(caller_requirements(&c, "wrap_null", definite) == 1);
+    // skip passes n->next to read_root, so it requires its own n->next: path [next].
+    assert(ownership_heap_env.proved(&c, "skip"));
+    assert(ownership_heap_env.requires_each(&c, "skip", nonnull_at(0, 1, 1)));
+    assert(ownership_heap_env.requires_each(&c, "skip",
+        ownership_heap_env.root_requirement(0, full)));
+    assert(caller_requirements(&c, "skip_short", definite) == 1);
+    assert(requirement_events(&c, "skip_long") == 0);
+    // n->next is read only after a test of n, so an empty n holds: the callee reads no field of
+    // it.
+    assert(ownership_heap_env.requires(&c, "tested_next", nonnull_at(0, 1, 1)));
+    assert(!ownership_heap_env.requires(&c, "tested_next",
+        ownership_heap_env.root_requirement(0, full)));
+    assert(requirement_events(&c, "tested_null") == 0);
+    // &n->v reads no storage; a read after it requires n, though the address unfolded n.
+    assert(ownership_heap_env.summary(&c, "addr")->required_some.len == 0);
+    assert(requirement_events(&c, "addr_null") == 0);
+    assert(ownership_heap_env.requires_each(&c, "addr_read",
+        ownership_heap_env.root_requirement(0, full)));
+    // An owner that is empty on one path only: a possible candidate.
+    assert(caller_requirements(&c, "maybe_empty", possible) == 1);
+    assert(caller_requirements(&c, "maybe_empty", definite) == 0);
+
+    ownership_heap_env.closure mut l = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&l);
+    string[4] names_l = {"nine", "many", "last_null", "first_null"};
+    ownership_heap_env.run(&l, LISTS[..], names_l[..]);
+    // The state keeps 8 requirements of each path, so the ninth is a requirement of some path.
+    assert(ownership_heap_env.proved(&l, "nine"));
+    assert(ownership_heap_env.summary(&l, "nine")->post.required.len == 8);
+    assert(ownership_heap_env.requires_each(&l, "nine",
+        ownership_heap_env.root_requirement(7, full)));
+    assert(!ownership_heap_env.requires_each(&l, "nine",
+        ownership_heap_env.root_requirement(8, full)));
+    assert(ownership_heap_env.requires(&l, "nine", ownership_heap_env.root_requirement(8, full)));
+    assert(caller_requirements(&l, "first_null", definite) == 1);
+    assert(caller_requirements(&l, "last_null", possible) == 1);
+    // The body keeps 16 requirements of some path; the seventeenth gives incomplete proof, and
+    // no caller applies the summary.
+    assert(ownership_heap_env.unproved(&l, "many", ownership_api.incomplete_reason.unknown_effect));
+    assert(ownership_heap_env.summary(&l, "many")->residual);
+    assert(ownership_heap_env.summary(&l, "many")->required_some.len == 16);
+
+    ownership_heap_env.closure mut d = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&d);
+    // An extern has no body, so it has no name here.
+    string[12] names_d = {"drop_list", "put2", "put2_empty", "put2_full", "put2_short",
+        "walk_all", "read_first", "wrap_first", "empty_first", "full_first", "set", "touched"};
+    ownership_heap_env.run(&d, DEEP[..], names_d[..]);
+    // put2 stores over n->next->next, an entry owner two fields down: it requires it empty, and
+    // it requires n and n->next nonnull because it reads through them.
+    u32[6] mut two = {};
+    two[0] = 1;
+    two[1] = 1;
+    assert(ownership_heap_env.proved(&d, "put2"));
+    assert(ownership_heap_env.requires_each(&d, "put2", ownership_heap_env.requirement(0, 2, two,
+        ownership_facts.root_kind.null_root)));
+    assert(ownership_heap_env.requires_each(&d, "put2", nonnull_at(0, 1, 1)));
+    // FIR stores through the address of the field, so the store requires the cell n->next.
+    assert(ownership_heap_env.summary(&d, "put2")->required_some.len == 3);
+    assert(requirement_events(&d, "put2_empty") == 0);
+    // A full grandchild fails the empty requirement: a definite candidate, and the lost owner
+    // stays allocated, so no later event repeats it.
+    assert(caller_requirements(&d, "put2_full", definite) == 1);
+    assert(ownership_heap_env.first_text(&d, "put2_full") ==
+        "an empty owned field that this call requires");
+    // An empty child fails the read of it; the empty requirement below it holds.
+    assert(caller_requirements(&d, "put2_short", definite) == 1);
+    assert(ownership_heap_env.first_text(&d, "put2_short") ==
+        "the empty owner that the callee dereferences");
+    // A recursive callee that reads without a test passes its requirement one field deeper each
+    // round. At depth 6 the path ends, and the next recursive call gives a possible candidate.
+    u32[6] mut six = {1, 1, 1, 1, 1, 1};
+    assert(ownership_heap_env.requires_each(&d, "walk_all",
+        ownership_heap_env.root_requirement(0, full)));
+    assert(ownership_heap_env.requires(&d, "walk_all", nonnull_at(0, 1, 1)));
+    assert(ownership_heap_env.requires(&d, "walk_all", ownership_heap_env.requirement(0, 6, six,
+        full)));
+    assert(!ownership_heap_env.proved(&d, "walk_all"));
+    assert(caller_requirements(&d, "walk_all", possible) >= 1);
+    // An owned leaf of caller storage: wrap_first passes the requirement of read_first on, and
+    // an empty field of the caller's holder fails it.
+    assert(ownership_heap_env.proved(&d, "wrap_first"));
+    assert(ownership_heap_env.requires_each(&d, "wrap_first",
+        ownership_heap_env.root_requirement(0, full)));
+    assert(caller_requirements(&d, "empty_first", definite) == 1);
+    assert(requirement_events(&d, "full_first") == 0);
+    // An owner of unknown status cannot meet an empty requirement: incomplete proof, and the
+    // owner leaves the proof.
+    assert(loses(&d, "touched", "an empty owner that this call requires"));
+    assert(requirement_events(&d, "touched") == 0);
+
+    // An owner without an entry path has no requirement that a summary can name: the callee
+    // keeps its proof and marks its input lost, and its caller gets incomplete proof.
+    ownership_heap_env.closure mut lost = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&lost);
+    string[10] names_lost = {"drop_list", "read7", "null7", "either", "either_null", "fold_read",
+        "fold_null", "test_join", "test_null", "tested_store"};
+    ownership_heap_env.run(&lost, LOST[..], names_lost[..]);
+    string[3] callees = {"read7", "either", "fold_read"};
+    string[3] callers = {"null7", "either_null", "fold_null"};
+    u64 mut k = 0;
+    while (k < 3) {
+        assert(ownership_heap_env.proved(&lost, callees[k]));
+        assert(ownership_heap_env.summary(&lost, callees[k])->lost_required == 1);
+        assert(ownership_heap_env.unproved(&lost, callers[k],
+            ownership_api.incomplete_reason.missing_graph));
+        assert(ownership_heap_env.first_text(&lost, callers[k]) ==
+            "an owner that the callee accesses without its entry path");
+        k += 1;
+    }
+    // read7 still requires the 7 owners down to depth 6 by name.
+    assert(ownership_heap_env.summary(&lost, "read7")->post.required.len == 7);
+    // A test of the joined owner establishes its root: nothing is lost, and the caller proves.
+    assert(ownership_heap_env.summary(&lost, "test_join")->lost_required == 0);
+    assert(ownership_heap_env.proved(&lost, "test_join"));
+    assert(ownership_heap_env.proved(&lost, "test_null"));
+    // A store after a test goes through an address: the test covers the root, so the store
+    // requires nothing although the unfold of the address assumed the root.
+    assert(ownership_heap_env.proved(&lost, "tested_store"));
+    assert(ownership_heap_env.summary(&lost, "tested_store")->required_some.len == 0);
+    assert(ownership_heap_env.summary(&lost, "tested_store")->lost_required == 0);
+
+    ownership_heap_env.closure mut repairs = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&repairs);
+    string[21] repair_names = {"drop_list", "read_b", "addr_then", "null_addr_then", "touch",
+        "touched", "null_touched", "child_view", "null_child_view", "read_root", "addr_pass",
+        "null_addr_pass", "read_next", "addr_pass_next", "null_addr_pass_next", "addr_arg",
+        "null_addr_arg", "null_borrow", "maybe_cut", "after_cut", "caller_cut"};
+    ownership_heap_env.run(&repairs, REPAIRS[..], repair_names[..]);
+    string[6] candidates = {"null_addr_then", "null_child_view", "null_addr_pass",
+        "null_addr_pass_next", "null_addr_arg", "null_borrow"};
+    k = 0;
+    while (k < candidates.len) {
+        assert(!ownership_heap_env.proved(&repairs, candidates[k]));
+        assert(requirement_events(&repairs, candidates[k]) == 1);
+        k += 1;
+    }
+    assert(ownership_heap_env.unproved(&repairs, "null_touched",
+        ownership_api.incomplete_reason.missing_graph));
+    // A callee that changes the parent ends its entry identity. A later member access is lost.
+    assert(ownership_heap_env.proved(&repairs, "after_cut"));
+    assert(ownership_heap_env.summary(&repairs, "after_cut")->lost_required == 1);
+    assert(ownership_heap_env.unproved(&repairs, "caller_cut",
+        ownership_api.incomplete_reason.missing_graph));
+
+    ownership_heap_env.closure mut review2 = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&review2);
+    string[17] names_review2 = {"read_release_read", "joined_caller", "index_slice",
+        "stale_index", "addr_only", "null_addr_only", "addr_use", "null_addr_use",
+        "field_only", "null_field_only", "field_use", "null_field_use", "forward_unknown",
+        "null_forward_unknown", "field_addr", "returned_field_use", "null_returned_field_use"};
+    ownership_heap_env.run(&review2, REVIEW2[..], names_review2[..]);
+    // The join of an accessed owner with its empty side loses the entry path and its cover.
+    assert(ownership_heap_env.proved(&review2, "read_release_read"));
+    assert(ownership_heap_env.summary(&review2, "read_release_read")->lost_required == 1);
+    assert(ownership_heap_env.unproved(&review2, "joined_caller",
+        ownership_api.incomplete_reason.missing_graph));
+    // Slice creation reads nothing. Its later index reads the cell and needs it live.
+    assert(ownership_heap_env.proved(&review2, "index_slice"));
+    assert(ownership_heap_env.requires_each(&review2, "index_slice",
+        ownership_heap_env.root_requirement(0, full)));
+    assert(ownership_heap_env.candidate(&review2, "stale_index",
+        ownership_api.event_kind.invalid_use));
+    // &*p reads no designated storage, so a null caller proves. The address keeps its source,
+    // so a later access records the caller read.
+    assert(ownership_heap_env.proved(&review2, "addr_only"));
+    assert(ownership_heap_env.summary(&review2, "addr_only")->view_reads == 0);
+    assert(ownership_heap_env.proved(&review2, "null_addr_only"));
+    assert(ownership_heap_env.proved(&review2, "addr_use"));
+    assert((ownership_heap_env.summary(&review2, "addr_use")->view_reads & 2) == 2);
+    assert(!ownership_heap_env.proved(&review2, "null_addr_use"));
+    assert(requirement_events(&review2, "null_addr_use") == 1);
+    assert(ownership_heap_env.proved(&review2, "field_only"));
+    assert(ownership_heap_env.summary(&review2, "field_only")->view_reads == 0);
+    assert(ownership_heap_env.proved(&review2, "null_field_only"));
+    assert(ownership_heap_env.proved(&review2, "field_use"));
+    assert((ownership_heap_env.summary(&review2, "field_use")->view_reads & 2) == 2);
+    assert(!ownership_heap_env.proved(&review2, "null_field_use"));
+    assert(requirement_events(&review2, "null_field_use") == 1);
+    // An extern can read through its argument. The wrapper records that read for its caller.
+    assert(ownership_heap_env.proved(&review2, "forward_unknown"));
+    assert((ownership_heap_env.summary(&review2, "forward_unknown")->view_reads & 2) == 2);
+    assert(!ownership_heap_env.proved(&review2, "null_forward_unknown"));
+    assert(requirement_events(&review2, "null_forward_unknown") == 1);
+    // A returned field address keeps the source of the argument after summary translation.
+    assert(ownership_heap_env.proved(&review2, "field_addr"));
+    assert(ownership_heap_env.summary(&review2, "field_addr")->view_reads == 0);
+    assert(ownership_heap_env.proved(&review2, "returned_field_use"));
+    assert((ownership_heap_env.summary(&review2, "returned_field_use")->view_reads & 2) == 2);
+    assert(!ownership_heap_env.proved(&review2, "null_returned_field_use"));
+    assert(requirement_events(&review2, "null_returned_field_use") == 1);
 }
 
 fn main() i32 {
@@ -803,8 +1400,9 @@ fn main() i32 {
     kept();
     counted();
     edges();
-    requirements();
+    assumed_requirements();
     scalars();
+    requirements();
     println("heap provenance ok");
     return 0;
 }

@@ -210,7 +210,7 @@ class GoodTest(unittest.TestCase):
         self.assertEqual(status, 0, err.getvalue())
         self.assertIn(" 0 untagged\n", out.getvalue())
         for row in ("atom.root: nullness", "atom.status: status_fact", "value.nullness: nullness",
-                    "state.released: may_set"):
+                    "state.released: may_set", "state.required: requirement_list"):
             self.assertIn(row, out.getvalue())
         self.assertIn("fact_joins: %d provenance.established, %d null_value(), %d pruning "
                       "predicates, %d forget_scalars, %d callee effects in their functions\n"
@@ -223,6 +223,8 @@ class GoodTest(unittest.TestCase):
         self.assertEqual(joins.PRUNING_SITES, {"null_test": 3, "refine": 2, "apply": 2})
         self.assertEqual(joins.FORGET_SITES, {"call": 1})
         self.assertEqual(joins.EFFECT_SITES, {"call": 4})
+        # The must-list of caller requirements joins by intersection (D10.7).
+        self.assertEqual(joins.FACT_JOINS["requirement_list"], "join_requirement_list")
 
 
 class FieldTest(unittest.TestCase):

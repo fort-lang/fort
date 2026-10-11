@@ -79,6 +79,7 @@ FACT_JOINS = {
     "status_fact": "join_status_fact",
     "may_set": "join_may_set",
     "must_set": "join_must_set",
+    "requirement_list": "join_requirement_list",
 }
 # The function that gives a fact of a type the provenance `assumed`.
 ASSUMES = {
@@ -137,7 +138,7 @@ ESTABLISHED_SITES = {
     "unknown_call": 1,
     "check_overwrite": 1,
     "end_slot": 1,
-    "require_one": 2,
+    "check_empty": 1,
     "finish_return": 1,
 }
 # The functions that may call `null_value()`, and how often.

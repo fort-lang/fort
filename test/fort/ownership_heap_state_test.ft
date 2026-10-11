@@ -12,6 +12,10 @@
 //| precision covers
 //| null tests
 //| caller requirements
+//| requirement walks
+//| requirement joins
+//| requirement checks
+//| lost requirements
 //| branch forms
 //| heap state ok
 /// Checks the state operations of the heap proof one at a time (D17.16, D17.18, fir.md 14.1).
@@ -226,12 +230,48 @@ fn tables() void {
         ownership_facts.root_kind.nonnull, ownership_facts.provenance.established);
     ownership_heap.atom k = ownership_heap.join_atom(x, f);
     assert(k.kind == ownership_heap.atom_kind.opaque && k.shape == 0);
-    // Handles survive only when both sides name one entry value.
+    // Handles survive only when both sides name one entry path.
     x.handle = 2;
-    x.handle_field = ownership_heap.NONE;
     f.handle = 3;
     assert(ownership_heap.join_atom(x, f).handle == ownership_heap.NONE);
     assert(ownership_heap.join_atom(x, x).handle == 2);
+    // One handle with two paths, or with two depths, keeps no entry path, and the join clears the
+    // path too.
+    x.handle_depth = 2;
+    x.handle_path[0] = 1;
+    x.handle_path[1] = 4;
+    ownership_heap.atom mut y2 = x;
+    assert(ownership_heap.join_atom(x, y2).handle == 2);
+    assert(ownership_heap.join_atom(x, y2).handle_depth == 2);
+    y2.handle_path[1] = 5;
+    ownership_heap.atom split = ownership_heap.join_atom(x, y2);
+    assert(split.handle == ownership_heap.NONE && split.handle_depth == 0);
+    assert(split.handle_path[0] == 0 && split.handle_path[1] == 0);
+    assert(!ownership_heap.same_atom(x, y2));
+    y2 = x;
+    y2.handle_depth = 1;
+    assert(ownership_heap.join_atom(x, y2).handle == ownership_heap.NONE);
+    assert(!ownership_heap.same_atom(x, y2));
+    // A field past the depth names no path: only the first `handle_depth` fields count.
+    y2 = x;
+    y2.handle_path[2] = 7;
+    assert(ownership_heap.join_atom(x, y2).handle == 2 && ownership_heap.same_atom(x, y2));
+    // A dereference covers the entry root only when it covers it on each path.
+    x.entry_required = true;
+    y2 = x;
+    assert(ownership_heap.join_atom(x, y2).entry_required);
+    y2.entry_required = false;
+    assert(!ownership_heap.join_atom(x, y2).entry_required);
+    assert(!ownership_heap.join_atom(y2, x).entry_required);
+    assert(!ownership_heap.same_atom(x, y2));
+    // The fact is about the root: a join that drops the entry path keeps it, and a record that
+    // loses its path keeps it.
+    y2 = x;
+    y2.handle = 3;
+    assert(ownership_heap.join_atom(x, y2).entry_required);
+    assert(ownership_heap.join_atom(x, y2).handle == ownership_heap.NONE);
+    ownership_heap.clear_handle(&y2);
+    assert(y2.entry_required && y2.handle == ownership_heap.NONE && y2.handle_depth == 0);
 }
 
 fn keys() void {
@@ -392,7 +432,7 @@ fn entry_state() void {
         assert(a.root.how == ownership_facts.provenance.assumed);
         assert(a.status.how == ownership_facts.provenance.assumed);
         assert(a.origin == ownership_heap.bit(i));
-        assert(a.handle == cast(i, u32) && a.handle_field == ownership_heap.NONE && !a.strict);
+        assert(a.handle == cast(i, u32) && a.handle_depth == 0 && !a.strict);
         i += 1;
     }
     assert(value_at(&s, local(1)).kind == ownership_heap.value_kind.owned);
@@ -483,9 +523,10 @@ fn unfold_fold() void {
     assert(child.root.how == ownership_facts.provenance.assumed);
     assert(child.status.how == ownership_facts.provenance.assumed);
     assert(child.strict && child.choice && child.origin == 1);
-    assert(child.handle == 0 && child.handle_field == 0);
+    assert(child.handle == 0 && child.handle_depth == 1 && child.handle_path[0] == 0);
     ownership_heap.atom payload = s.atoms[bytes.atom];
-    assert(payload.kind == ownership_heap.atom_kind.flat && payload.handle_field == 1);
+    assert(payload.kind == ownership_heap.atom_kind.flat && payload.handle == 0);
+    assert(payload.handle_depth == 1 && payload.handle_path[0] == 1);
     // The scalar field has no slot. Two edges now, and the template of q stays. The root of a
     // cell is no refined fact: its kind gives it.
     m = ownership_heap.measure(ctx, &s);
@@ -493,11 +534,13 @@ fn unfold_fold() void {
     s.atoms[1].root.value = ownership_facts.root_kind.null_root;
     assert(ownership_heap.measure(ctx, &s).p == 1);
     s.atoms[1].root.value = ownership_facts.root_kind.free;
-    // A child of a strict child is strict and has no handle: it is no entry field.
+    // A child of a strict child is strict. It is the entry value one field deeper: p->next->next.
     assert(ownership_heap.unfold(ctx, &s, next.atom));
     ownership_heap.value deeper = value_at(&s,
         field_key(ownership_heap.base_kind.cell, next.atom, 0));
-    assert(s.atoms[deeper.atom].strict && s.atoms[deeper.atom].handle == ownership_heap.NONE);
+    assert(s.atoms[deeper.atom].strict && s.atoms[deeper.atom].handle == 0);
+    assert(s.atoms[deeper.atom].handle_depth == 2);
+    assert(s.atoms[deeper.atom].handle_path[0] == 0 && s.atoms[deeper.atom].handle_path[1] == 0);
     // A member view of p gains each child as a source.
     ownership_heap.value mut member = ownership_heap.empty_value();
     member.kind = ownership_heap.value_kind.view;
@@ -508,7 +551,8 @@ fn unfold_fold() void {
     assert(s.atoms[0].kind == ownership_heap.atom_kind.region);
     assert(s.atoms[0].root.value == ownership_facts.root_kind.nonnull);
     assert(s.atoms[0].root.how == ownership_facts.provenance.assumed);
-    assert(s.atoms[0].handle == ownership_heap.NONE && s.atoms[0].origin == 1);
+    assert(s.atoms[0].handle == ownership_heap.NONE && s.atoms[0].handle_depth == 0);
+    assert(s.atoms[0].origin == 1);
     assert(!s.atoms[next.atom].used && !s.atoms[bytes.atom].used && !s.atoms[deeper.atom].used);
     assert(!s.atoms[0].strict);
     assert(ownership_heap.find_slot(&s, field_key(ownership_heap.base_kind.cell, 0, 0)) ==
@@ -852,6 +896,18 @@ fn tests() void {
     assert(s.atoms[0].root.value == ownership_facts.root_kind.free);
 }
 
+// Whether `r` is a member of the first `len` requirements of `items`.
+fn has(ownership_facts.requirement@ items, u32 len, ownership_facts.requirement r) bool {
+    return ownership_facts.has_requirement(items, len, r);
+}
+
+fn path2(u32 a, u32 b) u32[6] {
+    u32[6] mut out = {};
+    out[0] = a;
+    out[1] = b;
+    return out;
+}
+
 fn requirements() void {
     println("caller requirements");
     fixture mut x = fixture{};
@@ -860,26 +916,664 @@ fn requirements() void {
     ownership_heap.context mut* ctx = &x.ctx;
     ownership_heap.state mut s = ownership_heap.initial(ctx);
     defer ownership_heap.free_state(&s);
-    // The entry value of q becomes a requirement and an empty root.
-    assert(ownership_heap.require_empty(ctx, &s, 1));
-    assert(ctx->require_null[1] && s.atoms[1].root.value == ownership_facts.root_kind.null_root);
+    ownership_facts.root_kind empty = ownership_facts.root_kind.null_root;
+    ownership_facts.root_kind full = ownership_facts.root_kind.nonnull;
+    // The entry value of q becomes a requirement of each path and an empty root.
+    assert(ownership_heap.require_empty(ctx, &s, 1, true));
+    ownership_facts.requirement empty_q = ownership_heap_env.root_requirement(1, empty);
+    assert(has(ctx->required_some.items[..], ctx->required_some.len, empty_q));
+    assert(has(s.required.items[..], s.required.len, empty_q));
+    assert(s.atoms[1].root.value == ownership_facts.root_kind.null_root);
     // The caller supplies the empty owner, so the body assumes its null root.
     assert(s.atoms[1].root.how == ownership_facts.provenance.assumed);
-    // The entry next field of p becomes a field requirement.
+    // The entry next field of p becomes a requirement at the path of that field. A requirement
+    // of some path only stays out of the state.
     assert(ownership_heap.unfold(ctx, &s, 0));
     ownership_heap.value next = value_at(&s, field_key(ownership_heap.base_kind.cell, 0, 0));
-    assert(ownership_heap.require_empty(ctx, &s, next.atom));
-    assert(ctx->require_fields[0] == 1 && !ctx->require_null[0]);
-    // A field of a field is no entry field: no requirement names it.
+    assert(ownership_heap.require_empty(ctx, &s, next.atom, false));
+    ownership_facts.requirement empty_next = ownership_heap_env.requirement(0, 1, path2(0, 0),
+        empty);
+    assert(has(ctx->required_some.items[..], ctx->required_some.len, empty_next));
+    assert(!has(s.required.items[..], s.required.len, empty_next));
+    assert(!has(ctx->required_some.items[..], ctx->required_some.len,
+        ownership_heap_env.root_requirement(0, empty)));
+    // A root that is not a free choice, or an atom of unknown status, gives no requirement.
     ownership_heap.value bytes = value_at(&s, field_key(ownership_heap.base_kind.cell, 0, 1));
     s.atoms[bytes.atom].root.value = ownership_facts.root_kind.nonnull;
-    assert(!ownership_heap.require_empty(ctx, &s, bytes.atom));
+    assert(!ownership_heap.require_empty(ctx, &s, bytes.atom, true));
     s.atoms[bytes.atom].root.value = ownership_facts.root_kind.free;
     s.atoms[bytes.atom].status.value = ownership_facts.atom_status.unknown;
-    assert(!ownership_heap.require_empty(ctx, &s, bytes.atom));
+    assert(!ownership_heap.require_empty(ctx, &s, bytes.atom, true));
+    s.atoms[bytes.atom].status.value = ownership_facts.atom_status.live;
     // A fresh allocation is no input choice.
     u32 made = fresh_cell(ctx, &s, 5);
-    assert(!ownership_heap.require_empty(ctx, &s, made));
+    assert(!ownership_heap.require_empty(ctx, &s, made, true));
+    assert(ctx->required_some.len == 2 && s.required.len == 1);
+    // A dereference of an entry value whose nonnull root the body did not establish is a
+    // requirement of each path (D10.7). No dereference that reads unfolded p, so a read through
+    // the cell p requires it. p->bytes has a free root and the entry path of the unfold child.
+    assert(!s.atoms[0].entry_required);
+    ownership_heap.deref_atom(ctx, &s, 0, true, "p");
+    ownership_facts.requirement full_p = ownership_heap_env.root_requirement(0, full);
+    assert(has(s.required.items[..], s.required.len, full_p) && s.atoms[0].entry_required);
+    ownership_heap.deref_atom(ctx, &s, bytes.atom, true, "p->bytes");
+    ownership_facts.requirement full_bytes = ownership_heap_env.requirement(0, 1, path2(1, 0),
+        full);
+    assert(has(s.required.items[..], s.required.len, full_bytes));
+    assert(has(ctx->required_some.items[..], ctx->required_some.len, full_bytes));
+    // A second dereference adds nothing: the lists keep one member for each requirement.
+    ownership_heap.deref_atom(ctx, &s, bytes.atom, true, "p->bytes");
+    assert(ctx->required_some.len == 4 && s.required.len == 3);
+    // The dereference of the region p requires p and unfolds it; p->next->next is the entry value
+    // two fields down. (The state `s` made p->next empty.)
+    ownership_heap.state mut deep = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&deep);
+    ownership_heap.deref_atom(ctx, &deep, 0, true, "p");
+    assert(deep.atoms[0].kind == ownership_heap.atom_kind.cell);
+    assert(has(deep.required.items[..], deep.required.len, full_p));
+    ownership_heap.value deep_next = value_at(&deep,
+        field_key(ownership_heap.base_kind.cell, 0, 0));
+    ownership_heap.deref_atom(ctx, &deep, deep_next.atom, true, "p->next");
+    ownership_heap.value deeper = value_at(&deep,
+        field_key(ownership_heap.base_kind.cell, deep_next.atom, 0));
+    ownership_heap.deref_atom(ctx, &deep, deeper.atom, true, "p->next->next");
+    ownership_heap.deref_atom(ctx, &deep, 0, true, "p");
+    assert(deep.required.len == 3);
+    assert(has(deep.required.items[..], deep.required.len,
+        ownership_heap_env.requirement(0, 1, path2(0, 0), full)));
+    assert(has(deep.required.items[..], deep.required.len,
+        ownership_heap_env.requirement(0, 2, path2(0, 0), full)));
+    // The last dereference of an address computation reads no storage, so it requires nothing.
+    // It still unfolds the region (D17.18).
+    u32 before = ctx->required_some.len;
+    ownership_heap.state mut address = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&address);
+    ownership_heap.deref_atom(ctx, &address, 0, false, "p");
+    assert(address.atoms[0].kind == ownership_heap.atom_kind.cell);
+    assert(address.required.len == 0 && ctx->required_some.len == before);
+    assert(!address.atoms[0].entry_required);
+    // A later read through that cell requires the root: the unfold assumed it, and no read
+    // covered it.
+    ownership_heap.deref_atom(ctx, &address, 0, true, "p");
+    assert(address.required.len == 1 && ownership_facts.requirement_order(
+        address.required.items[0], full_p) == 0);
+    // After a test, the first read covers the cell, so a read after the unfold adds nothing.
+    ownership_heap.state mut tested = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&tested);
+    tested.atoms[0].root = ownership_facts.nullness{ownership_facts.root_kind.nonnull,
+        ownership_facts.provenance.established};
+    ownership_heap.deref_atom(ctx, &tested, 0, true, "p");
+    assert(tested.atoms[0].root.how == ownership_facts.provenance.assumed);
+    ownership_heap.deref_atom(ctx, &tested, 0, true, "p");
+    assert(tested.required.len == 0 && tested.atoms[0].entry_required);
+    // An established nonnull root needs no requirement, and a fresh cell has no entry path.
+    ownership_heap.state mut fresh = ownership_heap.clone(&s);
+    defer ownership_heap.free_state(&fresh);
+    fresh.required = ownership_facts.requirement_list{};
+    fresh.atoms[bytes.atom].entry_required = false;
+    fresh.atoms[bytes.atom].root = ownership_facts.nullness{ownership_facts.root_kind.nonnull,
+        ownership_facts.provenance.established};
+    ownership_heap.deref_atom(ctx, &fresh, bytes.atom, true, "p->bytes");
+    ownership_heap.deref_atom(ctx, &fresh, made, true, "made");
+    assert(fresh.required.len == 0 && ctx->required_some.len == before);
+    // The entry root is covered now. A fresh cell holds no member of an input: it keeps no fact.
+    assert(fresh.atoms[bytes.atom].entry_required && !fresh.atoms[made].entry_required);
+    assert(ctx->lost_required == 0);
+    // An imported nonnull root needs the requirement.
+    fresh.atoms[bytes.atom].entry_required = false;
+    fresh.atoms[bytes.atom].root.how = ownership_facts.provenance.imported;
+    ownership_heap.deref_atom(ctx, &fresh, bytes.atom, true, "p->bytes");
+    assert(fresh.required.len == 1 && ownership_facts.requirement_order(fresh.required.items[0],
+        full_bytes) == 0);
+    // A full list of the state drops a new requirement of each path: the summary still names it
+    // for some path. The body list takes 16; one more gives incomplete proof and makes the
+    // summary residual.
+    ownership_heap.state mut many = ownership_heap.clone(&s);
+    defer ownership_heap.free_state(&many);
+    many.required = ownership_facts.requirement_list{};
+    u32 room = 16 - ctx->required_some.len;
+    assert(room > 9);
+    u32 mut k = 0;
+    while (k < room) {
+        ownership_heap.require(ctx, &many,
+            ownership_heap_env.requirement(2, 1, path2(k, 0), full), true);
+        k += 1;
+    }
+    assert(many.required.len == 8 && ctx->required_some.len == 16);
+    assert(has(many.required.items[..], many.required.len,
+        ownership_heap_env.requirement(2, 1, path2(7, 0), full)));
+    assert(!has(many.required.items[..], many.required.len,
+        ownership_heap_env.requirement(2, 1, path2(8, 0), full)));
+    assert(has(ctx->required_some.items[..], ctx->required_some.len,
+        ownership_heap_env.requirement(2, 1, path2(room - 1, 0), full)));
+    assert(!ctx->residual && !ctx->incomplete_any);
+    ownership_heap.require(ctx, &many, ownership_heap_env.requirement(2, 1, path2(room, 0), full),
+        true);
+    assert(ctx->required_some.len == 16 && ctx->residual && ctx->incomplete_any);
+    assert(ownership_heap.body_proof(ctx).terminal.reason ==
+        ownership_api.incomplete_reason.unknown_effect);
+    // A member of a full list is no new requirement.
+    ctx->residual = false;
+    ownership_heap.require(ctx, &many, full_p, true);
+    assert(!ctx->residual);
+}
+
+fn walk(ownership_heap.state* s, u32 start, types.node* ty, u32 entry, u32 depth, u32 field,
+    ownership_facts.root_kind needs) ownership_heap.requirement_walk {
+    u32[6] mut path = {};
+    u32 mut i = 0;
+    while (i < depth) {
+        path[i] = field;
+        i += 1;
+    }
+    return ownership_heap.walk_requirement(s, start, ty,
+        ownership_heap_env.requirement(entry, depth, path, needs));
+}
+
+fn is_test(ownership_heap.requirement_walk w, ownership_heap.requirement_test test) bool {
+    return w.test == test;
+}
+
+// The walk of one callee requirement through a caller state, each branch alone (D10.7). The
+// state of `host` is the caller: p and q are its own entry owners 0 and 1.
+fn walks() void {
+    println("requirement walks");
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "host");
+    ownership_heap.context mut* ctx = &x.ctx;
+    ownership_heap.state mut s = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&s);
+    types.node* ty = ctx->interface[0].ty;
+    ownership_facts.root_kind full = ownership_facts.root_kind.nonnull;
+    ownership_facts.root_kind empty = ownership_facts.root_kind.null_root;
+    ownership_heap.requirement_test holds = ownership_heap.requirement_test.holds;
+    ownership_heap.requirement_test fails = ownership_heap.requirement_test.fails;
+    ownership_heap.requirement_test unknown = ownership_heap.requirement_test.unknown;
+    ownership_heap.requirement_test passed = ownership_heap.requirement_test.passed;
+    u32 none = ownership_heap.NONE;
+    // An empty argument: it fails a nonnull requirement at its root and holds an empty one.
+    ownership_heap.requirement_walk mut w = walk(&s, none, ty, 0, 0, 0, full);
+    assert(is_test(w, fails) && w.at_owner && w.owner == none);
+    assert(w.holder == ownership_heap.U64_MAX);
+    assert(ownership_heap.requirement_certainty(&s, w, full, true) ==
+        ownership_api.certainty.definite);
+    assert(ownership_heap.requirement_certainty(&s, w, full, false) ==
+        ownership_api.certainty.possible);
+    assert(is_test(walk(&s, none, ty, 0, 0, 0, empty), holds));
+    // Above the end of the path an empty owner holds: the callee never reaches the field.
+    w = walk(&s, none, ty, 0, 2, 0, full);
+    assert(is_test(w, holds) && !w.at_owner);
+    // The entry owner q of the caller passes the requirement on with its own entry: 1, not 0.
+    w = walk(&s, 1, ty, 0, 0, 0, full);
+    assert(is_test(w, passed) && w.at_owner && w.owner == 1);
+    assert(ownership_facts.requirement_order(w.passed,
+        ownership_heap_env.root_requirement(1, full)) == 0);
+    w = walk(&s, 1, ty, 0, 0, 0, empty);
+    assert(is_test(w, passed) && ownership_facts.requirement_order(w.passed,
+        ownership_heap_env.root_requirement(1, empty)) == 0);
+    // Above the end, the unchanged region q passes the rest of the path on: q->next->next.
+    w = walk(&s, 1, ty, 0, 2, 0, full);
+    assert(is_test(w, passed) && !w.at_owner && w.passed.entry == 1 && w.passed.depth == 2);
+    assert(w.passed.path[0] == 0 && w.passed.path[1] == 0 && w.passed.needs == full);
+    // A joined path of 7 fields is beyond the bound: the caller does not know the owner.
+    s.atoms[1].handle_depth = 5;
+    w = walk(&s, 1, ty, 0, 2, 0, full);
+    assert(is_test(w, unknown) && w.why == ownership_api.incomplete_reason.missing_graph);
+    s.atoms[1].handle_depth = 4;
+    w = walk(&s, 1, ty, 0, 2, 0, full);
+    assert(is_test(w, passed) && w.passed.depth == 6);
+    s.atoms[1].handle_depth = 0;
+    // A region that is no entry owner, or not live, or no free choice passes nothing on.
+    s.atoms[1].choice = false;
+    assert(is_test(walk(&s, 1, ty, 0, 1, 0, full), unknown));
+    s.atoms[1].choice = true;
+    s.atoms[1].status.value = ownership_facts.atom_status.unknown;
+    assert(is_test(walk(&s, 1, ty, 0, 1, 0, full), unknown));
+    s.atoms[1].status.value = ownership_facts.atom_status.live;
+    // Another type above the end gives no field.
+    assert(is_test(walk(&s, 1, null, 0, 1, 0, full), unknown));
+    // A null root above the end holds.
+    s.atoms[1].root.value = empty;
+    assert(is_test(walk(&s, 1, ty, 0, 1, 0, full), holds));
+    s.atoms[1].root.value = ownership_facts.root_kind.free;
+    // A cell: the walk follows the field slot, and the child of an unfold passes its own path.
+    assert(ownership_heap.unfold(ctx, &s, 1));
+    u64 next_at = ownership_heap.find_slot(&s, field_key(ownership_heap.base_kind.cell, 1, 0));
+    u32 child = s.slots[next_at].v.atom;
+    w = walk(&s, 1, ty, 0, 1, 0, full);
+    assert(is_test(w, passed) && w.at_owner && w.owner == child && w.holder == next_at);
+    assert(w.passed.entry == 1 && w.passed.depth == 1 && w.passed.path[0] == 0);
+    // An empty field fails a nonnull requirement at it and holds one below it.
+    ownership_heap.value kept = s.slots[next_at].v;
+    s.slots[next_at].v = ownership_heap.empty_value();
+    w = walk(&s, 1, ty, 0, 1, 0, full);
+    assert(is_test(w, fails) && w.owner == none && w.holder == next_at);
+    assert(is_test(walk(&s, 1, ty, 0, 1, 0, empty), holds));
+    assert(is_test(walk(&s, 1, ty, 0, 2, 0, full), holds));
+    // A field value that the state does not follow is unknown.
+    s.slots[next_at].v = ownership_heap.unknown_value();
+    w = walk(&s, 1, ty, 0, 1, 0, full);
+    assert(is_test(w, unknown) && !w.at_owner && w.owner == 1);
+    assert(w.why == ownership_api.incomplete_reason.unknown_effect);
+    s.slots[next_at].v = kept;
+    // The owner at the end: each root and status.
+    s.atoms[child].handle = none;
+    w = walk(&s, 1, ty, 0, 1, 0, full);
+    assert(is_test(w, fails));
+    assert(ownership_heap.requirement_certainty(&s, w, full, true) ==
+        ownership_api.certainty.choice);
+    s.atoms[child].root.value = ownership_facts.root_kind.joined;
+    w = walk(&s, 1, ty, 0, 1, 0, full);
+    assert(is_test(w, fails));
+    assert(ownership_heap.requirement_certainty(&s, w, full, true) ==
+        ownership_api.certainty.possible);
+    s.atoms[child].root.value = empty;
+    w = walk(&s, 1, ty, 0, 1, 0, full);
+    assert(is_test(w, fails));
+    assert(ownership_heap.requirement_certainty(&s, w, full, true) ==
+        ownership_api.certainty.definite);
+    assert(is_test(walk(&s, 1, ty, 0, 1, 0, empty), holds));
+    // A nonnull root that an unfold or a callee assumed meets nothing (rule P1). An owner of an
+    // input without an entry path loses the requirement; an established or a covered root holds.
+    s.atoms[child].root.value = full;
+    w = walk(&s, 1, ty, 0, 1, 0, full);
+    assert(is_test(w, ownership_heap.requirement_test.lost) && w.owner == child);
+    s.atoms[child].root.how = ownership_facts.provenance.established;
+    assert(is_test(walk(&s, 1, ty, 0, 1, 0, full), holds));
+    s.atoms[child].root.how = ownership_facts.provenance.assumed;
+    s.atoms[child].entry_required = true;
+    assert(is_test(walk(&s, 1, ty, 0, 1, 0, full), holds));
+    s.atoms[child].entry_required = false;
+    // With an entry path, an assumed or an imported root passes the requirement on.
+    s.atoms[child].handle = 1;
+    s.atoms[child].handle_depth = 1;
+    w = walk(&s, 1, ty, 0, 1, 0, full);
+    assert(is_test(w, passed) && w.passed.entry == 1 && w.passed.depth == 1);
+    s.atoms[child].root.how = ownership_facts.provenance.imported;
+    assert(is_test(walk(&s, 1, ty, 0, 1, 0, full), passed));
+    s.atoms[child].root.how = ownership_facts.provenance.assumed;
+    // A joined root with an entry path is empty on some path of the caller: it fails.
+    s.atoms[child].root.value = ownership_facts.root_kind.joined;
+    assert(is_test(walk(&s, 1, ty, 0, 1, 0, full), fails));
+    s.atoms[child].root.value = full;
+    s.atoms[child].handle = none;
+    s.atoms[child].handle_depth = 0;
+    // An atom without input members and with an assumed root fails: a possible candidate.
+    u64 saved_origin = s.atoms[child].origin;
+    s.atoms[child].origin = 0;
+    w = walk(&s, 1, ty, 0, 1, 0, full);
+    assert(is_test(w, fails));
+    assert(ownership_heap.requirement_certainty(&s, w, full, true) ==
+        ownership_api.certainty.possible);
+    s.atoms[child].origin = saved_origin;
+    // An empty requirement at a nonnull owner fails: definite for a nonnull root.
+    w = walk(&s, 1, ty, 0, 1, 0, empty);
+    assert(is_test(w, fails) && w.at_owner && w.owner == child);
+    assert(ownership_heap.requirement_certainty(&s, w, empty, true) ==
+        ownership_api.certainty.definite);
+    assert(ownership_heap.requirement_certainty(&s, w, empty, false) ==
+        ownership_api.certainty.possible);
+    s.atoms[child].root.value = ownership_facts.root_kind.free;
+    s.atoms[child].choice = false;
+    w = walk(&s, 1, ty, 0, 1, 0, empty);
+    assert(is_test(w, fails));
+    assert(ownership_heap.requirement_certainty(&s, w, empty, true) ==
+        ownership_api.certainty.choice);
+    s.atoms[child].choice = true;
+    // A leaked or escaped owner holds an empty requirement: its loss has an event already.
+    s.atoms[child].status.value = ownership_facts.atom_status.leaked;
+    assert(is_test(walk(&s, 1, ty, 0, 1, 0, empty), holds));
+    s.atoms[child].status.value = ownership_facts.atom_status.escaped;
+    assert(is_test(walk(&s, 1, ty, 0, 1, 0, empty), holds));
+    // An owner of unknown status is unknown at the end.
+    s.atoms[child].status.value = ownership_facts.atom_status.unknown;
+    w = walk(&s, 1, ty, 0, 1, 0, empty);
+    assert(is_test(w, unknown) && w.at_owner && w.owner == child);
+    assert(w.why == ownership_api.incomplete_reason.unknown_effect);
+    s.atoms[child].status.value = ownership_facts.atom_status.live;
+    // A fresh cell is no entry owner: an empty requirement fails definite, a nonnull one holds.
+    u32 made = fresh_cell(ctx, &s, 5);
+    w = walk(&s, made, ty, 0, 0, 0, empty);
+    assert(is_test(w, fails));
+    assert(ownership_heap.requirement_certainty(&s, w, empty, true) ==
+        ownership_api.certainty.definite);
+    assert(is_test(walk(&s, made, ty, 0, 0, 0, full), holds));
+    // Its next field is empty: a dereference of it fails at the call.
+    w = walk(&s, made, ty, 0, 1, 0, full);
+    assert(is_test(w, fails) && w.owner == none);
+    // The empty root requirement of the summary.
+    ownership_heap.summary mut sum = ownership_heap.summary{};
+    assert(!ownership_heap.requires_empty_root(&sum, 0));
+    sum.required_some.items[0] = ownership_heap_env.root_requirement(0, full);
+    sum.required_some.items[1] = ownership_heap_env.root_requirement(1, empty);
+    sum.required_some.len = 2;
+    assert(!ownership_heap.requires_empty_root(&sum, 0));
+    assert(ownership_heap.requires_empty_root(&sum, 1));
+}
+
+// The requirements of a state join by intersection, and a state that differs only in them is a
+// change, so a block entry runs again (D10.7, D17.18).
+fn requirement_joins() void {
+    println("requirement joins");
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "host");
+    ownership_heap.context mut* ctx = &x.ctx;
+    ownership_heap.state mut s = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&s);
+    assert(ownership_heap.canonical(ctx, &s));
+    ownership_facts.requirement p_full = ownership_heap_env.root_requirement(0,
+        ownership_facts.root_kind.nonnull);
+    ownership_facts.requirement q_full = ownership_heap_env.root_requirement(1,
+        ownership_facts.root_kind.nonnull);
+    ownership_heap.state mut left = ownership_heap.clone(&s);
+    defer ownership_heap.free_state(&left);
+    ownership_heap.state mut right = ownership_heap.clone(&s);
+    defer ownership_heap.free_state(&right);
+    ownership_facts.insert_requirement(left.required.items[..], &left.required.len, p_full);
+    ownership_facts.insert_requirement(left.required.items[..], &left.required.len, q_full);
+    ownership_facts.insert_requirement(right.required.items[..], &right.required.len, q_full);
+    // A clone keeps the list, and `equal` sees a list that differs.
+    ownership_heap.state mut copy = ownership_heap.clone(&left);
+    defer ownership_heap.free_state(&copy);
+    assert(copy.required.len == 2);
+    bool mut same = false;
+    assert(ownership_heap.equal(ctx, &left, &copy, &same) && same);
+    assert(ownership_heap.equal(ctx, &left, &right, &same) && !same);
+    assert(ownership_heap.equal(ctx, &left, &s, &same) && !same);
+    // The join keeps q, which both paths require, and drops p, which one path requires.
+    ownership_heap.state mut joined = ownership_heap.state{};
+    defer ownership_heap.free_state(&joined);
+    assert(ownership_heap.join(ctx, &left, &right, false, &joined));
+    assert(joined.required.len == 1);
+    assert(ownership_facts.requirement_order(joined.required.items[0], q_full) == 0);
+    ownership_heap.state mut flipped = ownership_heap.state{};
+    defer ownership_heap.free_state(&flipped);
+    assert(ownership_heap.join(ctx, &right, &left, false, &flipped));
+    assert(flipped.required.len == 1);
+    // A widening keeps the same intersection.
+    ownership_heap.state mut widened = ownership_heap.state{};
+    defer ownership_heap.free_state(&widened);
+    assert(ownership_heap.join(ctx, &left, &right, true, &widened));
+    assert(widened.required.len == 1);
+    // A path with no requirement empties the list.
+    ownership_heap.state mut free_join = ownership_heap.state{};
+    defer ownership_heap.free_state(&free_join);
+    assert(ownership_heap.join(ctx, &left, &s, false, &free_join));
+    assert(free_join.required.len == 0);
+    // A side that no path reaches gives the list of the other side.
+    ownership_heap.state mut none = ownership_heap.bottom(s.ended.len);
+    defer ownership_heap.free_state(&none);
+    ownership_heap.state mut one = ownership_heap.state{};
+    defer ownership_heap.free_state(&one);
+    assert(ownership_heap.join(ctx, &none, &left, false, &one));
+    assert(one.required.len == 2);
+    ownership_heap.state mut other = ownership_heap.state{};
+    defer ownership_heap.free_state(&other);
+    assert(ownership_heap.join(ctx, &right, &none, false, &other));
+    assert(other.required.len == 1);
+}
+
+// The rows of requirement events from row `from` on, of certainty `how`.
+fn requirement_rows(fixture* x, u64 from, ownership_api.certainty how) u64 {
+    u64 mut found = 0;
+    u64 mut i = from;
+    while (i < x->c.counts.events && i < x->c.counts.rows.len) {
+        ownership_heap_env.event_row row = x->c.counts.rows[i];
+        if (row.kind == ownership_api.event_kind.caller_requirement && row.certainty == how) {
+            found += 1;
+        }
+        i += 1;
+    }
+    return found;
+}
+
+// A summary with two interface atoms of the node type of `host`, and requirements of some path.
+fn callee_summary(ownership_heap.context* ctx, ownership_facts.requirement@ some,
+    ownership_facts.requirement@ each) ownership_heap.summary {
+    ownership_heap.summary mut sum = ownership_heap.summary{};
+    sum.interface = new(ownership_heap.interface_entry, 2);
+    sum.interface[0].ty = ctx->interface[0].ty;
+    sum.interface[1].ty = ctx->interface[0].ty;
+    u64 mut i = 0;
+    while (i < some.len) {
+        ownership_facts.insert_requirement(sum.required_some.items[..], &sum.required_some.len,
+            some[i]);
+        i += 1;
+    }
+    i = 0;
+    while (i < each.len) {
+        ownership_facts.insert_requirement(sum.post.required.items[..], &sum.post.required.len,
+            each[i]);
+        i += 1;
+    }
+    return sum;
+}
+
+// `check_requirements` at one call, with a caller state of `host` and a summary that names each
+// requirement directly (D10.7, `spec/fir.md` 14 Calls).
+fn requirement_checks() void {
+    println("requirement checks");
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "host");
+    ownership_heap.context mut* ctx = &x.ctx;
+    // Each call below has an operation of its own, so no event repeats another.
+    ctx->reporting = true;
+    ownership_heap.state mut s = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&s);
+    ownership_facts.root_kind full = ownership_facts.root_kind.nonnull;
+    ownership_facts.root_kind empty = ownership_facts.root_kind.null_root;
+    u32[6] mut next = {};
+    ownership_facts.requirement next_full = ownership_heap_env.requirement(0, 1, next, full);
+    ownership_facts.requirement next_empty = ownership_heap_env.requirement(0, 1, next, empty);
+    ownership_facts.requirement q_empty = ownership_heap_env.root_requirement(1, empty);
+    // A fresh node of the caller has an empty next field. The callee reads it on each path:
+    // a definite candidate. It stores over its second owner on some path, and the entry owner q
+    // of the caller passes that on for some path only, with q's empty root assumed.
+    u32 made = fresh_cell(ctx, &s, 5);
+    ownership_facts.requirement[2] some1 = {next_full, q_empty};
+    ownership_facts.requirement[1] each1 = {next_full};
+    ownership_heap.summary mut first = callee_summary(ctx, some1[..], each1[..]);
+    defer ownership_heap.free_summary(&first);
+    u32[2] bound1 = {made, 1};
+    u64 mut before = x.c.counts.events;
+    ctx->op = ownership_heap.position(ctx, 0, 1, false);
+    ownership_heap.check_requirements(ctx, &s, &first, bound1[..]);
+    assert(requirement_rows(&x, before, ownership_api.certainty.definite) == 1);
+    assert(x.c.counts.events == before + 1);
+    assert(ownership_facts.has_requirement(ctx->required_some.items[..], ctx->required_some.len,
+        ownership_heap_env.root_requirement(1, empty)));
+    assert(!ownership_facts.has_requirement(s.required.items[..], s.required.len,
+        ownership_heap_env.root_requirement(1, empty)));
+    assert(s.atoms[1].root.value == empty);
+    assert(s.atoms[1].root.how == ownership_facts.provenance.assumed);
+    // A fresh node fails the empty requirement of some path: a possible candidate, and the node
+    // is lost.
+    u32 other = fresh_cell(ctx, &s, 6);
+    ownership_facts.requirement[1] some2 = {q_empty};
+    ownership_facts.requirement[1] each2 = {q_empty};
+    ownership_heap.summary mut second = callee_summary(ctx, some2[..], each2[..0]);
+    defer ownership_heap.free_summary(&second);
+    u32[2] bound2 = {ownership_heap.NONE, other};
+    before = x.c.counts.events;
+    ctx->op = ownership_heap.position(ctx, 0, 2, false);
+    ownership_heap.check_requirements(ctx, &s, &second, bound2[..]);
+    assert(requirement_rows(&x, before, ownership_api.certainty.possible) == 1);
+    assert(s.atoms[other].status.value == ownership_facts.atom_status.leaked);
+    // On each path it is definite.
+    u32 third = fresh_cell(ctx, &s, 6);
+    ownership_heap.summary mut each_path = callee_summary(ctx, some2[..], each2[..]);
+    defer ownership_heap.free_summary(&each_path);
+    u32[2] bound3 = {ownership_heap.NONE, third};
+    before = x.c.counts.events;
+    ctx->op = ownership_heap.position(ctx, 0, 3, false);
+    ownership_heap.check_requirements(ctx, &s, &each_path, bound3[..]);
+    assert(requirement_rows(&x, before, ownership_api.certainty.definite) == 1);
+    // The dereferences come before the empty owners: a full next field holds the nonnull
+    // requirement, and only then fails the empty one and leaves its slot.
+    ownership_heap.state mut t = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&t);
+    u32 parent = fresh_cell(ctx, &t, 5);
+    u32 child = fresh_cell(ctx, &t, 6);
+    set_value(&t, local(6), ownership_heap.empty_value());
+    set_value(&t, field_key(ownership_heap.base_kind.cell, parent, 0),
+        ownership_heap.own_value(child));
+    ownership_facts.requirement[2] both = {next_full, next_empty};
+    ownership_heap.summary mut order = callee_summary(ctx, both[..], both[..]);
+    defer ownership_heap.free_summary(&order);
+    u32[2] bound4 = {parent, ownership_heap.NONE};
+    before = x.c.counts.events;
+    ctx->op = ownership_heap.position(ctx, 0, 4, false);
+    ownership_heap.check_requirements(ctx, &t, &order, bound4[..]);
+    assert(x.c.counts.events == before + 1);
+    assert(requirement_rows(&x, before, ownership_api.certainty.definite) == 1);
+    assert(ownership_heap_env.text(&x.c.counts.rows[before]) ==
+        "an empty owned field that this call requires");
+    assert(value_at(&t, field_key(ownership_heap.base_kind.cell, parent, 0)).kind ==
+        ownership_heap.value_kind.empty);
+    assert(t.atoms[child].status.value == ownership_facts.atom_status.leaked);
+    // A requirement on an interface atom that the call does not bind is no requirement here.
+    ownership_facts.requirement[1] beyond = {ownership_heap_env.root_requirement(5, full)};
+    ownership_heap.summary mut wide = callee_summary(ctx, beyond[..], beyond[..]);
+    defer ownership_heap.free_summary(&wide);
+    u32[2] bound5 = {ownership_heap.NONE, ownership_heap.NONE};
+    before = x.c.counts.events;
+    ctx->op = ownership_heap.position(ctx, 0, 5, false);
+    ownership_heap.check_requirements(ctx, &t, &wide, bound5[..]);
+    assert(x.c.counts.events == before);
+}
+
+// An access through an owner of an input that has no entry path marks the inputs of the body
+// lost, and a call of such a summary gives incomplete proof; the body itself keeps its proof
+// (D10.7, D17.18).
+fn lost_requirements() void {
+    println("lost requirements");
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "host");
+    ownership_heap.context mut* ctx = &x.ctx;
+    ownership_heap.state mut s = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&s);
+    // q without its entry path: the access marks q, the interface atom of its members.
+    ownership_heap.clear_handle(&s.atoms[1]);
+    ownership_heap.deref_atom(ctx, &s, 1, true, "q");
+    assert(ctx->lost_required == 2 && s.required.len == 0 && ctx->required_some.len == 0);
+    assert(s.atoms[1].entry_required);
+    // A covered root marks nothing more, and an address computation marks nothing.
+    ctx->lost_required = 0;
+    ownership_heap.deref_atom(ctx, &s, 1, true, "q");
+    assert(ctx->lost_required == 0);
+    ownership_heap.state mut address = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&address);
+    ownership_heap.clear_handle(&address.atoms[1]);
+    ownership_heap.deref_atom(ctx, &address, 1, false, "q");
+    assert(ctx->lost_required == 0 && !address.atoms[1].entry_required);
+    // An established nonnull root marks nothing; an imported one does.
+    ownership_heap.state mut tested = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&tested);
+    ownership_heap.clear_handle(&tested.atoms[0]);
+    tested.atoms[0].root = ownership_facts.nullness{ownership_facts.root_kind.nonnull,
+        ownership_facts.provenance.established};
+    ownership_heap.deref_atom(ctx, &tested, 0, true, "p");
+    assert(ctx->lost_required == 0 && tested.atoms[0].entry_required);
+    ownership_heap.state mut imported = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&imported);
+    ownership_heap.clear_handle(&imported.atoms[0]);
+    imported.atoms[0].root = ownership_facts.nullness{ownership_facts.root_kind.nonnull,
+        ownership_facts.provenance.imported};
+    ownership_heap.deref_atom(ctx, &imported, 0, true, "p");
+    assert(ctx->lost_required == 1);
+    // An atom that holds no member of an input marks nothing and keeps no fact.
+    ctx->lost_required = 0;
+    u32 made = fresh_cell(ctx, &imported, 5);
+    imported.atoms[made].root = ownership_facts.nullness{ownership_facts.root_kind.joined,
+        ownership_facts.provenance.assumed};
+    ownership_heap.deref_atom(ctx, &imported, made, true, "a");
+    assert(ctx->lost_required == 0 && !imported.atoms[made].entry_required);
+    // The members of both entry owners: a view of two atoms marks both.
+    ownership_heap.value mut both = ownership_heap.empty_value();
+    both.kind = ownership_heap.value_kind.view;
+    assert(ownership_heap.add_source(&both, 0) && ownership_heap.add_source(&both, 1));
+    both.nullness = ownership_facts.nullness{ownership_facts.root_kind.joined,
+        ownership_facts.provenance.assumed};
+    ownership_heap.state mut views = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&views);
+    ownership_heap.deref_value(ctx, &views, both, false, true, "w");
+    assert(ctx->lost_required == 3);
+    // A view whose nonnull root the body established, and the last load of an address, mark
+    // nothing.
+    ctx->lost_required = 0;
+    both.nullness = ownership_facts.nullness{ownership_facts.root_kind.nonnull,
+        ownership_facts.provenance.established};
+    ownership_heap.deref_value(ctx, &views, both, false, true, "w");
+    both.nullness = ownership_facts.nullness{ownership_facts.root_kind.joined,
+        ownership_facts.provenance.assumed};
+    ownership_heap.deref_value(ctx, &views, both, false, false, "w");
+    assert(ctx->lost_required == 0);
+    // A call of a summary with a lost requirement gives incomplete proof, whatever it binds.
+    ctx->reporting = true;
+    ctx->op = ownership_heap.position(ctx, 0, 9, false);
+    ownership_facts.requirement[1] none_req = {ownership_heap_env.root_requirement(0,
+        ownership_facts.root_kind.nonnull)};
+    ownership_heap.summary mut lost = callee_summary(ctx, none_req[..0], none_req[..0]);
+    defer ownership_heap.free_summary(&lost);
+    lost.lost_required = 1;
+    u32[2] bound = {made, made};
+    u64 before = x.c.counts.events;
+    assert(!ctx->incomplete_any);
+    ownership_heap.check_requirements(ctx, &views, &lost, bound[..]);
+    assert(x.c.counts.events == before + 1 && ctx->incomplete_any);
+    ownership_heap_env.event_row row = x.c.counts.rows[before];
+    assert(row.kind == ownership_api.event_kind.incomplete_proof);
+    assert(row.reason == ownership_api.incomplete_reason.missing_graph);
+    assert(ownership_heap_env.text(&row) ==
+        "an owner that the callee accesses without its entry path");
+    // A summary without one gives nothing.
+    lost.lost_required = 0;
+    ctx->op = ownership_heap.position(ctx, 0, 10, false);
+    ownership_heap.check_requirements(ctx, &views, &lost, bound[..]);
+    assert(x.c.counts.events == before + 1);
+
+    // The nonnull edge of a test covers an atom that holds members of an input, so a fold that
+    // assumes the root later keeps it covered. A fresh atom keeps no fact.
+    ownership_heap.state mut edge = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&edge);
+    ownership_heap.clear_handle(&edge.atoms[1]);
+    ownership_heap.value mut cond = ownership_heap.scalar_value();
+    cond.test = 1;
+    cond.test_nonnull = true;
+    assert(ownership_heap.refine(&edge, cond, true));
+    assert(edge.atoms[1].entry_required);
+    ownership_heap.state mut null_edge = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&null_edge);
+    assert(ownership_heap.refine(&null_edge, cond, false));
+    assert(!null_edge.atoms[1].entry_required);
+    u32 cell = fresh_cell(ctx, &edge, 6);
+    cond.test = cell;
+    assert(ownership_heap.refine(&edge, cond, true));
+    assert(!edge.atoms[cell].entry_required);
+    // A join with a side that holds no member of an input keeps the fact of the other side.
+    ownership_heap.atom covered = edge.atoms[1];
+    ownership_heap.atom fresh_atom = edge.atoms[cell];
+    assert(ownership_heap.join_atom(covered, fresh_atom).entry_required);
+    assert(ownership_heap.join_atom(fresh_atom, covered).entry_required);
+    ownership_heap.atom mut bare = covered;
+    bare.entry_required = false;
+    assert(!ownership_heap.join_atom(bare, fresh_atom).entry_required);
+    ownership_heap.atom mut fresh_origin = fresh_atom;
+    fresh_origin.origin = 4;
+    assert(!ownership_heap.join_atom(covered, fresh_origin).entry_required);
+    // An address computation through an established root covers it before its unfold.
+    ownership_heap.state mut addressed = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&addressed);
+    addressed.atoms[0].root = ownership_facts.nullness{ownership_facts.root_kind.nonnull,
+        ownership_facts.provenance.established};
+    ownership_heap.deref_atom(ctx, &addressed, 0, false, "p");
+    assert(addressed.atoms[0].entry_required);
+    assert(addressed.atoms[0].root.how == ownership_facts.provenance.assumed);
+    assert(addressed.required.len == 0);
 }
 
 // The heap proof keeps no path, so a body with a branch, a loop, an abort, a call, an assert or
@@ -913,6 +1607,10 @@ fn main() i32 {
     covers();
     tests();
     requirements();
+    walks();
+    requirement_joins();
+    requirement_checks();
+    lost_requirements();
     branch_forms();
     println("heap state ok");
     return 0;
