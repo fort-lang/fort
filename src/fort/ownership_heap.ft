@@ -3210,6 +3210,17 @@ fn rvalue_value(context mut* c, state mut* s, fir.rvalue rv, types.node* t) valu
     case fir.rvalue_kind.rv_not:
         value mut flipped = operand(c, s, fir.rvalue_operand(c->f, rv, 0));
         if (flipped.kind != value_kind.scalar) { return scalar_value(); }
+        if (t != null && types.type_is_int(t)) {
+            // `not` of an integer inverts each bit in the width of its type (`spec/fir.md` 6).
+            // A u64 result above the i64 maximum has no known number.
+            value mut inverted = scalar_value();
+            if (flipped.numbered) {
+                u64 bits = ~consts.cv_bits(consts.cv_from_i64(flipped.number));
+                inverted.numbered = consts.cv_to_i64(consts.int_from_truncated(bits, t->prim),
+                    &inverted.number);
+            }
+            return inverted;
+        }
         flipped.test_nonnull = !flipped.test_nonnull;
         flipped.truth = !flipped.truth;
         return flipped;
