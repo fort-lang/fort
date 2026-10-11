@@ -33,6 +33,41 @@ string[14] CHAIN = {
     "fn leak(u64 n) void { heap_node mut* own h = build(n); }",
 };
 
+string[5] FRAME_LIMIT = {
+    "struct node { i32 value; }",
+    "fn invoke(fn (node mut* own mut*) void f) void {",
+    "    node mut* own mut p = null;",
+    "    f(&p);",
+    "}",
+};
+
+// A W refusal inside a call frame stops the computation before any callee effect runs.
+fn frame_stop() void {
+    string[1] names = {"invoke"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.open(&c, FRAME_LIMIT[..], names[..]);
+    ownership_heap_env.solve(&c);
+    u64 calls = c.counts.total_calls;
+    bool mut saw = false;
+    u64 mut denied = 1;
+    while (denied <= calls) {
+        c.counts.deny_at = denied;
+        ownership_heap_env.solve(&c);
+        if (ownership_heap_env.unproved(&c, "invoke",
+            ownership_api.incomplete_reason.work_limit)) {
+            ownership_heap_env.event_row row = ownership_heap_env.first(&c, "invoke");
+            if (row.line == 4) {
+                assert(ownership_heap_env.budget_events(&c) == 1);
+                assert(ownership_heap_env.violations(&c, "invoke") == 0);
+                saw = true;
+            }
+        }
+        denied += 1;
+    }
+    assert(saw);
+}
+
 // A05: a refused W unit stops the computation. The analysis does not pretend that the
 // remaining operations ran: it publishes incomplete proof with the exhaustion, records one
 // budget event for each stopped computation, and claims no invalid use and no lost ownership.
@@ -240,6 +275,7 @@ fn interface_bits() void {
 
 fn main() i32 {
     work();
+    frame_stop();
     shapes();
     atoms();
     roots();

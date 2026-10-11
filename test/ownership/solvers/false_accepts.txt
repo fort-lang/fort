@@ -1,8 +1,8 @@
 # Known false accepts of one ownership solver alone (D17.14, D17.18).
 #
-# test/ownership_driver_test.py runs test/ownership/solvers_alone.ft over 112 faulty bodies: the
+# test/ownership_driver_test.py runs test/ownership/solvers_alone.ft over 139 faulty bodies: the
 # faulty body of each of the 37 reject cases of test/ownership/qualification/manifest.json and
-# the 75 bodies of test/ownership/solvers/faulty.json. A body is faulty because its source has
+# the 102 bodies of test/ownership/solvers/faulty.json. A body is faulty because its source has
 # the expected error: the error line of a reject case, or the faulty.json entry of a probe. A
 # solver that proves a faulty body gives a false accept.
 #
@@ -12,30 +12,32 @@
 # A list with more entries than the bound line below fails the run. Lower the bound in the
 # commit that deletes an entry, and never raise it. The empty list is the goal.
 #
-# The bound rose from 5 to 16 on 2026-10-11 by a ruling of the user: merge the rule that only an
-# established fact removes a path with these entries in the ledger, and fix the 3 classes in 3
-# small later changes. The 11 entries of classes F, G and H were false accepts on main before
-# that rule too; its review found them. Each later change lowers the bound. The D10.7 caller
-# requirement deleted the 5 entries of class E, so the bound fell from 14 to 9. Review added 9
-# class-E bodies to faulty.json. The repaired solver proves none of them.
+# The bound rose from 5 to 16 on 2026-10-11 by a ruling of the user. The 11 entries of classes F,
+# G and H existed on main before that ruling. The bitwise `not` rule deleted the 2 class H entries.
+# The D10.7 caller requirement deleted the 5 class E entries. The frame rule deleted the 2 class F
+# entries. These changes lowered the bound to 7. On 2026-10-11, the user added 2 class I entries
+# and 3 class K and L entries. The bound became 12. Each class I callee fails its own proof. A
+# later change can add a summary bit for each parameter whose address escapes. The class K and L
+# callees have complete proofs. A later change can extend the summary write footprint.
 #
-# at most 9 entries
+# at most 12 entries
 #
-# Classes (the earlier classes A, B and D, and a known scalar that a callee writes, have no entry
-# left: only an established fact removes a path, D17.18). Class H (`~x` kept the number of x) has
-# no entry left: `not` of a known integer inverts its bits in the width of its type. Class E has
-# no entry left: a callee that dereferences an empty owner of the caller, at the root or in an
-# owned field, fails a caller requirement (D10.7).
-# F  A fact of a local whose address escaped survives a call. forget_scalars forgets only the
-#    value of a scalar local; a pointer local whose address an earlier call kept keeps its root
-#    fact, and a later call that writes it through a global or an extern changes nothing.
+# Classes A, B, D, E, F and H have no entries. Only an established fact removes a path. A call
+# forgets each fact that a callee can write through an address of a local. A dereference adds a
+# D10.7 caller requirement. A bitwise `not` uses the width of its type.
 # G  A cast store loses or widens a write. A cast that changes the pointee type keeps the
 #    address: a store to a field that has no slot is lost, and a narrow store replaces the
 #    whole slot of a wider local or an owner.
-
-# F: a fact of a local whose address escaped survives a call.
-test/ownership/probes/review_q06_ptr_local.ft:ptr_global heap # F
-test/ownership/probes/review_q06_ptr_local.ft:ptr_extern heap # F
+# I  A callee changes an owner through an escaped local address. A callee that fails its own
+#    proof releases an owner, or stores a new owner, through an address that an earlier call
+#    kept. forget_frame keeps each obligation and each status value, so a view of the released
+#    node stays valid and the filled owner stays empty.
+# K  A complete callee writes caller storage through a global. The frame of a call does not
+#    reach the storage that a parameter designates, and the summary records no store through a
+#    global, so the caller keeps the old value of that storage.
+# L  A complete callee writes through a pointer leaf of a by-value aggregate. The graft applies
+#    no store through such a leaf, so the caller keeps the old value of the storage that the
+#    leaf designates.
 
 # G: a cast store loses or widens a write.
 test/ownership/probes/review_q01_pun.ft:pun_struct heap # G
@@ -45,3 +47,14 @@ test/ownership/probes/review_q02_pun_owner.ft:pun_owner heap # G
 test/ownership/probes/review_q04_pun_null.ft:pun_null_address heap # G
 test/ownership/probes/review_q04_pun_null.ft:pun_null_owner heap # G
 test/ownership/probes/review_q08_pun_caller.ft:zap heap # G
+
+# I: a callee changes an owner through an escaped local address.
+test/ownership/probes/frame_f3_owner_changes.ft:owner_uaf heap # I
+test/ownership/probes/frame_f3_owner_changes.ft:owner_filled heap # I
+
+# K: a complete callee writes caller storage through a global.
+test/ownership/probes/frame_f4_footprint.ft:caller_kept heap # K
+test/ownership/probes/frame_f4_footprint.ft:caller_local heap # K
+
+# L: a complete callee writes through a pointer leaf of a by-value aggregate.
+test/ownership/probes/frame_f4_footprint.ft:struct_view_val heap # L

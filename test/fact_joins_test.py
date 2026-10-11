@@ -108,12 +108,12 @@ fn refine(state mut* s, atom a, value cond) bool {
     return may_prune(a.root);
 }
 
-fn forget_scalars(state mut* s) void {
+fn forget_frame(state mut* s) void {
     s->reached = s->reached;
 }
 
 fn call(state mut* s) void {
-    forget_scalars(s);
+    forget_frame(s);
     if (s->reached) { apply(s, s->atoms[0]); return; }
     unknown_call(s);
 }
@@ -172,7 +172,7 @@ class GoodTest(unittest.TestCase):
         self.assertEqual(err, "")
         self.assertIn("fact_joins: 17 fields, 5 typed, 12 tagged, 0 untagged\n", out)
         self.assertIn("fact_joins: 2 provenance.established, 1 null_value(), 3 pruning "
-                      "predicates, 1 forget_scalars, 2 callee effects in their functions\n", out)
+                      "predicates, 1 forget_frame, 2 callee effects in their functions\n", out)
         self.assertTrue(out.endswith("fact_joins: no problems\n"))
 
     def test_each_field_has_one_row_in_declaration_order(self):
@@ -213,13 +213,13 @@ class GoodTest(unittest.TestCase):
                     "state.released: may_set", "state.required: requirement_list"):
             self.assertIn(row, out.getvalue())
         self.assertIn("fact_joins: %d provenance.established, %d null_value(), %d pruning "
-                      "predicates, %d forget_scalars, %d callee effects in their functions\n"
+                      "predicates, %d forget_frame, %d callee effects in their functions\n"
                       % (sum(joins.ESTABLISHED_SITES.values()),
                          sum(joins.NULL_VALUE_SITES.values()),
                          sum(joins.PRUNING_SITES.values()), sum(joins.FORGET_SITES.values()),
                          sum(joins.EFFECT_SITES.values())), out.getvalue())
         # Each site that removes a path reads a predicate (D17.18), and each callee effect of
-        # `call` follows its one forget of the scalars that a callee can write.
+        # `call` follows its one frame of the facts that a callee can write.
         self.assertEqual(joins.PRUNING_SITES, {"null_test": 3, "refine": 2, "apply": 2})
         self.assertEqual(joins.FORGET_SITES, {"call": 1})
         self.assertEqual(joins.EFFECT_SITES, {"call": 4})
@@ -605,26 +605,26 @@ class SiteTest(unittest.TestCase):
         self.assertIn(" 3 pruning predicates, ", out)
 
 
-class ScalarTest(unittest.TestCase):
+class FrameTest(unittest.TestCase):
     def test_a_call_that_forgets_before_its_effects_passes(self):
         status, _, err = run(GOOD)
         self.assertEqual(status, 0, err)
 
     def test_an_effect_without_the_forget_fails(self):
-        status, _, err = run(replace("    forget_scalars(s);\n    if (s->reached)",
+        status, _, err = run(replace("    forget_frame(s);\n    if (s->reached)",
                                      "    if (s->reached)"))
         self.assertEqual(status, 1)
-        self.assertIn("call has 0 forget_scalars, and the table allows 1", err)
-        self.assertIn("call applies a callee effect before forget_scalars", err)
+        self.assertIn("call has 0 forget_frame, and the table allows 1", err)
+        self.assertIn("call applies a callee effect before forget_frame", err)
 
     def test_a_forget_after_an_effect_fails(self):
-        status, _, err = run(replace("    forget_scalars(s);\n    if (s->reached) { apply(s, "
+        status, _, err = run(replace("    forget_frame(s);\n    if (s->reached) { apply(s, "
                                      "s->atoms[0]); return; }\n",
                                      "    if (s->reached) { apply(s, s->atoms[0]); return; }\n"
-                                     "    forget_scalars(s);\n"))
+                                     "    forget_frame(s);\n"))
         self.assertEqual(status, 1)
-        self.assertIn("call applies a callee effect before forget_scalars, so a callee can "
-                      "change a known scalar", err)
+        self.assertIn("call applies a callee effect before forget_frame, so a fact that a "
+                      "callee can write survives the call", err)
 
     def test_an_effect_outside_the_table_fails(self):
         status, _, err = run(replace("    s->slots[0].v = null_value();\n",
@@ -636,14 +636,14 @@ class ScalarTest(unittest.TestCase):
     def test_a_second_forget_site_fails(self):
         status, _, err = run(replace("    s->slots[0].v = null_value();\n",
                                      "    s->slots[0].v = null_value();\n"
-                                     "    forget_scalars(s);\n"))
+                                     "    forget_frame(s);\n"))
         self.assertEqual(status, 1)
-        self.assertIn("moved has 1 forget_scalars, and the table allows 0", err)
+        self.assertIn("moved has 1 forget_frame, and the table allows 0", err)
 
     def test_the_declarations_are_no_calls(self):
         status, out, err = run(GOOD)
         self.assertEqual(status, 0, err)
-        self.assertIn(" 1 forget_scalars, 2 callee effects in their functions", out)
+        self.assertIn(" 1 forget_frame, 2 callee effects in their functions", out)
 
 
 class ArgumentTest(unittest.TestCase):

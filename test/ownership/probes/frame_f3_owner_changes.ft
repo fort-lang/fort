@@ -1,0 +1,36 @@
+// Class I shapes (D17.18): a callee changes an owner through an escaped local address. The callee
+// releases the owner, or stores a new owner, through an address that an earlier call kept. Each
+// callee fails its own proof, and the frame of a call keeps each obligation and status value, so
+// the heap solver alone proves the caller. `owner_uaf` reads the released node through a view, and
+// `owner_filled` leaks the stored node.
+struct node { i32 v; node mut* own next; }
+struct holder { node mut* own mut* pp; }
+node mut* own mut* mut saved = null;
+fn keep_owner(holder* h) void { saved = h->pp; }
+fn take_owner() void { if (saved != null) { del(*saved); } }
+fn fill_owner() void { if (saved != null) { *saved = new(node); } }
+// A view of the owner reads the released node.
+fn owner_uaf() i32 {
+    node mut* own mut m = new(node);
+    node* v = m;
+    holder mut h = holder{};
+    h.pp = &m;
+    keep_owner(&h);
+    take_owner();
+    i32 x = v->v;
+    del(m);
+    return x;
+}
+// The callee stores a new node into an empty owner.
+fn owner_filled() void {
+    node mut* own mut m = null;
+    holder mut h = holder{};
+    h.pp = &m;
+    keep_owner(&h);
+    fill_owner();
+}
+fn main() i32 {
+    owner_uaf();
+    owner_filled();
+    return 0;
+}

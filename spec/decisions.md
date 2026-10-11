@@ -2545,9 +2545,19 @@ says ownership is "by convention", this section supersedes it.
   address-only projection records no caller read. Its result keeps the parameter source for a later
   access.
   The known value of a scalar is a fact of the same kind as a root. A call can write each local
-  whose storage a FIR address names. After a call, a scalar local of that kind has no known
-  value. The heap analysis does not yet forget the root fact of a pointer local of that kind
-  (class F of `test/ownership/solvers/false_accepts.txt`).
+  whose storage a FIR address names, also through an address that an earlier call kept. An
+  address or a slice names the storage of a local when its place dereferences no pointer and
+  indexes no span, and a slice takes a fixed array. The call can also write each allocation
+  whose storage an address of the analyzed function named. Through that storage it can write
+  each atom that the storage owns or views, and each local or allocation whose address the
+  storage holds, and so on. Before the callee effect of a call, each slot of that storage loses
+  its facts. A scalar slot has no known value. A reference slot that does not own has an
+  unknown value. An empty owner has an assumed null. Each atom of that storage has an assumed
+  root and an assumed status, and no scalar keeps a test of that root. Each obligation stays
+  where it is. The heap analysis does not yet see three writes of a callee: a release or a store
+  of an owner through such an address by a callee without a complete proof, a store through a
+  global into the storage that a parameter designates, and a store through a pointer leaf of a
+  by-value aggregate (classes I, K and L of `test/ownership/solvers/false_accepts.txt`).
   A fact that the caller state takes from a callee summary removes no path of the caller.
   A call itself ends a caller path only in two cases. The summary has no returning path. Or the
   callee established a null root on each returning path, and the caller established that root
@@ -2647,6 +2657,11 @@ says ownership is "by convention", this section supersedes it.
   7 more faulty callers. They covered view and address arguments, assumed roots, an empty argument,
   and a changed parent. The heap solver proved all 7 with the solver from 04b3c943. It proves none
   with these rules.
+  Amended 2026-10-11: A call forgot only the known value of a scalar local whose storage a FIR
+  address names. A pointer local or an owner of that kind kept its root fact over a call that
+  wrote it through an address that an earlier call kept. The heap solver alone proved 2 faulty
+  bodies of the ledger and 17 more faulty bodies of that kind. Now a call forgets each fact of
+  the storage that such a local, or an allocation whose storage an address named, reaches.
 
 ### D17.19 Global ownership and process boundaries
 - owner: `memory-model.md` (2.9), `toolchain.md` (2.1), `module-system.md` (11),
