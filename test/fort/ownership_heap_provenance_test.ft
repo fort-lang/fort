@@ -3,6 +3,7 @@
 //! stdout:
 //| addresses
 //| calls
+//| stopped borrowed results
 //| kept pruning
 //| counted loops
 //| edges
@@ -226,8 +227,9 @@ string[21] F4 = {
 };
 
 // The exit contradiction of main.
-string[35] D3 = {
+string[44] D3 = {
     "struct node { node mut* own next; i32 v; }",
+    "struct box { node mut* own item; }",
     "fn drop_list(node mut* own n) void { if (n == null) { return; }",
     "    drop_list(move(n->next)); del(n); }",
     "fn need_null(node mut* own n) node mut* own {",
@@ -262,6 +264,14 @@ string[35] D3 = {
     "    drop_list(move(y));",
     "}",
     "fn fresh() node mut* own { return new(node); }",
+    "fn stop_box() box { panic(\"stop\"); }",
+    "fn aggregate_stop() void {",
+    "    node mut* own mut p = new(node); box mut* dst = cast(&p, box mut*);",
+    "    *dst = stop_box(); del(p);",
+    "}",
+    "fn stop_span(u8@ s) u8@ { panic(\"stop\"); }",
+    "fn span_stop(u8@ s) void { node mut* own mut p = new(node);",
+    "    u8@ mut* dst = cast(&p, u8@ mut*); *dst = stop_span(s); del(p); }",
 };
 
 // Established tests.
@@ -1115,8 +1125,9 @@ fn calls() void {
 
     ownership_heap_env.closure mut d3 = ownership_heap_env.closure{};
     defer ownership_heap_env.close(&d3);
-    string[8] names3 = {"drop_list", "need_null", "fresh_arg", "tested_arg", "unfolded_arg",
-        "free_arg", "returned_arg", "fresh"};
+    string[12] names3 = {"drop_list", "need_null", "fresh_arg", "tested_arg", "unfolded_arg",
+        "free_arg", "returned_arg", "fresh", "stop_box", "aggregate_stop", "stop_span",
+        "span_stop"};
     ownership_heap_env.run(&d3, D3[..], names3[..]);
     // The test of n establishes its null root on the one returning path.
     assert(ownership_heap_env.proved(&d3, "need_null") && returns(&d3, "need_null"));
@@ -1126,6 +1137,11 @@ fn calls() void {
     // An allocation establishes a nonnull argument: the call does not return, and the leak of
     // `extra` after it is on no path.
     assert(ownership_heap_env.proved(&d3, "fresh_arg") && !returns(&d3, "fresh_arg"));
+    assert(ownership_heap_env.proved(&d3, "aggregate_stop") &&
+        !returns(&d3, "aggregate_stop"));
+    assert(ownership_heap_env.events(&d3, "aggregate_stop") == 0);
+    assert(ownership_heap_env.proved(&d3, "span_stop") && !returns(&d3, "span_stop"));
+    assert(ownership_heap_env.events(&d3, "span_stop") == 0);
     // A test establishes n: its nonnull path ends at the call, and the null path returns.
     assert(ownership_heap_env.proved(&d3, "tested_arg") && returns(&d3, "tested_arg"));
     // An unfold only assumes the nonnull root of its cell: need_null(null) returns, and `extra`
@@ -1138,6 +1154,49 @@ fn calls() void {
     assert(ownership_heap_env.summary(&d3, "fresh")->post.atoms[0].root.how ==
         ownership_facts.provenance.established);
     assert(!ownership_heap_env.proved(&d3, "returned_arg") && returns(&d3, "returned_arg"));
+}
+
+// A call that cannot return ends the assignment before the proof resolves its destination. Span
+// and string results use the scalar assignment path although their values have two runtime words.
+fn stopped_borrowed_results() void {
+    println("stopped borrowed results");
+    string[19] text = {
+        "struct node { node mut* own next; i32 v; }",
+        "struct holder { node mut* own p; }",
+        "u8@ mut SPAN_OUT = {};",
+        "string mut TEXT_OUT = {};",
+        "fn stop_span(u8@ s) u8@ { panic(\"stop\"); }",
+        "fn stop_text(string s) string { panic(\"stop\"); }",
+        "fn span_plain(u8@ s) void { u8@ mut out = {}; out = stop_span(s); }",
+        "fn text_plain(string s) void { string mut out = {}; out = stop_text(s); }",
+        "fn span_local(u8@ s) void { node mut* own mut p = new(node);",
+        "    u8@ mut* dst = cast(&p, u8@ mut*); *dst = stop_span(s); del(p); }",
+        "fn span_field(holder mut* h, u8@ s) void {",
+        "    u8@ mut* dst = cast(&h->p, u8@ mut*); *dst = stop_span(s); del(h->p); }",
+        "fn text_local(string s) void { node mut* own mut p = new(node);",
+        "    string mut* dst = cast(&p, string mut*); *dst = stop_text(s); del(p); }",
+        "fn text_field(holder mut* h, string s) void {",
+        "    string mut* dst = cast(&h->p, string mut*); *dst = stop_text(s); del(h->p); }",
+        "fn span_global(u8@ s) void { SPAN_OUT = stop_span(s); }",
+        "fn text_global(string s) void { TEXT_OUT = stop_text(s); }",
+        "fn main() i32 { return 0; }",
+    };
+    string[11] names = {"stop_span", "stop_text", "span_plain", "text_plain", "span_local",
+        "span_field", "text_local", "text_field", "span_global", "text_global", "main"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    assert(ownership_heap_env.proved(&c, "stop_span") && !returns(&c, "stop_span"));
+    assert(ownership_heap_env.proved(&c, "stop_text") && !returns(&c, "stop_text"));
+    string[8] callers = {"span_plain", "text_plain", "span_local", "span_field", "text_local",
+        "text_field", "span_global", "text_global"};
+    u64 mut i = 0;
+    while (i < callers.len) {
+        assert(ownership_heap_env.proved(&c, callers[i]));
+        assert(!returns(&c, callers[i]));
+        assert(ownership_heap_env.events(&c, callers[i]) == 0);
+        i += 1;
+    }
 }
 
 // An established fact still removes a path: a test, a null constant, a move, an allocation and
@@ -1772,6 +1831,7 @@ fn requirements() void {
 fn main() i32 {
     addresses();
     calls();
+    stopped_borrowed_results();
     kept();
     counted();
     edges();

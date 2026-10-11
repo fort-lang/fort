@@ -1662,7 +1662,7 @@ class SoundnessGateTest(unittest.TestCase):
         self.assertTrue(set(HEAP_ROWS_SKIPPED) <= set(programs))
         out = [(path, CHECKOUT / path) for path in programs if path not in HEAP_ROWS_SKIPPED]
         probes = sorted((OWNERSHIP / "probes").glob("*.ft"))
-        self.assertEqual(len(probes), 37)
+        self.assertEqual(len(probes), 44)
         out += [(path.relative_to(CHECKOUT).as_posix(), path) for path in probes]
         heap_tests = sorted((CHECKOUT / "test" / "fort").glob("ownership_heap*_test.ft"))
         self.assertEqual(len(heap_tests), 12)
@@ -1715,7 +1715,7 @@ class SoundnessGateTest(unittest.TestCase):
         self.assertEqual(sum(len(bodies) for _, bodies in items), 37)
         probes = json.loads(FAULTY_PROBES.read_text())["faulty"]
         items += [(f"test/ownership/probes/{name}", bodies) for name, bodies in probes.items()]
-        self.assertEqual(sum(len(bodies) for _, bodies in items), 139)
+        self.assertEqual(sum(len(bodies) for _, bodies in items), 156)
 
         def verdicts(item):
             path, bodies = item
@@ -1728,7 +1728,7 @@ class SoundnessGateTest(unittest.TestCase):
 
         with ThreadPoolExecutor(max_workers=4) as pool:
             found = [row for rows in pool.map(verdicts, items) for row in rows]
-        self.assertEqual(len(found), len(GATE_COLUMNS) * 139)
+        self.assertEqual(len(found), len(GATE_COLUMNS) * 156)
         proved = {(path, body, solver) for path, body, solver, verdict in found
                   if verdict == "proved"}
         ledger = read_ledger(FALSE_ACCEPTS.read_text())

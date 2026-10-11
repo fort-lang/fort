@@ -138,6 +138,7 @@ ESTABLISHED_SITES = {
     "havoc_value": 1,
     "unknown_call": 1,
     "check_overwrite": 1,
+    "clear_storage": 1,
     "end_slot": 1,
     "check_empty": 1,
     "finish_return": 1,
