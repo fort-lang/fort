@@ -2135,7 +2135,7 @@ came here.
   `test/fort/ownership_event_keys_test.ft` and `test/fort/ownership_ffi_hook_adapter_test.ft`
   hold this.
   Every other failure of one call application keeps the call's event key. The first failure
-  stops the application, and a forward tree reaches each call once, so one key is enough.
+  stops the application. Extraction visits each reached block once, so one key is enough.
   The flow `direct_call` step runs `ownership_summary.call_step`. It binds the callee roots to the
   current path facts and runs `ownership_calls.apply`.
   An output root binds to a whole caller root only. An argument such as `&t->b` designates a
@@ -2228,9 +2228,14 @@ came here.
   under W_scale 64 and published `work_limit`; the plain body uses 11683. The production
   W_scale is 1024 (the 2026-10-07 ruling).
 - **A branch on a captured formal gives guarded cases** (D17.18).
-  Extraction walks each reached block of a forward tree and keeps the origins and scalars at each
-  block entry. A back edge or a second parent keeps the body unsupported, so an `if` whose
-  branches meet again before an exit stays incomplete.
+  Extraction finds the reachable CFG before it emits effects. Kahn order processes an acyclic CFG
+  without using block numbers. Each block entry joins origins, unknown-origin marks, scalar facts,
+  and holding marks from its predecessors. A difference removes the fact from one predecessor.
+  The blocks that remain after Kahn order contain a directed cycle or follow one. They take a
+  conservative top entry, which is their fixed point. Extraction then emits each operation once.
+  It sorts flow steps and call sites into FIR position order. A merge or cycle keeps publication
+  incomplete because one parent path cannot represent it. A one-parent acyclic path can publish
+  across an edge to a lower-numbered block. Its effect order follows the parent path.
   A bool switch on a scalar formal value adds a flow value edge. Flow records an equality atom on
   that path and does not reach a path that contradicts an atom.
   Each exit gives one case. Its guard holds the formal value atoms of its path. It keeps only the
