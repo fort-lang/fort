@@ -108,6 +108,8 @@ struct atom {
     // An address of the atom storage, or of a member, left a slot. A callee can write the
     // storage through that address, so each call frame forgets its facts.
     bool addressed; // join: may
+    // An address of the atom storage, or of a member, reached a store or an unknown effect.
+    bool address_escaped; // join: may
     // The atom is the entry value of the owner at the entry path of the atom: the owned-field
     // path `handle_path[..handle_depth]` below the entry value of interface atom `handle`
     // (`spec/fir.md` 14 Calls). `handle` is NONE, and the path empty, for any other atom. An
@@ -204,6 +206,8 @@ struct state {
     u64 atoms_len; // join: owner
     // For each local: 0 live, 1 ended, 2 possibly ended.
     u8 mut@ own ended; // join: owner
+    // For each local: an address of its storage reached a store or an unknown effect.
+    bool mut@ own escaped; // join: owner
     // The interface atoms with a possibly released member.
     may_set released;
     // The requirements that each path that the state represents has (D10.7).
@@ -260,6 +264,10 @@ struct summary {
     // stands for each parameter from 64 on, which no bit can name.
     u64 view_reads; // join: may
     bool reads_high; // join: may
+    // The parameters whose reachable addresses can reach a store or an unknown effect.
+    // `escapes_high` stands for each parameter from 64 on.
+    u64 address_escapes; // join: may
+    bool escapes_high; // join: may
     // The requirements that some path of the body has. `post.required` holds those that each
     // returning path has.
     requirement_set required_some; // join: may
@@ -343,6 +351,8 @@ struct context {
     u64 needs_shape;
     u64 view_reads;
     bool reads_high;
+    u64 address_escapes;
+    bool escapes_high;
     // See `summary.required_some`. Each pass adds to it, as each pass adds to `needs_shape`.
     requirement_set required_some;
     // See `summary.lost_required`.
@@ -647,12 +657,14 @@ fn free_state(state mut* s) void {
     del(s->slots);
     del(s->atoms);
     del(s->ended);
+    del(s->escaped);
     *s = state{};
 }
 
 fn bottom(u64 locals) state {
     state mut s = state{};
     s.ended = new(u8, locals);
+    s.escaped = new(bool, locals);
     return s;
 }
 
@@ -674,6 +686,9 @@ fn clone(state* s) state {
     out.ended = new(u8, s->ended.len);
     i = 0;
     while (i < s->ended.len) { out.ended[i] = s->ended[i]; i += 1; }
+    out.escaped = new(bool, s->escaped.len);
+    i = 0;
+    while (i < s->escaped.len) { out.escaped[i] = s->escaped[i]; i += 1; }
     return out;
 }
 
@@ -1288,6 +1303,7 @@ fn unfold(context mut* c, state mut* s, u32 a) bool {
                 child.params = parent.params;
                 // An address of a member of the parent can name a member of the child.
                 child.addressed = parent.addressed;
+                child.address_escaped = parent.address_escaped;
                 // An owned field of an entry value is an entry value one field deeper, down to
                 // the path bound (D10.7, D17.18).
                 if (parent.handle != NONE && cast(parent.handle_depth, u64) < PATH_DEPTH) {
@@ -1373,6 +1389,7 @@ fn absorb(state mut* s, u32 parent, u32 child) void {
     p->strict = p->strict && from.strict;
     p->exposed = p->exposed || from.exposed;
     p->addressed = p->addressed || from.addressed;
+    p->address_escaped = p->address_escaped || from.address_escaped;
     p->borrows = p->borrows || from.borrows;
     p->params = p->params || from.params;
     p->choice = false;
@@ -1975,7 +1992,8 @@ fn same_atom(atom a, atom b) bool {
         a.status.how == b.status.how && a.ty == b.ty && a.shape == b.shape &&
         a.root.value == b.root.value && a.root.how == b.root.how && a.origin == b.origin &&
         a.fresh == b.fresh && a.strict == b.strict && a.choice == b.choice &&
-        a.exposed == b.exposed && a.addressed == b.addressed && same_entry(a, b) &&
+        a.exposed == b.exposed && a.addressed == b.addressed &&
+        a.address_escaped == b.address_escaped && same_entry(a, b) &&
         a.entry_required == b.entry_required &&
         a.empty_leaves == b.empty_leaves && a.borrows == b.borrows && a.params == b.params &&
         a.used == b.used;
@@ -2005,12 +2023,17 @@ fn equal(context mut* c, state* a, state* b, bool mut* same) bool {
     }
     if (a->released.bits != b->released.bits ||
         a->lossy != b->lossy || a->slots_len != b->slots_len || a->atoms_len != b->atoms_len ||
-        a->ended.len != b->ended.len ||
+        a->ended.len != b->ended.len || a->escaped.len != b->escaped.len ||
         !same_requirements(a->required.items[..a->required.len],
         b->required.items[..b->required.len])) { return true; }
     u64 mut i = 0;
     while (i < a->ended.len) {
         if (a->ended[i] != b->ended[i]) { return true; }
+        i += 1;
+    }
+    i = 0;
+    while (i < a->escaped.len) {
+        if (a->escaped[i] != b->escaped[i]) { return true; }
         i += 1;
     }
     i = 0;
@@ -2051,6 +2074,7 @@ fn join_atom(atom a, atom b) atom {
     out.choice = a.choice && b.choice;
     out.exposed = a.exposed || b.exposed;
     out.addressed = a.addressed || b.addressed;
+    out.address_escaped = a.address_escaped || b.address_escaped;
     // A null root has no leaves, so only the other side says whether they are empty.
     bool leaves_a = a.empty_leaves || a.root.value == root_kind.null_root;
     bool leaves_b = b.empty_leaves || b.root.value == root_kind.null_root;
@@ -2462,6 +2486,12 @@ fn join(context mut* c, state* a, state* b, bool widen, state mut* out) bool {
         joined.ended[i] = x.ended[i] == y.ended[i] ? x.ended[i] : 2;
         i += 1;
     }
+    joined.escaped = new(bool, x.escaped.len);
+    i = 0;
+    while (i < x.escaped.len) {
+        joined.escaped[i] = x.escaped[i] || y.escaped[i];
+        i += 1;
+    }
     u64 total = cast(p.next, u64);
     joined.atoms = new(atom, total);
     joined.atoms_len = total;
@@ -2786,6 +2816,9 @@ fn initial(context mut* c) state {
         } else if (item.key.base == base_kind.caller && !item.owning &&
             (is_reference(item.ty) || item.array)) {
             s.slots[i].v = entry_value(item.key);
+            if (cast(item.key.id, u64) < c->callers_len) {
+                s.slots[i].v.param = c->callers[cast(item.key.id, u64)].param;
+            }
         }
         i += 1;
     }
@@ -2986,6 +3019,24 @@ fn note_param_read(context mut* c, u32 param) void {
 fn reads_param(summary* sum, u64 param) bool {
     if (param >= 64) { return sum->reads_high; }
     return (sum->view_reads & bit(param)) != 0;
+}
+
+// Notes that an address reachable from parameter `param` reaches a store or an unknown effect.
+fn note_param_escape(context mut* c, u32 param) void {
+    if (param == ANY_PARAM) {
+        c->address_escapes = U64_MAX;
+        c->escapes_high = true;
+    } else if (param != NONE && param >= 64) {
+        c->escapes_high = true;
+    } else if (param != NONE) {
+        c->address_escapes = c->address_escapes | bit(cast(param, u64));
+    }
+}
+
+// Whether the callee can retain an address reachable from parameter `param` (from 1).
+fn escapes_param(summary* sum, u64 param) bool {
+    if (param >= 64) { return sum->escapes_high; }
+    return (sum->address_escapes & bit(param)) != 0;
 }
 
 fn deref_value(context mut* c, state mut* s, value v, bool owning, bool reads, string what)
@@ -3527,10 +3578,38 @@ fn own_local(state* s, location loc) bool {
     return at != U64_MAX && !s->slots[at].array;
 }
 
+// Whether a store destination can retain a reference beyond its current local slot.
+fn retaining_store(state* s, location loc) bool {
+    if (loc.kind == location_kind.unknown) { return true; }
+    if (loc.kind == location_kind.element) {
+        if (loc.external || loc.param != NONE) { return true; }
+        u32 mut i = 0;
+        while (i < loc.count) {
+            atom item = s->atoms[cast(loc.sources[i], u64)];
+            if (item.address_escaped || item.exposed || item.origin != 0) { return true; }
+            i += 1;
+        }
+        return false;
+    }
+    if (loc.kind != location_kind.slots) { return false; }
+    u64 id = cast(loc.key.id, u64);
+    if (loc.key.base == base_kind.local) {
+        return id < s->escaped.len && s->escaped[id];
+    }
+    if (loc.key.base == base_kind.cell && id < s->atoms_len) {
+        atom item = s->atoms[id];
+        return item.address_escaped || item.exposed || item.origin != 0;
+    }
+    return true;
+}
+
 // Writes a value into a location. An owned value written into storage that the proof does not
 // track leaves the proof with incomplete proof (D17.13, D17.18).
 fn write_at(context mut* c, state mut* s, location loc, types.node* t, value v) void {
     value stored = !is_reference(t) || v.kind != value_kind.owned ? v : as_view(s, v);
+    if (is_reference(t) && t->is_mut && v.kind != value_kind.owned &&
+        retaining_store(s, loc) && !static_reference(stored) &&
+        !escape_value(c, s, stored, t)) { return; }
     // The storage decides, not the type of the place: a store into an owning slot is a store
     // over an owner (D17.17).
     bool mut owning_slot = false;
@@ -4539,6 +4618,57 @@ fn designated(state* s, value v, slot_key mut* out) bool {
     return false;
 }
 
+// Binds the callee interface to one caller state. Caller requirements use the entry state.
+// Effects use the state after the frame.
+fn bind_interfaces(state* s, summary* sum, argument@ args, leaf_list* arg_leaves,
+    slot_key@ prefixes, u32 mut@ bound) bool {
+    u64 mut i = 0;
+    while (i < sum->interface.len) {
+        interface_entry e = sum->interface[i];
+        value mut v = unknown_value();
+        if (e.key.base == base_kind.local) {
+            u64 param = cast(e.key.id, u64);
+            if (param == 0 || param > args.len) { return false; }
+            argument arg = args[param - 1];
+            if (!arg.aggregate && e.key.depth == 0) {
+                v = arg.v;
+            } else if (arg.aggregate) {
+                u64 mut j = 0;
+                while (j < arg.count) {
+                    leaf item = arg_leaves->items[arg.first + j];
+                    slot_key mut lk = slot_key{};
+                    lk.depth = item.depth;
+                    lk.path = item.path;
+                    slot_key mut ek = e.key;
+                    ek.base = base_kind.local;
+                    ek.id = 0;
+                    lk.base = base_kind.local;
+                    if (same_key(lk, ek)) { v = item.v; }
+                    j += 1;
+                }
+            }
+        } else {
+            if (cast(e.key.id, u64) >= prefixes.len) { return false; }
+            slot_key mut where = slot_key{};
+            if (!rebase(prefixes[cast(e.key.id, u64)], e.key.depth, e.key.path, &where)) {
+                return false;
+            }
+            u64 at = find_slot(s, where);
+            if (at == U64_MAX || s->slots[at].array) { return false; }
+            v = s->slots[at].v;
+        }
+        if (v.kind == value_kind.owned) {
+            bound[i] = v.atom;
+        } else if (v.kind == value_kind.empty) {
+            bound[i] = NONE;
+        } else {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
 fn reaches(state* s, u32 from, u32 to) bool {
     bool mut@ own seen = new(bool, s->atoms_len);
     defer del(seen);
@@ -4768,11 +4898,14 @@ fn apply(context mut* c, state mut* s, state* entry, callee* target, argument@ a
     }
     slot_key mut@ own prefixes = new(slot_key, sum->callers.len);
     defer del(prefixes);
+    slot_key mut@ own entry_prefixes = new(slot_key, sum->callers.len);
+    defer del(entry_prefixes);
     u64 mut k = 0;
     while (k < sum->callers.len) {
         u64 param = cast(sum->callers[k].param, u64);
         if (param == 0 || param > args.len || args[param - 1].aggregate ||
             !designated(s, args[param - 1].v, &prefixes[k])) { return false; }
+        if (!designated(entry, args[param - 1].v, &entry_prefixes[k])) { return false; }
         k += 1;
     }
     // The caller storage must have the layout that the callee reads: each exit slot of the
@@ -4793,51 +4926,15 @@ fn apply(context mut* c, state mut* s, state* entry, callee* target, argument@ a
         }
         q += 1;
     }
+    u32 mut@ own entry_bound = new(u32, interfaces);
+    defer del(entry_bound);
+    if (!bind_interfaces(entry, sum, args, arg_leaves, entry_prefixes[..], entry_bound)) {
+        return false;
+    }
     u32 mut@ own bound = new(u32, interfaces);
     defer del(bound);
+    if (!bind_interfaces(s, sum, args, arg_leaves, prefixes[..], bound)) { return false; }
     u64 mut i = 0;
-    while (i < interfaces) {
-        interface_entry e = sum->interface[i];
-        value mut v = unknown_value();
-        if (e.key.base == base_kind.local) {
-            u64 param = cast(e.key.id, u64);
-            if (param == 0 || param > args.len) { return false; }
-            argument arg = args[param - 1];
-            if (!arg.aggregate && e.key.depth == 0) {
-                v = arg.v;
-            } else if (arg.aggregate) {
-                u64 mut j = 0;
-                while (j < arg.count) {
-                    leaf item = arg_leaves->items[arg.first + j];
-                    slot_key mut lk = slot_key{};
-                    lk.depth = item.depth;
-                    lk.path = item.path;
-                    slot_key mut ek = e.key;
-                    ek.base = base_kind.local;
-                    ek.id = 0;
-                    lk.base = base_kind.local;
-                    if (same_key(lk, ek)) { v = item.v; }
-                    j += 1;
-                }
-            }
-        } else {
-            slot_key mut where = slot_key{};
-            if (!rebase(prefixes[cast(e.key.id, u64)], e.key.depth, e.key.path, &where)) {
-                return false;
-            }
-            u64 at = find_slot(s, where);
-            if (at == U64_MAX || s->slots[at].array) { return false; }
-            v = s->slots[at].v;
-        }
-        if (v.kind == value_kind.owned) {
-            bound[i] = v.atom;
-        } else if (v.kind == value_kind.empty) {
-            bound[i] = NONE;
-        } else {
-            return false;
-        }
-        i += 1;
-    }
     // Two caller storage arguments with owned leaves must not overlap, and a cell argument must
     // stay apart from each owned argument (fir.md 14 Calls).
     k = 0;
@@ -4856,7 +4953,7 @@ fn apply(context mut* c, state mut* s, state* entry, callee* target, argument@ a
     if (!separate(c, s, sum, args, arg_leaves, prefixes[..], bound[..])) { return false; }
     // The owners that the callee dereferences and the empty owners that it requires (D10.7,
     // `spec/fir.md` 14 Calls).
-    check_requirements_at(c, s, entry, sum, bound[..]);
+    check_requirements_at(c, s, entry, sum, entry_bound[..]);
     // The shape that the callee needs (`spec/memory-model.md` 2.7).
     i = 0;
     while (i < interfaces) {
@@ -5379,11 +5476,8 @@ fn check_empty(context mut* c, state mut* s, state* entry, requirement_walk w, b
     string text = w.holder == U64_MAX ? "an empty owner that this call requires" :
         "an empty owned field that this call requires";
     if (w.test == requirement_test.passed) {
-        if (w.at_owner) {
-            require_empty(c, s, w.owner, each);
-        } else {
-            require(c, s, w.passed, each);
-        }
+        require(c, s, w.passed, each);
+        if (w.at_owner) { require_empty(c, s, w.owner, each); }
         return;
     }
     if (w.test == requirement_test.unknown) {
@@ -5484,17 +5578,190 @@ fn reach_value(value v, bool mut@ locals, bool mut@ atoms) bool {
     return grew;
 }
 
+// Marks the direct storage target of one retained reference. Owners only supply traversal roots.
+fn escape_targets(value v, types.node* t, bool mut@ locals, bool mut@ atoms) bool {
+    bool mut grew = false;
+    if (t == null || !is_reference(t) || !t->is_mut) { return false; }
+    if (v.kind == value_kind.view) {
+        u32 mut i = 0;
+        while (i < v.count) {
+            if (!atoms[cast(v.sources[i], u64)]) {
+                atoms[cast(v.sources[i], u64)] = true;
+                grew = true;
+            }
+            i += 1;
+        }
+    } else if (v.kind == value_kind.address ||
+        (v.kind == value_kind.unknown && v.retained_target)) {
+        slot_key target = v.kind == value_kind.address ? v.target : v.retained;
+        u64 id = cast(target.id, u64);
+        if (target.base == base_kind.local && id < locals.len) {
+            grew = !locals[id] || grew;
+            locals[id] = true;
+        } else if (target.base == base_kind.cell && id < atoms.len) {
+            grew = !atoms[id] || grew;
+            atoms[id] = true;
+        }
+    }
+    if (v.lost_target && v.kind == value_kind.unknown) {
+        u64 mut i = 0;
+        while (i < locals.len) {
+            if (!locals[i]) { locals[i] = true; grew = true; }
+            i += 1;
+        }
+        i = 0;
+        while (i < atoms.len) {
+            if (!atoms[i]) { atoms[i] = true; grew = true; }
+            i += 1;
+        }
+    }
+    return grew;
+}
+
+// Marks each local and atom whose address can reach an effect through `input`. The closure follows
+// owners, views, and stored addresses. It also propagates the parameter source into this summary.
+fn escape_value(context mut* c, state mut* s, value input, types.node* input_ty) bool {
+    bool mut@ own reached_locals = new(bool, s->escaped.len);
+    defer del(reached_locals);
+    bool mut@ own reached_atoms = new(bool, s->atoms_len);
+    defer del(reached_atoms);
+    bool mut@ own escaped_locals = new(bool, s->escaped.len);
+    defer del(escaped_locals);
+    bool mut@ own escaped_atoms = new(bool, s->atoms_len);
+    defer del(escaped_atoms);
+    value first = current_value(s, input);
+    if (input_ty != null && is_reference(input_ty) && input_ty->is_mut) {
+        note_param_escape(c, first.param);
+    }
+    bool mut grew = reach_value(first, reached_locals, reached_atoms);
+    bool mut seeded = escape_targets(first, input_ty, escaped_locals, escaped_atoms);
+    while (grew) {
+        if (!pay(c, s->slots_len + 1)) { return false; }
+        grew = false;
+        u64 mut i = 0;
+        while (i < s->slots_len) {
+            slot item = s->slots[i];
+            if (reached_key(item.key, reached_locals[..], reached_atoms[..])) {
+                value v = current_value(s, item.v);
+                if (item.ty != null && is_reference(item.ty) && item.ty->is_mut) {
+                    note_param_escape(c, v.param);
+                }
+                seeded = escape_targets(v, item.ty, escaped_locals, escaped_atoms) || seeded;
+                if (reach_value(v, reached_locals, reached_atoms)) { grew = true; }
+            }
+            i += 1;
+        }
+    }
+    if (!seeded) { return true; }
+    u64 mut i = 0;
+    while (i < escaped_locals.len) {
+        s->escaped[i] = s->escaped[i] || escaped_locals[i];
+        i += 1;
+    }
+    i = 0;
+    while (i < escaped_atoms.len) {
+        s->atoms[i].address_escaped = s->atoms[i].address_escaped || escaped_atoms[i];
+        i += 1;
+    }
+    return true;
+}
+
+// Marks the addresses that one argument can retain. Aggregate arguments use their copied leaves.
+fn escape_argument(context mut* c, state mut* s, argument arg, leaf_list* arg_leaves) bool {
+    if (!arg.aggregate) {
+        note_param_escape(c, current_value(s, arg.v).param);
+        return escape_value(c, s, arg.v, arg.ty);
+    }
+    u64 mut i = 0;
+    while (i < arg.count) {
+        leaf item = arg_leaves->items[arg.first + i];
+        note_param_escape(c, current_value(s, item.v).param);
+        if (!escape_value(c, s, item.v, item.ty)) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+// Applies the escape parameters of `sum`. A null summary is an unknown effect on each argument.
+fn escape_arguments(context mut* c, state mut* s, argument@ args, leaf_list* arg_leaves,
+    summary* sum) bool {
+    u64 mut i = 0;
+    while (i < args.len) {
+        if ((sum == null || escapes_param(sum, i + 1)) &&
+            !escape_argument(c, s, args[i], arg_leaves)) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+// Forgets each owner that an escaped address can reach. An old allocation escapes, and a fresh
+// unknown owner keeps the possible replacement obligation. Each closure round pays for its slots.
+fn forget_escaped_owners(context mut* c, state mut* s) void {
+    bool mut@ own locals = new(bool, s->escaped.len);
+    defer del(locals);
+    bool mut@ own atoms = new(bool, s->atoms_len);
+    defer del(atoms);
+    bool mut seeded = false;
+    u64 mut n = 0;
+    while (n < locals.len) {
+        locals[n] = s->escaped[n];
+        seeded = seeded || locals[n];
+        n += 1;
+    }
+    n = 0;
+    while (n < atoms.len) {
+        atoms[n] = s->atoms[n].address_escaped;
+        seeded = seeded || atoms[n];
+        n += 1;
+    }
+    if (!seeded) { return; }
+    bool mut grew = true;
+    while (grew) {
+        // A refused unit stops the computation, and its result keeps the incomplete status.
+        if (!pay(c, s->slots_len + 1)) { return; }
+        grew = false;
+        u64 mut i = 0;
+        while (i < s->slots_len) {
+            slot item = s->slots[i];
+            if (reached_key(item.key, locals[..], atoms[..]) &&
+                reach_value(item.v, locals, atoms)) { grew = true; }
+            i += 1;
+        }
+    }
+    u64 mut i = 0;
+    while (i < s->slots_len) {
+        slot item = s->slots[i];
+        if (reached_key(item.key, locals[..], atoms[..]) && item.owning) {
+            if (item.v.kind == value_kind.owned) {
+                escape(s, item.v.atom, atom_status.escaped);
+            }
+            s->slots[i].v = fresh_unknown_owner(s);
+        } else if (item.v.kind == value_kind.scalar && item.v.test != NONE &&
+            atoms[cast(item.v.test, u64)]) {
+            value mut* tested = &s->slots[i].v;
+            tested->test = NONE;
+        }
+        i += 1;
+    }
+    u64 mut a = 0;
+    while (a < atoms.len) {
+        if (atoms[a]) {
+            atom mut* escaped = &s->atoms[a];
+            escaped->addressed = true;
+            escaped->root = ownership_facts.assume(escaped->root);
+            escaped->status = ownership_facts.assume_status(escaped->status);
+        }
+        a += 1;
+    }
+}
+
 /// The frame of a call (D17.18). A callee can write each local whose storage a FIR address names
-/// (`context.named`), and each atom whose storage an address named (`atom.addressed`): through
-/// an address argument, through a global, or through an address that an earlier call kept.
-/// Through that storage it reaches each atom that the storage owns or views, and each local or
-/// cell whose address the storage holds, and it can write their storage too. So before each
-/// callee effect, the storage of that closure keeps no fact that can remove a path. A scalar slot
-/// has no known value. A reference slot that does not own holds an unknown reference. An empty
-/// owner keeps an assumed null. Each reached atom keeps its root and its status as assumed facts,
-/// and no scalar tests its root. Each obligation stays where it is. Each round of the closure
-/// pays one W unit for each slot; a state with no named local and no addressed atom pays nothing.
+/// (`context.named`), and each atom whose storage an address named (`atom.addressed`). The frame
+/// follows owners, views, and stored addresses. Scalar and reference facts become unknown.
+/// Escaped addresses also remove owner facts. Each closure round pays for its slots.
 fn forget_frame(context mut* c, state mut* s) void {
+    forget_escaped_owners(c, s);
+    if (c->stopped) { return; }
     bool mut@ own locals = new(bool, c->named.len);
     defer del(locals);
     bool mut@ own atoms = new(bool, s->atoms_len);
@@ -5515,13 +5782,13 @@ fn forget_frame(context mut* c, state mut* s) void {
     if (!seeded) { return; }
     bool mut grew = true;
     while (grew) {
-        // A refused unit stops the computation, and its result keeps the incomplete status.
         if (!pay(c, s->slots_len + 1)) { return; }
         grew = false;
         u64 mut i = 0;
         while (i < s->slots_len) {
-            if (reached_key(s->slots[i].key, locals[..], atoms[..]) &&
-                reach_value(s->slots[i].v, locals, atoms)) { grew = true; }
+            slot item = s->slots[i];
+            if (reached_key(item.key, locals[..], atoms[..]) &&
+                reach_value(item.v, locals, atoms)) { grew = true; }
             i += 1;
         }
     }
@@ -5538,7 +5805,6 @@ fn forget_frame(context mut* c, state mut* s) void {
             }
         } else if (item.v.kind == value_kind.scalar && item.v.test != NONE &&
             atoms[cast(item.v.test, u64)]) {
-            // The test read a root that the callee can change.
             s->slots[i].v.test = NONE;
         }
         i += 1;
@@ -5546,8 +5812,6 @@ fn forget_frame(context mut* c, state mut* s) void {
     u64 mut a = 0;
     while (a < atoms.len) {
         if (atoms[a]) {
-            // A callee can keep an address that it reads through reached storage. A later call
-            // must reach that allocation after this frame clears the reference that led to it.
             s->atoms[a].addressed = true;
             s->atoms[a].root = ownership_facts.assume(s->atoms[a].root);
             s->atoms[a].status = ownership_facts.assume_status(s->atoms[a].status);
@@ -5590,8 +5854,8 @@ fn call(context mut* c, state mut* s, fir.rvalue rv, types.node* t, leaf_list mu
     }
     reset(out);
     if (c->stopped || !s->reached) { return; }
-    // Caller requirements read the entry facts. The frame then removes facts before the callee
-    // effect. Atom and slot indices stay stable across the frame.
+    // Caller requirements read the entry facts. Escape effects and the frame then remove facts
+    // before the callee effect. Atom and slot indices stay stable across the frame.
     state mut entry = clone(s);
     defer free_state(&entry);
     // A leaf of an aggregate argument left the body at its store into that aggregate.
@@ -5601,15 +5865,23 @@ fn call(context mut* c, state mut* s, fir.rvalue rv, types.node* t, leaf_list mu
         k += 1;
     }
     if (c->stopped) { return; }
+    u64 found = rv.callee == fir.callee_kind.cl_fn ? find_callee(c, rv.callee_sym) : U64_MAX;
+    callee* mut target = null;
+    summary* mut sum = null;
+    bool mut usable = false;
+    if (found != U64_MAX) {
+        target = &c->callees[found];
+        sum = target->published;
+        usable = sum != null && sum->known && !sum->residual &&
+            (target->member || ownership_api.successful(sum->proof));
+    }
+    bool trusted_foreign = rv.callee == fir.callee_kind.cl_extern;
+    if (!trusted_foreign &&
+        !escape_arguments(c, s, args[..], &arg_leaves, usable ? sum : null)) { return; }
     // Each callee effect below, a summary or an unknown call, follows this one frame.
     forget_frame(c, s);
     if (c->stopped) { return; }
-    u64 found = rv.callee == fir.callee_kind.cl_fn ? find_callee(c, rv.callee_sym) : U64_MAX;
     if (found != U64_MAX) {
-        callee* target = &c->callees[found];
-        summary* sum = target->published;
-        bool usable = sum != null && sum->known && !sum->residual &&
-            (target->member || ownership_api.successful(sum->proof));
         // A published fort body without a proof reported its own error (`spec/fir.md` 14.1).
         bool own_error = sum != null && sum->known && !usable && !target->member;
         u64 before = c->notes;
@@ -5619,6 +5891,12 @@ fn call(context mut* c, state mut* s, fir.rvalue rv, types.node* t, leaf_list mu
         // A member call still checks its binding, so its own reason names the call.
         if (!usable && target->member && sum != null && sum->known) {
             apply(c, s, &entry, target, args[..], &arg_leaves, t, out, true);
+        }
+        // A failed application becomes an unknown effect. It can retain each argument.
+        if (usable) {
+            if (!escape_arguments(c, s, args[..], &arg_leaves, null)) { return; }
+            forget_escaped_owners(c, s);
+            if (c->stopped) { return; }
         }
         reset(out);
         unknown_call(c, s, args[..], &arg_leaves, t, out, !own_error && c->notes == before);
@@ -6029,6 +6307,8 @@ fn take_summary(context mut* c) summary {
     }
     out.view_reads = c->view_reads;
     out.reads_high = c->reads_high;
+    out.address_escapes = c->address_escapes;
+    out.escapes_high = c->escapes_high;
     out.required_some = c->required_some;
     out.lost_required = c->lost_required;
     out.events = c->events;
@@ -6041,6 +6321,7 @@ fn same_summary(context mut* c, summary* a, summary* b, bool mut* same) bool {
     *same = false;
     if (a->known != b->known || a->returns != b->returns || a->residual != b->residual ||
         a->view_reads != b->view_reads || a->reads_high != b->reads_high ||
+        a->address_escapes != b->address_escapes || a->escapes_high != b->escapes_high ||
         a->proof.kind != b->proof.kind || a->proof.failed != b->proof.failed ||
         a->interface.len != b->interface.len || a->lost_required != b->lost_required ||
         !same_requirements(a->required_some.items[..a->required_some.len],
