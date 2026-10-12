@@ -1,0 +1,51 @@
+{
+  "comment": [
+    "Four rows cover projected call arguments, aggregate call results, residual call",
+    "publication, and divergence publication (D17.18). The build writes LLVM IR for",
+    "the focused module test. The stage compiles and runs the same test with the mutant.",
+    "Run this table in the Linux VM with the debug preset."
+  ],
+  "sources": [
+    "src/fort/ownership_calls.ft",
+    "src/fort/ownership_summary.ft",
+    "src/fort/ownership_summary_body.ft"
+  ],
+  "binary": "build/Linux/debug/mutate/ownership_summary_call_publication_test.ll",
+  "build": "mkdir -p build/Linux/debug/mutate && build/Linux/debug/fort --std-dir build/Linux/debug/std -I src/fort -I test/fort/support -S -o build/Linux/debug/mutate/ownership_summary_call_publication_test.ll test/fort/ownership_summary_call_publication_test.ft",
+  "stages": [
+    {
+      "name": "call and publication summary module test",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --cc /usr/bin/clang --target x86_64-linux-gnu --verify-ir -j 1 ownership_summary_call_publication"
+    }
+  ],
+  "mutations": [
+    {
+      "decision": "D17.18-projected-call-argument",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "            if (argument.kind != fir.operand_kind.ok_copy ||\n                fir.type_owning(argument_ty) ||\n                (fir.type_aggregate(argument_ty) && !reference(argument_ty))) {",
+      "new": "            if (argument.kind == fir.operand_kind.ok_copy ||\n                fir.type_owning(argument_ty) ||\n                (fir.type_aggregate(argument_ty) && !reference(argument_ty))) {",
+      "what": "a projected copy argument remains unsupported"
+    },
+    {
+      "decision": "D17.18-aggregate-call-result",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    if (aggregate_result && fir.type_owning(dst_ty)) {",
+      "new": "    if (aggregate_result) {",
+      "what": "a non-owning aggregate call result remains unsupported"
+    },
+    {
+      "decision": "D17.18-residual-publication",
+      "file": "src/fort/ownership_summary.ft",
+      "old": "    if (count == 0) {\n        out.proof = ownership_api.incomplete(ownership_api.incomplete_reason.unknown_effect,",
+      "new": "    if (count == 0 || program->call_residual) {\n        out.proof = ownership_api.incomplete(ownership_api.incomplete_reason.unknown_effect,",
+      "what": "a residual call discards the observed cases at publication"
+    },
+    {
+      "decision": "D17.18-divergence-publication",
+      "file": "src/fort/ownership_calls.ft",
+      "old": "        ending != ownership_api.outcome_kind.abort &&\n        ending != ownership_api.outcome_kind.divergence)) {",
+      "new": "        ending != ownership_api.outcome_kind.abort)) {",
+      "what": "a proved divergent call becomes an unknown call outcome"
+    }
+  ]
+}

@@ -1,0 +1,285 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| projected call argument ok
+//| aggregate call result ok
+//| residual call publication ok
+//| no normal exit publication ok
+//| aggregate call lifetime rejected ok
+//| projected move rejected ok
+//| aggregate result sibling retained ok
+//| projected aggregate rejected ok
+//| null aggregate result residual ok
+//| partial null aggregate result residual ok
+/// Checks call extraction and publication at summary boundaries (D17.14, D17.15, D17.18).
+import fir;
+import ownership_api;
+import ownership_call_bodies;
+import ownership_summary_body;
+import ownership_summary_model;
+
+string[3] PROJECTED = {
+    "struct pair { i32 left; i32 right; }",
+    "fn take(i32 value) void {}",
+    "fn projected(pair value) void { take(value.right); }",
+};
+
+string[3] AGGREGATE_RESULT = {
+    "struct view_box { i32* ptr; i32 tag; }",
+    "fn make(i32* p) view_box { return view_box{p, 7}; }",
+    "fn result(i32* p) view_box { view_box value = make(p); return value; }",
+};
+
+string[1] RESIDUAL = {
+    "fn run(fn () void target) void { target(); }",
+};
+
+string[2] DIVERGENCE = {
+    "fn stop() void {}",
+    "fn wrapper() void { stop(); }",
+};
+
+string[3] PROJECTED_MOVE = {
+    "struct owner_box { i32 mut* own item; }",
+    "fn take(i32 mut* own item) void { del(item); }",
+    "fn projected_move(owner_box mut* box) void { take(move(box->item)); }",
+};
+
+string[3] DANGLING_AGGREGATE_CALL = {
+    "struct view_box { i32* ptr; }",
+    "fn make(i32* p) view_box { return view_box{p}; }",
+    "fn returned(i32 mut* own p) view_box { defer del(p); return make(p); }",
+};
+
+string[4] AGGREGATE_RESULT_SIBLING = {
+    "struct view_pair { i32* left; i32* right; }",
+    "fn returned(i32 mut* own p, i32* q) view_pair {",
+    "    defer del(p);",
+    "    return view_pair{p, q}; }",
+};
+
+string[6] PROJECTED_AGGREGATE = {
+    "struct view_box { i32* ptr; }",
+    "fn take(view_box value) void {}",
+    "fn caller(view_box mut* box, i32 mut* own p) void {",
+    "    box->ptr = p; del(p);",
+    "    take(*box); box->ptr = null;",
+    "}",
+};
+
+string[7] NULL_AGGREGATE_RESULT = {
+    "struct view_box { i32* ptr; }",
+    "fn clear() view_box { return view_box{null}; }",
+    "fn caller(i32 mut* own p) view_box {",
+    "    view_box mut value = view_box{p};",
+    "    value = clear(); del(p);",
+    "    return value;",
+    "}",
+};
+
+string[7] PARTIAL_NULL_AGGREGATE_RESULT = {
+    "struct view_pair { i32* left; i32* right; }",
+    "fn clear(i32* q) view_pair { return view_pair{null, q}; }",
+    "fn caller(i32 mut* own p, i32* q) view_pair {",
+    "    view_pair mut value = view_pair{p, p};",
+    "    value = clear(q); del(p);",
+    "    return value;",
+    "}",
+};
+
+fn complete(ownership_summary_model.summary* model) bool {
+    return ownership_api.successful(model->proof) && !model->residual_effects;
+}
+
+fn projected_argument() void {
+    ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+    string[2] names = {"take", "projected"};
+    ownership_call_bodies.open(&set, PROJECTED[..], names[..]);
+    defer ownership_call_bodies.close(&set);
+    ownership_call_bodies.infer_all(&set);
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(&set, 1);
+    assert(complete(model) && model->cases.len == 1);
+    u64 mut reads = 0;
+    u64 mut i = 0;
+    while (i < model->effects.len) {
+        if (model->effects[i].payload == ownership_summary_model.payload_kind.read) {
+            reads += 1;
+        }
+        i += 1;
+    }
+    assert(reads == 1);
+    println("projected call argument ok");
+}
+
+fn aggregate_result() void {
+    ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+    string[2] names = {"make", "result"};
+    ownership_call_bodies.open(&set, AGGREGATE_RESULT[..], names[..]);
+    defer ownership_call_bodies.close(&set);
+    ownership_call_bodies.infer_all(&set);
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(&set, 1);
+    assert(complete(model) && model->cases.len == 1);
+    u64 mut result_writes = 0;
+    u64 mut i = 0;
+    while (i < model->effects.len) {
+        ownership_summary_model.effect_node effect = model->effects[i];
+        if (effect.payload == ownership_summary_model.payload_kind.replacement &&
+            effect.effect.place.projections.len == 1) { result_writes += 1; }
+        i += 1;
+    }
+    assert(result_writes == 1);
+    println("aggregate call result ok");
+}
+
+fn call_position(fir.func* function, u32 mut* block, u32 mut* gap) void {
+    u32 mut b = 0;
+    while (b < fir.block_count(function)) {
+        u32 mut g = 0;
+        while (g < fir.block_statement_count(function, b)) {
+            fir.statement* stmt = fir.block_statement(function, b, g);
+            if (stmt->kind == fir.stmt_kind.st_assign &&
+                stmt->value.kind == fir.rvalue_kind.rv_call) {
+                *block = b;
+                *gap = g;
+                return;
+            }
+            g += 1;
+        }
+        b += 1;
+    }
+    panic("ownership_summary_call_publication_test: missing call");
+}
+
+fn residual_publication() void {
+    ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+    string[1] names = {"run"};
+    ownership_call_bodies.open(&set, RESIDUAL[..], names[..]);
+    defer ownership_call_bodies.close(&set);
+    u32 mut block = 0;
+    u32 mut gap = 0;
+    call_position(&set.functions[0], &block, &gap);
+    ownership_summary_body.callee_binding@ no_targets = {};
+    ownership_summary_body.call_targets[1] targets = {ownership_summary_body.call_targets{
+        .block = block, .gap = gap, .fort = no_targets, .residual_fort = true}};
+    set.inputs[0].targets = targets[..];
+    ownership_call_bodies.infer(&set, 0);
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(&set, 0);
+    assert(ownership_api.successful(model->proof) && model->residual_effects);
+    assert(model->cases.len == 1);
+    assert(model->cases[0].outcome.kind == ownership_api.outcome_kind.function_return);
+    println("residual call publication ok");
+}
+
+fn no_normal_exit() void {
+    ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+    string[2] names = {"stop", "wrapper"};
+    ownership_call_bodies.open(&set, DIVERGENCE[..], names[..]);
+    defer ownership_call_bodies.close(&set);
+    ownership_call_bodies.infer(&set, 0);
+    ownership_summary_model.summary* stopped = ownership_call_bodies.summary(&set, 0);
+    assert(complete(stopped) && stopped->cases.len == 1);
+    stopped->cases[0].outcome = ownership_api.outcome_fact{
+        .kind = ownership_api.outcome_kind.divergence};
+    set.views[0] = ownership_summary_model.view(stopped);
+    set.bindings[0] = ownership_summary_body.callee_binding{
+        set.functions[0].sym, &set.views[0], false};
+    ownership_call_bodies.infer(&set, 1);
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(&set, 1);
+    assert(complete(model) && model->cases.len == 1);
+    assert(model->cases[0].outcome.kind == ownership_api.outcome_kind.divergence);
+    assert(!model->cases[0].outcome.possible_caller_return);
+    assert(!model->cases[0].outcome.cleanup_required);
+    println("no normal exit publication ok");
+}
+
+fn projected_move_rejected() void {
+    ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+    string[2] names = {"take", "projected_move"};
+    ownership_call_bodies.open(&set, PROJECTED_MOVE[..], names[..]);
+    defer ownership_call_bodies.close(&set);
+    ownership_call_bodies.infer_all(&set);
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(&set, 1);
+    assert(model->proof.kind == ownership_api.proof_kind.incomplete);
+    assert(model->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(model->cases.len == 0);
+    println("projected move rejected ok");
+}
+
+fn aggregate_call_lifetime_rejected() void {
+    ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+    string[2] names = {"make", "returned"};
+    ownership_call_bodies.open(&set, DANGLING_AGGREGATE_CALL[..], names[..]);
+    defer ownership_call_bodies.close(&set);
+    ownership_call_bodies.infer_all(&set);
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(&set, 1);
+    assert(model->proof.failed && !ownership_api.successful(model->proof));
+    assert(ownership_call_bodies.saw(&set, ownership_api.event_kind.invalid_use));
+    assert(model->cases.len == 0);
+    println("aggregate call lifetime rejected ok");
+}
+
+fn aggregate_result_sibling_retained() void {
+    ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+    string[1] names = {"returned"};
+    ownership_call_bodies.open(&set, AGGREGATE_RESULT_SIBLING[..], names[..]);
+    defer ownership_call_bodies.close(&set);
+    ownership_call_bodies.infer_all(&set);
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(&set, 0);
+    assert(model->proof.failed && !ownership_api.successful(model->proof));
+    assert(ownership_call_bodies.saw(&set, ownership_api.event_kind.invalid_use));
+    assert(model->cases.len == 0);
+    println("aggregate result sibling retained ok");
+}
+
+fn projected_aggregate_rejected() void {
+    ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+    string[2] names = {"take", "caller"};
+    ownership_call_bodies.open(&set, PROJECTED_AGGREGATE[..], names[..]);
+    defer ownership_call_bodies.close(&set);
+    ownership_call_bodies.infer_all(&set);
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(&set, 1);
+    assert(model->proof.kind == ownership_api.proof_kind.incomplete);
+    assert(model->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(model->cases.len == 0);
+    println("projected aggregate rejected ok");
+}
+
+fn null_aggregate_result_residual() void {
+    ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+    string[2] names = {"clear", "caller"};
+    ownership_call_bodies.open(&set, NULL_AGGREGATE_RESULT[..], names[..]);
+    defer ownership_call_bodies.close(&set);
+    ownership_call_bodies.infer_all(&set);
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(&set, 1);
+    assert(ownership_api.successful(model->proof) && model->residual_effects);
+    assert(model->cases.len == 1);
+    assert(!ownership_call_bodies.saw(&set, ownership_api.event_kind.invalid_use));
+    println("null aggregate result residual ok");
+}
+
+fn partial_null_aggregate_result_residual() void {
+    ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+    string[2] names = {"clear", "caller"};
+    ownership_call_bodies.open(&set, PARTIAL_NULL_AGGREGATE_RESULT[..], names[..]);
+    defer ownership_call_bodies.close(&set);
+    ownership_call_bodies.infer_all(&set);
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(&set, 1);
+    assert(ownership_api.successful(model->proof) && model->residual_effects);
+    assert(model->cases.len == 1);
+    assert(!ownership_call_bodies.saw(&set, ownership_api.event_kind.invalid_use));
+    println("partial null aggregate result residual ok");
+}
+
+fn main() i32 {
+    projected_argument();
+    aggregate_result();
+    residual_publication();
+    no_normal_exit();
+    aggregate_call_lifetime_rejected();
+    projected_move_rejected();
+    aggregate_result_sibling_retained();
+    projected_aggregate_rejected();
+    null_aggregate_result_residual();
+    partial_null_aggregate_result_residual();
+    return 0;
+}
