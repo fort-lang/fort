@@ -1,0 +1,278 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| summary terminators ok
+/// Checks switch and loan rules in body summary extraction (D17.10, D17.18).
+import fir;
+import ownership_api;
+import ownership_call_bodies;
+import ownership_calls_env;
+import ownership_limits;
+import ownership_summary_body;
+import ownership_summary_model;
+
+string[33] SOURCE = {
+    "enum shade {",
+    "    dark,",
+    "    light,",
+    "}",
+    "fn enum_pick(shade s) i32 {",
+    "    switch (s) {",
+    "    case shade.dark: return 10;",
+    "    case shade.light: return 20;",
+    "    }",
+    "}",
+    "fn integer_pick(i32 n) i32 {",
+    "    switch (n) {",
+    "    case -2: return 30;",
+    "    case 7: return 40;",
+    "    default: return 50;",
+    "    }",
+    "}",
+    "fn bool_pick(bool selected) i32 {",
+    "    if (selected) { return 60; }",
+    "    return 70;",
+    "}",
+    "",
+    "",
+    "fn constant_pick() i32 {",
+    "    switch (7) { case 7: return 80; default: return 90; }",
+    "}",
+    "fn loaned(string text) u64 {",
+    "    for (char c : text) { return 1; } return 0;",
+    "}",
+    "struct choice_box { i32 choice; }",
+    "fn projected_pick(choice_box* b) i32 {",
+    "    switch (b->choice) { case 1: return 100; default: return 110; }",
+    "}",
+};
+
+string[3] NESTED_SWITCH = {
+    "fn nested_switch(i32** p) i32 {",
+    "    switch (**p) { case 1: return 120; default: return 130; }",
+    "}",
+};
+
+// Gives one extraction a fresh W meter. The body array owns the FIR and the service.
+fn extract(ownership_call_bodies.bodies mut* b, u64 index)
+    ownership_summary_body.body_program {
+    b->services.limits = ownership_limits.computation(
+        ownership_limits.fir_size(&b->functions[index]));
+    b->inputs[index].limits = b->services.limits;
+    ownership_calls_env.reset(&b->services);
+    return ownership_summary_body.extract(&b->inputs[index]);
+}
+
+fn successful(ownership_summary_body.body_program* body) void {
+    assert(ownership_api.successful(body->proof));
+    assert(!body->residual_effects);
+}
+
+fn switch_count(fir.func* f) u32 {
+    u32 mut count = 0;
+    u32 mut block = 0;
+    while (block < fir.block_count(f)) {
+        if (fir.block_at(f, block)->term.kind == fir.term_kind.tk_switch) { count += 1; }
+        block += 1;
+    }
+    return count;
+}
+
+fn has_value(ownership_summary_body.body_program* body, i64 value) bool {
+    u64 mut i = 0;
+    while (i < body->values_len) {
+        if (body->values[i].value == value) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+fn distinct_edges(ownership_summary_body.body_program* body) bool {
+    u64 mut i = 0;
+    while (i < body->values_len) {
+        u64 mut k = i + 1;
+        while (k < body->values_len) {
+            if (body->values[i].block == body->values[k].block &&
+                body->values[i].target_index == body->values[k].target_index) {
+                return false;
+            }
+            k += 1;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// An enum switch records its 2 explicit values. Its generated failure edge has no exact value.
+fn enum_switch(ownership_call_bodies.bodies mut* b) void {
+    ownership_summary_body.body_program mut body = extract(b, 0);
+    defer ownership_summary_body.free(&body);
+    successful(&body);
+    assert(switch_count(&b->functions[0]) == 1);
+    assert(body.values_len == 2);
+    assert(has_value(&body, 0));
+    assert(has_value(&body, 1));
+    assert(distinct_edges(&body));
+    assert(body.values[0].value_version.kind == ownership_api.entity_kind.value);
+    assert(body.values[1].value_version.kind == ownership_api.entity_kind.value);
+}
+
+// An integer switch records both explicit arm values. The default can select many other values.
+fn integer_switch(ownership_call_bodies.bodies mut* b) void {
+    ownership_summary_body.body_program mut body = extract(b, 1);
+    defer ownership_summary_body.free(&body);
+    successful(&body);
+    assert(switch_count(&b->functions[1]) == 1);
+    assert(body.values_len == 2);
+    assert(has_value(&body, -2));
+    assert(has_value(&body, 7));
+    assert(distinct_edges(&body));
+    assert(body.values[0].block == body.values[1].block);
+    assert(body.values[0].target_index != body.values[1].target_index);
+}
+
+// The existing bool rule keeps one exact value on its arm and the other value on its default.
+fn boolean_switch(ownership_call_bodies.bodies mut* b) void {
+    ownership_summary_body.body_program mut body = extract(b, 2);
+    defer ownership_summary_body.free(&body);
+    successful(&body);
+    assert(switch_count(&b->functions[2]) == 1);
+    assert(body.values_len == 2);
+    assert(has_value(&body, 0));
+    assert(has_value(&body, 1));
+    assert(distinct_edges(&body));
+}
+
+// FIR V9 selects one edge of a constant switch. The extractor adds no symbolic edge fact.
+fn constant_switch(ownership_call_bodies.bodies mut* b) void {
+    ownership_summary_body.body_program mut body = extract(b, 3);
+    defer ownership_summary_body.free(&body);
+    successful(&body);
+    assert(switch_count(&b->functions[3]) == 1);
+    assert(body.values_len == 0);
+    u64 mut reached = 0;
+    u64 mut i = 0;
+    while (i < body.reached.len) {
+        if (body.reached[i]) { reached += 1; }
+        i += 1;
+    }
+    // Entry and the selected return block are the only reached blocks.
+    assert(reached == 2);
+}
+
+fn loan_position(fir.func* f, fir.stmt_kind kind, u32 mut* block, u32 mut* gap) bool {
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, b)) {
+            if (fir.block_statement(f, b, i)->kind == kind) {
+                *block = b;
+                *gap = i;
+                return true;
+            }
+            i += 1;
+        }
+        b += 1;
+    }
+    return false;
+}
+
+// The range loop ends its body with a return, so its verified CFG is acyclic. Extraction and
+// flow accept both loan markers and publish complete paths for the empty and nonempty cases.
+fn loan_markers(ownership_call_bodies.bodies mut* b) void {
+    assert(fir.loan_count(&b->functions[4]) == 1);
+    u32 mut begin_block = 0;
+    u32 mut begin_gap = 0;
+    u32 mut end_block = 0;
+    u32 mut end_gap = 0;
+    assert(loan_position(&b->functions[4], fir.stmt_kind.st_loan_begin,
+        &begin_block, &begin_gap));
+    assert(loan_position(&b->functions[4], fir.stmt_kind.st_loan_end, &end_block, &end_gap));
+    ownership_summary_body.body_program mut body = extract(b, 4);
+    defer ownership_summary_body.free(&body);
+    successful(&body);
+}
+
+// A switch through caller storage publishes its read and required byte range at the terminator.
+fn projected_switch(ownership_call_bodies.bodies mut* b) void {
+    ownership_summary_body.body_program mut body = extract(b, 5);
+    defer ownership_summary_body.free(&body);
+    successful(&body);
+    assert(switch_count(&b->functions[5]) == 1);
+    assert(body.requirements_len == 1);
+    assert(body.requirements[0].kind == ownership_summary_model.requirement_kind.extent);
+    assert(body.requirements[0].operation.terminator);
+    assert(body.requirements[0].range.access.end.value == 4);
+    u64 mut reads = 0;
+    u64 mut i = 0;
+    while (i < body.effects_len) {
+        ownership_summary_model.effect_node effect = body.effects[i];
+        if (effect.payload == ownership_summary_model.payload_kind.read) {
+            assert(effect.effect.operation.terminator);
+            assert(effect.operand.projections.len == 1);
+            assert(effect.operand.projections[0].kind == ownership_api.projection_kind.field);
+            assert(effect.operand.projections[0].field == 0);
+            reads += 1;
+        }
+        i += 1;
+    }
+    assert(reads == 1);
+}
+
+// Two dereferences load one reference before the scalar read. All 3 effects use the terminator.
+fn nested_switch() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[1] names = {"nested_switch"};
+    ownership_call_bodies.open(&b, NESTED_SWITCH[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    u32 mut block = 0;
+    while (block < fir.block_count(&b.functions[0]) &&
+        fir.block_at(&b.functions[0], block)->term.kind != fir.term_kind.tk_switch) { block += 1; }
+    assert(block < fir.block_count(&b.functions[0]));
+    fir.terminator* term = &fir.block_at(&b.functions[0], block)->term;
+    assert(term->cond.place.proj_len == 2);
+    ownership_summary_body.body_program mut body = extract(&b, 0);
+    defer ownership_summary_body.free(&body);
+    successful(&body);
+    assert(body.requirements_len == 2);
+    u64 mut i = 0;
+    while (i < body.requirements_len) {
+        assert(body.requirements[i].operation.terminator);
+        i += 1;
+    }
+    u64 mut terminator_effects = 0;
+    i = 0;
+    while (i < body.effects_len) {
+        if (body.effects[i].effect.operation.terminator) { terminator_effects += 1; }
+        i += 1;
+    }
+    assert(terminator_effects == 3);
+    u64 mut terminator_provenance = 0;
+    i = 0;
+    while (i < body.provenance_len) {
+        if (body.provenance_records[i].operation.terminator) {
+            assert(body.provenance_records[i].source.line == term->loc.line);
+            assert(body.provenance_records[i].source.col == term->loc.col);
+            terminator_provenance += 1;
+        }
+        i += 1;
+    }
+    assert(terminator_provenance == 3);
+}
+
+fn main() i32 {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[6] names = {"enum_pick", "integer_pick", "bool_pick", "constant_pick", "loaned",
+        "projected_pick"};
+    ownership_call_bodies.open(&b, SOURCE[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    enum_switch(&b);
+    integer_switch(&b);
+    boolean_switch(&b);
+    constant_switch(&b);
+    loan_markers(&b);
+    projected_switch(&b);
+    nested_switch();
+    println("summary terminators ok");
+    return 0;
+}

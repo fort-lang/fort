@@ -495,7 +495,7 @@ fn emit(body_input* in, body_program mut* out, ownership_transfer.request mut re
         return;
     }
     u64 index = out->steps_len;
-    req.operation = position(in, block, gap, false);
+    req.operation = position(in, block, gap, out->context.operation.terminator);
     req.source_position = location(in, out, at);
     req.direct_source_proved = true;
     req.direct_destination_proved = true;
@@ -718,7 +718,9 @@ fn add_read(body_input* in, body_program mut* out, fir.place place_at, u32 block
         return false;
     }
     selected_storage mut selected = selected_storage{};
-    if (place_at.proj_len > 1) { selected = select_storage(in, out, place_at); }
+    if (place_at.proj_len > 1) {
+        selected = select_storage(in, out, place_at, at, exit_at, statement);
+    }
     if (place_at.proj_len > 1 && !selected.proved) { return false; }
     // A nested read through a reference to storage of this body has no modeled place, so it
     // stays unsupported. A nested read of a by-value local reads that local, as one step does.
@@ -944,7 +946,8 @@ fn intrinsic(body_input* in, body_program mut* out, fir.place from, fir.place to
 // A selected path names storage. Its source names the storage lifetime.
 // One definition names the current reference at this verified operation.
 fn load_reference(body_input* in, body_program mut* out, ownership_api.place_path place,
-    ownership_api.entity_id containing, types.node* ty, i64 offset) ownership_api.place_path {
+    ownership_api.entity_id containing, types.node* ty, i64 offset, diag.loc at,
+    diag.loc exit_at, u32 statement) ownership_api.place_path {
     ownership_api.place_path destination = ownership_api.place_path{
         .root = next(out, ownership_api.entity_kind.slot)};
     ownership_api.entity_id pointed = next(out, ownership_api.entity_kind.source);
@@ -974,18 +977,16 @@ fn load_reference(body_input* in, body_program mut* out, ownership_api.place_pat
         version.ordinal, 1, extent(ty), pointee_alignment(ty));
     ownership_state.append_contents(&out->entry, empty(destination, false));
     ownership_api.operation_position op = out->context.operation;
-    fir.statement* stmt = fir.block_statement(in->function.body, op.block, op.operation);
     ownership_transfer.request read = ownership_transfer.request{
         .kind = ownership_transfer.action.inspect, .source = destination,
         .destination = destination, .source_key = containing};
     emit(in, out, read, op.block, op.operation, 0, ownership_summary_model.payload_kind.read,
-        stmt->loc, stmt->exit_loc, stmt->stmt, destination);
+        at, exit_at, statement, destination);
     ownership_transfer.request req = ownership_transfer.request{
         .kind = ownership_transfer.action.assignment, .source = place,
         .destination = destination, .source_key = containing, .value = contents};
     emit(in, out, req, op.block, op.operation, cast(out->effects_len, u32),
-        ownership_summary_model.payload_kind.reference_load, stmt->loc, stmt->exit_loc,
-        stmt->stmt, destination);
+        ownership_summary_model.payload_kind.reference_load, at, exit_at, statement, destination);
     return destination;
 }
 
@@ -1004,8 +1005,8 @@ struct selected_storage {
 
 enum output_action { release_value, move_value, store_value, aggregate_store }
 
-fn select_storage(body_input* in, body_program mut* out, fir.place input_place)
-    selected_storage {
+fn select_storage(body_input* in, body_program mut* out, fir.place input_place, diag.loc at,
+    diag.loc exit_at, u32 statement) selected_storage {
     selected_storage mut selected = selected_storage{};
     if (input_place.base != fir.base_kind.bk_local ||
         cast(input_place.local, u64) >= out->origins.len || input_place.proj_len > 16) {
@@ -1078,7 +1079,7 @@ fn select_storage(body_input* in, body_program mut* out, fir.place input_place)
             (selected.caller || selected.loaded)) {
             selected.path.projections = parts[..count];
             selected.path = load_reference(in, out, selected.path, selected.source, ty,
-                selected.offset);
+                selected.offset, at, exit_at, statement);
             if (!ownership_api.successful(out->proof)) { return selected; }
             selected.loaded = true;
             selected.source = out->roots[out->roots_len - 1].source;
@@ -1247,7 +1248,8 @@ fn retain(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
 
 fn assign_output(body_input* in, body_program mut* out, fir.statement* stmt,
     u32 block, u32 gap) void {
-    selected_storage mut selected = select_storage(in, out, stmt->place);
+    selected_storage mut selected = select_storage(in, out, stmt->place, stmt->loc,
+        stmt->exit_loc, stmt->stmt);
     if (selected.proved && !reference(selected.ty) &&
         !fir.type_aggregate(selected.ty)) {
         if (!output_ready(in, out, &selected, output_action.store_value)) { return; }
@@ -1317,7 +1319,8 @@ fn assign_output(body_input* in, body_program mut* out, fir.statement* stmt,
         req.source_key = out->origins[input_operand.place.local];
         payload = ownership_summary_model.payload_kind.move;
     } else if (input_operand.kind == fir.operand_kind.ok_move) {
-        selected_storage mut from = select_storage(in, out, input_operand.place);
+        selected_storage mut from = select_storage(in, out, input_operand.place, stmt->loc,
+            stmt->exit_loc, stmt->stmt);
         if (!output_ready(in, out, &from, output_action.move_value)) { return; }
         req.kind = ownership_transfer.action.move_owner;
         req.source = from.path;
@@ -1657,7 +1660,8 @@ fn aggregate_value(body_input* in, body_program mut* out, fir.statement* stmt, u
                 .operation = position(in, block, gap, false), .place = slot(in, dst)},
             .payload = ownership_summary_model.payload_kind.move};
         if (input_operand.kind == fir.operand_kind.ok_move && !direct(input_operand.place)) {
-            selected_storage selected = select_storage(in, out, input_operand.place);
+            selected_storage selected = select_storage(in, out, input_operand.place, stmt->loc,
+                stmt->exit_loc, stmt->stmt);
             if (!selected.proved || !selected.indirect || !selected.caller ||
                 selected.ty != ty || selected.path.projections.len != 0) {
                 reject(out, ownership_api.incomplete_reason.unknown_effect);
@@ -1899,9 +1903,11 @@ fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
             } else if (!header) {
                 if (reference(dst_ty) && dst_ty->is_own &&
                     input_operand.kind == fir.operand_kind.ok_move) {
-                    selected_storage mut from = select_storage(in, out, input_operand.place);
+                    selected_storage mut from = select_storage(in, out, input_operand.place,
+                        stmt->loc, stmt->exit_loc, stmt->stmt);
                     if (!output_ready(in, out, &from, output_action.move_value)) { return; }
-                    load_reference(in, out, from.path, from.source, from.ty, from.offset);
+                    load_reference(in, out, from.path, from.source, from.ty, from.offset,
+                        stmt->loc, stmt->exit_loc, stmt->stmt);
                     if (!ownership_api.successful(out->proof)) { return; }
                     req.kind = ownership_transfer.action.move_owner;
                     req.source = from.path;
@@ -1910,7 +1916,8 @@ fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
                     out->origins[dst] = req.source_key;
                     payload = ownership_summary_model.payload_kind.move;
                 } else if (reference(dst_ty)) {
-                    selected_storage selected = select_storage(in, out, input_operand.place);
+                    selected_storage selected = select_storage(in, out, input_operand.place,
+                        stmt->loc, stmt->exit_loc, stmt->stmt);
                     // A load from storage of this body, such as a by-value aggregate, has no
                     // modeled source, so it stays unsupported.
                     if (!selected.proved || !selected.caller) {
@@ -1918,7 +1925,8 @@ fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
                         return;
                     }
                     ownership_api.place_path loaded = load_reference(in, out, selected.path,
-                        selected.source, selected.ty, selected.offset);
+                        selected.source, selected.ty, selected.offset, stmt->loc, stmt->exit_loc,
+                        stmt->stmt);
                     if (!ownership_api.successful(out->proof)) { return; }
                     req.kind = ownership_transfer.action.copy;
                     req.source = loaded;
@@ -2016,7 +2024,8 @@ fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
                 out->held_inline_address = true;
                 return;
             }
-            selected_storage selected = select_storage(in, out, rv.place);
+            selected_storage selected = select_storage(in, out, rv.place, stmt->loc,
+                stmt->exit_loc, stmt->stmt);
             if (!selected.proved || !selected.indirect) {
                 reject(out, ownership_api.incomplete_reason.unknown_effect);
                 return;
@@ -2118,14 +2127,61 @@ fn add_terminal_events(body_input* in, body_program mut* out, u32 block) bool {
     return true;
 }
 
-// A switch of two edges on a bool value. Any other switch stays unsupported.
-fn boolean_switch(body_program mut* out, fir.func* f, fir.terminator* term) bool {
-    if (term->kind != fir.term_kind.tk_switch || term->arms_len != 1 || !work(out, 1)) {
+// The exact i64 value that switch edge `index` selects. An explicit arm selects its value.
+// The default of a one-arm bool switch selects the other bool value. Another default has no
+// exact value because it can select more than one value.
+fn switch_edge_value(fir.func* f, fir.terminator* term, u32 index, i64 mut* value) bool {
+    types.node* ty = fir.operand_type(f, term->cond);
+    if (index < term->arms_len) {
+        consts.cval selected = fir.term_arm(f, term, index).value;
+        if (ty != null && ty->kind == types.type_kind.k_prim &&
+            ty->prim == prim.prim_kind.prim_bool) {
+            *value = consts.cv_eq(selected, consts.cv_from_bool(true)) ? 1 : 0;
+            return true;
+        }
+        return consts.cv_is_int_like(selected) &&
+            consts.cv_to_i64(consts.cv_as_int(selected), value);
+    }
+    if (index != term->arms_len || term->arms_len != 1 || ty == null ||
+        ty->kind != types.type_kind.k_prim || ty->prim != prim.prim_kind.prim_bool) {
         return false;
     }
-    types.node* ty = fir.operand_type(f, term->cond);
-    return ty != null && ty->kind == types.type_kind.k_prim &&
-        ty->prim == prim.prim_kind.prim_bool;
+    *value = consts.cv_eq(fir.term_arm(f, term, 0).value,
+        consts.cv_from_bool(true)) ? 0 : 1;
+    return true;
+}
+
+// Verified FIR permits these terminators. A switch can use each type that FIR V4 accepts.
+fn supported_terminator(body_program mut* out, fir.terminator* term) bool {
+    if (term->kind == fir.term_kind.tk_switch) { return work(out, 1); }
+    return term->kind == fir.term_kind.tk_return || term->kind == fir.term_kind.tk_goto ||
+        term->kind == fir.term_kind.tk_check ||
+        term->kind == fir.term_kind.tk_check_overwrite ||
+        term->kind == fir.term_kind.tk_fail || term->kind == fir.term_kind.tk_trap;
+}
+
+// A scalar header field needs no storage load. Another projected switch condition is a semantic
+// read at the terminator.
+fn switch_condition_read(body_input* in, body_program mut* out, u32 block, u32 gap,
+    fir.terminator* term) bool {
+    if (term->kind != fir.term_kind.tk_switch ||
+        term->cond.kind == fir.operand_kind.ok_const || direct(term->cond.place)) {
+        return true;
+    }
+    types.node* base = term->cond.place.base == fir.base_kind.bk_local ?
+        fir.local_at(in->function.body, term->cond.place.local)->ty : null;
+    bool header = base != null && (base->kind == types.type_kind.k_span ||
+        base->kind == types.type_kind.k_string) && term->cond.place.proj_len == 1 &&
+        fir.place_projection(in->function.body, term->cond.place, 0).kind ==
+            fir.proj_kind.pj_field;
+    return header || add_read(in, out, term->cond.place, block, gap, 0, term->loc,
+        term->exit_loc, term->stmt);
+}
+
+// Verified loan markers have no extracted summary effect. Flow reads the markers from FIR and
+// enforces their local storage loan.
+fn loan_statement(fir.stmt_kind kind) bool {
+    return kind == fir.stmt_kind.st_loan_begin || kind == fir.stmt_kind.st_loan_end;
 }
 
 // A holding aggregate that never reaches the result on a returning path would hide its
@@ -2368,8 +2424,6 @@ fn follow_targets(body_input* in, body_program mut* out, u32 block, fir.terminat
     fir.func* f = in->function.body;
     ownership_api.scalar_fact tested = term->kind == fir.term_kind.tk_switch ?
         constant(in, out, term->cond) : ownership_api.scalar_fact{};
-    i64 arm_value = term->kind == fir.term_kind.tk_switch &&
-        consts.cv_eq(fir.term_arm(f, term, 0).value, consts.cv_from_bool(true)) ? 1 : 0;
     u32 mut index = 0;
     u32 mut target = 0;
     while (fir.term_targets(f, term, index, &target)) {
@@ -2392,11 +2446,13 @@ fn follow_targets(body_input* in, body_program mut* out, u32 block, fir.terminat
             out->call_residual = true;
             out->definite_prefix = false;
         }
+        i64 mut edge_value = 0;
         if (tested.kind == ownership_api.fact_kind.symbolic &&
             tested.symbol.kind == ownership_api.entity_kind.value &&
+            switch_edge_value(f, term, index, &edge_value) &&
             out->values_len < out->values.len) {
             out->values[out->values_len] = ownership_flow.value_edge{block, index,
-                tested.symbol, index == 0 ? arm_value : 1 - arm_value};
+                tested.symbol, edge_value};
             out->values_len += 1;
         }
         index += 1;
@@ -2440,6 +2496,7 @@ fn extract(body_input* in) body_program {
     u64 mut extra = 0;
     u64 mut operands = 0;
     u64 mut targets = 0;
+    u64 mut value_edges = 0;
     u32 mut b = 0;
     while (b < fir.block_count(f)) {
         if (!work(&out, 1)) { return out; }
@@ -2495,6 +2552,18 @@ fn extract(body_input* in) body_program {
             extra += projections * 2 + calls;
             gap += 1;
         }
+        fir.terminator* term = &fir.block_at(f, b)->term;
+        if (term->kind == fir.term_kind.tk_switch) {
+            u64 projections = term->cond.kind == fir.operand_kind.ok_const ? 0 :
+                cast(term->cond.place.proj_len, u64);
+            u64 edges = cast(term->arms_len, u64) + 1;
+            if (projections > (U64_MAX - extra) / 2 || edges > U64_MAX - value_edges) {
+                reject(&out, ownership_api.incomplete_reason.invalid_input);
+                return out;
+            }
+            extra += projections * 2;
+            value_edges += edges;
+        }
         b += 1;
     }
     u64 event_limit = types.TYPE_MAX_SIZE / sizeof(ownership_flow.event_binding);
@@ -2545,7 +2614,7 @@ fn extract(body_input* in) body_program {
     }
     out.targets = new(call_target, targets);
     if (locals != 0 && blocks > types.TYPE_MAX_SIZE / sizeof(ownership_api.scalar_fact) / locals ||
-        blocks > types.TYPE_MAX_SIZE / sizeof(ownership_flow.value_edge) / 2 ||
+        value_edges > types.TYPE_MAX_SIZE / sizeof(ownership_flow.value_edge) ||
         !work(&out, blocks * (locals * 2 + 4))) {
         reject(&out, ownership_api.incomplete_reason.invalid_input);
         return out;
@@ -2559,7 +2628,7 @@ fn extract(body_input* in) body_program {
     out.entry_unknown = new(bool, blocks * locals);
     out.entry_scalars = new(ownership_api.scalar_fact, blocks * locals);
     out.entry_holding = new(u8, blocks * locals);
-    out.values = new(ownership_flow.value_edge, blocks * 2);
+    out.values = new(ownership_flow.value_edge, value_edges);
     u64 mut parent = 0;
     while (parent < blocks) {
         out.parents[parent] = U32_MAX;
@@ -2613,7 +2682,8 @@ fn extract(body_input* in) body_program {
                 emit(in, &out, req, b, gap, 0, ownership_summary_model.payload_kind.release,
                     stmt->loc, stmt->exit_loc, stmt->stmt, req.destination);
             } else if (stmt->kind == fir.stmt_kind.st_del) {
-                selected_storage mut selected = select_storage(in, &out, stmt->place);
+                selected_storage mut selected = select_storage(in, &out, stmt->place, stmt->loc,
+                    stmt->exit_loc, stmt->stmt);
                 if (!output_ready(in, &out, &selected, output_action.release_value)) {
                     return out;
                 }
@@ -2630,7 +2700,7 @@ fn extract(body_input* in) body_program {
                 req.source_correspondence_proved = true;
                 emit(in, &out, req, b, gap, 0, ownership_summary_model.payload_kind.storage_end,
                     stmt->loc, stmt->exit_loc, stmt->stmt, req.destination);
-            } else if (stmt->kind != fir.stmt_kind.st_live) {
+            } else if (stmt->kind != fir.stmt_kind.st_live && !loan_statement(stmt->kind)) {
                 reject(&out, ownership_api.incomplete_reason.unknown_effect);
             }
             if (!ownership_api.successful(out.proof)) { return out; }
@@ -2638,13 +2708,9 @@ fn extract(body_input* in) body_program {
         }
         out.context.operation = position(in, b, gap, true);
         out.context.source = location(in, &out, current->term.loc);
-        if (current->term.kind != fir.term_kind.tk_return &&
-            current->term.kind != fir.term_kind.tk_goto &&
-            current->term.kind != fir.term_kind.tk_check &&
-            current->term.kind != fir.term_kind.tk_check_overwrite &&
-            current->term.kind != fir.term_kind.tk_fail &&
-            current->term.kind != fir.term_kind.tk_trap &&
-            !boolean_switch(&out, f, &current->term)) {
+        if (current->term.kind == fir.term_kind.tk_switch &&
+            !switch_condition_read(in, &out, b, gap, &current->term)) { return out; }
+        if (!supported_terminator(&out, &current->term)) {
             reject(&out, ownership_api.incomplete_reason.unknown_effect);
             return out;
         }
