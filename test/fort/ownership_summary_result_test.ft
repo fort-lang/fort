@@ -1,0 +1,95 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| summary owning results ok
+/// Checks borrowed summary results whose element type has owning leaves (D17.5-D17.7, D17.14).
+import ownership_api;
+import ownership_call_bodies;
+import ownership_summary_body;
+import ownership_summary_model;
+
+string[9] SOURCE = {
+    "struct node { i32 mut* own payload; node mut* child; }",
+    "struct box { i32 mut* own item; }",
+    "struct parser { node mut* parsed; }",
+    "fn mutable_child(node mut* parent) node mut* { return parent->child; }",
+    "fn owner_field(box mut* b) i32 mut* own mut* { return &b->item; }",
+    "fn parse_node(parser mut* p) node mut* { return p->parsed; }",
+    "fn returned_parser_node(parser mut* p) node mut* { return parse_node(p); }",
+    "fn owning_nested() node mut* own { return new(node); }",
+    "",
+};
+
+fn complete_result(ownership_call_bodies.bodies* b, u64 index)
+    ownership_summary_model.relation {
+    ownership_summary_model.summary* inferred = ownership_call_bodies.summary(b, index);
+    ownership_summary_model.case_record returned = ownership_call_bodies.only_case(b, index);
+    assert(returned.outcome.kind == ownership_api.outcome_kind.function_return);
+    assert(returned.outcome.possible_caller_return);
+    assert(returned.results.len == 1 && inferred->results.len == 1);
+    assert(inferred->results[0].borrow.source.kind == ownership_api.entity_kind.source);
+    assert(inferred->results[0].borrow.representation_complete);
+    return inferred->results[0];
+}
+
+// The child is mutable and its node type owns a payload. Loading the child produces a separate
+// symbolic caller source. The result must not claim the parent object as the child allocation.
+fn mutable_child(ownership_call_bodies.bodies* b) void {
+    ownership_summary_model.relation result = complete_result(b, 0);
+    ownership_api.entity_id parent = ownership_summary_body.designated(&b->inputs[0], 1);
+    assert(!ownership_summary_model.same(result.borrow.source, parent));
+}
+
+// The address designates the owner slot itself. Its source is the caller object that contains
+// the field. Returning the address transfers neither the slot nor the allocation in the slot.
+fn owner_field(ownership_call_bodies.bodies* b) void {
+    ownership_summary_model.relation result = complete_result(b, 1);
+    ownership_api.entity_id box_source = ownership_summary_body.designated(&b->inputs[1], 1);
+    assert(ownership_summary_model.same(result.borrow.source, box_source));
+    assert(result.borrow.range.offset.kind == ownership_api.fact_kind.exact);
+    assert(result.borrow.range.offset.value == 0);
+}
+
+// A parser returns a mutable syntax node. The node has an owning payload, but the returned
+// pointer borrows it. The result keeps the separate source stored in the parser field.
+fn parser_node(ownership_call_bodies.bodies* b) void {
+    ownership_summary_model.relation result = complete_result(b, 2);
+    ownership_api.entity_id parser_source = ownership_summary_body.designated(&b->inputs[2], 1);
+    assert(!ownership_summary_model.same(result.borrow.source, parser_source));
+}
+
+// The wrapper now reaches body analysis. The current call rule stops later at the returned call
+// result. The source line proves that the result-type preflight rule did not stop this body.
+fn parser_wrapper(ownership_call_bodies.bodies* b) void {
+    ownership_summary_model.summary* inferred = ownership_call_bodies.summary(b, 3);
+    assert(!ownership_api.successful(inferred->proof));
+    assert(inferred->proof.terminal.present);
+    assert(inferred->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(inferred->proof.terminal.source.line == 7);
+}
+
+// An owning result of an owning element still needs descendant-allocation summary support. The
+// extractor refuses it before body analysis. This borrowed-result rule does not weaken that case.
+fn nested_owner_stays_unsupported(ownership_call_bodies.bodies* b) void {
+    ownership_summary_model.summary* inferred = ownership_call_bodies.summary(b, 4);
+    assert(!ownership_api.successful(inferred->proof));
+    assert(inferred->proof.terminal.present);
+    assert(inferred->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(inferred->proof.terminal.source.line == 0);
+}
+
+fn main() i32 {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[5] names = {"mutable_child", "owner_field", "parse_node",
+        "returned_parser_node", "owning_nested"};
+    ownership_call_bodies.open(&b, SOURCE[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    mutable_child(&b);
+    owner_field(&b);
+    parser_node(&b);
+    parser_wrapper(&b);
+    nested_owner_stays_unsupported(&b);
+    println("summary owning results ok");
+    return 0;
+}
