@@ -105,10 +105,15 @@ struct body_program {
     u64 targets_len;
     ownership_api.scalar_fact mut@ own call_args;
     u64 call_args_len;
-    // The body is a forward tree. Each reached block keeps its one parent and the origins and
-    // scalars at its entry. A switch on a formal value adds one value edge per target.
+    // Each reached block keeps its joined entry facts. A block with one predecessor also keeps
+    // that parent. A merge has no one parent. A switch on a formal adds one value edge per target.
     u32 mut@ own parents;
     bool mut@ own reached;
+    bool mut@ own entry_set;
+    // A cycle and its descendants use a conservative entry. Its top state is a fixed point.
+    bool mut@ own conservative;
+    u32 mut@ own block_order;
+    u64 block_order_len;
     ownership_api.entity_id mut@ own entry_origins;
     bool mut@ own entry_unknown;
     ownership_api.scalar_fact mut@ own entry_scalars;
@@ -173,6 +178,9 @@ fn free(body_program mut* out) void {
     del(owned.call_args);
     del(owned.parents);
     del(owned.reached);
+    del(owned.entry_set);
+    del(owned.conservative);
+    del(owned.block_order);
     del(owned.entry_origins);
     del(owned.entry_unknown);
     del(owned.entry_scalars);
@@ -2068,9 +2076,212 @@ fn results_reached(body_program mut* out) bool {
     u64 mut i = 0;
     while (i < out->holding.len) {
         if (!work(out, 1)) { return false; }
-        if (out->holding[i] == 1) {
+        if (out->holding[i] == 1 || out->holding[i] == 3) {
             reject(out, ownership_api.incomplete_reason.unknown_effect);
             return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+fn same_scalar(ownership_api.scalar_fact a, ownership_api.scalar_fact b) bool {
+    return a.kind == b.kind && a.value == b.value &&
+        ownership_summary_model.same(a.symbol, b.symbol);
+}
+
+// Joins one predecessor into an initialized block entry. A difference keeps no fact from one
+// path. A reference difference keeps the unknown-origin mark for a later source requirement.
+fn join_entry(body_input* in, body_program mut* out, u32 target, u64 locals) bool {
+    if (!work(out, locals * 2)) { return false; }
+    u64 base = cast(target, u64) * locals;
+    u64 mut i = 0;
+    while (i < locals) {
+        bool origin_differs = !ownership_summary_model.same(out->entry_origins[base + i],
+            out->origins[i]);
+        if (origin_differs) { out->entry_origins[base + i] = ownership_api.entity_id{}; }
+        out->entry_unknown[base + i] = out->entry_unknown[base + i] || out->unknown[i] ||
+            (origin_differs && reference(fir.local_at(in->function.body, cast(i, u32))->ty));
+        if (!same_scalar(out->entry_scalars[base + i], out->scalars[i])) {
+            out->entry_scalars[base + i] = ownership_api.scalar_fact{};
+        }
+        if (out->entry_holding[base + i] != out->holding[i]) {
+            out->entry_holding[base + i] = 3;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+fn copy_entry(body_program mut* out, u32 target, u64 locals) void {
+    u64 base = cast(target, u64) * locals;
+    u64 mut i = 0;
+    while (i < locals) {
+        out->entry_origins[base + i] = out->origins[i];
+        out->entry_unknown[base + i] = out->unknown[i];
+        out->entry_scalars[base + i] = out->scalars[i];
+        out->entry_holding[base + i] = out->holding[i];
+        i += 1;
+    }
+}
+
+fn widen_entry(body_input* in, body_program mut* out, u32 block, u64 locals) void {
+    u64 base = cast(block, u64) * locals;
+    u64 mut i = 0;
+    while (i < locals) {
+        types.node* ty = fir.local_at(in->function.body, cast(i, u32))->ty;
+        out->entry_origins[base + i] = ownership_api.entity_id{};
+        out->entry_unknown[base + i] = reference(ty);
+        out->entry_scalars[base + i] = ownership_api.scalar_fact{};
+        out->entry_holding[base + i] = fir.type_aggregate(ty) && !reference(ty) ? 3 : 0;
+        i += 1;
+    }
+    out->entry_set[block] = true;
+}
+
+// Finds all reachable blocks. Kahn order removes the acyclic part without using block numbers.
+// The remaining cycle and its descendants take top, which is their conservative fixed point.
+fn discover_cfg(body_input* in, body_program mut* out, u64 locals) bool {
+    fir.func* f = in->function.body;
+    out->reached[0] = true;
+    out->entry_set[0] = true;
+    bool mut changed = true;
+    while (changed) {
+        changed = false;
+        u32 mut block = 0;
+        while (block < fir.block_count(f)) {
+            fir.block* current = fir.block_at(f, block);
+            if (!work(out, 1) || !current->terminated) {
+                reject(out, ownership_api.incomplete_reason.invalid_input);
+                return false;
+            }
+            if (!out->reached[block]) { block += 1; continue; }
+            u32 mut index = 0;
+            u32 mut target = 0;
+            while (fir.term_targets(f, &current->term, index, &target)) {
+                if (!work(out, 2) || cast(target, u64) >= out->reached.len) {
+                    reject(out, ownership_api.incomplete_reason.invalid_input);
+                    return false;
+                }
+                if (!fir_flow.reachable_target(f, &current->term, index, &target)) {
+                    index += 1;
+                    continue;
+                }
+                if (!out->reached[target]) { out->reached[target] = true; changed = true; }
+                index += 1;
+            }
+            block += 1;
+        }
+    }
+    u64 blocks = cast(fir.block_count(f), u64);
+    u32 mut@ own pending = new(u32, blocks);
+    bool mut@ own scheduled = new(bool, blocks);
+    defer del(pending);
+    defer del(scheduled);
+    u32 mut block = 0;
+    while (block < fir.block_count(f)) {
+        if (out->reached[block]) {
+            fir.block* current = fir.block_at(f, block);
+            u32 mut index = 0;
+            u32 mut target = 0;
+            while (fir.term_targets(f, &current->term, index, &target)) {
+                if (!work(out, 1)) { return false; }
+                if (fir_flow.reachable_target(f, &current->term, index, &target) &&
+                    out->reached[target]) {
+                    if (pending[target] == U32_MAX) {
+                        reject(out, ownership_api.incomplete_reason.invalid_input);
+                        return false;
+                    }
+                    pending[target] += 1;
+                }
+                index += 1;
+            }
+        }
+        block += 1;
+    }
+    // The function entry is an incoming state, not a CFG predecessor.
+    bool mut progress = true;
+    while (progress) {
+        progress = false;
+        block = 0;
+        while (block < fir.block_count(f)) {
+            if (!work(out, 1)) { return false; }
+            if (out->reached[block] && !scheduled[block] && pending[block] == 0) {
+                scheduled[block] = true;
+                out->block_order[out->block_order_len] = block;
+                out->block_order_len += 1;
+                progress = true;
+                fir.block* current = fir.block_at(f, block);
+                u32 mut index = 0;
+                u32 mut target = 0;
+                while (fir.term_targets(f, &current->term, index, &target)) {
+                    if (!work(out, 1)) { return false; }
+                    if (fir_flow.reachable_target(f, &current->term, index, &target) &&
+                        out->reached[target] && pending[target] > 0) {
+                        pending[target] -= 1;
+                    }
+                    index += 1;
+                }
+            }
+            block += 1;
+        }
+    }
+    block = 0;
+    while (block < fir.block_count(f)) {
+        if (out->reached[block] && !scheduled[block]) {
+            out->conservative[block] = true;
+            widen_entry(in, out, block, locals);
+            out->parents[block] = U32_MAX;
+            out->call_residual = true;
+            out->block_order[out->block_order_len] = block;
+            out->block_order_len += 1;
+        }
+        block += 1;
+    }
+    return true;
+}
+
+fn step_after(ownership_flow.step a, ownership_flow.step b) bool {
+    return a.block > b.block || (a.block == b.block && (a.gap > b.gap ||
+        (a.gap == b.gap && a.order > b.order)));
+}
+
+// Flow requires steps and calls in FIR position order. Extraction can visit an acyclic CFG in a
+// different order, so it restores these two public orders after it emits each operation once.
+fn sort_program(body_program mut* out) bool {
+    u64 mut i = 1;
+    while (i < out->steps_len) {
+        u64 mut j = i;
+        while (j > 0 && step_after(out->steps[j - 1], out->steps[j])) {
+            if (!work(out, 1)) { return false; }
+            ownership_flow.step step_before = out->steps[j - 1];
+            out->steps[j - 1] = out->steps[j];
+            out->steps[j] = step_before;
+            ownership_transfer.event_binding event_before = out->transfer_events[j - 1];
+            out->transfer_events[j - 1] = out->transfer_events[j];
+            out->transfer_events[j] = event_before;
+            j -= 1;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < out->steps_len) {
+        if (out->steps[i].kind == ownership_flow.step_kind.local_effect) {
+            out->steps[i].local.event_bindings = out->transfer_events[i..i + 1];
+        }
+        i += 1;
+    }
+    i = 1;
+    while (i < out->calls_len) {
+        u64 mut j = i;
+        while (j > 0 && (out->calls[j - 1].block > out->calls[j].block ||
+            (out->calls[j - 1].block == out->calls[j].block &&
+                out->calls[j - 1].gap > out->calls[j].gap))) {
+            if (!work(out, 1)) { return false; }
+            call_site before = out->calls[j - 1];
+            out->calls[j - 1] = out->calls[j];
+            out->calls[j] = before;
+            j -= 1;
         }
         i += 1;
     }
@@ -2091,8 +2302,8 @@ fn restore_entry(body_program mut* out, u32 block, u64 locals) bool {
     return true;
 }
 
-// Each target that flow can reach gets this block as its one parent. A back edge or a second
-// parent makes a path that this extractor does not split, so the body stays unsupported.
+// Each target joins all reachable predecessor states. A block with one predecessor keeps it as
+// its parent. A merge has no one parent, so publication stays incomplete for that body.
 // A switch on a captured formal value gives each edge the value that it selects.
 fn follow_targets(body_input* in, body_program mut* out, u32 block, fir.terminator* term,
     u64 locals) bool {
@@ -2109,20 +2320,19 @@ fn follow_targets(body_input* in, body_program mut* out, u32 block, fir.terminat
             index += 1;
             continue;
         }
-        if (target <= block || cast(target, u64) >= out->reached.len || out->reached[target]) {
-            reject(out, ownership_api.incomplete_reason.unknown_effect);
+        if (cast(target, u64) >= out->reached.len) {
+            reject(out, ownership_api.incomplete_reason.invalid_input);
             return false;
         }
-        out->reached[target] = true;
-        out->parents[target] = block;
-        u64 base = cast(target, u64) * locals;
-        u64 mut i = 0;
-        while (i < locals) {
-            out->entry_origins[base + i] = out->origins[i];
-            out->entry_unknown[base + i] = out->unknown[i];
-            out->entry_scalars[base + i] = out->scalars[i];
-            out->entry_holding[base + i] = out->holding[i];
-            i += 1;
+        if (!out->conservative[target] && !out->entry_set[target]) {
+            copy_entry(out, target, locals);
+            out->entry_set[target] = true;
+            out->parents[target] = block;
+        } else if (!out->conservative[target] && out->parents[target] != block) {
+            if (!join_entry(in, out, target, locals)) { return false; }
+            out->parents[target] = U32_MAX;
+            out->call_residual = true;
+            out->definite_prefix = false;
         }
         if (tested.kind == ownership_api.fact_kind.symbolic &&
             tested.symbol.kind == ownership_api.entity_kind.value &&
@@ -2284,6 +2494,9 @@ fn extract(body_input* in) body_program {
     }
     out.parents = new(u32, blocks);
     out.reached = new(bool, blocks);
+    out.entry_set = new(bool, blocks);
+    out.conservative = new(bool, blocks);
+    out.block_order = new(u32, blocks);
     out.entry_origins = new(ownership_api.entity_id, blocks * locals);
     out.entry_unknown = new(bool, blocks * locals);
     out.entry_scalars = new(ownership_api.scalar_fact, blocks * locals);
@@ -2294,25 +2507,27 @@ fn extract(body_input* in) body_program {
         out.parents[parent] = U32_MAX;
         parent += 1;
     }
-    out.reached[0] = true;
     out.entry = ownership_state.empty();
     out.metadata = ownership_state.empty();
     out.next_key = cast(locals * 2 + 2, u32);
     out.coverage = in->coverage;
     out.coverage.actual_source_complete = false;
     if (!seed(in, &out)) { return out; }
-    b = 0;
-    while (b < fir.block_count(f)) {
+    if (!discover_cfg(in, &out, locals)) { return out; }
+    u64 mut block_at = 0;
+    while (block_at < out.block_order_len) {
+        b = out.block_order[block_at];
         fir.block* current = fir.block_at(f, b);
         if (!work(&out, 1) || !current->terminated) {
             reject(&out, ownership_api.incomplete_reason.invalid_input);
             return out;
         }
         if (!out.reached[b]) {
-            b += 1;
+            block_at += 1;
             continue;
         }
-        if (b > 0 && !restore_entry(&out, b, locals)) { return out; }
+        if (out.conservative[b]) { out.definite_prefix = false; }
+        if ((b > 0 || out.conservative[0]) && !restore_entry(&out, b, locals)) { return out; }
         u32 mut gap = 0;
         while (gap < fir.block_statement_count(f, b)) {
             fir.statement* stmt = fir.block_statement(f, b, gap);
@@ -2395,12 +2610,13 @@ fn extract(body_input* in) body_program {
             out.definite_prefix = false;
         }
         if (!add_terminal_events(in, &out, b)) { return out; }
-        b += 1;
+        block_at += 1;
     }
     if (out.held_inline_address) {
         reject(&out, ownership_api.incomplete_reason.unknown_effect);
         return out;
     }
+    if (!sort_program(&out)) { return out; }
     out.residual_effects = false;
     return out;
 }

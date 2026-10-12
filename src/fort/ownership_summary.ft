@@ -1011,11 +1011,17 @@ fn on_path(ownership_summary_body.body_program mut* program, u32 block, u32 exit
 fn before_exit(ownership_summary_body.body_program mut* program,
     ownership_api.operation_position at, ownership_api.operation_position exit) bool {
     if (at.block == exit.block) { return at.operation <= exit.operation; }
-    return at.block < exit.block && on_path(program, at.block, exit.block);
+    return on_path(program, at.block, exit.block);
 }
 
 fn position_less(ownership_api.operation_position a, ownership_api.operation_position b) bool {
     return a.block < b.block || (a.block == b.block && a.operation < b.operation);
+}
+
+fn effect_before(ownership_summary_body.body_program mut* program,
+    ownership_api.operation_position a, ownership_api.operation_position b) bool {
+    if (a.block == b.block) { return a.operation < b.operation; }
+    return on_path(program, a.block, b.block);
 }
 
 // Returns the effects of one exit in FIR order. Equal positions keep their emission order.
@@ -1030,7 +1036,8 @@ fn exit_sequence(ownership_summary_body.body_program mut* program, exit_snapshot
         ownership_api.operation_position at = program->effects[i].effect.operation;
         if (before_exit(program, at, exit->operation)) {
             u64 mut j = count;
-            while (j > 0 && position_less(at, program->effects[index[j - 1]].effect.operation)) {
+            while (j > 0 && effect_before(program, at,
+                program->effects[index[j - 1]].effect.operation)) {
                 if (!ownership_summary_body.work(program, 1)) { return 0; }
                 index[j] = index[j - 1];
                 j -= 1;
@@ -1149,7 +1156,7 @@ fn released_views(ownership_summary_body.body_program mut* program, exit_snapsho
                     if (!ownership_summary_body.work(program, 1)) { return false; }
                     ownership_summary_model.requirement row = program->requirements[r];
                     if (ownership_summary_model.same(row.source, view) &&
-                        position_less(release.effect.operation, row.operation) &&
+                        effect_before(program, release.effect.operation, row.operation) &&
                         before_exit(program, row.operation, exit->operation)) {
                         intrinsic_use(program, row.operation,
                             position_source(program, row.operation, exit->source), view,

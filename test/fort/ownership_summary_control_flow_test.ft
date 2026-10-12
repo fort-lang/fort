@@ -1,0 +1,727 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| summary control flow ok
+/// Checks the control-flow state join of calls_heap summary extraction.
+import fir;
+import fir_verify;
+import lower_env;
+import ownership_api;
+import ownership_calls_env;
+import ownership_calls_fixtures;
+import ownership_flow;
+import ownership_graph;
+import ownership_limits;
+import ownership_summary;
+import ownership_summary_body;
+import ownership_summary_model;
+import pass_env;
+
+string[4] PRELUDE = {
+    "fn f(bool c) i32 {",
+    "    return 0;",
+    "}",
+    "fn g(i32 value) i32 { return value; }",
+};
+
+struct cfg_fixture {
+    lower_env.env checked;
+    ownership_calls_env.env services;
+    fir.module module;
+    ownership_flow.source_file_binding[1] files;
+    ownership_summary_body.body_input input;
+}
+
+fn open(cfg_fixture mut* e, string lets, string@ blocks) void {
+    lower_env.open(&e->checked);
+    ownership_calls_env.open(&e->services);
+    string[32] mut text = {};
+    u64 mut len = 0;
+    text[len] = "fn main.f(_1 (c): bool) -> i32 {";
+    len += 1;
+    if (lets.len > 0) {
+        text[len] = lets;
+        len += 1;
+    }
+    for (string block : blocks) {
+        text[len] = block;
+        len += 1;
+    }
+    text[len] = "}";
+    len += 1;
+    e->module = pass_env.parse(&e->checked, PRELUDE[..], text[..len]);
+    fir.func* function = fir.module_function_at(&e->module, 0);
+    pass_env.verified(&e->checked, function,
+        "ownership_summary_control_flow: the verifier refuses the fixture");
+    e->files[0] = ownership_flow.source_file_binding{1, 1, "t.fir"};
+    e->services.limits = ownership_limits.computation(ownership_limits.fir_size(function));
+    ownership_calls_env.reset(&e->services);
+    ownership_summary_body.callee_binding@ no_callees = {};
+    ownership_summary_body.call_targets@ no_targets = {};
+    e->input = ownership_summary_body.body_input{
+        ownership_graph.body_input{ownership_calls_env.function(1, 1), function, true},
+        e->files[..], &e->services.services, e->services.limits,
+        ownership_summary_model.coverage_status{true, true, false}, true, no_callees, no_targets};
+}
+
+fn close(cfg_fixture mut* e) void {
+    fir.module_free(&e->module);
+    ownership_calls_env.close(&e->services);
+    lower_env.close(&e->checked);
+}
+
+fn entry(cfg_fixture* e, ownership_summary_body.body_program* p, u32 block, u32 local)
+    ownership_api.scalar_fact {
+    u64 locals = cast(fir.local_count(e->input.function.body), u64);
+    return p->entry_scalars[cast(block, u64) * locals + cast(local, u64)];
+}
+
+fn entry_origin(cfg_fixture* e, ownership_summary_body.body_program* p, u32 block, u32 local)
+    ownership_api.entity_id {
+    u64 locals = cast(fir.local_count(e->input.function.body), u64);
+    return p->entry_origins[cast(block, u64) * locals + cast(local, u64)];
+}
+
+fn entry_unknown(cfg_fixture* e, ownership_summary_body.body_program* p, u32 block,
+    u32 local) bool {
+    u64 locals = cast(fir.local_count(e->input.function.body), u64);
+    return p->entry_unknown[cast(block, u64) * locals + cast(local, u64)];
+}
+
+fn assert_sorted(ownership_summary_body.body_program* p) void {
+    u64 mut i = 1;
+    while (i < p->steps_len) {
+        ownership_flow.step before = p->steps[i - 1];
+        ownership_flow.step after = p->steps[i];
+        assert(before.block < after.block || (before.block == after.block &&
+            (before.gap < after.gap || (before.gap == after.gap &&
+                before.order < after.order))));
+        i += 1;
+    }
+}
+
+// The path visits bb3 before bb1. The graph order keeps the constant at the entry of bb1.
+// FIR block order still sorts the emitted steps. Publication follows the parent path.
+fn lower_numbered_edge() void {
+    string[4] blocks = {
+        "bb0: { live(_2); goto bb3; }",
+        "bb1: { _0 = copy _2; dead(_2); return; }",
+        "bb2: { trap; }",
+        "bb3: { _2 = const i32 7; goto bb1; }",
+    };
+    cfg_fixture mut e = cfg_fixture{};
+    open(&e, "let _2 (x): i32;", blocks[..]);
+    defer close(&e);
+    ownership_summary_body.body_program mut p = ownership_summary_body.extract(&e.input);
+    defer ownership_summary_body.free(&p);
+    assert(ownership_api.successful(p.proof));
+    assert(p.block_order_len == 3);
+    assert(p.block_order[0] == 0 && p.block_order[1] == 3 && p.block_order[2] == 1);
+    assert(p.reached[0] && p.reached[1] && !p.reached[2] && p.reached[3]);
+    assert(!p.conservative[0] && !p.conservative[1] && !p.conservative[3]);
+    assert(entry(&e, &p, 1, 2).kind == ownership_api.fact_kind.exact);
+    assert(entry(&e, &p, 1, 2).value == 7);
+    assert(p.parents[3] == 0 && p.parents[1] == 3);
+    assert(!p.call_residual);
+    assert_sorted(&p);
+    ownership_summary_body.free(&p);
+    ownership_calls_env.reset(&e.services);
+    ownership_summary_model.summary mut inferred = ownership_summary.infer(&e.input);
+    defer ownership_summary_model.free(&inferred);
+    assert(ownership_api.successful(inferred.proof));
+    assert(!inferred.residual_effects && inferred.cases.len == 1);
+}
+
+// Both incoming edges write 7. The join keeps that exact fact. The merge has no one parent.
+fn equal_forward_join() void {
+    string[4] blocks = {
+        "bb0: { live(_2); switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _2 = const i32 7; goto bb3; }",
+        "bb2: { _2 = const i32 7; goto bb3; }",
+        "bb3: { _0 = copy _2; dead(_2); return; }",
+    };
+    cfg_fixture mut e = cfg_fixture{};
+    open(&e, "let _2 (x): i32;", blocks[..]);
+    defer close(&e);
+    ownership_summary_body.body_program mut p = ownership_summary_body.extract(&e.input);
+    defer ownership_summary_body.free(&p);
+    assert(ownership_api.successful(p.proof));
+    assert(p.block_order_len == 4);
+    assert(p.block_order[0] == 0 && p.block_order[1] == 1);
+    assert(p.block_order[2] == 2 && p.block_order[3] == 3);
+    assert(entry(&e, &p, 3, 2).kind == ownership_api.fact_kind.exact);
+    assert(entry(&e, &p, 3, 2).value == 7);
+    assert(p.parents[3] == ownership_summary_body.U32_MAX);
+    assert(p.call_residual && !p.definite_prefix);
+    assert_sorted(&p);
+}
+
+// The incoming edges write different values. The join keeps neither exact value.
+fn different_forward_join() void {
+    string[4] blocks = {
+        "bb0: { live(_2); switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _2 = const i32 7; goto bb3; }",
+        "bb2: { _2 = const i32 8; goto bb3; }",
+        "bb3: { _0 = const i32 0; dead(_2); return; }",
+    };
+    cfg_fixture mut e = cfg_fixture{};
+    open(&e, "let _2 (x): i32;", blocks[..]);
+    defer close(&e);
+    ownership_summary_body.body_program mut p = ownership_summary_body.extract(&e.input);
+    defer ownership_summary_body.free(&p);
+    assert(ownership_api.successful(p.proof));
+    assert(entry(&e, &p, 3, 2).kind == ownership_api.fact_kind.unknown);
+    assert(entry(&e, &p, 3, 2).value == 0);
+    assert(p.call_residual);
+}
+
+// A cycle leaves Kahn order. The cycle and its returning descendant use the top state.
+fn directed_cycle() void {
+    string[4] blocks = {
+        "bb0: { live(_2); _2 = const i32 7; goto bb1; }",
+        "bb1: { switch(copy _1) -> [true: bb2, otherwise: bb3]; }",
+        "bb2: { _2 = const i32 8; goto bb1; }",
+        "bb3: { _0 = const i32 0; dead(_2); return; }",
+    };
+    cfg_fixture mut e = cfg_fixture{};
+    open(&e, "let _2 (x): i32;", blocks[..]);
+    defer close(&e);
+    ownership_summary_body.body_program mut p = ownership_summary_body.extract(&e.input);
+    defer ownership_summary_body.free(&p);
+    assert(ownership_api.successful(p.proof));
+    assert(p.block_order_len == 4 && p.block_order[0] == 0);
+    assert(p.conservative[1] && p.conservative[2] && p.conservative[3]);
+    assert(entry(&e, &p, 1, 2).kind == ownership_api.fact_kind.unknown);
+    assert(entry(&e, &p, 2, 2).kind == ownership_api.fact_kind.unknown);
+    assert(entry(&e, &p, 3, 2).kind == ownership_api.fact_kind.unknown);
+    assert(p.parents[1] == ownership_summary_body.U32_MAX);
+    assert(p.call_residual && !p.definite_prefix);
+    assert_sorted(&p);
+}
+
+// The false edge of the constant switch is unreachable. It adds no merge or cycle.
+fn constant_switch_edge() void {
+    string[3] blocks = {
+        "bb0: { switch(const true) -> [true: bb2, otherwise: bb1]; }",
+        "bb1: { goto bb2; }",
+        "bb2: { _0 = const i32 0; return; }",
+    };
+    cfg_fixture mut e = cfg_fixture{};
+    open(&e, "", blocks[..]);
+    defer close(&e);
+    ownership_summary_body.body_program mut p = ownership_summary_body.extract(&e.input);
+    defer ownership_summary_body.free(&p);
+    assert(ownership_api.successful(p.proof));
+    assert(p.reached[0] && !p.reached[1] && p.reached[2]);
+    assert(p.block_order_len == 2 && p.block_order[0] == 0 && p.block_order[1] == 2);
+    assert(p.parents[2] == 0);
+    assert(!p.call_residual);
+}
+
+// Two address definitions disagree at the merge. The join names no selected source.
+fn origin_join() void {
+    string[4] blocks = {
+        "bb0: { live(_2); live(_3); live(_4);",
+        "    switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _4 = addr mut(_2); goto bb3; }",
+        "bb2: { _4 = addr mut(_3); goto bb3; }",
+    };
+    string[2] tail = {
+        "bb3: { _0 = const i32 0; dead(_4); dead(_3); dead(_2); return; }",
+        "bb4: { trap; }",
+    };
+    string[6] mut all = {};
+    u64 mut i = 0;
+    while (i < blocks.len) { all[i] = blocks[i]; i += 1; }
+    all[4] = tail[0];
+    all[5] = tail[1];
+    cfg_fixture mut e = cfg_fixture{};
+    open(&e, "let _2 (a): i32; let _3 (b): i32; let _4 (p): i32 mut*;", all[..5]);
+    defer close(&e);
+    ownership_summary_body.body_program mut p = ownership_summary_body.extract(&e.input);
+    defer ownership_summary_body.free(&p);
+    assert(ownership_api.successful(p.proof));
+    assert(entry_origin(&e, &p, 3, 4).kind == ownership_api.entity_kind.none);
+    assert(entry_unknown(&e, &p, 3, 4));
+    assert(p.call_residual);
+}
+
+// Equal address definitions keep their one source. The joined value needs no unknown mark.
+fn equal_origin_join() void {
+    string[4] blocks = {
+        "bb0: { live(_2); live(_3); switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _3 = addr mut(_2); goto bb3; }",
+        "bb2: { _3 = addr mut(_2); goto bb3; }",
+        "bb3: { _0 = const i32 0; dead(_3); dead(_2); return; }",
+    };
+    cfg_fixture mut e = cfg_fixture{};
+    open(&e, "let _2 (a): i32; let _3 (p): i32 mut*;", blocks[..]);
+    defer close(&e);
+    ownership_summary_body.body_program mut p = ownership_summary_body.extract(&e.input);
+    defer ownership_summary_body.free(&p);
+    assert(ownership_api.successful(p.proof));
+    ownership_api.entity_id expected = ownership_summary_body.source(&e.input, 2);
+    assert(ownership_summary_model.same(entry_origin(&e, &p, 3, 3), expected));
+    assert(!entry_unknown(&e, &p, 3, 3));
+    assert(p.parents[3] == ownership_summary_body.U32_MAX);
+    assert(p.call_residual);
+}
+
+// A null value and an address disagree. The join does not select the address source.
+fn address_and_null_join() void {
+    string[4] blocks = {
+        "bb0: { live(_2); live(_3); switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _3 = addr mut(_2); goto bb3; }",
+        "bb2: { _3 = const null i32 mut*; goto bb3; }",
+        "bb3: { _0 = const i32 0; dead(_3); dead(_2); return; }",
+    };
+    cfg_fixture mut e = cfg_fixture{};
+    open(&e, "let _2 (a): i32; let _3 (p): i32 mut*;", blocks[..]);
+    defer close(&e);
+    ownership_summary_body.body_program mut p = ownership_summary_body.extract(&e.input);
+    defer ownership_summary_body.free(&p);
+    assert(ownership_api.successful(p.proof));
+    ownership_api.entity_id joined = entry_origin(&e, &p, 3, 3);
+    assert(joined.kind == ownership_api.entity_kind.none);
+    assert(entry_unknown(&e, &p, 3, 3));
+    assert(p.call_residual);
+}
+
+// An untouched scalar parameter has one symbolic value on both arms.
+fn symbolic_value_join() void {
+    string[4] blocks = {
+        "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { goto bb3; }",
+        "bb2: { goto bb3; }",
+        "bb3: { _0 = const i32 0; return; }",
+    };
+    cfg_fixture mut e = cfg_fixture{};
+    open(&e, "", blocks[..]);
+    defer close(&e);
+    ownership_summary_body.body_program mut p = ownership_summary_body.extract(&e.input);
+    defer ownership_summary_body.free(&p);
+    assert(ownership_api.successful(p.proof));
+    ownership_api.scalar_fact joined = entry(&e, &p, 3, 1);
+    assert(joined.kind == ownership_api.fact_kind.symbolic);
+    assert(joined.symbol.kind == ownership_api.entity_kind.value);
+    assert(joined.symbol.ordinal == 2);
+    assert(p.values_len == 2);
+    assert(p.call_residual);
+}
+
+// Two edges from one switch enter one block with the same predecessor state.
+// This shape has one parent. It does not require conservative publication.
+fn duplicate_switch_target() void {
+    string[2] blocks = {
+        "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb1]; }",
+        "bb1: { _0 = const i32 0; return; }",
+    };
+    cfg_fixture mut e = cfg_fixture{};
+    open(&e, "", blocks[..]);
+    defer close(&e);
+    ownership_summary_body.body_program mut p = ownership_summary_body.extract(&e.input);
+    defer ownership_summary_body.free(&p);
+    assert(ownership_api.successful(p.proof));
+    assert(p.block_order_len == 2);
+    assert(p.parents[1] == 0);
+    assert(p.values_len == 2);
+    assert(!p.call_residual);
+    assert(!p.conservative[0] && !p.conservative[1]);
+}
+
+// An unreachable self-loop supplies no state. It does not make the reached return incomplete.
+fn unreachable_cycle() void {
+    string[2] blocks = {
+        "bb0: { _0 = const i32 0; return; }",
+        "bb1: { goto bb1; }",
+    };
+    cfg_fixture mut e = cfg_fixture{};
+    open(&e, "", blocks[..]);
+    defer close(&e);
+    ownership_summary_body.body_program mut p = ownership_summary_body.extract(&e.input);
+    defer ownership_summary_body.free(&p);
+    assert(ownership_api.successful(p.proof));
+    assert(p.reached[0] && !p.reached[1]);
+    assert(p.block_order_len == 1 && p.block_order[0] == 0);
+    assert(!p.conservative[0] && !p.conservative[1]);
+    assert(!p.call_residual);
+    assert(p.steps_len == 1);
+}
+
+// Two entry edges enter one cycle. Kahn order removes bb0 only. The cycle and exit take top.
+fn irreducible_cycle() void {
+    string[4] blocks = {
+        "bb0: { live(_2); switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _2 = const i32 1; goto bb2; }",
+        "bb2: { switch(copy _1) -> [true: bb1, otherwise: bb3]; }",
+        "bb3: { _0 = const i32 0; dead(_2); return; }",
+    };
+    cfg_fixture mut e = cfg_fixture{};
+    open(&e, "let _2 (x): i32;", blocks[..]);
+    defer close(&e);
+    ownership_summary_body.body_program mut p = ownership_summary_body.extract(&e.input);
+    defer ownership_summary_body.free(&p);
+    assert(ownership_api.successful(p.proof));
+    assert(p.block_order_len == 4 && p.block_order[0] == 0);
+    assert(!p.conservative[0]);
+    assert(p.conservative[1] && p.conservative[2] && p.conservative[3]);
+    assert(entry(&e, &p, 1, 2).kind == ownership_api.fact_kind.unknown);
+    assert(entry(&e, &p, 2, 2).kind == ownership_api.fact_kind.unknown);
+    assert(entry(&e, &p, 3, 2).kind == ownership_api.fact_kind.unknown);
+    assert(p.call_residual);
+}
+
+// A self-loop and its exit take top. The statement after the entry can establish a new fact.
+fn self_loop_and_exit() void {
+    string[3] blocks = {
+        "bb0: { live(_2); goto bb1; }",
+        "bb1: { _2 = const i32 4; switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb2: { _2 = const i32 9; _0 = copy _2; dead(_2); return; }",
+    };
+    cfg_fixture mut e = cfg_fixture{};
+    open(&e, "let _2 (x): i32;", blocks[..]);
+    defer close(&e);
+    ownership_summary_body.body_program mut p = ownership_summary_body.extract(&e.input);
+    defer ownership_summary_body.free(&p);
+    assert(ownership_api.successful(p.proof));
+    assert(!p.conservative[0]);
+    assert(p.conservative[1] && p.conservative[2]);
+    assert(entry(&e, &p, 1, 2).kind == ownership_api.fact_kind.unknown);
+    assert(entry(&e, &p, 2, 2).kind == ownership_api.fact_kind.unknown);
+    assert(p.scalars[2].kind == ownership_api.fact_kind.exact);
+    assert(p.scalars[2].value == 9);
+    assert(p.call_residual);
+}
+
+// The outer and inner cycles leave only bb0 in Kahn order. Their exit remains conservative.
+fn nested_cycles() void {
+    string[6] blocks = {
+        "bb0: { live(_2); goto bb1; }",
+        "bb1: { switch(copy _1) -> [true: bb2, otherwise: bb5]; }",
+        "bb2: { switch(copy _1) -> [true: bb3, otherwise: bb4]; }",
+        "bb3: { _2 = const i32 3; goto bb2; }",
+        "bb4: { _2 = const i32 4; goto bb1; }",
+        "bb5: { _0 = const i32 0; dead(_2); return; }",
+    };
+    cfg_fixture mut e = cfg_fixture{};
+    open(&e, "let _2 (x): i32;", blocks[..]);
+    defer close(&e);
+    ownership_summary_body.body_program mut p = ownership_summary_body.extract(&e.input);
+    defer ownership_summary_body.free(&p);
+    assert(ownership_api.successful(p.proof));
+    assert(p.block_order_len == 6 && p.block_order[0] == 0);
+    u32 mut block = 1;
+    while (block < 6) {
+        assert(p.conservative[block]);
+        assert(entry(&e, &p, block, 2).kind == ownership_api.fact_kind.unknown);
+        block += 1;
+    }
+    assert(p.call_residual);
+}
+
+// A lower-numbered diamond keeps graph order. Equal writes retain the exact scalar at bb1.
+fn lower_numbered_diamond_equal() void {
+    string[5] blocks = {
+        "bb0: { live(_2); goto bb4; }",
+        "bb1: { _0 = copy _2; dead(_2); return; }",
+        "bb2: { _2 = const i32 5; goto bb1; }",
+        "bb3: { _2 = const i32 5; goto bb1; }",
+        "bb4: { switch(copy _1) -> [true: bb2, otherwise: bb3]; }",
+    };
+    cfg_fixture mut e = cfg_fixture{};
+    open(&e, "let _2 (x): i32;", blocks[..]);
+    defer close(&e);
+    ownership_summary_body.body_program mut p = ownership_summary_body.extract(&e.input);
+    defer ownership_summary_body.free(&p);
+    assert(ownership_api.successful(p.proof));
+    assert(p.block_order_len == 5);
+    assert(p.block_order[0] == 0 && p.block_order[1] == 4);
+    assert(p.block_order[2] == 2 && p.block_order[3] == 3 && p.block_order[4] == 1);
+    assert(entry(&e, &p, 1, 2).kind == ownership_api.fact_kind.exact);
+    assert(entry(&e, &p, 1, 2).value == 5);
+    assert(p.parents[1] == ownership_summary_body.U32_MAX);
+    assert(p.call_residual);
+    assert_sorted(&p);
+}
+
+// A lower-numbered diamond with different writes loses the scalar fact at bb1.
+fn lower_numbered_diamond_different() void {
+    string[5] blocks = {
+        "bb0: { live(_2); goto bb4; }",
+        "bb1: { _0 = const i32 0; dead(_2); return; }",
+        "bb2: { _2 = const i32 5; goto bb1; }",
+        "bb3: { _2 = const i32 6; goto bb1; }",
+        "bb4: { switch(copy _1) -> [true: bb2, otherwise: bb3]; }",
+    };
+    cfg_fixture mut e = cfg_fixture{};
+    open(&e, "let _2 (x): i32;", blocks[..]);
+    defer close(&e);
+    ownership_summary_body.body_program mut p = ownership_summary_body.extract(&e.input);
+    defer ownership_summary_body.free(&p);
+    assert(ownership_api.successful(p.proof));
+    assert(entry(&e, &p, 1, 2).kind == ownership_api.fact_kind.unknown);
+    assert(p.parents[1] == ownership_summary_body.U32_MAX);
+    assert(p.call_residual);
+    assert_sorted(&p);
+}
+
+// Calls emitted in graph order return to FIR position order. Their target slices stay valid.
+fn lower_numbered_calls_sort() void {
+    string[4] blocks = {
+        "bb0: { live(_2); live(_3); goto bb3; }",
+        "bb1: { _3 = call fn main.g(copy _2); _0 = copy _3; dead(_3); dead(_2); return; }",
+        "bb2: { trap; }",
+        "bb3: { _2 = call fn main.g(const i32 7); goto bb1; }",
+    };
+    cfg_fixture mut e = cfg_fixture{};
+    open(&e, "let _2 (x): i32; let _3 (y): i32;", blocks[..]);
+    defer close(&e);
+    ownership_summary_body.body_program mut p = ownership_summary_body.extract(&e.input);
+    defer ownership_summary_body.free(&p);
+    assert(ownership_api.successful(p.proof));
+    assert(p.calls_len == 2);
+    assert(p.calls[0].block == 1 && p.calls[0].gap == 0);
+    assert(p.calls[1].block == 3 && p.calls[1].gap == 0);
+    assert(p.calls[0].targets_len == 1 && p.calls[1].targets_len == 1);
+    assert(p.calls[0].args_len == 1 && p.calls[1].args_len == 1);
+    assert_sorted(&p);
+    u64 mut i = 0;
+    while (i < p.steps_len) {
+        if (p.steps[i].kind == ownership_flow.step_kind.local_effect) {
+            assert(p.steps[i].local.event_bindings.len == 1);
+            assert(p.steps[i].local.event_bindings[0].key.kind ==
+                ownership_api.entity_kind.event);
+        }
+        i += 1;
+    }
+}
+
+// A forward merge publishes incomplete proof after extraction succeeds.
+fn merge_publication_is_conservative() void {
+    string[4] blocks = {
+        "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { goto bb3; }",
+        "bb2: { goto bb3; }",
+        "bb3: { _0 = const i32 0; return; }",
+    };
+    cfg_fixture mut e = cfg_fixture{};
+    open(&e, "", blocks[..]);
+    defer close(&e);
+    ownership_summary_model.summary mut inferred = ownership_summary.infer(&e.input);
+    defer ownership_summary_model.free(&inferred);
+    assert(inferred.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(inferred.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(inferred.residual_effects && inferred.cases.len == 0);
+}
+
+// A directed cycle publishes incomplete proof after extraction reaches its top fixed point.
+fn cycle_publication_is_conservative() void {
+    string[3] blocks = {
+        "bb0: { goto bb1; }",
+        "bb1: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb2: { _0 = const i32 0; return; }",
+    };
+    cfg_fixture mut e = cfg_fixture{};
+    open(&e, "", blocks[..]);
+    defer close(&e);
+    ownership_summary_model.summary mut inferred = ownership_summary.infer(&e.input);
+    defer ownership_summary_model.free(&inferred);
+    assert(inferred.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(inferred.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(inferred.residual_effects && inferred.cases.len == 0);
+}
+
+// Discovery of a later loop does not change an earlier typed read into an uncertain read.
+fn definite_read_before_loop() void {
+    string[7] source = {
+        "fn callee(bool c) i64 {",
+        "    i32 mut* own p = new(i32); i64* view = cast(p, i64*);",
+        "    i64 value = *view; bool mut repeat = c;",
+        "    while (repeat) { repeat = false; }",
+        "    del(p); return value;",
+        "}",
+        "fn caller(bool c) i64 { return callee(c); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(f.summary.proof.failed);
+    assert(f.summary.proof.kind == ownership_api.proof_kind.complete);
+    assert(f.services.counts.events == 1);
+    assert(f.services.counts.last.kind == ownership_api.event_kind.invalid_use);
+    assert(f.services.counts.last.text == "typed read exceeds its original storage window");
+}
+
+// A lower-numbered conservative loop exit has no definite reaching path for its wide read.
+fn unreachable_read_after_loop() void {
+    string[6] blocks = {
+        "bb0: { live(_2); _2 = const true; goto bb3; }",
+        "bb1: { live(_3); _3 = const i32 0; live(_4); _4 = addr(_3); live(_5);",
+        "    _5 = cast<i64*>(copy _4); live(_6); _6 = copy (*_5); _0 = const i32 0;",
+        "    dead(_6); dead(_5); dead(_4); dead(_3); dead(_2); return; }",
+        "bb2: { goto bb3; }",
+        "bb3: { switch(copy _2) -> [true: bb2, otherwise: bb1]; }",
+    };
+    cfg_fixture mut e = cfg_fixture{};
+    string lets = "let _2(r):bool;let _3(x):i32;let _4(p):i32*;let _5(v):i64*;let _6(y):i64;";
+    open(&e, lets, blocks[..]);
+    defer close(&e);
+    ownership_summary_body.body_program mut p = ownership_summary_body.extract(&e.input);
+    defer ownership_summary_body.free(&p);
+    assert(p.block_order_len == 4 && p.block_order[0] == 0 && p.block_order[1] == 1);
+    assert(p.conservative[1] && p.conservative[2] && p.conservative[3]);
+    assert(p.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(p.proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(e.services.counts.events == 0);
+}
+
+// Repeated extraction frees each work array. It also gives the same graph order each time.
+fn deterministic_repetition() void {
+    string[4] blocks = {
+        "bb0: { live(_2); goto bb3; }",
+        "bb1: { _0 = copy _2; dead(_2); return; }",
+        "bb2: { trap; }",
+        "bb3: { _2 = const i32 12; goto bb1; }",
+    };
+    cfg_fixture mut e = cfg_fixture{};
+    open(&e, "let _2 (x): i32;", blocks[..]);
+    defer close(&e);
+    u32 mut round = 0;
+    while (round < 20) {
+        ownership_calls_env.reset(&e.services);
+        ownership_summary_body.body_program mut p = ownership_summary_body.extract(&e.input);
+        assert(ownership_api.successful(p.proof));
+        assert(p.block_order_len == 3);
+        assert(p.block_order[0] == 0 && p.block_order[1] == 3 && p.block_order[2] == 1);
+        assert(entry(&e, &p, 1, 2).kind == ownership_api.fact_kind.exact);
+        assert(entry(&e, &p, 1, 2).value == 12);
+        assert(!p.call_residual);
+        ownership_summary_body.free(&p);
+        assert(p.block_order.len == 0 && p.entry_set.len == 0 && p.conservative.len == 0);
+        round += 1;
+    }
+}
+
+// A six-edge reverse chain needs repeated Kahn scans. It keeps one exact value through each edge.
+fn reverse_number_chain() void {
+    string[7] blocks = {
+        "bb0: { live(_2); goto bb6; }",
+        "bb1: { _0 = copy _2; dead(_2); return; }",
+        "bb2: { goto bb1; }",
+        "bb3: { goto bb2; }",
+        "bb4: { goto bb3; }",
+        "bb5: { goto bb4; }",
+        "bb6: { _2 = const i32 21; goto bb5; }",
+    };
+    cfg_fixture mut e = cfg_fixture{};
+    open(&e, "let _2 (x): i32;", blocks[..]);
+    defer close(&e);
+    ownership_summary_body.body_program mut p = ownership_summary_body.extract(&e.input);
+    defer ownership_summary_body.free(&p);
+    assert(ownership_api.successful(p.proof));
+    assert(p.block_order_len == 7);
+    assert(p.block_order[0] == 0);
+    assert(p.block_order[1] == 6);
+    assert(p.block_order[2] == 5);
+    assert(p.block_order[3] == 4);
+    assert(p.block_order[4] == 3);
+    assert(p.block_order[5] == 2);
+    assert(p.block_order[6] == 1);
+    u32 mut block = 1;
+    while (block < 6) {
+        assert(entry(&e, &p, block, 2).kind == ownership_api.fact_kind.exact);
+        assert(entry(&e, &p, block, 2).value == 21);
+        assert(!p.conservative[block]);
+        block += 1;
+    }
+    assert(!p.call_residual);
+    assert_sorted(&p);
+    ownership_summary_body.free(&p);
+    ownership_calls_env.reset(&e.services);
+    ownership_summary_model.summary mut inferred = ownership_summary.infer(&e.input);
+    defer ownership_summary_model.free(&inferred);
+    assert(ownership_api.successful(inferred.proof));
+    assert(inferred.cases.len == 1 && !inferred.residual_effects);
+}
+
+// An unknown joined origin stays unknown through a direct copy and the next block entry.
+fn unknown_origin_propagates() void {
+    string[5] blocks = {
+        "bb0: { live(_2); live(_3); live(_4); live(_5);",
+        "    switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { _4 = addr mut(_2); goto bb3; }",
+        "bb2: { _4 = addr mut(_3); goto bb3; }",
+        "bb3: { _5 = copy _4; goto bb4; }",
+    };
+    string[1] exit = {
+        "bb4: { _0 = const i32 0; dead(_5); dead(_4); dead(_3); dead(_2); return; }",
+    };
+    string[6] mut all = {};
+    u64 mut line = 0;
+    while (line < blocks.len) { all[line] = blocks[line]; line += 1; }
+    all[5] = exit[0];
+    cfg_fixture mut e = cfg_fixture{};
+    open(&e,
+        "let _2 (a): i32; let _3 (b): i32; let _4 (p): i32 mut*; let _5 (q): i32 mut*;",
+        all[..]);
+    defer close(&e);
+    ownership_summary_body.body_program mut p = ownership_summary_body.extract(&e.input);
+    defer ownership_summary_body.free(&p);
+    assert(ownership_api.successful(p.proof));
+    assert(entry_origin(&e, &p, 3, 4).kind == ownership_api.entity_kind.none);
+    assert(entry_unknown(&e, &p, 3, 4));
+    assert(entry_origin(&e, &p, 4, 5).kind == ownership_api.entity_kind.none);
+    assert(entry_unknown(&e, &p, 4, 5));
+    assert(p.call_residual);
+}
+
+// A constant switch prunes an unreachable self-loop before Kahn order counts its edge.
+fn pruned_unreachable_cycle() void {
+    string[3] blocks = {
+        "bb0: { switch(const true) -> [true: bb2, otherwise: bb1]; }",
+        "bb1: { goto bb1; }",
+        "bb2: { _0 = const i32 0; return; }",
+    };
+    cfg_fixture mut e = cfg_fixture{};
+    open(&e, "", blocks[..]);
+    defer close(&e);
+    ownership_summary_body.body_program mut p = ownership_summary_body.extract(&e.input);
+    defer ownership_summary_body.free(&p);
+    assert(ownership_api.successful(p.proof));
+    assert(p.reached[0] && !p.reached[1] && p.reached[2]);
+    assert(p.block_order_len == 2);
+    assert(p.block_order[0] == 0 && p.block_order[1] == 2);
+    assert(!p.conservative[0] && !p.conservative[1] && !p.conservative[2]);
+    assert(p.parents[2] == 0);
+    assert(!p.call_residual);
+}
+
+fn main() i32 {
+    lower_numbered_edge();
+    equal_forward_join();
+    different_forward_join();
+    directed_cycle();
+    constant_switch_edge();
+    origin_join();
+    equal_origin_join();
+    address_and_null_join();
+    symbolic_value_join();
+    duplicate_switch_target();
+    unreachable_cycle();
+    irreducible_cycle();
+    self_loop_and_exit();
+    nested_cycles();
+    lower_numbered_diamond_equal();
+    lower_numbered_diamond_different();
+    lower_numbered_calls_sort();
+    merge_publication_is_conservative();
+    cycle_publication_is_conservative();
+    definite_read_before_loop();
+    unreachable_read_after_loop();
+    deterministic_repetition();
+    reverse_number_chain();
+    unknown_origin_propagates();
+    pruned_unreachable_cycle();
+    println("summary control flow ok");
+    return 0;
+}
