@@ -85,12 +85,12 @@ documentation) keeps its individual commits.
 GitHub PR CI supplies the merge gate (2026-10-01, T-306). Local final gates are not required.
 Push the branch and open a PR against `main`. Require green PR `ci-status` and the merge queue.
 Never merge or push `main` locally. Permit no ruleset bypass actors; never bypass the ruleset.
-Never use `--admin`. Queue the PR with `tools/queue_pr.sh <number> <reviewed-head-sha>`. It runs
-GraphQL `enqueuePullRequest` with `expectedHeadOid` set to that head. `gh pr merge` cannot queue: it
-enables auto-merge, which the repository disables. The ruleset's merge method decides the merge. The
-queue tests `main` plus the queued PRs as one commit, merges them in order and moves `main` to that
-commit, so `main` gets no push run. A nightly run of the full matrix tests `main`. Queue no PR while
-the latest `ci-status` on `main` (the queue run of its head or the nightly run) is red.
+Never use `--admin`. First run `gh pr merge <number> --rebase --match-head-commit
+<reviewed-head-sha>`. If it exits 1 because this repository disables auto-merge, run
+`tools/queue_pr.sh <number> <reviewed-head-sha>`. This fallback calls GraphQL
+`enqueuePullRequest` with `expectedHeadOid` set to that head. The ruleset selects rebase merge.
+The queue tests `main` plus queued PRs as one commit and merges them in order, so `main` gets no
+push run. A nightly full matrix tests `main`. Queue no PR while its latest `ci-status` is red.
 
 ### Tickets
 - Keep one markdown ticket per deliverable in `.tickets/` in the main checkout, not a worktree.
@@ -167,8 +167,8 @@ the latest `ci-status` on `main` (the queue run of its head or the nightly run) 
 
       codex review --strict-config -c 'sandbox_mode="read-only"' \
         -c 'model_reasoning_effort="high"' \
-        -c 'developer_instructions="Read and follow .codex/agents/rev-std.toml."' --base main
-  Add the ticket's absolute path to `developer_instructions`. Use the selected tier and effort.
+        -c 'developer_instructions="Read and follow .codex/agents/rev-std.toml."' --base origin/main
+  Fetch `origin/main` before review. Add the ticket's absolute path to `developer_instructions`.
   Never pass `[PROMPT]` with `--base`. Keep the ticket in `inreview/` through fixes. Relay findings.
   A source fix needs new PR CI. Review again if behavior changes.
 - Reviewer: follows its TOML. Check tests, citations, commits, scope, xfail, and the ticket.
