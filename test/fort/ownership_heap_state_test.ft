@@ -803,10 +803,15 @@ fn joins() void {
     ownership_heap.state mut ended = ownership_heap.clone(&a);
     defer ownership_heap.free_state(&ended);
     ended.ended[5] = 1;
+    ended.escaped[5] = true;
     ownership_heap.state mut maybe = ownership_heap.state{};
     defer ownership_heap.free_state(&maybe);
     assert(ownership_heap.join(ctx, &a, &ended, false, &maybe));
     assert(maybe.ended[5] == 2);
+    assert(maybe.escaped[5] && !a.escaped[5]);
+    ownership_heap.atom mut addressed = a.atoms[0];
+    addressed.address_escaped = true;
+    assert(ownership_heap.join_atom(a.atoms[0], addressed).address_escaped);
     // A mixed join maps the retained cell target into the joined atom numbering.
     ownership_heap.state mut left = ownership_heap.clone(&a);
     defer ownership_heap.free_state(&left);
@@ -838,6 +843,23 @@ fn joins() void {
     assert(mixed_value.retained.base == ownership_heap.base_kind.cell);
     assert(mixed_value.retained.id == mixed_target && mixed_target != mixed_extra);
     assert(right_extra != right_target);
+}
+
+// The summary mask names parameters 1 through 63. The high bit covers later parameters.
+fn escape_bits() void {
+    ownership_heap.context mut c = ownership_heap.context{};
+    ownership_heap.note_param_escape(&c, 1);
+    ownership_heap.note_param_escape(&c, 64);
+    ownership_heap.summary mut s = ownership_heap.summary{};
+    s.address_escapes = c.address_escapes;
+    s.escapes_high = c.escapes_high;
+    assert(s.address_escapes == 2 && s.escapes_high);
+    assert(ownership_heap.escapes_param(&s, 1));
+    assert(!ownership_heap.escapes_param(&s, 2));
+    assert(ownership_heap.escapes_param(&s, 64));
+    ownership_heap.context mut any = ownership_heap.context{};
+    ownership_heap.note_param_escape(&any, ownership_heap.ANY_PARAM);
+    assert(any.address_escapes == ownership_heap.U64_MAX && any.escapes_high);
 }
 
 fn widening() void {
@@ -1925,6 +1947,7 @@ fn main() i32 {
     lost_requirements();
     retyped();
     escapes();
+    escape_bits();
     branch_forms();
     println("heap state ok");
     return 0;

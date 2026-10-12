@@ -403,7 +403,7 @@ string[60] SCALARS = {
 };
 
 // The frame of a call.
-string[270] FRAME = {
+string[295] FRAME = {
     "struct pair { i32 mut* a; i32 b; }",
     "struct node { i32 v; node mut* own next; }",
     "struct peer { i32 v; i32 mut* p; }",
@@ -432,6 +432,31 @@ string[270] FRAME = {
     "fn clear_view() void { (*saved_view)->p = null; }",
     "fn clear_through(holder h) void { *h.pp = null; }",
     "fn clear_arg(peer mut* p) void { p->p = null; }",
+    "fn copy_holder(node_holder mut* dst, node_holder* src) void { dst->pp = src->pp; }",
+    "fn copy_holder_wrap(node_holder mut* dst, node_holder* src) void { copy_holder(dst, src); }",
+    "fn escaped_then_fill() void {",
+    "    node mut* own mut m = null;",
+    "    node_holder mut src = node_holder{};",
+    "    node_holder mut dst = node_holder{};",
+    "    src.pp = &m;",
+    "    copy_holder(&dst, &src);",
+    "    fill(&m);",
+    "    del(m);",
+    "}",
+    "fn retain_and_fill(node mut* own mut* out, node_holder mut* h) void {",
+    "    h->pp = out;",
+    "    fill(out);",
+    "}",
+    "fn wrap_fill(node mut* own mut out, node_holder mut* h) void {",
+    "    retain_and_fill(&out, h); del(out); }",
+    "fn fill_nonempty() void {",
+    "    node mut* own value = new(node); node_holder mut h = node_holder{};",
+    "    wrap_fill(move(value), &h); }",
+    "fn keep_holder(holder h) void { saved = h.pp; }",
+    "fn keep_holder_wrap(holder h) void { keep_holder(h); }",
+    "fn pass_unknown(i32 mut* p, fn (i32 mut*) void f) void { f(p); }",
+    "extern fn foreign_write(i32 mut* p) void;",
+    "fn pass_foreign(i32 mut* p) void { foreign_write(p); }",
     "i32 mut* mut* mut* mut saved_rr = null;",
     "fn stash_rr(i32 mut* mut* mut* pp) void { saved_rr = pp; }",
     "fn clear_rr() void { **saved_rr = null; }",
@@ -1419,12 +1444,15 @@ fn frame() void {
     println("address-taken frame");
     ownership_heap_env.closure mut c = ownership_heap_env.closure{};
     defer ownership_heap_env.close(&c);
-    string[45] names = {"stash_pp", "clear_pp", "stash_pair", "clear_pair", "keep_node",
+    string[55] names = {"stash_pp", "clear_pp", "stash_pair", "clear_pair", "keep_node",
         "take_node", "keep_peer", "clear_peer", "nothing", "touch", "fill", "fill_node",
         "stash_view", "clear_view", "clear_through", "stash_rr", "clear_rr", "addr_of",
         "pointer_local", "pointer_field", "owner_root", "owner_cell", "owner_link", "owner_empty",
         "view_cell", "struct_by_value", "returned_address", "unnamed_pointer", "through_pointer",
-        "kept_owner", "kept_leak", "clear_arg", "retained_view", "retained_cleared_view",
+        "kept_owner", "kept_leak", "clear_arg", "copy_holder", "copy_holder_wrap",
+        "escaped_then_fill", "retain_and_fill", "wrap_fill", "fill_nonempty",
+        "keep_holder", "keep_holder_wrap", "pass_unknown", "pass_foreign",
+        "retained_view", "retained_cleared_view",
         "retained_owner", "retained_view_write", "retained_join", "retained_residual",
         "retained_remap", "retained_param", "retained_param_caller", "retained_param_mixed",
         "retained_param_mixed_caller", "retained_param_choice", "retained_param_choice_caller"};
@@ -1440,6 +1468,8 @@ fn frame() void {
     assert(loses(&c, "pointer_field", "extra"));
     // A callee releases the owner through the kept address: its allocation root is assumed.
     assert(!ownership_heap_env.proved(&c, "owner_root"));
+    assert(ownership_heap_env.summary(&c, "owner_root")->proof.terminal.reason ==
+        ownership_api.incomplete_reason.unknown_effect);
     assert(loses(&c, "owner_root", "extra"));
     // A callee with a complete proof clears a field of the cell that the owner holds.
     assert(ownership_heap_env.proved(&c, "clear_peer"));
@@ -1450,6 +1480,8 @@ fn frame() void {
     assert(loses(&c, "owner_link", "extra"));
     // A callee fills an empty owner through the kept address: its null is assumed.
     assert(!ownership_heap_env.proved(&c, "owner_empty"));
+    assert(ownership_heap_env.summary(&c, "owner_empty")->proof.terminal.reason ==
+        ownership_api.incomplete_reason.unknown_effect);
     assert(loses(&c, "owner_empty", "extra"));
     // A pointer local views the cell, and the callee clears a field of the cell through the kept
     // address of the pointer.
@@ -1476,6 +1508,29 @@ fn frame() void {
     assert(ownership_heap_env.proved(&c, "kept_owner"));
     assert(!ownership_heap_env.proved(&c, "kept_leak"));
     assert(loses(&c, "kept_leak", "m"));
+    // A mutable address stored through caller storage sets its parameter bit. A complete wrapper
+    // propagates that bit through the matching argument.
+    assert(ownership_heap_env.proved(&c, "copy_holder"));
+    assert(ownership_heap_env.proved(&c, "copy_holder_wrap"));
+    assert((ownership_heap_env.summary(&c, "copy_holder")->address_escapes & 4) == 4);
+    assert((ownership_heap_env.summary(&c, "copy_holder_wrap")->address_escapes & 4) == 4);
+    // The requirement uses the pre-frame placeholder. The fill effect uses its replacement.
+    // The one incomplete requirement remains. The caller-storage effect creates no second event.
+    assert(ownership_heap_env.unproved(&c, "escaped_then_fill",
+        ownership_api.incomplete_reason.unknown_effect));
+    assert(ownership_heap_env.events(&c, "escaped_then_fill") == 1);
+    assert(ownership_heap_env.first_text(&c, "escaped_then_fill") ==
+        "an empty owner that this call requires");
+    // The frame cannot erase the empty-input requirement that `retain_and_fill` passes through
+    // `wrap_fill`. A caller that supplies a nonempty owner must not prove.
+    assert(ownership_heap_env.summary(&c, "wrap_fill")->required_some.len == 1);
+    assert(!ownership_heap_env.proved(&c, "fill_nonempty"));
+    assert((ownership_heap_env.summary(&c, "keep_node")->address_escapes & 2) == 2);
+    assert((ownership_heap_env.summary(&c, "keep_holder")->address_escapes & 2) == 2);
+    assert((ownership_heap_env.summary(&c, "keep_holder_wrap")->address_escapes & 2) == 2);
+    assert((ownership_heap_env.summary(&c, "pass_unknown")->address_escapes & 2) == 2);
+    assert(ownership_heap_env.summary(&c, "pass_foreign")->address_escapes == 0);
+    assert(ownership_heap_env.summary(&c, "clear_arg")->address_escapes == 0);
     // The first call can retain the cell that q views. The second call reaches that cell after
     // the first frame clears q, so the possible clear of m->p keeps the leak path.
     assert(ownership_heap_env.proved(&c, "clear_arg"));

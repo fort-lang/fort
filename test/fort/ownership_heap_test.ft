@@ -199,7 +199,7 @@ fn unbounded_chain() void {
 // publication round repeats it (`spec/memory-model.md` 2.7, H04).
 fn recursive_cleanup() void {
     println("G4 recursive list cleanup");
-    string[13] text = {
+    string[27] text = {
         "struct node { node mut* own next; i32 v; }",
         "fn drop_list(node mut* own n) void { if (n == null) { return; }",
         "    drop_list(move(n->next)); del(n); }",
@@ -213,18 +213,47 @@ fn recursive_cleanup() void {
         "fn tail_first(node mut* own n) void { if (n == null) { return; }",
         "    node mut* own rest = move(n->next); del(n); tail_first(move(rest)); }",
         "fn use_tail_first() void { node mut* own a = new(node); tail_first(move(a)); }",
+        "struct cycle_node { cycle_node mut* own next; }",
+        "fn escape_seed(void mut* p, void mut* mut* out) void { *out = p; *out = null; }",
+        "fn escape_a(cycle_node mut* own n, void mut* p, void mut* mut* out) void {",
+        "    if (n == null) { *out = null; return; } escape_b(move(n->next), p, out);",
+        "    del(n); *out = null; }",
+        "fn escape_b(cycle_node mut* own n, void mut* p, void mut* mut* out) void {",
+        "    if (n == null) { *out = null; return; } escape_c(move(n->next), p, out);",
+        "    del(n); *out = null; }",
+        "fn escape_c(cycle_node mut* own n, void mut* p, void mut* mut* out) void {",
+        "    if (n == null) { *out = null; return; } escape_d(move(n->next), p, out);",
+        "    del(n); *out = null; }",
+        "fn escape_d(cycle_node mut* own n, void mut* p, void mut* mut* out) void {",
+        "    if (n == null) { escape_seed(p, out); return; }",
+        "    escape_a(move(n->next), p, out); del(n); escape_seed(p, out); }",
     };
-    string[7] names = {"drop_list", "drop_tree", "use_list", "use_tree", "tail_first",
-        "use_tail_first", "drop_list"};
+    string[11] names = {"drop_list", "drop_tree", "use_list", "use_tree", "tail_first",
+        "use_tail_first", "escape_seed", "escape_a", "escape_b", "escape_c", "escape_d"};
     ownership_heap_env.closure mut c = ownership_heap_env.closure{};
     defer ownership_heap_env.close(&c);
-    ownership_heap_env.run(&c, text[..], names[0..6]);
+    ownership_heap_env.run(&c, text[..], names[..]);
     assert(ownership_heap_env.proved(&c, "drop_list"));
     assert(ownership_heap_env.proved(&c, "drop_tree"));
     assert(ownership_heap_env.proved(&c, "tail_first"));
     assert(ownership_heap_env.proved(&c, "use_list"));
     assert(ownership_heap_env.proved(&c, "use_tree"));
     assert(ownership_heap_env.proved(&c, "use_tail_first"));
+    // The address escape starts in the fourth member. The fixed point passes it through the three
+    // earlier members of the cycle. Each member restores the same exit state.
+    assert(ownership_heap_env.proved(&c, "escape_seed"));
+    assert(ownership_heap_env.proved(&c, "escape_d"));
+    assert(ownership_heap_env.proved(&c, "escape_c"));
+    assert(ownership_heap_env.proved(&c, "escape_b"));
+    assert(ownership_heap_env.proved(&c, "escape_a"));
+    assert((ownership_heap_env.summary(&c, "escape_d")->address_escapes & 4) == 4);
+    assert((ownership_heap_env.summary(&c, "escape_c")->address_escapes & 4) == 4);
+    assert((ownership_heap_env.summary(&c, "escape_b")->address_escapes & 4) == 4);
+    assert((ownership_heap_env.summary(&c, "escape_a")->address_escapes & 4) == 4);
+    assert(ownership_heap_env.rounds(&c, "escape_a") == 5);
+    assert(ownership_heap_env.rounds(&c, "escape_b") == 5);
+    assert(ownership_heap_env.rounds(&c, "escape_c") == 5);
+    assert(ownership_heap_env.rounds(&c, "escape_d") == 5);
     // Each recursive body needs rounds before the fixed point: bottom, then the base case, then
     // a round that changes nothing.
     assert(ownership_heap_env.rounds(&c, "drop_list") == 3);
