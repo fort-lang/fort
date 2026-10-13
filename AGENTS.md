@@ -135,7 +135,7 @@ push run. A nightly full matrix tests `main`. Queue no PR while its latest `ci-s
 
 ### Agents
 - The coordinator is the main Codex session. Seven TOML roles live in `.codex/agents/` (T-139).
-  Each role inherits the coordinator model and sets effort. Pass its text and effort to a worker.
+  Each role inherits the coordinator model and sets effort. Pass its text, model, and effort.
   Use named roles only after loading is proved. Restart Codex after a role changes.
 - Implementors use full tools: `impl-mech` (medium) for work the specification
   pins completely, transcription and coverage; `impl-std` (high) for ordinary tickets that need
@@ -165,12 +165,12 @@ push run. A nightly full matrix tests `main`. Queue no PR while its latest `ci-s
 - Coordinator: pushes the branch and opens a PR. Start independent read-only review on its head SHA.
   Move the ticket to `inreview/`. PR CI and review can run concurrently. For `rev-std`, use:
 
-      codex review --strict-config -c 'sandbox_mode="read-only"' \
+      codex review --strict-config -c 'model="<coordinator-model>"' -c 'sandbox_mode="read-only"' \
         -c 'model_reasoning_effort="high"' \
         -c 'developer_instructions="Read and follow .codex/agents/rev-std.toml."' --base origin/main
   Fetch `origin/main` before review. Add the ticket's absolute path to `developer_instructions`.
-  Never pass `[PROMPT]` with `--base`. Keep the ticket in `inreview/` through fixes. Relay findings.
-  A source fix needs new PR CI. Review again if behavior changes.
+  Set `<coordinator-model>` to the active model. Never pass `[PROMPT]` with `--base`.
+  Keep the ticket in `inreview/`. Relay findings. Run CI for source fixes; review behavior changes.
 - Reviewer: follows its TOML. Check tests, citations, commits, scope, xfail, and the ticket.
   Pending PR CI remains pending. Never edit or merge. Route learning below.
 - Coordinator: send a finding class that 2 review rounds find to the user as a rule question, not
