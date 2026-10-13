@@ -1383,6 +1383,21 @@ fn caller_storage(ownership_summary_body.body_program mut* program,
     return false;
 }
 
+// A store into `root` replaces an earlier store at `place` when `root` is its prefix.
+fn store_covers(ownership_summary_body.body_program mut* program,
+    ownership_api.place_path root, ownership_api.place_path place) bool {
+    if (root.residual || place.residual ||
+        !ownership_summary_model.same(root.root, place.root) ||
+        place.projections.len < root.projections.len) { return false; }
+    u64 mut i = 0;
+    while (i < root.projections.len) {
+        if (!ownership_summary_body.work(program, 1) || !ownership_state.same_projection(
+            root.projections[i], place.projections[i])) { return false; }
+        i += 1;
+    }
+    return i == root.projections.len;
+}
+
 // The last borrow store into each caller storage path of a normal return retains its source
 // after the return. The summary keeps it as a retained relation. The source must still be
 // live at the return, after deferred effects (D17.14). A later store at that path, such as a
@@ -1405,7 +1420,7 @@ fn retained_stores(ownership_summary_body.body_program mut* program, exit_snapsh
                 ownership_summary_model.effect_node next = program->effects[next_at];
                 later = (next.payload == ownership_summary_model.payload_kind.copy ||
                     next.payload == ownership_summary_model.payload_kind.replacement) &&
-                    ownership_state.same_place(next.effect.place, node.effect.place);
+                    store_covers(program, next.effect.place, node.effect.place);
                 j += 1;
             }
             ownership_api.entity_id source = node.payload ==

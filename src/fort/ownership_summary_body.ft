@@ -998,8 +998,11 @@ struct selected_storage {
     i64 bytes;
     bool indirect;
     bool caller;
+    bool loaded;
     bool proved;
 }
+
+enum output_action { release_value, move_value, store_value, aggregate_store }
 
 fn select_storage(body_input* in, body_program mut* out, fir.place input_place)
     selected_storage {
@@ -1026,10 +1029,14 @@ fn select_storage(body_input* in, body_program mut* out, fir.place input_place)
             while (r < out->roots_len) {
                 if (!work(out, 1)) { return selected; }
                 ownership_summary_model.symbolic_root root_at = out->roots[r];
-                if (root_at.kind == ownership_summary_model.root_kind.caller_source &&
+                if ((root_at.kind == ownership_summary_model.root_kind.caller_source ||
+                    root_at.kind == ownership_summary_model.root_kind.loaded_source) &&
                     ownership_summary_model.same(root_at.source, selected.source)) {
                     selected.path.root = root_at.slot;
-                    selected.caller = true;
+                    selected.caller = root_at.kind ==
+                        ownership_summary_model.root_kind.caller_source;
+                    selected.loaded = root_at.kind ==
+                        ownership_summary_model.root_kind.loaded_source;
                     bool mut captured = false;
                     u64 mut e = out->effects_len;
                     while (e > 0) {
@@ -1067,11 +1074,13 @@ fn select_storage(body_input* in, body_program mut* out, fir.place input_place)
             }
             ty = ty->elem;
         } else if (part.kind == fir.proj_kind.pj_deref && i > 0 && ty != null &&
-            ty->kind == types.type_kind.k_ptr && ty->elem != null && selected.caller) {
+            ty->kind == types.type_kind.k_ptr && ty->elem != null &&
+            (selected.caller || selected.loaded)) {
             selected.path.projections = parts[..count];
             selected.path = load_reference(in, out, selected.path, selected.source, ty,
                 selected.offset);
             if (!ownership_api.successful(out->proof)) { return selected; }
+            selected.loaded = true;
             selected.source = out->roots[out->roots_len - 1].source;
             selected.offset = 0;
             count = 0;
@@ -1138,17 +1147,30 @@ fn select_storage(body_input* in, body_program mut* out, fir.place input_place)
 }
 
 fn output_ready(body_input* in, body_program mut* out, selected_storage mut* selected,
-    bool release_old) bool {
-    if (!selected->proved || !selected->caller || !selected->indirect ||
-        !reference(selected->ty) || !selected->ty->is_own || selected->ty->elem == null ||
-        (!release_old && (fir.type_owning(selected->ty->elem) ||
-            fir.type_aggregate(selected->ty->elem)))) {
+    output_action action) bool {
+    bool output = selected->proved && selected->caller && !selected->loaded &&
+        selected->indirect;
+    bool owner = reference(selected->ty) && selected->ty->is_own &&
+        selected->ty->elem != null;
+    bool scalar = !reference(selected->ty) && !fir.type_aggregate(selected->ty);
+    // An indirect release can consume one selected old owner.
+    bool release = output && action == output_action.release_value && owner;
+    // An indirect move can transfer one selected old owner.
+    bool moving = output && action == output_action.move_value && owner;
+    // A projected store can replace one scalar, owner, or aggregate place.
+    bool store = selected->proved && (action == output_action.store_value ||
+        action == output_action.aggregate_store) &&
+        (scalar || (output && (owner || fir.type_aggregate(selected->ty))));
+    if (!release && !moving && !store) {
         reject(out, ownership_api.incomplete_reason.unknown_effect);
         return false;
     }
     requirement(in, out, selected->source, selected->path, selected->offset + selected->bytes,
         ownership_summary_model.requirement_kind.extent, types.type_alignof(selected->ty));
     selected->flow_path = selected->path;
+    if (store && !owner && !fir.type_owning(selected->ty)) {
+        return ownership_api.successful(out->proof);
+    }
     if (selected->path.projections.len != 0) {
         bool mut found = false;
         u64 mut e = 0;
@@ -1171,9 +1193,13 @@ fn output_ready(body_input* in, body_program mut* out, selected_storage mut* sel
     if (!work(out, out->entry.contents_len)) { return false; }
     u64 old = ownership_transfer.contents_index(&out->entry, selected->flow_path);
     if (old == ownership_api.U64_MAX) {
-        requirement(in, out, selected->source, selected->path, 0,
-            release_old ? ownership_summary_model.requirement_kind.valid_owner :
-                ownership_summary_model.requirement_kind.empty_output, 1);
+        // Aggregate handling cannot publish a destination check before right-side effects.
+        if (action != output_action.aggregate_store) {
+            requirement(in, out, selected->source, selected->path, 0,
+                action != output_action.store_value ?
+                    ownership_summary_model.requirement_kind.valid_owner :
+                    ownership_summary_model.requirement_kind.empty_output, 1);
+        }
         ownership_state.append_contents(&out->entry, empty(selected->flow_path, true));
     }
     return ownership_api.successful(out->proof);
@@ -1222,16 +1248,35 @@ fn retain(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
 fn assign_output(body_input* in, body_program mut* out, fir.statement* stmt,
     u32 block, u32 gap) void {
     selected_storage mut selected = select_storage(in, out, stmt->place);
-    if (selected.proved && selected.indirect && !reference(selected.ty) &&
+    if (selected.proved && !reference(selected.ty) &&
         !fir.type_aggregate(selected.ty)) {
-        if (selected.caller) {
-            requirement(in, out, selected.source, selected.path, selected.offset + selected.bytes,
-                ownership_summary_model.requirement_kind.extent, types.type_alignof(selected.ty));
-        } else if (!local_read(in, out, selected.source, selected.offset + selected.bytes,
-            types.type_alignof(selected.ty), stmt->loc)) { return; }
+        if (!output_ready(in, out, &selected, output_action.store_value)) { return; }
+        u32 mut operand = 0;
+        while (operand < stmt->value.ops_len) {
+            fir.operand input_operand = fir.rvalue_operand(in->function.body, stmt->value,
+                operand);
+            bool reference_use = input_operand.kind != fir.operand_kind.ok_const &&
+                direct(input_operand.place) && reference(fir.local_at(in->function.body,
+                    input_operand.place.local)->ty);
+            if (input_operand.kind != fir.operand_kind.ok_const &&
+                (!direct(input_operand.place) || reference_use) &&
+                !add_read(in, out, input_operand.place, block, gap, operand, stmt->loc,
+                    stmt->exit_loc, stmt->stmt)) { return; }
+            operand += 1;
+        }
+        if (!selected.indirect) {
+            local_read(in, out, selected.source, selected.offset + selected.bytes,
+                types.type_alignof(selected.ty), stmt->loc);
+            return;
+        }
+        if (!selected.caller && !selected.loaded &&
+            !local_read(in, out, selected.source, selected.offset + selected.bytes,
+                types.type_alignof(selected.ty), stmt->loc)) { return; }
+        ownership_api.place_path read = slot(in, stmt->place.local);
         ownership_transfer.request req = ownership_transfer.request{
-            .kind = ownership_transfer.action.inspect, .source = slot(in, stmt->place.local),
-            .destination = slot(in, stmt->place.local), .source_key = selected.source};
+            .kind = selected.loaded ? ownership_transfer.action.use :
+                ownership_transfer.action.inspect,
+            .source = read, .destination = read, .source_key = selected.source};
         emit(in, out, req, block, gap, 0, ownership_summary_model.payload_kind.read,
             stmt->loc, stmt->exit_loc, stmt->stmt, req.destination);
         return;
@@ -1241,7 +1286,20 @@ fn assign_output(body_input* in, body_program mut* out, fir.statement* stmt,
         retain(in, out, stmt, block, gap, &selected);
         return;
     }
-    if (!output_ready(in, out, &selected, false)) { return; }
+    bool aggregate_effect = fir.type_aggregate(selected.ty) &&
+        (stmt->value.kind != fir.rvalue_kind.rv_use || stmt->value.ops_len != 1 ||
+        (fir.rvalue_operand(in->function.body, stmt->value, 0).kind !=
+            fir.operand_kind.ok_const) ||
+        (fir.rvalue_operand(in->function.body, stmt->value, 0).value.kind !=
+            fir.const_kind.ck_zero &&
+        fir.rvalue_operand(in->function.body, stmt->value, 0).value.kind !=
+            fir.const_kind.ck_null));
+    if (!output_ready(in, out, &selected, aggregate_effect ?
+        output_action.aggregate_store : output_action.store_value)) { return; }
+    if (aggregate_effect) {
+        aggregate_value(in, out, stmt, block, gap);
+        return;
+    }
     if (stmt->value.kind != fir.rvalue_kind.rv_use || stmt->value.ops_len != 1) {
         reject(out, ownership_api.incomplete_reason.unknown_effect);
         return;
@@ -1260,7 +1318,7 @@ fn assign_output(body_input* in, body_program mut* out, fir.statement* stmt,
         payload = ownership_summary_model.payload_kind.move;
     } else if (input_operand.kind == fir.operand_kind.ok_move) {
         selected_storage mut from = select_storage(in, out, input_operand.place);
-        if (!output_ready(in, out, &from, true)) { return; }
+        if (!output_ready(in, out, &from, output_action.move_value)) { return; }
         req.kind = ownership_transfer.action.move_owner;
         req.source = from.path;
         req.source_key = from.source;
@@ -1842,7 +1900,7 @@ fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
                 if (reference(dst_ty) && dst_ty->is_own &&
                     input_operand.kind == fir.operand_kind.ok_move) {
                     selected_storage mut from = select_storage(in, out, input_operand.place);
-                    if (!output_ready(in, out, &from, true)) { return; }
+                    if (!output_ready(in, out, &from, output_action.move_value)) { return; }
                     load_reference(in, out, from.path, from.source, from.ty, from.offset);
                     if (!ownership_api.successful(out->proof)) { return; }
                     req.kind = ownership_transfer.action.move_owner;
@@ -2556,7 +2614,9 @@ fn extract(body_input* in) body_program {
                     stmt->loc, stmt->exit_loc, stmt->stmt, req.destination);
             } else if (stmt->kind == fir.stmt_kind.st_del) {
                 selected_storage mut selected = select_storage(in, &out, stmt->place);
-                if (!output_ready(in, &out, &selected, true)) { return out; }
+                if (!output_ready(in, &out, &selected, output_action.release_value)) {
+                    return out;
+                }
                 ownership_transfer.request req = ownership_transfer.request{
                     .kind = ownership_transfer.action.release, .source = selected.path,
                     .destination = selected.path, .source_key = selected.source,

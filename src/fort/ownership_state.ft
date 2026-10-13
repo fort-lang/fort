@@ -475,6 +475,7 @@ struct region_candidate {
     ownership_api.graph_node@ nodes;
     ownership_api.graph_edge@ edges;
     ownership_api.place_path@ removed;
+    bool remove_descendants;
 }
 struct region_measurement { ownership_api.proof_status proof; u64 amount; }
 struct region_identity {
@@ -633,21 +634,23 @@ fn region_range(region_counter mut* paid, ownership_api.region range, bool repre
 }
 
 fn region_removed(region_counter mut* paid, ownership_api.place_path place,
-    ownership_api.place_path@ removed, bool mut* found) bool {
+    ownership_api.place_path@ removed, bool remove_descendants, bool mut* found) bool {
     *found = false;
     u64 mut i = 0;
     while (i < removed.len) {
         if (!region_spend(paid)) { return false; }
         ownership_api.place_path other = removed[i];
-        if (same_entity(place.root, other.root) && place.residual == other.residual &&
-            place.projections.len == other.projections.len) {
+        if (!place.residual && !other.residual && same_entity(place.root, other.root) &&
+            (remove_descendants ? place.projections.len >= other.projections.len :
+            place.projections.len == other.projections.len)) {
+            u64 length = remove_descendants ? other.projections.len : place.projections.len;
             u64 mut j = 0;
-            while (j < place.projections.len) {
+            while (j < length) {
                 if (!region_spend(paid)) { return false; }
                 if (!same_projection(place.projections[j], other.projections[j])) { break; }
                 j += 1;
             }
-            if (j == place.projections.len) { *found = true; return true; }
+            if (j == length) { *found = true; return true; }
         }
         i += 1;
     }
@@ -749,7 +752,8 @@ fn measure_regions(state* s, ownership_api.services* svc, region_candidate candi
     while (ok && i < s->contents_len) {
         bool mut removed = false;
         ok = region_spend(&paid) &&
-            region_removed(&paid, s->contents[i].place, candidate.removed, &removed);
+            region_removed(&paid, s->contents[i].place, candidate.removed,
+                candidate.remove_descendants, &removed);
         if (ok && !removed) { ok = region_contents(&paid, s->contents[i]); }
         i += 1;
     }
@@ -833,6 +837,7 @@ struct guard_candidate {
     ownership_api.place_path@ places;
     ownership_api.place_path@ removed;
     ownership_api.correlation@ correlations;
+    bool remove_descendants;
 }
 struct shape_candidate {
     ownership_api.graph_edge@ edges;
@@ -893,7 +898,7 @@ fn guard_fact_at(state* s, guard_candidate* c, u64 index,
     ownership_api.contents_fact mut* out) bool {
     if (index < s->contents_len) {
         *out = s->contents[index];
-        return !selected(out->place, c->removed);
+        return !selected(out->place, c->removed, c->remove_descendants);
     }
     u64 added = index - s->contents_len;
     if (c->places.len == 0) { *out = c->contents[added]; return true; }
@@ -2016,19 +2021,32 @@ fn has_residual(ownership_api.place_path p) bool {
     return false;
 }
 
-fn selected(ownership_api.place_path p, ownership_api.place_path@ aliases) bool {
+// A root store replaces its child contents. A projected store keeps sibling contents.
+fn selected(ownership_api.place_path p, ownership_api.place_path@ aliases,
+    bool remove_descendants) bool {
+    if (p.residual) { return false; }
     u64 mut i = 0;
     while (i < aliases.len) {
-        if (same_place(p, aliases[i])) { return true; }
+        ownership_api.place_path root = aliases[i];
+        if (!root.residual && same_entity(p.root, root.root) &&
+            (remove_descendants ? p.projections.len >= root.projections.len :
+            p.projections.len == root.projections.len)) {
+            u64 length = remove_descendants ? root.projections.len : p.projections.len;
+            u64 mut projection = 0;
+            while (projection < length && same_projection(
+                p.projections[projection], root.projections[projection])) { projection += 1; }
+            if (projection == length) { return true; }
+        }
         i += 1;
     }
     return false;
 }
 
 // The caller proves that all aliases name one concrete destination.
-fn strong_contents(state mut* s, ownership_api.services* svc,
+fn strong_update(state mut* s, ownership_api.services* svc,
     ownership_api.contents_fact fact, ownership_api.place_path@ aliases, bool unique,
-    ownership_api.operation_position op, ownership_api.source_position at)
+    bool remove_descendants, ownership_api.operation_position op,
+    ownership_api.source_position at)
     ownership_api.mutation_result {
     if (!unique || aliases.len == 0) { return bad_selection(s, svc, op, at); }
     u64 mut i = 0;
@@ -2057,14 +2075,14 @@ fn strong_contents(state mut* s, ownership_api.services* svc,
     content_candidate mut content = content_candidate{.count_regions = true,
         .count_guards = true};
     content.regions = region_candidate{.contents = added[..], .copies = aliases.len,
-        .removed = aliases};
+        .removed = aliases, .remove_descendants = remove_descendants};
     content.guards = guard_candidate{.contents = added[..], .places = aliases,
-        .removed = aliases};
+        .removed = aliases, .remove_descendants = remove_descendants};
     ownership_api.mutation_result result = require_content(s, svc, content, counts, op, at);
     if (!result.applied) { return result; }
     i = 0;
     while (i < s->contents_len) {
-        if (selected(s->contents[i].place, aliases)) {
+        if (selected(s->contents[i].place, aliases, remove_descendants)) {
             u64 mut j = i + 1;
             while (j < s->contents_len) { s->contents[j - 1] = s->contents[j]; j += 1; }
             s->contents_len -= 1;
@@ -2078,6 +2096,22 @@ fn strong_contents(state mut* s, ownership_api.services* svc,
         i += 1;
     }
     return result;
+}
+
+// A whole store replaces each selected place and its descendants.
+fn strong_contents(state mut* s, ownership_api.services* svc,
+    ownership_api.contents_fact fact, ownership_api.place_path@ aliases, bool unique,
+    ownership_api.operation_position op, ownership_api.source_position at)
+    ownership_api.mutation_result {
+    return strong_update(s, svc, fact, aliases, unique, true, op, at);
+}
+
+// Aggregate reconstruction updates one fact after it removes the old destination subtree.
+fn strong_fact(state mut* s, ownership_api.services* svc,
+    ownership_api.contents_fact fact, ownership_api.place_path@ aliases, bool unique,
+    ownership_api.operation_position op, ownership_api.source_position at)
+    ownership_api.mutation_result {
+    return strong_update(s, svc, fact, aliases, unique, false, op, at);
 }
 
 // Each selected retains its old contents and a guarded new alternative.

@@ -1,0 +1,371 @@
+//! run
+//! flags: -I ../../src/fort -I support
+/// Checks indirect release, move, and store outputs in body summaries.
+import fir;
+import fir_verify;
+import ownership_api;
+import ownership_calls_env;
+import ownership_calls_fixtures;
+import ownership_flow;
+import ownership_state;
+import ownership_summary;
+import ownership_summary_body;
+import ownership_summary_model;
+import ownership_transfer;
+
+fn complete(string@ source) void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source);
+    defer ownership_calls_fixtures.close(&f);
+    assert(ownership_api.successful(f.summary.proof));
+}
+
+fn incomplete(string@ source) void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source);
+    defer ownership_calls_fixtures.close(&f);
+    assert(f.summary.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(f.summary.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+}
+
+fn release_output() void {
+    string[3] source = {
+        "struct bag { i32 mut* own head; }",
+        "fn callee(bag mut* p) void { del(p->head); }",
+        "fn caller(bag mut* p) void { callee(p); }",
+    };
+    complete(source[..]);
+}
+
+fn move_output() void {
+    string[4] source = {
+        "struct bag { i32 mut* own head; }",
+        "fn callee(bag mut* p) void { i32 mut* own q = move(p->head);",
+        "    del(q); }",
+        "fn caller(bag mut* p) void { callee(p); }",
+    };
+    complete(source[..]);
+}
+
+fn owner_chain_store() void {
+    string[5] source = {
+        "struct block { block mut* own next; }",
+        "struct state { block mut* own blocks; }",
+        "fn callee(state mut* s, block mut* own b) void {",
+        "    b->next = move(s->blocks); s->blocks = move(b); }",
+        "fn caller(state mut* s, block mut* own b) void { callee(s, move(b)); }",
+    };
+    complete(source[..]);
+}
+
+fn projected_scalar_store() void {
+    string[3] source = {
+        "struct number { u64 magnitude; bool negative; bool valid; }",
+        "fn callee(number mut value) number { value.negative = false; return value; }",
+        "fn caller(number value) number { return callee(value); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut body = ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&body);
+    // The scalar write advances before the aggregate result reaches its separate rule.
+    assert(body.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(body.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(body.proof.terminal.operation.operation == 1);
+    assert(body.requirements_len == 0 && body.effects_len == 0);
+}
+
+fn loaded_scalar_store() void {
+    string[4] scalar = {
+        "struct leaf { i32 value; }",
+        "struct holder { leaf mut* p; }",
+        "fn callee(holder mut* out) void { out->p->value = 1; }",
+        "fn caller(holder mut* out) void { callee(out); }",
+    };
+    complete(scalar[..]);
+}
+
+// The scalar store uses the current loaded pointer. An empty current pointer is invalid.
+fn loaded_scalar_current_pointer() void {
+    string[4] source = {
+        "struct leaf { i32 value; }",
+        "struct holder { leaf mut* own p; }",
+        "fn callee(holder mut* out) void { out->p->value = 1; }",
+        "fn caller(holder mut* out) void { callee(out); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut body = ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&body);
+    assert(ownership_api.successful(body.proof));
+    ownership_api.place_path current_local = ownership_summary_body.slot(&f.inputs[0], 1);
+    ownership_api.entity_id mut loaded = ownership_api.entity_id{};
+    u64 mut i = 0;
+    while (i < body.roots_len) {
+        if (body.roots[i].kind == ownership_summary_model.root_kind.loaded_source) {
+            assert(loaded.kind == ownership_api.entity_kind.none);
+            loaded = body.roots[i].slot;
+        }
+        i += 1;
+    }
+    assert(loaded.kind == ownership_api.entity_kind.slot);
+    assert(!ownership_summary_model.same(current_local.root, loaded));
+    u64 mut read = ownership_api.U64_MAX;
+    i = 0;
+    while (i < body.steps_len) {
+        ownership_flow.step current_step = body.steps[i];
+        if (current_step.kind == ownership_flow.step_kind.local_effect &&
+            current_step.local.kind == ownership_transfer.action.use &&
+            ownership_state.same_place(current_step.local.source, current_local)) {
+            assert(read == ownership_api.U64_MAX);
+            read = i;
+        }
+        i += 1;
+    }
+    assert(read != ownership_api.U64_MAX);
+    ownership_transfer.request req = body.steps[read].local;
+    assert(req.kind == ownership_transfer.action.use);
+    ownership_state.state mut current = ownership_state.empty();
+    defer ownership_state.free(&current);
+    ownership_state.append_contents(&current, ownership_summary_body.empty(req.source, true));
+    ownership_api.proof_status proof = ownership_transfer.apply(&current, &f.services.services,
+        &req);
+    assert(proof.failed && f.services.counts.last.kind == ownership_api.event_kind.invalid_use);
+}
+
+// A whole aggregate clear removes the retained relation of its covered pointer field.
+fn aggregate_clear_retained() void {
+    string[4] source = {
+        "struct holder { i32* p; }",
+        "fn callee(holder mut* out, i32* p) void { out->p = p; *out = holder{}; }",
+        "fn caller(holder mut* out, i32* p) void { callee(out, p); }",
+        "",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(ownership_api.successful(f.summary.proof));
+    u64 mut child_store = 0;
+    u64 mut root_clear = 0;
+    u64 mut i = 0;
+    while (i < f.summary.effects.len) {
+        ownership_summary_model.effect_node effect = f.summary.effects[i];
+        if (effect.payload == ownership_summary_model.payload_kind.copy &&
+            effect.effect.place.projections.len == 1) { child_store += 1; }
+        if (effect.payload == ownership_summary_model.payload_kind.replacement &&
+            effect.effect.place.projections.len == 0) { root_clear += 1; }
+        i += 1;
+    }
+    assert(child_store == 1 && root_clear == 1 && f.summary.retained.len == 0);
+}
+
+// A root replacement counts its new region after it excludes one covered child region.
+fn aggregate_root_region_count() void {
+    ownership_calls_env.env mut e = ownership_calls_env.env{};
+    ownership_calls_env.open(&e);
+    defer ownership_calls_env.close(&e);
+    e.limits.r = 1;
+    ownership_calls_env.reset(&e);
+    ownership_state.state mut current = ownership_state.empty();
+    defer ownership_state.free(&current);
+    ownership_api.entity_id root = ownership_api.entity_id{
+        .kind = ownership_api.entity_kind.slot, .ordinal = 1};
+    ownership_api.place_path whole = ownership_api.place_path{.root = root};
+    ownership_api.projection[1] field = {ownership_api.projection{
+        .kind = ownership_api.projection_kind.field, .field = 0}};
+    ownership_api.place_path child = ownership_api.place_path{
+        .root = root, .projections = field[..]};
+    ownership_api.borrow_relation[1] old_borrow = {ownership_api.borrow_relation{
+        .containing = child, .source = ownership_api.entity_id{
+            .kind = ownership_api.entity_kind.source, .ordinal = 2},
+        .range = ownership_calls_env.region(2, 0, 4)}};
+    ownership_state.append_contents(&current, ownership_api.contents_fact{
+        .place = child, .kind = ownership_api.contents_kind.reference,
+        .borrows = old_borrow[..]});
+    ownership_api.borrow_relation[1] new_borrow = {ownership_api.borrow_relation{
+        .containing = whole, .source = ownership_api.entity_id{
+            .kind = ownership_api.entity_kind.source, .ordinal = 3},
+        .range = ownership_calls_env.region(3, 0, 4)}};
+    ownership_api.place_path[1] aliases = {whole};
+    ownership_api.mutation_result replaced = ownership_state.strong_contents(&current,
+        &e.services, ownership_api.contents_fact{.place = whole,
+            .kind = ownership_api.contents_kind.reference, .borrows = new_borrow[..]},
+        aliases[..], true,
+        ownership_api.operation_position{}, ownership_api.source_position{});
+    assert(replaced.applied && ownership_api.successful(replaced.proof));
+    assert(e.counts.meter.used.r == 1);
+    assert(current.contents_len == 1 && current.contents[0].borrows.len == 1);
+    assert(current.contents[0].borrows[0].range.key.ordinal == 3);
+    assert(ownership_state.same_place(current.contents[0].place, whole));
+}
+
+fn loaded_owner_store() void {
+    string[4] owner = {
+        "struct node { node mut* own next; }",
+        "struct holder { node mut* p; }",
+        "fn callee(holder mut* out) void { out->p->next = null; }",
+        "fn caller(holder mut* out) void { callee(out); }",
+    };
+    // The loaded reference does not name the caller place that holds `next`.
+    incomplete(owner[..]);
+}
+
+fn projected_scalar_source() void {
+    string[2] source = {
+        "fn callee(i32 mut* out, i32* input) void { *out = *input; }",
+        "fn caller(i32 mut* out, i32* input) void { callee(out, input); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(ownership_api.successful(f.summary.proof));
+    ownership_api.entity_id mut input_source = ownership_api.entity_id{};
+    u64 mut root = 0;
+    while (root < f.summary.roots.len) {
+        ownership_summary_model.symbolic_root row = f.summary.roots[root];
+        if (row.kind == ownership_summary_model.root_kind.caller_source && row.formal == 2) {
+            input_source = row.source;
+        }
+        root += 1;
+    }
+    assert(input_source.kind == ownership_api.entity_kind.source);
+    u64 mut input_requirements = 0;
+    u64 mut i = 0;
+    while (i < f.summary.requirements.len) {
+        if (f.summary.requirements[i].kind ==
+            ownership_summary_model.requirement_kind.extent &&
+            ownership_summary_model.same(f.summary.requirements[i].source,
+                input_source)) {
+            input_requirements += 1;
+        }
+        i += 1;
+    }
+    // The valid projected source supplies one checked right-side read.
+    assert(input_requirements == 1);
+    ownership_calls_fixtures.prepare(&f);
+    ownership_calls_fixtures.apply(&f, 1);
+    assert(ownership_api.successful(f.application.proof));
+
+    ownership_calls_fixtures.fixture mut bad = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&bad, source[..]);
+    defer ownership_calls_fixtures.close(&bad);
+    ownership_calls_fixtures.prepare(&bad);
+    ownership_api.contents_fact value = ownership_calls_fixtures.contents(&bad, 2);
+    assert(value.borrows.len == 1);
+    u64 source_at = ownership_state.source_index(&bad.caller, value.borrows[0].source);
+    assert(source_at != ownership_api.U64_MAX);
+    bad.caller.sources[source_at].validity = ownership_api.validity_kind.released;
+    ownership_calls_fixtures.apply(&bad, 2);
+    assert(bad.application.proof.failed && !bad.application.normal_continuation);
+    assert(bad.services.counts.last.kind == ownership_api.event_kind.caller_requirement);
+}
+
+fn direct_reference_source() void {
+    string[3] source = {
+        "fn callee(bool mut* out, i32 mut* own p) void { i32* value = p; del(p);",
+        "    *out = value != null; }",
+        "fn caller(bool mut* out, i32 mut* own p) void { callee(out, move(p)); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    fir.statement mut* mut comparison = null;
+    fir.statement mut* mut output = null;
+    u32 mut block = 0;
+    while (block < fir.block_count(&f.functions[0])) {
+        fir.block mut* current = fir.block_mut(&f.functions[0], block);
+        u32 mut gap = 0;
+        while (cast(gap, u64) < current->statements.len) {
+            fir.statement mut* stmt = &current->statements.items[cast(gap, u64)];
+            if (stmt->kind == fir.stmt_kind.st_assign &&
+                stmt->value.kind == fir.rvalue_kind.rv_ne) {
+                assert(comparison == null);
+                comparison = stmt;
+            } else if (stmt->kind == fir.stmt_kind.st_assign &&
+                fir.place_indirect(&f.functions[0], stmt->place)) {
+                assert(output == null);
+                output = stmt;
+            }
+            gap += 1;
+        }
+        block += 1;
+    }
+    assert(comparison != null && output != null);
+    // Put the comparison at the output to test its direct reference operand without a temporary.
+    fir.place temporary = comparison->place;
+    comparison->place = output->place;
+    output->place = temporary;
+    output->value = fir.rvalue_use(&f.functions[0],
+        fir.operand_const(fir.const_bool(false)));
+    fir_verify.violation mut verifier_failure = fir_verify.violation{};
+    assert(!fir_verify.find_violation(&f.functions[0], &f.checked.rt, &verifier_failure));
+    ownership_calls_fixtures.computation(&f, 0);
+    ownership_summary_model.summary mut inferred = ownership_summary.infer(&f.inputs[0]);
+    defer ownership_summary_model.free(&inferred);
+    assert(inferred.proof.failed && !ownership_api.successful(inferred.proof));
+    assert(f.services.counts.last.kind == ownership_api.event_kind.invalid_use);
+}
+
+fn aliased_aggregate_move() void {
+    string[4] source = {
+        "struct payload { i32 mut* own item; }",
+        "struct holder { payload p; }",
+        "fn callee(holder mut* a, holder mut* b) void { a->p = move(b->p); }",
+        "fn caller(holder mut* both) void { callee(both, both); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut body = ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&body);
+    assert(body.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(body.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    // The aggregate-value front stays incomplete. It publishes no pre-move output check.
+    assert(body.requirements_len == 2);
+    assert(body.requirements[0].kind == ownership_summary_model.requirement_kind.extent);
+    assert(body.requirements[1].kind == ownership_summary_model.requirement_kind.extent);
+}
+
+fn store_outputs() void {
+    string[3] empty_owner = {
+        "struct state { i32 mut* own p; }",
+        "fn callee(state mut* out) void { *out = state{}; }",
+        "fn caller(state mut* out) void { callee(out); }",
+    };
+    complete(empty_owner[..]);
+
+    string[3] aggregate = {
+        "struct report { i32 kind; i32 value; }",
+        "fn callee(report mut* out) void { *out = report{1, 2}; }",
+        "fn caller(report mut* out) void { callee(out); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, aggregate[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut body = ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&body);
+    // The output rule records extent and empty-output requirements before the aggregate value
+    // reaches its separate unsupported rule.
+    assert(body.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(body.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(body.requirements_len == 1 && body.effects_len == 0);
+}
+
+fn main() i32 {
+    release_output();
+    move_output();
+    owner_chain_store();
+    projected_scalar_store();
+    loaded_scalar_store();
+    loaded_scalar_current_pointer();
+    aggregate_clear_retained();
+    aggregate_root_region_count();
+    loaded_owner_store();
+    projected_scalar_source();
+    direct_reference_source();
+    aliased_aggregate_move();
+    store_outputs();
+    return 0;
+}
