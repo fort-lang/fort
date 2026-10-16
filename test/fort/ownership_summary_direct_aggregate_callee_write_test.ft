@@ -1,0 +1,271 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| callee write refreshes aggregate leaf ok
+//| callee null refreshes aggregate leaf ok
+//| local write supersedes callee leaf ok
+//| callee writes refresh two leaves ok
+//| later callee write refreshes aggregate leaf ok
+//| branch call refreshes its aggregate leaf ok
+//| read-only callee keeps private aggregate leaf ok
+//| canonical callee write published ok
+//| joined private leaves refresh ok
+/// Checks the current borrowed leaf after a proved direct callee write (D17.14-D17.15).
+import ownership_api;
+import ownership_call_bodies;
+import ownership_flow;
+import ownership_state;
+import ownership_summary;
+import ownership_summary_body;
+import ownership_summary_model;
+
+string[9] SOURCE = {
+    "struct view_box { i32* ptr; }",
+    "fn replace(view_box mut* out, i32* ptr) void { out->ptr = ptr; }",
+    "fn take(view_box value) void {}",
+    "fn caller(i32 mut* own old, i32* current) view_box {",
+    "    view_box mut value = view_box{old};",
+    "    del(old); replace(&value, current);",
+    "    take(value);",
+    "    value = view_box{current};",
+    "    return value; }",
+};
+
+string[9] NULL_SOURCE = {
+    "struct view_box { i32* ptr; }",
+    "fn clear(view_box mut* out) void { out->ptr = null; }",
+    "fn take(view_box value) void {}",
+    "fn caller(i32 mut* own old, i32* current) view_box {",
+    "    view_box mut value = view_box{old};",
+    "    del(old); clear(&value);",
+    "    take(value);",
+    "    value = view_box{current};",
+    "    return value; }",
+};
+
+string[10] LOCAL_SOURCE = {
+    "struct view_box { i32* ptr; }",
+    "fn replace(view_box mut* out, i32* ptr) void { out->ptr = ptr; }",
+    "fn take(view_box value) void {}",
+    "fn caller(i32 mut* own old, i32 mut* own current, i32* later) view_box {",
+    "    view_box mut value = view_box{old};",
+    "    del(old); replace(&value, current);",
+    "    value = view_box{later};",
+    "    del(current); take(value);",
+    "    value = view_box{later};",
+    "    return value; }",
+};
+
+string[10] TWO_LEAVES = {
+    "struct view_pair { i32* first; i32* second; }",
+    "fn replace(view_pair mut* out, i32* first, i32* second) void {",
+    "    out->first = first; out->second = second; }",
+    "fn take(view_pair value) void {}",
+    "fn caller(i32 mut* own old_first, i32 mut* own old_second,",
+    "    i32* first, i32* second) view_pair {",
+    "    view_pair mut value = view_pair{old_first, old_second};",
+    "    del(old_first); del(old_second); replace(&value, first, second);",
+    "    take(value); value = view_pair{first, second};",
+    "    return value; }",
+};
+
+string[10] TWO_CALLS = {
+    "struct view_box { i32* ptr; }",
+    "fn replace(view_box mut* out, i32* ptr) void { out->ptr = ptr; }",
+    "fn take(view_box value) void {}",
+    "fn caller(i32 mut* own old, i32 mut* own first, i32* current) view_box {",
+    "    view_box mut value = view_box{old};",
+    "    del(old); replace(&value, first);",
+    "    replace(&value, current); del(first);",
+    "    take(value);",
+    "    value = view_box{current};",
+    "    return value; }",
+};
+
+string[13] BRANCH_SOURCE = {
+    "struct view_box { i32* ptr; }",
+    "fn replace(view_box mut* out, i32* ptr) void { out->ptr = ptr; }",
+    "fn take(view_box value) void {}",
+    "fn caller(bool use_call, i32 mut* own old, i32* current, i32* other) view_box {",
+    "    view_box mut value = view_box{old};",
+    "    del(old);",
+    "    if (use_call) {",
+    "        replace(&value, current); take(value);",
+    "        value = view_box{current};",
+    "        return value;",
+    "    }",
+    "    value = view_box{other}; take(value);",
+    "    return value; }",
+};
+
+string[9] READ_ONLY_SOURCE = {
+    "struct view_box { i32* ptr; }",
+    "fn observe(view_box mut* out) void {}",
+    "fn take(view_box value) void {}",
+    "fn caller(i32 mut* own old, i32* current) view_box {",
+    "    view_box mut value = view_box{old};",
+    "    observe(&value); take(value);",
+    "    del(old);",
+    "    value = view_box{current};",
+    "    return value; }",
+};
+
+fn complete(ownership_summary_model.summary* model, u64 cases) void {
+    assert(ownership_api.successful(model->proof));
+    assert(!model->residual_effects && model->cases.len == cases);
+}
+
+fn inferred(string@ source, string@ names, u64 cases) void {
+    ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+    ownership_call_bodies.open(&set, source, names);
+    defer ownership_call_bodies.close(&set);
+    ownership_call_bodies.infer_all(&set);
+    complete(ownership_call_bodies.summary(&set, names.len - 1), cases);
+}
+
+fn main() i32 {
+    ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+    string[3] names = {"replace", "take", "caller"};
+    ownership_call_bodies.open(&set, SOURCE[..], names[..]);
+    defer ownership_call_bodies.close(&set);
+    ownership_call_bodies.infer_all(&set);
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(&set, 2);
+    complete(model, 1);
+    println("callee write refreshes aggregate leaf ok");
+    run_edges();
+    return 0;
+}
+
+// A null replacement refreshes the private leaf with the canonical empty value.
+fn callee_null_refreshes_aggregate_leaf() void {
+    string[3] names = {"clear", "take", "caller"};
+    inferred(NULL_SOURCE[..], names[..], 1);
+    println("callee null refreshes aggregate leaf ok");
+}
+
+// A later literal creates a newer private leaf. It supersedes the callee value.
+fn local_write_supersedes_callee_leaf() void {
+    string[3] names = {"replace", "take", "caller"};
+    inferred(LOCAL_SOURCE[..], names[..], 1);
+    println("local write supersedes callee leaf ok");
+}
+
+// Two callee stores refresh two distinct private leaves of one aggregate value.
+fn callee_writes_refresh_two_leaves() void {
+    string[3] names = {"replace", "take", "caller"};
+    inferred(TWO_LEAVES[..], names[..], 1);
+    println("callee writes refresh two leaves ok");
+}
+
+// A second call refreshes the same private leaf with its later canonical value.
+fn later_callee_write_refreshes_aggregate_leaf() void {
+    string[3] names = {"replace", "take", "caller"};
+    inferred(TWO_CALLS[..], names[..], 1);
+    println("later callee write refreshes aggregate leaf ok");
+}
+
+// The call refreshes its branch. The other branch keeps its local replacement.
+fn branch_call_refreshes_its_aggregate_leaf() void {
+    string[3] names = {"replace", "take", "caller"};
+    inferred(BRANCH_SOURCE[..], names[..], 2);
+    println("branch call refreshes its aggregate leaf ok");
+}
+
+// A callee without a store keeps the current private construction leaf.
+fn read_only_callee_keeps_private_aggregate_leaf() void {
+    string[3] names = {"observe", "take", "caller"};
+    inferred(READ_ONLY_SOURCE[..], names[..], 1);
+    println("read-only callee keeps private aggregate leaf ok");
+}
+
+// The published case orders the canonical callee write before the aggregate leaf read.
+fn canonical_callee_write_is_published() void {
+    string[3] names = {"replace", "take", "caller"};
+    ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+    ownership_call_bodies.open(&set, SOURCE[..], names[..]);
+    defer ownership_call_bodies.close(&set);
+    ownership_call_bodies.infer_all(&set);
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(&set, 2);
+    complete(model, 1);
+    ownership_api.entity_id current =
+        ownership_summary_body.slot(&set.inputs[2], 2).root;
+    bool mut write = false;
+    bool mut read = false;
+    u64 mut i = 0;
+    while (i < model->cases[0].effects.len) {
+        u64 mut e = 0;
+        while (e < model->effects.len && !ownership_summary_model.same(
+            model->effects[e].effect.key, model->cases[0].effects[i])) { e += 1; }
+        assert(e < model->effects.len);
+        ownership_summary_model.effect_node node = model->effects[e];
+        if (node.payload == ownership_summary_model.payload_kind.copy &&
+            ownership_summary_model.same(node.operand.root, current) &&
+            node.effect.place.projections.len == 1 && !read) { write = true; }
+        if (node.payload == ownership_summary_model.payload_kind.read &&
+            node.effect.place.projections.len == 1) {
+            assert(write);
+            read = true;
+        }
+        i += 1;
+    }
+    assert(read);
+    println("canonical callee write published ok");
+}
+
+// An unconditional refresh replaces all joined old alternatives at the private leaf.
+fn joined_private_leaves_refresh() void {
+    ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+    string[3] names = {"replace", "take", "caller"};
+    ownership_call_bodies.open(&set, SOURCE[..], names[..]);
+    defer ownership_call_bodies.close(&set);
+    ownership_summary_body.body_program mut body =
+        ownership_summary_body.extract(&set.inputs[2]);
+    defer ownership_summary_body.free(&body);
+    assert(ownership_api.successful(body.proof));
+    u64 mut at = 0;
+    while (at < body.effects_len && ownership_state.same_place(body.effect_flow[at],
+        body.effects[at].effect.place)) { at += 1; }
+    assert(at < body.effects_len);
+    ownership_api.place_path canonical = body.effects[at].effect.place;
+    ownership_api.place_path private = body.effect_flow[at];
+    ownership_state.state mut facts = ownership_state.empty();
+    defer ownership_state.free(&facts);
+    ownership_api.contents_fact mut current = ownership_api.contents_fact{
+        .place = canonical, .kind = ownership_api.contents_kind.empty_owner,
+        .owner_empty = true};
+    current.span_length.kind = ownership_api.fact_kind.exact;
+    ownership_state.append_contents(&facts, current);
+    ownership_api.contents_fact mut old = current;
+    old.place = private;
+    old.value_version = ownership_api.entity_id{.function = canonical.root.function,
+        .kind = ownership_api.entity_kind.value, .ordinal = 1};
+    ownership_state.append_contents(&facts, old);
+    old.value_version.ordinal = 2;
+    ownership_state.append_contents(&facts, old);
+    ownership_summary.call_context mut context = ownership_summary.call_context{
+        .in = &set.inputs[2], .program = &body};
+    ownership_flow.step flow_step = ownership_flow.step{.operation = body.context.operation};
+    bool mut refreshed = false;
+    assert(ownership_summary.refresh_private_leaves(&context, &flow_step, &facts, canonical,
+        body.context.event, &refreshed));
+    assert(refreshed && ownership_api.successful(body.proof));
+    u64 mut held = 0;
+    u64 mut i = 0;
+    while (i < facts.contents_len) {
+        if (ownership_state.same_place(facts.contents[i].place, private)) { held += 1; }
+        i += 1;
+    }
+    assert(held == 1);
+    println("joined private leaves refresh ok");
+}
+
+fn run_edges() void {
+    callee_null_refreshes_aggregate_leaf();
+    local_write_supersedes_callee_leaf();
+    callee_writes_refresh_two_leaves();
+    later_callee_write_refreshes_aggregate_leaf();
+    branch_call_refreshes_its_aggregate_leaf();
+    read_only_callee_keeps_private_aggregate_leaf();
+    canonical_callee_write_is_published();
+    joined_private_leaves_refresh();
+}

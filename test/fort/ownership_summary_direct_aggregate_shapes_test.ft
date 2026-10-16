@@ -1,0 +1,198 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| ancestor and sibling leaf paths judged ok
+//| constant neighbour leaves judged ok
+//| callee leaf writes judged ok
+//| eight-field leaves judged ok
+/// Holds 12 faulty shapes of a dangling borrowed aggregate leaf and 6 valid counterparts
+/// (D17.14). Of the faulty bodies, 11 fail and 1 stays unproved, because its callee `maybe`
+/// is unsupported. The summary solver proves each valid counterpart.
+import ownership_api;
+import ownership_call_bodies;
+import ownership_summary_model;
+
+string[24] PATHS = {
+    "struct view_box { i32* ptr; }",
+    "fn take(view_box value) void {}",
+    "fn p1_bad(bool a, bool b, i32 mut* own p, i32* q) view_box {",
+    "    view_box mut v = view_box{p};",
+    "    if (a) { del(p); if (b) { take(v); v = view_box{q}; return v; }",
+    "        v = view_box{q}; return v; }",
+    "    del(p); v = view_box{q}; return v; }",
+    "fn p1_ok(bool a, bool b, i32 mut* own p, i32* q) view_box {",
+    "    view_box mut v = view_box{p};",
+    "    if (a) { if (b) { take(v); del(p); v = view_box{q}; return v; }",
+    "        del(p); v = view_box{q}; return v; }",
+    "    del(p); v = view_box{q}; return v; }",
+    "fn p2_bad(bool a, i32 mut* own p, i32* q) view_box {",
+    "    view_box mut v = view_box{q};",
+    "    if (a) { v = view_box{p}; del(p); take(v); v = view_box{q}; return v; }",
+    "    take(v); del(p); return v; }",
+    "fn p3_bad(bool a, i32 mut* own p, i32* q) view_box {",
+    "    view_box mut v = view_box{q};",
+    "    if (a) { take(v); del(p); return v; }",
+    "    v = view_box{p}; del(p); take(v); v = view_box{q}; return v; }",
+    "fn p3_ok(bool a, i32 mut* own p, i32* q) view_box {",
+    "    view_box mut v = view_box{q};",
+    "    if (a) { take(v); del(p); return v; }",
+    "    v = view_box{p}; take(v); del(p); v = view_box{q}; return v; }",
+};
+
+string[16] CONSTANTS = {
+    "struct pair { string text; i32* ptr; }",
+    "struct rpair { i32* ptr; string text; }",
+    "fn take(pair value) void {}",
+    "fn rtake(rpair value) void {}",
+    "fn k1_bad(i32 mut* own p, i32* q) pair {",
+    "    pair mut v = pair{\"x\", p}; del(p); take(v); v = pair{\"y\", q}; return v; }",
+    "fn k1_ok(i32 mut* own p, i32* q) pair {",
+    "    pair mut v = pair{\"x\", p}; take(v); del(p); v = pair{\"y\", q}; return v; }",
+    "fn k2_bad(i32 mut* own p, i32* q) rpair {",
+    "    rpair mut v = rpair{p, \"x\"}; del(p); rtake(v); v = rpair{q, \"y\"}; return v; }",
+    "fn k3_ok(i32 mut* own p, i32* q) rpair {",
+    "    rpair mut v = rpair{p, \"x\"}; del(p); v = rpair{null, \"z\"}; rtake(v);",
+    "    v = rpair{q, \"y\"}; return v; }",
+    "fn k4_bad(i32 mut* own p, i32* q) rpair {",
+    "    rpair mut v = rpair{null, \"x\"}; v = rpair{p, \"w\"}; del(p); rtake(v);",
+    "    v = rpair{q, \"y\"}; return v; }",
+};
+
+string[20] CALLEE = {
+    "struct view_pair { i32* first; i32* second; }",
+    "fn put_first(view_pair mut* out, i32* ptr) void { out->first = ptr; }",
+    "fn take(view_pair value) void {}",
+    "fn maybe(view_pair mut* out, i32* ptr, bool c) void { if (c) { out->first = ptr; } }",
+    "fn cw1_bad(i32 mut* own a, i32 mut* own b, i32* cur) view_pair {",
+    "    view_pair mut v = view_pair{a, b};",
+    "    del(a); del(b); put_first(&v, cur); take(v);",
+    "    v = view_pair{cur, cur}; return v; }",
+    "fn cw2_bad(bool c, i32 mut* own a, i32* cur) view_pair {",
+    "    view_pair mut v = view_pair{a, cur};",
+    "    del(a); maybe(&v, cur, c); take(v);",
+    "    v = view_pair{cur, cur}; return v; }",
+    "fn cw3_bad(i32 mut* own a, i32 mut* own cur, i32* later) view_pair {",
+    "    view_pair mut v = view_pair{a, later};",
+    "    del(a); put_first(&v, cur); del(cur); take(v);",
+    "    v = view_pair{later, later}; return v; }",
+    "fn cw3_ok(i32 mut* own a, i32 mut* own cur, i32* later) view_pair {",
+    "    view_pair mut v = view_pair{a, later};",
+    "    del(a); put_first(&v, cur); take(v); del(cur);",
+    "    v = view_pair{later, later}; return v; }",
+};
+
+string[20] WIDE = {
+    "struct wide8 { i32* m0; i32* m1; i32* m2; i32* m3; i32* m4; i32* m5; i32* m6; i32* m7; }",
+    "fn take8(wide8 h) void {}",
+    "fn w8_bad(i32 mut* own p, i32* q) wide8 {",
+    "    wide8 mut v = wide8{null, null, null, null, null, null, null, p};",
+    "    del(p); take8(v);",
+    "    v = wide8{q, q, q, q, q, q, q, q}; return v; }",
+    "fn w8_ok(i32 mut* own p, i32* q) wide8 {",
+    "    wide8 mut v = wide8{null, null, null, null, null, null, null, p};",
+    "    take8(v); del(p);",
+    "    v = wide8{q, q, q, q, q, q, q, q}; return v; }",
+    "fn w8_first_bad(i32 mut* own p, i32* q) wide8 {",
+    "    wide8 mut v = wide8{p, null, null, null, null, null, null, null};",
+    "    del(p); take8(v);",
+    "    v = wide8{q, q, q, q, q, q, q, q}; return v; }",
+    "fn w8_twice_bad(i32 mut* own p, i32* q) wide8 {",
+    "    wide8 mut v = wide8{q, q, q, q, q, q, q, q};",
+    "    take8(v);",
+    "    v = wide8{q, q, q, p, q, q, q, q};",
+    "    del(p); take8(v);",
+    "    v = wide8{q, q, q, q, q, q, q, q}; return v; }",
+};
+
+// Infers each body in order. Each earlier body is a callee of the later bodies. A name that
+// ends in `_bad` must not prove, and each other name must prove with complete effects.
+fn judged(string@ source, string@ names) void {
+    ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+    ownership_call_bodies.open(&set, source, names);
+    defer ownership_call_bodies.close(&set);
+    u64 mut i = 0;
+    while (i < names.len) {
+        ownership_call_bodies.infer(&set, i);
+        ownership_summary_model.summary* model = ownership_call_bodies.summary(&set, i);
+        bool proved = ownership_api.successful(model->proof) && !model->residual_effects;
+        string name = names[i];
+        bool bad = name.len > 4 && name[name.len - 4..] == "_bad";
+        if (bad) {
+            assert(!proved && model->cases.len == 0);
+        } else {
+            assert(proved);
+        }
+        i += 1;
+    }
+}
+
+// A dangling leaf fails with an invalid use, not only an incomplete proof.
+fn invalid(string@ source, string@ names) void {
+    ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+    ownership_call_bodies.open(&set, source, names);
+    defer ownership_call_bodies.close(&set);
+    ownership_call_bodies.infer_all(&set);
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(&set, names.len - 1);
+    assert(model->proof.failed);
+    assert(ownership_call_bodies.saw(&set, ownership_api.event_kind.invalid_use));
+}
+
+fn ancestor_and_sibling_leaf_paths() void {
+    string[6] names = {"take", "p1_bad", "p1_ok", "p2_bad", "p3_bad", "p3_ok"};
+    judged(PATHS[..], names[..]);
+    string[2] ancestor = {"take", "p1_bad"};
+    invalid(PATHS[..], ancestor[..]);
+    string[3] sibling = {"take", "p1_bad", "p3_bad"};
+    invalid(PATHS[..], sibling[..]);
+    println("ancestor and sibling leaf paths judged ok");
+}
+
+fn constant_neighbour_leaves() void {
+    string[6] names = {"take", "rtake", "k1_bad", "k1_ok", "k2_bad", "k3_ok"};
+    judged(CONSTANTS[..], names[..]);
+    string[3] later = {"take", "rtake", "k4_bad"};
+    judged(CONSTANTS[..], later[..]);
+    invalid(CONSTANTS[..], later[..]);
+    println("constant neighbour leaves judged ok");
+}
+
+// `maybe` writes on one path only, so its summary and `cw2_bad` stay unproved.
+fn callee_leaf_writes() void {
+    string[6] names = {"put_first", "take", "maybe", "cw1_bad", "cw2_bad", "cw3_bad"};
+    ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+    ownership_call_bodies.open(&set, CALLEE[..], names[..]);
+    defer ownership_call_bodies.close(&set);
+    ownership_call_bodies.infer_all(&set);
+    assert(!ownership_api.successful(ownership_call_bodies.summary(&set, 2)->proof));
+    string[4] first = {"put_first", "take", "maybe", "cw1_bad"};
+    invalid(CALLEE[..], first[..]);
+    string[3] dead = {"put_first", "take", "cw3_bad"};
+    invalid(CALLEE[..], dead[..]);
+    string[3] valid = {"put_first", "take", "cw3_ok"};
+    judged(CALLEE[..], valid[..]);
+    u64 mut i = 3;
+    while (i < names.len) {
+        ownership_summary_model.summary* model = ownership_call_bodies.summary(&set, i);
+        assert(!ownership_api.successful(model->proof) && model->cases.len == 0);
+        i += 1;
+    }
+    println("callee leaf writes judged ok");
+}
+
+fn eight_field_leaves() void {
+    string[5] names = {"take8", "w8_bad", "w8_ok", "w8_first_bad", "w8_twice_bad"};
+    judged(WIDE[..], names[..]);
+    string[2] last = {"take8", "w8_bad"};
+    invalid(WIDE[..], last[..]);
+    string[5] twice = {"take8", "w8_bad", "w8_ok", "w8_first_bad", "w8_twice_bad"};
+    invalid(WIDE[..], twice[..]);
+    println("eight-field leaves judged ok");
+}
+
+fn main() i32 {
+    ancestor_and_sibling_leaf_paths();
+    constant_neighbour_leaves();
+    callee_leaf_writes();
+    eight_field_leaves();
+    return 0;
+}

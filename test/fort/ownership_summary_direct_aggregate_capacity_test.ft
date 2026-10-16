@@ -1,0 +1,336 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| literal capacity counts fields ok
+//| eight null leaves fit ok
+//| sixteen null leaves fit ok
+//| sixty-four null leaves fit ok
+//| sixty-five fields refused ok
+//| sixty-four borrowed copies fit ok
+//| mixed sixty-four leaves fit ok
+//| sixteen string leaves reach the call ok
+//| sixty-four string leaves reach the call ok
+//| nested literal stays unsupported ok
+/// Checks that a struct literal reserves one slot for each field effect (D17.15).
+import fir;
+import ownership_api;
+import ownership_call_bodies;
+import ownership_summary_body;
+import ownership_summary_model;
+
+string[46] NULLS = {
+    "struct wide8 {",
+    "    i32* m0; i32* m1; i32* m2; i32* m3; i32* m4; i32* m5; i32* m6; i32* m7; }",
+    "struct wide16 {",
+    "    i32* m0; i32* m1; i32* m2; i32* m3; i32* m4; i32* m5; i32* m6; i32* m7;",
+    "    i32* m8; i32* m9; i32* m10; i32* m11; i32* m12; i32* m13; i32* m14; i32* m15; }",
+    "struct wide64 {",
+    "    i32* m0; i32* m1; i32* m2; i32* m3; i32* m4; i32* m5; i32* m6; i32* m7;",
+    "    i32* m8; i32* m9; i32* m10; i32* m11; i32* m12; i32* m13; i32* m14; i32* m15;",
+    "    i32* m16; i32* m17; i32* m18; i32* m19; i32* m20; i32* m21; i32* m22; i32* m23;",
+    "    i32* m24; i32* m25; i32* m26; i32* m27; i32* m28; i32* m29; i32* m30; i32* m31;",
+    "    i32* m32; i32* m33; i32* m34; i32* m35; i32* m36; i32* m37; i32* m38; i32* m39;",
+    "    i32* m40; i32* m41; i32* m42; i32* m43; i32* m44; i32* m45; i32* m46; i32* m47;",
+    "    i32* m48; i32* m49; i32* m50; i32* m51; i32* m52; i32* m53; i32* m54; i32* m55;",
+    "    i32* m56; i32* m57; i32* m58; i32* m59; i32* m60; i32* m61; i32* m62; i32* m63; }",
+    "fn eight() wide8 { return wide8{",
+    "    null, null, null, null, null, null, null, null}; }",
+    "fn sixteen() wide16 { return wide16{",
+    "    null, null, null, null, null, null, null, null,",
+    "    null, null, null, null, null, null, null, null}; }",
+    "fn sixty_four() wide64 { return wide64{",
+    "    null, null, null, null, null, null, null, null,",
+    "    null, null, null, null, null, null, null, null,",
+    "    null, null, null, null, null, null, null, null,",
+    "    null, null, null, null, null, null, null, null,",
+    "    null, null, null, null, null, null, null, null,",
+    "    null, null, null, null, null, null, null, null,",
+    "    null, null, null, null, null, null, null, null,",
+    "    null, null, null, null, null, null, null, null}; }",
+    "fn copies(i32* p) wide64 { return wide64{",
+    "    p, p, p, p, p, p, p, p,",
+    "    p, p, p, p, p, p, p, p,",
+    "    p, p, p, p, p, p, p, p,",
+    "    p, p, p, p, p, p, p, p,",
+    "    p, p, p, p, p, p, p, p,",
+    "    p, p, p, p, p, p, p, p,",
+    "    p, p, p, p, p, p, p, p,",
+    "    p, p, p, p, p, p, p, p}; }",
+    "fn mixed(i32* p) wide64 { return wide64{",
+    "    p, null, p, null, p, null, p, null,",
+    "    p, null, p, null, p, null, p, null,",
+    "    p, null, p, null, p, null, p, null,",
+    "    p, null, p, null, p, null, p, null,",
+    "    p, null, p, null, p, null, p, null,",
+    "    p, null, p, null, p, null, p, null,",
+    "    p, null, p, null, p, null, p, null,",
+    "    p, null, p, null, p, null, p, null}; }",
+};
+
+string[20] OVER = {
+    "struct wide65 {",
+    "    i32* m0; i32* m1; i32* m2; i32* m3; i32* m4; i32* m5; i32* m6; i32* m7;",
+    "    i32* m8; i32* m9; i32* m10; i32* m11; i32* m12; i32* m13; i32* m14; i32* m15;",
+    "    i32* m16; i32* m17; i32* m18; i32* m19; i32* m20; i32* m21; i32* m22; i32* m23;",
+    "    i32* m24; i32* m25; i32* m26; i32* m27; i32* m28; i32* m29; i32* m30; i32* m31;",
+    "    i32* m32; i32* m33; i32* m34; i32* m35; i32* m36; i32* m37; i32* m38; i32* m39;",
+    "    i32* m40; i32* m41; i32* m42; i32* m43; i32* m44; i32* m45; i32* m46; i32* m47;",
+    "    i32* m48; i32* m49; i32* m50; i32* m51; i32* m52; i32* m53; i32* m54; i32* m55;",
+    "    i32* m56; i32* m57; i32* m58; i32* m59; i32* m60; i32* m61; i32* m62; i32* m63;",
+    "    i32* m64; }",
+    "fn over() wide65 { return wide65{",
+    "    null, null, null, null, null, null, null, null,",
+    "    null, null, null, null, null, null, null, null,",
+    "    null, null, null, null, null, null, null, null,",
+    "    null, null, null, null, null, null, null, null,",
+    "    null, null, null, null, null, null, null, null,",
+    "    null, null, null, null, null, null, null, null,",
+    "    null, null, null, null, null, null, null, null,",
+    "    null, null, null, null, null, null, null, null,",
+    "    null}; }",
+};
+
+string[36] STRINGS = {
+    "struct text16 {",
+    "    string m0; string m1; string m2; string m3; string m4; string m5; string m6; string m7;",
+    "    string m8; string m9; string m10; string m11;",
+    "    string m12; string m13; string m14; string m15; }",
+    "struct text64 {",
+    "    string m0; string m1; string m2; string m3; string m4; string m5; string m6; string m7;",
+    "    string m8; string m9; string m10; string m11;",
+    "    string m12; string m13; string m14; string m15;",
+    "    string m16; string m17; string m18; string m19;",
+    "    string m20; string m21; string m22; string m23;",
+    "    string m24; string m25; string m26; string m27;",
+    "    string m28; string m29; string m30; string m31;",
+    "    string m32; string m33; string m34; string m35;",
+    "    string m36; string m37; string m38; string m39;",
+    "    string m40; string m41; string m42; string m43;",
+    "    string m44; string m45; string m46; string m47;",
+    "    string m48; string m49; string m50; string m51;",
+    "    string m52; string m53; string m54; string m55;",
+    "    string m56; string m57; string m58; string m59;",
+    "    string m60; string m61; string m62; string m63; }",
+    "fn take16(text16 value) void {}",
+    "fn call16() text16 { text16 mut value = text16{",
+    "    \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\",",
+    "    \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\"};",
+    "    take16(value); return value; }",
+    "fn take64(text64 value) void {}",
+    "fn call64() text64 { text64 mut value = text64{",
+    "    \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\",",
+    "    \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\",",
+    "    \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\",",
+    "    \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\",",
+    "    \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\",",
+    "    \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\",",
+    "    \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\",",
+    "    \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\", \"a\"};",
+    "    take64(value); return value; }",
+};
+
+string[5] NESTED = {
+    "struct inner { string text; }",
+    "struct outer { inner nested; string tail; }",
+    "fn take(outer value) void {}",
+    "fn caller() outer {",
+    "    outer mut value = outer{inner{\"x\"}, \"y\"}; take(value); return value; }",
+};
+
+fn count(ownership_summary_body.body_program* body,
+    ownership_summary_model.payload_kind kind) u64 {
+    u64 mut n = 0;
+    u64 mut i = 0;
+    while (i < body->effects_len) {
+        if (body->effects[i].payload == kind) { n += 1; }
+        i += 1;
+    }
+    return n;
+}
+
+fn complete(ownership_summary_model.summary* model) bool {
+    return ownership_api.successful(model->proof) && !model->residual_effects &&
+        model->cases.len == 1;
+}
+
+// The reservation counts each field operand of a literal, up to the modelled field limit.
+fn literal_capacity_counts_fields() void {
+    fir.statement mut stmt = fir.statement{.kind = fir.stmt_kind.st_assign,
+        .value = fir.rvalue{.kind = fir.rvalue_kind.rv_aggregate, .ops_len = 8}};
+    assert(ownership_summary_body.literal_capacity(&stmt) == 8);
+    stmt.value.ops_len = 0;
+    assert(ownership_summary_body.literal_capacity(&stmt) == 0);
+    stmt.value.ops_len = 64;
+    assert(ownership_summary_body.literal_capacity(&stmt) == 64);
+    stmt.value.ops_len = 65;
+    assert(ownership_summary_body.literal_capacity(&stmt) == 64);
+    stmt.value.ops_len = 4294967295;
+    assert(ownership_summary_body.literal_capacity(&stmt) == 64);
+    stmt.value.kind = fir.rvalue_kind.rv_use;
+    assert(ownership_summary_body.literal_capacity(&stmt) == 0);
+    stmt.value.kind = fir.rvalue_kind.rv_aggregate;
+    stmt.kind = fir.stmt_kind.st_del;
+    assert(ownership_summary_body.literal_capacity(&stmt) == 0);
+    println("literal capacity counts fields ok");
+}
+
+// Each null field gives one empty replacement of its result leaf, in field order.
+fn null_leaves_fit(ownership_call_bodies.bodies* set, u64 index, u64 fields) void {
+    ownership_summary_body.body_program mut body =
+        ownership_summary_body.extract(&set->inputs[index]);
+    defer ownership_summary_body.free(&body);
+    assert(ownership_api.successful(body.proof));
+    assert(body.effects_len == fields);
+    assert(count(&body, ownership_summary_model.payload_kind.replacement) == fields);
+    u64 mut i = 0;
+    while (i < fields) {
+        ownership_summary_model.effect_node row = body.effects[i];
+        assert(row.effect.place.projections.len == 1);
+        assert(row.effect.place.projections[0].kind == ownership_api.projection_kind.field);
+        assert(cast(row.effect.place.projections[0].field, u64) == i);
+        assert(row.value.owner_empty && row.value.borrows.len == 0);
+        i += 1;
+    }
+    assert(complete(ownership_call_bodies.summary(set, index)));
+}
+
+fn opened_nulls(ownership_call_bodies.bodies mut* set) void {
+    string[5] names = {"eight", "sixteen", "sixty_four", "copies", "mixed"};
+    ownership_call_bodies.open(set, NULLS[..], names[..]);
+    ownership_call_bodies.infer_all(set);
+}
+
+// Eight null fields need eight slots. The pre-pass of one statement alone reserves seven.
+fn eight_null_leaves_fit() void {
+    ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+    opened_nulls(&set);
+    defer ownership_call_bodies.close(&set);
+    null_leaves_fit(&set, 0, 8);
+    println("eight null leaves fit ok");
+}
+
+fn sixteen_null_leaves_fit() void {
+    ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+    opened_nulls(&set);
+    defer ownership_call_bodies.close(&set);
+    null_leaves_fit(&set, 1, 16);
+    println("sixteen null leaves fit ok");
+}
+
+// Sixty-four fields is the most that the literal model accepts.
+fn sixty_four_null_leaves_fit() void {
+    ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+    opened_nulls(&set);
+    defer ownership_call_bodies.close(&set);
+    null_leaves_fit(&set, 2, 64);
+    println("sixty-four null leaves fit ok");
+}
+
+// A literal above the field limit stops before its first field effect.
+fn sixty_five_fields_refused() void {
+    ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+    string[1] names = {"over"};
+    ownership_call_bodies.open(&set, OVER[..], names[..]);
+    defer ownership_call_bodies.close(&set);
+    ownership_summary_body.body_program mut body =
+        ownership_summary_body.extract(&set.inputs[0]);
+    defer ownership_summary_body.free(&body);
+    assert(body.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(body.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(body.effects_len == 0);
+    println("sixty-five fields refused ok");
+}
+
+// A borrowed copy also costs one effect and one requirement for each field.
+fn sixty_four_borrowed_copies_fit() void {
+    ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+    opened_nulls(&set);
+    defer ownership_call_bodies.close(&set);
+    ownership_summary_body.body_program mut body =
+        ownership_summary_body.extract(&set.inputs[3]);
+    defer ownership_summary_body.free(&body);
+    assert(ownership_api.successful(body.proof));
+    assert(count(&body, ownership_summary_model.payload_kind.copy) == 64);
+    assert(body.requirements_len == 64);
+    assert(complete(ownership_call_bodies.summary(&set, 3)));
+    println("sixty-four borrowed copies fit ok");
+}
+
+// Copies and replacements share the field reservation.
+fn mixed_sixty_four_leaves_fit() void {
+    ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+    opened_nulls(&set);
+    defer ownership_call_bodies.close(&set);
+    ownership_summary_body.body_program mut body =
+        ownership_summary_body.extract(&set.inputs[4]);
+    defer ownership_summary_body.free(&body);
+    assert(ownership_api.successful(body.proof));
+    assert(count(&body, ownership_summary_model.payload_kind.copy) == 32);
+    assert(count(&body, ownership_summary_model.payload_kind.replacement) == 32);
+    assert(complete(ownership_call_bodies.summary(&set, 4)));
+    println("mixed sixty-four leaves fit ok");
+}
+
+// Each string field gives one replacement. The call then reads each leaf once.
+fn string_leaves_reach_call(ownership_call_bodies.bodies* set, u64 index, u64 fields) void {
+    ownership_summary_body.body_program mut body =
+        ownership_summary_body.extract(&set->inputs[index]);
+    defer ownership_summary_body.free(&body);
+    assert(ownership_api.successful(body.proof));
+    assert(count(&body, ownership_summary_model.payload_kind.replacement) == fields);
+    assert(count(&body, ownership_summary_model.payload_kind.read) == fields);
+}
+
+fn sixteen_string_leaves_reach_call() void {
+    ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+    string[4] names = {"take16", "call16", "take64", "call64"};
+    ownership_call_bodies.open(&set, STRINGS[..], names[..]);
+    defer ownership_call_bodies.close(&set);
+    ownership_call_bodies.infer_all(&set);
+    string_leaves_reach_call(&set, 1, 16);
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(&set, 1);
+    assert(complete(model) && model->sources.len == 1);
+    println("sixteen string leaves reach the call ok");
+}
+
+// Extraction holds 64 replacements and 64 reads. The summary then meets the effect limit E,
+// as 64 borrowed copies and their 64 reads do (D17.18).
+fn sixty_four_string_leaves_reach_call() void {
+    ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+    string[4] names = {"take16", "call16", "take64", "call64"};
+    ownership_call_bodies.open(&set, STRINGS[..], names[..]);
+    defer ownership_call_bodies.close(&set);
+    ownership_call_bodies.infer_all(&set);
+    string_leaves_reach_call(&set, 3, 64);
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(&set, 3);
+    assert(model->proof.kind == ownership_api.proof_kind.incomplete);
+    assert(model->proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    println("sixty-four string leaves reach the call ok");
+}
+
+// A nested struct literal stays unsupported, as before the leaf reads.
+fn nested_literal_stays_unsupported() void {
+    ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+    string[2] names = {"take", "caller"};
+    ownership_call_bodies.open(&set, NESTED[..], names[..]);
+    defer ownership_call_bodies.close(&set);
+    ownership_call_bodies.infer_all(&set);
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(&set, 1);
+    assert(model->proof.kind == ownership_api.proof_kind.incomplete);
+    assert(model->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    println("nested literal stays unsupported ok");
+}
+
+fn main() i32 {
+    literal_capacity_counts_fields();
+    eight_null_leaves_fit();
+    sixteen_null_leaves_fit();
+    sixty_four_null_leaves_fit();
+    sixty_five_fields_refused();
+    sixty_four_borrowed_copies_fit();
+    mixed_sixty_four_leaves_fit();
+    sixteen_string_leaves_reach_call();
+    sixty_four_string_leaves_reach_call();
+    nested_literal_stays_unsupported();
+    return 0;
+}
