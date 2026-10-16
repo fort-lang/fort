@@ -8,6 +8,7 @@
 //| unknown effects keep obligations unproved
 //| views at a call
 //| aggregates and pointers to owners
+//| write footprints at calls
 //| heap calls ok
 /// Checks heap summaries at calls (D17.16, D17.18, `spec/fir.md` 14 Calls).
 import ownership_api;
@@ -391,6 +392,130 @@ fn aggregates() void {
     assert(ownership_heap_env.proved(&c, "swapped"));
 }
 
+// A callee with a complete proof can write caller storage that its post-state does not name. It
+// can store through a pointer that a global holds, or through a pointer leaf of a by-value
+// struct. The summary records that write footprint. Each caller forgets only the facts of storage
+// that the footprint can reach (D17.18, `spec/fir.md` 14.1). The text is not a `string[N]`
+// array, so `heap_rows` does not read it.
+fn write_footprints() void {
+    println("write footprints at calls");
+    string mut@ own text = new(string, 47);
+    defer del(text);
+    text[0] = "struct node { i32 v; }";
+    text[1] = "struct peer { i32 v; i32 mut* p; }";
+    text[2] = "struct cpeer { i32 v; node* p; }";
+    text[3] = "struct holder2 { peer mut* p; }";
+    text[4] = "cpeer mut* mut saved_c = null;";
+    text[5] = "fn stash_c(cpeer mut* c) void { saved_c = c; }";
+    text[6] = "fn clear_c() void { saved_c->p = null; }";
+    text[7] = "fn reset_c() void { saved_c = null; }";
+    text[8] = "fn read_c() i32 { return saved_c->v; }";
+    text[9] = "fn wrap_global() void { clear_c(); }";
+    text[10] = "fn clear2(holder2 h) void { h.p->p = null; }";
+    text[11] = "fn clear_second(i32 k, holder2 h) void { h.p->p = null; }";
+    text[12] = "fn copy_only(holder2 mut h) void { h.p = null; }";
+    text[13] = "fn direct(peer mut* q) void { q->p = null; }";
+    text[14] = "fn set_v(cpeer mut* c) void { c->v = 1; }";
+    text[15] = "fn wrap_view(i32 k, holder2 h) void { clear2(h); }";
+    text[16] = "fn wrap_direct(i32 k, peer mut* q) void { direct(q); }";
+    text[17] = "fn wrap_copy(holder2 h) void { copy_only(h); }";
+    // Each caller leaks `extra` on one path. Only a stale caller fact removes that path.
+    text[18] = "fn kept_global(cpeer mut* c) void { i32 mut* own extra = new(i32); stash_c(c);";
+    text[19] = "    node mut* own b = new(node); c->p = b; clear_c();";
+    text[20] = "    if (c->p == null) { del(b); return; } c->p = null; del(b); del(extra); }";
+    text[21] = "fn kept_wrapped(cpeer mut* c) void { i32 mut* own extra = new(i32); stash_c(c);";
+    text[22] = "    node mut* own b = new(node); c->p = b; wrap_global();";
+    text[23] = "    if (c->p == null) { del(b); return; } c->p = null; del(b); del(extra); }";
+    text[24] = "fn kept_reset(cpeer mut* c) void { i32 mut* own extra = new(i32); stash_c(c);";
+    text[25] = "    node mut* own b = new(node); c->p = b; reset_c();";
+    text[26] = "    if (c->p == null) { del(b); return; } c->p = null; del(b); del(extra); }";
+    text[27] = "fn kept_read(cpeer mut* c) void { i32 mut* own extra = new(i32); stash_c(c);";
+    text[28] = "    node mut* own b = new(node); c->p = b; i32 r = read_c();";
+    text[29] = "    if (c->p == null) { del(b); return; } c->p = null; del(b); del(extra); }";
+    text[30] = "fn local_kept() void { i32 mut* own extra = new(i32); i32 mut x = 1;";
+    text[31] = "    peer mut* own m = new(peer); m->p = &x; clear_c();";
+    text[32] = "    if (m->p == null) { del(m); return; } m->p = null; del(m); del(extra); }";
+    text[33] = "fn view_val() void { i32 mut* own extra = new(i32); i32 mut x = 1;";
+    text[34] = "    peer mut* own m = new(peer); m->p = &x; holder2 mut h = holder2{}; h.p = m;";
+    text[35] = "    clear2(h); if (m->p != null) { del(extra); } m->p = null; del(m); }";
+    text[36] = "fn view_wrapped() void { i32 mut* own extra = new(i32); i32 mut x = 1;";
+    text[37] = "    peer mut* own m = new(peer); m->p = &x; holder2 mut h = holder2{}; h.p = m;";
+    text[38] = "    wrap_view(0, h); if (m->p != null) { del(extra); } m->p = null; del(m); }";
+    text[39] = "fn view_copy() void { i32 mut* own extra = new(i32); i32 mut x = 1;";
+    text[40] = "    peer mut* own m = new(peer); m->p = &x; holder2 mut h = holder2{}; h.p = m;";
+    text[41] = "    wrap_copy(h); if (m->p != null) { del(extra); } m->p = null; del(m); }";
+    text[42] = "fn view_freed() void { peer mut* own m = new(peer); holder2 mut h = holder2{};";
+    text[43] = "    h.p = m; clear2(h); del(m); }";
+    text[44] = "fn kept_direct(cpeer mut* c) void { i32 mut* own extra = new(i32);";
+    text[45] = "    node mut* own b = new(node); c->p = b; set_v(c);";
+    text[46] = "    if (c->p == null) { del(b); return; } c->p = null; del(b); del(extra); }";
+    string[23] names = {"stash_c", "clear_c", "reset_c", "read_c", "wrap_global", "clear2",
+        "clear_second", "copy_only", "direct", "set_v", "wrap_view", "wrap_direct", "wrap_copy",
+        "kept_global", "kept_wrapped", "kept_reset", "kept_read", "local_kept", "view_val",
+        "view_wrapped", "view_copy", "view_freed", "kept_direct"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+
+    // A store through a pointer that a global holds is a global write. A direct store into the
+    // global and a read through it are not. A wrapper publishes the global write of its callee.
+    assert(ownership_heap_env.proved(&c, "clear_c"));
+    assert(ownership_heap_env.summary(&c, "clear_c")->global_writes);
+    assert(ownership_heap_env.proved(&c, "reset_c"));
+    assert(!ownership_heap_env.summary(&c, "reset_c")->global_writes);
+    assert(ownership_heap_env.proved(&c, "read_c"));
+    assert(!ownership_heap_env.summary(&c, "read_c")->global_writes);
+    assert(ownership_heap_env.proved(&c, "wrap_global"));
+    assert(ownership_heap_env.summary(&c, "wrap_global")->global_writes);
+    // A by-value struct parameter records a write through its pointer leaf. The bit is the
+    // position of the parameter, from 1.
+    ownership_heap.summary* clear2 = ownership_heap_env.summary(&c, "clear2");
+    assert(ownership_heap_env.proved(&c, "clear2"));
+    assert(clear2->view_writes == ownership_heap.bit(1) && !clear2->writes_high);
+    assert(!clear2->global_writes);
+    ownership_heap.summary* second = ownership_heap_env.summary(&c, "clear_second");
+    assert(second->view_writes == ownership_heap.bit(2) && !second->writes_high);
+    // A store into a field of the by-value copy changes no caller storage.
+    assert(ownership_heap_env.proved(&c, "copy_only"));
+    assert(ownership_heap_env.summary(&c, "copy_only")->view_writes == 0);
+    assert(!ownership_heap_env.summary(&c, "copy_only")->writes_high);
+    // A direct pointer parameter records its write as well. Its caller uses the exact post-state.
+    assert(ownership_heap_env.summary(&c, "direct")->view_writes == ownership_heap.bit(1));
+    assert(ownership_heap_env.summary(&c, "set_v")->view_writes == ownership_heap.bit(1));
+    // A wrapper maps the footprint of the callee to the parameter of its own actual leaf.
+    ownership_heap.summary* wrapped = ownership_heap_env.summary(&c, "wrap_view");
+    assert(ownership_heap_env.proved(&c, "wrap_view"));
+    assert(wrapped->view_writes == ownership_heap.bit(2) && !wrapped->global_writes);
+    assert(ownership_heap_env.proved(&c, "wrap_direct"));
+    assert(ownership_heap_env.summary(&c, "wrap_direct")->view_writes == ownership_heap.bit(2));
+    assert(ownership_heap_env.proved(&c, "wrap_copy"));
+    assert(ownership_heap_env.summary(&c, "wrap_copy")->view_writes == 0);
+
+    // A global write reaches caller storage that an earlier call exposed. The leak path stays,
+    // directly and through the wrapper.
+    assert(ownership_heap_env.unproved(&c, "kept_global",
+        ownership_api.incomplete_reason.unknown_effect));
+    assert(ownership_heap_env.unproved(&c, "kept_wrapped",
+        ownership_api.incomplete_reason.unknown_effect));
+    // A callee with no global write keeps the exact caller facts, so the leak path is absent.
+    assert(ownership_heap_env.proved(&c, "kept_reset"));
+    assert(ownership_heap_env.proved(&c, "kept_read"));
+    // A global write cannot reach a cell that no effect exposed.
+    assert(ownership_heap_env.proved(&c, "local_kept"));
+    // A write through a by-value pointer leaf reaches the cell of that leaf, directly and
+    // through the wrapper.
+    assert(ownership_heap_env.unproved(&c, "view_val",
+        ownership_api.incomplete_reason.missing_path));
+    assert(ownership_heap_env.unproved(&c, "view_wrapped",
+        ownership_api.incomplete_reason.missing_path));
+    assert(ownership_heap_env.proved(&c, "view_copy"));
+    // A write changes storage contents. It does not release the cell, so the caller frees it.
+    assert(ownership_heap_env.proved(&c, "view_freed"));
+    assert(ownership_heap_env.events(&c, "view_freed") == 0);
+    // The footprint does not erase the exact post-state of a direct pointer parameter.
+    assert(ownership_heap_env.proved(&c, "kept_direct"));
+}
+
 fn main() i32 {
     caller_storage();
     separate_instances();
@@ -399,6 +524,7 @@ fn main() i32 {
     unknown_effects();
     views_at_call();
     aggregates();
+    write_footprints();
     println("heap calls ok");
     return 0;
 }

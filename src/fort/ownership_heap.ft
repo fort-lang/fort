@@ -268,6 +268,12 @@ struct summary {
     // `escapes_high` stands for each parameter from 64 on.
     u64 address_escapes; // join: may
     bool escapes_high; // join: may
+    // The body writes through the reference leaves of these parameters. Direct pointer
+    // parameters use `post`. These bits supply the missing by-value aggregate footprint.
+    u64 view_writes; // join: may
+    bool writes_high; // join: may
+    // The body writes storage through a pointer that a global holds.
+    bool global_writes; // join: may
     // The requirements that some path of the body has. `post.required` holds those that each
     // returning path has.
     requirement_set required_some; // join: may
@@ -353,6 +359,9 @@ struct context {
     bool reads_high;
     u64 address_escapes;
     bool escapes_high;
+    u64 view_writes;
+    bool writes_high;
+    bool global_writes;
     // See `summary.required_some`. Each pass adds to it, as each pass adds to `needs_shape`.
     requirement_set required_some;
     // See `summary.lost_required`.
@@ -1575,6 +1584,35 @@ fn owned_from(state* s, u32 a, bool mut@ seen) void {
             i += 1;
         }
     }
+}
+
+// The owned-atom walk for an unknown write. Each reached atom and each tested descendant slot
+// pays one W unit.
+fn owned_from_paid(context mut* c, state* s, u32 a, bool mut@ seen) bool {
+    if (seen[cast(a, u64)]) { return true; }
+    u32 mut@ own stack = new(u32, s->atoms_len + 1);
+    defer del(stack);
+    u64 mut top = 1;
+    stack[0] = a;
+    seen[cast(a, u64)] = true;
+    while (top > 0) {
+        if (!pay(c, 1)) { return false; }
+        top -= 1;
+        u32 x = stack[top];
+        u64 mut i = 0;
+        while (i < s->slots_len) {
+            if (!pay(c, 1)) { return false; }
+            slot field = s->slots[i];
+            if (field.key.base == base_kind.cell && field.key.id == x &&
+                field.v.kind == value_kind.owned && !seen[cast(field.v.atom, u64)]) {
+                seen[cast(field.v.atom, u64)] = true;
+                stack[top] = field.v.atom;
+                top += 1;
+            }
+            i += 1;
+        }
+    }
+    return true;
 }
 
 // Makes atom `a` opaque and absorbs each atom that it owns, through any owned cycle. Its
@@ -3015,6 +3053,19 @@ fn note_param_read(context mut* c, u32 param) void {
     }
 }
 
+// Records a write through storage that a parameter value designates. A direct pointer parameter
+// has an exact caller-storage post-state. A by-value aggregate needs this footprint at its caller.
+fn note_param_write(context mut* c, u32 param) void {
+    if (param == ANY_PARAM) {
+        c->view_writes = U64_MAX;
+        c->writes_high = true;
+    } else if (param != NONE && param >= 64) {
+        c->writes_high = true;
+    } else if (param != NONE) {
+        c->view_writes = c->view_writes | bit(cast(param, u64));
+    }
+}
+
 // Whether the callee reads the storage that parameter `param` (from 1) designates.
 fn reads_param(summary* sum, u64 param) bool {
     if (param >= 64) { return sum->reads_high; }
@@ -3037,6 +3088,12 @@ fn note_param_escape(context mut* c, u32 param) void {
 fn escapes_param(summary* sum, u64 param) bool {
     if (param >= 64) { return sum->escapes_high; }
     return (sum->address_escapes & bit(param)) != 0;
+}
+
+// Whether the callee writes storage through a reference leaf of parameter `param` (from 1).
+fn writes_param(summary* sum, u64 param) bool {
+    if (param >= 64) { return sum->writes_high; }
+    return (sum->view_writes & bit(param)) != 0;
 }
 
 fn deref_value(context mut* c, state mut* s, value v, bool owning, bool reads, string what)
@@ -3606,6 +3663,7 @@ fn retaining_store(state* s, location loc) bool {
 // Writes a value into a location. An owned value written into storage that the proof does not
 // track leaves the proof with incomplete proof (D17.13, D17.18).
 fn write_at(context mut* c, state mut* s, location loc, types.node* t, value v) void {
+    note_param_write(c, loc.param);
     value stored = !is_reference(t) || v.kind != value_kind.owned ? v : as_view(s, v);
     if (is_reference(t) && t->is_mut && v.kind != value_kind.owned &&
         retaining_store(s, loc) && !static_reference(stored) &&
@@ -4115,6 +4173,9 @@ fn aggregate_type(types.node* t) bool {
 }
 
 fn assign(context mut* c, state mut* s, fir.statement* stmt) void {
+    if (stmt->place.base == fir.base_kind.bk_global && fir.place_indirect(c->f, stmt->place)) {
+        c->global_writes = true;
+    }
     types.node* t = fir.place_type(c->f, stmt->place);
     if (aggregate_type(t)) {
         leaf_list mut list = leaf_list{};
@@ -4323,13 +4384,15 @@ fn find_callee(context* c, ast.sym* symbol) u64 {
     return U64_MAX;
 }
 
-// Marks atom `a` and each atom that it owns as taken by an unknown effect.
-fn escape(state mut* s, u32 a, atom_status status) void {
+// Marks atom `a` and each atom that it owns as taken by an unknown effect. Each atom pays one W
+// unit before the function reads or changes it.
+fn escape(context mut* c, state mut* s, u32 a, atom_status status) bool {
     bool mut@ own seen = new(bool, s->atoms_len);
     defer del(seen);
-    owned_from(s, a, seen);
+    if (!owned_from_paid(c, s, a, seen)) { return false; }
     u64 mut k = 0;
     while (k < seen.len) {
+        if (!pay(c, 1)) { return false; }
         if (seen[k]) {
             if (s->atoms[k].status.value == atom_status.live) {
                 s->atoms[k].status = status_fact{status, provenance.established};
@@ -4338,52 +4401,58 @@ fn escape(state mut* s, u32 a, atom_status status) void {
         }
         k += 1;
     }
+    return true;
 }
 
 // Gives each slot below `prefix` an unknown value. An owned leaf keeps an obligation of unknown
-// shape, and its old atom escapes. Returns true when a tracked fact changed.
-fn havoc_prefix(state mut* s, slot_key prefix) bool {
-    bool mut changed = false;
+// shape, and its old atom escapes. Each direct slot pays one W unit.
+fn havoc_prefix(context mut* c, state mut* s, slot_key prefix, bool mut* changed) bool {
+    *changed = false;
+    if (!pay(c, 1)) { return false; }
     u64 mut i = 0;
     while (i < s->slots_len) {
+        if (!pay(c, 1)) { return false; }
         slot item = s->slots[i];
         if (prefix_of(prefix, item.key)) {
             if (item.v.kind == value_kind.owned) {
                 atom a = s->atoms[cast(item.v.atom, u64)];
                 if (a.status.value == atom_status.live && a.root.value != root_kind.null_root) {
-                    changed = true;
+                    *changed = true;
                 }
-                escape(s, item.v.atom, atom_status.escaped);
+                if (!escape(c, s, item.v.atom, atom_status.escaped)) { return false; }
             }
             if (item.owning) {
                 s->slots[i].v = fresh_unknown_owner(s);
-                changed = true;
+                *changed = true;
             } else if (is_reference(item.ty) || item.array) {
                 s->slots[i].v = effect_value();
             }
         }
         i += 1;
     }
-    return changed;
+    return true;
 }
 
 // The storage that a value designates: its atoms take the unknown effect.
-fn havoc_value(state mut* s, value v) bool {
-    bool mut changed = false;
+fn havoc_value(context mut* c, state mut* s, value v, bool mut* changed) bool {
+    *changed = false;
     if (v.kind == value_kind.owned) {
-        escape(s, v.atom, atom_status.escaped);
-        changed = true;
+        if (!escape(c, s, v.atom, atom_status.escaped)) { return false; }
+        *changed = true;
     } else if (v.kind == value_kind.view) {
         u32 mut i = 0;
         while (i < v.count) {
+            if (!pay(c, 1)) { return false; }
             u32 a = v.sources[i];
-            if (s->atoms[cast(a, u64)].status.value == atom_status.live) { changed = true; }
+            if (s->atoms[cast(a, u64)].status.value == atom_status.live) { *changed = true; }
             s->atoms[cast(a, u64)].exposed = true;
             // An unknown effect can store any reference in the fields of the atom.
             s->atoms[cast(a, u64)].borrows = true;
             s->atoms[cast(a, u64)].params = true;
             if (s->atoms[cast(a, u64)].kind == atom_kind.cell) {
-                if (havoc_prefix(s, key_of(base_kind.cell, a))) { changed = true; }
+                bool mut nested = false;
+                if (!havoc_prefix(c, s, key_of(base_kind.cell, a), &nested)) { return false; }
+                if (nested) { *changed = true; }
             }
             if (s->atoms[cast(a, u64)].status.value == atom_status.live) {
                 s->atoms[cast(a, u64)].status =
@@ -4392,20 +4461,225 @@ fn havoc_value(state mut* s, value v) bool {
             i += 1;
         }
     } else if (v.kind == value_kind.address) {
-        if (havoc_prefix(s, v.target)) { changed = true; }
+        bool mut nested = false;
+        if (!havoc_prefix(c, s, v.target, &nested)) { return false; }
+        if (nested) { *changed = true; }
         if (v.target.base == base_kind.cell) {
             s->atoms[cast(v.target.id, u64)].exposed = true;
         }
     } else if (v.kind == value_kind.unknown) {
         if (v.retained_target) {
-            if (havoc_prefix(s, v.retained)) { changed = true; }
+            bool mut nested = false;
+            if (!havoc_prefix(c, s, v.retained, &nested)) { return false; }
+            if (nested) { *changed = true; }
             if (v.retained.base == base_kind.cell) {
                 s->atoms[cast(v.retained.id, u64)].exposed = true;
             }
         }
-        if (v.lost_target) { changed = true; }
+        if (v.lost_target) { *changed = true; }
     }
-    return changed;
+    return true;
+}
+
+// Pays for and scans one storage prefix. A write does not release the allocation that contains
+// the storage.
+fn havoc_written_prefix(context mut* c, state mut* s, slot_key prefix) bool {
+    bool mut changed = false;
+    return havoc_prefix(c, s, prefix, &changed);
+}
+
+// Scans one type occurrence after it pays W. Each struct declaration child pays W before use.
+// Shared type nodes pay again for each occurrence.
+fn has_reference_paid(context mut* c, types.node* t, bool mut* found) bool {
+    *found = false;
+    if (!pay(c, 1)) { return false; }
+    if (t == null) { return true; }
+    if (types.type_is_reference(t)) {
+        *found = true;
+        return true;
+    }
+    if (t->kind == types.type_kind.k_array) {
+        return has_reference_paid(c, t->elem, found);
+    }
+    if (t->kind != types.type_kind.k_struct || t->decl == null) { return true; }
+    ast.node* decl = fir.struct_decl(t);
+    u64 mut i = 0;
+    while (i < ast.ast_len(decl)) {
+        if (!pay(c, 1)) { return false; }
+        ast.node* item = ast.ast_child(decl, i);
+        if (item->kind == ast.ast_kind.k_field_decl) {
+            bool mut child = false;
+            if (!has_reference_paid(c, item->ty, &child)) { return false; }
+            if (child) {
+                *found = true;
+                return true;
+            }
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// An unknown write can retain a reference only when the written pointee can contain one. An
+// unknown or type-erased pointee keeps the conservative flags.
+fn retain_written_reference(context mut* c, atom mut* a, types.node* through) bool {
+    if (through != null && is_reference(through) &&
+        through->kind != types.type_kind.k_voidptr && through->elem != null &&
+        through->elem->kind != types.type_kind.k_void) {
+        bool mut found = false;
+        if (!has_reference_paid(c, through->elem, &found)) { return false; }
+        if (!found) { return true; }
+    }
+    a->borrows = true;
+    a->params = true;
+    return true;
+}
+
+// Forgets the tracked contents of storage that `v` can designate. `global` keeps a cell reachable
+// by a later indirect global write. Each possible atom redirect pays for one full atom scan.
+fn havoc_written_storage(context mut* c, state mut* s, value v, types.node* through, bool global)
+    bool {
+    u32 mut roots = 0;
+    if (v.kind == value_kind.owned ||
+        (v.kind == value_kind.address && v.target.base == base_kind.cell) ||
+        (v.kind == value_kind.unknown && v.retained_target &&
+        v.retained.base == base_kind.cell)) {
+        roots = 1;
+    } else if (v.kind == value_kind.view) {
+        roots = v.count;
+    }
+    while (roots > 0) {
+        if (!pay(c, s->atoms_len + 1)) { return false; }
+        roots -= 1;
+    }
+    value current = current_value(s, v);
+    if (current.kind == value_kind.owned) {
+        u32 a = current.atom;
+        if (cast(a, u64) < s->atoms_len && s->atoms[cast(a, u64)].used) {
+            if (!retain_written_reference(c, &s->atoms[cast(a, u64)], through)) { return false; }
+            s->atoms[cast(a, u64)].exposed = s->atoms[cast(a, u64)].exposed || global;
+            if (s->atoms[cast(a, u64)].kind == atom_kind.cell) {
+                if (!havoc_written_prefix(c, s, key_of(base_kind.cell, a))) { return false; }
+            }
+        }
+    } else if (current.kind == value_kind.view) {
+        u32 mut i = 0;
+        while (i < current.count) {
+            if (!pay(c, 1)) { return false; }
+            u32 a = current.sources[i];
+            if (cast(a, u64) < s->atoms_len && s->atoms[cast(a, u64)].used) {
+                if (!retain_written_reference(c, &s->atoms[cast(a, u64)], through)) {
+                    return false;
+                }
+                s->atoms[cast(a, u64)].exposed = s->atoms[cast(a, u64)].exposed || global;
+                if (s->atoms[cast(a, u64)].kind == atom_kind.cell) {
+                    if (!havoc_written_prefix(c, s, key_of(base_kind.cell, a))) { return false; }
+                }
+            }
+            i += 1;
+        }
+    } else if (current.kind == value_kind.address) {
+        if (!havoc_written_prefix(c, s, current.target)) { return false; }
+        if (global && current.target.base == base_kind.cell &&
+            cast(current.target.id, u64) < s->atoms_len) {
+            s->atoms[cast(current.target.id, u64)].exposed = true;
+        }
+    } else if (current.kind == value_kind.unknown) {
+        if (current.retained_target && !havoc_written_prefix(c, s, current.retained)) {
+            return false;
+        }
+        return !current.lost_target;
+    }
+    return true;
+}
+
+// Publishes a callee write footprint before exact binding. A later binding failure uses the
+// unknown-call state effect, but it does not remove this transitive summary effect.
+fn propagate_write_footprint(context mut* c, summary* sum, argument@ args,
+    leaf_list* arg_leaves) bool {
+    if (sum->global_writes) { c->global_writes = true; }
+    if (sum->view_writes == 0 && !sum->writes_high) { return true; }
+    u64 mut i = 0;
+    while (i < args.len) {
+        if (!pay(c, 1)) { return false; }
+        if (writes_param(sum, i + 1)) {
+            if (args[i].aggregate) {
+                u64 mut j = 0;
+                while (j < args[i].count) {
+                    if (!pay(c, 1)) { return false; }
+                    note_param_write(c, arg_leaves->items[args[i].first + j].v.param);
+                    j += 1;
+                }
+            } else {
+                note_param_write(c, args[i].v.param);
+            }
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// Applies stores that the callee post-state cannot name. An indirect global write can reach each
+// argument, caller slot, and cell that a prior effect exposed. A by-value aggregate write follows
+// only the actual leaves of its formal parameter.
+fn apply_write_footprint(context mut* c, state mut* s, summary* sum, argument@ args,
+    leaf_list* arg_leaves) bool {
+    u64 mut i = 0;
+    if (sum->global_writes) {
+        while (i < args.len) {
+            if (!pay(c, 1)) { return false; }
+            if (args[i].aggregate) {
+                u64 mut j = 0;
+                while (j < args[i].count) {
+                    leaf item = arg_leaves->items[args[i].first + j];
+                    if (!pay(c, 1) || !havoc_written_storage(c, s, item.v, item.ty, true)) {
+                        return false;
+                    }
+                    j += 1;
+                }
+            } else if (!havoc_written_storage(c, s, args[i].v, args[i].ty, true)) {
+                return false;
+            }
+            i += 1;
+        }
+        i = 0;
+        while (i < c->callers_len) {
+            if (!pay(c, 1) ||
+                !havoc_written_prefix(c, s, key_of(base_kind.caller, cast(i, u32)))) {
+                return false;
+            }
+            i += 1;
+        }
+        i = 0;
+        while (i < s->atoms_len) {
+            if (!pay(c, 1)) { return false; }
+            atom item = s->atoms[i];
+            if (item.used && (item.exposed || item.addressed) && item.kind == atom_kind.cell) {
+                if (!havoc_written_prefix(c, s, key_of(base_kind.cell, cast(i, u32)))) {
+                    return false;
+                }
+            }
+            i += 1;
+        }
+    }
+    if (sum->view_writes == 0 && !sum->writes_high) { return true; }
+    i = 0;
+    while (i < args.len) {
+        if (!pay(c, 1)) { return false; }
+        if (writes_param(sum, i + 1)) {
+            if (args[i].aggregate) {
+                u64 mut j = 0;
+                while (j < args[i].count) {
+                    if (!pay(c, 1)) { return false; }
+                    leaf item = arg_leaves->items[args[i].first + j];
+                    if (!havoc_written_storage(c, s, item.v, item.ty, false)) { return false; }
+                    j += 1;
+                }
+            }
+        }
+        i += 1;
+    }
+    return true;
 }
 
 /// A call without a complete summary (D17.13, D17.18). It takes each owned argument, and it can
@@ -4422,18 +4696,26 @@ fn unknown_call(context mut* c, state mut* s, argument@ args, leaf_list* arg_lea
             while (j < args[i].count) {
                 value v = arg_leaves->items[args[i].first + j].v;
                 note_param_read(c, v.param);
-                if (havoc_value(s, v)) { changed = true; }
+                bool mut argument_changed = false;
+                if (!havoc_value(c, s, v, &argument_changed)) { return; }
+                if (argument_changed) { changed = true; }
                 j += 1;
             }
         } else {
             note_param_read(c, args[i].v.param);
-            if (havoc_value(s, args[i].v)) { changed = true; }
+            bool mut argument_changed = false;
+            if (!havoc_value(c, s, args[i].v, &argument_changed)) { return; }
+            if (argument_changed) { changed = true; }
         }
         i += 1;
     }
     i = 0;
     while (i < c->callers_len) {
-        if (havoc_prefix(s, key_of(base_kind.caller, cast(i, u32)))) { changed = true; }
+        bool mut caller_changed = false;
+        if (!havoc_prefix(c, s, key_of(base_kind.caller, cast(i, u32)), &caller_changed)) {
+            return;
+        }
+        if (caller_changed) { changed = true; }
         i += 1;
     }
     i = 0;
@@ -4441,8 +4723,13 @@ fn unknown_call(context mut* c, state mut* s, argument@ args, leaf_list* arg_lea
         atom a = s->atoms[i];
         // An escaped atom left the proof with its storage: its slots change nothing here.
         if (a.used && a.exposed && a.kind == atom_kind.cell &&
-            a.status.value != atom_status.escaped &&
-            havoc_prefix(s, key_of(base_kind.cell, cast(i, u32)))) { changed = true; }
+            a.status.value != atom_status.escaped) {
+            bool mut atom_changed = false;
+            if (!havoc_prefix(c, s, key_of(base_kind.cell, cast(i, u32)), &atom_changed)) {
+                return;
+            }
+            if (atom_changed) { changed = true; }
+        }
         if (a.used && a.exposed && a.status.value == atom_status.live) {
             s->atoms[i].status = status_fact{atom_status.unknown, provenance.established};
             s->atoms[i].borrows = true;
@@ -4877,6 +5164,9 @@ fn apply(context mut* c, state mut* s, state* entry, callee* target, argument@ a
     u64 interfaces = sum->interface.len;
     if (!pay(c, sum->post.slots_len + sum->post.atoms_len + interfaces +
         cast(sum->required_some.len, u64) + 1)) { return true; }
+    // This summary metadata remains valid when exact binding fails below. Publish it before any
+    // such fallback. A refused W charge stops this computation and permits no fallback work.
+    if (!propagate_write_footprint(c, sum, args, arg_leaves)) { return true; }
     // Each argument whose storage the callee reads must be live at the call (D17.14), and so
     // must each reference leaf of a by-value aggregate argument.
     u64 mut r = 0;
@@ -5261,6 +5551,7 @@ fn apply(context mut* c, state mut* s, state* entry, callee* target, argument@ a
         if (slot_of_write[j] != U64_MAX) { s->slots[slot_of_write[j]].v = written[j]; }
         j += 1;
     }
+    if (!apply_write_footprint(c, s, sum, now[..], arg_leaves)) { return c->stopped; }
     return true;
 }
 
@@ -5733,7 +6024,7 @@ fn forget_escaped_owners(context mut* c, state mut* s) void {
         slot item = s->slots[i];
         if (reached_key(item.key, locals[..], atoms[..]) && item.owning) {
             if (item.v.kind == value_kind.owned) {
-                escape(s, item.v.atom, atom_status.escaped);
+                if (!escape(c, s, item.v.atom, atom_status.escaped)) { return; }
             }
             s->slots[i].v = fresh_unknown_owner(s);
         } else if (item.v.kind == value_kind.scalar && item.v.test != NONE &&
@@ -6309,6 +6600,9 @@ fn take_summary(context mut* c) summary {
     out.reads_high = c->reads_high;
     out.address_escapes = c->address_escapes;
     out.escapes_high = c->escapes_high;
+    out.view_writes = c->view_writes;
+    out.writes_high = c->writes_high;
+    out.global_writes = c->global_writes;
     out.required_some = c->required_some;
     out.lost_required = c->lost_required;
     out.events = c->events;
@@ -6322,6 +6616,8 @@ fn same_summary(context mut* c, summary* a, summary* b, bool mut* same) bool {
     if (a->known != b->known || a->returns != b->returns || a->residual != b->residual ||
         a->view_reads != b->view_reads || a->reads_high != b->reads_high ||
         a->address_escapes != b->address_escapes || a->escapes_high != b->escapes_high ||
+        a->view_writes != b->view_writes || a->writes_high != b->writes_high ||
+        a->global_writes != b->global_writes ||
         a->proof.kind != b->proof.kind || a->proof.failed != b->proof.failed ||
         a->interface.len != b->interface.len || a->lost_required != b->lost_required ||
         !same_requirements(a->required_some.items[..a->required_some.len],
