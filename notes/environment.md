@@ -636,7 +636,8 @@ without a rewrite.
   environment: a runner image, a toolchain or a mirror.
 - `fort.yml` builds and tests the language server in its job `lsp`, apart from the job
   `bootstrap` (T-264). `bootstrap` builds the default targets except `fort_lsp` and the C unit
-  suites, and runs the label `fort`; `lsp` builds `fort_lsp` and runs the label `lsp`. Each job
+  suites, and runs the label `fort` without the label `modules`; `modules` runs the label
+  `modules`; `lsp` builds `fort_lsp` and runs the label `lsp`. Each job
   bootstraps the compiler itself, as `lint` does, so no job waits for another. **The job
   `bootstrap` names its targets**: `fort fort_std lang_ffi_helpers`, the default build without
   `fort_lsp` and the C unit suites. A new `ALL` target in `CMakeLists.txt` gets no CI build
@@ -675,9 +676,36 @@ without a rewrite.
   The worst case is 3 pairs of 2 calls of 130 s (120 s, then 10 s to KILL), plus 2 sleeps of 10
   s: 800 s. That is inside the 840 s step bound, so the third pair can run to its end.
   A normal install takes 9 to 34 seconds on Linux and 21 to 52 seconds on Darwin.
-- The `bootstrap` job builds the chain and runs every ctest test of the release preset. On
-  2026-10-16 it took 57 to 90 minutes: main at 5a0bb72b took 90 minutes on ubuntu-latest. The
-  90-minute bound cancelled two merge groups with no failed test: run 38858719872 after 90 m 33 s
-  on ubuntu-latest, and run 38861014412 after 90 m 17 s on ubuntu-24.04. The job bound is 150
-  minutes until a split of `fort-modules` brings the job under 60 minutes again. Measure the job
-  time of a run before you lower the bound.
+- The `bootstrap` job builds the chain, runs the label `fort` without the label `modules`, and
+  then runs the source audit. The job `modules` runs the module corpus `test/fort` in 2 parts
+  (`FORT_MODULE_SHARDS` in `CMakeLists.txt`, `notes/testing.md`). Each host runs 2 `modules`
+  jobs, and each one runs 1 part, `ctest -R '^fort-modules-<k>-of-2$'`. The bootstrap in a
+  `modules` job takes about 1 minute. A part name holds the count of parts. If the `-of-<n>`
+  of the `ctest -R` pattern differs from `FORT_MODULE_SHARDS`, each `modules` job selects no test
+  and `--no-tests=error` fails it. That guard does not see a matrix that leaves a part out:
+  `shard: [1]` with `-of-2` passes and never runs part 2. The ctest `fort-modules-shards` reads
+  `fort.yml` for that case. It fails unless the `modules` matrix `shard` lists each part 1 to
+  `FORT_MODULE_SHARDS` once, and the `ctest -R` pattern and the job name hold that count.
+- Each run now holds 2 more macOS jobs than before the split: 6 `modules` jobs, 2 of them on
+  `macos-latest`. GitHub runs fewer macOS jobs at a time than Linux jobs, so a macOS job can
+  wait in the queue while the Linux jobs run. The wall time of a run can then exceed the time of
+  its longest job, because a job bound counts from the start of the job and not from the queue.
+- **Why the corpus runs on 2 runners.** Before the split, on 2026-10-16, `bootstrap` took 57 to
+  90 minutes: main at 5a0bb72b took 90 minutes on ubuntu-latest. The 90-minute bound cancelled
+  two merge groups with no failed test: run 38858719872 after 90 m 33 s on ubuntu-latest, and run
+  38861014412 after 90 m 17 s on ubuntu-24.04. The 9 `bootstrap` jobs of the merge-group runs
+  38908543068, 38923357773 and 38933193124 took 58.4 to 89.8 minutes. In those jobs the ctest
+  `fort-modules` took 1697 to 2718 s, the audit step took 16.5 to 36.9 minutes, the 4 enforce
+  steps took 2.4 to 4.0 minutes, and the other 37 ctest tests took 4 to 7 minutes of wall time.
+  `fort-modules` already ran its 584 tests with `-j 4`, one worker for each processor of the
+  runner. In the VM of section 1 (6 processors, x86-64 under qemu) the 584 tests took 6740 s of
+  worker time and 1124 s of wall time. The longest test took 90 s, and the median test took 8 s.
+  So the corpus is bound by the processors, and no single test or serial step holds it. More
+  workers on one runner do not help. A second runner halves the corpus. The two parts took
+  3350 s and 3390 s of worker time, and `ctest -L '^modules$'` ran them in 552 s and 574 s.
+- The expected job times after the split come from the 9 jobs above. `bootstrap` is the job
+  time minus `fort-modules`: 26.5 to 47.9 minutes. A `modules` job is about 1.5 minutes of setup
+  and build plus half of the corpus: 15 to 25 minutes. The bound of `bootstrap` is 90 minutes and
+  the bound of `modules` is 60 minutes. The audit step grew from 5.8 to 7.3 minutes (run
+  38434591745, 2026-10-13) to 16.5 to 36.9 minutes (2026-10-16), and it now holds the
+  `bootstrap` time. Measure the job time of a run before you lower a bound.
