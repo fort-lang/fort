@@ -274,6 +274,129 @@ fn retained_refusal() void {
     ownership_summary_model.free(&out);
 }
 
+// A summary owns its ordered static source facts. It rejects caller-dependent source state.
+fn static_sources() void {
+    ownership_calls_env.env mut e = ownership_calls_env.env{};
+    ownership_calls_env.open(&e);
+    defer ownership_calls_env.close(&e);
+    ownership_api.source_fact[2] mut sources = {
+        ownership_api.source_fact{
+            .key = ownership_calls_env.id(ownership_api.entity_kind.source, 300),
+            .kind = ownership_api.source_kind.static_storage,
+            .validity = ownership_api.validity_kind.live},
+        ownership_api.source_fact{
+            .key = ownership_calls_env.id(ownership_api.entity_kind.source, 301),
+            .kind = ownership_api.source_kind.static_storage,
+            .validity = ownership_api.validity_kind.live},
+    };
+    e.input.sources = sources[..];
+    ownership_summary_model.summary mut first = ownership_summary_model.clone(&e.input,
+        &e.services);
+    ownership_calls_env.accepted(first.proof);
+    assert(first.sources.len == 2);
+    assert(ownership_state.same_source(first.sources[0], sources[0]));
+    assert(ownership_state.same_source(first.sources[1], sources[1]));
+    sources[0].validity = ownership_api.validity_kind.ended;
+    assert(first.sources[0].validity == ownership_api.validity_kind.live);
+    ownership_summary_model.summary_view observed = ownership_summary_model.view(&first);
+    ownership_summary_model.summary mut second = ownership_summary_model.clone(&observed,
+        &e.services);
+    ownership_calls_env.accepted(second.proof);
+    ownership_summary_model.free(&first);
+    assert(second.sources.len == 2);
+    assert(second.sources[0].validity == ownership_api.validity_kind.live);
+    assert(second.sources[1].kind == ownership_api.source_kind.static_storage);
+    ownership_summary_model.free(&second);
+}
+
+// The model accepts only ordered, live static source facts without allocations.
+fn invalid_static_sources() void {
+    u32 mut scenario = 0;
+    while (scenario < 9) {
+        ownership_calls_env.env mut e = ownership_calls_env.env{};
+        ownership_calls_env.open(&e);
+        ownership_api.source_fact[2] mut sources = {
+            ownership_api.source_fact{
+                .key = ownership_calls_env.id(ownership_api.entity_kind.source, 300),
+                .kind = ownership_api.source_kind.static_storage,
+                .validity = ownership_api.validity_kind.live},
+            ownership_api.source_fact{
+                .key = ownership_calls_env.id(ownership_api.entity_kind.source, 301),
+                .kind = ownership_api.source_kind.static_storage,
+                .validity = ownership_api.validity_kind.live},
+        };
+        if (scenario == 0) { sources[0].key = ownership_api.entity_id{}; }
+        if (scenario == 1) { sources[0].key.kind = ownership_api.entity_kind.slot; }
+        if (scenario == 2) { sources[0].kind = ownership_api.source_kind.stack; }
+        if (scenario == 3) { sources[0].validity = ownership_api.validity_kind.unknown; }
+        if (scenario == 4) { sources[0].validity = ownership_api.validity_kind.released; }
+        if (scenario == 5) { sources[0].validity = ownership_api.validity_kind.ended; }
+        if (scenario == 6) {
+            sources[0].allocation =
+                ownership_calls_env.id(ownership_api.entity_kind.allocation, 300);
+        }
+        if (scenario == 7) { sources[1].key = sources[0].key; }
+        if (scenario == 8) {
+            ownership_api.source_fact swap = sources[0];
+            sources[0] = sources[1];
+            sources[1] = swap;
+        }
+        e.input.sources = sources[..];
+        ownership_summary_model.summary mut out = ownership_summary_model.clone(&e.input,
+            &e.services);
+        ownership_calls_env.rejected(out.proof,
+            ownership_api.incomplete_reason.invalid_input);
+        assert(out.residual_effects && e.counts.events == 1);
+        ownership_summary_model.free(&out);
+        ownership_calls_env.close(&e);
+        scenario += 1;
+    }
+}
+
+// One published source adds its copy and canonical-key charges. Each refusal keeps its reason.
+fn static_source_work() void {
+    ownership_calls_env.env mut e = ownership_calls_env.env{};
+    ownership_calls_env.open(&e);
+    defer ownership_calls_env.close(&e);
+    ownership_calls_env.reset(&e);
+    ownership_summary_model.summary mut empty = ownership_summary_model.clone(&e.input,
+        &e.services);
+    ownership_calls_env.accepted(empty.proof);
+    u64 without = e.counts.calls;
+    ownership_summary_model.free(&empty);
+    ownership_api.source_fact[1] source = {ownership_api.source_fact{
+        .key = ownership_calls_env.id(ownership_api.entity_kind.source, 300),
+        .kind = ownership_api.source_kind.static_storage,
+        .validity = ownership_api.validity_kind.live}};
+    e.input.sources = source[..];
+    ownership_calls_env.reset(&e);
+    ownership_summary_model.summary mut copied = ownership_summary_model.clone(&e.input,
+        &e.services);
+    ownership_calls_env.accepted(copied.proof);
+    assert(e.counts.calls == without + 3);
+    assert(copied.sources.len == 1);
+    ownership_summary_model.free(&copied);
+    u64 mut denied = 1;
+    while (denied <= 3) {
+        ownership_calls_env.reset(&e);
+        e.counts.deny_at = denied;
+        ownership_summary_model.summary mut refused = ownership_summary_model.clone(&e.input,
+            &e.services);
+        ownership_calls_env.rejected(refused.proof,
+            ownership_api.incomplete_reason.work_limit);
+        assert(refused.residual_effects && e.counts.events == 1);
+        assert(refused.proof.terminal.limit.category == ownership_api.limit_category.w);
+        assert(e.counts.calls == denied);
+        assert(e.counts.denied_work == ownership_api.work_kind.summary_solver);
+        assert(refused.proof.terminal.limit.used == 7);
+        if (denied < 3) { assert(refused.sources.len == 0); }
+        else { assert(refused.sources.len == 1); }
+        ownership_summary_model.free(&refused);
+        denied += 1;
+    }
+    e.counts.deny_at = 0;
+}
+
 // E names the relations that one owner retains now. A second copy adds no unit.
 // The input retains 12: two requirements, two effects, one guard, one result, one
 // retained relation, one case, two outcome effects, one order, and one correlation.
@@ -312,6 +435,9 @@ fn main() i32 {
     canonical_refusals();
     unproved_order();
     retained_refusal();
+    static_sources();
+    invalid_static_sources();
+    static_source_work();
     content_count();
     println("direct-call model ok");
     return 0;

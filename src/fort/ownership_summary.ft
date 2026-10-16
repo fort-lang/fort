@@ -365,15 +365,23 @@ fn caller_visible(call_context* c, ownership_api.place_path place,
     return false;
 }
 
-// A callee copy of one of its parameters into caller storage becomes a copy from the argument
-// local of this body (D17.14). Callers replay it into their own storage. Any other callee
-// store into caller storage stays unexported.
+// A callee copy of one parameter becomes a copy from the argument local of this body (D17.14).
+// An empty replacement keeps its exact value. Other stores stay unexported.
 fn export_store(call_context* c, fir.statement* call, ownership_flow.step* s,
-    ownership_summary_model.summary* bound, ownership_summary_model.effect_node node) bool {
+    ownership_summary_model.summary* bound, ownership_summary_model.effect_node mut node,
+    bool refreshed) bool {
+    ownership_api.ordered_effect mut effect = node.effect;
+    effect.operation = s->operation;
+    node.effect = effect;
+    if (node.payload == ownership_summary_model.payload_kind.replacement) {
+        if (!refreshed || node.value.borrows.len != 0) { return false; }
+        ownership_summary_body.export_effect(c->in, c->program, node,
+            s->source, call->loc.file);
+        return ownership_api.successful(c->program->proof);
+    }
     if (node.payload != ownership_summary_model.payload_kind.copy ||
         node.operand.projections.len != 0 ||
-        caller_visible(c, node.operand, ownership_api.entity_id{}) ||
-        !caller_visible(c, node.effect.place, ownership_api.entity_id{})) { return false; }
+        caller_visible(c, node.operand, ownership_api.entity_id{})) { return false; }
     u64 mut r = 0;
     while (r < bound->roots.len) {
         if (!call_work(c, 1)) { return false; }
@@ -399,6 +407,64 @@ fn export_store(call_context* c, fir.statement* call, ownership_flow.step* s,
         r += 1;
     }
     return false;
+}
+
+// A local aggregate literal uses private flow storage for each reference leaf. A proved callee
+// store writes the canonical leaf. Refresh each private leaf that exists on this path, so a later
+// copied aggregate reads the current value.
+fn refresh_private_leaves(call_context* c, ownership_flow.step* s,
+    ownership_state.state mut* facts, ownership_api.place_path canonical,
+    ownership_api.entity_id event, bool mut* refreshed) bool {
+    ownership_summary_body.body_program mut* program = c->program;
+    u64 mut i = 0;
+    while (i < program->effects_len) {
+        ownership_api.place_path private = program->effect_flow[i];
+        if (!call_work(c, 1) || !call_work(c, private.projections.len) ||
+            !call_work(c, canonical.projections.len) ||
+            !call_work(c, program->effects[i].effect.place.projections.len)) { return false; }
+        bool mapped = !ownership_state.same_place(private, canonical) &&
+            ownership_state.same_place(program->effects[i].effect.place, canonical);
+        bool mut duplicate = false;
+        u64 mut j = 0;
+        while (mapped && j < i && !duplicate) {
+            if (!call_work(c, 1) ||
+                !call_work(c, program->effects[j].effect.place.projections.len) ||
+                !call_work(c, canonical.projections.len) ||
+                !call_work(c, program->effect_flow[j].projections.len) ||
+                !call_work(c, private.projections.len)) { return false; }
+            duplicate = ownership_state.same_place(program->effects[j].effect.place,
+                canonical) && ownership_state.same_place(program->effect_flow[j], private);
+            j += 1;
+        }
+        bool mut private_contents = false;
+        if (mapped && !duplicate) {
+            if (!call_work(c, facts->contents_len)) { return false; }
+            u64 mut k = 0;
+            while (k < facts->contents_len && !private_contents) {
+                private_contents = ownership_state.same_place(facts->contents[k].place, private);
+                k += 1;
+            }
+        }
+        if (private_contents) {
+            ownership_transfer.event_binding[1] events = {
+                ownership_transfer.event_binding{s->operation, event}};
+            ownership_transfer.request transfer = ownership_transfer.request{
+                .kind = ownership_transfer.action.copy, .operation = s->operation,
+                .source_position = s->source, .source = canonical, .destination = private,
+                .direct_source_proved = true, .direct_destination_proved = true,
+                .event_map_complete_proved = true, .leaf_places_proved = true,
+                .event_bindings = events[..]};
+            ownership_api.proof_status proof = ownership_transfer.apply(facts,
+                c->in->services, &transfer);
+            if (!ownership_api.successful(proof)) {
+                program->proof = proof;
+                return false;
+            }
+            *refreshed = true;
+        }
+        i += 1;
+    }
+    return true;
 }
 
 fn listed(ownership_api.entity_id@ keys, ownership_api.entity_id key) bool {
@@ -429,7 +495,7 @@ struct continuation {
 // A call of several targets exports nothing: an exported requirement or effect would bind
 // each caller to one target, and a target of several is not a witness (`spec/fir.md` 14.1).
 fn export_call(call_context* c, ownership_summary_body.call_site site, fir.statement* call,
-    ownership_flow.step* s, ownership_calls.application* applied, u64 index, bool definite,
+    ownership_flow.step* s, ownership_calls.application mut* applied, u64 index, bool definite,
     continuation mut* kept) bool {
     ownership_summary_body.body_program mut* program = c->program;
     ownership_summary_model.summary* bound = &applied->bound.model;
@@ -470,10 +536,22 @@ fn export_call(call_context* c, ownership_summary_body.call_site site, fir.state
     while (i < bound->effects.len) {
         if (!call_work(c, 2) || !call_work(c, applied_case.effects.len)) { return false; }
         ownership_summary_model.effect_node node = bound->effects[i];
-        if (listed(applied_case.effects, node.effect.key) &&
-            node.payload != ownership_summary_model.payload_kind.read &&
+        bool active = listed(applied_case.effects, node.effect.key);
+        bool store = node.payload == ownership_summary_model.payload_kind.copy ||
+            node.payload == ownership_summary_model.payload_kind.replacement;
+        bool mut refreshed = false;
+        if (active && store &&
+            applied->normal_continuation &&
+            !refresh_private_leaves(c, s, &applied->state, node.effect.place,
+                site.event, &refreshed)) {
+            return false;
+        }
+        bool visible = active && node.payload != ownership_summary_model.payload_kind.read &&
             (caller_visible(c, node.effect.place, node.effect.allocation) ||
-            caller_visible(c, node.operand, ownership_api.entity_id{}))) {
+            caller_visible(c, node.operand, ownership_api.entity_id{}));
+        if (active &&
+            node.payload != ownership_summary_model.payload_kind.read &&
+            (refreshed || visible)) {
             if (!definite) {
                 program->call_residual = true;
             } else if (n < kept->stores_len) {
@@ -483,7 +561,9 @@ fn export_call(call_context* c, ownership_summary_body.call_site site, fir.state
             } else {
                 kept->stores[n] = node.effect.key;
                 kept->stores_len = n + 1;
-                if (!export_store(c, call, s, bound, node)) { program->call_residual = true; }
+                if (!export_store(c, call, s, bound, node, refreshed)) {
+                    program->call_residual = true;
+                }
             }
             n += 1;
         }
@@ -1735,9 +1815,30 @@ fn publish(ownership_summary_body.body_input* in,
         }
         i += 1;
     }
+    u64 mut sources_len = 0;
+    i = 0;
+    while (i < program->entry.sources_len) {
+        if (!ownership_summary_body.work(program, 1)) { return failed(program); }
+        if (program->entry.sources[i].kind == ownership_api.source_kind.static_storage) {
+            sources_len += 1;
+        }
+        i += 1;
+    }
+    ownership_api.source_fact mut@ own sources = new(ownership_api.source_fact, sources_len);
+    defer del(sources);
+    i = 0;
+    u64 mut source = 0;
+    while (i < program->entry.sources_len) {
+        if (!ownership_summary_body.work(program, 1)) { return failed(program); }
+        if (program->entry.sources[i].kind == ownership_api.source_kind.static_storage) {
+            sources[source] = program->entry.sources[i];
+            source += 1;
+        }
+        i += 1;
+    }
     exit_snapshot* first = ordered[0];
     ownership_summary_model.summary_view input = ownership_summary_model.summary_view{
-        .roots = program->roots[..program->roots_len],
+        .sources = sources[..], .roots = program->roots[..program->roots_len],
         .requirements = program->requirements[..program->requirements_len],
         .effects = program->effects[..program->effects_len], .order = built.order[..unique],
         .predicates = built.predicates[..built.predicates_len],

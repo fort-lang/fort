@@ -1669,9 +1669,16 @@ fn children_empty(request* req, application mut* out, ownership_summary_model.co
 }
 
 
+// An empty-output row names the old value of an output leaf (D17.15). A literal writes each of
+// its leaves at one operation, so the rows of that operation hold before its first effect. A
+// later effect of the same operation does not check them again: an earlier field has written
+// its own leaf by then. The leaves of one literal are disjoint, and each transfer refuses a known
+// live owner at its write. A row whose source is a loaded root keeps a check before each effect.
+// No empty-output row is `captured` today: a result row has no source, an owner store needs
+// storage that is not loaded (`output_ready`), and a loaded root gets a new source of its own.
 fn requirements_proved(request* req, application mut* out,
     ownership_summary_model.context* ctx, ownership_summary_model.effect_node node,
-        bool initial) bool {
+        bool initial, bool first) bool {
     u64 mut i = 0;
     while (i < out->bound.model.requirements.len) {
         if (!ownership_summary_model.work(ctx, &out->proof, 1)) { return false; }
@@ -1709,7 +1716,14 @@ fn requirements_proved(request* req, application mut* out,
             }
             loaded += 1;
         }
-        if (pending) { i += 1; continue; }
+        // The `captured` guard keeps the check before each effect for a loaded row. No producer
+        // makes such a row today; see the comment above this function.
+        if (pending ||
+            (row.kind == ownership_summary_model.requirement_kind.empty_output && !captured &&
+            !first)) {
+            i += 1;
+            continue;
+        }
         row.source = key(&out->bound, ctx, row.source);
         row.range = range(&out->bound, ctx, row.range);
         ownership_api.entity_id relation = captured ? row.source : row.key;
@@ -1845,6 +1859,29 @@ fn seed_locals(request* req, application mut* out, ownership_summary_model.conte
                     return false;
                 }
             }
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// A summary publishes only intrinsic static sources. Seed each source before an effect uses it.
+// The stable key lets repeated calls reuse one equal fact. A conflicting fact fails closed.
+fn seed_sources(request* req, application mut* out, ownership_summary_model.context* ctx) bool {
+    u64 mut i = 0;
+    while (i < out->bound.model.sources.len) {
+        if (!ownership_summary_model.work(ctx, &out->proof, out->state.sources_len + 1)) {
+            return false;
+        }
+        ownership_api.source_fact source = out->bound.model.sources[i];
+        u64 at = ownership_state.source_index(&out->state, source.key);
+        if (at == ownership_api.U64_MAX) {
+            ownership_state.append_sources(&out->state, source);
+        } else if (!ownership_state.same_source(out->state.sources[at], source)) {
+            out->proof = caller_failure(req, out, source.key, req->operation,
+                ownership_api.incomplete_reason.missing_correspondence,
+                "published static source conflicts with caller state");
+            return false;
         }
         i += 1;
     }
@@ -2083,6 +2120,17 @@ fn selected_transfer(request* req, application mut* out,
     if (!projected && !whole) {
         return ownership_transfer.apply(&out->state, req->services, transfer);
     }
+    if (transfer->kind == ownership_transfer.action.inspect && destination != null &&
+        types.type_is_reference(destination)) {
+        transfer->leaf_places_proved = true;
+        return ownership_transfer.apply(&out->state, req->services, transfer);
+    }
+    if (transfer->kind == ownership_transfer.action.assignment && projected &&
+        destination != null &&
+        types.type_is_reference(destination)) {
+        transfer->leaf_places_proved = true;
+        return ownership_transfer.apply(&out->state, req->services, transfer);
+    }
     if (transfer->kind == ownership_transfer.action.assignment &&
         transfer->destination.projections.len == 0) {
         ownership_api.projection@ none = {};
@@ -2113,7 +2161,8 @@ fn selected_transfer(request* req, application mut* out,
 }
 
 fn apply_node(request* req, application mut* out, ownership_summary_model.context mut* ctx,
-    ownership_summary_model.effect_node mut node, ownership_transfer.event_binding@ events) bool {
+    ownership_summary_model.effect_node mut node, ownership_transfer.event_binding@ events,
+    bool first) bool {
     ctx->operation = node.effect.operation;
     if (!ownership_summary_model.work(ctx, &out->proof, 2) ||
         !ownership_summary_model.effect_charge(ctx, &out->proof, &out->bound.relations)) {
@@ -2131,7 +2180,8 @@ fn apply_node(request* req, application mut* out, ownership_summary_model.contex
     node.value.borrows = borrow_list(&out->bound, ctx, node.value.borrows);
     node.range = range(&out->bound, ctx, node.range);
     out->proof = out->bound.proof;
-    if (!ownership_api.successful(out->proof) || !requirements_proved(req, out, ctx, node, false)) {
+    if (!ownership_api.successful(out->proof) ||
+        !requirements_proved(req, out, ctx, node, false, first)) {
         return false;
     }
     if (node.payload == ownership_summary_model.payload_kind.reference_load) {
@@ -2679,7 +2729,7 @@ fn apply_selected(request* req, u64 index, bool guarded) application {
                 "linear call has incomplete effects or outcomes");
         return out;
     }
-    if (!copy_caller(req, &out, &ctx)) { return out; }
+    if (!copy_caller(req, &out, &ctx) || !seed_sources(req, &out, &ctx)) { return out; }
     u64 mut alias = 0;
     while (alias < out.bound.aliases.len) {
         if (!ownership_summary_model.work(&ctx, &out.proof, 1)) { return out; }
@@ -2710,7 +2760,8 @@ fn apply_selected(request* req, u64 index, bool guarded) application {
             if (!ownership_summary_model.work(&ctx, &out.proof, 1)) { return out; }
             if (ownership_summary_model.same(sequence[preflight],
                 out.bound.model.effects[at].effect.key)) {
-                if (!requirements_proved(req, &out, &ctx, out.bound.model.effects[at], true)) {
+                if (!requirements_proved(req, &out, &ctx, out.bound.model.effects[at], true,
+                    true)) {
                     return out;
                 }
                 break;
@@ -2720,6 +2771,8 @@ fn apply_selected(request* req, u64 index, bool guarded) application {
         preflight += 1;
     }
     if (!seed_locals(req, &out, &ctx, events[..])) { return out; }
+    // The operation of the effect before this one. Its empty-output rows were checked there.
+    ownership_api.operation_position mut previous = ownership_api.operation_position{};
     u64 mut i = 0;
     while (i < sequence.len) {
         u64 mut j = 0;
@@ -2727,9 +2780,13 @@ fn apply_selected(request* req, u64 index, bool guarded) application {
         while (j < out.bound.model.effects.len) {
             if (!ownership_summary_model.work(&ctx, &out.proof, 1)) { return out; }
             if (ownership_summary_model.same(sequence[i], out.bound.model.effects[j].effect.key)) {
-                if (!apply_node(req, &out, &ctx, out.bound.model.effects[j], events[..])) {
+                ownership_api.operation_position at = out.bound.model.effects[j].effect.operation;
+                bool first = i == 0 || ownership_keys.operation(previous, at) != 0;
+                if (!apply_node(req, &out, &ctx, out.bound.model.effects[j], events[..],
+                    first)) {
                     return out;
                 }
+                previous = at;
                 found = true;
                 break;
             }

@@ -152,30 +152,42 @@ fn rebase(ownership_api.place_path path, ownership_api.place_path source,
     return out;
 }
 
-fn has_reference(types.node* ty, u64 depth) bool {
+fn leaf_spend(ownership_state.unit_counter mut* paid) bool {
+    return paid == null || ownership_state.unit_spend(paid);
+}
+
+fn leaf_work_valid(ownership_state.unit_counter* paid) bool {
+    return paid == null || ownership_api.successful(paid->proof);
+}
+
+fn has_reference(types.node* ty, u64 depth, ownership_state.unit_counter mut* paid) bool {
     if (ty == null || depth > MAX_DEPTH) { return true; }
+    if (!leaf_spend(paid)) { return true; }
     if (types.type_is_reference(ty)) { return true; }
     if (ty->kind == types.type_kind.k_array) {
-        return has_reference(ty->elem, depth + 1);
+        return has_reference(ty->elem, depth + 1, paid);
     }
     if (ty->kind != types.type_kind.k_struct || ty->decl == null) { return false; }
     ast.sym* record = cast(ty->decl, ast.sym*);
     if (record->node == null) { return true; }
     u64 mut i = 0;
     while (i < ast.ast_len(record->node)) {
+        if (!leaf_spend(paid)) { return true; }
         ast.node* member = ast.ast_child(record->node, i);
         if (member->kind == ast.ast_kind.k_field_decl &&
-            has_reference(member->ty, depth + 1)) { return true; }
+            has_reference(member->ty, depth + 1, paid)) { return true; }
         i += 1;
     }
     return false;
 }
 
 fn walk(types.node* ty, ownership_api.place_path path, leaf_plan mut* plan,
-    u64 depth) bool {
+    u64 depth, ownership_state.unit_counter mut* paid) bool {
     if (ty == null || depth > MAX_DEPTH) { return false; }
+    if (!leaf_spend(paid)) { return false; }
     if (ty->kind == types.type_kind.k_array) {
-        if (!has_reference(ty->elem, depth + 1)) { return true; }
+        if (!has_reference(ty->elem, depth + 1, paid)) { return true; }
+        if (!leaf_work_valid(paid)) { return false; }
         if (ty->len > MAX_LEAVES - plan->len) { return false; }
         u64 mut i = 0;
         while (i < ty->len) {
@@ -184,7 +196,7 @@ fn walk(types.node* ty, ownership_api.place_path path, leaf_plan mut* plan,
             part.index.kind = ownership_api.fact_kind.exact;
             part.index.value = cast(i, i64);
             owned_path mut child = append(path, part);
-            bool good = walk(ty->elem, child.path, plan, depth + 1);
+            bool good = walk(ty->elem, child.path, plan, depth + 1, paid);
             del(child.parts);
             if (!good) { return false; }
             i += 1;
@@ -199,6 +211,7 @@ fn walk(types.node* ty, ownership_api.place_path path, leaf_plan mut* plan,
         u64 mut i = 0;
         u32 mut field = 0;
         while (i < ast.ast_len(record->node)) {
+            if (!leaf_spend(paid)) { return false; }
             ast.node* member = ast.ast_child(record->node, i);
             if (member->kind == ast.ast_kind.k_field_decl) {
                 if (member->ty == null) { return false; }
@@ -206,7 +219,7 @@ fn walk(types.node* ty, ownership_api.place_path path, leaf_plan mut* plan,
                 part.kind = ownership_api.projection_kind.field;
                 part.field = field;
                 owned_path mut child = append(path, part);
-                bool good = walk(member->ty, child.path, plan, depth + 1);
+                bool good = walk(member->ty, child.path, plan, depth + 1, paid);
                 del(child.parts);
                 if (!good) { return false; }
                 field += 1;
@@ -227,7 +240,15 @@ fn walk(types.node* ty, ownership_api.place_path path, leaf_plan mut* plan,
 fn leaves(types.node* ty, ownership_api.place_path root, leaf_plan mut* out) bool {
     out->storage = ownership_state.empty();
     out->items = new(leaf, MAX_LEAVES);
-    return walk(ty, root, out, 0);
+    return walk(ty, root, out, 0, null);
+}
+
+/// Each type node and struct member spends one W unit before the walker reads it.
+fn leaves_with_work(types.node* ty, ownership_api.place_path root, leaf_plan mut* out,
+    ownership_state.unit_counter mut* paid) bool {
+    out->storage = ownership_state.empty();
+    out->items = new(leaf, MAX_LEAVES);
+    return walk(ty, root, out, 0, paid);
 }
 
 fn free_plan(leaf_plan mut* plan) void {

@@ -87,6 +87,7 @@ struct provenance {
 }
 
 struct summary_view {
+    ownership_api.source_fact@ sources;
     symbolic_root@ roots;
     requirement@ requirements;
     effect_node@ effects;
@@ -115,6 +116,7 @@ struct effect_block {
 
 // Records borrow nested slices from metadata and outcome_blocks.
 struct summary {
+    ownership_api.source_fact mut@ own sources;
     symbolic_root mut@ own roots;
     requirement mut@ own requirements;
     effect_node mut@ own effects;
@@ -158,6 +160,7 @@ fn same(ownership_api.entity_id a, ownership_api.entity_id b) bool {
 
 fn free(summary mut* out) void {
     summary mut owned = move(*out);
+    del(owned.sources);
     del(owned.roots);
     del(owned.requirements);
     del(owned.effects);
@@ -181,7 +184,8 @@ fn free(summary mut* out) void {
 }
 
 fn view(summary* input) summary_view {
-    return summary_view{input->roots[..], input->requirements[..], input->effects[..],
+    return summary_view{input->sources[..], input->roots[..], input->requirements[..],
+        input->effects[..],
             input->order[..], input->predicates[..], input->guards[..], input->correlations[..],
             input->results[..], input->retained[..], input->cases[..],
             input->provenance_records[..], input->witnesses[..], input->coverage, input->proof,
@@ -449,6 +453,24 @@ fn copy_roots(summary_view* input, context* ctx, summary mut* out) bool {
     return true;
 }
 
+fn copy_sources(summary_view* input, context* ctx, summary mut* out) bool {
+    if (input->sources.len > types.TYPE_MAX_SIZE / sizeof(ownership_api.source_fact) ||
+        !work(ctx, &out->proof, 1) || !work(ctx, &out->proof, input->sources.len)) {
+        return false;
+    }
+    out->sources = new(ownership_api.source_fact, input->sources.len);
+    ownership_api.entity_id mut previous = ownership_api.entity_id{};
+    u64 mut i = 0;
+    while (i < input->sources.len) {
+        ownership_api.source_fact row = input->sources[i];
+        if (!canonical(ctx, &out->proof, previous, row.key, i)) { return false; }
+        out->sources[i] = row;
+        previous = row.key;
+        i += 1;
+    }
+    return true;
+}
+
 fn copy_requirements(summary_view* input, context* ctx, summary mut* out) bool {
     if (input->requirements.len > types.TYPE_MAX_SIZE / sizeof(requirement) ||
         !work(ctx, &out->proof, 1) || !work(ctx, &out->proof, input->requirements.len)) {
@@ -653,7 +675,8 @@ fn copy_witnesses(summary_view* input, context* ctx, summary mut* out) bool {
 }
 
 fn copy_records(summary_view* input, context* ctx, summary mut* out) bool {
-    if (!copy_roots(input, ctx, out) || !copy_requirements(input, ctx, out) ||
+    if (!copy_sources(input, ctx, out) || !copy_roots(input, ctx, out) ||
+        !copy_requirements(input, ctx, out) ||
         !copy_effects(input, ctx, out) || !copy_predicates(input, ctx, out) ||
         !copy_guards(input, ctx, out) || !copy_results(input, ctx, out) ||
         !copy_retained(input, ctx, out) || !copy_cases(input, ctx, out) ||
@@ -899,6 +922,19 @@ fn validate_loaded(summary mut* out, context* ctx) bool {
 
 fn validate(summary mut* out, context* ctx) bool {
     if (!validate_sequences(out, ctx) || !validate_loaded(out, ctx)) { return false; }
+    {
+        ownership_api.source_fact@ rows = out->sources[..];
+        u64 mut i = 0;
+        while (i < rows.len) {
+            ownership_api.source_fact row = rows[i];
+            if (!work(ctx, &out->proof, 1) ||
+                row.key.kind != ownership_api.entity_kind.source ||
+                row.kind != ownership_api.source_kind.static_storage ||
+                row.validity != ownership_api.validity_kind.live ||
+                row.allocation.kind != ownership_api.entity_kind.none) { return false; }
+            i += 1;
+        }
+    }
     {
         symbolic_root@ rows_9 = out->roots[..];
         u64 mut row_index_9 = 0;
@@ -1185,7 +1221,8 @@ fn equal(summary_view* a, summary_view* b, context* ctx, ownership_api.proof_sta
         ownership_keys.operation(a->operation, b->operation) != 0 ||
         ownership_keys.source(a->source, b->source) != 0 || !same(a->event, b->event) ||
         ownership_keys.source(a->callee_source, b->callee_source) != 0 ||
-        a->roots.len != b->roots.len || a->requirements.len != b->requirements.len ||
+        a->sources.len != b->sources.len || a->roots.len != b->roots.len ||
+        a->requirements.len != b->requirements.len ||
         a->effects.len != b->effects.len || a->order.len != b->order.len ||
         a->predicates.len != b->predicates.len || a->guards.len != b->guards.len ||
         a->correlations.len != b->correlations.len || a->results.len != b->results.len ||
@@ -1193,6 +1230,12 @@ fn equal(summary_view* a, summary_view* b, context* ctx, ownership_api.proof_sta
         a->provenance_records.len != b->provenance_records.len ||
         a->witnesses.len != b->witnesses.len) { return false; }
     u64 mut i = 0;
+    while (i < a->sources.len) {
+        if (!work(ctx, proof, 1) ||
+            !ownership_state.same_source(a->sources[i], b->sources[i])) { return false; }
+        i += 1;
+    }
+    i = 0;
     while (i < a->roots.len) {
         if (!work(ctx, proof, 1) || !same_root(a->roots[i], b->roots[i])) { return false; }
         i += 1;
@@ -1423,6 +1466,7 @@ fn rename_relation(renaming mut* r, relation row) relation {
 
 // The renamed top-level records of one summary. Each array is owned until the clone copies it.
 struct renamed_records {
+    ownership_api.source_fact mut@ own sources;
     symbolic_root mut@ own roots;
     requirement mut@ own requirements;
     effect_node mut@ own effects;
@@ -1439,6 +1483,7 @@ struct renamed_records {
 
 fn free_renamed(renamed_records mut* out) void {
     renamed_records mut owned = move(*out);
+    del(owned.sources);
     del(owned.roots);
     del(owned.requirements);
     del(owned.effects);
@@ -1455,8 +1500,17 @@ fn free_renamed(renamed_records mut* out) void {
 }
 
 fn rename_rows(renaming mut* r, summary_view* input, renamed_records mut* out) void {
-    out->roots = new(symbolic_root, input->roots.len);
+    out->sources = new(ownership_api.source_fact, input->sources.len);
     u64 mut i = 0;
+    while (i < input->sources.len) {
+        ownership_api.source_fact mut row = input->sources[i];
+        row.key = rename_key(r, row.key);
+        row.allocation = rename_key(r, row.allocation);
+        out->sources[i] = row;
+        i += 1;
+    }
+    out->roots = new(symbolic_root, input->roots.len);
+    i = 0;
     while (i < input->roots.len) {
         symbolic_root mut row = input->roots[i];
         row.key = rename_key(r, row.key);
@@ -1601,9 +1655,9 @@ fn rename(summary_view* input, ownership_api.function_id from, ownership_api.fun
     failed.residual_effects = true;
     if (svc == null) { return failed; }
     failed.proof = complete();
-    u64 count = input->roots.len + input->requirements.len + input->effects.len +
-        input->order.len + input->predicates.len + input->guards.len + input->correlations.len +
-        input->results.len + input->retained.len + input->cases.len +
+    u64 count = input->sources.len + input->roots.len + input->requirements.len +
+        input->effects.len + input->order.len + input->predicates.len + input->guards.len +
+        input->correlations.len + input->results.len + input->retained.len + input->cases.len +
         input->provenance_records.len + input->witnesses.len;
     if (!work(&reporting, &failed.proof, count)) { return failed; }
     renaming mut r = renaming{.from = from, .to = to, .scratch = ownership_state.empty()};
@@ -1611,7 +1665,8 @@ fn rename(summary_view* input, ownership_api.function_id from, ownership_api.fun
     renamed_records mut rows = renamed_records{};
     defer free_renamed(&rows);
     rename_rows(&r, input, &rows);
-    summary_view renamed = summary_view{rows.roots[..], rows.requirements[..], rows.effects[..],
+    summary_view renamed = summary_view{rows.sources[..], rows.roots[..], rows.requirements[..],
+        rows.effects[..],
         rows.order[..], rows.predicates[..], rows.guards[..], rows.correlations[..],
         rows.results[..], rows.retained[..], rows.cases[..], rows.provenance_records[..],
         rows.witnesses[..], input->coverage, input->proof, input->residual_effects,

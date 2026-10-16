@@ -2312,7 +2312,15 @@ came here.
   A body may build a flat struct literal, move a whole struct out of caller storage, or move a
   holding local into `_0`. Each leaf effect goes into the summary. A literal written into `_0`
   requires each owning destination leaf to be empty, and each caller checks that after the
-  operand effects. Flow models the owner and borrow leaves of a literal in private slots.
+  operand effects. The caller checks each such `empty_output` row once, before the first effect
+  of the literal's operation, not again after an earlier field has written its own leaf. Two
+  facts make this sound: the leaves of one literal are disjoint, and the transfer refuses a known
+  live owner at each write (`ownership_transfer` `do_move` and `do_assignment`). A row whose
+  source is a loaded root keeps the check before each effect. No producer makes such a row today.
+  Flow models the owner and borrow leaves of a literal in private slots.
+  Each field adds at most one effect, a copy, a move or a constant replacement, and at most one
+  requirement. So the capacity pass of `extract` reserves one slot of each array for each field.
+  `LITERAL_FIELDS` limits a literal to 64 fields.
   A holding local must reach `_0` on each returning path. A nested struct, an owning aggregate
   parameter, and a returned aggregate parameter stay unsupported.
   FIR can write a call result through a pointer local, as in `(*_k) = call`. Then the callee

@@ -57,6 +57,9 @@ fn header(ownership_calls_env.env* e, ownership_summary_model.summary_view* a) v
     b.callee_source.col += 1;
     assert(!equal(e, a, &b));
     b = *a;
+    b.sources = a->sources[..0];
+    assert(!equal(e, a, &b));
+    b = *a;
     b.roots = a->roots[..a->roots.len - 1];
     assert(!equal(e, a, &b));
     b = *a;
@@ -70,6 +73,19 @@ fn header(ownership_calls_env.env* e, ownership_summary_model.summary_view* a) v
 // One changed field of one root, requirement, or effect makes the summaries differ.
 fn records(ownership_calls_env.env* e, ownership_summary_model.summary_view* a) void {
     u64 mut field = 0;
+    while (field < 5) {
+        ownership_api.source_fact[1] mut sources = {a->sources[0]};
+        if (field == 0) { sources[0].key = other(); }
+        if (field == 1) { sources[0].kind = ownership_api.source_kind.stack; }
+        if (field == 2) { sources[0].validity = ownership_api.validity_kind.ended; }
+        if (field == 3) { sources[0].allocation = other(); }
+        if (field == 4) { sources[0].boundary = moved(sources[0].boundary); }
+        ownership_summary_model.summary_view mut b = *a;
+        b.sources = sources[..];
+        assert(!equal(e, a, &b));
+        field += 1;
+    }
+    field = 0;
     while (field < 9) {
         ownership_summary_model.symbolic_root[6] mut roots = {};
         u64 mut i = 0;
@@ -252,6 +268,7 @@ fn renamed(ownership_calls_env.env mut* e, ownership_summary_model.summary_view*
     ownership_calls_env.accepted(copy.proof);
     ownership_summary_model.summary_view b = ownership_summary_model.view(&copy);
     assert(!equal(e, &input, &b));
+    assert(b.sources.len == 1 && framed(b.sources[0].key, 9));
     u64 mut i = 0;
     while (i < b.roots.len) {
         assert(framed(b.roots[i].key, 9) && framed(b.roots[i].slot, 9));
@@ -298,6 +315,11 @@ fn main() i32 {
     ownership_calls_env.env mut e = ownership_calls_env.env{};
     ownership_calls_env.open(&e);
     defer ownership_calls_env.close(&e);
+    ownership_api.source_fact[1] sources = {ownership_api.source_fact{
+        .key = ownership_calls_env.id(ownership_api.entity_kind.source, 300),
+        .kind = ownership_api.source_kind.static_storage,
+        .validity = ownership_api.validity_kind.live}};
+    e.input.sources = sources[..];
     ownership_summary_model.summary mut first = ownership_summary_model.clone(&e.input,
         &e.services);
     defer ownership_summary_model.free(&first);
