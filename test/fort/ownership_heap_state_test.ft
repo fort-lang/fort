@@ -5,6 +5,17 @@
 //| keys and views
 //| known integers
 //| the entry state
+//| summary write footprints
+//| scalar write footprint
+//| fallback write footprint
+//| parameter write bits
+//| reference scan work
+//| written reference flags
+//| written storage
+//| written storage refusal
+//| global footprint reach
+//| parameter footprint select
+//| owned cycle work
 //| unfold and fold
 //| canonical form
 //| joins keep obligations
@@ -21,12 +32,15 @@
 //| branch forms
 //| heap state ok
 /// Checks the state operations of the heap proof one at a time (D17.16, D17.18, fir.md 14.1).
+import ast;
+import diag;
 import fir;
 import ownership_api;
 import ownership_facts;
 import ownership_heap;
 import ownership_heap_env;
 import ownership_limits;
+import prim;
 import types;
 
 string[16] HOST = {
@@ -131,6 +145,26 @@ fn fresh_cell(ownership_heap.context mut* ctx, ownership_heap.state mut* s, u32 
     ownership_heap.add_cell_slots(ctx, s, made, t);
     set_value(s, local(n), ownership_heap.own_value(made));
     return made;
+}
+
+// Two cell atoms and two owning slots. The first atom owns the second through its first slot.
+fn nested_havoc_state(ownership_heap.state mut* s) ownership_heap.slot_key {
+    u32 parent = ownership_heap.push_atom(s, ownership_heap.new_atom(
+        ownership_heap.atom_kind.cell, null, 0, ownership_facts.root_kind.nonnull,
+        ownership_facts.provenance.established));
+    u32 child = ownership_heap.push_atom(s, ownership_heap.new_atom(
+        ownership_heap.atom_kind.cell, null, 0, ownership_facts.root_kind.nonnull,
+        ownership_facts.provenance.established));
+    assert(parent == 0 && child == 1);
+    ownership_heap.slot_key parent_field =
+        field_key(ownership_heap.base_kind.cell, parent, 0);
+    ownership_heap.slot_key child_field =
+        field_key(ownership_heap.base_kind.cell, child, 0);
+    ownership_heap.push_slot(s, ownership_heap.slot{.key = parent_field, .owning = true,
+        .v = ownership_heap.own_value(child)});
+    ownership_heap.push_slot(s, ownership_heap.slot{.key = child_field, .owning = true,
+        .v = ownership_heap.empty_value()});
+    return ownership_heap.key_of(ownership_heap.base_kind.cell, parent);
 }
 
 fn tables() void {
@@ -492,6 +526,825 @@ fn entry_state() void {
     assert(seen.kind == ownership_heap.value_kind.view && seen.external);
     assert(seen.nullness.value == ownership_facts.root_kind.nonnull);
     assert(seen.nullness.how == ownership_facts.provenance.imported);
+}
+
+// A summary write footprint forgets only the caller storage that its missing effects can reach.
+fn write_footprints() void {
+    println("summary write footprints");
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "host");
+    ownership_heap.context mut* ctx = &x.ctx;
+    ownership_heap.argument@ no_args = {};
+    ownership_heap.leaf_list mut no_leaves = ownership_heap.leaf_list{};
+
+    // An indirect global write reaches a cell that an earlier effect exposed. It forgets the
+    // cell contents. It does not release the cell.
+    ownership_heap.state mut global_state = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&global_state);
+    u32 global_cell = fresh_cell(ctx, &global_state, 5);
+    global_state.atoms[global_cell].exposed = true;
+    ownership_heap.slot_key global_field =
+        field_key(ownership_heap.base_kind.cell, global_cell, 0);
+    assert(value_at(&global_state, global_field).kind == ownership_heap.value_kind.empty);
+    ownership_heap.summary mut global_sum = ownership_heap.summary{.global_writes = true};
+    assert(ownership_heap.propagate_write_footprint(ctx, &global_sum, no_args, &no_leaves));
+    assert(ownership_heap.apply_write_footprint(ctx, &global_state, &global_sum, no_args,
+        &no_leaves));
+    assert(ctx->global_writes);
+    assert(value_at(&global_state, global_field).kind == ownership_heap.value_kind.owned);
+    assert(global_state.atoms[global_cell].status.value == ownership_facts.atom_status.live);
+
+    // A by-value aggregate write follows its matching reference leaf. It does not expose or
+    // release the cell.
+    ownership_heap.state mut leaf_state = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&leaf_state);
+    u32 leaf_cell = fresh_cell(ctx, &leaf_state, 5);
+    ownership_heap.value mut view = ownership_heap.empty_value();
+    view.kind = ownership_heap.value_kind.view;
+    view.param = 3;
+    assert(ownership_heap.add_source(&view, leaf_cell));
+    ownership_heap.argument[1] mut args = {
+        ownership_heap.argument{.aggregate = true, .first = 0, .count = 1},
+    };
+    ownership_heap.leaf_list mut leaves = ownership_heap.leaf_list{};
+    leaves.items = new(ownership_heap.leaf, 1);
+    defer ownership_heap.free_leaves(&leaves);
+    leaves.items[0].v = view;
+    leaves.len = 1;
+    ownership_heap.summary mut leaf_sum = ownership_heap.summary{};
+    leaf_sum.view_writes = ownership_heap.bit(1);
+    ownership_heap.slot_key leaf_field = field_key(ownership_heap.base_kind.cell, leaf_cell, 0);
+    assert(value_at(&leaf_state, leaf_field).kind == ownership_heap.value_kind.empty);
+    assert(ownership_heap.propagate_write_footprint(ctx, &leaf_sum, args[..], &leaves));
+    assert(ownership_heap.apply_write_footprint(ctx, &leaf_state, &leaf_sum, args[..], &leaves));
+    assert((ctx->view_writes & ownership_heap.bit(3)) != 0);
+    assert(value_at(&leaf_state, leaf_field).kind == ownership_heap.value_kind.owned);
+    assert(!leaf_state.atoms[leaf_cell].exposed);
+    assert(leaf_state.atoms[leaf_cell].status.value == ownership_facts.atom_status.live);
+
+    // A direct reference parameter uses the exact summary post-state. This footprint does not
+    // forget its storage.
+    ownership_heap.state mut direct_state = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&direct_state);
+    u32 direct_cell = fresh_cell(ctx, &direct_state, 5);
+    ownership_heap.value mut direct_view = ownership_heap.empty_value();
+    direct_view.kind = ownership_heap.value_kind.view;
+    direct_view.param = 4;
+    assert(ownership_heap.add_source(&direct_view, direct_cell));
+    ownership_heap.argument[1] direct_args = {ownership_heap.argument{.v = direct_view}};
+    ownership_heap.summary mut direct_sum = ownership_heap.summary{};
+    direct_sum.view_writes = ownership_heap.bit(1);
+    ownership_heap.slot_key direct_field =
+        field_key(ownership_heap.base_kind.cell, direct_cell, 0);
+    assert(ownership_heap.propagate_write_footprint(ctx, &direct_sum, direct_args[..],
+        &no_leaves));
+    assert(ownership_heap.apply_write_footprint(ctx, &direct_state, &direct_sum, direct_args[..],
+        &no_leaves));
+    assert((ctx->view_writes & ownership_heap.bit(4)) != 0);
+    assert(value_at(&direct_state, direct_field).kind == ownership_heap.value_kind.empty);
+}
+
+// A write through a by-value pointer leaf cannot put a retained reference in scalar storage.
+fn scalar_write_footprint() void {
+    println("scalar write footprint");
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "host");
+    ownership_heap.state mut s = ownership_heap.initial(&x.ctx);
+    defer ownership_heap.free_state(&s);
+    u64 scalar_slot = ownership_heap.find_slot(&s, local(8));
+    assert(scalar_slot != ownership_heap.U64_MAX);
+    types.node* scalar_type = s.slots[scalar_slot].ty;
+    assert(!types.type_is_reference(scalar_type));
+    u64 reference_slot = ownership_heap.find_slot(&s, local(4));
+    assert(reference_slot != ownership_heap.U64_MAX);
+    types.node* scalar_reference = s.slots[reference_slot].ty;
+    assert(types.type_is_reference(scalar_reference));
+    assert(scalar_reference->elem == scalar_type);
+    ownership_heap.atom mut scalar = ownership_heap.new_atom(ownership_heap.atom_kind.flat,
+        scalar_type, 0, ownership_facts.root_kind.nonnull,
+        ownership_facts.provenance.established);
+    scalar.used = true;
+    scalar.borrows = false;
+    scalar.params = false;
+    u32 scalar_atom = ownership_heap.push_atom(&s, scalar);
+    ownership_heap.value mut view = ownership_heap.empty_value();
+    view.kind = ownership_heap.value_kind.view;
+    view.param = 1;
+    assert(ownership_heap.add_source(&view, scalar_atom));
+    ownership_heap.argument[1] args = {
+        ownership_heap.argument{.aggregate = true, .first = 0, .count = 1},
+    };
+    ownership_heap.leaf_list mut leaves = ownership_heap.leaf_list{};
+    leaves.items = new(ownership_heap.leaf, 1);
+    defer ownership_heap.free_leaves(&leaves);
+    leaves.items[0].ty = scalar_reference;
+    leaves.items[0].v = view;
+    leaves.len = 1;
+    ownership_heap.summary mut sum = ownership_heap.summary{};
+    sum.view_writes = ownership_heap.bit(1);
+    assert(ownership_heap.apply_write_footprint(&x.ctx, &s, &sum, args[..], &leaves));
+    assert(!s.atoms[scalar_atom].borrows);
+    assert(!s.atoms[scalar_atom].params);
+}
+
+// A shared aggregate type pays once for each occurrence. A refused charge changes no atom fact.
+fn scalar_write_type_work() void {
+    types.table mut type_table = types.table{};
+    defer types.type_table_free(&type_table);
+    ast.arena mut node_arena = ast.arena{};
+    defer ast.ast_arena_free(&node_arena);
+    ast.sym[9] mut declarations = {};
+    types.node*[9] mut levels = {};
+    types.node* integer = types.type_prim(&type_table, prim.prim_kind.prim_i32);
+    diag.loc where = diag.loc{};
+    u64 mut i = 0;
+    while (i < levels.len) {
+        declarations[i].kind = ast.sym_kind.s_struct;
+        declarations[i].node = ast.ast_new(&node_arena, ast.ast_kind.k_struct_decl, where);
+        levels[i] = types.type_struct(&type_table, "shared", cast(&declarations[i], void mut*));
+        types.node* field_type = i == 0 ? integer : levels[i - 1];
+        ast.node mut* first = ast.ast_new(&node_arena, ast.ast_kind.k_field_decl, where);
+        first->ty = field_type;
+        ast.ast_push(declarations[i].node, first);
+        if (i > 0) {
+            ast.node mut* second = ast.ast_new(&node_arena, ast.ast_kind.k_field_decl, where);
+            second->ty = field_type;
+            ast.ast_push(declarations[i].node, second);
+        }
+        i += 1;
+    }
+    types.node* through = types.type_ptr(&type_table, levels[8], false, true);
+
+    fixture mut complete = fixture{};
+    defer close(&complete);
+    open(&complete, "empty");
+    ownership_heap.atom mut selected = ownership_heap.atom{};
+    u64 before = complete.c.counts.meter.used.w;
+    assert(ownership_heap.retain_written_reference(&complete.ctx, &selected, through));
+    assert(complete.c.counts.meter.used.w == before + 1533);
+    assert(!selected.borrows && !selected.params);
+
+    fixture mut refused = fixture{};
+    defer close(&refused);
+    open(&refused, "empty");
+    ownership_heap.state mut refused_state = ownership_heap.state{};
+    defer ownership_heap.free_state(&refused_state);
+    assert(ownership_heap.push_atom(&refused_state, ownership_heap.atom{}) == 0);
+    ownership_heap.value mut target = ownership_heap.empty_value();
+    target.kind = ownership_heap.value_kind.view;
+    assert(ownership_heap.add_source(&target, 0));
+    refused.c.counts.deny_at = refused.c.counts.total_calls + 5;
+    assert(!ownership_heap.havoc_written_storage(&refused.ctx, &refused_state, target, through,
+        false));
+    assert(refused.ctx.stopped);
+    assert(!refused_state.atoms[0].borrows && !refused_state.atoms[0].params);
+    assert(!refused_state.atoms[0].exposed);
+    assert(refused.ctx.first_incomplete.terminal.reason ==
+        ownership_api.incomplete_reason.work_limit);
+
+    // A wide struct uses one paid declaration traversal. Refuse the last declaration-child
+    // charge before the scan reads that child.
+    ast.sym mut wide_declaration = ast.sym{};
+    wide_declaration.kind = ast.sym_kind.s_struct;
+    wide_declaration.node = ast.ast_new(&node_arena, ast.ast_kind.k_struct_decl, where);
+    u64 mut field = 0;
+    while (field < 10000) {
+        ast.node mut* item = ast.ast_new(&node_arena, ast.ast_kind.k_field_decl, where);
+        item->ty = integer;
+        ast.ast_push(wide_declaration.node, item);
+        field += 1;
+    }
+    types.node* wide = types.type_struct(&type_table, "wide",
+        cast(&wide_declaration, void mut*));
+    types.node* wide_through = types.type_ptr(&type_table, wide, false, true);
+    fixture mut wide_refused = fixture{};
+    defer close(&wide_refused);
+    open(&wide_refused, "empty");
+    ownership_heap.atom mut wide_selected = ownership_heap.atom{};
+    wide_refused.c.counts.deny_at = wide_refused.c.counts.total_calls + 20000;
+    assert(!ownership_heap.retain_written_reference(&wide_refused.ctx, &wide_selected,
+        wide_through));
+    assert(wide_refused.c.counts.total_calls == wide_refused.c.counts.deny_at);
+    assert(!wide_selected.borrows && !wide_selected.params);
+    assert(wide_refused.ctx.first_incomplete.terminal.reason ==
+        ownership_api.incomplete_reason.work_limit);
+}
+
+// A usable summary keeps its transitive write footprint when an unused formal cannot bind to a
+// null actual. The caller applies the unknown state effect but still publishes the footprint.
+fn fallback_write_footprint() void {
+    println("fallback write footprint");
+    string mut@ own text = new(string, 6);
+    defer del(text);
+    text[0] = "struct peer { i32* p; }";
+    text[1] = "peer mut* mut saved = null;";
+    text[2] = "fn keep(peer mut* p) void { saved = p; }";
+    text[3] = "fn clear(peer mut* unused) void { saved->p = null; }";
+    text[4] = "fn wrapper() void { clear(null); }";
+    text[5] = "fn empty() void { }";
+    string[4] names = {"keep", "clear", "wrapper", "empty"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    assert(ownership_heap_env.proved(&c, "clear"));
+    assert(ownership_heap_env.proved(&c, "wrapper"));
+    assert(ownership_heap_env.summary(&c, "clear")->callers.len > 0);
+    assert(ownership_heap_env.summary(&c, "clear")->global_writes);
+    assert(ownership_heap_env.summary(&c, "wrapper")->global_writes);
+
+    // One exposed cell and its one slot pay one atom unit and two prefix units.
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "empty");
+    ownership_heap.state mut s = ownership_heap.state{};
+    defer ownership_heap.free_state(&s);
+    s.slots = new(ownership_heap.slot, 1);
+    s.slots_len = 1;
+    s.slots[0].key = field_key(ownership_heap.base_kind.cell, 0, 0);
+    s.atoms = new(ownership_heap.atom, 1);
+    s.atoms_len = 1;
+    s.atoms[0].used = true;
+    s.atoms[0].kind = ownership_heap.atom_kind.cell;
+    s.atoms[0].exposed = true;
+    ownership_heap.summary mut footprint = ownership_heap.summary{.global_writes = true};
+    ownership_heap.argument@ no_args = {};
+    ownership_heap.leaf_list mut no_leaves = ownership_heap.leaf_list{};
+    u64 mut before = x.c.counts.meter.used.w;
+    assert(ownership_heap.propagate_write_footprint(&x.ctx, &footprint, no_args, &no_leaves));
+    assert(ownership_heap.apply_write_footprint(&x.ctx, &s, &footprint, no_args, &no_leaves));
+    assert(x.c.counts.meter.used.w == before + 3);
+
+    // An argument and its aggregate leaf each pay in propagation and application.
+    ownership_heap.argument[1] args = {
+        ownership_heap.argument{.aggregate = true, .first = 0, .count = 1},
+    };
+    ownership_heap.leaf_list mut leaves = ownership_heap.leaf_list{};
+    leaves.items = new(ownership_heap.leaf, 1);
+    defer ownership_heap.free_leaves(&leaves);
+    leaves.items[0].v = ownership_heap.empty_value();
+    leaves.len = 1;
+    ownership_heap.summary mut parameter = ownership_heap.summary{};
+    parameter.view_writes = ownership_heap.bit(1);
+    before = x.c.counts.meter.used.w;
+    assert(ownership_heap.propagate_write_footprint(&x.ctx, &parameter, args[..], &leaves));
+    assert(ownership_heap.apply_write_footprint(&x.ctx, &s, &parameter, args[..], &leaves));
+    assert(x.c.counts.meter.used.w == before + 4);
+
+    // The prefix scan pays 3 units. Its escape pays 3 descendant-walk units and 2 atom units.
+    fixture mut nested = fixture{};
+    defer close(&nested);
+    open(&nested, "empty");
+    ownership_heap.state mut nested_state = ownership_heap.state{};
+    defer ownership_heap.free_state(&nested_state);
+    ownership_heap.slot_key prefix = nested_havoc_state(&nested_state);
+    before = nested.c.counts.meter.used.w;
+    assert(ownership_heap.havoc_written_prefix(&nested.ctx, &nested_state, prefix));
+    assert(nested.c.counts.meter.used.w == before + 8);
+    assert(nested_state.atoms[1].status.value == ownership_facts.atom_status.escaped);
+
+    // Refuse the last nested atom unit. The footprint stops and keeps the W exhaustion.
+    fixture mut refused = fixture{};
+    defer close(&refused);
+    open(&refused, "empty");
+    ownership_heap.state mut refused_state = ownership_heap.state{};
+    defer ownership_heap.free_state(&refused_state);
+    ownership_heap.slot_key refused_prefix = nested_havoc_state(&refused_state);
+    refused.c.counts.deny_at = refused.c.counts.total_calls + 7;
+    assert(!ownership_heap.havoc_written_prefix(&refused.ctx, &refused_state, refused_prefix));
+    assert(refused.ctx.stopped);
+    assert(refused_state.atoms[1].status.value == ownership_facts.atom_status.live);
+    assert(refused.ctx.first_incomplete.terminal.reason ==
+        ownership_api.incomplete_reason.work_limit);
+
+    // Refuse the first descendant-slot unit. The ownership walk stops before it reads the slot.
+    fixture mut descendant_refused = fixture{};
+    defer close(&descendant_refused);
+    open(&descendant_refused, "empty");
+    ownership_heap.state mut descendant_state = ownership_heap.state{};
+    defer ownership_heap.free_state(&descendant_state);
+    ownership_heap.slot_key descendant_prefix = nested_havoc_state(&descendant_state);
+    descendant_refused.c.counts.deny_at = descendant_refused.c.counts.total_calls + 4;
+    assert(!ownership_heap.havoc_written_prefix(&descendant_refused.ctx, &descendant_state,
+        descendant_prefix));
+    assert(descendant_refused.ctx.stopped);
+    assert(descendant_state.atoms[1].status.value == ownership_facts.atom_status.live);
+    assert(descendant_refused.ctx.first_incomplete.terminal.reason ==
+        ownership_api.incomplete_reason.work_limit);
+}
+
+// The W units that the meter of `x` used.
+fn used_w(fixture* x) u64 { return x->c.counts.meter.used.w; }
+
+// Pushes `cells` cell atoms. Each cell has one borrowed reference slot of type `ty` that holds an
+// empty value. Each cell starts with clear retained-reference flags.
+fn reference_cells(ownership_heap.state mut* s, u32 cells, types.node* ty) void {
+    u32 mut i = 0;
+    while (i < cells) {
+        ownership_heap.atom mut a = ownership_heap.new_atom(ownership_heap.atom_kind.cell, null,
+            0, ownership_facts.root_kind.nonnull, ownership_facts.provenance.established);
+        a.borrows = false;
+        a.params = false;
+        u32 made = ownership_heap.push_atom(s, a);
+        ownership_heap.push_slot(s, ownership_heap.slot{
+            .key = field_key(ownership_heap.base_kind.cell, made, 0), .ty = ty,
+            .v = ownership_heap.empty_value()});
+        i += 1;
+    }
+}
+
+// The kind of the value in the one slot of cell `a`.
+fn cell_kind(ownership_heap.state* s, u32 a) ownership_heap.value_kind {
+    return value_at(s, field_key(ownership_heap.base_kind.cell, a, 0)).kind;
+}
+
+// A view of the one atom `a`, from parameter `param`.
+fn view_of(u32 a, u32 param) ownership_heap.value {
+    ownership_heap.value mut v = ownership_heap.empty_value();
+    v.kind = ownership_heap.value_kind.view;
+    v.param = param;
+    assert(ownership_heap.add_source(&v, a));
+    return v;
+}
+
+// A struct type with one declaration child for each entry of `types_of`. A child is a field
+// when its entry of `fields` is true. Otherwise it is a child of another kind with that type.
+fn struct_of(types.table mut* tt, ast.arena mut* nodes, ast.sym mut* declaration,
+    types.node*@ types_of, bool@ fields) types.node* {
+    diag.loc where = diag.loc{};
+    declaration->kind = ast.sym_kind.s_struct;
+    declaration->node = ast.ast_new(nodes, ast.ast_kind.k_struct_decl, where);
+    u64 mut i = 0;
+    while (i < types_of.len) {
+        ast.ast_kind kind = fields[i] ? ast.ast_kind.k_field_decl : ast.ast_kind.k_compile_if;
+        ast.node mut* item = ast.ast_new(nodes, kind, where);
+        item->ty = types_of[i];
+        ast.ast_push(declaration->node, item);
+        i += 1;
+    }
+    return types.type_struct(tt, "probe", cast(declaration, void mut*));
+}
+
+// The W units of one reference scan of `t`. `found` takes the result of the scan.
+fn scan_units(fixture mut* x, types.node* t, bool mut* found) u64 {
+    u64 before = used_w(x);
+    assert(ownership_heap.has_reference_paid(&x->ctx, t, found));
+    return used_w(x) - before;
+}
+
+// A write records one footprint bit for each parameter from 1 to 63. A parameter from 64 on
+// sets the shared high flag, and an unknown parameter sets each bit and the flag.
+fn param_write_bits() void {
+    println("parameter write bits");
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "empty");
+    ownership_heap.context mut* ctx = &x.ctx;
+    assert(ctx->view_writes == 0 && !ctx->writes_high);
+    // Storage of no parameter records nothing. A read records no write.
+    ownership_heap.note_param_write(ctx, ownership_heap.NONE);
+    ownership_heap.note_param_read(ctx, 5);
+    assert(ctx->view_writes == 0 && !ctx->writes_high);
+    ownership_heap.note_param_write(ctx, 1);
+    ownership_heap.note_param_write(ctx, 63);
+    u64 low = ownership_heap.bit(1) | ownership_heap.bit(63);
+    assert(ctx->view_writes == low && !ctx->writes_high);
+    // A second write of one parameter changes nothing.
+    ownership_heap.note_param_write(ctx, 1);
+    assert(ctx->view_writes == low);
+    ownership_heap.note_param_write(ctx, 64);
+    assert(ctx->view_writes == low && ctx->writes_high);
+    ownership_heap.note_param_write(ctx, 200);
+    assert(ctx->view_writes == low && ctx->writes_high);
+
+    fixture mut any = fixture{};
+    defer close(&any);
+    open(&any, "empty");
+    ownership_heap.note_param_write(&any.ctx, ownership_heap.ANY_PARAM);
+    assert(any.ctx.view_writes == ownership_heap.U64_MAX && any.ctx.writes_high);
+    assert(any.ctx.view_reads == 0 && !any.ctx.reads_high);
+
+    // A caller reads one bit for each parameter below 64 and the high flag from 64 on.
+    ownership_heap.summary mut sum = ownership_heap.summary{};
+    sum.view_writes = ownership_heap.bit(3);
+    assert(ownership_heap.writes_param(&sum, 3));
+    assert(!ownership_heap.writes_param(&sum, 2));
+    assert(!ownership_heap.writes_param(&sum, 4));
+    assert(!ownership_heap.writes_param(&sum, 64));
+    sum.writes_high = true;
+    assert(ownership_heap.writes_param(&sum, 64));
+    assert(ownership_heap.writes_param(&sum, 200));
+    assert(!ownership_heap.writes_param(&sum, 2));
+}
+
+// Each visited type occurrence pays one W unit, and each struct declaration child pays one more
+// unit before the scan reads it. A reference field stops the scan.
+fn reference_scan_work() void {
+    println("reference scan work");
+    types.table mut tt = types.table{};
+    defer types.type_table_free(&tt);
+    ast.arena mut nodes = ast.arena{};
+    defer ast.ast_arena_free(&nodes);
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "empty");
+    types.node* integer = types.type_prim(&tt, prim.prim_kind.prim_i32);
+    types.node* pointer = types.type_ptr(&tt, integer, false, true);
+    bool mut found = true;
+    // A scalar and a reference each pay one unit.
+    assert(scan_units(&x, integer, &found) == 1 && !found);
+    assert(scan_units(&x, pointer, &found) == 1 && found);
+    // An array pays for itself and for its element type.
+    assert(scan_units(&x, types.type_array(&tt, integer, 4), &found) == 2 && !found);
+    assert(scan_units(&x, types.type_array(&tt, pointer, 4), &found) == 2 && found);
+    // A struct with no declaration has no children to read.
+    assert(scan_units(&x, types.type_struct(&tt, "opaque", null), &found) == 1 && !found);
+
+    // Three scalar fields: 1 unit for the struct, then 2 units for each field.
+    ast.sym[6] mut declarations = {};
+    types.node*[3] three = {integer, integer, integer};
+    bool[3] three_fields = {true, true, true};
+    types.node* scalars = struct_of(&tt, &nodes, &declarations[0], three[..], three_fields[..]);
+    assert(scan_units(&x, scalars, &found) == 7 && !found);
+    // The reference in the second field stops the scan. The last 2 fields pay nothing.
+    types.node*[4] stop = {integer, pointer, integer, integer};
+    bool[4] stop_fields = {true, true, true, true};
+    types.node* stopped = struct_of(&tt, &nodes, &declarations[1], stop[..], stop_fields[..]);
+    assert(scan_units(&x, stopped, &found) == 5 && found);
+    // A child that is not a field pays one unit and starts no type visit, so its type is not
+    // read.
+    types.node*[2] other = {integer, pointer};
+    bool[2] other_fields = {true, false};
+    types.node* mixed = struct_of(&tt, &nodes, &declarations[2], other[..], other_fields[..]);
+    assert(scan_units(&x, mixed, &found) == 4 && !found);
+    // A nested struct pays for its own scan inside the field of the outer struct.
+    types.node*[2] nest = {scalars, integer};
+    bool[2] nest_fields = {true, true};
+    types.node* outer = struct_of(&tt, &nodes, &declarations[3], nest[..], nest_fields[..]);
+    assert(scan_units(&x, outer, &found) == 1 + 1 + 7 + 2 && !found);
+    // A reference in the nested struct stops the outer scan too.
+    types.node*[2] deep = {stopped, integer};
+    types.node* deep_outer = struct_of(&tt, &nodes, &declarations[4], deep[..], nest_fields[..]);
+    assert(scan_units(&x, deep_outer, &found) == 1 + 1 + 5 && found);
+
+    // A wide scalar struct uses one declaration traversal: 1 unit and 2 units for each of its
+    // 1000 fields. A scan that reads an earlier field again pays more.
+    types.node* mut@ own wide_types = new(types.node*, 1000);
+    defer del(wide_types);
+    bool mut@ own wide_fields = new(bool, 1000);
+    defer del(wide_fields);
+    u64 mut i = 0;
+    while (i < 1000) {
+        wide_types[i] = integer;
+        wide_fields[i] = true;
+        i += 1;
+    }
+    types.node* wide = struct_of(&tt, &nodes, &declarations[5], wide_types, wide_fields);
+    assert(scan_units(&x, wide, &found) == 2001 && !found);
+    // A second scan of one type node pays again. The scan keeps no memo.
+    assert(scan_units(&x, wide, &found) == 2001 && !found);
+}
+
+// A footprint adds retained-reference flags only when the written pointee can hold a reference,
+// or when the pointee type is unknown or erased.
+fn written_reference_flags() void {
+    println("written reference flags");
+    types.table mut tt = types.table{};
+    defer types.type_table_free(&tt);
+    ast.arena mut nodes = ast.arena{};
+    defer ast.ast_arena_free(&nodes);
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "empty");
+    types.node* integer = types.type_prim(&tt, prim.prim_kind.prim_i32);
+    types.node* scalar_pointer = types.type_ptr(&tt, integer, false, true);
+    types.node* pointer_pointer = types.type_ptr(&tt, scalar_pointer, false, true);
+    types.node* scalar_span = types.type_span(&tt, integer, false, true);
+    types.node* void_pointer = types.type_voidptr(&tt, false, true);
+    ast.sym[1] mut declarations = {};
+    types.node*[2] members = {integer, scalar_pointer};
+    bool[2] member_fields = {true, true};
+    types.node* holder = struct_of(&tt, &nodes, &declarations[0], members[..], member_fields[..]);
+    types.node* holder_pointer = types.type_ptr(&tt, holder, false, true);
+
+    // A scalar pointee pays one scan unit and keeps both flags clear.
+    ownership_heap.atom mut a = ownership_heap.atom{};
+    u64 mut before = used_w(&x);
+    assert(ownership_heap.retain_written_reference(&x.ctx, &a, scalar_pointer));
+    assert(used_w(&x) == before + 1 && !a.borrows && !a.params);
+    assert(ownership_heap.retain_written_reference(&x.ctx, &a, scalar_span));
+    assert(!a.borrows && !a.params);
+    // A pointee that can hold a reference sets both flags after its scan.
+    before = used_w(&x);
+    assert(ownership_heap.retain_written_reference(&x.ctx, &a, pointer_pointer));
+    assert(used_w(&x) == before + 1 && a.borrows && a.params);
+    ownership_heap.atom mut b = ownership_heap.atom{};
+    before = used_w(&x);
+    assert(ownership_heap.retain_written_reference(&x.ctx, &b, holder_pointer));
+    assert(used_w(&x) == before + 5 && b.borrows && b.params);
+    // An unknown or erased pointee sets both flags without a scan.
+    ownership_heap.atom mut unknown = ownership_heap.atom{};
+    before = used_w(&x);
+    assert(ownership_heap.retain_written_reference(&x.ctx, &unknown, null));
+    assert(used_w(&x) == before && unknown.borrows && unknown.params);
+    ownership_heap.atom mut erased = ownership_heap.atom{};
+    assert(ownership_heap.retain_written_reference(&x.ctx, &erased, void_pointer));
+    assert(used_w(&x) == before && erased.borrows && erased.params);
+    // A written type that is not a reference names no pointee, so it is conservative.
+    ownership_heap.atom mut plain = ownership_heap.atom{};
+    assert(ownership_heap.retain_written_reference(&x.ctx, &plain, integer));
+    assert(used_w(&x) == before && plain.borrows && plain.params);
+    // The scalar guard does not clear a flag that an earlier effect set.
+    ownership_heap.atom mut kept = ownership_heap.atom{.borrows = true, .params = true};
+    assert(ownership_heap.retain_written_reference(&x.ctx, &kept, scalar_pointer));
+    assert(kept.borrows && kept.params);
+}
+
+// A footprint forgets the contents of each storage that a value can designate. It pays one full
+// atom scan for each possible root before it reads state. Only a global write exposes the
+// storage, and a lost target makes no claim.
+fn written_storage() void {
+    println("written storage");
+    types.table mut tt = types.table{};
+    defer types.type_table_free(&tt);
+    types.node* integer = types.type_prim(&tt, prim.prim_kind.prim_i32);
+    types.node* scalar_pointer = types.type_ptr(&tt, integer, false, true);
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "empty");
+    ownership_heap.context mut* ctx = &x.ctx;
+    ownership_heap.state mut s = ownership_heap.state{};
+    defer ownership_heap.free_state(&s);
+    reference_cells(&s, 4, scalar_pointer);
+    ownership_heap.value_kind empty = ownership_heap.value_kind.empty;
+    ownership_heap.value_kind unknown = ownership_heap.value_kind.unknown;
+
+    // An owned cell pays 5 root units, 1 type unit, and 5 prefix units. The global write exposes
+    // it and forgets its slot. The cell stays live, and its scalar pointee adds no flag.
+    u64 mut before = used_w(&x);
+    assert(ownership_heap.havoc_written_storage(ctx, &s, ownership_heap.own_value(0),
+        scalar_pointer, true));
+    assert(used_w(&x) == before + 11);
+    assert(s.atoms[0].exposed && cell_kind(&s, 0) == unknown);
+    assert(s.atoms[0].status.value == ownership_facts.atom_status.live);
+    assert(!s.atoms[0].borrows && !s.atoms[0].params);
+    assert(cell_kind(&s, 1) == empty && cell_kind(&s, 2) == empty && cell_kind(&s, 3) == empty);
+    // A parameter write forgets the slot. It does not expose the cell.
+    assert(ownership_heap.havoc_written_storage(ctx, &s, ownership_heap.own_value(1),
+        scalar_pointer, false));
+    assert(!s.atoms[1].exposed && cell_kind(&s, 1) == unknown);
+
+    // An address pays one root and its prefix scan, and it needs no type scan.
+    ownership_heap.value mut address = ownership_heap.empty_value();
+    address.kind = ownership_heap.value_kind.address;
+    address.target = ownership_heap.key_of(ownership_heap.base_kind.cell, 2);
+    before = used_w(&x);
+    assert(ownership_heap.havoc_written_storage(ctx, &s, address, scalar_pointer, false));
+    assert(used_w(&x) == before + 10);
+    assert(!s.atoms[2].exposed && cell_kind(&s, 2) == unknown);
+    set_value(&s, field_key(ownership_heap.base_kind.cell, 2, 0), ownership_heap.empty_value());
+    assert(ownership_heap.havoc_written_storage(ctx, &s, address, scalar_pointer, true));
+    assert(s.atoms[2].exposed && cell_kind(&s, 2) == unknown);
+
+    // A view source that an atom redirect replaced writes the storage of the new atom.
+    ownership_heap.atom mut gone = ownership_heap.atom{};
+    gone.into = 3;
+    u32 redirected = ownership_heap.push_atom(&s, gone);
+    s.atoms[redirected].used = false;
+    before = used_w(&x);
+    assert(ownership_heap.havoc_written_storage(ctx, &s, view_of(redirected, 2), scalar_pointer,
+        false));
+    // 6 root units, 1 source unit, 1 type unit, and 5 prefix units.
+    assert(used_w(&x) == before + 13);
+    assert(cell_kind(&s, 3) == unknown && !s.atoms[3].exposed);
+    // A view source past the atoms names no storage. It pays its root and its source unit.
+    set_value(&s, field_key(ownership_heap.base_kind.cell, 3, 0), ownership_heap.empty_value());
+    before = used_w(&x);
+    assert(ownership_heap.havoc_written_storage(ctx, &s, view_of(9, 2), scalar_pointer, true));
+    assert(used_w(&x) == before + 7 && cell_kind(&s, 3) == empty);
+
+    // An unknown value with a retained target forgets that storage.
+    ownership_heap.value mut retained = ownership_heap.unknown_value();
+    retained.retained_target = true;
+    retained.retained = ownership_heap.key_of(ownership_heap.base_kind.cell, 3);
+    assert(ownership_heap.havoc_written_storage(ctx, &s, retained, scalar_pointer, false));
+    assert(cell_kind(&s, 3) == unknown);
+    // A lost target makes no claim. The caller keeps its fallback, and the proof does not stop.
+    ownership_heap.value mut lost = ownership_heap.unknown_value();
+    lost.lost_target = true;
+    before = used_w(&x);
+    assert(!ownership_heap.havoc_written_storage(ctx, &s, lost, scalar_pointer, false));
+    assert(used_w(&x) == before && !ctx->stopped);
+    // A scalar and an empty value designate no storage and pay nothing.
+    ownership_heap.value mut number = ownership_heap.empty_value();
+    number.kind = ownership_heap.value_kind.scalar;
+    assert(ownership_heap.havoc_written_storage(ctx, &s, number, scalar_pointer, true));
+    assert(ownership_heap.havoc_written_storage(ctx, &s, ownership_heap.empty_value(),
+        scalar_pointer, true));
+    assert(used_w(&x) == before);
+}
+
+// A refused type-scan charge of an owned target stops the footprint before exposure or nested
+// storage work.
+fn written_storage_refusal() void {
+    println("written storage refusal");
+    types.table mut tt = types.table{};
+    defer types.type_table_free(&tt);
+    ast.arena mut nodes = ast.arena{};
+    defer ast.ast_arena_free(&nodes);
+    types.node* integer = types.type_prim(&tt, prim.prim_kind.prim_i32);
+    ast.sym[1] mut declarations = {};
+    types.node*[2] members = {integer, integer};
+    bool[2] member_fields = {true, true};
+    types.node* pair = struct_of(&tt, &nodes, &declarations[0], members[..], member_fields[..]);
+    types.node* pair_pointer = types.type_ptr(&tt, pair, false, true);
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "empty");
+    ownership_heap.state mut s = ownership_heap.state{};
+    defer ownership_heap.free_state(&s);
+    reference_cells(&s, 1, pair_pointer);
+    // Units 1 and 2 are the root scan, and unit 3 is the struct visit. Refuse unit 4, the
+    // charge of the first declaration child.
+    x.c.counts.deny_at = x.c.counts.total_calls + 4;
+    assert(!ownership_heap.havoc_written_storage(&x.ctx, &s, ownership_heap.own_value(0),
+        pair_pointer, true));
+    assert(x.c.counts.total_calls == x.c.counts.deny_at && x.ctx.stopped);
+    assert(!s.atoms[0].exposed && !s.atoms[0].borrows && !s.atoms[0].params);
+    assert(cell_kind(&s, 0) == ownership_heap.value_kind.empty);
+    assert(x.ctx.first_incomplete.terminal.reason == ownership_api.incomplete_reason.work_limit);
+}
+
+// An indirect global write reaches each argument, each caller slot, and each exposed or
+// addressed cell. It does not reach a cell that no effect exposed.
+fn global_footprint_reach() void {
+    println("global footprint reach");
+    types.table mut tt = types.table{};
+    defer types.type_table_free(&tt);
+    types.node* integer = types.type_prim(&tt, prim.prim_kind.prim_i32);
+    types.node* scalar_pointer = types.type_ptr(&tt, integer, false, true);
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "empty");
+    ownership_heap.state mut s = ownership_heap.state{};
+    defer ownership_heap.free_state(&s);
+    reference_cells(&s, 5, scalar_pointer);
+    s.atoms[0].exposed = true;
+    s.atoms[1].addressed = true;
+    ownership_heap.argument[2] args = {
+        ownership_heap.argument{.v = view_of(3, 1), .ty = scalar_pointer},
+        ownership_heap.argument{.aggregate = true, .first = 0, .count = 1},
+    };
+    ownership_heap.leaf_list mut leaves = ownership_heap.leaf_list{};
+    leaves.items = new(ownership_heap.leaf, 1);
+    defer ownership_heap.free_leaves(&leaves);
+    leaves.items[0].ty = scalar_pointer;
+    leaves.items[0].v = view_of(4, 2);
+    leaves.len = 1;
+    // A summary with no footprint changes nothing.
+    ownership_heap.summary none = ownership_heap.summary{};
+    assert(ownership_heap.apply_write_footprint(&x.ctx, &s, &none, args[..], &leaves));
+    u32 mut i = 0;
+    while (i < 5) {
+        assert(cell_kind(&s, i) == ownership_heap.value_kind.empty);
+        i += 1;
+    }
+    ownership_heap.summary global = ownership_heap.summary{.global_writes = true};
+    assert(ownership_heap.apply_write_footprint(&x.ctx, &s, &global, args[..], &leaves));
+    // The exposed and the addressed cells lose their contents. The hidden cell keeps them.
+    assert(cell_kind(&s, 0) == ownership_heap.value_kind.unknown);
+    assert(cell_kind(&s, 1) == ownership_heap.value_kind.unknown);
+    assert(cell_kind(&s, 2) == ownership_heap.value_kind.empty && !s.atoms[2].exposed);
+    // A direct argument and an aggregate leaf lose their contents, and the write exposes both.
+    assert(cell_kind(&s, 3) == ownership_heap.value_kind.unknown && s.atoms[3].exposed);
+    assert(cell_kind(&s, 4) == ownership_heap.value_kind.unknown && s.atoms[4].exposed);
+    // A global write changes contents. It releases no cell.
+    i = 0;
+    while (i < 5) {
+        assert(s.atoms[i].status.value == ownership_facts.atom_status.live);
+        i += 1;
+    }
+
+    // Each caller storage loses its owners. The old owned atom escapes, and a fresh unknown
+    // owner takes its slot.
+    fixture mut h = fixture{};
+    defer close(&h);
+    open(&h, "host");
+    ownership_heap.state mut entry = ownership_heap.initial(&h.ctx);
+    defer ownership_heap.free_state(&entry);
+    ownership_heap.slot_key first = field_key(ownership_heap.base_kind.caller, 0, 0);
+    ownership_heap.value old = value_at(&entry, first);
+    assert(old.kind == ownership_heap.value_kind.owned);
+    ownership_heap.argument@ no_args = {};
+    ownership_heap.leaf_list mut no_leaves = ownership_heap.leaf_list{};
+    assert(ownership_heap.apply_write_footprint(&h.ctx, &entry, &none, no_args, &no_leaves));
+    assert(value_at(&entry, first).atom == old.atom);
+    assert(ownership_heap.apply_write_footprint(&h.ctx, &entry, &global, no_args, &no_leaves));
+    ownership_heap.value now = value_at(&entry, first);
+    assert(now.kind == ownership_heap.value_kind.owned && now.atom != old.atom);
+    assert(entry.atoms[old.atom].status.value == ownership_facts.atom_status.escaped);
+    assert(entry.atoms[now.atom].status.value == ownership_facts.atom_status.unknown);
+}
+
+// A parameter footprint follows only the actual leaves of its formal parameter. A wrapper
+// publishes it on the parameter of each such leaf.
+fn parameter_footprint_select() void {
+    println("parameter footprint select");
+    types.table mut tt = types.table{};
+    defer types.type_table_free(&tt);
+    types.node* integer = types.type_prim(&tt, prim.prim_kind.prim_i32);
+    types.node* scalar_pointer = types.type_ptr(&tt, integer, false, true);
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "empty");
+    ownership_heap.state mut s = ownership_heap.state{};
+    defer ownership_heap.free_state(&s);
+    reference_cells(&s, 2, scalar_pointer);
+    ownership_heap.argument[2] args = {
+        ownership_heap.argument{.aggregate = true, .first = 0, .count = 1},
+        ownership_heap.argument{.aggregate = true, .first = 1, .count = 1},
+    };
+    ownership_heap.leaf_list mut leaves = ownership_heap.leaf_list{};
+    leaves.items = new(ownership_heap.leaf, 2);
+    defer ownership_heap.free_leaves(&leaves);
+    leaves.items[0].ty = scalar_pointer;
+    leaves.items[0].v = view_of(0, 5);
+    leaves.items[1].ty = scalar_pointer;
+    leaves.items[1].v = view_of(1, 7);
+    leaves.len = 2;
+    // The callee writes through its second parameter only.
+    ownership_heap.summary mut sum = ownership_heap.summary{};
+    sum.view_writes = ownership_heap.bit(2);
+    u64 before = used_w(&x);
+    assert(ownership_heap.propagate_write_footprint(&x.ctx, &sum, args[..], &leaves));
+    // 2 argument units and 1 unit for the leaf of the written parameter.
+    assert(used_w(&x) == before + 3);
+    assert(x.ctx.view_writes == ownership_heap.bit(7) && !x.ctx.writes_high);
+    assert(!x.ctx.global_writes);
+    assert(ownership_heap.apply_write_footprint(&x.ctx, &s, &sum, args[..], &leaves));
+    assert(cell_kind(&s, 0) == ownership_heap.value_kind.empty);
+    assert(cell_kind(&s, 1) == ownership_heap.value_kind.unknown);
+    assert(!s.atoms[0].exposed && !s.atoms[1].exposed);
+
+    // A leaf of an unknown parameter publishes a write of each parameter.
+    fixture mut any = fixture{};
+    defer close(&any);
+    open(&any, "empty");
+    leaves.items[1].v.param = ownership_heap.ANY_PARAM;
+    assert(ownership_heap.propagate_write_footprint(&any.ctx, &sum, args[..], &leaves));
+    assert(any.ctx.view_writes == ownership_heap.U64_MAX && any.ctx.writes_high);
+    // A direct argument publishes the parameter of its own value.
+    fixture mut direct = fixture{};
+    defer close(&direct);
+    open(&direct, "empty");
+    ownership_heap.argument[2] direct_args = {
+        ownership_heap.argument{.v = view_of(0, 4)},
+        ownership_heap.argument{.v = view_of(1, 6)},
+    };
+    assert(ownership_heap.propagate_write_footprint(&direct.ctx, &sum, direct_args[..],
+        &leaves));
+    assert(direct.ctx.view_writes == ownership_heap.bit(6));
+}
+
+// The escape walk of a written owner visits each atom of an owned cycle once.
+fn owned_cycle_work() void {
+    println("owned cycle work");
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "empty");
+    ownership_heap.state mut s = ownership_heap.state{};
+    defer ownership_heap.free_state(&s);
+    ownership_heap.slot_key prefix = nested_havoc_state(&s);
+    // Atom 2 owns atom 1, and atom 1 owns atom 2 through the second slot.
+    u32 third = ownership_heap.push_atom(&s, ownership_heap.new_atom(
+        ownership_heap.atom_kind.cell, null, 0, ownership_facts.root_kind.nonnull,
+        ownership_facts.provenance.established));
+    assert(third == 2);
+    s.slots[1].v = ownership_heap.own_value(third);
+    ownership_heap.push_slot(&s, ownership_heap.slot{
+        .key = field_key(ownership_heap.base_kind.cell, third, 0), .owning = true,
+        .v = ownership_heap.own_value(1)});
+    // The prefix pays 1 unit and 3 slot units. The walk pays 2 atom units and 6 slot units, and
+    // the escape pays 3 atom units.
+    u64 mut before = used_w(&x);
+    assert(ownership_heap.havoc_written_prefix(&x.ctx, &s, prefix));
+    assert(used_w(&x) == before + 15);
+    assert(s.atoms[1].status.value == ownership_facts.atom_status.escaped);
+    assert(s.atoms[2].status.value == ownership_facts.atom_status.escaped);
+    assert(s.atoms[0].status.value == ownership_facts.atom_status.live);
+
+    // A prefix with no owned value pays only for its direct slot scan.
+    fixture mut flat = fixture{};
+    defer close(&flat);
+    open(&flat, "empty");
+    ownership_heap.state mut plain = ownership_heap.state{};
+    defer ownership_heap.free_state(&plain);
+    reference_cells(&plain, 3, null);
+    before = used_w(&flat);
+    assert(ownership_heap.havoc_written_prefix(&flat.ctx, &plain,
+        ownership_heap.key_of(ownership_heap.base_kind.cell, 1)));
+    assert(used_w(&flat) == before + 4);
 }
 
 fn unfold_fold() void {
@@ -1934,6 +2787,18 @@ fn main() i32 {
     keys();
     integers();
     entry_state();
+    write_footprints();
+    scalar_write_footprint();
+    scalar_write_type_work();
+    fallback_write_footprint();
+    param_write_bits();
+    reference_scan_work();
+    written_reference_flags();
+    written_storage();
+    written_storage_refusal();
+    global_footprint_reach();
+    parameter_footprint_select();
+    owned_cycle_work();
     unfold_fold();
     canonical_form();
     joins();
