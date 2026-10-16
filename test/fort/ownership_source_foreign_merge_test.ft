@@ -1,0 +1,200 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| graph alone ok
+//| generated callers ok
+//| fort callers ok
+//| ordinary bodies ok
+//| other modules ok
+/// Tests that the closure merges the generated callers into the foreign-called bodies of the
+/// graph (D17.18). The generated startup, a runtime check, `new` and `del` call a body that no
+/// fort call site names, so a caller-source requirement of that body has no caller to bind it.
+import check_env;
+import lower_env;
+import ownership_api;
+import ownership_graph;
+import ownership_limits;
+import ownership_source;
+import ownership_source_calls;
+import ownership_source_env;
+import std.strbuf;
+
+// A line here is a line of RUNTIME_EXTRA after the lines of lower_env.RUNTIME. Each generated
+// body reads through a pointer parameter, so its summary has a caller-source requirement.
+// `exit_code` has the same body and no generated caller.
+u32 ARGS_INIT_LINE = 1;
+u32 ALLOC_LINE = 3;
+u32 FREE_LINE = 4;
+string[5] RUNTIME_EXTRA = {
+    "fn args_init(i32 argc, char* mut* argv) void {",
+    "    char* first = *argv; }",
+    "fn alloc(u64 elem_size, u64 count, char* file, u32 line, u32 col) char { return *file; }",
+    "fn free(u8* p) u8 { return *p; }",
+    "fn exit_code(i32* p) i32 { return *p; }",
+};
+
+// A line here is a line of the entry module `main`. The entry `main` reads through its pointer
+// parameter. `helper` has the same body. `via_main` calls the entry `main` from fort code, and
+// `via_helper` calls `helper`. `via_lib` calls the `main` of module `lib`, which is no entry.
+u32 MAIN_LINE = 2;
+string[6] SOURCE = {
+    "import lib;",
+    "fn main(i32* p) i32 { return *p; }",
+    "fn helper(i32* p) i32 { return *p; }",
+    "fn via_main() i32 { i32 x = 1; return main(&x); }",
+    "fn via_helper() i32 { i32 x = 1; return helper(&x); }",
+    "fn via_lib() i32 { i32 x = 1; return lib.main(&x); }",
+};
+
+string LIB = "fn main(i32* p) i32 { return *p; }\n";
+
+fn open(ownership_source_env.env mut* e) void {
+    ownership_source_env.open(e);
+    strbuf.str_buf mut runtime = strbuf.create();
+    defer strbuf.free(&runtime);
+    for (string line : lower_env.RUNTIME) {
+        strbuf.append(&runtime, line);
+        strbuf.push(&runtime, '\n');
+    }
+    for (string line : RUNTIME_EXTRA) {
+        strbuf.append(&runtime, line);
+        strbuf.push(&runtime, '\n');
+    }
+    check_env.add(&e->checked, "std/rt.ft", strbuf.view(&runtime));
+    check_env.add(&e->checked, "lib.ft", LIB);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    for (string line : SOURCE) {
+        strbuf.append(&text, line);
+        strbuf.push(&text, '\n');
+    }
+    assert(ownership_source_env.prepare(e, strbuf.view(&text)));
+    ownership_source.analyze(&e->source);
+    assert(e->source.graph_built && ownership_api.successful(e->source.graph.proof));
+}
+
+// The index of the row of `name` in module `module`, which is also its index in the graph.
+fn index(ownership_source_env.env* e, string module, string name) u64 {
+    u64 mut i = 0;
+    while (i < e->source.bodies.len) {
+        ownership_source.body* row = &e->source.bodies[i];
+        if (row->module->path == module && row->declaration->name == name) { return i; }
+        i += 1;
+    }
+    panic("ownership_source_foreign_merge_test: no such body");
+}
+
+fn foreign(ownership_source_env.env* e, string module, string name) bool {
+    u64 at = index(e, module, name);
+    assert(at < e->source.graph.foreign_called.len);
+    return e->source.graph.foreign_called[at];
+}
+
+fn calls(ownership_source_env.env mut* e, string module, string name)
+    ownership_source_calls.row* {
+    ownership_source_calls.row* found = ownership_source_env.find(e, module, name)->calls;
+    assert(found != null && found->violations == 0);
+    return found;
+}
+
+// A lost requirement gives incomplete proof at the read through the parameter.
+fn lost_at(ownership_source_env.env mut* e, string module, string name, u32 line) void {
+    ownership_source_calls.row* found = calls(e, module, name);
+    if (ownership_api.successful(found->proof) ||
+        found->proof.terminal.reason != ownership_api.incomplete_reason.missing_path ||
+        found->proof.terminal.source.line != line) {
+        eprintln(name, ": reason ", cast(found->proof.terminal.reason, u64), " at ",
+            found->proof.terminal.source.line);
+        assert(false);
+    }
+}
+
+fn proved(ownership_source_env.env mut* e, string module, string name) void {
+    ownership_source_calls.row* found = calls(e, module, name);
+    if (!ownership_api.successful(found->proof)) {
+        eprintln(name, ": reason ", cast(found->proof.terminal.reason, u64), " at ",
+            found->proof.terminal.source.line);
+        assert(false);
+    }
+}
+
+// The graph sees a fort call of the entry `main` and no address of a generated body, so the
+// graph alone marks none of them. The merge in ownership_source.analyze marks them.
+fn graph_alone(ownership_source_env.env mut* e) void {
+    ownership_graph.graph mut g = ownership_graph.build(e->source.graph_inputs[..],
+        ownership_limits.computation(ownership_graph.closure_size(e->source.graph_inputs[..])));
+    defer ownership_graph.free(&g);
+    assert(ownership_api.successful(g.proof));
+    assert(g.foreign_called.len == e->source.graph.foreign_called.len);
+    string[3] generated = {"args_init", "alloc", "free"};
+    for (string name : generated) {
+        assert(!g.foreign_called[index(e, "std.rt", name)]);
+        assert(foreign(e, "std.rt", name));
+    }
+    assert(!g.foreign_called[index(e, "main", "main")] && foreign(e, "main", "main"));
+    u64 mut merged = 0;
+    u64 mut i = 0;
+    while (i < g.foreign_called.len) {
+        assert(!g.foreign_called[i] || e->source.graph.foreign_called[i]);
+        if (e->source.graph.foreign_called[i] && !g.foreign_called[i]) { merged += 1; }
+        i += 1;
+    }
+    // The 9 `fail_*` bodies, `assert_fail` and `panic` of lower_env.RUNTIME, the 3 generated
+    // bodies of RUNTIME_EXTRA, and the entry `main`.
+    assert(merged == 15);
+    println("graph alone ok");
+}
+
+// Each generated body loses the requirement of its read, so its row gives incomplete proof
+// there. The same body under another name keeps the requirement and proves.
+fn generated(ownership_source_env.env mut* e) void {
+    u32 base = cast(lower_env.RUNTIME_LINES, u32);
+    lost_at(e, "std.rt", "args_init", base + ARGS_INIT_LINE + 1);
+    lost_at(e, "std.rt", "alloc", base + ALLOC_LINE);
+    lost_at(e, "std.rt", "free", base + FREE_LINE);
+    lost_at(e, "main", "main", MAIN_LINE);
+    assert(!foreign(e, "std.rt", "exit_code"));
+    proved(e, "std.rt", "exit_code");
+    println("generated callers ok");
+}
+
+// A fort call of a foreign-called body applies an incomplete summary, so the caller gives
+// incomplete proof too. A fort call of the same body under another name proves.
+fn fort_callers(ownership_source_env.env mut* e) void {
+    ownership_source_calls.row* found = calls(e, "main", "via_main");
+    assert(!ownership_api.successful(found->proof));
+    proved(e, "main", "via_helper");
+    println("fort callers ok");
+}
+
+// The other bodies are not foreign-called. FIR lowers a string comparison and a print to fort
+// calls of `str_eq` and of the print bodies, so the graph sees each caller of those.
+fn ordinary(ownership_source_env.env mut* e) void {
+    string[3] names = {"helper", "via_main", "via_helper"};
+    for (string name : names) { assert(!foreign(e, "main", name)); }
+    string[4] runtime = {"exit_code", "str_eq", "print_str", "print_i64"};
+    for (string name : runtime) { assert(!foreign(e, "std.rt", name)); }
+    println("ordinary bodies ok");
+}
+
+// A body named `main` outside the entry module is no generated caller. It keeps its
+// requirement, and its fort caller binds it.
+fn other_modules(ownership_source_env.env mut* e) void {
+    assert(!foreign(e, "lib", "main"));
+    proved(e, "lib", "main");
+    assert(!foreign(e, "main", "via_lib"));
+    proved(e, "main", "via_lib");
+    println("other modules ok");
+}
+
+fn main() i32 {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    open(&e);
+    graph_alone(&e);
+    generated(&e);
+    fort_callers(&e);
+    ordinary(&e);
+    other_modules(&e);
+    ownership_source_env.close(&e);
+    return 0;
+}

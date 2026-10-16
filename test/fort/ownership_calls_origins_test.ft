@@ -9,8 +9,10 @@
 import fir;
 import ownership_api;
 import ownership_call_bodies;
+import ownership_flow;
 import ownership_summary_body;
 import ownership_summary_model;
+import ownership_transfer;
 
 // Flow knows `b == 1` on the path of the call, so it applies only the case that returns `p`.
 // Extraction reads no path atom, so both cases stay and the origin of the result is unknown.
@@ -70,6 +72,12 @@ string[3] STORED = {
 string[2] LOADED = {
     "fn load(i32** pp) i32* { return *pp; }",
     "fn top(i32* p) i32 { i32* mut s = p; i32* x = load(&s); i32* y = x; return 0; }",
+};
+
+// The first indirect read loads the pointer. The second indirect read uses that pointer.
+// Each exported read must have one body-flow check.
+string[1] NESTED_READ = {
+    "fn nested(i32** pp) i32 { return **pp; }",
 };
 
 // The inner call passes its unknown result to the outer call, whose case returns it.
@@ -222,11 +230,19 @@ fn consumers() void {
     stops_after_call(STORED[..], names[..], 1, 1);
 }
 
-// A loaded source, an argument with an unknown origin, a span pointer field, and a result
-// that can name no source each give an unknown origin.
+// A loaded result keeps its bound caller source. The other three results have no one origin.
 fn mapped_sources() void {
     string[2] loaded = {"load", "top"};
-    stops_after_call(LOADED[..], loaded[..], 0, 1);
+    ownership_call_bodies.bodies mut loaded_bodies = ownership_call_bodies.bodies{};
+    bodies(&loaded_bodies, LOADED[..], loaded[..]);
+    defer ownership_call_bodies.close(&loaded_bodies);
+    ownership_summary_model.summary* loaded_top =
+        ownership_call_bodies.summary(&loaded_bodies, 1);
+    assert(ownership_api.successful(loaded_top->proof) && !loaded_top->residual_effects);
+    assert(loaded_top->cases.len == 1 && loaded_top->requirements.len == 1);
+    ownership_api.entity_id p = ownership_summary_body.designated(&loaded_bodies.inputs[1], 1);
+    assert(live_requirements(loaded_top, p) == 1);
+    assert(loaded_bodies.services.counts.events == 0);
     string[2] names = {"sel", "top"};
     stops_after_call(NESTED[..], names[..], 1, 2);
     string[2] header = {"sels", "top"};
@@ -241,6 +257,60 @@ fn mapped_sources() void {
     assert(s->proof.kind == ownership_api.proof_kind.incomplete && s->cases.len == 0);
     assert(s->proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
     assert(b.services.counts.events == 0);
+}
+
+fn nested_indirect_read() void {
+    string[1] names = {"nested"};
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    ownership_call_bodies.open(&b, NESTED_READ[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_summary_body.body_program mut body = ownership_summary_body.extract(&b.inputs[0]);
+    defer ownership_summary_body.free(&body);
+    assert(ownership_api.successful(body.proof));
+    u64 mut reads = 0;
+    u64 mut checks = 0;
+    u64 mut uses = 0;
+    u64 mut i = 0;
+    while (i < body.effects_len) {
+        if (body.effects[i].payload == ownership_summary_model.payload_kind.read) { reads += 1; }
+        i += 1;
+    }
+    i = 0;
+    while (i < body.steps_len) {
+        if (body.steps[i].kind == ownership_flow.step_kind.local_effect &&
+            (body.steps[i].local.kind == ownership_transfer.action.inspect ||
+                body.steps[i].local.kind == ownership_transfer.action.use)) { checks += 1; }
+        if (body.steps[i].kind == ownership_flow.step_kind.local_effect &&
+            body.steps[i].local.kind == ownership_transfer.action.use) { uses += 1; }
+        i += 1;
+    }
+    assert(reads == 2 && checks == reads && uses == 1);
+}
+
+// A foreign entry has no modeled caller that can satisfy a caller-source requirement. This
+// rule applies to a direct requirement and to one that a wrapper exports from its callee.
+fn foreign_entry_requirement() void {
+    string[2] names = {"load", "top"};
+    ownership_call_bodies.bodies mut direct = ownership_call_bodies.bodies{};
+    ownership_call_bodies.open(&direct, LOADED[..], names[..]);
+    defer ownership_call_bodies.close(&direct);
+    direct.inputs[0].foreign_called = true;
+    ownership_call_bodies.infer(&direct, 0);
+    ownership_summary_model.summary* loaded = ownership_call_bodies.summary(&direct, 0);
+    assert(loaded->proof.kind == ownership_api.proof_kind.incomplete);
+    assert(loaded->proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(loaded->residual_effects && loaded->requirements.len == 0);
+
+    ownership_call_bodies.bodies mut wrapper = ownership_call_bodies.bodies{};
+    ownership_call_bodies.open(&wrapper, LOADED[..], names[..]);
+    defer ownership_call_bodies.close(&wrapper);
+    ownership_call_bodies.infer(&wrapper, 0);
+    wrapper.inputs[1].foreign_called = true;
+    ownership_call_bodies.infer(&wrapper, 1);
+    ownership_summary_model.summary* top = ownership_call_bodies.summary(&wrapper, 1);
+    assert(top->proof.kind == ownership_api.proof_kind.incomplete);
+    assert(top->proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(top->residual_effects && top->requirements.len == 0);
 }
 
 // When the exact arguments refute each normal case, the copy after the call does not run.
@@ -290,6 +360,8 @@ fn main() i32 {
     released_selected();
     consumers();
     mapped_sources();
+    nested_indirect_read();
+    foreign_entry_requirement();
     refuted();
     independent_error(ERROR_BEFORE[..]);
     independent_error(ERROR_AFTER[..]);

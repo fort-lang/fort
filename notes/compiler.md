@@ -1301,22 +1301,28 @@ came here.
   destination, a whole TL or a TA leaf, then borrows a symbolic caller source of its own, one for
   each parameter and field path (`loaded_key`). The body requires that source live at entry, and
   only a caller can satisfy that: the caller must prove the reference in its own storage live at the
-  call. **No caller checks it yet, so the rule is gated.** `ownership_source_local.loaded_bound` is
-  the one switch: it reads `callers_bind_loaded`, which `ownership_source.context` passes to both
-  runs before they prepare and which the compiler leaves off. `ownership_report.fir_test_local`
-  (`--fir-test`) prepares a local run from a zero context and copies no switch, so it stays off
-  there too. Off, the read of each load stays the gap `unknown_source` in `untracked_loads`, and
-  `entry_facts` gives each loaded source unknown validity: the body stays outside the declared
-  scopes, as before the rule. The calls increment turns the switch on when its summaries record the
-  requirement and check it at each call. A returned loaded source must then map to the source of the
-  caller's reference, not to the parameter's own source (`view_caller` in `_loaded_gate_test.ft`).
+  call. **The call summaries check it at each call, so the rule is on in a closure.**
+  `ownership_source_local.loaded_bound` is the one switch: it reads `callers_bind_loaded`, which
+  `ownership_source.prepare` turns on for both runs of each closure body before they prepare.
+  `ownership_report.fir_test_local` (`--fir-test`) prepares a local run from a zero context with
+  no call summaries, so the switch stays off there. Off, the read of each load stays the gap
+  `unknown_source` in `untracked_loads`, and `entry_facts` gives each loaded source unknown
+  validity: the body stays outside the declared scopes. A returned loaded source maps to the
+  source of the caller's reference, not to the parameter's own source (`view_caller` in
+  `_loaded_gate_test.ft`).
   On, the source is live at entry, and at a clean position no outside step has made it unknown, so
   the read is no gap. An outside step after the load makes the source unknown, so a later use is
-  incomplete proof. A copy of the loaded reference, a use through it, a third indirection, an index
-  before the loaded reference, a span parameter and a slice stored straight into untracked storage
-  keep the gap. `test/fort/ownership_source_local_loaded_test.ft` holds the rule with the switch on,
-  and `_loaded_gate_test.ft` holds the gate: with the switch off, the readers of a borrow that a
-  caller released first are the gap in both rows (`read`, `read2`, `usel`).
+  incomplete proof. In the local and stored runs, a copy of the loaded reference, a use through
+  it, a third indirection, an index before the loaded reference, a span parameter and a slice
+  stored straight into untracked storage keep the gap. Only the call summaries keep the loaded
+  caller source through a clean use or copy, after a caller binds the requirement
+  (`ownership_summary_body.argument_origin`, `mapped_sources` in
+  `test/fort/ownership_calls_origins_test.ft`). The gap of the local and stored runs is
+  conservative: it gives incomplete proof and no error.
+  `test/fort/ownership_source_local_loaded_test.ft` holds the rule with the switch on,
+  and `_loaded_gate_test.ft` holds the gate: a standalone run keeps the gap (`standalone`). In a
+  closure the readers `read`, `read2` and `usel` prove, and the call analysis refuses each unsafe
+  caller (`bound`).
   Each switch on a flag gives a flag edge for each arm, and for an otherwise target that one bool
   value takes. An edge keeps the value only where the flag is live at its target, so a dead flag
   splits no paths. A dead marker of a flag removes its value. The value survives a later write of
@@ -2207,6 +2213,50 @@ came here.
   against 35370, but its fixed point needs 13 sweeps against 11.
   `test/fort/ownership_graph_test.ft` G16 to G19, `test/fort/ownership_indirect_test.ft` R14 and
   the 4 rows of `tools/mutations/ownership_graph.json` hold this.
+- **A function identity outside exact storage makes its body foreign-called** (D17.13, D17.18).
+  A foreign-called body exports no requirement on a caller source. `requirement` and
+  `export_requirement` in `ownership_summary_body.ft` record a lost requirement instead, so the
+  summary is incomplete proof, and each fort call of the body gives incomplete proof too. The
+  empty-output requirement of a result stays (`result_requirement`), because a foreign caller
+  must satisfy it under D17.13 trust. The heap solver reads no foreign-called flag: it analyzes
+  each body with symbolic inputs (D17.13). So a foreign-called
+  `fn fac() ob { return ob{new(u8, 1), 1}; }` keeps a complete summary with 1 empty-output
+  requirement (`ownership_summary_foreign_test.ft`).
+  `ownership_source.generated_caller` marks `main`, the bodies that generated startup or a
+  runtime check calls, and `std.rt.alloc` and `std.rt.free`, which the code of `new` and `del`
+  calls. FIR lowers a print and a string comparison to fort calls, so their runtime bodies need
+  no mark. `ownership_source.analyze` merges these 17 names into the marks of the graph
+  (`ownership_source_foreign_merge_test.ft`). The graph marks the others with one invariant:
+  it follows a fort identity exactly only in exact storage. Exact storage is a local of one body
+  at a place that dereferences no pointer and indexes no span or string, when no FIR address or
+  slice of that body names the storage of the local (`exact_storage`).
+  A copy of a function-typed slot or of a whole value of one type keeps the identity in view.
+  So does a parameter or the result of a call target that names a body. Each other path marks
+  the body of the identity. The reading is conservative: it can mark a body that no foreign code
+  calls. Seven escape points apply the rule.
+  Rule 1: a fact at a global, through a pointer or a span index, or in an addressed local. The
+  address can reach an extern before or after the store, so `collect_sites` marks each addressed
+  local before the first fact, and `add_fact` marks before its duplicate test.
+  Rule 2: an argument of a call with a foreign or a residual target (`foreign_arguments`).
+  Rule 3: the operand of a cast to a type that is not a function type (`foreign_casts`).
+  Rule 4: a read through an index, a dereference or a nested field. It copies no fact at a
+  numbered field, so `copy_place` marks each such fact that the place can select.
+  Rule 5: a copy that keys an identity at an aggregate slot. FIR can build an aggregate into a
+  projected place (`_1.0 = aggregate handler(...)`), and that member key names no slot either.
+  Rule 6: the checked initializer of each global or constant that a statement names, and of each
+  global or constant that such an initializer names (D7.10). A scalar declaration needs no scan.
+  Rule 7: the result of a foreign-called body, closed transitively (`foreign_results`).
+  Rules 2, 3 and 7 read the facts once at the fixed point, because a mark changes no fact.
+  Each scan pays 1 W unit for each record, initializer node or fact that it visits. A mark finds
+  its body by the index in its target. Foreign code that names a fort symbol directly (D9.6,
+  D9.7) stays outside the rule, as a residual target does. `test/fort/ownership_graph_test.ft`
+  G20 to G22 and 19 rows of `tools/mutations/ownership_graph.json` hold this. G20, G21 and G22
+  refuse the build at each W bound below its full work. A refused build keeps only marks of the
+  full build, and its active operation is the operation of the refusal. G22 finds the refusal
+  of each new loop: the bound one below a mark refuses the charge of that mark.
+  `test/fort/ownership_source_calls_foreign_test.ft` holds 11 escape shapes and 2 twins in the
+  calls_heap rows of a closure, and `test/lang/fail/ownership/070` to `074` hold 4 shapes in
+  `--ownership-check` diagnostics.
 - **A call of a function value applies the summary of each fort target** (D17.13, D17.18).
   `ownership_recursive.solve` gives each graph call one `call_targets` record and binds each
   explicit fort target to its published summary. Extraction finds the record of a call by a

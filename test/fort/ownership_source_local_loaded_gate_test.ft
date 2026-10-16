@@ -1,32 +1,24 @@
 //! run
 //! flags: -I ../../src/fort -I support
 //! stdout:
+//| standalone ok
 //| record ok
-//| gated ok
 //| bound ok
-/// Tests the switch of loaded parameter sources (ownership_source_local.loaded_bound). A body
-/// that loads a reference out of a parameter referent requires that reference's source live at
-/// entry, and only a caller can satisfy that (spec/fir.md 14.1). No caller checks it yet, so
-/// the compiler keeps the switch off and each such load stays the gap unknown_source. A line
-/// here is a line of SOURCE.
+/// Tests standalone and integrated loaded-source gates.
+// A line here is a line of SOURCE.
 import ownership_api;
 import ownership_keys;
 import ownership_source;
+import ownership_source_calls;
 import ownership_source_env;
 import ownership_source_local;
 import std.strbuf;
 
-u32 READ_LINE = 14;
-u32 READ2_LINE = 24;
-u32 USEL_LINE = 50;
 u32 CHAIN_MAIN_LINE = 18;
 u32 CHAIN2_MAIN_LINE = 25;
 u32 CHAIN4_MAIN_LINE = 28;
 u32 CALLER_LOCAL_LINE = 36;
-u32 VIEW_LINE = 53;
-u32 VIEW_CALLER_LINE = 54;
-u32 LEGAL_CALLER_LINE = 62;
-u32 BLOCK_AT_LINE = 52;
+u32 LEGAL_STORE_LINE = 65;
 
 string[70] SOURCE = {
     "struct holder { u8@ s; }",
@@ -101,7 +93,7 @@ string[70] SOURCE = {
     "}",
 };
 
-fn open(ownership_source_env.env mut* e, strbuf.str_buf mut* text, bool bound) void {
+fn open(ownership_source_env.env mut* e, strbuf.str_buf mut* text) void {
     u64 mut i = 0;
     while (i < SOURCE.len) {
         strbuf.append(text, SOURCE[i]);
@@ -111,9 +103,6 @@ fn open(ownership_source_env.env mut* e, strbuf.str_buf mut* text, bool bound) v
     strbuf.append(text, "fn root() i32 { return 0; }\n");
     ownership_source_env.open(e);
     ownership_source_env.runtime(e);
-    // The compiler leaves the switch off: a fresh source context holds false.
-    assert(!e->source.callers_bind_loaded);
-    e->source.callers_bind_loaded = bound;
     assert(ownership_source_env.prepare(e, strbuf.view(text)));
 }
 
@@ -129,13 +118,6 @@ fn gap_in(string name, string run, ownership_source_local.context* c,
         assert(false);
     }
     assert(c->violations_len == 0 && !ownership_api.successful(c->proof));
-}
-
-// The read of the load is the gap in both rows: no row proves the use.
-fn gap(ownership_source_env.env mut* e, string name, u32 line) void {
-    ownership_source.body mut* found = row(e, name);
-    gap_in(name, "local", &found->local, ownership_source_local.missing.unknown_source, line);
-    gap_in(name, "stored", &found->stored, ownership_source_local.missing.unknown_source, line);
 }
 
 fn proved_in(string name, string run, ownership_source_local.context* c) void {
@@ -160,25 +142,8 @@ fn stored_only(ownership_source_env.env mut* e, string name, u32 line) void {
     gap_in(name, "local", &found->local, ownership_source_local.missing.unknown_source, line);
 }
 
-// A caller of view: the call result is the gap fort_call in the stored row, and `&h` is the gap
-// of the local row, both at the call on `line`.
-fn returned(ownership_source_env.env mut* e, string name, u32 line) void {
-    ownership_source.body mut* found = row(e, name);
-    gap_in(name, "stored", &found->stored, ownership_source_local.missing.fort_call, line);
-    gap_in(name, "local", &found->local, ownership_source_local.missing.unknown_source, line);
-}
-
-// The switch reaches both runs of each body.
-fn switched(ownership_source_env.env mut* e, bool bound) void {
-    string[4] names = {"read", "read2", "usel", "block_at"};
-    for (string name : names) {
-        assert(row(e, name)->local.callers_bind_loaded == bound);
-        assert(row(e, name)->stored.callers_bind_loaded == bound);
-    }
-}
-
-// With the switch off the producer keeps the requirement record: the step of the load still
-// names the loaded source, and that source is unknown at entry, not live.
+// The producer keeps one requirement record. The loaded source is live because each caller
+// binds the entry requirement before it applies the summary.
 fn record(ownership_source_env.env mut* e) void {
     ownership_source_local.context* c = &row(e, "read")->local;
     assert(c->initialized && !c->solved && c->loaded_len == 1);
@@ -188,7 +153,7 @@ fn record(ownership_source_env.env mut* e) void {
     while (k < c->entry.sources_len) {
         if (ownership_keys.entity(c->entry.sources[k].key, key) == 0) {
             assert(c->entry.sources[k].kind == ownership_api.source_kind.symbolic_caller);
-            assert(c->entry.sources[k].validity == ownership_api.validity_kind.unknown);
+            assert(c->entry.sources[k].validity == ownership_api.validity_kind.live);
             found += 1;
         }
         k += 1;
@@ -208,35 +173,54 @@ fn record(ownership_source_env.env mut* e) void {
     println("record ok");
 }
 
-// The review probes: a borrow that a body stores into caller storage or a global, released
-// before a reader loads it. No caller checks that the loaded source is live at the call, so
-// each reader is the gap in both rows, and no row proves the use of freed memory. The bodies
-// that store the borrow need no gap of their own (a heap or caller borrow in untracked storage):
-// that rule rests on the gap of each reader until the calls increment binds the requirement.
-fn gated(ownership_source_env.env mut* e) void {
-    switched(e, false);
-    // stash and chain_main, stash2 and chain2_main, gstash and chain3_main, chain4_main in one
-    // caller, set with caller_local and caller_global, gset2 and use_loaded_main.
-    gap(e, "read", READ_LINE + 1);
-    gap(e, "read2", READ2_LINE);
-    gap(e, "usel", USEL_LINE);
-    proved(e, "stash");
-    proved(e, "stash2");
-    proved(e, "gstash");
-    proved(e, "set");
-    proved(e, "gset2");
-    // The shape of fir.block_at keeps the gap until callers bind the requirement.
-    gap(e, "block_at", BLOCK_AT_LINE);
-    gap(e, "view", VIEW_LINE);
-    println("gated ok");
+// An unsafe caller gives incomplete proof and no violation: no event validates its read.
+fn calls_unproved(ownership_source_env.env mut* e, string name) void {
+    ownership_source_calls.row* calls = row(e, name)->calls;
+    assert(calls != null && !ownership_api.successful(calls->proof));
+    assert(calls->proof.kind == ownership_api.proof_kind.incomplete && calls->violations == 0);
 }
 
-// With the switch on, each reader proves, while its caller releases the buffer before the
-// call. That is why the switch stays off. Before the calls increment turns it on, its summaries
-// must reject these callers at the call to the reader: chain_main, chain2_main, chain3_main,
-// chain4_main, caller_local, caller_global and use_loaded_main.
+// The summary solver gives unknown_effect at `line`, so the calls row is incomplete there.
+fn summary_unknown(ownership_source_calls.row* calls, u32 line) void {
+    assert(calls != null && !calls->summary_proved && calls->violations == 0);
+    assert(calls->summary_proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(calls->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    if (calls->summary_proof.terminal.source.line != line ||
+        calls->proof.terminal.source.line != line) {
+        eprintln("summary gap at ", calls->summary_proof.terminal.source.line, ", want ", line);
+        assert(false);
+    }
+}
+
+// A direct FIR analysis has no call summaries. Its loaded source stays unknown, and the load
+// stays the unknown-source gap.
+fn standalone(ownership_source_env.env mut* e) void {
+    ownership_source.body mut* found = row(e, "read");
+    ownership_source_local.context mut c = ownership_source_local.context{};
+    ownership_source_local.prepare(&c, &found->function, found->key, found->source.file,
+        found->module->file, found->source);
+    defer ownership_source_local.free(&c);
+    assert(!c.callers_bind_loaded && c.loaded_len == 1);
+    ownership_api.entity_id key = ownership_source_local.loaded_source(&c, 0);
+    u64 mut matches = 0;
+    u64 mut i = 0;
+    while (i < c.entry.sources_len) {
+        if (ownership_keys.entity(c.entry.sources[i].key, key) == 0) {
+            assert(c.entry.sources[i].validity == ownership_api.validity_kind.unknown);
+            matches += 1;
+        }
+        i += 1;
+    }
+    assert(matches == 1 && c.gap == ownership_source_local.missing.unknown_source);
+    println("standalone ok");
+}
+
+// The local analyses prove each clean loaded source. The call analysis refuses each bad caller.
+// The heap solver proves the caller that reads the returned view before release. The summary
+// solver gives unknown_effect at the store of a slice into a field of `h`, so the calls row of
+// that caller stays incomplete at the store. Both solvers prove the full slice that `view`
+// returns, so the calls row of `view` is complete.
 fn bound(ownership_source_env.env mut* e) void {
-    switched(e, true);
     proved(e, "read");
     proved(e, "read2");
     proved(e, "usel");
@@ -247,38 +231,33 @@ fn bound(ownership_source_env.env mut* e) void {
     proved(e, "caller_global");
     proved(e, "use_loaded_main");
     // These four prove in the stored row, which tracks the stack source of h. The local run
-    // tracks no aggregate, so `&h` is its gap. The calls increment must turn each of them into
-    // a violation or a gap in the stored row before it turns the switch on.
+    // tracks no aggregate, so `&h` is its gap. Call analysis rejects each unsafe caller below.
     stored_only(e, "chain_main", CHAIN_MAIN_LINE + 2);
     stored_only(e, "chain2_main", CHAIN2_MAIN_LINE);
     stored_only(e, "chain4_main", CHAIN4_MAIN_LINE + 5);
     stored_only(e, "caller_local", CALLER_LOCAL_LINE + 3);
-    // A returned loaded source: view returns `h->s[..]`, which borrows the caller source of
-    // h->s. view_caller releases b and then reads the result; legal_caller reads it first.
-    // Today a fort call result has no source, so both are the gap fort_call in the stored row.
-    // The calls increment must map the returned source to the source of the caller's
-    // reference h.s, the allocation of b, and not to the parameter's own source, the stack
-    // source of h. Then view_caller is a use after release, and legal_caller must still prove.
-    returned(e, "view_caller", VIEW_CALLER_LINE + 4);
-    returned(e, "legal_caller", LEGAL_CALLER_LINE + 4);
+    string[5] bad = {"chain_main", "chain2_main", "chain4_main", "caller_local",
+        "view_caller"};
+    for (string name : bad) { calls_unproved(e, name); }
+    ownership_source_calls.row* legal = row(e, "legal_caller")->calls;
+    assert(legal != null && legal->heap_proved &&
+        ownership_api.successful(legal->heap_proof));
+    summary_unknown(legal, LEGAL_STORE_LINE);
+    ownership_source_calls.row* viewed = row(e, "view")->calls;
+    assert(viewed != null && viewed->heap_proved && viewed->summary_proved);
+    assert(ownership_api.successful(viewed->proof) && viewed->violations == 0);
+    ownership_source_calls.row* unsafe_view = row(e, "view_caller")->calls;
+    assert(unsafe_view != null && !unsafe_view->heap_proved);
     println("bound ok");
 }
 
 fn main() i32 {
-    ownership_source_env.env mut off = ownership_source_env.env{};
-    // A zero source context, as the compiler driver makes it, holds the switch off.
-    assert(!off.source.callers_bind_loaded);
+    ownership_source_env.env mut on = ownership_source_env.env{};
     strbuf.str_buf mut text = strbuf.create();
     defer strbuf.free(&text);
-    open(&off, &text, false);
-    record(&off);
-    ownership_source.analyze(&off.source);
-    gated(&off);
-    ownership_source_env.close(&off);
-    ownership_source_env.env mut on = ownership_source_env.env{};
-    strbuf.str_buf mut again = strbuf.create();
-    defer strbuf.free(&again);
-    open(&on, &again, true);
+    open(&on, &text);
+    standalone(&on);
+    record(&on);
     ownership_source.analyze(&on.source);
     bound(&on);
     ownership_source_env.close(&on);

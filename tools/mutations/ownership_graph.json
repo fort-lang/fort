@@ -1,26 +1,162 @@
 {
   "comment": [
-    "One row for each check that keeps a residual fort target of a call free of",
-    "graph edges and fact flow, and one for the explicit flow beside it (D17.18).",
-    "A row names the line that holds the check and the text that breaks it. The",
-    "module tests compile src/fort with the mutant. The table runs on a darwin",
+    "Fourteen rows cover the callback-escape rules: a fort identity that leaves exact",
+    "storage makes its body foreign-called. Two rows cover the generated callers that",
+    "src/fort/ownership_source.ft merges into the foreign-called bodies of the graph. Four rows",
+    "cover residual and explicit call flow. Three rows hold the W charge of a mark and of the result scan, and the active operation of a refused cast scan.",
+    "A row names the line that holds the rule and the text that breaks it. The",
+    "module tests compile src/fort with the mutant. The table runs on a Darwin",
     "host with --runner 'bash -c' after cmake --preset debug. ZERO_AR_DATE=1",
-    "makes the darwin link reproducible, so the md5 guard holds.",
-    "The md5 guard reads the product compiler that the build links.",
-    "One run of the table took 72 s."
+    "makes the Darwin link reproducible, so the MD5 guard holds.",
+    "The MD5 guard reads the product compiler that the build links.",
+    "One 18-row run took 712 s, with a 2 s pause before each round."
   ],
   "sources": [
-    "src/fort/ownership_graph.ft"
+    "src/fort/ownership_graph.ft",
+    "src/fort/ownership_source.ft"
   ],
   "binary": "build/Darwin/debug/fort",
   "build": "ZERO_AR_DATE=1 cmake --build build/Darwin/debug --target fort",
   "stages": [
     {
       "name": "graph module tests",
-      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Darwin/debug/fort --std-dir build/Darwin/debug/std --timeout 900 -j 6 ownership_graph_test ownership_source_test ownership_indirect_test"
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Darwin/debug/fort --std-dir build/Darwin/debug/std --timeout 900 -j 6 ownership_graph_test ownership_source_test ownership_source_foreign ownership_indirect_test"
     }
   ],
   "mutations": [
+    {
+      "decision": "D17.18-foreign-exposed-storage",
+      "file": "src/fort/ownership_graph.ft",
+      "old": "    if (value.exposed) {",
+      "new": "    if (false) {",
+      "what": "a fact outside exact storage does not make its fort identity foreign-called"
+    },
+    {
+      "decision": "D17.18-foreign-indirect-storage",
+      "file": "src/fort/ownership_graph.ft",
+      "old": "        fir.place_indirect(g->bodies[body].body, slot) ||",
+      "new": "        false ||",
+      "what": "a store through a pointer counts as exact storage"
+    },
+    {
+      "decision": "D17.18-foreign-addressed-storage",
+      "file": "src/fort/ownership_graph.ft",
+      "old": "    return at < g->addressed.len && !g->addressed[at];",
+      "new": "    return at < g->addressed.len;",
+      "what": "a local that an address names counts as exact storage"
+    },
+    {
+      "decision": "D17.18-foreign-addressed-mark",
+      "file": "src/fort/ownership_graph.ft",
+      "old": "        g->addressed[g->local_first[cast(body, u64)] + cast(value.place.local, u64)] = true;",
+      "new": "        g->addressed[g->local_first[cast(body, u64)] + cast(value.place.local, u64)] = false;",
+      "what": "the site walk marks no addressed local"
+    },
+    {
+      "decision": "D17.18-foreign-global-storage",
+      "file": "src/fort/ownership_graph.ft",
+      "old": "    if (slot.base != fir.base_kind.bk_local ||",
+      "new": "    if (false ||",
+      "what": "a global counts as exact storage"
+    },
+    {
+      "decision": "D17.18-foreign-unkeyed-read",
+      "file": "src/fort/ownership_graph.ft",
+      "old": "        if (same && !matched && source_field == ROOT - 1 &&",
+      "new": "        if (false && same && !matched && source_field == ROOT - 1 &&",
+      "what": "an indexed read drops the numbered field facts without a mark"
+    },
+    {
+      "decision": "D17.18-foreign-lossy-copy",
+      "file": "src/fort/ownership_graph.ft",
+      "old": "            if (!keyed) {",
+      "new": "            if (false) {",
+      "what": "a copy that keys an identity at an aggregate slot does not mark it"
+    },
+    {
+      "decision": "D17.18-foreign-member-key",
+      "file": "src/fort/ownership_graph.ft",
+      "old": "        if (value.field != ROOT) {",
+      "new": "        if (false) {",
+      "what": "an aggregate built into a projected place keys its member without a mark"
+    },
+    {
+      "decision": "D17.18-foreign-erased-cast",
+      "file": "src/fort/ownership_graph.ft",
+      "old": "    foreign_casts(g);",
+      "new": "    if (false) { foreign_casts(g); }",
+      "what": "a cast to a type that is not a function type does not mark its operand"
+    },
+    {
+      "decision": "D17.18-foreign-residual-argument",
+      "file": "src/fort/ownership_graph.ft",
+      "old": "    bool mut foreign = call->residual_foreign || call->residual_fort;",
+      "new": "    bool mut foreign = call->residual_foreign;",
+      "what": "an argument of a residual fort target does not mark its identities"
+    },
+    {
+      "decision": "D17.18-foreign-extern-argument",
+      "file": "src/fort/ownership_graph.ft",
+      "old": "        foreign_arguments(g, &g->calls[call]);",
+      "new": "        if (false) { foreign_arguments(g, &g->calls[call]); }",
+      "what": "an extern argument does not mark its identities"
+    },
+    {
+      "decision": "D17.18-foreign-global-initializer",
+      "file": "src/fort/ownership_graph.ft",
+      "old": "    return seed_initializer(g, global->node->b);",
+      "new": "    return true;",
+      "what": "a checked global initializer marks no function name"
+    },
+    {
+      "decision": "D17.18-foreign-initializer-address",
+      "file": "src/fort/ownership_graph.ft",
+      "old": "        if (!seed_global(g, value->sym)) { return false; }",
+      "new": "        if (false) { return false; }",
+      "what": "an initializer that names another global does not scan that global"
+    },
+    {
+      "decision": "D17.18-foreign-returned-callback",
+      "file": "src/fort/ownership_graph.ft",
+      "old": "            if (current.base == fir.base_kind.bk_local && current.local == 0) {",
+      "new": "            if (false) {",
+      "what": "a callback in the result of a foreign-called body is not marked"
+    },
+    {
+      "decision": "D17.18-generated-merge",
+      "file": "src/fort/ownership_source.ft",
+      "old": "            c->graph.foreign_called[i] = c->graph.foreign_called[i] ||\n                generated_caller(&c->bodies[i]);",
+      "new": "            c->graph.foreign_called[i] = c->graph.foreign_called[i] ||\n                (false && generated_caller(&c->bodies[i]));",
+      "what": "a body that generated code calls keeps the foreign-called flag of the graph alone"
+    },
+    {
+      "decision": "D17.18-generated-new-del",
+      "file": "src/fort/ownership_source.ft",
+      "old": "        name == \"alloc\" || name == \"free\" ||",
+      "new": "        false ||",
+      "what": "the runtime bodies that `new` and `del` lower to are not generated callers"
+    },
+    {
+      "decision": "D17.18-foreign-mark-work",
+      "file": "src/fort/ownership_graph.ft",
+      "old": "    if (!charge_work(g, 1)) { return false; }\n    g->foreign_called[value.index] = true;",
+      "new": "    g->foreign_called[value.index] = true;",
+      "what": "a foreign-called mark pays no W unit"
+    },
+    {
+      "decision": "D17.18-foreign-result-work",
+      "file": "src/fort/ownership_graph.ft",
+      "old": "        while (i != U64_MAX) {\n            if (!charge_work(g, 1)) { return; }\n            fact current = g->facts[i];",
+      "new": "        while (i != U64_MAX) {\n            fact current = g->facts[i];",
+      "what": "the result scan visits each fact of a foreign-called body without a W unit"
+    },
+    {
+      "decision": "D17.18-foreign-cast-refusal",
+      "file": "src/fort/ownership_graph.ft",
+      "old": "        foreign_operand(g, g->casts[i].body, g->casts[i].value);\n        // A refusal keeps the operation of its cast active.\n        if (!ownership_api.successful(g->proof)) { return; }\n",
+      "new": "        foreign_operand(g, g->casts[i].body, g->casts[i].value);\n",
+      "what": "a refusal inside the cast scan lets the next cast replace the active operation"
+    },
     {
       "decision": "D17.18-residual-edges",
       "file": "src/fort/ownership_graph.ft",
