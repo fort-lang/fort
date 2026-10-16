@@ -1,0 +1,925 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| summary transfer preconditions ok
+/// Checks the verified transfer facts that summary extraction supplies (D17.15, D17.18).
+import ownership_api;
+import ownership_call_bodies;
+import ownership_calls_fixtures;
+import ownership_flow;
+import ownership_local_env;
+import ownership_state;
+import ownership_summary_body;
+import ownership_summary_model;
+import ownership_transfer;
+
+string[2] PROJECTED = {
+    "struct counter { i64 value; }",
+    "fn projected(counter* p) i64 { return p->value; }",
+};
+
+string[1] PROJECTED_RELEASED = {
+    "fn projected_released(i64[1] mut* own p) i64 { i64[1]* v = p; del(p); return (*v)[0]; }",
+};
+
+string[2] PROJECTED_VOID = {
+    "struct erased_box { void* item; }",
+    "fn projected_void(erased_box* p) bool { return p->item == null; }",
+};
+
+string[5] PROJECTED_MOVED = {
+    "struct counter { i64 value; }",
+    "fn projected_moved(counter mut* own p) i64 {",
+    "    counter mut* own q = move(p);",
+    "    i64 result = p->value; del(q); return result;",
+    "}",
+};
+
+string[7] ADDRESS_MOVED = {
+    "struct box { i64 value; }",
+    "fn address_moved(box mut* own p) i64 {",
+    "    box mut* own q = move(p);",
+    "    box* v = &*p;",
+    "    i64 result = v->value;",
+    "    del(q); return result;",
+    "}",
+};
+
+string[4] ADDRESS_LIVE = {
+    "struct box { i64 value; }",
+    "fn address_live(box* p) i64 {",
+    "    box* v = &*p; return v->value;",
+    "}",
+};
+
+string[1] NESTED_ADDRESS = {
+    "fn nested_address(i64** p) i64* { return &**p; }",
+};
+
+string[6] REPEATED_ADDRESS = {
+    "fn repeated_address(i64* own p) bool {",
+    "    i64* own q = move(p);",
+    "    i64* a = &*p;",
+    "    i64* b = &*a;",
+    "    bool result = b == null; del(q); return result;",
+    "}",
+};
+
+string[6] NESTED_PROJECTED = {
+    "fn nested_projected_live(i64** p) i64 { return **p; }",
+    "fn nested_projected_moved(i64** own p) i64 {",
+    "    i64** own q = move(p);",
+    "    i64 result = **p; del(q); return result;",
+    "}",
+    "",
+};
+
+string[17] NESTED_INNER = {
+    "fn nested_inner_live(i64** p) i64 { return **p; }",
+    "fn nested_inner_touch() void { }",
+    "fn nested_inner_moved(i64 mut* own mut* p) i64 {",
+    "    nested_inner_touch();",
+    "    i64 mut* own q = move(*p);",
+    "    i64 result = **p;",
+    "    del(q); return result;",
+    "}",
+    "fn nested_inner_released(i64 mut* own mut* p) i64 {",
+    "    del(*p);",
+    "    return **p;",
+    "}",
+    "fn nested_inner_replaced(i64 mut* mut* p, i64 mut* q) i64 {",
+    "    *p = q;",
+    "    return **p;",
+    "}",
+    "fn nested_inner_null(i64* mut* p) i64 { *p = null; return **p; }",
+};
+
+string[8] REPEATED_NESTED = {
+    "fn repeated_nested_live(i64 mut* mut* mut* p, i64 mut* q) i64 {",
+    "    **p = q;",
+    "    return ***p;",
+    "}",
+    "fn repeated_nested_null(i64* mut* mut* p) i64 {",
+    "    **p = null;",
+    "    return ***p;",
+    "}",
+};
+
+string[4] REPEATED_LOAD = {
+    "fn repeated_load(i64 mut* mut* mut* p) i64 {",
+    "    i64 first = ***p;",
+    "    return ***p;",
+    "}",
+};
+
+string[6] REPLACED_LOAD = {
+    "fn replaced_load(i64 mut* mut* p) i64 {",
+    "    i64 mut* first = *p;",
+    "    *p = null;",
+    "    i64 mut* second = *p;",
+    "    return *second;",
+    "}",
+};
+
+string[6] REPLACED_LOAD_LIVE = {
+    "fn replaced_load_live(i64 mut* mut* p, i64 mut* replacement) i64 {",
+    "    i64 mut* first = *p;",
+    "    *p = replacement;",
+    "    i64 mut* second = *p;",
+    "    return *second;",
+    "}",
+};
+
+string[4] DISTINCT_LOADS = {
+    "fn distinct_loads(i64 mut* mut* mut* a, i64 mut* mut* mut* b) i64 {",
+    "    i64 first = ***a;",
+    "    return ***b;",
+    "}",
+};
+
+string[13] RELEASED_ADDRESS = {
+    "struct released_box { i64 value; }",
+    "fn released_address(i64 mut* own p) i64 {",
+    "    del(p);",
+    "    i64* a = &*p; return *a;",
+    "}",
+    "fn released_field(released_box mut* own p) i64 {",
+    "    del(p);",
+    "    i64* a = &p->value; return *a;",
+    "}",
+    "fn released_element(i64[2] mut* own p) i64 {",
+    "    del(p);",
+    "    i64* a = &(*p)[0]; return *a;",
+    "}",
+};
+
+string[11] OFFSET_UNUSED = {
+    "struct offset_pair { i64 first; i64 second; }",
+    "fn offset_unused(offset_pair mut* own p) bool {",
+    "    offset_pair mut* own q = move(p);",
+    "    i64* a = &p->second;",
+    "    bool result = a == null; del(q); return result;",
+    "}",
+    "fn offset_index_unused(i64[2] mut* own p) bool {",
+    "    i64[2] mut* own q = move(p);",
+    "    i64* a = &(*p)[1];",
+    "    bool result = a == null; del(q); return result;",
+    "}",
+};
+
+string[8] PREFIX_REUSE = {
+    "struct cell { i64 v; }",
+    "struct cbox { cell* c; }",
+    "fn callee(cbox mut* p) i64 {",
+    "    i64 a = p->c->v;",
+    "    *p = cbox{};",
+    "    return a + p->c->v;",
+    "}",
+    "fn caller(cbox mut* p) i64 { return callee(p); }",
+};
+
+string[9] FIELD_REUSE = {
+    "struct cell { i64 v; }",
+    "struct cbox { cell* c; }",
+    "struct outer { cbox b; i64 n; }",
+    "fn callee(outer mut* p) i64 {",
+    "    i64 a = p->b.c->v;",
+    "    p->b = cbox{};",
+    "    return a + p->b.c->v;",
+    "}",
+    "fn caller(outer mut* p) i64 { return callee(p); }",
+};
+
+string[8] PREFIX_STORE = {
+    "struct cell { i64 v; }",
+    "struct cbox { cell* c; }",
+    "fn callee(cbox mut* p, cell* r) i64 {",
+    "    p->c = r;",
+    "    *p = cbox{};",
+    "    return p->c->v;",
+    "}",
+    "fn caller(cbox mut* p, cell* r) i64 { return callee(p, r); }",
+};
+
+string[8] PREFIX_REFILL = {
+    "struct cell { i64 v; }",
+    "struct cbox { cell* c; }",
+    "fn callee(cbox mut* p, cell* r) i64 {",
+    "    *p = cbox{};",
+    "    p->c = r;",
+    "    return p->c->v;",
+    "}",
+    "fn caller(cbox mut* p, cell* r) i64 { return callee(p, r); }",
+};
+
+// The faulty bodies store a pointer through a call, release its target, and read through it.
+string[44] CALL_FAULTY = {
+    "struct cell { i64 v; }",
+    "struct cbox { cell* c; }",
+    "fn setc(cbox mut* p, cell* r) void { p->c = r; }",
+    "fn local_free(cbox mut* p) i64 {",
+    "    cell mut* own x = new(cell);",
+    "    setc(p, x);",
+    "    del(x);",
+    "    i64 b = p->c->v;",
+    "    p->c = null;",
+    "    return b;",
+    "}",
+    "fn stale_slot(cbox mut* p, cell* r1, cell mut* own r2) i64 {",
+    "    p->c = r1;",
+    "    setc(p, r2);",
+    "    del(r2);",
+    "    i64 b = p->c->v;",
+    "    p->c = r1;",
+    "    return b;",
+    "}",
+    "fn reuse_free(cbox mut* p, cell mut* own r) i64 {",
+    "    i64 a = p->c->v;",
+    "    setc(p, r);",
+    "    del(r);",
+    "    i64 b = p->c->v;",
+    "    p->c = null;",
+    "    return a + b;",
+    "}",
+    "fn stale_two(cbox mut* p, cell mut* own r1, cell* r3) i64 {",
+    "    p->c = r3;",
+    "    setc(p, r1);",
+    "    del(r1);",
+    "    i64 b = p->c->v;",
+    "    p->c = r3;",
+    "    return b;",
+    "}",
+    "fn local_free_reuse(cbox mut* p) i64 {",
+    "    i64 a = p->c->v;",
+    "    cell mut* own x = new(cell);",
+    "    setc(p, x);",
+    "    del(x);",
+    "    i64 b = p->c->v;",
+    "    p->c = null;",
+    "    return a + b;",
+    "}",
+};
+
+string[29] CALL_MIXED = {
+    "struct cell { i64 v; }",
+    "struct cbox { cell* c; }",
+    "fn setc(cbox mut* p, cell* r) void { p->c = r; }",
+    "fn local_free_slot(cbox mut* p, cell* r) i64 {",
+    "    p->c = r;",
+    "    cell mut* own x = new(cell);",
+    "    setc(p, x);",
+    "    del(x);",
+    "    i64 b = p->c->v;",
+    "    p->c = null;",
+    "    return b;",
+    "}",
+    "fn read_after_call(cbox mut* p, cell* r1, cell* r2) i64 {",
+    "    p->c = r1;",
+    "    setc(p, r2);",
+    "    return p->c->v;",
+    "}",
+    "fn store_after_call(cbox mut* p, cell* r1, cell* r2) i64 {",
+    "    setc(p, r1);",
+    "    p->c = r2;",
+    "    return p->c->v;",
+    "}",
+    "fn copy_reuse(cbox mut* p, cell* r) bool {",
+    "    cell* a = p->c;",
+    "    setc(p, r);",
+    "    cell* b = p->c;",
+    "    return a == b;",
+    "}",
+    "",
+};
+
+string[1] OUTPUT = {
+    "fn output(i64 mut* p, i64 value) void { *p = value; }",
+};
+
+string[2] TEMPORARY = {
+    "fn choose(bool take) i64 { println(take); return 1; }",
+    "fn temporary(bool take) i64 { return choose(take); }",
+};
+
+fn projected_scalar() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[1] names = {"projected"};
+    ownership_call_bodies.open(&b, PROJECTED[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_call_bodies.only_case(&b, 0);
+}
+
+// A scalar leaf has no ownership contents. Its designated source must still be live.
+fn projected_released() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[1] names = {"projected_released"};
+    ownership_call_bodies.open(&b, PROJECTED_RELEASED[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(&b, 0);
+    assert(model->proof.kind == ownership_api.proof_kind.complete && model->proof.failed);
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.invalid_use));
+    assert(b.services.counts.last.text == "reference source is no longer live");
+}
+
+// A projected void pointer stays a reference. Unknown reference contents prove no source.
+fn projected_void() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[1] names = {"projected_void"};
+    ownership_call_bodies.open(&b, PROJECTED_VOID[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(&b, 0);
+    assert(model->proof.kind == ownership_api.proof_kind.incomplete);
+    assert(model->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(model->cases.len == 0);
+}
+
+// A move leaves the allocation live through its destination. The old owner is still empty.
+fn projected_moved() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[1] names = {"projected_moved"};
+    ownership_call_bodies.open(&b, PROJECTED_MOVED[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(&b, 0);
+    assert(model->proof.kind == ownership_api.proof_kind.complete && model->proof.failed);
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.invalid_use));
+    assert(b.services.counts.last.text == "empty reference has no element");
+}
+
+// Address formation reads no storage. A later read still observes the empty owner used to form
+// the address.
+fn address_moved() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[1] names = {"address_moved"};
+    ownership_call_bodies.open(&b, ADDRESS_MOVED[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(&b, 0);
+    assert(model->proof.kind == ownership_api.proof_kind.complete && model->proof.failed);
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.invalid_use));
+    assert(b.services.counts.last.text == "empty reference has no element");
+}
+
+fn address_live() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[1] names = {"address_live"};
+    ownership_call_bodies.open(&b, ADDRESS_LIVE[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_call_bodies.only_case(&b, 0);
+}
+
+// The second dereference loads the base that the address request must preserve.
+fn nested_address() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[1] names = {"nested_address"};
+    ownership_call_bodies.open(&b, NESTED_ADDRESS[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_call_bodies.only_case(&b, 0);
+}
+
+// Repeated address formation preserves the known empty base. It reads no pointed-to storage.
+fn repeated_address() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[1] names = {"repeated_address"};
+    ownership_call_bodies.open(&b, REPEATED_ADDRESS[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_call_bodies.only_case(&b, 0);
+}
+
+// The first dereference must check the outer owner before the second dereference checks the
+// loaded reference.
+fn nested_projected() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"nested_projected_live", "nested_projected_moved"};
+    ownership_call_bodies.open(&b, NESTED_PROJECTED[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_call_bodies.only_case(&b, 0);
+    ownership_summary_model.summary* moved = ownership_call_bodies.summary(&b, 1);
+    assert(moved->proof.kind == ownership_api.proof_kind.complete && moved->proof.failed);
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.invalid_use));
+    assert(b.services.counts.last.text == "empty reference has no element");
+}
+
+fn failed_inner_read(ownership_call_bodies.bodies* b, u64 index) void {
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(b, index);
+    assert(model->proof.kind == ownership_api.proof_kind.complete && model->proof.failed);
+    assert(model->cases.len == 0);
+}
+
+// The last dereference checks the current inner slot after a store, release, or move.
+fn nested_inner() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[6] names = {"nested_inner_live", "nested_inner_touch", "nested_inner_replaced",
+        "nested_inner_null", "nested_inner_released", "nested_inner_moved"};
+    ownership_call_bodies.open(&b, NESTED_INNER[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_call_bodies.only_case(&b, 0);
+    ownership_call_bodies.only_case(&b, 2);
+    ownership_summary_model.summary* null_store = ownership_call_bodies.summary(&b, 3);
+    assert(null_store->proof.kind == ownership_api.proof_kind.incomplete);
+    assert(null_store->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(null_store->cases.len == 0);
+    failed_inner_read(&b, 4);
+    failed_inner_read(&b, 5);
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.invalid_use));
+    assert(b.services.counts.last.text == "empty reference has no element");
+}
+
+// Repeated nested loads use one flow slot. A later dereference reads a preceding live or null
+// store through that slot.
+fn repeated_nested() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"repeated_nested_live", "repeated_nested_null"};
+    ownership_call_bodies.open(&b, REPEATED_NESTED[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_call_bodies.only_case(&b, 0);
+    ownership_summary_model.summary* null_store = ownership_call_bodies.summary(&b, 1);
+    assert(null_store->proof.kind == ownership_api.proof_kind.incomplete &&
+        null_store->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(null_store->cases.len == 0);
+}
+
+// The exact caller path and type give one root for each dereference depth. Both reads use the
+// same two roots and the same two load effects.
+fn repeated_load() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[1] names = {"repeated_load"};
+    ownership_call_bodies.open(&b, REPEATED_LOAD[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(&b, 0);
+    ownership_call_bodies.only_case(&b, 0);
+    u64 mut loaded_roots = 0;
+    u64 mut i = 0;
+    while (i < model->roots.len) {
+        if (model->roots[i].kind == ownership_summary_model.root_kind.loaded_source) {
+            loaded_roots += 1;
+        }
+        i += 1;
+    }
+    u64 mut loaded_effects = 0;
+    i = 0;
+    while (i < model->effects.len) {
+        if (model->effects[i].payload ==
+            ownership_summary_model.payload_kind.reference_load) { loaded_effects += 1; }
+        i += 1;
+    }
+    assert(loaded_roots == 2);
+    assert(loaded_effects == 2);
+}
+
+// A store ends root reuse for the loaded path. The next load cannot reuse the old source.
+fn replaced_load() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[1] names = {"replaced_load"};
+    ownership_call_bodies.open(&b, REPLACED_LOAD[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(&b, 0);
+    assert(model->proof.kind == ownership_api.proof_kind.incomplete && model->proof.failed);
+    assert(model->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(model->cases.len == 0);
+}
+
+// A live replacement also stops root reuse. The summary has no stored-value load rule yet.
+fn replaced_load_live() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[1] names = {"replaced_load_live"};
+    ownership_call_bodies.open(&b, REPLACED_LOAD_LIVE[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(&b, 0);
+    assert(model->proof.kind == ownership_api.proof_kind.incomplete && model->proof.failed);
+    assert(model->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(model->cases.len == 0);
+}
+
+// Equal projection text does not merge roots from different caller sources. Each parameter
+// contributes two load roots and two load effects.
+fn distinct_loads() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[1] names = {"distinct_loads"};
+    ownership_call_bodies.open(&b, DISTINCT_LOADS[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(&b, 0);
+    ownership_call_bodies.only_case(&b, 0);
+    u64 mut loaded_roots = 0;
+    u64 mut loaded_effects = 0;
+    u64 mut i = 0;
+    while (i < model->roots.len) {
+        if (model->roots[i].kind == ownership_summary_model.root_kind.loaded_source) {
+            loaded_roots += 1;
+        }
+        i += 1;
+    }
+    i = 0;
+    while (i < model->effects.len) {
+        if (model->effects[i].payload ==
+            ownership_summary_model.payload_kind.reference_load) { loaded_effects += 1; }
+        i += 1;
+    }
+    assert(loaded_roots == 4);
+    assert(loaded_effects == 4);
+}
+
+// An address from a released owner keeps the released source. Its later read must fail at
+// offset zero: through the whole owner, its first field, or its first element.
+fn released_address() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[3] names = {"released_address", "released_field", "released_element"};
+    ownership_call_bodies.open(&b, RELEASED_ADDRESS[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    failed_inner_read(&b, 0);
+    failed_inner_read(&b, 1);
+    failed_inner_read(&b, 2);
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.invalid_use));
+    assert(b.services.counts.last.text == "reference source is no longer live");
+}
+
+// An address computation reads no storage (D17.18). A nonzero field or index offset from a
+// moved owner forms an address, and a null comparison does not dereference it.
+fn offset_unused() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"offset_unused", "offset_index_unused"};
+    ownership_call_bodies.open(&b, OFFSET_UNUSED[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_call_bodies.only_case(&b, 0);
+    ownership_call_bodies.only_case(&b, 1);
+}
+
+// Transfer keeps the exact empty-base fact on an address. The address keeps its source relation
+// and fails only when a later operation uses it.
+fn address_base_fact() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    defer ownership_local_env.free(&e);
+    ownership_api.entity_id source = ownership_local_env.id(
+        ownership_api.entity_kind.source, 9);
+    ownership_state.append_sources(&e.state, ownership_local_env.source(9,
+        ownership_api.source_kind.symbolic_caller, ownership_api.entity_id{}));
+    ownership_state.append_contents(&e.state, ownership_api.contents_fact{
+        .place = ownership_local_env.place(1),
+        .kind = ownership_api.contents_kind.empty_owner,
+        .span_length = ownership_api.scalar_fact{
+            .kind = ownership_api.fact_kind.exact}, .owner_empty = true});
+    ownership_state.append_contents(&e.state, ownership_api.contents_fact{
+        .place = ownership_local_env.place(2), .kind = ownership_api.contents_kind.scalar});
+    ownership_api.borrow_relation[1] relation = {ownership_api.borrow_relation{
+        .source = source, .representation_complete = true}};
+    ownership_transfer.request mut formed = ownership_local_env.req(&e,
+        ownership_transfer.action.assignment, 1, 2);
+    formed.value = ownership_api.contents_fact{.place = formed.source,
+        .kind = ownership_api.contents_kind.reference, .borrows = relation[..]};
+    formed.source_precondition_proved = true;
+    formed.current_base_required = true;
+    formed.current_base = ownership_local_env.place(1);
+    assert(ownership_api.successful(ownership_local_env.apply(&e, &formed)));
+    u64 stored = ownership_transfer.contents_index(&e.state, ownership_local_env.place(2));
+    assert(stored != ownership_api.U64_MAX);
+    assert(e.state.contents[stored].kind == ownership_api.contents_kind.reference);
+    assert(e.state.contents[stored].owner_empty &&
+        e.state.contents[stored].span_length.kind == ownership_api.fact_kind.exact &&
+        e.state.contents[stored].span_length.value == 0);
+    assert(e.state.contents[stored].borrows.len == 1 &&
+        e.state.contents[stored].borrows[0].source.ordinal == source.ordinal);
+    ownership_transfer.request mut used = ownership_local_env.req(&e,
+        ownership_transfer.action.use, 2, 2);
+    assert(!ownership_api.successful(ownership_local_env.apply(&e, &used)));
+    assert(e.counts.last_kind == ownership_api.event_kind.invalid_use);
+}
+
+fn pointer_output() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[1] names = {"output"};
+    ownership_call_bodies.open(&b, OUTPUT[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(&b, 0);
+    ownership_call_bodies.only_case(&b, 0);
+    bool mut read = false;
+    u64 mut i = 0;
+    while (i < model->effects.len) {
+        if (model->effects[i].payload == ownership_summary_model.payload_kind.read &&
+            model->effects[i].effect.place.projections.len == 0) { read = true; }
+        i += 1;
+    }
+    assert(read);
+}
+
+// A caller requirement validates an unknown symbolic source. A known released source still
+// rejects the same transfer.
+fn required_source() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    defer ownership_local_env.free(&e);
+    ownership_api.entity_id source = ownership_local_env.id(
+        ownership_api.entity_kind.source, 9);
+    ownership_api.source_fact mut fact = ownership_local_env.source(9,
+        ownership_api.source_kind.symbolic_caller, ownership_api.entity_id{});
+    fact.validity = ownership_api.validity_kind.unknown;
+    ownership_state.append_sources(&e.state, fact);
+    ownership_api.borrow_relation[1] relation = {ownership_api.borrow_relation{
+        .source = source, .representation_complete = true}};
+    ownership_state.append_contents(&e.state, ownership_api.contents_fact{
+        .place = ownership_local_env.place(1), .kind = ownership_api.contents_kind.reference,
+        .borrows = relation[..]});
+    ownership_transfer.request mut required = ownership_local_env.req(&e,
+        ownership_transfer.action.inspect, 1, 1);
+    required.source_precondition_proved = true;
+    assert(ownership_api.successful(ownership_local_env.apply(&e, &required)));
+    e.state.sources[0].validity = ownership_api.validity_kind.released;
+    required = ownership_local_env.req(&e, ownership_transfer.action.inspect, 1, 1);
+    required.source_precondition_proved = true;
+    assert(!ownership_api.successful(ownership_local_env.apply(&e, &required)));
+}
+
+// Address formation preserves its relation without reading the source. The later read still
+// needs that source and reports incomplete proof when no source fact exists.
+fn address_formation() void {
+    ownership_local_env.env mut e = ownership_local_env.env{};
+    ownership_local_env.init(&e);
+    defer ownership_local_env.free(&e);
+    ownership_state.append_contents(&e.state, ownership_api.contents_fact{
+        .place = ownership_local_env.place(2), .kind = ownership_api.contents_kind.scalar});
+    ownership_api.borrow_relation[1] relation = {ownership_api.borrow_relation{
+        .source = ownership_local_env.id(ownership_api.entity_kind.source, 9),
+        .representation_complete = true}};
+    ownership_transfer.request mut formed = ownership_local_env.req(&e,
+        ownership_transfer.action.assignment, 1, 2);
+    formed.value = ownership_api.contents_fact{.place = formed.source,
+        .kind = ownership_api.contents_kind.reference, .borrows = relation[..]};
+    formed.source_precondition_proved = true;
+    assert(ownership_api.successful(ownership_local_env.apply(&e, &formed)));
+    ownership_transfer.request mut used = ownership_local_env.req(&e,
+        ownership_transfer.action.inspect, 2, 2);
+    ownership_api.proof_status proof = ownership_local_env.apply(&e, &used);
+    assert(proof.kind == ownership_api.proof_kind.incomplete && proof.failed);
+}
+
+fn temporary_return() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"choose", "temporary"};
+    ownership_call_bodies.open(&b, TEMPORARY[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(&b, 1);
+    assert(model->proof.kind == ownership_api.proof_kind.incomplete);
+    assert(model->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    // The unresolved call is gap 2. The later copy into the result stays ownership-complete.
+    assert(model->proof.terminal.operation.operation == 2);
+}
+
+// A clear of a prefix of the loaded path ends root reuse, as an exact store does. Extraction
+// stops at the second load, because the first loaded source is no longer the current pointer.
+fn prefix_reuse(string@ source) void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut body = ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&body);
+    assert(body.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(body.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(f.summary.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(f.summary.cases.len == 0);
+}
+
+// The step index of the one root clear `*p = cbox{}`, a replacement of the whole caller path.
+// The result store into local 0 is the other replacement of a whole path.
+fn clear_step(ownership_summary_body.body_input* in, ownership_summary_body.body_program* body)
+    u64 {
+    ownership_api.place_path result = ownership_summary_body.slot(in, 0);
+    u64 mut step = ownership_api.U64_MAX;
+    u64 mut e = 0;
+    while (e < body->effects_len) {
+        ownership_summary_model.effect_node node = body->effects[e];
+        if (node.payload == ownership_summary_model.payload_kind.replacement &&
+            node.effect.place.projections.len == 0 &&
+            !ownership_summary_model.same(node.effect.place.root, result.root)) {
+            assert(step == ownership_api.U64_MAX && body->effect_steps[e] != 0);
+            step = body->effect_steps[e] - 1;
+        }
+        e += 1;
+    }
+    assert(step != ownership_api.U64_MAX);
+    return step;
+}
+
+// After a root clear, the field read takes its current base below the flow destination of the
+// clear. The clear removed those contents, so the read stays unproved. The private slot of the
+// older store `p->c = r` still holds a live pointer, and it does not answer for the field.
+fn prefix_store() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, PREFIX_STORE[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut body = ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&body);
+    assert(ownership_api.successful(body.proof));
+    ownership_api.place_path clear = body.steps[clear_step(&f.inputs[0], &body)].local.destination;
+    u64 mut reads = 0;
+    u64 mut i = 0;
+    while (i < body.steps_len) {
+        ownership_transfer.request req = body.steps[i].local;
+        if (body.steps[i].kind == ownership_flow.step_kind.local_effect &&
+            req.kind == ownership_transfer.action.inspect && req.current_base_required) {
+            ownership_api.place_path base = req.current_base;
+            assert(ownership_summary_model.same(base.root, clear.root));
+            assert(base.projections.len == clear.projections.len + 1);
+            assert(base.projections[clear.projections.len].kind ==
+                ownership_api.projection_kind.field);
+            assert(base.projections[clear.projections.len].field == 0);
+            reads += 1;
+        }
+        i += 1;
+    }
+    assert(reads == 1);
+    // A read of the clear's own fact would give a complete failed proof instead.
+    assert(f.summary.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(f.summary.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(f.summary.cases.len == 0);
+}
+
+// A later exact store after the clear answers for the field, so the read is proved.
+fn prefix_refill() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, PREFIX_REFILL[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(ownership_api.successful(f.summary.proof) && !f.summary.proof.failed);
+}
+
+// `covers` takes the same path or a prefix of it. A sibling, a longer store, another root, and a
+// residual store do not cover the path.
+fn store_covers() void {
+    ownership_api.entity_id root = ownership_api.entity_id{
+        .kind = ownership_api.entity_kind.slot, .ordinal = 7};
+    ownership_api.entity_id other = ownership_api.entity_id{
+        .kind = ownership_api.entity_kind.slot, .ordinal = 8};
+    ownership_api.projection[2] fields = {
+        ownership_api.projection{.kind = ownership_api.projection_kind.field, .field = 0},
+        ownership_api.projection{.kind = ownership_api.projection_kind.field, .field = 1}};
+    ownership_api.projection[1] sibling = {
+        ownership_api.projection{.kind = ownership_api.projection_kind.field, .field = 1}};
+    ownership_api.place_path whole = ownership_api.place_path{.root = root};
+    ownership_api.place_path first = ownership_api.place_path{.root = root,
+        .projections = fields[..1]};
+    ownership_api.place_path deep = ownership_api.place_path{.root = root,
+        .projections = fields[..]};
+    ownership_api.place_path beside = ownership_api.place_path{.root = root,
+        .projections = sibling[..]};
+    assert(ownership_summary_body.covers(whole, whole));
+    assert(ownership_summary_body.covers(whole, first));
+    assert(ownership_summary_body.covers(first, deep));
+    assert(ownership_summary_body.covers(first, first));
+    assert(!ownership_summary_body.covers(first, whole));
+    assert(!ownership_summary_body.covers(beside, first));
+    assert(!ownership_summary_body.covers(ownership_api.place_path{.root = other}, first));
+    assert(!ownership_summary_body.covers(ownership_api.place_path{.root = root,
+        .residual = true}, first));
+}
+
+// `covered_flow` appends the uncovered suffix of the path to the store's flow destination. A
+// residual destination and a joined path above 16 projections stop the extraction.
+fn covered_flow() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, PREFIX_STORE[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut body = ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&body);
+    assert(ownership_api.successful(body.proof));
+    ownership_api.entity_id root = ownership_api.entity_id{
+        .kind = ownership_api.entity_kind.slot, .ordinal = 7};
+    ownership_api.entity_id flow = ownership_api.entity_id{
+        .kind = ownership_api.entity_kind.slot, .ordinal = 9};
+    ownership_api.projection[16] mut many = {};
+    u64 mut i = 0;
+    while (i < 16) {
+        many[i] = ownership_api.projection{.kind = ownership_api.projection_kind.field,
+            .field = cast(i, u32)};
+        i += 1;
+    }
+    ownership_api.place_path path = ownership_api.place_path{.root = root,
+        .projections = many[..3]};
+    ownership_api.place_path destination = ownership_api.place_path{.root = flow,
+        .projections = many[5..6]};
+    ownership_api.place_path exact = ownership_summary_body.covered_flow(&body, destination,
+        path, 3);
+    assert(ownership_state.same_place(exact, destination));
+    ownership_api.place_path joined = ownership_summary_body.covered_flow(&body, destination,
+        path, 1);
+    assert(ownership_summary_model.same(joined.root, flow) && joined.projections.len == 3);
+    assert(joined.projections[0].field == 5 && joined.projections[1].field == 1);
+    assert(joined.projections[2].field == 2);
+    assert(ownership_api.successful(body.proof));
+    ownership_api.place_path full = ownership_api.place_path{.root = flow,
+        .projections = many[..15]};
+    ownership_api.place_path most = ownership_summary_body.covered_flow(&body, full, path, 2);
+    assert(most.projections.len == 16 && ownership_api.successful(body.proof));
+    ownership_api.place_path over = ownership_summary_body.covered_flow(&body, full, path, 1);
+    assert(over.root.kind == ownership_api.entity_kind.none);
+    assert(body.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(body.proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    ownership_summary_body.body_program mut residual =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&residual);
+    ownership_api.place_path stopped = ownership_summary_body.covered_flow(&residual,
+        ownership_api.place_path{.root = flow, .residual = true}, path, 1);
+    assert(stopped.root.kind == ownership_api.entity_kind.none);
+    assert(residual.proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+}
+
+// A summary that is not proved and has no case. A call hides the current base of the read.
+fn not_proved(ownership_call_bodies.bodies* b, u64 index) void {
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(b, index);
+    assert(model->proof.kind == ownership_api.proof_kind.incomplete);
+    assert(model->cases.len == 0);
+}
+
+// A call between a store and a read ends root reuse, and the inner-slot search does not cross
+// it. Each of the 5 faulty reads gets the base verdict: not proved.
+fn call_faulty() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[6] names = {"setc", "local_free", "stale_slot", "reuse_free", "stale_two",
+        "local_free_reuse"};
+    ownership_call_bodies.open(&b, CALL_FAULTY[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_call_bodies.only_case(&b, 0);
+    u64 mut i = 1;
+    while (i < 6) {
+        not_proved(&b, i);
+        i += 1;
+    }
+}
+
+// The sixth faulty body, a valid read after a call, and a store after the call. Only the
+// store after the call gives the read a current base again, so only that body is proved.
+// A reference copy after the call takes a fresh loaded root: 2 roots for 2 loads.
+fn call_mixed() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[5] names = {"setc", "local_free_slot", "read_after_call", "store_after_call",
+        "copy_reuse"};
+    ownership_call_bodies.open(&b, CALL_MIXED[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_call_bodies.only_case(&b, 0);
+    not_proved(&b, 1);
+    not_proved(&b, 2);
+    ownership_call_bodies.only_case(&b, 3);
+    ownership_call_bodies.only_case(&b, 4);
+    ownership_summary_model.summary* copies = ownership_call_bodies.summary(&b, 4);
+    u64 mut loaded_roots = 0;
+    u64 mut i = 0;
+    while (i < copies->roots.len) {
+        if (copies->roots[i].kind == ownership_summary_model.root_kind.loaded_source) {
+            loaded_roots += 1;
+        }
+        i += 1;
+    }
+    assert(loaded_roots == 2);
+}
+
+fn main() i32 {
+    projected_scalar();
+    projected_released();
+    projected_void();
+    projected_moved();
+    address_moved();
+    address_live();
+    nested_address();
+    repeated_address();
+    nested_projected();
+    nested_inner();
+    repeated_nested();
+    repeated_load();
+    replaced_load();
+    replaced_load_live();
+    distinct_loads();
+    released_address();
+    offset_unused();
+    pointer_output();
+    address_formation();
+    address_base_fact();
+    required_source();
+    temporary_return();
+    prefix_reuse(PREFIX_REUSE[..]);
+    prefix_reuse(FIELD_REUSE[..]);
+    prefix_store();
+    prefix_refill();
+    store_covers();
+    covered_flow();
+    call_faulty();
+    call_mixed();
+    println("summary transfer preconditions ok");
+    return 0;
+}

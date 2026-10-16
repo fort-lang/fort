@@ -112,27 +112,39 @@ fn loaded_scalar_current_pointer() void {
     }
     assert(loaded.kind == ownership_api.entity_kind.slot);
     assert(!ownership_summary_model.same(current_local.root, loaded));
-    u64 mut read = ownership_api.U64_MAX;
+    // Two `use` reads check the current local at operation 0. Step 0 is the current-base read
+    // of the nested load in `load_reference`. Step 2 is the loaded-store read of
+    // `assign_output`. Step 1 between them loads the pointer from caller storage.
+    u64[2] mut reads = {ownership_api.U64_MAX, ownership_api.U64_MAX};
+    u64 mut found = 0;
     i = 0;
     while (i < body.steps_len) {
         ownership_flow.step current_step = body.steps[i];
         if (current_step.kind == ownership_flow.step_kind.local_effect &&
             current_step.local.kind == ownership_transfer.action.use &&
             ownership_state.same_place(current_step.local.source, current_local)) {
-            assert(read == ownership_api.U64_MAX);
-            read = i;
+            assert(found < 2);
+            reads[found] = i;
+            found += 1;
         }
         i += 1;
     }
-    assert(read != ownership_api.U64_MAX);
-    ownership_transfer.request req = body.steps[read].local;
-    assert(req.kind == ownership_transfer.action.use);
-    ownership_state.state mut current = ownership_state.empty();
-    defer ownership_state.free(&current);
-    ownership_state.append_contents(&current, ownership_summary_body.empty(req.source, true));
-    ownership_api.proof_status proof = ownership_transfer.apply(&current, &f.services.services,
-        &req);
-    assert(proof.failed && f.services.counts.last.kind == ownership_api.event_kind.invalid_use);
+    assert(found == 2 && reads[0] == 0 && reads[1] == 2);
+    assert(body.steps[1].local.kind == ownership_transfer.action.assignment);
+    // Each of the two reads fails on an empty current pointer.
+    u64 mut r = 0;
+    while (r < 2) {
+        ownership_transfer.request req = body.steps[reads[r]].local;
+        assert(req.kind == ownership_transfer.action.use && req.operation.operation == 0);
+        ownership_state.state mut current = ownership_state.empty();
+        ownership_state.append_contents(&current, ownership_summary_body.empty(req.source, true));
+        ownership_api.proof_status proof = ownership_transfer.apply(&current,
+            &f.services.services, &req);
+        ownership_state.free(&current);
+        assert(proof.failed &&
+            f.services.counts.last.kind == ownership_api.event_kind.invalid_use);
+        r += 1;
+    }
 }
 
 // A whole aggregate clear removes the retained relation of its covered pointer field.

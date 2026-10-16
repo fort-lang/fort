@@ -89,6 +89,8 @@ struct body_program {
     ownership_summary_model.symbolic_root mut@ own roots;
     ownership_summary_model.requirement mut@ own requirements;
     ownership_summary_model.effect_node mut@ own effects;
+    // A nonzero value is the local flow-step index plus one for this effect.
+    u64 mut@ own effect_steps;
     ownership_summary_model.provenance mut@ own provenance_records;
     ownership_api.entity_id mut@ own origins;
     // A reference local whose origin is unknown: a call result can designate caller storage
@@ -168,6 +170,7 @@ fn free(body_program mut* out) void {
     del(owned.roots);
     del(owned.requirements);
     del(owned.effects);
+    del(owned.effect_steps);
     del(owned.provenance_records);
     del(owned.origins);
     del(owned.unknown);
@@ -499,6 +502,8 @@ fn emit(body_input* in, body_program mut* out, ownership_transfer.request mut re
     req.source_position = location(in, out, at);
     req.direct_source_proved = true;
     req.direct_destination_proved = true;
+    req.leaf_places_proved = ownership_transfer.leaf_path(req.source) &&
+        ownership_transfer.leaf_path(req.destination);
     req.event_map_complete_proved = true;
     out->transfer_events[index] = ownership_transfer.event_binding{req.operation,
         next(out, ownership_api.entity_kind.event)};
@@ -549,6 +554,7 @@ fn emit(body_input* in, body_program mut* out, ownership_transfer.request mut re
         .value = req.value, .range = req.value.borrows.len == 1 ?
             req.value.borrows[0].range : ownership_api.region{},
         .provenance = provenance_key, .deferred = deferred};
+    out->effect_steps[out->effects_len] = index + 1;
     out->effects_len += 1;
     out->provenance_records[out->provenance_len] = ownership_summary_model.provenance{
         .key = provenance_key, .operation = req.operation, .source = req.source_position,
@@ -733,7 +739,11 @@ fn add_read(body_input* in, body_program mut* out, fir.place place_at, u32 block
             ownership_summary_model.requirement_kind.extent, types.type_alignof(selected.ty));
         ownership_transfer.request req = ownership_transfer.request{
             .kind = ownership_transfer.action.inspect, .source = selected.path,
-            .destination = selected.path, .source_key = selected.source};
+            .destination = selected.path, .source_key = selected.source,
+            .scalar_contents_proved = !selected.base_unknown &&
+                !types.type_is_reference(selected.ty) && !fir.type_aggregate(selected.ty),
+            .current_base_required = !selected.base_unknown,
+            .current_base = selected.current_base};
         emit(in, out, req, block, gap, order, ownership_summary_model.payload_kind.read,
             at, exit_at, statement, req.destination);
         if (!ownership_api.successful(out->proof)) { return false; }
@@ -943,56 +953,141 @@ fn intrinsic(body_input* in, body_program mut* out, fir.place from, fir.place to
     return true;
 }
 
+struct loaded_reference {
+    ownership_api.place_path path;
+    ownership_api.entity_id source;
+    bool blocked;
+}
+
+// One plus the index of the last call step, or 0. A call can write each caller path, so no
+// current fact of a caller path crosses it (D17.18).
+fn call_barrier(body_program mut* out) u64 {
+    u64 mut s = out->steps_len;
+    while (s > 0) {
+        if (!work(out, 1)) { return out->steps_len; }
+        s -= 1;
+        if (out->steps[s].kind == ownership_flow.step_kind.direct_call) { return s + 1; }
+    }
+    return 0;
+}
+
+// A store at `store` replaces `path` when `store` names `path` or a prefix of it. This is the
+// prefix rule of `store_covers` in `ownership_summary` and of `ownership_state.selected`.
+fn covers(ownership_api.place_path store, ownership_api.place_path path) bool {
+    ownership_api.place_path[1] stores = {store};
+    return ownership_state.same_place(store, path) ||
+        ownership_state.selected(path, stores[..], true);
+}
+
+// One linear body prefix uses one loaded root for one exact caller path. A store that covers
+// the path ends that reuse. A later call also ends it, and the next load takes a fresh root.
+fn prior_load(body_program mut* out, ownership_api.place_path place,
+    ownership_api.entity_id containing, types.node* ty) loaded_reference {
+    if (!out->definite_prefix) { return loaded_reference{}; }
+    u64 barrier = call_barrier(out);
+    bool mut replaced = false;
+    u64 mut e = out->effects_len;
+    while (e > 0) {
+        e -= 1;
+        if (!work(out, 3) || !work(out, place.projections.len) ||
+            !work(out, out->effects[e].operand.projections.len) ||
+            !work(out, out->effects[e].effect.place.projections.len)) {
+            return loaded_reference{};
+        }
+        ownership_summary_model.effect_node node = out->effects[e];
+        if (node.payload == ownership_summary_model.payload_kind.reference_load &&
+            ownership_summary_model.same(node.effect.source, containing) &&
+            ownership_state.same_place(node.operand, place)) {
+            u64 mut r = 0;
+            while (r < out->roots_len) {
+                if (!work(out, 1)) { return loaded_reference{}; }
+                ownership_summary_model.symbolic_root row = out->roots[r];
+                if (row.kind == ownership_summary_model.root_kind.loaded_source &&
+                    types.type_equal(row.ty, ty) &&
+                    ownership_summary_model.same(row.slot, node.effect.place.root)) {
+                    if (replaced) { return loaded_reference{.blocked = true}; }
+                    if (out->effect_steps[e] <= barrier) { return loaded_reference{}; }
+                    return loaded_reference{.path = node.effect.place, .source = row.source};
+                }
+                r += 1;
+            }
+        }
+        if (node.effect.kind != ownership_api.effect_kind.read &&
+            covers(node.effect.place, place)) {
+            replaced = true;
+        }
+    }
+    return loaded_reference{};
+}
+
 // A selected path names storage. Its source names the storage lifetime.
-// One definition names the current reference at this verified operation.
+// Flow validates the current reference before it loads the next reference.
 fn load_reference(body_input* in, body_program mut* out, ownership_api.place_path place,
-    ownership_api.entity_id containing, types.node* ty, i64 offset, diag.loc at,
-    diag.loc exit_at, u32 statement) ownership_api.place_path {
-    ownership_api.place_path destination = ownership_api.place_path{
-        .root = next(out, ownership_api.entity_kind.slot)};
-    ownership_api.entity_id pointed = next(out, ownership_api.entity_kind.source);
-    ownership_api.entity_id mut allocation = pointed;
-    allocation.kind = ownership_api.entity_kind.allocation;
-    ownership_api.entity_id mut version = pointed;
-    version.kind = ownership_api.entity_kind.value;
+    ownership_api.place_path current_base, ownership_api.entity_id containing, types.node* ty,
+    i64 offset, diag.loc at, diag.loc exit_at, u32 statement) loaded_reference {
     u64 bytes = types.type_sizeof(ty);
     if (!reference(ty) || ty->elem == null || bytes > 9223372036854775807 ||
         offset < 0 || offset > 9223372036854775807 - cast(bytes, i64)) {
         reject(out, ownership_api.incomplete_reason.missing_path);
-        return destination;
+        return loaded_reference{};
     }
     requirement(in, out, containing, place, offset + cast(bytes, i64),
         ownership_summary_model.requirement_kind.extent, types.type_alignof(ty));
-    root(out, ownership_summary_model.symbolic_root{
-        .key = next(out, ownership_api.entity_kind.template),
-        .kind = ownership_summary_model.root_kind.loaded_source, .slot = destination.root,
-        .source = pointed, .allocation = allocation, .value_version = version,
-        .ownership = ownership_summary_model.owner_class.borrowed, .ty = ty});
-    // The root keeps its allocation for binding. The source fact has none, as a borrowed
-    // formal has none: the body proves no fact about the caller allocation.
-    ownership_state.append_sources(&out->entry, ownership_api.source_fact{
-        .key = pointed, .kind = ownership_api.source_kind.symbolic_caller,
-        .validity = ownership_api.validity_kind.live});
-    ownership_api.contents_fact contents = value(in, out, destination, pointed,
-        version.ordinal, 1, extent(ty), pointee_alignment(ty));
-    ownership_state.append_contents(&out->entry, empty(destination, false));
+    loaded_reference mut loaded = prior_load(out, place, containing, ty);
+    if (!ownership_api.successful(out->proof)) { return loaded_reference{}; }
+    if (loaded.blocked) {
+        reject(out, ownership_api.incomplete_reason.unknown_effect);
+        return loaded_reference{};
+    }
+    bool fresh = loaded.path.root.kind == ownership_api.entity_kind.none;
+    if (fresh) {
+        ownership_api.entity_id loaded_slot = next(out, ownership_api.entity_kind.slot);
+        ownership_api.entity_id loaded_source = next(out, ownership_api.entity_kind.source);
+        loaded = loaded_reference{.path = ownership_api.place_path{.root = loaded_slot},
+            .source = loaded_source};
+        ownership_api.entity_id mut allocation = loaded.source;
+        allocation.kind = ownership_api.entity_kind.allocation;
+        ownership_api.entity_id mut version = loaded.source;
+        version.kind = ownership_api.entity_kind.value;
+        root(out, ownership_summary_model.symbolic_root{
+            .key = next(out, ownership_api.entity_kind.template),
+            .kind = ownership_summary_model.root_kind.loaded_source, .slot = loaded.path.root,
+            .source = loaded.source, .allocation = allocation, .value_version = version,
+            .ownership = ownership_summary_model.owner_class.borrowed, .ty = ty});
+        // The root keeps its allocation for binding. The source fact has none, as a borrowed
+        // formal has none: the body proves no fact about the caller allocation.
+        ownership_state.append_sources(&out->entry, ownership_api.source_fact{
+            .key = loaded.source, .kind = ownership_api.source_kind.symbolic_caller,
+            .validity = ownership_api.validity_kind.live});
+        ownership_state.append_contents(&out->entry, empty(loaded.path, false));
+    }
     ownership_api.operation_position op = out->context.operation;
     ownership_transfer.request read = ownership_transfer.request{
-        .kind = ownership_transfer.action.inspect, .source = destination,
-        .destination = destination, .source_key = containing};
+        .kind = ownership_transfer.action.use, .source = current_base,
+        .destination = current_base, .source_key = containing};
     emit(in, out, read, op.block, op.operation, 0, ownership_summary_model.payload_kind.read,
-        at, exit_at, statement, destination);
+        at, exit_at, statement, current_base);
+    if (!fresh || !ownership_api.successful(out->proof)) { return loaded; }
+    ownership_api.entity_id mut version = loaded.source;
+    version.kind = ownership_api.entity_kind.value;
+    ownership_api.contents_fact contents = value(in, out, loaded.path, loaded.source,
+        version.ordinal, 1, extent(ty), pointee_alignment(ty));
     ownership_transfer.request req = ownership_transfer.request{
         .kind = ownership_transfer.action.assignment, .source = place,
-        .destination = destination, .source_key = containing, .value = contents};
+        .destination = loaded.path, .source_key = containing, .value = contents};
     emit(in, out, req, op.block, op.operation, cast(out->effects_len, u32),
-        ownership_summary_model.payload_kind.reference_load, at, exit_at, statement, destination);
-    return destination;
+        ownership_summary_model.payload_kind.reference_load, at, exit_at, statement,
+        loaded.path);
+    return loaded;
 }
 
 struct selected_storage {
     ownership_api.place_path path;
     ownership_api.place_path flow_path;
+    ownership_api.place_path current_base;
+    // A call after the last store of a base hides its current contents. A read then keeps the
+    // base verdict: no current-base check and no scalar-contents proof.
+    bool base_unknown;
     ownership_api.entity_id source;
     types.node* ty;
     i64 offset;
@@ -1005,6 +1100,73 @@ struct selected_storage {
 
 enum output_action { release_value, move_value, store_value, aggregate_store }
 
+// The flow contents of `path` continue below the flow destination of a store that covers it.
+fn covered_flow(body_program mut* out, ownership_api.place_path destination,
+    ownership_api.place_path path, u64 prefix) ownership_api.place_path {
+    if (prefix >= path.projections.len) { return destination; }
+    u64 length = destination.projections.len + (path.projections.len - prefix);
+    if (destination.residual || length > 16) {
+        reject(out, ownership_api.incomplete_reason.missing_path);
+        return ownership_api.place_path{};
+    }
+    ownership_api.projection[16] mut parts = {};
+    u64 mut i = 0;
+    while (i < length) {
+        parts[i] = i < destination.projections.len ? destination.projections[i] :
+            path.projections[prefix + i - destination.projections.len];
+        i += 1;
+    }
+    ownership_api.place_path joined = ownership_api.place_path{.root = destination.root,
+        .projections = parts[..length]};
+    if (!ownership_summary_model.path_charge(&out->context, &out->proof, joined)) {
+        return ownership_api.place_path{};
+    }
+    return ownership_state.copy_place(&out->metadata, joined);
+}
+
+// A caller-storage change can use a private flow slot. Find its newest current flow contents.
+// A store at a prefix of the path gives the contents below its flow destination. The search
+// does not cross a call: `crossed` reports that a call may have written the path.
+fn current_flow_contents(body_program mut* out, ownership_api.place_path path,
+    ownership_api.place_path fallback, bool mut* crossed) ownership_api.place_path {
+    u64 barrier = call_barrier(out);
+    *crossed = barrier > 0;
+    u64 mut e = out->effects_len;
+    while (e > 0) {
+        if (!work(out, 1)) { return fallback; }
+        e -= 1;
+        ownership_summary_model.effect_node node = out->effects[e];
+        if (!work(out, path.projections.len) ||
+            !work(out, node.effect.place.projections.len) ||
+            !work(out, node.operand.projections.len)) { return fallback; }
+        u64 encoded = out->effect_steps[e];
+        if (encoded == 0 || encoded > out->steps_len ||
+            out->steps[encoded - 1].kind != ownership_flow.step_kind.local_effect) {
+            continue;
+        }
+        u64 step = encoded - 1;
+        if (step < barrier) { return fallback; }
+        if (node.payload == ownership_summary_model.payload_kind.release &&
+            ownership_state.same_place(path, node.effect.place)) {
+            *crossed = false;
+            return out->steps[step].local.source;
+        }
+        if ((node.effect.kind == ownership_api.effect_kind.write ||
+            node.effect.kind == ownership_api.effect_kind.transfer) &&
+            covers(node.effect.place, path)) {
+            *crossed = false;
+            return covered_flow(out, out->steps[step].local.destination, path,
+                node.effect.place.projections.len);
+        }
+        if (node.payload == ownership_summary_model.payload_kind.move &&
+            ownership_state.same_place(path, node.operand)) {
+            *crossed = false;
+            return out->steps[step].local.source;
+        }
+    }
+    return fallback;
+}
+
 fn select_storage(body_input* in, body_program mut* out, fir.place input_place, diag.loc at,
     diag.loc exit_at, u32 statement) selected_storage {
     selected_storage mut selected = selected_storage{};
@@ -1014,6 +1176,7 @@ fn select_storage(body_input* in, body_program mut* out, fir.place input_place, 
         return selected;
     }
     selected.path = slot(in, input_place.local);
+    selected.current_base = selected.path;
     selected.source = source(in, input_place.local);
     types.node* mut ty = fir.local_at(in->function.body, input_place.local)->ty;
     ownership_api.projection[16] mut parts = {};
@@ -1078,11 +1241,19 @@ fn select_storage(body_input* in, body_program mut* out, fir.place input_place, 
             ty->kind == types.type_kind.k_ptr && ty->elem != null &&
             (selected.caller || selected.loaded)) {
             selected.path.projections = parts[..count];
-            selected.path = load_reference(in, out, selected.path, selected.source, ty,
-                selected.offset, at, exit_at, statement);
+            bool mut crossed = false;
+            ownership_api.place_path current = current_flow_contents(out, selected.path,
+                ownership_api.place_path{}, &crossed);
+            loaded_reference loaded = load_reference(in, out, selected.path,
+                selected.current_base, selected.source, ty, selected.offset, at, exit_at,
+                statement);
+            selected.path = loaded.path;
             if (!ownership_api.successful(out->proof)) { return selected; }
             selected.loaded = true;
-            selected.source = out->roots[out->roots_len - 1].source;
+            selected.current_base = current.root.kind == ownership_api.entity_kind.none ?
+                selected.path : current;
+            selected.base_unknown = selected.base_unknown || crossed;
+            selected.source = loaded.source;
             selected.offset = 0;
             count = 0;
             ty = ty->elem;
@@ -1278,7 +1449,8 @@ fn assign_output(body_input* in, body_program mut* out, fir.statement* stmt,
         ownership_transfer.request req = ownership_transfer.request{
             .kind = selected.loaded ? ownership_transfer.action.use :
                 ownership_transfer.action.inspect,
-            .source = read, .destination = read, .source_key = selected.source};
+            .source = read, .destination = read, .source_key = selected.source,
+            .source_precondition_proved = selected.caller};
         emit(in, out, req, block, gap, 0, ownership_summary_model.payload_kind.read,
             stmt->loc, stmt->exit_loc, stmt->stmt, req.destination);
         return;
@@ -1875,6 +2047,7 @@ fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
             u32 src = input_operand.place.local;
             req = basic(in, src, dst, input_operand.kind == fir.operand_kind.ok_move ?
                 ownership_transfer.action.move_owner : ownership_transfer.action.copy);
+            req.scalar_contents_proved = !reference(dst_ty) && !fir.type_aggregate(dst_ty);
             payload = input_operand.kind == fir.operand_kind.ok_move ?
                 ownership_summary_model.payload_kind.move
                     : ownership_summary_model.payload_kind.copy;
@@ -1906,12 +2079,13 @@ fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
                     selected_storage mut from = select_storage(in, out, input_operand.place,
                         stmt->loc, stmt->exit_loc, stmt->stmt);
                     if (!output_ready(in, out, &from, output_action.move_value)) { return; }
-                    load_reference(in, out, from.path, from.source, from.ty, from.offset,
-                        stmt->loc, stmt->exit_loc, stmt->stmt);
+                    loaded_reference loaded = load_reference(in, out, from.path,
+                        from.current_base, from.source, from.ty, from.offset, stmt->loc,
+                        stmt->exit_loc, stmt->stmt);
                     if (!ownership_api.successful(out->proof)) { return; }
                     req.kind = ownership_transfer.action.move_owner;
                     req.source = from.path;
-                    req.source_key = out->roots[out->roots_len - 1].source;
+                    req.source_key = loaded.source;
                     req.value.place = from.flow_path;
                     out->origins[dst] = req.source_key;
                     payload = ownership_summary_model.payload_kind.move;
@@ -1924,13 +2098,13 @@ fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
                         reject(out, ownership_api.incomplete_reason.unknown_effect);
                         return;
                     }
-                    ownership_api.place_path loaded = load_reference(in, out, selected.path,
-                        selected.source, selected.ty, selected.offset, stmt->loc, stmt->exit_loc,
-                        stmt->stmt);
+                    loaded_reference loaded = load_reference(in, out, selected.path,
+                        selected.current_base, selected.source, selected.ty, selected.offset,
+                        stmt->loc, stmt->exit_loc, stmt->stmt);
                     if (!ownership_api.successful(out->proof)) { return; }
                     req.kind = ownership_transfer.action.copy;
-                    req.source = loaded;
-                    req.source_key = out->roots[out->roots_len - 1].source;
+                    req.source = loaded.path;
+                    req.source_key = loaded.source;
                     out->origins[dst] = req.source_key;
                     payload = ownership_summary_model.payload_kind.copy;
                 } else if (!add_read(in, out, input_operand.place, block, gap, 0, stmt->loc,
@@ -2054,6 +2228,9 @@ fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
             if (!ownership_summary_model.contents_charge(&out->context, &out->proof,
                 req.value)) { return; }
             req.value = ownership_state.copy_contents(&out->metadata, req.value);
+            req.source_precondition_proved = !selected.base_unknown;
+            req.current_base_required = !selected.base_unknown;
+            req.current_base = selected.current_base;
             out->origins[dst] = selected.source;
         } else {
             req.kind = ownership_transfer.action.address;
@@ -2583,10 +2760,11 @@ fn extract(body_input* in) body_program {
         cap + locals * 2 > types.TYPE_MAX_SIZE / sizeof(ownership_summary_model.symbolic_root) ||
         cap > types.TYPE_MAX_SIZE / sizeof(ownership_summary_model.requirement) ||
         cap > types.TYPE_MAX_SIZE / sizeof(ownership_summary_model.provenance) ||
+        cap > types.TYPE_MAX_SIZE / sizeof(u64) ||
         locals > types.TYPE_MAX_SIZE / sizeof(ownership_api.scalar_fact) ||
         locals > types.TYPE_MAX_SIZE / sizeof(ownership_flow.parameter) ||
         cap > types.TYPE_MAX_SIZE / sizeof(ownership_flow.step) ||
-        cap > cast(U32_MAX, u64) / 8 || !work(&out, cap * 12 + locals * 4)) {
+        cap > cast(U32_MAX, u64) / 8 || !work(&out, cap * 13 + locals * 4)) {
         reject(&out, ownership_api.incomplete_reason.invalid_input);
         return out;
     }
@@ -2597,6 +2775,7 @@ fn extract(body_input* in) body_program {
     out.roots = new(ownership_summary_model.symbolic_root, cap + locals * 2);
     out.requirements = new(ownership_summary_model.requirement, cap);
     out.effects = new(ownership_summary_model.effect_node, cap);
+    out.effect_steps = new(u64, cap);
     out.provenance_records = new(ownership_summary_model.provenance, cap);
     out.origins = new(ownership_api.entity_id, locals);
     out.unknown = new(bool, locals);

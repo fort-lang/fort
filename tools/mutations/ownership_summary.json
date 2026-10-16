@@ -9,11 +9,13 @@
     "compile the mutant through the flags of each test. Build the debug preset first, on a",
     "Darwin host, and run with --runner 'bash -c'.",
     "The md5 guard reads that LLVM IR file. A table whose binary is the compiler reads",
-    "stale on each row. 9 rounds took 119 s."
+    "stale on each row.",
+    "Twenty-three rows include eleven transfer-precondition rows."
   ],
   "sources": [
     "src/fort/ownership_summary_body.ft",
-    "src/fort/ownership_summary.ft"
+    "src/fort/ownership_summary.ft",
+    "src/fort/ownership_transfer.ft"
   ],
   "binary": "build/Darwin/debug/mutate/ownership_calls_origins_test.ll",
   "build": "mkdir -p build/Darwin/debug/mutate && build/Darwin/debug/fort --std-dir build/Darwin/debug/std -I src/fort -I test/fort/support -S -o build/Darwin/debug/mutate/ownership_calls_origins_test.ll test/fort/ownership_calls_origins_test.ft",
@@ -111,6 +113,83 @@
       "old": "        if (out->reached[block] && !scheduled[block]) {",
       "new": "        if (out->reached[block] && !scheduled[block] && block == U32_MAX) {",
       "what": "a directed CFG cycle gets no conservative fixed point"
+    },
+    {
+      "decision": "D17.15-transfer-leaf",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    req.leaf_places_proved = ownership_transfer.leaf_path(req.source) &&\n        ownership_transfer.leaf_path(req.destination);",
+      "new": "    req.leaf_places_proved = false;",
+      "what": "an exact projected transfer loses its verified leaf proof"
+    },
+    {
+      "decision": "D17.18-required-source",
+      "file": "src/fort/ownership_transfer.ft",
+      "old": "fn source_precondition(request* req) bool {\n    return req->source_precondition_proved;\n}",
+      "new": "fn source_precondition(request* req) bool {\n    return false;\n}",
+      "what": "verified source preconditions do not reach transfer application"
+    },
+    {
+      "decision": "D17.15-scalar-contents",
+      "file": "src/fort/ownership_transfer.ft",
+      "old": "fn current_base(request* req) bool {\n    return req->current_base_required;\n}",
+      "new": "fn current_base(request* req) bool {\n    return false;\n}",
+      "what": "a projected scalar read loses the current base across direct and address-based access"
+    },
+    {
+      "decision": "D17.15-nested-current-slot",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "            selected.current_base = current.root.kind == ownership_api.entity_kind.none ?\n                selected.path : current;",
+      "new": "            selected.current_base = selected.path;",
+      "what": "a nested scalar read ignores the current inner slot contents"
+    },
+    {
+      "decision": "D17.15-repeated-loaded-root",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    if (!out->definite_prefix) { return loaded_reference{}; }",
+      "new": "    if (true || !out->definite_prefix) { return loaded_reference{}; }",
+      "what": "repeated exact loads use different symbolic flow slots"
+    },
+    {
+      "decision": "D17.15-loaded-root-store-barrier",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "                    if (replaced) { return loaded_reference{.blocked = true}; }",
+      "new": "                    if (false && replaced) {\n                        return loaded_reference{.blocked = true};\n                    }",
+      "what": "a loaded root remains reusable after a store replaces its reference"
+    },
+    {
+      "decision": "D17.15-prefix-store-covers",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    return ownership_state.same_place(store, path) ||\n        ownership_state.selected(path, stores[..], true);",
+      "new": "    return ownership_state.same_place(store, path);",
+      "what": "a store at a prefix of a loaded path does not replace that path"
+    },
+    {
+      "decision": "D17.15-prefix-flow-suffix",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    if (prefix >= path.projections.len) { return destination; }",
+      "new": "    if (prefix <= path.projections.len) { return destination; }",
+      "what": "a prefix store gives its own flow fact instead of the fact below its destination"
+    },
+    {
+      "decision": "D17.18-call-ends-root-reuse",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "                    if (out->effect_steps[e] <= barrier) { return loaded_reference{}; }",
+      "new": "                    if (false && out->effect_steps[e] <= barrier) {\n                        return loaded_reference{};\n                    }",
+      "what": "a loaded root remains reusable after a call that can write its path"
+    },
+    {
+      "decision": "D17.18-call-ends-flow-search",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        if (step < barrier) { return fallback; }",
+      "new": "        if (false && step < barrier) { return fallback; }",
+      "what": "the inner-slot search takes a store from before a call"
+    },
+    {
+      "decision": "D17.18-call-hides-base",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    *crossed = barrier > 0;",
+      "new": "    *crossed = false;",
+      "what": "a read after a call keeps the current-base check of a fresh loaded root"
     }
   ]
 }
