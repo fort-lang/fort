@@ -20,6 +20,9 @@
 //| G17 residual flow
 //| G18 determinism
 //| G19 component scale
+//| G20 foreign-called bodies
+//| G21 callback escapes
+//| G22 foreign work limits
 /// Tests call components and target propagation over verified FIR.
 import ast;
 import check_env;
@@ -1192,6 +1195,290 @@ fn component_scale() void {
     println("G19 component scale");
 }
 
+// Exact callback identities can reach an extern through values, storage, initializers, indexed
+// aggregates, erased addresses, and callback results. An ordinary fort call adds no foreign entry.
+fn foreign_called_bodies() void {
+    fixture mut f = fixture{};
+    string[36] source = {"struct handler { fn () void cb; }",
+        "extern fn register(fn () void cb) void;", "extern fn expose(void* p) void;",
+        "extern fn register_factory(fn () fn () fn () void cb) void;",
+        "fn direct() void {}", "fn wrapped() void {}", "fn erased() void {}",
+        "fn stored() void {}", "fn global() void {}", "fn copied() void {}",
+        "fn ordinary() void {}", "fn initialized() void {}", "fn indexed_first() void {}",
+        "fn indexed_second() void {}", "fn addressed() void {}", "fn returned_leaf() void {}",
+        "fn returned_mid() fn () void { return returned_leaf; }",
+        "fn returned_outer() fn () fn () void { return returned_mid; }",
+        "(fn () void) mut GLOBAL = null;", "(fn () void) mut GLOBAL_COPY = null;",
+        "(fn () void) mut INITIALIZED = initialized;",
+        "(fn () void) mut ADDRESS_GLOBAL = null;",
+        "fn relay(fn () void cb) void { register(cb); }",
+        "fn caller() void { register(direct); relay(wrapped);",
+        "expose(cast(erased, void*)); handler h = {stored}; expose(cast(&h, void*));",
+        "ordinary(); }", "fn store_global() void { GLOBAL = global; }",
+        "fn expose_global() void { register(GLOBAL); }",
+        "fn store_copy() void { GLOBAL_COPY = copied; }",
+        "fn expose_copy() void { fn () void cb = GLOBAL_COPY; register(cb); }",
+        "fn expose_initialized() void { register(INITIALIZED); }",
+        "fn expose_indexed(u64 i) void { (fn () void)[2] table =",
+        "{indexed_first, indexed_second}; register(table[i]); }",
+        "fn store_address() void { ADDRESS_GLOBAL = addressed; }",
+        "fn expose_address() void { expose(cast(ADDRESS_GLOBAL, void*)); }",
+        "fn expose_factory() void { register_factory(returned_outer); }"};
+    string[25] names = {"direct", "wrapped", "erased", "stored", "global", "copied",
+        "ordinary", "initialized", "indexed_first", "indexed_second", "addressed",
+        "returned_leaf", "returned_mid", "returned_outer", "relay", "caller", "store_global",
+        "expose_global", "store_copy", "expose_copy", "expose_initialized", "expose_indexed",
+        "store_address", "expose_address", "expose_factory"};
+    open(&f, source[..], names[..], 16);
+    string[13] escaped = {"direct", "wrapped", "erased", "stored", "global", "copied",
+        "initialized", "indexed_first", "indexed_second", "addressed", "returned_leaf",
+        "returned_mid", "returned_outer"};
+    u64 mut i = 0;
+    while (i < escaped.len) {
+        assert(f.graph.foreign_called[body_index(&f, escaped[i])]);
+        i += 1;
+    }
+    assert(!f.graph.foreign_called[body_index(&f, "ordinary")]);
+    assert(!f.graph.foreign_called[body_index(&f, "relay")]);
+    assert(!f.graph.foreign_called[body_index(&f, "caller")]);
+    assert(f.graph.stabilization_steps == 2);
+    assert(f.graph.work == 284);
+    u64 work_bound = ownership_limits.work_bound(f.graph.fir_size);
+    assert(work_bound == 125952 && f.graph.work < work_bound);
+    // A bound below 284 refuses in one of 283 builds, at any charge of the escape scans too.
+    assert(sweep(&f) == 283);
+    close(&f);
+    println("G20 foreign-called bodies");
+}
+
+// A function identity that reaches storage that the graph cannot follow exactly makes its body
+// foreign-called. Shapes 1 to 5 are the review shapes: an indexed copy, an erased factory
+// result, a store through an alias, an output parameter, and a global address initializer.
+// Shapes 6 to 8 hold a nested copy, a member key in a projected place, and a residual argument.
+// The three controls flow only through exact storage.
+fn callback_escapes() void {
+    fixture mut f = fixture{};
+    string[38] source = {"struct handler { fn () void cb; }",
+        "struct outer { handler inner; u64 n; }",
+        "struct pair { fn () void first; handler inner; }",
+        "extern fn register(fn () void cb) void;", "extern fn expose(void* p) void;",
+        "extern fn register_erased(fn () void* f) void;",
+        "extern fn register_fill(fn (handler mut*) void f) void;",
+        "fn indexed_a() void {}", "fn indexed_b() void {}", "fn erased_leaf() void {}",
+        "fn alias_leaf() void {}", "fn out_leaf() void {}", "fn initializer_leaf() void {}",
+        "fn nested_leaf() void {}", "fn member_leaf() void {}", "fn sunk_leaf() void {}",
+        "fn kept_leaf() void {}", "fn passed_leaf() void {}",
+        "handler ADDRESSED_HANDLER = {initializer_leaf};",
+        "handler* HANDLER_ADDRESS = &ADDRESSED_HANDLER;",
+        "fn indexed_copy(u64 i) void { (fn () void)[2] table = {indexed_a, indexed_b};",
+        "fn () void cb = table[i]; register(cb); }",
+        "fn erased_factory() void* { return cast(erased_leaf, void*); }",
+        "fn expose_factory() void { register_erased(erased_factory); }",
+        "fn alias_store() void { handler mut h = {null}; handler mut* p = &h;",
+        "void* q = cast(&h, void*); expose(q); p->cb = alias_leaf; }",
+        "fn fill(handler mut* out) void { out->cb = out_leaf; }",
+        "fn expose_fill() void { register_fill(fill); }",
+        "fn expose_address() void { expose(cast(HANDLER_ADDRESS, void*)); }",
+        "fn nested_copy() void { handler h = {nested_leaf}; outer o = {h, 1};",
+        "handler x = o.inner; register(x.cb); }",
+        "fn member_store() void { pair mut o = {null, {null}}; o.inner = handler{member_leaf};",
+        "fn () void cb = o.inner.cb; register(cb); }",
+        "fn sink_call(fn (fn () void) void sink) void { sink(sunk_leaf); }",
+        "fn exact_flow() void { handler h = {kept_leaf}; handler h2 = h;",
+        "fn () void cb = h2.cb; cb(); }",
+        "fn keep(fn () void cb) void { cb(); }", "fn pass_exact() void { keep(passed_leaf); }"};
+    string[24] names = {"indexed_a", "indexed_b", "erased_leaf", "alias_leaf", "out_leaf",
+        "initializer_leaf", "nested_leaf", "member_leaf", "sunk_leaf", "kept_leaf",
+        "passed_leaf", "indexed_copy", "erased_factory", "expose_factory", "alias_store", "fill",
+        "expose_fill", "expose_address", "nested_copy", "member_store", "sink_call",
+        "exact_flow", "keep", "pass_exact"};
+    open(&f, source[..], names[..], 16);
+    string[11] escaped = {"indexed_a", "indexed_b", "erased_leaf", "alias_leaf", "out_leaf",
+        "initializer_leaf", "nested_leaf", "member_leaf", "sunk_leaf", "erased_factory", "fill"};
+    u64 mut i = 0;
+    while (i < escaped.len) {
+        assert(f.graph.foreign_called[body_index(&f, escaped[i])]);
+        i += 1;
+    }
+    u64 mut marked = 0;
+    i = 0;
+    while (i < f.graph.foreign_called.len) {
+        if (f.graph.foreign_called[i]) { marked += 1; }
+        i += 1;
+    }
+    assert(marked == escaped.len && f.graph.foreign_len == marked);
+    assert(!f.graph.foreign_called[body_index(&f, "kept_leaf")]);
+    assert(!f.graph.foreign_called[body_index(&f, "passed_leaf")]);
+    assert(target(&f, nth_call(&f, "exact_flow", 0),
+        cast(body_index(&f, "kept_leaf") + 1, u32)));
+    assert(target(&f, nth_call(&f, "keep", 0), cast(body_index(&f, "passed_leaf") + 1, u32)));
+    assert(sweep(&f) == f.graph.work - 1);
+    close(&f);
+    println("G21 callback escapes");
+}
+
+// A build whose W bound is below its full work refuses with one work-limit proof at the charge
+// that passes the bound. The refusal names the active operation of the graph, and the build
+// keeps only marks that the full build makes.
+fn refused_within(fixture* f, ownership_graph.graph* g, u64 bound) void {
+    ownership_api.proof_status proof = g->proof;
+    assert(proof.kind == ownership_api.proof_kind.incomplete && proof.failed);
+    assert(proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(proof.terminal.limit.present);
+    assert(proof.terminal.limit.category == ownership_api.limit_category.w);
+    assert(proof.terminal.limit.scope == ownership_api.limit_scope.computation);
+    assert(proof.terminal.limit.bound == bound && proof.terminal.limit.used <= bound);
+    assert(proof.terminal.limit.attempted > bound - proof.terminal.limit.used);
+    assert(ownership_keys.operation(g->active_operation, proof.terminal.limit.operation) == 0);
+    // A bound below the body count refuses before the build allocates its marks.
+    assert(g->foreign_called.len == f->graph.foreign_called.len ||
+        (g->foreign_called.len == 0 && bound < f->inputs.len && g->foreign_len == 0));
+    u64 mut marked = 0;
+    u64 mut i = 0;
+    while (i < g->foreign_called.len) {
+        if (g->foreign_called[i]) {
+            assert(f->graph.foreign_called[i]);
+            marked += 1;
+        }
+        i += 1;
+    }
+    assert(marked == g->foreign_len);
+    i = 0;
+    while (i < g->foreign_len) {
+        assert(g->foreign_called[g->foreign_order[i]]);
+        i += 1;
+    }
+}
+
+// The refusal of the charge that pays for one mark. Each mark costs 1 W unit, so a bound one
+// below the first bound that makes the mark refuses exactly that charge.
+fn mark_refusal(fixture* f, u64 bound, ownership_api.work_kind kind, u64 steps)
+    ownership_graph.graph {
+    ownership_api.limit_table mut small = ownership_limits.production();
+    small.t = 16;
+    small.w = bound;
+    ownership_graph.graph g = ownership_graph.build(f->inputs[..], small);
+    refused_within(f, &g, bound);
+    assert(g.proof.terminal.limit.used == bound && g.proof.terminal.limit.attempted == 1);
+    assert(g.proof.terminal.limit.work == kind && g.stabilization_steps == steps);
+    return g;
+}
+
+// Each W bound below the full work of the fixture refuses within the build. The bound of the
+// full work gives the same marks in the same order. Returns the number of refused builds.
+fn sweep(fixture* f) u64 {
+    ownership_api.limit_table mut small = ownership_limits.production();
+    small.t = 16;
+    u64 mut refusals = 0;
+    u64 mut bound = 1;
+    while (bound < f->graph.work) {
+        small.w = bound;
+        ownership_graph.graph mut trial = ownership_graph.build(f->inputs[..], small);
+        refused_within(f, &trial, bound);
+        ownership_graph.free(&trial);
+        refusals += 1;
+        bound += 1;
+    }
+    small.w = f->graph.work;
+    ownership_graph.graph mut exact = ownership_graph.build(f->inputs[..], small);
+    assert(ownership_api.successful(exact.proof) && exact.work == f->graph.work);
+    assert(exact.foreign_len == f->graph.foreign_len);
+    u64 mut i = 0;
+    while (i < exact.foreign_len) {
+        assert(exact.foreign_order[i] == f->graph.foreign_order[i]);
+        i += 1;
+    }
+    ownership_graph.free(&exact);
+    return refusals;
+}
+
+// Each W bound from 1 to the full work drives one build. The initializer scan, the extern
+// argument scan, the cast scan and the result scan each make one mark, and the bound one below
+// that mark refuses inside the loop that makes it (D17.18).
+fn foreign_work_limits() void {
+    fixture mut f = fixture{};
+    // The site walk visits `busy` first. Its 10 call records cost more than the body count, so
+    // the bound one below the initializer mark passes the up-front check of the build.
+    string[16] source = {"struct handler { fn () void cb; }",
+        "extern fn register(fn () void cb) void;", "extern fn expose(void* p) void;",
+        "extern fn register_factory(fn () fn () void f) void;",
+        "fn seeded() void {}", "fn argued() void {}", "fn erased() void {}",
+        "fn returned() void {}", "fn factory() fn () void { return returned; }",
+        "handler SEEDED = {seeded};",
+        "fn busy() void { argued(); argued(); argued(); argued(); argued(); argued(); argued();",
+        "argued(); argued(); argued(); }",
+        "fn expose_seeded() void { register(SEEDED.cb); }",
+        "fn expose_argument() void { register(argued); }",
+        "fn expose_cast() void { expose(cast(erased, void*)); }",
+        "fn expose_factory() void { register_factory(factory); }"};
+    string[10] names = {"busy", "seeded", "argued", "erased", "returned", "factory",
+        "expose_seeded", "expose_argument", "expose_cast", "expose_factory"};
+    open(&f, source[..], names[..], 16);
+    string[5] marked = {"seeded", "argued", "factory", "erased", "returned"};
+    for (string name : marked) { assert(f.graph.foreign_called[body_index(&f, name)]); }
+    assert(f.graph.foreign_len == marked.len);
+    u64 full = f.graph.work;
+    u64 steps = f.graph.stabilization_steps;
+    assert(full > marked.len && steps > 0);
+    u64[5] mut first = {};
+    ownership_api.limit_table mut small = ownership_limits.production();
+    small.t = 16;
+    u64 mut previous = 0;
+    u64 mut bound = 1;
+    while (bound < full) {
+        small.w = bound;
+        ownership_graph.graph mut trial = ownership_graph.build(f.inputs[..], small);
+        refused_within(&f, &trial, bound);
+        assert(trial.foreign_len >= previous);
+        previous = trial.foreign_len;
+        u64 mut k = 0;
+        while (k < marked.len && trial.foreign_called.len > 0) {
+            if (first[k] == 0 && trial.foreign_called[body_index(&f, marked[k])]) {
+                first[k] = bound;
+            }
+            k += 1;
+        }
+        ownership_graph.free(&trial);
+        bound += 1;
+    }
+    assert(sweep(&f) == full - 1);
+    // The site walk scans the initializer before the fixed point, and the three escape scans
+    // run in their order after it.
+    assert(first[0] > 1 && first[0] < first[1] && first[1] < first[2]);
+    assert(first[2] < first[3] && first[3] < first[4] && first[4] < full);
+    ownership_graph.graph mut g = mark_refusal(&f, first[0] - 1,
+        ownership_api.work_kind.transfer, 0);
+    assert(g.proof.terminal.limit.operation.function.declaration.declaration ==
+        cast(body_index(&f, "expose_seeded") + 1, u32));
+    assert(g.seeded_globals_len == 1 && g.calls_len < f.graph.calls_len);
+    ownership_graph.free(&g);
+    string[2] callers = {"expose_argument", "expose_factory"};
+    u64 mut k = 0;
+    while (k < callers.len) {
+        g = mark_refusal(&f, first[k + 1] - 1, ownership_api.work_kind.substitution, steps);
+        u64 call = nth_call(&f, callers[k], 0);
+        assert(ownership_keys.operation(g.proof.terminal.limit.operation,
+            f.graph.calls[call].position) == 0);
+        ownership_graph.free(&g);
+        k += 1;
+    }
+    g = mark_refusal(&f, first[3] - 1, ownership_api.work_kind.transfer, steps);
+    assert(f.graph.casts_len == 1 &&
+        f.graph.casts[0].body == cast(body_index(&f, "expose_cast"), u32));
+    assert(ownership_keys.operation(g.proof.terminal.limit.operation,
+        f.graph.casts[0].position) == 0);
+    assert(g.proof.terminal.limit.source.line > 0);
+    ownership_graph.free(&g);
+    g = mark_refusal(&f, first[4] - 1, ownership_api.work_kind.transfer, steps);
+    ownership_api.operation_position entry = ownership_api.operation_position{
+        f.inputs[body_index(&f, "factory")].key, 0, 0, false};
+    assert(ownership_keys.operation(g.proof.terminal.limit.operation, entry) == 0);
+    assert(g.proof.terminal.limit.source.line == 0);
+    ownership_graph.free(&g);
+    close(&f);
+    println("G22 foreign work limits");
+}
+
 fn main() i32 {
     acyclic();
     self_recursion();
@@ -1213,5 +1500,8 @@ fn main() i32 {
     residual_flow();
     determinism();
     component_scale();
+    foreign_called_bodies();
+    callback_escapes();
+    foreign_work_limits();
     return 0;
 }

@@ -42,7 +42,7 @@ SOLVERS = ("summary", "heap")
 # The columns of solvers_alone: each solver alone, then the calls_heap row that joins them. No
 # ledger entry names the calls_heap row: it proves no faulty body.
 GATE_COLUMNS = (*SOLVERS, "calls_heap")
-LEDGER_CLASSES = ("A", "B", "D", "E", "F", "G", "H", "I", "K", "L", "N")
+LEDGER_CLASSES = ("A", "B", "D", "E", "F", "G", "H", "I", "K", "L", "M", "N")
 TEXT_ARRAY = re.compile(r"^(\s*)string\[[^\]]*\] (?:mut )?(\w+) = \{(.*)$")
 STRING_LITERAL = re.compile(r'"((?:[^"\\]|\\.)*)"')
 # A function of a heap test that copies a base text and then a tail into `out`.
@@ -1217,10 +1217,8 @@ class OwnershipDriverTest(unittest.TestCase):
                     self.assertEqual((stored["solver"], stored["violations"]), ("complete", 0))
 
     # Loads out of the referent of a pointer parameter (spec/fir.md 14.1). A clean load borrows
-    # the caller source of the loaded reference. The body requires that source live at entry,
-    # and no caller checks that yet, so the compiler keeps each such load the gap: `row_at` and
-    # `name` stay outside both scopes, as do a load after a store through the parameter, a
-    # second loaded level, a use through the loaded reference and a load before a call.
+    # the caller source of the loaded reference. A call summary checks that source at each call.
+    # The local analyses can then use that source after the ordered load.
     LOADED_CASES = (
         "struct item { u32 n; }\n"
         "struct items { item mut@ own data; u64 len; }\n"
@@ -1241,7 +1239,7 @@ class OwnershipDriverTest(unittest.TestCase):
         "fn main() i32 { return 0; }\n"
     )
 
-    def test_loaded_parameter_sources_stay_gated_in_every_mode(self):
+    def test_loaded_parameter_sources_use_call_binding_in_every_mode(self):
         self.entry.write_text(self.LOADED_CASES)
         names = ("row_at", "name", "stored", "deeper", "used", "called")
         projections = []
@@ -1261,8 +1259,16 @@ class OwnershipDriverTest(unittest.TestCase):
                 projections.append(rows)
         # The release and bounds-check options remove checks from the FIR, and the verdicts stay.
         self.assertTrue(all(value == projections[0] for value in projections))
+        inside = (("complete", "complete"), ("complete", "complete"))
         outside = (("incomplete", "incomplete"), ("incomplete", "incomplete"))
-        self.assertEqual(projections[0], {name: outside for name in names})
+        self.assertEqual(projections[0], {
+            "row_at": inside,
+            "name": inside,
+            "stored": outside,
+            "deeper": outside,
+            "used": outside,
+            "called": outside,
+        })
 
     def test_report_can_replace_an_old_report_atomically(self):
         self.report.write_bytes(b"old report\n")
@@ -1605,6 +1611,20 @@ class GateInputTest(unittest.TestCase):
         text = FALSE_ACCEPTS.read_text()
         self.assertLessEqual(len(read_ledger(text)), ledger_bound(text))
 
+    def test_the_loaded_caller_probe_is_the_text_of_the_gate_test(self):
+        # The class M ledger entries name callers of the loaded-source gate test. The probe
+        # holds the same program, so a change to one text must reach the other.
+        gate = (CHECKOUT / "test" / "fort" /
+                "ownership_source_local_loaded_gate_test.ft").read_text()
+        start = gate.index("string[70] SOURCE = {\n") + len("string[70] SOURCE = {\n")
+        quoted = gate[start:gate.index("\n};\n", start)].splitlines()
+        source = [unescape(STRING_LITERAL.fullmatch(line.strip().rstrip(",")).group(1))
+                  for line in quoted]
+        probe = (OWNERSHIP / "probes" / "loaded_callers.ft").read_text().splitlines()
+        code = [line for line in probe if not line.startswith("//")]
+        self.assertEqual(len(source), 70)
+        self.assertEqual(code, source + ["fn main() i32 { return 0; }"])
+
     def test_each_probe_program_has_its_faulty_bodies(self):
         probes = json.loads(FAULTY_PROBES.read_text())["faulty"]
         files = sorted(path.name for path in (OWNERSHIP / "probes").glob("*.ft"))
@@ -1664,7 +1684,7 @@ class SoundnessGateTest(unittest.TestCase):
         self.assertTrue(set(HEAP_ROWS_SKIPPED) <= set(programs))
         out = [(path, CHECKOUT / path) for path in programs if path not in HEAP_ROWS_SKIPPED]
         probes = sorted((OWNERSHIP / "probes").glob("*.ft"))
-        self.assertEqual(len(probes), 48)
+        self.assertEqual(len(probes), 49)
         out += [(path.relative_to(CHECKOUT).as_posix(), path) for path in probes]
         heap_tests = sorted((CHECKOUT / "test" / "fort").glob("ownership_heap*_test.ft"))
         self.assertEqual(len(heap_tests), 12)
@@ -1717,7 +1737,7 @@ class SoundnessGateTest(unittest.TestCase):
         self.assertEqual(sum(len(bodies) for _, bodies in items), 37)
         probes = json.loads(FAULTY_PROBES.read_text())["faulty"]
         items += [(f"test/ownership/probes/{name}", bodies) for name, bodies in probes.items()]
-        self.assertEqual(sum(len(bodies) for _, bodies in items), 168)
+        self.assertEqual(sum(len(bodies) for _, bodies in items), 176)
 
         def verdicts(item):
             path, bodies = item
@@ -1730,7 +1750,7 @@ class SoundnessGateTest(unittest.TestCase):
 
         with ThreadPoolExecutor(max_workers=4) as pool:
             found = [row for rows in pool.map(verdicts, items) for row in rows]
-        self.assertEqual(len(found), len(GATE_COLUMNS) * 168)
+        self.assertEqual(len(found), len(GATE_COLUMNS) * 176)
         proved = {(path, body, solver) for path, body, solver, verdict in found
                   if verdict == "proved"}
         ledger = read_ledger(FALSE_ACCEPTS.read_text())

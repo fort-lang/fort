@@ -87,10 +87,6 @@ struct context {
     bool analyzed;
     bool graph_built;
     bool accounting_complete;
-    // Whether callers bind the live-at-entry requirement of loaded parameter sources
-    // (ownership_source_local.loaded_bound). Off: no call summary checks it yet. The calls
-    // increment turns it on when its summaries check it at each call.
-    bool callers_bind_loaded;
     // The owning globals and the final boundary of the process-exit analysis.
     ownership_source_exit.closure exit;
     // The calls_heap analysis of the closure: body i of the graph is body i here.
@@ -224,6 +220,20 @@ fn known_branch(ast.node* selector) ast.node* {
     return current;
 }
 
+// The generated executable, a generated runtime check, and the code that `new` and `del` lower to
+// call these bodies. They have no fort caller that can satisfy a caller-source requirement.
+fn generated_caller(body* row) bool {
+    string name = row->function.sym->name;
+    if (row->module->entry && name == "main") { return true; }
+    if (row->module->path != modules.RUNTIME_PATH) { return false; }
+    return name == "args_init" || name == "args" || name == "shutdown" ||
+        name == "alloc" || name == "free" ||
+        name == "fail_bounds" || name == "fail_span" || name == "fail_overflow" ||
+        name == "fail_shift" || name == "fail_div_zero" || name == "fail_div_overflow" ||
+        name == "fail_alloc_count" || name == "fail_overwrite" || name == "fail_enum" ||
+        name == "panic" || name == "assert_fail";
+}
+
 /// Discovers rows after front-end failure without claiming a complete denominator.
 fn prepare(context mut* c, check.checker mut* ck, modules.module_set* set,
     bool checked) void {
@@ -288,8 +298,9 @@ fn prepare(context mut* c, check.checker mut* ck, modules.module_set* set,
         row->verification = status.complete;
         ownership_source_live.prepare(&row->live, &row->function, row->key, row->source.file,
             row->source);
-        row->local.callers_bind_loaded = c->callers_bind_loaded;
-        row->stored.callers_bind_loaded = c->callers_bind_loaded;
+        // The closure call solver binds each loaded-source entry requirement at its call sites.
+        row->local.callers_bind_loaded = true;
+        row->stored.callers_bind_loaded = true;
         ownership_source_local.prepare(&row->local, &row->function, row->key, row->source.file,
             row->module->file, row->source);
         ownership_source_local.prepare_stored(&row->stored, &row->function, row->key,
@@ -374,6 +385,12 @@ fn analyze(context mut* c) void {
         c->graph = ownership_graph.build(c->graph_inputs[..],
             ownership_limits.computation(ownership_graph.closure_size(c->graph_inputs[..])));
         c->graph_built = true;
+        i = 0;
+        while (i < c->bodies.len && i < c->graph.foreign_called.len) {
+            c->graph.foreign_called[i] = c->graph.foreign_called[i] ||
+                generated_caller(&c->bodies[i]);
+            i += 1;
+        }
         c->graph.proof = locate(c, c->graph.proof);
         if (c->graph.proof.terminal.limit.present) { c->graph_first_refusal = c->graph.proof; }
         i = 0;

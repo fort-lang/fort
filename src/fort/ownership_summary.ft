@@ -327,25 +327,12 @@ fn caller_root(call_context* c, ownership_api.entity_id source) u64 {
     while (r < c->program->roots_len) {
         if (!call_work(c, 1)) { return ownership_api.U64_MAX; }
         ownership_summary_model.symbolic_root root = c->program->roots[r];
-        if (root.kind == ownership_summary_model.root_kind.caller_source &&
+        if ((root.kind == ownership_summary_model.root_kind.caller_source ||
+            root.kind == ownership_summary_model.root_kind.loaded_source) &&
             ownership_summary_model.same(root.source, source)) { return r; }
         r += 1;
     }
     return ownership_api.U64_MAX;
-}
-
-// A loaded root names a reference that this body loaded from caller storage. A callee
-// requirement on its source has no formal of this body, so no caller can check it here.
-fn loaded_root(call_context* c, ownership_api.entity_id source) bool {
-    u64 mut r = 0;
-    while (r < c->program->roots_len) {
-        if (!call_work(c, 1)) { return true; }
-        ownership_summary_model.symbolic_root root = c->program->roots[r];
-        if (root.kind == ownership_summary_model.root_kind.loaded_source &&
-            ownership_summary_model.same(root.source, source)) { return true; }
-        r += 1;
-    }
-    return false;
 }
 
 // A caller-visible place is designated caller storage of this body.
@@ -519,10 +506,13 @@ fn export_call(call_context* c, ownership_summary_body.call_site site, fir.state
         } else if (root != ownership_api.U64_MAX && readable &&
             row.guard.kind == ownership_api.entity_kind.none) {
             ownership_summary_model.symbolic_root formal = program->roots[root];
+            ownership_api.place_path holder = formal.kind ==
+                ownership_summary_model.root_kind.loaded_source ?
+                ownership_api.place_path{.root = formal.slot} :
+                ownership_summary_body.slot(c->in, formal.formal);
             ownership_summary_body.export_requirement(c->in, program, row,
-                ownership_summary_body.slot(c->in, formal.formal), s->operation,
-                s->source, call->loc.file);
-        } else if (root != ownership_api.U64_MAX || loaded_root(c, row.source) ||
+                holder, s->operation, s->source, call->loc.file);
+        } else if (root != ownership_api.U64_MAX ||
             caller_visible(c, row.path, ownership_api.entity_id{})) {
             program->call_residual = true;
         }

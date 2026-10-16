@@ -1,0 +1,195 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| escape points ok
+//| exact flow ok
+//| fort callers ok
+/// Tests the calls_heap row of each body that one escape point makes foreign-called (D17.13,
+/// D17.18). Each callback reads through its parameter, so its summary needs a caller-source
+/// requirement. An escape loses that requirement, and the row gives incomplete proof at the
+/// read. The twins flow only through exact storage, so each fort caller binds the requirement.
+import ownership_api;
+import ownership_source;
+import ownership_source_calls;
+import ownership_source_env;
+import std.strbuf;
+
+// A line here is a line of SOURCE. Each callback is on one line, and its read is at column 32.
+u32 FIRST_CALLBACK_LINE = 6;
+u32 READ_COLUMN = 32;
+string[50] SOURCE = {
+    "struct handler { fn (i32*) i32 cb; }",
+    "struct outer { handler inner; u64 n; }",
+    "extern fn register(fn (i32*) i32 hook) void;",
+    "extern fn expose(void* p) void;",
+    "extern fn register_factory(fn () fn (i32*) i32 f) void;",
+    "fn glo_cb(i32* p) i32 { return *p; }",
+    "fn arg_cb(i32* p) i32 { return *p; }",
+    "fn era_cb(i32* p) i32 { return *p; }",
+    "fn idx_cb(i32* p) i32 { return *p; }",
+    "fn nst_cb(i32* p) i32 { return *p; }",
+    "fn ini_cb(i32* p) i32 { return *p; }",
+    "fn ret_cb(i32* p) i32 { return *p; }",
+    "fn als_cb(i32* p) i32 { return *p; }",
+    "fn out_cb(i32* p) i32 { return *p; }",
+    "fn snk_cb(i32* p) i32 { return *p; }",
+    "fn adr_cb(i32* p) i32 { return *p; }",
+    "fn exa_cb(i32* p) i32 { return *p; }",
+    "fn pas_cb(i32* p) i32 { return *p; }",
+    "(fn (i32*) i32) mut HOOK = null;",
+    "handler INIT = {ini_cb};",
+    "handler ADDRESSED = {adr_cb};",
+    "handler* ADDRESS = &ADDRESSED;",
+    "fn install() void { HOOK = glo_cb; }",
+    "fn expose_argument() void { register(arg_cb); }",
+    "fn expose_erased() void { expose(cast(era_cb, void*)); }",
+    "fn read_indexed(u64 i) i32 {",
+    "    (fn (i32*) i32)[2] table = {idx_cb, idx_cb};",
+    "    fn (i32*) i32 picked = table[i];",
+    "    i32 x = 1;",
+    "    return picked(&x); }",
+    "fn read_nested() i32 {",
+    "    outer o = {handler{nst_cb}, 1};",
+    "    handler h = o.inner;",
+    "    i32 x = 1;",
+    "    return h.cb(&x); }",
+    "fn read_initialized() i32 { i32 x = 1; return INIT.cb(&x); }",
+    "fn factory() fn (i32*) i32 { return ret_cb; }",
+    "fn expose_factory() void { register_factory(factory); }",
+    "fn alias_store() void { handler mut h = {null}; handler mut* p = &h; p->cb = als_cb; }",
+    "fn fill(handler mut* target) void { target->cb = out_cb; }",
+    "fn sink(fn (fn (i32*) i32) void put) void { put(snk_cb); }",
+    "fn read_address() i32 { i32 x = 1; return ADDRESS->cb(&x); }",
+    "fn call_exact() i32 {",
+    "    i32 x = 1;",
+    "    fn (i32*) i32 f = exa_cb;",
+    "    return f(&x); }",
+    "fn keep(fn (i32*) i32 hook) i32 { i32 x = 1; return hook(&x); }",
+    "fn call_passed() i32 { return keep(pas_cb); }",
+    "fn unused_a() void {}",
+    "fn unused_b() void {}",
+};
+
+// The callbacks in SOURCE order. The first seven escape through rules 1 to 7 of the
+// callback-escape invariant. The next four are review shapes: a store through an address alias
+// and a store through an output parameter (rule 1), an argument of a residual target (rule 2),
+// and a global that an address initializer names (rule 6). The last two are the twins.
+string[13] CALLBACKS = {"glo_cb", "arg_cb", "era_cb", "idx_cb", "nst_cb", "ini_cb", "ret_cb",
+    "als_cb", "out_cb", "snk_cb", "adr_cb", "exa_cb", "pas_cb"};
+u64 ESCAPED = 11;
+
+fn open(ownership_source_env.env mut* e) void {
+    ownership_source_env.open(e);
+    ownership_source_env.runtime(e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    for (string line : SOURCE) {
+        strbuf.append(&text, line);
+        strbuf.push(&text, '\n');
+    }
+    strbuf.append(&text, "fn root() i32 { return 0; }\n");
+    assert(ownership_source_env.prepare(e, strbuf.view(&text)));
+    ownership_source.analyze(&e->source);
+    assert(e->source.graph_built && ownership_api.successful(e->source.graph.proof));
+}
+
+fn foreign(ownership_source_env.env* e, string name) bool {
+    u64 mut i = 0;
+    while (i < e->source.bodies.len) {
+        ownership_source.body* row = &e->source.bodies[i];
+        if (row->module->path == "main" && row->declaration->name == name) {
+            assert(i < e->source.graph.foreign_called.len);
+            return e->source.graph.foreign_called[i];
+        }
+        i += 1;
+    }
+    panic("ownership_source_calls_foreign_test: no such body");
+}
+
+fn calls(ownership_source_env.env mut* e, string name) ownership_source_calls.row* {
+    ownership_source_calls.row* found = ownership_source_env.find(e, "main", name)->calls;
+    assert(found != null && found->violations == 0);
+    return found;
+}
+
+fn report(string name, ownership_source_calls.row* found) void {
+    eprintln(name, ": reason ", cast(found->proof.terminal.reason, u64), " at ",
+        found->proof.terminal.source.line, ":", found->proof.terminal.source.col);
+}
+
+// Each escape point marks its callback, and the lost requirement names the read `*p`.
+fn escape_points(ownership_source_env.env mut* e) void {
+    u64 mut i = 0;
+    while (i < ESCAPED) {
+        string name = CALLBACKS[i];
+        assert(foreign(e, name));
+        ownership_source_calls.row* found = calls(e, name);
+        u32 line = FIRST_CALLBACK_LINE + cast(i, u32);
+        if (ownership_api.successful(found->proof) ||
+            found->proof.terminal.reason != ownership_api.incomplete_reason.missing_path ||
+            found->proof.terminal.source.line != line ||
+            found->proof.terminal.source.col != READ_COLUMN) {
+            report(name, found);
+            assert(false);
+        }
+        i += 1;
+    }
+    // Rule 2 marks `factory` too, because the extern receives it as a function value. The two
+    // bodies that no statement names stay unmarked.
+    assert(foreign(e, "factory"));
+    assert(!foreign(e, "unused_a") && !foreign(e, "unused_b"));
+    println("escape points ok");
+}
+
+// A callback that flows only through exact storage or a fort parameter keeps its requirement,
+// and its row proves. `call_exact` calls it through an exact local, so its row proves too. The
+// parameter of `keep` also has a residual fort target, so `keep` and its caller stay incomplete
+// with unknown_effect at their calls.
+fn exact_flow(ownership_source_env.env mut* e) void {
+    u64 mut i = ESCAPED;
+    while (i < CALLBACKS.len) {
+        assert(!foreign(e, CALLBACKS[i]));
+        ownership_source_calls.row* found = calls(e, CALLBACKS[i]);
+        if (!ownership_api.successful(found->proof)) {
+            report(CALLBACKS[i], found);
+            assert(false);
+        }
+        i += 1;
+    }
+    string[3] callers = {"call_exact", "keep", "call_passed"};
+    for (string name : callers) { assert(!foreign(e, name)); }
+    assert(ownership_api.successful(calls(e, "call_exact")->proof));
+    string[2] residual = {"keep", "call_passed"};
+    for (string name : residual) {
+        ownership_source_calls.row* found = calls(e, name);
+        assert(found->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    }
+    println("exact flow ok");
+}
+
+// A fort caller of a foreign-called callback applies its incomplete summary, so the caller
+// gives incomplete proof too. The bodies that only expose a callback read no caller source.
+fn fort_callers(ownership_source_env.env mut* e) void {
+    string[4] callers = {"read_indexed", "read_nested", "read_initialized", "read_address"};
+    for (string name : callers) {
+        assert(!foreign(e, name));
+        assert(!ownership_api.successful(calls(e, name)->proof));
+    }
+    string[7] exposers = {"install", "expose_argument", "expose_erased", "expose_factory",
+        "alias_store", "fill", "sink"};
+    for (string name : exposers) {
+        assert(!foreign(e, name));
+        assert(calls(e, name)->violations == 0);
+    }
+    println("fort callers ok");
+}
+
+fn main() i32 {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    open(&e);
+    escape_points(&e);
+    exact_flow(&e);
+    fort_callers(&e);
+    ownership_source_env.close(&e);
+    return 0;
+}

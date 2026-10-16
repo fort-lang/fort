@@ -743,16 +743,16 @@ bullet at a time and without a rewrite.
   `lower_env` writes its sandboxes into the working directory.
   `test/ownership/heap_rows.ft` prints one row for each function of a file: the verdict, the
   incomplete reason, `returns`, the interface length, the post slots, the post atoms and the events.
-  The test compares 1385 rows of 280 inputs with `test/ownership/heap_rows.txt`. The inputs are
-  107 of the 109 manifest programs, the 48 programs of `test/ownership/probes`, and 125 texts that
+  The test compares 1405 rows of 281 inputs with `test/ownership/heap_rows.txt`. The inputs are
+  107 of the 109 manifest programs, the 49 programs of `test/ownership/probes`, and 125 texts that
   `heap_texts` takes from the 12 `test/fort/ownership_heap*_test.ft` programs. `HEAP_ROWS_SKIPPED`
   names the other 2 manifest programs with the reason: each imports `std.str`, and the sandbox
   `std` holds only a runtime. A skipped program that `heap_rows` reads fails the test. Run the
   test with `--bless` to write the golden, and read the diff of the golden before the commit.
   `test/ownership/solvers_alone.ft` prints the summary verdict, the heap verdict and the verdict
-  of the calls_heap row (`ownership_source_calls_env.verdict`) of 168 faulty bodies:
+  of the calls_heap row (`ownership_source_calls_env.verdict`) of 176 faulty bodies:
   the faulty body of each of the 37 reject cases (the last function at or before an error line)
-  and the 131 bodies of `test/ownership/solvers/faulty.json`. A body is faulty because its source
+  and the 139 bodies of `test/ownership/solvers/faulty.json`. A body is faulty because its source
   has the expected error: the error line of a reject case, or the `faulty.json` entry of a probe.
   The summary solver must prove 0, and the calls_heap row must prove 0: it needs both proofs. No
   ledger entry names the row. Its one-body witness checker validates an event in 13 of the faulty
@@ -789,8 +789,15 @@ bullet at a time and without a rewrite.
   `review_s*` probes. The user ruled on 2026-10-16 that the ledger takes them as class N: a
   dangling borrowed leaf of a copied aggregate call argument that the heap solver does not see.
   The summary solver fails 11 of them, and 1 stays unproved. The bound became 12. Thus
-  `faulty.json` has 131 bodies, the set has 168, and class N is the only class with entries.
-  The empty ledger is the goal.
+  `faulty.json` had 131 bodies, and the set had 168. The final review of the loaded-source gate
+  found 6 faulty callers that the heap solver alone proves: a callee loads a reference from
+  caller storage and reads through it, and a release before the call has emptied the referent.
+  On 2026-10-15 the user ruled that the ledger takes them as class M. They reached main after
+  class N, and N became 18. A later change fixes the heap rule.
+  `test/ownership/probes/loaded_callers.ft` holds the 8 faulty callers of
+  `test/fort/ownership_source_local_loaded_gate_test.ft`, and the driver test holds the two
+  texts the same. Thus, `faulty.json` has 139 bodies, and the full set has 176. The ledger
+  classes with entries are M and N. The empty ledger is the goal.
   Measured runs of the first 10 probe programs on darwin, built with `build/Darwin/debug/fort --cc
   /opt/homebrew/bin/clang --std-dir build/Darwin/debug/std -o <probe> <probe>.ft`: `round8_a3`
   exits 134 (the assertion of `chk_addr`), `round8_d2` exits 139, and the other 8 exit 0.

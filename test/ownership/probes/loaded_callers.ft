@@ -1,0 +1,78 @@
+// Class M (D17.15, D17.18): a caller passes storage that holds a reference, and a callee loads
+// that reference and reads through it. Each faulty caller lets the read reach released storage:
+// it releases the buffer before the call, or a callee releases it, or it reads a returned view
+// after the release. The heap solver alone proves 6 of the 8 faulty callers: class M of
+// test/ownership/solvers/false_accepts.txt. The lines after this comment, but `main`, are the
+// SOURCE lines of test/fort/ownership_source_local_loaded_gate_test.ft. The driver test holds
+// that the two texts stay the same.
+struct holder { u8@ s; }
+struct cell { i64 a; }
+struct ph { cell* p; }
+struct block { u32 n; }
+struct block_vec { block mut@ own items; u64 len; }
+struct func { block_vec blocks; u64 len; }
+holder mut GH = holder{{}};
+ph mut GPH = ph{null};
+fn stash(holder mut* h) void {
+    u8 mut@ own b = new(u8, 4);
+    h->s = b[..4];
+    del(b);
+}
+fn read(holder* h) u8 {
+    u8@ v = h->s[..];
+    return v[0];
+}
+fn chain_main() u8 {
+    holder mut h = holder{{}};
+    stash(&h);
+    return read(&h);
+}
+fn stash2(ph mut* h) void { cell mut* own b = new(cell); h->p = b; del(b); }
+fn read2(ph* h) i64 { i64* q = &h->p->a; return *q; }
+fn chain2_main() i64 { ph mut h = ph{null}; stash2(&h); return read2(&h); }
+fn gstash() void { u8 mut@ own b = new(u8, 4); GH.s = b[..4]; del(b); }
+fn chain3_main() u8 { gstash(); return read(&GH); }
+fn chain4_main() u8 {
+    u8 mut@ own b = new(u8, 4);
+    holder mut h = holder{{}};
+    h.s = b[..4];
+    del(b);
+    return read(&h);
+}
+fn set(holder mut* h, u8@ s) void { h->s = s; }
+fn caller_local() u8 {
+    u8 mut@ own b = new(u8, 4);
+    holder mut h = holder{{}};
+    set(&h, b[..4]);
+    del(b);
+    return read(&h);
+}
+fn caller_global() u8 {
+    u8 mut@ own b = new(u8, 4);
+    set(&GH, b[..4]);
+    del(b);
+    return read(&GH);
+}
+fn gset2() void { cell mut* own b = new(cell); GPH.p = b; del(b); }
+fn usel(ph* h) i64 { i64* q = &h->p->a; return *q; }
+fn use_loaded_main() i64 { gset2(); return usel(&GPH); }
+fn block_at(func* f, u32 b) block* { return &f->blocks.items[cast(b, u64)]; }
+fn view(holder* h) u8@ { return h->s[..]; }
+fn view_caller() u8 {
+    u8 mut@ own b = new(u8, 4);
+    holder mut h = holder{{}};
+    h.s = b[..4];
+    u8@ v = view(&h);
+    del(b);
+    return v[0];
+}
+fn legal_caller() u8 {
+    u8 mut@ own b = new(u8, 4);
+    holder mut h = holder{{}};
+    h.s = b[..4];
+    u8@ v = view(&h);
+    u8 x = v[0];
+    del(b);
+    return x;
+}
+fn main() i32 { return 0; }

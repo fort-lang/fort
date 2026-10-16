@@ -21,6 +21,8 @@ struct target {
     target_kind kind;
     ownership_api.function_id function;
     ast.sym* foreign_symbol;
+    // The index of the body of a fort target in the graph inputs.
+    u64 index;
 }
 
 /// The caller keeps each verified body and its checked symbols live through graph teardown.
@@ -38,6 +40,8 @@ struct fact {
     ast.sym* global;
     u32 field;
     target value;
+    // The place of this fact is outside exact storage, so its fort identity is foreign-called.
+    bool exposed;
     u64 next;
 }
 
@@ -57,6 +61,14 @@ struct call_site {
     bool residual_foreign;
 }
 
+// A cast to a type that is not a function type, in body `body`.
+struct cast_site {
+    ownership_api.operation_position position;
+    ownership_api.source_position source;
+    u32 body;
+    fir.operand value;
+}
+
 struct target_view {
     ownership_api.entity_id@ fort_targets;
     ast.sym*@ foreign_targets;
@@ -74,8 +86,21 @@ struct graph {
     u64 mut@ own last_fact;
     call_site mut@ own calls;
     u64 calls_len;
+    cast_site mut@ own casts;
+    u64 casts_len;
     u32 mut@ own components;
     bool mut@ own recursive;
+    // A generated caller or an extern can call this body without a fort call site.
+    bool mut@ own foreign_called;
+    // The foreign-called bodies in the order that the graph marked them.
+    u64 mut@ own foreign_order;
+    u64 foreign_len;
+    // Globals and constants whose checked initializer the graph has scanned.
+    ast.sym* mut@ own seeded_globals;
+    u64 seeded_globals_len;
+    // The first flag of each body in `addressed`, which holds one flag for each local.
+    u64 mut@ own local_first;
+    bool mut@ own addressed;
     // The components with each callee component before its callers (D17.18).
     u32 mut@ own order;
     ownership_api.entity_id mut@ own query_targets;
@@ -83,6 +108,7 @@ struct graph {
     ownership_api.proof_status proof;
     u64 fir_size;
     u64 work;
+    u64 stabilization_steps;
     ownership_api.operation_position active_operation;
     ownership_api.source_position active_source;
     ownership_api.work_kind active_work;
@@ -177,6 +203,15 @@ fn reserve_facts(graph mut* g) void {
     g->facts = move(next);
 }
 
+fn reserve_casts(graph mut* g) void {
+    if (g->casts_len < g->casts.len) { return; }
+    cast_site mut@ own next = new(cast_site, grow(g->casts.len));
+    u64 mut i = 0;
+    while (i < g->casts_len) { next[i] = g->casts[i]; i += 1; }
+    del(g->casts);
+    g->casts = move(next);
+}
+
 fn reserve_calls(graph mut* g) void {
     if (g->calls_len < g->calls.len) { return; }
     call_site mut@ own next = new(call_site, grow(g->calls.len));
@@ -215,8 +250,36 @@ fn same_place(fact* a, fact* b) bool {
         a->global == b->global && a->field == b->field;
 }
 
+fn reserve_foreign(graph mut* g) void {
+    if (g->foreign_len < g->foreign_order.len) { return; }
+    u64 mut@ own next = new(u64, grow(g->foreign_order.len));
+    u64 mut i = 0;
+    while (i < g->foreign_len) { next[i] = g->foreign_order[i]; i += 1; }
+    del(g->foreign_order);
+    g->foreign_order = move(next);
+}
+
+// Marks the body of an exact fort identity that leaves exact storage. The body index comes
+// with the target, so a mark scans nothing. The order list keeps each marked body once.
+fn foreign_body(graph mut* g, target value) bool {
+    if (value.kind != target_kind.fort || value.index >= g->foreign_called.len ||
+        g->foreign_called[value.index]) { return false; }
+    if (!charge_work(g, 1)) { return false; }
+    g->foreign_called[value.index] = true;
+    reserve_foreign(g);
+    g->foreign_order[g->foreign_len] = value.index;
+    g->foreign_len += 1;
+    return true;
+}
+
 fn add_fact(graph mut* g, fact mut value) bool {
     if (!ownership_api.successful(g->proof)) { return false; }
+    // Rule 1: storage outside exact storage exposes the identity. The mark comes before the
+    // duplicate test, because two places with one key can differ in their storage.
+    if (value.exposed) {
+        foreign_body(g, value.value);
+        if (!ownership_api.successful(g->proof)) { return false; }
+    }
     u64 body = cast(value.body, u64);
     u64 mut i = g->first_fact[body];
     while (i != U64_MAX) {
@@ -258,6 +321,7 @@ fn target_of(graph* g, ast.sym* symbol) target {
     if (index == U64_MAX) { out.kind = target_kind.residual_fort; return out; }
     out.kind = target_kind.fort;
     out.function = g->bodies[index].key;
+    out.index = index;
     return out;
 }
 
@@ -270,6 +334,17 @@ fn field_of(fir.func* body, fir.place slot) u32 {
     return p.field;
 }
 
+// Exact storage is a local of one body at a place that dereferences no pointer and indexes no
+// span or string, when no FIR address or slice of that body names the storage of the local.
+// Only exact storage keeps a fort identity in view of the graph (D17.18).
+fn exact_storage(graph* g, u32 body, fir.place slot) bool {
+    if (slot.base != fir.base_kind.bk_local ||
+        fir.place_indirect(g->bodies[body].body, slot) ||
+        cast(body, u64) >= g->local_first.len) { return false; }
+    u64 at = g->local_first[cast(body, u64)] + cast(slot.local, u64);
+    return at < g->addressed.len && !g->addressed[at];
+}
+
 fn place_fact(graph* g, u32 body, fir.place slot, target value) fact {
     fact mut out = fact{};
     out.body = body;
@@ -278,7 +353,62 @@ fn place_fact(graph* g, u32 body, fir.place slot, target value) fact {
     out.global = slot.global;
     out.field = field_of(g->bodies[body].body, slot);
     out.value = value;
+    out.exposed = !exact_storage(g, body, slot);
     return out;
+}
+
+fn reserve_seeded_globals(graph mut* g) void {
+    if (g->seeded_globals_len < g->seeded_globals.len) { return; }
+    ast.sym* mut@ own next = new(ast.sym*, grow(g->seeded_globals.len));
+    u64 mut i = 0;
+    while (i < g->seeded_globals_len) {
+        next[i] = g->seeded_globals[i];
+        i += 1;
+    }
+    del(g->seeded_globals);
+    g->seeded_globals = move(next);
+}
+
+// Rule 6: a checked initializer is global storage. It holds function names, `&` of module-level
+// declarations, and literals of those (D7.10). Each function name is foreign-called, and each
+// named global or constant has its own initializer scanned. One W unit pays for each node.
+fn seed_initializer(graph mut* g, ast.node* value) bool {
+    if (value == null) { return true; }
+    if (!charge_work(g, 1)) { return false; }
+    if (value->sym != null && value->sym->kind == ast.sym_kind.s_fn) {
+        foreign_body(g, target_of(g, value->sym));
+    } else if (value->sym != null && (value->sym->kind == ast.sym_kind.s_global ||
+        value->sym->kind == ast.sym_kind.s_const)) {
+        if (!seed_global(g, value->sym)) { return false; }
+    }
+    if (!ownership_api.successful(g->proof) || !seed_initializer(g, value->a) ||
+        !seed_initializer(g, value->b) || !seed_initializer(g, value->c) ||
+        !seed_initializer(g, value->d)) { return false; }
+    u64 mut i = 0;
+    while (i < ast.ast_len(value)) {
+        if (!seed_initializer(g, ast.ast_child(value, i))) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+// Scans the checked initializer of a global or a constant once. A scalar holds no function
+// name and no address (D7.10), so its declaration needs no scan and no list search.
+fn seed_global(graph mut* g, ast.sym* global) bool {
+    if (global == null || global->node == null ||
+        global->node->kind != ast.ast_kind.k_var_decl || (global->ty != null &&
+        (global->ty->kind == types.type_kind.k_prim ||
+        global->ty->kind == types.type_kind.k_enum))) { return true; }
+    if (!charge_work(g, g->seeded_globals_len + 1)) { return false; }
+    u64 mut i = 0;
+    while (i < g->seeded_globals_len) {
+        if (g->seeded_globals[i] == global) { return true; }
+        i += 1;
+    }
+    reserve_seeded_globals(g);
+    g->seeded_globals[g->seeded_globals_len] = global;
+    g->seeded_globals_len += 1;
+    return seed_initializer(g, global->node->b);
 }
 
 fn source_at(graph* g, u32 body, fir.statement* instruction)
@@ -305,12 +435,27 @@ fn matches(fact* value, u32 body, fir.place slot, u32 field) bool {
         (value->field == field || value->field == ROOT - 1);
 }
 
+// The field that the first projection of a place selects, or ROOT when that projection is an
+// index or a dereference and can select any numbered field.
+fn first_field(fir.func* body, fir.place slot) u32 {
+    if (slot.proj_len == 0) { return ROOT; }
+    fir.projection p = fir.place_projection(body, slot, 0);
+    if (p.kind != fir.proj_kind.pj_field) { return ROOT; }
+    return p.field;
+}
+
 fn copy_place(graph mut* g, u32 from_body, fir.place source, u32 to_body,
     fir.place destination, u32 extra_field) bool {
     fir.func* src = g->bodies[from_body].body;
     fir.func* dst = g->bodies[to_body].body;
     u32 source_field = field_of(src, source);
     u32 destination_field = field_of(dst, destination);
+    // Rule 5: a copy keeps each key only for a function-typed slot or a whole value of one type.
+    // A member key of an aggregate needs a whole destination.
+    bool keyed = (extra_field == ROOT || destination_field == ROOT) &&
+        ((source_field == ROOT && destination_field == ROOT && extra_field == ROOT) ||
+        fir.place_type(src, source)->kind == types.type_kind.k_fn);
+    u32 selected = first_field(src, source);
     bool mut changed = false;
     if (source.base == fir.base_kind.bk_global || source_field == ROOT - 1 ||
         (source_field != ROOT && fir.type_aggregate(fir.place_type(src, source)))) {
@@ -321,10 +466,21 @@ fn copy_place(graph mut* g, u32 from_body, fir.place source, u32 to_body,
     u64 mut i = g->first_fact[cast(from_body, u64)];
     while (i != U64_MAX && i < count) {
         fact current = g->facts[i];
-        bool matched = source_field == ROOT ?
-            matches(&current, from_body, source, current.field) :
+        bool same = matches(&current, from_body, source, current.field);
+        bool matched = source_field == ROOT ? same :
             matches(&current, from_body, source, source_field);
+        // Rule 4: a read through an index, a dereference or a nested field copies no fact at a
+        // numbered field. Each such fact that the place can select leaves the graph's view.
+        if (same && !matched && source_field == ROOT - 1 &&
+            (selected == ROOT || current.field == selected)) {
+            foreign_body(g, current.value);
+            if (!ownership_api.successful(g->proof)) { return false; }
+        }
         if (matched) {
+            if (!keyed) {
+                foreign_body(g, current.value);
+                if (!ownership_api.successful(g->proof)) { return false; }
+            }
             fact mut next = place_fact(g, to_body, destination, current.value);
             if (extra_field != ROOT) { next.field = extra_field; }
             else if (destination_field == ROOT && source_field == ROOT) {
@@ -338,7 +494,7 @@ fn copy_place(graph mut* g, u32 from_body, fir.place source, u32 to_body,
             changed = add_fact(g, next) || changed;
             if (!ownership_api.successful(g->proof)) { return false; }
         }
-        i = g->facts[i].next;
+        i = current.next;
     }
     return changed;
 }
@@ -350,7 +506,14 @@ fn copy_operand(graph mut* g, u32 body, fir.operand source, u32 to_body,
     }
     if (source.value.kind != fir.const_kind.ck_fn) { return false; }
     fact mut value = place_fact(g, to_body, destination, target_of(g, source.value.sym));
-    if (field != ROOT) { value.field = field; }
+    if (field != ROOT) {
+        // Rule 5: a member key of an aggregate built into a projected place names no slot.
+        if (value.field != ROOT) {
+            foreign_body(g, value.value);
+            if (!ownership_api.successful(g->proof)) { return false; }
+        }
+        value.field = field;
+    }
     return add_fact(g, value);
 }
 
@@ -420,6 +583,105 @@ fn collect_callee(graph mut* g, call_site mut* call) bool {
         i = current.next;
     }
     return changed;
+}
+
+// Rules 2 and 3: an operand leaves the graph's view. Each exact fort identity that the operand
+// can hold becomes foreign-called. One W unit pays for each fact that the scan visits.
+fn foreign_operand(graph mut* g, u32 body, fir.operand value) void {
+    if (value.kind == fir.operand_kind.ok_const) {
+        if (value.value.kind == fir.const_kind.ck_fn) {
+            foreign_body(g, target_of(g, value.value.sym));
+        }
+        return;
+    }
+    u32 field = field_of(g->bodies[body].body, value.place);
+    u64 mut i = g->first_fact[cast(body, u64)];
+    while (i != U64_MAX && charge_work(g, 1)) {
+        fact current = g->facts[i];
+        bool matched = field == ROOT || field == ROOT - 1 ?
+            matches(&current, body, value.place, current.field) :
+            matches(&current, body, value.place, field);
+        if (matched) {
+            foreign_body(g, current.value);
+            if (!ownership_api.successful(g->proof)) { return; }
+        }
+        i = current.next;
+    }
+}
+
+// Rule 2: a foreign target and a residual target name no body that the graph sees, so no fact
+// follows an argument of such a call.
+fn foreign_arguments(graph mut* g, call_site* call) void {
+    bool mut foreign = call->residual_foreign || call->residual_fort;
+    u64 mut i = 0;
+    while (i < call->targets_len) {
+        foreign = foreign || call->targets[i].kind == target_kind.foreign;
+        i += 1;
+    }
+    if (!foreign) { return; }
+    u32 mut op = 0;
+    while (op < call->value.ops_len && ownership_api.successful(g->proof)) {
+        foreign_operand(g, call->body,
+            fir.rvalue_operand(g->bodies[call->body].body, call->value, op));
+        op += 1;
+    }
+}
+
+// Rule 3: a cast to a type that is not a function type erases the identity, or keys its fields
+// by another type. Both leave the graph's view. One W unit pays for each recorded cast.
+fn foreign_casts(graph mut* g) void {
+    u64 mut i = 0;
+    while (i < g->casts_len) {
+        g->active_operation = g->casts[i].position;
+        g->active_source = g->casts[i].source;
+        g->active_work = ownership_api.work_kind.transfer;
+        if (!charge_work(g, 1)) { return; }
+        foreign_operand(g, g->casts[i].body, g->casts[i].value);
+        // A refusal keeps the operation of its cast active.
+        if (!ownership_api.successful(g->proof)) { return; }
+        i += 1;
+    }
+}
+
+// Rule 7: a foreign caller can keep and call each exact identity in the result of a
+// foreign-called body. The order list grows during the scan, so the rule closes transitively.
+// One W unit pays for each fact that the scan visits.
+fn foreign_results(graph mut* g) void {
+    u64 mut next = 0;
+    while (next < g->foreign_len) {
+        u64 body = g->foreign_order[next];
+        next += 1;
+        g->active_operation = ownership_api.operation_position{g->bodies[body].key, 0, 0, false};
+        g->active_source = ownership_api.source_position{};
+        g->active_work = ownership_api.work_kind.transfer;
+        u64 mut i = g->first_fact[body];
+        while (i != U64_MAX) {
+            if (!charge_work(g, 1)) { return; }
+            fact current = g->facts[i];
+            if (current.base == fir.base_kind.bk_local && current.local == 0) {
+                foreign_body(g, current.value);
+                if (!ownership_api.successful(g->proof)) { return; }
+            }
+            i = current.next;
+        }
+    }
+}
+
+// The escape rules that read operands run once at the fixed point. A mark changes no fact.
+fn foreign_escapes(graph mut* g) void {
+    u64 mut call = 0;
+    while (call < g->calls_len && ownership_api.successful(g->proof)) {
+        g->active_operation = g->calls[call].position;
+        g->active_source = g->calls[call].source;
+        g->active_work = ownership_api.work_kind.substitution;
+        if (!charge_work(g, 1)) { return; }
+        foreign_arguments(g, &g->calls[call]);
+        call += 1;
+    }
+    if (!ownership_api.successful(g->proof)) { return; }
+    foreign_casts(g);
+    if (!ownership_api.successful(g->proof)) { return; }
+    foreign_results(g);
 }
 
 // Copies the arguments of `call` into the parameters of body `callee`, and the result of that
@@ -500,6 +762,20 @@ fn copy_statement(graph mut* g, u32 body, fir.statement* instruction) bool {
         changed = seed_unknown(g, body, instruction->place) || changed;
         return changed;
     }
+    if (value.kind == fir.rvalue_kind.rv_cast) {
+        if (fir.place_type(g->bodies[body].body, instruction->place)->kind ==
+            types.type_kind.k_fn) {
+            fir.operand source = fir.rvalue_operand(g->bodies[body].body, value, 0);
+            bool mut changed = copy_operand(g, body, source, body, instruction->place, ROOT);
+            if (!ownership_api.successful(g->proof)) { return false; }
+            if (fir.operand_type(g->bodies[body].body, source)->kind != types.type_kind.k_fn) {
+                changed = add_fact(g, place_fact(g, body, instruction->place,
+                    target{.kind = target_kind.residual_fort})) || changed;
+            }
+            return changed;
+        }
+        return false;
+    }
     if (value.kind == fir.rvalue_kind.rv_addr || value.kind == fir.rvalue_kind.rv_slice) {
         return seed_unknown(g, body, value.place);
     }
@@ -511,7 +787,53 @@ fn copy_statement(graph mut* g, u32 body, fir.statement* instruction) bool {
     return false;
 }
 
-fn collect_calls(graph mut* g) bool {
+// Rule 1 needs each addressed local before the first fact. An address or a slice names the
+// storage of a local when its place dereferences no pointer and indexes no span, and a slice
+// takes a fixed array (D17.18).
+fn names_storage(fir.func* f, fir.rvalue value) bool {
+    if ((value.kind != fir.rvalue_kind.rv_addr && value.kind != fir.rvalue_kind.rv_slice) ||
+        value.place.base != fir.base_kind.bk_local || fir.place_indirect(f, value.place)) {
+        return false;
+    }
+    return value.kind == fir.rvalue_kind.rv_addr ||
+        fir.place_type(f, value.place)->kind == types.type_kind.k_array;
+}
+
+fn expose_global(graph mut* g, fir.place slot) bool {
+    if (slot.base != fir.base_kind.bk_global) { return true; }
+    return seed_global(g, slot.global);
+}
+
+// Rule 6 scans the initializer of each global that a statement names, in a place, an operand
+// or a callee value. A terminator reads only conditions and check arguments.
+fn expose_statement(graph mut* g, u32 body, fir.statement* instruction) bool {
+    fir.func* f = g->bodies[body].body;
+    if (!expose_global(g, instruction->place)) { return false; }
+    if (instruction->kind != fir.stmt_kind.st_assign) { return true; }
+    fir.rvalue value = instruction->value;
+    if (names_storage(f, value)) {
+        if (!charge_work(g, 1)) { return false; }
+        g->addressed[g->local_first[cast(body, u64)] + cast(value.place.local, u64)] = true;
+    }
+    if ((value.kind == fir.rvalue_kind.rv_addr || value.kind == fir.rvalue_kind.rv_slice) &&
+        !expose_global(g, value.place)) { return false; }
+    if (value.kind == fir.rvalue_kind.rv_call && value.callee == fir.callee_kind.cl_value &&
+        value.callee_op.kind != fir.operand_kind.ok_const &&
+        !expose_global(g, value.callee_op.place)) { return false; }
+    u32 mut op = 0;
+    while (op < value.ops_len) {
+        fir.operand item = fir.rvalue_operand(f, value, op);
+        if (item.kind != fir.operand_kind.ok_const && !expose_global(g, item.place)) {
+            return false;
+        }
+        op += 1;
+    }
+    return true;
+}
+
+// One walk before the first fact records each call and each erased cast, marks each addressed
+// local, and scans each named initializer. A W unit pays for each record and each mark.
+fn collect_sites(graph mut* g) bool {
     u32 mut body = 0;
     while (cast(body, u64) < g->bodies.len) {
         fir.func* f = g->bodies[body].body;
@@ -520,12 +842,22 @@ fn collect_calls(graph mut* g) bool {
             u32 mut position = 0;
             while (position < fir.block_statement_count(f, block)) {
                 fir.statement* instruction = fir.block_statement(f, block, position);
+                g->active_operation = ownership_api.operation_position{
+                    g->bodies[body].key, block, position, false};
+                g->active_source = source_at(g, body, instruction);
+                g->active_work = ownership_api.work_kind.transfer;
+                if (!expose_statement(g, body, instruction)) { return false; }
+                if (instruction->kind == fir.stmt_kind.st_assign &&
+                    instruction->value.kind == fir.rvalue_kind.rv_cast &&
+                    fir.place_type(f, instruction->place)->kind != types.type_kind.k_fn) {
+                    if (!charge_work(g, 1)) { return false; }
+                    reserve_casts(g);
+                    g->casts[g->casts_len] = cast_site{g->active_operation, g->active_source,
+                        body, fir.rvalue_operand(f, instruction->value, 0)};
+                    g->casts_len += 1;
+                }
                 if (instruction->kind == fir.stmt_kind.st_assign &&
                     instruction->value.kind == fir.rvalue_kind.rv_call) {
-                    g->active_operation = ownership_api.operation_position{
-                        g->bodies[body].key, block, position, false};
-                    g->active_source = source_at(g, body, instruction);
-                    g->active_work = ownership_api.work_kind.transfer;
                     if (!charge_work(g, 1)) { return false; }
                     reserve_calls(g);
                     call_site mut call = call_site{};
@@ -611,7 +943,10 @@ fn step(graph mut* g) bool {
 }
 
 fn stabilize(graph mut* g) void {
-    while (ownership_api.successful(g->proof) && step(g)) {}
+    while (ownership_api.successful(g->proof)) {
+        g->stabilization_steps += 1;
+        if (!step(g)) { break; }
+    }
     if (!ownership_api.successful(g->proof)) { return; }
     bool mut missing = false;
     u64 mut i = 0;
@@ -624,8 +959,12 @@ fn stabilize(graph mut* g) void {
         i += 1;
     }
     if (missing) {
-        while (ownership_api.successful(g->proof) && step(g)) {}
+        while (ownership_api.successful(g->proof)) {
+            g->stabilization_steps += 1;
+            if (!step(g)) { break; }
+        }
     }
+    if (ownership_api.successful(g->proof)) { foreign_escapes(g); }
 }
 
 fn materialize(graph mut* g) void {
@@ -949,13 +1288,19 @@ fn build(body_input@ bodies, ownership_api.limit_table limits) graph {
     }
     g.first_fact = new(u64, bodies.len);
     g.last_fact = new(u64, bodies.len);
+    g.foreign_called = new(bool, bodies.len);
+    g.local_first = new(u64, bodies.len);
+    u64 mut locals = 0;
     i = 0;
     while (i < bodies.len) {
         g.first_fact[i] = U64_MAX;
         g.last_fact[i] = U64_MAX;
+        g.local_first[i] = locals;
+        locals += cast(fir.local_count(bodies[i].body), u64);
         i += 1;
     }
-    if (!collect_calls(&g)) { return g; }
+    g.addressed = new(bool, locals);
+    if (!collect_sites(&g)) { return g; }
     if (!seed_parameters(&g)) { return g; }
     stabilize(&g);
     if (ownership_api.successful(g.proof)) { materialize(&g); components(&g); }
@@ -1106,11 +1451,17 @@ fn free(graph mut* g) void {
         i += 1;
     }
     del(g->calls);
+    del(g->casts);
     del(g->facts);
     del(g->first_fact);
     del(g->last_fact);
     del(g->components);
     del(g->recursive);
+    del(g->foreign_called);
+    del(g->foreign_order);
+    del(g->seeded_globals);
+    del(g->local_first);
+    del(g->addressed);
     del(g->order);
     del(g->query_targets);
     *g = graph{};

@@ -148,7 +148,8 @@ struct context {
     // caller source: a place of a stable parameter, a `deref` and then fields.
     fir.place mut@ own loaded;
     u64 loaded_len;
-    // The switch of loaded sources (loaded_bound). The caller sets it before prepare.
+    // Call summaries bind each loaded-source entry requirement when this switch is set.
+    // A standalone FIR analysis leaves it clear.
     bool callers_bind_loaded;
     ownership_flow.step mut@ own steps;
     u64 steps_len;
@@ -2541,13 +2542,8 @@ fn loaded_statement(context* c, u32 block, u32 gap, fir.statement* s, u32 mut* d
     return *depth != U32_MAX;
 }
 
-// The switch of loaded sources: whether callers bind their requirement. A body that uses a
-// loaded source requires it live at entry, and the caller must satisfy that at each call
-// (fir.md 14, Calls). No caller checks it yet, so the switch is off in the compiler: the read
-// of each load stays the gap unknown_source in untracked_loads, and each loaded source is
-// unknown at entry. The calls increment turns the switch on through
-// ownership_source.context.callers_bind_loaded when its summaries record the requirement and
-// check it at each call. Then the source is live at entry and its read is no gap.
+// Call summaries bind the live-at-entry requirement of each loaded source. A standalone local
+// analysis has no summaries and keeps the source unbound (fir.md 14, Calls).
 fn loaded_bound(context* c) bool { return c->callers_bind_loaded; }
 
 // The symbolic caller source of the reference at the first `depth` projections of `p`, one for
@@ -2685,8 +2681,8 @@ fn untracked_loads(context mut* c) void {
             // callee, the place of a slice of a span or a `string`, a released place, and the
             // pointers that an address or the destination loads. Each read is a use. A clean
             // load from a parameter referent reads a reference whose caller source the step
-            // names (write_tracked_at): no write reached it, so that source is live there when
-            // callers bind its requirement (loaded_bound). Until then the read is the gap.
+            // names (write_tracked_at): no write reached it. The caller binds the live source
+            // requirement before the clean read.
             u32 mut depth = U32_MAX;
             bool loaded = loaded_bound(c) && loaded_statement(c, b, i, s, &depth);
             fir.read mut got = fir.read{};

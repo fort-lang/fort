@@ -4810,15 +4810,15 @@ fn argument_source(u32 param, argument@ args) u32 {
 // The value of callee exit value `v` in the caller. The caller imports each nullness fact that
 // the summary gives: a fact that the callee established or imported is imported here, and it
 // removes no path of the caller (D17.18).
-fn graft_value(context* c, state* s, value v, u32@ map, slot_key@ prefixes, argument@ args)
-    value {
-    value mut out = translate_value(c, s, v, map, prefixes, args);
+fn graft_value(context* c, state* s, state* entry, value v, u32@ map,
+    slot_key@ prefixes, argument@ args) value {
+    value mut out = translate_value(c, s, entry, v, map, prefixes, args);
     out.nullness = ownership_facts.import_nullness(out.nullness);
     return out;
 }
 
-fn translate_value(context* c, state* s, value v, u32@ map, slot_key@ prefixes, argument@ args)
-    value {
+fn translate_value(context* c, state* s, state* entry, value v, u32@ map,
+    slot_key@ prefixes, argument@ args) value {
     value mut out = v;
     out.param = NONE;
     // A view of exactly one parameter that held an address is that address in the caller.
@@ -4877,8 +4877,8 @@ fn translate_value(context* c, state* s, value v, u32@ map, slot_key@ prefixes, 
             cast(v.target.id, u64) < prefixes.len) {
             slot_key mut k = slot_key{};
             if (rebase(prefixes[cast(v.target.id, u64)], v.target.depth, v.target.path, &k)) {
-                u64 at = find_slot(s, k);
-                if (at != U64_MAX) { return s->slots[at].v; }
+                u64 at = find_slot(entry, k);
+                if (at != U64_MAX) { return entry->slots[at].v; }
             }
         }
         return v.exact ? effect_value() : unknown_value();
@@ -5494,7 +5494,7 @@ fn apply(context mut* c, state mut* s, state* entry, callee* target, argument@ a
             if (fresh_cell) {
                 slot mut copy = item;
                 copy.key.id = owner;
-                copy.v = graft_value(c, s, item.v, map[..], prefixes[..], now[..]);
+                copy.v = graft_value(c, s, entry, item.v, map[..], prefixes[..], now[..]);
                 u64 at = find_slot(s, copy.key);
                 if (at == U64_MAX) {
                     push_slot(s, copy);
@@ -5516,8 +5516,8 @@ fn apply(context mut* c, state mut* s, state* entry, callee* target, argument@ a
         want.path = out->items[i].path;
         u64 at = find_slot(&sum->post, want);
         if (at != U64_MAX) {
-            out->items[i].v = graft_value(c, s, sum->post.slots[at].v, map[..], prefixes[..],
-                now[..]);
+            out->items[i].v = graft_value(c, s, entry, sum->post.slots[at].v, map[..],
+                prefixes[..], now[..]);
         } else if (out->items[i].owning) {
             out->items[i].v = empty_value();
         } else if (is_reference(out->items[i].ty)) {
@@ -5540,7 +5540,8 @@ fn apply(context mut* c, state mut* s, state* entry, callee* target, argument@ a
                 // A borrowed array slot takes the exit value that stands for each element.
                 if (at != U64_MAX && (!s->slots[at].array || !s->slots[at].owning)) {
                     slot_of_write[j] = at;
-                    written[j] = graft_value(c, s, item.v, map[..], prefixes[..], now[..]);
+                    written[j] = graft_value(c, s, entry, item.v, map[..], prefixes[..],
+                        now[..]);
                 }
             }
         }

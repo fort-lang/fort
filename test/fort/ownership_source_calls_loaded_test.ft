@@ -1,0 +1,112 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| unsafe callers ok
+//| safe callers ok
+//| readers ok
+/// Tests the calls_heap rows of loaded-source callers in a closure (D17.15, D17.18). A callee
+/// loads a pointer from caller storage and reads through it, so the caller must keep the
+/// referent live at the call. A wrapper passes that requirement on. No row of an unsafe caller
+/// proves, and no row gives a violation, because no event validates the read.
+import ownership_api;
+import ownership_source;
+import ownership_source_calls;
+import ownership_source_env;
+import std.strbuf;
+
+string[21] SOURCE = {
+    "struct cell { i64 a; }",
+    "struct ph { cell* p; }",
+    "ph mut GPH = ph{null};",
+    "fn read2(ph* h) i64 { i64* q = &h->p->a; return *q; }",
+    "fn wrap(ph* h) i64 { return read2(h); }",
+    "fn wrap2(ph* h) i64 { return wrap(h); }",
+    "fn pick(ph* h) cell* { return h->p; }",
+    "fn good() i64 { cell mut* own b = new(cell); ph h = ph{b}; i64 r = read2(&h); del(b);",
+    "    return r; }",
+    "fn good_wrap() i64 { cell mut* own b = new(cell); ph h = ph{b}; i64 r = wrap(&h); del(b);",
+    "    return r; }",
+    "fn good_pick() i64 { cell mut* own b = new(cell); ph h = ph{b}; cell* c = pick(&h);",
+    "    i64 r = c->a; del(b); return r; }",
+    "fn bad() i64 { cell mut* own b = new(cell); ph h = ph{b}; del(b); return read2(&h); }",
+    "fn bad_wrap() i64 { cell mut* own b = new(cell); ph h = ph{b}; del(b); return wrap(&h); }",
+    "fn bad_wrap2() i64 { cell mut* own b = new(cell); ph h = ph{b}; del(b);",
+    "    return wrap2(&h); }",
+    "fn bad_pick() i64 { cell mut* own b = new(cell); ph h = ph{b}; cell* c = pick(&h);",
+    "    del(b); return c->a; }",
+    "fn null_holder() i64 { ph h = ph{null}; return read2(&h); }",
+    "fn bad_global() i64 { cell mut* own b = new(cell); GPH.p = b; del(b); return read2(&GPH); }",
+};
+
+fn open(ownership_source_env.env mut* e) void {
+    ownership_source_env.open(e);
+    ownership_source_env.runtime(e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    for (string line : SOURCE) {
+        strbuf.append(&text, line);
+        strbuf.push(&text, '\n');
+    }
+    strbuf.append(&text, "fn root() i32 { return 0; }\n");
+    assert(ownership_source_env.prepare(e, strbuf.view(&text)));
+    ownership_source.analyze(&e->source);
+    assert(e->source.graph_built && ownership_api.successful(e->source.graph.proof));
+}
+
+fn calls(ownership_source_env.env mut* e, string name) ownership_source_calls.row* {
+    ownership_source_calls.row* found = ownership_source_env.find(e, "main", name)->calls;
+    if (found == null || found->violations != 0) {
+        eprintln(name, ": no row or a violation");
+        assert(false);
+    }
+    return found;
+}
+
+// Each unsafe caller releases the referent before a callee reads it, directly, through one or
+// two wrappers, through a returned pointer, through a null holder, or through a global.
+fn unsafe_callers(ownership_source_env.env mut* e) void {
+    string[6] names = {"bad", "bad_wrap", "bad_wrap2", "bad_pick", "null_holder", "bad_global"};
+    for (string name : names) {
+        ownership_source_calls.row* found = calls(e, name);
+        if (ownership_api.successful(found->proof) ||
+            found->proof.kind != ownership_api.proof_kind.incomplete) {
+            eprintln(name, ": proved");
+            assert(false);
+        }
+    }
+    println("unsafe callers ok");
+}
+
+// Each safe caller keeps the referent live over the read. Its row gives no violation.
+fn safe_callers(ownership_source_env.env mut* e) void {
+    string[3] names = {"good", "good_wrap", "good_pick"};
+    for (string name : names) { calls(e, name); }
+    println("safe callers ok");
+}
+
+// No body here exposes a function identity, so no body is foreign-called. The reader proves
+// in the summary solver alone: its requirement names the loaded source of `h->p`.
+fn readers(ownership_source_env.env mut* e) void {
+    u64 mut i = 0;
+    while (i < e->source.bodies.len) {
+        if (e->source.bodies[i].module->path == "main") {
+            assert(!e->source.graph.foreign_called[i]);
+        }
+        i += 1;
+    }
+    ownership_source_calls.row* reader = calls(e, "read2");
+    assert(reader->summary_proved && ownership_api.successful(reader->summary_proof));
+    string[3] wrappers = {"wrap", "wrap2", "pick"};
+    for (string name : wrappers) { calls(e, name); }
+    println("readers ok");
+}
+
+fn main() i32 {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    open(&e);
+    unsafe_callers(&e);
+    safe_callers(&e);
+    readers(&e);
+    ownership_source_env.close(&e);
+    return 0;
+}
