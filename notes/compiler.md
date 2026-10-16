@@ -2139,6 +2139,16 @@ came here.
   value.
   Typed local reads require the original source window and actual type alignment.
   Reference inspection does not prove a designated-storage read.
+  A projected span or string header read first uses its local reference base in body flow
+  (`read_projection_base`). A released or moved base then fails before the header read (D17.14).
+  The base use adds a live requirement on the origin of the base. Projected loads and moves use
+  the current-base check of `load_reference` instead.
+  A function value is scalar contents. Seeding, assignment, and a cast give it no data source.
+  A direct data-reference cast to a function value inspects the operand, so null converts without
+  an element use. A projected operand is a temporal read. An addressed function slot keeps stack
+  storage until its storage ends, and a source-free root skips call storage seeding and teardown.
+  No string literal and no fixed-array or partial slice has a summary rule. Each stays
+  `unknown_effect` at its operation.
   Inferred extent requirements guard private symbolic caller reads.
   Their exported typed effect still checks the actual caller representation.
   `ownership_calls.apply` applies the ordered case to a separate caller-state owner.
