@@ -16,6 +16,7 @@
 //| graph refusals
 //| empty closure
 //| event order
+//| sole candidates
 //| calls ok
 /// Checks the calls_heap rows that the summary solver and the heap solver give together.
 import ownership_api;
@@ -27,6 +28,7 @@ import ownership_source_calls;
 import ownership_source_calls_env;
 import ownership_source_local;
 import ownership_summary_model;
+import ownership_witness;
 
 string[18] TEXT = {
     "struct node { node mut* own next; i32 v; }",
@@ -156,18 +158,19 @@ fn ledgers() void {
         ownership_source_calls.solver_kind.heap)->meter.used.v == 2);
 }
 
-// No event is a violation. A definite failure of either solver is incomplete proof at the
-// first kept event of that solver. The summary solver gives the terminal first.
+// The one-body checker validates the direct leak. Other candidates stay incomplete proof.
 fn events_are_incomplete_proof() void {
     println("events are incomplete proof");
     ownership_source_calls_env.closure mut c = ownership_source_calls_env.closure{};
     defer ownership_source_calls_env.close(&c);
     ownership_source_calls_env.run(&c, TEXT[..], NAMES[..]);
     u64 mut i = 0;
+    u64 mut violations = 0;
     while (i < c.calls.rows.len) {
-        assert(c.calls.rows[i].violations == 0);
+        violations += c.calls.rows[i].violations;
         i += 1;
     }
+    assert(violations == 1);
     // The leak fails the summary solver definitely and is a heap candidate; the storage end of
     // `p` is the first event of each, and the summary solver gives it.
     ownership_source_calls.row* leak = ownership_source_calls_env.row_of(&c, "leak");
@@ -181,7 +184,9 @@ fn events_are_incomplete_proof() void {
     assert(leak->first_heap.source.line == 4);
     assert(at(leak->proof, 4, 45));
     assert(leak->proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
-    assert(ownership_source_calls_env.verdict(&c, "leak") == "unproved");
+    assert(leak->violations == 1 && leak->witness.conditions_len == 0);
+    assert(leak->witness.verdict == ownership_witness.status.validated);
+    assert(ownership_source_calls_env.verdict(&c, "leak") == "failed");
     assert(complete(leak->correspondence) && complete(leak->solver));
     // The summary solver proves a shallow release; the heap solver gives a candidate there.
     ownership_source_calls.row* shallow = ownership_source_calls_env.row_of(&c, "shallow");
@@ -192,6 +197,7 @@ fn events_are_incomplete_proof() void {
     assert(shallow->proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
     assert(shallow->proof.terminal.operation.function.declaration.declaration ==
         cast(ownership_source_calls_env.index(&c, "shallow") + 1, u32));
+    assert(shallow->witness.verdict == ownership_witness.status.rejected);
     assert(ownership_source_calls_env.verdict(&c, "shallow") == "unproved");
     // A read after a release in a callee fails both solvers; it stays incomplete proof.
     ownership_source_calls.row* after = ownership_source_calls_env.row_of(&c, "reads_after");
@@ -807,6 +813,43 @@ fn event_order() void {
     assert(!ownership_source_calls.before(&a, &a));
 }
 
+// A branch note may claim that the other arms miss the event only for a sole candidate: it names
+// an allocation, and no heap candidate of the body at another operation names that allocation.
+// One event that a solver gives twice is still one candidate. The direct leak is sole.
+fn sole_candidates() void {
+    println("sole candidates");
+    ownership_source_calls_env.closure mut c = ownership_source_calls_env.closure{};
+    defer ownership_source_calls_env.close(&c);
+    ownership_source_calls_env.run(&c, TEXT[..], NAMES[..]);
+    ownership_source_calls.row* leak = ownership_source_calls_env.row_of(&c, "leak");
+    assert(leak->heap_sole && leak->heap_sites_len >= 1);
+    ownership_api.entity_id owner = ownership_api.entity_id{
+        .kind = ownership_api.entity_kind.allocation, .ordinal = 2};
+    ownership_api.operation_position at = ownership_api.operation_position{.block = 1};
+    ownership_api.operation_position other = ownership_api.operation_position{.block = 2};
+    ownership_source_calls.row mut r = ownership_source_calls.row{};
+    r.heap_event.relation = owner;
+    r.heap_event.operation = at;
+    r.heap_sites = new(ownership_source_calls.candidate_site, 3);
+    defer del(r.heap_sites);
+    r.heap_sites[0] = ownership_source_calls.candidate_site{owner, at};
+    r.heap_sites_len = 1;
+    assert(ownership_source_calls.sole_candidate(&r));
+    r.heap_sites[1] = ownership_source_calls.candidate_site{owner, at};
+    r.heap_sites_len = 2;
+    assert(ownership_source_calls.sole_candidate(&r));
+    ownership_api.entity_id another = ownership_api.entity_id{
+        .kind = ownership_api.entity_kind.allocation, .ordinal = 3};
+    r.heap_sites[2] = ownership_source_calls.candidate_site{another, other};
+    r.heap_sites_len = 3;
+    assert(ownership_source_calls.sole_candidate(&r));
+    r.heap_sites[2] = ownership_source_calls.candidate_site{owner, other};
+    assert(!ownership_source_calls.sole_candidate(&r));
+    r.heap_sites_len = 1;
+    r.heap_event.relation.kind = ownership_api.entity_kind.none;
+    assert(!ownership_source_calls.sole_candidate(&r));
+}
+
 fn main() i32 {
     proved_rows();
     ledgers();
@@ -823,6 +866,7 @@ fn main() i32 {
     graph_refusals();
     empty_closure();
     event_order();
+    sole_candidates();
     println("calls ok");
     return 0;
 }

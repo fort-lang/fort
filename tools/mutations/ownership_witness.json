@@ -1,0 +1,521 @@
+{
+  "comment": [
+    "One row for each decision of the one-body ownership witness checker.",
+    "The stages compile the checker test, its producer test, and its report test.",
+    "Run this table in a Linux VM or on a native host after a debug build."
+  ],
+  "sources": [
+    "src/fort/ownership_witness.ft",
+    "src/fort/ownership_source_calls.ft",
+    "src/fort/ownership_report.ft",
+    "src/fort/ownership_source.ft"
+  ],
+  "binary": "build/$(uname -s)/debug/witness-mutate/ownership_witness_test",
+  "build": "mkdir -p build/$(uname -s)/debug/witness-mutate && cd test/fort && ../../build/$(uname -s)/debug/fort -I ../../src/fort -I support ownership_witness_test.ft -o ../../build/$(uname -s)/debug/witness-mutate/ownership_witness_test",
+  "stages": [
+    {
+      "name": "checker",
+      "command": "build/$(uname -s)/debug/witness-mutate/ownership_witness_test"
+    },
+    {
+      "name": "producer",
+      "command": "cd test/fort && ../../build/$(uname -s)/debug/fort -I ../../src/fort -I support ownership_source_calls_test.ft -o ../../build/$(uname -s)/debug/witness-mutate/ownership_source_calls_test && ../../build/$(uname -s)/debug/witness-mutate/ownership_source_calls_test"
+    },
+    {
+      "name": "report",
+      "command": "cd test/fort && ../../build/$(uname -s)/debug/fort -I ../../src/fort -I support ownership_report_calls_test.ft -o ../../build/$(uname -s)/debug/witness-mutate/ownership_report_calls_test && ../../build/$(uname -s)/debug/witness-mutate/ownership_report_calls_test"
+    }
+  ],
+  "mutations": [
+    {
+      "decision": "D17.18-witness-limit",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    if (s->used >= bound) {",
+      "new": "    if (s->used > bound) {",
+      "what": "a witness uses one step after its X bound"
+    },
+    {
+      "decision": "D17.18-null-stops",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "            if (pointer.kind == value_kind.null_value) {\n                return place_result{.resolved = true, .invalid = true, .key = key, .ty = ty,\n                    .invalid_allocation = NONE};\n            }",
+      "new": "            if (pointer.kind == value_kind.null_value) {\n                return place_result{.resolved = true, .key = key, .ty = ty,\n                    .invalid_allocation = NONE};\n            }",
+      "what": "a null dereference lets the witness continue"
+    },
+    {
+      "decision": "D17.18-established-roots-only",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    return v.entry_root.how == ownership_facts.provenance.established &&\n        v.entry_root.value == root;",
+      "new": "    return v.entry_root.value == root;",
+      "what": "an assumed or imported root decides a path"
+    },
+    {
+      "decision": "D17.18-call-stops-core",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    if (stmt->value.kind == fir.rvalue_kind.rv_call) {\n        s->stopped = true;\n        return false;\n    }",
+      "new": "    if (stmt->value.kind == fir.rvalue_kind.rv_call) {\n        return false;\n    }",
+      "what": "the one-body checker continues across a call"
+    },
+    {
+      "decision": "D17.18-cast-stops-core",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    if (r.kind == fir.rvalue_kind.rv_cast) {\n        // A cast can change the bytes that a later load observes. This core has no byte state.\n        s->stopped = true;\n        return value{};\n    }",
+      "new": "    if (r.kind == fir.rvalue_kind.rv_cast) {\n        return a;\n    }",
+      "what": "the exact path preserves a value through an unsupported cast"
+    },
+    {
+      "decision": "D17.18-candidate-position",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    return op.block == block && op.operation == operation && op.terminator == terminator;",
+      "new": "    return op.block == block && op.terminator == terminator;",
+      "what": "a different operation satisfies the candidate"
+    },
+    {
+      "decision": "D17.18-input-branch-condition",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    if (!add_condition(s, condition{.kind = condition_kind.input_branch,",
+      "new": "    if (!add_condition(s, condition{.kind = condition_kind.check_passes,",
+      "what": "an undecided input branch gets the wrong condition kind"
+    },
+    {
+      "decision": "D17.18-check-condition",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    return add_condition(s, condition{.kind = condition_kind.check_passes,",
+      "new": "    return add_condition(s, condition{.kind = condition_kind.input_branch,",
+      "what": "an undecided kept check gets the wrong condition kind"
+    },
+    {
+      "decision": "D17.18-nonnull-condition",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    return add_condition(s, condition{.kind = condition_kind.nonnull,",
+      "new": "    return add_condition(s, condition{.kind = condition_kind.input_branch,",
+      "what": "an undecided dereference gets the wrong condition kind"
+    },
+    {
+      "decision": "D17.18-loop-stop",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    if (fir_flow.bits_get(&s->passed, block)) { return false; }",
+      "new": "    if (false && fir_flow.bits_get(&s->passed, block)) { return false; }",
+      "what": "the one-body checker enters one block twice"
+    },
+    {
+      "decision": "D17.18-decided-check",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "        return (cond.constant_value.mag == 1) == success;",
+      "new": "        return (cond.constant_value.mag == 1) != success;",
+      "what": "a decided kept check takes its failing outcome"
+    },
+    {
+      "decision": "D17.18-storage-end-loss",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "            return lost;",
+      "new": "            return false;",
+      "what": "a storage end validates no lost owner"
+    },
+    {
+      "decision": "D17.18-typed-wrapping-arithmetic",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "        *out = consts.cv_wrap_add(a, b, ty->prim);\n        return true;",
+      "new": "        return consts.cv_add(a, b, out);",
+      "what": "wrapping addition ignores the integer width"
+    },
+    {
+      "decision": "D17.18-switch-label-identity",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "        } else if (!pick_choice(s, cond.param, fir.term_arm(f, term, selected).value)) {",
+      "new": "        } else if (!pick_entry(s, cond, fir.term_arm(f, term, selected).value.mag != 0)) {",
+      "what": "distinct integer switch labels become one Boolean choice"
+    },
+    {
+      "decision": "D17.18-switch-otherwise-exclusions",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "                if (!exclude_choice(s, cond.param, fir.term_arm(f, term, i).value)) {",
+      "new": "                if (false && !exclude_choice(s, cond.param, fir.term_arm(f, term, i).value)) {",
+      "what": "an otherwise arm does not exclude its explicit labels"
+    },
+    {
+      "decision": "D17.18-candidate-field-identity",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "            live_obligation(s, item.contents) && candidate_field(s, owner, item)) { return true; }",
+      "new": "            live_obligation(s, item.contents)) { return true; }",
+      "what": "a live sibling field validates another field candidate"
+    },
+    {
+      "decision": "D17.18-producer-validation",
+      "file": "src/fort/ownership_source_calls.ft",
+      "old": "            if (c->rows[i].witness.verdict == ownership_witness.status.validated) {\n                c->rows[i].violations = 1;\n            }",
+      "new": "            if (c->rows[i].witness.verdict == ownership_witness.status.rejected) {\n                c->rows[i].violations = 1;\n            }",
+      "what": "the producer counts a rejected witness as a violation"
+    },
+    {
+      "decision": "D17.18-event-text-lifetime",
+      "file": "src/fort/ownership_source_calls.ft",
+      "old": "            r->heap_event.text = cast(r->heap_text[..], string);",
+      "new": "            r->heap_event.text = \"\";",
+      "what": "the report loses the copied candidate subject"
+    },
+    {
+      "decision": "D17.18-aggregate-store-replaces-projections",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    if (s->stopped) { return false; }\n    slot_at(s, to, ty)->contents = leaf;",
+      "new": "    if (s->stopped) { return false; }\n    slot_at(s, to, ty);",
+      "what": "a whole aggregate copy keeps stale destination leaves"
+    },
+    {
+      "decision": "D17.18-entry-pointer-alias-identity",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "                    root = s->entry_allocations[cast(pointer.param, u64)];",
+      "new": "                    root = add_allocation(s, false, false, NONE);",
+      "what": "a copied entry pointer gets a different referent"
+    },
+    {
+      "decision": "D17.18-exhaustive-otherwise",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "            if (exclusions_cover(s, cond.param)) { return false; }",
+      "new": "            if (false && exclusions_cover(s, cond.param)) { return false; }",
+      "what": "an otherwise path remains feasible after complete typed exclusions"
+    },
+    {
+      "decision": "D17.18-nested-nonnull-prefix",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "        .pointer_body = s->input->body, .pointer_place = p, .pointer_prefix = prefix});",
+      "new": "        .pointer_body = s->input->body, .pointer_place = p, .pointer_prefix = 0});",
+      "what": "a nested nonnull note loses its complete pointer prefix"
+    },
+    {
+      "decision": "D17.18-return-transfers-descendants",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "                returned[cast(item.key.root, u64)] && owning(item.ty) &&",
+      "new": "                false && returned[cast(item.key.root, u64)] && owning(item.ty) &&",
+      "what": "a returned owner does not transfer its owned descendants"
+    },
+    {
+      "decision": "D17.18-storage-end-candidate-field",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    return strbuf.view(&text) == s->input->candidate->text;\n}\n\n// Whether releasing allocation `root` loses the live owned field that the candidate names.",
+      "new": "    return true;\n}\n\n// Whether releasing allocation `root` loses the live owned field that the candidate names.",
+      "what": "a storage-end match accepts a sibling owner field"
+    },
+    {
+      "decision": "D17.18-selected-branch-outcome",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "        .outcome = \"\", .input = true, .selected = selection, .selected_value = selected_value,",
+      "new": "        .outcome = \"\", .input = true, .selected = branch_selection.none,\n        .selected_value = selected_value,",
+      "what": "a branch note loses its selected outcome"
+    },
+    {
+      "decision": "D17.18-unsupported-rvalue-stops",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    if (!implemented_binary(r.kind)) { s->stopped = true; return value{}; }",
+      "new": "    if (false && !implemented_binary(r.kind)) { s->stopped = true; return value{}; }",
+      "what": "an unsupported binary rvalue keeps the path active"
+    },
+    {
+      "decision": "D17.18-fresh-scalar-zero",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "        s->allocations[cast(key.root, u64)].fresh) { return typed_zero(ty); }",
+      "new": "        s->allocations[cast(key.root, u64)].fresh) { return value{}; }",
+      "what": "a fresh scalar allocation loses its typed zero"
+    },
+    {
+      "decision": "D17.18-aggregate-zero-leaves",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "        return nearest.kind == value_kind.zero_aggregate ? typed_zero(ty) : value{};",
+      "new": "        return value{};",
+      "what": "a zeroed aggregate loses its zeroed reference leaves"
+    },
+    {
+      "decision": "D17.18-address-allocation-lifetime",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "                    if (backing >= s->allocations_len || !s->allocations[backing].live) {",
+      "new": "                    if (false && (backing >= s->allocations_len || !s->allocations[backing].live)) {",
+      "what": "an address can read a released allocation"
+    },
+    {
+      "decision": "D17.18-address-local-lifetime",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "                    if (backing >= s->local_live.len || !s->local_live[backing]) {",
+      "new": "                    if (false && (backing >= s->local_live.len || !s->local_live[backing])) {",
+      "what": "an address can read local storage after its end"
+    },
+    {
+      "decision": "D17.18-invalid-source-identity",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    if (s->input->candidate->text.len > 0 && key.kind == storage_kind.local) {\n        return candidate_key(s, key);\n    }",
+      "new": "    if (s->input->candidate->text.len > 0 && key.kind == storage_kind.local) {\n        return true;\n    }",
+      "what": "an invalid read matches a candidate for another allocation"
+    },
+    {
+      "decision": "D17.18-return-allocation-identity",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "            !returned[i] && candidate_allocation(s, cast(i, u32))) { return true; }",
+      "new": "            !returned[i]) { return true; }",
+      "what": "a return loss matches another residual allocation"
+    },
+    {
+      "decision": "D17.18-typed-boolean-zero",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "        return typed_constant(ty, consts.cv_from_bool(false));",
+      "new": "        return value{.kind = value_kind.constant, .constant_value = consts.cv_from_u64(0),\n            .ty = ty};",
+      "what": "a zero Boolean holds an integer constant"
+    },
+    {
+      "decision": "D17.18-typed-comparison",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "        if (!typed(a) || !typed(b) || !same_prim(a.ty, b.ty)) {",
+      "new": "        if (false) {",
+      "what": "a comparison accepts constants without their FIR type"
+    },
+    {
+      "decision": "D17.18-boolean-order-stops",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    if (boolean && !equality_kind(kind)) { s->stopped = true; return value{}; }",
+      "new": "    if (false) { s->stopped = true; return value{}; }",
+      "what": "an ordering comparison of Boolean constants reaches the integer order"
+    },
+    {
+      "decision": "D17.18-equal-identity-compares",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    if (same_identity(a, b)) { return typed_constant(result, consts.cv_from_bool(reflexive(rel))); }",
+      "new": "    if (false && same_identity(a, b)) {\n        return typed_constant(result, consts.cv_from_bool(reflexive(rel)));\n    }",
+      "what": "two equal exact operands do not compare by their value"
+    },
+    {
+      "decision": "D17.18-inexact-comparison-stops",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "            .relation_value = rel, .constant_value = b.constant_value};\n    }\n    s->stopped = true;\n    return value{};",
+      "new": "            .relation_value = rel, .constant_value = b.constant_value};\n    }\n    return value{};",
+      "what": "an inexact comparison gives an unknown result and keeps the path"
+    },
+    {
+      "decision": "D17.18-nearest-ancestor-default",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "        if (below(s->slots[i].key, key) && (!found || s->slots[i].key.depth > depth)) {",
+      "new": "        if (below(s->slots[i].key, key) && (!found || s->slots[i].key.depth < depth)) {",
+      "what": "an older ancestor decides the default of a slot"
+    },
+    {
+      "decision": "D17.18-copy-reads-leaf-identity",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    value leaf = stored_value(s, from, ty);",
+      "new": "    value leaf = slot_at(s, from, ty)->contents;",
+      "what": "a copied unknown reference gets a referent apart from its source"
+    },
+    {
+      "decision": "D17.18-first-invalid-read",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "            if (candidate && s->input->candidate->kind == ownership_api.event_kind.invalid_use) {\n                return candidate_invalid_source(s, s->invalid_key, s->invalid_allocation);\n            }\n            s->stopped = true;\n            return false;\n        }\n        read += 1;",
+      "new": "            if (candidate && s->input->candidate->kind == ownership_api.event_kind.invalid_use &&\n                candidate_invalid_source(s, s->invalid_key, s->invalid_allocation)) {\n                return true;\n            }\n            read += 1;\n            continue;\n        }\n        read += 1;",
+      "what": "a statement reads on after its first invalid read"
+    },
+    {
+      "decision": "D17.18-invalid-address-stops",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "        if (!got.resolved || got.invalid) { s->stopped = true; return value{}; }",
+      "new": "        if (!got.resolved || got.invalid) { return value{}; }",
+      "what": "an address of invalid storage becomes a free pointer"
+    },
+    {
+      "decision": "D17.18-validated-record-shows",
+      "file": "src/fort/ownership_source_calls.ft",
+      "old": "    return r->violations > 0 || (r->correspondence == ownership_source_local.status.complete &&\n        !ownership_api.successful(r->proof));",
+      "new": "    return (r->correspondence == ownership_source_local.status.complete &&\n        !ownership_api.successful(r->proof));",
+      "what": "a later call without callee facts hides a validated violation"
+    },
+    {
+      "decision": "D17.18-input-alias-read-stops",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "fn stored_value(exact_state mut* s, storage_key key, types.node* ty) value {\n    if (!input_read(s, key)) { return value{}; }",
+      "new": "fn stored_value(exact_state mut* s, storage_key key, types.node* ty) value {\n    if (false) { return value{}; }",
+      "what": "a read of input storage keeps its value after a store through another referent"
+    },
+    {
+      "decision": "D17.18-input-pointer-load-stops",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "            if (!input_read(s, key)) { return place_result{}; }\n            slot mut* owner = slot_at(s, key, ty);",
+      "new": "            slot mut* owner = slot_at(s, key, ty);",
+      "what": "a pointer load out of input storage keeps its value after a store through another referent"
+    },
+    {
+      "decision": "D17.18-input-read-own-referent",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    if (!s->stored_many && s->stored_root == key.root) { return true; }",
+      "new": "    if (false) { return true; }",
+      "what": "a read of input storage stops after a store through the same referent"
+    },
+    {
+      "decision": "D17.18-input-store-write",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    if (!got.resolved || got.invalid) { return false; }\n    input_store(s, got.key);",
+      "new": "    if (!got.resolved || got.invalid) { return false; }",
+      "what": "a write through an input records no store"
+    },
+    {
+      "decision": "D17.18-input-store-copy",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "        input_store(s, to);\n        slot_at(s, to, ty)->contents = value{};\n        return true;\n    }\n    if (ty->kind == types.type_kind.k_array) {",
+      "new": "        slot_at(s, to, ty)->contents = value{};\n        return true;\n    }\n    if (ty->kind == types.type_kind.k_array) {",
+      "what": "a copy into input storage records no store"
+    },
+    {
+      "decision": "D17.18-input-store-zero",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "fn zero_store(exact_state mut* s, storage_key key, types.node* ty) void {\n    input_store(s, key);",
+      "new": "fn zero_store(exact_state mut* s, storage_key key, types.node* ty) void {",
+      "what": "a zero store into input storage records no store"
+    },
+    {
+      "decision": "D17.18-input-store-release",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "            a->obligation = false;\n            input_store(s, released);",
+      "new": "            a->obligation = false;",
+      "what": "a release of input storage records no store"
+    },
+    {
+      "decision": "D17.18-address-records-nothing",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "            if (i == computed && pointer.kind != value_kind.allocation &&\n                pointer.kind != value_kind.address) { return place_result{}; }",
+      "new": "            if (false) { return place_result{}; }",
+      "what": "an address computation records a non-null condition and decides its base"
+    },
+    {
+      "decision": "D17.18-return-input-storage",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "        bool visible = (item.key.kind == storage_kind.local && item.key.root == 0) ||\n            input_storage(s, item.key);",
+      "new": "        bool visible = (item.key.kind == storage_kind.local && item.key.root == 0);",
+      "what": "an owner in input storage does not transfer at a return"
+    },
+    {
+      "decision": "D17.18-owning-old-value",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    if (owning(fir.place_type(f, stmt->place))) {\n        bool mut old_invalid = false;",
+      "new": "    if (true) {\n        bool mut old_invalid = false;",
+      "what": "a non-owning overwrite loses its old value"
+    },
+    {
+      "decision": "D17.18-ruled-branch-text",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "string BRANCH_HOLDS = \"the condition here to hold\";\nstring BRANCH_OTHER = \"; the other arm does not reach \";",
+      "new": "string BRANCH_HOLDS = \"the condition here to be true\";\nstring BRANCH_OTHER = \"; the false arm does not reach \";",
+      "what": "the true arm renders other words than the ruled input-branch row"
+    },
+    {
+      "decision": "D17.18-copy-leaf-step",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    if (!charge(s)) { return false; }\n    value leaf = stored_value(s, from, ty);",
+      "new": "    value leaf = stored_value(s, from, ty);",
+      "what": "a leaf of a whole aggregate copy pays no X step"
+    },
+    {
+      "decision": "D17.18-unassumed-checks-stop",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    if (!permitted) { return false; }",
+      "new": "    if (false) { return false; }",
+      "what": "an undecided overflow, shift or overwrite check passes with a condition"
+    },
+    {
+      "decision": "D17.18-aggregate-literal-stops",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    if (r.kind != fir.rvalue_kind.rv_use || r.ops_len != 1) { s->stopped = true; return; }",
+      "new": "    if (r.kind != fir.rvalue_kind.rv_use || r.ops_len != 1) { return; }",
+      "what": "an aggregate literal store keeps the path active"
+    },
+    {
+      "decision": "D17.18-duplicate-selection",
+      "file": "src/fort/ownership_source.ft",
+      "old": "        if (executed && c->calls.rows[i].violations > 0 &&\n            repeated(&c->bodies[i], &c->calls.rows[i].heap_event)) {",
+      "new": "        if (false) {",
+      "what": "the calls_heap row counts a loss that an earlier analysis already gives"
+    },
+    {
+      "decision": "D17.18-overwrite-check-stops",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "            if (bad || owner.kind != value_kind.null_value) { return false; }",
+      "new": "            if (bad) { return false; }",
+      "what": "a live owner passes the overwrite check"
+    },
+    {
+      "decision": "D17.18-owning-copy-stops",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    if (types.type_is_owning_aggregate(fir.place_type(f, from.place))) {\n        s->stopped = true;\n        return;\n    }\n    place_result source",
+      "new": "    place_result source",
+      "what": "the copy of an owning aggregate keeps the path active"
+    },
+    {
+      "decision": "D17.18-duplicate-kind",
+      "file": "src/fort/ownership_source.ft",
+      "old": "    if (v->kind != e->kind || !v->quoted || ownership_keys.source(v->source, e->source) != 0) {",
+      "new": "    if (!v->quoted || ownership_keys.source(v->source, e->source) != 0) {",
+      "what": "a calls_heap event of another kind repeats a violation"
+    },
+    {
+      "decision": "D17.18-duplicate-quoted",
+      "file": "src/fort/ownership_source.ft",
+      "old": "    if (v->kind != e->kind || !v->quoted || ownership_keys.source(v->source, e->source) != 0) {",
+      "new": "    if (v->kind != e->kind || ownership_keys.source(v->source, e->source) != 0) {",
+      "what": "a calls_heap event repeats an unquoted violation"
+    },
+    {
+      "decision": "D17.18-duplicate-source",
+      "file": "src/fort/ownership_source.ft",
+      "old": "    if (v->kind != e->kind || !v->quoted || ownership_keys.source(v->source, e->source) != 0) {",
+      "new": "    if (v->kind != e->kind || !v->quoted) {",
+      "what": "a calls_heap event repeats a violation at another source range"
+    },
+    {
+      "decision": "D17.18-duplicate-name",
+      "file": "src/fort/ownership_source.ft",
+      "old": "    if (v->leaf == ownership_source_local.WHOLE) { return v->name == e->text; }",
+      "new": "    if (v->leaf == ownership_source_local.WHOLE) { return true; }",
+      "what": "a calls_heap event repeats a violation of another place"
+    },
+    {
+      "decision": "D17.18-input-store-array-copy",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "        input_store(s, to);\n        slot_at(s, to, ty)->contents = value{};\n        return true;\n    }\n    if (!charge(s)) { return false; }",
+      "new": "        slot_at(s, to, ty)->contents = value{};\n        return true;\n    }\n    if (!charge(s)) { return false; }",
+      "what": "a whole-array copy into input storage records no store"
+    },
+    {
+      "decision": "D17.18-branch-second-clause",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    if (!item->excludes || item->reached.len == 0) { return; }",
+      "new": "    if (item->reached.len == 0) { return; }",
+      "what": "a branch note claims that the other arms miss the event when one of them reaches it"
+    },
+    {
+      "decision": "D17.18-branch-excludes",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "        if (i != selected && fir_flow.bits_get(toward, target)) { return true; }",
+      "new": "        if (false) { return true; }",
+      "what": "the checker finds no unselected arm that reaches the operation"
+    },
+    {
+      "decision": "D17.18-branch-event-noun",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    if (kind == ownership_api.event_kind.invalid_use) { return \"the invalid use\"; }",
+      "new": "    if (kind == ownership_api.event_kind.invalid_use) { return \"the leak\"; }",
+      "what": "an invalid-use note names a leak"
+    },
+    {
+      "decision": "D17.18-branch-same-source",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "            if (hit) { return false; }",
+      "new": "            if (false) { return false; }",
+      "what": "a branch note ignores another operation at the source range of the event"
+    },
+    {
+      "decision": "D17.18-branch-sole-candidate",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    if (!s->input->sole) { return false; }",
+      "new": "    if (false) { return false; }",
+      "what": "a branch note ignores another candidate of the same allocation"
+    },
+    {
+      "decision": "D17.18-producer-sole-candidate",
+      "file": "src/fort/ownership_source_calls.ft",
+      "old": "        if (ownership_keys.entity(site.relation, relation) == 0 &&\n            ownership_keys.operation(site.operation, r->heap_event.operation) != 0) {",
+      "new": "        if (ownership_keys.entity(site.relation, relation) == 0) {",
+      "what": "the producer counts one event that a solver gave twice as a second candidate"
+    }
+  ]
+}

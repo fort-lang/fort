@@ -2611,8 +2611,14 @@ says ownership is "by convention", this section supersedes it.
   After a crossed call the witness takes no branch whose condition depends on an entry value
   that the call can read. After a branch whose condition depends on any entry value, the
   witness crosses no fort call. Such a branch or call leaves the event incomplete proof.
-  The witness knows no value in a global, behind a pointer, or in a local whose storage a FIR
-  address names. So no branch that it takes reads such a value.
+  The witness knows no value in a global. In other storage it knows a value only when its own
+  walk stored that value there, read it there, or zeroed the storage as a new allocation, and no
+  call came between. Two inputs can name one storage (D17.4). Input storage is storage that the
+  walk did not allocate: an entry pointer, or a pointer that the walk read from storage that it
+  does not know, designates it. In input storage the witness keeps a value only until a store
+  through another referent of input storage. A read of input storage after such a store stops
+  the walk. A local or a cell of an allocation of the walk keeps its value over that store. So
+  each branch that the witness takes reads only a value that its own walk decided.
   A crossed call that does not return for the inputs that it gets on the witness path makes a
   violation after it false. A function that never returns is such a callee. Give such a
   function a noreturn type; the compiler does not check this.
@@ -2662,6 +2668,13 @@ says ownership is "by convention", this section supersedes it.
   wrote it through an address that an earlier call kept. The heap solver alone proved 2 faulty
   bodies of the ledger and 17 more faulty bodies of that kind. Now a call forgets each fact of
   the storage that such a local, or an allocation whose storage an address named, reaches.
+  Amended 2026-10-16: The witness knew no value in a global, behind a pointer, or in a local
+  whose storage a FIR address names. The one-body witness checker branches on values that its
+  own walk stored behind a pointer. A review found 6 bodies in which two inputs named one
+  storage, so a value that the walk kept was stale, and each gave a false violation on a run
+  that exits 0. Now the witness knows a value outside a global only from its own walk, and in
+  input storage only until a store through another referent. The user ratified this amendment
+  on 2026-10-16.
 
 ### D17.19 Global ownership and process boundaries
 - owner: `memory-model.md` (2.9), `toolchain.md` (2.1), `module-system.md` (11),

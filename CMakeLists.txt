@@ -581,6 +581,14 @@ set_tests_properties(fact_joins_selftest PROPERTIES
     LABELS "fort;unit"
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
+# Hold the witness checker to its summary and import boundaries.
+add_test(NAME ownership_witness_lint
+    COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/ownership_witness_lint.py"
+            --root "${CMAKE_SOURCE_DIR}")
+set_tests_properties(ownership_witness_lint PROPERTIES
+    LABELS "fort;unit"
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
 # Hold each anchor of each table in tools/mutations to its source file. One test for each
 # table runs `tools/mutate.py --check --strict`, which builds nothing. It fails when an anchor
 # does not match its file once, or when the table has no comment. With --strict, a row whose

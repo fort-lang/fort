@@ -991,6 +991,33 @@ came here.
   numbers in each canonical form, join, and graft, so that fact needs its own renaming there.
   Extern calls are unknown effects in this module, with no D17.13 trust.
   Keep `del` shallow and add no runtime identity data.
+- **The one-body witness checker executes only typed exact values** (D17.18).
+  `src/fort/ownership_witness.ft` gives each exact constant its FIR type, and `typed` holds it: a
+  zero `bool` is `false`, and a zero integer is `0` of its type. A comparison gives a typed Boolean
+  constant or an input relation, or it stops the path; equal exact operands compare by their value.
+  A whole aggregate copy writes each destination leaf from its source leaf and pays one X step for
+  each leaf. The nearest ancestor slot decides an unwritten slot. `unknown` names storage contents
+  only, so an inexact rvalue cannot decide a branch or a check. The first invalid read of an
+  operation ends the path. Three review rounds found stale or untyped zero facts before this rule.
+  `typed_values` and `typed_regressions` in `test/fort/ownership_witness_test.ft` hold it.
+- **The one-body witness checker makes no alias assumption between inputs** (D17.4, D17.18).
+  Input storage is a cell of a referent that the path did not allocate: an entry pointer, or a
+  pointer in storage that the path does not know. Two such referents can name one storage. So
+  after a store through one referent (a write, a copy, a zero store, a move out or a release),
+  a read of input storage through another referent stops the path (`input_read`). A local and a
+  fresh cell keep their contents. A review found 6 bodies with a false violation that exited 0
+  when each input had its own storage. The checker does not substitute aliases; a later checker
+  can. `alias_rules` holds it. An address computation reads no storage at its last dereference:
+  it records no condition, and the path stops unless that pointer is an exact allocation or
+  address (`address_rules`). At a return, an owner in input storage transfers (`return_rules`).
+  A calls_heap witness that gives the primary error of an earlier analysis of the body counts
+  once, in that analysis (`ownership_source.repeated`, toolchain.md 4.2 duplicate selection).
+  An input-branch note says that the other arms do not reach the event only when no unselected
+  arm reaches the block of the operation, nor another block with an operation at the same source
+  range, and the producer has no other candidate of the same allocation (`excludes`). Lowering
+  copies a `defer` body to each scope exit, so one source statement can have two operations.
+  Otherwise the note states only the selected outcome: reviews ran bodies `demo`, `d` and `two`
+  of `branch_notes` with their other arm, and each leaked too.
 - **Each heap fact has a type, a provenance and one join** (D17.16, D17.18).
   `src/fort/ownership_facts.ft` holds the fact types of the heap proof and their joins. A
   `nullness` (a root value) and a `status_fact` (an allocation status) hold on each path that the

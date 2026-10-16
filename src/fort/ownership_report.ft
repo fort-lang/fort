@@ -14,6 +14,7 @@ import ownership_source_exit;
 import ownership_source_leaves;
 import ownership_source_local;
 import ownership_source_raw;
+import ownership_witness;
 import session;
 import std.io;
 import std.libc;
@@ -310,9 +311,10 @@ fn analysis_violations(ownership_source.body* row, u64 stage) u64 {
 }
 
 // The local, stored-borrow, raw, calls_heap and process-exit analyses report violations. The
-// stored run drops each violation that the local run validated, so the sum counts each
-// diagnostic once. The calls_heap row has no violation. The process-exit analysis checks global
-// owners and exits, which no other analysis checks.
+// stored run drops each violation that the local run validated, and the calls_heap row drops a
+// witness whose primary error an earlier analysis gives (`ownership_source.repeated`). So the
+// sum counts each diagnostic once. The process-exit analysis checks global owners and exits,
+// which no other analysis checks.
 fn body_violations(ownership_source.body* row) u64 {
     return analysis_violations(row, LOCAL) + analysis_violations(row, STORED_BORROWS) +
         analysis_violations(row, RAW) + analysis_violations(row, CALLS_HEAP) +
@@ -692,6 +694,9 @@ string CALLS_UNPROVED = "cannot prove the call and heap obligations here";
 // The terminal of the calls_heap proof of a body, with the declaration of the body when the
 // terminal has no source.
 fn calls_source(ownership_source_calls.row* r) ownership_api.source_position {
+    if (r->violations > 0) {
+        return r->heap_event.source;
+    }
     ownership_api.source_position at = r->proof.terminal.source;
     return at.filename_present ? at : r->source;
 }
@@ -699,10 +704,77 @@ fn calls_source(ownership_source_calls.row* r) ownership_api.source_position {
 // The canonical order of the calls_heap record of a body: an incomplete-proof event at the
 // terminal of its proof.
 fn calls_order(ownership_source_calls.row* r) ownership_source_local.violation {
+    if (r->violations > 0) {
+        return ownership_source_local.violation{.operation = r->heap_event.operation,
+            .source = r->heap_event.source, .kind = r->heap_event.kind,
+            .relation = r->heap_event.relation, .leaf = ownership_source_local.WHOLE};
+    }
     ownership_api.terminal_failure t = r->proof.terminal;
     return ownership_source_local.violation{.operation = t.operation, .source = calls_source(r),
         .kind = ownership_api.event_kind.incomplete_proof, .relation = t.relation,
         .leaf = ownership_source_local.WHOLE};
+}
+
+// Renders one condition from the one condition table. The four rows use this one sentence form.
+fn witness_condition(ownership_witness.condition* item, strbuf.str_buf mut* message) void {
+    strbuf.append(message, "this path needs ");
+    if (item->kind == ownership_witness.condition_kind.input_branch) {
+        ownership_witness.append_branch_condition(item, message);
+        return;
+    }
+    if (item->kind == ownership_witness.condition_kind.nonnull ||
+        item->kind == ownership_witness.condition_kind.call_returns) { strbuf.push(message, '\''); }
+    ownership_witness.append_subject(item, message);
+    if (item->kind == ownership_witness.condition_kind.nonnull ||
+        item->kind == ownership_witness.condition_kind.call_returns) { strbuf.push(message, '\''); }
+    strbuf.push(message, ' ');
+    strbuf.append(message, item->required);
+    strbuf.append(message, "; ");
+    if (item->kind == ownership_witness.condition_kind.nonnull) {
+        strbuf.append(message, "a null '");
+        ownership_witness.append_subject(item, message);
+        strbuf.append(message, "' faults at this read first");
+    } else {
+        strbuf.append(message, item->outcome);
+    }
+}
+
+fn calls_violation(ownership_source.context mut* c, diag.sink mut* diagnostics, string entry,
+    u64 body) bool {
+    ownership_source_calls.context mut* calls = &c->calls;
+    ownership_source_calls.row* r = &calls->rows[body];
+    u64 ledger = ownership_source_calls.ledger_of(calls, body,
+        ownership_source_calls.solver_kind.summary);
+    u64 lines = r->witness.conditions_len + 1;
+    if (!ownership_source_calls.charge_report(calls, ledger, r->heap_event.operation,
+        r->heap_event.source, lines)) {
+        strbuf.str_buf mut limit = strbuf.create();
+        defer strbuf.free(&limit);
+        report_limit_message(calls->ledgers[ledger].meter.bounds.v, &limit);
+        diag.error(diagnostics, location(c, r->heap_event.source, entry), strbuf.view(&limit));
+        return false;
+    }
+    strbuf.str_buf mut message = strbuf.create();
+    defer strbuf.free(&message);
+    if (r->heap_event.kind == ownership_api.event_kind.invalid_use) {
+        strbuf.append(&message, "invalid use of '");
+    } else if (r->heap_event.kind == ownership_api.event_kind.lost_ownership) {
+        strbuf.append(&message, "lost ownership of '");
+    } else {
+        strbuf.append(&message, "failed caller requirement for '");
+    }
+    strbuf.append(&message, r->heap_event.text);
+    strbuf.push(&message, '\'');
+    diag.error(diagnostics, location(c, r->heap_event.source, entry), strbuf.view(&message));
+    u64 mut i = 0;
+    while (i < r->witness.conditions_len) {
+        strbuf.clear(&message);
+        witness_condition(&r->witness.conditions[i], &message);
+        diag.note(diagnostics, location(c, r->witness.conditions[i].place, entry),
+            strbuf.view(&message));
+        i += 1;
+    }
+    return true;
 }
 
 // Whether `calls_budgets` renders refusal `p` for ledger `index`: the first refusal of the
@@ -736,6 +808,9 @@ fn calls_record(ownership_source.context mut* c, diag.sink mut* diagnostics, str
     u64 body, reason shown) bool {
     ownership_source_calls.context mut* calls = &c->calls;
     ownership_source_calls.row* r = &calls->rows[body];
+    if (r->violations > 0) {
+        return calls_violation(c, diagnostics, entry, body);
+    }
     u64 summary = ownership_source_calls.ledger_of(calls, body,
         ownership_source_calls.solver_kind.summary);
     u64 heap = ownership_source_calls.ledger_of(calls, body,

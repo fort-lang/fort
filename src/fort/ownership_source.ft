@@ -15,6 +15,7 @@ import ownership_keys;
 import ownership_limits;
 import ownership_source_calls;
 import ownership_source_exit;
+import ownership_source_leaves;
 import ownership_source_live;
 import ownership_source_local;
 import ownership_source_raw;
@@ -469,8 +470,57 @@ fn solve_calls(context mut* c) void {
     i = 0;
     while (i < c->bodies.len) {
         c->bodies[i].calls = executed ? &c->calls.rows[i] : null;
+        if (executed && c->calls.rows[i].violations > 0 &&
+            repeated(&c->bodies[i], &c->calls.rows[i].heap_event)) {
+            // The earlier analysis renders and counts that error (toolchain 1.1). The calls_heap
+            // row keeps its incomplete proof, as for a candidate without a witness.
+            c->calls.rows[i].violations = 0;
+        }
         i += 1;
     }
+}
+
+// Whether violation `v` of `run` gives the primary error of event `e`: one source range, one
+// event kind and one quoted place. A raw or process-exit violation names a whole local or a
+// global, so it has no run.
+fn repeats(ownership_source_local.context* run, ownership_source_local.violation* v,
+    ownership_api.event_descriptor* e) bool {
+    if (v->kind != e->kind || !v->quoted || ownership_keys.source(v->source, e->source) != 0) {
+        return false;
+    }
+    if (v->leaf == ownership_source_local.WHOLE) { return v->name == e->text; }
+    if (run == null) { return false; }
+    strbuf.str_buf mut name = strbuf.create();
+    defer strbuf.free(&name);
+    ownership_source_leaves.append_name(&run->leaves, run->function, v->leaf, &name);
+    return strbuf.view(&name) == e->text;
+}
+
+fn repeats_any(ownership_source_local.context* run, ownership_source_local.violation@ list,
+    ownership_api.event_descriptor* e) bool {
+    u64 mut i = 0;
+    while (i < list.len) {
+        if (repeats(run, &list[i], e)) { return true; }
+        i += 1;
+    }
+    return false;
+}
+
+/// Whether an earlier analysis of body `row` gives the primary error of the validated calls_heap
+/// event `e` (toolchain 4.2 duplicate selection). On equal keys the earlier analysis comes first.
+fn repeated(body* row, ownership_api.event_descriptor* e) bool {
+    if (row->local.solved &&
+        repeats_any(&row->local, row->local.violations[..row->local.violations_len], e)) {
+        return true;
+    }
+    if (row->stored.solved &&
+        repeats_any(&row->stored, row->stored.violations[..row->stored.violations_len], e)) {
+        return true;
+    }
+    if (row->raw.solved &&
+        repeats_any(null, row->raw.violations[..row->raw.violations_len], e)) { return true; }
+    return row->exit.solved &&
+        repeats_any(null, row->exit.violations[..row->exit.violations_len], e);
 }
 
 fn free(context mut* c) void {

@@ -1735,11 +1735,66 @@ class SoundnessGateTest(unittest.TestCase):
         self.assertLessEqual(len(ledger), ledger_bound(FALSE_ACCEPTS.read_text()))
         self.assertEqual({entry for entry in proved if entry[2] == "summary"}, set())
         self.assertEqual({entry for entry in proved if entry[2] == "calls_heap"}, set())
-        # No faulty body is a violation of the calls_heap row: it validates no event.
-        self.assertEqual([row for row in found if row[2] == "calls_heap" and row[3] == "failed"],
-                         [])
+        # The witness checker validates this measured subset of the faulty bodies.
+        failed = {row for row in found if row[2] == "calls_heap" and row[3] == "failed"}
+        expected_failed = {
+            ("test/ownership/approved/ex01_local_view.ft", "demo", "calls_heap", "failed"),
+            ("test/ownership/approved/ex04_refill.ft", "demo", "calls_heap", "failed"),
+            ("test/ownership/approved/ex13_owned_child.ft", "demo", "calls_heap", "failed"),
+            ("test/lang/fail/ownership/047_use_after_move.ft", "main", "calls_heap", "failed"),
+            ("test/lang/fail/ownership/050_leak_at_an_early_return.ft", "pick", "calls_heap",
+             "failed"),
+            ("test/lang/fail/ownership/054_note_names_the_move_site.ft", "main", "calls_heap",
+             "failed"),
+            ("test/lang/fail/ownership/058_leak_of_a_defer_block_local.ft", "main", "calls_heap",
+             "failed"),
+            ("test/lang/fail/ownership/059_read_inside_a_defer_after_del.ft", "main", "calls_heap",
+             "failed"),
+            ("test/lang/fail/ownership/064_conditional_release_inside_a_defer.ft", "main",
+             "calls_heap", "failed"),
+            ("test/lang/fail/ownership/065_nested_defer_under_a_branch.ft", "leaky",
+             "calls_heap", "failed"),
+            ("test/lang/fail/ownership/066_note_of_a_conditional_release.ft", "main",
+             "calls_heap", "failed"),
+            ("test/ownership/probes/review_f5.ft", "local_read", "calls_heap", "failed"),
+            ("test/ownership/probes/review_q04_pun_null.ft", "joined_targets", "calls_heap",
+             "failed"),
+        }
+        self.assertEqual(failed, expected_failed)
         self.assertEqual(sorted(proved - set(ledger)), [], "a false accept outside the ledger")
         self.assertEqual(sorted(set(ledger) - proved), [], "a ledger entry no longer proves")
+
+    def test_witness_checker_qualification_counts(self):
+        """The checker validates no event in the 72 accepted cases. In the 37 rejected cases, 3
+        validated events are not a primary error of an earlier analysis (toolchain.md 4.2)."""
+        cases = qualification_cases()
+        self.assertEqual(sum(verdict == "accept" for _, verdict, _ in cases), 72)
+        self.assertEqual(sum(verdict == "reject" for _, verdict, _ in cases), 37)
+
+        def verdicts(item):
+            index, (path, expected, _) = item
+            source = CHECKOUT / path
+            report = self.root / f"witness-{index}.json"
+            run = subprocess.run(
+                [OPTIONS.fort, "--std-dir", OPTIONS.std_dir, "--ownership-check",
+                 "--ownership-report", str(report), "--check", source.name],
+                cwd=source.parent, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+                timeout=120)
+            self.assertIn(run.returncode, (0, 1), path)
+            document = json.loads(report.read_text())
+            failed = sum(analysis["violations"] for body in document["bodies"]
+                         for analysis in body["analyses"] if analysis["name"] == "calls_heap")
+            return path, expected, failed
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            rows = list(pool.map(verdicts, enumerate(cases)))
+        self.assertEqual(sum(failed for _, expected, failed in rows if expected == "accept"), 0)
+        self.assertEqual(sum(failed for _, expected, failed in rows if expected == "reject"), 3)
+        self.assertEqual({path for path, _, failed in rows if failed}, {
+            "test/lang/fail/ownership/065_nested_defer_under_a_branch.ft",
+            "test/lang/fail/ownership/066_note_of_a_conditional_release.ft",
+            "test/ownership/approved/ex13_owned_child.ft",
+        })
 
 
 def main():
