@@ -442,10 +442,32 @@ set(FORT_MODULE_TEST_COMMAND
     --verify-ir
     -j "${FORT_LANG_JOBS}"
 )
-add_test(NAME fort-modules COMMAND ${FORT_MODULE_TEST_COMMAND})
-set_tests_properties(fort-modules PROPERTIES
+# The corpus runs as FORT_MODULE_SHARDS tests, fort-modules-<k>-of-<n>. Each one
+# passes `--shard k/n`, and the parts are disjoint and hold each test once. The
+# label `modules` lets the CI job `modules` run one part on a runner of its own.
+# The name holds n, so a CI job that asks for a part of another count finds no
+# test and fails. The ctest `fort-modules-shards` holds the parts against the
+# whole list, and the matrix of the CI job `modules` against 1..n.
+set(FORT_MODULE_SHARDS 2)
+set(FORT_MODULE_TESTS "")
+foreach(part RANGE 1 ${FORT_MODULE_SHARDS})
+    set(name "fort-modules-${part}-of-${FORT_MODULE_SHARDS}")
+    add_test(NAME "${name}"
+        COMMAND ${FORT_MODULE_TEST_COMMAND} --shard "${part}/${FORT_MODULE_SHARDS}")
+    set_tests_properties("${name}" PROPERTIES
+        LABELS "fort;unit;modules"
+        ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
+    list(APPEND FORT_MODULE_TESTS "${name}")
+endforeach()
+add_test(NAME fort-modules-shards
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/module_shards_test.py"
+            --harness "${FORT_LANG_HARNESS}"
+            --root "${FORT_MODULE_TEST_DIR}"
+            --parts ${FORT_MODULE_SHARDS}
+            --workflow "${CMAKE_SOURCE_DIR}/.github/workflows/fort.yml")
+set_tests_properties(fort-modules-shards PROPERTIES
     LABELS "fort;unit"
-    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
 # The language server's modules: test/lsp/<x>_test.ft, in the format of
 # test/fort. A corpus of its own, so the label `lsp` selects the server tests
@@ -503,7 +525,7 @@ set_tests_properties(lang-json PROPERTIES LABELS "fort;integration")
 # nothing beside it; untold, it ran seven tests beside a full-load harness on
 # the darwin host and `lang_selftest` reported its 5 s fake compiler as timed
 # out (2026-09-25, three presets).
-set_tests_properties(fort-modules lsp-modules lang lang-json
+set_tests_properties(${FORT_MODULE_TESTS} lsp-modules lang lang-json
     PROPERTIES PROCESSORS ${FORT_LANG_JOBS})
 
 # The interactive test checks line flushing when stdout is a terminal.

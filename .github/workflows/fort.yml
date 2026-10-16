@@ -1,6 +1,6 @@
 # The checks of the fort compiler: the format of its C test helpers, the fort lint, a
-# Release bootstrap from bootstrap0 followed by the compiler tests, and the language server
-# build with its tests.
+# Release bootstrap from bootstrap0 followed by the compiler tests, the module tests in
+# parts, and the language server build with its tests.
 #
 # Every job checks out the full history. Configure reads the pinned commit of
 # tools/bootstrap.ref with git, and a shallow clone does not hold it.
@@ -76,7 +76,7 @@ jobs:
           - { os: macos-latest, host: darwin }
     runs-on: ${{ matrix.os }}
     # notes/environment.md 7 gives the measured job times behind this bound.
-    timeout-minutes: 150
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
         with:
@@ -95,11 +95,12 @@ jobs:
           cmake --build --preset release
           --target fort fort_std lang_ffi_helpers
       # The fort tests: the language corpus, the check mode, the fixpoint in four build
-      # modes, the terminal test, and the module and FIR tests.
+      # modes, the terminal test, and the FIR tests. The parts of the module corpus carry
+      # the label `modules`, and the job `modules` runs them.
       - name: Run the fort tests
         run: |
           ulimit -c 0
-          ctest --preset release -L '^fort$' --no-tests=error \
+          ctest --preset release -L '^fort$' -LE '^modules$' --no-tests=error \
             -j "$(getconf _NPROCESSORS_ONLN)"
       - name: Record the source audit build
         env:
@@ -205,6 +206,43 @@ jobs:
           name: fixpoint-${{ matrix.os }}
           path: build/*/release/cmake-fixpoint/fixpoint/*/module.diff
           if-no-files-found: ignore
+
+  # The module corpus test/fort: one part for each job. Each part takes all the
+  # processors of its runner, so two runners halve the time of the corpus. The test
+  # name holds the count of parts, so a count here that differs from
+  # FORT_MODULE_SHARDS in CMakeLists.txt selects no test and fails the job.
+  modules:
+    name: modules (${{ matrix.os }}, ${{ matrix.shard }}/2)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-latest, macos-latest]
+        shard: [1, 2]
+        include:
+          - { os: ubuntu-24.04, host: linux }
+          - { os: ubuntu-latest, host: linux }
+          - { os: macos-latest, host: darwin }
+    runs-on: ${{ matrix.os }}
+    # notes/environment.md 7 gives the measured job times behind this bound.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install the tools
+        timeout-minutes: 14
+        run: tools/ci_setup.sh ${{ matrix.host }}
+      - name: Configure
+        run: cmake --preset release
+      - name: Bootstrap the compiler
+        run: >-
+          cmake --build --preset release
+          --target fort fort_std
+      - name: Run one part of the module tests
+        run: |
+          ulimit -c 0
+          ctest --preset release -L '^modules$' \
+            -R '^fort-modules-${{ matrix.shard }}-of-2$' --no-tests=error
 
   # The language server: fort-lsp and its tests, apart from the compiler's.
   lsp:

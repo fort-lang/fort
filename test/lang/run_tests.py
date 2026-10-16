@@ -14,6 +14,8 @@ A test with an `index.json` file is
 selected too, and its golden identifier index is held against the `"symbols"`
 of a `--index` run. A fail test holds the compiler's whole stderr in a golden
 file beside it, and `--bless` writes the goldens of the selected fail tests.
+`--shard K/N` runs part K of N disjoint parts of the selected tests, so N runs
+together run each selected test once.
 
 Standard library only; Python 3.12.
 """
@@ -683,6 +685,27 @@ def select(tests, filters):
 def exclude_exact(tests, paths):
     """Remove only tests whose complete corpus path occurs in `paths`."""
     return [test for test in tests if test.path not in paths]
+
+
+def shard(tests, part, parts):
+    """Part `part` of `parts`: the tests at positions part, part + parts, ... (from 1).
+
+    The parts are disjoint and together hold each test once, so `parts` runs of
+    `--shard` run the corpus once. Position order alternates neighbours with
+    one prefix, such as `ownership_`, between the parts.
+    """
+    return tests[part - 1 :: parts]
+
+
+def parse_shard(text):
+    """Read `K/N` with 1 <= K <= N; argparse reports a ValueError as a usage error."""
+    part, sep, parts = text.partition("/")
+    if not sep or not part.isdigit() or not parts.isdigit():
+        raise ValueError(text)
+    part, parts = int(part), int(parts)
+    if not 1 <= part <= parts:
+        raise ValueError(text)
+    return part, parts
 
 
 # ---- judging --------------------------------------------------------------------------
@@ -1617,6 +1640,12 @@ def parse_args(argv):
         help="exclude one complete corpus path (repeatable)",
     )
     parser.add_argument(
+        "--shard",
+        type=parse_shard,
+        metavar="K/N",
+        help="run only part K of N parts of the selected tests (see shard())",
+    )
+    parser.add_argument(
         "-v", "--verbose", action="store_true", help="show the commands and outputs of failures"
     )
     parser.add_argument("--keep", action="store_true", help="keep the temporary directories")
@@ -1668,6 +1697,8 @@ def main(argv=None):
         # The document is compared on the tests that have something to compare:
         # each fail test, which has diagnostics, and each test with a golden index.
         selected = [t for t in selected if t.kind == "fail" or t.golden_index]
+    if args.shard:
+        selected = shard(selected, *args.shard)
     if args.list:
         for test in selected:
             print(test.path)

@@ -26,7 +26,8 @@ bullet at a time and without a rewrite.
   tests that match all of them), and so does CI (T-261). The label `lsp` holds the language
   server's tests, `lsp-modules` (`test/lsp`) and `lsp-binary`, so a CI job runs them apart from
   the compiler's (T-264). Unit:
-  `test/fort` (`fort-modules`), `test/lsp` (`lsp-modules`), `test/fir` (`fir`),
+  `test/fort` (`fort-modules-1-of-2` and `fort-modules-2-of-2`, and `fort-modules-shards`, which
+  holds the parts against the whole list), `test/lsp` (`lsp-modules`), `test/fir` (`fir`),
   `highlight_selftest`, `extension_selftest`, `panic_coverage`, `panic_coverage_selftest`,
   `fact_joins`, `fact_joins_selftest` and one `mutation_anchors_<table>` test for each table in
   `tools/mutations`, and the three `mutate_` tests of `--check` over the fixture
@@ -349,11 +350,17 @@ bullet at a time and without a rewrite.
   `.gitignore` entry. Remove them with `rm -rf sandbox[0-9]*`. Then run the
   source counter that reported the mismatch.
 - Three corpora run through `run_tests.py`, which takes their root as `--root`.
-  CTest `lang` runs the product language corpus with `xfail.txt`. CTest
-  `fort-modules` runs `test/fort/<x>_test.ft` against the compiler modules, and CTest
+  CTest `lang` runs the product language corpus with `xfail.txt`. The CTests
+  `fort-modules-<k>-of-<n>` run `test/fort/<x>_test.ft` against the compiler modules, and CTest
   `lsp-modules` runs `test/lsp/<x>_test.ft` against the language server's modules.
-  `lang` is an integration test and the other two are unit tests. A `test/fort` test is an ordinary
-  run test in the D14.5 directives whose header carries `//! flags: -I ../../src/fort` (the
+  `lang` is an integration test and the others are unit tests. `run_tests.py --shard k/n` runs
+  the tests at positions k, k + n, ... of the sorted selection, so n parts run each test once.
+  `FORT_MODULE_SHARDS` in `CMakeLists.txt` sets n (2). The label `modules` marks the parts, and
+  the CI job `modules` runs one part on each runner (`notes/environment.md` 7).
+  `test/module_shards_test.py` (ctest `fort-modules-shards`) lists the whole corpus and each
+  part with `--list` and fails when a test is in two parts or in none. It also fails unless the
+  matrix of the CI job `modules` lists each part once. A `test/fort` test is an
+  ordinary run test in the D14.5 directives whose header carries `//! flags: -I ../../src/fort` (the
   compiler's working
   directory is the corpus root, so the path has two `..`, not three). **The tests of `src/lsp`
   stand in `test/lsp`** (T-264; `test/fort` until then), in the same format, and a test of a
