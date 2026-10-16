@@ -2070,9 +2070,16 @@ came here.
   The consumer loads the current complete reference from canonical caller storage at that operation.
   It keeps the inner source, allocation, value version, byte window, and alignment.
   Outer storage liveness cannot prove inner source liveness.
-  A load from storage of the body, and a nested read through a loaded reference, stay
-  unsupported.
+  A load from storage of the body stays unsupported.
+  A nested caller-storage scalar read validates each reference base in order.
+  That read stays incomplete when it cannot name one current base exactly.
+  Only a scalar read checks each current base in this way.
+  A reference load gives a symbolic root. It does not read the current flow contents of its path.
   A prior replacement changes a later load. A prior load keeps its old source.
+  A store at the loaded path or at a prefix of it is a replacement, as for the output stores.
+  It stops root reuse. The current inner slot continues below the flow destination of that store.
+  A call step also ends root reuse, and the inner-slot search does not cross it.
+  A nested read after the call gets no current-base check and no scalar-contents proof.
   Loaded bindings use reserved frame capacity. They consume no argument index.
   Shallow parent release requires each inline owned child empty at that operation.
   A bounded checked-type walk does not follow a child pointer.

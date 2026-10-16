@@ -59,6 +59,16 @@ struct request {
     // An assignment stores a value that an effect outside local proof produced. The store
     // keeps the destination check. Later reads of the unknown contents need other facts.
     bool opaque_value;
+    // Verified FIR or a caller requirement proves this source precondition. Address formation
+    // preserves the reference without reading its source (D17.18).
+    bool source_precondition_proved;
+    // Verified FIR says that the source and destination are scalar storage. Unknown scalar
+    // bits contain no ownership relation and can move through the ownership state.
+    bool scalar_contents_proved;
+    // A projected scalar read checks its current base before it accepts missing scalar contents.
+    // Address formation preserves an empty current base for that later check.
+    bool current_base_required;
+    ownership_api.place_path current_base;
     // The source and destination may be reference leaves of private aggregate slots: a slot
     // root with field and constant-index projections. No pointer names such a leaf.
     bool leaf_places_proved;
@@ -77,6 +87,14 @@ fn same_place(ownership_api.place_path a, ownership_api.place_path b) bool {
 
 fn same_entity(ownership_api.entity_id a, ownership_api.entity_id b) bool {
     return ownership_keys.entity(a, b) == 0;
+}
+
+fn source_precondition(request* req) bool {
+    return req->source_precondition_proved;
+}
+
+fn current_base(request* req) bool {
+    return req->current_base_required;
 }
 
 fn event_key(request* req) ownership_api.entity_id {
@@ -341,6 +359,16 @@ fn empty_owner_proved(ownership_api.contents_fact value) bool {
         value.span_length.value == 0;
 }
 
+// An address formed from an empty owner keeps its source relation. A later address formation
+// still reads no pointed-to storage.
+fn empty_base_proved(ownership_api.contents_fact value) bool {
+    return empty_owner_proved(value) ||
+        (value.kind == ownership_api.contents_kind.reference && value.owner_empty &&
+        value.borrows.len == 1 && value.borrows[0].representation_complete &&
+        value.span_length.kind == ownership_api.fact_kind.exact &&
+        value.span_length.value == 0);
+}
+
 fn source_index(ownership_state.state* s, ownership_api.entity_id key) u64 {
     u64 mut i = 0;
     while (i < s->sources_len) {
@@ -396,10 +424,14 @@ fn read_sources(ownership_state.state* s, ownership_api.services* svc, request* 
         }
         // A live unknown fort source still passes, as it did before. It gives no extent trust.
         if (index == s->sources_len ||
-            s->sources[index].validity == ownership_api.validity_kind.unknown) {
+            (s->sources[index].validity == ownership_api.validity_kind.unknown &&
+            !source_precondition(req))) {
             return unproved(svc, req, relation.source);
         }
-        ownership_api.source_fact source = s->sources[index];
+        ownership_api.source_fact mut source = s->sources[index];
+        if (source.validity == ownership_api.validity_kind.unknown) {
+            source.validity = ownership_api.validity_kind.live;
+        }
         if (source.validity != ownership_api.validity_kind.live) {
             return invalid(svc, req, ownership_api.event_kind.invalid_use, relation.source,
                 "reference source is no longer live");
@@ -433,37 +465,52 @@ fn read_sources(ownership_state.state* s, ownership_api.services* svc, request* 
     return proof;
 }
 
-fn check_read(ownership_state.state* s, ownership_api.services* svc, request* req,
-    ownership_api.contents_fact value, bool dereference) ownership_api.proof_status {
-    if (value.kind == ownership_api.contents_kind.unknown) {
+fn check_value(ownership_state.state* s, ownership_api.services* svc, request* req,
+    ownership_api.contents_fact checked, bool dereference) ownership_api.proof_status {
+    if (checked.kind == ownership_api.contents_kind.unknown) {
         return unproved(svc, req, req->source.root);
     }
-    if (dereference && value.kind != ownership_api.contents_kind.reference &&
-        value.kind != ownership_api.contents_kind.empty_owner) {
+    if (dereference && checked.kind != ownership_api.contents_kind.reference &&
+        checked.kind != ownership_api.contents_kind.empty_owner) {
         return unproved(svc, req, req->source.root);
     }
-    if (value.kind == ownership_api.contents_kind.reference &&
-        value.borrows.len == 0 && !value.owner_empty) {
+    if (checked.kind == ownership_api.contents_kind.reference &&
+        checked.borrows.len == 0 && !checked.owner_empty) {
         return unproved(svc, req, req->source.root);
     }
     bool mut foreign = false;
-    ownership_api.proof_status sources = read_sources(s, svc, req, value, &foreign);
+    ownership_api.proof_status sources = read_sources(s, svc, req, checked, &foreign);
     if (!ownership_api.successful(sources)) { return sources; }
-    if (dereference && (value.owner_empty ||
-        (value.span_length.kind == ownership_api.fact_kind.exact &&
-        value.span_length.value == 0))) {
+    if (dereference && (checked.owner_empty ||
+        (checked.span_length.kind == ownership_api.fact_kind.exact &&
+        checked.span_length.value == 0))) {
         return invalid(svc, req, ownership_api.event_kind.invalid_use, req->source_key,
             "empty reference has no element");
     }
     if (dereference && !req->temporal_use &&
-        ((value.span_length.kind != ownership_api.fact_kind.exact && !foreign) ||
-        (value.span_length.kind == ownership_api.fact_kind.exact &&
-        value.span_length.value < 0))) {
+        ((checked.span_length.kind != ownership_api.fact_kind.exact && !foreign) ||
+        (checked.span_length.kind == ownership_api.fact_kind.exact &&
+        checked.span_length.value < 0))) {
         return unproved(svc, req, req->source.root);
     }
     ownership_api.proof_status mut proof = ownership_api.proof_status{};
     proof.kind = ownership_api.proof_kind.complete;
     return proof;
+}
+
+fn check_read(ownership_state.state* s, ownership_api.services* svc, request* req,
+    ownership_api.contents_fact value, bool dereference) ownership_api.proof_status {
+    if (req->scalar_contents_proved && current_base(req)) {
+        u64 index = contents_index(s, req->current_base);
+        if (index == U64_MAX) { return unproved(svc, req, req->current_base.root); }
+        ownership_api.proof_status base_read = check_value(s, svc, req, s->contents[index], true);
+        if (!ownership_api.successful(base_read)) { return base_read; }
+    }
+    ownership_api.contents_fact mut checked = value;
+    if (checked.kind == ownership_api.contents_kind.unknown && req->scalar_contents_proved) {
+        checked.kind = ownership_api.contents_kind.scalar;
+    }
+    return check_value(s, svc, req, checked, dereference);
 }
 
 fn write(ownership_state.state mut* s, ownership_api.services* svc,
@@ -572,11 +619,14 @@ fn do_allocation(ownership_state.state mut* s, ownership_api.services* svc,
 fn do_copy(ownership_state.state mut* s, ownership_api.services* svc, request* req)
     ownership_api.proof_status {
     u64 index = contents_index(s, req->source);
-    if (index == U64_MAX || ownership_state.has_residual(req->source) ||
+    if ((index == U64_MAX && !req->scalar_contents_proved) ||
+        ownership_state.has_residual(req->source) ||
         ownership_state.has_residual(req->destination)) {
         return unproved(svc, req, req->source.root);
     }
-    ownership_api.contents_fact value = s->contents[index];
+    ownership_api.contents_fact value = index == U64_MAX ?
+        ownership_api.contents_fact{.place = req->source,
+            .kind = ownership_api.contents_kind.scalar} : s->contents[index];
     ownership_api.proof_status read = check_read(s, svc, req, value, false);
     if (!ownership_api.successful(read)) { return read; }
     if (req->destination_owns && !value.owner_empty) {
@@ -681,16 +731,38 @@ fn do_assignment(ownership_state.state mut* s, ownership_api.services* svc,
         unknown.kind = ownership_api.contents_kind.unknown;
         return write(s, svc, unknown, req->destination, req);
     }
-    ownership_api.proof_status read = check_read(s, svc, req, req->value, false);
-    if (!ownership_api.successful(read)) { return read; }
-    if (req->destination_owns && !req->value.owner_empty) {
-        if (req->value.kind != ownership_api.contents_kind.reference) {
+    ownership_api.contents_fact mut value = req->value;
+    if (!source_precondition(req)) {
+        ownership_api.proof_status read = check_read(s, svc, req, req->value, false);
+        if (!ownership_api.successful(read)) { return read; }
+    } else if (req->value.kind != ownership_api.contents_kind.reference ||
+        req->value.borrows.len != 1 || !req->value.borrows[0].representation_complete) {
+        return unproved(svc, req, req->source.root);
+    }
+    if (source_precondition(req) && current_base(req)) {
+        u64 base = contents_index(s, req->current_base);
+        if (base == U64_MAX || ownership_state.has_residual(req->current_base)) {
+            value = ownership_api.contents_fact{.kind = ownership_api.contents_kind.unknown};
+        } else if (empty_base_proved(s->contents[base])) {
+            // The value keeps its source relation, so a later read still checks that source.
+            value.owner_empty = true;
+            value.span_length.kind = ownership_api.fact_kind.exact;
+            value.span_length.value = 0;
+        } else if (s->contents[base].kind != ownership_api.contents_kind.reference ||
+            s->contents[base].owner_empty || s->contents[base].borrows.len != 1 ||
+            !s->contents[base].borrows[0].representation_complete ||
+            !same_entity(s->contents[base].borrows[0].source, value.borrows[0].source)) {
+            value = ownership_api.contents_fact{.kind = ownership_api.contents_kind.unknown};
+        }
+    }
+    if (req->destination_owns && !value.owner_empty) {
+        if (value.kind != ownership_api.contents_kind.reference) {
             return unproved(svc, req, req->destination.root);
         }
         return invalid(svc, req, ownership_api.event_kind.lost_ownership,
             req->destination.root, "assignment would create a second owner");
     }
-    return write(s, svc, req->value, req->destination, req);
+    return write(s, svc, value, req->destination, req);
 }
 
 fn do_address(ownership_state.state mut* s, ownership_api.services* svc,
@@ -1101,9 +1173,14 @@ fn apply(ownership_state.state mut* s, ownership_api.services* svc,
     else if (req->kind == action.weak_store) { proof = do_weak_store(&next, &local, req); }
     else {
         u64 index = contents_index(&next, req->source);
-        if (index == U64_MAX) { proof = unproved(&local, req, req->source.root); }
-        else { proof = check_read(&next, &local, req, next.contents[index],
-            req->kind == action.use); }
+        if (index == U64_MAX && !req->scalar_contents_proved) {
+            proof = unproved(&local, req, req->source.root);
+        } else {
+            ownership_api.contents_fact value = index == U64_MAX ?
+                ownership_api.contents_fact{.place = req->source,
+                    .kind = ownership_api.contents_kind.scalar} : next.contents[index];
+            proof = check_read(&next, &local, req, value, req->kind == action.use);
+        }
     }
     if (ownership_api.successful(proof)) {
         ownership_state.free(s);
