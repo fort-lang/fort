@@ -675,3 +675,9 @@ without a rewrite.
   The worst case is 3 pairs of 2 calls of 130 s (120 s, then 10 s to KILL), plus 2 sleeps of 10
   s: 800 s. That is inside the 840 s step bound, so the third pair can run to its end.
   A normal install takes 9 to 34 seconds on Linux and 21 to 52 seconds on Darwin.
+- The `bootstrap` job builds the chain and runs every ctest test of the release preset. On
+  2026-10-16 it took 57 to 90 minutes: main at 5a0bb72b took 90 minutes on ubuntu-latest. The
+  90-minute bound cancelled two merge groups with no failed test: run 38858719872 after 90 m 33 s
+  on ubuntu-latest, and run 38861014412 after 90 m 17 s on ubuntu-24.04. The job bound is 150
+  minutes until a split of `fort-modules` brings the job under 60 minutes again. Measure the job
+  time of a run before you lower the bound.
