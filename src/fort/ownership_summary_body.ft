@@ -1657,14 +1657,22 @@ fn call(body_input* in, body_program mut* out, fir.statement* stmt, u32 block, u
         if (!work(out, 1)) { return; }
         fir.operand argument = fir.rvalue_operand(f, rv, op);
         if (argument.kind != fir.operand_kind.ok_const && !direct(argument.place)) {
-            reject(out, ownership_api.incomplete_reason.unknown_effect);
-            return;
+            types.node* argument_ty = fir.operand_type(f, argument);
+            if (argument.kind != fir.operand_kind.ok_copy ||
+                fir.type_owning(argument_ty) ||
+                (fir.type_aggregate(argument_ty) && !reference(argument_ty))) {
+                reject(out, ownership_api.incomplete_reason.unknown_effect);
+                return;
+            }
+            if (!add_read(in, out, argument.place, block, gap, op, stmt->loc, stmt->exit_loc,
+                stmt->stmt)) { return; }
         }
         op += 1;
     }
     u32 dst = stmt->place.local;
     types.node* dst_ty = fir.local_at(f, dst)->ty;
-    if (fir.type_aggregate(dst_ty) && !reference(dst_ty)) {
+    bool aggregate_result = fir.type_aggregate(dst_ty) && !reference(dst_ty);
+    if (aggregate_result && fir.type_owning(dst_ty)) {
         reject(out, ownership_api.incomplete_reason.unknown_effect);
         return;
     }
@@ -1749,6 +1757,7 @@ fn call(body_input* in, body_program mut* out, fir.statement* stmt, u32 block, u
             out->call_args[args_first..args_first + cast(rv.ops_len, u64)]) : mapped_origin{};
     out->origins[dst] = result.origin;
     out->unknown[dst] = result.unknown;
+    if (aggregate_result && dst != 0) { out->holding[dst] = 1; }
 }
 
 fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block, u32 gap)

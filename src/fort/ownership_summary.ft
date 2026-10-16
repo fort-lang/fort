@@ -563,9 +563,83 @@ fn export_call_result(call_context* c, fir.statement* call, ownership_flow.step*
     ownership_state.state* continuation) bool {
     ownership_summary_body.body_program mut* program = c->program;
     types.node* result = fir.local_at(c->in->function.body, call->place.local)->ty;
-    if (!ownership_summary_body.reference(result)) { return true; }
     ownership_api.place_path destination = ownership_summary_body.slot(c->in,
         call->place.local);
+    if (fir.type_aggregate(result) && !ownership_summary_body.reference(result)) {
+        bool[64] mut fields = {};
+        u64 mut i = 0;
+        while (i < continuation->contents_len) {
+            if (!call_work(c, 1)) { return false; }
+            ownership_api.contents_fact value = continuation->contents[i];
+            if (ownership_summary_model.same(value.place.root, destination.root) &&
+                value.place.projections.len != 0 &&
+                value.kind == ownership_api.contents_kind.reference) {
+                if (value.place.projections.len == 1 &&
+                    value.place.projections[0].kind == ownership_api.projection_kind.field &&
+                    value.place.projections[0].field < 64) {
+                    fields[value.place.projections[0].field] = true;
+                }
+                bool mut duplicate = false;
+                u64 mut prior = 0;
+                while (prior < i) {
+                    if (!call_work(c, 1)) { return false; }
+                    ownership_api.contents_fact earlier = continuation->contents[prior];
+                    if (ownership_state.same_place(earlier.place, value.place)) {
+                        if (!same_value(earlier, value)) {
+                            program->call_residual = true;
+                            return true;
+                        }
+                        duplicate = true;
+                    }
+                    prior += 1;
+                }
+                u64 mut b = 0;
+                while (!duplicate && b < value.borrows.len) {
+                    if (!call_work(c, 1)) { return false; }
+                    if (caller_root(c, value.borrows[b].source) == ownership_api.U64_MAX) {
+                        program->call_residual = true;
+                        return ownership_api.successful(program->proof);
+                    }
+                    b += 1;
+                }
+                if (!duplicate) {
+                    ownership_summary_body.export_result(c->in, program, value.place, value,
+                        s->operation, s->source, call->loc.file);
+                    if (!ownership_api.successful(program->proof)) { return false; }
+                }
+            }
+            i += 1;
+        }
+        if (result->kind != types.type_kind.k_struct) {
+            program->call_residual = true;
+            ownership_summary_body.export_result(c->in, program, destination,
+                ownership_api.contents_fact{.place = destination,
+                    .kind = ownership_api.contents_kind.unknown},
+                s->operation, s->source, call->loc.file);
+            return ownership_api.successful(program->proof);
+        }
+        u32 mut field = 0;
+        types.node* mut field_ty = fir.struct_field_type(result, field);
+        while (field < 64 && field_ty != null) {
+            if (!call_work(c, 1)) { return false; }
+            if (ownership_summary_body.reference(field_ty) && !fields[field]) {
+                ownership_api.projection[1] part = {ownership_api.projection{
+                    .kind = ownership_api.projection_kind.field, .field = field}};
+                ownership_api.place_path missing = ownership_api.place_path{
+                    .root = destination.root, .projections = part[..]};
+                program->call_residual = true;
+                ownership_summary_body.export_result(c->in, program, missing,
+                    ownership_api.contents_fact{.place = missing,
+                        .kind = ownership_api.contents_kind.unknown},
+                    s->operation, s->source, call->loc.file);
+                if (!ownership_api.successful(program->proof)) { return false; }
+            }
+            field += 1;
+            field_ty = fir.struct_field_type(result, field);
+        }
+        return true;
+    }
+    if (!ownership_summary_body.reference(result)) { return true; }
     if (!call_work(c, continuation->contents_len)) { return false; }
     u64 at = ownership_transfer.contents_index(continuation, destination);
     if (at == ownership_api.U64_MAX) {
@@ -661,7 +735,8 @@ fn apply_one(call_context* c, ownership_summary_body.call_site site, fir.stateme
         return false;
     }
     if (!applied.normal_continuation) {
-        if (applied.outcome.kind != ownership_api.outcome_kind.abort) {
+        if (applied.outcome.kind != ownership_api.outcome_kind.abort &&
+            applied.outcome.kind != ownership_api.outcome_kind.divergence) {
             verdict->unknown = true;
             return false;
         }
@@ -1209,8 +1284,8 @@ fn exit_less(exit_snapshot* a, exit_snapshot* b) bool {
 }
 
 // The exits of the observer list, sorted by FIR position. Each possible abort case of a call
-// gives one abort exit, so several abort exits can share the position of their call. Two
-// other exits at one position, or an exit that is neither a return nor an abort, leave the
+// gives one abort exit, so several abort exits can share the position of their call. A
+// divergence exit has no normal continuation. Two other exits at one position leave the
 // summary without a proof.
 fn sorted_exits(ownership_summary_body.body_program mut* program, exits* observations,
     exit_snapshot* mut@ out) bool {
@@ -1219,7 +1294,8 @@ fn sorted_exits(ownership_summary_body.body_program mut* program, exits* observa
     while (item != null && count < out.len) {
         if (!ownership_summary_body.work(program, 1 + count)) { return false; }
         if (item->outcome.kind != ownership_api.outcome_kind.function_return &&
-            item->outcome.kind != ownership_api.outcome_kind.abort) { return false; }
+            item->outcome.kind != ownership_api.outcome_kind.abort &&
+            item->outcome.kind != ownership_api.outcome_kind.divergence) { return false; }
         u64 mut j = count;
         while (j > 0 && exit_less(item, out[j - 1])) {
             out[j] = out[j - 1];
@@ -1452,12 +1528,14 @@ fn local_slot(ownership_summary_body.body_input* in, ownership_api.entity_id roo
         cast(root.ordinal, u64) < cast(fir.local_count(in->function.body), u64);
 }
 
-// Removes the leaves of `root` and returns the new length.
-fn drop_leaves(leaf_source mut@ leaves, u64 len, ownership_api.entity_id root) u64 {
+// Removes one field, or all fields, of `root` and returns the new length.
+fn drop_leaves(leaf_source mut@ leaves, u64 len, ownership_api.entity_id root, u32 field,
+    bool whole) u64 {
     u64 mut kept = 0;
     u64 mut i = 0;
     while (i < len) {
-        if (!ownership_summary_model.same(leaves[i].root, root)) {
+        if (!ownership_summary_model.same(leaves[i].root, root) ||
+            (!whole && leaves[i].field != field)) {
             leaves[kept] = leaves[i];
             kept += 1;
         }
@@ -1467,8 +1545,8 @@ fn drop_leaves(leaf_source mut@ leaves, u64 len, ownership_api.entity_id root) u
 }
 
 // A borrowed leaf of an aggregate result designates its source after the return. The exit path
-// copies leaves into locals and moves locals into the result in FIR order. Each result leaf
-// source must still be live at the return, after deferred effects (D17.15).
+// writes leaves into locals and moves locals into the result in FIR order. Each result leaf source
+// must still be live at the return, after deferred effects (D17.15).
 fn result_leaves(ownership_summary_body.body_input* in,
     ownership_summary_body.body_program mut* program, exit_snapshot* exit,
     ownership_api.entity_id@ sequence) bool {
@@ -1483,19 +1561,24 @@ fn result_leaves(ownership_summary_body.body_input* in,
         if (at == ownership_api.U64_MAX) { return false; }
         ownership_summary_model.effect_node node = program->effects[at];
         ownership_api.place_path place = node.effect.place;
-        bool whole = node.payload == ownership_summary_model.payload_kind.move ||
-            node.payload == ownership_summary_model.payload_kind.copy;
-        if (whole && local_slot(in, place.root) && place.projections.len == 1 &&
+        bool write = node.payload == ownership_summary_model.payload_kind.move ||
+            node.payload == ownership_summary_model.payload_kind.copy ||
+            node.payload == ownership_summary_model.payload_kind.replacement;
+        if (write && local_slot(in, place.root) && place.projections.len == 1 &&
             place.projections[0].kind == ownership_api.projection_kind.field) {
-            len = drop_leaves(leaves[..], len, place.root);
-            if (node.payload == ownership_summary_model.payload_kind.copy &&
-                node.effect.source.kind == ownership_api.entity_kind.source && len < leaves.len) {
+            len = drop_leaves(leaves[..], len, place.root, place.projections[0].field, false);
+            ownership_api.entity_id source =
+                node.payload == ownership_summary_model.payload_kind.copy ? node.effect.source :
+                node.payload == ownership_summary_model.payload_kind.replacement &&
+                    node.value.borrows.len == 1 ? node.value.borrows[0].source :
+                ownership_api.entity_id{};
+            if (source.kind == ownership_api.entity_kind.source && len < leaves.len) {
                 leaves[len] = leaf_source{place.root, place.projections[0].field,
-                    node.effect.source};
+                    source};
                 len += 1;
             }
-        } else if (whole && local_slot(in, place.root) && place.projections.len == 0) {
-            len = drop_leaves(leaves[..], len, place.root);
+        } else if (write && local_slot(in, place.root) && place.projections.len == 0) {
+            len = drop_leaves(leaves[..], len, place.root, 0, true);
             u64 mut k = 0;
             u64 copied = len;
             while (k < copied && local_slot(in, node.operand.root) &&
@@ -1653,7 +1736,7 @@ fn publish(ownership_summary_body.body_input* in,
             program->lost_operation, program->lost_source);
         return out;
     }
-    if (count == 0 || program->call_residual) {
+    if (count == 0) {
         out.proof = ownership_api.incomplete(ownership_api.incomplete_reason.unknown_effect,
             program->context.operation, program->context.source);
         return out;
@@ -1731,6 +1814,7 @@ fn publish(ownership_summary_body.body_input* in,
         .retained = built.retained[..built.retained_len], .cases = built.cases[..],
         .provenance_records = program->provenance_records[..program->provenance_len],
         .coverage = program->coverage, .proof = program->proof,
+        .residual_effects = program->call_residual,
         .operation = first->operation, .source = first->source,
         .event = program->context.event, .callee_source = first->source};
     return ownership_summary_model.clone(&input, in->services);

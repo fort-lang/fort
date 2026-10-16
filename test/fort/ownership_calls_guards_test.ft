@@ -659,7 +659,7 @@ fn copies(ownership_summary_model.summary* s) u64 {
 }
 
 // A store that not each case of `g` does keeps `h` incomplete, and `top` cannot pass.
-fn split_store(string@ text) void {
+fn split_store(string@ text, u64 cases) void {
     ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
     string[3] names = {"g", "h", "top"};
     bodies(&b, text, names[..]);
@@ -667,10 +667,11 @@ fn split_store(string@ text) void {
     ownership_summary_model.summary* g = ownership_call_bodies.summary(&b, 0);
     assert(ownership_api.successful(g->proof) && g->cases.len == 2);
     ownership_summary_model.summary* h = ownership_call_bodies.summary(&b, 1);
-    assert(h->proof.kind == ownership_api.proof_kind.incomplete && h->cases.len == 0);
-    assert(h->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(ownership_api.successful(h->proof) && h->residual_effects &&
+        h->cases.len == cases);
     ownership_summary_model.summary* top = ownership_call_bodies.summary(&b, 2);
-    assert(!ownership_api.successful(top->proof) && top->cases.len == 0);
+    assert(!ownership_api.successful(top->proof) && top->residual_effects &&
+        top->cases.len == 0);
     assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.incomplete_proof));
 }
 
@@ -692,18 +693,19 @@ fn shared_store(string@ text, u64 cases) void {
 // A call export attaches to each exit after the call, so it cannot name one case of the
 // callee. The stores of the applied cases must agree, or the caller stays incomplete.
 fn joined_stores() void {
-    split_store(ONE_CASE_STORE[..]);
-    split_store(ONE_CASE_RESULT[..]);
-    split_store(LOADED_STORE[..]);
-    split_store(LOADED_RESULT[..]);
-    split_store(ABORT_STORE[..]);
+    split_store(ONE_CASE_STORE[..], 1);
+    split_store(ONE_CASE_RESULT[..], 1);
+    split_store(LOADED_STORE[..], 1);
+    split_store(LOADED_RESULT[..], 1);
+    split_store(ABORT_STORE[..], 2);
     ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
     string[3] names = {"g", "h", "top"};
     bodies(&b, OTHER_STORE[..], names[..]);
     defer ownership_call_bodies.close(&b);
     assert(copies(ownership_call_bodies.summary(&b, 0)) == 2);
     ownership_summary_model.summary* h = ownership_call_bodies.summary(&b, 1);
-    assert(h->proof.kind == ownership_api.proof_kind.incomplete && h->cases.len == 0);
+    assert(ownership_api.successful(h->proof) && h->residual_effects &&
+        h->cases.len == 1);
     assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.incomplete_proof));
     shared_store(SHARED_STORE[..], 1);
     shared_store(ABORT_BEFORE[..], 2);

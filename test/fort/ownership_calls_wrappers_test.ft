@@ -170,6 +170,11 @@ fn unresolved(ownership_call_bodies.bodies* b, u64 index, ownership_api.incomple
     assert(s->proof.terminal.reason == why && s->cases.len == 0);
 }
 
+fn published_residual(ownership_call_bodies.bodies* b, u64 index) void {
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(b, index);
+    assert(ownership_api.successful(s->proof) && s->residual_effects && s->cases.len == 1);
+}
+
 // Three wrapper bodies keep the caller source of their own parameter. Each wrapper exports the
 // callee requirement as a read at its call, before the result write of that call.
 fn case_g02_1() void {
@@ -332,8 +337,8 @@ fn case_g11_2() void {
     ownership_call_bodies.infer(&unbound, 1);
     ownership_call_bodies.infer(&unbound, 2);
     ownership_call_bodies.infer(&unbound, 3);
-    unresolved(&unbound, 1, ownership_api.incomplete_reason.unknown_effect);
-    unresolved(&unbound, 3, ownership_api.incomplete_reason.unknown_effect);
+    published_residual(&unbound, 1);
+    published_residual(&unbound, 3);
     ownership_summary_model.summary* s = ownership_call_bodies.summary(&unbound, 2);
     assert(s->proof.kind == ownership_api.proof_kind.incomplete && s->cases.len == 0);
     assert(!ownership_call_bodies.saw(&unbound, ownership_api.event_kind.lost_ownership));
@@ -404,7 +409,7 @@ fn abort_keeps_owner() void {
     defer ownership_call_bodies.close(&b);
     ownership_call_bodies.infer_all(&b);
     aborts(&b, 0);
-    unresolved(&b, 1, ownership_api.incomplete_reason.unknown_effect);
+    published_residual(&b, 1);
     assert(b.services.counts.events == 0);
 }
 
@@ -444,7 +449,7 @@ fn case_g12_3() void {
     b.inputs[0].correspondence_complete = false;
     ownership_call_bodies.infer_all(&b);
     unresolved(&b, 0, ownership_api.incomplete_reason.missing_correspondence);
-    unresolved(&b, 1, ownership_api.incomplete_reason.unknown_effect);
+    published_residual(&b, 1);
     ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 2);
     assert(s->proof.kind == ownership_api.proof_kind.incomplete && s->cases.len == 0);
     assert(!ownership_call_bodies.saw(&b, ownership_api.event_kind.lost_ownership));
@@ -470,7 +475,7 @@ fn unresolved_calls() void {
     ownership_call_bodies.open(&spin, RECURSIVE[..], spin_names[..]);
     defer ownership_call_bodies.close(&spin);
     ownership_call_bodies.infer_all(&spin);
-    unresolved(&spin, 0, ownership_api.incomplete_reason.unknown_effect);
+    published_residual(&spin, 0);
     ownership_summary_model.summary* caller = ownership_call_bodies.summary(&spin, 1);
     assert(caller->proof.kind == ownership_api.proof_kind.incomplete && caller->cases.len == 0);
     assert(caller->proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
@@ -489,8 +494,7 @@ fn owning_argument() void {
     ownership_call_bodies.infer(&b, 1);
     assert(b.services.counts.events == 0);
     ownership_summary_model.summary* s = ownership_call_bodies.summary(&b, 1);
-    assert(s->proof.kind == ownership_api.proof_kind.incomplete && s->residual_effects);
-    assert(s->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(ownership_api.successful(s->proof) && s->residual_effects && s->cases.len == 1);
     ownership_call_bodies.infer(&b, 2);
     unresolved(&b, 2, ownership_api.incomplete_reason.missing_path);
 }
