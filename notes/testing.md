@@ -227,9 +227,13 @@ bullet at a time and without a rewrite.
   rule: `run_tests.py --bless [filter...]` writes the goldens of the selected `fail` tests from the
   compiler's output and then judges them; a compiler step that is an `ERROR` writes nothing. Bless
   only the tests a change touches, and read `git diff -- '*.stderr'` before the commit, because the
-  diff of the goldens is the review of the new text. `--lint` rejects a golden with no `.ft` beside
-  it and a golden beside a `run` test. **Select the fail corpus as `fail/`, not `fail`**: a filter
-  is a substring of the path, and on 2026-09-27 `run_tests.py --list fail` printed 275 tests, 23 of
+  diff of the goldens is the review of the new text. A rebase can resolve a conflict in a golden to
+  the text of one side, and that text is stale for the rebased compiler. After a rebase that
+  touches a golden, bless that golden again with the rebased compiler and read its diff. On PR 132
+  a rebase kept the `main` text of 4 goldens, and PR CI run 38451164740 failed those 4 tests.
+  `--lint` rejects a golden with no `.ft` beside it and a golden beside a `run` test.
+  **Select the fail corpus as `fail/`, not `fail`**: a filter is a substring of the path, and on
+  2026-09-27 `run_tests.py --list fail` printed 275 tests, 23 of
   them run tests such as `run/errors/008_assert_failure.ft`, against 252 for `--list fail/`. The
   harness matches its diagnostic patterns only against lines that start with a byte other than a
   space, so a rendered source line that spells `x.ft:1:1: error: y` is never read as a diagnostic. A

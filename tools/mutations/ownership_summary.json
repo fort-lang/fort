@@ -1,15 +1,14 @@
 {
   "comment": [
-    "One row for each rule of the unknown origin of a call result, and of the join of call",
-    "results that it relies on (D17.18), and one row for the check kind that is true on",
-    "success in summary extraction. Two rows hold the CFG join and cycle fixed point.",
+    "Nineteen rows cover projected access rules and their review repairs.",
+    "The other 12 rows cover call results, joins, checks, CFG joins, and cycles.",
     "The product compiler does not import ownership_summary_body.ft or ownership_summary.ft, so",
     "a mutant changes no compiler binary. The build writes the LLVM IR of the origin test,",
     "which compiles both modules from src/fort, and the runner compares that file. The stages",
     "compile the mutant through the flags of each test. Build the debug preset first, on a",
     "Darwin host, and run with --runner 'bash -c'.",
     "The md5 guard reads that LLVM IR file. A table whose binary is the compiler reads",
-    "stale on each row. 9 rounds took 119 s."
+    "stale on each row. Use --only to run one row."
   ],
   "sources": [
     "src/fort/ownership_summary_body.ft",
@@ -31,8 +30,8 @@
     {
       "decision": "D17.18-unknown-origin",
       "file": "src/fort/ownership_summary_body.ft",
-      "old": "    if (out->unknown[held]) {\n        if (!out->lost_requirement) {",
-      "new": "    if (false && out->unknown[held]) {\n        if (!out->lost_requirement) {",
+      "old": "    if (out->unknown[held]) {\n        lose_requirement(out);",
+      "new": "    if (false && out->unknown[held]) {\n        lose_requirement(out);",
       "what": "an unknown origin drops its requirement without a record"
     },
     {
@@ -111,6 +110,139 @@
       "old": "        if (out->reached[block] && !scheduled[block]) {",
       "new": "        if (out->reached[block] && !scheduled[block] && block == U32_MAX) {",
       "what": "a directed CFG cycle gets no conservative fixed point"
+    },
+    {
+      "decision": "D17.14-global-projected-read",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    if (global) {\n        if (!selected.global || selected.indirect || reference(selected.ty) ||",
+      "new": "    if (false && global) {\n        if (!selected.global || selected.indirect || reference(selected.ty) ||",
+      "what": "a projected global scalar has no read effect"
+    },
+    {
+      "decision": "D17.17-dynamic-span-typed-window",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        i64 typed_end = selected.required_end;\n        u64 typed_align = types.type_alignof(selected.ty);\n",
+      "new": "        i64 typed_end = 0;\n        u64 typed_align = 1;\n",
+      "what": "a dynamic span read loses its typed extent and alignment"
+    },
+    {
+      "decision": "D17.17-exact-local-index",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "                if (selected.loaded ||\n                    (!selected.caller && index.kind != ownership_api.fact_kind.exact)) { break; }\n",
+      "new": "                if (selected.loaded || !selected.caller) { break; }\n",
+      "what": "an exact local-allocation index requires a caller root"
+    },
+    {
+      "decision": "D17.17-casted-span-storage-owner",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "                        storage_element = fir.projection_type(in->function.body, root_at.ty, part,\n                            &storage_fault);\n",
+      "new": "                        storage_element = element;\n",
+      "what": "an indexed cast span uses the view type instead of the owning storage type"
+    },
+    {
+      "decision": "D17.17-dynamic-store-typed-window",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    requirement(in, out, selected->source, selected->path, selected->required_end,\n        ownership_summary_model.requirement_kind.extent, types.type_alignof(selected->ty));\n    selected->flow_path = selected->path;\n",
+      "new": "    requirement(in, out, selected->source, selected->path, 0,\n        ownership_summary_model.requirement_kind.live_source, 1);\n    selected->flow_path = selected->path;\n",
+      "what": "a dynamic scalar store loses its typed extent and alignment"
+    },
+    {
+      "decision": "D17.17-dynamic-span-enclosing-extent",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "                if (cast(stride, i64) > selected.required_end) {\n                    selected.required_end = cast(stride, i64);\n                }\n                selected.offset_proved = false;\n",
+      "new": "                selected.offset_proved = false;\n",
+      "what": "a dynamic span index loses the enclosing element extent"
+    },
+    {
+      "decision": "D17.15-captured-span-extent",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "            if (index.kind == ownership_api.fact_kind.symbolic && selected.caller) {\n                lose_requirement(out);\n            }\n",
+      "new": "            if (false && index.kind == ownership_api.fact_kind.symbolic && selected.caller) {\n                lose_requirement(out);\n            }\n",
+      "what": "a captured caller span index publishes an unshifted byte extent"
+    },
+    {
+      "decision": "D17.15-captured-string-extent",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "            if (index.kind == ownership_api.fact_kind.symbolic && selected.caller) {\n                lose_requirement(out);\n            }\n",
+      "new": "            if (ty->kind == types.type_kind.k_span &&\n                index.kind == ownership_api.fact_kind.symbolic && selected.caller) {\n                lose_requirement(out);\n            }\n",
+      "what": "a captured caller string index publishes a one-byte extent"
+    },
+    {
+      "decision": "D17.18-formal-span-path",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "                        if (root_at.kind == ownership_summary_model.root_kind.caller_source &&\n                            (!read || i + 1 < input_place.proj_len)) { lose_requirement(out); }\n",
+      "new": "                        if (false && root_at.kind == ownership_summary_model.root_kind.caller_source &&\n                            (!read || i + 1 < input_place.proj_len)) { lose_requirement(out); }\n",
+      "what": "a field read past an index of a span formal publishes a requirement past one element"
+    },
+    {
+      "decision": "D17.14-global-store",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    bool scalar = !selected->global && !reference(selected->ty) &&\n",
+      "new": "    bool scalar = !reference(selected->ty) &&\n",
+      "what": "a store to a global field takes the scalar output rule"
+    },
+    {
+      "decision": "D17.15-array-index-read",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        fir.place_projection(in->function.body, place_at, 0).kind == fir.proj_kind.pj_index &&\n        reference(fir.local_at(in->function.body, place_at.local)->ty) &&\n",
+      "new": "        fir.place_projection(in->function.body, place_at, 0).kind == fir.proj_kind.pj_index &&\n",
+      "what": "one dynamic index step of a by-value array has no selected path"
+    },
+    {
+      "decision": "D17.15-exact-output-place",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    bool exact = selected->offset_proved && selected->extent_proved;\n",
+      "new": "    bool exact = true;\n",
+      "what": "a release through a dynamic span index consumes an owner without an exact place"
+    },
+    {
+      "decision": "D17.15-span-element-store",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        (scalar || (output && (span_element ? base_owner :\n            (owner || fir.type_aggregate(selected->ty)))));\n",
+      "new": "        (scalar || (output && (owner || fir.type_aggregate(selected->ty))));\n",
+      "what": "a null store through a span element replaces an owner of an aggregate"
+    },
+    {
+      "decision": "D17.18-formal-span-change",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "                            (!read || i + 1 < input_place.proj_len)) { lose_requirement(out); }\n",
+      "new": "                            i + 1 < input_place.proj_len) { lose_requirement(out); }\n",
+      "what": "a store, a release or a move through one index of a span formal keeps its requirement"
+    },
+    {
+      "decision": "D17.18-loaded-root-caller",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "                    selected.caller = root_at.kind ==\n                        ownership_summary_model.root_kind.caller_source;\n                    selected.loaded = root_at.kind ==\n                        ownership_summary_model.root_kind.loaded_source;\n                    bool mut captured = false;\n",
+      "new": "                    selected.caller = true;\n                    selected.loaded = root_at.kind ==\n                        ownership_summary_model.root_kind.loaded_source;\n                    bool mut captured = false;\n",
+      "what": "a loaded root at the first deref takes the caller rules"
+    },
+    {
+      "decision": "D17.18-loaded-root-read",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    if (projected && selected.indirect && !selected.caller && selected.loaded) {\n",
+      "new": "    if (false && projected && selected.indirect && !selected.caller && selected.loaded) {\n",
+      "what": "a nested read through a loaded root has no stop"
+    },
+    {
+      "decision": "D17.18-loaded-deref-caller",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "            selected.loaded = true;\n            selected.source = out->roots[out->roots_len - 1].source;\n            selected.offset = 0;\n",
+      "new": "            selected.loaded = true;\n            selected.source = out->roots[out->roots_len - 1].source;\n            selected.caller = true;\n            selected.offset = 0;\n",
+      "what": "a pointer load through a loaded local takes the caller rules"
+    },
+    {
+      "decision": "D17.18-loaded-span-local",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "                        if (root_at.kind == ownership_summary_model.root_kind.loaded_source) {\n                            selected.loaded = true;\n                            break;\n                        }\n",
+      "new": "",
+      "what": "a span local loaded from caller storage takes the caller span rule"
+    },
+    {
+      "decision": "D17.18-loaded-span-one-step",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        reference(fir.local_at(in->function.body, place_at.local)->ty) &&\n        !loaded_origin(out, out->origins[place_at.local]));\n",
+      "new": "        reference(fir.local_at(in->function.body, place_at.local)->ty));\n",
+      "what": "one index step of a loaded span local loses the read rule of main"
     }
   ]
 }

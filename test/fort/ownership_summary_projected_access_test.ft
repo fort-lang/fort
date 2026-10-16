@@ -1,0 +1,1468 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| projected summary access ok
+/// Checks path selection for span and string indices, loaded fields, and globals. A dynamic
+/// fixed-array index and a copied field address stay incomplete.
+import ast;
+import fir;
+import ownership_api;
+import ownership_calls_env;
+import ownership_calls_fixtures;
+import ownership_state;
+import ownership_summary_body;
+import ownership_summary_model;
+import ownership_transfer;
+
+fn successful(ownership_calls_fixtures.fixture* f) void {
+    assert(ownership_api.successful(f->summary.proof));
+    assert(!f->summary.residual_effects);
+    assert(f->summary.cases.len > 0);
+}
+
+fn projection_count(ownership_summary_model.summary* model,
+    ownership_api.projection_kind kind) u64 {
+    u64 mut count = 0;
+    u64 mut effect = 0;
+    while (effect < model->effects.len) {
+        ownership_summary_model.effect_node row = model->effects[effect];
+        u64 mut part = 0;
+        while (part < row.effect.place.projections.len) {
+            if (row.effect.place.projections[part].kind == kind) { count += 1; }
+            part += 1;
+        }
+        part = 0;
+        while (part < row.operand.projections.len) {
+            if (row.operand.projections[part].kind == kind) { count += 1; }
+            part += 1;
+        }
+        effect += 1;
+    }
+    return count;
+}
+
+fn body_projection_count(ownership_summary_body.body_program* program,
+    ownership_api.projection_kind kind) u64 {
+    u64 mut count = 0;
+    u64 mut effect = 0;
+    while (effect < program->effects_len) {
+        ownership_summary_model.effect_node row = program->effects[effect];
+        u64 mut part = 0;
+        while (part < row.effect.place.projections.len) {
+            if (row.effect.place.projections[part].kind == kind) { count += 1; }
+            part += 1;
+        }
+        part = 0;
+        while (part < row.operand.projections.len) {
+            if (row.operand.projections[part].kind == kind) { count += 1; }
+            part += 1;
+        }
+        effect += 1;
+    }
+    return count;
+}
+
+fn body_captured_projection(ownership_summary_body.body_program* program,
+    ownership_api.projection_kind kind) ownership_api.projection {
+    u64 mut effect = 0;
+    while (effect < program->effects_len) {
+        ownership_summary_model.effect_node row = program->effects[effect];
+        u64 mut part = 0;
+        while (part < row.effect.place.projections.len) {
+            ownership_api.projection item = row.effect.place.projections[part];
+            if (item.kind == kind) { return item; }
+            part += 1;
+        }
+        part = 0;
+        while (part < row.operand.projections.len) {
+            ownership_api.projection item = row.operand.projections[part];
+            if (item.kind == kind) { return item; }
+            part += 1;
+        }
+        effect += 1;
+    }
+    return ownership_api.projection{};
+}
+
+fn captured_projection(ownership_summary_model.summary* model,
+    ownership_api.projection_kind kind) ownership_api.projection {
+    u64 mut effect = 0;
+    while (effect < model->effects.len) {
+        ownership_summary_model.effect_node row = model->effects[effect];
+        u64 mut part = 0;
+        while (part < row.effect.place.projections.len) {
+            ownership_api.projection item = row.effect.place.projections[part];
+            if (item.kind == kind) { return item; }
+            part += 1;
+        }
+        part = 0;
+        while (part < row.operand.projections.len) {
+            ownership_api.projection item = row.operand.projections[part];
+            if (item.kind == kind) { return item; }
+            part += 1;
+        }
+        effect += 1;
+    }
+    return ownership_api.projection{};
+}
+
+fn root_count(ownership_summary_model.summary* model,
+    ownership_summary_model.root_kind kind) u64 {
+    u64 mut count = 0;
+    u64 mut i = 0;
+    while (i < model->roots.len) {
+        if (model->roots[i].kind == kind) { count += 1; }
+        i += 1;
+    }
+    return count;
+}
+
+fn body_root_count(ownership_summary_body.body_program* program,
+    ownership_summary_model.root_kind kind) u64 {
+    u64 mut count = 0;
+    u64 mut i = 0;
+    while (i < program->roots_len) {
+        if (program->roots[i].kind == kind) { count += 1; }
+        i += 1;
+    }
+    return count;
+}
+
+fn source_count(ownership_summary_body.body_program* program,
+    ownership_api.source_kind kind) u64 {
+    u64 mut count = 0;
+    u64 mut i = 0;
+    while (i < program->entry.sources_len) {
+        if (program->entry.sources[i].kind == kind) { count += 1; }
+        i += 1;
+    }
+    return count;
+}
+
+fn global_read_count(ownership_summary_body.body_program* program) u64 {
+    u64 mut count = 0;
+    u64 mut effect = 0;
+    while (effect < program->effects_len) {
+        ownership_summary_model.effect_node row = program->effects[effect];
+        u64 mut global = 0;
+        while (row.payload == ownership_summary_model.payload_kind.read &&
+            global < program->globals_len) {
+            if (ownership_summary_model.same(row.effect.place.root,
+                program->globals[global].slot)) {
+                count += 1;
+                break;
+            }
+            global += 1;
+        }
+        effect += 1;
+    }
+    return count;
+}
+
+fn read_count(ownership_summary_model.summary* model) u64 {
+    u64 mut count = 0;
+    u64 mut i = 0;
+    while (i < model->effects.len) {
+        if (model->effects[i].payload == ownership_summary_model.payload_kind.read) {
+            count += 1;
+        }
+        i += 1;
+    }
+    return count;
+}
+
+fn captured_requirement(ownership_summary_body.body_program* program,
+    ownership_api.projection_kind kind) ownership_summary_model.requirement {
+    u64 mut row = 0;
+    while (row < program->requirements_len) {
+        ownership_summary_model.requirement needed = program->requirements[row];
+        u64 mut part = 0;
+        while (part < needed.path.projections.len) {
+            if (needed.path.projections[part].kind == kind) { return needed; }
+            part += 1;
+        }
+        row += 1;
+    }
+    return ownership_summary_model.requirement{};
+}
+
+fn captured_read(ownership_summary_body.body_program* program,
+    ownership_api.projection_kind kind) ownership_summary_model.effect_node {
+    u64 mut row = program->effects_len;
+    while (row > 0) {
+        row -= 1;
+        ownership_summary_model.effect_node read = program->effects[row];
+        u64 mut part = 0;
+        while (read.payload == ownership_summary_model.payload_kind.read &&
+            part < read.effect.place.projections.len) {
+            if (read.effect.place.projections[part].kind == kind) { return read; }
+            part += 1;
+        }
+    }
+    return ownership_summary_model.effect_node{};
+}
+
+fn select_projected_destination(ownership_calls_fixtures.fixture* f,
+    ownership_summary_body.body_program mut* program)
+    ownership_summary_body.selected_storage {
+    u32 mut block = 0;
+    while (block < fir.block_count(&f->functions[0])) {
+        u32 mut gap = 0;
+        while (gap < fir.block_statement_count(&f->functions[0], block)) {
+            fir.statement* stmt = fir.block_statement(&f->functions[0], block, gap);
+            if (stmt->kind == fir.stmt_kind.st_assign && stmt->place.proj_len > 0) {
+                return ownership_summary_body.select_storage(&f->inputs[0], program,
+                    stmt->place, stmt->loc, stmt->exit_loc, stmt->stmt);
+            }
+            gap += 1;
+        }
+        block += 1;
+    }
+    return ownership_summary_body.selected_storage{};
+}
+
+// A dynamic index into a fixed array of caller storage has no selected path. The summary stays
+// incomplete with missing_path, so no caller can apply it (D17.15, D17.18).
+fn dynamic_fixed_index_stays_incomplete() void {
+    string[3] source = {
+        "struct views { i32*[2] items; }",
+        "fn callee(views* p, u64 i) i32 { return *p->items[i]; }",
+        "fn caller(views* p, u64 i) i32 { return callee(p, i); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(f.summary.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(f.summary.proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(f.summary.residual_effects);
+    assert(projection_count(&f.summary, ownership_api.projection_kind.fixed_index) == 0);
+}
+
+fn exact_fixed_index() void {
+    string[3] source = {
+        "struct views { i32*[2] items; }",
+        "fn callee(views* p) i32 { return *p->items[1]; }",
+        "fn caller(views* p) i32 { return callee(p); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    successful(&f);
+    ownership_api.projection index = captured_projection(&f.summary,
+        ownership_api.projection_kind.fixed_index);
+    assert(index.index.kind == ownership_api.fact_kind.exact);
+    assert(index.index.value == 1);
+    assert(index.captured_version.kind == ownership_api.entity_kind.none);
+}
+
+fn computed_fixed_index_stays_incomplete() void {
+    string[3] source = {
+        "struct views { i32*[4] items; }",
+        "fn callee(views* p, u64 i) i32 { u64 j = i + 1; return *p->items[j]; }",
+        "fn caller(views* p, u64 i) i32 { return callee(p, i); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(f.summary.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(f.summary.proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(program.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(program.proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(body_projection_count(&program, ownership_api.projection_kind.fixed_index) == 0);
+}
+
+fn dynamic_span_index() void {
+    string[2] source = {
+        "fn callee(i32@ values, u64 i) i32 { return values[i]; }",
+        "fn caller() i32 { i32[1] values = {7}; return callee(values[..], 1); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(f.summary.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(f.summary.proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(ownership_api.successful(program.proof));
+    assert(program.lost_requirement);
+    assert(body_projection_count(&program,
+        ownership_api.projection_kind.captured_index) > 0);
+    ownership_api.projection index = body_captured_projection(&program,
+        ownership_api.projection_kind.captured_index);
+    assert(index.index.kind == ownership_api.fact_kind.symbolic);
+    assert(index.captured_version.kind == ownership_api.entity_kind.value);
+    ownership_summary_model.requirement needed = captured_requirement(&program,
+        ownership_api.projection_kind.captured_index);
+    assert(needed.kind == ownership_summary_model.requirement_kind.extent);
+    assert(needed.range.extent.kind == ownership_api.fact_kind.exact);
+    assert(needed.range.extent.value == 4 && needed.range.alignment == 4);
+    ownership_summary_model.effect_node read = captured_read(&program,
+        ownership_api.projection_kind.captured_index);
+    assert(read.range.extent.kind == ownership_api.fact_kind.exact);
+    assert(read.range.extent.value == 4 && read.range.alignment == 4);
+    ownership_calls_fixtures.prepare(&f);
+    ownership_calls_fixtures.apply(&f, 1);
+    assert(f.application.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(!f.application.normal_continuation);
+}
+
+fn pointer_backed_span_view() void {
+    string[2] source = {
+        "fn callee(i32* pointer, i32@ values) i32 { return *pointer; }",
+        "fn caller(i32* pointer, i32@ values) i32 { return callee(pointer, values); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(ownership_api.successful(program.proof));
+    assert(!program.lost_requirement);
+    u64 mut pointer_root = ownership_api.U64_MAX;
+    u64 mut span_root = ownership_api.U64_MAX;
+    u64 mut root = 0;
+    while (root < program.roots_len) {
+        ownership_summary_model.symbolic_root item = program.roots[root];
+        if (item.kind == ownership_summary_model.root_kind.caller_source && item.formal == 1) {
+            pointer_root = root;
+        } else if (item.kind == ownership_summary_model.root_kind.caller_source &&
+            item.formal == 2) {
+            span_root = root;
+        }
+        root += 1;
+    }
+    assert(pointer_root != ownership_api.U64_MAX && span_root != ownership_api.U64_MAX);
+    assert(program.roots[pointer_root].ty->elem == program.roots[span_root].ty->elem);
+    // A caller can bind a pointer formal to the pointer view of a span root.
+    program.roots[pointer_root].ty = program.roots[span_root].ty;
+    fir.place dereference = fir.place_deref(&f.functions[0], fir.place_local(1));
+    fir.terminator* term = &fir.block_at(&f.functions[0], 0)->term;
+    ownership_summary_body.selected_storage selected =
+        ownership_summary_body.select_storage(&f.inputs[0], &program, dereference, term->loc,
+            term->exit_loc, term->stmt);
+    assert(ownership_api.successful(program.proof));
+    assert(selected.proved && selected.caller && selected.indirect);
+}
+
+// A captured index of a caller string reads byte `i`. The summary cannot name `i` in its byte
+// end, so a 1-byte requirement would accept a 1-byte caller string. Publication stays
+// incomplete, as it does for a span (D17.15, D17.18).
+fn dynamic_string_index() void {
+    string[2] source = {
+        "fn callee(string value, u64 i) char { return value[i]; }",
+        "fn caller(string value, u64 i) char { return callee(value, i); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(f.summary.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(f.summary.proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(f.summary.cases.len == 0 && f.summary.residual_effects);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(ownership_api.successful(program.proof));
+    assert(program.lost_requirement);
+    ownership_api.projection index = body_captured_projection(&program,
+        ownership_api.projection_kind.captured_index);
+    assert(index.kind == ownership_api.projection_kind.captured_index);
+    assert(index.index.kind == ownership_api.fact_kind.symbolic);
+    assert(index.captured_version.kind == ownership_api.entity_kind.value);
+    ownership_summary_model.requirement needed = captured_requirement(&program,
+        ownership_api.projection_kind.captured_index);
+    assert(needed.kind == ownership_summary_model.requirement_kind.extent);
+    assert(needed.range.access.end.kind == ownership_api.fact_kind.exact);
+    assert(needed.range.access.end.value == 1 && needed.range.alignment == 1);
+}
+
+// An exact caller string index keeps its exact byte end: index 3 needs 4 bytes.
+fn exact_string_index() void {
+    string[2] source = {
+        "fn callee(string value) char { return value[3]; }",
+        "fn caller(string value) char { return callee(value); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    successful(&f);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(ownership_api.successful(program.proof));
+    assert(!program.lost_requirement);
+    ownership_summary_model.requirement needed = captured_requirement(&program,
+        ownership_api.projection_kind.captured_index);
+    assert(needed.kind == ownership_summary_model.requirement_kind.extent);
+    assert(needed.range.access.end.kind == ownership_api.fact_kind.exact);
+    assert(needed.range.access.end.value == 4 && needed.range.alignment == 1);
+}
+
+// A string that the body loads from caller storage is caller storage too. Its captured index
+// loses the requirement as a parameter string does.
+fn loaded_string_index_loses_requirement() void {
+    string[3] source = {
+        "struct text_box { string text; }",
+        "fn callee(text_box* p, u64 i) char { return p->text[i]; }",
+        "fn caller(text_box* p, u64 i) char { return callee(p, i); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(f.summary.proof.kind == ownership_api.proof_kind.incomplete);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(ownership_api.successful(program.proof));
+    assert(program.lost_requirement);
+    assert(body_root_count(&program, ownership_summary_model.root_kind.loaded_source) > 0);
+}
+
+fn nested_span_index() void {
+    string[3] source = {
+        "struct values { i32@ items; }",
+        "fn callee(values* p, u64 i) i32 { return p->items[i]; }",
+        "fn caller(values* p, u64 i) i32 { return callee(p, i); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(ownership_api.successful(program.proof));
+    assert(program.roots_len > 0);
+    assert(body_projection_count(&program,
+        ownership_api.projection_kind.captured_index) > 0);
+}
+
+fn dynamic_struct_index_keeps_enclosing_extent() void {
+    string[3] source = {
+        "struct row { i32 first; i32 second; i32 third; i32 value; }",
+        "fn callee(row@ values, u64 i) i32 { return values[i].value; }",
+        "fn caller(row@ values, u64 i) i32 { return callee(values, i); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(ownership_api.successful(program.proof));
+    ownership_summary_model.requirement needed = captured_requirement(&program,
+        ownership_api.projection_kind.captured_index);
+    assert(needed.kind == ownership_summary_model.requirement_kind.extent);
+    assert(needed.range.extent.kind == ownership_api.fact_kind.exact);
+    assert(needed.range.extent.value == 16 && needed.range.alignment == 4);
+}
+
+fn dynamic_span_write() void {
+    string[2] source = {
+        "fn callee(i32 mut@ values, u64 i, i32 value) void { values[i] = value; }",
+        "fn caller(i32 mut@ values, u64 i, i32 value) void { callee(values, i, value); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(ownership_api.successful(program.proof));
+    ownership_summary_body.selected_storage selected =
+        select_projected_destination(&f, &program);
+    assert(selected.proved);
+    assert(selected.path.projections.len == 1);
+    assert(selected.path.projections[0].kind ==
+        ownership_api.projection_kind.captured_index);
+    ownership_summary_model.requirement needed = captured_requirement(&program,
+        ownership_api.projection_kind.captured_index);
+    assert(needed.kind == ownership_summary_model.requirement_kind.extent);
+    assert(needed.range.extent.kind == ownership_api.fact_kind.exact);
+    assert(needed.range.extent.value == 4 && needed.range.alignment == 4);
+}
+
+fn kind_count(ownership_summary_body.body_program* program,
+    ownership_summary_model.requirement_kind kind) u64 {
+    u64 mut count = 0;
+    u64 mut row = 0;
+    while (row < program->requirements_len) {
+        if (program->requirements[row].kind == kind) { count += 1; }
+        row += 1;
+    }
+    return count;
+}
+
+fn casted_span_index_keeps_owner_storage() void {
+    string[5] source = {
+        "struct node { i32 value; }",
+        "fn callee(node mut* own mut@ items) void {",
+        "    node mut* mut@ view = cast(items, node mut* mut@);",
+        "    view[0] = null; }",
+        "fn caller(node mut* own mut@ items) void { callee(items); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(program.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(program.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(program.residual_effects);
+}
+
+fn nested_header_length() void {
+    string[3] source = {
+        "struct text_box { string text; }",
+        "fn callee(text_box* p) u64 { return p->text.len; }",
+        "fn caller(text_box* p) u64 { return callee(p); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(ownership_api.successful(program.proof));
+    assert(body_projection_count(&program, ownership_api.projection_kind.field) >= 2);
+    assert(program.effects_len > 0);
+}
+
+fn nested_span_length() void {
+    string[3] source = {
+        "struct span_box { i32@ values; }",
+        "fn callee(span_box* p) u64 { return p->values.len; }",
+        "fn caller(span_box* p) u64 { return callee(p); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(ownership_api.successful(program.proof));
+    assert(body_projection_count(&program, ownership_api.projection_kind.field) >= 2);
+    assert(program.requirements_len > 0);
+}
+
+// A copy of a field address names no caller path. A field read through the copy stays
+// incomplete with unknown_effect, as on main (D17.14).
+fn copied_field_address_stays_incomplete() void {
+    string[5] source = {
+        "struct vector { i32@ items; }",
+        "struct outer { vector values; }",
+        "fn callee(outer* p) u64 {",
+        "    vector* v = &p->values; vector* w = v; return w->items.len; }",
+        "fn caller(outer* p) u64 { return callee(p); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(f.summary.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(f.summary.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(program.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(program.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(program.residual_effects);
+}
+
+fn exact_local_allocation_index() void {
+    string[5] source = {
+        "fn callee() i32 {",
+        "    i32 mut@ own values = new(i32, 2);",
+        "    i32 result = values[1]; del(values); return result;",
+        "}",
+        "fn caller() i32 { return callee(); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(ownership_api.successful(program.proof));
+    assert(body_root_count(&program,
+        ownership_summary_model.root_kind.allocation_template) == 1);
+    assert(body_root_count(&program, ownership_summary_model.root_kind.caller_source) == 0);
+    ownership_summary_model.effect_node read = captured_read(&program,
+        ownership_api.projection_kind.captured_index);
+    assert(read.effect.place.projections.len == 1);
+    assert(read.effect.place.projections[0].index.kind == ownership_api.fact_kind.exact);
+    assert(read.effect.place.projections[0].index.value == 1);
+    assert(read.range.extent.kind == ownership_api.fact_kind.exact);
+    assert(read.range.extent.value == 8 && read.range.alignment == 4);
+}
+
+fn changed_address_pointee_stays_incomplete() void {
+    string[5] source = {
+        "struct node { node mut* own next; i32 value; }",
+        "struct holder { node mut* own first; i32 tag; }",
+        "fn callee(holder mut* p, node mut* n) void {",
+        "    node mut* mut* q = cast(&p->first, node mut* mut*); *q = n; }",
+        "fn caller(holder mut* p, node mut* n) void { callee(p, n); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(program.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(program.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(program.residual_effects);
+}
+
+fn changed_array_address_pointee_stays_incomplete() void {
+    string[5] source = {
+        "struct node { node mut* own next; i32 value; }",
+        "struct holder { node mut* own[2] items; i32 tag; }",
+        "fn callee(holder mut* p) void {",
+        "    node* mut* q = cast(&p->items, node* mut*); *q = null; }",
+        "fn caller(holder mut* p) void { callee(p); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(program.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(program.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(program.residual_effects);
+}
+
+fn replaced_nested_field_address_stays_incomplete() void {
+    string[5] source = {
+        "struct vector { i32@ items; }",
+        "struct outer { vector values; }",
+        "fn callee(outer* p) u64 {",
+        "    vector* mut v = &p->values; v = null; return v->items.len; }",
+        "fn caller(outer* p) u64 { return callee(p); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(program.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(program.residual_effects);
+}
+
+fn repeated_nested_field_read() void {
+    string[3] source = {
+        "struct text_box { string text; }",
+        "fn callee(text_box* p) u64 { return p->text.len + p->text.len; }",
+        "fn caller(text_box* p) u64 { return callee(p); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(ownership_api.successful(program.proof));
+    assert(program.effects_len >= 2);
+    assert(body_projection_count(&program, ownership_api.projection_kind.field) >= 4);
+}
+
+fn nested_string_value() void {
+    string[4] source = {
+        "struct text_box { string text; }",
+        "fn callee(text_box* p) string { return p->text; }",
+        "fn caller(text_box* p) string { return callee(p); }",
+        "fn unused() void {}",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    successful(&f);
+    assert(root_count(&f.summary,
+        ownership_summary_model.root_kind.loaded_source) == 1);
+}
+
+// A pointer field read through a local loaded from caller storage names no caller root, as on
+// main. The summary stays incomplete with unknown_effect.
+fn loaded_pointer_field_stays_incomplete() void {
+    string[4] source = {
+        "struct link { i32* value; }",
+        "struct outer { link* child; }",
+        "fn callee(outer* p) i32 { link* q = p->child; return *q->value; }",
+        "fn caller(outer* p) i32 { return callee(p); }",
+    };
+    callee_stays_incomplete(source[..], ownership_api.incomplete_reason.unknown_effect);
+}
+
+fn global_length() void {
+    string[3] source = {
+        "string TEXT = \"abc\";",
+        "fn callee() u64 { return TEXT.len; }",
+        "fn caller() u64 { return callee(); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    successful(&f);
+    assert(root_count(&f.summary, ownership_summary_model.root_kind.global) == 1);
+    assert(read_count(&f.summary) == 1);
+    assert(f.summary.requirements.len == 0);
+}
+
+fn repeated_global_length() void {
+    string[3] source = {
+        "string TEXT = \"abc\";",
+        "fn callee() u64 { return TEXT.len + TEXT.len; }",
+        "fn caller() u64 { return callee(); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(ownership_api.successful(program.proof));
+    assert(program.globals_len == 1);
+    assert(global_read_count(&program) > 0);
+    assert(program.requirements_len == 0);
+}
+
+fn two_global_lengths() void {
+    string[4] source = {
+        "string LEFT = \"a\";",
+        "string RIGHT = \"bc\";",
+        "fn callee() u64 { return LEFT.len + RIGHT.len; }",
+        "fn caller() u64 { return callee(); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(ownership_api.successful(program.proof));
+    assert(program.globals_len == 2);
+    assert(global_read_count(&program) == 4);
+    assert(program.requirements_len == 0);
+}
+
+fn global_character() void {
+    string[3] source = {
+        "string TEXT = \"abc\";",
+        "fn callee(u64 i) char { return TEXT[i]; }",
+        "fn caller(u64 i) char { return callee(i); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    successful(&f);
+    assert(root_count(&f.summary, ownership_summary_model.root_kind.global) == 1);
+    assert(projection_count(&f.summary,
+        ownership_api.projection_kind.captured_index) > 0);
+    assert(f.summary.requirements.len == 0);
+}
+
+fn global_scalar_field() void {
+    string[4] source = {
+        "struct pair { u64 value; }",
+        "pair DATA = {7};",
+        "fn callee() u64 { return DATA.value; }",
+        "fn caller() u64 { return callee(); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(ownership_api.successful(program.proof));
+    assert(program.globals_len == 1);
+    assert(global_read_count(&program) > 0);
+    assert(body_projection_count(&program, ownership_api.projection_kind.field) > 0);
+    assert(program.requirements_len == 0);
+}
+
+fn mutable_global_header() void {
+    string[3] source = {
+        "string mut TEXT = \"abc\";",
+        "fn callee() u64 { return TEXT.len; }",
+        "fn caller() u64 { return callee(); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(ownership_api.successful(program.proof));
+    assert(program.globals_len == 1);
+    assert(global_read_count(&program) == 1);
+    assert(program.requirements_len == 0);
+}
+
+fn global_reference_field_stays_incomplete() void {
+    string[4] source = {
+        "struct box { i32* value; }",
+        "box DATA = {null};",
+        "fn callee() i32 { return *DATA.value; }",
+        "fn caller() i32 { return callee(); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(program.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(program.residual_effects);
+}
+
+fn global_sources_are_static() void {
+    string[3] source = {
+        "string TEXT = \"abc\";",
+        "fn callee() u64 { return TEXT.len; }",
+        "fn caller() u64 { return callee(); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(ownership_api.successful(program.proof));
+    assert(source_count(&program, ownership_api.source_kind.static_storage) == 1);
+    assert(program.globals_len == 1);
+    assert(program.globals[0].symbol != null);
+}
+
+fn global_source_is_stable() void {
+    string[3] source = {
+        "string TEXT = \"abc\";",
+        "fn callee() u64 { return TEXT.len + TEXT.len; }",
+        "fn caller() u64 { return callee(); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(ownership_api.successful(program.proof));
+    assert(program.globals_len == 1);
+    assert(source_count(&program, ownership_api.source_kind.static_storage) == 1);
+    assert(program.globals[0].source.kind == ownership_api.entity_kind.source);
+    assert(program.globals[0].slot.kind == ownership_api.entity_kind.slot);
+}
+
+fn mutable_global_index_stays_incomplete() void {
+    string[3] source = {
+        "string mut TEXT = \"abc\";",
+        "fn callee(u64 i) char { return TEXT[i]; }",
+        "fn caller(u64 i) char { return callee(i); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(f.summary.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(f.summary.proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(f.summary.residual_effects);
+}
+
+fn direct_global_aggregate_stays_incomplete() void {
+    string[3] source = {
+        "string TEXT = \"abc\";",
+        "fn callee() string { return TEXT; }",
+        "fn caller() string { return callee(); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(f.summary.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(f.summary.residual_effects);
+}
+
+// The global rule reads static storage. A store to a global field stays incomplete.
+fn global_store_stays_incomplete() void {
+    string[4] source = {
+        "struct pair { u64 value; }",
+        "pair mut DATA = {7};",
+        "fn callee() void { DATA.value = 1; }",
+        "fn caller() void { callee(); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(program.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(program.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(program.requirements_len == 0);
+}
+
+fn global_application_stays_conservative() void {
+    string[3] source = {
+        "string TEXT = \"abc\";",
+        "fn callee() u64 { return TEXT.len; }",
+        "fn caller() u64 { return callee(); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    successful(&f);
+    ownership_calls_fixtures.prepare(&f);
+    ownership_calls_fixtures.apply(&f, 1);
+    assert(f.application.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(!f.application.normal_continuation);
+}
+
+// A pointer field of a by-value parameter has no input root, so its load stops path selection
+// with missing_path, as on main.
+fn by_value_pointer_field_stays_incomplete() void {
+    string[5] source = {
+        "struct syntax { u64 flags; }",
+        "struct symbol { syntax* node; }",
+        "struct value { symbol* callee; }",
+        "fn callee(value r) u64 { return r.callee->node->flags; }",
+        "fn caller(value r) u64 { return callee(r); }",
+    };
+    callee_stays_incomplete(source[..], ownership_api.incomplete_reason.missing_path);
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(program.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(program.proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(body_root_count(&program, ownership_summary_model.root_kind.loaded_source) == 0);
+}
+
+// A span field of a by-value parameter has no input root. Its index stops path selection with
+// missing_path, as on main.
+fn by_value_span_field_stays_incomplete() void {
+    string[4] dynamic = {
+        "struct projection { u64 kind; }",
+        "struct path { projection@ projections; }",
+        "fn callee(path p, u64 i) u64 { return p.projections[i].kind; }",
+        "fn caller(path p, u64 i) u64 { return callee(p, i); }",
+    };
+    callee_stays_incomplete(dynamic[..], ownership_api.incomplete_reason.missing_path);
+    string[4] exact = {
+        "struct projection { u64 kind; }",
+        "struct path { projection@ projections; }",
+        "fn callee(path p) u64 { return p.projections[0].kind; }",
+        "fn caller(path p) u64 { return callee(p); }",
+    };
+    callee_stays_incomplete(exact[..], ownership_api.incomplete_reason.missing_path);
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, exact[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(program.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(program.proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(body_root_count(&program, ownership_summary_model.root_kind.loaded_source) == 0);
+}
+
+fn changed_by_value_pointer_stays_incomplete() void {
+    string[5] source = {
+        "struct syntax { u64 flags; }",
+        "struct symbol { syntax* node; }",
+        "struct value { symbol* callee; }",
+        "fn callee(value mut r) u64 { r.callee = null; return r.callee->node->flags; }",
+        "fn caller(value r) u64 { return callee(r); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(program.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(program.residual_effects);
+}
+
+fn changed_by_value_span_stays_incomplete() void {
+    string[5] source = {
+        "struct projection { u64 kind; }",
+        "struct path { projection@ projections; }",
+        "fn callee(path mut p, projection@ values, u64 i) u64 {",
+        "    p.projections = values; return p.projections[i].kind; }",
+        "fn caller(path p, projection@ values, u64 i) u64 { return callee(p, values, i); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(program.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(program.residual_effects);
+}
+
+fn mutable_by_value_span_stays_incomplete() void {
+    string[4] source = {
+        "struct projection { u64 kind; }",
+        "struct path { projection@ projections; }",
+        "fn callee(path mut p, u64 i) u64 { return p.projections[i].kind; }",
+        "fn caller(path p, u64 i) u64 { return callee(p, i); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(program.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(program.residual_effects);
+}
+
+fn span_index_end_overflow_stays_incomplete() void {
+    string[2] source = {
+        "fn callee(string value) char { return value[9223372036854775807]; }",
+        "fn caller(string value) char { return callee(value); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(program.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(program.proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(program.residual_effects);
+}
+
+fn extent_count(ownership_summary_body.body_program* program) u64 {
+    u64 mut count = 0;
+    u64 mut row = 0;
+    while (row < program->requirements_len) {
+        if (program->requirements[row].kind ==
+            ownership_summary_model.requirement_kind.extent) { count += 1; }
+        row += 1;
+    }
+    return count;
+}
+
+// A slice has no summary rule. The extraction stops at the first slice, before an extent of
+// the sliced view can reach a requirement (D17.18).
+fn sliced_callee(string callee, string caller) void {
+    string[2] source = {callee, caller};
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(f.summary.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(f.summary.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(f.summary.cases.len == 0 && f.summary.requirements.len == 0);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(program.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(program.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(extent_count(&program) == 0);
+}
+
+// A slice of a slice, an index after a slice, and a slice of 0 bytes.
+fn slices_stay_incomplete() void {
+    string caller = "fn caller(i32@ v) i32 { return callee(v); }";
+    sliced_callee("fn callee(i32@ v) i32 { i32@ w = v[1..3][0..1]; return w[0]; }", caller);
+    sliced_callee("fn callee(i32@ v) i32 { return v[1..][0]; }", caller);
+    sliced_callee("fn callee(i32@ v, u64 i) i32 { i32@ w = v[1..]; return w[i]; }",
+        "fn caller(i32@ v, u64 i) i32 { return callee(v, i); }");
+    sliced_callee("fn callee(i32@ v) i32 { i32@ w = v[0..0]; return cast(w.len, i32); }",
+        caller);
+}
+
+// The callee summary needs 8 bytes of its view. A caller that passes a slice of a slice or a
+// slice of 0 bytes stops at its own slice, so no sliced view reaches the application.
+fn sliced_caller(string caller) void {
+    string[2] source = {"fn callee(i32@ v) i32 { return v[1]; }", caller};
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    successful(&f);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[1]);
+    defer ownership_summary_body.free(&program);
+    assert(program.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(program.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+}
+
+fn caller_slices_stay_incomplete() void {
+    sliced_caller("fn caller(i32@ v) i32 { return callee(v[1..3][0..2]); }");
+    sliced_caller("fn caller(i32@ v) i32 { return callee(v[2..2]); }");
+}
+
+// The caller view starts at `offset` in its storage and holds `bytes` bytes. The application
+// measures the requirement from the start of the view and not from the start of the storage.
+fn span_index_window(string callee, i64 offset, i64 bytes, bool proved) void {
+    string[2] source = {callee, "fn caller(i32@ values) i32 { return callee(values); }"};
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    successful(&f);
+    ownership_calls_fixtures.prepare(&f);
+    ownership_calls_fixtures.configure_source(&f, ownership_api.source_kind.symbolic_caller,
+        ownership_api.validity_kind.live, offset + bytes);
+    ownership_api.contents_fact mut value = ownership_calls_fixtures.contents(&f, 1);
+    ownership_api.borrow_relation[1] mut relations = {value.borrows[0]};
+    relations[0].range.offset = ownership_summary_body.integer(offset);
+    relations[0].range.access.begin = ownership_summary_body.integer(offset);
+    value.borrows = relations[..];
+    u64 at = ownership_transfer.contents_index(&f.caller, value.place);
+    f.caller.contents[at] = ownership_state.copy_contents(&f.caller, value);
+    ownership_calls_fixtures.apply(&f, 8);
+    if (proved) {
+        assert(ownership_api.successful(f.application.proof) && f.application.normal_continuation);
+        return;
+    }
+    assert(f.application.proof.failed && !f.application.normal_continuation);
+    assert(f.services.counts.last.kind == ownership_api.event_kind.caller_requirement);
+    assert(f.services.counts.last.text == "call requires a larger argument access window");
+}
+
+// Index 1 needs 8 bytes and index 0 needs 4. The last byte decides each pair of windows.
+fn span_index_windows() void {
+    string second = "fn callee(i32@ values) i32 { return values[1]; }";
+    span_index_window(second, 0, 0, false);
+    span_index_window(second, 0, 7, false);
+    span_index_window(second, 0, 8, true);
+    span_index_window(second, 8, 4, false);
+    span_index_window(second, 8, 7, false);
+    span_index_window(second, 8, 8, true);
+    string first = "fn callee(i32@ values) i32 { return values[0]; }";
+    span_index_window(first, 0, 0, false);
+    span_index_window(first, 4, 3, false);
+    span_index_window(first, 4, 4, true);
+}
+
+// The summary of `callee` stays incomplete with `reason`, and a call of it is not proved.
+fn callee_stays_incomplete(string@ source, ownership_api.incomplete_reason reason) void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source);
+    defer ownership_calls_fixtures.close(&f);
+    assert(f.summary.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(f.summary.proof.terminal.reason == reason);
+    assert(f.summary.cases.len == 0 && f.summary.residual_effects);
+}
+
+// A store, a release and a load through a dynamic fixed-array index, and a release before a
+// dynamic store. Each body has a use after free, and each summary stays incomplete (D17.15).
+fn dynamic_fixed_index_faults_stay_incomplete() void {
+    string[11] stored = {
+        "struct views { i32*[2] items; }",
+        "fn callee(views mut* p, u64 i) i32 {",
+        "    i32 mut* own a = new(i32);",
+        "    p->items[i] = a;",
+        "    del(a);",
+        "    i32 v = *p->items[i];",
+        "    p->items[i] = null;",
+        "    return v;",
+        "}",
+        "fn caller(views mut* p, u64 i) i32 { return callee(p, i); }",
+        "fn unused() void {}",
+    };
+    callee_stays_incomplete(stored[..], ownership_api.incomplete_reason.missing_path);
+    string[3] released = {
+        "struct S { u8 x; u8[4] a; }",
+        "fn callee(S mut* own p, u64 i) void { del(p); p->a[i] = 1; }",
+        "fn caller(S mut* own p, u64 i) void { callee(move(p), i); }",
+    };
+    callee_stays_incomplete(released[..], ownership_api.incomplete_reason.missing_path);
+}
+
+// A field address copied into a local names no caller path. The store, the release and the
+// load through it stay incomplete, as on main (D17.14).
+fn copied_field_address_fault_stays_incomplete() void {
+    string[13] source = {
+        "struct inner { i32* item; }",
+        "struct outer { u64 tag; inner in; }",
+        "fn callee(outer mut* p) i32 {",
+        "    i32 mut* own a = new(i32);",
+        "    inner mut* q = &p->in;",
+        "    q->item = a;",
+        "    del(a);",
+        "    i32 v = *q->item;",
+        "    q->item = null;",
+        "    return v;",
+        "}",
+        "fn caller(outer mut* p) i32 { return callee(p); }",
+        "fn unused() void {}",
+    };
+    callee_stays_incomplete(source[..], ownership_api.incomplete_reason.unknown_effect);
+}
+
+// A caller binds a span formal to one element at entry. A field read past an index step of
+// the formal stays incomplete, so the caller that passes its own span is not failed.
+fn formal_span_field_index_stays_incomplete() void {
+    string[3] source = {
+        "struct node { node@* ptr; u64 v; }",
+        "fn callee(node@ s) u64 { return s[1].v; }",
+        "fn caller(node@ s) u64 { return callee(s); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(f.summary.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(f.summary.proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(ownership_api.successful(program.proof));
+    assert(program.lost_requirement);
+    ownership_calls_fixtures.prepare(&f);
+    ownership_calls_fixtures.apply(&f, 1);
+    // An incomplete application is no violation: a violation is a complete failed proof.
+    assert(f.application.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(!f.application.normal_continuation);
+    string[3] first = {
+        "struct node { node@* ptr; u64 v; }",
+        "fn callee(node@ s) u64 { return s[0].v; }",
+        "fn caller(node@ s) u64 { return callee(s); }",
+    };
+    callee_stays_incomplete(first[..], ownership_api.incomplete_reason.missing_path);
+}
+
+// After a load through `s[0].ptr`, the next index selects the loaded span and not `s`. The
+// selection stops, so `s` gets no 32-byte extent requirement.
+fn loaded_span_index_names_no_outer_local() void {
+    string[3] source = {
+        "struct node { node@* ptr; u64 v; }",
+        "fn callee(node@ s) u64 { return (*s[0].ptr)[1].v; }",
+        "fn caller(node@ s) u64 { return callee(s); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    assert(f.summary.proof.kind == ownership_api.proof_kind.incomplete);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(program.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(program.proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    u64 mut row = 0;
+    while (row < program.requirements_len) {
+        ownership_summary_model.requirement needed = program.requirements[row];
+        assert(needed.kind != ownership_summary_model.requirement_kind.extent ||
+            needed.range.access.end.value < 32);
+        row += 1;
+    }
+}
+
+// One index step of a by-value array reads that local, as on main. A dynamic index after a
+// field of a by-value struct has no selected path.
+fn by_value_array_index_reads_the_local() void {
+    string[2] source = {
+        "fn callee(i32[2] a, u64 i) i32 { return a[i]; }",
+        "fn caller(i32[2] a, u64 i) i32 { return callee(a, i); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    successful(&f);
+    assert(f.summary.requirements.len == 0);
+    string[3] nested = {
+        "struct box { i32[2] a; }",
+        "fn callee(box b, u64 i) i32 { return b.a[i]; }",
+        "fn caller(box b, u64 i) i32 { return callee(b, i); }",
+    };
+    callee_stays_incomplete(nested[..], ownership_api.incomplete_reason.missing_path);
+}
+
+// A release consumes one exact owner place. An exact span index gives that place and needs a
+// valid old owner. A dynamic index names no exact place, so its extraction stops.
+fn span_index_release_needs_an_exact_place() void {
+    string[3] exact = {
+        "struct node { i32 value; }",
+        "fn callee(node mut* own mut@ items) void { del(items[0]); }",
+        "fn caller(node mut* own mut@ items) void { callee(items); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, exact[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(ownership_api.successful(program.proof));
+    assert(kind_count(&program, ownership_summary_model.requirement_kind.valid_owner) == 1);
+    // A release through a span formal loses its requirement, so the summary keeps the stop of
+    // main: missing_path.
+    assert(program.lost_requirement);
+    assert(f.summary.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(f.summary.proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    string[3] dynamic = {
+        "struct node { i32 value; }",
+        "fn callee(node mut* own mut@ items, u64 i) void { del(items[i]); }",
+        "fn caller(node mut* own mut@ items, u64 i) void { callee(items, i); }",
+    };
+    ownership_calls_fixtures.fixture mut g = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&g, dynamic[..]);
+    defer ownership_calls_fixtures.close(&g);
+    ownership_summary_body.body_program mut released =
+        ownership_summary_body.extract(&g.inputs[0]);
+    defer ownership_summary_body.free(&released);
+    assert(released.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(released.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(kind_count(&released, ownership_summary_model.requirement_kind.valid_owner) == 0);
+}
+
+// A local loaded from caller storage names no caller root, as on main. A store of a borrowed
+// pointer, a copy and a read through it stay incomplete with unknown_effect.
+fn loaded_root_access_stays_incomplete() void {
+    string base = "struct holder { i32* r; u64 n; } struct outer { holder mut* h; }";
+    string[3] retained = {base,
+        "fn callee(outer mut* p) void { i32 x = 1; holder mut* q = p->h; q->r = &x; }",
+        "fn caller(outer mut* p) void { callee(p); }"};
+    callee_stays_incomplete(retained[..], ownership_api.incomplete_reason.unknown_effect);
+    string[3] copied = {base,
+        "fn callee(outer* p) i32* { holder* q = p->h; return q->r; }",
+        "fn caller(outer* p) i32* { return callee(p); }"};
+    callee_stays_incomplete(copied[..], ownership_api.incomplete_reason.unknown_effect);
+    string[3] read = {base,
+        "fn callee(outer* p) u64 { holder* q = p->h; return q->n; }",
+        "fn caller(outer* p) u64 { return callee(p); }"};
+    callee_stays_incomplete(read[..], ownership_api.incomplete_reason.unknown_effect);
+}
+
+// The local `q` keeps the old pointer of `b->c`, and the body frees that cell before it reads
+// `*q->v`. A second deref through a loaded local takes no caller rule, so the summary stays
+// incomplete with unknown_effect, as on main (D17.18).
+fn loaded_deref_after_release_stays_incomplete() void {
+    string[4] source = {
+        "struct cell { i32* v; u64 n; } struct box { cell mut* own c; }",
+        "fn callee(box mut* b) i32 { cell* q = b->c; del(move(b->c)); return *q->v; }",
+        "fn caller(box mut* b) i32 { return callee(b); }",
+        "fn unused() void {}",
+    };
+    callee_stays_incomplete(source[..], ownership_api.incomplete_reason.unknown_effect);
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_summary_body.body_program mut program =
+        ownership_summary_body.extract(&f.inputs[0]);
+    defer ownership_summary_body.free(&program);
+    assert(program.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(program.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+}
+
+// One index step of a span local loaded from caller storage keeps the read rule of main, which
+// proves this body.
+fn loaded_span_one_step_keeps_main() void {
+    string[3] source = {
+        "struct view { u64@ sp; }",
+        "fn callee(view* p) u64 { u64@ s = p->sp; return s[0]; }",
+        "fn caller(view* p) u64 { return callee(p); }",
+    };
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source[..]);
+    defer ownership_calls_fixtures.close(&f);
+    successful(&f);
+    assert(projection_count(&f.summary, ownership_api.projection_kind.captured_index) == 0);
+}
+
+// A span local loaded from caller storage names no caller root. A field read past its index
+// stops path selection after the release of that span, as on main.
+fn loaded_span_after_release_stays_incomplete() void {
+    string[3] source = {
+        "struct node { u64 v; } struct hold { node mut@ own buf; }",
+        "fn callee(hold mut* h) u64 { node@ s = h->buf; del(move(h->buf)); return s[0].v; }",
+        "fn caller(hold mut* h) u64 { return callee(h); }",
+    };
+    callee_stays_incomplete(source[..], ownership_api.incomplete_reason.missing_path);
+}
+
+// The callee of `source` changes element 1 of a span formal, and the caller passes its own
+// span. The callee summary stays incomplete, so the call is not failed (D17.18).
+fn formal_span_change(string@ source) void {
+    callee_stays_incomplete(source, ownership_api.incomplete_reason.missing_path);
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source);
+    defer ownership_calls_fixtures.close(&f);
+    ownership_calls_fixtures.prepare(&f);
+    ownership_calls_fixtures.apply(&f, 1);
+    assert(f.application.proof.kind == ownership_api.proof_kind.incomplete);
+    assert(!f.application.normal_continuation);
+}
+
+// A store, a release and a move through one index step of a span formal lose the requirement.
+// Only a read of one index step keeps the read rule of main.
+fn formal_span_changes_stay_incomplete() void {
+    string[2] stored = {"fn callee(u64 mut@ s) void { s[1] = 3; }",
+        "fn caller(u64 mut@ s) void { callee(s); }"};
+    formal_span_change(stored[..]);
+    string[3] released = {"struct node { i32 value; }",
+        "fn callee(node mut* own mut@ view) void { del(view[1]); }",
+        "fn caller(node mut* own mut@ v) void { callee(v); }"};
+    formal_span_change(released[..]);
+    string[3] moved = {"struct node { i32 value; }",
+        "fn callee(node mut* own mut@ view) node mut* own { return move(view[1]); }",
+        "fn caller(node mut* own mut@ v) node mut* own { return callee(v); }"};
+    formal_span_change(moved[..]);
+}
+
+fn main() i32 {
+    dynamic_fixed_index_stays_incomplete();
+    exact_fixed_index();
+    computed_fixed_index_stays_incomplete();
+    dynamic_span_index();
+    pointer_backed_span_view();
+    dynamic_string_index();
+    nested_span_index();
+    dynamic_struct_index_keeps_enclosing_extent();
+    dynamic_span_write();
+    casted_span_index_keeps_owner_storage();
+    nested_header_length();
+    nested_span_length();
+    copied_field_address_stays_incomplete();
+    exact_local_allocation_index();
+    changed_address_pointee_stays_incomplete();
+    changed_array_address_pointee_stays_incomplete();
+    replaced_nested_field_address_stays_incomplete();
+    repeated_nested_field_read();
+    nested_string_value();
+    loaded_pointer_field_stays_incomplete();
+    global_length();
+    repeated_global_length();
+    two_global_lengths();
+    global_character();
+    global_scalar_field();
+    mutable_global_header();
+    global_reference_field_stays_incomplete();
+    global_sources_are_static();
+    global_source_is_stable();
+    mutable_global_index_stays_incomplete();
+    direct_global_aggregate_stays_incomplete();
+    global_application_stays_conservative();
+    global_store_stays_incomplete();
+    by_value_pointer_field_stays_incomplete();
+    by_value_span_field_stays_incomplete();
+    changed_by_value_pointer_stays_incomplete();
+    changed_by_value_span_stays_incomplete();
+    mutable_by_value_span_stays_incomplete();
+    span_index_end_overflow_stays_incomplete();
+    exact_string_index();
+    loaded_string_index_loses_requirement();
+    slices_stay_incomplete();
+    caller_slices_stay_incomplete();
+    span_index_windows();
+    dynamic_fixed_index_faults_stay_incomplete();
+    copied_field_address_fault_stays_incomplete();
+    formal_span_field_index_stays_incomplete();
+    loaded_span_index_names_no_outer_local();
+    by_value_array_index_reads_the_local();
+    span_index_release_needs_an_exact_place();
+    loaded_root_access_stays_incomplete();
+    loaded_deref_after_release_stays_incomplete();
+    loaded_span_after_release_stays_incomplete();
+    loaded_span_one_step_keeps_main();
+    formal_span_changes_stay_incomplete();
+    println("projected summary access ok");
+    return 0;
+}
