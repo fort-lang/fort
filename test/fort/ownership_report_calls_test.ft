@@ -25,6 +25,8 @@
 //| lowering failure ok
 //| graph refusal ok
 //| graph without proof ok
+//| validated before gap ok
+//| repeats ok
 /// Checks how the report carries the integrated calls_heap analysis.
 import diag;
 import ownership_api;
@@ -34,6 +36,7 @@ import ownership_source;
 import ownership_source_calls;
 import ownership_source_env;
 import ownership_source_local;
+import ownership_witness;
 import std.str;
 import std.strbuf;
 
@@ -47,6 +50,14 @@ string[4] PROGRAM = {
 string[2] MUTUAL = {
     "fn left(bool b) void { if (b) { right(false); } }",
     "fn right(bool b) void { if (b) { left(false); } }",
+};
+
+// A validated shallow-release loss before an extern call. The call leaves the correspondence of
+// the body incomplete.
+string[3] GAP = {
+    "struct pair { i32 mut* own left; i32 mut* own right; }",
+    "extern fn ext() void;",
+    "fn early() void { pair mut* own p = new(pair); p->left = new(i32); del(p); ext(); }",
 };
 
 string[2] ORDER = {
@@ -105,8 +116,12 @@ fn rows() void {
     ownership_source.body* calls_noop = ownership_source_env.find(&e, "main", "calls_noop");
     assert(status(calls_noop, 0) == "complete" && status(calls_noop, 2) == "complete");
     // The leak is a local violation and incomplete calls_heap proof: the body counts the local
-    // violation once.
+    // violation once. The calls_heap checker validates the same loss, and the local row gives
+    // its primary error first, so the calls_heap row drops it (toolchain.md 4.2).
     ownership_source.body* leak = ownership_source_env.find(&e, "main", "leak");
+    assert(leak->calls->witness.verdict == ownership_witness.status.validated);
+    assert(leak->calls->violations == 0);
+    assert(ownership_source.repeated(leak, &leak->calls->heap_event));
     assert(ownership_report.analysis_status(leak, ownership_report.LOCAL, 2) == "violated");
     assert(status(leak, 0) == "complete" && status(leak, 1) == "complete");
     assert(status(leak, 2) == "incomplete");
@@ -1008,6 +1023,64 @@ fn graph_without_proof() void {
     println("graph without proof ok");
 }
 
+// A validated witness stops before any call, so a later call without callee facts does not
+// suppress it: the body renders its calls_heap violation although its correspondence is
+// incomplete, and the report counts that violation once.
+fn validated_before_gap() void {
+    ownership_source_env.env mut e = ownership_source_env.env{};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    open(&e, &text, GAP[..], true);
+    defer ownership_source_env.close(&e);
+    u64 index = body_index(&e, "early");
+    ownership_source_calls.row* r = &e.source.calls.rows[index];
+    assert(r->correspondence == ownership_source_local.status.incomplete);
+    assert(r->witness.verdict == ownership_witness.status.validated && r->violations == 1);
+    assert(ownership_source_calls.shows_record(&e.source.calls, index));
+    ownership_source.body* early = ownership_source_env.find(&e, "main", "early");
+    assert(ownership_report.analysis_violations(early, ownership_report.CALLS_HEAP) == 1);
+    u64 local = ownership_report.analysis_violations(early, ownership_report.LOCAL);
+    diag.sink mut found = diag.sink{};
+    defer diag.free(&found);
+    ownership_report.diagnose(&e.source, &found, "main.ft");
+    u64 shown = record_count_at(&found, "lost ownership of 'p->left'", "main.ft", 3);
+    if (shown != local + 1) {
+        eprintln("validated before gap: ", shown, " records, ", local, " local violations");
+        assert(false);
+    }
+    println("validated before gap ok");
+}
+
+// A calls_heap event repeats a violation when both give one primary error: one source range, one
+// event kind and one quoted place name. Each other pair renders two errors.
+fn repeats() void {
+    ownership_api.source_position at = ownership_api.source_position{.module = 1, .file = 1,
+        .line = 4, .col = 2, .end_line = 4, .end_col = 3};
+    ownership_source_local.violation v = ownership_source_local.violation{
+        .kind = ownership_api.event_kind.lost_ownership, .source = at, .name = "p",
+        .quoted = true, .leaf = ownership_source_local.WHOLE};
+    ownership_api.event_descriptor e = ownership_api.event_descriptor{
+        .kind = ownership_api.event_kind.lost_ownership, .source = at, .text = "p"};
+    assert(ownership_source.repeats(null, &v, &e));
+    ownership_api.event_descriptor mut other = e;
+    other.text = "q";
+    assert(!ownership_source.repeats(null, &v, &other));
+    other = e;
+    other.kind = ownership_api.event_kind.invalid_use;
+    assert(!ownership_source.repeats(null, &v, &other));
+    other = e;
+    other.source.col = 3;
+    assert(!ownership_source.repeats(null, &v, &other));
+    ownership_source_local.violation mut unquoted = v;
+    unquoted.quoted = false;
+    assert(!ownership_source.repeats(null, &unquoted, &e));
+    // A leaf names its place through the leaves of its run. Without a run it repeats nothing.
+    ownership_source_local.violation mut leaf = v;
+    leaf.leaf = 0;
+    assert(!ownership_source.repeats(null, &leaf, &e));
+    println("repeats ok");
+}
+
 fn main() i32 {
     rows();
     document();
@@ -1033,5 +1106,7 @@ fn main() i32 {
     lowering_failure();
     graph_refusal();
     graph_without_proof();
+    validated_before_gap();
+    repeats();
     return 0;
 }

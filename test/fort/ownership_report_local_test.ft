@@ -26,6 +26,7 @@ import ownership_report_env;
 import ownership_source;
 import ownership_source_env;
 import ownership_source_local;
+import ownership_witness;
 import std.str;
 import std.strbuf;
 
@@ -96,7 +97,14 @@ fn rows() void {
     // A load from storage that no TL holds leaves correspondence incomplete.
     assert(ownership_report.analysis_status(loaded, local, 0) == "incomplete");
     assert(ownership_report.analysis_status(loaded, local, 2) == "incomplete");
-    // Only the local row counts violations.
+    // Only the local row counts violations. The calls_heap checker validates the same loss, and
+    // the local row gives its primary error first, so the calls_heap row drops it (toolchain.md
+    // 4.2 duplicate selection) and keeps its incomplete proof.
+    assert(leak->calls != null);
+    assert(leak->calls->witness.verdict == ownership_witness.status.validated);
+    assert(ownership_source.repeated(leak, &leak->calls->heap_event));
+    assert(ownership_report.analysis_status(leak, ownership_report.CALLS_HEAP, 2) ==
+        "incomplete");
     u64 mut stage = 0;
     while (stage < ownership_report.ANALYSIS_COUNT) {
         if (stage != local) { assert(ownership_report.analysis_violations(leak, stage) == 0); }
@@ -233,7 +241,8 @@ fn diagnostics() void {
     diag.sink mut found = diag.sink{};
     defer diag.free(&found);
     ownership_report_env.diagnose(&e.source, &found, "main.ft");
-    // Three violations give an error and a note each. The closure reason follows them.
+    // Three violations give an error and a note each. The closure reason follows them. Each loss
+    // gives one primary error, also where the calls_heap checker validates it again.
     assert(diag.count(&found) == 4 && diag.record_count(&found) == 7);
     assert(diag.record_at(&found, 0).msg == "lost ownership of 'p'");
     assert(diag.record_at(&found, 1).msg == "storage ends with a live owner");

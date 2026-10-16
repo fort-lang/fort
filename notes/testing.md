@@ -722,11 +722,12 @@ bullet at a time and without a rewrite.
     entries.
   - A coverage PR: a row may change from incomplete to complete. The ledger does not change. One
     probe for each trust class comes before the fix.
-  - A witness PR: a violation in the 72 accept cases or in the compiler closure is must-fix. The
-    witness PR adds `test/ownership/witness/false_violations.txt`. A false violation on a probe
-    joins that file when its rendered conditions name a step that fails on the run. A false
-    violation whose conditions all hold on the run is a checker bug, and it is must-fix
-    (2026-10-10).
+  - A witness PR: a violation in the 72 accept cases or in the compiler closure is must-fix. A
+    false violation on a probe joins `test/ownership/witness/false_violations.txt` when its
+    rendered conditions name a step that fails on the run. The witness PR that records the first
+    such violation adds that file; the one-body checker records none, so the file does not exist
+    yet. A false violation whose conditions all hold on the run is a checker bug, and it is
+    must-fix (2026-10-10).
 - **Two soundness gates hold the heap solver and the summary solver alone** (D17.14, D17.18).
   Outside its 12 test programs, only `ownership_source_calls` imports `ownership_heap`, and it
   joins the two solvers. These gates run each solver alone.
@@ -746,11 +747,12 @@ bullet at a time and without a rewrite.
   the faulty body of each of the 37 reject cases (the last function at or before an error line)
   and the 119 bodies of `test/ownership/solvers/faulty.json`. A body is faulty because its source
   has the expected error: the error line of a reject case, or the `faulty.json` entry of a probe.
-  The summary solver must prove 0, and the calls_heap row must prove 0 and fail 0: it needs both
-  proofs and validates no event. No ledger entry names the row. The heap solver may prove only the
-  entries of `test/ownership/solvers/false_accepts.txt`, and each entry must still prove. The
-  ledger has one line `# at most N entries`, and a ledger with more entries fails the test. A
-  change lowers N
+  The summary solver must prove 0, and the calls_heap row must prove 0: it needs both proofs. No
+  ledger entry names the row. Its one-body witness checker validates an event in 13 of the faulty
+  bodies, so the row fails exactly those 13, and `expected_failed` in the test names them. The
+  heap solver may prove only the entries of `test/ownership/solvers/false_accepts.txt`, and each
+  entry must still prove. The ledger has one line `# at most N entries`, and a ledger with more
+  entries fails the test. A change lowers N
   when it deletes an entry, so each step down is a one-line diff; a raise of N is the only way to
   add an entry, and review refuses it. On 2026-10-10 N was 13: 4 entries of class A, 3 of B, 1 of
   D and 5 of E. Rule P1 of D17.18 (only an established fact removes a path) deleted the 8 entries

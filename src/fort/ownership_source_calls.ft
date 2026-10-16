@@ -17,6 +17,8 @@ import ownership_recursive;
 import ownership_source_local;
 import ownership_summary_body;
 import ownership_summary_model;
+import ownership_witness;
+import std.mem;
 
 u64 NONE = 18446744073709551615;
 
@@ -67,12 +69,19 @@ enum gap_kind {
     own_proof,
 }
 
+/// The relation and operation of one heap candidate.
+struct candidate_site {
+    ownership_api.entity_id relation;
+    ownership_api.operation_position operation;
+}
+
 /// The calls_heap outcome of one body.
 struct row {
     ownership_source_local.status correspondence;
     ownership_source_local.status solver;
     ownership_api.proof_status proof;
-    // No event is a violation, so this count stays 0.
+    // 1 when the one-body witness checker validates the heap candidate, else 0. The source
+    // context sets it to 0 again when an earlier analysis gives the same primary error.
     u64 violations;
     // The published proof of each solver, and whether a caller can apply that summary.
     ownership_api.proof_status summary_proof;
@@ -85,6 +94,15 @@ struct row {
     // no witness decides yet (`candidate`).
     unproved summary_candidate;
     unproved heap_candidate;
+    // The selected heap candidate and its one-body witness check.
+    ownership_api.event_descriptor heap_event;
+    u8 mut@ own heap_text;
+    ownership_witness.result witness;
+    // The relation and operation of each heap candidate of the body, and whether the selected
+    // candidate is the only one of its allocation (`ownership_witness.request.sole`).
+    candidate_site mut@ own heap_sites;
+    u64 heap_sites_len;
+    bool heap_sole;
     // The events that the row counted and did not keep.
     u64 dropped;
     // The refused V charge of an event of this body that the row could not keep.
@@ -285,6 +303,36 @@ fn before(unproved* a, unproved* b) bool {
 // a later event that comes before it takes its place and pays nothing. `dropped` counts the events
 // that are not the first event. The result keeps the proof of the solver, so the producer changes
 // no solver outcome.
+fn add_site(row mut* r, ownership_api.event_descriptor* e) void {
+    if (r->heap_sites_len == r->heap_sites.len) {
+        u64 cap = r->heap_sites.len == 0 ? 4 : r->heap_sites.len * 2;
+        candidate_site mut@ own bigger = new(candidate_site, cap);
+        u64 mut i = 0;
+        while (i < r->heap_sites_len) { bigger[i] = r->heap_sites[i]; i += 1; }
+        del(r->heap_sites);
+        r->heap_sites = move(bigger);
+    }
+    r->heap_sites[r->heap_sites_len] = candidate_site{e->relation, e->operation};
+    r->heap_sites_len += 1;
+}
+
+/// Whether the selected heap candidate of row `r` names an allocation, and no heap candidate of
+/// the body at another operation names that allocation. A solver can give one event twice.
+fn sole_candidate(row* r) bool {
+    ownership_api.entity_id relation = r->heap_event.relation;
+    if (relation.kind != ownership_api.entity_kind.allocation) { return false; }
+    u64 mut i = 0;
+    while (i < r->heap_sites_len) {
+        candidate_site site = r->heap_sites[i];
+        if (ownership_keys.entity(site.relation, relation) == 0 &&
+            ownership_keys.operation(site.operation, r->heap_event.operation) != 0) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
 fn event(void mut* opaque, ownership_api.event_request* req) ownership_api.event_result {
     context mut* c = cast(opaque, context mut*);
     ownership_api.event_result out = ownership_api.event_result{.proof = req->current,
@@ -300,7 +348,20 @@ fn event(void mut* opaque, ownership_api.event_request* req) ownership_api.event
     bool was = first->present;
     if (!keep(c, r, first, next, e) || was) { r->dropped += 1; }
     if (candidate(e)) {
-        keep(c, r, summary ? &r->summary_candidate : &r->heap_candidate, next, e);
+        if (!summary) { add_site(r, e); }
+        bool selected = keep(c, r, summary ? &r->summary_candidate : &r->heap_candidate, next,
+            e);
+        if (!summary && selected) {
+            del(r->heap_text);
+            r->heap_event = *e;
+            if (e->text.len > 0) {
+                r->heap_text = new(u8, e->text.len);
+                mem.copy(r->heap_text, cast(e->text, u8@));
+                r->heap_event.text = cast(r->heap_text[..], string);
+            } else {
+                r->heap_event.text = "";
+            }
+        }
     }
     return out;
 }
@@ -609,6 +670,16 @@ fn solve_heaps(context mut* c, ownership_flow.source_file_binding@ files) void {
         ownership_heap.summary* s = &solved.summaries[i];
         c->rows[i].heap_proof = s->proof;
         c->rows[i].heap_proved = heap_applies(s);
+        if (c->rows[i].heap_candidate.present) {
+            c->rows[i].heap_sole = sole_candidate(&c->rows[i]);
+            ownership_witness.request check = ownership_witness.request{g->bodies[i].body, s,
+                &c->rows[i].heap_event, files[i..i + 1], ownership_witness.PRODUCTION_X,
+                c->rows[i].heap_sole};
+            c->rows[i].witness = ownership_witness.check(&check);
+            if (c->rows[i].witness.verdict == ownership_witness.status.validated) {
+                c->rows[i].violations = 1;
+            }
+        }
         i += 1;
     }
 }
@@ -667,15 +738,17 @@ fn ledger_of(context* c, u64 body, solver_kind solver) u64 {
     return index;
 }
 
-/// Whether body `body` renders one terminal record (`spec/toolchain.md` 4.2): it is declared,
-/// that is its correspondence is complete, and its proof is not complete. The summary ledger of
-/// the body pays for the record. A declared body has that ledger: without it, no event is kept
-/// and each proof carries the refusal of the graph, a budget error that excludes the body.
+/// Whether body `body` renders one terminal record (`spec/toolchain.md` 4.2): it has a validated
+/// violation, or it is declared, that is its correspondence is complete, and its proof is not
+/// complete. A validated witness stops before any call, so a later call without callee facts
+/// does not suppress it. The summary ledger of the body pays for the record. A declared body has
+/// that ledger: without it, no event is kept and each proof carries the refusal of the graph, a
+/// budget error that excludes the body.
 fn shows_record(context* c, u64 body) bool {
     if (ledger_of(c, body, solver_kind.summary) == NONE) { return false; }
     row* r = &c->rows[body];
-    return r->correspondence == ownership_source_local.status.complete &&
-        !ownership_api.successful(r->proof);
+    return r->violations > 0 || (r->correspondence == ownership_source_local.status.complete &&
+        !ownership_api.successful(r->proof));
 }
 
 /// The refusal `p` of ledger `index` with a source: a terminal without a source names the
@@ -707,6 +780,13 @@ fn charge_report(context mut* c, u64 index, ownership_api.operation_position op,
 }
 
 fn free(context mut* c) void {
+    u64 mut i = 0;
+    while (i < c->rows.len) {
+        ownership_witness.free(&c->rows[i].witness);
+        del(c->rows[i].heap_text);
+        del(c->rows[i].heap_sites);
+        i += 1;
+    }
     del(c->rows);
     del(c->members);
     del(c->members_first);

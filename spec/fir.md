@@ -1424,10 +1424,17 @@ These bounds control analysis precision. They add no source-language size restri
 | E | function | Ordered summary-effect nodes and symbolic summary relations. |
 | W | computation | Counted transfer, join, widening, substitution, and summary-solver work. |
 | V | report | Retained proof events, witness links, and rendered diagnostic records. |
+| X | witness | Path steps and conditions of one witness check. The production bound is 1024. |
+| K | witness | Projections of one storage key of a witness check. The production bound is 6. |
 
 D, R, P, G, H, T, and E count the content that their scope holds now.
 Removed content does not count. Insertion, join, and widening use the same count for a category.
 W is cumulative within one computation.
+X is cumulative within one witness check of one candidate event. Each statement, terminator,
+recorded condition, and leaf of a whole aggregate copy is one step.
+A refused X step leaves the candidate incomplete proof. It is not a work-budget failure.
+A place with more than K field and element projections in one storage key stops the witness
+check. That candidate stays incomplete proof too.
 A computation is the call-graph build, the liveness or flow analysis of one function, or the
 summary solver of one recursive component. A function in a recursive component keeps its own
 liveness computation.
@@ -1546,7 +1553,9 @@ Compose mixed target outcomes under their conditions, including actual aliases a
 An abort alternative needs no cleanup. It cannot remove a normal alternative's obligations.
 
 **Deterministic limits.** Use a versioned table of numeric implementation bounds for D, R, P, G,
-H, T, E, and V. The W bound of a computation is a function of its FIR size S:
+H, T, E, and V. The witness checker fixes X and K as constants of its source
+(`ownership_witness.PRODUCTION_X` and `PATH_DEPTH`), and the bound table above gives their values.
+The W bound of a computation is a function of its FIR size S:
 `W(S) = W_base + W_scale * S`. The same versioned table supplies W_base and W_scale.
 The FIR size of a function is its FIR statement count plus its block count.
 The FIR size of a computation is the sum over its functions. The graph build uses all its bodies.
