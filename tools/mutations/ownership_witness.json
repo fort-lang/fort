@@ -15,7 +15,7 @@
   "stages": [
     {
       "name": "checker",
-      "command": "build/$(uname -s)/debug/witness-mutate/ownership_witness_test"
+      "command": "cd build/$(uname -s)/debug/witness-mutate && ./ownership_witness_test"
     },
     {
       "name": "producer",
@@ -296,7 +296,7 @@
     {
       "decision": "D17.18-copy-reads-leaf-identity",
       "file": "src/fort/ownership_witness.ft",
-      "old": "    value leaf = stored_value(s, from, ty);",
+      "old": "    value leaf = stored_value(s, from, ty, at);",
       "new": "    value leaf = slot_at(s, from, ty)->contents;",
       "what": "a copied unknown reference gets a referent apart from its source"
     },
@@ -322,25 +322,25 @@
       "what": "a later call without callee facts hides a validated violation"
     },
     {
-      "decision": "D17.18-input-alias-read-stops",
+      "decision": "D17.18-input-alias-read-condition",
       "file": "src/fort/ownership_witness.ft",
-      "old": "fn stored_value(exact_state mut* s, storage_key key, types.node* ty) value {\n    if (!input_read(s, key)) { return value{}; }",
-      "new": "fn stored_value(exact_state mut* s, storage_key key, types.node* ty) value {\n    if (false) { return value{}; }",
-      "what": "a read of input storage keeps its value after a store through another referent"
+      "old": "fn stored_value(exact_state mut* s, storage_key key, types.node* ty, diag.loc at) value {\n    if (!input_read(s, key, at)) { return value{}; }",
+      "new": "fn stored_value(exact_state mut* s, storage_key key, types.node* ty, diag.loc at) value {\n    if (false) { return value{}; }",
+      "what": "a read of input storage after a store through another referent takes no distinct-storage condition"
     },
     {
-      "decision": "D17.18-input-pointer-load-stops",
+      "decision": "D17.18-input-pointer-load-condition",
       "file": "src/fort/ownership_witness.ft",
-      "old": "            if (!input_read(s, key)) { return place_result{}; }\n            slot mut* owner = slot_at(s, key, ty);",
+      "old": "            if (!input_read(s, key, at)) { return place_result{}; }\n            slot mut* owner = slot_at(s, key, ty);",
       "new": "            slot mut* owner = slot_at(s, key, ty);",
-      "what": "a pointer load out of input storage keeps its value after a store through another referent"
+      "what": "a pointer load out of input storage after a store through another referent takes no distinct-storage condition"
     },
     {
       "decision": "D17.18-input-read-own-referent",
       "file": "src/fort/ownership_witness.ft",
-      "old": "    if (!s->stored_many && s->stored_root == key.root) { return true; }",
-      "new": "    if (false) { return true; }",
-      "what": "a read of input storage stops after a store through the same referent"
+      "old": "        if (other != key.root && !distinct(s, key.root, other) &&",
+      "new": "        if (!distinct(s, key.root, other) &&",
+      "what": "a read of input storage takes a distinct-storage condition after a store through its own referent"
     },
     {
       "decision": "D17.18-input-store-write",
@@ -401,8 +401,8 @@
     {
       "decision": "D17.18-copy-leaf-step",
       "file": "src/fort/ownership_witness.ft",
-      "old": "    if (!charge(s)) { return false; }\n    value leaf = stored_value(s, from, ty);",
-      "new": "    value leaf = stored_value(s, from, ty);",
+      "old": "    if (!charge(s)) { return false; }\n    value leaf = stored_value(s, from, ty, at);",
+      "new": "    value leaf = stored_value(s, from, ty, at);",
       "what": "a leaf of a whole aggregate copy pays no X step"
     },
     {
@@ -516,6 +516,125 @@
       "old": "        if (ownership_keys.entity(site.relation, relation) == 0 &&\n            ownership_keys.operation(site.operation, r->heap_event.operation) != 0) {",
       "new": "        if (ownership_keys.entity(site.relation, relation) == 0) {",
       "what": "the producer counts one event that a solver gave twice as a second candidate"
+    },
+    {
+      "decision": "D17.18-alias-pair-once",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "        if (other != key.root && !distinct(s, key.root, other) &&",
+      "new": "        if (other != key.root &&",
+      "what": "a second read of one referent pair takes a second distinct-storage condition"
+    },
+    {
+      "decision": "D17.18-alias-pair-unordered",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "        if ((item.first == a && item.second == b) || (item.first == b && item.second == a)) {",
+      "new": "        if (item.first == a && item.second == b) {",
+      "what": "a read of a referent pair in the other order takes a second distinct-storage condition"
+    },
+    {
+      "decision": "D17.18-alias-each-store",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "            !note_distinct(s, key.root, other, at, name_read)) {\n            s->stopped = true;\n            return false;\n        }\n        i += 1;",
+      "new": "            !note_distinct(s, key.root, other, at, name_read)) {\n            s->stopped = true;\n            return false;\n        }\n        i = s->stores_len;",
+      "what": "a read of input storage takes a condition only with the first referent that has a store"
+    },
+    {
+      "decision": "D17.18-alias-condition-step",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    return add_condition(s, condition{.kind = condition_kind.input_alias,",
+      "new": "    s->used -= 1;\n    return add_condition(s, condition{.kind = condition_kind.input_alias,",
+      "what": "a distinct-storage condition pays no X step"
+    },
+    {
+      "decision": "D17.18-alias-note-text",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "string ALIAS_FACT = \"' to designate distinct storage here; if they overlap, a store through '\";",
+      "new": "string ALIAS_FACT = \"' to designate other storage here; if they overlap, a store through '\";",
+      "what": "the alias note leaves the ruled words"
+    },
+    {
+      "decision": "D17.18-alias-walk-storage",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "fn input_check(exact_state mut* s, storage_key key, diag.loc at, bool name_read) bool {\n    if (!input_storage(s, key)) { return true; }",
+      "new": "fn input_check(exact_state mut* s, storage_key key, diag.loc at, bool name_read) bool {",
+      "what": "a read of a local or a fresh cell takes a distinct-storage condition"
+    },
+    {
+      "decision": "D17.18-alias-note-row",
+      "file": "src/fort/ownership_report.ft",
+      "old": "    if (item->kind == ownership_witness.condition_kind.input_alias) {\n        ownership_witness.append_alias_condition(item, message);\n        return;\n    }",
+      "new": "",
+      "what": "the report renders an alias condition with the generic row"
+    },
+    {
+      "decision": "D17.18-input-store-move",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    if (!got.resolved || got.invalid) { s->stopped = true; return; }\n    input_store(s, got.key);",
+      "new": "    if (!got.resolved || got.invalid) { s->stopped = true; return; }",
+      "what": "a move out of input storage records no store"
+    },
+    {
+      "decision": "D17.18-alias-name-stops",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    if (!name_holds(s, root, at) || !name_holds(s, other, at) || !name_of(s, root, &read) ||",
+      "new": "    if (!name_of(s, root, &read) ||",
+      "what": "a note names a referent whose name a store wrote over"
+    },
+    {
+      "decision": "D17.18-alias-name-forget",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "        if (s->allocations[i].named && overlap(s->allocations[i].origin, key)) {\n            s->allocations[i].named = false;",
+      "new": "        if (s->allocations[i].named && overlap(s->allocations[i].origin, key)) {\n            s->allocations[i].named = true;",
+      "what": "a store over the slot of a name keeps the name"
+    },
+    {
+      "decision": "D17.18-alias-name-param",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "            fir.local_at(s->input->body, key.root)->kind == fir.local_kind.lk_param;",
+      "new": "            true;",
+      "what": "a local that is no parameter names a referent"
+    },
+    {
+      "decision": "D17.18-alias-name-entry-value",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "                    if (entry.kind != value_kind.entry_value || entry.param != pointer.param) {",
+      "new": "                    if (false) {",
+      "what": "a parameter names its entry referent after a store wrote over it"
+    },
+    {
+      "decision": "D17.18-alias-name-parent",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    return input_check(s, a.origin, at, true) && name_holds(s, a.origin.root, at);",
+      "new": "    return input_check(s, a.origin, at, true);",
+      "what": "a name that steps through a forgotten name holds"
+    },
+    {
+      "decision": "D17.18-alias-name-origin-read",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "    return input_check(s, a.origin, at, true) && name_holds(s, a.origin.root, at);",
+      "new": "    return name_holds(s, a.origin.root, at);",
+      "what": "a name that reads input storage takes no condition with the other referents with a store"
+    },
+    {
+      "decision": "D17.18-alias-name-chain",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "        if (origin.root >= root || !name_of(s, origin.root, out) ||\n            !push_step(out, name_step.deref, 0)) { return false; }",
+      "new": "        *out = referent_name{.local = s->allocations[cast(origin.root, u64)].origin.root};",
+      "what": "a name of a referent read from input storage leaves out the chain of its parent"
+    },
+    {
+      "decision": "D17.18-release-inexact-stops",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "        if (!bad && held.kind != value_kind.allocation && held.kind != value_kind.null_value) {",
+      "new": "        if (false) {",
+      "what": "a release of a pointer that is no exact allocation of the path lets the path continue"
+    },
+    {
+      "decision": "D17.18-alias-name-note",
+      "file": "src/fort/ownership_witness.ft",
+      "old": "        .name_read = name_read});",
+      "new": "        .name_read = false});",
+      "what": "the condition of the slot of a name says that the store can change the read"
     }
   ]
 }

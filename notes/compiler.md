@@ -1000,16 +1000,34 @@ came here.
   only, so an inexact rvalue cannot decide a branch or a check. The first invalid read of an
   operation ends the path. Three review rounds found stale or untyped zero facts before this rule.
   `typed_values` and `typed_regressions` in `test/fort/ownership_witness_test.ft` hold it.
-- **The one-body witness checker makes no alias assumption between inputs** (D17.4, D17.18).
-  Input storage is a cell of a referent that the path did not allocate: an entry pointer, or a
-  pointer in storage that the path does not know. Two such referents can name one storage. So
-  after a store through one referent (a write, a copy, a zero store, a move out or a release),
-  a read of input storage through another referent stops the path (`input_read`). A local and a
-  fresh cell keep their contents. A review found 6 bodies with a false violation that exited 0
-  when each input had its own storage. The checker does not substitute aliases; a later checker
-  can. `alias_rules` holds it. An address computation reads no storage at its last dereference:
-  it records no condition, and the path stops unless that pointer is an exact allocation or
-  address (`address_rules`). At a return, an owner in input storage transfers (`return_rules`).
+- **The one-body witness checker reads input storage under a distinct-storage condition**
+  (D17.4, D17.18). Input storage is a cell of a referent that the path did not allocate: an
+  entry pointer, or a pointer in storage that the path does not know. Two such referents can
+  name one storage. So after a store through one referent (a write, a copy, a zero store, a move
+  out or a release), a read of input storage through another referent takes the input condition
+  that the two designate distinct storage (`input_read`), and reads its own cells. Each pair
+  takes one condition, of one X step. The note names each referent by its origin, the slot that
+  held its pointer when the path got it: a parameter, or a slot of input storage, through a
+  dereference of the name of its parent (`name_referent`, `name_of`). A store over that slot,
+  or over the slot of a parent, forgets the name (`forget_names`), and a note that needs a
+  forgotten name stops the path (`name_holds`). A pointer of a store such as `a = &p->n` can
+  designate a part of the referent, and a local can change or end before the read, so neither
+  names a referent (review of 2026-10-16). A slot of input storage in a name is read again at
+  the note, so it takes its own alias conditions; each such note ends in "can change this name"
+  (`condition.name_read`). A release of a pointer that is no exact allocation of the path, such
+  as a loaded owner that it never dereferenced, stops the path (the user, 2026-10-17), because
+  the path does not know which storage it ends. A loaded owner stops it even after a copy of it
+  was dereferenced, and a null release continues. So `alias_copy` and `store_moved` of main stay
+  incomplete proof (coordinator, 2026-10-17). A local and a fresh cell take no condition.
+  The checker takes no `same` relation: an event that faults only when two inputs designate one
+  storage stays incomplete proof (the user, 2026-10-16), and a comparison of two referents
+  still stops. A review found 6 bodies with a false violation that exited 0 when two inputs
+  named one storage; under the condition each validates, its run with distinct inputs leaks,
+  and its run with one storage does not (`WitnessAliasRunTest`). `alias_rules`, `alias_pairs`,
+  `alias_names` and `alias_state` hold it. An address computation reads no storage at its last
+  dereference: it records no condition, and the path stops unless that pointer is an exact
+  allocation or address (`address_rules`). At a return, an owner in input storage transfers
+  (`return_rules`).
   A calls_heap witness that gives the primary error of an earlier analysis of the body counts
   once, in that analysis (`ownership_source.repeated`, toolchain.md 4.2 duplicate selection).
   An input-branch note says that the other arms do not reach the event only when no unselected

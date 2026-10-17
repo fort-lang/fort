@@ -14,8 +14,12 @@
 //| copy refusals ok
 //| return rules ok
 //| branch notes ok
-/// Checks the one-body witness walk and its four diagnostic condition rows.
+//| alias pairs ok
+//| alias names ok
+//| alias state ok
+/// Checks the one-body witness walk and its five diagnostic condition rows.
 import consts;
+import diag;
 import fir;
 import fir_flow;
 import ownership_api;
@@ -290,9 +294,107 @@ string[29] NOTES_TEXT = {
     "    switch (c) { case 1: { if (x == 0) { x = 1; } } default: {} } }",
 };
 
+// The return rule without a release of the loaded owner. A sixth closure keeps each closure
+// below its 64 recorded events.
+string[5] RETURN_TEXT = {
+    "struct holder { i32 mut* own item; }",
+    "fn store_kept(holder mut* h) void { i32 mut* own old = move(h->item);",
+    "    h->item = new(i32); }",
+    "fn store_taken(holder mut* h) void { i32 mut* own old = move(h->item);",
+    "    h->item = new(i32); i32 mut* own b = move(h->item); }",
+};
+
+string[2] RETURN_NAMES = {"store_kept", "store_taken"};
+
 string[15] NOTES_NAMES = {"demo", "iu_view", "iu_after", "iu_switch", "both_leak",
     "both_switch", "arm_leak", "arm_false", "arm_case", "arm_other", "d", "e", "two", "sw",
     "other_both"};
+
+// The bodies of the alias pairs, the note names and the X step of a condition. A fifth closure
+// keeps each closure below its 64 recorded events.
+string[74] ALIAS_TEXT = {
+    "struct ib { i32 n; bool c; }",
+    "struct nd { nd mut* next; i32 n; }",
+    "struct hold { ib mut* own item; }",
+    "fn twice_alias(ib mut* p, ib mut* q) void { p->n = 1; q->n = 2; i32 a = p->n;",
+    "    i32 mut* own k = new(i32); if (p->n == 1) { return; } del(k); }",
+    "fn swap_alias(ib mut* p, ib mut* q) void { q->n = 1; i32 a = p->n; p->n = 2;",
+    "    i32 mut* own k = new(i32); if (q->n == 1) { return; } del(k); }",
+    "fn rename_alias(ib mut* p, ib mut* q) void { p->n = 1; q->n = 2; ib mut* r = q;",
+    "    r->c = true; i32 mut* own k = new(i32); if (p->n == 1) { return; } del(k); }",
+    "fn chain_alias(nd mut* p, nd mut* q) void { q->n = 1; nd mut* b = p->next->next;",
+    "    i32 mut* own k = new(i32); }",
+    "fn release_field(hold mut* h, ib mut* q) void { bool b = h->item->c; del(h->item);",
+    "    q->n = 1; i32 mut* own k = new(i32); if (q->n == 1) { return; } del(k); }",
+    "fn pay_alias(ib mut* p, ib mut* q) void { p->n = 1; q->n = 2; i32 a = p->n;",
+    "    i32 mut* own k = new(i32); }",
+    "fn pay_own(ib mut* p, ib mut* q) void { p->n = 1; i32 a = p->n; q->n = 2;",
+    "    i32 mut* own k = new(i32); }",
+    "fn move_alias(hold mut* h, ib mut* q) void { ib mut* own t = move(h->item); i32 v = q->n;",
+    "    i32 mut* own k = new(i32); }",
+    "fn same_only(ib mut* p, ib mut* q) void { p->n = 1; q->n = 2; i32 mut* own k = new(i32);",
+    "    if (p->n == 2) { return; } del(k); }",
+    "fn cmp_alias(ib mut* p, ib mut* q) void { p->n = 1; q->n = 2; i32 a = p->n;",
+    "    i32 mut* own k = new(i32); if (p == q) { return; } del(k); }",
+    "fn three_alias(ib mut* p, ib mut* q, ib mut* r) void { p->n = 1; q->n = 2; r->n = 3;",
+    "    i32 mut* own k = new(i32); if (p->n == 1) { return; } del(k); }",
+    "fn known_alias(nd mut* p, nd mut* q) void { p->next = q; q->n = 2; nd mut* r = p->next;",
+    "    i32 mut* own k = new(i32); if (r->n == 2) { return; } del(k); }",
+    "struct in2 { i32 x; }",
+    "struct ob { i32 n; in2 m; }",
+    "struct hd { ib mut* c; }",
+    "fn sub_store(ob mut* p, in2 mut* q) void { q->x = 7; p->m.x = 1; i32 mut* a = &p->n;",
+    "    *a = 3; i32 mut* own k = new(i32); if (q->x == 7) { return; } del(k); }",
+    "fn sub_read(ob mut* p, in2 mut* q) void { p->m.x = 7; i32 mut* a = &p->n; q->x = 0;",
+    "    i32 t = *a; i32 mut* own k = new(i32); if (p->m.x == 7) { return; } del(k); }",
+    "fn moved_local(ib mut* p, ib mut* q, ib mut* r) void { ib mut* mut w = q; p->n = 1;",
+    "    w->n = 2; w = r; i32 mut* own k = new(i32); if (p->n == 1) { return; } del(k); }",
+    "fn moved_field(ib mut* p, hd mut* h, ib mut* r) void { p->n = 1; h->c->n = 2; h->c = r;",
+    "    i32 mut* own k = new(i32); if (p->n == 1) { return; } del(k); }",
+    "fn self_name(nd mut* p) void { nd mut* mut cur = p->next; cur->n = 1; cur = p;",
+    "    cur->n = 2; cur = p->next; i32 mut* own k = new(i32); if (cur->n == 1) { return; }",
+    "    del(k); }",
+    "fn dead_local(ib mut* p, ib mut* q) void { p->n = 1; if (true) { ib mut* w = q;",
+    "    w->n = 2; } i32 mut* own k = new(i32); if (p->n == 1) { return; } del(k); }",
+    "fn moved_param(ib mut* p, ib mut* mut q, ib mut* r) void { p->n = 1; q->n = 2; q = r;",
+    "    i32 mut* own k = new(i32); if (p->n == 1) { return; } del(k); }",
+    "fn copied_param(ib mut* p, ib mut* mut q, ib mut* r) void { ib mut* w = q; q = r;",
+    "    p->n = 1; w->n = 2; i32 mut* own k = new(i32); if (p->n == 1) { return; } del(k); }",
+    "fn origin_alias(nd mut* p, nd mut* q) void { nd mut* r = p->next; i32 v = r->n; q->n = 1;",
+    "    i32 w = r->n; i32 mut* own k = new(i32); }",
+    "fn zero_parent(nd mut* p, nd mut* q) void { q->n = 5; nd mut* r = p->next; r->n = 1;",
+    "    *p = nd{}; i32 mut* own k = new(i32); if (q->n == 5) { return; } del(k); }",
+    "fn copy_parent(nd mut* p, nd mut* q, nd* g) void { q->n = 5; nd mut* r = p->next;",
+    "    r->n = 1; *p = *g; i32 mut* own k = new(i32); if (q->n == 5) { return; } del(k); }",
+    "fn leaf_moved(pr2 mut r, pr2 t) void { ib mut* a = r.a; a->n = 1; r.b->n = 2; r = t;",
+    "    i32 mut* own k = new(i32); if (a->n == 1) { return; } del(k); }",
+    "struct pr2 { ib mut* a; ib mut* b; }",
+    "struct pr3 { ib mut* a; ib mut* b; i32 n; }",
+    "fn leaf_kept(pr3 mut r) void { ib mut* a = r.a; a->n = 1; r.b->n = 2; r.n = 5;",
+    "    i32 mut* own k = new(i32); if (a->n == 1) { return; } del(k); }",
+    "struct ho { nd mut* own c; }",
+    "fn release_name(hold mut* h, ib mut* q, ib mut* p) void { p->n = 1; del(h->item);",
+    "    i32 mut* own k = new(i32); if (p->n == 1) { return; } del(k); }",
+    "fn rel_other(ho mut* h, ho mut* g, ib mut* q) void { nd mut* a = h->c->next; a->n = 1;",
+    "    del(g->c); q->n = 2; i32 mut* own k = new(i32); if (a->n == 1) { return; } del(k); }",
+    "fn release_entry(hold mut* h, ib mut* own q, ib mut* p) bool { p->n = 1;",
+    "    ib mut* own old = move(h->item); h->item = move(q); del(h->item);",
+    "    i32 mut* own k = new(i32); if (p->n == 1) { del(old); return true; } del(old); del(k);",
+    "    return false; }",
+    "fn null_release(ib mut* p, ib mut* q) void { p->n = 1; ib mut* own t = null; del(t);",
+    "    q->n = 2; i32 mut* own k = new(i32); if (p->n == 1) { return; } del(k); }",
+    "fn exact_release(hold mut* h, ib mut* p) void { p->n = 1; bool b = h->item->c;",
+    "    del(h->item); i32 mut* own k = new(i32); if (p->n == 1) { return; } del(k); }",
+    "fn deep_name(nd mut* p, nd mut* q) void { nd mut* a = p->next; nd mut* b = a->next;",
+    "    b->n = 1; q->n = 2; i32 mut* own k = new(i32); if (b->n == 1) { return; } del(k); }",
+};
+
+string[31] ALIAS_NAMES = {"twice_alias", "swap_alias", "rename_alias", "chain_alias",
+    "release_field", "pay_alias", "pay_own", "move_alias", "same_only", "cmp_alias",
+    "three_alias", "known_alias", "sub_store", "sub_read", "moved_local", "moved_field",
+    "self_name", "dead_local", "moved_param", "copied_param", "origin_alias", "zero_parent",
+    "copy_parent", "leaf_moved", "deep_name", "leaf_kept", "release_name", "rel_other",
+    "release_entry", "null_release", "exact_release"};
 
 // The producer rule `ownership_source_calls.sole_candidate` over the recorded events: `event`
 // names an allocation, and no candidate of body `index` at another operation names it.
@@ -576,10 +678,12 @@ fn review_regressions(ownership_heap_env.closure mut* c) void {
         i += 1;
     }
 
+    // `del(a->left)` releases a loaded owner that the path never dereferenced, so the path stops
+    // there (the user, 2026-10-17), and the read of `*b->left` stays incomplete proof.
     ownership_witness.result mut alias = candidate(c, "alias_copy",
         ownership_witness.PRODUCTION_X);
     defer ownership_witness.free(&alias);
-    assert(alias.verdict == ownership_witness.status.validated);
+    assert(alias.verdict == ownership_witness.status.rejected);
 
     exact_storage_field(c);
 
@@ -694,8 +798,9 @@ fn latest_review_regressions(ownership_heap_env.closure mut* c) void {
         .input = &residual_query};
     residual_state.allocations = new(ownership_witness.allocation, 2);
     residual_state.allocations_len = 2;
-    residual_state.allocations[0] = ownership_witness.allocation{true, true, false, 1};
-    residual_state.allocations[1] = ownership_witness.allocation{false, false, false, 2};
+    residual_state.allocations[0] = ownership_witness.allocation{.live = true,
+        .obligation = true, .relation = 1};
+    residual_state.allocations[1] = ownership_witness.allocation{.relation = 2};
     if (ownership_witness.return_loses(&residual_state)) {
         eprintln("red residual_identity");
         failed = true;
@@ -799,6 +904,19 @@ fn condition_text() void {
         .reached = "the invalid use"};
     rendered_condition2(&false_arm, "this path needs the condition here to be false; ",
         "the true arm does not reach the invalid use");
+    // A pointer place without a source name renders as "the pointer".
+    ownership_witness.condition alias = ownership_witness.condition{
+        .kind = ownership_witness.condition_kind.input_alias, .place = place, .input = true};
+    strbuf.str_buf mut alias_text = strbuf.create();
+    defer strbuf.free(&alias_text);
+    strbuf.append(&alias_text, "this path needs 'the pointer' and 'the pointer' to designate ");
+    strbuf.append(&alias_text, "distinct storage here; if they overlap, a store through ");
+    rendered_condition2(&alias, strbuf.view(&alias_text), "'the pointer' can change this read");
+    // The condition of the slot of a name says that the store can change the name.
+    ownership_witness.condition slot = ownership_witness.condition{
+        .kind = ownership_witness.condition_kind.input_alias, .place = place, .input = true,
+        .name_read = true};
+    rendered_condition2(&slot, strbuf.view(&alias_text), "'the pointer' can change this name");
     println("condition text ok");
 }
 
@@ -1161,29 +1279,113 @@ fn undecided_checks(ownership_heap_env.closure mut* c) void {
     println("undecided checks ok");
 }
 
-// The checker makes no alias assumption between two inputs. Each of the first nine bodies
-// stores through one input with a write, a struct or array copy, a zero store or a release, and
-// then reads input storage through another one. `use_alias` loads `p->ptr` after a store
-// through `q`. Each path stops, so each event stays incomplete proof. The checker validated the
-// first six and `use_alias` when it gave each input its own storage. The controls store through
-// one input, only read inputs, or read a local or a fresh cell after two input stores: the rule
-// does not stop them.
+// The expected note of a nonnull condition on pointer `read` when `store` is empty, else the
+// expected note of the alias condition of read pointer `read` and store pointer `store`. The
+// words are the rows that the user ruled (PR 125 Open question 1; this branch, 2026-10-16). A
+// `store` that starts with '#' is the condition of the slot of a name: its note ends in "can
+// change this name" (coordinator, 2026-10-17).
+fn expected_note(string read, string stored, strbuf.str_buf mut* out) void {
+    bool slot = stored.len > 0 && stored[0] == '#';
+    string store = slot ? stored[1..] : stored;
+    strbuf.append(out, "this path needs '");
+    strbuf.append(out, read);
+    if (store.len == 0) {
+        strbuf.append(out, "' to be non-null here; a null '");
+        strbuf.append(out, read);
+        strbuf.append(out, "' faults at this read first");
+        return;
+    }
+    strbuf.append(out, "' and '");
+    strbuf.append(out, store);
+    strbuf.append(out, "' to designate distinct storage here; if they overlap, a store through '");
+    strbuf.append(out, store);
+    strbuf.append(out, slot ? "' can change this name" : "' can change this read");
+}
+
+// Whether `got` validates with one note for each entry `i`, in order: `expected_note` of
+// `reads[i]` and `stores[i]`. On a mismatch it prints each note of `got`.
+fn alias_notes(string name, ownership_witness.result* got, string@ reads, string@ stores) bool {
+    assert(reads.len == stores.len);
+    bool mut ok = got->verdict == ownership_witness.status.validated &&
+        got->conditions_len == reads.len;
+    u64 mut i = 0;
+    while (ok && i < reads.len) {
+        strbuf.str_buf mut want = strbuf.create();
+        expected_note(reads[i], stores[i], &want);
+        strbuf.str_buf mut text = strbuf.create();
+        ownership_report.witness_condition(&got->conditions[i], &text);
+        ok = strbuf.view(&text) == strbuf.view(&want);
+        strbuf.free(&text);
+        strbuf.free(&want);
+        i += 1;
+    }
+    if (!ok) {
+        eprintln("red ", name, " verdict ", cast(got->verdict, u32), " notes ",
+            got->conditions_len);
+        i = 0;
+        while (i < got->conditions_len) {
+            strbuf.str_buf mut text = strbuf.create();
+            ownership_report.witness_condition(&got->conditions[i], &text);
+            eprintln("    ", strbuf.view(&text));
+            strbuf.free(&text);
+            i += 1;
+        }
+    }
+    return ok;
+}
+
+// `alias_notes` for the loss of `k` in `name`.
+fn alias_loss(ownership_heap_env.closure mut* c, string name, string@ reads, string@ stores)
+    bool {
+    ownership_witness.result mut got = loss(c, name, "k");
+    defer ownership_witness.free(&got);
+    return alias_notes(name, &got, reads, stores);
+}
+
+// Two inputs can designate one storage (D17.4). Each of the first nine bodies stores through one
+// input with a write, a struct or array copy, a zero store or a release, and then reads input
+// storage through another one. `use_alias` loads `p->ptr` after a store through `q`. Each path
+// takes the condition that the two pointers designate distinct storage, and validates under it
+// (D17.18). The final review of PR 125 ran the first six with one storage, and each exited 0
+// with no leak. `test/ownership/witness/alias_runs.ft` runs them, `zero_alias` and `arr_alias`
+// both ways. A note names each referent by a pointer that designates all of it: `al_next` names
+// the referent of `r` by the slot that the path read it from, `(*(p)).next`. `release_alias`
+// stops: `del(p)` writes null over `p`, so no name of the released referent holds at the read.
+// The controls store through one input, only read inputs, or read a local or a fresh cell after
+// two input stores: they take no alias condition.
 fn alias_rules(ownership_heap_env.closure mut* c) void {
     bool mut ok = true;
     ownership_witness.status validated = ownership_witness.status.validated;
-    ownership_witness.status rejected = ownership_witness.status.rejected;
-    string[9] aliased = {"al", "al_next", "copy_alias", "width_alias", "leaf_alias",
-        "equal_alias", "zero_alias", "release_alias", "arr_alias"};
-    for (string name : aliased) { ok = expect_loss(c, name, rejected, 0) && ok; }
+    ownership_witness.result mut al = loss(c, "al", "k");
+    defer ownership_witness.free(&al);
+    assert(al.conditions_len == 3);
+    rendered_condition2(&al.conditions[2], "this path needs 'p' and 'q' to designate distinct ",
+        "storage here; if they overlap, a store through 'q' can change this read");
+    string[3] p_q = {"p", "q", "p"};
+    string[3] after_q = {"", "", "q"};
+    string[3] q_p = {"q", "p", "q"};
+    string[3] after_p = {"", "", "p"};
+    ok = alias_notes("al", &al, p_q[..], after_q[..]) && ok;
+    string[3] p_r = {"p", "r", "p"};
+    string[3] after_next = {"", "", "(*(p)).next"};
+    ok = alias_loss(c, "al_next", p_r[..], after_next[..]) && ok;
+    ok = alias_loss(c, "copy_alias", q_p[..], after_p[..]) && ok;
+    ok = alias_loss(c, "width_alias", p_q[..], after_q[..]) && ok;
+    string[3] leaves = {"(r).a", "(r).b", "(r).a"};
+    string[3] after_b = {"", "", "(r).b"};
+    ok = alias_loss(c, "leaf_alias", leaves[..], after_b[..]) && ok;
+    string[4] equal = {"p", "a", "q", "p"};
+    string[4] equal_store = {"", "", "", "q"};
+    ok = alias_loss(c, "equal_alias", equal[..], equal_store[..]) && ok;
+    ok = alias_loss(c, "zero_alias", q_p[..], after_p[..]) && ok;
+    ok = expect_loss(c, "release_alias", ownership_witness.status.rejected, 0) && ok;
+    ok = alias_loss(c, "arr_alias", q_p[..], after_p[..]) && ok;
     ownership_heap_env.event_row read = ownership_heap_env.first(c, "use_alias");
     assert(read.kind == ownership_api.event_kind.invalid_use);
     assert(ownership_heap_env.text(&read) == "p->ptr");
     ownership_witness.result mut used = candidate(c, "use_alias",
         ownership_witness.PRODUCTION_X);
-    if (used.verdict != rejected) {
-        eprintln("red use_alias verdict ", cast(used.verdict, u32));
-        ok = false;
-    }
+    ok = alias_notes("use_alias", &used, p_q[..], after_q[..]) && ok;
     ownership_witness.free(&used);
     ok = expect_loss(c, "one_input", validated, 1) && ok;
     ok = expect_loss(c, "read_inputs", validated, 2) && ok;
@@ -1196,6 +1398,370 @@ fn alias_rules(ownership_heap_env.closure mut* c) void {
     ok = rendered_all(&one, one_note[..]) && ok;
     assert(ok);
     println("alias rules ok");
+}
+
+// One pair takes one condition: a second read of the pair adds none (`twice_alias`), and nor
+// does a read in the other order (`swap_alias`). A read after stores through two other
+// referents takes two (`three_alias`). A note names each referent by its parameter, also when a
+// copy `r` of `q` made the store (`rename_alias`), or by the slot that the path read it from
+// (`chain_alias`). A name that a store wrote over stops the path: `del(h->item)` writes null
+// over `h->item` (`release_field`). A condition is one X step: `pay_alias` and `pay_own` run
+// the same statements, and only `pay_alias` reads after a store through the other input. With
+// one step less, `pay_alias` refuses.
+fn alias_pairs(ownership_heap_env.closure mut* c) void {
+    bool mut ok = true;
+    string[3] p_q = {"p", "q", "p"};
+    string[3] after_q = {"", "", "q"};
+    ok = alias_loss(c, "twice_alias", p_q[..], after_q[..]) && ok;
+    string[3] swap = {"q", "p", "p"};
+    string[3] swap_store = {"", "", "q"};
+    ok = alias_loss(c, "swap_alias", swap[..], swap_store[..]) && ok;
+    string[3] renamed = {"p", "q", "p"};
+    string[3] renamed_store = {"", "", "q"};
+    ok = alias_loss(c, "rename_alias", renamed[..], renamed_store[..]) && ok;
+    string[5] chain = {"q", "p", "p", "(*(p)).next", "(*(p)).next"};
+    string[5] chain_store = {"", "", "q", "", "q"};
+    ok = alias_loss(c, "chain_alias", chain[..], chain_store[..]) && ok;
+    ok = expect_loss(c, "release_field", ownership_witness.status.rejected, 0) && ok;
+    ownership_witness.result mut own_path = loss(c, "pay_own", "k");
+    defer ownership_witness.free(&own_path);
+    ownership_witness.result mut alias_path = loss(c, "pay_alias", "k");
+    defer ownership_witness.free(&alias_path);
+    if (own_path.verdict != ownership_witness.status.validated ||
+        alias_path.verdict != ownership_witness.status.validated ||
+        own_path.conditions_len != 2 || alias_path.conditions_len != 3 ||
+        alias_path.used != own_path.used + 1) {
+        eprintln("red pay used ", own_path.used, " and ", alias_path.used);
+        ok = false;
+    }
+    ownership_witness.result mut short = loss_at(c, "pay_alias", "k", own_path.used);
+    defer ownership_witness.free(&short);
+    if (short.verdict != ownership_witness.status.refused || short.used != own_path.used) {
+        eprintln("red pay_alias at bound ", own_path.used, " verdict ", cast(short.verdict, u32));
+        ok = false;
+    }
+    // The least bound that validates `pay_alias` is its count of steps.
+    ownership_witness.result mut enough = loss_at(c, "pay_alias", "k", alias_path.used);
+    defer ownership_witness.free(&enough);
+    if (enough.verdict != ownership_witness.status.validated || enough.conditions_len != 3) {
+        eprintln("red pay_alias at bound ", alias_path.used, " verdict ",
+            cast(enough.verdict, u32));
+        ok = false;
+    }
+    // A move out of input storage is a store, so the later read through `q` takes a condition.
+    // The body does not release `t`: that release would stop the path (2026-10-17).
+    string[3] moved = {"h", "q", "q"};
+    string[3] moved_store = {"", "", "h"};
+    ok = alias_loss(c, "move_alias", moved[..], moved_store[..]) && ok;
+    // No `same` relation (the user, 2026-10-16): `same_only` leaks only when `p` and `q`
+    // designate one storage. Under the distinct-storage condition the branch goes to `del(k)`,
+    // so no path reaches the leak, and the event stays incomplete proof. A comparison of two
+    // referents stops the path, also after the pair took its condition (`cmp_alias`).
+    ownership_witness.status rejected = ownership_witness.status.rejected;
+    ok = expect_loss(c, "same_only", rejected, 0) && ok;
+    ok = expect_loss(c, "cmp_alias", rejected, 0) && ok;
+    // One read after stores through two other inputs takes a condition with each, in the
+    // order of their first stores.
+    string[5] three = {"p", "q", "r", "p", "p"};
+    string[5] three_store = {"", "", "", "q", "r"};
+    ok = alias_loss(c, "three_alias", three[..], three_store[..]) && ok;
+    // A pointer that the path stored keeps its exact value: `r` is `q`, so the read of `r->n`
+    // reads the cell that the path wrote through `q`, and takes no alias condition. Only the
+    // load of `p->next` after the store through `q` takes one. The copy `r` of the entry value
+    // of `q` takes its own nonnull note.
+    string[4] known = {"p", "q", "p", "r"};
+    string[4] known_store = {"", "", "q", ""};
+    ok = alias_loss(c, "known_alias", known[..], known_store[..]) && ok;
+    assert(ok);
+    println("alias pairs ok");
+}
+
+// The review probes of the names (2026-10-16). A store through `a = &p->n` writes a part of the
+// referent of `p`, so the note names `p` (`sub_store`, `sub_read`). A local that made the store
+// can change before the read or end, so the note names the parameter (`moved_local`,
+// `dead_local`). A slot that names a referent and that a store writes over stops the path:
+// `h->c = r` (`moved_field`), `q = r` over a `mut` parameter (`moved_param`), and `q = r`
+// before the copy `w` of `q` reaches the referent (`copied_param`). `self_name` names both
+// referents by slots that no store wrote over. The name `(*(p)).next` reads the storage of `p`
+// at the note, so it takes the condition of `p` and `q` first (`origin_alias`).
+fn alias_names(ownership_heap_env.closure mut* c) void {
+    bool mut ok = true;
+    ownership_witness.status rejected = ownership_witness.status.rejected;
+    string[3] q_p = {"q", "p", "q"};
+    string[3] after_p = {"", "", "p"};
+    string[3] p_q = {"p", "q", "p"};
+    string[3] after_q = {"", "", "q"};
+    ok = alias_loss(c, "sub_store", q_p[..], after_p[..]) && ok;
+    ok = alias_loss(c, "sub_read", p_q[..], after_q[..]) && ok;
+    string[3] p_w = {"p", "w", "p"};
+    ok = alias_loss(c, "moved_local", p_w[..], after_q[..]) && ok;
+    ok = alias_loss(c, "dead_local", p_w[..], after_q[..]) && ok;
+    string[4] self = {"p", "cur", "p", "cur"};
+    string[4] self_store = {"", "", "(*(p)).next", ""};
+    ok = alias_loss(c, "self_name", self[..], self_store[..]) && ok;
+    ok = expect_loss(c, "moved_field", rejected, 0) && ok;
+    ok = expect_loss(c, "moved_param", rejected, 0) && ok;
+    ok = expect_loss(c, "copied_param", rejected, 0) && ok;
+    string[5] origin = {"p", "r", "q", "p", "(*(p)).next"};
+    string[5] origin_store = {"", "", "", "#q", "q"};
+    ok = alias_loss(c, "origin_alias", origin[..], origin_store[..]) && ok;
+    ownership_witness.result mut slot_note = loss(c, "origin_alias", "k");
+    defer ownership_witness.free(&slot_note);
+    assert(slot_note.conditions_len == 5);
+    rendered_condition2(&slot_note.conditions[3], "this path needs 'p' and 'q' to designate ",
+        "distinct storage here; if they overlap, a store through 'q' can change this name");
+    // A zero store or a copy over `*p` writes over the slot `(*(p)).next` that names the
+    // referent of `r`, and a copy over the parameter `r` writes over `(r).a`: each path stops.
+    ok = expect_loss(c, "zero_parent", rejected, 0) && ok;
+    ok = expect_loss(c, "copy_parent", rejected, 0) && ok;
+    ok = expect_loss(c, "leaf_moved", rejected, 0) && ok;
+    // A store over the field `n` beside the pointer slots writes over no name.
+    string[3] kept = {"a", "(r).b", "(r).a"};
+    string[3] kept_store = {"", "", "(r).b"};
+    ok = alias_loss(c, "leaf_kept", kept[..], kept_store[..]) && ok;
+    // A release of a pointer that is no exact allocation of the path stops it (the user,
+    // 2026-10-17): a loaded owner (`release_name`, `rel_other`) or a stored entry owner
+    // (`release_entry`) that the path never dereferenced. Each event stays incomplete proof.
+    ok = expect_loss(c, "release_name", rejected, 0) && ok;
+    ok = expect_loss(c, "rel_other", rejected, 0) && ok;
+    ok = expect_loss(c, "release_entry", rejected, 0) && ok;
+    // A null release ends no storage, and the release of a dereferenced owner is exact: each
+    // path goes on. The read of `h->item->c` after the store through `p` takes the pairs of `h`
+    // and of `(*(h)).item` with `p`, so under them the release ends no storage of `p`.
+    string[3] null_reads = {"p", "q", "p"};
+    string[3] null_stores = {"", "", "q"};
+    ok = alias_loss(c, "null_release", null_reads[..], null_stores[..]) && ok;
+    string[5] exact = {"p", "h", "h", "(*(h)).item", "(*(h)).item"};
+    string[5] exact_stores = {"", "", "p", "", "p"};
+    ok = alias_loss(c, "exact_release", exact[..], exact_stores[..]) && ok;
+    ownership_witness.result mut deep = loss(c, "deep_name", "k");
+    defer ownership_witness.free(&deep);
+    ok = deep_notes(&deep) && ok;
+    assert(ok);
+    println("alias names ok");
+}
+
+// Whether `path` holds `conditions` conditions and `pairs` distinct pairs.
+fn alias_counts(ownership_witness.exact_state* path, u64 conditions, u64 pairs) bool {
+    if (path->conditions_len != conditions || path->pairs_len != pairs) {
+        eprintln("red alias counts ", path->conditions_len, " conditions ", path->pairs_len,
+            " pairs");
+        return false;
+    }
+    return true;
+}
+
+// The notes of `deep_name`. The read of `b->n` after the store through `q` takes the pair of
+// `b` and `q`, last. The name of `b` reads the slots `(*(p)).next` and `(*((*(p)).next)).next`
+// of input storage, so each takes the pair of its parent with each referent with a store, `b`
+// and `q`, before it. A pair that a name needs comes before the note that needs it.
+fn deep_notes(ownership_witness.result* got) bool {
+    string a = "(*(p)).next";
+    string b = "(*((*(p)).next)).next";
+    string slot_b = "#(*((*(p)).next)).next";
+    string[9] reads = {"p", "a", "b", "q", "p", a, "p", a, b};
+    string[9] stores = {"", "", "", "", "#q", "#q", slot_b, slot_b, "q"};
+    return alias_notes("deep_name", got, reads[..], stores[..]);
+}
+
+// The local of parameter `name` of `body`.
+fn param_local(fir.func* body, string name) u32 {
+    u32 mut i = 0;
+    while (i < fir.local_count(body)) {
+        if (fir.local_name(fir.local_at(body, i)) == name) { return i; }
+        i += 1;
+    }
+    panic("param_local: no such local");
+}
+
+// Gives referent `root` of `path` the slot `key` as its name, and returns `root`.
+fn named(ownership_witness.exact_state mut* path, u32 root, ownership_witness.storage_key key)
+    u32 {
+    ownership_witness.name_referent(path, root, key);
+    return root;
+}
+
+// The rendered name of referent `root` of `path`.
+fn name_text(ownership_witness.exact_state* path, u32 root, string expected) bool {
+    ownership_witness.referent_name mut name = ownership_witness.referent_name{};
+    if (!ownership_witness.name_of(path, root, &name)) {
+        eprintln("red name of ", root);
+        return false;
+    }
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    ownership_witness.append_referent(path->input->body, &name, &text);
+    if (strbuf.view(&text) != expected) {
+        eprintln("red name ", strbuf.view(&text));
+        return false;
+    }
+    return true;
+}
+
+// The pair rule and the names on a state that the test builds over `three_alias`. Referents P,
+// Q and R are the parameters, F is a fresh allocation, and C and D are read from cells of P. A
+// read before each store, a local, a fresh cell and a read through the referent of the store
+// take no condition. A read through one referent after a store through another takes one, of
+// one X step, naming both. The same pair takes no second one, in either order, and a third
+// referent takes its own. A store over the slot of a name forgets it; so does a store over the
+// slot of a parent. A note that needs a forgotten name stops the path. At the X bound a new
+// condition refuses the path and stops it.
+fn alias_state(ownership_heap_env.closure mut* c) void {
+    fir.func* body = &c->functions[ownership_heap_env.index(c, "three_alias")];
+    ownership_witness.request query = ownership_witness.request{.body = body, .bound = 8};
+    ownership_witness.exact_state mut path = ownership_witness.exact_state{.input = &query};
+    defer ownership_witness.state_free(&path);
+    ownership_witness.storage_kind cell = ownership_witness.storage_kind.cell;
+    ownership_witness.storage_kind slot = ownership_witness.storage_kind.local;
+    u32 p_local = param_local(body, "p");
+    u32 q_local = param_local(body, "q");
+    u32 r_local = param_local(body, "r");
+    ownership_witness.storage_key local_p = ownership_witness.storage_key{.kind = slot,
+        .root = p_local};
+    u32 p = named(&path, ownership_witness.add_allocation(&path, false, false,
+        ownership_witness.NONE), local_p);
+    u32 q = named(&path, ownership_witness.add_allocation(&path, false, false,
+        ownership_witness.NONE), ownership_witness.storage_key{.kind = slot, .root = q_local});
+    u32 r = named(&path, ownership_witness.add_allocation(&path, false, false,
+        ownership_witness.NONE), ownership_witness.storage_key{.kind = slot, .root = r_local});
+    u32 fresh = ownership_witness.add_allocation(&path, true, true, 1);
+    ownership_witness.storage_key cell_p = ownership_witness.storage_key{.kind = cell, .root = p};
+    ownership_witness.storage_key cell_q = ownership_witness.storage_key{.kind = cell, .root = q};
+    ownership_witness.storage_key cell_r = ownership_witness.storage_key{.kind = cell, .root = r};
+    ownership_witness.storage_key cell_fresh = ownership_witness.storage_key{.kind = cell,
+        .root = fresh};
+    // The local `k` of the body, which is no input storage and names no referent.
+    u32 k_local = param_local(body, "k");
+    ownership_witness.storage_key local = ownership_witness.storage_key{.kind = slot,
+        .root = k_local};
+    diag.loc at = diag.loc{};
+    bool mut ok = path.allocations[cast(p, u64)].named && !path.allocations[cast(fresh, u64)].named;
+    ok = ownership_witness.input_read(&path, cell_p, at) && ok;
+    ownership_witness.input_store(&path, cell_q);
+    ownership_witness.input_store(&path, cell_q);
+    ownership_witness.input_store(&path, cell_fresh);
+    ownership_witness.input_store(&path, local);
+    if (path.stores_len != 1 || path.stores[0] != q) {
+        eprintln("red alias stores ", path.stores_len);
+        ok = false;
+    }
+    ok = ownership_witness.input_read(&path, local, at) && ok;
+    ok = ownership_witness.input_read(&path, cell_fresh, at) && ok;
+    ok = ownership_witness.input_read(&path, cell_q, at) && ok;
+    ok = alias_counts(&path, 0, 0) && ok;
+    ok = ownership_witness.input_read(&path, cell_p, at) && ok;
+    ok = alias_counts(&path, 1, 1) && ok;
+    if (path.conditions[0].kind != ownership_witness.condition_kind.input_alias ||
+        path.conditions[0].read_name.local != p_local ||
+        path.conditions[0].store_name.local != q_local || path.conditions[0].read_name.len != 0 ||
+        !path.conditions[0].input || path.used != 1) {
+        eprintln("red alias condition used ", path.used);
+        ok = false;
+    }
+    ok = ownership_witness.input_read(&path, cell_p, at) && ok;
+    ownership_witness.input_store(&path, cell_p);
+    ok = ownership_witness.input_read(&path, cell_q, at) && ok;
+    ok = alias_counts(&path, 1, 1) && ok;
+    ok = ownership_witness.distinct(&path, p, q) && ownership_witness.distinct(&path, q, p) &&
+        !ownership_witness.distinct(&path, p, r) && ok;
+    ownership_witness.input_store(&path, cell_r);
+    ok = ownership_witness.input_read(&path, cell_p, at) && ok;
+    ok = alias_counts(&path, 2, 2) && ok;
+    ok = ownership_witness.input_read(&path, cell_q, at) && ok;
+    ok = alias_counts(&path, 3, 3) && !path.stopped && path.used == 3 && ok;
+    // C is read from field `n` of P, so its name is the slot `(*(p)).n`.
+    ownership_witness.storage_key p_n = ownership_witness.storage_key{.kind = cell, .root = p,
+        .depth = 1};
+    u32 c_root = named(&path, ownership_witness.add_allocation(&path, false, false,
+        ownership_witness.NONE), p_n);
+    ok = name_text(&path, p, "p") && name_text(&path, c_root, "(*(p)).n") && ok;
+    ok = ownership_witness.name_holds(&path, c_root, at) && alias_counts(&path, 3, 3) && ok;
+    // A store over that slot forgets the name of C, and not the name of P.
+    ownership_witness.input_store(&path, p_n);
+    ok = !path.allocations[cast(c_root, u64)].named && path.allocations[cast(p, u64)].named && ok;
+    // A name never comes back: a second store over the slot keeps it forgotten.
+    ownership_witness.input_store(&path, p_n);
+    ok = !path.allocations[cast(c_root, u64)].named &&
+        !ownership_witness.name_holds(&path, c_root, at) && ok;
+    ownership_witness.storage_key cell_c = ownership_witness.storage_key{.kind = cell,
+        .root = c_root};
+    ok = !ownership_witness.input_read(&path, cell_c, at) && path.stopped && ok;
+    ok = alias_counts(&path, 3, 4) && ok;
+    // D is read from P after that store. A store over the parameter `p` forgets the name of P,
+    // so the name of D, which steps through `p`, holds no more either.
+    path.stopped = false;
+    u32 d_root = named(&path, ownership_witness.add_allocation(&path, false, false,
+        ownership_witness.NONE), p_n);
+    ok = ownership_witness.name_holds(&path, d_root, at) && ok;
+    ownership_witness.input_store(&path, local_p);
+    ok = path.allocations[cast(d_root, u64)].named &&
+        !ownership_witness.name_holds(&path, d_root, at) && !ownership_witness.name_holds(&path,
+        p, at) && ok;
+    // A slot that is no parameter names nothing.
+    u32 u_root = named(&path, ownership_witness.add_allocation(&path, false, false,
+        ownership_witness.NONE), ownership_witness.storage_key{.kind = slot, .root = k_local});
+    ok = !path.allocations[cast(u_root, u64)].named && ok;
+    // A name has at most NAME_DEPTH steps. Each referent of a chain from `q` adds a dereference
+    // and a field: eight of them give 16 steps, and the ninth gives no name.
+    u32 mut chain = q;
+    u32 mut first = ownership_witness.NONE;
+    u32 mut level = 0;
+    while (level < 9) {
+        chain = named(&path, ownership_witness.add_allocation(&path, false, false,
+            ownership_witness.NONE), ownership_witness.storage_key{.kind = cell, .root = chain,
+            .depth = 1});
+        if (level == 0) { first = chain; }
+        ownership_witness.referent_name mut steps = ownership_witness.referent_name{};
+        bool fits = ownership_witness.name_of(&path, chain, &steps);
+        ok = (level < 8 ? fits && steps.len == (level + 1) * 2 : !fits) && ok;
+        level += 1;
+    }
+    ok = name_text(&path, first, "(*(q)).n") && ok;
+    // A local without a source name renders as "the pointer".
+    u32 mut unnamed = 0;
+    while (unnamed < fir.local_count(body) &&
+        fir.local_name(fir.local_at(body, unnamed)).len != 0) { unnamed += 1; }
+    if (unnamed < fir.local_count(body)) {
+        ownership_witness.referent_name temp = ownership_witness.referent_name{.local = unnamed};
+        strbuf.str_buf mut text = strbuf.create();
+        ownership_witness.append_referent(body, &temp, &text);
+        ok = strbuf.view(&text) == "the pointer" && ok;
+        strbuf.free(&text);
+    }
+    // An element step renders its index.
+    ownership_witness.storage_key mut q_element = ownership_witness.storage_key{.kind = cell,
+        .root = q, .depth = 1};
+    q_element.path[0] = 2147483648 | 3;
+    u32 e_root = named(&path, ownership_witness.add_allocation(&path, false, false,
+        ownership_witness.NONE), q_element);
+    ok = name_text(&path, e_root, "(*(q))[3]") && ok;
+    // Two keys overlap when one is the other or lies below it. Two fields of one cell, two
+    // roots, or a local and a cell with one number do not.
+    ownership_witness.storage_key mut p_c = ownership_witness.storage_key{.kind = cell,
+        .root = p, .depth = 1};
+    p_c.path[0] = 1;
+    ownership_witness.storage_key q_n = ownership_witness.storage_key{.kind = cell, .root = q,
+        .depth = 1};
+    ownership_witness.storage_key local_n = ownership_witness.storage_key{.kind = slot,
+        .root = p, .depth = 1};
+    ok = ownership_witness.overlap(p_n, p_n) && ownership_witness.overlap(cell_p, p_n) &&
+        ownership_witness.overlap(p_n, cell_p) && !ownership_witness.overlap(p_n, p_c) &&
+        !ownership_witness.overlap(p_n, q_n) && !ownership_witness.overlap(p_n, local_n) && ok;
+    // `held` reads a slot and adds none: a key without a slot gives unknown.
+    u64 slots = path.slots_len;
+    ok = ownership_witness.held(&path, q_n).kind == ownership_witness.value_kind.unknown &&
+        path.slots_len == slots && ok;
+    // The bound is 8; the walk used 3 steps. At the bound a new pair refuses the path.
+    path.used = 8;
+    path.stopped = false;
+    u32 s4 = named(&path, ownership_witness.add_allocation(&path, false, false,
+        ownership_witness.NONE), ownership_witness.storage_key{.kind = cell, .root = q,
+        .depth = 1});
+    ownership_witness.storage_key cell_s = ownership_witness.storage_key{.kind = cell, .root = s4};
+    ok = !ownership_witness.input_read(&path, cell_s, at) && ok;
+    ok = path.conditions_len == 3 && path.refused && path.stopped && ok;
+    assert(ok);
+    println("alias state ok");
 }
 
 // An address computation reads no storage at its last dereference and establishes no fact about
@@ -1298,24 +1864,34 @@ fn copy_refusals(ownership_heap_env.closure mut* c) void {
     println("copy refusals ok");
 }
 
+// The return verdict of the candidate at the return of `name`: the first allocation of the
+// body, whose relation follows the interface.
+fn return_verdict(ownership_heap_env.closure mut* c, string name) ownership_witness.status {
+    u32 relation = cast(ownership_heap_env.summary(c, name)->interface.len + 1, u32);
+    ownership_witness.result mut got = return_candidate(c, name, "h->item", relation);
+    defer ownership_witness.free(&got);
+    return got.verdict;
+}
+
 // At a return the caller can reach each owner in input storage, so that owner transfers. The
-// owner that `store_out` leaves in `h->item` is no loss. `store_moved` moves it out of that
-// storage again, so the same allocation is lost at the return.
-fn return_rules(ownership_heap_env.closure mut* c) void {
-    u32 stored = cast(ownership_heap_env.summary(c, "store_out")->interface.len + 1, u32);
-    ownership_witness.result mut out = return_candidate(c, "store_out", "h->item", stored);
-    if (out.verdict != ownership_witness.status.rejected) {
-        eprintln("red store_out verdict ", cast(out.verdict, u32));
-        assert(false);
-    }
-    ownership_witness.free(&out);
-    u32 moved = cast(ownership_heap_env.summary(c, "store_moved")->interface.len + 1, u32);
-    ownership_witness.result mut back = return_candidate(c, "store_moved", "h->item", moved);
-    defer ownership_witness.free(&back);
-    if (back.verdict != ownership_witness.status.validated) {
-        eprintln("red store_moved verdict ", cast(back.verdict, u32));
-        assert(false);
-    }
+// owner that `store_kept` leaves in `h->item` is no loss. `store_taken` moves it out of that
+// storage again, so the same allocation is lost at the return. Main's bodies `store_out` and
+// `store_moved` also release the loaded owner `old`, which the path never dereferenced, so
+// each path stops there (the user, 2026-10-17), and each event stays incomplete proof. Main
+// validated the loss of `store_moved`; that validation was not sound when two inputs alias.
+fn return_rules(ownership_heap_env.closure mut* c, ownership_heap_env.closure mut* r) void {
+    bool mut ok = true;
+    ownership_witness.status rejected = ownership_witness.status.rejected;
+    ownership_witness.status mut got = return_verdict(c, "store_out");
+    ok = got == rejected && ok;
+    got = return_verdict(c, "store_moved");
+    ok = got == rejected && ok;
+    got = return_verdict(r, "store_kept");
+    ok = got == rejected && ok;
+    got = return_verdict(r, "store_taken");
+    ok = got == ownership_witness.status.validated && ok;
+    if (!ok) { eprintln("red return rules"); }
+    assert(ok);
     println("return rules ok");
 }
 
@@ -1468,10 +2044,19 @@ fn main() i32 {
     address_rules(&rules);
     step_rules(&rules);
     copy_refusals(&rules);
-    return_rules(&rules);
+    ownership_heap_env.closure mut returns = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&returns);
+    ownership_heap_env.run(&returns, RETURN_TEXT[..], RETURN_NAMES[..]);
+    return_rules(&rules, &returns);
     ownership_heap_env.closure mut notes = ownership_heap_env.closure{};
     defer ownership_heap_env.close(&notes);
     ownership_heap_env.run(&notes, NOTES_TEXT[..], NOTES_NAMES[..]);
     branch_notes(&notes);
+    ownership_heap_env.closure mut aliases = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&aliases);
+    ownership_heap_env.run(&aliases, ALIAS_TEXT[..], ALIAS_NAMES[..]);
+    alias_pairs(&aliases);
+    alias_names(&aliases);
+    alias_state(&aliases);
     return 0;
 }

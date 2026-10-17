@@ -1432,6 +1432,11 @@ Removed content does not count. Insertion, join, and widening use the same count
 W is cumulative within one computation.
 X is cumulative within one witness check of one candidate event. Each statement, terminator,
 recorded condition, and leaf of a whole aggregate copy is one step.
+An alias condition of D17.18 is a recorded condition. The scans of the alias rule are no step,
+because the witness has no W meter. A read scans the referents with a store and, for each, the
+recorded pairs, so a read costs at most their product. Each recorded pair pays one X step, so
+the work stays bounded. A store scans the referents once to forget each name that it writes
+over.
 A refused X step leaves the candidate incomplete proof. It is not a work-budget failure.
 A place with more than K field and element projections in one storage key stops the witness
 check. That candidate stays incomplete proof too.

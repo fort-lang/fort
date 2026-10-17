@@ -349,6 +349,9 @@ bullet at a time and without a rewrite.
   `test/fort/`, and it is why this line is a rule about the working directory and not a second
   `.gitignore` entry. Remove them with `rm -rf sandbox[0-9]*`. Then run the
   source counter that reported the mismatch.
+  A mutation stage is such a run. The `checker` stage of `tools/mutations/ownership_witness.json`
+  ran its binary from the root, and one round of 22 rows left 10 `sandbox<n>/` there, which a
+  `git add -A` then took into a commit. The stage now runs from its build directory.
 - Three corpora run through `run_tests.py`, which takes their root as `--root`.
   CTest `lang` runs the product language corpus with `xfail.txt`. The CTests
   `fort-modules-<k>-of-<n>` run `test/fort/<x>_test.ft` against the compiler modules, and CTest
@@ -735,6 +738,18 @@ bullet at a time and without a rewrite.
     such violation adds that file; the one-body checker records none, so the file does not exist
     yet. A false violation whose conditions all hold on the run is a checker bug, and it is
     must-fix (2026-10-10).
+    A probe of an input condition runs both ways: once with inputs that hold each rendered
+    condition, and once with inputs that break one. `WitnessAliasRunTest` in
+    `test/ownership_driver_test.py` does it for the 27 bodies of
+    `test/ownership/witness/alias_runs.ft`. Each of 21 losses validates under its
+    distinct-storage notes, and the run with distinct inputs holds each note and leaks 1
+    allocation. The run with one storage leaks 0, but for 2 bodies whose notes ask for more than
+    the leak needs. Six losses stay incomplete proof: `same_only` leaks only with one storage,
+    because the checker takes no `same` relation, and 5 bodies write over a slot that names a
+    referent. The leak detector is the glibc
+    allocation trace: `main` calls `mtrace`, and the test preloads `libc_malloc_debug.so.0` with
+    `MALLOC_TRACE` set. Under qemu-user the preload reaches the x86-64 program, and the library
+    is below `QEMU_LD_PREFIX`. Darwin skips the runs.
 - **Two soundness gates hold the heap solver and the summary solver alone** (D17.14, D17.18).
   Outside its 12 test programs, only `ownership_source_calls` imports `ownership_heap`, and it
   joins the two solvers. These gates run each solver alone.
