@@ -2360,6 +2360,7 @@ says ownership is "by convention", this section supersedes it.
   identity.
   A copy of a reference value, alone or as a leaf of a whole aggregate copy, is a semantic use
   of it, so copying a dangling reference is an invalid use.
+  A whole aggregate move copies each borrowed leaf, so it is a semantic use of each one too.
   A copy of a valid reference preserves its source relations.
   Casts, retained fields, elements, globals, and available fort calls also preserve source
   relations.
@@ -2396,6 +2397,9 @@ says ownership is "by convention", this section supersedes it.
   Amended 2026-10-08: A copy of a reference value, alone or as a leaf of a whole aggregate copy,
   is a semantic use, so copying a dangling reference is an invalid use. Before, the rule said
   only that copies preserve source relations.
+  Amended 2026-10-16: A whole aggregate move is a semantic use of each borrowed leaf, as a copy
+  is. Before, the rule named only a copy as a use. The user ratified this amendment on
+  2026-10-16.
 
 ### D17.15 Place identity and aggregate storage
 - owner: `memory-model.md` (2.6), `fir.md` (5.5 and 9.6), `type-system.md` (8.5).

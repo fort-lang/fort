@@ -29,6 +29,8 @@
 //| lost requirements
 //| storage of another type
 //| a cast pointer that leaves the body
+//| copied references
+//| copied leaf work
 //| branch forms
 //| heap state ok
 /// Checks the state operations of the heap proof one at a time (D17.16, D17.18, fir.md 14.1).
@@ -1698,6 +1700,231 @@ fn joins() void {
     assert(right_extra != right_target);
 }
 
+// A view of the one source atom `a` that reaches the storage of no parameter.
+fn source_view(u32 a) ownership_heap.value { return view_of(a, ownership_heap.NONE); }
+
+// Checks a copy of `v` at operation `at`, in the slot of `w` when `keyed`, else in storage
+// without a slot. The result is the number of events.
+fn copy_events(fixture mut* x, ownership_heap.state mut* s, ownership_heap.value v, u32 at,
+    bool keyed) u64 {
+    x->ctx.op = ownership_heap.position(&x->ctx, 0, at, false);
+    u64 before = x->c.counts.events;
+    ownership_heap.location mut loc = ownership_heap.location{};
+    loc.kind = keyed ? ownership_heap.location_kind.slots : ownership_heap.location_kind.unknown;
+    loc.key = local(7);
+    ownership_heap.check_copy(&x->ctx, s, loc, ownership_heap.leaf{.v = v});
+    return x->c.counts.events - before;
+}
+
+// The last event of the fixture has kind `kind`, certainty `how` and reason `why`.
+fn last_event(fixture* x, ownership_api.event_kind kind, ownership_api.certainty how,
+    ownership_api.incomplete_reason why) bool {
+    ownership_heap_env.event_row row = x->c.counts.rows[x->c.counts.events - 1];
+    return row.kind == kind && row.certainty == how && row.reason == why;
+}
+
+fn last_text(fixture* x) string {
+    return ownership_heap_env.text(&x->c.counts.rows[x->c.counts.events - 1]);
+}
+
+fn set_status(ownership_heap.state mut* s, u32 a, ownership_facts.atom_status status) void {
+    s->atoms[cast(a, u64)].status = ownership_facts.status_fact{status,
+        ownership_facts.provenance.established};
+}
+
+// A copy of a reference is a use of it (D17.14). Each kind of value gives the event of its fact.
+// A reference that stays valid gives none.
+fn copied_references() void {
+    println("copied references");
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "host");
+    ownership_heap.context mut* ctx = &x.ctx;
+    ownership_heap.state mut s = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&s);
+    ctx->reporting = true;
+    u32 live = fresh_cell(ctx, &s, 5);
+    u32 gone = fresh_cell(ctx, &s, 6);
+    set_status(&s, gone, ownership_facts.atom_status.released);
+    ownership_api.certainty definite = ownership_api.certainty.definite;
+    ownership_api.certainty possible = ownership_api.certainty.possible;
+    ownership_api.event_kind invalid = ownership_api.event_kind.invalid_use;
+    ownership_api.event_kind incomplete = ownership_api.event_kind.incomplete_proof;
+    ownership_api.incomplete_reason path = ownership_api.incomplete_reason.missing_path;
+    ownership_api.incomplete_reason effect = ownership_api.incomplete_reason.unknown_effect;
+
+    // Null, an input view, and a view of a live or leaked atom need nothing.
+    assert(copy_events(&x, &s, ownership_heap.null_value(), 1, true) == 0);
+    assert(value_at(&s, local(4)).kind == ownership_heap.value_kind.view);
+    assert(copy_events(&x, &s, value_at(&s, local(4)), 2, true) == 0);
+    assert(copy_events(&x, &s, source_view(live), 3, true) == 0);
+    set_status(&s, live, ownership_facts.atom_status.leaked);
+    assert(copy_events(&x, &s, source_view(live), 4, true) == 0);
+    set_status(&s, live, ownership_facts.atom_status.live);
+    // Each source released: an invalid use of the copied slot, with the released atom.
+    assert(copy_events(&x, &s, source_view(gone), 5, true) == 1);
+    assert(last_event(&x, invalid, definite, path) && last_text(&x) == "w");
+    assert(x.c.counts.rows[x.c.counts.events - 1].relation.ordinal == gone + 1);
+    // One released source of two, or a possibly released source: a missing path.
+    ownership_heap.value mut both = source_view(live);
+    assert(ownership_heap.add_source(&both, gone));
+    assert(copy_events(&x, &s, both, 6, true) == 1);
+    assert(last_event(&x, incomplete, possible, path));
+    set_status(&s, gone, ownership_facts.atom_status.maybe_released);
+    assert(copy_events(&x, &s, source_view(gone), 7, true) == 1);
+    assert(last_event(&x, incomplete, possible, path));
+    set_status(&s, gone, ownership_facts.atom_status.released);
+    // A source of unknown status, or one that escaped, can be released by an unknown effect.
+    set_status(&s, live, ownership_facts.atom_status.unknown);
+    assert(copy_events(&x, &s, source_view(live), 8, true) == 1);
+    assert(last_event(&x, incomplete, possible, effect));
+    set_status(&s, live, ownership_facts.atom_status.escaped);
+    assert(copy_events(&x, &s, source_view(live), 9, true) == 1);
+    assert(last_event(&x, incomplete, possible, effect));
+    set_status(&s, live, ownership_facts.atom_status.live);
+
+    // An address of a local is valid until the local ends. An ended local gives an invalid use,
+    // and a local that ended on some path gives a missing path.
+    ownership_heap.value local_address = ownership_heap.address_value(local(8),
+        ownership_heap.address_fact(&s, local(8)));
+    assert(copy_events(&x, &s, local_address, 10, true) == 0);
+    s.ended[8] = 1;
+    assert(copy_events(&x, &s, local_address, 11, true) == 1);
+    assert(last_event(&x, invalid, definite, path) && last_text(&x) == "w");
+    s.ended[8] = 2;
+    assert(copy_events(&x, &s, local_address, 12, true) == 1);
+    assert(last_event(&x, incomplete, possible, path));
+    s.ended[8] = 0;
+    // An address of a cell field needs a live or leaked cell. Caller storage stays valid.
+    ownership_heap.slot_key gone_field = field_key(ownership_heap.base_kind.cell, gone, 0);
+    ownership_heap.value gone_address = ownership_heap.address_value(gone_field,
+        ownership_heap.address_fact(&s, gone_field));
+    assert(copy_events(&x, &s, gone_address, 13, true) == 1);
+    assert(last_event(&x, invalid, definite, path));
+    assert(x.c.counts.rows[x.c.counts.events - 1].relation.ordinal == gone + 1);
+    ownership_heap.slot_key live_field = field_key(ownership_heap.base_kind.cell, live, 0);
+    ownership_heap.value live_address = ownership_heap.address_value(live_field,
+        ownership_heap.address_fact(&s, live_field));
+    assert(copy_events(&x, &s, live_address, 14, true) == 0);
+    set_status(&s, live, ownership_facts.atom_status.leaked);
+    assert(copy_events(&x, &s, live_address, 15, true) == 0);
+    set_status(&s, live, ownership_facts.atom_status.unknown);
+    assert(copy_events(&x, &s, live_address, 16, true) == 1);
+    assert(last_event(&x, incomplete, possible, effect));
+    set_status(&s, live, ownership_facts.atom_status.live);
+    ownership_heap.value caller = value_at(&s, local(3));
+    assert(caller.kind == ownership_heap.value_kind.address);
+    assert(caller.target.base == ownership_heap.base_kind.caller);
+    assert(copy_events(&x, &s, caller, 17, true) == 0);
+
+    // A reference whose facts the body lost gives incomplete proof. An input of the caller does
+    // not. The work of an unknown effect does not when that effect made the body residual.
+    assert(copy_events(&x, &s, ownership_heap.unknown_value(), 18, true) == 1);
+    assert(last_event(&x, incomplete, possible, effect) && last_text(&x) == "w");
+    assert(copy_events(&x, &s, ownership_heap.input_value(), 19, true) == 0);
+    assert(!ctx->residual);
+    assert(copy_events(&x, &s, ownership_heap.effect_value(), 20, true) == 1);
+    ctx->residual = true;
+    assert(copy_events(&x, &s, ownership_heap.effect_value(), 21, true) == 0);
+    assert(copy_events(&x, &s, ownership_heap.unknown_value(), 22, true) == 1);
+    ctx->residual = false;
+    // A leaf without a slot has a fixed text.
+    assert(copy_events(&x, &s, ownership_heap.unknown_value(), 23, false) == 1);
+    assert(last_text(&x) == "a reference that this call copies");
+    assert(copy_events(&x, &s, source_view(gone), 24, false) == 1);
+    assert(last_event(&x, invalid, definite, path));
+    assert(last_text(&x) == "a reference that this call copies");
+}
+
+// Checks the leaves of `list` at location `loc` and operation `at`. `*events` takes the number
+// of events, and the result is the number of W units.
+fn leaf_units(fixture mut* x, ownership_heap.state mut* s, ownership_heap.location loc,
+    ownership_heap.leaf_list* list, u32 at, u64 mut* events) u64 {
+    x->ctx.op = ownership_heap.position(&x->ctx, 0, at, false);
+    u64 before = x->c.counts.events;
+    u64 units = used_w(x);
+    ownership_heap.check_copied_leaves(&x->ctx, s, loc, list);
+    *events = x->c.counts.events - before;
+    return used_w(x) - units;
+}
+
+// Each borrowed leaf of an argument pays one W unit. An owned or scalar leaf pays nothing, and
+// the transfer rules follow an owned leaf. Storage without slots keeps the facts of its atoms:
+// its leaves need nothing when no atom keeps a reference of the body. The scan of those atoms
+// pays one W unit for each argument.
+fn copied_leaf_work() void {
+    println("copied leaf work");
+    types.table mut tt = types.table{};
+    defer types.type_table_free(&tt);
+    fixture mut x = fixture{};
+    defer close(&x);
+    open(&x, "host");
+    ownership_heap.context mut* ctx = &x.ctx;
+    ownership_heap.state mut s = ownership_heap.initial(ctx);
+    defer ownership_heap.free_state(&s);
+    ctx->reporting = true;
+    u32 gone = fresh_cell(ctx, &s, 6);
+    set_status(&s, gone, ownership_facts.atom_status.released);
+    types.node* owner = fir.local_at(ctx->f, 1)->ty;
+    types.node* view = fir.local_at(ctx->f, 7)->ty;
+    types.node* small = fir.local_at(ctx->f, 8)->ty;
+    assert(owner->is_own && ownership_heap.is_reference(view) && !view->is_own);
+    assert(!ownership_heap.is_reference(small));
+    ownership_heap.leaf_list mut list = ownership_heap.leaf_list{};
+    defer ownership_heap.free_leaves(&list);
+    // An owned leaf with a released view, a scalar, a released borrowed leaf, and an array of
+    // references without facts.
+    ownership_heap.leaf mut owned = ownership_heap.leaf{.ty = owner, .owning = true};
+    owned.v = source_view(gone);
+    ownership_heap.push_leaf(&list, owned);
+    ownership_heap.push_leaf(&list, ownership_heap.leaf{.ty = small,
+        .v = ownership_heap.scalar_value()});
+    ownership_heap.leaf mut released = ownership_heap.leaf{.ty = view};
+    released.v = source_view(gone);
+    ownership_heap.push_leaf(&list, released);
+    ownership_heap.push_leaf(&list, ownership_heap.leaf{.ty = types.type_array(&tt, view, 2),
+        .array = true, .v = ownership_heap.unknown_value()});
+    ownership_heap.location mut slots = ownership_heap.location{};
+    slots.kind = ownership_heap.location_kind.slots;
+    slots.key = local(7);
+    // Two borrowed leaves pay 2 units: an invalid use of `w`, and incomplete proof of the array
+    // leaf, which names no slot.
+    u64 mut events = 0;
+    assert(leaf_units(&x, &s, slots, &list, 1, &events) == 2 && events == 2);
+    ownership_heap_env.event_row first = x.c.counts.rows[x.c.counts.events - 2];
+    assert(first.kind == ownership_api.event_kind.invalid_use);
+    assert(ownership_heap_env.text(&first) == "w");
+    assert(last_event(&x, ownership_api.event_kind.incomplete_proof,
+        ownership_api.certainty.possible, ownership_api.incomplete_reason.unknown_effect));
+    assert(last_text(&x) == "a reference that this call copies");
+    // A second leaf without facts at the same call gives no second event.
+    ownership_heap.push_leaf(&list, ownership_heap.leaf{.ty = view,
+        .v = ownership_heap.unknown_value()});
+    assert(leaf_units(&x, &s, slots, &list, 2, &events) == 3 && events == 2);
+    // A live atom without a reference of the body: the leaves hold inputs or static data.
+    u32 kept = fresh_cell(ctx, &s, 5);
+    s.atoms[cast(kept, u64)].borrows = false;
+    u32[8] mut one = {};
+    one[0] = kept;
+    ownership_heap.location none = ownership_heap.element_of(1, one, false, ownership_heap.NONE);
+    assert(leaf_units(&x, &s, none, &list, 3, &events) == 4 && events == 0);
+    // An atom that keeps a reference of the body: each borrowed leaf is checked.
+    s.atoms[cast(kept, u64)].borrows = true;
+    assert(leaf_units(&x, &s, none, &list, 4, &events) == 4 && events == 2);
+    // A second atom with that fact is enough, and storage without atoms keeps only inputs.
+    u32 other = fresh_cell(ctx, &s, 6);
+    s.atoms[cast(kept, u64)].borrows = false;
+    s.atoms[cast(other, u64)].borrows = true;
+    one[1] = other;
+    ownership_heap.location both = ownership_heap.element_of(2, one, false, ownership_heap.NONE);
+    assert(leaf_units(&x, &s, both, &list, 6, &events) == 4 && events == 2);
+    ownership_heap.location caller = ownership_heap.element_of(0, one, true, ownership_heap.NONE);
+    assert(leaf_units(&x, &s, caller, &list, 7, &events) == 4 && events == 0);
+    // An unknown location, such as a global, has leaves without facts.
+    assert(leaf_units(&x, &s, ownership_heap.unknown_location(), &list, 5, &events) == 3);
+    assert(events == 2);
+}
+
 // The summary mask names parameters 1 through 63. The high bit covers later parameters.
 fn escape_bits() void {
     ownership_heap.context mut c = ownership_heap.context{};
@@ -2813,6 +3040,8 @@ fn main() i32 {
     retyped();
     escapes();
     escape_bits();
+    copied_references();
+    copied_leaf_work();
     branch_forms();
     println("heap state ok");
     return 0;

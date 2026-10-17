@@ -9,12 +9,17 @@
 //| views at a call
 //| aggregates and pointers to owners
 //| write footprints at calls
+//| copied leaves of aggregate arguments
+//| whole-array stores
+//| array leaves below the path bound
+//| casts of element addresses
 //| heap calls ok
 /// Checks heap summaries at calls (D17.16, D17.18, `spec/fir.md` 14 Calls).
 import ownership_api;
 import ownership_facts;
 import ownership_heap;
 import ownership_heap_env;
+import std.str;
 
 string[11] LIST = {
     "struct node { node mut* own next; i32 v; }",
@@ -516,6 +521,293 @@ fn write_footprints() void {
     assert(ownership_heap_env.proved(&c, "kept_direct"));
 }
 
+// A copy of an aggregate argument copies each borrowed leaf, and a copy of a reference is a use
+// of it (D17.14). So each borrowed leaf must not dangle at the call, also when the callee does
+// not read it.
+fn copied_leaves() void {
+    println("copied leaves of aggregate arguments");
+    string[40] text = {
+        "struct box { i32* p; }",
+        "struct outer { box inner; i32 n; }",
+        "struct pair { string s; i32* p; }",
+        "struct mixed { i32 mut* own o; i32* p; }",
+        "fn take(box b) void {}",
+        "fn take_outer(outer o) void {}",
+        "fn take_pair(pair v) void {}",
+        "fn take_arr(i32*[2] a) void {}",
+        "fn take_mixed(mixed m) void { del(m.o); }",
+        "fn copy_bad(i32 mut* own p) void { box b = box{p}; del(p); take(b); }",
+        "fn copy_ok(i32 mut* own p) void { box b = box{p}; take(b); del(p); }",
+        "fn nested_bad(i32 mut* own p) void { outer o = outer{box{p}, 1}; del(p);",
+        "    take_outer(o); }",
+        "fn nested_ok(i32 mut* own p) void { outer o = outer{box{p}, 1}; take_outer(o);",
+        "    del(p); }",
+        "fn text_bad(i32 mut* own p) void { pair v = pair{\"x\", p}; del(p); take_pair(v); }",
+        "fn text_ok(i32* q) void { pair v = pair{\"x\", q}; take_pair(v); }",
+        "fn moved_bad(i32 mut* own p) void { mixed mut m = mixed{new(i32), p}; del(p);",
+        "    take_mixed(move(m)); }",
+        "fn moved_ok(i32* q) void { mixed mut m = mixed{new(i32), q}; take_mixed(move(m)); }",
+        "fn ended_bad() void { box mut b = box{null}; { i32 x = 1; b = box{&x}; } take(b); }",
+        "fn ended_ok() void { i32 x = 1; box b = box{&x}; take(b); }",
+        "fn cell_bad(i32 mut* own p) void { box mut* own c = new(box); c->p = p; del(p);",
+        "    take(*c); del(c); }",
+        "fn cell_ok(i32 mut* own p) void { box mut* own c = new(box); c->p = p; take(*c);",
+        "    del(c); del(p); }",
+        "fn inputs_ok(box b, box* h) void { take(b); take(*h); }",
+        "fn null_ok() void { box b = box{null}; take(b); }",
+        "fn joined_bad(bool k, i32 mut* own p, i32* q) void { box mut b = box{q};",
+        "    if (k) { b = box{p}; } del(p); take(b); }",
+        "fn array_ok(i32* q) void { i32*[2] a = {q, q}; take_arr(a); }",
+        "fn array_bad(i32 mut* own p, i32* q) void { i32*[2] a = {q, p}; del(p); take_arr(a); }",
+        "fn span_ok(i32* q) void { box mut@ own a = new(box, 2); a[1].p = q; take(a[1]);",
+        "    del(a); }",
+        "fn span_body(i32 mut* own p) void { box mut@ own a = new(box, 2); a[1].p = p;",
+        "    take(a[1]); del(a); del(p); }",
+        "fn nothing() void {}",
+        "fn put(box mut* b, i32* q) void { b->p = q; }",
+        "fn framed(i32 mut* own p) void { box mut b = box{p}; nothing(); take(b); del(p);",
+        "    put(&b, null); }",
+    };
+    string[27] names = {"take", "take_outer", "take_pair", "take_arr", "take_mixed", "copy_bad",
+        "copy_ok", "nested_bad", "nested_ok", "text_bad", "text_ok", "moved_bad", "moved_ok",
+        "ended_bad", "ended_ok", "cell_bad", "cell_ok", "inputs_ok", "null_ok", "joined_bad",
+        "array_ok", "array_bad", "span_ok", "span_body", "nothing", "put", "framed"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    // A callee that does not read its parameter has a complete proof.
+    assert(ownership_heap_env.proved(&c, "take"));
+    assert(ownership_heap_env.proved(&c, "take_arr"));
+    assert(ownership_heap_env.proved(&c, "take_mixed"));
+    // A leaf whose source is released before the call: one candidate at the call. It names the
+    // copied leaf, at each depth and next to a string constant.
+    assert(copy_candidate(&c, "copy_bad", 10, "b.p"));
+    assert(ownership_heap_env.proved(&c, "copy_ok"));
+    assert(copy_candidate(&c, "nested_bad", 13, "o.inner.p"));
+    assert(ownership_heap_env.proved(&c, "nested_ok"));
+    assert(copy_candidate(&c, "text_bad", 16, "v.p"));
+    assert(ownership_heap_env.proved(&c, "text_ok"));
+    // A whole move copies its borrowed leaves too. Its owned leaf moves.
+    assert(copy_candidate(&c, "moved_bad", 19, "m.p"));
+    assert(ownership_heap_env.proved(&c, "moved_ok"));
+    // An address of a local that ended, and a cell field whose source is released.
+    assert(copy_candidate(&c, "ended_bad", 21, "b.p"));
+    assert(ownership_heap_env.proved(&c, "ended_ok"));
+    assert(copy_candidate(&c, "cell_bad", 24, "c->p"));
+    assert(ownership_heap_env.proved(&c, "cell_ok"));
+    // Inputs of the caller and null leaves need nothing.
+    assert(ownership_heap_env.proved(&c, "inputs_ok"));
+    assert(ownership_heap_env.proved(&c, "null_ok"));
+    // A join keeps the released source of one path.
+    assert(ownership_heap_env.candidate(&c, "joined_bad", ownership_api.event_kind.invalid_use));
+    assert(ownership_heap_env.first(&c, "joined_bad").line == 30);
+    // One slot stands for each element of a fixed array. The literal keeps the join of its
+    // elements, so an input proves and a released element is an invalid use.
+    assert(ownership_heap_env.proved(&c, "array_ok"));
+    assert(copy_candidate(&c, "array_bad", 32, "a reference that this call copies"));
+    // Storage without slots keeps the facts of its atom. An input keeps the proof. A reference
+    // of the body gives incomplete proof, because the facts do not name its source.
+    assert(ownership_heap_env.proved(&c, "span_ok"));
+    assert(lost_copy(&c, "span_body", 36, "a reference that this call copies"));
+    // A call forgets the facts of a local whose storage a FIR address names (D17.18). The
+    // copy then uses a leaf with no facts, so the body gives incomplete proof.
+    assert(lost_copy(&c, "framed", 39, "b.p"));
+}
+
+// A store of a whole array replaces each element, so the array slot takes the facts of the
+// stored value; a store of one row joins them (D17.14, D17.15). Storage without slots records
+// the references of the store, and untracked storage gives incomplete proof.
+fn array_stores() void {
+    println("whole-array stores");
+    string[32] text = {
+        "struct holder { i32*[2] arr; }",
+        "struct abox { i32*[2] ps; }",
+        "struct mh { i32 mut*[1] ps; }",
+        "abox mut garr = abox{};",
+        "fn take_arr(i32*[2] value) void {}",
+        "fn take_abox(abox value) void {}",
+        "fn take_rows(i32*[2][2] value) void {}",
+        "fn caller_bad(holder mut* h, i32 mut* own p) void {",
+        "    i32*[2] t = {p, p}; h->arr = t; del(p); }",
+        "fn caller_ok(holder mut* h, i32* q) void { i32*[2] t = {q, null}; h->arr = t; }",
+        "fn param_bad(i32*[2] mut a, i32 mut* own p) void {",
+        "    i32*[2] t = {p, p}; a = t; del(p); take_arr(a); }",
+        "fn param_ok(i32*[2] mut a, i32 mut* own p) void {",
+        "    i32*[2] t = {p, p}; a = t; take_arr(a); del(p); }",
+        "fn field_bad(abox mut b, i32 mut* own p) void {",
+        "    i32*[2] t = {p, p}; b.ps = t; del(p); take_abox(b); }",
+        "fn field_ok(abox mut b, i32* q) void { i32*[2] t = {q, q}; b.ps = t; take_abox(b); }",
+        "fn row_bad(i32*[2][2] mut m, i32 mut* own p) void {",
+        "    i32*[2] r = {p, p}; m[0] = r; del(p); take_rows(m); }",
+        "fn row_ok(i32*[2][2] mut m, i32* q) void { i32*[2] r = {q, q}; m[0] = r; take_rows(m); }",
+        "fn heap_bad(i32 mut* own p) void { abox mut@ own a = new(abox, 2); i32*[2] t = {p, p};",
+        "    a[1].ps = t; del(p); take_abox(a[1]); del(a); }",
+        "fn heap_ok(i32* q) void { abox mut@ own a = new(abox, 2); i32*[2] t = {q, q};",
+        "    a[1].ps = t; take_abox(a[1]); del(a); }",
+        "fn global_store(i32 mut* own p) void { i32*[2] t = {p, p}; garr.ps = t; del(p); }",
+        "fn global_copy() void { take_abox(garr); }",
+        "fn copy_arr(mh mut* dst, mh* src) void { dst->ps = src->ps; }",
+        "fn keep_arr(mh mut* dst, mh* src) void { i32 mut*[1] t = {null}; dst->ps = t; }",
+        "fn null_first(i32 mut* own p) void { i32*[2] a = {null, p}; take_arr(a); del(p); }",
+        "fn null_last(i32 mut* own p) void { i32*[2] a = {p, null}; take_arr(a); del(p); }",
+        "fn zero_ok() void { i32*[2] a = {}; take_arr(a); }",
+        "fn zero_box_ok() void { abox b = abox{}; take_abox(b); }",
+    };
+    string[21] names = {"take_arr", "take_abox", "take_rows", "caller_bad", "caller_ok",
+        "param_bad", "param_ok", "field_bad", "field_ok", "row_bad", "row_ok", "heap_bad",
+        "heap_ok", "global_store", "global_copy", "copy_arr", "keep_arr", "null_first",
+        "null_last", "zero_ok", "zero_box_ok"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    // A whole store into caller storage: the caller slot keeps the released element after the
+    // return. Inputs and null stay valid.
+    assert(ownership_heap_env.candidate(&c, "caller_bad", ownership_api.event_kind.invalid_use));
+    assert(ownership_heap_env.events(&c, "caller_bad") == 1);
+    assert(ownership_heap_env.proved(&c, "caller_ok"));
+    // A whole store into a by-value parameter and into one of its fields, then a copy.
+    assert(copy_candidate(&c, "param_bad", 12, "a reference that this call copies"));
+    assert(ownership_heap_env.proved(&c, "param_ok"));
+    assert(copy_candidate(&c, "field_bad", 16, "a reference that this call copies"));
+    assert(ownership_heap_env.proved(&c, "field_ok"));
+    // A row keeps the other row: the join of an input and a view of the body has no facts.
+    assert(lost_copy(&c, "row_bad", 19, "a reference that this call copies"));
+    assert(ownership_heap_env.proved(&c, "row_ok"));
+    // Storage without slots records a reference of the body.
+    assert(lost_copy(&c, "heap_bad", 22, "a reference that this call copies"));
+    assert(ownership_heap_env.proved(&c, "heap_ok"));
+    // Untracked storage cannot keep a reference of the body, and a global has no facts.
+    assert(ownership_heap_env.unproved(&c, "global_store",
+        ownership_api.incomplete_reason.unknown_effect));
+    assert(ownership_heap_env.events(&c, "global_store") == 1);
+    assert(ownership_heap_env.first(&c, "global_store").line == 25);
+    assert(lost_copy(&c, "global_copy", 26, "a reference that this call copies"));
+    // Mutable element references escape as a store of one element does. Null escapes nothing.
+    assert(ownership_heap_env.proved(&c, "copy_arr"));
+    assert((ownership_heap_env.summary(&c, "copy_arr")->address_escapes & 4) == 4);
+    assert(ownership_heap_env.proved(&c, "keep_arr"));
+    assert(ownership_heap_env.summary(&c, "keep_arr")->address_escapes == 0);
+    // A null element keeps the view of the other element in either order.
+    assert(ownership_heap_env.proved(&c, "null_first"));
+    assert(ownership_heap_env.proved(&c, "null_last"));
+    // A zero value holds no reference, as an array and as a field.
+    assert(ownership_heap_env.proved(&c, "zero_ok"));
+    assert(ownership_heap_env.proved(&c, "zero_box_ok"));
+}
+
+// A struct below the path bound is one array leaf, as a fixed array is (`add_leaves`). A store
+// of the whole struct replaces its slot. A store into a part of an owning leaf keeps the owner
+// and gives incomplete proof at the store (D17.15, D17.17).
+fn deep_leaves() void {
+    println("array leaves below the path bound");
+    string[18] text = {
+        "struct d0 { i32* p; }",
+        "struct d1 { d0 x; }",
+        "struct d2 { d1 x; }",
+        "struct d3 { d2 x; }",
+        "struct d4 { d3 x; }",
+        "struct d5 { d4 x; }",
+        "struct d6 { d5 x; }",
+        "struct e0 { i32 mut* own o; i32*[2] ps; }",
+        "struct e1 { e0 x; }",
+        "struct e2 { e1 x; }",
+        "struct e3 { e2 x; }",
+        "struct e4 { e3 x; }",
+        "struct e5 { e4 x; }",
+        "struct e6 { e5 x; }",
+        "fn take6(d6 value) void {}",
+        "fn deep_copy(d6 w) void { d6 mut v = w; take6(v); }",
+        "fn deep_part(i32* q) void { e6 mut v = e6{}; i32*[2] t = {q, q};",
+        "    v.x.x.x.x.x.x.ps = t; }",
+    };
+    string[3] names = {"take6", "deep_copy", "deep_part"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    // The copy of `w` gives the leaf of `v` the input of `w`.
+    assert(ownership_heap_env.proved(&c, "deep_copy"));
+    // The zero value already puts an owner into the leaf at line 17. The array field is a part
+    // of that owning leaf, so the store at line 18 gives incomplete proof of its own.
+    assert(ownership_heap_env.unproved(&c, "deep_part",
+        ownership_api.incomplete_reason.unknown_effect));
+    assert(ownership_heap_env.events(&c, "deep_part") == 2);
+    ownership_heap_env.event_row store = second_event(&c, "deep_part");
+    assert(store.line == 18 &&
+        str.starts_with(ownership_heap_env.text(&store), "the reference that this store puts"));
+}
+
+// The address of an element at an index that is not known to be zero keeps the key of its
+// array at another byte offset. A cast of it to the array type is a cast store, so it cannot
+// replace the whole array slot (D17.17). Index zero keeps the start of the array.
+fn element_casts() void {
+    println("casts of element addresses");
+    string[15] text = {
+        "fn take_arr(i32*[2] value) void {}",
+        "fn cast_bad(i32 mut* own p, i32* q) void { i32*[2] mut a = {p, p}; del(p);",
+        "    i32*[2] mut* pa = cast(&a[1], i32*[2] mut*); i32*[2] t = {q, q}; *pa = t;",
+        "    take_arr(a); }",
+        "fn cast_zero_ok(i32 mut* own p, i32* q) void { i32*[2] mut a = {p, p}; del(p);",
+        "    i32*[2] mut* pa = cast(&a[0], i32*[2] mut*); i32*[2] t = {q, q}; *pa = t;",
+        "    take_arr(a); }",
+        "fn elem_ok(i32* q, i32* r) void { i32*[2] mut a = {q, q}; i32* mut* pe = &a[1];",
+        "    *pe = r; take_arr(a); }",
+        "fn join_bad(bool k, i32 mut* own p, i32* q) void { i32*[2] mut a = {p, p}; del(p);",
+        "    i32*[2] mut* mut pa = &a; if (k) { pa = cast(&a[1], i32*[2] mut*); }",
+        "    i32*[2] t = {q, q}; *pa = t; take_arr(a); }",
+        "fn join2_bad(bool k, i32 mut* own p, i32* q) void { i32*[2] mut a = {p, p}; del(p);",
+        "    i32*[2] mut* mut pa = cast(&a[1], i32*[2] mut*); if (k) { pa = &a; }",
+        "    i32*[2] t = {q, q}; *pa = t; take_arr(a); }",
+    };
+    string[6] names = {"take_arr", "cast_bad", "cast_zero_ok", "elem_ok", "join_bad",
+        "join2_bad"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    // The cast store forgets the facts of the array, and the copy then gives incomplete proof.
+    assert(!ownership_heap_env.proved(&c, "cast_bad"));
+    assert(ownership_heap_env.proved(&c, "cast_zero_ok"));
+    // A store of one element through its own address joins it into the slot.
+    assert(ownership_heap_env.proved(&c, "elem_ok"));
+    // A join of the start and an element address has no known offset, in either order.
+    assert(!ownership_heap_env.proved(&c, "join_bad"));
+    assert(!ownership_heap_env.proved(&c, "join2_bad"));
+}
+
+// The second event of body `name`, or a zero row.
+fn second_event(ownership_heap_env.closure* c, string name) ownership_heap_env.event_row {
+    u32 declaration = cast(ownership_heap_env.index(c, name) + 1, u32);
+    u64 mut seen = 0;
+    u64 mut i = 0;
+    while (i < c->counts.events && i < c->counts.rows.len) {
+        if (c->counts.rows[i].operation.function.declaration.declaration == declaration) {
+            seen += 1;
+            if (seen == 2) { return c->counts.rows[i]; }
+        }
+        i += 1;
+    }
+    return ownership_heap_env.event_row{};
+}
+
+// The only event of `name` is an invalid use of the copied leaf `leaf` with a definite
+// certainty, at line `line`.
+fn copy_candidate(ownership_heap_env.closure* c, string name, u32 line, string leaf) bool {
+    ownership_heap_env.event_row row = ownership_heap_env.first(c, name);
+    return ownership_heap_env.events(c, name) == 1 &&
+        row.kind == ownership_api.event_kind.invalid_use &&
+        row.certainty == ownership_api.certainty.definite &&
+        row.reason == ownership_api.incomplete_reason.missing_path && row.line == line &&
+        ownership_heap_env.text(&row) == leaf;
+}
+
+// The only event of `name` is incomplete proof of a copied leaf without facts, at line `line`.
+fn lost_copy(ownership_heap_env.closure* c, string name, u32 line, string leaf) bool {
+    ownership_heap_env.event_row row = ownership_heap_env.first(c, name);
+    return ownership_heap_env.events(c, name) == 1 &&
+        ownership_heap_env.unproved(c, name, ownership_api.incomplete_reason.unknown_effect) &&
+        row.kind == ownership_api.event_kind.incomplete_proof && row.line == line &&
+        ownership_heap_env.text(&row) == leaf;
+}
+
 fn main() i32 {
     caller_storage();
     separate_instances();
@@ -525,6 +817,10 @@ fn main() i32 {
     views_at_call();
     aggregates();
     write_footprints();
+    copied_leaves();
+    array_stores();
+    deep_leaves();
+    element_casts();
     println("heap calls ok");
     return 0;
 }
