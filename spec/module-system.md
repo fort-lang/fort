@@ -403,6 +403,12 @@ to C. The library declares `qsort` in `std.libc` and wraps it in `std.sort`, whi
 program calls (`stdlib.md` 2.2, 2.10); the declaration above is the same one, written out here
 because a program may redeclare a C symbol with an identical signature (D9.8).
 
+Foreign code calls a fort function only through a function value that it receives, as `qsort`
+does here. The C start-up code calls the emitted `main`, and generated code calls entry points
+of `toolchain.md` 5.1. A linked object or `dlsym` that names a dotted fort symbol is outside the
+language contract, and the ownership proof assumes no such call (D9.7). A library check uses
+the same contract: the other callers of a library body are fort callers (D17.19).
+
 ### 8.6 Spans and strings
 
 Spans and strings never cross the boundary whole (D9.8, D13.4). Pass `.ptr` and `.len`: `s.ptr`
