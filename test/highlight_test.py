@@ -49,11 +49,12 @@ CORPUS_DIRS = (
     OWNERSHIP_QUALIFICATION_DIR,
     OWNERSHIP_PROBES_DIR,
 )
-# The single `.ft` files the grammar is held over, each in a directory that holds other
-# corpus directories: the two soundness gate programs of test/ownership.
+# The single `.ft` files the grammar is held over: the two soundness gate programs of
+# test/ownership, and the alias runs of the witness checker, alone in test/ownership/witness.
 CORPUS_FILES = (
     ROOT / "test" / "ownership" / "heap_rows.ft",
     ROOT / "test" / "ownership" / "solvers_alone.ft",
+    ROOT / "test" / "ownership" / "witness" / "alias_runs.ft",
 )
 # The least number of `.ft` each of those directories holds. A directory grows,
 # so its own test asserts a floor. No test asserts the exact total.
@@ -823,7 +824,7 @@ class CorpusTest(unittest.TestCase):
         self.check_directory(OWNERSHIP_PROBES_DIR)
 
     def test_every_ownership_gate_program_spells_correctly(self):
-        """Check the two soundness gate programs of test/ownership."""
+        """Check the two soundness gate programs and the alias runs of test/ownership."""
         self.check_files(list(CORPUS_FILES))
 
     def test_the_corpus_walk_holds_no_duplicate(self):

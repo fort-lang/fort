@@ -2616,9 +2616,20 @@ says ownership is "by convention", this section supersedes it.
   call came between. Two inputs can name one storage (D17.4). Input storage is storage that the
   walk did not allocate: an entry pointer, or a pointer that the walk read from storage that it
   does not know, designates it. In input storage the witness keeps a value only until a store
-  through another referent of input storage. A read of input storage after such a store stops
-  the walk. A local or a cell of an allocation of the walk keeps its value over that store. So
-  each branch that the witness takes reads only a value that its own walk decided.
+  through another referent of input storage. A read of input storage after such a store takes
+  an alias condition: the referent of the read and the referent of the store designate distinct
+  storage. Under that condition the read gets the value of its own referent. The witness
+  renders each alias condition as a note at the read (toolchain.md 4.2). The note names each
+  referent by the slot that held its pointer when the walk got it: a parameter, a part of a
+  by-value parameter, or a slot of input storage. That slot must stay unchanged from when the
+  walk got it to the note. A slot of input storage is read again at the note, so it takes its
+  own alias conditions, and each of those notes says that the store can change the name.
+  Without such a name the walk stops. A release also stops the walk when the pointer that it
+  reads is no exact allocation of the walk: one that the walk allocated, or that it
+  dereferenced from the same slot. So a release of a loaded owner stops the walk even after the
+  walk dereferenced a copy of it. A release of a null pointer continues the walk. A local or a
+  cell of an allocation of the walk keeps its value over that store. So each branch that the
+  witness takes reads only a value that its own walk decided.
   A crossed call that does not return for the inputs that it gets on the witness path makes a
   violation after it false. A function that never returns is such a callee. Give such a
   function a noreturn type; the compiler does not check this.
@@ -2675,6 +2686,24 @@ says ownership is "by convention", this section supersedes it.
   that exits 0. Now the witness knows a value outside a global only from its own walk, and in
   input storage only until a store through another referent. The user ratified this amendment
   on 2026-10-16.
+  Amended 2026-10-16 (second time): A read of input storage after a store through another
+  input stopped the walk. So the 6 bodies of that review stayed incomplete proof, although each
+  leaks when its two inputs designate distinct storage. Now a read after a store through another
+  input continues under a rendered distinct-storage condition. The note names each referent by
+  the slot that held its pointer when the walk got it, and a store over that slot forgets the
+  name; a note without a name stops the walk. The pointer of a store can designate a part of
+  the referent (`a = &p->n`), or change before the read, so it names no referent. A run with
+  distinct inputs holds each condition and leaks. A run with one storage breaks a condition;
+  19 of the 21 such runs of `test/ownership/witness/alias_runs.ft` exit 0 with no leak. The user
+  ratified the distinct-storage condition on 2026-10-16; the coordinator ratified the naming
+  rule on 2026-10-17.
+  Amended 2026-10-17: A release of a loaded owner, or of a stored entry owner, that the walk
+  never dereferenced recorded no store. So 3 review bodies validated a loss on a run that read
+  the released object. The user ruled on 2026-10-17 that such a release stops the walk, and
+  the event stays incomplete proof. The stop turns two events that main validated into
+  incomplete proof: the invalid use in `alias_copy` and the loss in `store_moved`
+  (`test/fort/ownership_witness_test.ft`). The coordinator ratified that loss of precision on
+  2026-10-17, and ratified that the stop holds after a copy was dereferenced.
 
 ### D17.19 Global ownership and process boundaries
 - owner: `memory-model.md` (2.9), `toolchain.md` (2.1), `module-system.md` (11),

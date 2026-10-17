@@ -50,6 +50,53 @@ TEXT_JOINER = re.compile(r"^fn (\w+)\(string@ tail, string mut@ out\) u64 \{\n"
                          r"    u64 mut n = 0;\n    while \(n < (\w+)\.len\)", re.M)
 LEDGER_ENTRY = re.compile(r"^(\S+):(\w+) (\w+) # (\w+)$")
 LEDGER_BOUND = re.compile(r"^# at most (\d+) entries$", re.M)
+# The input-alias probes of the witness checker (D17.4, D17.18). Each body leaks `k` only when
+# its inputs designate distinct storage. The checker validates each loss under the rendered
+# conditions that name the referents: the line of the loss, then for each alias note its line,
+# the name of the referent of the read and the name of the referent of the store. A store name
+# that starts with '#' marks the condition of the slot of a name, which "can change this name".
+ALIAS_RUNS = OWNERSHIP / "witness" / "alias_runs.ft"
+ALIAS_NOTES = {
+    "al": (27, [(27, "p", "q")]),
+    "al_next": (36, [(36, "p", "(*(p)).next")]),
+    "copy_alias": (45, [(45, "q", "p")]),
+    "width_alias": (53, [(53, "p", "q")]),
+    "leaf_alias": (61, [(61, "(r).a", "(r).b")]),
+    "equal_alias": (70, [(70, "p", "q")]),
+    "zero_alias": (78, [(78, "q", "p")]),
+    "arr_alias": (87, [(87, "q", "p")]),
+    "three_alias": (105, [(105, "p", "q"), (105, "p", "r")]),
+    "sub_store": (117, [(117, "q", "p")]),
+    "sub_read": (127, [(125, "p", "q")]),
+    "moved_local": (138, [(138, "p", "q")]),
+    "self_name": (160, [(158, "p", "(*(p)).next")]),
+    "dead_local": (172, [(172, "p", "q")]),
+    "deep_name": (183, [(183, "p", "#q"), (183, "(*(p)).next", "#q"),
+                        (183, "p", "#(*((*(p)).next)).next"),
+                        (183, "(*(p)).next", "#(*((*(p)).next)).next"),
+                        (183, "(*((*(p)).next)).next", "q")]),
+    "twice_alias": (217, [(215, "p", "q")]),
+    "swap_alias": (226, [(223, "p", "q")]),
+    "rename_alias": (236, [(236, "p", "q")]),
+    "known_alias": (246, [(244, "p", "q")]),
+    "origin_alias": (256, [(254, "p", "#q"), (254, "(*(p)).next", "q")]),
+    "leaf_kept": (265, [(265, "(r).a", "(r).b")]),
+}
+# The validated bodies that leak with one storage too: the notes ask for more than the leak
+# needs. Each other validated body leaks only with distinct inputs.
+ALIAS_ALWAYS = {"known_alias", "origin_alias"}
+# The bodies whose loss stays incomplete proof, each with the leaks of its distinct run and of
+# its run with one storage. `same_only` leaks only with one storage, and the checker takes no
+# such relation (the user, 2026-10-16). `moved_field` writes over the slot that names the
+# referent of its store, `zero_parent` and `leaf_moved` write over the slot of a name with an
+# aggregate store, and `moved_param` and `copied_param` write over a `mut` parameter, so their
+# paths stop.
+ALIAS_STOPS = {"same_only": (0, 1), "moved_field": (1, 0), "zero_parent": (1, 0),
+               "leaf_moved": (1, 0), "moved_param": (1, 0), "copied_param": (1, 0)}
+# glibc writes the allocation trace of a program that calls `mtrace` when this library is
+# preloaded. The x86-64 library of a cross host is below QEMU_LD_PREFIX.
+MALLOC_DEBUG = "libc_malloc_debug.so.0"
+TRACE_LINE = re.compile(r"^@ \S+ ([-+<>]) (0x[0-9a-f]+)")
 
 
 def unescape(literal):
@@ -153,6 +200,29 @@ def ledger_bound(text):
     if len(bounds) != 1:
         raise ValueError("the ledger needs one '# at most N entries' line")
     return int(bounds[0])
+
+
+def live_allocations(trace):
+    """The addresses that a glibc allocation trace allocates and does not free. `+` and `>`
+    allocate, `-` and `<` free; a free of an address from before the trace changes nothing."""
+    live = set()
+    for line in trace.splitlines():
+        found = TRACE_LINE.match(line)
+        if not found:
+            continue
+        mark, address = found.groups()
+        if mark in "+>":
+            live.add(address)
+        else:
+            live.discard(address)
+    return live
+
+
+def malloc_debug_library():
+    """The preloadable glibc malloc debug library of the target, or None."""
+    roots = [Path(os.environ["QEMU_LD_PREFIX"]) / "lib"] if os.environ.get("QEMU_LD_PREFIX") else []
+    roots += [Path("/lib/x86_64-linux-gnu"), Path("/usr/lib/x86_64-linux-gnu")]
+    return next((root / MALLOC_DEBUG for root in roots if (root / MALLOC_DEBUG).is_file()), None)
 
 
 def qualification_cases():
@@ -1817,6 +1887,89 @@ class SoundnessGateTest(unittest.TestCase):
             "test/lang/fail/ownership/066_note_of_a_conditional_release.ft",
             "test/ownership/approved/ex13_owned_child.ft",
         })
+
+
+class WitnessAliasRunTest(unittest.TestCase):
+    """Holds each input-alias probe both ways. The checker validates its loss only under the
+    rendered distinct-storage condition. A run with distinct inputs holds that condition and
+    leaks `k`; a run with one storage, as the final review of PR 125 ran it, leaks nothing.
+    `same_only` leaks only with one storage, and `moved_field` writes over the slot that names
+    a referent; each loss stays incomplete proof."""
+
+    def test_trace_reading_keeps_only_unfreed_allocations(self):
+        trace = ("= Start\n@ ./p:[0x1] - 0x10\n@ ./p:[0x2] + 0x20 0x4\n"
+                 "@ ./p:[0x3] + 0x30 0x4\n@ ./p:[0x4] < 0x30\n@ ./p:[0x4] > 0x40 0x8\n"
+                 "@ ./p:[0x5] - 0x20\n= End\n")
+        self.assertEqual(live_allocations(trace), {"0x40"})
+        self.assertEqual(live_allocations("= Start\n@ ./p:[0x1] - 0x10\n"), set())
+
+    def test_each_loss_validates_under_its_alias_note(self):
+        with tempfile.TemporaryDirectory(prefix="fort-alias-") as temporary:
+            report = Path(temporary) / "report.json"
+            run = subprocess.run(
+                [OPTIONS.fort, "--std-dir", OPTIONS.std_dir, "--ownership-check",
+                 "--ownership-report", str(report), "--check", ALIAS_RUNS.name],
+                cwd=ALIAS_RUNS.parent, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                check=False, timeout=300)
+            self.assertEqual(run.returncode, 1, run.stderr.decode())
+            document = json.loads(report.read_text())
+        violations = {body["source"]["name"]: sum(
+            analysis["violations"] for analysis in body["analyses"]
+            if analysis["name"] == "calls_heap")
+            for body in document["bodies"] if body["source"].get("module") == "alias_runs"}
+        self.assertEqual({name: count for name, count in violations.items() if count},
+                         {name: 1 for name in ALIAS_NOTES})
+        proofs = {body["source"]["name"]: analysis["proof"] for body in document["bodies"]
+                  if body["source"].get("module") == "alias_runs"
+                  for analysis in body["analyses"] if analysis["name"] == "calls_heap"}
+        self.assertEqual({name: proofs[name] for name in ALIAS_STOPS},
+                         {name: "incomplete" for name in ALIAS_STOPS})
+        stderr = run.stderr.decode()
+        for name, (line, notes) in ALIAS_NOTES.items():
+            with self.subTest(body=name):
+                error = rf"alias_runs\.ft:{line}:\d+: error: lost ownership of 'k'"
+                self.assertRegex(stderr, error)
+                block = stderr[re.search(error, stderr).start():].split(" error: ")[1]
+                expected = [(at, f"this path needs '{read}' and '{store.lstrip('#')}' to "
+                             f"designate distinct storage here; if they overlap, a store "
+                             f"through '{store.lstrip('#')}' can change this "
+                             f"{'name' if store.startswith('#') else 'read'}")
+                            for at, read, store in notes]
+                found = [(int(at), text) for at, text in re.findall(
+                    r"^alias_runs\.ft:(\d+):\d+: note: (this path needs '[^']*' and .*)$",
+                    block, re.M)]
+                self.assertEqual(found, expected)
+
+    @unittest.skipUnless(sys.platform == "linux", "the glibc allocation trace needs Linux")
+    def test_distinct_inputs_leak_and_one_storage_leaks_nothing(self):
+        library = malloc_debug_library()
+        self.assertIsNotNone(library, f"no {MALLOC_DEBUG} for the target")
+        with tempfile.TemporaryDirectory(prefix="fort-alias-") as temporary:
+            root = Path(temporary)
+            binary = root / "alias_runs"
+            built = subprocess.run(
+                [OPTIONS.fort, "--cc", OPTIONS.cc, "--std-dir", OPTIONS.std_dir, "-o",
+                 str(binary), str(ALIAS_RUNS)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=300)
+            self.assertEqual(built.returncode, 0, built.stderr.decode())
+            runs = [(name, (("distinct", 1), ("alias", int(name in ALIAS_ALWAYS))))
+                    for name in ALIAS_NOTES]
+            runs += [(name, (("distinct", distinct), ("alias", alias)))
+                     for name, (distinct, alias) in ALIAS_STOPS.items()]
+            for name, relations in runs:
+                for relation, leaked in relations:
+                    with self.subTest(body=name, relation=relation):
+                        trace = root / f"{name}.{relation}.trace"
+                        environment = dict(os.environ, LD_PRELOAD=str(library),
+                                           MALLOC_TRACE=str(trace))
+                        run = subprocess.run([str(binary), name, relation], env=environment,
+                                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                             check=False, timeout=60)
+                        self.assertEqual(run.returncode, 0, run.stderr.decode())
+                        self.assertEqual(len(live_allocations(trace.read_text())), leaked)
+            unknown = subprocess.run([str(binary), "none", "alias"], stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, check=False, timeout=60)
+            self.assertEqual(unknown.returncode, 2)
 
 
 def main():
