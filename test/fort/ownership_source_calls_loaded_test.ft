@@ -47,7 +47,9 @@ fn open(ownership_source_env.env mut* e) void {
         strbuf.append(&text, line);
         strbuf.push(&text, '\n');
     }
-    strbuf.append(&text, "fn root() i32 { return 0; }\n");
+    // The entry `main` makes the closure an executable, and `readers` holds the mark of its
+    // generated caller.
+    strbuf.append(&text, "fn main() i32 { return 0; }\n");
     assert(ownership_source_env.prepare(e, strbuf.view(&text)));
     ownership_source.analyze(&e->source);
     assert(e->source.graph_built && ownership_api.successful(e->source.graph.proof));
@@ -84,13 +86,15 @@ fn safe_callers(ownership_source_env.env mut* e) void {
     println("safe callers ok");
 }
 
-// No body here exposes a function identity, so no body is foreign-called. The reader proves
-// in the summary solver alone: its requirement names the loaded source of `h->p`.
+// No body here exposes a function identity, so the entry `main` is the one foreign-called body
+// of the module. The reader proves in the summary solver alone: its requirement names the loaded
+// source of `h->p`.
 fn readers(ownership_source_env.env mut* e) void {
     u64 mut i = 0;
     while (i < e->source.bodies.len) {
-        if (e->source.bodies[i].module->path == "main") {
-            assert(!e->source.graph.foreign_called[i]);
+        ownership_source.body* row = &e->source.bodies[i];
+        if (row->module->path == "main") {
+            assert(e->source.graph.foreign_called[i] == (row->declaration->name == "main"));
         }
         i += 1;
     }
