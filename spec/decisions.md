@@ -1110,6 +1110,14 @@ Sections:
   Linux reaches them through procedure linkage and global offset tables.
   Mac reaches them through Mach-O stubs and global offset tables.
   The runtime is fort, so a call into it is a direct fort-to-fort call like any other.
+  A fort function gets a call from outside fort source in three ways only.
+  Foreign code calls a function value that it receives from fort code.
+  The C start-up code calls the emitted `main`, which calls the entry module's `main` (D11.6).
+  Generated code calls entry points of `toolchain.md` 5.1.
+  A linked object or `dlsym` that names a dotted fort symbol is outside the language contract.
+  The ownership proof assumes no such call (D17.13).
+  A library check applies the same contract. The other callers of a library body are fort
+  callers, and they meet the caller requirements that the check infers (D17.19).
 - history: Amended 2026-09-10 with D19: the assembler directives that spelled this became IR linkage
   words. Amended 2026-09-11: quoting was said to cover dotted names and to keep the emitter free of
   per-name analysis, which left a legal entry base name holding a `"` emitting invalid IR that clang
@@ -1125,6 +1133,10 @@ Sections:
   Amended 2026-09-28 (T-212): the compiler also emitted `fort_entry` in the entry module, and that
   name was reserved as well. The emitted `main` now calls the entry module's `main` itself
   (D11.6), so the compiler emits one unmangled definition and `fort_entry` is an ordinary C name.
+  Amended 2026-10-16: the rule did not say how foreign code can call a fort function. Every fort
+  function has an external symbol, so a linked object could name one, and the ownership proof
+  had no contract for that call. The three ways above are now the contract.
+  The user ratified this amendment on 2026-10-16.
 
 ### D9.8 Extern declarations
 - owner: `module-system.md`.

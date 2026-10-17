@@ -2226,7 +2226,11 @@ came here.
   runtime check calls, and `std.rt.alloc` and `std.rt.free`, which the code of `new` and `del`
   calls. FIR lowers a print and a string comparison to fort calls, so their runtime bodies need
   no mark. `ownership_source.analyze` merges these 17 names into the marks of the graph
-  (`ownership_source_foreign_merge_test.ft`). The graph marks the others with one invariant:
+  (`ownership_source_foreign_merge_test.ft`). A library check marks no other body: a library
+  body keeps its caller requirements, and its fort callers meet them (D9.7, D17.19). The
+  language has no export attribute, because `pub` is a reserved word (D2.4).
+  `ownership_source_foreign_contract_test.ft` holds this contract in a library and in an
+  executable. The graph marks the others with one invariant:
   it follows a fort identity exactly only in exact storage. Exact storage is a local of one body
   at a place that dereferences no pointer and indexes no span or string, when no FIR address or
   slice of that body names the storage of the local (`exact_storage`).
@@ -2248,12 +2252,13 @@ came here.
   Rule 7: the result of a foreign-called body, closed transitively (`foreign_results`).
   Rules 2, 3 and 7 read the facts once at the fixed point, because a mark changes no fact.
   Each scan pays 1 W unit for each record, initializer node or fact that it visits. A mark finds
-  its body by the index in its target. Foreign code that names a fort symbol directly (D9.6,
-  D9.7) stays outside the rule, as a residual target does. `test/fort/ownership_graph_test.ft`
-  G20 to G22 and 19 rows of `tools/mutations/ownership_graph.json` hold this. G20, G21 and G22
-  refuse the build at each W bound below its full work. A refused build keeps only marks of the
-  full build, and its active operation is the operation of the refusal. G22 finds the refusal
-  of each new loop: the bound one below a mark refuses the charge of that mark.
+  its body by the index in its target. A linked object or `dlsym` that names a dotted fort
+  symbol is outside the language contract (D9.7), so it needs no mark.
+  `test/fort/ownership_graph_test.ft` G20 to G22 and 19 rows of
+  `tools/mutations/ownership_graph.json` hold this. G20, G21 and G22 refuse the build at each W
+  bound below its full work. A refused build keeps only marks of the full build, and its active
+  operation is the operation of the refusal. G22 finds the refusal of each new loop: the bound
+  one below a mark refuses the charge of that mark.
   `test/fort/ownership_source_calls_foreign_test.ft` holds 11 escape shapes and 2 twins in the
   calls_heap rows of a closure, and `test/lang/fail/ownership/070` to `074` hold 4 shapes in
   `--ownership-check` diagnostics.
