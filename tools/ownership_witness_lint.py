@@ -7,7 +7,7 @@ import re
 
 
 ALLOWED_SUMMARY_FIELDS = {"returns", "interface", "required_some", "post"}
-CONDITION_KINDS = {"call_returns", "check_passes", "nonnull", "input_branch"}
+CONDITION_KINDS = {"call_returns", "check_passes", "nonnull", "input_branch", "input_alias"}
 
 
 def fail(message):
