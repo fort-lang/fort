@@ -76,6 +76,13 @@ fn join_values(state mut* out, value vx, value vy) value {
     return v;
 }
 
+fn element_join(value a, value b) value {
+    value mut out = a; // join: copy
+    out.nullness = ownership_facts.join_nullness(a.nullness, b.nullness);
+    if (b.atom == 0) { return out; }
+    return out;
+}
+
 fn join(state* a, state* b, state mut* out) bool {
     state mut joined = state{};
     joined.reached = a->reached || b->reached;
@@ -441,6 +448,37 @@ class RecordTest(unittest.TestCase):
         status, _, err = run(replace("    joined.atoms[1] = a->atoms[1]; // join: copy\n",
                                      "    joined.atoms[1].into = a->atoms[1].into;\n"))
         self.assertEqual(status, 0, err)
+
+    def test_a_second_join_holds_the_rules_of_a_join(self):
+        # A provenance by hand, a typed field from one side, a tagged field through the
+        # operator of another tag, and a whole record without its tag each fail.
+        status, _, err = run(replace("    out.nullness = ownership_facts.join_nullness(a.nullness, "
+                                     "b.nullness);\n    if (b.atom",
+                                     "    out.nullness.how = provenance.assumed;\n    if (b.atom"))
+        self.assertEqual(status, 1)
+        self.assertIn("element_join assigns a provenance by hand", err)
+        status, _, err = run(replace("    out.nullness = ownership_facts.join_nullness(a.nullness, "
+                                     "b.nullness);\n    if (b.atom",
+                                     "    out.nullness = b.nullness;\n    if (b.atom"))
+        self.assertEqual(status, 1)
+        self.assertIn("element_join assigns value.nullness without join_nullness", err)
+        status, _, err = run(replace("    if (b.atom == 0) { return out; }",
+                                     "    out.kind = a.kind || b.kind;\n"
+                                     "    if (b.atom == 0) { return out; }"))
+        self.assertEqual(status, 1)
+        self.assertIn("value.kind has the tag same, but element_join joins it as", err)
+        status, _, err = run(replace("    value mut out = a; // join: copy\n    out.nullness = "
+                                     "ownership_facts.join_nullness(a.nullness",
+                                     "    value mut out = a;\n    out.nullness = "
+                                     "ownership_facts.join_nullness(a.nullness"))
+        self.assertEqual(status, 1)
+        self.assertIn("element_join reads the whole record `a` without `// join: copy`", err)
+
+    def test_a_missing_second_join_fails(self):
+        status, _, err = run(replace("fn element_join(value a, value b) value {",
+                                     "fn other_join(value a, value b) value {"))
+        self.assertEqual(status, 1)
+        self.assertIn("the file declares no join function element_join", err)
 
     def test_a_record_parameter_without_the_tag_fails(self):
         status, _, err = run(replace("    value mut v = vx; // join: copy\n",

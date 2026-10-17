@@ -174,6 +174,9 @@ struct value {
     bool lost_target; // join: may
     // An address whose byte offset from `target` the proof does not know.
     bool offset_unknown; // join: may
+    // The type of the element that an address designates, when an array index that the proof
+    // does not know to be zero puts the address after the start of `target`; else null.
+    types.node* element; // join: same
     // A scalar that tests the root of `test`, or NONE. True means a nonnull root when
     // `test_nonnull` is true. A known scalar has the truth value `truth`. A join of two scalars
     // drops these facts and `number`.
@@ -309,6 +312,9 @@ struct location {
     // A field projection after a cast has no matching field offset in the storage type. The key
     // still names storage that a write must clear, but it does not name the projected address.
     bool offset_unknown;
+    // See `value.element`: the type of the place that an address designates after the start of
+    // its key storage, or null.
+    types.node* element;
 }
 
 // One leaf of an aggregate value, relative to the aggregate.
@@ -615,7 +621,7 @@ fn same_value(value a, value b) bool {
         return true;
     case value_kind.address:
         return same_key(a.target, b.target) && a.param == b.param &&
-            a.offset_unknown == b.offset_unknown &&
+            a.offset_unknown == b.offset_unknown && a.element == b.element &&
             a.nullness.value == b.nullness.value && a.nullness.how == b.nullness.how;
     }
 }
@@ -1534,6 +1540,44 @@ fn weak_reference(value old, value v) value {
     return unknown_value();
 }
 
+// Whether a store of type `t` writes one whole array leaf: a fixed array of borrowed references,
+// or a struct below the path bound that holds borrowed references (`add_leaves`).
+fn array_leaf(types.node* t) bool {
+    return t != null && !is_reference(t) && (t->kind == types.type_kind.k_array ||
+        t->kind == types.type_kind.k_struct) && has_reference(t) && !owned_leaf(t);
+}
+
+// The value that one array slot keeps for two elements of an array literal. Two views keep the
+// sources of both, and an empty element keeps the other view. Any other pair takes
+// `weak_reference`, which keeps static data and inputs and loses each other fact.
+fn element_join(value a, value b) value {
+    if (a.kind == value_kind.empty && b.kind == value_kind.view) {
+        value mut kept = b; // join: copy
+        kept.nullness = ownership_facts.join_nullness(a.nullness, b.nullness);
+        return kept;
+    }
+    if (a.kind == value_kind.view && b.kind == value_kind.empty) {
+        value mut kept = a; // join: copy
+        kept.nullness = ownership_facts.join_nullness(a.nullness, b.nullness);
+        return kept;
+    }
+    if (a.kind != value_kind.view || b.kind != value_kind.view) {
+        return weak_reference(a, b); // join: copy
+    }
+    value mut out = a; // join: copy
+    u32 mut i = 0;
+    while (i < b.count) {
+        if (!add_source(&out, b.sources[i])) { return unknown_value(); }
+        i += 1;
+    }
+    sort_sources(&out);
+    out.external = a.external || b.external;
+    out.exact = a.exact && b.exact && out.count == 1;
+    out.param = joined_parameter(a.param, b.param);
+    out.nullness = ownership_facts.join_nullness(a.nullness, b.nullness);
+    return out;
+}
+
 // Whether atom `a`, or an atom that it owns, keeps in a borrowed field a reference that this
 // body made (`params` false) or a reference to storage that a parameter designates (`params`
 // true).
@@ -2424,7 +2468,10 @@ fn join_values(state mut* out, pairing* p, value vx, value vy) value {
             value mut joined_address = address_value(tx,
                 ownership_facts.join_nullness(vx.nullness, vy.nullness));
             joined_address.param = vx.param == vy.param ? vx.param : ANY_PARAM;
-            joined_address.offset_unknown = vx.offset_unknown || vy.offset_unknown;
+            // Two element types give no known offset.
+            joined_address.offset_unknown = vx.offset_unknown || vy.offset_unknown ||
+                vx.element != vy.element;
+            joined_address.element = vx.element;
             return joined_address;
         }
     }
@@ -3128,6 +3175,7 @@ fn deref_value(context mut* c, state mut* s, value v, bool owning, bool reads, s
         loc.key = v.target;
         loc.param = v.param;
         loc.offset_unknown = v.offset_unknown;
+        loc.element = v.element;
         return loc;
     case value_kind.owned:
         return deref_atom(c, s, v.atom, reads, what);
@@ -3263,7 +3311,9 @@ fn retype(context* c, state* s, location mut* loc, types.node* pointee) void {
         loc->retyped = pointee;
         return;
     }
-    if (loc->kind != location_kind.slots || holds(key_type(c, s, loc->key), pointee)) { return; }
+    // An address after the start of its key holds only the types of its element.
+    types.node* storage = loc->element != null ? loc->element : key_type(c, s, loc->key);
+    if (loc->kind != location_kind.slots || holds(storage, pointee)) { return; }
     loc->kind = location_kind.unknown;
     loc->retyped = pointee;
 }
@@ -3330,6 +3380,7 @@ fn resolve_place(context mut* c, state mut* s, fir.place p, bool address, locati
     loc.key = key_of(base_kind.local, p.local);
     loc.param = NONE;
     types.node* mut t = fir.local_at(c->f, p.local)->ty;
+    bool mut indexed = false;
     u32 mut i = 0;
     while (i < p.proj_len) {
         fir.projection pj = fir.place_projection(c->f, p, i);
@@ -3369,7 +3420,13 @@ fn resolve_place(context mut* c, state mut* s, fir.place p, bool address, locati
                     if (!zero_index(s, pj.index)) { loc.offset_unknown = true; }
                 } else if (loc.kind == location_kind.slots) {
                     u64 at = find_slot(s, loc.key);
-                    if (at == U64_MAX) { loc.kind = location_kind.length; }
+                    if (at == U64_MAX) {
+                        loc.kind = location_kind.length;
+                    } else if (address && (computed == p.proj_len || i > computed) &&
+                        !zero_index(s, pj.index)) {
+                        // The element keeps the key of its array, at another byte offset.
+                        indexed = true;
+                    }
                 }
             } else {
                 value mut header = unknown_value();
@@ -3401,6 +3458,10 @@ fn resolve_place(context mut* c, state mut* s, fir.place p, bool address, locati
         }
         t = fir.apply_projection(c->f, t, pj);
         i += 1;
+    }
+    // An address after the start of its key storage designates its own place type (`retype`).
+    if (address && loc.kind == location_kind.slots && (indexed || loc.element != null)) {
+        loc.element = *ty;
     }
     *out = loc;
 }
@@ -3608,8 +3669,10 @@ fn escape_cast(context mut* c, state mut* s, value v, types.node* t) void {
     location mut loc = location{};
     loc.kind = location_kind.unknown;
     loc.retyped = t->elem;
+    types.node* mut storage = null;
     if (v.kind == value_kind.address) {
         loc.key = v.target;
+        storage = v.element;
     } else if (v.kind == value_kind.view && v.exact && v.count == 1 && !v.external) {
         atom item = s->atoms[cast(v.sources[0], u64)];
         if (item.kind == atom_kind.region && !holds(item.ty, t->elem)) {
@@ -3621,7 +3684,8 @@ fn escape_cast(context mut* c, state mut* s, value v, types.node* t) void {
     } else {
         return;
     }
-    if (v.offset_unknown || !holds(key_type(c, s, loc.key), t->elem)) {
+    if (storage == null) { storage = key_type(c, s, loc.key); }
+    if (v.offset_unknown || !holds(storage, t->elem)) {
         clear_retyped(c, s, loc);
     }
 }
@@ -3668,6 +3732,14 @@ fn write_at(context mut* c, state mut* s, location loc, types.node* t, value v) 
     if (is_reference(t) && t->is_mut && v.kind != value_kind.owned &&
         retaining_store(s, loc) && !static_reference(stored) &&
         !escape_value(c, s, stored, t)) { return; }
+    // A store of a whole array leaf stores each element. Its value stands for each element, so
+    // mutable element references escape as a store of one element does.
+    bool whole = array_leaf(t);
+    types.node* element = whole && t->kind == types.type_kind.k_array ? types.behind_arrays(t) :
+        null;
+    if (element != null && is_reference(element) && element->is_mut &&
+        retaining_store(s, loc) && !static_reference(stored) &&
+        !escape_value(c, s, stored, element)) { return; }
     // The storage decides, not the type of the place: a store into an owning slot is a store
     // over an owner (D17.17).
     bool mut owning_slot = false;
@@ -3695,7 +3767,14 @@ fn write_at(context mut* c, state mut* s, location loc, types.node* t, value v) 
             s->slots[at].v = weak_reference(s->slots[at].v, stored);
             return;
         }
-        if (at == U64_MAX && !is_reference(t) && v.kind != value_kind.owned) { return; }
+        // A store of the whole leaf replaces each element, so the slot takes the facts of the
+        // stored value. A store of one part of it, such as a row of a nested array, joins them.
+        if (at != U64_MAX && !s->slots[at].owning && whole) {
+            value old = s->slots[at].v;
+            s->slots[at].v = s->slots[at].ty == t ? stored : weak_reference(old, stored);
+            return;
+        }
+        if (at == U64_MAX && !is_reference(t) && !whole && v.kind != value_kind.owned) { return; }
     }
     if (loc.kind == location_kind.length) { return; }
     if (loc.kind == location_kind.element) {
@@ -3706,7 +3785,7 @@ fn write_at(context mut* c, state mut* s, location loc, types.node* t, value v) 
                 "the owned leaves that this write can change");
         }
         // A field without a slot keeps the stored reference in the facts of its atoms.
-        if (is_reference(t) && v.kind != value_kind.owned) {
+        if ((is_reference(t) || whole) && v.kind != value_kind.owned) {
             u32 mut i = 0;
             while (i < loc.count) {
                 atom mut* a = &s->atoms[cast(loc.sources[i], u64)];
@@ -3718,7 +3797,7 @@ fn write_at(context mut* c, state mut* s, location loc, types.node* t, value v) 
     }
     // Storage that the proof does not track cannot keep a reference that this body made or that
     // a caller passed in: no fact would carry it to a return or to a caller.
-    if (is_reference(t) && v.kind != value_kind.owned && !static_reference(stored) &&
+    if ((is_reference(t) || whole) && v.kind != value_kind.owned && !static_reference(stored) &&
         (loc.kind == location_kind.unknown || loc.kind == location_kind.slots ||
         (loc.kind == location_kind.element && loc.external))) {
         unproved(c, s, ownership_api.incomplete_reason.unknown_effect, NONE,
@@ -3740,6 +3819,12 @@ fn place_leaves(context mut* c, state mut* s, fir.place p, bool moving, leaf_lis
     location mut loc = location{};
     types.node* mut t = null;
     resolve(c, s, p, &loc, &t);
+    located_leaves(c, s, loc, t, moving, out);
+}
+
+// The leaves of type `t` at resolved location `loc`, read or moved.
+fn located_leaves(context mut* c, state mut* s, location loc, types.node* t, bool moving,
+    leaf_list mut* out) void {
     leaves_of(t, out);
     u64 mut i = 0;
     while (i < out->len) {
@@ -3747,7 +3832,8 @@ fn place_leaves(context mut* c, state mut* s, fir.place p, bool moving, leaf_lis
         if (loc.kind == location_kind.slots) {
             slot_key mut k = slot_key{};
             u64 at = rebase(loc.key, item->depth, item->path, &k) ? find_slot(s, k) : U64_MAX;
-            if (at != U64_MAX && !s->slots[at].array) {
+            // A borrowed array slot stands for each element: each whole-array store sets it.
+            if (at != U64_MAX && (!s->slots[at].array || !s->slots[at].owning)) {
                 item->v = s->slots[at].v;
                 if (moving) { s->slots[at].v = null_value(); }
                 if (!moving) { item->v = as_view(s, item->v); }
@@ -4008,6 +4094,7 @@ fn rvalue_value(context mut* c, state mut* s, fir.rvalue rv, types.node* t) valu
             value mut out = address_value(loc.key, address_fact(s, loc.key));
             out.param = loc.param;
             out.offset_unknown = loc.offset_unknown;
+            out.element = loc.element;
             return out;
         }
         if (loc.kind == location_kind.element) {
@@ -4095,6 +4182,16 @@ fn rvalue_leaves(context mut* c, state mut* s, fir.rvalue rv, types.node* t, lea
         fir.operand op = fir.rvalue_operand(c->f, rv, 0);
         if (op.kind == fir.operand_kind.ok_const) {
             leaves_of(t, out);
+            // Zero storage holds no reference, so each borrowed array leaf of a zero constant is
+            // empty, as each reference leaf is. Each such leaf pays one W unit.
+            u64 mut z = 0;
+            while (op.value.kind == fir.const_kind.ck_zero && z < out->len) {
+                if (out->items[z].array && !out->items[z].owning) {
+                    if (!pay(c, 1)) { return; }
+                    out->items[z].v = empty_value();
+                }
+                z += 1;
+            }
             return;
         }
         place_leaves(c, s, op.place, op.kind == fir.operand_kind.ok_move, out);
@@ -4150,14 +4247,25 @@ fn rvalue_leaves(context mut* c, state mut* s, fir.rvalue rv, types.node* t, lea
         }
         return;
     }
+    // The one array leaf of a literal of borrowed references keeps the join of its elements.
+    // Each element pays one W unit.
+    bool literal = rv.kind == fir.rvalue_kind.rv_aggregate && t != null &&
+        t->kind == types.type_kind.k_array && is_reference(t->elem) && !t->elem->is_own;
+    value mut elements = empty_value();
     u32 mut n = 0;
     while (n < rv.ops_len) {
-        operand(c, s, fir.rvalue_operand(c->f, rv, n));
+        value element = as_view(s, operand(c, s, fir.rvalue_operand(c->f, rv, n)));
+        if (literal) {
+            if (!pay(c, 1)) { return; }
+            elements = n == 0 ? element : element_join(elements, element);
+        }
         n += 1;
     }
     u64 mut i = 0;
     while (i < out->len) {
-        if (out->items[i].owning) {
+        if (literal && out->items[i].array && out->items[i].depth == 0) {
+            out->items[i].v = elements;
+        } else if (out->items[i].owning) {
             unproved(c, s, ownership_api.incomplete_reason.unknown_effect, NONE,
                 "the owned leaves of this aggregate value");
             out->items[i].v = fresh_unknown_owner(s);
@@ -4858,6 +4966,7 @@ fn translate_value(context* c, state* s, state* entry, value v, u32@ map,
             value mut address = address_value(k, address_fact(s, k));
             address.param = argument_source(v.param, args);
             address.offset_unknown = v.offset_unknown;
+            address.element = v.element;
             return address;
         }
         if (v.target.base == base_kind.cell) {
@@ -4889,7 +4998,8 @@ fn translate_value(context* c, state* s, state* entry, value v, u32@ map,
 
 // The prefix of the caller storage that an argument designates, or false.
 fn designated(state* s, value v, slot_key mut* out) bool {
-    if (v.kind == value_kind.address && !v.offset_unknown) {
+    // An address after the start of its key designates no whole caller storage.
+    if (v.kind == value_kind.address && !v.offset_unknown && v.element == null) {
         *out = v.target;
         return true;
     }
@@ -6112,6 +6222,89 @@ fn forget_frame(context mut* c, state mut* s) void {
     }
 }
 
+// The text of an event at a copied leaf at `loc`: the source spelling of its slot, or a fixed
+// text when the leaf has no slot of its own. Only an event computes it.
+fn copied_name(context mut* c, state* s, location loc, leaf item) string {
+    slot_key mut k = slot_key{};
+    if (loc.kind != location_kind.slots || item.array ||
+        !rebase(loc.key, item.depth, item.path, &k)) {
+        return "a reference that this call copies";
+    }
+    return name(c, s, k);
+}
+
+// A copy of a reference is a use of it, so the reference must not dangle at the copy (D17.14).
+// Each source of a view must be live or leaked. The local of an address must not end, and the
+// cell of an address must be live or leaked. A reference whose facts this body lost can dangle,
+// so it gives incomplete proof. An input of the caller needs nothing. A reference that an
+// unknown effect wrote needs nothing when that effect made this body residual, as at a return
+// (`check_retained`).
+fn check_copy(context mut* c, state mut* s, location loc, leaf item) void {
+    value v = item.v;
+    if (v.kind == value_kind.view) {
+        bool mut live = true;
+        u32 mut i = 0;
+        while (i < v.count) {
+            atom_status status = s->atoms[cast(v.sources[i], u64)].status.value;
+            if (status != atom_status.live && status != atom_status.leaked) { live = false; }
+            i += 1;
+        }
+        if (!live) { use_sources(c, s, v.count, v.sources, copied_name(c, s, loc, item)); }
+        return;
+    }
+    if (v.kind == value_kind.address) {
+        if (v.target.base == base_kind.local) {
+            u8 ended = s->ended[cast(v.target.id, u64)];
+            if (ended == 1) {
+                violation(c, s, ownership_api.event_kind.invalid_use, certainty.definite, NONE,
+                    copied_name(c, s, loc, item));
+            } else if (ended == 2) {
+                unproved(c, s, ownership_api.incomplete_reason.missing_path, NONE,
+                    copied_name(c, s, loc, item));
+            }
+        } else if (v.target.base == base_kind.cell) {
+            atom_status status = s->atoms[cast(v.target.id, u64)].status.value;
+            if (status != atom_status.live && status != atom_status.leaked) {
+                u32[8] mut one = {};
+                one[0] = v.target.id;
+                use_sources(c, s, 1, one, copied_name(c, s, loc, item));
+            }
+        }
+        return;
+    }
+    if (v.kind == value_kind.unknown && !v.external && !(v.exact && c->residual)) {
+        unproved(c, s, ownership_api.incomplete_reason.unknown_effect, NONE,
+            copied_name(c, s, loc, item));
+    }
+}
+
+// Each borrowed leaf of an aggregate call argument is a copy of its reference, and a whole move
+// copies its borrowed leaves too (D17.14). An owned leaf follows the transfer rules. Storage
+// without slots keeps its references in the facts of its atoms: when no atom keeps a reference
+// of this body, each leaf holds an input or static data. The scan of those atoms pays one W
+// unit, and each borrowed leaf pays one more.
+fn check_copied_leaves(context mut* c, state mut* s, location loc, leaf_list* list) void {
+    bool mut body = true;
+    if (loc.kind == location_kind.element) {
+        if (!pay(c, 1)) { return; }
+        body = false;
+        u32 mut j = 0;
+        while (j < loc.count) {
+            if (s->atoms[cast(loc.sources[j], u64)].borrows) { body = true; }
+            j += 1;
+        }
+    }
+    u64 mut i = 0;
+    while (i < list->len) {
+        leaf item = list->items[i];
+        if (!item.owning && (is_reference(item.ty) || item.array)) {
+            if (!pay(c, 1)) { return; }
+            if (body) { check_copy(c, s, loc, item); }
+        }
+        i += 1;
+    }
+}
+
 /// Evaluates a call (`spec/fir.md` 6). The arguments are read in order, then a complete
 /// summary applies, or the call is unknown (D17.13, D17.18).
 fn call(context mut* c, state mut* s, fir.rvalue rv, types.node* t, leaf_list mut* out) void {
@@ -6129,7 +6322,12 @@ fn call(context mut* c, state mut* s, fir.rvalue rv, types.node* t, leaf_list mu
         argument mut arg = argument{};
         arg.ty = ty;
         if (aggregate_type(ty) && op.kind != fir.operand_kind.ok_const) {
-            place_leaves(c, s, op.place, op.kind == fir.operand_kind.ok_move, &part);
+            location mut loc = location{};
+            types.node* mut place_ty = null;
+            resolve(c, s, op.place, &loc, &place_ty);
+            located_leaves(c, s, loc, place_ty, op.kind == fir.operand_kind.ok_move, &part);
+            // The copy uses each borrowed leaf before any effect of the call (D17.14).
+            check_copied_leaves(c, s, loc, &part);
             arg.aggregate = true;
             arg.first = arg_leaves.len;
             arg.count = part.len;

@@ -565,6 +565,7 @@ preserves its source relations: a whole aggregate copy preserves each borrowed f
 source (D17.15).
 An owning aggregate copy into an owning place still requires move (D17.7).
 A whole move transfers all owning leaves, borrowed fields, and scalar fields.
+It copies each borrowed field, so it is a semantic use of each one, as a copy is (D17.14).
 It empties the complete abstract source value, including its non-owning fields (D17.6).
 A projected move transfers and empties only the selected subobject.
 Sibling fields and elements keep their contents and obligations.

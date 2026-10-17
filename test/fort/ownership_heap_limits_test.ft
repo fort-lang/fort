@@ -8,6 +8,7 @@
 //| production bounds
 //| repeated solves agree
 //| the interface bit set
+//| array literal work
 //| heap limits ok
 /// Checks the finite bounds of the heap proof (D17.18, `spec/fir.md` 14.1): W per computation,
 /// H and R per state, and the interface bit set.
@@ -273,6 +274,37 @@ fn interface_bits() void {
     assert(ownership_heap_env.unproved(&c, "small", ownership_api.incomplete_reason.missing_graph));
 }
 
+// The W use of the one body `lit` of `line`, which proves.
+fn literal_work(string line) u64 {
+    string mut@ own text = new(string, 1);
+    defer del(text);
+    text[0] = line;
+    string[1] names = {"lit"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text, names[..]);
+    assert(ownership_heap_env.proved(&c, "lit") && c.counts.computations == 1);
+    return c.counts.used[0];
+}
+
+// Each element of an array literal of references pays one W unit in each pass, and an array of
+// scalars pays nothing for its elements. A zero value pays one unit for each borrowed array leaf
+// (D17.18).
+fn literal_elements() void {
+    println("array literal work");
+    u64 one = literal_work("fn lit(i32* q) void { i32*[1] a = {q}; }");
+    u64 four = literal_work("fn lit(i32* q) void { i32*[4] a = {q, q, q, q}; }");
+    assert(four > one && (four - one) % 3 == 0);
+    u64 scalar_one = literal_work("fn lit(i32 q) void { i32[1] a = {q}; }");
+    u64 scalar_four = literal_work("fn lit(i32 q) void { i32[4] a = {q, q, q, q}; }");
+    assert(scalar_four == scalar_one);
+    // A zero value pays one unit for its one array leaf, where a literal pays one unit for each
+    // of its 4 elements: the literal pays 3 units more in each pass.
+    u64 zero = literal_work("fn lit() void { i32*[4] a = {}; }");
+    u64 nulls = literal_work("fn lit() void { i32*[4] a = {null, null, null, null}; }");
+    assert(nulls - zero == four - one);
+}
+
 fn main() i32 {
     work();
     frame_stop();
@@ -282,6 +314,7 @@ fn main() i32 {
     production();
     deterministic();
     interface_bits();
+    literal_elements();
     println("heap limits ok");
     return 0;
 }
