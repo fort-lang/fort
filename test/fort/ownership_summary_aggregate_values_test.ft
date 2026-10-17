@@ -1,0 +1,1682 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| aggregate constant ok
+//| aggregate zero return ok
+//| aggregate copy ok
+//| aggregate move ok
+//| aggregate return ok
+//| aggregate invalid reads ok
+//| aggregate base reads ok
+//| aggregate private reads ok
+//| aggregate partial models ok
+//| aggregate second dereferences ok
+//| aggregate body leaves ok
+//| aggregate components ok
+//| aggregate wide literals ok
+//| aggregate caller copies ok
+//| aggregate guarded bases ok
+//| aggregate addressed locals ok
+//| aggregate owner leaves ok
+//| aggregate parameter writes ok
+//| aggregate addressed owners ok
+//| aggregate array returns ok
+//| aggregate projected writes ok
+/// Checks complete aggregate values in summary extraction (D17.5-D17.7, D17.14-D17.15).
+import ownership_api;
+import ownership_call_bodies;
+import ownership_summary_model;
+import ownership_state;
+
+string[31] SOURCE = {
+    "struct pair { i32 first; i32 second; }",
+    "struct owner_box { i32 mut* own item; i32 tag; }",
+    "struct moved_view { i32 mut* own item; i32* ptr; }",
+    "struct view_box { i32* ptr; }",
+    "struct two_views { i32 mut* own item; i32* first; i32* second; }",
+    "struct nested_view { view_box inner; }",
+    "fn constant_value() owner_box { owner_box value = {}; return move(value); }",
+    "fn copied_value(pair p) pair { pair q = p; return q; }",
+    "fn moved_value() owner_box { owner_box a = owner_box{new(i32), 1};",
+    "    owner_box b = move(a); return b; }",
+    "fn returned_value(i32 n) pair { return pair{n, 2}; }",
+    "fn moved_borrow(i32* p) moved_view {",
+    "    moved_view value = moved_view{new(i32), p}; return move(value);",
+    "}",
+    "fn returned_param(i32* p) view_box {",
+    "    view_box value = view_box{p}; return value;",
+    "}",
+    "fn caller_copy_live(view_box* value) view_box { return *value; }",
+    "fn moved_two(i32* p, i32* q) two_views {",
+    "    two_views value = two_views{new(i32), p, q}; return move(value);",
+    "}",
+    "fn returned_nested_param(i32* p) nested_view {",
+    "    view_box inner = view_box{p}; nested_view value = nested_view{inner};",
+    "    return value;",
+    "}",
+    "fn zero_borrowed_result(bool take, i32* p) nested_view {",
+    "    view_box item = view_box{p};",
+    "    if (take) { return nested_view{item}; }",
+    "    return nested_view{{}};",
+    "}",
+    "fn unused() void {}",
+};
+
+string[42] FAILURES = {
+    "struct view_box { i32* ptr; }",
+    "struct outer_box { view_box inner; }",
+    "struct mixed_box { i32 mut* own item; i32* ptr; }",
+    "fn nested_after_release(i32 mut* own p) outer_box {",
+    "    view_box value = view_box{p}; del(p); return outer_box{value};",
+    "}",
+    "fn array_after_release(i32 mut* own p) view_box[1] {",
+    "    view_box value = view_box{p}; del(p);",
+    "    view_box[1] result = {value}; return result;",
+    "}",
+    "fn copy_after_release(i32 mut* own p) view_box {",
+    "    view_box value = view_box{p}; del(p); return value;",
+    "}",
+    "fn move_after_release(i32 mut* own p) mixed_box {",
+    "    mixed_box value = mixed_box{new(i32), p};",
+    "    del(p); return move(value);",
+    "}",
+    "fn returned_local() view_box {",
+    "    i32 local = 0; view_box value = view_box{&local}; return value;",
+    "}",
+    "fn caller_copy_after_release(view_box mut* own value) view_box {",
+    "    del(value); return *value; }",
+    "fn returned_local_move() mixed_box {",
+    "    i32 local = 0; mixed_box value = mixed_box{new(i32), &local};",
+    "    return move(value);",
+    "}",
+    "fn returned_nested_local() outer_box {",
+    "    i32 local = 0; view_box inner = view_box{&local};",
+    "    outer_box value = outer_box{inner}; return value;",
+    "}",
+    "fn caller_move_after_release(mixed_box mut* own value) mixed_box {",
+    "    del(value); return move(*value); }",
+    "fn caller_nested_after_release(outer_box mut* own value) outer_box {",
+    "    del(value); return *value; }",
+    "fn local_copy_after_release() view_box {",
+    "    view_box mut* own value = new(view_box);",
+    "    del(value); return *value;",
+    "}",
+    "fn nested_copy_after_release(i32 mut* own p) outer_box {",
+    "    view_box inner = view_box{p}; outer_box first = outer_box{inner};",
+    "    del(p); outer_box second = outer_box{inner};",
+    "    return second; }",
+};
+
+// Each load, copy or move through a pointer or span local uses that local first (D17.14).
+string[39] BASES = {
+    "struct src_box { i32* ptr; }",
+    "struct dst_box { i32* ptr; }",
+    "struct pair { i32 first; i32 second; }",
+    "struct num_box { i32 n; }",
+    "struct holder { src_box* src; }",
+    "struct view_box { i32* ptr; }",
+    "struct caller_outer { view_box inner; }",
+    "fn leaf_after_release(src_box mut* own s) dst_box {",
+    "    del(s); return dst_box{s->ptr}; }",
+    "fn leaf_after_move(src_box mut* own s) dst_box {",
+    "    src_box mut* own t = move(s); dst_box d = dst_box{s->ptr}; del(t); return d; }",
+    "fn nested_after_release(holder mut* own h) dst_box {",
+    "    del(h); return dst_box{h->src->ptr}; }",
+    "fn scalar_after_release(pair mut* own p) num_box {",
+    "    del(p); return num_box{p->first}; }",
+    "fn deref_after_release(i32 mut* own q) num_box {",
+    "    del(q); return num_box{*q}; }",
+    "fn projected_after_release(caller_outer mut* own c) view_box {",
+    "    del(c); return c->inner; }",
+    "fn load_after_release(src_box mut* own s) i32* {",
+    "    del(s); return s->ptr; }",
+    "fn read_after_release(i32 mut* own q) i32 {",
+    "    del(q); return *q; }",
+    "fn leaf_live(src_box* s) dst_box { return dst_box{s->ptr}; }",
+    "fn nested_live(holder* h) dst_box { return dst_box{h->src->ptr}; }",
+    "fn load_live(src_box* s) i32* { return s->ptr; }",
+    "fn read_live(i32* q) i32 { return *q; }",
+    "fn span_live(i32@ s) i32 { return s[0]; }",
+    "fn projected_live(caller_outer* c) view_box { return c->inner; }",
+    "struct owner_holder { i32 mut* own item; }",
+    "fn move_after_release(owner_holder mut* own h) i32 mut* own {",
+    "    del(h); i32 mut* own out = move(h->item); return out; }",
+    "fn output_after_release(owner_holder mut* own h, owner_holder mut* g) void {",
+    "    del(h); del(g->item); g->item = move(h->item); }",
+    "fn move_live(owner_holder mut* h) i32 mut* own {",
+    "    i32 mut* own out = move(h->item); h->item = new(i32); return out; }",
+    "fn output_live(owner_holder mut* h, owner_holder mut* g) void {",
+    "    del(g->item); g->item = move(h->item); h->item = new(i32); }",
+    "fn unused_bases() void {}",
+};
+
+// A whole copy or move from a place inside a modeled local reads each leaf in body flow.
+string[37] PRIVATE = {
+    "struct view_box { i32* ptr; }",
+    "struct outer_box { view_box inner; }",
+    "struct mixed { i32 mut* own item; i32* ptr; }",
+    "struct outer_mixed { mixed inner; }",
+    "fn private_after_release(i32 mut* own p) view_box {",
+    "    view_box inner = view_box{p}; outer_box outer = outer_box{inner};",
+    "    del(p); return outer.inner; }",
+    "fn element_after_release(i32* q, i32 mut* own p) view_box {",
+    "    view_box a = view_box{q}; view_box b = view_box{p};",
+    "    view_box[2] values = {a, b}; del(p); return values[1]; }",
+    "fn component_after_release(i32 mut* own p) outer_box {",
+    "    view_box inner = view_box{p}; outer_box first = outer_box{inner};",
+    "    del(p); return outer_box{first.inner}; }",
+    "fn private_move_after_release(i32 mut* own p) mixed {",
+    "    mixed value = mixed{new(i32), p}; outer_mixed outer = outer_mixed{move(value)};",
+    "    del(p); return move(outer.inner); }",
+    "fn local_after_release(i32 mut* own p) view_box {",
+    "    view_box inner = view_box{p}; outer_box outer = outer_box{inner};",
+    "    del(p); view_box copy = outer.inner; return copy; }",
+    "fn private_live(i32* p) view_box {",
+    "    view_box inner = view_box{p}; outer_box outer = outer_box{inner};",
+    "    return outer.inner; }",
+    "fn element_live(i32* p, i32* q) view_box {",
+    "    view_box a = view_box{p}; view_box b = view_box{q};",
+    "    view_box[2] values = {a, b}; return values[1]; }",
+    "fn component_live(i32* p) outer_box {",
+    "    view_box inner = view_box{p}; outer_box first = outer_box{inner};",
+    "    return outer_box{first.inner}; }",
+    "fn private_move_live(i32* p) mixed {",
+    "    mixed value = mixed{new(i32), p}; outer_mixed outer = outer_mixed{move(value)};",
+    "    return move(outer.inner); }",
+    "fn local_live(i32* p) view_box {",
+    "    view_box inner = view_box{p}; outer_box outer = outer_box{inner};",
+    "    view_box copy = outer.inner; return copy; }",
+    "fn param_live(outer_box value) view_box { return value.inner; }",
+    "fn unused_private() void {}",
+    "fn spare_private() void {}",
+};
+
+// A local that holds an unmodeled component and a reference leaf in body flow has a partial model.
+string[26] PARTIAL = {
+    "struct view_box { i32* ptr; }",
+    "struct two { view_box a; view_box b; }",
+    "struct with_ref { view_box a; i32* b; }",
+    "fn partial_after_release(view_box* src, i32 mut* own p) two {",
+    "    view_box mine = view_box{p}; two value = two{*src, mine};",
+    "    del(p); return value; }",
+    "fn partial_live(view_box* src, i32* p) two {",
+    "    view_box mine = view_box{p}; two value = two{*src, mine}; return value; }",
+    "fn partial_reference(view_box* src, i32* p) with_ref {",
+    "    with_ref value = with_ref{*src, p}; return value; }",
+    "fn partial_result(view_box* src, i32* p) two {",
+    "    view_box mine = view_box{p}; return two{*src, mine}; }",
+    "fn caller_and_zero(view_box* src) two {",
+    "    two value = two{*src, {}}; return value; }",
+    "fn address_after_release(i32 mut* own p) view_box {",
+    "    view_box value = view_box{p}; view_box* at = &value; del(p); return *at; }",
+    "fn heap_copy_live() view_box {",
+    "    view_box mut* own value = new(view_box); view_box copy = *value; del(value);",
+    "    return copy; }",
+    "fn partial_result_after_release(view_box* src, i32 mut* own p) two {",
+    "    view_box mine = view_box{p}; defer del(p); return two{*src, mine}; }",
+    "fn param_partial_after_release(view_box v, i32 mut* own p) two {",
+    "    view_box mine = view_box{p}; two value = two{v, mine}; del(p); return value; }",
+    "fn param_partial_live(view_box v, i32* p) two {",
+    "    view_box mine = view_box{p}; two value = two{v, mine}; return value; }",
+    "fn unused_partial() void {}",
+};
+
+string[3] METERED = {
+    "struct fields { i32 a; i32 b; i32 c; i32 d; i32 e; i32 f; i32 g; i32 h; }",
+    "fn metered() fields { return fields{1, 2, 3, 4, 5, 6, 7, 8}; }",
+    "fn unused_metered() void {}",
+};
+
+string[30] METERED_WIDE = {
+    "struct wide_fields {",
+    "    i32 f01;",
+    "    i32 f02;",
+    "    i32 f03;",
+    "    i32 f04;",
+    "    i32 f05;",
+    "    i32 f06;",
+    "    i32 f07;",
+    "    i32 f08;",
+    "    i32 f09;",
+    "    i32 f10;",
+    "    i32 f11;",
+    "    i32 f12;",
+    "    i32 f13;",
+    "    i32 f14;",
+    "    i32 f15;",
+    "    i32 f16;",
+    "    i32 f17;",
+    "    i32 f18;",
+    "    i32 f19;",
+    "    i32 f20;",
+    "    i32 f21;",
+    "    i32 f22;",
+    "    i32 f23;",
+    "    i32 f24;",
+    "}",
+    "fn metered_wide() wide_fields {",
+    "    return wide_fields{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,",
+    "        13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24}; }",
+    "fn unused_metered_wide() void {}",
+};
+
+string[14] METERED_NESTED = {
+    "struct scalar_fields {",
+    "    i32 f01; i32 f02; i32 f03; i32 f04;",
+    "    i32 f05; i32 f06; i32 f07; i32 f08;",
+    "    i32 f09; i32 f10; i32 f11; i32 f12;",
+    "    i32 f13; i32 f14; i32 f15; i32 f16;",
+    "    i32 f17; i32 f18; i32 f19; i32 f20;",
+    "    i32 f21; i32 f22; i32 f23; i32 f24;",
+    "}",
+    "struct scalar_wrapper { scalar_fields data; i32* ptr; }",
+    "fn metered_nested(i32* p) scalar_wrapper {",
+    "    scalar_fields data = {};",
+    "    return scalar_wrapper{data, p};",
+    "}",
+    "fn unused_metered_nested() void {}",
+};
+
+string[31] NESTED = {
+    "struct view { i32* ptr; }",
+    "struct twin_view { view left; view right; }",
+    "struct owner_ref { i32 mut* own ptr; }",
+    "struct twin_owner { owner_ref left; owner_ref right; }",
+    "fn nested_borrow(i32* p, i32* q) twin_view {",
+    "    view left = view{p};",
+    "    view right = view{q};",
+    "    twin_view value = twin_view{left, right};",
+    "    return value;",
+    "}",
+    "fn fixed_borrow(i32* p) view[2] {",
+    "    view first = view{p};",
+    "    view second = view{p};",
+    "    view[2] values = {first, second};",
+    "    return values;",
+    "}",
+    "fn nested_owner() twin_owner {",
+    "    owner_ref left = owner_ref{new(i32)};",
+    "    owner_ref right = owner_ref{new(i32)};",
+    "    twin_owner value = twin_owner{move(left), move(right)};",
+    "    return move(value);",
+    "}",
+    "fn nested_zero() twin_owner { twin_owner value = {}; return move(value); }",
+    "struct text_box { string text; }",
+    "struct pointer_box { i32* ptr; }",
+    "struct pointer_source { i32* ptr; }",
+    "fn empty_text() text_box { return text_box{\"\"}; }",
+    "fn projected_borrow(pointer_source* source) pointer_box {",
+    "    return pointer_box{source->ptr}; }",
+    "fn spare() void {}",
+    "fn unused_nested() void {}",
+};
+
+string[22] DEEP_LIMIT = {
+    "struct depth_00 { i32* ptr; }",
+    "struct depth_01 { depth_00 value; }",
+    "struct depth_02 { depth_01 value; }",
+    "struct depth_03 { depth_02 value; }",
+    "struct depth_04 { depth_03 value; }",
+    "struct depth_05 { depth_04 value; }",
+    "struct depth_06 { depth_05 value; }",
+    "struct depth_07 { depth_06 value; }",
+    "struct depth_08 { depth_07 value; }",
+    "struct depth_09 { depth_08 value; }",
+    "struct depth_10 { depth_09 value; }",
+    "struct depth_11 { depth_10 value; }",
+    "struct depth_12 { depth_11 value; }",
+    "struct depth_13 { depth_12 value; }",
+    "struct depth_14 { depth_13 value; }",
+    "struct depth_15 { depth_14 value; }",
+    "struct depth_16 { depth_15 value; }",
+    "struct depth_17 { depth_16 value; }",
+    "fn too_deep() depth_17 { depth_17 value = {}; return value; }",
+    "fn too_wide() depth_00[257] { depth_00[257] value = {}; return value; }",
+    "fn scalar_wide() i8[4294967296] { i8[4294967296] value = {}; return value; }",
+    "fn unused_limit() void {}",
+};
+
+// A dereference after the first projection loads a reference whose contents no flow step reads.
+string[29] SECOND = {
+    "struct view_box { i32* ptr; }",
+    "struct pair { i32 first; i32 second; }",
+    "struct mixed { i32 mut* own item; i32* ptr; }",
+    "struct outer_v { view_box inner; }",
+    "struct hb { view_box mut* own item; }",
+    "struct hp { pair mut* own item; }",
+    "struct hm { mixed mut* own item; }",
+    "struct ho { outer_v mut* own item; }",
+    "struct om { mixed inner; }",
+    "struct hom { om mut* own item; }",
+    "fn pp_copy(view_box mut* own mut* pp) view_box { del(*pp); return **pp; }",
+    "fn pp_copy_named(view_box mut* own mut* pp) view_box {",
+    "    del(*pp); view_box c = **pp; return c; }",
+    "fn field_copy(hb mut* h) view_box { del(h->item); return *h->item; }",
+    "fn field_copy_named(hb mut* h) view_box {",
+    "    del(h->item); view_box c = *h->item; return c; }",
+    "fn field_copy_scalar(hp mut* h) pair { del(h->item); return *h->item; }",
+    "fn field_nested(ho mut* h) view_box { del(h->item); return h->item->inner; }",
+    "fn field_moved(hb mut* h) view_box {",
+    "    view_box mut* own q = move(h->item); view_box c = *h->item; del(q);",
+    "    h->item = new(view_box); return c; }",
+    "fn literal_component(hb mut* h) outer_v { del(h->item); return outer_v{*h->item}; }",
+    "fn literal_leaf(hb mut* h) view_box { del(h->item); return view_box{h->item->ptr}; }",
+    "fn field_copy_live(hb* h) view_box { return *h->item; }",
+    "fn pp_copy_live(view_box* own* pp) view_box { return **pp; }",
+    "fn move_residual(hom mut* h) mixed { return move(h->item->inner); }",
+    "fn component_move(hm mut* h) om { return om{move(*h->item)}; }",
+    "fn field_move_live(hm mut* h) mixed { return move(*h->item); }",
+    "fn unused_second() void {}",
+};
+
+// A literal leaf of body storage has no modeled source, as a reference load in `assign`.
+string[17] BODY_LEAVES = {
+    "struct view_box { i32* ptr; }",
+    "struct dst_box { i32* ptr; }",
+    "struct outer_box { view_box inner; }",
+    "struct holder { view_box* item; }",
+    "fn local_leaf(i32 mut* own p) dst_box {",
+    "    view_box value = view_box{p}; del(p); return dst_box{value.ptr}; }",
+    "fn local_leaf_named(i32 mut* own p) dst_box {",
+    "    view_box value = view_box{p}; del(p); dst_box d = dst_box{value.ptr}; return d; }",
+    "fn nested_leaf(i32 mut* own p) dst_box {",
+    "    view_box inner = view_box{p}; outer_box o = outer_box{inner}; del(p);",
+    "    return dst_box{o.inner.ptr}; }",
+    "fn local_leaf_live(i32* p) dst_box {",
+    "    view_box value = view_box{p}; return dst_box{value.ptr}; }",
+    "fn param_leaf(view_box v) dst_box { return dst_box{v.ptr}; }",
+    "fn loaded_leaf(holder* h) dst_box { view_box* v = h->item; return dst_box{v->ptr}; }",
+    "fn caller_leaf(view_box* v) dst_box { return dst_box{v->ptr}; }",
+    "fn unused_leaves() void {}",
+};
+
+// A whole component copy names the storage of its source, not a borrowed source.
+string[16] COMPONENTS = {
+    "struct view_box { i32* ptr; }",
+    "struct outer_v { view_box inner; }",
+    "struct two { view_box a; view_box b; }",
+    "fn param_component(view_box v) outer_v { return outer_v{v}; }",
+    "fn named_component(view_box v) outer_v { outer_v r = outer_v{v}; return r; }",
+    "fn caller_component(view_box mut* own src) outer_v {",
+    "    outer_v r = outer_v{*src}; del(src); return r; }",
+    "fn two_components(view_box v, view_box w) two { return two{v, w}; }",
+    "fn deferred_component(view_box mut* own src) outer_v {",
+    "    defer del(src); return outer_v{*src}; }",
+    "fn released_component(i32 mut* own p) outer_v {",
+    "    view_box c = view_box{p}; del(p); return outer_v{c}; }",
+    "fn address_over_stale(i32 mut* own p, i32* q) view_box {",
+    "    view_box mut d = view_box{p}; view_box other = view_box{q}; view_box* at = &other;",
+    "    d = *at; del(p); return d; }",
+    "fn unused_components() void {}",
+};
+
+// Each body writes caller storage and then copies it whole or loads a leaf from it.
+string[33] CALLER = {
+    "struct view_box { i32* ptr; }",
+    "struct dst_box { i32* ptr; }",
+    "struct outer_v { view_box inner; }",
+    "struct holder { view_box inner; i32 tag; }",
+    "fn set(view_box mut* s, i32* p) void { s->ptr = p; }",
+    "fn c2_call_write(view_box mut* src, i32 mut* own p) view_box {",
+    "    set(src, p); view_box r = *src; src->ptr = null; del(p); return r; }",
+    "fn c1_local_addr(view_box mut* src) view_box {",
+    "    i32 x = 1; src->ptr = &x; view_box r = *src; src->ptr = null; return r; }",
+    "fn f4_caller_written(view_box mut* src, i32 mut* own p) outer_v {",
+    "    src->ptr = p; outer_v r = outer_v{*src}; src->ptr = null; del(p); return r; }",
+    "fn f5_caller_direct(view_box mut* src, i32 mut* own p) outer_v {",
+    "    src->ptr = p; outer_v r = outer_v{*src}; del(p); src->ptr = null; return r; }",
+    "fn f15_direct(view_box mut* src, i32 mut* own p) view_box {",
+    "    src->ptr = p; view_box r = *src; src->ptr = null; del(p); return r; }",
+    "fn f16_direct_ret(view_box mut* src, i32 mut* own p) view_box {",
+    "    src->ptr = p; del(p); view_box r = *src; src->ptr = null; return r; }",
+    "fn f17_lit_direct(view_box mut* src, i32 mut* own p) outer_v {",
+    "    src->ptr = p; del(p); outer_v r = outer_v{*src}; src->ptr = null; return r; }",
+    "fn q2_return_then_clear(view_box mut* src, i32 mut* own p) view_box {",
+    "    src->ptr = p; view_box r = *src; del(p); src->ptr = null; return r; }",
+    "fn q3_field_of_caller(holder mut* h, i32 mut* own p) view_box {",
+    "    h->inner.ptr = p; view_box r = h->inner; h->inner.ptr = null; del(p); return r; }",
+    "fn lw2_leaf_named(view_box mut* src, i32 mut* own p) dst_box {",
+    "    src->ptr = p; dst_box d = dst_box{src->ptr}; src->ptr = null; del(p); return d; }",
+    "fn lw4_field_leaf(holder mut* h, i32 mut* own p) dst_box {",
+    "    h->inner.ptr = p; dst_box d = dst_box{h->inner.ptr}; h->inner.ptr = null; del(p);",
+    "    return d; }",
+    "fn c3_ok_unwritten(view_box mut* src, i32 mut* own p) view_box {",
+    "    view_box r = *src; del(p); return r; }",
+    "fn q5_ok_clear_first(view_box mut* src, i32* q) view_box {",
+    "    src->ptr = q; view_box r = *src; src->ptr = null; return r; }",
+    "fn unused_caller() void {}",
+};
+
+// A null test makes the read after a move or a release dead, so each body but the last is valid.
+string[16] GUARD = {
+    "struct pair { i32 first; i32 second; }",
+    "fn takepair(pair mut* own s) void { del(s); }",
+    "fn g10_moved_owner_guard(pair mut* own s) i32 {",
+    "    pair mut* own t = move(s); i32 mut x = 0; if (s != null) { x = s->first; }",
+    "    del(t); return x; }",
+    "fn g12_param_deref_guard(i32 mut* own s) i32 {",
+    "    i32 mut* own t = move(s); i32 mut x = 0; if (s != null) { x = *s; } del(t); return x; }",
+    "fn g13_released_guard(pair mut* own s) i32 {",
+    "    del(s); i32 mut x = 0; if (s != null) { x = s->first; } return x; }",
+    "fn g14_callee_guard(pair mut* own s) i32 {",
+    "    takepair(move(s)); i32 mut x = 0; if (s != null) { x = s->second; } return x; }",
+    "fn g11_local_owner_guard() i32 {",
+    "    pair mut* own a = new(pair); pair mut* own t = move(a); i32 mut x = 0;",
+    "    if (a != null) { x = a->first; } del(t); return x; }",
+    "fn g15_released_unguarded(pair mut* own s) i32 { del(s); return s->first; }",
+    "fn unused_guard() void {}",
+};
+
+// A callee writes an aggregate local through its address.
+string[11] ADDRESSED = {
+    "struct view_box { i32* ptr; }",
+    "fn replace(view_box mut* out, i32* ptr) void { out->ptr = ptr; }",
+    "fn zero_then_call(i32* current) view_box {",
+    "    view_box mut value = {}; replace(&value, current); return value; }",
+    "fn copy_then_call(i32* old, i32* current) view_box {",
+    "    view_box first = view_box{old}; view_box mut value = first; replace(&value, current);",
+    "    return value; }",
+    "fn literal_then_call(i32* old, i32* current) view_box {",
+    "    view_box mut value = view_box{old}; replace(&value, current); return value; }",
+    "fn zero_unaddressed() view_box { view_box value = {}; return value; }",
+    "fn unused_addressed() void {}",
+};
+
+// A literal keeps an owning leaf of a named local in place, so later checks see the owner.
+string[8] OWNERS = {
+    "struct owner_box { i32 mut* own item; i32 tag; }",
+    "fn zero_over_owner() owner_box {",
+    "    owner_box mut a = owner_box{new(i32), 1}; a = owner_box{}; return move(a); }",
+    "fn move_over_owner() owner_box {",
+    "    owner_box mut a = owner_box{new(i32), 1}; owner_box b = owner_box{new(i32), 2};",
+    "    a = move(b); return move(a); }",
+    "fn leak_local() i32 { owner_box a = owner_box{new(i32), 1}; return 0; }",
+    "fn unused_owners() void {}",
+};
+
+// A callee writes a borrowed leaf of a by-value parameter, or of a whole copy of one, through an
+// address (D17.14). No refresh publishes that write, so each of these 7 faulty bodies stays
+// unsupported. Each proved before the whole effect stopped at an addressed local.
+string[23] PARAM_WRITES = {
+    "struct view_box { i32* ptr; }",
+    "struct view2 { i32* a; i32* b; }",
+    "struct two { view_box x; view_box y; }",
+    "struct holder { view_box inner; i32 tag; }",
+    "fn set(view_box mut* b, i32* v) void { b->ptr = v; }",
+    "fn set_b(view2 mut* b, i32* v) void { b->b = v; }",
+    "fn set_ty(two mut* t, i32* v) void { t->y.ptr = v; }",
+    "fn set_h(holder mut* h, i32* v) void { h->inner.ptr = v; }",
+    "fn g4_param_copy(view_box v, i32 mut* own p) view_box {",
+    "    view_box mut a = v; set(&a, p); del(p); return a; }",
+    "fn g4c_param_two(view2 v, i32 mut* own p) view2 {",
+    "    view2 mut a = v; set_b(&a, p); del(p); return a; }",
+    "fn k1_param_alias(view_box v, i32 mut* own p) view_box {",
+    "    view_box mut a = v; view_box mut* q = &a; set(q, p); del(p); return a; }",
+    "fn k2_param_self(view_box mut v, i32 mut* own p) view_box {",
+    "    set(&v, p); del(p); return v; }",
+    "fn k3_param_two(two tv, i32 mut* own p) two {",
+    "    two mut t = tv; set_ty(&t, p); del(p); return t; }",
+    "fn k5_param_holder(holder hv, i32 mut* own p) holder {",
+    "    holder mut h = hv; set_h(&h, p); del(p); return h; }",
+    "fn k6_param_self_two(view2 mut v, i32 mut* own p) view2 {",
+    "    set_b(&v, p); del(p); return v; }",
+    "fn unused_param_writes() void {}",
+};
+
+// A callee releases the owning leaf of an addressed literal local (D17.14). The leaf stays in
+// place, where no refresh runs, so each of these 3 faulty bodies stays unsupported. Each proves
+// without the guard of `literal_leaf_ready`.
+string[12] OWNER_WRITES = {
+    "struct owner_box { i32 mut* own item; i32 tag; }",
+    "struct mixed { i32 mut* own item; i32* view; }",
+    "fn rel_only(owner_box mut* b) void { del(b->item); }",
+    "fn mrel(mixed mut* m) void { del(m->item); }",
+    "fn e1_rel_only_ret(i32 tag) owner_box {",
+    "    owner_box mut a = owner_box{new(i32), tag}; rel_only(&a); return move(a); }",
+    "fn e2_rel_only_copy(i32 tag) owner_box {",
+    "    owner_box mut a = owner_box{new(i32), tag}; rel_only(&a); owner_box b = move(a);",
+    "    return move(b); }",
+    "fn e6_mixed_rel(i32* k) mixed {",
+    "    mixed mut m = mixed{new(i32), k}; mrel(&m); return move(m); }",
+    "fn unused_owner_writes() void {}",
+};
+
+// A fixed-array literal of references has index leaves, which `result_leaves` does not read
+// (D17.15). So its whole return expands into leaf copies, and body flow checks each leaf at the
+// exit. Each of these 8 faulty bodies proved while that return stayed one whole effect.
+string[18] ARRAY_RETURNS = {
+    "fn seta(i32*[2] mut* a, i32* v) void { (*a)[1] = v; }",
+    "fn g1_arr_rel(i32* k, i32 mut* own p) i32*[2] {",
+    "    i32*[2] mut a = {k, p}; del(p); return a; }",
+    "fn g2_arr_set(i32* k, i32 mut* own p) i32*[2] {",
+    "    i32*[2] mut a = {k, k}; seta(&a, p); del(p); return a; }",
+    "fn g6_arr_one(i32 mut* own p) i32*[1] {",
+    "    i32*[1] mut a = {p}; del(p); return a; }",
+    "fn h3_arr_first(i32* k, i32 mut* own p) i32*[2] {",
+    "    i32*[2] a = {p, k}; del(p); return a; }",
+    "fn h4_arr_param_leaf(i32* v, i32 mut* own p) i32*[2] {",
+    "    i32*[2] a = {v, p}; del(p); return a; }",
+    "fn h5_arr_null_then(i32 mut* own p) i32*[2] {",
+    "    i32*[2] a = {null, p}; del(p); return a; }",
+    "fn h8_arr_local(i32* k) i32*[2] {",
+    "    i32 x = 1; i32*[2] a = {k, &x}; return a; }",
+    "fn i2_arr_two_copies(i32* k, i32 mut* own p) i32*[2] {",
+    "    i32*[2] a = {k, p}; i32*[2] b = {k, k}; del(p); return a; }",
+    "fn unused_array_returns() void {}",
+};
+
+// A projected whole copy out of an addressed by-value parameter keeps its leaves in place, where
+// no refresh runs (D17.14). It stops when its source or its destination is addressed, so each
+// of these 4 faulty bodies stays unsupported.
+string[13] PROJECTED_WRITES = {
+    "struct view_box { i32* ptr; }",
+    "struct two { view_box x; view_box y; }",
+    "struct holder { view_box inner; i32 tag; }",
+    "fn set_ty(two mut* t, i32* v) void { t->y.ptr = v; }",
+    "fn j1_param_proj(two mut tv, i32 mut* own p) view_box {",
+    "    set_ty(&tv, p); del(p); return tv.y; }",
+    "fn j5_param_named(two mut tv, i32 mut* own p) view_box {",
+    "    set_ty(&tv, p); view_box r = tv.y; del(p); return r; }",
+    "fn j9_lit_proj(two mut tv, i32 mut* own p) holder {",
+    "    set_ty(&tv, p); del(p); return holder{tv.y, 0}; }",
+    "fn j13_alias(two mut tv, i32 mut* own p) view_box {",
+    "    two mut* q = &tv; set_ty(q, p); del(p); return tv.y; }",
+    "fn unused_projected_writes() void {}",
+};
+
+// A literal reserves 2 flow steps for each leaf of an aggregate component (D17.18). The base
+// reserve of the few statements of `tight` does not hold the 32 leaf copies of its result, so
+// without the component reserve the table is full and extraction gives `invalid_input`.
+string[7] TIGHT = {
+    "struct tight_holder { i32*[32] items; i32 tag; }",
+    "fn tight(i32* q) tight_holder {",
+    "    i32*[32] a = {q, q, q, q, q, q, q, q, q, q, q, q, q, q, q, q,",
+    "        q, q, q, q, q, q, q, q, q, q, q, q, q, q, q, q};",
+    "    return tight_holder{a, 1};",
+    "}",
+    "fn unused_tight() void {}",
+};
+
+// 32 and 64 components reserve flow steps by leaf count, not by a fixed 256 (D17.18).
+string[115] WIDE = {
+    "struct view_box { i32* ptr; }",
+    "struct pair { i32 first; i32 second; }",
+    "struct pairs32 {",
+    "    pair c00; pair c01; pair c02; pair c03; pair c04; pair c05; pair c06; pair c07;",
+    "    pair c08; pair c09; pair c10; pair c11; pair c12; pair c13; pair c14; pair c15;",
+    "    pair c16; pair c17; pair c18; pair c19; pair c20; pair c21; pair c22; pair c23;",
+    "    pair c24; pair c25; pair c26; pair c27; pair c28; pair c29; pair c30; pair c31;",
+    "}",
+    "struct pairs64 {",
+    "    pair c00; pair c01; pair c02; pair c03; pair c04; pair c05; pair c06; pair c07;",
+    "    pair c08; pair c09; pair c10; pair c11; pair c12; pair c13; pair c14; pair c15;",
+    "    pair c16; pair c17; pair c18; pair c19; pair c20; pair c21; pair c22; pair c23;",
+    "    pair c24; pair c25; pair c26; pair c27; pair c28; pair c29; pair c30; pair c31;",
+    "    pair c32; pair c33; pair c34; pair c35; pair c36; pair c37; pair c38; pair c39;",
+    "    pair c40; pair c41; pair c42; pair c43; pair c44; pair c45; pair c46; pair c47;",
+    "    pair c48; pair c49; pair c50; pair c51; pair c52; pair c53; pair c54; pair c55;",
+    "    pair c56; pair c57; pair c58; pair c59; pair c60; pair c61; pair c62; pair c63;",
+    "}",
+    "struct views32 {",
+    "    view_box c00; view_box c01; view_box c02; view_box c03; view_box c04; view_box c05;",
+    "    view_box c06; view_box c07; view_box c08; view_box c09; view_box c10; view_box c11;",
+    "    view_box c12; view_box c13; view_box c14; view_box c15; view_box c16; view_box c17;",
+    "    view_box c18; view_box c19; view_box c20; view_box c21; view_box c22; view_box c23;",
+    "    view_box c24; view_box c25; view_box c26; view_box c27; view_box c28; view_box c29;",
+    "    view_box c30; view_box c31;",
+    "}",
+    "struct views64 {",
+    "    view_box c00; view_box c01; view_box c02; view_box c03; view_box c04; view_box c05;",
+    "    view_box c06; view_box c07; view_box c08; view_box c09; view_box c10; view_box c11;",
+    "    view_box c12; view_box c13; view_box c14; view_box c15; view_box c16; view_box c17;",
+    "    view_box c18; view_box c19; view_box c20; view_box c21; view_box c22; view_box c23;",
+    "    view_box c24; view_box c25; view_box c26; view_box c27; view_box c28; view_box c29;",
+    "    view_box c30; view_box c31; view_box c32; view_box c33; view_box c34; view_box c35;",
+    "    view_box c36; view_box c37; view_box c38; view_box c39; view_box c40; view_box c41;",
+    "    view_box c42; view_box c43; view_box c44; view_box c45; view_box c46; view_box c47;",
+    "    view_box c48; view_box c49; view_box c50; view_box c51; view_box c52; view_box c53;",
+    "    view_box c54; view_box c55; view_box c56; view_box c57; view_box c58; view_box c59;",
+    "    view_box c60; view_box c61; view_box c62; view_box c63;",
+    "}",
+    "fn temps32(i32 a, i32 b) pairs32 { return pairs32{",
+    "    pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b},",
+    "    pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b},",
+    "    pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b},",
+    "    pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b},",
+    "    pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b},",
+    "    pair{a, b}, pair{a, b}",
+    "}; }",
+    "fn temps64(i32 a, i32 b) pairs64 { return pairs64{",
+    "    pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b},",
+    "    pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b},",
+    "    pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b},",
+    "    pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b},",
+    "    pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b},",
+    "    pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b},",
+    "    pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b},",
+    "    pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b},",
+    "    pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b},",
+    "    pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b},",
+    "    pair{a, b}, pair{a, b}, pair{a, b}, pair{a, b}",
+    "}; }",
+    "fn named32(i32 a, i32 b) pairs32 {",
+    "    pair t00 = pair{a, b}; pair t01 = pair{a, b}; pair t02 = pair{a, b};",
+    "    pair t03 = pair{a, b}; pair t04 = pair{a, b}; pair t05 = pair{a, b};",
+    "    pair t06 = pair{a, b}; pair t07 = pair{a, b}; pair t08 = pair{a, b};",
+    "    pair t09 = pair{a, b}; pair t10 = pair{a, b}; pair t11 = pair{a, b};",
+    "    pair t12 = pair{a, b}; pair t13 = pair{a, b}; pair t14 = pair{a, b};",
+    "    pair t15 = pair{a, b}; pair t16 = pair{a, b}; pair t17 = pair{a, b};",
+    "    pair t18 = pair{a, b}; pair t19 = pair{a, b}; pair t20 = pair{a, b};",
+    "    pair t21 = pair{a, b}; pair t22 = pair{a, b}; pair t23 = pair{a, b};",
+    "    pair t24 = pair{a, b}; pair t25 = pair{a, b}; pair t26 = pair{a, b};",
+    "    pair t27 = pair{a, b}; pair t28 = pair{a, b}; pair t29 = pair{a, b};",
+    "    pair t30 = pair{a, b}; pair t31 = pair{a, b};",
+    "    return pairs32{",
+    "        t00, t01, t02, t03, t04, t05, t06, t07, t08, t09, t10, t11, t12, t13, t14, t15,",
+    "        t16, t17, t18, t19, t20, t21, t22, t23, t24, t25, t26, t27, t28, t29, t30, t31",
+    "    }; }",
+    "fn named64(i32 a, i32 b) pairs64 {",
+    "    pair t00 = pair{a, b}; pair t01 = pair{a, b}; pair t02 = pair{a, b};",
+    "    pair t03 = pair{a, b}; pair t04 = pair{a, b}; pair t05 = pair{a, b};",
+    "    pair t06 = pair{a, b}; pair t07 = pair{a, b}; pair t08 = pair{a, b};",
+    "    pair t09 = pair{a, b}; pair t10 = pair{a, b}; pair t11 = pair{a, b};",
+    "    pair t12 = pair{a, b}; pair t13 = pair{a, b}; pair t14 = pair{a, b};",
+    "    pair t15 = pair{a, b}; pair t16 = pair{a, b}; pair t17 = pair{a, b};",
+    "    pair t18 = pair{a, b}; pair t19 = pair{a, b}; pair t20 = pair{a, b};",
+    "    pair t21 = pair{a, b}; pair t22 = pair{a, b}; pair t23 = pair{a, b};",
+    "    pair t24 = pair{a, b}; pair t25 = pair{a, b}; pair t26 = pair{a, b};",
+    "    pair t27 = pair{a, b}; pair t28 = pair{a, b}; pair t29 = pair{a, b};",
+    "    pair t30 = pair{a, b}; pair t31 = pair{a, b}; pair t32 = pair{a, b};",
+    "    pair t33 = pair{a, b}; pair t34 = pair{a, b}; pair t35 = pair{a, b};",
+    "    pair t36 = pair{a, b}; pair t37 = pair{a, b}; pair t38 = pair{a, b};",
+    "    pair t39 = pair{a, b}; pair t40 = pair{a, b}; pair t41 = pair{a, b};",
+    "    pair t42 = pair{a, b}; pair t43 = pair{a, b}; pair t44 = pair{a, b};",
+    "    pair t45 = pair{a, b}; pair t46 = pair{a, b}; pair t47 = pair{a, b};",
+    "    pair t48 = pair{a, b}; pair t49 = pair{a, b}; pair t50 = pair{a, b};",
+    "    pair t51 = pair{a, b}; pair t52 = pair{a, b}; pair t53 = pair{a, b};",
+    "    pair t54 = pair{a, b}; pair t55 = pair{a, b}; pair t56 = pair{a, b};",
+    "    pair t57 = pair{a, b}; pair t58 = pair{a, b}; pair t59 = pair{a, b};",
+    "    pair t60 = pair{a, b}; pair t61 = pair{a, b}; pair t62 = pair{a, b};",
+    "    pair t63 = pair{a, b};",
+    "    return pairs64{",
+    "        t00, t01, t02, t03, t04, t05, t06, t07, t08, t09, t10, t11, t12, t13, t14, t15,",
+    "        t16, t17, t18, t19, t20, t21, t22, t23, t24, t25, t26, t27, t28, t29, t30, t31,",
+    "        t32, t33, t34, t35, t36, t37, t38, t39, t40, t41, t42, t43, t44, t45, t46, t47,",
+    "        t48, t49, t50, t51, t52, t53, t54, t55, t56, t57, t58, t59, t60, t61, t62, t63",
+    "    }; }",
+    "fn param32(view_box v) views32 { return views32{",
+    "    v, v, v, v, v, v, v, v, v, v, v, v, v, v, v, v, v, v, v, v, v, v, v, v,",
+    "    v, v, v, v, v, v, v, v",
+    "}; }",
+    "fn param64(view_box v) views64 { return views64{",
+    "    v, v, v, v, v, v, v, v, v, v, v, v, v, v, v, v, v, v, v, v, v, v, v, v,",
+    "    v, v, v, v, v, v, v, v, v, v, v, v, v, v, v, v, v, v, v, v, v, v, v, v,",
+    "    v, v, v, v, v, v, v, v, v, v, v, v, v, v, v, v",
+    "}; }",
+    "fn unused_wide() void {}",
+};
+
+fn payloads(ownership_summary_model.summary* model,
+    ownership_summary_model.payload_kind kind) u64 {
+    u64 mut count = 0;
+    u64 mut i = 0;
+    while (i < model->effects.len) {
+        if (model->effects[i].payload == kind) { count += 1; }
+        i += 1;
+    }
+    return count;
+}
+
+fn payload_at(ownership_summary_model.summary* model,
+    ownership_summary_model.payload_kind kind, u64 ordinal) u64 {
+    u64 mut seen = 0;
+    u64 mut i = 0;
+    while (i < model->effects.len) {
+        if (model->effects[i].payload == kind) {
+            if (seen == ordinal) { return i; }
+            seen += 1;
+        }
+        i += 1;
+    }
+    return model->effects.len;
+}
+
+fn selected(ownership_summary_model.summary* model,
+    ownership_summary_model.payload_kind payload,
+    ownership_api.projection_kind first_kind, i64 first, u32 second) bool {
+    u64 mut i = 0;
+    while (i < model->effects.len) {
+        ownership_summary_model.effect_node row = model->effects[i];
+        if (row.payload == payload && row.effect.place.projections.len == 2) {
+            ownership_api.projection outer = row.effect.place.projections[0];
+            ownership_api.projection inner = row.effect.place.projections[1];
+            bool first_matches = first_kind == ownership_api.projection_kind.field ?
+                outer.field == cast(first, u32) :
+                outer.index.kind == ownership_api.fact_kind.exact &&
+                    outer.index.value == first;
+            if (outer.kind == first_kind && first_matches &&
+                inner.kind == ownership_api.projection_kind.field && inner.field == second) {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    return false;
+}
+
+fn invalid_body_with(ownership_call_bodies.bodies mut* state, u64 index, string message,
+    bool terminator) void {
+    ownership_call_bodies.infer(state, index);
+    ownership_summary_model.summary* failed = ownership_call_bodies.summary(state, index);
+    assert(failed->proof.failed && !ownership_api.successful(failed->proof));
+    assert(failed->cases.len == 0);
+    assert(ownership_call_bodies.saw(state, ownership_api.event_kind.invalid_use));
+    assert(state->services.counts.last.evidence ==
+        ownership_api.evidence_kind.unconditional);
+    assert(state->services.counts.last.reason == ownership_api.incomplete_reason.none);
+    assert(state->services.counts.last.text == message);
+    assert(state->services.counts.last.operation.terminator == terminator);
+}
+
+// A store or a move over a live owner fails with a lost owner (D17.6).
+fn lost_owner(ownership_call_bodies.bodies mut* state, u64 index, string message) void {
+    ownership_call_bodies.infer(state, index);
+    ownership_summary_model.summary* failed = ownership_call_bodies.summary(state, index);
+    assert(failed->proof.failed && !ownership_api.successful(failed->proof));
+    assert(failed->cases.len == 0);
+    assert(ownership_call_bodies.saw(state, ownership_api.event_kind.lost_ownership));
+    assert(state->services.counts.last.text == message);
+}
+
+fn invalid_body(ownership_call_bodies.bodies mut* state, u64 index) void {
+    invalid_body_with(state, index, "reference source is no longer live", false);
+}
+
+fn incomplete_with(ownership_call_bodies.bodies mut* state, u64 index,
+    ownership_api.incomplete_reason reason) void {
+    ownership_call_bodies.infer(state, index);
+    ownership_summary_model.summary* stopped = ownership_call_bodies.summary(state, index);
+    assert(!ownership_api.successful(stopped->proof));
+    assert(stopped->proof.terminal.reason == reason);
+    assert(stopped->cases.len == 0);
+    assert(state->services.counts.events == 0);
+}
+
+fn incomplete_body(ownership_call_bodies.bodies mut* state, u64 index) void {
+    incomplete_with(state, index, ownership_api.incomplete_reason.unknown_effect);
+}
+
+// A base use of an empty owner stops the proof at the base. Extraction models no null test, so
+// it gives incomplete proof with an abstract possibility, never a failure (D17.18).
+fn unproved_base(ownership_call_bodies.bodies mut* state, u64 index) void {
+    ownership_call_bodies.infer(state, index);
+    ownership_summary_model.summary* stopped = ownership_call_bodies.summary(state, index);
+    assert(!ownership_api.successful(stopped->proof));
+    assert(stopped->proof.kind == ownership_api.proof_kind.incomplete);
+    assert(stopped->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(stopped->cases.len == 0);
+    assert(ownership_call_bodies.saw(state, ownership_api.event_kind.incomplete_proof));
+    assert(state->services.counts.last.evidence ==
+        ownership_api.evidence_kind.abstract_possibility);
+    assert(state->services.counts.last.text == "local ownership effect needs a proved fact");
+}
+
+fn proved(ownership_call_bodies.bodies* b, u64 index) void {
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(b, index);
+    assert(ownership_api.successful(model->proof));
+    assert(!model->residual_effects && model->cases.len == 1);
+}
+
+fn effect(ownership_summary_model.summary* model, u64 index,
+    ownership_summary_model.payload_kind payload, ownership_api.effect_kind kind) void {
+    assert(index < model->effects.len);
+    assert(model->effects[index].payload == payload);
+    assert(model->effects[index].effect.kind == kind);
+}
+
+// Effect `index` writes `root` at a path of `parts` projections from an operand of `from`.
+fn leaf_effect(ownership_summary_model.summary* model, u64 index,
+    ownership_summary_model.payload_kind payload, u32 root, u64 parts, u64 from) void {
+    assert(index < model->effects.len);
+    ownership_summary_model.effect_node row = model->effects[index];
+    assert(row.payload == payload);
+    assert(row.effect.place.root.ordinal == root);
+    assert(row.effect.place.projections.len == parts);
+    assert(row.operand.projections.len == from);
+}
+
+// The index of the first read of local `local` itself, or the effect count.
+fn read_of(ownership_summary_model.summary* model, u32 local) u64 {
+    u64 mut i = 0;
+    while (i < model->effects.len) {
+        ownership_summary_model.effect_node row = model->effects[i];
+        if (row.payload == ownership_summary_model.payload_kind.read &&
+            row.effect.place.root.ordinal == local && row.effect.place.projections.len == 0) {
+            return i;
+        }
+        i += 1;
+    }
+    return model->effects.len;
+}
+
+// The first effect reads pointer local `local` itself, before any load through it.
+fn base_first(ownership_summary_model.summary* model, u32 local) void {
+    assert(model->effects.len > 0 && model->requirements.len > 0);
+    ownership_summary_model.effect_node first = model->effects[0];
+    assert(first.payload == ownership_summary_model.payload_kind.read);
+    assert(first.effect.place.root.ordinal == local);
+    assert(first.effect.place.projections.len == 0);
+    assert(model->requirements[0].kind ==
+        ownership_summary_model.requirement_kind.live_source);
+}
+
+// Loads, copies and moves through a released, moved or emptied base stop at the base.
+fn base_reads() void {
+    ownership_call_bodies.bodies mut failures = ownership_call_bodies.bodies{};
+    string[2] failure_names = {"scalar_after_release", "deref_after_release"};
+    ownership_call_bodies.open(&failures, BASES[..], failure_names[..]);
+    defer ownership_call_bodies.close(&failures);
+    // A projected read checks the current base of the parent and fails. A one-step read of a
+    // caller owner uses this base use, which gives incomplete proof.
+    invalid_body_with(&failures, 0, "empty reference has no element", false);
+    unproved_base(&failures, 1);
+    u64 mut i = 0;
+
+    // A projected literal leaf and a whole copy of caller storage stop before flow, live or
+    // released (caller_copies).
+    ownership_call_bodies.bodies mut stopped = ownership_call_bodies.bodies{};
+    string[6] stopped_names = {"nested_after_release", "nested_live", "leaf_after_release",
+        "leaf_after_move", "projected_after_release", "leaf_live"};
+    ownership_call_bodies.open(&stopped, BASES[..], stopped_names[..]);
+    defer ownership_call_bodies.close(&stopped);
+    i = 0;
+    while (i < 6) {
+        incomplete_body(&stopped, i);
+        i += 1;
+    }
+    ownership_call_bodies.bodies mut projected_copy = ownership_call_bodies.bodies{};
+    string[1] projected_copy_names = {"projected_live"};
+    ownership_call_bodies.open(&projected_copy, BASES[..], projected_copy_names[..]);
+    defer ownership_call_bodies.close(&projected_copy);
+    incomplete_body(&projected_copy, 0);
+
+    ownership_call_bodies.bodies mut loads = ownership_call_bodies.bodies{};
+    string[4] load_names = {"load_after_release", "read_after_release", "move_after_release",
+        "output_after_release"};
+    ownership_call_bodies.open(&loads, BASES[..], load_names[..]);
+    defer ownership_call_bodies.close(&loads);
+    invalid_body_with(&loads, 0, "empty reference has no element", false);
+    unproved_base(&loads, 1);
+    invalid_body_with(&loads, 2, "empty reference has no element", false);
+    invalid_body_with(&loads, 3, "empty reference has no element", false);
+
+    ownership_call_bodies.bodies mut moves = ownership_call_bodies.bodies{};
+    string[2] move_names = {"move_live", "output_live"};
+    ownership_call_bodies.open(&moves, BASES[..], move_names[..]);
+    defer ownership_call_bodies.close(&moves);
+    ownership_call_bodies.infer_all(&moves);
+    proved(&moves, 0);
+    proved(&moves, 1);
+    ownership_summary_model.summary* move_load = ownership_call_bodies.summary(&moves, 0);
+    u64 move_base = read_of(move_load, 1);
+    assert(move_base < payload_at(move_load, ownership_summary_model.payload_kind.move, 0));
+    ownership_summary_model.summary* output = ownership_call_bodies.summary(&moves, 1);
+    u64 output_base = read_of(output, 1);
+    assert(output_base < payload_at(output, ownership_summary_model.payload_kind.move, 0));
+
+    ownership_call_bodies.bodies mut live = ownership_call_bodies.bodies{};
+    string[3] live_names = {"load_live", "read_live", "span_live"};
+    ownership_call_bodies.open(&live, BASES[..], live_names[..]);
+    defer ownership_call_bodies.close(&live);
+    ownership_call_bodies.infer_all(&live);
+    i = 0;
+    while (i < 3) {
+        proved(&live, i);
+        i += 1;
+    }
+    // The reference load uses the current base of the parent first: a read of local 1.
+    ownership_summary_model.summary* load = ownership_call_bodies.summary(&live, 0);
+    assert(load->effects.len == 3 && load->requirements.len == 1);
+    assert(read_of(load, 1) == 0);
+    assert(load->requirements[0].kind == ownership_summary_model.requirement_kind.extent);
+    effect(load, 1, ownership_summary_model.payload_kind.reference_load,
+        ownership_api.effect_kind.write);
+    leaf_effect(load, 2, ownership_summary_model.payload_kind.copy, 0, 0, 0);
+
+    ownership_summary_model.summary* read = ownership_call_bodies.summary(&live, 1);
+    base_first(read, 1);
+    assert(read->effects.len == 2 && read->requirements.len == 2);
+    effect(read, 1, ownership_summary_model.payload_kind.replacement,
+        ownership_api.effect_kind.write);
+    println("aggregate base reads ok");
+}
+
+// A projected copy or move out of a modeled local expands into flow leaf effects.
+fn private_reads() void {
+    ownership_call_bodies.bodies mut failures = ownership_call_bodies.bodies{};
+    string[5] failure_names = {"private_after_release", "element_after_release",
+        "component_after_release", "private_move_after_release", "local_after_release"};
+    ownership_call_bodies.open(&failures, PRIVATE[..], failure_names[..]);
+    defer ownership_call_bodies.close(&failures);
+    u64 mut i = 0;
+    while (i < 5) {
+        invalid_body(&failures, i);
+        i += 1;
+    }
+
+    ownership_call_bodies.bodies mut live = ownership_call_bodies.bodies{};
+    string[6] live_names = {"private_live", "element_live", "component_live",
+        "private_move_live", "local_live", "param_live"};
+    ownership_call_bodies.open(&live, PRIVATE[..], live_names[..]);
+    defer ownership_call_bodies.close(&live);
+    ownership_call_bodies.infer_all(&live);
+    i = 0;
+    while (i < 6) {
+        proved(&live, i);
+        i += 1;
+    }
+    ownership_summary_model.summary* field = ownership_call_bodies.summary(&live, 0);
+    assert(field->effects.len == 5);
+    leaf_effect(field, 1, ownership_summary_model.payload_kind.copy, 3, 2, 1);
+    leaf_effect(field, 2, ownership_summary_model.payload_kind.copy, 0, 1, 2);
+
+    ownership_summary_model.summary* element = ownership_call_bodies.summary(&live, 1);
+    assert(element->effects.len == 12);
+    leaf_effect(element, 8, ownership_summary_model.payload_kind.copy, 0, 1, 2);
+    ownership_api.projection index = element->effects[8].operand.projections[0];
+    assert(index.kind == ownership_api.projection_kind.fixed_index);
+    assert(index.index.kind == ownership_api.fact_kind.exact && index.index.value == 1);
+
+    ownership_summary_model.summary* component = ownership_call_bodies.summary(&live, 2);
+    assert(component->effects.len == 5);
+    leaf_effect(component, 2, ownership_summary_model.payload_kind.copy, 0, 2, 2);
+
+    ownership_summary_model.summary* moved = ownership_call_bodies.summary(&live, 3);
+    assert(moved->effects.len == 11);
+    leaf_effect(moved, 6, ownership_summary_model.payload_kind.move, 0, 1, 2);
+    leaf_effect(moved, 7, ownership_summary_model.payload_kind.copy, 0, 1, 2);
+    leaf_effect(moved, 8, ownership_summary_model.payload_kind.replacement, 3, 2, 2);
+
+    ownership_summary_model.summary* local = ownership_call_bodies.summary(&live, 4);
+    assert(local->effects.len == 7);
+    leaf_effect(local, 2, ownership_summary_model.payload_kind.copy, 4, 1, 2);
+    leaf_effect(local, 3, ownership_summary_model.payload_kind.copy, 0, 1, 1);
+
+    ownership_summary_model.summary* param = ownership_call_bodies.summary(&live, 5);
+    assert(param->effects.len == 1);
+    leaf_effect(param, 0, ownership_summary_model.payload_kind.copy, 0, 0, 1);
+    println("aggregate private reads ok");
+}
+
+// An unmodeled component and a flow reference leaf in one named local keep proof incomplete.
+fn partial_models() void {
+    ownership_call_bodies.bodies mut partial = ownership_call_bodies.bodies{};
+    string[6] partial_names = {"partial_after_release", "partial_live", "partial_reference",
+        "partial_result_after_release", "address_after_release", "heap_copy_live"};
+    ownership_call_bodies.open(&partial, PARTIAL[..], partial_names[..]);
+    defer ownership_call_bodies.close(&partial);
+    u64 mut i = 0;
+    while (i < 4) {
+        incomplete_body(&partial, i);
+        i += 1;
+    }
+    incomplete_with(&partial, 4, ownership_api.incomplete_reason.missing_path);
+    incomplete_with(&partial, 5, ownership_api.incomplete_reason.missing_path);
+
+    // A by-value parameter component is unmodeled too, so its named literal stays incomplete.
+    ownership_call_bodies.bodies mut param_partial = ownership_call_bodies.bodies{};
+    string[2] param_partial_names = {"param_partial_after_release", "param_partial_live"};
+    ownership_call_bodies.open(&param_partial, PARTIAL[..], param_partial_names[..]);
+    defer ownership_call_bodies.close(&param_partial);
+    incomplete_body(&param_partial, 0);
+    incomplete_body(&param_partial, 1);
+
+    // A caller component into the result is a whole copy of caller storage (caller_copies).
+    ownership_call_bodies.bodies mut whole = ownership_call_bodies.bodies{};
+    string[2] whole_names = {"partial_result", "caller_and_zero"};
+    ownership_call_bodies.open(&whole, PARTIAL[..], whole_names[..]);
+    defer ownership_call_bodies.close(&whole);
+    incomplete_body(&whole, 0);
+    incomplete_body(&whole, 1);
+    println("aggregate partial models ok");
+}
+
+// A whole copy, a literal component and a literal leaf through a second dereference stop
+// before flow (D17.14). Only the whole caller move of the prior rule keeps its proof.
+fn second_derefs() void {
+    ownership_call_bodies.bodies mut copies = ownership_call_bodies.bodies{};
+    string[6] copy_names = {"pp_copy", "pp_copy_named", "field_copy", "field_copy_named",
+        "field_copy_scalar", "field_nested"};
+    ownership_call_bodies.open(&copies, SECOND[..], copy_names[..]);
+    defer ownership_call_bodies.close(&copies);
+    u64 mut i = 0;
+    while (i < 6) {
+        incomplete_body(&copies, i);
+        i += 1;
+    }
+
+    ownership_call_bodies.bodies mut literals = ownership_call_bodies.bodies{};
+    string[3] literal_names = {"field_moved", "literal_component", "literal_leaf"};
+    ownership_call_bodies.open(&literals, SECOND[..], literal_names[..]);
+    defer ownership_call_bodies.close(&literals);
+    i = 0;
+    while (i < 3) {
+        incomplete_body(&literals, i);
+        i += 1;
+    }
+
+    // The valid bodies of the same shapes lose their proof too.
+    ownership_call_bodies.bodies mut live = ownership_call_bodies.bodies{};
+    string[4] live_names = {"field_copy_live", "pp_copy_live", "move_residual",
+        "component_move"};
+    ownership_call_bodies.open(&live, SECOND[..], live_names[..]);
+    defer ownership_call_bodies.close(&live);
+    i = 0;
+    while (i < 4) {
+        incomplete_body(&live, i);
+        i += 1;
+    }
+
+    ownership_call_bodies.bodies mut moves = ownership_call_bodies.bodies{};
+    string[1] move_names = {"field_move_live"};
+    ownership_call_bodies.open(&moves, SECOND[..], move_names[..]);
+    defer ownership_call_bodies.close(&moves);
+    ownership_call_bodies.infer(&moves, 0);
+    proved(&moves, 0);
+    ownership_summary_model.summary* moved = ownership_call_bodies.summary(&moves, 0);
+    base_first(moved, 1);
+    assert(moved->effects.len == 4);
+    assert(payload_at(moved, ownership_summary_model.payload_kind.reference_load, 0) == 2);
+    effect(moved, 3, ownership_summary_model.payload_kind.move,
+        ownership_api.effect_kind.transfer);
+    leaf_effect(moved, 3, ownership_summary_model.payload_kind.move, 0, 0, 0);
+    println("aggregate second dereferences ok");
+}
+
+// A literal leaf of body storage, of a by-value parameter or of a loaded reference stays
+// unsupported, live or released (D17.14).
+fn body_leaves() void {
+    ownership_call_bodies.bodies mut stored = ownership_call_bodies.bodies{};
+    string[6] stored_names = {"local_leaf", "local_leaf_named", "nested_leaf",
+        "local_leaf_live", "param_leaf", "loaded_leaf"};
+    ownership_call_bodies.open(&stored, BODY_LEAVES[..], stored_names[..]);
+    defer ownership_call_bodies.close(&stored);
+    u64 mut i = 0;
+    while (i < 6) {
+        incomplete_body(&stored, i);
+        i += 1;
+    }
+    println("aggregate body leaves ok");
+}
+
+// A whole component copy keeps proof and gives no result leaf failure (D17.15). A modeled
+// component still reads each leaf in body flow.
+fn components() void {
+    ownership_call_bodies.bodies mut whole = ownership_call_bodies.bodies{};
+    string[5] whole_names = {"param_component", "named_component", "two_components",
+        "caller_component", "deferred_component"};
+    ownership_call_bodies.open(&whole, COMPONENTS[..], whole_names[..]);
+    defer ownership_call_bodies.close(&whole);
+    ownership_call_bodies.infer_all(&whole);
+    u64 mut i = 0;
+    while (i < 3) {
+        proved(&whole, i);
+        i += 1;
+    }
+    ownership_summary_model.summary* param = ownership_call_bodies.summary(&whole, 0);
+    assert(param->effects.len == 1 && param->requirements.len == 0);
+    leaf_effect(param, 0, ownership_summary_model.payload_kind.copy, 0, 1, 0);
+    ownership_summary_model.summary* two = ownership_call_bodies.summary(&whole, 2);
+    assert(two->effects.len == 2);
+    leaf_effect(two, 1, ownership_summary_model.payload_kind.copy, 0, 1, 0);
+    // A component of caller storage is a whole copy of caller storage (caller_copies).
+    incomplete_body(&whole, 3);
+    incomplete_body(&whole, 4);
+
+    ownership_call_bodies.bodies mut failures = ownership_call_bodies.bodies{};
+    string[2] failure_names = {"released_component", "address_over_stale"};
+    ownership_call_bodies.open(&failures, COMPONENTS[..], failure_names[..]);
+    defer ownership_call_bodies.close(&failures);
+    invalid_body(&failures, 0);
+    // A copy through an address writes no flow step, so flow does not run on a stale leaf.
+    incomplete_with(&failures, 1, ownership_api.incomplete_reason.missing_path);
+    println("aggregate components ok");
+}
+
+// Literals of 32 and 64 components stay far below their W bound. Each aggregate assignment
+// reserves 2 steps for each reference leaf and 1 for each operand (D17.18).
+fn wide_literals() void {
+    ownership_call_bodies.bodies mut temps = ownership_call_bodies.bodies{};
+    string[2] temp_names = {"temps32", "temps64"};
+    ownership_call_bodies.open(&temps, WIDE[..], temp_names[..]);
+    defer ownership_call_bodies.close(&temps);
+    // Copied temporaries reach the return with a holding mark, a later rule.
+    incomplete_body(&temps, 0);
+    assert(temps.services.counts.meter.used.w == 5653);
+    incomplete_body(&temps, 1);
+    assert(temps.services.counts.meter.used.w == 11125);
+
+    ownership_call_bodies.bodies mut tight = ownership_call_bodies.bodies{};
+    string[1] tight_names = {"tight"};
+    ownership_call_bodies.open(&tight, TIGHT[..], tight_names[..]);
+    defer ownership_call_bodies.close(&tight);
+    ownership_call_bodies.infer(&tight, 0);
+    proved(&tight, 0);
+    ownership_summary_model.summary* tight_summary = ownership_call_bodies.summary(&tight, 0);
+    // 32 copies build `a`, 32 leaf copies write the result, and 1 storage end ends `a`.
+    assert(tight_summary->effects.len == 65);
+    assert(payloads(tight_summary, ownership_summary_model.payload_kind.copy) == 64);
+    assert(payloads(tight_summary, ownership_summary_model.payload_kind.storage_end) == 1);
+
+    ownership_call_bodies.bodies mut named = ownership_call_bodies.bodies{};
+    string[4] named_names = {"named32", "named64", "param32", "param64"};
+    ownership_call_bodies.open(&named, WIDE[..], named_names[..]);
+    defer ownership_call_bodies.close(&named);
+    u64[4] widths = {32, 64, 32, 64};
+    u64[4] used = {13785, 27582, 6420, 16009};
+    u64 mut i = 0;
+    while (i < 4) {
+        ownership_call_bodies.infer(&named, i);
+        proved(&named, i);
+        assert(named.services.counts.meter.used.w == used[i]);
+        assert(named.services.counts.meter.used.w < named.services.limits.w / 4);
+        assert(ownership_call_bodies.summary(&named, i)->effects.len == widths[i]);
+        i += 1;
+    }
+    println("aggregate wide literals ok");
+}
+
+// A whole copy of caller storage and a projected literal leaf read no write of this body to
+// that storage (D17.14). So they stay unsupported. The 11 faulty bodies proved before the cut.
+fn caller_copies() void {
+    ownership_call_bodies.bodies mut written = ownership_call_bodies.bodies{};
+    string[5] written_names = {"set", "c2_call_write", "c1_local_addr", "f4_caller_written",
+        "f5_caller_direct"};
+    ownership_call_bodies.open(&written, CALLER[..], written_names[..]);
+    defer ownership_call_bodies.close(&written);
+    ownership_call_bodies.infer(&written, 0);
+    proved(&written, 0);
+    u64 mut i = 1;
+    while (i < 5) {
+        incomplete_body(&written, i);
+        i += 1;
+    }
+
+    ownership_call_bodies.bodies mut direct_copies = ownership_call_bodies.bodies{};
+    string[6] direct_names = {"f15_direct", "f16_direct_ret", "f17_lit_direct",
+        "q2_return_then_clear", "q3_field_of_caller", "lw2_leaf_named"};
+    ownership_call_bodies.open(&direct_copies, CALLER[..], direct_names[..]);
+    defer ownership_call_bodies.close(&direct_copies);
+    i = 0;
+    while (i < 6) {
+        incomplete_body(&direct_copies, i);
+        i += 1;
+    }
+
+    // The valid bodies of the same shapes lose their proof too.
+    ownership_call_bodies.bodies mut rest = ownership_call_bodies.bodies{};
+    string[3] rest_names = {"lw4_field_leaf", "c3_ok_unwritten", "q5_ok_clear_first"};
+    ownership_call_bodies.open(&rest, CALLER[..], rest_names[..]);
+    defer ownership_call_bodies.close(&rest);
+    i = 0;
+    while (i < 3) {
+        incomplete_body(&rest, i);
+        i += 1;
+    }
+    println("aggregate caller copies ok");
+}
+
+// Extraction models no null test. A one-step guarded read of a caller owner uses this base use
+// and gives incomplete proof. A projected guarded read reaches the current-base check of the
+// parent, which fails it as on the parent: that false violation belongs to the parent rule.
+fn guarded_bases() void {
+    ownership_call_bodies.bodies mut guarded = ownership_call_bodies.bodies{};
+    string[5] guarded_names = {"takepair", "g10_moved_owner_guard", "g12_param_deref_guard",
+        "g13_released_guard", "g14_callee_guard"};
+    ownership_call_bodies.open(&guarded, GUARD[..], guarded_names[..]);
+    defer ownership_call_bodies.close(&guarded);
+    ownership_call_bodies.infer(&guarded, 0);
+    proved(&guarded, 0);
+    invalid_body_with(&guarded, 1, "empty reference has no element", false);
+    unproved_base(&guarded, 2);
+    invalid_body_with(&guarded, 3, "empty reference has no element", false);
+    invalid_body_with(&guarded, 4, "empty reference has no element", false);
+    ownership_call_bodies.bodies mut local = ownership_call_bodies.bodies{};
+    string[2] local_names = {"g11_local_owner_guard", "g15_released_unguarded"};
+    ownership_call_bodies.open(&local, GUARD[..], local_names[..]);
+    defer ownership_call_bodies.close(&local);
+    // The local owner stops in extraction before flow, unproved as well.
+    incomplete_body(&local, 0);
+    invalid_body_with(&local, 1, "empty reference has no element", false);
+    println("aggregate guarded bases ok");
+}
+
+// A proved callee store refreshes the private leaves of a literal, and the summary publishes
+// the write as a copy effect, as on the parent. A zero or a whole copy keeps its leaves in place,
+// where no refresh runs, so an addressed local of that kind stays unsupported (D17.14).
+fn addressed_locals() void {
+    ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+    string[5] names = {"replace", "zero_then_call", "copy_then_call", "literal_then_call",
+        "zero_unaddressed"};
+    ownership_call_bodies.open(&set, ADDRESSED[..], names[..]);
+    defer ownership_call_bodies.close(&set);
+    ownership_call_bodies.infer(&set, 0);
+    proved(&set, 0);
+    incomplete_body(&set, 1);
+    incomplete_body(&set, 2);
+    ownership_call_bodies.infer(&set, 3);
+    proved(&set, 3);
+    ownership_summary_model.summary* literal = ownership_call_bodies.summary(&set, 3);
+    u64 mut published = 0;
+    u64 mut i = 0;
+    while (i < literal->effects.len) {
+        ownership_summary_model.effect_node node = literal->effects[i];
+        if (node.payload == ownership_summary_model.payload_kind.copy &&
+            node.effect.place.root.ordinal == 3 && node.effect.place.projections.len == 1 &&
+            node.operand.root.ordinal == 2) { published += 1; }
+        i += 1;
+    }
+    assert(published == 1);
+    ownership_call_bodies.infer(&set, 4);
+    proved(&set, 4);
+    println("aggregate addressed locals ok");
+}
+
+// A store or a zero over a live owning leaf discards that owner, and a storage end of a local
+// with an owning leaf stops the proof, because the leaf stays in place (D17.6, D17.15).
+fn owner_leaves() void {
+    ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+    string[3] names = {"zero_over_owner", "move_over_owner", "leak_local"};
+    ownership_call_bodies.open(&set, OWNERS[..], names[..]);
+    defer ownership_call_bodies.close(&set);
+    lost_owner(&set, 0, "assignment would discard a live owner");
+    lost_owner(&set, 1, "move would discard a live owner");
+    unproved_base(&set, 2);
+    println("aggregate owner leaves ok");
+}
+
+// The harness opens at most 6 bodies, so the 7 bodies and their 4 callees take 2 sets.
+fn param_writes() void {
+    string[6] first_names = {"set", "set_b", "g4_param_copy", "g4c_param_two", "k2_param_self",
+        "k6_param_self_two"};
+    string[6] second_names = {"set", "set_ty", "set_h", "k1_param_alias", "k3_param_two",
+        "k5_param_holder"};
+    u64[2] callees = {2, 3};
+    u64 mut round = 0;
+    while (round < 2) {
+        ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+        if (round == 0) {
+            ownership_call_bodies.open(&set, PARAM_WRITES[..], first_names[..]);
+        } else {
+            ownership_call_bodies.open(&set, PARAM_WRITES[..], second_names[..]);
+        }
+        u64 mut i = 0;
+        while (i < callees[round]) {
+            ownership_call_bodies.infer(&set, i);
+            proved(&set, i);
+            i += 1;
+        }
+        while (i < 6) {
+            incomplete_body(&set, i);
+            i += 1;
+        }
+        ownership_call_bodies.close(&set);
+        round += 1;
+    }
+    println("aggregate parameter writes ok");
+}
+
+fn owner_writes() void {
+    ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+    string[5] names = {"rel_only", "mrel", "e1_rel_only_ret", "e2_rel_only_copy",
+        "e6_mixed_rel"};
+    ownership_call_bodies.open(&set, OWNER_WRITES[..], names[..]);
+    defer ownership_call_bodies.close(&set);
+    ownership_call_bodies.infer(&set, 0);
+    proved(&set, 0);
+    ownership_call_bodies.infer(&set, 1);
+    proved(&set, 1);
+    incomplete_body(&set, 2);
+    incomplete_body(&set, 3);
+    incomplete_body(&set, 4);
+    println("aggregate addressed owners ok");
+}
+
+fn failed_body(ownership_call_bodies.bodies mut* state, u64 index) void {
+    ownership_call_bodies.infer(state, index);
+    ownership_summary_model.summary* failed = ownership_call_bodies.summary(state, index);
+    assert(failed->proof.failed && !ownership_api.successful(failed->proof));
+    assert(failed->cases.len == 0);
+}
+
+// The harness opens at most 6 bodies, so the 8 bodies and their callee take 2 sets.
+fn array_returns() void {
+    ownership_call_bodies.bodies mut first = ownership_call_bodies.bodies{};
+    string[6] first_names = {"seta", "g1_arr_rel", "g2_arr_set", "g6_arr_one", "h3_arr_first",
+        "h4_arr_param_leaf"};
+    ownership_call_bodies.open(&first, ARRAY_RETURNS[..], first_names[..]);
+    defer ownership_call_bodies.close(&first);
+    ownership_call_bodies.infer(&first, 0);
+    proved(&first, 0);
+    u64 mut i = 1;
+    while (i < 6) {
+        failed_body(&first, i);
+        i += 1;
+    }
+    ownership_call_bodies.bodies mut second = ownership_call_bodies.bodies{};
+    string[3] second_names = {"h5_arr_null_then", "h8_arr_local", "i2_arr_two_copies"};
+    ownership_call_bodies.open(&second, ARRAY_RETURNS[..], second_names[..]);
+    defer ownership_call_bodies.close(&second);
+    i = 0;
+    while (i < 3) {
+        failed_body(&second, i);
+        i += 1;
+    }
+    println("aggregate array returns ok");
+}
+
+fn projected_writes() void {
+    ownership_call_bodies.bodies mut set = ownership_call_bodies.bodies{};
+    string[5] names = {"set_ty", "j1_param_proj", "j5_param_named", "j9_lit_proj",
+        "j13_alias"};
+    ownership_call_bodies.open(&set, PROJECTED_WRITES[..], names[..]);
+    defer ownership_call_bodies.close(&set);
+    ownership_call_bodies.infer(&set, 0);
+    proved(&set, 0);
+    u64 mut i = 1;
+    while (i < 5) {
+        incomplete_body(&set, i);
+        i += 1;
+    }
+    println("aggregate projected writes ok");
+}
+
+fn main() i32 {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[6] names = {"constant_value", "copied_value", "moved_value", "returned_value",
+        "moved_borrow", "returned_param"};
+    ownership_call_bodies.open(&b, SOURCE[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+
+    proved(&b, 0);
+    ownership_summary_model.summary* constant = ownership_call_bodies.summary(&b, 0);
+    assert(constant->effects.len == 3 && constant->roots.len == 2);
+    effect(constant, 0, ownership_summary_model.payload_kind.replacement,
+        ownership_api.effect_kind.write);
+    effect(constant, 1, ownership_summary_model.payload_kind.move,
+        ownership_api.effect_kind.transfer);
+    effect(constant, 2, ownership_summary_model.payload_kind.storage_end,
+        ownership_api.effect_kind.storage_end);
+    println("aggregate constant ok");
+    println("aggregate zero return ok");
+
+    proved(&b, 1);
+    ownership_summary_model.summary* copied = ownership_call_bodies.summary(&b, 1);
+    assert(copied->effects.len == 3 && copied->roots.len == 3);
+    effect(copied, 0, ownership_summary_model.payload_kind.copy,
+        ownership_api.effect_kind.write);
+    effect(copied, 1, ownership_summary_model.payload_kind.copy,
+        ownership_api.effect_kind.write);
+    effect(copied, 2, ownership_summary_model.payload_kind.storage_end,
+        ownership_api.effect_kind.storage_end);
+    println("aggregate copy ok");
+
+    proved(&b, 2);
+    ownership_summary_model.summary* moved = ownership_call_bodies.summary(&b, 2);
+    assert(moved->effects.len == 6 && moved->roots.len == 5);
+    effect(moved, 0, ownership_summary_model.payload_kind.allocation,
+        ownership_api.effect_kind.write);
+    u64[3] moves = {1, 2, 3};
+    for (u64 i : moves) {
+        effect(moved, i, ownership_summary_model.payload_kind.move,
+            ownership_api.effect_kind.transfer);
+    }
+    u64[2] ends = {4, 5};
+    for (u64 i : ends) {
+        effect(moved, i, ownership_summary_model.payload_kind.storage_end,
+            ownership_api.effect_kind.storage_end);
+    }
+    println("aggregate move ok");
+
+    proved(&b, 3);
+    ownership_summary_model.summary* returned = ownership_call_bodies.summary(&b, 3);
+    assert(returned->effects.len == 0 && returned->roots.len == 2);
+    println("aggregate return ok");
+
+    proved(&b, 4);
+    ownership_summary_model.summary* moved_borrow = ownership_call_bodies.summary(&b, 4);
+    assert(payloads(moved_borrow, ownership_summary_model.payload_kind.allocation) == 1);
+    assert(payloads(moved_borrow,
+        ownership_summary_model.payload_kind.copy) == 2);
+    assert(payloads(moved_borrow,
+        ownership_summary_model.payload_kind.move) == 2);
+    assert(payloads(moved_borrow, ownership_summary_model.payload_kind.replacement) == 1);
+    u64 moved_borrow_copy = payload_at(moved_borrow,
+        ownership_summary_model.payload_kind.copy, 1);
+    u64 moved_borrow_clear = payload_at(moved_borrow,
+        ownership_summary_model.payload_kind.replacement, 0);
+    assert(moved_borrow_copy < moved_borrow->effects.len);
+    assert(moved_borrow_clear < moved_borrow->effects.len);
+    assert(ownership_state.same_place(moved_borrow->effects[moved_borrow_copy].operand,
+        moved_borrow->effects[moved_borrow_clear].effect.place));
+
+    proved(&b, 5);
+    ownership_summary_model.summary* returned_param = ownership_call_bodies.summary(&b, 5);
+    assert(payloads(returned_param, ownership_summary_model.payload_kind.copy) == 2);
+    assert(returned_param->requirements.len == 1);
+
+    ownership_call_bodies.bodies mut extra_results = ownership_call_bodies.bodies{};
+    string[4] extra_result_names = {"caller_copy_live", "moved_two",
+        "returned_nested_param", "zero_borrowed_result"};
+    ownership_call_bodies.open(&extra_results, SOURCE[..], extra_result_names[..]);
+    defer ownership_call_bodies.close(&extra_results);
+    ownership_call_bodies.infer_all(&extra_results);
+
+    // A whole copy of caller storage stays unsupported, live or not (caller_copies).
+    incomplete_body(&extra_results, 0);
+
+    proved(&extra_results, 1);
+    ownership_summary_model.summary* moved_two =
+        ownership_call_bodies.summary(&extra_results, 1);
+    assert(payloads(moved_two, ownership_summary_model.payload_kind.copy) == 4);
+    assert(payloads(moved_two, ownership_summary_model.payload_kind.replacement) == 2);
+    u64 mut replacement = 0;
+    while (replacement < 2) {
+        u64 copied_at = payload_at(moved_two, ownership_summary_model.payload_kind.copy,
+            replacement + 2);
+        u64 cleared_at = payload_at(moved_two,
+            ownership_summary_model.payload_kind.replacement, replacement);
+        assert(copied_at < moved_two->effects.len && cleared_at < moved_two->effects.len);
+        assert(ownership_state.same_place(moved_two->effects[copied_at].operand,
+            moved_two->effects[cleared_at].effect.place));
+        replacement += 1;
+    }
+
+    proved(&extra_results, 2);
+    ownership_summary_model.summary* nested_param =
+        ownership_call_bodies.summary(&extra_results, 2);
+    assert(payloads(nested_param, ownership_summary_model.payload_kind.copy) == 3);
+    assert(nested_param->requirements.len == 1);
+
+    ownership_summary_model.summary* zero_borrowed =
+        ownership_call_bodies.summary(&extra_results, 3);
+    assert(ownership_api.successful(zero_borrowed->proof));
+    assert(!zero_borrowed->residual_effects && zero_borrowed->cases.len == 2);
+    assert(payloads(zero_borrowed,
+        ownership_summary_model.payload_kind.replacement) == 1);
+
+    ownership_call_bodies.bodies mut nested = ownership_call_bodies.bodies{};
+    string[6] nested_names = {"nested_borrow", "fixed_borrow", "nested_owner",
+        "nested_zero", "empty_text", "projected_borrow"};
+    ownership_call_bodies.open(&nested, NESTED[..], nested_names[..]);
+    defer ownership_call_bodies.close(&nested);
+    ownership_call_bodies.infer_all(&nested);
+
+    proved(&nested, 0);
+    ownership_summary_model.summary* nested_borrow =
+        ownership_call_bodies.summary(&nested, 0);
+    assert(payloads(nested_borrow, ownership_summary_model.payload_kind.copy) == 6);
+    assert(payloads(nested_borrow, ownership_summary_model.payload_kind.storage_end) == 3);
+    assert(selected(nested_borrow, ownership_summary_model.payload_kind.copy,
+        ownership_api.projection_kind.field, 0, 0));
+    assert(selected(nested_borrow, ownership_summary_model.payload_kind.copy,
+        ownership_api.projection_kind.field, 1, 0));
+    assert(nested_borrow->requirements.len == 2);
+    assert(nested_borrow->requirements[0].kind ==
+        ownership_summary_model.requirement_kind.live_source);
+    assert(nested_borrow->requirements[1].kind ==
+        ownership_summary_model.requirement_kind.live_source);
+
+    proved(&nested, 1);
+    ownership_summary_model.summary* fixed_borrow =
+        ownership_call_bodies.summary(&nested, 1);
+    assert(payloads(fixed_borrow, ownership_summary_model.payload_kind.copy) == 6);
+    assert(payloads(fixed_borrow, ownership_summary_model.payload_kind.storage_end) == 3);
+    assert(selected(fixed_borrow, ownership_summary_model.payload_kind.copy,
+        ownership_api.projection_kind.fixed_index, 0, 0));
+    assert(selected(fixed_borrow, ownership_summary_model.payload_kind.copy,
+        ownership_api.projection_kind.fixed_index, 1, 0));
+    assert(fixed_borrow->requirements.len == 2);
+
+    proved(&nested, 2);
+    ownership_summary_model.summary* nested_owner =
+        ownership_call_bodies.summary(&nested, 2);
+    assert(payloads(nested_owner, ownership_summary_model.payload_kind.allocation) == 2);
+    assert(payloads(nested_owner, ownership_summary_model.payload_kind.move) == 7);
+    assert(payloads(nested_owner, ownership_summary_model.payload_kind.storage_end) == 3);
+    assert(selected(nested_owner, ownership_summary_model.payload_kind.move,
+        ownership_api.projection_kind.field, 0, 0));
+    assert(selected(nested_owner, ownership_summary_model.payload_kind.move,
+        ownership_api.projection_kind.field, 1, 0));
+
+    proved(&nested, 3);
+    ownership_summary_model.summary* nested_zero =
+        ownership_call_bodies.summary(&nested, 3);
+    assert(payloads(nested_zero, ownership_summary_model.payload_kind.replacement) == 2);
+    assert(payloads(nested_zero, ownership_summary_model.payload_kind.move) == 2);
+    assert(payloads(nested_zero, ownership_summary_model.payload_kind.storage_end) == 1);
+    assert(selected(nested_zero, ownership_summary_model.payload_kind.replacement,
+        ownership_api.projection_kind.field, 0, 0));
+    assert(selected(nested_zero, ownership_summary_model.payload_kind.replacement,
+        ownership_api.projection_kind.field, 1, 0));
+
+    proved(&nested, 4);
+    ownership_summary_model.summary* empty_text = ownership_call_bodies.summary(&nested, 4);
+    assert(payloads(empty_text, ownership_summary_model.payload_kind.replacement) == 1);
+    assert(payloads(empty_text, ownership_summary_model.payload_kind.reference_load) == 0);
+    assert(payloads(empty_text, ownership_summary_model.payload_kind.copy) == 0);
+
+    // A projected borrowed leaf stays unsupported: it would read a fresh source (D17.14).
+    incomplete_body(&nested, 5);
+
+    ownership_call_bodies.bodies mut failures = ownership_call_bodies.bodies{};
+    string[6] failure_names = {"nested_after_release", "array_after_release",
+        "copy_after_release", "move_after_release", "caller_copy_after_release",
+        "returned_local"};
+    ownership_call_bodies.open(&failures, FAILURES[..], failure_names[..]);
+    defer ownership_call_bodies.close(&failures);
+    u64 mut i = 0;
+    while (i < 2) {
+        invalid_body(&failures, i);
+        i += 1;
+    }
+    // A flat literal returned whole is one effect, as on the parent; the exit check fails it.
+    invalid_body_with(&failures, 2, "returned aggregate view outlives its source", true);
+    invalid_body(&failures, 3);
+    incomplete_body(&failures, 4);
+    invalid_body_with(&failures, 5, "returned aggregate view outlives its source", true);
+
+    ownership_call_bodies.bodies mut local_failures = ownership_call_bodies.bodies{};
+    string[2] local_failure_names = {"returned_local_move", "returned_nested_local"};
+    ownership_call_bodies.open(&local_failures, FAILURES[..], local_failure_names[..]);
+    defer ownership_call_bodies.close(&local_failures);
+    invalid_body_with(&local_failures, 0, "returned view outlives its source", true);
+    invalid_body_with(&local_failures, 1, "returned view outlives its source", true);
+
+    ownership_call_bodies.bodies mut caller_failures = ownership_call_bodies.bodies{};
+    string[2] caller_failure_names = {"caller_move_after_release",
+        "caller_nested_after_release"};
+    ownership_call_bodies.open(&caller_failures, FAILURES[..], caller_failure_names[..]);
+    defer ownership_call_bodies.close(&caller_failures);
+    unproved_base(&caller_failures, 0);
+    incomplete_body(&caller_failures, 1);
+
+    ownership_call_bodies.bodies mut second_failures = ownership_call_bodies.bodies{};
+    string[2] second_failure_names = {"local_copy_after_release",
+        "nested_copy_after_release"};
+    ownership_call_bodies.open(&second_failures, FAILURES[..], second_failure_names[..]);
+    defer ownership_call_bodies.close(&second_failures);
+    // A whole copy through an address of body storage stops before flow (missing path).
+    incomplete_with(&second_failures, 0, ownership_api.incomplete_reason.missing_path);
+    invalid_body(&second_failures, 1);
+
+    ownership_call_bodies.bodies mut metered = ownership_call_bodies.bodies{};
+    string[1] metered_names = {"metered"};
+    ownership_call_bodies.open(&metered, METERED[..], metered_names[..]);
+    defer ownership_call_bodies.close(&metered);
+    ownership_call_bodies.infer(&metered, 0);
+    proved(&metered, 0);
+    // Each literal field reads one declaration child and pays one W unit for it.
+    assert(metered.services.counts.meter.used.w == 435);
+
+    ownership_call_bodies.bodies mut metered_wide = ownership_call_bodies.bodies{};
+    string[1] metered_wide_names = {"metered_wide"};
+    ownership_call_bodies.open(&metered_wide, METERED_WIDE[..], metered_wide_names[..]);
+    defer ownership_call_bodies.close(&metered_wide);
+    ownership_call_bodies.infer(&metered_wide, 0);
+    proved(&metered_wide, 0);
+    assert(metered_wide.services.counts.meter.used.w == 819);
+    // The 16 more fields cost 24 W units each, so the field walk stays linear.
+    assert(metered_wide.services.counts.meter.used.w -
+        metered.services.counts.meter.used.w == 16 * 24);
+
+    ownership_call_bodies.bodies mut metered_nested = ownership_call_bodies.bodies{};
+    string[1] metered_nested_names = {"metered_nested"};
+    ownership_call_bodies.open(&metered_nested, METERED_NESTED[..], metered_nested_names[..]);
+    defer ownership_call_bodies.close(&metered_nested);
+    ownership_call_bodies.infer(&metered_nested, 0);
+    proved(&metered_nested, 0);
+    assert(metered_nested.services.counts.meter.used.w == 1121);
+    metered_nested.services.limits.w = 982;
+    ownership_call_bodies.infer_with(&metered_nested, 0);
+    ownership_summary_model.summary* work_stopped =
+        ownership_call_bodies.summary(&metered_nested, 0);
+    assert(!ownership_api.successful(work_stopped->proof));
+    assert(work_stopped->proof.terminal.reason == ownership_api.incomplete_reason.work_limit);
+    assert(work_stopped->cases.len == 0);
+
+    ownership_call_bodies.bodies mut limits = ownership_call_bodies.bodies{};
+    string[3] limit_names = {"too_deep", "too_wide", "scalar_wide"};
+    ownership_call_bodies.open(&limits, DEEP_LIMIT[..], limit_names[..]);
+    defer ownership_call_bodies.close(&limits);
+    incomplete_body(&limits, 0);
+    incomplete_body(&limits, 1);
+    ownership_call_bodies.infer(&limits, 2);
+    proved(&limits, 2);
+    ownership_summary_model.summary* scalar_wide =
+        ownership_call_bodies.summary(&limits, 2);
+    assert(scalar_wide->effects.len == 1);
+    assert(scalar_wide->requirements.len == 0);
+    assert(scalar_wide->roots.len == 2);
+    assert(!scalar_wide->residual_effects);
+    effect(scalar_wide, 0, ownership_summary_model.payload_kind.storage_end,
+        ownership_api.effect_kind.storage_end);
+    println("aggregate invalid reads ok");
+    base_reads();
+    private_reads();
+    partial_models();
+    second_derefs();
+    body_leaves();
+    components();
+    wide_literals();
+    caller_copies();
+    guarded_bases();
+    addressed_locals();
+    owner_leaves();
+    param_writes();
+    owner_writes();
+    array_returns();
+    projected_writes();
+    return 0;
+}

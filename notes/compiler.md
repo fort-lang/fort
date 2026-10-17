@@ -2407,6 +2407,48 @@ came here.
   At each normal return a borrowed result leaf must still be live, after deferred effects.
   The extractor does not lower global places, so a test binds a result to caller storage with
   a static source to model a global destination.
+- **A load, copy or move through a pointer or span local uses that local first** (D17.14).
+  Two rules do this. The current-base check of `select_storage`, `load_reference` and
+  `add_read` (`current_base`, `current_base_required`) covers a projected scalar read, a
+  reference load and an owner move: a released, moved or emptied base fails with `empty
+  reference has no element`. That check models no null test, so a read that a `!= null` test
+  makes dead still fails. `ownership_summary_body.base_use` covers a one-step read of a
+  reference local (`add_read`) and a whole copy or move in `complete_aggregate`. It emits one
+  flow `use` of the local (`base_request`, with `temporal_use`). An empty owner from caller
+  storage then gives incomplete proof (`empty_unproved`, `local ownership effect needs a proved
+  fact`), because extraction models no null test (D17.18); an owner of this body keeps the
+  failure. `assign_output` keeps a call that no lowered body reaches: FIR moves a projected
+  owner into a temporary first. A later dereference loads a reference with `load_reference`,
+  which reads the current base and reuses a loaded root (`prior_load`) but reads no write of
+  this body to caller storage as a whole. A store and a release through a pointer do not call
+  `base_use`.
+- **A whole aggregate copy reads each leaf that body flow models** (D17.14, D17.15).
+  A literal writes each borrowed or constant reference leaf to a private flow slot, as the
+  direct aggregate call reads expect (`literal_flow`); `aggregate_flow_leaf` finds the current
+  flow place of a public leaf. An owning leaf of a named local stays in place, so a later store,
+  zero or storage end over it sees the owner. A copy or move from a local with holding mark 1
+  or 4, direct or through fields and constant indices, expands into leaf effects
+  (`leaf_transfers`), and body flow reads each leaf at its current flow place. Mark 4 names a
+  flat literal. A flat struct literal copied whole into `_0` stays one whole effect, and
+  `result_leaves` reads its field leaves at the exit. A fixed-array literal has index leaves,
+  which `result_leaves` does not read, so its whole return expands into leaf copies. A by-value
+  parameter and a local with mark 3 export one whole effect, and
+  the caller replays it. A callee can write a local through its address in three cases. A
+  private literal leaf: a proved callee store refreshes it and publishes the write. A leaf in
+  place, written by a zero, a whole copy by leaf or an owning literal leaf: the write stays
+  unsupported (`addressed_local`). A whole effect of a by-value parameter or of a mark-3 local,
+  direct or projected: it stops when its source or its destination is addressed, because no
+  refresh replays that write. No flow step reads caller storage as a whole, so a whole copy of
+  caller storage, a literal
+  component of it and a projected literal leaf stay unsupported; only a whole move with no
+  projection after its last dereference keeps one transfer. The effect source of a whole copy
+  names the storage of its source, so `result_leaves` takes no borrowed source from a whole
+  component copy. A named literal that holds an unmodeled component and a flow reference leaf
+  stays unsupported. A whole copy through an address of body storage stops extraction with
+  `missing_path` before flow. A whole copy, move or zero reserves 2 flow steps for each
+  reference leaf of its type (`aggregate_reserve`, D17.18). A literal reserves 2 only for each
+  leaf of an aggregate component, because `literal_capacity` reserves its fields. 38 rows of
+  `tools/mutations/ownership_summary_aggregate.json` hold the aggregate rules.
 - **A view loaded from an owner field ends when the same body releases that field** (D17.14).
   Flow models a caller owner field as a private empty slot, so its release does not end the
   loaded source. `ownership_summary.publish` checks the exit sequence instead. A later

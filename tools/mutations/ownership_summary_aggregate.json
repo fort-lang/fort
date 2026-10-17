@@ -1,0 +1,298 @@
+{
+  "comment": [
+    "Thirty-eight rows: 5 for the original rules, 8 for the review repair rules, 6 for the final",
+    "repair and 19 for the cut rounds, the rebase on the parent and the delta reviews. They hold",
+    "the caller storage rules, the leaf-count reservation of a whole value and of the components",
+    "of a literal, the component result leaf, the incomplete base use, the private literal leaf,",
+    "the owning leaf in place, the address guards of in-place leaves, of an owning literal leaf",
+    "and of a direct and a projected whole effect, and the whole return of a flat struct literal.",
+    "No row holds the base use of a projected owner move in assign_output. FIR lowers that",
+    "move through a temporary, so no body reaches it, and its mutant survives every stage.",
+    "The build compiles only the focused test. The second stage uses the built debug compiler.",
+    "Run this table in the Linux VM after you build the debug preset."
+  ],
+  "sources": [
+    "src/fort/ownership_summary_body.ft",
+    "src/fort/ownership_summary.ft"
+  ],
+  "binary": "build/Linux/debug/summary-aggregate-mutate/ownership_summary_aggregate_values_test",
+  "build": "mkdir -p build/Linux/debug/summary-aggregate-mutate && cd test/fort && ../../build/Linux/debug/fort -I ../../src/fort -I support ownership_summary_aggregate_values_test.ft -o ../../build/Linux/debug/summary-aggregate-mutate/ownership_summary_aggregate_values_test",
+  "stages": [
+    {
+      "name": "the focused aggregate-value suite",
+      "command": "cd build/Linux/debug/summary-aggregate-mutate && ./ownership_summary_aggregate_values_test"
+    },
+    {
+      "name": "the summary suites",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --cc /usr/bin/clang --target x86_64-linux-gnu -j 6 ownership_calls_ ownership_recursive ownership_indirect ownership_summary_"
+    }
+  ],
+  "mutations": [
+    {
+      "decision": "D17.15-aggregate-zero",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "            if (input_operand.value.kind != fir.const_kind.ck_zero) {",
+      "new": "            if (input_operand.value.kind == fir.const_kind.ck_zero) {",
+      "what": "an aggregate zero constant stays unsupported"
+    },
+    {
+      "decision": "D17.15-aggregate-copy",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        (!moving && fir.type_owning(ty)) || (!returning && destination.root.ordinal == 0)) {",
+      "new": "        !moving || (!returning && destination.root.ordinal == 0)) {",
+      "what": "a complete non-owning aggregate copy stays unsupported"
+    },
+    {
+      "decision": "D17.6-aggregate-move",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    bool moving = value_operand.kind == fir.operand_kind.ok_move;",
+      "new": "    bool moving = false;",
+      "what": "a complete aggregate move stays unsupported"
+    },
+    {
+      "decision": "D17.15-aggregate-return",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "            if (!complete_aggregate(in, out, input_operand, slot(in, dst), ty, dst == 0,",
+      "new": "            if (!complete_aggregate(in, out, input_operand, slot(in, dst), ty, false,",
+      "what": "a complete aggregate cannot reach the result"
+    },
+    {
+      "decision": "D17.15-aggregate-wide-array",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        return ty->len > cast(U32_MAX, u64) ? U32_MAX : cast(ty->len, u32);",
+      "new": "        return 0;",
+      "what": "a wide scalar aggregate stays unsupported"
+    },
+    {
+      "decision": "D17.14-aggregate-returned-borrow",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        bool returned_borrow = destination.root.ordinal == 0 && !owner;\n        if (returned_borrow) { out->result_reference = true; }",
+      "new": "        bool returned_borrow = destination.root.ordinal == 0 && !owner;\n        if (false && returned_borrow) { out->result_reference = true; }",
+      "what": "a returned aggregate can hide a borrow of ended local storage"
+    },
+    {
+      "decision": "D17.14-caller-aggregate-read",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    ownership_transfer.request mut req = basic(in, base, base, ownership_transfer.action.use);",
+      "new": "    ownership_transfer.request mut req = basic(in, base, base, ownership_transfer.action.inspect);",
+      "what": "a load, copy or move through a released base inspects the base and accepts it"
+    },
+    {
+      "decision": "D17.6-aggregate-borrow-clear",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        if (moving && !owner && ownership_api.successful(out->proof)) {",
+      "new": "        if (false && moving && !owner && ownership_api.successful(out->proof)) {",
+      "what": "a whole move keeps a borrowed reference in its source leaf"
+    },
+    {
+      "decision": "D17.18-aggregate-field-work",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        if (!work(out, 1)) { return 0; }",
+      "new": "        if (false && !work(out, 1)) { return 0; }",
+      "what": "a struct field-count traversal does not charge W"
+    },
+    {
+      "decision": "D17.14-indirect-local-aggregate-read",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        if (!base_use(in, out, value_operand.place, block, gap, stmt->loc, stmt->exit_loc,",
+      "new": "        if (false && !base_use(in, out, value_operand.place, block, gap, stmt->loc, stmt->exit_loc,",
+      "what": "a whole aggregate copy through a pointer reads no base"
+    },
+    {
+      "decision": "D17.15-nested-aggregate-copy-holding",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "                if (input_operand.kind == fir.operand_kind.ok_move &&\n                    direct(input_operand.place)) { out->holding[input_operand.place.local] = 2; }",
+      "new": "                if (input_operand.kind != fir.operand_kind.ok_const &&\n                    direct(input_operand.place)) { out->holding[input_operand.place.local] = 2; }",
+      "what": "a nested aggregate copy consumes its source holding mark"
+    },
+    {
+      "decision": "D17.15-zero-borrowed-result",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        ownership_api.place_path flow_destination = destination.root.ordinal == 0 &&\n            item.ty->is_own ?",
+      "new": "        ownership_api.place_path flow_destination = destination.root.ordinal == 0 ?",
+      "what": "a zero borrowed result leaf uses a private flow slot"
+    },
+    {
+      "decision": "D17.18-aggregate-scalar-field-work",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    bool walked = ownership_places.leaves_with_work(ty, root, plan, &paid);",
+      "new": "    bool walked = ownership_places.leaves(ty, root, plan);",
+      "what": "an aggregate leaf walk does not charge expanded scalar fields"
+    },
+    {
+      "decision": "D17.14-base-temporal-use",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    req.temporal_use = true;",
+      "new": "    req.temporal_use = false;",
+      "what": "a span base use needs an exact span length"
+    },
+    {
+      "decision": "D17.14-direct-read-base",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "            req = base_request(in, out, place_at.local);",
+      "new": "            req.source_key = out->origins[place_at.local];\n            live_requirement(in, out, place_at.local);",
+      "what": "a read through one dereference inspects its base and accepts a released base"
+    },
+    {
+      "decision": "D17.15-private-projected-leaves",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        *modeled = !selected.indirect && out->holding[value_operand.place.local] == 1;",
+      "new": "        *modeled = false;",
+      "what": "a projected copy out of a modeled local reads no flow leaf"
+    },
+    {
+      "decision": "D17.15-local-address-copy",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        if (selected.indirect && !selected.caller) {\n            reject(out, ownership_api.incomplete_reason.missing_path);",
+      "new": "        if (false && selected.indirect && !selected.caller) {\n            reject(out, ownership_api.incomplete_reason.missing_path);",
+      "what": "a whole copy through an address of body storage publishes complete proof"
+    },
+    {
+      "decision": "D17.15-partial-model",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        if (dst != 0 && !modeled && flow_reference) {",
+      "new": "        if (false && dst != 0 && !modeled && flow_reference) {",
+      "what": "a named literal with an unmodeled component and a flow reference leaf publishes complete proof"
+    },
+    {
+      "decision": "D17.18-literal-field-cursor-work",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        if (!work(out, 1)) { return null; }\n        ast.node* member = ast.ast_child(declaration->node, *cursor);",
+      "new": "        if (false && !work(out, 1)) { return null; }\n        ast.node* member = ast.ast_child(declaration->node, *cursor);",
+      "what": "a literal field walk does not charge W"
+    },
+    {
+      "decision": "D17.14-caller-whole-copy",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        if (selected.indirect && (value_operand.kind != fir.operand_kind.ok_move ||",
+      "new": "        if (selected.indirect && (false ||",
+      "what": "a whole copy of caller storage reads no write of this body and proves"
+    },
+    {
+      "decision": "D17.14-caller-move-residual",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "            selected.path.projections.len != 0 || destination.projections.len != 0)) {",
+      "new": "            false || destination.projections.len != 0)) {",
+      "what": "a whole move of caller storage with a residual projection proves"
+    },
+    {
+      "decision": "D17.14-caller-component",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "            selected.path.projections.len != 0 || destination.projections.len != 0)) {",
+      "new": "            selected.path.projections.len != 0 || false)) {",
+      "what": "a literal component of caller storage proves"
+    },
+    {
+      "decision": "D17.18-aggregate-fixed-reserve",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    return leaves * 2 + cast(operands, u64);",
+      "new": "    return ownership_places.MAX_LEAVES;",
+      "what": "each aggregate assignment reserves 256 steps and 3,072 W units"
+    },
+    {
+      "decision": "D17.18-aggregate-leaf-reserve",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    return leaves * 2 + cast(operands, u64);",
+      "new": "    return cast(operands, u64);",
+      "what": "an aggregate assignment reserves no step for its reference leaves"
+    },
+    {
+      "decision": "D17.15-component-result-leaf",
+      "file": "src/fort/ownership_summary.ft",
+      "old": "                if (field == null || !fir.type_aggregate(field) ||",
+      "new": "                if (true || field == null || !fir.type_aggregate(field) ||",
+      "what": "a whole component copy names a storage source as a returned leaf source"
+    },
+    {
+      "decision": "D17.18-base-use-unproved",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    req.empty_unproved = caller_source(out, req.source_key);",
+      "new": "    req.empty_unproved = false;",
+      "what": "a base use of an empty caller owner fails on a path that a null test makes dead"
+    },
+    {
+      "decision": "D17.14-addressed-local-in-place",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    return destination.root.ordinal != 0 && local < out->addressed.len && out->addressed[local];",
+      "new": "    return false;",
+      "what": "a callee write into an addressed local with in-place leaves is not published"
+    },
+    {
+      "decision": "D17.15-literal-private-leaf",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    if (field->is_own && dst != 0) { return destination; }\n    return ownership_api.place_path{.root = next(out, ownership_api.entity_kind.slot)};",
+      "new": "    return destination;",
+      "what": "a borrowed literal leaf lives in place, and no callee store refreshes it"
+    },
+    {
+      "decision": "D17.15-flat-literal-whole-return",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        bool whole = mark == 4 && returning && destination.projections.len == 0 &&",
+      "new": "        bool whole = false && mark == 4 && returning && destination.projections.len == 0 &&",
+      "what": "a flat literal returned whole expands into leaf copies"
+    },
+    {
+      "decision": "D17.15-private-leaf-read",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        ownership_api.place_path source_flow = aggregate_flow_leaf(out, from.items[i].path,\n            block, gap);",
+      "new": "        ownership_api.place_path source_flow = from.items[i].path;",
+      "what": "a whole copy reads the public leaf, not the private flow slot of a literal"
+    },
+    {
+      "decision": "D17.15-literal-owner-in-place",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    if (field->is_own && dst != 0) { return destination; }",
+      "new": "    if (false && field->is_own && dst != 0) { return destination; }",
+      "what": "an owning literal leaf lives in a private slot, so a later store or storage end misses it"
+    },
+    {
+      "decision": "D17.18-literal-component-reserve",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        if (!literal || plan.items[i].path.projections.len > 1) { leaves += 1; }",
+      "new": "        if (!literal) { leaves += 1; }",
+      "what": "a literal reserves no step for the leaves of its aggregate components"
+    },
+    {
+      "decision": "D17.18-literal-field-reserve-once",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        if (!literal || plan.items[i].path.projections.len > 1) { leaves += 1; }",
+      "new": "        if (true) { leaves += 1; }",
+      "what": "a literal reserves its top-level reference leaves twice, here and in literal_capacity"
+    },
+    {
+      "decision": "D17.14-whole-effect-address-guard",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    if (direct(value_operand.place) && !private_whole &&",
+      "new": "    if (false && direct(value_operand.place) && !private_whole &&",
+      "what": "a whole effect of a by-value parameter or of a mark-3 local misses a callee write through an address"
+    },
+    {
+      "decision": "D17.15-private-whole-return-exempt",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    if (direct(value_operand.place) && !private_whole &&",
+      "new": "    if (direct(value_operand.place) &&",
+      "what": "a flat literal returned whole stops at an addressed local, though a callee store refreshes its private leaves"
+    },
+    {
+      "decision": "D17.14-addressed-owner-leaf",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    if (field->is_own && addressed_local(out, destination)) {",
+      "new": "    if (false && field->is_own && addressed_local(out, destination)) {",
+      "what": "an owning literal leaf of an addressed local misses a callee release"
+    },
+    {
+      "decision": "D17.15-array-whole-return",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "            ty->kind == types.type_kind.k_struct &&\n            value_operand.kind == fir.operand_kind.ok_copy;",
+      "new": "            value_operand.kind == fir.operand_kind.ok_copy;",
+      "what": "a fixed-array literal returned whole stays one effect, whose index leaves result_leaves does not read"
+    },
+    {
+      "decision": "D17.14-projected-whole-address-guard",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        if (!*modeled && !selected.indirect && (addressed_local(out, selected.path) ||",
+      "new": "        if (false && !*modeled && !selected.indirect && (addressed_local(out, selected.path) ||",
+      "what": "a projected whole effect out of an addressed local misses a callee write through an address"
+    }
+  ]
+}

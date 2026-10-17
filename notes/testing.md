@@ -1029,7 +1029,10 @@ bullet at a time and without a rewrite.
   compile is visible at once. A mutation by hand has none of that: on 2026-09-14 two
   implementors stopped at once on a spend limit, and T-127's worktree then held a mutation of
   `bootstrap0/src/check.c` and `src/fort/check.ft` that reverted T-128's fix. Nothing in the
-  repository said the tree was mutated. Three rules follow.
+  repository said the tree was mutated. A round in progress also holds a mutant in its
+  `--root`: on 2026-10-16 a probe driver built from the root of a running round read a mutant
+  and reported 4 false verdict changes. Build any other tool from a second copy of the tree.
+  Three rules follow.
   Run `tools/mutate.py <table> --check` before the round, not after it rots.
   **Each table describes itself.** `ls tools/mutations/*.json` lists the tables.
   `jq -r '[input_filename] + .sources | join(" ")' tools/mutations/*.json` prints each table and
@@ -1056,6 +1059,11 @@ bullet at a time and without a rewrite.
   the unmutated build. On 2026-10-08 the row `D17.14-imported-bodies` read `caught`, and its
   log held 8 failed cases of `ownership_driver_groups` that the baseline failed as well. Before
   a round, run each stage command on the baseline. Then read the failed case names in each log.
+  **A compile timeout in a stage also reads as a catch.** `test/lang/run_tests.py` exits 1 when
+  a test reports `compiler timed out`, and `tools/mutate.py` then records `caught`. On
+  2026-10-15 the row `D17.14-output-move-base` read `caught` under VM load: its log held 24
+  `ERROR ... compiler timed out` lines and no failed case. A Darwin round reads `survived`,
+  because FIR moves that owner through a temporary. Read each `caught` log for a failed case.
   **The checker table reads its rows from history.** Commit 39a58dd8 deleted every `Dn.m`
   citation of `bootstrap0/src/check.c` and `check_stmt.c` and kept the code. The table has one
   row for each of the 78 decisions those files cited at `39a58dd8^`, one row for each of the 6
