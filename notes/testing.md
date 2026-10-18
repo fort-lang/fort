@@ -352,6 +352,11 @@ bullet at a time and without a rewrite.
   A mutation stage is such a run. The `checker` stage of `tools/mutations/ownership_witness.json`
   ran its binary from the root, and one round of 22 rows left 10 `sandbox<n>/` there, which a
   `git add -A` then took into a commit. The stage now runs from its build directory.
+- **A module test can state its verdicts before its rule exists.** `run_tests.py` reads
+  `<root>/xfail.txt` when it exists, so `fort-modules` takes a `test/fort/xfail.txt` with no
+  flag, and a listed pass fails the run. The commit that adds the rule deletes the entry, and
+  the file with its last entry. A listed test that does not compile is XFAIL too, so run it with
+  `--no-xfail` before the commit and read its stderr.
 - Three corpora run through `run_tests.py`, which takes their root as `--root`.
   CTest `lang` runs the product language corpus with `xfail.txt`. The CTests
   `fort-modules-<k>-of-<n>` run `test/fort/<x>_test.ft` against the compiler modules, and CTest
@@ -758,21 +763,22 @@ bullet at a time and without a rewrite.
   `lower_env` writes its sandboxes into the working directory.
   `test/ownership/heap_rows.ft` prints one row for each function of a file: the verdict, the
   incomplete reason, `returns`, the interface length, the post slots, the post atoms and the events.
-  The test compares 1590 rows of 291 inputs with `test/ownership/heap_rows.txt`. The inputs are
-  107 of the 109 manifest programs, the 54 programs of `test/ownership/probes`, and 130 texts that
+  The test compares 1794 rows of 304 inputs with `test/ownership/heap_rows.txt`. The inputs are
+  107 of the 109 manifest programs, the 67 programs of `test/ownership/probes`, and 130 texts that
   `heap_texts` takes from the 12 `test/fort/ownership_heap*_test.ft` programs. `HEAP_ROWS_SKIPPED`
   names the other 2 manifest programs with the reason: each imports `std.str`, and the sandbox
   `std` holds only a runtime. A skipped program that `heap_rows` reads fails the test. Run the
   test with `--bless` to write the golden, and read the diff of the golden before the commit.
   `test/ownership/solvers_alone.ft` prints the summary verdict, the heap verdict and the verdict
-  of the calls_heap row (`ownership_source_calls_env.verdict`) of 220 faulty bodies:
+  of the calls_heap row (`ownership_source_calls_env.verdict`) of 347 faulty bodies:
   the faulty body of each of the 37 reject cases (the last function at or before an error line)
-  and the 183 bodies of `test/ownership/solvers/faulty.json`. A body is faulty because its source
+  and the 310 bodies of `test/ownership/solvers/faulty.json`. A body is faulty because its source
   has the expected error: the error line of a reject case, or the `faulty.json` entry of a probe.
   The summary solver must prove 0, and the calls_heap row must prove 0: it needs both proofs. No
-  ledger entry names the row. Its one-body witness checker validates an event in 13 of the faulty
-  bodies, so the row fails exactly those 13, and `expected_failed` in the test names them. The
-  heap solver may prove only the entries of `test/ownership/solvers/false_accepts.txt`, and each
+  ledger entry names the row. Its one-body witness checker validates an event in 16 of the faulty
+  bodies, so the row fails exactly those 16, and `expected_failed` in the test names them. 3 of
+  the 16 are bodies of the `base_*` probes. The heap solver may prove only the entries of
+  `test/ownership/solvers/false_accepts.txt`, and each
   entry must still prove. The ledger has one line `# at most N entries`, and a ledger with more
   entries fails the test. A change lowers N
   when it deletes an entry, so each step down is a one-line diff; a raise of N is the only way to
@@ -840,8 +846,19 @@ bullet at a time and without a rewrite.
   entries went too, and N became 3. Against e1a4aca4 the change moved 28 rows of the golden
   from `proved` to `unproved` and 5 rows of valid stores of a global address the other way.
   `copied_references.ft` took 24 more faulty bodies, most with valid counterparts, so
-  `faulty.json` has 183 bodies, and the full set has 220. The ledger class with entries is P.
-  The empty ledger is the goal.
+  `faulty.json` had 183 bodies, and the full set had 220.
+  The 10 `base_*` probes hold bodies of the reviews of PR 120, 132 and 134: an access to
+  caller storage through a released, moved or emptied base, formals that alias (D17.4), and an
+  owner output after a call. The user ruled on 2026-10-16 that the ledger takes the bodies
+  of these probes that the heap solver alone proves, in 2 classes. Class O: two inputs name
+  one storage, and the heap solver keeps a stale fact. Class P: a read of caller storage after
+  its release or move. A body joins `faulty.json` only when the summary solver and the
+  calls_heap row prove it 0 times. The base rule of the summary solver (`notes/compiler.md`)
+  proves none of the 84 faulty bodies of these probes, so all 84 joined, 8 with a class O
+  entry and 8 with a class P entry, and the bound became 19. The review of that rule added 3
+  probes (`base_copies`, `base_store_back`, `base_held_writes`) with 43 faulty bodies that no
+  solver alone proves. `faulty.json` has 310 bodies, and the full set has 347. The ledger
+  classes with entries are O and P. The empty ledger is the goal.
   Measured runs of the first 10 probe programs on darwin, built with `build/Darwin/debug/fort --cc
   /opt/homebrew/bin/clang --std-dir build/Darwin/debug/std -o <probe> <probe>.ft`: `round8_a3`
   exits 134 (the assertion of `chk_addr`), `round8_d2` exits 139, and the other 8 exit 0.

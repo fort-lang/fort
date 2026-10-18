@@ -1,0 +1,47 @@
+// Probe d.ft of the review of PR 120: a load after a callee changes caller storage.
+struct counter { i64 value; }
+struct box { i64* item; }
+fn clear(i64* mut* pp) void { *pp = null; }
+fn cl_after_read(i64* mut* pp) i64 { i64 a = **pp; clear(pp); return a + **pp; }
+fn cl_first(i64* mut* pp) i64 { clear(pp); return **pp; }
+fn setp(i64* mut* pp, i64* n) void { *pp = n; }
+fn set_after_read(i64* mut* pp, i64* n) i64 { i64 a = **pp; setp(pp, n); return a + **pp; }
+fn clear_box(box mut* b) void { b->item = null; }
+fn box_after_read(box mut* b) i64 { i64 a = *b->item; clear_box(b); return a + *b->item; }
+fn wipe(counter mut* own mut* pp) void { del(*pp); }
+fn wipe_after_read(counter mut* own mut* pp) i64 {
+    i64 a = (*pp)->value;
+    wipe(pp);
+    return a + (*pp)->value;
+}
+fn store_local(i64* mut* pp) i64 { i64 x = 1; i64* t = &x; *pp = t; return **pp; }
+fn deep_after_read(i64* mut* mut* ppp) i64 { i64 a = ***ppp; clear(*ppp); return a + ***ppp; }
+// Probe e.ft of the same review: a load after a store through caller storage.
+struct pair { i64 a; i64 b; }
+fn null_then_load(i64 mut* mut* p) i64 {
+    *p = null;
+    i64 mut* second = *p;
+    return *second;
+}
+fn null_then_nested(i64* mut* mut* p) i64 {
+    **p = null;
+    i64* r = **p;
+    return *r;
+}
+fn null_then_read(i64* mut* p) i64 {
+    *p = null;
+    return **p;
+}
+fn live_then_load(i64 mut* mut* p, i64 mut* q) i64 {
+    *p = q;
+    i64 mut* second = *p;
+    return *second;
+}
+fn addr_offset_unused(pair mut* own p) bool {
+    pair mut* own q = move(p);
+    i64* a = &p->b;
+    bool r = a == null;
+    del(q);
+    return r;
+}
+fn main() i32 { return 0; }

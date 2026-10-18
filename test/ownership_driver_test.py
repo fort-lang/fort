@@ -42,7 +42,7 @@ SOLVERS = ("summary", "heap")
 # The columns of solvers_alone: each solver alone, then the calls_heap row that joins them. No
 # ledger entry names the calls_heap row: it proves no faulty body.
 GATE_COLUMNS = (*SOLVERS, "calls_heap")
-LEDGER_CLASSES = ("A", "B", "D", "E", "F", "G", "H", "I", "K", "L", "M", "N", "P", "Q")
+LEDGER_CLASSES = ("A", "B", "D", "E", "F", "G", "H", "I", "K", "L", "M", "N", "O", "P", "Q")
 TEXT_ARRAY = re.compile(r"^(\s*)string\[[^\]]*\] (?:mut )?(\w+) = \{(.*)$")
 STRING_LITERAL = re.compile(r'"((?:[^"\\]|\\.)*)"')
 # A function of a heap test that copies a base text and then a tail into `out`.
@@ -1656,10 +1656,11 @@ class GateInputTest(unittest.TestCase):
         self.assertEqual(sorted(ledger.values()), ["F", "G", "H"])
         # The class of 2026-10-16: N.
         self.assertEqual(read_ledger("f.ft:d heap # N\n"), {("f.ft", "d", "heap"): "N"})
-        # The class of 2026-10-17: P. Class O has no entry, so the ledger refuses it.
+        # The class of 2026-10-17: P. The user ruling of 2026-10-16 adds class O.
         self.assertEqual(read_ledger("f.ft:e heap # P\n"), {("f.ft", "e", "heap"): "P"})
-        with self.assertRaisesRegex(ValueError, "line 1: unknown class O"):
-            read_ledger("f.ft:e heap # O\n")
+        self.assertEqual(read_ledger("f.ft:e heap # O\n"), {("f.ft", "e", "heap"): "O"})
+        with self.assertRaisesRegex(ValueError, "line 1: unknown class R"):
+            read_ledger("f.ft:e heap # R\n")
 
     def test_ledger_refuses_a_bad_line(self):
         for text, message in (("f.ft:main heap\n", "line 1: not"),
@@ -1758,7 +1759,7 @@ class SoundnessGateTest(unittest.TestCase):
         self.assertTrue(set(HEAP_ROWS_SKIPPED) <= set(programs))
         out = [(path, CHECKOUT / path) for path in programs if path not in HEAP_ROWS_SKIPPED]
         probes = sorted((OWNERSHIP / "probes").glob("*.ft"))
-        self.assertEqual(len(probes), 54)
+        self.assertEqual(len(probes), 67)
         out += [(path.relative_to(CHECKOUT).as_posix(), path) for path in probes]
         heap_tests = sorted((CHECKOUT / "test" / "fort").glob("ownership_heap*_test.ft"))
         self.assertEqual(len(heap_tests), 12)
@@ -1811,7 +1812,7 @@ class SoundnessGateTest(unittest.TestCase):
         self.assertEqual(sum(len(bodies) for _, bodies in items), 37)
         probes = json.loads(FAULTY_PROBES.read_text())["faulty"]
         items += [(f"test/ownership/probes/{name}", bodies) for name, bodies in probes.items()]
-        self.assertEqual(sum(len(bodies) for _, bodies in items), 220)
+        self.assertEqual(sum(len(bodies) for _, bodies in items), 347)
 
         def verdicts(item):
             path, bodies = item
@@ -1824,7 +1825,7 @@ class SoundnessGateTest(unittest.TestCase):
 
         with ThreadPoolExecutor(max_workers=4) as pool:
             found = [row for rows in pool.map(verdicts, items) for row in rows]
-        self.assertEqual(len(found), len(GATE_COLUMNS) * 220)
+        self.assertEqual(len(found), len(GATE_COLUMNS) * 347)
         proved = {(path, body, solver) for path, body, solver, verdict in found
                   if verdict == "proved"}
         ledger = read_ledger(FALSE_ACCEPTS.read_text())
@@ -1855,6 +1856,9 @@ class SoundnessGateTest(unittest.TestCase):
             ("test/ownership/probes/review_f5.ft", "local_read", "calls_heap", "failed"),
             ("test/ownership/probes/review_q04_pun_null.ft", "joined_targets", "calls_heap",
              "failed"),
+            ("test/ownership/probes/base_a.ft", "np_moved", "calls_heap", "failed"),
+            ("test/ownership/probes/base_a.ft", "hp_moved", "calls_heap", "failed"),
+            ("test/ownership/probes/base_b.ft", "rd_moved", "calls_heap", "failed"),
         }
         self.assertEqual(failed, expected_failed)
         self.assertEqual(sorted(proved - set(ledger)), [], "a false accept outside the ledger")

@@ -1,0 +1,86 @@
+// Probe h.ft of the delta review of PR 120: an owner output after a call.
+struct cell { i64 v; }
+struct cbox { cell* c; }
+struct node { i64 v; }
+struct nholder { node mut* own item; }
+struct twoh { nholder h; nholder k; }
+fn nop() void {}
+fn setc(cbox mut* p, cell* r) void { p->c = r; }
+fn zap(cbox mut* p) void { *p = cbox{}; }
+fn setpp(cbox* mut* pp, cbox* o) void { *pp = o; }
+fn nullpp(cbox* mut* pp) void { *pp = null; }
+fn callee_set_read(cbox mut* p, cell* r) i64 {
+    i64 a = p->c->v;
+    setc(p, r);
+    return a + p->c->v;
+}
+fn callee_set_free(cbox mut* p, cell mut* own r) i64 {
+    i64 a = p->c->v;
+    setc(p, r);
+    del(r);
+    i64 b = p->c->v;
+    zap(p);
+    return a + b;
+}
+fn callee_pp_null(cbox* mut* pp) i64 {
+    i64 a = (*pp)->c->v;
+    nullpp(pp);
+    return a + (*pp)->c->v;
+}
+fn callee_pp_set(cbox* mut* pp, cbox* o) i64 {
+    i64 a = (*pp)->c->v;
+    setpp(pp, o);
+    return a + (*pp)->c->v;
+}
+fn callee_after_zap(cbox mut* p, cell* r) i64 {
+    *p = cbox{};
+    setc(p, r);
+    return p->c->v;
+}
+fn mis_release(nholder mut* h, node mut* own n, node mut* own m) i64 {
+    nop();
+    node* keep = m;
+    del(h->item);
+    h->item = move(n);
+    del(h->item);
+    i64 r = h->item->v;
+    del(m);
+    return r + keep->v;
+}
+fn mis_move(nholder mut* h, node mut* own n, node mut* own m) i64 {
+    nop();
+    node mut* own keep = move(m);
+    del(h->item);
+    h->item = move(n);
+    i64 r = h->item->v;
+    del(keep);
+    return r;
+}
+fn mis_clear(twoh mut* t, node mut* own n) i64 {
+    nop();
+    t->k.item = move(n);
+    t->h = nholder{};
+    t->h = nholder{};
+    return t->h.item->v;
+}
+fn mis_clear2(twoh mut* t, node mut* own n) i64 {
+    nop();
+    del(t->k.item);
+    t->k.item = move(n);
+    t->h = nholder{};
+    t->h = nholder{};
+    return t->h.item->v;
+}
+fn mis_ok(nholder mut* h, node mut* own n) i64 {
+    nop();
+    del(h->item);
+    h->item = move(n);
+    return h->item->v;
+}
+fn nomis_release(nholder mut* h, node mut* own n) i64 {
+    del(h->item);
+    h->item = move(n);
+    del(h->item);
+    return h->item->v;
+}
+fn main() i32 { return 0; }

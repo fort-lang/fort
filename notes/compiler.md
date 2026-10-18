@@ -2256,15 +2256,41 @@ came here.
   released span is a valid read (D17.9). The pointer field is the reference itself: with its
   own root, `s->heap.ptr` proved a read through it after `move(s->heap)` and also before it
   (`test/lang/fail/ownership/076_span_pointer_after_move.ft`), so it stops with missing_path.
-  A nested caller-storage scalar read validates each reference base in order.
-  That read stays incomplete when it cannot name one current base exactly.
-  Only a scalar read checks each current base in this way.
-  A reference load gives a symbolic root. It does not read the current flow contents of its path.
-  A prior replacement changes a later load. A prior load keeps its old source.
-  A store at the loaded path or at a prefix of it is a replacement, as for the output stores.
-  It stops root reuse. The current inner slot continues below the flow destination of that store.
-  A call step also ends root reuse, and the inner-slot search does not cross it.
-  A nested read after the call gets no current-base check and no scalar-contents proof.
+  **Each read, store, reference load and release of caller storage reads the current flow
+  contents of each base in order** (D17.14, `spec/fir.md` 14.1). One helper serves the four:
+  `ownership_summary_body.base_request` gives the `use` of the base, with a temporal use (the
+  extent requirement or the local window bounds the access). A one-step read through a caller
+  pointer dereferences its base, so `del(p); return *p;` fails. A scalar store, a borrowed
+  store, a release, a move and an owning store use their current base before they change the
+  storage behind it. A nested read checks each base in order, as before.
+  A reference load reads the current flow contents of its path. A store, a release or a move
+  of the path since the last call leaves a private flow slot, and the load copies it. Without
+  that slot the load takes the entry value only when no call, no release, and no store or move
+  under a dereference comes before it (`outside_written`); otherwise the loaded value is
+  unknown, and a later use of it stays incomplete. A prior replacement changes a later load: a
+  blocked reuse loads again from the current contents. A move out of the path ends reuse.
+  A store, a release or a move under another caller root ends the current-contents search and
+  root reuse, because two inputs can name one storage (D17.4). The written root of each effect
+  is `body_program.written`. A load writes only its private slot, so the search skips it.
+  A release of caller storage ends the source of the load of its old owner that the path still
+  holds (`last_load`, `ownership_transfer.end_loaded`), so a borrow from `*pp` dies at
+  `del(*pp)`. A local that holds a moved caller owner (`caller_owned`) is inspected and not
+  dereferenced: flow models that owner as an empty slot. Its release ends the loaded source too.
+  A borrow copy of such a local borrows that loaded source, so each use of the copy goes
+  through `base_request`. A store of an owner back into caller storage (a held owner, or an
+  owner moved out of caller storage) leaves no source that names it: each later load, move or
+  release of that path or of a path that overlaps it stops the summary with incomplete proof
+  (`stored_back_before`). A release or a move that cannot name the load of its old owner, for
+  example after a call, stays incomplete (`loaded_before`).
+  After a branch, an empty base gives incomplete proof and not a failure, because extraction
+  models no null test (D17.18). A caller read through a borrow at a nonzero offset gives
+  incomplete proof, because its extent requirement counts from the start of the source.
+  A read of a reference through a pointer to a local inspects the contents of the local, since
+  that copy is a use (D17.14); after a call it stays incomplete.
+  A release through one input and a read through another keep a complete summary: the
+  application checks the read after it applies the release, so an aliased caller fails there
+  (`ownership_calls_projected_test.ft`, G07.5 and G07.6). A return binds the events of each
+  loaded source, so a returned view of a released loaded source fails at the return.
   Loaded bindings use reserved frame capacity. They consume no argument index.
   Shallow parent release requires each inline owned child empty at that operation.
   A bounded checked-type walk does not follow a child pointer.

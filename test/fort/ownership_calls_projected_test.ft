@@ -15,6 +15,8 @@
 //| boundary G07.1
 //| boundary G07.3
 //| boundary G07.4
+//| boundary G07.5
+//| boundary G07.6
 //| boundary X08
 //| boundary X22
 //| boundary L01-live
@@ -647,7 +649,10 @@ string[13] CASE_G06_4_SOURCE = {
     "}",
     "fn caller(owner_box mut* a, owner_box mut* b) i32 { return callee(a, b); }",
 };
-string[12] CASE_G07_1_SOURCE = {
+// Each G07 callee loads the view before it releases `a->item`. A release through `a` before
+// the load would end the current-contents search of `b` (D17.4). The application checks the
+// loaded view after the release, so an alias of the released owner fails there.
+string[13] CASE_G07_1_SOURCE = {
     "struct owner_box {",
     "    i32 mut* own item;",
     "    i32 tag;",
@@ -656,12 +661,13 @@ string[12] CASE_G07_1_SOURCE = {
     "struct inline_box { i32 value; }",
     "struct inline_view { i32 value; i32* ptr; }",
     "fn callee(owner_box mut* a, view_box* b) i32 {",
+    "    i32* v = b->ptr;",
     "    del(a->item);",
-    "    return *b->ptr;",
+    "    return *v;",
     "}",
     "fn caller(owner_box mut* a, view_box* b) i32 { return callee(a, b); }",
 };
-string[12] CASE_G07_3_SOURCE = {
+string[13] CASE_G07_3_SOURCE = {
     "struct owner_box {",
     "    i32 mut* own item;",
     "    i32 tag;",
@@ -670,12 +676,13 @@ string[12] CASE_G07_3_SOURCE = {
     "struct inline_box { i32 value; }",
     "struct inline_view { i32 value; i32* ptr; }",
     "fn callee(owner_box mut* a, owner_box* b) i32 {",
+    "    i32* v = b->item;",
     "    del(a->item);",
-    "    return *b->item;",
+    "    return *v;",
     "}",
     "fn caller(owner_box mut* p) i32 { return callee(p, p); }",
 };
-string[12] CASE_G07_4_SOURCE = {
+string[13] CASE_G07_4_SOURCE = {
     "struct owner_box {",
     "    i32 mut* own item;",
     "    i32 tag;",
@@ -684,10 +691,30 @@ string[12] CASE_G07_4_SOURCE = {
     "struct inline_box { i32 value; }",
     "struct inline_view { i32 value; i32* ptr; }",
     "fn callee(owner_box mut* a, view_box* b) i32 {",
+    "    i32* v = b->ptr;",
     "    del(a->item);",
-    "    return *b->ptr;",
+    "    return *v;",
     "}",
     "fn caller(owner_box mut* a, view_box* b) i32 { return callee(a, b); }",
+};
+// A release through `h` before a read through another input. The application releases the
+// caller owner first, so a read input that aliases that owner fails there (D17.4).
+string[6] CASE_G07_5_SOURCE = {
+    "struct holder { i32 mut* own item; }",
+    "fn callee(i32* p, holder mut* h) i32 {",
+    "    del(h->item);",
+    "    return *p;",
+    "}",
+    "fn caller(i32* p, holder mut* h) i32 { return callee(p, h); }",
+};
+string[7] CASE_G07_6_SOURCE = {
+    "struct box { i32 value; }",
+    "struct holder { box mut* own item; }",
+    "fn callee(box* p, holder mut* h) i32 {",
+    "    del(h->item);",
+    "    return p->value;",
+    "}",
+    "fn caller(box* p, holder mut* h) i32 { return callee(p, h); }",
 };
 string[3] CASE_X08_SOURCE = {
     "struct owner_box { i32 mut* own item; i32 tag; }",
@@ -730,11 +757,14 @@ string[8] CASE_L02_RELEASED_SOURCE = {
     "    return callee(&inner);",
     "}",
 };
-string[12] CASE_L03_SHARED_INNER_SOURCE = {
+// The callee loads `*right` before the release: a load after a release takes no entry value
+// (spec/fir.md 14.1). The application checks the loaded reference after the release.
+string[13] CASE_L03_SHARED_INNER_SOURCE = {
     "fn callee(i32** left, i32** right, i32 mut* own owner) i32 {",
+    "    i32* after = *right;",
     "    i32 before = **left;",
     "    del(owner);",
-    "    return before + **right;",
+    "    return before + *after;",
     "}",
     "fn caller() i32 {",
     "    i32 mut* own owner = new(i32);",
@@ -894,7 +924,7 @@ fn case_g07_1() void {
     application_success(&f);
     assert(ownership_calls_fixtures.outstanding(&f.application.state) == 1);
     ownership_calls_fixtures.boundary("G07.1",
-        "b3772ec666897f33572c71b96b58bcf655dbe7a45815dde05a4ab2a6639ac995", "none");
+        "56b0e5f398df50c13defb55d115f0c32589cd69916d71436e6668e20b7c50e25", "none");
 }
 
 fn case_g07_3() void {
@@ -910,7 +940,7 @@ fn case_g07_3() void {
     application_failure(&f, false);
     assert(ownership_calls_fixtures.outstanding(&f.caller) == 1);
     ownership_calls_fixtures.boundary("G07.3",
-        "68e6b9b1823a0414307f122f5d8e95cf813aa74d810a8371ab150184541f66aa", "caller_requirement");
+        "47e1ab10ebbf2f234424fdacedd72dcabb856e3cd76dfcd0f2a5bf545cf132e7", "caller_requirement");
 }
 
 fn case_g07_4() void {
@@ -927,7 +957,28 @@ fn case_g07_4() void {
     application_failure(&f, false);
     assert(ownership_calls_fixtures.outstanding(&f.caller) == 1);
     ownership_calls_fixtures.boundary("G07.4",
-        "b3772ec666897f33572c71b96b58bcf655dbe7a45815dde05a4ab2a6639ac995", "caller_requirement");
+        "56b0e5f398df50c13defb55d115f0c32589cd69916d71436e6668e20b7c50e25", "caller_requirement");
+}
+
+// The read input `p` designates the allocation that `h->item` owns. The callee summary is
+// complete, and the application fails at the read after it applies the release.
+fn alias_release(string@ source, string key, string hash, u32 number) void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    ownership_calls_fixtures.open(&f, source);
+    defer ownership_calls_fixtures.close(&f);
+    assert(ownership_api.successful(f.summary.proof));
+    ownership_calls_fixtures.prepare(&f);
+    ownership_api.place_path item = child_slot(&f, 2);
+    seed_output_at(&f, true, item, 90);
+    u64 at = ownership_transfer.contents_index(&f.caller, item);
+    assert(at != ownership_api.U64_MAX);
+    ownership_api.contents_fact mut value = f.caller.contents[at];
+    value.place = ownership_summary_body.slot(&f.inputs[1], 1);
+    put_contents(&f, value);
+    ownership_calls_env.reset(&f.services);
+    ownership_calls_fixtures.apply(&f, number);
+    application_failure(&f, false);
+    ownership_calls_fixtures.boundary(key, hash, "caller_requirement");
 }
 
 fn case_x08() void {
@@ -1083,7 +1134,7 @@ fn case_l03_shared_inner() void {
     }
     assert(captures >= 2);
     ownership_calls_fixtures.boundary("L03-shared-inner",
-        "45366fc464467e47d00bbf06f366d694d3f867f39861f09a417ad35c836abcd7", "caller_requirement");
+        "1ea6fd4af3ff283f75fa087aaac8a0e10819f389bcf4c23d830753d039ed1aaa", "caller_requirement");
 }
 
 // Each altered caller fact keeps the checked callee body unchanged.
@@ -1199,21 +1250,26 @@ fn ordered_load(bool before) void {
     ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
     ownership_calls_fixtures.open(&f, before ? saved[..] : after[..]);
     defer ownership_calls_fixtures.close(&f);
+    if (before) {
+        // The release of `*p` ends the source of the view that the body loaded from it, so
+        // the body itself fails at the read of `v` (D17.14).
+        assert(f.summary.proof.failed && !ownership_api.successful(f.summary.proof));
+        assert(f.services.counts.last.kind == ownership_api.event_kind.invalid_use);
+        assert(f.services.counts.last.text == "reference source is no longer live");
+        return;
+    }
     assert(ownership_api.successful(f.summary.proof));
     ownership_calls_fixtures.prepare(&f);
     ownership_api.entity_id old = seed_output(&f, true);
     ownership_calls_env.reset(&f.services);
     ownership_calls_fixtures.apply(&f, 70);
-    if (before) { application_failure(&f, false); }
-    else {
-        application_success(&f);
-        assert(f.application.state.allocations[ownership_state.allocation_index(
-            &f.application.state, old)].validity == ownership_api.validity_kind.released);
-        assert(ownership_calls_fixtures.outstanding(&f.application.state) == 1);
-        u64 n = ownership_transfer.owner_index(&f.application.state, selected(&f));
-        assert(n != ownership_api.U64_MAX);
-        assert(!ownership_summary_model.same(f.application.state.allocations[n].key, old));
-    }
+    application_success(&f);
+    assert(f.application.state.allocations[ownership_state.allocation_index(
+        &f.application.state, old)].validity == ownership_api.validity_kind.released);
+    assert(ownership_calls_fixtures.outstanding(&f.application.state) == 1);
+    u64 n = ownership_transfer.owner_index(&f.application.state, selected(&f));
+    assert(n != ownership_api.U64_MAX);
+    assert(!ownership_summary_model.same(f.application.state.allocations[n].key, old));
 }
 
 struct reused_graph {
@@ -1410,6 +1466,10 @@ fn main() i32 {
     case_g07_1();
     case_g07_3();
     case_g07_4();
+    alias_release(CASE_G07_5_SOURCE[..], "G07.5",
+        "ab59b95283f6e285cbd3c76df7ee9e49ff397b9a71787378e928447bfb3ac3ab", 95);
+    alias_release(CASE_G07_6_SOURCE[..], "G07.6",
+        "c483215b0f9df86ef7b21d0259fbe3c8f332a8c27744782ee1391da1b019ba9c", 96);
     case_x08();
     hidden_child_owner();
     case_x22();
