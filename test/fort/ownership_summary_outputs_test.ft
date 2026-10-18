@@ -112,24 +112,31 @@ fn loaded_scalar_current_pointer() void {
     }
     assert(loaded.kind == ownership_api.entity_kind.slot);
     assert(!ownership_summary_model.same(current_local.root, loaded));
-    // Two `use` reads check the current local at operation 0. Step 0 is the current-base read
-    // of the nested load in `load_reference`. Step 2 is the loaded-store read of
-    // `assign_output`. Step 1 between them loads the pointer from caller storage.
+    // Each base gets one `use` read at operation 0, in order. Step 0 reads the current local
+    // before the nested load in `load_reference`. Step 1 loads the pointer from caller
+    // storage. Step 2 is the store read of `assign_output`: it reads the loaded pointer, the
+    // current base of the store, and not the local again.
     u64[2] mut reads = {ownership_api.U64_MAX, ownership_api.U64_MAX};
     u64 mut found = 0;
+    u64 mut local_reads = 0;
     i = 0;
     while (i < body.steps_len) {
         ownership_flow.step current_step = body.steps[i];
         if (current_step.kind == ownership_flow.step_kind.local_effect &&
-            current_step.local.kind == ownership_transfer.action.use &&
-            ownership_state.same_place(current_step.local.source, current_local)) {
+            current_step.local.kind == ownership_transfer.action.use) {
             assert(found < 2);
             reads[found] = i;
             found += 1;
+            if (ownership_state.same_place(current_step.local.source, current_local)) {
+                local_reads += 1;
+            }
         }
         i += 1;
     }
-    assert(found == 2 && reads[0] == 0 && reads[1] == 2);
+    assert(found == 2 && reads[0] == 0 && reads[1] == 2 && local_reads == 1);
+    assert(ownership_state.same_place(body.steps[0].local.source, current_local));
+    assert(ownership_summary_model.same(body.steps[2].local.source.root, loaded));
+    assert(body.steps[2].local.source.projections.len == 0);
     assert(body.steps[1].local.kind == ownership_transfer.action.assignment);
     // Each of the two reads fails on an empty current pointer.
     u64 mut r = 0;

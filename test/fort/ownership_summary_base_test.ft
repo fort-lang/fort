@@ -1,0 +1,957 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| summary base ok
+/// Holds the verdicts of the base rule of the summary solver (D17.14, D17.18; spec/fir.md 14.1).
+/// Each read, store, reference load and release of caller storage reads the current flow
+/// contents of each base in order. A store through another caller root ends that search, and the
+/// base is then unknown. A load takes the entry value only when no call, no `del`, and no store
+/// behind a dereference comes before it.
+///
+/// Each group is one probe of `test/ownership/probes/base_*.ft` without its `main`. A long line
+/// of a probe is two lines here. Each body has one expected verdict:
+/// - F: a faulty body. Neither the summary solver nor the calls_heap row proves it.
+/// - K: a valid body that the summary solver proves. It still proves, so a lost proof shows.
+/// - V: a valid body that the summary solver does not prove. It stays unproved and reports no
+///   violation, so both a new proof and a new failure show.
+/// The three bodies that release through one input and read through another keep their proof:
+/// the application checks the read after the release (`ownership_calls_projected_test.ft`,
+/// G07.5 and G07.6).
+import ownership_gate_env;
+import ownership_recursive_env;
+import ownership_source_calls_env;
+
+string[56] BASE_A = {
+    "struct counter { i64 value; }",
+    "struct inner { i64 v; }",
+    "struct outer { inner part; }",
+    "struct holder { i64 mut* own item; }",
+    "fn np_released(outer mut* own p) i64 { outer* v = p; del(p); return v->part.v; }",
+    "fn np_moved(outer mut* own p) i64 {",
+    "    outer mut* own q = move(p);",
+    "    i64 r = p->part.v;",
+    "    del(q);",
+    "    return r;",
+    "}",
+    "fn hp_released(holder mut* h) i64 { del(h->item); return *h->item; }",
+    "fn hp_moved(holder mut* h) i64 {",
+    "    i64 mut* own q = move(h->item);",
+    "    i64 r = *h->item;",
+    "    del(q);",
+    "    return r;",
+    "}",
+    "fn loop_moved(counter mut* own p, i64 n) i64 {",
+    "    counter mut* own q = move(p);",
+    "    i64 mut s = 0;",
+    "    i64 mut i = 0;",
+    "    while (i < n) { s += p->value; i += 1; }",
+    "    del(q);",
+    "    return s;",
+    "}",
+    "fn rel_inner(i64 mut* own mut* pp) void { del(*pp); }",
+    "fn callee_released(i64 mut* own mut* pp) i64 { rel_inner(pp); return **pp; }",
+    "fn rel_owner(counter mut* own c) void { del(c); }",
+    "fn callee_moved(counter mut* own p) i64 { counter* v = p; rel_owner(move(p));",
+    "    return v->value; }",
+    "fn drop_item(holder mut* h) void { del(h->item); }",
+    "fn callee_field(holder mut* h) i64 { drop_item(h); return *h->item; }",
+    "fn joined(i64 mut* own mut* pp, bool c) i64 {",
+    "    if (c) { del(*pp); }",
+    "    return **pp;",
+    "}",
+    "fn branch_ret(i64 mut* own mut* pp, bool c) i64 {",
+    "    if (c) { return 0; }",
+    "    del(*pp);",
+    "    return **pp;",
+    "}",
+    "fn store_released(counter mut* own p) void { del(p); p->value = 1; }",
+    "fn store_moved(counter mut* own p) void {",
+    "    counter mut* own q = move(p);",
+    "    p->value = 1;",
+    "    del(q);",
+    "}",
+    "fn store_alias(counter mut* own p) void { counter mut* v = p; del(p); v->value = 1; }",
+    "fn moved_copy(counter mut* own p) i64 {",
+    "    counter mut* own q = move(p);",
+    "    counter* v = p;",
+    "    i64 r = v->value;",
+    "    del(q);",
+    "    return r;",
+    "}",
+};
+
+string[17] BASE_A_NAMES = {
+    "np_released", "np_moved", "hp_released", "hp_moved", "loop_moved", "rel_inner",
+    "callee_released", "rel_owner", "callee_moved", "drop_item", "callee_field", "joined",
+    "branch_ret", "store_released", "store_moved", "store_alias", "moved_copy",
+};
+
+string[17] BASE_A_WANT = {
+    "F", "F", "F", "F", "F", "K", "F", "K", "F", "K", "F", "F", "F", "F", "F", "F", "F",
+};
+
+string[35] BASE_B = {
+    "struct counter { i64 value; }",
+    "struct holder { i64 mut* own item; }",
+    "fn ws_nested(i64 mut* own mut* pp) void { del(*pp); **pp = 5; }",
+    "fn ws_field(holder mut* h) void { del(h->item); *h->item = 5; }",
+    "fn ws_direct(i64 mut* own p) void { del(p); *p = 5; }",
+    "fn ws_moved_index(i64[2] mut* own p) void {",
+    "    i64[2] mut* own q = move(p);",
+    "    (*p)[1] = 5;",
+    "    del(q);",
+    "}",
+    "fn ws_live(counter mut* own p) void { p->value = 1; del(p); }",
+    "fn ws_alias_moved(counter mut* own p) void {",
+    "    counter mut* own q = move(p);",
+    "    counter mut* v = p;",
+    "    v->value = 1;",
+    "    del(q);",
+    "}",
+    "fn rd_released(i64 mut* own p) i64 { del(p); return *p; }",
+    "fn rd_moved(i64 mut* own p) i64 {",
+    "    i64 mut* own q = move(p);",
+    "    i64 r = *p;",
+    "    del(q);",
+    "    return r;",
+    "}",
+    "fn rd_index_moved(i64[2] mut* own p) i64 {",
+    "    i64[2] mut* own q = move(p);",
+    "    i64 r = (*p)[1];",
+    "    del(q);",
+    "    return r;",
+    "}",
+    "fn ws_nested_moved(i64 mut* own mut* pp) void {",
+    "    i64 mut* own q = move(*pp);",
+    "    **pp = 5;",
+    "    del(q);",
+    "}",
+};
+
+string[10] BASE_B_NAMES = {
+    "ws_nested", "ws_field", "ws_direct", "ws_moved_index", "ws_live", "ws_alias_moved",
+    "rd_released", "rd_moved", "rd_index_moved", "ws_nested_moved",
+};
+
+string[10] BASE_B_WANT = {
+    "F", "F", "F", "F", "K", "F", "F", "F", "F", "F",
+};
+
+string[74] BASE_C = {
+    "struct counter { i64 value; }",
+    "struct pair { i64 a; i64 b; }",
+    "struct holder { i64 mut* own item; }",
+    "fn copy_after_move(i64 mut* own mut* pp) i64 {",
+    "    i64 mut* own q = move(*pp);",
+    "    i64 mut* r = *pp;",
+    "    i64 b = *r;",
+    "    del(q);",
+    "    return b;",
+    "}",
+    "fn copy_after_read_move(i64 mut* own mut* pp) i64 {",
+    "    i64 a = **pp;",
+    "    i64 mut* own q = move(*pp);",
+    "    i64 mut* r = *pp;",
+    "    i64 b = *r;",
+    "    del(q);",
+    "    return a + b;",
+    "}",
+    "fn ret_addr_released(counter mut* own p) i64* {",
+    "    counter* v = p;",
+    "    del(p);",
+    "    return &v->value;",
+    "}",
+    "fn loaded_release(i64 mut* own mut* pp) i64 {",
+    "    i64 mut* inner = *pp;",
+    "    del(*pp);",
+    "    return *inner;",
+    "}",
+    "fn naddr_before(i64 mut* own mut* pp) i64 {",
+    "    i64* a = &**pp;",
+    "    del(*pp);",
+    "    return *a;",
+    "}",
+    "fn naddr_before_move(i64 mut* own mut* pp) i64 {",
+    "    i64* a = &**pp;",
+    "    i64 mut* own q = move(*pp);",
+    "    del(q);",
+    "    return *a;",
+    "}",
+    "fn addr_nested_rel(i64 mut* own mut* pp) i64 {",
+    "    del(*pp);",
+    "    i64* a = &**pp;",
+    "    return *a;",
+    "}",
+    "fn addr_pair_rel(pair mut* own mut* pp) i64* {",
+    "    del(*pp);",
+    "    return &(*pp)->b;",
+    "}",
+    "fn addr_before(counter mut* own p) i64 {",
+    "    i64* a = &p->value;",
+    "    del(p);",
+    "    return *a;",
+    "}",
+    "fn addr_before_move(counter mut* own p) i64 {",
+    "    i64* a = &p->value;",
+    "    counter mut* own q = move(p);",
+    "    i64 r = *a;",
+    "    del(q);",
+    "    return r;",
+    "}",
+    "fn two_level(holder mut* mut* hh) i64 {",
+    "    del((*hh)->item);",
+    "    return *(*hh)->item;",
+    "}",
+    "fn read_then_release(i64 mut* own mut* pp) i64 {",
+    "    i64 a = **pp;",
+    "    del(*pp);",
+    "    return a + **pp;",
+    "}",
+    "fn nested_scalar_after_loaded_release(counter mut* own mut* pp) i64 {",
+    "    counter* c = *pp;",
+    "    del(*pp);",
+    "    return c->value;",
+    "}",
+};
+
+string[13] BASE_C_NAMES = {
+    "copy_after_move", "copy_after_read_move", "ret_addr_released", "loaded_release",
+    "naddr_before", "naddr_before_move", "addr_nested_rel", "addr_pair_rel", "addr_before",
+    "addr_before_move", "two_level", "read_then_release", "nested_scalar_after_loaded_release",
+};
+
+string[13] BASE_C_WANT = {
+    "F", "F", "F", "F", "F", "F", "F", "F", "F", "K", "F", "F", "F",
+};
+
+string[45] BASE_D = {
+    "struct counter { i64 value; }",
+    "struct box { i64* item; }",
+    "fn clear(i64* mut* pp) void { *pp = null; }",
+    "fn cl_after_read(i64* mut* pp) i64 { i64 a = **pp; clear(pp); return a + **pp; }",
+    "fn cl_first(i64* mut* pp) i64 { clear(pp); return **pp; }",
+    "fn setp(i64* mut* pp, i64* n) void { *pp = n; }",
+    "fn set_after_read(i64* mut* pp, i64* n) i64 { i64 a = **pp; setp(pp, n); return a + **pp; }",
+    "fn clear_box(box mut* b) void { b->item = null; }",
+    "fn box_after_read(box mut* b) i64 { i64 a = *b->item; clear_box(b); return a + *b->item; }",
+    "fn wipe(counter mut* own mut* pp) void { del(*pp); }",
+    "fn wipe_after_read(counter mut* own mut* pp) i64 {",
+    "    i64 a = (*pp)->value;",
+    "    wipe(pp);",
+    "    return a + (*pp)->value;",
+    "}",
+    "fn store_local(i64* mut* pp) i64 { i64 x = 1; i64* t = &x; *pp = t; return **pp; }",
+    "fn deep_after_read(i64* mut* mut* ppp) i64 { i64 a = ***ppp; clear(*ppp);",
+    "    return a + ***ppp; }",
+    "struct pair { i64 a; i64 b; }",
+    "fn null_then_load(i64 mut* mut* p) i64 {",
+    "    *p = null;",
+    "    i64 mut* second = *p;",
+    "    return *second;",
+    "}",
+    "fn null_then_nested(i64* mut* mut* p) i64 {",
+    "    **p = null;",
+    "    i64* r = **p;",
+    "    return *r;",
+    "}",
+    "fn null_then_read(i64* mut* p) i64 {",
+    "    *p = null;",
+    "    return **p;",
+    "}",
+    "fn live_then_load(i64 mut* mut* p, i64 mut* q) i64 {",
+    "    *p = q;",
+    "    i64 mut* second = *p;",
+    "    return *second;",
+    "}",
+    "fn addr_offset_unused(pair mut* own p) bool {",
+    "    pair mut* own q = move(p);",
+    "    i64* a = &p->b;",
+    "    bool r = a == null;",
+    "    del(q);",
+    "    return r;",
+    "}",
+};
+
+string[16] BASE_D_NAMES = {
+    "clear", "cl_after_read", "cl_first", "setp", "set_after_read", "clear_box", "box_after_read",
+    "wipe", "wipe_after_read", "store_local", "deep_after_read", "null_then_load",
+    "null_then_nested", "null_then_read", "live_then_load", "addr_offset_unused",
+};
+
+string[16] BASE_D_WANT = {
+    "K", "F", "F", "K", "V", "K", "F", "K", "F", "F", "F", "F", "F", "F", "K", "K",
+};
+
+string[20] BASE_F = {
+    "struct box { i64 value; }",
+    "fn zero_addr_deref(i64 mut* own p) i64 {",
+    "    i64 mut* own q = move(p);",
+    "    i64* a = &*p;",
+    "    i64 r = *a;",
+    "    del(q);",
+    "    return r;",
+    "}",
+    "fn zero_field_deref(box mut* own p) i64 {",
+    "    box mut* own q = move(p);",
+    "    i64* a = &p->value;",
+    "    i64 r = *a;",
+    "    del(q);",
+    "    return r;",
+    "}",
+    "fn released_addr_deref(i64 mut* own p) i64 {",
+    "    del(p);",
+    "    i64* a = &*p;",
+    "    return *a;",
+    "}",
+};
+
+string[3] BASE_F_NAMES = {
+    "zero_addr_deref", "zero_field_deref", "released_addr_deref",
+};
+
+string[3] BASE_F_WANT = {
+    "F", "F", "F",
+};
+
+string[26] BASE_ACCESSES = {
+    "struct hold { u64 mut@ own buf; }",
+    "struct view_store { u64[4] local; u64@ data; string text; }",
+    "struct S { u8 x; u8[4] a; }",
+    "struct views { i32*[2] items; }",
+    "fn rel(hold mut* h) void { del(move(h->buf)); }",
+    "fn m1(hold mut* h) u64 { u64@ s = h->buf; rel(h); return s[0]; }",
+    "fn m2(hold mut* h) u64 { u64@ s = h->buf; u64 mut@ own t = move(h->buf); del(t);",
+    "    return s[0]; }",
+    "fn m3(hold mut* h, u64 i) u64 { u64@ s = h->buf; del(move(h->buf)); return s[i]; }",
+    "fn o1(hold mut* h) u64 { u64@ s = h->buf; del(move(h->buf)); return s[0]; }",
+    "fn stale_store(view_store mut* own store, u64@ d) void { del(store); store->data = d; }",
+    "fn stale_scalar(view_store mut* own store) void { del(store); store->local[1] = 3; }",
+    "fn wr_after_free_exact(S mut* own p) void { del(p); p->a[1] = 1; }",
+    "fn wr_param_field(S mut* own p) void { del(p); p->x = 1; }",
+    "fn wr_local_exact() void { S mut* own p = new(S); del(p); p->a[1] = 1; }",
+    "fn wr_local_field() void { S mut* own p = new(S); del(p); p->x = 1; }",
+    "fn put0(views mut* p, i32* q) void { p->items[0] = q; }",
+    "fn rd_exact(views mut* p) i32 {",
+    "    {",
+    "        i32 c = 3;",
+    "        put0(p, &c);",
+    "    }",
+    "    i32 r = *p->items[0];",
+    "    p->items[0] = null;",
+    "    return r;",
+    "}",
+};
+
+string[13] BASE_ACCESSES_NAMES = {
+    "rel", "m1", "m2", "m3", "o1", "stale_store", "stale_scalar", "wr_after_free_exact",
+    "wr_param_field", "wr_local_exact", "wr_local_field", "put0", "rd_exact",
+};
+
+string[13] BASE_ACCESSES_WANT = {
+    "K", "F", "F", "F", "F", "F", "F", "F", "F", "F", "F", "K", "F",
+};
+
+string[105] BASE_ALIAS = {
+    "struct cell { i64 v; }",
+    "struct cbox { cell* c; }",
+    "struct outer { cbox b; i64 n; }",
+    "struct node { i64 v; }",
+    "struct nholder { node mut* own item; }",
+    "struct holder { i64 mut* own item; }",
+    "struct ibox { i64 v; }",
+    "struct hbox { ibox mut* own item; }",
+    "fn two_alias_free(cbox mut* p, cbox mut* q, cell* r1) i64 {",
+    "    p->c = r1;",
+    "    cell mut* own x = new(cell);",
+    "    q->c = x;",
+    "    del(x);",
+    "    i64 b = p->c->v;",
+    "    p->c = r1;",
+    "    q->c = r1;",
+    "    return b;",
+    "}",
+    "fn two_alias_null(cbox mut* p, cbox mut* q, cell* r1) i64 {",
+    "    p->c = r1;",
+    "    q->c = null;",
+    "    return p->c->v;",
+    "}",
+    "fn two_alias_entry(cbox mut* p, cbox mut* q) i64 {",
+    "    q->c = null;",
+    "    return p->c->v;",
+    "}",
+    "fn outer_alias_free(cbox mut* p, outer mut* o, cell* r1) i64 {",
+    "    p->c = r1;",
+    "    cell mut* own x = new(cell);",
+    "    o->b.c = x;",
+    "    del(x);",
+    "    i64 b = p->c->v;",
+    "    p->c = r1;",
+    "    o->b.c = r1;",
+    "    return b;",
+    "}",
+    "fn outer_alias_zero(cbox mut* p, outer mut* o, cell* r1) i64 {",
+    "    p->c = r1;",
+    "    *o = outer{};",
+    "    return p->c->v;",
+    "}",
+    "fn owner_alias_free(nholder mut* h, nholder mut* k, node mut* own n) i64 {",
+    "    del(h->item);",
+    "    h->item = move(n);",
+    "    del(k->item);",
+    "    k->item = null;",
+    "    return h->item->v;",
+    "}",
+    "fn reuse_alias_null(cbox mut* p, cbox mut* q) i64 {",
+    "    i64 a = p->c->v;",
+    "    q->c = null;",
+    "    i64 b = p->c->v;",
+    "    return a + b;",
+    "}",
+    "fn reuse_alias_free(cbox mut* p, cbox mut* q) i64 {",
+    "    i64 a = p->c->v;",
+    "    cell mut* own x = new(cell);",
+    "    q->c = x;",
+    "    del(x);",
+    "    i64 b = p->c->v;",
+    "    q->c = null;",
+    "    return a + b;",
+    "}",
+    "fn slot_alias_null(cbox mut* p, cell* mut* q, cell* r1) i64 {",
+    "    p->c = r1;",
+    "    *q = null;",
+    "    return p->c->v;",
+    "}",
+    "fn slot_alias_entry(cbox mut* p, cell* mut* q) i64 {",
+    "    *q = null;",
+    "    return p->c->v;",
+    "}",
+    "fn field_alias_free(ibox* p, hbox mut* h) i64 {",
+    "    del(h->item);",
+    "    return p->v;",
+    "}",
+    "fn direct_alias_free(i64* p, holder mut* h) i64 {",
+    "    del(h->item);",
+    "    return *p;",
+    "}",
+    "fn rel_alias(nholder mut* h, nholder mut* k, node mut* own n) i64 {",
+    "    del(h->item);",
+    "    h->item = move(n);",
+    "    del(k->item);",
+    "    return h->item->v;",
+    "}",
+    "fn move_alias(nholder mut* h, nholder mut* k, node mut* own n) i64 {",
+    "    del(h->item);",
+    "    h->item = move(n);",
+    "    node mut* own t = move(k->item);",
+    "    del(t);",
+    "    return h->item->v;",
+    "}",
+    "fn alias_del(holder mut* h, holder mut* k) i64 {",
+    "    i64* r = h->item;",
+    "    del(k->item);",
+    "    return *r;",
+    "}",
+    "fn two_alias_caller(cbox mut* p, cell* r1) i64 { return two_alias_free(p, p, r1); }",
+    "fn two_alias_null_caller(cbox mut* p, cell* r1) i64 { return two_alias_null(p, p, r1); }",
+    "fn two_alias_entry_caller(cbox mut* p) i64 { return two_alias_entry(p, p); }",
+    "fn owner_alias_caller(nholder mut* h, node mut* own n) i64 {",
+    "    return owner_alias_free(h, h, move(n));",
+    "}",
+};
+
+string[19] BASE_ALIAS_NAMES = {
+    "two_alias_free", "two_alias_null", "two_alias_entry", "outer_alias_free", "outer_alias_zero",
+    "owner_alias_free", "reuse_alias_null", "reuse_alias_free", "slot_alias_null",
+    "slot_alias_entry", "field_alias_free", "direct_alias_free", "rel_alias", "move_alias",
+    "alias_del", "two_alias_caller", "two_alias_null_caller", "two_alias_entry_caller",
+    "owner_alias_caller",
+};
+
+string[19] BASE_ALIAS_WANT = {
+    "F", "F", "F", "F", "F", "F", "F", "F", "F", "F", "K", "K", "F", "F", "K", "F", "F", "F", "F",
+};
+
+string[84] BASE_OUTPUT_H = {
+    "struct cell { i64 v; }",
+    "struct cbox { cell* c; }",
+    "struct node { i64 v; }",
+    "struct nholder { node mut* own item; }",
+    "struct twoh { nholder h; nholder k; }",
+    "fn nop() void {}",
+    "fn setc(cbox mut* p, cell* r) void { p->c = r; }",
+    "fn zap(cbox mut* p) void { *p = cbox{}; }",
+    "fn setpp(cbox* mut* pp, cbox* o) void { *pp = o; }",
+    "fn nullpp(cbox* mut* pp) void { *pp = null; }",
+    "fn callee_set_read(cbox mut* p, cell* r) i64 {",
+    "    i64 a = p->c->v;",
+    "    setc(p, r);",
+    "    return a + p->c->v;",
+    "}",
+    "fn callee_set_free(cbox mut* p, cell mut* own r) i64 {",
+    "    i64 a = p->c->v;",
+    "    setc(p, r);",
+    "    del(r);",
+    "    i64 b = p->c->v;",
+    "    zap(p);",
+    "    return a + b;",
+    "}",
+    "fn callee_pp_null(cbox* mut* pp) i64 {",
+    "    i64 a = (*pp)->c->v;",
+    "    nullpp(pp);",
+    "    return a + (*pp)->c->v;",
+    "}",
+    "fn callee_pp_set(cbox* mut* pp, cbox* o) i64 {",
+    "    i64 a = (*pp)->c->v;",
+    "    setpp(pp, o);",
+    "    return a + (*pp)->c->v;",
+    "}",
+    "fn callee_after_zap(cbox mut* p, cell* r) i64 {",
+    "    *p = cbox{};",
+    "    setc(p, r);",
+    "    return p->c->v;",
+    "}",
+    "fn mis_release(nholder mut* h, node mut* own n, node mut* own m) i64 {",
+    "    nop();",
+    "    node* keep = m;",
+    "    del(h->item);",
+    "    h->item = move(n);",
+    "    del(h->item);",
+    "    i64 r = h->item->v;",
+    "    del(m);",
+    "    return r + keep->v;",
+    "}",
+    "fn mis_move(nholder mut* h, node mut* own n, node mut* own m) i64 {",
+    "    nop();",
+    "    node mut* own keep = move(m);",
+    "    del(h->item);",
+    "    h->item = move(n);",
+    "    i64 r = h->item->v;",
+    "    del(keep);",
+    "    return r;",
+    "}",
+    "fn mis_clear(twoh mut* t, node mut* own n) i64 {",
+    "    nop();",
+    "    t->k.item = move(n);",
+    "    t->h = nholder{};",
+    "    t->h = nholder{};",
+    "    return t->h.item->v;",
+    "}",
+    "fn mis_clear2(twoh mut* t, node mut* own n) i64 {",
+    "    nop();",
+    "    del(t->k.item);",
+    "    t->k.item = move(n);",
+    "    t->h = nholder{};",
+    "    t->h = nholder{};",
+    "    return t->h.item->v;",
+    "}",
+    "fn mis_ok(nholder mut* h, node mut* own n) i64 {",
+    "    nop();",
+    "    del(h->item);",
+    "    h->item = move(n);",
+    "    return h->item->v;",
+    "}",
+    "fn nomis_release(nholder mut* h, node mut* own n) i64 {",
+    "    del(h->item);",
+    "    h->item = move(n);",
+    "    del(h->item);",
+    "    return h->item->v;",
+    "}",
+};
+
+string[16] BASE_OUTPUT_H_NAMES = {
+    "nop", "setc", "zap", "setpp", "nullpp", "callee_set_read", "callee_set_free", "callee_pp_null",
+    "callee_pp_set", "callee_after_zap", "mis_release", "mis_move", "mis_clear", "mis_clear2",
+    "mis_ok", "nomis_release",
+};
+
+string[16] BASE_OUTPUT_H_WANT = {
+    "K", "K", "K", "K", "K", "V", "F", "F", "V", "V", "F", "K", "F", "F", "K", "F",
+};
+
+string[30] BASE_OUTPUT_M = {
+    "struct node { i64 v; }",
+    "struct nholder { node mut* own item; }",
+    "fn nop() void {}",
+    "fn mis_leak(nholder mut* h, node mut* own n, node mut* own m) void {",
+    "    nop();",
+    "    node mut* own m2 = move(m);",
+    "    h->item = move(n);",
+    "    del(h->item);",
+    "}",
+    "fn nomis_leak(nholder mut* h, node mut* own n, node mut* own m) void {",
+    "    node mut* own m2 = move(m);",
+    "    h->item = move(n);",
+    "    del(h->item);",
+    "}",
+    "fn mis_read(nholder mut* h, node mut* own n, node mut* own m) i64 {",
+    "    nop();",
+    "    node mut* own m2 = move(m);",
+    "    h->item = move(n);",
+    "    del(h->item);",
+    "    i64 r = h->item->v;",
+    "    del(m2);",
+    "    return r;",
+    "}",
+    "fn mis_ok(nholder mut* h, node mut* own n, node mut* own m) void {",
+    "    nop();",
+    "    node mut* own m2 = move(m);",
+    "    h->item = move(n);",
+    "    del(h->item);",
+    "    del(m2);",
+    "}",
+};
+
+string[5] BASE_OUTPUT_M_NAMES = {
+    "nop", "mis_leak", "nomis_leak", "mis_read", "mis_ok",
+};
+
+string[5] BASE_OUTPUT_M_WANT = {
+    "K", "F", "F", "F", "K",
+};
+
+string[39] BASE_OUTPUT_N = {
+    "struct node { i64 v; }",
+    "struct nholder { node mut* own item; }",
+    "fn nop() void {}",
+    "fn rel_in(nholder mut* h, node mut* own n, node mut* own m) void {",
+    "    nop();",
+    "    node mut* own m2 = move(m);",
+    "    h->item = move(n);",
+    "    del(h->item);",
+    "    del(m2);",
+    "}",
+    "fn double_free(nholder mut* h, node mut* own n, node mut* own m) void {",
+    "    rel_in(h, move(n), move(m));",
+    "    del(h->item);",
+    "}",
+    "fn read_after(nholder mut* h, node mut* own n, node mut* own m) i64 {",
+    "    rel_in(h, move(n), move(m));",
+    "    return h->item->v;",
+    "}",
+    "fn rel_in_nocall(nholder mut* h, node mut* own n, node mut* own m) void {",
+    "    node mut* own m2 = move(m);",
+    "    h->item = move(n);",
+    "    del(h->item);",
+    "    del(m2);",
+    "}",
+    "fn double_free_nocall(nholder mut* h, node mut* own n, node mut* own m) void {",
+    "    rel_in_nocall(h, move(n), move(m));",
+    "    del(h->item);",
+    "}",
+    "fn body_double(nholder mut* h, node mut* own n) void {",
+    "    nop();",
+    "    h->item = move(n);",
+    "    del(h->item);",
+    "    del(h->item);",
+    "}",
+    "fn body_double_nocall(nholder mut* h, node mut* own n) void {",
+    "    h->item = move(n);",
+    "    del(h->item);",
+    "    del(h->item);",
+    "}",
+};
+
+string[8] BASE_OUTPUT_N_NAMES = {
+    "nop", "rel_in", "double_free", "read_after", "rel_in_nocall", "double_free_nocall",
+    "body_double", "body_double_nocall",
+};
+
+string[8] BASE_OUTPUT_N_WANT = {
+    "K", "K", "V", "F", "K", "V", "K", "K",
+};
+
+// Bodies of the rules that the base probes do not reach. A local holds a moved caller owner, a
+// release or a move goes through an emptied base, a read widens a field address, a load skips
+// the private slot of the load before it, and a reference read goes through a local address.
+// A release or a move after a call cannot name the load of its old owner, so it stays
+// incomplete. After a check that keeps one path the move still names that load. A load after
+// a release takes no entry value, because the released allocation can be the loaded one.
+string[29] RULES = {
+    "struct holder { i64 mut* own item; }",
+    "struct pair { i32 a; i32 b; }",
+    "struct view { u64@ sp; }",
+    "struct sh { view* v; }",
+    "fn held_read(holder mut* h) i64 {",
+    "    i64 mut* own q = move(h->item); i64 x = *q; del(q); return x; }",
+    "fn release_base(holder mut* own h) void { del(h); del(h->item); }",
+    "fn move_base(holder mut* own h) i64 {",
+    "    holder mut* own g = move(h); i64 mut* own q = move(h->item); del(q); del(g);",
+    "    return 0; }",
+    "fn widen(pair* p) u64 { i32* b = &p->b; u64* w = cast(b, u64*); return *w; }",
+    "fn m6(sh* p) u64 { u64@ s = p->v->sp; return s[0]; }",
+    "fn t1_int_typed(i32 mut* own p) u64 {",
+    "    i32* s = p; i32** ps = &s; del(p); return cast(*ps, u64); }",
+    "fn t6_void_copy_ok(i32 mut* own p) void {",
+    "    void* s = cast(p, void*); void** ps = &s; void* q = *ps; void* r = q; del(p); }",
+    "fn foo() void {}",
+    "fn release_after_call(i64 mut* own mut* pp) i64 {",
+    "    i64* inner = *pp; foo(); del(*pp); return *inner; }",
+    "fn move_after_call(i64 mut* own mut* pp) i64 {",
+    "    i64* inner = *pp; foo(); i64 mut* own q = move(*pp); del(q); return *inner; }",
+    "fn move_after_check(i64 mut* own mut* pp, i64@ s) i64 {",
+    "    i64 x = s[0];",
+    "    i64* inner = *pp; i64 mut* own q = move(*pp); del(q); return *inner + x; }",
+    "fn move_keep_valid(i64 mut* own mut* pp) i64 {",
+    "    i64* inner = *pp; i64 mut* own q = move(*pp); i64 x = *inner; *pp = move(q);",
+    "    return x; }",
+    "fn del_then_load(i64 mut* own p, i64** q) i64 { del(p); return **q; }",
+    "",
+};
+
+string[13] RULES_NAMES = {
+    "held_read", "release_base", "move_base", "widen", "m6", "t1_int_typed", "t6_void_copy_ok",
+    "foo", "release_after_call", "move_after_call", "move_after_check", "move_keep_valid",
+    "del_then_load",
+};
+
+string[13] RULES_WANT = {"K", "F", "F", "F", "K", "F", "V", "K", "F", "F", "F",
+    "K", "F"};
+
+// Reads behind a null test. Extraction models no null test, so an empty base after a branch
+// gives incomplete proof and no violation (D17.18). The unguarded read still fails.
+string[15] GUARDS = {
+    "struct pair { i32 first; i32 second; }",
+    "fn takepair(pair mut* own s) void { del(s); }",
+    "fn g10_moved_owner_guard(pair mut* own s) i32 { pair mut* own t = move(s);",
+    "    i32 mut x = 0; if (s != null) { x = s->first; } del(t); return x; }",
+    "fn g11_local_owner_guard() i32 {",
+    "    pair mut* own a = new(pair); pair mut* own t = move(a); i32 mut x = 0;",
+    "    if (a != null) { x = a->first; } del(t); return x; }",
+    "fn g12_param_deref_guard(i32 mut* own s) i32 { i32 mut* own t = move(s);",
+    "    i32 mut x = 0; if (s != null) { x = *s; } del(t); return x; }",
+    "fn g13_released_guard(pair mut* own s) i32 {",
+    "    del(s); i32 mut x = 0; if (s != null) { x = s->first; } return x; }",
+    "fn g14_callee_guard(pair mut* own s) i32 {",
+    "    takepair(move(s)); i32 mut x = 0; if (s != null) { x = s->second; } return x; }",
+    "fn g15_released_unguarded(pair mut* own s) i32 { del(s); return s->first; }",
+    "",
+};
+
+string[7] GUARDS_NAMES = {
+    "takepair", "g10_moved_owner_guard", "g11_local_owner_guard", "g12_param_deref_guard",
+    "g13_released_guard", "g14_callee_guard", "g15_released_unguarded",
+};
+
+string[7] GUARDS_WANT = {"K", "V", "V", "V", "V", "V", "F"};
+
+// A borrow copy of a held caller owner borrows the loaded source of the owner. Each use of the
+// copy checks that source, so a use after the release of the owner fails, through a further
+// copy, after a move into another local, and after a store back into caller storage.
+string[39] HELD = {
+    "struct holder { i64 mut* own item; }",
+    "struct hold { i64 mut* own item; i64 v; }",
+    "fn held_write(i64 mut* own mut* pp) void {",
+    "    i64 mut* own x = move(*pp); i64 mut* y = x; del(x); *y = 1; }",
+    "fn hc_field_write(hold mut* own mut* pp) void {",
+    "    hold mut* own x = move(*pp); hold mut* y = x; del(x); y->v = 3; }",
+    "fn hc_branch(i64 mut* own mut* pp, bool c) void {",
+    "    i64 mut* own x = move(*pp); i64 mut* y = x;",
+    "    if (c) { del(x); *y = 1; return; }",
+    "    *pp = move(x); }",
+    "fn hf_reassign(i64 mut* own mut* pp) i64 {",
+    "    i64 mut* own mut x = move(*pp); i64 mut* y = x; del(x); x = new(i64); *y = 2;",
+    "    del(x); return 0; }",
+    "fn held_copy(i64 mut* own mut* pp) i64 {",
+    "    i64 mut* own x = move(*pp); i64* y = x; del(x); return *y; }",
+    "fn held_copy_field(holder mut* h) i64 {",
+    "    i64 mut* own x = move(h->item); i64* y = x; del(x); return *y; }",
+    "fn held_copy_after(i64 mut* own mut* pp) i64 {",
+    "    i64 mut* own x = move(*pp); i64* y = x; i64 mut* own z = move(x); del(z); return *y; }",
+    "fn held_two_copies(i64 mut* own mut* pp) i64 {",
+    "    i64 mut* own x = move(*pp); i64* y = x; i64* w = y; del(x); return *w; }",
+    "fn held_return(i64 mut* own mut* pp) i64* {",
+    "    i64 mut* own x = move(*pp); i64* y = x; del(x); return y; }",
+    "fn held_store_back(i64 mut* own mut* pp) i64 {",
+    "    i64 mut* own x = move(*pp); i64* y = x; *pp = move(x); del(*pp); return *y; }",
+    "fn held_other(i64 mut* own mut* pp, i64 mut* own mut* qq) i64 {",
+    "    i64 mut* own x = move(*pp); i64* y = x; del(*qq); *qq = move(x); del(*qq);",
+    "    return *y; }",
+    "fn held_valid_copy(i64 mut* own mut* pp) i64 {",
+    "    i64 mut* own x = move(*pp); i64* y = x; i64 a = *y; del(x); return a; }",
+    "fn held_valid_back(i64 mut* own mut* pp) i64 {",
+    "    i64 mut* own x = move(*pp); i64* y = x; i64 a = *y; *pp = move(x); return a + *y; }",
+    "fn hc_valid_write(i64 mut* own mut* pp) void {",
+    "    i64 mut* own x = move(*pp); i64 mut* y = x; *y = 1; del(x); }",
+    "fn hc_valid_field(hold mut* own mut* pp) void {",
+    "    hold mut* own x = move(*pp); hold mut* y = x; y->v = 3; *pp = move(x); }",
+    "fn store_new_back(i64 mut* own mut* pp, i64 mut* own n) i64 {",
+    "    i64 mut* own x = move(*pp); i64* y = x; *pp = move(n); del(*pp); i64 a = *y; del(x);",
+    "    return a; }",
+};
+
+string[16] HELD_NAMES = {
+    "held_write", "hc_field_write", "hc_branch", "hf_reassign", "held_copy", "held_copy_field",
+    "held_copy_after", "held_two_copies", "held_return", "held_store_back", "held_other",
+    "held_valid_copy", "held_valid_back", "hc_valid_write", "hc_valid_field", "store_new_back",
+};
+
+string[16] HELD_WANT = {"F", "F", "F", "F", "F", "F", "F", "F", "F", "F", "F", "K", "K", "K",
+    "K", "K"};
+
+// A store back of a held caller owner into caller storage. Flow models that owner as an empty
+// slot, so a later load, move or release of the path stops the summary (D17.18). A faulty use
+// of the old source after that stays unproved; a valid body without such an access proves.
+// Without the load stop, the valid `sv_load_return` and `sv_load_unused` prove through the
+// empty slot. A read through the loaded reference stays unproved without the stop. The next 7
+// valid bodies prove on main and stay unproved here: the stop gives up their precision.
+string[62] STOP = {
+    "fn sv_return(i64 mut* own mut* pp) i64* {",
+    "    i64 mut* own x = move(*pp); i64* y = x; *pp = move(x); return y; }",
+    "fn sv_reload(i64 mut* own mut* pp) i64 {",
+    "    i64 mut* own x = move(*pp); *pp = move(x); i64* w = *pp; return *w; }",
+    "fn sv_load_return(i64 mut* own mut* pp) i64* {",
+    "    i64 mut* own x = move(*pp); *pp = move(x); i64* w = *pp; return w; }",
+    "fn sv_load_unused(i64 mut* own mut* pp) i64 {",
+    "    i64 mut* own x = move(*pp); *pp = move(x); i64* w = *pp; return 0; }",
+    "fn sv_moved_out_z(i64 mut* own mut* pp) i64 {",
+    "    i64 mut* own x = move(*pp); *pp = move(x); i64 mut* own z = move(*pp); del(*pp);",
+    "    i64 a = *z; *pp = move(z); return a; }",
+    "fn sv_new_read(i64 mut* own mut* pp) i64 {",
+    "    i64 mut* own x = move(*pp); *pp = move(x); del(*pp); *pp = new(i64);",
+    "    i64 mut* w = *pp; *w = 4; return *w; }",
+    "fn sv_read_then_release(i64 mut* own mut* pp) i64 {",
+    "    i64 mut* own x = move(*pp); i64* y = x; *pp = move(x); i64 a = *y; del(*pp);",
+    "    *pp = new(i64); return a; }",
+    "fn sv_relay(i64 mut* own mut* pp) i64 {",
+    "    i64 mut* own x = move(*pp); i64* y = x; *pp = move(x); i64 mut* own z = move(*pp);",
+    "    i64 a = *y; *pp = move(z); return a + *y; }",
+    "fn tv_moved_twice(i64 mut* own mut* pp) i64 {",
+    "    i64 mut* own x = move(*pp); i64* y = x; *pp = move(x); i64 mut* own z = move(*pp);",
+    "    *pp = move(z); i64 mut* own u = move(*pp); del(*pp); i64 a = *y; *pp = move(u);",
+    "    return a; }",
+    "fn sv_release_new(i64 mut* own mut* pp) i64 {",
+    "    i64 mut* own x = move(*pp); *pp = move(x); del(*pp); *pp = new(i64); **pp = 3;",
+    "    return **pp; }",
+    "fn tv_load(i64 mut* own mut* pp) i64 {",
+    "    i64 mut* own x = move(*pp); i64* y = x; *pp = move(x); i64* w = *pp;",
+    "    i64 a = *y + *w; del(*pp); *pp = new(i64); return a; }",
+    "fn sd_moved(i64 mut* own mut* pp) i64 {",
+    "    i64 mut* own x = move(*pp); i64* y = x; *pp = move(x); del(x); return *y; }",
+    "fn sb_load(i64 mut* own mut* pp) i64 {",
+    "    i64 mut* own x = move(*pp); i64* y = x; *pp = move(x); i64* w = *pp; del(*pp);",
+    "    return *y; }",
+    "fn ts_write(i64 mut* own mut* pp) void {",
+    "    i64 mut* own x = move(*pp); i64 mut* y = x; *pp = move(x); i64* w = *pp; del(*pp);",
+    "    *pp = new(i64); *y = 5; }",
+    "fn mb_new(i64 mut* own mut* pp) i64 {",
+    "    i64 mut* own x = move(*pp); i64* y = x; *pp = move(x); del(*pp); *pp = new(i64);",
+    "    return *y; }",
+    "fn ts_plain_move(i64 mut* own mut* pp) i64 {",
+    "    i64* r = *pp; i64 mut* own x = move(*pp); *pp = move(x); i64 mut* own z = move(*pp);",
+    "    del(z); *pp = new(i64); return *r; }",
+    "fn sv_moved_out(i64 mut* own mut* pp) i64 {",
+    "    i64 mut* own x = move(*pp); i64* y = x; *pp = move(x); i64 mut* own z = move(*pp);",
+    "    del(*pp); i64 a = *y; *pp = move(z); return a; }",
+    "fn tv_empty_release(i64 mut* own mut* pp) i64 {",
+    "    i64 mut* own x = move(*pp); i64* y = x; *pp = move(x); i64 mut* own z = move(*pp);",
+    "    del(*pp); del(*pp); i64 a = *z; *pp = move(z); return a + *y; }",
+    "fn sj_valid(i64 mut* own mut* pp, bool c) i64 {",
+    "    i64 mut* own x = move(*pp); i64* y = x; i64 mut* own n = new(i64);",
+    "    if (c) { *pp = move(n); } else { del(n); *pp = move(x); }",
+    "    del(*pp); i64 mut a = 0; if (c) { a = *y; } del(x); *pp = new(i64); return a; }",
+    "struct holder { i64 mut* own item; }",
+    "fn ts_field(holder mut* h) i64 {",
+    "    i64 mut* own x = move(h->item); i64* y = x; h->item = move(x); i64* w = h->item;",
+    "    del(h->item); h->item = new(i64); return *y; }",
+    "fn field_back(holder mut* h, holder mut* k) i64 {",
+    "    i64 mut* own x = move(h->item); i64* y = x; del(k->item); k->item = move(x);",
+    "    i64 mut* own z = move(k->item); del(z); h->item = new(i64); k->item = new(i64);",
+    "    return *y; }",
+};
+
+string[21] STOP_NAMES = {
+    "sv_return", "sv_reload", "sv_load_return", "sv_load_unused", "sv_moved_out_z",
+    "sv_new_read", "sv_read_then_release", "sv_relay", "tv_moved_twice", "sv_release_new",
+    "tv_load", "sd_moved", "sb_load",
+    "ts_write", "mb_new", "ts_plain_move", "sv_moved_out", "tv_empty_release", "sj_valid",
+    "ts_field", "field_back",
+};
+
+string[21] STOP_WANT = {"K", "V", "V", "V", "V", "V", "V", "V", "V", "V", "V", "K", "F", "F", "F",
+    "F", "V", "V", "V", "F", "F"};
+
+// Valid shapes that main proves and that this rule leaves unproved, by the ruling of
+// 2026-10-18: a load after a release through another input, or after a release of a body
+// allocation, takes no entry value (spec/fir.md 14.1).
+string[16] OLD = {
+    "struct owner_box { i32 mut* own item; i32 tag; }",
+    "struct view_box { i32* ptr; }",
+    "fn g07_1_old(owner_box mut* a, view_box* b) i32 { del(a->item); return *b->ptr; }",
+    "fn g07_3_old(owner_box mut* a, owner_box* b) i32 { del(a->item); return *b->item; }",
+    "fn l03_old(i32** left, i32** right, i32 mut* own owner) i32 {",
+    "    i32 before = **left;",
+    "    del(owner);",
+    "    return before + **right;",
+    "}",
+    "fn branch_load_old(owner_box mut* a, owner_box* b, bool read) i32 {",
+    "    del(a->item);",
+    "    if (read) { return *b->item; }",
+    "    return 0;",
+    "}",
+    "fn local_del_then_load(i32** p) i32 {",
+    "    i32 mut* own x = new(i32); del(x); return **p; }",
+};
+
+string[5] OLD_NAMES = {
+    "g07_1_old", "g07_3_old", "l03_old", "branch_load_old", "local_del_then_load",
+};
+
+string[5] OLD_WANT = {"V", "V", "V", "V", "V"};
+
+// Solves one group and prints each body whose verdict differs from its expectation. Gives the
+// count of those bodies.
+fn check(string label, string@ text, string@ names, string@ want) u64 {
+    assert(names.len == want.len);
+    ownership_recursive_env.closure mut summaries = ownership_recursive_env.closure{};
+    defer ownership_recursive_env.close(&summaries);
+    ownership_recursive_env.open(&summaries, text, names);
+    ownership_recursive_env.solve(&summaries);
+    ownership_source_calls_env.closure mut calls = ownership_source_calls_env.closure{};
+    defer ownership_source_calls_env.close(&calls);
+    ownership_source_calls_env.run(&calls, text, names);
+    u64 mut wrong = 0;
+    u64 mut i = 0;
+    while (i < names.len) {
+        string summary = ownership_gate_env.summary_verdict(&summaries, names[i]);
+        string row = ownership_source_calls_env.verdict(&calls, names[i]);
+        bool mut held = summary == "unproved";
+        if (want[i] == "F") { held = summary != "proved" && row != "proved"; }
+        if (want[i] == "K") { held = summary == "proved"; }
+        if (!held) {
+            eprintln(label, " ", names[i], " expects ", want[i], ": summary ", summary,
+                ", calls_heap ", row);
+            wrong += 1;
+        }
+        i += 1;
+    }
+    return wrong;
+}
+
+fn main() i32 {
+    u64 mut wrong = 0;
+    wrong += check("base_a", BASE_A[..], BASE_A_NAMES[..], BASE_A_WANT[..]);
+    wrong += check("base_b", BASE_B[..], BASE_B_NAMES[..], BASE_B_WANT[..]);
+    wrong += check("base_c", BASE_C[..], BASE_C_NAMES[..], BASE_C_WANT[..]);
+    wrong += check("base_d", BASE_D[..], BASE_D_NAMES[..], BASE_D_WANT[..]);
+    wrong += check("base_f", BASE_F[..], BASE_F_NAMES[..], BASE_F_WANT[..]);
+    wrong += check("base_accesses", BASE_ACCESSES[..], BASE_ACCESSES_NAMES[..],
+        BASE_ACCESSES_WANT[..]);
+    wrong += check("base_alias", BASE_ALIAS[..], BASE_ALIAS_NAMES[..], BASE_ALIAS_WANT[..]);
+    wrong += check("base_output_h", BASE_OUTPUT_H[..], BASE_OUTPUT_H_NAMES[..],
+        BASE_OUTPUT_H_WANT[..]);
+    wrong += check("base_output_m", BASE_OUTPUT_M[..], BASE_OUTPUT_M_NAMES[..],
+        BASE_OUTPUT_M_WANT[..]);
+    wrong += check("base_output_n", BASE_OUTPUT_N[..], BASE_OUTPUT_N_NAMES[..],
+        BASE_OUTPUT_N_WANT[..]);
+    wrong += check("rules", RULES[..], RULES_NAMES[..], RULES_WANT[..]);
+    wrong += check("guards", GUARDS[..], GUARDS_NAMES[..], GUARDS_WANT[..]);
+    wrong += check("held", HELD[..], HELD_NAMES[..], HELD_WANT[..]);
+    wrong += check("old", OLD[..], OLD_NAMES[..], OLD_WANT[..]);
+    wrong += check("stop", STOP[..], STOP_NAMES[..], STOP_WANT[..]);
+    if (wrong != 0) {
+        eprintln(wrong, " bodies differ from their expectation");
+        return 1;
+    }
+    println("summary base ok");
+    return 0;
+}

@@ -13,7 +13,8 @@
     "Darwin host, and run with --runner 'bash -c'.",
     "The md5 guard reads that LLVM IR file. A table whose binary is the compiler reads",
     "stale on each row.",
-    "Twenty-seven rows include eleven transfer-precondition rows."
+    "Twenty-seven rows include eleven transfer-precondition rows. Thirty-three rows hold the",
+    "base rule of each access to caller storage and its alias barrier."
   ],
   "sources": [
     "src/fort/ownership_summary_body.ft",
@@ -221,6 +222,237 @@
       "old": "(ty->kind == types.type_kind.k_span || ty->kind == types.type_kind.k_string) &&\n            part.field == 1) {",
       "new": "(ty->kind == types.type_kind.k_span || ty->kind == types.type_kind.k_string) &&\n            part.field < 2) {",
       "what": "the pointer field of a caller span header gives a loaded root of its own"
+    },
+    {
+      "decision": "D17.14-base-one-step-read",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "            req.kind = base_use.kind;\n",
+      "new": "            req.kind = ownership_transfer.action.inspect;\n",
+      "what": "a one-step caller read inspects its base and does not dereference it"
+    },
+    {
+      "decision": "D17.14-base-scalar-store",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        req.source_precondition_proved = selected.caller;\n        emit(in, out, req, block, gap, 0,",
+      "new": "        req.source_precondition_proved = selected.caller;\n        req.kind = ownership_transfer.action.inspect;\n        emit(in, out, req, block, gap, 0,",
+      "what": "a scalar store inspects its current base and does not dereference it"
+    },
+    {
+      "decision": "D17.14-base-owner-access",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    if (selected->indirect) {\n        ownership_transfer.request base = base_request(",
+      "new": "    if (false && selected->indirect) {\n        ownership_transfer.request base = base_request(",
+      "what": "a release, a move or an owning store does not use its current base"
+    },
+    {
+      "decision": "D17.14-base-borrowed-store",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    emit(in, out, base, block, gap, 0, ownership_summary_model.payload_kind.read, stmt->loc,\n        stmt->exit_loc, stmt->stmt, base.source, base.destination);\n    if (!ownership_api.successful(out->proof)) { return; }\n    fir.operand input_operand",
+      "new": "    if (!ownership_api.successful(out->proof)) { return; }\n    fir.operand input_operand",
+      "what": "a borrowed store into caller storage does not use its current base"
+    },
+    {
+      "decision": "D17.14-load-current-contents",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    if (current.root.kind != ownership_api.entity_kind.none) {\n        req.kind = ownership_transfer.action.copy;",
+      "new": "    if (false && current.root.kind != ownership_api.entity_kind.none) {\n        req.kind = ownership_transfer.action.copy;",
+      "what": "a load after a store, a release or a move takes the entry value"
+    },
+    {
+      "decision": "D17.18-load-after-outside-write",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        .opaque_value = unknown_value};",
+      "new": "        .opaque_value = false};",
+      "what": "a load after a call or a write under a dereference takes the entry value"
+    },
+    {
+      "decision": "D17.4-store-ends-contents-search",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        if (out->written[e].kind != ownership_api.entity_kind.none &&\n            !ownership_summary_model.same(out->written[e], path.root)) {\n            *crossed = true;",
+      "new": "        if (false &&\n            !ownership_summary_model.same(out->written[e], path.root)) {\n            *crossed = true;",
+      "what": "a store under another caller root does not end the current-contents search"
+    },
+    {
+      "decision": "D17.4-store-ends-reuse",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        if (out->written[e].kind != ownership_api.entity_kind.none &&\n            !ownership_summary_model.same(out->written[e], place.root)) {\n            return loaded_reference{};",
+      "new": "        if (false &&\n            !ownership_summary_model.same(out->written[e], place.root)) {\n            return loaded_reference{};",
+      "what": "a store under another caller root does not end the reuse of a load"
+    },
+    {
+      "decision": "D17.14-move-ends-reuse",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "            (node.payload == ownership_summary_model.payload_kind.move &&\n            covers(node.operand, place))) {",
+      "new": "            (false &&\n            covers(node.operand, place))) {",
+      "what": "a move out of a loaded path does not end the reuse of its load"
+    },
+    {
+      "decision": "D17.14-release-ends-loaded-source",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": ".ended_source = old.blocked ? ownership_api.entity_id{} : old.source};",
+      "new": ".ended_source = ownership_api.entity_id{}};",
+      "what": "a release of caller storage keeps the loaded source of its old owner live"
+    },
+    {
+      "decision": "D17.14-held-owner-release",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "                if (out.caller_owned[held]) { req.ended_source = out.origins[held]; }",
+      "new": "                if (false) { req.ended_source = out.origins[held]; }",
+      "what": "a release of a moved caller owner keeps its loaded source live"
+    },
+    {
+      "decision": "D17.14-held-owner-inspect",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        .kind = held_owner(in, out, base) ? ownership_transfer.action.inspect :\n            ownership_transfer.action.use,",
+      "new": "        .kind = ownership_transfer.action.use,",
+      "what": "a moved caller owner, an empty slot in flow, is dereferenced"
+    },
+    {
+      "decision": "D17.18-empty-base-after-branch",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "            .current_base = selected.current_base, .empty_unproved = !out->definite_prefix};",
+      "new": "            .current_base = selected.current_base, .empty_unproved = false};",
+      "what": "an empty base of a nested read after a null test is a violation"
+    },
+    {
+      "decision": "D17.18-empty-use-after-branch",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        .empty_unproved = !out->definite_prefix};\n}",
+      "new": "        .empty_unproved = false};\n}",
+      "what": "an empty base of a one-step read after a null test is a violation"
+    },
+    {
+      "decision": "D17.18-empty-base-check",
+      "file": "src/fort/ownership_transfer.ft",
+      "old": "        if (req->empty_unproved) { return unproved(svc, req, req->source.root); }\n",
+      "new": "",
+      "what": "the transfer reports an empty base after a branch as an invalid use"
+    },
+    {
+      "decision": "D17.17-start-window",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "            req.start_window = caller && base_use.kind == ownership_transfer.action.use;",
+      "new": "            req.start_window = false;",
+      "what": "a caller read through a borrow at an offset uses the window from the source start"
+    },
+    {
+      "decision": "D17.17-start-window-check",
+      "file": "src/fort/ownership_transfer.ft",
+      "old": "            checked.borrows[b].range.offset.value != 0) {\n            return unproved(svc, req, req->source.root);",
+      "new": "            false) {\n            return unproved(svc, req, req->source.root);",
+      "what": "the transfer accepts a borrow at a nonzero offset for a start window"
+    },
+    {
+      "decision": "D17.14-local-reference-read",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    if (pointee && ownership_api.successful(out->proof)) {",
+      "new": "    if (false && pointee && ownership_api.successful(out->proof)) {",
+      "what": "a reference read through a local address does not use the local contents"
+    },
+    {
+      "decision": "D17.18-output-step-index",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "                selected->flow_path = out->effect_flow[e];",
+      "new": "                selected->flow_path = out->steps[e].local.destination;",
+      "what": "an owner output reads the step list by effect index"
+    },
+    {
+      "decision": "D17.14-return-loaded-events",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    if (fir.block_at(in->function.body, block)->term.kind != fir.term_kind.tk_return) {\n        return true;\n    }",
+      "new": "    if (true) {\n        return true;\n    }",
+      "what": "a return binds no events of a loaded source"
+    },
+    {
+      "decision": "D17.14-load-skips-own-slot",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        if (node.payload == ownership_summary_model.payload_kind.reference_load) { continue; }\n",
+      "new": "",
+      "what": "the current-contents search takes a load as a store into the storage behind it"
+    },
+    {
+      "decision": "D17.14-blocked-load-reads",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    if (loaded.blocked) { loaded = loaded_reference{}; }",
+      "new": "    if (loaded.blocked) {\n        reject(out, ownership_api.incomplete_reason.unknown_effect);\n        return loaded_reference{};\n    }",
+      "what": "a load after a replacement of a loaded path stops extraction"
+    },
+    {
+      "decision": "D17.14-end-loaded-source",
+      "file": "src/fort/ownership_transfer.ft",
+      "old": "    s->sources[i].validity = ownership_api.validity_kind.released;\n    return complete();",
+      "new": "    s->sources[i].validity = ownership_api.validity_kind.live;\n    return complete();",
+      "what": "the transfer keeps the ended loaded source live"
+    },
+    {
+      "decision": "D17.14-unlinked-release",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "                if (!old.blocked && old.source.kind == ownership_api.entity_kind.none &&\n                    loaded_before(&out, selected.path, selected.source)) {",
+      "new": "                if (false &&\n                    loaded_before(&out, selected.path, selected.source)) {",
+      "what": "a release that cannot name the earlier load of its old owner keeps that source live"
+    },
+    {
+      "decision": "D17.14-unlinked-move",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "                    if (!prior.blocked && prior.source.kind == ownership_api.entity_kind.none &&\n                        loaded_before(out, from.path, from.source)) {",
+      "new": "                    if (false &&\n                        loaded_before(out, from.path, from.source)) {",
+      "what": "a move that cannot name the earlier load of its old owner keeps that source live"
+    },
+    {
+      "decision": "D17.14-moved-owner-source",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "                    req.source_key = prior.blocked ||\n                        prior.source.kind == ownership_api.entity_kind.none ? loaded.source :\n                        prior.source;",
+      "new": "                    req.source_key = loaded.source;",
+      "what": "a moved caller owner takes a fresh loaded source after a branch"
+    },
+    {
+      "decision": "D17.4-release-mark",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "                mark(&out, selected.path.root);\n            } else if (stmt->kind == fir.stmt_kind.st_dead) {",
+      "new": "            } else if (stmt->kind == fir.stmt_kind.st_dead) {",
+      "what": "a release of caller storage is no write under its root"
+    },
+    {
+      "decision": "D17.4-move-mark",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    mark(out, moved_from);\n",
+      "new": "",
+      "what": "a move out of caller storage is no write under its root"
+    },
+    {
+      "decision": "D17.18-release-outside-write",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "            node.effect.kind == ownership_api.effect_kind.release ||\n",
+      "new": "",
+      "what": "a release before a load leaves the load its entry value"
+    },
+    {
+      "decision": "D17.14-held-copy-borrow",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "            } else if (out->caller_owned[src] && reference(dst_ty)) {",
+      "new": "            } else if (false && out->caller_owned[src] && reference(dst_ty)) {",
+      "what": "a borrow copy of a held caller owner copies the empty slot of flow"
+    },
+    {
+      "decision": "D17.14-stored-back-load",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    if (stored_back_before(out, place)) {\n        reject(out, ownership_api.incomplete_reason.unknown_effect);\n        return loaded_reference{};\n    }\n",
+      "new": "",
+      "what": "a load after a store back of a held owner takes a fresh source"
+    },
+    {
+      "decision": "D17.14-stored-back-release",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    if ((release || moving) && stored_back_before(out, selected->path)) {",
+      "new": "    if (false && stored_back_before(out, selected->path)) {",
+      "what": "a release or a move after a store back of a held owner names no source"
+    },
+    {
+      "decision": "D17.14-stored-back-mark",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        back = out->caller_owned[input_operand.place.local];\n",
+      "new": "        back = false;\n",
+      "what": "a store back of a held caller owner is no store back"
     }
   ]
 }

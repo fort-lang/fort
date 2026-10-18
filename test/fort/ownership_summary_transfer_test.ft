@@ -433,15 +433,19 @@ fn nested_inner() void {
     assert(b.services.counts.last.text == "empty reference has no element");
 }
 
-// Repeated nested loads use one flow slot. A later dereference reads a preceding live or null
-// store through that slot.
+// A store through the root that a load of `*p` gives can change `*p` itself, because two
+// paths can name one storage (D17.4). So the next load of `*p` takes no known value, and the
+// later dereference stays incomplete after a live store and after a null store.
 fn repeated_nested() void {
     ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
     string[2] names = {"repeated_nested_live", "repeated_nested_null"};
     ownership_call_bodies.open(&b, REPEATED_NESTED[..], names[..]);
     defer ownership_call_bodies.close(&b);
     ownership_call_bodies.infer_all(&b);
-    ownership_call_bodies.only_case(&b, 0);
+    ownership_summary_model.summary* live_store = ownership_call_bodies.summary(&b, 0);
+    assert(live_store->proof.kind == ownership_api.proof_kind.incomplete &&
+        live_store->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(live_store->cases.len == 0);
     ownership_summary_model.summary* null_store = ownership_call_bodies.summary(&b, 1);
     assert(null_store->proof.kind == ownership_api.proof_kind.incomplete &&
         null_store->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
@@ -477,7 +481,9 @@ fn repeated_load() void {
     assert(loaded_effects == 2);
 }
 
-// A store ends root reuse for the loaded path. The next load cannot reuse the old source.
+// A store ends root reuse for the loaded path. The next load cannot reuse the old source: it
+// reads the contents that the store left (spec/fir.md 14.1). A null store into a borrowed
+// field leaves no reference there, so the dereference of the reloaded value stays incomplete.
 fn replaced_load() void {
     ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
     string[1] names = {"replaced_load"};
@@ -487,20 +493,20 @@ fn replaced_load() void {
     ownership_summary_model.summary* model = ownership_call_bodies.summary(&b, 0);
     assert(model->proof.kind == ownership_api.proof_kind.incomplete && model->proof.failed);
     assert(model->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(model->proof.terminal.operation.operation == 5);
     assert(model->cases.len == 0);
 }
 
-// A live replacement also stops root reuse. The summary has no stored-value load rule yet.
+// A live store gives the stored reference, and its read proves with the requirement of that
+// reference.
 fn replaced_load_live() void {
     ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
     string[1] names = {"replaced_load_live"};
     ownership_call_bodies.open(&b, REPLACED_LOAD_LIVE[..], names[..]);
     defer ownership_call_bodies.close(&b);
     ownership_call_bodies.infer_all(&b);
-    ownership_summary_model.summary* model = ownership_call_bodies.summary(&b, 0);
-    assert(model->proof.kind == ownership_api.proof_kind.incomplete && model->proof.failed);
-    assert(model->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
-    assert(model->cases.len == 0);
+    ownership_call_bodies.only_case(&b, 0);
+    assert(b.services.counts.events == 0);
 }
 
 // Equal projection text does not merge roots from different caller sources. Each parameter
@@ -681,16 +687,16 @@ fn temporary_return() void {
     assert(model->proof.terminal.operation.operation == 2);
 }
 
-// A clear of a prefix of the loaded path ends root reuse, as an exact store does. Extraction
-// stops at the second load, because the first loaded source is no longer the current pointer.
+// A clear of a prefix of the loaded path ends root reuse, as an exact store does. The second
+// load does not reuse the first loaded source: it reads the contents below the clear
+// (spec/fir.md 14.1). The clear left no contents there, so the summary stays incomplete.
 fn prefix_reuse(string@ source) void {
     ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
     ownership_calls_fixtures.open(&f, source);
     defer ownership_calls_fixtures.close(&f);
     ownership_summary_body.body_program mut body = ownership_summary_body.extract(&f.inputs[0]);
     defer ownership_summary_body.free(&body);
-    assert(body.proof.kind == ownership_api.proof_kind.incomplete);
-    assert(body.proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(ownership_api.successful(body.proof));
     assert(f.summary.proof.kind == ownership_api.proof_kind.incomplete);
     assert(f.summary.cases.len == 0);
 }
@@ -864,7 +870,8 @@ fn call_faulty() void {
 
 // The sixth faulty body, a valid read after a call, and a store after the call. Only the
 // store after the call gives the read a current base again, so only that body is proved.
-// A reference copy after the call takes a fresh loaded root: 2 roots for 2 loads.
+// A reference copy after the call takes a fresh loaded root with no known value, because the
+// call can store into `p->c` (spec/fir.md 14.1). Its comparison stays incomplete.
 fn call_mixed() void {
     ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
     string[5] names = {"setc", "local_free_slot", "read_after_call", "store_after_call",
@@ -876,17 +883,9 @@ fn call_mixed() void {
     not_proved(&b, 1);
     not_proved(&b, 2);
     ownership_call_bodies.only_case(&b, 3);
-    ownership_call_bodies.only_case(&b, 4);
+    not_proved(&b, 4);
     ownership_summary_model.summary* copies = ownership_call_bodies.summary(&b, 4);
-    u64 mut loaded_roots = 0;
-    u64 mut i = 0;
-    while (i < copies->roots.len) {
-        if (copies->roots[i].kind == ownership_summary_model.root_kind.loaded_source) {
-            loaded_roots += 1;
-        }
-        i += 1;
-    }
-    assert(loaded_roots == 2);
+    assert(copies->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
 }
 
 fn main() i32 {

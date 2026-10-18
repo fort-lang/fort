@@ -1,0 +1,57 @@
+// Probe a.ft of the review of PR 120: an access through a released, moved or emptied base.
+struct counter { i64 value; }
+struct inner { i64 v; }
+struct outer { inner part; }
+struct holder { i64 mut* own item; }
+fn np_released(outer mut* own p) i64 { outer* v = p; del(p); return v->part.v; }
+fn np_moved(outer mut* own p) i64 {
+    outer mut* own q = move(p);
+    i64 r = p->part.v;
+    del(q);
+    return r;
+}
+fn hp_released(holder mut* h) i64 { del(h->item); return *h->item; }
+fn hp_moved(holder mut* h) i64 {
+    i64 mut* own q = move(h->item);
+    i64 r = *h->item;
+    del(q);
+    return r;
+}
+fn loop_moved(counter mut* own p, i64 n) i64 {
+    counter mut* own q = move(p);
+    i64 mut s = 0;
+    i64 mut i = 0;
+    while (i < n) { s += p->value; i += 1; }
+    del(q);
+    return s;
+}
+fn rel_inner(i64 mut* own mut* pp) void { del(*pp); }
+fn callee_released(i64 mut* own mut* pp) i64 { rel_inner(pp); return **pp; }
+fn rel_owner(counter mut* own c) void { del(c); }
+fn callee_moved(counter mut* own p) i64 { counter* v = p; rel_owner(move(p)); return v->value; }
+fn drop_item(holder mut* h) void { del(h->item); }
+fn callee_field(holder mut* h) i64 { drop_item(h); return *h->item; }
+fn joined(i64 mut* own mut* pp, bool c) i64 {
+    if (c) { del(*pp); }
+    return **pp;
+}
+fn branch_ret(i64 mut* own mut* pp, bool c) i64 {
+    if (c) { return 0; }
+    del(*pp);
+    return **pp;
+}
+fn store_released(counter mut* own p) void { del(p); p->value = 1; }
+fn store_moved(counter mut* own p) void {
+    counter mut* own q = move(p);
+    p->value = 1;
+    del(q);
+}
+fn store_alias(counter mut* own p) void { counter mut* v = p; del(p); v->value = 1; }
+fn moved_copy(counter mut* own p) i64 {
+    counter mut* own q = move(p);
+    counter* v = p;
+    i64 r = v->value;
+    del(q);
+    return r;
+}
+fn main() i32 { return 0; }

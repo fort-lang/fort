@@ -1,0 +1,29 @@
+// The same four accesses of caller storage after a release, a move or a call. m1 to m3 are of
+// the final review of PR 132 and o1 is rebuilt from its log. stale_store and stale_scalar are
+// of the fix round of PR 134. The other bodies are of the final review of PR 132.
+struct hold { u64 mut@ own buf; }
+struct view_store { u64[4] local; u64@ data; string text; }
+struct S { u8 x; u8[4] a; }
+struct views { i32*[2] items; }
+fn rel(hold mut* h) void { del(move(h->buf)); }
+fn m1(hold mut* h) u64 { u64@ s = h->buf; rel(h); return s[0]; }
+fn m2(hold mut* h) u64 { u64@ s = h->buf; u64 mut@ own t = move(h->buf); del(t); return s[0]; }
+fn m3(hold mut* h, u64 i) u64 { u64@ s = h->buf; del(move(h->buf)); return s[i]; }
+fn o1(hold mut* h) u64 { u64@ s = h->buf; del(move(h->buf)); return s[0]; }
+fn stale_store(view_store mut* own store, u64@ d) void { del(store); store->data = d; }
+fn stale_scalar(view_store mut* own store) void { del(store); store->local[1] = 3; }
+fn wr_after_free_exact(S mut* own p) void { del(p); p->a[1] = 1; }
+fn wr_param_field(S mut* own p) void { del(p); p->x = 1; }
+fn wr_local_exact() void { S mut* own p = new(S); del(p); p->a[1] = 1; }
+fn wr_local_field() void { S mut* own p = new(S); del(p); p->x = 1; }
+fn put0(views mut* p, i32* q) void { p->items[0] = q; }
+fn rd_exact(views mut* p) i32 {
+    {
+        i32 c = 3;
+        put0(p, &c);
+    }
+    i32 r = *p->items[0];
+    p->items[0] = null;
+    return r;
+}
+fn main() i32 { return 0; }

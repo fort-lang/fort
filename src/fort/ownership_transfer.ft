@@ -69,6 +69,14 @@ struct request {
     // Address formation preserves an empty current base for that later check.
     bool current_base_required;
     ownership_api.place_path current_base;
+    // An empty base gives incomplete proof, not an invalid use. A branch before the access can
+    // test the base, and the extraction models no null test (D17.18).
+    bool empty_unproved;
+    // An extent requirement guards this read from the start of its source, so a borrow at
+    // another offset gives incomplete proof (D17.17).
+    bool start_window;
+    // A release of caller storage ends the loaded source of the old owner (D17.14).
+    ownership_api.entity_id ended_source;
     // The source and destination may be reference leaves of private aggregate slots: a slot
     // root with field and constant-index projections. No pointer names such a leaf.
     bool leaf_places_proved;
@@ -484,8 +492,23 @@ fn check_value(ownership_state.state* s, ownership_api.services* svc, request* r
     if (dereference && (checked.owner_empty ||
         (checked.span_length.kind == ownership_api.fact_kind.exact &&
         checked.span_length.value == 0))) {
+        if (req->empty_unproved) { return unproved(svc, req, req->source.root); }
         return invalid(svc, req, ownership_api.event_kind.invalid_use, req->source_key,
             "empty reference has no element");
+    }
+    u64 mut b = 0;
+    while (dereference && req->start_window && b < checked.borrows.len) {
+        ownership_api.charge_result charged = ownership_api.charge_work(svc,
+            ownership_api.work_kind.transfer, req->operation, req->source_position);
+        if (!charged.allowed) {
+            return ownership_state.report_failure(svc, charged.proof, req->operation,
+                req->source_position);
+        }
+        if (checked.borrows[b].range.offset.kind != ownership_api.fact_kind.exact ||
+            checked.borrows[b].range.offset.value != 0) {
+            return unproved(svc, req, req->source.root);
+        }
+        b += 1;
     }
     if (dereference && !req->temporal_use &&
         ((checked.span_length.kind != ownership_api.fact_kind.exact && !foreign) ||
@@ -699,9 +722,7 @@ fn do_release(ownership_state.state mut* s, ownership_api.services* svc,
     u64 owner = owner_index(s, req->source);
     if (empty_owner_proved(value) && owners == 0 &&
         owner_overlap(s, req->source) == overlap_kind.none) {
-        ownership_api.proof_status mut proof = ownership_api.proof_status{};
-        proof.kind = ownership_api.proof_kind.complete;
-        return proof;
+        return end_loaded(s, svc, req);
     }
     if (owners != 1 || value.owner_empty ||
         !owner_reference_proved(s, value, s->allocations[owner]) ||
@@ -713,7 +734,27 @@ fn do_release(ownership_state.state mut* s, ownership_api.services* svc,
     ownership_api.mutation_result released = ownership_state.release_member(s, svc,
         allocation, true, req->operation, req->source_position);
     if (!released.applied) { return released.proof; }
-    return write(s, svc, empty_value(req->source), req->source, req);
+    ownership_api.proof_status emptied = write(s, svc, empty_value(req->source), req->source,
+        req);
+    if (!ownership_api.successful(emptied)) { return emptied; }
+    return end_loaded(s, svc, req);
+}
+
+// The release of caller storage frees the old owner that the body loaded from it. Flow models
+// that owner as an empty slot, so the release ends the loaded source instead: each borrow of
+// it is then a use after release (D17.9, D17.14). A source outside the state stays unproved.
+fn end_loaded(ownership_state.state mut* s, ownership_api.services* svc, request* req)
+    ownership_api.proof_status {
+    if (req->ended_source.kind != ownership_api.entity_kind.source) { return complete(); }
+    u64 i = source_index(s, req->ended_source);
+    if (i == U64_MAX) { return unproved(svc, req, req->ended_source); }
+    ownership_state.charge_counts mut counts = ownership_state.charge_counts{};
+    counts.w = 1;
+    ownership_api.mutation_result paid = ownership_state.require_counts(s, svc, counts,
+        req->operation, req->source_position);
+    if (!paid.applied) { return paid.proof; }
+    s->sources[i].validity = ownership_api.validity_kind.released;
+    return complete();
 }
 
 fn do_assignment(ownership_state.state mut* s, ownership_api.services* svc,
