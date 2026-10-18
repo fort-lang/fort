@@ -1,0 +1,244 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| move of empty owner applies ok
+//| move of empty owner over a live first leaf refused ok
+//| move of live owner applies ok
+//| move of dangling owner not proved ok
+//| move out and back of empty owner applies ok
+//| dereference of empty owner refused ok
+//| dereference of dangling owner refused ok
+//| copy of empty owner applies ok
+//| copy of dangling owner refused ok
+/// Applies a callee that loads the caller leaf `q->b` to an empty, a live and a dangling leaf.
+/// A move or a copy of a null value is legal (D17.6). A dereference of it is not, and a use of
+/// a dangling owner is not (D17.14).
+import ownership_api;
+import ownership_calls_fixtures;
+import ownership_state;
+import ownership_summary_body;
+import ownership_summary_model;
+
+string[3] MOVE_B_TO_A = {
+    "struct pr { i32 mut* own a; i32 mut* own b; }",
+    "fn callee(pr mut* q) pr { i32 mut* own t = move(q->b); return pr{move(t), null}; }",
+    "fn caller(pr mut* p) void { *p = callee(p); }",
+};
+
+string[3] MOVE_BACK = {
+    "struct pr { i32 mut* own a; i32 mut* own b; }",
+    "fn callee(pr mut* q) void { i32 mut* own t = move(q->b); q->b = move(t); }",
+    "fn caller(pr mut* p) void { callee(p); }",
+};
+
+string[3] DEREFERENCE = {
+    "struct pr { i32 mut* own a; i32 mut* own b; }",
+    "fn callee(pr mut* q) i32 { return *q->b; }",
+    "fn caller(pr mut* p) i32 { return callee(p); }",
+};
+
+string[3] COPY = {
+    "struct pr { i32 mut* own a; i32 mut* own b; }",
+    "fn callee(pr* q) bool { i32* t = q->b; i32* u = t; return u == null; }",
+    "fn caller(pr* p) bool { return callee(p); }",
+};
+
+enum leaf { empty, live, dangling }
+
+// The old caller leaf `field` of the destination that `p` designates.
+fn storage(ownership_calls_fixtures.fixture mut* f, u32 field) ownership_api.place_path {
+    ownership_api.place_path mut path = ownership_summary_body.caller_slot(&f->inputs[1], 1);
+    ownership_api.projection[1] part = {ownership_api.projection{
+        .kind = ownership_api.projection_kind.field, .field = field}};
+    path.projections = part[..];
+    return ownership_state.copy_place(&f->caller, path);
+}
+
+// The leaf `field` holds a heap owner with allocation ordinal `number`. A released owner
+// dangles: its source is no longer live and its allocation has no obligation.
+fn owner(ownership_calls_fixtures.fixture mut* f, u32 field, u32 number, leaf state) void {
+    ownership_api.validity_kind validity = state == leaf.live ?
+        ownership_api.validity_kind.live : ownership_api.validity_kind.released;
+    ownership_api.place_path item = storage(f, field);
+    ownership_api.entity_id key = ownership_summary_body.id(f->inputs[1].function.key,
+        ownership_api.entity_kind.allocation, number);
+    ownership_api.entity_id mut source = key;
+    source.kind = ownership_api.entity_kind.source;
+    ownership_state.append_sources(&f->caller, ownership_api.source_fact{
+        .key = source, .kind = ownership_api.source_kind.heap, .validity = validity,
+        .allocation = key});
+    ownership_state.append_allocations(&f->caller, ownership_api.allocation_fact{
+        .key = key, .site = key, .validity = validity,
+        .count = ownership_api.multiplicity{false, true, false},
+        .obligation = state == leaf.live, .owner = ownership_api.owner_location{.place = item},
+        .logical_length = ownership_summary_body.integer(1)});
+    ownership_api.entity_id mut version = source;
+    version.kind = ownership_api.entity_kind.value;
+    ownership_api.entity_id mut region = source;
+    region.kind = ownership_api.entity_kind.region;
+    ownership_api.borrow_relation[1] relations = {ownership_api.borrow_relation{
+        .value_version = version, .containing = item, .source = source,
+        .range = ownership_api.region{.key = region, .source = source,
+            .offset = ownership_summary_body.integer(0),
+            .access = ownership_api.byte_window{ownership_summary_body.integer(0),
+                ownership_summary_body.integer(4), true},
+            .extent = ownership_summary_body.integer(4), .alignment = 4},
+        .representation_complete = true}};
+    ownership_state.append_contents(&f->caller, ownership_api.contents_fact{
+        .place = item, .value_version = version,
+        .kind = ownership_api.contents_kind.reference, .borrows = relations[..],
+        .span_length = ownership_summary_body.integer(1)});
+}
+
+fn seed(ownership_calls_fixtures.fixture mut* f, u32 field, u32 number, leaf state) void {
+    if (state == leaf.empty) {
+        ownership_state.append_contents(&f->caller,
+            ownership_summary_body.empty(storage(f, field), true));
+    } else {
+        owner(f, field, number, state);
+    }
+}
+
+// Applies the callee summary to a caller whose leaves `p->a` and `p->b` hold `a` and `b`.
+fn applied(ownership_calls_fixtures.fixture mut* f, string@ text, leaf a, leaf b) void {
+    ownership_calls_fixtures.open(f, text);
+    assert(ownership_api.successful(f->summary.proof) && !f->summary.residual_effects);
+    ownership_calls_fixtures.prepare(f);
+    ownership_calls_fixtures.configure_source(f, ownership_api.source_kind.symbolic_caller,
+        ownership_api.validity_kind.live, 16);
+    seed(f, 0, 90, a);
+    seed(f, 1, 91, b);
+    ownership_calls_fixtures.apply(f, 1);
+}
+
+// The summary of `text` holds a live-source row on the source of a loaded root.
+fn loaded_live_row(ownership_calls_fixtures.fixture* f) bool {
+    u64 mut i = 0;
+    while (i < f->summary.requirements.len) {
+        ownership_summary_model.requirement row = f->summary.requirements[i];
+        u64 mut r = 0;
+        while (r < f->summary.roots.len) {
+            ownership_summary_model.symbolic_root root = f->summary.roots[r];
+            if (row.kind == ownership_summary_model.requirement_kind.live_source &&
+                root.kind == ownership_summary_model.root_kind.loaded_source &&
+                ownership_summary_model.same(root.source, row.source)) {
+                return true;
+            }
+            r += 1;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+fn applies(ownership_calls_fixtures.fixture* f, u64 owners) bool {
+    return ownership_api.successful(f->application.proof) && f->application.normal_continuation &&
+        ownership_calls_fixtures.outstanding(&f->application.state) == owners;
+}
+
+fn refused(ownership_calls_fixtures.fixture* f, string text) bool {
+    return f->application.proof.failed &&
+        f->application.proof.terminal.reason == ownership_api.incomplete_reason.none &&
+        f->services.counts.last.text == text;
+}
+
+// `moveb_to_a` with two empty leaves: the move yields null, and the literal writes null twice.
+fn move_of_empty_owner_applies() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    defer ownership_calls_fixtures.close(&f);
+    applied(&f, MOVE_B_TO_A[..], leaf.empty, leaf.empty);
+    assert(f.summary.effects.len == 8 && f.summary.requirements.len == 6);
+    assert(loaded_live_row(&f));
+    assert(applies(&f, 0));
+    println("move of empty owner applies ok");
+}
+
+// The empty move is legal, but the literal writes over the live owner in `p->a`.
+fn move_of_empty_owner_over_live_first_refused() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    defer ownership_calls_fixtures.close(&f);
+    applied(&f, MOVE_B_TO_A[..], leaf.live, leaf.empty);
+    assert(refused(&f, "call requires an empty old output leaf"));
+    assert(f.services.counts.last.kind == ownership_api.event_kind.caller_requirement);
+    println("move of empty owner over a live first leaf refused ok");
+}
+
+// A nonnull `q->b` keeps its live-source rule. The owner moves into `p->a`.
+fn move_of_live_owner_applies() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    defer ownership_calls_fixtures.close(&f);
+    applied(&f, MOVE_B_TO_A[..], leaf.empty, leaf.live);
+    assert(applies(&f, 1));
+    println("move of live owner applies ok");
+}
+
+// The caller cannot prove the old owner of the move source when that owner dangles. The
+// call stops as incomplete proof with missing_path before any D17.14 use check.
+fn move_of_dangling_owner_not_proved() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    defer ownership_calls_fixtures.close(&f);
+    applied(&f, MOVE_B_TO_A[..], leaf.empty, leaf.dangling);
+    assert(f.application.proof.kind == ownership_api.proof_kind.incomplete &&
+        f.application.proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(f.services.counts.last.text == "cannot prove the selected old output owner");
+    println("move of dangling owner not proved ok");
+}
+
+fn move_out_and_back_of_empty_owner_applies() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    defer ownership_calls_fixtures.close(&f);
+    applied(&f, MOVE_BACK[..], leaf.empty, leaf.empty);
+    assert(loaded_live_row(&f));
+    assert(applies(&f, 0));
+    println("move out and back of empty owner applies ok");
+}
+
+// A dereference keeps its extent row. A null value has no storage to read.
+fn dereference_of_empty_owner_refused() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    defer ownership_calls_fixtures.close(&f);
+    applied(&f, DEREFERENCE[..], leaf.empty, leaf.empty);
+    assert(!loaded_live_row(&f));
+    assert(refused(&f, "call requires a nonnull reference"));
+    assert(ownership_calls_fixtures.outstanding(&f.caller) == 0);
+    println("dereference of empty owner refused ok");
+}
+
+fn dereference_of_dangling_owner_refused() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    defer ownership_calls_fixtures.close(&f);
+    applied(&f, DEREFERENCE[..], leaf.empty, leaf.dangling);
+    assert(refused(&f, "call requires a live source"));
+    println("dereference of dangling owner refused ok");
+}
+
+// A copy of a null value and a compare of it read no storage.
+fn copy_of_empty_owner_applies() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    defer ownership_calls_fixtures.close(&f);
+    applied(&f, COPY[..], leaf.empty, leaf.empty);
+    assert(loaded_live_row(&f));
+    assert(applies(&f, 0));
+    println("copy of empty owner applies ok");
+}
+
+fn copy_of_dangling_owner_refused() void {
+    ownership_calls_fixtures.fixture mut f = ownership_calls_fixtures.fixture{};
+    defer ownership_calls_fixtures.close(&f);
+    applied(&f, COPY[..], leaf.empty, leaf.dangling);
+    assert(refused(&f, "reference source is no longer live"));
+    println("copy of dangling owner refused ok");
+}
+
+fn main() i32 {
+    move_of_empty_owner_applies();
+    move_of_empty_owner_over_live_first_refused();
+    move_of_live_owner_applies();
+    move_of_dangling_owner_not_proved();
+    move_out_and_back_of_empty_owner_applies();
+    dereference_of_empty_owner_refused();
+    dereference_of_dangling_owner_refused();
+    copy_of_empty_owner_applies();
+    copy_of_dangling_owner_refused();
+    return 0;
+}
