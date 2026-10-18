@@ -758,16 +758,16 @@ bullet at a time and without a rewrite.
   `lower_env` writes its sandboxes into the working directory.
   `test/ownership/heap_rows.ft` prints one row for each function of a file: the verdict, the
   incomplete reason, `returns`, the interface length, the post slots, the post atoms and the events.
-  The test compares 1508 rows of 290 inputs with `test/ownership/heap_rows.txt`. The inputs are
-  107 of the 109 manifest programs, the 54 programs of `test/ownership/probes`, and 129 texts that
+  The test compares 1590 rows of 291 inputs with `test/ownership/heap_rows.txt`. The inputs are
+  107 of the 109 manifest programs, the 54 programs of `test/ownership/probes`, and 130 texts that
   `heap_texts` takes from the 12 `test/fort/ownership_heap*_test.ft` programs. `HEAP_ROWS_SKIPPED`
   names the other 2 manifest programs with the reason: each imports `std.str`, and the sandbox
   `std` holds only a runtime. A skipped program that `heap_rows` reads fails the test. Run the
   test with `--bless` to write the golden, and read the diff of the golden before the commit.
   `test/ownership/solvers_alone.ft` prints the summary verdict, the heap verdict and the verdict
-  of the calls_heap row (`ownership_source_calls_env.verdict`) of 196 faulty bodies:
+  of the calls_heap row (`ownership_source_calls_env.verdict`) of 220 faulty bodies:
   the faulty body of each of the 37 reject cases (the last function at or before an error line)
-  and the 159 bodies of `test/ownership/solvers/faulty.json`. A body is faulty because its source
+  and the 183 bodies of `test/ownership/solvers/faulty.json`. A body is faulty because its source
   has the expected error: the error line of a reject case, or the `faulty.json` entry of a probe.
   The summary solver must prove 0, and the calls_heap row must prove 0: it needs both proofs. No
   ledger entry names the row. Its one-body witness checker validates an event in 13 of the faulty
@@ -832,8 +832,16 @@ bullet at a time and without a rewrite.
   The heap solver alone proves 3 of them on 3b0fca76 too: `full_after_move`, `ptr_after_move`
   and `ptr_field_move`, each a read of caller storage after its move. On 2026-10-17 a
   coordinator ruling, by a delegation of the user, put them in the ledger as class P, and the
-  bound became 12. Thus, `faulty.json` has 159 bodies, and the full set has 196. The ledger
-  classes with entries are M, P and Q. The empty ledger is the goal.
+  bound became 12. Thus, `faulty.json` had 159 bodies, and the full set had 196. The copy rule
+  of the heap scalar operand and the heap assignment (`notes/compiler.md` 6) deleted the 3
+  class Q entries. Its review found 5 faulty callers that pass null to a callee that the rule
+  left without a proof. A call of a callee without a proof that takes a reference now gives
+  incomplete proof in the caller. Each class M caller makes such a call, so the 6 class M
+  entries went too, and N became 3. Against e1a4aca4 the change moved 28 rows of the golden
+  from `proved` to `unproved` and 5 rows of valid stores of a global address the other way.
+  `copied_references.ft` took 24 more faulty bodies, most with valid counterparts, so
+  `faulty.json` has 183 bodies, and the full set has 220. The ledger class with entries is P.
+  The empty ledger is the goal.
   Measured runs of the first 10 probe programs on darwin, built with `build/Darwin/debug/fort --cc
   /opt/homebrew/bin/clang --std-dir build/Darwin/debug/std -o <probe> <probe>.ft`: `round8_a3`
   exits 134 (the assertion of `chk_addr`), `round8_d2` exits 139, and the other 8 exit 0.

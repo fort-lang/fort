@@ -335,10 +335,13 @@ fn retyped_flow() void {
     // its value.
     assert(ownership_heap_env.proved(&c, "restored"));
     assert(ownership_heap_env.proved(&c, "other_base"));
-    // A pointer read through a cast from scalar storage has no source.
+    // A pointer read through a cast from scalar storage has no source. Its copy into `n` is a
+    // use of it (D17.14), and the read through `n` records a second event.
     assert(ownership_heap_env.unproved(&c, "read_pointer",
         ownership_api.incomplete_reason.unknown_effect));
-    assert(ownership_heap_env.first_text(&c, "read_pointer") == "n");
+    assert(ownership_heap_env.first_text(&c, "read_pointer") ==
+        "a reference that this assignment copies");
+    assert(ownership_heap_env.events(&c, "read_pointer") == 2);
     // A scalar read through a cast of an owner changes no fact of the owner.
     assert(ownership_heap_env.proved(&c, "bits_read"));
 }
@@ -388,16 +391,22 @@ fn retyped_edges() void {
     assert(ownership_heap_env.proved(&c, "identity"));
     // A join of the forgotten value and the known value knows nothing, so the leak stays.
     assert(leaks(&c, "one_branch"));
-    // A pointer read through a cast of a struct to its first field has no source.
+    // A pointer read through a cast of a struct to its first field has no source. Its copy into
+    // `n` is a use (D17.14) before the read through `n`.
     assert(ownership_heap_env.unproved(&c, "first_field",
         ownership_api.incomplete_reason.unknown_effect));
-    assert(ownership_heap_env.first_text(&c, "first_field") == "n");
+    assert(ownership_heap_env.first_text(&c, "first_field") ==
+        "a reference that this assignment copies");
+    assert(ownership_heap_env.events(&c, "first_field") == 2);
     // A flat allocation holds no owner, so a cast keeps a joined view of two of them. A cast of
     // a joined view of two cells gives incomplete proof, also for a read (a precision limit).
+    // The copy of the cast result into `p` gives the first event, and the read the second.
     assert(ownership_heap_env.proved(&c, "flat_join"));
     assert(ownership_heap_env.unproved(&c, "joined_read",
         ownership_api.incomplete_reason.unknown_effect));
-    assert(ownership_heap_env.first_text(&c, "joined_read") == "p");
+    assert(ownership_heap_env.first_text(&c, "joined_read") ==
+        "a reference that this assignment copies");
+    assert(ownership_heap_env.events(&c, "joined_read") == 2);
 }
 
 // A pointer of another pointee type than its storage leaves the body at a call argument, at a
@@ -758,8 +767,11 @@ fn shapes() void {
     assert(ownership_heap_env.text(&half) == "b->y");
     assert(ownership_heap_env.field_requirements(&c, "half_box", 0,
         ownership_facts.root_kind.null_root) == 0);
+    // The caller moves an owner into the callee, which has no proof, so the call gives
+    // incomplete proof in the caller too (`spec/fir.md` 14, Calls).
     assert(!ownership_heap_env.proved(&c, "use_half"));
-    assert(ownership_heap_env.events(&c, "use_half") == 0);
+    assert(ownership_heap_env.events(&c, "use_half") == 1);
+    assert(ownership_heap_env.first_text(&c, "use_half") == "a call of a function without a proof");
     // Three children each take a strict part.
     assert(ownership_heap_env.proved(&c, "drop_tri"));
     // A borrowed back edge adds no obligation and no shape requirement.

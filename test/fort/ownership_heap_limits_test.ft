@@ -90,15 +90,25 @@ fn work() void {
     }
     assert(ownership_heap_env.budget_events(&c) == 4);
     assert(c.counts.events == 4);
-    // At 44 units `use` ends within its bound. Its callees have no proof, so their calls stay
-    // unknown: the callees reported their own errors, and the summary of `use` is residual.
-    c.counts.work = 44;
+    // At 48 units `use` ends within its bound. Its callees have no proof, so their calls stay
+    // unknown: the callees reported their own errors, and the summary of `use` is residual. The
+    // call of `drop_chain` passes an owner to a callee without a proof, so it gives incomplete
+    // proof in `use` (`spec/fir.md` 14, Calls). The call of `build` passes a scalar and gives
+    // none. The scan of the arguments of each such call pays one W unit for each argument.
+    // At 47 units `use` stops too, so its W use includes the scan of the arguments.
+    c.counts.work = 47;
     ownership_heap_env.solve(&c);
+    assert(ownership_heap_env.budget_events(&c) == 3);
+    c.counts.work = 48;
+    ownership_heap_env.solve(&c);
+    assert(ownership_heap_env.budget_events(&c) == 2);
     assert(ownership_heap_env.unproved(&c, "drop_chain",
         ownership_api.incomplete_reason.work_limit));
     assert(!ownership_heap_env.proved(&c, "use"));
     assert(ownership_heap_env.summary(&c, "use")->residual);
-    assert(ownership_heap_env.events(&c, "use") == 0);
+    assert(ownership_heap_env.events(&c, "use") == 1);
+    assert(ownership_heap_env.first_text(&c, "use") == "a call of a function without a proof");
+    assert(ownership_heap_env.first_text(&c, "use") == "a call of a function without a proof");
     // The same closure fits the production bound of each computation.
     c.counts.work = 0;
     ownership_heap_env.solve(&c);
@@ -289,20 +299,22 @@ fn literal_work(string line) u64 {
 
 // Each element of an array literal of references pays one W unit in each pass, and an array of
 // scalars pays nothing for its elements. A zero value pays one unit for each borrowed array leaf
-// (D17.18).
+// (D17.18). The copy of a borrowed reference element pays one more unit for its use (D17.14),
+// and a constant element is no copy.
 fn literal_elements() void {
     println("array literal work");
     u64 one = literal_work("fn lit(i32* q) void { i32*[1] a = {q}; }");
     u64 four = literal_work("fn lit(i32* q) void { i32*[4] a = {q, q, q, q}; }");
-    assert(four > one && (four - one) % 3 == 0);
+    assert(four > one && (four - one) % 6 == 0);
     u64 scalar_one = literal_work("fn lit(i32 q) void { i32[1] a = {q}; }");
     u64 scalar_four = literal_work("fn lit(i32 q) void { i32[4] a = {q, q, q, q}; }");
     assert(scalar_four == scalar_one);
     // A zero value pays one unit for its one array leaf, where a literal pays one unit for each
-    // of its 4 elements: the literal pays 3 units more in each pass.
+    // of its 4 elements: the literal of constants pays 3 units more in each pass. The literal of
+    // 4 copies pays 3 more elements and 3 more copies than the literal of 1 copy.
     u64 zero = literal_work("fn lit() void { i32*[4] a = {}; }");
     u64 nulls = literal_work("fn lit() void { i32*[4] a = {null, null, null, null}; }");
-    assert(nulls - zero == four - one);
+    assert(nulls > zero && 2 * (nulls - zero) == four - one);
 }
 
 fn main() i32 {

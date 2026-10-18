@@ -83,9 +83,27 @@ fn refusals() void {
     assert(ownership_heap_env.unproved(&c, "bottom", ownership_api.incomplete_reason.work_limit));
     assert(ownership_heap_env.unproved(&c, "ping", ownership_api.incomplete_reason.work_limit));
     assert(ownership_heap_env.unproved(&c, "pong", ownership_api.incomplete_reason.work_limit));
-    // A stopped recursive component records one budget event for the whole component.
+    // A stopped recursive component records one budget event for the whole component. Each
+    // caller that passes an owner to a callee without a proof gives incomplete proof at that
+    // call (`spec/fir.md` 14, Calls): `middle` and `ring`. `top` stops on its own.
     u64 budget = ownership_heap_env.budget_events(&c);
-    assert(budget >= 2 && budget == c.counts.events);
+    assert(budget >= 2 && budget + call_events(&c) == c.counts.events);
+    assert(call_events(&c) == 2);
+    assert(ownership_heap_env.first_text(&c, "middle") == "a call of a function without a proof");
+    assert(ownership_heap_env.first_text(&c, "ring") == "a call of a function without a proof");
+}
+
+// The number of events that give incomplete proof at a call of a callee without a proof.
+fn call_events(ownership_heap_env.closure* c) u64 {
+    u64 mut found = 0;
+    u64 mut i = 0;
+    while (i < c->counts.events && i < c->counts.rows.len) {
+        if (ownership_heap_env.text(&c->counts.rows[i]) == "a call of a function without a proof") {
+            found += 1;
+        }
+        i += 1;
+    }
+    return found;
 }
 
 // The rounds of a recursive component record no event; the publication round records each.
@@ -197,9 +215,12 @@ fn withdrawal() void {
     assert(!ownership_heap_env.summary(&c, "pong")->residual);
     assert(ownership_heap_env.unproved(&c, "ping", ownership_api.incomplete_reason.missing_graph));
     assert(ownership_heap_env.events(&c, "ping") == 1);
-    // A caller of a withdrawn member keeps the call unknown and records nothing itself.
+    // A caller of a withdrawn member keeps the call unknown. It passes an owner to a callee
+    // without a proof, so the call gives incomplete proof there (`spec/fir.md` 14, Calls).
     assert(!ownership_heap_env.proved(&c, "use_even"));
-    assert(ownership_heap_env.events(&c, "use_even") == 0);
+    assert(ownership_heap_env.events(&c, "use_even") == 1);
+    assert(ownership_heap_env.first_text(&c, "use_even") ==
+        "a call of a function without a proof");
 }
 
 fn main() i32 {

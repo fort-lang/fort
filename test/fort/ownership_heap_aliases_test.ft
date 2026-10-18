@@ -171,10 +171,10 @@ fn storage_inside() void {
     assert(ownership_heap_env.proved(&c, "use_apart"));
 }
 
-// A reference whose facts the body lost can designate released or local storage. A callee
-// that reads through it needs that storage live, as a read in the caller does, and a returned
-// or stored one needs it live after the return (D17.14). An input reference of the caller
-// needs nothing.
+// A reference whose facts the body lost can designate released or local storage. A copy of it
+// is a use, so each copy gives incomplete proof, also into a callee that does not read it. A
+// returned or stored one also needs its storage live after the return (D17.14). An input
+// reference of the caller needs nothing.
 fn unknown_arguments() void {
     println("references that the proof does not follow");
     string[18] text = {
@@ -208,16 +208,27 @@ fn unknown_arguments() void {
         ownership_api.incomplete_reason.unknown_effect));
     assert(ownership_heap_env.unproved(&c, "via_call",
         ownership_api.incomplete_reason.unknown_effect));
+    // The copy of the argument uses `p` before the callee reads it. The read at the same call
+    // adds no second event.
     ownership_heap_env.event_row read = ownership_heap_env.first(&c, "via_call");
-    assert(read.line == 5 && ownership_heap_env.text(&read) == "storage that this call reads");
-    // A callee that does not read through the reference needs nothing of it.
-    assert(ownership_heap_env.proved(&c, "not_read"));
-    // A returned or stored lost reference can dangle after the return.
+    assert(read.line == 5 && ownership_heap_env.text(&read) == "p");
+    assert(ownership_heap_env.events(&c, "via_call") == 1);
+    // A copy of a reference is a use of it (D17.14). The copy into a callee that does not read
+    // the reference also uses a reference that can dangle.
+    assert(ownership_heap_env.unproved(&c, "not_read",
+        ownership_api.incomplete_reason.unknown_effect));
+    ownership_heap_env.event_row copied = ownership_heap_env.first(&c, "not_read");
+    assert(copied.line == 9 && ownership_heap_env.text(&copied) == "p");
+    assert(ownership_heap_env.events(&c, "not_read") == 1);
+    // A returned or stored lost reference can dangle after the return. The copy into the result
+    // or into caller storage records its event first, and the return records one more.
     assert(ownership_heap_env.unproved(&c, "ret", ownership_api.incomplete_reason.unknown_effect));
     assert(ownership_heap_env.first(&c, "ret").line == 11);
+    assert(ownership_heap_env.events(&c, "ret") == 2);
     assert(ownership_heap_env.unproved(&c, "store",
         ownership_api.incomplete_reason.unknown_effect));
-    assert(ownership_heap_env.first_text(&c, "store") == "h->p");
+    assert(ownership_heap_env.first_text(&c, "store") == "p");
+    assert(ownership_heap_env.events(&c, "store") == 2);
     // An input reference of the caller goes back to the caller unchanged.
     assert(ownership_heap_env.proved(&c, "get_input"));
     assert(ownership_heap_env.proved(&c, "keep_input"));

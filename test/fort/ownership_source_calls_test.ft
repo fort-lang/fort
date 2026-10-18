@@ -202,15 +202,21 @@ fn events_are_incomplete_proof() void {
     // A read after a release in a callee fails both solvers; it stays incomplete proof.
     ownership_source_calls.row* after = ownership_source_calls_env.row_of(&c, "reads_after");
     assert(at(after->proof, 14, 73) && after->violations == 0);
-    // The heap solver proves the caller of shallow, but its summary keeps the unknown effects of
-    // that call, so no caller can apply it. Such a proof is incomplete at the declaration.
+    // The caller of shallow passes an owner to a callee without a heap proof, so the heap solver
+    // gives incomplete proof at that call (`spec/fir.md` 14, Calls). Its summary keeps the
+    // unknown effects of that call, so no caller can apply it.
     ownership_source_calls.row* calls = ownership_source_calls_env.row_of(&c, "calls_shallow");
-    assert(ownership_api.successful(calls->heap_proof) && !calls->heap_proved);
+    assert(!ownership_api.successful(calls->heap_proof) && !calls->heap_proved);
+    assert(at(calls->heap_proof, 18, 63));
+    assert(calls->heap_proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
     assert(calls->gap == ownership_source_calls.gap_kind.callee_heap);
     assert(at(calls->gap_proof, 18, 63) && incomplete(calls->correspondence));
+    // A successful heap proof with that gap is incomplete at the declaration.
     ownership_source_calls.unproved absent = ownership_source_calls.unproved{};
+    ownership_api.proof_status heap_proved = ownership_api.proof_status{
+        .kind = ownership_api.proof_kind.complete};
     ownership_api.proof_status mut p = ownership_source_calls.unproved_proof(&c.calls, calls,
-        calls->heap_proof, &absent);
+        heap_proved, &absent);
     assert(at(p, 18, 4) && p.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
     // A definite failure without a kept event is incomplete proof at the declaration.
     ownership_api.proof_status failed = ownership_api.proof_status{
