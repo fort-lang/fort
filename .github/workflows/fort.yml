@@ -132,17 +132,34 @@ jobs:
           (evidence / "ci-context.json").write_text(json.dumps(context) + "\n")
           PY
       # Exit 1 ownership verdicts remain visible. Invalid reports fail this gate.
+      # The roots are independent, so one attempt runs on each processor of the runner, and
+      # each attempt gets 1.5 GiB of the available memory. The largest root takes 1427 MiB.
+      # The attestation keeps the root order. notes/environment.md 7 gives the step times.
       - name: Audit actual compiler source reports
         run: |
           host="$(uname -s)"
           target=x86_64-linux-gnu
           if [ "$host" = Darwin ]; then target=arm64-apple-macosx11.0.0; fi
           build="build/$host/release"
+          cpus="$(getconf _NPROCESSORS_ONLN)"
+          if [ "$host" = Darwin ]; then
+            # Free, inactive and speculative pages can serve a new process.
+            available="$(vm_stat | awk '/page size of/ { size = $8 }
+              /^Pages (free|inactive|speculative):/ { sub(/\./, "", $NF); pages += $NF }
+              END { printf "%d", pages * size / 1024 }')"
+          else
+            available="$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)"
+          fi
+          jobs=$((available / 1572864))
+          if [ "$jobs" -gt "$cpus" ]; then jobs="$cpus"; fi
+          if [ "$jobs" -lt 1 ]; then jobs=1; fi
+          echo "audit: $cpus processors, $available KiB available, $jobs jobs"
           python3 tools/ownership_audit.py run \
             --checkout "$PWD" --compiler "$build/fort" \
             --compiler-checkout "$PWD" \
             --compiler-provenance "$build/ownership-source-evidence/compiler-provenance.json" \
             --target "$target" --std-dir "$build/std" \
+            --jobs "$jobs" \
             --output "$build/ownership-source-evidence/audit"
           python3 tools/ownership_audit.py validate \
             --checkout "$PWD" --compiler "$build/fort" \

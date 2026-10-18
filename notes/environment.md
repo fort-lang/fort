@@ -709,3 +709,25 @@ without a rewrite.
   the bound of `modules` is 60 minutes. The audit step grew from 5.8 to 7.3 minutes (run
   38434591745, 2026-10-13) to 16.5 to 36.9 minutes (2026-10-16), and it now holds the
   `bootstrap` time. Measure the job time of a run before you lower a bound.
+- **The audit step runs one root on each processor.** On 2026-10-18 the step took 14.4 to 18.4
+  minutes on `macos-latest` and 22.4 to 34.2 minutes on Linux (merge-group runs 39088299816,
+  39091980824, 39092960992 and 39100961806). The subcommand `run` took all but about 31 s of it.
+  The 70 roots are independent: each attempt is one compiler process, and it writes only the
+  files of its own index. `tools/ownership_audit.py run --jobs <n>` runs n attempts at the same
+  time. The attestation keeps the attempts and the errors in root order, so `--jobs` changes no
+  evidence. An exception that an attempt does not catch stops the audit: no later attempt starts,
+  `audit.json` gets the rows of the finished attempts and of that attempt, and the tool exits 1.
+  In the VM (4 processors) the 70 roots took 161 minutes of processor time, and `--jobs 4` took
+  37.5 minutes of wall time. Each of its 70 reports had the bodies, totals, meters and verdict of
+  run 39100961806. The root `src/fort/main.ft` took 4.4 % of the processor time, so the last root
+  does not hold the step.
+- **The memory of the runner also limits the audit jobs.** The largest roots, `src/fort/main.ft`
+  and `src/fort/driver.ft`, each had a peak memory of 1427 MiB in the VM. So the step gives each
+  job 1.5 GiB: jobs = min(processors, available memory / 1.5 GiB), and at least 1. On Linux the
+  available memory is `MemAvailable` of `/proc/meminfo`. On macOS it is the free, inactive and
+  speculative pages of `vm_stat`. The step prints `audit: <n> processors, <k> KiB available, <j>
+  jobs`. GitHub gives the public Linux runners 4 vCPUs and 16 GiB, so expect 4 jobs. It gives
+  `macos-latest` (arm64) 3 vCPUs and 7 GiB, so expect 2 or 3 jobs; the printed line gives the
+  measured value. In the VM the line read `4 processors, 7526432 KiB available, 4 jobs`. The
+  expected step is 7 to 10 minutes on Linux and 6 to 10 minutes on macOS. If the Linux processors
+  are threads of shared cores, the step can take more time.
