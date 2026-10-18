@@ -18,6 +18,7 @@ u32 CHAIN_MAIN_LINE = 18;
 u32 CHAIN2_MAIN_LINE = 25;
 u32 CHAIN4_MAIN_LINE = 28;
 u32 CALLER_LOCAL_LINE = 36;
+u32 VIEW_LINE = 53;
 u32 LEGAL_STORE_LINE = 65;
 
 string[70] SOURCE = {
@@ -220,8 +221,9 @@ fn standalone(ownership_source_env.env mut* e) void {
 // The local analyses prove each clean loaded source. The call analysis refuses each bad caller.
 // The heap solver proves the caller that reads the returned view before release. The summary
 // solver gives unknown_effect at the store of a slice into a field of `h`, so the calls row of
-// that caller stays incomplete at the store. Both solvers prove the full slice that `view`
-// returns, so the calls row of `view` is complete.
+// that caller stays incomplete at the store. The heap solver proves the full slice that `view`
+// returns. The summary solver gives unknown_effect at that slice, so the calls row of `view`
+// stays incomplete there.
 fn bound(ownership_source_env.env mut* e) void {
     proved(e, "read");
     proved(e, "read2");
@@ -246,8 +248,9 @@ fn bound(ownership_source_env.env mut* e) void {
         ownership_api.successful(legal->heap_proof));
     summary_unknown(legal, LEGAL_STORE_LINE);
     ownership_source_calls.row* viewed = row(e, "view")->calls;
-    assert(viewed != null && viewed->heap_proved && viewed->summary_proved);
-    assert(ownership_api.successful(viewed->proof) && viewed->violations == 0);
+    assert(viewed != null && viewed->heap_proved &&
+        ownership_api.successful(viewed->heap_proof));
+    summary_unknown(viewed, VIEW_LINE);
     ownership_source_calls.row* unsafe_view = row(e, "view_caller")->calls;
     assert(unsafe_view != null && !unsafe_view->heap_proved);
     println("bound ok");

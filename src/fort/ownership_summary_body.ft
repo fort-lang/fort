@@ -1329,14 +1329,15 @@ fn select_storage(body_input* in, body_program mut* out, fir.place input_place, 
             ty = field->ty;
         } else if (part.kind == fir.proj_kind.pj_field && ty != null &&
             (ty->kind == types.type_kind.k_span || ty->kind == types.type_kind.k_string) &&
-            part.field < 2) {
-            if (part.field == 1) {
-                u64 pointer_bytes = types.type_sizeof(fir.apply_projection(in->function.body, ty,
-                    fir.projection{.kind = fir.proj_kind.pj_field, .field = 0}));
-                if (pointer_bytes > 9223372036854775807 || selected.offset >
-                    9223372036854775807 - cast(pointer_bytes, i64)) { break; }
-                selected.offset += cast(pointer_bytes, i64);
-            }
+            part.field == 1) {
+            // Only the length field of a header is storage of its own here. The pointer field
+            // is the reference itself, and a copy of it needs a live source that this path
+            // does not check after a move or a release (D17.14), so it stops below.
+            u64 pointer_bytes = types.type_sizeof(fir.apply_projection(in->function.body, ty,
+                fir.projection{.kind = fir.proj_kind.pj_field, .field = 0}));
+            if (pointer_bytes > 9223372036854775807 || selected.offset >
+                9223372036854775807 - cast(pointer_bytes, i64)) { break; }
+            selected.offset += cast(pointer_bytes, i64);
             if (count >= 16) { break; }
             parts[count] = ownership_api.projection{
                 .kind = ownership_api.projection_kind.field, .field = part.field};
@@ -1376,22 +1377,6 @@ fn select_storage(body_input* in, body_program mut* out, fir.place input_place, 
     selected.bytes = cast(types.type_sizeof(ty), i64);
     selected.proved = true;
     return selected;
-}
-
-// Whether `length` reads the length field of `span`. This shape is the full high bound that FIR
-// lowers for `span[..]`. The low bound must still be zero.
-fn full_slice_high(fir.func* f, fir.place span, fir.operand length) bool {
-    if (length.kind == fir.operand_kind.ok_const || !fir.same_base(span, length.place) ||
-        length.place.proj_len != span.proj_len + 1) { return false; }
-    u32 mut i = 0;
-    while (i < span.proj_len) {
-        fir.projection a = fir.place_projection(f, span, i);
-        fir.projection b = fir.place_projection(f, length.place, i);
-        if (a.kind != b.kind || a.field != b.field || a.index != b.index) { return false; }
-        i += 1;
-    }
-    fir.projection last = fir.place_projection(f, length.place, span.proj_len);
-    return last.kind == fir.proj_kind.pj_field && last.field == 1;
 }
 
 fn output_ready(body_input* in, body_program mut* out, selected_storage mut* selected,
@@ -2435,37 +2420,6 @@ fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
         // A defensive mark: the pointer of a span literal holds a matched allocation, so no
         // input reaches this line with an unknown origin.
         out->unknown[dst] = marked;
-    } else if (rv.kind == fir.rvalue_kind.rv_slice && reference(dst_ty)) {
-        types.node* sliced = fir.place_type(f, rv.place);
-        ownership_api.scalar_fact low = constant(in, out, fir.rvalue_operand(f, rv, 0));
-        fir.operand high = fir.rvalue_operand(f, rv, 1);
-        if ((sliced->kind != types.type_kind.k_span &&
-            sliced->kind != types.type_kind.k_string) || low.kind !=
-            ownership_api.fact_kind.exact || low.value != 0 || !full_slice_high(f, rv.place,
-            high)) {
-            reject(out, ownership_api.incomplete_reason.unknown_effect);
-            return;
-        }
-        selected_storage selected = select_storage(in, out, rv.place, stmt->loc,
-            stmt->exit_loc, stmt->stmt);
-        if (!selected.proved || !selected.caller) {
-            reject(out, ownership_api.incomplete_reason.unknown_effect);
-            return;
-        }
-        loaded_reference loaded = load_reference(in, out, selected.path,
-            selected.current_base, selected.source, selected.ty, selected.offset, stmt->loc,
-            stmt->exit_loc, stmt->stmt);
-        if (!ownership_api.successful(out->proof)) { return; }
-        if (high.kind != fir.operand_kind.ok_const && !add_read(in, out, high.place, block, gap,
-            2, stmt->loc, stmt->exit_loc, stmt->stmt)) { return; }
-        ownership_api.entity_id loaded_source = loaded.source;
-        requirement(in, out, loaded_source, loaded.path, 0,
-            ownership_summary_model.requirement_kind.live_source, 1);
-        req.kind = ownership_transfer.action.copy;
-        req.source = loaded.path;
-        req.source_key = loaded_source;
-        out->origins[dst] = loaded_source;
-        payload = ownership_summary_model.payload_kind.copy;
     } else if (rv.kind == fir.rvalue_kind.rv_addr) {
         if (!direct(rv.place)) {
             if (rv.place.base == fir.base_kind.bk_local &&
@@ -2538,6 +2492,8 @@ fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
         out->scalars[dst] = ownership_api.scalar_fact{};
         out->origins[dst] = ownership_api.entity_id{};
     } else {
+        // Any other rvalue stops the proof. A slice is one: the summary does not check that the
+        // reference it reads from caller storage is still live after a move or a store (D17.14).
         reject(out, ownership_api.incomplete_reason.unknown_effect);
         return;
     }

@@ -1,0 +1,244 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| faulty slices ok
+//| slice forms ok
+//| valid slices ok
+//| header fields ok
+//| view lengths ok
+/// Tests the summary at a slice and at a header field of a caller span (D17.14, D17.18). A slice
+/// and the pointer field read the reference that the span holds. The summary does not check
+/// that a move or a store before the read left that reference live, so it stops there and gives
+/// no case. The length field is a scalar of the caller storage. Its read keeps the check of the
+/// base, so it proves after a move or a release of the span and fails after the release of the
+/// base. Reading the length of an empty or released span is valid (D17.9).
+import ownership_api;
+import ownership_call_bodies;
+import ownership_summary_model;
+
+// Line n of the text is line n of the sandbox entry module. The first 4 bodies are faulty: each
+// one reads storage that a release or a move made invalid. The last 3 bodies are valid.
+string[28] SLICES = {
+    "struct heap_store { u64 mut@ own heap; }",
+    "struct view_store { u64@ data; string text; }",
+    "fn full_after_move(heap_store mut* s) u64 {",
+    "    u64 mut@ own h = move(s->heap);",
+    "    u64 mut@ v = s->heap[..];",
+    "    del(h);",
+    "    return v[0]; }",
+    "fn ptr_after_move(heap_store mut* s) u64 {",
+    "    u64 mut@ own h = move(s->heap);",
+    "    u64 mut@ v = s->heap[..];",
+    "    u64 mut* p = v.ptr;",
+    "    del(h);",
+    "    return *p; }",
+    "fn full_after_release(heap_store mut* s) u64 {",
+    "    u64 mut@ v = s->heap[..];",
+    "    u64 mut@ own h = move(s->heap);",
+    "    del(h);",
+    "    return v[0]; }",
+    "fn load_after_store_full(view_store mut* s, u64@ other) u64 {",
+    "    u64 mut@ own a = new(u64, 4);",
+    "    s->data = a;",
+    "    u64@ d = s->data[..];",
+    "    s->data = other;",
+    "    del(a);",
+    "    return d[0]; }",
+    "fn full_ok(heap_store* s) u64 { u64 mut@ v = s->heap[..]; return v.len; }",
+    "fn text_ok(view_store* s) u64 { string t = s->text[..]; return t.len; }",
+    "fn len_ok(heap_store* s) u64 { return s->heap.len; }",
+};
+
+string[4] FAULTY = {"full_after_move", "ptr_after_move", "full_after_release",
+    "load_after_store_full"};
+string[3] VALID = {"full_ok", "text_ok", "len_ok"};
+
+// Each body moves the owner out of `s->heap` and then slices it in another form: a range, a
+// prefix with a parameter bound, a slice of a slice, and a slice of a local slice.
+string[25] FORMS = {
+    "struct heap_store { u64 mut@ own heap; }",
+    "fn range_move(heap_store mut* s) u64 {",
+    "    u64 mut@ own h = move(s->heap);",
+    "    u64 mut@ v = s->heap[1..3];",
+    "    del(h);",
+    "    return v[0]; }",
+    "fn prefix_move(heap_store mut* s, u64 n) u64 {",
+    "    u64 mut@ own h = move(s->heap);",
+    "    u64 mut@ v = s->heap[..n];",
+    "    del(h);",
+    "    return v[0]; }",
+    "fn slice_slice_direct(heap_store mut* s) u64 {",
+    "    u64 mut@ own h = move(s->heap);",
+    "    u64 mut@ w = s->heap[..][1..2];",
+    "    del(h);",
+    "    return w[0]; }",
+    "fn slice_slice_move(heap_store mut* s) u64 {",
+    "    u64 mut@ v = s->heap[..];",
+    "    u64 mut@ own h = move(s->heap);",
+    "    del(h);",
+    "    u64 mut@ w = v[..];",
+    "    return w[0]; }",
+    "fn explicit_full_move(heap_store mut* s) u64 {",
+    "    u64 mut@ own h = move(s->heap); u64 mut@ v = s->heap[0..s->heap.len];",
+    "    del(h); return v[0]; }",
+};
+
+string[5] FORM_NAMES = {"range_move", "prefix_move", "slice_slice_direct", "slice_slice_move",
+    "explicit_full_move"};
+
+// The pointer field bodies are faulty. The length field bodies are valid, but the last one
+// reads through `s` after `del(s)`.
+string[26] HEADERS = {
+    "struct heap_store { u64 mut@ own heap; }",
+    "fn ptr_field_move(heap_store mut* s) u64 {",
+    "    u64 mut@ own h = move(s->heap);",
+    "    u64 mut* p = s->heap.ptr;",
+    "    del(h);",
+    "    return *p; }",
+    "fn ptr_field_release(heap_store mut* s) u64 {",
+    "    u64 mut* p = s->heap.ptr;",
+    "    u64 mut@ own h = move(s->heap);",
+    "    del(h);",
+    "    return *p; }",
+    "fn ptr_field_ok(heap_store* s) u64 { u64 mut* p = s->heap.ptr; return *p; }",
+    "fn len_after_move(heap_store mut* s) u64 {",
+    "    u64 mut@ own h = move(s->heap);",
+    "    u64 n = s->heap.len;",
+    "    del(h);",
+    "    return n; }",
+    "fn len_after_release(heap_store mut* s) u64 {",
+    "    u64 mut@ own h = move(s->heap);",
+    "    del(h);",
+    "    return s->heap.len; }",
+    "fn len_after_base_free(heap_store mut* own s) u64 {",
+    "    u64 mut@ own h = move(s->heap);",
+    "    del(h);",
+    "    del(s);",
+    "    return s->heap.len; }",
+};
+
+string[6] HEADER_NAMES = {"ptr_field_move", "ptr_field_release", "ptr_field_ok",
+    "len_after_move", "len_after_release", "len_after_base_free"};
+
+// The coordinator ruling of 2026-10-17: a view keeps its length in its own header, so a length
+// read after the release of the storage it views touches no freed memory. The product accepts
+// the local twin, `v.len` after `del(a)`.
+string[5] VIEWS = {
+    "struct view_store { u64 mut@ own heap; u64@ view; }",
+    "fn view_len_after_release(view_store mut* s) u64 {",
+    "    del(s->heap);",
+    "    return s->view.len; }",
+    "fn local_view_len() u64 { u64 mut@ own a = new(u64, 4); u64@ v = a; del(a); return v.len; }",
+};
+
+string[2] VIEW_NAMES = {"view_len_after_release", "local_view_len"};
+
+// Body `index` stops with `reason` at `line` and `col`. It has no
+// case and has residual effects, so a caller can apply none of it.
+fn stops_with(ownership_call_bodies.bodies* b, string@ names, u64 index,
+    ownership_api.incomplete_reason reason, u32 line, u32 col) void {
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(b, index);
+    assert(s->proof.kind == ownership_api.proof_kind.incomplete);
+    assert(s->proof.terminal.reason == reason);
+    assert(s->cases.len == 0 && s->residual_effects);
+    if (s->proof.terminal.source.line != line || s->proof.terminal.source.col != col) {
+        eprintln(names[index], " stops at ", s->proof.terminal.source.line, ":",
+            s->proof.terminal.source.col, ", want ", line, ":", col);
+        assert(false);
+    }
+}
+
+// Body `index` stops at the slice whose `[` is at `line` and `col`, with unknown_effect.
+fn stops(ownership_call_bodies.bodies* b, string@ names, u64 index, u32 line, u32 col) void {
+    stops_with(b, names, index, ownership_api.incomplete_reason.unknown_effect, line, col);
+}
+
+// Body `index` proves with one case and no residual effect.
+fn proves(ownership_call_bodies.bodies* b, u64 index) void {
+    ownership_summary_model.summary* s = ownership_call_bodies.summary(b, index);
+    assert(ownership_api.successful(s->proof) && !s->residual_effects);
+    assert(s->cases.len == 1);
+}
+
+// Each body stops at the `[` of its slice: column 25 of `s->heap[..]`, and column 21 of
+// `s->data[..]` in `load_after_store_full`. No faulty body gets a case.
+fn faulty() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    ownership_call_bodies.open(&b, SLICES[..], FAULTY[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    stops(&b, FAULTY[..], 0, 5, 25);
+    stops(&b, FAULTY[..], 1, 10, 25);
+    stops(&b, FAULTY[..], 2, 15, 25);
+    stops(&b, FAULTY[..], 3, 22, 21);
+    println("faulty slices ok");
+}
+
+// Each form stops at its first slice of caller storage. In `slice_slice_direct` that is the
+// inner `s->heap[..]`. In `slice_slice_move` it is the slice before the move, so the later slice
+// of the local `v` never runs. The explicit bound `s->heap.len` is a valid length read, so
+// `explicit_full_move` stops at the slice and not at that read.
+fn forms() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    ownership_call_bodies.open(&b, FORMS[..], FORM_NAMES[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    stops(&b, FORM_NAMES[..], 0, 4, 25);
+    stops(&b, FORM_NAMES[..], 1, 9, 25);
+    stops(&b, FORM_NAMES[..], 2, 14, 25);
+    stops(&b, FORM_NAMES[..], 3, 18, 25);
+    stops(&b, FORM_NAMES[..], 4, 24, 57);
+    println("slice forms ok");
+}
+
+// A full slice of a live caller span or string also stops: the stop is conservative. The read
+// of the length field of the span proves.
+fn valid() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    ownership_call_bodies.open(&b, SLICES[..], VALID[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    stops(&b, VALID[..], 0, 26, 53);
+    stops(&b, VALID[..], 1, 27, 51);
+    proves(&b, 2);
+    println("valid slices ok");
+}
+
+// Each read of the pointer field of `s->heap` stops with missing_path at its `.ptr`: a faulty
+// read after the move, a faulty read before the move, and a valid read. Each length read
+// proves, but the read after `del(s)` fails, because the check of the base `s` holds.
+fn headers() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    ownership_call_bodies.open(&b, HEADERS[..], HEADER_NAMES[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_api.incomplete_reason path = ownership_api.incomplete_reason.missing_path;
+    stops_with(&b, HEADER_NAMES[..], 0, path, 4, 25);
+    stops_with(&b, HEADER_NAMES[..], 1, path, 8, 25);
+    stops_with(&b, HEADER_NAMES[..], 2, path, 12, 58);
+    proves(&b, 3);
+    proves(&b, 4);
+    ownership_summary_model.summary* freed = ownership_call_bodies.summary(&b, 5);
+    assert(freed->proof.kind == ownership_api.proof_kind.complete && freed->proof.failed);
+    println("header fields ok");
+}
+
+// The length of the view `s->view` proves after `del(s->heap)`, and so does the local twin.
+fn views() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    ownership_call_bodies.open(&b, VIEWS[..], VIEW_NAMES[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    proves(&b, 0);
+    proves(&b, 1);
+    println("view lengths ok");
+}
+
+fn main() i32 {
+    faulty();
+    forms();
+    valid();
+    headers();
+    views();
+    return 0;
+}

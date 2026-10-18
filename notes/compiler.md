@@ -2180,6 +2180,16 @@ came here.
   It keeps the inner source, allocation, value version, byte window, and alignment.
   Outer storage liveness cannot prove inner source liveness.
   A load from storage of the body stays unsupported.
+  A slice stays unsupported, because the summary does not check that the reference it reads is
+  still live. A full-slice rule with only a live-source requirement proved `s->heap[..]` after
+  `move(s->heap)` in the summary and calls_heap rows (`ownership_summary_span_test.ft`,
+  `test/lang/fail/ownership/075_full_slice_after_move.ft`). The plain load `s->heap` after the
+  same move still proves in both rows.
+  Of a span or string header in caller storage, `select_storage` selects only the length field.
+  A length read is a scalar read with the check of each base, and the length of an empty or
+  released span is a valid read (D17.9). The pointer field is the reference itself: with its
+  own root, `s->heap.ptr` proved a read through it after `move(s->heap)` and also before it
+  (`test/lang/fail/ownership/076_span_pointer_after_move.ft`), so it stops with missing_path.
   A nested caller-storage scalar read validates each reference base in order.
   That read stays incomplete when it cannot name one current base exactly.
   Only a scalar read checks each current base in this way.
