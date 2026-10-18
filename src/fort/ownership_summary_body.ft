@@ -108,6 +108,10 @@ struct body_program {
     bool mut@ own stored_back;
     ownership_summary_model.provenance mut@ own provenance_records;
     ownership_api.entity_id mut@ own origins;
+    // The allocation of the entry value of each by-value owner parameter. A caller chose that
+    // value, so a clear below a store keeps it (D17.18, `clear_slot`).
+    ownership_api.entity_id mut@ own entry_owners;
+    u64 entry_owners_len;
     // A reference local whose origin is unknown: a call result can designate caller storage
     // that its origin does not name. An origin of kind none without this mark needs no caller
     // requirement: the value is null, static storage, or storage of a call (D17.18).
@@ -195,6 +199,7 @@ fn free(body_program mut* out) void {
     del(owned.stored_back);
     del(owned.provenance_records);
     del(owned.origins);
+    del(owned.entry_owners);
     del(owned.unknown);
     del(owned.scalars);
     del(owned.addressed);
@@ -437,6 +442,8 @@ fn seed(body_input* in, body_program mut* out) bool {
                     }
                 }
                 if (local_at_point->ty->is_own) {
+                    out->entry_owners[out->entry_owners_len] = allocation;
+                    out->entry_owners_len += 1;
                     ownership_state.append_allocations(&out->entry, ownership_api.allocation_fact{
                         .key = allocation, .site = allocation,
                         .validity = ownership_api.validity_kind.live,
@@ -1655,7 +1662,110 @@ fn output_ready(body_input* in, body_program mut* out, selected_storage mut* sel
         }
         ownership_state.append_contents(&out->entry, empty(selected->flow_path, true));
     }
+    if (store && fir.type_aggregate(selected->ty) && !clear_below(in, out, selected, stmt)) {
+        return false;
+    }
     return ownership_api.successful(out->proof);
+}
+
+// Whether `path` is strictly below `prefix`: the paths have one root, and the projections of
+// `prefix` begin the longer projections of `path`.
+fn strictly_below(ownership_api.place_path prefix, ownership_api.place_path path) bool {
+    return path.projections.len > prefix.projections.len && covers(prefix, path);
+}
+
+// The private flow slot of an owner path strictly below `prefix` that effect `e` names, or an
+// empty path. A release, an owner store or a null store at that path writes the slot that the
+// search of `output_ready` chose for it. A move out of such a path names no slot here: when
+// the search found none, the move reads a fresh slot that stays empty, because no later
+// search finds a move out (its effect names the local that takes the owner).
+fn slot_below(body_program mut* out, u64 e, ownership_api.place_path prefix)
+    ownership_api.place_path {
+    ownership_summary_model.effect_node node = out->effects[e];
+    bool owner_effect = node.payload == ownership_summary_model.payload_kind.move ||
+        node.payload == ownership_summary_model.payload_kind.release || node.value.owner_empty;
+    if (owner_effect && strictly_below(prefix, node.effect.place) &&
+        !ownership_summary_model.same(out->effect_flow[e].root, node.effect.place.root)) {
+        return out->effect_flow[e];
+    }
+    return ownership_api.place_path{};
+}
+
+// Appends one flow step for the private flow slot `slot_place` at operation `op`. The step
+// exports no effect. A clear writes an empty owner into the slot. It keeps the entry value of a
+// by-value owner parameter (`entry_owners`), and it checks each other old owner. Otherwise the
+// step moves the contents of the slot into a fresh slot and leaves the slot empty.
+fn slot_step(body_input* in, body_program mut* out, ownership_api.place_path slot_place,
+    ownership_api.entity_id source, ownership_api.operation_position op, diag.loc at,
+    bool clear) void {
+    if (!work(out, 3) || out->steps_len >= out->steps.len) {
+        reject(out, ownership_api.incomplete_reason.invalid_input);
+        return;
+    }
+    u64 index = out->steps_len;
+    ownership_transfer.request mut req = ownership_transfer.request{
+        .kind = ownership_transfer.action.assignment, .source = slot_place,
+        .destination = slot_place, .source_key = source, .destination_owns = true,
+        .value = empty(slot_place, true),
+        .kept_owners = out->entry_owners[..out->entry_owners_len]};
+    if (!clear) {
+        req.kind = ownership_transfer.action.move_owner;
+        req.destination = ownership_api.place_path{.root = next(out,
+            ownership_api.entity_kind.slot)};
+        if (!ownership_api.successful(out->proof)) { return; }
+    }
+    req.operation = position(in, op.block, op.operation, op.terminator);
+    req.source_position = location(in, out, at);
+    req.direct_source_proved = true;
+    req.direct_destination_proved = true;
+    req.leaf_places_proved = ownership_transfer.leaf_path(slot_place);
+    req.event_map_complete_proved = true;
+    out->transfer_events[index] = ownership_transfer.event_binding{req.operation,
+        next(out, ownership_api.entity_kind.event)};
+    if (!ownership_api.successful(out->proof)) { return; }
+    req.event_bindings = out->transfer_events[index..index + 1];
+    out->steps[index] = ownership_flow.step{.block = op.block, .gap = op.operation,
+        .order = cast(index, u32), .kind = ownership_flow.step_kind.local_effect,
+        .operation = req.operation, .source = req.source_position, .local = req};
+    out->steps_len += 1;
+}
+
+// A zero store or a whole move at a caller path replaces the contents of each path below it
+// (D17.7, D17.15). An earlier release, owner store or null store at such a path keeps its
+// contents in a private flow slot, and the flow place of the store or the move does not name
+// that slot. So each such slot gets one flow step (`slot_step`) before the store, or after the
+// move. A store clears the slot: the write checks the old owner, so a store that discards an
+// owner of the body fails (D17.11, D17.14). A whole move moves the contents of the slot with
+// the value and leaves the slot empty. The steps export no effect: the summary effect of the
+// store or the move already changes each path below it.
+fn clear_below(body_input* in, body_program mut* out, selected_storage* selected,
+    fir.statement* stmt) bool {
+    return slots_below(in, out, selected, out->context.operation, stmt->loc, true);
+}
+
+fn slots_below(body_input* in, body_program mut* out, selected_storage* selected,
+    ownership_api.operation_position op, diag.loc at, bool clear) bool {
+    u64 first = out->steps_len;
+    u64 mut e = 0;
+    while (e < out->effects_len) {
+        if (!work(out, 2) || !work(out, selected->path.projections.len) ||
+            !work(out, out->effects[e].effect.place.projections.len)) { return false; }
+        ownership_api.place_path slot_place = slot_below(out, e, selected->path);
+        bool mut cleared = slot_place.root.kind == ownership_api.entity_kind.none;
+        u64 mut s = first;
+        while (!cleared && s < out->steps_len) {
+            if (!work(out, 1)) { return false; }
+            cleared = ownership_state.same_place(clear ? out->steps[s].local.destination :
+                out->steps[s].local.source, slot_place);
+            s += 1;
+        }
+        if (!cleared) {
+            slot_step(in, out, slot_place, selected->source, op, at, clear);
+            if (!ownership_api.successful(out->proof)) { return false; }
+        }
+        e += 1;
+    }
+    return true;
 }
 
 // A borrowed reference store into caller storage retains its source (D17.14). The caller
@@ -2300,8 +2410,9 @@ fn aggregate_value(body_input* in, body_program mut* out, fir.statement* stmt, u
             .effect = ownership_api.ordered_effect{.kind = ownership_api.effect_kind.transfer,
                 .operation = position(in, block, gap, false), .place = slot(in, dst)},
             .payload = ownership_summary_model.payload_kind.move};
+        selected_storage mut selected = selected_storage{};
         if (input_operand.kind == fir.operand_kind.ok_move && !direct(input_operand.place)) {
-            selected_storage selected = select_storage(in, out, input_operand.place, stmt->loc,
+            selected = select_storage(in, out, input_operand.place, stmt->loc,
                 stmt->exit_loc, stmt->stmt);
             if (!selected.proved || !selected.indirect || !selected.caller ||
                 selected.ty != ty || selected.path.projections.len != 0) {
@@ -2327,6 +2438,14 @@ fn aggregate_value(body_input* in, body_program mut* out, fir.statement* stmt, u
             return;
         }
         export_effect(in, out, node, where, stmt->loc.file);
+        // A whole move out of caller storage empties each path below it (D17.15): its owners
+        // go with the value, which reaches the result (`results_reached`). The move writes
+        // the caller root, so a later load takes no entry value (`outside_written`).
+        if (selected.proved && ownership_api.successful(out->proof)) {
+            mark(out, selected.path.root);
+            if (!slots_below(in, out, &selected, position(in, block, gap, false), stmt->loc,
+                false)) { return; }
+        }
     } else {
         reject(out, ownership_api.incomplete_reason.unknown_effect);
         return;
@@ -3328,6 +3447,7 @@ fn extract(body_input* in) body_program {
     out.stored_back = new(bool, cap);
     out.provenance_records = new(ownership_summary_model.provenance, cap);
     out.origins = new(ownership_api.entity_id, locals);
+    out.entry_owners = new(ownership_api.entity_id, locals);
     out.unknown = new(bool, locals);
     out.caller_owned = new(bool, locals);
     out.scalars = new(ownership_api.scalar_fact, locals);

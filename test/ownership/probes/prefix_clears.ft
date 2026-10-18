@@ -1,0 +1,224 @@
+// A zero store at a prefix of a caller path replaces each path below it (D17.15). The bodies
+// that end in `_bad` discard a live owner that the body allocated: the owner is in a field
+// below the store, so the store loses it (D17.14). The bodies that end in `_ok` release or
+// move that owner first, or store at a disjoint path.
+struct holder { i64 mut* own item; }
+struct pair { i64 mut* own a; i64 mut* own b; }
+struct outer { holder in; i64 v; }
+struct twin { holder a; holder b; }
+struct arr { i64 mut* own[2] items; }
+struct row { holder[2] cells; }
+struct mixed { i64 v; i64 mut* own item; }
+fn nop() void {}
+fn look(holder* h) void {}
+fn drop_item(holder mut* h) void { del(h->item); }
+fn root_bad(holder mut* h) void {
+    del(h->item);
+    h->item = new(i64);
+    *h = holder{};
+}
+fn fresh_bad(holder mut* h) void {
+    h->item = new(i64);
+    *h = holder{};
+}
+fn twice_bad(holder mut* h) void {
+    del(h->item);
+    h->item = new(i64);
+    *h = holder{};
+    *h = holder{};
+}
+fn then_del_bad(holder mut* h) void {
+    del(h->item);
+    h->item = new(i64);
+    *h = holder{};
+    del(h->item);
+}
+fn nested_mid_bad(outer mut* o) void {
+    del(o->in.item);
+    o->in.item = new(i64);
+    o->in = holder{};
+}
+fn nested_root_bad(outer mut* o) void {
+    del(o->in.item);
+    o->in.item = new(i64);
+    *o = outer{};
+}
+fn pair_a_bad(pair mut* p) void {
+    del(p->a);
+    p->a = new(i64);
+    del(p->b);
+    *p = pair{};
+}
+fn pair_b_bad(pair mut* p) void {
+    del(p->a);
+    del(p->b);
+    p->b = new(i64);
+    *p = pair{};
+}
+fn moved_back_bad(holder mut* h) void {
+    i64 mut* own x = move(h->item);
+    del(x);
+    h->item = new(i64);
+    *h = holder{};
+}
+fn after_call_bad(holder mut* h) void {
+    del(h->item);
+    h->item = new(i64);
+    nop();
+    *h = holder{};
+}
+fn pass_call_bad(holder mut* h) void {
+    del(h->item);
+    h->item = new(i64);
+    look(h);
+    *h = holder{};
+}
+fn after_read_bad(holder mut* h) i64 {
+    del(h->item);
+    h->item = new(i64);
+    *h->item = 4;
+    i64 v = *h->item;
+    *h = holder{};
+    return v;
+}
+fn branch_bad(holder mut* h, bool c) void {
+    del(h->item);
+    if (c) { h->item = new(i64); }
+    *h = holder{};
+}
+fn array_bad(arr mut* a) void {
+    del(a->items[0]);
+    del(a->items[1]);
+    a->items[0] = new(i64);
+    *a = arr{};
+}
+fn cell_bad(row mut* r) void {
+    del(r->cells[1].item);
+    r->cells[1].item = new(i64);
+    r->cells[1] = holder{};
+}
+fn cell_root_bad(row mut* r) void {
+    del(r->cells[0].item);
+    r->cells[0].item = new(i64);
+    *r = row{};
+}
+fn mixed_bad(mixed mut* m) void {
+    del(m->item);
+    m->item = new(i64);
+    m->v = 3;
+    *m = mixed{};
+}
+fn root_ok(holder mut* h) void {
+    del(h->item);
+    h->item = new(i64);
+    del(h->item);
+    *h = holder{};
+}
+fn move_out_ok(holder mut* h) i64 mut* own {
+    del(h->item);
+    h->item = new(i64);
+    i64 mut* own x = move(h->item);
+    *h = holder{};
+    return x;
+}
+fn clear_then_set_ok(holder mut* h) void {
+    del(h->item);
+    *h = holder{};
+    h->item = new(i64);
+}
+fn set_clear_set_ok(holder mut* h) void {
+    del(h->item);
+    h->item = new(i64);
+    del(h->item);
+    *h = holder{};
+    h->item = new(i64);
+}
+fn nested_ok(outer mut* o) void {
+    del(o->in.item);
+    o->in.item = new(i64);
+    del(o->in.item);
+    o->in = holder{};
+    *o = outer{};
+}
+fn twin_other_ok(twin mut* t) void {
+    del(t->a.item);
+    t->a.item = new(i64);
+    del(t->b.item);
+    t->b = holder{};
+}
+fn cell_other_ok(row mut* r) void {
+    del(r->cells[0].item);
+    r->cells[0].item = new(i64);
+    del(r->cells[1].item);
+    r->cells[1] = holder{};
+}
+fn pair_ok(pair mut* p) void {
+    del(p->a);
+    p->a = new(i64);
+    del(p->b);
+    del(p->a);
+    *p = pair{};
+}
+fn drop_call_ok(holder mut* h) void {
+    del(h->item);
+    h->item = new(i64);
+    drop_item(h);
+    *h = holder{};
+}
+fn release_ok(holder mut* h) void {
+    del(h->item);
+    *h = holder{};
+}
+// A whole move out of caller storage takes each owner below it, so a later zero store loses
+// nothing, and a later read finds an empty owner.
+fn whole_zero_ok(holder mut* h) holder {
+    del(h->item);
+    h->item = new(i64);
+    holder mut r = move(*h);
+    *h = holder{};
+    return r;
+}
+fn whole_twice_ok(holder mut* h) holder {
+    del(h->item);
+    h->item = new(i64);
+    holder mut r = move(*h);
+    *h = holder{};
+    *h = holder{};
+    return r;
+}
+fn whole_set_ok(holder mut* h) holder {
+    del(h->item);
+    h->item = new(i64);
+    holder mut r = move(*h);
+    *h = holder{};
+    h->item = new(i64);
+    return r;
+}
+fn whole_store_ok(holder mut* h) holder {
+    del(h->item);
+    h->item = new(i64);
+    holder mut r = move(*h);
+    h->item = new(i64);
+    del(h->item);
+    return r;
+}
+fn whole_read_bad(holder mut* h) holder {
+    del(h->item);
+    h->item = new(i64);
+    holder mut r = move(*h);
+    *h->item = 5;
+    return r;
+}
+fn whole_entry_read_bad(holder mut* h) holder {
+    holder mut r = move(*h);
+    *h->item = 5;
+    return r;
+}
+fn whole_lost_bad(holder mut* h) holder {
+    del(h->item);
+    holder mut r = move(*h);
+    h->item = new(i64);
+    *h = holder{};
+    return r;
+}
+fn main() i32 { return 0; }

@@ -2287,6 +2287,26 @@ came here.
   incomplete proof, because its extent requirement counts from the start of the source.
   A read of a reference through a pointer to a local inspects the contents of the local, since
   that copy is a use (D17.14); after a call it stays incomplete.
+  **A zero store or a whole move at a caller path replaces the flow contents of each path
+  below it** (D17.7, D17.14, D17.15). A release, an owner store or a null store at a projected
+  caller path keeps the contents of that path in a private flow slot (`output_ready`). The flow
+  place of a store or a move at a prefix of that path does not name the slot. So `slots_below`
+  gives each such slot one flow step, and the step exports no effect, because the summary effect
+  of the store or the move already changes each path below it. Before an owning aggregate store
+  into caller storage, the step writes an empty owner, and the write checks the old owner
+  (D17.11): `del(h->item); h->item = new(i64); *h = holder{};` fails. The write keeps the entry
+  value of a by-value owner parameter (`kept_owners` of `ownership_transfer.request`): a store
+  over it is a caller requirement (D17.18), and each caller checks the exported store. So the
+  summary solver keeps its d9595ac4 proof of `clear_live` and of 10 more such bodies, and the
+  heap solver proves them with the requirement that the parameter is null. A caller that passes
+  a live owner fails at the call (`by_value_requirements` of `ownership_heap_calls_test.ft`).
+  After a whole move `move(*h)`, which the summary exports with no flow step, the step moves the
+  contents of each slot into a fresh slot, so the slot is empty, and the move marks the caller
+  root as written, so a later load takes no entry value (`outside_written`). The owners reach the
+  result (`results_reached`). A move out of one path needs no step: its fresh slot stays empty,
+  because the search of `output_ready` finds no move out. On d9595ac4 the summary solver proved
+  18 of the 20 faulty bodies of `test/ownership/probes/prefix_clears.ft`, and it failed the valid
+  `whole_set_ok` and `whole_store_ok`. With the rules it proves none of the 20 and proves both.
   A release through one input and a read through another keep a complete summary: the
   application checks the read after it applies the release, so an aliased caller fails there
   (`ownership_calls_projected_test.ft`, G07.5 and G07.6). A return binds the events of each

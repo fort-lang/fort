@@ -14,6 +14,7 @@
 //| whole-array stores
 //| array leaves below the path bound
 //| casts of element addresses
+//| by-value owner requirements at calls
 //| heap calls ok
 /// Checks heap summaries at calls (D17.16, D17.18, `spec/fir.md` 14 Calls).
 import ownership_api;
@@ -1003,6 +1004,79 @@ fn copied_scalars() void {
     assert(unproved_call(&c, "box_pass_bad"));
 }
 
+// A store over the entry value of a by-value owner parameter requires it empty (D17.18): the
+// heap proof of the callee names the requirement that the parameter is null. A caller that
+// passes a fresh owner fails it at the call, as a definite candidate. A caller that passes null
+// meets it, and its proof stays (`test/ownership/probes/by_value_callers.ft`).
+fn by_value_requirements() void {
+    println("by-value owner requirements at calls");
+    string[19] text = {
+        "struct holder { i64 mut* own item; }",
+        "fn clear_live(holder mut* h, i64 mut* own n) void {",
+        "    del(h->item);",
+        "    h->item = move(n);",
+        "    *h = holder{};",
+        "}",
+        "fn drop_moved(i64 mut* own n) void {",
+        "    i64 mut* own mut x = move(n);",
+        "    x = null;",
+        "}",
+        "fn clear_live_live(holder mut* h) void {",
+        "    i64 mut* own n = new(i64);",
+        "    clear_live(h, move(n));",
+        "}",
+        "fn clear_live_null(holder mut* h) void { clear_live(h, null); }",
+        "fn drop_moved_live() void {",
+        "    i64 mut* own n = new(i64);",
+        "    drop_moved(move(n)); }",
+        "fn drop_moved_null() void { drop_moved(null); }",
+    };
+    string[6] names = {"clear_live", "drop_moved", "clear_live_live", "clear_live_null",
+        "drop_moved_live", "drop_moved_null"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    ownership_facts.requirement empty_n =
+        ownership_heap_env.root_requirement(0, ownership_facts.root_kind.null_root);
+    // Interface atom 0 is the entry value of the local parameter `n`, and each returning path
+    // requires it null. That one requirement is the whole published condition.
+    ownership_heap.summary* live = ownership_heap_env.summary(&c, "clear_live");
+    assert(ownership_heap_env.proved(&c, "clear_live"));
+    assert(live->interface.len == 2 &&
+        live->interface[0].key.base == ownership_heap.base_kind.local);
+    assert(ownership_heap_env.requires_each(&c, "clear_live", empty_n));
+    assert(live->required_some.len == 1 && live->post.required.len == 1);
+    ownership_heap.summary* moved = ownership_heap_env.summary(&c, "drop_moved");
+    assert(ownership_heap_env.proved(&c, "drop_moved"));
+    assert(moved->interface.len == 1 &&
+        moved->interface[0].key.base == ownership_heap.base_kind.local);
+    assert(ownership_heap_env.requires_each(&c, "drop_moved", empty_n));
+    assert(moved->required_some.len == 1);
+    // The fresh owner fails the requirement at the call, the only event of each caller.
+    string[2] live_callers = {"clear_live_live", "drop_moved_live"};
+    u32[2] call_lines = {13, 18};
+    u64 mut i = 0;
+    while (i < live_callers.len) {
+        assert(!ownership_heap_env.proved(&c, live_callers[i]));
+        assert(ownership_heap_env.candidate(&c, live_callers[i],
+            ownership_api.event_kind.caller_requirement));
+        assert(ownership_heap_env.candidates(&c, live_callers[i],
+            ownership_api.event_kind.caller_requirement, ownership_api.certainty.definite) == 1);
+        assert(ownership_heap_env.events(&c, live_callers[i]) == 1);
+        ownership_heap_env.event_row row = ownership_heap_env.first(&c, live_callers[i]);
+        assert(row.kind == ownership_api.event_kind.caller_requirement);
+        assert(row.line == call_lines[i]);
+        i += 1;
+    }
+    // Null meets the requirement, so the proof of each null caller stays, with no requirement
+    // and no event.
+    assert(ownership_heap_env.proved(&c, "clear_live_null"));
+    assert(ownership_heap_env.summary(&c, "clear_live_null")->required_some.len == 0);
+    assert(ownership_heap_env.events(&c, "clear_live_null") == 0);
+    assert(ownership_heap_env.proved(&c, "drop_moved_null"));
+    assert(ownership_heap_env.events(&c, "drop_moved_null") == 0);
+}
+
 fn main() i32 {
     caller_storage();
     separate_instances();
@@ -1017,6 +1091,7 @@ fn main() i32 {
     array_stores();
     deep_leaves();
     element_casts();
+    by_value_requirements();
     println("heap calls ok");
     return 0;
 }

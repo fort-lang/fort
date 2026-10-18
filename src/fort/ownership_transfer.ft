@@ -86,6 +86,9 @@ struct request {
     ownership_api.entity_id weak_guard;
     // The weak store moves the contents of `source`: the source becomes an empty owner.
     bool weak_moves;
+    // An assignment keeps the destination as it is when each owner there is one of these
+    // allocations: the entry values of the by-value owner parameters (D17.18).
+    ownership_api.entity_id@ kept_owners;
     event_binding@ event_bindings;
 }
 
@@ -757,8 +760,48 @@ fn end_loaded(ownership_state.state mut* s, ownership_api.services* svc, request
     return complete();
 }
 
+// Whether at least one owner overlaps the destination and each such owner is a kept owner of
+// the request. Each comparison pays one W unit.
+fn only_kept_owners(ownership_state.state mut* s, ownership_api.services* svc, request* req,
+    ownership_api.proof_status mut* proof) bool {
+    if (req->kept_owners.len == 0) { return false; }
+    ownership_state.charge_counts mut counts = ownership_state.charge_counts{};
+    counts.w = s->allocations_len > (U64_MAX - 1) / (req->kept_owners.len + 1) ? U64_MAX :
+        s->allocations_len * (req->kept_owners.len + 1) + 1;
+    ownership_api.mutation_result paid = ownership_state.require_counts(s, svc, counts,
+        req->operation, req->source_position);
+    if (!paid.applied) {
+        *proof = paid.proof;
+        return false;
+    }
+    bool mut found = false;
+    u64 mut i = 0;
+    while (i < s->allocations_len) {
+        if (s->allocations[i].obligation &&
+            relate(s->allocations[i].owner.place, req->destination) != region_relation.disjoint) {
+            bool mut kept = false;
+            u64 mut k = 0;
+            while (!kept && k < req->kept_owners.len) {
+                kept = same_entity(s->allocations[i].key, req->kept_owners[k]);
+                k += 1;
+            }
+            if (!kept) { return false; }
+            found = true;
+        }
+        i += 1;
+    }
+    return found;
+}
+
 fn do_assignment(ownership_state.state mut* s, ownership_api.services* svc,
     request* req) ownership_api.proof_status {
+    // A caller chose the entry value of a by-value owner parameter, so a store over it is a
+    // caller requirement and not a loss in the body (D17.18). The summary effect of the store
+    // replaces that owner at each caller, and the application checks it there. So the state
+    // keeps the owner, as it does without such a store.
+    ownership_api.proof_status mut paid = complete();
+    if (only_kept_owners(s, svc, req, &paid)) { return complete(); }
+    if (!ownership_api.successful(paid)) { return paid; }
     overlap_kind overlap = owner_overlap(s, req->destination);
     if (overlap == overlap_kind.possible) {
         return unproved(svc, req, req->destination.root);

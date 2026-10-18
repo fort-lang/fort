@@ -1,0 +1,73 @@
+// Callers of bodies that store over the entry value of caller storage. A move out of caller
+// storage, stored back into caller storage, keeps no owner of the body. The heap solver proves
+// each callee with the caller requirement that the moved owner is null (D17.18). The bodies
+// that end in `_live` pass a live owner, so they fail that requirement at the call and lose
+// the owner: each is faulty. The bodies that end in `_null` pass null and meet it.
+struct holder { i64 mut* own item; }
+struct pair { i64 mut* own a; i64 mut* own b; }
+struct outer { holder in; i64 v; }
+fn steal_bad(holder mut* h, holder mut* g) void {
+    del(h->item);
+    h->item = move(g->item);
+    *h = holder{};
+}
+fn steal_root_bad(outer mut* o, holder mut* g) void {
+    del(o->in.item);
+    o->in.item = move(g->item);
+    *o = outer{};
+}
+fn steal_self_bad(pair mut* p) void {
+    del(p->a);
+    p->a = move(p->b);
+    *p = pair{};
+}
+fn back_twice_bad(holder mut* h, holder mut* g) void {
+    i64 mut* own x = move(g->item);
+    del(h->item);
+    *h = holder{};
+    h->item = move(x);
+    *h = holder{};
+}
+fn steal_live(holder mut* h, holder mut* g) void {
+    del(g->item);
+    g->item = new(i64);
+    steal_bad(h, g);
+}
+fn steal_local_live(holder mut* h) void {
+    holder mut y = holder{};
+    y.item = new(i64);
+    steal_bad(h, &y);
+    del(y.item);
+}
+fn steal_root_live(outer mut* o, holder mut* g) void {
+    del(g->item);
+    g->item = new(i64);
+    steal_root_bad(o, g);
+}
+fn self_live(pair mut* p) void {
+    del(p->b);
+    p->b = new(i64);
+    steal_self_bad(p);
+}
+fn back_live(holder mut* h, holder mut* g) void {
+    del(g->item);
+    g->item = new(i64);
+    back_twice_bad(h, g);
+}
+fn steal_null(holder mut* h, holder mut* g) void {
+    del(g->item);
+    steal_bad(h, g);
+}
+fn steal_root_null(outer mut* o, holder mut* g) void {
+    del(g->item);
+    steal_root_bad(o, g);
+}
+fn self_null(pair mut* p) void {
+    del(p->b);
+    steal_self_bad(p);
+}
+fn back_null(holder mut* h, holder mut* g) void {
+    del(g->item);
+    back_twice_bad(h, g);
+}
+fn main() i32 { return 0; }
