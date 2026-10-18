@@ -230,6 +230,15 @@ struct requirement_set {
     u32 len;
 }
 
+// The caller slots, in `key_order`, whose entry values a copy of a body reads on some path
+// (D17.14, `spec/fir.md` 14.1). The body cannot check such a reference, so each caller checks
+// its own value of the slot at the call. A body whose set is full gives incomplete proof,
+// because its summary cannot name each slot.
+struct entry_use_set {
+    slot_key[16] items;
+    u32 len;
+}
+
 struct shape {
     types.node* ty;
     bool supported;
@@ -283,6 +292,8 @@ struct summary {
     // The requirements that some path of the body has. `post.required` holds those that each
     // returning path has.
     requirement_set required_some; // join: may
+    // The caller slots whose entry values a copy of the body reads on some path.
+    entry_use_set entry_uses; // join: may
     // The interface atoms, one bit each, whose members the body accesses through an owner that
     // lost its entry path, with a root that the body did not establish nonnull. The summary
     // cannot name that requirement, so each call of it gives incomplete proof (D10.7, D17.18).
@@ -373,6 +384,8 @@ struct context {
     bool global_writes;
     // See `summary.required_some`. Each pass adds to it, as each pass adds to `needs_shape`.
     requirement_set required_some;
+    // See `summary.entry_uses`. Each pass adds to it.
+    entry_use_set entry_uses;
     // See `summary.lost_required`.
     u64 lost_required;
     state mut@ own entry;
@@ -473,18 +486,48 @@ fn forgotten_value(value old) value {
     return v;
 }
 
-// A reference that needs no check at a return and that the proof does not follow. Its target
-// names no slot.
-fn input_value() value {
+// A reference to static data: it stays valid in each computation, so its copy and its return
+// need nothing. The proof follows nothing behind it, and its target names no slot. Only static
+// data takes this value: a copy of any other external unknown value must name the caller slot of
+// its entry value (D17.14), so a reference that the caller supplied and that no slot names is a
+// lost reference.
+fn static_value() value {
     value mut v = unknown_value();
     v.external = true;
     v.target = key_of(base_kind.local, NONE);
     return v;
 }
 
+// A join of external values that name no one slot: entry values of two caller slots, or an entry
+// value and static data. Each part that this body copied into its slot named its use at that
+// copy (`check_copy`). A part that a caller slot held at entry is the entry value of that slot,
+// so a copy from the slot names the slot. Its target names no slot of any caller, so a caller
+// gets a lost reference.
+fn joined_input() value {
+    value mut v = static_value();
+    v.target = key_of(base_kind.caller, NONE);
+    return v;
+}
+
+// A reference that a caller stored in a borrowed field of heap storage before the call: a field
+// of an entry value that an unfold makes a slot. No caller slot names it, and no check covers it,
+// so its copy gives incomplete proof (D17.14). It stays an input of the caller, so a return of it
+// needs nothing, and a caller gets a lost reference.
+fn stored_input() value {
+    value mut v = static_value();
+    v.target = key_of(base_kind.cell, NONE);
+    return v;
+}
+
+// Whether `v` is an external value whose target is the target of `kind`, one of the three values
+// above.
+fn external_as(value v, value kind) bool {
+    return v.kind == value_kind.unknown && v.external && same_key(v.target, kind.target);
+}
+
 // The entry value of caller slot `k`: a caller of this body reads it from its own slot.
 fn entry_value(slot_key k) value {
-    value mut v = input_value();
+    value mut v = static_value();
     v.target = k;
     v.param = ANY_PARAM;
     return v;
@@ -1349,10 +1392,13 @@ fn unfold(context mut* c, state mut* s, u32 a) bool {
                 }
             } else if (item.v.kind == value_kind.empty && !item.owning &&
                 (is_reference(item.ty) || item.array)) {
-                // A borrowed field of an entry value is an input of the caller. A region whose
-                // fold found only external references in its borrowed fields keeps that fact.
-                s->slots[i].v = parent.choice || !parent.borrows ? input_value() :
-                    unknown_value();
+                // A borrowed field of a member of an input holds a reference that the caller
+                // stored, and no slot of the caller names it (`stored_input`). A region whose fold
+                // found a reference of this body loses it. A field of a region that this body
+                // made holds what this body copied there: views of parameters, static data, and
+                // entry values whose copy named its use (`joined_input`).
+                s->slots[i].v = parent.borrows ? unknown_value() : (!parent.params ?
+                    static_value() : (parent.origin != 0 ? stored_input() : joined_input()));
                 // A field that can hold a view of a parameter keeps that fact for a refold.
                 if (parent.params) { s->slots[i].v.param = ANY_PARAM; }
             }
@@ -1535,8 +1581,11 @@ fn weak_reference(value old, value v) value {
     if (static_reference(v) && static_reference(old)) {
         return old.kind == value_kind.empty ? v : old;
     }
+    // Entry values, joined inputs, static data and views of parameters give a joined input. A
+    // stored input keeps that fact. The slot keeps its parameter fact.
     if (!body_reference(v) && !body_reference(old)) {
-        value mut both = input_value();
+        value mut both = external_as(v, stored_input()) || external_as(old, stored_input()) ?
+            stored_input() : joined_input();
         both.param = ANY_PARAM;
         return both;
     }
@@ -2368,11 +2417,15 @@ fn join_values(state mut* out, pairing* p, value vx, value vy) value {
     if (vx.kind == value_kind.unknown && vy.kind == value_kind.unknown) {
         value mut joined = unknown_value();
         if (vx.external && vy.external) {
+            // One entry value keeps its caller slot. Two that name two slots give a joined input,
+            // and a stored input keeps that fact, because no check covers it.
             if (same_key(vx.target, vy.target) && vx.param == vy.param) {
                 joined = vx; // join: copy
+            } else if (same_key(vx.target, stored_input().target) ||
+                same_key(vy.target, stored_input().target)) {
+                joined = stored_input();
             } else {
-                joined = input_value();
-                if (vx.param != NONE || vy.param != NONE) { joined.param = ANY_PARAM; }
+                joined = joined_input();
             }
         } else if (vx.exact && vy.exact) {
             joined = effect_value();
@@ -2925,7 +2978,14 @@ fn unknown_location() location {
 // Checks that a read or a write through storage of `count` sources finds each source live
 // (D17.14). A released source of each alternative is an invalid use. Another doubt gives
 // incomplete proof. False when the access is not proved.
-fn use_sources(context mut* c, state mut* s, u32 count, u32[8] sources, string what) bool {
+fn use_sources(context mut* c, state* s, u32 count, u32[8] sources, string what) bool {
+    return use_sources_as(c, s, count, sources, certainty.definite, what);
+}
+
+// `use_sources` for an access whose released sources give a candidate of certainty `how`: a
+// callee use of some path gives a possible candidate (D17.18).
+fn use_sources_as(context mut* c, state* s, u32 count, u32[8] sources, certainty how,
+    string what) bool {
     u32 mut released = 0;
     u32 mut unknown = 0;
     u32 mut doubtful = 0;
@@ -2947,7 +3007,7 @@ fn use_sources(context mut* c, state mut* s, u32 count, u32[8] sources, string w
         i += 1;
     }
     if (count > 0 && released == count) {
-        violation(c, s, ownership_api.event_kind.invalid_use, certainty.definite, first, what);
+        violation(c, s, ownership_api.event_kind.invalid_use, how, first, what);
         return false;
     }
     if (unknown > 0) {
@@ -3513,18 +3573,40 @@ fn fresh_unknown_owner(state mut* s) value {
 /// Evaluates an operand. A copy of an owner lends a view of its atom (D17.4). A move empties its
 /// slot and keeps the atom (D17.16).
 fn operand(context mut* c, state mut* s, fir.operand op) value {
-    return evaluate(c, s, op, false, "");
+    return evaluate(c, s, op, false, false, "");
+}
+
+// Evaluates an operand whose reference leaves its place without a copy: the operand of a cast
+// to a reference type. The read names the caller slot of an external value (`name_read`).
+fn named_operand(context mut* c, state mut* s, fir.operand op) value {
+    return evaluate(c, s, op, false, true, "");
+}
+
+// A reference that leaves a caller slot without a copy, by a cast or a slice, names that slot,
+// as a copy does (D17.14, `spec/fir.md` 14.1). An entry value names its own slot. A joined input
+// can be the entry value of the slot that it leaves, so it names that slot: in its next slot no
+// copy can tell which caller slot it came from. Each other value keeps its own rule at its copy.
+fn name_read(context mut* c, state* s, location loc, types.node* t, value v) void {
+    if (!is_reference(t) || v.kind != value_kind.unknown || !v.external) { return; }
+    if (v.target.base == base_kind.caller && cast(v.target.id, u64) < c->callers_len) {
+        note_entry_use(c, s, v.target);
+    } else if (external_as(v, joined_input()) && loc.kind == location_kind.slots &&
+        loc.key.base == base_kind.caller && cast(loc.key.id, u64) < c->callers_len) {
+        note_entry_use(c, s, loc.key);
+    }
 }
 
 // Evaluates an operand that an operation copies or moves into another place: a call argument,
 // the value of an assignment, or an operand of an aggregate literal. The copy of a borrowed
 // reference uses it (D17.14). `what` names a reference without a slot of its own.
 fn copied_operand(context mut* c, state mut* s, fir.operand op, string what) value {
-    return evaluate(c, s, op, true, what);
+    return evaluate(c, s, op, true, false, what);
 }
 
-// Evaluates an operand. `copies` says that the operation copies it into another place.
-fn evaluate(context mut* c, state mut* s, fir.operand op, bool copies, string what) value {
+// Evaluates an operand. `copies` says that the operation copies it into another place, and
+// `names` that its reference leaves the place without a copy.
+fn evaluate(context mut* c, state mut* s, fir.operand op, bool copies, bool names, string what)
+    value {
     if (op.kind == fir.operand_kind.ok_const) {
         switch (op.value.kind) {
         case fir.const_kind.ck_null, fir.const_kind.ck_zero:
@@ -3553,6 +3635,7 @@ fn evaluate(context mut* c, state mut* s, fir.operand op, bool copies, string wh
     resolve(c, s, op.place, &loc, &t);
     value v = read_at(c, s, loc, t);
     if (copies) { check_copied_value(c, s, loc, t, v, what); }
+    if (names) { name_read(c, s, loc, t, v); }
     if (op.kind == fir.operand_kind.ok_copy) { return as_view(s, v); }
     if (loc.kind == location_kind.slots) {
         u64 at = find_slot(s, loc.key);
@@ -4076,7 +4159,9 @@ fn rvalue_value(context mut* c, state mut* s, fir.rvalue rv, types.node* t) valu
         flipped.truth = !flipped.truth;
         return flipped;
     case fir.rvalue_kind.rv_cast:
-        value converted = operand(c, s, fir.rvalue_operand(c->f, rv, 0));
+        // A cast to a reference type moves the reference out of its place without a copy.
+        value converted = is_reference(t) ? named_operand(c, s, fir.rvalue_operand(c->f, rv, 0)) :
+            operand(c, s, fir.rvalue_operand(c->f, rv, 0));
         types.node* from = fir.operand_type(c->f, fir.rvalue_operand(c->f, rv, 0));
         if (!is_reference(t)) {
             if (converted.numbered) { return numbered_in(converted.number, t); }
@@ -4106,7 +4191,7 @@ fn rvalue_value(context mut* c, state mut* s, fir.rvalue rv, types.node* t) valu
         // computation, so a copy of it needs nothing (D17.14). The proof keeps no other fact
         // of that storage, so a read or a write through the address stays unproved.
         if (rv.place.base == fir.base_kind.bk_global && !fir.place_indirect(c->f, rv.place)) {
-            return input_value();
+            return static_value();
         }
         location mut loc = location{};
         types.node* mut place_ty = null;
@@ -4162,7 +4247,10 @@ fn rvalue_value(context mut* c, state mut* s, fir.rvalue rv, types.node* t) valu
             }
             return unknown_value();
         }
-        return as_view(s, read_at(c, s, sliced, sliced_ty));
+        // A slice of a span or a string moves the reference of its header out of its place.
+        value header = read_at(c, s, sliced, sliced_ty);
+        name_read(c, s, sliced, sliced_ty, header);
+        return as_view(s, header);
     case fir.rvalue_kind.rv_slice_ptr:
         u32 mut k = 0;
         while (k < rv.ops_len) {
@@ -5297,6 +5385,91 @@ fn separate(context mut* c, state mut* s, summary* sum, argument@ args, leaf_lis
     return true;
 }
 
+// The caller slot of this body that use `k` of a callee names, through the prefixes of the
+// caller storage that the arguments designate, or U64_MAX.
+fn entry_use_slot(state* entry, slot_key k, slot_key@ entry_prefixes, slot_key mut* where) u64 {
+    if (k.base != base_kind.caller || cast(k.id, u64) >= entry_prefixes.len ||
+        !rebase(entry_prefixes[cast(k.id, u64)], k.depth, k.path, where)) { return U64_MAX; }
+    return find_slot(entry, *where);
+}
+
+// The callee copies the entry value of each slot of `sum.entry_uses` on some path: the reference
+// that this body holds in that slot at the call (D17.14, `spec/fir.md` 14.1). The copy check
+// reads the entry state, before the frame forgets the facts of named storage. A released source
+// gives a possible candidate (D17.18). An entry value of this body passes the use on to its own
+// callers. A slot that this body does not hold gives incomplete proof. Each slot pays one W
+// unit.
+fn check_entry_uses(context mut* c, state mut* s, state* entry, summary* sum,
+    slot_key@ entry_prefixes) void {
+    u32 mut i = 0;
+    while (i < sum->entry_uses.len) {
+        if (!pay(c, 1)) { return; }
+        slot_key mut where = slot_key{};
+        u64 at = entry_use_slot(entry, sum->entry_uses.items[i], entry_prefixes, &where);
+        if (at == U64_MAX) {
+            unproved(c, s, ownership_api.incomplete_reason.unknown_effect, NONE,
+                "the caller storage of a reference that this call copies");
+        } else {
+            location mut loc = unknown_location();
+            loc.kind = location_kind.slots;
+            loc.key = where;
+            leaf mut item = leaf{};
+            item.ty = entry->slots[at].ty;
+            item.array = entry->slots[at].array;
+            item.v = entry->slots[at].v;
+            // The callee copies on some path, so a released source is a possible candidate.
+            check_copy(c, entry, loc, item, certainty.possible, CALL_COPY);
+        }
+        i += 1;
+    }
+}
+
+// Whether an owned edge from atom `from` reaches one of the atoms of `found`. The walk pays for
+// each atom and slot that it reads. A refused unit gives true, and the computation stops.
+fn reaches_any(context mut* c, state* s, u32 from, u32@ found) bool {
+    bool mut@ own seen = new(bool, s->atoms_len);
+    defer del(seen);
+    if (!owned_from_paid(c, s, from, seen)) { return true; }
+    u64 mut j = 0;
+    while (j < found.len) {
+        if (cast(found[j], u64) < seen.len && seen[cast(found[j], u64)]) { return true; }
+        j += 1;
+    }
+    return false;
+}
+
+// The summary does not order a copy and a release of the callee, so the callee can copy the
+// reference of a slot of `sum.entry_uses` after it releases a bound interface atom. The storage
+// that the reference designates must lie outside each bound atom that the callee releases, as
+// in `separate`. An owned edge from such an atom to that storage gives incomplete proof. Each
+// slot pays one W unit.
+fn separate_entry_uses(context mut* c, state mut* s, state* entry, summary* sum,
+    slot_key@ entry_prefixes, u32@ bound) bool {
+    u32 mut i = 0;
+    while (i < sum->entry_uses.len) {
+        if (!pay(c, 1)) { return false; }
+        slot_key mut where = slot_key{};
+        u64 at = entry_use_slot(entry, sum->entry_uses.items[i], entry_prefixes, &where);
+        u32[8] mut found = {};
+        u64 mut n = 0;
+        if (at != U64_MAX && designated_atoms(entry->slots[at].v, found[..], &n) && n > 0) {
+            u64 mut b = 0;
+            while (b < bound.len) {
+                bool releases = b < 64 && (sum->post.released.bits & bit(b)) != 0;
+                if (bound[b] != NONE && releases && reaches_any(c, s, bound[b], found[..n])) {
+                    if (c->stopped) { return false; }
+                    unproved(c, s, ownership_api.incomplete_reason.unknown_effect, bound[b],
+                        "that the arguments of this call are separate");
+                    return false;
+                }
+                b += 1;
+            }
+        }
+        i += 1;
+    }
+    return true;
+}
+
 /// Applies a summary at a call (D17.16, `spec/fir.md` 14 Calls). The caller binds each interface
 /// atom to its actual atom, checks the shape that the callee needs, and grafts the exit facts of
 /// caller storage and of the result. False keeps the call unknown.
@@ -5336,10 +5509,19 @@ fn apply(context mut* c, state mut* s, state* entry, callee* target, argument@ a
     while (k < sum->callers.len) {
         u64 param = cast(sum->callers[k].param, u64);
         if (param == 0 || param > args.len || args[param - 1].aggregate ||
-            !designated(s, args[param - 1].v, &prefixes[k])) { return false; }
-        if (!designated(entry, args[param - 1].v, &entry_prefixes[k])) { return false; }
+            !designated(s, args[param - 1].v, &prefixes[k]) ||
+            !designated(entry, args[param - 1].v, &entry_prefixes[k])) {
+            // The unknown call that follows checks no reference that the callee copies.
+            if (sum->entry_uses.len > 0) {
+                unproved(c, s, ownership_api.incomplete_reason.unknown_effect, NONE,
+                    "the caller storage of a reference that this call copies");
+            }
+            return false;
+        }
         k += 1;
     }
+    // Check the copied slots now: a later check can make the call unknown without an event.
+    check_entry_uses(c, s, entry, sum, entry_prefixes[..]);
     // The caller storage must have the layout that the callee reads: each exit slot of the
     // callee names a caller slot of the same type. A cast pointer that disagrees stays unknown.
     u64 mut q = 0;
@@ -5383,6 +5565,7 @@ fn apply(context mut* c, state mut* s, state* entry, callee* target, argument@ a
         k += 1;
     }
     if (!separate(c, s, sum, args, arg_leaves, prefixes[..], bound[..])) { return false; }
+    if (!separate_entry_uses(c, s, entry, sum, entry_prefixes[..], bound[..])) { return false; }
     // The owners that the callee dereferences and the empty owners that it requires (D10.7,
     // `spec/fir.md` 14 Calls).
     check_requirements_at(c, s, entry, sum, entry_bound[..]);
@@ -6273,10 +6456,14 @@ fn copied_name(context mut* c, state* s, location loc, leaf item, string what) s
 // A copy of a reference is a use of it, so the reference must not dangle at the copy (D17.14).
 // Each source of a view must be live or leaked. The local of an address must not end, and the
 // cell of an address must be live or leaked. A reference whose facts this body lost can dangle,
-// so it gives incomplete proof. An input of the caller needs nothing. A reference that an
-// unknown effect wrote needs nothing when that effect made this body residual, as at a return
-// (`check_retained`). `what` names a leaf without a slot of its own.
-fn check_copy(context mut* c, state mut* s, location loc, leaf item, string what) void {
+// so it gives incomplete proof. The entry value of a caller slot is the reference that the
+// caller holds there, so the summary names the slot and each caller checks it at the call
+// (`note_entry_use`). Another input of the caller needs nothing. A reference that an unknown
+// effect wrote needs nothing when that effect made this body residual, as at a return
+// (`check_retained`). `what` names a leaf without a slot of its own. `s` gives the facts, and a
+// released source gives a candidate of certainty `how`.
+fn check_copy(context mut* c, state* s, location loc, leaf item, certainty how, string what)
+    void {
     value v = item.v;
     if (v.kind == value_kind.view) {
         bool mut live = true;
@@ -6286,14 +6473,16 @@ fn check_copy(context mut* c, state mut* s, location loc, leaf item, string what
             if (status != atom_status.live && status != atom_status.leaked) { live = false; }
             i += 1;
         }
-        if (!live) { use_sources(c, s, v.count, v.sources, copied_name(c, s, loc, item, what)); }
+        if (!live) {
+            use_sources_as(c, s, v.count, v.sources, how, copied_name(c, s, loc, item, what));
+        }
         return;
     }
     if (v.kind == value_kind.address) {
         if (v.target.base == base_kind.local) {
             u8 ended = s->ended[cast(v.target.id, u64)];
             if (ended == 1) {
-                violation(c, s, ownership_api.event_kind.invalid_use, certainty.definite, NONE,
+                violation(c, s, ownership_api.event_kind.invalid_use, how, NONE,
                     copied_name(c, s, loc, item, what));
             } else if (ended == 2) {
                 unproved(c, s, ownership_api.incomplete_reason.missing_path, NONE,
@@ -6304,9 +6493,31 @@ fn check_copy(context mut* c, state mut* s, location loc, leaf item, string what
             if (status != atom_status.live && status != atom_status.leaked) {
                 u32[8] mut one = {};
                 one[0] = v.target.id;
-                use_sources(c, s, 1, one, copied_name(c, s, loc, item, what));
+                use_sources_as(c, s, 1, one, how, copied_name(c, s, loc, item, what));
             }
         }
+        return;
+    }
+    if (v.kind == value_kind.unknown && v.external && v.target.base == base_kind.caller &&
+        cast(v.target.id, u64) < c->callers_len) {
+        note_entry_use(c, s, v.target);
+        return;
+    }
+    // A joined input of a caller slot can be the entry value of that slot, so the copy names the
+    // slot too. Each other part named its use at its own copy into the slot.
+    slot_key mut k = slot_key{};
+    if (external_as(v, joined_input())) {
+        if (loc.kind == location_kind.slots && rebase(loc.key, item.depth, item.path, &k) &&
+            k.base == base_kind.caller && cast(k.id, u64) < c->callers_len) {
+            note_entry_use(c, s, k);
+        }
+        return;
+    }
+    // Only static data needs nothing. A stored input, or any other input of the caller that no
+    // slot names, has no check that covers it (D17.14).
+    if (v.kind == value_kind.unknown && v.external && !external_as(v, static_value())) {
+        unproved(c, s, ownership_api.incomplete_reason.unknown_effect, NONE,
+            copied_name(c, s, loc, item, what));
         return;
     }
     if (v.kind == value_kind.unknown && !v.external && !(v.exact && c->residual)) {
@@ -6315,18 +6526,48 @@ fn check_copy(context mut* c, state mut* s, location loc, leaf item, string what
     }
 }
 
-// Whether storage at `loc` can keep a reference of this body. Storage without slots keeps its
-// references in the facts of its atoms: when no atom keeps a reference of this body, each leaf
-// holds an input or static data. The scan of those atoms pays one W unit. A refused scan gives
-// false, and the stopped proof checks nothing more.
+// A copy of the entry value of caller slot `k` uses the reference that the caller holds there
+// (D17.14). The body cannot check that reference, so its summary names the slot, and each
+// caller checks its own value of the slot at the call (`spec/fir.md` 14.1). The scan of the set
+// pays one W unit. A full set gives incomplete proof, and no caller applies the summary.
+fn note_entry_use(context mut* c, state* s, slot_key k) void {
+    if (!pay(c, 1)) { return; }
+    u32 mut at = 0;
+    while (at < c->entry_uses.len && key_order(c->entry_uses.items[at], k) < 0) { at += 1; }
+    if (at < c->entry_uses.len && key_order(c->entry_uses.items[at], k) == 0) { return; }
+    if (cast(c->entry_uses.len, u64) >= c->entry_uses.items.len) {
+        c->residual = true;
+        unproved(c, s, ownership_api.incomplete_reason.unknown_effect, NONE,
+            "each copied reference of caller storage within its list");
+        return;
+    }
+    u32 mut j = c->entry_uses.len;
+    while (j > at) {
+        c->entry_uses.items[j] = c->entry_uses.items[j - 1];
+        j -= 1;
+    }
+    c->entry_uses.items[at] = k;
+    c->entry_uses.len += 1;
+}
+
+// Whether a copy of a reference from storage at `loc` needs a check. Storage without slots keeps
+// its references in the facts of its atoms, and a read of it gives a lost reference. A leaf of
+// storage that a parameter designates (`external`) holds a reference that the caller stored, and
+// no caller slot names it. So does a leaf of a member of an input (`origin`) that can keep a
+// reference of an input (`params`), and a leaf of an atom that can keep a reference of this body
+// (`borrows`): the copy gives incomplete proof (D17.14). A leaf of an atom that this body made
+// and that keeps no reference of this body holds what this body copied there, and its copy needs
+// nothing. The scan of those atoms pays one W unit. A refused scan gives false, and the stopped
+// proof checks nothing more.
 fn copied_storage(context mut* c, state* s, location loc) bool {
     bool mut body = true;
     if (loc.kind == location_kind.element) {
         if (!pay(c, 1)) { return false; }
-        body = false;
+        body = loc.external;
         u32 mut j = 0;
         while (j < loc.count) {
-            if (s->atoms[cast(loc.sources[j], u64)].borrows) { body = true; }
+            atom item = s->atoms[cast(loc.sources[j], u64)];
+            if (item.borrows || (item.params && item.origin != 0)) { body = true; }
             j += 1;
         }
     }
@@ -6344,7 +6585,7 @@ fn check_copied_leaves(context mut* c, state mut* s, location loc, leaf_list* li
         leaf item = list->items[i];
         if (!item.owning && (is_reference(item.ty) || item.array)) {
             if (!pay(c, 1)) { return; }
-            if (body) { check_copy(c, s, loc, item, what); }
+            if (body) { check_copy(c, s, loc, item, certainty.definite, what); }
         }
         i += 1;
     }
@@ -6363,7 +6604,7 @@ fn check_copied_value(context mut* c, state mut* s, location loc, types.node* t,
     leaf mut item = leaf{};
     item.ty = t;
     item.v = v;
-    check_copy(c, s, loc, item, what);
+    check_copy(c, s, loc, item, certainty.definite, what);
 }
 
 // Whether an argument of a call holds a reference, so that a callee requirement can name it
@@ -6891,6 +7132,7 @@ fn take_summary(context mut* c) summary {
     out.writes_high = c->writes_high;
     out.global_writes = c->global_writes;
     out.required_some = c->required_some;
+    out.entry_uses = c->entry_uses;
     out.lost_required = c->lost_required;
     out.events = c->events;
     out.post = move(c->exit);
@@ -6908,7 +7150,13 @@ fn same_summary(context mut* c, summary* a, summary* b, bool mut* same) bool {
         a->proof.kind != b->proof.kind || a->proof.failed != b->proof.failed ||
         a->interface.len != b->interface.len || a->lost_required != b->lost_required ||
         !same_requirements(a->required_some.items[..a->required_some.len],
-        b->required_some.items[..b->required_some.len])) { return true; }
+        b->required_some.items[..b->required_some.len]) ||
+        a->entry_uses.len != b->entry_uses.len) { return true; }
+    u32 mut u = 0;
+    while (u < a->entry_uses.len) {
+        if (key_order(a->entry_uses.items[u], b->entry_uses.items[u]) != 0) { return true; }
+        u += 1;
+    }
     u64 mut i = 0;
     while (i < a->interface.len) {
         if (a->interface[i].needs_shape != b->interface[i].needs_shape) { return true; }

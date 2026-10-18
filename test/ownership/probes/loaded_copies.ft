@@ -1,0 +1,276 @@
+// Class M with callees that have a proof (D17.14, D17.18, spec/fir.md 14.1). A callee loads a
+// reference from caller storage and copies it: into a local, a result, caller storage, a new
+// cell, an extern argument or a global. The copy is a use, so the reference that the caller
+// holds in that slot must not dangle at the call. Each faulty caller lets the copy read
+// released storage. It releases the referent before the call, or the callee releases it before
+// the copy, or the callee loads a reference that a write through an alias changed. On 0d995df2
+// the heap solver alone proved 10 of the 21 faulty callers: copy_dangling, peek_dangling,
+// wrap_dangling, boxed_dangling, wrapv_dangling, array_dangling, span_dangling, cell_dangling,
+// release_copy and moved_copy. Each valid caller copies a live reference.
+struct cell { i64 a; }
+struct ph { cell* p; }
+struct wp { ph mut* inner; }
+struct holder { u8@ s; }
+struct outer { ph inner; }
+struct arrh { cell*[2] ps; }
+struct node { cell* v; node mut* own next; }
+struct list { node mut* own head; }
+struct box { cell mut* own c; }
+struct chain { ph here; chain mut* own next; }
+ph mut gph = ph{null};
+extern fn ext(cell* p) void;
+fn pick(ph* h) cell* { return h->p; }
+fn pick2(outer* o) cell* { return o->inner.p; }
+fn copy_over(ph mut* d, ph* s) void { d->p = s->p; }
+fn wrap_copy(ph mut* d, ph* s) void { copy_over(d, s); }
+fn peek(ph* h) void { cell* c = h->p; }
+fn boxed(ph* h) ph mut* own { ph mut* own n = new(ph); n->p = h->p; return n; }
+fn wrapv(ph* h) ph { return ph{h->p}; }
+fn copyarr(arrh mut* d, arrh* s) void { d->ps = s->ps; }
+fn copy_span(holder mut* d, holder* s) void { d->s = s->s; }
+fn fwd_ext(ph* h) void { ext(h->p); }
+fn toglob(ph* h) void { gph.p = h->p; }
+fn rel_copy(box mut* bx, ph mut* d, ph* s) void { del(bx->c); d->p = s->p; }
+fn rel_copy2(cell mut* own o, ph mut* d, ph* s) void { del(o); d->p = s->p; }
+fn alias_load(wp w, ph* h, cell* x) cell* { w.inner->p = x; return h->p; }
+fn set_leaf(wp w, cell* x) void { w.inner->p = x; }
+fn alias_through(wp w, ph* h, cell* x) cell* { set_leaf(w, x); return h->p; }
+fn peekv(list* l) cell* { return l->head->v; }
+fn copy_v(ph mut* d, list* l) void { d->p = l->head->v; }
+fn deep_copy(ph mut* d, chain* ch) void {
+    if (ch->next == null) { d->p = ch->here.p; return; }
+    deep_copy(d, ch->next);
+}
+fn noop(ph* h) void { }
+fn pick_dangling() i64 {
+    cell mut* own b = new(cell);
+    ph h = ph{b};
+    del(b);
+    cell* c = pick(&h);
+    return 0;
+}
+fn pick_ok() i64 {
+    cell mut* own b = new(cell);
+    ph h = ph{b};
+    cell* c = pick(&h);
+    i64 r = c->a;
+    del(b);
+    return r;
+}
+fn nested_dangling() i64 {
+    cell mut* own b = new(cell);
+    outer o = outer{ph{b}};
+    del(b);
+    cell* r = pick2(&o);
+    return 0;
+}
+fn copy_dangling() i64 {
+    cell mut* own b = new(cell);
+    ph s = ph{b};
+    ph mut d = ph{null};
+    del(b);
+    copy_over(&d, &s);
+    return 0;
+}
+fn copy_ok() i64 {
+    cell mut* own b = new(cell);
+    ph s = ph{b};
+    ph mut d = ph{null};
+    copy_over(&d, &s);
+    i64 r = d.p->a;
+    del(b);
+    return r;
+}
+fn wrap_dangling() i64 {
+    cell mut* own b = new(cell);
+    ph s = ph{b};
+    ph mut d = ph{null};
+    del(b);
+    wrap_copy(&d, &s);
+    return 0;
+}
+fn wrap_ok() i64 {
+    cell mut* own b = new(cell);
+    ph s = ph{b};
+    ph mut d = ph{null};
+    wrap_copy(&d, &s);
+    i64 r = d.p->a;
+    del(b);
+    return r;
+}
+fn peek_dangling() i64 {
+    cell mut* own b = new(cell);
+    ph h = ph{b};
+    del(b);
+    peek(&h);
+    return 0;
+}
+fn noop_ok() i64 {
+    cell mut* own b = new(cell);
+    ph h = ph{b};
+    del(b);
+    noop(&h);
+    return 0;
+}
+fn boxed_dangling() i64 {
+    cell mut* own b = new(cell);
+    ph h = ph{b};
+    del(b);
+    ph mut* own n = boxed(&h);
+    del(n);
+    return 0;
+}
+fn wrapv_dangling() i64 {
+    cell mut* own b = new(cell);
+    ph h = ph{b};
+    del(b);
+    ph r = wrapv(&h);
+    return 0;
+}
+fn array_dangling() i64 {
+    cell mut* own b = new(cell);
+    arrh s = arrh{{b, b}};
+    arrh mut d = arrh{{null, null}};
+    del(b);
+    copyarr(&d, &s);
+    return 0;
+}
+fn span_dangling() i64 {
+    u8 mut@ own b = new(u8, 4);
+    holder s = holder{b[..4]};
+    holder mut d = holder{{}};
+    del(b);
+    copy_span(&d, &s);
+    return 0;
+}
+fn cell_dangling() i64 {
+    cell mut* own b = new(cell);
+    ph mut* own n = new(ph);
+    n->p = b;
+    del(b);
+    peek(n);
+    del(n);
+    return 0;
+}
+fn cell_ok() i64 {
+    cell mut* own b = new(cell);
+    ph mut* own n = new(ph);
+    n->p = b;
+    peek(n);
+    del(n);
+    del(b);
+    return 0;
+}
+fn ext_dangling() i64 {
+    cell mut* own b = new(cell);
+    ph h = ph{b};
+    del(b);
+    fwd_ext(&h);
+    return 0;
+}
+fn global_dangling() i64 {
+    cell mut* own b = new(cell);
+    gph.p = b;
+    del(b);
+    cell* c = pick(&gph);
+    gph.p = null;
+    return 0;
+}
+fn toglob_dangling() i64 {
+    cell mut* own b = new(cell);
+    ph h = ph{b};
+    del(b);
+    toglob(&h);
+    gph.p = null;
+    return 0;
+}
+fn release_copy() i64 {
+    box mut bx = box{new(cell)};
+    ph s = ph{bx.c};
+    ph mut d = ph{null};
+    rel_copy(&bx, &d, &s);
+    return 0;
+}
+fn release_copy_ok() i64 {
+    box mut bx = box{new(cell)};
+    cell mut* own k = new(cell);
+    ph s = ph{k};
+    ph mut d = ph{null};
+    rel_copy(&bx, &d, &s);
+    i64 r = d.p->a;
+    del(k);
+    return r;
+}
+fn moved_copy() i64 {
+    cell mut* own b = new(cell);
+    ph s = ph{b};
+    ph mut d = ph{null};
+    rel_copy2(move(b), &d, &s);
+    return 0;
+}
+fn alias_leaf() i64 {
+    cell mut* own b = new(cell);
+    cell mut* own c = new(cell);
+    ph mut h = ph{b};
+    cell* r = alias_load(wp{&h}, &h, c);
+    del(c);
+    i64 v = r->a;
+    del(b);
+    return v;
+}
+fn alias_ok() i64 {
+    cell mut* own b = new(cell);
+    cell mut* own c = new(cell);
+    ph mut h = ph{b};
+    cell* r = alias_load(wp{&h}, &h, c);
+    i64 v = r->a;
+    del(c);
+    del(b);
+    return v;
+}
+fn alias_call() i64 {
+    cell mut* own b = new(cell);
+    cell mut* own c = new(cell);
+    ph mut h = ph{b};
+    cell* r = alias_through(wp{&h}, &h, c);
+    del(c);
+    i64 v = r->a;
+    del(b);
+    return v;
+}
+fn node_dangling() i64 {
+    cell mut* own b = new(cell);
+    list mut l = list{new(node)};
+    l.head->v = b;
+    del(b);
+    cell* r = peekv(&l);
+    del(l.head);
+    return 0;
+}
+fn node_copy_dangling() i64 {
+    cell mut* own b = new(cell);
+    list mut l = list{new(node)};
+    ph mut d = ph{null};
+    l.head->v = b;
+    del(b);
+    copy_v(&d, &l);
+    del(l.head);
+    return 0;
+}
+fn index_dangling(u64 i) i64 {
+    cell mut* own b = new(cell);
+    ph[2] mut arr = {ph{null}, ph{null}};
+    arr[1] = ph{b};
+    del(b);
+    peek(&arr[i]);
+    return 0;
+}
+fn deep_dangling() i64 {
+    cell mut* own b = new(cell);
+    chain mut ch = chain{ph{b}, null};
+    ph mut d = ph{null};
+    del(b);
+    deep_copy(&d, &ch);
+    return 0;
+}
+fn main() i32 { return 0; }

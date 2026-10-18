@@ -414,9 +414,9 @@
     {
       "decision": "D17.14-unfold-external",
       "file": "src/fort/ownership_heap.ft",
-      "old": "                s->slots[i].v = parent.choice || !parent.borrows ? input_value() :",
-      "new": "                s->slots[i].v = parent.choice ? input_value() :",
-      "what": "an unfold loses the fact that each field holds an external reference"
+      "old": "                s->slots[i].v = parent.borrows ? unknown_value() : (!parent.params ?\n",
+      "new": "                s->slots[i].v = true ? unknown_value() : (!parent.params ?\n",
+      "what": "an unfold makes each field a lost reference, also of a region that holds no input"
     },
     {
       "decision": "D17.14-entry-value",
@@ -1534,15 +1534,15 @@
     {
       "decision": "D17.14-copy-released-view",
       "file": "src/fort/ownership_heap.ft",
-      "old": "        if (!live) { use_sources(c, s, v.count, v.sources, copied_name(c, s, loc, item, what)); }\n",
-      "new": "        if (false) { use_sources(c, s, v.count, v.sources, copied_name(c, s, loc, item, what)); }\n",
+      "old": "        if (!live) {\n            use_sources_as(c, s, v.count, v.sources, how, copied_name(c, s, loc, item, what));\n",
+      "new": "        if (false) {\n            use_sources_as(c, s, v.count, v.sources, how, copied_name(c, s, loc, item, what));\n",
       "what": "a copied view with a released source records no event"
     },
     {
       "decision": "D17.14-copy-ended-local",
       "file": "src/fort/ownership_heap.ft",
-      "old": "            if (ended == 1) {\n                violation(c, s, ownership_api.event_kind.invalid_use, certainty.definite, NONE,\n                    copied_name(c, s, loc, item, what));\n",
-      "new": "            if (false) {\n                violation(c, s, ownership_api.event_kind.invalid_use, certainty.definite, NONE,\n                    copied_name(c, s, loc, item, what));\n",
+      "old": "            if (ended == 1) {\n                violation(c, s, ownership_api.event_kind.invalid_use, how, NONE,\n",
+      "new": "            if (false) {\n                violation(c, s, ownership_api.event_kind.invalid_use, how, NONE,\n",
       "what": "a copied address of an ended local records no event"
     },
     {
@@ -1583,16 +1583,16 @@
     {
       "decision": "D17.14-copy-element-borrows",
       "file": "src/fort/ownership_heap.ft",
-      "old": "            if (s->atoms[cast(loc.sources[j], u64)].borrows) { body = true; }\n",
-      "new": "            if (false) { body = true; }\n",
+      "old": "            if (item.borrows || (item.params && item.origin != 0)) { body = true; }\n",
+      "new": "            if (item.params && item.origin != 0) { body = true; }\n",
       "what": "a leaf of storage without slots needs nothing when an atom keeps a reference of the body"
     },
     {
       "decision": "D17.14-copy-element-inputs",
       "file": "src/fort/ownership_heap.ft",
-      "old": "        if (!pay(c, 1)) { return false; }\n        body = false;\n",
-      "new": "        if (!pay(c, 1)) { return false; }\n        body = true;\n",
-      "what": "a leaf of storage without slots gives incomplete proof when no atom keeps a body reference"
+      "old": "        body = loc.external;\n",
+      "new": "        body = true;\n",
+      "what": "a leaf of storage that this body made gives incomplete proof without a reference of the body"
     },
     {
       "decision": "D17.14-copy-owned-leaf",
@@ -1611,15 +1611,15 @@
     {
       "decision": "D17.18-copy-element-scan-work",
       "file": "src/fort/ownership_heap.ft",
-      "old": "    if (loc.kind == location_kind.element) {\n        if (!pay(c, 1)) { return false; }\n        body = false;\n",
-      "new": "    if (loc.kind == location_kind.element) {\n        body = false;\n",
+      "old": "    if (loc.kind == location_kind.element) {\n        if (!pay(c, 1)) { return false; }\n        body = loc.external;\n",
+      "new": "    if (loc.kind == location_kind.element) {\n        body = loc.external;\n",
       "what": "the scan of the atoms of storage without slots pays no W unit"
     },
     {
       "decision": "D17.14-copy-element-each-atom",
       "file": "src/fort/ownership_heap.ft",
-      "old": "        while (j < loc.count) {\n            if (s->atoms[cast(loc.sources[j], u64)].borrows) { body = true; }\n",
-      "new": "        while (j < 1 && j < loc.count) {\n            if (s->atoms[cast(loc.sources[j], u64)].borrows) { body = true; }\n",
+      "old": "        while (j < loc.count) {\n            atom item = s->atoms[cast(loc.sources[j], u64)];\n",
+      "new": "        while (j < 1 && j < loc.count) {\n            atom item = s->atoms[cast(loc.sources[j], u64)];\n",
       "what": "a leaf of storage without slots reads the reference fact of its first atom only"
     },
     {
@@ -1835,8 +1835,8 @@
     {
       "decision": "D17.14-copy-global-address",
       "file": "src/fort/ownership_heap.ft",
-      "old": "        if (rv.place.base == fir.base_kind.bk_global && !fir.place_indirect(c->f, rv.place)) {\n            return input_value();\n",
-      "new": "        if (false) {\n            return input_value();\n",
+      "old": "        if (rv.place.base == fir.base_kind.bk_global && !fir.place_indirect(c->f, rv.place)) {\n            return static_value();\n",
+      "new": "        if (false) {\n            return static_value();\n",
       "what": "the address of a global is a lost reference, so its copy gives incomplete proof"
     },
     {
@@ -1866,6 +1866,195 @@
       "old": "        if (!pay(c, 1)) { return true; }\n        if (!args[i].aggregate && is_reference(args[i].ty)) { return true; }\n",
       "new": "        if (!args[i].aggregate && is_reference(args[i].ty)) { return true; }\n",
       "what": "the scan of the arguments of a call of a callee without a proof pays no W unit"
+    },
+    {
+      "decision": "D17.14-entry-use-copy",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        cast(v.target.id, u64) < c->callers_len) {\n        note_entry_use(c, s, v.target);\n        return;\n",
+      "new": "        cast(v.target.id, u64) < c->callers_len) {\n        return;\n",
+      "what": "a copy of the entry value of a caller slot does not name the slot in the summary"
+    },
+    {
+      "decision": "D17.14-entry-use-call",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    check_entry_uses(c, s, entry, sum, entry_prefixes[..]);\n",
+      "new": "",
+      "what": "a call does not check the caller value of each slot whose entry value the callee copies"
+    },
+    {
+      "decision": "D17.18-entry-use-frame",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "            item.v = entry->slots[at].v;\n",
+      "new": "            item.v = s->slots[at].v;\n",
+      "what": "the check of a copied caller slot reads the state after the frame"
+    },
+    {
+      "decision": "D17.14-entry-use-unbound",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "            if (sum->entry_uses.len > 0) {\n",
+      "new": "            if (false) {\n",
+      "what": "a call that cannot bind the caller storage of a copied reference records no event"
+    },
+    {
+      "decision": "D17.14-entry-use-separate",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    if (!separate_entry_uses(c, s, entry, sum, entry_prefixes[..], bound[..])) { return false; }\n",
+      "new": "",
+      "what": "a copied caller reference may designate storage that the callee releases"
+    },
+    {
+      "decision": "D17.14-entry-use-release-only",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "                if (bound[b] != NONE && releases && reaches_any(c, s, bound[b], found[..n])) {\n",
+      "new": "                if (bound[b] != NONE && reaches_any(c, s, bound[b], found[..n])) {\n",
+      "what": "a copied caller reference must lie outside each bound atom, also one that the callee keeps"
+    },
+    {
+      "decision": "D17.18-entry-use-full",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        c->residual = true;\n        unproved(c, s, ownership_api.incomplete_reason.unknown_effect, NONE,\n            \"each copied reference of caller storage within its list\");\n        return;\n",
+      "new": "        return;\n",
+      "what": "a full use set drops a copied caller slot without incomplete proof"
+    },
+    {
+      "decision": "D17.14-entry-use-once",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    if (at < c->entry_uses.len && key_order(c->entry_uses.items[at], k) == 0) { return; }\n",
+      "new": "",
+      "what": "the use set takes a copied caller slot twice"
+    },
+    {
+      "decision": "D17.14-entry-use-order",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    while (at < c->entry_uses.len && key_order(c->entry_uses.items[at], k) < 0) { at += 1; }\n",
+      "new": "",
+      "what": "the use set does not keep the key order"
+    },
+    {
+      "decision": "D17.18-entry-use-fixed-point",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        b->required_some.items[..b->required_some.len]) ||\n        a->entry_uses.len != b->entry_uses.len) { return true; }\n    u32 mut u = 0;\n    while (u < a->entry_uses.len) {\n        if (key_order(a->entry_uses.items[u], b->entry_uses.items[u]) != 0) { return true; }\n        u += 1;\n    }\n",
+      "new": "        b->required_some.items[..b->required_some.len])) { return true; }\n",
+      "what": "the fixed point of a recursive component does not compare the use sets"
+    },
+    {
+      "decision": "D17.18-entry-use-note-work",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "fn note_entry_use(context mut* c, state* s, slot_key k) void {\n    if (!pay(c, 1)) { return; }\n",
+      "new": "fn note_entry_use(context mut* c, state* s, slot_key k) void {\n",
+      "what": "the scan of the use set pays no W unit"
+    },
+    {
+      "decision": "D17.18-entry-use-check-work",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    while (i < sum->entry_uses.len) {\n        if (!pay(c, 1)) { return; }\n",
+      "new": "    while (i < sum->entry_uses.len) {\n",
+      "what": "the check of a copied caller slot at a call pays no W unit"
+    },
+    {
+      "decision": "D17.18-entry-use-separate-work",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    while (i < sum->entry_uses.len) {\n        if (!pay(c, 1)) { return false; }\n",
+      "new": "    while (i < sum->entry_uses.len) {\n",
+      "what": "the separation of a copied caller slot at a call pays no W unit"
+    },
+    {
+      "decision": "D17.14-unfold-stored-input",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "                    static_value() : (parent.origin != 0 ? stored_input() : joined_input()));\n",
+      "new": "                    static_value() : joined_input());\n",
+      "what": "a field of an entry region is a joined input, so its copy needs nothing"
+    },
+    {
+      "decision": "D17.14-copy-element-external",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        body = loc.external;\n",
+      "new": "        body = false;\n",
+      "what": "a leaf of the storage that a parameter designates needs nothing at its copy"
+    },
+    {
+      "decision": "D17.14-copy-element-origin",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "            if (item.borrows || (item.params && item.origin != 0)) { body = true; }\n",
+      "new": "            if (item.borrows) { body = true; }\n",
+      "what": "a leaf of a member of an input needs nothing at its copy"
+    },
+    {
+      "decision": "D17.14-copy-element-body-made",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "            if (item.borrows || (item.params && item.origin != 0)) { body = true; }\n",
+      "new": "            if (item.borrows || item.params) { body = true; }\n",
+      "what": "a leaf of storage that this body made with a view of a parameter gives incomplete proof"
+    },
+    {
+      "decision": "D17.14-join-entry-values",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "                joined = joined_input();\n",
+      "new": "                joined = static_value();\n",
+      "what": "a join of the entry values of two caller slots is static data"
+    },
+    {
+      "decision": "D17.14-join-stored-input",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "            } else if (same_key(vx.target, stored_input().target) ||\n                same_key(vy.target, stored_input().target)) {\n",
+      "new": "            } else if (false) {\n",
+      "what": "a join of a stored input with an entry value is a joined input"
+    },
+    {
+      "decision": "D17.14-weak-joined",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        value mut both = external_as(v, stored_input()) || external_as(old, stored_input()) ?\n            stored_input() : joined_input();\n",
+      "new": "        value mut both = static_value();\n",
+      "what": "a store of one element joins the entry value of the array into static data"
+    },
+    {
+      "decision": "D17.14-copy-joined-slot",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "            note_entry_use(c, s, k);\n",
+      "new": "",
+      "what": "a copy of a joined input from a caller slot names no slot"
+    },
+    {
+      "decision": "D17.14-copy-unnamed-input",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    if (v.kind == value_kind.unknown && v.external && !external_as(v, static_value())) {\n",
+      "new": "    if (false) {\n",
+      "what": "a copy of a stored input, which no caller slot names, needs nothing"
+    },
+    {
+      "decision": "D17.18-entry-use-possible",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "            check_copy(c, entry, loc, item, certainty.possible, CALL_COPY);\n",
+      "new": "            check_copy(c, entry, loc, item, certainty.definite, CALL_COPY);\n",
+      "what": "a callee copy of some path gives a definite candidate at the call"
+    },
+    {
+      "decision": "D17.14-name-cast",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        value converted = is_reference(t) ? named_operand(c, s, fir.rvalue_operand(c->f, rv, 0)) :\n",
+      "new": "        value converted = false ? named_operand(c, s, fir.rvalue_operand(c->f, rv, 0)) :\n",
+      "what": "a cast to a reference type moves a joined input out of a caller slot without naming it"
+    },
+    {
+      "decision": "D17.14-name-slice",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        name_read(c, s, sliced, sliced_ty, header);\n",
+      "new": "",
+      "what": "a slice moves the reference of a caller slot out without naming the slot"
+    },
+    {
+      "decision": "D17.14-name-entry",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    if (v.target.base == base_kind.caller && cast(v.target.id, u64) < c->callers_len) {\n        note_entry_use(c, s, v.target);\n    } else if",
+      "new": "    if (false) {\n        note_entry_use(c, s, v.target);\n    } else if",
+      "what": "a cast or a slice of an entry value names no slot"
+    },
+    {
+      "decision": "D17.14-name-joined",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    } else if (external_as(v, joined_input()) && loc.kind == location_kind.slots &&\n",
+      "new": "    } else if (false && loc.kind == location_kind.slots &&\n",
+      "what": "a cast or a slice of a joined input names no slot"
     }
   ]
 }

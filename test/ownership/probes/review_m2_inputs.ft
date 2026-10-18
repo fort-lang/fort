@@ -1,0 +1,131 @@
+// Class M review (D17.14, D17.18, spec/fir.md 14.1): a callee copies a reference that a caller
+// stored in storage that no caller slot names. Such storage is a field of a member of an input
+// (`l->h->v`, `o->v`, `l.h->v`), an element of a span parameter (`ps[0]`, `hs[0].p`), or the
+// pointee of a pointer leaf of a by-value aggregate (`w.inner->p`). On 13cc1703 the heap solver
+// alone proved each of the 7 `_dangling` callers. Now each such copy gives incomplete proof, so
+// each callee has no proof, and a call that passes it a reference gives incomplete proof. The
+// `_ok` callers hold the same shapes with a live referent; they lose their proof with the
+// callee (the copy has no check that covers it).
+struct cell { i64 a; }
+struct ph { cell* p; }
+struct wp { ph* inner; }
+struct inner { cell* v; }
+struct boxi { inner mut* own h; }
+fn peek_mid(boxi* l) void { cell* c = l->h->v; }
+fn agg_mid(boxi* l) void { ph t = ph{l->h->v}; }
+fn own_param(inner mut* own o) void { cell* c = o->v; del(o); }
+fn val_param(boxi l) void { cell* c = l.h->v; del(l.h); }
+fn span_el(cell*@ ps) void { cell* c = ps[0]; }
+fn span_field(ph@ hs) void { cell* c = hs[0].p; }
+fn byval_load(wp w) void { cell* c = w.inner->p; }
+fn mid_peek_dangling() i64 {
+    cell mut* own b = new(cell);
+    boxi mut l = boxi{new(inner)};
+    l.h->v = b;
+    del(b);
+    peek_mid(&l);
+    del(l.h);
+    return 0;
+}
+fn mid_peek_ok() i64 {
+    cell mut* own b = new(cell);
+    boxi mut l = boxi{new(inner)};
+    l.h->v = b;
+    peek_mid(&l);
+    del(l.h);
+    del(b);
+    return 0;
+}
+fn agg_mid_dangling() i64 {
+    cell mut* own b = new(cell);
+    boxi mut l = boxi{new(inner)};
+    l.h->v = b;
+    del(b);
+    agg_mid(&l);
+    del(l.h);
+    return 0;
+}
+fn agg_mid_ok() i64 {
+    cell mut* own b = new(cell);
+    boxi mut l = boxi{new(inner)};
+    l.h->v = b;
+    agg_mid(&l);
+    del(l.h);
+    del(b);
+    return 0;
+}
+fn own_param_dangling() i64 {
+    cell mut* own b = new(cell);
+    inner mut* own o = new(inner);
+    o->v = b;
+    del(b);
+    own_param(move(o));
+    return 0;
+}
+fn own_param_ok() i64 {
+    cell mut* own b = new(cell);
+    inner mut* own o = new(inner);
+    o->v = b;
+    own_param(move(o));
+    del(b);
+    return 0;
+}
+fn val_param_dangling() i64 {
+    cell mut* own b = new(cell);
+    boxi mut l = boxi{new(inner)};
+    l.h->v = b;
+    del(b);
+    val_param(move(l));
+    return 0;
+}
+fn val_param_ok() i64 {
+    cell mut* own b = new(cell);
+    boxi mut l = boxi{new(inner)};
+    l.h->v = b;
+    val_param(move(l));
+    del(b);
+    return 0;
+}
+fn span_el_dangling() i64 {
+    cell mut* own b = new(cell);
+    cell*[1] mut arr = {b};
+    del(b);
+    span_el(arr[..]);
+    return 0;
+}
+fn span_el_ok() i64 {
+    cell mut* own b = new(cell);
+    cell*[1] mut arr = {b};
+    span_el(arr[..]);
+    del(b);
+    return 0;
+}
+fn span_field_dangling() i64 {
+    cell mut* own b = new(cell);
+    ph[1] mut hs = {ph{b}};
+    del(b);
+    span_field(hs[..]);
+    return 0;
+}
+fn span_field_ok() i64 {
+    cell mut* own b = new(cell);
+    ph[1] mut hs = {ph{b}};
+    span_field(hs[..]);
+    del(b);
+    return 0;
+}
+fn byval_load_dangling() i64 {
+    cell mut* own b = new(cell);
+    ph h = ph{b};
+    del(b);
+    byval_load(wp{&h});
+    return 0;
+}
+fn byval_load_ok() i64 {
+    cell mut* own b = new(cell);
+    ph h = ph{b};
+    byval_load(wp{&h});
+    del(b);
+    return 0;
+}
+fn main() i32 { return 0; }

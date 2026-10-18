@@ -1,0 +1,61 @@
+// Class M wrappers (D17.14, D17.18): a caller passes storage that holds a reference, and a
+// callee, alone or through one or two wrappers, loads the reference and reads through it. The
+// final review of the loaded-source gate measured these bodies on 2026-10-15: the heap solver
+// alone proved `bad`, `bad_wrap`, `bad_wrap2` and `null_holder`. Each releases the referent
+// before the call, or passes null. On 0d995df2 the heap solver alone proves none of them: a read
+// through a reference that a callee loads from caller storage gives incomplete proof, and each
+// caller of a callee without a proof that passes it a reference gives incomplete proof too.
+// `bad_pick` reads a returned loaded reference after the release. The `good` bodies hold the
+// same shapes with a live referent.
+struct cell { i64 a; }
+struct ph { cell* p; }
+struct pph { ph* inner; }
+ph mut gph = ph{null};
+fn read2(ph* h) i64 { i64* q = &h->p->a; return *q; }
+fn wrap(ph* h) i64 { return read2(h); }
+fn wrap2(ph* h) i64 { return wrap(h); }
+fn deep(pph* h) i64 { ph* i = h->inner; return read2(i); }
+fn good() i64 { cell mut* own b = new(cell); ph h = ph{b}; i64 r = read2(&h); del(b); return r; }
+fn good_wrap() i64 {
+    cell mut* own b = new(cell);
+    ph h = ph{b};
+    i64 r = wrap(&h);
+    del(b);
+    return r;
+}
+fn good_wrap2() i64 {
+    cell mut* own b = new(cell);
+    ph h = ph{b};
+    i64 r = wrap2(&h);
+    del(b);
+    return r;
+}
+fn bad() i64 { cell mut* own b = new(cell); ph h = ph{b}; del(b); return read2(&h); }
+fn bad_wrap() i64 { cell mut* own b = new(cell); ph h = ph{b}; del(b); return wrap(&h); }
+fn bad_wrap2() i64 { cell mut* own b = new(cell); ph h = ph{b}; del(b); return wrap2(&h); }
+fn pick(ph* h) cell* { return h->p; }
+fn good_pick() i64 {
+    cell mut* own b = new(cell);
+    ph h = ph{b};
+    cell* c = pick(&h);
+    i64 r = c->a;
+    del(b);
+    return r;
+}
+fn bad_pick() i64 {
+    cell mut* own b = new(cell);
+    ph h = ph{b};
+    cell* c = pick(&h);
+    del(b);
+    return c->a;
+}
+fn null_holder() i64 { ph h = ph{null}; return read2(&h); }
+fn good_global() i64 {
+    cell mut* own b = new(cell);
+    gph.p = b;
+    i64 r = read2(&gph);
+    gph.p = null;
+    del(b);
+    return r;
+}
+fn main() i32 { return 0; }

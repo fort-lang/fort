@@ -9,6 +9,7 @@
 //| repeated solves agree
 //| the interface bit set
 //| array literal work
+//| entry use work
 //| heap limits ok
 /// Checks the finite bounds of the heap proof (D17.18, `spec/fir.md` 14.1): W per computation,
 /// H and R per state, and the interface bit set.
@@ -317,6 +318,36 @@ fn literal_elements() void {
     assert(nulls > zero && 2 * (nulls - zero) == four - one);
 }
 
+// The W use of the caller `lit` of the callee `take` in `text`, which both prove. `lit` is the
+// second computation, because each callee component comes first.
+fn caller_work(string@ text) u64 {
+    string[2] names = {"take", "lit"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text, names[..]);
+    assert(ownership_heap_env.proved(&c, "take") && ownership_heap_env.proved(&c, "lit"));
+    assert(c.counts.computations == 2);
+    return c.counts.used[1];
+}
+
+// A copy of the entry value of a caller slot pays one W unit in each pass for the scan of the
+// use set (D17.14, D17.18). The copy of another input pays nothing more. The caller of a callee
+// with one use pays one unit to check it and one unit to keep it apart from released atoms, in
+// each pass. Each body has two passes: one to the stable state and the final pass.
+fn entry_use_work() void {
+    println("entry use work");
+    u64 entry = literal_work(
+        "struct ph { i32* p; } fn lit(ph* h, i32* q) void { i32* a = h->p; i32* b = a; }");
+    u64 input = literal_work(
+        "struct ph { i32* p; } fn lit(ph* h, i32* q) void { i32* a = h->p; i32* b = q; }");
+    assert(entry == input + 2);
+    string[3] copies = {"struct ph { i32* p; }", "fn take(ph* h) void { i32* c = h->p; }",
+        "fn lit(i32* q) void { ph h = ph{q}; take(&h); }"};
+    string[3] plain = {"struct ph { i32* p; }", "fn take(ph* h) void { i32* c = null; }",
+        "fn lit(i32* q) void { ph h = ph{q}; take(&h); }"};
+    assert(caller_work(copies[..]) == caller_work(plain[..]) + 4);
+}
+
 fn main() i32 {
     work();
     frame_stop();
@@ -327,6 +358,7 @@ fn main() i32 {
     deterministic();
     interface_bits();
     literal_elements();
+    entry_use_work();
     println("heap limits ok");
     return 0;
 }

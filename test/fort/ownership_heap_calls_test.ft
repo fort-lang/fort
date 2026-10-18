@@ -14,6 +14,8 @@
 //| whole-array stores
 //| array leaves below the path bound
 //| casts of element addresses
+//| copies of loaded caller references
+//| copies of loaded inputs
 //| heap calls ok
 /// Checks heap summaries at calls (D17.16, D17.18, `spec/fir.md` 14 Calls).
 import ownership_api;
@@ -853,6 +855,17 @@ fn copy_candidate(ownership_heap_env.closure* c, string name, u32 line, string l
         ownership_heap_env.text(&row) == leaf;
 }
 
+// The only event of `name` is an invalid use of the copied caller slot `leaf` at the call at line
+// `line`. The callee copies on some path, so the certainty is possible (D17.18).
+fn use_candidate(ownership_heap_env.closure* c, string name, u32 line, string leaf) bool {
+    ownership_heap_env.event_row row = ownership_heap_env.first(c, name);
+    return ownership_heap_env.events(c, name) == 1 &&
+        row.kind == ownership_api.event_kind.invalid_use &&
+        row.certainty == ownership_api.certainty.possible &&
+        row.reason == ownership_api.incomplete_reason.missing_path && row.line == line &&
+        ownership_heap_env.text(&row) == leaf;
+}
+
 // The only event of `name` is the incomplete proof of a call of a callee without a proof.
 fn unproved_call(ownership_heap_env.closure* c, string name) bool {
     return ownership_heap_env.events(c, name) == 1 &&
@@ -1003,6 +1016,274 @@ fn copied_scalars() void {
     assert(unproved_call(&c, "box_pass_bad"));
 }
 
+// Whether the use set of `name` holds exactly the caller slots `uses`, in order: each a caller
+// storage base, its id and its first field.
+fn entry_uses_are(ownership_heap_env.closure* c, string name, u32[2]@ uses) bool {
+    ownership_heap.summary* s = ownership_heap_env.summary(c, name);
+    if (cast(s->entry_uses.len, u64) != uses.len) { return false; }
+    u64 mut i = 0;
+    while (i < uses.len) {
+        ownership_heap.slot_key k = s->entry_uses.items[i];
+        if (k.base != ownership_heap.base_kind.caller || k.id != uses[i][0] || k.depth == 0 ||
+            k.path[0] != uses[i][1]) { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+// The first event of `name` is incomplete proof with the text `what` at line `line`.
+fn unproved_at(ownership_heap_env.closure* c, string name, u32 line, string what) bool {
+    ownership_heap_env.event_row row = ownership_heap_env.first(c, name);
+    return row.kind == ownership_api.event_kind.incomplete_proof &&
+        row.reason == ownership_api.incomplete_reason.unknown_effect && row.line == line &&
+        ownership_heap_env.text(&row) == what;
+}
+
+// A callee that loads a reference from caller storage and copies it uses the reference that the
+// caller holds in that slot (D17.14, `spec/fir.md` 14.1). The callee cannot check it, so its
+// summary names the slot, and the caller checks its own value of the slot at the call. A
+// wrapper passes an entry value of its own on. The summary does not order a copy and a release
+// of the callee, so the reference must not designate storage that the callee releases. Storage
+// that the call cannot bind, and a set of more than 16 slots, give incomplete proof.
+fn loaded_copies() void {
+    println("copies of loaded caller references");
+    string[43] text = {
+        "struct ph { i32* p; }",
+        "struct outer { ph inner; }",
+        "struct box { i32 mut* own c; }",
+        "fn pick(ph* h) i32* { return h->p; }",
+        "fn copy_over(ph mut* d, ph* s) void { d->p = s->p; }",
+        "fn wrap_copy(ph mut* d, ph* s) void { copy_over(d, s); }",
+        "fn peek(ph* h) void { i32* c = h->p; }",
+        "fn both(ph* a, outer* o) void { i32* x = a->p; i32* y = o->inner.p; i32* z = x; }",
+        "fn rel_copy(box mut* bx, ph mut* d, ph* s) void { del(bx->c); d->p = s->p; }",
+        "fn noop(ph* h) void {}",
+        "fn copy_bad(i32 mut* own p) void { ph s = ph{p}; ph mut d = ph{null}; del(p);",
+        "    copy_over(&d, &s); }",
+        "fn copy_ok(i32 mut* own p) void { ph s = ph{p}; ph mut d = ph{null}; copy_over(&d, &s);",
+        "    del(p); }",
+        "fn wrap_bad(i32 mut* own p) void { ph s = ph{p}; ph mut d = ph{null}; del(p);",
+        "    wrap_copy(&d, &s); }",
+        "fn peek_bad(i32 mut* own p) void { ph h = ph{p}; del(p); peek(&h); }",
+        "fn noop_ok(i32 mut* own p) void { ph h = ph{p}; del(p); noop(&h); }",
+        "fn input_ok(ph* h) void { peek(h); }",
+        "fn cell_bad(i32 mut* own p) void { ph mut* own n = new(ph); n->p = p; del(p); peek(n);",
+        "    del(n); }",
+        "fn ended_bad() void { ph mut h = ph{null}; { i32 x = 1; h.p = &x; } peek(&h); }",
+        "fn release_bad() void { box mut bx = box{new(i32)}; ph s = ph{bx.c}; ph mut d = ph{null};",
+        "    rel_copy(&bx, &d, &s); }",
+        "fn release_ok(i32* q) void { box mut bx = box{new(i32)}; ph s = ph{q};",
+        "    ph mut d = ph{null}; rel_copy(&bx, &d, &s); }",
+        "fn span_peek(i32* q) void { ph mut@ own sp = new(ph, 2); sp[1].p = q; peek(&sp[1]);",
+        "    del(sp); }",
+        "struct wide { i32* a; i32* b; i32* c; i32* d; i32* e; i32* f; i32* g; i32* h; i32* i;",
+        "    i32* j; i32* k; i32* l; i32* m; i32* n; i32* o; i32* p; i32* q; }",
+        "fn copy_all(wide* w) void { i32* xa = w->a; i32* xb = w->b; i32* xc = w->c;",
+        "    i32* xd = w->d; i32* xe = w->e; i32* xf = w->f; i32* xg = w->g; i32* xh = w->h;",
+        "    i32* xi = w->i; i32* xj = w->j; i32* xk = w->k; i32* xl = w->l; i32* xm = w->m;",
+        "    i32* xn = w->n; i32* xo = w->o; i32* xp = w->p;",
+        "    i32* xq = w->q; }",
+        "fn copy_most(wide* w) void { i32* xa = w->a; i32* xb = w->b; i32* xc = w->c;",
+        "    i32* xd = w->d; i32* xe = w->e; i32* xf = w->f; i32* xg = w->g; i32* xh = w->h;",
+        "    i32* xi = w->i; i32* xj = w->j; i32* xk = w->k; i32* xl = w->l; i32* xm = w->m;",
+        "    i32* xn = w->n; i32* xo = w->o; i32* xp = w->p; }",
+        "fn wide_call(wide* w) void { copy_all(w); }",
+        "fn keep_copy(box mut* bx, ph mut* d, ph* s) void { d->p = s->p; }",
+        "fn keep_ok() void { box mut bx = box{new(i32)}; ph s = ph{bx.c}; ph mut d = ph{null};",
+        "    keep_copy(&bx, &d, &s); del(bx.c); }",
+    };
+    string[23] names = {"pick", "copy_over", "wrap_copy", "peek", "both", "rel_copy", "noop",
+        "copy_bad", "copy_ok", "wrap_bad", "peek_bad", "noop_ok", "input_ok", "cell_bad",
+        "ended_bad", "release_bad", "release_ok", "span_peek", "copy_all", "copy_most",
+        "wide_call", "keep_copy", "keep_ok"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    // A copy into the result, into caller storage and into a local each name the slot. A
+    // wrapper names the slot of its own caller storage, and a callee that copies nothing names
+    // none. Each body proves.
+    u32[1][2] first = {{0, 0}};
+    u32[1][2] second = {{1, 0}};
+    u32[2][2] two = {{0, 0}, {1, 0}};
+    u32[1][2] none = {};
+    assert(ownership_heap_env.proved(&c, "pick") && entry_uses_are(&c, "pick", first[..]));
+    assert(ownership_heap_env.proved(&c, "copy_over") &&
+        entry_uses_are(&c, "copy_over", second[..]));
+    assert(ownership_heap_env.proved(&c, "wrap_copy") &&
+        entry_uses_are(&c, "wrap_copy", second[..]));
+    assert(ownership_heap_env.proved(&c, "peek") && entry_uses_are(&c, "peek", first[..]));
+    assert(ownership_heap_env.proved(&c, "noop") && entry_uses_are(&c, "noop", none[..0]));
+    // Two slots of two caller storages, in key order. A copy of a copy names no slot again.
+    assert(ownership_heap_env.proved(&c, "both") && entry_uses_are(&c, "both", two[..]));
+    assert(ownership_heap_env.summary(&c, "both")->entry_uses.items[1].depth == 2);
+    // The caller checks its value of the slot at the call: a released view, through one
+    // wrapper too, a released source of a cell field, and an address of an ended local. The
+    // callee copies on some path, so each candidate is possible (D17.18).
+    assert(use_candidate(&c, "copy_bad", 12, "s.p"));
+    assert(ownership_heap_env.proved(&c, "copy_ok"));
+    assert(use_candidate(&c, "wrap_bad", 16, "s.p"));
+    assert(use_candidate(&c, "peek_bad", 17, "h.p"));
+    assert(use_candidate(&c, "cell_bad", 20, "n->p"));
+    assert(use_candidate(&c, "ended_bad", 22, "h.p"));
+    // A dangling slot that the callee does not copy needs nothing. An entry value of the
+    // caller passes the use on to its own callers.
+    assert(ownership_heap_env.proved(&c, "noop_ok"));
+    assert(ownership_heap_env.proved(&c, "input_ok") &&
+        entry_uses_are(&c, "input_ok", first[..]));
+    // The callee releases `bx->c` and copies `s->p`, which views it: the release can come first.
+    assert(unproved_at(&c, "release_bad", 24, "that the arguments of this call are separate"));
+    assert(ownership_heap_env.proved(&c, "release_ok"));
+    // A bound atom that the callee keeps can own the storage of the copied reference.
+    assert(ownership_heap_env.proved(&c, "keep_ok"));
+    // An element of a span is a flat atom, so the call cannot bind its caller storage.
+    assert(unproved_at(&c, "span_peek", 27,
+        "the caller storage of a reference that this call copies"));
+    // 16 slots fit the set. A 17th gives incomplete proof, and the summary is residual, so a
+    // caller that passes a reference gives incomplete proof at the call.
+    assert(ownership_heap_env.proved(&c, "copy_most"));
+    assert(ownership_heap_env.summary(&c, "copy_most")->entry_uses.len == 16);
+    assert(unproved_at(&c, "copy_all", 35,
+        "each copied reference of caller storage within its list"));
+    assert(ownership_heap_env.summary(&c, "copy_all")->residual);
+    assert(ownership_heap_env.first_text(&c, "wide_call") ==
+        "a call of a function without a proof");
+    // In a recursive component a use reaches one more member in each round: the members run in
+    // their order, and only `ring_f` copies. Each member reads `h->n`, so the other facts stop
+    // changing after round 2. The fixed point must compare the use sets too. Without that
+    // comparison the solve stops after round 3, `ring_a` and `ring_b` name no slot, and
+    // `ring_bad` proves (measured on 2026-10-18).
+    string[10] ring = {
+        "struct ph { i32* p; u32 n; }",
+        "fn ring_a(ph* h) void { if (h->n == 0) { return; } ring_b(h); }",
+        "fn ring_b(ph* h) void { if (h->n == 0) { return; } ring_c(h); }",
+        "fn ring_c(ph* h) void { if (h->n == 0) { return; } ring_d(h); }",
+        "fn ring_d(ph* h) void { if (h->n == 0) { return; } ring_e(h); }",
+        "fn ring_e(ph* h) void { if (h->n == 0) { return; } ring_f(h); }",
+        "fn ring_f(ph* h) void { i32* c = h->p; if (h->n == 0) { return; }",
+        "    ring_a(h); }",
+        "fn ring_bad(i32 mut* own p) void { ph h = ph{p, 4}; del(p); ring_a(&h); }",
+        "fn ring_ok(i32 mut* own p) void { ph h = ph{p, 4}; ring_a(&h); del(p); }",
+    };
+    string[8] ring_names = {"ring_a", "ring_b", "ring_c", "ring_d", "ring_e", "ring_f", "ring_bad",
+        "ring_ok"};
+    ownership_heap_env.closure mut r = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&r);
+    ownership_heap_env.run(&r, ring[..], ring_names[..]);
+    u64 mut m = 0;
+    while (m < 6) {
+        assert(ownership_heap_env.proved(&r, ring_names[m]) &&
+            entry_uses_are(&r, ring_names[m], first[..]));
+        m += 1;
+    }
+    assert(ownership_heap_env.rounds(&r, "ring_a") > 5);
+    assert(use_candidate(&r, "ring_bad", 9, "h.p"));
+    assert(ownership_heap_env.proved(&r, "ring_ok"));
+}
+
+// A copy needs nothing only when it names the caller slot of its entry value, or when its value
+// is valid by a fact of the proof: static data, a view of a parameter, or a reference that this
+// body copied into storage that it made (D17.14, `spec/fir.md` 14.1). A join of entry values of
+// two caller slots, or of a stored element with one, names the slot that a later copy reads. A
+// cast or a slice that moves a reference out of a caller slot names the slot too. A reference
+// that a caller stored in heap storage, or in the storage of a span or a pointer parameter, has
+// no check that covers it, so its copy gives incomplete proof.
+fn loaded_inputs() void {
+    println("copies of loaded inputs");
+    string[45] text = {
+        "struct ph { i32* p; }",
+        "struct arrh { i32*[2] ps; }",
+        "struct node { i32* v; node mut* own next; i32 n; }",
+        "struct list { node mut* own head; }",
+        "struct inner { i32* v; }",
+        "struct boxi { inner mut* own h; }",
+        "struct wp { ph* inner; }",
+        "fn join_two(ph mut* h, ph* g, bool f) void { if (f) { h->p = g->p; } i32* c = h->p; }",
+        "fn join_bad(i32 mut* own b, i32* k, bool f) void { ph mut h = ph{b}; ph g = ph{k};",
+        "    del(b); join_two(&h, &g, f); }",
+        "fn join_ok(i32* b, i32* k, bool f) void { ph mut h = ph{b}; ph g = ph{k};",
+        "    join_two(&h, &g, f); }",
+        "fn weak(arrh mut* h, i32* q) void { h->ps[0] = q; arrh t = *h; }",
+        "fn weak_bad(i32 mut* own b, i32* k) void { arrh mut a = arrh{{k, b}}; del(b);",
+        "    weak(&a, k); }",
+        "fn weak_ok(i32* b, i32* k) void { arrh mut a = arrh{{k, b}}; weak(&a, k); }",
+        "fn peekv(list* l) i32* { return l->head->v; }",
+        "fn region_join(list mut* l, ph* g, bool f) void { i32 x = l->head->n;",
+        "    if (f) { l->head->v = g->p; } i32* c = l->head->v; }",
+        "fn peek_mid(boxi* l) void { i32* c = l->h->v; }",
+        "fn own_param(inner mut* own o) void { i32* c = o->v; del(o); }",
+        "fn span_el(i32*@ ps) void { i32* c = ps[0]; }",
+        "fn byval_load(wp w) void { i32* c = w.inner->p; }",
+        "fn span_el_bad(i32 mut* own b) void { i32*[1] mut arr = {b}; del(b);",
+        "    span_el(arr[..]); }",
+        "fn byval_bad(i32 mut* own b) void { ph h = ph{b}; del(b); byval_load(wp{&h}); }",
+        "fn fresh_ok(i32* q) void { inner mut@ own a = new(inner, 1); a[0].v = q;",
+        "    i32* c = a[0].v; del(a); }",
+        "fn drop(node mut* own n) void { if (n == null) { return; } drop(move(n->next)); del(n); }",
+        "fn mk_copy(i32* p, u64 k) void { node mut* own mut h = null; u64 mut i = 0;",
+        "    while (i < k) { node mut* own n = new(node); n->v = p; n->next = move(h);",
+        "        h = move(n); i += 1; } if (h != null) { i32* c = h->v; } drop(move(h)); }",
+        "struct hs { u8@ s; }",
+        "fn join_cast(ph mut* h, ph* g, bool f) void { if (f) { h->p = g->p; }",
+        "    i32* c = cast(h->p, i32*); i32* d = c; }",
+        "fn cast_bad(i32 mut* own b, i32* k, bool f) void { ph mut h = ph{b}; ph g = ph{k};",
+        "    del(b); join_cast(&h, &g, f); }",
+        "fn cast_ok(i32* b, i32* k, bool f) void { ph mut h = ph{b}; ph g = ph{k};",
+        "    join_cast(&h, &g, f); }",
+        "fn view(hs* h) u8@ { return h->s[..]; }",
+        "fn slice_bad(u8 mut@ own b) void { hs h = hs{b[..4]}; del(b); u8@ v = view(&h); }",
+        "fn slice_ok(u8 mut@ own b) void { hs h = hs{b[..4]}; u8@ v = view(&h); del(b); }",
+        "fn join_view(hs mut* h, hs* g, bool f) u8@ { if (f) { h->s = g->s; } return h->s[..]; }",
+        "fn jslice_bad(u8 mut@ own b, u8@ k, bool f) void { hs mut h = hs{b[..4]}; hs g = hs{k};",
+        "    del(b); u8@ v = join_view(&h, &g, f); }",
+    };
+    string[25] names = {"join_two", "join_bad", "join_ok", "weak", "weak_bad", "weak_ok", "peekv",
+        "region_join", "peek_mid", "own_param", "span_el", "byval_load", "span_el_bad",
+        "byval_bad", "fresh_ok", "drop", "mk_copy", "join_cast", "cast_bad", "cast_ok", "view",
+        "slice_bad", "slice_ok", "join_view", "jslice_bad"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    u32[1][2] first = {{0, 0}};
+    u32[2][2] both = {{0, 0}, {1, 0}};
+    // A join of the entry values of `h->p` and `g->p` names `h->p` at its copy from that slot.
+    assert(ownership_heap_env.proved(&c, "join_two") &&
+        entry_uses_are(&c, "join_two", both[..]));
+    assert(use_candidate(&c, "join_bad", 10, "h.p"));
+    assert(ownership_heap_env.proved(&c, "join_ok"));
+    // A store of one element joins it with the entry value of the array, so the whole copy
+    // names the array slot.
+    assert(ownership_heap_env.proved(&c, "weak") && entry_uses_are(&c, "weak", first[..]));
+    assert(use_candidate(&c, "weak_bad", 15, "a reference that this call copies"));
+    assert(ownership_heap_env.proved(&c, "weak_ok"));
+    // A field of an entry region holds a stored input, also after a join with an entry value.
+    assert(unproved_at(&c, "peekv", 17, "l->head->v"));
+    assert(unproved_at(&c, "region_join", 19, "l->head->v"));
+    // A field of a flat member of an input, of an element of a span parameter, and behind a
+    // pointer leaf of a by-value aggregate. A caller that passes a reference to such a callee
+    // gives incomplete proof at the call.
+    assert(unproved_at(&c, "peek_mid", 20, ownership_heap.ASSIGNMENT_COPY));
+    assert(unproved_at(&c, "own_param", 21, ownership_heap.ASSIGNMENT_COPY));
+    assert(unproved_at(&c, "span_el", 22, ownership_heap.ASSIGNMENT_COPY));
+    assert(unproved_at(&c, "byval_load", 23, ownership_heap.ASSIGNMENT_COPY));
+    assert(unproved_call(&c, "span_el_bad"));
+    assert(unproved_call(&c, "byval_bad"));
+    // Storage and a region that this body made keep what it copied there: a view of `q` or `p`.
+    assert(ownership_heap_env.proved(&c, "fresh_ok"));
+    assert(ownership_heap_env.proved(&c, "mk_copy"));
+    // A cast and a slice move a reference out of a caller slot without a copy, so each names the
+    // slot: a joined input names the slot that it leaves, and an entry value names its own.
+    assert(ownership_heap_env.proved(&c, "join_cast") &&
+        entry_uses_are(&c, "join_cast", both[..]));
+    assert(use_candidate(&c, "cast_bad", 37, "h.p"));
+    assert(ownership_heap_env.proved(&c, "cast_ok"));
+    assert(ownership_heap_env.proved(&c, "view") && entry_uses_are(&c, "view", first[..]));
+    assert(use_candidate(&c, "slice_bad", 41, "h.s"));
+    assert(ownership_heap_env.proved(&c, "slice_ok"));
+    assert(ownership_heap_env.proved(&c, "join_view") &&
+        entry_uses_are(&c, "join_view", both[..]));
+    assert(use_candidate(&c, "jslice_bad", 45, "h.s"));
+}
+
 fn main() i32 {
     caller_storage();
     separate_instances();
@@ -1017,6 +1298,8 @@ fn main() i32 {
     array_stores();
     deep_leaves();
     element_casts();
+    loaded_copies();
+    loaded_inputs();
     println("heap calls ok");
     return 0;
 }

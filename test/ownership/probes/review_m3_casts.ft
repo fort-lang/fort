@@ -1,0 +1,114 @@
+// Class M review, round 2 (D17.14, D17.17, D17.18): a callee joins the entry values of two caller
+// slots, casts the slot to a pointer type, and copies the result. On the path where f is false
+// the copy reads the dangling entry value of `h->p`. On 07832282 the cast moved the joined input
+// into a local without a copy check, so no copy named `h->p`, and the heap solver alone proved
+// jc_local_dangling, jc_store_dangling and jc_void_dangling. A cast and a slice now name the
+// caller slot that their reference leaves. `view_dangling` releases a span before a callee
+// returns a slice of it; main and 07832282 prove it. The `_ok` bodies hold the same shapes with
+// live referents.
+struct cell { i64 a; }
+struct ph { cell* p; }
+struct vh { void* p; }
+struct holder { u8@ s; }
+fn jc_local(ph mut* h, ph* g, bool f) void {
+    if (f) { h->p = g->p; }
+    cell* c = cast(h->p, cell*);
+    cell* d = c;
+}
+fn jc_store(ph mut* h, ph* g, ph mut* o, bool f) void {
+    if (f) { h->p = g->p; }
+    cell* c = cast(h->p, cell*);
+    o->p = c;
+}
+fn jc_void(vh mut* h, vh* g, bool f) void {
+    if (f) { h->p = g->p; }
+    cell* c = cast(h->p, cell*);
+    cell* d = c;
+}
+fn ent_local(ph* h) void { cell* c = cast(h->p, cell*); cell* d = c; }
+fn view(holder* h) u8@ { return h->s[..]; }
+fn jc_local_dangling(bool f) i64 {
+    cell mut* own b = new(cell);
+    cell mut* own x = new(cell);
+    ph mut h = ph{b};
+    ph g = ph{x};
+    del(b);
+    jc_local(&h, &g, f);
+    del(x);
+    return 0;
+}
+fn jc_local_ok(bool f) i64 {
+    cell mut* own b = new(cell);
+    cell mut* own x = new(cell);
+    ph mut h = ph{b};
+    ph g = ph{x};
+    jc_local(&h, &g, f);
+    del(b);
+    del(x);
+    return 0;
+}
+fn jc_store_dangling(bool f) i64 {
+    cell mut* own b = new(cell);
+    cell mut* own x = new(cell);
+    ph mut h = ph{b};
+    ph g = ph{x};
+    ph mut o = ph{null};
+    del(b);
+    jc_store(&h, &g, &o, f);
+    del(x);
+    return 0;
+}
+fn jc_store_ok(bool f) i64 {
+    cell mut* own b = new(cell);
+    cell mut* own x = new(cell);
+    ph mut h = ph{b};
+    ph g = ph{x};
+    ph mut o = ph{null};
+    jc_store(&h, &g, &o, f);
+    del(b);
+    del(x);
+    return 0;
+}
+fn jc_void_dangling(bool f) i64 {
+    cell mut* own b = new(cell);
+    cell mut* own x = new(cell);
+    vh mut h = vh{cast(b, void*)};
+    vh g = vh{cast(x, void*)};
+    del(b);
+    jc_void(&h, &g, f);
+    del(x);
+    return 0;
+}
+fn jc_void_ok(bool f) i64 {
+    cell mut* own b = new(cell);
+    cell mut* own x = new(cell);
+    vh mut h = vh{cast(b, void*)};
+    vh g = vh{cast(x, void*)};
+    jc_void(&h, &g, f);
+    del(b);
+    del(x);
+    return 0;
+}
+fn ent_local_dangling() i64 {
+    cell mut* own b = new(cell);
+    ph h = ph{b};
+    del(b);
+    ent_local(&h);
+    return 0;
+}
+fn view_dangling() i64 {
+    u8 mut@ own b = new(u8, 4);
+    holder h = holder{b[..4]};
+    del(b);
+    u8@ v = view(&h);
+    return 0;
+}
+fn view_ok() i64 {
+    u8 mut@ own b = new(u8, 4);
+    holder h = holder{b[..4]};
+    u8@ v = view(&h);
+    u8 x = v[0];
+    del(b);
+    return 0;
+}
+fn main() i32 { return 0; }

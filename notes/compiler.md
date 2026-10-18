@@ -1055,9 +1055,55 @@ came here.
     prove on main: a copy of a live element beside a dangling one, a copy of a null element
     after the release of the other element (as a local, a store and an argument), a copy of a
     live element, and a copy of an element of a parameter array.
-  An unknown reference value is external (an input of the caller, or a field of a region whose
-  fold found only external references), the work of an unknown effect (`exact`), or a
-  reference whose facts the body lost, for example in a join of a local address with a view.
+  A copy of the entry value of a caller slot uses the reference that the caller holds in that
+  slot (D17.14, `spec/fir.md` 14.1). The body cannot check that reference, so `check_copy` puts
+  the slot into `summary.entry_uses` (`note_entry_use`). The set holds at most 16 caller slots in
+  `key_order`. A 17th slot gives incomplete proof and a residual summary. At a call,
+  `check_entry_uses` reads the caller value of each slot of the set in the entry state, before
+  the frame, and checks it as a copy. A released source is an invalid use at the call, and an
+  entry value of the caller passes the use on to its own callers. A call that cannot bind the
+  caller storage gives incomplete proof. The summary does not order a copy and a release, so
+  `separate_entry_uses` gives incomplete proof when an owned edge from a bound interface atom
+  that the callee releases reaches the storage of the copied reference. A copy of an entry value
+  pays one W unit for the scan of the set, and a call pays two units for each slot of the set.
+  A recursive component compares the sets at its fixed point, because a use reaches one more
+  member in each round (`ring_a` of `ownership_heap_calls_test.ft`). Before this rule the heap
+  solver alone proved 10 faulty callers of `test/ownership/probes/loaded_copies.ft` on
+  0d995df2. In each, a callee with a proof copied a reference that its caller had released: into
+  a local, the result, caller storage, a new cell, an array or a span, or after the callee
+  released the referent itself. Against 0d995df2 the rule changed no row of
+  `test/ownership/heap_rows.txt` (measured on 2026-10-18). A use of some path gives a possible
+  candidate at the call (D17.18).
+  A copy needs nothing only when it names a caller slot, or when a fact of the proof makes its
+  value valid: static data, a view of a parameter (the caller checks the argument), or a
+  reference that this body copied into storage that it made. Four external values hold this
+  (`static_value`, `entry_value`, `joined_input`, `stored_input`). A join of two entry values,
+  or a store of one array element over an entry value, gives a joined input. Each part of it
+  named its use when the body copied it into its slot, so its copy from a caller slot names that
+  slot, which can still hold its entry value, and its copy from another slot needs nothing. A
+  stored input is a field that an unfold of a member of an input makes a slot: a reference that
+  a caller stored, which no caller slot names. Its copy gives incomplete proof, and a join keeps
+  it a stored input. A copy from storage without slots gives incomplete proof when the storage
+  is that of a parameter (`external`), or a member of an input (`origin`) with `params`, or an
+  atom with `borrows`. Before this rule the heap solver alone proved 10 faulty bodies of the
+  review on main: `test/ownership/probes/review_m1_joins.ft` and `review_m2_inputs.ft`.
+  Against e2147be1 it changed 1 row of the golden from `proved` to `unproved`, `copy_p` of
+  `ownership_heap_aliases_test.ft` (a copy of `a->p` of an entry region), and none the other
+  way. The valid twins of the review probes lose their proof with their callee: a copy of
+  `l->h->v`, `o->v`, `ps[0]`, `hs[0].p` or `w.inner->p` has no check that covers it.
+  A cast to a reference type and a slice move a reference out of its place without a copy, so
+  their read names a caller slot as a copy does (`name_read`): an entry value names its slot,
+  and a joined input names the caller slot that it leaves. Before this rule a cast moved a
+  joined input into a local, and its copy there named no slot: the heap solver alone proved 3
+  faulty callers of `test/ownership/probes/review_m3_casts.ft` on 07832282, and `view_dangling`
+  there, a slice of a dangling caller span, on main. Against 07832282 the rule changed no row
+  of the golden. The rule does not see a cast of such a reference to an integer or a comparison
+  of it, because neither gives a reference. A span aggregate takes a reference only from the
+  fresh allocation of `new`, so it reads no caller slot. The one-body slice form above stays:
+  `u8@ v = h.s[..]` after the release in the same body proves.
+  An unknown reference value is external (one of the four values above), the work of an unknown
+  effect (`exact`), or a reference whose facts the body lost, for example in a join of a local
+  address with a view.
   The entry value of a caller slot names that slot (`target`), so a caller of the body reads
   its own value of the slot from before the call (`keep_dangling`); any other external value
   of a callee is a lost reference in its caller. A callee that reads through an unknown
@@ -1092,8 +1138,12 @@ came here.
   merged. Of these rows, 41 hold the cast rule of D17.17 below, 28 hold the frame of a call, 14
   hold rule P1 of D17.18, and 3 hold `not` of an integer. On 2026-10-17 the table held 242
   rows: 15 of them held the copied-leaf rule of a call, 15 the whole-array store, and 5 the
-  element address. The copy rule of a scalar and of an assignment adds 10 rows, so the table
-  holds 252. The `provenance` stage runs `ownership_heap_provenance_test.ft`.
+  element address. The copy rule of a scalar and of an assignment, with its call of a callee
+  without a proof, added 15 rows: the table held 257 rows on 0d995df2. The 13
+  `D17.14-entry-use-*` and `D17.18-entry-use-*` rows hold the copied caller slots, and 10 rows
+  hold the joined and stored inputs and the possible use, and 4 rows hold the reads of a cast
+  and a slice, so the table holds 284. The
+  `provenance` stage runs `ownership_heap_provenance_test.ft`.
   A known integer keeps a number only through a copy (`rv_use`), `add`, `sub`, `cast` and `not`.
   Each one computes the exact result in its type, and a result that does not fit has no number.
   `add` and `sub` give a number only when each operand lies strictly between -2^40 and 2^40

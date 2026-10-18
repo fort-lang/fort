@@ -763,16 +763,16 @@ bullet at a time and without a rewrite.
   `lower_env` writes its sandboxes into the working directory.
   `test/ownership/heap_rows.ft` prints one row for each function of a file: the verdict, the
   incomplete reason, `returns`, the interface length, the post slots, the post atoms and the events.
-  The test compares 1794 rows of 304 inputs with `test/ownership/heap_rows.txt`. The inputs are
-  107 of the 109 manifest programs, the 67 programs of `test/ownership/probes`, and 130 texts that
+  The test compares 1965 rows of 314 inputs with `test/ownership/heap_rows.txt`. The inputs are
+  107 of the 109 manifest programs, the 72 programs of `test/ownership/probes`, and 135 texts that
   `heap_texts` takes from the 12 `test/fort/ownership_heap*_test.ft` programs. `HEAP_ROWS_SKIPPED`
   names the other 2 manifest programs with the reason: each imports `std.str`, and the sandbox
   `std` holds only a runtime. A skipped program that `heap_rows` reads fails the test. Run the
   test with `--bless` to write the golden, and read the diff of the golden before the commit.
   `test/ownership/solvers_alone.ft` prints the summary verdict, the heap verdict and the verdict
-  of the calls_heap row (`ownership_source_calls_env.verdict`) of 347 faulty bodies:
+  of the calls_heap row (`ownership_source_calls_env.verdict`) of 389 faulty bodies:
   the faulty body of each of the 37 reject cases (the last function at or before an error line)
-  and the 310 bodies of `test/ownership/solvers/faulty.json`. A body is faulty because its source
+  and the 352 bodies of `test/ownership/solvers/faulty.json`. A body is faulty because its source
   has the expected error: the error line of a reject case, or the `faulty.json` entry of a probe.
   The summary solver must prove 0, and the calls_heap row must prove 0: it needs both proofs. No
   ledger entry names the row. Its one-body witness checker validates an event in 16 of the faulty
@@ -857,8 +857,29 @@ bullet at a time and without a rewrite.
   proves none of the 84 faulty bodies of these probes, so all 84 joined, 8 with a class O
   entry and 8 with a class P entry, and the bound became 19. The review of that rule added 3
   probes (`base_copies`, `base_store_back`, `base_held_writes`) with 43 faulty bodies that no
-  solver alone proves. `faulty.json` has 310 bodies, and the full set has 347. The ledger
-  classes with entries are O and P. The empty ledger is the goal.
+  solver alone proves. So `faulty.json` had 310 bodies, and the full set had 347.
+  The class M rule itself had no fix yet: a callee with a proof can load a reference from
+  caller storage and copy it. On 0d995df2 the heap solver alone proved 10 of the 21 faulty
+  callers of `test/ownership/probes/loaded_copies.ft`, each a copy of a reference that the
+  caller had released. The heap call now checks the caller value of each slot whose entry value
+  the callee copies (`notes/compiler.md` 6), and it proves none of them. Against 0d995df2 the
+  rule changed no row of the golden. `test/ownership/probes/loaded_wrappers.ft` holds the 5
+  faulty wrapper callers of the final review of the loaded-source gate, which main proves no
+  more. Its review found 10 more faulty bodies that main and 13cc1703 prove: 3 copy a slot after
+  a join of two entry values, and 7 copy a reference that a caller stored where no caller slot
+  names it. `test/ownership/probes/review_m1_joins.ft` and `review_m2_inputs.ft` hold them, 11
+  faulty bodies with `join_ret_dangling`, and their valid twins. Against e2147be1 the fix moved
+  1 row of the golden from `proved` to `unproved`, `copy_p`, and none the other way. The second
+  review found that a cast moved a joined input out of a caller slot with no check: the heap
+  solver alone proved 3 faulty callers on 07832282. A cast to a reference type and a slice now
+  name the caller slot that their reference leaves. The rule does not see a cast of such a
+  reference to an integer or a comparison of it, because neither gives a reference.
+  `test/ownership/probes/review_m3_casts.ft` holds 5 faulty bodies, among them `view_dangling`,
+  a slice that main proves, and their valid twins. Against 07832282 the fix changed no row of
+  the golden, and against d9595ac4 it changed the same 2 rows as against e2147be1 (`copy_p`
+  and the event count of `owned_arg`). The 5 probes of class M add 42 faulty bodies, so
+  `faulty.json` has 352 bodies, and the full set has 389. The ledger classes with entries are O
+  and P. The empty ledger is the goal.
   Measured runs of the first 10 probe programs on darwin, built with `build/Darwin/debug/fort --cc
   /opt/homebrew/bin/clang --std-dir build/Darwin/debug/std -o <probe> <probe>.ft`: `round8_a3`
   exits 134 (the assertion of `chk_addr`), `round8_d2` exits 139, and the other 8 exit 0.

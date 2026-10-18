@@ -1714,7 +1714,20 @@ fn copy_events(fixture mut* x, ownership_heap.state mut* s, ownership_heap.value
     loc.kind = keyed ? ownership_heap.location_kind.slots : ownership_heap.location_kind.unknown;
     loc.key = local(7);
     ownership_heap.check_copy(&x->ctx, s, loc, ownership_heap.leaf{.v = v},
-        "a reference that this call copies");
+        ownership_api.certainty.definite, "a reference that this call copies");
+    return x->c.counts.events - before;
+}
+
+// Checks a copy of `v` at operation `at` from slot `k`. The result is the number of events.
+fn copy_from(fixture mut* x, ownership_heap.state mut* s, ownership_heap.value v, u32 at,
+    ownership_heap.slot_key k) u64 {
+    x->ctx.op = ownership_heap.position(&x->ctx, 0, at, false);
+    u64 before = x->c.counts.events;
+    ownership_heap.location mut loc = ownership_heap.location{};
+    loc.kind = ownership_heap.location_kind.slots;
+    loc.key = k;
+    ownership_heap.check_copy(&x->ctx, s, loc, ownership_heap.leaf{.v = v},
+        ownership_api.certainty.definite, "a reference that this call copies");
     return x->c.counts.events - before;
 }
 
@@ -1819,11 +1832,11 @@ fn copied_references() void {
     assert(caller.target.base == ownership_heap.base_kind.caller);
     assert(copy_events(&x, &s, caller, 17, true) == 0);
 
-    // A reference whose facts the body lost gives incomplete proof. An input of the caller does
-    // not. The work of an unknown effect does not when that effect made the body residual.
+    // A reference whose facts the body lost gives incomplete proof. Static data does not. The
+    // work of an unknown effect does not when that effect made the body residual.
     assert(copy_events(&x, &s, ownership_heap.unknown_value(), 18, true) == 1);
     assert(last_event(&x, incomplete, possible, effect) && last_text(&x) == "w");
-    assert(copy_events(&x, &s, ownership_heap.input_value(), 19, true) == 0);
+    assert(copy_events(&x, &s, ownership_heap.static_value(), 19, true) == 0);
     assert(!ctx->residual);
     assert(copy_events(&x, &s, ownership_heap.effect_value(), 20, true) == 1);
     ctx->residual = true;
@@ -1836,6 +1849,28 @@ fn copied_references() void {
     assert(copy_events(&x, &s, source_view(gone), 24, false) == 1);
     assert(last_event(&x, invalid, definite, path));
     assert(last_text(&x) == "a reference that this call copies");
+
+    // Of the external values only static data, an entry value and a joined input need no event
+    // (D17.14). An entry value names its slot. A joined input names the caller slot that it is
+    // copied from, and needs nothing in another slot. A stored input, which a caller stored in
+    // heap storage, gives incomplete proof.
+    ownership_heap.slot_key field = field_key(ownership_heap.base_kind.caller, 0, 0);
+    assert(ctx->entry_uses.len == 0);
+    assert(copy_events(&x, &s, ownership_heap.joined_input(), 25, true) == 0);
+    assert(ctx->entry_uses.len == 0);
+    assert(copy_from(&x, &s, ownership_heap.joined_input(), 26, field) == 0);
+    assert(ctx->entry_uses.len == 1);
+    assert(ownership_heap.same_key(ctx->entry_uses.items[0], field));
+    assert(copy_events(&x, &s, ownership_heap.entry_value(field), 27, true) == 0);
+    assert(ctx->entry_uses.len == 1);
+    assert(copy_events(&x, &s, ownership_heap.stored_input(), 28, true) == 1);
+    assert(last_event(&x, incomplete, possible, effect) && last_text(&x) == "w");
+    assert(copy_from(&x, &s, ownership_heap.static_value(), 29, field) == 0);
+    assert(ctx->entry_uses.len == 1);
+    // An external value of another target has no check that covers it either.
+    ownership_heap.value mut other = ownership_heap.static_value();
+    other.target = local(5);
+    assert(copy_events(&x, &s, other, 30, true) == 1);
 }
 
 // Checks the leaves of `list` at location `loc` and operation `at`. `*events` takes the number
@@ -1903,9 +1938,12 @@ fn copied_leaf_work() void {
     ownership_heap.push_leaf(&list, ownership_heap.leaf{.ty = view,
         .v = ownership_heap.unknown_value()});
     assert(leaf_units(&x, &s, slots, &list, 2, &events) == 3 && events == 2);
-    // A live atom without a reference of the body: the leaves hold inputs or static data.
+    // An atom that this body made, without a reference of the body: the leaves hold what this
+    // body copied there, views of parameters or static data.
     u32 kept = fresh_cell(ctx, &s, 5);
     s.atoms[cast(kept, u64)].borrows = false;
+    s.atoms[cast(kept, u64)].params = true;
+    assert(s.atoms[cast(kept, u64)].origin == 0);
     u32[8] mut one = {};
     one[0] = kept;
     ownership_heap.location none = ownership_heap.element_of(1, one, false, ownership_heap.NONE);
@@ -1913,15 +1951,23 @@ fn copied_leaf_work() void {
     // An atom that keeps a reference of the body: each borrowed leaf is checked.
     s.atoms[cast(kept, u64)].borrows = true;
     assert(leaf_units(&x, &s, none, &list, 4, &events) == 4 && events == 2);
-    // A second atom with that fact is enough, and storage without atoms keeps only inputs.
-    u32 other = fresh_cell(ctx, &s, 6);
+    // A member of an input that can keep a reference of an input holds what a caller stored:
+    // each borrowed leaf is checked too (D17.14). Without the reference fact it holds none.
     s.atoms[cast(kept, u64)].borrows = false;
+    s.atoms[cast(kept, u64)].origin = 1;
+    assert(leaf_units(&x, &s, none, &list, 8, &events) == 4 && events == 2);
+    s.atoms[cast(kept, u64)].params = false;
+    assert(leaf_units(&x, &s, none, &list, 9, &events) == 4 && events == 0);
+    s.atoms[cast(kept, u64)].origin = 0;
+    // A second atom with that fact is enough. The storage that a parameter designates holds
+    // references that a caller stored, so each borrowed leaf is checked there too.
+    u32 other = fresh_cell(ctx, &s, 6);
     s.atoms[cast(other, u64)].borrows = true;
     one[1] = other;
     ownership_heap.location both = ownership_heap.element_of(2, one, false, ownership_heap.NONE);
     assert(leaf_units(&x, &s, both, &list, 6, &events) == 4 && events == 2);
     ownership_heap.location caller = ownership_heap.element_of(0, one, true, ownership_heap.NONE);
-    assert(leaf_units(&x, &s, caller, &list, 7, &events) == 4 && events == 0);
+    assert(leaf_units(&x, &s, caller, &list, 7, &events) == 4 && events == 2);
     // An unknown location, such as a global, has leaves without facts.
     assert(leaf_units(&x, &s, ownership_heap.unknown_location(), &list, 5, &events) == 3);
     assert(events == 2);

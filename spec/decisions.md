@@ -2620,6 +2620,14 @@ says ownership is "by convention", this section supersedes it.
   passes the requirement on, with its own path. A state keeps at most 8 requirements of each path
   and drops a new one. A body keeps at most 16 requirements of some path. One more gives incomplete
   proof, and no caller applies its summary.
+  A copy of a reference that a callee loads from caller storage is a use of it (D17.14). When the
+  reference is the entry value of a caller slot, the summary names that slot, and the caller checks
+  its own value of the slot at the call. A cast to a reference type and a slice that move the
+  reference out of a caller slot name that slot too. A use of some path only gives a possible
+  candidate. A
+  body keeps at most 16 such caller slots. One more gives incomplete proof, and no caller applies
+  its summary. A copy of another reference that a caller stored, and that no caller slot names,
+  gives incomplete proof.
   A witness can cross a direct call of a fort callee that has a returning type and no parameter
   that can own a value. It assumes that the callee returns (fir.md 14.1, A06).
   An entry value is the value that a parameter of the checked function has when it starts.
@@ -2727,6 +2735,14 @@ says ownership is "by convention", this section supersedes it.
   incomplete proof: the invalid use in `alias_copy` and the loss in `store_moved`
   (`test/fort/ownership_witness_test.ft`). The coordinator ratified that loss of precision on
   2026-10-17, and ratified that the stop holds after a copy was dereferenced.
+  Amended 2026-10-18: A heap callee with a proof copied a reference from caller storage, and its
+  summary named no use, so its caller checked nothing. The heap solver alone proved 10 faulty
+  callers of `test/ownership/probes/loaded_copies.ft`. Review found 10 more: a copy after a join
+  of two entry values, and a copy of a reference that a caller stored in heap storage, in a span
+  or behind a pointer leaf. Now the caller checks each copied caller slot, and each other copy of
+  a stored reference gives incomplete proof. The coordinator ratified the bound of 16 slots. A
+  second review found that a cast moved a joined value out of a caller slot with no check, and
+  the heap solver alone proved 3 faulty callers. Now a cast and a slice name the slot too.
 
 ### D17.19 Global ownership and process boundaries
 - owner: `memory-model.md` (2.9), `toolchain.md` (2.1), `module-system.md` (11),
