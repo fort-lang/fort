@@ -966,7 +966,10 @@ came here.
   changed no slot, so the heap solver alone proved the 3 faulty bodies of
   `test/ownership/probes/array_stores.ft`: a store of a dangling reference into caller storage,
   a by-value array parameter, or an array field of a by-value struct. A read of one element
-  (`a[i]`) still gets an unknown value.
+  (`a[i]`) still gets an unknown value. The slot value cannot stand for that read: an array
+  literal joins a view with a null element into a view of the same exact source
+  (`element_join`), and a null test or a requirement binding would read the root of that
+  atom. The copy rule below therefore loses the proof of a valid copy of an element.
   The address of an element at an index that the proof does not know to be zero keeps the key
   of its array, but it starts after the start of the array. The location and the address keep
   the type of that element (`element`), and `retype` matches a pointee type against it, not
@@ -990,10 +993,68 @@ came here.
   - A callee store of one element into caller storage (`h->arr[0] = q`): the joined input of the
     callee is no entry value, so the caller gets a lost reference.
   - An array literal of two addresses (`{&x, &x}`): `weak_reference` loses each address.
-  The heap transfer does not yet check a copy of a dangling reference as a scalar argument, a
-  scalar copy or an aggregate assignment. Each is a known false accept of ledger class Q
-  (`test/ownership/probes/copied_references.ft`), and a later change closes it. `not_read` of
-  `ownership_heap_aliases_test.ft` asserts the scalar argument case as it is now.
+  The same check holds each other copy of a borrowed reference that FIR writes as an operand
+  (D17.14): a scalar call argument, a scalar field of a struct literal and a reference element
+  of an array literal (`copied_operand`), the value of an assignment, and a whole aggregate copy
+  or move by assignment (`place_leaves`). Each check of a borrowed reference pays one W unit. A
+  copy of an owner needs nothing: a release or a move empties its place, so a place that still
+  holds an owner holds no released allocation. A check of an owner changes no row of
+  `test/ownership/heap_rows.txt` (measured on 2026-10-17); it pays one more W unit, so the run
+  of A05 at 48 units in `ownership_heap_limits_test.ft` then stops. A cast to a pointer goes
+  into a temporary, and the copy of that temporary checks the source that the cast keeps. The
+  copy into the result records an event before the return check, so a returned dangling
+  reference gives 2 events. A temporary has no name, so its event takes a fixed text, as a leaf
+  without a slot does. Before this rule the heap solver alone proved 13 faulty bodies of
+  `test/ownership/probes/copied_references.ft`, the 3 class Q bodies among them, and
+  `stale_pass` and `not_read` of the heap tests.
+  The address of a direct global place is static storage, so `rv_addr` gives it an external
+  value (`input_value`): its copy, its return and its store need nothing. A read or a write
+  through it still gives incomplete proof, because the proof keeps no fact of the global. On
+  main 5 valid bodies of the frame probes, which store `&target` through a pointer, gave
+  incomplete proof; they now prove.
+  A call of a fort callee whose summary has no proof (`own_error`) gives incomplete proof in
+  the caller when an argument holds a reference: a reference argument, or a reference leaf of an
+  aggregate argument (`reference_arguments`). Such a callee publishes no requirement (D10.7),
+  so the caller can violate one unseen, and an incomplete summary supplies no proof of safe
+  effects (`spec/fir.md` 14, Calls). A call with only scalar arguments can violate no
+  requirement, and the unknown effect makes the caller residual when the callee can change
+  tracked storage. The scan pays one W unit for each argument and each aggregate leaf. Before
+  this rule the 5 `null_*_bad` callers of `copied_references.ft` proved: each passes null to a
+  callee that the copy rule left without a proof. 9 more faulty bodies there pass or test a null
+  array element: main proves 2 of them, `arr_ptr_bad` and `arr_ptrc_bad`, and a read of the
+  array slot value proved the other 7. The rule
+  changed 20 rows of `heap_rows.txt` from `proved` to `unproved` (the 6 class M callers,
+  `keep_holder_wrap` and the `main` of 13 probes), and a rule without the scan of the
+  arguments changed 50.
+  Five forms of this rule's subject stay outside it (measured on 2026-10-18 against
+  `e1a4aca4`), and the heap solver alone proves each faulty form:
+  - An array literal of struct or array elements reads each element as one scalar, so it checks
+    no borrowed leaf.
+  - A cast to a span, a struct or an array writes straight into its destination, and `operand`
+    reads its operand without a check.
+  - A cast of a dangling reference to an integer, a slice whose result no copy reads, and a
+    comparison (`x == null`) are no copy. The user ruled that a comparison is a use; a later
+    change takes it with the slice and the cast.
+  Four limits of the rule lose proofs that main has:
+  - A reference that a mutable global holds. The proof keeps no fact of a global, so the copy
+    gives incomplete proof (`global_copy` of `copied_scalars` in `ownership_heap_calls_test.ft`).
+    On main the same loss holds at a return. FIR gives the value of an immutable global as a
+    constant, so its copy needs nothing. In `std/` and `src/fort/`, 1 mutable global holds a
+    reference, the owner `args_store` of `std/rt.ft`, and a copy of an owner needs nothing.
+  - A local whose storage a FIR address names, after a call (`framed` above). The 3
+    `retained_param` bodies of `ownership_heap_provenance_test.ft` copy such a local into an
+    extern call, so each gives incomplete proof. The pointer keeps its parameter source, but a
+    join of a lost reference with an input keeps a parameter source too (`joined_parameter`),
+    so the copy cannot take the caller requirement of the read rule without a new fact.
+  - A reference that an extern call writes through the address of a local is lost, so a later
+    copy of it gives incomplete proof (`readp3` of `copied_references.ft`, `lost_callee` of
+    `copied_scalars`).
+  - A read of one element of a fixed array of references is lost (`read_at`, above), so its
+    copy gives incomplete proof: `elem_ok` of `copied_scalars` and `readp2` of
+    `copied_references.ft`. The review probes measured 6 more valid bodies of this form that
+    prove on main: a copy of a live element beside a dangling one, a copy of a null element
+    after the release of the other element (as a local, a store and an argument), a copy of a
+    live element, and a copy of an element of a parameter array.
   An unknown reference value is external (an input of the caller, or a field of a region whose
   fold found only external references), the work of an unknown effect (`exact`), or a
   reference whose facts the body lost, for example in a join of a local address with a view.
@@ -1029,9 +1090,10 @@ came here.
   lost owner of unknown status becomes escaped, so a read through its views stays unproved.
   `tools/mutations/ownership_heap.json` held 184 rows of the core rules when the cast rule
   merged. Of these rows, 41 hold the cast rule of D17.17 below, 28 hold the frame of a call, 14
-  hold rule P1 of D17.18, and 3 hold `not` of an integer. On 2026-10-17 the table holds 242
-  rows: 15 of them hold the copied-leaf rule of a call, 15 hold the whole-array store, and 5
-  hold the element address. The `provenance` stage runs `ownership_heap_provenance_test.ft`.
+  hold rule P1 of D17.18, and 3 hold `not` of an integer. On 2026-10-17 the table held 242
+  rows: 15 of them held the copied-leaf rule of a call, 15 the whole-array store, and 5 the
+  element address. The copy rule of a scalar and of an assignment adds 10 rows, so the table
+  holds 252. The `provenance` stage runs `ownership_heap_provenance_test.ft`.
   A known integer keeps a number only through a copy (`rv_use`), `add`, `sub`, `cast` and `not`.
   Each one computes the exact result in its type, and a result that does not fit has no number.
   `add` and `sub` give a number only when each operand lies strictly between -2^40 and 2^40

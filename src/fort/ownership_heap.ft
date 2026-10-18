@@ -39,6 +39,9 @@ u64 FIELD_LIMIT = 32;
 u32 WIDEN_AFTER = 4;
 // A recursive component runs at most this many rounds before it publishes. W bounds them too.
 u64 ROUND_LIMIT = 16;
+// The texts of an event at a copied reference without a named slot of its own (D17.14).
+string CALL_COPY = "a reference that this call copies";
+string ASSIGNMENT_COPY = "a reference that this assignment copies";
 
 enum atom_kind {
     cell,
@@ -3510,6 +3513,18 @@ fn fresh_unknown_owner(state mut* s) value {
 /// Evaluates an operand. A copy of an owner lends a view of its atom (D17.4). A move empties its
 /// slot and keeps the atom (D17.16).
 fn operand(context mut* c, state mut* s, fir.operand op) value {
+    return evaluate(c, s, op, false, "");
+}
+
+// Evaluates an operand that an operation copies or moves into another place: a call argument,
+// the value of an assignment, or an operand of an aggregate literal. The copy of a borrowed
+// reference uses it (D17.14). `what` names a reference without a slot of its own.
+fn copied_operand(context mut* c, state mut* s, fir.operand op, string what) value {
+    return evaluate(c, s, op, true, what);
+}
+
+// Evaluates an operand. `copies` says that the operation copies it into another place.
+fn evaluate(context mut* c, state mut* s, fir.operand op, bool copies, string what) value {
     if (op.kind == fir.operand_kind.ok_const) {
         switch (op.value.kind) {
         case fir.const_kind.ck_null, fir.const_kind.ck_zero:
@@ -3537,6 +3552,7 @@ fn operand(context mut* c, state mut* s, fir.operand op) value {
     types.node* mut t = null;
     resolve(c, s, op.place, &loc, &t);
     value v = read_at(c, s, loc, t);
+    if (copies) { check_copied_value(c, s, loc, t, v, what); }
     if (op.kind == fir.operand_kind.ok_copy) { return as_view(s, v); }
     if (loc.kind == location_kind.slots) {
         u64 at = find_slot(s, loc.key);
@@ -3813,13 +3829,15 @@ fn write_at(context mut* c, state mut* s, location loc, types.node* t, value v) 
     }
 }
 
-// The leaves of a place, read or moved. A copy of an owned leaf lends a view.
+// The leaves of a place that an assignment copies or moves. A copy of an owned leaf lends a
+// view. The copy uses each borrowed leaf (D17.14).
 fn place_leaves(context mut* c, state mut* s, fir.place p, bool moving, leaf_list mut* out)
     void {
     location mut loc = location{};
     types.node* mut t = null;
     resolve(c, s, p, &loc, &t);
     located_leaves(c, s, loc, t, moving, out);
+    check_copied_leaves(c, s, loc, out, ASSIGNMENT_COPY);
 }
 
 // The leaves of type `t` at resolved location `loc`, read or moved.
@@ -4016,7 +4034,7 @@ fn compare(context mut* c, state mut* s, fir.rvalue rv) value {
 fn rvalue_value(context mut* c, state mut* s, fir.rvalue rv, types.node* t) value {
     switch (rv.kind) {
     case fir.rvalue_kind.rv_use:
-        return operand(c, s, fir.rvalue_operand(c->f, rv, 0));
+        return copied_operand(c, s, fir.rvalue_operand(c->f, rv, 0), ASSIGNMENT_COPY);
     case fir.rvalue_kind.rv_eq, fir.rvalue_kind.rv_ne:
         if (is_null_constant(fir.rvalue_operand(c->f, rv, 0)) ||
             is_null_constant(fir.rvalue_operand(c->f, rv, 1)) ||
@@ -4084,6 +4102,12 @@ fn rvalue_value(context mut* c, state mut* s, fir.rvalue rv, types.node* t) valu
         if (lost) { return unknown_value(); }
         return converted;
     case fir.rvalue_kind.rv_addr:
+        // The address of global storage designates static storage, which stays live in each
+        // computation, so a copy of it needs nothing (D17.14). The proof keeps no other fact
+        // of that storage, so a read or a write through the address stays unproved.
+        if (rv.place.base == fir.base_kind.bk_global && !fir.place_indirect(c->f, rv.place)) {
+            return input_value();
+        }
         location mut loc = location{};
         types.node* mut place_ty = null;
         resolve_place(c, s, rv.place, true, &loc, &place_ty);
@@ -4236,7 +4260,7 @@ fn rvalue_leaves(context mut* c, state mut* s, fir.rvalue rv, types.node* t, lea
                     i += 1;
                 }
             } else {
-                value v = operand(c, s, op);
+                value v = copied_operand(c, s, op, ASSIGNMENT_COPY);
                 u64 mut j = 0;
                 while (j < out->len) {
                     if (out->items[j].depth == 1 && out->items[j].path[0] == field) {
@@ -4259,7 +4283,10 @@ fn rvalue_leaves(context mut* c, state mut* s, fir.rvalue rv, types.node* t, lea
     value mut elements = empty_value();
     u32 mut n = 0;
     while (n < rv.ops_len) {
-        value element = as_view(s, operand(c, s, fir.rvalue_operand(c->f, rv, n)));
+        fir.operand op = fir.rvalue_operand(c->f, rv, n);
+        // Each element of an aggregate literal is a copy (D17.14).
+        value element = as_view(s, rv.kind == fir.rvalue_kind.rv_aggregate ?
+            copied_operand(c, s, op, ASSIGNMENT_COPY) : operand(c, s, op));
         if (literal) {
             if (!pay(c, 1)) { return; }
             elements = n == 0 ? element : element_join(elements, element);
@@ -6227,13 +6254,18 @@ fn forget_frame(context mut* c, state mut* s) void {
     }
 }
 
-// The text of an event at a copied leaf at `loc`: the source spelling of its slot, or a fixed
-// text when the leaf has no slot of its own. Only an event computes it.
-fn copied_name(context mut* c, state* s, location loc, leaf item) string {
+// The text of an event at a copied leaf at `loc`: the source spelling of its slot, or the
+// text `what` when the leaf has no slot of its own or its local has no name, as a temporary
+// has none. Only an event computes it.
+fn copied_name(context mut* c, state* s, location loc, leaf item, string what) string {
     slot_key mut k = slot_key{};
     if (loc.kind != location_kind.slots || item.array ||
         !rebase(loc.key, item.depth, item.path, &k)) {
-        return "a reference that this call copies";
+        return what;
+    }
+    if (k.base == base_kind.local && k.id < fir.local_count(c->f) &&
+        fir.local_name(fir.local_at(c->f, k.id)).len == 0) {
+        return what;
     }
     return name(c, s, k);
 }
@@ -6243,8 +6275,8 @@ fn copied_name(context mut* c, state* s, location loc, leaf item) string {
 // cell of an address must be live or leaked. A reference whose facts this body lost can dangle,
 // so it gives incomplete proof. An input of the caller needs nothing. A reference that an
 // unknown effect wrote needs nothing when that effect made this body residual, as at a return
-// (`check_retained`).
-fn check_copy(context mut* c, state mut* s, location loc, leaf item) void {
+// (`check_retained`). `what` names a leaf without a slot of its own.
+fn check_copy(context mut* c, state mut* s, location loc, leaf item, string what) void {
     value v = item.v;
     if (v.kind == value_kind.view) {
         bool mut live = true;
@@ -6254,7 +6286,7 @@ fn check_copy(context mut* c, state mut* s, location loc, leaf item) void {
             if (status != atom_status.live && status != atom_status.leaked) { live = false; }
             i += 1;
         }
-        if (!live) { use_sources(c, s, v.count, v.sources, copied_name(c, s, loc, item)); }
+        if (!live) { use_sources(c, s, v.count, v.sources, copied_name(c, s, loc, item, what)); }
         return;
     }
     if (v.kind == value_kind.address) {
@@ -6262,36 +6294,35 @@ fn check_copy(context mut* c, state mut* s, location loc, leaf item) void {
             u8 ended = s->ended[cast(v.target.id, u64)];
             if (ended == 1) {
                 violation(c, s, ownership_api.event_kind.invalid_use, certainty.definite, NONE,
-                    copied_name(c, s, loc, item));
+                    copied_name(c, s, loc, item, what));
             } else if (ended == 2) {
                 unproved(c, s, ownership_api.incomplete_reason.missing_path, NONE,
-                    copied_name(c, s, loc, item));
+                    copied_name(c, s, loc, item, what));
             }
         } else if (v.target.base == base_kind.cell) {
             atom_status status = s->atoms[cast(v.target.id, u64)].status.value;
             if (status != atom_status.live && status != atom_status.leaked) {
                 u32[8] mut one = {};
                 one[0] = v.target.id;
-                use_sources(c, s, 1, one, copied_name(c, s, loc, item));
+                use_sources(c, s, 1, one, copied_name(c, s, loc, item, what));
             }
         }
         return;
     }
     if (v.kind == value_kind.unknown && !v.external && !(v.exact && c->residual)) {
         unproved(c, s, ownership_api.incomplete_reason.unknown_effect, NONE,
-            copied_name(c, s, loc, item));
+            copied_name(c, s, loc, item, what));
     }
 }
 
-// Each borrowed leaf of an aggregate call argument is a copy of its reference, and a whole move
-// copies its borrowed leaves too (D17.14). An owned leaf follows the transfer rules. Storage
-// without slots keeps its references in the facts of its atoms: when no atom keeps a reference
-// of this body, each leaf holds an input or static data. The scan of those atoms pays one W
-// unit, and each borrowed leaf pays one more.
-fn check_copied_leaves(context mut* c, state mut* s, location loc, leaf_list* list) void {
+// Whether storage at `loc` can keep a reference of this body. Storage without slots keeps its
+// references in the facts of its atoms: when no atom keeps a reference of this body, each leaf
+// holds an input or static data. The scan of those atoms pays one W unit. A refused scan gives
+// false, and the stopped proof checks nothing more.
+fn copied_storage(context mut* c, state* s, location loc) bool {
     bool mut body = true;
     if (loc.kind == location_kind.element) {
-        if (!pay(c, 1)) { return; }
+        if (!pay(c, 1)) { return false; }
         body = false;
         u32 mut j = 0;
         while (j < loc.count) {
@@ -6299,15 +6330,59 @@ fn check_copied_leaves(context mut* c, state mut* s, location loc, leaf_list* li
             j += 1;
         }
     }
+    return body;
+}
+
+// Each borrowed leaf of an aggregate copy is a copy of its reference, and a whole move copies
+// its borrowed leaves too (D17.14): a call argument or the value of an assignment. An owned leaf
+// follows the transfer rules. Each borrowed leaf pays one W unit.
+fn check_copied_leaves(context mut* c, state mut* s, location loc, leaf_list* list, string what)
+    void {
+    bool body = copied_storage(c, s, loc);
     u64 mut i = 0;
     while (i < list->len) {
         leaf item = list->items[i];
         if (!item.owning && (is_reference(item.ty) || item.array)) {
             if (!pay(c, 1)) { return; }
-            if (body) { check_copy(c, s, loc, item); }
+            if (body) { check_copy(c, s, loc, item, what); }
         }
         i += 1;
     }
+}
+
+// A copy of a borrowed reference operand `v` of type `t` at `loc` uses it (D17.14): a scalar
+// call argument, the value of an assignment, or an operand of an aggregate literal. A copy of
+// an owner needs nothing: a release or a move empties its place, so an owner that a place
+// still holds is not released. The check pays one W unit, as a borrowed leaf of an aggregate
+// copy does.
+fn check_copied_value(context mut* c, state mut* s, location loc, types.node* t, value v,
+    string what) void {
+    if (!is_reference(t) || t->is_own) { return; }
+    bool body = copied_storage(c, s, loc);
+    if (!pay(c, 1) || !body) { return; }
+    leaf mut item = leaf{};
+    item.ty = t;
+    item.v = v;
+    check_copy(c, s, loc, item, what);
+}
+
+// Whether an argument of a call holds a reference, so that a callee requirement can name it
+// (D10.7). Each argument pays one W unit, and each leaf of an aggregate argument one more.
+fn reference_arguments(context mut* c, argument@ args, leaf_list* arg_leaves) bool {
+    u64 mut i = 0;
+    while (i < args.len) {
+        if (!pay(c, 1)) { return true; }
+        if (!args[i].aggregate && is_reference(args[i].ty)) { return true; }
+        u64 mut j = 0;
+        while (args[i].aggregate && j < args[i].count) {
+            if (!pay(c, 1)) { return true; }
+            leaf item = arg_leaves->items[args[i].first + j];
+            if (is_reference(item.ty) || item.array) { return true; }
+            j += 1;
+        }
+        i += 1;
+    }
+    return false;
 }
 
 /// Evaluates a call (`spec/fir.md` 6). The arguments are read in order, then a complete
@@ -6332,7 +6407,7 @@ fn call(context mut* c, state mut* s, fir.rvalue rv, types.node* t, leaf_list mu
             resolve(c, s, op.place, &loc, &place_ty);
             located_leaves(c, s, loc, place_ty, op.kind == fir.operand_kind.ok_move, &part);
             // The copy uses each borrowed leaf before any effect of the call (D17.14).
-            check_copied_leaves(c, s, loc, &part);
+            check_copied_leaves(c, s, loc, &part, CALL_COPY);
             arg.aggregate = true;
             arg.first = arg_leaves.len;
             arg.count = part.len;
@@ -6342,7 +6417,8 @@ fn call(context mut* c, state mut* s, fir.rvalue rv, types.node* t, leaf_list mu
                 j += 1;
             }
         } else {
-            arg.v = operand(c, s, op);
+            // The copy of a borrowed reference uses it before any effect of the call (D17.14).
+            arg.v = copied_operand(c, s, op, CALL_COPY);
         }
         args[cast(i, u64)] = arg;
         i += 1;
@@ -6392,6 +6468,13 @@ fn call(context mut* c, state mut* s, fir.rvalue rv, types.node* t, leaf_list mu
             if (!escape_arguments(c, s, args[..], &arg_leaves, null)) { return; }
             forget_escaped_owners(c, s);
             if (c->stopped) { return; }
+        }
+        // A callee without a proof supplies no proof of safe effects (`spec/fir.md` 14, Calls),
+        // also where it reported its own error. It publishes no requirement, so a caller that
+        // passes it a reference can violate one unseen: the call gives incomplete proof here.
+        if (own_error && reference_arguments(c, args[..], &arg_leaves)) {
+            unproved(c, s, ownership_api.incomplete_reason.unknown_effect, NONE,
+                "a call of a function without a proof");
         }
         reset(out);
         unknown_call(c, s, args[..], &arg_leaves, t, out, !own_error && c->notes == before);

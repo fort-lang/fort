@@ -1811,7 +1811,7 @@ class SoundnessGateTest(unittest.TestCase):
         self.assertEqual(sum(len(bodies) for _, bodies in items), 37)
         probes = json.loads(FAULTY_PROBES.read_text())["faulty"]
         items += [(f"test/ownership/probes/{name}", bodies) for name, bodies in probes.items()]
-        self.assertEqual(sum(len(bodies) for _, bodies in items), 196)
+        self.assertEqual(sum(len(bodies) for _, bodies in items), 220)
 
         def verdicts(item):
             path, bodies = item
@@ -1824,7 +1824,7 @@ class SoundnessGateTest(unittest.TestCase):
 
         with ThreadPoolExecutor(max_workers=4) as pool:
             found = [row for rows in pool.map(verdicts, items) for row in rows]
-        self.assertEqual(len(found), len(GATE_COLUMNS) * 196)
+        self.assertEqual(len(found), len(GATE_COLUMNS) * 220)
         proved = {(path, body, solver) for path, body, solver, verdict in found
                   if verdict == "proved"}
         ledger = read_ledger(FALSE_ACCEPTS.read_text())

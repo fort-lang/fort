@@ -1,5 +1,8 @@
 struct view_box { i32* ptr; }
+struct mixed { i32 mut* own o; i32* p; }
+struct holder { i32* p; }
 fn takep(i32* p) void {}
+fn takes(u8@ s) void {}
 // A scalar reference argument that dangles. The callee does not read it.
 fn sc_arg_bad(i32 mut* own p) void { i32* x = p; del(p); takep(x); }
 fn sc_arg_ok(i32 mut* own p) void { i32* x = p; takep(x); del(p); }
@@ -11,4 +14,80 @@ fn ag_copy_bad(i32 mut* own p, i32* q) view_box {
     view_box mut v = view_box{p}; del(p); view_box w = v; v = view_box{q}; return v; }
 fn ag_copy_ok(i32 mut* own p, i32* q) view_box {
     view_box mut v = view_box{p}; view_box w = v; del(p); v = view_box{q}; return v; }
+// A whole move by assignment copies its dangling borrowed leaf.
+fn mv_assign_bad(i32 mut* own p) void { mixed mut m = mixed{new(i32), p}; del(p);
+    mixed n = move(m); del(n.o); }
+fn mv_assign_ok(i32 mut* own p) void { mixed mut m = mixed{new(i32), p};
+    mixed n = move(m); del(p); del(n.o); }
+// A struct literal and an array literal copy a dangling reference.
+fn lit_bad(i32 mut* own p) void { i32* x = p; del(p); view_box w = view_box{x}; }
+fn lit_ok(i32 mut* own p) void { i32* x = p; view_box w = view_box{x}; del(p); }
+fn arr_lit_bad(i32 mut* own p) void { i32* x = p; del(p); i32*[2] t = {x, x}; }
+fn arr_lit_ok(i32 mut* own p) void { i32* x = p; i32*[2] t = {x, x}; del(p); }
+// A store into a field copies a dangling reference.
+fn field_bad(i32 mut* own p) void { i32* x = p; view_box mut v = view_box{null}; del(p);
+    v.ptr = x; }
+fn field_ok(i32 mut* own p) void { i32* x = p; view_box mut v = view_box{null}; v.ptr = x;
+    del(p); }
+// The address of a local after its scope, copied and passed.
+fn addr_copy_bad() void { i32* mut q = null; { i32 z = 1; q = &z; } i32* r = q; }
+fn addr_copy_ok() void { i32* mut q = null; { i32 z = 1; q = &z; i32* r = q; } }
+fn addr_arg_bad() void { i32* mut q = null; { i32 z = 1; q = &z; } takep(q); }
+// The address of a field of a released cell.
+fn cell_copy_bad() void { holder mut* own h = new(holder); i32* mut* a = &h->p; del(h);
+    i32* mut* b = a; }
+fn cell_copy_ok() void { holder mut* own h = new(holder); i32* mut* a = &h->p;
+    i32* mut* b = a; del(h); }
+// A span of released storage, copied and passed.
+fn span_copy_bad() void { u8 mut@ own b = new(u8, 4); u8@ v = b; del(b); u8@ w = v; }
+fn span_copy_ok() void { u8 mut@ own b = new(u8, 4); u8@ v = b; u8@ w = v; del(b); }
+fn span_arg_bad() void { u8 mut@ own b = new(u8, 4); u8@ v = b; del(b); takes(v); }
+// The result of a cast keeps its source, so its copy uses that source.
+fn cast_copy_bad(i32 mut* own p) void { i32* x = p; del(p); i32* y = cast(x, i32*); }
+fn cast_copy_ok(i32 mut* own p) void { i32* x = p; i32* y = cast(x, i32*); del(p); }
+// A copy of an owner needs nothing: the release empties the owner on its path. The view `v`
+// also keeps the released atom on that path.
+fn own_lend_ok(i32 mut* own p, bool k) i32 mut* own { i32* v = p; if (k) { del(p); }
+    takep(p); return move(p); }
+// A faulty caller passes an empty owner to a callee that reads through its parameter (D10.7).
+// The copy of `&gv` keeps `readp` proved, so its callers fail its requirement. The copy of
+// `t[0]` and the copy of `r` after an extern call are lost, so `readp2` and `readp3` have no
+// proof, and each of their callers gives incomplete proof (`spec/fir.md` 14, Calls).
+i32 mut gv = 0;
+extern fn ext_set(i32* mut* out) void;
+fn readp(i32* q) i32 { takep(&gv); return *q; }
+fn readp2(i32* q) i32 { i32*[1] t = {q}; takep(t[0]); return *q; }
+fn readp3(i32* q) i32 { i32* mut r = q; ext_set(&r); takep(r); return *q; }
+fn null_caller_bad() i32 { i32 mut* own p = new(i32); del(p); return readp(p); }
+fn null_caller2_bad() i32 { i32 mut* own p = new(i32); del(p); return readp2(p); }
+fn null_caller3_bad() i32 { i32 mut* own p = new(i32); del(p); return readp3(p); }
+fn null_const_bad() i32 { return readp(null); }
+fn null_const2_bad() i32 { return readp2(null); }
+fn live_caller_ok() i32 { i32 z = 1; return readp(&z); }
+// A read of one element of a fixed array of references gives no fact (`read_at`), so its
+// copy gives incomplete proof. Each faulty body passes or tests a null element of an array
+// that also holds a live view.
+fn derefp(i32* p) i32 { return *p; }
+fn storep(i32 mut* p) void { *p = 4; }
+fn rdvc(i32*[2] a) i32 { return derefp(a[1]); }
+fn lit_null_call_bad() i32 { i32 mut* own p = new(i32); *p = 3; i32* x = p;
+    i32*[2] a = {x, null}; i32 r = derefp(a[1]); del(p); return r; }
+fn par_null_call_bad(i32* q) i32 { i32*[2] a = {q, null}; return derefp(a[1]); }
+fn first_null_call_bad() i32 { i32 mut* own p = new(i32); *p = 3; i32* x = p;
+    i32*[2] a = {null, x}; i32 r = derefp(a[0]); del(p); return r; }
+fn mut_null_call_bad() void { i32 mut* own p = new(i32); i32 mut* x = p;
+    i32 mut*[2] a = {x, null}; storep(a[1]); del(p); }
+fn prune_leak_bad() void { i32 mut* own p = new(i32); *p = 1; i32* x = p;
+    i32*[2] a = {x, null}; if (a[1] == null) { return; } del(p); }
+fn prune_leak2_bad() void { i32 mut* own p = new(i32); *p = 1; i32* x = p;
+    i32*[2] a = {null, x}; if (a[0] != null) { del(p); } }
+fn arr_valc_bad() i32 { i32 mut* own p = new(i32); *p = 1; i32* x = p; i32*[2] a = {x, null};
+    i32 r = rdvc(a); del(p); return r; }
+// Main proves these two: a callee reads the null element through a pointer to the array.
+fn rd(i32*[2]* pa) i32 { return *(*pa)[1]; }
+fn rdc(i32*[2]* pa) i32 { return derefp((*pa)[1]); }
+fn arr_ptr_bad() i32 { i32 mut* own p = new(i32); *p = 1; i32* x = p; i32*[2] a = {x, null};
+    i32 r = rd(&a); del(p); return r; }
+fn arr_ptrc_bad() i32 { i32 mut* own p = new(i32); *p = 1; i32* x = p; i32*[2] a = {x, null};
+    i32 r = rdc(&a); del(p); return r; }
 fn main() i32 { return 0; }

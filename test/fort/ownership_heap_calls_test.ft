@@ -10,6 +10,7 @@
 //| aggregates and pointers to owners
 //| write footprints at calls
 //| copied leaves of aggregate arguments
+//| copied scalar references
 //| whole-array stores
 //| array leaves below the path bound
 //| casts of element addresses
@@ -284,10 +285,13 @@ fn unknown_effects() void {
     assert(ownership_heap_env.unproved(&c, "kept", ownership_api.incomplete_reason.unknown_effect));
     // A call with scalar arguments reaches no tracked obligation.
     assert(ownership_heap_env.proved(&c, "scalar_only"));
-    // The callee reports its own loss. Its caller records no event at the call, but its own
-    // summary cannot use the callee's.
+    // The callee reports its own loss. A callee without a proof supplies no proof of safe
+    // effects (`spec/fir.md` 14, Calls), so the call gives incomplete proof in its caller too,
+    // and the summary of the caller cannot use the callee's.
     assert(ownership_heap_env.candidate(&c, "bad_callee", ownership_api.event_kind.lost_ownership));
-    assert(ownership_heap_env.events(&c, "after_bad") == 0);
+    assert(ownership_heap_env.events(&c, "after_bad") == 1);
+    assert(ownership_heap_env.first_text(&c, "after_bad") ==
+        "a call of a function without a proof");
     assert(ownership_heap_env.summary(&c, "after_bad")->residual);
     // A call of a function value is unknown to this module.
     assert(ownership_heap_env.unproved(&c, "fnptr",
@@ -339,8 +343,13 @@ fn views_at_call() void {
     assert(ownership_heap_env.proved(&c, "live_read"));
     assert(ownership_heap_env.candidate(&c, "stale_read", ownership_api.event_kind.invalid_use));
     assert(ownership_heap_env.first(&c, "stale_read").kind == ownership_api.event_kind.invalid_use);
-    // Passing a dangling view to a callee that never reads it is no use (D17.14).
-    assert(ownership_heap_env.proved(&c, "stale_pass"));
+    // A copy of a reference is a use of it (D17.14). So passing a dangling view to a callee that
+    // never reads it is an invalid use of the copied `v`.
+    assert(ownership_heap_env.candidate(&c, "stale_pass", ownership_api.event_kind.invalid_use));
+    ownership_heap_env.event_row passed = ownership_heap_env.first(&c, "stale_pass");
+    assert(passed.kind == ownership_api.event_kind.invalid_use && passed.line == 7);
+    assert(ownership_heap_env.text(&passed) == "v");
+    assert(ownership_heap_env.events(&c, "stale_pass") == 1);
     assert(ownership_heap_env.proved(&c, "eat_and_read"));
     assert(!ownership_heap_env.proved(&c, "self_view"));
     assert(ownership_heap_env.proved(&c, "other_view"));
@@ -496,15 +505,22 @@ fn write_footprints() void {
     assert(ownership_heap_env.proved(&c, "wrap_copy"));
     assert(ownership_heap_env.summary(&c, "wrap_copy")->view_writes == 0);
 
-    // A global write reaches caller storage that an earlier call exposed. The leak path stays,
-    // directly and through the wrapper.
+    // `stash_c` stores a parameter into a global, so it has no proof, and each call of it gives
+    // incomplete proof in its caller (`spec/fir.md` 14, Calls). A global write reaches caller
+    // storage that the earlier call exposed. The leak path stays, directly and through the
+    // wrapper.
     assert(ownership_heap_env.unproved(&c, "kept_global",
         ownership_api.incomplete_reason.unknown_effect));
+    assert(ownership_heap_env.saw(&c, "kept_global", ownership_api.event_kind.lost_ownership,
+        ownership_api.evidence_kind.abstract_possibility) == 1);
     assert(ownership_heap_env.unproved(&c, "kept_wrapped",
         ownership_api.incomplete_reason.unknown_effect));
-    // A callee with no global write keeps the exact caller facts, so the leak path is absent.
-    assert(ownership_heap_env.proved(&c, "kept_reset"));
-    assert(ownership_heap_env.proved(&c, "kept_read"));
+    assert(ownership_heap_env.saw(&c, "kept_wrapped", ownership_api.event_kind.lost_ownership,
+        ownership_api.evidence_kind.abstract_possibility) == 1);
+    // A callee with no global write keeps the exact caller facts, so the leak path is absent:
+    // the call of `stash_c` gives the only event.
+    assert(unproved_call(&c, "kept_reset"));
+    assert(unproved_call(&c, "kept_read"));
     // A global write cannot reach a cell that no effect exposed.
     assert(ownership_heap_env.proved(&c, "local_kept"));
     // A write through a by-value pointer leaf reaches the cell of that leaf, directly and
@@ -837,6 +853,13 @@ fn copy_candidate(ownership_heap_env.closure* c, string name, u32 line, string l
         ownership_heap_env.text(&row) == leaf;
 }
 
+// The only event of `name` is the incomplete proof of a call of a callee without a proof.
+fn unproved_call(ownership_heap_env.closure* c, string name) bool {
+    return ownership_heap_env.events(c, name) == 1 &&
+        ownership_heap_env.unproved(c, name, ownership_api.incomplete_reason.unknown_effect) &&
+        ownership_heap_env.first_text(c, name) == "a call of a function without a proof";
+}
+
 // The only event of `name` is incomplete proof of a copied leaf without facts, at line `line`.
 fn lost_copy(ownership_heap_env.closure* c, string name, u32 line, string leaf) bool {
     ownership_heap_env.event_row row = ownership_heap_env.first(c, name);
@@ -844,6 +867,140 @@ fn lost_copy(ownership_heap_env.closure* c, string name, u32 line, string leaf) 
         ownership_heap_env.unproved(c, name, ownership_api.incomplete_reason.unknown_effect) &&
         row.kind == ownership_api.event_kind.incomplete_proof && row.line == line &&
         ownership_heap_env.text(&row) == leaf;
+}
+
+// A copy of a borrowed reference is a use of it (D17.14): a scalar call argument, the value of an
+// assignment, a whole aggregate copy or move by assignment, and each operand of a struct or array
+// literal. Each copy checks the reference against the state at the copy, also when no later
+// operation reads it. A copy of an owner needs nothing: a release or a move empties its place.
+fn copied_scalars() void {
+    println("copied scalar references");
+    string[53] text = {
+        "struct box { i32* p; }",
+        "struct mixed { i32 mut* own o; i32* p; }",
+        "struct holder { i32* p; }",
+        "fn takep(i32* p) void {}",
+        "fn takes(u8@ s) void {}",
+        "fn arg_bad(i32 mut* own p) void { i32* x = p; del(p); takep(x); }",
+        "fn arg_ok(i32 mut* own p) void { i32* x = p; takep(x); del(p); }",
+        "fn copy_bad(i32 mut* own p) void { i32* x = p; del(p); i32* y = x; }",
+        "fn copy_ok(i32 mut* own p) void { i32* x = p; i32* y = x; del(p); }",
+        "fn whole_bad(i32 mut* own p) void { box b = box{p}; del(p); box c = b; }",
+        "fn whole_ok(i32 mut* own p) void { box b = box{p}; box c = b; del(p); }",
+        "fn moved_bad(i32 mut* own p) void { mixed mut m = mixed{new(i32), p}; del(p);",
+        "    mixed n = move(m); del(n.o); }",
+        "fn moved_ok(i32 mut* own p) void { mixed mut m = mixed{new(i32), p};",
+        "    mixed n = move(m); del(p); del(n.o); }",
+        "fn field_bad(i32 mut* own p) void { i32* x = p; del(p); box b = box{x}; }",
+        "fn element_bad(i32 mut* own p) void { i32* x = p; del(p); i32*[2] a = {x, x}; }",
+        "fn store_bad(i32 mut* own p) void { i32* x = p; box mut b = box{null}; del(p);",
+        "    b.p = x; }",
+        "fn ended_bad() void { i32* mut q = null; { i32 z = 1; q = &z; } takep(q); }",
+        "fn ended_ok() void { i32* mut q = null; { i32 z = 1; q = &z; takep(q); } }",
+        "fn cell_bad() void { holder mut* own h = new(holder); i32* mut* a = &h->p; del(h);",
+        "    i32* mut* b = a; }",
+        "fn span_bad() void { u8 mut@ own b = new(u8, 4); u8@ v = b; del(b); takes(v); }",
+        "fn cast_bad(i32 mut* own p) void { i32* x = p; del(p); takep(cast(x, i32*)); }",
+        "fn owner_ok(i32 mut* own p, bool k) i32 mut* own { if (k) { del(p); } takep(p);",
+        "    return move(p); }",
+        "fn input_ok(i32* q, holder* h) void { i32* x = q; takep(x); takep(h->p); }",
+        "fn null_ok() void { i32* x = null; takep(x); }",
+        "fn text_ok() void { string s = \"x\"; string t = s; }",
+        "fn lost_bad(bool k, i32 mut* own p) void { i32 z = 1; i32* mut x = &z;",
+        "    if (k) { x = p; } del(p); takep(x); }",
+        "i32* mut gp = null;",
+        "fn global_copy() void { takep(gp); }",
+        "fn compared(i32 mut* own p) bool { i32* x = p; del(p); return x == null; }",
+        "fn kept_ok(i32 mut* own p) void { i32* x = p; del(p); }",
+        "fn returned_bad(i32 mut* own p) i32* { i32* x = p; del(p); return x; }",
+        "fn unused_ok(i32 mut* own p) void { i32* x = p; del(p); i32* mut y = null; y = null; }",
+        "fn owner_view_ok(i32 mut* own p, bool k) i32 mut* own { i32* v = p; if (k) { del(p); }",
+        "    takep(p); return move(p); }",
+        "i32 mut gv = 0;",
+        "fn gaddr_ok() void { takep(&gv); }",
+        "fn gaddr_ret_ok() i32* { return &gv; }",
+        "fn elem_ok(i32* q) void { i32*[2] t = {q, q}; takep(t[1]); }",
+        "fn elem_bad(i32 mut* own p) void { i32* x = p; i32*[2] t = {x, x}; del(p);",
+        "    takep(t[0]); }",
+        "extern fn ext_set(i32* mut* out) void;",
+        "fn lost_callee(i32* q) i32 { i32* mut r = q; ext_set(&r); takep(r); return *q; }",
+        "fn null_pass_bad() i32 { return lost_callee(null); }",
+        "fn lost_int(i32 k) i32 { i32 z = k; i32* mut r = &z; ext_set(&r); takep(r); return k; }",
+        "fn scalar_pass_ok() i32 { return lost_int(1); }",
+        "fn lost_box(box b) i32 { i32* mut r = b.p; ext_set(&r); takep(r); return *b.p; }",
+        "fn box_pass_bad() i32 { box b = box{null}; return lost_box(b); }",
+    };
+    string[39] names = {"takep", "takes", "arg_bad", "arg_ok", "copy_bad", "copy_ok", "whole_bad",
+        "whole_ok", "moved_bad", "moved_ok", "field_bad", "element_bad", "store_bad", "ended_bad",
+        "ended_ok", "cell_bad", "span_bad", "cast_bad", "owner_ok", "input_ok", "null_ok",
+        "text_ok", "lost_bad", "global_copy", "compared", "kept_ok", "returned_bad",
+        "unused_ok", "owner_view_ok", "gaddr_ok", "gaddr_ret_ok", "elem_ok", "elem_bad",
+        "lost_callee", "null_pass_bad", "lost_int", "scalar_pass_ok", "lost_box", "box_pass_bad"};
+    ownership_heap_env.closure mut c = ownership_heap_env.closure{};
+    defer ownership_heap_env.close(&c);
+    ownership_heap_env.run(&c, text[..], names[..]);
+    // A scalar argument, a scalar copy, and their copies before the release.
+    assert(copy_candidate(&c, "arg_bad", 6, "x"));
+    assert(ownership_heap_env.proved(&c, "arg_ok"));
+    assert(copy_candidate(&c, "copy_bad", 8, "x"));
+    assert(ownership_heap_env.proved(&c, "copy_ok"));
+    // A whole copy and a whole move by assignment use each borrowed leaf.
+    assert(copy_candidate(&c, "whole_bad", 10, "b.p"));
+    assert(ownership_heap_env.proved(&c, "whole_ok"));
+    assert(copy_candidate(&c, "moved_bad", 13, "m.p"));
+    assert(ownership_heap_env.proved(&c, "moved_ok"));
+    // A struct literal, an array literal and a field store copy `x`. Two elements of one literal
+    // give one event.
+    assert(copy_candidate(&c, "field_bad", 16, "x"));
+    assert(copy_candidate(&c, "element_bad", 17, "x"));
+    assert(copy_candidate(&c, "store_bad", 19, "x"));
+    // An address of an ended local, an address into a released cell, and a released span.
+    assert(copy_candidate(&c, "ended_bad", 20, "q"));
+    assert(ownership_heap_env.proved(&c, "ended_ok"));
+    assert(copy_candidate(&c, "cell_bad", 23, "a"));
+    assert(copy_candidate(&c, "span_bad", 24, "v"));
+    // A cast result keeps its source. Its temporary has no name, so the text is fixed.
+    assert(copy_candidate(&c, "cast_bad", 25, "a reference that this call copies"));
+    // On the release path the owner is empty, so its copy needs nothing. In `owner_view_ok` the
+    // view `v` also keeps the released atom on that path.
+    assert(ownership_heap_env.proved(&c, "owner_ok"));
+    assert(ownership_heap_env.proved(&c, "owner_view_ok"));
+    // Inputs of the caller, null, and static text need nothing.
+    assert(ownership_heap_env.proved(&c, "input_ok"));
+    assert(ownership_heap_env.proved(&c, "null_ok"));
+    assert(ownership_heap_env.proved(&c, "text_ok"));
+    // A reference whose facts the body lost gives incomplete proof at its copy.
+    assert(lost_copy(&c, "lost_bad", 32, "x"));
+    // The proof keeps no fact of a mutable global, so the copy of its reference is lost (a
+    // precision limit). The global place has no slot, so the text is fixed.
+    assert(lost_copy(&c, "global_copy", 34, "a reference that this call copies"));
+    // A comparison is no copy, and a dangling local that no operation copies needs nothing.
+    assert(ownership_heap_env.proved(&c, "compared"));
+    assert(ownership_heap_env.proved(&c, "kept_ok"));
+    assert(ownership_heap_env.proved(&c, "unused_ok"));
+    // The copy into the result and the return each record an event.
+    assert(ownership_heap_env.candidate(&c, "returned_bad", ownership_api.event_kind.invalid_use));
+    assert(ownership_heap_env.events(&c, "returned_bad") == 2);
+    assert(ownership_heap_env.first(&c, "returned_bad").line == 37);
+    // The address of a global designates static storage, so its copy and its return need
+    // nothing (D17.14).
+    assert(ownership_heap_env.proved(&c, "gaddr_ok"));
+    assert(ownership_heap_env.proved(&c, "gaddr_ret_ok"));
+    // A read of one element of a fixed array of references gives no fact, so its copy is lost:
+    // a precision limit for a valid copy, and incomplete proof for a dangling one.
+    assert(lost_copy(&c, "elem_ok", 44, "t"));
+    assert(lost_copy(&c, "elem_bad", 46, "t"));
+    // The copy of `r` after the extern call is lost, so `lost_callee` has no proof. A caller
+    // that passes it a reference gives incomplete proof at the call, because the callee
+    // publishes no requirement. A caller that passes a scalar can violate no requirement.
+    assert(ownership_heap_env.unproved(&c, "lost_callee",
+        ownership_api.incomplete_reason.unknown_effect));
+    assert(unproved_call(&c, "null_pass_bad"));
+    assert(!ownership_heap_env.proved(&c, "lost_int"));
+    assert(ownership_heap_env.proved(&c, "scalar_pass_ok"));
+    // A reference leaf of a by-value aggregate argument counts as a reference.
+    assert(!ownership_heap_env.proved(&c, "lost_box"));
+    assert(unproved_call(&c, "box_pass_bad"));
 }
 
 fn main() i32 {
@@ -856,6 +1013,7 @@ fn main() i32 {
     aggregates();
     write_footprints();
     copied_leaves();
+    copied_scalars();
     array_stores();
     deep_leaves();
     element_casts();

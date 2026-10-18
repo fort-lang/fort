@@ -135,7 +135,7 @@ GRAFT_ASSUMES = (
 ESTABLISHED_SITES = {
     "null_value": 1,
     "address_fact": 1,
-    "operand": 1,
+    "evaluate": 1,
     "allocate": 2,
     "refine": 1,
     "null_descendants": 1,
@@ -152,7 +152,7 @@ ESTABLISHED_SITES = {
 }
 # The functions that may call `null_value()`, and how often.
 NULL_VALUE_SITES = {
-    "operand": 2,
+    "evaluate": 2,
     "located_leaves": 1,
     "allocate": 1,
     "release_place": 1,
