@@ -534,17 +534,50 @@ fn held_owner(body_input* in, body_program mut* out, ownership_api.place_path ba
 // The use of the current base of one access to caller storage (D17.14, spec/fir.md 14.1).
 // Each read, store, reference load and release reads the current flow contents of its base
 // before it reaches the storage behind it. The use dereferences the base. The extent
-// requirement or the local window bounds the access, so the use checks no length. After a
-// branch an empty base gives incomplete proof, because extraction models no null test
-// (D17.18). A local that holds the old owner of caller storage is inspected: flow models that
-// owner as an empty slot.
+// requirement or the local window bounds the source of the access from its start, and the
+// use checks the window of the base value (`access_window`, D17.17). After a branch an empty
+// base gives incomplete proof, because extraction models no null test (D17.18). A local that
+// holds the old owner of caller storage is inspected: flow models that owner as an empty slot.
 fn base_request(body_input* in, body_program mut* out, ownership_api.place_path base,
-    ownership_api.entity_id pointed) ownership_transfer.request {
-    return ownership_transfer.request{
+    ownership_api.entity_id pointed, access_window window) ownership_transfer.request {
+    ownership_transfer.request mut req = ownership_transfer.request{
         .kind = held_owner(in, out, base) ? ownership_transfer.action.inspect :
             ownership_transfer.action.use,
         .source = base, .destination = base, .source_key = pointed, .temporal_use = true,
         .empty_unproved = !out->definite_prefix};
+    if (req.kind == ownership_transfer.action.use) { windowed(&req, window); }
+    return req;
+}
+
+// The bytes of one access through a base value (D17.17). A cast keeps the offset, the window
+// and the alignment of a reference, so the type of the base does not give them. The path and
+// the requirement of an access to caller storage count from the start of the source. So when
+// `fixed`, the base must designate byte `base_offset` of its source, as the extraction took it.
+// The access takes `bytes` bytes from byte `offset` of that source, at alignment `align`. A
+// span or a string read takes 0 bytes here: its runtime check bounds its element (D10.6), and
+// its window holds no length.
+struct access_window {
+    bool fixed;
+    i64 base_offset;
+    i64 offset;
+    i64 bytes;
+    u64 align;
+}
+
+// Flow checks each borrow of the base value against `window` (`ownership_transfer`).
+fn windowed(ownership_transfer.request mut* req, access_window window) void {
+    req->window_checked = true;
+    req->base_fixed = window.fixed;
+    req->base_offset = window.base_offset;
+    req->access_offset = window.offset - window.base_offset;
+    req->access_bytes = window.bytes;
+    req->access_align = window.align;
+}
+
+// The window of an access to `selected`. A base in caller storage has a fixed offset.
+fn window_of(selected_storage* selected) access_window {
+    return access_window{selected->caller || selected->loaded, selected->base_offset,
+        selected->offset, selected->bytes, types.type_alignof(selected->ty)};
 }
 
 fn lose_requirement(body_program mut* out) void {
@@ -867,13 +900,15 @@ fn add_read(body_input* in, body_program mut* out, fir.place place_at, u32 block
     if (place_at.proj_len > 1 && selected.indirect) {
         requirement(in, out, selected.source, selected.path, selected.offset + selected.bytes,
             ownership_summary_model.requirement_kind.extent, types.type_alignof(selected.ty));
-        ownership_transfer.request req = ownership_transfer.request{
+        ownership_transfer.request mut req = ownership_transfer.request{
             .kind = ownership_transfer.action.inspect, .source = selected.path,
             .destination = selected.path, .source_key = selected.source,
             .scalar_contents_proved = !selected.base_unknown &&
                 !types.type_is_reference(selected.ty) && !fir.type_aggregate(selected.ty),
             .current_base_required = !selected.base_unknown,
             .current_base = selected.current_base, .empty_unproved = !out->definite_prefix};
+        // The base check of a scalar read also checks the window of the base value.
+        windowed(&req, window_of(&selected));
         emit(in, out, req, block, gap, order, ownership_summary_model.payload_kind.read,
             at, exit_at, statement, req.source, req.destination);
         if (!ownership_api.successful(out->proof)) { return false; }
@@ -928,14 +963,22 @@ fn add_read(body_input* in, body_program mut* out, fir.place place_at, u32 block
             } else if (!local_read(in, out, req.source_key, bytes, align, at)) { return false; }
             // Caller extent requirements guard this symbolic body read from the start of its
             // source. Application still uses the actual caller representation. The read uses
-            // its base as each other access to caller storage does (`base_request`).
+            // its base as each other access to caller storage does (`base_request`). So a
+            // caller base must designate the start of its source, and a cast keeps the window
+            // that the read must fit (D17.17).
             ownership_transfer.request base_use = base_request(in, out, req.source,
-                req.source_key);
+                req.source_key, access_window{caller, 0, 0,
+                    base->kind == types.type_kind.k_ptr ? bytes : 0, align});
             if (!ownership_api.successful(out->proof)) { return false; }
             req.kind = base_use.kind;
             req.temporal_use = true;
             req.empty_unproved = base_use.empty_unproved;
-            req.start_window = caller && base_use.kind == ownership_transfer.action.use;
+            req.window_checked = base_use.window_checked;
+            req.base_fixed = base_use.base_fixed;
+            req.base_offset = base_use.base_offset;
+            req.access_offset = base_use.access_offset;
+            req.access_bytes = base_use.access_bytes;
+            req.access_align = base_use.access_align;
             pointee = place_at.proj_len == 1 && base->kind == types.type_kind.k_ptr &&
                 reference(base->elem);
             typed = range(in, out, req.source_key, bytes, 1);
@@ -1244,9 +1287,12 @@ fn loaded_before(body_program mut* out, ownership_api.place_path place,
 // or a move of the path since the last call gives a private flow slot, and the load copies it.
 // Without such a slot the load takes the entry value only when no call, no release, and no
 // store or move under a dereference comes before it. Otherwise the loaded value is unknown.
+// The current base designates byte `base_offset` of `containing`, and the load reads the
+// reference at byte `offset`.
 fn load_reference(body_input* in, body_program mut* out, ownership_api.place_path place,
     ownership_api.place_path current_base, ownership_api.entity_id containing, types.node* ty,
-    i64 offset, diag.loc at, diag.loc exit_at, u32 statement) loaded_reference {
+    i64 base_offset, i64 offset, diag.loc at, diag.loc exit_at, u32 statement)
+    loaded_reference {
     u64 bytes = types.type_sizeof(ty);
     if (!reference(ty) || ty->elem == null || bytes > 9223372036854775807 ||
         offset < 0 || offset > 9223372036854775807 - cast(bytes, i64)) {
@@ -1294,7 +1340,8 @@ fn load_reference(body_input* in, body_program mut* out, ownership_api.place_pat
         ownership_state.append_contents(&out->entry, empty(loaded.path, false));
     }
     ownership_api.operation_position op = out->context.operation;
-    ownership_transfer.request read = base_request(in, out, current_base, containing);
+    ownership_transfer.request read = base_request(in, out, current_base, containing,
+        access_window{true, base_offset, offset, cast(bytes, i64), types.type_alignof(ty)});
     if (!ownership_api.successful(out->proof)) { return loaded_reference{}; }
     emit(in, out, read, op.block, op.operation, 0, ownership_summary_model.payload_kind.read,
         at, exit_at, statement, read.source, current_base);
@@ -1327,6 +1374,9 @@ struct selected_storage {
     bool base_unknown;
     ownership_api.entity_id source;
     types.node* ty;
+    // The byte of `source` that the current base designates, as the extraction takes it: the
+    // offset of the one address that a pointer local holds (`captured`), or 0 (D17.17).
+    i64 base_offset;
     i64 offset;
     i64 bytes;
     bool indirect;
@@ -1471,6 +1521,7 @@ fn select_storage(body_input* in, body_program mut* out, fir.place input_place, 
                                 while (p < n) { parts[p] = node.operand.projections[p]; p += 1; }
                                 count = n;
                                 selected.offset = node.value.borrows[0].range.offset.value;
+                                selected.base_offset = selected.offset;
                                 captured = true;
                             }
                             break;
@@ -1493,8 +1544,8 @@ fn select_storage(body_input* in, body_program mut* out, fir.place input_place, 
             ownership_api.place_path current = current_flow_contents(out, selected.path,
                 ownership_api.place_path{}, &crossed);
             loaded_reference loaded = load_reference(in, out, selected.path,
-                selected.current_base, selected.source, ty, selected.offset, at, exit_at,
-                statement);
+                selected.current_base, selected.source, ty, selected.base_offset,
+                selected.offset, at, exit_at, statement);
             selected.path = loaded.path;
             if (!ownership_api.successful(out->proof)) { return selected; }
             selected.loaded = true;
@@ -1503,6 +1554,7 @@ fn select_storage(body_input* in, body_program mut* out, fir.place input_place, 
             selected.base_unknown = selected.base_unknown || crossed;
             selected.source = loaded.source;
             selected.flow_path = selected.path;
+            selected.base_offset = 0;
             selected.offset = 0;
             count = 0;
             ty = ty->elem;
@@ -1583,6 +1635,18 @@ fn select_storage(body_input* in, body_program mut* out, fir.place input_place, 
     return selected;
 }
 
+// The use of the current base of an output to `selected`, at the operation of `stmt`.
+fn use_base(body_input* in, body_program mut* out, selected_storage* selected,
+    fir.statement* stmt) bool {
+    ownership_transfer.request base = base_request(in, out, selected->current_base,
+        selected->source, window_of(selected));
+    if (!ownership_api.successful(out->proof)) { return false; }
+    ownership_api.operation_position op = out->context.operation;
+    emit(in, out, base, op.block, op.operation, 0, ownership_summary_model.payload_kind.read,
+        stmt->loc, stmt->exit_loc, stmt->stmt, base.source, base.destination);
+    return ownership_api.successful(out->proof);
+}
+
 fn output_ready(body_input* in, body_program mut* out, selected_storage mut* selected,
     output_action action, fir.statement* stmt) bool {
     bool output = selected->proved && selected->caller && !selected->loaded &&
@@ -1609,20 +1673,17 @@ fn output_ready(body_input* in, body_program mut* out, selected_storage mut* sel
     requirement(in, out, selected->source, selected->path, selected->offset + selected->bytes,
         ownership_summary_model.requirement_kind.extent, types.type_alignof(selected->ty));
     selected->flow_path = selected->path;
+    // A scalar store uses its base in `assign_output`, after its operands. A zero store of an
+    // aggregate that owns nothing has no operand, so it uses its base here: its base window
+    // must hold the aggregate (D17.17). Another aggregate value stays unsupported.
     if (store && !owner && !fir.type_owning(selected->ty)) {
+        if (!scalar && selected->indirect && action == output_action.store_value) {
+            return use_base(in, out, selected, stmt);
+        }
         return ownership_api.successful(out->proof);
     }
-    // A release, a move or an owning store uses its base first. A scalar store uses it in
-    // `assign_output`, after its operands.
-    if (selected->indirect) {
-        ownership_transfer.request base = base_request(in, out, selected->current_base,
-            selected->source);
-        if (!ownership_api.successful(out->proof)) { return false; }
-        ownership_api.operation_position op = out->context.operation;
-        emit(in, out, base, op.block, op.operation, 0, ownership_summary_model.payload_kind.read,
-            stmt->loc, stmt->exit_loc, stmt->stmt, base.source, base.destination);
-        if (!ownership_api.successful(out->proof)) { return false; }
-    }
+    // A release, a move or an owning store uses its base first.
+    if (selected->indirect && !use_base(in, out, selected, stmt)) { return false; }
     if (selected->path.projections.len != 0) {
         bool mut found = false;
         u64 mut e = 0;
@@ -1672,7 +1733,7 @@ fn retain(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
     requirement(in, out, selected->source, selected->path, selected->offset + selected->bytes,
         ownership_summary_model.requirement_kind.extent, types.type_alignof(selected->ty));
     ownership_transfer.request base = base_request(in, out, selected->current_base,
-        selected->source);
+        selected->source, window_of(selected));
     if (!ownership_api.successful(out->proof)) { return; }
     emit(in, out, base, block, gap, 0, ownership_summary_model.payload_kind.read, stmt->loc,
         stmt->exit_loc, stmt->stmt, base.source, base.destination);
@@ -1737,7 +1798,7 @@ fn assign_output(body_input* in, body_program mut* out, fir.statement* stmt,
         // The store uses its current base: the pointer local, or the reference that the last
         // dereference loaded (`base_request`).
         ownership_transfer.request mut req = base_request(in, out, selected.current_base,
-            selected.source);
+            selected.source, window_of(&selected));
         if (!ownership_api.successful(out->proof)) { return; }
         req.source_precondition_proved = selected.caller;
         emit(in, out, req, block, gap, 0, ownership_summary_model.payload_kind.read,
@@ -2582,8 +2643,8 @@ fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
                         return;
                     }
                     loaded_reference loaded = load_reference(in, out, from.path,
-                        from.current_base, from.source, from.ty, from.offset, stmt->loc,
-                        stmt->exit_loc, stmt->stmt);
+                        from.current_base, from.source, from.ty, from.base_offset, from.offset,
+                        stmt->loc, stmt->exit_loc, stmt->stmt);
                     if (!ownership_api.successful(out->proof)) { return; }
                     req.kind = ownership_transfer.action.move_owner;
                     req.source = from.path;
@@ -2605,8 +2666,9 @@ fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
                         return;
                     }
                     loaded_reference loaded = load_reference(in, out, selected.path,
-                        selected.current_base, selected.source, selected.ty, selected.offset,
-                        stmt->loc, stmt->exit_loc, stmt->stmt);
+                        selected.current_base, selected.source, selected.ty,
+                        selected.base_offset, selected.offset, stmt->loc, stmt->exit_loc,
+                        stmt->stmt);
                     if (!ownership_api.successful(out->proof)) { return; }
                     req.kind = ownership_transfer.action.copy;
                     req.source = loaded.path;
@@ -2737,6 +2799,9 @@ fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
             req.source_precondition_proved = !selected.base_unknown;
             req.current_base_required = !selected.base_unknown;
             req.current_base = selected.current_base;
+            // An address outside the window of its base, or at another base offset, has an
+            // unknown value (`ownership_transfer.do_assignment`).
+            windowed(&req, window_of(&selected));
             out->origins[dst] = selected.source;
         } else {
             req.kind = ownership_transfer.action.address;

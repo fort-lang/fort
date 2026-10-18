@@ -1,0 +1,174 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| whole windows
+//| fixed base offset
+//| window bounds
+//| alignment
+//| guards
+/// Tests the window check of a dereference of a base value (D17.17). A cast keeps the offset,
+/// the access window and the alignment of a reference. A caller requirement or the local window
+/// bounds an access through the whole window of a source. Any other window must hold the
+/// access, at a byte of its alignment.
+import ownership_api;
+import ownership_transfer;
+
+i64 MAX = 9223372036854775807;
+
+fn id(ownership_api.entity_kind kind, u32 ordinal) ownership_api.entity_id {
+    return ownership_api.entity_id{.kind = kind, .ordinal = ordinal};
+}
+
+fn exact(i64 value) ownership_api.scalar_fact {
+    return ownership_api.scalar_fact{.kind = ownership_api.fact_kind.exact, .value = value};
+}
+
+// The window of an address at byte `offset` of source 3 that may access bytes `begin` to `end`.
+fn selected(i64 offset, i64 begin, i64 end) ownership_api.region {
+    return ownership_api.region{.key = id(ownership_api.entity_kind.region, 40),
+        .source = id(ownership_api.entity_kind.source, 3), .offset = exact(offset),
+        .access = ownership_api.byte_window{exact(begin), exact(end), true}, .extent = exact(end),
+        .alignment = 4};
+}
+
+// The whole window of source 3: its key is the key of the source as a region.
+fn whole(i64 end) ownership_api.region {
+    ownership_api.region mut r = selected(0, 0, end);
+    r.key = id(ownership_api.entity_kind.region, 3);
+    return r;
+}
+
+fn access(bool fixed, i64 offset, i64 bytes, u64 align) ownership_transfer.request {
+    return ownership_transfer.request{.window_checked = true, .base_fixed = fixed,
+        .access_offset = offset, .access_bytes = bytes, .access_align = align};
+}
+
+fn whole_windows() void {
+    assert(ownership_transfer.whole_window(whole(4)));
+    assert(!ownership_transfer.whole_window(selected(0, 0, 4)));
+    ownership_api.region mut r = whole(4);
+    r.key = id(ownership_api.entity_kind.source, 3);
+    assert(!ownership_transfer.whole_window(r));
+    r = whole(4);
+    r.source = id(ownership_api.entity_kind.none, 3);
+    r.key = id(ownership_api.entity_kind.none, 3);
+    assert(!ownership_transfer.whole_window(r));
+    r = whole(4);
+    r.key = id(ownership_api.entity_kind.region, 4);
+    assert(!ownership_transfer.whole_window(r));
+    // A requirement bounds the bytes and the alignment of an access through a whole window.
+    ownership_transfer.request wide = access(true, 0, 8, 8);
+    assert(ownership_transfer.window_holds(&wide, whole(4)));
+    ownership_transfer.request far = access(true, 4096, 8, 8);
+    assert(ownership_transfer.window_holds(&far, whole(4)));
+    println("whole windows");
+}
+
+fn fixed_base_offset() void {
+    // An extent requirement counts from the start of a source of caller storage.
+    ownership_transfer.request at_start = access(true, 0, 4, 4);
+    assert(ownership_transfer.window_holds(&at_start, selected(0, 0, 4)));
+    assert(!ownership_transfer.window_holds(&at_start, selected(4, 4, 8)));
+    ownership_api.region mut moved = whole(8);
+    moved.offset = exact(4);
+    assert(!ownership_transfer.window_holds(&at_start, moved));
+    // A captured address designates its own byte: the store of an owner through an address
+    // temporary reads its base at byte 8.
+    ownership_transfer.request mut captured = access(true, 0, 8, 8);
+    captured.base_offset = 8;
+    assert(ownership_transfer.window_holds(&captured, selected(8, 8, 16)));
+    assert(!ownership_transfer.window_holds(&captured, selected(0, 0, 16)));
+    assert(!ownership_transfer.window_holds(&captured, whole(16)));
+    captured.access_bytes = 9;
+    assert(!ownership_transfer.window_holds(&captured, selected(8, 8, 16)));
+    // A local base takes the offset of its value.
+    ownership_transfer.request local = access(false, 0, 4, 4);
+    assert(ownership_transfer.window_holds(&local, selected(4, 4, 8)));
+    assert(ownership_transfer.window_holds(&local, moved));
+    ownership_api.region mut unknown = selected(4, 4, 8);
+    unknown.offset = ownership_api.scalar_fact{};
+    assert(!ownership_transfer.window_holds(&local, unknown));
+    ownership_api.region mut negative = selected(4, 4, 8);
+    negative.offset = exact(-4);
+    assert(!ownership_transfer.window_holds(&local, negative));
+    println("fixed base offset");
+}
+
+fn window_bounds() void {
+    ownership_transfer.request four = access(true, 0, 4, 4);
+    ownership_transfer.request five = access(true, 0, 5, 1);
+    ownership_transfer.request eight = access(true, 0, 8, 4);
+    assert(ownership_transfer.window_holds(&four, selected(0, 0, 4)));
+    assert(!ownership_transfer.window_holds(&five, selected(0, 0, 4)));
+    assert(!ownership_transfer.window_holds(&eight, selected(0, 0, 4)));
+    // The second field of a cast struct lies after the window of the first field.
+    ownership_transfer.request second = access(true, 4, 4, 4);
+    assert(!ownership_transfer.window_holds(&second, selected(0, 0, 4)));
+    assert(ownership_transfer.window_holds(&second, selected(0, 0, 8)));
+    // An access at byte 4 after a local base at byte 4 takes bytes 8 to 12.
+    ownership_transfer.request after = access(false, 4, 4, 4);
+    assert(!ownership_transfer.window_holds(&after, selected(4, 4, 8)));
+    assert(ownership_transfer.window_holds(&after, selected(4, 4, 12)));
+    // A base before the start of its window holds no access.
+    ownership_transfer.request before = access(false, 0, 4, 4);
+    assert(!ownership_transfer.window_holds(&before, selected(0, 4, 8)));
+    // A span or a string read takes 0 bytes here. It still needs a window that holds its byte.
+    ownership_transfer.request span = access(true, 0, 0, 8);
+    assert(ownership_transfer.window_holds(&span, selected(0, 0, 0)));
+    assert(!ownership_transfer.window_holds(&span, selected(4, 4, 8)));
+    ownership_api.region mut open_span = selected(0, 0, 0);
+    open_span.access.arithmetic_proved = false;
+    assert(!ownership_transfer.window_holds(&span, open_span));
+    assert(ownership_transfer.window_holds(&span, whole(0)));
+    ownership_api.region mut symbolic = selected(0, 0, 8);
+    symbolic.access.end = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.symbolic};
+    assert(!ownership_transfer.window_holds(&four, symbolic));
+    symbolic = selected(0, 0, 8);
+    symbolic.access.begin = ownership_api.scalar_fact{};
+    assert(!ownership_transfer.window_holds(&four, symbolic));
+    ownership_api.region mut unproved = selected(0, 0, 8);
+    unproved.access.arithmetic_proved = false;
+    assert(!ownership_transfer.window_holds(&four, unproved));
+    println("window bounds");
+}
+
+fn alignment() void {
+    // An 8-byte read at byte 4 of a 12-byte window fits its bytes and not its alignment.
+    ownership_transfer.request wide = access(false, 0, 8, 8);
+    assert(!ownership_transfer.window_holds(&wide, selected(4, 4, 12)));
+    ownership_transfer.request narrow = access(false, 0, 8, 4);
+    assert(ownership_transfer.window_holds(&narrow, selected(4, 4, 12)));
+    ownership_transfer.request at_eight = access(false, 4, 8, 8);
+    assert(ownership_transfer.window_holds(&at_eight, selected(4, 4, 16)));
+    ownership_transfer.request zero = access(true, 0, 4, 0);
+    assert(!ownership_transfer.window_holds(&zero, selected(0, 0, 4)));
+    ownership_transfer.request huge = access(true, 0, 4, 9223372036854775808);
+    assert(!ownership_transfer.window_holds(&huge, selected(0, 0, 4)));
+    println("alignment");
+}
+
+fn guards() void {
+    ownership_transfer.request back = access(false, -4, 4, 1);
+    assert(!ownership_transfer.window_holds(&back, selected(4, 0, 8)));
+    ownership_transfer.request negative = access(false, 0, -1, 1);
+    assert(!ownership_transfer.window_holds(&negative, selected(4, 4, 8)));
+    // The sum of the offsets and the bytes cannot wrap past the largest i64.
+    ownership_transfer.request far = access(false, MAX, 1, 1);
+    assert(!ownership_transfer.window_holds(&far, selected(4, 4, MAX)));
+    ownership_transfer.request last = access(false, MAX - 4, 1, 1);
+    assert(!ownership_transfer.window_holds(&last, selected(4, 4, MAX)));
+    ownership_transfer.request edge = access(false, MAX - 5, 1, 1);
+    assert(ownership_transfer.window_holds(&edge, selected(4, 4, MAX)));
+    ownership_transfer.request beyond = access(false, 0, MAX, 1);
+    assert(!ownership_transfer.window_holds(&beyond, selected(4, 4, MAX)));
+    println("guards");
+}
+
+fn main() i32 {
+    whole_windows();
+    fixed_base_offset();
+    window_bounds();
+    alignment();
+    guards();
+    return 0;
+}

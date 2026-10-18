@@ -1,0 +1,174 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| summary window ok
+/// Holds the verdicts of the window rule of the summary solver (D17.17, D17.14; spec/fir.md
+/// 14.1). A cast keeps the offset, the access window and the alignment of a reference. Each
+/// access through a base reads the current base, and flow checks each borrow of the base value:
+/// a base of caller storage designates the start of its source, and the access lies inside a
+/// window that is not the whole window of its source, at a byte of its alignment.
+///
+/// The group is `test/ownership/probes/window_casts.ft` without its comments and its `main`. A
+/// long line of the probe is two lines here. Each body has one expected verdict:
+/// - F: a faulty body. Neither the summary solver nor the calls_heap row proves it.
+/// - K: a valid body that the summary solver proves. It still proves, so a lost proof shows.
+/// - V: a valid body that the summary solver does not prove. It stays unproved and reports no
+///   violation, so both a new proof and a new failure show. Of the 7, 4 proved before the rule:
+///   `struct_in`, `addr_in`, `path_cast` and `load_cast` name a path through the start of the
+///   base, and the cast base designates another byte.
+import ownership_gate_env;
+import ownership_recursive_env;
+import ownership_source_calls_env;
+
+string[98] WINDOW = {
+    "struct pair { i32 a; i32 b; }",
+    "struct outer { i32 x; pair p; }",
+    "struct wrap { pair p; i32 z; }",
+    "struct mix { u32 a; u32 b; u64 c; }",
+    "struct two { i32* a; i32* b; }",
+    "struct own2 { i32 mut* own a; i32 mut* own b; }",
+    "struct s8 { u32 x; u32[2] y; u64 z; }",
+    "struct holder { u64* w; }",
+    "struct iholder { i32* w; }",
+    "fn widen(pair* p) u64 { i32* b = &p->b; u64* w = cast(b, u64*); return *w; }",
+    "fn widen_first(pair* p) u64 { i32* a = &p->a; u64* w = cast(a, u64*); return *w; }",
+    "fn widen_direct(pair* p) u64 { u64* w = cast(&p->b, u64*); return *w; }",
+    "fn widen_void(pair* p) u64 { void* v = cast(&p->b, void*); u64* w = cast(v, u64*);",
+    "    return *w; }",
+    "fn widen_copy(pair* p) u64 { i32* b = &p->b; i32* c = b; u64* w = cast(c, u64*); return *w; }",
+    "fn widen_nested(outer* o) u64 { u64* w = cast(&o->p.b, u64*); return *w; }",
+    "fn widen_branch(pair* p, bool c) u64 {",
+    "    u64* mut w = cast(p, u64*);",
+    "    if (c) { w = cast(&p->b, u64*); }",
+    "    return *w;",
+    "}",
+    "fn widen_struct(pair* p) i32 { pair* q = cast(&p->b, pair*); return q->b; }",
+    "fn first_struct(pair* p) i32 { pair* q = cast(&p->a, pair*); return q->b; }",
+    "fn wrap_out(wrap* w) i32 { wrap* q = cast(&w->p, wrap*); return q->z; }",
+    "fn load_window(two* t) i32* { two* q = cast(&t->a, two*); return q->b; }",
+    "fn addr_window(pair* p) i32 { pair* q = cast(&p->a, pair*); i32* r = &q->b; return *r; }",
+    "fn store_struct(pair mut* p) void { pair mut* q = cast(&p->b, pair mut*); q->b = 0; }",
+    "fn store_whole(pair mut* p) void { pair mut* q = cast(&p->b, pair mut*); *q = pair{}; }",
+    "fn store_branch(pair mut* p, bool c) void {",
+    "    pair mut* mut q = p;",
+    "    if (c) { q = cast(&p->b, pair mut*); }",
+    "    q->b = 0;",
+    "}",
+    "fn store_owner_out(own2 mut* t, i32 mut* own n) void {",
+    "    own2 mut* q = cast(&t->b, own2 mut*);",
+    "    q->b = move(n);",
+    "}",
+    "fn sel_a(pair* p) u64* { return cast(&p->a, u64*); }",
+    "fn use_sel_a(pair* p) u64 { u64* w = sel_a(p); return *w; }",
+    "fn sel_b(pair* p) pair* { return cast(&p->b, pair*); }",
+    "fn use_sel_b(pair* p) i32 { pair* q = sel_b(p); return q->b; }",
+    "fn trip(holder mut* h, pair* p) u64 { h->w = cast(&p->a, u64*); return *h->w; }",
+    "fn trip_local(holder mut* h, pair* p) u64 {",
+    "    u64* w = cast(&p->a, u64*);",
+    "    h->w = w;",
+    "    u64* v = h->w;",
+    "    return *v;",
+    "}",
+    "fn loc_mis() u64 {",
+    "    mix mut* own a = new(mix);",
+    "    a->a = 1;",
+    "    a->b = 2;",
+    "    a->c = 3;",
+    "    u64* w = cast(&a->b, u64*);",
+    "    u64 v = *w;",
+    "    del(a);",
+    "    return v;",
+    "}",
+    "fn loc_align() u64 {",
+    "    s8 mut* own a = new(s8);",
+    "    a->x = 1;",
+    "    a->z = 3;",
+    "    u64* w = cast(&a->y, u64*);",
+    "    u64 v = *w;",
+    "    del(a);",
+    "    return v;",
+    "}",
+    "fn whole_cast(pair* p) u64 { u64* w = cast(p, u64*); return *w; }",
+    "fn whole_wide(i32* p) u64 { u64* w = cast(p, u64*); return *w; }",
+    "fn first_field(outer* o) i32 { i32* q = &o->x; return *q; }",
+    "fn first_align(s8* p) u32 { u32* w = cast(&p->x, u32*); return *w; }",
+    "fn first_same(pair* p) u32 { u32* u = cast(&p->a, u32*); return *u; }",
+    "fn store_owner_in(own2 mut* t, i32 mut* own n) void {",
+    "    own2 mut* q = cast(&t->a, own2 mut*);",
+    "    q->a = move(n);",
+    "}",
+    "fn captured(outer* o) i32 { pair* q = &o->p; return q->b; }",
+    "fn wrap_in(wrap* w) i32 { wrap* q = cast(&w->p, wrap*); return q->p.b; }",
+    "fn trip_ok(iholder mut* h, pair* p) i32 { h->w = &p->a; return *h->w; }",
+    "fn loc_field() i32 {",
+    "    pair mut* own a = new(pair);",
+    "    a->a = 1;",
+    "    a->b = 2;",
+    "    i32* w = &a->b;",
+    "    i32 v = *w;",
+    "    del(a);",
+    "    return v;",
+    "}",
+    "fn struct_in(pair* p) i32 { pair* q = cast(&p->b, pair*); return q->a; }",
+    "fn addr_in(pair* p) i32 { pair* q = cast(&p->b, pair*); i32* r = &q->a; return *r; }",
+    "fn path_cast(two* t) i32 { two* q = cast(&t->b, two*); return *q->a; }",
+    "fn load_cast(two* t) i32* { two* q = cast(&t->b, two*); return q->a; }",
+    "fn branch_cast(two* t, bool c) i32 {",
+    "    two* mut q = t;",
+    "    if (c) { q = cast(&t->b, two*); }",
+    "    return *q->a;",
+    "}",
+    "fn narrow(pair* p) u8 { u8* c = cast(&p->b, u8*); return *c; }",
+};
+
+string[40] WINDOW_NAMES = {
+    "widen", "widen_first", "widen_direct", "widen_void", "widen_copy", "widen_nested",
+    "widen_branch", "widen_struct", "first_struct", "wrap_out", "load_window", "addr_window",
+    "store_struct", "store_whole", "store_branch", "store_owner_out", "sel_a", "use_sel_a", "sel_b",
+    "use_sel_b", "trip", "trip_local", "loc_mis", "loc_align", "whole_cast", "whole_wide",
+    "first_field", "first_align", "first_same", "store_owner_in", "captured", "wrap_in", "trip_ok",
+    "loc_field", "struct_in", "addr_in", "path_cast", "load_cast", "branch_cast", "narrow",
+};
+
+string[40] WINDOW_WANT = {
+    "F", "F", "F", "F", "F", "F", "F", "F", "F", "F", "F", "F", "F", "F", "F", "F", "K", "F", "K",
+    "F", "F", "F", "F", "F", "K", "K", "K", "K", "K", "K", "V", "K", "K", "K", "V", "V", "V", "V",
+    "V", "V",
+};
+
+fn check(string label, string@ text, string@ names, string@ want) u64 {
+    assert(names.len == want.len);
+    ownership_recursive_env.closure mut summaries = ownership_recursive_env.closure{};
+    defer ownership_recursive_env.close(&summaries);
+    ownership_recursive_env.open(&summaries, text, names);
+    ownership_recursive_env.solve(&summaries);
+    ownership_source_calls_env.closure mut calls = ownership_source_calls_env.closure{};
+    defer ownership_source_calls_env.close(&calls);
+    ownership_source_calls_env.run(&calls, text, names);
+    u64 mut wrong = 0;
+    u64 mut i = 0;
+    while (i < names.len) {
+        string summary = ownership_gate_env.summary_verdict(&summaries, names[i]);
+        string row = ownership_source_calls_env.verdict(&calls, names[i]);
+        bool mut held = summary == "unproved";
+        if (want[i] == "F") { held = summary != "proved" && row != "proved"; }
+        if (want[i] == "K") { held = summary == "proved"; }
+        if (!held) {
+            eprintln(label, " ", names[i], " expects ", want[i], ": summary ", summary,
+                ", calls_heap ", row);
+            wrong += 1;
+        }
+        i += 1;
+    }
+    return wrong;
+}
+
+fn main() i32 {
+    u64 wrong = check("window", WINDOW[..], WINDOW_NAMES[..], WINDOW_WANT[..]);
+    if (wrong != 0) {
+        eprintln(wrong, " bodies differ from their expectation");
+        return 1;
+    }
+    println("summary window ok");
+    return 0;
+}

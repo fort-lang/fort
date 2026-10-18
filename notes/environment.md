@@ -199,7 +199,10 @@ without a rewrite.
   cannot be trapped at all in a gate an agent started**, because a script started with `&` from a
   non-interactive shell has SIGINT ignored on entry (POSIX). Use `kill -TERM <pid>`. Find the pid
   by matching the process whose command *is* the gate. Never use `pkill -f`: it also matches every
-  waiter that quotes the command.
+  waiter that quotes the command. In `tools/vm run` it also matches its own `bash -c`, whose
+  command line holds the pattern. On 2026-10-18 such a `pkill` ended its own session and the
+  session of a background `tools/vm run`. Each ssh then exited 255, and the wrapper retried both,
+  so the stopped background command started again. Stop a guest process by its PID.
   **`$!` names a subshell when `&` follows an AND-list**, so the pid a wrapper prints is often not
   the gate. In `cd <worktree> && tools/vm gate > build/gate.log 2>&1 & pid=$!`, the `&` binds to
   the whole `cd && tools/vm` list, so bash forks a subshell for the list and `$!` is that subshell;

@@ -13,8 +13,9 @@
     "Darwin host, and run with --runner 'bash -c'.",
     "The md5 guard reads that LLVM IR file. A table whose binary is the compiler reads",
     "stale on each row.",
-    "Twenty-seven rows include eleven transfer-precondition rows. Thirty-three rows hold the",
-    "base rule of each access to caller storage and its alias barrier."
+    "Twenty-seven rows include eleven transfer-precondition rows. Thirty-one rows hold the",
+    "base rule of each access to caller storage and its alias barrier. Fourteen rows hold the",
+    "window rule of a base value (D17.17), two of them in the place of the start-window rows."
   ],
   "sources": [
     "src/fort/ownership_summary_body.ft",
@@ -240,8 +241,8 @@
     {
       "decision": "D17.14-base-owner-access",
       "file": "src/fort/ownership_summary_body.ft",
-      "old": "    if (selected->indirect) {\n        ownership_transfer.request base = base_request(",
-      "new": "    if (false && selected->indirect) {\n        ownership_transfer.request base = base_request(",
+      "old": "    if (selected->indirect && !use_base(in, out, selected, stmt)) { return false; }",
+      "new": "    if (false && selected->indirect && !use_base(in, out, selected, stmt)) { return false; }",
       "what": "a release, a move or an owning store does not use its current base"
     },
     {
@@ -317,8 +318,8 @@
     {
       "decision": "D17.18-empty-use-after-branch",
       "file": "src/fort/ownership_summary_body.ft",
-      "old": "        .empty_unproved = !out->definite_prefix};\n}",
-      "new": "        .empty_unproved = false};\n}",
+      "old": "        .empty_unproved = !out->definite_prefix};\n    if (req.kind == ownership_transfer.action.use)",
+      "new": "        .empty_unproved = false};\n    if (req.kind == ownership_transfer.action.use)",
       "what": "an empty base of a one-step read after a null test is a violation"
     },
     {
@@ -331,16 +332,16 @@
     {
       "decision": "D17.17-start-window",
       "file": "src/fort/ownership_summary_body.ft",
-      "old": "            req.start_window = caller && base_use.kind == ownership_transfer.action.use;",
-      "new": "            req.start_window = false;",
-      "what": "a caller read through a borrow at an offset uses the window from the source start"
+      "old": "            req.window_checked = base_use.window_checked;",
+      "new": "            req.window_checked = false;",
+      "what": "a one-step read checks no window of its base value"
     },
     {
       "decision": "D17.17-start-window-check",
       "file": "src/fort/ownership_transfer.ft",
-      "old": "            checked.borrows[b].range.offset.value != 0) {\n            return unproved(svc, req, req->source.root);",
-      "new": "            false) {\n            return unproved(svc, req, req->source.root);",
-      "what": "the transfer accepts a borrow at a nonzero offset for a start window"
+      "old": "        (req->base_fixed && r.offset.value != req->base_offset)) { return false; }",
+      "new": "        false) { return false; }",
+      "what": "a caller base at another offset keeps the path that the extraction took"
     },
     {
       "decision": "D17.14-local-reference-read",
@@ -453,6 +454,90 @@
       "old": "        back = out->caller_owned[input_operand.place.local];\n",
       "new": "        back = false;\n",
       "what": "a store back of a held caller owner is no store back"
+    },
+    {
+      "decision": "D17.17-whole-window",
+      "file": "src/fort/ownership_transfer.ft",
+      "old": "    if (whole_window(r)) { return true; }",
+      "new": "    if (false) { return true; }",
+      "what": "a caller requirement no longer bounds a read through the whole window of a source"
+    },
+    {
+      "decision": "D17.17-window-end",
+      "file": "src/fort/ownership_transfer.ft",
+      "old": "        end <= r.access.end.value && align != 0",
+      "new": "        true && align != 0",
+      "what": "an access may end after the window of an address"
+    },
+    {
+      "decision": "D17.17-window-align",
+      "file": "src/fort/ownership_transfer.ft",
+      "old": "        begin % cast(align, i64) == 0;",
+      "new": "        true;",
+      "what": "an access may start at a byte that its alignment does not divide"
+    },
+    {
+      "decision": "D17.17-address-window",
+      "file": "src/fort/ownership_transfer.ft",
+      "old": "        } else if (req->window_checked &&\n            !window_holds(req, s->contents[base].borrows[0].range)) {",
+      "new": "        } else if (false &&\n            !window_holds(req, s->contents[base].borrows[0].range)) {",
+      "what": "an address through a cast base keeps the value of the path from the source start"
+    },
+    {
+      "decision": "D17.17-base-window",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "    if (req.kind == ownership_transfer.action.use) { windowed(&req, window); }\n",
+      "new": "",
+      "what": "the use of a base checks no window of the base value"
+    },
+    {
+      "decision": "D17.17-read-window",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        // The base check of a scalar read also checks the window of the base value.\n        windowed(&req, window_of(&selected));\n",
+      "new": "",
+      "what": "a projected scalar read checks no window of its base value"
+    },
+    {
+      "decision": "D17.17-pointer-bytes",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "                    base->kind == types.type_kind.k_ptr ? bytes : 0, align});",
+      "new": "                    0, align});",
+      "what": "a one-step pointer read takes no bytes from the window of its base"
+    },
+    {
+      "decision": "D17.17-local-window",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "                req.source_key, access_window{caller, 0, 0,",
+      "new": "                req.source_key, access_window{true, 0, 0,",
+      "what": "a local base must designate the start of its allocation"
+    },
+    {
+      "decision": "D17.17-local-read",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "            req.window_checked = base_use.window_checked;",
+      "new": "            req.window_checked = base_use.window_checked && caller;",
+      "what": "a one-step read of local storage checks no window of its base"
+    },
+    {
+      "decision": "D17.17-load-window",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        access_window{true, base_offset, offset, cast(bytes, i64), types.type_alignof(ty)});",
+      "new": "        access_window{true, base_offset, offset, 0, types.type_alignof(ty)});",
+      "what": "a reference load takes no bytes from the window of its base"
+    },
+    {
+      "decision": "D17.17-zero-store-base",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "        if (!scalar && selected->indirect && action == output_action.store_value) {",
+      "new": "        if (false) {",
+      "what": "a zero store of an aggregate that owns nothing uses no base"
+    },
+    {
+      "decision": "D17.17-captured-base",
+      "file": "src/fort/ownership_summary_body.ft",
+      "old": "                                selected.base_offset = selected.offset;\n",
+      "new": "",
+      "what": "a captured address at a nonzero offset counts as a base at the start of its source"
     }
   ]
 }

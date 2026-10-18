@@ -1,0 +1,125 @@
+// A cast keeps the offset, the access window and the alignment of a reference (D17.17). Each
+// faulty body reads or writes through a cast outside the window of a selected address: the
+// address of a field or an element, also through a copy, a void* round trip, a call result, a
+// store and a load, or one branch. The valid bodies read inside the window.
+struct pair { i32 a; i32 b; }
+struct outer { i32 x; pair p; }
+struct wrap { pair p; i32 z; }
+struct mix { u32 a; u32 b; u64 c; }
+struct two { i32* a; i32* b; }
+struct own2 { i32 mut* own a; i32 mut* own b; }
+struct s8 { u32 x; u32[2] y; u64 z; }
+struct holder { u64* w; }
+struct iholder { i32* w; }
+// Faulty: an 8-byte read through the address of a 4-byte field.
+fn widen(pair* p) u64 { i32* b = &p->b; u64* w = cast(b, u64*); return *w; }
+fn widen_first(pair* p) u64 { i32* a = &p->a; u64* w = cast(a, u64*); return *w; }
+fn widen_direct(pair* p) u64 { u64* w = cast(&p->b, u64*); return *w; }
+fn widen_void(pair* p) u64 { void* v = cast(&p->b, void*); u64* w = cast(v, u64*); return *w; }
+fn widen_copy(pair* p) u64 { i32* b = &p->b; i32* c = b; u64* w = cast(c, u64*); return *w; }
+fn widen_nested(outer* o) u64 { u64* w = cast(&o->p.b, u64*); return *w; }
+fn widen_branch(pair* p, bool c) u64 {
+    u64* mut w = cast(p, u64*);
+    if (c) { w = cast(&p->b, u64*); }
+    return *w;
+}
+// Faulty: a field of the cast type lies outside the window of the field address.
+fn widen_struct(pair* p) i32 { pair* q = cast(&p->b, pair*); return q->b; }
+fn first_struct(pair* p) i32 { pair* q = cast(&p->a, pair*); return q->b; }
+fn wrap_out(wrap* w) i32 { wrap* q = cast(&w->p, wrap*); return q->z; }
+fn load_window(two* t) i32* { two* q = cast(&t->a, two*); return q->b; }
+fn addr_window(pair* p) i32 { pair* q = cast(&p->a, pair*); i32* r = &q->b; return *r; }
+fn store_struct(pair mut* p) void { pair mut* q = cast(&p->b, pair mut*); q->b = 0; }
+fn store_whole(pair mut* p) void { pair mut* q = cast(&p->b, pair mut*); *q = pair{}; }
+fn store_branch(pair mut* p, bool c) void {
+    pair mut* mut q = p;
+    if (c) { q = cast(&p->b, pair mut*); }
+    q->b = 0;
+}
+// Faulty: an owner stored after the end of the caller storage.
+fn store_owner_out(own2 mut* t, i32 mut* own n) void {
+    own2 mut* q = cast(&t->b, own2 mut*);
+    q->b = move(n);
+}
+// Faulty: the cast value reaches the read through a call result or through caller storage.
+fn sel_a(pair* p) u64* { return cast(&p->a, u64*); }
+fn use_sel_a(pair* p) u64 { u64* w = sel_a(p); return *w; }
+fn sel_b(pair* p) pair* { return cast(&p->b, pair*); }
+fn use_sel_b(pair* p) i32 { pair* q = sel_b(p); return q->b; }
+fn trip(holder mut* h, pair* p) u64 { h->w = cast(&p->a, u64*); return *h->w; }
+fn trip_local(holder mut* h, pair* p) u64 {
+    u64* w = cast(&p->a, u64*);
+    h->w = w;
+    u64* v = h->w;
+    return *v;
+}
+// Faulty: a misaligned 8-byte read through the address of a field of an allocation.
+fn loc_mis() u64 {
+    mix mut* own a = new(mix);
+    a->a = 1;
+    a->b = 2;
+    a->c = 3;
+    u64* w = cast(&a->b, u64*);
+    u64 v = *w;
+    del(a);
+    return v;
+}
+// Faulty: an 8-byte read at byte 4 of an 8-aligned allocation, inside the field window.
+fn loc_align() u64 {
+    s8 mut* own a = new(s8);
+    a->x = 1;
+    a->z = 3;
+    u64* w = cast(&a->y, u64*);
+    u64 v = *w;
+    del(a);
+    return v;
+}
+// Valid: each read lies inside the window of its reference. A caller requirement bounds a
+// read through the whole window of a parameter, also after a cast.
+fn whole_cast(pair* p) u64 { u64* w = cast(p, u64*); return *w; }
+fn whole_wide(i32* p) u64 { u64* w = cast(p, u64*); return *w; }
+fn first_field(outer* o) i32 { i32* q = &o->x; return *q; }
+fn first_align(s8* p) u32 { u32* w = cast(&p->x, u32*); return *w; }
+fn first_same(pair* p) u32 { u32* u = cast(&p->a, u32*); return *u; }
+fn store_owner_in(own2 mut* t, i32 mut* own n) void {
+    own2 mut* q = cast(&t->a, own2 mut*);
+    q->a = move(n);
+}
+fn captured(outer* o) i32 { pair* q = &o->p; return q->b; }
+fn wrap_in(wrap* w) i32 { wrap* q = cast(&w->p, wrap*); return q->p.b; }
+fn trip_ok(iholder mut* h, pair* p) i32 { h->w = &p->a; return *h->w; }
+fn loc_field() i32 {
+    pair mut* own a = new(pair);
+    a->a = 1;
+    a->b = 2;
+    i32* w = &a->b;
+    i32 v = *w;
+    del(a);
+    return v;
+}
+// Valid, and the summary does not prove them: the summary names a path through the start of
+// the base, and the cast base designates another byte.
+fn struct_in(pair* p) i32 { pair* q = cast(&p->b, pair*); return q->a; }
+fn addr_in(pair* p) i32 { pair* q = cast(&p->b, pair*); i32* r = &q->a; return *r; }
+fn path_cast(two* t) i32 { two* q = cast(&t->b, two*); return *q->a; }
+fn load_cast(two* t) i32* { two* q = cast(&t->b, two*); return q->a; }
+fn branch_cast(two* t, bool c) i32 {
+    two* mut q = t;
+    if (c) { q = cast(&t->b, two*); }
+    return *q->a;
+}
+fn narrow(pair* p) u8 { u8* c = cast(&p->b, u8*); return *c; }
+fn main() i32 {
+    pair p = pair{.a = 1, .b = 2};
+    outer o = outer{};
+    wrap w = wrap{};
+    two t = two{.a = &p.a, .b = &p.b};
+    iholder mut ih = iholder{};
+    u64 y = 7;
+    i32 mut s = cast(first_same(&p), i32) - 1;
+    s += captured(&o) + wrap_in(&w) + trip_ok(&ih, &p) - 1 + loc_field() - 2;
+    s += struct_in(&p) - 2 + path_cast(&t) - 2 + *load_cast(&t) - 2 + branch_cast(&t, false) - 1;
+    s += addr_in(&p) - 2 + cast(narrow(&p), i32) - 2 + first_field(&o);
+    s += cast(whole_wide(cast(&y, i32*)), i32) - 7;
+    return s;
+}

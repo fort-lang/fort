@@ -2285,6 +2285,27 @@ came here.
   After a branch, an empty base gives incomplete proof and not a failure, because extraction
   models no null test (D17.18). A caller read through a borrow at a nonzero offset gives
   incomplete proof, because its extent requirement counts from the start of the source.
+  **The use of each base also checks the window of the base value** (D17.17, `spec/fir.md` 14.1). A
+  cast keeps the offset, the access window and the alignment of a reference, so the type of the base
+  does not give them. The path and the extent requirement of an access to caller storage count from
+  the start of the source. Flow checks each borrow of the current base value
+  (`ownership_transfer.window_holds`). A base of caller storage must designate the byte that the
+  extraction took, or the access gives incomplete proof: the start of its source, or the offset of
+  the one address that a pointer local holds (`captured` in `select_storage`). The lowering stores
+  an owner through such an address temporary (`(*_4) = move _5`), so a captured base at a nonzero
+  offset is common. A caller requirement or the local window bounds an access through the whole
+  window of a source: the region whose key is the key of the source (`whole_window`). Any other
+  window, for example the window of the address of a field, must hold the bytes of the access, and
+  the alignment of the access must divide its byte in the source. A base of local storage keeps the
+  offset of its value. The one-step read, the projected scalar read, the reference load, each store,
+  the release, the move and the address formation check the window (`access_window`). An address
+  outside the window of its base, or through a base at another offset, has an unknown value. A zero
+  store of an aggregate that owns nothing now uses its base too. On d9595ac4 the summary solver
+  proved 14 of the 22 faulty bodies of `test/ownership/probes/window_casts.ft` and the calls_heap
+  row proved 10. With the rule both prove 0. The heap solver alone still proves 16 of them (ledger
+  class R). Four valid bodies lose their proof: `struct_in`, `addr_in`,
+  `path_cast` and `load_cast` read inside the window, but the summary names a path from the start of
+  a cast base that designates another byte (`test/fort/ownership_summary_window_test.ft`).
   A read of a reference through a pointer to a local inspects the contents of the local, since
   that copy is a use (D17.14); after a call it stays incomplete.
   A release through one input and a read through another keep a complete summary: the

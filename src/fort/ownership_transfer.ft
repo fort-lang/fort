@@ -72,9 +72,19 @@ struct request {
     // An empty base gives incomplete proof, not an invalid use. A branch before the access can
     // test the base, and the extraction models no null test (D17.18).
     bool empty_unproved;
-    // An extent requirement guards this read from the start of its source, so a borrow at
-    // another offset gives incomplete proof (D17.17).
-    bool start_window;
+    // The window of a dereference of the base value (D17.17). A cast keeps the offset, the
+    // access window and the alignment of a reference. When `base_fixed`, the extraction took
+    // the base to designate byte `base_offset` of its source, and an extent requirement
+    // guards the access from the start of that source, so a borrow at another offset gives
+    // incomplete proof. A caller requirement or the local window bounds an access through the
+    // whole window of a source. Any other window must hold the `access_bytes` bytes at
+    // `access_offset` after the designated byte, at `access_align`.
+    bool window_checked;
+    bool base_fixed;
+    i64 base_offset;
+    i64 access_offset;
+    i64 access_bytes;
+    u64 access_align;
     // A release of caller storage ends the loaded source of the old owner (D17.14).
     ownership_api.entity_id ended_source;
     // The source and destination may be reference leaves of private aggregate slots: a slot
@@ -473,6 +483,37 @@ fn read_sources(ownership_state.state* s, ownership_api.services* svc, request* 
     return proof;
 }
 
+// Whether `r` is the whole window of its source. `ownership_summary_body.range` gives that
+// window the key of its source as a region, and `ownership_calls.reference_load` binds a
+// loaded root through that key. A selected address has a window of its own key.
+fn whole_window(ownership_api.region r) bool {
+    ownership_api.entity_id mut whole = r.source;
+    whole.kind = ownership_api.entity_kind.region;
+    return r.source.kind == ownership_api.entity_kind.source && same_entity(r.key, whole);
+}
+
+// Whether one borrow of the base value holds the dereference window of `req` (D17.17). The
+// bytes of a whole window need no check here: a caller requirement or the local window bounds
+// them from the start of the source. That requirement or window also aligns the source, so an
+// access is aligned when its byte in the source is. A read of 0 bytes needs a window that
+// holds its byte.
+fn window_holds(request* req, ownership_api.region r) bool {
+    if (r.offset.kind != ownership_api.fact_kind.exact || r.offset.value < 0 ||
+        (req->base_fixed && r.offset.value != req->base_offset)) { return false; }
+    if (whole_window(r)) { return true; }
+    i64 max = 9223372036854775807;
+    if (req->access_offset < 0 || req->access_bytes < 0 ||
+        req->access_offset > max - r.offset.value) { return false; }
+    i64 begin = r.offset.value + req->access_offset;
+    if (req->access_bytes > max - begin) { return false; }
+    i64 end = begin + req->access_bytes;
+    u64 align = req->access_align;
+    return r.access.arithmetic_proved && r.access.begin.kind == ownership_api.fact_kind.exact &&
+        r.access.end.kind == ownership_api.fact_kind.exact && r.access.begin.value <= begin &&
+        end <= r.access.end.value && align != 0 && align <= 9223372036854775807 &&
+        begin % cast(align, i64) == 0;
+}
+
 fn check_value(ownership_state.state* s, ownership_api.services* svc, request* req,
     ownership_api.contents_fact checked, bool dereference) ownership_api.proof_status {
     if (checked.kind == ownership_api.contents_kind.unknown) {
@@ -497,15 +538,14 @@ fn check_value(ownership_state.state* s, ownership_api.services* svc, request* r
             "empty reference has no element");
     }
     u64 mut b = 0;
-    while (dereference && req->start_window && b < checked.borrows.len) {
+    while (dereference && req->window_checked && b < checked.borrows.len) {
         ownership_api.charge_result charged = ownership_api.charge_work(svc,
             ownership_api.work_kind.transfer, req->operation, req->source_position);
         if (!charged.allowed) {
             return ownership_state.report_failure(svc, charged.proof, req->operation,
                 req->source_position);
         }
-        if (checked.borrows[b].range.offset.kind != ownership_api.fact_kind.exact ||
-            checked.borrows[b].range.offset.value != 0) {
+        if (!window_holds(req, checked.borrows[b].range)) {
             return unproved(svc, req, req->source.root);
         }
         b += 1;
@@ -793,6 +833,12 @@ fn do_assignment(ownership_state.state mut* s, ownership_api.services* svc,
             s->contents[base].owner_empty || s->contents[base].borrows.len != 1 ||
             !s->contents[base].borrows[0].representation_complete ||
             !same_entity(s->contents[base].borrows[0].source, value.borrows[0].source)) {
+            value = ownership_api.contents_fact{.kind = ownership_api.contents_kind.unknown};
+        } else if (req->window_checked &&
+            !window_holds(req, s->contents[base].borrows[0].range)) {
+            // The address names storage at another offset than the extraction took, or outside
+            // the window of its base. The value is unknown, so a later access gives
+            // incomplete proof (D17.17).
             value = ownership_api.contents_fact{.kind = ownership_api.contents_kind.unknown};
         }
     }
