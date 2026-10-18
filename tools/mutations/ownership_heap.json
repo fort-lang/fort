@@ -561,14 +561,14 @@
     {
       "decision": "D17.14-untracked-store",
       "file": "src/fort/ownership_heap.ft",
-      "old": "    if (is_reference(t) && v.kind != value_kind.owned && !static_reference(stored) &&",
-      "new": "    if (false && is_reference(t) && v.kind != value_kind.owned && !static_reference(stored) &&",
+      "old": "    if ((is_reference(t) || whole) && v.kind != value_kind.owned && !static_reference(stored) &&",
+      "new": "    if (false && (is_reference(t) || whole) && v.kind != value_kind.owned &&\n        !static_reference(stored) &&",
       "what": "a store of a reference into storage that the proof does not track passes"
     },
     {
       "decision": "D17.17-retype",
       "file": "src/fort/ownership_heap.ft",
-      "old": "    if (loc->kind != location_kind.slots || holds(key_type(c, s, loc->key), pointee)) { return; }\n",
+      "old": "    if (loc->kind != location_kind.slots || holds(storage, pointee)) { return; }\n",
       "new": "    if (true) { return; }\n",
       "what": "a pointer of another pointee type reads and writes its storage as that storage"
     },
@@ -694,7 +694,7 @@
     {
       "decision": "D17.17-escape-type",
       "file": "src/fort/ownership_heap.ft",
-      "old": "    if (v.offset_unknown || !holds(key_type(c, s, loc.key), t->elem)) {\n        clear_retyped(c, s, loc);\n    }\n",
+      "old": "    if (v.offset_unknown || !holds(storage, t->elem)) {\n        clear_retyped(c, s, loc);\n    }\n",
       "new": "    if (true) {\n        clear_retyped(c, s, loc);\n    }\n",
       "what": "a pointer of the type of its storage forgets that storage when it leaves"
     },
@@ -1366,8 +1366,8 @@
     {
       "decision": "D17.17-escape-unknown-offset",
       "file": "src/fort/ownership_heap.ft",
-      "old": "    if (v.offset_unknown || !holds(key_type(c, s, loc.key), t->elem)) {\n",
-      "new": "    if (!holds(key_type(c, s, loc.key), t->elem)) {\n",
+      "old": "    if (v.offset_unknown || !holds(storage, t->elem)) {\n",
+      "new": "    if (!holds(storage, t->elem)) {\n",
       "what": "a mutable escape uses the type of one slot when its byte offset is unknown"
     },
     {
@@ -1516,6 +1516,251 @@
       "old": "    while (i < ast.ast_len(decl)) {\n        if (!pay(c, 1)) { return false; }\n        ast.node* item = ast.ast_child(decl, i);\n",
       "new": "    while (i < ast.ast_len(decl)) {\n        ast.node* item = ast.ast_child(decl, i);\n",
       "what": "the scalar write guard reads a struct declaration child without a W charge"
+    },
+    {
+      "decision": "D17.14-call-copied-leaves",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "            // The copy uses each borrowed leaf before any effect of the call (D17.14).\n            check_copied_leaves(c, s, loc, &part);\n",
+      "new": "            // The copy uses each borrowed leaf before any effect of the call (D17.14).\n",
+      "what": "a call does not check the borrowed leaves of an aggregate argument"
+    },
+    {
+      "decision": "D17.14-copy-moved-aggregate",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "            check_copied_leaves(c, s, loc, &part);\n",
+      "new": "            if (op.kind != fir.operand_kind.ok_move) { check_copied_leaves(c, s, loc, &part); }\n",
+      "what": "a whole move of an aggregate argument does not use its borrowed leaves"
+    },
+    {
+      "decision": "D17.14-copy-released-view",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        if (!live) { use_sources(c, s, v.count, v.sources, copied_name(c, s, loc, item)); }\n",
+      "new": "        if (false) { use_sources(c, s, v.count, v.sources, copied_name(c, s, loc, item)); }\n",
+      "what": "a copied view with a released source records no event"
+    },
+    {
+      "decision": "D17.14-copy-ended-local",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "            if (ended == 1) {\n                violation(c, s, ownership_api.event_kind.invalid_use, certainty.definite, NONE,\n                    copied_name(c, s, loc, item));\n",
+      "new": "            if (false) {\n                violation(c, s, ownership_api.event_kind.invalid_use, certainty.definite, NONE,\n                    copied_name(c, s, loc, item));\n",
+      "what": "a copied address of an ended local records no event"
+    },
+    {
+      "decision": "D17.14-copy-possibly-ended-local",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "            } else if (ended == 2) {\n                unproved(c, s, ownership_api.incomplete_reason.missing_path, NONE,\n                    copied_name(c, s, loc, item));\n",
+      "new": "            } else if (false) {\n                unproved(c, s, ownership_api.incomplete_reason.missing_path, NONE,\n                    copied_name(c, s, loc, item));\n",
+      "what": "a copied address of a local that ended on some path records no event"
+    },
+    {
+      "decision": "D17.14-copy-cell-address",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "            atom_status status = s->atoms[cast(v.target.id, u64)].status.value;\n            if (status != atom_status.live && status != atom_status.leaked) {\n",
+      "new": "            atom_status status = s->atoms[cast(v.target.id, u64)].status.value;\n            if (false) {\n",
+      "what": "a copied address of a released cell records no event"
+    },
+    {
+      "decision": "D17.14-copy-lost-reference",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    if (v.kind == value_kind.unknown && !v.external && !(v.exact && c->residual)) {\n",
+      "new": "    if (false && v.kind == value_kind.unknown && !v.external && !(v.exact && c->residual)) {\n",
+      "what": "a copied reference whose facts the body lost records no event"
+    },
+    {
+      "decision": "D17.14-copy-effect-not-residual",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    if (v.kind == value_kind.unknown && !v.external && !(v.exact && c->residual)) {\n",
+      "new": "    if (v.kind == value_kind.unknown && !v.external && !v.exact) {\n",
+      "what": "a copied reference that an unknown effect wrote needs nothing in a body that is not residual"
+    },
+    {
+      "decision": "D17.14-copy-effect-residual",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    if (v.kind == value_kind.unknown && !v.external && !(v.exact && c->residual)) {\n",
+      "new": "    if (v.kind == value_kind.unknown && !v.external) {\n",
+      "what": "a copied reference that an unknown effect wrote records a second event in a residual body"
+    },
+    {
+      "decision": "D17.14-copy-element-borrows",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "            if (s->atoms[cast(loc.sources[j], u64)].borrows) { body = true; }\n",
+      "new": "            if (false) { body = true; }\n",
+      "what": "a leaf of storage without slots needs nothing when an atom keeps a reference of the body"
+    },
+    {
+      "decision": "D17.14-copy-element-inputs",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        if (!pay(c, 1)) { return; }\n        body = false;\n",
+      "new": "        if (!pay(c, 1)) { return; }\n        body = true;\n",
+      "what": "a leaf of storage without slots gives incomplete proof when no atom keeps a body reference"
+    },
+    {
+      "decision": "D17.14-copy-owned-leaf",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        if (!item.owning && (is_reference(item.ty) || item.array)) {\n            if (!pay(c, 1)) { return; }\n",
+      "new": "        if (is_reference(item.ty) || item.array) {\n            if (!pay(c, 1)) { return; }\n",
+      "what": "an owned leaf of an aggregate argument pays the work of a borrowed leaf"
+    },
+    {
+      "decision": "D17.18-copy-leaf-work",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        if (!item.owning && (is_reference(item.ty) || item.array)) {\n            if (!pay(c, 1)) { return; }\n",
+      "new": "        if (!item.owning && (is_reference(item.ty) || item.array)) {\n",
+      "what": "a borrowed leaf of an aggregate argument is checked without a W charge"
+    },
+    {
+      "decision": "D17.18-copy-element-scan-work",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    if (loc.kind == location_kind.element) {\n        if (!pay(c, 1)) { return; }\n        body = false;\n",
+      "new": "    if (loc.kind == location_kind.element) {\n        body = false;\n",
+      "what": "the scan of the atoms of storage without slots pays no W unit"
+    },
+    {
+      "decision": "D17.14-copy-element-each-atom",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        while (j < loc.count) {\n            if (s->atoms[cast(loc.sources[j], u64)].borrows) { body = true; }\n",
+      "new": "        while (j < 1 && j < loc.count) {\n            if (s->atoms[cast(loc.sources[j], u64)].borrows) { body = true; }\n",
+      "what": "a leaf of storage without slots reads the reference fact of its first atom only"
+    },
+    {
+      "decision": "D17.15-whole-array-store",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "            s->slots[at].v = s->slots[at].ty == t ? stored : weak_reference(old, stored);\n",
+      "new": "            s->slots[at].v = weak_reference(old, stored);\n",
+      "what": "a store of a whole array joins its value into the array slot"
+    },
+    {
+      "decision": "D17.15-whole-array-row-join",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "            s->slots[at].v = s->slots[at].ty == t ? stored : weak_reference(old, stored);\n",
+      "new": "            s->slots[at].v = stored;\n",
+      "what": "a store of one row of a nested array replaces the facts of each row"
+    },
+    {
+      "decision": "D17.14-located-array-slot",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "            // A borrowed array slot stands for each element: each whole-array store sets it.\n            if (at != U64_MAX && (!s->slots[at].array || !s->slots[at].owning)) {\n",
+      "new": "            // A borrowed array slot stands for each element: each whole-array store sets it.\n            if (at != U64_MAX && !s->slots[at].array) {\n",
+      "what": "a read of a whole borrowed array leaf drops the facts of its slot"
+    },
+    {
+      "decision": "D17.14-array-literal-join",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    bool literal = rv.kind == fir.rvalue_kind.rv_aggregate && t != null &&\n",
+      "new": "    bool literal = false && rv.kind == fir.rvalue_kind.rv_aggregate && t != null &&\n",
+      "what": "an array literal of references gives its slot no facts"
+    },
+    {
+      "decision": "D17.14-element-join-views",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    if (a.kind != value_kind.view || b.kind != value_kind.view) {\n        return weak_reference(a, b); // join: copy\n",
+      "new": "    if (true) {\n        return weak_reference(a, b); // join: copy\n",
+      "what": "two view elements of an array literal lose their sources"
+    },
+    {
+      "decision": "D17.14-element-join-empty-first",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    if (a.kind == value_kind.empty && b.kind == value_kind.view) {\n",
+      "new": "    if (false && a.kind == value_kind.empty && b.kind == value_kind.view) {\n",
+      "what": "a null element before a view element loses the view"
+    },
+    {
+      "decision": "D17.14-element-join-empty-last",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    if (a.kind == value_kind.view && b.kind == value_kind.empty) {\n",
+      "new": "    if (false && a.kind == value_kind.view && b.kind == value_kind.empty) {\n",
+      "what": "a null element after a view element loses the view"
+    },
+    {
+      "decision": "D17.14-whole-array-element-facts",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        if ((is_reference(t) || whole) && v.kind != value_kind.owned) {\n",
+      "new": "        if (is_reference(t) && v.kind != value_kind.owned) {\n",
+      "what": "a whole-array store into storage without slots records no reference of the body"
+    },
+    {
+      "decision": "D17.14-whole-array-untracked",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    if ((is_reference(t) || whole) && v.kind != value_kind.owned && !static_reference(stored) &&\n",
+      "new": "    if (is_reference(t) && v.kind != value_kind.owned && !static_reference(stored) &&\n",
+      "what": "a whole-array store into untracked storage gives no incomplete proof"
+    },
+    {
+      "decision": "D17.18-whole-array-escape",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    if (element != null && is_reference(element) && element->is_mut &&\n",
+      "new": "    if (false && element != null && is_reference(element) && element->is_mut &&\n",
+      "what": "a whole-array store of mutable references sets no escaped-address fact"
+    },
+    {
+      "decision": "D17.18-array-literal-work",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        if (literal) {\n            if (!pay(c, 1)) { return; }\n",
+      "new": "        if (literal) {\n",
+      "what": "an element of an array literal joins without a W charge"
+    },
+    {
+      "decision": "D17.17-element-address-retype",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    types.node* storage = loc->element != null ? loc->element : key_type(c, s, loc->key);\n",
+      "new": "    types.node* storage = key_type(c, s, loc->key);\n",
+      "what": "a cast of an element address matches the type of its whole array"
+    },
+    {
+      "decision": "D17.17-element-address-index",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "                        // The element keeps the key of its array, at another byte offset.\n                        indexed = true;\n",
+      "new": "                        // The element keeps the key of its array, at another byte offset.\n                        indexed = false;\n",
+      "what": "an address through an index that is not known to be zero keeps the start of its array"
+    },
+    {
+      "decision": "D17.17-element-address-join",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "            joined_address.offset_unknown = vx.offset_unknown || vy.offset_unknown ||\n                vx.element != vy.element;\n",
+      "new": "            joined_address.offset_unknown = vx.offset_unknown || vy.offset_unknown;\n",
+      "what": "a join of the start and an element address keeps a known offset"
+    },
+    {
+      "decision": "D17.15-array-leaf-struct",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "    return t != null && !is_reference(t) && (t->kind == types.type_kind.k_array ||\n        t->kind == types.type_kind.k_struct) && has_reference(t) && !owned_leaf(t);\n",
+      "new": "    return t != null && !is_reference(t) && t->kind == types.type_kind.k_array &&\n        has_reference(t) && !owned_leaf(t);\n",
+      "what": "a store of a whole struct below the path bound changes no slot"
+    },
+    {
+      "decision": "D17.17-whole-array-owning-slot",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        if (at != U64_MAX && !s->slots[at].owning && whole) {\n",
+      "new": "        if (at != U64_MAX && whole) {\n",
+      "what": "a store into a part of an owning array leaf replaces its owner with a reference"
+    },
+    {
+      "decision": "D17.14-zero-array-leaf",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "                        if (!pay(c, 1)) { return; }\n                        out->items[z].v = empty_value();\n",
+      "new": "                        if (!pay(c, 1)) { return; }\n",
+      "what": "a zero value gives its borrowed array leaves no facts"
+    },
+    {
+      "decision": "D17.18-zero-array-work",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "                        if (!pay(c, 1)) { return; }\n                        out->items[z].v = empty_value();\n",
+      "new": "                        out->items[z].v = empty_value();\n",
+      "what": "a borrowed array leaf of a zero value pays no W unit"
+    },
+    {
+      "decision": "D17.17-slice-element",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "                address.element = sliced_ty->elem;\n",
+      "new": "",
+      "what": "an address through a slice of a fixed array matches the whole array type"
+    },
+    {
+      "decision": "D17.17-escape-element-storage",
+      "file": "src/fort/ownership_heap.ft",
+      "old": "        loc.key = v.target;\n        storage = v.element;\n",
+      "new": "        loc.key = v.target;\n",
+      "what": "an escaped element address cast to its array type keeps the facts of the array"
     }
   ]
 }

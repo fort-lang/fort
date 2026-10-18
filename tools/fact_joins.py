@@ -103,6 +103,12 @@ JOIN_FUNCTIONS = {
     "value": "join_values",
     "state": "join",
 }
+# A second join of two records of a struct, which is not the join of states. It holds the rules
+# of a join function: each typed field through the join of its type, each tagged field through
+# its operator, and no hand provenance. It counts no join of a field.
+SECOND_JOINS = {
+    "element_join": "value",
+}
 # A container of records whose struct has typed fields, and the join of two of its records.
 RECORD_JOINS = {
     "atoms": "join_atom",
@@ -111,6 +117,7 @@ RECORD_JOINS = {
 RECORD_PARAMETERS = {
     "join_atom": ("a", "b"),
     "join_values": ("vx", "vy"),
+    "element_join": ("a", "b"),
 }
 # The functions that put the facts of a callee summary into the state of its caller.
 GRAFT_FUNCTIONS = ("apply", "graft_value")
@@ -146,7 +153,7 @@ ESTABLISHED_SITES = {
 # The functions that may call `null_value()`, and how often.
 NULL_VALUE_SITES = {
     "operand": 2,
-    "place_leaves": 1,
+    "located_leaves": 1,
     "allocate": 1,
     "release_place": 1,
     "end_slot": 1,
@@ -374,7 +381,8 @@ def statement_from(code, offset):
 def check_joins(structs, bodies, problems):
     """Hold each typed field to its join in the join functions."""
     typed = [f for fields in structs.values() for f in fields if f.fact is not None]
-    for name in sorted(set(JOIN_FUNCTIONS.values())):
+    functions = sorted(set(JOIN_FUNCTIONS.values()) | set(SECOND_JOINS))
+    for name in functions:
         if name not in bodies:
             problems.append("%s: the file declares no join function %s" % (SOURCE, name))
     for field in typed:
@@ -382,7 +390,7 @@ def check_joins(structs, bodies, problems):
             problems.append("%s: %s.%s has the fact type %s, but no join function joins a %s"
                             % (field.where(), field.struct, field.name, field.fact,
                                field.struct))
-    for function in sorted(set(JOIN_FUNCTIONS.values())):
+    for function in functions:
         body = bodies.get(function)
         if body is None:
             continue
@@ -424,27 +432,33 @@ def check_operators(structs, bodies, problems):
             if field.tag is None or field.struct not in JOIN_FUNCTIONS:
                 continue
             function = JOIN_FUNCTIONS[field.struct]
-            body = bodies.get(function)
-            if body is None:
-                continue
-            for offset, write, rhs in field_uses(body.code, field.name):
-                if not write:
+            seconds = [name for name, struct in sorted(SECOND_JOINS.items())
+                       if struct == field.struct]
+            for name in [function] + seconds:
+                body = bodies.get(name)
+                if body is None:
                     continue
-                text = statement_from(body.code, rhs)
-                union = "||" in text or re.search(r"[^|]\|[^|]", text) is not None
-                meet = "&&" in text or re.search(r"\s&\s", text) is not None
-                if field.tag == "may":
-                    good = union and not meet
-                elif field.tag == "must":
-                    good = meet
-                else:
-                    good = not union and not meet
-                field.operators += 1
-                if not good:
-                    problems.append("%s:%d: %s.%s has the tag %s, but %s joins it as `%s`"
-                                    % (SOURCE, body.number_at(offset), field.struct,
-                                       field.name, field.tag, function,
-                                       " ".join(text.split())))
+                for offset, write, rhs in field_uses(body.code, field.name):
+                    if not write:
+                        continue
+                    text = statement_from(body.code, rhs)
+                    union = "||" in text or re.search(r"[^|]\|[^|]", text) is not None
+                    meet = "&&" in text or re.search(r"\s&\s", text) is not None
+                    if field.tag == "may":
+                        good = union and not meet
+                    elif field.tag == "must":
+                        good = meet
+                    else:
+                        good = not union and not meet
+                    if name == function:
+                        field.operators += 1
+                    if not good:
+                        problems.append("%s:%d: %s.%s has the tag %s, but %s joins it as `%s`"
+                                        % (SOURCE, body.number_at(offset), field.struct,
+                                           field.name, field.tag, name,
+                                           " ".join(text.split())))
+            if bodies.get(function) is None:
+                continue
             if field.operators == 0 and field.tag in ("may", "must"):
                 problems.append("%s: %s.%s has the tag %s, but %s assigns it nowhere"
                                 % (field.where(), field.struct, field.name, field.tag,
