@@ -939,6 +939,61 @@ came here.
   an atom to that storage gives incomplete proof (`ownership_heap_aliases_test.ft`). The
   summary does not order a read and a release, so a read before the release is unproved too.
   Reads through parameter 64 or later share one bit (`reads_high`).
+  A copy of a reference is a use of it (D17.14). A by-value aggregate argument copies each
+  borrowed leaf, and a whole move copies them too. So `call` checks each borrowed leaf of an
+  aggregate argument against the state at that argument, before any effect of the call
+  (`check_copied_leaves`), also when the callee does not read it. A view needs each source live
+  or leaked. An address needs its local not ended, or its cell live or leaked. A reference
+  whose facts the body lost gives incomplete proof. An input of the caller needs nothing. A
+  reference that an unknown effect wrote needs nothing when that effect made the body residual,
+  as at a return (`check_retained`). The leaves of storage without slots need nothing when no
+  atom of that storage keeps a reference of the body (`borrows`). The scan of those atoms pays
+  one W unit for each argument, and each borrowed leaf pays one more. One event goes to each
+  operation, kind and relation, so a callee read of the same leaf adds no event. Before this rule
+  the heap solver alone proved the 12 class N bodies of the 4 `review_s*` probes.
+  One borrowed slot stands for each element of a fixed array of references (or of a struct below
+  the path bound). Each store keeps it a fact about each element (D17.15). A store of one
+  element, or of one row of a nested array, joins the stored value into the slot
+  (`weak_reference`). A store of the whole leaf, whose type is the type of the slot, replaces
+  each element, so the slot takes the stored value. A store into storage without slots records
+  its references in `borrows` and `params`, and a store into untracked storage gives incomplete
+  proof, as a reference store does. Mutable element references of a whole store escape as an
+  element store does. An array literal of references gives the join of its elements
+  (`element_join`): two views keep the sources of both, a null element keeps the other view, and
+  each other pair takes `weak_reference`. Each element pays one W unit. A zero value gives each
+  borrowed array leaf an empty value, as each reference leaf, and pays one W unit for each such
+  leaf. `located_leaves` reads the slot for a whole array. Before this rule a whole-array store
+  changed no slot, so the heap solver alone proved the 3 faulty bodies of
+  `test/ownership/probes/array_stores.ft`: a store of a dangling reference into caller storage,
+  a by-value array parameter, or an array field of a by-value struct. A read of one element
+  (`a[i]`) still gets an unknown value.
+  The address of an element at an index that the proof does not know to be zero keeps the key
+  of its array, but it starts after the start of the array. The location and the address keep
+  the type of that element (`element`), and `retype` matches a pointee type against it, not
+  against the array. So a cast of `&a[1]` to `i32*[2] mut*` is a cast store (`clear_retyped`,
+  `stays_in`), and it cannot replace the whole slot. Such an address designates no caller
+  storage of a summary, and a join of two element types loses the offset. A slice of a fixed
+  array designates its elements, also when it starts after the first one, so its address keeps
+  the element type too. An address through a span index or a slice therefore never matches the
+  whole array type, also at index zero: the coordinator ratified that loss of `span_zero_ok` on
+  2026-10-17. Main proves the 8 faulty bodies of `test/ownership/probes/array_casts.ft`, and the
+  whole-array store without this rule proved 6 of them.
+  Five limits lose proofs that main has; each leaf is unknown or lost, so the copy gives
+  incomplete proof (measured on 2026-10-17 against `87d93057`):
+  - An aggregate global. The proof keeps no fact of a global, so `take(g)` of a global with a
+    null leaf gives incomplete proof (`global_copy` of `ownership_heap_calls_test.ft`).
+  - A local whose storage a FIR address names. A call forgets its reference leaves (D17.18).
+    Only a summary that reaches that storage through an argument gives the entry values back,
+    so a copy of that local after another call gives incomplete proof (`framed`).
+  - An array literal of struct literals (`{sv{q}, sv{q}}`): its element type is no reference,
+    so the literal gives no join.
+  - A callee store of one element into caller storage (`h->arr[0] = q`): the joined input of the
+    callee is no entry value, so the caller gets a lost reference.
+  - An array literal of two addresses (`{&x, &x}`): `weak_reference` loses each address.
+  The heap transfer does not yet check a copy of a dangling reference as a scalar argument, a
+  scalar copy or an aggregate assignment. Each is a known false accept of ledger class Q
+  (`test/ownership/probes/copied_references.ft`), and a later change closes it. `not_read` of
+  `ownership_heap_aliases_test.ft` asserts the scalar argument case as it is now.
   An unknown reference value is external (an input of the caller, or a field of a region whose
   fold found only external references), the work of an unknown effect (`exact`), or a
   reference whose facts the body lost, for example in a join of a local address with a view.
@@ -972,10 +1027,11 @@ came here.
   other member, because their summaries rest on each other.
   A lost owner of live status becomes leaked: it stays allocated, so its views stay valid. A
   lost owner of unknown status becomes escaped, so a read through its views stays unproved.
-  `tools/mutations/ownership_heap.json` holds 184 rows of the core rules. Of these rows, 41
-  hold the cast rule of D17.17 below, 28 hold the frame of a call, 14 hold rule P1 of D17.18,
-  and 3 hold `not` of an integer. The `provenance` stage runs
-  `ownership_heap_provenance_test.ft`.
+  `tools/mutations/ownership_heap.json` held 184 rows of the core rules when the cast rule
+  merged. Of these rows, 41 hold the cast rule of D17.17 below, 28 hold the frame of a call, 14
+  hold rule P1 of D17.18, and 3 hold `not` of an integer. On 2026-10-17 the table holds 242
+  rows: 15 of them hold the copied-leaf rule of a call, 15 hold the whole-array store, and 5
+  hold the element address. The `provenance` stage runs `ownership_heap_provenance_test.ft`.
   A known integer keeps a number only through a copy (`rv_use`), `add`, `sub`, `cast` and `not`.
   Each one computes the exact result in its type, and a result that does not fit has no number.
   `add` and `sub` give a number only when each operand lies strictly between -2^40 and 2^40
@@ -1123,9 +1179,11 @@ came here.
   `unknown_call`) occur only in the functions of `ESTABLISHED_SITES`, `NULL_VALUE_SITES`,
   `PRUNING_SITES`, `FORGET_SITES` and `EFFECT_SITES`, as often as the table says, and `call`
   takes its frame before its first callee effect. So a new established fact, a new pruning site
-  or a new callee effect changes a table. A new fact type adds one row to `FACT_JOINS` and one
-  join function. No join function writes a part of a typed field, so the lint reports no partial
-  write.
+  or a new callee effect changes a table. A change that moves such a site into another function
+  changes the table too: the split of `located_leaves` from `place_leaves` failed both ctests on
+  3 hosts until `NULL_VALUE_SITES` named `located_leaves`. A new fact type adds one row to
+  `FACT_JOINS` and one join function. No join function writes a part of a typed field, so the
+  lint reports no partial write.
 - **A pointer of another pointee type than its storage reads and writes no fact of it** (D17.17).
   A cast keeps the address. Each dereference compares the pointee type with its storage type.
   `key_type` finds the type of local, caller or cell storage. It then follows each field path.

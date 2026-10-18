@@ -743,16 +743,16 @@ bullet at a time and without a rewrite.
   `lower_env` writes its sandboxes into the working directory.
   `test/ownership/heap_rows.ft` prints one row for each function of a file: the verdict, the
   incomplete reason, `returns`, the interface length, the post slots, the post atoms and the events.
-  The test compares 1405 rows of 281 inputs with `test/ownership/heap_rows.txt`. The inputs are
-  107 of the 109 manifest programs, the 49 programs of `test/ownership/probes`, and 125 texts that
+  The test compares 1500 rows of 288 inputs with `test/ownership/heap_rows.txt`. The inputs are
+  107 of the 109 manifest programs, the 52 programs of `test/ownership/probes`, and 129 texts that
   `heap_texts` takes from the 12 `test/fort/ownership_heap*_test.ft` programs. `HEAP_ROWS_SKIPPED`
   names the other 2 manifest programs with the reason: each imports `std.str`, and the sandbox
   `std` holds only a runtime. A skipped program that `heap_rows` reads fails the test. Run the
   test with `--bless` to write the golden, and read the diff of the golden before the commit.
   `test/ownership/solvers_alone.ft` prints the summary verdict, the heap verdict and the verdict
-  of the calls_heap row (`ownership_source_calls_env.verdict`) of 176 faulty bodies:
+  of the calls_heap row (`ownership_source_calls_env.verdict`) of 190 faulty bodies:
   the faulty body of each of the 37 reject cases (the last function at or before an error line)
-  and the 139 bodies of `test/ownership/solvers/faulty.json`. A body is faulty because its source
+  and the 153 bodies of `test/ownership/solvers/faulty.json`. A body is faulty because its source
   has the expected error: the error line of a reject case, or the `faulty.json` entry of a probe.
   The summary solver must prove 0, and the calls_heap row must prove 0: it needs both proofs. No
   ledger entry names the row. Its one-body witness checker validates an event in 13 of the faulty
@@ -796,8 +796,22 @@ bullet at a time and without a rewrite.
   class N, and N became 18. A later change fixes the heap rule.
   `test/ownership/probes/loaded_callers.ft` holds the 8 faulty callers of
   `test/fort/ownership_source_local_loaded_gate_test.ft`, and the driver test holds the two
-  texts the same. Thus, `faulty.json` has 139 bodies, and the full set has 176. The ledger
-  classes with entries are M and N. The empty ledger is the goal.
+  texts the same. Thus, `faulty.json` had 139 bodies, and the full set had 176. The copied-leaf
+  rule of the heap call transfer (`notes/compiler.md` 6) deleted the 12 class N entries, and N
+  became 6. That rule changed 12 rows of the golden from `proved` to `unproved`, the 12 class N
+  bodies, and no row in the other direction. The review of that rule found 3 more faulty shapes
+  that the heap solver alone proves on main: a dangling reference copied as a scalar argument,
+  as a scalar, or in an aggregate assignment. On 2026-10-16 the user ruled that the ledger takes
+  them as class Q for a later change, and N became 9. The summary solver fails 2 of them, and 1
+  stays unproved. `test/ownership/probes/copied_references.ft` holds them, so `faulty.json` had
+  142 bodies, and the full set had 179. The same review found that the heap solver alone proves
+  3 whole-array stores of a dangling reference. The user ruled on 2026-10-16 that this change
+  fixes them, so they took no ledger entry. `test/ownership/probes/array_stores.ft` holds them
+  with valid counterparts, so `faulty.json` had 145 bodies, and the full set had 182. The
+  reviews of that fix found 8 casts of an element address to the array type, 3 of them through
+  a slice, that the heap solver alone proves on main. `test/ownership/probes/array_casts.ft`
+  holds them, so `faulty.json` has 153 bodies, and the full set has 190. The ledger classes
+  with entries are M and Q. The empty ledger is the goal.
   Measured runs of the first 10 probe programs on darwin, built with `build/Darwin/debug/fort --cc
   /opt/homebrew/bin/clang --std-dir build/Darwin/debug/std -o <probe> <probe>.ft`: `round8_a3`
   exits 134 (the assertion of `chk_addr`), `round8_d2` exits 139, and the other 8 exit 0.
