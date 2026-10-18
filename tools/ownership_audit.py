@@ -6,6 +6,7 @@ Synthetic reports test this tool. They establish no compiler-source ownership pr
 
 import argparse
 from collections import Counter
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -14,6 +15,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 
 ANALYSES = ("graph", "liveness", "local", "stored_borrows", "raw", "calls_heap", "process_exit")
 STAGES = ("checking", "lowering", "verification")
@@ -1116,6 +1118,130 @@ def audit_totals(attempts, body_identities, context_bodies):
     }
 
 
+class AuditRun:
+    """The fixed inputs of one audit run. Each root attempt reads them and changes none."""
+
+    def __init__(self, **values):
+        self.__dict__.update(values)
+
+
+def attempt_row(run, index, root):
+    """Return the row of one root attempt before its invocation."""
+    report_path = run.output / f"report-{index:04d}.json"
+    argv = command(
+        run.compiler,
+        root,
+        report_path,
+        run.target,
+        run.standard,
+        run.search_roots,
+        run.cfg,
+        run.release,
+        run.no_bounds,
+    )
+    return {
+        "root": root,
+        "cwd": str(run.checkout),
+        "argv": argv,
+        "exit_status": 2,
+        "report_path": str(report_path),
+        "report_sha256": None,
+        "inputs": [],
+    }
+
+
+def start_root(run, index, root, attempt):
+    """Run one root attempt unless an earlier attempt stopped the audit.
+
+    Return None for an attempt that did not start. An exception that the attempt does not
+    catch stops the audit: no later attempt starts.
+    """
+    if run.stop.is_set():
+        return None
+    try:
+        return attempt_root(run, index, root, attempt)
+    except BaseException:
+        run.stop.set()
+        raise
+
+
+def attempt_root(run, index, root, attempt):
+    """Run the compiler on one root, validate its report and fill in its row.
+
+    Return the body identities, the context body count, and the error text or None. The
+    attempt reads the shared inputs and writes only its row and the files of its own index, so
+    two attempts can run at the same time.
+    """
+    report_path = Path(attempt["report_path"])
+    argv = attempt["argv"]
+    checkout, standard = run.checkout, run.standard
+    candidates = {}
+    try:
+        require(not os.path.lexists(report_path), "report: stale path before invocation")
+        require(run.compiler.read_bytes() == run.binary, "compiler: changed before invocation")
+        roots = [checkout / Path(root).parent, *run.search_roots, standard]
+        require(
+            snapshot(run.input_roots) == run.audit_inputs, "inputs: changed since audit snapshot"
+        )
+        candidates = snapshot(roots)
+        atomic_json(
+            run.output / f"inputs-{index:04d}.json",
+            [{"path": path, "sha256": digest(data)} for path, data in sorted(candidates.items())],
+        )
+        result = subprocess.run(
+            argv, cwd=checkout, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False
+        )
+        attempt["exit_status"] = result.returncode
+        (run.output / f"stdout-{index:04d}.txt").write_bytes(result.stdout)
+        (run.output / f"stderr-{index:04d}.txt").write_bytes(result.stderr)
+        require(not report_path.is_symlink(), "report: symbolic link destination")
+        report, report_bytes = read_json(report_path)
+        attempt["report_sha256"] = digest(report_bytes)
+        # Keep closure inputs even if another report field fails validation.
+        if type(report) is dict and type(report.get("files")) is list:
+            for row in report["files"]:
+                if type(row) is dict and type(row.get("path")) is str:
+                    absolute = str(resolve_path(row["path"], checkout))
+                    if absolute in candidates:
+                        attempt["inputs"].append(
+                            {
+                                "path": normalize(absolute, checkout, checkout, standard),
+                                "sha256": digest(candidates[absolute]),
+                            }
+                        )
+        require(run.compiler.read_bytes() == run.binary, "compiler: changed during invocation")
+        require(
+            snapshot(roots) == candidates and snapshot(run.input_roots) == run.audit_inputs,
+            "inputs: changed during invocation",
+        )
+        inputs, body_ids, count = validate_report(
+            report,
+            argv=argv,
+            cwd=checkout,
+            root=root,
+            target=run.target,
+            cfg=run.effective,
+            checkout=checkout,
+            standard=standard,
+            exit_status=result.returncode,
+            candidates=candidates,
+            limits=run.limits,
+            compiler_version=run.version,
+        )
+        attempt["inputs"] = inputs
+        return body_ids, count, None
+    except FailedReportAttempt as error:
+        attempt["inputs"] = error.inputs
+        return error.identities, error.bodies, f"{root}: {error}"
+    except (InvalidEvidence, OSError) as error:
+        try:
+            if report_path.is_file():
+                attempt["report_sha256"] = digest(report_path.read_bytes())
+        except OSError:
+            pass
+        return set(), 0, f"{root}: {error}"
+
+
 def run_audit(
     *,
     checkout,
@@ -1129,8 +1255,14 @@ def run_audit(
     cfg=(),
     release=False,
     no_bounds=False,
+    jobs=1,
 ):
-    """Keep all attempted roots. Mark the attestation incomplete when any evidence fails."""
+    """Keep all attempted roots. Mark the attestation incomplete when any evidence fails.
+
+    `jobs` attempts run at the same time. The attestation holds the attempts and the errors
+    in root order for each value of `jobs`.
+    """
+    require(type(jobs) is int and jobs >= 1, "jobs: expected a positive integer")
     checkout = Path(checkout).resolve()
     compiler = Path(compiler).resolve()
     compiler_checkout = Path(compiler_checkout).resolve()
@@ -1149,6 +1281,24 @@ def run_audit(
     output = Path(output).resolve()
     require(not output.exists(), "output: requires a fresh directory")
     output.mkdir(parents=True)
+    run = AuditRun(
+        checkout=checkout,
+        compiler=compiler,
+        binary=binary,
+        output=output,
+        target=target,
+        standard=standard,
+        search_roots=search_roots,
+        cfg=cfg,
+        release=release,
+        no_bounds=no_bounds,
+        effective=effective,
+        limits=limits,
+        version=version,
+        input_roots=input_roots,
+        audit_inputs=audit_inputs,
+        stop=threading.Event(),
+    )
     attestation = {
         "kind": "fort-ownership-audit",
         "version": 1,
@@ -1162,98 +1312,49 @@ def run_audit(
         "attempts": [],
         "totals": {},
     }
-    errors = []
+    roots = root_order(paths)
+    rows = [attempt_row(run, index, root) for index, root in enumerate(roots)]
+    # The errors of the finished attempts, by root index. The main thread alone writes them.
+    finished = {}
     identities = set()
     context_bodies = 0
-    for index, root in enumerate(root_order(paths)):
-        report_path = output / f"report-{index:04d}.json"
-        argv = command(
-            compiler, root, report_path, target, standard, search_roots, cfg, release, no_bounds
-        )
-        attempt = {
-            "root": root,
-            "cwd": str(checkout),
-            "argv": argv,
-            "exit_status": 2,
-            "report_path": str(report_path),
-            "report_sha256": None,
-            "inputs": [],
+
+    def publish():
+        attestation["attempts"] = [rows[index] for index in sorted(finished)]
+        attestation["totals"] = audit_totals(attestation["attempts"], identities, context_bodies)
+        atomic_json(output / "audit.json", attestation)
+
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=jobs)
+    try:
+        futures = {
+            pool.submit(start_root, run, index, root, rows[index]): index
+            for index, root in enumerate(roots)
         }
-        attestation["attempts"].append(attempt)
-        candidates = {}
-        try:
-            require(not os.path.lexists(report_path), "report: stale path before invocation")
-            require(compiler.read_bytes() == binary, "compiler: changed before invocation")
-            roots = [checkout / Path(root).parent, *search_roots, standard]
-            require(snapshot(input_roots) == audit_inputs, "inputs: changed since audit snapshot")
-            candidates = snapshot(roots)
-            atomic_json(
-                output / f"inputs-{index:04d}.json",
-                [
-                    {"path": path, "sha256": digest(data)}
-                    for path, data in sorted(candidates.items())
-                ],
-            )
-            result = subprocess.run(
-                argv, cwd=checkout, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False
-            )
-            attempt["exit_status"] = result.returncode
-            (output / f"stdout-{index:04d}.txt").write_bytes(result.stdout)
-            (output / f"stderr-{index:04d}.txt").write_bytes(result.stderr)
-            require(not report_path.is_symlink(), "report: symbolic link destination")
-            report, report_bytes = read_json(report_path)
-            attempt["report_sha256"] = digest(report_bytes)
-            # Keep closure inputs even if another report field fails validation.
-            if type(report) is dict and type(report.get("files")) is list:
-                for row in report["files"]:
-                    if type(row) is dict and type(row.get("path")) is str:
-                        absolute = str(resolve_path(row["path"], checkout))
-                        if absolute in candidates:
-                            attempt["inputs"].append(
-                                {
-                                    "path": normalize(absolute, checkout, checkout, standard),
-                                    "sha256": digest(candidates[absolute]),
-                                }
-                            )
-            require(compiler.read_bytes() == binary, "compiler: changed during invocation")
-            require(
-                snapshot(roots) == candidates and snapshot(input_roots) == audit_inputs,
-                "inputs: changed during invocation",
-            )
-            inputs, body_ids, count = validate_report(
-                report,
-                argv=argv,
-                cwd=checkout,
-                root=root,
-                target=target,
-                cfg=effective,
-                checkout=checkout,
-                standard=standard,
-                exit_status=result.returncode,
-                candidates=candidates,
-                limits=limits,
-                compiler_version=version,
-            )
-            attempt["inputs"] = inputs
-            identities.update(body_ids)
-            context_bodies = checked_sum((context_bodies, count), "context bodies")
-        except FailedReportAttempt as error:
-            attempt["inputs"] = error.inputs
-            identities.update(error.identities)
-            context_bodies = checked_sum((context_bodies, error.bodies), "context bodies")
-            errors.append(f"{root}: {error}")
-        except (InvalidEvidence, OSError) as error:
-            errors.append(f"{root}: {error}")
+        for future in concurrent.futures.as_completed(futures):
+            index = futures[future]
             try:
-                if report_path.is_file():
-                    attempt["report_sha256"] = digest(report_path.read_bytes())
-            except OSError:
-                pass
-        finally:
-            attestation["totals"] = audit_totals(
-                attestation["attempts"], identities, context_bodies
-            )
-            atomic_json(output / "audit.json", attestation)
+                outcome = future.result()
+            except BaseException:
+                # Keep the row of the attempt that stopped the audit, as the serial loop did.
+                finished[index] = []
+                raise
+            if outcome is None:
+                continue
+            body_ids, count, error = outcome
+            finished[index] = [] if error is None else [error]
+            identities.update(body_ids)
+            try:
+                context_bodies = checked_sum((context_bodies, count), "context bodies")
+            except InvalidEvidence as total_error:
+                finished[index].append(f"{roots[index]}: {total_error}")
+            publish()
+    except BaseException:
+        run.stop.set()
+        pool.shutdown(wait=True, cancel_futures=True)
+        publish()
+        raise
+    pool.shutdown(wait=True)
+    errors = [error for index in sorted(finished) for error in finished[index]]
     try:
         after = provenance(checkout, compiler, compiler_checkout, compiler_provenance)
         require(
@@ -1528,6 +1629,8 @@ def main(argv=None):
             sub.add_argument("--cfg", action="append", default=[])
             sub.add_argument("--release", action="store_true")
             sub.add_argument("--no-bounds-check", action="store_true")
+            # The count of root attempts that run at the same time. It changes no evidence.
+            sub.add_argument("--jobs", type=int, default=1)
     options = parser.parse_args(argv)
     common = {
         "checkout": options.checkout,
@@ -1556,6 +1659,7 @@ def main(argv=None):
                 cfg=options.cfg,
                 release=options.release,
                 no_bounds=options.no_bounds_check,
+                jobs=options.jobs,
             )
             if errors:
                 for error in errors:

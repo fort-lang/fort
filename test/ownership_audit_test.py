@@ -10,6 +10,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -2613,6 +2614,302 @@ class RunnerTests(RepositoryFixture):
             with self.subTest(cfg=cfg):
                 with self.assertRaises(audit.InvalidEvidence):
                     audit.effective_configuration(TARGET, cfg)
+
+
+class ParallelRunnerTests(RepositoryFixture):
+    """`jobs` attempts run at the same time and change no evidence."""
+
+    ROOTS = [
+        "src/fort/main.ft",
+        "src/fort/ownership_api.ft",
+        "src/fort/ownership_limits.ft",
+        "src/fort/shared.ft",
+    ]
+
+    def comparable(self, result, output):
+        text = json.dumps(result, sort_keys=True).replace(str(self.base / output), "OUT")
+        value = json.loads(text)
+        for attempt in value["attempts"]:
+            attempt.pop("report_sha256")
+        return value
+
+    def report_bytes(self, output):
+        return [
+            (self.base / output / f"report-{index:04d}.json")
+            .read_text()
+            .replace(str(self.base / output), "OUT")
+            for index in range(len(self.ROOTS))
+        ]
+
+    def test_parallel_attestation_equals_the_serial_attestation(self):
+        self.executable()
+        serial, serial_errors = self.run_fixture(output="serial", jobs=1)
+        for jobs in (2, 4, 16):
+            with self.subTest(jobs=jobs):
+                output = f"parallel-{jobs}"
+                result, errors = self.run_fixture(output=output, jobs=jobs)
+                self.assertEqual(errors, serial_errors)
+                self.assertEqual(errors, [])
+                self.assertTrue(result["complete"])
+                self.assertEqual([row["root"] for row in result["attempts"]], self.ROOTS)
+                self.assertEqual(self.comparable(result, output), self.comparable(serial, "serial"))
+                self.assertEqual(self.report_bytes(output), self.report_bytes("serial"))
+                self.assertEqual(self.validate_fixture(self.base / output / "audit.json"), result)
+
+    def test_attempts_and_errors_keep_root_order_when_main_finishes_last(self):
+        self.executable("incomplete")
+        original = audit.subprocess.run
+        others = threading.Semaphore(0)
+        finished = []
+        lock = threading.Lock()
+
+        def main_last(argv, **options):
+            if argv[0] != str(self.compiler) or argv[1:] == ["--version"]:
+                return original(argv, **options)
+            if argv[-1] == "src/fort/main.ft":
+                for _ in range(len(self.ROOTS) - 1):
+                    self.assertTrue(others.acquire(timeout=60))
+            result = original(argv, **options)
+            with lock:
+                finished.append(argv[-1])
+            if argv[-1] != "src/fort/main.ft":
+                others.release()
+            return result
+
+        written = []
+        publish = audit.atomic_json
+
+        def record(path, value):
+            if Path(path).name == "audit.json":
+                written.append([row["root"] for row in value["attempts"]])
+            return publish(path, value)
+
+        with patch.object(audit.subprocess, "run", side_effect=main_last):
+            with patch.object(audit, "atomic_json", side_effect=record):
+                result, errors = self.run_fixture(jobs=4)
+        self.assertEqual(finished[-1], "src/fort/main.ft")
+        self.assertNotIn("src/fort/main.ft", written[0])
+        for roots in written:
+            self.assertEqual(roots, [root for root in self.ROOTS if root in roots])
+        self.assertEqual(written[-1], self.ROOTS)
+        self.assertEqual(len(written), len(self.ROOTS) + 1)
+        self.assertFalse(result["complete"])
+        self.assertEqual([row["root"] for row in result["attempts"]], self.ROOTS)
+        self.assertEqual(len(errors), len(self.ROOTS))
+        for root, error in zip(self.ROOTS, errors, strict=True):
+            self.assertTrue(error.startswith(f"{root}: "), error)
+        lines = (self.base / "out/errors.txt").read_text().splitlines()
+        self.assertEqual(lines, errors)
+        self.assertEqual(result["totals"]["root_attempts"], len(self.ROOTS))
+        self.assertEqual(result["totals"]["context_bodies"], 11)
+
+    def test_parallel_failed_root_does_not_remove_other_attempts(self):
+        self.executable("invalid_first")
+        result, errors = self.run_fixture(jobs=4)
+        self.assertFalse(result["complete"])
+        self.assertEqual(len(errors), 1)
+        self.assertTrue(errors[0].startswith("src/fort/main.ft: "), errors[0])
+        self.assertEqual(len(result["attempts"]), len(self.ROOTS))
+        self.assertIsNotNone(result["attempts"][0]["report_sha256"])
+        self.assertEqual(len(result["attempts"][0]["inputs"]), 3)
+        with self.assertRaisesRegex(audit.InvalidEvidence, "incomplete evidence"):
+            self.validate_fixture()
+
+    def test_parallel_runner_rejects_changed_input_and_binary_bytes(self):
+        for mode in ("source_change", "input_added", "input_deleted", "binary_change"):
+            with self.subTest(mode=mode):
+                if not (self.standard / "rt.ft").exists():
+                    (self.standard / "rt.ft").write_text("fn rt() void {}\n")
+                self.git("checkout", "--", "src/fort")
+                (self.standard / "new.ft").unlink(missing_ok=True)
+                self.executable(mode)
+                result, errors = self.run_fixture(output=mode, jobs=4)
+                self.assertFalse(result["complete"])
+                self.assertGreaterEqual(len(errors), 1)
+                self.assertEqual(len(result["attempts"]), len(self.ROOTS))
+                self.assertIn("changed", " ".join(errors))
+                with self.assertRaises(audit.InvalidEvidence):
+                    self.validate_fixture(self.base / mode / "audit.json")
+
+    def test_parallel_os_execution_failure_keeps_attempts(self):
+        self.executable()
+        original = audit.subprocess.run
+
+        def fail_compiler(argv, **options):
+            if argv[0] == str(self.compiler) and argv[1:] != ["--version"]:
+                raise OSError("cannot execute")
+            return original(argv, **options)
+
+        with patch.object(audit.subprocess, "run", side_effect=fail_compiler):
+            result, errors = self.run_fixture(jobs=3)
+        self.assertEqual(len(errors), len(self.ROOTS))
+        self.assertFalse(result["complete"])
+        self.assertEqual([row["exit_status"] for row in result["attempts"]], [2] * 4)
+        self.assertTrue(all(row["report_sha256"] is None for row in result["attempts"]))
+
+    def stop_at_main(self, started):
+        """Patch the runner so that the main root raises an exception that it does not catch."""
+        original_run = audit.subprocess.run
+        original_validate = audit.validate_report
+
+        def counted(argv, **options):
+            if argv[0] == str(self.compiler) and argv[1:] != ["--version"]:
+                started.append(argv[-1])
+                if argv[-1] == self.ROOTS[1] and self.runs:
+                    # The second root ends only after the main root stopped the audit.
+                    self.assertTrue(self.runs[0].stop.wait(timeout=60))
+            return original_run(argv, **options)
+
+        def fail_main(report, **options):
+            if options["root"] == self.ROOTS[0]:
+                raise RuntimeError("synthetic tool fault")
+            return original_validate(report, **options)
+
+        self.runs = []
+        original_init = audit.AuditRun.__init__
+
+        def record(run, **values):
+            original_init(run, **values)
+            self.runs.append(run)
+
+        return (
+            patch.object(audit.subprocess, "run", side_effect=counted),
+            patch.object(audit, "validate_report", side_effect=fail_main),
+            patch.object(audit.AuditRun, "__init__", record),
+        )
+
+    def test_uncaught_attempt_exception_stops_the_audit_and_keeps_its_row(self):
+        self.executable()
+        for jobs in (1, 2):
+            with self.subTest(jobs=jobs):
+                output = f"stopped-{jobs}"
+                started = []
+                run_patch, validate_patch, init_patch = self.stop_at_main(started)
+                with run_patch, validate_patch, init_patch:
+                    with self.assertRaisesRegex(RuntimeError, "synthetic tool fault"):
+                        self.run_fixture(output=output, jobs=jobs)
+                self.assertTrue(self.runs[0].stop.is_set())
+                self.assertEqual(sorted(started), self.ROOTS[:jobs])
+                written = json.loads((self.base / output / "audit.json").read_text())
+                self.assertFalse(written["complete"])
+                self.assertEqual([row["root"] for row in written["attempts"]], self.ROOTS[:1])
+                self.assertEqual(written["attempts"][0]["exit_status"], 1)
+                self.assertIsNotNone(written["attempts"][0]["report_sha256"])
+                self.assertEqual(written["totals"]["root_attempts"], 1)
+                for index in range(jobs, len(self.ROOTS)):
+                    self.assertFalse((self.base / output / f"inputs-{index:04d}.json").exists())
+                    self.assertFalse((self.base / output / f"report-{index:04d}.json").exists())
+                self.assertFalse((self.base / output / "errors.txt").exists())
+                with self.assertRaisesRegex(audit.InvalidEvidence, "incomplete evidence"):
+                    self.validate_fixture(self.base / output / "audit.json")
+
+    def test_cli_exits_one_on_an_uncaught_attempt_exception(self):
+        self.executable()
+        script = f"""
+import importlib.util
+import sys
+tool = {str(REPOSITORY / "tools/ownership_audit.py")!r}
+spec = importlib.util.spec_from_file_location("ownership_audit", tool)
+audit = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(audit)
+original = audit.validate_report
+def fail_main(report, **options):
+    if options["root"] == "src/fort/main.ft":
+        raise RuntimeError("synthetic tool fault")
+    return original(report, **options)
+audit.validate_report = fail_main
+sys.exit(audit.main(sys.argv[1:]))
+"""
+        argv = [
+            sys.executable,
+            "-c",
+            script,
+            "run",
+            "--checkout",
+            str(self.checkout),
+            "--compiler",
+            str(self.compiler),
+            "--compiler-provenance",
+            str(self.provenance),
+            "--output",
+            str(self.base / "cli-stopped"),
+            "--target",
+            TARGET,
+            "--std-dir",
+            str(self.standard),
+            "--jobs",
+            "1",
+        ]
+        result = subprocess.run(argv, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("RuntimeError: synthetic tool fault", result.stderr)
+        self.assertEqual(result.stdout, "")
+        written = json.loads((self.base / "cli-stopped/audit.json").read_text())
+        self.assertFalse(written["complete"])
+        self.assertEqual([row["root"] for row in written["attempts"]], self.ROOTS[:1])
+        self.assertFalse((self.base / "cli-stopped/report-0001.json").exists())
+
+    def test_context_total_failure_records_an_error_for_its_root(self):
+        self.executable()
+        original = audit.checked_sum
+        calls = []
+
+        def overflow_second(values, where):
+            if where == "context bodies":
+                calls.append(where)
+                if len(calls) == 2:
+                    raise audit.InvalidEvidence("context bodies: synthetic overflow")
+            return original(values, where)
+
+        with patch.object(audit, "checked_sum", side_effect=overflow_second):
+            result, errors = self.run_fixture(jobs=1)
+        self.assertEqual(len(calls), len(self.ROOTS))
+        self.assertEqual(errors, [f"{self.ROOTS[1]}: context bodies: synthetic overflow"])
+        self.assertFalse(result["complete"])
+        self.assertEqual([row["root"] for row in result["attempts"]], self.ROOTS)
+        lines = (self.base / "out/errors.txt").read_text().splitlines()
+        self.assertEqual(lines, errors)
+        # The failed sum leaves the count of that root out of the total.
+        self.assertEqual(result["totals"]["root_attempts"], len(self.ROOTS))
+        self.assertLess(result["totals"]["context_bodies"], 11)
+
+    def test_jobs_must_be_a_positive_integer(self):
+        self.executable()
+        for jobs in (0, -1, True, 1.5, "2", None):
+            with self.subTest(jobs=jobs):
+                with self.assertRaisesRegex(audit.InvalidEvidence, "jobs"):
+                    self.run_fixture(output="rejected", jobs=jobs)
+                self.assertFalse((self.base / "rejected").exists())
+
+    def test_cli_jobs_runs_and_validates(self):
+        common = [
+            "--checkout",
+            str(self.checkout),
+            "--compiler",
+            str(self.compiler),
+            "--compiler-provenance",
+            str(self.provenance),
+        ]
+        run = ["--target", TARGET, "--std-dir", str(self.standard)]
+        self.executable()
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            status = audit.main(
+                ["run", *common, "--output", str(self.base / "cli"), *run, "--jobs", "3"]
+            )
+        self.assertEqual(status, 0)
+        self.assertEqual(json.loads(stdout.getvalue())["root_attempts"], len(self.ROOTS))
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                audit.main(["validate", *common, str(self.base / "cli/audit.json")]), 0
+            )
+        with redirect_stderr(io.StringIO()) as errors:
+            status = audit.main(
+                ["run", *common, "--output", str(self.base / "zero"), *run, "--jobs", "0"]
+            )
+        self.assertEqual(status, 1)
+        self.assertIn("jobs", errors.getvalue())
+        self.assertFalse((self.base / "zero").exists())
 
 
 class EnforcementTests(RepositoryFixture):
