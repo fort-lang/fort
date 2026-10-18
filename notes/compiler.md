@@ -2179,6 +2179,10 @@ came here.
   The consumer loads the current complete reference from canonical caller storage at that operation.
   It keeps the inner source, allocation, value version, byte window, and alignment.
   Outer storage liveness cannot prove inner source liveness.
+  At the caller, a proved empty owner in a loaded root meets each live-source row of that root.
+  A null value names no storage, so a move or a copy of it is legal (D17.6). Each other row of
+  that root fails with "call requires a nonnull reference": an extent row is a dereference
+  (`test/fort/ownership_summary_direct_aggregate_empty_move_test.ft`).
   A load from storage of the body stays unsupported.
   A slice stays unsupported, because the summary does not check that the reference it reads is
   still live. A full-slice rule with only a live-source requirement proved `s->heap[..]` after

@@ -1695,6 +1695,7 @@ fn requirements_proved(request* req, application mut* out,
         }
         bool mut pending = false;
         bool mut captured = false;
+        bool mut vacuous = false;
         u64 mut loaded = 0;
         while (loaded < out->bound.model.roots.len) {
             if (!ownership_summary_model.work(ctx, &out->proof, 1)) { return false; }
@@ -1708,17 +1709,24 @@ fn requirements_proved(request* req, application mut* out,
                 u64 at = ownership_transfer.contents_index(&out->state,
                     ownership_api.place_path{.root = root.slot});
                 pending = at == ownership_api.U64_MAX;
+                // A null value names no storage, so its source cannot dangle. A move or copy of
+                // it is legal (D17.6). A dereference keeps its extent row, which fails here.
                 if (!pending && ownership_transfer.empty_owner_proved(out->state.contents[at])) {
-                    out->proof = caller_failure(req, out, row.key, row.operation,
-                        ownership_api.incomplete_reason.none, "call requires a nonnull reference");
-                    return false;
+                    if (row.kind == ownership_summary_model.requirement_kind.live_source) {
+                        vacuous = true;
+                    } else {
+                        out->proof = caller_failure(req, out, row.key, row.operation,
+                            ownership_api.incomplete_reason.none,
+                                "call requires a nonnull reference");
+                        return false;
+                    }
                 }
             }
             loaded += 1;
         }
         // The `captured` guard keeps the check before each effect for a loaded row. No producer
         // makes such a row today; see the comment above this function.
-        if (pending ||
+        if (pending || vacuous ||
             (row.kind == ownership_summary_model.requirement_kind.empty_output && !captured &&
             !first)) {
             i += 1;
