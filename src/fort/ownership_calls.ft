@@ -1776,6 +1776,10 @@ fn requirements_proved(request* req, application mut* out,
     return true;
 }
 
+fn source_free(ownership_summary_model.symbolic_root root) bool {
+    return root.source.kind == ownership_api.entity_kind.none;
+}
+
 fn seed_locals(request* req, application mut* out, ownership_summary_model.context* ctx,
     ownership_transfer.event_binding@ events) bool {
     u64 mut i = 0;
@@ -1783,25 +1787,33 @@ fn seed_locals(request* req, application mut* out, ownership_summary_model.conte
         if (!ownership_summary_model.work(ctx, &out->proof, 4)) { return false; }
         ownership_summary_model.symbolic_root row = out->bound.model.roots[i];
         if (row.kind == ownership_summary_model.root_kind.by_value_slot) {
-            if (!ownership_summary_model.work(ctx, &out->proof, out->state.sources_len)) {
-                return false;
-            }
-            u64 previous = ownership_state.source_index(&out->state, row.source);
-            if (row.ty == null || (previous != ownership_api.U64_MAX &&
-                (out->state.sources[previous].kind != ownership_api.source_kind.stack ||
-                out->state.sources[previous].validity != ownership_api.validity_kind.ended))) {
+            if (row.ty == null) {
                 out->proof = caller_failure(req, out, row.source, req->operation,
                     ownership_api.incomplete_reason.missing_correspondence,
                     "callee local storage must be separate from caller storage");
                 return false;
             }
-            ownership_api.source_fact storage = ownership_api.source_fact{
-                .key = row.source, .kind = ownership_api.source_kind.stack,
-                .validity = ownership_api.validity_kind.live};
-            if (previous == ownership_api.U64_MAX) {
-                ownership_state.append_sources(&out->state, storage);
+            if (!source_free(row)) {
+                if (!ownership_summary_model.work(ctx, &out->proof, out->state.sources_len)) {
+                    return false;
+                }
+                u64 previous = ownership_state.source_index(&out->state, row.source);
+                if (previous != ownership_api.U64_MAX &&
+                    (out->state.sources[previous].kind != ownership_api.source_kind.stack ||
+                    out->state.sources[previous].validity != ownership_api.validity_kind.ended)) {
+                    out->proof = caller_failure(req, out, row.source, req->operation,
+                        ownership_api.incomplete_reason.missing_correspondence,
+                        "callee local storage must be separate from caller storage");
+                    return false;
+                }
+                ownership_api.source_fact storage = ownership_api.source_fact{
+                    .key = row.source, .kind = ownership_api.source_kind.stack,
+                    .validity = ownership_api.validity_kind.live};
+                if (previous == ownership_api.U64_MAX) {
+                    ownership_state.append_sources(&out->state, storage);
+                }
+                else { out->state.sources[previous] = storage; }
             }
-            else { out->state.sources[previous] = storage; }
             ownership_api.contents_fact contents = ownership_api.contents_fact{
                 .place = ownership_api.place_path{.root = row.slot},
                 .kind = row.ty->is_own ? ownership_api.contents_kind.empty_owner :
@@ -2332,21 +2344,23 @@ fn end_locals(request* req, application mut* out, ownership_summary_model.contex
                 }
                 a += 1;
             }
-            if (!ownership_summary_model.work(ctx, &out->proof, out->state.sources_len)) {
-                return false;
-            }
-            u64 source = ownership_state.source_index(&out->state, row.source);
-            if (source != ownership_api.U64_MAX &&
-                out->state.sources[source].validity == ownership_api.validity_kind.live) {
-                // A failed update takes the update key of the call, not a body key.
-                ownership_summary_model.update_route mut route =
-                    ownership_summary_model.update_route{};
-                ownership_api.services keyed = ownership_summary_model.update_services(&route,
-                    req->services, ctx->event);
-                ownership_api.mutation_result ended = ownership_state.end_source(&out->state,
-                    &keyed, row.source, req->operation, req->source);
-                out->proof = ended.proof;
-                if (!ended.applied) { return false; }
+            if (!source_free(row)) {
+                if (!ownership_summary_model.work(ctx, &out->proof, out->state.sources_len)) {
+                    return false;
+                }
+                u64 source = ownership_state.source_index(&out->state, row.source);
+                if (source != ownership_api.U64_MAX &&
+                    out->state.sources[source].validity == ownership_api.validity_kind.live) {
+                    // A failed update takes the update key of the call, not a body key.
+                    ownership_summary_model.update_route mut route =
+                        ownership_summary_model.update_route{};
+                    ownership_api.services keyed = ownership_summary_model.update_services(&route,
+                        req->services, ctx->event);
+                    ownership_api.mutation_result ended = ownership_state.end_source(&out->state,
+                        &keyed, row.source, req->operation, req->source);
+                    out->proof = ended.proof;
+                    if (!ended.applied) { return false; }
+                }
             }
         }
         i += 1;

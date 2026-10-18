@@ -1,0 +1,1164 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| summary local operations ok
+/// Checks local parameter, assignment, cast, and allocation summary rules (D17.14-D17.15).
+import fir;
+import ownership_api;
+import ownership_call_bodies;
+import ownership_calls_env;
+import ownership_flow;
+import ownership_state;
+import ownership_summary_body;
+import ownership_summary_model;
+import ownership_transfer;
+import types;
+
+string[9] CALLBACK_SOURCE = {
+    "struct hooks { fn (void mut*) void callback; void mut* context; }",
+    "fn visit(void mut* context) void {}",
+    "fn install(hooks mut* h, fn (void mut*) void callback, void mut* context) void {",
+    "    h->callback = callback; h->context = context; }",
+    "fn configure(hooks mut* h, i32 mut* p) void { install(h, visit, cast(p, void mut*)); }",
+    "fn relay(fn (void mut*) void callback) fn (void mut*) void { return callback; }",
+    "fn erase_callback(fn (void mut*) void callback) void* { return cast(callback, void*); }",
+    "fn accept_two(fn (void mut*) void first, fn (void mut*) void second) void {}",
+    "fn pass_two() void { accept_two(visit, visit); }",
+};
+
+string[5] FUNCTION_READ_SOURCE = {
+    "struct owner_hooks { fn (void mut*) void callback; }",
+    "fn load(owner_hooks* h) void {",
+    "    fn (void mut*) void callback = h->callback; }",
+    "fn stale(owner_hooks mut* own h) void {",
+    "    del(h); fn (void mut*) void callback = h->callback; }",
+};
+
+string[5] FUNCTION_CAST_SOURCE = {
+    "fn live(void* raw) void { fn () void callback = cast(raw, fn () void); }",
+    "fn stale(i32 mut* own p) void {",
+    "    void* raw = cast(p, void*); del(p);",
+    "    fn () void callback = cast(raw, fn () void); }",
+    "fn empty() void { void* raw = null; fn () void callback = cast(raw, fn () void); }",
+};
+
+string[3] ADDRESSED_FUNCTION_SOURCE = {
+    "fn target(i32 value) i32 { return value; }",
+    "fn local_address() void { fn (i32) i32 local = target;",
+    "    (fn (i32) i32)* address = &local; }",
+};
+
+// No slice rule is part of this change. Each slice stays unsupported at the slice, as before it.
+string[23] SLICE_SOURCE = {
+    "struct index_store { u64[4] local; u64 mut@ own heap; }",
+    "struct heap_store { u64 mut@ own heap; }",
+    "struct holder { u64 mut@ view; u64 n; }",
+    "fn fixed_view(index_store mut* store, u64 count) u64 mut@ { return store->local[0..count]; }",
+    "fn span_view(index_store mut* store) u64 mut@ { return store->heap[..]; }",
+    "fn bad_view(index_store mut* store, u64 count) u64 mut@ { return store->local[1..count]; }",
+    "fn exact_view(index_store mut* store) u64 mut@ { return store->local[0..2]; }",
+    "fn empty_view(index_store mut* store) u64 mut@ { return store->local[0..0]; }",
+    "fn full_view(index_store mut* store) u64 mut@ { return store->local[..]; }",
+    "fn dynamic_lower(index_store mut* store, u64 first) u64 mut@ {",
+    "    return store->local[first..]; }",
+    "fn span_lower(index_store mut* store) u64 mut@ { return store->heap[1..]; }",
+    "fn span_prefix(index_store mut* store, u64 count) u64 mut@ { return store->heap[0..count]; }",
+    "fn full_after_move(heap_store mut* s) u64 {",
+    "    u64 mut@ own h = move(s->heap);",
+    "    u64 mut@ v = s->heap[..];",
+    "    del(h); return v[0]; }",
+    "fn stored_then_load(index_store mut* store, holder mut* h) u64 {",
+    "    u64 mut@ e = store->local[0..0];",
+    "    h->view = e; u64 mut@ v = h->view; return v[0]; }",
+    "fn stored_then_full(index_store mut* store, holder mut* h) u64 {",
+    "    u64 mut@ e = store->local[0..0];",
+    "    h->view = e; u64 mut@ v = h->view[..]; return v[0]; }",
+};
+
+// Each projected load or move after the release reads the released containing reference.
+string[7] STALE_BASE_SOURCE = {
+    "struct view_store { u64[4] local; u64@ data; string text; }",
+    "struct heap_store { u64 mut@ own heap; }",
+    "fn stale_load(view_store mut* own store) u64@ { del(store); return store->data; }",
+    "fn stale_move(heap_store mut* own store) u64 mut@ own {",
+    "    del(move(store->heap)); del(store); return move(store->heap); }",
+    "fn live_load(view_store mut* store) u64@ { return store->data; }",
+    "fn live_move(heap_store mut* store) u64 mut@ own { return move(store->heap); }",
+};
+
+// Each literal shape stops at the literal. A wrapper of a literal body stays incomplete too.
+string[5] LITERAL_SOURCE = {
+    "fn literal() string { return \"abc\"; }",
+    "fn wrapper() string { return literal(); }",
+    "fn local_text() string { string value = \"wxyz\"; return value; }",
+    "fn empty_text() string { return \"\"; }",
+    "fn two_texts() string { string a = \"ab\"; string b = \"abcdef\"; return b; }",
+};
+
+// Projected `void*` loads keep the verdicts of the base revision. A typed cast of a `void*` field
+// selects a pointee with no extent, so its load stops with `missing_path`, not `invalid_input`.
+string[11] VOID_LOAD_SOURCE = {
+    "struct h { void* p; i32 n; }",
+    "struct hm { void mut* p; i32 n; }",
+    "struct ho { void* own p; i32 n; }",
+    "struct outer { h* inner; i32 n; }",
+    "struct sym { u64 id; }",
+    "fn load_field(h* x) void* { void* q = x->p; return q; }",
+    "fn load_mut_field(hm* x) void mut* { void mut* q = x->p; return q; }",
+    "fn move_owner(ho mut* x) void* own { void* own q = move(x->p); return q; }",
+    "fn load_nested(outer* o) void* { void* q = o->inner->p; return q; }",
+    "fn compare_field(h* x) bool { return x->p == null; }",
+    "fn typed_field(h* x) sym* { return cast(x->p, sym*); }",
+};
+
+// A `void*` result with scalar contents stays scalar. A `void*` result that holds a relation keeps
+// the returned-borrow check, so a dangling erased view does not prove.
+string[6] VOID_RESULT_SOURCE = {
+    "struct h { void* p; i32 n; }",
+    "fn load_deref(void** pp) void* { void* q = *pp; return q; }",
+    "fn load_by_value(h x) void* { void* q = x.p; return q; }",
+    "fn dangling_erased(i32 mut* own p) void* {",
+    "    void* q = cast(p, void*); del(p); return q; }",
+    "fn local_erased() void* { i32 x = 1; return cast(&x, void*); }",
+};
+
+// A moved owner has no element. A projected load through it fails at the load.
+string[4] MOVED_BASE_SOURCE = {
+    "struct view_store { u64[4] local; u64@ data; string text; }",
+    "fn moved_load(view_store mut* own store) u64 {",
+    "    view_store mut* own other = move(store); u64@ d = store->data; del(other);",
+    "    return d.len; }",
+};
+
+string[14] DETAIL_SOURCE = {
+    "struct owner_box { i32 mut* own item; }",
+    "fn copied_ptr(i32* p) i32* { i32* q = p; return q; }",
+    "fn copied_void(void* p) void* { void* q = p; return q; }",
+    "fn copied_string(string s) string { string q = s; return q; }",
+    "fn null_copy() i32* { i32* p = null; i32* q = p; return q; }",
+    "fn exact_bytes() u8 mut@ own { return new(u8, 4); }",
+    "fn exact_words() u64 mut@ own { return new(u64, 3); }",
+    "fn zero_words() u64 mut@ own { return new(u64, 0); }",
+    "fn pass_box(owner_box b) owner_box { return move(b); }",
+    "fn erased_copy(i32 mut* p) void mut* { void mut* q = cast(p, void mut*); return q; }",
+    "fn address_copy(i32* p) u64 { u64 q = cast(p, u64); return q; }",
+    "fn exact_empty() string { string q = \"\"; return q; }",
+    "fn const_erased(i32* p) void* { return cast(p, void*); }",
+    "fn round_trip(i32* p) i32* { void* q = cast(p, void*); return cast(q, i32*); }",
+};
+
+string[6] ALLOCATION_DETAIL_SOURCE = {
+    "fn five_u16() u16 mut@ own { return new(u16, 5); }",
+    "fn seven_u32() u32 mut@ own { return new(u32, 7); }",
+    "fn one_u64() u64 mut@ own { return new(u64, 1); }",
+    "fn one_u8() u8 mut@ own { return new(u8, 1); }",
+    "fn zero_u16() u16 mut@ own { return new(u16, 0); }",
+    "fn zero_u32() u32 mut@ own { return new(u32, 0); }",
+};
+
+string[7] HEADER_SOURCE = {
+    "struct buffer { u8 mut@ own data; u64 len; }",
+    "struct text_box { string text; }",
+    "struct view_box { u8@ data; }",
+    "fn capacity(buffer* b) u64 { return b->data.len; }",
+    "fn text_length(text_box* b) u64 { return b->text.len; }",
+    "fn stale_capacity(view_box mut* own b) u64 { del(b); return b->data.len; }",
+    "fn stale_text(text_box mut* own b) u64 { del(b); return b->text.len; }",
+};
+
+string[9] SOURCE = {
+    "struct owner_box { i32 mut* own item; }",
+    "struct token { string text; }",
+    "fn owner_input(owner_box b) void {}",
+    "fn static_text() string { return \"abc\"; }",
+    "fn field_text(token t) string { return t.text; }",
+    "fn erased(i32 mut* p) void mut* { return cast(p, void mut*); }",
+    "fn address(i32* p) u64 { return cast(p, u64); }",
+    "fn allocated(u64 n) u8 mut@ own { return new(u8, n); }",
+    "fn opaque_input(void mut* p) void {}",
+};
+
+fn complete(ownership_call_bodies.bodies* b, u64 index)
+    ownership_summary_model.summary* {
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(b, index);
+    assert(ownership_api.successful(model->proof));
+    assert(!model->residual_effects && model->cases.len == 1);
+    return model;
+}
+
+// Extraction accepts the owning aggregate parameter. Its leaf boundary prevents a complete
+// empty-owner summary.
+fn owning_parameter(ownership_call_bodies.bodies* b) void {
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(b, 0);
+    assert(!ownership_api.successful(model->proof));
+    assert(model->proof.terminal.present);
+    assert(model->proof.terminal.reason == ownership_api.incomplete_reason.missing_boundary);
+    assert(model->proof.terminal.source.line == 3);
+}
+
+fn one_result(ownership_summary_model.summary* model)
+    ownership_summary_model.relation {
+    assert(model->results.len == 1);
+    return model->results[0];
+}
+
+// No string literal rule is part of this change. A literal stops at its line with
+// `unknown_effect`, as before it.
+fn unsupported_literal(ownership_call_bodies.bodies* b, u64 index, u32 line) void {
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(b, index);
+    assert(!ownership_api.successful(model->proof));
+    assert(model->proof.terminal.present);
+    assert(model->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(model->proof.terminal.source.line == line);
+    assert(model->cases.len == 0 && model->results.len == 0);
+}
+
+// The local assignment rule reaches the load of a string field of a by-value parameter. The load
+// refuses a string reference, so the summary stops there with `missing_path`.
+fn field_assignment(ownership_call_bodies.bodies* b) void {
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(b, 2);
+    assert(!ownership_api.successful(model->proof));
+    assert(model->proof.terminal.present);
+    assert(model->proof.terminal.reason == ownership_api.incomplete_reason.missing_path);
+    assert(model->proof.terminal.source.line == 5);
+}
+
+// A typed pointer-to-void-pointer cast keeps the same caller source.
+fn pointer_cast(ownership_call_bodies.bodies* b) void {
+    ownership_summary_model.relation result = one_result(complete(b, 3));
+    ownership_api.entity_id input = ownership_summary_body.designated(&b->inputs[3], 1);
+    assert(ownership_summary_model.same(result.borrow.source, input));
+    assert(complete(b, 4)->results.len == 0);
+}
+
+// A dynamic allocation keeps one symbolic count in the allocation and returned span.
+fn dynamic_allocation(ownership_call_bodies.bodies* b) void {
+    ownership_summary_model.summary* model = complete(b, 5);
+    u64 mut allocations = 0;
+    u64 mut i = 0;
+    while (i < model->effects.len) {
+        ownership_summary_model.effect_node effect = model->effects[i];
+        if (effect.payload == ownership_summary_model.payload_kind.allocation) {
+            allocations += 1;
+            assert(effect.value.span_length.kind == ownership_api.fact_kind.symbolic);
+            assert(effect.value.borrows.len == 1);
+            assert(effect.value.borrows[0].range.extent.kind == ownership_api.fact_kind.unknown);
+            assert(effect.value.borrows[0].range.access.end.kind ==
+                ownership_api.fact_kind.unknown);
+        }
+        i += 1;
+    }
+    assert(allocations == 1);
+    ownership_summary_model.relation result = one_result(model);
+    assert(result.borrow.range.extent.kind == ownership_api.fact_kind.unknown);
+}
+
+// A borrowed void-pointer parameter keeps its caller source with an unknown byte extent.
+fn opaque_parameter() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[1] names = {"opaque_input"};
+    ownership_call_bodies.open(&b, SOURCE[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_summary_model.summary* model = complete(&b, 0);
+    u64 mut sources = 0;
+    u64 mut i = 0;
+    while (i < model->roots.len) {
+        ownership_summary_model.symbolic_root row = model->roots[i];
+        if (row.kind == ownership_summary_model.root_kind.caller_source && row.formal == 1 &&
+            row.allocation.kind == ownership_api.entity_kind.none) { sources += 1; }
+        i += 1;
+    }
+    assert(sources == 1);
+}
+
+string[7] EDGE_SOURCE = {
+    "struct owner_box { i32 mut* own item; }",
+    "fn empty_text() string { return \"\"; }",
+    "fn null_value() i32* { return null; }",
+    "fn zero_allocation() u8 mut@ own { return new(u8, 0); }",
+    "fn scaled_allocation(u64 n) u64 mut@ own { return new(u64, n); }",
+    "fn integer_pointer(u64 n) i32* { return cast(n, i32*); }",
+    "fn erased_owner(i32 mut* own p) void mut* own { return cast(move(p), void mut* own); }",
+};
+
+fn effect_count(ownership_summary_model.summary* model,
+    ownership_summary_model.payload_kind kind) u64 {
+    u64 mut count = 0;
+    u64 mut i = 0;
+    while (i < model->effects.len) {
+        if (model->effects[i].payload == kind) { count += 1; }
+        i += 1;
+    }
+    return count;
+}
+
+fn allocation_effect(ownership_summary_model.summary* model)
+    ownership_summary_model.effect_node {
+    ownership_summary_model.effect_node mut found = ownership_summary_model.effect_node{};
+    u64 mut count = 0;
+    u64 mut i = 0;
+    while (i < model->effects.len) {
+        if (model->effects[i].payload == ownership_summary_model.payload_kind.allocation) {
+            found = model->effects[i];
+            count += 1;
+        }
+        i += 1;
+    }
+    assert(count == 1);
+    return found;
+}
+
+fn result_case(ownership_summary_model.summary* model)
+    ownership_summary_model.case_record {
+    assert(model->cases.len == 1);
+    ownership_summary_model.case_record result = model->cases[0];
+    assert(result.outcome.kind == ownership_api.outcome_kind.function_return);
+    assert(result.outcome.possible_caller_return);
+    return result;
+}
+
+// A null assignment keeps no result relation and creates no allocation template.
+fn null_assignment(ownership_call_bodies.bodies* b) void {
+    ownership_summary_model.summary* model = complete(b, 1);
+    assert(model->results.len == 0);
+    assert(effect_count(model, ownership_summary_model.payload_kind.replacement) == 1);
+    assert(effect_count(model, ownership_summary_model.payload_kind.allocation) == 0);
+    assert(result_case(model).results.len == 0);
+    u64 mut templates = 0;
+    u64 mut i = 0;
+    while (i < model->roots.len) {
+        if (model->roots[i].kind ==
+            ownership_summary_model.root_kind.allocation_template) { templates += 1; }
+        i += 1;
+    }
+    assert(templates == 0);
+}
+
+// A zero count is exact. It keeps an allocation effect and a zero-byte source window.
+fn zero_length_allocation(ownership_call_bodies.bodies* b) void {
+    ownership_summary_model.summary* model = complete(b, 2);
+    ownership_summary_model.effect_node effect = allocation_effect(model);
+    assert(effect.effect.allocation.kind == ownership_api.entity_kind.allocation);
+    assert(effect.effect.source.kind == ownership_api.entity_kind.source);
+    assert(effect.value.kind == ownership_api.contents_kind.reference);
+    assert(effect.value.span_length.kind == ownership_api.fact_kind.exact);
+    assert(effect.value.span_length.value == 0);
+    assert(effect.value.borrows.len == 1);
+    assert(effect.value.borrows[0].representation_complete);
+    assert(effect.value.borrows[0].range.extent.kind == ownership_api.fact_kind.exact);
+    assert(effect.value.borrows[0].range.extent.value == 0);
+    assert(effect.value.borrows[0].range.access.end.kind == ownership_api.fact_kind.exact);
+    assert(effect.value.borrows[0].range.access.end.value == 0);
+    assert(effect.value.borrows[0].range.access.arithmetic_proved);
+    assert(effect.value.borrows[0].range.alignment == 1);
+    assert(model->results.len == 1);
+    assert(result_case(model).results.len == 1);
+}
+
+// A symbolic count for an eight-byte element does not become an exact byte count.
+fn scaled_symbolic_allocation(ownership_call_bodies.bodies* b) void {
+    ownership_summary_model.summary* model = complete(b, 3);
+    ownership_summary_model.effect_node effect = allocation_effect(model);
+    assert(effect.value.span_length.kind == ownership_api.fact_kind.symbolic);
+    assert(effect.value.span_length.symbol.kind == ownership_api.entity_kind.value);
+    assert(effect.value.borrows.len == 1);
+    ownership_api.region range = effect.value.borrows[0].range;
+    assert(range.offset.kind == ownership_api.fact_kind.exact);
+    assert(range.offset.value == 0);
+    assert(range.access.begin.kind == ownership_api.fact_kind.exact);
+    assert(range.access.begin.value == 0);
+    assert(range.access.end.kind == ownership_api.fact_kind.unknown);
+    assert(range.extent.kind == ownership_api.fact_kind.unknown);
+    assert(!range.access.arithmetic_proved);
+    assert(range.alignment == 8);
+    assert(range.source.kind == ownership_api.entity_kind.source);
+    assert(effect.effect.allocation.kind == ownership_api.entity_kind.allocation);
+    assert(effect.effect.source.kind == ownership_api.entity_kind.source);
+    assert(result_case(model).results.len == 1);
+}
+
+// An integer-to-pointer cast gets no source. A returned copy needs that source and stays
+// incomplete at publication.
+fn integer_pointer_stays_unknown(ownership_call_bodies.bodies* b) void {
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(b, 4);
+    assert(!ownership_api.successful(model->proof));
+    assert(model->proof.kind == ownership_api.proof_kind.incomplete);
+    assert(model->proof.terminal.present);
+    assert(model->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(model->proof.terminal.source.line == 6);
+    assert(model->residual_effects);
+    assert(model->cases.len == 0);
+    assert(model->results.len == 0);
+}
+
+// A moved owning pointer keeps its allocation identity through a void-pointer cast.
+fn owning_pointer_cast(ownership_call_bodies.bodies* b) void {
+    ownership_summary_model.summary* model = complete(b, 5);
+    ownership_summary_model.relation result = one_result(model);
+    ownership_api.entity_id input = ownership_summary_body.designated(&b->inputs[5], 1);
+    assert(ownership_summary_model.same(result.borrow.source, input));
+    assert(result.borrow.representation_complete);
+    assert(result.borrow.range.source.kind == ownership_api.entity_kind.source);
+    assert(ownership_summary_model.same(result.borrow.range.source, input));
+    assert(effect_count(model, ownership_summary_model.payload_kind.move) >= 1);
+    assert(result_case(model).results.len == 1);
+}
+
+fn edge_cases() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[6] names = {"empty_text", "null_value", "zero_allocation",
+        "scaled_allocation", "integer_pointer", "erased_owner"};
+    ownership_call_bodies.open(&b, EDGE_SOURCE[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    unsupported_literal(&b, 0, 2);
+    null_assignment(&b);
+    zero_length_allocation(&b);
+    scaled_symbolic_allocation(&b);
+    integer_pointer_stays_unknown(&b);
+    owning_pointer_cast(&b);
+}
+
+// Function values stay scalar. The adjacent opaque context keeps its data source. The wrapper
+// binds the direct function value and the context through the complete callee summary.
+fn function_values_are_scalar() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[6] names = {"install", "configure", "relay", "erase_callback", "accept_two",
+        "pass_two"};
+    ownership_call_bodies.open(&b, CALLBACK_SOURCE[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_summary_model.summary* installed = complete(&b, 0);
+    complete(&b, 1);
+    ownership_summary_model.summary* relayed = complete(&b, 2);
+    ownership_summary_model.summary* erased = ownership_call_bodies.summary(&b, 3);
+    ownership_summary_model.summary* accepted = complete(&b, 4);
+    ownership_summary_model.summary* passed = complete(&b, 5);
+    assert(!ownership_api.successful(erased->proof));
+    assert(erased->proof.kind == ownership_api.proof_kind.incomplete);
+    assert(erased->proof.terminal.present);
+    assert(erased->residual_effects);
+    u64 mut function_slots = 0;
+    u64 mut function_sources = 0;
+    u64 mut context_sources = 0;
+    u64 mut i = 0;
+    while (i < installed->roots.len) {
+        ownership_summary_model.symbolic_root row = installed->roots[i];
+        if (row.kind == ownership_summary_model.root_kind.by_value_slot && row.formal == 2 &&
+            row.source.kind == ownership_api.entity_kind.none) { function_slots += 1; }
+        if (row.formal == 2 && row.source.kind != ownership_api.entity_kind.none) {
+            function_sources += 1;
+        }
+        if (row.kind == ownership_summary_model.root_kind.caller_source && row.formal == 3) {
+            context_sources += 1;
+        }
+        i += 1;
+    }
+    assert(function_slots == 1 && function_sources == 0 && context_sources == 1);
+
+    u64 mut relay_slots = 0;
+    u64 mut relay_sources = 0;
+    i = 0;
+    while (i < relayed->roots.len) {
+        ownership_summary_model.symbolic_root row = relayed->roots[i];
+        if (row.kind == ownership_summary_model.root_kind.by_value_slot && row.formal == 1) {
+            relay_slots += 1;
+            assert(row.source.kind == ownership_api.entity_kind.none);
+            assert(row.allocation.kind == ownership_api.entity_kind.none);
+        }
+        if (row.formal == 1 && row.source.kind != ownership_api.entity_kind.none) {
+            relay_sources += 1;
+        }
+        i += 1;
+    }
+    assert(relay_slots == 1);
+    assert(relay_sources == 0);
+    assert(relayed->results.len == 0);
+    assert(effect_count(relayed, ownership_summary_model.payload_kind.allocation) == 0);
+    assert(result_case(relayed).results.len == 0);
+    assert(accepted->results.len == 0 && passed->results.len == 0);
+    u64 mut accepted_slots = 0;
+    u64 mut accepted_sources = 0;
+    i = 0;
+    while (i < accepted->roots.len) {
+        ownership_summary_model.symbolic_root row = accepted->roots[i];
+        if (row.kind == ownership_summary_model.root_kind.by_value_slot && row.formal > 0) {
+            accepted_slots += 1;
+            assert(row.formal == 1 || row.formal == 2);
+            assert(row.source.kind == ownership_api.entity_kind.none);
+            assert(row.allocation.kind == ownership_api.entity_kind.none);
+        }
+        if (row.formal > 0 && row.source.kind != ownership_api.entity_kind.none) {
+            accepted_sources += 1;
+        }
+        i += 1;
+    }
+    assert(accepted_slots == 2 && accepted_sources == 0);
+    assert(effect_count(accepted, ownership_summary_model.payload_kind.storage_end) == 0);
+    assert(effect_count(passed, ownership_summary_model.payload_kind.storage_end) == 0);
+
+    u64 mut erased_slots = 0;
+    u64 mut erased_sources = 0;
+    i = 0;
+    while (i < erased->roots.len) {
+        ownership_summary_model.symbolic_root row = erased->roots[i];
+        if (row.kind == ownership_summary_model.root_kind.by_value_slot && row.formal == 1) {
+            erased_slots += 1;
+            assert(row.source.kind == ownership_api.entity_kind.none);
+            assert(row.allocation.kind == ownership_api.entity_kind.none);
+        }
+        if (row.formal == 1 && row.source.kind != ownership_api.entity_kind.none) {
+            erased_sources += 1;
+        }
+        i += 1;
+    }
+    assert(erased_slots == 0);
+    assert(erased_sources == 0);
+    assert(erased->results.len == 0);
+    assert(erased->cases.len == 0);
+    assert(effect_count(erased, ownership_summary_model.payload_kind.allocation) == 0);
+
+    i = 0;
+    while (i < installed->effects.len) {
+        ownership_summary_model.effect_node effect = installed->effects[i];
+        if (effect.payload == ownership_summary_model.payload_kind.replacement) {
+            assert(effect.value.borrows.len == 0);
+            assert(effect.effect.source.kind == ownership_api.entity_kind.none);
+            assert(effect.effect.allocation.kind == ownership_api.entity_kind.none);
+        }
+        i += 1;
+    }
+}
+
+// A projected function-value assignment reads the selected caller storage before its scalar
+// write. The read keeps the caller source and its temporal requirement.
+fn projected_function_read_checks_storage() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"load", "stale"};
+    ownership_call_bodies.open(&b, FUNCTION_READ_SOURCE[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_summary_model.summary* model = complete(&b, 0);
+    ownership_api.entity_id source = ownership_summary_body.designated(&b.inputs[0], 1);
+    u64 mut reads = 0;
+    u64 mut i = 0;
+    while (i < model->effects.len) {
+        ownership_summary_model.effect_node effect = model->effects[i];
+        if (effect.payload == ownership_summary_model.payload_kind.read) {
+            reads += 1;
+            assert(ownership_summary_model.same(effect.effect.source, source));
+            assert(effect.range.access.end.kind == ownership_api.fact_kind.exact);
+            assert(effect.range.access.end.value == 8);
+        }
+        i += 1;
+    }
+    assert(reads == 1);
+    u64 mut extents = 0;
+    i = 0;
+    while (i < model->requirements.len) {
+        ownership_summary_model.requirement row = model->requirements[i];
+        if (row.kind == ownership_summary_model.requirement_kind.extent) {
+            extents += 1;
+            assert(ownership_summary_model.same(row.source, source));
+            assert(row.range.offset.kind == ownership_api.fact_kind.exact);
+            assert(row.range.offset.value == 0);
+            assert(row.range.access.begin.kind == ownership_api.fact_kind.exact);
+            assert(row.range.access.begin.value == 0);
+            assert(row.range.access.end.kind == ownership_api.fact_kind.exact);
+            assert(row.range.access.end.value == 8);
+            assert(row.range.extent.kind == ownership_api.fact_kind.exact);
+            assert(row.range.extent.value == 8);
+            assert(row.range.alignment == 8);
+        }
+        i += 1;
+    }
+    assert(extents == 1);
+    ownership_summary_model.summary* stale = ownership_call_bodies.summary(&b, 1);
+    assert(stale->proof.failed && !ownership_api.successful(stale->proof));
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.invalid_use));
+}
+
+// A cast to a function value reads a direct reference operand before the scalar write.
+fn direct_function_cast_checks_storage() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[3] names = {"live", "empty", "stale"};
+    ownership_call_bodies.open(&b, FUNCTION_CAST_SOURCE[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_summary_model.summary* live = complete(&b, 0);
+    assert(effect_count(live, ownership_summary_model.payload_kind.read) == 1);
+    ownership_summary_model.summary* empty = complete(&b, 1);
+    assert(effect_count(empty, ownership_summary_model.payload_kind.read) == 1);
+    assert(empty->requirements.len == 0);
+    ownership_summary_model.summary* stale = ownership_call_bodies.summary(&b, 2);
+    assert(stale->proof.failed && !ownership_api.successful(stale->proof));
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.invalid_use));
+}
+
+// Taking a function-value slot address keeps one stack source and its storage end.
+fn addressed_function_keeps_storage() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[1] names = {"local_address"};
+    ownership_call_bodies.open(&b, ADDRESSED_FUNCTION_SOURCE[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    ownership_summary_model.summary* model = complete(&b, 0);
+    u64 mut addressed = 0;
+    u64 mut i = 0;
+    while (i < model->roots.len) {
+        ownership_summary_model.symbolic_root row = model->roots[i];
+        if (row.kind == ownership_summary_model.root_kind.by_value_slot && row.ty != null &&
+            row.ty->kind == types.type_kind.k_fn &&
+            row.source.kind == ownership_api.entity_kind.source) { addressed += 1; }
+        i += 1;
+    }
+    assert(addressed == 1);
+    assert(effect_count(model, ownership_summary_model.payload_kind.storage_end) >= 1);
+}
+
+fn unsupported_slice(ownership_call_bodies.bodies* b, u64 index) void {
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(b, index);
+    assert(!ownership_api.successful(model->proof));
+    assert(model->proof.kind == ownership_api.proof_kind.incomplete);
+    assert(model->proof.terminal.present);
+    assert(model->proof.terminal.reason == ownership_api.incomplete_reason.unknown_effect);
+    assert(model->residual_effects);
+    assert(model->cases.len == 0);
+    assert(model->results.len == 0);
+}
+
+fn stale_base(ownership_call_bodies.bodies mut* b, u64 index) void {
+    ownership_call_bodies.infer(b, index);
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(b, index);
+    assert(model->proof.failed && !ownership_api.successful(model->proof));
+    assert(ownership_call_bodies.saw(b, ownership_api.event_kind.invalid_use));
+    assert(b->services.counts.events == 1);
+}
+
+// A projected reference load and a projected move read their containing reference first. A
+// released base fails there. A live base keeps a complete summary with one base read.
+fn projected_loads_check_base() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"stale_load", "stale_move"};
+    ownership_call_bodies.open(&b, STALE_BASE_SOURCE[..], names[..]);
+    stale_base(&b, 0);
+    stale_base(&b, 1);
+    ownership_call_bodies.close(&b);
+
+    ownership_call_bodies.bodies mut live = ownership_call_bodies.bodies{};
+    string[2] live_names = {"live_load", "live_move"};
+    ownership_call_bodies.open(&live, STALE_BASE_SOURCE[..], live_names[..]);
+    defer ownership_call_bodies.close(&live);
+    ownership_call_bodies.infer(&live, 0);
+    assert(base_reads(complete(&live, 0), &live.inputs[0], 1) == 1);
+    ownership_call_bodies.infer(&live, 1);
+    assert(base_reads(complete(&live, 1), &live.inputs[1], 1) == 1);
+}
+
+// A literal, a local literal, an empty literal, and two literals each stop at the literal line.
+// A wrapper of a literal body has no complete callee, so it stays incomplete.
+fn literals_stay_unsupported() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[5] names = {"literal", "wrapper", "local_text", "empty_text", "two_texts"};
+    ownership_call_bodies.open(&b, LITERAL_SOURCE[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    unsupported_literal(&b, 0, 1);
+    ownership_summary_model.summary* wrapper = ownership_call_bodies.summary(&b, 1);
+    assert(!ownership_api.successful(wrapper->proof) && wrapper->results.len == 0);
+    unsupported_literal(&b, 2, 3);
+    unsupported_literal(&b, 3, 4);
+    unsupported_literal(&b, 4, 5);
+}
+
+// This change adds no slice rule. A fixed-array slice, a partial span slice, and a zero-byte
+// slice stored into caller storage each stop at the slice with `unknown_effect`. A full span
+// slice follows the slice rule of the base revision, so the probe sets hold those shapes.
+fn slices_stay_unsupported() void {
+    ownership_call_bodies.bodies mut first = ownership_call_bodies.bodies{};
+    string[6] first_names = {"fixed_view", "bad_view", "exact_view", "empty_view", "full_view",
+        "dynamic_lower"};
+    ownership_call_bodies.open(&first, SLICE_SOURCE[..], first_names[..]);
+    ownership_call_bodies.infer_all(&first);
+    u32[6] first_lines = {4, 6, 7, 8, 9, 11};
+    u64 mut i = 0;
+    while (i < 6) {
+        unsupported_slice(&first, i);
+        assert(first.summaries[i].proof.terminal.source.line == first_lines[i]);
+        i += 1;
+    }
+    ownership_call_bodies.close(&first);
+
+    ownership_call_bodies.bodies mut second = ownership_call_bodies.bodies{};
+    string[3] second_names = {"span_lower", "span_prefix", "stored_then_load"};
+    ownership_call_bodies.open(&second, SLICE_SOURCE[..], second_names[..]);
+    defer ownership_call_bodies.close(&second);
+    ownership_call_bodies.infer_all(&second);
+    u32[3] second_lines = {12, 13, 19};
+    i = 0;
+    while (i < 3) {
+        unsupported_slice(&second, i);
+        assert(second.summaries[i].proof.terminal.source.line == second_lines[i]);
+        i += 1;
+    }
+}
+
+// The read effects whose place is the unprojected slot of local `base`.
+fn base_reads(ownership_summary_model.summary* model, ownership_summary_body.body_input* input,
+    u32 base) u64 {
+    ownership_api.entity_id root = ownership_summary_body.slot(input, base).root;
+    u64 mut count = 0;
+    u64 mut i = 0;
+    while (i < model->effects.len) {
+        ownership_summary_model.effect_node node = model->effects[i];
+        if (node.payload == ownership_summary_model.payload_kind.read &&
+            ownership_summary_model.same(node.effect.place.root, root) &&
+            node.effect.place.projections.len == 0) { count += 1; }
+        i += 1;
+    }
+    return count;
+}
+
+// Each refused charge of body `index` stops its summary. The run without a refusal is complete.
+fn refusals_stop(ownership_call_bodies.bodies mut* b, u64 index) void {
+    b->services.counts.deny_at = 0;
+    ownership_call_bodies.infer(b, index);
+    complete(b, index);
+    u64 total = b->services.counts.calls;
+    assert(total > 0);
+    u64 mut at = 1;
+    while (at <= total) {
+        b->services.counts.deny_at = at;
+        ownership_call_bodies.infer(b, index);
+        assert(!ownership_api.successful(b->summaries[index].proof));
+        at += 1;
+    }
+    b->services.counts.deny_at = 0;
+    ownership_call_bodies.infer(b, index);
+    complete(b, index);
+}
+
+// A refused charge in a base read or a header read stops the summary.
+fn rule_refusals() void {
+    ownership_call_bodies.bodies mut base = ownership_call_bodies.bodies{};
+    string[2] base_names = {"live_load", "live_move"};
+    ownership_call_bodies.open(&base, STALE_BASE_SOURCE[..], base_names[..]);
+    refusals_stop(&base, 0);
+    refusals_stop(&base, 1);
+    ownership_call_bodies.close(&base);
+
+    ownership_call_bodies.bodies mut header = ownership_call_bodies.bodies{};
+    string[2] header_names = {"capacity", "text_length"};
+    ownership_call_bodies.open(&header, HEADER_SOURCE[..], header_names[..]);
+    defer ownership_call_bodies.close(&header);
+    refusals_stop(&header, 0);
+    refusals_stop(&header, 1);
+}
+
+// A projected load through a moved owner uses an empty base, so it fails at that load.
+fn moved_base_load() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[1] names = {"moved_load"};
+    ownership_call_bodies.open(&b, MOVED_BASE_SOURCE[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer(&b, 0);
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(&b, 0);
+    assert(model->proof.failed && !ownership_api.successful(model->proof));
+    assert(b.services.counts.events >= 1);
+    assert(b.services.counts.last.kind == ownership_api.event_kind.invalid_use);
+    assert(b.services.counts.last.source.line == 3);
+}
+
+// Each `void*` load form stops at its line with the reason of the base revision. The typed cast
+// of a `void*` field stops with `missing_path`; it never reaches a zero-size range.
+fn void_loads_keep_base_verdicts() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[6] names = {"load_field", "load_mut_field", "move_owner", "load_nested",
+        "compare_field", "typed_field"};
+    ownership_call_bodies.open(&b, VOID_LOAD_SOURCE[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    u32[6] lines = {6, 7, 8, 9, 10, 11};
+    u64 mut i = 0;
+    while (i < 6) {
+        ownership_summary_model.summary* model = ownership_call_bodies.summary(&b, i);
+        assert(!ownership_api.successful(model->proof) && model->proof.terminal.present);
+        assert(model->proof.terminal.source.line == lines[i]);
+        ownership_api.incomplete_reason expected = i == 5 ?
+            ownership_api.incomplete_reason.missing_path :
+            ownership_api.incomplete_reason.unknown_effect;
+        assert(model->proof.terminal.reason == expected);
+        i += 1;
+    }
+}
+
+// A scalar `void*` result proves and publishes no relation, as in the base revision. A dangling
+// erased view and an erased view of a local each keep the returned-borrow check and fail.
+fn void_results() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[4] names = {"load_deref", "load_by_value", "dangling_erased", "local_erased"};
+    ownership_call_bodies.open(&b, VOID_RESULT_SOURCE[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer(&b, 0);
+    assert(complete(&b, 0)->results.len == 0);
+    ownership_call_bodies.infer(&b, 1);
+    assert(complete(&b, 1)->results.len == 0);
+    ownership_call_bodies.infer(&b, 2);
+    ownership_summary_model.summary* dangling = ownership_call_bodies.summary(&b, 2);
+    assert(!ownership_api.successful(dangling->proof) && dangling->results.len == 0);
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.invalid_use));
+    ownership_call_bodies.infer(&b, 3);
+    ownership_summary_model.summary* local = ownership_call_bodies.summary(&b, 3);
+    assert(!ownership_api.successful(local->proof) && local->results.len == 0);
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.invalid_use));
+}
+
+fn root_count(ownership_summary_model.summary* model,
+    ownership_summary_model.root_kind kind, u32 formal) u64 {
+    u64 mut count = 0;
+    u64 mut i = 0;
+    while (i < model->roots.len) {
+        ownership_summary_model.symbolic_root row = model->roots[i];
+        if (row.kind == kind && row.formal == formal) { count += 1; }
+        i += 1;
+    }
+    return count;
+}
+
+fn allocation_root_count(ownership_summary_model.summary* model) u64 {
+    u64 mut count = 0;
+    u64 mut i = 0;
+    while (i < model->roots.len) {
+        if (model->roots[i].kind == ownership_summary_model.root_kind.allocation_template) {
+            count += 1;
+        }
+        i += 1;
+    }
+    return count;
+}
+
+// A nested span header read keeps the containing caller source. It creates no allocation.
+fn nested_header_read_cases() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[4] names = {"capacity", "text_length", "stale_capacity", "stale_text"};
+    ownership_call_bodies.open(&b, HEADER_SOURCE[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    u64 mut i = 0;
+    while (i < 2) {
+        ownership_summary_model.summary* model = complete(&b, i);
+        assert(model->results.len == 0);
+        assert(result_case(model).results.len == 0);
+        assert(root_count(model, ownership_summary_model.root_kind.caller_source, 1) == 1);
+        assert(allocation_root_count(model) == 0);
+        assert(effect_count(model, ownership_summary_model.payload_kind.read) > 0);
+        assert(effect_count(model, ownership_summary_model.payload_kind.allocation) == 0);
+        ownership_api.entity_id input = ownership_summary_body.designated(&b.inputs[i], 1);
+        bool mut extent = false;
+        u64 mut r = 0;
+        while (r < model->requirements.len) {
+            ownership_summary_model.requirement row = model->requirements[r];
+            if (row.kind == ownership_summary_model.requirement_kind.extent &&
+                ownership_summary_model.same(row.source, input)) {
+                assert(row.path.root.kind == ownership_api.entity_kind.slot);
+                extent = true;
+            }
+            r += 1;
+        }
+        assert(extent);
+        i += 1;
+    }
+    while (i < names.len) {
+        ownership_summary_model.summary* stale = ownership_call_bodies.summary(&b, i);
+        assert(stale->proof.failed && !ownership_api.successful(stale->proof));
+        i += 1;
+    }
+    assert(ownership_call_bodies.saw(&b, ownership_api.event_kind.invalid_use));
+}
+
+fn exact_region(ownership_api.region range_at, i64 end, i64 extent, u64 alignment) void {
+    assert(range_at.source.kind == ownership_api.entity_kind.source);
+    assert(range_at.offset.kind == ownership_api.fact_kind.exact);
+    assert(range_at.offset.value == 0);
+    assert(range_at.access.begin.kind == ownership_api.fact_kind.exact);
+    assert(range_at.access.begin.value == 0);
+    assert(range_at.access.end.kind == ownership_api.fact_kind.exact);
+    assert(range_at.access.end.value == end);
+    assert(range_at.extent.kind == ownership_api.fact_kind.exact);
+    assert(range_at.extent.value == extent);
+    assert(range_at.alignment == alignment);
+    assert(range_at.access.arithmetic_proved);
+}
+
+// A pointer copy keeps one caller source and its exact pointee range.
+fn copied_pointer_case(ownership_call_bodies.bodies* b) void {
+    ownership_summary_model.summary* model = complete(b, 0);
+    ownership_summary_model.relation result = one_result(model);
+    ownership_api.entity_id input = ownership_summary_body.designated(&b->inputs[0], 1);
+    assert(ownership_summary_model.same(result.borrow.source, input));
+    assert(result.borrow.representation_complete);
+    exact_region(result.borrow.range, 4, 4, 4);
+    assert(ownership_summary_model.same(result.borrow.range.source, input));
+    assert(root_count(model, ownership_summary_model.root_kind.by_value_slot, 1) == 1);
+    assert(root_count(model, ownership_summary_model.root_kind.caller_source, 1) == 1);
+    assert(allocation_root_count(model) == 0);
+    assert(effect_count(model, ownership_summary_model.payload_kind.replacement) == 0);
+    assert(effect_count(model, ownership_summary_model.payload_kind.allocation) == 0);
+    assert(result_case(model).results.len == 1);
+}
+
+// A void-pointer copy keeps its source. It does not invent a byte extent.
+fn copied_void_case(ownership_call_bodies.bodies* b) void {
+    ownership_summary_model.summary* model = complete(b, 1);
+    ownership_summary_model.relation result = one_result(model);
+    ownership_api.entity_id input = ownership_summary_body.designated(&b->inputs[1], 1);
+    assert(ownership_summary_model.same(result.borrow.source, input));
+    assert(result.borrow.representation_complete);
+    assert(ownership_summary_model.same(result.borrow.range.source, input));
+    assert(result.borrow.range.offset.kind == ownership_api.fact_kind.exact);
+    assert(result.borrow.range.offset.value == 0);
+    assert(result.borrow.range.access.begin.kind == ownership_api.fact_kind.exact);
+    assert(result.borrow.range.access.begin.value == 0);
+    assert(result.borrow.range.access.end.kind == ownership_api.fact_kind.unknown);
+    assert(result.borrow.range.extent.kind == ownership_api.fact_kind.unknown);
+    assert(result.borrow.range.alignment == 1);
+    assert(!result.borrow.range.access.arithmetic_proved);
+    assert(root_count(model, ownership_summary_model.root_kind.caller_source, 1) == 1);
+    assert(allocation_root_count(model) == 0);
+    assert(result_case(model).results.len == 1);
+}
+
+// A string copy keeps the selected caller source and one complete return relation.
+fn copied_string_case(ownership_call_bodies.bodies* b) void {
+    ownership_summary_model.summary* model = complete(b, 2);
+    ownership_summary_model.relation result = one_result(model);
+    ownership_api.entity_id input = ownership_summary_body.designated(&b->inputs[2], 1);
+    assert(ownership_summary_model.same(result.borrow.source, input));
+    assert(result.borrow.representation_complete);
+    assert(ownership_summary_model.same(result.borrow.range.source, input));
+    assert(result.borrow.range.offset.kind == ownership_api.fact_kind.exact);
+    assert(result.borrow.range.offset.value == 0);
+    assert(result.borrow.range.access.begin.kind == ownership_api.fact_kind.exact);
+    assert(result.borrow.range.access.begin.value == 0);
+    assert(result.borrow.range.alignment == 1);
+    assert(root_count(model, ownership_summary_model.root_kind.by_value_slot, 1) == 1);
+    assert(root_count(model, ownership_summary_model.root_kind.caller_source, 1) == 1);
+    assert(allocation_root_count(model) == 0);
+    assert(result_case(model).results.len == 1);
+}
+
+// Two local null assignments keep the return empty and create no source.
+fn copied_null_case(ownership_call_bodies.bodies* b) void {
+    ownership_summary_model.summary* model = complete(b, 3);
+    assert(model->results.len == 0);
+    assert(result_case(model).results.len == 0);
+    assert(root_count(model, ownership_summary_model.root_kind.caller_source, 0) == 0);
+    assert(root_count(model, ownership_summary_model.root_kind.loaded_source, 0) == 0);
+    assert(allocation_root_count(model) == 0);
+    assert(effect_count(model, ownership_summary_model.payload_kind.allocation) == 0);
+    assert(effect_count(model, ownership_summary_model.payload_kind.replacement) == 1);
+}
+
+fn exact_allocation_case(ownership_call_bodies.bodies* b, u64 index, i64 count,
+    i64 bytes, u64 alignment) void {
+    ownership_summary_model.summary* model = complete(b, index);
+    ownership_summary_model.effect_node effect = allocation_effect(model);
+    assert(effect.effect.allocation.kind == ownership_api.entity_kind.allocation);
+    assert(effect.effect.source.kind == ownership_api.entity_kind.source);
+    assert(effect.value.kind == ownership_api.contents_kind.reference);
+    assert(effect.value.span_length.kind == ownership_api.fact_kind.exact);
+    assert(effect.value.span_length.value == count);
+    assert(effect.value.borrows.len == 1);
+    assert(effect.value.borrows[0].representation_complete);
+    exact_region(effect.value.borrows[0].range, bytes, bytes, alignment);
+    assert(ownership_summary_model.same(effect.value.borrows[0].range.source,
+        effect.effect.source));
+    assert(allocation_root_count(model) == 1);
+    assert(effect_count(model, ownership_summary_model.payload_kind.allocation) == 1);
+    assert(model->results.len == 1);
+    ownership_summary_model.relation result = one_result(model);
+    assert(ownership_summary_model.same(result.borrow.source, effect.effect.source));
+    assert(ownership_summary_model.same(result.borrow.range.source, effect.effect.source));
+    assert(result.borrow.range.extent.kind == ownership_api.fact_kind.exact);
+    assert(result.borrow.range.extent.value == bytes);
+    assert(result.borrow.range.alignment == alignment);
+    assert(result_case(model).results.len == 1);
+}
+
+// Moving an owning aggregate does not claim that its hidden owner is empty.
+fn aggregate_move_boundary(ownership_call_bodies.bodies* b) void {
+    ownership_summary_model.summary* model = ownership_call_bodies.summary(b, 1);
+    assert(!ownership_api.successful(model->proof));
+    assert(model->proof.kind == ownership_api.proof_kind.incomplete);
+    assert(model->proof.terminal.present);
+    assert(model->residual_effects);
+    assert(model->cases.len == 0);
+    assert(model->results.len == 0);
+}
+
+// A local pointer cast and copy keep the input source and its exact range.
+fn erased_copy_case(ownership_call_bodies.bodies* b) void {
+    ownership_summary_model.summary* model = complete(b, 2);
+    ownership_summary_model.relation result = one_result(model);
+    ownership_api.entity_id input = ownership_summary_body.designated(&b->inputs[2], 1);
+    assert(ownership_summary_model.same(result.borrow.source, input));
+    assert(ownership_summary_model.same(result.borrow.range.source, input));
+    assert(result.borrow.representation_complete);
+    exact_region(result.borrow.range, 4, 4, 4);
+    assert(root_count(model, ownership_summary_model.root_kind.caller_source, 1) == 1);
+    assert(allocation_root_count(model) == 0);
+    assert(effect_count(model, ownership_summary_model.payload_kind.allocation) == 0);
+    assert(effect_count(model, ownership_summary_model.payload_kind.replacement) == 0);
+    assert(result_case(model).results.len == 1);
+}
+
+// A pointer-to-integer copy publishes no storage relation or allocation.
+fn address_copy_case(ownership_call_bodies.bodies* b) void {
+    ownership_summary_model.summary* model = complete(b, 3);
+    assert(model->results.len == 0);
+    assert(result_case(model).results.len == 0);
+    assert(allocation_root_count(model) == 0);
+    assert(effect_count(model, ownership_summary_model.payload_kind.allocation) == 0);
+    assert(effect_count(model, ownership_summary_model.payload_kind.replacement) >= 1);
+}
+
+fn detail_cases() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[6] first = {"copied_ptr", "copied_void", "copied_string", "null_copy",
+        "exact_bytes", "exact_words"};
+    ownership_call_bodies.open(&b, DETAIL_SOURCE[..], first[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    copied_pointer_case(&b);
+    copied_void_case(&b);
+    copied_string_case(&b);
+    copied_null_case(&b);
+    exact_allocation_case(&b, 4, 4, 4, 1);
+    exact_allocation_case(&b, 5, 3, 24, 8);
+
+    ownership_call_bodies.bodies mut c = ownership_call_bodies.bodies{};
+    string[5] second = {"zero_words", "pass_box", "erased_copy", "address_copy",
+        "exact_empty"};
+    ownership_call_bodies.open(&c, DETAIL_SOURCE[..], second[..]);
+    defer ownership_call_bodies.close(&c);
+    ownership_call_bodies.infer_all(&c);
+    exact_allocation_case(&c, 0, 0, 0, 8);
+    aggregate_move_boundary(&c);
+    erased_copy_case(&c);
+    address_copy_case(&c);
+    unsupported_literal(&c, 4, 12);
+}
+
+fn cast_result_case(ownership_call_bodies.bodies* b, u64 index) void {
+    ownership_summary_model.summary* model = complete(b, index);
+    ownership_summary_model.relation result = one_result(model);
+    ownership_api.entity_id input = ownership_summary_body.designated(&b->inputs[index], 1);
+    assert(ownership_summary_model.same(result.borrow.source, input));
+    assert(ownership_summary_model.same(result.borrow.range.source, input));
+    assert(result.borrow.representation_complete);
+    exact_region(result.borrow.range, 4, 4, 4);
+    assert(root_count(model, ownership_summary_model.root_kind.by_value_slot, 1) == 1);
+    assert(root_count(model, ownership_summary_model.root_kind.caller_source, 1) == 1);
+    assert(root_count(model, ownership_summary_model.root_kind.loaded_source, 1) == 0);
+    assert(allocation_root_count(model) == 0);
+    assert(effect_count(model, ownership_summary_model.payload_kind.allocation) == 0);
+    assert(effect_count(model, ownership_summary_model.payload_kind.release) == 0);
+    assert(result_case(model).results.len == 1);
+}
+
+// Qualifier-preserving casts retain one caller source through one or two cast steps.
+fn cast_detail_cases() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[2] names = {"const_erased", "round_trip"};
+    ownership_call_bodies.open(&b, DETAIL_SOURCE[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    cast_result_case(&b, 0);
+    cast_result_case(&b, 1);
+}
+
+// Exact allocation sizes preserve element counts, byte counts, and alignments.
+fn allocation_detail_cases() void {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[6] names = {"five_u16", "seven_u32", "one_u64", "one_u8", "zero_u16",
+        "zero_u32"};
+    ownership_call_bodies.open(&b, ALLOCATION_DETAIL_SOURCE[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    exact_allocation_case(&b, 0, 5, 10, 2);
+    exact_allocation_case(&b, 1, 7, 28, 4);
+    exact_allocation_case(&b, 2, 1, 8, 8);
+    exact_allocation_case(&b, 3, 1, 1, 1);
+    exact_allocation_case(&b, 4, 0, 0, 2);
+    exact_allocation_case(&b, 5, 0, 0, 4);
+
+    u64 mut i = 0;
+    while (i < 6) {
+        ownership_summary_model.summary* model = complete(&b, i);
+        assert(root_count(model, ownership_summary_model.root_kind.caller_source, 0) == 0);
+        assert(root_count(model, ownership_summary_model.root_kind.loaded_source, 0) == 0);
+        assert(allocation_root_count(model) == 1);
+        assert(effect_count(model, ownership_summary_model.payload_kind.allocation) == 1);
+        assert(effect_count(model, ownership_summary_model.payload_kind.release) == 0);
+        assert(effect_count(model, ownership_summary_model.payload_kind.move) >= 1);
+        u64 mut templates = 0;
+        u64 mut j = 0;
+        while (j < model->roots.len) {
+            ownership_summary_model.symbolic_root row = model->roots[j];
+            if (row.kind == ownership_summary_model.root_kind.allocation_template) {
+                templates += 1;
+                assert(row.allocation.kind == ownership_api.entity_kind.allocation);
+            }
+            j += 1;
+        }
+        assert(templates == 1);
+        u64 mut allocations = 0;
+        j = 0;
+        while (j < model->effects.len) {
+            ownership_summary_model.effect_node effect = model->effects[j];
+            if (effect.payload == ownership_summary_model.payload_kind.allocation) {
+                allocations += 1;
+                assert(effect.effect.source.kind == ownership_api.entity_kind.source);
+                assert(effect.effect.allocation.kind == ownership_api.entity_kind.allocation);
+                assert(effect.value.borrows.len == 1);
+            }
+            j += 1;
+        }
+        assert(allocations == 1);
+        i += 1;
+    }
+}
+
+fn main() i32 {
+    ownership_call_bodies.bodies mut b = ownership_call_bodies.bodies{};
+    string[6] names = {"owner_input", "static_text", "field_text", "erased", "address",
+        "allocated"};
+    ownership_call_bodies.open(&b, SOURCE[..], names[..]);
+    defer ownership_call_bodies.close(&b);
+    ownership_call_bodies.infer_all(&b);
+    owning_parameter(&b);
+    unsupported_literal(&b, 1, 4);
+    field_assignment(&b);
+    pointer_cast(&b);
+    dynamic_allocation(&b);
+    opaque_parameter();
+    edge_cases();
+    function_values_are_scalar();
+    projected_function_read_checks_storage();
+    direct_function_cast_checks_storage();
+    addressed_function_keeps_storage();
+    projected_loads_check_base();
+    slices_stay_unsupported();
+    literals_stay_unsupported();
+    void_loads_keep_base_verdicts();
+    void_results();
+    moved_base_load();
+    rule_refusals();
+    detail_cases();
+    cast_detail_cases();
+    allocation_detail_cases();
+    nested_header_read_cases();
+    println("summary local operations ok");
+    return 0;
+}

@@ -153,6 +153,9 @@ struct body_program {
     // A call changed caller-visible state that this summary does not export.
     // Flow still checks the body. The published summary stays incomplete.
     bool call_residual;
+    // An owning aggregate parameter has unmodeled leaf obligations. Extraction can inspect its
+    // body, but it cannot publish a complete summary until a leaf rule discharges each owner.
+    bool aggregate_owner_boundary;
     // A call of a provisional target that has no possible case, or whose possible cases do
     // not cover the captured values. The first such call names its position.
     bool uncovered;
@@ -277,8 +280,17 @@ fn next(body_program mut* out, ownership_api.entity_kind kind) ownership_api.ent
 }
 
 fn reference(types.node* ty) bool {
-    return ty != null && (ty->kind == types.type_kind.k_ptr ||
-        ty->kind == types.type_kind.k_span || ty->kind == types.type_kind.k_string);
+    return ty != null && types.type_is_reference(ty);
+}
+
+// A reference whose pointee has a byte extent. A `void*` has none, so a projected `void*` copy
+// stays a scalar read, as in the base revision.
+fn pointee_reference(types.node* ty) bool {
+    return reference(ty) && extent(ty) != 0;
+}
+
+fn function_value(types.node* ty) bool {
+    return ty != null && ty->kind == types.type_kind.k_fn;
 }
 
 fn direct(fir.place place_at) bool {
@@ -294,8 +306,8 @@ fn empty(ownership_api.place_path place_at, bool owning) ownership_api.contents_
 
 fn extent(types.node* ty) u64 {
     if (ty->kind == types.type_kind.k_string) { return 1; }
-    if (ty->elem == null || !types.type_size_fits(ty->elem) ||
-        ty->elem->kind == types.type_kind.k_void) { return 0; }
+    if (ty->elem == null || ty->elem->kind == types.type_kind.k_void ||
+        !types.type_size_fits(ty->elem)) { return 0; }
     return types.type_sizeof(ty->elem);
 }
 
@@ -338,6 +350,55 @@ fn value(body_input* in, body_program mut* out, ownership_api.place_path place_a
     return ownership_state.copy_contents(&out->metadata, data);
 }
 
+// A symbolic allocation length identifies its element count. It does not prove a byte range.
+fn allocation_value(body_input* in, body_program mut* out, ownership_api.place_path place_at,
+    ownership_api.entity_id key, u32 version, ownership_api.scalar_fact length, u64 size,
+    u64 align) ownership_api.contents_fact {
+    if (length.kind == ownership_api.fact_kind.exact) {
+        return value(in, out, place_at, key, version, length.value, size, align);
+    }
+    ownership_api.region unknown = ownership_api.region{
+        .key = id(in->function.key, ownership_api.entity_kind.region, key.ordinal), .source = key,
+        .offset = integer(0), .access = ownership_api.byte_window{.begin = integer(0)},
+        .alignment = align};
+    ownership_api.borrow_relation[1] relations = {ownership_api.borrow_relation{
+        .key = id(in->function.key, ownership_api.entity_kind.relation, version),
+        .value_version = id(in->function.key, ownership_api.entity_kind.value, version),
+        .containing = place_at, .source = key, .range = unknown,
+        .representation_complete = true}};
+    ownership_api.contents_fact data = ownership_api.contents_fact{.place = place_at,
+        .kind = ownership_api.contents_kind.reference,
+        .value_version = relations[0].value_version, .borrows = relations[..],
+        .span_length = length};
+    if (!ownership_summary_model.contents_charge(&out->context, &out->proof, data)) {
+        return ownership_api.contents_fact{};
+    }
+    return ownership_state.copy_contents(&out->metadata, data);
+}
+
+// An opaque pointer has one exact pointer value and no exact byte extent. A later operation that
+// needs an extent must supply one before it can use the pointed storage.
+fn opaque_value(body_input* in, body_program mut* out, ownership_api.place_path place_at,
+    ownership_api.entity_id key, u32 version) ownership_api.contents_fact {
+    ownership_api.region unknown = ownership_api.region{
+        .key = id(in->function.key, ownership_api.entity_kind.region, key.ordinal), .source = key,
+        .offset = integer(0), .access = ownership_api.byte_window{.begin = integer(0)},
+        .alignment = 1};
+    ownership_api.borrow_relation[1] relations = {ownership_api.borrow_relation{
+        .key = id(in->function.key, ownership_api.entity_kind.relation, version),
+        .value_version = id(in->function.key, ownership_api.entity_kind.value, version),
+        .containing = place_at, .source = key, .range = unknown,
+        .representation_complete = true}};
+    ownership_api.contents_fact data = ownership_api.contents_fact{.place = place_at,
+        .kind = ownership_api.contents_kind.reference,
+        .value_version = relations[0].value_version, .borrows = relations[..],
+        .span_length = integer(1)};
+    if (!ownership_summary_model.contents_charge(&out->context, &out->proof, data)) {
+        return ownership_api.contents_fact{};
+    }
+    return ownership_state.copy_contents(&out->metadata, data);
+}
+
 fn root(body_program mut* out, ownership_summary_model.symbolic_root row) void {
     if (!work(out, 1) || out->roots_len >= out->roots.len ||
         !ownership_summary_model.effect_charge(&out->context, &out->proof, &out->relations)) {
@@ -368,26 +429,34 @@ fn seed(body_input* in, body_program mut* out) bool {
         fir.local* local_at_point = fir.local_at(f, i);
         ownership_api.place_path place_at = slot(in, i);
         ownership_api.entity_id storage = source(in, i);
+        bool function = function_value(local_at_point->ty);
+        bool stored_function = function && out->addressed[i];
         root(out, ownership_summary_model.symbolic_root{
             .key = id(in->function.key, ownership_api.entity_kind.template, i + 1),
             .kind = i == 0 ? ownership_summary_model.root_kind.result :
                 ownership_summary_model.root_kind.by_value_slot,
             .formal = local_at_point->kind == fir.local_kind.lk_param ? i : 0,
                 .slot = place_at.root,
-            .source = i == 0 ? ownership_api.entity_id{} : storage, .ty = local_at_point->ty,
+            .source = i == 0 ? ownership_api.entity_id{} : storage,
+            .ty = local_at_point->ty,
             .ownership = local_at_point->ty->is_own ? ownership_summary_model.owner_class.owning :
                 ownership_summary_model.owner_class.borrowed});
-        ownership_state.append_sources(&out->entry, ownership_api.source_fact{
-            .key = storage, .kind = ownership_api.source_kind.stack,
-            .validity = ownership_api.validity_kind.live});
+        if (!function || stored_function) {
+            ownership_state.append_sources(&out->entry, ownership_api.source_fact{
+                .key = storage, .kind = ownership_api.source_kind.stack,
+                .validity = ownership_api.validity_kind.live});
+        }
         ownership_api.contents_fact mut contents = empty(place_at, local_at_point->ty->is_own);
         if (local_at_point->kind == fir.local_kind.lk_param) {
             if (fir.type_aggregate(local_at_point->ty) && fir.type_owning(local_at_point->ty)) {
-                reject(out, ownership_api.incomplete_reason.unknown_effect);
-                return false;
+                // Seed the aggregate slot. The boundary flag prevents an empty-owner proof.
+                out->aggregate_owner_boundary = true;
             }
-            out->parameters[out->parameters_len] = ownership_flow.parameter{place_at.root, storage};
-            out->parameters_len += 1;
+            if (!function || stored_function) {
+                out->parameters[out->parameters_len] = ownership_flow.parameter{
+                    place_at.root, storage};
+                out->parameters_len += 1;
+            }
             if (reference(local_at_point->ty)) {
                 ownership_api.entity_id pointed = designated(in, i);
                 out->origins[i] = pointed;
@@ -407,16 +476,23 @@ fn seed(body_input* in, body_program mut* out) bool {
                         ownership_api.source_kind.symbolic_caller,
                     .validity = ownership_api.validity_kind.live, .allocation = allocation});
                 u64 size = extent(local_at_point->ty);
-                if (size == 0 || size > 9223372036854775807) {
+                if (size == 0 && local_at_point->ty->kind == types.type_kind.k_voidptr &&
+                    !local_at_point->ty->is_own) {
+                    contents = opaque_value(in, out, place_at, pointed, i + 1);
+                } else if (size == 0 || size > 9223372036854775807) {
                     reject(out, ownership_api.incomplete_reason.missing_correspondence);
                     return false;
+                } else {
+                    contents = value(in, out, place_at, pointed, i + 1, 1, size,
+                        pointee_alignment(local_at_point->ty));
                 }
-                contents = value(in, out, place_at, pointed, i + 1, 1, size,
-                    pointee_alignment(local_at_point->ty));
                 if (local_at_point->ty->kind != types.type_kind.k_ptr) {
-                    contents.span_length = ownership_api.scalar_fact{
-                        .kind = ownership_api.fact_kind.symbolic,
-                        .symbol = id(in->function.key, ownership_api.entity_kind.value, i + 1)};
+                    if (local_at_point->ty->kind != types.type_kind.k_voidptr) {
+                        contents.span_length = ownership_api.scalar_fact{
+                            .kind = ownership_api.fact_kind.symbolic,
+                            .symbol = id(in->function.key, ownership_api.entity_kind.value,
+                                i + 1)};
+                    }
                     if (local_at_point->ty->is_own) {
                         reject(out, ownership_api.incomplete_reason.unknown_effect);
                         return false;
@@ -432,7 +508,7 @@ fn seed(body_input* in, body_program mut* out) bool {
                 }
             } else if (fir.type_aggregate(local_at_point->ty)) {
                 contents.kind = ownership_api.contents_kind.aggregate;
-            } else {
+            } else if (!function) {
                 // A scalar formal is a captured caller value. A call binds it as a capture.
                 // An addressed formal can change through its address, so it has no symbol.
                 contents.value_version = id(in->function.key, ownership_api.entity_kind.value,
@@ -445,6 +521,24 @@ fn seed(body_input* in, body_program mut* out) bool {
             }
         }
         ownership_state.append_contents(&out->entry, contents);
+        i += 1;
+    }
+    return ownership_api.successful(out->proof);
+}
+
+// Function roots use an internal slot key during flow. A published function value has no
+// data-storage source.
+fn hide_function_sources(body_program mut* out) bool {
+    u64 mut i = 0;
+    while (i < out->roots_len) {
+        if (!work(out, 1)) { return false; }
+        ownership_summary_model.symbolic_root mut* row = &out->roots[i];
+        bool addressed = cast(row->slot.ordinal, u64) < out->addressed.len &&
+            out->addressed[row->slot.ordinal];
+        if (row->kind == ownership_summary_model.root_kind.by_value_slot &&
+            function_value(row->ty) && !addressed) {
+            row->source = ownership_api.entity_id{};
+        }
         i += 1;
     }
     return ownership_api.successful(out->proof);
@@ -760,13 +854,66 @@ fn cast_value(types.node* dst, types.node* src, ownership_api.scalar_fact value)
         ownership_api.scalar_fact{};
 }
 
+// A projected access through a local reference first uses that reference in body flow. A
+// released or moved base then fails before the access reads its pointed storage (D17.14).
+// The caller can retarget the summary effect of this step to the selected storage.
+fn read_projection_base(body_input* in, body_program mut* out, fir.place place_at, u32 block,
+    u32 gap, u32 order, diag.loc at, diag.loc exit_at, u32 statement) bool {
+    if (place_at.base != fir.base_kind.bk_local || place_at.proj_len == 0 ||
+        cast(place_at.local, u64) >= out->origins.len ||
+        !reference(fir.local_at(in->function.body, place_at.local)->ty)) {
+        reject(out, ownership_api.incomplete_reason.unknown_effect);
+        return false;
+    }
+    u32 base = place_at.local;
+    live_requirement(in, out, base);
+    ownership_transfer.request mut req = basic(in, base, base, ownership_transfer.action.use);
+    req.source_key = out->origins[base];
+    req.temporal_use = true;
+    emit(in, out, req, block, gap, order, ownership_summary_model.payload_kind.read,
+        at, exit_at, statement, req.source, req.destination);
+    return ownership_api.successful(out->proof);
+}
+
 fn add_read(body_input* in, body_program mut* out, fir.place place_at, u32 block, u32 gap,
-    u32 order, diag.loc at, diag.loc exit_at, u32 statement) bool {
+    u32 order, bool temporal_use, diag.loc at, diag.loc exit_at, u32 statement) bool {
     if (place_at.base != fir.base_kind.bk_local || cast(place_at.local, u64) >= out->origins.len) {
         reject(out, ownership_api.incomplete_reason.unknown_effect);
         return false;
     }
     selected_storage mut selected = selected_storage{};
+    if (place_at.proj_len > 1) {
+        fir.place mut header = place_at;
+        header.proj_len -= 1;
+        types.node* header_ty = fir.place_type(in->function.body, header);
+        fir.projection field = fir.place_projection(in->function.body, place_at,
+            place_at.proj_len - 1);
+        if (header_ty != null && (header_ty->kind == types.type_kind.k_span ||
+                header_ty->kind == types.type_kind.k_string) &&
+            field.kind == fir.proj_kind.pj_field && field.field < 2) {
+            selected = select_storage(in, out, header, at, exit_at, statement);
+            if (!selected.proved || !selected.indirect || !selected.caller) {
+                reject(out, ownership_api.incomplete_reason.unknown_effect);
+                return false;
+            }
+            requirement(in, out, selected.source, selected.path,
+                selected.offset + selected.bytes,
+                ownership_summary_model.requirement_kind.extent,
+                types.type_alignof(header_ty));
+            if (!read_projection_base(in, out, place_at, block, gap, order, at, exit_at,
+                statement)) { return false; }
+            ownership_summary_model.effect_node mut* effect =
+                &out->effects[out->effects_len - 1];
+            effect->effect.place = selected.path;
+            effect->effect.source = selected.source;
+            effect->operand = selected.path;
+            effect->range = range(in, out, selected.source,
+                selected.offset + selected.bytes, 1);
+            effect->range.key = next(out, ownership_api.entity_kind.region);
+            effect->range.alignment = types.type_alignof(header_ty);
+            return ownership_api.successful(out->proof);
+        }
+    }
     if (place_at.proj_len > 1) {
         selected = select_storage(in, out, place_at, at, exit_at, statement);
     }
@@ -799,6 +946,9 @@ fn add_read(body_input* in, body_program mut* out, fir.place place_at, u32 block
         ownership_transfer.action.inspect);
     ownership_api.region mut typed = ownership_api.region{};
     if (reference(fir.local_at(in->function.body, place_at.local)->ty)) {
+        req.kind = temporal_use ? ownership_transfer.action.use :
+            ownership_transfer.action.inspect;
+        req.temporal_use = temporal_use;
         req.source_key = out->origins[place_at.local];
         live_requirement(in, out, place_at.local);
         types.node* base = fir.local_at(in->function.body, place_at.local)->ty;
@@ -1069,7 +1219,9 @@ fn load_reference(body_input* in, body_program mut* out, ownership_api.place_pat
     ownership_api.place_path current_base, ownership_api.entity_id containing, types.node* ty,
     i64 offset, diag.loc at, diag.loc exit_at, u32 statement) loaded_reference {
     u64 bytes = types.type_sizeof(ty);
-    if (!reference(ty) || ty->elem == null || bytes > 9223372036854775807 ||
+    // A typed copy can select a `void*` field, such as `cast(t->decl, sym*)`. That load has no
+    // pointee extent and no zero-size range, so it stops with `missing_path`.
+    if (!reference(ty) || ty->elem == null || extent(ty) == 0 || bytes > 9223372036854775807 ||
         offset < 0 || offset > 9223372036854775807 - cast(bytes, i64)) {
         reject(out, ownership_api.incomplete_reason.missing_path);
         return loaded_reference{};
@@ -1510,7 +1662,7 @@ fn assign_output(body_input* in, body_program mut* out, fir.statement* stmt,
                     input_operand.place.local)->ty);
             if (input_operand.kind != fir.operand_kind.ok_const &&
                 (!direct(input_operand.place) || reference_use) &&
-                !add_read(in, out, input_operand.place, block, gap, operand, stmt->loc,
+                !add_read(in, out, input_operand.place, block, gap, operand, false, stmt->loc,
                     stmt->exit_loc, stmt->stmt)) { return; }
             operand += 1;
         }
@@ -2267,6 +2419,28 @@ fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
     }
     u32 dst = stmt->place.local;
     types.node* dst_ty = fir.local_at(f, dst)->ty;
+    if (function_value(dst_ty) &&
+        (rv.kind == fir.rvalue_kind.rv_use || rv.kind == fir.rvalue_kind.rv_cast)) {
+        fir.operand function_operand = fir.rvalue_operand(f, rv, 0);
+        bool reference_cast = rv.kind == fir.rvalue_kind.rv_cast &&
+            reference(fir.operand_type(f, function_operand));
+        if (function_operand.kind != fir.operand_kind.ok_const &&
+            (reference_cast || !direct(function_operand.place)) &&
+            !add_read(in, out, function_operand.place,
+            block, gap, 0, !reference_cast || !direct(function_operand.place),
+            stmt->loc, stmt->exit_loc, stmt->stmt)) { return; }
+        // A function value carries call identity. It does not designate data storage.
+        out->scalars[dst] = ownership_api.scalar_fact{};
+        out->origins[dst] = ownership_api.entity_id{};
+        out->unknown[dst] = false;
+        ownership_transfer.request scalar = ownership_transfer.request{
+            .kind = ownership_transfer.action.assignment, .source = slot(in, dst),
+            .destination = slot(in, dst), .value = empty(slot(in, dst), false)};
+        emit(in, out, scalar, block, gap, rv.ops_len + 1,
+            ownership_summary_model.payload_kind.replacement, stmt->loc, stmt->exit_loc,
+            stmt->stmt, scalar.source, scalar.destination);
+        return;
+    }
     // The new value replaces the unknown mark of `dst`. A copy or a move of a local, the
     // pointer field of a span local, and a span built from a pointer local keep the mark of
     // their first operand.
@@ -2303,10 +2477,29 @@ fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
             if (reference(dst_ty)) { live_requirement(in, out, src); }
             if (rv.kind == fir.rvalue_kind.rv_cast &&
                 (!types.type_cast_allowed(dst_ty, fir.operand_type(f, input_operand)) ||
-                types.type_cast_adds_own(dst_ty, fir.operand_type(f, input_operand)) ||
-                reference(dst_ty) != reference(fir.operand_type(f, input_operand)))) {
+                types.type_cast_adds_own(dst_ty, fir.operand_type(f, input_operand)))) {
                 reject(out, ownership_api.incomplete_reason.unknown_effect);
                 return;
+            }
+            if (rv.kind == fir.rvalue_kind.rv_cast) {
+                types.node* src_ty = fir.operand_type(f, input_operand);
+                bool src_reference = reference(src_ty);
+                bool dst_reference = reference(dst_ty);
+                if (src_reference && !dst_reference) {
+                    if (!add_read(in, out, input_operand.place, block, gap, 0, false, stmt->loc,
+                        stmt->exit_loc, stmt->stmt)) { return; }
+                    req = basic(in, dst, dst, ownership_transfer.action.assignment);
+                    req.value = empty(slot(in, dst), false);
+                    payload = ownership_summary_model.payload_kind.replacement;
+                    out->origins[dst] = ownership_api.entity_id{};
+                    out->unknown[dst] = false;
+                } else if (!src_reference && dst_reference) {
+                    req = basic(in, dst, dst, ownership_transfer.action.assignment);
+                    req.opaque_value = true;
+                    payload = ownership_summary_model.payload_kind.replacement;
+                    out->origins[dst] = ownership_api.entity_id{};
+                    out->unknown[dst] = true;
+                }
             }
         } else if (input_operand.kind != fir.operand_kind.ok_const) {
             out->origins[dst] = ownership_api.entity_id{};
@@ -2321,7 +2514,7 @@ fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
                 out->origins[dst] = out->origins[input_operand.place.local];
                 out->unknown[dst] = marked;
             } else if (!header) {
-                if (reference(dst_ty) && dst_ty->is_own &&
+                if (pointee_reference(dst_ty) && dst_ty->is_own &&
                     input_operand.kind == fir.operand_kind.ok_move) {
                     selected_storage mut from = select_storage(in, out, input_operand.place,
                         stmt->loc, stmt->exit_loc, stmt->stmt);
@@ -2336,12 +2529,14 @@ fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
                     req.value.place = from.flow_path;
                     out->origins[dst] = req.source_key;
                     payload = ownership_summary_model.payload_kind.move;
-                } else if (reference(dst_ty)) {
+                } else if (pointee_reference(dst_ty)) {
                     selected_storage selected = select_storage(in, out, input_operand.place,
                         stmt->loc, stmt->exit_loc, stmt->stmt);
-                    // A load from storage of this body, such as a by-value aggregate, has no
-                    // modeled source, so it stays unsupported.
-                    if (!selected.proved || !selected.caller) {
+                    bool parameter_value = selected.proved && !selected.indirect &&
+                        input_operand.place.base == fir.base_kind.bk_local &&
+                        fir.local_at(f, input_operand.place.local)->kind ==
+                            fir.local_kind.lk_param;
+                    if (!selected.proved || (!selected.caller && !parameter_value)) {
                         reject(out, ownership_api.incomplete_reason.unknown_effect);
                         return;
                     }
@@ -2354,7 +2549,7 @@ fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
                     req.source_key = loaded.source;
                     out->origins[dst] = req.source_key;
                     payload = ownership_summary_model.payload_kind.copy;
-                } else if (!add_read(in, out, input_operand.place, block, gap, 0, stmt->loc,
+                } else if (!add_read(in, out, input_operand.place, block, gap, 0, false, stmt->loc,
                     stmt->exit_loc, stmt->stmt)) { return; }
                 if (fir.type_aggregate(dst_ty) && !reference(dst_ty)) {
                     reject(out, ownership_api.incomplete_reason.unknown_effect);
@@ -2374,14 +2569,24 @@ fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
             out->origins[dst] = ownership_api.entity_id{};
         }
     } else if (rv.kind == fir.rvalue_kind.rv_alloc) {
-        ownership_api.scalar_fact length = constant(in, out, fir.rvalue_operand(f, rv, 0));
+        fir.operand count = fir.rvalue_operand(f, rv, 0);
+        ownership_api.scalar_fact mut length = constant(in, out, count);
         if (rv.ty == null || !types.type_size_fits(rv.ty) || fir.type_owning(rv.ty)) {
             reject(out, ownership_api.incomplete_reason.unknown_effect);
             return;
         }
         u64 size = types.type_sizeof(rv.ty);
-        if (length.kind != ownership_api.fact_kind.exact || length.value < 0 || size == 0 ||
-            cast(length.value, u64) > 9223372036854775807 / size) {
+        if (length.kind == ownership_api.fact_kind.unknown &&
+            count.kind != fir.operand_kind.ok_const && direct(count.place) &&
+            !out->addressed[count.place.local]) {
+            length = ownership_api.scalar_fact{.kind = ownership_api.fact_kind.symbolic,
+                .symbol = next(out, ownership_api.entity_kind.value)};
+            out->scalars[count.place.local] = length;
+        }
+        if (length.kind == ownership_api.fact_kind.unknown ||
+            (length.kind == ownership_api.fact_kind.exact &&
+            (length.value < 0 || size == 0 ||
+            cast(length.value, u64) > 9223372036854775807 / size))) {
             reject(out, ownership_api.incomplete_reason.missing_correspondence);
             return;
         }
@@ -2399,8 +2604,8 @@ fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
             .kind = ownership_api.source_kind.heap, .validity = ownership_api.validity_kind.live,
             .allocation = req.allocation.key};
         req.source_key = req.fresh_source.key;
-        req.value = value(in, out, slot(in, dst), req.fresh_source.key,
-            req.allocation.key.ordinal, length.value, size, types.type_alignof(rv.ty));
+        req.value = allocation_value(in, out, slot(in, dst), req.fresh_source.key,
+            req.allocation.key.ordinal, length, size, types.type_alignof(rv.ty));
         out->origins[dst] = req.source_key;
         root(out, ownership_summary_model.symbolic_root{
             .key = next(out, ownership_api.entity_kind.template),
@@ -2412,7 +2617,8 @@ fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
         fir.operand pointer = fir.rvalue_operand(f, rv, 0);
         ownership_api.scalar_fact length = constant(in, out, fir.rvalue_operand(f, rv, 1));
         if (pointer.kind != fir.operand_kind.ok_move || !direct(pointer.place) ||
-            length.kind != ownership_api.fact_kind.exact || length.value < 0) {
+            length.kind == ownership_api.fact_kind.unknown ||
+            (length.kind == ownership_api.fact_kind.exact && length.value < 0)) {
             reject(out, ownership_api.incomplete_reason.unknown_effect);
             return;
         }
@@ -2424,8 +2630,13 @@ fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
             if (allocation.payload == ownership_summary_model.payload_kind.allocation &&
                 ownership_summary_model.same(allocation.effect.place.root, slot(in,
                     pointer.place.local).root) &&
-                allocation.value.span_length.kind == ownership_api.fact_kind.exact &&
-                allocation.value.span_length.value == length.value) { matched = true; }
+                ((allocation.value.span_length.kind == ownership_api.fact_kind.exact &&
+                length.kind == ownership_api.fact_kind.exact &&
+                allocation.value.span_length.value == length.value) ||
+                (allocation.value.span_length.kind == ownership_api.fact_kind.symbolic &&
+                length.kind == ownership_api.fact_kind.symbolic &&
+                ownership_summary_model.same(allocation.value.span_length.symbol,
+                    length.symbol)))) { matched = true; }
             effect += 1;
         }
         if (!matched) { reject(out, ownership_api.incomplete_reason.unknown_effect); return; }
@@ -2457,7 +2668,7 @@ fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
             stmt->exit_loc, stmt->stmt);
         if (!ownership_api.successful(out->proof)) { return; }
         if (high.kind != fir.operand_kind.ok_const && !add_read(in, out, high.place, block, gap,
-            2, stmt->loc, stmt->exit_loc, stmt->stmt)) { return; }
+            2, false, stmt->loc, stmt->exit_loc, stmt->stmt)) { return; }
         ownership_api.entity_id loaded_source = loaded.source;
         requirement(in, out, loaded_source, loaded.path, 0,
             ownership_summary_model.requirement_kind.live_source, 1);
@@ -2531,8 +2742,8 @@ fn assign(body_input* in, body_program mut* out, fir.statement* stmt, u32 block,
         while (i < rv.ops_len) {
             fir.operand input_operand = fir.rvalue_operand(f, rv, i);
             if (input_operand.kind != fir.operand_kind.ok_const &&
-                !add_read(in, out, input_operand.place, block, gap, i, stmt->loc, stmt->exit_loc,
-                    stmt->stmt)) { return; }
+                !add_read(in, out, input_operand.place, block, gap, i, false, stmt->loc,
+                    stmt->exit_loc, stmt->stmt)) { return; }
             i += 1;
         }
         out->scalars[dst] = ownership_api.scalar_fact{};
@@ -2629,7 +2840,7 @@ fn switch_condition_read(body_input* in, body_program mut* out, u32 block, u32 g
         base->kind == types.type_kind.k_string) && term->cond.place.proj_len == 1 &&
         fir.place_projection(in->function.body, term->cond.place, 0).kind ==
             fir.proj_kind.pj_field;
-    return header || add_read(in, out, term->cond.place, block, gap, 0, term->loc,
+    return header || add_read(in, out, term->cond.place, block, gap, 0, false, term->loc,
         term->exit_loc, term->stmt);
 }
 
@@ -3154,6 +3365,10 @@ fn extract(body_input* in) body_program {
                     .destination_owns = true, .leaves_empty_proved = true};
                 emit(in, &out, req, b, gap, 0, ownership_summary_model.payload_kind.release,
                     stmt->loc, stmt->exit_loc, stmt->stmt, req.source, selected.flow_path);
+            } else if (stmt->kind == fir.stmt_kind.st_dead &&
+                function_value(fir.local_at(f, stmt->local)->ty) &&
+                !out.addressed[stmt->local]) {
+                // A function value has no data storage to end.
             } else if (stmt->kind == fir.stmt_kind.st_dead) {
                 ownership_transfer.request mut req = basic(in, stmt->local, stmt->local,
                     ownership_transfer.action.dead);
@@ -3201,6 +3416,10 @@ fn extract(body_input* in) body_program {
     }
     if (out.held_inline_address) {
         reject(&out, ownership_api.incomplete_reason.unknown_effect);
+        return out;
+    }
+    if (out.aggregate_owner_boundary) {
+        reject(&out, ownership_api.incomplete_reason.missing_boundary);
         return out;
     }
     if (!sort_program(&out)) { return out; }

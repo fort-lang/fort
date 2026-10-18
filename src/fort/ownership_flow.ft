@@ -1679,12 +1679,23 @@ fn complete_return_relation(ownership_api.contents_fact value,
         same_entity(relation.value_version, value.value_version);
 }
 
+// A `void*` result has no pointee extent. Scalar contents there hold no relation, so the result
+// stays scalar: it publishes no relation and has no borrow to check (D17.14).
+fn scalar_pointer_result(program* in, ownership_api.contents_fact value) bool {
+    if (in->function == null || fir.local_count(in->function) == 0) { return false; }
+    types.node* ty = fir.local_at(in->function, 0)->ty;
+    return ty != null && ty->kind == types.type_kind.k_voidptr &&
+        value.kind == ownership_api.contents_kind.scalar && value.place.projections.len == 0 &&
+        value.borrows.len == 0;
+}
+
 fn check_returned_borrows(program* in, analysis mut* out, path* p,
     ownership_api.operation_position op) void {
     if (in->result_slot.kind == ownership_api.entity_kind.none) { return; }
     ownership_api.source_position at = return_source(in, op.block);
     bool mut found = false;
     bool mut reference_leaf = false;
+    bool mut scalar_result = false;
     u64 mut c = 0;
     while (c < p->facts.contents_len) {
         ownership_api.contents_fact value = p->facts.contents[c];
@@ -1696,6 +1707,11 @@ fn check_returned_borrows(program* in, analysis mut* out, path* p,
             }
             if (value.kind == ownership_api.contents_kind.scalar &&
                 value.place.projections.len > 0) {
+                c += 1;
+                continue;
+            }
+            if (scalar_pointer_result(in, value)) {
+                scalar_result = true;
                 c += 1;
                 continue;
             }
@@ -1746,7 +1762,7 @@ fn check_returned_borrows(program* in, analysis mut* out, path* p,
         }
         c += 1;
     }
-    if (!found || !reference_leaf) {
+    if (!found || (!reference_leaf && !scalar_result)) {
         note_failure(out, failure(in, op, at,
             ownership_api.event_kind.incomplete_proof,
             ownership_api.incomplete_reason.missing_correspondence,
