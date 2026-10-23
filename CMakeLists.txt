@@ -540,6 +540,22 @@ set_tests_properties(lang-json PROPERTIES LABELS "fort;integration")
 set_tests_properties(${FORT_MODULE_TESTS} lsp-modules lang lang-json
     PROPERTIES PROCESSORS ${FORT_LANG_JOBS})
 
+# The interface file of std against its sources (D9.11): two runs and a moved copy of the root
+# write the same bytes, every section checks, and each program of test/lang checks to the same
+# error lines against the interface as against the sources. test/library/checker.ft reads the
+# interface in place of `--use`, which no build reads yet.
+add_test(NAME library-interface
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/library/interface_test.py"
+            --fort "${FORT_COMPILER_BINARY}"
+            --std-dir "${FORT_STD_DIR}"
+            --cc "${FORT_TARGET_CC_PATH}"
+            -j "${FORT_LANG_JOBS}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(library-interface PROPERTIES
+    LABELS "fort;integration"
+    PROCESSORS ${FORT_LANG_JOBS}
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
 # The interactive test checks line flushing when stdout is a terminal.
 # Language tests capture stdout through a pipe and take the non-interactive path.
 # test/tty_test.py drives one program through a real pty and a pipe.

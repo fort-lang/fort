@@ -1,0 +1,799 @@
+/// Writes the interface file of a library (D9.11, module-system.md 10.3).
+///
+/// The file declares every module-level declaration of every module of the library, with no
+/// function body. It holds one section for each module, in byte order of the module path. A
+/// section holds one import for each module that its source module selects with an import or
+/// that one of its types or values names, in byte order of the path, and then each selected
+/// declaration in byte order of its name. A name of another module is qualified with the binding
+/// of its import. A constant has its folded value and a `mut` global the zero value of its type.
+/// The bytes are a function of the checked trees alone, so two runs write the same file. The
+/// writer reads the annotations of the checker and changes nothing. This module uses no
+/// function-pointer table.
+import ast;
+import check;
+import consts;
+import containers;
+import flt;
+import lexer;
+import modules;
+import prim;
+import scope;
+import types;
+import std.str;
+import std.strbuf;
+
+// The first non-zero capacity of a declaration list; growth doubles from there.
+u64 LIST_MIN_CAP = 16;
+
+// The separator of a module path and of a qualified name.
+char PATH_SEPARATOR = '.';
+
+// The bytes that stand in a literal as they are, and the hex digits of every other byte
+// (module-system.md 10.3, D2.8).
+u64 PRINTABLE_FIRST = 32;
+u64 PRINTABLE_LAST = 126;
+string HEX_DIGITS = "0123456789ABCDEF";
+u64 HEX_SHIFT = 4;
+u64 HEX_MASK = 15;
+
+// The bytes of a binding prefix and of a digit after it.
+char PREFIX_BYTE = '_';
+
+// The selected declarations of one module.
+struct decl_list {
+    ast.node* mut@ own items;
+    u64 len;
+}
+
+// The writer of one section: the module, the modules that its section imports and the prefix of
+// their bindings. The collection pass writes nothing that it keeps and records each module that
+// a type or a value names. The write pass then finds each of them among the imports.
+struct section {
+    check.checker* ck;
+    modules.module* m;
+    containers.str_vec imports; // module paths, in byte order and unique after the collection
+    strbuf.str_buf prefix;
+    bool collecting;
+}
+
+// ---- the declaration list ----------------------------------------------------------
+
+fn push_decl(decl_list mut* v, ast.node* decl) void {
+    if (v->len == v->items.len) {
+        u64 mut cap = LIST_MIN_CAP;
+        if (v->items.len >= cap) {
+            if (v->items.len > containers.U64_MAX / 2) {
+                panic("interface.push_decl: capacity overflow");
+            }
+            cap = v->items.len * 2;
+        }
+        ast.node* mut@ own bigger = new(ast.node*, cap);
+        u64 mut i = 0;
+        while (i < v->len) {
+            bigger[i] = v->items[i];
+            i += 1;
+        }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = decl;
+    v->len += 1;
+}
+
+fn free_decls(decl_list mut* v) void {
+    del(v->items);
+    v->len = 0;
+}
+
+// Appends each declaration of `list` that `$if` selects (D21.2), as the checker collects them.
+fn collect_list(ast.node* list, decl_list mut* out) void {
+    u64 mut i = 0;
+    while (list != null && i < ast.ast_len(list)) {
+        collect_decl(ast.ast_child(list, i), out);
+        i += 1;
+    }
+}
+
+fn collect_decl(ast.node* decl, decl_list mut* out) void {
+    ast.node* mut current = decl;
+    while (current->kind == ast.ast_kind.k_compile_if) {
+        if ((current->flags & ast.FLAG_IMPORT_SELECTOR) != 0) {
+            return;
+        }
+        if ((current->flags & ast.FLAG_SELECT_THEN) != 0) {
+            collect_list(current->b, out);
+            return;
+        }
+        if (current->c == null) {
+            return;
+        }
+        if (current->c->kind != ast.ast_kind.k_compile_if) {
+            collect_list(current->c, out);
+            return;
+        }
+        current = current->c;
+    }
+    if (current->kind == ast.ast_kind.k_fn_decl || current->kind == ast.ast_kind.k_struct_decl
+        || current->kind == ast.ast_kind.k_enum_decl || current->kind == ast.ast_kind.k_var_decl) {
+        push_decl(out, current);
+    }
+}
+
+// Orders the declarations by name, in byte order. The names of one module are distinct.
+fn sort_decls(decl_list mut* v) void {
+    u64 mut i = 1;
+    while (i < v->len) {
+        ast.node* decl = v->items[i];
+        u64 mut j = i;
+        while (j > 0 && str.cmp(decl->name, v->items[j - 1]->name) < 0) {
+            v->items[j] = v->items[j - 1];
+            j -= 1;
+        }
+        v->items[j] = decl;
+        i += 1;
+    }
+}
+
+// Orders the module paths in byte order.
+fn sort_paths(containers.str_vec mut* v) void {
+    u64 mut i = 1;
+    while (i < v->len) {
+        string path = containers.str_at(v, i);
+        u64 mut j = i;
+        while (j > 0 && str.cmp(path, containers.str_at(v, j - 1)) < 0) {
+            containers.str_set(v, j, containers.str_at(v, j - 1));
+            j -= 1;
+        }
+        containers.str_set(v, j, path);
+        i += 1;
+    }
+}
+
+// ---- imports and bindings ----------------------------------------------------------
+
+// Whether `name` starts with `prefix` followed by a decimal digit.
+fn is_binding_name(string name, string prefix) bool {
+    return name.len > prefix.len && str.starts_with(name, prefix)
+        && name[prefix.len] >= '0' && name[prefix.len] <= '9';
+}
+
+// The binding prefix of the section: the shortest run of `_` such that no declaration name of
+// the module starts with it and a decimal digit.
+fn choose_prefix(decl_list* decls, strbuf.str_buf mut* out) void {
+    strbuf.clear(out);
+    strbuf.push(out, PREFIX_BYTE);
+    bool mut taken = true;
+    while (taken) {
+        taken = false;
+        u64 mut i = 0;
+        while (i < decls->len) {
+            if (is_binding_name(decls->items[i]->name, strbuf.view(out))) {
+                taken = true;
+            }
+            i += 1;
+        }
+        if (taken) {
+            strbuf.push(out, PREFIX_BYTE);
+        }
+    }
+}
+
+fn has_import(section* sec, string path) bool {
+    u64 mut i = 0;
+    while (i < sec->imports.len) {
+        if (containers.str_at(&sec->imports, i) == path) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+// Records that the section names the module `path`. The module of the section needs no import.
+fn add_import(section mut* sec, string path) void {
+    if (path == sec->m->path || has_import(sec, path)) {
+        return;
+    }
+    containers.str_push(&sec->imports, path);
+}
+
+// Records the module of each import binding of the source module: a module import gives its
+// module, and a symbol import gives the module that declares the symbol (D9.3, D21.3). Only a
+// selected import binds a name, so the namespace holds exactly the selected ones.
+fn add_source_imports(section mut* sec) void {
+    scope.scope* names = &sec->m->names;
+    u64 mut i = 0;
+    while (i < scope.count(names)) {
+        scope.binding* b = scope.at(names, i);
+        i += 1;
+        if (b->kind == scope.bind_kind.b_module && b->module != null) {
+            add_import(sec, cast(b->module, modules.module*)->path);
+        } else if (b->kind == scope.bind_kind.b_symbol && b->to != null && b->to->node != null
+                   && b->to->node->sym != null && b->to->node->sym->owner != null) {
+            add_import(sec, b->to->node->sym->owner->name);
+        }
+    }
+}
+
+// Writes `<binding>.` for a name of the module `path`, and nothing for a name of the module of
+// the section. The collection pass records the module instead.
+fn write_qualifier(section mut* sec, string path, strbuf.str_buf mut* out) void {
+    if (path == sec->m->path) {
+        return;
+    }
+    if (sec->collecting) {
+        add_import(sec, path);
+        return;
+    }
+    u64 mut i = 0;
+    while (i < sec->imports.len) {
+        if (containers.str_at(&sec->imports, i) == path) {
+            strbuf.append(out, strbuf.view(&sec->prefix));
+            strbuf.append_u64(out, i);
+            strbuf.push(out, PATH_SEPARATOR);
+            return;
+        }
+        i += 1;
+    }
+    panic("interface.write_qualifier: a module that the collection did not record");
+}
+
+// The module that declares the module-level symbol `s`.
+fn module_path(ast.sym* s) string {
+    if (s == null || s->owner == null || s->owner->kind != ast.sym_kind.s_module) {
+        panic("interface.module_path: a symbol with no module");
+    }
+    return s->owner->name;
+}
+
+// Writes the name of a module-level declaration, qualified when another module declares it.
+fn write_name(section mut* sec, ast.sym* s, strbuf.str_buf mut* out) void {
+    write_qualifier(sec, module_path(s), out);
+    strbuf.append(out, s->name);
+}
+
+// ---- types --------------------------------------------------------------------------
+
+// Writes the base of a type: a primitive, `void`, `string`, a struct or an enum with its
+// qualifier, or a function type whose parameters and result are written the same way.
+fn write_base(section mut* sec, types.node* t, strbuf.str_buf mut* out) void {
+    if (t->kind == types.type_kind.k_struct || t->kind == types.type_kind.k_enum) {
+        write_name(sec, check.nominal_sym(t), out);
+        return;
+    }
+    if (t->kind != types.type_kind.k_fn) {
+        types.spell_base(t, out);
+        return;
+    }
+    // the result comes last, as it does in a declaration
+    strbuf.append(out, "fn (");
+    u64 mut i = 0;
+    while (i < t->params.len) {
+        if (i > 0) {
+            strbuf.append(out, ", ");
+        }
+        write_type(sec, t->params[i], false, out);
+        i += 1;
+    }
+    strbuf.append(out, ") ");
+    if (t->is_noreturn) {
+        strbuf.append(out, "noreturn");
+    } else {
+        write_type(sec, t->elem, false, out);
+    }
+}
+
+// Writes a type with its markers and suffixes, `mut0` being the marker of the binding
+// (D5.3, D17.2). The spelling is the one of types.type_to_str_decl, with each struct and enum
+// qualified.
+fn write_type(section mut* sec, types.node* t, bool mut0, strbuf.str_buf mut* out) void {
+    types.spine mut sp = types.spine{};
+    types.spine_collect(&sp, t);
+    bool mut base_mut = mut0;
+    if (sp.n != 0) {
+        base_mut = types.is_ref_node(sp.nodes[sp.n - 1]) && sp.nodes[sp.n - 1]->is_mut;
+    }
+    if (sp.paren) {
+        strbuf.push(out, '(');
+        write_type(sec, sp.base, base_mut, out);
+        strbuf.push(out, ')');
+    } else {
+        bool group_fn = sp.base->kind == types.type_kind.k_fn && (sp.n != 0 || base_mut);
+        if (group_fn) {
+            strbuf.push(out, '(');
+        }
+        write_base(sec, sp.base, out);
+        if (group_fn) {
+            strbuf.push(out, ')');
+        }
+        // `string` takes `own` after the base type
+        if (sp.base->kind == types.type_kind.k_string && sp.base->is_own) {
+            strbuf.append(out, " own");
+        }
+        if (base_mut) {
+            strbuf.append(out, " mut");
+        }
+    }
+    types.spell_suffixes(&sp, mut0, out);
+}
+
+// ---- values -------------------------------------------------------------------------
+
+// Writes one byte of a char or string literal: 0x20 to 0x7E as it is, except `"`, `'` and `\`,
+// which take a backslash, and every other byte as `\xHH` with uppercase digits.
+fn write_byte(u64 code, strbuf.str_buf mut* out) void {
+    if (code == cast('"', u64) || code == cast('\'', u64) || code == cast('\\', u64)) {
+        strbuf.push(out, '\\');
+        strbuf.push(out, cast(code, char));
+        return;
+    }
+    if (code >= PRINTABLE_FIRST && code <= PRINTABLE_LAST) {
+        strbuf.push(out, cast(code, char));
+        return;
+    }
+    strbuf.append(out, "\\x");
+    strbuf.push(out, HEX_DIGITS[(code >> HEX_SHIFT) & HEX_MASK]);
+    strbuf.push(out, HEX_DIGITS[code & HEX_MASK]);
+}
+
+fn write_string(string bytes, strbuf.str_buf mut* out) void {
+    strbuf.push(out, '"');
+    u64 mut i = 0;
+    while (i < bytes.len) {
+        write_byte(cast(bytes[i], u64), out);
+        i += 1;
+    }
+    strbuf.push(out, '"');
+}
+
+// Writes a finite binary64 value as `<d>.<digits>e<exponent>`: the shortest decimal that reads
+// back (D18.2), with `-` before a negative value, negative zero included. 0.5 is `5.0e-1`.
+fn write_float(u64 bits, strbuf.str_buf mut* out) void {
+    if ((bits & flt.F64_SIGN) != 0) {
+        strbuf.push(out, '-');
+    }
+    strbuf.str_buf mut digits = strbuf.create();
+    defer strbuf.free(&digits);
+    i64 mut exponent = 0;
+    flt.shortest(bits, &digits, &exponent);
+    string d = strbuf.view(&digits);
+    strbuf.push(out, d[0]);
+    strbuf.push(out, '.');
+    if (d.len > 1) {
+        strbuf.append(out, d[1..d.len]);
+    } else {
+        strbuf.push(out, '0');
+    }
+    strbuf.push(out, 'e');
+    strbuf.append_i64(out, exponent);
+}
+
+// Writes an integer in decimal, with `-` before a negative value.
+fn write_int(consts.cval v, strbuf.str_buf mut* out) void {
+    if (v.neg) {
+        strbuf.push(out, '-');
+    }
+    strbuf.append_u64(out, v.mag);
+}
+
+// Writes an enum value: `<enum>.<member>` when a member has the value, else
+// `cast(<decimal>, <enum>)` (D3.9, D4.6).
+fn write_enum(section mut* sec, types.node* t, consts.cval v, strbuf.str_buf mut* out) void {
+    ast.sym* e = check.nominal_sym(t);
+    u64 mut i = 0;
+    while (i < ast.ast_len(e->node)) {
+        ast.node* member = ast.ast_child(e->node, i);
+        i += 1;
+        if (member->kind == ast.ast_kind.k_enum_member
+            && consts.cv_eq(check.check_node_value(sec->ck, member), v)) {
+            write_name(sec, e, out);
+            strbuf.push(out, PATH_SEPARATOR);
+            strbuf.append(out, member->name);
+            return;
+        }
+    }
+    strbuf.append(out, "cast(");
+    write_int(v, out);
+    strbuf.append(out, ", ");
+    write_name(sec, e, out);
+    strbuf.push(out, ')');
+}
+
+// Writes the zero value of `t`: `0`, `0.0e0`, `false`, `'\x00'`, `null` for a pointer or a
+// function pointer, and `{}` for an enum, a struct, an array, a span or a `string`.
+fn write_zero(types.node* t, strbuf.str_buf mut* out) void {
+    if (t->kind == types.type_kind.k_prim) {
+        if (prim.prim_is_float(t->prim)) {
+            strbuf.append(out, "0.0e0");
+        } else if (t->prim == prim.prim_kind.prim_bool) {
+            strbuf.append(out, "false");
+        } else if (t->prim == prim.prim_kind.prim_char) {
+            strbuf.append(out, "'\\x00'");
+        } else {
+            strbuf.push(out, '0');
+        }
+        return;
+    }
+    if (t->kind == types.type_kind.k_ptr || t->kind == types.type_kind.k_voidptr
+        || t->kind == types.type_kind.k_fn) {
+        strbuf.append(out, "null");
+        return;
+    }
+    strbuf.append(out, "{}");
+}
+
+// Writes a folded scalar of type `t` and returns whether it is the zero value. A negative zero
+// float is not the zero value.
+fn write_scalar(section mut* sec, types.node* t, consts.cval v, strbuf.str_buf mut* out) bool {
+    switch (v.kind) {
+    case consts.cval_kind.cv_str:
+        write_string(v.str, out);
+        return false;
+    case consts.cval_kind.cv_float:
+        write_float(consts.cv_float_bits(v), out);
+        return consts.cv_float_bits(v) == 0;
+    case consts.cval_kind.cv_bool:
+        if (v.mag != 0) {
+            strbuf.append(out, "true");
+        } else {
+            strbuf.append(out, "false");
+        }
+        return v.mag == 0;
+    case consts.cval_kind.cv_char:
+        strbuf.push(out, '\'');
+        write_byte(v.mag, out);
+        strbuf.push(out, '\'');
+        return v.mag == 0;
+    case consts.cval_kind.cv_null:
+        strbuf.append(out, "null");
+        return true;
+    case consts.cval_kind.cv_int:
+        if (t->kind == types.type_kind.k_enum) {
+            write_enum(sec, t, v, out);
+        } else if (t->kind == types.type_kind.k_prim && t->prim == prim.prim_kind.prim_char) {
+            strbuf.push(out, '\'');
+            write_byte(v.mag, out);
+            strbuf.push(out, '\'');
+        } else {
+            write_int(v, out);
+        }
+        return v.mag == 0;
+    case consts.cval_kind.cv_none:
+        break;
+    }
+    panic("interface.write_scalar: a constant with no value");
+}
+
+// The initializer of the field `field` in a designated struct literal, or null when the literal
+// omits the field.
+fn designated(ast.node* lit, string field) ast.node* {
+    u64 mut i = 0;
+    while (i < ast.ast_len(lit)) {
+        ast.node* d = ast.ast_child(lit, i);
+        if (d->kind == ast.ast_kind.k_designator && d->name == field) {
+            return d->a;
+        }
+        i += 1;
+    }
+    return null;
+}
+
+// Writes a constant struct as `{.<field> = <value>, ...}` with every field in declaration
+// order, or `{}` when each leaf is zero. A field that the literal omits is zero.
+fn write_struct(section mut* sec, types.node* t, ast.node* n, strbuf.str_buf mut* out) bool {
+    ast.sym* s = check.nominal_sym(t);
+    bool is_designated = (n->flags & ast.FLAG_DESIGNATED) != 0;
+    strbuf.str_buf mut buf = strbuf.create();
+    defer strbuf.free(&buf);
+    bool mut zero = true;
+    u64 mut at = 0;
+    strbuf.push(&buf, '{');
+    u64 mut i = 0;
+    while (i < ast.ast_len(s->node)) {
+        ast.node* f = ast.ast_child(s->node, i);
+        i += 1;
+        if (f->kind != ast.ast_kind.k_field_decl) {
+            continue;
+        }
+        if (at > 0) {
+            strbuf.append(&buf, ", ");
+        }
+        ast.node* mut v = null;
+        if (is_designated) {
+            v = designated(n, f->name);
+        } else if (at < ast.ast_len(n)) {
+            v = ast.ast_child(n, at);
+        }
+        strbuf.push(&buf, PATH_SEPARATOR);
+        strbuf.append(&buf, f->name);
+        strbuf.append(&buf, " = ");
+        if (!write_value(sec, f->ty, v, &buf)) {
+            zero = false;
+        }
+        at += 1;
+    }
+    strbuf.push(&buf, '}');
+    if (zero) {
+        strbuf.append(out, "{}");
+    } else {
+        strbuf.append(out, strbuf.view(&buf));
+    }
+    return zero;
+}
+
+// Writes a constant fixed array as `{<value>, ...}` with every element, or `{}` when each leaf
+// is zero.
+fn write_array(section mut* sec, types.node* t, ast.node* n, strbuf.str_buf mut* out) bool {
+    strbuf.str_buf mut buf = strbuf.create();
+    defer strbuf.free(&buf);
+    bool mut zero = true;
+    strbuf.push(&buf, '{');
+    u64 mut i = 0;
+    while (i < t->len) {
+        if (i > 0) {
+            strbuf.append(&buf, ", ");
+        }
+        ast.node* mut v = null;
+        if (i < ast.ast_len(n)) {
+            v = ast.ast_child(n, i);
+        }
+        if (!write_value(sec, t->elem, v, &buf)) {
+            zero = false;
+        }
+        i += 1;
+    }
+    strbuf.push(&buf, '}');
+    if (zero) {
+        strbuf.append(out, "{}");
+    } else {
+        strbuf.append(out, strbuf.view(&buf));
+    }
+    return zero;
+}
+
+/// Writes the folded value of the module-level initializer `n` of type `t` and returns whether
+/// it is the zero value (D4.4, D4.6). A null `n` is a member that a literal omits, which is zero:
+/// the zero value of its type, and for an enum the enum value 0.
+/// The forms are those of gen_data.const_value: a folded scalar or string, a brace initializer,
+/// a literal, a function, another constant, and the address of a module-level declaration.
+fn write_value(section mut* sec, types.node* t, ast.node* n, strbuf.str_buf mut* out) bool {
+    if (n == null) {
+        if (t->kind == types.type_kind.k_enum) {
+            // an omitted member is a value of the enum, which is written as a value
+            write_enum(sec, t, consts.cv_from_i64(0), out);
+        } else {
+            write_zero(t, out);
+        }
+        return true;
+    }
+    if ((n->ann & check.ANN_CONST) != 0) {
+        consts.cval v = check.check_node_value(sec->ck, n);
+        if (v.kind != consts.cval_kind.cv_none) {
+            return write_scalar(sec, t, v, out);
+        }
+    }
+    if (n->kind == ast.ast_kind.k_brace_init) {
+        if (ast.ast_len(n) == 0) {
+            write_zero(t, out);
+            return true;
+        }
+        if (t->kind == types.type_kind.k_array) {
+            return write_array(sec, t, n, out);
+        }
+        if (t->kind == types.type_kind.k_struct) {
+            return write_struct(sec, t, n, out);
+        }
+    } else if (n->kind == ast.ast_kind.k_struct_lit || n->kind == ast.ast_kind.k_array_lit) {
+        return write_value(sec, t, n->b, out);
+    } else if (n->kind == ast.ast_kind.k_ident || n->kind == ast.ast_kind.k_field) {
+        ast.sym* s = n->sym;
+        if (s != null && (s->kind == ast.sym_kind.s_fn || s->kind == ast.sym_kind.s_extern_fn)) {
+            write_name(sec, s, out);
+            return false;
+        }
+        if (s != null && s->kind == ast.sym_kind.s_const && s->node != null
+            && s->node->b != null) {
+            // the checker resolved the chain and refused a cycle
+            return write_value(sec, t, s->node->b, out);
+        }
+    } else if (n->kind == ast.ast_kind.k_unary
+               && cast(n->op, lexer.tok_kind) == lexer.tok_kind.amp && n->a != null
+               && n->a->sym != null && (n->a->sym->kind == ast.sym_kind.s_const
+                                        || n->a->sym->kind == ast.sym_kind.s_global)) {
+        strbuf.push(out, '&');
+        write_name(sec, n->a->sym, out);
+        return false;
+    }
+    panic("interface.write_value: an initializer that is no constant form");
+}
+
+// ---- declarations -------------------------------------------------------------------
+
+fn write_fn(section mut* sec, ast.node* decl, strbuf.str_buf mut* out) void {
+    ast.sym* s = decl->sym;
+    if ((decl->flags & ast.FLAG_EXTERN) != 0) {
+        strbuf.append(out, "extern ");
+    }
+    strbuf.append(out, "fn ");
+    strbuf.append(out, decl->name);
+    strbuf.push(out, '(');
+    u64 mut written = 0;
+    u64 mut i = 0;
+    while (i < ast.ast_len(decl)) {
+        ast.node* p = ast.ast_child(decl, i);
+        i += 1;
+        if (p->kind != ast.ast_kind.k_param) {
+            continue;
+        }
+        if (written > 0) {
+            strbuf.append(out, ", ");
+        }
+        write_type(sec, p->sym->ty, p->sym->mut0, out);
+        strbuf.push(out, ' ');
+        strbuf.append(out, p->name);
+        written += 1;
+    }
+    if ((decl->flags & ast.FLAG_VARIADIC) != 0) {
+        strbuf.append(out, ", ...");
+    }
+    strbuf.append(out, ") ");
+    if (s->ty->is_noreturn) {
+        strbuf.append(out, "noreturn");
+    } else {
+        write_type(sec, s->ty->elem, false, out);
+    }
+    strbuf.push(out, ';');
+}
+
+fn write_struct_decl(section mut* sec, ast.node* decl, strbuf.str_buf mut* out) void {
+    strbuf.append(out, "struct ");
+    strbuf.append(out, decl->name);
+    strbuf.append(out, " {");
+    u64 mut i = 0;
+    while (i < ast.ast_len(decl)) {
+        ast.node* f = ast.ast_child(decl, i);
+        i += 1;
+        if (f->kind != ast.ast_kind.k_field_decl) {
+            continue;
+        }
+        strbuf.push(out, ' ');
+        write_type(sec, f->ty, false, out);
+        strbuf.push(out, ' ');
+        strbuf.append(out, f->name);
+        strbuf.push(out, ';');
+    }
+    strbuf.append(out, " }");
+}
+
+fn write_enum_decl(section mut* sec, ast.node* decl, strbuf.str_buf mut* out) void {
+    strbuf.append(out, "enum ");
+    strbuf.append(out, decl->name);
+    strbuf.append(out, " {");
+    u64 mut written = 0;
+    u64 mut i = 0;
+    while (i < ast.ast_len(decl)) {
+        ast.node* member = ast.ast_child(decl, i);
+        i += 1;
+        if (member->kind != ast.ast_kind.k_enum_member) {
+            continue;
+        }
+        if (written > 0) {
+            strbuf.push(out, ',');
+        }
+        strbuf.push(out, ' ');
+        strbuf.append(out, member->name);
+        strbuf.append(out, " = ");
+        write_int(check.check_node_value(sec->ck, member), out);
+        written += 1;
+    }
+    strbuf.append(out, " }");
+}
+
+// A constant has its folded value. A `mut` global has the zero value of its type, because no
+// dependent reads its initializer, and its type holds the `mut` that the source writes (D7.10).
+fn write_var(section mut* sec, ast.node* decl, strbuf.str_buf mut* out) void {
+    ast.sym* s = decl->sym;
+    write_type(sec, s->ty, s->mut0, out);
+    strbuf.push(out, ' ');
+    strbuf.append(out, decl->name);
+    strbuf.append(out, " = ");
+    if (s->kind == ast.sym_kind.s_global) {
+        write_zero(s->ty, out);
+    } else {
+        write_value(sec, s->ty, decl->b, out);
+    }
+    strbuf.push(out, ';');
+}
+
+// Writes one declaration line, its newline included.
+fn write_decl(section mut* sec, ast.node* decl, strbuf.str_buf mut* out) void {
+    if (decl->sym == null || decl->sym->error) {
+        panic("interface.write_decl: a declaration that did not check");
+    }
+    switch (decl->kind) {
+    case ast.ast_kind.k_fn_decl:
+        write_fn(sec, decl, out);
+    case ast.ast_kind.k_struct_decl:
+        write_struct_decl(sec, decl, out);
+    case ast.ast_kind.k_enum_decl:
+        write_enum_decl(sec, decl, out);
+    default:
+        write_var(sec, decl, out);
+    }
+    strbuf.push(out, '\n');
+}
+
+// ---- sections and the file -----------------------------------------------------------
+
+// Writes the section of the module `m`: its `//! module` line, its imports and its declarations.
+fn write_section(check.checker* ck, modules.module* m, strbuf.str_buf mut* out) void {
+    decl_list mut decls = decl_list{};
+    defer free_decls(&decls);
+    collect_list(m->ast, &decls);
+    sort_decls(&decls);
+    section mut sec = section{};
+    sec.ck = ck;
+    sec.m = m;
+    defer containers.str_free(&sec.imports);
+    defer strbuf.free(&sec.prefix);
+    choose_prefix(&decls, &sec.prefix);
+    add_source_imports(&sec);
+    // the collection pass: each module that a type or a value names
+    sec.collecting = true;
+    strbuf.str_buf mut scratch = strbuf.create();
+    defer strbuf.free(&scratch);
+    u64 mut i = 0;
+    while (i < decls.len) {
+        write_decl(&sec, decls.items[i], &scratch);
+        i += 1;
+    }
+    sort_paths(&sec.imports);
+    sec.collecting = false;
+    strbuf.append(out, modules.INTERFACE_SECTION);
+    strbuf.append(out, m->path);
+    strbuf.push(out, '\n');
+    i = 0;
+    while (i < sec.imports.len) {
+        strbuf.append(out, "import ");
+        strbuf.append(out, containers.str_at(&sec.imports, i));
+        strbuf.append(out, " as ");
+        strbuf.append(out, strbuf.view(&sec.prefix));
+        strbuf.append_u64(out, i);
+        strbuf.append(out, ";\n");
+        i += 1;
+    }
+    i = 0;
+    while (i < decls.len) {
+        write_decl(&sec, decls.items[i], out);
+        i += 1;
+    }
+}
+
+/// Appends the interface file of the library `name` to `out` (D9.11, module-system.md 10.3).
+/// The set holds the closure of a `--lib` build and the checker has checked it with no error.
+/// The modules of the library are the modules of the closure whose path starts with `<name>.`
+/// and that no interface file declares.
+fn write(check.checker* ck, modules.module_set* set, string name, strbuf.str_buf mut* out) void {
+    containers.str_vec mut paths = containers.str_create();
+    defer containers.str_free(&paths);
+    u64 mut i = 0;
+    while (i < modules.count(set)) {
+        modules.module* m = modules.at(set, i);
+        i += 1;
+        if (!m->interface && m->path.len > name.len && str.starts_with(m->path, name)
+            && m->path[name.len] == PATH_SEPARATOR) {
+            containers.str_push(&paths, m->path);
+        }
+    }
+    sort_paths(&paths);
+    strbuf.append(out, modules.INTERFACE_FORMAT);
+    strbuf.push(out, '\n');
+    strbuf.append(out, modules.INTERFACE_LIBRARY);
+    strbuf.append(out, name);
+    strbuf.push(out, '\n');
+    i = 0;
+    while (i < paths.len) {
+        write_section(ck, modules.find(set, containers.str_at(&paths, i)), out);
+        i += 1;
+    }
+}

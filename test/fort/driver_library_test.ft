@@ -1,0 +1,385 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| usage ok
+//| root ok
+//| build ok
+//| ok
+/// Checks `--lib <name> <root> --emit-interface` in src/fort/driver.ft (D9.11, toolchain.md 1
+/// and 2.1): the usage errors of a library build, a root that cannot be read or holds no module,
+/// a compile error, and the interface file on stdout, which two runs write alike.
+import capture;
+import driver;
+import library_env;
+import std.io;
+import std.libc;
+import std.str;
+import std.strbuf;
+import std.sys;
+
+// The exit statuses, as this suite spells them.
+i32 EXIT_OK = 0;
+i32 EXIT_COMPILE_ERROR = 1;
+i32 EXIT_USAGE = 2;
+
+// The status of `fort <args>`, with stdout in `out.txt` and stderr in `err.txt` of the working
+// directory.
+fn run(string@ args) i32 {
+    i32 saved_out = capture.begin(io.STDOUT, "out.txt");
+    i32 saved_err = capture.begin(io.STDERR, "err.txt");
+    i32 status = driver.run(args);
+    capture.end(io.STDERR, saved_err);
+    capture.end(io.STDOUT, saved_out);
+    return status;
+}
+
+// Whether the last run's stderr is `text`.
+fn err_is(string text) bool {
+    string own got = capture.text("err.txt");
+    defer del(got);
+    if (got != text) {
+        print(got);
+    }
+    return got == text;
+}
+
+// Whether the last run's stderr holds `text`.
+fn err_has(string text) bool {
+    string own got = capture.text("err.txt");
+    defer del(got);
+    return str.find(got, text) >= 0;
+}
+
+fn out_is_empty() bool {
+    string own got = capture.text("out.txt");
+    defer del(got);
+    return got.len == 0;
+}
+
+fn make_dir(string path) void {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    assert(libc.mkdir(c_path.ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
+}
+
+fn write_file(string path, string text) void {
+    assert(io.write_file(path, cast(text, u8@)));
+}
+
+// A module of the library root: an import, a folded constant and a function.
+string IO_MODULE = "import std.rt;\ni32 A = rt.B + 1;\nfn f(i32 x) i32 {\n    return x;\n}\n";
+
+// A library root `std` named `root`, with a runtime and one more module.
+fn write_root() void {
+    make_dir("root");
+    write_file("root/rt.ft", "i32 B = 1;\n");
+    write_file("root/io.ft", IO_MODULE);
+    // `fn` is a keyword, so this file is no module
+    write_file("root/fn.ft", "i32 C = 1;\n");
+}
+
+// ---- usage errors -----------------------------------------------------------------
+
+// The usage line that follows each usage error.
+string USAGE_LINE = "\nusage: fort [options] entry.ft\n";
+
+// Whether `fort <args>` is the usage error `message`, which the usage line follows, with
+// nothing on stdout.
+fn usage_error_is(string@ args, string message) bool {
+    i32 status = run(args);
+    string own got = capture.text("err.txt");
+    defer del(got);
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    strbuf.append(&want, "fort: error: ");
+    strbuf.append(&want, message);
+    strbuf.append(&want, USAGE_LINE);
+    bool ok = status == EXIT_USAGE && got == strbuf.view(&want) && out_is_empty();
+    if (!ok) {
+        print(got);
+    }
+    return ok;
+}
+
+fn the_usage_errors_of_a_library_build() void {
+    string[2] alone = {"fort", "--emit-interface"};
+    assert(usage_error_is(alone[..], "--emit-interface requires --lib"));
+    string[3] short = {"fort", "--lib", "std"};
+    assert(usage_error_is(short[..],
+                          "missing argument for option '--lib'"));
+    string[6] entry = {"fort", "--lib", "std", "root", "--emit-interface", "main.ft"};
+    assert(usage_error_is(entry[..], "unexpected argument 'main.ft'"));
+    string[5] name = {"fort", "--lib", "9x", "root", "--emit-interface"};
+    assert(usage_error_is(name[..], "invalid library name '9x'"));
+    string[5] keyword = {"fort", "--lib", "struct", "root", "--emit-interface"};
+    assert(usage_error_is(keyword[..],
+                          "invalid library name 'struct'"));
+    strbuf.str_buf mut both = strbuf.create();
+    defer strbuf.free(&both);
+    strbuf.append(&both, "--lib does not combine with -I, -l, --check, --json, --index, ");
+    strbuf.append(&both, "--tokens, --ast or a --fir option");
+    string alone_lib = strbuf.view(&both);
+    string[6] check = {"fort", "--lib", "std", "root", "--emit-interface", "--check"};
+    assert(usage_error_is(check[..], alone_lib));
+    string[7] include = {"fort", "--lib", "std", "root", "--emit-interface", "-I", "x"};
+    assert(usage_error_is(include[..], alone_lib));
+    string[6] link = {"fort", "--lib", "std", "root", "--emit-interface", "-lm"};
+    assert(usage_error_is(link[..], alone_lib));
+    string[6] fir = {"fort", "--lib", "std", "root", "--emit-interface", "--fir"};
+    assert(usage_error_is(fir[..], alone_lib));
+    // --overwrite-report and --index each imply --check, which a library build does not take
+    string[6] report = {"fort", "--lib", "std", "root", "--emit-interface", "--overwrite-report"};
+    assert(usage_error_is(report[..], alone_lib));
+    string[6] index = {"fort", "--lib", "std", "root", "--emit-interface", "--index"};
+    assert(usage_error_is(index[..], alone_lib));
+    string[6] json = {"fort", "--lib", "std", "root", "--emit-interface", "--json"};
+    assert(usage_error_is(json[..], alone_lib));
+    string[6] tokens = {"fort", "--tokens", "--lib", "std", "root", "--emit-interface"};
+    assert(usage_error_is(tokens[..], alone_lib));
+    string[6] stats = {"fort", "--lib", "std", "root", "--emit-interface", "--fir-stats"};
+    assert(usage_error_is(stats[..], alone_lib));
+    string[6] ir = {"fort", "--lib", "std", "root", "--emit-interface", "-S"};
+    assert(usage_error_is(ir[..],
+                          "--emit-interface does not combine with -S, -c or -o"));
+    string[6] object = {"fort", "--lib", "std", "root", "--emit-interface", "-c"};
+    assert(usage_error_is(object[..],
+                          "--emit-interface does not combine with -S, -c or -o"));
+    string[5] other = {"fort", "--lib", "geom", "root", "--emit-interface"};
+    assert(usage_error_is(other[..],
+                          "a library build needs --use std=<path>"));
+    string[4] artifact = {"fort", "--lib", "std", "root"};
+    assert(usage_error_is(artifact[..],
+                          "--lib writes no artifact yet: give --emit-interface"));
+}
+
+// ---- the root ----------------------------------------------------------------------
+
+fn a_root_that_cannot_be_read_is_exit_two() void {
+    string[5] args = {"fort", "--lib", "std", "missing", "--emit-interface"};
+    assert(run(args[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: cannot read library root 'missing': No such file or directory\n"));
+    assert(out_is_empty());
+}
+
+fn a_root_with_no_module_is_exit_two() void {
+    make_dir("empty");
+    write_file("empty/notes.txt", "text\n");
+    string[5] args = {"fort", "--lib", "std", "empty", "--emit-interface"};
+    assert(run(args[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: library root 'empty' holds no module\n"));
+    assert(out_is_empty());
+}
+
+fn an_unsupported_target_is_exit_two() void {
+    write_root();
+    string[7] args = {"fort", "--lib", "std", "root", "--emit-interface", "--target", "pdp11"};
+    assert(run(args[..]) == EXIT_USAGE);
+    assert(err_has("unsupported target 'pdp11'"));
+}
+
+// ---- the build ---------------------------------------------------------------------
+
+fn a_compile_error_in_a_module_is_exit_one() void {
+    make_dir("broken");
+    write_file("broken/rt.ft", "i32 B = 1;\n");
+    write_file("broken/io.ft", "i32 A = \"x\";\n");
+    string[5] args = {"fort", "--lib", "std", "broken", "--emit-interface"};
+    assert(run(args[..]) == EXIT_COMPILE_ERROR);
+    assert(err_has("broken/io.ft:1:9: error: the initializer expects i32, not string"));
+    assert(out_is_empty());
+}
+
+fn the_interface_file_is_written_to_stdout_alike_twice() void {
+    write_root();
+    string[5] args = {"fort", "--lib", "std", "root", "--emit-interface"};
+    assert(run(args[..]) == EXIT_OK);
+    assert(err_is(""));
+    string own first = capture.text("out.txt");
+    defer del(first);
+    // `== ` stands for the directive mark, which the harness allows after code only for an error
+    string[8] want = {
+        "== fort interface 1",
+        "== library std",
+        "== module std.io",
+        "import std.rt as _0;",
+        "i32 A = 2;",
+        "fn f(i32 x) i32;",
+        "== module std.rt",
+        "i32 B = 1;",
+    };
+    assert(library_env.same_lines(first, want[..]));
+    assert(run(args[..]) == EXIT_OK);
+    string own second = capture.text("out.txt");
+    defer del(second);
+    assert(first == second);
+}
+
+// A library whose interface depends on the configuration map: a `$if` on the target and one on a
+// key of `--cfg`, which each run sets, because a key that is not set is an error.
+fn write_selected_root() void {
+    make_dir("selected");
+    write_file("selected/rt.ft", "i32 B = 1;\n");
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, SELECTED_OS);
+    strbuf.append(&b, SELECTED_MODE);
+    write_file("selected/os.ft", strbuf.view(&b));
+}
+
+// The two lines of the module `std.os` of that library.
+string SELECTED_OS = "$if ($cfg(target_os) == \"linux\") { i32 OS = 1; } else { i32 OS = 2; }\n";
+string SELECTED_MODE = "$if ($cfg(mode) == \"fast\") { i32 MODE = 3; }\n";
+
+// The interface that `fort --lib std selected --emit-interface <more>` writes.
+fn selected_interface(string@ more) string own {
+    string[5] head = {"fort", "--lib", "std", "selected", "--emit-interface"};
+    string[12] mut args = {};
+    u64 mut n = 0;
+    while (n < head.len) {
+        args[n] = head[n];
+        n += 1;
+    }
+    u64 mut i = 0;
+    while (i < more.len) {
+        args[n] = more[i];
+        n += 1;
+        i += 1;
+    }
+    assert(run(args[0..n]) == EXIT_OK);
+    return capture.text("out.txt");
+}
+
+fn the_interface_follows_the_target_and_the_configuration() void {
+    write_selected_root();
+    // each run names its target, so the cases hold on both hosts
+    string[4] linux_target = {"--target", "x86_64-linux-gnu", "--cfg", "mode=slow"};
+    string own linux = selected_interface(linux_target[..]);
+    defer del(linux);
+    assert(str.find(linux, "\ni32 OS = 1;\n") >= 0);
+    assert(str.find(linux, "MODE") < 0);
+    string[4] mac = {"--target", "arm64-apple-macosx11.0.0", "--cfg", "mode=slow"};
+    string own macos = selected_interface(mac[..]);
+    defer del(macos);
+    assert(str.find(macos, "\ni32 OS = 2;\n") >= 0);
+    string[4] fast = {"--target", "x86_64-linux-gnu", "--cfg", "mode=fast"};
+    string own configured = selected_interface(fast[..]);
+    defer del(configured);
+    assert(str.find(configured, "\ni32 MODE = 3;\ni32 OS = 1;\n") >= 0);
+    // a build mode changes no byte of the interface (module-system.md 10.3)
+    string[6] modes = {"--target", "x86_64-linux-gnu", "--cfg", "mode=slow", "--release",
+                       "--no-bounds-check"};
+    string own released = selected_interface(modes[..]);
+    defer del(released);
+    assert(released == linux);
+}
+
+// ---- the closure of the build ------------------------------------------------------
+
+fn each_module_with_an_error_reports_it() void {
+    make_dir("twice");
+    write_file("twice/rt.ft", "i32 B = 1;\n");
+    write_file("twice/a.ft", "i32 A = \"x\";\n");
+    write_file("twice/b.ft", "bool C = 1;\n");
+    string[5] args = {"fort", "--lib", "std", "twice", "--emit-interface"};
+    assert(run(args[..]) == EXIT_COMPILE_ERROR);
+    assert(err_has("twice/a.ft:1:9: error: the initializer expects i32, not string"));
+    assert(err_has("twice/b.ft:1:10: error:"));
+    // the text form quotes the line under each header line
+    assert(err_has("    i32 A = \"x\";\n"));
+    assert(out_is_empty());
+}
+
+fn a_path_in_no_library_is_a_compile_error_of_the_build() void {
+    make_dir("lonely");
+    write_file("lonely/rt.ft", "import util.strings;\n");
+    string[5] args = {"fort", "--lib", "std", "lonely", "--emit-interface"};
+    assert(run(args[..]) == EXIT_COMPILE_ERROR);
+    assert(err_has("lonely/rt.ft:1:1: error: module 'util.strings' is in no library"));
+}
+
+fn a_nested_module_takes_the_path_of_its_directories() void {
+    make_dir("nested");
+    make_dir("nested/digest");
+    make_dir("nested/my-dir");
+    write_file("nested/rt.ft", "i32 B = 1;\n");
+    write_file("nested/digest/sum.ft", "import std.rt;\ni32 S = rt.B;\n");
+    write_file("nested/my-dir/x.ft", "i32 X = 1;\n");
+    write_file("nested/notes.txt", "text\n");
+    char mut@ own target = str.to_cstr("rt.ft");
+    defer del(target);
+    char mut@ own path = str.to_cstr("nested/copy.ft");
+    defer del(path);
+    assert(libc.symlink(target.ptr, path.ptr) == 0);
+    string[5] args = {"fort", "--lib", "std", "nested/", "--emit-interface"};
+    assert(run(args[..]) == EXIT_OK);
+    string own got = capture.text("out.txt");
+    defer del(got);
+    // two modules: no `my-dir`, no text file and no symbolic link
+    assert(library_env.line_count(got) == 7);
+    assert(library_env.holds(got, "module std.digest.sum\nimport std.rt as _0;\ni32 S = 1;\n"));
+    assert(str.find(got, "copy") < 0 && str.find(got, "my-dir") < 0);
+}
+
+fn an_output_option_is_a_usage_error_and_the_std_dir_is_unused() void {
+    write_root();
+    string[7] output = {"fort", "--lib", "std", "root", "--emit-interface", "-o", "out.flib"};
+    assert(usage_error_is(output[..], "--emit-interface does not combine with -S, -c or -o"));
+    assert(io.open_read("out.flib") < 0);
+    string[7] args = {"fort", "--lib", "std", "root", "--emit-interface", "--std-dir", "nowhere"};
+    assert(run(args[..]) == EXIT_OK);
+    assert(err_is(""));
+    string own got = capture.text("out.txt");
+    defer del(got);
+    assert(str.starts_with(got, "/"));
+}
+
+fn a_root_without_read_permission_is_exit_two() void {
+    make_dir("closed");
+    write_file("closed/rt.ft", "i32 B = 1;\n");
+    char mut@ own c_path = str.to_cstr("closed");
+    defer del(c_path);
+    assert(libc.chmod(c_path.ptr, 0) == 0);
+    string[5] args = {"fort", "--lib", "std", "closed", "--emit-interface"};
+    i32 status = run(args[..]);
+    assert(libc.chmod(c_path.ptr, 0o700) == 0);
+    string own got = capture.text("err.txt");
+    defer del(got);
+    if (status == EXIT_OK) {
+        // a process that reads every directory, such as root, reads this one too
+        return;
+    }
+    assert(status == EXIT_USAGE);
+    assert(got == "fort: error: cannot read library root 'closed': Permission denied\n");
+}
+
+// `-o` refuses the build wherever it stands on the command line, and with any file name.
+fn an_output_option_anywhere_is_a_usage_error() void {
+    string message = "--emit-interface does not combine with -S, -c or -o";
+    string[7] first = {"fort", "-o", "x", "--lib", "std", "root", "--emit-interface"};
+    assert(usage_error_is(first[..], message));
+    string[7] empty = {"fort", "--emit-interface", "-o", "", "--lib", "std", "root"};
+    assert(usage_error_is(empty[..], message));
+    string[8] both = {"fort", "--lib", "std", "root", "--emit-interface", "-S", "-o", "x.ll"};
+    assert(usage_error_is(both[..], message));
+}
+
+fn main() i32 {
+    the_usage_errors_of_a_library_build();
+    println("usage ok");
+    a_root_that_cannot_be_read_is_exit_two();
+    a_root_with_no_module_is_exit_two();
+    an_unsupported_target_is_exit_two();
+    a_root_without_read_permission_is_exit_two();
+    println("root ok");
+    a_compile_error_in_a_module_is_exit_one();
+    the_interface_file_is_written_to_stdout_alike_twice();
+    the_interface_follows_the_target_and_the_configuration();
+    each_module_with_an_error_reports_it();
+    a_path_in_no_library_is_a_compile_error_of_the_build();
+    a_nested_module_takes_the_path_of_its_directories();
+    an_output_option_is_a_usage_error_and_the_std_dir_is_unused();
+    an_output_option_anywhere_is_a_usage_error();
+    println("build ok");
+    println("ok");
+    return 0;
+}

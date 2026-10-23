@@ -5,6 +5,7 @@ import comptime;
 import containers;
 import diag;
 import lexer;
+import library.tree;
 import parser;
 import scope;
 import session;
@@ -13,6 +14,7 @@ import std.os;
 import std.str;
 import std.strbuf;
 import std.strmap;
+import std.vec;
 
 // The buffer size getcwd is given. A working directory above this size makes
 // getcwd fail, and a relative path then goes to realpath as it is.
@@ -42,6 +44,12 @@ string RUNTIME_FILE = "rt.ft";
 // there.
 u64 VEC_MIN_CAP = 8;
 
+// The lines that an interface file starts with and the marker of the first line of each section
+// (module-system.md 10.3). The `library` line ends with the name of the library.
+string INTERFACE_FORMAT = "//! fort interface 1";
+string INTERFACE_LIBRARY = "//! library ";
+string INTERFACE_SECTION = "//! module ";
+
 // Where a module stands in the walk of the import closure.
 enum module_state {
     m_loading, // on the current import path: reaching it again is a cycle
@@ -59,6 +67,7 @@ struct module {
     bool parsed;       // no diagnostic was reported while lexing and parsing it
     bool selected;     // compile-time selection completed without a diagnostic
     bool entry; // the module named on the command line
+    bool interface; // a section of the interface file of a used library (D9.11)
     module_state state;
 }
 
@@ -71,6 +80,29 @@ struct owned_modules {
 // Stores the dependency order or the import path being walked.
 struct module_vec {
     module mut* mut@ own items;
+    u64 len;
+}
+
+/// One used library: its interface file, lexed once, and the sections of the file
+/// (module-system.md 10.2 and 10.3). Section `k` is the module `paths[k]`, whose tokens are
+/// `toks[firsts[k]..ends[k]]`. A section becomes a module of the closure when an import reaches
+/// it, and never before.
+struct used_library {
+    string name; // the name of the library, the first segment of each of its paths
+    string file; // the interface file, as diagnostics name it
+    string source; // the bytes of the file, which the session keeps
+    lexer.tok_vec toks; // the tokens of the whole file, the end of file included
+    containers.str_vec paths; // the module path of each section, in file order
+    strmap.str_map sections; // module path -> section index
+    vec.int_vec firsts; // the first token of each section
+    vec.int_vec ends; // the token after the last token of each section
+    vec.int_vec lines; // the line of the `//! module` line of each section
+    vec.int_vec offsets; // the byte offset of that line
+}
+
+// Stores the used libraries at stable addresses, in the order the caller added them.
+struct used_libraries {
+    used_library mut* own mut@ own items;
     u64 len;
 }
 
@@ -90,6 +122,12 @@ struct module_set {
     ast.arena arena;           // syntax trees for the module set
     strbuf.str_buf msg;        // the message under construction
     bool stopped; // a module has errors: read no further file
+    // ---- a library build (D9.11) ----
+    string library; // the name of the library that `--lib` builds; "" in every other build
+    string library_root; // the root directory of that library
+    strmap.str_map listed; // module path -> position in `listed_files`: the modules of the walk
+    containers.str_vec listed_files; // the file of each listed module
+    used_libraries used; // the libraries that `--use` names
 }
 
 // ---- the module vectors ------------------------------------------------------------
@@ -284,6 +322,26 @@ fn is_std_path(ast.node* path, u64 n) bool {
     return n > 0 && segment_at(path, 0) == STD_SEGMENT;
 }
 
+// Whether the path begins with the name of the library that `--lib` builds. Such a path resolves
+// only among the modules of the walk (module-system.md 10.2 item 2).
+fn is_library_path(module_set* set, ast.node* path, u64 n) bool {
+    return set->library.len > 0 && n > 0 && segment_at(path, 0) == set->library;
+}
+
+// The first `n` segments joined with `.` in `out`, without interning them.
+fn path_view(strbuf.str_buf mut* out, ast.node* path, u64 n) string {
+    strbuf.clear(out);
+    u64 mut i = 0;
+    while (i < n) {
+        if (i > 0) {
+            strbuf.push(out, PATH_SEPARATOR);
+        }
+        strbuf.append(out, segment_at(path, i));
+        i += 1;
+    }
+    return strbuf.view(out);
+}
+
 // The number of files the first `n` segments may name, one per search root. A
 // A path that starts with `std` has one candidate in the standard library
 // directory. `std` names that directory, so `import std;` names no file. Other
@@ -291,6 +349,13 @@ fn is_std_path(ast.node* path, u64 n) bool {
 // library directory.
 fn candidate_count(module_set* set, ast.node* path, u64 n) u64 {
     if (n == 0) {
+        return 0;
+    }
+    if (is_library_path(set, path, n)) {
+        // `<name>` alone is no module of the library
+        if (n >= 2) {
+            return 1;
+        }
         return 0;
     }
     if (is_std_path(path, n)) {
@@ -305,6 +370,10 @@ fn candidate_count(module_set* set, ast.node* path, u64 n) u64 {
 // The `i`-th candidate file of the first `n` segments, the roots in order,
 // built into `out`.
 fn candidate_at(module_set* set, strbuf.str_buf mut* out, ast.node* path, u64 n, u64 i) string {
+    if (is_library_path(set, path, n)) {
+        // `geom.shape.circle` is `<root>/shape/circle.ft`
+        return file_of(out, set->library_root, path, 1, n);
+    }
     if (is_std_path(path, n)) {
         // `std.io` is `<std>/io.ft`
         return file_of(out, set->std_dir, path, 1, n);
@@ -332,6 +401,15 @@ fn find_file(module_set mut* set, ast.node* path, u64 n, string mut* out) bool {
     u64 count = candidate_count(set, path, n);
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
+    if (is_library_path(set, path, n)) {
+        // The walk listed every module, so no file outside the list is opened.
+        i64 mut listed = 0;
+        if (count == 0 || !strmap.get(&set->listed, path_view(&b, path, n), &listed)) {
+            return false;
+        }
+        *out = containers.str_at(&set->listed_files, cast(listed, u64));
+        return true;
+    }
     u64 mut i = 0;
     while (i < count) {
         string file = candidate_at(set, &b, path, n, i);
@@ -406,19 +484,56 @@ fn note_candidates(session.session mut* s, module_set mut* set, diag.loc at, ast
     }
 }
 
-// `module 'util.strings' not found`: no file exists for either reading.
-fn error_not_found(session.session mut* s, module_set mut* set, diag.loc at, ast.node* path,
-                        u64 n) void {
+// `module 'util.strings' not found`, the message alone.
+fn error_missing(session.session mut* s, module_set mut* set, diag.loc at, ast.node* path,
+                 u64 n) void {
     string name = path_text(set, path, n);
     msg_begin(set);
     msg_str(set, "module ");
     msg_quote(set, name);
     msg_str(set, " not found");
     diag.error(session.diags(s), at, msg_end(set));
+}
+
+// `module 'geom.a.b' not found` for a path of the used library `lib`, with
+// `note: looked for <module> in library '<name>'` once for each reading (module-system.md 13). A
+// prefix that is the name of the library alone is no module, so it gives no reading.
+fn error_not_in_library(session.session mut* s, module_set mut* set, diag.loc at, ast.node* path,
+                        u64 n, used_library* lib) void {
+    error_missing(s, set, at, path, n);
+    u64 mut reading = n;
+    while (reading >= 2 && reading + 1 >= n) {
+        string module = path_text(set, path, reading);
+        msg_begin(set);
+        msg_str(set, "looked for ");
+        msg_str(set, module);
+        msg_str(set, " in library ");
+        msg_quote(set, lib->name);
+        diag.note(session.diags(s), at, msg_end(set));
+        reading -= 1;
+    }
+}
+
+// `module 'util.strings' not found`: no file exists for either reading.
+fn error_not_found(session.session mut* s, module_set mut* set, diag.loc at, ast.node* path,
+                        u64 n) void {
+    error_missing(s, set, at, path, n);
     note_candidates(s, set, at, path, n);
     if (n >= 2) {
         note_candidates(s, set, at, path, n - 1);
     }
+}
+
+// `module 'util.strings' is in no library`: under `--lib`, the first segment names neither the
+// library nor a used library (module-system.md 10.2 item 3).
+fn error_in_no_library(session.session mut* s, module_set mut* set, diag.loc at, ast.node* path,
+                       u64 n) void {
+    string name = path_text(set, path, n);
+    msg_begin(set);
+    msg_str(set, "module ");
+    msg_quote(set, name);
+    msg_str(set, " is in no library");
+    diag.error(session.diags(s), at, msg_end(set));
 }
 
 // `module 'util' has no declaration named 'strngs'`: the symbol reading found
@@ -662,6 +777,27 @@ fn load_module(session.session mut* s, module_set mut* set, string path, string 
         error_same_file(s, set, at, path, set->modules.items[cast(twin, u64)]->path, real);
         return null;
     }
+    module mut* m = admit(set, path, file, real, source, entry);
+    strmap.put(&set->by_real, m->real, cast(set->modules.len - 1, i64));
+
+    // the diagnostic count says whether the file parsed, not null
+    u64 before = session.error_count(s);
+    lexer.tok_vec mut toks = lexer.tokvec_create();
+    // the tokens cover the file, so the parser runs either way
+    lexer.lex_file(s, m->file, m->source, &toks);
+    m->ast = parser.parse_module(s, m->file, &toks, &set->arena);
+    lexer.tokvec_free(&toks);
+    m->parsed = session.error_count(s) == before;
+    if (!m->parsed) {
+        return null;
+    }
+    return walk_module(s, set, m);
+}
+
+// Adds a new module in the loading state and enters it in the path map. The caller enters a module
+// that has a file of its own in the identity map.
+fn admit(module_set mut* set, string path, string file, string real, string source,
+         bool entry) module mut* {
     module mut* own fresh = new(module);
     fresh->path = path;
     fresh->file = file;
@@ -677,19 +813,12 @@ fn load_module(session.session mut* s, module_set mut* set, string path, string 
     set->modules.len += 1;
     module mut* m = set->modules.items[set->modules.len - 1];
     strmap.put(&set->by_path, m->path, cast(set->modules.len - 1, i64));
-    strmap.put(&set->by_real, m->real, cast(set->modules.len - 1, i64));
+    return m;
+}
 
-    // the diagnostic count says whether the file parsed, not null
-    u64 before = session.error_count(s);
-    lexer.tok_vec mut toks = lexer.tokvec_create();
-    // the tokens cover the file, so the parser runs either way
-    lexer.lex_file(s, m->file, m->source, &toks);
-    m->ast = parser.parse_module(s, m->file, &toks, &set->arena);
-    lexer.tokvec_free(&toks);
-    m->parsed = session.error_count(s) == before;
-    if (!m->parsed) {
-        return null;
-    }
+// Selects, collects and resolves a module that parsed, and puts it in the dependency order after
+// its imports. Returns null after a diagnostic.
+fn walk_module(session.session mut* s, module_set mut* set, module mut* m) module mut* {
     m->selected = comptime.select_module(s, m->ast);
     if (!m->selected) {
         return null;
@@ -707,6 +836,319 @@ fn load_module(session.session mut* s, module_set mut* set, string path, string 
     m->state = module_state.m_ready;
     vec_push(&set->order, m);
     return m;
+}
+
+// ---- used libraries --------------------------------------------------------------
+
+// Ensures room for one more used library, growing to the largest of VEC_MIN_CAP and twice the
+// capacity.
+fn used_reserve(used_libraries mut* v) void {
+    if (v->len < v->items.len) {
+        return;
+    }
+    u64 mut cap = VEC_MIN_CAP;
+    if (v->items.len >= cap) {
+        if (v->items.len > containers.U64_MAX / 2) {
+            panic("modules.used_reserve: capacity overflow");
+        }
+        cap = v->items.len * 2;
+    }
+    used_library mut* own mut@ own bigger = new(used_library mut* own, cap);
+    u64 mut i = 0;
+    while (i < v->len) {
+        del(bigger[i]);
+        bigger[i] = move(v->items[i]);
+        i += 1;
+    }
+    del(v->items);
+    v->items = move(bigger);
+}
+
+// The used library whose name is the first segment of the path, or null.
+fn used_of(module_set* set, ast.node* path, u64 n) used_library mut* {
+    if (n == 0) {
+        return null;
+    }
+    string first = segment_at(path, 0);
+    u64 mut i = 0;
+    while (i < set->used.len) {
+        if (set->used.items[i]->name == first) {
+            return set->used.items[i];
+        }
+        i += 1;
+    }
+    return null;
+}
+
+// The used library `name`, or null.
+fn used_named(module_set* set, string name) used_library mut* {
+    u64 mut i = 0;
+    while (i < set->used.len) {
+        if (set->used.items[i]->name == name) {
+            return set->used.items[i];
+        }
+        i += 1;
+    }
+    return null;
+}
+
+// The index of the section of `path` in `lib`, or -1 when the file has no such section.
+fn section_of(used_library* lib, string path) i64 {
+    i64 mut k = 0;
+    if (!strmap.get(&lib->sections, path, &k)) {
+        return -1;
+    }
+    return k;
+}
+
+// The end of the line of `text` that starts at `from`: the offset of its newline, or the length
+// of the text when no newline ends it.
+fn line_end(string text, u64 from) u64 {
+    u64 mut i = from;
+    while (i < text.len && text[i] != '\n') {
+        i += 1;
+    }
+    return i;
+}
+
+// Splits the interface text of `lib` into its sections (module-system.md 10.3). Line 1 names the
+// format, line 2 the library, and each `//! module <path>` line starts a section. The tokens of
+// the file fall into the section whose lines hold them. Returns false when the text has another
+// form; the caller reports the library as corrupt.
+fn split_sections(module_set mut* set, used_library mut* lib) bool {
+    string text = lib->source;
+    u64 mut line = 1;
+    u64 mut at = 0;
+    while (at < text.len) {
+        u64 end = line_end(text, at);
+        if (end == text.len) {
+            // every line ends with one newline byte
+            return false;
+        }
+        string body = text[at..end];
+        if (line == 1 && body != INTERFACE_FORMAT) {
+            return false;
+        }
+        if (line == 2 && (!str.starts_with(body, INTERFACE_LIBRARY)
+                          || body[INTERFACE_LIBRARY.len..body.len] != lib->name)) {
+            return false;
+        }
+        if (line > 2 && str.starts_with(body, INTERFACE_SECTION)) {
+            string path = body[INTERFACE_SECTION.len..body.len];
+            if (!str.starts_with(path, lib->name) || path.len <= lib->name.len
+                || path[lib->name.len] != PATH_SEPARATOR || section_of(lib, path) >= 0) {
+                return false;
+            }
+            string kept = containers.pool_intern(&set->pool, path);
+            strmap.put(&lib->sections, kept, cast(lib->paths.len, i64));
+            containers.str_push(&lib->paths, kept);
+            vec.int_push(&lib->lines, cast(line, i64));
+            vec.int_push(&lib->offsets, cast(at, i64));
+        }
+        line += 1;
+        at = end + 1;
+    }
+    if (line <= 2) {
+        return false;
+    }
+    // The last token is the end of file, which belongs to no section.
+    u64 count = lexer.tokvec_count(&lib->toks);
+    u64 mut t = 0;
+    if (count > 1 && (lib->lines.len == 0
+                      || cast(lexer.tokvec_at(&lib->toks, 0).line, i64) < lib->lines.items[0])) {
+        // a token above the first section
+        return false;
+    }
+    u64 mut k = 0;
+    while (k < lib->lines.len) {
+        vec.int_push(&lib->firsts, cast(t, i64));
+        while (t + 1 < count && (k + 1 == lib->lines.len
+                                 || cast(lexer.tokvec_at(&lib->toks, t).line, i64)
+                                    < lib->lines.items[k + 1])) {
+            t += 1;
+        }
+        vec.int_push(&lib->ends, cast(t, i64));
+        k += 1;
+    }
+    return true;
+}
+
+/// Adds the used library `name`, whose interface file is `file` with the bytes `text`
+/// (D9.11, module-system.md 10.2). A path whose first segment is `name` then resolves only in
+/// the sections of the file. The session keeps the text, so a diagnostic in the file shows its
+/// line. Returns false after a lexical diagnostic, and false with no diagnostic when the text is
+/// not an interface file of `name`.
+fn use_library(session.session mut* s, module_set mut* set, string name, string file,
+               string text) bool {
+    string kept_file = containers.pool_intern(&set->pool, file);
+    session.set_source(s, kept_file, text);
+    string mut source = "";
+    if (!session.read_source(s, kept_file, &source)) {
+        // panic-coverage: unreachable: read: read_source answers from the text set_source set.
+        panic("modules.use_library: the session lost a source it was given");
+    }
+    used_reserve(&set->used);
+    used_library mut* own fresh = new(used_library);
+    fresh->name = containers.pool_intern(&set->pool, name);
+    fresh->file = kept_file;
+    fresh->source = source;
+    u64 k = set->used.len;
+    del(set->used.items[k]);
+    set->used.items[k] = move(fresh);
+    set->used.len += 1;
+    used_library mut* lib = set->used.items[set->used.len - 1];
+    if (!lexer.lex_file(s, lib->file, lib->source, &lib->toks)) {
+        return false;
+    }
+    return split_sections(set, lib);
+}
+
+// The tokens of section `k` of `lib` in `out`, ended by an end of file at the first byte of the
+// next section, or at the end of the file for the last section.
+fn copy_tokens(used_library* lib, u64 k, lexer.tok_vec mut* out) void {
+    u64 first = cast(lib->firsts.items[k], u64);
+    u64 end = cast(lib->ends.items[k], u64);
+    lexer.tokvec_reserve(out, end - first + 1);
+    u64 mut i = first;
+    while (i < end) {
+        lexer.tokvec_push(out, lexer.tokvec_at(&lib->toks, i));
+        i += 1;
+    }
+    lexer.token mut eof = lexer.tokvec_at(&lib->toks, lexer.tokvec_count(&lib->toks) - 1);
+    if (k + 1 < lib->lines.len) {
+        // the first byte of the `//! module` line of the next section
+        eof.line = cast(lib->lines.items[k + 1], u32);
+        eof.col = 1;
+        eof.off = cast(lib->offsets.items[k + 1], u64);
+    }
+    lexer.tokvec_push(out, eof);
+}
+
+// Loads section `k` of `lib` as a module of the closure, or returns the module that an earlier
+// import loaded. Returns null after a diagnostic at `at`, as load_module does.
+fn load_section(session.session mut* s, module_set mut* set, used_library* lib, u64 k,
+                diag.loc at) module mut* {
+    string path = containers.str_at(&lib->paths, k);
+    i64 mut known = 0;
+    if (strmap.get(&set->by_path, path, &known)) {
+        module mut* found = set->modules.items[cast(known, u64)];
+        if (found->state == module_state.m_loading) {
+            error_cycle(s, set, at, found);
+            return null;
+        }
+        return found;
+    }
+    if (set->stopped) {
+        return null;
+    }
+    // A section has no file of its own, so it takes no place in the identity map.
+    module mut* m = admit(set, path, lib->file, "", lib->source, false);
+    m->interface = true;
+    u64 before = session.error_count(s);
+    lexer.tok_vec mut toks = lexer.tokvec_create();
+    defer lexer.tokvec_free(&toks);
+    copy_tokens(lib, k, &toks);
+    m->ast = parser.parse_interface(s, m->file, &toks, &set->arena);
+    m->parsed = session.error_count(s) == before;
+    if (!m->parsed) {
+        return null;
+    }
+    return walk_module(s, set, m);
+}
+
+// Whether section `k` of `lib` declares `name`, which the symbol reading asks. A loaded section
+// answers from its namespace. Any other section is parsed here with its reports muted, and it
+// does not enter the closure.
+fn has_declaration(session.session mut* s, module_set mut* set, used_library* lib, u64 k,
+                   string name) bool {
+    if (set->stopped) {
+        return false;
+    }
+    module* known = find(set, containers.str_at(&lib->paths, k));
+    if (known != null) {
+        scope.binding* found = scope.find(&known->names, name);
+        return found != null && scope.is_declaration(found);
+    }
+    bool mut declares = false;
+    ast.arena mut ar = ast.arena{};
+    defer ast.ast_arena_free(&ar);
+    lexer.tok_vec mut toks = lexer.tokvec_create();
+    defer lexer.tokvec_free(&toks);
+    copy_tokens(lib, k, &toks);
+    diag.mute(session.diags(s));
+    u64 before = session.error_count(s);
+    ast.node mut* probed = parser.parse_interface(s, lib->file, &toks, &ar);
+    if (probed != null && session.error_count(s) == before) {
+        declares = selected_declares(probed, name);
+    }
+    diag.unmute(session.diags(s));
+    return declares;
+}
+
+// Resolves `import a.b.c;` whose first segment names a used library, by the two readings over
+// the sections of its interface file (module-system.md 10.2 item 1).
+fn resolve_used_path(session.session mut* s, module_set mut* set, module mut* m,
+                     ast.node mut* imp, used_library* lib) bool {
+    ast.node* path = imp->a;
+    u64 n = ast.ast_len(path);
+    string last = segment_at(path, n - 1);
+    string mut bound = last;
+    if (imp->b != null) {
+        bound = imp->b->name;
+    }
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    i64 module_k = section_of(lib, path_view(&b, path, n));
+    i64 mut prefix_k = -1;
+    if (n >= 2) {
+        prefix_k = section_of(lib, path_view(&b, path, n - 1));
+    }
+    if (module_k >= 0) {
+        if (prefix_k >= 0 && has_declaration(s, set, lib, cast(prefix_k, u64), last)) {
+            error_ambiguous(s, set, imp->loc, path, n, lib->file, lib->file);
+            return false;
+        }
+        module mut* target = load_section(s, set, lib, cast(module_k, u64), imp->loc);
+        if (target == null) {
+            return false;
+        }
+        scope.binding mut* bound_module = bind_name(s, set, m, bound, scope.bind_kind.b_module,
+                                                    imp->loc, imp);
+        if (bound_module == null) {
+            return false;
+        }
+        bound_module->module = cast(target, void*);
+        return true;
+    }
+    if (prefix_k >= 0) {
+        module mut* prefix = load_section(s, set, lib, cast(prefix_k, u64), imp->loc);
+        if (prefix == null) {
+            return false;
+        }
+        return bind_symbol(s, set, m, prefix, last, bound, imp->loc, imp);
+    }
+    error_not_in_library(s, set, imp->loc, path, n, lib);
+    return false;
+}
+
+// Resolves `import a.b.{s1, s2 as t};` whose first segment names a used library: the prefix is a
+// section of its interface file, and each item is a declaration of that section.
+fn resolve_used_items(session.session mut* s, module_set mut* set, module mut* m,
+                      ast.node mut* imp, used_library* lib) bool {
+    ast.node* path = imp->a;
+    u64 n = ast.ast_len(path);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    i64 k = section_of(lib, path_view(&b, path, n));
+    if (k < 0) {
+        error_not_in_library(s, set, imp->loc, path, n, lib);
+        return false;
+    }
+    module mut* from = load_section(s, set, lib, cast(k, u64), imp->loc);
+    if (from == null) {
+        return false;
+    }
+    return bind_items(s, set, m, from, imp);
 }
 
 // ---- resolving one import ---------------------------------------
@@ -810,6 +1252,14 @@ fn resolve_items(session.session mut* s, module_set mut* set, module mut* m,
                       ast.node mut* imp) bool {
     ast.node* path = imp->a;
     u64 n = ast.ast_len(path);
+    used_library* lib = used_of(set, path, n);
+    if (lib != null) {
+        return resolve_used_items(s, set, m, imp, lib);
+    }
+    if (set->library.len > 0 && !is_library_path(set, path, n)) {
+        error_in_no_library(s, set, imp->loc, path, n);
+        return false;
+    }
     string mut file = "";
     if (!find_file(set, path, n, &file)) {
         error_not_found(s, set, imp->loc, path, n);
@@ -819,6 +1269,12 @@ fn resolve_items(session.session mut* s, module_set mut* set, module mut* m,
     if (from == null) {
         return false;
     }
+    return bind_items(s, set, m, from, imp);
+}
+
+// Binds each item of `import a.b.{s1, s2 as t};` from the module `from` of its prefix.
+fn bind_items(session.session mut* s, module_set mut* set, module mut* m, module* from,
+              ast.node mut* imp) bool {
     u64 mut i = 0;
     while (i < ast.ast_len(imp)) {
         ast.node mut* item = ast.ast_child_mut(imp, i);
@@ -847,6 +1303,14 @@ fn resolve_path(session.session mut* s, module_set mut* set, module mut* m,
                      ast.node mut* imp) bool {
     ast.node* path = imp->a;
     u64 n = ast.ast_len(path);
+    used_library* lib = used_of(set, path, n);
+    if (lib != null) {
+        return resolve_used_path(s, set, m, imp, lib);
+    }
+    if (set->library.len > 0 && !is_library_path(set, path, n)) {
+        error_in_no_library(s, set, imp->loc, path, n);
+        return false;
+    }
     string last = segment_at(path, n - 1);
     string mut bound = last;
     if (imp->b != null) {
@@ -985,6 +1449,25 @@ fn free(module_set mut* set) void {
     set->std_dir = "";
     set->cwd = "";
     set->stopped = false;
+    i = 0;
+    while (i < set->used.len) {
+        used_library mut* own lib = move(set->used.items[i]);
+        lexer.tokvec_free(&lib->toks);
+        containers.str_free(&lib->paths);
+        strmap.free(&lib->sections);
+        vec.int_free(&lib->firsts);
+        vec.int_free(&lib->ends);
+        vec.int_free(&lib->lines);
+        vec.int_free(&lib->offsets);
+        del(lib);
+        i += 1;
+    }
+    del(set->used.items);
+    set->used.len = 0;
+    set->library = "";
+    set->library_root = "";
+    strmap.free(&set->listed);
+    containers.str_free(&set->listed_files);
     containers.pool_free(&set->pool);
 }
 
@@ -1121,11 +1604,12 @@ fn runtime_file(module_set* set, strbuf.str_buf mut* out) string {
     return strbuf.view(out);
 }
 
-// Loads `std.rt` before the entry file when a standard library directory is set.
-// The runtime then precedes program modules in dependency order.
+// Loads `std.rt` before the entry file when a standard library directory is set, or from the
+// interface file of a used library `std` when the set has one (D9.11). The runtime then precedes
+// program modules in dependency order.
 fn load_runtime(session.session mut* s, module_set mut* set) bool {
     if (set->std_dir.len == 0) {
-        return true;
+        return load_library_runtime(s, set);
     }
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
@@ -1191,6 +1675,85 @@ fn load_named(session.session mut* s, module_set mut* set, string path, string e
     string named = containers.pool_intern(&set->pool, path);
     if (load_module(s, set, named, file, file_start(file), true) == null) {
         return false;
+    }
+    return session.error_count(s) == before;
+}
+
+// The runtime of a `--lib` closure (D9.10, D9.11). The library `std` holds it at `<root>/rt.ft`.
+// Every other library reads it from the interface file of the used library `std`; the driver
+// refuses a library build that uses no `std`, so the runtime is then absent and not an error here.
+fn load_library_runtime(session.session mut* s, module_set mut* set) bool {
+    if (set->library == STD_SEGMENT) {
+        i64 mut listed = 0;
+        if (strmap.get(&set->listed, RUNTIME_PATH, &listed)) {
+            string path = containers.pool_intern(&set->pool, RUNTIME_PATH);
+            string runtime = containers.str_at(&set->listed_files, cast(listed, u64));
+            return load_module(s, set, path, runtime, file_start(runtime), false) != null;
+        }
+        strbuf.str_buf mut b = strbuf.create();
+        defer strbuf.free(&b);
+        strbuf.append(&b, set->library_root);
+        if (set->library_root.len > 0
+            && set->library_root[set->library_root.len - 1] != DIRECTORY_SEPARATOR) {
+            strbuf.push(&b, DIRECTORY_SEPARATOR);
+        }
+        strbuf.append(&b, RUNTIME_FILE);
+        string missing = containers.pool_intern(&set->pool, strbuf.view(&b));
+        msg_begin(set);
+        msg_str(set, "module ");
+        msg_quote(set, RUNTIME_PATH);
+        msg_str(set, " not found");
+        diag.error(session.diags(s), file_start(missing), msg_end(set));
+        msg_begin(set);
+        msg_str(set, "looked for ");
+        msg_str(set, missing);
+        diag.note(session.diags(s), file_start(missing), msg_end(set));
+        return false;
+    }
+    used_library* std_lib = used_named(set, STD_SEGMENT);
+    if (std_lib == null) {
+        return true;
+    }
+    i64 k = section_of(std_lib, RUNTIME_PATH);
+    if (k < 0) {
+        diag.loc at = diag.loc_make(std_lib->file, 1, 1);
+        msg_begin(set);
+        msg_str(set, "module ");
+        msg_quote(set, RUNTIME_PATH);
+        msg_str(set, " not found");
+        diag.error(session.diags(s), at, msg_end(set));
+        return false;
+    }
+    return load_section(s, set, std_lib, cast(k, u64), diag.loc_make(std_lib->file, 1, 1)) != null;
+}
+
+/// Reads the library `name` whose modules the walk of `root` listed in `*t` (D9.11,
+/// module-system.md 10.2). The roots of the closure are `std.rt` and then each listed module, in
+/// byte order of the module path. A path whose first segment is `name` then resolves only among
+/// the listed modules. The set reads no standard library directory and no search root. Returns
+/// false after a read, parse, selection or import diagnostic.
+fn load_library(session.session mut* s, module_set mut* set, string name, string root,
+                tree.tree* t) bool {
+    u64 before = session.error_count(s);
+    set->library = containers.pool_intern(&set->pool, name);
+    set->library_root = containers.pool_intern(&set->pool, root);
+    u64 mut i = 0;
+    while (i < tree.count(t)) {
+        string path = containers.pool_intern(&set->pool, tree.path_at(t, i));
+        strmap.put(&set->listed, path, cast(i, i64));
+        containers.str_push(&set->listed_files, containers.pool_intern(&set->pool,
+                                                                       tree.file_at(t, i)));
+        i += 1;
+    }
+    if (!load_library_runtime(s, set)) {
+        return false;
+    }
+    i = 0;
+    while (i < tree.count(t)) {
+        string path = containers.pool_intern(&set->pool, tree.path_at(t, i));
+        string file = containers.str_at(&set->listed_files, i);
+        load_module(s, set, path, file, file_start(file), false);
+        i += 1;
     }
     return session.error_count(s) == before;
 }

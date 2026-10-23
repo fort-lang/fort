@@ -876,3 +876,163 @@ fn flt_hex(u64 bits, strbuf.str_buf mut* out) void {
         strbuf.push(out, HEX_DIGITS[(bits >> (i * HEX_BITS)) & HEX_MASK]);
     }
 }
+
+// ---- the shortest decimal of a constant ----------------------------------------------
+
+// The exact digits that the shortest search reads, and the most digits that a binary64 needs
+// to read back (D18.2). log10(2) is LOG10_2_NUM / LOG10_2_DEN, which estimates the decimal
+// exponent of the leading digit; the search then corrects the estimate exactly.
+u64 SHORT_EXACT_DIGITS = 18;
+u64 SHORT_MAX_DIGITS = 17;
+i64 LOG10_2_NUM = 30103;
+i64 LOG10_2_DEN = 100000;
+
+// floor(a / b) for b > 0, which the `/` of a negative a does not give.
+fn floor_div(i64 a, i64 b) i64 {
+    i64 q = a / b;
+    if (a % b != 0 && a < 0) {
+        return q - 1;
+    }
+    return q;
+}
+
+// Whether the decimal `digits[0..n]` times 10^(exponent - n + 1) reads back as `bits`.
+fn reads_back(u8@ digits, u64 n, i64 exponent, u64 bits) bool {
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut i = 0;
+    while (i < n) {
+        strbuf.push(&text, cast(cast(digits[i], u64) + cast('0', u64), char));
+        i += 1;
+    }
+    strbuf.push(&text, 'e');
+    i64 scale = exponent - cast(n, i64) + 1;
+    if (scale < 0) {
+        strbuf.push(&text, '-');
+        strbuf.append_u64(&text, cast(0 - scale, u64));
+    } else {
+        strbuf.append_u64(&text, cast(scale, u64));
+    }
+    u64 mut back = 0;
+    return flt_parse(strbuf.view(&text), &back) && back == bits;
+}
+
+// Adds one to the last of `n` digits. A carry out of the first digit gives the digit 1 and
+// raises the exponent.
+fn step_up(u8 mut@ digits, u64 n, i64 mut* exponent) void {
+    u64 mut i = n;
+    while (i > 0) {
+        i -= 1;
+        if (digits[i] < 9) {
+            digits[i] += 1;
+            return;
+        }
+        digits[i] = 0;
+    }
+    digits[0] = 1;
+    *exponent += 1;
+}
+
+/// Appends to `out` the digits of the shortest decimal that reads back as the finite binary64
+/// magnitude `bits`, and sets `*exponent` to the decimal exponent of its first digit (D18.2).
+/// Among the decimals of that length that read back, it takes the nearest, with ties to the
+/// even last digit. Zero gives the digit `0` and the exponent 0. The sign bit is ignored.
+fn shortest(u64 bits, strbuf.str_buf mut* out, i64 mut* exponent) void {
+    u64 magnitude = bits & F64_MAG_MASK;
+    bool mut neg = false;
+    u64 mut m = 0;
+    i64 mut e = 0;
+    flt_parts(magnitude, &neg, &m, &e);
+    *exponent = 0;
+    if (m == 0) {
+        strbuf.push(out, '0');
+        return;
+    }
+    bignum mut num = bignum{};
+    bignum mut den = bignum{};
+    bn_set_u64(&num, m);
+    bn_set_u64(&den, 1);
+    if (e > 0) {
+        bn_shl(&num, cast(e, u64));
+    } else if (e < 0) {
+        bn_shl(&den, cast(0 - e, u64));
+    }
+    // the value lies in [2^(b - 1), 2^b)
+    i64 b = cast(bits_of_u64(m), i64) + e;
+    i64 mut k = floor_div((b - 1) * LOG10_2_NUM, LOG10_2_DEN);
+    if (k >= 0) {
+        bn_mul_pow10(&den, cast(k, u64));
+    } else {
+        bn_mul_pow10(&num, cast(0 - k, u64));
+    }
+    // num / den is now the value times 10^-k; bring it into [1, 10)
+    while (bn_cmp(&num, &den) < 0) {
+        bn_mul_add(&num, DEC_BASE, 0);
+        k -= 1;
+    }
+    bignum mut ten = den;
+    bn_mul_add(&ten, DEC_BASE, 0);
+    while (bn_cmp(&num, &ten) >= 0) {
+        bn_mul_add(&den, DEC_BASE, 0);
+        bn_mul_add(&ten, DEC_BASE, 0);
+        k += 1;
+    }
+    u8[SHORT_EXACT_DIGITS] mut exact = {};
+    u64 mut i = 0;
+    while (i < SHORT_EXACT_DIGITS) {
+        bool mut sticky = false;
+        u64 q = bn_div(&num, &den, &sticky);
+        exact[i] = cast(q, u8);
+        bignum mut part = den;
+        bn_mul_add(&part, q, 0);
+        bn_sub(&num, &part);
+        bn_mul_add(&num, DEC_BASE, 0);
+        i += 1;
+    }
+    bool tail = !bn_is_zero(&num);
+    u8[SHORT_EXACT_DIGITS] mut cand = {};
+    u64 mut n = 1;
+    while (n <= SHORT_MAX_DIGITS) {
+        i = 0;
+        while (i < n) {
+            cand[i] = exact[i];
+            i += 1;
+        }
+        i64 mut ke = k;
+        bool mut below = tail;
+        i = n + 1;
+        while (i < SHORT_EXACT_DIGITS) {
+            below = below || exact[i] != 0;
+            i += 1;
+        }
+        u8 next = exact[n];
+        bool up = next > 5 || (next == 5 && (below || exact[n - 1] % 2 == 1));
+        if (up) {
+            step_up(cand[..], n, &ke);
+        }
+        bool mut found = reads_back(cand[..], n, ke, magnitude);
+        if (!found && !up) {
+            // Next to a power of two the interval below the value is the narrower one, so the
+            // decimal above can read back where the nearest one, below the value, does not. A
+            // nearest decimal above the value that fails leaves no other decimal of n digits.
+            step_up(cand[..], n, &ke);
+            found = reads_back(cand[..], n, ke, magnitude);
+        }
+        if (found) {
+            u64 mut last = n;
+            while (last > 1 && cand[last - 1] == 0) {
+                last -= 1;
+            }
+            i = 0;
+            while (i < last) {
+                strbuf.push(out, cast(cast(cand[i], u64) + cast('0', u64), char));
+                i += 1;
+            }
+            *exponent = ke;
+            return;
+        }
+        n += 1;
+    }
+    // panic-coverage: unreachable: read: 17 significant digits read back as any binary64.
+    panic("flt.shortest: no decimal of 17 digits reads back");
+}

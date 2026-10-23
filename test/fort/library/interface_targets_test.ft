@@ -1,0 +1,176 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| linux ok
+//| macos ok
+//| clients ok
+//| ok
+/// Checks that the interface file is a function of the configuration map (D9.11,
+/// module-system.md 10.3): a library whose modules select imports and declarations with `$if`
+/// on the target and on a key of `--cfg` gives one interface for each map, with no `$if` and no
+/// `$cfg` left, and a client of each checks alike against the interface and the sources.
+import library_env;
+import std.strbuf;
+
+// The module `os.platform`: a constant, a struct and a function for each target, and an
+// extern that only one target declares.
+string[22] PLATFORM = {
+    "$if ($cfg(target_os) == \"linux\") {",
+    "    import os.posix;",
+    "} else {",
+    "    import os.darwin;",
+    "}",
+    "$if ($cfg(target_os) == \"linux\") {",
+    "    string NAME = \"linux\";",
+    "    struct handle { i32 fd; }",
+    "    fn open_handle(string path) handle {",
+    "        return handle{posix.open_fd(path)};",
+    "    }",
+    "    extern fn epoll_create(i32 size) i32;",
+    "} else $if ($cfg(target_os) == \"macos\") {",
+    "    string NAME = \"macos\";",
+    "    struct handle { i64 fd; u32 flags; }",
+    "    fn open_handle(string path) handle {",
+    "        return handle{darwin.open_fd(path), 0};",
+    "    }",
+    "} else {",
+    "    string NAME = \"other\";",
+    "}",
+    "i32 PAGE = $cfg(target_os) == \"linux\" ? 4096 : 16384;",
+};
+
+string[3] POSIX = {"fn open_fd(string path) i32 {", "    return 3;", "}"};
+string[3] DARWIN = {"fn open_fd(string path) i64 {", "    return 3;", "}"};
+
+// The module `os.build`, whose declarations follow a key of `--cfg`.
+string[7] BUILD = {
+    "$if ($cfg(profile) == \"debug\") {",
+    "    bool CHECKS = true;",
+    "    u32 LEVEL = 2;",
+    "} else {",
+    "    bool CHECKS = false;",
+    "}",
+    "string PROFILE = $cfg(profile);",
+};
+
+fn add_library(library_env.env mut* e, string target, string profile) void {
+    library_env.config(e, "target_os", target);
+    library_env.config(e, "profile", profile);
+    library_env.add_lines(e, "lib/os/platform.ft", PLATFORM[..]);
+    library_env.add_lines(e, "lib/os/posix.ft", POSIX[..]);
+    library_env.add_lines(e, "lib/os/darwin.ft", DARWIN[..]);
+    library_env.add_lines(e, "lib/os/build.ft", BUILD[..]);
+}
+
+string[17] LINUX_DEBUG = {
+    "== fort interface 1",
+    "== library os",
+    "== module os.build",
+    "bool CHECKS = true;",
+    "u32 LEVEL = 2;",
+    "string PROFILE = \"debug\";",
+    "== module os.darwin",
+    "fn open_fd(string path) i64;",
+    "== module os.platform",
+    "import os.posix as _0;",
+    "string NAME = \"linux\";",
+    "i32 PAGE = 4096;",
+    "extern fn epoll_create(i32 size) i32;",
+    "struct handle { i32 fd; }",
+    "fn open_handle(string path) handle;",
+    "== module os.posix",
+    "fn open_fd(string path) i32;",
+};
+
+string[15] MACOS_RELEASE = {
+    "== fort interface 1",
+    "== library os",
+    "== module os.build",
+    "bool CHECKS = false;",
+    "string PROFILE = \"release\";",
+    "== module os.darwin",
+    "fn open_fd(string path) i64;",
+    "== module os.platform",
+    "import os.darwin as _0;",
+    "string NAME = \"macos\";",
+    "i32 PAGE = 16384;",
+    "struct handle { i64 fd; u32 flags; }",
+    "fn open_handle(string path) handle;",
+    "== module os.posix",
+    "fn open_fd(string path) i32;",
+};
+
+// Whether the library under `target` and `profile` gives the interface `want`.
+fn gives(string target, string profile, string@ want) bool {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    add_library(&e, target, profile);
+    if (!library_env.emit(&e, "os", "lib/os")) {
+        return false;
+    }
+    return library_env.same_lines(library_env.text(&e), want);
+}
+
+// A client that uses the declarations of both targets, so that one of them is an error on each.
+string[9] CLIENT = {
+    "import os.platform;",
+    "import os.build;",
+    "fn main() i32 {",
+    "    platform.handle h = platform.open_handle(\"/tmp\");",
+    "    i64 fd = h.fd;",
+    "    u32 flags = h.flags;",
+    "    i32 e = platform.epoll_create(1);",
+    "    return platform.PAGE + cast(build.LEVEL, i32);",
+    "}",
+};
+
+// The error lines of CLIENT under `target` and `profile`, against the sources and against the
+// interface, which must be the same text.
+fn client_alike(string target, string profile) bool {
+    library_env.env mut by_source = library_env.env{};
+    library_env.open(&by_source);
+    defer library_env.close(&by_source);
+    add_library(&by_source, target, profile);
+    library_env.add_lines(&by_source, "main.ft", CLIENT[..]);
+    library_env.check_with_sources(&by_source, "lib", "main.ft");
+    strbuf.str_buf mut sources = strbuf.create();
+    defer strbuf.free(&sources);
+    library_env.error_lines(&by_source, &sources);
+    library_env.env mut lib = library_env.env{};
+    library_env.open(&lib);
+    defer library_env.close(&lib);
+    add_library(&lib, target, profile);
+    assert(library_env.emit(&lib, "os", "lib/os"));
+    library_env.env mut use = library_env.env{};
+    library_env.open(&use);
+    defer library_env.close(&use);
+    library_env.config(&use, "target_os", target);
+    library_env.config(&use, "profile", profile);
+    library_env.add_lines(&use, "main.ft", CLIENT[..]);
+    library_env.check_against(&use, "os", "os.flib/interface.ft", library_env.text(&lib),
+                              "main.ft");
+    strbuf.str_buf mut iface = strbuf.create();
+    defer strbuf.free(&iface);
+    library_env.error_lines(&use, &iface);
+    if (strbuf.view(&sources) != strbuf.view(&iface) || strbuf.view(&sources) == "") {
+        println("sources:");
+        print(strbuf.view(&sources));
+        println("interface:");
+        print(strbuf.view(&iface));
+        return false;
+    }
+    return true;
+}
+
+fn main() i32 {
+    assert(gives("linux", "debug", LINUX_DEBUG[..]));
+    println("linux ok");
+    assert(gives("macos", "release", MACOS_RELEASE[..]));
+    println("macos ok");
+    assert(client_alike("linux", "debug"));
+    assert(client_alike("macos", "release"));
+    println("clients ok");
+    println("ok");
+    return 0;
+}

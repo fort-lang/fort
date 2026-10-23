@@ -1,0 +1,177 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| spacing ok
+//| order ok
+//| ok
+/// Checks the two form checks of test/fort/support/library_env.ft, which every library suite
+/// runs on each interface file that it writes: the spacing of module-system.md 10.3 and the order
+/// of the sections, the imports and the declarations. A check that took a broken form would hold
+/// nothing, so each rule has a text that keeps it and a text that breaks it.
+import library_env;
+import std.strbuf;
+
+// ---- spacing --------------------------------------------------------------------------
+
+// Lines that keep each spacing rule.
+string[14] SPACED = {
+    "fn add(vector a, _0.vector b) vector;",
+    "extern fn printf(char* fmt, ...) i32;",
+    "struct box { u8[4] tag; pair mut* next; string own name; }",
+    "enum color { red = 0, green = 5, black = -1 }",
+    "pair ONE = {.tag = 0, .value = 1};",
+    "i32[3] ROW = {1, 2, 3};",
+    "pair ZERO = {};",
+    "i32* PA = &_0.A;",
+    "color ODD = cast(3, _0.color);",
+    "_0.mode M = _0.mode.on;",
+    "fn (i32, i32) i32 F = null;",
+    "(fn (i32) i32)* G = null;",
+    "f64 NEG = -1.5e0;",
+    "string TEXT = \"a b\\x09\";",
+};
+
+// Lines that break one rule each.
+string[14] UNSPACED = {
+    "fn add( vector a, vector b) vector;",
+    "fn add (vector a) vector;",
+    "extern fn printf(char* fmt , ...) i32;",
+    "struct box {u8 tag; }",
+    "enum color { red = 0,green = 5 }",
+    "pair ONE = { .tag = 0 };",
+    "i32[3] ROW = {1, 2, 3 };",
+    "i32 * PA = &A;",
+    "i32* PA = & A;",
+    "color ODD = cast (3, color);",
+    "_0 .mode M = _0.mode.on;",
+    "fn (i32)i32 F = null;",
+    "f64 NEG = - 1.5e0;",
+    "i32 [3] ROW = {};",
+};
+
+fn each_rule_of_the_spacing_is_held() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u64 mut i = 0;
+    while (i < SPACED.len) {
+        assert(library_env.spaced_line(SPACED[i], &b));
+        i += 1;
+    }
+    i = 0;
+    while (i < UNSPACED.len) {
+        if (library_env.spaced_line(UNSPACED[i], &b)) {
+            println("taken: ", UNSPACED[i]);
+        }
+        assert(!library_env.spaced_line(UNSPACED[i], &b));
+        i += 1;
+    }
+}
+
+fn a_directive_line_is_no_line_of_the_rules() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string[3] good = {"== module geom.a", "i32 A = 1;", "fn f() void;"};
+    library_env.join(good[..], &b);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    library_env.unmark(strbuf.view(&b), &text);
+    assert(library_env.spaced(strbuf.view(&text), false));
+    strbuf.clear(&b);
+    string[2] bad = {"== module geom.a", "i32 A = 1 ;"};
+    library_env.join(bad[..], &b);
+    strbuf.clear(&text);
+    library_env.unmark(strbuf.view(&b), &text);
+    assert(!library_env.spaced(strbuf.view(&text), false));
+}
+
+// ---- order -----------------------------------------------------------------------------
+
+// Whether the lines `lines`, markers written out, are a well formed interface of `geom`.
+fn formed(string@ lines) bool {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    library_env.join(lines, &b);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    library_env.unmark(strbuf.view(&b), &text);
+    return library_env.well_formed(strbuf.view(&text), "geom", false);
+}
+
+fn a_file_in_order_is_well_formed() void {
+    string[11] good = {
+        "== fort interface 1",
+        "== library geom",
+        "== module geom.a",
+        "i32 A = 1;",
+        "fn f() void;",
+        "== module geom.b",
+        "import geom.a as _0;",
+        "import geom.c as _1;",
+        "_0.mode M = _0.mode.on;",
+        "struct box { i32 x; }",
+        "== module geom.c",
+    };
+    assert(formed(good[..]));
+    string[7] prefixed = {
+        "== fort interface 1",
+        "== library geom",
+        "== module geom.p",
+        "import geom.a as __0;",
+        "i32 _0x = 1;",
+        "fn (i32) i32 _1 = null;",
+        "extern fn _9(i32 x) i32;",
+    };
+    assert(formed(prefixed[..]));
+}
+
+fn each_rule_of_the_order_is_held() void {
+    string[3] header = {"== fort interface 2", "== library geom", "== module geom.a"};
+    assert(!formed(header[..]));
+    string[3] library = {"== fort interface 1", "== library other", "== module geom.a"};
+    assert(!formed(library[..]));
+    string[4] sections = {"== fort interface 1", "== library geom", "== module geom.b",
+                          "== module geom.a"};
+    assert(!formed(sections[..]));
+    string[3] foreign = {"== fort interface 1", "== library geom", "== module other.a"};
+    assert(!formed(foreign[..]));
+    string[5] declarations = {"== fort interface 1", "== library geom", "== module geom.a",
+                              "i32 b = 1;", "i32 A = 1;"};
+    assert(!formed(declarations[..]));
+    string[5] imports = {"== fort interface 1", "== library geom", "== module geom.a",
+                         "import geom.c as _0;", "import geom.b as _1;"};
+    assert(!formed(imports[..]));
+    string[5] bindings = {"== fort interface 1", "== library geom", "== module geom.a",
+                          "import geom.b as _0;", "import geom.c as _2;"};
+    assert(!formed(bindings[..]));
+    string[5] taken = {"== fort interface 1", "== library geom", "== module geom.a",
+                       "import geom.b as _0;", "i32 _0x = 1;"};
+    assert(!formed(taken[..]));
+    string[5] longer = {"== fort interface 1", "== library geom", "== module geom.a",
+                        "import geom.b as __0;", "i32 A = 1;"};
+    assert(!formed(longer[..]));
+    string[4] stray = {"== fort interface 1", "== library geom", "i32 A = 1;", "== module geom.a"};
+    assert(!formed(stray[..]));
+}
+
+fn the_name_of_each_declaration_line_is_found() void {
+    assert(library_env.declared_name("fn add(vector a) vector;") == "add");
+    assert(library_env.declared_name("extern fn printf(char* f, ...) i32;") == "printf");
+    assert(library_env.declared_name("struct box { i32 x; }") == "box");
+    assert(library_env.declared_name("enum color { red = 0 }") == "color");
+    assert(library_env.declared_name("fn (i32) i32 F = twice;") == "F");
+    assert(library_env.declared_name("i32 mut calls = 0;") == "calls");
+    assert(library_env.declared_name("pair ONE = {.tag = 0, .value = 1};") == "ONE");
+    assert(library_env.declared_name("no declaration") == "");
+}
+
+fn main() i32 {
+    each_rule_of_the_spacing_is_held();
+    a_directive_line_is_no_line_of_the_rules();
+    println("spacing ok");
+    a_file_in_order_is_well_formed();
+    each_rule_of_the_order_is_held();
+    the_name_of_each_declaration_line_is_found();
+    println("order ok");
+    println("ok");
+    return 0;
+}

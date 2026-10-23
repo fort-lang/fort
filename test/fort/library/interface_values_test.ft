@@ -1,0 +1,264 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| values ok
+//| folded alike ok
+//| fixed point ok
+//| ok
+/// Checks the folded value of each kind of constant in the interface file (D4.4, D4.6,
+/// module-system.md 10.3): its text, the value that a client folds from it, and the fixed point:
+/// a section that the writer reads back and writes again is the same text.
+import ast;
+import check;
+import consts;
+import library_env;
+import modules;
+import scope;
+import std.strbuf;
+
+// One case: the type and the initializer of a constant of the library module, and the value
+// that its interface line holds.
+struct row {
+    string ty;
+    string init;
+    string want;
+}
+
+// The declarations that the cases name: a struct, an enum, a function and a constant.
+string[4] PRELUDE = {
+    "struct pair { u8 tag; u64 value; }",
+    "struct rec { i32 n; color c; string s; u8[2] b; pair p; }",
+    "enum color { red, green = 5, blue }",
+    "fn twice(i32 v) i32 { return v * 2; }",
+};
+
+// The cases. A scalar folds to its literal, an aggregate to its members, and an aggregate whose
+// every leaf is zero to `{}`. A negative zero float is not zero.
+row[107] ROWS = {
+    {"i8", "-128", "-128"},
+    {"i8", "127", "127"},
+    {"i16", "-32768", "-32768"},
+    {"i16", "32767", "32767"},
+    {"i32", "-2147483648", "-2147483648"},
+    {"i32", "2147483647", "2147483647"},
+    {"i64", "-9223372036854775808", "-9223372036854775808"},
+    {"u8", "255", "255"},
+    {"u16", "65535", "65535"},
+    {"u32", "4294967295", "4294967295"},
+    {"u64", "18446744073709551615", "18446744073709551615"},
+    {"i32", "0", "0"},
+    {"i32", "1 << 10", "1024"},
+    {"i32", "7 / 2", "3"},
+    {"i32", "-7 % 3", "-1"},
+    {"i32", "0xFF & 0x0F", "15"},
+    {"u8", "cast(300, u8)", "44"},
+    {"u64", "sizeof(pair)", "16"},
+    {"i32", "A * 3", "6"},
+    {"f64", "1.0", "1.0e0"},
+    {"f64", "1e300", "1.0e300"},
+    {"f64", "2.5e-3", "2.5e-3"},
+    {"f64", "-1.5", "-1.5e0"},
+    {"f64", "1.0 / 3.0", "3.333333333333333e-1"},
+    {"f64", "0.0", "0.0e0"},
+    {"f64", "-0.0", "-0.0e0"},
+    {"f32", "0.1", "1.0000000149011612e-1"},
+    {"f32", "16777217.0", "1.6777216e7"},
+    {"bool", "true", "true"},
+    {"bool", "false", "false"},
+    {"bool", "1 < 2", "true"},
+    {"char", "'a'", "'a'"},
+    {"char", "'\\0'", "'\\x00'"},
+    {"char", "'\"'", "'\\\"'"},
+    {"char", "'\\\\'", "'\\\\'"},
+    {"char", "'~'", "'~'"},
+    {"char", "' '", "' '"},
+    {"char", "'\\x7f'", "'\\x7F'"},
+    {"char", "'\\n'", "'\\x0A'"},
+    {"string", "\"hello world\"", "\"hello world\""},
+    {"string", "\"tab\\there\"", "\"tab\\x09here\""},
+    {"string", "\"it's\"", "\"it\\'s\""},
+    {"string", "\"\"", "\"\""},
+    {"string", "\"\\xff\\x00\"", "\"\\xFF\\x00\""},
+    {"string", "{}", "{}"},
+    {"i32*", "null", "null"},
+    {"i32*", "&A", "&A"},
+    {"fn (i32) i32", "twice", "twice"},
+    {"fn (i32) i32", "null", "null"},
+    {"color", "color.red", "color.red"},
+    {"color", "color.blue", "color.blue"},
+    {"color", "cast(6, color)", "color.blue"},
+    {"color", "cast(-5, color)", "cast(-5, color)"},
+    {"pair", "{}", "{}"},
+    {"pair", "{0, 0}", "{}"},
+    {"pair", "{.value = 2}", "{.tag = 0, .value = 2}"},
+    {"pair", "pair{3, 4}", "{.tag = 3, .value = 4}"},
+    {"rec", "{1, color.green, \"x\", {1, 2}, {.tag = 3}}",
+     "{.n = 1, .c = color.green, .s = \"x\", .b = {1, 2}, .p = {.tag = 3, .value = 0}}"},
+    {"rec", "{.c = color.red}", "{}"},
+    {"rec", "{.s = \"\"}", "{.n = 0, .c = color.red, .s = \"\", .b = {}, .p = {}}"},
+    {"pair[2]", "{{1, 2}, {}}", "{{.tag = 1, .value = 2}, {}}"},
+    {"f64[2]", "{0.0, -0.0}", "{0.0e0, -0.0e0}"},
+    {"f64[2]", "{0.0, 0.0}", "{}"},
+    {"bool[3]", "{false, false, false}", "{}"},
+    {"i32[3]", "i32[3]{1, 0, 0}", "{1, 0, 0}"},
+    {"u8@", "{}", "{}"},
+    {"i8", "-1", "-1"},
+    {"i16", "-129", "-129"},
+    {"i64", "9223372036854775807", "9223372036854775807"},
+    {"u8", "'a'", "97"},
+    {"u16", "0x8000", "32768"},
+    {"u32", "1 << 31", "2147483648"},
+    {"i32", "-(1 << 30)", "-1073741824"},
+    {"i32", "10 - 20", "-10"},
+    {"i64", "-9223372036854775807 - 1", "-9223372036854775808"},
+    {"u64", "sizeof(rec)", "48"},
+    {"f64", "1.5e308", "1.5e308"},
+    {"f64", "-2.2250738585072014e-308", "-2.2250738585072014e-308"},
+    {"f64", "4.9e-324", "5.0e-324"},
+    {"f64", "123456789.0", "1.23456789e8"},
+    {"f64", "0.1 + 0.2", "3.0000000000000004e-1"},
+    {"f32", "1.0 / 3.0", "3.333333432674408e-1"},
+    {"f32", "-0.0", "-0.0e0"},
+    {"f32", "3.4028234663852886e38", "3.4028234663852886e38"},
+    {"bool", "!true", "false"},
+    {"bool", "A == 2", "true"},
+    {"char", "'\\''", "'\\''"},
+    {"char", "'\\xff'", "'\\xFF'"},
+    {"string", "\"a\\\\b\"", "\"a\\\\b\""},
+    {"string", "\"\\x7f\\x80\"", "\"\\x7F\\x80\""},
+    {"color", "color.green", "color.green"},
+    {"color[2]", "{color.red, color.red}", "{}"},
+    {"color[2]", "{color.blue, color.red}", "{color.blue, color.red}"},
+    {"pair[2]", "{}", "{}"},
+    {"rec", "{.p = {.value = 9}}",
+     "{.n = 0, .c = color.red, .s = {}, .b = {}, .p = {.tag = 0, .value = 9}}"},
+    {"string[2]", "{\"a\", {}}", "{\"a\", {}}"},
+    {"string[2]", "{{}, {}}", "{}"},
+    {"u8[3]", "{0, 0, 1}", "{0, 0, 1}"},
+    {"char[2]", "{'a', '\\0'}", "{'a', '\\x00'}"},
+    {"i32*[2]", "{&A, null}", "{&A, null}"},
+    {"i32*[2]", "{null, null}", "{}"},
+    {"pair", "{.value = 0, .tag = 0}", "{}"},
+    {"pair", "{.value = 1, .tag = 2}", "{.tag = 2, .value = 1}"},
+    {"f32[2]", "{0.5, 0.25}", "{5.0e-1, 2.5e-1}"},
+    {"color", "cast(0, color)", "color.red"},
+    {"bool", "C28", "true"},
+    {"pair", "C56", "{.tag = 3, .value = 4}"},
+};
+
+// The library module `geom.v`: the prelude, `A`, and `C<k>` for each case.
+fn add_cases(library_env.env mut* e) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    library_env.join(PRELUDE[..], &b);
+    strbuf.append(&b, "i32 A = 2;\n");
+    u64 mut k = 0;
+    while (k < ROWS.len) {
+        strbuf.append(&b, ROWS[k].ty);
+        strbuf.append(&b, " C");
+        strbuf.append_u64(&b, k);
+        strbuf.append(&b, " = ");
+        strbuf.append(&b, ROWS[k].init);
+        strbuf.append(&b, ";\n");
+        k += 1;
+    }
+    library_env.add(e, "lib/geom/v.ft", strbuf.view(&b));
+}
+
+// The interface line of case `k`.
+fn line_of(u64 k, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    strbuf.push(out, '\n');
+    strbuf.append(out, ROWS[k].ty);
+    strbuf.append(out, " C");
+    strbuf.append_u64(out, k);
+    strbuf.append(out, " = ");
+    strbuf.append(out, ROWS[k].want);
+    strbuf.append(out, ";\n");
+    return strbuf.view(out);
+}
+
+fn each_case_has_its_folded_value() void {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    add_cases(&e);
+    assert(library_env.emit(&e, "geom", "lib/geom"));
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u64 mut k = 0;
+    while (k < ROWS.len) {
+        if (!library_env.holds(library_env.text(&e), line_of(k, &b))) {
+            println("case ", k);
+        }
+        assert(library_env.holds(library_env.text(&e), line_of(k, &b)));
+        k += 1;
+    }
+}
+
+// The folded value of the initializer of `C<k>` in `geom.v` of the set of `e`.
+fn value_of(library_env.env* e, u64 k) consts.cval {
+    strbuf.str_buf mut name = strbuf.create();
+    defer strbuf.free(&name);
+    strbuf.push(&name, 'C');
+    strbuf.append_u64(&name, k);
+    modules.module* m = modules.find(&e->m.set, "geom.v");
+    scope.binding* b = scope.find(&m->names, strbuf.view(&name));
+    return check.check_node_value(&e->ck, b->node->b);
+}
+
+fn a_client_folds_each_scalar_to_the_value_of_the_source() void {
+    library_env.env mut lib = library_env.env{};
+    library_env.open(&lib);
+    defer library_env.close(&lib);
+    add_cases(&lib);
+    assert(library_env.emit(&lib, "geom", "lib/geom"));
+    library_env.env mut use = library_env.env{};
+    library_env.open(&use);
+    defer library_env.close(&use);
+    library_env.add(&use, "main.ft", "import geom.v;\n");
+    assert(library_env.check_against(&use, "geom", "geom.flib/interface.ft",
+                                     library_env.text(&lib), "main.ft"));
+    u64 mut scalars = 0;
+    u64 mut k = 0;
+    while (k < ROWS.len) {
+        consts.cval source = value_of(&lib, k);
+        if (source.kind != consts.cval_kind.cv_none) {
+            assert(consts.cv_eq(value_of(&use, k), source));
+            if (consts.cv_is_float(source)) {
+                // cv_eq takes -0.0 for 0.0, and the bits tell them apart
+                assert(consts.cv_float_bits(value_of(&use, k)) == consts.cv_float_bits(source));
+            }
+            scalars += 1;
+        }
+        k += 1;
+    }
+    // the cases before the first `{}` string, but the struct and array ones, fold to a scalar
+    assert(scalars >= 70);
+}
+
+fn the_interface_is_a_fixed_point_of_the_writer() void {
+    library_env.env mut lib = library_env.env{};
+    library_env.open(&lib);
+    defer library_env.close(&lib);
+    add_cases(&lib);
+    assert(library_env.emit(&lib, "geom", "lib/geom"));
+    library_env.env mut use = library_env.env{};
+    library_env.open(&use);
+    defer library_env.close(&use);
+    library_env.add(&use, "main.ft", "import geom.v;\n");
+    assert(library_env.check_against(&use, "geom", "geom.flib/interface.ft",
+                                     library_env.text(&lib), "main.ft"));
+    assert(library_env.rewrites_alike(&use, library_env.text(&lib)));
+}
+
+fn main() i32 {
+    each_case_has_its_folded_value();
+    println("values ok");
+    a_client_folds_each_scalar_to_the_value_of_the_source();
+    println("folded alike ok");
+    the_interface_is_a_fixed_point_of_the_writer();
+    println("fixed point ok");
+    println("ok");
+    return 0;
+}

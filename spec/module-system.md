@@ -1052,6 +1052,7 @@ All diagnostics follow D14.2: `<file>:<line>:<col>: error: <message>`, optionall
 | invalid C variable-tail type        | `C variable tail cannot use type 'f32'`                 |
 | owning C variable-tail rvalue       | `owning temporary would leak`                           |
 | `--lib` import in no library        | `module 'util.strings' is in no library`                |
+| `$cfg` in an interface file (D9.11) | `an interface file holds no '$cfg'`, at the `$cfg`      |
 
 The missing-`main` row is the one diagnostic a build reports and `fort --check` does not: under
 `--check` the root is a module under inspection and D8.6 is not applied (D20.1). Every other row
@@ -1060,6 +1061,10 @@ is reported the same way in both modes, and `--check --json` reports them as the
 
 The mixed `$if` message is `a module $if cannot contain both imports and declarations`. It stands
 at the opening `$if` (D21.3).
+
+Against the interface file of a used library, an import of an import binding gives
+`module '<m>' has no declaration named '<n>'` and not `cannot import '<n>'`, because section 10.3
+binds each import of a section as `<p><k>` and keeps no import name of the source.
 
 Notes accompany some of these: "not found" lists `note: looked for <path>` once per root and
 reading, and `note: looked for <module> in library '<name>'` once per reading for a path of a used

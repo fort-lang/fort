@@ -257,8 +257,8 @@ file: `fort [options] --lib <name> <root>`.
   error, because every closure holds `std.rt` and only the library `std` holds it (D9.10, D9.11).
 - `--emit-interface` requires `--lib`. It checks the library, writes its interface file to
   stdout (`module-system.md` 10.3) and stops, so it writes no file and runs no `--cc`. Its bytes
-  are the bytes of the `interface.ft` of the artifact. It is a usage error together with `-S` or
-  `-c`.
+  are the bytes of the `interface.ft` of the artifact. It is a usage error together with `-S`,
+  `-c` or `-o`.
 - `--cache-dir <dir>` selects the cache directory of section 2.3. The default is
   `<root>/.fort-cache` under `--lib` and `<entry dir>/.fort-cache` otherwise. `--cache-stats`
   writes one line to stdout after the build: `cache hit <unit> <name> <key>` or
@@ -318,7 +318,7 @@ A library build (D9.11) adds two groups of texts, each with status 2. Nine repor
 the compiler cannot use and then print the usage line: `invalid library name '<name>'`,
 `invalid --use argument '<arg>'`, `duplicate library '<name>'`,
 `--lib does not combine with -I, -l, --check, --json, --index, --tokens, --ast or a --fir option`,
-`--emit-interface requires --lib`, `--emit-interface does not combine with -S or -c`,
+`--emit-interface requires --lib`, `--emit-interface does not combine with -S, -c or -o`,
 `--ar requires --lib`, `<option> requires --lib or --use` (for `--cache-dir` and
 `--cache-stats`), and `a library build needs --use std=<path>`. Thirteen report an artifact,
 a library root or the archiver: `cannot read library root '<root>': <reason>`,

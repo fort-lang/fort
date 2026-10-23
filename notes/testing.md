@@ -31,7 +31,8 @@ bullet at a time and without a rewrite.
   `highlight_selftest`, `extension_selftest`, `panic_coverage`, `panic_coverage_selftest` and
   one `mutation_anchors_<table>` test for each table in `tools/mutations`, and the three
   `mutate_` tests of `--check` over the fixture `test/mutate/strict_table.json`;
-  the 71 bootstrap0 C suites. Integration: the corpus (`lang`, `lang-json`), `fixpoint`, `tty`,
+  the 71 bootstrap0 C suites. Integration: the corpus (`lang`, `lang-json`), `library-interface`,
+  `fixpoint`, `tty`,
   `stack_depth` and `lsp-binary`; bootstrap0 has none, since building bootstrap-1 proves the C
   compiler. `stack_depth` gives each compiler of the build a 1 MB stack and a type of 254
   nested groups (D2.11). Before the checkers kept their suffixes on a stack of their own, that
@@ -602,6 +603,17 @@ bullet at a time and without a rewrite.
   `test/lsp_binary_test.sh` fed the binary a recorded script (ctest `lsp-binary`, labels `lsp`
   and `integration`). Hold such a script against a wrong binary before
   trusting it: this one exits 1 for `/bin/cat` and for `build/<Host>/<preset>/fort` (T-064).
+
+- **`library-interface` holds the interface file of `std` against its sources** (D9.11).
+  `test/library/interface_test.py` writes the interface with `--lib std <std> --emit-interface`
+  twice and from a copy of the root at another path, and requires the same bytes. It then builds
+  `test/library/checker.ft`, a program over the compiler modules that loads a program with
+  `modules.use_library` in place of the standard library directory. A program that imports every
+  section must check clean, and the writer must write each section that a check read as the same
+  text. Each program of `test/lang` must then give the same error lines and status against the
+  interface as against the sources; notes are not compared, because a note can point into the
+  interface file. The checker is the test-only path until a build reads an interface file
+  through `--use`.
 
 ## 5. Product tests and the fixed point
 

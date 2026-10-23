@@ -1,0 +1,321 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| segments ok
+//| walk ok
+//| ok
+/// Checks the walk of a library root in src/fort/library/tree.ft (D9.11, module-system.md 10.1):
+/// which files are modules, the module path of each, the byte order of the list, and the root
+/// that cannot be read.
+import library.tree;
+import modules_env;
+import std.libc;
+import std.str;
+import std.strbuf;
+
+// ---- segments ----------------------------------------------------------------------
+
+fn a_segment_is_an_identifier_that_is_no_keyword() void {
+    assert(tree.is_segment("geom"));
+    assert(tree.is_segment("_x9"));
+    assert(tree.is_segment("Z"));
+    assert(!tree.is_segment(""));
+    assert(!tree.is_segment("007"));
+    assert(!tree.is_segment("9a"));
+    assert(!tree.is_segment("my-dir"));
+    assert(!tree.is_segment("a.b"));
+    assert(!tree.is_segment(".fort-cache"));
+    // a keyword and a reserved word (D9.1)
+    assert(!tree.is_segment("struct"));
+    assert(!tree.is_segment("while"));
+    assert(!tree.is_segment("type"));
+    assert(!tree.is_segment("union"));
+    assert(!tree.is_segment("i32"));
+    assert(!tree.is_segment("string"));
+    assert(!tree.is_segment("as"));
+    assert(!tree.is_segment("import"));
+    assert(!tree.is_segment("async"));
+    assert(!tree.is_segment("a b"));
+    assert(!tree.is_segment("caf\xC3\xA9"));
+    assert(!tree.is_segment("$if"));
+    // a name that only starts like a keyword is a segment
+    assert(tree.is_segment("structs"));
+    assert(tree.is_segment("i32x"));
+    assert(tree.is_segment("_struct"));
+    assert(tree.is_segment("std"));
+}
+
+// ---- the walk -------------------------------------------------------------------------
+
+// Walks `<sandbox>/<rel>` as the library `name` into `*t`.
+fn walk(modules_env.env* e, string name, string rel, tree.tree mut* t, i32 mut* failure) bool {
+    string own root = modules_env.in_sandbox(e, rel);
+    defer del(root);
+    return tree.walk(t, name, root, failure);
+}
+
+// Whether entry `i` of the list is the module `path` at the sandbox file `rel`.
+fn entry_is(modules_env.env* e, tree.tree* t, u64 i, string path, string rel) bool {
+    string own file = modules_env.in_sandbox(e, rel);
+    defer del(file);
+    return i < tree.count(t) && tree.path_at(t, i) == path && tree.file_at(t, i) == file;
+}
+
+fn each_module_file_below_the_root_is_listed_in_byte_order() void {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "lib/geom/vec.ft", "i32 A = 1;\n");
+    modules_env.add(&e, "lib/geom/shape/circle.ft", "i32 B = 1;\n");
+    modules_env.add(&e, "lib/geom/shape.ft", "i32 C = 1;\n");
+    modules_env.add(&e, "lib/geom/Big.ft", "i32 D = 1;\n");
+    modules_env.add(&e, "lib/geom/shape_x.ft", "i32 E = 1;\n");
+    tree.tree mut t = tree.tree{};
+    defer tree.free(&t);
+    i32 mut failure = 0;
+    assert(walk(&e, "geom", "lib/geom", &t, &failure));
+    assert(tree.count(&t) == 5);
+    assert(entry_is(&e, &t, 0, "geom.Big", "lib/geom/Big.ft"));
+    assert(entry_is(&e, &t, 1, "geom.shape", "lib/geom/shape.ft"));
+    assert(entry_is(&e, &t, 2, "geom.shape.circle", "lib/geom/shape/circle.ft"));
+    assert(entry_is(&e, &t, 3, "geom.shape_x", "lib/geom/shape_x.ft"));
+    assert(entry_is(&e, &t, 4, "geom.vec", "lib/geom/vec.ft"));
+    assert(tree.find(&t, "geom.shape.circle") == 2);
+    assert(tree.find(&t, "geom.circle") == -1);
+}
+
+fn a_name_that_is_no_segment_and_another_file_are_no_module() void {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "lib/geom/vec.ft", "i32 A = 1;\n");
+    modules_env.add(&e, "lib/geom/007.ft", "i32 B = 1;\n");
+    modules_env.add(&e, "lib/geom/my-dir/x.ft", "i32 C = 1;\n");
+    modules_env.add(&e, "lib/geom/.fort-cache/y.ft", "i32 D = 1;\n");
+    modules_env.add(&e, "lib/geom/notes.txt", "text\n");
+    modules_env.add(&e, "lib/geom/struct.ft", "i32 E = 1;\n");
+    modules_env.add(&e, "lib/geom/a.b.ft", "i32 F = 1;\n");
+    modules_env.add(&e, "lib/geom/.ft", "i32 G = 1;\n");
+    tree.tree mut t = tree.tree{};
+    defer tree.free(&t);
+    i32 mut failure = 0;
+    assert(walk(&e, "geom", "lib/geom", &t, &failure));
+    assert(tree.count(&t) == 1);
+    assert(entry_is(&e, &t, 0, "geom.vec", "lib/geom/vec.ft"));
+}
+
+// Makes the sandbox link `rel` that names `target`.
+fn link(modules_env.env* e, string target, string rel) void {
+    string own path = modules_env.in_sandbox(e, rel);
+    defer del(path);
+    char mut@ own c_target = str.to_cstr(target);
+    defer del(c_target);
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    assert(libc.symlink(c_target.ptr, c_path.ptr) == 0);
+}
+
+fn the_walk_follows_no_symbolic_link() void {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "lib/geom/vec.ft", "i32 A = 1;\n");
+    modules_env.add(&e, "outside/shape/circle.ft", "i32 B = 1;\n");
+    modules_env.add(&e, "outside/line.ft", "i32 C = 1;\n");
+    link(&e, "vec.ft", "lib/geom/copy.ft");
+    link(&e, "../../outside/shape", "lib/geom/shape");
+    link(&e, "../../outside/line.ft", "lib/geom/line.ft");
+    tree.tree mut t = tree.tree{};
+    defer tree.free(&t);
+    i32 mut failure = 0;
+    assert(walk(&e, "geom", "lib/geom", &t, &failure));
+    assert(tree.count(&t) == 1);
+    assert(entry_is(&e, &t, 0, "geom.vec", "lib/geom/vec.ft"));
+}
+
+fn a_root_with_no_module_gives_an_empty_list() void {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "lib/geom/notes.txt", "text\n");
+    tree.tree mut t = tree.tree{};
+    defer tree.free(&t);
+    i32 mut failure = 0;
+    assert(walk(&e, "geom", "lib/geom", &t, &failure));
+    assert(tree.count(&t) == 0);
+    assert(failure == 0);
+}
+
+fn a_root_that_cannot_be_read_gives_its_errno() void {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    tree.tree mut t = tree.tree{};
+    defer tree.free(&t);
+    i32 mut failure = 0;
+    assert(!walk(&e, "geom", "missing", &t, &failure));
+    assert(failure == libc.ENOENT);
+}
+
+fn a_root_with_a_trailing_separator_takes_no_second_one() void {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "lib/geom/vec.ft", "i32 A = 1;\n");
+    tree.tree mut t = tree.tree{};
+    defer tree.free(&t);
+    i32 mut failure = 0;
+    assert(walk(&e, "geom", "lib/geom/", &t, &failure));
+    assert(entry_is(&e, &t, 0, "geom.vec", "lib/geom/vec.ft"));
+}
+
+// A file system that records no kinds gives DT_UNKNOWN, and the walk then asks the file system.
+fn an_unknown_kind_is_asked_of_the_file_system() void {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "lib/a.ft", "i32 A = 1;\n");
+    modules_env.add(&e, "lib/sub/b.ft", "i32 B = 1;\n");
+    link(&e, "a.ft", "lib/c.ft");
+    string own file = modules_env.in_sandbox(&e, "lib/a.ft");
+    defer del(file);
+    string own dir = modules_env.in_sandbox(&e, "lib/sub");
+    defer del(dir);
+    string own linked = modules_env.in_sandbox(&e, "lib/c.ft");
+    defer del(linked);
+    assert(tree.kind_of(file, libc.DT_UNKNOWN) == libc.DT_REG);
+    assert(tree.kind_of(dir, libc.DT_UNKNOWN) == libc.DT_DIR);
+    assert(tree.kind_of(linked, libc.DT_UNKNOWN) == libc.DT_LNK);
+    // a kind that the stream gave is taken as it is
+    assert(tree.kind_of(file, libc.DT_DIR) == libc.DT_DIR);
+    assert(tree.kind_of(dir, libc.DT_LNK) == libc.DT_LNK);
+    assert(tree.is_link(linked) && !tree.is_link(file) && !tree.is_link(dir));
+    assert(tree.is_directory(dir) && !tree.is_directory(file));
+}
+
+fn a_directory_below_the_root_that_cannot_be_read_fails_the_walk() void {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "lib/geom/a.ft", "i32 A = 1;\n");
+    modules_env.add(&e, "lib/geom/closed/b.ft", "i32 B = 1;\n");
+    string own closed = modules_env.in_sandbox(&e, "lib/geom/closed");
+    defer del(closed);
+    char mut@ own c_closed = str.to_cstr(closed);
+    defer del(c_closed);
+    assert(libc.chmod(c_closed.ptr, 0) == 0);
+    tree.tree mut t = tree.tree{};
+    defer tree.free(&t);
+    i32 mut failure = 0;
+    bool walked = walk(&e, "geom", "lib/geom", &t, &failure);
+    // put the mode back so that the harness can remove the sandbox
+    assert(libc.chmod(c_closed.ptr, 0o700) == 0);
+    if (failure == 0) {
+        // a process that reads every directory, such as root, reads this one too
+        assert(walked && tree.count(&t) == 2);
+        return;
+    }
+    assert(!walked && failure == libc.EACCES);
+}
+
+// Fifteen modules over four levels, written in an order of their own. The walk lists them in
+// byte order of the module path, which Python's sorted gave: `.` (0x2E) before a digit, a
+// digit before an upper-case letter, that before `_` (0x5F), and `_` before a lower-case letter.
+string[15] MANY = {
+    "z9.ft", "a/b/c/d.ft", "mn.ft", "_.ft", "a.ft", "Ab/x.ft", "m_n.ft", "a0.ft", "z/Z.ft",
+    "a/b.ft", "__x.ft", "ab.ft", "m/n/o.ft", "a_b.ft", "a/b/c.ft",
+};
+string[15] MANY_SORTED = {
+    "geom.Ab.x", "geom._", "geom.__x", "geom.a", "geom.a.b", "geom.a.b.c", "geom.a.b.c.d",
+    "geom.a0", "geom.a_b", "geom.ab", "geom.m.n.o", "geom.m_n", "geom.mn", "geom.z.Z", "geom.z9",
+};
+
+fn many_modules_over_many_levels_stand_in_byte_order() void {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u64 mut i = 0;
+    while (i < MANY.len) {
+        strbuf.clear(&b);
+        strbuf.append(&b, "lib/geom/");
+        strbuf.append(&b, MANY[i]);
+        modules_env.add(&e, strbuf.view(&b), "i32 A = 1;\n");
+        i += 1;
+    }
+    tree.tree mut t = tree.tree{};
+    defer tree.free(&t);
+    i32 mut failure = 0;
+    assert(walk(&e, "geom", "lib/geom", &t, &failure));
+    assert(tree.count(&t) == MANY_SORTED.len);
+    i = 0;
+    while (i < MANY_SORTED.len) {
+        if (tree.path_at(&t, i) != MANY_SORTED[i]) {
+            println(i, ": ", tree.path_at(&t, i));
+        }
+        assert(tree.path_at(&t, i) == MANY_SORTED[i]);
+        // the file is the path below the root, `.` written `/`, with the suffix
+        string file = tree.file_at(&t, i);
+        assert(str.ends_with(file, ".ft"));
+        i += 1;
+    }
+}
+
+fn a_list_is_empty_after_free_and_can_be_walked_again() void {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "lib/geom/a.ft", "i32 A = 1;\n");
+    tree.tree mut t = tree.tree{};
+    defer tree.free(&t);
+    i32 mut failure = 0;
+    assert(walk(&e, "geom", "lib/geom", &t, &failure));
+    assert(tree.count(&t) == 1);
+    tree.free(&t);
+    assert(tree.count(&t) == 0 && tree.find(&t, "geom.a") == -1);
+    assert(walk(&e, "other", "lib/geom", &t, &failure));
+    assert(tree.count(&t) == 1 && tree.path_at(&t, 0) == "other.a");
+}
+
+// opendir(3) gives ENOTDIR for a file before it asks for permission, so a file that the process
+// cannot read is still no directory, and only a directory that it cannot read counts as one.
+fn a_file_without_read_permission_is_no_directory() void {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "lib/locked.ft", "i32 A = 1;\n");
+    string own file = modules_env.in_sandbox(&e, "lib/locked.ft");
+    defer del(file);
+    char mut@ own c_file = str.to_cstr(file);
+    defer del(c_file);
+    assert(libc.chmod(c_file.ptr, 0) == 0);
+    bool directory = tree.is_directory(file);
+    u8 kind = tree.kind_of(file, libc.DT_UNKNOWN);
+    assert(libc.chmod(c_file.ptr, 0o600) == 0);
+    assert(!directory && kind == libc.DT_REG);
+}
+
+// An errno that an earlier call left does not fail the walk: next_entry clears it before each
+// readdir(3), so only an error of the walk itself counts.
+fn an_old_errno_does_not_fail_the_walk() void {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add(&e, "lib/geom/a.ft", "i32 A = 1;\n");
+    modules_env.add(&e, "lib/geom/sub/b.ft", "i32 B = 1;\n");
+    *libc.errno_slot() = libc.EACCES;
+    tree.tree mut t = tree.tree{};
+    defer tree.free(&t);
+    i32 mut failure = 0;
+    assert(walk(&e, "geom", "lib/geom", &t, &failure));
+    assert(failure == 0 && tree.count(&t) == 2);
+}
+
+fn main() i32 {
+    a_segment_is_an_identifier_that_is_no_keyword();
+    println("segments ok");
+    each_module_file_below_the_root_is_listed_in_byte_order();
+    a_name_that_is_no_segment_and_another_file_are_no_module();
+    the_walk_follows_no_symbolic_link();
+    a_root_with_no_module_gives_an_empty_list();
+    a_root_that_cannot_be_read_gives_its_errno();
+    a_root_with_a_trailing_separator_takes_no_second_one();
+    an_unknown_kind_is_asked_of_the_file_system();
+    a_directory_below_the_root_that_cannot_be_read_fails_the_walk();
+    many_modules_over_many_levels_stand_in_byte_order();
+    a_list_is_empty_after_free_and_can_be_walked_again();
+    a_file_without_read_permission_is_no_directory();
+    an_old_errno_does_not_fail_the_walk();
+    println("walk ok");
+    println("ok");
+    return 0;
+}

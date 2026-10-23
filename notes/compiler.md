@@ -283,6 +283,16 @@ came here.
   checker and the index walk share it because the index's file order is documented as the
   checker's order (D20.3), and two copies of that loop would drift with no test able to see it.
 
+- **A library build loads its modules from a list, and a used library from its sections**
+  (D9.11, module-system.md 10.2). `library/tree.ft` walks the root once and lists the modules in
+  byte order of the path; `modules.load_library` resolves a path of the library only in that list,
+  so the loader opens no other file for it, and it refuses a path of no library at the import.
+  `modules.use_library` lexes an interface file once and keeps the token range of each section. A
+  section becomes a module (`module.interface`) only when an import reaches it, and its positions
+  are those of the whole file. A section has no file of its own, so it takes no place in the
+  identity map. `library/interface.ft` reads the checked trees and writes nothing into them, so it
+  can run on a module that an interface file declared: the writer gives that section its own text
+  back, which `test/library/checker.ft` and `interface_values_test` hold.
 - **A diagnostic about two declarations stands at the one in the module being checked**, and the
   other declaration is its note (D14.2, amended 2026-09-14 by T-112). The closure is checked in
   dependency order (D9.10), so that declaration is the later of the two and the note can name a

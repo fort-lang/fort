@@ -1,0 +1,388 @@
+//! run
+//! flags: -I ../../src/fort
+//! stdout:
+//| literals ok
+//| numbers ok
+//| zero values ok
+//| prefix ok
+//| order ok
+//| imports ok
+//| selection ok
+//| ok
+/// Checks the parts of src/fort/library/interface.ft one by one, apart from a checked library:
+/// the bytes of a literal, the text of an integer and of a float, the zero value of each type,
+/// the binding prefix, the byte order of names and paths, the import list of a section and the
+/// walk over `$if` (module-system.md 10.3).
+import ast;
+import consts;
+import containers;
+import diag;
+import library.interface;
+import modules;
+import prim;
+import std.strbuf;
+import types;
+
+// The position of each node these tests make: no file names it.
+diag.loc AT = {};
+
+// ---- literals ----------------------------------------------------------------------------
+
+// The text that write_byte gives the byte `code`.
+fn byte_text(u64 code, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    interface.write_byte(code, out);
+    return strbuf.view(out);
+}
+
+fn a_printable_byte_stands_as_it_is_and_every_other_takes_hex() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(byte_text(cast('a', u64), &b) == "a");
+    assert(byte_text(cast(' ', u64), &b) == " ");
+    assert(byte_text(cast('~', u64), &b) == "~");
+    assert(byte_text(cast('0', u64), &b) == "0");
+    // the three bytes that a literal escapes
+    assert(byte_text(cast('"', u64), &b) == "\\\"");
+    assert(byte_text(cast('\'', u64), &b) == "\\'");
+    assert(byte_text(cast('\\', u64), &b) == "\\\\");
+    // below and above the printable range, with upper-case digits
+    assert(byte_text(0, &b) == "\\x00");
+    assert(byte_text(9, &b) == "\\x09");
+    assert(byte_text(10, &b) == "\\x0A");
+    assert(byte_text(31, &b) == "\\x1F");
+    assert(byte_text(127, &b) == "\\x7F");
+    assert(byte_text(128, &b) == "\\x80");
+    assert(byte_text(171, &b) == "\\xAB");
+    assert(byte_text(255, &b) == "\\xFF");
+    // every byte of the printable range but the three is one byte of text
+    u64 mut code = 32;
+    u64 mut plain = 0;
+    while (code <= 126) {
+        if (byte_text(code, &b).len == 1) {
+            plain += 1;
+        }
+        code += 1;
+    }
+    assert(plain == 95 - 3);
+    // every other byte is four bytes of text
+    code = 0;
+    u64 mut hex = 0;
+    while (code < 256) {
+        if (byte_text(code, &b).len == 4) {
+            hex += 1;
+        }
+        code += 1;
+    }
+    assert(hex == 256 - 95);
+}
+
+fn a_string_is_quoted_with_each_byte_written() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    interface.write_string("", &b);
+    assert(strbuf.view(&b) == "\"\"");
+    strbuf.clear(&b);
+    interface.write_string("it's \"x\"\n", &b);
+    assert(strbuf.view(&b) == "\"it\\'s \\\"x\\\"\\x0A\"");
+}
+
+// ---- numbers ---------------------------------------------------------------------------
+
+// The text that write_float gives the binary64 pattern `bits`.
+fn float_text(u64 bits, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    interface.write_float(bits, out);
+    return strbuf.view(out);
+}
+
+fn a_float_is_one_digit_a_point_the_rest_and_the_exponent() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(float_text(0x0000000000000000, &b) == "0.0e0");
+    assert(float_text(0x8000000000000000, &b) == "-0.0e0");
+    assert(float_text(0x3FF0000000000000, &b) == "1.0e0");
+    assert(float_text(0xBFF0000000000000, &b) == "-1.0e0");
+    assert(float_text(0x3FE0000000000000, &b) == "5.0e-1");
+    assert(float_text(0x4059000000000000, &b) == "1.0e2");
+    assert(float_text(0x3FB999999999999A, &b) == "1.0e-1");
+    assert(float_text(0x400921F9F01B866E, &b) == "3.14159e0");
+    assert(float_text(0x7FEFFFFFFFFFFFFF, &b) == "1.7976931348623157e308");
+    assert(float_text(0x0000000000000001, &b) == "5.0e-324");
+    assert(float_text(0x0010000000000000, &b) == "2.2250738585072014e-308");
+    assert(float_text(0x44B52D02C7E14AF6, &b) == "1.0e23");
+}
+
+// The text that write_int gives the value `v`.
+fn int_text(consts.cval v, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    interface.write_int(v, out);
+    return strbuf.view(out);
+}
+
+fn an_integer_is_decimal_with_a_minus_for_a_negative_value() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(int_text(consts.cv_from_i64(0), &b) == "0");
+    assert(int_text(consts.cv_from_i64(42), &b) == "42");
+    assert(int_text(consts.cv_from_i64(-1), &b) == "-1");
+    assert(int_text(consts.cv_from_i64(-9223372036854775807 - 1), &b) == "-9223372036854775808");
+    assert(int_text(consts.cv_from_u64(18446744073709551615), &b) == "18446744073709551615");
+}
+
+// ---- zero values ---------------------------------------------------------------------
+
+// The text that write_zero gives the type `t`.
+fn zero_text(types.node* t, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    interface.write_zero(t, out);
+    return strbuf.view(out);
+}
+
+fn each_type_has_its_zero_value() void {
+    types.table mut tt = types.table{};
+    defer types.type_table_free(&tt);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    types.node* i32_type = types.type_prim(&tt, prim.prim_kind.prim_i32);
+    assert(zero_text(i32_type, &b) == "0");
+    assert(zero_text(types.type_prim(&tt, prim.prim_kind.prim_u8), &b) == "0");
+    assert(zero_text(types.type_prim(&tt, prim.prim_kind.prim_u64), &b) == "0");
+    assert(zero_text(types.type_prim(&tt, prim.prim_kind.prim_f32), &b) == "0.0e0");
+    assert(zero_text(types.type_prim(&tt, prim.prim_kind.prim_f64), &b) == "0.0e0");
+    assert(zero_text(types.type_prim(&tt, prim.prim_kind.prim_bool), &b) == "false");
+    assert(zero_text(types.type_prim(&tt, prim.prim_kind.prim_char), &b) == "'\\x00'");
+    assert(zero_text(types.type_ptr(&tt, i32_type, false, true), &b) == "null");
+    assert(zero_text(types.type_voidptr(&tt, false, false), &b) == "null");
+    types.node*[1] params = {i32_type};
+    assert(zero_text(types.type_fn(&tt, i32_type, params[..], false), &b) == "null");
+    assert(zero_text(types.type_array(&tt, i32_type, 4), &b) == "{}");
+    assert(zero_text(types.type_span(&tt, i32_type, false, false), &b) == "{}");
+    assert(zero_text(types.type_string(&tt, false), &b) == "{}");
+    assert(zero_text(types.type_struct(&tt, "point", null), &b) == "{}");
+    assert(zero_text(types.type_enum(&tt, "color", null), &b) == "{}");
+}
+
+// ---- the binding prefix ----------------------------------------------------------------
+
+// The prefix that choose_prefix gives the declaration names `names`.
+fn prefix_of(string@ names, strbuf.str_buf mut* out) string {
+    ast.arena mut ar = ast.arena{};
+    defer ast.ast_arena_free(&ar);
+    interface.decl_list mut decls = interface.decl_list{};
+    defer interface.free_decls(&decls);
+    u64 mut i = 0;
+    while (i < names.len) {
+        ast.node mut* n = ast.ast_new(&ar, ast.ast_kind.k_var_decl, AT);
+        n->name = names[i];
+        interface.push_decl(&decls, n);
+        i += 1;
+    }
+    interface.choose_prefix(&decls, out);
+    return strbuf.view(out);
+}
+
+fn the_prefix_is_the_shortest_run_that_no_name_starts_with_before_a_digit() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string[2] plain = {"a", "B"};
+    assert(prefix_of(plain[..], &b) == "_");
+    string[2] letters = {"_a", "__b"};
+    assert(prefix_of(letters[..], &b) == "_");
+    string[1] one = {"_0"};
+    assert(prefix_of(one[..], &b) == "__");
+    string[2] two = {"_9x", "__0"};
+    assert(prefix_of(two[..], &b) == "___");
+    string[3] three = {"_1", "__2", "___3"};
+    assert(prefix_of(three[..], &b) == "____");
+    // a gap leaves the shorter run free
+    string[1] gap = {"__5"};
+    assert(prefix_of(gap[..], &b) == "_");
+    string[1] none = {"x"};
+    assert(prefix_of(none[0..0], &b) == "_");
+    assert(interface.is_binding_name("_0", "_"));
+    assert(!interface.is_binding_name("_", "_"));
+    assert(!interface.is_binding_name("_x0", "_"));
+    assert(interface.is_binding_name("__7a", "__"));
+}
+
+// ---- byte order ---------------------------------------------------------------------------
+
+fn names_and_paths_sort_in_byte_order() void {
+    ast.arena mut ar = ast.arena{};
+    defer ast.ast_arena_free(&ar);
+    interface.decl_list mut decls = interface.decl_list{};
+    defer interface.free_decls(&decls);
+    string[7] names = {"b", "_c", "B", "a1", "a", "Z", "a_"};
+    u64 mut i = 0;
+    while (i < names.len) {
+        ast.node mut* n = ast.ast_new(&ar, ast.ast_kind.k_var_decl, AT);
+        n->name = names[i];
+        interface.push_decl(&decls, n);
+        i += 1;
+    }
+    interface.sort_decls(&decls);
+    string[7] sorted = {"B", "Z", "_c", "a", "a1", "a_", "b"};
+    i = 0;
+    while (i < sorted.len) {
+        assert(decls.items[i]->name == sorted[i]);
+        i += 1;
+    }
+    containers.str_vec mut paths = containers.str_create();
+    defer containers.str_free(&paths);
+    string[5] unsorted = {"geom.z_a", "geom.z", "geom.Y", "geom.z.a", "geom.a"};
+    i = 0;
+    while (i < unsorted.len) {
+        containers.str_push(&paths, unsorted[i]);
+        i += 1;
+    }
+    interface.sort_paths(&paths);
+    string[5] ordered = {"geom.Y", "geom.a", "geom.z", "geom.z.a", "geom.z_a"};
+    i = 0;
+    while (i < ordered.len) {
+        assert(containers.str_at(&paths, i) == ordered[i]);
+        i += 1;
+    }
+}
+
+fn a_list_grows_past_its_first_capacity() void {
+    ast.arena mut ar = ast.arena{};
+    defer ast.ast_arena_free(&ar);
+    interface.decl_list mut decls = interface.decl_list{};
+    defer interface.free_decls(&decls);
+    u64 mut i = 0;
+    while (i < 3 * interface.LIST_MIN_CAP + 1) {
+        ast.node mut* n = ast.ast_new(&ar, ast.ast_kind.k_var_decl, AT);
+        interface.push_decl(&decls, n);
+        i += 1;
+    }
+    assert(decls.len == 3 * interface.LIST_MIN_CAP + 1);
+    assert(decls.items.len >= decls.len);
+    interface.free_decls(&decls);
+    assert(decls.len == 0);
+}
+
+// ---- imports and qualifiers ------------------------------------------------------------
+
+fn an_import_is_recorded_once_and_the_own_module_never() void {
+    modules.module mut m = modules.module{};
+    m.path = "geom.a";
+    interface.section mut sec = interface.section{};
+    sec.m = &m;
+    defer containers.str_free(&sec.imports);
+    interface.add_import(&sec, "geom.b");
+    interface.add_import(&sec, "geom.a");
+    interface.add_import(&sec, "geom.b");
+    interface.add_import(&sec, "std.io");
+    assert(sec.imports.len == 2);
+    assert(interface.has_import(&sec, "geom.b") && interface.has_import(&sec, "std.io"));
+    assert(!interface.has_import(&sec, "geom.a"));
+}
+
+fn a_qualifier_is_the_binding_of_the_position_of_its_import() void {
+    modules.module mut m = modules.module{};
+    m.path = "geom.a";
+    interface.section mut sec = interface.section{};
+    sec.m = &m;
+    defer containers.str_free(&sec.imports);
+    defer strbuf.free(&sec.prefix);
+    strbuf.append(&sec.prefix, "__");
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    // the collection pass records and writes nothing
+    sec.collecting = true;
+    interface.write_qualifier(&sec, "geom.c", &b);
+    interface.write_qualifier(&sec, "geom.b", &b);
+    interface.write_qualifier(&sec, "geom.a", &b);
+    assert(strbuf.view(&b) == "" && sec.imports.len == 2);
+    interface.sort_paths(&sec.imports);
+    sec.collecting = false;
+    interface.write_qualifier(&sec, "geom.b", &b);
+    strbuf.push(&b, ' ');
+    interface.write_qualifier(&sec, "geom.c", &b);
+    strbuf.push(&b, ' ');
+    // the module of the section takes no qualifier
+    interface.write_qualifier(&sec, "geom.a", &b);
+    assert(strbuf.view(&b) == "__0. __1. ");
+}
+
+// ---- the walk over $if --------------------------------------------------------------------
+
+// A `$if` node over `then` and `other`, selected as `flags` says.
+fn compile_if(ast.arena mut* ar, u32 flags, ast.node mut* then, ast.node mut* other) ast.node mut* {
+    ast.node mut* n = ast.ast_new(ar, ast.ast_kind.k_compile_if, AT);
+    n->flags = flags;
+    n->b = then;
+    n->c = other;
+    return n;
+}
+
+// A branch holding one declaration named `name` of the kind `kind`.
+fn branch(ast.arena mut* ar, ast.ast_kind kind, string name) ast.node mut* {
+    ast.node mut* list = ast.ast_new(ar, ast.ast_kind.k_block, AT);
+    ast.node mut* decl = ast.ast_new(ar, kind, AT);
+    decl->name = name;
+    ast.ast_push(list, decl);
+    return list;
+}
+
+fn the_walk_takes_the_selected_branch_of_each_chain() void {
+    ast.arena mut ar = ast.arena{};
+    defer ast.ast_arena_free(&ar);
+    ast.node mut* module = ast.ast_new(&ar, ast.ast_kind.k_module, AT);
+    ast.node mut* plain = ast.ast_new(&ar, ast.ast_kind.k_fn_decl, AT);
+    plain->name = "plain";
+    ast.ast_push(module, plain);
+    ast.ast_push(module, ast.ast_new(&ar, ast.ast_kind.k_import, AT));
+    // then branch selected
+    ast.ast_push(module, compile_if(&ar, ast.FLAG_SELECT_THEN,
+                                    branch(&ar, ast.ast_kind.k_struct_decl, "then_taken"),
+                                    branch(&ar, ast.ast_kind.k_struct_decl, "else_left")));
+    // else branch: a block
+    ast.ast_push(module, compile_if(&ar, 0, branch(&ar, ast.ast_kind.k_enum_decl, "then_left"),
+                                    branch(&ar, ast.ast_kind.k_enum_decl, "else_taken")));
+    // `else $if`, whose second condition is selected
+    ast.node mut* second = compile_if(&ar, ast.FLAG_SELECT_THEN,
+                                      branch(&ar, ast.ast_kind.k_var_decl, "chain_taken"), null);
+    ast.ast_push(module, compile_if(&ar, 0, branch(&ar, ast.ast_kind.k_var_decl, "chain_left"),
+                                    second));
+    // no branch selected and no else
+    ast.ast_push(module, compile_if(&ar, 0, branch(&ar, ast.ast_kind.k_var_decl, "none"), null));
+    // an import selector holds no declaration
+    ast.ast_push(module, compile_if(&ar, ast.FLAG_SELECT_THEN | ast.FLAG_IMPORT_SELECTOR,
+                                    branch(&ar, ast.ast_kind.k_var_decl, "import_only"), null));
+    ast.ast_push(module, ast.ast_new(&ar, ast.ast_kind.k_error, AT));
+    interface.decl_list mut decls = interface.decl_list{};
+    defer interface.free_decls(&decls);
+    interface.collect_list(module, &decls);
+    string[4] want = {"plain", "then_taken", "else_taken", "chain_taken"};
+    assert(decls.len == want.len);
+    u64 mut i = 0;
+    while (i < want.len) {
+        assert(decls.items[i]->name == want[i]);
+        i += 1;
+    }
+}
+
+fn main() i32 {
+    a_printable_byte_stands_as_it_is_and_every_other_takes_hex();
+    a_string_is_quoted_with_each_byte_written();
+    println("literals ok");
+    a_float_is_one_digit_a_point_the_rest_and_the_exponent();
+    an_integer_is_decimal_with_a_minus_for_a_negative_value();
+    println("numbers ok");
+    each_type_has_its_zero_value();
+    println("zero values ok");
+    the_prefix_is_the_shortest_run_that_no_name_starts_with_before_a_digit();
+    println("prefix ok");
+    names_and_paths_sort_in_byte_order();
+    a_list_grows_past_its_first_capacity();
+    println("order ok");
+    an_import_is_recorded_once_and_the_own_module_never();
+    a_qualifier_is_the_binding_of_the_position_of_its_import();
+    println("imports ok");
+    the_walk_takes_the_selected_branch_of_each_chain();
+    println("selection ok");
+    println("ok");
+    return 0;
+}
