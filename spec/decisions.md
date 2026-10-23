@@ -1042,7 +1042,12 @@ Sections:
   standard library directory. The first segment `std` is reserved for the standard library
   directory. The current working directory is never searched. Import paths are root-relative (a file
   in `util/` imports its sibling as `util.other`). A module's identity is the real path of its file;
-  reaching one file through two different paths is an error.
+  reaching one file through two different paths is an error. In a library build (D9.11), a path
+  whose first segment names a used library resolves in that library and in no root. A library
+  build has no standard library directory. The identity of a module of a used library is the name
+  of the library and the module path.
+- history: Amended 2026-10-22: the three roots were the only places where a path resolved. D9.11
+  adds libraries, which own the paths that start with their names.
 
 ### D9.3 Import forms
 - owner: `module-system.md`.
@@ -1247,10 +1252,14 @@ Sections:
 - owner: `module-system.md`.
 - rule: Whole-program compilation: the compiler walks the import closure from the entry file,
   type-checks every module, emits one LLVM IR module (D19.1), and runs `--cc` over it once to
-  compile and link it (D14.3). Interface files, separate compilation, a module cache and incremental
-  rebuilds are deferred. Every closure holds `std.rt` (D13.1), which the compiler loads as a root of
-  its own beside the entry file, in a build and under `--check` alike, so the runtime is parsed,
-  checked and emitted like any other module and its records appear in the index (D20.3). What
+  compile and link it (D14.3). Whole-program compilation is the default. A build that names
+  `--lib` or `--use` is a library build, and D9.11 gives its interface files, its separate
+  compilation, its cache and its incremental rebuilds. Every closure holds `std.rt` (D13.1),
+  which the compiler loads as a root of its own beside the entry file, in a build and under
+  `--check` alike, so the runtime is parsed,
+  checked and emitted like any other module and its records appear in the index (D20.3). In a
+  library build, a unit other than the library `std` reads `std.rt` from the interface file of
+  `std` and emits no definition of it (D9.11). What
   `std.rt` imports is in the closure with it, `std.libc` above all, so every program is now compiled
   against those `extern` declarations and D9.8's identity rule binds its own declarations of those C
   symbols to them. Membership does not bind the name: a module that wants to name the runtime writes
@@ -1263,6 +1272,131 @@ Sections:
   float printers gave it `std.strbuf` as well, and `std.strbuf` imports `std.mem`, so every
   closure holds four. The sentence above does not change and the count is not in it; the cost of
   the three extra modules is measured in `notes/compiler.md` 7.
+  Amended 2026-10-22: the rule held the sentence "Interface files, separate compilation, a module
+  cache and incremental rebuilds are deferred." The user asked for compiled libraries "similar to
+  crates" on 2026-10-22. D9.11 adds them as library builds beside this default.
+
+### D9.11 Libraries and incremental builds
+- owner: `module-system.md` (10.1 to 10.4), `toolchain.md` (1, 2.1 to 2.3), `grammar.md`
+  (Module structure, Declarations).
+- rule: A library is a named directory tree of modules. `fort --lib <name> <root>` builds it once
+  into an artifact. A later build uses the artifact with `--use <name>=<path>`. A build that names
+  `--lib` or `--use` is a library build. A build that names neither is a whole-program build
+  (D9.10), and this decision changes nothing in it.
+
+  The name of a library is one module-path segment: an identifier that is not a keyword or a
+  reserved word (D9.1). The library `std` is the standard library (D9.2). The modules of a library
+  are the regular `.ft` files below `<root>`, at any depth, whose directory names and base name
+  are such segments. The file `<root>/a/b.ft` is the module `<name>.a.b`. Every import spells it
+  `<name>.a.b`, in a module of the library and in a module outside it. The compiler ignores every
+  other file and directory, and it follows no symbolic link. A root with no module is an error.
+
+  The unit of a library build is the set of modules that the build compiles to one object. Under
+  `--lib` the unit is every module of the library. Under `--use` without `--lib`, the unit is the
+  entry unit: the modules of the closure that are in no used library. A module path whose first
+  segment is the name of a used library resolves only in the interface file of that library, by
+  the two readings of D9.3 over its modules. The compiler searches no root of D9.2 for such a
+  path. A library build has no standard library directory, so a `std` path resolves only in a
+  library named `std`. Under `--lib`, a path whose first segment is `<name>` resolves only among
+  the modules that the walk lists, by the two readings of D9.3 over that list. The compiler opens
+  no other file for such a path, so a symbolic link and a file that a case-insensitive file system
+  matches give no module. Under `--lib`, a path whose first segment names neither `<name>` nor a
+  used library is a compile error. The roots of a `--lib` closure are `std.rt` and then each
+  module of the library in byte order of its path. Its dependency order is the post-order of that
+  walk, as in D9.10.
+
+  The artifact is the directory `<name>.flib/`. It holds `interface.ft`, `lib.a`, `manifest` and
+  the directory `summaries/`. `toolchain.md` 2.2 gives the byte format of each.
+  `interface.ft` is fort text that declares every module-level declaration of every module of the
+  library (D9.6), with no function body. `lib.a` is an archive with one member: the object of the
+  IR module of the library. `manifest` is text with one field on each line: the format version,
+  the unit, the compiler identity, the target, the build mode, the bounds mode, each configuration
+  pair (D21.1), `--cc`, each `-Xcc` argument, `--ar`, the source hash, the interface hash of each
+  used library, the key, the interface hash, the archive hash and the summaries version.
+  `summaries/` holds no file, and its version is 1. A later decision gives it content.
+
+  The interface file holds one section for each module of the library, in byte order of the
+  module path. A section starts with one import for each module that the source module selects
+  with an import (D21.3) or that a value of the section names, in byte order of the path. Each
+  import names the full module path, `<name>.a.b` for a module of the library, and has a binding
+  that the compiler makes. Then the section holds each selected declaration
+  of the module (D21.2), in byte order of its name. A name of another module is qualified with the
+  binding of its module. Each constant has its folded value (D4.4, D4.6). Each `mut` global has the
+  zero value of its type, because no dependent reads its initializer. No `$if` and no `$cfg`
+  remain. A function is a bodiless declaration, `fn name(T p) R;`, which is legal only in an
+  interface file. It declares a function of the internal calling convention (D9.9) with the symbol
+  `<module>.<name>` (D9.7), and the object of the library defines it. `module-system.md` 10.3 fixes
+  the spelling of each value and the spacing. The bytes of the file are a function of the sources
+  of the library, the interface files that the build reads, the target and the configuration map.
+
+  Every hash is SHA-256 (FIPS 180-4), written as 64 lowercase hex digits. The compiler identity
+  is the hash of the bytes of the running compiler executable. The source hash covers the module
+  path, the opened file path and the bytes of each module of the unit. The interface hash is the
+  hash of `interface.ft`. The key is the hash of the manifest lines from the format version to
+  the last used library. So the key covers the compiler identity, the options that change the
+  object, the target, the configuration, the source hash and the interface hash of each used
+  library. It does not cover the source hash or the archive of a used library.
+
+  The rebuild rule: the compiler rebuilds a unit when its key has no valid cache entry. A change
+  to a library that keeps its interface hash keeps the key of each dependent, so no dependent is
+  rebuilt. A change of its interface hash changes the key of each unit that uses the library.
+
+  The cache directory is `--cache-dir <dir>`. Its default is `<root>/.fort-cache/` under `--lib`
+  and `<entry dir>/.fort-cache/` otherwise. The cache entry of the key K is `<dir>/1/K/`. The
+  compiler writes an entry or an artifact file by file. It removes `manifest`, writes each other
+  file to a temporary name in the same directory and renames it, and then writes `manifest` the
+  same way. A directory is corrupt when its manifest is absent, has an unknown version or a
+  malformed line, has a key that is not the hash of its lines, or names a file whose hash differs.
+  A corrupt cache entry is a miss. A cache that the compiler cannot read or write gives a miss and
+  no error. Only two builds use the cache: a `--lib` build that writes an artifact, and a build
+  with `--use` that writes an object or an executable.
+
+  The command line adds `--lib <name> <root>`, `--use <name>=<path>` (repeatable),
+  `--emit-interface` (with `--lib`: write the interface file to stdout and stop), `--cache-dir
+  <dir>`, `--cache-stats` (write one line about the cache to stdout, with the cause of each
+  miss) and `--ar <path>` (default
+  `ar`). The manifest of a used library must name `<name>`. Its compiler identity, target, build
+  mode, bounds mode and configuration map must equal the ones of the build. The command line must
+  name with `--use` each library that its manifest uses, with the interface hash that the manifest
+  records. The used libraries must not form a cycle. A failure of one of these rules is an error
+  with status 2. `toolchain.md` 1 gives the combinations of options and the messages. One
+  invocation builds one unit. It does not build a used library, so a build tool runs one
+  invocation for each library, dependencies first.
+
+  Linkage: each unit is one IR module (D19.1). It defines the functions and the data of its own
+  modules. It declares each function of each interface module of its closure with `declare`, and
+  each constant and global with an `external` global, all `dso_local` (D9.7). It repeats the named
+  type of each struct of its closure. Its private data `@.str.<N>`, `@.file.<N>` and
+  `@.enum.<name>` is numbered from 0 in each unit (D19.5). Only the entry unit holds `main` (D9.7,
+  D11.6). The link line names the entry object and then the `lib.a` of each used library. A
+  library comes before each library that it uses. Where this order leaves a choice, the name that
+  is first in byte order comes first. The identity rule of D9.8 covers all units: a build checks
+  its closure, and then it checks each extern declaration of each module of each used library that
+  is not in its closure. Every closure holds `std.rt` (D9.10). The library `std` holds it, so a
+  library build other than `--lib std` must use `std`.
+
+  Whole-program mode stays the default. It reads no artifact, writes no cache and runs no
+  archiver, and its emitted text does not change (D19.5). The bootstrap chain (D14.7), the
+  fixpoint and the IR snapshots therefore do not change. The emitted text of a unit is a function
+  of its sources, the interface files that it reads, the target and the invocation inputs other
+  than `-o`, `--cache-dir` and `--cache-stats`. A program that a library build makes writes the
+  same output and exits with the same status as its whole-program build. The one exception is a
+  path in a runtime error message (D11.4): it is the path that the build of the library opened.
+  Only the IR text and `interface.ft` are byte-deterministic; an object and `lib.a` need not be.
+- rationale: the user asked for "non-trivial caching resulting in e.g. static libraries --
+  something similar to crates" on 2026-10-22. An interface file is fort text, so the parser and
+  the checker read it and no second format needs a reader. A key that holds the interface hash of
+  a dependency and not its source hash gives the crate rule: a change to a body rebuilds one
+  library.
+- history: Amended 2026-10-23: a first ruling of the user on 2026-10-23, "prefix outside only",
+  let a module of a library import a sibling by its path below the root. The user replaced that
+  ruling on 2026-10-23 with "long spelling only": every import names `<name>.<path>`, inside a
+  library too, and no short form exists. `std` already imports that way. `src/lsp` imports its
+  own modules as `lsp.<name>`, but it needs its one `import flt;` changed before it can be a
+  library. The imports of the compiler change in the ticket that builds it as a library. The
+  user ruled on 2026-10-23 that each invocation does one step and does not build a used library;
+  a driver like cargo can come later. The coordinator ratified the other eleven choices of the
+  first text on 2026-10-23. `--cache-stats` then gained the cause of each miss.
 
 ## D10 Memory and runtime checks
 
@@ -1521,6 +1655,8 @@ Sections:
   family (D11.5, D11.7, D12.2); it reaches the operating system through `std.libc`, with ordinary
   `extern` declarations (D9.8).
   `toolchain.md` 5 names its entry points and fixes what each one does.
+  In a library build (D9.11), `std.rt` is a module of the library `std`. The program then links
+  it from the archive of that library.
 - history: Amended 2026-09-11 (T-088): the runtime was `runtime/fort_rt.c`, compiled to
   `<std-dir>/fort_rt.o` and linked into every program, and this decision then called it permanent
   and not a self-hosting goal. The argument that reverses it: a builtin needs the compiler for one
@@ -1533,6 +1669,8 @@ Sections:
   needs a `.o`.
   Amended 2026-10-22: the user made the overwrite check static, so the runtime holds no failure
   path for it (D17.11).
+  Amended 2026-10-22: every program compiled `std.rt` into its own module. D9.11 adds library
+  builds, in which `std.rt` comes from the archive of the library `std`.
 
 ### D13.2 The v1 library modules
 - owner: `stdlib.md`.
@@ -1647,8 +1785,12 @@ Sections:
   `--fir-after` does not change the report), `--fir-stats` (after a build writes its module,
   write the line `lowered N of M` to stdout: N functions that the translator wrote of M
   definitions of fort functions, and N equals M, because a function that the translator does
-  not write is a compile error, `spec/fir.md` 9.8; combining it with `--tokens`, `--ast`,
-  `--check`, `--index`, `--fir` or `--fir-test` is a usage error), `--help`, `--version`.
+  not write is a compile error, `spec/fir.md` 9.8; a bodiless declaration of D9.11 is no
+  definition; combining it with `--tokens`, `--ast`,
+  `--check`, `--index`, `--fir` or `--fir-test` is a usage error), `--lib <name> <root>`,
+  `--use <name>=<path>` (repeatable), `--emit-interface`, `--cache-dir <dir>`, `--cache-stats`
+  and `--ar <path>` (the library builds of D9.11), `--help`, `--version`.
+  `--lib` takes no entry file; every other build takes one.
   Exit status: 0 success, 1 compile error, 2 usage, toolchain (`--cc` failed) or internal error;
   usage and toolchain errors are printed as `fort: error: <message>`.
   A Linux x86-64 compiler stores `x86_64-linux-gnu` as its built target.
@@ -1659,7 +1801,10 @@ Sections:
   The compiler accepts `x86_64-linux-gnu` and `arm64-apple-macosxM.m.p` target forms.
   In IR modes, it rejects any other target form as a usage error with status 2.
   `-S --target` may select the other target and must emit IR for that selected target.
-  A non-built target with `-S` requires an explicit `--std-dir` option before IR emission.
+  A non-built target with `-S` requires an explicit `--std-dir` option before IR emission in a
+  whole-program build. A library build reads no `--std-dir`; its used libraries carry the target.
+  `--lib std` uses no library. Its root supplies the standard modules for the selected target,
+  and the caller must give a root that matches that target.
   When `-S` and `-c` occur together, `-S` wins and permits that cross-target IR output.
   The caller must supply standard sources that match the selected target's C ABI and constants.
   The compiler checks that the option is present; it does not verify the sources' C ABI.
@@ -1701,6 +1846,11 @@ Sections:
   Amended 2026-10-01 (T-255): `--fir-stats` counted "N functions that the FIR path wrote", and
   N was less than M when the direct path wrote a function. T-255 deleted the direct path, so a
   module that a build writes has N equal to M; the flag stays for `tools/ir_snapshot.sh`.
+  Amended 2026-10-22: `--lib`, `--use`, `--emit-interface`, `--cache-dir`, `--cache-stats` and
+  `--ar` did not exist, and every build took an entry file. They are the library builds of D9.11.
+  Amended 2026-10-23: a non-built `-S` target required `--std-dir` in every build. A library
+  build reads no `--std-dir`: the used library `std`, or the root of `--lib std`, supplies the
+  standard modules.
 
 ### D14.2 Diagnostics and recovery
 - owner: `toolchain.md`.
@@ -1771,6 +1921,9 @@ Sections:
   position-independent executable by default on both targets.
   The default `--cc` is `clang` on both targets.
   Neither target links an object from a fort C runtime (D13.1).
+  A library build (D9.11) compiles the IR module of its unit with this line and `-c`. A `--lib`
+  build then archives the object with `<ar> rcs`. An entry build then links its object and the
+  archive of each used library with a second `--cc` line (`toolchain.md` 2.1).
 - history: Amended 2026-09-10 with D19: generated code was GNU assembly, assembled and linked by the
   system C compiler. Amended 2026-09-11 (T-088): the line also named `<std-dir>/fort_rt.o`, the C
   runtime object (D13.1 as amended).
@@ -1779,6 +1932,8 @@ Sections:
   `x86_64-linux-gnu` and Apple clang 21 for arm64 both link a position-independent executable
   without them. The default `--cc` became `clang` on both targets. Before this date the Mac
   default was `/usr/bin/clang`. From that date the driver had no branch on the target.
+  Amended 2026-10-22: every build ran one `--cc` line over one module of the whole program. D9.11
+  adds library builds with a compile line, an archive line and a link line.
 
 ### D14.4 Where the language tests live
 - owner: `toolchain.md`.
@@ -1909,13 +2064,14 @@ Generics; untagged unions (idiom: a fat struct with a kind field); tagged unions
 variadic function-pointer types; overloading; default
 and named arguments; visibility modifiers; type aliases; integer-range `for`; struct, array and
 span equality; definite-assignment analysis (idiom: initialize with `{}` or a sentinel);
-alignment and packed attributes (idiom: an opaque `u8[N]` field and a C shim); separate
-compilation and interface files; conditional compilation; labeled `break` (idiom: a flag or a
+alignment and packed attributes (idiom: an opaque `u8[N]` field and a C shim); conditional
+compilation; labeled `break` (idiom: a flag or a
 helper function); raw strings; a blank identifier; compile-time function evaluation; `alignof`;
 `sizeof(expr)`; array suffixes after a trailing pointer suffix (`i32[4]*[2]`, idiom: a struct);
 string `switch`; linear ownership, that is compile-time detection of leaks and of use after
 `move` (idiom: `defer del`, and the zeroing that `move` and `del` leave behind, D17); `goto`
-(never). Amended 2026-09-10: spans were called slices (D3.5).
+(never). Amended 2026-09-10: spans were called slices (D3.5). Amended 2026-10-22: the list
+held "separate compilation and interface files". D9.11 adds both as library builds.
 
 Deferred at the C boundary (2026-09-11, T-025): an extern link name or alias.
 An extern still has no link name of its own; its declared name is its C symbol (D9.8).
@@ -2456,6 +2612,7 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   and the emitter suites verify each module they emit. The goldens of
   `bootstrap0/test/gen_module_test.c` are the reference for the form of a module until the contract
   below says otherwise.
+  A library build (D9.11) emits one such module for each unit, and the module holds that unit.
 - history: Amended 2026-09-15 (T-140): Mac IR uses the selected Apple triple without a datalayout.
   Amended 2026-09-25 (the user): the hand-written samples under `test/ir/` and the pipeline test
   that ran them were retired; until then they were the reference for the form of a module.
@@ -2466,6 +2623,8 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   every function. The same day `toolchain.md` 6 item 1 dropped "in one forward pass", item 10
   dropped the sentence that the tree walk never has to know its predecessors and named the
   blocks by FIR block number, and section 8 replaced the direct path with the pipeline of FIR.
+  Amended 2026-10-22: every build emitted one module for the whole program. D9.11 adds library
+  builds, which emit one module for each unit.
 
 ### D19.2 Type mapping
 - owner: `toolchain.md` (6, the IR contract).
