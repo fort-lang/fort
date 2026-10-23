@@ -55,3 +55,8 @@ is in force now and T-103 lints it.
 [Ownership source rollout](ownership-source-rollout.md) plans compiler-source ownership integration.
 It covers incremental audits, diagnostics, source repairs, and CI enforcement.
 The plan follows D19.8 and `spec/toolchain.md` 1.1.
+
+## Retrospectives
+
+[The ownership wave](ownership-retrospective.md) records why the ownership work of 2026-10-02 to
+2026-10-18 failed, in 8 measured points, and the rules for the next design.
