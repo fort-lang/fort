@@ -94,9 +94,6 @@ struct scope {
     u32 continue_target;
     u64 defers_first;
     u64 locals_first;
-    u32 range_loan;
-    diag.loc range_location;
-    u32 range_statement;
 }
 
 // `items[..len]` holds the open scopes, the innermost last.
@@ -112,7 +109,6 @@ struct local_list {
     u64 len;
 }
 
-/// One inactive range binding. The IDs name a selected range node and this lowering occurrence.
 // The state of the lowering of one function. `block` receives the next statement. `counter` is
 // the last statement index that the walk gave, and `stmt` is the index of the statement that the
 // walk lowers now: 0 outside every statement (spec/fir.md 9.7). `scopes` is the stack of the open
@@ -131,7 +127,6 @@ struct lowerer {
     scope_vec scopes;
     gen.node_ref_vec defers;
     local_list named;
-    u32 next_loan;
     u64 floor;
     diag.loc exit_at;
     ast.sym* str_eq;
@@ -207,8 +202,9 @@ fn lower_function(check.checker mut* ck, ast.node* decl, fir.func mut* out, repo
     defer scopes_free(&lw.scopes);
     defer gen.refs_free(&lw.defers);
     defer locals_free(&lw.named);
-    prescan(&lw, decl->b);
+    prescan(out, decl->b);
     zero_owners(&lw);
+    // the body is the scope of kind `fn` (spec/fir.md 9.2)
     if (!lower_scope(&lw, decl->b, scope_kind.sc_fn, 0, 0)) {
         *why = lw.why;
         fir.func_free(out);
@@ -237,25 +233,25 @@ fn zero_owners(lowerer mut* lw) void {
 // Adds a named local for each declaration below `n`, in the order of a walk of the tree: a
 // declaration before its children, and the selected branch of a statement `$if` alone
 // (spec/fir.md 5.3). A range `for` declares its variable on the loop node.
-fn prescan(lowerer mut* lw, ast.node* n) void {
+fn prescan(fir.func mut* f, ast.node* n) void {
     if (n == null) {
         return;
     }
     if (n->kind == ast.ast_kind.k_compile_if) {
-        prescan(lw, selected_branch(n));
+        prescan(f, selected_branch(n));
         return;
     }
     if ((n->kind == ast.ast_kind.k_var_decl || n->kind == ast.ast_kind.k_range_for)
         && n->sym != null) {
-        fir.local_add(lw->f, n->sym->ty, fir.local_kind.lk_named, n->sym, n->name_loc);
+        fir.local_add(f, n->sym->ty, fir.local_kind.lk_named, n->sym, n->name_loc);
     }
-    prescan(lw, n->a);
-    prescan(lw, n->b);
-    prescan(lw, n->c);
-    prescan(lw, n->d);
+    prescan(f, n->a);
+    prescan(f, n->b);
+    prescan(f, n->c);
+    prescan(f, n->d);
     u64 mut i = 0;
     while (i < ast.ast_len(n)) {
-        prescan(lw, ast.ast_child(n, i));
+        prescan(f, ast.ast_child(n, i));
         i += 1;
     }
 }
@@ -361,8 +357,7 @@ fn scope_push(lowerer mut* lw, scope_kind kind, u32 break_target, u32 continue_t
         del(v->items);
         v->items = move(bigger);
     }
-    v->items[v->len] = scope{kind, break_target, continue_target, lw->defers.len,
-                             lw->named.len, 0, diag.loc{}, 0};
+    v->items[v->len] = scope{kind, break_target, continue_target, lw->defers.len, lw->named.len};
     v->len += 1;
 }
 
@@ -591,8 +586,12 @@ fn lower_statements(lowerer mut* lw, ast.node* n) bool {
 fn close_scope(lowerer mut* lw, diag.loc at) bool {
     u64 depth = lw->scopes.len - 1;
     if (!terminated(lw)) {
-        if (!expand(lw, depth, at)) { return false; }
-        if (!terminated(lw)) { mark_dead(lw, depth, at); }
+        if (!expand(lw, depth, at)) {
+            return false;
+        }
+        if (!terminated(lw)) {
+            mark_dead(lw, depth, at);
+        }
     }
     scope_pop(lw);
     return true;
@@ -672,17 +671,14 @@ fn unwind(lowerer mut* lw, ast.node* n, exit_kind x, u64 mut* stop) bool {
     u64 mut depth = lw->scopes.len;
     while (depth > lw->floor) {
         depth -= 1;
-        u32 loan = lw->scopes.items[depth].range_loan;
-        diag.loc at = lw->scopes.items[depth].range_location;
-        u32 statement_index = lw->scopes.items[depth].range_statement;
-        if (!expand(lw, depth, n->loc)) { return false; }
-        if (terminated(lw)) { return true; }
-        mark_dead(lw, depth, n->loc);
-        scope_kind kind = lw->scopes.items[depth].kind;
-        if (loan != 0 && !exit_stops_at(x, kind)) {
-            append(lw, fir.stmt_loan_end(loan, at, statement_index));
+        if (!expand(lw, depth, n->loc)) {
+            return false;
         }
-        if (exit_stops_at(x, kind)) {
+        if (terminated(lw)) {
+            return true;
+        }
+        mark_dead(lw, depth, n->loc);
+        if (exit_stops_at(x, lw->scopes.items[depth].kind)) {
             *stop = depth;
             return true;
         }
@@ -1117,35 +1113,31 @@ fn lower_for(lowerer mut* lw, ast.node* n) bool {
     return close_scope(lw, end_of(n));
 }
 
-// Select the collection once and retain its source place before any held address.
-fn range_collection(lowerer mut* lw, ast.node* coll, fir.place mut* out,
-    fir.place mut* original, u32 mut* header) bool {
+// The collection storage of a range `for` (D7.5, D17.10). An owning fixed array stays
+// in its place. A span or string header goes into a temporary with `own` removed.
+// The header copy lends the storage and holds its pointer and length before the loop.
+// Another fixed array goes into a value copy.
+fn range_collection(lowerer mut* lw, ast.node* coll, fir.place mut* out) bool {
     if (fir.type_owning(coll->ty) && coll->ty->kind == types.type_kind.k_array) {
         fir.place mut p = fir.place{};
-        if (!lower_place(lw, coll, &p)) { return false; }
-        *original = p;
+        if (!lower_place(lw, coll, &p)) {
+            return false;
+        }
         *out = hold_base(lw, p, true, coll->loc);
-        if (fir.place_indirect(lw->f, p)) { *header = out->local; }
         return true;
     }
     types.node* ty = lent_type(lw, coll->ty);
     u32 t = fir.local_add(lw->f, ty, fir.local_kind.lk_temp, null, coll->loc);
     *out = fir.place_local(t);
-    if (coll->ty->kind == types.type_kind.k_array) {
-        return lower_into(lw, coll, *out);
-    }
-    *header = t;
-    if (fir.type_owning(coll->ty) || designates(coll)) {
+    if (fir.type_owning(coll->ty)) {
         fir.place mut p = fir.place{};
-        if (!lower_place(lw, coll, &p)) { return false; }
-        *original = p;
-        p = hold_base(lw, p, true, coll->loc);
+        if (!lower_place(lw, coll, &p)) {
+            return false;
+        }
         assign(lw, *out, fir.rvalue_use(lw->f, fir.operand_copy(p)), coll->loc);
-    } else {
-        if (!lower_into(lw, coll, *out)) { return false; }
-        *original = *out;
+        return true;
     }
-    return true;
+    return lower_into(lw, coll, *out);
 }
 
 // `for (T x : c) B` (spec/fir.md 9.3): the place of `c`, then the counter `_i: u64 = const u64 0`;
@@ -1158,17 +1150,8 @@ fn range_collection(lowerer mut* lw, ast.node* coll, fir.place mut* out,
 // the element at `c`.
 fn lower_range_for(lowerer mut* lw, ast.node* n) bool {
     fir.place mut c = fir.place{};
-    fir.place mut original = fir.place{};
-    u32 mut header = 0;
-    if (!range_collection(lw, n->b, &c, &original, &header)) { return false; }
-    u32 mut loan = 0;
-    if (n->b->ty->kind != types.type_kind.k_array || fir.type_owning(n->b->ty)) {
-        if (cast(lw->next_loan, u64) >= fir.U32_LIMIT) {
-            panic("fir_lower.lower_range_for: too many loans");
-        }
-        lw->next_loan += 1;
-        loan = lw->next_loan;
-        append(lw, fir.stmt_loan_begin(loan, original, header, n->loc, lw->stmt));
+    if (!range_collection(lw, n->b, &c)) {
+        return false;
     }
     types.node* wide = u64_ty(lw);
     u32 i = fir.local_add(lw->f, wide, fir.local_kind.lk_temp, null, n->loc);
@@ -1187,9 +1170,6 @@ fn lower_range_for(lowerer mut* lw, ast.node* n) bool {
     // `x` belongs to the scope of the body: each iteration starts it, and each exit of the body
     // ends it
     scope_push(lw, scope_kind.sc_loop, done, step);
-    lw->scopes.items[lw->scopes.len - 1].range_loan = loan;
-    lw->scopes.items[lw->scopes.len - 1].range_location = n->loc;
-    lw->scopes.items[lw->scopes.len - 1].range_statement = lw->stmt;
     u32 x = local_of(lw, n->sym);
     live(lw, x, n->name_loc);
     fir.operand element = fir.operand_copy(fir.place_index(lw->f, c, i));
@@ -1205,7 +1185,6 @@ fn lower_range_for(lowerer mut* lw, ast.node* n) bool {
     assign(lw, counter, fir.rvalue_binary(lw->f, fir.rvalue_kind.rv_add, index, one), n->loc);
     jump(lw, head, n->loc);
     lw->block = done;
-    if (loan != 0) { append(lw, fir.stmt_loan_end(loan, n->loc, lw->stmt)); }
     return true;
 }
 
