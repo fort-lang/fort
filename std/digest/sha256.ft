@@ -1,0 +1,190 @@
+/// Computes the SHA-256 digest of a byte sequence to FIPS 180-4.
+/// A caller hashes in parts with init, update and finish, or in one call with hash.
+
+// The bytes of one message block (FIPS 180-4 5.2.1).
+u64 BLOCK = 64;
+
+// The bytes of a digest.
+u64 SIZE = 32;
+
+// The round constants K0 to K63 (FIPS 180-4 4.2.2).
+u32[64] K = {
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+};
+
+// The initial hash value H0 (FIPS 180-4 5.3.3).
+u32[8] H0 = {
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+};
+
+/// Holds a digest in progress. Call init before the first update.
+/// block holds `used` bytes that wait for a full block. total counts every byte given to update.
+struct state {
+    u32[8] h;
+    u8[64] block;
+    u64 used;
+    u64 total;
+}
+
+// Rotates x right by n bits, for n in 1 to 31 (FIPS 180-4 3.2).
+fn rotate(u32 x, u32 n) u32 {
+    return (x >> n) | (x << (32 - n));
+}
+
+// Reads four bytes at p[i] as one big-endian word (FIPS 180-4 3.1).
+fn read_word(u8@ p, u64 i) u32 {
+    return (cast(p[i], u32) << 24) | (cast(p[i + 1], u32) << 16) | (cast(p[i + 2], u32) << 8)
+         | cast(p[i + 3], u32);
+}
+
+// Writes w at out[i] as four big-endian bytes.
+fn write_word(u8 mut@ out, u64 i, u32 w) void {
+    out[i] = cast(w >> 24, u8);
+    out[i + 1] = cast((w >> 16) & 0xff, u8);
+    out[i + 2] = cast((w >> 8) & 0xff, u8);
+    out[i + 3] = cast(w & 0xff, u8);
+}
+
+// Runs the compression function on one 64-byte block and adds the result into hv
+// (FIPS 180-4 6.2.2). The sums are modulo 2^32, so they use the wrapping forms.
+fn compress(u32 mut@ hv, u8@ p) void {
+    u32[64] mut w = {};
+    u64 mut t = 0;
+    while (t < 16) {
+        w[t] = read_word(p, t * 4);
+        t += 1;
+    }
+    while (t < 64) {
+        u32 x = w[t - 15];
+        u32 y = w[t - 2];
+        u32 s0 = rotate(x, 7) ^ rotate(x, 18) ^ (x >> 3);
+        u32 s1 = rotate(y, 17) ^ rotate(y, 19) ^ (y >> 10);
+        w[t] = s1 +% w[t - 7] +% s0 +% w[t - 16];
+        t += 1;
+    }
+    u32 mut a = hv[0];
+    u32 mut b = hv[1];
+    u32 mut c = hv[2];
+    u32 mut d = hv[3];
+    u32 mut e = hv[4];
+    u32 mut f = hv[5];
+    u32 mut g = hv[6];
+    u32 mut h = hv[7];
+    t = 0;
+    while (t < 64) {
+        u32 big1 = rotate(e, 6) ^ rotate(e, 11) ^ rotate(e, 25);
+        u32 ch = (e & f) ^ (~e & g);
+        u32 t1 = h +% big1 +% ch +% K[t] +% w[t];
+        u32 big0 = rotate(a, 2) ^ rotate(a, 13) ^ rotate(a, 22);
+        u32 maj = (a & b) ^ (a & c) ^ (b & c);
+        u32 t2 = big0 +% maj;
+        h = g;
+        g = f;
+        f = e;
+        e = d +% t1;
+        d = c;
+        c = b;
+        b = a;
+        a = t1 +% t2;
+        t += 1;
+    }
+    hv[0] = hv[0] +% a;
+    hv[1] = hv[1] +% b;
+    hv[2] = hv[2] +% c;
+    hv[3] = hv[3] +% d;
+    hv[4] = hv[4] +% e;
+    hv[5] = hv[5] +% f;
+    hv[6] = hv[6] +% g;
+    hv[7] = hv[7] +% h;
+}
+
+/// Sets s to the state of an empty message.
+fn init(state mut* s) void {
+    *s = state{};
+    s->h = H0;
+}
+
+/// Adds the bytes of data to the message. A caller may split a message at any byte.
+/// Panics when the message length in bits cannot fit in u64 (FIPS 180-4 5.1.1).
+fn update(state mut* s, u8@ data) void {
+    // The length in bits is total * 8, so total stays below 2^61.
+    if (data.len > 0x1fffffffffffffff - s->total) {
+        panic("sha256.update: message too long");
+    }
+    s->total += data.len;
+    u64 mut i = 0;
+    // Fill a block that holds bytes from an earlier update.
+    if (s->used > 0) {
+        while (s->used < BLOCK && i < data.len) {
+            s->block[s->used] = data[i];
+            s->used += 1;
+            i += 1;
+        }
+        if (s->used < BLOCK) {
+            return;
+        }
+        compress(s->h[..], s->block[..]);
+        s->used = 0;
+    }
+    // Compress each full block of data in place.
+    while (data.len - i >= BLOCK) {
+        compress(s->h[..], data[i..i + BLOCK]);
+        i += BLOCK;
+    }
+    // Keep the tail for the next update or finish.
+    while (i < data.len) {
+        s->block[s->used] = data[i];
+        s->used += 1;
+        i += 1;
+    }
+}
+
+/// Pads the message, compresses the last blocks and returns the 32-byte digest
+/// (FIPS 180-4 5.1.1 and 6.2.2). Call init before s takes another message.
+fn finish(state mut* s) u8[32] {
+    u64 bits = s->total * 8;
+    s->block[s->used] = 0x80;
+    s->used += 1;
+    // The 8-byte length must fit after the pad byte, or it goes in one more block.
+    if (s->used > BLOCK - 8) {
+        while (s->used < BLOCK) {
+            s->block[s->used] = 0;
+            s->used += 1;
+        }
+        compress(s->h[..], s->block[..]);
+        s->used = 0;
+    }
+    while (s->used < BLOCK - 8) {
+        s->block[s->used] = 0;
+        s->used += 1;
+    }
+    u64 mut j = 0;
+    while (j < 8) {
+        s->block[BLOCK - 1 - j] = cast((bits >> (j * 8)) & 0xff, u8);
+        j += 1;
+    }
+    compress(s->h[..], s->block[..]);
+    s->used = 0;
+    u8[32] mut out = {};
+    j = 0;
+    while (j < 8) {
+        write_word(out[..], j * 4, s->h[j]);
+        j += 1;
+    }
+    return out;
+}
+
+/// Returns the SHA-256 digest of data in one call.
+fn hash(u8@ data) u8[32] {
+    state mut s = {};
+    init(&s);
+    update(&s, data);
+    return finish(&s);
+}

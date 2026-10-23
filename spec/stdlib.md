@@ -121,7 +121,7 @@ library follows:
 ### 1.5 Naming
 
 Module short names are the last path segment:
-`sys libc mem io str strbuf vec strmap math sort net`.
+`sys libc mem io str strbuf vec strmap math sort net sha256`.
 Functions, struct and enum types, enum members, fields and variables are `lower_case` with
 underscores (`str_buf`, `ptr_vec`, `str_map_entry`); module constants are `UPPER_CASE` (D1.4).
 When a module has several struct types, the functions carry the type as a prefix
@@ -146,6 +146,8 @@ import binding's name for a local even though D7.9 permits it.
 | `std.sort`      | `libc`                                      | an array sorted in place         |
 | `std.net`       | `libc`, `str`, `sys`                        | a TCP listener and a connection  |
 | `std.os`        | `libc`, `str`, `strbuf`                     | triple, binary path, real path   |
+
+`std.digest.sha256` imports nothing and gives the SHA-256 digest of bytes (2.15).
 
 `std.libc`, `std.net` and `std.os` have one source for each target: `std/linux/` and
 `std/darwin/`. The other modules are the same on both targets and stand in `std/`.
@@ -290,6 +292,7 @@ extern fn unsetenv(char* name) i32;
 extern fn access(char* path, i32 mode) i32;
 extern fn getcwd(char mut* buf, u64 size) char mut*;
 extern fn unlink(char* path) i32;
+extern fn rename(char* old_path, char* new_path) i32;
 extern fn rmdir(char* path) i32;
 extern fn symlink(char* target, char* link_path) i32;
 extern fn mkdir(char* path, u32 mode) i32;
@@ -342,6 +345,10 @@ a pointer to each of two of them; `std.sort` wraps it and is what a caller uses 
 Ownership: `malloc`, `calloc` and `free` carry it in their types, so a
 `calloc` result is released like a `malloc` one and not dropped; every other extern here takes
 and returns views, and the library wraps every ownership-bearing call below.
+`rename` gives the file at `old_path` the name `new_path` and returns 0, or -1 with errno set.
+It replaces a file at `new_path` in one atomic step, so a reader of `new_path` sees the old
+file or the new file and never a partial file. Both paths must be on one file system. A program
+writes a file atomically with a temporary file beside the target and a `rename` onto the target.
 `readlink` and `realpath` write into the caller's buffer, so the buffer is `char mut*`.
 `realpath` returns that buffer, a view. With a null buffer C allocates the result and the caller
 must free it, but one symbol has one signature (D9.8) and a cast never adds `own` (D3.14), so
@@ -1213,6 +1220,50 @@ leaves `out` unchanged when `realpath(3)` fails. It
 allocates the buffer of `libc.PATH_MAX` bytes that `realpath` writes, with `new`, and frees it
 before it returns. This is the owning form of `realpath` that D17.13 describes: the `std.libc`
 declaration takes a buffer and returns a view of it.
+
+### 2.15 `std.digest.sha256`
+
+The SHA-256 digest of FIPS 180-4. The module is the same on both targets and imports nothing. A
+caller hashes a message in parts with `init`, `update` and `finish`, or in one call with `hash`.
+The digest is the 32 bytes of FIPS 180-4 6.2.2, with the most significant byte of H0 first.
+
+```fort
+u64 BLOCK = 64;
+u64 SIZE = 32;
+
+struct state {
+    u32[8] h;
+    u8[64] block;
+    u64 used;
+    u64 total;
+}
+
+fn init(state mut* s) void;
+fn update(state mut* s, u8@ data) void;
+fn finish(state mut* s) u8[32];
+fn hash(u8@ data) u8[32];
+```
+
+`init` sets `s` to the state of an empty message: `h` holds the initial hash value of FIPS 180-4
+5.3.3 and the other fields are zero. `update` adds the bytes of `data` to the message. A caller
+may split a message at any byte, and the digest does not change. `update` panics when the
+message length in bits cannot fit in `u64`, the limit of FIPS 180-4 5.1.1. `finish` pads the
+message (FIPS 180-4 5.1.1), compresses the last one or two blocks and returns the digest. After
+`finish`, a caller calls `init` before it gives `s` another message. `hash(data)` returns the
+digest that `init`, one `update` with `data` and `finish` give. `state` holds no owning field, so
+it needs no `free`, and every function takes views (D17).
+
+```fort
+import std.digest.sha256;
+
+u8[32] d = sha256.hash(cast("abc", u8@));   // ba7816bf...f20015ad
+
+sha256.state mut s = {};
+sha256.init(&s);
+sha256.update(&s, cast("ab", u8@));
+sha256.update(&s, cast("c", u8@));
+u8[32] same = sha256.finish(&s);            // the same 32 bytes as d
+```
 
 ## 3. The runtime surface the library relies on
 

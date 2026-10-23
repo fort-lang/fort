@@ -1,0 +1,165 @@
+//! run
+//! stdout:
+//| empty ok
+//| abc ok
+//| 448 bits ok
+//| 896 bits ok
+//| a million ok
+//| a million in parts ok
+//| 55 bytes ok
+//| 56 bytes ok
+//| 63 bytes ok
+//| 64 bytes ok
+//| 65 bytes ok
+//| 130 bytes ok
+//| 131 splits ok
+//| one byte at a time ok
+//| reuse ok
+/// Checks std.digest.sha256 against the FIPS 180-4 example vectors and the block boundaries.
+/// The NIST examples give the empty, "abc", 448-bit, 896-bit and one-million-"a" digests.
+/// Python's hashlib.sha256 gave the digests of 55, 56, 63, 64 and 65 bytes of "a".
+import std.digest.sha256;
+import std.mem;
+import std.strbuf;
+
+string HEX = "0123456789abcdef";
+
+// Appends the 64 lower-case hex digits of d to out.
+fn append_hex(strbuf.str_buf mut* out, u8[32] d) void {
+    for (u8 v : d) {
+        strbuf.push(out, HEX[cast(v >> 4, u64)]);
+        strbuf.push(out, HEX[cast(v & 0xf, u64)]);
+    }
+}
+
+// Prints "<name> ok" when d is want, and both digests when it is not.
+fn expect(string name, u8[32] d, string want) bool {
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    append_hex(&got, d);
+    if (strbuf.view(&got) != want) {
+        println(name, ": got ", strbuf.view(&got), " want ", want);
+        return false;
+    }
+    println(name, " ok");
+    return true;
+}
+
+// Returns n bytes of 'a'. The caller frees them.
+fn letters(u64 n) u8 mut@ own {
+    u8 mut@ own m = new(u8, n);
+    mem.fill(m, cast('a', u8));
+    return m;
+}
+
+// The five examples of FIPS 180-4: one block, one block, two blocks, two blocks, and the long
+// message. The long message also goes in parts of 1000 bytes.
+fn nist_examples() bool {
+    bool mut ok = expect("empty", sha256.hash(cast("", u8@)),
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    ok = expect("abc", sha256.hash(cast("abc", u8@)),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") && ok;
+    string m448 = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+    ok = expect("448 bits", sha256.hash(cast(m448, u8@)),
+        "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1") && ok;
+    // The 896-bit message is 112 bytes, so it goes in two parts to fit the line.
+    strbuf.str_buf mut m896 = strbuf.create();
+    defer strbuf.free(&m896);
+    strbuf.append(&m896, "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmn");
+    strbuf.append(&m896, "hijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu");
+    ok = expect("896 bits", sha256.hash(strbuf.bytes(&m896)),
+        "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1") && ok;
+    u8 mut@ own million = letters(1000000);
+    defer del(million);
+    string want = "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0";
+    ok = expect("a million", sha256.hash(million), want) && ok;
+    sha256.state mut s = {};
+    sha256.init(&s);
+    u64 mut i = 0;
+    while (i < million.len) {
+        sha256.update(&s, million[i..i + 1000]);
+        i += 1000;
+    }
+    return expect("a million in parts", sha256.finish(&s), want) && ok;
+}
+
+// Lengths 55 and 56 put the 8-byte length in the last block or in one more block. Lengths 63,
+// 64 and 65 lie on each side of a full block.
+fn boundaries() bool {
+    u8 mut@ own m = letters(65);
+    defer del(m);
+    bool mut ok = expect("55 bytes", sha256.hash(m[..55]),
+        "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318");
+    ok = expect("56 bytes", sha256.hash(m[..56]),
+        "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a") && ok;
+    ok = expect("63 bytes", sha256.hash(m[..63]),
+        "7d3e74a05d7db15bce4ad9ec0658ea98e3f06eeecf16b4c6fff2da457ddc2f34") && ok;
+    ok = expect("64 bytes", sha256.hash(m[..64]),
+        "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb") && ok;
+    return expect("65 bytes", sha256.hash(m),
+        "635361c48bb9eab14198e76ea8ab7f1a41685d6ad62aa9146d301d4f17eb0ae0") && ok;
+}
+
+// A message of 130 bytes in two updates, split at each of its 131 offsets, gives the digest of
+// one call. Python's hashlib.sha256 gave that digest. Then one update for each byte gives it too.
+fn splits() bool {
+    u8 mut@ own m = new(u8, 130);
+    defer del(m);
+    u64 mut i = 0;
+    while (i < m.len) {
+        m[i] = cast((i * 7 + 3) % 256, u8);
+        i += 1;
+    }
+    string want = "4d5e47a2e8510a314576c238f6ff19d389d3ef3aaaca8b2e530263a5d15741da";
+    u8[32] whole = sha256.hash(m);
+    bool mut ok = expect("130 bytes", whole, want);
+    u64 mut k = 0;
+    while (k <= m.len) {
+        sha256.state mut s = {};
+        sha256.init(&s);
+        sha256.update(&s, m[..k]);
+        sha256.update(&s, m[k..]);
+        u8[32] d = sha256.finish(&s);
+        if (!mem.equal(d[..], whole[..])) {
+            println("split at ", k, " differs");
+            ok = false;
+        }
+        k += 1;
+    }
+    if (ok) {
+        println(k, " splits ok");
+    }
+    sha256.state mut bytewise = {};
+    sha256.init(&bytewise);
+    i = 0;
+    while (i < m.len) {
+        sha256.update(&bytewise, m[i..i + 1]);
+        i += 1;
+    }
+    return expect("one byte at a time", sha256.finish(&bytewise), want) && ok;
+}
+
+// init after finish starts a new message on the same state.
+fn reuse() bool {
+    sha256.state mut s = {};
+    sha256.init(&s);
+    sha256.update(&s, cast("something else", u8@));
+    u8[32] first = sha256.finish(&s);
+    sha256.init(&s);
+    sha256.update(&s, cast("abc", u8@));
+    u8[32] second = sha256.finish(&s);
+    bool differ = !mem.equal(first[..], second[..]);
+    return expect("reuse", second,
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") && differ;
+}
+
+fn main() i32 {
+    bool mut ok = nist_examples();
+    ok = boundaries() && ok;
+    ok = splits() && ok;
+    ok = reuse() && ok;
+    if (!ok) {
+        return 1;
+    }
+    return 0;
+}
