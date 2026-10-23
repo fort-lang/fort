@@ -699,7 +699,7 @@ def shard(tests, part, parts):
 
     The parts are disjoint and together hold each test once, so `parts` runs of
     `--shard` run the corpus once. Position order alternates neighbours with
-    one prefix, such as `ownership_`, between the parts.
+    one prefix, such as `fir_lower_`, between the parts.
     """
     return tests[part - 1 :: parts]
 

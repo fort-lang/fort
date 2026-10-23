@@ -5,11 +5,10 @@
 //| sets ok
 //| order ok
 //| verdicts ok
-//| loans ok
-/// Checks the effect list of V12 and V13 and the sets that it gives the dataflow, and the early
-/// return of V14 for a function with no loan statement. The list and the sets replace a walk of
-/// every block at every transfer, so each case holds them against what that walk did: the effects
-/// in item order, and a transfer as sets that equals the effects applied in order.
+/// Checks the effect list of V12 and V13 and the sets that it gives the dataflow. The list and
+/// the sets replace a walk of every block at every transfer, so each case holds them against what
+/// that walk did: the effects in item order, and a transfer as sets that equals the effects
+/// applied in order.
 import fir;
 import fir_flow;
 import fir_verify;
@@ -412,45 +411,6 @@ fn a_block_hands_on_the_state_its_last_effect_left() void {
     expect_verdict(&e, both[..], "none");
 }
 
-// ---- V14 -----------------------------------------------------------------------------------
-
-fn a_loan_statement_is_found_in_any_block() void {
-    lower_env.env mut e = lower_env.env{};
-    lower_env.open(&e);
-    defer lower_env.close(&e);
-    string[6] none = {
-        "fn main.f(_1 (xs): i32@) -> void {", "    let _2: u64;",
-        "    bb0: { _2 = copy _1.1; goto bb1; }", "    bb1: { return; }", "}", "",
-    };
-    fir.module mut m = parse(&e, none[..]);
-    assert(!fir_verify.has_loan_statement(fir.module_function_at(&m, 0)));
-    fir.module_free(&m);
-    string[6] end_only = {
-        "fn main.f(_1 (xs): i32@) -> void {", "    let _2: u64;",
-        "    bb0: { _2 = copy _1.1; goto bb1; }", "    bb1: { loan_end 1; return; }", "}", "",
-    };
-    m = parse(&e, end_only[..]);
-    assert(fir_verify.has_loan_statement(fir.module_function_at(&m, 0)));
-    fir.module_free(&m);
-    // an end with no begin still breaks V14: the early return needs no loan statement at all
-    expect_verdict(&e, end_only[..], "V14 bb1 0");
-    string[6] begin = {
-        "fn main.f(_1 (xs): i32@) -> void {", "    let _2: u64;",
-        "    bb0: { _2 = copy _1.1; goto bb1; }",
-        "    bb1: { loan_begin 1 _1; loan_end 1; return; }", "}", "",
-    };
-    m = parse(&e, begin[..]);
-    assert(fir_verify.has_loan_statement(fir.module_function_at(&m, 0)));
-    fir.module_free(&m);
-    expect_verdict(&e, begin[..], "none");
-    // a loan that stays open at the return breaks V14 in a block after the first
-    string[6] open_loan = {
-        "fn main.f(_1 (xs): i32@) -> void {", "    let _2: u64;",
-        "    bb0: { _2 = copy _1.1; goto bb1; }", "    bb1: { loan_begin 1 _1; return; }", "}", "",
-    };
-    expect_verdict(&e, open_loan[..], "V14 bb1 1");
-}
-
 fn main() i32 {
     the_effects_follow_the_items_in_order();
     println("effects ok");
@@ -461,7 +421,5 @@ fn main() i32 {
     println("order ok");
     a_block_hands_on_the_state_its_last_effect_left();
     println("verdicts ok");
-    a_loan_statement_is_found_in_any_block();
-    println("loans ok");
     return 0;
 }

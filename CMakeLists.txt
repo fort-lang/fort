@@ -564,23 +564,6 @@ set_tests_properties(highlight_selftest PROPERTIES
     LABELS "fort;unit"
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
-# Validate ownership audit evidence with synthetic report fixtures.
-add_test(NAME ownership_audit_selftest
-    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/ownership_audit_test.py"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(ownership_audit_selftest PROPERTIES
-    LABELS "fort;unit"
-    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
-
-# Test the ownership qualification matrix tool with a fake compiler.
-# It also validates the checked-in manifest. It runs no ownership verdict.
-add_test(NAME ownership_matrix_selftest
-    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/ownership_matrix_test.py"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(ownership_matrix_selftest PROPERTIES
-    LABELS "fort;unit"
-    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
-
 # Hold each panic site of src/fort, src/lsp and std against its panic tests (D11.4).
 # A site with no test needs a declaration or a line in test/panic_gaps.txt.
 add_test(NAME panic_coverage
@@ -595,31 +578,6 @@ add_test(NAME panic_coverage_selftest
     COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/panic_coverage_test.py"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(panic_coverage_selftest PROPERTIES
-    LABELS "fort;unit"
-    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
-
-# Hold each field of the heap proof state to the join of its fact type, or to one join tag
-# (D17.16, D17.18). It reads src/fort/ownership_heap.ft and builds nothing.
-add_test(NAME fact_joins
-    COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/fact_joins.py"
-            --root "${CMAKE_SOURCE_DIR}")
-set_tests_properties(fact_joins PROPERTIES
-    LABELS "fort;unit"
-    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
-
-# Seed each class of problem of tools/fact_joins.py in a small heap module.
-add_test(NAME fact_joins_selftest
-    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/fact_joins_test.py"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(fact_joins_selftest PROPERTIES
-    LABELS "fort;unit"
-    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
-
-# Hold the witness checker to its summary and import boundaries.
-add_test(NAME ownership_witness_lint
-    COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/ownership_witness_lint.py"
-            --root "${CMAKE_SOURCE_DIR}")
-set_tests_properties(ownership_witness_lint PROPERTIES
     LABELS "fort;unit"
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
@@ -664,56 +622,6 @@ set_tests_properties(mutate_check_applied mutate_check_strict_stale mutate_stric
 set_tests_properties(mutate_check_strict_stale PROPERTIES WILL_FAIL TRUE)
 set_tests_properties(mutate_strict_needs_check PROPERTIES
     PASS_REGULAR_EXPRESSION "error: --strict needs --check")
-
-# Test ownership selection and report publication through the built compiler.
-add_test(NAME ownership_driver
-    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/ownership_driver_test.py"
-            --fort "${FORT_COMPILER_BINARY}"
-            --std-dir "${FORT_STD_DIR}"
-            --cc "${FORT_TARGET_CC_PATH}"
-            --opt "${FORT_OPT_PATH}"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(ownership_driver PROPERTIES
-    LABELS "fort;integration"
-    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
-
-# Test three selected driver groups: check against build, no C compiler, pre-transform FIR.
-add_test(NAME ownership_driver_groups
-    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/ownership_driver_groups_test.py"
-            --fort "${FORT_COMPILER_BINARY}"
-            --std-dir "${FORT_STD_DIR}"
-            --cc "${FORT_TARGET_CC_PATH}"
-            --opt "${FORT_OPT_PATH}"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(ownership_driver_groups PROPERTIES
-    LABELS "fort;integration"
-    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
-
-# Fail the close of the ownership report file through a seccomp probe. Linux is its named host:
-# Darwin has no system call filter that a test can install.
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    add_test(NAME ownership_report_close
-        COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/ownership_report_close_test.py"
-                --fort "${FORT_COMPILER_BINARY}"
-                --std-dir "${FORT_STD_DIR}"
-        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-    # A close that no supervisor answers would wait without end. The two cases take about 2 s.
-    set_tests_properties(ownership_report_close PROPERTIES
-        LABELS "fort;integration"
-        TIMEOUT 300
-        SKIP_RETURN_CODE 77
-        ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
-endif()
-
-# Test the comparison of selected and unselected IR with a stand-in and the built compiler.
-add_test(NAME ownership_ir_compare
-    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/ownership_ir_compare_test.py"
-            --fort "${FORT_COMPILER_BINARY}"
-            --std-dir "${FORT_STD_DIR}"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(ownership_ir_compare PROPERTIES
-    LABELS "fort;integration"
-    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
 
 # Check the deepest nesting of D2.11 under a 1 MB stack. The test gives each
 # compiler of the build the same type of 254 nested groups.

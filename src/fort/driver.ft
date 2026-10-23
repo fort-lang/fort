@@ -18,8 +18,6 @@ import index;
 import json;
 import lexer;
 import modules;
-import ownership_report;
-import ownership_source;
 import parser;
 import prim;
 import session;
@@ -51,12 +49,10 @@ string FIR_BUILD_MODE = "build-mode";
 string[FIR_PASS_COUNT] FIR_PASSES = {"lower", "build-mode"};
 
 // The passes that the `//! pass:` directives of a `.fir` test name (spec/fir.md 16.3). `none`
-// runs nothing, `verify` runs the verifier on each function, `ownership-local` runs the local
-// ownership analysis on each function, and `build-mode` runs the build-mode pass for the mode
-// that its arguments, `--release` and `--no-bounds-check`, select.
+// runs nothing, `verify` runs the verifier on each function, and `build-mode` runs the build-mode
+// pass for the mode that its arguments, `--release` and `--no-bounds-check`, select.
 string FIR_TEST_NONE = "none";
 string FIR_TEST_VERIFY = "verify";
-string FIR_TEST_OWNERSHIP_LOCAL = "ownership-local";
 string FIR_TEST_RELEASE = "--release";
 string FIR_TEST_NO_BOUNDS = "--no-bounds-check";
 
@@ -114,9 +110,6 @@ struct options {
     bool release;         // --release
     bool no_bounds_check; // --no-bounds-check
     bool check; // --check: the front end alone
-    bool ownership_check; // Request complete closure proof.
-    bool have_ownership_report;
-    string ownership_report; // The last --ownership-report path.
     bool json; // --json, the document on stdout
     bool index; // --index, the identifier index in it
     bool tokens; // --tokens: the entry file's tokens on stdout
@@ -167,9 +160,6 @@ fn help() void {
     println("  --cfg <list>       set key=value pairs; repeatable");
     println("  -Xcc <arg>         pass <arg> to --cc verbatim; repeatable, in order");
     println("  --check            run the front end only and stop; emit nothing");
-    println("  --ownership-check  request complete ownership proof");
-    println("  --ownership-report <file>");
-    println("                     write coverage JSON; needs --ownership-check");
     println("  --json             write the check document to stdout; needs --check");
     println("  --index            fill the document's identifier index; implies --check --json");
     println("  --tokens           write the entry file's tokens to stdout and stop");
@@ -320,8 +310,6 @@ fn parse_flag(options mut* opts, string arg) bool {
         opts->no_bounds_check = true;
     } else if (arg == "--check") {
         opts->check = true;
-    } else if (arg == "--ownership-check") {
-        opts->ownership_check = true;
     } else if (arg == "--json") {
         opts->json = true;
     } else if (arg == "--index") {
@@ -367,9 +355,8 @@ fn parse_valued(options mut* opts, string@ args, u64 mut* i, bool mut* ok) bool 
     bool is_target = arg == "--target";
     bool is_cfg = arg == "--cfg";
     bool is_cc_arg = arg == "-Xcc";
-    bool is_report = arg == "--ownership-report";
     if (!is_output && !is_include && !is_std_dir && !is_cc && !is_target && !is_cfg
-        && !is_cc_arg && !is_report) {
+        && !is_cc_arg) {
         return false;
     }
     string mut value = "";
@@ -393,9 +380,6 @@ fn parse_valued(options mut* opts, string@ args, u64 mut* i, bool mut* ok) bool 
         if (!parse_cfg(opts, value)) {
             *ok = false;
         }
-    } else if (is_report) {
-        opts->have_ownership_report = true;
-        opts->ownership_report = value;
     } else {
         containers.str_push(&opts->cc_args, value);
     }
@@ -458,14 +442,6 @@ fn parse(options mut* opts, string@ args) i32 {
     }
     if (!opts->have_entry) {
         usage_error("no entry file");
-        return PARSE_ERROR;
-    }
-    if (opts->have_ownership_report && !opts->ownership_check) {
-        usage_error("--ownership-report requires --ownership-check");
-        return PARSE_ERROR;
-    }
-    if (opts->ownership_check && (opts->tokens || opts->ast || opts->fir || opts->fir_test)) {
-        usage_error("--ownership-check does not combine with token, AST or FIR inspection");
         return PARSE_ERROR;
     }
     if (opts->tokens && (opts->check || opts->json || opts->index)) {
@@ -1321,7 +1297,6 @@ struct fir_test {
 enum test_pass_kind {
     tp_none,
     tp_verify,
-    tp_ownership_local,
     tp_build,
 }
 
@@ -1381,9 +1356,8 @@ fn read_fir_test(string text, fir_test mut* t) void {
 }
 
 // Reads the text of one `//! pass:` directive into *out. EXIT_OK when the pass runs, else
-// EXIT_USAGE after an error: an unknown pass, `none`, `verify` or `ownership-local` with an
-// argument, or an argument of `build-mode` that is not --release or --no-bounds-check. Spaces
-// separate the arguments.
+// EXIT_USAGE after an error: an unknown pass, `none` or `verify` with an argument, or an argument
+// of `build-mode` that is not --release or --no-bounds-check. Spaces separate the arguments.
 fn fir_test_pass(string text, test_pass mut* out) i32 {
     *out = test_pass{};
     i64 space = str.index_of(text, ' ');
@@ -1393,15 +1367,13 @@ fn fir_test_pass(string text, test_pass mut* out) i32 {
         name = text[0..cast(space, u64)];
         rest = text[cast(space, u64) + 1..text.len];
     }
-    if (name == FIR_TEST_NONE || name == FIR_TEST_VERIFY || name == FIR_TEST_OWNERSHIP_LOCAL) {
+    if (name == FIR_TEST_NONE || name == FIR_TEST_VERIFY) {
         if (space >= 0) {
             eprintln("fort: error: the pass '", name, "' takes no argument");
             return EXIT_USAGE;
         }
         if (name == FIR_TEST_VERIFY) {
             out->kind = test_pass_kind.tp_verify;
-        } else if (name == FIR_TEST_OWNERSHIP_LOCAL) {
-            out->kind = test_pass_kind.tp_ownership_local;
         }
         return EXIT_OK;
     }
@@ -1431,21 +1403,12 @@ fn fir_test_pass(string text, test_pass mut* out) i32 {
     return EXIT_OK;
 }
 
-// Runs the passes of a `.fir` test in order, each over every function of `m` in text order.
-// EXIT_OK when all passes ran. The pass `verify` ends the compiler with a panic at the first
-// violation of a rule. The pass `ownership-local` stops the run after it reports an error
-// (exit 1) or a broken verifier rule (exit 2).
-fn run_test_passes(fir.module mut* m, test_pass@ passes, fir_verify.runtime* rt,
-    diag.sink mut* diagnostics, string file) i32 {
+// Runs the passes of a `.fir` test in order, each over every function of `m` in text order. The
+// pass `verify` ends the compiler with a panic at the first violation of a rule.
+fn run_test_passes(fir.module mut* m, test_pass@ passes, fir_verify.runtime* rt) void {
     u64 mut pass_index = 0;
     while (pass_index < passes.len) {
         test_pass p = passes[pass_index];
-        if (p.kind == test_pass_kind.tp_ownership_local) {
-            i32 status = local_ownership_pass(m, rt, diagnostics, file);
-            if (status != EXIT_OK) {
-                return status;
-            }
-        }
         u64 mut k = 0;
         while (k < m->funcs.len) {
             fir.func mut* f = &m->funcs.items[k];
@@ -1458,43 +1421,6 @@ fn run_test_passes(fir.module mut* m, test_pass@ passes, fir_verify.runtime* rt,
         }
         pass_index += 1;
     }
-    return EXIT_OK;
-}
-
-// The pass `ownership-local` of a `.fir` test: the local ownership analysis of --ownership-check
-// on each function, in text order (D17.14, D17.18). It runs no other analysis, so it proves no
-// closure. The verifier tests each function first and does not panic: a broken rule is exit 2,
-// as a verification failure of --ownership-check is (toolchain.md 1.1). A validated violation,
-// or an incomplete local proof, is an error at its source location, and the pass then gives
-// exit 1. The function index is the declaration key in module 0.
-fn local_ownership_pass(fir.module mut* m, fir_verify.runtime* rt, diag.sink mut* diagnostics,
-    string file) i32 {
-    u64 mut k = 0;
-    while (k < m->funcs.len) {
-        fir.func* f = &m->funcs.items[k];
-        strbuf.str_buf mut failure = strbuf.create();
-        defer strbuf.free(&failure);
-        if (!fir_verify.verify_report(f, rt, &failure)) {
-            error(strbuf.view(&failure));
-            return EXIT_USAGE;
-        }
-        k += 1;
-    }
-    u64 mut errors = 0;
-    k = 0;
-    while (k < m->funcs.len) {
-        if (k > fir.U32_LIMIT) {
-            error("the .fir test has more functions than a declaration key holds");
-            return EXIT_USAGE;
-        }
-        errors += ownership_report.fir_test_local(&m->funcs.items[k], cast(k, u32), diagnostics,
-            file);
-        k += 1;
-    }
-    if (errors > 0) {
-        return EXIT_COMPILE_ERROR;
-    }
-    return EXIT_OK;
 }
 
 // --fir-test reads a `.fir` test (spec/fir.md 16.3): it checks the prelude of the test as the
@@ -1502,8 +1428,7 @@ fn local_ownership_pass(fir.module mut* m, fir_verify.runtime* rt, diag.sink mut
 // test names, in order, and writes the module to stdout in one print. The harness compares the
 // text. A diagnostic of the prelude or of the FIR text is exit 1 with no text; an unreadable file
 // and a pass that does not run are exit 2. The pass `verify` ends the compiler with a panic at
-// the first violation of a rule, and writes no text then. The pass `ownership-local` writes no
-// text after an error (exit 1) or a broken rule (exit 2), and it must come before `build-mode`.
+// the first violation of a rule, and writes no text then.
 fn fir_test_entry(options* opts, string program) i32 {
     if (!target_form(opts->target)) {
         usage_error_arg("unsupported target", opts->target);
@@ -1528,18 +1453,11 @@ fn fir_test_entry(options* opts, string program) i32 {
     test_pass mut@ own passes = new(test_pass, t.passes.len);
     defer del(passes);
     u64 mut k = 0;
-    bool mut transformed = false;
     while (k < t.passes.len) {
         i32 pass = fir_test_pass(containers.str_at(&t.passes, k), &passes[k]);
         if (pass != EXIT_OK) {
             return pass;
         }
-        // The proof reads the FIR before the build-mode pass (spec/fir.md 14, D19.8).
-        if (passes[k].kind == test_pass_kind.tp_ownership_local && transformed) {
-            error("the pass 'ownership-local' runs before the pass 'build-mode'");
-            return EXIT_USAGE;
-        }
-        transformed = transformed || passes[k].kind == test_pass_kind.tp_build;
         k += 1;
     }
     // The loader reads the prelude in place of the file, so a diagnostic of the prelude names
@@ -1570,10 +1488,7 @@ fn fir_test_entry(options* opts, string program) i32 {
         return EXIT_COMPILE_ERROR;
     }
     fir_verify.runtime rt = fir_verify.runtime_of(&an.ck);
-    i32 ran = run_test_passes(&m, passes, &rt, session.diags(&s), opts->entry);
-    if (ran != EXIT_OK) {
-        return ran;
-    }
+    run_test_passes(&m, passes, &rt);
     strbuf.str_buf mut out = strbuf.create();
     defer strbuf.free(&out);
     fir_print.print_module(&m, &out);
@@ -1583,7 +1498,7 @@ fn fir_test_entry(options* opts, string program) i32 {
 
 // Runs the front end, then the available build or check passes. --check and --fir write no
 // file, so they take any target form that the compiler accepts, as a check does.
-fn compile_entry(options* opts, string program, string@ arguments) i32 {
+fn compile_entry(options* opts, string program) i32 {
     bool front_only = opts->check || opts->fir;
     if (front_only && !target_form(opts->target)) {
         usage_error_arg("unsupported target", opts->target);
@@ -1605,128 +1520,48 @@ fn compile_entry(options* opts, string program, string@ arguments) i32 {
     analysis mut an = analysis_create(&s);
     bool mut analysis_live = true;
     defer analysis_release(&an, &analysis_live);
-    i32 mut status = front_end(&s, opts, program, &an);
-    ownership_source.context mut proof = ownership_source.context{};
-    defer ownership_source.free(&proof);
-    string out_path = opts->have_output ? opts->output : default_output(&p, opts);
-    if (opts->ownership_check && status != EXIT_USAGE) {
-        if (opts->have_ownership_report && !ownership_report.path_allowed(
-            opts->ownership_report, opts->entry, out_path, &an.set, &s)) {
-            error("ownership report path names an input, an output, or an invalid destination");
-            return EXIT_USAGE;
-        }
-        ownership_source.prepare(&proof, &an.ck, &an.set, status == EXIT_OK);
-        ownership_source.analyze(&proof);
-        i32 selected = ownership_report.verdict(&proof);
-        ownership_report.diagnose(&proof, session.diags(&s), opts->entry);
-        if (selected == EXIT_USAGE) {
-            error("internal error: ownership source analysis failed");
-        }
-        status = selected;
-    }
-    if (status == EXIT_OK && !opts->check) {
-        status = compile_checked(&s, opts, &an, &analysis_live, &p);
-    }
-    if (opts->ownership_check && opts->have_ownership_report && proof.prepared) {
-        if (!write_ownership_report(opts, arguments, &proof, &s, status)) {
-            error("cannot write ownership report");
-            return EXIT_USAGE;
-        }
-    }
+    i32 status = front_end(&s, opts, program, &an);
     if (opts->check && opts->json && (status == EXIT_OK || status == EXIT_COMPILE_ERROR)) {
+        // the document answers for both verdicts, so it goes first
         check_document(&s, opts, &an, &p);
+        return status;
     }
-    return status;
-}
-
-// Writes configuration in key order. The session supplies effective target values.
-fn report_configuration(session.session* s, options* opts, containers.str_vec mut* keys,
-    containers.str_vec mut* values) void {
-    containers.str_push(keys, "target_os");
-    containers.str_push(keys, "target_arch");
-    containers.str_push(keys, "target_abi");
-    u64 mut i = 0;
-    while (i < opts->cfg_keys.len) {
-        containers.str_push(keys, containers.str_at(&opts->cfg_keys, i));
-        i += 1;
+    if (status != EXIT_OK) {
+        return status;
     }
-    i = 1;
-    while (i < keys->len) {
-        string key = containers.str_at(keys, i);
-        u64 mut at = i;
-        while (at > 0 && str.cmp(containers.str_at(keys, at - 1), key) > 0) {
-            containers.str_set(keys, at, containers.str_at(keys, at - 1));
-            at -= 1;
-        }
-        containers.str_set(keys, at, key);
-        i += 1;
+    if (opts->check) {
+        // --check stops after the front end, no module emitted
+        return EXIT_OK;
     }
-    i = 0;
-    while (i < keys->len) {
-        string mut value = "";
-        if (!session.config_get(s, containers.str_at(keys, i), &value)) {
-            panic("ownership report: effective configuration is absent");
-        }
-        containers.str_push(values, value);
-        i += 1;
-    }
-}
-
-fn write_ownership_report(options* opts, string@ arguments, ownership_source.context* proof,
-    session.session* s, i32 status) bool {
-    char[modules.CWD_CAP] mut cwd = {};
-    if (libc.getcwd(&cwd[0], cwd.len) == null) { return false; }
-    containers.str_vec mut keys = containers.str_create();
-    defer containers.str_free(&keys);
-    containers.str_vec mut values = containers.str_create();
-    defer containers.str_free(&values);
-    report_configuration(s, opts, &keys, &values);
-    strbuf.str_buf mut version = strbuf.create();
-    defer strbuf.free(&version);
-    strbuf.append(&version, "fort ");
-    strbuf.append(&version, VERSION);
-    ownership_report.invocation call = ownership_report.invocation{
-        opts->entry, str.from_cstr(&cwd[0]), arguments, opts->target, strbuf.view(&version),
-        keys.items[..keys.len], values.items[..values.len], opts->check, opts->release,
-        opts->no_bounds_check};
-    strbuf.str_buf mut report = strbuf.create();
-    defer strbuf.free(&report);
-    ownership_report.build(&report, proof, &call, status);
-    return ownership_report.publish(opts->ownership_report, strbuf.bytes(&report));
-}
-
-// Selected analysis precedes this build pipeline and its mode transformations.
-fn compile_checked(session.session mut* s, options* opts, analysis mut* an,
-    bool mut* analysis_live, containers.pool mut* p) i32 {
     if (opts->fir_report) {
         // --fir-verify-report stops before the emitter, as --fir does
-        return fir_report_entry(an, opts);
+        return fir_report_entry(&an, opts);
     }
     if (opts->fir) {
         // --fir stops before the emitter
-        return fir_entry(an, opts);
+        return fir_entry(&an, opts);
     }
     string mut out_path = opts->output;
     if (!opts->have_output) {
-        out_path = default_output(p, opts);
+        out_path = default_output(&p, opts);
     }
     if (opts->emit_ir) {
         // -S writes the module to the output and stops, so it needs no
         // temporary.
-        return emit_module(s, opts, an, out_path);
+        return emit_module(&s, opts, &an, out_path);
     }
     string mut parent = TMP_DIR_DEFAULT;
     i32 mut failure = 0;
-    string dir = make_temp_dir(p, &parent, &failure);
+    string dir = make_temp_dir(&p, &parent, &failure);
     if (dir.len == 0) {
         error_path("cannot create a temporary directory in", parent,
                    str.from_cstr(libc.strerror(failure)));
         return EXIT_USAGE;
     }
-    string ir_path = join_path(p, dir, entry_base(opts->entry), IR_SUFFIX);
-    i32 mut built = emit_module(s, opts, an, ir_path);
+    string ir_path = join_path(&p, dir, entry_base(opts->entry), IR_SUFFIX);
+    i32 mut built = emit_module(&s, opts, &an, ir_path);
     // Release analysis storage before fork duplicates the process page tables.
-    if (!opts->ownership_check) { analysis_release(an, analysis_live); }
+    analysis_release(&an, &analysis_live);
     if (built == EXIT_OK) {
         built = run_cc(opts, ir_path, out_path);
     }
@@ -1763,5 +1598,5 @@ fn run(string@ args) i32 {
     if (opts.fir_test) {
         return fir_test_entry(&opts, args[0]);
     }
-    return compile_entry(&opts, args[0], args[1..]);
+    return compile_entry(&opts, args[0]);
 }

@@ -186,7 +186,7 @@ def check_table(table, root, strict=False):
 
     Without `strict`, a row whose `new` text stands where its `old` text was
     counts as applied, not stale, so a round in progress does not fail it.
-    The `new` text of 73 of 489 rows already occurs in the clean file. For
+    The `new` text of 46 of 294 rows already occurs in the clean file. For
     such a row, a missing anchor reads as applied. With `strict`, no row
     counts as applied, so each missing anchor is stale. Use `strict` only
     where no round runs.

@@ -34,13 +34,6 @@ int32_t helper_apply(int32_t (*cb)(int32_t), int32_t x) {
     return cb(x);
 }
 
-// Calls back into a fort function with a pointer that C chooses. No fort call site gives the
-// argument of either call.
-int32_t helper_apply_ptr(int32_t (*cb)(int32_t*), int32_t* p) {
-    int32_t first = cb(p);
-    return first + cb(p);
-}
-
 // Calls back into a fort function through a floating-point signature, so the
 // callback's argument and result travel in SSE registers.
 double helper_apply_f64(double (*cb)(double), double x) {

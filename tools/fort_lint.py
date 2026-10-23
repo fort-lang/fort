@@ -42,7 +42,6 @@ SOURCE_SETS = (
     ("src/lsp/**/*.ft", ("src", "src/fort")),
     ("test/fort/**/*.ft", ("src", "src/fort", "test/fort/support")),
     ("test/lsp/**/*.ft", ("src", "src/fort", "test/fort/support")),
-    ("test/ownership/*.ft", ("src", "src/fort", "test/fort/support")),
 )
 SOURCE_GLOBS = tuple(glob for glob, _ in SOURCE_SETS)
 TARGETS = ("linux", "darwin")
@@ -84,7 +83,7 @@ PREFIX_ROOTS = ("src/fort", "src/lsp", "std")
 # A prefix that PREFIX_LIMIT files of one directory share asks for a directory.
 PREFIX_LIMIT = 3
 # The flat groups that a later change moves into directories, as (directory, prefix).
-LEGACY_PREFIXES = (("src/fort", "fir"), ("src/fort", "ownership"))
+LEGACY_PREFIXES = (("src/fort", "fir"),)
 # NAMING_ROOTS are the roots whose nested modules get the function and glossary checks.
 # A flat module of `src/lsp`, `lsp.server`, is no nested module: its four `create` functions
 # keep their names until it moves.

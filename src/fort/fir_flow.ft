@@ -6,9 +6,6 @@
 // function pointer. It holds no module-level mutable state, and every set it allocates belongs
 // to a record that the caller frees.
 import fir;
-import consts;
-import prim;
-import types;
 
 // ---- the bit sets --------------------------------------------------------------------------
 
@@ -337,46 +334,4 @@ fn forward(fir.func* f, fir.pred_table* pt, dataflow mut* d, bits@ gens, bits@ k
             }
         }
     }
-}
-
-// Matches the verifier's constant-switch selection before build-mode changes.
-fn constant_switch_value(fir.constant c) consts.cval {
-    if (c.kind != fir.const_kind.ck_zero) { return c.value; }
-    if (c.ty->kind == types.type_kind.k_prim && c.ty->prim == prim.prim_kind.prim_bool) {
-        return consts.cv_from_bool(false);
-    }
-    if (c.ty->kind == types.type_kind.k_prim && c.ty->prim == prim.prim_kind.prim_char) {
-        return consts.cv_from_char(0);
-    }
-    return consts.int_make(false, 0);
-}
-
-/// Reports whether a verified terminator can reach target number `index`.
-/// A constant switch reaches only its selected arm or its otherwise target.
-fn reachable_target(fir.func* f, fir.terminator* term, u32 index, u32 mut* target) bool {
-    if (!fir.term_targets(f, term, index, target)) { return false; }
-    if (term->kind != fir.term_kind.tk_switch ||
-        term->cond.kind != fir.operand_kind.ok_const) { return true; }
-    consts.cval value = constant_switch_value(term->cond.value);
-    u32 mut selected = term->arms_len;
-    u32 mut i = 0;
-    while (i < term->arms_len) {
-        fir.arm choice = fir.term_arm(f, term, i);
-        if (consts.cv_eq(choice.value, value)) { selected = i; break; }
-        i += 1;
-    }
-    return index == selected;
-}
-
-/// Finds the first target at or after number `*index` that a verified terminator can reach,
-/// and leaves its number in `*index`. It skips each target that a constant switch does not
-/// select, so a loop over the targets does not stop at an unselected arm. False when no
-/// target remains.
-fn next_reachable_target(fir.func* f, fir.terminator* term, u32 mut* index, u32 mut* target)
-    bool {
-    while (fir.term_targets(f, term, *index, target)) {
-        if (reachable_target(f, term, *index, target)) { return true; }
-        *index += 1;
-    }
-    return false;
 }
