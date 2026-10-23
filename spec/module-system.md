@@ -56,6 +56,8 @@ looked up only in the standard library directory, `std` mapping to that director
 (`std.io` is `<std>/io.ft`); a path that does not begin with `std` is never looked up there. A
 file `std/x.ft` under any other root is unreachable.
 
+- In a library build, a used library owns each path that starts with its name, and the standard
+  library directory is not a root (section 10.2, D9.11).
 - The current working directory is never a root. `fort src/main.ft` run from the project
   directory makes `src/` a root, not `.`; a module in `./lib/` needs `-I .` and is then
   `lib.name`.
@@ -517,7 +519,9 @@ rest of the convention follow the selected C ABI.
 
 ## 10. Compilation model
 
-Fort v1 compiles a whole program at once (D9.10):
+By default, fort v1 compiles a whole program at once (D9.10). A build that names `--lib` or
+`--use` is a library build instead (sections 10.1 to 10.4, D9.11). A whole-program build has these
+steps:
 
 1. The entry file is parsed. Its import selectors are evaluated before an import path is resolved.
    The parser retains each branch. Only selected imports are resolved (sections 2 and 3; D21.3).
@@ -539,9 +543,263 @@ module the root does not reach is still never read, except `std.rt`, which is a 
 closure in both modes (D9.10), so checking a library means checking a file that imports it.
 
 A module outside the closure is never read, so an error in an unimported standard library module
-is never reported. There is no separate compilation: no interface files, no per-module objects, no
-module cache, no incremental rebuild, no parallel compilation of modules and no `--module-path`
-(D15). A change to any file recompiles the program.
+is never reported. A whole-program build has no interface file, no object for each module, no
+module cache, no incremental rebuild, no parallel compilation of modules and no `--module-path`.
+A change to any file recompiles the program.
+
+### 10.1 Libraries
+
+A library is a named directory tree of modules (D9.11). `fort --lib <name> <root>` builds the
+library `<name>` from the directory `<root>` into the artifact `<name>.flib/` (`toolchain.md`
+2.1). A later build names the artifact with `--use <name>=<path>`.
+
+- The name is one module-path segment: an identifier that is neither a keyword nor a reserved
+  word (section 1, D9.1). The library `std` is the standard library, so its modules are the
+  `std` paths of section 2.
+- The modules of the library are the regular files with the extension `.ft` below `<root>`, at
+  any depth, whose directory names and base name are all segments. The file `<root>/a/b.ft` is
+  the module `<name>.a.b`. The compiler ignores every other file and directory, so the cache
+  directory `.fort-cache` and the artifact `std.flib` are never modules. It follows no symbolic
+  link, to a file or to a directory.
+- A root with no module is an error (`toolchain.md` 1).
+- Every import spells the module of `<root>/a/b.ft` as `<name>.a.b`, in a module of the library
+  and in a module outside it (section 10.2). No short form exists. The user ruled "long spelling
+  only" on 2026-10-23. `std` already imports its modules this way, as `std.libc`. `src/lsp`
+  imports its own modules as `lsp.text`, but its one `import flt;` names a module of the compiler,
+  so it needs that import changed before it can be a library. The compiler, which imports its
+  siblings as `ast` and `check`, needs new imports before it can be a library.
+- A library has no module whose path is `<name>` alone, as `std` is no module (section 3).
+
+| File under the root `lib/geom` | Module of the library `geom` |
+|--------------------------------|------------------------------|
+| `lib/geom/vec.ft`              | `geom.vec`                   |
+| `lib/geom/shape/circle.ft`     | `geom.shape.circle`          |
+| `lib/geom/007.ft`              | none: `007` is not a segment |
+| `lib/geom/my-dir/x.ft`         | none: `my-dir` is not a segment |
+
+The **unit** of a library build is the set of modules that the build compiles to one object.
+Under `--lib` the unit is every module of the library. Under `--use` without `--lib`, the unit is
+the **entry unit**: the modules of the closure that are in no used library. The entry module is
+always in the entry unit. Each unit is compiled once by one invocation of `fort`. A build tool
+runs one invocation for each library, dependencies first, and then one for the program. One
+invocation does one step and never builds a used library; the user ruled this on 2026-10-23.
+
+### 10.2 Resolution in a library build
+
+A library build changes where a path resolves (D9.2, D9.11). The two readings of section 3 and
+their diagnostics do not change.
+
+1. A path whose first segment is the name of a used library resolves in the interface file of
+   that library and nowhere else. The module reading succeeds when the interface file has a
+   section for the module `a.b.c`. The symbol reading succeeds when it has a section for `a.b`
+   that declares `c`. The search roots of section 2 are not searched for the path.
+2. Under `--lib <name>`, a path whose first segment is `<name>` resolves only among the modules
+   that the walk of section 10.1 lists, by the two readings of section 3 over that list. The
+   module reading succeeds when the list holds the module `<name>.a.b`. The symbol reading
+   succeeds when the list holds `<name>.a` and that module declares `b`. The compiler opens no
+   other file for such a path: a symbolic link, and a file that only a case-insensitive file
+   system matches, give no module. A path that neither reading finds is
+   `module '<name>.a.b' not found`, with `note: looked for <root>/a/b.ft` (section 13).
+3. Under `--lib`, a path whose first segment names neither the library nor a used library is the
+   compile error `module 'util.strings' is in no library`, at the import (section 13).
+4. Under `--use` without `--lib`, any other path resolves in the entry directory and then in each
+   `-I` directory (section 2).
+5. A library build has no standard library directory. A `std` path therefore resolves only in a
+   library named `std`, by item 1 or item 2. A library build that is neither `--lib std` nor a
+   build with `--use std=<path>` is a usage error (`toolchain.md` 1), because every closure holds
+   `std.rt` (section 10, D9.10).
+
+The roots of a `--lib` closure are `std.rt` and then each module of the library, in byte order of
+the module path. Its dependency order is the post-order of that walk, as section 10 gives it for
+one entry. The identity of a module of a used library is the name of the library and the module
+path; such a module has no file of its own, so the same-file rule of section 2 does not apply to
+it. The import relation stays acyclic (D9.5): the imports of an interface section are edges of
+the graph like any other import.
+
+Under `--check`, `--fir` and `-S`, a build with `--use` reads interface files as above. An
+interface module is a module of the closure in every pass, and the identifier index (D20.3)
+records its declarations at their positions in the interface file.
+
+### 10.3 The interface file
+
+`interface.ft` is fort text that declares the whole library (D9.11). A dependent reads it with
+the parser and the checker of every other module. The file is a sequence of lines, and each line
+ends with one newline byte. For a library `geom` with one module, `lib/geom/vec.ft`:
+
+```fort
+import std.math;
+
+struct vector { f64 x; f64 y; }
+
+i32 DIM = 1 + 1;
+vector ORIGIN = {0.0, 0.0};
+vector UNIT_X = {1.0, 0.0};
+i32 mut calls = 7;
+
+fn add(vector a, vector b) vector {
+    calls += 1;
+    return vector{a.x + b.x, a.y + b.y};
+}
+
+fn largest(vector v) f64 {
+    return math.max_f64(v.x, v.y);
+}
+```
+
+the interface file is:
+
+```fort
+//! fort interface 1
+//! library geom
+//! module geom.vec
+import std.math as _0;
+i32 DIM = 2;
+vector ORIGIN = {};
+vector UNIT_X = {.x = 1.0e0, .y = 0.0e0};
+fn add(vector a, vector b) vector;
+i32 mut calls = 0;
+fn largest(vector v) f64;
+struct vector { f64 x; f64 y; }
+```
+
+**Lines.** Line 1 is `//! fort interface 1`, where 1 is the format version. Line 2 is
+`//! library <name>`. Each module then has a section that starts with the line
+`//! module <path>`, in byte order of the module path. A section ends before the next `//! module`
+line or at the end of the file. The text of a section is one `interface_module` of `grammar.md`
+section 2. A position in the file is its line and column in the whole file, so a diagnostic or an
+index record at an interface declaration names `<path>/interface.ft` and that position.
+
+**Imports.** A section first holds one line `import <path> as <binding>;`, where `<path>` is the
+full module path, such as `geom.shape` for a module of the same library, for each module that
+the source module selects with an import (D9.3, D21.3) and for each module that a value of the
+section names, in byte order of the module path. A symbol import of the source module gives the
+module that declares the symbol. Each module has one line, whatever number of bindings the source
+gave it. The binding of the k-th line, k from 0, is the prefix p followed by k in decimal. The
+prefix p is the shortest run of `_` such that no declaration name of the module starts with p and
+a decimal digit. So the imports of a section give the same closure as the imports of its source.
+
+**Declarations.** After its imports, a section holds each declaration of the module that `$if`
+selects (D21.2), one on each line, in byte order of the name. The names of one module are
+distinct (section 5), so this order is total. Each declaration has one of these forms:
+
+| Source declaration    | Interface line                                    |
+|-----------------------|---------------------------------------------------|
+| function with a body  | `fn <name>(<type> <param>, ...) <result>;`        |
+| `extern fn`           | `extern fn <name>(<type> <param>, ...) <result>;` |
+| struct                | `struct <name> { <type> <field>; ... }`           |
+| enum                  | `enum <name> { <member> = <value>, ... }`         |
+| constant              | `<type> <name> = <value>;`                        |
+| `mut` global          | `<type> <name> = <zero value>;`                   |
+
+- A parameter, a field and an enum member keep the name and the order of the source. An `extern`
+  keeps its `...` (D9.8). An enum member has its value in decimal, a negative value with `-`.
+- A type keeps its markers and its suffixes (D5.3, D17.2). A struct or an enum of another module
+  is `<binding>.<name>`. A struct or an enum of the same module is its name alone.
+- The type of a `mut` global holds its `mut` as the source writes it (D7.10). Its value is the
+  zero value of its type: `0` for an integer, `0.0e0` for a float, `false`, `'\x00'`, `null` for a
+  pointer or a function pointer, and `{}` for an enum, a struct, an array, a span or a `string`.
+  No dependent reads the initializer of a `mut` global (D4.6), so a change of it does not change
+  the interface hash.
+- No `$if`, no `$cfg` and no function body remain.
+
+**Values.** The value of a constant is its folded value (D4.4, D4.6, D7.10), in this form:
+
+- An integer is in decimal, with `-` before a negative value: `-9223372036854775808`.
+- A float is the shortest decimal that reads back to its `f64` value (D18.2). An `f32` value is
+  first converted to `f64` exactly, so the second rounding of D4.4 changes nothing. The form is
+  `<d>.<digits>e<exponent>`: one digit, a `.`, the other digits or `0`, then `e` and the decimal
+  exponent with `-` when it is negative. So 0.5 is `5.0e-1` and 100.0 is `1.0e2`. A negative value,
+  negative zero included, has `-` before the digits. No constant is infinite or NaN (D4.4).
+- A `bool` is `true` or `false`. A `char` is a char literal. A `string` is a string literal, or
+  `{}` when its pointer is null. In a literal, the bytes 0x20 to 0x7E stay as they are, except `"`,
+  `'` and `\`, which are written `\"`, `\'` and `\\`. Every other byte is `\xHH`, with uppercase hex
+  digits (D2.8).
+- A pointer is `null` or `&<declaration>`, and a function pointer is `null` or a function name. A
+  declaration of another module is `<binding>.<name>`.
+- An enum value is `<enum>.<member>` when a member has the value. Else it is
+  `cast(<decimal>, <enum>)` (D3.9, D4.6).
+- A span is `{}`, because no other span value is constant (D4.6).
+- A struct or an array is `{}` when each of its leaves has the zero value above. A negative zero
+  float is not the zero value. Else a struct is
+  `{.<field> = <value>, ...}` with every field in declaration order, and an array is
+  `{<value>, ...}` with every element.
+
+**Spacing.** One space stands between two tokens, with these exceptions. No space stands before
+`,`, `;`, `)` or `]`, or before a `*`, `@` or `[` that is a type suffix. No space stands after
+`(`, `&`, a unary `-` or the `[` of a suffix, or after the `.` of a designator. No space stands
+on either side of the `.` of a qualified name or an enum member, `_0.color.red`. No space stands
+between a name or `cast` and the `(` after it, but the `fn` of a function type has a space after
+it, `fn (i32, i32) i32`. An initializer brace has no space inside it, `{1, 2}`, and the body of a
+struct or an enum has one, `{ f64 x; }`.
+
+**The bodiless declaration.** `fn name(T p) R;` is legal only in an interface file
+(`grammar.md` section 3). It declares a fort function of its module with the type
+`fn (T) R` (D3.10). The function uses the internal calling convention (D9.9), and its symbol is
+`<module>.<name>` (D9.7). The object of the library defines it. A call, a function value and an
+import of it are the same as for a function with a body. It has no body, so D8.4 does not apply to
+it, `--fir` writes nothing for it, and `--fir-stats` does not count it (D14.1).
+
+**Determinism.** The bytes of the file are a function of the sources of the library, the
+interface files that the build reads, the target and the configuration map (D9.11). They do not
+depend on the build mode, the paths of the sources or the order in which the walk finds files.
+The IR text of a unit is byte-deterministic as well (D19.5). An object and `lib.a` need not be,
+because an archiver can write a time stamp.
+
+### 10.4 Linkage between units
+
+Each unit is one LLVM IR module (D19.1, D9.11). It follows the contract of `toolchain.md` 6, with
+these additions for the interface modules of its closure:
+
+- The unit defines the functions, constants and globals of its own modules, as a whole-program
+  build defines them.
+- The named types section holds the named type of each struct of the closure, interface modules
+  included, in dependency order and then in declaration order.
+- In the globals section, each constant and global of an interface module stands at the place
+  of its definition as an external global: `@"m.X" = external dso_local constant <type>, align
+  <n>` for a constant and `@"m.g" = external dso_local global <type>, align <n>` for a `mut`
+  global. A dependent reads a constant as a whole-program build reads it. It folds the value
+  from the interface file where a whole-program build folds the constant, as in a constant
+  expression (D4.6). It reads the external global where a whole-program build reads the global:
+  for `&`, and for an aggregate constant that it indexes, reads a field of or copies.
+- The declarations section starts with one `declare dso_local <result> @"m.f"(<parameters>) #0`
+  for each bodiless function of each interface module, in dependency order and then in
+  declaration order. The parameters and the result carry the attributes of D9.9 (`sret(%T)`,
+  `zeroext`, `signext`) and no names. `#0` is the attribute group of each fort definition
+  (`toolchain.md` 6 item 7), so the declaration carries what the definition in the library
+  carries, and the unit emits `#0` when a `declare` uses it. Then the declarations of a
+  whole-program module follow.
+- The counters of `@.str.<N>` and `@.file.<N>` start at 0 in each unit. This private data, and
+  each enum table `@.enum.<name>`, is `private` (`toolchain.md` 6 item 4), so two units never
+  share a name.
+- Only the entry unit emits `main` (D9.7, D11.6). Under `--lib`, D8.6 does not apply, and a
+  `main` of a library module is an ordinary function.
+
+All symbols stay distinct across units. A used library owns each path that starts with its name
+(section 10.2), so the entry unit holds no module of that library, and the symbols of section 7
+stay injective.
+
+**Link order.** The link line names the object of the entry unit and then the `lib.a` of each
+used library (`toolchain.md` 2.1). A library comes before each library that it uses. Where this
+rule leaves a choice, the name that is first in byte order comes first. So the compiler picks the
+libraries one at a time, and each pick is the first name in byte order among the remaining
+libraries that no remaining library uses. `std`, which each other library uses, comes last.
+
+**Extern declarations across units.** The identity rule of D9.8 holds across units. A build
+checks the extern declarations of its closure, as section 13 gives it. It then loads each module
+of each used library that is not in its closure, from the interface file, and checks each extern
+declaration of those modules against the closure and against each other. These modules add
+nothing to the IR module, the FIR or the index. A conflict stands at the later declaration in this
+order: the closure in dependency order, then the other modules, library by library in the reverse
+of the link order and module by module in byte order of the path. The object of a library holds
+all of its modules, so an extern of a module that the program never imports is still linked.
+
+**The runtime.** Every closure holds `std.rt` (D9.10), and the library `std` holds it. In a
+library build, the program links `std.rt` from the archive of `std` (D13.1).
+
+**Behaviour.** A program that a library build makes writes the same output and exits with the
+same status as its whole-program build. The one exception is a path in a runtime error message
+(D11.4), which is the path that the build of the library opened. Clang cannot inline a function
+across two units, so the speed can differ.
 
 ## 11. Entry point and program start
 
@@ -793,6 +1051,7 @@ All diagnostics follow D14.2: `<file>:<line>:<col>: error: <message>`, optionall
 | aggregate in an extern signature    | `extern signature cannot use type 'i32@'`               |
 | invalid C variable-tail type        | `C variable tail cannot use type 'f32'`                 |
 | owning C variable-tail rvalue       | `owning temporary would leak`                           |
+| `--lib` import in no library        | `module 'util.strings' is in no library`                |
 
 The missing-`main` row is the one diagnostic a build reports and `fort --check` does not: under
 `--check` the root is a module under inspection and D8.6 is not applied (D20.1). Every other row
@@ -803,11 +1062,12 @@ The mixed `$if` message is `a module $if cannot contain both imports and declara
 at the opening `$if` (D21.3).
 
 Notes accompany some of these: "not found" lists `note: looked for <path>` once per root and
-reading; the ambiguous case gives the full paths in the message and the same-file case adds `note:
-both name <real path>`; a redeclaration points at the earlier one with `note: previous declaration
-of 'add' here`; the missing-`main` message continues `or 'fn main(string@ args) i32'`. Every
-conflicting-extern row names the difference in the same words:
-`: the result type differs`, `: the number of parameters differs`, `: parameter N differs` or
+reading, and `note: looked for <module> in library '<name>'` once per reading for a path of a used
+library (section 10.2); the ambiguous case gives the full paths in the message and the
+same-file case adds `note: both name <real path>`; a redeclaration points at the earlier one
+with `note: previous declaration of 'add' here`; the missing-`main` message continues
+`or 'fn main(string@ args) i32'`. Every conflicting-extern row names the difference in the same
+words: `: the result type differs`, `: the number of parameters differs`, `: parameter N differs` or
 `: the variable-tail mark differs`. A conflict between two modules is reported
 at the later declaration of the dependency order, on the piece that carries the difference, with
 `note: previous declaration of 'write' here` at the earlier one; when either of the two types names
@@ -829,7 +1089,7 @@ where the closing import depends on walk order (D14.5).
 ## 14. Not in v1
 
 Deferred by D15, with the v1 idiom: visibility modifiers (idiom: naming conventions, since
-everything is exported); separate compilation, interface files and a module cache (idiom:
-whole-program builds); conditional compilation (idiom: a C shim behind `extern`). Also absent:
+everything is exported); conditional compilation (idiom: a C shim behind `extern`). Also absent:
 wildcard imports, re-exports, nested module declarations inside a file, importing enum members,
-a module-dependency tool and generated module documentation.
+a module-dependency tool, a build of a used library by the build that uses it (idiom: one `fort`
+invocation for each library, section 10.1) and generated module documentation.

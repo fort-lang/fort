@@ -2,7 +2,7 @@
 
 This document specifies the `fort` compiler's command line, build pipeline, build modes,
 diagnostics, runtime, code generation contract and test conventions for v1. It implements D14
-together with D9.10, D10, D11, D12, D18 and the run-time side of D17. Where it disagrees with
+together with D9.10, D9.11, D10, D11, D12, D18 and the run-time side of D17. Where it disagrees with
 `decisions.md` or `grammar.md`, those files win (D1.2).
 
 Sections: 1 Command line; 2 Build pipeline; 3 Build modes; 4 Diagnostics; 5 The runtime;
@@ -15,7 +15,8 @@ fort [options] entry.ft
 ```
 
 Exactly one entry file is given; the first argument that does not start with `-` is the entry
-file (D14.1). Options and the entry file may appear in any order.
+file (D14.1). Options and the entry file may appear in any order. A `--lib` build takes no entry
+file: `fort [options] --lib <name> <root>`.
 
 | Option              | Meaning                                                    | Default    |
 |---------------------|------------------------------------------------------------|------------|
@@ -41,12 +42,20 @@ file (D14.1). Options and the entry file may appear in any order.
 | `--fir-test`        | run the passes of a FIR test and write the FIR (D14.1)     | off        |
 | `--fir-verify-report` | write the first FIR violation of each function; stop (D14.1) | off   |
 | `--fir-stats`       | after the build, write `lowered N of M` (D14.1)            | off        |
+| `--lib <name> <root>` | build the library `<name>` from `<root>` (D9.11)           | off        |
+| `--use <name>=<path>` | use the library artifact `<path>`; repeatable (D9.11)      | none       |
+| `--emit-interface`  | write the interface file of `--lib` and stop (D9.11)       | off        |
+| `--cache-dir <dir>` | the cache directory of a library build (D9.11)             | see below  |
+| `--cache-stats`     | write the cache outcome of a library build (D9.11)         | off        |
+| `--ar <path>`       | the archiver of a `--lib` build (D9.11)                    | `ar`       |
 | `--help`            | print the usage line and exit 0                            |            |
 | `--version`         | print the compiler version and exit 0                      |            |
 
-- `-o`, `-I`, `--std-dir`, `--cc`, `--target`, `--cfg` and `-Xcc` take the following argument;
+- `-o`, `-I`, `--std-dir`, `--cc`, `--target`, `--cfg`, `-Xcc`, `--use`, `--cache-dir` and
+  `--ar` take the following argument, and `--lib` takes the two following arguments;
   `-l<lib>` is one argument. `-I` roots are searched in command-line order (D9.2) and `-Xcc`
-  arguments are passed in command-line order. The last `-o`, `--std-dir`, `--cc` and `--target` win.
+  arguments are passed in command-line order. The last `-o`, `--std-dir`, `--cc`, `--target`,
+  `--cache-dir` and `--ar` win.
 - `--cc` must name a clang, since nothing else reads LLVM IR (D14.1, D19.1).
   The compiler defaults to `clang` on both targets (D14.3).
 - The default target is the compiler binary's built target (D14.1).
@@ -68,7 +77,10 @@ file (D14.1). Options and the entry file may appear in any order.
   If `realpath` fails, Mac uses the path `_NSGetExecutablePath` returned.
 - `-S` and `-c` together stop at the IR. With `-S`, `-l`, `--cc` and `-Xcc` are unused.
   `--target` remains active and selects the IR triple, ABI and target standard root.
-  A target other than the built target requires an explicit `--std-dir` option with `-S`.
+  A target other than the built target requires an explicit `--std-dir` option with `-S` in a
+  whole-program build; a library build reads no `--std-dir` (section 2.1). The used library
+  `std` supplies the standard modules of a library build, and the root of `--lib std` supplies
+  them when it builds `std` itself.
   This rule also applies when `-c` appears with `-S`.
   The caller must select sources that match that target. The compiler checks option presence.
   It does not inspect the sources for C ABI agreement.
@@ -228,6 +240,39 @@ file (D14.1). Options and the entry file may appear in any order.
 
   Bootstrap-0 need not parse or print this new C extern form.
 - The entry file's directory is always a root and the current directory never is (D9.2).
+- `--lib <name> <root>` builds the library `<name>` from the directory `<root>` (D9.11,
+  `module-system.md` 10.1) by the steps of section 2.1. `<name>` must be a module-path segment.
+  The build takes no entry file, so an argument that does not start with `-` is an unexpected
+  argument. The default output is the artifact directory `<name>.flib` in the current directory;
+  with `-c` it is `<name>.o` and with `-S` `<name>.ll`. `--lib` is a usage error together with
+  `-I`, `-l`, `--check`, `--json`, `--index`, `--tokens`, `--ast`, `--fir`, `--fir-after`,
+  `--fir-test`, `--fir-verify-report` or `--fir-stats`. `--std-dir` is unused.
+- `--use <name>=<path>` names the artifact directory `<path>` of a built library. The argument
+  splits at its first `=`. `<name>` must be a segment and `<path>` must not be empty. Two `--use`
+  options of one name, or a `--use` of the `--lib` name, are a usage error. A build with `--use`
+  and without `--lib` takes an entry file and follows section 2.1. `--std-dir` is unused in it.
+  `--use` is unused under `--tokens` and `--ast`. Every other mode that loads a closure reads the
+  interface files (`module-system.md` 10.2).
+- A library build that is neither `--lib std` nor a build with `--use std=<path>` is a usage
+  error, because every closure holds `std.rt` and only the library `std` holds it (D9.10, D9.11).
+- `--emit-interface` requires `--lib`. It checks the library, writes its interface file to
+  stdout (`module-system.md` 10.3) and stops, so it writes no file and runs no `--cc`. Its bytes
+  are the bytes of the `interface.ft` of the artifact. It is a usage error together with `-S` or
+  `-c`.
+- `--cache-dir <dir>` selects the cache directory of section 2.3. The default is
+  `<root>/.fort-cache` under `--lib` and `<entry dir>/.fort-cache` otherwise. `--cache-stats`
+  writes one line to stdout after the build: `cache hit <unit> <name> <key>` or
+  `cache miss <unit> <name> <key> <cause>`, where `<unit>` is `library` or `entry`,
+  `<name>` is the library name or the entry module path, as a manifest value, and `<key>` is the
+  key of section 2.2 (section 2.2 gives the manifest value form). `<cause>` is `absent`,
+  `corrupt` or `unreadable` (section 2.3), so the line reports each miss and its cause. A build
+  that does not use the cache writes no line, and a compile error writes no line. Each of the
+  two options requires `--lib` or `--use`.
+- `--ar <path>` names the archiver that writes `lib.a` (section 2.1). It requires `--lib`. The
+  default is `ar` on both targets.
+- A build with neither `--lib` nor `--use` is a whole-program build. It reads no artifact, uses
+  no cache and runs no archiver, so its IR text and its outputs are those of section 2 (D9.10,
+  D19.5).
 
 Exit status (D14.1):
 
@@ -269,6 +314,25 @@ pass:' directive`, `unknown pass '<name>'`, `the pass '<name>' takes no argument
 build mode '<argument>'`. The last two are the compiler's own failures: `internal error: <what>`
 and `out of memory`.
 
+A library build (D9.11) adds two groups of texts, each with status 2. Nine report a command line
+the compiler cannot use and then print the usage line: `invalid library name '<name>'`,
+`invalid --use argument '<arg>'`, `duplicate library '<name>'`,
+`--lib does not combine with -I, -l, --check, --json, --index, --tokens, --ast or a --fir option`,
+`--emit-interface requires --lib`, `--emit-interface does not combine with -S or -c`,
+`--ar requires --lib`, `<option> requires --lib or --use` (for `--cache-dir` and
+`--cache-stats`), and `a library build needs --use std=<path>`. Thirteen report an artifact,
+a library root or the archiver: `cannot read library root '<root>': <reason>`,
+`library root '<root>' holds no module`, `cannot read library '<path>': <reason>`,
+`library '<path>' is corrupt`, `library '<path>' is named '<other>', not '<name>'`,
+`library '<name>' was built with another <field>`, where `<field>` is `compiler`, `target`,
+`build mode`, `bounds mode` or `configuration`,
+`library '<name>' uses library '<dep>', which no --use names`,
+`library '<name>' was built against another interface of '<dep>'`,
+`library cycle: '<a>' uses '<b>' uses '<a>'`, which starts and ends at the first library of
+the cycle in byte order of the name, `cannot write '<file>': <reason>` for a file of an artifact,
+`cannot run '<ar>': <reason>`, `ar failed with status <n>` and `ar failed with signal <n>`.
+A failure of the cache is no error (section 2.3).
+
 ```sh
 fort main.ft -o main                          # build ./main in checked mode
 fort -S main.ft                               # write main.ll and stop
@@ -285,6 +349,10 @@ fort --index main.ft                          # the same document with the ident
 fort --tokens main.ft                         # one line per token of that file, nothing else
 fort --fir main.ft                            # the FIR of the program, nothing else
 FORT_STD_DIR=/opt/fort/std fort main.ft
+fort --lib std build/std                      # build std.flib from a standard root
+fort --lib geom lib/geom --use std=std.flib   # build geom.flib against std.flib
+fort --use std=std.flib --use geom=geom.flib -o app main.ft
+fort --lib geom lib/geom --use std=std.flib --emit-interface   # the interface on stdout
 ```
 
 The only environment variables read are `FORT_STD_DIR` (D14.1) and `TMPDIR`, which locates the
@@ -292,7 +360,8 @@ temporary directory for the intermediate IR file (D19.1).
 
 ## 2. Build pipeline
 
-Compilation is whole-program (D9.10):
+A build with neither `--lib` nor `--use` is whole-program (D9.10), and it has the steps below.
+Section 2.1 gives the steps of a library build (D9.11).
 
 0. In an IR mode or under `--check` or `--fir`, select the built target or the explicit
    `--target` (D14.1). Reject an unsupported target form with status 2 before step 1.
@@ -355,7 +424,9 @@ reports (D17.11).
   emitter suites verify each module they emit. `llvm.trap` raises SIGILL on x86-64 and SIGTRAP
   on arm64 (`test/lang/run/ffi/009`).
 - An object from `-c` contains the whole program, the runtime included, so linking it needs no
-  input the compiler produced beyond the object itself (D9.10, D13.1).
+  input the compiler produced beyond the object itself (D9.10, D13.1). In a library build, an
+  object from `-c` holds one unit, and a link of the entry object needs the `lib.a` of each used
+  library as well (section 2.1, D9.11).
 
 Where things live: `<std-dir>/*.ft` holds the standard library modules of D13.2 (`std.sys`,
 `std.libc`, `std.rt`, `std.mem`, `std.io`, `std.str`, `std.strbuf`, `std.vec`,
@@ -366,6 +437,194 @@ modules in the import closure are read (module-system.md 10). A `--std-dir` (or 
 that does not hold the library therefore fails every compile, a program with no `import` at all
 included, with `module 'std.rt' not found` naming a module the user never wrote: the runtime is
 read from there like any other standard library module.
+
+### 2.1 Library builds (D9.11)
+
+A library build compiles one unit (`module-system.md` 10.1) to one object. A `--lib` build has
+these steps:
+
+0. Select the target as in step 0 of section 2, with one change: a library build reads no
+   `--std-dir`, so a non-built `-S` target needs none. The used library `std` supplies the
+   standard modules, and step 1 requires its target to equal the selected target. `--lib std`
+   uses no library: its root supplies the standard modules, and the caller must give a root that
+   matches the selected target, as for `--std-dir` (section 1).
+1. Read the manifest and the `interface.ft` of each `--use` artifact once and validate them
+   (section 2.2). Later steps use the bytes that this step checked. Apply the rules of
+   D9.11 to the used libraries: the name, the compiler identity, the target, the build mode, the
+   bounds mode and the configuration map; each library that a manifest uses; no cycle. Exit 2 on
+   the first failure, with the message of section 1.
+2. Walk `<root>` and list the modules of the library in byte order of the module path. Read each
+   module file once. The source hash of step 3 and the parse of step 4 use these bytes, and no
+   step reads the file again. Exit 2 when the root cannot be read or holds no module.
+3. Compute the source hash and the key (section 2.2). When the build writes an artifact, look up
+   the cache entry of the key (section 2.3). On a hit, write the files of the entry to the
+   artifact (section 2.2), write the `--cache-stats` line and exit 0.
+4. Parse each root and each newly reached module, as in step 2 of section 2, with the roots and
+   the resolution of `module-system.md` 10.2. Check, lower and verify every module, and run the
+   emptiness pass, as in step 3 of section 2 (exit 1). Check the extern declarations of the used
+   libraries (`module-system.md` 10.4).
+5. Write the interface file. Under `--emit-interface`, write it to stdout and stop.
+6. Emit the IR module of the unit to `<tmp>/<name>.ll`, or to the `-S` output and stop.
+7. Run the compile line, to the `-c` output and stop under `-c`:
+
+   ```sh
+   clang --target=x86_64-linux-gnu -O1 -fPIE -Wno-override-module \
+       -c -o <tmp>/<name>.o <tmp>/<name>.ll <-Xcc args>
+   ```
+
+8. Run the archive line, which writes an archive with one member:
+
+   ```sh
+   ar rcs <tmp>/lib.a <tmp>/<name>.o
+   ```
+
+   An archiver can write a time stamp into the archive, so two builds can write two different
+   `lib.a` files. Only the IR text and `interface.ft` are byte-deterministic (D9.11, D19.5). The
+   manifest records the SHA-256 of the `lib.a` that it stands beside.
+
+9. Write the cache entry and then the artifact (sections 2.2 and 2.3). Write the `--cache-stats`
+   line. Remove the temporary directory.
+
+A build with `--use` and without `--lib` has these steps:
+
+0. Select the target as in step 0 of a `--lib` build.
+1. Validate the used libraries as in step 1 of a `--lib` build.
+2. Read the entry file and load its closure as in steps 1 and 2 of section 2, with the
+   resolution of `module-system.md` 10.2. Read each file once. The entry unit is the set of
+   closure modules that are in no used library. The source hash of step 3 uses the bytes that this
+   step parsed.
+3. When the build writes an object or an executable, compute the source hash and the key of the
+   entry unit and look up its cache entry. On a hit, go to step 7 with the object of the entry.
+4. Check, lower and verify every module of the closure, interface modules included, and run the
+   emptiness pass, as in step 3 of section 2 (exit 1). Check the extern declarations of the used
+   libraries. `--check` stops here.
+5. Emit the IR module of the entry unit to `<tmp>/<entry>.ll`, or to the `-S` output and stop.
+6. Run the compile line of a `--lib` build over it, with the output `<tmp>/<entry>.o`, or the
+   `-c` output under `-c`. Write the cache entry. Under `-c`, stop.
+7. Under `-c` after a hit, write the object of the entry to the `-c` output and stop. Else run the
+   link line:
+
+   ```sh
+   clang --target=x86_64-linux-gnu -o <out> <object> <archives> <-l options> <-Xcc args>
+   ```
+
+   `<object>` is the object of the entry unit. `<archives>` is the `lib.a` of each used library,
+   in the link order of `module-system.md` 10.4. Each `lib.a`, and the `object.o` of a cache hit,
+   is the checked copy in the temporary directory (section 2.2, Reading).
+8. Write the `--cache-stats` line. Remove the temporary directory.
+
+The three lines are the Linux x86-64 form. Mac arm64 uses the same lines with
+`--target=arm64-apple-macosxM.m.p`. The compile line uses `-O2` in place of `-O1` under
+`--release` (D14.3). `<ar>` replaces `ar`, and `<cc>` replaces `clang`. A failure of `--cc` or
+`--ar` exits 2 with the messages of section 1. Each line runs in the order shown.
+
+### 2.2 The artifact and the manifest (D9.11)
+
+The artifact `<name>.flib/` is a directory with four entries:
+
+| Entry          | Content                                                                    |
+|----------------|----------------------------------------------------------------------------|
+| `interface.ft` | the interface file of `module-system.md` 10.3                              |
+| `lib.a`        | the archive of the archive line of section 2.1, with the member `<name>.o` |
+| `manifest`     | the fields below                                                           |
+| `summaries/`   | an empty directory; the manifest gives its version, 1                      |
+
+The manifest is text. Each line is `<field>` or `<field> <value>`, and it ends with one newline
+byte. In a value, the bytes 0x21 to 0x7E stay as they are, except `\`. Every other byte, a space
+and `\` included, is `\xHH` with uppercase hex digits. A `cfg` line has two values with one space
+between them. A hash is 64 lowercase hex digits. The lines come in this order:
+
+| Line                | Unit    | Value                                                   |
+|---------------------|---------|---------------------------------------------------------|
+| `fort-manifest 1`   | both    | the format version                                      |
+| `library <name>`    | `--lib` | the library name                                        |
+| `entry <module>`    | entry   | the entry module path                                   |
+| `compiler <hash>`   | both    | the SHA-256 of the running compiler executable          |
+| `target <triple>`   | both    | the selected target (D14.1)                             |
+| `mode <mode>`       | both    | `checked`, or `release` under `--release` (D11.1)       |
+| `bounds <on\|off>`  | both    | `off` under `--no-bounds-check`, else `on` (D10.6)      |
+| `cfg <key> <value>` | both    | one line for each pair of the configuration map (D21.1) |
+| `cc <path>`         | both    | the `--cc` value as written                             |
+| `xcc <arg>`         | both    | one line for each `-Xcc` argument                       |
+| `ar <path>`         | `--lib` | the `--ar` value as written                             |
+| `source <hash>`     | both    | the source hash                                         |
+| `use <name> <hash>` | both    | one line for each `--use`: its interface hash           |
+| `key <hash>`        | both    | the key                                                 |
+| `interface <hash>`  | `--lib` | the SHA-256 of `interface.ft`                           |
+| `archive <hash>`    | `--lib` | the SHA-256 of `lib.a`                                  |
+| `summaries 1`       | `--lib` | the version of `summaries/`                             |
+| `object <hash>`     | entry   | the SHA-256 of `object.o` (section 2.3)                 |
+
+- The `cfg` lines hold the whole configuration map, the three target keys included, in byte
+  order of the key. The `xcc` lines keep the command-line order. The `use` lines are in byte
+  order of the name.
+- The **source hash** is the SHA-256 of one byte string. For each module of the unit, in byte
+  order of the module path, the string holds the module path, a newline, the path that the
+  compiler opened, a newline, the byte count of the file in decimal, a newline and the bytes of
+  the file, the same bytes that the build parses (section 2.1). The module path and the opened
+  path are written as manifest values, because the base name of an entry file can hold any byte
+  but `.` (D9.1). The opened path is in the hash because the IR text holds it (D11.4, D19.5).
+- The **key** is the SHA-256 of the bytes of the manifest lines from `fort-manifest 1` to the last
+  `use` line, each with its newline. The key line follows them. The lines after it give the
+  outputs, which the key does not cover.
+- The `--cc`, `-Xcc` and `--ar` values change the object, so the key covers them. It covers the
+  text of the values and not the programs that they name.
+
+**Write protocol.** The compiler writes an artifact or a cache entry `D` in this order. It makes
+`D` when it does not exist. It removes `D/manifest`. It writes each other file `F` to
+`D/F.tmp.<pid>`, where `<pid>` is the process id in decimal, and renames it to `D/F`. It makes
+`D/summaries` for a library when it does not exist. Then it writes `D/manifest` in the same way.
+A reader that opens `D/manifest` between two steps finds none. A reader that read the manifest
+before a writer started can then read a file of the newer build. The SHA-256 of that file differs
+from its manifest line, so rule 4 below makes the directory corrupt for that reader.
+
+**Reading.** A reader reads each file of a directory once: the manifest, `interface.ft`, and
+`lib.a` or `object.o`. It checks the bytes that it read, and then it uses only those bytes. It
+parses the `interface.ft` bytes that it checked, it writes the checked bytes when it copies an
+entry to an artifact, and it links a copy of the checked `lib.a` or `object.o` that it writes to
+the temporary directory. So a file that a writer replaces after the check never reaches the
+build.
+
+**Validation.** A directory is valid when all of these are true; else it is corrupt:
+
+1. `manifest` exists, and each of its lines has the form and the order of the table above.
+2. The first line is `fort-manifest 1`, and a library has `summaries 1`.
+3. The key line holds the SHA-256 of the lines before it.
+4. The SHA-256 of each file that an output line names equals that line.
+5. A library has the directory `summaries/`.
+
+A corrupt `--use` artifact is the error `library '<path>' is corrupt`. A corrupt cache entry is a
+miss (section 2.3).
+
+### 2.3 The cache (D9.11)
+
+The cache directory is the `--cache-dir` value, else `<root>/.fort-cache` under `--lib`, else
+`<entry dir>/.fort-cache`. The compiler makes it, and its subdirectory `1`, when they do not
+exist. The 1 is the version of the cache layout. The cache entry of the key K is the directory
+`<cache>/1/K/`.
+
+- A library entry holds the four entries of the artifact. An entry of the entry unit holds
+  `object.o`, the object of the compile line, and `manifest`.
+- A lookup finds a hit when the entry is valid (section 2.2) and its key line holds K. Each other
+  outcome is a miss, with one of three causes: `absent` (no entry), `corrupt` (a corrupt entry)
+  or `unreadable` (a cache directory that the compiler cannot read). `--cache-stats` writes the
+  cause (section 1).
+- After a miss the compiler builds the unit and writes the entry by the write protocol. When it
+  cannot write the entry, the build goes on and gives the same result.
+- On a hit of a library, the compiler writes the files of the entry to the artifact `-o` by the
+  write protocol. On a hit of the entry unit, it links the `object.o` of the entry.
+- The compiler never removes an entry.
+- Only two builds use the cache: a `--lib` build that writes an artifact, and a build with
+  `--use` that writes an object or an executable. `--lib` with `-S` or `-c`, `-S`, `--check`,
+  `--fir` and `--emit-interface` do not read or write it.
+
+**The rebuild rule.** The key of a unit covers the interface hash of each used library and not
+its source hash or its archive (section 2.2). A change to the body of a function of a library
+changes its source hash, so that library misses and is rebuilt. Its interface hash stays the
+same, so each library and entry unit that uses it keeps its key and hits. The link line of the
+program then names the new archive. A change of a declaration changes the interface hash, so
+each unit that uses the library misses and is rebuilt. A build tool runs `fort` for each library
+in dependency order and then for the program, and the cache decides what each run compiles.
 
 ## 3. Build modes
 
@@ -629,7 +888,9 @@ helpers, its own `extern` declarations -- is an ordinary module's.
 The compiler holds the list of names below, since fort has no attribute with which a module could
 mark a declaration as the target of a builtin (D12.2), and emits its calls against the signatures
 this section fixes, by the mangled names of D9.7 (`@"std.rt.print_i64"`). It emits no declaration
-for any of them: the module that holds the call holds the definition too (section 6 item 8).
+for any of them: the module that holds the call holds the definition too (section 6 item 8). In a
+library build, the archive of `std` holds the definitions. A unit other than `std` then declares
+each entry point that it calls with the `declare` lines of `module-system.md` 10.4 (D9.11).
 
 ### 5.1 Entry points
 
@@ -837,7 +1098,8 @@ where a module the compiler builds holds the whole of `std.rt` (item 8, D9.10, D
 to the emitter's text is a change here.
 
 1. **Form and module header.** One textual module (`.ll`, LLVM 18 syntax, opaque pointers) holds
-   the whole program (D9.10, D19.1) and is built by appending text. It
+   the whole program (D9.10, D19.1) and is built by appending text. In a library build, one module
+   holds each unit, with the additions of `module-system.md` 10.4 (D9.11). It
    begins with
 
    ```llvm
@@ -920,7 +1182,9 @@ to the emitter's text is a change here.
    One target symbol is one IR entity: `main` is reserved, so the checker refuses an `extern` that
    declares it (D9.7, module-system.md 13) and the emitter declares no name it defines, which
    leaves the definition of item 22 alone. A runtime entry point is a fort definition in the
-   module like any other, so nothing declares it either (item 8).
+   module like any other, so nothing declares it either (item 8). In a library build, a unit
+   other than `std` declares each runtime entry point and each other function of an interface
+   module (`module-system.md` 10.4, D9.11). It still declares no name that it defines.
 
 5. **Data emission.** Private data follows the function definitions, `@.file.N` constants before
    `@.str.N` before `@.enum.*` (D19.5):
@@ -2045,7 +2309,8 @@ Deferred by D15 and the design reviews: debugger support (no DWARF, no `!dbg` me
 frame pointer of section 6 item 7 and the symbol names are what a debugger gets), an optimizer
 of the compiler's own and `-O` options on `fort`'s command line (`--cc` optimizes the module at
 `-O1`, or `-O2` under `--release`, D14.3), building the module through the LLVM C API in process
-(D15), warnings, separate compilation and incremental builds, a package manager, documentation
+(D15), warnings, a package manager, a build of a used library by the build that uses it (D9.11
+builds one unit in each invocation), optimization across the units of a library build, documentation
 generation, cross-target objects and links, any target beyond Linux x86-64 and Mac arm64,
 `--help` text beyond the
 usage line, and conditional compilation. The idioms that replace the deferred language features

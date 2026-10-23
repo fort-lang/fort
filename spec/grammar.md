@@ -92,7 +92,16 @@ compile_decl_if = "$if" "(" expr ")" decl_branch
                   { "else" "$if" "(" expr ")" decl_branch }
                   [ "else" decl_branch ] ;                           (* D21.2 *)
 decl_branch = "{" { top_decl } "}" ;
+
+interface_module = { interface_import } { interface_decl } ;          (* D9.11 *)
+interface_import = "import" import_path "as" identifier ";" ;
+interface_decl   = fn_signature | extern_decl | struct_decl | enum_decl | global_decl ;
 ```
+
+The parser reads each section of an interface file (D9.11, `module-system.md` 10.3) as an
+`interface_module`, and every other file as a `module`. A `fn_signature` is therefore a syntax
+error in a source file. A function body and a `$if` are syntax errors in an interface file, and a
+`$cfg` there is a compile error.
 
 A module `$if` chain is parsed as a `compile_module_if`. The parser classifies the complete chain
 after it parses both branches. A chain with at least one recursive import leaf is an import
@@ -111,6 +120,7 @@ Whether the last segment of an `import_path` names a module or a symbol is decid
 
 ```ebnf
 fn_decl      = "fn" identifier "(" [ param_list ] ")" return_type block ;   (* D8.1 *)
+fn_signature = "fn" identifier "(" [ param_list ] ")" return_type ";" ;     (* D9.11 *)
 extern_decl  = "extern" "fn" identifier "(" [ extern_param_list ] ")" return_type ";" ; (* D9.8 *)
 extern_param_list = param_list [ "," "..." ] ;            (* at least one fixed C parameter *)
 return_type  = type | "void" | "noreturn" | "(" return_type ")" ;           (* D8.5 *)
@@ -370,6 +380,7 @@ top-level boundary because `$if` is also a valid statement there (D21.2).
 |------------------------|-----------------------------------|
 | Lexical elements       | D2.1 to D2.11                     |
 | Imports                | D9.1 to D9.4                      |
+| Interface files        | D9.11                             |
 | Functions and `extern` | D8.1, D8.5, D8.6, D9.8            |
 | Structs and enums      | D3.8, D3.9                        |
 | Declarations           | D7.1, D7.10, D6.5                 |
