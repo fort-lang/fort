@@ -6,6 +6,7 @@
 // lower_env environment.
 import check_env;
 import fir;
+import fir.emptiness;
 import fir_lower;
 import fir_parse;
 import fir_passes;
@@ -80,11 +81,20 @@ fn verified(lower_env.env mut* e, fir.func* f, string what) void {
     }
 }
 
-/// Runs the pass in mode `m` on `f` between two runs of the verifier, and holds that each block
-/// has the number of its position after the pass.
+/// Runs the emptiness pass on `f` for its proof, which reports nothing, and then the build-mode
+/// pass with that proof, so the pass removes the overwrite checks that the proof proves
+/// (spec/fir.md 11).
+fn build_proved(fir.func mut* f, bool release, bool no_bounds) void {
+    emptiness.proof mut p = emptiness.prove(f);
+    defer emptiness.free(&p);
+    fir_passes.build_mode(f, release, no_bounds, &p);
+}
+
+/// Runs the pass in mode `m` on `f` between two runs of the verifier, as build_proved does, and
+/// holds that each block has the number of its position after the pass.
 fn build(lower_env.env mut* e, fir.func mut* f, mode m) void {
     verified(e, f, "pass_env.build: the verifier refuses the input");
-    fir_passes.build_mode(f, m.release, m.no_bounds);
+    build_proved(f, m.release, m.no_bounds);
     verified(e, f, "pass_env.build: the verifier refuses the output");
     numbered(f);
 }

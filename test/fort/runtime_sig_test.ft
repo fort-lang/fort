@@ -90,8 +90,6 @@ fn every_failure_entry_point_is_the_one_of_5_1() void {
          "void @\"std.rt.fail_div_overflow\"(ptr, i32, i32) noreturn");
     want(runtime_sig.rt_entry.rt_fail_alloc_count,
          "void @\"std.rt.fail_alloc_count\"(i64, ptr, i32, i32) noreturn");
-    want(runtime_sig.rt_entry.rt_fail_overwrite,
-         "void @\"std.rt.fail_overwrite\"(ptr, i32, i32) noreturn");
     want(runtime_sig.rt_entry.rt_fail_enum,
          "void @\"std.rt.fail_enum\"(i64, ptr, ptr, i32, i32) noreturn");
     want(runtime_sig.rt_entry.rt_panic,
@@ -170,6 +168,10 @@ fn every_entry_point_is_found_by_its_own_mangled_name() void {
     assert(runtime_sig.rt_entry_of("fort_rt_new") == runtime_sig.rt_entry.rt_none);
     assert(runtime_sig.rt_entry_of("printf") == runtime_sig.rt_entry.rt_none);
     assert(runtime_sig.rt_entry_of("") == runtime_sig.rt_entry.rt_none);
+    // std.rt keeps fail_overwrite for the pinned compiler, and no check calls it, so it is an
+    // ordinary fort function and no entry point (D17.11).
+    assert(runtime_sig.rt_entry_of("std.rt.fail_overwrite") == runtime_sig.rt_entry.rt_none);
+    assert(runtime_sig.RT_ENTRY_COUNT == 27);
 }
 
 fn an_arity_is_read_off_the_row_and_the_row_ends_at_its_first_gap() void {
@@ -198,9 +200,10 @@ fn an_arity_is_read_off_the_row_and_the_row_ends_at_its_first_gap() void {
 }
 
 fn only_the_rows_5_1_marks_noreturn_are_noreturn() void {
-    // Every `std.rt.fail_*`, `std.rt.panic`, `std.rt.assert_fail` and `std.rt.exit` is `fn
-    // noreturn`. Nothing else is: twelve of the twenty-eight runtime signatures. These
-    // definitions carry attribute group `#8`.
+    // Every `std.rt.fail_*` that a check calls, `std.rt.panic`, `std.rt.assert_fail` and
+    // `std.rt.exit` is `fn noreturn`. Nothing else is: eleven of the twenty-seven runtime
+    // signatures. These definitions carry attribute group `#8`. `std.rt.fail_overwrite` has no
+    // row, so its definition carries the `#1` of every other `noreturn` function.
     u64 mut noreturns = 0;
     u64 mut i = 0;
     while (i < runtime_sig.RT_ENTRY_COUNT) {
@@ -210,7 +213,7 @@ fn only_the_rows_5_1_marks_noreturn_are_noreturn() void {
         }
         i += 1;
     }
-    assert(noreturns == 12);
+    assert(noreturns == 11);
     assert(runtime_sig.rt_entry_noreturn(runtime_sig.rt_entry.rt_exit));
     assert(runtime_sig.rt_entry_noreturn(runtime_sig.rt_entry.rt_panic));
     assert(!runtime_sig.rt_entry_noreturn(runtime_sig.rt_entry.rt_alloc));

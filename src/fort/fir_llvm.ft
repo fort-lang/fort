@@ -1194,15 +1194,13 @@ fn fail_only(fir.func* f, u32 b) bool {
 }
 
 // Whether block `b` of `f` makes a failure block: it ends in a `check`, or it is a failure block
-// itself.
+// itself. No `check(overwrite: p)` reaches the translator (spec/fir.md 12.4).
 fn makes_failure(fir.func* f, u32 b) bool {
     fir.block* bl = fir.block_at(f, b);
     if (!bl->terminated) {
         return false;
     }
-    fir.term_kind k = bl->term.kind;
-    return k == fir.term_kind.tk_check || k == fir.term_kind.tk_check_overwrite
-        || fail_only(f, b);
+    return bl->term.kind == fir.term_kind.tk_check || fail_only(f, b);
 }
 
 /// The label that a branch to block `b` names: `%L<b>`, or the label of the failure block when
@@ -1222,7 +1220,9 @@ fn failure_label(translator* t, u32 b) u64 {
     return t->fail_label[cast(b, u64)];
 }
 
-/// The runtime entry that a check or a `fail` of `kind` calls (spec/fir.md 8).
+/// The runtime entry that a check or a `fail` of `kind` calls (spec/fir.md 8). The kind
+/// `overwrite` calls no entry: the verifier refuses a `fail` of that kind (rule V7), and the
+/// build-mode pass removes each `check(overwrite: p)`.
 fn entry_of(fir.check_kind kind) runtime_sig.rt_entry {
     switch (kind) {
     case fir.check_kind.chk_overflow:
@@ -1240,7 +1240,7 @@ fn entry_of(fir.check_kind kind) runtime_sig.rt_entry {
     case fir.check_kind.chk_alloc_count:
         return runtime_sig.rt_entry.rt_fail_alloc_count;
     case fir.check_kind.chk_overwrite:
-        return runtime_sig.rt_entry.rt_fail_overwrite;
+        panic("fir_llvm.entry_of: the overwrite check has no runtime entry");
     case fir.check_kind.chk_enum:
         return runtime_sig.rt_entry.rt_fail_enum;
     case fir.check_kind.chk_user:
@@ -1355,31 +1355,11 @@ fn check_to(translator mut* t, fir.terminator* term, u64 bad) void {
     // the failure block opened a block of its own; the block of the check ends in its `br`
 }
 
-// `check(overwrite: p) -> bb`: the pointer word of `p`, field 0 of a span or a `string`, then
-// `icmp ne ptr` against null, then `br i1` with the failure label first; the failure block calls
-// `std.rt.fail_overwrite` (toolchain.md 6 item 18).
-fn overwrite_to(translator mut* t, fir.terminator* term, u64 bad) void {
-    gen.emitter mut* g = t->g;
-    types.node* ty = fir.place_type(t->f, term->place);
-    gen.gen_val mut word = gen.gen_val{};
-    if (whole_register(t, term->place)) {
-        word = register_value(t, term->place.local);
-    } else if (fir.type_aggregate(ty)) {
-        word = gen.gen_span_ptr(g, place_addr(t, term->place));
-    } else {
-        word = gen.gen_load_place(g, gen.gen_place{place_addr(t, term->place), ty});
-    }
-    gen.gen_val live = gen.gen_icmp(g, "ne", word, gen.gen_literal(g, "ptr", "null"));
-    gen.gen_args mut args = gen.gen_args_init();
-    defer gen.gen_args_free(&args);
-    gen.gen_br_cond(g, live, bad, label_of(t, term->target));
-    gen.gen_fail_block(g, bad, runtime_sig.rt_entry.rt_fail_overwrite, &args, term->loc);
-}
-
 /// Translates the terminator of block `b` (spec/fir.md 12.4): `goto` is `br`, `switch` is `br i1`
 /// or an LLVM `switch`, `return` is `ret`, a `check` is a `br i1` and a failure block in
 /// `g->fail`, `fail` is the call and `unreachable` in place, `trap` is the call of `llvm.trap` and
-/// `unreachable`, and `unreachable` is `unreachable`.
+/// `unreachable`, and `unreachable` is `unreachable`. A `check(overwrite: p)` is an internal
+/// error: the build-mode pass replaced each one by `goto` (spec/fir.md 11).
 fn translate_terminator(translator mut* t, u32 b) void {
     gen.emitter mut* g = t->g;
     fir.block* bl = fir.block_at(t->f, b);
@@ -1397,7 +1377,7 @@ fn translate_terminator(translator mut* t, u32 b) void {
     case fir.term_kind.tk_check:
         check_to(t, term, failure_label(t, b));
     case fir.term_kind.tk_check_overwrite:
-        overwrite_to(t, term, failure_label(t, b));
+        panic("fir_llvm.translate_terminator: a check(overwrite) after the build-mode pass");
     case fir.term_kind.tk_fail:
         fail_call(t, term);
     case fir.term_kind.tk_trap:

@@ -2449,15 +2449,20 @@ says ownership is "by convention", this section supersedes it.
   right-hand side and before its own kill rules.
   The proof of one function has a limit. Its work is the sum of three counts in the FIR of the
   function: its statements and terminators times its overwrite checks; its blocks times its
-  locals; and, for each local, the stores whose place has that local as its base times the index
-  temporaries that copy that local. The first count bounds the walk of the facts, because a check
-  names at most one fact, and the search for an equal fact. The second bounds the sets of the
-  dataflows of the stale index temporaries and of the fresh pointer locals. The third bounds the
-  steps that mark the index temporaries stale. The analysis measures the work before any
-  dataflow. When the work passes 1048576 (2^20), the analysis proves no store of the function, so
-  each store into an `own` reference-typed place of that function is an error. A function with
-  no overwrite check has no work. The functions of the compiler, its language server and the
-  standard library measure 4451 or less, and a function of the language tests 23608 or less.
+  locals; and, for each local `k` that is not memory, the stores whose place has the base `k`
+  times the temporaries of the lowering that are not memory and that exactly one store writes,
+  with a copy of `k` or with a copy of `k` cast to `u64`. The third count includes such a
+  temporary whether or not an index reads it (`fir.md` 11). The first count bounds the walk of
+  the facts, because a check names at most one fact, and the search for an equal fact. The
+  second bounds the sets of the dataflows of the stale index temporaries and of the fresh pointer
+  locals. The third bounds the steps that mark the index temporaries stale. The analysis measures
+  the work before any dataflow. When the work passes 1048576 (2^20), the analysis proves no store
+  of the function, so each store into an `own` reference-typed place of that function is an
+  error. The first of those errors has a second note at the same position: `the function
+  exceeds the work limit of D17.11; split it`. A function with no overwrite check has no work.
+  The functions of the compiler, its language server and the standard library measure 4451 or
+  less, and a function of the language tests 23608 or less. The one exception is `big` of
+  `fail/ownership/060`, which passes the limit on purpose.
   `del` and `move` leave zero behind. So for locals `v`, `a` and `b`, `del(v.data); v.data =
   new(...)` passes, `a = move(b)` after `move(a)` passes, and a store into a local that holds `{}`
   or `null` passes.
@@ -2503,6 +2508,11 @@ says ownership is "by convention", this section supersedes it.
   of one function. Corrected 2026-10-23 in review round 2: the work counts the overwrite checks,
   the blocks times the locals and the stale steps, and the analysis measures it before any
   dataflow, so a function with many blocks and few checks cannot take unbounded time.
+  Corrected 2026-10-23 after the final review of PR 155: the third count of the work named the
+  index temporaries that copy a local. The analysis counts each temporary that one store writes
+  with a copy of a local that is not memory, whether or not an index reads it, and the count
+  now says so. A later review found that the errors of a function past the limit did not name
+  the limit. The coordinator ruled that the first error takes the second note above.
 
 ### D17.12 Owned strings
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,

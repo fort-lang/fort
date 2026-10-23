@@ -130,7 +130,6 @@ struct options {
     bool fir_test; // --fir-test: the entry is a `.fir` test; run its passes and write the FIR
     bool fir_report; // --fir-verify-report: the first violation of each function, not the FIR
     bool fir_stats; // --fir-stats: after the build, `lowered N of M` on stdout
-    bool overwrite_report; // --overwrite-report: each overwrite check not proved, on stdout
     bool have_lib; // --lib <name> <root>: a library build (D9.11)
     string lib_name; // the name of --lib, read only when have_lib
     string lib_root; // the root of --lib, read only when have_lib
@@ -186,7 +185,6 @@ fn help() void {
     println("  --fir-verify-report");
     println("                     write the first FIR violation of each function and stop");
     println("  --fir-stats        after the build, write `lowered N of M` functions");
-    println("  --overwrite-report write each overwrite check that is not proved and stop");
     println("  --lib <name> <root>");
     println("                     build the library <name> from the directory <root>");
     println("  --emit-interface   write the interface file of --lib to stdout and stop");
@@ -318,7 +316,7 @@ fn parse_cfg(options mut* opts, string list) bool {
 
 // The options that carry no value: -S, -c, --release, --no-bounds-check, --check, --json,
 // --index, --tokens, --ast, --fir, --fir-test, --fir-verify-report, --fir-stats and
-// --overwrite-report, each of which sets one flag.
+// --emit-interface, each of which sets one flag.
 fn parse_flag(options mut* opts, string arg) bool {
     if (arg == "-S") {
         opts->emit_ir = true;
@@ -356,10 +354,6 @@ fn parse_flag(options mut* opts, string arg) bool {
     } else if (arg == "--fir-stats") {
         // counts the two paths of the emitter
         opts->fir_stats = true;
-    } else if (arg == "--overwrite-report") {
-        // --overwrite-report implies --check, which runs the emptiness pass
-        opts->overwrite_report = true;
-        opts->check = true;
     } else if (arg == "--emit-interface") {
         // writes the interface file of the library and stops (D9.11)
         opts->emit_interface = true;
@@ -508,11 +502,6 @@ fn parse(options mut* opts, string@ args) i32 {
         && (opts->tokens || opts->ast || opts->check || opts->fir || opts->fir_test)) {
         // --fir-stats counts what the emitter writes, and none of these modes emits
         usage_error(FIR_STATS_ALONE);
-        return PARSE_ERROR;
-    }
-    if (opts->overwrite_report && opts->json) {
-        // the report and the document both go to stdout
-        usage_error("--overwrite-report does not combine with --json or --index");
         return PARSE_ERROR;
     }
     if (opts->json && !opts->check) {
@@ -1266,12 +1255,14 @@ fn check_document(session.session mut* s, options* opts, analysis mut* an,
 // --fir lowers each function of a checked program into a FIR module and writes the module to
 // stdout, with one print: the modules in dependency order and the functions of each in source
 // order, with a blank line between two functions. The verifier tests each function after the
-// lowering, and a violation ends the compiler with a panic that names the rule. With
-// `--fir-after=build-mode`, the build-mode pass then rewrites each function for the mode that
-// --release and --no-bounds-check select, and the verifier tests it again (spec/fir.md 11). A
-// function that the lowering does not lower writes the line of fir_lower.write_report in its
-// place.
-fn fir_entry(analysis mut* an, options* opts) i32 {
+// lowering, and a violation ends the compiler with a panic that names the rule. The emptiness
+// pass then runs on it, as in step 3 of toolchain.md 2. An overwrite check that the pass does not
+// prove is the error of D17.11. After such an error the run writes no FIR and returns
+// EXIT_COMPILE_ERROR. With `--fir-after=build-mode`, the build-mode pass then rewrites each
+// function for the mode that --release and --no-bounds-check select, and the verifier tests it
+// again (spec/fir.md 11). A function that the lowering does not lower writes the line of
+// fir_lower.write_report in its place.
+fn fir_entry(session.session mut* s, analysis mut* an, options* opts) i32 {
     fir_verify.runtime rt = fir_verify.runtime_of(&an->ck);
     bool build = opts->fir_after == FIR_BUILD_MODE;
     gen.node_ref_vec mut decls = gen.node_ref_vec{};
@@ -1283,6 +1274,7 @@ fn fir_entry(analysis mut* an, options* opts) i32 {
     defer fir.module_free(&m);
     strbuf.str_buf mut text = strbuf.create();
     defer strbuf.free(&text);
+    bool mut proved = true;
     u64 mut i = 0;
     while (i < decls.len) {
         if (i > 0) {
@@ -1292,16 +1284,24 @@ fn fir_entry(analysis mut* an, options* opts) i32 {
         fir_lower.report mut why = fir_lower.report{};
         if (fir_lower.lower_function(&an->ck, gen.refs_at(&decls, i), &f, &why)) {
             fir_verify.verify(&f, &rt);
+            emptiness.proof mut verdicts = prove_overwrites(s, &f);
+            if (verdicts.unproved > 0) {
+                proved = false;
+            }
             if (build) {
-                fir_passes.build_mode(&f, opts->release, opts->no_bounds_check);
+                fir_passes.build_mode(&f, opts->release, opts->no_bounds_check, &verdicts);
                 fir_verify.verify(&f, &rt);
             }
+            emptiness.free(&verdicts);
             fir_print.print_function(&f, &text);
             fir.module_add_function(&m, move(f));
         } else {
             fir_lower.write_report(&why, &text);
         }
         i += 1;
+    }
+    if (!proved) {
+        return EXIT_COMPILE_ERROR;
     }
     print(strbuf.view(&text));
     return EXIT_OK;
@@ -1334,7 +1334,10 @@ fn report_violation(fir.func* f, fir_verify.runtime* rt, diag.loc at,
 fn report_function(fir.func mut* f, fir_verify.runtime* rt, diag.loc at, bool release,
                    bool no_bounds, strbuf.str_buf mut* out) void {
     if (report_violation(f, rt, at, out)) {
-        fir_passes.build_mode(f, release, no_bounds);
+        // the proof decides which overwrite checks the pass removes, and reports nothing here
+        emptiness.proof mut verdicts = emptiness.prove(f);
+        defer emptiness.free(&verdicts);
+        fir_passes.build_mode(f, release, no_bounds, &verdicts);
         report_violation(f, rt, at, out);
     }
 }
@@ -1365,21 +1368,28 @@ fn fir_report_entry(analysis mut* an, options* opts) i32 {
     return EXIT_OK;
 }
 
+// Runs the emptiness pass on the verified function `f` and reports the error of D17.11 and its
+// notes at each overwrite check that the pass does not prove (spec/fir.md 11). Returns the proof,
+// which the caller frees.
+fn prove_overwrites(session.session mut* s, fir.func* f) emptiness.proof {
+    emptiness.proof verdicts = emptiness.prove(f);
+    emptiness.report(f, &verdicts, s);
+    return verdicts;
+}
+
 // --check lowers each function of a checked program, runs the verifier on it and then the
-// emptiness pass, before the build-mode pass, as a build does (spec/fir.md 11). With
-// --overwrite-report, it writes the line of emptiness.write_sites for each check that the pass
-// does not prove to stdout, with one print. Without the option it writes nothing, so a check
-// that the pass does not prove is no error yet. A function that the lowering does not lower, or
-// whose checks name a runtime entry that `std.rt` lacks, does not take part, because a build
-// reports it. The run returns EXIT_OK.
+// emptiness pass, before the build-mode pass, as a build does (spec/fir.md 11). It reports each
+// overwrite check that the pass does not prove, as a build does, and returns EXIT_COMPILE_ERROR
+// after a report and EXIT_OK otherwise. A function that the lowering does not lower, or whose
+// checks name a runtime entry that `std.rt` lacks, does not take part, because a build reports
+// it.
 fn overwrite_entry(session.session mut* s, analysis mut* an, options* opts) i32 {
     fir_verify.runtime mut rt = fir_verify.runtime_of(&an->ck);
     fir_verify.excuse_mode(&rt, opts->release, opts->no_bounds_check);
     gen.node_ref_vec mut decls = gen.node_ref_vec{};
     defer gen.refs_free(&decls);
     fir_lower.program_functions(&an->set, &decls);
-    strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    bool mut proved = true;
     u64 mut i = 0;
     while (i < decls.len) {
         fir.func mut f = fir.func{};
@@ -1388,9 +1398,9 @@ fn overwrite_entry(session.session mut* s, analysis mut* an, options* opts) i32 
             fir.check_kind mut missing = fir.check_kind.chk_overflow;
             if (fir_verify.runtime_holds(&f, &rt, &missing)) {
                 fir_verify.verify(&f, &rt);
-                emptiness.proof mut verdicts = emptiness.prove(&f);
-                if (opts->overwrite_report) {
-                    emptiness.write_sites(&f, &verdicts, s, &text);
+                emptiness.proof mut verdicts = prove_overwrites(s, &f);
+                if (verdicts.unproved > 0) {
+                    proved = false;
                 }
                 emptiness.free(&verdicts);
             }
@@ -1398,8 +1408,8 @@ fn overwrite_entry(session.session mut* s, analysis mut* an, options* opts) i32 
         }
         i += 1;
     }
-    if (opts->overwrite_report) {
-        print(strbuf.view(&text));
+    if (!proved) {
+        return EXIT_COMPILE_ERROR;
     }
     return EXIT_OK;
 }
@@ -1526,7 +1536,9 @@ fn fir_test_pass(string text, test_pass mut* out) i32 {
 }
 
 // Runs the passes of a `.fir` test in order, each over every function of `m` in text order. The
-// pass `verify` ends the compiler with a panic at the first violation of a rule.
+// pass `verify` ends the compiler with a panic at the first violation of a rule. The pass
+// `build-mode` runs the emptiness pass first, which reports nothing here, and removes the
+// overwrite checks that it proves.
 fn run_test_passes(fir.module mut* m, test_pass@ passes, fir_verify.runtime* rt) void {
     u64 mut pass_index = 0;
     while (pass_index < passes.len) {
@@ -1537,7 +1549,10 @@ fn run_test_passes(fir.module mut* m, test_pass@ passes, fir_verify.runtime* rt)
             if (p.kind == test_pass_kind.tp_verify) {
                 fir_verify.verify(f, rt);
             } else if (p.kind == test_pass_kind.tp_build) {
-                fir_passes.build_mode(f, p.release, p.no_bounds);
+                // the pass removes the overwrite checks that the emptiness pass proves
+                emptiness.proof mut verdicts = emptiness.prove(f);
+                fir_passes.build_mode(f, p.release, p.no_bounds, &verdicts);
+                emptiness.free(&verdicts);
             }
             k += 1;
         }
@@ -1664,7 +1679,7 @@ fn compile_entry(options* opts, string program) i32 {
     }
     if (opts->fir) {
         // --fir stops before the emitter
-        return fir_entry(&an, opts);
+        return fir_entry(&s, &an, opts);
     }
     string mut out_path = opts->output;
     if (!opts->have_output) {

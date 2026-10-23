@@ -198,28 +198,35 @@ file: `fort [options] --lib <name> <root>`.
   `spec/fir.md` 13 and exits 0 (D14.1). A diagnostic of the prelude or of the FIR text writes no
   FIR and exits 1. The pass `none` runs nothing. The pass `verify` runs the verifier of
   `spec/fir.md` 10 on each function, and the first violation ends the compiler with a panic.
-  The pass `build-mode` runs the build-mode pass of `spec/fir.md` 11 on each function, and does
-  not run the verifier. Its arguments `--release` and `--no-bounds-check` select the mode, and
-  with no argument it runs the default mode. The compiler reads every directive before it runs
-  a pass. An unknown pass, an argument of `none` or `verify`, and an argument of `build-mode`
-  that is no mode exit 2. `--fir-test` takes the target rule of `--check` and is a usage error
-  together with `--tokens`, `--ast`, `--check`, `--json`, `--index`, `--fir` or `--fir-after`.
+  The pass `build-mode` runs the emptiness pass of `spec/fir.md` 11 on each function, which
+  reports nothing here. It then runs the build-mode pass with that proof, so an overwrite check
+  that the emptiness pass does not prove stays. It does not run the verifier. Its arguments
+  `--release` and `--no-bounds-check` select the mode, and with no argument it runs the default
+  mode. The compiler reads every directive before it runs a pass. An unknown pass, an argument of
+  `none` or `verify`, and an argument of `build-mode` that is no mode exit 2. `--fir-test` takes
+  the target rule of `--check` and is a usage error together with `--tokens`, `--ast`, `--check`,
+  `--json`, `--index`, `--fir` or `--fir-after`.
 - `--fir-verify-report` implies `--fir` and takes its target rule. It lowers each function of
   the closure as `--fir` does and runs the verifier of `spec/fir.md` 10 in report mode, first on
   the output of the lowering and then, when the function keeps every rule, on the output of the
-  build-mode pass for the mode that `--release` and `--no-bounds-check` select. The verifier
-  stops at the first violation of a function, so for each function that breaks a rule it writes
-  one line to stdout, the first violation, `<file>:<line>:<col>: fir.verify: V<n> <what>:
-  <function> bb<k> statement <i> (s<N>)`, where the location is the name of the function. It
-  exits 0 whatever it found. A function that the lowering does not support writes nothing.
-  `--fir-after` does not change the report (`spec/fir.md` 16.5).
-- A build writes each function through FIR: the lowering, the verifier, the build-mode pass and
-  the translator (`spec/fir.md` 3). Each of two cases is a compile error with exit 1 and no
-  module (`spec/fir.md` 9.8): a function that the lowering does not support, and a function that
-  needs a print function, `str_eq` or the entry of a check kind of `std.rt` that the closure
-  lacks or declares in another form. For a print function or `str_eq`, another form is another
-  signature (`spec/fir.md` 9.8). For the entry of a check kind, another form is other parameters
-  than rule V7 requires. A check that the selected mode removes needs no entry.
+  build-mode pass for the mode that `--release` and `--no-bounds-check` select. That pass removes
+  the overwrite checks that the emptiness pass proves, and the run reports no overwrite error of
+  D17.11 (`spec/fir.md` 11). The verifier stops at the first violation of a function, so for
+  each function that breaks a rule it writes one line to stdout, the first violation,
+  `<file>:<line>:<col>: fir.verify: V<n> <what>: <function> bb<k> statement <i> (s<N>)`, where
+  the location is the name of the function. It exits 0 whatever it found. A function that the
+  lowering does not support writes nothing. `--fir-after` does not change the report
+  (`spec/fir.md` 16.5).
+- A build writes each function through FIR: the lowering, the verifier, the emptiness pass, the
+  build-mode pass and the translator (`spec/fir.md` 3). Each of three cases is a compile error
+  with exit 1 and no module. The first is a function that the lowering does not support
+  (`spec/fir.md` 9.8). The second is a function that needs a print function, `str_eq` or the
+  entry of a check kind of `std.rt` that the closure lacks or declares in another form
+  (`spec/fir.md` 9.8). The third is a function with an overwrite check that the emptiness pass
+  does not prove, which is the error of D17.11 (`spec/fir.md` 11). For a print function or
+  `str_eq`, another form is another signature (`spec/fir.md` 9.8). For the entry of a check
+  kind, another form is other parameters than rule V7 requires. A check that the selected mode
+  removes needs no entry.
   The compiler assumes the other `std.rt` functions that it calls (`alloc`, `free`, `args_init`,
   `args`, `flush_all`) and does not test them.
   `--fir-stats` then writes one line to stdout after the module is written, `lowered N of M`: N

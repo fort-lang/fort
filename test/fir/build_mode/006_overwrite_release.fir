@@ -39,15 +39,16 @@
 //|     let _2: i32 mut* own #3:14;
 //|
 //|     bb0: {
+//|         del(move (*_1).0) #2:5 s1;
 //|         (*_1).0 = alloc<i32>(const u64 1) #3:14 s1;
 //|         return #4:1 s0;
 //|     }
 //| }
 // `f` is the worked example of spec/fir.md 13. Under --release the overwrite check goes, `_3 =
 // alloc<i32>(const u64 1)` and `_2 = move _3` fold into `_2 = alloc<i32>(const u64 1)` at the
-// location of the `alloc`, and bb1 merges into bb0, so bb2 and bb3 become bb1 and bb2. `g` stores
-// through a pointer: the place `(*_1).0` of the check and of the store is one place, so the two
-// statements fold too.
+// location of the `alloc`, and bb1 merges into bb0, so bb2 and bb3 become bb1 and bb2. `g` deletes
+// `(*_1).0` first, so the emptiness pass proves its check. It stores through a pointer: the place
+// `(*_1).0` of the check and of the store is one place, so the two statements fold too.
 fn main.f(_1 (c): bool) -> i32 {
     let _0: i32;
     let _2 (p): i32 mut* own #2:18;
@@ -82,6 +83,7 @@ fn main.g(_1 (b): box mut*) -> void {
     let _2: i32 mut* own #3:14;
 
     bb0: {
+        del(move (*_1).0) #2:5 s1;
         _2 = alloc<i32>(const u64 1) #3:14 s1;
         check(overwrite: (*_1).0) -> bb1 #3:12 s1;
     }

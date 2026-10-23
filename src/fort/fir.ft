@@ -1357,7 +1357,8 @@ enum term_kind {
     tk_unreachable,
 }
 
-/// The kind of a runtime check. Each kind has one runtime entry in `std.rt`.
+/// The kind of a check. Each kind but `overwrite` has one runtime entry in `std.rt`. The emptiness
+/// pass proves each overwrite check at compile time, so it has no runtime entry (spec/fir.md 8).
 enum check_kind {
     chk_overflow,
     chk_shift,
@@ -1490,7 +1491,8 @@ fn term_check(operand cond, check_kind kind, u32 first, u32 len, u32 target, dia
     return t;
 }
 
-/// `check(overwrite: p) -> target`: it continues when the owning value at `p` is null.
+/// `check(overwrite: p) -> target`: it continues when the owning value at `p` is null. It is a
+/// compile-time check: the emptiness pass proves it, and the build-mode pass replaces it by `goto`.
 fn term_check_overwrite(place p, u32 target, diag.loc at, u32 index) terminator {
     terminator mut t = term_start(term_kind.tk_check_overwrite, at, index);
     t.check = check_kind.chk_overwrite;
@@ -1618,11 +1620,15 @@ fn term_is_abort(terminator* t) bool {
         || t->kind == term_kind.tk_unreachable;
 }
 
-/// Whether a build mode removes a check of `kind`: `release` removes `overflow`, `shift` and
-/// `overwrite`, and `no_bounds` (`--no-bounds-check`) removes `bounds` and `span`.
+/// Whether a build mode removes a check of `kind`. Every mode removes `overwrite` when the
+/// emptiness pass proves the check, which fir_passes.build_mode reads (spec/fir.md 11).
+/// `release` removes `overflow` and `shift`. `no_bounds` (`--no-bounds-check`) removes `bounds`
+/// and `span`.
 fn term_removable(check_kind kind, bool release, bool no_bounds) bool {
     switch (kind) {
-    case check_kind.chk_overflow, check_kind.chk_shift, check_kind.chk_overwrite:
+    case check_kind.chk_overwrite:
+        return true;
+    case check_kind.chk_overflow, check_kind.chk_shift:
         return release;
     case check_kind.chk_bounds, check_kind.chk_span:
         return no_bounds;
@@ -1632,7 +1638,8 @@ fn term_removable(check_kind kind, bool release, bool no_bounds) bool {
     }
 }
 
-/// The name of the `std.rt` function that a failure of `kind` calls.
+/// The name of the `std.rt` function that a failure of `kind` calls. It is empty for `overwrite`,
+/// which calls no function: no build keeps an overwrite check (spec/fir.md 8).
 fn check_entry(check_kind kind) string {
     switch (kind) {
     case check_kind.chk_overflow:
@@ -1650,7 +1657,7 @@ fn check_entry(check_kind kind) string {
     case check_kind.chk_alloc_count:
         return "fail_alloc_count";
     case check_kind.chk_overwrite:
-        return "fail_overwrite";
+        return "";
     case check_kind.chk_enum:
         return "fail_enum";
     case check_kind.chk_user:

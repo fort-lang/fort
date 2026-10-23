@@ -27,10 +27,11 @@ The passes run in the order of their `pass:` directives, each on every function 
 - `verify` runs the verifier of `spec/fir.md` 10. A module whose functions keep every rule is
   written as `none` writes it. The first violation ends the compiler with a panic that names the
   rule, the function, the block and the statement.
-- `build-mode` runs the build-mode pass of `spec/fir.md` 11. Its arguments select the mode:
-  `--release`, `--no-bounds-check`, both in either order, or none for the default mode. Spaces
-  separate the arguments. The pass does not run the verifier, so a test of it names `verify`
-  in a second `pass:` directive.
+- `build-mode` runs the emptiness pass of `spec/fir.md` 11, which reports nothing here, and then
+  the build-mode pass with its proof: an overwrite check that it does not prove stays. Its
+  arguments select the mode: `--release`, `--no-bounds-check`, both in either order, or none for
+  the default mode. Spaces separate the arguments. The pass does not run the verifier, so a test
+  of it names `verify` in a second `pass:` directive.
 
 A pass that the compiler does not know, an argument of `none` or `verify`, and an argument of
 `build-mode` that is not a mode make the compiler exit 2 before any pass runs, and the harness

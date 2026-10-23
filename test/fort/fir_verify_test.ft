@@ -146,7 +146,9 @@ fn entry(strbuf.str_buf mut* b, string name, string params) void {
     strbuf.append(b, "char* file, u32 line, u32 col) noreturn {\n    while (true) {\n    }\n}\n");
 }
 
-// The runtime entries that the sandbox declares, and the reported parameters of each.
+// The runtime functions that the sandbox declares, and the reported parameters of each. They are
+// the ten entries of the check kinds and fail_overwrite, which std/rt.ft keeps for the pinned
+// compiler and no check kind names.
 u64 ENTRY_COUNT = 11;
 
 string[ENTRY_COUNT] ENTRY_NAMES = {
@@ -177,8 +179,8 @@ string[ENTRY_COUNT] ENTRY_PARAMS = {
     "char* ptr, u64 len, ",
 };
 
-// The sandbox's std/rt.ft: the eleven runtime entries of the check kinds. `bounds` gives the
-// reported parameters of fail_bounds. The entry `other` is a global of the module and no
+// The sandbox's std/rt.ft: the eleven functions of ENTRY_NAMES. `bounds` gives the reported
+// parameters of fail_bounds. The entry `other` is a global of the module and no
 // function when `as_global` is set, and it is not there at all otherwise.
 fn runtime_text(strbuf.str_buf mut* b, string bounds, string other, bool as_global) void {
     u64 mut i = 0;
@@ -481,18 +483,28 @@ fn types_agree_after_mut_and_own_are_removed() void {
 
 // ---- the runtime entries ---------------------------------------------------------------------
 
+// Each check kind but `overwrite` finds its entry. The overwrite check names no entry, so it finds
+// none, though the sandbox declares fail_overwrite as std/rt.ft does (spec/fir.md 8).
 fn every_check_kind_finds_its_runtime_entry() void {
     env mut e = env{};
     open(&e);
     defer close(&e);
+    u64 mut found = 0;
     u64 mut k = 0;
     while (k < fir_verify.CHECK_KINDS) {
         ast.sym* s = e.rt.entry[k];
-        assert(s != null && s->kind == ast.sym_kind.s_fn);
-        assert(s->name == fir.check_entry(cast(k, fir.check_kind)));
-        assert(s->owner->name == "std.rt");
+        if (cast(k, fir.check_kind) == fir.check_kind.chk_overwrite) {
+            assert(s == null);
+        } else {
+            assert(s != null && s->kind == ast.sym_kind.s_fn);
+            assert(s->name == fir.check_entry(cast(k, fir.check_kind)));
+            assert(s->owner->name == "std.rt");
+            found += 1;
+        }
         k += 1;
     }
+    assert(found == fir_verify.CHECK_KINDS - 1);
+    assert(check_env.sym_main(&e.c, "fail_overwrite") == null);
     // CHECK_KINDS counts every member of fir.check_kind
     assert(fir_verify.CHECK_KINDS == cast(fir.check_kind.chk_panic, u64) + 1);
 }
@@ -1210,10 +1222,11 @@ fn v4_an_overwrite_check_names_its_place() void {
         fir_verify.V4_CHECK_FORM, 0, 0);
     red(&e, lets, "goto bb1; } bb1: { check(const false, overwrite) -> bb2; } bb2: { return; }",
         4, fir_verify.V4_CHECK_FORM, 1, 0);
-    // the place form, a check of another kind, and a fail of the kind
+    // the place form and a check of another kind
     green(&e, lets, "check(overwrite: _2) -> bb1; } bb1: { return; }");
     green(&e, lets, "check(copy _1, overflow) -> bb1; } bb1: { return; }");
-    green(&e, lets, "fail(overwrite); }");
+    // a fail of the kind keeps V4, and V7 refuses it: the kind names no runtime entry
+    red(&e, lets, "fail(overwrite); }", 7, fir_verify.V7_NO_ENTRY, 0, 0);
     // the constructors give the same record as the text
     fir.func mut f = func_of(&e, "nothing");
     defer fir.func_free(&f);
@@ -1635,7 +1648,8 @@ fn v7_a_check_reports_what_its_runtime_entry_takes() void {
 }
 
 fn v7_a_runtime_entry_matches_its_kind() void {
-    // a closure whose runtime has no fail_enum, and one with no fail_overwrite
+    // a closure whose runtime has no fail_enum, and one with no fail_overwrite, which no check
+    // needs
     env mut e = env{};
     open_with(&e, BOUNDS, "fail_enum", false);
     defer close(&e);
@@ -1648,8 +1662,7 @@ fn v7_a_runtime_entry_matches_its_kind() void {
     env mut o = env{};
     open_with(&o, BOUNDS, "fail_overwrite", false);
     defer close(&o);
-    red(&o, "let _1: u8 mut* own; bb0: {", "check(overwrite: _1) -> bb1; } bb1: { return; }", 7,
-        fir_verify.V7_NO_ENTRY, 0, 0);
+    green(&o, "let _1: u8 mut* own; bb0: {", "check(overwrite: _1) -> bb1; } bb1: { return; }");
     red(&o, lets, "fail(overflow, copy _2); }", 7, fir_verify.V7_REPORTED_COUNT, 0, 0);
     // an entry that takes another type than the table gives, even with operands of that type
     env mut u = env{};
@@ -1675,7 +1688,8 @@ fn v7_a_runtime_entry_matches_its_kind() void {
 
 // The excuse of a build mode (fir_verify.excuse_mode): before the build-mode pass, a `check` of a
 // kind that the mode removes needs no entry; a `fail` of that kind still needs one, the other
-// mode excuses no such check, and the runtime after the pass (unexcused) excuses no kind.
+// mode excuses no such check, and the runtime after the pass (unexcused) excuses no kind. A
+// `check(overwrite: p)` needs no entry with no excuse, with each excuse and after the pass.
 fn v7_an_excused_kind_needs_no_entry_before_the_pass() void {
     env mut e = env{};
     open_with(&e, BOUNDS, "fail_overflow", false);
@@ -1691,7 +1705,7 @@ fn v7_an_excused_kind_needs_no_entry_before_the_pass() void {
     red(&e, lets, check, 7, fir_verify.V7_NO_ENTRY, 0, 0);
     fir_verify.excuse_mode(&e.rt, false, true);
     red(&e, lets, check, 7, fir_verify.V7_NO_ENTRY, 0, 0);
-    // --no-bounds-check excuses a bounds check; the overwrite check is excused under --release
+    // --no-bounds-check excuses a bounds check, and the overwrite check needs no excuse
     env mut b = env{};
     open_with(&b, BOUNDS, "fail_bounds", false);
     defer close(&b);
@@ -1706,10 +1720,15 @@ fn v7_an_excused_kind_needs_no_entry_before_the_pass() void {
     defer close(&o);
     string olets = "let _1: u8 mut* own; bb0: {";
     string over = "check(overwrite: _1) -> bb1; } bb1: { return; }";
+    green(&o, olets, over);
     fir_verify.excuse_mode(&o.rt, true, false);
     green(&o, olets, over);
+    fir_verify.excuse_mode(&o.rt, false, true);
+    green(&o, olets, over);
     o.rt = fir_verify.unexcused(&o.rt);
-    red(&o, olets, over, 7, fir_verify.V7_NO_ENTRY, 0, 0);
+    green(&o, olets, over);
+    // a `fail` of the kind names the entry that the kind lacks
+    red(&o, olets, "fail(overwrite); }", 7, fir_verify.V7_NO_ENTRY, 0, 0);
 }
 
 // Each check kind with one reported operand of another type, and with one operand too many. The
@@ -1730,20 +1749,25 @@ string[KIND_COUNT] KIND_WRONG = {
     "fail(panic, copy _4, copy _2); }",
 };
 
-// Whether KIND_WRONG breaks the count of the operands (true) or the type of one (false).
-bool[KIND_COUNT] KIND_WRONG_COUNT = {
-    true,
-    false,
-    true,
-    true,
-    false,
-    false,
-    false,
-    true,
-    false,
-    false,
-    false,
-};
+// The violation of each case of KIND_WRONG: WRONG_COUNT for the count of the operands,
+// WRONG_TYPE for the type of one, and WRONG_ENTRY for the overwrite kind, which names no runtime
+// entry.
+u32 WRONG_COUNT = 0;
+u32 WRONG_TYPE = 1;
+u32 WRONG_ENTRY = 2;
+
+u32[KIND_COUNT] KIND_WRONG_WHAT = {0, 1, 0, 0, 1, 1, 1, 2, 1, 1, 1};
+
+// The violation text of a WRONG_ code.
+fn wrong_text(u32 code) string {
+    if (code == WRONG_COUNT) {
+        return fir_verify.V7_REPORTED_COUNT;
+    }
+    if (code == WRONG_ENTRY) {
+        return fir_verify.V7_NO_ENTRY;
+    }
+    return fir_verify.V7_REPORTED;
+}
 
 fn v7_every_kind_holds_its_operands_against_its_entry() void {
     env mut e = env{};
@@ -1752,11 +1776,7 @@ fn v7_every_kind_holds_its_operands_against_its_entry() void {
     string lets = "let _1: bool; let _2: i64; let _3: u64; let _4: char*; let _5: i32; bb0: {";
     u64 mut i = 0;
     while (i < KIND_COUNT) {
-        string mut what = fir_verify.V7_REPORTED;
-        if (KIND_WRONG_COUNT[i]) {
-            what = fir_verify.V7_REPORTED_COUNT;
-        }
-        red(&e, lets, KIND_WRONG[i], 7, what, 0, 0);
+        red(&e, lets, KIND_WRONG[i], 7, wrong_text(KIND_WRONG_WHAT[i]), 0, 0);
         i += 1;
     }
 }

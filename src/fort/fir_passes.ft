@@ -6,6 +6,7 @@
 // call returns.
 import consts;
 import fir;
+import fir.emptiness;
 import fir_flow;
 import prim;
 import types;
@@ -55,20 +56,26 @@ struct mask_table {
     u32 mut@ own next;
 }
 
-/// Rewrites `f` for the build mode. `release` removes the checks of the kinds `overflow`, `shift`
-/// and `overwrite`, and `no_bounds` removes the kinds `bounds` and `span`. Every other check and
-/// every `fail` stays. The pass then removes each pure assignment to a temporary that nothing
-/// uses, folds the store after a removed overwrite check, merges the continuation of each
-/// removed check into the block of the check, and numbers the blocks again in ascending order.
+/// Rewrites `f` for the build mode. `verdicts` is the proof that emptiness.prove gave for `f`.
+/// Every mode removes each `check(overwrite: p)` that `verdicts` proves, and each other one stays.
+/// `release` removes the checks of the kinds `overflow` and `shift`, and `no_bounds` removes the
+/// kinds `bounds` and `span`. Every other check and every `fail` stays. The pass then removes
+/// each pure assignment to a temporary that nothing uses, folds the store after a removed
+/// overwrite check, merges the continuation of each removed check into the block of the check,
+/// and numbers the blocks again in ascending order.
 // The steps keep the order of spec/fir.md 11. The verifier accepts the result when it accepts
-// `f`; the callers run it after the pass.
-fn build_mode(fir.func mut* f, bool release, bool no_bounds) void {
+// `f`; the callers run it after the pass. A build reaches the pass with no unproved check, and
+// the translator refuses one that stays (fir_llvm.translate_terminator).
+fn build_mode(fir.func mut* f, bool release, bool no_bounds, emptiness.proof* verdicts) void {
     u64 n = f->blocks.len;
+    if (verdicts->proved.len != n) {
+        panic("fir_passes.build_mode: the proof is of another function");
+    }
     removal mut@ own done = new(removal, n);
     defer del(done);
     mask mut@ own masks = new(mask, n);
     defer del(masks);
-    u64 count = remove_checks(f, release, no_bounds, done, masks);
+    u64 count = remove_checks(f, release, no_bounds, verdicts, done, masks);
     substitute(f, masks[0..count]);
     remove_dead(f);
     fold_stores(f, done);
@@ -78,16 +85,17 @@ fn build_mode(fir.func mut* f, bool release, bool no_bounds) void {
 // ---- the checks --------------------------------------------------------------------------------
 
 // Replaces each check that the mode removes by `goto` to its continuation, at the location and the
-// statement index of the check, and records it in `done`. A shift check leaves its mask at the
-// end of its block and in `masks`. Returns the count of the masks.
-fn remove_checks(fir.func mut* f, bool release, bool no_bounds, removal mut@ done,
-                 mask mut@ masks) u64 {
+// statement index of the check, and records it in `done`. An overwrite check goes only when
+// `verdicts` proves it. A shift check leaves its mask at the end of its block and in `masks`.
+// Returns the count of the masks.
+fn remove_checks(fir.func mut* f, bool release, bool no_bounds, emptiness.proof* verdicts,
+                 removal mut@ done, mask mut@ masks) u64 {
     u64 mut count = 0;
     u32 mut b = 0;
     while (b < fir.block_count(f)) {
         fir.terminator t = fir.block_at(f, b)->term;
         bool checks = t.kind == fir.term_kind.tk_check
-            || t.kind == fir.term_kind.tk_check_overwrite;
+            || (t.kind == fir.term_kind.tk_check_overwrite && emptiness.is_proved(verdicts, b));
         if (checks && fir.term_removable(t.check, release, no_bounds)) {
             u64 at = cast(b, u64);
             done[at].removed = true;
@@ -485,7 +493,7 @@ fn mark_use(u32 mut@ uses, fir.place p) void {
 // ---- the store after a removed overwrite check -------------------------------------------------
 
 // Folds `_t = rvalue` and `p = move _t` into `p = rvalue` where a removed `check(overwrite: p)`
-// stood between the two and nothing else uses `_t`: the direct store of release mode. The folded
+// stood between the two and nothing else uses `_t`: the direct store of every mode. The folded
 // statement keeps the location and the statement index of `_t = rvalue`, where an `alloc` reports
 // its failure. A fold moves one use of `_t` and no other use, so one count serves every fold.
 fn fold_stores(fir.func mut* f, removal@ done) void {

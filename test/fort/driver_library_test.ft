@@ -7,7 +7,8 @@
 //| ok
 /// Checks `--lib <name> <root> --emit-interface` in src/fort/driver.ft (D9.11, toolchain.md 1
 /// and 2.1): the usage errors of a library build, a root that cannot be read or holds no module,
-/// a compile error, and the interface file on stdout, which two runs write alike.
+/// a compile error, an overwrite error of D17.11, and the interface file on stdout, which two
+/// runs write alike.
 import capture;
 import driver;
 import library_env;
@@ -127,9 +128,7 @@ fn the_usage_errors_of_a_library_build() void {
     assert(usage_error_is(link[..], alone_lib));
     string[6] fir = {"fort", "--lib", "std", "root", "--emit-interface", "--fir"};
     assert(usage_error_is(fir[..], alone_lib));
-    // --overwrite-report and --index each imply --check, which a library build does not take
-    string[6] report = {"fort", "--lib", "std", "root", "--emit-interface", "--overwrite-report"};
-    assert(usage_error_is(report[..], alone_lib));
+    // --index implies --check, which a library build does not take
     string[6] index = {"fort", "--lib", "std", "root", "--emit-interface", "--index"};
     assert(usage_error_is(index[..], alone_lib));
     string[6] json = {"fort", "--lib", "std", "root", "--emit-interface", "--json"};
@@ -187,6 +186,29 @@ fn a_compile_error_in_a_module_is_exit_one() void {
     assert(run(args[..]) == EXIT_COMPILE_ERROR);
     assert(err_has("broken/io.ft:1:9: error: the initializer expects i32, not string"));
     assert(out_is_empty());
+}
+
+// A module whose store into `*out` has no `del` before it, and the same module with the `del`.
+string LEAKY_CELL = "fn fill(i32 mut* own mut* out) void {\n    *out = new(i32);\n}\n";
+string FIXED_CELL =
+    "fn fill(i32 mut* own mut* out) void {\n    del(*out);\n    *out = new(i32);\n}\n";
+
+// A library build lowers each body and runs the emptiness pass, as `--check` does (toolchain.md
+// 2.1). So an `own` store that the pass does not prove is the error of D17.11 with its note: exit
+// 1 and no interface file on stdout. With a `del` before the store the build writes the file.
+fn an_unproved_overwrite_store_is_exit_one() void {
+    make_dir("leaky");
+    write_file("leaky/rt.ft", "i32 B = 1;\n");
+    write_file("leaky/cell.ft", LEAKY_CELL);
+    string[5] args = {"fort", "--lib", "std", "leaky", "--emit-interface"};
+    assert(run(args[..]) == EXIT_COMPILE_ERROR);
+    assert(err_has("leaky/cell.ft:2:10: error: overwriting owned value: cannot prove '*out' is"));
+    assert(err_has("leaky/cell.ft:2:10: note: del or move '*out' before this store\n"));
+    assert(out_is_empty());
+    write_file("leaky/cell.ft", FIXED_CELL);
+    assert(run(args[..]) == EXIT_OK);
+    assert(err_is(""));
+    assert(!out_is_empty());
 }
 
 fn the_interface_file_is_written_to_stdout_alike_twice() void {
@@ -372,6 +394,7 @@ fn main() i32 {
     a_root_without_read_permission_is_exit_two();
     println("root ok");
     a_compile_error_in_a_module_is_exit_one();
+    an_unproved_overwrite_store_is_exit_one();
     the_interface_file_is_written_to_stdout_alike_twice();
     the_interface_follows_the_target_and_the_configuration();
     each_module_with_an_error_reports_it();

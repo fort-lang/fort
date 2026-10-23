@@ -1,0 +1,41 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! abort
+//! stderr: panic: fir_passes.build_mode: the proof is of another function
+//! stdout:
+//| 2 blocks, a proof of 0
+/// The build-mode pass reads the verdict of each block from the proof that emptiness.prove gave
+/// for the function (spec/fir.md 11). A proof with another count of blocks is the proof of
+/// another function, which breaks that precondition, so the pass panics.
+import fir;
+import fir.emptiness;
+import fir_passes;
+import lower_env;
+import pass_env;
+
+string[1] PRELUDE = {"fn g(bool c) void {}"};
+
+string[8] TEXT = {
+    "fn main.g(_1 (c): bool) -> void {",
+    "    bb0: {",
+    "        check(copy _1, overflow) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+};
+
+// A panic ends the program, so the case stands in a file of its own.
+fn main() i32 {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    fir.module mut fm = pass_env.parse(&e, PRELUDE[..], TEXT[..]);
+    defer fir.module_free(&fm);
+    fir.func mut* f = &fm.funcs.items[0];
+    emptiness.proof mut other = emptiness.proof{};
+    println(fir.block_count(f), " blocks, a proof of ", other.proved.len);
+    fir_passes.build_mode(f, true, false, &other);
+    return 0;
+}

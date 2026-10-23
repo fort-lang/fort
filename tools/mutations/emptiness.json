@@ -1,18 +1,22 @@
 {
   "comment": [
     "One row for each gen rule, kill rule and definition of the emptiness pass, the static",
-    "overwrite check of D17.11 (src/fort/fir/emptiness.ft), and for its report. A row names",
-    "the line that decides the rule and a text that breaks it. The first stage runs the cases",
-    "over FIR text and the examples over fort source (test/fort/fir/emptiness_test.ft). The",
-    "second stage runs the driver test, which holds --overwrite-report. The third holds each",
-    "site where a program of test/lang stops at run time against the report",
-    "(test/overwrite_oracle_test.py). The table runs in the Linux VM with the debug preset and",
-    "the default runner. The md5 guard reads the product compiler, whose driver and emitter",
-    "import fir.emptiness."
+    "overwrite check of D17.11 (src/fort/fir/emptiness.ft), for its report in a build, under",
+    "--check and under --fir, and for the proof that the build-mode pass reads",
+    "(src/fort/fir_passes.ft). A row names the line that decides the rule and a text that breaks",
+    "it. The first stage runs the cases over FIR text and the examples over fort source",
+    "(test/fort/fir/emptiness_test.ft). The second runs the build-mode suite",
+    "(test/fort/fir_passes_test.ft). The third runs the driver test, which holds the error in",
+    "each mode. The fourth holds each program that stopped at run time before the rule became",
+    "static against the error at its old site (test/overwrite_oracle_test.py). The table runs in",
+    "the Linux VM with the debug preset and the default runner. The md5 guard reads the product",
+    "compiler, whose driver and emitter import fir.emptiness."
   ],
   "sources": [
     "src/fort/fir/emptiness.ft",
-    "src/fort/driver.ft"
+    "src/fort/driver.ft",
+    "src/fort/gen_fir.ft",
+    "src/fort/fir_passes.ft"
   ],
   "binary": "build/Linux/debug/fort",
   "build": "ninja -C build/Linux/debug fort",
@@ -22,11 +26,15 @@
       "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 2 fir/emptiness"
     },
     {
+      "name": "the build-mode suite",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 2 fir_passes_test"
+    },
+    {
       "name": "the driver test",
       "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 2 driver_test"
     },
     {
-      "name": "the runtime oracle",
+      "name": "the compile-error oracle",
       "command": "python3 test/overwrite_oracle_test.py --fort build/Linux/debug/fort --std-dir build/Linux/debug/std"
     }
   ],
@@ -319,11 +327,46 @@
       "what": "a deferred store gives one error at each exit"
     },
     {
-      "decision": "D17.11-report-check",
+      "decision": "D17.11-build-error",
+      "file": "src/fort/gen_fir.ft",
+      "old": "    if (verdicts.unproved > 0) {\n        emptiness.report(f, &verdicts, g->sess);",
+      "new": "    if (false) {\n        emptiness.report(f, &verdicts, g->sess);",
+      "what": "a build reports no store that the pass does not prove and emits it"
+    },
+    {
+      "decision": "D17.11-check-error",
       "file": "src/fort/driver.ft",
-      "old": "        opts->overwrite_report = true;\n        opts->check = true;",
-      "new": "        opts->overwrite_report = true;",
-      "what": "--overwrite-report does not imply --check"
+      "old": "    emptiness.report(f, &verdicts, s);\n    return verdicts;",
+      "new": "    return verdicts;",
+      "what": "--check and --fir report no store that the pass does not prove"
+    },
+    {
+      "decision": "D17.11-check-status",
+      "file": "src/fort/driver.ft",
+      "old": "    if (!proved) {\n        return EXIT_COMPILE_ERROR;\n    }\n    return EXIT_OK;\n}",
+      "new": "    return EXIT_OK;\n}",
+      "what": "--check exits 0 after an overwrite error"
+    },
+    {
+      "decision": "D17.11-fir-status",
+      "file": "src/fort/driver.ft",
+      "old": "    if (!proved) {\n        return EXIT_COMPILE_ERROR;\n    }\n    print(strbuf.view(&text));",
+      "new": "    print(strbuf.view(&text));",
+      "what": "--fir writes the FIR and exits 0 after an overwrite error"
+    },
+    {
+      "decision": "D17.11-limit-note",
+      "file": "src/fort/fir/emptiness.ft",
+      "old": "            if (p->over && !limit_told) {",
+      "new": "            if (false) {",
+      "what": "the first error of a function past the work limit names no limit"
+    },
+    {
+      "decision": "D17.11-proof-gate",
+      "file": "src/fort/fir_passes.ft",
+      "old": "            || (t.kind == fir.term_kind.tk_check_overwrite && emptiness.is_proved(verdicts, b));",
+      "new": "            || t.kind == fir.term_kind.tk_check_overwrite;",
+      "what": "the build-mode pass removes an overwrite check that the emptiness pass does not prove"
     }
   ]
 }
