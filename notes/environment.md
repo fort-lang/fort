@@ -642,9 +642,12 @@ without a rewrite.
   `ubsan-debug`, `ubsan-release`, `msan-debug` and `msan-release`. Darwin has no msan. tsan
   stays out of CI (the user, T-261). The sanitizer flags set no `-O` level, so the build type
   decides it.
-- The runners are `ubuntu-24.04`, `ubuntu-latest` and `macos-latest`. The Linux target is
-  x86_64, the Linux runners are x86_64, and the Darwin runner is arm64, so each runner builds and
-  runs its target natively. CI installs none of the qemu, binfmt and cross packages of section 3;
+- The runners are `ubuntu-24.04` and `macos-latest`. Linux CI runs on `ubuntu-24.04` only from
+  2026-10-23. From that date `ubuntu-latest` is Ubuntu 26.04 (`resolute`) and has no LLVM 18
+  installed. Its `libllvm18` download from the azure mirror stalled on each attempt (run
+  39997806297). The `ci-status` job of `ci.yml` still runs on `ubuntu-latest`, because it
+  installs nothing. The Linux target is x86_64, the Linux runners are x86_64, and the Darwin
+  runner is arm64, so each runner builds and runs its target natively. CI installs none of the qemu, binfmt and cross packages of section 3;
   the harnesses only give `QEMU_LD_PREFIX` a default.
 - Every job checks out with `fetch-depth: 0`. Configure runs `git cat-file` and
   `git merge-base --is-ancestor` on the pin of `tools/bootstrap.ref`, and a shallow clone does
