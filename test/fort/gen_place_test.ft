@@ -298,29 +298,24 @@ fn new_of_a_span_writes_the_header_it_allocated() void {
     defer gen_env.close(&e);
     assert(open_own(&e));
     // The count is an `i32` even when it is a literal, so it is widened to 64
-    // bits and checked. The header is then written field by field into a
-    // `%tmp` slot, which the overwrite check of `s` lets into `s`.
-    string[18] want = {
-        "  %t3 = sext i32 3 to i64\n",
-        "  %t4 = icmp slt i64 %t3, 0\n",
-        "  br i1 %t4, label %L7, label %L2\n",
+    // bits and checked. The emptiness pass proves the store into `s`, so every
+    // mode writes the header field by field straight into `s`, with no
+    // overwrite check (spec/fir.md 11).
+    string[10] want = {
+        "  %t1 = sext i32 3 to i64\n",
+        "  %t2 = icmp slt i64 %t1, 0\n",
+        "  br i1 %t2, label %L2, label %L1\n",
         "\n",
-        "L2:\n",
-        "  %t5 = call ptr @\"std.rt.alloc\"(i64 4, i64 %t3, ptr @.file.0, i32 3, i32 26)\n",
-        "  %t6 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 0\n",
-        "  store ptr %t5, ptr %t6, align 8\n",
-        "  %t7 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 1\n",
-        "  store i64 %t3, ptr %t7, align 8\n",
-        "  %t8 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 0\n",
-        "  %t9 = load ptr, ptr %t8, align 8\n",
-        "  %t10 = icmp ne ptr %t9, null\n",
-        "  br i1 %t10, label %L8, label %L3\n",
-        "\n",
-        "L3:\n",
-        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %s.1, ptr align 8 %tmp0, ",
-        "i64 16, i1 false)\n",
+        "L1:\n",
+        "  %t3 = call ptr @\"std.rt.alloc\"(i64 4, i64 %t1, ptr @.file.0, i32 3, i32 26)\n",
+        "  %t4 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 0\n",
+        "  store ptr %t3, ptr %t4, align 8\n",
+        "  %t5 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 1\n",
+        "  store i64 %t1, ptr %t5, align 8\n",
     };
-    gen_env.expect_in(gen_env.main_text(&e), gen_env.join_lines(&e, want[..]));
+    string got = gen_env.main_text(&e);
+    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
+    assert(str.find(got, "icmp ne ptr") < 0);
 }
 
 fn an_unsigned_count_needs_no_branch_at_all() void {
@@ -331,19 +326,21 @@ fn an_unsigned_count_needs_no_branch_at_all() void {
     assert(gen_env.open_lines(&e, lines[..]));
     // An unsigned count is never negative. So the check is on the signed path
     // alone and the width already agrees, so nothing widens it either (item
-    // 9). The one branch is the overwrite check of `s`.
+    // 9). The store into `s` has no check either, so the function has no
+    // branch at all.
     string[6] want = {
         "  %t0 = load i64, ptr %m.0, align 8\n",
         "  %t1 = call ptr @\"std.rt.alloc\"(i64 4, i64 %t0, ptr @.file.0, i32 3, i32 26)\n",
-        "  %t2 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 0\n",
+        "  %t2 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 0\n",
         "  store ptr %t1, ptr %t2, align 8\n",
-        "  %t3 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 1\n",
+        "  %t3 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 1\n",
         "  store i64 %t0, ptr %t3, align 8\n",
     };
     string got = gen_env.main_text(&e);
     gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
     assert(str.find(got, "icmp slt") < 0);
     assert(str.find(got, "fail_alloc_count") < 0);
+    assert(str.find(got, " br ") < 0);
 }
 
 fn a_negative_count_is_checked_and_the_check_survives_release_mode() void {
@@ -354,8 +351,8 @@ fn a_negative_count_is_checked_and_the_check_survives_release_mode() void {
     assert(gen_env.open_lines(&e, lines[..]));
     // It is not a bounds check, so neither `--release` nor
     // `--no-bounds-check` removes it, and it is reported with the signed
-    // value the source wrote. Release mode has no overwrite check, so the
-    // header goes straight into `s`.
+    // value the source wrote. No mode has an overwrite check, so the header
+    // goes straight into `s`.
     string[11] want = {
         "  %t0 = load i32, ptr %n.0, align 4\n",
         "  %t1 = sext i32 %t0 to i64\n",
@@ -385,10 +382,10 @@ fn del_of_an_lvalue_frees_the_pointer_and_empties_the_storage() void {
     // The emptying is not an assignment and carries no overwrite check, which
     // is what makes `del(v); v = new(...)` pass one.
     gen_env.expect_in(gen_env.main_text(&e),
-                      gen_env.join4(&e, "  %t14 = load ptr, ptr %p.0, align 8\n",
-                                    "  call void @\"std.rt.free\"(ptr %t14)\n",
+                      gen_env.join4(&e, "  %t6 = load ptr, ptr %p.0, align 8\n",
+                                    "  call void @\"std.rt.free\"(ptr %t6)\n",
                                     "  store ptr null, ptr %p.0, align 8\n",
-                                    "  %t15 = getelementptr inbounds %fort.span, ptr %s.1, "));
+                                    "  %t7 = getelementptr inbounds %fort.span, ptr %s.1, "));
 }
 
 fn move_of_an_aggregate_goes_through_an_intermediate() void {
@@ -398,19 +395,18 @@ fn move_of_an_aggregate_goes_through_an_intermediate() void {
     assert(open_own(&e));
     // The destination may be the operand itself and nothing here can tell. The value is read
     // into a place of the emitter's own and the operand is emptied before it is handed on, here
-    // into the slot that the overwrite check of `t` lets into `t`.
+    // straight into `t`, because every mode folds the store that the emptiness pass proves.
     string got = gen_env.main_text(&e);
-    gen_env.expect_in(got, "  %tmp2 = alloca %fort.span, align 8\n");
+    gen_env.expect_in(got, "  %tmp0 = alloca %fort.span, align 8\n");
+    assert(str.find(got, "%tmp1") < 0);
     string[5] want = {
-        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp2, ptr align 8 %s.1, i64 16, ",
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %s.1, i64 16, ",
         "i1 false)\n",
         "  call void @llvm.memset.p0.i64(ptr align 8 %s.1, i8 0, i64 16, i1 false)\n",
-        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp1, ptr align 8 %tmp2, i64 16, ",
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %t.2, ptr align 8 %tmp0, i64 16, ",
         "i1 false)\n",
     };
     gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
-    gen_env.expect_in(
-        got, "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %t.2, ptr align 8 %tmp1, i64 16, ");
 }
 
 fn an_arrow_reaches_the_header_the_pointer_points_at() void {
@@ -510,9 +506,9 @@ fn del_of_a_span_frees_its_pointer_and_zeroes_its_header() void {
     // A span or `string` operand is an aggregate, so its pointer is field 0
     // and the emptying is a 16-byte memset.
     string[4] want = {
-        "  %t15 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 0\n",
-        "  %t16 = load ptr, ptr %t15, align 8\n",
-        "  call void @\"std.rt.free\"(ptr %t16)\n",
+        "  %t7 = getelementptr inbounds %fort.span, ptr %s.1, i32 0, i32 0\n",
+        "  %t8 = load ptr, ptr %t7, align 8\n",
+        "  call void @\"std.rt.free\"(ptr %t8)\n",
         "  call void @llvm.memset.p0.i64(ptr align 8 %s.1, i8 0, i64 16, i1 false)\n",
     };
     gen_env.expect_in(gen_env.main_text(&e), gen_env.join_lines(&e, want[..]));
@@ -528,9 +524,9 @@ fn del_of_an_rvalue_stores_nothing() void {
     gen_env.expect_in(
         gen_env.main_text(&e),
         gen_env.join3(&e,
-                      "  %t17 = call ptr @\"std.rt.alloc\"(i64 4, i64 1, ptr @.file.0, ",
+                      "  %t9 = call ptr @\"std.rt.alloc\"(i64 4, i64 1, ptr @.file.0, ",
                       "i32 7, i32 9)\n",
-                      "  call void @\"std.rt.free\"(ptr %t17)\n  %t18 = load ptr"));
+                      "  call void @\"std.rt.free\"(ptr %t9)\n  %t10 = load ptr"));
 }
 
 fn move_of_a_scalar_reads_the_value_before_it_empties_the_operand() void {
@@ -540,16 +536,11 @@ fn move_of_a_scalar_reads_the_value_before_it_empties_the_operand() void {
     assert(open_own(&e));
     // The order is the whole of the rule. The value is read into the register the `load` names
     // and the operand is zeroed only afterwards, so `p = move(p)` yields what `p` held. The
-    // store into `u` waits for its overwrite check.
-    string[8] want = {
-        "  %t18 = load ptr, ptr %p.0, align 8\n",
+    // store into `u` follows with no overwrite check, which no mode keeps.
+    string[3] want = {
+        "  %t10 = load ptr, ptr %p.0, align 8\n",
         "  store ptr null, ptr %p.0, align 8\n",
-        "  %t19 = load ptr, ptr %u.3, align 8\n",
-        "  %t20 = icmp ne ptr %t19, null\n",
-        "  br i1 %t20, label %L10, label %L5\n",
-        "\n",
-        "L5:\n",
-        "  store ptr %t18, ptr %u.3, align 8\n",
+        "  store ptr %t10, ptr %u.3, align 8\n",
     };
     gen_env.expect_in(gen_env.main_text(&e), gen_env.join_lines(&e, want[..]));
 }

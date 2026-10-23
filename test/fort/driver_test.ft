@@ -121,7 +121,6 @@ fn every_flag_sets_its_own_option() void {
     assert(opts.fir_after.len == 0);
     assert(!opts.fir_report);
     assert(!opts.fir_stats);
-    assert(!opts.overwrite_report);
 }
 
 // --index implies --check and --json, so it is the whole command line an
@@ -341,10 +340,8 @@ fn help_prints_the_usage_line_and_the_option_table() void {
     assert(str.starts_with(out, "usage: fort [options] entry.ft\noptions:\n"));
     // One line per option follows the usage line and the
     // `options:` header.
-    assert(capture.line_count(out) == 31);
-    string overwrite =
-        "  --overwrite-report write each overwrite check that is not proved and stop\n";
-    assert(str.find(out, overwrite) >= 0);
+    assert(capture.line_count(out) == 30);
+    assert(str.find(out, "--overwrite-report") < 0);
     string check =
         "  --check            check the program and its overwrite stores; emit nothing\n";
     assert(str.find(out, check) >= 0);
@@ -1550,26 +1547,15 @@ fn fir_verify_report_writes_one_line_for_each_function() void {
     assert(refused == "");
 }
 
-// ---- --overwrite-report ----------------------------------------------------------------------
+// ---- the overwrite error ---------------------------------------------------------------------
 
-// --overwrite-report sets its own flag and --check. It does not combine with --json or --index,
-// which write to stdout too, and a mode that refuses --check refuses it.
-fn overwrite_report_parses() void {
+// --overwrite-report listed the stores that the emptiness pass did not prove while such a store
+// was no error yet. Each such store is an error now, so the option is gone: it is an unknown
+// option, with a value and without one.
+fn overwrite_report_is_an_unknown_option() void {
     string[3] mut argv = {"fort", "--overwrite-report", "entry.ft"};
-    driver.options mut opts = driver.options_create();
-    defer driver.options_free(&opts);
-    assert(driver.parse(&opts, argv[0..3]) == driver.PARSE_OK);
-    assert(opts.overwrite_report && opts.check && !opts.json && !opts.fir && !opts.emit_ir);
-    string[2] others = {"--json", "--index"};
-    for (string other : others) {
-        string[4] mut bad = {"fort", "--overwrite-report", other, "entry.ft"};
-        assert(run(bad[0..4]) == EXIT_USAGE);
-        string message = "--overwrite-report does not combine with --json or --index\n";
-        assert(err_has(message));
-    }
-    string[4] mut fir_mode = {"fort", "--fir", "--overwrite-report", "entry.ft"};
-    assert(run(fir_mode[0..4]) == EXIT_USAGE);
-    assert(err_has("--fir does not combine with --tokens, --ast, --check, --json or --index"));
+    assert(run(argv[0..3]) == EXIT_USAGE);
+    assert(err_has("fort: error: unknown option '--overwrite-report'\n"));
     string[3] mut valued = {"fort", "--overwrite-report=1", "entry.ft"};
     assert(run(valued[0..3]) == EXIT_USAGE);
     assert(err_has("fort: error: unknown option '--overwrite-report=1'\n"));
@@ -1598,6 +1584,15 @@ string[18] OW_SITES = {
     "}",
 };
 
+// The diagnostic lines of OW_SITES, in source order: the error and its note at each store that
+// the pass does not prove.
+string[4] OW_REPORT = {
+    "ow_sites.ft:5:13: error: overwriting owned value: cannot prove 'b->left' is empty here\n",
+    "ow_sites.ft:5:13: note: del or move 'b->left' before this store\n",
+    "ow_sites.ft:13:23: error: overwriting owned value: cannot prove 'p' is empty here\n",
+    "ow_sites.ft:13:23: note: del or move 'p' before this store\n",
+};
+
 // The count of the lines of `out` that start with `prefix`.
 fn lines_with(string out, string prefix) u64 {
     u64 mut count = 0;
@@ -1615,47 +1610,125 @@ fn lines_with(string out, string prefix) u64 {
     return count;
 }
 
-// A runtime with the entry of the overwrite check, which the build-mode pass keeps. The pass skips
-// a function whose check has no runtime entry, so the empty runtime gives no report.
-string[4] OW_RUNTIME = {
-    "fn fail_overwrite(char* file, u32 line, u32 col) noreturn {",
-    "    while (true) {",
-    "    }",
-    "}",
-};
+// Whether the last run reported the lines of OW_REPORT in that order, and no other line that
+// names ow_sites.ft. The proved store of line 9 gives no line.
+fn reported_ow_sites() bool {
+    string own err = captured_err();
+    defer del(err);
+    i64 mut at = 0;
+    for (string line : OW_REPORT) {
+        i64 found = str.find(err[cast(at, u64)..err.len], line);
+        if (found < 0) {
+            return false;
+        }
+        at += found + cast(line.len, i64);
+    }
+    return lines_with(err, "ow_sites.ft:") == OW_REPORT.len;
+}
 
-// --overwrite-report writes one line for each check that the emptiness pass does not prove, and
-// exits 0. --check runs the pass too and writes nothing, because no such check is an error yet. A
-// program that does not check writes no report, and with the empty runtime the pass skips each
-// function that holds an overwrite check.
-fn overwrite_report_writes_each_check_that_is_not_proved() void {
+// A store that the emptiness pass does not prove is the error of D17.11 with its note at the same
+// position, in each build mode, under --check, --check --json and --fir (spec/fir.md 11,
+// toolchain.md 2): the run exits 1 and writes no module, no FIR and no line but the diagnostics.
+// The check names no runtime entry, so the empty runtime of this test serves every run.
+fn each_unproved_store_is_an_error_in_every_mode() void {
+    write_runtime();
     write_lines("ow_sites.ft", OW_SITES[..]);
-    string[3] mut empty = {"fort", "--overwrite-report", "ow_sites.ft"};
-    assert(run(empty[0..3]) == EXIT_OK);
-    string own skipped = captured_out();
-    defer del(skipped);
-    assert(skipped == "");
-    assert(libc.mkdir("ow_std".ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
-    write_lines("ow_std/rt.ft", OW_RUNTIME[..]);
-    string[5] mut argv = {"fort", "--std-dir", "ow_std", "--overwrite-report", "ow_sites.ft"};
-    assert(run(argv[0..5]) == EXIT_OK);
-    assert(captured_err_is_empty());
-    string own out = captured_out();
-    defer del(out);
-    assert(out == "ow_sites.ft:5:13 b->left\now_sites.ft:13:23 p\n");
-    assert(lines_with(out, "ow_sites.ft:") == 2);
-    string[5] mut check = {"fort", "--std-dir", "ow_std", "--check", "ow_sites.ft"};
-    assert(run(check[0..5]) == EXIT_OK);
-    assert(captured_err_is_empty());
+    string[6] mut build = {"fort", "-S", "-S", "ow_sites.ft", "-o", "ow_sites.ll"};
+    for (string mode : MODES) {
+        remove_file("ow_sites.ll");
+        build[2] = mode;
+        assert(run(build[0..6]) == EXIT_COMPILE_ERROR);
+        assert(reported_ow_sites());
+        assert(!file_exists("ow_sites.ll"));
+    }
+    string[3] mut check = {"fort", "--check", "ow_sites.ft"};
+    assert(run(check[0..3]) == EXIT_COMPILE_ERROR);
+    assert(reported_ow_sites());
     string own quiet = captured_out();
     defer del(quiet);
     assert(quiet == "");
-    write_file("ow_bad.ft", "fn main() i32 {\n    return true;\n}\n");
-    string[5] mut bad = {"fort", "--std-dir", "ow_std", "--overwrite-report", "ow_bad.ft"};
-    assert(run(bad[0..5]) == EXIT_COMPILE_ERROR);
-    string own none = captured_out();
-    defer del(none);
-    assert(none == "");
+    string[4] mut released = {"fort", "--check", "--release", "ow_sites.ft"};
+    assert(run(released[0..4]) == EXIT_COMPILE_ERROR);
+    assert(reported_ow_sites());
+    string[4] mut document = {"fort", "--check", "--json", "ow_sites.ft"};
+    assert(run(document[0..4]) == EXIT_COMPILE_ERROR);
+    assert(captured_err_is_empty());
+    assert(out_has("overwriting owned value: cannot prove 'b->left' is empty here"));
+    assert(out_has("del or move 'p' before this store"));
+    string[3] mut fir_mode = {"fort", "--fir", "ow_sites.ft"};
+    assert(run(fir_mode[0..3]) == EXIT_COMPILE_ERROR);
+    assert(reported_ow_sites());
+    string own no_fir = captured_out();
+    defer del(no_fir);
+    assert(no_fir == "");
+    string[3] mut after = {"fort", "--fir-after=build-mode", "ow_sites.ft"};
+    assert(run(after[0..3]) == EXIT_COMPILE_ERROR);
+    assert(reported_ow_sites());
+}
+
+// The same program with each store proved: a `del` before the store of `refill` and one at the
+// end of the loop body of `leak`. Every mode accepts it, and the build-mode pass leaves no
+// overwrite check in the FIR of any mode.
+string[20] OW_PROVED = {
+    "struct node {",
+    "    node mut* own left;",
+    "}",
+    "fn refill(node mut* b) void {",
+    "    del(b->left);",
+    "    b->left = new(node);",
+    "}",
+    "fn fill(node mut* b) void {",
+    "    del(b->left);",
+    "    b->left = new(node);",
+    "}",
+    "fn leak(bool c) void {",
+    "    while (c) {",
+    "        node mut* own p = new(node);",
+    "        del(p);",
+    "    }",
+    "}",
+    "fn main() i32 {",
+    "    return 0;",
+    "}",
+};
+
+// With each store proved, a build, --check and --fir exit 0 with no diagnostic. The FIR after
+// the lowering holds the three checks, and the FIR after the build-mode pass holds none in each
+// mode, the checked mode included (spec/fir.md 11).
+fn a_proved_store_leaves_no_check_in_any_mode() void {
+    write_runtime();
+    write_lines("ow_proved.ft", OW_PROVED[..]);
+    string[3] mut check = {"fort", "--check", "ow_proved.ft"};
+    assert(run(check[0..3]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    string[3] mut lowered = {"fort", "--fir-after=lower", "ow_proved.ft"};
+    assert(run(lowered[0..3]) == EXIT_OK);
+    string own before = captured_out();
+    defer del(before);
+    assert(lines_with(before, "        check(overwrite: ") == 3);
+    // `--fir-after=build-mode` a second time stands for the default mode
+    string[3] fir_modes = {"--fir-after=build-mode", "--release", "--no-bounds-check"};
+    string[4] mut after = {"fort", "--fir-after=build-mode", "", "ow_proved.ft"};
+    for (string mode : fir_modes) {
+        after[2] = mode;
+        assert(run(after[0..4]) == EXIT_OK);
+        assert(captured_err_is_empty());
+        string own built = captured_out();
+        defer del(built);
+        assert(str.find(built, "check(overwrite: ") < 0);
+        assert(str.find(built, "fn ow_proved.refill(") >= 0);
+    }
+    string[6] mut build = {"fort", "-S", "-S", "ow_proved.ft", "-o", "ow_proved.ll"};
+    for (string mode : MODES) {
+        remove_file("ow_proved.ll");
+        build[2] = mode;
+        assert(run(build[0..6]) == EXIT_OK);
+        assert(captured_err_is_empty());
+        string own module = capture.text("ow_proved.ll");
+        defer del(module);
+        assert(str.find(module, "fail_overwrite") < 0);
+        assert(str.find(module, "define dso_local void @\"ow_proved.refill\"(") >= 0);
+    }
 }
 
 // `if (c) { return 1; }` falling off the end of a function that returns a value: a path from
@@ -2171,8 +2244,9 @@ fn main() i32 {
     fir_verify_report_holds_a_function_built_by_hand();
     no_bounds_check_reaches_the_build_mode_pass();
     fir_verify_report_names_a_check_with_no_runtime_entry();
-    overwrite_report_parses();
-    overwrite_report_writes_each_check_that_is_not_proved();
+    overwrite_report_is_an_unknown_option();
+    each_unproved_store_is_an_error_in_every_mode();
+    a_proved_store_leaves_no_check_in_any_mode();
     fir_test_parses_as_a_flag();
     fir_test_combines_with_no_other_mode();
     fir_test_of_the_pass_none_writes_the_module();

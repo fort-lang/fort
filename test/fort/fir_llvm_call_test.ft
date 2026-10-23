@@ -14,6 +14,7 @@ import fir_llvm;
 import gen;
 import llvm_env;
 import pass_env;
+import std.str;
 import std.strbuf;
 
 string[62] SOURCE = {
@@ -263,10 +264,10 @@ fn a_moved_argument_is_copied_then_zeroed() void {
     llvm_env.open(&e);
     defer llvm_env.close(&e);
     string[5] want = {
-        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp1, ptr align 8 %s.0, i64 16, \\",
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %s.0, i64 16, \\",
         "i1 false)",
         "  call void @llvm.memset.p0.i64(ptr align 8 %s.0, i8 0, i64 16, i1 false)",
-        "  call void @\"main.eat\"(ptr %tmp1)",
+        "  call void @\"main.eat\"(ptr %tmp0)",
         "  ret void",
     };
     string got = llvm_env.lowered_whole(&e, SOURCE[..], "feed", pass_env.CHECKED);
@@ -641,58 +642,50 @@ fn a_span_check_calls_fail_span() void {
     llvm_env.verified(&e, got);
 }
 
-// `new(i32, m)` with a signed count checks it with `alloc_count`; the header is built in a `%tmp`
-// slot, the overwrite check of `z` loads its pointer word, and `del(z)` frees and zeroes it.
+// `new(i32, m)` with a signed count checks it with `alloc_count`. The emptiness pass proves the
+// store into `z`, so every mode folds it: the header is written straight into `z`, with no `%tmp`
+// slot and no overwrite check, and `del(z)` frees and zeroes it (spec/fir.md 11).
 fn an_allocation_calls_fail_alloc_count() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
     defer llvm_env.close(&e);
-    string[35] want = {
+    string[22] want = {
         "define dso_local void @\"main.many\"(i64 %m.in) #0 {",
         "entry:",
         "  %m.0 = alloca i64, align 8",
         "  %z.1 = alloca %fort.span, align 8",
-        "  %tmp0 = alloca %fort.span, align 8",
         "  store i64 %m.in, ptr %m.0, align 8",
         "  call void @llvm.memset.p0.i64(ptr align 8 %z.1, i8 0, i64 16, i1 false)",
         "  %t0 = load i64, ptr %m.0, align 8",
         "  %t1 = icmp slt i64 %t0, 0",
-        "  br i1 %t1, label %L3, label %L1",
+        "  br i1 %t1, label %L2, label %L1",
         "",
         "L1:",
         "  %t2 = call ptr @\"std.rt.alloc\"(i64 4, i64 %t0, ptr @.file.0, i32 21, i32 22)",
-        "  %t3 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 0",
+        "  %t3 = getelementptr inbounds %fort.span, ptr %z.1, i32 0, i32 0",
         "  store ptr %t2, ptr %t3, align 8",
-        "  %t4 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 1",
+        "  %t4 = getelementptr inbounds %fort.span, ptr %z.1, i32 0, i32 1",
         "  store i64 %t0, ptr %t4, align 8",
         "  %t5 = getelementptr inbounds %fort.span, ptr %z.1, i32 0, i32 0",
         "  %t6 = load ptr, ptr %t5, align 8",
-        "  %t7 = icmp ne ptr %t6, null",
-        "  br i1 %t7, label %L4, label %L2",
-        "",
-        "L2:",
-        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %z.1, ptr align 8 %tmp0, i64 16, \\",
-        "i1 false)",
-        "  %t8 = getelementptr inbounds %fort.span, ptr %z.1, i32 0, i32 0",
-        "  %t9 = load ptr, ptr %t8, align 8",
-        "  call void @\"std.rt.free\"(ptr %t9)",
+        "  call void @\"std.rt.free\"(ptr %t6)",
         "  call void @llvm.memset.p0.i64(ptr align 8 %z.1, i8 0, i64 16, i1 false)",
         "  ret void",
         "",
-        "L3:",
-        "  call void @\"std.rt.fail_alloc_count\"(i64 %t0, ptr @.file.0, i32 21, i32 22)",
-        "  unreachable",
-        "",
     };
     string[4] tail = {
-        "L4:",
-        "  call void @\"std.rt.fail_overwrite\"(ptr @.file.0, i32 21, i32 18)",
+        "L2:",
+        "  call void @\"std.rt.fail_alloc_count\"(i64 %t0, ptr @.file.0, i32 21, i32 22)",
         "  unreachable",
         "}",
     };
-    string got = llvm_env.lowered_whole(&e, RUNTIME[..], "many", pass_env.CHECKED);
-    llvm_env.expect2(&e, got, want[..], tail[..]);
-    llvm_env.verified(&e, got);
+    pass_env.mode[3] modes = {pass_env.CHECKED, pass_env.RELEASE, pass_env.NO_BOUNDS};
+    for (pass_env.mode m : modes) {
+        string got = llvm_env.lowered_whole(&e, RUNTIME[..], "many", m);
+        llvm_env.expect2(&e, got, want[..], tail[..]);
+        llvm_env.verified(&e, got);
+        assert(str.find(got, "fail_overwrite") < 0);
+    }
 }
 
 fn main() i32 {

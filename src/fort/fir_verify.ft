@@ -116,18 +116,20 @@ string V13_UNASSIGNED = "a read of a temporary before an assignment of it";
 
 /// The runtime entry of each check kind, as the checker checked it in `std.rt`, in the order of
 /// `fir.check_kind`. An entry that the closure does not hold is null, and V7 reports a `check` or
-/// a `fail` of that kind. `excused` marks each kind whose checks the build-mode pass of the
-/// selected mode removes (excuse_mode): before that pass, V7 accepts a `check` or a
-/// `check(overwrite: p)` of such a kind with no fitting entry, because the pass removes it. A
-/// `fail` is never excused, and after the pass the verifier runs with no kind excused
-/// (unexcused), so a check that the pass keeps needs its entry.
+/// a `fail` of that kind. The kind `overwrite` has no entry, and `check(overwrite: p)` needs none
+/// at any point (spec/fir.md 10, V7). `excused` marks each kind whose checks the build-mode pass
+/// of the selected mode removes (excuse_mode). Before that pass, V7 accepts a `check` of such a
+/// kind with no fitting entry, because the pass removes it. A `fail` is never excused. After the
+/// pass the verifier runs with no kind excused (unexcused), so a check that the pass keeps needs
+/// its entry.
 struct runtime {
     ast.sym*[CHECK_KINDS] entry;
     bool[CHECK_KINDS] excused;
 }
 
 /// Finds the runtime entry of each check kind among the symbols of `ck`: the function of the
-/// module `std.rt` whose name `fir.check_entry` gives.
+/// module `std.rt` whose name `fir.check_entry` gives. The empty name of `overwrite` names no
+/// function, so its entry stays null.
 fn runtime_of(check.checker* ck) runtime {
     runtime mut rt = runtime{};
     u64 mut i = 0;
@@ -150,7 +152,7 @@ fn runtime_of(check.checker* ck) runtime {
 
 /// Marks in `rt` each check kind that the build-mode pass of `release` and `no_bounds` removes
 /// (fir.term_removable), so that V7 and runtime_holds excuse a missing entry of that kind on a
-/// `check` or a `check(overwrite: p)`.
+/// `check`.
 fn excuse_mode(runtime mut* rt, bool release, bool no_bounds) void {
     u64 mut k = 0;
     while (k < CHECK_KINDS) {
@@ -170,25 +172,23 @@ fn unexcused(runtime* rt) runtime {
     return out;
 }
 
-// Whether `rt` excuses a missing entry for the terminator `t`: a `check` or a
-// `check(overwrite: p)` of a kind that `rt` excuses. A `fail` always needs its entry.
+// Whether `rt` excuses a missing entry for the terminator `t`: a `check` of a kind that `rt`
+// excuses. A `fail` always needs its entry.
 fn excuses(runtime* rt, fir.terminator* t) bool {
-    bool checks = t->kind == fir.term_kind.tk_check || t->kind == fir.term_kind.tk_check_overwrite;
-    return checks && rt->excused[cast(t->check, u64)];
+    return t->kind == fir.term_kind.tk_check && rt->excused[cast(t->check, u64)];
 }
 
-/// Whether `rt` holds a runtime entry that fits the kind of each `check`, `check(overwrite: p)`
-/// and `fail` of `f` that the build-mode pass keeps: entry_fits for each kind that `rt` does not
-/// excuse. Rule V7 refuses `f` when it does not, and *missing then gives the first kind with no
-/// fitting entry in block order. Only a closure whose `std.rt` is a stub, as in a test, or comes
-/// from an old standard directory lacks one.
+/// Whether `rt` holds a runtime entry that fits the kind of each `check` and `fail` of `f` that
+/// the build-mode pass keeps. It tests entry_fits for each kind that `rt` does not excuse. A
+/// `check(overwrite: p)` needs no entry. Rule V7 refuses `f` when it does not, and *missing then
+/// gives the first kind with no fitting entry in block order. Only a closure whose `std.rt` is a
+/// stub, as in a test, or comes from an old standard directory lacks one.
 fn runtime_holds(fir.func* f, runtime* rt, fir.check_kind mut* missing) bool {
     u32 mut b = 0;
     while (b < fir.block_count(f)) {
         fir.block* bl = fir.block_at(f, b);
         fir.term_kind k = bl->term.kind;
-        bool reports = k == fir.term_kind.tk_check || k == fir.term_kind.tk_fail
-            || k == fir.term_kind.tk_check_overwrite;
+        bool reports = k == fir.term_kind.tk_check || k == fir.term_kind.tk_fail;
         fir.check_kind kind = bl->term.check;
         if (bl->terminated && reports && !excuses(rt, &bl->term)
             && !entry_fits(rt, kind, f->tt)) {
@@ -978,9 +978,9 @@ fn v7_statement(walk mut* w, fir.statement* s, u32 b, u32 i) bool {
     return true;
 }
 
-// V7 for a `check`, a `fail` or a `check(overwrite: p)`: the runtime entry of its kind exists
-// and takes the operands that fir.check_reported gives, then the file, the line and the column,
-// and the reported operands agree with those parameters.
+// V7 for a `check` or a `fail`. The runtime entry of its kind exists. It takes the operands that
+// fir.check_reported gives, then the file, the line and the column. The reported operands agree
+// with those parameters.
 // A `check` of a kind that `excused` marks needs no fitting entry.
 fn v7_reported(walk mut* w, fir.terminator* t, u32 b, u32 position) bool {
     if (excuses(w->rt, t) && !entry_fits(w->rt, t->check, w->f->tt)) {
@@ -1010,9 +1010,10 @@ fn v7_reported(walk mut* w, fir.terminator* t, u32 b, u32 position) bool {
     return true;
 }
 
+// V7 for a terminator. A `check(overwrite: p)` names no runtime entry, so V7 accepts it in every
+// mode, before and after the build-mode pass (spec/fir.md 10).
 fn v7_terminator(walk mut* w, fir.terminator* t, u32 b, u32 position) bool {
-    if (t->kind == fir.term_kind.tk_check || t->kind == fir.term_kind.tk_fail
-        || t->kind == fir.term_kind.tk_check_overwrite) {
+    if (t->kind == fir.term_kind.tk_check || t->kind == fir.term_kind.tk_fail) {
         return v7_reported(w, t, b, position);
     }
     return true;

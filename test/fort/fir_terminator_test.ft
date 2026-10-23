@@ -153,21 +153,28 @@ fn fail_trap_and_unreachable_abort() void {
 // The count of check kinds: chk_panic is the last member.
 u32 CHECK_KINDS = 11;
 
+// Every mode removes the overwrite check, which the emptiness pass proved, --release removes the
+// overflow and the shift checks, and --no-bounds-check the bounds and the span checks (spec/fir.md
+// 8, 11).
 fn the_build_modes_remove_their_checks() void {
     assert(cast(fir.check_kind.chk_panic, u32) + 1 == CHECK_KINDS);
+    u32 mut removed_checked = 0;
     u32 mut removed_release = 0;
     u32 mut removed_no_bounds = 0;
     u32 mut k = 0;
     while (k < CHECK_KINDS) {
         fir.check_kind kind = cast(k, fir.check_kind);
-        bool by_release = kind == fir.check_kind.chk_overflow
-            || kind == fir.check_kind.chk_shift || kind == fir.check_kind.chk_overwrite;
+        bool every = kind == fir.check_kind.chk_overwrite;
+        bool by_release = kind == fir.check_kind.chk_overflow || kind == fir.check_kind.chk_shift;
         bool by_no_bounds = kind == fir.check_kind.chk_bounds || kind == fir.check_kind.chk_span;
         // The four combinations of the two modes.
-        assert(!fir.term_removable(kind, false, false));
-        assert(fir.term_removable(kind, true, false) == by_release);
-        assert(fir.term_removable(kind, false, true) == by_no_bounds);
-        assert(fir.term_removable(kind, true, true) == (by_release || by_no_bounds));
+        assert(fir.term_removable(kind, false, false) == every);
+        assert(fir.term_removable(kind, true, false) == (by_release || every));
+        assert(fir.term_removable(kind, false, true) == (by_no_bounds || every));
+        assert(fir.term_removable(kind, true, true) == (by_release || by_no_bounds || every));
+        if (fir.term_removable(kind, false, false)) {
+            removed_checked += 1;
+        }
         if (fir.term_removable(kind, true, false)) {
             removed_release += 1;
         }
@@ -176,8 +183,9 @@ fn the_build_modes_remove_their_checks() void {
         }
         k += 1;
     }
+    assert(removed_checked == 1);
     assert(removed_release == 3);
-    assert(removed_no_bounds == 2);
+    assert(removed_no_bounds == 3);
 }
 
 // ---- runtime entries --------------------------------------------------------------------
@@ -254,9 +262,10 @@ fn every_check_kind_calls_its_runtime_entry() void {
     row(&e, fir.check_kind.chk_alloc_count, "fail_alloc_count",
         "fn (i64, char*, u32, u32) noreturn", alloc_count != null);
     rows += 1;
-    fn (char*, u32, u32) noreturn overwrite = rt.fail_overwrite;
-    row(&e, fir.check_kind.chk_overwrite, "fail_overwrite", "fn (char*, u32, u32) noreturn",
-        overwrite != null);
+    // The overwrite check names no runtime entry: the emptiness pass proves it, and the build-mode
+    // pass removes it in every mode (spec/fir.md 8).
+    assert(fir.check_entry(fir.check_kind.chk_overwrite) == "");
+    assert(fir.check_reported_count(fir.check_kind.chk_overwrite) == 0);
     rows += 1;
     fn (i64, char*, char*, u32, u32) noreturn bad_enum = rt.fail_enum;
     row(&e, fir.check_kind.chk_enum, "fail_enum", "fn (i64, char*, char*, u32, u32) noreturn",

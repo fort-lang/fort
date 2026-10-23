@@ -63,35 +63,19 @@ string[45] MOVES = {
 
 // ---- moves --------------------------------------------------------------------------------------
 
+// The modes of the build-mode pass that keep different checks. Each removes every overwrite
+// check, so a store into an `own` reference writes one text in all three (spec/fir.md 11).
+pass_env.mode[3] OWN_MODES = {pass_env.CHECKED, pass_env.RELEASE, pass_env.NO_BOUNDS};
+
 // `move p` of a pointer that is no temporary: the load, `store ptr null`, and only then the store
-// into the destination (toolchain.md 6 item 18). In checked mode the value waits in the register
-// `_3` across the overwrite check, and `q = move _3` of that register zeroes nothing. Under
-// --release the fold leaves `q = move p`.
+// into the destination (toolchain.md 6 item 18). The build-mode pass of every mode removes the
+// overwrite check and folds `_3 = move p` and `q = move _3` into `q = move p`, so `_3` gets no
+// storage.
 fn a_pointer_move_zeroes_before_the_store() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
     defer llvm_env.close(&e);
-    fir.func mut f = llvm_env.lower(&e, MOVES[..], "mv", pass_env.CHECKED);
-    defer fir.func_free(&f);
-    assert(llvm_env.storage_of(&f, 3) == fir_llvm.storage.sk_register);
-    string[14] want = {
-        "entry:",
-        "  %result = alloca ptr, align 8",
-        "  %p.0 = alloca ptr, align 8",
-        "  %q.1 = alloca ptr, align 8",
-        "  store ptr %p.in, ptr %p.0, align 8",
-        "  store ptr null, ptr %q.1, align 8",
-        "  %t0 = load ptr, ptr %p.0, align 8",
-        "  store ptr null, ptr %p.0, align 8",
-        "",
-        "L1:",
-        "  store ptr %t0, ptr %q.1, align 8",
-        "  %t1 = load ptr, ptr %q.1, align 8",
-        "  store ptr null, ptr %q.1, align 8",
-        "  store ptr %t1, ptr %result, align 8",
-    };
-    llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
-    string[12] release = {
+    string[12] want = {
         "entry:",
         "  %result = alloca ptr, align 8",
         "  %p.0 = alloca ptr, align 8",
@@ -105,45 +89,23 @@ fn a_pointer_move_zeroes_before_the_store() void {
         "  store ptr null, ptr %q.1, align 8",
         "  store ptr %t1, ptr %result, align 8",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, MOVES[..], "mv", pass_env.RELEASE), release[..]);
+    for (pass_env.mode m : OWN_MODES) {
+        fir.func mut f = llvm_env.lower(&e, MOVES[..], "mv", m);
+        defer fir.func_free(&f);
+        assert(llvm_env.storage_of(&f, 3) == fir_llvm.storage.sk_none);
+        llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
+    }
 }
 
 // `move s` of a span: `llvm.memcpy` into a new `%tmp`, `llvm.memset` of `s`, then `llvm.memcpy`
-// out (toolchain.md 6 item 18). In checked mode the value goes into the slot `_3`, `%tmp0`, and
-// `t = move _3` copies it out with no intermediate and no zeroing. The implicit move of `return t`
-// goes through an intermediate of its own.
+// out (toolchain.md 6 item 18). The fold of every mode writes `t = move s`: into `%tmp0`, the
+// memset, then out into `t`. The implicit move of `return t` goes through an intermediate of its
+// own.
 fn a_span_move_goes_through_an_intermediate() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
     defer llvm_env.close(&e);
-    fir.func mut f = llvm_env.lower(&e, MOVES[..], "mvs", pass_env.CHECKED);
-    defer fir.func_free(&f);
-    assert(llvm_env.storage_of(&f, 3) == fir_llvm.storage.sk_slot);
-    string[20] want = {
-        "entry:",
-        "  %t.1 = alloca %fort.span, align 8",
-        "  %tmp0 = alloca %fort.span, align 8",
-        "  %tmp1 = alloca %fort.span, align 8",
-        "  %tmp2 = alloca %fort.span, align 8",
-        "  call void @llvm.memset.p0.i64(ptr align 8 %t.1, i8 0, i64 16, i1 false)",
-        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp1, ptr align 8 %s.in, \\",
-        "i64 16, i1 false)",
-        "  call void @llvm.memset.p0.i64(ptr align 8 %s.in, i8 0, i64 16, i1 false)",
-        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %tmp1, \\",
-        "i64 16, i1 false)",
-        "",
-        "L1:",
-        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %t.1, ptr align 8 %tmp0, \\",
-        "i64 16, i1 false)",
-        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp2, ptr align 8 %t.1, \\",
-        "i64 16, i1 false)",
-        "  call void @llvm.memset.p0.i64(ptr align 8 %t.1, i8 0, i64 16, i1 false)",
-        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %ret.sret, ptr align 8 %tmp2, \\",
-        "i64 16, i1 false)",
-    };
-    llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
-    // under --release the fold writes `t = move s`: into %tmp0, memset, then out into `t`
-    string[15] release = {
+    string[15] want = {
         "entry:",
         "  %t.1 = alloca %fort.span, align 8",
         "  %tmp0 = alloca %fort.span, align 8",
@@ -160,17 +122,22 @@ fn a_span_move_goes_through_an_intermediate() void {
         "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %ret.sret, ptr align 8 %tmp1, \\",
         "i64 16, i1 false)",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, MOVES[..], "mvs", pass_env.RELEASE), release[..]);
+    for (pass_env.mode m : OWN_MODES) {
+        fir.func mut f = llvm_env.lower(&e, MOVES[..], "mvs", m);
+        defer fir.func_free(&f);
+        assert(llvm_env.storage_of(&f, 3) == fir_llvm.storage.sk_none);
+        llvm_env.expect(&e, llvm_env.translate(&e, &f), want[..]);
+    }
 }
 
 // `s = move(s)`: the destination is the operand itself, so the value must leave `s` before the
-// zeroing and come back after it (notes/compiler.md 6). The intermediate `%tmp0` of --release
-// holds it, and `s` ends as it began.
+// zeroing and come back after it (notes/compiler.md 6). The intermediate `%tmp0` of the fold
+// holds it, and `s` ends as it began. Every mode writes this text.
 fn a_move_into_its_own_place_keeps_the_value() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
     defer llvm_env.close(&e);
-    string[13] release = {
+    string[13] want = {
         "entry:",
         "  %tmp0 = alloca %fort.span, align 8",
         "  %tmp1 = alloca %fort.span, align 8",
@@ -185,29 +152,9 @@ fn a_move_into_its_own_place_keeps_the_value() void {
         "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %ret.sret, ptr align 8 %tmp1, \\",
         "i64 16, i1 false)",
     };
-    llvm_env.expect(&e, llvm_env.lowered(&e, MOVES[..], "self", pass_env.RELEASE), release[..]);
-    // in checked mode the slot `_2` holds the value across the overwrite check of `s`
-    string[18] checked = {
-        "entry:",
-        "  %tmp0 = alloca %fort.span, align 8",
-        "  %tmp1 = alloca %fort.span, align 8",
-        "  %tmp2 = alloca %fort.span, align 8",
-        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp1, ptr align 8 %s.in, \\",
-        "i64 16, i1 false)",
-        "  call void @llvm.memset.p0.i64(ptr align 8 %s.in, i8 0, i64 16, i1 false)",
-        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %tmp1, \\",
-        "i64 16, i1 false)",
-        "",
-        "L1:",
-        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %s.in, ptr align 8 %tmp0, \\",
-        "i64 16, i1 false)",
-        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp2, ptr align 8 %s.in, \\",
-        "i64 16, i1 false)",
-        "  call void @llvm.memset.p0.i64(ptr align 8 %s.in, i8 0, i64 16, i1 false)",
-        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %ret.sret, ptr align 8 %tmp2, \\",
-        "i64 16, i1 false)",
-    };
-    llvm_env.expect(&e, llvm_env.lowered(&e, MOVES[..], "self", pass_env.CHECKED), checked[..]);
+    for (pass_env.mode m : OWN_MODES) {
+        llvm_env.expect(&e, llvm_env.lowered(&e, MOVES[..], "self", m), want[..]);
+    }
 }
 
 // `*h = move(*g)`: the lowering holds the address of `*h` in the register `_3`, and the move

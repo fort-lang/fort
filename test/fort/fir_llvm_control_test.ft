@@ -26,66 +26,11 @@ string[9] WORKED = {
     "}",
 };
 
-// The four blocks are `entry`, `%L1` to `%L3`, and the failure block of the overwrite check of
-// `bb0` is `%L4`, after them. The check loads `p` and compares it with null, the failure label
-// first. Each `return` loads `%result`.
+// The build-mode pass of every mode removes the overwrite check, which the emptiness pass proves,
+// and merges `bb1` into `bb0`, so three blocks remain and no failure block stands after them
+// (spec/fir.md 11, 13). The blocks are `entry`, `%L1` and `%L2`, and each `return` loads
+// `%result`. The three modes write one text.
 fn the_worked_example_translates_whole() void {
-    llvm_env.env mut e = llvm_env.env{};
-    llvm_env.open(&e);
-    defer llvm_env.close(&e);
-    string[43] want = {
-        "define dso_local i32 @\"main.f\"(i1 zeroext %c.in) #0 {",
-        "entry:",
-        "  %result = alloca i32, align 4",
-        "  %c.0 = alloca i8, align 1",
-        "  %p.1 = alloca ptr, align 8",
-        "  %t0 = zext i1 %c.in to i8",
-        "  store i8 %t0, ptr %c.0, align 1",
-        "  store ptr null, ptr %p.1, align 8",
-        "  %t1 = call ptr @\"std.rt.alloc\"(i64 4, i64 1, ptr @.file.0, i32 2, i32 22)",
-        "  %t2 = load ptr, ptr %p.1, align 8",
-        "  %t3 = icmp ne ptr %t2, null",
-        "  br i1 %t3, label %L4, label %L1",
-        "",
-        "L1:",
-        "  store ptr %t1, ptr %p.1, align 8",
-        "  %t4 = load i8, ptr %c.0, align 1",
-        "  %t5 = trunc i8 %t4 to i1",
-        "  br i1 %t5, label %L2, label %L3",
-        "",
-        "L2:",
-        "  store i32 1, ptr %result, align 4",
-        "  %t6 = load ptr, ptr %p.1, align 8",
-        "  call void @\"std.rt.free\"(ptr %t6)",
-        "  store ptr null, ptr %p.1, align 8",
-        "  %t7 = load i32, ptr %result, align 4",
-        "  ret i32 %t7",
-        "",
-        "L3:",
-        "  %t8 = load ptr, ptr %p.1, align 8",
-        "  store i32 7, ptr %t8, align 4",
-        "  %t9 = load ptr, ptr %p.1, align 8",
-        "  %t10 = load i32, ptr %t9, align 4",
-        "  store i32 %t10, ptr %result, align 4",
-        "  %t11 = load ptr, ptr %p.1, align 8",
-        "  call void @\"std.rt.free\"(ptr %t11)",
-        "  store ptr null, ptr %p.1, align 8",
-        "  %t12 = load i32, ptr %result, align 4",
-        "  ret i32 %t12",
-        "",
-        "L4:",
-        "  call void @\"std.rt.fail_overwrite\"(ptr @.file.0, i32 2, i32 18)",
-        "  unreachable",
-        "}",
-    };
-    string got = llvm_env.lowered_whole(&e, WORKED[..], "f", pass_env.CHECKED);
-    llvm_env.expect(&e, got, want[..]);
-    llvm_env.verified(&e, got);
-}
-
-// Under --release the build-mode pass removes the check and merges `bb1` into `bb0`, so three
-// blocks remain and no failure block stands after them (spec/fir.md 13).
-fn the_worked_example_in_release_mode() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
     defer llvm_env.close(&e);
@@ -125,9 +70,12 @@ fn the_worked_example_in_release_mode() void {
         "  ret i32 %t10",
         "}",
     };
-    string got = llvm_env.lowered_whole(&e, WORKED[..], "f", pass_env.RELEASE);
-    llvm_env.expect(&e, got, want[..]);
-    llvm_env.verified(&e, got);
+    pass_env.mode[3] modes = {pass_env.CHECKED, pass_env.RELEASE, pass_env.NO_BOUNDS};
+    for (pass_env.mode m : modes) {
+        string got = llvm_env.lowered_whole(&e, WORKED[..], "f", m);
+        llvm_env.expect(&e, got, want[..]);
+        llvm_env.verified(&e, got);
+    }
 }
 
 // ---- the terminators ----------------------------------------------------------------------------
@@ -623,7 +571,6 @@ fn the_failure_blocks_follow_the_blocks_that_make_them() void {
 
 fn main() i32 {
     the_worked_example_translates_whole();
-    the_worked_example_in_release_mode();
     println("worked ok");
     an_integer_switch_and_unreachable();
     an_enum_switch_and_its_failure_block();

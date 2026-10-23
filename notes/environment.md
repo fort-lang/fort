@@ -361,7 +361,10 @@ without a rewrite.
   nothing. The guard caught **1 of the 88** rebuilds of T-077's mutation audit. There
   `tools/vm build debug` exited 0 and left the baseline binary in place, although the source held
   a mutation that does not compile. Without the guard that row would have read as caught by
-  nothing. A re-run by hand of it gave the build error the batch had missed. That check is also how
+  nothing. A re-run by hand of it gave the build error the batch had missed. On 2026-10-23 the
+  first round of 3 of 4 runs of `tools/mutate.py` in VM slot 2 read `stale`, and every later
+  round built: run a `stale` row again by hand, with the mutant written through a new inode
+  (`cp` then `mv` on the host), and compare the `md5sum` again. That check is also how
   a build that silently skipped a source is caught, which is worth one `md5sum` before any
   measurement that will be quoted as evidence. Undo the mutation from a saved copy of the file,
   never with `git checkout <file>`: the file usually also holds the

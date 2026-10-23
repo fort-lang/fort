@@ -36,6 +36,9 @@ u32 NO_LOCAL = 4294967295;
 /// checks stays unproved.
 u64 WORK_LIMIT = 1048576;
 
+/// The second note of the first error of a function past WORK_LIMIT (D17.11).
+string LIMIT_NOTE = "the function exceeds the work limit of D17.11; split it";
+
 // ---- the proof ---------------------------------------------------------------------------------
 
 /// The verdict of each `check(overwrite: p)` of one function. `proved[b]` says whether the check
@@ -420,7 +423,8 @@ fn find_operand(fir.func* f, fir.terminator* t, u32 i, fir.operand mut* out) boo
 // ---- the stale index temporaries ---------------------------------------------------------------
 
 // The steps of the stale chains: for each local, the stores whose place has it as its base times
-// the index temporaries whose source it is. apply_stale takes that many steps in one walk.
+// the temporaries whose source it is (mark_sources). apply_stale takes that many steps in one
+// walk.
 fn stale_steps(context* c) u64 {
     u64 mut sum = 0;
     u64 mut k = 0;
@@ -1417,12 +1421,14 @@ fn is_repeated(fir.func* f, proof* p, u32 b) bool {
 
 /// Reports each check of `f` that `p` does not prove, once for each location, in block order:
 /// the error `overwriting owned value: cannot prove '<place>' is empty here` and the note
-/// `del or move '<place>' before this store`, at the declared name or at the `=`.
+/// `del or move '<place>' before this store`, at the declared name or at the `=`. When the work
+/// of `f` passed WORK_LIMIT, the first error takes a second note, LIMIT_NOTE (D17.11).
 fn report(fir.func* f, proof* p, session.session mut* s) void {
     strbuf.str_buf mut place = strbuf.create();
     defer strbuf.free(&place);
     strbuf.str_buf mut text = strbuf.create();
     defer strbuf.free(&text);
+    bool mut limit_told = false;
     u32 mut b = 0;
     while (b < fir.block_count(f)) {
         fir.terminator* t = &fir.block_at(f, b)->term;
@@ -1440,27 +1446,10 @@ fn report(fir.func* f, proof* p, session.session mut* s) void {
             strbuf.append(&text, strbuf.view(&place));
             strbuf.append(&text, "' before this store");
             diag.note(session.diags(s), at, strbuf.view(&text));
-        }
-        b += 1;
-    }
-}
-
-/// Appends one line `<file>:<line>:<col> <place>` for each check of `f` that `p` does not prove,
-/// once for each location, in block order, at the location that report gives.
-fn write_sites(fir.func* f, proof* p, session.session mut* s, strbuf.str_buf mut* out) void {
-    u32 mut b = 0;
-    while (b < fir.block_count(f)) {
-        fir.terminator* t = &fir.block_at(f, b)->term;
-        if (!p->proved[cast(b, u64)] && !is_repeated(f, p, b)) {
-            diag.loc at = site(f, t);
-            strbuf.append(out, at.file);
-            strbuf.push(out, ':');
-            strbuf.append_u64(out, cast(at.line, u64));
-            strbuf.push(out, ':');
-            strbuf.append_u64(out, cast(at.col, u64));
-            strbuf.push(out, ' ');
-            write_place(f, t, s, out);
-            strbuf.push(out, '\n');
+            if (p->over && !limit_told) {
+                diag.note(session.diags(s), at, LIMIT_NOTE);
+                limit_told = true;
+            }
         }
         b += 1;
     }

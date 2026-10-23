@@ -9,7 +9,9 @@
 /// Checks the build-mode pass on functions that the lowering writes (spec/fir.md 9, 11): the
 /// worked example of spec/fir.md 13, the stores into `own` places, a loop with shift and overflow
 /// checks, and the bounds and span checks of a `switch`. Each case runs the verifier before and
-/// after the pass. The default mode leaves each lowered function as the lowering wrote it.
+/// after the pass. Every mode removes each overwrite check and folds its store, so the default
+/// mode leaves a lowered function as the lowering wrote it only when it stores into no `own`
+/// reference.
 import lower_env;
 import pass_env;
 
@@ -28,9 +30,10 @@ string[9] WORKED = {
     "}",
 };
 
-// Under --release the overwrite check of the declaration goes, `_3 = alloc<i32>(const u64 1)` and
+// In every mode the overwrite check of the declaration goes, `_3 = alloc<i32>(const u64 1)` and
 // `_2 = move _3` fold into one store at the location of the `alloc`, and bb1 merges into bb0.
-// bb2 and bb3 become bb1 and bb2, and the `switch` names them.
+// bb2 and bb3 become bb1 and bb2, and the `switch` names them. The function has no other check,
+// so the three modes write one text.
 fn the_worked_example_folds_and_merges() void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
@@ -63,9 +66,9 @@ fn the_worked_example_folds_and_merges() void {
         "}",
     };
     lower_env.expect(pass_env.lowered(&e, WORKED[..], "f", pass_env.RELEASE), want[..]);
-    // --no-bounds-check keeps the overwrite check, and the function has no bounds check
-    assert(pass_env.keeps_lowering(&e, WORKED[..], "f", pass_env.NO_BOUNDS));
-    assert(pass_env.keeps_lowering(&e, WORKED[..], "f", pass_env.CHECKED));
+    lower_env.expect(pass_env.lowered(&e, WORKED[..], "f", pass_env.NO_BOUNDS), want[..]);
+    lower_env.expect(pass_env.lowered(&e, WORKED[..], "f", pass_env.CHECKED), want[..]);
+    assert(!pass_env.keeps_lowering(&e, WORKED[..], "f", pass_env.CHECKED));
 }
 
 // ---- the stores into own places -----------------------------------------------------------------
@@ -105,7 +108,7 @@ string[27] STORES = {
 
 // The store through `h->p`: the lowering holds the address of the target in `_2`, and the check
 // and the store name `(*_2)`, so the two statements fold, and the store keeps the location of the
-// `alloc`.
+// `alloc`. The checked mode writes the same text.
 fn a_store_through_a_pointer_folds() void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
@@ -125,12 +128,14 @@ fn a_store_through_a_pointer_folds() void {
         "}",
     };
     lower_env.expect(pass_env.lowered(&e, STORES[..], "g", pass_env.RELEASE), want[..]);
+    lower_env.expect(pass_env.lowered(&e, STORES[..], "g", pass_env.CHECKED), want[..]);
 }
 
-// The store into `v[i]`: --release keeps the two bounds checks, folds the call into the element
-// `_1[_6]` and merges the continuation of the overwrite check. With --no-bounds-check too, the
-// bounds checks go with their `ge` and their reported `cast`, and the three continuations merge
-// into bb0. The index locals `_3` and `_6` stay for the places that read them.
+// The store into `v[i]`: the checked mode and --release keep the two bounds checks, fold the call
+// into the element `_1[_6]` and merge the continuation of the overwrite check. With
+// --no-bounds-check, the bounds checks go with their `ge` and their reported `cast`, and the three
+// continuations merge into bb0. The index locals `_3` and `_6` stay for the places that read
+// them.
 fn a_store_into_an_element_folds() void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
@@ -166,6 +171,7 @@ fn a_store_into_an_element_folds() void {
         "}",
     };
     lower_env.expect(pass_env.lowered(&e, STORES[..], "a", pass_env.RELEASE), release[..]);
+    lower_env.expect(pass_env.lowered(&e, STORES[..], "a", pass_env.CHECKED), release[..]);
     string[18] both = {
         "fn main.a(_1 (v): u8 mut* own[2], _2 (i): i64) -> void {",
         "    let _0: void;",
@@ -187,13 +193,14 @@ fn a_store_into_an_element_folds() void {
         "}",
     };
     lower_env.expect(pass_env.lowered(&e, STORES[..], "a", pass_env.BOTH), both[..]);
+    lower_env.expect(pass_env.lowered(&e, STORES[..], "a", pass_env.NO_BOUNDS), both[..]);
 }
 
 // The three reassignments of `p` and the declaration of `q` fold: the rvalue of the temporary,
 // a `call`, `const null` or `move _3`, moves into the store. The store of the `?:` does not fold,
 // because the block of its check holds no statement: the two arms assign `_7`. Each continuation
 // merges, so bb1, bb2 and bb3 go into bb0, bb7 goes into bb6, and bb4, bb5 and bb6 become bb1,
-// bb2 and bb3.
+// bb2 and bb3. The function has no other check, so every mode writes this text.
 fn the_stores_of_a_local_fold() void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
@@ -239,12 +246,14 @@ fn the_stores_of_a_local_fold() void {
         "    }",
         "}",
     };
-    lower_env.expect(pass_env.lowered(&e, STORES[..], "m", pass_env.RELEASE), want[..]);
+    for (pass_env.mode build : pass_env.MODES) {
+        lower_env.expect(pass_env.lowered(&e, STORES[..], "m", build), want[..]);
+    }
 }
 
 // The declaration of an own span from `new(u8, k)`: no mode removes the check of the count, and
-// --release removes the overwrite check of the declaration, so the `aggregate` of the header folds
-// into `_2` and bb2 merges into bb1.
+// every mode removes the overwrite check of the declaration, so the `aggregate` of the header
+// folds into `_2` and bb2 merges into bb1.
 fn a_span_store_folds_and_the_count_check_stays() void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
@@ -276,10 +285,9 @@ fn a_span_store_folds_and_the_count_check_stays() void {
         "    }",
         "}",
     };
-    lower_env.expect(pass_env.lowered(&e, STORES[..], "n", pass_env.BOTH), want[..]);
-    // the default mode and --no-bounds-check keep both checks
-    assert(pass_env.keeps_lowering(&e, STORES[..], "n", pass_env.CHECKED));
-    assert(pass_env.keeps_lowering(&e, STORES[..], "n", pass_env.NO_BOUNDS));
+    for (pass_env.mode build : pass_env.MODES) {
+        lower_env.expect(pass_env.lowered(&e, STORES[..], "n", build), want[..]);
+    }
 }
 
 // ---- a loop -------------------------------------------------------------------------------------
@@ -427,18 +435,19 @@ fn the_bounds_of_a_switch_go() void {
 
 // ---- the default mode ---------------------------------------------------------------------------
 
-// The default mode removes no check, and the lowering leaves no dead temporary in these
-// functions, so the pass changes none of them.
+// The default mode removes only the overwrite checks, and the lowering leaves no dead temporary in
+// these functions. So the pass changes no function that stores into no `own` reference, and it
+// changes each function that does (spec/fir.md 11).
 fn the_default_mode_keeps_each_lowered_function() void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
     defer lower_env.close(&e);
-    assert(pass_env.keeps_lowering(&e, WORKED[..], "f", pass_env.CHECKED));
-    assert(pass_env.keeps_lowering(&e, STORES[..], "g", pass_env.CHECKED));
-    assert(pass_env.keeps_lowering(&e, STORES[..], "a", pass_env.CHECKED));
-    assert(pass_env.keeps_lowering(&e, STORES[..], "m", pass_env.CHECKED));
     assert(pass_env.keeps_lowering(&e, LOOP[..], "sum", pass_env.CHECKED));
     assert(pass_env.keeps_lowering(&e, PICK[..], "pick", pass_env.CHECKED));
+    assert(!pass_env.keeps_lowering(&e, WORKED[..], "f", pass_env.CHECKED));
+    assert(!pass_env.keeps_lowering(&e, STORES[..], "g", pass_env.CHECKED));
+    assert(!pass_env.keeps_lowering(&e, STORES[..], "a", pass_env.CHECKED));
+    assert(!pass_env.keeps_lowering(&e, STORES[..], "m", pass_env.CHECKED));
 }
 
 fn main() i32 {

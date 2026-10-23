@@ -276,8 +276,10 @@ fn a_construct_that_the_lowering_refuses_is_an_error() void {
     assert(e.g.lowered == 2);
 }
 
-// `stop` ends in a `fail(panic)` and `drop` in a `check(overwrite)` at the declaration of an
-// owning local. The empty runtime lacks both runtime entries, so each is a compile error.
+// `stop` ends in a `fail(panic)` and `drop` holds a `check(overwrite)` at the declaration of an
+// owning local. The empty runtime lacks the entry of `panic`, so `stop` is a compile error. The
+// overwrite check names no runtime entry, and the emptiness pass proves it, so the emitter writes
+// `drop` (spec/fir.md 8, 11).
 string[10] ENTRIES = {
     "fn stop() void {\n",
     "    panic(\"stop\");\n",
@@ -291,18 +293,19 @@ string[10] ENTRIES = {
     "}\n",
 };
 
-fn a_fail_or_an_overwrite_check_with_no_runtime_entry_is_an_error() void {
+fn a_fail_with_no_runtime_entry_is_an_error_and_an_overwrite_check_needs_none() void {
     gen_env.env mut e = gen_env.env{};
     assert(!emit(&e, ENTRIES[..], false));
     defer gen_env.close(&e);
     assert(e.g.functions == 3);
-    assert(e.g.lowered == 1);
-    assert(gen_env.errors(&e) == 2);
+    assert(e.g.lowered == 2);
+    assert(gen_env.errors(&e) == 1);
     assert(gen_env.said(&e, "has no entry `panic` with the parameters that `stop` needs"));
-    assert(gen_env.said(&e, "has no entry `fail_overwrite` with the parameters"));
+    assert(!gen_env.said(&e, "fail_overwrite"));
     string text = gen_env.funcs(&e);
     assert(str.find(text, "main.stop") < 0);
-    assert(str.find(text, "main.drop") < 0);
+    assert(str.find(definition(text, "drop"), "store ptr null") >= 0);
+    assert(str.find(text, "fail_overwrite") < 0);
     assert(str.find(definition(text, "main"), "%result") >= 0);
 }
 
@@ -542,7 +545,7 @@ fn main() i32 {
     each_mode_excuses_only_the_kinds_that_it_removes();
     both_modes_need_no_entry_for_an_index_or_a_shift();
     a_construct_that_the_lowering_refuses_is_an_error();
-    a_fail_or_an_overwrite_check_with_no_runtime_entry_is_an_error();
+    a_fail_with_no_runtime_entry_is_an_error_and_an_overwrite_check_needs_none();
     a_designated_literal_zeroes_its_padding();
     println("functions ok");
     the_counts_are_the_definitions_and_those_that_the_translator_wrote();

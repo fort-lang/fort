@@ -35,21 +35,28 @@ struct fir_path {
 /// emptiness pass, the build-mode pass of the mode of `g` and the verifier again, whose rules V9
 /// among them stay on. The first verifier excuses the check kinds that `rt` excuses; the second
 /// excuses none, so a check that the pass keeps needs its runtime entry (rule V7). A violation of
-/// a rule ends the compiler with a panic that names it.
-// The emptiness pass reports nothing yet, so the build-mode pass keeps each overwrite check of a
-// checked build.
-fn check_fir(gen.emitter* g, fir_verify.runtime* rt, fir.func mut* f) void {
+/// a rule ends the compiler with a panic that names it. The build-mode pass reads the proof of
+/// the emptiness pass. False when that pass does not prove an overwrite check of `f`. Then it
+/// reports the error of D17.11 and its notes at each such check, in every mode, and `f` reaches
+/// no later pass (spec/fir.md 11).
+fn check_fir(gen.emitter mut* g, fir_verify.runtime* rt, fir.func mut* f) bool {
     fir_verify.verify(f, rt);
     emptiness.proof mut verdicts = emptiness.prove(f);
-    emptiness.free(&verdicts);
-    fir_passes.build_mode(f, g->opts.release, g->opts.no_bounds_check);
+    defer emptiness.free(&verdicts);
+    if (verdicts.unproved > 0) {
+        emptiness.report(f, &verdicts, g->sess);
+        g->failed = true;
+        return false;
+    }
+    fir_passes.build_mode(f, g->opts.release, g->opts.no_bounds_check, &verdicts);
     fir_verify.runtime strict = fir_verify.unexcused(rt);
     fir_verify.verify(f, &strict);
+    return true;
 }
 
 // Writes the definition of `fn_node` through FIR: the lowering, check_fir and the translator
-// (spec/fir.md 3). Four cases write no text, and each is a compile error (spec/fir.md 9.8,
-// spec/toolchain.md 1):
+// (spec/fir.md 3). Five cases write no text, and each is a compile error (spec/fir.md 9.8,
+// spec/fir.md 11, spec/toolchain.md 1):
 // - the lowering does not support a construct of the function: at the construct,
 //   `cannot lower `<f>` to FIR: the lowering does not support the node `<kind>``;
 // - a construct needs a print or a string equality that `std.rt` lacks: at the construct,
@@ -60,9 +67,11 @@ fn check_fir(gen.emitter* g, fir_verify.runtime* rt, fir.func mut* f) void {
 // - a `check` that the build-mode pass of the mode keeps, or a `fail`, names an entry that
 //   `std.rt` lacks or declares with other parameters, which rule V7 refuses: at the name of the
 //   function,
-//   `the runtime `std.rt` has no entry `<name>` with the parameters that `<f>` needs`.
-// Only a stub `std.rt` of a test or an old --std-dir meets the last three. A violation of a rule
-// of the verifier ends the compiler with a panic.
+//   `the runtime `std.rt` has no entry `<name>` with the parameters that `<f>` needs`;
+// - the emptiness pass does not prove an overwrite check: at the `=` or at the declared name,
+//   `overwriting owned value: cannot prove '<place>' is empty here` and a note (D17.11).
+// Only a stub `std.rt` of a test or an old --std-dir meets the second, the third and the fourth.
+// A violation of a rule of the verifier ends the compiler with a panic.
 fn fir_function(gen.emitter mut* g, fir_path mut* fp, ast.node* fn_node) bool {
     fir.func mut f = fir.func{};
     fir_lower.report mut why = fir_lower.report{};
@@ -100,21 +109,24 @@ fn fir_function(gen.emitter mut* g, fir_path mut* fp, ast.node* fn_node) bool {
         gen.gen_error(g, fn_node->name_loc, strbuf.view(&text));
         return false;
     }
-    emit_fir(g, fp, move(f));
-    return true;
+    return emit_fir(g, fp, move(f));
 }
 
 /// Writes the FIR function `f`, which it takes: check_fir, then the translator. `f` is the only
 /// function of its FIR module, so its extern list drives the `declare` lines of its calls
-/// (spec/fir.md 5.1), after the lines of the functions before it.
-fn emit_fir(gen.emitter mut* g, fir_path mut* fp, fir.func f) void {
+/// (spec/fir.md 5.1), after the lines of the functions before it. False when check_fir reports an
+/// overwrite error, which writes no text.
+fn emit_fir(gen.emitter mut* g, fir_path mut* fp, fir.func f) bool {
     fir.module mut m = fir.module_new();
     defer fir.module_free(&m);
     fir.module_add_function(&m, move(f));
     fir.func mut* added = &m.funcs.items[0];
-    check_fir(g, &fp->rt, added);
+    if (!check_fir(g, &fp->rt, added)) {
+        return false;
+    }
     fir.module_collect_externs(&m);
     fir_llvm.translate_module(g, &m);
+    return true;
 }
 
 /// Writes the definition of `fn_node` through FIR when it defines a function that the emitter

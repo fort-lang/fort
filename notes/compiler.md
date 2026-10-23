@@ -601,7 +601,13 @@ came here.
   `--fir-after=build-mode` over the 41051 functions of the run corpus, the 2560 of
   `test/lang/programs`, the 1820 of `src/fort/main.ft` and the 306 of `src/lsp/main.ft` in the
   four modes, and the verifier accepted each result. On `main.ft`, `--release` removes 1197
-  checks and `--no-bounds-check` 730, and the default mode changes no function.
+  checks and `--no-bounds-check` 730, and the default mode changes no function. Since the
+  overwrite error of D17.11 became static, every mode removes each `check(overwrite: p)` that
+  the proof of the emptiness pass proves, and folds its store. `build_mode` takes that proof and
+  keeps each unproved check. Only `--fir-after=build-mode` after its error,
+  `--fir-verify-report` and a FIR test bring one to it, and the translator panics on one. So
+  the default mode changes each function that stores into an `own` reference: the checked IR of
+  the compiler lost 180 calls of `std.rt.fail_overwrite`.
 - **The emptiness pass keeps one fact for each place that a check names** (`spec/fir.md` 11).
   `fir.emptiness.prove` reads one verified function before the build-mode pass. No gen rule and no
   kill rule of one fact reads another fact, so the pass tracks only the places of the
@@ -620,12 +626,19 @@ came here.
   place text of a report comes from the source: the pass finds the assignment at the position of the
   `=` in the tree of the function and takes the text from its first token to the `=`, with a `(`
   before it when the text needs one. A FIR text with no tree gives the FIR place. The emitter
-  (`gen_fir.check_fir`) and `--check` (`driver.overwrite_entry`) run the pass; neither reports a
-  check that it does not prove, and the build-mode pass keeps the runtime check, so the emitted IR
-  does not change. `--overwrite-report` writes one line `<file>:<line>:<col> <place>` for each such
-  check of the closure, once for each location in a function. `--check` skips a function whose check
-  names a runtime entry that `std.rt` lacks, because the verifier would panic and a build reports
-  the function.
+  (`gen_fir.check_fir`), `--check` and `--lib` (`driver.overwrite_entry`), and `--fir` and
+  `--fir-after` (`driver.fir_entry`) run the pass and report each check that it does not prove with
+  `emptiness.report`; a function with such a check reaches no later pass, and the run exits 1 with
+  no module, no interface file and no FIR. Past the work limit the first error of a function takes
+  the note `emptiness.LIMIT_NOTE` (`fail/ownership/060` passes the limit with 1000 checked
+  additions). `--check` skips a function whose check names a runtime entry that `std.rt` lacks,
+  because the verifier would panic and a build reports the function. A `check(overwrite: p)` names
+  no runtime entry, so the empty runtime of a test needs none for it. `std/rt.ft` keeps
+  `fail_overwrite` with no row in `runtime_sig.ft`: the pin of `tools/bootstrap.ref` builds HEAD
+  with HEAD's `std` in a checked build and emits a call of it for each store into an `own`
+  reference. Without it, `tools/vm build debug fort` exits 1 at the step that builds HEAD with the
+  pin: clang refuses the module with `error: use of undefined value '@std.rt.fail_overwrite'`.
+  Remove the function when a pin moves past the static error.
 - **The translator gives each local its storage in one scan, before it writes text** (T-249).
   `fir_llvm.classify` reads the blocks in number order. A scalar temporary is a register when
   one statement assigns it whole and every read has the statement index of that statement. Two

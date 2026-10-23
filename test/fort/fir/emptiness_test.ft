@@ -46,6 +46,7 @@ import heap;
 import lower_env;
 import modules_env;
 import pass_env;
+import session;
 import std.str;
 import std.strbuf;
 
@@ -4518,33 +4519,14 @@ string[26] REPORTS = {
     "59:15: del or move 't.kids[0]' before this store",
 };
 
-// The line of --overwrite-report of each function of REPORTED, after the name of the file.
-string[13] SITES = {
-    ":7:13 b->left\n",
-    ":10:16 (*q).right\n",
-    ":13:7 G\n",
-    ":17:23 p\n",
-    ":21:7 p\n",
-    ":25:19 b->left\n",
-    ":31:18 ((*q)).right\n",
-    ":37:20 (*a)[first(1)]\n",
-    ":41:17 q ->right\n",
-    ":48:16 t->kids[1]\n",
-    ":51:21 t->sub->kids[0]\n",
-    ":54:10 *out\n",
-    ":59:15 t.kids[0]\n",
-};
-
 // The report of each check that the pass does not prove: the error and its note at the `=` of
 // an assignment, a range of the one character, or at the declared name of a declaration, once
-// for each location; and the line of each in the site list.
+// for each location, in the file of the function.
 fn the_report_names_each_place_at_its_position() void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
     defer lower_env.close(&e);
     lower_env.check_lines(&e, REPORTED[..], true);
-    strbuf.str_buf mut sites = strbuf.create();
-    defer strbuf.free(&sites);
     u64 mut k = 0;
     while (k < REPORTED_NAMES.len) {
         fir.func mut f = fir.func{};
@@ -4555,11 +4537,8 @@ fn the_report_names_each_place_at_its_position() void {
         assert(check_env.reports(&e.c) == before + 2);
         assert(check_env.report_severity(&e.c, before) == "error");
         assert(check_env.report_severity(&e.c, before + 1) == "note");
-        strbuf.clear(&sites);
-        emptiness.write_sites(&f, &p, &e.c.m.s, &sites);
-        string line = strbuf.view(&sites);
-        assert(str.ends_with(line, SITES[k]));
-        assert(str.starts_with(line, check_env.report_file(&e.c, before)));
+        assert(check_env.report_file(&e.c, before) == check_env.report_file(&e.c, before + 1));
+        assert(str.ends_with(check_env.report_file(&e.c, before), "main.ft"));
         emptiness.free(&p);
         fir.func_free(&f);
         k += 1;
@@ -4612,7 +4591,7 @@ string[6] TEXT_REPORTS = {
     "11:7: del or move 'global main.G' before this store",
 };
 
-// With no tree, the report and the site list name the FIR place, and a declaration its name.
+// With no tree, the report names the FIR place, and a declaration its name.
 fn the_report_of_a_fir_text_names_the_fir_place() void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
@@ -4629,12 +4608,47 @@ fn the_report_of_a_fir_text_names_the_fir_place() void {
     u64 mut k = 0;
     while (k < TEXT_REPORTS.len) {
         assert(check_env.report_text(&e.c, before + k) == TEXT_REPORTS[k]);
+        assert(check_env.report_file(&e.c, before + k) == "t.fir");
         k += 1;
     }
-    strbuf.str_buf mut sites = strbuf.create();
-    defer strbuf.free(&sites);
-    emptiness.write_sites(f, &p, &e.c.m.s, &sites);
-    assert(strbuf.view(&sites) == "t.fir:7:13 (*_1).0\nt.fir:9:5 p\nt.fir:11:7 global main.G\n");
+}
+
+// The diagnostics of TEXT_REPORTED past the work limit: the error and the note of each check, and
+// the second note of the first error, which names the limit (D17.11).
+string[7] LIMIT_REPORTS = {
+    "7:13: overwriting owned value: cannot prove '(*_1).0' is empty here",
+    "7:13: del or move '(*_1).0' before this store",
+    "7:13: the function exceeds the work limit of D17.11; split it",
+    "9:5: overwriting owned value: cannot prove 'p' is empty here",
+    "9:5: del or move 'p' before this store",
+    "11:7: overwriting owned value: cannot prove 'global main.G' is empty here",
+    "11:7: del or move 'global main.G' before this store",
+};
+
+// Past the work limit each check of the function is unproved, and the first error takes a
+// second note that names the limit; the other errors take none (D17.11). A limit of 0 puts the
+// three checks of TEXT_REPORTED past it, and the report under the limit names no limit
+// (the_report_of_a_fir_text_names_the_fir_place).
+fn the_first_error_past_the_work_limit_names_the_limit() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    fir.module mut m = pass_env.parse(&e, PRELUDE[..], TEXT_REPORTED[..]);
+    defer fir.module_free(&m);
+    fir.func* f = &m.funcs.items[0];
+    emptiness.proof mut p = emptiness.prove_within(f, 0);
+    defer emptiness.free(&p);
+    assert(p.over && p.checks == 3 && p.unproved == 3);
+    u64 before = check_env.reports(&e.c);
+    emptiness.report(f, &p, &e.c.m.s);
+    assert(check_env.reports(&e.c) == before + LIMIT_REPORTS.len);
+    u64 mut k = 0;
+    while (k < LIMIT_REPORTS.len) {
+        assert(check_env.report_text(&e.c, before + k) == LIMIT_REPORTS[k]);
+        k += 1;
+    }
+    assert(check_env.report_severity(&e.c, before + 2) == "note");
+    assert(emptiness.LIMIT_NOTE == "the function exceeds the work limit of D17.11; split it");
 }
 
 // ---- the release of each allocation ------------------------------------------------------------
@@ -4642,7 +4656,21 @@ fn the_report_of_a_fir_text_names_the_fir_place() void {
 // The count of the rounds of proofs between two samples of the release probe.
 u64 PROOFS = 20;
 
-// Each round proves each function of HELD PROOFS times, writes its sites and frees its proof. A
+// Appends the place that the report names for each check of `f` that `p` does not prove, as
+// emptiness.report writes it, and writes no diagnostic.
+fn write_unproved(fir.func* f, emptiness.proof* p, session.session mut* s,
+                  strbuf.str_buf mut* out) void {
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        if (!emptiness.is_proved(p, b)) {
+            emptiness.write_place(f, &fir.block_at(f, b)->term, s, out);
+            strbuf.push(out, '\n');
+        }
+        b += 1;
+    }
+}
+
+// Each round proves each function of HELD PROOFS times, writes its places and frees its proof. A
 // proof that keeps a vector of its context, a set of a dataflow or the probes of a walk keeps 32
 // bytes or more in each proof, so 4480 bytes or more in each round, and the program break moves.
 // The probe runs first in main, as the probe of fir_flow_test does: after the other tests, the
@@ -4664,7 +4692,7 @@ fn the_proofs_leave_the_heap_where_it_was() void {
             while (i < m.funcs.len) {
                 emptiness.proof mut p = emptiness.prove(&m.funcs.items[i]);
                 strbuf.clear(&out);
-                emptiness.write_sites(&m.funcs.items[i], &p, &e.c.m.s, &out);
+                write_unproved(&m.funcs.items[i], &p, &e.c.m.s, &out);
                 emptiness.free(&p);
                 i += 1;
             }
@@ -4911,6 +4939,7 @@ fn main() i32 {
     println("examples ok");
     the_report_names_each_place_at_its_position();
     the_report_of_a_fir_text_names_the_fir_place();
+    the_first_error_past_the_work_limit_names_the_limit();
     println("report ok");
     the_work_limit_stops_the_proof_of_a_function();
     println("work ok");

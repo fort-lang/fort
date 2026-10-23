@@ -11,7 +11,6 @@
 /// removal of the dead temporaries. Each case runs the verifier before and after the pass.
 import consts;
 import fir;
-import fir_passes;
 import lower_env;
 import pass_env;
 import std.strbuf;
@@ -39,9 +38,11 @@ string[KIND_COUNT] KIND_TERMS = {
 };
 
 // The column "removed by" of spec/fir.md 8: whether --release removes each kind of KIND_TERMS,
-// and whether --no-bounds-check does.
+// and whether --no-bounds-check does. The overwrite check of KIND_TERMS tests a parameter, which
+// the emptiness pass cannot prove empty, so no mode removes it (the_proof_decides_each_overwrite
+// holds the removal of a proved one).
 bool[KIND_COUNT] BY_RELEASE = {
-    true, true, false, false, false, false, false, true, false, false, false, false, false,
+    true, true, false, false, false, false, false, false, false, false, false, false, false,
 };
 
 bool[KIND_COUNT] BY_NO_BOUNDS = {
@@ -102,9 +103,9 @@ fn each_mode_removes_the_kinds_of_its_column() void {
         }
         k += 1;
     }
-    // overflow, shift and overwrite in two modes each, bounds and span in two modes each
-    assert(removed == 10);
-    assert(kept == 42);
+    // overflow, shift, bounds and span in two modes each, and the unproved overwrite in none
+    assert(removed == 8);
+    assert(kept == 44);
 }
 
 // A removed check whose continuation cannot merge leaves `goto` at the location, the exit and the
@@ -141,7 +142,7 @@ fn a_removed_check_leaves_goto_at_its_location() void {
 
 // Runs the pass with no verifier, for an input that breaks a rule on purpose.
 fn build_unverified(fir.func mut* f, pass_env.mode m) void {
-    fir_passes.build_mode(f, m.release, m.no_bounds);
+    pass_env.build_proved(f, m.release, m.no_bounds);
 }
 
 // ---- the width of the mask ----------------------------------------------------------------------
@@ -779,17 +780,15 @@ string[6] USE_PRELUDE = {
 
 // Each temporary here has one kind of use, and the use keeps it: an index local, the pointer of
 // the place of a `del` and of a destination, the operand of a `switch`, the condition and a
-// reported operand of a `check`, the pointer that the place of an overwrite check loads, the
-// callee of a call through a value, an `addr` or a `slice` of its storage, and a temporary that
-// reads itself in a loop. A parameter, a
-// named local and the return place stay with no reader. Every mode leaves the module as it was:
-// no check here is removable but the bounds check and the overwrite check, and the text keeps
-// those in the default mode.
+// reported operand of a `check`, the callee of a call through a value, an `addr` or a `slice` of
+// its storage, and a temporary that reads itself in a loop. A parameter, a named local and the
+// return place stay with no reader. The default mode leaves the module as it was: no check here
+// is removable but the bounds check, and the default mode keeps it.
 fn each_use_keeps_its_temporary() void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
     defer lower_env.close(&e);
-    string[114] text = {
+    string[100] text = {
         "fn main.index(_1 (v): i32[4], _2 (i): i32) -> i32 {",
         "    let _0: i32;",
         "    let _3: u64;",
@@ -834,20 +833,6 @@ fn each_use_keeps_its_temporary() void {
         "        return;",
         "    }",
         "    bb3: {",
-        "        return;",
-        "    }",
-        "}",
-        "",
-        "fn main.owner(_1 (q): u8 mut* own mut*) -> void {",
-        "    let _0: void;",
-        "    let _2: u8 mut* own mut*;",
-        "",
-        "    bb0: {",
-        "        _2 = copy _1;",
-        "        check(overwrite: (*_2)) -> bb1;",
-        "    }",
-        "    bb1: {",
-        "        (*_2) = const null u8 mut* own;",
         "        return;",
         "    }",
         "}",
@@ -908,6 +893,107 @@ fn each_use_keeps_its_temporary() void {
     assert(pass_env.unchanged(&e, USE_PRELUDE[..], text[..], pass_env.CHECKED));
     // --no-bounds-check removes the bounds check of `branch`, and so changes the module
     assert(!pass_env.unchanged(&e, USE_PRELUDE[..], text[..], pass_env.NO_BOUNDS));
+}
+
+// The pointer that the place of an overwrite check loads: the `del` empties `(*_2)`, so every
+// mode removes the check, and its continuation merges into bb0 (spec/fir.md 11). The store
+// `(*_2) = const null` keeps no temporary of its own, so no fold applies, and `_2` stays as the
+// pointer of the destination.
+fn the_pointer_of_an_overwrite_check_stays_as_the_pointer_of_its_store() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[14] text = {
+        "fn main.owner(_1 (q): u8 mut* own mut*) -> void {",
+        "    let _0: void;",
+        "    let _2: u8 mut* own mut*;",
+        "",
+        "    bb0: {",
+        "        _2 = copy _1;",
+        "        del(move (*_2));",
+        "        check(overwrite: (*_2)) -> bb1;",
+        "    }",
+        "    bb1: {",
+        "        (*_2) = const null u8 mut* own;",
+        "        return;",
+        "    }",
+        "}",
+    };
+    string[11] want = {
+        "fn main.owner(_1 (q): u8 mut* own mut*) -> void {",
+        "    let _0: void;",
+        "    let _2: u8 mut* own mut*;",
+        "",
+        "    bb0: {",
+        "        _2 = copy _1;",
+        "        del(move (*_2));",
+        "        (*_2) = const null u8 mut* own;",
+        "        return;",
+        "    }",
+        "}",
+    };
+    for (pass_env.mode m : pass_env.MODES) {
+        lower_env.expect(pass_env.run(&e, USE_PRELUDE[..], text[..], m), want[..]);
+    }
+}
+
+// The build-mode pass removes an overwrite check only when the emptiness pass proves it
+// (spec/fir.md 11). `_2` holds the zero value of the entry, so its check goes in every mode and
+// its store folds. The parameter `_1` has no fact at the entry, so its check stays in every mode:
+// no build reaches the pass with it, and the translator refuses it
+// (fir_llvm_overwrite_check_panic_test).
+fn the_proof_decides_each_overwrite() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[22] text = {
+        "fn main.both(_1 (p): u8 mut* own) -> void {",
+        "    let _2 (q): u8 mut* own;",
+        "    let _3: u8 mut* own;",
+        "    let _4: u8 mut* own;",
+        "",
+        "    bb0: {",
+        "        _2 = const zero u8 mut* own;",
+        "        _3 = alloc<u8>(const u64 1);",
+        "        check(overwrite: _2) -> bb1;",
+        "    }",
+        "    bb1: {",
+        "        _2 = move _3;",
+        "        _4 = alloc<u8>(const u64 1);",
+        "        check(overwrite: _1) -> bb2;",
+        "    }",
+        "    bb2: {",
+        "        _1 = move _4;",
+        "        del(move _2);",
+        "        del(move _1);",
+        "        return;",
+        "    }",
+        "}",
+    };
+    string[19] want = {
+        "fn main.both(_1 (p): u8 mut* own) -> void {",
+        "    let _0: void;",
+        "    let _2 (q): u8 mut* own;",
+        "    let _3: u8 mut* own;",
+        "    let _4: u8 mut* own;",
+        "",
+        "    bb0: {",
+        "        _2 = const zero u8 mut* own;",
+        "        _2 = alloc<u8>(const u64 1);",
+        "        _4 = alloc<u8>(const u64 1);",
+        "        check(overwrite: _1) -> bb1;",
+        "    }",
+        "    bb1: {",
+        "        _1 = move _4;",
+        "        del(move _2);",
+        "        del(move _1);",
+        "        return;",
+        "    }",
+        "}",
+    };
+    for (pass_env.mode m : pass_env.MODES) {
+        lower_env.expect(pass_env.run(&e, USE_PRELUDE[..], text[..], m), want[..]);
+    }
 }
 
 // A temporary with two assignments and no reader loses both. A chain of four temporaries, each
@@ -981,6 +1067,8 @@ fn main() i32 {
     a_pure_rvalue_goes_and_the_others_stay();
     println("dead ok");
     each_use_keeps_its_temporary();
+    the_pointer_of_an_overwrite_check_stays_as_the_pointer_of_its_store();
+    the_proof_decides_each_overwrite();
     the_removal_repeats_until_nothing_changes();
     println("uses ok");
     return 0;

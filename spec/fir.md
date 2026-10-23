@@ -821,11 +821,11 @@ changes the function, and the verifier runs after it. The passes run in this ord
 1. The verifier (section 10).
 2. The flow analyses (section 14), which report and never rewrite.
 3. **The emptiness pass**, a reporting pass (D17.11). The module `fir.emptiness`
-   (`src/fort/fir/emptiness.ft`) holds it. It runs in every build mode and under `--check`. It
-   proves each `check(overwrite: p)`, and it reports the error of D17.11 for each one that it
-   cannot prove. A function with an error reaches no later pass, and the build writes no module.
-   The compiler does not report this error yet: until a later change turns it on, the pass lists
-   each check that it does not prove only under `--overwrite-report`, and the build goes on.
+   (`src/fort/fir/emptiness.ft`) holds it. It runs in every build mode, under `--check` and under
+   `--fir` (`toolchain.md` 1). It proves each `check(overwrite: p)`, and it reports the error of
+   D17.11 for each one that it cannot prove. A function with an error reaches no later pass, and
+   the run writes no module and no FIR. `--fir-verify-report` and the pass `build-mode` of a FIR
+   test run it too, for its proof, and report nothing.
    The pass is the forward must-empty analysis of D17.11, and it reads FIR this way:
    - **Facts.** A fact says that a tracked place holds the zero value. A tracked place is a local
      `_n` or a global, followed by `field` and keyed `index` projections. It is also a local `_p` of
@@ -921,17 +921,20 @@ changes the function, and the verifier runs after it. The passes run in this ord
    - **Proof.** A `check(overwrite: p)` is proved when `p` is a tracked place and its fact holds at
      the end of its block. The work of a function is the sum of three counts: its statements and
      terminators times its `check(overwrite: p)` terminators, its blocks times its locals, and for
-     each local the stores whose place has that local as its base times the index temporaries whose
-     key comes from a `copy` of that local. The pass measures it before any dataflow. When it passes
-     1048576 (2^20), the pass proves no check of the function (D17.11). A function with no such
-     check has no work. The pass reports an unproved check at the location of the check, which is
-     the `=` of an assignment or the declared name of a declaration (9.3). The message and its note
-     name the source text of the lvalue (D17.11).
+     each local `_k` that is not memory the assignments whose place has the base `_k` times the
+     temporaries `_t` that are not memory and that exactly one assignment writes, with the rvalue
+     `copy _k` or `cast<u64>(copy _k)`. The third count includes such a `_t` whether or not an
+     `index` reads it. The pass measures the work before any dataflow. When it passes 1048576
+     (2^20), the pass proves no check of the function (D17.11), and the first error of the
+     function takes the second note of D17.11. A function with no such check has no work. The
+     pass reports an unproved check at the location of the check, which is the `=` of an
+     assignment or the declared name of a declaration (9.3). The message and its note name the
+     source text of the lvalue (D17.11).
    - **Rewrite.** The pass rewrites nothing, so the verifier does not run after it.
 4. **The build-mode pass**, which rewrites for the selected mode (D11.1, D10.6, D17.11):
-   - In every mode, it replaces each `check(overwrite: p)` by `goto`, because the emptiness pass
-     proved it. It does not do this yet: until the error of D17.11 is on, it keeps each
-     `check(overwrite: p)` of a checked build and removes it under `--release`.
+   - In every mode, it replaces each `check(overwrite: p)` that the emptiness pass proved by
+     `goto`. A check that the pass did not prove stays. No build reaches the pass with one (item
+     3), and the translator refuses one (12.4).
    - Under `--release`, it replaces `check(_, overflow)` by `goto`. It
      replaces `check(_, shift, _n, ...) -> bb` by `_m = and(copy _n, const i64 W - 1)` and
      `goto bb`, which is the mask of item 15. `_m` takes the statement index of the check. When
@@ -1062,8 +1065,9 @@ lost a `zeroext`.
 - `return` is `ret void`, or a load of `%result` and `ret` (item 7).
 - `check(f, kind, args) -> bb` is `br i1 %f, label %fail, label %bb`, the failure label first
   (D19.6). The kind `user` branches to the continuation first, `br i1 %c, label %bb, label
-  %fail` (item 14). No `check(overwrite: p)` reaches the translator: the build-mode pass
-  replaced each one by `goto` (section 11, item 18).
+  %fail` (item 14). No `check(overwrite: p)` reaches the translator in a build: the build-mode
+  pass replaced each one, which the emptiness pass proved, by `goto` (section 11, item 18). A
+  check that reaches it is an internal error (D13.3).
 - The translator makes one failure block for each `check`: one call of the runtime entry of
   `kind` with `args`, the `@.file.N`, the line and the column, then `unreachable`. A FIR block
   other than `bb0` that holds only `fail` is a failure block too, written the same way, and its

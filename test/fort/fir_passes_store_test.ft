@@ -9,7 +9,6 @@
 /// which rule V2 or V11 refuses in a verified function.
 import diag;
 import fir;
-import fir_passes;
 import lower_env;
 import pass_env;
 
@@ -24,8 +23,9 @@ string[5] FOLD_PRELUDE = {
 };
 
 // One function for each case. The temporary of each is FOLD_TEMPS at its position, and whether
-// its store folds is FOLDS at its position.
-string[198] FOLD_TEXT = {
+// its store folds is FOLDS at its position. A case whose place has no fact at the entry deletes
+// it first, so that the emptiness pass proves its check and the build-mode pass removes it.
+string[203] FOLD_TEXT = {
     // the store `p = move _t` follows the check of `p`: it folds
     "fn main.fa() -> void {",
     "    let _1 (p): u8 mut* own;",
@@ -162,6 +162,7 @@ string[198] FOLD_TEXT = {
     "    let _2: u8 mut* own;",
     "",
     "    bb0: {",
+    "        del(move (*_1).0);",
     "        _2 = alloc<u8>(const u64 1);",
     "        check(overwrite: (*_1).0) -> bb1;",
     "    }",
@@ -175,6 +176,7 @@ string[198] FOLD_TEXT = {
     "    let _2: u8 mut* own;",
     "",
     "    bb0: {",
+    "        del(move (*_1).1);",
     "        _2 = alloc<u8>(const u64 1);",
     "        check(overwrite: (*_1).1) -> bb1;",
     "    }",
@@ -188,6 +190,7 @@ string[198] FOLD_TEXT = {
     "    let _1: u8 mut* own;",
     "",
     "    bb0: {",
+    "        del(move global main.KEPT);",
     "        _1 = alloc<u8>(const u64 1);",
     "        check(overwrite: global main.KEPT) -> bb1;",
     "    }",
@@ -201,6 +204,7 @@ string[198] FOLD_TEXT = {
     "    let _4: u8 mut* own;",
     "",
     "    bb0: {",
+    "        del(move (*_1)[_2]);",
     "        _4 = alloc<u8>(const u64 1);",
     "        check(overwrite: (*_1)[_2]) -> bb1;",
     "    }",
@@ -214,6 +218,7 @@ string[198] FOLD_TEXT = {
     "    let _4: u8 mut* own;",
     "",
     "    bb0: {",
+    "        del(move (*_1)[_2]);",
     "        _4 = alloc<u8>(const u64 1);",
     "        check(overwrite: (*_1)[_2]) -> bb1;",
     "    }",
@@ -362,7 +367,7 @@ fn the_merge_leaves_a_loop_and_the_entry() void {
         }
         fir.module mut fm = pass_env.parse(&e, prelude[..], lines[..]);
         fir.func mut* f = &fm.funcs.items[0];
-        fir_passes.build_mode(f, true, false);
+        pass_env.build_proved(f, true, false);
         assert(fir.block_count(f) == 2);
         pass_env.numbered(f);
         fir.terminator* t = &fir.block_at(f, 1)->term;

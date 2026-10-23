@@ -653,8 +653,8 @@ set_tests_properties(stack_depth PROPERTIES
     LABELS "fort;integration"
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
 
-# Hold the emptiness pass against the runtime overwrite check: each program of test/lang/run that
-# stops at an overwrite check at run time must have that site in `--overwrite-report`.
+# Hold the static overwrite rule against the programs that trapped at run time before it: each
+# one fails to compile at its old site, with the same diagnostics in every build mode.
 add_test(NAME overwrite_oracle
     COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/overwrite_oracle_test.py"
             --fort "${FORT_COMPILER_BINARY}" --std-dir "${FORT_STD_DIR}"
