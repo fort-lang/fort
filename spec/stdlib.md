@@ -68,7 +68,11 @@ library follows:
   container; a view of an owned value is valid until the value is `del`ed or moved away, which
   nothing checks (D10.7, D17.14).
 - **The `defer` idiom.** Declare the owning variable empty, defer its release on the next
-  line, then fill it:
+  line, then fill it. Put the declaration before the first call of the function, so that no
+  call comes before it on any path. The function takes the address of the slot, and a call
+  kills the fact that such a slot is empty (D17.11, kill rule 5). So a declaration after a
+  call stores into a slot that the compiler cannot prove empty, and that is a compile error.
+  This block shows the correct idiom, with the declaration first:
 
   ```fort
   u8 mut@ own mut data = {};
@@ -452,13 +456,13 @@ fn write_file(string path, u8@ data) bool
   `out->len` restored and `sys.errno()` describing the failing call (`close(2)` leaves `errno`
   alone when it succeeds). On success the contents are `strbuf.bytes(out)` and, as text,
   `strbuf.view(out)`. Ownership: as `read_all`.
-- `read_file_bytes`: the same as `read_file`, delivering a plain heap span. Precondition: `*out` is
-  empty (`{}`). On success the callee stores a fresh, exact-size allocation holding the file's bytes
-  into `*out` (`u8 mut@ own bytes = new(u8, n); ...; del(*out); *out = move(bytes);`, D17.5), so
-  `out->len` is the file's length and an empty file yields a zero-length, non-null allocation
-  (D10.2); on failure `*out` is untouched. The callee `del`s `*out` just before the store, because
-  the entry value of `*out` is unknown to it (D17.11); under the precondition, that `del` frees
-  nothing. Ownership: `*out` is `u8 mut@ own`; the caller releases it with `del`, usually through
+- `read_file_bytes`: the same as `read_file`, delivering a plain heap span. On success the callee
+  stores a fresh, exact-size allocation holding the file's bytes into `*out`
+  (`u8 mut@ own bytes = new(u8, n); ...; del(*out); *out = move(bytes);`, D17.5), so `out->len` is
+  the file's length and an empty file yields a zero-length, non-null allocation (D10.2); on failure
+  `*out` is untouched. The callee `del`s `*out` just before the store, because the entry value of
+  `*out` is unknown to it (D17.11). So a live slot is freed before the store, and an empty slot
+  (`{}`) frees nothing. Ownership: `*out` is `u8 mut@ own`; the caller releases it with `del`, usually through
   `defer del(data);` on the `u8 mut@ own mut data` whose address it passed (1.3).
 - `write_file`: `open_write`, `write_all`, `close`. Returns `true` only when all three succeed.
   Ownership: none.
