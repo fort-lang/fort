@@ -637,6 +637,16 @@ set_tests_properties(stack_depth PROPERTIES
     LABELS "fort;integration"
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
 
+# Hold the emptiness pass against the runtime overwrite check: each program of test/lang/run that
+# stops at an overwrite check at run time must have that site in `--overwrite-report`.
+add_test(NAME overwrite_oracle
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/overwrite_oracle_test.py"
+            --fort "${FORT_COMPILER_BINARY}" --std-dir "${FORT_STD_DIR}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(overwrite_oracle PROPERTIES
+    LABELS "fort;integration"
+    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
+
 # Node's built-in runner tests the VS Code extension in editors/vscode.
 # It converts diagnostic documents into editor shapes.
 # It also converts 1-based byte columns to character offsets.

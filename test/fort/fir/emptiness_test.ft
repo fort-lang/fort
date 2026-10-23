@@ -1,0 +1,4918 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| release ok
+//| entry ok
+//| del ok
+//| move ok
+//| zero ok
+//| fresh ok
+//| same base ok
+//| keys ok
+//| fresh store ok
+//| memory ok
+//| calls ok
+//| globals ok
+//| held ok
+//| join ok
+//| bounds ok
+//| constants ok
+//| loops ok
+//| aggregates ok
+//| kill matrix ok
+//| zero sequence ok
+//| freshness ok
+//| zero values ok
+//| key shapes ok
+//| return key ok
+//| held shapes ok
+//| addresses ok
+//| straight stores ok
+//| examples ok
+//| report ok
+//| work ok
+/// Checks the emptiness pass of fir.emptiness, the proof of each overwrite check. Each gen rule,
+/// each kill rule and each definition of the rule has a group of cases over FIR text, and each
+/// group holds a case that the pass proves and a case that it does not prove. The examples of
+/// the rule then run over lowered fort source, and the report names each check that the pass
+/// does not prove.
+import check_env;
+import fir;
+import fir.emptiness;
+import fir_env;
+import fir_lower;
+import fir_parse;
+import heap;
+import lower_env;
+import modules_env;
+import pass_env;
+import std.str;
+import std.strbuf;
+
+// The types, the globals and the functions that the FIR text of each case names. A `node` has
+// two owning fields, a fixed array of two owning pointers and an owning span of them. A `pair`
+// has two owning fields.
+string[18] PRELUDE = {
+    "struct node {",
+    "    node mut* own left;",
+    "    node mut* own right;",
+    "    node mut* own[2] kids;",
+    "    node mut* own mut@ own list;",
+    "}",
+    "node mut* own mut G = null;",
+    "node mut* own mut H = null;",
+    "struct pair {",
+    "    node mut* own a;",
+    "    node mut* own b;",
+    "}",
+    "pair mut S = pair{};",
+    "fn g() void {",
+    "}",
+    "fn take(node mut* own n) void {",
+    "    del(n);",
+    "}",
+};
+
+// ---- the cases over FIR text ----------------------------------------------------------------
+
+// Each group is a FIR module and the verdicts of its functions: the verdict of each check of a
+// function, in block order, `P` for a check that the pass proves and `U` for one that it does
+// not prove.
+
+// The store of the zero value in the entry block makes a named local empty.
+string[39] ENTRY = {
+    // the entry block zeroes the named local: P
+    "fn main.e1() -> void {",
+    "    let _1 (p): node mut* own;",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own;",
+    "        _2 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _2;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a parameter has no store in the entry block: U
+    "fn main.e2(_1 (p): node mut* own) -> void {",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        _2 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _2;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a named local with no store in the entry block: U
+    "fn main.e3() -> void {",
+    "    let _1 (p): node mut* own;",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        _2 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _2;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[3] ENTRY_VERDICTS = {"P", "U", "U"};
+
+// `del(move p)` makes `p` empty, and only `p`.
+string[47] DEL = {
+    // del of the field before the store: P
+    "fn main.d1(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        _2 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _2;",
+    "        return;",
+    "    }",
+    "}",
+    // no del: the entry value of the field is not known: U
+    "fn main.d2(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        _2 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _2;",
+    "        return;",
+    "    }",
+    "}",
+    // del of the other field: U
+    "fn main.d3(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1).1);",
+    "        _2 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _2;",
+    "        return;",
+    "    }",
+    "}",
+    // del(*out) before *out = move(buf): P
+    "fn main.d4(_1 (out): node mut* own mut*) -> void {",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1));",
+    "        _2 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1) = move _2;",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[4] DEL_VERDICTS = {"P", "U", "U", "P"};
+
+// A `move` operand makes its place and each tracked place below it empty.
+string[82] MOVE = {
+    // a move of the local after a store into it: PP
+    "fn main.m1(_1 (x): node mut* own) -> void {",
+    "    let _2 (p): node mut* own;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _2 = const zero node mut* own;",
+    "        check(overwrite: _2) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2 = move _1;",
+    "        _3 = move _2;",
+    "        check(overwrite: _2) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        _2 = move _3;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // no move after the store: PU
+    "fn main.m2(_1 (x): node mut* own) -> void {",
+    "    let _2 (p): node mut* own;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _2 = const zero node mut* own;",
+    "        check(overwrite: _2) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2 = move _1;",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: _2) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        _2 = move _3;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // a move of a struct: its field and an element of its fixed array, not a span element: PPU
+    "fn main.m3(_1 (s): node, _2 (k): u64) -> void {",
+    "    let _3: node;",
+    "    let _4: node mut* own;",
+    "    let _5: node mut* own;",
+    "    let _6: node mut* own;",
+    "    bb0: {",
+    "        _3 = move _1;",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1.0 = move _4;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1.2[_2]) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        _1.2[_2] = move _5;",
+    "        _6 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1.3[_2]) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        _1.3[_2] = move _6;",
+    "        return;",
+    "    }",
+    "}",
+    // the read of the move comes before the kill of the store: PU
+    "fn main.m4() -> void {",
+    "    let _1 (p): node mut* own;",
+    "    let _2: node mut* own;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own;",
+    "        _2 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _2;",
+    "        _1 = move _1;",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        _1 = move _3;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[4] MOVE_VERDICTS = {"PP", "PU", "PPU", "PU"};
+
+// A store of the zero value makes its place and each tracked place below it empty.
+string[112] ZERO = {
+    // the move of a temporary that holds the zero value: UP
+    "fn main.z1(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _2 = const zero node mut* own;",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _2;",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        (*_1).0 = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // a store of null: P
+    "fn main.z2(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        (*_1).0 = const null node mut* own;",
+    "        _2 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _2;",
+    "        return;",
+    "    }",
+    "}",
+    // an aggregate of zero constants: a field and an element of a fixed array below it: PP
+    "fn main.z3() -> void {",
+    "    let _1 (s): node;",
+    "    let _2: node mut* own;",
+    "    let _3: node mut* own;",
+    "    let _4: u64;",
+    "    bb0: {",
+    "        _1 = aggregate node(const null node mut* own, const zero node mut* own,",
+    "            const zero node mut* own[2], const zero node mut* own mut@ own);",
+    "        _4 = const u64 1;",
+    "        _2 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1.1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1.1 = move _2;",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1.2[_4]) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        _1.2[_4] = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // an aggregate with an operand that is no constant: U
+    "fn main.z4(_1 (x): node mut* own) -> void {",
+    "    let _2 (s): node;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _2 = aggregate node(move _1, const null node mut* own,",
+    "            const zero node mut* own[2], const zero node mut* own mut@ own);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: _2.1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2.1 = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // a zero temporary that a second item reads: U
+    "fn main.z5(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own;",
+    "    let _3: bool;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        _2 = const zero node mut* own;",
+    "        _3 = eq(copy _2, const null node mut* own);",
+    "        (*_1).0 = move _2;",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _4;",
+    "        return;",
+    "    }",
+    "}",
+    // a zero temporary that a second store writes in part: U
+    "fn main.z6(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own mut@ own;",
+    "    let _3: node mut* own mut@ own;",
+    "    bb0: {",
+    "        _2 = const zero node mut* own mut@ own;",
+    "        _2.1 = const u64 1;",
+    "        (*_1).3 = move _2;",
+    "        _3 = const zero node mut* own mut@ own;",
+    "        check(overwrite: (*_1).3) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).3 = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // a zero temporary that is memory: U
+    "fn main.z7(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own;",
+    "    let _3: node mut* own mut*;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        _2 = const zero node mut* own;",
+    "        _3 = addr mut(_2);",
+    "        (*_1).0 = move _2;",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _4;",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[7] ZERO_VERDICTS = {"UP", "P", "PP", "U", "U", "U", "U"};
+
+// A store of a fresh `new` makes each tracked place through the pointer empty.
+string[88] FRESH = {
+    // a fresh new: a field and an element of a fixed array through it: PPP
+    "fn main.f1() -> void {",
+    "    let _1 (n): node mut* own;",
+    "    let _2: node mut* own;",
+    "    let _3: node mut* own;",
+    "    let _4: u64;",
+    "    let _5: node mut* own;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own;",
+    "        _2 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _2;",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        (*_1).0 = move _3;",
+    "        _4 = const u64 0;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).2[_4]) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        (*_1).2[_4] = move _5;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a pointer that is no fresh new: PU
+    "fn main.f2(_1 (m): node mut* own) -> void {",
+    "    let _2 (n): node mut* own;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _2 = const zero node mut* own;",
+    "        check(overwrite: _2) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2 = move _1;",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_2).0) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        (*_2).0 = move _3;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // an allocation that a second item reads is no fresh new: PU
+    "fn main.f3() -> void {",
+    "    let _1 (n): node mut* own;",
+    "    let _2: node mut* own;",
+    "    let _3: bool;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own;",
+    "        _2 = alloc<node>(const u64 1);",
+    "        _3 = eq(copy _2, const null node mut* own);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _2;",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        (*_1).0 = move _4;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // no element of a span through a fresh new: PU
+    "fn main.f4(_1 (k): u64) -> void {",
+    "    let _2 (n): node mut* own;",
+    "    let _3: node mut* own;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        _2 = const zero node mut* own;",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: _2) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2 = move _3;",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_2).3[_1]) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        (*_2).3[_1] = move _4;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[4] FRESH_VERDICTS = {"PPP", "PU", "PU", "PU"};
+
+// A store kills the fact of each place with its base that is not separate from it.
+string[67] SAME_BASE = {
+    // a store into the place: U
+    "fn main.k1(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        _2 = alloc<node>(const u64 1);",
+    "        (*_1).0 = move _2;",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // a store into a separate field through the same pointer: P
+    "fn main.k2(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        _2 = alloc<node>(const u64 1);",
+    "        (*_1).1 = move _2;",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // a store into the pointer local: U
+    "fn main.k3(_1 (b): node mut*, _2 (c): node mut*) -> void {",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        _1 = copy _2;",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // a store into a separate field of a local, and a store into the whole local: PU
+    "fn main.k4(_1 (t): node) -> void {",
+    "    let _2 (s): node;",
+    "    let _3: node mut* own;",
+    "    let _4: node mut* own;",
+    "    let _5: node mut* own;",
+    "    bb0: {",
+    "        _2 = const zero node;",
+    "        _3 = alloc<node>(const u64 1);",
+    "        _2.1 = move _3;",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: _2.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2.0 = move _4;",
+    "        del(move _2.0);",
+    "        _2 = move _1;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        check(overwrite: _2.0) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        _2.0 = move _5;",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[4] SAME_BASE_VERDICTS = {"U", "P", "U", "PU"};
+
+// Two elements with one key are one place, and an element with no key is not tracked.
+string[142] KEYS = {
+    // two temporaries that copy one local: P
+    "fn main.y1(_1 (v): node mut*, _2 (k): u64) -> void {",
+    "    let _3: u64;",
+    "    let _4: u64;",
+    "    let _5: node mut* own;",
+    "    bb0: {",
+    "        _3 = copy _2;",
+    "        del(move (*_1).3[_3]);",
+    "        _4 = cast<u64>(copy _2);",
+    "        _5 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).3[_4]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).3[_4] = move _5;",
+    "        return;",
+    "    }",
+    "}",
+    // an index read from memory has no key: U
+    "fn main.y2(_1 (v): node mut*) -> void {",
+    "    let _2: u64;",
+    "    let _3: u64;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        _2 = copy (*_1).3.1;",
+    "        del(move (*_1).3[_2]);",
+    "        _3 = copy (*_1).3.1;",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).3[_3]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).3[_3] = move _4;",
+    "        return;",
+    "    }",
+    "}",
+    // a store into the key local after the copy and before its use: U
+    "fn main.y3(_1 (v): node mut*, _2 (k): u64) -> void {",
+    "    let _3: u64;",
+    "    let _4: u64;",
+    "    let _5: node mut* own;",
+    "    bb0: {",
+    "        _4 = copy _2;",
+    "        _2 = const u64 1;",
+    "        _3 = copy _2;",
+    "        del(move (*_1).3[_3]);",
+    "        _5 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).3[_4]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).3[_4] = move _5;",
+    "        return;",
+    "    }",
+    "}",
+    // two equal constants, and two constants that differ: PU
+    "fn main.y4(_1 (v): node mut* own[2] mut*) -> void {",
+    "    let _2: u64;",
+    "    let _3: u64;",
+    "    let _4: node mut* own;",
+    "    let _5: u64;",
+    "    let _6: node mut* own;",
+    "    bb0: {",
+    "        _2 = cast<u64>(const i32 1);",
+    "        del(move (*_1)[_2]);",
+    "        _3 = const u64 1;",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1)[_3]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1)[_3] = move _4;",
+    "        _5 = const u64 0;",
+    "        _6 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1)[_5]) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        (*_1)[_5] = move _6;",
+    "        return;",
+    "    }",
+    "}",
+    // a store into another element: b[j] and b[i]: U
+    "fn main.y5(_1 (v): node mut* own[2] mut*, _2 (i): u64, _3 (j): u64) -> void {",
+    "    let _4: node mut* own;",
+    "    let _5: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1)[_2]);",
+    "        _4 = alloc<node>(const u64 1);",
+    "        (*_1)[_3] = move _4;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1)[_2]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1)[_2] = move _5;",
+    "        return;",
+    "    }",
+    "}",
+    // a store into the key local itself: U
+    "fn main.y6(_1 (v): node mut* own[2] mut*, _2 (i): u64) -> void {",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1)[_2]);",
+    "        _2 = const u64 1;",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1)[_2]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1)[_2] = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // a parameter index is its own key: P
+    "fn main.y7(_1 (v): node mut* own[2] mut*, _2 (i): u64) -> void {",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1)[_2]);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1)[_2]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1)[_2] = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // a temporary that two stores write has no key: U
+    "fn main.y8(_1 (v): node mut* own[2] mut*) -> void {",
+    "    let _2: u64;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _2 = const u64 1;",
+    "        _2 = const u64 1;",
+    "        del(move (*_1)[_2]);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1)[_2]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1)[_2] = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // an index local that is memory has no key: U
+    "fn main.y9(_1 (v): node mut* own[2] mut*, _2 (i): u64) -> void {",
+    "    let _3: u64*;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        _3 = addr(_2);",
+    "        del(move (*_1)[_2]);",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1)[_2]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1)[_2] = move _4;",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[9] KEYS_VERDICTS = {"P", "U", "U", "PU", "U", "U", "P", "U", "U"};
+
+// A store through a fresh pointer local kills only the facts with its base.
+string[98] FRESH_STORE = {
+    // a store through a fresh pointer keeps a fact through a parameter: P
+    "fn main.s1(_1 (b): node mut*) -> void {",
+    "    let _2 (n): node mut* own;",
+    "    let _3: node mut* own;",
+    "    let _4: node mut* own;",
+    "    let _5: node mut* own;",
+    "    bb0: {",
+    "        _2 = const zero node mut* own;",
+    "        del(move (*_1).0);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        _2 = move _3;",
+    "        _4 = alloc<node>(const u64 1);",
+    "        (*_2).0 = move _4;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _5;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // a copy of the pointer ends its freshness: U
+    "fn main.s2(_1 (b): node mut*) -> void {",
+    "    let _2 (n): node mut* own;",
+    "    let _3: node mut* own;",
+    "    let _4: node mut* own;",
+    "    let _5: node mut* own;",
+    "    let _6: node mut*;",
+    "    bb0: {",
+    "        _2 = const zero node mut* own;",
+    "        del(move (*_1).0);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        _2 = move _3;",
+    "        _6 = copy _2;",
+    "        _4 = alloc<node>(const u64 1);",
+    "        (*_2).0 = move _4;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _5;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // an address of a place through the pointer ends its freshness: U
+    "fn main.s3(_1 (b): node mut*) -> void {",
+    "    let _2 (n): node mut* own;",
+    "    let _3: node mut* own;",
+    "    let _4: node mut* own;",
+    "    let _5: node mut* own;",
+    "    let _6: node mut* own*;",
+    "    bb0: {",
+    "        _2 = const zero node mut* own;",
+    "        del(move (*_1).0);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        _2 = move _3;",
+    "        _6 = addr((*_2).1);",
+    "        _4 = alloc<node>(const u64 1);",
+    "        (*_2).0 = move _4;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _5;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // one path where the pointer is not fresh: U
+    "fn main.s4(_1 (b): node mut*, _2 (c): bool, _3 (m): node mut* own) -> void {",
+    "    let _4 (n): node mut* own;",
+    "    let _5: node mut* own;",
+    "    let _6: node mut* own;",
+    "    let _7: node mut* own;",
+    "    bb0: {",
+    "        _4 = const zero node mut* own;",
+    "        del(move (*_1).0);",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _5 = alloc<node>(const u64 1);",
+    "        _4 = move _5;",
+    "        goto bb3;",
+    "    }",
+    "    bb2: {",
+    "        _4 = move _3;",
+    "        goto bb3;",
+    "    }",
+    "    bb3: {",
+    "        _6 = alloc<node>(const u64 1);",
+    "        (*_4).0 = move _6;",
+    "        _7 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        (*_1).0 = move _7;",
+    "        del(move _4);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[4] FRESH_STORE_VERDICTS = {"P", "U", "U", "U"};
+
+// A store through a pointer or into memory kills each fact reached through memory.
+string[185] MEMORY = {
+    // a store through another parameter: U
+    "fn main.t1(_1 (p): node mut*, _2 (q): node mut*) -> void {",
+    "    let _3: node mut* own;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        (*_2).1 = move _3;",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _4;",
+    "        return;",
+    "    }",
+    "}",
+    // a store into a memory local: U
+    "fn main.t2(_1 (p): node mut*) -> void {",
+    "    let _2 (s): node;",
+    "    let _3: node*;",
+    "    let _4: node mut* own;",
+    "    let _5: node mut* own;",
+    "    bb0: {",
+    "        _2 = const zero node;",
+    "        _3 = addr(_2);",
+    "        del(move (*_1).0);",
+    "        _4 = alloc<node>(const u64 1);",
+    "        _2.1 = move _4;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _5;",
+    "        return;",
+    "    }",
+    "}",
+    // a store into a local that is no memory: P
+    "fn main.t3(_1 (p): node mut*) -> void {",
+    "    let _2 (s): node;",
+    "    let _3: node mut* own;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        _2 = const zero node;",
+    "        del(move (*_1).0);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        _2.1 = move _3;",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _4;",
+    "        return;",
+    "    }",
+    "}",
+    // a store into a global kills a fact through a pointer, not the fact of a local: UP
+    "fn main.t4(_1 (p): node mut*) -> void {",
+    "    let _2 (x): node mut* own;",
+    "    let _3: node mut* own;",
+    "    let _4: node mut* own;",
+    "    let _5: node mut* own;",
+    "    bb0: {",
+    "        _2 = const zero node mut* own;",
+    "        del(move (*_1).0);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        global main.G = move _3;",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _4;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        check(overwrite: _2) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        _2 = move _5;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // a store into an element of a span kills a separate field through the pointer: U
+    "fn main.t5(_1 (p): node mut*, _2 (k): u64) -> void {",
+    "    let _3: node mut* own;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        (*_1).3[_2] = move _3;",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _4;",
+    "        return;",
+    "    }",
+    "}",
+    // a store through a pointer keeps a fact through a fresh pointer: P
+    "fn main.t6(_1 (p): node mut*) -> void {",
+    "    let _2 (n): node mut* own;",
+    "    let _3: node mut* own;",
+    "    let _4: node mut* own;",
+    "    let _5: node mut* own;",
+    "    bb0: {",
+    "        _2 = const zero node mut* own;",
+    "        _3 = alloc<node>(const u64 1);",
+    "        _2 = move _3;",
+    "        _4 = alloc<node>(const u64 1);",
+    "        (*_1).0 = move _4;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_2).1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_2).1 = move _5;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // the same after a copy of the pointer: U
+    "fn main.t7(_1 (p): node mut*) -> void {",
+    "    let _2 (n): node mut* own;",
+    "    let _3: node mut* own;",
+    "    let _4: node mut* own;",
+    "    let _5: node mut* own;",
+    "    let _6: node mut*;",
+    "    bb0: {",
+    "        _2 = const zero node mut* own;",
+    "        _3 = alloc<node>(const u64 1);",
+    "        _2 = move _3;",
+    "        _6 = copy _2;",
+    "        _4 = alloc<node>(const u64 1);",
+    "        (*_1).0 = move _4;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_2).1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_2).1 = move _5;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // a store through a pointer kills the fact of a memory local: U
+    "fn main.t8(_1 (p): node mut*) -> void {",
+    "    let _2 (x): node mut* own;",
+    "    let _3: node mut* own mut*;",
+    "    let _4: node mut* own;",
+    "    let _5: node mut* own;",
+    "    bb0: {",
+    "        _2 = const zero node mut* own;",
+    "        _3 = addr mut(_2);",
+    "        _4 = alloc<node>(const u64 1);",
+    "        (*_1).0 = move _4;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        check(overwrite: _2) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2 = move _5;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // a slice of a fixed array makes the local memory: U
+    "fn main.t9(_1 (p): node mut*) -> void {",
+    "    let _2 (a): node mut* own[2];",
+    "    let _3: node mut* own mut@;",
+    "    let _4: u64;",
+    "    let _5: node mut* own;",
+    "    let _6: node mut* own;",
+    "    bb0: {",
+    "        _2 = const zero node mut* own[2];",
+    "        _3 = slice mut(_2, const u64 0, const u64 2);",
+    "        _4 = const u64 0;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        (*_1).0 = move _5;",
+    "        _6 = alloc<node>(const u64 1);",
+    "        check(overwrite: _2[_4]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2[_4] = move _6;",
+    "        return;",
+    "    }",
+    "}",
+    // a place through a pointer local that is memory is not tracked: U
+    "fn main.t10(_1 (b): node mut*) -> void {",
+    "    let _2: node mut**;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _2 = addr(_1);",
+    "        del(move (*_1).0);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _3;",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[10] MEMORY_VERDICTS = {"U", "U", "P", "UP", "U", "P", "U", "U", "U", "U"};
+
+// A call kills each fact but the facts of a local that is no memory.
+string[97] CALLS = {
+    // a call keeps the fact of a local that is no memory: P
+    "fn main.c1() -> void {",
+    "    let _1 (p): node mut* own;",
+    "    let _2: void;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own;",
+    "        _2 = call fn main.g();",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _3;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a call kills a fact through a pointer and the fact of a global: UU
+    "fn main.c2(_1 (b): node mut*) -> void {",
+    "    let _2: void;",
+    "    let _3: node mut* own;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        del(move global main.G);",
+    "        _2 = call fn main.g();",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _3;",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: global main.G) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        global main.G = move _4;",
+    "        return;",
+    "    }",
+    "}",
+    // a call kills the fact of a memory local: U
+    "fn main.c3() -> void {",
+    "    let _1 (p): node mut* own;",
+    "    let _2: void;",
+    "    let _3: node mut* own;",
+    "    let _4: node mut* own*;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own;",
+    "        _4 = addr(_1);",
+    "        _2 = call fn main.g();",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _3;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a call kills a fact through a fresh pointer: U
+    "fn main.c4() -> void {",
+    "    let _1 (n): node mut* own;",
+    "    let _2: node mut* own;",
+    "    let _3: void;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own;",
+    "        _2 = alloc<node>(const u64 1);",
+    "        _1 = move _2;",
+    "        _3 = call fn main.g();",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _4;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // the move of a call argument comes before the kill of the call: UP
+    "fn main.c5(_1 (x): node mut* own) -> void {",
+    "    let _2: void;",
+    "    let _3: node mut* own;",
+    "    let _4: void;",
+    "    let _5: node mut* own;",
+    "    bb0: {",
+    "        del(move global main.G);",
+    "        _2 = call fn main.take(move global main.G);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: global main.G) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        global main.G = move _3;",
+    "        _4 = call fn main.take(move _1);",
+    "        _5 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        _1 = move _5;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[5] CALLS_VERDICTS = {"P", "UU", "U", "U", "UP"};
+
+// A global is a tracked place with no fact at the entry.
+string[30] GLOBALS = {
+    // del of the global: P
+    "fn main.g1(_1 (x): node mut* own) -> void {",
+    "    bb0: {",
+    "        del(move global main.G);",
+    "        check(overwrite: global main.G) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        global main.G = move _1;",
+    "        return;",
+    "    }",
+    "}",
+    // no del: a global has no fact at the entry: U
+    "fn main.g2(_1 (x): node mut* own) -> void {",
+    "    bb0: {",
+    "        check(overwrite: global main.G) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        global main.G = move _1;",
+    "        return;",
+    "    }",
+    "}",
+    // a store into another global keeps the fact: P
+    "fn main.g3(_1 (x): node mut* own, _2 (y): node mut* own) -> void {",
+    "    bb0: {",
+    "        del(move global main.G);",
+    "        global main.H = move _2;",
+    "        check(overwrite: global main.G) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        global main.G = move _1;",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[3] GLOBALS_VERDICTS = {"P", "U", "P"};
+
+// A held address `(*_a)` reads as the place of its `addr mut`.
+string[128] HELD = {
+    // del(b->items); b->items = new(...): P
+    "fn main.h1(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own mut*;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        _2 = addr mut((*_1).0);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_2)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_2) = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // no del: U
+    "fn main.h2(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own mut*;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _2 = addr mut((*_1).0);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_2)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_2) = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // a third read of the address: U
+    "fn main.h3(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own mut*;",
+    "    let _3: node mut* own;",
+    "    let _4: node mut* own mut*;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        _2 = addr mut((*_1).0);",
+    "        _4 = copy _2;",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_2)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_2) = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // the held store kills as a store into its place: PU
+    "fn main.h4(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own mut*;",
+    "    let _3: node mut* own;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        _2 = addr mut((*_1).0);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_2)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_2) = move _3;",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        (*_1).0 = move _4;",
+    "        return;",
+    "    }",
+    "}",
+    // n->next = move(l->head); l->head = move(n): the held address ends no freshness: PPP
+    "fn main.h5(_1 (l): node mut*) -> void {",
+    "    let _2 (n): node mut* own;",
+    "    let _3: node mut* own;",
+    "    let _4: node mut* own mut*;",
+    "    let _5: node mut* own;",
+    "    let _6: node mut* own mut*;",
+    "    let _7: node mut* own;",
+    "    bb0: {",
+    "        _2 = const zero node mut* own;",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: _2) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2 = move _3;",
+    "        _4 = addr mut((*_2).1);",
+    "        _5 = move (*_1).0;",
+    "        check(overwrite: (*_4)) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        (*_4) = move _5;",
+    "        _6 = addr mut((*_1).0);",
+    "        _7 = move _2;",
+    "        check(overwrite: (*_6)) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        (*_6) = move _7;",
+    "        return;",
+    "    }",
+    "}",
+    // the held address of a field makes no memory: P
+    "fn main.h6() -> void {",
+    "    let _1 (s): node;",
+    "    let _2: node mut* own mut*;",
+    "    let _3: node mut* own;",
+    "    let _4: void;",
+    "    bb0: {",
+    "        _1 = const zero node;",
+    "        _2 = addr mut(_1.0);",
+    "        _4 = call fn main.g();",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_2)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_2) = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // an address with a third read makes the local memory: U
+    "fn main.h7() -> void {",
+    "    let _1 (s): node;",
+    "    let _2: node mut* own mut*;",
+    "    let _3: node mut* own;",
+    "    let _4: void;",
+    "    let _5: node mut* own mut*;",
+    "    bb0: {",
+    "        _1 = const zero node;",
+    "        _2 = addr mut(_1.0);",
+    "        _5 = copy _2;",
+    "        _4 = call fn main.g();",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1.0 = move _3;",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[7] HELD_VERDICTS = {"P", "U", "U", "PU", "PPP", "P", "U"};
+
+// A fact holds at the start of a block when it holds at the end of each predecessor.
+string[124] JOIN = {
+    // both arms del: P
+    "fn main.j1(_1 (b): node mut*, _2 (c): bool) -> void {",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        del(move (*_1).0);",
+    "        goto bb3;",
+    "    }",
+    "    bb2: {",
+    "        del(move (*_1).0);",
+    "        goto bb3;",
+    "    }",
+    "    bb3: {",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        (*_1).0 = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // one arm only: U
+    "fn main.j2(_1 (b): node mut*, _2 (c): bool) -> void {",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        del(move (*_1).0);",
+    "        goto bb3;",
+    "    }",
+    "    bb2: {",
+    "        goto bb3;",
+    "    }",
+    "    bb3: {",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        (*_1).0 = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // a declaration in a loop whose body does not del the local: U
+    "fn main.j3(_1 (c): bool) -> void {",
+    "    let _2 (p): node mut* own;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _2 = const zero node mut* own;",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        switch(copy _1) -> [true: bb2, otherwise: bb4];",
+    "    }",
+    "    bb2: {",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: _2) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        _2 = move _3;",
+    "        goto bb1;",
+    "    }",
+    "    bb4: {",
+    "        return;",
+    "    }",
+    "}",
+    // the same loop with a del at the end of the body: P
+    "fn main.j4(_1 (c): bool) -> void {",
+    "    let _2 (p): node mut* own;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _2 = const zero node mut* own;",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        switch(copy _1) -> [true: bb2, otherwise: bb4];",
+    "    }",
+    "    bb2: {",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: _2) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        _2 = move _3;",
+    "        del(move _2);",
+    "        goto bb1;",
+    "    }",
+    "    bb4: {",
+    "        return;",
+    "    }",
+    "}",
+    // a block that no edge reaches: P
+    "fn main.j5() -> void {",
+    "    let _1 (p): node mut* own;",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        return;",
+    "    }",
+    "    bb1: {",
+    "        _2 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        _1 = move _2;",
+    "        return;",
+    "    }",
+    "}",
+    // the edge that a constant switch does not select: U
+    "fn main.j6(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        switch(const true) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        del(move (*_1).0);",
+    "        goto bb3;",
+    "    }",
+    "    bb2: {",
+    "        goto bb3;",
+    "    }",
+    "    bb3: {",
+    "        _2 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        (*_1).0 = move _2;",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[6] JOIN_VERDICTS = {"P", "U", "U", "P", "P", "U"};
+
+// The sets of more than one word, a function with no check, and a check that no fact can prove.
+string[444] BOUNDS = {
+    // 66 elements: the facts 63 and 64 stand at the two sides of a word, and only they lack a
+    // del: 66 verdicts
+    "fn main.b1(_1 (v): node mut* own[128] mut*) -> void {",
+    "    let _2: u64;",
+    "    let _3: u64;",
+    "    let _4: u64;",
+    "    let _5: u64;",
+    "    let _6: u64;",
+    "    let _7: u64;",
+    "    let _8: u64;",
+    "    let _9: u64;",
+    "    let _10: u64;",
+    "    let _11: u64;",
+    "    let _12: u64;",
+    "    let _13: u64;",
+    "    let _14: u64;",
+    "    let _15: u64;",
+    "    let _16: u64;",
+    "    let _17: u64;",
+    "    let _18: u64;",
+    "    let _19: u64;",
+    "    let _20: u64;",
+    "    let _21: u64;",
+    "    let _22: u64;",
+    "    let _23: u64;",
+    "    let _24: u64;",
+    "    let _25: u64;",
+    "    let _26: u64;",
+    "    let _27: u64;",
+    "    let _28: u64;",
+    "    let _29: u64;",
+    "    let _30: u64;",
+    "    let _31: u64;",
+    "    let _32: u64;",
+    "    let _33: u64;",
+    "    let _34: u64;",
+    "    let _35: u64;",
+    "    let _36: u64;",
+    "    let _37: u64;",
+    "    let _38: u64;",
+    "    let _39: u64;",
+    "    let _40: u64;",
+    "    let _41: u64;",
+    "    let _42: u64;",
+    "    let _43: u64;",
+    "    let _44: u64;",
+    "    let _45: u64;",
+    "    let _46: u64;",
+    "    let _47: u64;",
+    "    let _48: u64;",
+    "    let _49: u64;",
+    "    let _50: u64;",
+    "    let _51: u64;",
+    "    let _52: u64;",
+    "    let _53: u64;",
+    "    let _54: u64;",
+    "    let _55: u64;",
+    "    let _56: u64;",
+    "    let _57: u64;",
+    "    let _58: u64;",
+    "    let _59: u64;",
+    "    let _60: u64;",
+    "    let _61: u64;",
+    "    let _62: u64;",
+    "    let _63: u64;",
+    "    let _64: u64;",
+    "    let _65: u64;",
+    "    let _66: u64;",
+    "    let _67: u64;",
+    "    bb0: {",
+    "        _2 = const u64 0;",
+    "        del(move (*_1)[_2]);",
+    "        _3 = const u64 1;",
+    "        del(move (*_1)[_3]);",
+    "        _4 = const u64 2;",
+    "        del(move (*_1)[_4]);",
+    "        _5 = const u64 3;",
+    "        del(move (*_1)[_5]);",
+    "        _6 = const u64 4;",
+    "        del(move (*_1)[_6]);",
+    "        _7 = const u64 5;",
+    "        del(move (*_1)[_7]);",
+    "        _8 = const u64 6;",
+    "        del(move (*_1)[_8]);",
+    "        _9 = const u64 7;",
+    "        del(move (*_1)[_9]);",
+    "        _10 = const u64 8;",
+    "        del(move (*_1)[_10]);",
+    "        _11 = const u64 9;",
+    "        del(move (*_1)[_11]);",
+    "        _12 = const u64 10;",
+    "        del(move (*_1)[_12]);",
+    "        _13 = const u64 11;",
+    "        del(move (*_1)[_13]);",
+    "        _14 = const u64 12;",
+    "        del(move (*_1)[_14]);",
+    "        _15 = const u64 13;",
+    "        del(move (*_1)[_15]);",
+    "        _16 = const u64 14;",
+    "        del(move (*_1)[_16]);",
+    "        _17 = const u64 15;",
+    "        del(move (*_1)[_17]);",
+    "        _18 = const u64 16;",
+    "        del(move (*_1)[_18]);",
+    "        _19 = const u64 17;",
+    "        del(move (*_1)[_19]);",
+    "        _20 = const u64 18;",
+    "        del(move (*_1)[_20]);",
+    "        _21 = const u64 19;",
+    "        del(move (*_1)[_21]);",
+    "        _22 = const u64 20;",
+    "        del(move (*_1)[_22]);",
+    "        _23 = const u64 21;",
+    "        del(move (*_1)[_23]);",
+    "        _24 = const u64 22;",
+    "        del(move (*_1)[_24]);",
+    "        _25 = const u64 23;",
+    "        del(move (*_1)[_25]);",
+    "        _26 = const u64 24;",
+    "        del(move (*_1)[_26]);",
+    "        _27 = const u64 25;",
+    "        del(move (*_1)[_27]);",
+    "        _28 = const u64 26;",
+    "        del(move (*_1)[_28]);",
+    "        _29 = const u64 27;",
+    "        del(move (*_1)[_29]);",
+    "        _30 = const u64 28;",
+    "        del(move (*_1)[_30]);",
+    "        _31 = const u64 29;",
+    "        del(move (*_1)[_31]);",
+    "        _32 = const u64 30;",
+    "        del(move (*_1)[_32]);",
+    "        _33 = const u64 31;",
+    "        del(move (*_1)[_33]);",
+    "        _34 = const u64 32;",
+    "        del(move (*_1)[_34]);",
+    "        _35 = const u64 33;",
+    "        del(move (*_1)[_35]);",
+    "        _36 = const u64 34;",
+    "        del(move (*_1)[_36]);",
+    "        _37 = const u64 35;",
+    "        del(move (*_1)[_37]);",
+    "        _38 = const u64 36;",
+    "        del(move (*_1)[_38]);",
+    "        _39 = const u64 37;",
+    "        del(move (*_1)[_39]);",
+    "        _40 = const u64 38;",
+    "        del(move (*_1)[_40]);",
+    "        _41 = const u64 39;",
+    "        del(move (*_1)[_41]);",
+    "        _42 = const u64 40;",
+    "        del(move (*_1)[_42]);",
+    "        _43 = const u64 41;",
+    "        del(move (*_1)[_43]);",
+    "        _44 = const u64 42;",
+    "        del(move (*_1)[_44]);",
+    "        _45 = const u64 43;",
+    "        del(move (*_1)[_45]);",
+    "        _46 = const u64 44;",
+    "        del(move (*_1)[_46]);",
+    "        _47 = const u64 45;",
+    "        del(move (*_1)[_47]);",
+    "        _48 = const u64 46;",
+    "        del(move (*_1)[_48]);",
+    "        _49 = const u64 47;",
+    "        del(move (*_1)[_49]);",
+    "        _50 = const u64 48;",
+    "        del(move (*_1)[_50]);",
+    "        _51 = const u64 49;",
+    "        del(move (*_1)[_51]);",
+    "        _52 = const u64 50;",
+    "        del(move (*_1)[_52]);",
+    "        _53 = const u64 51;",
+    "        del(move (*_1)[_53]);",
+    "        _54 = const u64 52;",
+    "        del(move (*_1)[_54]);",
+    "        _55 = const u64 53;",
+    "        del(move (*_1)[_55]);",
+    "        _56 = const u64 54;",
+    "        del(move (*_1)[_56]);",
+    "        _57 = const u64 55;",
+    "        del(move (*_1)[_57]);",
+    "        _58 = const u64 56;",
+    "        del(move (*_1)[_58]);",
+    "        _59 = const u64 57;",
+    "        del(move (*_1)[_59]);",
+    "        _60 = const u64 58;",
+    "        del(move (*_1)[_60]);",
+    "        _61 = const u64 59;",
+    "        del(move (*_1)[_61]);",
+    "        _62 = const u64 60;",
+    "        del(move (*_1)[_62]);",
+    "        _63 = const u64 61;",
+    "        del(move (*_1)[_63]);",
+    "        _64 = const u64 62;",
+    "        del(move (*_1)[_64]);",
+    "        _65 = const u64 63;",
+    "        _66 = const u64 64;",
+    "        _67 = const u64 65;",
+    "        del(move (*_1)[_67]);",
+    "        check(overwrite: (*_1)[_2]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        check(overwrite: (*_1)[_3]) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        check(overwrite: (*_1)[_4]) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        check(overwrite: (*_1)[_5]) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        check(overwrite: (*_1)[_6]) -> bb5;",
+    "    }",
+    "    bb5: {",
+    "        check(overwrite: (*_1)[_7]) -> bb6;",
+    "    }",
+    "    bb6: {",
+    "        check(overwrite: (*_1)[_8]) -> bb7;",
+    "    }",
+    "    bb7: {",
+    "        check(overwrite: (*_1)[_9]) -> bb8;",
+    "    }",
+    "    bb8: {",
+    "        check(overwrite: (*_1)[_10]) -> bb9;",
+    "    }",
+    "    bb9: {",
+    "        check(overwrite: (*_1)[_11]) -> bb10;",
+    "    }",
+    "    bb10: {",
+    "        check(overwrite: (*_1)[_12]) -> bb11;",
+    "    }",
+    "    bb11: {",
+    "        check(overwrite: (*_1)[_13]) -> bb12;",
+    "    }",
+    "    bb12: {",
+    "        check(overwrite: (*_1)[_14]) -> bb13;",
+    "    }",
+    "    bb13: {",
+    "        check(overwrite: (*_1)[_15]) -> bb14;",
+    "    }",
+    "    bb14: {",
+    "        check(overwrite: (*_1)[_16]) -> bb15;",
+    "    }",
+    "    bb15: {",
+    "        check(overwrite: (*_1)[_17]) -> bb16;",
+    "    }",
+    "    bb16: {",
+    "        check(overwrite: (*_1)[_18]) -> bb17;",
+    "    }",
+    "    bb17: {",
+    "        check(overwrite: (*_1)[_19]) -> bb18;",
+    "    }",
+    "    bb18: {",
+    "        check(overwrite: (*_1)[_20]) -> bb19;",
+    "    }",
+    "    bb19: {",
+    "        check(overwrite: (*_1)[_21]) -> bb20;",
+    "    }",
+    "    bb20: {",
+    "        check(overwrite: (*_1)[_22]) -> bb21;",
+    "    }",
+    "    bb21: {",
+    "        check(overwrite: (*_1)[_23]) -> bb22;",
+    "    }",
+    "    bb22: {",
+    "        check(overwrite: (*_1)[_24]) -> bb23;",
+    "    }",
+    "    bb23: {",
+    "        check(overwrite: (*_1)[_25]) -> bb24;",
+    "    }",
+    "    bb24: {",
+    "        check(overwrite: (*_1)[_26]) -> bb25;",
+    "    }",
+    "    bb25: {",
+    "        check(overwrite: (*_1)[_27]) -> bb26;",
+    "    }",
+    "    bb26: {",
+    "        check(overwrite: (*_1)[_28]) -> bb27;",
+    "    }",
+    "    bb27: {",
+    "        check(overwrite: (*_1)[_29]) -> bb28;",
+    "    }",
+    "    bb28: {",
+    "        check(overwrite: (*_1)[_30]) -> bb29;",
+    "    }",
+    "    bb29: {",
+    "        check(overwrite: (*_1)[_31]) -> bb30;",
+    "    }",
+    "    bb30: {",
+    "        check(overwrite: (*_1)[_32]) -> bb31;",
+    "    }",
+    "    bb31: {",
+    "        check(overwrite: (*_1)[_33]) -> bb32;",
+    "    }",
+    "    bb32: {",
+    "        check(overwrite: (*_1)[_34]) -> bb33;",
+    "    }",
+    "    bb33: {",
+    "        check(overwrite: (*_1)[_35]) -> bb34;",
+    "    }",
+    "    bb34: {",
+    "        check(overwrite: (*_1)[_36]) -> bb35;",
+    "    }",
+    "    bb35: {",
+    "        check(overwrite: (*_1)[_37]) -> bb36;",
+    "    }",
+    "    bb36: {",
+    "        check(overwrite: (*_1)[_38]) -> bb37;",
+    "    }",
+    "    bb37: {",
+    "        check(overwrite: (*_1)[_39]) -> bb38;",
+    "    }",
+    "    bb38: {",
+    "        check(overwrite: (*_1)[_40]) -> bb39;",
+    "    }",
+    "    bb39: {",
+    "        check(overwrite: (*_1)[_41]) -> bb40;",
+    "    }",
+    "    bb40: {",
+    "        check(overwrite: (*_1)[_42]) -> bb41;",
+    "    }",
+    "    bb41: {",
+    "        check(overwrite: (*_1)[_43]) -> bb42;",
+    "    }",
+    "    bb42: {",
+    "        check(overwrite: (*_1)[_44]) -> bb43;",
+    "    }",
+    "    bb43: {",
+    "        check(overwrite: (*_1)[_45]) -> bb44;",
+    "    }",
+    "    bb44: {",
+    "        check(overwrite: (*_1)[_46]) -> bb45;",
+    "    }",
+    "    bb45: {",
+    "        check(overwrite: (*_1)[_47]) -> bb46;",
+    "    }",
+    "    bb46: {",
+    "        check(overwrite: (*_1)[_48]) -> bb47;",
+    "    }",
+    "    bb47: {",
+    "        check(overwrite: (*_1)[_49]) -> bb48;",
+    "    }",
+    "    bb48: {",
+    "        check(overwrite: (*_1)[_50]) -> bb49;",
+    "    }",
+    "    bb49: {",
+    "        check(overwrite: (*_1)[_51]) -> bb50;",
+    "    }",
+    "    bb50: {",
+    "        check(overwrite: (*_1)[_52]) -> bb51;",
+    "    }",
+    "    bb51: {",
+    "        check(overwrite: (*_1)[_53]) -> bb52;",
+    "    }",
+    "    bb52: {",
+    "        check(overwrite: (*_1)[_54]) -> bb53;",
+    "    }",
+    "    bb53: {",
+    "        check(overwrite: (*_1)[_55]) -> bb54;",
+    "    }",
+    "    bb54: {",
+    "        check(overwrite: (*_1)[_56]) -> bb55;",
+    "    }",
+    "    bb55: {",
+    "        check(overwrite: (*_1)[_57]) -> bb56;",
+    "    }",
+    "    bb56: {",
+    "        check(overwrite: (*_1)[_58]) -> bb57;",
+    "    }",
+    "    bb57: {",
+    "        check(overwrite: (*_1)[_59]) -> bb58;",
+    "    }",
+    "    bb58: {",
+    "        check(overwrite: (*_1)[_60]) -> bb59;",
+    "    }",
+    "    bb59: {",
+    "        check(overwrite: (*_1)[_61]) -> bb60;",
+    "    }",
+    "    bb60: {",
+    "        check(overwrite: (*_1)[_62]) -> bb61;",
+    "    }",
+    "    bb61: {",
+    "        check(overwrite: (*_1)[_63]) -> bb62;",
+    "    }",
+    "    bb62: {",
+    "        check(overwrite: (*_1)[_64]) -> bb63;",
+    "    }",
+    "    bb63: {",
+    "        check(overwrite: (*_1)[_65]) -> bb64;",
+    "    }",
+    "    bb64: {",
+    "        check(overwrite: (*_1)[_66]) -> bb65;",
+    "    }",
+    "    bb65: {",
+    "        check(overwrite: (*_1)[_67]) -> bb66;",
+    "    }",
+    "    bb66: {",
+    "        return;",
+    "    }",
+    "}",
+    // no check: no verdict
+    "fn main.b2(_1 (b): node mut*) -> void {",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        return;",
+    "    }",
+    "}",
+    // a check through two derefs, whose place is not tracked, so no fact exists: U
+    "fn main.b3(_1 (pp): node mut* mut*) -> void {",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        del(move (*(*_1)).0);",
+    "        _2 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*(*_1)).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*(*_1)).0 = move _2;",
+    "        return;",
+    "    }",
+    "}",
+    // two checks of one place share one fact: PP
+    "fn main.b4(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        _2 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _2;",
+    "        del(move (*_1).0);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        (*_1).0 = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // a check with no other statement, in the entry block: U
+    "fn main.b5(_1 (b): node mut*) -> void {",
+    "    bb0: {",
+    "        check(overwrite: (*_1).1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[5] BOUNDS_VERDICTS = {
+    "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPUUP", "", "U", "PP", "U",
+};
+
+// Two constant keys name one element when their values are equal.
+string[81] CONSTANTS = {
+    // the largest u64 in both keys: P
+    "fn main.n1(_1 (v): node mut* own[2] mut*) -> void {",
+    "    let _2: u64;",
+    "    let _3: u64;",
+    "    bb0: {",
+    "        _2 = const u64 0xFFFFFFFFFFFFFFFF;",
+    "        del(move (*_1)[_2]);",
+    "        _3 = const u64 0xFFFFFFFFFFFFFFFF;",
+    "        check(overwrite: (*_1)[_3]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // the largest u64 and a cast of -1: two values, so no proof: U
+    "fn main.n2(_1 (v): node mut* own[2] mut*) -> void {",
+    "    let _2: u64;",
+    "    let _3: u64;",
+    "    bb0: {",
+    "        _2 = cast<u64>(const i64 -1);",
+    "        del(move (*_1)[_2]);",
+    "        _3 = const u64 0xFFFFFFFFFFFFFFFF;",
+    "        check(overwrite: (*_1)[_3]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // a cast of u8 255 and u64 255: P
+    "fn main.n3(_1 (v): node mut* own[2] mut*) -> void {",
+    "    let _2: u64;",
+    "    let _3: u64;",
+    "    bb0: {",
+    "        _2 = cast<u64>(const u8 255);",
+    "        del(move (*_1)[_2]);",
+    "        _3 = const u64 255;",
+    "        check(overwrite: (*_1)[_3]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // zero in both keys: P
+    "fn main.n4(_1 (v): node mut* own[2] mut*) -> void {",
+    "    let _2: u64;",
+    "    let _3: u64;",
+    "    bb0: {",
+    "        _2 = const u64 0;",
+    "        del(move (*_1)[_2]);",
+    "        _3 = cast<u64>(const i32 0);",
+    "        check(overwrite: (*_1)[_3]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // two negative constants of two types: P
+    "fn main.n6(_1 (v): node mut* own[2] mut*) -> void {",
+    "    let _2: u64;",
+    "    let _3: u64;",
+    "    bb0: {",
+    "        _2 = cast<u64>(const i8 -1);",
+    "        del(move (*_1)[_2]);",
+    "        _3 = cast<u64>(const i64 -1);",
+    "        check(overwrite: (*_1)[_3]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // a store into an element with another constant key kills the fact: the indexes are not
+    // separate: U
+    "fn main.n5(_1 (v): node mut* own[2] mut*) -> void {",
+    "    let _2: u64;",
+    "    let _3: u64;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        _2 = const u64 0;",
+    "        del(move (*_1)[_2]);",
+    "        _3 = const u64 1;",
+    "        _4 = alloc<node>(const u64 1);",
+    "        (*_1)[_3] = move _4;",
+    "        check(overwrite: (*_1)[_2]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[6] CONSTANTS_VERDICTS = {"P", "U", "P", "P", "P", "U"};
+
+// A loop carries a kill, a store into a key local and an end of freshness around its back edge.
+string[198] LOOPS = {
+    // a copy of the key before the loop and a store into the key in its body: U
+    "fn main.l1(_1 (v): node mut*, _2 (k): u64, _3 (c): bool) -> void {",
+    "    let _4: u64;",
+    "    let _5: u64;",
+    "    bb0: {",
+    "        _4 = copy _2;",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        switch(copy _3) -> [true: bb2, otherwise: bb3];",
+    "    }",
+    "    bb2: {",
+    "        _2 = const u64 1;",
+    "        goto bb1;",
+    "    }",
+    "    bb3: {",
+    "        _5 = copy _2;",
+    "        del(move (*_1).3[_5]);",
+    "        check(overwrite: (*_1).3[_4]) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        return;",
+    "    }",
+    "}",
+    // the same loop with no store into the key: P
+    "fn main.l2(_1 (v): node mut*, _2 (k): u64, _3 (c): bool) -> void {",
+    "    let _4: u64;",
+    "    let _5: u64;",
+    "    let _6: u64;",
+    "    bb0: {",
+    "        _4 = copy _2;",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        switch(copy _3) -> [true: bb2, otherwise: bb3];",
+    "    }",
+    "    bb2: {",
+    "        _6 = const u64 1;",
+    "        goto bb1;",
+    "    }",
+    "    bb3: {",
+    "        _5 = copy _2;",
+    "        del(move (*_1).3[_5]);",
+    "        check(overwrite: (*_1).3[_4]) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        return;",
+    "    }",
+    "}",
+    // a fresh pointer in the loop: a store through a parameter keeps its fact: P
+    "fn main.l3(_1 (c): bool, _2 (q): node mut*) -> void {",
+    "    let _3 (n): node mut* own;",
+    "    let _4: node mut* own;",
+    "    let _5: node mut* own;",
+    "    bb0: {",
+    "        _3 = const zero node mut* own;",
+    "        _4 = alloc<node>(const u64 1);",
+    "        _3 = move _4;",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        switch(copy _1) -> [true: bb2, otherwise: bb4];",
+    "    }",
+    "    bb2: {",
+    "        del(move (*_3).1);",
+    "        _5 = alloc<node>(const u64 1);",
+    "        (*_2).0 = move _5;",
+    "        check(overwrite: (*_3).1) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        goto bb1;",
+    "    }",
+    "    bb4: {",
+    "        del(move _3);",
+    "        return;",
+    "    }",
+    "}",
+    // the same loop with a copy of the pointer on the back edge: U
+    "fn main.l4(_1 (c): bool, _2 (q): node mut*) -> void {",
+    "    let _3 (n): node mut* own;",
+    "    let _4: node mut* own;",
+    "    let _5: node mut* own;",
+    "    let _6: node mut*;",
+    "    bb0: {",
+    "        _3 = const zero node mut* own;",
+    "        _4 = alloc<node>(const u64 1);",
+    "        _3 = move _4;",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        switch(copy _1) -> [true: bb2, otherwise: bb4];",
+    "    }",
+    "    bb2: {",
+    "        del(move (*_3).1);",
+    "        _5 = alloc<node>(const u64 1);",
+    "        (*_2).0 = move _5;",
+    "        check(overwrite: (*_3).1) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        _6 = copy _3;",
+    "        goto bb1;",
+    "    }",
+    "    bb4: {",
+    "        del(move _3);",
+    "        return;",
+    "    }",
+    "}",
+    // a loop whose body deletes the local on one path only: U
+    "fn main.l5(_1 (c): bool, _2 (d): bool) -> void {",
+    "    let _3 (p): node mut* own;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        _3 = const zero node mut* own;",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        switch(copy _1) -> [true: bb2, otherwise: bb6];",
+    "    }",
+    "    bb2: {",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: _3) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        _3 = move _4;",
+    "        switch(copy _2) -> [true: bb4, otherwise: bb5];",
+    "    }",
+    "    bb4: {",
+    "        del(move _3);",
+    "        goto bb1;",
+    "    }",
+    "    bb5: {",
+    "        goto bb1;",
+    "    }",
+    "    bb6: {",
+    "        return;",
+    "    }",
+    "}",
+    // a loop whose body deletes the place before each check: P
+    "fn main.l8(_1 (b): node mut*, _2 (c): bool) -> void {",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        switch(copy _2) -> [true: bb2, otherwise: bb4];",
+    "    }",
+    "    bb2: {",
+    "        del(move (*_1).0);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        (*_1).0 = move _3;",
+    "        goto bb1;",
+    "    }",
+    "    bb4: {",
+    "        return;",
+    "    }",
+    "}",
+    // a switch of three arms, each with a del: P
+    "fn main.l6(_1 (b): node mut*, _2 (k): i32) -> void {",
+    "    bb0: {",
+    "        switch(copy _2) -> [i32 0: bb1, i32 1: bb2, otherwise: bb3];",
+    "    }",
+    "    bb1: {",
+    "        del(move (*_1).0);",
+    "        goto bb4;",
+    "    }",
+    "    bb2: {",
+    "        del(move (*_1).0);",
+    "        goto bb4;",
+    "    }",
+    "    bb3: {",
+    "        del(move (*_1).0);",
+    "        goto bb4;",
+    "    }",
+    "    bb4: {",
+    "        check(overwrite: (*_1).0) -> bb5;",
+    "    }",
+    "    bb5: {",
+    "        return;",
+    "    }",
+    "}",
+    // a switch of three arms, one with no del: U
+    "fn main.l7(_1 (b): node mut*, _2 (k): i32) -> void {",
+    "    bb0: {",
+    "        switch(copy _2) -> [i32 0: bb1, i32 1: bb2, otherwise: bb3];",
+    "    }",
+    "    bb1: {",
+    "        del(move (*_1).0);",
+    "        goto bb4;",
+    "    }",
+    "    bb2: {",
+    "        goto bb4;",
+    "    }",
+    "    bb3: {",
+    "        del(move (*_1).0);",
+    "        goto bb4;",
+    "    }",
+    "    bb4: {",
+    "        check(overwrite: (*_1).0) -> bb5;",
+    "    }",
+    "    bb5: {",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[8] LOOPS_VERDICTS = {"U", "P", "P", "U", "U", "P", "P", "U"};
+
+// Structs as places: a pointee moved whole, an aggregate result and a global struct.
+string[86] AGGREGATES = {
+    // a move of a pointee makes its fields empty, but no element of its span: PPU
+    "fn main.a1(_1 (b): node mut*, _2 (k): u64) -> void {",
+    "    let _3: node;",
+    "    bb0: {",
+    "        _3 = move (*_1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        check(overwrite: (*_1).2[_2]) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        check(overwrite: (*_1).3[_2]) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        return;",
+    "    }",
+    "}",
+    // an aggregate result is memory: a call kills its fact: U
+    "fn main.a2() -> node {",
+    "    let _1: void;",
+    "    bb0: {",
+    "        _0 = const zero node;",
+    "        _1 = call fn main.g();",
+    "        check(overwrite: _0.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // the same result with no call: P
+    "fn main.a3() -> node {",
+    "    bb0: {",
+    "        _0 = const zero node;",
+    "        check(overwrite: _0.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // a store into a separate field of a global struct keeps the fact: P
+    "fn main.a4(_1 (x): node mut* own) -> void {",
+    "    bb0: {",
+    "        del(move global main.S.0);",
+    "        global main.S.1 = move _1;",
+    "        check(overwrite: global main.S.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // a store into another global keeps it: P
+    "fn main.a5(_1 (x): node mut* own) -> void {",
+    "    bb0: {",
+    "        del(move global main.S.0);",
+    "        global main.G = move _1;",
+    "        check(overwrite: global main.S.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // a store through a pointer kills the fact of a global: U
+    "fn main.a6(_1 (b): node mut*, _2 (x): node mut* own) -> void {",
+    "    bb0: {",
+    "        del(move global main.S.0);",
+    "        (*_1).1 = move _2;",
+    "        check(overwrite: global main.S.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // del through a fresh pointer, then a call: the call kills the fact: PU
+    "fn main.a7() -> void {",
+    "    let _1 (n): node mut* own;",
+    "    let _2: node mut* own;",
+    "    let _3: void;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own;",
+    "        _2 = alloc<node>(const u64 1);",
+    "        _1 = move _2;",
+    "        del(move (*_1).1);",
+    "        check(overwrite: (*_1).1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _3 = call fn main.g();",
+    "        check(overwrite: (*_1).1) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[7] AGGREGATES_VERDICTS = {"PPU", "U", "P", "P", "P", "U", "PU"};
+
+// Each kind of store against each kind of fact, in the order F1 to F7.
+string[689] KILL_MATRIX = {
+    // no store: each fact holds: PPPPPPP
+    "fn main.x0(_1 (p): node mut*, _2 (q): node mut*, _3 (x): node mut* own,",
+    "    _4 (k): u64) -> void {",
+    "    let _5 (a): node;",
+    "    let _6 (m): node;",
+    "    let _7 (n): node mut* own;",
+    "    let _8: node mut* own;",
+    "    let _9: node*;",
+    "    let _10: void;",
+    "    bb0: {",
+    "        _5 = const zero node;",
+    "        _6 = const zero node;",
+    "        _9 = addr(_6);",
+    "        _7 = const zero node mut* own;",
+    "        _8 = alloc<node>(const u64 1);",
+    "        _7 = move _8;",
+    "        del(move global main.G);",
+    "        del(move (*_1).0);",
+    "        del(move (*_7).0);",
+    "        del(move (*_1).3[_4]);",
+    "        del(move (*_2).0);",
+    "        check(overwrite: _5.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        check(overwrite: _6.0) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        check(overwrite: global main.G) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        check(overwrite: (*_1).0) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        check(overwrite: (*_7).0) -> bb5;",
+    "    }",
+    "    bb5: {",
+    "        check(overwrite: (*_1).3[_4]) -> bb6;",
+    "    }",
+    "    bb6: {",
+    "        check(overwrite: (*_2).0) -> bb7;",
+    "    }",
+    "    bb7: {",
+    "        del(move _7);",
+    "        return;",
+    "    }",
+    "}",
+    // a separate field of a local that is no memory: PPPPPPP
+    "fn main.x1(_1 (p): node mut*, _2 (q): node mut*, _3 (x): node mut* own,",
+    "    _4 (k): u64) -> void {",
+    "    let _5 (a): node;",
+    "    let _6 (m): node;",
+    "    let _7 (n): node mut* own;",
+    "    let _8: node mut* own;",
+    "    let _9: node*;",
+    "    let _10: void;",
+    "    bb0: {",
+    "        _5 = const zero node;",
+    "        _6 = const zero node;",
+    "        _9 = addr(_6);",
+    "        _7 = const zero node mut* own;",
+    "        _8 = alloc<node>(const u64 1);",
+    "        _7 = move _8;",
+    "        del(move global main.G);",
+    "        del(move (*_1).0);",
+    "        del(move (*_7).0);",
+    "        del(move (*_1).3[_4]);",
+    "        del(move (*_2).0);",
+    "        _5.1 = move _3;",
+    "        check(overwrite: _5.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        check(overwrite: _6.0) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        check(overwrite: global main.G) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        check(overwrite: (*_1).0) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        check(overwrite: (*_7).0) -> bb5;",
+    "    }",
+    "    bb5: {",
+    "        check(overwrite: (*_1).3[_4]) -> bb6;",
+    "    }",
+    "    bb6: {",
+    "        check(overwrite: (*_2).0) -> bb7;",
+    "    }",
+    "    bb7: {",
+    "        del(move _7);",
+    "        return;",
+    "    }",
+    "}",
+    // a separate field of a memory local: it keeps the global: PPPUPUU
+    "fn main.x2(_1 (p): node mut*, _2 (q): node mut*, _3 (x): node mut* own,",
+    "    _4 (k): u64) -> void {",
+    "    let _5 (a): node;",
+    "    let _6 (m): node;",
+    "    let _7 (n): node mut* own;",
+    "    let _8: node mut* own;",
+    "    let _9: node*;",
+    "    let _10: void;",
+    "    bb0: {",
+    "        _5 = const zero node;",
+    "        _6 = const zero node;",
+    "        _9 = addr(_6);",
+    "        _7 = const zero node mut* own;",
+    "        _8 = alloc<node>(const u64 1);",
+    "        _7 = move _8;",
+    "        del(move global main.G);",
+    "        del(move (*_1).0);",
+    "        del(move (*_7).0);",
+    "        del(move (*_1).3[_4]);",
+    "        del(move (*_2).0);",
+    "        _6.1 = move _3;",
+    "        check(overwrite: _5.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        check(overwrite: _6.0) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        check(overwrite: global main.G) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        check(overwrite: (*_1).0) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        check(overwrite: (*_7).0) -> bb5;",
+    "    }",
+    "    bb5: {",
+    "        check(overwrite: (*_1).3[_4]) -> bb6;",
+    "    }",
+    "    bb6: {",
+    "        check(overwrite: (*_2).0) -> bb7;",
+    "    }",
+    "    bb7: {",
+    "        del(move _7);",
+    "        return;",
+    "    }",
+    "}",
+    // another global: it keeps the memory local: PPPUPUU
+    "fn main.x3(_1 (p): node mut*, _2 (q): node mut*, _3 (x): node mut* own,",
+    "    _4 (k): u64) -> void {",
+    "    let _5 (a): node;",
+    "    let _6 (m): node;",
+    "    let _7 (n): node mut* own;",
+    "    let _8: node mut* own;",
+    "    let _9: node*;",
+    "    let _10: void;",
+    "    bb0: {",
+    "        _5 = const zero node;",
+    "        _6 = const zero node;",
+    "        _9 = addr(_6);",
+    "        _7 = const zero node mut* own;",
+    "        _8 = alloc<node>(const u64 1);",
+    "        _7 = move _8;",
+    "        del(move global main.G);",
+    "        del(move (*_1).0);",
+    "        del(move (*_7).0);",
+    "        del(move (*_1).3[_4]);",
+    "        del(move (*_2).0);",
+    "        global main.H = move _3;",
+    "        check(overwrite: _5.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        check(overwrite: _6.0) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        check(overwrite: global main.G) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        check(overwrite: (*_1).0) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        check(overwrite: (*_7).0) -> bb5;",
+    "    }",
+    "    bb5: {",
+    "        check(overwrite: (*_1).3[_4]) -> bb6;",
+    "    }",
+    "    bb6: {",
+    "        check(overwrite: (*_2).0) -> bb7;",
+    "    }",
+    "    bb7: {",
+    "        del(move _7);",
+    "        return;",
+    "    }",
+    "}",
+    // a separate field through the parameter: PUUPPUU
+    "fn main.x4(_1 (p): node mut*, _2 (q): node mut*, _3 (x): node mut* own,",
+    "    _4 (k): u64) -> void {",
+    "    let _5 (a): node;",
+    "    let _6 (m): node;",
+    "    let _7 (n): node mut* own;",
+    "    let _8: node mut* own;",
+    "    let _9: node*;",
+    "    let _10: void;",
+    "    bb0: {",
+    "        _5 = const zero node;",
+    "        _6 = const zero node;",
+    "        _9 = addr(_6);",
+    "        _7 = const zero node mut* own;",
+    "        _8 = alloc<node>(const u64 1);",
+    "        _7 = move _8;",
+    "        del(move global main.G);",
+    "        del(move (*_1).0);",
+    "        del(move (*_7).0);",
+    "        del(move (*_1).3[_4]);",
+    "        del(move (*_2).0);",
+    "        (*_1).1 = move _3;",
+    "        check(overwrite: _5.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        check(overwrite: _6.0) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        check(overwrite: global main.G) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        check(overwrite: (*_1).0) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        check(overwrite: (*_7).0) -> bb5;",
+    "    }",
+    "    bb5: {",
+    "        check(overwrite: (*_1).3[_4]) -> bb6;",
+    "    }",
+    "    bb6: {",
+    "        check(overwrite: (*_2).0) -> bb7;",
+    "    }",
+    "    bb7: {",
+    "        del(move _7);",
+    "        return;",
+    "    }",
+    "}",
+    // a separate field through the fresh pointer: PPPPPPP
+    "fn main.x5(_1 (p): node mut*, _2 (q): node mut*, _3 (x): node mut* own,",
+    "    _4 (k): u64) -> void {",
+    "    let _5 (a): node;",
+    "    let _6 (m): node;",
+    "    let _7 (n): node mut* own;",
+    "    let _8: node mut* own;",
+    "    let _9: node*;",
+    "    let _10: void;",
+    "    bb0: {",
+    "        _5 = const zero node;",
+    "        _6 = const zero node;",
+    "        _9 = addr(_6);",
+    "        _7 = const zero node mut* own;",
+    "        _8 = alloc<node>(const u64 1);",
+    "        _7 = move _8;",
+    "        del(move global main.G);",
+    "        del(move (*_1).0);",
+    "        del(move (*_7).0);",
+    "        del(move (*_1).3[_4]);",
+    "        del(move (*_2).0);",
+    "        (*_7).1 = move _3;",
+    "        check(overwrite: _5.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        check(overwrite: _6.0) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        check(overwrite: global main.G) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        check(overwrite: (*_1).0) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        check(overwrite: (*_7).0) -> bb5;",
+    "    }",
+    "    bb5: {",
+    "        check(overwrite: (*_1).3[_4]) -> bb6;",
+    "    }",
+    "    bb6: {",
+    "        check(overwrite: (*_2).0) -> bb7;",
+    "    }",
+    "    bb7: {",
+    "        del(move _7);",
+    "        return;",
+    "    }",
+    "}",
+    // the element of the span through the parameter: PUUUPUU
+    "fn main.x6(_1 (p): node mut*, _2 (q): node mut*, _3 (x): node mut* own,",
+    "    _4 (k): u64) -> void {",
+    "    let _5 (a): node;",
+    "    let _6 (m): node;",
+    "    let _7 (n): node mut* own;",
+    "    let _8: node mut* own;",
+    "    let _9: node*;",
+    "    let _10: void;",
+    "    bb0: {",
+    "        _5 = const zero node;",
+    "        _6 = const zero node;",
+    "        _9 = addr(_6);",
+    "        _7 = const zero node mut* own;",
+    "        _8 = alloc<node>(const u64 1);",
+    "        _7 = move _8;",
+    "        del(move global main.G);",
+    "        del(move (*_1).0);",
+    "        del(move (*_7).0);",
+    "        del(move (*_1).3[_4]);",
+    "        del(move (*_2).0);",
+    "        (*_1).3[_4] = move _3;",
+    "        check(overwrite: _5.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        check(overwrite: _6.0) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        check(overwrite: global main.G) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        check(overwrite: (*_1).0) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        check(overwrite: (*_7).0) -> bb5;",
+    "    }",
+    "    bb5: {",
+    "        check(overwrite: (*_1).3[_4]) -> bb6;",
+    "    }",
+    "    bb6: {",
+    "        check(overwrite: (*_2).0) -> bb7;",
+    "    }",
+    "    bb7: {",
+    "        del(move _7);",
+    "        return;",
+    "    }",
+    "}",
+    // a separate field through the other parameter: PUUUPUP
+    "fn main.x7(_1 (p): node mut*, _2 (q): node mut*, _3 (x): node mut* own,",
+    "    _4 (k): u64) -> void {",
+    "    let _5 (a): node;",
+    "    let _6 (m): node;",
+    "    let _7 (n): node mut* own;",
+    "    let _8: node mut* own;",
+    "    let _9: node*;",
+    "    let _10: void;",
+    "    bb0: {",
+    "        _5 = const zero node;",
+    "        _6 = const zero node;",
+    "        _9 = addr(_6);",
+    "        _7 = const zero node mut* own;",
+    "        _8 = alloc<node>(const u64 1);",
+    "        _7 = move _8;",
+    "        del(move global main.G);",
+    "        del(move (*_1).0);",
+    "        del(move (*_7).0);",
+    "        del(move (*_1).3[_4]);",
+    "        del(move (*_2).0);",
+    "        (*_2).1 = move _3;",
+    "        check(overwrite: _5.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        check(overwrite: _6.0) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        check(overwrite: global main.G) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        check(overwrite: (*_1).0) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        check(overwrite: (*_7).0) -> bb5;",
+    "    }",
+    "    bb5: {",
+    "        check(overwrite: (*_1).3[_4]) -> bb6;",
+    "    }",
+    "    bb6: {",
+    "        check(overwrite: (*_2).0) -> bb7;",
+    "    }",
+    "    bb7: {",
+    "        del(move _7);",
+    "        return;",
+    "    }",
+    "}",
+    // a call: PUUUUUU
+    "fn main.x8(_1 (p): node mut*, _2 (q): node mut*, _3 (x): node mut* own,",
+    "    _4 (k): u64) -> void {",
+    "    let _5 (a): node;",
+    "    let _6 (m): node;",
+    "    let _7 (n): node mut* own;",
+    "    let _8: node mut* own;",
+    "    let _9: node*;",
+    "    let _10: void;",
+    "    bb0: {",
+    "        _5 = const zero node;",
+    "        _6 = const zero node;",
+    "        _9 = addr(_6);",
+    "        _7 = const zero node mut* own;",
+    "        _8 = alloc<node>(const u64 1);",
+    "        _7 = move _8;",
+    "        del(move global main.G);",
+    "        del(move (*_1).0);",
+    "        del(move (*_7).0);",
+    "        del(move (*_1).3[_4]);",
+    "        del(move (*_2).0);",
+    "        _10 = call fn main.g();",
+    "        check(overwrite: _5.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        check(overwrite: _6.0) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        check(overwrite: global main.G) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        check(overwrite: (*_1).0) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        check(overwrite: (*_7).0) -> bb5;",
+    "    }",
+    "    bb5: {",
+    "        check(overwrite: (*_1).3[_4]) -> bb6;",
+    "    }",
+    "    bb6: {",
+    "        check(overwrite: (*_2).0) -> bb7;",
+    "    }",
+    "    bb7: {",
+    "        del(move _7);",
+    "        return;",
+    "    }",
+    "}",
+    // a store into the parameter itself: PPPUPUP
+    "fn main.x9(_1 (p): node mut*, _2 (q): node mut*, _3 (x): node mut* own,",
+    "    _4 (k): u64) -> void {",
+    "    let _5 (a): node;",
+    "    let _6 (m): node;",
+    "    let _7 (n): node mut* own;",
+    "    let _8: node mut* own;",
+    "    let _9: node*;",
+    "    let _10: void;",
+    "    bb0: {",
+    "        _5 = const zero node;",
+    "        _6 = const zero node;",
+    "        _9 = addr(_6);",
+    "        _7 = const zero node mut* own;",
+    "        _8 = alloc<node>(const u64 1);",
+    "        _7 = move _8;",
+    "        del(move global main.G);",
+    "        del(move (*_1).0);",
+    "        del(move (*_7).0);",
+    "        del(move (*_1).3[_4]);",
+    "        del(move (*_2).0);",
+    "        _1 = copy _2;",
+    "        check(overwrite: _5.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        check(overwrite: _6.0) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        check(overwrite: global main.G) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        check(overwrite: (*_1).0) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        check(overwrite: (*_7).0) -> bb5;",
+    "    }",
+    "    bb5: {",
+    "        check(overwrite: (*_1).3[_4]) -> bb6;",
+    "    }",
+    "    bb6: {",
+    "        check(overwrite: (*_2).0) -> bb7;",
+    "    }",
+    "    bb7: {",
+    "        del(move _7);",
+    "        return;",
+    "    }",
+    "}",
+    // a store into the key local: PPPPPUP
+    "fn main.x10(_1 (p): node mut*, _2 (q): node mut*, _3 (x): node mut* own,",
+    "    _4 (k): u64) -> void {",
+    "    let _5 (a): node;",
+    "    let _6 (m): node;",
+    "    let _7 (n): node mut* own;",
+    "    let _8: node mut* own;",
+    "    let _9: node*;",
+    "    let _10: void;",
+    "    bb0: {",
+    "        _5 = const zero node;",
+    "        _6 = const zero node;",
+    "        _9 = addr(_6);",
+    "        _7 = const zero node mut* own;",
+    "        _8 = alloc<node>(const u64 1);",
+    "        _7 = move _8;",
+    "        del(move global main.G);",
+    "        del(move (*_1).0);",
+    "        del(move (*_7).0);",
+    "        del(move (*_1).3[_4]);",
+    "        del(move (*_2).0);",
+    "        _4 = const u64 1;",
+    "        check(overwrite: _5.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        check(overwrite: _6.0) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        check(overwrite: global main.G) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        check(overwrite: (*_1).0) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        check(overwrite: (*_7).0) -> bb5;",
+    "    }",
+    "    bb5: {",
+    "        check(overwrite: (*_1).3[_4]) -> bb6;",
+    "    }",
+    "    bb6: {",
+    "        check(overwrite: (*_2).0) -> bb7;",
+    "    }",
+    "    bb7: {",
+    "        del(move _7);",
+    "        return;",
+    "    }",
+    "}",
+    // a store of null into F4: the store kills, then makes F4 empty: PUUPPUU
+    "fn main.x11(_1 (p): node mut*, _2 (q): node mut*, _3 (x): node mut* own,",
+    "    _4 (k): u64) -> void {",
+    "    let _5 (a): node;",
+    "    let _6 (m): node;",
+    "    let _7 (n): node mut* own;",
+    "    let _8: node mut* own;",
+    "    let _9: node*;",
+    "    let _10: void;",
+    "    bb0: {",
+    "        _5 = const zero node;",
+    "        _6 = const zero node;",
+    "        _9 = addr(_6);",
+    "        _7 = const zero node mut* own;",
+    "        _8 = alloc<node>(const u64 1);",
+    "        _7 = move _8;",
+    "        del(move global main.G);",
+    "        del(move (*_1).0);",
+    "        del(move (*_7).0);",
+    "        del(move (*_1).3[_4]);",
+    "        del(move (*_2).0);",
+    "        (*_1).0 = const null node mut* own;",
+    "        check(overwrite: _5.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        check(overwrite: _6.0) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        check(overwrite: global main.G) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        check(overwrite: (*_1).0) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        check(overwrite: (*_7).0) -> bb5;",
+    "    }",
+    "    bb5: {",
+    "        check(overwrite: (*_1).3[_4]) -> bb6;",
+    "    }",
+    "    bb6: {",
+    "        check(overwrite: (*_2).0) -> bb7;",
+    "    }",
+    "    bb7: {",
+    "        del(move _7);",
+    "        return;",
+    "    }",
+    "}",
+    // a del is no store and kills nothing: PPPPPPP
+    "fn main.x12(_1 (p): node mut*, _2 (q): node mut*, _3 (x): node mut* own,",
+    "    _4 (k): u64) -> void {",
+    "    let _5 (a): node;",
+    "    let _6 (m): node;",
+    "    let _7 (n): node mut* own;",
+    "    let _8: node mut* own;",
+    "    let _9: node*;",
+    "    let _10: void;",
+    "    bb0: {",
+    "        _5 = const zero node;",
+    "        _6 = const zero node;",
+    "        _9 = addr(_6);",
+    "        _7 = const zero node mut* own;",
+    "        _8 = alloc<node>(const u64 1);",
+    "        _7 = move _8;",
+    "        del(move global main.G);",
+    "        del(move (*_1).0);",
+    "        del(move (*_7).0);",
+    "        del(move (*_1).3[_4]);",
+    "        del(move (*_2).0);",
+    "        del(move (*_2).1);",
+    "        check(overwrite: _5.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        check(overwrite: _6.0) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        check(overwrite: global main.G) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        check(overwrite: (*_1).0) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        check(overwrite: (*_7).0) -> bb5;",
+    "    }",
+    "    bb5: {",
+    "        check(overwrite: (*_1).3[_4]) -> bb6;",
+    "    }",
+    "    bb6: {",
+    "        check(overwrite: (*_2).0) -> bb7;",
+    "    }",
+    "    bb7: {",
+    "        del(move _7);",
+    "        return;",
+    "    }",
+    "}",
+    // a field behind a second deref, p->right->left: F4 dies, as p->right can be p: PUUUPUU
+    "fn main.x13(_1 (p): node mut*, _2 (q): node mut*, _3 (x): node mut* own,",
+    "    _4 (k): u64) -> void {",
+    "    let _5 (a): node;",
+    "    let _6 (m): node;",
+    "    let _7 (n): node mut* own;",
+    "    let _8: node mut* own;",
+    "    let _9: node*;",
+    "    let _10: void;",
+    "    bb0: {",
+    "        _5 = const zero node;",
+    "        _6 = const zero node;",
+    "        _9 = addr(_6);",
+    "        _7 = const zero node mut* own;",
+    "        _8 = alloc<node>(const u64 1);",
+    "        _7 = move _8;",
+    "        del(move global main.G);",
+    "        del(move (*_1).0);",
+    "        del(move (*_7).0);",
+    "        del(move (*_1).3[_4]);",
+    "        del(move (*_2).0);",
+    "        (*(*_1).1).0 = move _3;",
+    "        check(overwrite: _5.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        check(overwrite: _6.0) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        check(overwrite: global main.G) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        check(overwrite: (*_1).0) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        check(overwrite: (*_7).0) -> bb5;",
+    "    }",
+    "    bb5: {",
+    "        check(overwrite: (*_1).3[_4]) -> bb6;",
+    "    }",
+    "    bb6: {",
+    "        check(overwrite: (*_2).0) -> bb7;",
+    "    }",
+    "    bb7: {",
+    "        del(move _7);",
+    "        return;",
+    "    }",
+    "}",
+    // a second deref through a field of the local: it is separate from no fact of the local:
+    // UUUUPUU
+    "fn main.x14(_1 (p): node mut*, _2 (q): node mut*, _3 (x): node mut* own,",
+    "    _4 (k): u64) -> void {",
+    "    let _5 (a): node;",
+    "    let _6 (m): node;",
+    "    let _7 (n): node mut* own;",
+    "    let _8: node mut* own;",
+    "    let _9: node*;",
+    "    let _10: void;",
+    "    bb0: {",
+    "        _5 = const zero node;",
+    "        _6 = const zero node;",
+    "        _9 = addr(_6);",
+    "        _7 = const zero node mut* own;",
+    "        _8 = alloc<node>(const u64 1);",
+    "        _7 = move _8;",
+    "        del(move global main.G);",
+    "        del(move (*_1).0);",
+    "        del(move (*_7).0);",
+    "        del(move (*_1).3[_4]);",
+    "        del(move (*_2).0);",
+    "        (*_5.1).0 = move _3;",
+    "        check(overwrite: _5.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        check(overwrite: _6.0) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        check(overwrite: global main.G) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        check(overwrite: (*_1).0) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        check(overwrite: (*_7).0) -> bb5;",
+    "    }",
+    "    bb5: {",
+    "        check(overwrite: (*_1).3[_4]) -> bb6;",
+    "    }",
+    "    bb6: {",
+    "        check(overwrite: (*_2).0) -> bb7;",
+    "    }",
+    "    bb7: {",
+    "        del(move _7);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[15] KILL_MATRIX_VERDICTS = {
+    "PPPPPPP", "PPPPPPP", "PPPUPUU", "PPPUPUU", "PUUPPUU", "PPPPPPP", "PUUUPUU", "PUUUPUP",
+    "PUUUUUU", "PPPUPUP", "PPPPPUP", "PUUPPUU", "PPPPPPP", "PUUUPUU", "UUUUPUU",
+};
+
+// A store of null into each kind of place in order: each store makes its place empty and kills by
+// the kill rules.
+string[93] ZERO_SEQUENCE = {
+    // F1 to F7 in order: PUUUPUP
+    "fn main.w1(_1 (p): node mut*, _2 (q): node mut*, _3 (k): u64) -> void {",
+    "    let _4 (a): node;",
+    "    let _5 (m): node;",
+    "    let _6 (n): node mut* own;",
+    "    let _7: node mut* own;",
+    "    let _8: node*;",
+    "    bb0: {",
+    "        _8 = addr(_5);",
+    "        _6 = const zero node mut* own;",
+    "        _7 = alloc<node>(const u64 1);",
+    "        _6 = move _7;",
+    "        _4.0 = const null node mut* own;",
+    "        _5.0 = const null node mut* own;",
+    "        global main.G = const null node mut* own;",
+    "        (*_1).0 = const null node mut* own;",
+    "        (*_6).0 = const null node mut* own;",
+    "        (*_1).3[_3] = const null node mut* own;",
+    "        (*_2).0 = const null node mut* own;",
+    "        check(overwrite: _4.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        check(overwrite: _5.0) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        check(overwrite: global main.G) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        check(overwrite: (*_1).0) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        check(overwrite: (*_6).0) -> bb5;",
+    "    }",
+    "    bb5: {",
+    "        check(overwrite: (*_1).3[_3]) -> bb6;",
+    "    }",
+    "    bb6: {",
+    "        check(overwrite: (*_2).0) -> bb7;",
+    "    }",
+    "    bb7: {",
+    "        del(move _6);",
+    "        return;",
+    "    }",
+    "}",
+    // the moves of F1 to F7 make each empty, and a move kills nothing: PPPPPPP
+    "fn main.w2(_1 (p): node mut*, _2 (q): node mut*, _3 (k): u64) -> void {",
+    "    let _4 (a): node;",
+    "    let _5 (m): node;",
+    "    let _6 (n): node mut* own;",
+    "    let _7: node mut* own;",
+    "    let _8: node*;",
+    "    let _9: node mut* own;",
+    "    let _10: node mut* own;",
+    "    let _11: node mut* own;",
+    "    let _12: node mut* own;",
+    "    let _13: node mut* own;",
+    "    let _14: node mut* own;",
+    "    let _15: node mut* own;",
+    "    bb0: {",
+    "        _8 = addr(_5);",
+    "        _6 = const zero node mut* own;",
+    "        _7 = alloc<node>(const u64 1);",
+    "        _6 = move _7;",
+    "        _9 = move _4.0;",
+    "        _10 = move _5.0;",
+    "        _11 = move global main.G;",
+    "        _12 = move (*_1).0;",
+    "        _13 = move (*_6).0;",
+    "        _14 = move (*_1).3[_3];",
+    "        _15 = move (*_2).0;",
+    "        check(overwrite: _4.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        check(overwrite: _5.0) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        check(overwrite: global main.G) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        check(overwrite: (*_1).0) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        check(overwrite: (*_6).0) -> bb5;",
+    "    }",
+    "    bb5: {",
+    "        check(overwrite: (*_1).3[_3]) -> bb6;",
+    "    }",
+    "    bb6: {",
+    "        check(overwrite: (*_2).0) -> bb7;",
+    "    }",
+    "    bb7: {",
+    "        del(move _6);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[2] ZERO_SEQUENCE_VERDICTS = {"PUUUPUP", "PPPPPPP"};
+
+// What ends the freshness of a pointer local, and what does not.
+string[236] FRESHNESS = {
+    // no event: P
+    "fn main.v0(_1 (p): node mut*, _2 (x): node mut* own, _3 (y): node mut* own) -> void {",
+    "    let _4 (n): node mut* own;",
+    "    let _5: node mut* own;",
+    "    bb0: {",
+    "        _4 = const zero node mut* own;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        _4 = move _5;",
+    "        (*_1).0 = move _2;",
+    "        check(overwrite: (*_4).1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        del(move _4);",
+    "        return;",
+    "    }",
+    "}",
+    // a copy of the pointer: U
+    "fn main.v1(_1 (p): node mut*, _2 (x): node mut* own, _3 (y): node mut* own) -> void {",
+    "    let _4 (n): node mut* own;",
+    "    let _5: node mut* own;",
+    "    let _6: node mut*;",
+    "    bb0: {",
+    "        _4 = const zero node mut* own;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        _4 = move _5;",
+    "        _6 = copy _4;",
+    "        (*_1).0 = move _2;",
+    "        check(overwrite: (*_4).1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        del(move _4);",
+    "        return;",
+    "    }",
+    "}",
+    // a comparison that copies the pointer: U
+    "fn main.v2(_1 (p): node mut*, _2 (x): node mut* own, _3 (y): node mut* own) -> void {",
+    "    let _4 (n): node mut* own;",
+    "    let _5: node mut* own;",
+    "    let _6: bool;",
+    "    bb0: {",
+    "        _4 = const zero node mut* own;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        _4 = move _5;",
+    "        _6 = eq(copy _4, const null node mut* own);",
+    "        (*_1).0 = move _2;",
+    "        check(overwrite: (*_4).1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        del(move _4);",
+    "        return;",
+    "    }",
+    "}",
+    // an address of a field through the pointer: U
+    "fn main.v3(_1 (p): node mut*, _2 (x): node mut* own, _3 (y): node mut* own) -> void {",
+    "    let _4 (n): node mut* own;",
+    "    let _5: node mut* own;",
+    "    let _6: node mut* own*;",
+    "    bb0: {",
+    "        _4 = const zero node mut* own;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        _4 = move _5;",
+    "        _6 = addr((*_4).0);",
+    "        (*_1).0 = move _2;",
+    "        check(overwrite: (*_4).1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        del(move _4);",
+    "        return;",
+    "    }",
+    "}",
+    // a slice of a fixed array through the pointer: U
+    "fn main.v4(_1 (p): node mut*, _2 (x): node mut* own, _3 (y): node mut* own) -> void {",
+    "    let _4 (n): node mut* own;",
+    "    let _5: node mut* own;",
+    "    let _6: node mut* own@;",
+    "    bb0: {",
+    "        _4 = const zero node mut* own;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        _4 = move _5;",
+    "        _6 = slice((*_4).2, const u64 0, const u64 1);",
+    "        (*_1).0 = move _2;",
+    "        check(overwrite: (*_4).1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        del(move _4);",
+    "        return;",
+    "    }",
+    "}",
+    // an address of the pointer local makes it memory: U
+    "fn main.v5(_1 (p): node mut*, _2 (x): node mut* own, _3 (y): node mut* own) -> void {",
+    "    let _4 (n): node mut* own;",
+    "    let _5: node mut* own;",
+    "    let _6: node mut* own*;",
+    "    bb0: {",
+    "        _4 = const zero node mut* own;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        _4 = move _5;",
+    "        _6 = addr(_4);",
+    "        (*_1).0 = move _2;",
+    "        check(overwrite: (*_4).1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        del(move _4);",
+    "        return;",
+    "    }",
+    "}",
+    // a copy of a field through the pointer: P
+    "fn main.v6(_1 (p): node mut*, _2 (x): node mut* own, _3 (y): node mut* own) -> void {",
+    "    let _4 (n): node mut* own;",
+    "    let _5: node mut* own;",
+    "    let _6: node mut*;",
+    "    bb0: {",
+    "        _4 = const zero node mut* own;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        _4 = move _5;",
+    "        _6 = copy (*_4).0;",
+    "        (*_1).0 = move _2;",
+    "        check(overwrite: (*_4).1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        del(move _4);",
+    "        return;",
+    "    }",
+    "}",
+    // a del of a field through the pointer: P
+    "fn main.v7(_1 (p): node mut*, _2 (x): node mut* own, _3 (y): node mut* own) -> void {",
+    "    let _4 (n): node mut* own;",
+    "    let _5: node mut* own;",
+    "    bb0: {",
+    "        _4 = const zero node mut* own;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        _4 = move _5;",
+    "        del(move (*_4).0);",
+    "        (*_1).0 = move _2;",
+    "        check(overwrite: (*_4).1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        del(move _4);",
+    "        return;",
+    "    }",
+    "}",
+    // a store into a field through the pointer: P
+    "fn main.v8(_1 (p): node mut*, _2 (x): node mut* own, _3 (y): node mut* own) -> void {",
+    "    let _4 (n): node mut* own;",
+    "    let _5: node mut* own;",
+    "    bb0: {",
+    "        _4 = const zero node mut* own;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        _4 = move _5;",
+    "        (*_4).0 = move _3;",
+    "        (*_1).0 = move _2;",
+    "        check(overwrite: (*_4).1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        del(move _4);",
+    "        return;",
+    "    }",
+    "}",
+    // a second fresh new: P
+    "fn main.v9(_1 (p): node mut*, _2 (x): node mut* own, _3 (y): node mut* own) -> void {",
+    "    let _4 (n): node mut* own;",
+    "    let _5: node mut* own;",
+    "    let _6: node mut* own;",
+    "    bb0: {",
+    "        _4 = const zero node mut* own;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        _4 = move _5;",
+    "        _6 = alloc<node>(const u64 1);",
+    "        del(move _4);",
+    "        _4 = move _6;",
+    "        (*_1).0 = move _2;",
+    "        check(overwrite: (*_4).1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        del(move _4);",
+    "        return;",
+    "    }",
+    "}",
+    // a store of a value that is no fresh new: U
+    "fn main.v10(_1 (p): node mut*, _2 (x): node mut* own, _3 (y): node mut* own) -> void {",
+    "    let _4 (n): node mut* own;",
+    "    let _5: node mut* own;",
+    "    bb0: {",
+    "        _4 = const zero node mut* own;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        _4 = move _5;",
+    "        del(move _4);",
+    "        _4 = move _3;",
+    "        (*_1).0 = move _2;",
+    "        check(overwrite: (*_4).1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        del(move _4);",
+    "        return;",
+    "    }",
+    "}",
+    // a call that does not name the pointer, which kills the fact itself: U
+    "fn main.v11(_1 (p): node mut*, _2 (x): node mut* own, _3 (y): node mut* own) -> void {",
+    "    let _4 (n): node mut* own;",
+    "    let _5: node mut* own;",
+    "    let _6: void;",
+    "    bb0: {",
+    "        _4 = const zero node mut* own;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        _4 = move _5;",
+    "        _6 = call fn main.g();",
+    "        (*_1).0 = move _2;",
+    "        check(overwrite: (*_4).1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        del(move _4);",
+    "        return;",
+    "    }",
+    "}",
+    // a move of a field through the pointer: P
+    "fn main.v12(_1 (p): node mut*, _2 (x): node mut* own, _3 (y): node mut* own) -> void {",
+    "    let _4 (n): node mut* own;",
+    "    let _5: node mut* own;",
+    "    let _6: node mut* own;",
+    "    bb0: {",
+    "        _4 = const zero node mut* own;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        _4 = move _5;",
+    "        _6 = move (*_4).0;",
+    "        (*_1).0 = move _2;",
+    "        check(overwrite: (*_4).1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        del(move _4);",
+    "        return;",
+    "    }",
+    "}",
+    // a span over the pointer copies it: U
+    "fn main.v13(_1 (p): node mut*, _2 (x): node mut* own, _3 (y): node mut* own) -> void {",
+    "    let _4 (n): node mut* own;",
+    "    let _5: node mut* own;",
+    "    let _6: node mut@;",
+    "    bb0: {",
+    "        _4 = const zero node mut* own;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        _4 = move _5;",
+    "        _6 = slice_ptr(copy _4, const u64 0, const u64 1);",
+    "        (*_1).0 = move _2;",
+    "        check(overwrite: (*_4).1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        del(move _4);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[14] FRESHNESS_VERDICTS = {
+    "P", "U", "U", "U", "U", "U", "P", "P", "P", "P", "U", "U", "P", "U",
+};
+
+// Which right sides store the zero value.
+string[92] ZERO_VALUES = {
+    // const zero: P
+    "fn main.u1(_1 (b): node mut*, _2 (x): node mut* own) -> void {",
+    "    bb0: {",
+    "        (*_1).0 = const zero node mut* own;",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // const null: P
+    "fn main.u2(_1 (b): node mut*, _2 (x): node mut* own) -> void {",
+    "    bb0: {",
+    "        (*_1).0 = const null node mut* own;",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // the move of a temporary that holds null: P
+    "fn main.u3(_1 (b): node mut*, _2 (x): node mut* own) -> void {",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _3 = const null node mut* own;",
+    "        (*_1).0 = move _3;",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // the move of a named local that holds null: U
+    "fn main.u4(_1 (b): node mut*, _2 (x): node mut* own) -> void {",
+    "    let _3 (z): node mut* own;",
+    "    bb0: {",
+    "        _3 = const null node mut* own;",
+    "        (*_1).0 = move _3;",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // an allocation: U
+    "fn main.u5(_1 (b): node mut*, _2 (x): node mut* own) -> void {",
+    "    bb0: {",
+    "        (*_1).0 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // a cast of a zero temporary: U
+    "fn main.u6(_1 (b): node mut*, _2 (x): node mut* own) -> void {",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _3 = const zero node mut* own;",
+    "        (*_1).0 = cast<node mut* own>(move _3);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // the move of a parameter: U
+    "fn main.u7(_1 (b): node mut*, _2 (x): node mut* own) -> void {",
+    "    bb0: {",
+    "        (*_1).0 = move _2;",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // the move of a temporary whose one store moved a parameter: U
+    "fn main.u8(_1 (b): node mut*, _2 (x): node mut* own) -> void {",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _3 = move _2;",
+    "        (*_1).0 = move _3;",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // the move of a temporary that two stores write: U
+    "fn main.u9(_1 (b): node mut*, _2 (x): node mut* own) -> void {",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _3 = const null node mut* own;",
+    "        _3 = move _2;",
+    "        (*_1).0 = move _3;",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[9] ZERO_VALUES_VERDICTS = {"P", "P", "P", "U", "U", "U", "U", "U", "U"};
+
+// The shapes of an index temporary that give it the key of a local.
+string[105] KEY_SHAPES = {
+    // the cast of a local of another integer type: P
+    "fn main.i1(_1 (v): node mut*, _2 (k): i32) -> void {",
+    "    let _3: u64;",
+    "    let _4: u64;",
+    "    bb0: {",
+    "        _3 = cast<u64>(copy _2);",
+    "        del(move (*_1).3[_3]);",
+    "        _4 = cast<u64>(copy _2);",
+    "        check(overwrite: (*_1).3[_4]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // a copy and a cast of one local: P
+    "fn main.i2(_1 (v): node mut*, _2 (k): u64) -> void {",
+    "    let _3: u64;",
+    "    let _4: u64;",
+    "    bb0: {",
+    "        _3 = copy _2;",
+    "        del(move (*_1).3[_3]);",
+    "        _4 = cast<u64>(copy _2);",
+    "        check(overwrite: (*_1).3[_4]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // two locals: two keys, whatever their values: U
+    "fn main.i3(_1 (v): node mut*, _2 (k): u64, _3 (j): u64) -> void {",
+    "    let _4: u64;",
+    "    let _5: u64;",
+    "    bb0: {",
+    "        _4 = copy _2;",
+    "        del(move (*_1).3[_4]);",
+    "        _5 = copy _3;",
+    "        check(overwrite: (*_1).3[_5]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // a copy of a copy: the keys do not compose: U
+    "fn main.i4(_1 (v): node mut*, _2 (k): u64) -> void {",
+    "    let _3: u64;",
+    "    let _4: u64;",
+    "    bb0: {",
+    "        _3 = copy _2;",
+    "        del(move (*_1).3[_3]);",
+    "        _4 = copy _3;",
+    "        check(overwrite: (*_1).3[_4]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // the source local is memory: U
+    "fn main.i5(_1 (v): node mut*, _2 (k): u64) -> void {",
+    "    let _3: u64;",
+    "    let _4: u64;",
+    "    let _5: u64*;",
+    "    bb0: {",
+    "        _5 = addr(_2);",
+    "        _3 = copy _2;",
+    "        del(move (*_1).3[_3]);",
+    "        _4 = copy _2;",
+    "        check(overwrite: (*_1).3[_4]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // the index temporary is memory: U
+    "fn main.i6(_1 (v): node mut*, _2 (k): u64) -> void {",
+    "    let _3: u64;",
+    "    let _4: u64;",
+    "    let _5: u64*;",
+    "    bb0: {",
+    "        _3 = copy _2;",
+    "        del(move (*_1).3[_3]);",
+    "        _4 = copy _2;",
+    "        _5 = addr(_4);",
+    "        check(overwrite: (*_1).3[_4]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // a store into the source before the copy and none after: P
+    "fn main.i7(_1 (v): node mut*, _2 (k): u64) -> void {",
+    "    let _3: u64;",
+    "    let _4: u64;",
+    "    bb0: {",
+    "        _2 = const u64 3;",
+    "        _3 = copy _2;",
+    "        del(move (*_1).3[_3]);",
+    "        _4 = copy _2;",
+    "        check(overwrite: (*_1).3[_4]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // a parameter as the index: its own key: P
+    "fn main.i8(_1 (v): node mut*, _2 (k): u64) -> void {",
+    "    bb0: {",
+    "        del(move (*_1).3[_2]);",
+    "        check(overwrite: (*_1).3[_2]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[8] KEY_SHAPES_VERDICTS = {"P", "P", "U", "U", "U", "U", "P", "P"};
+
+// The return place is no key, whatever its value.
+string[10] RETURN_KEY = {
+    // the return place as the index of an element: U
+    "fn main.r1(_1 (v): node mut* own[2] mut*) -> u64 {",
+    "    bb0: {",
+    "        _0 = const u64 1;",
+    "        del(move (*_1)[_0]);",
+    "        check(overwrite: (*_1)[_0]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[1] RETURN_KEY_VERDICTS = {"U"};
+
+// An address is a held address only with one store, one check and one store through it.
+string[87] HELD_SHAPES = {
+    // an element with a key: P
+    "fn main.o1(_1 (v): node mut*, _2 (k): u64, _3 (x): node mut* own) -> void {",
+    "    let _4: u64;",
+    "    let _5: u64;",
+    "    let _6: node mut* own mut*;",
+    "    bb0: {",
+    "        _4 = copy _2;",
+    "        del(move (*_1).3[_4]);",
+    "        _5 = copy _2;",
+    "        _6 = addr mut((*_1).3[_5]);",
+    "        check(overwrite: (*_6)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_6) = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // a global: P
+    "fn main.o2(_1 (x): node mut* own) -> void {",
+    "    let _2: node mut* own mut*;",
+    "    bb0: {",
+    "        del(move global main.G);",
+    "        _2 = addr mut(global main.G);",
+    "        check(overwrite: (*_2)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_2) = move _1;",
+    "        return;",
+    "    }",
+    "}",
+    // two stores of the address: U
+    "fn main.o3(_1 (b): node mut*, _2 (x): node mut* own) -> void {",
+    "    let _3: node mut* own mut*;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        _3 = addr mut((*_1).1);",
+    "        _3 = addr mut((*_1).0);",
+    "        check(overwrite: (*_3)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_3) = move _2;",
+    "        return;",
+    "    }",
+    "}",
+    // two checks through the address: UU
+    "fn main.o4(_1 (b): node mut*, _2 (x): node mut* own) -> void {",
+    "    let _3: node mut* own mut*;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        _3 = addr mut((*_1).0);",
+    "        check(overwrite: (*_3)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        check(overwrite: (*_3)) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        (*_3) = move _2;",
+    "        return;",
+    "    }",
+    "}",
+    // an address of the held address makes it memory, so its own address makes its local memory:
+    // UU
+    "fn main.o6(_1 (x): node mut* own) -> void {",
+    "    let _2 (s): node;",
+    "    let _3: node mut* own mut*;",
+    "    let _4: node mut* own mut**;",
+    "    let _5: void;",
+    "    bb0: {",
+    "        _2 = const zero node;",
+    "        _3 = addr mut(_2.0);",
+    "        _4 = addr(_3);",
+    "        _5 = call fn main.g();",
+    "        check(overwrite: _2.1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        check(overwrite: (*_3)) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        (*_3) = move _1;",
+    "        return;",
+    "    }",
+    "}",
+    // a check with no store through the address: U
+    "fn main.o5(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own mut*;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        _2 = addr mut((*_1).0);",
+    "        check(overwrite: (*_2)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[6] HELD_SHAPES_VERDICTS = {"P", "P", "U", "UU", "UU", "U"};
+
+// Only an address of the fixed storage of a local makes it memory.
+string[42] ADDRESSES = {
+    // an address of an element of a span field makes no memory: a call keeps the fact: P
+    "fn main.m1(_1 (k): u64) -> void {",
+    "    let _2 (s): node;",
+    "    let _3: node mut* own*;",
+    "    let _4: void;",
+    "    bb0: {",
+    "        _2 = const zero node;",
+    "        _3 = addr(_2.3[_1]);",
+    "        _4 = call fn main.g();",
+    "        check(overwrite: _2.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // an address of a field makes the local memory: a call kills the fact: U
+    "fn main.m2() -> void {",
+    "    let _1 (s): node;",
+    "    let _2: node mut* own*;",
+    "    let _3: void;",
+    "    bb0: {",
+    "        _1 = const zero node;",
+    "        _2 = addr(_1.1);",
+    "        _3 = call fn main.g();",
+    "        check(overwrite: _1.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // an address of an element of a fixed array field makes the local memory: U
+    "fn main.m3(_1 (k): u64) -> void {",
+    "    let _2 (s): node;",
+    "    let _3: node mut* own*;",
+    "    let _4: void;",
+    "    bb0: {",
+    "        _2 = const zero node;",
+    "        _3 = addr(_2.2[_1]);",
+    "        _4 = call fn main.g();",
+    "        check(overwrite: _2.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[3] ADDRESSES_VERDICTS = {"P", "U", "U"};
+
+// A store straight into a memory local or a global keeps the facts of other locals and globals,
+// and kills each fact through a pointer that can hold its address.
+string[106] STRAIGHT = {
+    // into a memory local: the facts of another memory local and of a global stay: PP
+    "fn main.k1(_1 (v): node mut* own) -> void {",
+    "    let _2 (x): node;",
+    "    let _3 (y): node;",
+    "    let _4: node*;",
+    "    let _5: node*;",
+    "    bb0: {",
+    "        _4 = addr(_2);",
+    "        _5 = addr(_3);",
+    "        _3 = const zero node;",
+    "        del(move global main.G);",
+    "        _2.1 = move _1;",
+    "        check(overwrite: _3.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        check(overwrite: global main.G) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "}",
+    // into a global: the facts of another global and of a memory local stay: PP
+    "fn main.k2(_1 (v): node mut* own) -> void {",
+    "    let _2 (y): node;",
+    "    let _3: node*;",
+    "    bb0: {",
+    "        _3 = addr(_2);",
+    "        _2 = const zero node;",
+    "        del(move global main.G);",
+    "        global main.H = move _1;",
+    "        check(overwrite: _2.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        check(overwrite: global main.G) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "}",
+    // into a memory local: a fact through a pointer that holds its address dies: U
+    "fn main.k3(_1 (v): node mut* own) -> void {",
+    "    let _2 (x): node;",
+    "    let _3: node mut*;",
+    "    bb0: {",
+    "        _2 = const zero node;",
+    "        _3 = addr mut(_2);",
+    "        del(move (*_3).0);",
+    "        _2.0 = move _1;",
+    "        check(overwrite: (*_3).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // into a global: a fact through a pointer that holds its address dies: U
+    "fn main.k4(_1 (v): node mut* own) -> void {",
+    "    let _2: node mut* own mut*;",
+    "    bb0: {",
+    "        _2 = addr mut(global main.G);",
+    "        del(move (*_2));",
+    "        global main.G = move _1;",
+    "        check(overwrite: (*_2)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // into a memory local: a fact through a fresh pointer stays: P
+    "fn main.k5(_1 (v): node mut* own) -> void {",
+    "    let _2 (x): node;",
+    "    let _3: node*;",
+    "    let _4 (n): node mut* own;",
+    "    let _5: node mut* own;",
+    "    bb0: {",
+    "        _3 = addr(_2);",
+    "        _4 = const zero node mut* own;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        _4 = move _5;",
+    "        _2.1 = move _1;",
+    "        check(overwrite: (*_4).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        del(move _4);",
+    "        return;",
+    "    }",
+    "}",
+    // into a memory local: an element of a span of another local dies: U
+    "fn main.k6(_1 (v): node mut* own, _2 (k): u64) -> void {",
+    "    let _3 (x): node;",
+    "    let _4: node*;",
+    "    let _5 (y): node;",
+    "    bb0: {",
+    "        _4 = addr(_3);",
+    "        del(move _5.3[_2]);",
+    "        _3.1 = move _1;",
+    "        check(overwrite: _5.3[_2]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // into a local that is no memory: a fact through a pointer stays: P
+    "fn main.k7(_1 (v): node mut* own, _2 (b): node mut*) -> void {",
+    "    let _3 (x): node;",
+    "    bb0: {",
+    "        del(move (*_2).0);",
+    "        _3.1 = move _1;",
+    "        check(overwrite: (*_2).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[7] STRAIGHT_VERDICTS = {"PP", "PP", "U", "U", "P", "U", "P"};
+
+// Writes the verdict of each check of `f` into `out`, in block order: `P` for a check that `p`
+// proves, and `U` for one that it does not prove. Holds the two counts of `p` against them.
+fn write_verdicts(fir.func* f, emptiness.proof* p, strbuf.str_buf mut* out) void {
+    strbuf.clear(out);
+    u32 mut unproved = 0;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        if (fir.block_at(f, b)->term.kind == fir.term_kind.tk_check_overwrite) {
+            if (emptiness.is_proved(p, b)) {
+                strbuf.push(out, 'P');
+            } else {
+                strbuf.push(out, 'U');
+                unproved += 1;
+            }
+        } else {
+            assert(emptiness.is_proved(p, b));
+        }
+        b += 1;
+    }
+    assert(cast(p->checks, u64) == strbuf.view(out).len);
+    assert(p->unproved == unproved);
+}
+
+// Parses `text` against PRELUDE, holds that the verifier accepts each function, proves each one,
+// and holds that function `k` of the module gives the verdicts `want[k]`.
+fn expect(string@ text, string@ want) void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    fir.module mut m = pass_env.parse(&e, PRELUDE[..], text);
+    defer fir.module_free(&m);
+    assert(m.funcs.len == want.len);
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    u64 mut k = 0;
+    while (k < m.funcs.len) {
+        fir.func* f = &m.funcs.items[k];
+        pass_env.verified(&e, f, "emptiness_test: the verifier refuses the input");
+        emptiness.proof mut p = emptiness.prove(f);
+        write_verdicts(f, &p, &got);
+        emptiness.free(&p);
+        if (strbuf.view(&got) != want[k]) {
+            eprintln("function ", k, " gives ", strbuf.view(&got), " and not ", want[k]);
+            panic("emptiness_test: a verdict differs");
+        }
+        k += 1;
+    }
+}
+
+// ---- one test for each group --------------------------------------------------------------
+
+// The store of the zero value in the entry block makes a named local empty.
+fn the_entry_store_makes_a_named_local_empty() void {
+    expect(ENTRY[..], ENTRY_VERDICTS[..]);
+}
+
+// `del(move p)` makes `p` empty, and only `p`.
+fn del_makes_its_place_empty() void {
+    expect(DEL[..], DEL_VERDICTS[..]);
+}
+
+// A `move` operand makes its place and each tracked place below it empty.
+fn a_move_makes_its_place_and_each_place_below_it_empty() void {
+    expect(MOVE[..], MOVE_VERDICTS[..]);
+}
+
+// A store of the zero value makes its place and each tracked place below it empty.
+fn a_zero_store_makes_its_place_and_each_place_below_it_empty() void {
+    expect(ZERO[..], ZERO_VERDICTS[..]);
+}
+
+// A store of a fresh `new` makes each tracked place through the pointer empty.
+fn a_fresh_new_makes_each_place_through_its_pointer_empty() void {
+    expect(FRESH[..], FRESH_VERDICTS[..]);
+}
+
+// A store kills the fact of each place with its base that is not separate from it.
+fn a_store_kills_each_fact_with_its_base_that_is_not_separate() void {
+    expect(SAME_BASE[..], SAME_BASE_VERDICTS[..]);
+}
+
+// Two elements with one key are one place, and an element with no key is not tracked.
+fn two_elements_with_one_key_are_one_place() void {
+    expect(KEYS[..], KEYS_VERDICTS[..]);
+}
+
+// A store through a fresh pointer local kills only the facts with its base.
+fn a_store_through_a_fresh_pointer_kills_only_its_base() void {
+    expect(FRESH_STORE[..], FRESH_STORE_VERDICTS[..]);
+}
+
+// A store through a pointer or into memory kills each fact reached through memory.
+fn a_store_through_a_pointer_kills_each_fact_reached_through_memory() void {
+    expect(MEMORY[..], MEMORY_VERDICTS[..]);
+}
+
+// A call kills each fact but the facts of a local that is no memory.
+fn a_call_kills_each_fact_but_those_of_a_local_that_is_no_memory() void {
+    expect(CALLS[..], CALLS_VERDICTS[..]);
+}
+
+// A global is a tracked place with no fact at the entry.
+fn a_global_has_no_fact_at_the_entry() void {
+    expect(GLOBALS[..], GLOBALS_VERDICTS[..]);
+}
+
+// A held address `(*_a)` reads as the place of its `addr mut`.
+fn a_held_address_reads_as_its_place() void {
+    expect(HELD[..], HELD_VERDICTS[..]);
+}
+
+// A fact holds at the start of a block when it holds at the end of each predecessor.
+fn a_fact_holds_after_a_join_when_it_holds_on_each_edge() void {
+    expect(JOIN[..], JOIN_VERDICTS[..]);
+}
+
+// The sets of more than one word, a function with no check, and a check that no fact can prove.
+fn the_sets_reach_past_one_word_and_a_function_needs_no_check() void {
+    expect(BOUNDS[..], BOUNDS_VERDICTS[..]);
+}
+
+// Two constant keys name one element when their values are equal.
+fn two_constant_keys_with_one_value_name_one_element() void {
+    expect(CONSTANTS[..], CONSTANTS_VERDICTS[..]);
+}
+
+// A loop carries a kill, a store into a key local and an end of freshness around its back edge.
+fn a_loop_carries_each_kill_around_its_back_edge() void {
+    expect(LOOPS[..], LOOPS_VERDICTS[..]);
+}
+
+// Structs as places: a pointee moved whole, an aggregate result and a global struct.
+fn a_struct_is_a_place_with_fields_below_it() void {
+    expect(AGGREGATES[..], AGGREGATES_VERDICTS[..]);
+}
+
+// Each kind of store against each kind of fact, in the order F1 to F7.
+fn each_kind_of_store_kills_the_facts_that_the_rules_name() void {
+    expect(KILL_MATRIX[..], KILL_MATRIX_VERDICTS[..]);
+}
+
+// A store of null into each kind of place in order: each store makes its place empty and kills by
+// the kill rules.
+fn each_store_of_null_makes_its_place_empty_and_kills() void {
+    expect(ZERO_SEQUENCE[..], ZERO_SEQUENCE_VERDICTS[..]);
+}
+
+// What ends the freshness of a pointer local, and what does not.
+fn each_read_of_the_pointer_ends_its_freshness() void {
+    expect(FRESHNESS[..], FRESHNESS_VERDICTS[..]);
+}
+
+// Which right sides store the zero value.
+fn only_a_zero_constant_or_its_temporary_is_the_zero_value() void {
+    expect(ZERO_VALUES[..], ZERO_VALUES_VERDICTS[..]);
+}
+
+// The shapes of an index temporary that give it the key of a local.
+fn an_index_temporary_has_the_key_of_the_local_it_copies() void {
+    expect(KEY_SHAPES[..], KEY_SHAPES_VERDICTS[..]);
+}
+
+// The return place is no key, whatever its value.
+fn the_return_place_is_no_key() void {
+    expect(RETURN_KEY[..], RETURN_KEY_VERDICTS[..]);
+}
+
+// An address is a held address only with one store, one check and one store through it.
+fn an_address_is_held_with_one_store_one_check_and_one_store() void {
+    expect(HELD_SHAPES[..], HELD_SHAPES_VERDICTS[..]);
+}
+
+// Only an address of the fixed storage of a local makes it memory.
+fn only_an_address_of_fixed_storage_makes_a_local_memory() void {
+    expect(ADDRESSES[..], ADDRESSES_VERDICTS[..]);
+}
+
+// A store straight into a memory local or a global keeps the facts of other locals and globals,
+// and kills each fact through a pointer that can hold its address.
+fn a_store_straight_into_a_local_keeps_other_locals() void {
+    expect(STRAIGHT[..], STRAIGHT_VERDICTS[..]);
+}
+
+// ---- the examples over fort source -------------------------------------------------------------
+
+// The examples of the rule. A comment gives the verdicts of the checks of each function in block
+// order.
+string[221] EXAMPLES = {
+    "struct int_buf {",
+    "    i32 mut@ own items;",
+    "    u64 len;",
+    "}",
+    "struct node {",
+    "    node mut* own left;",
+    "    node mut* own right;",
+    "    node mut* own next;",
+    "}",
+    "struct node_vec {",
+    "    node mut* own mut@ own items;",
+    "    u64 len;",
+    "}",
+    "struct list {",
+    "    node mut* own head;",
+    "}",
+    "node mut* own mut G = null;",
+    // P
+    "fn fill(int_buf mut* b) void {",
+    "    del(b->items);",
+    "    b->items = new(i32, 8);",
+    "}",
+    // U: the entry value of b->items is not known
+    "fn refill(int_buf mut* b) void {",
+    "    b->items = new(i32, 8);",
+    "}",
+    // P
+    "fn store_out(node mut* own mut* out, node mut* own buf) void {",
+    "    del(*out);",
+    "    *out = move(buf);",
+    "}",
+    // PPP: the store into n->left keeps the fact of the separate field n->right
+    "fn pair(node mut* own l, node mut* own r) node mut* own {",
+    "    node mut* own n = new(node);",
+    "    n->left = move(l);",
+    "    n->right = move(r);",
+    "    return move(n);",
+    "}",
+    // UU: q can hold the value of p
+    "fn alias(node mut* p, node mut* q, node mut* own x) void {",
+    "    del(p->left);",
+    "    q->right = null;",
+    "    p->left = move(x);",
+    "}",
+    // P: both elements have the key k
+    "fn put(node_vec mut* v, node mut* own n) void {",
+    "    u64 k = v->len;",
+    "    del(v->items[k]);",
+    "    v->items[k] = move(n);",
+    "}",
+    // U: v->items[v->len] has no key
+    "fn put_len(node_vec mut* v, node mut* own n) void {",
+    "    del(v->items[v->len]);",
+    "    v->items[v->len] = move(n);",
+    "}",
+    // PPP: n is fresh, so the store into n->next keeps the fact of l->head
+    "fn push(list mut* l) void {",
+    "    node mut* own n = new(node);",
+    "    n->next = move(l->head);",
+    "    l->head = move(n);",
+    "}",
+    // P
+    "fn set_global(node mut* own x) void {",
+    "    del(G);",
+    "    G = move(x);",
+    "}",
+    // U: a global has no fact at the entry
+    "fn set_global_alone(node mut* own x) void {",
+    "    G = move(x);",
+    "}",
+    // PP: a = move(b) after move(a)
+    "fn swap(node mut* own mut a, node mut* own b) void {",
+    "    node mut* own t = move(a);",
+    "    a = move(b);",
+    "    del(t);",
+    "    del(a);",
+    "}",
+    // P: the body deletes the local
+    "fn loop_del() void {",
+    "    for (i32 mut i = 0; i < 3; i++) {",
+    "        i32 mut* own p = new(i32);",
+    "        del(p);",
+    "    }",
+    "}",
+    // U: the back edge joins a live p with the entry store
+    "fn loop_leak() void {",
+    "    for (i32 mut i = 0; i < 3; i++) {",
+    "        i32 mut* own p = new(i32);",
+    "    }",
+    "}",
+    // P: a store of null into a local that holds null
+    "fn twice() void {",
+    "    node mut* own mut p = null;",
+    "    p = null;",
+    "}",
+    // PPU: the elements of a span from `new` have no fact, so the store in the loop is not
+    // proved. The block of the check after the loop comes before the blocks of the body.
+    "fn grow(node_vec mut* v) void {",
+    "    node mut* own mut@ own bigger = new(node mut* own, v->items.len * 2);",
+    "    u64 mut i = 0;",
+    "    while (i < v->items.len) {",
+    "        bigger[i] = move(v->items[i]);",
+    "        i += 1;",
+    "    }",
+    "    del(v->items);",
+    "    v->items = move(bigger);",
+    "}",
+    // PP: the move of l->head makes it empty for the store of n->next
+    "fn pop(list mut* l) node mut* own {",
+    "    node mut* own n = move(l->head);",
+    "    l->head = move(n->next);",
+    "    return move(n);",
+    "}",
+    // PPP: the store into p->left keeps the fact of the separate field p->right
+    "fn swap_fields(node mut* p) void {",
+    "    node mut* own tmp = move(p->left);",
+    "    p->left = move(p->right);",
+    "    p->right = move(tmp);",
+    "    del(tmp);",
+    "}",
+    // no check
+    "fn make() node mut* own {",
+    "    return new(node);",
+    "}",
+    // U: the call on the right side can store into l->head after the del
+    "fn refresh(list mut* l) void {",
+    "    del(l->head);",
+    "    l->head = make();",
+    "}",
+    // PP: the call before the del
+    "fn refresh_first(list mut* l) void {",
+    "    node mut* own n = make();",
+    "    del(l->head);",
+    "    l->head = move(n);",
+    "}",
+    // P: an owning string field after its del
+    "struct named {",
+    "    string own name;",
+    "}",
+    "fn rename(named mut* x, string own s) void {",
+    "    del(x->name);",
+    "    x->name = move(s);",
+    "}",
+    // U: a store of null needs the proof too
+    "fn init_head(list mut* l) void {",
+    "    l->head = null;",
+    "}",
+    // P
+    "fn clear_head(list mut* l) void {",
+    "    del(l->head);",
+    "    l->head = null;",
+    "}",
+    // U: the push of a vector, whose element index reads memory
+    "fn push_back(node_vec mut* v, node mut* own n) void {",
+    "    v->items[v->len] = move(n);",
+    "    v->len += 1;",
+    "}",
+    // U: an out parameter with no del
+    "fn take_out(node mut* own mut* out) void {",
+    "    *out = new(node);",
+    "}",
+    // P: a parameter after its del
+    "fn reset(node mut* own mut p) void {",
+    "    del(p);",
+    "    p = new(node);",
+    "    del(p);",
+    "}",
+    // U: the call in the loop body stands after the del
+    "fn refresh_loop(list mut* l, bool c) void {",
+    "    while (c) {",
+    "        del(l->head);",
+    "        l->head = make();",
+    "    }",
+    "}",
+    // PP: a local in a loop that the body moves out
+    "fn loop_move(list mut* l, bool c) void {",
+    "    while (c) {",
+    "        node mut* own n = new(node);",
+    "        del(l->head);",
+    "        l->head = move(n);",
+    "    }",
+    "}",
+    // the seven shapes of the review: a store behind a second deref names any storage
+    "struct outer {",
+    "    node mut* own g;",
+    "    outer mut* next;",
+    "    node mut* own h;",
+    "    node mut* own[2] gs;",
+    "}",
+    "struct holder {",
+    "    node mut* own g;",
+    "    holder mut* self;",
+    "    node mut* own[2] a;",
+    "    node mut* own mut* pa;",
+    "}",
+    "struct inner {",
+    "    node mut* own f;",
+    "}",
+    "struct nest {",
+    "    inner a;",
+    "    inner mut* pa;",
+    "}",
+    "holder mut HG = {};",
+    // UU: p->next can be p, so the store through it kills the fact of p->g
+    "fn second(outer mut* p) void {",
+    "    p->next = p;",
+    "    del(p->g);",
+    "    p->next->g = new(node);",
+    "    p->g = new(node);",
+    "}",
+    // UU: the same through a field of a local
+    "fn self_local() void {",
+    "    holder mut x = {};",
+    "    x.self = &x;",
+    "    x.self->g = new(node);",
+    "    x.g = new(node);",
+    "    del(x.g);",
+    "}",
+    // UU: the same through a field of a global
+    "fn self_global() void {",
+    "    HG.self = &HG;",
+    "    del(HG.g);",
+    "    HG.self->g = new(node);",
+    "    HG.g = new(node);",
+    "}",
+    // UU: an element behind the second deref
+    "fn second_element(outer mut* p) void {",
+    "    p->next = p;",
+    "    del(p->gs[0]);",
+    "    p->next->gs[0] = new(node);",
+    "    p->gs[0] = new(node);",
+    "}",
+    // UUU: a move into the place behind the second deref
+    "fn second_move(outer mut* p) void {",
+    "    p->next = p;",
+    "    del(p->g);",
+    "    p->h = new(node);",
+    "    p->next->g = move(p->h);",
+    "    p->g = new(node);",
+    "}",
+    // UU: a pointer to a field of the local
+    "fn nested_field() void {",
+    "    nest mut x = {};",
+    "    x.pa = &x.a;",
+    "    del(x.a.f);",
+    "    x.pa->f = new(node);",
+    "    x.a.f = new(node);",
+    "    del(x.a.f);",
+    "}",
+    // UU: a pointer to an element of the local
+    "fn slot_index() void {",
+    "    holder mut x = {};",
+    "    x.pa = &x.a[0];",
+    "    del(x.a[0]);",
+    "    *x.pa = new(node);",
+    "    x.a[0] = new(node);",
+    "    del(x.a[0]);",
+    "}",
+};
+
+// The functions of EXAMPLES and the verdicts of each.
+string[35] EXAMPLE_NAMES = {
+    "fill", "refill", "store_out", "pair", "alias", "put", "put_len", "push", "set_global",
+    "set_global_alone", "swap", "loop_del", "loop_leak", "twice", "grow", "pop", "swap_fields",
+    "make", "refresh", "refresh_first", "rename", "init_head", "clear_head", "push_back",
+    "take_out", "reset", "refresh_loop", "loop_move", "second", "self_local", "self_global",
+    "second_element", "second_move", "nested_field", "slot_index",
+};
+
+string[35] EXAMPLE_VERDICTS = {
+    "P", "U", "P", "PPP", "UU", "P", "U", "PPP", "P", "U", "PP", "P", "U", "PP", "PPU", "PP",
+    "PPP", "", "U", "PP", "P", "U", "P", "U", "U", "P", "U", "PP", "UU", "UU", "UU", "UU", "UUU",
+    "UU", "UU",
+};
+
+// Lowers the function `name` of the checked source of `e` into *out, and holds that the
+// verifier accepts it.
+fn lower(lower_env.env mut* e, string name, fir.func mut* out) void {
+    fir_lower.report mut why = fir_lower.report{};
+    if (!fir_lower.lower_function(&e->c.ck, lower_env.decl(e, name), out, &why)) {
+        panic("emptiness_test: the lowering refuses the function");
+    }
+    pass_env.verified(e, out, "emptiness_test: the verifier refuses the lowering");
+}
+
+// The examples of the rule give their verdicts when the pass reads their lowering.
+fn the_examples_of_the_rule_hold_over_lowered_source() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, EXAMPLES[..], true);
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    u64 mut k = 0;
+    while (k < EXAMPLE_NAMES.len) {
+        fir.func mut f = fir.func{};
+        lower(&e, EXAMPLE_NAMES[k], &f);
+        emptiness.proof mut p = emptiness.prove(&f);
+        write_verdicts(&f, &p, &got);
+        emptiness.free(&p);
+        fir.func_free(&f);
+        if (strbuf.view(&got) != EXAMPLE_VERDICTS[k]) {
+            eprintln(EXAMPLE_NAMES[k], " gives ", strbuf.view(&got), " and not ",
+                     EXAMPLE_VERDICTS[k]);
+            panic("emptiness_test: an example gives another verdict");
+        }
+        k += 1;
+    }
+}
+
+// ---- the report --------------------------------------------------------------------------------
+
+// Sources whose checks the pass does not prove. The report names the source text of each target,
+// each parenthesis that it needs included, with each run of white space as one space, and the
+// declared name of a declaration. The `defer` expands into two checks at one location.
+string[60] REPORTED = {
+    "struct node {",
+    "    node mut* own left;",
+    "    node mut* own right;",
+    "}",
+    "node mut* own mut G = null;",
+    "fn refill(node mut* b) void {",
+    "    b->left = new(node);",
+    "}",
+    "fn paren(node mut* q, node mut* own x) void {",
+    "    (*q).right = move(x);",
+    "}",
+    "fn global_alone(node mut* own x) void {",
+    "    G = move(x);",
+    "}",
+    "fn loop_leak() void {",
+    "    for (i32 mut i = 0; i < 3; i++) {",
+    "        node mut* own p = new(node);",
+    "    }",
+    "}",
+    "fn param(node mut* own mut p) void {",
+    "    p = new(node);",
+    "    del(p);",
+    "}",
+    "fn deferred(node mut* b, bool c) void {",
+    "    defer b->left = new(node);",
+    "    if (c) {",
+    "        return;",
+    "    }",
+    "}",
+    "fn nested(node mut* q, node mut* own x) void {",
+    "    ((*q)).right = move(x);",
+    "}",
+    "fn first(u64 n) u64 {",
+    "    return n;",
+    "}",
+    "fn index_call(node mut* own[4] mut* a, node mut* own x) void {",
+    "    (*a)[first(1)] = move(x);",
+    "}",
+    "fn multi(node mut* q, node mut* own x) void {",
+    "    q",
+    "        ->right = move(x);",
+    "}",
+    "struct tree {",
+    "    node mut* own[2] kids;",
+    "    tree mut* own sub;",
+    "}",
+    "fn kid(tree mut* t, node mut* own x) void {",
+    "    t->kids[1] = move(x);",
+    "}",
+    "fn deep(tree mut* t, node mut* own x) void {",
+    "    t->sub->kids[0] = move(x);",
+    "}",
+    "fn star(node mut* own mut* out, node mut* own x) void {",
+    "    *out = move(x);",
+    "}",
+    "fn local_field(node mut* own x) void {",
+    "    tree mut t = tree{};",
+    "    t.kids[0] = move(x);",
+    "    t.kids[0] = null;",
+    "}",
+};
+
+string[13] REPORTED_NAMES = {
+    "refill", "paren", "global_alone", "loop_leak", "param", "deferred", "nested", "index_call",
+    "multi", "kid", "deep", "star", "local_field",
+};
+
+// The error and the note of each function of REPORTED, in order.
+string[26] REPORTS = {
+    "7:13: overwriting owned value: cannot prove 'b->left' is empty here",
+    "7:13: del or move 'b->left' before this store",
+    "10:16: overwriting owned value: cannot prove '(*q).right' is empty here",
+    "10:16: del or move '(*q).right' before this store",
+    "13:7: overwriting owned value: cannot prove 'G' is empty here",
+    "13:7: del or move 'G' before this store",
+    "17:23: overwriting owned value: cannot prove 'p' is empty here",
+    "17:23: del or move 'p' before this store",
+    "21:7: overwriting owned value: cannot prove 'p' is empty here",
+    "21:7: del or move 'p' before this store",
+    "25:19: overwriting owned value: cannot prove 'b->left' is empty here",
+    "25:19: del or move 'b->left' before this store",
+    "31:18: overwriting owned value: cannot prove '((*q)).right' is empty here",
+    "31:18: del or move '((*q)).right' before this store",
+    "37:20: overwriting owned value: cannot prove '(*a)[first(1)]' is empty here",
+    "37:20: del or move '(*a)[first(1)]' before this store",
+    "41:17: overwriting owned value: cannot prove 'q ->right' is empty here",
+    "41:17: del or move 'q ->right' before this store",
+    "48:16: overwriting owned value: cannot prove 't->kids[1]' is empty here",
+    "48:16: del or move 't->kids[1]' before this store",
+    "51:21: overwriting owned value: cannot prove 't->sub->kids[0]' is empty here",
+    "51:21: del or move 't->sub->kids[0]' before this store",
+    "54:10: overwriting owned value: cannot prove '*out' is empty here",
+    "54:10: del or move '*out' before this store",
+    "59:15: overwriting owned value: cannot prove 't.kids[0]' is empty here",
+    "59:15: del or move 't.kids[0]' before this store",
+};
+
+// The line of --overwrite-report of each function of REPORTED, after the name of the file.
+string[13] SITES = {
+    ":7:13 b->left\n",
+    ":10:16 (*q).right\n",
+    ":13:7 G\n",
+    ":17:23 p\n",
+    ":21:7 p\n",
+    ":25:19 b->left\n",
+    ":31:18 ((*q)).right\n",
+    ":37:20 (*a)[first(1)]\n",
+    ":41:17 q ->right\n",
+    ":48:16 t->kids[1]\n",
+    ":51:21 t->sub->kids[0]\n",
+    ":54:10 *out\n",
+    ":59:15 t.kids[0]\n",
+};
+
+// The report of each check that the pass does not prove: the error and its note at the `=` of
+// an assignment, a range of the one character, or at the declared name of a declaration, once
+// for each location; and the line of each in the site list.
+fn the_report_names_each_place_at_its_position() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, REPORTED[..], true);
+    strbuf.str_buf mut sites = strbuf.create();
+    defer strbuf.free(&sites);
+    u64 mut k = 0;
+    while (k < REPORTED_NAMES.len) {
+        fir.func mut f = fir.func{};
+        lower(&e, REPORTED_NAMES[k], &f);
+        emptiness.proof mut p = emptiness.prove(&f);
+        u64 before = check_env.reports(&e.c);
+        emptiness.report(&f, &p, &e.c.m.s);
+        assert(check_env.reports(&e.c) == before + 2);
+        assert(check_env.report_severity(&e.c, before) == "error");
+        assert(check_env.report_severity(&e.c, before + 1) == "note");
+        strbuf.clear(&sites);
+        emptiness.write_sites(&f, &p, &e.c.m.s, &sites);
+        string line = strbuf.view(&sites);
+        assert(str.ends_with(line, SITES[k]));
+        assert(str.starts_with(line, check_env.report_file(&e.c, before)));
+        emptiness.free(&p);
+        fir.func_free(&f);
+        k += 1;
+    }
+    k = 0;
+    while (k < REPORTS.len) {
+        if (check_env.report_text(&e.c, k) != REPORTS[k]) {
+            eprintln(check_env.report_text(&e.c, k), " and not ", REPORTS[k]);
+            panic("emptiness_test: a report differs");
+        }
+        k += 1;
+    }
+    // the error at `=` covers the one character
+    assert(modules_env.report_at(&e.c.m, 0).loc.end_col == 14);
+    // the error at a declared name covers the name
+    assert(modules_env.report_at(&e.c.m, 6).loc.end_col == 24);
+}
+
+// A FIR text with locations and no tree: the report names the FIR place of an assignment, at the
+// one character of its location, and the declared name of a declaration, at its location.
+string[19] TEXT_REPORTED = {
+    "fn main.r1(_1 (b): node mut*) -> void {",
+    "    let _2 (p): node mut* own #9:5;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1 #7:13;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _3;",
+    "        check(overwrite: _2) -> bb2 #9:5;",
+    "    }",
+    "    bb2: {",
+    "        check(overwrite: global main.G) -> bb3 #11:7;",
+    "    }",
+    "    bb3: {",
+    "        del(move global main.G);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+// The report of the three checks of TEXT_REPORTED, none of which the pass proves.
+string[6] TEXT_REPORTS = {
+    "7:13: overwriting owned value: cannot prove '(*_1).0' is empty here",
+    "7:13: del or move '(*_1).0' before this store",
+    "9:5: overwriting owned value: cannot prove 'p' is empty here",
+    "9:5: del or move 'p' before this store",
+    "11:7: overwriting owned value: cannot prove 'global main.G' is empty here",
+    "11:7: del or move 'global main.G' before this store",
+};
+
+// With no tree, the report and the site list name the FIR place, and a declaration its name.
+fn the_report_of_a_fir_text_names_the_fir_place() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    fir.module mut m = pass_env.parse(&e, PRELUDE[..], TEXT_REPORTED[..]);
+    defer fir.module_free(&m);
+    fir.func* f = &m.funcs.items[0];
+    emptiness.proof mut p = emptiness.prove(f);
+    defer emptiness.free(&p);
+    assert(p.checks == 3 && p.unproved == 3);
+    u64 before = check_env.reports(&e.c);
+    emptiness.report(f, &p, &e.c.m.s);
+    assert(check_env.reports(&e.c) == before + 6);
+    u64 mut k = 0;
+    while (k < TEXT_REPORTS.len) {
+        assert(check_env.report_text(&e.c, before + k) == TEXT_REPORTS[k]);
+        k += 1;
+    }
+    strbuf.str_buf mut sites = strbuf.create();
+    defer strbuf.free(&sites);
+    emptiness.write_sites(f, &p, &e.c.m.s, &sites);
+    assert(strbuf.view(&sites) == "t.fir:7:13 (*_1).0\nt.fir:9:5 p\nt.fir:11:7 global main.G\n");
+}
+
+// ---- the release of each allocation ------------------------------------------------------------
+
+// The count of the rounds of proofs between two samples of the release probe.
+u64 PROOFS = 20;
+
+// Each round proves each function of HELD PROOFS times, writes its sites and frees its proof. A
+// proof that keeps a vector of its context, a set of a dataflow or the probes of a walk keeps 32
+// bytes or more in each proof, so 4480 bytes or more in each round, and the program break moves.
+// The probe runs first in main, as the probe of fir_flow_test does: after the other tests, the
+// allocator can serve a leak out of the free chunks that they left.
+fn the_proofs_leave_the_heap_where_it_was() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    fir.module mut m = pass_env.parse(&e, PRELUDE[..], HELD[..]);
+    defer fir.module_free(&m);
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    u64[3] mut break_at = {};
+    u64 mut round = 0;
+    while (round < fir_env.LEAK_ROUNDS) {
+        u64 mut k = 0;
+        while (k < PROOFS) {
+            u64 mut i = 0;
+            while (i < m.funcs.len) {
+                emptiness.proof mut p = emptiness.prove(&m.funcs.items[i]);
+                strbuf.clear(&out);
+                emptiness.write_sites(&m.funcs.items[i], &p, &e.c.m.s, &out);
+                emptiness.free(&p);
+                i += 1;
+            }
+            k += 1;
+        }
+        u64 slot = fir_env.leak_slot(round);
+        if (slot < 3) {
+            break_at[slot] = heap.system_view();
+        }
+        round += 1;
+    }
+    assert(fir_env.moved(break_at) < fir_env.LEAK_BOUND);
+}
+
+// ---- the work limit ----------------------------------------------------------------------------
+
+// Writes into `out` the FIR text of a function with `n` checks, one for each element of a fixed
+// array with the constant keys 0 to n - 1, each after a `del` of its element. Its work is
+// 4n^2 + 4n + 2: n stores of a key, n `del`s and n + 1 terminators, times n checks, plus n + 1
+// blocks times n + 2 locals.
+fn write_elements(u64 n, strbuf.str_buf mut* out) void {
+    strbuf.clear(out);
+    strbuf.append(out, "fn main.big(_1 (v): node mut* own[2] mut*) -> void {\n");
+    u64 mut k = 0;
+    while (k < n) {
+        strbuf.append(out, "    let _");
+        strbuf.append_u64(out, k + 2);
+        strbuf.append(out, ": u64;\n");
+        k += 1;
+    }
+    strbuf.append(out, "    bb0: {\n");
+    k = 0;
+    while (k < n) {
+        strbuf.append(out, "        _");
+        strbuf.append_u64(out, k + 2);
+        strbuf.append(out, " = const u64 ");
+        strbuf.append_u64(out, k);
+        strbuf.append(out, ";\n        del(move (*_1)[_");
+        strbuf.append_u64(out, k + 2);
+        strbuf.append(out, "]);\n");
+        k += 1;
+    }
+    k = 0;
+    while (k < n) {
+        if (k > 0) {
+            strbuf.append(out, "    bb");
+            strbuf.append_u64(out, k);
+            strbuf.append(out, ": {\n");
+        }
+        strbuf.append(out, "        check(overwrite: (*_1)[_");
+        strbuf.append_u64(out, k + 2);
+        strbuf.append(out, "]) -> bb");
+        strbuf.append_u64(out, k + 1);
+        strbuf.append(out, ";\n    }\n");
+        k += 1;
+    }
+    strbuf.append(out, "    bb");
+    strbuf.append_u64(out, n);
+    strbuf.append(out, ": {\n        return;\n    }\n}\n");
+}
+
+// Writes into `out` the FIR text of a function of `t` blocks and 1025 locals with one check: a
+// `del`, a chain of `goto`s, the check and `return`. Its work is 1026t + 1: one statement and t
+// terminators times one check, plus t blocks times 1025 locals. `t` is 3 or more.
+fn write_wide(u64 t, strbuf.str_buf mut* out) void {
+    strbuf.clear(out);
+    strbuf.append(out, "fn main.wide(_1 (b): node mut*) -> void {\n");
+    u64 mut k = 2;
+    while (k < 1025) {
+        strbuf.append(out, "    let _");
+        strbuf.append_u64(out, k);
+        strbuf.append(out, ": u64;\n");
+        k += 1;
+    }
+    strbuf.append(out, "    bb0: {\n        del(move (*_1).0);\n        goto bb1;\n    }\n");
+    k = 1;
+    while (k + 2 < t) {
+        strbuf.append(out, "    bb");
+        strbuf.append_u64(out, k);
+        strbuf.append(out, ": {\n        goto bb");
+        strbuf.append_u64(out, k + 1);
+        strbuf.append(out, ";\n    }\n");
+        k += 1;
+    }
+    strbuf.append(out, "    bb");
+    strbuf.append_u64(out, t - 2);
+    strbuf.append(out, ": {\n        check(overwrite: (*_1).0) -> bb");
+    strbuf.append_u64(out, t - 1);
+    strbuf.append(out, ";\n    }\n    bb");
+    strbuf.append_u64(out, t - 1);
+    strbuf.append(out, ": {\n        return;\n    }\n}\n");
+}
+
+// Writes into `out` the FIR text of a function of two blocks with one check, `n` index
+// temporaries that copy the parameter `_2` and `n` stores into `_2`. Its work is n^2 + 4n + 9:
+// 2n + 1 statements and 2 terminators times one check, 2 blocks times n + 3 locals, and n stores
+// into `_2` times its n temporaries.
+fn write_chain(u64 n, strbuf.str_buf mut* out) void {
+    strbuf.clear(out);
+    strbuf.append(out, "fn main.chain(_1 (b): node mut*, _2 (k): u64) -> void {\n");
+    u64 mut k = 0;
+    while (k < n) {
+        strbuf.append(out, "    let _");
+        strbuf.append_u64(out, k + 3);
+        strbuf.append(out, ": u64;\n");
+        k += 1;
+    }
+    strbuf.append(out, "    bb0: {\n        del(move (*_1).0);\n");
+    k = 0;
+    while (k < n) {
+        strbuf.append(out, "        _");
+        strbuf.append_u64(out, k + 3);
+        strbuf.append(out, " = copy _2;\n");
+        k += 1;
+    }
+    k = 0;
+    while (k < n) {
+        strbuf.append(out, "        _2 = const u64 0;\n");
+        k += 1;
+    }
+    strbuf.append(out, "        check(overwrite: (*_1).0) -> bb1;\n    }\n");
+    strbuf.append(out, "    bb1: {\n        return;\n    }\n}\n");
+}
+
+// Parses the one function of `text`, holds that the verifier accepts it, proves it, and holds
+// its work and its verdicts: with `proved`, each check is proved; else no check is, and `over`
+// is set.
+fn expect_work(lower_env.env mut* e, fir_parse.prelude pre, string text, u64 work, bool proved)
+    void {
+    fir.module mut m = fir_parse.parse_module(&e->c.m.s, "t.fir", text, pre);
+    defer fir.module_free(&m);
+    assert(check_env.errors(&e->c) == 0 && m.funcs.len == 1);
+    fir.func* f = &m.funcs.items[0];
+    pass_env.verified(e, f, "emptiness_test: the verifier refuses the generated function");
+    emptiness.proof mut p = emptiness.prove(f);
+    defer emptiness.free(&p);
+    if (p.work != work) {
+        eprintln("work ", p.work, " and not ", work);
+        panic("emptiness_test: the work differs");
+    }
+    assert(p.checks > 0);
+    if (proved) {
+        assert(!p.over && p.unproved == 0);
+    } else {
+        assert(p.over && p.unproved == p.checks);
+    }
+}
+
+// The work limit, at its value, for each of its three counts: 511 elements take 1046530 work and
+// are proved, 512 take 1050626 and are not; 1022 blocks take 1048573 and 1023 take 1049599; 1021
+// stores into a source of 1021 temporaries take 1046534 and 1022 take 1048581. A limit equal to
+// the work of a small function proves it, and a limit one less proves none of its checks.
+fn the_work_limit_stops_the_proof_of_a_function() void {
+    assert(emptiness.WORK_LIMIT == 1048576);
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, PRELUDE[..], true);
+    fir_parse.prelude pre = fir_parse.prelude{check_env.module_at(&e.c, "main"), &e.c.ck};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    write_elements(511, &text);
+    expect_work(&e, pre, strbuf.view(&text), 1046530, true);
+    write_elements(512, &text);
+    expect_work(&e, pre, strbuf.view(&text), 1050626, false);
+    write_wide(1022, &text);
+    expect_work(&e, pre, strbuf.view(&text), 1048573, true);
+    write_wide(1023, &text);
+    expect_work(&e, pre, strbuf.view(&text), 1049599, false);
+    write_chain(1021, &text);
+    expect_work(&e, pre, strbuf.view(&text), 1046534, true);
+    write_chain(1022, &text);
+    expect_work(&e, pre, strbuf.view(&text), 1048581, false);
+    fir.module mut held = pass_env.parse(&e, PRELUDE[..], HELD[..]);
+    defer fir.module_free(&held);
+    fir.func* f = &held.funcs.items[4];
+    emptiness.proof mut whole = emptiness.prove(f);
+    defer emptiness.free(&whole);
+    assert(whole.checks == 3 && whole.unproved == 0 && !whole.over && whole.work > 0);
+    emptiness.proof mut at = emptiness.prove_within(f, whole.work);
+    defer emptiness.free(&at);
+    assert(at.unproved == 0 && !at.over && at.work == whole.work);
+    emptiness.proof mut under = emptiness.prove_within(f, whole.work - 1);
+    defer emptiness.free(&under);
+    assert(under.over && under.unproved == 3);
+}
+
+fn main() i32 {
+    the_proofs_leave_the_heap_where_it_was();
+    println("release ok");
+    the_entry_store_makes_a_named_local_empty();
+    println("entry ok");
+    del_makes_its_place_empty();
+    println("del ok");
+    a_move_makes_its_place_and_each_place_below_it_empty();
+    println("move ok");
+    a_zero_store_makes_its_place_and_each_place_below_it_empty();
+    println("zero ok");
+    a_fresh_new_makes_each_place_through_its_pointer_empty();
+    println("fresh ok");
+    a_store_kills_each_fact_with_its_base_that_is_not_separate();
+    println("same base ok");
+    two_elements_with_one_key_are_one_place();
+    println("keys ok");
+    a_store_through_a_fresh_pointer_kills_only_its_base();
+    println("fresh store ok");
+    a_store_through_a_pointer_kills_each_fact_reached_through_memory();
+    println("memory ok");
+    a_call_kills_each_fact_but_those_of_a_local_that_is_no_memory();
+    println("calls ok");
+    a_global_has_no_fact_at_the_entry();
+    println("globals ok");
+    a_held_address_reads_as_its_place();
+    println("held ok");
+    a_fact_holds_after_a_join_when_it_holds_on_each_edge();
+    println("join ok");
+    the_sets_reach_past_one_word_and_a_function_needs_no_check();
+    println("bounds ok");
+    two_constant_keys_with_one_value_name_one_element();
+    println("constants ok");
+    a_loop_carries_each_kill_around_its_back_edge();
+    println("loops ok");
+    a_struct_is_a_place_with_fields_below_it();
+    println("aggregates ok");
+    each_kind_of_store_kills_the_facts_that_the_rules_name();
+    println("kill matrix ok");
+    each_store_of_null_makes_its_place_empty_and_kills();
+    println("zero sequence ok");
+    each_read_of_the_pointer_ends_its_freshness();
+    println("freshness ok");
+    only_a_zero_constant_or_its_temporary_is_the_zero_value();
+    println("zero values ok");
+    an_index_temporary_has_the_key_of_the_local_it_copies();
+    println("key shapes ok");
+    the_return_place_is_no_key();
+    println("return key ok");
+    an_address_is_held_with_one_store_one_check_and_one_store();
+    println("held shapes ok");
+    only_an_address_of_fixed_storage_makes_a_local_memory();
+    println("addresses ok");
+    a_store_straight_into_a_local_keeps_other_locals();
+    println("straight stores ok");
+    the_examples_of_the_rule_hold_over_lowered_source();
+    println("examples ok");
+    the_report_names_each_place_at_its_position();
+    the_report_of_a_fir_text_names_the_fir_place();
+    println("report ok");
+    the_work_limit_stops_the_proof_of_a_function();
+    println("work ok");
+    return 0;
+}
