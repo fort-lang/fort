@@ -1,0 +1,88 @@
+//! run
+//! stdout:
+//| 0 0
+//| -1 true
+//| new text
+//| -1 true
+//| 0 0
+//| replaced
+//| -1 true
+//| 0 replaced
+//| -1 true true
+//| 0 0 0
+import std.io;
+import std.libc;
+import std.str;
+import std.strbuf;
+import std.sys;
+
+// libc.rename gives a file a new name (stdlib.md 2.2, D9.8). The test writes one file, renames it,
+// and reads it back under the new name. A second rename replaces a file that exists. A rename of a
+// missing file returns -1 and sets errno to ENOENT.
+fn main() i32 {
+    char mut@ own first = str.to_cstr("t121-first.txt");
+    defer del(first);
+    char mut@ own second = str.to_cstr("t121-second.txt");
+    defer del(second);
+    char mut@ own third = str.to_cstr("t121-third.txt");
+    defer del(third);
+
+    // Write the first file, then rename it to the second name.
+    if (!io.write_file("t121-first.txt", cast("new text", u8@))) {
+        return 1;
+    }
+    println(libc.rename(first.ptr, second.ptr), " ", libc.access(second.ptr, libc.R_OK));
+    println(libc.access(first.ptr, libc.R_OK), " ", sys.errno() == libc.ENOENT);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    if (!io.read_file("t121-second.txt", &text)) {
+        return 1;
+    }
+    println(strbuf.view(&text));
+
+    // The first name names no file now, so a rename of it fails with ENOENT.
+    println(libc.rename(first.ptr, third.ptr), " ", sys.errno() == libc.ENOENT);
+
+    // A rename onto a name that exists replaces that file in one step.
+    if (!io.write_file("t121-third.txt", cast("replaced", u8@))) {
+        return 1;
+    }
+    println(libc.rename(third.ptr, second.ptr), " ", libc.access(second.ptr, libc.R_OK));
+    strbuf.str_buf mut again = strbuf.create();
+    defer strbuf.free(&again);
+    if (!io.read_file("t121-second.txt", &again)) {
+        return 1;
+    }
+    println(strbuf.view(&again));
+    println(libc.access(third.ptr, libc.R_OK), " ", sys.errno() == libc.ENOENT);
+
+    // A rename of a file onto its own name does nothing and returns 0.
+    i32 same = libc.rename(second.ptr, second.ptr);
+    strbuf.str_buf mut kept = strbuf.create();
+    defer strbuf.free(&kept);
+    if (!io.read_file("t121-second.txt", &kept)) {
+        return 1;
+    }
+    println(same, " ", strbuf.view(&kept));
+
+    // A new name in a directory that does not exist fails with ENOENT, and the file keeps its name.
+    char mut@ own lost = str.to_cstr("t121-no-such-dir/t121.txt");
+    defer del(lost);
+    println(libc.rename(second.ptr, lost.ptr), " ", sys.errno() == libc.ENOENT, " ",
+            libc.access(second.ptr, libc.R_OK) == 0);
+
+    // A directory takes a new name too, and the file in it moves with it.
+    char mut@ own dir = str.to_cstr("t121-dir");
+    defer del(dir);
+    char mut@ own moved = str.to_cstr("t121-moved");
+    defer del(moved);
+    char mut@ own inside = str.to_cstr("t121-moved/t121-second.txt");
+    defer del(inside);
+    char mut@ own placed = str.to_cstr("t121-dir/t121-second.txt");
+    defer del(placed);
+    i32 made = libc.mkdir(dir.ptr, 0o755);
+    i32 put = libc.rename(second.ptr, placed.ptr);
+    println(made + put, " ", libc.rename(dir.ptr, moved.ptr), " ",
+            libc.access(inside.ptr, libc.R_OK));
+    return 0;
+}

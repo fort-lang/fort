@@ -892,13 +892,18 @@ bullet at a time and without a rewrite.
   it in PR CI and in the merge queue. It exits 1 for a stale anchor or a table without a
   `comment`. Run `ctest --preset debug -R '^mutation_anchors_'` after a change to a source.
   **Plain `--check` lets a stale row pass when the row's `new` text is in the file.** It reads
-  such a row as applied by a round in progress. The `new` text of 46 of 294 rows is in the
-  clean file, and the repointed `D3.1` row is one of them: a scratch edit that moved its anchor
-  left `--check` at exit 0. `--strict` counts no row as applied, so a missing anchor is stale.
-  With one row applied at a time, `--strict` exits 1 for 293 of 294 rows. The other row
-  (`D3.8` of `emitter_fort.json`) keeps its anchor inside `new`. So **a stage must not run
-  these tests**: the stage of `emitter_bootstrap.json` that runs `ctest -L unit` excludes them
-  with `-E "^mutation_anchors_"`. Plain `--check` exits 0 for all 294 rows applied one at a time.
+  such a row as applied by a round in progress. Some rows have `new` text that is in the clean
+  file, and the repointed `D3.1` row is one of them: a scratch edit that moved its anchor left
+  `--check` at exit 0. This command prints the number of those rows, then the number of rows of
+  all tables:
+  `python3 -c 'import json,glob; r=[m["new"] in open(m["file"]).read() for t in
+  sorted(glob.glob("tools/mutations/*.json")) for m in json.load(open(t))["mutations"]];
+  print(sum(r), len(r))'`. Run it from the top of the worktree.
+  `--strict` counts no row as applied, so a missing anchor is stale. With one row applied at a
+  time, `--strict` exits 1 for each row but one. That row (`D3.8` of `emitter_fort.json`) keeps
+  its anchor inside `new`. So **a stage must not run these tests**: the stage of
+  `emitter_bootstrap.json` that runs `ctest -L unit` excludes them with
+  `-E "^mutation_anchors_"`. Plain `--check` exits 0 for each row applied one at a time.
   The fixture `test/mutate/strict_table.json` has one row of this shape. The ctest
   `mutate_check_applied` requires exit 0 from plain `--check` on it, and
   `mutate_check_strict_stale` requires a failure from `--check --strict`.
