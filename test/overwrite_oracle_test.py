@@ -28,7 +28,8 @@ FLAGS = re.compile(r"^//! flags:(.*)$", re.M)
 # The programs whose own sites stop: 025, 031, 008, 012, 020 and 066 of test/lang/run.
 OWN_SITES = 6
 # The site, as file name, line and column, of each program that stops in a module it imports.
-IMPORTED_SITES = {"059_io_slot_reuse.ft": ("io.ft", 135, 10)}
+# The key is the path of the program below test/lang/run.
+IMPORTED_SITES = {"modules/imported_overwrite/main.ft": ("slot.ft", 8, 10)}
 
 
 def trapping_programs():
@@ -67,8 +68,9 @@ class OracleTest(unittest.TestCase):
             sites = [site_of(line) for line in report(path)]
             with self.subTest(program=str(path.relative_to(LANG))):
                 if found.group(1) is None:
-                    self.assertIn(path.name, IMPORTED_SITES)
-                    self.assertIn(IMPORTED_SITES[path.name], sites)
+                    key = str(path.relative_to(LANG / "run"))
+                    self.assertIn(key, IMPORTED_SITES)
+                    self.assertIn(IMPORTED_SITES[key], sites)
                     other += 1
                 elif Path(found.group(1)).name == path.name:
                     want = (path.name, int(found.group(2)), int(found.group(3)))

@@ -79,7 +79,9 @@ fn reserve(store mut* s) void {
     u64 mut i = 0;
     while (i < s->count) {
         // Move each record because its strings are unique values.
+        del(bigger[i].uri);
         bigger[i].uri = move(s->items[i].uri);
+        del(bigger[i].text);
         bigger[i].text = move(s->items[i].text);
         bigger[i].version = s->items[i].version;
         i += 1;
@@ -94,15 +96,21 @@ fn open(store mut* s, string uri, string text, i64 version) void {
     i64 found = find(s, uri);
     if (found >= 0) {
         u64 i = cast(found, u64);
+        string own copy = str.dup(text);
         del(s->items[i].text);
-        s->items[i].text = str.dup(text);
+        s->items[i].text = move(copy);
         s->items[i].version = version;
         return;
     }
     reserve(s);
-    s->items[s->count].uri = str.dup(uri);
-    s->items[s->count].text = str.dup(text);
-    s->items[s->count].version = version;
+    string own uri_copy = str.dup(uri);
+    string own text_copy = str.dup(text);
+    u64 k = s->count;
+    del(s->items[k].uri);
+    s->items[k].uri = move(uri_copy);
+    del(s->items[k].text);
+    s->items[k].text = move(text_copy);
+    s->items[k].version = version;
     s->count += 1;
 }
 
@@ -114,9 +122,10 @@ fn update(store mut* s, string uri, string text, i64 version) bool {
         return false;
     }
     u64 i = cast(found, u64);
-    // Delete before assignment because assignment over a unique value traps.
+    string own copy = str.dup(text);
+    // Delete before assignment because the compiler must prove the destination is empty.
     del(s->items[i].text);
-    s->items[i].text = str.dup(text);
+    s->items[i].text = move(copy);
     s->items[i].version = version;
     return true;
 }
@@ -131,7 +140,9 @@ fn close(store mut* s, string uri) bool {
     del(s->items[i].uri);
     del(s->items[i].text);
     while (i + 1 < s->count) {
+        del(s->items[i].uri);
         s->items[i].uri = move(s->items[i + 1].uri);
+        del(s->items[i].text);
         s->items[i].text = move(s->items[i + 1].text);
         s->items[i].version = s->items[i + 1].version;
         i += 1;

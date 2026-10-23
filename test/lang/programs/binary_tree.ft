@@ -67,9 +67,13 @@ fn insert(tnode mut* own here, string key, i64 value, u64 mut* count) tnode mut*
     tnode mut* own mut node = move(here);
     i32 order = compare(key, node->key);
     if (order < 0) {
-        node->left = insert(move(node->left), key, value, count);
+        tnode mut* own left = insert(move(node->left), key, value, count);
+        del(node->left);
+        node->left = move(left);
     } else if (order > 0) {
-        node->right = insert(move(node->right), key, value, count);
+        tnode mut* own right = insert(move(node->right), key, value, count);
+        del(node->right);
+        node->right = move(right);
     } else {
         node->value = value;
     }
@@ -135,25 +139,34 @@ fn take_min(tnode mut* own here, tnode mut* own mut* out) tnode mut* own {
     tnode mut* own mut node = move(here);
     if (node->left == null) {
         tnode mut* own right = move(node->right);
+        del(*out);
         *out = move(node);
         return move(right);
     }
-    node->left = take_min(move(node->left), out);
+    tnode mut* own left = take_min(move(node->left), out);
+    del(node->left);
+    node->left = move(left);
     return move(node);
 }
 
 fn remove(tnode mut* own here, string key, bool mut* removed) tnode mut* own {
+    // Declared before the first call, which can write this local through its address.
+    tnode mut* own mut successor = null;
     if (here == null) {
         return null;
     }
     tnode mut* own mut node = move(here);
     i32 order = compare(key, node->key);
     if (order < 0) {
-        node->left = remove(move(node->left), key, removed);
+        tnode mut* own left = remove(move(node->left), key, removed);
+        del(node->left);
+        node->left = move(left);
         return move(node);
     }
     if (order > 0) {
-        node->right = remove(move(node->right), key, removed);
+        tnode mut* own right = remove(move(node->right), key, removed);
+        del(node->right);
+        node->right = move(right);
         return move(node);
     }
     *removed = true;
@@ -168,21 +181,27 @@ fn remove(tnode mut* own here, string key, bool mut* removed) tnode mut* own {
         return move(left);
     }
     // Two children: the in-order successor takes this node's place.
-    tnode mut* own mut successor = null;
     tnode mut* own right = take_min(move(node->right), &successor);
-    successor->left = move(node->left);
-    successor->right = move(right);
+    tnode mut* own heir = move(successor);
+    del(heir->left);
+    heir->left = move(node->left);
+    del(heir->right);
+    heir->right = move(right);
     del(node);
-    return move(successor);
+    return move(heir);
 }
 
 fn insert_into(tree mut* t, string key, i64 value) void {
-    t->root = insert(move(t->root), key, value, &t->count);
+    tnode mut* own root = insert(move(t->root), key, value, &t->count);
+    del(t->root);
+    t->root = move(root);
 }
 
 fn remove_from(tree mut* t, string key) bool {
     bool mut removed = false;
-    t->root = remove(move(t->root), key, &removed);
+    tnode mut* own root = remove(move(t->root), key, &removed);
+    del(t->root);
+    t->root = move(root);
     if (removed) {
         t->count--;
     }

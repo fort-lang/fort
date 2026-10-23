@@ -1,21 +1,21 @@
 //! run
-//! abort
-//! stderr: runtime error: overwriting owned value
 //! stdout:
 //| true
 //| true 5 first
 //| true 6 second
+//| true 5 first
 import std.io;
 
-// A caller that reuses an own slot dels it first: the store inside
-// read_file_bytes never frees what the slot held, so a live slot is the
-// overwriting owned value runtime error in a checked build and a leak in a
-// release build (D17.11, stdlib.md 2.4).
+// A caller can reuse an own slot. read_file_bytes dels *out just before its
+// store, because the entry value of *out is unknown to it (D17.11, stdlib.md
+// 2.4). On an empty slot that del frees nothing, and on a live slot it frees
+// the old bytes, so the slot never leaks.
 fn main() i32 {
+    // The slot comes before the first call, which can write it (D17.11).
+    u8 mut@ own mut data = {};
     println(io.write_file("t028-slot-a.txt", cast("first", u8@)) &&
             io.write_file("t028-slot-b.txt", cast("second", u8@)));
 
-    u8 mut@ own mut data = {};
     defer del(data);
     println(io.read_file_bytes("t028-slot-a.txt", &data), " ", data.len, " ",
             cast(data[..], string));
@@ -25,9 +25,9 @@ fn main() i32 {
     println(io.read_file_bytes("t028-slot-b.txt", &data), " ", data.len, " ",
             cast(data[..], string));
 
-    // Not released, it is a live slot, and the store inside the library traps
-    // rather than dropping the allocation it holds.
-    io.read_file_bytes("t028-slot-a.txt", &data);
-    println("not reached");
+    // Not released, the slot is live, and the library frees the old bytes
+    // before it stores the new ones.
+    println(io.read_file_bytes("t028-slot-a.txt", &data), " ", data.len, " ",
+            cast(data[..], string));
     return 0;
 }
