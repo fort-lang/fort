@@ -767,12 +767,8 @@ Sections:
   expression, and parenthesized lvalues (a constant is an immutable lvalue: addressable and the
   operand of a span expression, never assignable). `.len` and `.ptr` are never lvalues. Field access
   and indexing on an rvalue struct or array are allowed and yield rvalues (copied through a
-  temporary). `&e` requires an lvalue. The ownership proof rejects returned or retained borrows
-  that outlive local, temporary, or by-value parameter storage (D17.14).
-  This includes addresses into inline aggregate fields and spans of local arrays.
-  Borrowed parameter slots and the caller storage they reference have separate storage boundaries.
-- history: Amended 2026-10-01 (T-272): The previous rule did not diagnose returned local addresses
-  or local-array spans.
+  temporary). `&e` requires an lvalue. Returning the address of a local or a span of a local array
+  is not diagnosed (documented undefined behavior, as in C).
 
 ### D6.8 Indexing
 - owner: `core-language.md` (Expressions).
@@ -787,14 +783,9 @@ Sections:
   only), a span, or a string; bounds are any integer type or untyped constants; the result is a span
   (or string) whose mutability is that of `e`'s elements. The runtime check is `0 <= lo <= hi <=
   len`, relative to the operand, not the original allocation. `p[lo..hi]` on a `T*` or `T mut*`
-  produces a `T@` or `T mut@` without a runtime range check.
-  For fort storage, the ownership proof requires a live source and sufficient extent for the range.
-  Foreign storage uses D17.13 trust. The operation supplies no proof exemption.
+  produces a `T@` or `T mut@` with no check; this is the explicit unsafe escape for foreign memory.
   No span can be taken of a `void*`.
-  Ordinary array, span, and string bounds keep their existing runtime-check contract (D10.6).
 - history: Amended 2026-09-10: the operation was called slicing and its result a slice (D3.5).
-  Amended 2026-10-01 (T-272): Raw-pointer spans previously supplied an unchecked foreign-memory
-  escape.
 
 ### D6.10 The arrow operator
 - owner: `core-language.md` (Expressions).
@@ -1110,20 +1101,6 @@ Sections:
   Linux reaches them through procedure linkage and global offset tables.
   Mac reaches them through Mach-O stubs and global offset tables.
   The runtime is fort, so a call into it is a direct fort-to-fort call like any other.
-  A fort function gets a call from outside fort source in four ways only.
-  Foreign code calls a function value that it receives from fort code.
-  The C start-up code calls the emitted `main`, which calls the entry module's `main` (D11.6).
-  Generated code calls `std.rt` bodies in three sequences (D11.6, `toolchain.md` 5.1).
-  Start-up and shutdown call `args_init`, `args` and `shutdown`.
-  Runtime checks and the builtins `panic` and `assert` call the 8 `fail_*` bodies, `panic` and
-  `assert_fail`. The code of `new` and `del` calls `alloc` and `free`.
-  The host of a library calls the entries of that library (D17.19).
-  Each other foreign call is outside the language contract. An example is a linked object or
-  `dlsym` that names a dotted fort symbol of an executable.
-  The ownership proof assumes no such call (D17.13).
-  A library check uses the same contract.
-  The host and fort callers must meet the caller requirements that the check infers (D17.13,
-  D17.19).
 - history: Amended 2026-09-10 with D19: the assembler directives that spelled this became IR linkage
   words. Amended 2026-09-11: quoting was said to cover dotted names and to keep the emitter free of
   per-name analysis, which left a legal entry base name holding a `"` emitting invalid IR that clang
@@ -1139,13 +1116,6 @@ Sections:
   Amended 2026-09-28 (T-212): the compiler also emitted `fort_entry` in the entry module, and that
   name was reserved as well. The emitted `main` now calls the entry module's `main` itself
   (D11.6), so the compiler emits one unmangled definition and `fort_entry` is an ordinary C name.
-  Amended 2026-10-16: the rule did not say how foreign code can call a fort function. Every fort
-  function has an external symbol, so a linked object could name one, and the ownership proof
-  had no contract for that call. The four ways above are now the contract.
-  The user ratified the executable contract on 2026-10-16; the coordinator ratified the library
-  sentence, which restates D17.19, on 2026-10-17.
-  Amended 2026-10-22: the user made the overwrite check static, so `fail_overwrite` left the
-  runtime and 8 `fail_*` bodies remain, not 9 (D17.11).
 
 ### D9.8 Extern declarations
 - owner: `module-system.md`.
@@ -1368,22 +1338,15 @@ Sections:
 
 ### D10.7 Undefined behavior in v1
 - owner: `memory-model.md`.
-- rule: The ownership proof rejects invalid or unproved fort temporal storage operations (D17.14).
-  Foreign trust can hide invalidation, dangling results, ownership duplication, and invalid release
-  (D17.13). These foreign violations remain undefined behavior.
-  Dereferencing `null`, calling a null function pointer, and data races remain undefined behavior.
-  Foreign raw-pointer ranges beyond the object remain undefined behavior.
-  The proof rejects a proved empty-owner dereference. It does not establish total memory safety.
-  Existing bounds, nullability, arithmetic, and data-race rules still apply.
-  Everything else is defined or a diagnosed error. There is no strict-aliasing rule.
-  Reading an object through another same-size type yields its bit pattern:
-  `*cast(&x, u64*)` for an `f64 x` is defined.
-  Same-size reinterpretation retains source and extent obligations (D6.9, D17.14).
+- rule: Undefined behavior in v1 is limited to: using a view, or a copy made before a `move` or
+  `del`, after the allocation was freed; `del` of an `extern` result that is not the start of an
+  allocation; dereferencing `null` or a dangling pointer; `p[lo..hi]` beyond the object, calling a
+  null function pointer, and data races. Everything else is defined or a diagnosed error. In
+  particular there is no strict-aliasing rule: reading an object through a pointer to another type
+  of the same size (`*cast(&x, u64*)` for an `f64 x`) is defined and yields the bit pattern.
 - history: Amended 2026-09-29 (T-257): the list held "`del` of adopted memory (D17.3) that is not
   the start of an allocation" and "writing through a cast that added mutability into read-only
   memory". A cast adds neither `own` nor `mut` (D3.14); the second item was stale since T-085.
-  Amended 2026-10-01 (T-272): The previous list left fort dangling views and local storage escapes
-  undiagnosed.
 
 ### D10.8 Stack probes
 - owner: `memory-model.md`.
@@ -1485,13 +1448,7 @@ Sections:
   `main` calls `std.rt.args_init(argc, argv)`, which builds the `string@` of arguments from `argv`,
   then `std.rt.args()`, which writes that span into the frame of the emitted `main`. It then calls
   the entry module's `main` (D8.6): with the span when that `main` declares the parameter, and with
-  no argument when it does not. On return, it calls `std.rt.shutdown`, the runtime cleanup.
-  `shutdown` flushes runtime buffers first. It then releases the runtime-owned argument headers,
-  before the final normal-exit boundary (D17.19).
-  Argument bytes remain borrowed from C startup storage. The entry returns `status & 0xFF`.
-  The compiler accounts for this generated sequence even when it lies outside source-function FIR.
-  `std.rt.exit` calls `std.rt.shutdown` before foreign process termination.
-  It does not execute caller defers or automatically delete user globals.
+  no argument when it does not. It then calls `std.rt.flush_all()` and returns `status & 0xFF`.
   The span goes by pointer, which is D9.9's internal convention for an aggregate parameter. The
   span in the frame of the emitted `main` is the caller-made copy of that convention, so no second
   copy exists. `toolchain.md` 5 fixes the runtime entry points and `toolchain.md` 6 the definition
@@ -1508,11 +1465,6 @@ Sections:
   entry module's `main` declared the parameter, then called that `main`. The T-088 amendment left
   `fort_entry` unchanged and gave no reason for it. The emitted `main` now calls the entry
   module's `main` itself and passes its own span, which D9.9 already makes the caller-made copy.
-  Amended 2026-10-02 (T-277): Normal exit previously flushed without an argument-storage cleanup
-  requirement. Final runtime cleanup now precedes the D17.19 obligation boundary.
-  Amended 2026-10-08: the rule named no function for the runtime cleanup, and the emitted `main`
-  called `std.rt.flush_all` only. The user chose one runtime shutdown function that flushes and
-  then releases. The emitted `main` and `std.rt.exit` call it, and toolchain.md 5.1 lists it.
 
 ### D11.7 How the print family writes a value
 - owner: `memory-model.md` (Runtime errors), `toolchain.md` (Build modes, runtime).
@@ -1961,15 +1913,9 @@ alignment and packed attributes (idiom: an opaque `u8[N]` field and a C shim); s
 compilation and interface files; conditional compilation; labeled `break` (idiom: a flag or a
 helper function); raw strings; a blank identifier; compile-time function evaluation; `alignof`;
 `sizeof(expr)`; array suffixes after a trailing pointer suffix (`i32[4]*[2]`, idiom: a struct);
-string `switch`; `goto` (never). Amended 2026-09-10: spans were called slices (D3.5).
-Amended 2026-10-01 (T-272): removed compile-time ownership proof from the deferred features.
-D17.14 and D19.8 define that proof and its staged delivery.
-A stricter rule that forbids current zero-value inspections after `move` or `del` remains deferred.
-Note 2026-10-03: The deferred stricter rule is the recorded branch ruling of 2026-09-18:
-"every read of an emptied local is an error".
-Branch `feat/local-linear-check` records that ruling at `77bb6a41`.
-Main never adopted it. D17.9 keeps zero-value inspections legal.
-The proof adds no general resource type system for file descriptors, sockets, or scalar handles.
+string `switch`; linear ownership, that is compile-time detection of leaks and of use after
+`move` (idiom: `defer del`, and the zeroing that `move` and `del` leave behind, D17); `goto`
+(never). Amended 2026-09-10: spans were called slices (D3.5).
 
 Deferred at the C boundary (2026-09-11, T-025): an extern link name or alias.
 An extern still has no link name of its own; its declared name is its C symbol (D9.8).
@@ -2156,9 +2102,6 @@ says ownership is "by convention", this section supersedes it.
   Bootstrap-0 does not implement `?:` at all (`toolchain.md` 7.3), so that clause is carried by the
   self-hosted compiler alone: T-044 added it, with the `fail` test for
   `use(flag ? new(node) : new(node))` (`test/lang/fail/ownership/037_ternary_own_arms.ft`).
-  Lending copies the source relation without transferring allocation ownership.
-  Mutable aliases remain legal under the existing mutability rules.
-  The proof checks their ordered ownership effects; it does not require exclusive borrowing.
 - history: Amended 2026-09-11: the comparison clause read "so `own` never blocks a comparison"
   without distinguishing an lvalue from an rvalue, which D17.8's "anything else is a compile error"
   contradicts for the rvalue (T-022). Amended 2026-09-12 (T-105): the stage1 clause cited `(D3.10)`
@@ -2171,8 +2114,6 @@ says ownership is "by convention", this section supersedes it.
   subset, and it still listed nothing stage1 lacks. So the note above needed a date and no
   correction. Amended 2026-09-24: "Stage1" in the rule became "Bootstrap-0", the new name of the
   C compiler. The notes above use the old name.
-  Amended 2026-10-01 (T-272): Lending gained source relations and temporal proof obligations without
-  exclusive borrowing.
 
 ### D17.5 Transfer
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,
@@ -2183,10 +2124,6 @@ says ownership is "by convention", this section supersedes it.
   not a local) requires `move(lv)`. An `own` **rvalue** (`new(...)`, a call result, `move(...)`,
   `cast(...)` to an `own` type) flows into an `own` place without it. `return x` where `x` is a
   local variable or parameter of `own` type is an implicit `move`.
-  Transfer preserves allocation identity independently of the owning place.
-  Existing views into that live heap allocation remain valid after the transfer.
-  A view into owner-slot storage instead observes the slot's changed contents.
-- history: Amended 2026-10-01 (T-272): Transfer gained allocation-source preservation obligations.
 
 ### D17.6 The move builtin
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,
@@ -2201,13 +2138,6 @@ says ownership is "by convention", this section supersedes it.
   may be taken out of what was only lent. Fields and elements of a local value count as the local.
   Moving a zero value yields a zero value. `move` and `del` of a module-level constant (D7.10) are
   errors: it lives in read-only memory.
-  A whole aggregate move transfers its complete value, including borrowed and scalar fields.
-  It leaves the source aggregate at its zero value. A projected move empties only its selected
-  place.
-  A move does not rebase borrowed addresses into inline storage.
-  The proof tracks transfer separately from generated clearing of fixed temporary storage.
-- history: Amended 2026-10-01 (T-272): The proof distinguishes heap sources, owner slots, and
-  aggregate transfer state.
 
 ### D17.7 Owning aggregates
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,
@@ -2218,11 +2148,6 @@ says ownership is "by convention", this section supersedes it.
   (initialization, assignment, a by-value parameter, a literal element) requires `move`; returning a
   local owning value is an implicit move. Functions therefore take `vec*` or `vec mut*`. `del` of an
   aggregate is an error: `del` is shallow, and a struct frees its own fields.
-  The proof checks each owning leaf, including leaves within nested aggregates.
-  Release or transfer owned descendants before deleting their containing allocation.
-  Aggregate replacement must not discard live ownership obligations (D17.11, D17.14).
-- history: Amended 2026-10-01 (T-272): Owning aggregates gained residual-descendant and overwrite
-  proof obligations. Del stays shallow.
 
 ### D17.8 An owning temporary must land
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,
@@ -2234,9 +2159,6 @@ says ownership is "by convention", this section supersedes it.
   new(node);`, `use(str.dup(x))`, `cast(new(node), node*)`), taking a span of it, indexing or taking
   `.ptr` of it (`new(u8, 8)[..4]`, `new(i32, 2)[0]`), accessing a field of an owning aggregate
   rvalue, and discarding it as an expression statement (`move(x);`, `str.dup(s);`).
-  The proof preserves these landing rules. It tracks temporary storage to its source-defined end.
-  An owning temporary supplies no exception for borrowing or retention.
-- history: Amended 2026-10-01 (T-272): Temporary landing remains required under the ownership proof.
 
 ### D17.9 What del requires
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,
@@ -2246,16 +2168,9 @@ says ownership is "by convention", this section supersedes it.
   span or `string own`, as an lvalue or an rvalue. On an lvalue, `del` empties the operand under the
   rules of D17.6, with the same mutability requirement through indirections; on an rvalue it only
   frees. `del(null)` (the literal adopts `void* own`) and `del` of a zero span or string are no-ops,
-  so `del(buf); del(buf);` frees once. Reading an emptied owner's zero value remains legal.
-  Null comparisons and zero span-length inspections remain legal after `del` or `move`.
-  The proof rejects a dereference through a proved empty owner. `del` of
+  so `del(buf); del(buf);` frees once, and a use after `del` or `move` dereferences `null`. `del` of
   a view, a sub-span, a `.ptr`, a stack address or a literal is a compile error, because none of
   them has an `own` type. This supersedes the earlier "del does not null its argument".
-  A zero-element allocation still has an allocation identity and a release or transfer obligation.
-  Its zero length does not make it an empty owner. Del requires valid ownership of its allocation.
-  Release invalidates borrows of that allocation. Refilling an owner place does not revive them.
-- history: Amended 2026-10-01 (T-272): The proof preserves empty del and zero inspections. It tracks
-  allocation identity apart from length.
 
 ### D17.10 Ownership in a range loop
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,
@@ -2278,14 +2193,9 @@ says ownership is "by convention", this section supersedes it.
   The checker refuses owning aggregate elements, because a loop variable cannot copy them without
   `move`. Iterate those collections by index.
   Moving an element out is explicit: `move(kids[i])`.
-  The storage loan lasts for the whole loop body. Local last-use reasoning does not shorten it.
-  Alias and call proofs must preserve that duration (D19.8).
 - history: Amended 2026-10-01 (T-263): The loop holds a lent header before its first iteration.
   The checker refuses operations that invalidate the collection storage inside the body.
   The previous rule lent an owning collection in its original place without this refusal.
-  Amended 2026-10-01 (T-272): The ownership proof preserves the whole-body storage loan from T-263.
-  Amended 2026-10-04: The proof enforces the loan from FIR loan statements.
-  The lowering assigns the duration once. The language rule remains unchanged.
 
 ### D17.11 The overwrite check
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,
@@ -2392,12 +2302,9 @@ says ownership is "by convention", this section supersedes it.
 - history: Amended 2026-09-11: `for (i32 mut i = 0; i < 3; i++) { i32 mut* own p = new(i32); }`
   leaked one allocation per iteration with no diagnostic, while the same program written as an
   assignment trapped (T-022's review).
-  Amended 2026-10-01 (T-272): Static overwrite obligations now include aggregate leaves. The
-  runtime-check contract stays unchanged.
   Amended 2026-10-22: the user made the overwrite check static. Before, checked builds trapped at
   run time on a store over a live `own` value, and release builds stored without a check. The user
   ruled that a destination the compiler cannot prove empty is an error ("Unknown is an error").
-  The paragraph on the separate ownership proof left this decision.
   The coordinator ratified on 2026-10-22 that a place through any pointer local that is not
   memory is tracked, and that a store through a pointer keeps the facts of its separate fields.
   The coordinator also ratified that an element with a constant or local index is tracked, and
@@ -2415,12 +2322,8 @@ says ownership is "by convention", this section supersedes it.
   `cast(move(buf), string own)` (the target says `own`, so the source must be moved, D3.14);
   `cast(buf, string)` lends a view instead. A store into a `string own` lvalue obeys the
   overwrite check of D17.11, at compile time.
-  Borrowed strings retain their character-source relations through casts, copies, fields, and calls.
-  A retained key does not extend its character allocation's lifetime (D17.14).
-- history: Amended 2026-10-01 (T-272): Borrowed character sources gained retention proof
-  obligations.
-  Amended 2026-10-22: the user made the overwrite check static, and this decision names it for
-  `string own` (D17.11).
+- history: Amended 2026-10-22: the user made the overwrite check static, and the rule gained the
+  sentence on a store into a `string own` lvalue (D17.11).
 
 ### D17.13 own in an extern signature
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,
@@ -2434,450 +2337,22 @@ says ownership is "by convention", this section supersedes it.
   signature (D9.8). The owning form is a fort function that allocates the buffer itself:
   `std.libc` declares `realpath` with a `char mut*` buffer, and `std.os.real_path` allocates that
   buffer with `new`.
-  An extern declaration is the implicit foreign trust boundary.
-  Trust its declared ABI, types, ownership convention, storage validity, and extent.
-  Check known fort argument sources before the call. Apply signature ownership transfers.
-  An own input transfers its obligation. A borrowed input alone does not transfer ownership.
-  An own result creates a fresh obligation under the declaration's uniqueness promise.
-  A borrowed result has a trusted foreign source. Missing foreign bodies or summaries cause no
-  error.
-  Permit access and slicing of trusted results without inferred source relations or static extents.
-  This trust does not prove non-nullness, initialization, alignment, or foreign storage lifetime.
-  Foreign callers and implementations must satisfy those requirements.
-  Keep known fort ownership facts across the call. Missing summaries do not block later cleanup.
-  Hidden foreign aliases, retention, releases, writes, and callback effects remain outside the
-  proof.
-  Do not infer that foreign code has no effects.
-  A foreign result may alias fort storage. Without a source relation, the proof cannot track that
-  alias.
-  Preserve foreign trust through copies, casts, fields, returns, and fort wrappers.
-  Other fort source relations keep their proof obligations. A raw cast cannot create foreign trust.
-  Trust arguments supplied at foreign entry points. Analyze fort callback bodies with symbolic
-  inputs.
-  This boundary requires no lifetime annotation, unsafe construct, contract syntax, or effect
-  summary.
 - history: Amended 2026-09-14 (T-086): `malloc` was declared `void* own`, because `void mut*` was
   not a type until D3.11 was amended.
   Amended 2026-09-29 (T-257): added the borrowing form for a C result that is owned on some calls
   only. A cast no longer adds `own` (D3.14), so an `extern` signature is the one way that C memory
   gets an owner.
-  Amended 2026-10-01 (T-272): The previous extern rule described convention without the full
-  foreign trust boundary. Hidden foreign effects stay outside proof.
 
-### D17.14 The ownership proof
+### D17.14 What ownership does not track
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,
   `del`, transfer, lending, the overwrite check), `core-language.md` (the `move` builtin,
   statements).
-- rule: The compiler proves temporal storage and allocation ownership obligations.
-  It checks fort operations in the complete checked import closure.
-  It rejects an operation when a reaching path violates its obligation.
-  It also rejects an operation when the analysis cannot prove its obligation.
-  D17.13 supplies foreign trust.
-  The proof covers dangling storage, lost ownership, invalid release, and invalid transfer.
-  It separates place contents from source validity and allocation identity from owner-place
-  identity.
-  A copy of a reference value, alone or as a leaf of a whole aggregate copy, is a semantic use
-  of it, so copying a dangling reference is an invalid use.
-  A whole aggregate move copies each borrowed leaf, so it is a semantic use of each one too.
-  A copy of a valid reference preserves its source relations.
-  Casts, retained fields, elements, globals, and available fort calls also preserve source
-  relations.
-  Taking an address, retaining a value, or reaching storage through an alias ends no proof
-  obligation.
-  Release or transfer residual owned leaves before normal storage end.
-  Local storage ends at its FIR dead marker. Temporary storage ends at its source-defined boundary.
-  By-value parameter storage ends at each normal return after deferred effects, even without dead
-  markers.
-  Its residual owned leaves still require cleanup. Symbolic caller storage has a separate boundary.
-  Check returned or retained borrows against their source boundary after deferred effects.
-  Permit release after a borrow's last semantic use. An unused dangling local alone requires no
-  error.
-  Escaping results and retained fields preserve caller obligations beyond local last use.
-  A replacement store need not read a dead borrow's previous value.
-  Branch states may differ if later operations satisfy each reaching state.
-  Loops preserve zero-iteration paths and residual obligations across iterations and scope exits.
-  Summaries carry normal-return, abort, and unknown outcomes with relevant input conditions.
-  Only proved absence of normal return removes a caller continuation. Unknown preserves normal
-  cleanup.
-  Abort paths require no cleanup. Allocation obligations cover memory, not scalar resources.
-  Executable owning globals must be empty at normal exit.
-  Libraries retain ownership between calls and provide explicit cleanup.
-  The proof adds no lifetime annotations, unsafe syntax, runtime identity tracking, or source
-  exemptions.
-  It preserves mutable aliases, current ownership syntax, representations, and the ABI.
-  D19.8 defines the analysis boundary and staged whole-feature selection.
-  Detailed place, heap, raw-region, convergence, and global-boundary rules refine this base
-  contract.
+- rule: Not tracked, exactly as in C: a view, or a copy made before a `move` or `del`, used after
+  the allocation was freed; an `own` value that is never freed. The linear check that would make
+  leaks and use after `move` compile errors is deferred (D15); this design is its intended base
+  and adds no syntax it would not need.
 - history: Amended 2026-09-29 (T-257): the list held "two `own` copies made through `cast`". A cast
   no longer adds `own` (D3.14), and `cast(move(x), ...)` ends the source binding (D17.5).
-  Amended 2026-10-01 (T-272): The previous rule deferred leak and dangling-view proof and left
-  escaped fort storage untracked.
-  Amended 2026-10-08: A copy of a reference value, alone or as a leaf of a whole aggregate copy,
-  is a semantic use, so copying a dangling reference is an invalid use. Before, the rule said
-  only that copies preserve source relations.
-  Amended 2026-10-16: A whole aggregate move is a semantic use of each borrowed leaf, as a copy
-  is. Before, the rule named only a copy as a use. The user ratified this amendment on
-  2026-10-16.
-
-### D17.15 Place identity and aggregate storage
-- owner: `memory-model.md` (2.6), `fir.md` (5.5 and 9.6), `type-system.md` (8.5).
-- rule: The proof separates storage slots, pointed-to sources, and allocation identities.
-  A slot has an object identity and a projected storage region.
-  Bind a dynamic index to its value at the operation. Reassigning its local changes that value.
-  Instantiate caller aliases before comparing storage or applying effects.
-  Equal index values select equal slots only through the same proved backing storage.
-  Different indices can prove disjoint element slots through proved non-overlapping regions.
-  They never prove different pointees or allocations by themselves.
-  Use finite equality, inequality, and range partitions for dynamic elements.
-  A strong update requires one proved concrete destination region in each represented state.
-  Apply the update to aliases of that region. Keep other regions unchanged.
-  A weak update retains possible selected destinations and their guarded alternatives.
-  It preserves unselected contents, live allocation obligations, and possible invalidation.
-  Check an operation's obligations for each feasible destination. Imprecision supplies no exemption.
-  Track nested owning leaves and borrowed fields through projected and whole-value operations.
-  A projected move empties only its selected place. A whole move transfers the complete value.
-  Both preserve heap allocation identities. Neither rebases an inline storage address.
-  A slot address remains valid while its slot storage lives. It observes updated slot contents.
-  End by-value parameter slots at normal return after deferred effects, without requiring dead
-  markers.
-  Check their residual owned leaves. Reject returned or retained borrows into those ending slots.
-  Symbolic owning inputs admit live obligations. Current empty callers do not remove those inputs.
-  Preserve separate symbolic caller sources referenced by borrowed parameter values.
-  Bind aggregate _0 to the actual caller destination, including argument and global aliases.
-  At each destructive result write, check previous overlapping owner obligations after operand
-  effects.
-  Do not assume fresh result storage. Preserve return, holding-temporary, and deferred-effect order.
-  Check returned borrows against their original sources after deferred effects.
-  Abstract transfer empties fixed temporary ownership even when generated code omits source
-  clearing.
-- rationale: Slot separation prevents false pointee separation and false inline-address relocation.
-  Ordered result effects preserve caller ownership when result storage aliases input storage.
-- history: Note 2026-10-02 (T-273): This entry refines D17.14 with dynamic places and aggregate
-  storage boundaries. It changes no representation, runtime instruction, or calling convention.
-
-### D17.16 Finite heap obligations
-- owner: `memory-model.md` 2.7 (finite heap identities and inductive cleanup).
-- rule: Each successful allocation creates a fresh identity and one release or transfer obligation.
-  Repeated executions of one allocation expression do not identify their live allocations.
-  A finite heap state retains distinct obligations or their simultaneous multiplicity.
-  Alternative sources and simultaneous allocations are different facts.
-  A release discharges only the selected allocation. It does not clear other allocations at that
-  site.
-  Joining or widening states cannot remove a possible residual obligation.
-  Moving an owned edge transfers its target obligation and empties the source edge.
-  Del stays shallow. Prove each owned leaf in the selected allocation empty before releasing it.
-  A transferred descendant remains live until its new owner releases or transfers it.
-  Finite structural predicates can represent unbounded acyclic chains and trees.
-  Infer their construction, separation, and cleanup conditions from fort operations and summaries.
-  Prove destructive cleanup by separating one node from the remainder, emptying its owned leaves,
-  releasing that node, and preserving the remainder invariant.
-  Pool cleanup also releases each block's owned payload before the block.
-  A normal cleanup result requires an empty remainder and no detached residual obligation.
-  Owned cycles and shared ownership cannot use an acyclic separation argument.
-  A proved cycle cut can establish a shape that ordinary release rules accept.
-  Shared borrows remain legal. Their uses retain the source-validity obligations of D17.14.
-  Pool growth does not invalidate earlier block views. Pool cleanup invalidates the sources it
-  releases.
-  Lost shape, identity, or alias precision gives incomplete proof at an operation that needs it.
-  It never gives successful cleanup. Add no annotation, recursive del, or runtime identity data.
-- rationale: Allocation-site sets cannot count concurrent obligations or prove complete chain
-  cleanup. Inductive predicates retain those facts in a finite state.
-
-### D17.17 Raw storage and reference representations
-- owner: `memory-model.md` (2.8), `type-system.md` (9.2).
-- rule: Raw fort references retain their source, byte offset, access window, and alignment facts.
-  Type erasure does not erase the original storage layout or its nested owning leaves.
-  Distinguish the storage containing a reference from the storage that reference designates.
-  A pointer cast changes neither source validity nor the permitted access window.
-  A void-pointer round trip preserves these facts. No cast creates ownership or foreign trust.
-  For a raw fort range, prove ordered nonnegative bounds and sufficient live storage.
-  Check offset and size calculations without using wrapped results as extent proof.
-  Extents can remain symbolic. Bind them to their captured allocation or view lengths.
-  A fort typed access also requires enough accessible bytes and the required alignment.
-  A cast itself adds no runtime alignment or range check.
-  Ordinary span bounds retain their existing runtime checks (D6.9, D10.6).
-  A complete borrowed representation copy preserves its original source and range relations.
-  Infer that effect from the actual ordered reads and writes, including caller aliases.
-  Partial reference writes preserve only the representation facts that their byte effects prove.
-  Reject a later reference use or escape when its complete representation remains unproved.
-  Before an overlapping write discards an owning leaf, prove its old obligation empty or
-  transferred.
-  A raw byte copy is not a semantic move. It cannot create a second owner.
-  A complete copy that implements a semantic move transfers the original obligation once.
-  Owner bits in a scalar byte buffer supply no transferable obligation or owning place.
-  A later byte clear cannot repair an earlier invalid ownership duplication or loss.
-  Byte interpretation cannot add mutability or bypass ownership conversion rules (D3.14).
-  Padding supplies no reference source or ownership obligation.
-  Preserve actual overlap and read order.
-  Assume a source snapshot only when the operation proves it.
-  Integer-to-pointer conversion alone supplies no storage source, even after an exact u64 round
-  trip.
-  Integer arithmetic and equal address bits supply no replacement source proof.
-  The type system still permits the conversion. Reject memory operations that require its unproved
-  source.
-  A zero-length view and an end pointer permit no element access.
-  An empty ordinary span can have no backing storage. A raw range still requires its source proof.
-  A zero-element allocation retains its release or transfer obligation and zero logical extent.
-  The runtime's minimum physical allocation size supplies no additional accessible element.
-  Del stays shallow. Type erasure does not remove residual owned descendants.
-  D17.13 permits foreign access without a static extent. Hidden foreign byte effects remain outside
-  proof.
-  Preserve that trust through reference copies and casts. Integer bits do not acquire foreign trust.
-  Foreign extent trust does not override a known allocation's release or transfer state.
-  Other known fort source relations retain their obligations at the foreign boundary.
-- rationale: Reference bytes carry source relations separately from ownership transfer obligations.
-  A byte pattern alone proves neither a live source nor a right to release an allocation.
-- history: Note 2026-10-02 (T-275): This entry refines the raw-storage obligations of D17.14.
-  It uses conservative rejection for integer reconstruction without a broader user ruling.
-  It changes no representation, runtime instruction, arithmetic operator, or calling convention.
-
-### D17.18 Finite ownership analysis and incomplete proof
-- owner: `fir.md` (14.1), `toolchain.md` (4.2).
-- rule: The ownership analysis uses a finite domain and deterministic work budgets.
-  Bound paths, regions, predicates, identities, shape templates, target alternatives, and effects.
-  Count each precision bound from the content of its scope, not from the history of insertions.
-  Regions, predicates, guarded alternatives, and shape templates use the state as their scope.
-  Insertion, join, and widening use the same count for one category.
-  Count work per computation: the call-graph build, the liveness or flow analysis of one function,
-  or the summary solver of one recursive component. Each function keeps its own liveness work.
-  The work bound of a computation is a fixed increasing function of its FIR size.
-  A work refusal stops that computation. Its published result keeps the incomplete status.
-  A new budget for the same computation cannot remove that status.
-  Joins represent all predecessor states. Widening can lose precision but cannot remove obligations.
-  Preserve release history, owned descendants, transferred regions, and retained source relations.
-  Infer recursive summaries to a fixed point over a bounded symbolic interface.
-  Keep provisional recursive results private. They prove neither absent effects nor absent return.
-  Export a complete sound summary or an incomplete summary with unknown effects and outcomes.
-  Incomplete fort summaries preserve possible caller continuation and its cleanup obligations.
-  A noreturn type proves no caller return. It supplies no abort or process-cleanup classification.
-  Keep normal process termination separate from function return, abort, and foreign termination.
-  Compose outcome conditions before removing continuations or applying cleanup boundaries.
-  Preserve normal-process-exit obligations even when a proved callee cannot return to its caller.
-  Unknown fort effects receive no foreign exemption (D17.13).
-  A precision loss gives no error when independent facts prove all affected obligations.
-  Otherwise report the affected obligation as incomplete proof. A work-budget failure is an error.
-  A validated reaching-path witness can establish an invalid operation.
-  An abstract possibility without that witness establishes only failure to prove safety.
-  The analysis removes a path only with a fact that holds on each execution that the state
-  represents. Only an operation of the analyzed function establishes such a fact: a null test,
-  an assignment, a move, a release, the end of a storage, or an allocation. The address of a
-  local or of static data is not null.
-  A fact that the analysis assumes removes no path. A nonnull root at a dereference is such a
-  fact. An address computation reads no storage. It establishes no fact about its base. An
-  address-only projection records no caller read. Its result keeps the parameter source for a later
-  access.
-  The known value of a scalar is a fact of the same kind as a root. A call can write each local
-  whose storage a FIR address names, also through an address that an earlier call kept. An
-  address or a slice names the storage of a local when its place dereferences no pointer and
-  indexes no span, and a slice takes a fixed array. The call can also write each allocation
-  whose storage an address of the analyzed function named. Through that storage it can write
-  each atom that the storage owns or views, and each local or allocation whose address the
-  storage holds, and so on. Before the callee effect of a call, each slot of that storage loses
-  its facts. A scalar slot has no known value. A reference slot that does not own has an
-  unknown value. An empty owner has an assumed null. Each atom of that storage has an assumed
-  root and an assumed status, and no scalar keeps a test of that root. Each obligation stays
-  where it is. The heap analysis does not yet see three writes of a callee: a release or a store
-  of an owner through such an address by a callee without a complete proof, a store through a
-  global into the storage that a parameter designates, and a store through a pointer leaf of a
-  by-value aggregate (classes I, K and L of `test/ownership/solvers/false_accepts.txt`).
-  A fact that the caller state takes from a callee summary removes no path of the caller.
-  A call itself ends a caller path only in two cases. The summary has no returning path. Or the
-  callee established a null root on each returning path, and the caller established that root
-  nonnull.
-  A summary has no returning path only when each path of the callee ends by these rules, at an
-  abort, or in a loop that does not end.
-  A caller requirement is a fact about the input of a callee, and it removes no path. An entry owner
-  is the value that an owned leaf of a parameter, or of caller storage that a borrowed parameter
-  designates, has when the function starts. An owned field of an entry owner is an entry owner too,
-  down to 6 fields, while the analysis keeps its identity. A fold, a join with another owner, a
-  join with an empty owner, or a callee that changes the fields of its parent ends that identity.
-  A read or a write through an
-  entry owner requires it nonnull when the body did not establish its nonnull root (D10.7). An owner
-  without that identity can still hold members of an input. An access through such an owner has no
-  requirement that a summary can name when the body did not establish its nonnull root. A view that
-  does not name one exact internal owner follows the same rule when its root is not established
-  nonnull. The summary then records a lost requirement, and each call of it gives incomplete proof.
-  The proof of the body itself does not change. An earlier access, or a
-  test edge that established the root, covers that root on its path: a later access there needs
-  nothing. A join with an empty owner keeps no earlier access cover. An address computation reads
-  no storage, so its last dereference requires nothing. An access through the address that it
-  computed requires that owner. An index through a fixed-array slice is such an access. At a call,
-  a callee read through
-  an exact internal view or address argument requires its caller owner on some path. A proved empty
-  argument gives a possible candidate. A store over an entry owner that is a free choice requires
-  it empty. The summary keeps each requirement of some path, and its exit
-  state keeps each requirement of each returning path. At a call, an owner of the caller fails a
-  requirement when it can be empty where the callee needs it nonnull, or nonempty where the callee
-  needs it empty. A failed requirement of each returning path gives a candidate with the certainty
-  of the caller fact. A failed requirement of some path only gives a possible candidate. A field
-  that the caller state does not hold gives a possible candidate for a nonnull requirement. It gives
-  incomplete proof for an empty requirement, as an owner of unknown status does. An empty owner
-  above the end of the path holds the requirement. The callee reaches the end only through an access
-  through that owner. That access has a requirement of its own, or a test of the callee established
-  the owner nonnull before it. Only an established nonnull root or an earlier covered root meets a
-  nonnull requirement. An assumed or imported nonnull root does not. An entry owner of the caller
-  passes the requirement on, with its own path. A state keeps at most 8 requirements of each path
-  and drops a new one. A body keeps at most 16 requirements of some path. One more gives incomplete
-  proof, and no caller applies its summary.
-  A witness can cross a direct call of a fort callee that has a returning type and no parameter
-  that can own a value. It assumes that the callee returns (fir.md 14.1, A06).
-  An entry value is the value that a parameter of the checked function has when it starts.
-  A parameter depends on its own entry value. A statement depends on each entry value that a
-  place it reads depends on: an operand, the index of an element, or a pointer that its
-  destination loads. A value that the statement writes depends on the same entry values.
-  A crossed call can read each entry value that its own statement depends on.
-  It can also read each entry value that an earlier statement of the function depends on, when
-  that statement stores outside a local whose storage no FIR address names. A store through a
-  pointer or a view and a store into a global count. So does each earlier call, an extern call
-  too, because the callee can store what it reads.
-  After a crossed call the witness takes no branch whose condition depends on an entry value
-  that the call can read. After a branch whose condition depends on any entry value, the
-  witness crosses no fort call. Such a branch or call leaves the event incomplete proof.
-  The witness knows no value in a global. In other storage it knows a value only when its own
-  walk stored that value there, read it there, or zeroed the storage as a new allocation, and no
-  call came between. Two inputs can name one storage (D17.4). Input storage is storage that the
-  walk did not allocate: an entry pointer, or a pointer that the walk read from storage that it
-  does not know, designates it. In input storage the witness keeps a value only until a store
-  through another referent of input storage. A read of input storage after such a store takes
-  an alias condition: the referent of the read and the referent of the store designate distinct
-  storage. Under that condition the read gets the value of its own referent. The witness
-  renders each alias condition as a note at the read (toolchain.md 4.2). The note names each
-  referent by the slot that held its pointer when the walk got it: a parameter, a part of a
-  by-value parameter, or a slot of input storage. That slot must stay unchanged from when the
-  walk got it to the note. A slot of input storage is read again at the note, so it takes its
-  own alias conditions, and each of those notes says that the store can change the name.
-  Without such a name the walk stops. A release also stops the walk when the pointer that it
-  reads is no exact allocation of the walk: one that the walk allocated, or that it
-  dereferenced from the same slot. So a release of a loaded owner stops the walk even after the
-  walk dereferenced a copy of it. A release of a null pointer continues the walk. A local or a
-  cell of an allocation of the walk keeps its value over that store. So each branch that the
-  witness takes reads only a value that its own walk decided.
-  A crossed call that does not return for the inputs that it gets on the witness path makes a
-  violation after it false. A function that never returns is such a callee. Give such a
-  function a noreturn type; the compiler does not check this.
-  Use canonical scheduling, stable event keys, and counted work for repeated-input determinism.
-  Publish the implementation's numeric limits, measured coverage, and reproduction commands.
-  A report limit cannot convert incomplete analysis into a successful verdict.
-  These rules add no annotation, unsafe construct, runtime identity data, or ABI change.
-- rationale: Finite summaries permit termination without accepting operations that lack proof.
-  Separate witness classes prevent an imprecise state from claiming a concrete memory error.
-  A bound on retained content cannot refuse a state that holds fewer facts than the bound.
-  One fixed work bound refused every body of the compiler source closure, 2038 of 2038.
-- history: Amended 2026-10-06: Shape templates were counted per computation, and guarded
-  alternatives, templates, and targets accumulated over all insertions. One fixed work bound
-  applied to every computation. Now each precision bound counts current content in its scope.
-  The work bound scales with the FIR size of each computation.
-  Note 2026-10-08: The user ruled on 2026-10-07 that the production W_scale is 1024, in
-  place of 64. The rule does not change.
-  Amended 2026-10-08: A witness crossed no unresolved fort call. The user ruled that a callee
-  without a parameter that can own a value cannot release or transfer a caller owner that is
-  a local slot, or a leaf of a local struct or array, when no FIR address names that storage
-  (D17.9, D3.14). So that owner's obligation stays exact across the call. The analysis
-  follows no other owner across the call: a callee can release an owner in the heap, in a
-  global, or behind an address. A callee that never returns normally makes such a violation
-  false. The cost is a false violation, never a missed one.
-  Amended 2026-10-09: The user ruled to narrow the walk, in place of accepting a false
-  violation for a callee that aborts for some values only, such as `require(n < 100)` before a
-  branch on n. The witness takes no branch on an entry value that a crossed call can read,
-  through its arguments or through a value that the function stored before the call.
-  Amended 2026-10-10: The heap analysis removed a path with facts that it only assumed: the
-  nonnull root of an unfold for an address computation, a root that a callee summary gave, and a
-  cell at the exit contradiction of a call. The heap solver alone proved 8 faulty bodies, each
-  with a leak on a null path. A review found 9 more, where a callee wrote a scalar local whose
-  known value then removed a path. Now only an established fact removes a path (rule P1).
-  Amended 2026-10-11: The heap analysis had no caller requirement for a dereference of an
-  entry owner (D10.7). The heap solver alone proved 5 faulty bodies whose callee dereferenced an
-  empty owner of the caller, at the root or in an owned field (class E of
-  `test/ownership/solvers/false_accepts.txt`). Now such a callee requires the owner nonnull.
-  A read through an owner that lost its identity (depth 7, a join with another owner, a fold)
-  first required nothing, and the heap solver alone proved 3 faulty callers
-  (`test/ownership/probes/lost_*.ft`). The user ruled that correctness comes first: such a
-  summary now records a lost requirement, and each caller gets incomplete proof. Review then found
-  7 more faulty callers. They covered view and address arguments, assumed roots, an empty argument,
-  and a changed parent. The heap solver proved all 7 with the solver from 04b3c943. It proves none
-  with these rules.
-  Amended 2026-10-11: A call forgot only the known value of a scalar local whose storage a FIR
-  address names. A pointer local or an owner of that kind kept its root fact over a call that
-  wrote it through an address that an earlier call kept. The heap solver alone proved 2 faulty
-  bodies of the ledger and 17 more faulty bodies of that kind. Now a call forgets each fact of
-  the storage that such a local, or an allocation whose storage an address named, reaches.
-  Amended 2026-10-16: The witness knew no value in a global, behind a pointer, or in a local
-  whose storage a FIR address names. The one-body witness checker branches on values that its
-  own walk stored behind a pointer. A review found 6 bodies in which two inputs named one
-  storage, so a value that the walk kept was stale, and each gave a false violation on a run
-  that exits 0. Now the witness knows a value outside a global only from its own walk, and in
-  input storage only until a store through another referent. The user ratified this amendment
-  on 2026-10-16.
-  Amended 2026-10-16 (second time): A read of input storage after a store through another
-  input stopped the walk. So the 6 bodies of that review stayed incomplete proof, although each
-  leaks when its two inputs designate distinct storage. Now a read after a store through another
-  input continues under a rendered distinct-storage condition. The note names each referent by
-  the slot that held its pointer when the walk got it, and a store over that slot forgets the
-  name; a note without a name stops the walk. The pointer of a store can designate a part of
-  the referent (`a = &p->n`), or change before the read, so it names no referent. A run with
-  distinct inputs holds each condition and leaks. A run with one storage breaks a condition;
-  19 of the 21 such runs of `test/ownership/witness/alias_runs.ft` exit 0 with no leak. The user
-  ratified the distinct-storage condition on 2026-10-16; the coordinator ratified the naming
-  rule on 2026-10-17.
-  Amended 2026-10-17: A release of a loaded owner, or of a stored entry owner, that the walk
-  never dereferenced recorded no store. So 3 review bodies validated a loss on a run that read
-  the released object. The user ruled on 2026-10-17 that such a release stops the walk, and
-  the event stays incomplete proof. The stop turns two events that main validated into
-  incomplete proof: the invalid use in `alias_copy` and the loss in `store_moved`
-  (`test/fort/ownership_witness_test.ft`). The coordinator ratified that loss of precision on
-  2026-10-17, and ratified that the stop holds after a copy was dereferenced.
-
-### D17.19 Global ownership and process boundaries
-- owner: `memory-model.md` (2.9), `toolchain.md` (2.1), `module-system.md` (11),
-  `stdlib.md` (2.1 and 3).
-- rule: A global retains storage across ordinary function returns.
-  Its initializer establishes its initial contents. Transfers preserve allocation identity.
-  A store must preserve or discharge old owning leaves after right-side effects.
-  Fields and elements of global aggregates retain their separate obligations.
-  Taking a global address creates no escape exemption.
-  Normal executable exit requires empty owning globals in the complete checked closure.
-  This includes runtime globals and live owned descendants reachable through global owners.
-  Runtime cleanup precedes the final obligation boundary. A call entry is not that boundary.
-  Generated startup creates the runtime argument owner before the source entry runs (D11.6).
-  Positive argc creates a header allocation. Nonpositive argc leaves the owner empty.
-  Normal entry return runs applicable source defers, flushes, and releases runtime argument storage.
-  The final boundary precedes the generated C return or a known foreign normal-exit operation.
-  `std.sys.exit` and `std.rt.exit` reach that boundary after ordered runtime cleanup.
-  Establish that cleanup from analyzed fort or generated effects. A runtime name proves no release.
-  Those exit functions do not execute caller defers or automatically delete user globals.
-  Residual allocation obligations in suspended caller storage also require discharge there.
-  Infer normal-termination requirements through fort wrappers and indirect fort targets.
-  A cleanup followed by exit differs from an exit followed by unreachable cleanup.
-  A source function return, including an ordinary call to a function named main, is not process
-  exit.
-  Libraries may retain owning globals between calls. Their summaries preserve those global states.
-  They provide explicit cleanup through ordinary callable fort functions.
-  Cleanup releases or transfers owned allocations and empties the library's owning global leaves.
-  Library checking uses the owning globals of its complete checked closure.
-  Foreign host storage outside that closure uses D17.13 trust.
-  The host calls cleanup after final library use and before unload or normal host termination.
-  Library checking uses symbolic global states and inputs. It infers caller requirements.
-  It does not invent a host call sequence, generated startup, or executable-exit boundary.
-  Foreign entries trust valid symbolic caller inputs under D17.13.
-  Analyze callback-local storage and all available fort effects normally.
-  Returned or retained borrows keep their source relations across ordinary returns.
-  Abort paths, including panic and runtime traps, require no cleanup.
-  The selected std.libc declarations exit(i32) noreturn and abort() noreturn establish normal and
-  abort termination, respectively. Compatible declarations of the same C symbol share that class.
-  Trust those standard conventions under foreign symbol interposition (D17.13).
-  Resolve function-value aliases before composing wrapper outcomes. Keep mixed outcomes distinct.
-  A noreturn type proves absence of caller return. It proves neither normal termination nor abort.
-  The defensive trap after a noreturn call does not classify the callee's termination.
-  Unresolved foreign process termination remains outside proof under D17.13.
-  Accepting such a call supplies no proof of normal-exit cleanup and no abort exemption.
-  Unknown fort bodies and targets receive no foreign exemption.
-  These rules add no annotations, contract syntax, contract database, destructors, or identity
-  tables.
-- rationale: Global storage survives a function return.
-  Executable normal exit ends its obligation.
-  Ordered runtime cleanup permits argument access during execution without a runtime-global
-  exemption.
-  Foreign trust permits ordinary FFI without claiming proof of hidden foreign process effects.
 
 ## D18 Float printing in the runtime
 
@@ -3175,7 +2650,7 @@ assembly, survives only in the history of this file and of `toolchain.md`.
 - history: Amended 2026-09-15 (T-140): the trap signal now follows the selected target.
 
 ### D19.8 FIR, the representation between the checker and the IR text
-- owner: `fir.md`; `toolchain.md` 1 (ownership selection and coverage reports).
+- owner: `fir.md`.
 - rule: The compiler lowers each checked function body to FIR, verifies it, runs its passes over it,
   and translates it to the LLVM IR text of `toolchain.md` 6 (`fir.md`). FIR follows the shape of
   Rust's MIR: a control-flow graph of basic blocks for each function, whose statements read and
@@ -3194,42 +2669,6 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   core once. A function that the
   lowering does not support, or that needs a `std.rt` entry that the closure lacks for a check
   that the selected mode keeps, is a compile error (`fir.md` 9.8).
-  Ownership analysis reads verified FIR for the complete checked import closure (D17.14).
-  It includes all available fort bodies, including runtime bodies in std.rt from std/rt.ft.
-  Infer source, alias, retention, and ordered effect summaries. Substitute actual aliases before
-  effects.
-  Bind aggregate _0 to its caller destination, including aliases with arguments and globals.
-  Keep ordered result writes, reads, moves, and deferred effects from FIR.
-  Unknown fort effects retain obligations and possible normal continuations.
-  An address, global, projected place, or aggregate result supplies no permanent escape exemption.
-  Ownership verdicts stay identical across checked, release, and bounds-check options.
-  The proof does not derive safety from a runtime check that a build mode removes.
-  During feature development, --ownership-check requests complete ownership proof.
-  Run all integrated analyses before build-mode transformations. Missing producers remain
-  incomplete.
-  Complete proof with zero violations exits 0. Violations or incomplete proof exit 1.
-  Usage, tool, and internal failures exit 2. Incomplete selected proof prevents code generation.
-  Initially support selection in check and build modes. Reject selection in source or FIR dump
-  modes.
-  Ordinary builds keep their existing behavior when selection is absent.
-  This whole-feature request is not an operation-level proof exemption.
-  Selected analysis never exempts an imported fort module or an available runtime body.
-  `--ownership-report <file>` requires selection and writes the versioned coverage report of
-  toolchain.md 1.1. It changes neither text diagnostics nor diagnostic JSON version 1.
-  Separate source checking, lowering, verification, correspondence, and solver completion in
-  reports.
-  Solver completion alone establishes no complete ownership proof.
-  Retain failed and unexecuted bodies, missing producers, and the first incomplete reason.
-  Permit source audits, measured source repairs, and scoped CI enforcement during feature delivery.
-  An audit gate can accept exit 1 with a valid fresh report. It grants no ownership acceptance.
-  Scoped enforcement requires zero violations and zero incomplete results for its declared scope.
-  Results outside that scope remain visible. Scoped acceptance never changes complete selection.
-  Keep the conservative range-call guard until complete selected proof establishes loan
-  preservation.
-  Complete feature qualification and source migration before default enablement.
-  Then require the analysis by default and remove the temporary selection option.
-  Staged delivery does not mean that the current compiler implements the complete proof.
-  The analysis adds no runtime ownership checks or representation changes (toolchain.md 6).
 - rationale: two passes derived one fact from the tree four times, and each time nothing compared
   the two answers: the parameter types of a runtime entry (T-072), lvalue-ness (T-193), whether a
   body can fall off its end, and the expansion of deferred statements. One lowering derives each
@@ -3242,15 +2681,6 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   T-255 deleted the direct path. The same day the rule gained the compile error for a function
   that needs a `std.rt` entry that the closure lacks for a check that the selected mode keeps;
   until then the direct path wrote such a function and called the missing entry.
-  Amended 2026-10-01 (T-272): Ownership analysis replaces permanent escape-based loss of checking
-  and gains staged selection.
-
-  Amended 2026-10-04: Collection loans use non-emitting loan_begin and loan_end statements.
-  FIR is the program. One lowering replaces separate source correspondence and side records.
-  Amended 2026-10-05: The rule previously delayed source migration until complete feature
-  validation.
-  Incremental audits and scoped enforcement now permit measured source repairs during delivery.
-  Complete selection still rejects incomplete proof. A separate report records partial coverage.
   Amended 2026-10-22: the user made the overwrite check static, so the emptiness pass now runs
   before the build-mode pass in every mode (D17.11).
 
@@ -3265,21 +2695,16 @@ language server to use them, while the server itself lands after the bootstrap f
 ### D20.1 The check mode
 - owner: `toolchain.md` (1, 4).
 - rule: `fort --check entry.ft` lexes, parses, resolves the import closure, and checks each module.
-  When ownership analysis is selected, it also lowers and verifies FIR and runs that analysis
-  (D19.8).
-  In every case it lowers each fort body to FIR, verifies it and runs the emptiness pass of
-  D17.11 on it, so it reports each overwrite error that a build reports.
+  It also lowers each fort body to FIR, verifies it and runs the emptiness pass of D17.11 on it,
+  so it reports each overwrite error that a build reports.
   It then stops: no LLVM IR, no `--cc`, no temporary directory, so `-o`, `-S`,
   `-c`, `-l`, `--cc` and `-Xcc` are unused as they already are under `-S`. `--target` selects the
   three configuration values of D21.1. An unsupported target is a usage error. Exit 0 when nothing
   was reported, 1 when anything was, 2 for a usage, toolchain or internal error (D14.1). The entry
   module need not define `main`: under `--check` it is a module under inspection and not a program,
   so D8.6 is not applied. Every other rule holds, the diagnostics of D14.2 included.
-  Check mode and build mode use the same selected ownership proof and diagnostic contract.
 - history: Amended 2026-09-16 (T-156): `--target` now selects the D21.1 configuration values under
   `--check`. The earlier rule named `--target` as unused in this mode.
-  Amended 2026-10-01 (T-272): Check mode previously stopped at the front end. Selected ownership
-  analysis now includes verified FIR.
   Amended 2026-10-22: the user made the overwrite check static, so check mode now lowers each
   body to FIR for the emptiness pass of D17.11.
 

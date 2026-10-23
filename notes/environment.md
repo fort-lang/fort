@@ -133,7 +133,7 @@ without a rewrite.
 - **A host git can write an index that the guest git refuses.** On 2026-10-08, after many
   `checkout --detach`, `commit --amend` and `cherry-pick` runs of host git 2.53 in one worktree,
   guest git 2.43 stopped with `index uses ... extension, which we do not understand` and `fatal:
-  index file corrupt`, and `tools/ownership_audit.py run` exited on its `git ls-files`. Both
+  index file corrupt`, and a guest `git ls-files` exited with that error. Both
   sides read the same bytes (equal md5). On a clean tree, rebuild the index on the host with
   `git read-tree HEAD`, then run the guest command, and do not run host git in that worktree
   while it runs. On 2026-10-09 the guest still gave `fatal: index file corrupt` after a
@@ -307,29 +307,24 @@ without a rewrite.
   while `python3` in the guest read 4387308 bytes with no NUL and `llvm-as-18` accepted a copy.
   A program that writes a file for a second tool to read writes each run to a new path, or under
   the guest's own `/tmp`.
-  The git index of a worktree is one more such file. Just after host commits, the guest's
-  `git ls-files` in `tools/ownership_audit.py run` failed with `error: index uses ... extension,
+  The git index of a worktree is one more such file. Just after host commits, a guest
+  `git ls-files` failed with `error: index uses ... extension,
   which we do not understand` and `fatal: index file corrupt` (2026-10-07). The guest's git read
   a copy of the same index bytes in its own `/tmp` with no error: 2158 entries. Before a guest
   command that reads git, rebuild the index in the guest: `rm` the file that
   `git rev-parse --git-path index` names, then `git reset -q`. Do this only when nothing is
   staged: `git reset -q` unstages each staged change.
-  A second symptom showed no error from git. Twice, after a host rebase and a guest test run,
-  the first guest `tools/ownership_audit.py run` exited 1 with "provenance: tracked source
-  changes" (2026-10-07). The host and the guest `git status --porcelain --untracked-files=no`
-  were both empty then. A second run in a new `tools/vm run` passed. Rebuild the index as
-  above, or run the audit again once, before you look for a change.
   `tools/mutate.py` writes each source in place (`open(path, "wb")`): a round first restores the
   source and then writes the mutant over it. Run in the guest, one round failed to build 3 times
   in a row with `unknown type name 'turn'` in `<built-in>`, and the build of the next round
   succeeded. The cause is the in-place write and a stale page of the shared folder, as above.
   The cure is the one above: give the file a new inode, or drop the guest's caches.
   The first round after the baseline build can report `stale` with no build step in its log:
-  `decide-correspondence` of `tools/mutations/ownership_calls.json` did so 3 times on 2026-10-11,
-  also with a drop of the caches, while the other 28 rows rebuilt. The rebuilt baseline binary
-  reaches the host after the mutant is written, so ninja finds the binary newer than the source.
-  A `--runner` script that runs `tools/vm run "<command>; s=$?; sync; exit $s"` and then
-  `sleep 3` on the host fixed it: run a stale first row again with such a runner.
+  one row of a mutation table did so 3 times on 2026-10-11, also with a drop of the caches,
+  while the other 28 rows rebuilt. The rebuilt baseline binary reaches the host after the mutant
+  is written, so ninja finds the binary newer than the source. A `--runner` script that runs
+  `tools/vm run "<command>; s=$?; sync; exit $s"` and then `sleep 3` on the host fixed it: run a
+  stale first row again with such a runner.
 - **A mutation harness must restore on the path it does not plan to take, and must prove the
   restore.** The stale page above was the face of T-125's incident that a cure exists for; the
   face that caused the damage was different. `bash harness.sh | head -8` closed the pipe, SIGPIPE
@@ -628,8 +623,7 @@ without a rewrite.
   holds the event name and, for `merge_group` and `schedule`, the commit SHA. Only a
   `pull_request` run cancels an older run, so nothing cancels a merge-group run or a scheduled
   run, and neither shares a group with a PR run. No job tests `github.event_name`, and every
-  matrix is static, so each event runs every job. On `merge_group` the source audit records
-  `github.sha` as both `PR_HEAD` and `TESTED_REVISION`.
+  matrix is static, so each event runs every job.
 - `main` gets no push run. GitHub moves `main` to the commit that the queue tested, and the
   checks of that commit already belong to its SHA. A scheduled run (`cron: '17 9 * * *'`, 09:17
   UTC) runs the full matrix on `main` each night. It finds flaky tests and drift of the
@@ -676,8 +670,8 @@ without a rewrite.
   The worst case is 3 pairs of 2 calls of 130 s (120 s, then 10 s to KILL), plus 2 sleeps of 10
   s: 800 s. That is inside the 840 s step bound, so the third pair can run to its end.
   A normal install takes 9 to 34 seconds on Linux and 21 to 52 seconds on Darwin.
-- The `bootstrap` job builds the chain, runs the label `fort` without the label `modules`, and
-  then runs the source audit. The job `modules` runs the module corpus `test/fort` in 2 parts
+- The `bootstrap` job builds the chain and runs the label `fort` without the label `modules`.
+  The job `modules` runs the module corpus `test/fort` in 2 parts
   (`FORT_MODULE_SHARDS` in `CMakeLists.txt`, `notes/testing.md`). Each host runs 2 `modules`
   jobs, and each one runs 1 part, `ctest -R '^fort-modules-<k>-of-2$'`. The bootstrap in a
   `modules` job takes about 1 minute. A part name holds the count of parts. If the `-of-<n>`
@@ -705,29 +699,10 @@ without a rewrite.
   3350 s and 3390 s of worker time, and `ctest -L '^modules$'` ran them in 552 s and 574 s.
 - The expected job times after the split come from the 9 jobs above. `bootstrap` is the job
   time minus `fort-modules`: 26.5 to 47.9 minutes. A `modules` job is about 1.5 minutes of setup
-  and build plus half of the corpus: 15 to 25 minutes. The bound of `bootstrap` is 90 minutes and
-  the bound of `modules` is 60 minutes. The audit step grew from 5.8 to 7.3 minutes (run
-  38434591745, 2026-10-13) to 16.5 to 36.9 minutes (2026-10-16), and it now holds the
-  `bootstrap` time. Measure the job time of a run before you lower a bound.
-- **The audit step runs one root on each processor.** On 2026-10-18 the step took 14.4 to 18.4
-  minutes on `macos-latest` and 22.4 to 34.2 minutes on Linux (merge-group runs 39088299816,
-  39091980824, 39092960992 and 39100961806). The subcommand `run` took all but about 31 s of it.
-  The 70 roots are independent: each attempt is one compiler process, and it writes only the
-  files of its own index. `tools/ownership_audit.py run --jobs <n>` runs n attempts at the same
-  time. The attestation keeps the attempts and the errors in root order, so `--jobs` changes no
-  evidence. An exception that an attempt does not catch stops the audit: no later attempt starts,
-  `audit.json` gets the rows of the finished attempts and of that attempt, and the tool exits 1.
-  In the VM (4 processors) the 70 roots took 161 minutes of processor time, and `--jobs 4` took
-  37.5 minutes of wall time. Each of its 70 reports had the bodies, totals, meters and verdict of
-  run 39100961806. The root `src/fort/main.ft` took 4.4 % of the processor time, so the last root
-  does not hold the step.
-- **The memory of the runner also limits the audit jobs.** The largest roots, `src/fort/main.ft`
-  and `src/fort/driver.ft`, each had a peak memory of 1427 MiB in the VM. So the step gives each
-  job 1.5 GiB: jobs = min(processors, available memory / 1.5 GiB), and at least 1. On Linux the
-  available memory is `MemAvailable` of `/proc/meminfo`. On macOS it is the free, inactive and
-  speculative pages of `vm_stat`. The step prints `audit: <n> processors, <k> KiB available, <j>
-  jobs`. GitHub gives the public Linux runners 4 vCPUs and 16 GiB, so expect 4 jobs. It gives
-  `macos-latest` (arm64) 3 vCPUs and 7 GiB, so expect 2 or 3 jobs; the printed line gives the
-  measured value. In the VM the line read `4 processors, 7526432 KiB available, 4 jobs`. The
-  expected step is 7 to 10 minutes on Linux and 6 to 10 minutes on macOS. If the Linux processors
-  are threads of shared cores, the step can take more time.
+  and build plus half of the corpus: 15 to 25 minutes. The audit step grew from 5.8 to 7.3
+  minutes (run 38434591745, 2026-10-13) to 16.5 to 36.9 minutes (2026-10-16).
+- The revert of the ownership wave on 2026-10-22 removed the audit step and its 4 enforce steps
+  from `bootstrap`, and the ownership tests from the module corpus. In PR CI run 39899589232 the
+  3 `bootstrap` jobs took 2m10s to 3m9s, and the 6 `modules` jobs took 3m20s to 5m53s. The bound
+  of `bootstrap` is 30 minutes and the bound of `modules` is 20 minutes. A PR run must show each
+  job under half its bound. Measure the job time of a run before you change a bound.

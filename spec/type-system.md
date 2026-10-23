@@ -821,8 +821,7 @@ the mark is erased in generated code. It is part of type identity (section 6): `
 `node*` are different types, and so are `fn (node* own) void` and `fn (node*) void`. `own` on a
 scalar, a struct, a fixed array or a function-pointer type is an error; a struct or array that
 contains an `own` reference is an owning aggregate instead (section 8.5). Ownership is a typing
-discipline with temporal storage and allocation proof (D17.14).
-The proof preserves current types, syntax, mutable aliases, and representations (D19.8).
+discipline, not a linear check: a use after `move` and a leak are not diagnosed (D17.14, D15).
 
 ```fort
 node mut* own n = new(node);         // an owned node
@@ -896,7 +895,6 @@ declaration, an assignment target, an `own` parameter, an `own` field or element
 nothing could free it afterwards (D17.8): converting or casting it to a non-`own` type, taking a
 span of it or taking its `.ptr`, accessing a field of an owning aggregate rvalue (section 8.5), and
 discarding it as an expression statement.
-The proof keeps the same temporary landing rule and source-defined storage boundary (D17.8).
 
 | Expression                                     | Type                                   |
 |------------------------------------------------|----------------------------------------|
@@ -950,9 +948,7 @@ is immutable. The first condition keeps a container from being freed while its e
 owned by nobody; the second closes the `T** -> const T**` hole for ownership, where a borrowed
 value could be stored, through the copy, into a slot the source still sees as owned. A `cast`
 is the escape from the monotone rule for a drop (section 9.2). No conversion or cast adds `own`
-(D3.14). A permitted drop keeps storage and ownership proof obligations (D17.14).
-Lending copies the storage-source relation without transferring allocation ownership (D17.4).
-The proof preserves mutable aliases and checks their ordered ownership effects (D17.14).
+(D3.14).
 
 | Conversion                                        | Result | Reason                          |
 |---------------------------------------------------|--------|---------------------------------|
@@ -997,21 +993,6 @@ struct frees its own fields, one `del` per `own` field, and a container exposes 
 function that does so (D13.5). Functions therefore take an owning struct by pointer, `vec*` or
 `vec mut*`, and a range `for` over owning elements is an error (`core-language.md` 6.4).
 An owning aggregate assignment has no fieldwise overwrite check (D17.11).
-The static proof checks each owning leaf in all build modes, including nested aggregates.
-It also checks residual owned leaves at normal storage end (D17.7, D17.14).
-A whole aggregate move transfers borrowed and scalar fields as well as owned leaves (D17.6).
-It clears the complete named source value. A projected move clears only its selected place.
-A move preserves live heap-source relations but does not rebase inline storage addresses.
-The proof binds aggregate result storage to the caller destination before ordered effects (D19.8).
-`memory-model.md` 2.6 defines projected storage identity and aggregate boundary rules (D17.15).
-Disjoint inline fields or elements do not establish distinct allocations in their reference values.
-Unknown element updates preserve possible selected leaves and unselected obligations.
-Copying a borrowed field preserves its original source, including a source in caller inline storage.
-Returning a view into ended local or by-value parameter storage fails.
-Returning an owner with a view into its transferred live allocation can succeed.
-Unused by-value owning aggregate parameters still require cleanup at normal return.
-An aggregate result write checks its actual caller destination, including aliases with inputs or
-globals.
 
 ```fort
 struct vec { i32 mut@ own data; u64 len; }
@@ -1039,8 +1020,6 @@ is legal and `del(string)` is not. The casts among `string`, `char@`, `u8@` and 
 forms (section 9.2) yield `own` exactly when the target spells it (D3.14), so a string built in
 a `u8 mut@ own` becomes a `string own` with `cast(move(buf), string own)`: the target says
 `own`, so the `own` lvalue must be moved (D17.5), and `cast(buf, string)` lends a view instead.
-Borrowed strings preserve their character sources through casts, copies, fields, and calls (D17.12).
-A retained string key does not extend the character allocation's lifetime (D17.14).
 
 ```fort
 string own d = str.dup("abc");       // ok
@@ -1163,37 +1142,6 @@ view and the source keeps ownership. An `own` rvalue cast to an `own` target tra
 lvalue cast to an `own` target is a copy into an `own` place and must be written `cast(move(x), T)`
 (D17.5), which empties `x`. A `cast` to an `own` type yields an `own` rvalue, which must land
 (section 8.3), and a cast that drops `own` from an `own` rvalue is refused (D17.8).
-
-**Storage proof in casts (D17.17).** Pointer casts preserve known sources, offsets, byte windows,
-and alignment facts. A cast through `void*` does not erase those facts or enlarge the window.
-It also does not hide owning leaves in the original storage layout.
-A different pointee type still needs a valid extent and alignment at its typed access.
-The cast itself adds no runtime check.
-`memory-model.md` 2.8 defines complete and partial reference representation effects.
-Raw byte interpretation creates no owner and adds no mutability.
-
-Pointer-to-`u64` conversion exposes address bits as an integer (D3.14).
-Reconstruction from an integer supplies no proved storage source, including an exact unmodified
-round trip. A fort memory operation that needs that source therefore fails its proof (D17.17).
-The conversion itself remains legal. It supplies no ownership or foreign trust.
-Foreign reference results retain D17.13 trust through permitted pointer casts.
-Foreign integer results do not receive reference trust from their bits.
-
-```fort
-fn integer_round_trip(i32 value) i32 {
-    u64 bits = cast(&value, u64);
-    i32* restored = cast(bits, i32*);
-    return *restored;               // proof error: reconstructed pointer has no proved source
-}
-fn void_round_trip() u8 {
-    u8 mut@ own bytes = new(u8, 4);
-    void mut* raw = cast(bytes.ptr, void mut*);
-    u8* restored = cast(raw, u8*);
-    u8 value = *restored;            // proved source, four accessible bytes, alignment 1
-    del(bytes);
-    return value;
-}
-```
 
 ```fort
 i64 w = cast(cast(-1, i8), i64);     // -1: sign-extended because i8 is signed
@@ -1504,13 +1452,6 @@ caller may write, so it is `void mut* own`, and `free` takes `void* own`, which 
 reaches by dropping marks (D3.11, D5.4). Signature identity includes `own` and the level-1
 mutability (D9.8): two modules declaring one C symbol with and without either conflict.
 
-An extern declaration supplies implicit foreign trust (D17.13; `memory-model.md` 4.5).
-The proof checks known fort inputs and signature ownership transfers.
-An own foreign result creates an obligation under the declaration's uniqueness promise.
-A borrowed foreign result has trusted storage validity and extent.
-Hidden foreign aliases, retention, releases, writes, and callbacks remain outside the proof.
-The declaration requires no additional compiler contract or source syntax.
-
 ```fort
 extern fn write(i32 fd, u8* buf, u64 n) i64;       // C means bytes here, so fort says bytes
 extern fn sort(i32@ xs) void;        // error: spans cannot cross an extern boundary
@@ -1526,9 +1467,9 @@ void* lost = malloc(16);             // error: owning temporary would leak
 
 Generics, unions (tagged or untagged), `Result`, methods, closures, overloading, default and
 named arguments, type aliases, struct, array and span equality, alignment and packed attributes,
-`alignof`, `sizeof(expr)` and string `switch` are deferred (D15).
-The ownership proof belongs to v1 (D17.14, D19.8).
-D15 lists the idioms: a fat struct with a kind field for unions, `bool` plus out-parameters for
-results, and an opaque `u8[N]` field with a C shim for alignment. An array suffix after a trailing
-reference suffix does not parse within one group. Group the complete inner type or use a struct
-(D3.6).
+`alignof`, `sizeof(expr)`, string `switch` and linear ownership (compile-time detection of leaks
+and of use after `move`, of which section 8 is the intended base, D17.14) are deferred; D15
+lists each with the idiom to use instead (a fat struct with a kind field for unions, `bool` plus
+out-parameters for results, an opaque `u8[N]` field with a C shim for alignment, `defer del`
+for ownership). An array suffix after a trailing reference suffix does not parse within one group.
+Group the complete inner type or use a struct (D3.6).

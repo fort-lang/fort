@@ -28,10 +28,9 @@ bullet at a time and without a rewrite.
   the compiler's (T-264). Unit:
   `test/fort` (`fort-modules-1-of-2` and `fort-modules-2-of-2`, and `fort-modules-shards`, which
   holds the parts against the whole list), `test/lsp` (`lsp-modules`), `test/fir` (`fir`),
-  `highlight_selftest`, `extension_selftest`, `panic_coverage`, `panic_coverage_selftest`,
-  `fact_joins`, `fact_joins_selftest` and one `mutation_anchors_<table>` test for each table in
-  `tools/mutations`, and the three `mutate_` tests of `--check` over the fixture
-  `test/mutate/strict_table.json`;
+  `highlight_selftest`, `extension_selftest`, `panic_coverage`, `panic_coverage_selftest` and
+  one `mutation_anchors_<table>` test for each table in `tools/mutations`, and the three
+  `mutate_` tests of `--check` over the fixture `test/mutate/strict_table.json`;
   the 71 bootstrap0 C suites. Integration: the corpus (`lang`, `lang-json`), `fixpoint`, `tty`,
   `stack_depth` and `lsp-binary`; bootstrap0 has none, since building bootstrap-1 proves the C
   compiler. `stack_depth` gives each compiler of the build a 1 MB stack and a type of 254
@@ -47,8 +46,6 @@ bullet at a time and without a rewrite.
   Record run URLs, job conclusions, and relevant test counts in the ticket.
   A missing, pending, cancelled, or failed required result does not pass the gate.
   Local tests provide development evidence. They do not replace PR CI.
-  Count results with exit status 0 in each required group before a commit or handoff.
-  A result row records an attempt. Its presence does not establish a pass.
   `AGENTS.md` defines the review, branch-update, and GitHub merge procedure.
 - The local `gate` target remains available for diagnosis. It is not a merge requirement.
   It runs `check-all`, then the configure, build, and test steps for `asan-debug` and `ubsan-debug`.
@@ -307,14 +304,6 @@ bullet at a time and without a rewrite.
 
 ## 4. fort module tests
 
-- `ownership_api.valid_limits` requires positive bounds.
-  Zero remaining W uses `bounds.w=1` and `used.w=1`.
-  Assert `used=1`, `bound=1`, and `attempted=1`.
-  `ownership_globals_history_limits_test.ft` checks this boundary and preserves caller state.
-- **An exported compiler helper can have test clients outside the focused selection.**
-  A range-capture CI run found an old prescan call in `fir_lower_local_panic_test.ft`.
-  After changing an exported `fir_lower` helper, search its callers and run the full module
-  corpus or its closure lint before handoff. A focused `fir_loan_*` run did not compile that client.
 - **A `test/fort` suite that checks two sources must reopen its environment between them.** A
   module set answers a path it has already loaded from the tree that load left, so a second
   `check_env.check_src` over one environment silently re-checks the first source and its
@@ -322,11 +311,6 @@ bullet at a time and without a rewrite.
   diagnostics as well. `check_env.reopen` is `bootstrap0/test/common/check_helpers.h`'s `begin()`
   and goes between the assertions about one source and the next check. The C helpers reset per
   check, so a translated suite that drops the reset is the failure mode to look for.
-- **Count the steps, barriers and records of an ownership producer before it solves.**
-  `ownership_source_local.release_work` frees them when `ownership_source.analyze` ends, so a
-  count read after `analyze` is 0 whatever the producer made. A draft of
-  `ownership_source_local_calls_test.ft` counted barriers after `analyze` and failed for that
-  reason; `ownership_source_local_test.ft` counts them on the prepared context.
 - **Run a `test/fort` binary from a scratch directory, never from `test/fort`.**
   `check_env.open` and `modules_env.open` create `sandbox<n>/` **relative to the working
   directory** (`test/fort/support/modules_env.ft:56`) and `close` never removes it (`:64`), so a
@@ -349,14 +333,6 @@ bullet at a time and without a rewrite.
   `test/fort/`, and it is why this line is a rule about the working directory and not a second
   `.gitignore` entry. Remove them with `rm -rf sandbox[0-9]*`. Then run the
   source counter that reported the mismatch.
-  A mutation stage is such a run. The `checker` stage of `tools/mutations/ownership_witness.json`
-  ran its binary from the root, and one round of 22 rows left 10 `sandbox<n>/` there, which a
-  `git add -A` then took into a commit. The stage now runs from its build directory.
-- **A module test can state its verdicts before its rule exists.** `run_tests.py` reads
-  `<root>/xfail.txt` when it exists, so `fort-modules` takes a `test/fort/xfail.txt` with no
-  flag, and a listed pass fails the run. The commit that adds the rule deletes the entry, and
-  the file with its last entry. A listed test that does not compile is XFAIL too, so run it with
-  `--no-xfail` before the commit and read its stderr.
 - Three corpora run through `run_tests.py`, which takes their root as `--root`.
   CTest `lang` runs the product language corpus with `xfail.txt`. The CTests
   `fort-modules-<k>-of-<n>` run `test/fort/<x>_test.ft` against the compiler modules, and CTest
@@ -415,11 +391,6 @@ bullet at a time and without a rewrite.
   (`the_blocks_a_node_owns_are_released_with_it` in `test/fort/types_table_test.ft`, T-032).
   Verify such a witness by deleting the `del` it covers and watching it go red; two of them in
   `types.ft` had no witness at all until that was measured.
-  Clang can replace an emitted LLVM target triple during linking.
-  Cross-target receipts record the host, explicit link target, executable architecture, and runner.
-  An LLVM triple alone proves no executable architecture.
-  Linux x86-64 receipts use explicit x86-64 linking and QEMU execution in an aarch64 guest.
-  Keep native aarch64 execution evidence separate from x86-64 execution evidence.
   **An allocator probe needs two views, because each is blind to what the other sees** (T-034), and
   both of them are blind to a leaked block above 128 KB (section 4 of this file, T-094).
   The address a round is handed catches a leak the allocator serves out of its own free chunks --
@@ -440,11 +411,6 @@ bullet at a time and without a rewrite.
   early one whatever the period, while a leak moves all of them. Two late samples were the rule
   until T-038 measured a period of **eight** over the emitter's round and read 26512 with nothing
   leaking; the window has to cover the cycle, and sixteen covers every period seen so far.
-  A scratch block that each mutation of the round allocates and frees can stretch the cycle past
-  sixteen: when the sorted G and H counts took their index arrays from the heap, the Linux break
-  stayed still over 400 rounds, and 8 of the 18 addresses of `ownership_state_cleanup_test.ft`
-  never came back within sixteen rounds. Keep a small scratch array in fixed storage in code that
-  an address probe measures; the counts now sort up to 64 rows in a fixed array.
   On macOS the address of a buffer is no view of the heap: the allocator serves a block from a
   per-CPU magazine, so `heap.ADDRESS_IS_A_VIEW` in `test/fort/support/heap.ft` is false there,
   `fir_env.address_moved` answers 0, and each probe that samples an address asserts on it only
@@ -483,54 +449,7 @@ bullet at a time and without a rewrite.
   longest program run went from 16.7 s to 6.7 s, the six programs together cost 15 s more CPU,
   because the harness compiles six programs and not one, and each mode gets a heap that no earlier
   mode fragmented (T-094).
-  The production harness gives each subprocess a separate 60-second limit.
-  Compilation includes the compiler's clang compile and link.
-  IR emission, LLVM verification, helper linking, and execution each have separate limits.
-  The harness kills the subprocess group when its limit expires.
-  The release preset builds the product compiler with `--release`.
-  Module fixtures without that flag use LLVM O1.
-  Byte cleanup programs use one allocator mode per entry.
-  Each mode keeps 64 warm rounds, one baseline round, and 256 measured rounds.
-  Each mode retains the last-sixteen sample window and both allocator bounds.
-  Owner modes discover move cost once before warm rounds.
-  They retain populated source history and tentative destination history in each transaction.
-  **A fixed refusal position drifts when the kernel adds work before it.** Paired R counting moved
-  the end of clone pricing to charge 9157 of 21428 in the populated round and 687 of 1610 in the
-  basic round. The storage positions 5068, 5468 and 6806 and the B26 positions 519 and 622 then
-  refused before the clone. A deleted failure-path release stayed green in all four suites.
-  Derive each position from one control run with `ownership_raw_bytes_env.watch`. Assert the
-  terminal source line of each refusal.
-  **A deleted shared release proves nothing about one operation's records.** The test fixture
-  frees its own states through the same release functions, so the probe goes red for the
-  fixture's leak too. To attribute teardown to one record class, leak that class alone in the
-  release path under test: move it out to a local that is never freed, and keep each other
-  release. `test/fort/ownership_raw_join_cleanup_test.ft` measures its record classes that way,
-  on the refusal path and on the published path.
-  **Linux `malloc_info` counts tcache chunks as live.** The metric's own `open_memstream` buffer
-  fills one tcache bin of seven chunks. A round that never uses that chunk size then reads 848
-  bytes more in each of the first seven measured rounds, 5936 in all, with no leak. The partition
-  counter probe failed CI that way on both Linux jobs. Call the metric in every warm round too.
-  **A round that frees a block above 128 KB makes the Linux break a view of the heap shape.**
-  glibc keeps free memory at the top of the heap below its trim threshold. A free of an mmap'd
-  chunk raises the mmap threshold to the chunk size and the trim threshold to twice that
-  (`mallopt(3)`). A probe copy of `ownership_source_live_test.ft` printed the break after each
-  round. It read a distance of 1007616 bytes with no leak after the second or third refused round,
-  where the test itself aborted at its bound of 4096 bytes. That happened in 1 of 30 working
-  directories on main b9d3b591, and in 2 of 30 after a change to `ownership_source_local.ft` (VM,
-  release preset). Only the length of the directory name changed between the runs.
-  `malloc_trim(0)` gave 974848 of those bytes back. The glibc count of live bytes is no cure: it
-  rose by 0 to 2720 bytes between the samples in the same 60 runs. With
-  `GLIBC_TUNABLES=glibc.malloc.tcache_count=0` it read 82624 bytes after rounds 7 and 23 in 7 of
-  7 directories, so that rise is tcache content.
-  **Count the blocks of a window instead.** `test/fort/support/window_alloc.c` interposes
-  `calloc` and `free`. Its end call returns the requested bytes of the blocks that `calloc` gave
-  out after the begin call and that `free` did not take back. The heap shape does not move that
-  count, so it sees a leaked block of any size: a mutant that keeps the refused body's storage
-  left 65964528 bytes. `ownership_source_live_test.ft` opens its window after round 7 and reads 0
-  on both targets. The count misses three things: a block from `malloc` or `realloc`, which the
-  fort runtime does not call (`std/rt.ft`); an allocation inside libc that does not call this
-  `calloc`; and a leak in a round before the window opens, rounds 0 to 7 in that test.
-  **No heap view sees a leak of a block above 128 KB while the round frees no other block of that
+  **Neither view sees a leak of a block above 128 KB while the round frees no other block of that
   size.** glibc serves an allocation above `M_MMAP_THRESHOLD`, 131072 by default, by mmap, so the
   program break does not move; and a round large enough to ask for one is a round whose block view
   is already off. The condition is the whole rule: glibc raises that threshold to the size of any
@@ -584,9 +503,9 @@ bullet at a time and without a rewrite.
   **A site that a test can call is reachable, even when no caller in the compiler breaks the
   guard.** D9.6 exports every function, so a test calls it with the precondition broken. A count
   that is a plain `u64` or `u32` field, such as `f.locals.len` beside its `own` span, is a value
-  that a test sets: 6 `fir` and 11 `ownership_state` tests set one to its limit. Three of the
-  first five unreachable declarations were wrong in this way, and a probe of each one exited 134.
-  The other two guarded the length of a span, which the forged length below reaches.
+  that a test sets: 6 `fir` tests (`test/fort/fir_*_limit_panic_test.ft`) set one to its limit.
+  Three of the first five unreachable declarations were wrong in this way, and a probe of each one
+  exited 134. The other two guarded the length of a span, which the forged length below reaches.
   A struct value is a value that a test builds, so an argument that needs a well-formed value
   fails: `flt.round_ratio` assumed trimmed bignums, and a divisor with a zero top limb reached
   its guard. Begin each unreachable reason with `probed:` (a program ran and stopped before the
@@ -597,11 +516,11 @@ bullet at a time and without a rewrite.
   `p[lo..hi]` on a pointer makes a view with no runtime check (D6.9). A pointer cast (D3.14) and a
   same-size reinterpretation (D10.7) can write the pointer or the length of an `own` span:
   `cast(&tt.nodes, raw mut*)->len = n`, with `raw` a struct of two `u64`, reached
-  `types.reserve`. D6.9 and D10.7 leave the extent to the ownership proof, which runs by default
-  only after the ownership series. No test forges a length or a pointer, so such a site stays
-  listed. A site that needs more memory or time than a test can use stays listed too. The comment
-  lines above an entry or a group give the reason. The list holds 26 of 248 sites after the first
-  sweep: 22 that need a forged length and 4 that need memory or time.
+  `types.reserve`. D6.9 and D10.7 make such a view undefined behavior. No test forges a length or
+  a pointer, so such a site stays listed. A site that needs more memory or time than a test can
+  use stays listed too. The comment lines above an entry or a group give the reason. The list
+  holds 17 of 215 sites, each a site that needs a forged length (`python3 tools/panic_coverage.py`
+  prints the totals).
 - **`test/fir` holds the FIR tests**, one `.fir` file each, in the format that `test/fir/README.md`
   gives (`spec/fir.md` 16.3). The header is the leading run of `//!` and `//|` lines: one or more
   `//! pass: <name>`, an optional `//! prelude:` block of fort declarations, and one outcome,
@@ -696,187 +615,6 @@ bullet at a time and without a rewrite.
   Bootstrap-0 builds the next compiler in the C-started chain.
 - External-stage1 mode uses an external compiler to build HEAD. It registers no bootstrap tests
   and no C unit suites (T-160).
-- **`tools/ownership_matrix.py` runs the ownership qualification matrix** (D19.8).
-  `test/ownership/qualification/manifest.json` lists 109 cases: the 24 approved originals,
-  21 accepted counterparts, 3 zero-element probes and the 61 retained `test/lang` ownership tests.
-  `run` uses `--ownership-check` in the four combinations of `--release` and `--no-bounds-check`.
-  It runs `--check` mode for each case, and `-S` build mode for 93 of the 109 cases.
-  An approved original keeps its bytes and positions, so it has no `main`. Its build mode compiles
-  a generated entry that imports it through `-I`. The 8 accept originals use build mode.
-  An accepted build also compares the selected and the unselected `-S` output byte for byte.
-  Check mode and build mode must give the same verdict, reason and diagnostics (D20.1).
-  A reject case matches only validated violations on its expected lines with complete proof.
-  Incomplete proof is an error diagnostic of its own (`spec/toolchain.md` 4.2), and an approved
-  position holds no such error. `--require-expected` also needs the expected notes and wording.
-  An exit 2, a crash, a timeout or a missing report fails `run` without that option.
-  The fixtures use the annotation and header patterns of `test/lang/run_tests.py`.
-  Each host report records the git revision and whether a tracked file differs from it.
-  That revision names the checkout, not the compiler binary. Build both from one tree.
-  `compare` holds a Linux report against a Darwin report of one clean revision.
-  `validate` holds the manifest counts and the approved hashes without a compiler.
-  CI runs only `ownership_matrix_selftest`, over a fake compiler. No CI test runs the matrix yet.
-  Register the matrix only with the complete ownership feature.
-- **Each solver alone runs over every faulty body before a producer enters CI.** PR 103 ran 8
-  review rounds, and no round looked for a false accept before round 8. No test ran a solver alone.
-  Round 8 found that the heap solver alone proves at least 14 bodies with real errors. Most of
-  those classes were on main already. So a test runs each solver alone over every faulty body.
-  That test passes before any producer of that solver joins CI. Every review round carries a
-  counted false-accept set: a number from that test, not a sample (PR 103, 2026-10-10).
-- **Every ownership PR carries the counted false-accept set and the gate of its kind.** The
-  soundness-gate PR adds `test/ownership/solvers_alone.ft`. It runs over each faulty body.
-  It prints four numbers: the bodies that the heap solver proves, the bodies that the summary
-  solver proves, the ledger size and the new false accepts. The same PR adds the ledger
-  `test/ownership/solvers/false_accepts.txt` in the shape of `test/lang/xfail.txt`
-  (`file:body solver # class`). New false accepts = 0 in every PR. The same PR also adds
-  `test/ownership/heap_rows.ft`, one row per body, and its golden `test/ownership/heap_rows.txt`.
-  Each PR kind has its own gate:
-  - A refactor PR: the corpus diff is empty, and the `heap_rows` diff is empty. One step is the
-    exception: the step that removes the prover's witness changes only the verdict and reason
-    columns, from `failed none` to `unproved missing_path`.
-  - A soundness PR: a row changes only from proved to unproved. The ledger shrinks by named
-    entries.
-  - A coverage PR: a row may change from incomplete to complete. The ledger does not change. One
-    probe for each trust class comes before the fix.
-  - A witness PR: a violation in the 72 accept cases or in the compiler closure is must-fix. A
-    false violation on a probe joins `test/ownership/witness/false_violations.txt` when its
-    rendered conditions name a step that fails on the run. The witness PR that records the first
-    such violation adds that file; the one-body checker records none, so the file does not exist
-    yet. A false violation whose conditions all hold on the run is a checker bug, and it is
-    must-fix (2026-10-10).
-    A probe of an input condition runs both ways: once with inputs that hold each rendered
-    condition, and once with inputs that break one. `WitnessAliasRunTest` in
-    `test/ownership_driver_test.py` does it for the 27 bodies of
-    `test/ownership/witness/alias_runs.ft`. Each of 21 losses validates under its
-    distinct-storage notes, and the run with distinct inputs holds each note and leaks 1
-    allocation. The run with one storage leaks 0, but for 2 bodies whose notes ask for more than
-    the leak needs. Six losses stay incomplete proof: `same_only` leaks only with one storage,
-    because the checker takes no `same` relation, and 5 bodies write over a slot that names a
-    referent. The leak detector is the glibc
-    allocation trace: `main` calls `mtrace`, and the test preloads `libc_malloc_debug.so.0` with
-    `MALLOC_TRACE` set. Under qemu-user the preload reaches the x86-64 program, and the library
-    is below `QEMU_LD_PREFIX`. Darwin skips the runs.
-- **Two soundness gates hold the heap solver and the summary solver alone** (D17.14, D17.18).
-  Outside its 12 test programs, only `ownership_source_calls` imports `ownership_heap`, and it
-  joins the two solvers. These gates run each solver alone.
-  `SoundnessGateTest` in `test/ownership_driver_test.py` builds both programs once with
-  `-I src/fort -I test/fort/support`. It runs each input in an empty directory of its own, because
-  `lower_env` writes its sandboxes into the working directory.
-  `test/ownership/heap_rows.ft` prints one row for each function of a file: the verdict, the
-  incomplete reason, `returns`, the interface length, the post slots, the post atoms and the events.
-  The test compares 1794 rows of 304 inputs with `test/ownership/heap_rows.txt`. The inputs are
-  107 of the 109 manifest programs, the 67 programs of `test/ownership/probes`, and 130 texts that
-  `heap_texts` takes from the 12 `test/fort/ownership_heap*_test.ft` programs. `HEAP_ROWS_SKIPPED`
-  names the other 2 manifest programs with the reason: each imports `std.str`, and the sandbox
-  `std` holds only a runtime. A skipped program that `heap_rows` reads fails the test. Run the
-  test with `--bless` to write the golden, and read the diff of the golden before the commit.
-  `test/ownership/solvers_alone.ft` prints the summary verdict, the heap verdict and the verdict
-  of the calls_heap row (`ownership_source_calls_env.verdict`) of 347 faulty bodies:
-  the faulty body of each of the 37 reject cases (the last function at or before an error line)
-  and the 310 bodies of `test/ownership/solvers/faulty.json`. A body is faulty because its source
-  has the expected error: the error line of a reject case, or the `faulty.json` entry of a probe.
-  The summary solver must prove 0, and the calls_heap row must prove 0: it needs both proofs. No
-  ledger entry names the row. Its one-body witness checker validates an event in 16 of the faulty
-  bodies, so the row fails exactly those 16, and `expected_failed` in the test names them. 3 of
-  the 16 are bodies of the `base_*` probes. The heap solver may prove only the entries of
-  `test/ownership/solvers/false_accepts.txt`, and each
-  entry must still prove. The ledger has one line `# at most N entries`, and a ledger with more
-  entries fails the test. A change lowers N
-  when it deletes an entry, so each step down is a one-line diff; a raise of N is the only way to
-  add an entry, and review refuses it. On 2026-10-10 N was 13: 4 entries of class A, 3 of B, 1 of
-  D and 5 of E. Rule P1 of D17.18 (only an established fact removes a path) deleted the 8 entries
-  of A, B and D, so N is 5, all of class E. The review of that rule found another class outside
-  the ledger: a callee wrote a known scalar local through its address, so the heap solver alone
-  proved 9 faulty bodies (`review_p01` to `review_p07`). The rule that a call forgets each scalar
-  local whose storage a FIR address names removed it, and `faulty.json` holds those 9 bodies and
-  8 more of the review (17 bodies of the 8 `review_p*` probes). A second review found 11 more,
-  all on main before the rule: a pointer local whose address escaped keeps its root fact over a
-  call (class F), a cast store loses or widens a write (G), and `~x` keeps the number of x (H).
-  The user ruled on 2026-10-11 that the ledger takes them, with N 16, and that 3 small changes
-  fix them; `faulty.json` then held 63 bodies (100 in all, from the 14 `review_*` probes of both
-  reviews). The width of `not` deleted the 2 entries of class H, and N became 14. The D10.7 caller
-  requirement deleted the 5 entries of class E, and N became 9. The frame of a call (D17.18)
-  deleted the 2 entries of class F, and N became 7. `faulty.json` took 22 more bodies of class F
-  from 2 `frame_*` probes. The heap solver proved 17 of them before the frame. The user ruled on
-  2026-10-11 that the ledger takes 5 more entries. N became 12. Class I has 2 entries for callee
-  changes through escaped local addresses. Class K has 2 entries for complete callees that write
-  caller storage through a global. Class L has 1 entry for a complete callee that writes through
-  a pointer leaf of a by-value aggregate. The cast rule deleted the 7 class G entries, and N
-  became 5. Seven cast probes add 17 faulty bodies. The 3 `lost_*` probes add 3 bodies. Review
-  added 9 bodies in 4 `review_r*` probes. They cover view and address arguments, an assumed root,
-  an empty argument, a changed parent, a null-side join, and a fixed-array slice index. Thus,
-  `faulty.json` has 119 bodies, and the full set has 156. The ledger classes with entries are I,
-  K and L. The summary write footprint then deleted the class K and L entries, and the bound
-  became 0. The final review of the direct aggregate leaf reads found 12 faulty bodies in 4
-  `review_s*` probes. The user ruled on 2026-10-16 that the ledger takes them as class N: a
-  dangling borrowed leaf of a copied aggregate call argument that the heap solver does not see.
-  The summary solver fails 11 of them, and 1 stays unproved. The bound became 12. Thus
-  `faulty.json` had 131 bodies, and the set had 168. The final review of the loaded-source gate
-  found 6 faulty callers that the heap solver alone proves: a callee loads a reference from
-  caller storage and reads through it, and a release before the call has emptied the referent.
-  On 2026-10-15 the user ruled that the ledger takes them as class M. They reached main after
-  class N, and N became 18. A later change fixes the heap rule.
-  `test/ownership/probes/loaded_callers.ft` holds the 8 faulty callers of
-  `test/fort/ownership_source_local_loaded_gate_test.ft`, and the driver test holds the two
-  texts the same. Thus, `faulty.json` had 139 bodies, and the full set had 176. The copied-leaf
-  rule of the heap call transfer (`notes/compiler.md` 6) deleted the 12 class N entries, and N
-  became 6. That rule changed 12 rows of the golden from `proved` to `unproved`, the 12 class N
-  bodies, and no row in the other direction. The review of that rule found 3 more faulty shapes
-  that the heap solver alone proves on main: a dangling reference copied as a scalar argument,
-  as a scalar, or in an aggregate assignment. On 2026-10-16 the user ruled that the ledger takes
-  them as class Q for a later change, and N became 9. The summary solver fails 2 of them, and 1
-  stays unproved. `test/ownership/probes/copied_references.ft` holds them, so `faulty.json` had
-  142 bodies, and the full set had 179. The same review found that the heap solver alone proves
-  3 whole-array stores of a dangling reference. The user ruled on 2026-10-16 that this change
-  fixes them, so they took no ledger entry. `test/ownership/probes/array_stores.ft` holds them
-  with valid counterparts, so `faulty.json` had 145 bodies, and the full set had 182. The
-  reviews of that fix found 8 casts of an element address to the array type, 3 of them through
-  a slice, that the heap solver alone proves on main. `test/ownership/probes/array_casts.ft`
-  holds them, so `faulty.json` had 153 bodies, and the full set had 190. A full-slice summary
-  rule proved 4 faulty slices of caller storage in the summary solver, and a copy of the pointer
-  field of a caller span proved 2 more. The fix adds the 4 bodies of
-  `test/ownership/probes/full_slices.ft` and the 2 of `test/ownership/probes/span_headers.ft`.
-  The heap solver alone proves 3 of them on 3b0fca76 too: `full_after_move`, `ptr_after_move`
-  and `ptr_field_move`, each a read of caller storage after its move. On 2026-10-17 a
-  coordinator ruling, by a delegation of the user, put them in the ledger as class P, and the
-  bound became 12. Thus, `faulty.json` had 159 bodies, and the full set had 196. The copy rule
-  of the heap scalar operand and the heap assignment (`notes/compiler.md` 6) deleted the 3
-  class Q entries. Its review found 5 faulty callers that pass null to a callee that the rule
-  left without a proof. A call of a callee without a proof that takes a reference now gives
-  incomplete proof in the caller. Each class M caller makes such a call, so the 6 class M
-  entries went too, and N became 3. Against e1a4aca4 the change moved 28 rows of the golden
-  from `proved` to `unproved` and 5 rows of valid stores of a global address the other way.
-  `copied_references.ft` took 24 more faulty bodies, most with valid counterparts, so
-  `faulty.json` had 183 bodies, and the full set had 220.
-  The 10 `base_*` probes hold bodies of the reviews of PR 120, 132 and 134: an access to
-  caller storage through a released, moved or emptied base, formals that alias (D17.4), and an
-  owner output after a call. The user ruled on 2026-10-16 that the ledger takes the bodies
-  of these probes that the heap solver alone proves, in 2 classes. Class O: two inputs name
-  one storage, and the heap solver keeps a stale fact. Class P: a read of caller storage after
-  its release or move. A body joins `faulty.json` only when the summary solver and the
-  calls_heap row prove it 0 times. The base rule of the summary solver (`notes/compiler.md`)
-  proves none of the 84 faulty bodies of these probes, so all 84 joined, 8 with a class O
-  entry and 8 with a class P entry, and the bound became 19. The review of that rule added 3
-  probes (`base_copies`, `base_store_back`, `base_held_writes`) with 43 faulty bodies that no
-  solver alone proves. `faulty.json` has 310 bodies, and the full set has 347. The ledger
-  classes with entries are O and P. The empty ledger is the goal.
-  Measured runs of the first 10 probe programs on darwin, built with `build/Darwin/debug/fort --cc
-  /opt/homebrew/bin/clang --std-dir build/Darwin/debug/std -o <probe> <probe>.ft`: `round8_a3`
-  exits 134 (the assertion of `chk_addr`), `round8_d2` exits 139, and the other 8 exit 0.
-  `leaks --atExit -- ./<probe>` finds 2 leaks in `review_f1`, `review_f2`, `review_f4` and
-  `round8_a1`, 4 in `round8_a2`, 5 in `round8_a3` and 1 in `round8_a4`. `review_f5` and `round8_d1`
-  exit 0 with 0 leaks: clang removes the dead load of `null_read` and `null_next`, so a run shows
-  no error in those 2 bodies. A run measures only the bodies that `main` of the probe calls.
-  What the gates miss. The golden holds a change and not a verdict: a blessed row that goes from
-  `failed` to `proved` passes, so the diff is the review. `heap_texts` takes only a `string[N]`
-  array of literals, and it joins a `tail` to a base only through a joiner function that the
-  function of the `tail` calls; a text that a test builds in another way is no input. A faulty
-  body is faulty only because its source says so, and a body with two faults counts once. A
-  `proved` verdict also needs `known` and no residual flag, so a successful proof with a residual
-  flag prints `unproved`, and the gate does not see a false accept of that kind. On 2026-10-10
-  0 of the 62 faulty bodies had one.
-  The third column judges the calls_heap row with the rules of `ownership_source_calls`, over the
-  closure of the file alone. It needs both proofs, so it proves no body that the summary solver
-  alone does not prove; on 2026-10-11 it gave 117 of 117 unproved.
 
 ## 6. Generated code
 
@@ -922,15 +660,6 @@ bullet at a time and without a rewrite.
   `tools/ir_snapshot.sh --fir-stats <fort> <std-dir> <out-dir>` also passes `--fir-stats`
   (D14.1) and writes the line `<mode> <test> lowered N of M` of each module to
   `<out-dir>/stats.txt`, with the sums of each mode at the end (T-253).
-- **`tools/ownership_ir_compare.py --fort <fort> --std-dir <std> <entry.ft>...` holds that the
-  ownership proof changes no IR** (D17.14, D19.8). For each entry and each of four modes
-  (`default`, `release`, `nobounds`, `release-nobounds`) it runs two `-S` builds that differ
-  only in `--ownership-check`, and it prints `equal`, `differ` with a diff, or `rejected`. A
-  `--flag` that selects the analysis or names its report is a usage error. It exits 0 only
-  when every case is `equal`. A selected build writes IR only at exit 0, so a `rejected` case
-  measures nothing and is no equality. On 2026-10-07 no selected build exits 0, so the tool
-  can give `equal` only once the proof accepts a program
-  (`test/ownership_ir_compare_test.py` holds each verdict with a stand-in compiler).
 - **The oracle of the FIR migration is `tools/fir_diff.py <before> <after> <out>`, and not
   `llvm-diff` alone** (T-253, `spec/fir.md` 16.2). It compares a snapshot of a compiler before
   T-253, whose direct path wrote every function, with a snapshot of a later compiler. Since T-255
@@ -1101,22 +830,6 @@ bullet at a time and without a rewrite.
   absent. Two earlier changes
   mutated `src/fort/check.ft`, and then both compilers, by hand, because no table covered either
   file. No table covers the fort checker today.
-  **The first row of a VM run can read `stale`.** The host writes the mutant, and the guest
-  `ninja` compares its mtime with an output that the baseline build wrote in the same second.
-  The row `D17.14-residual` read `stale` as the first row of two runs and `caught` as the second
-  row of a third run (md5 `e317a12eab36bd2ea481fd6eccdc18ce` against the baseline
-  `01afd107d70cd091e469ea64c1c5b8d2`). Re-run a stale first row behind another row.
-  That can fail too: a rerun of 2 rows of the raw table read `stale` for both. A runner that
-  waits 20 s before each guest command caught both rows (`--runner` with a script that runs
-  `sleep 20` and then `tools/vm run "$@"`).
-  A second row can reuse the binary of the first in the same way: `D17.14-untracked-leaves`
-  got the md5 of `D17.14-untracked-load`. A runner that waits 2 s after each build removes
-  both. `D17.16-leaves` read `stale` alone three times and `caught` with `--runner <script>`,
-  where the script runs `tools/vm run "$1"` and then `sleep 2` when `$1` starts with `ninja`.
-  **A stage that fails on the baseline catches each row.** `tools/mutate.py` runs no stage on
-  the unmutated build. On 2026-10-08 the row `D17.14-imported-bodies` read `caught`, and its
-  log held 8 failed cases of `ownership_driver_groups` that the baseline failed as well. Before
-  a round, run each stage command on the baseline. Then read the failed case names in each log.
   **The checker table reads its rows from history.** Commit 39a58dd8 deleted every `Dn.m`
   citation of `bootstrap0/src/check.c` and `check_stmt.c` and kept the code. The table has one
   row for each of the 78 decisions those files cited at `39a58dd8^`, one row for each of the 6
@@ -1134,14 +847,6 @@ bullet at a time and without a rewrite.
   writes the modification time of each object into the binary. Without it two builds of one
   source gave two md5 values, so the last line of the runner would read `MISMATCH`. With it,
   two builds gave one value.
-  **The ownership tables also run on a darwin host, from a copy outside the repository.** Their
-  commands name `build/Linux/debug`. In the copy, `binary`, `build` and each stage name
-  `build/Darwin/debug`, the build sets `ZERO_AR_DATE=1`, and each `run_tests.py` stage passes
-  `--cc`, `--target arm64-apple-macosx11.0.0` and `--opt`. On 2026-10-08 such copies of
-  `ownership_local.json`, `ownership_stored.json` and `ownership_raw.json` ran 32 rows with
-  `--runner 'bash -c'` and restored the md5 each time. A local round cost about 6 min, because
-  its first stage runs about 35 suites. Change no file of the worktree while a round runs: a
-  build or a test there reads the mutant.
   **The fort emitter table reads its citations from history and its lines from today.** Commit
   c9b834a7 deleted the citations of `src/fort/gen.ft`, `gen_expr.ft`, `gen_stmt.ft` and
   `gen_data.ft`, and b0606efa then replaced the direct path by FIR. At `a3e0c95d` those files
@@ -1187,14 +892,13 @@ bullet at a time and without a rewrite.
   it in PR CI and in the merge queue. It exits 1 for a stale anchor or a table without a
   `comment`. Run `ctest --preset debug -R '^mutation_anchors_'` after a change to a source.
   **Plain `--check` lets a stale row pass when the row's `new` text is in the file.** It reads
-  such a row as applied by a round in progress. The `new` text of 73 of 489 rows is in the
+  such a row as applied by a round in progress. The `new` text of 46 of 294 rows is in the
   clean file, and the repointed `D3.1` row is one of them: a scratch edit that moved its anchor
   left `--check` at exit 0. `--strict` counts no row as applied, so a missing anchor is stale.
-  With one row applied at a time, `--strict` exits 1 for 487 of 489 rows. The other two rows
-  (`D3.8` of `emitter_fort.json` and `fir-test-ownership-panic` of `ownership_driver.json`)
-  keep their anchor inside `new`. So **a stage must not run these tests**: the stage of
-  `emitter_bootstrap.json` that runs `ctest -L unit` excludes them with
-  `-E "^mutation_anchors_"`. Plain `--check` exits 0 for all 489 rows applied one at a time.
+  With one row applied at a time, `--strict` exits 1 for 293 of 294 rows. The other row
+  (`D3.8` of `emitter_fort.json`) keeps its anchor inside `new`. So **a stage must not run
+  these tests**: the stage of `emitter_bootstrap.json` that runs `ctest -L unit` excludes them
+  with `-E "^mutation_anchors_"`. Plain `--check` exits 0 for all 294 rows applied one at a time.
   The fixture `test/mutate/strict_table.json` has one row of this shape. The ctest
   `mutate_check_applied` requires exit 0 from plain `--check` on it, and
   `mutate_check_strict_stale` requires a failure from `--check --strict`.
@@ -1235,11 +939,9 @@ bullet at a time and without a rewrite.
   project writes**, which must tokenize with no `invalid.` scope and no unscoped character, so a
   new file the grammar mishandles fails here. `CORPUS_DIRS` is that list -- `test/lang/run`,
   `test/lang/programs`, `std`, `src/fort`, `src/lsp`, `test/fort` (its `support/` included),
-  `test/lsp`, `test/tty` and `test/ownership/approved` (T-308).
+  `test/lsp` and `test/tty`.
   T-145 added two net test programs and routed them into the grammar corpus; since 2026-09-25
   `run/ffi/013` and `run/stdlib/118` hold the C layout and the errno values on both targets.
-  Approved ownership examples receive lexical coverage during fixture preparation.
-  T-292 later qualifies their ownership verdicts.
   No test asserts the exact number of files; `CORPUS_MINIMUMS` gives each directory a floor.
   The other `.ft` files are listed in `EXCLUDED_DIRS`, each
   because it is meant to hold a lexical error (`test/lang/fail`, `test/highlight/scopes.ft`,
@@ -1286,15 +988,10 @@ bullet at a time and without a rewrite.
   The path is relative to the top of the worktree, so two worktrees that hold the same scopes give
   the same md5. An absolute path gives two md5s for one answer, and the second reader then builds
   a dump of their own (T-104, its review).
-  **Set `PYTHONDONTWRITEBYTECODE=1` to stop cache writes during a Python test run.** CMake sets
-  this variable for Python ctests. This variable and `-B` do not stop cache reads.
-  T-104 reads the first mutant's cache after changing the source within a few seconds.
-  T-309 measures cached `CORPUS_FILES = 817` while the current source says 831.
-  Both have modification time 1790941933 and source size 35741 bytes.
-  Python accepts the timestamp-based cache because these header values match.
-  Since 2026-10-07, no test asserts the exact corpus count; `CORPUS_FILES` is history.
-  Load current source with `compile` and `exec` for count measurements.
-  Keep cache files that another process can use.
+  **Set `PYTHONDONTWRITEBYTECODE=1` for a hand run of a Python suite you are mutating.** T-104 ran
+  two mutants of one file within a few seconds and read the same three failures for both, because
+  the second run loaded the `__pycache__` of the first. CMake sets the variable for every Python
+  ctest, so the gate never meets it; a hand run does.
 - The VS Code extension is plain JavaScript on the VS Code API, with no npm dependency and no build
   step. Its logic lives in `editors/vscode/lib/check.js`, which never `require('vscode')`, so Node's
   built-in runner tests it: `tools/vm run 'cd editors/vscode && node --test'` (ctest
