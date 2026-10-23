@@ -7,8 +7,15 @@ file once and reports problems as `<file>:<line>:<col>: <message>`.
 Use `fort_lint.py --fort build/<Host>/<preset>/fort [--target linux|darwin] [-I dir ...]
 [file.ft ...]`.
 Without file arguments, the tool checks the source sets of the target except SKIPPED. The
-target selects `std/<target>/*.ft`: a standard root declares one libc, so each target's
-modules are checked under the root of that target, on its own host.
+target selects `std/<target>/**/*.ft`: a standard root declares one libc, so each target's
+modules are checked under the root of that target, on its own host. Each set reads nested
+directories, so `src/fort/fir/flow.ft` gets the checks of `src/fort/ast.ft`.
+
+The naming checks of notes/style.md 3.1 apply to a file of `src/fort`, `src/lsp` and `std`
+by its path. The prefix check applies in each directory of those roots. The function and
+glossary checks apply to a nested module only: a file in a subdirectory of `src/fort`,
+`src/lsp` or `std`, outside the target directories. The flat modules keep their names until
+they move.
 """
 
 import argparse
@@ -21,14 +28,20 @@ from pathlib import Path
 
 # Pair each source group with the search roots that resolve its imports.
 # Language server modules use the `src` root, so their paths keep the `lsp.` prefix.
+# A nested module of src/fort imports its siblings from the root, `import fir.flow;`, and its
+# own directory is not that root. So it takes `src/fort` as a search root. The first matching
+# glob gives a file its roots, so a flat module of src/fort keeps none.
+# STD_COMMON skips the directories of TARGETS; the target glob adds the one of the target.
+STD_COMMON = "std/**/*.ft"
+STD_TARGET = "std/linux/**/*.ft"
 SOURCE_SETS = (
-    ("std/*.ft", ()),
-    ("std/linux/*.ft", ()),
+    (STD_COMMON, ()),
+    (STD_TARGET, ()),
     ("src/fort/*.ft", ()),
-    ("src/lsp/*.ft", ("src", "src/fort")),
-    ("test/fort/*.ft", ("src", "src/fort", "test/fort/support")),
-    ("test/fort/support/*.ft", ("src", "src/fort", "test/fort/support")),
-    ("test/lsp/*.ft", ("src", "src/fort", "test/fort/support")),
+    ("src/fort/**/*.ft", ("src/fort",)),
+    ("src/lsp/**/*.ft", ("src", "src/fort")),
+    ("test/fort/**/*.ft", ("src", "src/fort", "test/fort/support")),
+    ("test/lsp/**/*.ft", ("src", "src/fort", "test/fort/support")),
     ("test/ownership/*.ft", ("src", "src/fort", "test/fort/support")),
 )
 SOURCE_GLOBS = tuple(glob for glob, _ in SOURCE_SETS)
@@ -36,8 +49,8 @@ TARGETS = ("linux", "darwin")
 
 
 def source_sets(target):
-    """SOURCE_SETS with `std/linux/*.ft` replaced by the modules of `target`."""
-    return tuple(("std/%s/*.ft" % target, inc) if glob == "std/linux/*.ft" else (glob, inc)
+    """SOURCE_SETS with `std/linux/**/*.ft` replaced by the modules of `target`."""
+    return tuple(("std/%s/**/*.ft" % target, inc) if glob == STD_TARGET else (glob, inc)
                  for glob, inc in SOURCE_SETS)
 
 # A file named on the command line is checked even when this tuple excludes it.
@@ -65,26 +78,74 @@ LOWER_KINDS = (
     "parameter",
 )
 UPPER_KINDS = ("constant",)
+# The naming rules of notes/style.md 3.1.
+# PREFIX_ROOTS are the source roots whose directories get the file prefix check.
+PREFIX_ROOTS = ("src/fort", "src/lsp", "std")
+# A prefix that PREFIX_LIMIT files of one directory share asks for a directory.
+PREFIX_LIMIT = 3
+# The flat groups that a later change moves into directories, as (directory, prefix).
+LEGACY_PREFIXES = (("src/fort", "fir"), ("src/fort", "ownership"))
+# NAMING_ROOTS are the roots whose nested modules get the function and glossary checks.
+# A flat module of `src/lsp`, `lsp.server`, is no nested module: its four `create` functions
+# keep their names until it moves.
+NAMING_ROOTS = ("src/fort", "src/lsp", "std")
+# Each word that the glossary bans, and the word to use.
+GLOSSARY = {
+    "create": "make",
+    "destroy": "free",
+    "deinit": "free",
+    "lookup": "find",
+    "locate": "find",
+    "search": "find",
+    "cost": "work",
+    "price": "work",
+    "spend": "charge",
+}
+STYLE = "notes/style.md"
 # An `extern fn` keeps the foreign C symbol. A builtin keeps its language-defined name.
 EXEMPT_KINDS = ("extern fn", "builtin")
 # A variable cannot use its type name. A field can use it.
 SHADOW_KINDS = ("global", "local", "parameter")
 
 
+def in_target_directory(root, path):
+    """Whether the path is in `std/<target>/` for a target of TARGETS."""
+    parts = path.relative_to(root).parts
+    return len(parts) > 2 and parts[0] == "std" and parts[1] in TARGETS
+
+
 def collect(root, globs):
-    """Return the sorted list of files under root matching any of the globs."""
+    """Return the sorted list of files under root matching any of the globs.
+
+    STD_COMMON matches no file of a target directory.
+    """
     files = set()
     for pattern in globs:
-        files.update(p for p in root.glob(pattern) if p.is_file())
+        for path in root.glob(pattern):
+            if not path.is_file():
+                continue
+            if pattern == STD_COMMON and in_target_directory(root, path):
+                continue
+            files.add(path)
     return sorted(files)
+
+
+def glob_base(pattern):
+    """The directory part of a glob before its first wildcard: `std` for `std/**/*.ft`."""
+    parts = []
+    for part in pattern.split("/"):
+        if "*" in part:
+            break
+        parts.append(part)
+    return "/".join(parts)
 
 
 def default_file_set(root, sets=SOURCE_SETS):
     """Return the default (path, include roots) pairs, sorted by path.
 
     A file matched by two globs takes the roots of the first matching glob.
-    `test/fort/*.ft` and the support glob do not overlap, but a future pair
-    could overlap. Thus, table order defines the set. Filesystem order does not.
+    `src/fort/*.ft` and `src/fort/**/*.ft` overlap, and a flat module takes the
+    roots of the first. Thus, table order defines the set. Filesystem order does not.
     """
     skipped = {(root / name).resolve() for name in SKIPPED}
     chosen = {}
@@ -138,8 +199,62 @@ def shadow_problem(kind, name, type_text):
     return "%s '%s' takes the name of its type (D1.4)" % (kind, name)
 
 
-def record_problems(record):
-    """The problems of one index record, in order; a use carries none."""
+def module_segments(relative):
+    """The segments of a nested module path below its naming root, or None.
+
+    `src/fort/fir/flow.ft` gives `fir`, `flow` and `std/linux/sock/tcp.ft` gives `sock`,
+    `tcp`, since std/<target>/ stands for std/. `src/lsp/a/b.ft` gives `lsp`, `a`, `b`. A
+    flat module or a file outside NAMING_ROOTS gives None.
+    """
+    parts = Path(relative).with_suffix("").parts
+    for naming_root in NAMING_ROOTS:
+        base = tuple(naming_root.split("/"))
+        if parts[: len(base)] != base:
+            continue
+        rest = parts[len(base):]
+        if naming_root == "std" and len(rest) > 1 and rest[0] in TARGETS:
+            rest = rest[1:]
+        if len(rest) < 2:
+            return None
+        # A module of src/lsp is `lsp.<path>` through the search root `src`.
+        return ("lsp",) + rest if naming_root == "src/lsp" else rest
+    return None
+
+
+def glossary_problem(kind, name):
+    """The first word of a name that the glossary bans, as a problem, or None.
+
+    A word ends at `_` or, in a module path, at `.`.
+    """
+    for word in re.split(r"[_.]", name.lower()):
+        if word in GLOSSARY:
+            return "%s '%s' uses the word '%s'; the glossary says '%s' (%s)" % (
+                kind, name, word, GLOSSARY[word], STYLE)
+    return None
+
+
+def repeat_problem(kind, name, segments):
+    """The problem of a function whose first word is a word of its module path, or None.
+
+    Each segment splits at `_`, so `heap_free` in `owner/heap_state.ft` repeats `heap`.
+    A doer module may start a function with its verb (`parser.parse_place`): the verb is not
+    the module word, so the check passes it.
+    """
+    if kind != "fn":
+        return None
+    first = name.split("_")[0]
+    words = {word for segment in segments for word in segment.split("_")}
+    if first not in words:
+        return None
+    return "fn '%s' repeats the module word '%s' (%s)" % (name, first, STYLE)
+
+
+def record_problems(record, segments=None):
+    """The problems of one index record, in order; a use carries none.
+
+    `segments` is the module path of a nested module (module_segments). It turns on the
+    function and glossary checks of notes/style.md 3.1.
+    """
     if not record.get("is_decl"):
         return []
     kind = record["kind"]
@@ -151,6 +266,14 @@ def record_problems(record):
     shadow = shadow_problem(kind, name, record.get("type"))
     if shadow is not None:
         problems.append(shadow)
+    if segments is not None and kind not in EXEMPT_KINDS and kind != "module":
+        # A `module` record names an imported module, which is judged by its own path.
+        repeat = repeat_problem(kind, name, segments)
+        if repeat is not None:
+            problems.append(repeat)
+        word = glossary_problem(kind, name)
+        if word is not None:
+            problems.append(word)
     return problems
 
 
@@ -160,6 +283,29 @@ def module_name_problem(path):
     if LOWER_CASE.match(stem):
         return None
     return "module '%s' is not lower_case (D1.4)" % stem
+
+
+def prefix_problem(root, relative):
+    """The problem of a module whose first word PREFIX_LIMIT files of its directory share.
+
+    `src/fort/owner_state.ft` beside `owner_region.ft` and `owner_flow.ft` asks for the
+    directory `src/fort/owner/`. A file named as the prefix, `owner.ft`, does not count.
+    """
+    path = Path(relative)
+    directory = path.parent.as_posix()
+    if not any(directory == r or directory.startswith(r + "/") for r in PREFIX_ROOTS):
+        return None
+    if "_" not in path.stem:
+        return None
+    prefix = path.stem.split("_")[0]
+    if (directory, prefix) in LEGACY_PREFIXES:
+        return None
+    shared = [p for p in (Path(root) / directory).glob(prefix + "_*.ft") if p.is_file()]
+    if len(shared) < PREFIX_LIMIT:
+        return None
+    return ("module '%s' shares the prefix '%s_' with %d other files of %s; put them in the "
+            "directory %s/%s/ (%s)" % (path.stem, prefix, len(shared) - 1, directory,
+                                       directory, prefix, STYLE))
 
 
 def width_problems(text):
@@ -242,17 +388,18 @@ def group_records(document, root, cache):
     return buckets
 
 
-def file_problems(records, diagnostics, has_source_text=True):
+def file_problems(records, diagnostics, has_source_text=True, segments=None):
     """The problems one run reports about one file, sorted by position.
 
     A rejected file can still contain resolved index records. Check those records.
     Diagnostics disable the empty-index guard because an early error can produce no records.
+    `segments` is the module path of a nested module, as record_problems takes it.
     """
     problems = list(diagnostics)
     seen = set()
     found = []
     for record in records:
-        for message in record_problems(record):
+        for message in record_problems(record, segments):
             key = (record["line"], record["col"], message)
             if key in seen:
                 continue
@@ -279,7 +426,8 @@ def document_problems(document, root, relative, has_source_text=True):
     """
     cache = {}
     records = group_records(document, root, cache).get(real_path(root, relative, cache), [])
-    return file_problems(records, diagnostic_problems(document), has_source_text)
+    return file_problems(records, diagnostic_problems(document), has_source_text,
+                         module_segments(relative))
 
 
 def index_document(fort, root, relative, includes=(), std_dir=None):
@@ -321,12 +469,24 @@ def index_document(fort, root, relative, includes=(), std_dir=None):
     return document, None
 
 
-def text_problems(relative, text):
-    """The problems the file's own text carries: its module name and its width."""
+def text_problems(relative, text, root=None):
+    """The problems of the file's path and text: its module name, its prefix and its width.
+
+    The prefix check reads the directory of the file under `root`. Without a root it is off.
+    """
     problems = []
     name = module_name_problem(relative)
     if name is not None:
         problems.append((1, 1, name))
+    if root is not None:
+        prefix = prefix_problem(root, relative)
+        if prefix is not None:
+            problems.append((1, 1, prefix))
+    segments = module_segments(relative)
+    if segments is not None:
+        word = glossary_problem("module", ".".join(segments))
+        if word is not None:
+            problems.append((1, 1, word))
     problems.extend(width_problems(text))
     return problems
 
@@ -380,15 +540,17 @@ def lint_files(fort, root, files, std_dir=None):
                 # records of a file in this document are the records its own run
                 # would give. The search roots are the one thing that can change
                 # that closure. Thus, a run judges a file only when the roots
-                # agree. The default set loses no run to the rule. Std/ resolves
-                # through the copy beside the compiler, which is another file,
-                # and the test/fort and test/lsp tests carry the roots of test/fort/support.
+                # agree. Std/ resolves through the copy beside the compiler, which is
+                # another file, and the test/fort and test/lsp tests carry the roots of
+                # test/fort/support. A nested module of src/fort carries `-I src/fort`,
+                # so a run of a flat module does not judge it, and it takes a run of its own.
                 continue
             source = has_source_text(entries[other][3])
-            reports[other] = file_problems(records or [], diagnostics, source)
+            segments = module_segments(entries[other][0])
+            reports[other] = file_problems(records or [], diagnostics, source, segments)
     lines = []
     for index, (relative, _, _, text) in enumerate(entries):
-        problems = text_problems(relative, text) + reports[index]
+        problems = text_problems(relative, text, root) + reports[index]
         problems.sort(key=lambda problem: (problem[0], problem[1]))
         lines.append(
             ["%s:%d:%d: %s" % (relative, line, col, message) for line, col, message in problems]
@@ -410,7 +572,7 @@ def empty_set_problems(root, paths, globs=SOURCE_GLOBS):
         problems.append("fort_lint: no fort source matched %s" % ", ".join(globs))
         return problems
     for pattern in globs:
-        directory = root / os.path.dirname(pattern)
+        directory = root / glob_base(pattern)
         if not directory.is_dir():
             continue
         if not collect(root, (pattern,)):
@@ -444,7 +606,7 @@ def main(argv=None):
         "--target",
         choices=TARGETS,
         default="linux",
-        help="the target whose std/<target>/*.ft the default set holds (default: %(default)s)",
+        help="the target whose std/<target>/**/*.ft the default set holds (default: %(default)s)",
     )
     parser.add_argument("paths", nargs="*", type=Path, help="the files to check")
     args = parser.parse_args(argv)

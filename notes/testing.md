@@ -385,12 +385,12 @@ bullet at a time and without a rewrite.
   program rather than a translation unit, so the `#include`d helper a C suite would use
   (`bootstrap0/test/common/types_helpers.h`) has to be an imported module (`support/types_env.ft`,
   T-032). The directory is invisible to the harness: `discover` walks `run`, `fail`, `programs` and
-  the `*_test.ft` of the root and nothing else, so a test misfiled there would run nowhere and say
-  nothing. `_report_misplaced_tests` closes that (T-079): a `*_test.ft` anywhere below the root
-  outside those three directories is `test outside the root of the corpus`, which is a lint
-  problem and not a test, since what belongs under `support/` is shared code and nothing else.
-  `agents/lines.py` counts `test/fort/**/*.ft` and `test/lsp/*.ft` as test lines and
-  `src/fort/*.ft` and `src/lsp/*.ft` as source lines, `test/highlight_test.py` tokenizes them,
+  takes each other `*_test.ft` of the corpus, `fir/flow_test.ft` included, but none of `support/`.
+  So a test misfiled there would run nowhere and say nothing. `_report_misplaced_tests` closes
+  that (T-079): a `*_test.ft` below `support/` is `test in support/, which holds shared code
+  only`, a lint problem and not a test. Another `.ft` that is not a test is `bad test name`.
+  `agents/lines.py` counts `test/**/*.ft` as test lines and `src/fort/**/*.ft`,
+  `src/lsp/**/*.ft` and `std/**/*.ft` as source lines, `test/highlight_test.py` tokenizes them,
   and `tools/fort_lint.py` lints them with the search roots its `SOURCE_SETS` table pairs with
   the glob (`-I src -I src/fort -I test/fort/support`); a file named on its command line takes
   the roots of its own `-I` options.
@@ -1320,8 +1320,10 @@ bullet at a time and without a rewrite.
   rather than by hand, and a helper that is not a suite, such as `test/fake_vscode.js`, defines no
   test of its own, since Node 18 loads every file under `test/`.
 - **What checks `.ft` source, and what does not** (T-076). Three things do. `tools/fort_lint.py`
-  (target `lint`) holds `std/*.ft`, `std/<target>/*.ft` and
-  `src/fort/*.ft` to the identifier conventions of D1.4 and to 100 columns;
+  (target `lint`) holds `std/**/*.ft` (outside the target directories), `std/<target>/**/*.ft`,
+  `src/fort/**/*.ft` and `src/lsp/**/*.ft` to the identifier conventions of D1.4, to the naming
+  rules of `notes/style.md` 3.1 and to 100 columns. A nested module of `src/fort` takes
+  `-I src/fort`, because it imports its siblings from that root;
   it reads `fort --index` (D20.3) rather than tokenizing
   fort a second time, so the kinds and types it reasons about are the checker's own answers, and a
   second tokenizer cannot drift from the language. `lint` passes `--target`, so each host lints
@@ -1330,8 +1332,8 @@ bullet at a time and without a rewrite.
   assembled root was removed on 2026-09-26).
   `test/highlight_test.py` tokenizes `std/`,
   `src/fort/` and `test/lang/run` against the TextMate grammar, which is the only check that grammar
-  has. `agents/lines.py` counts `std/*.ft`, `std/linux/*.ft` and `std/darwin/*.ft` as source for the
-  test-to-code ratio (T-144).
+  has. `agents/lines.py` counts `std/**/*.ft`, nested and target modules included, as source for
+  the test-to-code ratio (T-144).
   The compiler and runtime are source too (D14.6).
   What still does not: **there is no formatter** -- indentation,
   spacing, brace placement and blank lines in `.ft` are review's alone, since `.clang-format` has no
@@ -1341,7 +1343,10 @@ bullet at a time and without a rewrite.
   lint, because a test exercises the language rather than exemplifying the conventions; and nothing
   checks import order, doc comments or dead code. Block comments need no check: `/*` is a lexical
   error in the compiler itself (D2.2). A new fort source outside `std/`, `src/fort/`
-  and `src/lsp/` is checked by nothing until a glob in `fort_lint.py` names it.
+  and `src/lsp/` is checked by nothing until a glob in `fort_lint.py` names it. A nested test
+  module, `test/fort/fir/flow_test.ft`, runs and is linted: the harness takes each `*_test.ft`
+  of a module corpus outside `run/`, `fail/`, `programs/` and `support/`. The compiler runs in
+  the corpus root, so a nested test spells `-I ../../src/fort -I support` as a root test does.
   **One `fort --index` run judges every file
   of the closure it indexed**, not only the file it names: the run indexes the whole import
   closure and each record carries its own file (D20.3), so `lint_files` takes the first file it

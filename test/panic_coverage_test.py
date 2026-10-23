@@ -351,6 +351,76 @@ class OrphanTest(TreeCase):
         self.assertIn('std/mem.ft:2: the site "mem.copy: short" has no test', err)
 
 
+class NestedModule(TreeCase):
+    """A module in a subdirectory of a source root holds sites as a flat module does."""
+
+    SITE = 'fn f() void {\n    panic("y.bit: out of range");\n}\n'
+
+    def test_an_untested_site_of_a_nested_compiler_module_fails(self):
+        tree = self.tree({"src/fort/x/y.ft": self.SITE})
+        out, _ = self.assertProblem(
+            tree, 'src/fort/x/y.ft:2: the site "y.bit: out of range" has no test, no '
+                  "declaration and no line in test/panic_gaps.txt")
+        self.assertIn("src/fort/x/y.ft: 1 sites, 0 tested, 0 unreachable, 1 untested\n", out)
+
+    def test_a_panic_test_answers_a_site_of_a_nested_compiler_module(self):
+        tree = self.tree({
+            "src/fort/x/y.ft": self.SITE,
+            "test/fort/x_y_bit_panic_test.ft": panic_test("panic: y.bit: out of range"),
+        })
+        out = self.assertGreen(tree)
+        self.assertIn("src/fort/x/y.ft: 1 sites, 1 tested, 0 unreachable, 0 untested\n", out)
+
+    def test_a_tests_declaration_in_a_nested_module_names_a_test_of_its_corpus(self):
+        tree = self.tree({
+            "src/fort/x/y.ft": 'fn f(string who) void {\n    // panic-coverage: tests: x_y\n'
+                               "    panic(who);\n}\n",
+            "test/fort/x_y_panic_test.ft": panic_test("panic: y.who"),
+        })
+        self.assertGreen(tree)
+
+    def test_a_nested_panic_test_answers_a_site(self):
+        tree = self.tree({
+            "src/fort/x/y.ft": self.SITE,
+            "test/fort/x/y_bit_panic_test.ft": panic_test("panic: y.bit: out of range"),
+        })
+        out = self.assertGreen(tree)
+        self.assertIn("test/fort: 2 panic tests, 0 with no single site\n", out)
+
+    def test_a_tests_declaration_names_a_nested_test_by_its_directory(self):
+        tree = self.tree({
+            "src/fort/x/y.ft": 'fn f(string who) void {\n    // panic-coverage: tests: x/y\n'
+                               "    panic(who);\n}\n",
+            "test/fort/x/y_panic_test.ft": panic_test("panic: y.who"),
+        })
+        self.assertGreen(tree)
+
+    def test_a_nested_panic_test_that_answers_no_site_fails(self):
+        tree = self.tree({"test/fort/x/y_panic_test.ft": panic_test("panic: y.none")})
+        self.assertProblem(tree, "test/fort/x/y_panic_test.ft: the test answers no panic site")
+
+    def test_a_panic_test_in_support_is_not_read(self):
+        tree = self.tree({"test/fort/support/y_panic_test.ft": panic_test("panic: y.none")})
+        out = self.assertGreen(tree)
+        self.assertIn("test/fort: 1 panic tests, 0 with no single site\n", out)
+
+    def test_an_untested_site_of_a_nested_server_module_fails(self):
+        tree = self.tree({"src/lsp/x/y.ft": self.SITE})
+        self.assertProblem(tree, 'src/lsp/x/y.ft:2: the site "y.bit: out of range" has no test')
+
+    def test_the_list_names_a_site_of_a_nested_module(self):
+        tree = self.tree({
+            "src/fort/x/y.ft": self.SITE,
+            "test/panic_gaps.txt": GAPS + 'src/fort/x/y.ft "y.bit: out of range"\n',
+        })
+        self.assertGreen(tree)
+
+    def test_an_untested_site_of_a_nested_std_module_fails(self):
+        tree = self.tree({"std/digest/sha256.ft": self.SITE})
+        self.assertProblem(
+            tree, 'std/digest/sha256.ft:2: the site "y.bit: out of range" has no test')
+
+
 class SharedText(TreeCase):
     def test_two_sites_of_one_module_with_one_text_fail(self):
         tree = self.tree({"src/fort/ast.ft": AST.replace(
