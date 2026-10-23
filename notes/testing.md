@@ -821,6 +821,12 @@ bullet at a time and without a rewrite.
   `bootstrap0/src/check.c` and `src/fort/check.ft` that reverted T-128's fix. Nothing in the
   repository said the tree was mutated. Three rules follow.
   Run `tools/mutate.py <table> --check` before the round, not after it rots.
+  **The first round of a run in the VM can read `stale`.** In three runs of
+  `tools/mutations/emptiness.json` on 2026-10-23, the first row gave the md5 of the baseline:
+  `ninja` ran only `Publishing build/fort` and did not build HEAD again, and the next rounds did.
+  Host and guest clocks agreed within 0.2 s. `--only` keeps the order of the table, so add a row
+  that an earlier run caught and that stands before the others, or run the first row by hand
+  with `touch` in the guest before `ninja`, and quote the md5 of its mutant.
   **Each table describes itself.** `ls tools/mutations/*.json` lists the tables.
   `jq -r '[input_filename] + .sources | join(" ")' tools/mutations/*.json` prints each table and
   the files that it covers. That is the `"sources"` list that the runner saves. The `comment` list

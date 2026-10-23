@@ -1,0 +1,1467 @@
+/// Proves at compile time that each store into an `own` reference finds its destination empty:
+/// the forward must-empty analysis of the overwrite check (spec/fir.md 11). It reads one verified
+/// FIR function before the build-mode pass, and it reads no other function.
+//
+// A fact says that a tracked place holds the zero value. The analysis keeps one fact for each
+// tracked place that a `check(overwrite: p)` names. No gen rule and no kill rule of one fact reads
+// another fact, so a fact that no check names changes no verdict. Three forward dataflows of
+// fir_flow run in this order, each with gen and kill sets for each block:
+// - the stale index temporaries, joined by union. A temporary `_t = copy _k` is stale at a point
+//   when a store into `_k` can stand between the assignment of `_t` and that point;
+// - the fresh pointer locals, joined by intersection;
+// - the facts, joined by intersection. A walk of each block gives its sets, with the stale set and
+//   the fresh set before each statement.
+// The module uses switches and no function-pointer dispatch table. It holds no module-level
+// mutable state: each vector belongs to one call of prove, or to the proof that it returns.
+import ast;
+import consts;
+import diag;
+import fir;
+import fir_flow;
+import fir_print;
+import prim;
+import session;
+import std.strbuf;
+import types;
+
+// The fact of a check whose place is not tracked, and of a block that ends in no check.
+u32 NO_FACT = 4294967295;
+
+// The end of a chain of index temporaries.
+u32 NO_LOCAL = 4294967295;
+
+/// The most work that the proof of one function takes. The work is the sum of three counts: the
+/// statements and the terminators times the overwrite checks, the blocks times the locals, and
+/// the steps of the stale chains (stale_steps). A function past it gets no proof, and each of its
+/// checks stays unproved.
+u64 WORK_LIMIT = 1048576;
+
+// ---- the proof ---------------------------------------------------------------------------------
+
+/// The verdict of each `check(overwrite: p)` of one function. `proved[b]` says whether the check
+/// that ends block `b` is proved. It is true for a block that ends in another terminator.
+/// `checks` counts the checks, and `unproved` counts the checks that the analysis does not prove.
+/// `work` is the work of the function, as WORK_LIMIT counts it, and `over` says that it passed
+/// the limit.
+struct proof {
+    bool mut@ own proved;
+    u32 checks;
+    u32 unproved;
+    u64 work;
+    bool over;
+}
+
+fn free(proof mut* p) void {
+    del(p->proved);
+    p->checks = 0;
+    p->unproved = 0;
+}
+
+/// Whether the check that ends block `b` is proved, or true when block `b` ends in another
+/// terminator.
+fn is_proved(proof* p, u32 b) bool {
+    return p->proved[cast(b, u64)];
+}
+
+// ---- paths -------------------------------------------------------------------------------------
+
+// The key of an index projection. `kk_local` names a local whose value at the point is the
+// index, and `kk_constant` a constant. `kk_none` is an index with no key, which differs from
+// every index.
+enum key_kind {
+    kk_none,
+    kk_local,
+    kk_constant,
+}
+
+struct key {
+    key_kind kind;
+    u32 local;
+    consts.cval value;
+}
+
+enum step_kind {
+    sk_deref,
+    sk_field,
+    sk_index,
+}
+
+// One projection of a path. `header` says that an index applies to a span or a `string`, whose
+// pointer field it reads first.
+struct step {
+    step_kind kind;
+    u32 field;
+    key key;
+    bool header;
+}
+
+// A place with the key of each index in place of its index local. Entries `first` to
+// `first + len - 1` of the steps of the context hold its projections. `tracked` says that the
+// path is a tracked place.
+struct path {
+    fir.base_kind base;
+    u32 local;
+    ast.sym* global;
+    u32 first;
+    u32 len;
+    bool tracked;
+}
+
+// What the analysis knows of one local before the dataflows. `assigns` counts the stores into the
+// storage of the local, whose place is fixed storage with the local as its base (fir.place_fixed),
+// and `reads` its reads as a whole local (fir.stmt_read_all, fir.term_read_all). `def_block` and
+// `def_index` give the last store. When `assigns` is 1 and the local is read, that store writes
+// the whole local: rule V13 needs a whole assignment of a temporary before each read of it.
+// `checks` counts the checks of `(*_n)`, and `stores` the stores into `(*_n)`. `based` counts the
+// stores whose place has the local as its base, through a deref too. `source` is the key of an
+// index temporary before the stale test, `next_source` the next temporary with the same source
+// local, and `sourced` the count of the temporaries whose source is the local. `taken` is the
+// local whose address the store of a held address takes, or NO_LOCAL.
+struct local_info {
+    u32 assigns;
+    u32 reads;
+    u32 def_block;
+    u32 def_index;
+    u32 checks;
+    u32 stores;
+    u32 based;
+    bool memory;
+    bool held;
+    key source;
+    u32 next_source;
+    u32 sourced;
+    u32 taken;
+}
+
+// The state of one call of prove. `first_source[k]` is the first index temporary whose source is
+// the local `k`. `steps[..steps_len]` holds the steps of the facts and of the path in use, and
+// `facts[..fact_count]` the facts. `block_fact[b]` is the fact of the check that ends block `b`.
+struct context {
+    fir.func* f;
+    local_info mut@ own locals;
+    u32 mut@ own first_source;
+    step mut@ own steps;
+    u64 steps_len;
+    path mut@ own facts;
+    u64 fact_count;
+    u32 mut@ own block_fact;
+    fir.read_list reads;
+}
+
+fn free_context(context mut* c) void {
+    del(c->locals);
+    del(c->first_source);
+    del(c->steps);
+    del(c->facts);
+    del(c->block_fact);
+    fir.read_list_free(&c->reads);
+}
+
+// Appends `s` to the steps, growing them as fir.grown_capacity says.
+fn push_step(context mut* c, step s) void {
+    if (c->steps_len == c->steps.len) {
+        u64 cap = fir.grown_capacity(c->steps.len, "fir.emptiness: too many steps");
+        step mut@ own bigger = new(step, cap);
+        u64 mut i = 0;
+        while (i < c->steps_len) {
+            bigger[i] = c->steps[i];
+            i += 1;
+        }
+        del(c->steps);
+        c->steps = move(bigger);
+    }
+    c->steps[c->steps_len] = s;
+    c->steps_len += 1;
+}
+
+// Appends `p` to the facts and returns its number.
+fn push_fact(context mut* c, path p) u32 {
+    if (c->fact_count == c->facts.len) {
+        u64 cap = fir.grown_capacity(c->facts.len, "fir.emptiness: too many facts");
+        path mut@ own bigger = new(path, cap);
+        u64 mut i = 0;
+        while (i < c->fact_count) {
+            bigger[i] = c->facts[i];
+            i += 1;
+        }
+        del(c->facts);
+        c->facts = move(bigger);
+    }
+    c->facts[c->fact_count] = p;
+    c->fact_count += 1;
+    return cast(c->fact_count - 1, u32);
+}
+
+fn step_at(context* c, path p, u32 i) step {
+    return c->steps[cast(p.first, u64) + cast(i, u64)];
+}
+
+// Whether `p` is a whole local, with no projection.
+fn is_local(fir.place p) bool {
+    return p.base == fir.base_kind.bk_local && p.proj_len == 0;
+}
+
+// Whether `p` is `(*_n)` for some local `_n`, with no other projection.
+fn is_deref_local(fir.func* f, fir.place p) bool {
+    return p.base == fir.base_kind.bk_local && p.proj_len == 1
+        && fir.place_projection(f, p, 0).kind == fir.proj_kind.pj_deref;
+}
+
+// Whether exactly one store writes the local `n` and it is no memory: then store_of gives that
+// store.
+fn is_single(context* c, u32 n) bool {
+    local_info* l = &c->locals[cast(n, u64)];
+    return l->assigns == 1 && !l->memory;
+}
+
+// The one store of the local `n`, when is_single holds.
+fn store_of(context* c, u32 n) fir.statement* {
+    local_info* l = &c->locals[cast(n, u64)];
+    return fir.block_statement(c->f, l->def_block, l->def_index);
+}
+
+// ---- the survey of the locals ------------------------------------------------------------------
+
+// Counts the reads of each whole local that the read list of `c` holds.
+fn count_reads(context mut* c) void {
+    u64 mut i = 0;
+    while (i < c->reads.len) {
+        fir.place p = c->reads.items[i].place;
+        if (is_local(p)) {
+            c->locals[cast(p.local, u64)].reads += 1;
+        }
+        i += 1;
+    }
+}
+
+// Counts the stores, the reads, the checks of `(*_n)` and the stores into `(*_n)` of each local,
+// and records the store of each local that has one.
+fn count_uses(context mut* c) void {
+    fir.func* f = c->f;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, i);
+            if (s->kind == fir.stmt_kind.st_assign && fir.place_fixed(f, s->place)) {
+                local_info mut* l = &c->locals[cast(s->place.local, u64)];
+                l->assigns += 1;
+                l->def_block = b;
+                l->def_index = i;
+            }
+            if (s->kind == fir.stmt_kind.st_assign && is_deref_local(f, s->place)) {
+                c->locals[cast(s->place.local, u64)].stores += 1;
+            }
+            if (s->kind == fir.stmt_kind.st_assign && s->place.base == fir.base_kind.bk_local) {
+                c->locals[cast(s->place.local, u64)].based += 1;
+            }
+            fir.stmt_read_all(f, s, &c->reads);
+            count_reads(c);
+            i += 1;
+        }
+        fir.terminator* t = &fir.block_at(f, b)->term;
+        if (t->kind == fir.term_kind.tk_check_overwrite && is_deref_local(f, t->place)) {
+            c->locals[cast(t->place.local, u64)].checks += 1;
+        }
+        fir.term_read_all(f, t, &c->reads);
+        count_reads(c);
+        b += 1;
+    }
+}
+
+// Whether the local `a` can be a held address: a temporary that one store writes with
+// `addr mut(p)`, and that one check of `(*_a)` and one store into `(*_a)` read, and nothing else.
+fn is_held_address(context* c, u32 a) bool {
+    local_info* l = &c->locals[cast(a, u64)];
+    if (fir.local_at(c->f, a)->kind != fir.local_kind.lk_temp || l->assigns != 1) {
+        return false;
+    }
+    fir.rvalue r = store_of(c, a)->value;
+    return r.kind == fir.rvalue_kind.rv_addr && r.is_mut && l->reads == 2 && l->checks == 1
+        && l->stores == 1;
+}
+
+// Whether the statement `s` takes the address of the storage of a local, and which one in *out:
+// an `addr` or a `slice` of a fixed array whose place is fixed storage of a local. A place that
+// passes through a deref or an index on a span or a `string` names no byte of the local.
+fn find_taken(context* c, fir.statement* s, u32 mut* out) bool {
+    if (s->kind != fir.stmt_kind.st_assign) {
+        return false;
+    }
+    fir.rvalue r = s->value;
+    bool slice = r.kind == fir.rvalue_kind.rv_slice
+        && fir.place_type(c->f, r.place)->kind == types.type_kind.k_array;
+    if (r.kind != fir.rvalue_kind.rv_addr && !slice) {
+        return false;
+    }
+    if (!fir.place_fixed(c->f, r.place)) {
+        return false;
+    }
+    *out = r.place.local;
+    return true;
+}
+
+// Marks the memory locals and the held addresses in time linear in the statements. A held
+// address makes no local memory, and a held address that is memory is no held address: then the
+// address that its store takes makes that local memory, which can end another held address.
+fn mark_memory(context mut* c) void {
+    fir.func* f = c->f;
+    u32 n = fir.local_count(f);
+    u32 mut k = 0;
+    while (k < n) {
+        local_info mut* l = &c->locals[cast(k, u64)];
+        l->held = is_held_address(c, k);
+        l->taken = NO_LOCAL;
+        k += 1;
+    }
+    // the storage of an aggregate result is the destination of the caller
+    if (fir.type_aggregate(fir.local_at(f, 0)->ty)) {
+        c->locals[0].memory = true;
+    }
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, i);
+            u32 mut taken = 0;
+            if (find_taken(c, s, &taken)) {
+                if (is_local(s->place) && c->locals[cast(s->place.local, u64)].held) {
+                    c->locals[cast(s->place.local, u64)].taken = taken;
+                } else {
+                    c->locals[cast(taken, u64)].memory = true;
+                }
+            }
+            i += 1;
+        }
+        b += 1;
+    }
+    // a held address ends once, so the walks take at most one step more than the locals
+    k = 0;
+    while (k < n) {
+        u32 mut at = k;
+        while (at != NO_LOCAL && c->locals[cast(at, u64)].memory
+               && c->locals[cast(at, u64)].held) {
+            c->locals[cast(at, u64)].held = false;
+            u32 next = c->locals[cast(at, u64)].taken;
+            if (next != NO_LOCAL) {
+                c->locals[cast(next, u64)].memory = true;
+            }
+            at = next;
+        }
+        k += 1;
+    }
+}
+
+// Whether `t` is the type `u64`.
+fn is_u64(types.node* t) bool {
+    return t->kind == types.type_kind.k_prim && t->prim == prim.prim_kind.prim_u64;
+}
+
+// Gives each index temporary its source: the local `_k` of `_t = copy _k` or of
+// `_t = cast<u64>(copy _k)`, when `_k` is no memory, or the constant `c` of `_t = const u64 c` or
+// of a cast of the integer constant `c`. One store must write the temporary, and the temporary
+// is no memory.
+fn mark_sources(context mut* c) void {
+    fir.func* f = c->f;
+    u32 n = fir.local_count(f);
+    u32 mut t = 0;
+    while (t < n) {
+        c->locals[cast(t, u64)].next_source = NO_LOCAL;
+        c->first_source[cast(t, u64)] = NO_LOCAL;
+        t += 1;
+    }
+    t = 0;
+    while (t < n) {
+        local_info mut* l = &c->locals[cast(t, u64)];
+        if (fir.local_at(f, t)->kind == fir.local_kind.lk_temp && is_single(c, t)) {
+            fir.rvalue r = store_of(c, t)->value;
+            bool shape = r.kind == fir.rvalue_kind.rv_use
+                || (r.kind == fir.rvalue_kind.rv_cast && is_u64(r.ty));
+            if (shape) {
+                fir.operand o = fir.rvalue_operand(f, r, 0);
+                if (o.kind == fir.operand_kind.ok_const && o.value.kind == fir.const_kind.ck_int) {
+                    l->source = key{key_kind.kk_constant, 0, o.value.value};
+                } else if (o.kind == fir.operand_kind.ok_copy && is_local(o.place)
+                           && !c->locals[cast(o.place.local, u64)].memory) {
+                    l->source = key{.kind = key_kind.kk_local, .local = o.place.local};
+                    l->next_source = c->first_source[cast(o.place.local, u64)];
+                    c->first_source[cast(o.place.local, u64)] = t;
+                    c->locals[cast(o.place.local, u64)].sourced += 1;
+                }
+            }
+        }
+        t += 1;
+    }
+}
+
+// ---- the operands of an item -------------------------------------------------------------------
+
+// Operand `i` of the terminator `t` in *out: the operand of a `switch`, the condition and the
+// reported operands of a `check`, the reported operands of a `fail`. False past the count.
+fn find_operand(fir.func* f, fir.terminator* t, u32 i, fir.operand mut* out) bool {
+    u32 mut at = i;
+    if (t->kind == fir.term_kind.tk_switch || t->kind == fir.term_kind.tk_check) {
+        if (at == 0) {
+            *out = t->cond;
+            return true;
+        }
+        at -= 1;
+    }
+    if (t->kind != fir.term_kind.tk_check && t->kind != fir.term_kind.tk_fail) {
+        return false;
+    }
+    if (at >= t->args_len) {
+        return false;
+    }
+    *out = fir.operand_at(f, t->args_first + at);
+    return true;
+}
+
+// ---- the stale index temporaries ---------------------------------------------------------------
+
+// The steps of the stale chains: for each local, the stores whose place has it as its base times
+// the index temporaries whose source it is. apply_stale takes that many steps in one walk.
+fn stale_steps(context* c) u64 {
+    u64 mut sum = 0;
+    u64 mut k = 0;
+    while (k < c->locals.len) {
+        sum += cast(c->locals[k].based, u64) * cast(c->locals[k].sourced, u64);
+        k += 1;
+    }
+    return sum;
+}
+
+// The effect of the statement `s` on the stale set: a store into a local makes each temporary
+// with that source stale, and the store of a temporary makes it fresh again.
+fn apply_stale(context* c, fir.statement* s, fir_flow.bits mut* stale) void {
+    if (s->kind != fir.stmt_kind.st_assign || s->place.base != fir.base_kind.bk_local) {
+        return;
+    }
+    u32 mut t = c->first_source[cast(s->place.local, u64)];
+    while (t != NO_LOCAL) {
+        fir_flow.bits_set(stale, t);
+        t = c->locals[cast(t, u64)].next_source;
+    }
+    local_info* l = &c->locals[cast(s->place.local, u64)];
+    if (s->place.proj_len == 0 && l->source.kind == key_kind.kk_local) {
+        fir_flow.bits_clear(stale, s->place.local);
+    }
+}
+
+// ---- the fresh pointer locals ------------------------------------------------------------------
+
+// Whether the rvalue `r` writes a fresh `new`: `alloc`, or the `move` of a temporary that one
+// store writes with an `alloc` and that only this `move` reads.
+fn is_fresh_new(context* c, fir.rvalue r) bool {
+    if (r.kind == fir.rvalue_kind.rv_alloc) {
+        return true;
+    }
+    u32 mut t = 0;
+    if (!find_moved_temp(c, r, &t)) {
+        return false;
+    }
+    return store_of(c, t)->value.kind == fir.rvalue_kind.rv_alloc;
+}
+
+// Whether the rvalue `r` is `move _t` of a temporary that one store writes, that is no memory and
+// that only this `move` reads, and which one in *out.
+fn find_moved_temp(context* c, fir.rvalue r, u32 mut* out) bool {
+    if (r.kind != fir.rvalue_kind.rv_use) {
+        return false;
+    }
+    fir.operand o = fir.rvalue_operand(c->f, r, 0);
+    if (o.kind != fir.operand_kind.ok_move || !is_local(o.place)) {
+        return false;
+    }
+    local_info* l = &c->locals[cast(o.place.local, u64)];
+    if (fir.local_at(c->f, o.place.local)->kind != fir.local_kind.lk_temp
+        || !is_single(c, o.place.local) || l->reads != 1) {
+        return false;
+    }
+    *out = o.place.local;
+    return true;
+}
+
+// Ends the freshness of a local that the operand `o` copies or moves as a whole.
+fn end_fresh(fir.operand o, fir_flow.bits mut* fresh) void {
+    if (o.kind != fir.operand_kind.ok_const && is_local(o.place)) {
+        fir_flow.bits_clear(fresh, o.place.local);
+    }
+}
+
+// The effect of the right side of the statement `s` on the fresh set: each operand that copies
+// or moves a local as a whole, and each `addr` or `slice` that names a place of a local, other
+// than the store of a held address, ends the freshness of that local.
+fn apply_fresh_reads(context* c, fir.statement* s, fir_flow.bits mut* fresh) void {
+    fir.operand mut o = fir.operand{};
+    u32 mut i = 0;
+    while (fir.stmt_reads(c->f, s, i, &o)) {
+        end_fresh(o, fresh);
+        i += 1;
+    }
+    if (s->kind != fir.stmt_kind.st_assign) {
+        return;
+    }
+    fir.rvalue r = s->value;
+    bool names = r.kind == fir.rvalue_kind.rv_addr || r.kind == fir.rvalue_kind.rv_slice;
+    bool held = is_local(s->place) && c->locals[cast(s->place.local, u64)].held;
+    if (names && !held && r.place.base == fir.base_kind.bk_local) {
+        fir_flow.bits_clear(fresh, r.place.local);
+    }
+}
+
+// The effect of the store of the statement `s` on the fresh set: a store of a fresh `new` into a
+// whole local makes it fresh, and any other store into the whole local ends its freshness.
+fn apply_fresh_store(context* c, fir.statement* s, fir_flow.bits mut* fresh) void {
+    if (s->kind != fir.stmt_kind.st_assign || !is_local(s->place)) {
+        return;
+    }
+    if (is_fresh_new(c, s->value)) {
+        fir_flow.bits_set(fresh, s->place.local);
+    } else {
+        fir_flow.bits_clear(fresh, s->place.local);
+    }
+}
+
+// The effect of the terminator `t` on the fresh set.
+fn apply_fresh_term(context* c, fir.terminator* t, fir_flow.bits mut* fresh) void {
+    fir.operand mut o = fir.operand{};
+    u32 mut i = 0;
+    while (find_operand(c->f, t, i, &o)) {
+        end_fresh(o, fresh);
+        i += 1;
+    }
+}
+
+// Whether the local `n` is a fresh pointer local in `fresh`: a pointer local that is no memory.
+fn is_fresh(context* c, fir_flow.bits* fresh, u32 n) bool {
+    return fir_flow.bits_get(fresh, n) && !c->locals[cast(n, u64)].memory
+        && fir.local_at(c->f, n)->ty->kind == types.type_kind.k_ptr;
+}
+
+// ---- the path of a place -----------------------------------------------------------------------
+
+// The key of the index local `i` at a point whose stale set is `stale`. A temporary has the key
+// of its source, unless the source is a local and the temporary is stale. A named local or a
+// parameter that is no memory is its own key. The return place is no key.
+fn key_of(context* c, u32 i, fir_flow.bits* stale) key {
+    local_info* l = &c->locals[cast(i, u64)];
+    fir.local_kind kind = fir.local_at(c->f, i)->kind;
+    if (kind == fir.local_kind.lk_return) {
+        return key{};
+    }
+    if (kind == fir.local_kind.lk_temp) {
+        if (l->source.kind == key_kind.kk_constant) {
+            return l->source;
+        }
+        if (l->source.kind == key_kind.kk_local && !fir_flow.bits_get(stale, i)) {
+            return l->source;
+        }
+        return key{};
+    }
+    if (l->memory) {
+        return key{};
+    }
+    return key{.kind = key_kind.kk_local, .local = i};
+}
+
+// The path of the place `p` at a point whose stale set is `stale`, with its steps at the end of
+// the steps of `c`. A held address `(*_a)` reads as the place of its `addr mut`. The path is
+// tracked when a deref stands first and follows a pointer local that is no memory, and each
+// index has a key.
+fn trace(context mut* c, fir.place p, fir_flow.bits* stale) path {
+    fir.func* f = c->f;
+    fir.place mut src = p;
+    if (is_deref_local(f, p) && c->locals[cast(p.local, u64)].held) {
+        src = store_of(c, p.local)->value.place;
+    }
+    path mut out = path{
+        .base = src.base,
+        .local = src.local,
+        .global = src.global,
+        .first = cast(c->steps_len, u32),
+        .tracked = true,
+    };
+    types.node* mut t = fir.base_type(f, src);
+    u32 mut i = 0;
+    while (i < src.proj_len) {
+        fir.projection pj = fir.place_projection(f, src, i);
+        step mut s = step{};
+        switch (pj.kind) {
+        case fir.proj_kind.pj_deref:
+            s.kind = step_kind.sk_deref;
+            bool pointer = src.base == fir.base_kind.bk_local && t->kind == types.type_kind.k_ptr;
+            if (i != 0 || !pointer || c->locals[cast(src.local, u64)].memory) {
+                out.tracked = false;
+            }
+        case fir.proj_kind.pj_field:
+            s.kind = step_kind.sk_field;
+            s.field = pj.field;
+        case fir.proj_kind.pj_index:
+            s.kind = step_kind.sk_index;
+            s.header = t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string;
+            s.key = key_of(c, pj.index, stale);
+            if (s.key.kind == key_kind.kk_none) {
+                out.tracked = false;
+            }
+        }
+        push_step(c, s);
+        out.len += 1;
+        t = fir.apply_projection(f, t, pj);
+        i += 1;
+    }
+    return out;
+}
+
+// Whether two keys name one element: both are keys, of one kind, of one local or one value.
+fn is_same_key(key a, key b) bool {
+    if (a.kind == key_kind.kk_none || a.kind != b.kind) {
+        return false;
+    }
+    if (a.kind == key_kind.kk_local) {
+        return a.local == b.local;
+    }
+    return consts.cv_eq(a.value, b.value);
+}
+
+// Whether two steps differ: two kinds, two fields, or two indexes whose keys differ.
+fn is_different(step a, step b) bool {
+    if (a.kind != b.kind) {
+        return true;
+    }
+    switch (a.kind) {
+    case step_kind.sk_deref:
+        return false;
+    case step_kind.sk_field:
+        return a.field != b.field;
+    case step_kind.sk_index:
+        return !is_same_key(a.key, b.key);
+    }
+}
+
+fn is_same_base(path a, path b) bool {
+    if (a.base != b.base) {
+        return false;
+    }
+    if (a.base == fir.base_kind.bk_global) {
+        return a.global == b.global;
+    }
+    return a.local == b.local;
+}
+
+// Whether two paths with one base are separate: neither leaves its first object after its first
+// step, and at the first step where they differ, both steps are fields. A path that starts the
+// other is not separate from it. A path leaves its object at a deref or at an index on a span or
+// a `string`, after which it can name any storage: `p->next->g` can be `p->g`.
+fn is_separate(context* c, path a, path b) bool {
+    if (is_leaving(c, a) || is_leaving(c, b)) {
+        return false;
+    }
+    u32 mut i = 0;
+    while (i < a.len && i < b.len) {
+        step x = step_at(c, a, i);
+        step y = step_at(c, b, i);
+        if (is_different(x, y)) {
+            return x.kind == step_kind.sk_field && y.kind == step_kind.sk_field;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+// Whether `q` has a deref or an index on a span or a `string` after its first step.
+fn is_leaving(context* c, path q) bool {
+    u32 mut i = 1;
+    while (i < q.len) {
+        step s = step_at(c, q, i);
+        if (s.kind == step_kind.sk_deref || s.header) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+// Whether `q` is `p` or a tracked place below `p`: it starts with the base and every step of
+// `p`, and continues with fields and indexes on fixed arrays only.
+fn is_below(context* c, path q, path p) bool {
+    if (!is_same_base(q, p) || q.len < p.len) {
+        return false;
+    }
+    u32 mut i = 0;
+    while (i < q.len) {
+        step s = step_at(c, q, i);
+        if (i < p.len) {
+            if (is_different(s, step_at(c, p, i))) {
+                return false;
+            }
+        } else if (s.kind == step_kind.sk_deref || s.header) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// Whether the paths `q` and `p` are one place: each is below the other.
+fn is_same(context* c, path q, path p) bool {
+    return q.len == p.len && is_below(c, q, p);
+}
+
+// Whether `q` is a place through the pointer local `n`: `(*_n)` followed by fields and indexes on
+// fixed arrays only.
+fn is_through(context* c, path q, u32 n) bool {
+    if (q.base != fir.base_kind.bk_local || q.local != n || q.len == 0
+        || step_at(c, q, 0).kind != step_kind.sk_deref) {
+        return false;
+    }
+    u32 mut i = 1;
+    while (i < q.len) {
+        step s = step_at(c, q, i);
+        if (s.kind == step_kind.sk_deref || s.header) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// Whether `q` holds a deref or an index on a span or a `string`: a store into it is a store
+// through a pointer.
+fn is_indirect(context* c, path q) bool {
+    u32 mut i = 0;
+    while (i < q.len) {
+        step s = step_at(c, q, i);
+        if (s.kind == step_kind.sk_deref || s.header) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+// Whether `q` is reached through memory: a place of a memory local or of a global, or a place
+// that holds a deref or an index on a span or a `string`.
+fn is_through_memory(context* c, path q) bool {
+    if (q.base == fir.base_kind.bk_global || c->locals[cast(q.local, u64)].memory) {
+        return true;
+    }
+    return is_indirect(c, q);
+}
+
+// Whether `q` holds an index whose key is the local `k`.
+fn has_key(context* c, path q, u32 k) bool {
+    u32 mut i = 0;
+    while (i < q.len) {
+        step s = step_at(c, q, i);
+        if (s.kind == step_kind.sk_index && s.key.kind == key_kind.kk_local && s.key.local == k) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+// Whether `q` is a place through a fresh pointer local of `fresh`.
+fn is_through_fresh(context* c, path q, fir_flow.bits* fresh) bool {
+    return q.base == fir.base_kind.bk_local && is_fresh(c, fresh, q.local)
+        && is_through(c, q, q.local);
+}
+
+// ---- the gen and kill rules --------------------------------------------------------------------
+
+// The two probes of one block: the effect of its statements on the empty set and on the full set.
+// For a transfer of gen and kill sets, the first is the gen set and the second the complement of
+// the kill set less the gen set.
+struct probes {
+    fir_flow.bits none;
+    fir_flow.bits all;
+}
+
+fn gen(probes mut* pr, u32 fact) void {
+    fir_flow.bits_set(&pr->none, fact);
+    fir_flow.bits_set(&pr->all, fact);
+}
+
+fn kill(probes mut* pr, u32 fact) void {
+    fir_flow.bits_clear(&pr->none, fact);
+    fir_flow.bits_clear(&pr->all, fact);
+}
+
+// Makes `p` and each tracked place below `p` empty.
+fn gen_below(context* c, path p, probes mut* pr) void {
+    u64 mut k = 0;
+    while (k < c->fact_count) {
+        if (is_below(c, c->facts[k], p)) {
+            gen(pr, cast(k, u32));
+        }
+        k += 1;
+    }
+}
+
+// The gen rule of `del(move p)`: it makes `p` empty.
+fn gen_exact(context* c, path p, probes mut* pr) void {
+    u64 mut k = 0;
+    while (k < c->fact_count) {
+        if (is_same(c, c->facts[k], p)) {
+            gen(pr, cast(k, u32));
+        }
+        k += 1;
+    }
+}
+
+// The kill rule of a `call`: it keeps the facts about a local that is no memory and about its
+// places that are not reached through memory.
+fn kill_call(context* c, probes mut* pr) void {
+    u64 mut k = 0;
+    while (k < c->fact_count) {
+        if (is_through_memory(c, c->facts[k])) {
+            kill(pr, cast(k, u32));
+        }
+        k += 1;
+    }
+}
+
+// The kill rules of a store into `d`, with the fresh set after its right side:
+// - each fact with the base of `d` that is not separate from `d` dies, and a store into a local
+//   kills each fact with that local as a key;
+// - a store through a fresh pointer local kills nothing more;
+// - any other store through a pointer kills each fact reached through memory, but a fact through
+//   a fresh pointer local and a fact with the base of `d` that is separate from `d` survive;
+// - a store straight into a memory local or a global kills each fact through a pointer that is
+//   not fresh, because the pointer can hold its address, and keeps the facts of other locals and
+//   other globals, whose bytes it does not write.
+fn kill_store(context* c, path d, fir_flow.bits* fresh, probes mut* pr) void {
+    bool to_local = d.base == fir.base_kind.bk_local;
+    u64 mut k = 0;
+    while (k < c->fact_count) {
+        path q = c->facts[k];
+        if (is_same_base(q, d) && !is_separate(c, q, d)) {
+            kill(pr, cast(k, u32));
+        } else if (to_local && has_key(c, q, d.local)) {
+            kill(pr, cast(k, u32));
+        }
+        k += 1;
+    }
+    if (is_through_fresh(c, d, fresh)) {
+        return;
+    }
+    if (is_indirect(c, d)) {
+        k = 0;
+        while (k < c->fact_count) {
+            path q = c->facts[k];
+            // the loop above killed each fact of the base that is not separate from `d`
+            bool kept = is_through_fresh(c, q, fresh) || is_same_base(q, d);
+            if (is_through_memory(c, q) && !kept) {
+                kill(pr, cast(k, u32));
+            }
+            k += 1;
+        }
+        return;
+    }
+    if (to_local && !c->locals[cast(d.local, u64)].memory) {
+        return;
+    }
+    k = 0;
+    while (k < c->fact_count) {
+        path q = c->facts[k];
+        if (is_indirect(c, q) && !is_through_fresh(c, q, fresh)) {
+            kill(pr, cast(k, u32));
+        }
+        k += 1;
+    }
+}
+
+// Whether the rvalue `r` is a zero value of its own: `const zero T`, `null T`, or an `aggregate`
+// whose operands are all such constants.
+fn is_zero_rvalue(fir.func* f, fir.rvalue r) bool {
+    if (r.kind != fir.rvalue_kind.rv_use && r.kind != fir.rvalue_kind.rv_aggregate) {
+        return false;
+    }
+    u32 mut i = 0;
+    while (i < r.ops_len) {
+        fir.operand o = fir.rvalue_operand(f, r, i);
+        bool zero = o.kind == fir.operand_kind.ok_const
+            && (o.value.kind == fir.const_kind.ck_zero || o.value.kind == fir.const_kind.ck_null);
+        if (!zero) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// Whether the store of the rvalue `r` writes the zero value: a zero rvalue, or the `move` of a
+// temporary that one store writes with a zero rvalue and that only this `move` reads.
+fn is_zero_value(context* c, fir.rvalue r) bool {
+    if (is_zero_rvalue(c->f, r)) {
+        return true;
+    }
+    u32 mut t = 0;
+    if (!find_moved_temp(c, r, &t)) {
+        return false;
+    }
+    return is_zero_rvalue(c->f, store_of(c, t)->value);
+}
+
+// The gen rule of each `move` operand of `s`, in operand order: it makes its place and each
+// tracked place below it empty. `del(move p)` makes `p` empty.
+fn gen_reads(context mut* c, fir.statement* s, fir_flow.bits* stale, probes mut* pr) void {
+    u64 mark = c->steps_len;
+    if (s->kind == fir.stmt_kind.st_del) {
+        path p = trace(c, s->place, stale);
+        gen_exact(c, p, pr);
+        c->steps_len = mark;
+        return;
+    }
+    fir.operand mut o = fir.operand{};
+    u32 mut i = 0;
+    while (fir.stmt_reads(c->f, s, i, &o)) {
+        if (o.kind == fir.operand_kind.ok_move) {
+            path p = trace(c, o.place, stale);
+            gen_below(c, p, pr);
+            c->steps_len = mark;
+        }
+        i += 1;
+    }
+}
+
+// The effect of the statement `s` on the facts, in the order of the rules: the reads of its
+// operands, the kill of a `call`, the kill rules of its store and then its gen rule. `stale` and
+// `fresh` hold the sets before `s`, and the function moves them past `s`. A terminator changes no
+// fact: rule V6 puts no `move` operand in a terminator.
+fn apply_facts(context mut* c, fir.statement* s, fir_flow.bits mut* stale,
+              fir_flow.bits mut* fresh, probes mut* pr) void {
+    gen_reads(c, s, stale, pr);
+    apply_fresh_reads(c, s, fresh);
+    if (s->kind == fir.stmt_kind.st_assign) {
+        if (s->value.kind == fir.rvalue_kind.rv_call) {
+            kill_call(c, pr);
+        }
+        u64 mark = c->steps_len;
+        path d = trace(c, s->place, stale);
+        kill_store(c, d, fresh, pr);
+        if (is_zero_value(c, s->value)) {
+            gen_below(c, d, pr);
+        }
+        bool pointer = d.len == 0 && d.base == fir.base_kind.bk_local
+            && fir.local_at(c->f, d.local)->ty->kind == types.type_kind.k_ptr;
+        if (pointer && is_fresh_new(c, s->value)) {
+            u64 mut k = 0;
+            while (k < c->fact_count) {
+                if (is_through(c, c->facts[k], d.local)) {
+                    gen(pr, cast(k, u32));
+                }
+                k += 1;
+            }
+        }
+        c->steps_len = mark;
+    }
+    apply_fresh_store(c, s, fresh);
+    apply_stale(c, s, stale);
+}
+
+// ---- the dataflows -----------------------------------------------------------------------------
+
+// The transfer that fir_flow.dataflow_new takes. prove gives each transfer as sets and never
+// calls it.
+fn transfer_none(fir.func* f, u32 b, fir_flow.bits mut* set) void {
+}
+
+// One set of `count` numbers for each of the `n` blocks.
+fn make_sets(u32 n, u32 count) fir_flow.bits mut@ own {
+    fir_flow.bits mut@ own sets = new(fir_flow.bits, cast(n, u64));
+    u64 mut b = 0;
+    while (b < sets.len) {
+        sets[b] = fir_flow.bits_new(count);
+        b += 1;
+    }
+    return sets;
+}
+
+fn free_sets(fir_flow.bits mut@ sets) void {
+    u64 mut b = 0;
+    while (b < sets.len) {
+        fir_flow.bits_free(&sets[b]);
+        b += 1;
+    }
+}
+
+// Writes the gen and the kill set of the two probes `pr` of block `b` into `gens[b]` and
+// `kills[b]`. The caller passes the sets and not the address of an element, so that its own
+// locals of the sets take no address and stay no memory.
+fn split_probes(probes* pr, fir_flow.bits mut@ gens, fir_flow.bits mut@ kills, u32 b) void {
+    u64 at = cast(b, u64);
+    fir_flow.bits_copy(&gens[at], &pr->none);
+    fir_flow.bits_fill(&kills[at]);
+    fir_flow.bits_subtract(&kills[at], &pr->all);
+}
+
+fn make_probes(u32 count) probes {
+    probes mut pr = probes{};
+    pr.none = fir_flow.bits_new(count);
+    pr.all = fir_flow.bits_new(count);
+    return pr;
+}
+
+fn free_probes(probes mut* pr) void {
+    fir_flow.bits_free(&pr->none);
+    fir_flow.bits_free(&pr->all);
+}
+
+// Empties the first probe and fills the second.
+fn reset_probes(probes mut* pr) void {
+    u64 mut w = 0;
+    while (w < pr->none.words.len) {
+        pr->none.words[w] = 0;
+        w += 1;
+    }
+    fir_flow.bits_fill(&pr->all);
+}
+
+// Runs the stale dataflow, a union from an entry where every temporary is stale, or with
+// `fresh` the fresh dataflow, an intersection from an entry where no local is fresh.
+fn run_locals(context mut* c, fir.pred_table* pt, fir_flow.dataflow mut* d, bool fresh) void {
+    fir.func* f = c->f;
+    u32 n = fir.block_count(f);
+    u32 count = fir.local_count(f);
+    fir_flow.bits mut@ own gens = make_sets(n, count);
+    fir_flow.bits mut@ own kills = make_sets(n, count);
+    defer {
+        free_sets(gens);
+        free_sets(kills);
+        del(gens);
+        del(kills);
+    }
+    probes mut pr = make_probes(count);
+    defer free_probes(&pr);
+    u32 mut b = 0;
+    while (b < n) {
+        reset_probes(&pr);
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, i);
+            if (fresh) {
+                apply_fresh_reads(c, s, &pr.none);
+                apply_fresh_store(c, s, &pr.none);
+                apply_fresh_reads(c, s, &pr.all);
+                apply_fresh_store(c, s, &pr.all);
+            } else {
+                apply_stale(c, s, &pr.none);
+                apply_stale(c, s, &pr.all);
+            }
+            i += 1;
+        }
+        if (fresh) {
+            fir.terminator* t = &fir.block_at(f, b)->term;
+            apply_fresh_term(c, t, &pr.none);
+            apply_fresh_term(c, t, &pr.all);
+        }
+        split_probes(&pr, gens, kills, b);
+        b += 1;
+    }
+    if (fresh) {
+        fir_flow.bits_fill(&d->init);
+    } else {
+        fir_flow.bits_fill(&d->entry);
+    }
+    fir_flow.dataflow_forward_sets(f, pt, d, gens, kills);
+}
+
+// Gives each check its fact: the path of its place at the end of its block, a fact of its own or
+// the fact of an earlier check of the same place. A check whose place is not tracked gets
+// NO_FACT. The search for an earlier fact takes at most the checks times the facts.
+fn collect_facts(context mut* c, fir_flow.dataflow* stale) void {
+    fir.func* f = c->f;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        c->block_fact[cast(b, u64)] = NO_FACT;
+        fir.terminator* t = &fir.block_at(f, b)->term;
+        if (t->kind == fir.term_kind.tk_check_overwrite) {
+            u64 mark = c->steps_len;
+            path p = trace(c, t->place, &stale->outs[cast(b, u64)]);
+            if (p.tracked) {
+                u64 mut k = 0;
+                while (k < c->fact_count && !is_same(c, c->facts[k], p)) {
+                    k += 1;
+                }
+                if (k < c->fact_count) {
+                    c->steps_len = mark;
+                    c->block_fact[cast(b, u64)] = cast(k, u32);
+                } else {
+                    c->block_fact[cast(b, u64)] = push_fact(c, p);
+                }
+            } else {
+                c->steps_len = mark;
+            }
+        }
+        b += 1;
+    }
+}
+
+// Runs the facts dataflow: an intersection from the entry, which holds no fact.
+fn run_facts(context mut* c, fir.pred_table* pt, fir_flow.dataflow* stale,
+             fir_flow.dataflow* fresh, fir_flow.dataflow mut* d) void {
+    fir.func* f = c->f;
+    u32 n = fir.block_count(f);
+    u32 count = cast(c->fact_count, u32);
+    u32 locals = fir.local_count(f);
+    fir_flow.bits mut@ own gens = make_sets(n, count);
+    fir_flow.bits mut@ own kills = make_sets(n, count);
+    defer {
+        free_sets(gens);
+        free_sets(kills);
+        del(gens);
+        del(kills);
+    }
+    probes mut pr = make_probes(count);
+    defer free_probes(&pr);
+    fir_flow.bits mut at_stale = fir_flow.bits_new(locals);
+    defer fir_flow.bits_free(&at_stale);
+    fir_flow.bits mut at_fresh = fir_flow.bits_new(locals);
+    defer fir_flow.bits_free(&at_fresh);
+    u32 mut b = 0;
+    while (b < n) {
+        reset_probes(&pr);
+        fir_flow.bits_copy(&at_stale, &stale->ins[cast(b, u64)]);
+        fir_flow.bits_copy(&at_fresh, &fresh->ins[cast(b, u64)]);
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, b)) {
+            apply_facts(c, fir.block_statement(f, b, i), &at_stale, &at_fresh, &pr);
+            i += 1;
+        }
+        split_probes(&pr, gens, kills, b);
+        b += 1;
+    }
+    fir_flow.bits_fill(&d->init);
+    fir_flow.dataflow_forward_sets(f, pt, d, gens, kills);
+}
+
+/// Proves each `check(overwrite: p)` of the verified function `f` within WORK_LIMIT. A check is
+/// proved when `p` is a tracked place whose fact holds at the end of the block of the check.
+fn prove(fir.func* f) proof {
+    return prove_within(f, WORK_LIMIT);
+}
+
+/// Proves as prove does, with `limit` as the most work. A function whose work passes `limit` gets
+/// no proof: each of its checks stays unproved. The test comes before any dataflow.
+fn prove_within(fir.func* f, u64 limit) proof {
+    u32 n = fir.block_count(f);
+    proof mut out = proof{};
+    out.proved = new(bool, cast(n, u64));
+    u64 mut units = 0;
+    u32 mut b = 0;
+    while (b < n) {
+        out.proved[cast(b, u64)] = true;
+        units += cast(fir.block_statement_count(f, b), u64) + 1;
+        if (fir.block_at(f, b)->term.kind == fir.term_kind.tk_check_overwrite) {
+            out.checks += 1;
+        }
+        b += 1;
+    }
+    if (out.checks == 0) {
+        return out;
+    }
+    u64 locals = cast(fir.local_count(f), u64);
+    // `context{}` is the zero value of the struct, so the pass proves the stores into its fields
+    // below. A designated literal such as `context{.f = f}` is no zero value.
+    context mut c = context{};
+    c.f = f;
+    c.locals = new(local_info, locals);
+    c.first_source = new(u32, locals);
+    c.block_fact = new(u32, cast(n, u64));
+    defer free_context(&c);
+    count_uses(&c);
+    mark_memory(&c);
+    mark_sources(&c);
+    out.work = units * cast(out.checks, u64) + cast(n, u64) * locals + stale_steps(&c);
+    if (out.work > limit) {
+        out.over = true;
+        judge(&c, null, &out);
+        return out;
+    }
+    fir.pred_table mut pt = fir.func_predecessors(f);
+    defer fir.pred_table_free(&pt);
+    fir_flow.dataflow mut stale = fir_flow.dataflow_new(fir.local_count(f),
+                                                        fir_flow.join_kind.join_union,
+                                                        transfer_none);
+    defer fir_flow.dataflow_free(&stale);
+    run_locals(&c, &pt, &stale, false);
+    fir_flow.dataflow mut fresh = fir_flow.dataflow_new(fir.local_count(f),
+                                                        fir_flow.join_kind.join_intersect,
+                                                        transfer_none);
+    defer fir_flow.dataflow_free(&fresh);
+    run_locals(&c, &pt, &fresh, true);
+    collect_facts(&c, &stale);
+    if (c.fact_count > 0) {
+        fir_flow.dataflow mut facts = fir_flow.dataflow_new(cast(c.fact_count, u32),
+                                                            fir_flow.join_kind.join_intersect,
+                                                            transfer_none);
+        defer fir_flow.dataflow_free(&facts);
+        run_facts(&c, &pt, &stale, &fresh, &facts);
+        judge(&c, &facts, &out);
+    } else {
+        judge(&c, null, &out);
+    }
+    return out;
+}
+
+// Writes the verdict of each check into `out`: proved when its fact holds at the end of its
+// block in the facts dataflow `d`. With no fact, `d` is null and no check is proved.
+fn judge(context* c, fir_flow.dataflow* d, proof mut* out) void {
+    u32 mut b = 0;
+    while (b < fir.block_count(c->f)) {
+        u32 fact = c->block_fact[cast(b, u64)];
+        bool check = fir.block_at(c->f, b)->term.kind == fir.term_kind.tk_check_overwrite;
+        bool held = fact != NO_FACT && d != null
+            && fir_flow.bits_get(&d->outs[cast(b, u64)], fact);
+        if (check && !held) {
+            out->proved[cast(b, u64)] = false;
+            out->unproved += 1;
+        }
+        b += 1;
+    }
+}
+
+// ---- the report --------------------------------------------------------------------------------
+
+// The offset of `line`:`col` in `src`, or the length of `src` past its end.
+fn offset(string src, u32 line, u32 col) u64 {
+    u64 mut at = 0;
+    u32 mut here = 1;
+    while (here < line && at < src.len) {
+        if (src[at] == '\n') {
+            here += 1;
+        }
+        at += 1;
+    }
+    u64 c = cast(col, u64);
+    if (c == 0 || at + c - 1 > src.len) {
+        return src.len;
+    }
+    return at + c - 1;
+}
+
+// Whether `a` starts before `b`.
+fn is_before(diag.loc a, diag.loc b) bool {
+    return a.line < b.line || (a.line == b.line && a.col < b.col);
+}
+
+// The earliest start of a node of the tree `n`, in *first.
+fn find_start(ast.node* n, diag.loc mut* first) void {
+    if (n == null) {
+        return;
+    }
+    if (n->loc.line > 0 && (first->line == 0 || is_before(n->loc, *first))) {
+        *first = n->loc;
+    }
+    find_start(n->a, first);
+    find_start(n->b, first);
+    find_start(n->c, first);
+    find_start(n->d, first);
+    u64 mut i = 0;
+    while (i < ast.ast_len(n)) {
+        find_start(ast.ast_child(n, i), first);
+        i += 1;
+    }
+}
+
+// The assignment of the tree `n` whose operator stands at `at`, or null.
+fn find_assign(ast.node* n, diag.loc at) ast.node* {
+    if (n == null) {
+        return null;
+    }
+    if (n->kind == ast.ast_kind.k_assign && n->loc.line == at.line && n->loc.col == at.col) {
+        return n;
+    }
+    ast.node* mut found = find_assign(n->a, at);
+    if (found == null) {
+        found = find_assign(n->b, at);
+    }
+    if (found == null) {
+        found = find_assign(n->c, at);
+    }
+    if (found == null) {
+        found = find_assign(n->d, at);
+    }
+    u64 mut i = 0;
+    while (found == null && i < ast.ast_len(n)) {
+        found = find_assign(ast.ast_child(n, i), at);
+        i += 1;
+    }
+    return found;
+}
+
+// Counts `(` less `)` in `text`.
+fn paren_depth(string text) i64 {
+    i64 mut depth = 0;
+    for (char ch : text) {
+        if (ch == '(') {
+            depth += 1;
+        } else if (ch == ')') {
+            depth -= 1;
+        }
+    }
+    return depth;
+}
+
+// Appends `text` to `out` with each run of white space as one space.
+fn append_flat(strbuf.str_buf mut* out, string text) void {
+    bool mut space = false;
+    u64 mut i = 0;
+    while (i < text.len) {
+        char ch = text[i];
+        if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') {
+            space = true;
+        } else {
+            if (space) {
+                strbuf.push(out, ' ');
+            }
+            space = false;
+            strbuf.push(out, ch);
+        }
+        i += 1;
+    }
+}
+
+// Appends the source text of the target of the assignment that stands at `at`: the text from the
+// first token of the target to the `=`. The parser gives no node for a parenthesis, so the text
+// starts at each `(` before the first node that the text needs. False when the source or the
+// assignment is not there.
+fn write_target(fir.func* f, diag.loc at, session.session mut* s,
+                strbuf.str_buf mut* out) bool {
+    if (f->sym == null || f->sym->node == null || at.line == 0) {
+        return false;
+    }
+    ast.node* n = find_assign(f->sym->node, at);
+    if (n == null) {
+        return false;
+    }
+    diag.loc mut first = diag.loc{};
+    find_start(n->a, &first);
+    string mut src = "";
+    if (first.line == 0 || !session.read_source(s, at.file, &src)) {
+        return false;
+    }
+    u64 mut start = offset(src, first.line, first.col);
+    u64 mut end = offset(src, at.line, at.col);
+    if (start >= end) {
+        return false;
+    }
+    while (paren_depth(src[start..end]) < 0 && start > 0) {
+        u64 mut back = start;
+        while (back > 0 && (src[back - 1] == ' ' || src[back - 1] == '\t')) {
+            back -= 1;
+        }
+        if (back == 0 || src[back - 1] != '(') {
+            break;
+        }
+        start = back - 1;
+    }
+    while (end > start && (src[end - 1] == ' ' || src[end - 1] == '\t' || src[end - 1] == '\n')) {
+        end -= 1;
+    }
+    append_flat(out, src[start..end]);
+    return true;
+}
+
+// Whether the check `t` stands for a declaration: its place is a named local, and the check
+// stands at the name of that local.
+fn is_declaration(fir.func* f, fir.terminator* t) bool {
+    if (!is_local(t->place)) {
+        return false;
+    }
+    fir.local* l = fir.local_at(f, t->place.local);
+    return l->kind == fir.local_kind.lk_named && l->loc.line == t->loc.line
+        && l->loc.col == t->loc.col && l->loc.line > 0;
+}
+
+/// Appends the text that the diagnostic of the check `t` names: the declared name for a
+/// declaration, the source text of the target for an assignment, and the FIR place when the
+/// source is not there.
+fn write_place(fir.func* f, fir.terminator* t, session.session mut* s,
+               strbuf.str_buf mut* out) void {
+    if (is_declaration(f, t)) {
+        strbuf.append(out, fir.local_name(fir.local_at(f, t->place.local)));
+        return;
+    }
+    if (!write_target(f, t->loc, s, out)) {
+        fir_print.print_place(f, t->place, out);
+    }
+}
+
+// The location of the diagnostic of the check `t`: the declared name, or the `=` of an
+// assignment.
+fn site(fir.func* f, fir.terminator* t) diag.loc {
+    if (is_declaration(f, t) || t->loc.line == 0) {
+        return t->loc;
+    }
+    return diag.loc_range(t->loc.file, t->loc.line, t->loc.col, t->loc.line, t->loc.col + 1);
+}
+
+// Whether a check of a block before `b` that `p` does not prove stands at the location of the
+// check of `b`: a deferred store expands into one check at each exit.
+fn is_repeated(fir.func* f, proof* p, u32 b) bool {
+    diag.loc at = fir.block_at(f, b)->term.loc;
+    u32 mut e = 0;
+    while (e < b) {
+        diag.loc other = fir.block_at(f, e)->term.loc;
+        if (!p->proved[cast(e, u64)] && other.line == at.line && other.col == at.col
+            && other.file == at.file) {
+            return true;
+        }
+        e += 1;
+    }
+    return false;
+}
+
+/// Reports each check of `f` that `p` does not prove, once for each location, in block order:
+/// the error `overwriting owned value: cannot prove '<place>' is empty here` and the note
+/// `del or move '<place>' before this store`, at the declared name or at the `=`.
+fn report(fir.func* f, proof* p, session.session mut* s) void {
+    strbuf.str_buf mut place = strbuf.create();
+    defer strbuf.free(&place);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        fir.terminator* t = &fir.block_at(f, b)->term;
+        if (!p->proved[cast(b, u64)] && !is_repeated(f, p, b)) {
+            strbuf.clear(&place);
+            write_place(f, t, s, &place);
+            diag.loc at = site(f, t);
+            strbuf.clear(&text);
+            strbuf.append(&text, "overwriting owned value: cannot prove '");
+            strbuf.append(&text, strbuf.view(&place));
+            strbuf.append(&text, "' is empty here");
+            diag.error(session.diags(s), at, strbuf.view(&text));
+            strbuf.clear(&text);
+            strbuf.append(&text, "del or move '");
+            strbuf.append(&text, strbuf.view(&place));
+            strbuf.append(&text, "' before this store");
+            diag.note(session.diags(s), at, strbuf.view(&text));
+        }
+        b += 1;
+    }
+}
+
+/// Appends one line `<file>:<line>:<col> <place>` for each check of `f` that `p` does not prove,
+/// once for each location, in block order, at the location that report gives.
+fn write_sites(fir.func* f, proof* p, session.session mut* s, strbuf.str_buf mut* out) void {
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        fir.terminator* t = &fir.block_at(f, b)->term;
+        if (!p->proved[cast(b, u64)] && !is_repeated(f, p, b)) {
+            diag.loc at = site(f, t);
+            strbuf.append(out, at.file);
+            strbuf.push(out, ':');
+            strbuf.append_u64(out, cast(at.line, u64));
+            strbuf.push(out, ':');
+            strbuf.append_u64(out, cast(at.col, u64));
+            strbuf.push(out, ' ');
+            write_place(f, t, s, out);
+            strbuf.push(out, '\n');
+        }
+        b += 1;
+    }
+}

@@ -2394,14 +2394,18 @@ says ownership is "by convention", this section supersedes it.
   A fresh `new` is the value of a `new` expression of this function, before any other operation
   reads it.
   A local is memory when the function takes its address anywhere: an `&`, or a slice of a fixed
-  array, whose lvalue starts at that local and contains no dereference. The storage of an
-  aggregate result is memory too, because it is the destination of the caller. A place reached
+  array, whose lvalue starts at that local and contains no dereference and no index into a span
+  or a `string`. An address whose lvalue passes through a dereference or through such an index
+  names no byte of the local, so `&s.items[i]` leaves `s` a local that is not memory. The storage
+  of an aggregate result is memory too, because it is the destination of the caller. A place reached
   through memory is a place of a memory local, a place of a global, a place through a pointer
   local, or a place that contains an index into a span or a `string`.
-  Two places with one base are separate when, at the first projection where they differ, both
-  projections are fields. Two index projections differ when their keys differ, and an index with
-  no key differs from every index. Then the places are not separate, because the two indexes can
-  be equal.
+  Two places with one base are separate when neither has a dereference or an index into a span
+  or a `string` after its first projection, and, at the first projection where they differ, both
+  projections are fields. After a dereference or such an index, a place can name any storage, so
+  `p->next->g` and `p->g` are not separate: `p->next` can hold the value of `p`. Two index
+  projections differ when their keys differ, and an index with no key differs from every index.
+  Then the places are not separate, because the two indexes can be equal.
   A pointer local `n` is fresh at a point when, on each path to that point, the last store into
   `n` writes a fresh `new`, and after that store no operand copies or moves the value of `n` and
   no `&` or slice names a place through `n`. A place through a fresh `n` contains no index into a
@@ -2423,19 +2427,37 @@ says ownership is "by convention", this section supersedes it.
      each fact through `p`, and a store into `b[j]` kills the fact of `b[i]`. A store into a
      local that is a key kills each fact whose place has that key.
   2. A store into a place through a fresh pointer local kills only what rule 1 kills.
-  3. Any other store through a pointer, and a store into a place of a memory local or of a
-     global, kills each fact about a place reached through memory, with two exceptions. It keeps
-     a fact about a place through a fresh pointer local. It keeps a fact that rule 1 keeps for
-     the same base, when neither place contains an index into a span or a `string`. A store
-     is through a pointer when its destination contains a dereference or an index into a span or
-     a `string`. One pointer value names one object, and the separate fields of one object do not
+  3. Any other store through a pointer kills each fact about a place reached through memory, with
+     two exceptions. It keeps a fact about a place through a fresh pointer local. It keeps a fact
+     that rule 1 keeps for the same base. A store is through a pointer when its destination contains
+     a dereference or an index into a span or a `string`. A destination with a dereference or an
+     index into a span or a `string` after its first projection, such as `p->next->g`, can name any
+     object, so the store kills each fact reached through memory except a fact through a fresh
+     pointer local. One pointer value names one object, and the separate fields of one object do not
      overlap. Another pointer can hold the value of `p`, so its store kills each fact through `p`.
-  4. A call kills each fact except the facts about a local that is not memory and about its
+  4. A store straight into a place of a memory local or of a global, whose destination contains
+     no dereference and no index into a span or a `string`, kills each fact about a place that
+     contains a dereference or an index into a span or a `string`, except a fact about a place
+     through a fresh pointer local. A pointer can hold the address of that local or global, so a
+     place through the pointer can name the bytes of the store. The store writes no byte of
+     another local or another global, so it keeps their facts. Rule 1 applies to its own base.
+  5. A call kills each fact except the facts about a local that is not memory and about its
      places that are not reached through memory. `new` and `del` are no calls under this rule.
   A store applies the kill rules first and its gen rule after them. A call in the right-hand side
   kills before the store. `del` and `move` are no stores, and they apply only their gen rule.
   Each store into an `own` reference-typed place needs the fact of that place after the
   right-hand side and before its own kill rules.
+  The proof of one function has a limit. Its work is the sum of three counts in the FIR of the
+  function: its statements and terminators times its overwrite checks; its blocks times its
+  locals; and, for each local, the stores whose place has that local as its base times the index
+  temporaries that copy that local. The first count bounds the walk of the facts, because a check
+  names at most one fact, and the search for an equal fact. The second bounds the sets of the
+  dataflows of the stale index temporaries and of the fresh pointer locals. The third bounds the
+  steps that mark the index temporaries stale. The analysis measures the work before any
+  dataflow. When the work passes 1048576 (2^20), the analysis proves no store of the function, so
+  each store into an `own` reference-typed place of that function is an error. A function with
+  no overwrite check has no work. The functions of the compiler, its language server and the
+  standard library measure 4451 or less, and a function of the language tests 23608 or less.
   `del` and `move` leave zero behind. So for locals `v`, `a` and `b`, `del(v.data); v.data =
   new(...)` passes, `a = move(b)` after `move(a)` passes, and a store into a local that holds `{}`
   or `null` passes.
@@ -2467,6 +2489,20 @@ says ownership is "by convention", this section supersedes it.
   that a store through a fresh pointer and a fact through it do not kill each other.
   The coordinator ruled in review round 1 that a global is a tracked place, so that a store into
   a global after its `del` passes.
+  Amended 2026-10-23: an `&` whose lvalue passes through a dereference or through an index into a
+  span or a `string` makes no local memory, and a store straight into a memory local or a global
+  keeps the facts of other locals and other globals (kill rule 4); ratified by the coordinator on
+  2026-10-23. Before, `&s.items[i]` made `s` memory, and such a store killed each fact about a
+  place reached through memory, as a store through a pointer does. Rule 4 still kills each fact
+  through a pointer that is not fresh, because the pointer can hold the address of the local or
+  the global.
+  Corrected 2026-10-23 after review: two places are separate only when neither has a dereference
+  or an index into a span or a `string` after its first projection. Before, `p->next->g` and
+  `p->g` were separate, so `p->next = p; del(p->g); p->next->g = new(node); p->g = new(node);`
+  passed and stored over a live allocation. The same review added the limit of 2^20 on the work
+  of one function. Corrected 2026-10-23 in review round 2: the work counts the overwrite checks,
+  the blocks times the locals and the stale steps, and the analysis measures it before any
+  dataflow, so a function with many blocks and few checks cannot take unbounded time.
 
 ### D17.12 Owned strings
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,

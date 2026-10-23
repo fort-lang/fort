@@ -592,6 +592,30 @@ came here.
   `test/lang/programs`, the 1820 of `src/fort/main.ft` and the 306 of `src/lsp/main.ft` in the
   four modes, and the verifier accepted each result. On `main.ft`, `--release` removes 1197
   checks and `--no-bounds-check` 730, and the default mode changes no function.
+- **The emptiness pass keeps one fact for each place that a check names** (`spec/fir.md` 11).
+  `fir.emptiness.prove` reads one verified function before the build-mode pass. No gen rule and no
+  kill rule of one fact reads another fact, so the pass tracks only the places of the
+  `check(overwrite: p)` terminators, and a function with no such check costs one scan of its blocks.
+  Three dataflows of `fir_flow` run with gen and kill sets: the stale index temporaries (a union
+  from a full entry set), the fresh pointer locals and the facts (both an intersection from an empty
+  entry set). A walk of each block applies each statement to an empty probe and to a full probe, so
+  the first gives the gen set and the second the kill set; the walk of the facts reads the stale and
+  the fresh set before each statement. Before any dataflow the pass measures the work: statements
+  and terminators times checks, plus blocks times locals, plus the steps of the stale chains. Past
+  `fir.emptiness.WORK_LIMIT` (2^20) the function gets no proof; the compiler, the server and `std`
+  measure 4451 or less (`proof.work`). The memory marks take one scan and one walk: a held address
+  that is memory ends once. Two paths are separate only while neither leaves its object, by a deref
+  or a span index after its first step: `p->next->g` can be `p->g`. A held address `(*_a)` reads as
+  the place of its `addr mut` when one check and one store read `_a` and nothing else does. The
+  place text of a report comes from the source: the pass finds the assignment at the position of the
+  `=` in the tree of the function and takes the text from its first token to the `=`, with a `(`
+  before it when the text needs one. A FIR text with no tree gives the FIR place. The emitter
+  (`gen_fir.check_fir`) and `--check` (`driver.overwrite_entry`) run the pass; neither reports a
+  check that it does not prove, and the build-mode pass keeps the runtime check, so the emitted IR
+  does not change. `--overwrite-report` writes one line `<file>:<line>:<col> <place>` for each such
+  check of the closure, once for each location in a function. `--check` skips a function whose check
+  names a runtime entry that `std.rt` lacks, because the verifier would panic and a build reports
+  the function.
 - **The translator gives each local its storage in one scan, before it writes text** (T-249).
   `fir_llvm.classify` reads the blocks in number order. A scalar temporary is a register when
   one statement assigns it whole and every read has the statement index of that statement. Two

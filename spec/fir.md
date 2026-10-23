@@ -824,6 +824,8 @@ changes the function, and the verifier runs after it. The passes run in this ord
    (`src/fort/fir/emptiness.ft`) holds it. It runs in every build mode and under `--check`. It
    proves each `check(overwrite: p)`, and it reports the error of D17.11 for each one that it
    cannot prove. A function with an error reaches no later pass, and the build writes no module.
+   The compiler does not report this error yet: until a later change turns it on, the pass lists
+   each check that it does not prove only under `--overwrite-report`, and the build goes on.
    The pass is the forward must-empty analysis of D17.11, and it reads FIR this way:
    - **Facts.** A fact says that a tracked place holds the zero value. A tracked place is a local
      `_n` or a global, followed by `field` and keyed `index` projections. It is also a local `_p` of
@@ -832,22 +834,27 @@ changes the function, and the verifier runs after it. The passes run in this ord
      the indexes. A tracked place below `p` starts with `p` and continues with `field` projections
      and `index` projections on fixed arrays only. A local `_n` is memory when an `addr`, or a
      `slice` of a fixed array, in the function names a place whose base is `_n` and that contains no
-     `deref`. The return place `_0` of an aggregate type is memory too, because its storage is the
-     destination of the caller (5.3). A place reached through memory is a tracked place of a memory
-     local or of a global, or a tracked place that contains a `deref` or an `index` on a span or a
-     `string`.
+     `deref` and no `index` on a span or a `string`: a place that designates fixed storage of `_n`
+     (5.5). Any other address names no byte of `_n`. The return place `_0` of an aggregate type is
+     memory too, because its storage is the destination of the caller (5.3). A place reached through
+     memory is a tracked place of a memory local or of a global, or a tracked place that contains a
+     `deref` or an `index` on a span or a `string`.
    - **Keys.** The lowering copies each index into a temporary (5.5), so FIR names an element
      `p[_t]`, and two uses of one source index name two temporaries. The pass maps `_t` to a key.
      The key is the local `_k` when exactly one assignment writes `_t`, that assignment is
      `_t = copy _k` or `_t = cast<u64>(copy _k)`, `_k` is a local that is not memory, and no
      statement stores into `_k` on a path from that assignment to the use of `_t`. The key is
-     the constant `c` when the one assignment of `_t` is `_t = const u64 c` or a `cast` of the
-     integer constant `c`. An index that is itself a local `_k` that is not memory has the key
-     `_k`. An `index` whose temporary has no key makes its place untracked.
-   - **Separate.** Two places with one base are separate when, at the first projection where they
-     differ, both projections are `field` projections. This is not the "disjoint" of 5.5. Two
-     `index` projections differ when their keys differ, and an `index` with no key differs from
-     every `index`.
+     the constant `c` when the one assignment of `_t` is `_t = const c`, with `c` an integer
+     constant of any integer type, or `_t = cast<u64>(const c)`. Two constant keys are equal when
+     their values are equal. A temporary that is memory has no key. An index that is itself a
+     named local or a parameter that is not memory is its own key; the return place `_0` is no
+     key. An `index` whose local has no key makes its place untracked.
+   - **Separate.** Two places with one base are separate when neither has a `deref` or an `index`
+     on a span or a `string` after its first projection, and, at the first projection where they
+     differ, both projections are `field` projections. After such a projection a place can name
+     any storage: `(*(*_1).1).0` (`p->next->g`) and `(*_1).0` (`p->g`) are not separate. This is
+     not the "disjoint" of 5.5. Two `index` projections differ when their keys differ, and an
+     `index` with no key differs from every `index`.
    - **Fresh.** A pointer local `_n` is fresh at a point when, on each path to that point, the
      last store into `_n` writes a fresh `new`, and after that store no `copy` or `move` operand
      whose place is `_n` itself reads it and no `addr` or `slice` names a place whose base is
@@ -876,12 +883,18 @@ changes the function, and the verifier runs after it. The passes run in this ord
      fact through `_p`. A store into a local that is a key kills each fact whose place has that key.
      A store into a place through a fresh pointer local kills nothing more. Every other store whose
      destination contains a `deref`, or an `index` on a span or a `string` (5.5), is a store through
-     a pointer. It kills each fact about a place reached through memory, and so does a store into a
-     place of a memory local or of a global. Two facts survive it: a fact about a place through a
-     fresh pointer local, and a fact about a place with the base of the destination that is separate
-     from it, when neither place contains an `index` on a span or a `string`. A `call` rvalue kills
-     each fact except the facts about a local that is not memory and about its places that are not
-     reached through memory. `alloc` and `del` are no calls.
+     a pointer. It kills each fact about a place reached through memory. Two facts survive it: a
+     fact about a place through a fresh pointer local, and a fact about a place with the base of the
+     destination that is separate from it. A destination with a `deref` or an `index` on a span or a
+     `string` after its first projection is separate from no place, so such a store kills each fact
+     reached through memory except the facts through a fresh pointer local. A store straight into a
+     place of a memory local or of a global, whose destination contains no `deref` and no `index` on
+     a span or a `string`, kills each fact about a place that contains a `deref` or an `index` on a
+     span or a `string`, except a fact about a place through a fresh pointer local: a pointer can
+     hold the address of that local or global. It writes no byte of another local or another global,
+     so it keeps their facts. A `call` rvalue kills each fact except the facts about a local that is
+     not memory and about its places that are not reached through memory. `alloc` and `del` are no
+     calls.
    - **Examples.** For a parameter `_1` of type `int_buf mut*`, the source `del(b->items);
      b->items = new(i32, 8);` lowers to `del(move (*_1).0)`, then `_3 = addr mut((*_1).0)`, the
      `new` into `_5`, `check(overwrite: (*_3))` and `(*_3) = move _5`. The pass reads `(*_3)` as
@@ -905,14 +918,20 @@ changes the function, and the verifier runs after it. The passes run in this ord
      the first iteration, so a block that no edge reaches passes, as in V13. The pass follows
      every edge, the edge that V9 prunes on a constant `switch` included, and it iterates to a
      fixpoint.
-   - **Proof.** A `check(overwrite: p)` is proved when `p` is a tracked place and its fact holds
-     at the end of its block. The pass reports an unproved check at the location of the check,
-     which is the `=` of an assignment or the declared name of a declaration (9.3). The message
-     and its note name the source text of the lvalue (D17.11).
+   - **Proof.** A `check(overwrite: p)` is proved when `p` is a tracked place and its fact holds at
+     the end of its block. The work of a function is the sum of three counts: its statements and
+     terminators times its `check(overwrite: p)` terminators, its blocks times its locals, and for
+     each local the stores whose place has that local as its base times the index temporaries whose
+     key comes from a `copy` of that local. The pass measures it before any dataflow. When it passes
+     1048576 (2^20), the pass proves no check of the function (D17.11). A function with no such
+     check has no work. The pass reports an unproved check at the location of the check, which is
+     the `=` of an assignment or the declared name of a declaration (9.3). The message and its note
+     name the source text of the lvalue (D17.11).
    - **Rewrite.** The pass rewrites nothing, so the verifier does not run after it.
 4. **The build-mode pass**, which rewrites for the selected mode (D11.1, D10.6, D17.11):
    - In every mode, it replaces each `check(overwrite: p)` by `goto`, because the emptiness pass
-     proved it.
+     proved it. It does not do this yet: until the error of D17.11 is on, it keeps each
+     `check(overwrite: p)` of a checked build and removes it under `--release`.
    - Under `--release`, it replaces `check(_, overflow)` by `goto`. It
      replaces `check(_, shift, _n, ...) -> bb` by `_m = and(copy _n, const i64 W - 1)` and
      `goto bb`, which is the mask of item 15. `_m` takes the statement index of the check. When
