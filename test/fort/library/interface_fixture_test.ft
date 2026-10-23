@@ -1,0 +1,373 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| interface ok
+//| clients ok
+//| fixed point ok
+//| ok
+/// Checks the whole interface file of a library of five modules in two directories, written as
+/// a program would write them: functions with bodies, a switch over an enum, constants of each
+/// kind, `mut` globals, a table of handlers with function pointers, a symbol import and names of
+/// other modules (D9.11, module-system.md 10.3). Clients then check alike against the interface
+/// and against the sources, and the interface is a fixed point of the writer.
+import library_env;
+import std.strbuf;
+
+// The module `shapes.color`.
+string[23] COLOR = {
+    "enum color { red, green, blue, custom = 100 }",
+    "",
+    "struct rgb { u8 r; u8 g; u8 b; }",
+    "",
+    "rgb[3] PALETTE = {{255, 0, 0}, {0, 255, 0}, {0, 0, 255}};",
+    "rgb BLACK = {};",
+    "rgb WHITE = {.r = 255, .g = 255, .b = 255};",
+    "color DEFAULT = color.blue;",
+    "string[3] NAMES = {\"red\", \"green\", \"blue\"};",
+    "",
+    "fn name(color c) string {",
+    "    if (c == color.custom) {",
+    "        return \"custom\";",
+    "    }",
+    "    return NAMES[cast(c, u64)];",
+    "}",
+    "",
+    "fn to_rgb(color c) rgb {",
+    "    if (c == color.custom) {",
+    "        return BLACK;",
+    "    }",
+    "    return PALETTE[cast(c, u64)];",
+    "}",
+};
+
+// The module `shapes.geom.rect`.
+string[30] GEOM_RECT = {
+    "import shapes.geom.vec;",
+    "",
+    "enum corner { top_left, top_right = 3, bottom_left, bottom_right }",
+    "",
+    "struct rect {",
+    "    vec.vec2 lo;",
+    "    vec.vec2 hi;",
+    "}",
+    "",
+    "rect UNIT = {vec.ZERO, {1.0, 1.0}};",
+    "corner FIRST = corner.top_left;",
+    "corner LAST = cast(5, corner);",
+    "corner ODD = cast(9, corner);",
+    "",
+    "fn width(rect* r) f64 {",
+    "    return r->hi.x - r->lo.x;",
+    "}",
+    "",
+    "fn at(rect* r, corner c) vec.vec2 {",
+    "    switch (c) {",
+    "    case corner.top_left:",
+    "        return r->lo;",
+    "    case corner.top_right:",
+    "        return vec.vec2{r->hi.x, r->lo.y};",
+    "    case corner.bottom_left:",
+    "        return vec.vec2{r->lo.x, r->hi.y};",
+    "    case corner.bottom_right:",
+    "        return r->hi;",
+    "    }",
+    "}",
+};
+
+// The module `shapes.geom.vec`.
+string[25] GEOM_VEC = {
+    "struct vec2 { f64 x; f64 y; }",
+    "",
+    "vec2 ZERO = {};",
+    "vec2 UNIT_X = {1.0, 0.0};",
+    "vec2 UNIT_Y = vec2{0.0, 1.0};",
+    "f64 EPSILON = 1.0e-9;",
+    "i32 DIMENSIONS = 2;",
+    "",
+    "fn add(vec2 a, vec2 b) vec2 {",
+    "    return vec2{a.x + b.x, a.y + b.y};",
+    "}",
+    "",
+    "fn scale(vec2 v, f64 k) vec2 {",
+    "    return vec2{v.x * k, v.y * k};",
+    "}",
+    "",
+    "fn dot(vec2 a, vec2 b) f64 {",
+    "    return a.x * b.x + a.y * b.y;",
+    "}",
+    "",
+    "fn near(vec2 a, vec2 b) bool {",
+    "    f64 dx = a.x - b.x;",
+    "    f64 dy = a.y - b.y;",
+    "    return dx * dx + dy * dy < EPSILON;",
+    "}",
+};
+
+// The module `shapes.registry`.
+string[34] REGISTRY = {
+    "import shapes.color.{rgb, color};",
+    "import shapes.geom.rect;",
+    "",
+    "struct handler {",
+    "    fn (i32) i32 run;",
+    "    string label;",
+    "    color tint;",
+    "}",
+    "",
+    "fn identity(i32 v) i32 {",
+    "    return v;",
+    "}",
+    "",
+    "fn twice(i32 v) i32 {",
+    "    return v * 2;",
+    "}",
+    "",
+    "handler DEFAULT_HANDLER = {identity, \"identity\", color.red};",
+    "handler[2] HANDLERS = {{identity, \"identity\", color.red},",
+    "                       {.run = twice, .label = \"twice\"}};",
+    "rect.corner HOME = rect.corner.bottom_right;",
+    "i32 mut registered = 3;",
+    "handler mut current = {twice, \"twice\", color.green};",
+    "rgb mut last_color = {1, 2, 3};",
+    "u64 mut* mut cursor = null;",
+    "(fn (i32) i32) mut hook = identity;",
+    "i32* LIMIT_ADDRESS = &LIMIT;",
+    "i32 LIMIT = 64;",
+    "",
+    "fn register(handler h) i32 {",
+    "    registered += 1;",
+    "    current = h;",
+    "    return registered;",
+    "}",
+};
+
+// The module `shapes.text`.
+string[23] TEXT = {
+    "import shapes.color;",
+    "",
+    "char SEPARATOR = ',';",
+    "char QUOTE = '\"';",
+    "char TAB = '\\t';",
+    "string GREETING = \"hello, \\\"world\\\"\\n\";",
+    "string EMPTY = \"\";",
+    "string UNSET = {};",
+    "u8@ NO_BYTES = {};",
+    "",
+    "fn count(string s, char c) u64 {",
+    "    u64 mut n = 0;",
+    "    for (char x : s) {",
+    "        if (x == c) {",
+    "            n += 1;",
+    "        }",
+    "    }",
+    "    return n;",
+    "}",
+    "",
+    "fn describe(color.color c) string {",
+    "    return color.name(c);",
+    "}",
+};
+
+// The interface of the library, its long lines continued with `+ ` and its directive mark written
+// `== `.
+string[63] WANT = {
+    "== fort interface 1",
+    "== library shapes",
+    "== module shapes.color",
+    "rgb BLACK = {};",
+    "color DEFAULT = color.blue;",
+    "string[3] NAMES = {\"red\", \"green\", \"blue\"};",
+    "rgb[3] PALETTE = {{.r = 255, .g = 0, .b = 0}, {.r = 0, .g = 255, .b = 0}, ",
+    "+ {.r = 0, .g = 0, .b = 255}};",
+    "rgb WHITE = {.r = 255, .g = 255, .b = 255};",
+    "enum color { red = 0, green = 1, blue = 2, custom = 100 }",
+    "fn name(color c) string;",
+    "struct rgb { u8 r; u8 g; u8 b; }",
+    "fn to_rgb(color c) rgb;",
+    "== module shapes.geom.rect",
+    "import shapes.geom.vec as _0;",
+    "corner FIRST = corner.top_left;",
+    "corner LAST = corner.bottom_right;",
+    "corner ODD = cast(9, corner);",
+    "rect UNIT = {.lo = {}, .hi = {.x = 1.0e0, .y = 1.0e0}};",
+    "fn at(rect* r, corner c) _0.vec2;",
+    "enum corner { top_left = 0, top_right = 3, bottom_left = 4, bottom_right = 5 }",
+    "struct rect { _0.vec2 lo; _0.vec2 hi; }",
+    "fn width(rect* r) f64;",
+    "== module shapes.geom.vec",
+    "i32 DIMENSIONS = 2;",
+    "f64 EPSILON = 1.0e-9;",
+    "vec2 UNIT_X = {.x = 1.0e0, .y = 0.0e0};",
+    "vec2 UNIT_Y = {.x = 0.0e0, .y = 1.0e0};",
+    "vec2 ZERO = {};",
+    "fn add(vec2 a, vec2 b) vec2;",
+    "fn dot(vec2 a, vec2 b) f64;",
+    "fn near(vec2 a, vec2 b) bool;",
+    "fn scale(vec2 v, f64 k) vec2;",
+    "struct vec2 { f64 x; f64 y; }",
+    "== module shapes.registry",
+    "import shapes.color as _0;",
+    "import shapes.geom.rect as _1;",
+    "handler DEFAULT_HANDLER = {.run = identity, .label = \"identity\", .tint = _0.color.red};",
+    "handler[2] HANDLERS = {{.run = identity, .label = \"identity\", .tint = _0.color.red}, ",
+    "+ {.run = twice, .label = \"twice\", .tint = _0.color.red}};",
+    "_1.corner HOME = _1.corner.bottom_right;",
+    "i32 LIMIT = 64;",
+    "i32* LIMIT_ADDRESS = &LIMIT;",
+    "handler mut current = {};",
+    "u64 mut* mut cursor = null;",
+    "struct handler { fn (i32) i32 run; string label; _0.color tint; }",
+    "(fn (i32) i32) mut hook = null;",
+    "fn identity(i32 v) i32;",
+    "_0.rgb mut last_color = {};",
+    "fn register(handler h) i32;",
+    "i32 mut registered = 0;",
+    "fn twice(i32 v) i32;",
+    "== module shapes.text",
+    "import shapes.color as _0;",
+    "string EMPTY = \"\";",
+    "string GREETING = \"hello, \\\"world\\\"\\x0A\";",
+    "u8@ NO_BYTES = {};",
+    "char QUOTE = '\\\"';",
+    "char SEPARATOR = ',';",
+    "char TAB = '\\x09';",
+    "string UNSET = {};",
+    "fn count(string s, char c) u64;",
+    "fn describe(_0.color c) string;",
+};
+
+// Writes the five modules under `root`.
+fn add_library(library_env.env mut* e, string root) void {
+    strbuf.str_buf mut path = strbuf.create();
+    defer strbuf.free(&path);
+    put(e, root, "color.ft", COLOR[..], &path);
+    put(e, root, "geom/rect.ft", GEOM_RECT[..], &path);
+    put(e, root, "geom/vec.ft", GEOM_VEC[..], &path);
+    put(e, root, "registry.ft", REGISTRY[..], &path);
+    put(e, root, "text.ft", TEXT[..], &path);
+}
+
+fn put(library_env.env mut* e, string root, string rel, string@ lines,
+       strbuf.str_buf mut* path) void {
+    strbuf.clear(path);
+    strbuf.append(path, root);
+    strbuf.push(path, '/');
+    strbuf.append(path, rel);
+    library_env.add_lines(e, strbuf.view(path), lines);
+}
+
+fn the_library_gives_its_whole_interface() void {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    add_library(&e, "lib/shapes");
+    assert(library_env.emit(&e, "shapes", "lib/shapes"));
+    assert(library_env.same_lines(library_env.text(&e), WANT[..]));
+}
+
+// The client programs: each imports the library as a program would and uses each module.
+string[14] CLEAN_CLIENT = {
+    "import shapes.geom.vec;",
+    "import shapes.geom.rect.{rect, corner, width};",
+    "import shapes.registry;",
+    "import shapes.text;",
+    "import shapes.color as paint;",
+    "fn main() i32 {",
+    "    vec.vec2 v = vec.add(vec.UNIT_X, vec.scale(vec.UNIT_Y, 2.0));",
+    "    rect r = {v, vec.add(v, v)};",
+    "    f64 w = width(&r);",
+    "    registry.handler h = registry.HANDLERS[1];",
+    "    i32 n = h.run(registry.LIMIT) + registry.register(registry.DEFAULT_HANDLER);",
+    "    u64 commas = text.count(text.GREETING, text.SEPARATOR);",
+    "    return n + cast(commas, i32) + cast(paint.to_rgb(paint.DEFAULT).b, i32);",
+    "}",
+};
+
+string[12] ERRING_CLIENT = {
+    "import shapes.geom.vec;",
+    "import shapes.geom.rect;",
+    "import shapes.registry;",
+    "import shapes.color;",
+    "fn main() i32 {",
+    "    vec.vec2 v = vec.add(vec.UNIT_X);",
+    "    rect.corner c = rect.corner.middle;",
+    "    registry.handler h = {.run = vec.dot};",
+    "    color.color k = registry.HOME;",
+    "    registry.LIMIT = 1;",
+    "    return vec.DIMENSIONS + 1.5;",
+    "}",
+};
+
+// The error lines of `client` against the sources of the library and against its interface.
+fn check_both(string@ client, strbuf.str_buf mut* sources, strbuf.str_buf mut* iface) void {
+    library_env.env mut by_source = library_env.env{};
+    library_env.open(&by_source);
+    defer library_env.close(&by_source);
+    add_library(&by_source, "lib/shapes");
+    library_env.add_lines(&by_source, "main.ft", client);
+    library_env.check_with_sources(&by_source, "lib", "main.ft");
+    library_env.error_lines(&by_source, sources);
+    library_env.env mut lib = library_env.env{};
+    library_env.open(&lib);
+    defer library_env.close(&lib);
+    add_library(&lib, "lib/shapes");
+    assert(library_env.emit(&lib, "shapes", "lib/shapes"));
+    library_env.env mut use = library_env.env{};
+    library_env.open(&use);
+    defer library_env.close(&use);
+    library_env.add_lines(&use, "main.ft", client);
+    library_env.check_against(&use, "shapes", "shapes.flib/interface.ft", library_env.text(&lib),
+                              "main.ft");
+    library_env.error_lines(&use, iface);
+}
+
+fn the_clients_check_alike_against_the_interface_and_the_sources() void {
+    strbuf.str_buf mut sources = strbuf.create();
+    defer strbuf.free(&sources);
+    strbuf.str_buf mut iface = strbuf.create();
+    defer strbuf.free(&iface);
+    check_both(CLEAN_CLIENT[..], &sources, &iface);
+    if (strbuf.view(&sources) != "" || strbuf.view(&iface) != "") {
+        print(strbuf.view(&sources));
+        print(strbuf.view(&iface));
+    }
+    assert(strbuf.view(&sources) == "" && strbuf.view(&iface) == "");
+    strbuf.clear(&sources);
+    strbuf.clear(&iface);
+    check_both(ERRING_CLIENT[..], &sources, &iface);
+    if (strbuf.view(&sources) != strbuf.view(&iface)) {
+        print(strbuf.view(&sources));
+        print(strbuf.view(&iface));
+    }
+    // six lines with errors, one error on each
+    assert(library_env.line_count(strbuf.view(&sources)) >= 6);
+    assert(strbuf.view(&sources) == strbuf.view(&iface));
+}
+
+fn the_interface_of_the_library_is_a_fixed_point() void {
+    library_env.env mut lib = library_env.env{};
+    library_env.open(&lib);
+    defer library_env.close(&lib);
+    add_library(&lib, "lib/shapes");
+    assert(library_env.emit(&lib, "shapes", "lib/shapes"));
+    library_env.env mut use = library_env.env{};
+    library_env.open(&use);
+    defer library_env.close(&use);
+    string[5] every = {"import shapes.color;", "import shapes.geom.rect;",
+                       "import shapes.geom.vec;", "import shapes.registry;", "import shapes.text;"};
+    library_env.add_lines(&use, "main.ft", every[..]);
+    assert(library_env.check_against(&use, "shapes", "shapes.flib/interface.ft",
+                                     library_env.text(&lib), "main.ft"));
+    assert(library_env.rewrites_alike(&use, library_env.text(&lib)));
+}
+
+fn main() i32 {
+    the_library_gives_its_whole_interface();
+    println("interface ok");
+    the_clients_check_alike_against_the_interface_and_the_sources();
+    println("clients ok");
+    the_interface_of_the_library_is_a_fixed_point();
+    println("fixed point ok");
+    println("ok");
+    return 0;
+}

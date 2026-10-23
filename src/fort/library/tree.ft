@@ -1,0 +1,247 @@
+/// Lists the modules of a library root (D9.11, module-system.md 10.1).
+///
+/// A module is a regular `.ft` file below the root whose directory names and base name are
+/// module-path segments. The file `<root>/a/b.ft` is the module `<name>.a.b`. The walk ignores
+/// every other file and directory, and it follows no symbolic link. The list is in byte order of
+/// the module path, so the order does not depend on the order in which the system gives the
+/// entries of a directory. This module uses no function-pointer table.
+import containers;
+import lexer;
+import std.libc;
+import std.str;
+import std.strbuf;
+import std.sys;
+
+// The extension of a module file.
+string MODULE_SUFFIX = ".ft";
+
+// The separators of a module path and of a file path.
+char PATH_SEPARATOR = '.';
+char DIRECTORY_SEPARATOR = '/';
+
+// The buffer that readlink(2) writes when the walk asks whether an entry is a symbolic link.
+u64 LINK_PROBE_CAP = 1;
+
+/// The modules of one library: `paths[i]` is the module path and `files[i]` is the file that the
+/// compiler opens for it, `<root>/a/b.ft`. Both vectors are in byte order of the module path.
+/// The strings belong to `pool`. A zero value is an empty list.
+struct tree {
+    containers.str_vec paths;
+    containers.str_vec files;
+    containers.pool pool;
+}
+
+/// Releases the list. The list is empty and usable afterwards.
+fn free(tree mut* t) void {
+    containers.str_free(&t->paths);
+    containers.str_free(&t->files);
+    containers.pool_free(&t->pool);
+}
+
+/// Returns the number of modules in the list.
+fn count(tree* t) u64 {
+    return t->paths.len;
+}
+
+/// Returns the module path of entry `i`. An index at or past `count` breaks the precondition.
+fn path_at(tree* t, u64 i) string {
+    return containers.str_at(&t->paths, i);
+}
+
+/// Returns the file of entry `i`. An index at or past `count` breaks the precondition.
+fn file_at(tree* t, u64 i) string {
+    return containers.str_at(&t->files, i);
+}
+
+/// Returns the position of the module `path` in the list, or -1 when the list does not hold it.
+fn find(tree* t, string path) i64 {
+    u64 mut i = 0;
+    while (i < t->paths.len) {
+        if (containers.str_at(&t->paths, i) == path) {
+            return cast(i, i64);
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+/// Whether `word` is one module-path segment: an identifier that is not a keyword or a reserved
+/// word (D9.1). A library name and each directory name and base name of a module are segments.
+fn is_segment(string word) bool {
+    if (word.len == 0) {
+        return false;
+    }
+    u64 mut i = 0;
+    while (i < word.len) {
+        char c = word[i];
+        bool letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+        bool digit = c >= '0' && c <= '9';
+        if (!letter && !(digit && i > 0)) {
+            return false;
+        }
+        i += 1;
+    }
+    return lexer.keyword_kind(word) == lexer.tok_kind.ident && !lexer.is_reserved_word(word);
+}
+
+// `<dir>/<name>` in `out`. A directory that ends in the separator takes no second one.
+fn join(strbuf.str_buf mut* out, string dir, string name) string {
+    strbuf.clear(out);
+    strbuf.append(out, dir);
+    if (dir.len > 0 && dir[dir.len - 1] != DIRECTORY_SEPARATOR) {
+        strbuf.push(out, DIRECTORY_SEPARATOR);
+    }
+    strbuf.append(out, name);
+    return strbuf.view(out);
+}
+
+// Whether `path` is a symbolic link. readlink(2) succeeds only on a link.
+fn is_link(string path) bool {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    char[LINK_PROBE_CAP] mut buf = {};
+    return libc.readlink(c_path.ptr, &buf[0], LINK_PROBE_CAP) >= 0;
+}
+
+// Whether `path` is a directory: it opens as a directory stream, or it fails to open with an
+// error other than ENOTDIR, which only a file that is no directory gives. So a directory that
+// cannot be read is a directory, and the walk then reports it.
+fn is_directory(string path) bool {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    void mut* d = libc.opendir(c_path.ptr);
+    if (d == null) {
+        return sys.errno() != libc.ENOTDIR;
+    }
+    libc.closedir(d);
+    return true;
+}
+
+// The kind of the entry `path`, with the kind that the directory stream gave. A file system that
+// does not record kinds gives DT_UNKNOWN, and the walk then asks the file system: a symbolic
+// link, a directory, or else a regular file.
+fn kind_of(string path, u8 given) u8 {
+    if (given != libc.DT_UNKNOWN) {
+        return given;
+    }
+    if (is_link(path)) {
+        return libc.DT_LNK;
+    }
+    if (is_directory(path)) {
+        return libc.DT_DIR;
+    }
+    return libc.DT_REG;
+}
+
+// Appends the module `<prefix>.<base>` at `file`, the strings interned.
+fn add(tree mut* t, string prefix, string base, string file) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, prefix);
+    strbuf.push(&b, PATH_SEPARATOR);
+    strbuf.append(&b, base);
+    containers.str_push(&t->paths, containers.pool_intern(&t->pool, strbuf.view(&b)));
+    containers.str_push(&t->files, containers.pool_intern(&t->pool, file));
+}
+
+// The next entry of the directory stream `stream`, or null at the end or after an error. errno is
+// 0 before the call, so it is 0 after it at the end and the error number after an error.
+fn next_entry(void mut* stream) libc.dirent* {
+    *libc.errno_slot() = 0;
+    return cast(libc.readdir(stream), libc.dirent*);
+}
+
+// Lists the modules below the directory `dir`, whose module-path prefix is `prefix`. Returns false
+// with the errno value in `*error` when a directory of the walk cannot be read.
+fn walk_dir(tree mut* t, string dir, string prefix, i32 mut* error) bool {
+    char mut@ own c_dir = str.to_cstr(dir);
+    defer del(c_dir);
+    void mut* stream = libc.opendir(c_dir.ptr);
+    if (stream == null) {
+        *error = sys.errno();
+        return false;
+    }
+    // The names are copied out of each entry, because the next readdir(3) can reuse its storage.
+    containers.pool mut scratch = containers.pool_create();
+    defer containers.pool_free(&scratch);
+    containers.str_vec mut dirs = containers.str_create();
+    defer containers.str_free(&dirs);
+    containers.str_vec mut files = containers.str_create();
+    defer containers.str_free(&files);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    libc.dirent* mut e = next_entry(stream);
+    while (e != null) {
+        string name = str.from_cstr(&e->name[0]);
+        if (name != "." && name != "..") {
+            u8 kind = kind_of(join(&b, dir, name), e->kind);
+            if (kind == libc.DT_DIR && is_segment(name)) {
+                containers.str_push(&dirs, containers.pool_intern(&scratch, name));
+            } else if (kind == libc.DT_REG && name.len > MODULE_SUFFIX.len
+                       && str.ends_with(name, MODULE_SUFFIX)
+                       && is_segment(name[0..name.len - MODULE_SUFFIX.len])) {
+                containers.str_push(&files, containers.pool_intern(&scratch, name));
+            }
+        }
+        e = next_entry(stream);
+    }
+    // readdir(3) gives null at the end and on an error, and only an error sets errno
+    i32 failure = sys.errno();
+    libc.closedir(stream);
+    if (failure != 0) {
+        *error = failure;
+        return false;
+    }
+    u64 mut i = 0;
+    while (i < files.len) {
+        string name = containers.str_at(&files, i);
+        add(t, prefix, name[0..name.len - MODULE_SUFFIX.len], join(&b, dir, name));
+        i += 1;
+    }
+    i = 0;
+    while (i < dirs.len) {
+        string name = containers.str_at(&dirs, i);
+        string child = containers.pool_intern(&scratch, join(&b, dir, name));
+        strbuf.clear(&b);
+        strbuf.append(&b, prefix);
+        strbuf.push(&b, PATH_SEPARATOR);
+        strbuf.append(&b, name);
+        string child_prefix = containers.pool_intern(&scratch, strbuf.view(&b));
+        if (!walk_dir(t, child, child_prefix, error)) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// Orders the list by the module path, in byte order, moving each file with its path. Insertion
+// sort keeps the code short; a library holds tens of modules.
+fn sort(tree mut* t) void {
+    u64 mut i = 1;
+    while (i < t->paths.len) {
+        string path = containers.str_at(&t->paths, i);
+        string file = containers.str_at(&t->files, i);
+        u64 mut j = i;
+        while (j > 0 && str.cmp(path, containers.str_at(&t->paths, j - 1)) < 0) {
+            containers.str_set(&t->paths, j, containers.str_at(&t->paths, j - 1));
+            containers.str_set(&t->files, j, containers.str_at(&t->files, j - 1));
+            j -= 1;
+        }
+        containers.str_set(&t->paths, j, path);
+        containers.str_set(&t->files, j, file);
+        i += 1;
+    }
+}
+
+/// Lists the modules of the library `name` below `root` into `*t`, which must be empty. Returns
+/// false with the errno value in `*error` when the root or a directory below it cannot be read.
+/// A root with no module gives an empty list and true; the caller reports it.
+fn walk(tree mut* t, string name, string root, i32 mut* error) bool {
+    *error = 0;
+    if (!walk_dir(t, root, name, error)) {
+        return false;
+    }
+    sort(t);
+    return true;
+}

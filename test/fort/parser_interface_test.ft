@@ -1,0 +1,328 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| source ok
+//| interface ok
+//| ok
+/// The bodiless declaration and the other rules of an interface file in src/fort/parser.ft
+/// (grammar.md section 2, D9.11): a source file refuses `fn f() R;`, and a section of an
+/// interface file takes it, takes only `import <path> as <binding>;`, and refuses a body, `$if`
+/// and `$cfg`.
+import ast;
+import parse_env;
+import std.strbuf;
+
+// ---- a source file ------------------------------------------------------------------
+
+fn a_bodiless_function_in_a_source_file_is_one_error_at_its_semicolon() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    ast.node* mod = parse_env.parse(&e, "fn f(i32 x) i32;\nfn g() void {\n}\n");
+    assert(parse_env.errors(&e) == 1);
+    assert(parse_env.diag_at(&e, 0) == "1:16: error: expected '{', found ';'");
+    // recovery keeps the declaration that follows
+    u64 mut functions = 0;
+    u64 mut i = 0;
+    while (i < ast.ast_len(mod)) {
+        ast.node* d = ast.ast_child(mod, i);
+        if (d->kind == ast.ast_kind.k_fn_decl) {
+            assert(d->name == "g" && d->b != null);
+            functions += 1;
+        }
+        i += 1;
+    }
+    assert(functions == 1);
+}
+
+fn an_extern_in_a_source_file_still_has_no_body() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    ast.node* mod = parse_env.parse(&e, "extern fn puts(char* s) i32;\n");
+    assert(parse_env.errors(&e) == 0);
+    assert(ast.ast_child(mod, 0)->b == null);
+}
+
+// ---- a section of an interface file ---------------------------------------------
+
+fn a_section_holds_imports_and_bodiless_declarations() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    ast.node* mod = parse_env.parse_interface(
+        &e, "import geom.math as _0;\nfn add(i32 a, _0.vector b) i32;\nfn none() void;\n");
+    assert(parse_env.errors(&e) == 0);
+    assert(ast.ast_len(mod) == 3);
+    ast.node* imp = ast.ast_child(mod, 0);
+    assert(imp->kind == ast.ast_kind.k_import && ast.ast_len(imp->a) == 2);
+    assert(imp->b != null && imp->b->name == "_0");
+    ast.node* f = ast.ast_child(mod, 1);
+    assert(f->kind == ast.ast_kind.k_fn_decl && f->name == "add");
+    assert(f->b == null && (f->flags & ast.FLAG_EXTERN) == 0);
+    assert(ast.ast_len(f) == 2);
+    assert(ast.ast_child(mod, 2)->b == null);
+    string head = "(fn (type (prim i32)) add (params (param (type (prim i32)) a) ";
+    string tail = "(param (type (name _0 vector)) b)) nil)";
+    assert(parse_env.dump(&e, f) == parse_env.join2(&e, head, tail));
+}
+
+fn every_other_declaration_reads_as_in_a_source_file() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    string head = "extern fn printf(char* f, ...) i32;\nstruct p { i32 x; }\n";
+    string middle = "enum c { a = 0, b = -1 }\ni32 mut n = 0;\n";
+    string tail = "fn (i32) i32 F = null;\nf64 H = -5.0e-1;\n";
+    // the source must outlive the parse, and join3 keeps it in a buffer that parse leaves alone
+    ast.node* mod = parse_env.parse_interface(&e, parse_env.join3(&e, head, middle, tail));
+    assert(parse_env.errors(&e) == 0);
+    assert(ast.ast_len(mod) == 6);
+    assert((ast.ast_child(mod, 0)->flags & ast.FLAG_VARIADIC) != 0);
+    assert(ast.ast_child(mod, 1)->kind == ast.ast_kind.k_struct_decl);
+    assert(ast.ast_child(mod, 2)->kind == ast.ast_kind.k_enum_decl);
+    assert(ast.ast_child(mod, 3)->kind == ast.ast_kind.k_var_decl);
+    assert(ast.ast_child(mod, 4)->kind == ast.ast_kind.k_var_decl);
+    assert(ast.ast_child(mod, 5)->kind == ast.ast_kind.k_var_decl);
+}
+
+fn a_function_body_in_a_section_is_a_syntax_error() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    parse_env.parse_interface(&e, "fn f() i32 {\n    return 1;\n}\n");
+    assert(parse_env.errors(&e) >= 1);
+    assert(parse_env.diag_at(&e, 0) == "1:12: error: expected ';', found '{'");
+}
+
+fn an_import_without_its_binding_is_a_syntax_error() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    parse_env.parse_interface(&e, "import geom.math;\n");
+    assert(parse_env.errors(&e) == 1);
+    assert(parse_env.diag_at(&e, 0) == "1:17: error: expected 'as', found ';'");
+    parse_env.parse_interface(&e, "import geom.{math};\n");
+    assert(parse_env.errors(&e) == 1);
+    assert(parse_env.diag_at(&e, 0) == "1:13: error: expected an identifier, found '{'");
+}
+
+fn a_compile_time_if_in_a_section_is_a_syntax_error() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    parse_env.parse_interface(&e, "$if (true) {\n    i32 A = 1;\n}\n");
+    assert(parse_env.errors(&e) >= 1);
+    assert(parse_env.diag_at(&e, 0) == "1:1: error: expected a type, found '$if'");
+}
+
+fn a_configuration_read_in_a_section_is_an_error() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    parse_env.parse_interface(&e, "string OS = $cfg(target_os);\n");
+    assert(parse_env.errors(&e) == 1);
+    assert(parse_env.diag_at(&e, 0) == "1:13: error: an interface file holds no '$cfg'");
+}
+
+// The section of an interface file whose lines are `lines`, joined in the buffer `out`, which
+// must outlive the parse.
+fn section(string@ lines, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    u64 mut i = 0;
+    while (i < lines.len) {
+        strbuf.append(out, lines[i]);
+        strbuf.push(out, '\n');
+        i += 1;
+    }
+    return strbuf.view(out);
+}
+
+fn an_error_in_one_declaration_leaves_the_next_ones() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string[5] lines = {
+        "fn f() i32 { return 1; }",
+        "i32 A = 1;",
+        "fn g(i32 x) i32",
+        "struct p { i32 x; }",
+        "fn h() void;",
+    };
+    ast.node* mod = parse_env.parse_interface(&e, section(lines[..], &b));
+    assert(parse_env.errors(&e) == 2);
+    assert(parse_env.diag_at(&e, 0) == "1:12: error: expected ';', found '{'");
+    assert(parse_env.diag_at(&e, 1) == "4:1: error: expected ';', found 'struct'");
+    // `A`, the struct and `h` remain
+    u64 mut named = 0;
+    u64 mut i = 0;
+    while (i < ast.ast_len(mod)) {
+        ast.node* d = ast.ast_child(mod, i);
+        if (d->name == "A" || d->name == "p" || d->name == "h") {
+            named += 1;
+        }
+        i += 1;
+    }
+    assert(named == 3);
+}
+
+fn an_import_after_a_declaration_is_the_source_error() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    parse_env.parse_interface(&e, "i32 A = 1;\nimport geom.a as _0;\n");
+    assert(parse_env.errors(&e) == 1);
+    assert(parse_env.diag_at(&e, 0) == "2:1: error: an import comes before every declaration");
+}
+
+fn an_extern_with_a_body_is_a_syntax_error_in_both_files() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    parse_env.parse_interface(&e, "extern fn puts(char* s) i32 {\n}\n");
+    assert(parse_env.errors(&e) >= 1);
+    assert(parse_env.diag_at(&e, 0) == "1:29: error: expected ';', found '{'");
+    parse_env.parse(&e, "extern fn puts(char* s) i32 {\n}\n");
+    assert(parse_env.errors(&e) >= 1);
+    assert(parse_env.diag_at(&e, 0) == "1:29: error: expected ';', found '{'");
+}
+
+fn a_configuration_read_stands_nowhere_in_a_section() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    // in an enum value and in an array length, as in an initializer
+    parse_env.parse_interface(&e, "enum c { a = $cfg(x) }\n");
+    assert(parse_env.diag_at(&e, 0) == "1:14: error: an interface file holds no '$cfg'");
+    parse_env.parse_interface(&e, "i32[$cfg(n)] A = {};\n");
+    assert(parse_env.diag_at(&e, 0) == "1:5: error: an interface file holds no '$cfg'");
+    // a source file reads it
+    parse_env.parse(&e, "string OS = $cfg(target_os);\n");
+    assert(parse_env.errors(&e) == 0);
+}
+
+fn a_compile_time_if_among_the_imports_is_a_syntax_error() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    parse_env.parse_interface(&e, "$if (true) {\n    import geom.a as _0;\n}\n");
+    assert(parse_env.errors(&e) >= 1);
+    assert(parse_env.diag_at(&e, 0) == "1:1: error: expected a type, found '$if'");
+}
+
+fn an_empty_section_is_an_empty_module() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    ast.node* mod = parse_env.parse_interface(&e, "");
+    assert(parse_env.errors(&e) == 0);
+    assert(mod->kind == ast.ast_kind.k_module && ast.ast_len(mod) == 0);
+}
+
+fn a_signature_takes_each_result_form() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string[5] lines = {
+        "fn stop() noreturn;",
+        "fn pick() fn (i32) i32;",
+        "fn table() (fn () void)[2];",
+        "fn bytes(u8 mut@ own buf) u8@ own;",
+        "fn (i32) i32 F = null;",
+    };
+    ast.node* mod = parse_env.parse_interface(&e, section(lines[..], &b));
+    assert(parse_env.errors(&e) == 0);
+    assert(ast.ast_len(mod) == 5);
+    u64 mut i = 0;
+    while (i < 4) {
+        ast.node* f = ast.ast_child(mod, i);
+        assert(f->kind == ast.ast_kind.k_fn_decl && f->b == null && f->a != null);
+        i += 1;
+    }
+    // a function type that opens a line is a global of that type, as in a source file
+    assert(ast.ast_child(mod, 4)->kind == ast.ast_kind.k_var_decl);
+    assert(parse_env.dump(&e, ast.ast_child(mod, 0)) == "(fn (type (noreturn)) stop (params) nil)");
+}
+
+fn each_declaration_of_a_section_keeps_its_place_in_the_file() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string[3] lines = {"import geom.a as _0;", "", "    fn f(_0.point p) void;"};
+    ast.node* mod = parse_env.parse_interface(&e, section(lines[..], &b));
+    assert(parse_env.errors(&e) == 0);
+    ast.node* f = ast.ast_child(mod, 1);
+    assert(f->loc.line == 3 && f->loc.col == 5);
+    assert(f->name_loc.line == 3 && f->name_loc.col == 8);
+}
+
+fn a_struct_and_an_enum_of_a_section_keep_the_source_rules() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    // a struct with no field and an enum with no member are the errors of a source file
+    parse_env.parse_interface(&e, "struct p { }\n");
+    assert(parse_env.errors(&e) == 1);
+    assert(parse_env.diag_at(&e, 0) == "1:12: error: a struct has at least one field");
+    parse_env.parse_interface(&e, "enum c { }\n");
+    assert(parse_env.errors(&e) == 1);
+    assert(parse_env.diag_at(&e, 0) == "1:10: error: an enum has at least one member");
+    // and the forms that the writer gives read back with no error
+    parse_env.parse_interface(&e, "struct p { i32 x; u8[4] tag; }\nenum c { a = 0, b = -1 }\n");
+    assert(parse_env.errors(&e) == 0);
+}
+
+fn a_section_reads_each_value_form_of_the_writer() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string[9] lines = {
+        "pair P = {.tag = 0, .value = 1};",
+        "i32[3] R = {1, 2, 3};",
+        "_0.color C = _0.color.red;",
+        "color D = cast(-5, color);",
+        "i32* A = &_0.X;",
+        "f64 F = -1.7976931348623157e308;",
+        "char Q = '\\'';",
+        "string S = \"a\\\"b\\x0A\";",
+        "pair Z = {};",
+    };
+    ast.node* mod = parse_env.parse_interface(&e, section(lines[..], &b));
+    assert(parse_env.errors(&e) == 0);
+    assert(ast.ast_len(mod) == 9);
+}
+
+fn a_section_of_only_imports_holds_no_declaration() void {
+    parse_env.env mut e = parse_env.create();
+    defer parse_env.free(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string[3] lines = {"import geom.a as _0;", "import geom.b.c as _1;", "import std.io as _2;"};
+    ast.node* mod = parse_env.parse_interface(&e, section(lines[..], &b));
+    assert(parse_env.errors(&e) == 0);
+    assert(ast.ast_len(mod) == 3);
+    u64 mut i = 0;
+    while (i < 3) {
+        ast.node* imp = ast.ast_child(mod, i);
+        assert(imp->kind == ast.ast_kind.k_import && imp->b != null && ast.ast_len(imp) == 0);
+        i += 1;
+    }
+    assert(ast.ast_len(ast.ast_child(mod, 1)->a) == 3);
+    assert(ast.ast_child(mod, 2)->b->name == "_2");
+}
+
+fn main() i32 {
+    a_bodiless_function_in_a_source_file_is_one_error_at_its_semicolon();
+    an_extern_in_a_source_file_still_has_no_body();
+    println("source ok");
+    a_section_holds_imports_and_bodiless_declarations();
+    every_other_declaration_reads_as_in_a_source_file();
+    a_function_body_in_a_section_is_a_syntax_error();
+    an_import_without_its_binding_is_a_syntax_error();
+    a_compile_time_if_in_a_section_is_a_syntax_error();
+    a_configuration_read_in_a_section_is_an_error();
+    an_error_in_one_declaration_leaves_the_next_ones();
+    an_import_after_a_declaration_is_the_source_error();
+    an_extern_with_a_body_is_a_syntax_error_in_both_files();
+    a_configuration_read_stands_nowhere_in_a_section();
+    a_compile_time_if_among_the_imports_is_a_syntax_error();
+    an_empty_section_is_an_empty_module();
+    a_signature_takes_each_result_form();
+    each_declaration_of_a_section_keeps_its_place_in_the_file();
+    a_struct_and_an_enum_of_a_section_keep_the_source_rules();
+    a_section_reads_each_value_form_of_the_writer();
+    a_section_of_only_imports_holds_no_declaration();
+    println("interface ok");
+    println("ok");
+    return 0;
+}

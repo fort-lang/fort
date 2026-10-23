@@ -1,0 +1,601 @@
+/// The environment the library suites share: a sandbox that holds the modules of a library, the
+/// checker over the set that loads them, and the interface file that src/fort/library/interface.ft
+/// writes. A second set reads the interface file as a used library, so that a suite can check a
+/// client against the interface and against the sources.
+//
+// The checker holds the session that it reports through, so the environment is filled at its
+// final address and never returned by value.
+import check;
+import check_stmt;
+import containers;
+import diag;
+import lexer;
+import library.interface;
+import library.tree;
+import modules;
+import modules_env;
+import session;
+import std.io;
+import std.str;
+import std.strbuf;
+
+// The sandbox, the checker over its set, the list of the walk and the interface text.
+struct env {
+    modules_env.env m;
+    check.checker ck;
+    tree.tree t;
+    strbuf.str_buf text;
+}
+
+// Prepares an empty sandbox and a checker over its set.
+fn open(env mut* e) void {
+    e->m = modules_env.open();
+    check.check_init(&e->ck, &e->m.s);
+}
+
+// Releases the checker, the list and the text, and then the sandbox: every annotation points
+// into the checker and every tree into the set.
+fn close(env mut* e) void {
+    check.check_free(&e->ck);
+    tree.free(&e->t);
+    strbuf.free(&e->text);
+    modules_env.close(&e->m);
+}
+
+// Writes a file at `rel` under the sandbox.
+fn add(env mut* e, string rel, string text) void {
+    modules_env.add(&e->m, rel, text);
+}
+
+// Sets one pair of the configuration map, as `--cfg` does.
+fn config(env mut* e, string key, string value) void {
+    session.config_set(&e->m.s, key, value);
+}
+
+// Walks the root `rel` of the sandbox as the library `name`, loads the library and checks it, as
+// `--lib` does. False when the walk failed or a diagnostic was reported.
+fn build(env mut* e, string name, string rel) bool {
+    string own root = modules_env.in_sandbox(&e->m, rel);
+    defer del(root);
+    i32 mut failure = 0;
+    if (!tree.walk(&e->t, name, root, &failure)) {
+        return false;
+    }
+    bool loaded = modules.load_library(&e->m.s, &e->m.set, name, root, &e->t);
+    e->ck.require_main = false;
+    bool checked = check_stmt.check_program(&e->ck, &e->m.set);
+    return loaded && checked && session.error_count(&e->m.s) == 0;
+}
+
+// Builds the library and writes its interface file into `text`. False when the build failed or
+// the file breaks a rule of its form: its spacing, its order or its bindings.
+fn emit(env mut* e, string name, string rel) bool {
+    if (!build(e, name, rel)) {
+        return false;
+    }
+    strbuf.clear(&e->text);
+    interface.write(&e->ck, &e->m.set, name, &e->text);
+    // every file that a suite writes is held to the form of module-system.md 10.3
+    return spaced(strbuf.view(&e->text), true) && well_formed(strbuf.view(&e->text), name, true);
+}
+
+// The interface text of the last emit.
+fn text(env* e) string {
+    return strbuf.view(&e->text);
+}
+
+// The part of the interface text that follows the two lines of the file header, so that an
+// assertion names the sections alone.
+fn sections(env* e) string {
+    string all = strbuf.view(&e->text);
+    u64 mut lines = 0;
+    u64 mut i = 0;
+    while (i < all.len && lines < 2) {
+        if (all[i] == '\n') {
+            lines += 1;
+        }
+        i += 1;
+    }
+    return all[i..all.len];
+}
+
+// Writes `text` to the sandbox file `rel` and adds it as the used library `name`, then loads the
+// entry `entry` of the sandbox and checks it. False when a step reported a diagnostic. The entry
+// rule is off, as it is under `--check`.
+fn check_against(env mut* e, string name, string rel, string text, string entry) bool {
+    add(e, rel, text);
+    string own file = modules_env.in_sandbox(&e->m, rel);
+    defer del(file);
+    if (!modules.use_library(&e->m.s, &e->m.set, name, file, text)) {
+        return false;
+    }
+    bool loaded = modules_env.load(&e->m, entry);
+    e->ck.require_main = false;
+    bool checked = check_stmt.check_program(&e->ck, &e->m.set);
+    return loaded && checked && session.error_count(&e->m.s) == 0;
+}
+
+// Loads the entry `entry` of the sandbox with the search root `root`, where the sources of the
+// library stand, and checks it. False when a step reported a diagnostic.
+fn check_with_sources(env mut* e, string root, string entry) bool {
+    modules_env.root(&e->m, root);
+    bool loaded = modules_env.load(&e->m, entry);
+    e->ck.require_main = false;
+    bool checked = check_stmt.check_program(&e->ck, &e->m.set);
+    return loaded && checked && session.error_count(&e->m.s) == 0;
+}
+
+// Appends `<line>:<col>: <message>` for each error that was reported, notes excluded, one on each
+// line: what a client sees of a check apart from the file names.
+fn error_lines(env mut* e, strbuf.str_buf mut* out) void {
+    diag.sink mut* diags = session.diags(&e->m.s);
+    u64 mut i = 0;
+    while (i < diag.record_count(diags)) {
+        diag.record r = diag.record_at(diags, i);
+        i += 1;
+        if (r.severity != diag.severity.error) {
+            continue;
+        }
+        strbuf.append_u64(out, cast(r.loc.line, u64));
+        strbuf.push(out, ':');
+        strbuf.append_u64(out, cast(r.loc.col, u64));
+        strbuf.append(out, ": ");
+        strbuf.append(out, r.msg);
+        strbuf.push(out, '\n');
+    }
+}
+
+// Whether any diagnostic reported so far holds `text`.
+fn said(env mut* e, string text) bool {
+    return modules_env.said(&e->m, text);
+}
+
+// The `i`-th diagnostic, in report order.
+fn report_at(env mut* e, u64 i) diag.record {
+    return modules_env.report_at(&e->m, i);
+}
+
+// The number of diagnostics, notes included.
+fn reports(env mut* e) u64 {
+    return modules_env.reports(&e->m);
+}
+
+// Whether the file `rel` of the sandbox holds the bytes `text`.
+fn file_is(env* e, string rel, string text) bool {
+    string own path = modules_env.in_sandbox(&e->m, rel);
+    defer del(path);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    return io.read_file(path, &b) && str.equal(strbuf.view(&b), text);
+}
+
+// Writes a file at `rel` whose lines are `lines`, each ended by a newline: fort joins no string
+// literals, so a test lists the lines of a module.
+fn add_lines(env mut* e, string rel, string@ lines) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    join(lines, &b);
+    add(e, rel, strbuf.view(&b));
+}
+
+// Appends each of `lines` and a newline to `out`.
+fn join(string@ lines, strbuf.str_buf mut* out) void {
+    u64 mut i = 0;
+    while (i < lines.len) {
+        strbuf.append(out, lines[i]);
+        strbuf.push(out, '\n');
+        i += 1;
+    }
+}
+
+// The marker that an expected interface text writes in place of the directive mark at the start
+// of a line, because the harness allows that mark after code only for an error (D14.5).
+string MARK = "== ";
+string HEADER_MARK = "//! ";
+
+// Appends `want` to `out` with each `== ` at the start of a line written as HEADER_MARK.
+fn unmark(string want, strbuf.str_buf mut* out) void {
+    u64 mut i = 0;
+    bool mut line_start = true;
+    while (i < want.len) {
+        if (line_start && str.starts_with(want[i..want.len], MARK)) {
+            strbuf.append(out, HEADER_MARK);
+            i += MARK.len;
+            line_start = false;
+            continue;
+        }
+        line_start = want[i] == '\n';
+        strbuf.push(out, want[i]);
+        i += 1;
+    }
+}
+
+// Whether `got` is `want` with its markers written out. A difference prints both texts.
+fn same_text(string got, string want) bool {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    unmark(want, &b);
+    if (got == strbuf.view(&b)) {
+        return true;
+    }
+    println("got:");
+    print(got);
+    println("want:");
+    print(strbuf.view(&b));
+    return false;
+}
+
+// The marker that starts an element of an expected text which continues the line before it, so
+// that a test keeps a line of more than 100 columns in two elements.
+string CONTINUED = "+ ";
+
+// Appends `lines` to `out` as join does, except that an element that starts with CONTINUED
+// continues the line before it.
+fn join_continued(string@ lines, strbuf.str_buf mut* out) void {
+    u64 mut i = 0;
+    while (i < lines.len) {
+        string line = lines[i];
+        if (str.starts_with(line, CONTINUED) && strbuf.view(out).len > 0) {
+            strbuf.truncate(out, strbuf.view(out).len - 1);
+            strbuf.append(out, line[CONTINUED.len..line.len]);
+        } else {
+            strbuf.append(out, line);
+        }
+        strbuf.push(out, '\n');
+        i += 1;
+    }
+}
+
+// Whether `got` is the lines `want`, each ended by a newline, with their markers written out and
+// their continued lines joined.
+fn same_lines(string got, string@ want) bool {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    join_continued(want, &b);
+    return same_text(got, strbuf.view(&b));
+}
+
+// Whether `text` holds `part`. A miss prints the text.
+fn holds(string text, string part) bool {
+    if (str.find(text, part) >= 0) {
+        return true;
+    }
+    println("text:");
+    print(text);
+    println("does not hold:");
+    print(part);
+    return false;
+}
+
+// The section of the module `path` in the interface text `text`: its module line and every line
+// up to the next module line or the end. Empty when the text has no such section.
+fn section_of(string text, string path) string {
+    strbuf.str_buf mut head = strbuf.create();
+    defer strbuf.free(&head);
+    strbuf.append(&head, modules.INTERFACE_SECTION);
+    strbuf.append(&head, path);
+    strbuf.push(&head, '\n');
+    i64 at = str.find(text, strbuf.view(&head));
+    if (at < 0) {
+        return "";
+    }
+    u64 start = cast(at, u64);
+    u64 mut end = start + strbuf.view(&head).len;
+    while (end < text.len && !str.starts_with(text[end..text.len], modules.INTERFACE_SECTION)) {
+        while (end < text.len && text[end] != '\n') {
+            end += 1;
+        }
+        end += 1;
+    }
+    return text[start..end];
+}
+
+// Writes again each section that the set of `e` read from an interface file, and returns
+// whether each one is the text it was read from: the interface file is a fixed point of the
+// writer. A difference prints both texts.
+fn rewrites_alike(env mut* e, string text) bool {
+    bool mut alike = true;
+    u64 mut i = 0;
+    while (i < modules.count(&e->m.set)) {
+        modules.module* m = modules.at(&e->m.set, i);
+        i += 1;
+        if (!m->interface) {
+            continue;
+        }
+        strbuf.str_buf mut b = strbuf.create();
+        defer strbuf.free(&b);
+        interface.write_section(&e->ck, m, &b);
+        if (strbuf.view(&b) != section_of(text, m->path)) {
+            println("read:");
+            print(section_of(text, m->path));
+            println("written again:");
+            print(strbuf.view(&b));
+            alike = false;
+        }
+    }
+    return alike;
+}
+
+// ---- the form of an interface file ---------------------------------------------------
+//
+// Two checks that know nothing of the writer: the spacing of each line, from its tokens alone,
+// and the order and the bindings of each section (module-system.md 10.3). emit runs both on each
+// file that it writes, so every case of every library suite checks the form as well.
+
+// Whether the token `t` of the line `line` is one of the kinds `a` or `b`.
+fn is_kind(lexer.token t, lexer.tok_kind a, lexer.tok_kind b) bool {
+    return t.kind == a || t.kind == b;
+}
+
+// Whether a space stands between the tokens `prev` and `cur`, where `init` says that the
+// innermost open brace is an initializer brace and not the body of a struct or an enum. The
+// rules of module-system.md 10.3: an interface line holds no binary `*`, no index and no binary
+// `-`, because its values are folded, so each `*`, `@` and `[` is a type suffix and each `-` is
+// unary.
+fn spaced_between(lexer.token prev, lexer.token cur, bool init) bool {
+    if (is_kind(cur, lexer.tok_kind.comma, lexer.tok_kind.semi)
+        || is_kind(cur, lexer.tok_kind.rparen, lexer.tok_kind.rbracket)) {
+        return false;
+    }
+    if (is_kind(cur, lexer.tok_kind.star, lexer.tok_kind.at)
+        || cur.kind == lexer.tok_kind.lbracket) {
+        return false;
+    }
+    if (is_kind(prev, lexer.tok_kind.lparen, lexer.tok_kind.amp)
+        || is_kind(prev, lexer.tok_kind.lbracket, lexer.tok_kind.minus)) {
+        return false;
+    }
+    if (prev.kind == lexer.tok_kind.dot) {
+        return false;
+    }
+    if (cur.kind == lexer.tok_kind.dot) {
+        // a designator after `, ` keeps its space; a qualified name and a member take none
+        return prev.kind == lexer.tok_kind.comma;
+    }
+    if (cur.kind == lexer.tok_kind.lparen
+        && is_kind(prev, lexer.tok_kind.ident, lexer.tok_kind.kw_cast)) {
+        return false;
+    }
+    if (init && (prev.kind == lexer.tok_kind.lbrace || cur.kind == lexer.tok_kind.rbrace)) {
+        return false;
+    }
+    return true;
+}
+
+// The spelling of the token `t` in `source`.
+fn spelling(string source, lexer.token t) string {
+    return source[t.off..t.off + t.len];
+}
+
+// Whether the line `line` is spelled as its tokens and the spacing rules spell it.
+fn spaced_line(string line, strbuf.str_buf mut* out) bool {
+    session.session mut s = session.create();
+    defer session.free(&s);
+    lexer.tok_vec mut toks = lexer.tokvec_create();
+    defer lexer.tokvec_free(&toks);
+    if (!lexer.lex_file(&s, "line.ft", line, &toks)) {
+        return false;
+    }
+    strbuf.clear(out);
+    // the kinds of the open braces: true for an initializer brace
+    bool[64] mut init = {};
+    u64 mut depth = 0;
+    u64 count = lexer.tokvec_count(&toks) - 1;
+    u64 mut i = 0;
+    while (i < count) {
+        lexer.token cur = lexer.tokvec_at(&toks, i);
+        bool inside = depth > 0 && init[depth - 1];
+        if (i > 0 && spaced_between(lexer.tokvec_at(&toks, i - 1), cur, inside)) {
+            strbuf.push(out, ' ');
+        }
+        strbuf.append(out, spelling(line, cur));
+        if (cur.kind == lexer.tok_kind.lbrace) {
+            bool body = i >= 2 && is_kind(lexer.tokvec_at(&toks, i - 2), lexer.tok_kind.kw_struct,
+                                          lexer.tok_kind.kw_enum);
+            init[depth] = !body;
+            depth += 1;
+        } else if (cur.kind == lexer.tok_kind.rbrace && depth > 0) {
+            depth -= 1;
+        }
+        i += 1;
+    }
+    return strbuf.view(out) == line;
+}
+
+// Whether each line of `text` that is no directive line is spaced by the rules. With `report`, a
+// line that is not prints the line and its spacing.
+fn spaced(string text, bool report) bool {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    bool mut ok = true;
+    u64 mut start = 0;
+    while (start < text.len) {
+        u64 mut end = start;
+        while (end < text.len && text[end] != '\n') {
+            end += 1;
+        }
+        string line = text[start..end];
+        if (!str.starts_with(line, HEADER_MARK) && !spaced_line(line, &b)) {
+            if (report) {
+                println("spaced: ", line);
+                println("rules:  ", strbuf.view(&b));
+            }
+            ok = false;
+        }
+        start = end + 1;
+    }
+    return ok;
+}
+
+// The name that the declaration line `line` declares: the word after `fn ` of a function, after
+// `struct ` or `enum ` of a type, and else the word before the first ` = ` of a constant.
+fn declared_name(string line) string {
+    string mut rest = line;
+    if (str.starts_with(rest, "extern ")) {
+        rest = rest["extern ".len..rest.len];
+    }
+    bool function = str.starts_with(rest, "fn ") && !str.starts_with(rest, "fn (");
+    if (function || str.starts_with(rest, "struct ") || str.starts_with(rest, "enum ")) {
+        u64 from = cast(str.index_of(rest, ' '), u64) + 1;
+        u64 mut to = from;
+        while (to < rest.len && rest[to] != '(' && rest[to] != ' ') {
+            to += 1;
+        }
+        return rest[from..to];
+    }
+    i64 eq = str.find(rest, " = ");
+    if (eq < 0) {
+        return "";
+    }
+    u64 mut from = cast(eq, u64);
+    while (from > 0 && rest[from - 1] != ' ') {
+        from -= 1;
+    }
+    return rest[from..cast(eq, u64)];
+}
+
+// Prints `what` and `detail` when `report` is set: the form checks name what they refuse.
+fn say(bool report, string what, string detail) void {
+    if (report) {
+        println(what, detail);
+    }
+}
+
+// Whether `name` starts with `prefix` and a decimal digit.
+fn starts_with_binding(string name, string prefix) bool {
+    return name.len > prefix.len && str.starts_with(name, prefix) && name[prefix.len] >= '0'
+        && name[prefix.len] <= '9';
+}
+
+// Whether the import line `line` is `import <path> as <prefix><k>;`, and its path in `*path`.
+fn import_parts(string line, string prefix, u64 k, string mut* path) bool {
+    if (!str.starts_with(line, "import ")) {
+        return false;
+    }
+    i64 as_at = str.find(line, " as ");
+    if (as_at < 0) {
+        return false;
+    }
+    *path = line["import ".len..cast(as_at, u64)];
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    strbuf.append(&want, prefix);
+    strbuf.append_u64(&want, k);
+    strbuf.push(&want, ';');
+    return line[cast(as_at, u64) + " as ".len..line.len] == strbuf.view(&want);
+}
+
+// The checks of one section: imports in byte order with bindings `<p>0`, `<p>1` and so on, the
+// shortest prefix p that no declaration name starts with before a digit, and declarations in
+// byte order of the name. `lines` holds the lines after the module line.
+fn ordered_section(string@ lines, bool report) bool {
+    u64 mut imports = 0;
+    while (imports < lines.len && str.starts_with(lines[imports], "import ")) {
+        imports += 1;
+    }
+    // the prefix is the run of `_` that the first binding starts with
+    string mut prefix = "_";
+    if (imports > 0) {
+        i64 as_at = str.find(lines[0], " as ");
+        u64 mut end = cast(as_at, u64) + " as ".len;
+        while (end < lines[0].len && lines[0][end] == '_') {
+            end += 1;
+        }
+        prefix = lines[0][cast(as_at, u64) + " as ".len..end];
+    }
+    u64 mut i = 0;
+    string mut last = "";
+    while (i < imports) {
+        string mut path = "";
+        if (!import_parts(lines[i], prefix, i, &path) || (i > 0 && str.cmp(last, path) >= 0)) {
+            say(report, "ordered: ", lines[i]);
+            return false;
+        }
+        last = path;
+        i += 1;
+    }
+    bool mut shorter_taken = prefix.len == 1;
+    last = "";
+    while (i < lines.len) {
+        string name = declared_name(lines[i]);
+        if (name.len == 0 || (last.len > 0 && str.cmp(last, name) >= 0)
+            || starts_with_binding(name, prefix)) {
+            say(report, "ordered: ", lines[i]);
+            return false;
+        }
+        if (prefix.len > 1 && starts_with_binding(name, prefix[0..prefix.len - 1])) {
+            shorter_taken = true;
+        }
+        last = name;
+        i += 1;
+    }
+    if (imports > 0 && !shorter_taken) {
+        say(report, "ordered: the prefix is not the shortest: ", prefix);
+        return false;
+    }
+    return true;
+}
+
+// Whether `text` has the two header lines of the library `name`, its sections in byte order of
+// a path of the library, and each section ordered.
+fn well_formed(string text, string name, bool report) bool {
+    containers.str_vec mut lines = containers.str_create();
+    defer containers.str_free(&lines);
+    u64 mut start = 0;
+    while (start < text.len) {
+        u64 mut end = start;
+        while (end < text.len && text[end] != '\n') {
+            end += 1;
+        }
+        containers.str_push(&lines, text[start..end]);
+        start = end + 1;
+    }
+    strbuf.str_buf mut library = strbuf.create();
+    defer strbuf.free(&library);
+    strbuf.append(&library, modules.INTERFACE_LIBRARY);
+    strbuf.append(&library, name);
+    if (lines.len < 2 || containers.str_at(&lines, 0) != modules.INTERFACE_FORMAT
+        || containers.str_at(&lines, 1) != strbuf.view(&library)) {
+        say(report, "well formed: the header", "");
+        return false;
+    }
+    string mut last = "";
+    u64 mut i = 2;
+    while (i < lines.len) {
+        string head = containers.str_at(&lines, i);
+        if (!str.starts_with(head, modules.INTERFACE_SECTION)) {
+            say(report, "well formed: no module line at ", head);
+            return false;
+        }
+        string path = head[modules.INTERFACE_SECTION.len..head.len];
+        if (!str.starts_with(path, name) || path[name.len] != '.'
+            || (last.len > 0 && str.cmp(last, path) >= 0)) {
+            say(report, "well formed: the section ", path);
+            return false;
+        }
+        last = path;
+        u64 mut end = i + 1;
+        while (end < lines.len
+               && !str.starts_with(containers.str_at(&lines, end), modules.INTERFACE_SECTION)) {
+            end += 1;
+        }
+        if (!ordered_section(containers.str_items(&lines)[i + 1..end], report)) {
+            return false;
+        }
+        i = end;
+    }
+    return true;
+}
+
+// The number of lines of `text`.
+fn line_count(string text) u64 {
+    u64 mut n = 0;
+    u64 mut i = 0;
+    while (i < text.len) {
+        if (text[i] == '\n') {
+            n += 1;
+        }
+        i += 1;
+    }
+    return n;
+}

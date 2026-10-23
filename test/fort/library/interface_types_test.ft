@@ -1,0 +1,219 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| spellings ok
+//| round trip ok
+//| qualified ok
+//| ok
+/// Checks that a type of the interface file keeps its markers and its suffixes (D5.3, D17.2,
+/// module-system.md 10.3): each parameter type of a library function is written as the checker
+/// spells it, and a client that reads the interface gets the same type back.
+import ast;
+import library_env;
+import modules;
+import scope;
+import std.strbuf;
+import types;
+
+// The parameter types of the cases, each written as the checker spells it, so that the source
+// text and the interface text of a case are the same. The cases cover each primitive, `string`,
+// each marker on a pointer, a span and `string`, nested arrays, an array of references and a
+// reference to an array, function types with and without a result, a grouped function type,
+// and a struct and an enum of the module.
+string[55] TYPES = {
+    "i8",
+    "i16",
+    "i32",
+    "i64",
+    "u8",
+    "u16",
+    "u32",
+    "u64",
+    "bool",
+    "char",
+    "f32",
+    "f64",
+    "string",
+    "string own",
+    "i32*",
+    "i32 mut*",
+    "i32* own",
+    "i32 mut* own",
+    "void*",
+    "void mut*",
+    "void* own",
+    "u8@",
+    "u8 mut@",
+    "u8@ own",
+    "u8 mut@ own",
+    "i32[4]",
+    "i32[2][3]",
+    "i32*[4]",
+    "i32[4]*",
+    "i32**",
+    "i32 mut* mut*",
+    "string@",
+    "fn () void",
+    "fn (i32) i32",
+    "fn (i32, u8*) noreturn",
+    "(fn (i32) i32)*",
+    "point",
+    "point mut*",
+    "mode",
+    "mode[2]",
+    "u8 mut@ mut*",
+    "string own*",
+    "string mut*",
+    "i32*[2][3]",
+    "u8@[4]",
+    "u8@*",
+    "void* own*",
+    "point[2]*",
+    "point* own",
+    "fn (point) mode",
+    "fn (u8@, string own) bool",
+    "fn (fn (i32) i32) void",
+    "(fn () void)[2]",
+    "i32 mut",
+    "point mut",
+};
+
+// The library module of the cases: one function for each type, `case_<k>(<type> p)`, and the
+// struct and the enum that the last cases name.
+fn add_cases(library_env.env mut* e) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "struct point { i32 x; }\nenum mode { off, on }\n");
+    u64 mut k = 0;
+    while (k < TYPES.len) {
+        strbuf.append(&b, "fn case_");
+        strbuf.append_u64(&b, k);
+        strbuf.push(&b, '(');
+        strbuf.append(&b, TYPES[k]);
+        strbuf.append(&b, " p) void {}\n");
+        k += 1;
+    }
+    library_env.add(e, "lib/geom/t.ft", strbuf.view(&b));
+}
+
+// The type of the parameter of `case_<k>` in the module `geom.t` of the set of `e`, as the
+// checker spells it.
+fn spelled(library_env.env* e, u64 k, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    strbuf.append(out, "case_");
+    strbuf.append_u64(out, k);
+    modules.module* m = modules.find(&e->m.set, "geom.t");
+    scope.binding* b = scope.find(&m->names, strbuf.view(out));
+    ast.node* p = ast.ast_child(b->node, 0);
+    strbuf.clear(out);
+    types.type_to_str_decl(p->sym->ty, p->sym->mut0, out);
+    return strbuf.view(out);
+}
+
+// Whether the interface text holds the line of `case_<k>` with the type `TYPES[k]`.
+fn holds_line(string text, u64 k) bool {
+    strbuf.str_buf mut line = strbuf.create();
+    defer strbuf.free(&line);
+    strbuf.append(&line, "\nfn case_");
+    strbuf.append_u64(&line, k);
+    strbuf.push(&line, '(');
+    strbuf.append(&line, TYPES[k]);
+    strbuf.append(&line, " p) void;\n");
+    return library_env.holds(text, strbuf.view(&line));
+}
+
+fn each_type_is_written_as_the_checker_spells_it() void {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    add_cases(&e);
+    assert(library_env.emit(&e, "geom", "lib/geom"));
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u64 mut k = 0;
+    while (k < TYPES.len) {
+        // the case list is in the checker's spelling
+        if (spelled(&e, k, &b) != TYPES[k]) {
+            println("case ", k, " spells as ", strbuf.view(&b));
+        }
+        assert(spelled(&e, k, &b) == TYPES[k]);
+        if (!holds_line(library_env.text(&e), k)) {
+            println("case ", k, ": ", TYPES[k]);
+        }
+        assert(holds_line(library_env.text(&e), k));
+        k += 1;
+    }
+}
+
+fn a_client_of_the_interface_reads_each_type_back() void {
+    library_env.env mut lib = library_env.env{};
+    library_env.open(&lib);
+    defer library_env.close(&lib);
+    add_cases(&lib);
+    assert(library_env.emit(&lib, "geom", "lib/geom"));
+    library_env.env mut use = library_env.env{};
+    library_env.open(&use);
+    defer library_env.close(&use);
+    library_env.add(&use, "main.ft", "import geom.t;\n");
+    assert(library_env.check_against(&use, "geom", "geom.flib/interface.ft",
+                                     library_env.text(&lib), "main.ft"));
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u64 mut k = 0;
+    while (k < TYPES.len) {
+        assert(spelled(&use, k, &b) == TYPES[k]);
+        k += 1;
+    }
+}
+
+fn a_struct_and_an_enum_of_another_module_take_its_binding() void {
+    string[2] a = {"struct point { i32 x; }", "enum mode { off, on }"};
+    string[7] b = {
+        "import geom.a;",
+        "fn f(a.point p) void {}",
+        "fn g(a.point mut* p) a.mode {",
+        "    return a.mode.on;",
+        "}",
+        "fn h((fn (a.point) a.mode)* p) void {}",
+        "struct holder { a.point[2] points; a.mode* mode; }",
+    };
+    string[7] want = {
+        "== module geom.b",
+        "import geom.a as _0;",
+        "fn f(_0.point p) void;",
+        "fn g(_0.point mut* p) _0.mode;",
+        "fn h((fn (_0.point) _0.mode)* p) void;",
+        "struct holder { _0.point[2] points; _0.mode* mode; }",
+        "",
+    };
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    library_env.add_lines(&e, "lib/geom/a.ft", a[..]);
+    library_env.add_lines(&e, "lib/geom/b.ft", b[..]);
+    assert(library_env.emit(&e, "geom", "lib/geom"));
+    strbuf.str_buf mut lines = strbuf.create();
+    defer strbuf.free(&lines);
+    library_env.join(want[0..6], &lines);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    library_env.unmark(strbuf.view(&lines), &text);
+    assert(library_env.holds(library_env.text(&e), strbuf.view(&text)));
+    library_env.env mut use = library_env.env{};
+    library_env.open(&use);
+    defer library_env.close(&use);
+    library_env.add(&use, "main.ft", "import geom.b;\n");
+    assert(library_env.check_against(&use, "geom", "geom.flib/interface.ft",
+                                     library_env.text(&e), "main.ft"));
+}
+
+fn main() i32 {
+    each_type_is_written_as_the_checker_spells_it();
+    println("spellings ok");
+    a_client_of_the_interface_reads_each_type_back();
+    println("round trip ok");
+    a_struct_and_an_enum_of_another_module_take_its_binding();
+    println("qualified ok");
+    println("ok");
+    return 0;
+}

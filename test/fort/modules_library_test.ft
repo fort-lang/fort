@@ -1,0 +1,800 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| library ok
+//| runtime ok
+//| sections ok
+//| malformed ok
+//| checker ok
+//| ok
+/// Checks the resolution of a library build in src/fort/modules.ft (D9.11, module-system.md
+/// 10.2): the modules of a `--lib` walk, a path in no library, the runtime of `--lib std`, and the
+/// sections of the interface file of a used library, which the checker reads with no body.
+import check_stmt;
+import diag;
+import library.tree;
+import library_env;
+import modules;
+import modules_env;
+import scope;
+import std.libc;
+import std.str;
+import std.strbuf;
+
+// An expected text writes `== ` where an interface file has its directive mark, because the
+// harness allows that mark after code only for an error annotation.
+
+// The diagnostic `i` as `<line>:<col>: <message>`, with `error` or `note` before the message.
+fn said_at(library_env.env mut* e, u64 i, strbuf.str_buf mut* out) string {
+    diag.record r = library_env.report_at(e, i);
+    strbuf.clear(out);
+    strbuf.append_u64(out, cast(r.loc.line, u64));
+    strbuf.push(out, ':');
+    strbuf.append_u64(out, cast(r.loc.col, u64));
+    if (r.severity == diag.severity.error) {
+        strbuf.append(out, ": error: ");
+    } else {
+        strbuf.append(out, ": note: ");
+    }
+    strbuf.append(out, r.msg);
+    return strbuf.view(out);
+}
+
+// Whether the file of diagnostic `i` ends with `tail`.
+fn file_of_ends(library_env.env mut* e, u64 i, string tail) bool {
+    return str.ends_with(library_env.report_at(e, i).loc.file, tail);
+}
+
+// ---- a --lib build ---------------------------------------------------------------------
+
+fn a_library_path_resolves_among_the_listed_modules() void {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    library_env.add(&e, "lib/geom/vec.ft", "import geom.shape.circle;\ni32 A = circle.R;\n");
+    library_env.add(&e, "lib/geom/shape/circle.ft", "i32 R = 2;\n");
+    library_env.add(&e, "lib/geom/use.ft", "import geom.vec.{A};\ni32 B = A;\n");
+    assert(library_env.build(&e, "geom", "lib/geom"));
+    // the roots in byte order, each import before its importer
+    assert(modules.count(&e.m.set) == 3);
+    assert(modules.at(&e.m.set, 0)->path == "geom.shape.circle");
+    assert(modules.at(&e.m.set, 1)->path == "geom.vec");
+    assert(modules.at(&e.m.set, 2)->path == "geom.use");
+    assert(modules.entry(&e.m.set) == null);
+}
+
+fn a_path_in_no_library_is_an_error_at_its_import() void {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    library_env.add(&e, "lib/geom/vec.ft", "import util.strings;\n");
+    library_env.add(&e, "lib/util/strings.ft", "i32 A = 1;\n");
+    assert(!library_env.build(&e, "geom", "lib/geom"));
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(library_env.reports(&e) == 1);
+    assert(said_at(&e, 0, &b) == "1:1: error: module 'util.strings' is in no library");
+    assert(file_of_ends(&e, 0, "lib/geom/vec.ft"));
+}
+
+fn a_symbol_import_in_no_library_is_the_same_error() void {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    library_env.add(&e, "lib/geom/vec.ft", "import other.{x};\n");
+    assert(!library_env.build(&e, "geom", "lib/geom"));
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(said_at(&e, 0, &b) == "1:1: error: module 'other' is in no library");
+}
+
+fn a_library_path_that_the_walk_did_not_list_is_not_found() void {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    library_env.add(&e, "lib/geom/vec.ft", "import geom.nope;\n");
+    assert(!library_env.build(&e, "geom", "lib/geom"));
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(library_env.reports(&e) == 2);
+    assert(said_at(&e, 0, &b) == "1:1: error: module 'geom.nope' not found");
+    string note = said_at(&e, 1, &b);
+    assert(str.starts_with(note, "1:1: note: looked for "));
+    assert(str.ends_with(note, "lib/geom/nope.ft"));
+}
+
+fn the_name_of_the_library_alone_is_no_module() void {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    library_env.add(&e, "lib/geom/vec.ft", "import geom;\n");
+    library_env.add(&e, "lib/geom.ft", "i32 A = 1;\n");
+    assert(!library_env.build(&e, "geom", "lib/geom"));
+    assert(library_env.said(&e, "module 'geom' not found"));
+}
+
+fn a_library_build_reads_no_search_root_and_no_standard_directory() void {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    library_env.add(&e, "lib/geom/vec.ft", "import std.io;\n");
+    library_env.add(&e, "std/io.ft", "i32 A = 1;\n");
+    library_env.add(&e, "std/rt.ft", "i32 B = 1;\n");
+    assert(!library_env.build(&e, "geom", "lib/geom"));
+    assert(library_env.said(&e, "module 'std.io' is in no library"));
+}
+
+// ---- the runtime of --lib std ------------------------------------------------------------
+
+fn the_runtime_of_the_library_std_is_its_first_root() void {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    library_env.add(&e, "root/io.ft", "import std.rt;\ni32 A = rt.B;\n");
+    library_env.add(&e, "root/rt.ft", "i32 B = 1;\n");
+    library_env.add(&e, "root/alpha.ft", "i32 C = 1;\n");
+    assert(library_env.build(&e, "std", "root"));
+    assert(modules.count(&e.m.set) == 3);
+    assert(modules.at(&e.m.set, 0)->path == "std.rt");
+    assert(modules.at(&e.m.set, 1)->path == "std.alpha");
+    assert(modules.at(&e.m.set, 2)->path == "std.io");
+}
+
+fn a_std_root_with_no_runtime_is_an_error() void {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    library_env.add(&e, "root/io.ft", "i32 A = 1;\n");
+    assert(!library_env.build(&e, "std", "root"));
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(library_env.reports(&e) == 2);
+    assert(said_at(&e, 0, &b) == "1:1: error: module 'std.rt' not found");
+    assert(file_of_ends(&e, 0, "root/rt.ft"));
+    string note = said_at(&e, 1, &b);
+    assert(str.starts_with(note, "1:1: note: looked for ") && str.ends_with(note, "root/rt.ft"));
+}
+
+// ---- the sections of a used library -----------------------------------------------------
+
+// An interface file of the library `geom` with three sections. Line 4 holds the first
+// declaration of `geom.a`.
+string[12] GEOM = {
+    "== fort interface 1",
+    "== library geom",
+    "== module geom.a",
+    "fn twice(i32 v) i32;",
+    "i32 A = 2;",
+    "== module geom.b",
+    "import geom.a as _0;",
+    "i32 B = _0.A;",
+    "fn (i32) i32 G = _0.twice;",
+    "== module geom.b.c",
+    "i32 C = 3;",
+    "struct point { i32 x; }",
+};
+
+// The interface text of GEOM in `out`, its markers written out.
+fn geom_text(strbuf.str_buf mut* out) string {
+    strbuf.str_buf mut lines = strbuf.create();
+    defer strbuf.free(&lines);
+    library_env.join(GEOM[..], &lines);
+    library_env.unmark(strbuf.view(&lines), out);
+    return strbuf.view(out);
+}
+
+// Checks the sandbox entry `main.ft` with `lines` against GEOM. Returns whether the check was
+// clean.
+fn check_main(library_env.env mut* e, string@ lines) bool {
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    library_env.add_lines(e, "main.ft", lines);
+    return library_env.check_against(e, "geom", "geom.flib/interface.ft", geom_text(&text),
+                                     "main.ft");
+}
+
+fn a_module_reading_loads_its_section_and_its_imports() void {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    string[3] main = {"import geom.b;", "i32 X = b.B;", "i32 Y = b.G(1);"};
+    assert(!check_main(&e, main[..]));
+    // `b.G(1)` calls in a constant, so the only error is that one; the sections loaded
+    assert(library_env.said(&e, "constant expression"));
+    modules.module* a = modules.find(&e.m.set, "geom.a");
+    modules.module* b = modules.find(&e.m.set, "geom.b");
+    assert(a != null && a->interface && b != null && b->interface);
+    assert(str.ends_with(a->file, "geom.flib/interface.ft"));
+    // a section that no import reaches never enters the closure
+    assert(modules.find(&e.m.set, "geom.b.c") == null);
+}
+
+fn a_symbol_reading_finds_a_declaration_of_the_prefix_section() void {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    string[4] main = {"import geom.b.B;", "import geom.a.{A, twice as t};", "i32 X = B + A;",
+                      "fn (i32) i32 F = t;"};
+    assert(check_main(&e, main[..]));
+    modules.module* m = modules.find(&e.m.set, "main");
+    scope.binding* bound = scope.find(&m->names, "t");
+    assert(bound != null && bound->kind == scope.bind_kind.b_symbol);
+}
+
+// A path that no section answers is not found, with one note for each reading that names a
+// module of the library (module-system.md 13).
+fn a_section_that_the_file_lacks_is_not_found_with_a_note_for_each_reading() void {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    string[1] main = {"import geom.nope;"};
+    assert(!check_main(&e, main[..]));
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    // `geom` alone is no module, so the one reading is `geom.nope`
+    assert(library_env.reports(&e) == 2);
+    assert(said_at(&e, 0, &b) == "1:1: error: module 'geom.nope' not found");
+    assert(said_at(&e, 1, &b) == "1:1: note: looked for geom.nope in library 'geom'");
+    library_env.env mut deep = library_env.env{};
+    library_env.open(&deep);
+    defer library_env.close(&deep);
+    string[1] two = {"import geom.x.y;"};
+    assert(!check_main(&deep, two[..]));
+    assert(library_env.reports(&deep) == 3);
+    assert(said_at(&deep, 0, &b) == "1:1: error: module 'geom.x.y' not found");
+    assert(said_at(&deep, 1, &b) == "1:1: note: looked for geom.x.y in library 'geom'");
+    assert(said_at(&deep, 2, &b) == "1:1: note: looked for geom.x in library 'geom'");
+    library_env.env mut other = library_env.env{};
+    library_env.open(&other);
+    defer library_env.close(&other);
+    string[1] items = {"import geom.nope.{x};"};
+    assert(!check_main(&other, items[..]));
+    assert(said_at(&other, 0, &b) == "1:1: error: module 'geom.nope' not found");
+    assert(said_at(&other, 1, &b) == "1:1: note: looked for geom.nope in library 'geom'");
+    library_env.env mut third = library_env.env{};
+    library_env.open(&third);
+    defer library_env.close(&third);
+    string[1] missing = {"import geom.a.nope;"};
+    assert(!check_main(&third, missing[..]));
+    string want = "1:1: error: module 'geom.a' has no declaration named 'nope'";
+    assert(said_at(&third, 0, &b) == want);
+}
+
+fn a_diagnostic_in_a_section_names_the_file_and_its_line() void {
+    string[6] bad = {
+        "== fort interface 1",
+        "== library geom",
+        "== module geom.a",
+        "i32 A = 2;",
+        "== module geom.b",
+        "i32 B = \"x\";",
+    };
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    strbuf.str_buf mut lines = strbuf.create();
+    defer strbuf.free(&lines);
+    library_env.join(bad[..], &lines);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    library_env.unmark(strbuf.view(&lines), &text);
+    library_env.add(&e, "main.ft", "import geom.b;\n");
+    assert(!library_env.check_against(&e, "geom", "geom.flib/interface.ft", strbuf.view(&text),
+                                      "main.ft"));
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(said_at(&e, 0, &b) == "6:9: error: the initializer expects i32, not string");
+    assert(file_of_ends(&e, 0, "geom.flib/interface.ft"));
+}
+
+fn the_runtime_comes_from_a_used_std_when_no_directory_is_set() void {
+    string[4] std_text = {
+        "== fort interface 1",
+        "== library std",
+        "== module std.rt",
+        "fn exit(i32 status) noreturn;",
+    };
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    strbuf.str_buf mut lines = strbuf.create();
+    defer strbuf.free(&lines);
+    library_env.join(std_text[..], &lines);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    library_env.unmark(strbuf.view(&lines), &text);
+    library_env.add(&e, "main.ft", "i32 A = 1;\n");
+    assert(library_env.check_against(&e, "std", "std.flib/interface.ft", strbuf.view(&text),
+                                     "main.ft"));
+    assert(modules.count(&e.m.set) == 2);
+    assert(modules.at(&e.m.set, 0)->path == "std.rt");
+    assert(modules.at(&e.m.set, 0)->interface);
+}
+
+// ---- more sections ----------------------------------------------------------------------
+
+// Checks the sandbox entry `main.ft` with `entry` against the interface text whose lines are
+// `lines`, markers written out, as the library `name`.
+fn check_lines(library_env.env mut* e, string name, string@ lines, string entry) bool {
+    strbuf.str_buf mut joined = strbuf.create();
+    defer strbuf.free(&joined);
+    library_env.join(lines, &joined);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    library_env.unmark(strbuf.view(&joined), &text);
+    library_env.add(e, "main.ft", entry);
+    return library_env.check_against(e, name, "lib.flib/interface.ft", strbuf.view(&text),
+                                     "main.ft");
+}
+
+fn two_sections_that_import_each_other_are_a_cycle() void {
+    string[8] lines = {
+        "== fort interface 1",
+        "== library geom",
+        "== module geom.a",
+        "import geom.b as _0;",
+        "i32 A = 1;",
+        "== module geom.b",
+        "import geom.a as _0;",
+        "i32 B = 1;",
+    };
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    assert(!check_lines(&e, "geom", lines[..], "import geom.a;\n"));
+    assert(library_env.said(&e, "circular import: 'geom.a' imports 'geom.b' imports 'geom.a'"));
+    // the cycle stands at the import of the section that closes it
+    assert(library_env.report_at(&e, 0).loc.line == 7);
+}
+
+fn both_readings_of_a_section_path_are_ambiguous() void {
+    string[6] lines = {
+        "== fort interface 1",
+        "== library geom",
+        "== module geom.a",
+        "i32 b = 1;",
+        "== module geom.a.b",
+        "i32 C = 1;",
+    };
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    assert(!check_lines(&e, "geom", lines[..], "import geom.a.b;\n"));
+    assert(library_env.said(&e, "ambiguous import 'geom.a.b'"));
+    string[6] apart = {
+        "== fort interface 1",
+        "== library geom",
+        "== module geom.a",
+        "i32 x = 1;",
+        "== module geom.a.b",
+        "i32 C = 1;",
+    };
+    library_env.env mut other = library_env.env{};
+    library_env.open(&other);
+    defer library_env.close(&other);
+    // a prefix that does not declare the name leaves the module reading
+    assert(check_lines(&other, "geom", apart[..], "import geom.a.b as c;\ni32 X = c.C;\n"));
+}
+
+fn an_import_in_a_section_that_the_file_lacks_is_an_error_in_the_file() void {
+    string[5] lines = {
+        "== fort interface 1",
+        "== library geom",
+        "== module geom.a",
+        "import geom.gone as _0;",
+        "i32 A = 1;",
+    };
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    assert(!check_lines(&e, "geom", lines[..], "import geom.a;\n"));
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(said_at(&e, 0, &b) == "4:1: error: module 'geom.gone' not found");
+    assert(file_of_ends(&e, 0, "lib.flib/interface.ft"));
+}
+
+fn a_section_that_ends_in_a_broken_declaration_reports_at_the_next_section() void {
+    string[6] lines = {
+        "== fort interface 1",
+        "== library geom",
+        "== module geom.a",
+        "i32 A = 1",
+        "== module geom.b",
+        "i32 B = 1;",
+    };
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    assert(!check_lines(&e, "geom", lines[..], "import geom.a;\n"));
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    // the end of the section is the first byte of the next module line
+    assert(said_at(&e, 0, &b) == "5:1: error: expected ';', found end of file");
+    library_env.env mut last = library_env.env{};
+    library_env.open(&last);
+    defer library_env.close(&last);
+    string[4] tail = {"== fort interface 1", "== library geom", "== module geom.a", "i32 A = 1"};
+    assert(!check_lines(&last, "geom", tail[..], "import geom.a;\n"));
+    assert(said_at(&last, 0, &b) == "5:1: error: expected ';', found end of file");
+}
+
+fn a_section_imports_a_section_of_another_used_library() void {
+    // every closure holds std.rt, which a used std gives (D9.10)
+    string[6] std_lines = {
+        "== fort interface 1",
+        "== library std",
+        "== module std.math",
+        "i32 PI = 3;",
+        "== module std.rt",
+        "fn exit(i32 status) noreturn;",
+    };
+    string[5] geom_lines = {
+        "== fort interface 1",
+        "== library geom",
+        "== module geom.a",
+        "import std.math as _0;",
+        "i32 A = _0.PI;",
+    };
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    strbuf.str_buf mut joined = strbuf.create();
+    defer strbuf.free(&joined);
+    library_env.join(std_lines[..], &joined);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    library_env.unmark(strbuf.view(&joined), &text);
+    assert(modules.use_library(&e.m.s, &e.m.set, "std", "std.flib/interface.ft",
+                               strbuf.view(&text)));
+    assert(check_lines(&e, "geom", geom_lines[..], "import geom.a;\ni32 X = a.A;\n"));
+    modules.module* math = modules.find(&e.m.set, "std.math");
+    assert(math != null && math->interface && str.ends_with(math->file, "std.flib/interface.ft"));
+}
+
+fn a_library_module_resolves_an_import_selector_within_the_library() void {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    library_env.config(&e, "target_os", "linux");
+    library_env.add(&e, "lib/geom/linux.ft", "i32 OS = 1;\n");
+    library_env.add(&e, "lib/geom/macos.ft", "i32 OS = 2;\n");
+    string[6] host = {
+        "$if ($cfg(target_os) == \"linux\") {",
+        "    import geom.linux as os;",
+        "} else {",
+        "    import geom.macos as os;",
+        "}",
+        "i32 HOST = os.OS;",
+    };
+    library_env.add_lines(&e, "lib/geom/host.ft", host[..]);
+    assert(library_env.emit(&e, "geom", "lib/geom"));
+    assert(library_env.holds(library_env.text(&e), "import geom.linux as _0;\ni32 HOST = 1;\n"));
+}
+
+fn both_readings_of_a_library_path_are_ambiguous() void {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    library_env.add(&e, "lib/geom/a.ft", "i32 b = 1;\n");
+    library_env.add(&e, "lib/geom/a/b.ft", "i32 C = 1;\n");
+    library_env.add(&e, "lib/geom/use.ft", "import geom.a.b;\n");
+    assert(!library_env.build(&e, "geom", "lib/geom"));
+    assert(library_env.said(&e, "ambiguous import 'geom.a.b'"));
+}
+
+// ---- a text that is no interface file --------------------------------------------------
+
+// Whether use_library refuses `text` for the library `geom` and reports nothing.
+fn refused(string text) bool {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    library_env.unmark(text, &b);
+    bool used = modules.use_library(&e.m.s, &e.m.set, "geom", "geom.flib/interface.ft",
+                                    strbuf.view(&b));
+    return !used && library_env.reports(&e) == 0;
+}
+
+fn a_text_of_another_form_is_refused_without_a_diagnostic() void {
+    assert(refused(""));
+    assert(refused("== fort interface 2\n== library geom\n"));
+    assert(refused("== fort interface 1\n== library other\n"));
+    assert(refused("== fort interface 1\n"));
+    // every line ends with a newline
+    assert(refused("== fort interface 1\n== library geom"));
+    assert(refused("== fort interface 1\n== library geom\ni32 A = 1;\n"));
+    assert(refused("== fort interface 1\n== library geom\n== module other.a\n"));
+    assert(refused("== fort interface 1\n== library geom\n== module geom\n"));
+    assert(refused("== fort interface 1\n== library geom\n== module geom.a\n== module geom.a\n"));
+    assert(!refused("== fort interface 1\n== library geom\n== module geom.a\ni32 A = 1;\n"));
+}
+
+// ---- the checker ---------------------------------------------------------------------
+
+fn a_bodiless_function_checks_and_a_client_calls_it() void {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    string[4] main = {"import geom.a;", "fn main() i32 {", "    return a.twice(2);", "}"};
+    assert(check_main(&e, main[..]));
+    modules.module* a = modules.find(&e.m.set, "geom.a");
+    scope.binding* f = scope.find(&a->names, "twice");
+    assert(f != null && f->kind == scope.bind_kind.b_fn && f->node->b == null);
+    assert(f->node->sym != null && !f->node->sym->error);
+}
+
+fn a_wrong_call_of_a_bodiless_function_is_the_client_s_error() void {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    string[4] main = {"import geom.a;", "fn main() i32 {", "    return a.twice(\"x\");", "}"};
+    assert(!check_main(&e, main[..]));
+    assert(file_of_ends(&e, 0, "main.ft"));
+    assert(library_env.report_at(&e, 0).loc.line == 3);
+}
+
+// ---- precedence ----------------------------------------------------------------------
+
+fn a_used_library_path_never_reaches_a_search_root() void {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    // a root that holds a file for the path, which the interface does not declare
+    library_env.add(&e, "roots/geom/hidden.ft", "i32 H = 1;\n");
+    modules_env.root(&e.m, "roots");
+    string[1] main = {"import geom.hidden;"};
+    assert(!check_main(&e, main[..]));
+    assert(library_env.said(&e, "module 'geom.hidden' not found"));
+    // and a section wins over a file of the same path under a root
+    library_env.env mut other = library_env.env{};
+    library_env.open(&other);
+    defer library_env.close(&other);
+    library_env.add(&other, "roots/geom/a.ft", "i32 FILE_ONLY = 1;\n");
+    modules_env.root(&other.m, "roots");
+    string[2] both = {"import geom.a;", "i32 X = a.A;"};
+    assert(check_main(&other, both[..]));
+}
+
+fn two_used_libraries_each_own_their_paths() void {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    string[4] shapes = {"== fort interface 1", "== library shapes", "== module shapes.a",
+                        "i32 A = 7;"};
+    strbuf.str_buf mut joined = strbuf.create();
+    defer strbuf.free(&joined);
+    library_env.join(shapes[..], &joined);
+    library_env.unmark(strbuf.view(&joined), &text);
+    assert(modules.use_library(&e.m.s, &e.m.set, "shapes", "shapes.flib/interface.ft",
+                               strbuf.view(&text)));
+    // geom.a is a section of geom, shapes.a one of shapes, and a path of neither library is a
+    // path of the search roots, as without libraries
+    string[4] main = {"import geom.a;", "import shapes.a as s;", "i32 X = a.A + s.A;", ""};
+    library_env.add(&e, "local.ft", "i32 L = 1;\n");
+    assert(check_main(&e, main[0..3]));
+    modules.module* sa = modules.find(&e.m.set, "shapes.a");
+    modules.module* ga = modules.find(&e.m.set, "geom.a");
+    assert(sa != null && ga != null && sa->file != ga->file);
+}
+
+fn a_listed_module_that_vanished_is_a_read_error() void {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    library_env.add(&e, "lib/geom/a.ft", "i32 A = 1;\n");
+    library_env.add(&e, "lib/geom/b.ft", "i32 B = 1;\n");
+    string own root = modules_env.in_sandbox(&e.m, "lib/geom");
+    defer del(root);
+    i32 mut failure = 0;
+    assert(tree.walk(&e.t, "geom", root, &failure));
+    string own gone = modules_env.in_sandbox(&e.m, "lib/geom/b.ft");
+    defer del(gone);
+    char mut@ own c_gone = str.to_cstr(gone);
+    defer del(c_gone);
+    assert(libc.unlink(c_gone.ptr) == 0);
+    assert(!modules.load_library(&e.m.s, &e.m.set, "geom", root, &e.t));
+    assert(library_env.said(&e, "cannot read '"));
+}
+
+fn a_prefix_that_does_not_parse_is_probed_without_a_report() void {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    // both readings exist; the prefix does not parse, so it declares nothing and stays silent
+    library_env.add(&e, "lib/geom/a.ft", "i32 A = ;\n");
+    library_env.add(&e, "lib/geom/a/b.ft", "i32 B = 1;\n");
+    library_env.add(&e, "lib/geom/use.ft", "import geom.a.b;\ni32 U = b.B;\n");
+    assert(!library_env.build(&e, "geom", "lib/geom"));
+    // the one error is the syntax error of a.ft, which is a root of the walk itself
+    u64 mut errors = 0;
+    u64 mut i = 0;
+    while (i < library_env.reports(&e)) {
+        if (library_env.report_at(&e, i).severity == diag.severity.error) {
+            errors += 1;
+        }
+        i += 1;
+    }
+    assert(errors == 1);
+    assert(!library_env.said(&e, "ambiguous"));
+}
+
+fn a_declaration_of_a_section_stands_at_its_place_in_the_file() void {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    string[1] main = {"import geom.b.c;"};
+    assert(check_main(&e, main[..]));
+    modules.module* c = modules.find(&e.m.set, "geom.b.c");
+    scope.binding* point = scope.find(&c->names, "point");
+    // `struct point { i32 x; }` is line 12 of GEOM
+    assert(point != null && point->loc.line == 12 && point->loc.col == 1);
+    scope.binding* constant = scope.find(&c->names, "C");
+    assert(constant != null && constant->loc.line == 11 && constant->loc.col == 1);
+}
+
+// ---- more of the file and the checker ------------------------------------------------
+
+// The interface text whose lines are `lines`, markers written out, in `out`.
+fn text_of(string@ lines, strbuf.str_buf mut* out) string {
+    strbuf.str_buf mut joined = strbuf.create();
+    defer strbuf.free(&joined);
+    library_env.join(lines, &joined);
+    strbuf.clear(out);
+    library_env.unmark(strbuf.view(&joined), out);
+    return strbuf.view(out);
+}
+
+fn a_lexical_error_in_the_file_is_reported_and_refuses_the_library() void {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    string[4] lines = {"== fort interface 1", "== library geom", "== module geom.a", "i32 A = `;"};
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string text = text_of(lines[..], &b);
+    assert(!modules.use_library(&e.m.s, &e.m.set, "geom", "geom.flib/interface.ft", text));
+    assert(library_env.reports(&e) >= 1);
+    diag.record r = library_env.report_at(&e, 0);
+    assert(r.loc.line == 4 && str.ends_with(r.loc.file, "geom.flib/interface.ft"));
+}
+
+fn a_comment_line_inside_a_section_is_no_section() void {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    string[6] lines = {"== fort interface 1", "== library geom", "== module geom.a",
+                       "// a comment", "== note", "i32 A = 1;"};
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string text = text_of(lines[..], &b);
+    library_env.add(&e, "main.ft", "import geom.a;\ni32 X = a.A;\n");
+    assert(library_env.check_against(&e, "geom", "geom.flib/interface.ft", text, "main.ft"));
+    modules.module* a = modules.find(&e.m.set, "geom.a");
+    scope.binding* bound = scope.find(&a->names, "A");
+    assert(bound != null && bound->loc.line == 6);
+}
+
+fn a_bodiless_main_of_a_section_is_an_ordinary_function() void {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    string[4] lines = {"== fort interface 1", "== library geom", "== module geom.a",
+                       "fn main() void;"};
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string text = text_of(lines[..], &b);
+    string[5] main = {"import geom.a;", "fn main() i32 {", "    a.main();", "    return 0;", "}"};
+    library_env.add_lines(&e, "main.ft", main[..]);
+    assert(modules.use_library(&e.m.s, &e.m.set, "geom", "geom.flib/interface.ft", text));
+    assert(modules_env.load(&e.m, "main.ft"));
+    // the entry rule holds for the entry module and not for the section
+    e.ck.require_main = true;
+    assert(check_stmt.check_program(&e.ck, &e.m.set));
+    assert(library_env.reports(&e) == 0);
+}
+
+fn one_extern_in_two_sections_is_one_symbol() void {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    library_env.add(&e, "lib/geom/a.ft", "extern fn puts(char* s) i32;\n");
+    library_env.add(&e, "lib/geom/b.ft", "extern fn puts(char* s) i32;\n");
+    assert(library_env.emit(&e, "geom", "lib/geom"));
+    string text = library_env.text(&e);
+    assert(library_env.holds(text, "module geom.a\nextern fn puts(char* s) i32;\n"));
+    assert(library_env.holds(text, "module geom.b\nextern fn puts(char* s) i32;\n"));
+    library_env.env mut use = library_env.env{};
+    library_env.open(&use);
+    defer library_env.close(&use);
+    string[3] main = {"import geom.a;", "import geom.b;", "extern fn puts(char* s) i32;"};
+    library_env.add_lines(&use, "main.ft", main[..]);
+    assert(library_env.check_against(&use, "geom", "geom.flib/interface.ft", text, "main.ft"));
+}
+
+fn a_main_of_a_library_module_is_an_ordinary_function() void {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    // D8.6 does not apply under --lib, so a `main` that returns void is no error
+    library_env.add(&e, "lib/geom/tool.ft", "fn main() void {\n}\n");
+    assert(library_env.emit(&e, "geom", "lib/geom"));
+    assert(library_env.holds(library_env.text(&e), "module geom.tool\nfn main() void;\n"));
+}
+
+// An import of an import binding is `cannot import` against the sources, and against the
+// interface it is `has no declaration`, because a section binds each import as `<p><k>` and keeps
+// no import name of the source (module-system.md 13).
+fn an_import_of_an_import_binding_has_no_declaration_in_the_interface() void {
+    library_env.env mut by_source = library_env.env{};
+    library_env.open(&by_source);
+    defer library_env.close(&by_source);
+    library_env.add(&by_source, "lib/geom/a.ft", "i32 A = 1;\n");
+    library_env.add(&by_source, "lib/geom/b.ft", "import geom.a;\ni32 B = a.A;\n");
+    library_env.add(&by_source, "main.ft", "import geom.b.a;\n");
+    assert(!library_env.check_with_sources(&by_source, "lib", "main.ft"));
+    assert(library_env.said(&by_source, "cannot import 'a': it is an import of module 'geom.b'"));
+    library_env.env mut lib = library_env.env{};
+    library_env.open(&lib);
+    defer library_env.close(&lib);
+    library_env.add(&lib, "lib/geom/a.ft", "i32 A = 1;\n");
+    library_env.add(&lib, "lib/geom/b.ft", "import geom.a;\ni32 B = a.A;\n");
+    assert(library_env.emit(&lib, "geom", "lib/geom"));
+    assert(library_env.holds(library_env.text(&lib), "import geom.a as _0;\ni32 B = 1;\n"));
+    library_env.env mut use = library_env.env{};
+    library_env.open(&use);
+    defer library_env.close(&use);
+    library_env.add(&use, "main.ft", "import geom.b.a;\n");
+    assert(!library_env.check_against(&use, "geom", "geom.flib/interface.ft",
+                                      library_env.text(&lib), "main.ft"));
+    assert(library_env.said(&use, "module 'geom.b' has no declaration named 'a'"));
+    assert(!library_env.said(&use, "cannot import"));
+}
+
+fn main() i32 {
+    a_library_path_resolves_among_the_listed_modules();
+    a_path_in_no_library_is_an_error_at_its_import();
+    a_symbol_import_in_no_library_is_the_same_error();
+    a_library_path_that_the_walk_did_not_list_is_not_found();
+    the_name_of_the_library_alone_is_no_module();
+    a_library_build_reads_no_search_root_and_no_standard_directory();
+    println("library ok");
+    the_runtime_of_the_library_std_is_its_first_root();
+    a_std_root_with_no_runtime_is_an_error();
+    println("runtime ok");
+    a_module_reading_loads_its_section_and_its_imports();
+    a_symbol_reading_finds_a_declaration_of_the_prefix_section();
+    a_section_that_the_file_lacks_is_not_found_with_a_note_for_each_reading();
+    a_diagnostic_in_a_section_names_the_file_and_its_line();
+    the_runtime_comes_from_a_used_std_when_no_directory_is_set();
+    two_sections_that_import_each_other_are_a_cycle();
+    both_readings_of_a_section_path_are_ambiguous();
+    an_import_in_a_section_that_the_file_lacks_is_an_error_in_the_file();
+    a_section_that_ends_in_a_broken_declaration_reports_at_the_next_section();
+    a_section_imports_a_section_of_another_used_library();
+    a_library_module_resolves_an_import_selector_within_the_library();
+    both_readings_of_a_library_path_are_ambiguous();
+    a_used_library_path_never_reaches_a_search_root();
+    two_used_libraries_each_own_their_paths();
+    a_listed_module_that_vanished_is_a_read_error();
+    a_prefix_that_does_not_parse_is_probed_without_a_report();
+    a_declaration_of_a_section_stands_at_its_place_in_the_file();
+    println("sections ok");
+    a_text_of_another_form_is_refused_without_a_diagnostic();
+    println("malformed ok");
+    a_bodiless_function_checks_and_a_client_calls_it();
+    a_wrong_call_of_a_bodiless_function_is_the_client_s_error();
+    a_lexical_error_in_the_file_is_reported_and_refuses_the_library();
+    a_comment_line_inside_a_section_is_no_section();
+    a_bodiless_main_of_a_section_is_an_ordinary_function();
+    one_extern_in_two_sections_is_one_symbol();
+    a_main_of_a_library_module_is_an_ordinary_function();
+    an_import_of_an_import_binding_has_no_declaration_in_the_interface();
+    println("checker ok");
+    println("ok");
+    return 0;
+}

@@ -29,6 +29,7 @@ LSP_SRC_DIR = ROOT / "src" / "lsp"
 FORT_TESTS_DIR = ROOT / "test" / "fort"
 LSP_TESTS_DIR = ROOT / "test" / "lsp"
 TTY_DIR = ROOT / "test" / "tty"
+LIBRARY_TESTS_DIR = ROOT / "test" / "library"
 EDITOR_FIXTURE_DIR = ROOT / "editors" / "vscode" / "test" / "fixtures"
 
 # Every directory of fort the grammar is held over. `src/fort` is the only one
@@ -42,6 +43,7 @@ CORPUS_DIRS = (
     FORT_TESTS_DIR,
     LSP_TESTS_DIR,
     TTY_DIR,
+    LIBRARY_TESTS_DIR,
 )
 # The least number of `.ft` each of those directories holds. A directory grows,
 # so its own test asserts a floor. No test asserts the exact total.
@@ -59,6 +61,7 @@ CORPUS_MINIMUMS = {
     FORT_TESTS_DIR: 80,
     LSP_TESTS_DIR: 20,
     TTY_DIR: 2,
+    LIBRARY_TESTS_DIR: 1,
 }
 # The `.ft` of the repository that are deliberately outside the corpus, each
 # because it is meant to hold a lexical error.
@@ -787,6 +790,10 @@ class CorpusTest(unittest.TestCase):
     def test_every_terminal_program_spells_correctly(self):
         """Check the terminal test programs."""
         self.check_directory(TTY_DIR)
+
+    def test_every_library_test_program_spells_correctly(self):
+        """Check the programs of the library tests, test/library/*.ft."""
+        self.check_directory(LIBRARY_TESTS_DIR)
 
     def test_the_corpus_walk_holds_no_duplicate(self):
         """Each file reaches exactly one of the tests above.

@@ -48,6 +48,9 @@ string ARRAY_OWN_ERROR =
 string REF_ARRAY_ERROR =
     "no array suffix follows a reference suffix: group the inner type or use a struct";
 
+// The diagnostic of a `$cfg` in an interface file, where the writer has folded each one.
+string INTERFACE_CFG_ERROR = "an interface file holds no '$cfg'";
+
 // The two diagnostics of an allocated type, which two sites each report.
 string ALLOC_MUT_ERROR = "new allocates writable storage: remove the outermost 'mut'";
 string ALLOC_OWN_ERROR = "inside new an own follows a '*' of the element type";
@@ -78,6 +81,9 @@ struct parser {
     // parses that are running, and the outermost one sets `type_suffixes` to 0.
     u32 type_open;
     u64 type_suffixes;
+    // A section of an interface file (grammar.md section 2, D9.11): a function has no body, an
+    // import has the one form `import <path> as <binding>;`, and no `$if` or `$cfg` stands.
+    bool interface;
 }
 
 // The state a speculative parse restores when it rewinds.
@@ -1130,6 +1136,11 @@ fn parse_primary(parser mut* p) ast.node mut* {
         take_name(p, n);
         leave(p);
         if (!expect(p, lexer.tok_kind.rparen, "')'")) {
+            return null;
+        }
+        if (p->interface) {
+            // the writer folds every configuration read (D9.11)
+            error_at(p, at_loc, INTERFACE_CFG_ERROR);
             return null;
         }
         return finish(p, n);
@@ -2389,7 +2400,9 @@ fn parse_extern_params(parser mut* p, ast.node mut* fn_node) bool {
 }
 
 // fn_decl = "fn" identifier "(" [ param_list ] ")" return_type block, with the
-// `fn` already parsed: the name is the second token and the result comes last.
+// `fn` already parsed: the name is the second token and the result comes last. In an interface
+// file the declaration is fn_signature, whose `;` stands where the block stands, and `b` stays
+// null (D9.11). A `;` there in a source file is one syntax error at the `;`.
 fn parse_fn_decl(parser mut* p, diag.loc at_loc) ast.node mut* {
     ast.node mut* n = node_at(p, ast.ast_kind.k_fn_decl, at_loc);
     if (!expect_name(p, n) || !parse_params(p, n)) {
@@ -2397,6 +2410,17 @@ fn parse_fn_decl(parser mut* p, diag.loc at_loc) ast.node mut* {
     }
     n->a = parse_return_type(p);
     if (n->a == null) {
+        return null;
+    }
+    if (p->interface) {
+        if (!expect(p, lexer.tok_kind.semi, "';'")) {
+            return null;
+        }
+        return finish(p, n);
+    }
+    if (at(p, lexer.tok_kind.semi)) {
+        // a bodiless declaration is legal only in an interface file
+        error_expected(p, "'{'");
         return null;
     }
     n->b = parse_body(p);
@@ -2638,9 +2662,10 @@ fn parse_import(parser mut* p) ast.node mut* {
     return finish(p, n);
 }
 
-// A top-level declaration is a function, extern, struct, enum, or global variable.
+// A top-level declaration is a function, extern, struct, enum, or global variable. An interface
+// file has no `$if`, so there a `$if` falls through to the global and fails as a type.
 fn parse_top_decl(parser mut* p) ast.node mut* {
-    if (at(p, lexer.tok_kind.dollar_if)) {
+    if (at(p, lexer.tok_kind.dollar_if) && !p->interface) {
         return parse_compile_if(p, true);
     }
     if (at(p, lexer.tok_kind.kw_fn)) {
@@ -2716,7 +2741,7 @@ fn parse_module(session.session mut* sess, string file, lexer.tok_vec* toks,
         panic("parser.parse_module: the token vector does not end in end of file");
     }
     parser mut p = parser{sess, file, toks, ntoks, 0, ar, 0, 0, false, 0,
-                          diag.loc_make(file, 0, 0), strbuf.create(), 0, 0};
+                          diag.loc_make(file, 0, 0), strbuf.create(), 0, 0, false};
     defer strbuf.free(&p.msg);
 
     ast.node mut* mod = ast.ast_new(ar, ast.ast_kind.k_module, diag.loc_make(file, 1, 1));
@@ -2738,6 +2763,78 @@ fn parse_module(session.session mut* sess, string file, lexer.tok_vec* toks,
         } else {
             parse_decl_into(&p, mod, false);
         }
+    }
+    return finish(&p, mod);
+}
+
+// interface_import = "import" import_path "as" identifier ";": the one import form of an
+// interface file. The binding is the `b` of the import, as an `as` alias is in a source file.
+fn parse_interface_import(parser mut* p) ast.node mut* {
+    diag.loc at_loc = here(p);
+    ast.node mut* n = node_at(p, ast.ast_kind.k_import, at_loc);
+    bump(p);
+    diag.loc path_loc = here(p);
+    ast.node mut* path = node_at(p, ast.ast_kind.k_path, path_loc);
+    n->a = path;
+    while (true) {
+        diag.loc at_segment = here(p);
+        ast.node mut* segment = node_at(p, ast.ast_kind.k_ident, at_segment);
+        if (!expect_name(p, segment)) {
+            return null;
+        }
+        ast.ast_push(path, finish(p, segment));
+        finish(p, path);
+        if (!at(p, lexer.tok_kind.dot)) {
+            break;
+        }
+        bump(p);
+    }
+    diag.loc alias = here(p);
+    if (!expect(p, lexer.tok_kind.kw_as, "'as'")) {
+        return null;
+    }
+    n->b = node_at(p, ast.ast_kind.k_ident, alias);
+    if (!expect_name(p, n->b)) {
+        return null;
+    }
+    finish(p, n->b);
+    if (!expect(p, lexer.tok_kind.semi, "';'")) {
+        return null;
+    }
+    return finish(p, n);
+}
+
+/// Parses one section of an interface file into a `k_module` node (grammar.md section 2,
+/// module-system.md 10.3). The section is an `interface_module`: its imports, and then its
+/// declarations, each function without a body. A function body and a `$if` are syntax errors,
+/// and a `$cfg` is an error. The token vector holds the tokens of the section and ends in EOF.
+/// The positions of the tokens are their positions in the whole file.
+fn parse_interface(session.session mut* sess, string file, lexer.tok_vec* toks,
+                   ast.arena mut* ar) ast.node mut* {
+    u64 ntoks = lexer.tokvec_count(toks);
+    if (ntoks == 0 || lexer.tokvec_at(toks, ntoks - 1).kind != lexer.tok_kind.eof) {
+        panic("parser.parse_interface: the token vector does not end in end of file");
+    }
+    parser mut p = parser{sess, file, toks, ntoks, 0, ar, 0, 0, false, 0,
+                          diag.loc_make(file, 0, 0), strbuf.create(), 0, 0, true};
+    defer strbuf.free(&p.msg);
+    diag.loc mut start = diag.loc_make(file, 1, 1);
+    if (ntoks > 0) {
+        start = here(&p);
+    }
+    ast.node mut* mod = ast.ast_new(ar, ast.ast_kind.k_module, start);
+    while (at(&p, lexer.tok_kind.kw_import)) {
+        u64 begin = p.pos;
+        ast.node mut* imp = parse_interface_import(&p);
+        if (imp != null) {
+            ast.ast_push(mod, imp);
+        }
+        if (p.failed) {
+            recover(&p, mod, begin, imp == null, RECOVER_DECL);
+        }
+    }
+    while (!at(&p, lexer.tok_kind.eof)) {
+        parse_decl_into(&p, mod, false);
     }
     return finish(&p, mod);
 }

@@ -18,6 +18,8 @@ import gen_fir;
 import index;
 import json;
 import lexer;
+import library.interface;
+import library.tree;
 import modules;
 import parser;
 import prim;
@@ -65,6 +67,14 @@ string FIR_TEST_ALONE =
 // --fir-after and --fir-verify-report set --fir.
 string FIR_STATS_ALONE =
     "--fir-stats does not combine with --tokens, --ast, --check, --index, --fir or --fir-test";
+
+// The usage error of --lib beside a mode or an option that a library build does not take, in two
+// parts that fit the line.
+string LIB_ALONE_HEAD = "--lib does not combine with -I, -l, --check, --json, --index, --tokens, ";
+string LIB_ALONE_TAIL = "--ast or a --fir option";
+
+// The usage error of --lib without --emit-interface: this compiler writes no artifact yet.
+string LIB_NO_ARTIFACT = "--lib writes no artifact yet: give --emit-interface";
 
 // The module path of the prelude of a `.fir` test, which its function names start with.
 string FIR_TEST_MODULE = "main";
@@ -121,6 +131,10 @@ struct options {
     bool fir_report; // --fir-verify-report: the first violation of each function, not the FIR
     bool fir_stats; // --fir-stats: after the build, `lowered N of M` on stdout
     bool overwrite_report; // --overwrite-report: each overwrite check not proved, on stdout
+    bool have_lib; // --lib <name> <root>: a library build (D9.11)
+    string lib_name; // the name of --lib, read only when have_lib
+    string lib_root; // the root of --lib, read only when have_lib
+    bool emit_interface; // --emit-interface: the interface file of --lib on stdout
     containers.str_vec includes; // -I roots, searched in command-line order
     containers.str_vec libs;     // -l<lib> as given, passed to the linker in order
     containers.str_vec cc_args;  // -Xcc arguments, passed verbatim after the rest
@@ -173,6 +187,9 @@ fn help() void {
     println("                     write the first FIR violation of each function and stop");
     println("  --fir-stats        after the build, write `lowered N of M` functions");
     println("  --overwrite-report write each overwrite check that is not proved and stop");
+    println("  --lib <name> <root>");
+    println("                     build the library <name> from the directory <root>");
+    println("  --emit-interface   write the interface file of --lib to stdout and stop");
     println("  --help             print this help and exit");
     println("  --version          print the compiler version and exit");
 }
@@ -343,6 +360,9 @@ fn parse_flag(options mut* opts, string arg) bool {
         // --overwrite-report implies --check, which runs the emptiness pass
         opts->overwrite_report = true;
         opts->check = true;
+    } else if (arg == "--emit-interface") {
+        // writes the interface file of the library and stops (D9.11)
+        opts->emit_interface = true;
     } else {
         return false;
     }
@@ -435,6 +455,16 @@ fn parse(options mut* opts, string@ args) i32 {
             if (!parse_fir_after(opts, arg)) {
                 return PARSE_ERROR;
             }
+        } else if (arg == "--lib") {
+            // the two following arguments, whatever they look like
+            if (i + 2 >= args.len) {
+                usage_error_arg("missing argument for option", arg);
+                return PARSE_ERROR;
+            }
+            opts->lib_name = args[i + 1];
+            opts->lib_root = args[i + 2];
+            opts->have_lib = true;
+            i += 2;
         } else if (!parse_flag(opts, arg)) {
             bool mut ok = true;
             if (!parse_valued(opts, args, &i, &ok)) {
@@ -446,6 +476,9 @@ fn parse(options mut* opts, string@ args) i32 {
             }
         }
         i += 1;
+    }
+    if (opts->have_lib || opts->emit_interface) {
+        return check_library_options(opts);
     }
     if (!opts->have_entry) {
         usage_error("no entry file");
@@ -485,6 +518,44 @@ fn parse(options mut* opts, string@ args) i32 {
     if (opts->json && !opts->check) {
         // a build spawns a `--cc` that inherits stdout
         usage_error("--json requires --check");
+        return PARSE_ERROR;
+    }
+    return PARSE_OK;
+}
+
+// The rules of a library build on the command line (toolchain.md 1, D9.11). A `--lib` build takes
+// no entry file. Only `--lib std` builds without `--use std=<path>`, which this compiler does not
+// read yet, so every other library is that usage error.
+fn check_library_options(options* opts) i32 {
+    if (!opts->have_lib) {
+        usage_error("--emit-interface requires --lib");
+        return PARSE_ERROR;
+    }
+    if (opts->have_entry) {
+        usage_error_arg("unexpected argument", opts->entry);
+        return PARSE_ERROR;
+    }
+    if (!tree.is_segment(opts->lib_name)) {
+        usage_error_arg("invalid library name", opts->lib_name);
+        return PARSE_ERROR;
+    }
+    if (opts->includes.len > 0 || opts->libs.len > 0 || opts->check || opts->json || opts->index
+        || opts->tokens || opts->ast || opts->fir || opts->fir_test || opts->fir_stats) {
+        eprintln("fort: error: ", LIB_ALONE_HEAD, LIB_ALONE_TAIL);
+        eprintln(USAGE);
+        return PARSE_ERROR;
+    }
+    if (opts->emit_interface && (opts->emit_ir || opts->compile_only || opts->have_output)) {
+        // the interface goes to stdout, so the command line names no file to write
+        usage_error("--emit-interface does not combine with -S, -c or -o");
+        return PARSE_ERROR;
+    }
+    if (opts->lib_name != modules.STD_SEGMENT) {
+        usage_error("a library build needs --use std=<path>");
+        return PARSE_ERROR;
+    }
+    if (!opts->emit_interface) {
+        usage_error(LIB_NO_ARTIFACT);
         return PARSE_ERROR;
     }
     return PARSE_OK;
@@ -1623,6 +1694,56 @@ fn compile_entry(options* opts, string program) i32 {
     return built;
 }
 
+// ---- the library build ---------------------------------------------
+
+// `--lib <name> <root> --emit-interface` (toolchain.md 2.1, D9.11): walks the root, loads and
+// checks every module of the library, lowers and verifies each body as --check does, and writes
+// its interface file to stdout. A root that
+// cannot be read or holds no module is exit 2, and a compile diagnostic is exit 1. The build
+// writes no file and runs no `--cc`, so it takes any target form, as a check does.
+fn library_entry(options* opts) i32 {
+    if (!target_form(opts->target)) {
+        usage_error_arg("unsupported target", opts->target);
+        return EXIT_USAGE;
+    }
+    tree.tree mut t = tree.tree{};
+    defer tree.free(&t);
+    i32 mut failure = 0;
+    if (!tree.walk(&t, opts->lib_name, opts->lib_root, &failure)) {
+        error_path("cannot read library root", opts->lib_root,
+                   str.from_cstr(libc.strerror(failure)));
+        return EXIT_USAGE;
+    }
+    if (tree.count(&t) == 0) {
+        eprintln("fort: error: library root '", opts->lib_root, "' holds no module");
+        return EXIT_USAGE;
+    }
+    session.session mut s = session.create();
+    defer session.free(&s);
+    configure(&s, opts);
+    diag.set_text(session.diags(&s), true);
+    session.show_sources(&s);
+    analysis mut an = analysis_create(&s);
+    defer analysis_free(&an);
+    bool loaded = modules.load_library(&s, &an.set, opts->lib_name, opts->lib_root, &t);
+    // D8.6 does not apply under --lib: a `main` of a library module is an ordinary function
+    an.ck.require_main = false;
+    bool checked = check_stmt.check_program(&an.ck, &an.set);
+    if (!loaded || !checked || session.error_count(&s) > 0) {
+        return EXIT_COMPILE_ERROR;
+    }
+    // lower, verify and run the emptiness pass over each body, as --check does (toolchain.md 2.1)
+    i32 lowered = overwrite_entry(&s, &an, opts);
+    if (lowered != EXIT_OK) {
+        return lowered;
+    }
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    interface.write(&an.ck, &an.set, opts->lib_name, &text);
+    print(strbuf.view(&text));
+    return EXIT_OK;
+}
+
 // ---- the pipeline --------------------------------------------------
 
 // Runs the compiler with args[1..]; returns the process exit status.
@@ -1651,6 +1772,9 @@ fn run(string@ args) i32 {
     }
     if (opts.fir_test) {
         return fir_test_entry(&opts, args[0]);
+    }
+    if (opts.have_lib) {
+        return library_entry(&opts);
     }
     return compile_entry(&opts, args[0]);
 }

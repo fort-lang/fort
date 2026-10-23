@@ -1,0 +1,110 @@
+/// Checks a program against the interface file of the library `std` in place of its sources: the
+/// test-only path of test/library/interface_test.py, until `--use` reads an artifact (D9.11).
+///
+/// usage: checker <interface.ft> [fort options] <entry.ft>
+///
+/// The options are the ones `fort` parses, `--check` among them. The checker reads no standard
+/// library directory: every `std` path resolves in the sections of the interface file
+/// (module-system.md 10.2). It writes the diagnostics as `fort --check` writes them and exits 0
+/// for a clean check, 1 for a compile error and 2 for a usage error. After a clean check it also
+/// writes each section that the check read again, and a section whose text changes is exit 1:
+/// the interface file is a fixed point of the writer.
+import check_stmt;
+import diag;
+import driver;
+import library.interface;
+import modules;
+import session;
+import std.io;
+import std.str;
+import std.strbuf;
+
+// The section of the module `path` in the interface text `text`, from its module line to the next
+// module line or the end. Empty when the text has no such section.
+fn section_of(string text, string path) string {
+    strbuf.str_buf mut head = strbuf.create();
+    defer strbuf.free(&head);
+    strbuf.append(&head, modules.INTERFACE_SECTION);
+    strbuf.append(&head, path);
+    strbuf.push(&head, '\n');
+    i64 at = str.find(text, strbuf.view(&head));
+    if (at < 0) {
+        return "";
+    }
+    u64 start = cast(at, u64);
+    u64 mut end = start + strbuf.view(&head).len;
+    while (end < text.len && !str.starts_with(text[end..text.len], modules.INTERFACE_SECTION)) {
+        while (end < text.len && text[end] != '\n') {
+            end += 1;
+        }
+        end += 1;
+    }
+    return text[start..end];
+}
+
+// Writes each section that the closure read again and returns the number that changed.
+fn count_changed(driver.analysis* an, string text) u64 {
+    u64 mut changed = 0;
+    u64 mut i = 0;
+    while (i < modules.count(&an->set)) {
+        modules.module* m = modules.at(&an->set, i);
+        i += 1;
+        if (!m->interface) {
+            continue;
+        }
+        strbuf.str_buf mut b = strbuf.create();
+        defer strbuf.free(&b);
+        interface.write_section(&an->ck, m, &b);
+        if (strbuf.view(&b) != section_of(text, m->path)) {
+            eprintln("checker: the section ", m->path, " is written again as other text");
+            eprint(strbuf.view(&b));
+            changed += 1;
+        }
+    }
+    return changed;
+}
+
+fn main(string@ args) i32 {
+    if (args.len < 3) {
+        eprintln("usage: checker <interface.ft> [fort options] <entry.ft>");
+        return 2;
+    }
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    if (!io.read_file(args[1], &text)) {
+        eprintln("checker: cannot read '", args[1], "'");
+        return 2;
+    }
+    driver.options mut opts = driver.options_create();
+    defer driver.options_free(&opts);
+    // the parse reads its arguments from index 1, so the interface file stands as its program
+    if (driver.parse(&opts, args[1..]) != driver.PARSE_OK) {
+        return 2;
+    }
+    session.session mut s = session.create();
+    defer session.free(&s);
+    driver.configure(&s, &opts);
+    diag.set_text(session.diags(&s), true);
+    session.show_sources(&s);
+    driver.analysis mut an = driver.analysis_create(&s);
+    defer driver.analysis_free(&an);
+    u64 mut i = 0;
+    while (i < opts.includes.len) {
+        modules.add_root(&an.set, opts.includes.items[i]);
+        i += 1;
+    }
+    if (!modules.use_library(&s, &an.set, "std", args[1], strbuf.view(&text))) {
+        eprintln("checker: '", args[1], "' is no interface file of the library std");
+        return 2;
+    }
+    bool loaded = modules.load(&s, &an.set, opts.entry);
+    an.ck.require_main = !opts.check;
+    bool checked = check_stmt.check_program(&an.ck, &an.set);
+    if (!loaded || !checked || session.error_count(&s) > 0) {
+        return 1;
+    }
+    if (count_changed(&an, strbuf.view(&text)) > 0) {
+        return 1;
+    }
+    return 0;
+}

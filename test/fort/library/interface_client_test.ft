@@ -1,0 +1,314 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| clean ok
+//| errors ok
+//| notes ok
+//| ok
+/// Checks that a client checks to the same error lines against the interface of a library as
+/// against its sources (D9.11): each case is one function body of a client, and the error lines,
+/// position and text, of the two checks must be the same. This is the rule that the corpus test
+/// test/library/interface_test.py holds over test/lang, here over each kind of declaration.
+import diag;
+import library_env;
+import std.str;
+import std.strbuf;
+
+// The modules of the library `geom`, under `lib/geom`: a function of each signature form, an
+// extern, structs, an enum, constants of each kind, a `mut` global and a module that names
+// another module's types.
+string[22] SHAPES = {
+    "struct vector { f64 x; f64 y; }",
+    "struct box { vector lo; vector hi; u8[4] tag; }",
+    "enum color { red, green = 5, blue }",
+    "i32 DIM = 1 + 1;",
+    "vector ORIGIN = {};",
+    "vector UNIT_X = {1.0, 0.0};",
+    "color FAVOURITE = color.blue;",
+    "string NAME = \"shapes\";",
+    "u8[4] TAG = {1, 2, 3, 4};",
+    "i32* PDIM = &DIM;",
+    "i32 mut calls = 7;",
+    "fn add(vector a, vector b) vector {",
+    "    calls += 1;",
+    "    return vector{a.x + b.x, a.y + b.y};",
+    "}",
+    "fn scale(vector mut* v, f64 k) void {",
+    "    v->x = v->x * k;",
+    "}",
+    "fn fail(string why) noreturn {",
+    "    panic(why);",
+    "}",
+    "extern fn printf(char* fmt, ...) i32;",
+};
+
+string[9] PAINT = {
+    "import geom.shapes;",
+    "shapes.color DEFAULT = shapes.color.green;",
+    "fn mix(shapes.color a, shapes.color b) shapes.color {",
+    "    return a;",
+    "}",
+    "fn area(shapes.box* b) f64 {",
+    "    return (b->hi.x - b->lo.x) * (b->hi.y - b->lo.y);",
+    "}",
+    "fn (shapes.color, shapes.color) shapes.color MIXER = mix;",
+};
+
+fn add_library(library_env.env mut* e) void {
+    library_env.add_lines(e, "lib/geom/shapes.ft", SHAPES[..]);
+    library_env.add_lines(e, "lib/geom/paint.ft", PAINT[..]);
+}
+
+// The client: the imports, then `body` inside `fn main() i32`.
+fn add_client(library_env.env mut* e, string body) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "import geom.shapes;\nimport geom.paint;\n");
+    strbuf.append(&b, "import geom.shapes.{vector, color};\n");
+    strbuf.append(&b, "fn main() i32 {\n");
+    strbuf.append(&b, body);
+    strbuf.append(&b, "\n    return 0;\n}\n");
+    library_env.add(e, "main.ft", strbuf.view(&b));
+}
+
+// The error lines of the client with `body` against the sources.
+fn against_sources(string body, strbuf.str_buf mut* out) void {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    add_library(&e);
+    add_client(&e, body);
+    library_env.check_with_sources(&e, "lib", "main.ft");
+    library_env.error_lines(&e, out);
+}
+
+// The error lines of the client with `body` against the interface of the same library.
+fn against_interface(string body, strbuf.str_buf mut* out) void {
+    library_env.env mut lib = library_env.env{};
+    library_env.open(&lib);
+    defer library_env.close(&lib);
+    add_library(&lib);
+    assert(library_env.emit(&lib, "geom", "lib/geom"));
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    add_client(&e, body);
+    library_env.check_against(&e, "geom", "geom.flib/interface.ft", library_env.text(&lib),
+                              "main.ft");
+    library_env.error_lines(&e, out);
+}
+
+// Whether the two checks of `body` give the same error lines, and whether there is one. A
+// difference prints both lists.
+fn alike(string body, bool erring) bool {
+    strbuf.str_buf mut sources = strbuf.create();
+    defer strbuf.free(&sources);
+    against_sources(body, &sources);
+    strbuf.str_buf mut iface = strbuf.create();
+    defer strbuf.free(&iface);
+    against_interface(body, &iface);
+    bool same = strbuf.view(&sources) == strbuf.view(&iface);
+    bool errs = strbuf.view(&sources).len > 0;
+    if (!same || errs != erring) {
+        println("body: ", body);
+        println("sources:");
+        print(strbuf.view(&sources));
+        println("interface:");
+        print(strbuf.view(&iface));
+    }
+    return same && errs == erring;
+}
+
+// Bodies that check with no error either way: each declaration used as its kind permits.
+string[16] CLEAN = {
+    "    vector v = shapes.add(shapes.UNIT_X, shapes.ORIGIN);",
+    "    vector mut w = shapes.ORIGIN;\n    shapes.scale(&w, 2.0);",
+    "    i32 d = shapes.DIM * 2;",
+    "    i32 n = *shapes.PDIM;",
+    "    color c = paint.mix(shapes.FAVOURITE, color.red);",
+    "    shapes.calls += 1;",
+    "    u64 s = sizeof(shapes.box);",
+    "    u8 t = shapes.TAG[2];",
+    "    string name = shapes.NAME;",
+    "    shapes.printf(\"%d\".ptr, 1);",
+    "    color c = paint.MIXER(color.red, paint.DEFAULT);",
+    "    shapes.box b = {};\n    f64 a = paint.area(&b);",
+    "    switch (shapes.FAVOURITE) {\n    case color.red, color.green, color.blue:\n    }",
+    "    i32[shapes.DIM] pair = {};",
+    "    if (shapes.DIM > 1) {\n        shapes.fail(\"stop\");\n    }",
+    "    f64 x = shapes.UNIT_X.x;",
+};
+
+// Bodies with errors: a wrong type, a wrong count, a missing name, a constant written, and a
+// switch that misses a member.
+string[16] ERRING = {
+    "    i32 v = shapes.add(shapes.UNIT_X, shapes.ORIGIN);",
+    "    vector v = shapes.add(shapes.UNIT_X);",
+    "    vector v = shapes.add(1, 2);",
+    "    shapes.DIM = 3;",
+    "    shapes.ORIGIN.x = 1.0;",
+    "    i32 d = shapes.nope;",
+    "    color c = color.purple;",
+    "    string s = shapes.calls;",
+    "    shapes.scale(&shapes.ORIGIN, 2.0);",
+    "    f64 a = paint.area(shapes.ORIGIN);",
+    "    color c = paint.mix(1, 2);",
+    "    switch (shapes.FAVOURITE) {\n    case color.red:\n        break;\n    }",
+    "    i32 n = shapes.PDIM;",
+    "    shapes.printf(1);",
+    "    vector v = {.z = 1.0};",
+    "    i32 r = shapes.fail(\"x\");",
+};
+
+fn every_clean_body_checks_alike() void {
+    u64 mut k = 0;
+    while (k < CLEAN.len) {
+        assert(alike(CLEAN[k], false));
+        k += 1;
+    }
+}
+
+fn every_erring_body_reports_the_same_error_lines() void {
+    u64 mut k = 0;
+    while (k < ERRING.len) {
+        assert(alike(ERRING[k], true));
+        k += 1;
+    }
+}
+
+// ---- notes ------------------------------------------------------------------------------
+
+// The diagnostics of a client with `body` against the interface, notes included, as
+// `<line>:<col>: <severity>` with the file of each, in `out`.
+fn notes_against_interface(string client, strbuf.str_buf mut* out) void {
+    library_env.env mut lib = library_env.env{};
+    library_env.open(&lib);
+    defer library_env.close(&lib);
+    add_library(&lib);
+    assert(library_env.emit(&lib, "geom", "lib/geom"));
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    library_env.add(&e, "main.ft", client);
+    library_env.check_against(&e, "geom", "geom.flib/interface.ft", library_env.text(&lib),
+                              "main.ft");
+    u64 mut i = 0;
+    while (i < library_env.reports(&e)) {
+        diag.record r = library_env.report_at(&e, i);
+        i += 1;
+        if (str.ends_with(r.loc.file, "interface.ft")) {
+            strbuf.append(out, "interface.ft:");
+        } else {
+            strbuf.append(out, "main.ft:");
+        }
+        strbuf.append_u64(out, cast(r.loc.line, u64));
+        if (r.severity == diag.severity.error) {
+            strbuf.append(out, ": error\n");
+        } else {
+            strbuf.append(out, ": note\n");
+        }
+    }
+}
+
+// An extern of the client that conflicts with an extern of the library stands at the client, and
+// its note points at the declaration in the interface file: the one difference that the error
+// lines of the two checks allow.
+fn a_note_can_point_into_the_interface_file() void {
+    string client = "import geom.shapes;\nextern fn printf(char* fmt) i64;\n";
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    notes_against_interface(client, &b);
+    // the extern of geom.shapes stands on line 21 of the interface file
+    assert(library_env.holds(strbuf.view(&b), "main.ft:2: error\ninterface.ft:"));
+    strbuf.str_buf mut sources = strbuf.create();
+    defer strbuf.free(&sources);
+    strbuf.str_buf mut iface = strbuf.create();
+    defer strbuf.free(&iface);
+    // the error lines are the same; the notes differ in their file only
+    against_sources_text(client, &sources);
+    against_interface_text(client, &iface);
+    assert(strbuf.view(&sources) == strbuf.view(&iface) && strbuf.view(&sources) != "");
+}
+
+// against_sources and against_interface over a whole client text.
+fn against_sources_text(string client, strbuf.str_buf mut* out) void {
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    add_library(&e);
+    library_env.add(&e, "main.ft", client);
+    library_env.check_with_sources(&e, "lib", "main.ft");
+    library_env.error_lines(&e, out);
+}
+
+fn against_interface_text(string client, strbuf.str_buf mut* out) void {
+    library_env.env mut lib = library_env.env{};
+    library_env.open(&lib);
+    defer library_env.close(&lib);
+    add_library(&lib);
+    assert(library_env.emit(&lib, "geom", "lib/geom"));
+    library_env.env mut e = library_env.env{};
+    library_env.open(&e);
+    defer library_env.close(&e);
+    library_env.add(&e, "main.ft", client);
+    library_env.check_against(&e, "geom", "geom.flib/interface.ft", library_env.text(&lib),
+                              "main.ft");
+    library_env.error_lines(&e, out);
+}
+
+// Bodies of a second kind: declarations of the client beside the library's.
+string[22] MORE = {
+    "    shapes.vector v = {.x = 1.0};\n    f64 k = shapes.dot(v, shapes.UNIT_X);",
+    "    shapes.box b = {shapes.ORIGIN, shapes.UNIT_X, shapes.TAG};",
+    "    shapes.box b = {shapes.ORIGIN, shapes.UNIT_X, {1, 2}};",
+    "    i32 x = paint.DEFAULT;",
+    "    color c = cast(5, color);",
+    "    u64 n = shapes.NAME.len + shapes.TAG.len;",
+    "    i32 d = shapes.DIM;\n    d = 4;",
+    "    fn (shapes.color, shapes.color) shapes.color f = paint.mix;",
+    "    fn (i32) i32 f = paint.mix;",
+    "    shapes.fail(shapes.NAME);",
+    "    shapes.vector* p = &shapes.ORIGIN;\n    f64 x = p->x;",
+    "    shapes.vector mut* p = &shapes.ORIGIN;",
+    "    u8 t = shapes.TAG[4];",
+    "    color c = shapes.FAVOURITE;\n    i32 n = cast(c, i32) + 1;",
+    "    i32 n = paint.area(null);",
+    "    shapes.box b = {.lo = shapes.UNIT_X, .tag = {9, 9, 9, 9}};",
+    "    shapes.calls = shapes.calls * 2 + shapes.DIM;",
+    "    string s = shapes.NAME[1..3];",
+    "    shapes.vector v = shapes.add(shapes.UNIT_X, shapes.UNIT_X, shapes.UNIT_X);",
+    "    i32 x = shapes.printf(\"%s\".ptr, shapes.NAME.ptr);",
+    "    f64 s = shapes.scale;",
+    "    fn (string) noreturn f = shapes.fail;\n    f(\"x\");",
+};
+
+fn more_bodies_check_alike() void {
+    u64 mut k = 0;
+    while (k < MORE.len) {
+        strbuf.str_buf mut sources = strbuf.create();
+        defer strbuf.free(&sources);
+        against_sources(MORE[k], &sources);
+        strbuf.str_buf mut iface = strbuf.create();
+        defer strbuf.free(&iface);
+        against_interface(MORE[k], &iface);
+        if (strbuf.view(&sources) != strbuf.view(&iface)) {
+            println("body: ", MORE[k]);
+            print(strbuf.view(&sources));
+            print(strbuf.view(&iface));
+        }
+        assert(strbuf.view(&sources) == strbuf.view(&iface));
+        k += 1;
+    }
+}
+
+fn main() i32 {
+    every_clean_body_checks_alike();
+    println("clean ok");
+    every_erring_body_reports_the_same_error_lines();
+    more_bodies_check_alike();
+    println("errors ok");
+    a_note_can_point_into_the_interface_file();
+    println("notes ok");
+    println("ok");
+    return 0;
+}
