@@ -636,6 +636,9 @@ Compilation is whole-program (D9.10):
    When ownership analysis is selected, lower and verify the available fort bodies in the closure.
    Infer summaries and check ownership obligations before build-mode transformations (D19.8).
    This includes std.rt from std/rt.ft. A proof failure is a source error (exit 1).
+   In every build mode, lower and verify each fort body of the closure, and run the emptiness
+   pass of `fir.md` 11 on it (D17.11). An overwrite check that the pass cannot prove is a source
+   error (exit 1).
 4. Emit one LLVM IR module for the closure to `<tmp>/<entry>.ll` (D19.1), or to the `-S` output
    and stop.
 5. Run `<cc>` over that module once: it compiles and links in one invocation (D14.3), exit 2 on
@@ -664,6 +667,8 @@ Compilation is whole-program (D9.10):
 `--cc`, and does not apply the entry-point rule of D8.6, since the file it is given is a module
 under inspection rather than a program. Selected ownership analysis uses symbolic inputs for
 available fort bodies. Check and build modes use the same ownership proof (D20.1, D19.8).
+`--check` runs the emptiness pass of step 3 too, so it reports each overwrite error that a build
+reports (D17.11).
 
 - The temporary directory comes from `mkdtemp` under `$TMPDIR` (default `/tmp`) and is removed
   whether or not `--cc` succeeded.
@@ -741,16 +746,15 @@ the checks below is that `--cc` compiles the module with `-O2` instead of `-O1` 
 | index out of range (D6.8)                          | trap    | trap        | removed             |
 | span bounds `0 <= lo <= hi <= len` (D6.9)          | trap    | trap        | removed             |
 | `new`: negative count, size overflow, no memory    | trap    | trap        | unchanged           |
-| store over a live `own` value (D17.11)             | trap    | no check    | unchanged           |
+| `own` store not proved empty (D17.11)              | compile error in every mode                 |
 | `assert(cond)` (D12.2)                             | trap    | trap        | unchanged           |
 | `panic(msg)`                                       | trap    | trap        | unchanged           |
 | constant index or fold out of range (D4.4, D6.8)   | compile error in every mode                 |
 | `cast` (D3.14)                                     | never traps in any mode                     |
 
 "Trap" is the runtime error contract of D11.4: flush, one line on stderr, `abort()`. "Wrap" is
-two's complement; "masked" means `count & (width - 1)`; "no check" means the store happens and
-the allocation the old value designated would leak without the static proof (D17.11).
-Selected ownership analysis rejects a store that loses that obligation in all build modes (D19.8).
+two's complement; "masked" means `count & (width - 1)`. No build mode emits a runtime check for a
+store into an `own` place: the emptiness pass proves each one at compile time (D17.11).
 Programs must not rely on wrapping or
 trapping for correctness (D11.1); the wrapping operators exist for code that needs wrap-around in
 both modes. A raw-pointer span adds no runtime range check (D6.9).
@@ -926,16 +930,14 @@ reports status 134:
 
 ```sh
 main.ft:12:14: runtime error: index 5 out of range for length 3
-main.ft:16:9: runtime error: overwriting owned value
 main.ft:20:5: panic: queue empty
 main.ft:31:5: assertion failed: n > 0
 ```
 
-The position of a runtime error is the operator token of the failing operation (`[`, `+`, `-`,
-`*`, `/`, `%`, `<<`, `>>`, `++`, `--`, a compound-assignment operator, unary `-`, the `=` of an
-assignment for the overwrite check of D17.11) or the builtin name for `new`, `assert` and
-`panic`. The assertion text is the verbatim source text of the argument. Runtime messages are
-listed in section 5.
+The position of a runtime error is the operator token of the failing operation (`[`, `+`, `-`, `*`,
+`/`, `%`, `<<`, `>>`, `++`, `--`, a compound-assignment operator, unary `-`) or the builtin name for
+`new`, `assert` and `panic`. The assertion text is the verbatim source text of the argument. Runtime
+messages are listed in section 5.
 
 ### 4.1 The check document (D20.2)
 
@@ -1063,12 +1065,11 @@ The implementation records its numeric bounds and measured coverage under FIR 14
 The runtime is `std.rt`, an ordinary fort module (`<std-dir>/rt.ft`) that the compiler loads into
 every import closure and emits into the program's module like any other (D13.1, D9.10). It owns
 process start and exit (D11.6), heap allocation (D10.2, D10.3), the runtime-error and panic paths
-(D11.4, including the ownership overwrite check of D17.11), formatting and buffering for the print
-family (D11.5, D11.7, D12.2, D18), and the program arguments for `std.sys`. It imports `std.libc`
-and reaches the operating system through it (D9.8): `write` for the buffers, `calloc` and `free`
-for `alloc` and `free` below, `abort` for the failure paths, `isatty` for D11.5's question and
-`strlen` for `args_init`. A program that writes `import std.rt;` calls it as it calls any module
-(D9.3).
+(D11.4), formatting and buffering for the print family (D11.5, D11.7, D12.2, D18), and the program
+arguments for `std.sys`. It imports `std.libc` and reaches the operating system through it (D9.8):
+`write` for the buffers, `calloc` and `free` for `alloc` and `free` below, `abort` for the failure
+paths, `isatty` for D11.5's question and `strlen` for `args_init`. A program that writes
+`import std.rt;` calls it as it calls any module (D9.3).
 
 Four things about it are not ordinary, and they are the whole list: it is a root of every closure,
 imported or not (D9.10); the compiler knows the names of section 5.1 and emits calls to them
@@ -1112,9 +1113,7 @@ struct enum_member { i32 value; char* name; }
 // takes `void* own`, which every result of `alloc` reaches by the monotone drop
 // of D5.4. The mark reaches no instruction, no signature and no size: every
 // pointer is one machine word, so the IR form of item 7 is `ptr` either way
-// (D3.11). It does move one source column, the declaration of the local that
-// holds `calloc`'s result being four characters further right, which the
-// overwrite check of section 6 item 18 records.
+// (D3.11).
 // The two are not called `new` and `del`: `new` is a keyword (D2.4), and `del`
 // is a universe function that a module-level declaration of that name shadows
 // (D12.2, D7.9) -- inside `std.rt`, which releases its own buffers and its argv
@@ -1137,9 +1136,7 @@ fn str_eq(char* a, u64 a_len, char* b, u64 b_len) bool;
 // carries the suffix because `type` is a reserved word (D2.4); `text` is the
 // NUL-terminated source text of the assert argument. `fail_div_overflow` is
 // `MIN / -1` and `MIN % -1`; `fail_alloc_count` is `new(T, n)` with a negative
-// signed `n`; `fail_overwrite` is an assignment to an `own` reference-typed
-// lvalue whose current value is not zero (D17.11), emitted in checked builds
-// only; `fail_enum` is the default a switch over an enum with no `default`
+// signed `n`; `fail_enum` is the default a switch over an enum with no `default`
 // clause is given (D7.7), where `type_name` is the enum's name, and it is
 // emitted in both build modes.
 fn fail_bounds(i64 index, u64 len, char* file, u32 line, u32 col) noreturn;
@@ -1149,7 +1146,6 @@ fn fail_shift(i64 count, char* type_name, char* file, u32 line, u32 col) noretur
 fn fail_div_zero(char* file, u32 line, u32 col) noreturn;
 fn fail_div_overflow(char* file, u32 line, u32 col) noreturn;
 fn fail_alloc_count(i64 n, char* file, u32 line, u32 col) noreturn;
-fn fail_overwrite(char* file, u32 line, u32 col) noreturn;
 fn fail_enum(i64 v, char* type_name, char* file, u32 line, u32 col) noreturn;
 fn panic(char* ptr, u64 len, char* file, u32 line, u32 col) noreturn;
 fn assert_fail(char* text, char* file, u32 line, u32 col) noreturn;
@@ -1247,7 +1243,6 @@ are those of 5.1, in `std.rt`:
 | `fail_alloc_count`    | `runtime error: negative allocation count -1`                |
 | `alloc` (overflow)    | `runtime error: allocation size overflow`                    |
 | `alloc` (no memory)   | `runtime error: out of memory`                               |
-| `fail_overwrite`      | `runtime error: overwriting owned value`                     |
 | `fail_enum`           | `runtime error: enum value 0 is not a member of level`       |
 | `panic`               | `panic: <message bytes>`                                     |
 | `assert_fail`         | `assertion failed: <expression text>`                        |
@@ -1671,36 +1666,22 @@ A change to the emitter's text is a change here.
     and, on an lvalue operand, zeroes the place: `store ptr null` for a pointer, a 16-byte
     `llvm.memset` for a span or `string`. On an rvalue nothing is stored.
 
-18. **Ownership** (D17). `own` is erased: same types, same ABI, same normalization, and neither
-    the module nor the runtime carries ownership information. `move(lv)` reads the operand's
-    value into an intermediate of the emitter's own -- the register a `load` names for a pointer
-    or a `void*`, a `%tmpK` slot an `llvm.memcpy` fills for a span, a `string` or an owning
-    aggregate -- zeroes the operand (`store ptr null` or `llvm.memset`) and only then copies the
-    value on to the destination, in both build modes (D17.6). The intermediate is not optional:
-    the destination may be the operand itself (`s = move(s)`, `*p = move(*q)`,
-    `v[i] = move(v[j])`), and copying to the destination first would let the zeroing destroy the
-    value the move is meant to yield. The overwrite check (D17.11), in checked mode only, runs
-    after the right-hand side is evaluated and immediately before the store:
-
-    ```llvm
-      %t7 = getelementptr inbounds %fort.span, ptr %v.2, i32 0, i32 0
-      %t8 = load ptr, ptr %t7, align 8
-      %t9 = icmp ne ptr %t8, null
-      br i1 %t9, label %L5, label %L4
-    ```
-
-    with `std.rt.fail_overwrite(ptr @.file.N, i32 line, i32 col)` at the `=` token. A span or
-    `string` target is produced into a compiler temporary first, an aggregate being written into
-    a place rather than held in a register (D19.3), and the header is copied over after the
-    check; a pointer target's value is already in a register, so the store follows the check
-    directly. Release mode emits the plain store with no temporary; `--no-bounds-check` does not
-    affect the check; `move`, `del` and assignments of owning aggregates never emit it. A
-    declaration of an owning local does emit it, at the declared name, and gen_function stores
-    the zero value into that local's slot once in the entry block so that the first execution
-    reads zero (D17.11 as amended, D19.4). The check's own load cannot be optimized away, since
-    it reads the location a later store writes. `return x` of an `own` local or parameter is the
-    implicit move of D17.5: the value is read, the operand is then zeroed the same way, and only
-    then does the function return, so a `defer del(x)` above it sees the zero value (D7.8).
+18. **Ownership** (D17). `own` is erased: same types, same ABI, same normalization, and neither the
+    module nor the runtime carries ownership information. `move(lv)` reads the operand's value into
+    an intermediate of the emitter's own -- the register a `load` names for a pointer or a `void*`,
+    a `%tmpK` slot an `llvm.memcpy` fills for a span, a `string` or an owning aggregate -- zeroes
+    the operand (`store ptr null` or `llvm.memset`) and only then copies the value on to the
+    destination, in both build modes (D17.6). The intermediate is not optional: the destination may
+    be the operand itself (`s = move(s)`, `*p = move(*q)` after `del(*p)`, `v[i] = move(v[j])` after
+    `del(v[i])`, D17.11), and copying to the destination first would let the zeroing destroy the
+    value the move is meant to yield. No store emits an overwrite check. The emptiness pass proves
+    each store into an `own` reference-typed place at compile time, and the build-mode pass removes
+    its FIR check in every build mode (D17.11, `fir.md` 11). Every mode emits the plain store with
+    no temporary. The entry block stores the zero value once into the slot of each local of `own`
+    reference type (D19.4, `fir.md` 9.2), because the emptiness pass reads that store as the entry
+    zeroing of D17.11. `return x` of an `own` local or parameter is the implicit move of D17.5: the
+    value is read, the operand is then zeroed the same way, and only then does the function return,
+    so a `defer del(x)` above it sees the zero value (D7.8).
 
 19. **Builtins** (D12.2). The print family evaluates `fd` once (`1`, `2`, or the first argument)
     and then each argument left to right, one call per argument (D11.5): `i8 i16 i32 i64`
@@ -2070,12 +2051,11 @@ test/
 
 `<area>` is one of `lexical constants operators casts mutability declarations control switch
 defer functions structs enums arrays spans strings pointers globals builtins errors modes modules
-ffi stdlib ownership`: `errors` holds the `abort` tests of the runtime checks (the overwrite
-check of D17.11 included, with its `--release` twin under `modes`), `modes` the `--release`
-tests, `stdlib` the tests of the standard library once it exists, and `ownership` the run tests
-of `own`, `move`, lending and `del` and the fail tests of every rule of D17. `NNN` is a three-digit
-sequence number and `name` a short snake-case description. Paths in `link:` are relative to
-`test/lang/`.
+ffi stdlib ownership`: `errors` holds the `abort` tests of the runtime checks, `modes` the
+`--release` tests, `stdlib` the tests of the standard library once it exists, and `ownership` the
+run tests of `own`, `move`, lending and `del` and the fail tests of every rule of D17, the
+overwrite check of D17.11 included. `NNN` is a three-digit sequence number and `name` a short
+snake-case description. Paths in `link:` are relative to `test/lang/`.
 
 ### 7.2 Directives (D14.5)
 
@@ -2455,11 +2435,11 @@ implementable; the design is to be planned in the implementation phase.
   and, on each assignment, whether the target is an `own` lvalue that needs the overwrite check.
 - **Codegen.** For each function, the lowering makes FIR from the annotated AST and expands the
   deferred statements statically at each exit (D7.8, D19.8); the verifier tests the FIR, the
-  build-mode pass applies the selected mode, and the verifier tests it again; the translator then
-  appends the text of section 6 to a single LLVM IR module (D19.1), with no libLLVM and no
-  register allocation: locals are `alloca`s in the entry block and intermediates are SSA
-  temporaries or `%tmp` slots (`fir.md` 3, 11, 12). A function that the lowering does not
-  support is a compile error (`fir.md` 9.8).
+  emptiness pass proves each overwrite check (D17.11), the build-mode pass applies the selected
+  mode, and the verifier tests it again; the translator then appends the text of section 6 to a
+  single LLVM IR module (D19.1), with no libLLVM and no register allocation: locals are `alloca`s in
+  the entry block and intermediates are SSA temporaries or `%tmp` slots (`fir.md` 3, 11, 12). A
+  function that the lowering does not support is a compile error (`fir.md` 9.8).
 - **Memory.** Arenas per compilation; nothing is freed before exit.
 
 ## 9. Editor support

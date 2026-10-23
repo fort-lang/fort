@@ -375,7 +375,8 @@ type, flows into an `own` place directly. Emptying is not an assignment: the ope
 reached through an indirection (`*p`, `p->f`, `s[i]`), the level holding it must be mutable,
 because the move changes storage that others can see; the fields and elements of a local value
 count as the local. Moving a zero value yields a zero value. `del` empties its operand the same
-way (8.2), and storing over a live `own` value is a runtime error in checked builds (6.1).
+way (8.2), and a store over an `own` value that the compiler cannot prove empty is a compile
+error (6.1, D17.11).
 
 **Temporaries must land (D17.8).** An `own` rvalue may only be bound to an `own` place, passed to an
 `own` parameter, or `del`ed. Anything else is an error ("owning temporary would leak"), because
@@ -978,13 +979,14 @@ and pointers. Assignment is a statement, not an expression: `a = b = c;` and `if
 parse. This removes the "assignment where a comparison was meant" bug class, and no rule is
 needed for the value of an assignment.
 
-When `lv` has an `own` reference type, `e` must be an `own` rvalue or `move(x)` (3.9), and in
-checked builds the store traps with `overwriting owned value` when `lv` currently holds a
-non-zero value, because the old allocation would leak (D17.11, D11.4); the check runs after `e`
-is evaluated, immediately before the store, and is reported at the `=` token. `del` and `move` leave
-zero behind, so `del(v.data); v.data = new(...)` and `a = move(b)` after `move(a)` pass; release
-builds store without runtime checking. Owning aggregate assignments have no fieldwise runtime check.
-The static proof separately checks previous ownership obligations in all build modes (D17.11).
+When `lv` has an `own` reference type, `e` must be an `own` rvalue or `move(x)` (3.9). The store
+is legal only when the compiler proves, inside the function, that `lv` holds the zero value at
+the store, because the old allocation would leak (D17.11). Otherwise it is a compile error at the
+`=` token, `overwriting owned value: cannot prove '<place>' is empty here`, in every build mode.
+The compiler tests the store after it evaluates `e`. `del` and `move` leave zero behind, so for
+locals `v`, `a` and `b`, `del(v.data); v.data = new(...)` and `a = move(b)` after `move(a)` pass.
+Owning aggregate assignments have no fieldwise overwrite check.
+The static proof separately checks previous ownership obligations in all build modes (D17.14).
 It checks each owning leaf after right-side effects, including aliased or nested destinations.
 
 ```fort
@@ -997,7 +999,7 @@ a[i] = f();               // a[i] is addressed and bounds-checked before f() run
 d++;                      // error: '++' on float type f64
 node mut* own mut h = null;
 h = new(node);            // ok: 'h' was null
-h = new(node);            // proof error: the previous allocation would be lost
+h = new(node);            // error: overwriting owned value
 h = k;                    // error: copying own lvalue 'k' needs move(k)
 del(h);
 h = move(k);              // ok: 'h' was emptied by del

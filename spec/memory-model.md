@@ -331,16 +331,22 @@ fn pattern(u64 n) u8 mut@ own {
 }
 ```
 
-The same shape delivers a result through an out-parameter: `*out = move(buf);` empties `buf`,
-so the deferred `del` frees only on the failure paths (section 9.2).
+The same shape delivers a result through an out-parameter: `del(*out); *out = move(buf);`
+empties `buf`, so the deferred `del` frees only on the failure paths (section 9.2).
 
 **Transfer into a container.** A container holds its storage as `own` fields; pushing moves the
 new element in and popping moves it out, and every field it overwrites was emptied first, so
-the overwrite check of section 2.5 passes (D17.11):
+the overwrite check of section 2.5 passes (D17.11). In `push`, the entry value of `n->next` is
+unknown, so `push` empties it first. `n` is a parameter and not a fresh `new`, so the store
+through `n` kills the fact about `l->head`: `n` and `l` can name one object for the proof. So
+`push` empties `l->head` again. A `push` that makes its node with `new` needs no second `del`
+(`module-system.md` 12):
 
 ```fort
 fn push(list mut* l, node mut* own n) void {
+    del(n->next);                        // the entry value of n->next is unknown
     n->next = move(l->head);             // l->head is empty afterwards
+    del(l->head);                        // frees nothing: the store through n killed its fact
     l->head = move(n);                   // stores into an emptied field
     l->size += 1;
 }
@@ -418,8 +424,8 @@ arena_free(&ar);
 
 `defer` captures nothing: the statement runs with the values its variables hold at exit (D7.8,
 D16), so after `defer del(p);` a later `del(p); p = move(q);` makes the exit free `q`; had the
-`del(p)` been left out, the assignment would trap on the overwrite check in a checked build
-before any deferred code runs (section 2.5).
+`del(p)` been left out, the assignment would be the compile error of the overwrite check
+(section 2.5).
 Prefer `defer` immediately after the `new` it undoes, before the variable is rebound.
 
 ### 2.5 Ownership at run time
@@ -427,29 +433,35 @@ Prefer `defer` immediately after the `new` it undoes, before the variable is reb
 `own` is erased: a `T* own` is the same eight bytes as a `T*`, a `T@ own` or `string own`
 the same sixteen as a view, with the same alignment, layout and calling convention, and
 `extern` signatures with `own` name the same C functions (D17.1, D17.13). The compiler emits
-exactly three things for ownership:
+exactly two things for ownership, and it checks one more at compile time:
 
 - **`move(lv)`** loads the operand's value and stores its zero value into the operand: eight
   zero bytes for a pointer or `void*`, sixteen for a span or string, the whole value for an
   owning aggregate (D17.6).
 - **`del(lv)`** passes the pointer (or the span's `ptr`) to the runtime's `free` and then
   stores the zero value into the operand; `del(rv)` only frees (D17.9; `toolchain.md` 6).
-- **The overwrite check.** In a checked build (D11.1), every assignment to an lvalue of `own`
-  reference type loads the current pointer word after the right-hand side has been evaluated,
-  immediately before the store, and traps when it is non-null:
-  `<file>:<line>:<col>: runtime error: overwriting owned value`, positioned at the assignment's
-  `=` (D17.11, D11.4; section 7). The previous allocation would otherwise leak silently. `del`
-  and `move` leave zero behind, so `del(v.data); v.data = new(...)`, `a = move(b)` after
-  `move(a)`, and a store into a slot initialized from `{}` or `null` all pass. A release build
-  stores without checking. Assignments of owning aggregates are not checked field by field. A
-  declaration is a store like any other and is checked too: the slot of an owning local is zeroed
-  once on entry, so the first execution passes and a second one -- a declaration in a loop whose
-  body did not `del` -- traps rather than leaking one allocation per iteration (D17.11). Its check
-  is reported at the declared name, a declaration having no operator token of its own.
+- **The overwrite check.** Every store into an lvalue of `own` reference type, a declaration
+  included, is legal only when the compiler proves, inside the function, that the lvalue holds the
+  zero value at the store (D17.11). The compiler tests the store after the right-hand side.
+  Otherwise the store is a compile error at the assignment's `=`, or at the declared name of a
+  declaration: `overwriting owned value: cannot prove '<place>' is empty here`, with the note
+  `del or move '<place>' before this store`. The previous allocation would otherwise leak.
+  Checked and release builds give the same verdict, and no build emits a runtime check for it.
+  The proof is the forward must-empty analysis of D17.11 over the FIR of the function
+  (`fir.md` 11). It tracks locals, globals, their fixed field paths, field paths through a
+  pointer local whose address the function does not take, parameters included, and elements
+  whose index is a constant or such a local. A store of an `own` reference into any other place
+  is always an error. An `own` field through a parameter needs
+  `del` or `move` first, because its entry value is unknown. `del` and `move` leave zero behind,
+  so for locals `v`, `a` and `b`, `del(v.data); v.data = new(...)`, `a = move(b)` after
+  `move(a)`, and a store into a local that holds `{}` or `null` all pass. The slot of an owning
+  local is zeroed once on entry, so a declaration in a loop whose body does not `del` or `move`
+  the local is an error: the back edge brings a live value to the declaration. Assignments of
+  owning aggregates are not checked field by field.
 
 ```fort
 u8 mut@ own mut buf = new(u8, 4);
-buf = new(u8, 8);                    // proof error: the previous allocation would be lost
+buf = new(u8, 8);                    // error: overwriting owned value
 del(buf);
 buf = new(u8, 8);                    // fine: buf was {null, 0}
 u8 mut@ own other = move(buf);       // buf is {null, 0} again
@@ -461,7 +473,7 @@ l = list{};                          // proof error: the aggregate still has an 
 
 **Static proof (D17.14, D19.8).** The proof checks temporal storage and allocation ownership in
 all build modes. It checks old owning leaves after right-side effects, before their replacement.
-Runtime overwrite checks remain separate. Their removal supplies no proof of destination emptiness.
+The overwrite check of D17.11 is a separate rule, and it reads one function at a time.
 
 Record place contents separately from source validity. Record allocation identity separately from
 the place that currently owns it. Release invalidates that allocation's borrows.
@@ -1441,6 +1453,8 @@ It still checks operations and completed local storage boundaries during that ex
 
 These verdicts follow D17.19. They describe the ownership proof, not current compiler coverage.
 Each executable example assumes the required final runtime argument cleanup.
+Each store into a global first `del`s it. The overwrite check of D17.11 reads one function and
+sees no precondition, so the entry value of a global is unknown to it.
 Diagnostic descriptions identify obligations. They add no fixed diagnostic message text.
 
 **G1. Local-to-global transfer.** Accept the transfer and later cleanup.
@@ -1451,6 +1465,7 @@ u8 mut@ own mut pool = {};
 
 fn fill() void {
     u8 mut@ own local = new(u8, 4);
+    del(pool);
     pool = move(local);
 }
 
@@ -1468,6 +1483,7 @@ Deleting or transferring pool before the replacement makes that store legal.
 u8 mut@ own mut pool = {};
 
 fn replace() void {
+    del(pool);
     pool = new(u8, 4);
     pool = new(u8, 8);
 }
@@ -1481,6 +1497,7 @@ leak.
 u8 mut@ own mut pool = {};
 
 fn main() i32 {
+    del(pool);
     pool = new(u8, 4);
     return 0;
 }
@@ -1492,6 +1509,7 @@ fn main() i32 {
 u8 mut@ own mut pool = {};
 
 fn main() i32 {
+    del(pool);
     pool = new(u8, 4);
     panic("stop");
 }
@@ -1506,6 +1524,7 @@ It must also discharge any other owners in the checked library closure.
 u8 mut@ own mut pool = {};
 
 fn put(u8 mut@ own value) void {
+    del(pool);
     pool = move(value);
 }
 
@@ -1523,6 +1542,7 @@ u8 mut* own mut saved = null;
 u8 mut@ mut retained = {};
 
 fn callback(u8 mut* own value) void {
+    del(saved);
     saved = move(value);
 }
 
@@ -1899,8 +1919,8 @@ free(cast(b.ptr, void* own));                  // error: a cast never adds own t
 ```
 
 The last line would make a second owner: `b` would still look live after it, so a `del(b)` would
-free twice and an assignment to `b` would trap on the overwrite check. Free `own` spans with
-`del`.
+free twice and an assignment to `b` would be the compile error of the overwrite check. Free `own`
+spans with `del`.
 
 ## 5. Fixed arrays and structs
 
@@ -1956,7 +1976,6 @@ except where the table says otherwise. Casts never trap (D3.14) and float arithm
 | `new(T, n)`     | `n < 0` at run time           | `negative allocation count -1`                |
 | `new`           | `n * sizeof(T)` exceeds `u64` | `allocation size overflow`                    |
 | `new`           | the allocator returns `null`  | `out of memory`                               |
-| `lv = e`, `own` | `lv` is not zero (checked)    | `overwriting owned value`                     |
 | `assert(c)`     | `c` is `false`                | `assertion failed: <text>`                    |
 | `panic(m)`      | always                        | `panic: <m>`                                  |
 | `noreturn` guard | a `noreturn` function returns | none: `llvm.trap` (D19.7)                    |
@@ -1974,7 +1993,7 @@ the offending values of the failing check, written as signed decimals.
 | shift count                 | runtime error     | count taken modulo width | unchanged           |
 | division                    | runtime error     | runtime error            | unchanged           |
 | `new` count, size, failure  | runtime error     | runtime error            | unchanged           |
-| `own` overwrite (D17.11)    | runtime error     | no runtime check        | unchanged           |
+| `own` overwrite (D17.11)    | compile error     | compile error            | unchanged           |
 | `assert`, `panic`           | runtime error     | runtime error            | unchanged           |
 | `noreturn` guard            | trap              | trap                     | unchanged           |
 
@@ -1992,8 +2011,9 @@ Notes:
 - Division checks apply at every width and in both modes (D6.13, D11.3).
 - `assert` is active in both modes; its message carries the source text of the argument (D12.2).
 - The overwrite check guards every store into an lvalue of `own` reference type, a declaration
-  included, and nothing else: `move`, `del` and aggregate assignments emit no runtime overwrite
-  check (D17.11, section 2.5). Release builds omit that check.
+  included, and nothing else: `move`, `del` and aggregate assignments have no overwrite check
+  (D17.11, section 2.5). It is a compile-time check in every build mode, and no build emits a
+  runtime check for it.
   The selected static proof rejects stores that lose old owning leaves in all build modes.
 - The `noreturn` guard is `call void @llvm.trap()` followed by `unreachable`, emitted after the
   body of a `noreturn` function and after every call to one (D8.5, D19.7). It is reachable only
@@ -2018,7 +2038,7 @@ i32 e = a / zero;                    // runtime error: division by zero
 assert(s.len == 3);                  // passes
 assert(s.len == 4);                  // main.ft:15:1: assertion failed: s.len == 4
 u8 mut@ own mut buf = new(u8, 2);
-buf = new(u8, 4);                    // proof error: the previous allocation would be lost
+buf = new(u8, 4);                    // error: overwriting owned value
 ```
 
 ## 7. The runtime-error contract
@@ -2036,19 +2056,16 @@ three forms:
 - `<file>:<line>:<col>: panic: <message>` for `panic`;
 - `<file>:<line>:<col>: assertion failed: <expression text>` for `assert`.
 
-`<file>` is the path the compiler opened (the search root as given plus the relative module
-path); `<line>:<col>` is the position of the check's operator token, which for the overwrite
-check is the `=` of the assignment (D17.11), or of the builtin's name for `new`, `assert` and
-`panic`; the `assert` text is the source text of the expression, verbatim (D11.4). Test files
-match these lines with `//! stderr: <substring>` and `//! abort` (D14.5).
+`<file>` is the path the compiler opened (the search root as given plus the relative module path);
+`<line>:<col>` is the position of the check's operator token, or of the builtin's name for `new`,
+`assert` and `panic`; the `assert` text is the source text of the expression, verbatim (D11.4). Test
+files match these lines with `//! stderr: <substring>` and `//! abort` (D14.5).
 
 ```sh
 $ fort main.ft && ./a.out
 main.ft:7:13: runtime error: index 5 out of range for length 3
 $ echo $?
 134
-$ fort leaky.ft && ./a.out
-leaky.ft:4:9: runtime error: overwriting owned value
 ```
 
 Output buffering (D11.5): `print` and `println` write to a runtime buffer for standard output;
@@ -2123,13 +2140,15 @@ fn free_chain(node mut* own head) void {
     while (head != null) {
         node mut* own next = move(head->next);   // level 1 of head is mutable (D17.6)
         del(head);                   // head == null afterwards
-        head = move(next);           // stores into an emptied binding: no trap (D17.11)
+        head = move(next);           // stores into an emptied binding (D17.11)
     }
 }
 
 fn demo() void {
     node mut* own a = make_node(1);
-    a->next = make_node(2);          // an rvalue into a zeroed field
+    node mut* own b = make_node(2);
+    del(a->next);                    // a call result is unknown here: empty the field first
+    a->next = move(b);               // no call stands between the del and the store
     node* second = a->next;          // lends
     free_chain(move(a));             // a == null afterwards; second dangles
     free_chain(a);                   // a null chain: nothing happens
@@ -2142,8 +2161,9 @@ fn demo() void {
 Functions return `bool` or an error enum and deliver results through `T mut*` out-parameters;
 `-1` and `null` sentinels are used where C convention expects them; `panic` is for programming
 errors (D13.3). A span result uses a pointer to an `own` slot, `u8 mut@ own mut* out` (D3.6,
-D13.5, D17.2): the callee moves the header through `*out`, and the caller, who initialized the
-slot to `{}` so that the store passes the overwrite check (D17.11), owns the elements.
+D13.5, D17.2): the callee `del`s `*out` and then moves the header through it, because the entry
+value of `*out` is unknown to the callee (D17.11). The caller initialized the slot to `{}`, so
+that `del` frees nothing, and the caller owns the elements.
 
 ```fort
 enum parse_error { none, empty, bad_digit, overflow }
@@ -2172,6 +2192,7 @@ fn read_all(i32 fd, u8 mut@ own mut* out) bool {
     u8 mut@ own buf = new(u8, 4096);
     defer del(buf);                  // frees buf on every failure path
     // ... fill buf, returning false on failure ...
+    del(*out);                       // the entry value of *out is unknown here (D17.11)
     *out = move(buf);                // buf is {null, 0}: the deferred del is a no-op
     return true;
 }
@@ -2215,7 +2236,7 @@ fn push(int_buf mut* b, i32 x) void {
         i32 mut@ own bigger = new(i32, b->items.len * 2 + 8);
         for (u64 mut i = 0; i < b->count; i++) { bigger[i] = b->items[i]; }
         del(b->items);               // no-op the first time; leaves {null, 0}
-        b->items = move(bigger);     // the store finds an empty field: no trap
+        b->items = move(bigger);     // the store finds an empty field (D17.11)
     }
     b->items[b->count] = x;
     b->count++;

@@ -59,9 +59,9 @@ library follows:
   keys are borrowed; freeing the container never touches them.
 - **Out-parameters that receive ownership are pointers to `own` slots**, `u8 mut@ own mut* out`
   (D13.5, D17.2). The caller initializes the slot to `{}` or `null` and passes its address; the
-  callee stores an `own` rvalue into `*out` and never frees what was there, so a live slot is
-  the `overwriting owned value` runtime error in checked builds and a leak in release builds
-  (D17.11). A caller that reuses a slot `del`s it first.
+  callee `del`s `*out` and then stores an `own` rvalue into it, because the entry value of `*out`
+  is unknown to the callee and the overwrite check of D17.11 needs it empty. The `del` frees
+  nothing when the caller initialized the slot.
 - **Accessors return views** (D17.3). Functions named `view` or `bytes`, `sys.args`, `sys.env`,
   `str.from_cstr` and every sub-span yield values without `own`; `del` on them does not
   compile (D17.9). A view into a container is valid until the next mutating call on that
@@ -82,8 +82,8 @@ library follows:
   `del` runs (D7.8), so the allocation reaches the caller and every other path frees it. The
   same shape with `strbuf.free(&b);` covers containers.
 - **`del` before storing.** Code that replaces owned storage writes `del(old)` before the store,
-  `del(b->data); b->data = move(bigger);`, because storing over a live `own` lvalue is a runtime
-  error in checked builds (D17.11).
+  `del(b->data); b->data = move(bigger);`, because a store over an `own` lvalue that the compiler
+  cannot prove empty is a compile error (D17.11).
 - Nothing in the library allocates without saying so in its entry. The library applies a cast
   between `string` and the byte spans (D3.14) only to a view (`buf[..]`) or to the `own` rvalue
   that `move` yields (`cast(move(buf), string own)`, D17.12). A cast never adds `own` (D3.14).
@@ -451,15 +451,14 @@ fn write_file(string path, u8@ data) bool
   `out->len` restored and `sys.errno()` describing the failing call (`close(2)` leaves `errno`
   alone when it succeeds). On success the contents are `strbuf.bytes(out)` and, as text,
   `strbuf.view(out)`. Ownership: as `read_all`.
-- `read_file_bytes`: the same as `read_file`, delivering a plain heap span. Precondition:
-  `*out` is empty (`{}`). On success the callee stores a fresh, exact-size allocation holding
-  the file's bytes into `*out` (`u8 mut@ own bytes = new(u8, n); ...; *out = move(bytes);`,
-  D17.5), so `out->len` is the file's length and an empty file yields a zero-length, non-null
-  allocation (D10.2); on failure `*out` is untouched. The store never frees what `*out` held:
-  a live slot is the `overwriting owned value` runtime error in checked builds and a leak in
-  release builds (D17.11), so a caller that reuses a slot `del`s it first. Ownership: `*out`
-  is `u8 mut@ own`; the caller releases it with `del`, usually through `defer del(data);` on
-  the `u8 mut@ own mut data` whose address it passed (1.3).
+- `read_file_bytes`: the same as `read_file`, delivering a plain heap span. Precondition: `*out` is
+  empty (`{}`). On success the callee stores a fresh, exact-size allocation holding the file's bytes
+  into `*out` (`u8 mut@ own bytes = new(u8, n); ...; del(*out); *out = move(bytes);`, D17.5), so
+  `out->len` is the file's length and an empty file yields a zero-length, non-null allocation
+  (D10.2); on failure `*out` is untouched. The callee `del`s `*out` just before the store, because
+  the entry value of `*out` is unknown to it (D17.11); under the precondition, that `del` frees
+  nothing. Ownership: `*out` is `u8 mut@ own`; the caller releases it with `del`, usually through
+  `defer del(data);` on the `u8 mut@ own mut data` whose address it passed (1.3).
 - `write_file`: `open_write`, `write_all`, `close`. Returns `true` only when all three succeed.
   Ownership: none.
 
@@ -747,12 +746,15 @@ answers `void mut*`, so a `node mut*` survives the round trip with the mark it w
 copy the file with the slot type `void*`. When the vector is to own its elements, copy
 the file with the slot type `node mut* own mut@ own items;` instead, an owned span of owned nodes
 (D17.2):
-`node_push(node_vec mut* v, node mut* own n)` stores `v->items[v->len] = move(n);` (a parameter
-is an `own` lvalue, D17.5, and a fresh slot is zero, D10.2, so the store passes D17.11);
-`node_pop` returns `node mut* own` with `return move(v->items[v->len]);` (the slot is reached
-through `mut` storage, D17.6, and is left `null`); the growth loop moves each element,
-`bigger[i] = move(v->items[i]);`; `node_free` `del`s every live element before the span; and
-a range loop over the live span lends, `for (node mut* n : v->items[..v->len])` (D17.10).
+`node_push(node_vec mut* v, node mut* own n)` copies the index into a local and empties the slot
+first, `u64 k = v->len; del(v->items[k]); v->items[k] = move(n);` (a parameter is an `own`
+lvalue, D17.5). The `del` frees nothing, because a fresh slot is zero at run time (D10.2), but
+the compiler cannot know that inside `node_push`; the local `k` gives both elements one key
+(D17.11). `node_pop` returns `node mut* own` with `return move(v->items[v->len]);` (the slot is
+reached through `mut` storage, D17.6, and is left `null`); the growth loop moves each element
+with `del(bigger[i]); bigger[i] = move(v->items[i]);`; `node_free` `del`s every live element
+before the span; and a range loop over the live span lends,
+`for (node mut* n : v->items[..v->len])` (D17.10).
 
 ```fort
 import std.vec;
@@ -1221,12 +1223,11 @@ declaration takes a buffer and returns a view of it.
 ## 3. The runtime surface the library relies on
 
 `toolchain.md` owns the runtime: the full entry-point list, the signatures, the print buffers and
-process start. `std.rt` is a library module like any other (D13.1, 2.11) and this section names
-only what the rest of the library calls of it. The library uses the builtins `new`, `del`,
-`move`, `panic`, `assert` and the print family as any program does (D12); the runtime calls
-behind them, including the overwrite check of D17.11, are emitted by the compiler and never named
-in library source. Beyond that, `sys` and `io` import `std.rt` and call four of its functions,
-whose signatures `toolchain.md` 5.1 fixes:
+process start. `std.rt` is a library module like any other (D13.1, 2.11) and this section names only
+what the rest of the library calls of it. The library uses the builtins `new`, `del`, `move`,
+`panic`, `assert` and the print family as any program does (D12); the runtime calls behind them are
+emitted by the compiler and never named in library source. Beyond that, `sys` and `io` import
+`std.rt` and call four of its functions, whose signatures `toolchain.md` 5.1 fixes:
 
 ```fort
 fn args() string@;

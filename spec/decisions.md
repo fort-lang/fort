@@ -1115,7 +1115,7 @@ Sections:
   The C start-up code calls the emitted `main`, which calls the entry module's `main` (D11.6).
   Generated code calls `std.rt` bodies in three sequences (D11.6, `toolchain.md` 5.1).
   Start-up and shutdown call `args_init`, `args` and `shutdown`.
-  Runtime checks and the builtins `panic` and `assert` call the 9 `fail_*` bodies, `panic` and
+  Runtime checks and the builtins `panic` and `assert` call the 8 `fail_*` bodies, `panic` and
   `assert_fail`. The code of `new` and `del` calls `alloc` and `free`.
   The host of a library calls the entries of that library (D17.19).
   Each other foreign call is outside the language contract. An example is a linked object or
@@ -1144,6 +1144,8 @@ Sections:
   had no contract for that call. The four ways above are now the contract.
   The user ratified the executable contract on 2026-10-16; the coordinator ratified the library
   sentence, which restates D17.19, on 2026-10-17.
+  Amended 2026-10-22: the user made the overwrite check static, so `fail_overwrite` left the
+  runtime and 8 `fail_*` bodies remain, not 9 (D17.11).
 
 ### D9.8 Extern declarations
 - owner: `module-system.md`.
@@ -1405,11 +1407,13 @@ Sections:
 - owner: `memory-model.md` (Runtime errors), `toolchain.md` (Build modes, runtime).
 - rule: Two build modes. **Checked**, the default: `+ - *`, unary `-`, `++ --` and the compound
   assignments trap on overflow for signed and unsigned integers; a shift count that is negative or
-  at least the operand width traps; storing over a live `own` value traps (D17.11). **Release**
-  (`fort --release`): overflow wraps in two's complement, the shift count is taken modulo the width,
-  and owned values are overwritten without a check. Programs must not rely on either behavior for
-  correctness.
+  at least the operand width traps. **Release** (`fort --release`): overflow wraps in two's
+  complement, and the shift count is taken modulo the width. Programs must not rely on either
+  behavior for correctness. Both modes reject a store over an `own` value that the compiler cannot
+  prove empty, at compile time (D17.11).
 - rationale: user decision ("trap in debug, wrap in release").
+- history: Amended 2026-10-22: the user made the overwrite check static. Before, checked builds
+  trapped on a store over a live `own` value, and release builds stored without a check (D17.11).
 
 ### D11.2 The wrapping operators
 - owner: `memory-model.md` (Runtime errors), `toolchain.md` (Build modes, runtime).
@@ -1426,7 +1430,7 @@ Sections:
 - rule: Runtime error contract: the runtime flushes buffered output, writes one line to stderr, and
   calls `abort()`, so the process dies with SIGABRT (status 134 under a shell). Formats:
   `<file>:<line>:<col>: runtime error: <message>` for checks (bounds, overflow, shift, division,
-  allocation, ownership, enum `switch`), `<file>:<line>:<col>: panic: <message>` for `panic`, and
+  allocation, enum `switch`), `<file>:<line>:<col>: panic: <message>` for `panic`, and
   `<file>:<line>:<col>: assertion failed: <expression text>` for `assert`. Deferred code does not
   run. The check messages are fixed, with the offending values in decimal:
 
@@ -1441,7 +1445,6 @@ Sections:
   | negative `new` count               | `negative allocation count -1`                     |
   | `new` size overflow                | `allocation size overflow`                         |
   | allocation failure                 | `out of memory`                                    |
-  | overwriting a live `own` value (D17.11) | `overwriting owned value`                     |
   | an enum value no clause names (D7.7) | `enum value 0 is not a member of level`          |
 
   The end of a `noreturn` function has a trap (D19.7). Linux x86-64 raises SIGILL.
@@ -1453,6 +1456,8 @@ Sections:
 - history: Amended 2026-09-10: the bounds message read `slice bounds ...` while spans were called
   slices (D3.5). Amended 2026-09-11 (T-020): the enum `switch` default of D7.7 was added.
   Amended 2026-09-15 (T-140): the `noreturn` trap now names both target signals.
+  Amended 2026-10-22: the user made the overwrite check static, so the ownership check and its
+  message `overwriting owned value` left this contract (D17.11).
 
 ### D11.5 Output buffering
 - owner: `memory-model.md` (Runtime errors), `toolchain.md` (Build modes, runtime).
@@ -1560,9 +1565,9 @@ Sections:
 - rule: The standard library is written in fort on top of `extern` declarations, and the runtime is
   part of it: `std.rt` is an ordinary fort module, in every import closure (D9.10) and compiled into
   the program like any other (D19.1). It owns process start and exit (D11.6), allocation (D10.2,
-  D10.3), the runtime-error and panic paths (D11.4, the ownership overwrite check of D17.11
-  included), and the formatting and buffering of the print family (D11.5, D11.7, D12.2); it reaches
-  the operating system through `std.libc`, with ordinary `extern` declarations (D9.8).
+  D10.3), the runtime-error and panic paths (D11.4), and the formatting and buffering of the print
+  family (D11.5, D11.7, D12.2); it reaches the operating system through `std.libc`, with ordinary
+  `extern` declarations (D9.8).
   `toolchain.md` 5 names its entry points and fixes what each one does.
 - history: Amended 2026-09-11 (T-088): the runtime was `runtime/fort_rt.c`, compiled to
   `<std-dir>/fort_rt.o` and linked into every program, and this decision then called it permanent
@@ -1574,6 +1579,8 @@ Sections:
   `v[i]` to `core::panicking::panic_bounds_check`, Rust code in `core`. Neither of the two things
   that kept the runtime in C applies to that target: nothing about it needs a C name and nothing
   needs a `.o`.
+  Amended 2026-10-22: the user made the overwrite check static, so the runtime holds no failure
+  path for it (D17.11).
 
 ### D13.2 The v1 library modules
 - owner: `stdlib.md`.
@@ -2284,30 +2291,119 @@ says ownership is "by convention", this section supersedes it.
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,
   `del`, transfer, lending, the overwrite check), `core-language.md` (the `move` builtin,
   statements).
-- rule: Overwrite check. In checked builds (D11.1), storing into an `own` reference-typed lvalue
-  whose current value is not the zero value is a runtime error, `overwriting owned value` (D11.4),
-  because the previous allocation would leak. `del` and `move` leave zero behind, so `del(v.data);
-  v.data = new(...)`, `a = move(b)` after `move(a)`, and initialization from `{}` or `null` all
-  pass. The check runs after the right-hand side is evaluated, immediately before the store, and is
-  reported at the `=` token. Release builds store without checking. Assignments of owning aggregates
-  are not checked field by field. A declaration is a store like any other and is checked too: the
-  slot of an owning local is zeroed once in the entry block (D19.4), so the first execution of the
-  declaration passes and a second one -- in a loop whose body did not `del` -- traps. Without that
-  zeroing the check would read an uninitialized `alloca`, which is why declarations were skipped and
-  why skipping them was wrong. A declaration's check is reported at the declared name rather than at
-  its `=`: the parser records no location for that token and `ast_node_t` has no room for one, and
-  the name is the better anchor in any case, being what a reader looks at to see whose allocation is
-  about to be dropped (D11.4).
-  Separately, the ownership proof checks destination leaves in all build modes.
-  After right-side effects, each previous destination obligation must be empty or already
-  transferred.
-  This includes projected owners, owning aggregate leaves, and destinations reached through aliases.
-  A removed runtime overwrite check supplies no proof of emptiness.
+- rule: Overwrite check. A store into an `own` reference-typed lvalue is legal only when the
+  compiler proves, inside the function, that the destination holds the zero value at the store.
+  Otherwise the store is a compile error, because the previous allocation could leak. The message
+  is `overwriting owned value: cannot prove '<place>' is empty here`. `<place>` is the source text
+  of the lvalue, or the declared name for a declaration. A note at the same position names the
+  fix: `del or move '<place>' before this store`. The error and the note stand at the `=` token of
+  an assignment. A declaration is a store like any other. Its error and its note stand at the
+  declared name, because the parser records no location for the `=` of a declaration.
+  The compiler tests the store after the right-hand side, so the effects of the right-hand side
+  count (D6.3). A store of the zero value into an `own` lvalue is a store too, and it needs the
+  same proof.
+  Checked and release builds give the same verdict, and `--check` gives it too (D20.1). No build
+  emits a runtime check for a store.
+  The rule covers only a store whose destination type is an `own` reference. Assignments of owning
+  aggregates are not checked field by field.
+  The proof is a forward must-empty analysis over the FIR of one function (`fir.md` 11). A fact
+  says that a tracked place holds the zero value. The analysis joins facts by intersection: a fact
+  holds at the start of a block only when it holds at the end of each predecessor. The entry block
+  starts with no fact. The analysis reads no other function.
+  The tracked places are these, and no fact names another place:
+  - a local or a global, then field projections and keyed index projections;
+  - a place through a pointer local: a local of pointer type that is not memory, parameters
+    included, then one dereference, then field projections and keyed index projections.
+  An index projection is keyed when its index is a constant or a local that is not memory. Its
+  key is that constant or that local. So an element `b[i]` is tracked when `b` is tracked and
+  `i` is a key. The fact of a tracked place is keyed by its base, its projections and the keys of
+  its indexes.
+  So a store of an `own` reference through any other pointer, or into an element whose index is
+  no key, is always an error. A global has no fact at the entry of a function, so a store into
+  it needs a gen rule first: `del(g); g = move(x);` passes, and `g = move(x);` alone is an error.
+  The kill rules below then apply to the fact of a global as to any other fact.
+  A tracked place below `p` is a tracked place that starts with `p`, its base and all its
+  projections, and continues with field projections and index projections on fixed arrays only.
+  It lies in the storage of `p` and not behind a pointer.
+  A fresh `new` is the value of a `new` expression of this function, before any other operation
+  reads it.
+  A local is memory when the function takes its address anywhere: an `&`, or a slice of a fixed
+  array, whose lvalue starts at that local and contains no dereference. The storage of an
+  aggregate result is memory too, because it is the destination of the caller. A place reached
+  through memory is a place of a memory local, a place of a global, a place through a pointer
+  local, or a place that contains an index into a span or a `string`.
+  Two places with one base are separate when, at the first projection where they differ, both
+  projections are fields. Two index projections differ when their keys differ, and an index with
+  no key differs from every index. Then the places are not separate, because the two indexes can
+  be equal.
+  A pointer local `n` is fresh at a point when, on each path to that point, the last store into
+  `n` writes a fresh `new`, and after that store no operand copies or moves the value of `n` and
+  no `&` or slice names a place through `n`. A place through a fresh `n` contains no index into a
+  span or a `string`. No other pointer can name the object of a fresh `n`. This rule assumes that
+  no operation accesses storage through a dangling pointer, such as a pointer to an allocation
+  that a `del` freed. Such an access is outside the guarantee of this rule.
+  These gen rules make a fact true:
+  1. Entry zeroing: the entry block stores the zero value once into each local of `own`
+     reference type (D19.4, `fir.md` 9.2).
+  2. `del(p)` makes `p` empty (D17.9).
+  3. `move(p)` makes its source `p` empty, and each tracked place below `p` (D17.6).
+  4. A store of the zero value (`{}`, `null`) into `p` makes `p` and each tracked place below `p`
+     empty.
+  5. A store of a fresh `new` into a pointer local `n` makes each tracked place through `n` empty,
+     because `new` fills its storage with zero (D10.2).
+  These kill rules make a fact false:
+  1. A store into a place `d` whose base is a local or a global kills the fact of each tracked
+     place with that base that is not separate from `d`. So a store into a pointer local `p` kills
+     each fact through `p`, and a store into `b[j]` kills the fact of `b[i]`. A store into a
+     local that is a key kills each fact whose place has that key.
+  2. A store into a place through a fresh pointer local kills only what rule 1 kills.
+  3. Any other store through a pointer, and a store into a place of a memory local or of a
+     global, kills each fact about a place reached through memory, with two exceptions. It keeps
+     a fact about a place through a fresh pointer local. It keeps a fact that rule 1 keeps for
+     the same base, when neither place contains an index into a span or a `string`. A store
+     is through a pointer when its destination contains a dereference or an index into a span or
+     a `string`. One pointer value names one object, and the separate fields of one object do not
+     overlap. Another pointer can hold the value of `p`, so its store kills each fact through `p`.
+  4. A call kills each fact except the facts about a local that is not memory and about its
+     places that are not reached through memory. `new` and `del` are no calls under this rule.
+  A store applies the kill rules first and its gen rule after them. A call in the right-hand side
+  kills before the store. `del` and `move` are no stores, and they apply only their gen rule.
+  Each store into an `own` reference-typed place needs the fact of that place after the
+  right-hand side and before its own kill rules.
+  `del` and `move` leave zero behind. So for locals `v`, `a` and `b`, `del(v.data); v.data =
+  new(...)` passes, `a = move(b)` after `move(a)` passes, and a store into a local that holds `{}`
+  or `null` passes.
+  For a parameter `b` of type `int_buf mut*`, `del(b->items); b->items = new(i32, 8);` passes,
+  and `b->items = new(i32, 8);` alone is an error, because the entry value of `b->items` is
+  unknown. So an out-parameter store needs `del(*out); *out = move(buf);`.
+  For a fresh `node mut* own n = new(node)` and locals `l` and `r`,
+  `n->left = move(l); n->right = move(r);` passes: the store into `n->left` keeps the fact of the
+  separate field `n->right`. For parameters `p` and `q`, in `del(p->f); q->g = 0;
+  p->f = new(T);` the last store is an error, because `q` can hold the value of `p`.
+  For a parameter `v` of type `node_vec mut*`, `u64 k = v->len; del(v->items[k]);
+  v->items[k] = move(n);` passes, because both elements have the key `k`. Without the local `k`,
+  `v->items[v->len]` has no key, and the store is an error.
+  For a parameter `l` of type `list mut*`, `node mut* own n = new(node); n->next = move(l->head);
+  l->head = move(n);` passes: `n` is fresh, so the store into `n->next` keeps the fact of
+  `l->head` that the `move` made.
+  A declaration in a loop is an error when the loop body does not `del` or `move` the local:
+  `for (i32 mut i = 0; i < 3; i++) { i32 mut* own p = new(i32); }` is an error at `p`,
+  because the back edge joins a live `p` with the entry zeroing.
 - history: Amended 2026-09-11: `for (i32 mut i = 0; i < 3; i++) { i32 mut* own p = new(i32); }`
   leaked one allocation per iteration with no diagnostic, while the same program written as an
   assignment trapped (T-022's review).
   Amended 2026-10-01 (T-272): Static overwrite obligations now include aggregate leaves. The
   runtime-check contract stays unchanged.
+  Amended 2026-10-22: the user made the overwrite check static. Before, checked builds trapped at
+  run time on a store over a live `own` value, and release builds stored without a check. The user
+  ruled that a destination the compiler cannot prove empty is an error ("Unknown is an error").
+  The paragraph on the separate ownership proof left this decision.
+  The coordinator ratified on 2026-10-22 that a place through any pointer local that is not
+  memory is tracked, and that a store through a pointer keeps the facts of its separate fields.
+  The coordinator also ratified that an element with a constant or local index is tracked, and
+  that a store through a fresh pointer and a fact through it do not kill each other.
+  The coordinator ruled in review round 1 that a global is a tracked place, so that a store into
+  a global after its `del` passes.
 
 ### D17.12 Owned strings
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,
@@ -2317,11 +2413,14 @@ says ownership is "by convention", this section supersedes it.
   `strbuf.take` return it; literals, sub-strings and `sys.args()` are `string`. `del(string own)` is
   legal and `del(string)` is not. A string built in a `u8 mut@ own` becomes a `string own` with
   `cast(move(buf), string own)` (the target says `own`, so the source must be moved, D3.14);
-  `cast(buf, string)` lends a view instead.
+  `cast(buf, string)` lends a view instead. A store into a `string own` lvalue obeys the
+  overwrite check of D17.11, at compile time.
   Borrowed strings retain their character-source relations through casts, copies, fields, and calls.
   A retained key does not extend its character allocation's lifetime (D17.14).
 - history: Amended 2026-10-01 (T-272): Borrowed character sources gained retention proof
   obligations.
+  Amended 2026-10-22: the user made the overwrite check static, and this decision names it for
+  `string own` (D17.11).
 
 ### D17.13 own in an extern signature
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,
@@ -3046,7 +3145,7 @@ assembly, survives only in the history of this file and of `toolchain.md`.
 
 ### D19.6 Checks and failure blocks
 - owner: `toolchain.md` (6, the IR contract).
-- rule: Checks and failure blocks. Every runtime check (D10.6, D11.1, D11.3, D17.11) computes one
+- rule: Checks and failure blocks. Every runtime check (D10.6, D11.1, D11.3) computes one
   `i1` that is true on failure and branches with the failure block as the first label; `assert` is
   the exception, since its operand is already the success condition (D12.2), and so is the `default`
   D7.7 gives an enum `switch`, which the switch's own default edge reaches. Failure blocks are
@@ -3062,6 +3161,8 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   attributes stood on a `declare` of a C entry point and `noreturn` was truthful because the C
   function was `_Noreturn`; the runtime is fort (D13.1 as amended) and the module defines it, so
   they stand on the definition the compiler emits from its `noreturn` fort signature.
+  Amended 2026-10-22: the user made the overwrite check of D17.11 static, so it is no runtime
+  check and has no failure block.
 
 ### D19.7 The trap after a noreturn body
 - owner: `toolchain.md` (6, the IR contract).
@@ -3084,11 +3185,13 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   each path that runs them, and every statement carries its source location. The lowering makes
   every decision that depends on fort meaning and emits every runtime check. The build-mode pass
   removes the checks the selected mode drops and rewrites the operations it changes, and the flow
-  analyses run before it, so an analysis gives one answer in every mode. The translator maps each
-  FIR construct to LLVM text, chooses the LLVM instruction from the fort types, and makes the
-  choices that depend on the target; it does not read the build mode. A feature of the language that
-  is not in the core of FIR lowers into it, so the translator and the analyses do not change for it;
-  a feature that needs a new projection or constant extends the core once. A function that the
+  analyses run before it, so an analysis gives one answer in every mode. Before the build-mode
+  pass, the emptiness pass proves each overwrite check in every mode (D17.11, `fir.md` 11). The
+  translator maps each FIR construct to LLVM text, chooses the LLVM instruction from the fort
+  types, and makes the choices that depend on the target; it does not read the build mode. A
+  feature of the language that is not in the core of FIR lowers into it, so the translator and the
+  analyses do not change for it; a feature that needs a new projection or constant extends the
+  core once. A function that the
   lowering does not support, or that needs a `std.rt` entry that the closure lacks for a check
   that the selected mode keeps, is a compile error (`fir.md` 9.8).
   Ownership analysis reads verified FIR for the complete checked import closure (D17.14).
@@ -3148,6 +3251,8 @@ assembly, survives only in the history of this file and of `toolchain.md`.
   validation.
   Incremental audits and scoped enforcement now permit measured source repairs during delivery.
   Complete selection still rejects incomplete proof. A separate report records partial coverage.
+  Amended 2026-10-22: the user made the overwrite check static, so the emptiness pass now runs
+  before the build-mode pass in every mode (D17.11).
 
 ## D20 Editor support
 
@@ -3162,6 +3267,8 @@ language server to use them, while the server itself lands after the bootstrap f
 - rule: `fort --check entry.ft` lexes, parses, resolves the import closure, and checks each module.
   When ownership analysis is selected, it also lowers and verifies FIR and runs that analysis
   (D19.8).
+  In every case it lowers each fort body to FIR, verifies it and runs the emptiness pass of
+  D17.11 on it, so it reports each overwrite error that a build reports.
   It then stops: no LLVM IR, no `--cc`, no temporary directory, so `-o`, `-S`,
   `-c`, `-l`, `--cc` and `-Xcc` are unused as they already are under `-S`. `--target` selects the
   three configuration values of D21.1. An unsupported target is a usage error. Exit 0 when nothing
@@ -3173,6 +3280,8 @@ language server to use them, while the server itself lands after the bootstrap f
   `--check`. The earlier rule named `--target` as unused in this mode.
   Amended 2026-10-01 (T-272): Check mode previously stopped at the front end. Selected ownership
   analysis now includes verified FIR.
+  Amended 2026-10-22: the user made the overwrite check static, so check mode now lowers each
+  body to FIR for the emptiness pass of D17.11.
 
 ### D20.2 The JSON document
 - owner: `toolchain.md` (1, 4).

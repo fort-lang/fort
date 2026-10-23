@@ -430,8 +430,9 @@ from `malloc` by `del` (D10.3). A span expression is always a view and a cast ne
 C function that fills a buffer and reports its length takes the out-parameter shape
 `u8 mut@ own mut* out`, a borrowed pointer to an `own` slot (D3.6, D13.5, D17.2). It copies the
 bytes into a span from `new`, frees C's block, and moves the span into the slot, since `.ptr`
-and `.len` are never assignable (D6.7); the caller initializes the slot to `{}` so that the
-store passes the overwrite check (D17.11).
+and `.len` are never assignable (D6.7). The wrapper `del`s the slot first, because the entry
+value of `*out` is unknown to it (D17.11); the caller initializes the slot to `{}`, so that the
+`del` frees nothing.
 
 ```fort
 extern fn c_read_all(u64 mut* n) u8 mut* own;   // C documents: the caller frees
@@ -443,7 +444,8 @@ fn read_all(u8 mut@ own mut* out) bool {
     u8 mut@ own bytes = new(u8, n);
     mem.copy(bytes, p[0..n]);                   // p[0..n] is a view of C's block
     del(p);                                     // new/del and malloc/free interchange (D10.3)
-    *out = move(bytes);                         // the caller dels *out
+    del(*out);                                  // the entry value of *out is unknown here
+    *out = move(bytes);                         // the caller dels *out later
     return true;
 }
 
@@ -667,8 +669,8 @@ fn list_pop(list mut* l, i32 mut* out) bool {
         return false;
     }
     node mut* own n = move(l->head);
-    *out = n->value;
     l->head = move(n->next);
+    *out = n->value;
     l->size -= 1;
     del(n);
     return true;
@@ -682,12 +684,14 @@ fn list_free(list mut* l) void {
 ```
 
 `node` and `list` refer to each other through pointers and live in one module (section 6).
-`node mut* own next` as a field type marks the pointee mutable (D5.5) and the node as owned by
-its predecessor (D17.2); `list` is therefore an owning aggregate and is passed as
-`list mut* l`, which makes the pointee writable in the callee (D5.3, D17.7). `new(node)`
-yields zeroed, owned memory (D10.2, D17.3); `move` transfers the head into the new node's
-`next` and the node into `head`, each store landing in a field the preceding `move` emptied, so
-the checked build's overwrite check passes (D17.5, D17.11); `del(n)` frees the popped node and
+`node mut* own next` as a field type marks the pointee mutable (D5.5) and the node as owned by its
+predecessor (D17.2); `list` is therefore an owning aggregate and is passed as `list mut* l`, which
+makes the pointee writable in the callee (D5.3, D17.7). `new(node)` yields zeroed, owned memory
+(D10.2, D17.3); `move` transfers the head into the new node's `next` and the node into `head`. The
+store into `n->next` lands in a field that `new` zeroed. `n` is fresh, so that store keeps the fact
+that `l->head` is empty, and `l->head = move(n)` passes. In `list_pop`, `n` comes from `l->head` and
+is not fresh, and a store through `out` can change any field that another pointer reaches, so
+`list_pop` stores `*out` after its owning store (D17.5, D17.11). `del(n)` frees the popped node and
 leaves `n` null (D17.9). A user writes `import list;`, `list.list mut l = list.list_create();`,
 `list.list_push(&l, 7);` and `defer list.list_free(&l);`; `&l` on a `list.list mut` is a
 `list.list mut*` (D5.8); a local named `list` would shadow the binding (section 5), hence `l`.
