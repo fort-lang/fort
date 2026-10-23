@@ -155,9 +155,99 @@ Keep exact identifiers and diagnostic text.
   UPPER_CASE. A variable never takes its type's name (`point p`, `box bx`, `list mut* mut l`); a
   field may (`node mut* own node`), since fields are not variables and are outside the module
   namespace (D7.9). `tools/fort_lint.py` enforces exactly that, and the 100-column wrap, over
-  `std/` and `src/fort/`; nothing formats `.ft`, so indentation and spacing are still written by
-  hand and read by review. Run it with `tools/vm lint`, or by hand as
+  `std/`, `src/fort/` and `src/lsp/`, nested directories included; nothing formats `.ft`, so
+  indentation and spacing are still written by hand and read by review. Run it with
+  `tools/vm lint`, or by hand as
   `tools/vm run 'python3 tools/fort_lint.py --fort build/Linux/debug/fort <file.ft>'`.
+
+### 3.1 Names of modules and functions
+
+The user approved these rules on 2026-10-07. The principle: a reader reads a name as
+`<module>.<name>`, and the pair says each idea one time. Each rule gives one good (+) and one
+bad (-) example from `src/fort` at `d9595ac4`. An example marked (invented) does not exist at
+`d9595ac4`: `src/fort` has no directory yet, so a good example that names a directory gives the
+form that a move takes. The flat modules keep their
+names until a later change moves them; new code obeys the rules from its first commit.
+
+Modules:
+
+1. A directory groups one subsystem (`fir/`, `owner/`, `lsp/`). Do not give files a shared
+   name prefix: use `owner/state.ft`, not `ownership_state.ft`.
+   (+) `src/fort/fir/verify.ft` (invented). (-) `src/fort/fir_verify.ft` beside six more
+   `fir_*.ft`.
+   A directory `fir/` beside `fir.ft` makes `import fir.flow;` ambiguous when `fir.ft` declares
+   `flow` (D9.3), so give no top-level declaration the name of a module in the directory.
+2. A module name is one noun. Prefer a subject noun: what the module is about (`ast`, `token`,
+   `state`, `region`). A module that runs one process over many subjects takes a doer noun
+   (`lexer`, `parser`, `printer`, `verifier`). Use a gerund where the doer noun is not a usual
+   word (`lowering`, not `lowerer`). Do not use verbs (`lower`, `check`) or vague words (`api`,
+   `util`, `common`, `model`, `work`).
+   (+) `lexer`, `types`. (-) `fir_lower` (a verb; use `fir/lowering`), `ownership_api`.
+3. A leaf does not repeat its directory: `owner/state`, not `owner/owner_state`.
+   (+) `fir/flow.ft` (invented). (-) `fir/fir_flow.ft` (invented), a move of `fir_flow.ft` that
+   keeps the old file name.
+4. One module has one job. A group of functions with a shared prefix becomes a module
+   (`ownership_state.region_*` becomes `region.*`).
+   (+) `place.field(f, p, k)` (invented). (-) `fir.place_local`, `fir.place_field` and nine more
+   `fir.place_*`.
+5. When two imports have one leaf, rename one as `<dir>_<leaf>` (`import fir.flow as fir_flow;`).
+   `src/fort/json.ft` and `src/lsp/json.ft` both have the leaf `json`.
+   (+) `import lsp.json as lsp_json;` (invented). (-) `import lsp.json as ljson;` (invented).
+
+Functions:
+
+6. A function name starts with a verb: `state.free`, `region.merge`, `lexer.next`.
+   (+) `lexer.advance(lx)`. (-) `check.sized_reserve(ck)`.
+7. A pure query names what it returns: `types.size(t)`, `region.count(r)`. A boolean query
+   starts with `is_` or `has_`. Do not use `get_`.
+   (+) `types.is_u64(t)`. (-) `fir_flow.bits_get(s, i)`, which returns `bool`.
+8. Do not repeat a word of the module name. One exception: the functions of a doer or gerund
+   module start with its verb (`parser.parse_place`, `lowering.lower_block`).
+   (+) `fir_parse.parse_place`. (-) `check.check_sym_count`, `ast.ast_push`.
+9. Do not name a thing that has its own module: `region.charge`, not `state.region_spend`.
+   (+) `index.free(ix)`. (-) `ownership_state.region_spend`, beside the module
+   `ownership_regions`.
+10. Use one to three words. A short name is good when the module makes it exact: `state.free`.
+    (+) `index.free`. (-) `parser.parse_module_compile_if_into`, six words.
+11. Types and constants obey the same no-repeat rule: `rpc.conn`, not `rpc.rpc_conn`.
+    (+) `ast.node`. (-) `gen.gen_val`, `fir_parse.fir_parser`.
+
+Words (the glossary: one word has one meaning in all of the compiler):
+
+12. `make` allocates and returns a value (not `create`; `new` is a keyword). `init` fills
+    storage that the caller owns. `free` ends a value from `make` or `init` (not `destroy` or
+    `deinit`). `find` searches and can fail (not `lookup`, `locate` or `search`). `work` is the
+    W amount (not `cost` or `price`); `charge` takes W (not `spend`). `release` is only the
+    ownership term: the program gives up storage.
+    (+) `index.free(ix)`. (-) `diag.create()`; use `diag.make()` (invented).
+13. Abbreviations come from a closed list: `ast`, `fir`, `llvm`, `lsp`, `rpc`, `json`, `uri`.
+    Write every other word in full (`float`, not `flt`).
+    (+) `index.write_json(ix, j)`. (-) `flt.ft` and `flt.flt_parse`.
+
+Enforcement:
+
+14. `tools/fort_lint.py` makes three checks and cites this section in each message.
+    - The prefix check reads each directory of `src/fort`, `src/lsp` and `std`. It flags each
+      module whose first word 3 or more files of its directory share. A file named as the prefix,
+      `rpc.ft`, does not count. `LEGACY_PREFIXES` exempts `fir_` and `ownership_` of `src/fort`
+      until they move.
+      (+) `src/fort/library/interface.ft` (invented). (-) `src/fort/library_interface.ft` beside
+      `library_artifact.ft` and `library_cache.ft` (invented).
+    - The function check flags a function whose first word is a word of its module path. The
+      check splits each directory and leaf at `_`, so `owner/heap_state.ft` has the words
+      `owner`, `heap` and `state`. The verb of a doer module is not its module word, so rule 8's
+      exception passes.
+      (+) `fir.parser.parse_place` (invented). (-) `owner.heap_state.heap_free` (invented).
+    - The glossary check flags a declared name or a module path that holds a word that rule 12
+      bans, and names the word to use.
+      (+) `fir.flow.make` (invented). (-) `fir.flow.create` (invented).
+
+    The function and glossary checks apply to a nested module only: a file in a subdirectory of
+    `src/fort`, `src/lsp` or `std` (`std/<target>/` stands for `std/`). On `d9595ac4` the 90
+    flat modules of `src/fort`, `src/lsp`, `std` and `std/linux` hold 187 functions whose first
+    word is the module name and 55 function names with a word that the glossary bans. So the
+    checks wait until those modules move. The lint does not check rules 2, 3, 5, 7, 9, 10, 11
+    and 13; review checks them.
 
 ## 4. Markdown and specification text
 

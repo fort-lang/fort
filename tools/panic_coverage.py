@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Hold each panic site of the fort modules against the panic tests beside it.
 
-A site is one `panic(...)` call in `src/fort/*.ft`, `src/lsp/*.ft` or `std/**/*.ft`. A panic ends
+A site is one `panic(...)` call in `src/fort/**/*.ft`, `src/lsp/**/*.ft` or `std/**/*.ft`, so a
+nested module such as `src/fort/fir/flow.ft` holds sites as a flat module does. A panic ends
 the program (D11.4), so each test of a site is a program of its own. The tests of `src/fort` are
-`test/fort/*_panic_test.ft`, and the tests of `src/lsp` are `test/lsp/*_panic_test.ft`. The tests
+`test/fort/**/*_panic_test.ft`, and the tests of `src/lsp` are `test/lsp/**/*_panic_test.ft`,
+outside `support/`. The tests
 of `std` are the `test/lang` programs that abort. Such a program answers a `std` site only.
 
 A test answers a site when one of its `//! stderr:` texts holds the whole text of the site and
@@ -13,7 +15,8 @@ declaration directly above that site names its tests:
 
     // panic-coverage: tests: fir_verify_v01 gen_fir_v9
 
-The name `<stem>` is the file `<stem>_panic_test.ft` of the corpus of the site. A declaration
+The name `<stem>` is the file `<stem>_panic_test.ft` of the corpus of the site; a nested test
+takes its directory, `fir/flow_get`. A declaration
 also says that no caller can reach a site:
 
     // panic-coverage: unreachable: <reason>
@@ -48,13 +51,15 @@ import sys
 
 # Each source root, the glob of its modules and the corpus of its panic tests.
 SOURCE_ROOTS = (
-    ("src/fort", "*.ft", "test/fort"),
-    ("src/lsp", "*.ft", "test/lsp"),
+    ("src/fort", "**/*.ft", "test/fort"),
+    ("src/lsp", "**/*.ft", "test/lsp"),
     ("std", "**/*.ft", None),
 )
 # The corpora whose `*_panic_test.ft` files must each answer exactly one site.
 PANIC_CORPORA = ("test/fort", "test/lsp")
 PANIC_TEST_SUFFIX = "_panic_test.ft"
+# The directory of a corpus that holds shared code; the harness runs no test there.
+SUPPORT_DIR = "support"
 # The language corpus. Its programs also panic in their own code, so it has no orphan test.
 LANG_CORPUS = "test/lang"
 STD_ROOT = "std"
@@ -278,7 +283,9 @@ def read_tests(root):
     """The panic tests of the two module corpora and the aborting programs of the language."""
     tests = []
     for corpus in PANIC_CORPORA:
-        for path in sorted((root / corpus).glob("*" + PANIC_TEST_SUFFIX)):
+        for path in sorted((root / corpus).rglob("*" + PANIC_TEST_SUFFIX)):
+            if path.relative_to(root / corpus).parts[0] == SUPPORT_DIR:
+                continue
             tests.append(Test(path.relative_to(root).as_posix(), corpus,
                               stderr_texts(directives(path))))
     for path in sorted((root / LANG_CORPUS).rglob("*.ft")):

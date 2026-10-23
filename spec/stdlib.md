@@ -149,7 +149,9 @@ import binding's name for a local even though D7.9 permits it.
 
 `std.libc`, `std.net` and `std.os` have one source for each target: `std/linux/` and
 `std/darwin/`. The other modules are the same on both targets and stand in `std/`.
-`tools/assemble_std.sh <linux|darwin> std <dir>` writes the flat standard root of one target.
+`tools/assemble_std.sh <linux|darwin> std <dir>` writes the standard root of one target. A module
+in a subdirectory keeps its path below `std/` or `std/<target>/`: `std/digest/sha256.ft` is the
+module `std.digest.sha256` (D9.2). The directory of the other target gives nothing.
 
 The import graph is acyclic (D9.5). A program imports what it uses: `import std.io;` and then
 `io.read_file(...)` (D9.3, D9.4).

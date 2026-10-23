@@ -138,18 +138,29 @@ if(FORT_ENABLE_BOOTSTRAP0)
 endif()
 
 # ---- the standard library ------------------------------------------------------
-# The target root is flat: the modules of std/ and those of std/<target>/.
-file(GLOB FORT_STD_SOURCES CONFIGURE_DEPENDS
-    "${FORT_STD_SRC_DIR}/*.ft" "${FORT_STD_SRC_DIR}/${FORT_TARGET}/*.ft")
+# The target root holds the modules of std/ and those of std/<target>/, each at its path
+# below that directory: std/digest/sha256.ft and std/<target>/libc.ft give digest/sha256.ft
+# and libc.ft. The directory of another target of FORT_STD_TARGETS gives nothing.
+set(FORT_STD_TARGETS linux darwin)
+file(GLOB_RECURSE FORT_STD_SOURCES CONFIGURE_DEPENDS RELATIVE "${FORT_STD_SRC_DIR}"
+    "${FORT_STD_SRC_DIR}/*.ft")
 set(FORT_STD_OUTPUTS "")
-foreach(std_source IN LISTS FORT_STD_SOURCES)
-    get_filename_component(std_name "${std_source}" NAME)
+foreach(std_relative IN LISTS FORT_STD_SOURCES)
+    set(std_name "${std_relative}")
+    string(REGEX MATCH "^([^/]+)/(.+)$" std_nested "${std_relative}")
+    if(std_nested AND CMAKE_MATCH_1 IN_LIST FORT_STD_TARGETS)
+        if(NOT CMAKE_MATCH_1 STREQUAL FORT_TARGET)
+            continue()
+        endif()
+        set(std_name "${CMAKE_MATCH_2}")
+    endif()
+    set(std_source "${FORT_STD_SRC_DIR}/${std_relative}")
     set(std_output "${FORT_STD_DIR}/${std_name}")
     add_custom_command(
         OUTPUT "${std_output}"
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${std_source}" "${std_output}"
         DEPENDS "${std_source}"
-        COMMENT "Copying std/${std_name}"
+        COMMENT "Copying std/${std_relative}"
         VERBATIM
     )
     list(APPEND FORT_STD_OUTPUTS "${std_output}")
@@ -262,7 +273,8 @@ if(FORT_ENABLE_BOOTSTRAP0)
 endif()
 
 # ---- the self-hosted compiler --------------------------------------------------
-file(GLOB FORT_FORT_SOURCES CONFIGURE_DEPENDS "${FORT_FORT_SRC_DIR}/*.ft")
+# A nested module, src/fort/fir/flow.ft, is a source of the compiler as src/fort/ast.ft is.
+file(GLOB_RECURSE FORT_FORT_SOURCES CONFIGURE_DEPENDS "${FORT_FORT_SRC_DIR}/*.ft")
 set(FORT_TREE_SCRIPT "${CMAKE_SOURCE_DIR}/bootstrap0/extract_pin.sh")
 
 if(NOT FORT_ENABLE_BOOTSTRAP0)
@@ -376,7 +388,7 @@ set_tests_properties(fixpoint PROPERTIES LABELS "fort;integration")
 # `<name>`. The other root is src/fort, which contains `flt`.
 # The entry file's directory is the first root. No import names a module there.
 set(FORT_LSP_SRC_DIR "${CMAKE_SOURCE_DIR}/src/lsp")
-file(GLOB FORT_LSP_SOURCES CONFIGURE_DEPENDS "${FORT_LSP_SRC_DIR}/*.ft")
+file(GLOB_RECURSE FORT_LSP_SOURCES CONFIGURE_DEPENDS "${FORT_LSP_SRC_DIR}/*.ft")
 # The binary is `fort-lsp` and the target is `fort_lsp`. Ninja refuses a target
 # whose name is also the path of an output in the same directory. And the
 # hyphen is the name a language server carries in every other toolchain.
@@ -423,8 +435,8 @@ endif()
 # --verify-ir runs opt -passes=verify over the `-S` output of every test that
 # compiles. Thus, it verifies each module that the emitter writes.
 #
-# The compiler's own modules: test/fort/<x>_test.ft is a run test in the
-# directive format. Each test imports a src/fort module with `-I` and asserts
+# The compiler's own modules: each test/fort/**/<x>_test.ft outside support/ is a
+# run test in the directive format. Each test imports a src/fort module with `-I` and asserts
 # what its comments promise. The harness takes the corpus root, so the same
 # run_tests.py judges both.
 #

@@ -614,36 +614,43 @@ def discover(root):
 
 # The directories of a corpus whose contents `discover` walks by name.
 WALKED_TOPS = ("run", "fail", "programs")
+# The directory of a module corpus that holds shared code and no test.
+SUPPORT_DIR = "support"
 
 
 def _report_misplaced_tests(root, problems):
-    """Report a `<x>_test.ft` in a directory discovery does not walk.
+    """Report a `<x>_test.ft` in `support/`, which holds shared code only.
 
-    Discovery ignores roots other than `run`, `fail`, and `programs`.
-    This check reports a test placed in another directory.
+    `_discover_module_tests` takes each other `*_test.ft` outside `run`, `fail` and
+    `programs`, so a test in support/ is the one that would run nowhere.
     """
-    for entry in sorted(root.rglob("*.ft")):
-        rel = entry.relative_to(root)
-        if len(rel.parts) == 1 or rel.parts[0] in WALKED_TOPS:
-            continue
+    for entry in sorted((root / SUPPORT_DIR).rglob("*.ft")):
         if entry.stem.endswith("_test"):
-            problems.append("%s: test outside the root of the corpus" % rel.as_posix())
+            problems.append("%s: test in support/, which holds shared code only"
+                            % entry.relative_to(root).as_posix())
 
 
 def _discover_module_tests(root, tests, problems):
-    """Register the `<x>_test.ft` files directly under `root` as run tests.
+    """Register the `<x>_test.ft` files of `root` and its subdirectories as run tests.
 
     test/fort uses unnumbered programs that import compiler modules with `-I`.
-    Each test takes the name of the module that it tests.
+    Each test takes the name of the module that it tests, and a nested module takes a
+    nested test: `fir/flow_test.ft` tests `src/fort/fir/flow.ft`. The compiler runs in
+    `root`, so a nested test spells its `-I` roots as a test at the root does.
+    `run`, `fail`, `programs` and `support` hold no module test.
     These tests do not belong to the numbered language corpus areas.
-    `test/lang` contains no root-level module test.
+    `test/lang` contains no module test.
     """
-    for entry in sorted(root.glob("*.ft")):
+    for entry in sorted(root.rglob("*.ft")):
+        parts = entry.relative_to(root).parts
+        if len(parts) > 1 and parts[0] in WALKED_TOPS + (SUPPORT_DIR,):
+            continue
         rel = entry.relative_to(root).as_posix()
-        # A `.ft` at the root that is not a test is a typo nothing would ever
-        # run, as `containers_tets.ft` would be. So it is a problem rather
-        # than a file to skip.
-        if not NAME_RE.match(entry.stem) or not entry.stem.endswith("_test"):
+        # A `.ft` outside those directories that is not a test is a typo
+        # nothing would ever run, as `containers_tets.ft` would be. So it is a
+        # problem rather than a file to skip.
+        names = [part for part in parts[:-1]] + [entry.stem]
+        if not all(NAME_RE.match(name) for name in names) or not entry.stem.endswith("_test"):
             problems.append("%s: bad test name" % rel)
             continue
         tests.append(Test(rel, rel, "run"))
