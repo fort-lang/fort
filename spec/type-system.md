@@ -996,7 +996,7 @@ would strand the rest (D17.8). `del` of an aggregate is an error, because `del` 
 struct frees its own fields, one `del` per `own` field, and a container exposes a `free`
 function that does so (D13.5). Functions therefore take an owning struct by pointer, `vec*` or
 `vec mut*`, and a range `for` over owning elements is an error (`core-language.md` 6.4).
-An owning aggregate assignment has no fieldwise runtime overwrite check (D17.11).
+An owning aggregate assignment has no fieldwise overwrite check (D17.11).
 The static proof checks each owning leaf in all build modes, including nested aggregates.
 It also checks residual owned leaves at normal storage end (D17.7, D17.14).
 A whole aggregate move transfers borrowed and scalar fields as well as owned leaves (D17.6).

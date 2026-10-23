@@ -68,8 +68,9 @@ Each term has one meaning in this document.
 - **Rvalue**: the right side of an assignment: an operand, an operation on operands, or an
   aggregate.
 - **Check**: the terminator `check` of section 8, and nothing else. Every runtime check of D10.6,
-  D11.1, D11.3 and D17.11 is one. The checker is the pass that resolves names and types. The
-  verifier tests rules.
+  D11.1 and D11.3 is one. The overwrite check of D17.11 is one too, but the emptiness pass proves
+  it at compile time and no build keeps it (section 11). The checker is the pass that resolves
+  names and types. The verifier tests rules.
 - **Failure block**: an LLVM block that the translator writes for a `check` or for a `fail`
   (item 14). FIR has no block kind for it.
 - **Owning type**: an `own` reference (`T* own`, `void* own`, `T@ own`, `string own`; D17.1) or an
@@ -94,8 +95,10 @@ The function pipeline is:
    `panic` with the rule, the function and the block (D13.3).
 4. The flow analyses read it (section 14). Ownership summaries use the complete verified closure.
    The analyses see every runtime check in every build mode.
-5. The build-mode pass rewrites it for the selected mode (section 11). The verifier runs again.
-6. The translator writes its LLVM text into the module (section 12).
+5. The emptiness pass proves each overwrite check (section 11, D17.11). It runs in every build
+   mode and under `--check`. An unproved check is a compile error.
+6. The build-mode pass rewrites it for the selected mode (section 11). The verifier runs again.
+7. The translator writes its LLVM text into the module (section 12).
 
 The module-level parts of the module stay where `toolchain.md` 6 puts them: the header, the named
 types, the globals, the private data, the declarations and the attribute groups. The translator
@@ -397,7 +400,7 @@ Rules:
   assignment, the place of `addr` and the place of a `slice` of a fixed array are no reads of
   their value: the item reads the pointer that each `deref` of such a place loads, and the span
   or `string` header before each index on a span or a `string`. A `slice` of a span or a
-  `string` reads its place, and `check(overwrite: p)` reads `p` to test it (12.4); section 14
+  `string` reads its place, and `check(overwrite: p)` reads `p` to test it (section 8); section 14
   counts that test as no use of `p`. Before that test, the check reads what the address of `p`
   loads: the pointer of each `deref` and the header before each index on a span or a `string`.
   Those reads are uses. A `return` reads `_0` unless `_0` is `void`. The reads come
@@ -415,9 +418,10 @@ Rules:
   with the runtime entry of `kind`: `f` is true on failure (D19.6, item 14). The kind `user` is
   the exception: its operand is the argument of the source `assert`, and it is true on success
   (D12.2).
-- `check(overwrite: p) -> bb` continues at `bb` when the owning value at `p` is null, and else
-  aborts with `fail_overwrite` (D17.11, item 18). It names the place, because its condition is
-  the null test of the place itself.
+- `check(overwrite: p) -> bb` says that the owning value at `p` is null, and it continues at `bb`
+  (D17.11, item 18). It is a compile-time check: the emptiness pass proves it or reports the error
+  of D17.11, and the build-mode pass replaces it by `goto` in every mode (section 11). It has no
+  runtime entry. It names the place, because its condition is the null test of the place itself.
 - `fail(kind, args)` aborts with the runtime entry of `kind` (items 14, 19).
 - `trap` is the trap of D8.5 (item 20).
 - `unreachable` ends a body that the checker proved cannot fall off its end (D8.4, item 10).
@@ -434,7 +438,7 @@ the check:
 | `bounds` | `fail_bounds` | the index as `i64`, the length as `u64` | `--no-bounds-check` |
 | `span` | `fail_span` | `lo` and `hi` as `i64`, the length as `u64` | `--no-bounds-check` |
 | `alloc_count` | `fail_alloc_count` | the count as `i64` | nothing |
-| `overwrite` | `fail_overwrite` | none | release |
+| `overwrite` | none | none | every mode, after the emptiness pass proves it |
 | `enum` | `fail_enum` | the value as `i64`, the enum name as `bytes` | nothing |
 | `user` | `assert_fail` | the source text of the argument as `bytes` | nothing |
 | `panic` | `panic` | the pointer and the length of the message | nothing |
@@ -473,8 +477,9 @@ checker records becomes a new annotation, not a second derivation.
 
 ### 9.2 The entry block
 
-1. For each named local whose type is an `own` reference: `_n = const zero T`. The first
-   execution of its declaration then finds null in its overwrite check (D17.11, item 18).
+1. For each named local whose type is an `own` reference: `_n = const zero T`. The emptiness
+   pass reads this store as the entry zeroing of D17.11, so the first execution of the declaration
+   passes its overwrite check (section 11).
 2. The body, lowered as a scope of kind `fn` (section 9.5).
 
 A parameter needs no statement. The translator stores each scalar parameter into its `alloca`
@@ -489,7 +494,8 @@ A parameter needs no statement. The translator stores each scalar parameter into
   (item 18).
 - **`lv = e;`**: the place `p` of `lv` first, with its index temporaries and their checks
   (D6.3). When `e` contains a writer and `p` does not designate fixed storage (5.5), the lowering
-  holds `_a = addr mut(p)` before `e` and writes `(*_a)` in place of `p`. Then `e` into `p`. For an
+  holds `_a = addr mut(p)` before `e` and writes `(*_a)` in place of `p`; the emptiness pass
+  reads `(*_a)` as `p` (section 11). Then `e` into `p`. For an
   `own` reference type: `e` into a temporary, `check(overwrite: p)`, then `p = move _t`. The check
   and the store stand at the `=` (D17.11). The store of a scalar `e` stands at the `=` too, as
   section 13 stores `*p = 7`. An aggregate `e` writes into `p` at its own node.
@@ -805,16 +811,16 @@ signature in each of these cases:
 
 The result of a print function that returns does not count.
 
-A function whose `check`, `check(overwrite: p)` or `fail` names a runtime entry that the closure
-lacks, or declares with other parameters than rule V7 requires, is a compile error too, at the
-name of the function: ``the runtime `std.rt` has no entry `<name>` with the parameters that
-`<f>` needs``. Only a `check` or `check(overwrite: p)` that the build-mode pass of the selected
-mode keeps (section 11) needs its entry: before the pass, the verifier excuses a missing entry of
-such a check of a kind that the mode removes, and the pass removes those checks. After the pass,
-the verifier excuses no kind. A `fail` always needs its entry. Only a stub `std.rt` of a test or
-an old `--std-dir` meets either error of a runtime entry. The compiler tests the entries of these
-errors alone: the print functions, `str_eq` and the entry of each check kind. It assumes the
-other `std.rt` functions that the translator calls, such as `alloc`, `free`, `args_init`,
+A function whose `check` or `fail` names a runtime entry that the closure lacks, or declares with
+other parameters than rule V7 requires, is a compile error too, at the name of the function:
+``the runtime `std.rt` has no entry `<name>` with the parameters that `<f>` needs``. A
+`check(overwrite: p)` names no runtime entry. Only a `check` that the build-mode pass of the
+selected mode keeps (section 11) needs its entry: before the pass, the verifier excuses a missing
+entry of such a check of a kind that the mode removes, and the pass removes those checks. After
+the pass, the verifier excuses no kind. A `fail` always needs its entry. Only a stub `std.rt` of
+a test or an old `--std-dir` meets either error of a runtime entry. The compiler tests the entries
+of these errors alone: the print functions, `str_eq` and the entry of each check kind. It assumes
+the other `std.rt` functions that the translator calls, such as `alloc`, `free`, `args_init`,
 `args` and `shutdown`.
 
 ## 10. The verifier
@@ -867,8 +873,9 @@ statement index.
   for a variadic extern, and every argument agrees with its parameter as V4 defines agreement
   (items 7, 8). The reported operands of a `check` and a `fail` agree with the parameters of the
   runtime entry of its kind, the location parameters excluded. Before the build-mode pass of a
-  build, a `check` or `check(overwrite: p)` of a kind that the mode removes needs no fitting
-  entry; after the pass, every check needs its entry (9.8).
+  build, a `check` of a kind that the mode removes needs no fitting entry, and a
+  `check(overwrite: p)` needs none at any point; after the pass, no `check(overwrite: p)` remains,
+  and every check needs its entry (9.8).
 - **V8**: a `call` of a `noreturn` function is the last statement of its block, and the block
   ends in `trap` (D8.5).
 - **V9**: no path from `bb0` reaches a block that ends in `unreachable` (D8.4). On a `switch`
@@ -930,8 +937,100 @@ changes the function, and the verifier runs after it. The passes run in this ord
 
 1. The verifier (section 10).
 2. The flow analyses (section 14), which report and never rewrite.
-3. **The build-mode pass**, which rewrites for the selected mode (D11.1, D10.6, D17.11):
-   - Under `--release`, it replaces `check(_, overflow)` and `check(overwrite: p)` by `goto`. It
+3. **The emptiness pass**, a reporting pass (D17.11). The module `fir.emptiness`
+   (`src/fort/fir/emptiness.ft`) holds it. It runs in every build mode and under `--check`. It
+   proves each `check(overwrite: p)`, and it reports the error of D17.11 for each one that it
+   cannot prove. A function with an error reaches no later pass, and the build writes no module.
+   The pass is the forward must-empty analysis of D17.11, and it reads FIR this way:
+   - **Facts.** A fact says that a tracked place holds the zero value. A tracked place is a local
+     `_n` or a global, followed by `field` and keyed `index` projections. It is also a local `_p` of
+     pointer type that is not memory, a parameter included, followed by one `deref` and then `field`
+     and keyed `index` projections. The fact is keyed by the base, the projections and the keys of
+     the indexes. A tracked place below `p` starts with `p` and continues with `field` projections
+     and `index` projections on fixed arrays only. A local `_n` is memory when an `addr`, or a
+     `slice` of a fixed array, in the function names a place whose base is `_n` and that contains no
+     `deref`. The return place `_0` of an aggregate type is memory too, because its storage is the
+     destination of the caller (5.3). A place reached through memory is a tracked place of a memory
+     local or of a global, or a tracked place that contains a `deref` or an `index` on a span or a
+     `string`.
+   - **Keys.** The lowering copies each index into a temporary (5.5), so FIR names an element
+     `p[_t]`, and two uses of one source index name two temporaries. The pass maps `_t` to a key.
+     The key is the local `_k` when exactly one assignment writes `_t`, that assignment is
+     `_t = copy _k` or `_t = cast<u64>(copy _k)`, `_k` is a local that is not memory, and no
+     statement stores into `_k` on a path from that assignment to the use of `_t`. The key is
+     the constant `c` when the one assignment of `_t` is `_t = const u64 c` or a `cast` of the
+     integer constant `c`. An index that is itself a local `_k` that is not memory has the key
+     `_k`. An `index` whose temporary has no key makes its place untracked.
+   - **Separate.** Two places with one base are separate when, at the first projection where they
+     differ, both projections are `field` projections. This is not the "disjoint" of 5.5. Two
+     `index` projections differ when their keys differ, and an `index` with no key differs from
+     every `index`.
+   - **Fresh.** A pointer local `_n` is fresh at a point when, on each path to that point, the
+     last store into `_n` writes a fresh `new`, and after that store no `copy` or `move` operand
+     whose place is `_n` itself reads it and no `addr` or `slice` names a place whose base is
+     `_n`. The analysis computes freshness with the facts, by the same join. A place through a
+     fresh `_n` is `(*_n)` followed by `field` projections and `index` projections on fixed
+     arrays only. The rule assumes no access through a dangling pointer (D17.11).
+   - **Held address.** When the right side of `lv = e` has a writer, the lowering holds
+     `_a = addr mut(p)` and writes `(*_a)` in place of `p` (9.3). The pass reads the place
+     `(*_a)` of that `check(overwrite: (*_a))` and of that store as `p`, for the fact, the kill
+     rules and the gen rules. This holds when `_a` is a temporary that exactly one assignment
+     writes, and only that check and that store read `_a`. That `addr` makes no local memory and
+     ends no freshness.
+   - **Values.** A store writes a fresh `new` when its rvalue is `alloc<T>(c)`, or `move _t`
+     where `_t` is a temporary that exactly one assignment writes, with an `alloc`, and that only
+     this `move` reads. A store writes the zero value when its rvalue is `const zero T`, `null T`,
+     an `aggregate` or `aggregate zeroed` whose operands are all such constants, or `move _t` where
+     `_t` is a temporary that exactly one assignment writes, with one of these rvalues, and that
+     only this `move` reads.
+   - **Gen.** The store `_n = const zero T` of the entry block (9.2) and every other store of
+     the zero value into `p` make `p` and each tracked place below `p` empty. `del(move p)`
+     makes `p` empty. Each `move p` operand makes `p` and each tracked place below `p` empty
+     when it reads `p`. A store of a fresh `new` into `_n` makes each tracked place through `_n`
+     empty.
+   - **Kill.** A store into a place `d` whose base is a local or a global kills the fact of each
+     tracked place with that base that is not separate from `d`, so a store into `_p` kills each
+     fact through `_p`. A store into a local that is a key kills each fact whose place has that key.
+     A store into a place through a fresh pointer local kills nothing more. Every other store whose
+     destination contains a `deref`, or an `index` on a span or a `string` (5.5), is a store through
+     a pointer. It kills each fact about a place reached through memory, and so does a store into a
+     place of a memory local or of a global. Two facts survive it: a fact about a place through a
+     fresh pointer local, and a fact about a place with the base of the destination that is separate
+     from it, when neither place contains an `index` on a span or a `string`. A `call` rvalue kills
+     each fact except the facts about a local that is not memory and about its places that are not
+     reached through memory. `alloc` and `del` are no calls.
+   - **Examples.** For a parameter `_1` of type `int_buf mut*`, the source `del(b->items);
+     b->items = new(i32, 8);` lowers to `del(move (*_1).0)`, then `_3 = addr mut((*_1).0)`, the
+     `new` into `_5`, `check(overwrite: (*_3))` and `(*_3) = move _5`. The pass reads `(*_3)` as
+     `(*_1).0`, whose fact the `del` made, so the check is proved; without the `del`, it is
+     unproved, because `bb0` starts with no fact. For parameters `_2` and `_4`, a store into
+     `(*_2).0` keeps the fact of `(*_2).1`, and a later store `(*_4).0 = const i32 0` kills it,
+     because `_4` can hold the value of `_2`. For a parameter `_1` of type `node_vec mut*` and the
+     local `_5` (`k`), the source `u64 k = v->len; del(v->items[k]); v->items[k] = move(n);`
+     gives `_6 = copy _5` and `del(move (*_1).0[_6])`, then `_8 = copy _5`,
+     `_9 = addr mut((*_1).0[_8])` and `check(overwrite: (*_9))`. The pass reads `(*_9)` as
+     `(*_1).0[_8]`, and `_6` and `_8` both have the key `_5`, so the check is proved. For a
+     parameter `_1` of type `list mut*`, the source `node mut* own n = new(node);
+     n->next = move(l->head); l->head = move(n);` passes: the held address of `n->next` ends no
+     freshness, so the store into `n->next` keeps the fact of `(*_1).0` (`l->head`) that the
+     `move` made.
+   - **Order.** Within a statement, the pass applies the reads of its operands first, in operand
+     order, then the kill of a `call`, then the kill rules of the store, then its gen rule.
+     `live`, `dead`, `loan_begin` and `loan_end` change no fact.
+   - **Join.** A block starts with the intersection of the facts at the end of its
+     predecessors. `bb0` starts with no fact, and every other block starts with all facts before
+     the first iteration, so a block that no edge reaches passes, as in V13. The pass follows
+     every edge, the edge that V9 prunes on a constant `switch` included, and it iterates to a
+     fixpoint.
+   - **Proof.** A `check(overwrite: p)` is proved when `p` is a tracked place and its fact holds
+     at the end of its block. The pass reports an unproved check at the location of the check,
+     which is the `=` of an assignment or the declared name of a declaration (9.3). The message
+     and its note name the source text of the lvalue (D17.11).
+   - **Rewrite.** The pass rewrites nothing, so the verifier does not run after it.
+4. **The build-mode pass**, which rewrites for the selected mode (D11.1, D10.6, D17.11):
+   - In every mode, it replaces each `check(overwrite: p)` by `goto`, because the emptiness pass
+     proved it.
+   - Under `--release`, it replaces `check(_, overflow)` by `goto`. It
      replaces `check(_, shift, _n, ...) -> bb` by `_m = and(copy _n, const i64 W - 1)` and
      `goto bb`, which is the mask of item 15. `_m` takes the statement index of the check. When
      the count `_n` is a whole temporary, the pass replaces each read of `_n` that the mask
@@ -951,13 +1050,13 @@ changes the function, and the verifier runs after it. The passes run in this ord
      whose assignments go keeps its number, and the translator gives it no storage (12.1).
    - Where a removed `check(overwrite: p)` stood between `_t = rvalue` and `p = move _t`, and
      nothing else reads `_t`, it rewrites the two statements to `p = rvalue`, which is the direct
-     store that the direct path wrote in release mode.
+     store that the direct path wrote in release mode. This fold applies in every mode.
    - It then merges the continuation block of each removed check, the shift check included, into
      the block of the check: rule V11 says that block has no other predecessor. It renumbers the
      blocks in ascending order and rewrites every target of every terminator.
    - It never touches `div_zero`, `div_overflow`, `alloc_count`, `enum`, `user` or `panic`.
-4. The verifier again.
-5. The translator (section 12).
+5. The verifier again.
+6. The translator (section 12).
 
 The build-mode pass keeps loan statements in order.
 It removes only dead whole-temporary assignments and folds adjacent stores of fixed shape.
@@ -966,7 +1065,7 @@ The pass does not move an executable operation across a loan statement.
 V14 verifies the result again.
 
 FIR changes at two points of this order, and `--fir-after=<pass>` (D14.1) names them: `lower`
-is the output of the lowering (section 9), and `build-mode` is the output of step 3.
+is the output of the lowering (section 9), and `build-mode` is the output of step 4.
 
 Two passes can come later and need no change to FIR: a **check elimination** pass that proves a
 `check` false and replaces it by `goto`, such as the bounds check of `a[i]` inside
@@ -1069,8 +1168,8 @@ lost a `zeroext`.
 - `return` is `ret void`, or a load of `%result` and `ret` (item 7).
 - `check(f, kind, args) -> bb` is `br i1 %f, label %fail, label %bb`, the failure label first
   (D19.6). The kind `user` branches to the continuation first, `br i1 %c, label %bb, label
-  %fail` (item 14). `check(overwrite: p)` first loads the pointer word of `p` (field 0 for a span
-  or `string`) and writes `icmp ne ptr` against null (item 18).
+  %fail` (item 14). No `check(overwrite: p)` reaches the translator: the build-mode pass
+  replaced each one by `goto` (section 11, item 18).
 - The translator makes one failure block for each `check`: one call of the runtime entry of
   `kind` with `args`, the `@.file.N`, the line and the column, then `unreachable`. A FIR block
   other than `bb0` that holds only `fail` is a failure block too, written the same way, and its
@@ -1290,8 +1389,9 @@ The deferred `del(p)` appears twice, once on each path to an exit, and nowhere e
 reads each path and finds the `del` on it without a model of D7.8. The statement indices count
 the six statements of the body and the two expansions (9.7): `s2` is the `defer`, which emits
 nothing, `s5` and `s8` are its expansions, and `s0` is the zeroing of the entry block. `_3` is
-read only by `s1`, so in the default mode the translator gives it a register. In release mode,
-the build-mode pass turns the `check` into `goto bb1` (section 11). It folds `_3 =
+read only by `s1`. In every build mode, the emptiness pass proves the check: the entry block
+zeroes `_2`, and no kill rule applies to `_2` before the check, because `alloc` is no call. The
+build-mode pass then turns the `check` into `goto bb1` (section 11). It folds `_3 =
 alloc<i32>(const u64 1)` and `_2 = move _3` into `_2 = alloc<i32>(const u64 1)`, at the location
 of the `alloc`, and merges `bb1` into `bb0`, so `bb2` and `bb3` become `bb1` and `bb2`. After the
 fold no statement names `_3`, so `_3` gets no storage (12.1).
@@ -1382,8 +1482,9 @@ A function can have no normal return without a noreturn type.
 **Mode independence.** The proof rejects invalid and unproved fort obligations (D17.14).
 Lost precision retains obligations. It never supplies an operation-level escape.
 The proof result stays identical across checked, release, and bounds-check options (D19.8).
-Do not derive safety from a check that a build mode removes: overflow, shift, bounds, span, or
-overwrite. Other continuation edges and switch edges keep their existing facts.
+Do not derive safety from a check that a build mode removes: overflow, shift, bounds, or span.
+The emptiness pass proves each overwrite check in every mode (D17.11).
+Other continuation edges and switch edges keep their existing facts.
 The proof preserves source evaluation order. It reads the order that FIR emits.
 It does not add a new span-header/index-expression order guarantee (D6.3).
 
