@@ -293,6 +293,25 @@ came here.
   identity map. `library/interface.ft` reads the checked trees and writes nothing into them, so it
   can run on a module that an interface file declared: the writer gives that section its own text
   back, which `test/library/checker.ft` and `interface_values_test` hold.
+  **`--lib` without `--emit-interface` builds the artifact** (toolchain.md 2.1).
+  `driver.library_entry` checks, lowers and runs the emptiness pass, writes the interface text,
+  emits the IR module of the unit, and runs the compile line and the archive line through
+  `driver.run_tool`. `library.artifact.write` then writes the directory. The source hash reads
+  `module.source`, the bytes that the session read once for the parse, so it runs before the
+  analysis is released. The archive is read once, and those bytes are hashed and copied. The
+  writer removes the manifest first and writes it last, each file through a temporary name and
+  rename(2), so a failure at any step leaves no manifest (`test/fort/library/artifact_test.ft`).
+  It empties `summaries/` before it writes a file, so a file of an older build does not stay. It
+  opens `summaries/` with O_NOFOLLOW and removes each entry with unlinkat(2) on that descriptor,
+  so a link at `summaries` fails the write (ELOOP) and no entry outside the artifact goes. A
+  file or a link at a temporary name, which a run with the same pid can leave, is removed with
+  unlink(2) first, and the temporary file is opened with O_EXCL, so no write goes through a link.
+  When unlinkat(2) refuses an entry and its AT_REMOVEDIR form gives ENOTDIR, the error is the one
+  of the first call: darwin gives ENOTDIR there and Linux gives EACCES for both (probed with a
+  directory of mode 0500).
+  No cache exists yet, so the build looks up no key. toolchain.md 2.1 puts the source hash in
+  step 3, before the parse; with no cache that order changes no output, and a build that reads the
+  cache must take the hash before the parse.
 - **A diagnostic about two declarations stands at the one in the module being checked**, and the
   other declaration is its note (D14.2, amended 2026-09-14 by T-112). The closure is checked in
   dependency order (D9.10), so that declaration is the later of the two and the note can name a
@@ -742,6 +761,19 @@ came here.
   `fort -S src/fort/main.ft` took 3.2 s to 3.4 s through FIR and 1.4 s to 1.6 s through the
   direct path, and `fort --fir` alone took 2.1 s to 2.2 s, so the lowering and the verifier take
   most of the difference.
+- **A unit defines its own modules alone** (module-system.md 10.4). A module with
+  `module.interface` set is a section of an interface file: `gen_fir.gen_declaration` puts each
+  bodiless function of it in `g->declared`, and `gen_data.gen_finish` writes those `declare
+  dso_local ... #0` lines first in the declarations section, from `gen.signature_of` as a
+  definition does. `gen_data.gen_global` writes each constant and global of it as an `external
+  dso_local` global and writes no initializer, so the unit takes no `@.str.N` from the library.
+  The named types and the enum tables come from the same walks as in a whole program. A
+  whole-program set holds no interface module, so its text does not change, and a `--lib` set
+  holds none either: it has no entry module, so it gets no C `main`. The counters of the private
+  data start at 0 in each unit because each invocation makes one emitter. `gen_interface_test`
+  holds each declaration against the definition of a whole-program build of the same sources,
+  and the ctest `library-artifact` does so for every declaration that the programs of
+  `test/library/programs` reach in `std`.
 
 ## 7. The runtime and the standard library
 

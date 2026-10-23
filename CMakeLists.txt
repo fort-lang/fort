@@ -556,6 +556,22 @@ set_tests_properties(library-interface PROPERTIES
     PROCESSORS ${FORT_LANG_JOBS}
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
+# The artifact of `--lib std` (D9.11): two builds write the same bytes, the manifest holds the
+# hashes that Python's hashlib gives, the IR module of each target verifies, and each program of
+# test/library/programs gives the same output linked against lib.a as built as a whole program.
+# test/library/builder.ft emits the entry unit, because no build reads an artifact yet.
+add_test(NAME library-artifact
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/library/artifact_test.py"
+            --fort "${FORT_COMPILER_BINARY}"
+            --std-dir "${FORT_STD_DIR}"
+            --cc "${FORT_TARGET_CC_PATH}"
+            --target "${FORT_TARGET_TRIPLE}"
+            --opt "${FORT_OPT_PATH}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(library-artifact PROPERTIES
+    LABELS "fort;integration"
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
 # The interactive test checks line flushing when stdout is a terminal.
 # Language tests capture stdout through a pipe and take the non-interactive path.
 # test/tty_test.py drives one program through a real pty and a pipe.

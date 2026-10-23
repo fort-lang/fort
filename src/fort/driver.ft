@@ -18,6 +18,7 @@ import gen_fir;
 import index;
 import json;
 import lexer;
+import library.artifact;
 import library.interface;
 import library.tree;
 import modules;
@@ -72,9 +73,6 @@ string FIR_STATS_ALONE =
 // parts that fit the line.
 string LIB_ALONE_HEAD = "--lib does not combine with -I, -l, --check, --json, --index, --tokens, ";
 string LIB_ALONE_TAIL = "--ast or a --fir option";
-
-// The usage error of --lib without --emit-interface: this compiler writes no artifact yet.
-string LIB_NO_ARTIFACT = "--lib writes no artifact yet: give --emit-interface";
 
 // The module path of the prelude of a `.fir` test, which its function names start with.
 string FIR_TEST_MODULE = "main";
@@ -134,6 +132,8 @@ struct options {
     string lib_name; // the name of --lib, read only when have_lib
     string lib_root; // the root of --lib, read only when have_lib
     bool emit_interface; // --emit-interface: the interface file of --lib on stdout
+    bool have_ar; // --ar was given, which only --lib takes
+    string ar; // --ar, the archiver that writes `lib.a`
     containers.str_vec includes; // -I roots, searched in command-line order
     containers.str_vec libs;     // -l<lib> as given, passed to the linker in order
     containers.str_vec cc_args;  // -Xcc arguments, passed verbatim after the rest
@@ -145,6 +145,7 @@ fn options_create() options {
     options mut opts = options{};
     opts.cc = DEFAULT_CC;
     opts.target = os.TARGET;
+    opts.ar = DEFAULT_AR;
     return opts;
 }
 
@@ -188,6 +189,8 @@ fn help() void {
     println("  --lib <name> <root>");
     println("                     build the library <name> from the directory <root>");
     println("  --emit-interface   write the interface file of --lib to stdout and stop");
+    println("  --ar <path>        the archiver that writes the lib.a of --lib (default ",
+            DEFAULT_AR, ")");
     println("  --help             print this help and exit");
     println("  --version          print the compiler version and exit");
 }
@@ -365,7 +368,7 @@ fn parse_flag(options mut* opts, string arg) bool {
 
 // The options that take the following argument. Returns false when `arg` is not
 // one of them; *ok is false when the argument was missing. The last -o,
-// --std-dir, --cc and --target win, while -I, --cfg, -l and -Xcc accumulate
+// --std-dir, --cc, --target and --ar win, while -I, --cfg, -l and -Xcc accumulate
 // in command-line order. A duplicate configuration key is an error.
 fn parse_valued(options mut* opts, string@ args, u64 mut* i, bool mut* ok) bool {
     string arg = args[*i];
@@ -376,8 +379,9 @@ fn parse_valued(options mut* opts, string@ args, u64 mut* i, bool mut* ok) bool 
     bool is_target = arg == "--target";
     bool is_cfg = arg == "--cfg";
     bool is_cc_arg = arg == "-Xcc";
+    bool is_ar = arg == "--ar";
     if (!is_output && !is_include && !is_std_dir && !is_cc && !is_target && !is_cfg
-        && !is_cc_arg) {
+        && !is_cc_arg && !is_ar) {
         return false;
     }
     string mut value = "";
@@ -401,6 +405,9 @@ fn parse_valued(options mut* opts, string@ args, u64 mut* i, bool mut* ok) bool 
         if (!parse_cfg(opts, value)) {
             *ok = false;
         }
+    } else if (is_ar) {
+        opts->have_ar = true;
+        opts->ar = value;
     } else {
         containers.str_push(&opts->cc_args, value);
     }
@@ -471,7 +478,7 @@ fn parse(options mut* opts, string@ args) i32 {
         }
         i += 1;
     }
-    if (opts->have_lib || opts->emit_interface) {
+    if (opts->have_lib || opts->emit_interface || opts->have_ar) {
         return check_library_options(opts);
     }
     if (!opts->have_entry) {
@@ -516,8 +523,12 @@ fn parse(options mut* opts, string@ args) i32 {
 // no entry file. Only `--lib std` builds without `--use std=<path>`, which this compiler does not
 // read yet, so every other library is that usage error.
 fn check_library_options(options* opts) i32 {
-    if (!opts->have_lib) {
+    if (!opts->have_lib && opts->emit_interface) {
         usage_error("--emit-interface requires --lib");
+        return PARSE_ERROR;
+    }
+    if (!opts->have_lib) {
+        usage_error("--ar requires --lib");
         return PARSE_ERROR;
     }
     if (opts->have_entry) {
@@ -541,10 +552,6 @@ fn check_library_options(options* opts) i32 {
     }
     if (opts->lib_name != modules.STD_SEGMENT) {
         usage_error("a library build needs --use std=<path>");
-        return PARSE_ERROR;
-    }
-    if (!opts->emit_interface) {
-        usage_error(LIB_NO_ARTIFACT);
         return PARSE_ERROR;
     }
     return PARSE_OK;
@@ -576,26 +583,48 @@ fn target_form(string target) bool {
     return dots == 2 && digits > 0;
 }
 
-// Adds the compiler keys and the user keys to the one analysis session.
-fn configure(session.session mut* s, options* opts) void {
+// Appends the configuration map of the build to `keys` and `values`: the three compiler keys of
+// the target, and then the user keys in command-line order (D21.1).
+fn append_config(options* opts, containers.str_vec mut* keys, containers.str_vec mut* values)
+    void {
+    containers.str_push(keys, "target_os");
+    containers.str_push(keys, "target_arch");
     if (opts->target == "x86_64-linux-gnu") {
-        session.config_set(s, "target_os", "linux");
-        session.config_set(s, "target_arch", "x86_64");
+        containers.str_push(values, "linux");
+        containers.str_push(values, "x86_64");
     } else {
-        session.config_set(s, "target_os", "macos");
-        session.config_set(s, "target_arch", "aarch64");
+        containers.str_push(values, "macos");
+        containers.str_push(values, "aarch64");
     }
-    session.config_set(s, "target_abi", "");
+    containers.str_push(keys, "target_abi");
+    containers.str_push(values, "");
     u64 mut i = 0;
     while (i < opts->cfg_keys.len) {
-        session.config_set(s, containers.str_at(&opts->cfg_keys, i),
-                           containers.str_at(&opts->cfg_values, i));
+        containers.str_push(keys, containers.str_at(&opts->cfg_keys, i));
+        containers.str_push(values, containers.str_at(&opts->cfg_values, i));
+        i += 1;
+    }
+}
+
+// Adds the compiler keys and the user keys to the one analysis session.
+fn configure(session.session mut* s, options* opts) void {
+    containers.str_vec mut keys = containers.str_create();
+    defer containers.str_free(&keys);
+    containers.str_vec mut values = containers.str_create();
+    defer containers.str_free(&values);
+    append_config(opts, &keys, &values);
+    u64 mut i = 0;
+    while (i < keys.len) {
+        session.config_set(s, containers.str_at(&keys, i), containers.str_at(&values, i));
         i += 1;
     }
 }
 
 // The default --cc on both targets: the clang that PATH finds (D14.1, D14.3).
 string DEFAULT_CC = "clang";
+
+// The default --ar on both targets: the archiver that PATH finds (D9.11).
+string DEFAULT_AR = "ar";
 
 // Rejects a target that this IR mode cannot use before it creates output.
 // The front-end modes do not call this function.
@@ -855,6 +884,14 @@ fn remove_temp_dir(string dir, string ir_path) void {
 // Builds the --cc command line in the same order as bootstrap0/src/driver.c.
 fn cc_argv(containers.pool mut* p, options* opts, string ir_path, string out_path,
                 containers.str_vec mut* argv) void {
+    push_cc_line(p, opts, ir_path, out_path, opts->compile_only, argv);
+}
+
+// Pushes the --cc command line over the module `ir_path` to `argv`: with `compile` set, it
+// compiles the module to the object `out_path` (`-c`, no `-l` option); else it compiles and links
+// the program.
+fn push_cc_line(containers.pool mut* p, options* opts, string ir_path, string out_path,
+                bool compile, containers.str_vec mut* argv) void {
     containers.str_push(argv, opts->cc);
     containers.str_push(argv, join_path(p, "", "--target=", opts->target));
     // Use -O2 under --release and -O1 otherwise. The compiler does not optimize the IR.
@@ -866,7 +903,7 @@ fn cc_argv(containers.pool mut* p, options* opts, string ir_path, string out_pat
     containers.str_push(argv, "-fPIE");
     // The module carries its own target triple, which clang would warn about
     containers.str_push(argv, "-Wno-override-module");
-    if (opts->compile_only) {
+    if (compile) {
         containers.str_push(argv, "-c");
     }
     containers.str_push(argv, "-o");
@@ -874,7 +911,7 @@ fn cc_argv(containers.pool mut* p, options* opts, string ir_path, string out_pat
     // The one input is the module, which holds the whole program, the runtime
     // included. No -x ir: clang reads a `.ll` by its suffix and -x is sticky
     containers.str_push(argv, ir_path);
-    if (!opts->compile_only) {
+    if (!compile) {
         u64 mut i = 0;
         while (i < opts->libs.len) {
             containers.str_push(argv, containers.str_at(&opts->libs, i));
@@ -933,11 +970,13 @@ fn cc_command_free(cc_command mut* c) void {
     del(c->items);
 }
 
-// Reports either `cc failed with status N` or `cc failed with signal N`.
-fn error_cc_status(string what, i64 value) void {
+// Reports either `<role> failed with status N` or `<role> failed with signal N`, where `role` is
+// `cc` or `ar`.
+fn error_tool_status(string role, string what, i64 value) void {
     strbuf.str_buf mut m = strbuf.create();
     defer strbuf.free(&m);
-    strbuf.append(&m, "cc failed with ");
+    strbuf.append(&m, role);
+    strbuf.append(&m, " failed with ");
     strbuf.append(&m, what);
     strbuf.push(&m, ' ');
     strbuf.append_i64(&m, value);
@@ -989,11 +1028,20 @@ fn run_cc(options* opts, string ir_path, string out_path) i32 {
     containers.str_vec mut argv = containers.str_create();
     defer containers.str_free(&argv);
     cc_argv(&p, opts, ir_path, out_path, &argv);
-    cc_command mut cmd = cc_command_build(&argv);
+    return run_tool("cc", &argv);
+}
+
+// Runs the command `argv`, whose first argument names the program, and waits for it. `role` is
+// `cc` or `ar`, the word of the status messages. Returns EXIT_OK, or EXIT_USAGE after reporting
+// the failure: `cannot run '<program>': <reason>`, or `<role> failed with status <n>` or
+// `... with signal <n>`.
+fn run_tool(string role, containers.str_vec* argv) i32 {
+    string program = containers.str_at(argv, 0);
+    cc_command mut cmd = cc_command_build(argv);
     defer cc_command_free(&cmd);
     i32[2] mut fds = {};
     if (libc.pipe(&fds[0]) != 0) {
-        error_path("cannot run", opts->cc, str.from_cstr(libc.strerror(sys.errno())));
+        error_path("cannot run", program, str.from_cstr(libc.strerror(sys.errno())));
         return EXIT_USAGE;
     }
     if (libc.fcntl(fds[1], F_SETFD, FD_CLOEXEC) != 0) {
@@ -1001,7 +1049,7 @@ fn run_cc(options* opts, string ir_path, string out_path) i32 {
         // An open write end in --cc or its child keeps the read blocked until the last process
         // exits. This is only a delay. Report close failure here instead of treating it as a
         // missing errno.
-        error_path("cannot run", opts->cc, str.from_cstr(libc.strerror(sys.errno())));
+        error_path("cannot run", program, str.from_cstr(libc.strerror(sys.errno())));
         io.close(fds[0]);
         io.close(fds[1]);
         return EXIT_USAGE;
@@ -1011,7 +1059,7 @@ fn run_cc(options* opts, string ir_path, string out_path) i32 {
         i32 failure = sys.errno();
         io.close(fds[0]);
         io.close(fds[1]);
-        error_path("cannot run", opts->cc, str.from_cstr(libc.strerror(failure)));
+        error_path("cannot run", program, str.from_cstr(libc.strerror(failure)));
         return EXIT_USAGE;
     }
     if (child == 0) {
@@ -1047,19 +1095,19 @@ fn run_cc(options* opts, string ir_path, string out_path) i32 {
             e |= cast(got[i], u64) << (i * BYTE_BITS);
             i += 1;
         }
-        error_path("cannot run", opts->cc, str.from_cstr(libc.strerror(cast(e, i32))));
+        error_path("cannot run", program, str.from_cstr(libc.strerror(cast(e, i32))));
         return EXIT_USAGE;
     }
     if (waited < 0) {
-        error_path("cannot wait for", opts->cc, str.from_cstr(libc.strerror(sys.errno())));
+        error_path("cannot wait for", program, str.from_cstr(libc.strerror(sys.errno())));
         return EXIT_USAGE;
     }
     if (wait_signaled(status)) {
-        error_cc_status("signal", wait_signal(status));
+        error_tool_status(role, "signal", wait_signal(status));
         return EXIT_USAGE;
     }
     if (wait_status(status) != 0) {
-        error_cc_status("status", wait_status(status));
+        error_tool_status(role, "status", wait_status(status));
         return EXIT_USAGE;
     }
     return EXIT_OK;
@@ -1711,14 +1759,156 @@ fn compile_entry(options* opts, string program) i32 {
 
 // ---- the library build ---------------------------------------------
 
-// `--lib <name> <root> --emit-interface` (toolchain.md 2.1, D9.11): walks the root, loads and
-// checks every module of the library, lowers and verifies each body as --check does, and writes
-// its interface file to stdout. A root that
-// cannot be read or holds no module is exit 2, and a compile diagnostic is exit 1. The build
-// writes no file and runs no `--cc`, so it takes any target form, as a check does.
-fn library_entry(options* opts) i32 {
+// The suffix of an artifact directory, and the archive that a library build writes in its
+// temporary directory (toolchain.md 2.1 and 2.2).
+string ARTIFACT_SUFFIX = ".flib";
+string ARCHIVE_NAME = "lib.a";
+
+// The output of a library build: -o when given, else `<name>.ll` under -S, `<name>.o` under -c
+// and the artifact directory `<name>.flib` otherwise, each in the current directory. Interned in
+// `p`.
+fn library_output(containers.pool mut* p, options* opts) string {
+    if (opts->have_output) {
+        return containers.pool_intern(p, opts->output);
+    }
+    // -S and -c together stop at the IR, so -S decides the suffix
+    if (opts->emit_ir) {
+        return join_path(p, "", opts->lib_name, IR_SUFFIX);
+    }
+    if (opts->compile_only) {
+        return join_path(p, "", opts->lib_name, OBJECT_SUFFIX);
+    }
+    return join_path(p, "", opts->lib_name, ARTIFACT_SUFFIX);
+}
+
+// Whether a library build can use its target. It reports the usage error when it cannot, before
+// the build reads the root (toolchain.md 2.1, step 0). --emit-interface and -S write text, so they
+// take any target form; -c and the artifact compile an object, so they take the built target
+// alone.
+fn has_usable_target(options* opts) bool {
     if (!target_form(opts->target)) {
         usage_error_arg("unsupported target", opts->target);
+        return false;
+    }
+    if (opts->emit_interface || opts->emit_ir || opts->target == os.TARGET) {
+        return true;
+    }
+    eprintln("fort: error: cannot compile object for target '", opts->target, "' with a '",
+             os.TARGET, "' compiler");
+    eprintln(USAGE);
+    return false;
+}
+
+// Runs the compile line of a library build over the module `ir_path` (toolchain.md 2.1, step 7):
+// the --cc line with `-c` and no `-l` option, to the object `object_path`.
+fn compile_library(options* opts, string ir_path, string object_path) i32 {
+    containers.pool mut p = containers.pool_create();
+    defer containers.pool_free(&p);
+    containers.str_vec mut argv = containers.str_create();
+    defer containers.str_free(&argv);
+    push_cc_line(&p, opts, ir_path, object_path, true, &argv);
+    return run_tool("cc", &argv);
+}
+
+// Runs the archive line (toolchain.md 2.1, step 8), `<ar> rcs <archive> <object>`, which writes
+// an archive with one member, the object.
+fn archive_library(options* opts, string archive_path, string object_path) i32 {
+    containers.str_vec mut argv = containers.str_create();
+    defer containers.str_free(&argv);
+    containers.str_push(&argv, opts->ar);
+    containers.str_push(&argv, "rcs");
+    containers.str_push(&argv, archive_path);
+    containers.str_push(&argv, object_path);
+    return run_tool("ar", &argv);
+}
+
+// Writes the artifact `dir` (toolchain.md 2.1, step 9, and 2.2). It reads the archive once and
+// uses those bytes for its hash and for the copy in the artifact. `interface_text` is the
+// interface file and `source` the source hash of the library. The status is EXIT_USAGE after a
+// report: the archive or the compiler executable that cannot be read, or a file of the artifact
+// that cannot be written.
+fn write_artifact(options* opts, string dir, string interface_text, string source,
+                  string archive_path) i32 {
+    strbuf.str_buf mut archive = strbuf.create();
+    defer strbuf.free(&archive);
+    if (!io.read_file(archive_path, &archive)) {
+        error_path("cannot read", archive_path, str.from_cstr(libc.strerror(sys.errno())));
+        return EXIT_USAGE;
+    }
+    strbuf.str_buf mut compiler = strbuf.create();
+    defer strbuf.free(&compiler);
+    strbuf.str_buf mut exe = strbuf.create();
+    defer strbuf.free(&exe);
+    if (!artifact.hash_compiler(&compiler, &exe)) {
+        if (strbuf.view(&exe).len == 0) {
+            error("internal error: the system gives no path of the compiler executable");
+        } else {
+            error_path("cannot read", strbuf.view(&exe), str.from_cstr(libc.strerror(sys.errno())));
+        }
+        return EXIT_USAGE;
+    }
+    strbuf.str_buf mut interface_hash = strbuf.create();
+    defer strbuf.free(&interface_hash);
+    artifact.append_hash(&interface_hash, cast(interface_text, u8@));
+    strbuf.str_buf mut archive_hash = strbuf.create();
+    defer strbuf.free(&archive_hash);
+    artifact.append_hash(&archive_hash, strbuf.bytes(&archive));
+    containers.str_vec mut keys = containers.str_create();
+    defer containers.str_free(&keys);
+    containers.str_vec mut values = containers.str_create();
+    defer containers.str_free(&values);
+    append_config(opts, &keys, &values);
+    artifact.manifest mut m = artifact.manifest{};
+    m.library = opts->lib_name;
+    m.compiler = strbuf.view(&compiler);
+    m.target = opts->target;
+    m.release = opts->release;
+    m.no_bounds_check = opts->no_bounds_check;
+    m.cfg_keys = containers.str_items(&keys);
+    m.cfg_values = containers.str_items(&values);
+    m.cc = opts->cc;
+    m.cc_args = containers.str_items(&opts->cc_args);
+    m.ar = opts->ar;
+    m.source = source;
+    m.interface = strbuf.view(&interface_hash);
+    m.archive = strbuf.view(&archive_hash);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    artifact.write_manifest(&m, &text);
+    strbuf.str_buf mut failed = strbuf.create();
+    defer strbuf.free(&failed);
+    i32 mut failure = 0;
+    if (!artifact.write(dir, interface_text, strbuf.bytes(&archive), strbuf.view(&text), &failed,
+                        &failure)) {
+        error_path("cannot write", strbuf.view(&failed), str.from_cstr(libc.strerror(failure)));
+        return EXIT_USAGE;
+    }
+    return EXIT_OK;
+}
+
+// Removes the files that a library build wrote in the temporary directory, and then the
+// directory. An empty path names no file, and a file already gone is not an error.
+fn remove_library_temp(string dir, string@ files) void {
+    u64 mut i = 0;
+    while (i < files.len) {
+        if (files[i].len > 0) {
+            char mut@ own path = str.to_cstr(files[i]);
+            defer del(path);
+            libc.unlink(&path[0]);
+        }
+        i += 1;
+    }
+    remove_temp_dir(dir, "");
+}
+
+// `--lib <name> <root>` (toolchain.md 2.1, D9.11): walks the root, loads and checks every module
+// of the library, and lowers and verifies each body as --check does. --emit-interface then writes
+// the interface file to stdout. Else the build emits one IR module for the library, which -S
+// writes to its output. It compiles the module to an object, which -c writes to its output, and
+// else archives the object and writes the artifact `<name>.flib`. A root that cannot be read or
+// holds no module is exit 2, and a compile diagnostic is exit 1.
+fn library_entry(options* opts) i32 {
+    if (!has_usable_target(opts)) {
         return EXIT_USAGE;
     }
     tree.tree mut t = tree.tree{};
@@ -1738,8 +1928,11 @@ fn library_entry(options* opts) i32 {
     configure(&s, opts);
     diag.set_text(session.diags(&s), true);
     session.show_sources(&s);
+    // The build path releases the analysis before it spawns --cc, as compile_entry does, and the
+    // flag makes one of the two calls do the work.
     analysis mut an = analysis_create(&s);
-    defer analysis_free(&an);
+    bool mut analysis_live = true;
+    defer analysis_release(&an, &analysis_live);
     bool loaded = modules.load_library(&s, &an.set, opts->lib_name, opts->lib_root, &t);
     // D8.6 does not apply under --lib: a `main` of a library module is an ordinary function
     an.ck.require_main = false;
@@ -1755,8 +1948,53 @@ fn library_entry(options* opts) i32 {
     strbuf.str_buf mut text = strbuf.create();
     defer strbuf.free(&text);
     interface.write(&an.ck, &an.set, opts->lib_name, &text);
-    print(strbuf.view(&text));
-    return EXIT_OK;
+    if (opts->emit_interface) {
+        print(strbuf.view(&text));
+        return EXIT_OK;
+    }
+    containers.pool mut p = containers.pool_create();
+    defer containers.pool_free(&p);
+    string out_path = library_output(&p, opts);
+    if (opts->emit_ir) {
+        return emit_module(&s, opts, &an, out_path);
+    }
+    // The source hash reads the bytes that the build parsed, which the analysis holds.
+    strbuf.str_buf mut source = strbuf.create();
+    defer strbuf.free(&source);
+    artifact.hash_sources(&an.set, &source);
+    string mut parent = TMP_DIR_DEFAULT;
+    string dir = make_temp_dir(&p, &parent, &failure);
+    if (dir.len == 0) {
+        error_path("cannot create a temporary directory in", parent,
+                   str.from_cstr(libc.strerror(failure)));
+        return EXIT_USAGE;
+    }
+    string ir_path = join_path(&p, dir, opts->lib_name, IR_SUFFIX);
+    string mut object_path = out_path;
+    string mut archive_path = "";
+    if (!opts->compile_only) {
+        object_path = join_path(&p, dir, opts->lib_name, OBJECT_SUFFIX);
+        archive_path = join_path(&p, dir, ARCHIVE_NAME, "");
+    }
+    i32 mut built = emit_module(&s, opts, &an, ir_path);
+    // Release analysis storage before fork duplicates the process page tables.
+    analysis_release(&an, &analysis_live);
+    if (built == EXIT_OK) {
+        built = compile_library(opts, ir_path, object_path);
+    }
+    if (built == EXIT_OK && !opts->compile_only) {
+        built = archive_library(opts, archive_path, object_path);
+    }
+    if (built == EXIT_OK && !opts->compile_only) {
+        built = write_artifact(opts, out_path, strbuf.view(&text), strbuf.view(&source),
+                               archive_path);
+    }
+    string[3] mut written = {ir_path, "", archive_path};
+    if (!opts->compile_only) {
+        written[1] = object_path;
+    }
+    remove_library_temp(dir, written[..]);
+    return built;
 }
 
 // ---- the pipeline --------------------------------------------------

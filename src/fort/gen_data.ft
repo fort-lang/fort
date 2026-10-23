@@ -390,6 +390,10 @@ fn gen_global(gen.emitter mut* g, ast.node* decl) void {
     // is finished before the next begins.
     string name = gen.gen_symbol_ref(g, s);
     string ty = gen.gen_mem_type(g, s->ty);
+    if (g->module != null && g->module->interface) {
+        gen_external(g, s, name, ty);
+        return;
+    }
     strbuf.str_buf mut init = strbuf.create();
     defer strbuf.free(&init);
     const_value(g, &init, s->ty, decl->b);
@@ -412,7 +416,64 @@ fn gen_global(gen.emitter mut* g, ast.node* decl) void {
     strbuf.push(&g->globals, '\n');
 }
 
+// `@"m.X" = external dso_local constant <type>, align <n>`, or `global` for a `mut` global: the
+// declaration `s` of an interface module, which the object of its library defines
+// (module-system.md 10.4). A dependent reads no initializer of it.
+fn gen_external(gen.emitter mut* g, ast.sym* s, string name, string ty) void {
+    strbuf.append(&g->globals, name);
+    if (s->kind == ast.sym_kind.s_global) {
+        strbuf.append(&g->globals, " = external dso_local global ");
+    } else {
+        strbuf.append(&g->globals, " = external dso_local constant ");
+    }
+    strbuf.append(&g->globals, ty);
+    strbuf.append(&g->globals, ", align ");
+    strbuf.append_u64(&g->globals, types.type_alignof(s->ty));
+    strbuf.push(&g->globals, '\n');
+}
+
 // ---- declarations --------------------------------------------------------
+
+// `declare dso_local <result> @"m.f"(<parameters>) #0` for the bodiless function `s` of an
+// interface module (module-system.md 10.4). The parameters carry the attributes of the
+// definition, `sret(%T)`, `zeroext` and `signext`, and no names. Every declaration takes `#0`;
+// the definition in the library takes `#0`, or `#1` or `#8` when it is `noreturn`.
+fn emit_declaration(gen.emitter mut* g, strbuf.str_buf mut* out, ast.sym* s) void {
+    gen.signature mut sig = gen.signature_of(g, s->ty, null);
+    defer gen.signature_free(&sig);
+    string callee = gen.gen_symbol_ref(g, s);
+    strbuf.append(out, "declare dso_local ");
+    if (sig.ret_attr.len > 0) {
+        strbuf.append(out, sig.ret_attr);
+        strbuf.push(out, ' ');
+    }
+    strbuf.append(out, sig.ret);
+    strbuf.push(out, ' ');
+    strbuf.append(out, callee);
+    strbuf.push(out, '(');
+    u64 mut written = 0;
+    if (sig.sret.len > 0) {
+        strbuf.append(out, "ptr sret(");
+        strbuf.append(out, sig.sret);
+        strbuf.push(out, ')');
+        written += 1;
+    }
+    u64 mut i = 0;
+    while (i < sig.params.len) {
+        if (written > 0) {
+            strbuf.append(out, ", ");
+        }
+        written += 1;
+        strbuf.append(out, sig.params[i].ty);
+        if (sig.params[i].attr.len > 0) {
+            strbuf.push(out, ' ');
+            strbuf.append(out, sig.params[i].attr);
+        }
+        i += 1;
+    }
+    strbuf.append(out, ") #0\n");
+    gen.gen_use_attr(g, gen.ATTR_FN);
+}
 
 // `declare <ret> @name(<params>) nobuiltin` for the `extern fn` `s`, from the signature map of
 // gen.signature_of: the C types, unmangled, with `...` only for a declaration that writes it.
@@ -519,10 +580,17 @@ fn gen_finish(gen.emitter mut* g) void {
     emit_data(g, &data);
     strbuf.str_buf mut externs = strbuf.create();
     defer strbuf.free(&externs);
+    // The declarations start with the functions of the interface modules, which the unit never
+    // defines. A whole-program module has none.
+    u64 mut i = 0;
+    while (i < g->declared.len) {
+        emit_declaration(g, &externs, gen.syms_at(&g->declared, i));
+        i += 1;
+    }
     // Writes `extern` C functions in first-use order. The one C name the module defines is `main`,
     // and the checker refuses an `extern` that declares it. So no `declare` stands beside a
     // `define` of the same name.
-    u64 mut i = 0;
+    i = 0;
     while (i < g->externs.len) {
         emit_extern(g, &externs, gen.syms_at(&g->externs, i));
         i += 1;
