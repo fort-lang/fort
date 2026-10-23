@@ -12,10 +12,10 @@ migration, which T-255 ended, and section 17 gives the open questions and their 
 
 FIR has two jobs.
 
-**One derivation of each fact.** The compiler has three passes that read a function body: the
-checker, the emitter, and, on the branch `feat/local-linear-check`, the linear ownership analysis
-(T-182). Each pass derives the facts it needs from the syntax tree. When two passes derive one
-fact, the two answers can differ, and no test compares them. The project has met this four times:
+**One derivation of each fact.** The compiler has two passes that read a function body: the
+checker and the emitter. Each pass derives the facts it needs from the syntax tree. When two
+passes derive one fact, the two answers can differ, and no test compares them. The project has met
+this four times:
 
 - **The parameter types of a runtime entry.** The declaration in `std/rt.ft` gives them, and each
   call site that the emitter writes gives them again. In T-072, a call passed `i32` where the
@@ -27,8 +27,8 @@ fact, the two answers can differ, and no test compares them. The project has met
   `terminated` flag derives it again. The emitter writes `unreachable` because `check_terminates`
   says that the body terminates, so a disagreement is undefined behavior at run time.
 - **Which deferred statements run at an exit.** The emitter's scope stack derives it (D7.8), and
-  the frames and joins of the linear ownership analysis derive it again. The analysis can call a
-  path clean that the emitted code leaks on.
+  the frames and joins of a linear ownership analysis on the tree would derive it again. Such an
+  analysis can call a path clean that the emitted code leaks on.
 
 **A fixed core that new language features lower into.** A feature then touches two places: the
 checker, which says what the feature means, and one lowering rule, which says what the feature is
@@ -83,18 +83,13 @@ Each term has one meaning in this document.
 
 ## 3. The pipeline
 
-The compiler checks the complete import closure first (D19.8).
-It lowers and verifies available fort bodies before interprocedural ownership analysis.
-This includes runtime bodies in std.rt from std/rt.ft. Module order follows D9.10.
-Function order within each module follows source order.
-The function pipeline is:
+For each module in the order of D9.10, and for each function in source order:
 
 1. The checker has checked the whole closure (`toolchain.md` 2, step 3).
 2. The lowering makes the FIR function from the checked tree (section 9).
 3. The verifier tests it (section 10). A violation is an internal error: the compiler calls
    `panic` with the rule, the function and the block (D13.3).
-4. The flow analyses read it (section 14). Ownership summaries use the complete verified closure.
-   The analyses see every runtime check in every build mode.
+4. The flow analyses read it (section 14). They see every runtime check, in every build mode.
 5. The emptiness pass proves each overwrite check (section 11, D17.11). It runs in every build
    mode and under `--check`. An unproved check is a compile error.
 6. The build-mode pass rewrites it for the selected mode (section 11). The verifier runs again.
@@ -178,13 +173,6 @@ A FIR module holds:
 
 A function holds its symbol, its fort function type, its locals (5.3) and its blocks (5.4).
 
-Loan statements belong to the function's ordinary statement vectors (section 7).
-A loan ID identifies one emitted loop occurrence in that function.
-The lowering assigns IDs in creation order. Each deferred expansion takes a new ID.
-Runtime iterations of an occurrence use the same ID.
-FIR is the program. No second source walk supplies a loan or its duration.
-A clone copies loan statements with the other statements.
-
 ### 5.3 Locals
 
 A local has a number, a fort type, a kind, a location, and, for a parameter or a named local,
@@ -200,8 +188,6 @@ its symbol. The numbers stand in this order:
 
 A named local carries its name for the textual form and for diagnostics; the number is its
 identity. A local of an aggregate type is a place. Nothing holds an aggregate as a value (D19.3).
-Ownership proof binds an aggregate _0 to its actual caller destination before ordered effects.
-That destination can alias arguments or globals. A scalar _0 remains private to the callee (D19.8).
 
 ### 5.4 Blocks
 
@@ -250,40 +236,6 @@ pointer field first, as a `deref` does. Every other place is reached through mem
 can change (principle 4). The type of a place
 follows from its base and its projections. The address of a place is the rvalue `addr` (section
 6). A place that names a global constant is read-only (D7.10).
-
-These structural comparisons do not prove that actual caller arguments designate distinct storage.
-Ownership analysis substitutes actual source and alias relations before applying effects (D19.8).
-Taking an address, projecting a place, or using an unknown index supplies no proof exemption.
-An unknown destination keeps possible overlap and its ownership obligations (D17.14).
-
-For ownership proof, resolve places to storage identities and regions (`memory-model.md` 2.6;
-D17.15).
-The structural comparisons above remain conservative optimization rules.
-They do not replace instantiated caller aliases or captured index-value relations.
-Record a local's scope instance, the selected field path, and its known region.
-Record a dereference or span index's possible backing sources separately from the header slot.
-Bind each dynamic index to its value at that operation, not merely its local number.
-Retain finite equality, inequality, and range membership conditions when they establish selection.
-Different indices can prove separate element regions. They do not prove separate pointees.
-One proved concrete destination region permits a strong update, including its aliases.
-Multiple possible destinations require guarded alternatives or a conservative weak update.
-Preserve unselected contents, allocation obligations, and possible invalidation in each alternative.
-Nested aggregate fields and elements retain their own ownership and borrowed-source relations.
-An aggregate _0 uses caller destination identity (D17.15).
-Its local number supplies no fresh storage identity.
-No new projection syntax, LLVM representation, or runtime identity field follows from these rules.
-
-The proof needs these input facts from verified FIR and source-boundary metadata (D17.15):
-
-- Slot types, field paths, layout regions, and allocation or symbolic caller sources.
-- Captured index values, source relations, partition conditions, and possible aliases.
-- Ordered reads, writes, moves, calls, result destinations, and deferred expansions.
-- Local dead markers, temporary boundaries, and the implicit normal-return parameter boundary.
-- Source locations for storage creation, transfer, retention, invalidation, and required uses.
-
-FIR already supplies types, places, ordered operations, and source locations.
-Preserve source-defined boundaries that explicit lifetime statements do not identify.
-The data-carrier contract adds no source annotation or runtime field.
 
 ### 5.6 Operands and constants
 
@@ -336,7 +288,7 @@ place lends it (D17.4).
   hi)` of a fixed array gives a `mut` span. `mut` appears only on a slice of a fixed-array
   place. A slice of a span place or a `string` place keeps the `mut` of that place, and a
   `string` place gives a `string`.
-- `slice_ptr(a, lo, hi)`: the span `a[lo..hi]` of the pointer `a`, with no runtime check (D6.9).
+- `slice_ptr(a, lo, hi)`: the span `a[lo..hi]` of the pointer `a`, with no check (D6.9).
 - `alloc<T>(n)`: `std.rt.alloc` of `n` elements of `T`, where `n` has type `u64`; `T mut* own`
   (item 17). `T` is neither `void` nor a span (D10.2).
 - `aggregate T(a, ...)`: a struct literal with every field in declaration order, an array
@@ -378,9 +330,6 @@ Rules:
 - `del(move p)` frees the allocation that the owning value at `p` holds and empties `p` (D17.9,
   item 17).
 - `live(_n)` says that the scope of the named local `n` begins here.
-- `loan_begin L p [h]` opens collection loan `L` of place `p`.
-  Optional local `h` names the held header or address. It adds no executable read.
-- `loan_end L` closes collection loan `L`. It adds no executable read.
 - `dead(_n)` says that the scope of the named local `n` ends here. An analysis reports an owning
   local that still holds a value.
 
@@ -519,12 +468,6 @@ A parameter needs no statement. The translator stores each scalar parameter into
   A span or string header goes into a temporary with its outermost `own` removed.
   That header copy holds the pointer and length once, and lends the collection storage.
   The checker refuses operations that invalidate that storage inside the body (D17.10).
-  A span, string, or owning fixed array takes a new loan ID `L`.
-  The lowering writes `loan_begin L p [h]` after capture and before counter initialization.
-  `p` names the source collection place before any held address.
-  `h` names the header temporary or held address when this lowering makes one.
-  A copied non-owning fixed array takes no loan.
-  `loan_end L` is the first statement in done.
   A counter `_i: u64 = const u64 0`; the
   blocks head, body, step and done; `_c = lt(copy _i, len)` and `switch(copy _c)` in head, where
   `len` is the constant length of an array or `copy c.1` of a span or `string`; `live(_x)` and
@@ -600,8 +543,8 @@ so `G` is read before `bump` runs.
   _lo, copy _hi), gt(copy _hi, len))`; `check(copy _f, span, cast<i64>(copy _lo), cast<i64>(copy
   _hi), len)`; then `slice(a, copy _lo, copy _hi)` into the destination (item 16). When a bound
   contains a writer, the place of `a` is held as for an index (D6.3). On a pointer:
-  `slice_ptr(a, lo, hi)` with no runtime check (D6.9). A stored span or `string` header is read
-  after the explicit bounds. An absent upper bound uses the length from that read (D6.3).
+  `slice_ptr(a, lo, hi)` with no check (D6.9). A stored span or `string` header is read after
+  the explicit bounds. An absent upper bound uses the length from that read (D6.3).
 - **`-x`**: `sub(const 0, x)` with the overflow check for an integer; `fneg(x)` for a float.
   `!x` and `~x`: `not`.
 - **`x + y`, `x - y`, `x * y`** on integers: `_f = add_overflows(a, b)`, `check(copy _f,
@@ -703,18 +646,6 @@ as the location of their exit. The scope around a `for` falls off at the closing
 body. When an expansion holds an expansion of its own, the inner statements carry the location
 of the inner exit.
 
-A range loan stays open through head, body, and step.
-Body fall-off, continue, and loop break emit no loan statement. Done closes the loan first.
-The zero-iteration edge also reaches done with the loan open.
-An exit can cross a loop scope without stopping there. Today only return does this.
-Such an exit writes `loan_end L` immediately after that scope's `dead` markers.
-It writes the end before deferred statements of the next scope outward.
-A break from an inner switch keeps the range loan open.
-A return evaluates its expression before this unwind (9.6).
-A deferred statement that ends its block stops the unwind.
-That path ends in an abort terminator without an invented loan end.
-Each deferred expansion with a range loop takes a new loan ID.
-
 ### 9.6 Return and the end of a body
 
 `return e`:
@@ -732,34 +663,6 @@ At the end of the body, when the last block has no terminator, the fall-off rule
 lowers the deferred statements and the `dead` markers of the `fn` scope. Then a `void` function
 ends with `return`, a `noreturn` function ends with `trap` (D8.5, item 20), and any other
 function ends with `unreachable`, which rule V9 tests.
-
-The ownership proof reads this order, including the aggregate holding temporary (D19.8).
-A whole named aggregate move transfers all fields and leaves its complete source at zero (D17.6).
-Generated clearing of fixed temporary storage is separate from the abstract transfer state.
-At each normal return, parameter storage ends after deferred effects, even without dead markers.
-Check residual owned parameter leaves and escaping borrows at that boundary (D17.14).
-Ending a borrowed parameter slot does not end its symbolic caller source.
-Bind aggregate _0 to the caller destination, including aliases with arguments and globals.
-Check old destination obligations at overlapping result writes in their FIR order (D17.11).
-Check returned borrows after deferred effects. An aborting expansion has no normal continuation.
-
-The boundary checks apply to unused scalar and aggregate owner parameters (D17.15).
-An aggregate parameter's caller-made copy ends here, even though its bytes belong to a caller
-temporary.
-A returned address into that copy fails. A copied borrow into original caller storage retains that
-separate source.
-Scalar _0 is private storage; copying its returned value preserves the value's source relations.
-Aggregate _0 instead keeps the actual caller region and its lifetime.
-
-Apply operand effects before checking each destructive result write (D17.11, D17.15).
-A whole aggregate move reads its complete value, empties its abstract source, and then writes its
-destination.
-The proof applies that transfer to fixed temporaries even when LLVM omits their generated clearing.
-A same-slot result can therefore write into the source that its operand transfer just emptied.
-When a holding temporary exists, deferred effects precede the final _0 write.
-An alias can install a new owner in _0 during defer. Check that owner before the final replacement.
-Earlier completed result writes remain visible to later deferred effects.
-Neither result storage nor a holding temporary permits effect reordering or inline-address rebasing.
 
 ### 9.7 The statement index
 
@@ -821,7 +724,7 @@ the pass, the verifier excuses no kind. A `fail` always needs its entry. Only a 
 a test or an old `--std-dir` meets either error of a runtime entry. The compiler tests the entries
 of these errors alone: the print functions, `str_eq` and the entry of each check kind. It assumes
 the other `std.rt` functions that the translator calls, such as `alloc`, `free`, `args_init`,
-`args` and `shutdown`.
+`args` and `flush_all`.
 
 ## 10. The verifier
 
@@ -895,26 +798,6 @@ statement index.
   the empty set and every other block with the set of all temporaries, so a block that no edge
   reaches, such as the block after a terminator (D14.2), passes. V13 follows every edge, the edge
   that V9 prunes on a constant `switch` included.
-- **V14**: the verifier tests loan statements with these seven rules:
-  1. Each ID has exactly one reachable `loan_begin L p [h]`.
-     `p` is a well-formed span, string, or owning fixed-array place.
-     Optional `h` is a non-owning span or string temporary, or a held address temporary.
-  2. The walk starts at `bb0` with no open loan.
-     It follows all edges except unselected edges of a constant switch.
-  3. A begin requires its ID closed and opens it.
-     An end requires its ID to be the greatest open ID and closes it.
-  4. Incoming open-loan sets at a join must be equal.
-  5. A return has no open loan. Fail, trap, and unreachable have no loan constraint.
-     Goto, switch, and check pass the set unchanged.
-  6. No executable statement or terminator reads header `h` while its loan is closed.
-  7. The walk does not test unreachable blocks.
-
-V14 reports these exact messages:
-`a loan statement out of order`, `a loan has two begin statements`,
-`a return with an open loan`, `incoming loan states conflict`,
-`a read of a loan header while the loan is closed`, and
-`a loan of a place that is not a collection`.
-
 V9 closes the termination gap of section 1. The direct path wrote `unreachable` at the end of a
 body because `check_terminates` said that the body terminates, and the translator writes the
 `unreachable` that the lowering puts there for the same reason. With V9, a disagreement is an
@@ -1016,7 +899,7 @@ changes the function, and the verifier runs after it. The passes run in this ord
      `move` made.
    - **Order.** Within a statement, the pass applies the reads of its operands first, in operand
      order, then the kill of a `call`, then the kill rules of the store, then its gen rule.
-     `live`, `dead`, `loan_begin` and `loan_end` change no fact.
+     `live` and `dead` change no fact.
    - **Join.** A block starts with the intersection of the facts at the end of its
      predecessors. `bb0` starts with no fact, and every other block starts with all facts before
      the first iteration, so a block that no edge reaches passes, as in V13. The pass follows
@@ -1058,12 +941,6 @@ changes the function, and the verifier runs after it. The passes run in this ord
 5. The verifier again.
 6. The translator (section 12).
 
-The build-mode pass keeps loan statements in order.
-It removes only dead whole-temporary assignments and folds adjacent stores of fixed shape.
-A loan statement stops store folding. Block merging appends statements in order.
-The pass does not move an executable operation across a loan statement.
-V14 verifies the result again.
-
 FIR changes at two points of this order, and `--fir-after=<pass>` (D14.1) names them: `lower`
 is the output of the lowering (section 9), and `build-mode` is the output of step 4.
 
@@ -1079,8 +956,6 @@ of a check holds only in the modes that keep that check (section 14).
 The translator writes one FIR function as LLVM IR text. It keeps every item of `toolchain.md` 6;
 12.5 records where its text deviated from the text of the direct path, which T-255 deleted. It
 does not read the tree and it does not read the build mode.
-It emits no instruction, table, field, call, check, or trap for a loan statement (D19.8).
-Equivalent executable FIR emits identical LLVM text with and without loan statements.
 
 ### 12.1 Locals and places
 
@@ -1150,7 +1025,7 @@ Equivalent executable FIR emits identical LLVM text with and without loan statem
 - `call` is `call` with the signature of 12.3; an extern call carries `#3` (item 8).
 - `del(move p)` loads the pointer (field 0 for a span or `string`), calls `std.rt.free`, and
   zeroes `p` (item 17).
-- `live`, `dead`, `loan_begin`, and `loan_end` print nothing.
+- `live` and `dead` print nothing.
 
 ### 12.3 Signatures
 
@@ -1294,8 +1169,7 @@ param       = local_ref [ "(" identifier ")" ] ":" type ;
 local       = "let" local_ref [ "(" identifier ")" ] ":" type [ position ] ";" ;
 block       = block_ref ":" "{" { statement } terminator "}" ;
 statement   = ( assign | "del" "(" "move" place ")" | "live" "(" local_ref ")"
-              | "dead" "(" local_ref ")" | "loan_begin" uint place [ local_ref ]
-              | "loan_end" uint ) [ location ] ";" ;
+              | "dead" "(" local_ref ")" ) [ location ] ";" ;
 assign      = place "=" rvalue ;
 terminator  = ( "goto" block_ref | switch | "return" | check | fail | "trap" | "unreachable" )
               [ location ] ";" ;
@@ -1323,7 +1197,6 @@ location    = position [ "exit" line_col ] [ "s" dec_digit { dec_digit } ] ;
 position    = "#" line_col ;
 line_col    = dec_digit { dec_digit } ":" dec_digit { dec_digit } ;
 integer     = [ "-" ] ( dec_digit { dec_digit } | "0x" hex_digit { hex_digit } ) ;
-uint        = dec_digit { dec_digit } | "0x" hex_digit { hex_digit } ;
 local_ref   = "_" dec_digit { dec_digit } ;
 block_ref   = "bb" dec_digit { dec_digit } ;
 ```
@@ -1398,399 +1271,69 @@ fold no statement names `_3`, so `_3` gets no storage (12.1).
 
 ## 14. Flow analyses on FIR
 
-A flow analysis reads verified FIR before the build-mode pass (D19.8).
-The ownership proof checks the complete checked import closure, including available std.rt bodies.
-It reads places, types, calls, moves, source locations, and deferred expansions from FIR.
-It adds no source annotations or runtime ownership tracking (D17.14).
+A flow analysis reads a verified function before the build-mode pass. It may assume these facts:
 
-The analysis retains these verified-FIR facts:
+- every path from `bb0` ends in an exit or in an abort block;
+- an abort block is a sink: runtime errors do not run deferred code (D7.8, D11.4), and no rule
+  about the state at an exit applies to it;
+- a `switch` whose operand is a constant has one edge only, the edge that the constant selects,
+  as in rule V9. `while (true) { }` lowers to such a `switch`, and its false edge reaches a
+  `return` that never runs;
+- every deferred statement is on each path that runs it, and on no other path;
+- `own` is on the fort type of every local and place;
+- for a place that is not escaped (below), a value leaves it only through `move`, `del` or an
+  assignment over it, and a value enters it only through an assignment; `alloc`, `aggregate`,
+  `cast` and `call` are the rvalues that produce an owning value (D17.3), and a `call` transfers
+  an owning argument by the rule of D17.5 for its parameter type. A `cast` never adds `own`
+  (D3.14): a `cast` that produces an owning value takes it from its `move` operand, so the
+  value leaves the place of that operand and enters the destination, as a `move` does;
+- `check(overwrite: p)` reads `p` only to test it, and counts as no use of `p`. It exists to
+  detect the state the analysis tracks (D17.11). The pointers that the address of `p` loads are
+  uses, as section 7 says;
+- `dead(_n)` is where an owning local goes out of scope, and where a leak is reported;
+- every statement has a location, and a deferred copy has the location of its exit.
 
-- An abort block is a sink. Runtime failures run no deferred code (D7.8, D11.4).
-- A constant switch has only its selected reachable edge (V9).
-- Each deferred statement appears on each path that runs it, and on no other path.
-- Fort types carry own on locals and places. A cast never creates ownership (D3.14).
-- An overwrite check tests place contents. That validation read counts as no semantic use.
-- Statements carry source locations. A deferred expansion also carries its exit location.
+**Escape.** Storage that an address can reach can change without a statement that names its
+place. A place is **escaped** at a point of the function when one of these is true:
+- its base is a global, which every `call` and every write through a pointer can change;
+- an `addr` or a `slice` of the place, of a place that contains it, or of a place that it
+  contains, stands on some path from `bb0` to that point, whether the result is stored, passed to
+  a call or dropped. A `slice` counts because the span it makes points into the place;
+- it is `_0` of an aggregate type: `_0` is then the caller's storage (item 7), and the caller can
+  pass a pointer to that same storage as an argument (`s = f(&s)`) or name it as a global
+  (`G = f()`), so `_0` is escaped from `bb0`;
+- it contains a `deref`, or an index on a span or a `string`: it is storage that a pointer reaches.
 
-**Storage sources and effects.** Keep place contents separate from source validity.
-Sources include local storage, allocations, static storage, symbolic caller storage, and trusted
-foreign storage (D17.13, D17.14). Keep allocation identity separate from the owning place.
-Borrow copies preserve source relations. Moves transfer ownership and borrowed contents.
-A move preserves live heap views. It does not rebase addresses into inline storage (D17.6).
-Release invalidates the allocation source. Refilling an owner does not revive earlier borrows.
-A zero-element allocation still has a cleanup obligation (D17.9).
+At a `call`, at every assignment or `del` whose place may overlap an escaped place, and at every
+`move` operand whose place may overlap an escaped place (5.5), an analysis must treat every escaped
+place that may overlap it as changed to an unknown state; a `call` changes every escaped place. A
+`del` also frees the storage its value designates, so it changes every escaped place that contains a
+`deref` or an index on a span or a `string`, as a `call` does. D17.14 leaves use after free outside
+the ownership rules; an analysis that tracks views (T-190) needs this rule. The escape of a place is
+permanent for the rest of the function: FIR has no rule that ends it. That is a deliberate loss of
+precision, not an oversight: an address can be stored anywhere, and nothing in FIR says when the
+last copy of it dies. An analysis that tracks the state of an escaped place, such as the escaped
+state of the linear ownership analysis (T-182), takes that state from this definition. A place that
+is not escaped changes only through the statements that name it, which is what makes an analysis of
+locals exact.
 
-Read ownership changes from alloc, aggregate, cast, call, move, del, and stores.
-Casts preserve known sources and ranges. They add neither own nor mut (D3.14).
-A raw cast does not create foreign trust. Fort raw-pointer spans require source and extent proof
-(D6.9). Ordinary span bounds keep their runtime-check contract (D10.6).
-An empty del is legal. Shallow del requires prior release or transfer of live owned descendants.
-Owning stores check old destination leaves after right-side effects in all build modes (D17.11).
-A replacement store need not read a dead borrow's old value.
+An analysis must not derive a fact from the continuation edge of a `check` that a build mode
+removes (`overflow`, `shift`, `bounds`, `span`): the fact holds only in the modes that keep that
+check. The emptiness pass proves each overwrite check in every mode (D17.11). The continuation
+edge of every other kind, and every edge of a `switch`, carries a fact that holds in every mode.
 
-**Addresses and retained relations.** Taking an address never ends proof obligations (D17.14).
-Track sources and effects through globals, projected places, fields, elements, and fort calls.
-Retained source relations survive copies, casts, returns, and intermediate fort calls.
-An aggregate result is caller storage, which can alias an argument or a global.
-Bind _0 to that destination before result writes, reads, moves, and deferred effects (D19.8).
-Unknown overlap preserves alternatives. It does not establish an independent destructive update.
-There is no permanent escaped state that exempts a fort operation from proof.
-
-**Calls.** Infer summaries from all available fort bodies (D19.8).
-Use symbolic caller sources for borrowed inputs. Keep by-value parameter slots separate.
-A summary records required live sources, extents, empty output owners, and alias relations.
-It records consumed ownership, returned sources, retained sources, and ordered memory effects.
-It also records relevant result predicates, callback effects, and call exit outcomes.
-Substitute actual caller places, sources, and aliases before applying those effects.
-Two formal parameters need not designate distinct storage. Mutable aliases remain legal.
-Ownership through a pointer to an owning slot keeps ordinary overwrite and cleanup obligations.
-Report an unsatisfied caller requirement at the call. Reject an intrinsic local escape in the
-callee.
-Foreign declarations, results, and hidden effects use D17.13 trust.
-Preserve trusted foreign classification through fort wrappers. Keep other fort sources checked.
-Unknown fort targets or incomplete summaries supply no proof of safe effects.
-
-**Paths and storage end.** Check obligations on reaching FIR paths (D17.14).
-Different branch states are legal when later operations satisfy each state.
-Keep zero-iteration paths and residual obligations across loops and crossed scopes.
-Use borrow liveness to permit release after the last semantic use.
-An escaping result or retained field preserves caller obligations beyond local last use.
-The range loan lasts from `loan_begin` through `loan_end`, regardless of local last use (D17.10).
-The proof reads direct effects from actual FIR statements and ordered effects from call outcomes.
-It rejects changes to the collection, containing storage, and fixed-storage extensions.
-It permits an indirect element write after the collection path.
-A release cannot free the captured header allocation or an allocation that contains its path.
-An unknown captured allocation makes any release incomplete.
-An unknown call during the loan reports `cannot prove call preserves collection storage`.
-Trusted extern calls supply only signature transfers (D17.13).
-FIR place bindings map projected and global storage to ownership paths.
-The solver checks the current function, actual base, and actual projection sequence.
-Bindings for one global base use one ownership root and a complete root binding.
-Missing, mismatched, and unresolved bindings cannot prove preservation.
-A dead marker ends local storage and requires discharge of residual owned leaves.
-Temporary storage ends at its source-defined boundary.
-Parameter storage ends at every normal return after deferred effects, even without dead markers.
-Check residual owned parameter leaves and returned borrows after those effects.
-Do not end symbolic caller storage merely because its borrowed parameter slot ends.
-
-Summaries distinguish normal-return, abort, and unknown outcomes with relevant input conditions.
-Remove a caller continuation only when the instantiated summary proves absence of normal return.
-An unknown outcome keeps a possible normal continuation and its cleanup obligations.
-Abort paths, including runtime failures, require no ordinary cleanup (D7.8, D11.4).
-A function can have no normal return without a noreturn type.
-
-**Mode independence.** The proof rejects invalid and unproved fort obligations (D17.14).
-Lost precision retains obligations. It never supplies an operation-level escape.
-The proof result stays identical across checked, release, and bounds-check options (D19.8).
-Do not derive safety from a check that a build mode removes: overflow, shift, bounds, or span.
-The emptiness pass proves each overwrite check in every mode (D17.11).
-Other continuation edges and switch edges keep their existing facts.
-The proof preserves source evaluation order. It reads the order that FIR emits.
-It does not add a new span-header/index-expression order guarantee (D6.3).
-
-Whole-feature selection and migration follow `toolchain.md` 1 (D19.8).
-Selection requests complete proof even while source producers remain unavailable.
-Missing producers remain incomplete. Incomplete selected proof prevents code generation.
-Incremental audits and measured source repairs can precede complete feature qualification.
-Scoped CI enforcement accepts only its declared obligations. It supplies no complete closure proof.
-The coverage report separates correspondence, solver completion, and ownership acceptance.
-Retain checked symbols, FIR, and proof contexts until their dependent analyses finish teardown.
-Never combine checker-local pointers or numeric keys from different contexts.
-The complete ownership feature requires place, heap, raw-region, convergence, and global-boundary
-rules. This base contract makes no compiler-completion claim.
-
-### 14.1 Finite ownership analysis and outcomes (D17.18)
-
-**Abstract meaning.** A state represents possible concrete storage states and execution prefixes.
-Bottom represents no reaching execution. Unknown represents missing information, not empty storage.
-An operation needs proof for each represented feasible alternative that reaches it.
-No successful operation can rely on an alternative that the analysis omitted without proof.
-Keep input requirements separate from facts established by the function body.
-An inferred caller requirement cannot repair an intrinsic callee error or an unresolved analysis.
-
-**Finite domain.** Construct keys from the complete checked closure before solving summaries.
-Keys use declarations, FIR positions, types, symbolic inputs, and bounded structural templates.
-Do not create a new key for each loop iteration, call depth, or concrete allocation.
-The implementation publishes a finite positive bound for each category below.
-These bounds control analysis precision. They add no source-language size restriction.
-
-| Bound | Scope | Bounded content |
-|---|---|---|
-| D | path | Access-path projection depth, including recursive pointer traversals. |
-| R | state | Distinguished regions, allocation representatives, and region partitions. |
-| P | state | Predicate atoms, including nullness, equality, inequality, and range membership. |
-| G | state | Guarded alternatives of contents and of ownership and source combinations. |
-| H | state | Graph edges, structural templates, and their parameters, clauses, and descendants. |
-| T | call | Explicit indirect target alternatives. |
-| E | function | Ordered summary-effect nodes and symbolic summary relations. |
-| W | computation | Counted transfer, join, widening, substitution, and summary-solver work. |
-| V | report | Retained proof events, witness links, and rendered diagnostic records. |
-| X | witness | Path steps and conditions of one witness check. The production bound is 1024. |
-| K | witness | Projections of one storage key of a witness check. The production bound is 6. |
-
-D, R, P, G, H, T, and E count the content that their scope holds now.
-Removed content does not count. Insertion, join, and widening use the same count for a category.
-W is cumulative within one computation.
-X is cumulative within one witness check of one candidate event. Each statement, terminator,
-recorded condition, and leaf of a whole aggregate copy is one step.
-An alias condition of D17.18 is a recorded condition. The scans of the alias rule are no step,
-because the witness has no W meter. A read scans the referents with a store and, for each, the
-recorded pairs, so a read costs at most their product. Each recorded pair pays one X step, so
-the work stays bounded. A store scans the referents once to forget each name that it writes
-over.
-A refused X step leaves the candidate incomplete proof. It is not a work-budget failure.
-A place with more than K field and element projections in one storage key stops the witness
-check. That candidate stays incomplete proof too.
-A computation is the call-graph build, the liveness or flow analysis of one function, or the
-summary solver of one recursive component. A function in a recursive component keeps its own
-liveness computation.
-
-Keep slot contents, source validity, allocation obligations, and borrowed-source relations separate
-(D17.15). Keep allocation validity and obligation location as independent facts.
-A transfer changes the obligation location. It does not end the allocation source.
-Summary groups retain simultaneous multiplicity separately from alternative sources (D17.16).
-Multiplicity uses zero, one, and many; many means at least two simultaneous allocations.
-A state can represent a set of these three counts. Joining zero and one retains both alternatives.
-Releasing one member of many leaves one or many. It never proves the group empty.
-An inductive shape proof can discharge a whole region only under memory model 2.7.
-Preserve transferred regions and detached obligations outside that proof's discharged region.
-
-Predicate keys bind dynamic index values at the operation, not merely their mutable local names.
-A loop merge that loses that value identity adds possible equality and overlap.
-It cannot establish a strong update. Bounded index partitions include an explicit residual region.
-Every possible selected element belongs to a retained partition or its residual region.
-Use bounded numeric endpoints and unknown bounds. Do not unroll arithmetic into new symbolic keys.
-Keep trusted foreign classification separate from an unknown fort source or target (D17.13).
-
-**Joins and widening.** Order states by represented possibility: a larger state represents at least
-all executions of a smaller state. A join contains both predecessors, including their conditions.
-Possible sources, effects, invalidation, and obligations combine by union or a sound abstraction.
-A universal fact survives only if it holds in all represented alternatives.
-Null tests refine a matching value version until an overlapping write invalidates that correlation.
-A flag is a bool local that no address names and that a switch tests, directly or through copies
-and negations. A path state holds at most one known value for each flag.
-A write of a flag sets that value when the path knows the written value: a bool constant, a copy
-or a negation of a flag with a known value, or a comparison of a pointer local with null that the
-contents of the local decide. Any other write of the flag, and its storage end, remove the value.
-No other statement changes it.
-An address or a slice through a pointer designates storage in the referent of that pointer only
-when no dereference and no index of a span or a string follows its first dereference or index,
-and a slice there cuts no span or string header. Otherwise it designates the storage of a
-reference that it loads (D17.17).
-Such a value has a source only when it loads one reference out of the referent of a parameter.
-The base is a borrowed pointer parameter that no statement writes, moves or releases, and that
-no scope marker names. The place starts with its dereference, and only fields come before the
-second dereference or index of a span or a string. No dereference and no such index follows that
-one, and a slice there cuts no span or string header. A slice that cuts a span or string header
-in the referent itself loads that header.
-No write outside the frame can come before the load on a path from entry: no call, no `del`, and
-no store into or move out of storage behind a dereference or such an index, a global, or an
-aggregate `_0` (D17.15). So the loaded reference still holds its entry value. The value borrows
-the symbolic caller source of that reference, one source for each parameter and field path.
-The function requires that source live at entry. The caller satisfies that requirement at the
-call, as for its other input requirements (section 14, Calls). Until the caller summaries bind
-it, the source has unknown validity at entry, and the read of the load is incomplete proof.
-Other such values have no source that the analysis knows.
-An empty owner decides that a pointer local is null only when no address or slice through an
-indirection can fill the local, directly or through copies, moves, casts and views. An address
-at a non-zero offset from a null base is not null.
-A reference whose every borrow names the source of an allocation and designates storage in that
-allocation decides that the pointer is not null, because each allocation has at least one byte
-(D10.2). Other contents decide nothing, and two contents alternatives for the local decide
-nothing.
-A switch edge whose arm needs the other value of a known flag reaches no execution.
-An edge adds the value that its arm needs only where a read of the flag can follow before its next
-write. Elsewhere the edge removes the value. A join keeps a flag value only when each predecessor
-holds it.
-An empty owner on one predecessor alone causes no error and supplies no proof about other paths.
-
-Transfer functions are monotone in this order. They model the exact operation before abstraction.
-A proved release or transfer can discharge its selected obligation. A join cannot discharge it.
-Require one proved destination in each alternative before a strong update (D17.15).
-An unknown destination keeps selected and unselected alternatives through a weak update.
-
-At bound D, replace the longer path with a residual tail that covers every omitted projection.
-That tail can overlap earlier regions unless a retained structural predicate proves separation.
-At bounds R, P, G, H, T, or E, merge alternatives into a covering residual description.
-Do not drop a possible source, live obligation, release event, or required ordering constraint.
-Unknown effect order cannot prove that a read precedes a possibly aliasing release.
-Record the lost fact and its source location. Preserve independent facts that still have proof.
-A widened state never marks storage escaped, foreign, empty, or released merely to end analysis.
-
-Use fixed predicate vocabularies and canonical region and shape keys after widening.
-Widening retains its residual descriptions at later iterations. It does not create longer paths.
-Witness links use finite event keys and summary references, not an expanded recursive call stack.
-If a witness limit loses the proof of feasibility, classify the event as incomplete proof.
-These restrictions give a finite state space and prevent endless key generation.
-
-**Loops and recursive summaries.** Solve loops from their entry states, including zero iterations.
-Join back-edge contributions until the state stops changing under the bounded domain.
-Preserve obligations at break, continue, return, and storage end.
-Check effects on all finite execution prefixes, including prefixes of infinite executions.
-An infinite execution has no final normal-exit boundary merely because the solver stops iterating.
-
-Compute call-graph components and target sets in canonical order.
-Within a recursive component, use bounded symbolic inputs, result storage, globals, and alias cases.
-Infer guarded requirements, ordered effects, retained sources, results, and outcomes together.
-A provisional may-summary can start at bottom for fixed-point computation only.
-No caller can use that provisional bottom as proof of absent effects or absent return.
-Keep dependencies on an unresolved recursive call explicit until the component reaches a fixed
-point and validates its coverage and obligations.
-
-A complete summary covers each admitted input condition, target, and finite effect or exit path.
-It includes observable prefixes of recursion that never returns.
-Validate recursive shape arguments under memory model 2.7; recursion alone proves no cleanup.
-A stable provisional table with unresolved dependencies is still incomplete.
-Export unknown for those dependencies and report affected unproved obligations.
-The finite domain guarantees stabilization or a counted-budget error, not acceptance of all inputs.
-
-**Exit outcomes.** Conditions partition ordinary function return, known normal process termination,
-abort, and unresolved foreign termination. Memory model 2.9 defines their boundary requirements.
-Keep divergence separate from a terminating outcome. It supplies no normal-return cleanup result.
-Unknown fort outcomes represent unresolved possible outcomes and retain a possible proof
-continuation with caller obligations. This continuation adds no FIR block or LLVM edge.
-A complete instantiated summary can remove a caller-return continuation only by proving no return.
-An incomplete summary cannot remove an existing caller continuation or its cleanup obligations.
-A verified noreturn type supplies its existing no-return fact (D8.5). It supplies no abort proof.
-Retain possible normal-process-termination requirements while fort outcome analysis is incomplete.
-A following defensive trap proves nothing about the callee's termination class.
-Do not confuse missing fort effects with trusted foreign effects.
-Compose mixed target outcomes under their conditions, including actual aliases and result values.
-An abort alternative needs no cleanup. It cannot remove a normal alternative's obligations.
-
-**Deterministic limits.** Use a versioned table of numeric implementation bounds for D, R, P, G,
-H, T, E, and V. The witness checker fixes X and K as constants of its source
-(`ownership_witness.PRODUCTION_X` and `PATH_DEPTH`), and the bound table above gives their values.
-The W bound of a computation is a function of its FIR size S:
-`W(S) = W_base + W_scale * S`. The same versioned table supplies W_base and W_scale.
-The FIR size of a function is its FIR statement count plus its block count.
-The FIR size of a computation is the sum over its functions. The graph build uses all its bodies.
-Saturate W(S) at the counter maximum. A W bound from this function is not a limit increase.
-Publish the table and each computation's FIR size with reproduction commands.
-Publish measured effects before feature qualification.
-The same compiler, checked input closure, target configuration, and table give the same verdict,
-primary errors, notes, and limit locations.
-Check and build use the same proof inputs and boundaries.
-Release and bounds-check options do not change this analysis (D19.8).
-
-Schedule functions by canonical module and declaration keys, blocks by FIR number, and operations
-by their position. Sort set alternatives and work queues by their keys.
-Use a fixed category order for budget charges and a fixed tie order for simultaneous limits.
-Define a work unit for each category. Record the used count and bound at exhaustion.
-Do not use elapsed time, available memory, address order, or thread arrival as a proof budget.
-Numeric counter saturation means exhaustion. It never wraps to a fresh budget.
-
-A precision limit marks only the facts that its abstraction loses.
-If retained facts still prove an obligation, accept that operation without a limit error.
-Otherwise emit incomplete proof at the operation that needs the missing fact.
-A work-budget failure stops the affected computation and marks its output incomplete.
-That status stays in the published result. A new meter for the same computation cannot remove it.
-Preserve known obligations and witnesses. Other computations can continue within their budgets.
-Emit a budget error even when no later source use consumes the incomplete output.
-If V prevents normal event storage, retain one terminal incomplete-proof record in reserved space.
-Compilation cannot succeed with a suppressed or unrecorded incomplete result.
-Use toolchain 4.2 for witness classes, event content, stable ordering, and cascade suppression.
-
-**Seven analysis traces.** A01 to A07 specify states, transitions, and verdicts.
-Their small bounds are trace inputs, not numeric production defaults.
-A names a concrete allocation. P names symbolic caller storage.
-These traces are design arguments. They are not current compiler probe results.
-
-A01: Access-path growth. Set D = 2. Successive traversals name p, p.next, and p.next.next.
-A third traversal maps p.next.next.next to the residual tail p.next.next.*.
-A fourth traversal remains in that tail. The access-path key set now stops growing.
-Keep any owned descendants, released sources, and borrow relations that enter the tail.
-Without a retained live-source invariant, dereferencing the tail gives incomplete proof.
-Expected reason: cannot prove live storage after access-path widening.
-
-A02: Loop multiplicity. Each iteration links a fresh site-S allocation into owned chain root p.
-Earlier iterations remain live through owned edges.
-The entry count is zero. One iteration gives one. Two iterations give many.
-The joined loop state is {zero, one, many}; another iteration leaves that set unchanged.
-If a branch releases one selected allocation, many leaves {one, many}, not zero.
-A normal scope end that loses those remaining owners rejects the path with a validated witness.
-Two concrete iterations witness at least one residual allocation after one release.
-A separate complete chain-drain invariant can prove empty without counting concrete iterations.
-
-A03: Recursive convergence. Let f(P,b) return P when b is true; otherwise it calls g(P,true).
-Let g(P,b) call f(P,b). Neither function changes P or its storage.
-Use simultaneous rounds. Write Nf and Ng for their discovered normal-return conditions.
-Round 0 gives (false, false). Round 1 gives (b, false). Round 2 gives (b, b).
-Round 3 gives (true, b). Round 4 gives (true, true). Round 5 changes nothing.
-Each discovered result preserves source P. Provisional missing returns remove no continuation.
-Complete path coverage at the fixed point proves that both results designate caller storage P.
-Accept each return with its live-source requirement. Ending a parameter slot does not end P.
-
-A04: Target growth. Set T = 2. A call first has {keep}, then {keep, release}.
-A third fort target produces {keep, release, residual-fort-targets}.
-The residual alternative covers the third target and later matching fort alternatives.
-It remains fort. It supplies neither foreign trust nor an empty effect set.
-Keep the known release alternative and its source event. Do not discard its possible invalidation.
-Without complete substituted effects and conditions, a later dependent read gives incomplete proof.
-Expected reason: cannot prove the call preserves the read's source for all possible fort targets.
-A target-set entry alone is not a validated concrete reaching-path witness.
-
-A05: Work exhaustion. Set the transfer-work bound W = 2 for this trace.
-Operation 1 allocates A into p. Operation 2 lends view(A) into v.
-Operation 3 proposes del(p). Charging its transfer needs work unit 3 and exceeds the bound.
-Do not pretend that del ran, that A became empty, or that later code cannot return.
-Keep A's obligation and v's source relation. Mark the remaining effects and outcomes incomplete.
-Reject with used = 2, bound = 2, and the attempted operation as the limit location.
-Do not claim a leak or use-after-free from this unexecuted abstract transfer.
-
-A06: Unknown recursive exit. The caller owns A and calls an unresolved recursive component.
-The component has no complete normal-return, abort, or normal-process-exit summary.
-Retain a possible return continuation carrying A's possible residual obligation.
-If the following caller return lacks cleanup, its cleanup proof is incomplete.
-Report cannot prove completed cleanup at that return; note the unresolved recursive call.
-Missing return entries prove no abort or divergence.
-A recursive component that reaches a complete no-return proof can remove the return continuation.
-It must still apply any proved normal-process-termination requirements.
-This verdict holds when a parameter of the callee can own a value, or when the call goes through
-a value. A witness crosses a direct call of a fort callee that has a returning type and no
-parameter that can own a value: it assumes that the callee returns (D17.18). After that call, a
-caller return that lacks cleanup of A is a lost owner, a violation, when A's owner is a local
-slot or a leaf of a local struct or array, and no FIR address names that storage.
-The witness takes no branch after the call whose condition depends on an entry value that the
-call can read (D17.18). The call can read an entry value through an argument that depends on
-it. It can also read one through a value that the caller stored before the call, except in a
-local whose storage no FIR address names. An argument of an earlier call, an extern call too,
-counts as stored. After a branch whose condition depends on any entry value, the witness
-crosses no fort call. Such a branch or call leaves the event incomplete proof. So
-`require(n < 100)` before `if (n >= 100) { return; }` gives incomplete proof at that return.
-So does a validator that reads n through a pointer, a view or a global that the caller wrote.
-A callee that does not return for the inputs that it gets on the witness path still makes a
-violation after its call false. Give a function that never returns a noreturn type; the
-compiler does not check this.
-Amended 2026-10-08: A06 made each leak after an unresolved fort call incomplete proof. The user
-ruled that a callee without a parameter that can own a value cannot release or transfer A when
-A's owner is a local slot or a leaf of a local struct or array, and no FIR address names that
-storage (D17.9, D3.14). So the obligation of A stays exact across the call. The analysis
-follows no other owner across the call. So `release(&buf)` with a `u8 mut@ own mut*`
-parameter, a release through a `holder mut*` parameter of an owner in the heap, and a release
-of a global owner give no such witness. A callee that never returns normally makes the
-reported violation false. The cost is a false violation, never a missed one.
-Amended 2026-10-09: The user ruled to narrow the walk, in place of accepting a false violation
-for a callee that aborts for some values only. The witness takes no branch on an entry value
-that a crossed call can read, through its arguments or through a value that the caller stored.
-
-A07: Mixed outcomes. The caller owns A. Under c, a complete target summary returns without change.
-Under !c, another complete target summary aborts. A deferred del(p) belongs to caller return.
-The normal continuation has condition c and retains A until that deferred del releases it.
-The abort alternative has condition !c and requires no ordinary cleanup.
-Accept the complete cleanup trace. Removing defer makes the normal path lose A at return.
-Condition c and that ordered return path validate the lost-ownership witness.
-Replacing the abort target with known normal process termination instead applies memory model 2.9.
+The linear ownership analysis, the refinement of null states and the analysis of local views
+(T-182, T-188, T-190) are analyses of this kind. Each supplies a state for each place and a
+transfer function for each statement. The first analysis that needs a framework for the join at
+each block and the fixpoint of each loop builds it. FIR itself does not hold one.
 
 ## 15. Extending the language
-
-The ownership proof of section 14 uses FIR places, moves, storage boundaries, and ordered effects
-(D17.14, D19.8). It is not a deferred language feature.
 
 Each feature that D15 defers, where it goes with FIR, and what changes in the core, the
 translator and the analyses:
 
-- **Definite assignment**: an analysis over stores, moves, and places. No change to the core.
+- **Linear ownership and definite assignment**: an analysis over `move`, `dead` and the
+  places. No change to the core.
 - **Compile-time function evaluation**: the interpreter of section 11. The checker must then
   lower and run a function while it checks another one, so the pipeline of section 3 changes to
   lower on demand. No change to the core.
@@ -1913,8 +1456,7 @@ Each item of `toolchain.md` 6 that describes a function body, and the part of FI
 - **Item 16, bounds checks**: the kinds `bounds` and `span`; the index projection; `slice` and
   `slice_ptr`.
 - **Item 17, `new` and `del`**: `alloc`, `del`, and the kind `alloc_count`.
-- **Item 18, ownership**: `move`, `loan_begin`, `loan_end`, the kind `overwrite`, and entry zeroing
-  (9.2). Loan statements emit no LLVM instruction.
+- **Item 18, ownership**: `move`, the kind `overwrite`, and the zeroing of the entry block (9.2).
 - **Item 19, builtins**: the lowering of the print family, `assert` and `panic` (9.4).
 - **Item 20, `noreturn`**: `trap`, rule V8, and the end of a body (9.6).
 

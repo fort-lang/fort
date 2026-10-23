@@ -31,9 +31,7 @@ file (D14.1). Options and the entry file may appear in any order.
 | `--target <triple>` | select the IR target; pass it to `--cc` (D14.1)              | see below  |
 | `--cfg <list>`      | add compile-time `key=value` pairs; repeatable (D21.1)      | none       |
 | `-Xcc <arg>`        | passed to `--cc` verbatim, after the arguments below       | none       |
-| `--check`           | check source and selected ownership proof (D20.1)          | off        |
-| `--ownership-check` | request complete ownership proof (D19.8)                  | off        |
-| `--ownership-report <file>` | write coverage JSON; needs ownership selection    | none       |
+| `--check`           | run the front end only and stop (D20.1)                    | off        |
 | `--json`            | write the check document to stdout (D20.2), needs `--check`| off        |
 | `--index`           | fill the document's identifier index (D20.3)               | off        |
 | `--tokens`          | write the entry file's tokens to stdout and stop (D14.1)   | off        |
@@ -46,40 +44,7 @@ file (D14.1). Options and the entry file may appear in any order.
 | `--help`            | print the usage line and exit 0                            |            |
 | `--version`         | print the compiler version and exit 0                      |            |
 
-Ownership delivery uses one temporary --ownership-check option (D19.8).
-It always requests complete proof in check mode and build mode. There is no stage selection option.
-Run all integrated analyses before build-mode transformations. Missing producers remain incomplete.
-Complete proof with zero violations exits 0. Violations or incomplete proof exit 1.
-Usage, tool, and internal failures exit 2. Incomplete selected proof prevents code generation.
-Reject ownership selection with --tokens, --ast, --fir, --fir-after, --fir-test, or
---fir-verify-report. Selection permits --fir-stats in build mode.
-It never exempts an operation, an imported fort module, or an available runtime body.
-Ordinary unselected builds retain their behavior.
-
---ownership-report takes the following argument and requires --ownership-check (D19.8).
-The last report path wins. It names a separate file, not stdout or stderr.
-The report records coverage under section 1.1. It changes neither text diagnostics nor JSON version
-1.
-Incomplete proof uses the existing error diagnostic format. Report-writing failure exits 2.
-Reject a report path that names an input or a compiler output. Preserve those files.
-Check mode can create the report's temporary file. It still creates no build temporary directory.
-
-Permit source audits, measured source repairs, and scoped CI enforcement during delivery (D19.8).
-The first audit gate validates inventory, report integrity, and tool execution.
-It accepts exit 0 or 1 with valid fresh evidence. Violations and incompleteness remain
-informational.
-Scoped enforcement rejects violations, missing bodies, and incomplete proof within its declared
-scope.
-Results outside that scope remain visible. Scoped acceptance never changes the compiler exit status.
-Keep existing build and fixpoint gates. Use source and FIR fixtures during feature development.
-Keep the conservative range-call guard until complete selected proof establishes loan preservation.
-Complete feature qualification and source migration before default enablement.
-Then require analysis by default and remove --ownership-check.
-Incremental reports do not claim current compiler completion.
-The proof adds no runtime ownership checks. It preserves the representations and ABI in section 6.
-
-- `-o`, `-I`, `--std-dir`, `--cc`, `--target`, `--cfg`, `--ownership-report` and `-Xcc`
-  take the following argument;
+- `-o`, `-I`, `--std-dir`, `--cc`, `--target`, `--cfg` and `-Xcc` take the following argument;
   `-l<lib>` is one argument. `-I` roots are searched in command-line order (D9.2) and `-Xcc`
   arguments are passed in command-line order. The last `-o`, `--std-dir`, `--cc` and `--target` win.
 - `--cc` must name a clang, since nothing else reads LLVM IR (D14.1, D19.1).
@@ -221,23 +186,12 @@ The proof adds no runtime ownership checks. It preserves the representations and
   `spec/fir.md` 13 and exits 0 (D14.1). A diagnostic of the prelude or of the FIR text writes no
   FIR and exits 1. The pass `none` runs nothing. The pass `verify` runs the verifier of
   `spec/fir.md` 10 on each function, and the first violation ends the compiler with a panic.
-  The pass `ownership-local` runs the local ownership analysis of `--ownership-check` on each
-  function, in text order (D17.14, D17.18). It runs no other analysis, so it gives no closure
-  proof. It first tests each function with the verifier in report mode. A broken rule writes
-  `fort: error:` and the violation, with no panic, and exits 2, as a verification failure of
-  `--ownership-check` does (1.1). Each validated violation is an error and a note at its
-  location. A function with no violation and an incomplete local proof gets one
-  `ownership proof is incomplete` error at its first incomplete reason (4.2). After an error
-  the pass writes no FIR and exits 1. A complete local proof proves one function in the local
-  scope of 1.1. The pass `ownership-local` must come before every pass `build-mode`, because
-  the proof reads the FIR before that pass (D19.8); after one it exits 2.
   The pass `build-mode` runs the build-mode pass of `spec/fir.md` 11 on each function, and does
   not run the verifier. Its arguments `--release` and `--no-bounds-check` select the mode, and
   with no argument it runs the default mode. The compiler reads every directive before it runs
-  a pass. An unknown pass, an argument of `none`, `verify` or `ownership-local`, and an
-  argument of `build-mode` that is no mode exit 2. `--fir-test` takes the target rule of
-  `--check` and is a usage error together with `--tokens`, `--ast`, `--check`, `--json`,
-  `--index`, `--fir` or `--fir-after`.
+  a pass. An unknown pass, an argument of `none` or `verify`, and an argument of `build-mode`
+  that is no mode exit 2. `--fir-test` takes the target rule of `--check` and is a usage error
+  together with `--tokens`, `--ast`, `--check`, `--json`, `--index`, `--fir` or `--fir-after`.
 - `--fir-verify-report` implies `--fir` and takes its target rule. It lowers each function of
   the closure as `--fir` does and runs the verifier of `spec/fir.md` 10 in report mode, first on
   the output of the lowering and then, when the function keeps every rule, on the output of the
@@ -255,7 +209,7 @@ The proof adds no runtime ownership checks. It preserves the representations and
   signature (`spec/fir.md` 9.8). For the entry of a check kind, another form is other parameters
   than rule V7 requires. A check that the selected mode removes needs no entry.
   The compiler assumes the other `std.rt` functions that it calls (`alloc`, `free`, `args_init`,
-  `args`, `shutdown`) and does not test them.
+  `args`, `flush_all`) and does not test them.
   `--fir-stats` then writes one line to stdout after the module is written, `lowered N of M`: N
   functions that the translator wrote of M definitions of fort functions in the closure, the
   compiler-emitted `main` not counted. A refusal is a compile error, so in a line that a build
@@ -336,280 +290,6 @@ FORT_STD_DIR=/opt/fort/std fort main.ft
 The only environment variables read are `FORT_STD_DIR` (D14.1) and `TMPDIR`, which locates the
 temporary directory for the intermediate IR file (D19.1).
 
-### 1.1 Ownership coverage reports (D19.8)
-
-The compiler report is a JSON version 6 document. The audit attestation is a JSON version 1
-document.
-Neither document changes the diagnostic JSON of section 4.1.
-The compiler writes one report for one checked closure. The runner attests the invocation and bytes.
-The compiler needs no git executable, revision option, or cryptographic hash implementation.
-These versions require the members and types below. Reject duplicate JSON members and unknown
-versions.
-All count and key integers are nonnegative. Source lines and columns start at 1.
-Integers exclude Boolean values and fit u64. Context-local function keys fit u32.
-Count overflow gives report failure, not wrapped totals.
-
-**Compiler report.** The top-level object has these members:
-
-| Member | Type and meaning |
-|---|---|
-| `kind` | String `fort-ownership-report`. |
-| `version` | Integer 6. Version 2 adds `w_scale`, `fir_size`; 3 local; 4 raw; 5 stored; 6 exit. |
-| `complete` | Boolean true; the report is complete, not necessarily its proof. |
-| `compiler_version` | The string that --version identifies. |
-| `invocation` | Entry, working directory, arguments, target, configuration, and mode. |
-| `files` | Array of the loaded source files. |
-| `enumeration` | Selected body count, inactive declaration count, and enumeration status. |
-| `analyses` | Availability and closure outcome for each named analysis. |
-| `limits` | The versioned numeric production limit table. |
-| `meters` | Actual counted ledgers and their separate scopes. |
-| `bodies` | One row for each discovered selected fort body. |
-| `totals` | Counts derived from the body rows. |
-| `boundary` | The process-exit boundary of the closure: its kind and its proof. |
-| `first_incomplete` | The first incomplete reason, or null. |
-| `failure` | The first front-end, lowering, verification, analysis, or tool failure, or null. |
-| `verdict` | String `accepted`, `rejected`, or `failed`. |
-| `exit_status` | Integer 0, 1, or 2; the compiler's final status. |
-
-`invocation` contains `entry`, `cwd`, `argv`, `target`, `configuration`, and `mode`.
-Entry, working directory, and target are strings. Arguments form a string array without argv[0].
-Configuration is an array of objects with string `key` and `value`, sorted by key.
-It contains effective values, including target-supplied values and last-option overrides.
-Mode contains Boolean `check`, `release`, and `no_bounds_check` members.
-The entry and each file path use the loader's filename. The runner normalizes paths for comparison.
-
-Each file row contains integer `id`, string `path`, and string `module`.
-File IDs start at 0 and increase without gaps in loaded-file order.
-`enumeration` contains Boolean `complete`, integer `selected_bodies`, and integer
-`inactive_declarations`. Count functions with bodies in inactive configuration branches separately.
-Count neither extern declarations nor inactive bodies as selected bodies.
-Lexical counts never establish a complete checked-body denominator.
-Front-end failure can prevent complete enumeration. Retain discovered rows and set its status false.
-
-Use these seven analysis names, in this order:
-`graph`, `liveness`, `local`, `stored_borrows`, `raw`, `calls_heap`, and `process_exit`.
-Each `analyses` row contains `name`, `producer`, and `status`.
-Producer is `integrated` or `unavailable`. Status is `complete`, `incomplete`, `failed`, or
-`unexecuted`. An unavailable producer has an incomplete closure outcome, even with no selected body.
-Closure outcomes include required non-body facts, such as globals and generated startup.
-The report runs integrated analyses. It never substitutes supplied test facts or permissive
-services.
-`limits` contains integer `version`, `d`, `r`, `p`, `g`, `h`, `t`, `e`, `w`, `w_scale`, and `v`.
-Use the actual production table. Do not copy numeric values into this specification (D17.18).
-`w` and `w_scale` are W_base and W_scale of the FIR-size W function (`fir.md` 14.1).
-
-Each meter row contains integer `id`, string `name`, `owner`, integer `fir_size`, `counts`, and
-`first_refusal`.
-Owner is null for a closure computation, or the context-local function key of its computation.
-`fir_size` is the FIR size of that computation.
-Counts form an array with string `category` and `scope`, plus integer `used` and `bound`.
-A W count has the bound `w + w_scale * fir_size`, saturated at the u64 maximum.
-Each other count has the bound of its table member.
-Category uses D, R, P, G, H, T, E, W, or V. Scope uses ownership_api.limit_scope names.
-Report only categories the actual ledger measures. Absence does not mean zero use.
-First refusal uses the reason object below, or null. Meter IDs start at 0 without gaps.
-The first milestone names the existing graph ledger `graph_private` and service ledgers `services`.
-The local increment adds one `local` ledger for each verified body: its local flow computation.
-A `local` ledger has an owner. Its FIR size equals the FIR size of that body's service ledger.
-Local correspondence can need a second local flow run, the classification run.
-It runs when the first run has a failure, no validated violation and no refusal.
-It drops the outside effects of calls and non-local releases.
-When it ends within its budget and fails nothing, each failure depends on those effects.
-Then the body leaves the local scope. Any other end keeps the body in that scope.
-Its first pass keeps one joined path state for each block, as if G were 1.
-Only a first pass that fails a step needs the second pass, with the production G.
-The classification run is a computation of its own, with a `local_classification` ledger.
-That ledger has the owner and the FIR size of the body's `local` ledger.
-A refusal there explains no failure: the body stays in the local scope with incomplete proof.
-The ledger keeps that refusal, and the compiler emits its budget error.
-The stored-borrow increment adds one `stored_borrows` ledger for each verified body.
-It is the stored run: the local steps, and the steps of struct and array leaves, stack
-sources and range loans.
-Its FIR size equals the FIR size of that body's service ledger.
-Its classification run has a `stored_borrows_classification` ledger with the same owner and
-FIR size. The rules of the local classification run apply to it.
-A stored violation that the local run validates at the same operation counts once, in the
-`local` row.
-The raw increment adds one `raw` ledger for each verified body: its raw computation.
-A `raw` ledger has an owner. Its FIR size equals the FIR size of that body's service ledger.
-The process-exit increment adds one `process_exit` ledger for each verified body: its first
-pass, its second pass and the witness walks of its definite failures. It has an owner, and its
-FIR size equals the FIR size of that body's service ledger.
-It also adds one `process_exit_fills` ledger when the boundary runs, that is when enumeration,
-checking, lowering and verification of each body succeed: the call-graph step that decides which
-bodies can fill an owning global. That ledger has no owner, counts W only, and has the sum of the
-FIR sizes of the `process_exit` ledgers.
-The graph FIR size is the sum of the service ledgers only.
-Graph construction uses the graph's retained private W ledger.
-Service dispatch, liveness, and the target queries of one body charge that body's service ledger.
-Report these scopes separately.
-Never sum separate ledgers as one shared meter. Never reset or split a computation to hide refusal.
-Required accounting that no ledger covers remains incomplete. Graph completion supplies no shared
-graph/liveness accounting claim.
-
-Each body row contains `source`, `key`, `checking`, `lowering`, `verification`, `analyses`,
-`ownership`, `violations`, and `first_incomplete`.
-`source` contains integer `file`, `line`, `col`, `end_line`, `end_col`, and `instance`, plus string
-`module` and `name`. Its file ID refers to `files`. Its range identifies the declaration name.
-Ranges use section 4.1. Instance is 0 for ordinary v1 function definitions.
-`key` is null before canonical key construction, or an object with integer `module`, `declaration`,
-and `instance` from ownership_api.function_id.
-Assign module keys in checked dependency order and declaration keys in selected source order.
-Number keys from 0. Keys remain local to this checked closure.
-The normalized path, name range, name, and instance define source identity across contexts.
-The module name remains context metadata. Numeric keys and pointers do not define source identity.
-
-Checking, lowering, and verification each use `complete`, `failed`, or `unexecuted`.
-Each body's analysis array contains the seven named rows in the same order.
-A row contains `name`, `correspondence`, `solver`, `proof`, and integer `violations`.
-Correspondence and solver use `complete`, `incomplete`, `failed`, or `unexecuted`.
-Proof and body ownership use `complete`, `violated`, `incomplete`, `failed`, or `unexecuted`.
-Complete correspondence means the stage has all required facts for that body's declared obligations.
-A solver can finish with incomplete correspondence. Its proof remains incomplete unless independent
-facts prove all affected obligations (D17.18).
-Only validated errors increment violations. Abstract possibilities remain incomplete proof.
-Body violations sum its analysis violation counts. Do not count the same diagnostic twice.
-After successful prerequisites, unavailable analysis rows have unexecuted correspondence and solver,
-and incomplete proof.
-Do not run a dependent stage when checking, lowering, or verification fails.
-Retain its row with unexecuted correspondence, solver, and proof.
-Missing rows never mean successful analysis.
-Derive body ownership from proof rows with this precedence: failed, violated, incomplete,
-unexecuted, complete. A failed prerequisite makes body ownership failed.
-Retain incompleteness separately when a validated violation also exists.
-
-`totals` contains integer `bodies` and `violations`, plus checking, lowering, verification, and
-ownership counter objects. Each counter names all statuses allowed for that field, including zeros.
-It also contains an `analyses` array with the seven names and correspondence, solver, and proof
-counter objects, plus integer `violations`.
-Each status counter object's counts sum to the selected body count.
-The body count equals the row count and `enumeration.selected_bodies`.
-These totals count context-body occurrences. They do not combine proofs from overlapping closures.
-
-`boundary` contains string `kind`, integer `leaves`, string `correspondence`, string `proof`,
-and `first_incomplete`. Kind is `executable` when the entry module has a selected `main`, and
-`library` otherwise (D17.19, D20.1). Checking failure does not change the kind. Leaves counts
-the owning global leaves of the closure. The elements of one fixed array count as one leaf.
-Correspondence and proof use `complete`, `incomplete`, or `unexecuted`.
-A cleanup body of a leaf leaves it empty at each normal return. In that body, each release or
-move of the leaf has the owned descendants of its value proved empty, and each store into the
-leaf finds it empty. The body has no hand-out. A hand-out moves a value that can hold an
-allocation out of the frame: into an owning global, an indirect owning place or a fort call
-argument; through a fort call while an owner of the frame whose address the body takes can hold
-an allocation; or into an extern call through an argument whose type reaches a writable owning
-slot, because D17.13 applies that signature transfer. Two cleanups could otherwise pass one
-allocation between leaves. The body alone decides these rules, with each fort call in it taken
-as unknown. No fort function that the body reaches through fort calls can fill an owning
-global: none has a hand-out, none has a first pass that a limit refused, and none makes an
-indirect fort call. The closure decides this over its call graph as one computation with its own
-W bound (D17.18). A refused computation proves no cleanup and gives the first boundary reason. A
-fort function that foreign code calls back stays outside these rules, and so does an address
-that foreign code retains from an earlier call. D17.13 keeps hidden foreign retention, writes
-and callback effects outside proof, and keeps known fort facts across an extern call. So a
-callback, or a later extern call through a retained address, can fill a leaf after a cleanup.
-An executable boundary follows the generated call of `std.rt.shutdown` after source main. It
-proves a leaf when `std.rt.shutdown` is a cleanup body of that leaf.
-A library boundary proves a leaf when some body of the closure is a cleanup body of that leaf.
-A leaf that the boundary does not prove then needs a summary: of source main in an executable,
-or of a cleanup wrapper in a library. Such a leaf outside std.rt makes correspondence
-incomplete. Such a std.rt leaf keeps correspondence complete and makes proof incomplete, because
-the runtime cleanup must prove it. Proof is complete only with complete correspondence and each
-leaf proved. Unexecuted means that enumeration, checking, lowering, or verification of a body
-failed. First incomplete is a reason object with stage `process_exit`, or null.
-The `process_exit` closure status is complete only when each body proof and the boundary proof
-are complete.
-
-Each reason object contains `stage`, `code`, `source`, and `limit`.
-Stage is `enumeration`, `checking`, `lowering`, `verification`, `tool`, or an analysis name.
-Code is a string. Incomplete reasons use ownership_api.incomplete_reason names or
-`missing_producer`.
-Failure codes use `source_error`, `unsupported_lowering`, `verification_failure`,
-`analysis_failure`,
-or `tool_failure`. Source is null without a location, or has `file`, `line`, `col`, `end_line`,
-and `end_col`. These members are integers.
-Limit is null, or an object with string `category` and integer `used` and `bound`.
-Category uses D, R, P, G, H, T, E, W, or V. Keep the first refused charge and its location.
-A W limit has the W bound of the meter that refused the charge.
-Use analysis order, then canonical function and source order, to select a report's first reason.
-Keep each affected body's first incomplete reason even when report diagnostics reach their limit.
-Stream coverage rows or retain bounded summary records. The report requires no expanded proof trace.
-Failure to retain required rows or write them gives exit 2. Never publish truncated coverage.
-
-Accepted means exit 0, complete enumeration, complete closure outcomes for all seven required
-analyses, complete body proofs, and zero violations.
-Unavailable producers prevent exit 0, including missing non-body obligations in an empty closure.
-An empty body array alone establishes no complete ownership acceptance.
-Rejected means exit 1. Failed means exit 2.
-Source errors and unsupported lowering exit 1. Verifier violations and internal service failures
-exit 2.
-Keep available failed and unexecuted rows in either case. A crash may produce no valid report.
-Solver completion, graph completion, and a complete JSON document do not establish ownership safety.
-
-Write to a new temporary file beside the report path. Complete the document, close it, then rename
-it
-atomically over that path. Publish only a complete document with `complete: true`.
-On report failure, remove the temporary file and exit 2. An older destination can remain unchanged.
-The runner therefore uses a fresh report path that does not exist before the invocation.
-After a successful ownership proof, a later build-tool failure updates the final report outcome.
-An error before report initialization can leave no report. CI treats that case as a failed attempt.
-
-**Audit attestation.** The runner writes a `fort-ownership-audit` version 1 object.
-Its members are `kind`, `version`, `complete`, `source_revision`, `compiler_revision`,
-`compiler_sha256`, `target`, `configuration`, `inventory`, `attempts`, and `totals`.
-Revisions are full git object names from source and compiler build provenance. They need not match.
-The compiler digest and all other SHA-256 values are 64 lowercase hexadecimal characters.
-The runner verifies the compiler bytes and source bytes before and after each invocation.
-It rejects changed bytes, missing provenance, mismatched revisions, and missing or invalid reports.
-Capture candidate .ft input hashes before invocation under the entry, search, and standard roots.
-Reject a reported file that the captured input manifest lacks.
-
-Target is a string. Configuration uses the compiler report's key/value array.
-Inventory is a sorted string array of tracked compiler paths from `git ls-files -- src/fort`.
-Retain paths ending in .ft. Run main.ft first, then the remaining roots in inventory order.
-An attempt row contains `root`, `cwd`, `argv`, `exit_status`, `report_path`, `report_sha256`, and
-`inputs`. Inputs contain normalized `path` and `sha256` for each reported closure file.
-Root, working directory, and report path are strings. Arguments form a string array, including
-argv[0].
-Exit status is an integer. Report digest is null when no report exists. Inputs form an object array.
-Each input path and digest is a string. Preserve failed attempt evidence even when validation fails.
-Normalize compiler source paths relative to the audited checkout. Normalize standard files relative
-to the selected standard root, with a `std/` prefix. Keep other files as absolute paths.
-The context identity is the root, target, effective configuration, search roots, and standard root.
-Capture search and standard roots from the invocation. Do not merge local numeric keys across
-contexts. Use normalized source identities to deduplicate file and declaration counts only.
-
-Attestation totals contain `root_attempts`, `unique_files`, `unique_source_bodies`, and
-`context_bodies`. Count the first two from attempts and input paths. Count the latter two from body
-identities and body rows. Each inventory root has one attempted invocation for this target.
-Each total is an integer. Retain unsuccessful attempts. Exit 2 or invalid evidence fails the audit.
-Use atomic publication for the attestation too. Its complete marker describes complete evidence.
-It grants no ownership acceptance.
-
-The first CI validator accepts exit 0 or 1 only with fresh valid reports and a valid attestation.
-It checks names, versions, types, identities, status combinations, row totals, and invocation bytes.
-It rejects missing roots, duplicate identities within a context, stale paths, and truncated
-evidence.
-It also rejects incomplete selected-body enumeration. Discovered rows prove no complete denominator.
-Preserve that failed root and report. Unsupported lowering can remain valid exit-1 audit evidence
-when its selected-body denominator is complete.
-Exit 2 or a missing valid report fails the gate. No coverage-regression baseline applies initially.
-The local scope declares a body when that body's `local` correspondence is complete.
-Scoped local enforcement rejects each local violation in any body.
-It also rejects each declared body whose `local` proof is not complete.
-The stored scope declares a body when its `stored_borrows` correspondence is complete.
-Scoped stored enforcement rejects each `stored_borrows` violation in any body.
-It also rejects each declared body whose `stored_borrows` proof is not complete.
-The raw scope declares a body when that body's `raw` correspondence is complete.
-Scoped raw enforcement rejects each raw violation in any body.
-It also rejects each declared body whose `raw` proof is not complete.
-The process-exit scope declares a body when its `process_exit` correspondence is complete.
-Scoped process-exit enforcement rejects each `process_exit` violation in any body.
-It also rejects each declared body whose `process_exit` proof is not complete.
-It also rejects a boundary whose correspondence is complete and whose proof is not complete.
-Later scoped enforcement reads the same reports and requires complete proof within its declared
-scope.
-It never converts exit 1 into accepted complete compiler proof.
-
 ## 2. Build pipeline
 
 Compilation is whole-program (D9.10):
@@ -633,9 +313,6 @@ Compilation is whole-program (D9.10):
    closure beside the entry file. The compiler loads it whether or not anything imports it (D9.10,
    D21.2, D21.3, section 5).
 3. Check every module in dependency order, imported modules first (exit 1).
-   When ownership analysis is selected, lower and verify the available fort bodies in the closure.
-   Infer summaries and check ownership obligations before build-mode transformations (D19.8).
-   This includes std.rt from std/rt.ft. A proof failure is a source error (exit 1).
    In every build mode, lower and verify each fort body of the closure, and run the emptiness
    pass of `fir.md` 11 on it (D17.11). An overwrite check that the pass cannot prove is a source
    error (exit 1).
@@ -665,8 +342,7 @@ Compilation is whole-program (D9.10):
 
 `--check` stops after step 3 (D20.1): it emits no module, creates no temporary directory, runs no
 `--cc`, and does not apply the entry-point rule of D8.6, since the file it is given is a module
-under inspection rather than a program. Selected ownership analysis uses symbolic inputs for
-available fort bodies. Check and build modes use the same ownership proof (D20.1, D19.8).
+under inspection rather than a program.
 `--check` runs the emptiness pass of step 3 too, so it reports each overwrite error that a build
 reports (D17.11).
 
@@ -690,45 +366,6 @@ modules in the import closure are read (module-system.md 10). A `--std-dir` (or 
 that does not hold the library therefore fails every compile, a program with no `import` at all
 included, with `module 'std.rt' not found` naming a module the user never wrote: the runtime is
 read from there like any other standard library module.
-
-### 2.1 Ownership entry and exit boundaries
-
-Selected analysis checks all available fort bodies, including uncalled bodies (D17.19, D19.8).
-It preserves global state and inferred caller requirements across ordinary function returns.
-Library checking uses symbolic inputs and global states.
-It still rejects local leaks and invalid source uses at their applicable boundaries.
-It does not invent a foreign host call sequence or an executable entry.
-Check and build modes use the same proof for the same closure and boundary assumptions (D20.1).
-
-A build supplies the generated executable boundary (D11.6).
-Account for static global initialization, runtime args_init, args, and source main in order.
-The runtime argument-owning global exists even when source main has no argument parameter.
-Positive argc allocates its headers. Nonpositive argc leaves it empty.
-On source main return, apply its defers before its normal-return checks.
-Then the generated call of `std.rt.shutdown` flushes runtime buffers and releases the
-runtime-owned argument-header storage, in that order.
-Check final owning-global emptiness before the generated C return.
-Include imported library and runtime globals, and live owned descendants of their allocations.
-Generated startup and shutdown can lie outside source-function FIR.
-A count of lowered fort functions does not prove coverage of those generated effects.
-Require explicit analysis coverage of the complete generated sequence.
-
-Known normal process termination through std.sys.exit or std.rt.exit has the same final obligation.
-Apply runtime cleanup before that boundary. Do not check argument-owner emptiness at call entry.
-Establish the cleanup from analyzed fort bodies or verified generated effects.
-An intended runtime guarantee does not replace an absent implementation effect.
-These calls execute no caller defers and automatically delete no user globals.
-Residual owners in suspended caller frames must also discharge before normal termination.
-Infer and instantiate these requirements through fort wrappers and indirect fort targets.
-Check prior releases, transfers, and retained borrows in their actual effect order.
-
-Panic, runtime failures, and compiler traps use the abort cleanup exemption (D17.19).
-Noreturn alone supplies no normal-exit or abort classification.
-Unresolved foreign termination uses D17.13 trust and establishes no proved final boundary.
-Unknown fort bodies receive no such exemption.
-Library cleanup requirements and external host limits appear in memory-model.md 2.9.
-These rules change no ABI representation. The runtime cleanup is the entry point
-`std.rt.shutdown` of section 5.1: the generated `main` and `std.rt.exit` call it (D11.6).
 
 ## 3. Build modes
 
@@ -757,17 +394,10 @@ two's complement; "masked" means `count & (width - 1)`. No build mode emits a ru
 store into an `own` place: the emptiness pass proves each one at compile time (D17.11).
 Programs must not rely on wrapping or
 trapping for correctness (D11.1); the wrapping operators exist for code that needs wrap-around in
-both modes. A raw-pointer span adds no runtime range check (D6.9).
-Fort storage still requires source and extent proof. Foreign storage uses D17.13 trust.
-The undefined behaviors of D10.7 remain undefined in every mode.
+both modes. `p[lo..hi]` on a raw pointer is never checked (D6.9), and the undefined behaviors of
+D10.7 are undefined in every mode.
 
 ## 4. Diagnostics
-
-Ownership errors use the existing source diagnostic contract (D17.14, D20.1).
-Check and build modes report the same proof verdicts under the same entry and boundary assumptions.
-Library checking retains inferred global requirements; a build instantiates them at executable
-entry.
-JSON keeps its existing schema and includes the same error and note ranges (D20.2).
 
 Compile-time diagnostics (D14.2) are written to stderr. Each one starts with a header line:
 
@@ -978,88 +608,6 @@ several:
   compiler reaches a verdict: a usage error, a toolchain error or an internal error leaves stdout
   empty and exits 2 (D14.1).
 
-### 4.2 Ownership proof diagnostics (D17.18)
-
-Selected ownership analysis uses the text format of section 4 and the JSON form of section 4.1.
-Ownership rejection and incomplete proof are compilation errors with exit 1.
-Use the same source ranges, messages, notes, and order in both forms.
-JSON version 1 gains no ownership-specific fields.
-
-**Evidence classes.** A concrete reaching-path witness identifies feasible input conditions and
-ordered FIR effects that reach the invalid operation.
-Validate its alias substitutions, branch conditions, source identities, and effect order.
-A witness can cross loops or recursive summaries only with a validated path or inductive argument.
-A collection of independent may-facts does not supply that validation.
-A witness can also cross an unresolved direct call of a fort callee that has a returning type and
-no parameter that can own a value, a recursive callee included. It assumes that the callee
-returns (D17.18, fir.md 14.1 A06): that is the one input condition that it does not prove.
-After that call it takes no branch whose condition depends on an entry value that the call can
-read (D17.18): through an argument, or through a value that the function stored before the call
-outside a local whose storage no FIR address names. An argument of an earlier call counts as
-stored. After a branch whose condition depends on any entry value, it crosses no fort call.
-Such a branch or call leaves the event incomplete proof.
-Amended 2026-10-08: a witness crossed no unresolved fort call. A callee that never returns
-normally makes such a witness false. The cost is a false violation, never a missed one.
-Amended 2026-10-09: a witness took each branch after a crossed call. A callee that aborts for
-some values only, such as `require(n < 100)`, then gave a false violation.
-
-A validated witness permits a path-dependent error: the operation fails on that reaching path.
-Use unconditional wording only when the invalidity holds on all represented reaching paths.
-An abstract possibility without a validated witness permits only an incomplete-proof error.
-It does not establish that the program has an actual memory error.
-Loss of witness precision cannot remove the safety obligation or produce successful compilation.
-
-| Event | Primary error location and content |
-|---|---|
-| Invalid use | The use; identify the place and invalid source on the validated path. |
-| Lost ownership | The overwrite, shallow release, or storage end; identify the residual owner. |
-| Failed caller requirement | The call; identify its unsatisfied substituted requirement. |
-| Incomplete proof | The affected operation; name the unproved storage or cleanup requirement. |
-| Work-budget failure | The attempted operation; identify the work category and bound. |
-
-Each event retains the responsible function and operation key, source range, reason, and evidence
-class. It also retains the relevant source and owner paths, conditions, and finite witness links.
-An input-branch condition states the selected Boolean arm. An integer-switch condition states the
-selected typed label or `otherwise`.
-It retains the certainty of its invalid fact. `definite` means that the fact holds on each
-execution that the producer's state represents. `choice` means that the fact holds for some value
-of a free input of the caller. `possible` means that the fact can hold on some represented
-execution, or on none.
-A precision-limit event names its category, numeric bound, and first source point that loses the
-required fact. A work-budget event records its used count and the attempted operation.
-These internal events are compiler interfaces. They require no source or foreign contract syntax.
-
-Attach notes for allocation, lending, release, transfer, or storage end when they explain the error.
-An unsatisfied caller requirement notes the callee operation and the substituted caller source or
-alias. A deferred-effect note includes its registration range and the applicable exit range.
-A limit note states what the abstraction loses. Do not state that widening releases storage.
-Use "cannot prove" for missing proof. Do not use "use after release" without validated invalidity.
-
-Representative primary messages follow. The named paths and counts come from the event.
-
-```sh
-case.ft:8:5: error: cannot prove that 'view' designates live storage
-case.ft:4:13: note: access-path depth 2 loses the required source relation here
-case.ft:9:5: error: ownership analysis exceeds the transfer-work bound 2
-case.ft:9:5: note: 2 work units complete; this operation needs another work unit
-case.ft:12:5: error: cannot prove completed cleanup at this return
-case.ft:7:5: note: this incomplete fort summary preserves a possible caller return
-```
-
-The numbers in these examples illustrate event rendering. They select no production limit.
-Do not emit both an incomplete-proof and budget error for the same unresolved obligation.
-Preserve proved independent errors when another operation gives incomplete proof.
-Suppress a dependent cascade only for the same operation, source relation, and underlying reason.
-Do not silence a separate owner, call requirement, storage boundary, or termination outcome.
-Diagnostic suppression affects rendering, not abstract state, obligations, or the final verdict.
-
-Order ownership events by canonical module and function keys, then source range, operation key,
-event class, and source relation key. Sort notes by causal role and then their stable source keys.
-Use that same order for duplicate selection and report-budget exhaustion.
-Do not use work-queue arrival or allocation addresses to select the first diagnostic.
-If a report bound omits detail, preserve a terminal incomplete-proof error and exit 1.
-The implementation records its numeric bounds and measured coverage under FIR 14.1.
-
 ## 5. The runtime
 
 The runtime is `std.rt`, an ordinary fort module (`<std-dir>/rt.ft`) that the compiler loads into
@@ -1174,19 +722,12 @@ fn flush_all() void;
 // module (section 6 item 22): it calls `args_init`, which builds the argument
 // span from `argv` (one string per argument, NUL-terminated, since it is the
 // `argv` byte sequence itself), then `args`, then the entry module's `main`,
-// then `shutdown`. It returns status & 0xFF.
-// args() lends the span during source execution and applicable source defers.
-// shutdown is the runtime cleanup. It flushes every buffer first. Then it
-// releases the runtime-owned header allocation and leaves args_store empty.
-// The strings borrow argv bytes; shutdown does not release those bytes.
-// A call that finds args_store empty releases nothing.
-// exit calls shutdown, then ends the process through foreign exit with
-// status & 0xFF. sys.exit calls exit. Neither path automatically deletes user
-// globals. exit does not run caller defers. Section 2.1 fixes the final
-// obligation boundary.
+// then `flush_all`, and returns `status & 0xFF`. The span lives for
+// the whole process and `args()` hands it out for `sys.args()`. `exit`
+// flushes every buffer and ends the process with `status & 0xFF`;
+// `sys.exit` is a call to it.
 fn args_init(i32 argc, char* mut* argv) void;
 fn args() string@;
-fn shutdown() void;
 fn exit(i32 status) noreturn;
 ```
 
@@ -1289,17 +830,11 @@ interactive path, and the script drives a compiled program on a real pseudo term
 ## 6. Code generation contract
 
 This section is normative for the compiler. The LLVM IR module it emits must satisfy every item
-and must pass `opt -passes=verify` (D19.1).
-The two worked examples illustrate LLVM types, calls, data, and runtime checks.
-They use hand-written runtime stubs instead of the complete std.rt module (item 8, D9.10, D13.1).
-Their args_init stubs allocate no argument headers. Their args stubs return an empty span.
-Their `shutdown` stubs release nothing, and they retain no runtime argument owner.
-Production startup with positive argc creates that owner and requires final cleanup (D17.19).
-The examples omit production allocation and cleanup effects. They are not exact complete compiler
-output.
-Item 22 defines the required production entry sequence and its cleanup call, `std.rt.shutdown`
-(section 5.1).
-A change to the emitter's text is a change here.
+and must pass `opt -passes=verify` (D19.1). The two examples at the end are what the compiler
+emits for their programs, as the goldens of `bootstrap0/test/gen_module_test.c` hold it, plus a
+hand-written definition of each `std.rt` entry point the example calls, over the C library,
+where a module the compiler builds holds the whole of `std.rt` (item 8, D9.10, D13.1). A change
+to the emitter's text is a change here.
 
 1. **Form and module header.** One textual module (`.ll`, LLVM 18 syntax, opaque pointers) holds
    the whole program (D9.10, D19.1) and is built by appending text. It
@@ -1744,51 +1279,48 @@ A change to the emitter's text is a change here.
     other and carries `dso_local` and `#0` (item 4, item 7). It calls the entry module's `main`
     directly. When that `main` declares the parameter, `@main` passes `ptr %args`, the span it
     built in its own frame. That span is the caller-made copy of item 7, so the callee uses it in
-    place and no second copy exists (item 10).
-    The following Linux ABI fragments show startup and source-entry calls.
-    The call of `std.rt.shutdown` is the runtime cleanup of section 2.1. It flushes and then
-    releases the argument headers, before the final obligation boundary and `ret`.
+    place and no second copy exists (item 10). The examples below show Linux IR:
 
     ```llvm
+    define dso_local i32 @main(i32 %argc, ptr %argv) #0 {
+    entry:
       %args = alloca %fort.span, align 8
       call void @"std.rt.args_init"(i32 %argc, ptr %argv)
       call void @"std.rt.args"(ptr sret(%fort.span) %args)
       %t0 = call i32 @"main.main"(ptr %args)
-      call void @"std.rt.shutdown"()
+      call void @"std.rt.flush_all"()
+      %t1 = and i32 %t0, 255
+      ret i32 %t1
+    }
     ```
 
     When the entry module's `main` takes no parameter, the call passes no argument and the rest
-    follows the same rule:
+    is the same:
 
     ```llvm
+    define dso_local i32 @main(i32 %argc, ptr %argv) #0 {
+    entry:
       %args = alloca %fort.span, align 8
       call void @"std.rt.args_init"(i32 %argc, ptr %argv)
       call void @"std.rt.args"(ptr sret(%fort.span) %args)
       %t0 = call i32 @"main.main"()
-      call void @"std.rt.shutdown"()
+      call void @"std.rt.flush_all"()
+      %t1 = and i32 %t0, 255
+      ret i32 %t1
+    }
     ```
 
     `std.rt.args` returns an aggregate, so it takes the destination as the hidden result pointer
     of item 7, written `sret(%fort.span)` on its own definition.
     The call writes `call void @"std.rt.args"(ptr sret(%fort.span) %args)` on both targets
     (D9.9).
-    `args_init` runs first, since `args` lends what it built.
-    The generated definition retains the C signature i32 @main(i32 %argc, ptr %argv).
-    After runtime argument cleanup and the final obligation boundary, it emits:
+    `args_init` runs first, since `args` hands out what it built. The `and` is D11.6's
+    `status & 0xFF`.
 
-    ```llvm
-      %t1 = and i32 %t0, 255
-      ret i32 %t1
-    ```
-
-    The and implements status & 0xFF (D11.6). Cleanup must precede this return (D17.19).
-    A complete emitted main must include the required cleanup between the fragments.
-
-23. **`-S` and `-c`** (D14.1). `-S` writes the complete module and stops.
-    The module follows this contract, including final entry cleanup (item 22).
-    `-c` writes it into the temporary directory and runs `--cc -c` over it (section 2).
-    The compiler never writes a `.s` file.
-    A user can run llc on the -S output to read the machine code.
+23. **`-S` and `-c`** (D14.1). `-S` writes the module and stops, so the text above is exactly
+    what a user reads; `-c` writes it into the temporary directory and runs `--cc -c` over it
+    (section 2). The compiler never writes a `.s` file; `llc` over the `-S` output is how a
+    human reads the machine code.
 
 The attribute groups have fixed indices, and only the used ones are emitted, so gaps in the
 numbering are normal (D19.5):
@@ -1819,10 +1351,7 @@ D14.2 emits no warning about what follows it).
 fn main() i32 { println("hello, world!"); return 0; }
 ```
 
-The following standalone Linux module illustrates `main.ft`.
-Its argument stubs create no owner, including when argc is positive.
-Its `shutdown` stub only returns, because no stub allocates. Production `shutdown` follows item
-22 (D17.19).
+in `main.ft` is:
 
 ```llvm
 target triple = "x86_64-unknown-linux-gnu"
@@ -1858,7 +1387,7 @@ entry:
   ret void
 }
 
-define dso_local void @"std.rt.shutdown"() #0 {
+define dso_local void @"std.rt.flush_all"() #0 {
 entry:
   ret void
 }
@@ -1876,7 +1405,7 @@ entry:
   call void @"std.rt.args_init"(i32 %argc, ptr %argv)
   call void @"std.rt.args"(ptr sret(%fort.span) %args)
   %t0 = call i32 @"main.main"()
-  call void @"std.rt.shutdown"()
+  call void @"std.rt.flush_all"()
   %t1 = and i32 %t0, 255
   ret i32 %t1
 }
@@ -1889,16 +1418,12 @@ attributes #0 = { nounwind "frame-pointer"="all" "probe-stack"="inline-asm" }
 attributes #3 = { nobuiltin }
 ```
 
-The five runtime definitions let this module link on its own through the C library's write.
-The source function, quoted names, private data, and attributes illustrate items 4, 5, 7, and 19.
-A production module includes the complete runtime closure (D9.10, D13.1).
-Its args_init creates header storage for positive argc even when source main takes no arguments.
-After source main returns, the production entry calls `std.rt.shutdown`. It flushes and releases
-that storage before the final normal-exit boundary and the masked return (D11.6, D17.19).
-The empty stubs above model neither that allocation nor its release.
-The illustrated entry is not the complete production entry of item 22.
-Section 5.1 fixes the cleanup entry point `std.rt.shutdown`; this example adds no ABI
-signature.
+The module the compiler emits for that program differs from this one in one way, and the way is
+the size: it also holds every definition of `std.rt` and of `std.libc`, because every closure
+holds the runtime (D9.10, D13.1). The five definitions above stand for them, over the C library's
+`write`, so that the example is small enough to read and links on its own. Every
+other byte is what the compiler writes: `main.main` and the `main` of item 22, the
+quoted dotted names of item 4, the private data of item 5 and the attribute group of item 7.
 
 ### 6.2 A program with a check
 
@@ -1911,10 +1436,8 @@ fn main() i32 {
 }
 ```
 
-The following standalone Linux module illustrates `abort.ft` with the fault position at 12:13.
-Its module path is abort (D9.1). Its source main symbol is abort.main (D9.7).
-It uses the same empty argument and `shutdown` stubs as section 6.1. They create and release no
-runtime argument owner (item 22, D17.19).
+in `abort.ft`, whose module path is therefore `abort` (D9.1) and whose `main` is the symbol
+`abort.main` (D9.7), with the `[` of `a[i]` at line 12, column 13, is, on the same terms:
 
 ```llvm
 target triple = "x86_64-unknown-linux-gnu"
@@ -1950,7 +1473,7 @@ entry:
   ret void
 }
 
-define dso_local void @"std.rt.shutdown"() #0 {
+define dso_local void @"std.rt.flush_all"() #0 {
 entry:
   ret void
 }
@@ -1991,7 +1514,7 @@ entry:
   call void @"std.rt.args_init"(i32 %argc, ptr %argv)
   call void @"std.rt.args"(ptr sret(%fort.span) %args)
   %t0 = call i32 @"abort.main"()
-  call void @"std.rt.shutdown"()
+  call void @"std.rt.flush_all"()
   %t1 = and i32 %t0, 255
   ret i32 %t1
 }
@@ -2022,10 +1545,6 @@ them (item 2). The definition of `std.rt.fail_bounds` carries the `#8` of item 1
 the `llvm.trap` of item 20 after its call to a C function declared `noreturn` nowhere. The
 program prints `before`, then `abort.ft:12:13: runtime error: index 5 out of range for length 3`,
 and dies with SIGABRT (D11.4).
-That abort path requires no cleanup (D17.19).
-A production normal return calls `std.rt.shutdown`, which releases the argument storage after the
-flush and before the final boundary and return. The `shutdown` stub here releases nothing, because
-its stubs allocate no owner.
 
 ## 7. Testing
 

@@ -26,15 +26,15 @@ The files below stand in `spec/`. Each one implements the decisions it cites and
 | `spec/project-overview.md` | what fort is, the phases, and the reading order |
 | `spec/core-language.md` | statements, expressions, functions, and the core syntax |
 | `spec/type-system.md` | types, mutability, conversions and constants |
-| `spec/memory-model.md` | storage, ownership proof, foreign trust, and runtime checks |
+| `spec/memory-model.md` | where values live, ownership, pointers, spans and the run-time checks |
 | `spec/module-system.md` | modules, imports, name resolution and the C foreign function interface |
 | `spec/stdlib.md` | the standard library |
-| `spec/toolchain.md` | options, staged ownership delivery, diagnostics, runtime, and codegen |
-| `spec/fir.md` | FIR, source and alias obligations, ordered effects, and LLVM translation (D19.8) |
+| `spec/toolchain.md` | the command line, the build pipeline, diagnostics, the runtime, codegen |
+| `spec/fir.md` | FIR, the representation between the checker and the LLVM IR text (D19.8) |
 
 ## Engineering knowledge
 
-These files describe the machine, the tests, the compiler, and the conventions. They describe
+These four files describe the machine, the tests, the compiler and the conventions. They describe
 the implementation; a difference between one of them and the code is a bug in one of the two.
 
 | file | holds |
@@ -42,19 +42,12 @@ the implementation; a difference between one of them and the code is a bug in on
 | `environment.md` | the VM, `tools/vm`, the shared folder, the cross toolchain, the build |
 | `testing.md` | the merge gate, each test corpus, how to write a test, what a test cannot see |
 | `compiler.md` | the invariant of each pass, and the rules of the port to fort |
-| `calls-heap-proof-gaps.md` | measured proof gaps for declared `calls_heap` bodies |
 | `style.md` | comments, C and fort conventions, markdown, shell, commit messages |
 
 T-098 created `environment.md`, `testing.md`, `compiler.md` and `style.md`; T-099 moved the text
 of the `## Environment`, `## Build and test` and `## Technical Standards` sections of `AGENTS.md`
 into them, and moved the nine specification files into `spec/`. `style.md` 1, the comment policy,
 is in force now and T-103 lints it.
-
-## Implementation plans
-
-[Ownership source rollout](ownership-source-rollout.md) plans compiler-source ownership integration.
-It covers incremental audits, diagnostics, source repairs, and CI enforcement.
-The plan follows D19.8 and `spec/toolchain.md` 1.1.
 
 ## Retrospectives
 
