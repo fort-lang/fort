@@ -71,7 +71,8 @@ Always implement a change in small incremental commits. A commit MUST be compose
 self-contained unit of logic that improves the overall system. No commit MUST break _any_ test in
 the repository. Before committing a change to `git`, make sure all tests pertinent to the component
 you are working on run successfully, and make sure that the code format and lint checks pass. Rebase
-on top of `main` frequently to reduce the chances of merge conflicts.
+on top of `main` frequently to reduce the chances of merge conflicts. Keep a count in the PR's own
+test or ticket, never in a file that parallel PRs share (`notes/ownership-retrospective.md` 6).
 
 Once done with a change that is a single unit of work, squash all commits on the branch into one
 via interactive rebase (`git rebase -i main`, mark all but the first as `squash`). Write a
@@ -108,7 +109,8 @@ push run. A nightly full matrix tests `main`. Queue no PR while its latest `ci-s
   points at it. `.tickets/` is ignored and its template is not checked in. Cite no local ticket
   ID in PR text, commit messages, or new checked-in prose. Cite a decision, path, test, or SHA.
 - Assign a ticket only when each dependency is in `done/` after its merge into `main`. Assign
-  independent tickets concurrently, one implementor each.
+  independent tickets concurrently, one implementor each. When a stream files more tickets than it
+  merges, stop its new tickets and re-plan it (`notes/ownership-retrospective.md` 6).
 - Acceptance criteria are verifiable in GitHub CI, the VM, or on a named native host.
   The ticket log names that host and records each hand-off with evidence:
   commands, results, review rounds, and merge SHA. Evidence must outlive the agent that
@@ -143,10 +145,9 @@ push run. A nightly full matrix tests `main`. Queue no PR while its latest `ci-s
   convention, memory layout, ownership and codegen; `impl-port` (medium) for transliterating a
   tested C module into fort against an oracle.
 - Reviewers run in a separate read-only Codex session; parent live settings can override a role's
-  sandbox (T-139). `rev-quick` (medium) screens a low-risk diff for conventions,
-  tests and scope; `rev-std` (high) reviews an
-  ordinary change; `rev-deep` (xhigh) re-derives the invariants independently for
-  ABI, memory, ownership, exact arithmetic, unsafe casts and generated code.
+  sandbox (b33baf94). `rev-quick` (medium) screens a low-risk diff for conventions, tests and scope;
+  `rev-std` (high) reviews an ordinary change; `rev-deep` (xhigh) re-derives the invariants
+  independently for ABI, memory, ownership, exact arithmetic, unsafe casts and generated code.
 - Each ticket names its tiers in its `impl:` and `review:` fields. Review depth follows the risk
   of the change, not the effort it took to write: a ticket can be `impl-std` and `rev-deep`.
 - A tier is a default, not a verdict. If a ticket run at `impl-mech` or `impl-port` fails the
@@ -175,7 +176,8 @@ push run. A nightly full matrix tests `main`. Queue no PR while its latest `ci-s
   Pending PR CI remains pending. Never edit or merge. Route learning below.
 - Coordinator: send a finding class that 2 review rounds find to the user as a rule question, not
   to a third fix round (PR 103: rounds 2 to 5 found one class). Split a ticket that reaches review
-  round 3 into tickets that each merge in one PR. PR 103 ran 8 rounds; PR 98 merged in 2 h.
+  round 3 into tickets that each merge in one PR. PR 103 ran 8 rounds; PR 98 merged in 2 h. Hold
+  that limit: 7 of 114 ownership-wave tickets passed round 3 (`notes/ownership-retrospective.md` 6).
 - Coordinator: require zero open must-fix findings and green PR `ci-status` for the current head.
   Record the PR URL, head and base SHA, job counts, the PR CI run (on the PR merge ref) and the
   merge-group CI run (on the merge-group commit). A new head invalidates the old CI result. If the
@@ -213,18 +215,16 @@ and "What checks `.ft` source" is the tests' as well.
 | a fact that one ticket needs | that ticket's Notes |
 
 `AGENTS.md` keeps three kinds of knowledge -- the project layout, the process rules, and this
-routing table -- and links to the rest. Its budget is 150 lines. T-099 moved the
-`## Environment`, `## Build and test` and `## Technical Standards` sections into the four
-`notes/` files above; the file measured 1538 lines before that move and 223 after it. On
-2026-10-10 the user ruled that the rules of `## Writing: ASD-STE100 everywhere` move to
-`notes/style.md` 7. A 3-line pointer stays here. The file measured 252 lines before that move and
-230 after it. `BUDGET_LIMIT` in `agents/knowledge_lint.py` holds 230, so any growth trips it;
-`BUDGET_TARGET` is 150 and no test reads it (T-103).
+routing table -- and links to the rest. Its budget is 150 lines. 17595160 moved three sections
+into the four `notes/` files above (1538 lines before, 223 after). On 2026-10-10 the user ruled that
+the rules of `## Writing: ASD-STE100 everywhere` move to `notes/style.md` 7, with a 3-line pointer
+here (252 lines before, 230 after). `BUDGET_LIMIT` in `agents/knowledge_lint.py` holds 230, so any
+growth trips it; `BUDGET_TARGET` is 150 and no test reads it (63de4f9b).
 
 Five rules for an entry:
 - Say what happened in one sentence, with a number, a command or a file path.
 - Say what to do in one sentence or two.
-- Cite a PR number, a SHA, a path or a decision; no local ticket ID (AGENTS.md line 108).
+- Cite a PR number, a SHA, a path or a decision; no local ticket ID (AGENTS.md, Tickets).
 - Match the shape of the neighbours in that section.
 - **Read the section before you append.** Extend the entry that is already there rather than add
   a second entry on the same subject.
