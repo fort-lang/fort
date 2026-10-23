@@ -1344,8 +1344,13 @@ Sections:
   The cache directory is `--cache-dir <dir>`. Its default is `<root>/.fort-cache/` under `--lib`
   and `<entry dir>/.fort-cache/` otherwise. The cache entry of the key K is `<dir>/1/K/`. The
   compiler writes an entry or an artifact file by file. It removes `manifest`, writes each other
-  file to a temporary name in the same directory and renames it, and then writes `manifest` the
-  same way. A directory is corrupt when its manifest is absent, has an unknown version or a
+  file to a new temporary name in the same directory and renames it, and then writes `manifest`
+  the same way. It removes a file or a link at a temporary name first, and an entry that stays
+  there fails the write. Before the files of a library, it makes `summaries/` and removes each
+  entry in it. A `summaries` that is a symbolic link, and an entry of it that is a directory with
+  an entry, fail the write, and the compiler removes nothing outside the directory. A failed
+  write leaves no manifest, and for an artifact it is an error with status 2. A directory is
+  corrupt when its manifest is absent, has an unknown version or a
   malformed line, has a key that is not the hash of its lines, or names a file whose hash differs.
   A corrupt cache entry is a miss. A cache that the compiler cannot read or write gives a miss and
   no error. Only two builds use the cache: a `--lib` build that writes an artifact, and a build
@@ -1397,6 +1402,11 @@ Sections:
   user ruled on 2026-10-23 that each invocation does one step and does not build a used library;
   a driver like cargo can come later. The coordinator ratified the other eleven choices of the
   first text on 2026-10-23. `--cache-stats` then gained the cause of each miss.
+  Amended 2026-10-23: the write rule read "writes each other file to a temporary name in the
+  same directory and renames it" and said nothing of `summaries/` or of a failed write. The
+  compiler now empties `summaries/` and refuses a link at it, removes a file or a link at a
+  temporary name and refuses an entry that stays there, and leaves no manifest after a failed
+  write; ratified by the coordinator, 2026-10-23.
 
 ## D10 Memory and runtime checks
 

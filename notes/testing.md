@@ -614,6 +614,19 @@ bullet at a time and without a rewrite.
   interface as against the sources; notes are not compared, because a note can point into the
   interface file. The checker is the test-only path until a build reads an interface file
   through `--use`.
+- **`library-artifact` holds the artifact of `--lib std` against a reading that shares no code
+  with the compiler** (D9.11). `test/library/artifact_test.py` builds `std.flib` twice and
+  requires the same bytes in each file. It writes the manifest from the table of toolchain.md 2.2
+  with Python's hashlib and requires the same text. It verifies the IR module of the library and
+  of the other target, from a root that it assembles for that target. Each program of
+  `test/library/programs` must give the same stdout, stderr and status when it is linked against
+  `lib.a` as when it is built whole, and each `declare` line of its entry unit must carry the
+  types of the definition in the library module. `test/library/builder.ft` emits the entry unit
+  against `interface.ft` until `--use` exists. The archiver of macOS writes the time stamp of
+  each member unless `ZERO_AR_DATE=1` is set (probed with `/usr/bin/ar rcs` twice over one
+  object), so the test sets it. GNU ar 2.42 of the VM writes zero stamps by default. The module
+  suite `driver_artifact_test.ft` runs the build with a `--cc` and an `--ar` that are scripts, so
+  the bytes of each file are known; only the ctest runs the real tools.
 
 ## 5. Product tests and the fixed point
 

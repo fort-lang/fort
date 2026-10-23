@@ -1,0 +1,687 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| target ok
+//| outputs ok
+//| artifact ok
+//| failures ok
+//| ok
+/// Checks the artifact build of src/fort/driver.ft (D9.11, toolchain.md 1, 2.1 and 2.2): the
+/// target that each output takes, the outputs of -S and -c, the compile line and the archive
+/// line, the files and the manifest of `<name>.flib`, and each failure of a tool or of a write.
+/// The --cc and the --ar of a case are scripts that this test writes: the compile copies the IR
+/// module to the object and the archiver puts it after an archive header. So the bytes of each
+/// file are known, and test/library/artifact_test.py runs the real tools.
+import capture;
+import driver;
+import library.artifact;
+import std.io;
+import std.libc;
+import std.os;
+import std.str;
+import std.strbuf;
+import std.sys;
+
+i32 EXIT_OK = 0;
+i32 EXIT_COMPILE_ERROR = 1;
+i32 EXIT_USAGE = 2;
+
+// The status of `fort <args>`, with stdout in `out.txt` and stderr in `err.txt`.
+fn run(string@ args) i32 {
+    i32 saved_out = capture.begin(io.STDOUT, "out.txt");
+    i32 saved_err = capture.begin(io.STDERR, "err.txt");
+    i32 status = driver.run(args);
+    capture.end(io.STDERR, saved_err);
+    capture.end(io.STDOUT, saved_out);
+    return status;
+}
+
+fn err_is(string text) bool {
+    string own got = capture.text("err.txt");
+    defer del(got);
+    if (got != text) {
+        print(got);
+    }
+    return got == text;
+}
+
+fn err_has(string text) bool {
+    string own got = capture.text("err.txt");
+    defer del(got);
+    if (str.find(got, text) < 0) {
+        print(got);
+        return false;
+    }
+    return true;
+}
+
+fn out_is_empty() bool {
+    string own got = capture.text("out.txt");
+    defer del(got);
+    return got.len == 0;
+}
+
+fn make_dir(string path) void {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    assert(libc.mkdir(c_path.ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
+}
+
+fn write_file(string path, string text) void {
+    assert(io.write_file(path, cast(text, u8@)));
+}
+
+// An executable script at `path` whose lines are `lines`.
+fn write_script(string path, string@ lines) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u64 mut i = 0;
+    while (i < lines.len) {
+        strbuf.append(&b, lines[i]);
+        strbuf.push(&b, '\n');
+        i += 1;
+    }
+    write_file(path, strbuf.view(&b));
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    assert(libc.chmod(c_path.ptr, 0o755) == 0);
+}
+
+fn exists(string path) bool {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    return libc.access(c_path.ptr, 0) == 0;
+}
+
+// The bytes of the file `path`, or the empty string when it cannot be read.
+fn contents(string path) string own {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    io.read_file(path, &b);
+    return strbuf.take(&b);
+}
+
+// Removes the file `path` when it exists.
+fn remove(string path) void {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    libc.unlink(c_path.ptr);
+}
+
+fn set_env(string name, string value) void {
+    char mut@ own key = str.to_cstr(name);
+    defer del(key);
+    char mut@ own text = str.to_cstr(value);
+    defer del(text);
+    assert(libc.setenv(key.ptr, text.ptr, 1) == 0);
+}
+
+fn unset_env(string name) void {
+    char mut@ own key = str.to_cstr(name);
+    defer del(key);
+    assert(libc.unsetenv(key.ptr) == 0);
+}
+
+// Whether the directory `path` holds no entry but `.` and `..`.
+fn is_empty_dir(string path) bool {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    void mut* d = libc.opendir(c_path.ptr);
+    if (d == null) {
+        return false;
+    }
+    u64 mut n = 0;
+    libc.dirent* mut e = cast(libc.readdir(d), libc.dirent*);
+    while (e != null) {
+        string name = str.from_cstr(&e->name[0]);
+        if (name != "." && name != "..") {
+            println("left: ", name);
+            n += 1;
+        }
+        e = cast(libc.readdir(d), libc.dirent*);
+    }
+    libc.closedir(d);
+    return n == 0;
+}
+
+// ---- the library and the tools ------------------------------------------------------
+
+// A library root `std` named `root`: a runtime, a module with a function and a constant, and a
+// module with a `main`, which a library build compiles as an ordinary function.
+string IO_MODULE = "import std.rt;\ni32 A = rt.B + 1;\nfn f(i32 x) i32 {\n    return x;\n}\n";
+string APP_MODULE = "fn main() i32 {\n    return 3;\n}\n";
+
+fn write_root() void {
+    make_dir("root");
+    write_file("root/rt.ft", "i32 B = 1;\n");
+    write_file("root/io.ft", IO_MODULE);
+    write_file("root/app.ft", APP_MODULE);
+}
+
+// The --cc of a case: it writes its arguments to cc.log, one on each line, and copies the input
+// module to the -o output.
+string[11] FAKE_CC = {
+    "#!/bin/sh",
+    "out=",
+    "in=",
+    "prev=",
+    "for a in \"$@\"; do",
+    "  if [ \"$prev\" = -o ]; then out=\"$a\"; fi",
+    "  case \"$a\" in *.ll) in=\"$a\";; esac",
+    "  prev=\"$a\"",
+    "  echo \"$a\"",
+    "done > cc.log",
+    "cp \"$in\" \"$out\"",
+};
+
+// The --ar of a case: it writes its arguments to ar.log and writes the archive header and then the
+// object to the archive.
+string[4] FAKE_AR = {
+    "#!/bin/sh",
+    "for a in \"$@\"; do echo \"$a\"; done > ar.log",
+    "printf '!<arch>\\n' > \"$2\"",
+    "cat \"$3\" >> \"$2\"",
+};
+
+// An empty list of options.
+string[1] NO_OPTIONS = {""};
+
+// The temporary directory of every build of this suite, which must be empty after each one.
+string TEMP = "temp";
+
+fn write_tools() void {
+    write_script("cc.sh", FAKE_CC[..]);
+    write_script("ar.sh", FAKE_AR[..]);
+    make_dir(TEMP);
+    set_env("TMPDIR", TEMP);
+}
+
+// The status of `fort --cc ./cc.sh --ar ./ar.sh --lib std root <more>`, and whether it left the
+// temporary directory empty.
+fn build(string@ more) i32 {
+    string[7] head = {"fort", "--cc", "./cc.sh", "--ar", "./ar.sh", "--lib", "std"};
+    string[24] mut args = {};
+    u64 mut n = 0;
+    while (n < head.len) {
+        args[n] = head[n];
+        n += 1;
+    }
+    args[n] = "root";
+    n += 1;
+    u64 mut i = 0;
+    while (i < more.len) {
+        args[n] = more[i];
+        n += 1;
+        i += 1;
+    }
+    i32 status = run(args[0..n]);
+    assert(is_empty_dir(TEMP));
+    return status;
+}
+
+// The target that this compiler was not built for.
+fn other_target() string {
+    if (os.TARGET == "x86_64-linux-gnu") {
+        return "arm64-apple-macosx11.0.0";
+    }
+    return "x86_64-linux-gnu";
+}
+
+// ---- the target ---------------------------------------------------------------------
+
+// The usage error that a non-built target of an object gives, and the usage line after it.
+fn object_target_error(strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    strbuf.append(out, "fort: error: cannot compile object for target '");
+    strbuf.append(out, other_target());
+    strbuf.append(out, "' with a '");
+    strbuf.append(out, os.TARGET);
+    strbuf.append(out, "' compiler\nusage: fort [options] entry.ft\n");
+    return strbuf.view(out);
+}
+
+fn an_object_or_an_artifact_takes_the_built_target_alone() void {
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    // the target is refused before the root is read, so a missing root gives no other error
+    string[6] artifact_args = {"fort", "--lib", "std", "missing", "--target", other_target()};
+    assert(run(artifact_args[..]) == EXIT_USAGE);
+    assert(err_is(object_target_error(&want)));
+    assert(!exists("std.flib"));
+    string[7] object_args = {"fort", "--lib", "std", "missing", "-c", "--target", other_target()};
+    assert(run(object_args[..]) == EXIT_USAGE);
+    assert(err_is(object_target_error(&want)));
+    assert(!exists("std.o"));
+    // an unsupported form is the usage error of every mode
+    string[6] bad = {"fort", "--lib", "std", "missing", "--target", "pdp11"};
+    assert(run(bad[..]) == EXIT_USAGE);
+    assert(err_has("fort: error: unsupported target 'pdp11'\n"));
+}
+
+fn the_ir_module_takes_either_target_and_needs_no_std_dir() void {
+    write_root();
+    write_tools();
+    string[5] args = {"-S", "--target", other_target(), "-o", "other.ll"};
+    assert(build(args[..]) == EXIT_OK);
+    assert(err_is(""));
+    string own ir = contents("other.ll");
+    defer del(ir);
+    strbuf.str_buf mut triple = strbuf.create();
+    defer strbuf.free(&triple);
+    strbuf.append(&triple, "target triple = \"");
+    if (other_target() == "x86_64-linux-gnu") {
+        strbuf.append(&triple, "x86_64-unknown-linux-gnu");
+    } else {
+        strbuf.append(&triple, other_target());
+    }
+    strbuf.append(&triple, "\"\n");
+    assert(str.starts_with(ir, strbuf.view(&triple)));
+    // the missing root of a non-built -S target is the error of the root
+    string[7] missing = {"fort", "--lib", "std", "missing", "-S", "--target", other_target()};
+    assert(run(missing[..]) == EXIT_USAGE);
+    assert(err_has("fort: error: cannot read library root 'missing': No such file or directory"));
+}
+
+// ---- the outputs --------------------------------------------------------------------
+
+fn the_ir_module_of_the_library_defines_every_module_and_no_main() void {
+    write_root();
+    write_tools();
+    string[1] args = {"-S"};
+    assert(build(args[..]) == EXIT_OK);
+    assert(err_is(""));
+    assert(out_is_empty());
+    string own ir = contents("std.ll");
+    defer del(ir);
+    assert(str.find(ir, "@\"std.io.A\" = dso_local constant i32 2, align 4\n") > 0);
+    assert(str.find(ir, "@\"std.rt.B\" = dso_local constant i32 1, align 4\n") > 0);
+    assert(str.find(ir, "define dso_local i32 @\"std.io.f\"(i32 %x.in) #0 {\n") > 0);
+    // a `main` of a library module is an ordinary function, and the unit has no C `main`
+    assert(str.find(ir, "define dso_local i32 @\"std.app.main\"() #0 {\n") > 0);
+    assert(str.find(ir, "@main(") < 0);
+    // nothing is declared: the unit defines each function of its closure
+    assert(str.find(ir, "declare") < 0);
+    assert(str.find(ir, "external") < 0);
+    // -S writes the module and stops, so no tool ran
+    assert(!exists("cc.log") && !exists("ar.log"));
+    assert(!exists("std.flib") && !exists("std.o"));
+}
+
+fn the_object_is_the_compile_line_over_the_module() void {
+    write_root();
+    write_tools();
+    string[1] ir_args = {"-S"};
+    assert(build(ir_args[..]) == EXIT_OK);
+    string own ir = contents("std.ll");
+    defer del(ir);
+    string[1] args = {"-c"};
+    assert(build(args[..]) == EXIT_OK);
+    assert(err_is(""));
+    string own object = contents("std.o");
+    defer del(object);
+    // the fake compile copies its input, which is the module that -S writes
+    assert(object == ir);
+    assert(!exists("ar.log"));
+    assert(!exists("std.flib"));
+    string own log = contents("cc.log");
+    defer del(log);
+    strbuf.str_buf mut head = strbuf.create();
+    defer strbuf.free(&head);
+    strbuf.append(&head, "--target=");
+    strbuf.append(&head, os.TARGET);
+    strbuf.append(&head, "\n-O1\n-fPIE\n-Wno-override-module\n-c\n-o\nstd.o\n");
+    assert(str.starts_with(log, strbuf.view(&head)));
+    // the module stands in the temporary directory under the name of the library
+    assert(str.starts_with(log[strbuf.view(&head).len..], "temp/fort-"));
+    assert(str.ends_with(log, "/std.ll\n"));
+    assert(capture.line_count(log) == 8);
+}
+
+fn ir_and_object_together_stop_at_the_ir() void {
+    write_root();
+    write_tools();
+    remove("std.o");
+    string[4] args = {"-c", "-S", "-o", "both.ll"};
+    assert(build(args[..]) == EXIT_OK);
+    assert(exists("both.ll"));
+    assert(!exists("std.o") && !exists("std.flib"));
+}
+
+fn an_object_takes_the_output_option() void {
+    write_root();
+    write_tools();
+    string[3] args = {"-c", "-o", "lib/one.o"};
+    make_dir("lib");
+    assert(build(args[..]) == EXIT_OK);
+    assert(exists("lib/one.o"));
+    string own log = contents("cc.log");
+    defer del(log);
+    assert(str.find(log, "\n-o\nlib/one.o\n") > 0);
+}
+
+// ---- the artifact -------------------------------------------------------------------
+
+// The interface file of the library, as --emit-interface writes it.
+fn interface_text() string own {
+    string[5] args = {"fort", "--lib", "std", "root", "--emit-interface"};
+    assert(run(args[..]) == EXIT_OK);
+    return capture.text("out.txt");
+}
+
+// The SHA-256 of `text` as a manifest writes it.
+fn hash_of(string text, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    artifact.append_hash(out, cast(text, u8@));
+    return strbuf.view(out);
+}
+
+// The value of the line `<field> <value>` of the manifest text, or the empty string.
+fn field_of(string text, string field) string {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.push(&b, '\n');
+    strbuf.append(&b, field);
+    strbuf.push(&b, ' ');
+    i64 at = str.find(text, strbuf.view(&b));
+    if (at < 0) {
+        return "";
+    }
+    u64 from = cast(at, u64) + strbuf.view(&b).len;
+    u64 mut end = from;
+    while (end < text.len && text[end] != '\n') {
+        end += 1;
+    }
+    return text[from..end];
+}
+
+fn the_artifact_holds_the_interface_the_archive_and_the_manifest() void {
+    write_root();
+    write_tools();
+    string own iface = interface_text();
+    defer del(iface);
+    string[1] ir_args = {"-S"};
+    assert(build(ir_args[..]) == EXIT_OK);
+    string own ir = contents("std.ll");
+    defer del(ir);
+    string@ none = NO_OPTIONS[0..0];
+    assert(build(none) == EXIT_OK);
+    assert(err_is(""));
+    assert(out_is_empty());
+    string own got_iface = contents("std.flib/interface.ft");
+    defer del(got_iface);
+    assert(got_iface == iface);
+    // the archive line wrote the header and the object, which the fake compile copied from the IR
+    string own archive = contents("std.flib/lib.a");
+    defer del(archive);
+    assert(str.starts_with(archive, "!<arch>\n"));
+    assert(archive[8..] == ir);
+    string own ar_log = contents("ar.log");
+    defer del(ar_log);
+    assert(str.starts_with(ar_log, "rcs\ntemp/fort-"));
+    assert(str.find(ar_log, "/lib.a\ntemp/fort-") > 0);
+    assert(str.ends_with(ar_log, "/std.o\n"));
+    assert(capture.line_count(ar_log) == 3);
+    assert(exists("std.flib/summaries"));
+    string own manifest = contents("std.flib/manifest");
+    defer del(manifest);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(field_of(manifest, "interface") == hash_of(iface, &b));
+    assert(field_of(manifest, "archive") == hash_of(archive, &b));
+    // the key is the hash of the lines before it
+    i64 key_at = str.find(manifest, "\nkey ");
+    assert(key_at > 0);
+    assert(field_of(manifest, "key") == hash_of(manifest[0..cast(key_at, u64) + 1], &b));
+    assert(str.ends_with(manifest, "\nsummaries 1\n"));
+}
+
+fn the_manifest_names_the_build() void {
+    write_root();
+    write_tools();
+    string@ none = NO_OPTIONS[0..0];
+    assert(build(none) == EXIT_OK);
+    string own manifest = contents("std.flib/manifest");
+    defer del(manifest);
+    strbuf.str_buf mut head = strbuf.create();
+    defer strbuf.free(&head);
+    strbuf.append(&head, "fort-manifest 1\nlibrary std\ncompiler ");
+    assert(str.starts_with(manifest, strbuf.view(&head)));
+    // the compiler is the program of this test, which runs the driver
+    strbuf.str_buf mut exe = strbuf.create();
+    defer strbuf.free(&exe);
+    assert(os.exe_path(&exe));
+    string own bytes = contents(strbuf.view(&exe));
+    defer del(bytes);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(field_of(manifest, "compiler") == hash_of(bytes, &b));
+    strbuf.clear(&head);
+    strbuf.append(&head, "\ntarget ");
+    strbuf.append(&head, os.TARGET);
+    strbuf.append(&head, "\nmode checked\nbounds on\ncfg target_abi \ncfg target_arch ");
+    assert(str.find(manifest, strbuf.view(&head)) > 0);
+    assert(str.find(manifest, "\ncc ./cc.sh\nar ./ar.sh\nsource ") > 0);
+    assert(field_of(manifest, "source").len == 64);
+    assert(str.find(manifest, "\nuse ") < 0);
+}
+
+fn the_options_of_the_object_are_lines_of_the_manifest() void {
+    write_root();
+    write_tools();
+    string[12] args = {"--release", "--no-bounds-check", "--cfg", "zone=a b", "-Xcc", "-DY",
+                       "-Xcc", "-DX", "--cfg", "flavour=x", "-o", "tuned.flib"};
+    assert(build(args[..]) == EXIT_OK);
+    string own manifest = contents("tuned.flib/manifest");
+    defer del(manifest);
+    assert(str.find(manifest, "\nmode release\nbounds off\ncfg flavour x\ncfg target_abi \n") > 0);
+    string tail = "\ncfg zone a\\x20b\ncc ./cc.sh\nxcc -DY\nxcc -DX\nar ./ar.sh\n";
+    assert(str.find(manifest, tail) > 0);
+    // the -Xcc arguments come last on the compile line, in command-line order
+    string own log = contents("cc.log");
+    defer del(log);
+    assert(str.ends_with(log, "/std.ll\n-DY\n-DX\n"));
+    assert(str.find(log, "\n-O2\n") > 0);
+    // a manifest of other options has another key, and the same interface
+    string@ none = NO_OPTIONS[0..0];
+    assert(build(none) == EXIT_OK);
+    string own plain = contents("std.flib/manifest");
+    defer del(plain);
+    assert(field_of(plain, "key") != field_of(manifest, "key"));
+    assert(field_of(plain, "interface") == field_of(manifest, "interface"));
+    assert(field_of(plain, "source") == field_of(manifest, "source"));
+}
+
+fn two_builds_write_the_same_bytes() void {
+    write_root();
+    write_tools();
+    string[2] first = {"-o", "first.flib"};
+    assert(build(first[..]) == EXIT_OK);
+    string[2] second = {"-o", "second.flib"};
+    assert(build(second[..]) == EXIT_OK);
+    string[3] files = {"interface.ft", "lib.a", "manifest"};
+    u64 mut i = 0;
+    while (i < files.len) {
+        strbuf.str_buf mut a = strbuf.create();
+        defer strbuf.free(&a);
+        strbuf.append(&a, "first.flib/");
+        strbuf.append(&a, files[i]);
+        strbuf.str_buf mut b = strbuf.create();
+        defer strbuf.free(&b);
+        strbuf.append(&b, "second.flib/");
+        strbuf.append(&b, files[i]);
+        string own one = contents(strbuf.view(&a));
+        defer del(one);
+        string own two = contents(strbuf.view(&b));
+        defer del(two);
+        assert(one.len > 0 && one == two);
+        i += 1;
+    }
+}
+
+fn a_new_build_replaces_the_files_of_an_artifact() void {
+    write_root();
+    write_tools();
+    string@ none = NO_OPTIONS[0..0];
+    assert(build(none) == EXIT_OK);
+    string own before = contents("std.flib/manifest");
+    defer del(before);
+    write_file("root/io.ft", "import std.rt;\ni32 A = rt.B + 2;\n");
+    // a summary that an older build left is removed
+    write_file("std.flib/summaries/old.sum", "stale");
+    assert(build(none) == EXIT_OK);
+    assert(!exists("std.flib/summaries/old.sum"));
+    string own after = contents("std.flib/manifest");
+    defer del(after);
+    // a new constant changes the source, the interface, the archive and the key
+    assert(field_of(after, "source") != field_of(before, "source"));
+    assert(field_of(after, "interface") != field_of(before, "interface"));
+    assert(field_of(after, "key") != field_of(before, "key"));
+    string own iface = contents("std.flib/interface.ft");
+    defer del(iface);
+    assert(str.find(iface, "\ni32 A = 3;\n") > 0);
+    write_file("root/io.ft", IO_MODULE);
+}
+
+// ---- the failures -------------------------------------------------------------------
+
+fn an_archiver_that_fails_writes_no_artifact() void {
+    write_root();
+    write_tools();
+    string[4] failing = {"--ar", "false", "-o", "failing.flib"};
+    assert(build(failing[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: ar failed with status 1\n"));
+    assert(!exists("failing.flib"));
+    string[4] missing = {"--ar", "./nosuchar", "-o", "failing.flib"};
+    assert(build(missing[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: cannot run './nosuchar': No such file or directory\n"));
+    assert(!exists("failing.flib"));
+}
+
+// An archiver that a signal stops.
+string[2] KILLED_AR = {
+    "#!/bin/sh",
+    "kill -9 $$",
+};
+
+fn an_archiver_that_a_signal_stops_is_reported_by_the_signal() void {
+    write_root();
+    write_tools();
+    write_script("killed.sh", KILLED_AR[..]);
+    string[4] args = {"--ar", "./killed.sh", "-o", "killed.flib"};
+    assert(build(args[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: ar failed with signal 9\n"));
+    assert(!exists("killed.flib"));
+}
+
+fn an_archiver_that_writes_no_archive_is_a_read_error() void {
+    write_root();
+    write_tools();
+    string[4] args = {"--ar", "true", "-o", "silent.flib"};
+    assert(build(args[..]) == EXIT_USAGE);
+    assert(err_has("fort: error: cannot read 'temp/fort-"));
+    assert(err_has("/lib.a': No such file or directory\n"));
+    assert(!exists("silent.flib"));
+}
+
+fn a_compiler_that_fails_runs_no_archiver() void {
+    write_root();
+    write_tools();
+    string[6] args = {"--cc", "false", "--ar", "./nosuchar", "-o", "broken.flib"};
+    assert(build(args[..]) == EXIT_USAGE);
+    // the last --cc wins, and the archiver never runs
+    assert(err_is("fort: error: cc failed with status 1\n"));
+    assert(!exists("broken.flib"));
+    string[3] object = {"--cc", "false", "-c"};
+    assert(build(object[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: cc failed with status 1\n"));
+}
+
+fn an_artifact_that_cannot_be_written_is_exit_two() void {
+    write_root();
+    write_tools();
+    string[2] args = {"-o", "nowhere/std.flib"};
+    assert(build(args[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: cannot write 'nowhere/std.flib': No such file or directory\n"));
+    // a file of the artifact names its path
+    make_dir("blocked.flib");
+    make_dir("blocked.flib/lib.a");
+    write_file("blocked.flib/lib.a/member", "m");
+    string[2] blocked = {"-o", "blocked.flib"};
+    assert(build(blocked[..]) == EXIT_USAGE);
+    assert(err_has("fort: error: cannot write 'blocked.flib/lib.a': "));
+    assert(!exists("blocked.flib/manifest"));
+}
+
+fn a_summaries_that_is_a_link_is_exit_two() void {
+    write_root();
+    write_tools();
+    make_dir("elsewhere");
+    write_file("elsewhere/one", "1");
+    write_file("elsewhere/two", "2");
+    make_dir("linked.flib");
+    char mut@ own c_target = str.to_cstr("../elsewhere");
+    defer del(c_target);
+    char mut@ own c_link = str.to_cstr("linked.flib/summaries");
+    defer del(c_link);
+    assert(libc.symlink(c_target.ptr, c_link.ptr) == 0);
+    string[2] args = {"-o", "linked.flib"};
+    assert(build(args[..]) == EXIT_USAGE);
+    string message = "fort: error: cannot write 'linked.flib/summaries': ";
+    assert(err_has(message));
+    assert(err_has("': Too many levels of symbolic links\n"));
+    // the entries of the link target stay, and the artifact has no manifest and no file
+    string own one = contents("elsewhere/one");
+    defer del(one);
+    string own two = contents("elsewhere/two");
+    defer del(two);
+    assert(one == "1" && two == "2");
+    assert(!exists("linked.flib/manifest"));
+    assert(!exists("linked.flib/interface.ft"));
+    assert(!exists("linked.flib/lib.a"));
+}
+
+fn a_compile_error_writes_nothing() void {
+    make_dir("bad");
+    write_file("bad/rt.ft", "i32 B = \"x\";\n");
+    write_tools();
+    string[9] args = {"fort", "--cc", "./cc.sh", "--ar", "./ar.sh", "--lib", "std", "bad", "-o"};
+    string[10] mut full = {};
+    u64 mut i = 0;
+    while (i < args.len) {
+        full[i] = args[i];
+        i += 1;
+    }
+    full[9] = "bad.flib";
+    assert(run(full[..]) == EXIT_COMPILE_ERROR);
+    assert(err_has("bad/rt.ft:1:9: error: the initializer expects i32, not string"));
+    assert(!exists("bad.flib"));
+    assert(is_empty_dir(TEMP));
+}
+
+fn main() i32 {
+    an_object_or_an_artifact_takes_the_built_target_alone();
+    the_ir_module_takes_either_target_and_needs_no_std_dir();
+    println("target ok");
+    the_ir_module_of_the_library_defines_every_module_and_no_main();
+    the_object_is_the_compile_line_over_the_module();
+    ir_and_object_together_stop_at_the_ir();
+    an_object_takes_the_output_option();
+    println("outputs ok");
+    the_artifact_holds_the_interface_the_archive_and_the_manifest();
+    the_manifest_names_the_build();
+    the_options_of_the_object_are_lines_of_the_manifest();
+    two_builds_write_the_same_bytes();
+    a_new_build_replaces_the_files_of_an_artifact();
+    println("artifact ok");
+    an_archiver_that_fails_writes_no_artifact();
+    an_archiver_that_a_signal_stops_is_reported_by_the_signal();
+    an_archiver_that_writes_no_archive_is_a_read_error();
+    a_compiler_that_fails_runs_no_archiver();
+    an_artifact_that_cannot_be_written_is_exit_two();
+    a_summaries_that_is_a_link_is_exit_two();
+    a_compile_error_writes_nothing();
+    println("failures ok");
+    unset_env("TMPDIR");
+    println("ok");
+    return 0;
+}

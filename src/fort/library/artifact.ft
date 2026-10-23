@@ -1,0 +1,487 @@
+/// Writes the artifact of a library build: the hashes that its manifest records, the manifest
+/// text and the files of the directory `<name>.flib/` (D9.11, toolchain.md 2.2).
+///
+/// Every hash is SHA-256 (FIPS 180-4), written as 64 lowercase hex digits. The manifest has one
+/// field on each line, and its key is the hash of the lines from the format version to the last
+/// used library. The writer writes each file to a temporary name and renames it, and it writes
+/// the manifest last, so a reader that finds a manifest finds the files of the same build.
+import modules;
+import std.digest.sha256;
+import std.io;
+import std.libc;
+import std.os;
+import std.str;
+import std.strbuf;
+import std.sys;
+
+// The version of the manifest format and the version of the directory `summaries/`.
+string FORMAT_VERSION = "1";
+string SUMMARIES_VERSION = "1";
+
+// The bytes that a manifest value keeps as they are: 0x21 to 0x7E, except `\`.
+u64 VALUE_FIRST = 33;
+u64 VALUE_LAST = 126;
+
+// The digits of an escaped byte of a value, and of a hash.
+string UPPER_HEX = "0123456789ABCDEF";
+string LOWER_HEX = "0123456789abcdef";
+u64 HEX_SHIFT = 4;
+u64 HEX_MASK = 15;
+
+/// The entries of an artifact.
+string INTERFACE_FILE = "interface.ft";
+string ARCHIVE_FILE = "lib.a";
+string MANIFEST_FILE = "manifest";
+string SUMMARIES_DIR = "summaries";
+
+// The part between the name of a file and the process id in its temporary name.
+string TEMP_INFIX = ".tmp.";
+
+// The mode of a directory that the writer makes. The umask of the process applies to it.
+u32 DIR_MODE = 0o777;
+
+// The mode of a file that the writer makes, as io.open_write gives it. The umask applies too.
+i32 FILE_MODE = 0o644;
+
+// The buffer that readlink(2) writes when the writer asks whether an entry is a symbolic link.
+u64 LINK_PROBE_CAP = 1;
+
+// ---- hashes ------------------------------------------------------------------------
+
+/// Appends `value` as a manifest value. The bytes 0x21 to 0x7E stay as they are, except `\`.
+/// Every other byte, a space and `\` included, is `\xHH` with uppercase hex digits.
+fn append_value(strbuf.str_buf mut* out, string value) void {
+    u64 mut i = 0;
+    while (i < value.len) {
+        u64 byte = cast(value[i], u64);
+        if (byte < VALUE_FIRST || byte > VALUE_LAST || value[i] == '\\') {
+            strbuf.append(out, "\\x");
+            strbuf.push(out, UPPER_HEX[byte >> HEX_SHIFT]);
+            strbuf.push(out, UPPER_HEX[byte & HEX_MASK]);
+        } else {
+            strbuf.push(out, value[i]);
+        }
+        i += 1;
+    }
+}
+
+/// Appends each byte of `digest` as two lowercase hex digits, the high digit first.
+fn append_digest(strbuf.str_buf mut* out, u8@ digest) void {
+    u64 mut i = 0;
+    while (i < digest.len) {
+        u64 byte = cast(digest[i], u64);
+        strbuf.push(out, LOWER_HEX[byte >> HEX_SHIFT]);
+        strbuf.push(out, LOWER_HEX[byte & HEX_MASK]);
+        i += 1;
+    }
+}
+
+/// Appends the SHA-256 of `data` as 64 lowercase hex digits.
+fn append_hash(strbuf.str_buf mut* out, u8@ data) void {
+    u8[32] digest = sha256.hash(data);
+    append_digest(out, digest[..]);
+}
+
+// The module of the unit of `set` whose path comes first in byte order after the path of
+// `after`, or the first module of the unit when `after` is null. Null when no module follows.
+// The unit is each module of the closure that no interface file declares, so under `--lib` it is
+// every module of the library.
+fn next_module(modules.module_set* set, modules.module* after) modules.module* {
+    modules.module* mut best = null;
+    u64 mut i = 0;
+    while (i < modules.count(set)) {
+        modules.module* m = modules.at(set, i);
+        i += 1;
+        if (m->interface || (after != null && str.cmp(m->path, after->path) <= 0)) {
+            continue;
+        }
+        if (best == null || str.cmp(m->path, best->path) < 0) {
+            best = m;
+        }
+    }
+    return best;
+}
+
+/// Appends the source hash of the unit of `set` (toolchain.md 2.2): the modules of the closure
+/// that no interface file declares, in byte order of the module path. For each module the hashed
+/// string holds the module path, a newline, the path that the compiler opened, a newline, the
+/// byte count of the file in decimal, a newline and the bytes that the build parsed. The two
+/// paths are written as manifest values.
+fn hash_sources(modules.module_set* set, strbuf.str_buf mut* out) void {
+    sha256.state mut st = sha256.state{};
+    sha256.init(&st);
+    strbuf.str_buf mut head = strbuf.create();
+    defer strbuf.free(&head);
+    modules.module* mut m = next_module(set, null);
+    while (m != null) {
+        strbuf.clear(&head);
+        append_value(&head, m->path);
+        strbuf.push(&head, '\n');
+        append_value(&head, m->file);
+        strbuf.push(&head, '\n');
+        strbuf.append_u64(&head, m->source.len);
+        strbuf.push(&head, '\n');
+        sha256.update(&st, strbuf.bytes(&head));
+        sha256.update(&st, cast(m->source, u8@));
+        m = next_module(set, m);
+    }
+    u8[32] digest = sha256.finish(&st);
+    append_digest(out, digest[..]);
+}
+
+/// Appends the compiler identity: the SHA-256 of the bytes of the running compiler executable.
+/// Returns false when the system gives no path for the executable, with `*path` empty, or when
+/// the file cannot be read, with its path in `*path` and the reason in sys.errno().
+fn hash_compiler(strbuf.str_buf mut* out, strbuf.str_buf mut* path) bool {
+    strbuf.clear(path);
+    if (!os.exe_path(path)) {
+        strbuf.clear(path);
+        return false;
+    }
+    strbuf.str_buf mut bytes = strbuf.create();
+    defer strbuf.free(&bytes);
+    if (!io.read_file(strbuf.view(path), &bytes)) {
+        return false;
+    }
+    append_hash(out, strbuf.bytes(&bytes));
+    return true;
+}
+
+// ---- the manifest ------------------------------------------------------------------
+
+/// The fields of the manifest of a library (toolchain.md 2.2). The strings and the spans are
+/// borrowed. A hash holds 64 lowercase hex digits. `cfg_values[i]` is the value of `cfg_keys[i]`,
+/// and `use_hashes[i]` is the interface hash of the used library `use_names[i]`. The pairs may
+/// come in any order: the manifest writes each list in byte order of the key or the name.
+/// `cc_args` keeps the command-line order.
+struct manifest {
+    string library;
+    string compiler;
+    string target;
+    bool release;
+    bool no_bounds_check;
+    string@ cfg_keys;
+    string@ cfg_values;
+    string cc;
+    string@ cc_args;
+    string ar;
+    string source;
+    string@ use_names;
+    string@ use_hashes;
+    string interface;
+    string archive;
+}
+
+// Appends the line `<field> <value>` with the value escaped.
+fn append_line(strbuf.str_buf mut* out, string field, string value) void {
+    strbuf.append(out, field);
+    strbuf.push(out, ' ');
+    append_value(out, value);
+    strbuf.push(out, '\n');
+}
+
+// Appends the line `<field> <first> <second>` with both values escaped. An empty value keeps
+// its separating space, so the line has two values in every case.
+fn append_pair(strbuf.str_buf mut* out, string field, string first, string second) void {
+    strbuf.append(out, field);
+    strbuf.push(out, ' ');
+    append_value(out, first);
+    strbuf.push(out, ' ');
+    append_value(out, second);
+    strbuf.push(out, '\n');
+}
+
+// The index in `keys` of the key that comes first in byte order after `after`, or the first key
+// when `first` is set. -1 when no key follows. The keys are distinct.
+fn next_key(string@ keys, string after, bool first) i64 {
+    i64 mut best = -1;
+    u64 mut i = 0;
+    while (i < keys.len) {
+        if ((first || str.cmp(keys[i], after) > 0)
+            && (best < 0 || str.cmp(keys[i], keys[cast(best, u64)]) < 0)) {
+            best = cast(i, i64);
+        }
+        i += 1;
+    }
+    return best;
+}
+
+// Appends one line `<field> <key> <value>` for each pair, in byte order of the key.
+fn append_pairs(strbuf.str_buf mut* out, string field, string@ keys, string@ values) void {
+    i64 mut k = next_key(keys, "", true);
+    while (k >= 0) {
+        u64 at = cast(k, u64);
+        append_pair(out, field, keys[at], values[at]);
+        k = next_key(keys, keys[at], false);
+    }
+}
+
+/// Appends the manifest of `m` to `out`, one line for each field in the order of toolchain.md
+/// 2.2. The key line holds the SHA-256 of the lines before it. The lines after the key give the
+/// outputs, which the key does not cover.
+fn write_manifest(manifest* m, strbuf.str_buf mut* out) void {
+    u64 start = strbuf.view(out).len;
+    append_line(out, "fort-manifest", FORMAT_VERSION);
+    append_line(out, "library", m->library);
+    append_line(out, "compiler", m->compiler);
+    append_line(out, "target", m->target);
+    if (m->release) {
+        append_line(out, "mode", "release");
+    } else {
+        append_line(out, "mode", "checked");
+    }
+    if (m->no_bounds_check) {
+        append_line(out, "bounds", "off");
+    } else {
+        append_line(out, "bounds", "on");
+    }
+    append_pairs(out, "cfg", m->cfg_keys, m->cfg_values);
+    append_line(out, "cc", m->cc);
+    u64 mut i = 0;
+    while (i < m->cc_args.len) {
+        append_line(out, "xcc", m->cc_args[i]);
+        i += 1;
+    }
+    append_line(out, "ar", m->ar);
+    append_line(out, "source", m->source);
+    append_pairs(out, "use", m->use_names, m->use_hashes);
+    strbuf.str_buf mut key = strbuf.create();
+    defer strbuf.free(&key);
+    append_hash(&key, strbuf.bytes(out)[start..]);
+    append_line(out, "key", strbuf.view(&key));
+    append_line(out, "interface", m->interface);
+    append_line(out, "archive", m->archive);
+    append_line(out, "summaries", SUMMARIES_VERSION);
+}
+
+// ---- the artifact directory --------------------------------------------------------
+
+// `<dir>/<name>` in `out`. A directory that ends in `/` takes no second one.
+fn join(strbuf.str_buf mut* out, string dir, string name) string {
+    strbuf.clear(out);
+    strbuf.append(out, dir);
+    if (dir.len > 0 && dir[dir.len - 1] != '/') {
+        strbuf.push(out, '/');
+    }
+    strbuf.append(out, name);
+    return strbuf.view(out);
+}
+
+// Makes the directory `path` when it does not exist. Returns false with the errno value in
+// `*error` when mkdir(2) fails for another reason, or when `path` names no directory.
+fn make_dir(string path, i32 mut* error) bool {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    if (libc.mkdir(c_path.ptr, DIR_MODE) == 0) {
+        return true;
+    }
+    i32 failure = sys.errno();
+    if (failure != libc.EEXIST) {
+        *error = failure;
+        return false;
+    }
+    // Something stands at the path: it must be a directory.
+    void mut* d = libc.opendir(c_path.ptr);
+    if (d == null) {
+        *error = sys.errno();
+        return false;
+    }
+    libc.closedir(d);
+    return true;
+}
+
+// Removes `path`. Returns false with the errno value in `*error` when unlink(2) fails for a
+// reason other than a missing file.
+fn remove_file(string path, i32 mut* error) bool {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    if (libc.unlink(c_path.ptr) == 0 || sys.errno() == libc.ENOENT) {
+        return true;
+    }
+    *error = sys.errno();
+    return false;
+}
+
+// Whether `path` is a symbolic link: readlink(2) succeeds on a link alone.
+fn is_link(string path) bool {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    char[LINK_PROBE_CAP] mut buf = {};
+    return libc.readlink(c_path.ptr, &buf[0], LINK_PROBE_CAP) >= 0;
+}
+
+// Makes the directory `path` when it does not exist and removes each entry in it, so a file of an
+// older build does not stay. A `path` that is a symbolic link is refused (ELOOP), so the writer
+// removes nothing outside the artifact. An entry that is a directory must be empty. The writer
+// opens `path` with O_NOFOLLOW and removes each entry relative to that descriptor, so a link that
+// replaces the directory during the removals does not redirect them. Returns false with the path
+// that failed in `*failed` and the errno value in `*error`.
+fn make_empty_dir(string path, strbuf.str_buf mut* failed, i32 mut* error) bool {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    if (libc.mkdir(c_path.ptr, DIR_MODE) != 0 && sys.errno() != libc.EEXIST) {
+        *error = sys.errno();
+        strbuf.append(failed, path);
+        return false;
+    }
+    i32 fd = libc.open(c_path.ptr, libc.O_RDONLY | libc.O_DIRECTORY | libc.O_NOFOLLOW, 0);
+    if (fd < 0) {
+        *error = sys.errno();
+        // Linux gives ENOTDIR for a link when O_DIRECTORY is set, darwin ELOOP; a link is ELOOP
+        if (is_link(path)) {
+            *error = libc.ELOOP;
+        }
+        strbuf.append(failed, path);
+        return false;
+    }
+    // closedir(3) closes `fd` as well
+    void mut* stream = libc.fdopendir(fd);
+    if (stream == null) {
+        *error = sys.errno();
+        libc.close(fd);
+        strbuf.append(failed, path);
+        return false;
+    }
+    // The names are copied out before any removal, each ended by a NUL, because a removal while
+    // readdir(3) walks the directory can make it skip an entry. errno is 0 before each readdir(3),
+    // so it is 0 after the last one at the end and the error number after an error.
+    strbuf.str_buf mut names = strbuf.create();
+    defer strbuf.free(&names);
+    *libc.errno_slot() = 0;
+    libc.dirent* mut e = cast(libc.readdir(stream), libc.dirent*);
+    while (e != null) {
+        string name = str.from_cstr(&e->name[0]);
+        if (name != "." && name != "..") {
+            strbuf.append(&names, name);
+            strbuf.push(&names, '\0');
+        }
+        *libc.errno_slot() = 0;
+        e = cast(libc.readdir(stream), libc.dirent*);
+    }
+    i32 failure = sys.errno();
+    if (failure != 0) {
+        libc.closedir(stream);
+        *error = failure;
+        strbuf.append(failed, path);
+        return false;
+    }
+    string all = strbuf.view(&names);
+    u64 mut at = 0;
+    while (at < all.len) {
+        u64 mut end = at;
+        while (all[end] != '\0') {
+            end += 1;
+        }
+        char mut@ own c_name = str.to_cstr(all[at..end]);
+        defer del(c_name);
+        // unlinkat(2) removes a file or a link itself; it refuses a directory, which
+        // AT_REMOVEDIR removes when it is empty
+        if (libc.unlinkat(fd, c_name.ptr, 0) != 0) {
+            i32 unlinked = sys.errno();
+            if (libc.unlinkat(fd, c_name.ptr, libc.AT_REMOVEDIR) != 0) {
+                *error = sys.errno();
+                if (*error == libc.ENOTDIR) {
+                    *error = unlinked;
+                }
+                libc.closedir(stream);
+                strbuf.append(failed, path);
+                strbuf.push(failed, '/');
+                strbuf.append(failed, all[at..end]);
+                return false;
+            }
+        }
+        at = end + 1;
+    }
+    libc.closedir(stream);
+    return true;
+}
+
+// Writes `data` to `<dir>/<name>.tmp.<pid>` and renames that file to `<dir>/<name>`, so the
+// name holds the old bytes or the new bytes and never a part. A file or a link at the temporary
+// name is removed first, and the temporary file must then be new (O_EXCL), so the write goes
+// through no link and an entry that stays there, such as a directory, fails it. Returns false
+// with the errno value in `*error`, and a temporary file that this call made removed, when a step
+// fails.
+fn replace(string dir, string name, u8@ data, i32 mut* error) bool {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, name);
+    strbuf.append(&b, TEMP_INFIX);
+    strbuf.append_i64(&b, cast(libc.getpid(), i64));
+    strbuf.str_buf mut temp_buf = strbuf.create();
+    defer strbuf.free(&temp_buf);
+    string temp = join(&temp_buf, dir, strbuf.view(&b));
+    strbuf.str_buf mut final_buf = strbuf.create();
+    defer strbuf.free(&final_buf);
+    string final_path = join(&final_buf, dir, name);
+    char mut@ own c_temp = str.to_cstr(temp);
+    defer del(c_temp);
+    // A file or a link that an earlier run with this pid left goes first; unlink(2) does not
+    // follow a link. O_EXCL then refuses an entry that stays or that a race puts there.
+    libc.unlink(c_temp.ptr);
+    i32 fd = libc.open(c_temp.ptr, libc.O_WRONLY | libc.O_CREAT | libc.O_EXCL, FILE_MODE);
+    if (fd < 0) {
+        *error = sys.errno();
+        return false;
+    }
+    bool mut ok = io.write_all(fd, data);
+    i32 mut failure = 0;
+    if (!ok) {
+        failure = sys.errno();
+    }
+    if (!io.close(fd) && ok) {
+        failure = sys.errno();
+        ok = false;
+    }
+    if (!ok) {
+        *error = failure;
+        libc.unlink(c_temp.ptr);
+        return false;
+    }
+    char mut@ own c_final = str.to_cstr(final_path);
+    defer del(c_final);
+    if (libc.rename(c_temp.ptr, c_final.ptr) != 0) {
+        *error = sys.errno();
+        libc.unlink(c_temp.ptr);
+        return false;
+    }
+    return true;
+}
+
+/// Writes the artifact `dir` by the write protocol of toolchain.md 2.2: it makes `dir` when it
+/// does not exist and removes `dir/manifest`. It makes `dir/summaries` when it does not exist and
+/// removes each entry in it, and it refuses a `summaries` that is a symbolic link. It writes
+/// `interface.ft` and then `lib.a`, each to a new temporary name that it renames, and it writes
+/// the manifest last in the same way. Returns false at the first step that fails, with the path
+/// of that step in `*failed` and the errno value in `*error`.
+fn write(string dir, string interface_text, u8@ archive, string manifest_text,
+         strbuf.str_buf mut* failed, i32 mut* error) bool {
+    strbuf.clear(failed);
+    if (!make_dir(dir, error)) {
+        strbuf.append(failed, dir);
+        return false;
+    }
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    if (!remove_file(join(&b, dir, MANIFEST_FILE), error)) {
+        strbuf.append(failed, strbuf.view(&b));
+        return false;
+    }
+    // summaries/ goes first, so a refused one leaves the files of the older build as they were
+    if (!make_empty_dir(join(&b, dir, SUMMARIES_DIR), failed, error)) {
+        return false;
+    }
+    if (!replace(dir, INTERFACE_FILE, cast(interface_text, u8@), error)) {
+        strbuf.append(failed, join(&b, dir, INTERFACE_FILE));
+        return false;
+    }
+    if (!replace(dir, ARCHIVE_FILE, archive, error)) {
+        strbuf.append(failed, join(&b, dir, ARCHIVE_FILE));
+        return false;
+    }
+    if (!replace(dir, MANIFEST_FILE, cast(manifest_text, u8@), error)) {
+        strbuf.append(failed, join(&b, dir, MANIFEST_FILE));
+        return false;
+    }
+    return true;
+}

@@ -764,10 +764,13 @@ these additions for the interface modules of its closure:
 - The declarations section starts with one `declare dso_local <result> @"m.f"(<parameters>) #0`
   for each bodiless function of each interface module, in dependency order and then in
   declaration order. The parameters and the result carry the attributes of D9.9 (`sret(%T)`,
-  `zeroext`, `signext`) and no names. `#0` is the attribute group of each fort definition
-  (`toolchain.md` 6 item 7), so the declaration carries what the definition in the library
-  carries, and the unit emits `#0` when a `declare` uses it. Then the declarations of a
-  whole-program module follow.
+  `zeroext`, `signext`) and no names, as the definition in the library carries them. Every
+  declaration takes `#0`, the attribute group of a fort definition (`toolchain.md` 6 item 7). The
+  definition takes `#0`, or `#1` or `#8` when the function is `noreturn` (`toolchain.md` 6 items
+  14 and 20), so the declaration of a `noreturn` function has no `noreturn` attribute. The code
+  after a call does not depend on it: a call of a `noreturn` function is followed by the trap of
+  item 20, or by `unreachable` in a failure block of item 14. The unit emits `#0` when a
+  `declare` uses it. Then the declarations of a whole-program module follow.
 - The counters of `@.str.<N>` and `@.file.<N>` start at 0 in each unit. This private data, and
   each enum table `@.enum.<name>`, is `private` (`toolchain.md` 6 item 4), so two units never
   share a name.

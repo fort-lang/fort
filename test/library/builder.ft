@@ -1,0 +1,61 @@
+/// Emits the IR module of the entry unit of a program against the interface file of the library
+/// `std`: the test-only path of test/library/artifact_test.py, until `--use` reads an artifact
+/// (D9.11).
+///
+/// usage: builder <interface.ft> [fort options] -o <out.ll> <entry.ft>
+///
+/// The options are the ones `fort` parses. The builder reads no standard library directory:
+/// every `std` path resolves in the sections of the interface file (module-system.md 10.2). It
+/// checks the closure, emits the modules of the entry unit with a `declare` line for each
+/// function and an external global for each constant and global of a `std` module
+/// (module-system.md 10.4), and writes the module to the `-o` path. The test compiles that module
+/// and links the object with the `lib.a` of the artifact. It writes the diagnostics as `fort`
+/// writes them and exits 0 after a clean build, 1 for a compile error and 2 for a usage error.
+import check_stmt;
+import diag;
+import driver;
+import modules;
+import session;
+import std.io;
+import std.strbuf;
+
+fn main(string@ args) i32 {
+    if (args.len < 3) {
+        eprintln("usage: builder <interface.ft> [fort options] -o <out.ll> <entry.ft>");
+        return 2;
+    }
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    if (!io.read_file(args[1], &text)) {
+        eprintln("builder: cannot read '", args[1], "'");
+        return 2;
+    }
+    driver.options mut opts = driver.options_create();
+    defer driver.options_free(&opts);
+    // the parse reads its arguments from index 1, so the interface file stands as its program
+    if (driver.parse(&opts, args[1..]) != driver.PARSE_OK) {
+        return 2;
+    }
+    if (!opts.have_output) {
+        eprintln("builder: -o names no module");
+        return 2;
+    }
+    session.session mut s = session.create();
+    defer session.free(&s);
+    driver.configure(&s, &opts);
+    diag.set_text(session.diags(&s), true);
+    session.show_sources(&s);
+    driver.analysis mut an = driver.analysis_create(&s);
+    defer driver.analysis_free(&an);
+    if (!modules.use_library(&s, &an.set, "std", args[1], strbuf.view(&text))) {
+        eprintln("builder: '", args[1], "' is no interface file of the library std");
+        return 2;
+    }
+    bool loaded = modules.load(&s, &an.set, opts.entry);
+    an.ck.require_main = true;
+    bool checked = check_stmt.check_program(&an.ck, &an.set);
+    if (!loaded || !checked || session.error_count(&s) > 0) {
+        return 1;
+    }
+    return driver.emit_module(&s, &opts, &an, opts.output);
+}

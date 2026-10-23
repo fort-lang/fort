@@ -327,8 +327,9 @@ the compiler cannot use and then print the usage line: `invalid library name '<n
 `--lib does not combine with -I, -l, --check, --json, --index, --tokens, --ast or a --fir option`,
 `--emit-interface requires --lib`, `--emit-interface does not combine with -S, -c or -o`,
 `--ar requires --lib`, `<option> requires --lib or --use` (for `--cache-dir` and
-`--cache-stats`), and `a library build needs --use std=<path>`. Thirteen report an artifact,
-a library root or the archiver: `cannot read library root '<root>': <reason>`,
+`--cache-stats`), and `a library build needs --use std=<path>`. Fifteen report an artifact,
+a library root, the archiver or the compiler executable: `cannot read library root '<root>':
+<reason>`,
 `library root '<root>' holds no module`, `cannot read library '<path>': <reason>`,
 `library '<path>' is corrupt`, `library '<path>' is named '<other>', not '<name>'`,
 `library '<name>' was built with another <field>`, where `<field>` is `compiler`, `target`,
@@ -337,8 +338,11 @@ a library root or the archiver: `cannot read library root '<root>': <reason>`,
 `library '<name>' was built against another interface of '<dep>'`,
 `library cycle: '<a>' uses '<b>' uses '<a>'`, which starts and ends at the first library of
 the cycle in byte order of the name, `cannot write '<file>': <reason>` for a file of an artifact,
-`cannot run '<ar>': <reason>`, `ar failed with status <n>` and `ar failed with signal <n>`.
-A failure of the cache is no error (section 2.3).
+`cannot run '<ar>': <reason>`, `ar failed with status <n>`, `ar failed with signal <n>`,
+`cannot read '<file>': <reason>` for the `lib.a` of the archive line or the running compiler
+executable, and `internal error: the system gives no path of the compiler executable`. A
+`<file>` of `cannot write` is the path in the artifact, `D`, `D/F` or `D/summaries/<entry>`, and
+never the temporary name. A failure of the cache is no error (section 2.3).
 
 ```sh
 fort main.ft -o main                          # build ./main in checked mode
@@ -578,12 +582,20 @@ between them. A hash is 64 lowercase hex digits. The lines come in this order:
   text of the values and not the programs that they name.
 
 **Write protocol.** The compiler writes an artifact or a cache entry `D` in this order. It makes
-`D` when it does not exist. It removes `D/manifest`. It writes each other file `F` to
-`D/F.tmp.<pid>`, where `<pid>` is the process id in decimal, and renames it to `D/F`. It makes
-`D/summaries` for a library when it does not exist. Then it writes `D/manifest` in the same way.
-A reader that opens `D/manifest` between two steps finds none. A reader that read the manifest
-before a writer started can then read a file of the newer build. The SHA-256 of that file differs
-from its manifest line, so rule 4 below makes the directory corrupt for that reader.
+`D` when it does not exist. It removes `D/manifest`. For a library, it makes `D/summaries` when it
+does not exist and removes each entry in it, so a file of an older build does not stay. It writes
+each other file `F` to `D/F.tmp.<pid>`, where `<pid>` is the process id in decimal, and renames
+it to `D/F`. Then it writes `D/manifest` in the same way. Each step can fail the write: a
+`D/summaries` that is a symbolic link, to a directory or to a file, an entry of it that is a
+directory with an entry, and an entry at `D/F.tmp.<pid>` that unlink(2) does not remove, such as
+a directory. A file or a link at that name, which an earlier run with the same process id can
+leave, is removed first.
+The compiler follows no link at `D/summaries` or at a temporary name, so it removes nothing
+outside `D` and writes through no link that it did not make. A failed write leaves no
+`D/manifest`, and for an artifact it is the error `cannot write '<file>': <reason>` of section 1,
+with status 2. A reader that opens `D/manifest` between two steps finds none. A reader that read
+the manifest before a writer started can then read a file of the newer build. The SHA-256 of that
+file differs from its manifest line, so rule 4 below makes the directory corrupt for that reader.
 
 **Reading.** A reader reads each file of a directory once: the manifest, `interface.ft`, and
 `lib.a` or `object.o`. It checks the bytes that it read, and then it uses only those bytes. It
