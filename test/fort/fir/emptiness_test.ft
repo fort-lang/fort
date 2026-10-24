@@ -1417,10 +1417,12 @@ string[72] HELD_STORE = {
 
 string[3] HELD_STORE_VERDICTS = {"PPPU", "U", "UU"};
 
-// A store into a local that the place of a held address reads makes the address stale, so its
-// check reads `(*_a)` and not the place. A store through a stale held address keeps no fact
-// through a fresh pointer, because the `addr` of the held address ended no freshness.
-string[103] HELD_STALE = {
+// A store into a local that the place of a held address reads makes the address stale. A stale
+// held address gives no tracked place, so the pass proves no check of it, and a `move` through it
+// gives no fact. A store through it keeps no fact through a fresh pointer, because the `addr` of
+// the held address ended no freshness. One edge that makes the address stale makes it stale
+// after the join.
+string[154] HELD_STALE = {
     // a store into the base of the place: PU
     "fn main.s1() -> void {",
     "    let _1: node mut* own;",
@@ -1529,9 +1531,261 @@ string[103] HELD_STALE = {
     "        return;",
     "    }",
     "}",
+    // a move through a stale held address gives no fact to the place that its index names now:
+    // UU
+    "fn main.s5(_1 (b): node mut*) -> void {",
+    "    let _2 (i): u64;",
+    "    let _3: node mut* own mut*;",
+    "    let _4: node mut* own;",
+    "    let _5: node mut* own;",
+    "    let _6: node mut* own;",
+    "    bb0: {",
+    "        _2 = const u64 0;",
+    "        _3 = addr mut((*_1).2[_2]);",
+    "        _2 = const u64 1;",
+    "        _4 = move (*_3);",
+    "        _5 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).2[_2]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).2[_2] = move _5;",
+    "        _6 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_3)) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        (*_3) = move _6;",
+    "        return;",
+    "    }",
+    "}",
+    // a store into the index on one edge makes the held address stale after the join: U
+    "fn main.s6(_1 (b): node mut*, _2 (c): bool) -> void {",
+    "    let _3 (i): u64;",
+    "    let _4: node mut* own mut*;",
+    "    let _5: node mut* own;",
+    "    bb0: {",
+    "        _3 = const u64 0;",
+    "        _4 = addr mut((*_1).2[_3]);",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _3 = const u64 1;",
+    "        del(move (*_1).2[_3]);",
+    "        goto bb3;",
+    "    }",
+    "    bb2: {",
+    "        del(move (*_1).2[_3]);",
+    "        goto bb3;",
+    "    }",
+    "    bb3: {",
+    "        _5 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_4)) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        (*_4) = move _5;",
+    "        return;",
+    "    }",
+    "}",
 };
 
-string[4] HELD_STALE_VERDICTS = {"PU", "PU", "UU", "PU"};
+string[6] HELD_STALE_VERDICTS = {"PU", "PU", "UU", "PU", "UU", "U"};
+
+// A call, a store through a pointer and a store straight into a memory local or a global make
+// each held address stale: they can change a span header that the place of the address reads,
+// with no store into a local. A `move` operand and a `del` make no held address stale, and a call
+// before the `addr` makes none stale either. In m8 and m9 the run is outside the guarantee of
+// D17.11, so the pass proves the check: the `del` of the header frees the storage that the held
+// address names, and the `move` of field 0 of the header leaves `null` with the length (D10.7).
+string[176] HELD_MEMORY = {
+    // a call: U
+    "fn main.m1(_1 (b): node mut*, _2 (i): u64) -> void {",
+    "    let _3: node mut* own mut*;",
+    "    let _4: void;",
+    "    let _5: node mut* own;",
+    "    let _6: node mut* own;",
+    "    bb0: {",
+    "        _3 = addr mut((*_1).3[_2]);",
+    "        _4 = call fn main.g();",
+    "        _5 = move (*_1).3[_2];",
+    "        _6 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_3)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_3) = move _6;",
+    "        del(move _5);",
+    "        return;",
+    "    }",
+    "}",
+    // a store through a pointer that names no span header: U
+    "fn main.m2(_1 (b): node mut*, _2 (i): u64, _3 (k): u64 mut*) -> void {",
+    "    let _4: node mut* own mut*;",
+    "    let _5: node mut* own;",
+    "    let _6: node mut* own;",
+    "    bb0: {",
+    "        _4 = addr mut((*_1).3[_2]);",
+    "        (*_3) = const u64 1;",
+    "        _5 = move (*_1).3[_2];",
+    "        _6 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_4)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_4) = move _6;",
+    "        del(move _5);",
+    "        return;",
+    "    }",
+    "}",
+    // a store straight into a memory local: U
+    "fn main.m3(_1 (b): node mut*, _2 (i): u64) -> void {",
+    "    let _3 (k): u64;",
+    "    let _4: u64 mut*;",
+    "    let _5: node mut* own mut*;",
+    "    let _6: node mut* own;",
+    "    let _7: node mut* own;",
+    "    bb0: {",
+    "        _3 = const u64 0;",
+    "        _4 = addr mut(_3);",
+    "        _5 = addr mut((*_1).3[_2]);",
+    "        _3 = const u64 1;",
+    "        _6 = move (*_1).3[_2];",
+    "        _7 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_5)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_5) = move _7;",
+    "        del(move _6);",
+    "        return;",
+    "    }",
+    "}",
+    // a store straight into a global: U
+    "fn main.m4(_1 (b): node mut*, _2 (i): u64) -> void {",
+    "    let _3: node mut* own mut*;",
+    "    let _4: node mut* own;",
+    "    let _5: node mut* own;",
+    "    bb0: {",
+    "        _3 = addr mut((*_1).3[_2]);",
+    "        global main.S.0 = const null node mut* own;",
+    "        _4 = move (*_1).3[_2];",
+    "        _5 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_3)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_3) = move _5;",
+    "        del(move _4);",
+    "        return;",
+    "    }",
+    "}",
+    // a `move` and a `del` through memory make no held address stale: P
+    "fn main.m5(_1 (b): node mut*, _2 (i): u64, _3 (j): u64) -> void {",
+    "    let _4: node mut* own mut*;",
+    "    let _5: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1).3[_2]);",
+    "        _4 = addr mut((*_1).3[_2]);",
+    "        _5 = move (*_1).3[_3];",
+    "        del(move (*_1).0);",
+    "        check(overwrite: (*_4)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_4) = move _5;",
+    "        return;",
+    "    }",
+    "}",
+    // a call makes a held address stale also when its place reads no span header: U
+    "fn main.m6(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own mut*;",
+    "    let _3: void;",
+    "    let _4: node mut* own;",
+    "    let _5: node mut* own;",
+    "    bb0: {",
+    "        _2 = addr mut((*_1).0);",
+    "        _3 = call fn main.g();",
+    "        _4 = move (*_1).0;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_2)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_2) = move _5;",
+    "        del(move _4);",
+    "        return;",
+    "    }",
+    "}",
+    // a call before the `addr` and a store into a local that is no memory: P
+    "fn main.m7(_1 (b): node mut*, _2 (i): u64) -> void {",
+    "    let _3: node mut* own mut*;",
+    "    let _4: void;",
+    "    let _5 (k): u64;",
+    "    let _6: node mut* own;",
+    "    let _7: node mut* own;",
+    "    bb0: {",
+    "        _4 = call fn main.g();",
+    "        _3 = addr mut((*_1).3[_2]);",
+    "        _5 = const u64 1;",
+    "        _6 = move (*_1).3[_2];",
+    "        _7 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_3)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_3) = move _7;",
+    "        del(move _6);",
+    "        return;",
+    "    }",
+    "}",
+    // a `del` of the header: the store writes through a dangling pointer: P
+    "fn main.m8(_1 (b): node mut*, _2 (i): u64) -> void {",
+    "    let _3: node mut* own mut*;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1).3[_2]);",
+    "        _3 = addr mut((*_1).3[_2]);",
+    "        del(move (*_1).3);",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_3)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_3) = move _4;",
+    "        return;",
+    "    }",
+    "}",
+    // a `move` of field 0 of the header: the next `index` dereferences `null`: P
+    "fn main.m9(_1 (b): node mut*, _2 (i): u64) -> void {",
+    "    let _3: node mut* own mut*;",
+    "    let _4: node mut* own mut* own;",
+    "    let _5: node mut* own;",
+    "    let _6: node mut* own;",
+    "    bb0: {",
+    "        _3 = addr mut((*_1).3[_2]);",
+    "        _4 = move (*_1).3.0;",
+    "        _5 = move (*_1).3[_2];",
+    "        _6 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_3)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_3) = move _6;",
+    "        del(move _5);",
+    "        return;",
+    "    }",
+    "}",
+    // a `move` of the header writes a zero header, whose length is 0, and the held address names
+    // the element that the moved span holds: P
+    "fn main.m10(_1 (b): node mut*, _2 (i): u64) -> void {",
+    "    let _3: node mut* own mut*;",
+    "    let _4: node mut* own mut@ own;",
+    "    let _5: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1).3[_2]);",
+    "        _3 = addr mut((*_1).3[_2]);",
+    "        _4 = move (*_1).3;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_3)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_3) = move _5;",
+    "        del(move _4);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[10] HELD_MEMORY_VERDICTS = {"U", "U", "U", "U", "P", "U", "P", "P", "P", "P"};
 
 // A fact holds at the start of a block when it holds at the end of each predecessor.
 string[124] JOIN = {
@@ -4231,6 +4485,7 @@ fn a_held_address_reads_as_its_place() void {
     expect(HELD[..], HELD_VERDICTS[..]);
     expect(HELD_STORE[..], HELD_STORE_VERDICTS[..]);
     expect(HELD_STALE[..], HELD_STALE_VERDICTS[..]);
+    expect(HELD_MEMORY[..], HELD_MEMORY_VERDICTS[..]);
 }
 
 // A fact holds at the start of a block when it holds at the end of each predecessor.
@@ -4309,7 +4564,7 @@ fn a_store_straight_into_a_local_keeps_other_locals() void {
 
 // The examples of the rule. A comment gives the verdicts of the checks of each function in block
 // order.
-string[221] EXAMPLES = {
+string[246] EXAMPLES = {
     "struct int_buf {",
     "    i32 mut@ own items;",
     "    u64 len;",
@@ -4568,21 +4823,50 @@ string[221] EXAMPLES = {
     "    x.a[0] = new(node);",
     "    del(x.a[0]);",
     "}",
+    "struct two {",
+    "    node mut* own mut@ cur;",
+    "    node mut* own mut@ other;",
+    "}",
+    "fn flip(two mut* t) bool {",
+    "    node mut* own mut@ x = t->cur;",
+    "    t->cur = t->other;",
+    "    t->other = x;",
+    "    return true;",
+    "}",
+    // U: the call makes t->cur another span after the store holds the address of t->cur[i]
+    "fn store_flip(two mut* t, u64 i) void {",
+    "    t->cur[i] = flip(t) ? move(t->cur[i]) : move(t->cur[i]);",
+    "}",
+    "fn flip_local(node mut* own mut@ mut* s, node mut* own mut@ other) bool {",
+    "    *s = other;",
+    "    return true;",
+    "}",
+    // U: the call makes s another span through &s
+    "fn store_local(node mut* own mut@ a, node mut* own mut@ b, u64 i) void {",
+    "    node mut* own mut@ mut s = a;",
+    "    s[i] = flip_local(&s, b) ? move(s[i]) : move(s[i]);",
+    "}",
+    // P: the move of v->items[j] makes no held address stale
+    "fn remove(node_vec mut* v, u64 i, u64 j) void {",
+    "    del(v->items[i]);",
+    "    v->items[i] = move(v->items[j]);",
+    "}",
 };
 
 // The functions of EXAMPLES and the verdicts of each.
-string[35] EXAMPLE_NAMES = {
+string[38] EXAMPLE_NAMES = {
     "fill", "refill", "store_out", "pair", "alias", "put", "put_len", "push", "set_global",
     "set_global_alone", "swap", "loop_del", "loop_leak", "twice", "grow", "pop", "swap_fields",
     "make", "refresh", "refresh_first", "rename", "init_head", "clear_head", "push_back",
     "take_out", "reset", "refresh_loop", "loop_move", "second", "self_local", "self_global",
-    "second_element", "second_move", "nested_field", "slot_index",
+    "second_element", "second_move", "nested_field", "slot_index", "store_flip", "store_local",
+    "remove",
 };
 
-string[35] EXAMPLE_VERDICTS = {
+string[38] EXAMPLE_VERDICTS = {
     "P", "U", "P", "PPP", "UU", "P", "U", "PPP", "P", "U", "PP", "P", "U", "PP", "PPU", "PP",
     "PPP", "", "U", "PP", "P", "U", "P", "U", "U", "P", "U", "PP", "UU", "UU", "UU", "UU", "UUU",
-    "UU", "UU",
+    "UU", "UU", "U", "U", "P",
 };
 
 // Lowers the function `name` of the checked source of `e` into *out, and holds that the

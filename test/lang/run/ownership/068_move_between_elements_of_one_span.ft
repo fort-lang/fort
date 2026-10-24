@@ -1,0 +1,58 @@
+//! run
+//! stdout:
+//| 7 null 9
+//| null 9 7
+// A store into an element of a span holds the address of the element before its right side
+// (D6.3). A `move` from another element writes zero into that element and changes no span, so
+// it makes no held address stale (spec/fir.md 11), and `del(v[i]); v[i] = move(v[j]);` passes.
+// fail/ownership/062 holds a call that changes the span, which makes the store an error.
+struct vec {
+    i32 mut* own mut@ own items;
+}
+
+fn swap_in(vec mut* v, u64 i, u64 j, bool c) void {
+    del(v->items[i]);
+    v->items[i] = c ? move(v->items[j]) : move(v->items[i]);
+}
+
+fn swap_span(i32 mut* own mut@ v, u64 i, u64 j) void {
+    del(v[i]);
+    v[i] = move(v[j]);
+}
+
+fn show(i32 mut* own mut@ v) void {
+    for (u64 mut k = 0; k < v.len; k++) {
+        if (k > 0) {
+            print(" ");
+        }
+        if (v[k] == null) {
+            print("null");
+        } else {
+            print(*v[k]);
+        }
+    }
+    println("");
+}
+
+fn main() i32 {
+    vec mut v = vec{.items = new(i32 mut* own, 3)};
+    del(v.items[0]);
+    v.items[0] = new(i32);
+    *v.items[0] = 9;
+    del(v.items[1]);
+    v.items[1] = new(i32);
+    *v.items[1] = 7;
+    swap_in(&v, 0, 1, true);
+    del(v.items[2]);
+    v.items[2] = new(i32);
+    *v.items[2] = 9;
+    show(v.items[..]);
+    swap_span(v.items[..], 1, 2);
+    swap_span(v.items[..], 2, 0);
+    show(v.items[..]);
+    del(v.items[0]);
+    del(v.items[1]);
+    del(v.items[2]);
+    del(v.items);
+    return 0;
+}

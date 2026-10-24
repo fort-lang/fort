@@ -52,6 +52,10 @@
 //| hand k2: sites 3, rejected 1, with an event 1, false rejects 0
 //| hand k2b: sites 2, rejected 0, with an event 0, false rejects 0
 //| hand k2d: sites 3, rejected 0, with an event 0, false rejects 0
+//| hand span_flip: reject with an event at 13:15
+//| hand span_flip: sites 2, rejected 1, with an event 1, false rejects 0
+//| hand span_local: reject with an event at 8:10
+//| hand span_local: sites 2, rejected 1, with an event 1, false rejects 0
 //| item local: reject with an event at 10:7
 //| item local: sites 4, rejected 1, with an event 1, false rejects 0
 //| item field: reject with an event at 13:9
@@ -118,10 +122,16 @@
 //| fir held_chain: false reject at 6:1
 //| fir held_chain: false reject at 9:1
 //| fir held_chain: reject with an event at 11:1
-//| fir: sites 37, rejected 18, with an event 12, false rejects 6
-//| hand: items 80, dropped 0, runs 80
-//| hand ends: return 15, exit 39, abort 0, trap 0, outside 1, fault 25
-//| hand: sites 214, rejected 52, with an event 41, false accepts 0, false rejects 11
+//| fir span_alias: reject with an event at 18:1
+//| fir span_straight: reject with an event at 18:1
+//| fir span_global: reject with an event at 16:1
+//| fir stale_gen: reject with an event at 11:1
+//| fir stale_gen: false reject at 13:1
+//| fir stale_join: reject with an event at 16:1
+//| fir: sites 48, rejected 24, with an event 17, false rejects 7
+//| hand: items 87, dropped 0, runs 87
+//| hand ends: return 20, exit 41, abort 0, trap 0, outside 1, fault 25
+//| hand: sites 229, rejected 60, with an event 48, false accepts 0, false rejects 12
 //| hand outside rule (a): leak 4, leak at exit 1, double release 0, invalid release 0
 //| hand outside rule (a): use after release 19, use after move 5, use after scope 2
 //| hand outside rule (a): duplicate owner 1, overwrite of no own reference 0
@@ -132,11 +142,11 @@
 //| exhaustive outside rule (a): leak 7958, leak at exit 0, double release 0, invalid release 0
 //| exhaustive outside rule (a): use after release 0, use after move 2, use after scope 0
 //| exhaustive outside rule (a): duplicate owner 0, overwrite of no own reference 0
-//| seeded: items 1620, dropped 2226, runs 1620
-//| seeded ends: return 0, exit 791, abort 36, trap 0, outside 41, fault 752
-//| seeded: sites 4224, rejected 1198, with an event 783, false accepts 0, false rejects 415
-//| seeded outside rule (a): leak 130, leak at exit 47, double release 2, invalid release 0
-//| seeded outside rule (a): use after release 445, use after move 208, use after scope 0
+//| seeded: items 1849, dropped 2632, runs 1849
+//| seeded ends: return 0, exit 1010, abort 36, trap 0, outside 41, fault 762
+//| seeded: sites 4806, rejected 1509, with an event 1000, false accepts 0, false rejects 509
+//| seeded outside rule (a): leak 142, leak at exit 47, double release 2, invalid release 0
+//| seeded outside rule (a): use after release 445, use after move 212, use after scope 0
 //| seeded outside rule (a): duplicate owner 30, overwrite of no own reference 6
 //| shapes: items 1199, dropped 0, runs 1199
 //| shapes ends: return 907, exit 0, abort 0, trap 0, outside 0, fault 292
@@ -233,10 +243,13 @@ string[STRBUF_LINES] STRBUF = {
 };
 
 // The hand cases of the design reviews (spec/ownership-design.md 5.6), with the k cases of the
-// review of R6. Each starts with the line of its places (generator.ft), and `$` marks each name of
-// a function. fa5 calls `bsearch`, which the oracle does not run, so fa5c calls `oracle_call`.
+// review of R6 and the span cases of the review of this test. Each starts with the line of its
+// places (generator.ft), and `$` marks each name of a function. fa5 calls `bsearch`, which the
+// oracle does not run, so fa5c calls `oracle_call`. In span_flip and span_local, the store holds
+// the address of an element of a span, and the call in its right side changes the span, so the
+// store writes the old element, which is live.
 // The count of the lines of HAND.
-u64 HAND_LINES = 504;
+u64 HAND_LINES = 550;
 
 string[HAND_LINES] HAND = {
     "// places: arr[i]:i32 arr[j]:i32",
@@ -743,15 +756,62 @@ string[HAND_LINES] HAND = {
     "    del(x);",
     "    return 0;",
     "}",
+    "// places: t->cur[i]:i32 a[0]:i32 b[0]:i32",
+    "struct two {",
+    "    i32 mut* own mut@ cur;",
+    "    i32 mut* own mut@ other;",
+    "}",
+    "fn flip$(two mut* t) bool {",
+    "    i32 mut* own mut@ x = t->cur;",
+    "    t->cur = t->other;",
+    "    t->other = x;",
+    "    return true;",
+    "}",
+    "fn store$(two mut* t, u64 i) void {",
+    "    t->cur[i] = flip$(t) ? move(t->cur[i]) : move(t->cur[i]);",
+    "}",
+    "fn main$() i32 {",
+    "    i32 mut* own[1] mut a = {};",
+    "    i32 mut* own[1] mut b = {};",
+    "    del(a[0]);",
+    "    a[0] = new(i32);",
+    "    *a[0] = 7;",
+    "    two mut t = two{.cur = a[..], .other = b[..]};",
+    "    store$(&t, 0);",
+    "    del(a[0]);",
+    "    del(b[0]);",
+    "    return 0;",
+    "}",
+    "// places: s[i]:i32 a[0]:i32 b[0]:i32",
+    "fn flip$(i32 mut* own mut@ mut* s, i32 mut* own mut@ other) bool {",
+    "    *s = other;",
+    "    return true;",
+    "}",
+    "fn store$(i32 mut* own mut@ a, i32 mut* own mut@ b, u64 i) void {",
+    "    i32 mut* own mut@ mut s = a;",
+    "    s[i] = flip$(&s, b) ? move(s[i]) : move(s[i]);",
+    "}",
+    "fn main$() i32 {",
+    "    i32 mut* own[1] mut a = {};",
+    "    i32 mut* own[1] mut b = {};",
+    "    del(a[0]);",
+    "    a[0] = new(i32);",
+    "    *a[0] = 7;",
+    "    store$(a[..], b[..], 0);",
+    "    del(a[0]);",
+    "    del(b[0]);",
+    "    return 0;",
+    "}",
 };
 
 // The count of the hand cases.
-u64 HAND_CASES = 43;
+u64 HAND_CASES = 45;
 
 string[HAND_CASES] HAND_NAMES = {
     "fa1", "fa2", "fa3", "fa4", "fa5", "fa5c", "fa6", "fa7", "fa8", "fa9", "fa10", "fa11", "fa12",
     "fa13", "g1", "g1b", "g2", "g3", "g4", "g5", "g6", "g7", "g8", "h1", "h2", "h3", "h4", "h5",
     "h6", "h7", "h8", "h9", "h10", "n1", "n1b", "n2a", "n2b", "n3", "n4", "k1", "k2", "k2b", "k2d",
+    "span_flip", "span_local",
 };
 
 // The item cases of design 3.6: an accept case and a reject case for each item of design 5.4
@@ -1270,23 +1330,27 @@ string[ITEM_CASES] ITEM_NAMES = {
 // The FIR text cases of design 3.6, for the shapes that the lowering of fort makes nowhere: an
 // index temporary that a store into its source makes stale, the `alloc` of a temporary that a
 // second item reads, the one store of a temporary that is memory, an `addr mut` of fixed storage,
-// which is no held address, an address of a held address, and a held address after a store into
-// a local that its place reads. `key_fresh`, `fresh_once` and `held_address` keep the rule; the
-// held address of `held_address` names a place through a fresh pointer. `key_stale`,
-// `fresh_twice`, `held_value`, `value_memory`, `held_fresh`, `held_copy`, `held_memory`,
-// `stale_base`, `stale_key`, `stale_fresh`, `stale_alias` and `held_chain` break it at a store
+// which is no held address, an address of a held address, a held address after a store into a
+// local that its place reads, and a held address after a store that changes the span header that
+// its place reads. `key_fresh`, `fresh_once` and `held_address` keep the rule; the held address
+// of `held_address` names a place through a fresh pointer. The other 17 cases break it at a store
 // that the run reaches with a live allocation. `held_memory` changes its held address through the
 // address of it. In `stale_base` and `stale_key` a store into the base or the index of the place
 // of a held address comes before its check, in `stale_fresh` the place is through a fresh
 // pointer, and in `stale_alias` a `move` through the stale address comes before a store through
-// that fresh pointer. These were false accepts of fir.emptiness: `held_value`, `held_fresh` and
-// `held_copy` while an `addr mut` of fixed storage could be a held address, `stale_base` and
-// `stale_key` while a held address read as its place after such a store, and `stale_alias` while
-// a stale held address gave a tracked place (spec/fir.md 11, Held address). In `fresh_twice`,
-// `held_fresh`, `held_copy`, `stale_fresh` and `held_chain`, the other rejected sites are false
-// rejects: no fact names their places, and the run finds them empty. FIR_PRELUDE holds the
-// declarations that they name.
-u64 FIR_PRELUDE_LINES = 7;
+// that fresh pointer. In `span_alias`, `span_straight` and `span_global` the span header changes
+// through a copy of the base pointer, by a store straight into a memory local and by a store
+// straight into a global. In `stale_gen` a `move` through the stale address comes before a check
+// of the place that its index names now, and in `stale_join` one edge makes the address stale.
+// These were false accepts of fir.emptiness: `held_value`, `held_fresh` and `held_copy` while an
+// `addr mut` of fixed storage could be a held address, `stale_base` and `stale_key` while a held
+// address read as its place after such a store, `stale_alias` while a stale held address gave a
+// tracked place, and the three span cases while only a store into a local made a held address
+// stale (spec/fir.md 11, Held address). In `fresh_twice`, `held_fresh`, `held_copy`,
+// `stale_fresh`, `held_chain` and `stale_gen`, the other rejected sites are false rejects: no
+// fact names their places, and the run finds them empty. FIR_PRELUDE holds the declarations that
+// they name.
+u64 FIR_PRELUDE_LINES = 11;
 
 string[FIR_PRELUDE_LINES] FIR_PRELUDE = {
     "struct pair {",
@@ -1296,9 +1360,13 @@ string[FIR_PRELUDE_LINES] FIR_PRELUDE = {
     "struct box {",
     "    i32 mut* own[2] e;",
     "}",
+    "struct sbox {",
+    "    i32 mut* own mut@ s;",
+    "}",
+    "sbox mut GS = {};",
 };
 
-u64 FIR_LINES = 459;
+u64 FIR_LINES = 688;
 
 string[FIR_LINES] FIR_CASES = {
     "fn main.key_fresh() -> i32 {",
@@ -1758,6 +1826,235 @@ string[FIR_LINES] FIR_CASES = {
     "        del(move _1) #12:1;",
     "        _0 = const i32 0 #13:1;",
     "        return #14:1;",
+    "    }",
+    "}",
+    "fn main.span_alias() -> i32 {",
+    "    let _1 (a): i32 mut* own[1];",
+    "    let _2 (b): i32 mut* own[1];",
+    "    let _3: u64;",
+    "    let _4: i32 mut* own;",
+    "    let _5: i32 mut* own mut@;",
+    "    let _6: i32 mut* own mut@;",
+    "    let _7: sbox mut* own;",
+    "    let _8: sbox mut*;",
+    "    let _9: u64;",
+    "    let _10: i32 mut* own mut*;",
+    "    let _11: u64;",
+    "    let _12: i32 mut* own;",
+    "    let _13: u64;",
+    "    let _14: u64;",
+    "    bb0: {",
+    "        _1 = const zero i32 mut* own[1] #2:1;",
+    "        _2 = const zero i32 mut* own[1] #3:1;",
+    "        _3 = const u64 0 #4:1;",
+    "        _4 = alloc<i32>(const u64 1) #5:1;",
+    "        check(overwrite: _1[_3]) -> bb1 #6:1;",
+    "    }",
+    "    bb1: {",
+    "        _1[_3] = move _4 #6:1;",
+    "        _5 = slice mut(_1, const u64 0, const u64 1) #7:1;",
+    "        _6 = slice mut(_2, const u64 0, const u64 1) #8:1;",
+    "        _7 = alloc<sbox>(const u64 1) #9:1;",
+    "        (*_7).0 = copy _5 #10:1;",
+    "        _8 = copy _7 #11:1;",
+    "        _9 = const u64 0 #12:1;",
+    "        _10 = addr mut((*_7).0[_9]) #13:1;",
+    "        (*_8).0 = copy _6 #14:1;",
+    "        _11 = const u64 0 #15:1;",
+    "        del(move (*_7).0[_11]) #16:1;",
+    "        _12 = alloc<i32>(const u64 1) #17:1;",
+    "        check(overwrite: (*_10)) -> bb2 #18:1;",
+    "    }",
+    "    bb2: {",
+    "        (*_10) = move _12 #18:1;",
+    "        _13 = const u64 0 #19:1;",
+    "        del(move _1[_13]) #19:2;",
+    "        _14 = const u64 0 #20:1;",
+    "        del(move _2[_14]) #20:2;",
+    "        del(move _7) #21:1;",
+    "        _0 = const i32 0 #22:1;",
+    "        return #23:1;",
+    "    }",
+    "}",
+    "fn main.span_straight() -> i32 {",
+    "    let _1 (a): i32 mut* own[1];",
+    "    let _2 (b): i32 mut* own[1];",
+    "    let _3: u64;",
+    "    let _4: i32 mut* own;",
+    "    let _5: i32 mut* own mut@;",
+    "    let _6: i32 mut* own mut@;",
+    "    let _7 (m): sbox;",
+    "    let _8: sbox mut*;",
+    "    let _9: u64;",
+    "    let _10: i32 mut* own mut*;",
+    "    let _11: u64;",
+    "    let _12: i32 mut* own;",
+    "    let _13: u64;",
+    "    let _14: u64;",
+    "    bb0: {",
+    "        _1 = const zero i32 mut* own[1] #2:1;",
+    "        _2 = const zero i32 mut* own[1] #3:1;",
+    "        _3 = const u64 0 #4:1;",
+    "        _4 = alloc<i32>(const u64 1) #5:1;",
+    "        check(overwrite: _1[_3]) -> bb1 #6:1;",
+    "    }",
+    "    bb1: {",
+    "        _1[_3] = move _4 #6:1;",
+    "        _5 = slice mut(_1, const u64 0, const u64 1) #7:1;",
+    "        _6 = slice mut(_2, const u64 0, const u64 1) #8:1;",
+    "        _7 = const zero sbox #9:1;",
+    "        _7.0 = copy _5 #10:1;",
+    "        _8 = addr mut(_7) #11:1;",
+    "        _9 = const u64 0 #12:1;",
+    "        _10 = addr mut((*_8).0[_9]) #13:1;",
+    "        _7.0 = copy _6 #14:1;",
+    "        _11 = const u64 0 #15:1;",
+    "        del(move (*_8).0[_11]) #16:1;",
+    "        _12 = alloc<i32>(const u64 1) #17:1;",
+    "        check(overwrite: (*_10)) -> bb2 #18:1;",
+    "    }",
+    "    bb2: {",
+    "        (*_10) = move _12 #18:1;",
+    "        _13 = const u64 0 #19:1;",
+    "        del(move _1[_13]) #19:2;",
+    "        _14 = const u64 0 #20:1;",
+    "        del(move _2[_14]) #20:2;",
+    "        _0 = const i32 0 #21:1;",
+    "        return #22:1;",
+    "    }",
+    "}",
+    "fn main.span_global() -> i32 {",
+    "    let _1 (a): i32 mut* own[1];",
+    "    let _2 (b): i32 mut* own[1];",
+    "    let _3: u64;",
+    "    let _4: i32 mut* own;",
+    "    let _5: i32 mut* own mut@;",
+    "    let _6: i32 mut* own mut@;",
+    "    let _7: u64;",
+    "    let _8: i32 mut* own mut*;",
+    "    let _9: u64;",
+    "    let _10: i32 mut* own;",
+    "    let _11: u64;",
+    "    let _12: u64;",
+    "    bb0: {",
+    "        _1 = const zero i32 mut* own[1] #2:1;",
+    "        _2 = const zero i32 mut* own[1] #3:1;",
+    "        _3 = const u64 0 #4:1;",
+    "        _4 = alloc<i32>(const u64 1) #5:1;",
+    "        check(overwrite: _1[_3]) -> bb1 #6:1;",
+    "    }",
+    "    bb1: {",
+    "        _1[_3] = move _4 #6:1;",
+    "        _5 = slice mut(_1, const u64 0, const u64 1) #7:1;",
+    "        _6 = slice mut(_2, const u64 0, const u64 1) #8:1;",
+    "        global main.GS.0 = copy _5 #9:1;",
+    "        _7 = const u64 0 #10:1;",
+    "        _8 = addr mut(global main.GS.0[_7]) #11:1;",
+    "        global main.GS.0 = copy _6 #12:1;",
+    "        _9 = const u64 0 #13:1;",
+    "        del(move global main.GS.0[_9]) #14:1;",
+    "        _10 = alloc<i32>(const u64 1) #15:1;",
+    "        check(overwrite: (*_8)) -> bb2 #16:1;",
+    "    }",
+    "    bb2: {",
+    "        (*_8) = move _10 #16:1;",
+    "        _11 = const u64 0 #17:1;",
+    "        del(move _1[_11]) #17:2;",
+    "        _12 = const u64 0 #18:1;",
+    "        del(move _2[_12]) #18:2;",
+    "        global main.GS = const zero sbox #19:1;",
+    "        _0 = const i32 0 #20:1;",
+    "        return #21:1;",
+    "    }",
+    "}",
+    "fn main.stale_gen() -> i32 {",
+    "    let _1: box mut* own;",
+    "    let _2 (i): u64;",
+    "    let _3: i32 mut* own;",
+    "    let _4: i32 mut* own mut*;",
+    "    let _5: i32 mut* own;",
+    "    let _6: i32 mut* own;",
+    "    let _7: i32 mut* own;",
+    "    let _8: u64;",
+    "    let _9: u64;",
+    "    bb0: {",
+    "        _2 = const u64 1 #2:1;",
+    "        _1 = alloc<box>(const u64 1) #3:1;",
+    "        _3 = alloc<i32>(const u64 1) #4:1;",
+    "        check(overwrite: (*_1).0[_2]) -> bb1 #5:1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0[_2] = move _3 #5:1;",
+    "        _2 = const u64 0 #6:1;",
+    "        _4 = addr mut((*_1).0[_2]) #7:1;",
+    "        _2 = const u64 1 #8:1;",
+    "        _7 = move (*_4) #9:1;",
+    "        _5 = alloc<i32>(const u64 1) #10:1;",
+    "        check(overwrite: (*_1).0[_2]) -> bb2 #11:1;",
+    "    }",
+    "    bb2: {",
+    "        (*_1).0[_2] = move _5 #11:1;",
+    "        _6 = alloc<i32>(const u64 1) #12:1;",
+    "        check(overwrite: (*_4)) -> bb3 #13:1;",
+    "    }",
+    "    bb3: {",
+    "        (*_4) = move _6 #13:1;",
+    "        _8 = const u64 0 #14:1;",
+    "        del(move (*_1).0[_8]) #14:2;",
+    "        _9 = const u64 1 #15:1;",
+    "        del(move (*_1).0[_9]) #15:2;",
+    "        del(move _1) #16:1;",
+    "        _0 = const i32 0 #17:1;",
+    "        return #18:1;",
+    "    }",
+    "}",
+    "fn main.stale_join() -> i32 {",
+    "    let _1: box mut* own;",
+    "    let _2 (i): u64;",
+    "    let _3: u64;",
+    "    let _4: i32 mut* own;",
+    "    let _5: i32 mut* own mut*;",
+    "    let _6: u64;",
+    "    let _7: i32 mut* own;",
+    "    let _8: u64;",
+    "    let _9: u64;",
+    "    let _10 (b): bool;",
+    "    bb0: {",
+    "        _10 = const true #2:1;",
+    "        _2 = const u64 0 #3:1;",
+    "        _1 = alloc<box>(const u64 1) #4:1;",
+    "        _3 = copy _2 #5:1;",
+    "        _4 = alloc<i32>(const u64 1) #5:2;",
+    "        check(overwrite: (*_1).0[_3]) -> bb1 #6:1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0[_3] = move _4 #6:1;",
+    "        _5 = addr mut((*_1).0[_2]) #7:1;",
+    "        switch(copy _10) -> [true: bb2, otherwise: bb3] #8:1;",
+    "    }",
+    "    bb2: {",
+    "        _2 = const u64 1 #9:1;",
+    "        _6 = copy _2 #10:1;",
+    "        del(move (*_1).0[_6]) #11:1;",
+    "        goto bb4 #12:1;",
+    "    }",
+    "    bb3: {",
+    "        del(move (*_1).0[_2]) #13:1;",
+    "        goto bb4 #14:1;",
+    "    }",
+    "    bb4: {",
+    "        _7 = alloc<i32>(const u64 1) #15:1;",
+    "        check(overwrite: (*_5)) -> bb5 #16:1;",
+    "    }",
+    "    bb5: {",
+    "        (*_5) = move _7 #16:1;",
+    "        _8 = const u64 0 #17:1;",
+    "        del(move (*_1).0[_8]) #17:2;",
+    "        _9 = const u64 1 #18:1;",
+    "        del(move (*_1).0[_9]) #18:2;",
+    "        del(move _1) #19:1;",
+    "        _0 = const i32 0 #20:1;",
+    "        return #21:1;",
     "    }",
     "}",
 };

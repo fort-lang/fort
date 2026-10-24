@@ -705,7 +705,13 @@ came here.
   held address as its place after a store into the base or an index local of the place: such a
   store makes the held address stale in the stale dataflow (`first_reader`, `apply_stale`). A
   stale held address gives no tracked place (`stale_alias`), and the store through it keeps no
-  fact through a fresh pointer local (`stale_fresh`). The
+  fact through a fresh pointer local (`stale_fresh`). Five more false accepts held the address
+  of an element of a span whose header is in memory: a call (`span_flip`, `span_local`), a
+  store through a pointer (`span_alias`), or a store straight into a memory local or a global
+  (`span_straight`, `span_global`) changed the header with no store into a local. So each such
+  statement makes each held address stale (`writes_memory`, `apply_stale`); the earlier cases
+  and the three families keep each count, and no source of the tree changes its verdict. The
+  two fort shapes are errors now (`test/lang/fail/ownership/062`). The
   place text of a report comes from the source: the pass finds the assignment at the position of the
   `=` in the tree of the function and takes the text from its first token to the `=`, with a `(`
   before it when the text needs one. A FIR text with no tree gives the FIR place. The emitter
