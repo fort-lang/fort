@@ -37,7 +37,9 @@ The passes run in the order of their `pass:` directives, each on every function 
   the pass runs the program `main.main` with the path of the test as its one argument. Its
   arguments can name a function, `main.f`, and then a value for each of its parameters: a decimal
   integer that fits an integer type, or `true` or `false` for a `bool`. The run has the real
-  `--std-dir` of the harness, so a failed check writes the message of `std.rt`.
+  `--std-dir` of the harness, so a failed check writes the message of `std.rt`. The report holds
+  a line for each ownership event of the run before the line of its end (`spec/fir.md` 11), so
+  `run/005_overwrite.fir` holds its `overwrite`.
 
 A pass that the compiler does not know, an argument of `none` or `verify`, an argument of
 `build-mode` that is not a mode, and arguments of `run` that name no function or give a value

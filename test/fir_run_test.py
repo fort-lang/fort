@@ -11,10 +11,16 @@ is no case of the oracle. For each other program the script builds the program i
 mode with the same flags, and runs it with the same arguments and stdin. The two must give the
 same stdout, the same stderr and the same status.
 
+With `--events` the interpreter also reports the ownership events of each run (`--fir-events`,
+spec/ownership-design.md 3.4). The comparison of stderr leaves the event lines out, and the script
+prints the count of the programs that run with no event and each program with its events. A
+correct program makes no event, so each program with events must stand in EXPECTED_EVENTS with
+its defect and the exact lines of its events, and each program there must make them when it runs.
+
 The script prints each program that differs, the count of the programs that run, of those that
 are outside and of those that differ, the count of the outside programs for each function, and
-the time of the whole corpus. It exits 0 when no program differs, 1 when one does, and 2 for an
-environment failure.
+the time of the whole corpus. It exits 0 when no program differs, 1 when one does or when the
+events of the programs do not match EXPECTED_EVENTS, and 2 for an environment failure.
 """
 
 import argparse
@@ -39,6 +45,35 @@ MODE_FLAGS = ("--release", "--no-bounds-check")
 OUTSIDE_RE = re.compile(
     rb"fort: error: the run calls '([^']*)', which the interpreter does not run"
 )
+# A line of `fort --fir-run --fir-events` for an ownership event of the run.
+EVENT_RE = re.compile(rb"^fort: event [^\n]*\n?", re.MULTILINE)
+# The programs of the corpus that make an event: each with its ownership defect and the lines of
+# its events, in the order of the run.
+EXPECTED_EVENTS = {
+    "programs/expr_eval.ft": (
+        "a `defer del(tree)` frees the root of the tree and no other node",
+        [
+            "fort: event leak in expr_eval.run_one at 320:11",
+            "fort: event leak at exit in expr_eval.main at 345:5",
+        ],
+    ),
+    "programs/json.ft": (
+        "a `defer del(doc)` frees the root value, and `del(strings.next)` the first block of the "
+        "arena",
+        [
+            "fort: event leak in json.inspect at 441:11",
+            "fort: event leak in json.inspect at 439:11",
+            "fort: event leak at exit in json.main at 472:5",
+        ],
+    ),
+    "run/control/012_range_for_multidim.ft": (
+        "`main` frees no span `g`",
+        ["fort: event leak in 012_range_for_multidim.main at 94:5"],
+    ),
+}
+# The longest run of a program under the interpreter in a debug build in the Linux VM was 70 s
+# (run/stdlib/095_rt_round_trip_floats.ft), so a program gets more time than the corpus gives.
+TIMEOUT = 300.0
 
 
 def parse_args(argv):
@@ -48,8 +83,9 @@ def parse_args(argv):
     parser.add_argument("--std-dir", required=True, help="the standard root of the built target")
     parser.add_argument("--cc", required=True, help="the clang of the target")
     parser.add_argument("--target", required=True, help="the target triple")
-    parser.add_argument("--timeout", type=float, default=run_tests.DEFAULT_TIMEOUT)
+    parser.add_argument("--timeout", type=float, default=TIMEOUT)
     parser.add_argument("-j", type=int, default=os.cpu_count() or 1, help="programs in parallel")
+    parser.add_argument("--events", action="store_true", help="run with --fir-events")
     return parser.parse_args(argv)
 
 
@@ -62,6 +98,8 @@ def interpret(args, test, workdir):
     """Run `test` under `fort --fir-run`; return the process."""
     env = run_tests.child_env(workdir, args.target)
     argv = [args.fort, "--std-dir", args.std_dir, "--target", args.target, "--fir-run"]
+    if args.events:
+        argv.append("--fir-events")
     argv += checked_flags(test.flags) + [test.entry, "--"] + test.args
     return run_tests.run_process(argv, LANG, env, args.timeout, test.stdin)
 
@@ -97,28 +135,30 @@ def describe(proc):
 
 
 def compare(args, test):
-    """Return (verdict, detail) for `test`: `run`, `outside` with the function, or `differ`."""
+    """Return (verdict, detail, events) for `test`: `run`, `outside` with the function, or
+    `differ`, and the event lines of the run, which the comparison of stderr leaves out."""
     test = run_tests.select_target_os(test, run_tests.target_os(args.target))
     workdir = tempfile.mkdtemp(prefix="fort-fir-run-")
     try:
         got = interpret(args, test, workdir)
         if got.timed_out:
-            return "differ", "%s: the interpreter timed out" % test.path
+            return "differ", "%s: the interpreter timed out" % test.path, []
         outside = OUTSIDE_RE.search(got.stderr)
         if outside:
-            return "outside", outside.group(1).decode("utf-8", errors="replace")
+            return "outside", outside.group(1).decode("utf-8", errors="replace"), []
+        events = [m.decode("utf-8", errors="replace").strip() for m in EVENT_RE.findall(got.stderr)]
         problem, want = build_and_run(args, test, workdir)
         if problem:
-            return "differ", "%s: %s" % (test.path, problem)
+            return "differ", "%s: %s" % (test.path, problem), events
         want_stderr = run_tests.drop_qemu_notice(want.stderr)
-        got_stderr = run_tests.drop_qemu_notice(got.stderr)
+        got_stderr = EVENT_RE.sub(b"", run_tests.drop_qemu_notice(got.stderr))
         if (got.returncode, got.stdout, got_stderr) != (want.returncode, want.stdout, want_stderr):
             return "differ", "%s: interpreter %s; checked build %s" % (
                 test.path,
                 describe(got),
                 describe(want),
-            )
-        return "run", ""
+            ), events
+        return "run", "", events
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
@@ -140,13 +180,18 @@ def main(argv=None):
         return 2
     counts = collections.Counter()
     outside = collections.Counter()
+    with_events = []
     with concurrent.futures.ThreadPoolExecutor(max(1, args.j)) as pool:
-        for verdict, detail in pool.map(lambda t: compare(args, t), selected):
+        for test, (verdict, detail, events) in zip(
+            selected, pool.map(lambda t: compare(args, t), selected)
+        ):
             counts[verdict] += 1
             if verdict == "outside":
                 outside[detail] += 1
             elif verdict == "differ":
                 print("DIFF", detail)
+            if events:
+                with_events.append((test.path, events))
     print(
         "fir_run_test: %d programs: %d run under the interpreter, %d outside, %d differ"
         % (len(selected), counts["run"], counts["outside"], counts["differ"])
@@ -155,6 +200,25 @@ def main(argv=None):
         "fir_run_test: outside by function: "
         + ", ".join("%s %d" % (name, n) for name, n in sorted(outside.items()))
     )
+    if args.events:
+        print(
+            "fir_run_test: %d programs run with no event, %d with events"
+            % (counts["run"] + counts["differ"] - len(with_events), len(with_events))
+        )
+        for path, events in sorted(with_events):
+            print("EVENTS %s: %s" % (path, "; ".join(events)))
+        ran = {t.path for t in selected}
+        got = dict(with_events)
+        wrong = sorted(p for p in got if got[p] != EXPECTED_EVENTS.get(p, ("", []))[1])
+        quiet = sorted(set(EXPECTED_EVENTS) & ran - set(got))
+        for path in wrong:
+            print("EVENTS UNEXPECTED %s: want %s" % (path, EXPECTED_EVENTS.get(path, ("", []))[1]))
+        for path in quiet:
+            print("EVENTS MISSING %s: %s" % (path, EXPECTED_EVENTS[path][0]))
+        if wrong or quiet:
+            print("fir_run_test: the events do not match EXPECTED_EVENTS")
+            print("fir_run_test: %.1f s" % (time.monotonic() - start))
+            return 1
     print("fir_run_test: %.1f s" % (time.monotonic() - start))
     return 1 if counts["differ"] else 0
 

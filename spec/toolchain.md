@@ -43,6 +43,7 @@ file: `fort [options] --lib <name> <root>`.
 | `--fir-verify-report` | write the first FIR violation of each function; stop (D14.1) | off   |
 | `--fir-stats`       | after the build, write `lowered N of M` (D14.1)            | off        |
 | `--fir-run`         | run the program's FIR with the interpreter (D14.1)         | off        |
+| `--fir-events`      | with `--fir-run`, report the ownership events (D14.1)      | off        |
 | `--`                | the arguments after it go to the program of `--fir-run`    | none       |
 | `--lib <name> <root>` | build the library `<name>` from `<root>` (D9.11)           | off        |
 | `--use <name>=<path>` | use the library artifact `<path>`; repeatable (D9.11)      | none       |
@@ -218,7 +219,8 @@ file: `fort [options] --lib <name> <root>`.
   `--fir-run` does, with the path of the test as its one argument. Its arguments can also name a
   function, as `main.f`, and a value for each parameter of it: a decimal integer that fits an
   integer type, or `true` or `false` for a `bool`. When a test names the pass `run`, the
-  compiler writes the report of each run in place of the module (`spec/fir.md` 16.3). The
+  compiler writes the report of each run in place of the module (`spec/fir.md` 16.3), with a
+  line for each ownership event of the run before the line of its end (`spec/fir.md` 11). The
   compiler reads every directive before it runs a pass. An unknown pass, an argument of
   `none` or `verify`, an argument of `build-mode` that is no mode, and arguments of `run` that
   name no function or give no value that fits each parameter exit 2. `--fir-test` takes
@@ -244,6 +246,11 @@ file: `fort [options] --lib <name> <root>`.
   as `--lib` says. It is also a usage error together with `--release` or `--no-bounds-check`,
   because the run keeps each check of the checked mode. `--` ends the options: each argument
   after it, an option too, goes to the program, and `--` is a usage error without `--fir-run`.
+- `--fir-events` takes `--fir-run`, before or after it. After the run, the compiler writes each
+  ownership event of `spec/ownership-design.md` 3.4 to stderr, after the output of the program,
+  as the line `fort: event <kind> in <function> at <line>:<col>` of `spec/fir.md` 11. The events
+  change no status and no output of the program. `--fir-events` is a usage error without
+  `--fir-run`.
 - `--fir-verify-report` implies `--fir` and takes its target rule. It lowers each function of
   the closure as `--fir` does and runs the verifier of `spec/fir.md` 10 in report mode, first on
   the output of the lowering and then, when the function keeps every rule, on the output of the
@@ -336,7 +343,7 @@ on stderr, for example `fort: error: cannot read 'x.ft': No such file or directo
 with 2; `--help` prints that line and then the table above, and exits 0.
 
 These are all the `fort: error: <message>` texts. Each exits with status 2 (D14.1).
-Twenty-three report a command line the compiler cannot use and then print the usage line:
+Twenty-four report a command line the compiler cannot use and then print the usage line:
 `missing argument for option '<opt>'`, `unexpected argument '<arg>'` (a second entry file),
 `unknown option '<opt>'`, `no entry file`, `-o - requires -S or -c`, `--json requires --check`
 (D20.2),
@@ -348,7 +355,7 @@ Twenty-three report a command line the compiler cannot use and then print the us
 `--fir-stats does not combine with --tokens, --ast, --check, --index, --fir or --fir-test`,
 `--fir-run does not combine with --tokens, --ast, --check, --json, --index, --use, --release,
 --no-bounds-check or another --fir option`,
-`-- requires --fir-run`,
+`-- requires --fir-run`, `--fir-events requires --fir-run`,
 `invalid --cfg assignment '<entry>'`, `invalid --cfg key '<key>'`, `empty --cfg list entry`,
 `duplicate --cfg key '<key>'`, and `cannot override compiler configuration key '<key>'`,
 `unsupported target '<triple>'`, `--std-dir is required for cross-target -S`,
@@ -413,6 +420,7 @@ fort --index main.ft                          # the same document with the ident
 fort --tokens main.ft                         # one line per token of that file, nothing else
 fort --fir main.ft                            # the FIR of the program, nothing else
 fort --fir-run main.ft -- a b                 # run the FIR of the program with the arguments a b
+fort --fir-run --fir-events main.ft           # the same run, and its ownership events on stderr
 FORT_STD_DIR=/opt/fort/std fort main.ft
 fort --lib std build/std                      # build std.flib from a standard root
 fort --lib geom lib/geom --use std=std.flib   # build geom.flib against std.flib
