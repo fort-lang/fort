@@ -657,13 +657,16 @@ without a rewrite.
   `ubsan-debug`, `ubsan-release`, `msan-debug` and `msan-release`. Darwin has no msan. tsan
   stays out of CI (the user, T-261). The sanitizer flags set no `-O` level, so the build type
   decides it.
-- The runners are `ubuntu-24.04` and `macos-latest`. Linux CI runs on `ubuntu-24.04` only from
-  2026-10-23. From that date `ubuntu-latest` is Ubuntu 26.04 (`resolute`) and has no LLVM 18
-  installed. Its `libllvm18` download from the azure mirror stalled on each attempt (run
-  39997806297). The `ci-status` job of `ci.yml` still runs on `ubuntu-latest`, because it
-  installs nothing. The Linux target is x86_64, the Linux runners are x86_64, and the Darwin
-  runner is arm64, so each runner builds and runs its target natively. CI installs none of the qemu, binfmt and cross packages of section 3;
-  the harnesses only give `QEMU_LD_PREFIX` a default.
+- The runners are `ubuntu-24.04`, `ubuntu-latest` and `macos-latest`. Each Linux job runs on
+  the two Ubuntu images. `ubuntu-24.04` is the release of the VM of section 1, and
+  `ubuntu-latest` is Ubuntu 26.04 (`resolute`), the image that GitHub gives by default. The two
+  images build with two LLVM 18 releases: `1:18.1.3-1ubuntu1`, which the `noble` image holds,
+  and `1:18.1.8-20ubuntu8`, which the job installs from `resolute/universe`. apt.llvm.org has no
+  `llvm-toolchain-resolute-18` suite, and `resolute` does not need one. The `ci-status` job of
+  `ci.yml` runs on `ubuntu-latest` and installs nothing. The Linux target is x86_64, the Linux
+  runners are x86_64, and the Darwin runner is arm64, so each runner builds and runs its target
+  natively. CI installs none of the qemu, binfmt and cross packages of section 3; the harnesses
+  only give `QEMU_LD_PREFIX` a default.
 - Every job checks out with `fetch-depth: 0`. Configure runs `git cat-file` and
   `git merge-base --is-ancestor` on the pin of `tools/bootstrap.ref`, and a shallow clone does
   not hold that commit.
@@ -679,15 +682,31 @@ without a rewrite.
   and links it with `brew link --force`, so `/opt/homebrew/bin/clang` and `opt`, the default
   `FORT_OPT`, are 18. `lint` adds clang-format 18 and clang-tidy 18 on Linux. Each host fails its
   setup when `clang` or `opt` reports another version.
-- A mirror outage on 2026-10-07 made `apt-get update` hang until GitHub cancelled the job after
-  about 45 minutes. Now each `apt-get` call ends a stalled fetch after 30 seconds, retries it 3
-  times, and runs under `timeout -k 10 120`. A loop runs the pair "update, then install" 3 times
-  at most, and runs `dpkg --configure -a` before each pair, because a timeout during unpack leaves
-  dpkg interrupted. The update may only warn: the install decides the status, because an old
-  index often still holds the packages. Each "Install the tools" step has `timeout-minutes: 14`.
-  The worst case is 3 pairs of 2 calls of 130 s (120 s, then 10 s to KILL), plus 2 sleeps of 10
-  s: 800 s. That is inside the 840 s step bound, so the third pair can run to its end.
-  A normal install takes 9 to 34 seconds on Linux and 21 to 52 seconds on Darwin.
+- **apt and its mirrors.** A mirror outage on 2026-10-07 made `apt-get update` hang until GitHub
+  cancelled the job after about 45 minutes. On 2026-10-23 the `libllvm18` download of
+  `resolute` stalled in 11 of 32 `ubuntu-latest` jobs (runs 39995985357 and 39997806297). The
+  11 jobs ran in the Azure region `westus3`, and none of the 21 other jobs did. The runner image
+  lists 3 mirrors in `/etc/apt/apt-mirrors.txt`: `azure.archive.ubuntu.com`, then
+  `archive.ubuntu.com`, then `security.ubuntu.com`. The azure name resolves to a mirror in the
+  region of the runner. In the 21 other jobs it gave the 81 to 95 MB of the packages in 1 to 4
+  s. In `westus3` each of the 33 attempts ended at its bound: 21 attempts of 120 s and 12 of
+  360 s. apt goes to the next mirror only when a mirror fails, not when it is slow.
+- So `tools/ci_setup.sh` downloads first and unpacks after. Each `apt-get` call ends a stalled
+  connection after 30 s, retries it 3 times, and runs under `sudo timeout -k 10 <bound>`, so
+  the signal goes to `apt-get` and not to `sudo`. The first download uses the list of the
+  image and has a bound of 30 s. If it fails, the script deletes the azure line from the list,
+  and downloads from `archive.ubuntu.com` at most 2 times with a bound of 60 s. Then it unpacks
+  from the apt cache at most 2 times with a bound of 120 s. Each `apt-get update` has a bound
+  of 60 s and may fail or only warn, because an old index often still holds the packages. Each
+  unpack first runs `dpkg --configure -a` with a bound of 60 s, because a timeout during an
+  unpack leaves dpkg interrupted. The script writes `apt installed the packages in <n> s` to the
+  log. Each "Install the tools" step has `timeout-minutes: 14`. The worst case is 810 s: 70 +
+  40 s for the first download, 2 x (70 + 70) s for the next 2, 2 x (70 + 130) s for the unpacks
+  and 2 sleeps of 10 s. That is inside the 840 s step bound, so the last attempt can run to its
+  end. In the 3 attempts of PR CI run 40089164921 the apt install took 8 to 50 s in 51 jobs on
+  `ubuntu-24.04` and 10 to 48 s in 51 jobs on `ubuntu-latest`. 2 of the 51 `ubuntu-latest` jobs
+  used the fallback, in the region `westus`, and took 46 and 48 s. A normal install took 21 to
+  52 seconds on Darwin.
 - The `bootstrap` job builds the chain and runs the label `fort` without the label `modules`.
   The job `modules` runs the module corpus `test/fort` in 2 parts
   (`FORT_MODULE_SHARDS` in `CMakeLists.txt`, `notes/testing.md`). Each host runs 2 `modules`

@@ -28,41 +28,73 @@ if [ "$#" -eq 2 ]; then
     lint=yes
 fi
 
-# retry <command...>: run the command at most 3 times and stop at the first success.
-# Wait RETRY_DELAY seconds (default 10) between attempts. Return the last exit status.
+# retry <attempts> <command...>: run the command at most <attempts> times and stop at the
+# first success. Wait RETRY_DELAY seconds (default 10) between attempts. Return the last
+# exit status.
 retry() {
-    local attempt=1 status
+    local attempts=$1 attempt=1 status
+    shift
     while true; do
         status=0
         "$@" || status=$?
         if [ "$status" -eq 0 ]; then
             return 0
         fi
-        if [ "$attempt" -ge 3 ]; then
+        if [ "$attempt" -ge "$attempts" ]; then
             echo "ci_setup.sh: '$*' failed $attempt times" >&2
             return "$status"
         fi
-        echo "ci_setup.sh: '$*' exited $status, attempt $attempt of 3" >&2
+        echo "ci_setup.sh: '$*' exited $status, attempt $attempt of $attempts" >&2
         attempt=$((attempt + 1))
         sleep "${RETRY_DELAY:-10}"
     done
 }
 
-# apt_install <package...>: run `apt-get update`, then install the packages.
-# The Acquire options end each stalled download after 30 seconds and retry it 3 times.
-# `timeout -k 10 120` sends TERM to each apt-get call after 120 seconds and KILL 10
-# seconds later, so a slow download cannot use the whole step bound (timeout-minutes in
-# the workflows). The update may fail or only warn: an old index often still holds the
-# packages, so the install decides the status. A timeout during unpack leaves dpkg
-# interrupted, so each pair first runs `dpkg --configure -a`, which does nothing on a
-# clean system.
-apt_install() {
-    local apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30
-        -o Acquire::https::Timeout=30)
-    sudo dpkg --configure -a || true
-    timeout -k 10 120 sudo apt-get "${apt_options[@]}" update -q || true
-    timeout -k 10 120 sudo DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" \
-        install -y -q --no-install-recommends "$@"
+# The Acquire options end each stalled connection after 30 seconds and retry it 3 times.
+# They do not end a slow download, so `timeout -k 10 <bound>` bounds each apt-get call:
+# TERM after <bound> seconds, KILL 10 seconds later. timeout runs under sudo, so it
+# signals apt-get itself and a killed call leaves no apt-get that holds the apt lock.
+APT_OPTIONS=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+
+# apt_get <bound> <argument...>: run apt-get with APT_OPTIONS for at most <bound> seconds.
+apt_get() {
+    local bound=$1
+    shift
+    sudo DEBIAN_FRONTEND=noninteractive timeout -k 10 "$bound" apt-get "${APT_OPTIONS[@]}" "$@"
+}
+
+# apt_fetch <bound> <package...>: run `apt-get update`, then download the packages and
+# their dependencies to the apt cache in at most <bound> seconds. The update may fail or
+# only warn: an old index often still holds the packages, so the download decides the
+# status.
+apt_fetch() {
+    local bound=$1
+    shift
+    apt_get 60 update -q || true
+    apt_get "$bound" install -y -q --no-install-recommends --download-only "$@"
+}
+
+# apt_unpack <package...>: install the packages from the apt cache. A timeout during an
+# unpack leaves dpkg interrupted, and then apt refuses to run. So each apt_unpack first runs
+# `dpkg --configure -a` for at most 60 seconds. That command does nothing on a clean system.
+# Each download comes before the first unpack, so no download needs it.
+apt_unpack() {
+    sudo timeout -k 10 60 dpkg --configure -a || true
+    apt_get 120 install -y -q --no-install-recommends "$@"
+}
+
+# skip_azure_mirror: remove the azure mirror from the mirror list of the runner image.
+# The list names http://azure.archive.ubuntu.com, then https://archive.ubuntu.com, then
+# https://security.ubuntu.com. apt goes to the next mirror only when a mirror fails, not
+# when it is slow. On a list with no azure line this function does nothing.
+# APT_MIRROR_LIST names the list; a test sets it.
+skip_azure_mirror() {
+    local list=${APT_MIRROR_LIST:-/etc/apt/apt-mirrors.txt}
+    if [ -f "$list" ] && grep -q 'azure\.archive\.ubuntu\.com' "$list"; then
+        sudo sed -i '/azure\.archive\.ubuntu\.com/d' "$list"
+        echo "ci_setup.sh: the mirror list is now:" >&2
+        cat "$list" >&2
+    fi
 }
 
 setup_linux() {
@@ -70,9 +102,21 @@ setup_linux() {
     if [ "$lint" = yes ]; then
         packages+=(clang-format-18 clang-tidy-18)
     fi
-    # A mirror outage made `apt-get update` hang until GitHub cancelled the job after
-    # about 45 minutes. retry runs the pair "update, then install" 3 times at most.
-    retry apt_install "${packages[@]}"
+    # The azure mirror of the runner image is fast in most regions: the 95 MB of the
+    # packages take 1 to 4 seconds. In region westus3 on Ubuntu 26.04 its libllvm18
+    # download stalled for 6 minutes and more. So the first download gets 30 seconds.
+    # After a failure, the script skips the azure mirror and downloads from
+    # archive.ubuntu.com, at most 2 times. A mirror outage once made `apt-get update`
+    # hang until GitHub cancelled the job after about 45 minutes, so each apt-get call has
+    # a bound.
+    local start=$SECONDS
+    if ! apt_fetch 30 "${packages[@]}"; then
+        echo "ci_setup.sh: the download from the first mirror failed or took more than 30 s" >&2
+        skip_azure_mirror
+        retry 2 apt_fetch 60 "${packages[@]}"
+    fi
+    retry 2 apt_unpack "${packages[@]}"
+    echo "ci_setup.sh: apt installed the packages in $((SECONDS - start)) s"
 
     # The clang 18 sanitizer runtimes cannot map their shadow memory under the runner
     # kernel's default ASLR entropy. 28 bits is the value they support.
