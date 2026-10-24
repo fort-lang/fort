@@ -526,6 +526,34 @@ set_tests_properties(fir PROPERTIES
     LABELS "fort;unit"
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
 
+# The FIR tests under the pass `run` of fir.interpreter: each function of each test runs with 0
+# for each integer parameter and `false` for each `bool`, and the harness counts the ends. A
+# function whose parameters take no such value, and a test whose text a pass refuses, cannot
+# run, and the harness counts each of them with its reason.
+add_test(NAME fir-run-tests
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/fir/run_tests.py" --run
+            --fort "${FORT_COMPILER_BINARY}"
+            --std-dir "${FORT_STD_DIR}")
+set_tests_properties(fir-run-tests PROPERTIES
+    LABELS "fort;unit"
+    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
+
+# The run corpus under fir.interpreter (spec/ownership-design.md 3.5): each program of
+# test/lang/run and test/lang/programs runs under `fort --fir-run`, and each one whose externs
+# the interpreter runs gives the stdout, the stderr and the status of its native checked build.
+add_test(NAME fir-run
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/fir_run_test.py"
+            --fort "${FORT_COMPILER_BINARY}"
+            --std-dir "${FORT_STD_DIR}"
+            --cc "${FORT_TARGET_CC_PATH}"
+            --target "${FORT_TARGET_TRIPLE}"
+            -j "${FORT_LANG_JOBS}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(fir-run PROPERTIES
+    LABELS "fort;integration"
+    PROCESSORS ${FORT_LANG_JOBS}
+    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
+
 # The product language test uses the current compiler and standard library.
 # It verifies each module that the compiler emits.
 set(FORT_LANG_COMMAND

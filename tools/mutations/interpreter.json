@@ -1,0 +1,558 @@
+{
+ "comment": [
+  "One row for each rule of the reference interpreter fir.interpreter",
+  "(src/fort/fir/interpreter.ft) and of its two entries in the driver, the mode --fir-run",
+  "and the pass `run` of --fir-test (src/fort/driver.ft). A row names the line that decides",
+  "the rule and a text that breaks it. The first stage runs the suite over FIR text",
+  "(test/fort/fir/interpreter_test.ft), the second the suite over fort source",
+  "(test/fort/fir/interpreter_source_test.ft), the third the driver suites, and the fourth",
+  "the run corpus against its native checked build (test/fir_run_test.py). The table runs",
+  "in the Linux VM with the debug preset and the default runner. The md5 guard reads the",
+  "product compiler, whose driver imports fir.interpreter. The first round of a run can",
+  "read stale (notes/testing.md 7), so the first row is one that a full run caught."
+ ],
+ "sources": [
+  "src/fort/fir/interpreter.ft",
+  "src/fort/driver.ft"
+ ],
+ "binary": "build/Linux/debug/fort",
+ "build": "ninja -C build/Linux/debug fort",
+ "stages": [
+  {
+   "name": "the interpreter suite over FIR text",
+   "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 2 fir/interpreter_test"
+  },
+  {
+   "name": "the interpreter suite over fort source",
+   "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 2 fir/interpreter_source_test"
+  },
+  {
+   "name": "the driver suites",
+   "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 2 driver_run_test driver_abort_status driver_trap_status"
+  },
+  {
+   "name": "the run corpus",
+   "command": "python3 test/fir_run_test.py --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --cc clang --target x86_64-linux-gnu -j 4"
+  }
+ ],
+ "mutations": [
+  {
+   "decision": "width-widen",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    return cast(v << cast(shift, u64), i64) >> shift;",
+   "new": "    return cast(v << cast(shift, u64), i64) >> shift & cast(ALL_BITS >> 1, i64);",
+   "what": "a negative value of a narrow type reads as positive"
+  },
+  {
+   "decision": "width-wrap",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    return v & (ALL_BITS >> cast(WORD_BITS - w, u64));",
+   "new": "    return v & (ALL_BITS >> cast(WORD_BITS - w, u64) >> 1);",
+   "what": "a value loses its top bit at each width below 64"
+  },
+  {
+   "decision": "overflow-signed-add",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "        return (y > 0 && x > high - y) || (y < 0 && x < low - y);",
+   "new": "        return y > 0 && x > high - y;",
+   "what": "a signed `+` below the minimum does not overflow"
+  },
+  {
+   "decision": "overflow-signed-sub",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "        return (y < 0 && x > high + y) || (y > 0 && x < low + y);",
+   "new": "        return y > 0 && x < low + y;",
+   "what": "a signed `-` above the maximum does not overflow"
+  },
+  {
+   "decision": "overflow-signed-mul",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    return magnitude(x) > (cast(high, u64) + 1) / magnitude(y);",
+   "new": "    return magnitude(x) > (cast(high, u64) + 2) / magnitude(y);",
+   "what": "a negative product one past the minimum does not overflow"
+  },
+  {
+   "decision": "overflow-unsigned-mul",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "        return a != 0 && b > wrap(ALL_BITS, w) / a;",
+   "new": "        return a != 0 && b > wrap(ALL_BITS, w) / a + 1;",
+   "what": "an unsigned product one step past the maximum does not overflow"
+  },
+  {
+   "decision": "divide-minimum",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    if (y == -1 && x == low) {\n        fault(it, \"division overflow\");",
+   "new": "    if (y == -1 && x == low && w == 0) {\n        fault(it, \"division overflow\");",
+   "what": "the minimum divided by -1 has a result"
+  },
+  {
+   "decision": "divide-sign",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    return wrap(cast(x / y, u64), w);",
+   "new": "    return wrap(cast(magnitude(x) / magnitude(y), u64), w);",
+   "what": "a signed division drops the sign of its quotient"
+  },
+  {
+   "decision": "shift-arithmetic",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "        return wrap(cast(widen(a, w) >> cast(n, i64), u64), w);",
+   "new": "        return wrap(a >> n, w);",
+   "what": "`shr` of a signed value is logical"
+  },
+  {
+   "decision": "shift-count",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    if (n >= cast(w, u64)) {\n        fault(it, \"shift count\");",
+   "new": "    if (n > cast(w, u64)) {\n        fault(it, \"shift count\");",
+   "what": "a count at the width shifts"
+  },
+  {
+   "decision": "compare-signed",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    i32 mut order = 0;\n    if (gen.gen_is_signed(t)) {",
+   "new": "    i32 mut order = 0;\n    if (gen.gen_is_signed(t) && false) {",
+   "what": "a signed comparison compares the bits as unsigned"
+  },
+  {
+   "decision": "compare-nan",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "        case fir.rvalue_kind.rv_ne:\n            return x != y;",
+   "new": "        case fir.rvalue_kind.rv_ne:\n            return x < y || x > y;",
+   "what": "`ne` of a NaN is false"
+  },
+  {
+   "decision": "float-precision",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "        case fir.rvalue_kind.rv_fadd:\n            return f32_bits(x + y);",
+   "new": "        case fir.rvalue_kind.rv_fadd:\n            return f32_bits(cast(cast(x, f64) + cast(y, f64) + 1e-9, f32));",
+   "what": "an f32 sum is not rounded in f32"
+  },
+  {
+   "decision": "cast-saturate",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "        return wrap(cast(cast(x, i8), u64), width(to));",
+   "new": "        return wrap(cast(cast(x, i64), u64), width(to));",
+   "what": "a float to i8 does not saturate at the i8 range"
+  },
+  {
+   "decision": "cast-round-f32",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "            if (is_f32(to)) {\n                return f32_bits(cast(s, f32));",
+   "new": "            if (is_f32(to)) {\n                return f32_bits(cast(cast(s, f64), f32));",
+   "what": "a signed integer reaches f32 through f64, rounded twice"
+  },
+  {
+   "decision": "cast-widen-signed",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    if (gen.gen_is_signed(from)) {\n        return wrap(cast(widen(v, width(from)), u64), width(to));",
+   "new": "    if (gen.gen_is_signed(from) && false) {\n        return wrap(cast(widen(v, width(from)), u64), width(to));",
+   "what": "a signed integer widens with zeros"
+  },
+  {
+   "decision": "layout-align",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "            at = align_up(at, types.type_alignof(field->ty));\n            if (n == k) {",
+   "new": "            if (n == k) {",
+   "what": "a struct has no padding between its fields"
+  },
+  {
+   "decision": "store-endian",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "        b[k] = cast(v & BYTE_MASK, u8);",
+   "new": "        b[b.len - 1 - k] = cast(v & BYTE_MASK, u8);",
+   "what": "a store writes its bytes big-endian"
+  },
+  {
+   "decision": "aggregate-padding",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    if (r.kind != fir.rvalue_kind.rv_aggregate || r.zeroed) {",
+   "new": "    if (r.kind != fir.rvalue_kind.rv_aggregate || !r.zeroed) {",
+   "what": "a positional aggregate writes the padding and a designated one does not zero it"
+  },
+  {
+   "decision": "move-zeroes",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "        // shadow: a move vacates its owner slots and passes the value to its destination\n        zero_bytes(it, addr, size);",
+   "new": "        // shadow: a move vacates its owner slots and passes the value to its destination",
+   "what": "a scalar `move` leaves its place as it was"
+  },
+  {
+   "decision": "del-zeroes",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    case wait_kind.wk_del:\n        zero_bytes(it, caller->addr, caller->size);",
+   "new": "    case wait_kind.wk_del:\n        zero_bytes(it, caller->addr, 0);",
+   "what": "`del` leaves its place as it was"
+  },
+  {
+   "decision": "check-user",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "            failed = c == 0;",
+   "new": "            failed = c != 0;",
+   "what": "`check(user)` fails on a true condition"
+  },
+  {
+   "decision": "check-overwrite",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "        // a `check(overwrite: p)` continues (spec/ownership-design.md 3.2)\n        go(it, k, t->target);",
+   "new": "        // a `check(overwrite: p)` continues (spec/ownership-design.md 3.2)\n        if (t->kind == fir.term_kind.tk_check_overwrite) {\n            fault(it, \"overwrite\");\n        }\n        go(it, k, t->target);",
+   "what": "`check(overwrite: p)` ends the run"
+  },
+  {
+   "decision": "check-location",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    values[n + 1] = cast(t->loc.line, u64);\n    values[n + 2] = cast(t->loc.col, u64);",
+   "new": "    values[n + 1] = cast(t->loc.col, u64);\n    values[n + 2] = cast(t->loc.line, u64);",
+   "what": "a failed check reports its column as its line"
+  },
+  {
+   "decision": "switch-arm",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "            if (arm_bits(ty, a.value) == v) {",
+   "new": "            if (arm_bits(ty, a.value) == v && i > 0) {",
+   "what": "a `switch` never takes its first arm"
+  },
+  {
+   "decision": "address-reuse",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    if (i + 1 == v->len) {\n        v->len -= 1;\n        return;\n    }",
+   "new": "    if (i + 1 == v->len) {\n        it->next = v->items[i].base;\n        v->len -= 1;\n        return;\n    }",
+   "what": "the address of the last region that ended goes to the next region"
+  },
+  {
+   "decision": "constant-readonly",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    if (base != 0) {\n        it->regions.items[region_at(it, base)].readonly = true;",
+   "new": "    if (base == 1) {\n        it->regions.items[region_at(it, base)].readonly = true;",
+   "what": "a constant and the bytes of a string constant are writable"
+  },
+  {
+   "decision": "compaction-move",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "            if (kept != k) {\n                v->items[kept] = move(v->items[k]);\n            }",
+   "new": "            if (kept != k) {\n                v->items[kept].live = v->items[k].live;\n            }",
+   "what": "the compaction of the regions keeps the entries that ended and drops the live ones"
+  },
+  {
+   "decision": "capture-stderr",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "        } else if (fd == 2) {\n            strbuf.append_bytes(&it->err, b);",
+   "new": "        } else if (fd == 2) {\n            strbuf.append_bytes(&it->out, b);",
+   "what": "a captured write to descriptor 2 lands in the stdout of the report"
+  },
+  {
+   "decision": "capture-isatty",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "        if (it->capture) {\n            return 0;\n        }\n        i32 tty",
+   "new": "        if (it->capture) {\n            return 1;\n        }\n        i32 tty",
+   "what": "a captured descriptor is a terminal"
+  },
+  {
+   "decision": "calloc-overflow",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "        if (a[0] != 0 && a[1] > ALL_BITS / a[0]) {\n            return 0;",
+   "new": "        if (a[0] != 0 && a[1] > ALL_BITS / a[0] && a[0] == 0) {\n            return 0;",
+   "what": "a `calloc` whose size overflows multiplies anyway"
+  },
+  {
+   "decision": "release-start",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    if (i == NONE || it->regions.items[i].base != p\n",
+   "new": "    if (i == NONE\n",
+   "what": "`free` of an address inside an allocation releases it"
+  },
+  {
+   "decision": "memmove-overlap",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    if (dst > src) {\n        u64 mut k = n;",
+   "new": "    if (dst > src && false) {\n        u64 mut k = n;",
+   "what": "a copy to a higher address that overlaps its source copies forward"
+  },
+  {
+   "decision": "memcmp-sign",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "            return cast(x[k], i32) - cast(y[k], i32);",
+   "new": "            return cast(y[k], i32) - cast(x[k], i32);",
+   "what": "`memcmp` gives the opposite sign"
+  },
+  {
+   "decision": "snprintf-format",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    return cast(cstring_at(it, a[2]), string) == FLOAT_FORMAT;",
+   "new": "    return cast(cstring_at(it, a[2]), string) != FLOAT_FORMAT;",
+   "what": "`snprintf` runs a format other than the one of std.rt and refuses the one of std.rt"
+  },
+  {
+   "decision": "strtod-end",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    if ((name == \"strtod\" || name == \"strtof\") && a.len == 2 && a[1] == 0) {",
+   "new": "    if ((name == \"strtod\" || name == \"strtof\") && a.len == 2) {",
+   "what": "`strtod` with an end pointer runs and writes no end"
+  },
+  {
+   "decision": "errno-darwin",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    if (name == \"__errno_location\" || name == \"__error\") {",
+   "new": "    if (name == \"__errno_location\") {",
+   "what": "the errno accessor of Darwin is outside"
+  },
+  {
+   "decision": "model-call-args",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "        call_address(it, k, addr, r, 1);",
+   "new": "        call_address(it, k, addr, r, 0);",
+   "what": "`oracle_call` passes its function as the first argument"
+  },
+  {
+   "decision": "exit-status",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "        it->end.status = cast(a[0] & BYTE_MASK, i32);",
+   "new": "        it->end.status = cast(widen(a[0], WORD_BITS / 2), i32);",
+   "what": "`exit(-1)` reports -1 and not the process status 255"
+  },
+  {
+   "decision": "main-status",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "        it->end.status = status & STATUS_MASK;",
+   "new": "        it->end.status = status;",
+   "what": "the status of `main` is not masked to a byte"
+  },
+  {
+   "decision": "stack-limit",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    if (FRAME_BYTES > it->stack_limit - it->stack_bytes) {",
+   "new": "    if (FRAME_BYTES >= it->stack_limit - it->stack_bytes) {",
+   "what": "a frame that ends at the limit of the stack does not fit"
+  },
+  {
+   "decision": "frame-bytes",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "u64 FRAME_BYTES = 16;",
+   "new": "u64 FRAME_BYTES = 8;",
+   "what": "a frame counts 8 bytes against the limit"
+  },
+  {
+   "decision": "frame-locals",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    if (FRAME_BYTES > it->stack_limit - it->stack_bytes) {",
+   "new": "    if (size + FRAME_BYTES > it->stack_limit - it->stack_bytes) {",
+   "what": "the limit counts the locals of the new frame, so a run ends that native completes"
+  },
+  {
+   "decision": "stack-pop",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    it->stack_bytes -= FRAME_BYTES;\n",
+   "new": "",
+   "what": "a frame that ended still counts against the limit"
+  },
+  {
+   "decision": "call-result",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "        if (!has_ended(it) && fits > 0) {\n            write_bytes(it, dest, it->scratch[..fits]);",
+   "new": "        if (!has_ended(it) && fits > 8) {\n            write_bytes(it, dest, it->scratch[..fits]);",
+   "what": "the scalar result of a call is lost"
+  },
+  {
+   "decision": "call-result-narrow",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "            write_bytes(it, dest, it->scratch[..fits]);",
+   "new": "            write_bytes(it, dest, it->scratch[..size]);",
+   "what": "a result wider than its place writes past the place"
+  },
+  {
+   "decision": "designated",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "        if (d->kind == ast.ast_kind.k_designator && gen.gen_field_index(d->sym, &k) && k == at) {",
+   "new": "        if (d->kind == ast.ast_kind.k_designator && gen.gen_field_index(d->sym, &k) && k != at) {",
+   "what": "a designated initializer puts a member in the other field"
+  },
+  {
+   "decision": "table-value",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "            store(it, entry, I32_SIZE, value);",
+   "new": "            store(it, entry, I32_SIZE, value + 1);",
+   "what": "an entry of an enum table holds the next value"
+  },
+  {
+   "decision": "float-constant-f32",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    if (is_f32(t)) {\n        return f32_bits(cast(f64_of(pattern), f32));",
+   "new": "    if (is_f32(t) && false) {\n        return f32_bits(cast(f64_of(pattern), f32));",
+   "what": "an f32 constant keeps the binary64 pattern"
+  },
+  {
+   "decision": "alloc-location",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    values[3] = cast(s->loc.line, u64);",
+   "new": "    values[3] = cast(s->loc.col, u64);",
+   "what": "`alloc` reports the column of its statement as its line"
+  },
+  {
+   "decision": "del-pointer",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    u64 ptr = load(it, addr, WORD);\n    if (has_ended(it)) {\n        return;\n    }\n    // shadow: a `del`",
+   "new": "    u64 ptr = load(it, addr + WORD, WORD);\n    if (has_ended(it)) {\n        return;\n    }\n    // shadow: a `del`",
+   "what": "`del` frees the word after the pointer of its place"
+  },
+  {
+   "decision": "slice-bound-signed",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    if (gen.gen_is_signed(t)) {\n        return cast(widen(v, width(t)), u64);",
+   "new": "    if (true) {\n        return cast(widen(v, width(t)), u64);",
+   "what": "each bound of `slice_ptr` is sign-extended, so the `u8` 200 reads as -56"
+  },
+  {
+   "decision": "slice-bound-unsigned",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    if (gen.gen_is_signed(t)) {\n        return cast(widen(v, width(t)), u64);",
+   "new": "    if (false) {\n        return cast(widen(v, width(t)), u64);",
+   "what": "each bound of `slice_ptr` is zero-extended, so the `i8` -1 reads as 255"
+  },
+  {
+   "decision": "bool-low-bit",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    if (gen.place_is_bool(t)) {\n        return v & 1;",
+   "new": "    if (gen.place_is_bool(t)) {\n        return v;",
+   "what": "a `bool` load keeps its whole byte, so the byte 2 reads as `true`"
+  },
+  {
+   "decision": "bool-member",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "        put(it, at, size, load_value(it, src, t));",
+   "new": "        put(it, at, size, load(it, src, size));",
+   "what": "a `bool` member or argument keeps the whole byte of its operand"
+  },
+  {
+   "decision": "argument-order",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    // the arguments go to `scratch` at the offsets of their parameters in the new frame\n    clear_scratch(it, it->routines.items[r].size);\n    u32 mut i = first;\n    while (i < c.ops_len && !has_ended(it)) {\n        u64 n = cast(i - first, u64) + 1;\n        if (n <= params) {\n            types.node* t = fir.local_at(cf, cast(n, u32))->ty;\n            u64 at = it->routines.items[r].offsets[n];\n            read_member(it, k, fir.rvalue_operand(f, c, i), at, t);\n        } else {\n            types.node* mut t = null;\n            read_scalar(it, k, fir.rvalue_operand(f, c, i), &t);\n        }\n        i += 1;\n    }\n    if (has_ended(it)) {\n        return;\n    }\n    u64 callee = push_frame(it, r);\n    if (callee == NONE) {\n        return;\n    }\n",
+   "new": "    u64 callee = push_frame(it, r);\n    if (callee == NONE) {\n        return;\n    }\n    // the arguments go to `scratch` at the offsets of their parameters in the new frame\n    clear_scratch(it, it->routines.items[r].size);\n    u32 mut i = first;\n    while (i < c.ops_len && !has_ended(it)) {\n        u64 n = cast(i - first, u64) + 1;\n        if (n <= params) {\n            types.node* t = fir.local_at(cf, cast(n, u32))->ty;\n            u64 at = it->routines.items[r].offsets[n];\n            read_member(it, k, fir.rvalue_operand(f, c, i), at, t);\n        } else {\n            types.node* mut t = null;\n            read_scalar(it, k, fir.rvalue_operand(f, c, i), &t);\n        }\n        i += 1;\n    }\n    if (has_ended(it)) {\n        return;\n    }\n",
+   "what": "the frame of the callee exists before its arguments are read, so a fault names the callee"
+  },
+  {
+   "decision": "argument-extra",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "            types.node* mut t = null;\n            read_scalar(it, k, fir.rvalue_operand(f, c, i), &t);\n        }\n        i += 1;",
+   "new": "            types.node* mut t = null;\n        }\n        i += 1;",
+   "what": "an argument of `oracle_call` past the parameters is not read"
+  },
+  {
+   "decision": "region-gap",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    it->next = base + room + REGION_GAP;",
+   "new": "    it->next = base + room;",
+   "what": "the end of one region is the base of the next"
+  },
+  {
+   "decision": "strtod-errno",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    if (error != 0) {\n        store(it, it->errno_slot, I32_SIZE, cast(error, u64));",
+   "new": "    if (false) {\n        store(it, it->errno_slot, I32_SIZE, cast(error, u64));",
+   "what": "a range error of `strtod` leaves the errno of the run"
+  },
+  {
+   "decision": "strtod-errno-kept",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    if (error != 0) {\n        store(it, it->errno_slot, I32_SIZE, cast(error, u64));",
+   "new": "    if (true) {\n        store(it, it->errno_slot, I32_SIZE, cast(error, u64));",
+   "what": "a call of `strtod` that sets no errno clears the errno of the run"
+  },
+  {
+   "decision": "report-aggregate",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "        if (o->ty != null && fir.type_aggregate(o->ty)) {",
+   "new": "        if (o->ty != null && fir.type_aggregate(o->ty) && false) {",
+   "what": "the report of an aggregate result gives its first word"
+  },
+  {
+   "decision": "slice-element",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    return base +% lo *% *size;",
+   "new": "    return base +% lo;",
+   "what": "a slice starts `lo` bytes into its place"
+  },
+  {
+   "decision": "string-length",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    store(it, addr + WORD, WORD, text.len);",
+   "new": "    store(it, addr + WORD, WORD, text.len + 1);",
+   "what": "a `string` constant counts its NUL"
+  },
+  {
+   "decision": "null-dereference",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "        if (addr < FIRST_ADDRESS) {\n            fault(it, \"null dereference\");",
+   "new": "        if (addr < 0) {\n            fault(it, \"null dereference\");",
+   "what": "a load through null is an invalid access"
+  },
+  {
+   "decision": "store-readonly",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "    if (write && it->regions.items[i].readonly) {",
+   "new": "    if (write && it->regions.items[i].readonly && false) {",
+   "what": "a store into read-only storage writes"
+  },
+  {
+   "decision": "refused-lowering",
+   "file": "src/fort/fir/interpreter.ft",
+   "old": "        } else {\n            refused = true;\n            del(made);",
+   "new": "        } else {\n            refused = false;\n            del(made);",
+   "what": "a function that the lowering refuses ends the run as outside"
+  },
+  {
+   "decision": "driver-trap-signal",
+   "file": "src/fort/driver.ft",
+   "old": "        if (str.starts_with(target, \"x86_64\")) {\n            return -SIGNAL_ILL;",
+   "new": "        if (str.starts_with(target, \"arm64\")) {\n            return -SIGNAL_ILL;",
+   "what": "a trap of an x86-64 run ends by SIGTRAP"
+  },
+  {
+   "decision": "driver-run-args",
+   "file": "src/fort/driver.ft",
+   "old": "            opts->have_run_args = true;\n            i += 1;",
+   "new": "            opts->have_run_args = true;",
+   "what": "`--` goes to the program as its first argument"
+  },
+  {
+   "decision": "driver-flush",
+   "file": "src/fort/driver.ft",
+   "old": "    rt.flush_all();\n    if (status != -SIGNAL_ABRT) {",
+   "new": "    if (status != -SIGNAL_ABRT) {",
+   "what": "a run that ends by a signal loses the buffered output of the compiler"
+  },
+  {
+   "decision": "driver-use",
+   "file": "src/fort/driver.ft",
+   "old": "            || opts->fir_stats || opts->use_names.len > 0 || opts->release\n",
+   "new": "            || opts->fir_stats || opts->release\n",
+   "what": "--fir-run reads the interface of a used library"
+  },
+  {
+   "decision": "driver-release",
+   "file": "src/fort/driver.ft",
+   "old": "            || opts->no_bounds_check)) {\n        // --fir-run runs",
+   "new": "            || false)) {\n        // --fir-run runs",
+   "what": "--fir-run --no-bounds-check runs the checked mode in silence"
+  },
+  {
+   "decision": "driver-run-range",
+   "file": "src/fort/driver.ft",
+   "old": "    if (!str.parse_i64(word, &v) || v > top || v < -top - 1) {",
+   "new": "    if (!str.parse_i64(word, &v) || v > top) {",
+   "what": "the pass `run` takes a signed value below the minimum of its parameter"
+  },
+  {
+   "decision": "driver-run-unsigned",
+   "file": "src/fort/driver.ft",
+   "old": "        return str.parse_u64(word, 10, out) && *out <= high;",
+   "new": "        return str.parse_u64(word, 10, out);",
+   "what": "the pass `run` takes an unsigned value past the maximum of its parameter"
+  },
+  {
+   "decision": "driver-run-report",
+   "file": "src/fort/driver.ft",
+   "old": "    if (!runs) {\n        fir_print.print_module(&m, &out);",
+   "new": "    if (true) {\n        fir_print.print_module(&m, &out);",
+   "what": "a test with the pass `run` writes the module after the reports"
+  }
+ ]
+}

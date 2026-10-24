@@ -1,0 +1,2418 @@
+/// Runs the FIR of a closure as the lowering makes it, before the emptiness pass and the
+/// build-mode pass (spec/fir.md 11). So each check of the checked mode runs, and a run ends as
+/// the checked build of the program ends. It is the reference semantics of the ownership checks
+/// (spec/ownership-design.md 3).
+//
+// A run has a 64-bit address space whose addresses it never gives out twice. Each global, data
+// constant, function, frame and allocation takes a new range of it, a region. A load or a store
+// finds the region that holds its bytes, so a pointer is an address and a cast to `u64` keeps
+// it (D3.14). A frame holds every local of one call, each at its own offset. The frames stand on
+// an explicit stack, so a deep recursion of the program takes no stack of the compiler.
+//
+// The run calls `std.rt` where a checked build calls it (spec/fir.md 12.2, 12.4). A failed check
+// calls the runtime entry of its kind, so the run writes the message of D11.4 and then calls
+// `abort`. `alloc` calls `std.rt.alloc` and `del` calls `std.rt.free`. The externs that `std.rt`
+// reaches run here (run_extern), and so do three model externs for the tests. A call of any
+// other extern, or of a function with no body, ends the run as `outside`.
+//
+// The comments that start with `shadow:` mark the points where the shadow state of
+// spec/ownership-design.md 3.3 observes the run. The module uses switches and no function-pointer
+// dispatch table. It holds no module-level mutable state: each vector belongs to one machine.
+import fort.ast;
+import fort.check;
+import fort.consts;
+import fort.diag;
+import fort.fir;
+import fort.fir_lower;
+import fort.fir_print;
+import fort.fir_verify;
+import fort.gen;
+import fort.lexer;
+import fort.prim;
+import std.libc;
+import std.strbuf;
+import fort.types;
+
+// ---- the address space ------------------------------------------------------------------------
+
+// The first address of a region. A load or a store below it is a null dereference.
+u64 FIRST_ADDRESS = 65536;
+
+// Each region starts at a multiple of REGION_ALIGN. REGION_GAP bytes that no region holds follow
+// each region, so the end of one region is no address of the next one.
+u64 REGION_ALIGN = 16;
+u64 REGION_GAP = 16;
+
+// The size of a pointer, and the offset of the length in a span header.
+u64 WORD = 8;
+
+// The size of a span or `string` header.
+u64 HEADER = 16;
+
+// The size of an entry of an enum table, `std.rt.enum_member`: an i32 value and a name pointer.
+u64 MEMBER_SIZE = 16;
+
+// The bits of a byte and of a u64, and the mask of one byte.
+u64 BYTE_BITS = 8;
+u32 WORD_BITS = 64;
+u64 BYTE_MASK = 255;
+u64 ALL_BITS = 18446744073709551615;
+
+// The status mask of a process exit (D11.6).
+i32 STATUS_MASK = 255;
+
+// The regions are compacted when more than COMPACT_FLOOR of them have ended and they are more
+// than half of all regions.
+u64 COMPACT_FLOOR = 4096;
+
+/// The most bytes of the frames of the stack when init fills a machine: 8 MiB, the stack of a
+/// main thread on both targets. Each frame counts FRAME_BYTES, so the limit is 524288 frames. A
+/// deeper recursion ends the run as a fault.
+u64 STACK_LIMIT = 8388608;
+/// The bytes that each frame counts against the limit: 16, the least frame of a call that a
+/// native checked build makes on both targets (a return address and the 16-byte alignment at the
+/// next call on x86-64, the saved frame pointer and link register on arm64). A frame counts no
+/// local, because the `-O1` of a checked build keeps a local that has no address in a register,
+/// so a recursion that the native build completes also completes here.
+u64 FRAME_BYTES = 16;
+
+// The most arguments of an extern call that the run models.
+u64 EXTERN_ARGS = 8;
+
+// The most bytes that the model of `snprintf` writes.
+u64 FORMAT_LIMIT = 4096;
+
+// The one format of `snprintf` that `std.rt` passes.
+string FLOAT_FORMAT = "%.*e";
+
+// The size of an i32: the errno slot and the value of an enum table entry.
+u64 I32_SIZE = 4;
+
+// No region, routine or key.
+u64 NONE = 18446744073709551615;
+
+// ---- outcomes ---------------------------------------------------------------------------------
+
+/// What ended a run.
+enum outcome_kind {
+    oc_none, // the run has not ended
+    oc_return, // the function of run_function returned
+    oc_exit, // the program called `exit`, or its `main` returned
+    oc_abort, // the program called `abort`, as a failed check does
+    oc_trap, // a `trap` terminator ran (D8.5)
+    oc_outside, // the program called a function that the run does not model
+    oc_fault, // an operation with no defined result, such as a null dereference
+}
+
+/// How a run ended. `status` is the status of `oc_exit`. `ty` and `value` are the result type
+/// and the bits of a scalar result of `oc_return`. `what` names the function of `oc_outside` and
+/// the operation of `oc_fault`. `at` is the location of the statement or terminator that ended
+/// the run.
+struct outcome {
+    outcome_kind kind;
+    i32 status;
+    types.node* ty;
+    u64 value;
+    string what;
+    diag.loc at;
+}
+
+// ---- regions, routines and frames -------------------------------------------------------------
+
+// The kinds of the regions.
+enum region_kind {
+    rk_global, // a module-level constant or global
+    rk_data, // the bytes of a string, a `bytes` constant, a file name or an enum table
+    rk_frame, // the locals of one call
+    rk_heap, // an allocation of `calloc`
+    rk_code, // a function as a value, which holds no byte
+    rk_slot, // storage of the run: errno, the slot of `oracle_keep`, the arguments of `main`
+}
+
+// One range of the address space. `bytes` is its storage in the compiler: null for a function,
+// and null after the region ends. `routine` is the routine of a function.
+struct region {
+    u64 base;
+    u64 size;
+    u8 mut* own bytes;
+    region_kind kind;
+    bool live;
+    bool readonly;
+    u64 routine;
+}
+
+// `items[..len]` holds the regions in ascending order of their base.
+struct region_vec {
+    region mut@ own items;
+    u64 len;
+}
+
+// A map from keys to values, the keys in ascending order: `keys[..len]` and `values[..len]`.
+struct map {
+    u64 mut@ own keys;
+    u64 mut@ own values;
+    u64 len;
+}
+
+// A function that the run can call. `f` is its FIR: a function of the module, or `lowered`, which
+// the routine owns, or null for a function with no body and for one that the lowering refused.
+// `offsets[n]` is the offset of local `n` in a frame of `size` bytes. `code` is the address of
+// the function as a value, 0 until a value names it.
+struct routine {
+    ast.sym* sym;
+    fir.func* f;
+    bool refused;
+    fir.func mut* own lowered;
+    u64 mut@ own offsets;
+    u64 size;
+    u64 code;
+}
+
+// `items[..len]` holds the routines in the order that the run met them.
+struct routine_vec {
+    routine mut@ own items;
+    u64 len;
+}
+
+// What a frame does when the frame that it called returns.
+enum wait_kind {
+    wk_none,
+    wk_assign, // the current statement stores the result of the callee
+    wk_del, // the current `del` zeroes `size` bytes at `addr` after `std.rt.free`
+    wk_noreturn, // the callee is the runtime entry of a failed check, which never returns
+}
+
+// One call of `routine`, whose locals stand in the frame region at `base`. The next item is
+// statement `next` of block `block`, or its terminator when `next` is the count of statements.
+struct frame {
+    u64 routine;
+    fir.func* f;
+    u64@ offsets;
+    u64 base;
+    u32 block;
+    u32 next;
+    wait_kind wait;
+    u64 addr;
+    u64 size;
+}
+
+// `items[..len]` holds the frames, the caller below the callee.
+struct frame_vec {
+    frame mut@ own items;
+    u64 len;
+}
+
+/// One run. init fills it and free releases it. With `capture`, the run keeps what the program
+/// writes to the descriptors 1 and 2 in `out` and `err`, and a write to another descriptor ends
+/// the run as `outside`. Without it, the program writes to the descriptors of the compiler.
+// `stack_limit` is the most bytes of the frames of the stack, STACK_LIMIT unless a test lowers it,
+// and `stack_bytes` the FRAME_BYTES of each frame that stands. `next` is the next free address.
+// `hit` is the region that find_region found last. `ended` counts the regions that are no longer
+// live. `dest` and `ret` serve the frame at the bottom of the stack: `ret` takes the bits of its
+// scalar result, and `dest`, when it is not 0, a copy of its result.
+struct machine {
+    check.checker mut* ck;
+    fir.module* m;
+    fir_verify.runtime rt;
+    bool capture;
+    strbuf.str_buf out;
+    strbuf.str_buf err;
+    region_vec regions;
+    u64 next;
+    u64 hit;
+    u64 ended;
+    map syms;
+    map globals;
+    map data;
+    map tables;
+    routine_vec routines;
+    frame_vec frames;
+    u64 errno_slot;
+    u64 kept;
+    u64 dest;
+    u64 ret;
+    ast.sym* alloc_entry;
+    ast.sym* free_entry;
+    ast.sym* args_init_entry;
+    ast.sym* args_entry;
+    ast.sym* flush_entry;
+    u8 mut@ own scratch;
+    u64 stack_limit;
+    u64 stack_bytes;
+    outcome end;
+}
+
+/// Fills `it` for a run of the functions of `m`, and of each function with a body of the closure
+/// that `ck` checked: the run lowers such a function when it meets it first. The closure must hold
+/// `std.rt`, whose `alloc`, `free`, `args_init`, `args` and `flush_all` the run calls.
+fn init(machine mut* it, check.checker mut* ck, fir.module* m, bool capture) void {
+    it->ck = ck;
+    it->m = m;
+    it->rt = fir_verify.runtime_of(ck);
+    it->capture = capture;
+    it->next = FIRST_ADDRESS;
+    it->hit = NONE;
+    it->stack_limit = STACK_LIMIT;
+    it->end = outcome{};
+    it->alloc_entry = runtime_function(ck, "alloc");
+    it->free_entry = runtime_function(ck, "free");
+    it->args_init_entry = runtime_function(ck, "args_init");
+    it->args_entry = runtime_function(ck, "args");
+    it->flush_entry = runtime_function(ck, "flush_all");
+    it->errno_slot = make_storage(it, region_kind.rk_slot, I32_SIZE);
+    it->kept = make_storage(it, region_kind.rk_slot, WORD);
+}
+
+// The function `name` of the module `std.rt`, or null when the closure holds none.
+fn runtime_function(check.checker* ck, string name) ast.sym* {
+    u64 mut i = 0;
+    while (i < check.check_sym_count(ck)) {
+        ast.sym* s = check.check_sym_at(ck, i);
+        if (s->kind == ast.sym_kind.s_fn && s->name == name && s->owner != null
+            && s->owner->kind == ast.sym_kind.s_module
+            && s->owner->name == fir_verify.RUNTIME_MODULE) {
+            return s;
+        }
+        i += 1;
+    }
+    return null;
+}
+
+/// Releases every vector of `it`.
+fn free(machine mut* it) void {
+    u64 mut i = 0;
+    while (i < it->regions.len) {
+        del(it->regions.items[i].bytes);
+        i += 1;
+    }
+    del(it->regions.items);
+    it->regions.len = 0;
+    i = 0;
+    while (i < it->routines.len) {
+        routine mut* r = &it->routines.items[i];
+        if (r->lowered != null) {
+            fir.func_free(r->lowered);
+        }
+        del(r->lowered);
+        del(r->offsets);
+        i += 1;
+    }
+    del(it->routines.items);
+    it->routines.len = 0;
+    del(it->frames.items);
+    it->frames.len = 0;
+    free_map(&it->syms);
+    free_map(&it->globals);
+    free_map(&it->data);
+    free_map(&it->tables);
+    strbuf.free(&it->out);
+    strbuf.free(&it->err);
+    del(it->scratch);
+}
+
+// ---- the end of a run -------------------------------------------------------------------------
+
+fn has_ended(machine* it) bool {
+    return it->end.kind != outcome_kind.oc_none;
+}
+
+// The location of the next item of the frame at the top of the stack, or the empty location.
+fn location(machine* it) diag.loc {
+    if (it->frames.len == 0) {
+        return diag.loc{};
+    }
+    frame* fr = &it->frames.items[it->frames.len - 1];
+    fir.block* bl = fir.block_at(fr->f, fr->block);
+    if (cast(fr->next, u64) < bl->statements.len) {
+        return bl->statements.items[cast(fr->next, u64)].loc;
+    }
+    return bl->term.loc;
+}
+
+// Ends the run with `kind`, unless it has ended already.
+fn stop(machine mut* it, outcome_kind kind, string what) void {
+    if (has_ended(it)) {
+        return;
+    }
+    it->end.kind = kind;
+    it->end.what = what;
+    it->end.at = location(it);
+}
+
+fn fault(machine mut* it, string what) void {
+    stop(it, outcome_kind.oc_fault, what);
+}
+
+// Makes a writable region as make_region does. When the compiler has no storage for it, the
+// result is 0 and the run ends as a fault.
+fn make_storage(machine mut* it, region_kind kind, u64 size) u64 {
+    u64 base = make_region(it, kind, size, false);
+    if (base == 0) {
+        fault(it, "no storage for the run");
+    }
+    return base;
+}
+
+// ---- maps -------------------------------------------------------------------------------------
+
+// The position of the first key of `x` that is at least `key`.
+fn key_position(map* x, u64 key) u64 {
+    u64 mut lo = 0;
+    u64 mut hi = x->len;
+    while (lo < hi) {
+        u64 mid = lo + (hi - lo) / 2;
+        if (x->keys[mid] < key) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+fn find_key(map* x, u64 key, u64 mut* out) bool {
+    u64 at = key_position(x, key);
+    if (at < x->len && x->keys[at] == key) {
+        *out = x->values[at];
+        return true;
+    }
+    return false;
+}
+
+// Maps `key` to `value`, in place of the value that `key` had.
+fn put_key(map mut* x, u64 key, u64 value) void {
+    u64 at = key_position(x, key);
+    if (at < x->len && x->keys[at] == key) {
+        x->values[at] = value;
+        return;
+    }
+    if (x->len == x->keys.len) {
+        u64 cap = fir.grown_capacity(x->keys.len, "fir.interpreter: map capacity overflow");
+        u64 mut@ own keys = new(u64, cap);
+        u64 mut@ own values = new(u64, cap);
+        u64 mut i = 0;
+        while (i < x->len) {
+            keys[i] = x->keys[i];
+            values[i] = x->values[i];
+            i += 1;
+        }
+        del(x->keys);
+        x->keys = move(keys);
+        del(x->values);
+        x->values = move(values);
+    }
+    u64 mut i = x->len;
+    while (i > at) {
+        x->keys[i] = x->keys[i - 1];
+        x->values[i] = x->values[i - 1];
+        i -= 1;
+    }
+    x->keys[at] = key;
+    x->values[at] = value;
+    x->len += 1;
+}
+
+fn free_map(map mut* x) void {
+    del(x->keys);
+    del(x->values);
+    x->len = 0;
+}
+
+// ---- regions ----------------------------------------------------------------------------------
+
+fn align_up(u64 v, u64 align) u64 {
+    return (v + align - 1) / align * align;
+}
+
+// Makes a region of `size` zero bytes at the next free address and returns its base. The return
+// is 0 when the compiler has no storage for the bytes.
+fn make_region(machine mut* it, region_kind kind, u64 size, bool readonly) u64 {
+    u64 base = align_up(it->next, REGION_ALIGN);
+    u64 mut room = size;
+    if (room == 0) {
+        room = 1;
+    }
+    u8 mut* own mut bytes = null;
+    if (kind != region_kind.rk_code) {
+        void mut* own p = libc.calloc(1, room);
+        if (p == null) {
+            return 0;
+        }
+        bytes = cast(move(p), u8 mut* own);
+    }
+    region_vec mut* v = &it->regions;
+    if (v->len == v->items.len) {
+        u64 cap = fir.grown_capacity(v->items.len, "fir.interpreter: region capacity overflow");
+        region mut@ own bigger = new(region, cap);
+        u64 mut i = 0;
+        while (i < v->len) {
+            bigger[i] = move(v->items[i]);
+            i += 1;
+        }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = region{base, size, move(bytes), kind, true, readonly, 0};
+    v->len += 1;
+    it->next = base + room + REGION_GAP;
+    return base;
+}
+
+// The index of the last region whose base is at most `addr`, or NONE.
+fn region_at(machine* it, u64 addr) u64 {
+    u64 mut lo = 0;
+    u64 mut hi = it->regions.len;
+    while (lo < hi) {
+        u64 mid = lo + (hi - lo) / 2;
+        if (it->regions.items[mid].base <= addr) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if (lo == 0) {
+        return NONE;
+    }
+    return lo - 1;
+}
+
+// Whether the live region `r` holds the `len` bytes at `addr`.
+fn has_range(region* r, u64 addr, u64 len) bool {
+    if (!r->live || r->bytes == null || addr < r->base) {
+        return false;
+    }
+    u64 at = addr - r->base;
+    return at <= r->size && len <= r->size - at;
+}
+
+// The index of the live region that holds the `len` bytes at `addr`, or NONE.
+fn find_region(machine mut* it, u64 addr, u64 len) u64 {
+    if (it->hit < it->regions.len && has_range(&it->regions.items[it->hit], addr, len)) {
+        return it->hit;
+    }
+    u64 i = region_at(it, addr);
+    if (i == NONE || !has_range(&it->regions.items[i], addr, len)) {
+        return NONE;
+    }
+    it->hit = i;
+    return i;
+}
+
+// The index of the region that holds the `len` bytes at `addr`. Without one, the run ends as a
+// fault and the result is NONE. With `write`, a read-only region is a fault too.
+fn reach(machine mut* it, u64 addr, u64 len, bool write) u64 {
+    u64 i = find_region(it, addr, len);
+    if (i == NONE) {
+        if (addr < FIRST_ADDRESS) {
+            fault(it, "null dereference");
+        } else {
+            fault(it, "invalid access");
+        }
+        return NONE;
+    }
+    if (write && it->regions.items[i].readonly) {
+        fault(it, "a store into read-only storage");
+        return NONE;
+    }
+    return i;
+}
+
+// The `n` bytes at `addr`, or no byte after a fault. The view lasts until the region ends.
+fn bytes_at(machine mut* it, u64 addr, u64 n) u8@ {
+    u8@ none = {};
+    if (n == 0) {
+        return none;
+    }
+    u64 i = reach(it, addr, n, false);
+    if (i == NONE) {
+        return none;
+    }
+    region* r = &it->regions.items[i];
+    u64 at = addr - r->base;
+    return r->bytes[at..at + n];
+}
+
+// The `n` bytes at `addr` for a store, or no byte after a fault.
+fn bytes_mut(machine mut* it, u64 addr, u64 n) u8 mut@ {
+    u8 mut@ none = {};
+    if (n == 0) {
+        return none;
+    }
+    u64 i = reach(it, addr, n, true);
+    if (i == NONE) {
+        return none;
+    }
+    region* r = &it->regions.items[i];
+    u64 at = addr - r->base;
+    return r->bytes[at..at + n];
+}
+
+// The bytes of the NUL-terminated string at `addr`, without the NUL, or no byte after a fault.
+fn cstring_at(machine mut* it, u64 addr) u8@ {
+    u8@ none = {};
+    u64 i = reach(it, addr, 1, false);
+    if (i == NONE) {
+        return none;
+    }
+    region* r = &it->regions.items[i];
+    u8@ all = r->bytes[0..r->size];
+    u64 start = addr - r->base;
+    u64 mut end = start;
+    while (end < all.len) {
+        if (all[end] == 0) {
+            return all[start..end];
+        }
+        end += 1;
+    }
+    fault(it, "invalid access");
+    return none;
+}
+
+// shadow: each load reads the slots that its bytes cover.
+fn load(machine mut* it, u64 addr, u64 size) u64 {
+    u8@ b = bytes_at(it, addr, size);
+    u64 mut v = 0;
+    u64 mut k = b.len;
+    while (k > 0) {
+        k -= 1;
+        v = (v << BYTE_BITS) | cast(b[k], u64);
+    }
+    return v;
+}
+
+// shadow: each store writes the slots that its bytes cover, and clears their marks unless the
+// store writes an owning value.
+fn store(machine mut* it, u64 addr, u64 size, u64 bits) void {
+    u8 mut@ b = bytes_mut(it, addr, size);
+    u64 mut v = bits;
+    u64 mut k = 0;
+    while (k < b.len) {
+        b[k] = cast(v & BYTE_MASK, u8);
+        v = v >> BYTE_BITS;
+        k += 1;
+    }
+}
+
+// Copies the `n` bytes at `src` to `dst`, as memmove does when the ranges overlap.
+fn copy_bytes(machine mut* it, u64 dst, u64 src, u64 n) void {
+    u8@ from = bytes_at(it, src, n);
+    u8 mut@ to = bytes_mut(it, dst, n);
+    if (has_ended(it) || n == 0) {
+        return;
+    }
+    if (dst > src) {
+        u64 mut k = n;
+        while (k > 0) {
+            k -= 1;
+            to[k] = from[k];
+        }
+        return;
+    }
+    u64 mut k = 0;
+    while (k < n) {
+        to[k] = from[k];
+        k += 1;
+    }
+}
+
+fn zero_bytes(machine mut* it, u64 addr, u64 n) void {
+    u8 mut@ to = bytes_mut(it, addr, n);
+    u64 mut k = 0;
+    while (k < to.len) {
+        to[k] = 0;
+        k += 1;
+    }
+}
+
+fn read_bytes(machine mut* it, u64 addr, u8 mut@ to) void {
+    u8@ from = bytes_at(it, addr, to.len);
+    u64 mut k = 0;
+    while (k < from.len) {
+        to[k] = from[k];
+        k += 1;
+    }
+}
+
+fn write_bytes(machine mut* it, u64 addr, u8@ from) void {
+    u8 mut@ to = bytes_mut(it, addr, from.len);
+    u64 mut k = 0;
+    while (k < to.len) {
+        to[k] = from[k];
+        k += 1;
+    }
+}
+
+// Ends region `i`: its bytes go, and so does its entry when it is the last one. The entries of
+// the regions that ended go when they pass COMPACT_FLOOR and half of the entries.
+// shadow: the end of a frame kills its slots, and a release ends an allocation.
+fn kill_region(machine mut* it, u64 i) void {
+    region_vec mut* v = &it->regions;
+    del(v->items[i].bytes);
+    v->items[i].live = false;
+    it->hit = NONE;
+    if (i + 1 == v->len) {
+        v->len -= 1;
+        return;
+    }
+    it->ended += 1;
+    if (it->ended < COMPACT_FLOOR || it->ended * 2 < v->len) {
+        return;
+    }
+    u64 mut kept = 0;
+    u64 mut k = 0;
+    while (k < v->len) {
+        if (v->items[k].live) {
+            if (kept != k) {
+                v->items[kept] = move(v->items[k]);
+            }
+            kept += 1;
+        }
+        k += 1;
+    }
+    v->len = kept;
+    it->ended = 0;
+}
+
+// Marks the region at `base` read-only. A base of 0 names no region.
+fn seal(machine mut* it, u64 base) void {
+    if (base != 0) {
+        it->regions.items[region_at(it, base)].readonly = true;
+    }
+}
+
+// ---- constants, globals and functions ----------------------------------------------------------
+
+// The address of the NUL-terminated copy of `text`, which the run makes when it meets the bytes
+// of `text` first.
+fn data_address(machine mut* it, string text) u64 {
+    u64 key = cast(text.ptr, u64);
+    u64 mut at = 0;
+    if (find_key(&it->data, key, &at)
+        && it->regions.items[region_at(it, at)].size == text.len + 1) {
+        return at;
+    }
+    u64 base = make_storage(it, region_kind.rk_data, text.len + 1);
+    write_bytes(it, base, cast(text, u8@));
+    seal(it, base);
+    put_key(&it->data, key, base);
+    return base;
+}
+
+// Writes the header of a `string` constant at `addr`: its bytes and its length.
+fn write_string(machine mut* it, u64 addr, string text) void {
+    store(it, addr, WORD, data_address(it, text));
+    store(it, addr + WORD, WORD, text.len);
+}
+
+// The address of the member table of the enum `e` (toolchain.md 6 item 21): for each member in
+// declaration order, its value and the address of its name.
+fn table_address(machine mut* it, ast.sym* e) u64 {
+    u64 mut at = 0;
+    if (find_key(&it->tables, cast(e, u64), &at)) {
+        return at;
+    }
+    u64 count = gen.gen_enum_count(e);
+    u64 base = make_storage(it, region_kind.rk_data, count * MEMBER_SIZE);
+    u64 mut k = 0;
+    u64 mut i = 0;
+    while (e->node != null && i < ast.ast_len(e->node)) {
+        ast.node* m = ast.ast_child(e->node, i);
+        if (m->kind == ast.ast_kind.k_enum_member) {
+            u64 entry = base + k * MEMBER_SIZE;
+            u64 value = consts.cv_bits(check.check_node_value(it->ck, m));
+            store(it, entry, I32_SIZE, value);
+            store(it, entry + WORD, WORD, data_address(it, m->name));
+            k += 1;
+        }
+        i += 1;
+    }
+    seal(it, base);
+    put_key(&it->tables, cast(e, u64), base);
+    return base;
+}
+
+// The routine of the function `s`, which the run makes when it meets `s` first.
+fn find_routine(machine mut* it, ast.sym* s) u64 {
+    u64 mut at = 0;
+    if (find_key(&it->syms, cast(s, u64), &at)) {
+        return at;
+    }
+    routine r = make_routine(it, s);
+    routine_vec mut* v = &it->routines;
+    if (v->len == v->items.len) {
+        u64 cap = fir.grown_capacity(v->items.len, "fir.interpreter: routine capacity overflow");
+        routine mut@ own bigger = new(routine, cap);
+        u64 mut i = 0;
+        while (i < v->len) {
+            bigger[i] = move(v->items[i]);
+            i += 1;
+        }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = move(r);
+    v->len += 1;
+    put_key(&it->syms, cast(s, u64), v->len - 1);
+    return v->len - 1;
+}
+
+// The function of `m` whose symbol is `s`, or null.
+fn module_function(fir.module* m, ast.sym* s) fir.func* {
+    u64 mut i = 0;
+    while (i < m->funcs.len) {
+        if (m->funcs.items[i].sym == s) {
+            return &m->funcs.items[i];
+        }
+        i += 1;
+    }
+    return null;
+}
+
+// The routine of `s`: its function of the module, else its function as the lowering makes it,
+// which the verifier tests. A declaration with no body, and a function that the lowering refuses
+// (spec/fir.md 9.8), have no function.
+fn make_routine(machine mut* it, ast.sym* s) routine {
+    fir.func* mut f = module_function(it->m, s);
+    fir.func mut* own mut lowered = null;
+    bool mut refused = false;
+    if (f == null && s->kind == ast.sym_kind.s_fn && s->node != null && s->node->b != null) {
+        fir.func mut* own made = new(fir.func);
+        fir_lower.report mut why = fir_lower.report{};
+        if (fir_lower.lower_function(it->ck, s->node, made, &why)) {
+            fir_verify.verify(made, &it->rt);
+            f = made;
+            lowered = move(made);
+        } else {
+            refused = true;
+            del(made);
+        }
+    }
+    u64 mut count = 0;
+    if (f != null) {
+        count = cast(fir.local_count(f), u64);
+    }
+    u64 mut@ own offsets = new(u64, count);
+    u64 mut size = 0;
+    u64 mut n = 0;
+    while (n < count) {
+        types.node* t = fir.local_at(f, cast(n, u32))->ty;
+        if (t->kind != types.type_kind.k_void) {
+            size = align_up(size, types.type_alignof(t));
+        }
+        offsets[n] = size;
+        size += size_of(t);
+        n += 1;
+    }
+    return routine{s, f, refused, move(lowered), move(offsets), size, 0};
+}
+
+// The address of the function `s` as a value: a region that holds no byte.
+fn code_address(machine mut* it, ast.sym* s) u64 {
+    u64 r = find_routine(it, s);
+    if (it->routines.items[r].code == 0) {
+        u64 base = make_region(it, region_kind.rk_code, 1, true);
+        it->regions.items[it->regions.len - 1].routine = r;
+        it->routines.items[r].code = base;
+    }
+    return it->routines.items[r].code;
+}
+
+// The routine of the function at the address `addr`, or NONE when no function is there.
+fn code_routine(machine* it, u64 addr) u64 {
+    u64 i = region_at(it, addr);
+    if (i == NONE) {
+        return NONE;
+    }
+    region* r = &it->regions.items[i];
+    if (r->kind != region_kind.rk_code || r->base != addr) {
+        return NONE;
+    }
+    return r->routine;
+}
+
+// The address of the global or constant `g`, which the run makes and fills with its initializer
+// when it meets `g` first. A constant is read-only (D7.10).
+fn global_address(machine mut* it, ast.sym* g) u64 {
+    u64 mut at = 0;
+    if (find_key(&it->globals, cast(g, u64), &at)) {
+        return at;
+    }
+    u64 base = make_storage(it, region_kind.rk_global, types.type_sizeof(g->ty));
+    put_key(&it->globals, cast(g, u64), base);
+    if (g->node != null) {
+        write_initial(it, base, g->ty, g->node->b);
+    }
+    if (g->kind == ast.sym_kind.s_const) {
+        seal(it, base);
+    }
+    return base;
+}
+
+// The bits of the folded constant `v` of the scalar type `t`, as gen.gen_const_mem_value writes
+// it: a `bool` is 0 or 1, a float holds its pattern in `t`, and a pointer holds null.
+fn value_bits(types.node* t, consts.cval v) u64 {
+    if (types.type_is_float(t)) {
+        consts.cval mut f = v;
+        if (!consts.cv_is_float(v) && !consts.cv_to_float(v, t->prim, &f)) {
+            // panic-coverage: unreachable: read: a magnitude below 2^64 is finite in f32 (D4.4)
+            panic("fir.interpreter: an integer constant is not finite as a float");
+        }
+        return float_bits(t, consts.cv_float_bits(f));
+    }
+    if (v.kind == consts.cval_kind.cv_bool) {
+        return bool_bits(v.mag != 0);
+    }
+    if (v.kind == consts.cval_kind.cv_null || is_pointer(t)) {
+        return 0;
+    }
+    return wrap(consts.cv_bits(consts.cv_as_int(v)), width(t));
+}
+
+// Writes the initializer `n` of type `t` at `addr`, as gen_data.const_value writes it. The
+// storage is zero already, so an omitted member writes nothing.
+fn write_initial(machine mut* it, u64 addr, types.node* t, ast.node* n) void {
+    if (n == null || t == null) {
+        return;
+    }
+    if ((n->ann & check.ANN_CONST) != 0) {
+        consts.cval v = check.check_node_value(it->ck, n);
+        if (v.kind == consts.cval_kind.cv_str) {
+            write_string(it, addr, v.str);
+            return;
+        }
+        if (v.kind != consts.cval_kind.cv_none) {
+            store(it, addr, types.type_sizeof(t), value_bits(t, v));
+            return;
+        }
+    }
+    if (n->kind == ast.ast_kind.k_brace_init) {
+        write_brace(it, addr, t, n);
+    } else if (n->kind == ast.ast_kind.k_struct_lit || n->kind == ast.ast_kind.k_array_lit) {
+        write_initial(it, addr, t, n->b);
+    } else if ((n->kind == ast.ast_kind.k_ident || n->kind == ast.ast_kind.k_field)
+               && n->sym != null && n->sym->kind == ast.sym_kind.s_fn) {
+        store(it, addr, WORD, code_address(it, n->sym));
+    } else if ((n->kind == ast.ast_kind.k_ident || n->kind == ast.ast_kind.k_field)
+               && n->sym != null && n->sym->kind == ast.sym_kind.s_const && n->sym->node != null) {
+        write_initial(it, addr, t, n->sym->node->b);
+    } else if (n->kind == ast.ast_kind.k_unary
+               && cast(n->op, lexer.tok_kind) == lexer.tok_kind.amp && n->a != null
+               && n->a->sym != null && (n->a->sym->kind == ast.sym_kind.s_const
+                                        || n->a->sym->kind == ast.sym_kind.s_global)) {
+        store(it, addr, WORD, global_address(it, n->a->sym));
+    } else {
+        // a build refuses such an initializer (gen_data.const_value), and a run does not
+        fault(it, "an initializer that the translator does not write");
+    }
+}
+
+// Writes a brace initializer: the elements of a fixed array, or the fields of a struct, in
+// declaration order or by their designators.
+fn write_brace(machine mut* it, u64 addr, types.node* t, ast.node* n) void {
+    if (t->kind == types.type_kind.k_array) {
+        u64 size = types.type_sizeof(t->elem);
+        u64 mut i = 0;
+        while (i < ast.ast_len(n)) {
+            write_initial(it, addr + i * size, t->elem, ast.ast_child(n, i));
+            i += 1;
+        }
+        return;
+    }
+    if (t->kind != types.type_kind.k_struct || ast.ast_len(n) == 0) {
+        return;
+    }
+    bool designated = (n->flags & ast.FLAG_DESIGNATED) != 0;
+    u32 count = fir.struct_field_count(t);
+    u32 mut k = 0;
+    while (k < count) {
+        types.node* mut ft = null;
+        u64 off = field_at(t, k, &ft);
+        ast.node* mut v = null;
+        if (designated) {
+            v = designated_value(n, cast(k, u64));
+        } else if (cast(k, u64) < ast.ast_len(n)) {
+            v = ast.ast_child(n, cast(k, u64));
+        }
+        write_initial(it, addr + off, ft, v);
+        k += 1;
+    }
+}
+
+// The member of the designated literal `lit` for the field at index `at`, or null.
+fn designated_value(ast.node* lit, u64 at) ast.node* {
+    u64 mut i = 0;
+    while (i < ast.ast_len(lit)) {
+        ast.node* d = ast.ast_child(lit, i);
+        u64 mut k = 0;
+        if (d->kind == ast.ast_kind.k_designator && gen.gen_field_index(d->sym, &k) && k == at) {
+            return d->a;
+        }
+        i += 1;
+    }
+    return null;
+}
+
+// ---- scalars ----------------------------------------------------------------------------------
+
+// The bytes of a value of type `t`: 0 for `void`, which a call statement and `_0` of a `void`
+// function have.
+fn size_of(types.node* t) u64 {
+    if (t->kind == types.type_kind.k_void) {
+        return 0;
+    }
+    return types.type_sizeof(t);
+}
+
+// The bits that a value of the scalar type `t` uses: 1 for `bool`, 64 for a pointer.
+fn width(types.node* t) u32 {
+    u32 bits = gen.gen_int_bits(t);
+    if (bits != 0) {
+        return bits;
+    }
+    return cast(types.type_sizeof(t) * BYTE_BITS, u32);
+}
+
+// The low `w` bits of `v`.
+fn wrap(u64 v, u32 w) u64 {
+    if (w >= WORD_BITS) {
+        return v;
+    }
+    return v & (ALL_BITS >> cast(WORD_BITS - w, u64));
+}
+
+// The value of the low `w` bits of `v` as a signed number.
+fn widen(u64 v, u32 w) i64 {
+    if (w >= WORD_BITS) {
+        return cast(v, i64);
+    }
+    i64 shift = cast(WORD_BITS - w, i64);
+    return cast(v << cast(shift, u64), i64) >> shift;
+}
+
+// The 64 bits of the integer `v` of type `t`: a sign-extension for a signed type and a
+// zero-extension for every other one.
+fn extend(u64 v, types.node* t) u64 {
+    if (gen.gen_is_signed(t)) {
+        return cast(widen(v, width(t)), u64);
+    }
+    return wrap(v, width(t));
+}
+
+fn bool_bits(bool b) u64 {
+    if (b) {
+        return 1;
+    }
+    return 0;
+}
+
+fn is_pointer(types.node* t) bool {
+    return t->kind == types.type_kind.k_ptr || t->kind == types.type_kind.k_voidptr
+        || t->kind == types.type_kind.k_fn;
+}
+
+fn is_f32(types.node* t) bool {
+    return t->kind == types.type_kind.k_prim && t->prim == prim.prim_kind.prim_f32;
+}
+
+fn f64_of(u64 bits) f64 {
+    u64 b = bits;
+    return *cast(&b, f64*);
+}
+
+fn f64_bits(f64 x) u64 {
+    f64 v = x;
+    return *cast(&v, u64*);
+}
+
+fn f32_of(u64 bits) f32 {
+    u32 b = cast(bits, u32);
+    return *cast(&b, f32*);
+}
+
+fn f32_bits(f32 x) u64 {
+    f32 v = x;
+    return cast(*cast(&v, u32*), u64);
+}
+
+// The bits of a float of type `t` whose value is the binary64 pattern `pattern`, which is exact
+// for an `f32` (spec/fir.md 5.6).
+fn float_bits(types.node* t, u64 pattern) u64 {
+    if (is_f32(t)) {
+        return f32_bits(cast(f64_of(pattern), f32));
+    }
+    return pattern;
+}
+
+// The value of the float bits `v` of type `t`, exact as an f64.
+fn float_value(types.node* t, u64 v) f64 {
+    if (is_f32(t)) {
+        return cast(f32_of(v), f64);
+    }
+    return f64_of(v);
+}
+
+// The bits of the scalar constant `c`.
+fn const_bits(machine mut* it, fir.constant c) u64 {
+    switch (c.kind) {
+    case fir.const_kind.ck_int:
+        return wrap(consts.cv_bits(consts.cv_as_int(c.value)), width(c.ty));
+    case fir.const_kind.ck_bool:
+        return bool_bits(c.value.mag != 0);
+    case fir.const_kind.ck_float:
+        return float_bits(c.ty, consts.cv_float_bits(c.value));
+    case fir.const_kind.ck_null, fir.const_kind.ck_zero:
+        return 0;
+    case fir.const_kind.ck_string:
+        panic("fir.interpreter: a string constant as a scalar");
+    case fir.const_kind.ck_bytes:
+        return data_address(it, c.text);
+    case fir.const_kind.ck_enum_table:
+        return table_address(it, c.sym);
+    case fir.const_kind.ck_fn:
+        return code_address(it, c.sym);
+    }
+}
+
+// Whether `a op b` overflows the type of width `w`: `op` is `+` for 0, `-` for 1 and `*` for 2.
+fn has_overflow(u64 a, u64 b, u32 w, bool sign, u32 op) bool {
+    if (!sign) {
+        if (op == 0) {
+            return a > wrap(ALL_BITS, w) - b;
+        }
+        if (op == 1) {
+            return a < b;
+        }
+        return a != 0 && b > wrap(ALL_BITS, w) / a;
+    }
+    i64 x = widen(a, w);
+    i64 y = widen(b, w);
+    i64 high = widen(wrap(ALL_BITS, w - 1), w);
+    i64 low = -high - 1;
+    if (op == 0) {
+        return (y > 0 && x > high - y) || (y < 0 && x < low - y);
+    }
+    if (op == 1) {
+        return (y < 0 && x > high + y) || (y > 0 && x < low + y);
+    }
+    if (x == 0 || y == 0) {
+        return false;
+    }
+    if ((x == -1 && y == low) || (y == -1 && x == low)) {
+        return true;
+    }
+    if ((x > 0) == (y > 0)) {
+        return magnitude(x) > cast(high, u64) / magnitude(y);
+    }
+    return magnitude(x) > (cast(high, u64) + 1) / magnitude(y);
+}
+
+// The magnitude of `x`, the minimum of i64 included.
+fn magnitude(i64 x) u64 {
+    if (x < 0) {
+        return 0 -% cast(x, u64);
+    }
+    return cast(x, u64);
+}
+
+// `a / b`, or `a % b` with `rem`, on the type of width `w`. A zero divisor and the minimum
+// divided by -1 have no result here; the checks of the lowering stand before each.
+fn divide(machine mut* it, u64 a, u64 b, u32 w, bool sign, bool rem) u64 {
+    if (b == 0) {
+        fault(it, "division by zero");
+        return 0;
+    }
+    if (!sign) {
+        if (rem) {
+            return a % b;
+        }
+        return a / b;
+    }
+    i64 x = widen(a, w);
+    i64 y = widen(b, w);
+    i64 low = -widen(wrap(ALL_BITS, w - 1), w) - 1;
+    if (y == -1 && x == low) {
+        fault(it, "division overflow");
+        return 0;
+    }
+    if (rem) {
+        return wrap(cast(x % y, u64), w);
+    }
+    return wrap(cast(x / y, u64), w);
+}
+
+// `a << n` or `a >> n` on the type `t`. A count at or past the width has no result here; the
+// check of the lowering stands before each shift.
+fn shift(machine mut* it, u64 a, u64 n, types.node* t, bool left) u64 {
+    u32 w = width(t);
+    if (n >= cast(w, u64)) {
+        fault(it, "shift count");
+        return 0;
+    }
+    if (left) {
+        return wrap(a << n, w);
+    }
+    if (gen.gen_is_signed(t)) {
+        return wrap(cast(widen(a, w) >> cast(n, i64), u64), w);
+    }
+    return a >> n;
+}
+
+// A comparison of `a` and `b` of the type `t`: signed, unsigned or float, as fir_llvm.predicate
+// selects it. A float comparison is ordered, except `ne`, which is true for a NaN.
+fn compare(fir.rvalue_kind kind, types.node* t, u64 a, u64 b) bool {
+    if (types.type_is_float(t)) {
+        f64 x = float_value(t, a);
+        f64 y = float_value(t, b);
+        switch (kind) {
+        case fir.rvalue_kind.rv_eq:
+            return x == y;
+        case fir.rvalue_kind.rv_ne:
+            return x != y;
+        case fir.rvalue_kind.rv_lt:
+            return x < y;
+        case fir.rvalue_kind.rv_le:
+            return x <= y;
+        case fir.rvalue_kind.rv_gt:
+            return x > y;
+        default:
+            return x >= y;
+        }
+    }
+    // the order of the two integers: -1, 0 or 1
+    i32 mut order = 0;
+    if (gen.gen_is_signed(t)) {
+        i64 x = widen(a, width(t));
+        i64 y = widen(b, width(t));
+        if (x < y) {
+            order = -1;
+        } else if (x > y) {
+            order = 1;
+        }
+    } else if (a < b) {
+        order = -1;
+    } else if (a > b) {
+        order = 1;
+    }
+    switch (kind) {
+    case fir.rvalue_kind.rv_eq:
+        return order == 0;
+    case fir.rvalue_kind.rv_ne:
+        return order != 0;
+    case fir.rvalue_kind.rv_lt:
+        return order < 0;
+    case fir.rvalue_kind.rv_le:
+        return order <= 0;
+    case fir.rvalue_kind.rv_gt:
+        return order > 0;
+    default:
+        return order >= 0;
+    }
+}
+
+// `fadd`, `fsub`, `fmul` or `fdiv` of two floats of type `t`, in the precision of `t`.
+fn apply_float(fir.rvalue_kind kind, types.node* t, u64 a, u64 b) u64 {
+    if (is_f32(t)) {
+        f32 x = f32_of(a);
+        f32 y = f32_of(b);
+        switch (kind) {
+        case fir.rvalue_kind.rv_fadd:
+            return f32_bits(x + y);
+        case fir.rvalue_kind.rv_fsub:
+            return f32_bits(x - y);
+        case fir.rvalue_kind.rv_fmul:
+            return f32_bits(x * y);
+        default:
+            return f32_bits(x / y);
+        }
+    }
+    f64 x = f64_of(a);
+    f64 y = f64_of(b);
+    switch (kind) {
+    case fir.rvalue_kind.rv_fadd:
+        return f64_bits(x + y);
+    case fir.rvalue_kind.rv_fsub:
+        return f64_bits(x - y);
+    case fir.rvalue_kind.rv_fmul:
+        return f64_bits(x * y);
+    default:
+        return f64_bits(x / y);
+    }
+}
+
+// An rvalue of two operands `a` and `b`, the first of type `t`.
+fn apply_binary(machine mut* it, fir.rvalue_kind kind, types.node* t, u64 a, u64 b) u64 {
+    u32 w = width(t);
+    bool sign = gen.gen_is_signed(t);
+    switch (kind) {
+    case fir.rvalue_kind.rv_add:
+        return wrap(a +% b, w);
+    case fir.rvalue_kind.rv_sub:
+        return wrap(a -% b, w);
+    case fir.rvalue_kind.rv_mul:
+        return wrap(a *% b, w);
+    case fir.rvalue_kind.rv_add_overflows:
+        return bool_bits(has_overflow(a, b, w, sign, 0));
+    case fir.rvalue_kind.rv_sub_overflows:
+        return bool_bits(has_overflow(a, b, w, sign, 1));
+    case fir.rvalue_kind.rv_mul_overflows:
+        return bool_bits(has_overflow(a, b, w, sign, 2));
+    case fir.rvalue_kind.rv_div:
+        return divide(it, a, b, w, sign, false);
+    case fir.rvalue_kind.rv_rem:
+        return divide(it, a, b, w, sign, true);
+    case fir.rvalue_kind.rv_and:
+        return a & b;
+    case fir.rvalue_kind.rv_or:
+        return a | b;
+    case fir.rvalue_kind.rv_xor:
+        return a ^ b;
+    case fir.rvalue_kind.rv_shl:
+        return shift(it, a, b, t, true);
+    case fir.rvalue_kind.rv_shr:
+        return shift(it, a, b, t, false);
+    case fir.rvalue_kind.rv_fadd, fir.rvalue_kind.rv_fsub, fir.rvalue_kind.rv_fmul,
+        fir.rvalue_kind.rv_fdiv:
+        return apply_float(kind, t, a, b);
+    default:
+        return bool_bits(compare(kind, t, a, b));
+    }
+}
+
+// The bits of a float of type `to` from the float or integer `v` of type `from` (D3.14): the
+// precision of `to`, the signedness of `from`, and a float to an integer saturates as
+// fir_llvm.float_cast makes it saturate.
+fn cast_float(types.node* to, types.node* from, u64 v) u64 {
+    if (!types.type_is_float(from)) {
+        if (gen.gen_is_signed(from)) {
+            i64 s = widen(v, width(from));
+            if (is_f32(to)) {
+                return f32_bits(cast(s, f32));
+            }
+            return f64_bits(cast(s, f64));
+        }
+        if (is_f32(to)) {
+            return f32_bits(cast(v, f32));
+        }
+        return f64_bits(cast(v, f64));
+    }
+    f64 x = float_value(from, v);
+    if (types.type_is_float(to)) {
+        if (is_f32(to)) {
+            return f32_bits(cast(x, f32));
+        }
+        return f64_bits(x);
+    }
+    switch (to->prim) {
+    case prim.prim_kind.prim_i8:
+        return wrap(cast(cast(x, i8), u64), width(to));
+    case prim.prim_kind.prim_i16:
+        return wrap(cast(cast(x, i16), u64), width(to));
+    case prim.prim_kind.prim_i32:
+        return wrap(cast(cast(x, i32), u64), width(to));
+    case prim.prim_kind.prim_i64:
+        return cast(cast(x, i64), u64);
+    case prim.prim_kind.prim_u8:
+        return cast(cast(x, u8), u64);
+    case prim.prim_kind.prim_u16:
+        return cast(cast(x, u16), u64);
+    case prim.prim_kind.prim_u32:
+        return cast(cast(x, u32), u64);
+    default:
+        return cast(x, u64);
+    }
+}
+
+// The bits of `cast<to>(v)` for `v` of the scalar type `from` (D3.14, fir_llvm.cast_value).
+fn convert(types.node* to, types.node* from, u64 v) u64 {
+    if (is_pointer(to) || is_pointer(from)) {
+        return v;
+    }
+    if (types.type_is_float(to) || types.type_is_float(from)) {
+        return cast_float(to, from, v);
+    }
+    if (gen.gen_is_signed(from)) {
+        return wrap(cast(widen(v, width(from)), u64), width(to));
+    }
+    return wrap(v, width(to));
+}
+
+// ---- places and operands ----------------------------------------------------------------------
+
+// The address of local `n` of frame `k`.
+fn local_address(machine* it, u64 k, u32 n) u64 {
+    frame* fr = &it->frames.items[k];
+    return fr->base + fr->offsets[cast(n, u64)];
+}
+
+// The offset of field `k` of the struct type `t`, as types.type_layout_struct lays it out, and
+// its type in *ty.
+fn field_at(types.node* t, u32 k, types.node* mut* ty) u64 {
+    ast.node* decl = fir.struct_decl(t);
+    u64 mut at = 0;
+    u32 mut n = 0;
+    u64 mut i = 0;
+    while (i < ast.ast_len(decl)) {
+        ast.node* field = ast.ast_child(decl, i);
+        if (field->kind == ast.ast_kind.k_field_decl) {
+            at = align_up(at, types.type_alignof(field->ty));
+            if (n == k) {
+                *ty = field->ty;
+                return at;
+            }
+            at += types.type_sizeof(field->ty);
+            n += 1;
+        }
+        i += 1;
+    }
+    panic("fir.interpreter: no such field");
+}
+
+// The address of the place `p` of frame `k`, and its type in *ty. A `deref` and an index on a
+// span or a `string` load a pointer (spec/fir.md 5.5). The address of a place through null is
+// below FIRST_ADDRESS, and an access there is a null dereference.
+fn place_address(machine mut* it, u64 k, fir.place p, types.node* mut* ty) u64 {
+    fir.func* f = it->frames.items[k].f;
+    u64 mut addr = 0;
+    types.node* mut t = null;
+    if (p.base == fir.base_kind.bk_global) {
+        addr = global_address(it, p.global);
+        t = p.global->ty;
+    } else {
+        addr = local_address(it, k, p.local);
+        t = fir.local_at(f, p.local)->ty;
+    }
+    u32 mut i = 0;
+    while (i < p.proj_len && !has_ended(it)) {
+        fir.projection pj = fir.place_projection(f, p, i);
+        switch (pj.kind) {
+        case fir.proj_kind.pj_deref:
+            addr = load(it, addr, WORD);
+            t = t->elem;
+        case fir.proj_kind.pj_field:
+            if (t->kind == types.type_kind.k_struct) {
+                types.node* mut ft = null;
+                addr = addr +% field_at(t, pj.field, &ft);
+                t = ft;
+            } else {
+                // a span or a `string` header: the pointer at 0, the length at WORD
+                addr = addr +% cast(pj.field, u64) * WORD;
+                t = fir.apply_projection(f, t, pj);
+            }
+        case fir.proj_kind.pj_index:
+            u64 index = load(it, local_address(it, k, pj.index), WORD);
+            types.node* elem = fir.apply_projection(f, t, pj);
+            if (t->kind != types.type_kind.k_array) {
+                addr = load(it, addr, WORD);
+            }
+            addr = addr +% index *% types.type_sizeof(elem);
+            t = elem;
+        }
+        i += 1;
+    }
+    *ty = t;
+    return addr;
+}
+
+// The bits of the scalar operand `o` of frame `k`, and its type in *ty. A `move` zeroes its
+// place after the read.
+fn read_scalar(machine mut* it, u64 k, fir.operand o, types.node* mut* ty) u64 {
+    if (o.kind == fir.operand_kind.ok_const) {
+        *ty = fir.const_type(it->frames.items[k].f, o.value);
+        return const_bits(it, o.value);
+    }
+    u64 addr = place_address(it, k, o.place, ty);
+    if (has_ended(it)) {
+        return 0;
+    }
+    u64 size = size_of(*ty);
+    u64 v = load_value(it, addr, *ty);
+    if (o.kind == fir.operand_kind.ok_move) {
+        // shadow: a move vacates its owner slots and passes the value to its destination
+        zero_bytes(it, addr, size);
+    }
+    return v;
+}
+
+// The scalar of type `t` at `addr`. A `bool` keeps the low bit of its byte, as the `load i8` and
+// the `trunc` of toolchain.md 6 item 2 keep it, so a byte 3 reads as `true` (D10.7).
+fn load_value(machine mut* it, u64 addr, types.node* t) u64 {
+    u64 v = load(it, addr, size_of(t));
+    if (gen.place_is_bool(t)) {
+        return v & 1;
+    }
+    return v;
+}
+
+// ---- rvalues ----------------------------------------------------------------------------------
+
+// The value of the scalar rvalue `r` of frame `k` (spec/fir.md 6). The operands are read in
+// order.
+fn evaluate_scalar(machine mut* it, u64 k, fir.rvalue r) u64 {
+    fir.func* f = it->frames.items[k].f;
+    types.node* mut t = null;
+    switch (r.kind) {
+    case fir.rvalue_kind.rv_use:
+        return read_scalar(it, k, fir.rvalue_operand(f, r, 0), &t);
+    case fir.rvalue_kind.rv_not:
+        u64 a = read_scalar(it, k, fir.rvalue_operand(f, r, 0), &t);
+        return wrap(~a, width(t));
+    case fir.rvalue_kind.rv_fneg:
+        u64 a = read_scalar(it, k, fir.rvalue_operand(f, r, 0), &t);
+        if (is_f32(t)) {
+            return f32_bits(-f32_of(a));
+        }
+        return f64_bits(-f64_of(a));
+    case fir.rvalue_kind.rv_cast:
+        u64 a = read_scalar(it, k, fir.rvalue_operand(f, r, 0), &t);
+        return convert(r.ty, t, a);
+    case fir.rvalue_kind.rv_addr:
+        return place_address(it, k, r.place, &t);
+    case fir.rvalue_kind.rv_slice, fir.rvalue_kind.rv_slice_ptr, fir.rvalue_kind.rv_alloc,
+        fir.rvalue_kind.rv_aggregate, fir.rvalue_kind.rv_call:
+        // rule V4 gives such an rvalue an aggregate place, and execute takes a call apart
+        fault(it, "an aggregate rvalue in a scalar place");
+        return 0;
+    default:
+        u64 a = read_scalar(it, k, fir.rvalue_operand(f, r, 0), &t);
+        types.node* mut other = null;
+        u64 b = read_scalar(it, k, fir.rvalue_operand(f, r, 1), &other);
+        if (has_ended(it)) {
+            return 0;
+        }
+        return apply_binary(it, r.kind, t, a, b);
+    }
+}
+
+// Writes the bits `v` of `size` bytes at `scratch[at..]`.
+fn put(machine mut* it, u64 at, u64 size, u64 v) void {
+    u64 mut bits = v;
+    u64 mut k = 0;
+    while (k < size) {
+        it->scratch[at + k] = cast(bits & BYTE_MASK, u8);
+        bits = bits >> BYTE_BITS;
+        k += 1;
+    }
+}
+
+// Gives `scratch` room for `size` bytes, all zero.
+fn clear_scratch(machine mut* it, u64 size) void {
+    if (it->scratch.len < size) {
+        del(it->scratch);
+        it->scratch = new(u8, size);
+        return;
+    }
+    u64 mut k = 0;
+    while (k < size) {
+        it->scratch[k] = 0;
+        k += 1;
+    }
+}
+
+// The offset of member `m` of the aggregate type `t`, and its type in *ty: a field of a struct,
+// an element of a fixed array, or a header field of a span or a `string`.
+fn member_at(fir.func* f, types.node* t, u32 m, types.node* mut* ty) u64 {
+    if (t->kind == types.type_kind.k_struct) {
+        return field_at(t, m, ty);
+    }
+    if (t->kind == types.type_kind.k_array) {
+        *ty = t->elem;
+        return cast(m, u64) * types.type_sizeof(t->elem);
+    }
+    *ty = fir.apply_projection(f, t, fir.projection{fir.proj_kind.pj_field, m, 0});
+    return cast(m, u64) * WORD;
+}
+
+// Reads the operand `o` of frame `k`, of type `ty`, into `scratch[at..]`.
+fn read_member(machine mut* it, u64 k, fir.operand o, u64 at, types.node* ty) void {
+    u64 size = types.type_sizeof(ty);
+    if (o.kind == fir.operand_kind.ok_const) {
+        if (o.value.kind == fir.const_kind.ck_string) {
+            put(it, at, WORD, data_address(it, o.value.text));
+            put(it, at + WORD, WORD, o.value.text.len);
+        } else if (!fir.type_aggregate(ty)) {
+            put(it, at, size, const_bits(it, o.value));
+        }
+        return;
+    }
+    types.node* mut t = null;
+    u64 src = place_address(it, k, o.place, &t);
+    if (fir.type_aggregate(ty)) {
+        read_bytes(it, src, it->scratch[at..at + size]);
+    } else {
+        // a scalar is a value, so a `bool` keeps its low bit
+        put(it, at, size, load_value(it, src, t));
+    }
+    if (o.kind == fir.operand_kind.ok_move) {
+        zero_bytes(it, src, size);
+    }
+}
+
+// The address of element `lo` of the fixed array, span or `string` at the place `p` of frame
+// `k`, and the size of an element in *size.
+fn element_base(machine mut* it, u64 k, fir.place p, u64 lo, u64 mut* size) u64 {
+    types.node* mut t = null;
+    u64 addr = place_address(it, k, p, &t);
+    fir.projection index = fir.projection{fir.proj_kind.pj_index, 0, 0};
+    *size = types.type_sizeof(fir.apply_projection(it->frames.items[k].f, t, index));
+    u64 mut base = addr;
+    if (t->kind != types.type_kind.k_array) {
+        base = load(it, addr, WORD);
+    }
+    return base +% lo *% *size;
+}
+
+// Evaluates the rvalue `r` of frame `k`, of the aggregate type `ty`, into `scratch[..size]`. The
+// operands are read in order, before the destination is written (spec/fir.md 6).
+fn evaluate_aggregate(machine mut* it, u64 k, fir.rvalue r, types.node* ty) void {
+    fir.func* f = it->frames.items[k].f;
+    clear_scratch(it, types.type_sizeof(ty));
+    types.node* mut t = null;
+    switch (r.kind) {
+    case fir.rvalue_kind.rv_use, fir.rvalue_kind.rv_cast:
+        read_member(it, k, fir.rvalue_operand(f, r, 0), 0, ty);
+    case fir.rvalue_kind.rv_aggregate:
+        u32 mut m = 0;
+        while (m < r.ops_len && !has_ended(it)) {
+            types.node* mut mt = null;
+            u64 at = member_at(f, ty, m, &mt);
+            read_member(it, k, fir.rvalue_operand(f, r, m), at, mt);
+            m += 1;
+        }
+    case fir.rvalue_kind.rv_slice:
+        u64 lo = read_scalar(it, k, fir.rvalue_operand(f, r, 0), &t);
+        u64 hi = read_scalar(it, k, fir.rvalue_operand(f, r, 1), &t);
+        u64 mut size = 0;
+        u64 base = element_base(it, k, r.place, lo, &size);
+        put(it, 0, WORD, base);
+        put(it, WORD, WORD, hi -% lo);
+    case fir.rvalue_kind.rv_slice_ptr:
+        // each bound becomes 64 bits by its own signedness (fir_llvm.bound_value)
+        u64 p = read_scalar(it, k, fir.rvalue_operand(f, r, 0), &t);
+        types.node* elem = t->elem;
+        types.node* mut lt = null;
+        u64 lo = extend(read_scalar(it, k, fir.rvalue_operand(f, r, 1), &lt), lt);
+        types.node* mut ht = null;
+        u64 hi = extend(read_scalar(it, k, fir.rvalue_operand(f, r, 2), &ht), ht);
+        put(it, 0, WORD, p +% lo *% types.type_sizeof(elem));
+        put(it, WORD, WORD, hi -% lo);
+    default:
+        // rule V4 gives no other rvalue an aggregate place
+        fault(it, "a scalar rvalue in an aggregate place");
+    }
+}
+
+// Writes `scratch` into the place of type `ty` at `dest`. An `aggregate` that is not `zeroed`
+// writes each member and leaves the padding of the destination as it was (spec/fir.md 12.2).
+fn write_aggregate(machine mut* it, u64 k, u64 dest, fir.rvalue r, types.node* ty) void {
+    u64 size = types.type_sizeof(ty);
+    if (r.kind != fir.rvalue_kind.rv_aggregate || r.zeroed) {
+        write_bytes(it, dest, it->scratch[..size]);
+        return;
+    }
+    fir.func* f = it->frames.items[k].f;
+    u32 mut m = 0;
+    while (m < r.ops_len && !has_ended(it)) {
+        types.node* mut mt = null;
+        u64 at = member_at(f, ty, m, &mt);
+        write_bytes(it, dest + at, it->scratch[at..at + types.type_sizeof(mt)]);
+        m += 1;
+    }
+}
+
+// ---- statements -------------------------------------------------------------------------------
+
+// Goes to the next item of frame `k`.
+fn advance(machine mut* it, u64 k) void {
+    if (!has_ended(it)) {
+        it->frames.items[k].next += 1;
+    }
+}
+
+// `p = rvalue` with no call (spec/fir.md 7): the rvalue, then the address of `p`, which reads
+// the pointers of `p` after the right side, then the store.
+fn assign(machine mut* it, u64 k, fir.statement* s) void {
+    fir.func* f = it->frames.items[k].f;
+    types.node* ty = fir.place_type(f, s->place);
+    types.node* mut dt = null;
+    if (fir.type_aggregate(ty)) {
+        evaluate_aggregate(it, k, s->value, ty);
+        u64 dest = place_address(it, k, s->place, &dt);
+        if (!has_ended(it)) {
+            write_aggregate(it, k, dest, s->value, ty);
+        }
+        return;
+    }
+    u64 v = evaluate_scalar(it, k, s->value);
+    if (has_ended(it)) {
+        return;
+    }
+    u64 dest = place_address(it, k, s->place, &dt);
+    if (!has_ended(it)) {
+        store(it, dest, size_of(ty), v);
+    }
+}
+
+// Pushes a frame of routine `r` and returns its index, or NONE when the frames pass the stack
+// limit. Its locals are zero.
+// shadow: the slots of a new frame are dead until the `live` of their local.
+fn push_frame(machine mut* it, u64 r) u64 {
+    u64 size = it->routines.items[r].size;
+    if (FRAME_BYTES > it->stack_limit - it->stack_bytes) {
+        fault(it, "the stack passes its limit");
+        return NONE;
+    }
+    u64 base = make_storage(it, region_kind.rk_frame, size);
+    if (base == 0) {
+        return NONE;
+    }
+    frame_vec mut* v = &it->frames;
+    if (v->len == v->items.len) {
+        u64 cap = fir.grown_capacity(v->items.len, "fir.interpreter: frame capacity overflow");
+        frame mut@ own bigger = new(frame, cap);
+        u64 mut i = 0;
+        while (i < v->len) {
+            bigger[i] = v->items[i];
+            i += 1;
+        }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    routine* rt = &it->routines.items[r];
+    v->items[v->len] = frame{r, rt->f, rt->offsets, base, 0, 0, wait_kind.wk_none, 0, 0};
+    v->len += 1;
+    it->stack_bytes += FRAME_BYTES;
+    return v->len - 1;
+}
+
+// Writes `values[i]` into parameter `i` of frame `k`: the bits of a scalar, or the address of
+// the bytes of an aggregate. A value past the parameters goes nowhere.
+fn write_values(machine mut* it, u64 k, u64@ values) void {
+    fir.func* f = it->frames.items[k].f;
+    u64 mut i = 0;
+    while (i < values.len && i < f->ty->params.len && !has_ended(it)) {
+        u32 n = cast(i + 1, u32);
+        types.node* t = fir.local_at(f, n)->ty;
+        u64 at = local_address(it, k, n);
+        if (fir.type_aggregate(t)) {
+            copy_bytes(it, at, values[i], types.type_sizeof(t));
+        } else {
+            store(it, at, types.type_sizeof(t), values[i]);
+        }
+        i += 1;
+    }
+}
+
+// Whether routine `r` has a function to run. Without one the run ends: as `outside` for a
+// declaration with no body, and as a fault for a function that the lowering refused.
+fn is_callable(machine mut* it, u64 r) bool {
+    routine* rt = &it->routines.items[r];
+    if (rt->f != null) {
+        return true;
+    }
+    if (rt->refused) {
+        fault(it, "a function that the lowering does not lower");
+    } else {
+        stop(it, outcome_kind.oc_outside, rt->sym->name);
+    }
+    return false;
+}
+
+// Calls the function `s` from frame `k` with the arguments `values`, and makes frame `k` wait
+// for it as `wait` says.
+fn call_values(machine mut* it, u64 k, ast.sym* s, u64@ values, wait_kind wait) void {
+    if (s == null) {
+        fault(it, "a runtime entry that std.rt lacks");
+        return;
+    }
+    u64 r = find_routine(it, s);
+    if (!is_callable(it, r)) {
+        return;
+    }
+    u64 callee = push_frame(it, r);
+    if (callee == NONE) {
+        return;
+    }
+    write_values(it, callee, values);
+    it->frames.items[k].wait = wait;
+}
+
+// Enters routine `r` for the call `c` of frame `k`, with the operands of `c` from `first` as its
+// arguments: each is read in order in frame `k`, as the caller-made copy of an aggregate argument
+// is (toolchain.md 6 item 7), and the new frame then takes them as its parameters. So a fault in
+// an argument stands at the call. An operand past the parameters is read and goes nowhere. Frame
+// `k` waits for the result.
+fn enter(machine mut* it, u64 k, u64 r, fir.rvalue c, u32 first) void {
+    if (!is_callable(it, r)) {
+        return;
+    }
+    fir.func* f = it->frames.items[k].f;
+    fir.func* cf = it->routines.items[r].f;
+    u64 params = cf->ty->params.len;
+    // the arguments go to `scratch` at the offsets of their parameters in the new frame
+    clear_scratch(it, it->routines.items[r].size);
+    u32 mut i = first;
+    while (i < c.ops_len && !has_ended(it)) {
+        u64 n = cast(i - first, u64) + 1;
+        if (n <= params) {
+            types.node* t = fir.local_at(cf, cast(n, u32))->ty;
+            u64 at = it->routines.items[r].offsets[n];
+            read_member(it, k, fir.rvalue_operand(f, c, i), at, t);
+        } else {
+            types.node* mut t = null;
+            read_scalar(it, k, fir.rvalue_operand(f, c, i), &t);
+        }
+        i += 1;
+    }
+    if (has_ended(it)) {
+        return;
+    }
+    u64 callee = push_frame(it, r);
+    if (callee == NONE) {
+        return;
+    }
+    u64 mut p = 1;
+    while (p <= params) {
+        types.node* t = fir.local_at(cf, cast(p, u32))->ty;
+        u64 at = it->routines.items[r].offsets[p];
+        write_bytes(it, local_address(it, callee, cast(p, u32)), it->scratch[at..at + size_of(t)]);
+        p += 1;
+    }
+    it->frames.items[k].wait = wait_kind.wk_assign;
+}
+
+// A `call` of frame `k`: a fort function or a function value enters a frame; an extern runs in
+// run_extern. The callee operand of a value is read first (D6.3).
+fn call_from(machine mut* it, u64 k, fir.statement* s) void {
+    fir.rvalue r = s->value;
+    if (r.callee == fir.callee_kind.cl_extern) {
+        run_extern(it, k, s);
+        return;
+    }
+    if (r.callee == fir.callee_kind.cl_fn) {
+        enter(it, k, find_routine(it, r.callee_sym), r, 0);
+        return;
+    }
+    types.node* mut t = null;
+    u64 addr = read_scalar(it, k, r.callee_op, &t);
+    call_address(it, k, addr, r, 0);
+}
+
+// Enters the function at the address `addr` for the call `r` of frame `k`, with the operands
+// from `first` as its arguments.
+fn call_address(machine mut* it, u64 k, u64 addr, fir.rvalue r, u32 first) void {
+    if (has_ended(it)) {
+        return;
+    }
+    u64 callee = code_routine(it, addr);
+    if (callee == NONE) {
+        if (addr == 0) {
+            fault(it, "a call of a null function pointer");
+        } else {
+            fault(it, "a call of an address that holds no function");
+        }
+        return;
+    }
+    enter(it, k, callee, r, first);
+}
+
+// `p = alloc<T>(n)`: `std.rt.alloc` with the size of `T`, `n`, and the file, the line and the
+// column of the statement (spec/fir.md 12.2).
+fn alloc_from(machine mut* it, u64 k, fir.statement* s) void {
+    types.node* mut t = null;
+    u64 n = read_scalar(it, k, fir.rvalue_operand(it->frames.items[k].f, s->value, 0), &t);
+    u64[5] mut values = {};
+    values[0] = types.type_sizeof(s->value.ty);
+    values[1] = n;
+    values[2] = data_address(it, s->loc.file);
+    values[3] = cast(s->loc.line, u64);
+    values[4] = cast(s->loc.col, u64);
+    if (!has_ended(it)) {
+        call_values(it, k, it->alloc_entry, values[..], wait_kind.wk_assign);
+    }
+}
+
+// `del(move p)`: the pointer of `p`, the pointer field of a span or a `string`, then
+// `std.rt.free`, then the zero value into `p` (spec/fir.md 12.2).
+fn del_from(machine mut* it, u64 k, fir.statement* s) void {
+    types.node* mut t = null;
+    u64 addr = place_address(it, k, s->place, &t);
+    u64 ptr = load(it, addr, WORD);
+    if (has_ended(it)) {
+        return;
+    }
+    // shadow: a `del` of the allocation at `ptr` through the slot at `addr`
+    u64[1] mut values = {};
+    values[0] = ptr;
+    call_values(it, k, it->free_entry, values[..], wait_kind.wk_del);
+    it->frames.items[k].addr = addr;
+    it->frames.items[k].size = types.type_sizeof(t);
+}
+
+// Runs statement `s` of frame `k` (spec/fir.md 7). A call, an `alloc` and a `del` enter a frame,
+// and the statement ends when it returns.
+fn execute(machine mut* it, u64 k, fir.statement* s) void {
+    switch (s->kind) {
+    case fir.stmt_kind.st_assign:
+        if (s->value.kind == fir.rvalue_kind.rv_call) {
+            call_from(it, k, s);
+            return;
+        }
+        if (s->value.kind == fir.rvalue_kind.rv_alloc) {
+            alloc_from(it, k, s);
+            return;
+        }
+        assign(it, k, s);
+    case fir.stmt_kind.st_del:
+        del_from(it, k, s);
+        return;
+    case fir.stmt_kind.st_live, fir.stmt_kind.st_dead:
+        // shadow: `live` starts the slots of a local, and `dead` kills them
+    }
+    advance(it, k);
+}
+
+// ---- terminators ------------------------------------------------------------------------------
+
+fn go(machine mut* it, u64 k, u32 target) void {
+    // shadow: the end of a terminator tests the owner counts
+    frame mut* fr = &it->frames.items[k];
+    fr->block = target;
+    fr->next = 0;
+}
+
+// The bits of the value `v` of a switch arm whose operand has the type `t`.
+fn arm_bits(types.node* t, consts.cval v) u64 {
+    if (v.kind == consts.cval_kind.cv_bool) {
+        return bool_bits(v.mag != 0);
+    }
+    return wrap(consts.cv_bits(consts.cv_as_int(v)), width(t));
+}
+
+// The failure of the `check` or `fail` `t` of frame `k`: the runtime entry of its kind with the
+// reported operands, the file, the line and the column of `t` (spec/fir.md 12.4). The entry
+// writes the message of D11.4 and calls `abort`.
+fn fail_check(machine mut* it, u64 k, fir.terminator* t) void {
+    fir.func* f = it->frames.items[k].f;
+    u64[6] mut values = {};
+    u32 mut i = 0;
+    while (i < t->args_len && i < 3) {
+        types.node* mut ty = null;
+        values[cast(i, u64)] = read_scalar(it, k, fir.operand_at(f, t->args_first + i), &ty);
+        i += 1;
+    }
+    u64 n = cast(i, u64);
+    values[n] = data_address(it, t->loc.file);
+    values[n + 1] = cast(t->loc.line, u64);
+    values[n + 2] = cast(t->loc.col, u64);
+    ast.sym* entry = it->rt.entry[cast(cast(t->check, i32), u64)];
+    if (!has_ended(it)) {
+        call_values(it, k, entry, values[..n + 3], wait_kind.wk_noreturn);
+    }
+}
+
+// Runs the terminator `t` of frame `k` (spec/fir.md 8).
+fn terminate(machine mut* it, u64 k, fir.terminator* t) void {
+    fir.func* f = it->frames.items[k].f;
+    types.node* mut ty = null;
+    switch (t->kind) {
+    case fir.term_kind.tk_goto, fir.term_kind.tk_check_overwrite:
+        // a `check(overwrite: p)` continues (spec/ownership-design.md 3.2)
+        go(it, k, t->target);
+    case fir.term_kind.tk_switch:
+        u64 v = read_scalar(it, k, t->cond, &ty);
+        u32 mut target = t->otherwise;
+        u32 mut i = 0;
+        while (i < t->arms_len) {
+            fir.arm a = fir.term_arm(f, t, i);
+            if (arm_bits(ty, a.value) == v) {
+                target = a.target;
+                break;
+            }
+            i += 1;
+        }
+        if (!has_ended(it)) {
+            go(it, k, target);
+        }
+    case fir.term_kind.tk_return:
+        return_from(it, k);
+    case fir.term_kind.tk_check:
+        u64 c = read_scalar(it, k, t->cond, &ty);
+        bool mut failed = c != 0;
+        if (t->check == fir.check_kind.chk_user) {
+            failed = c == 0;
+        }
+        if (has_ended(it)) {
+            return;
+        }
+        if (failed) {
+            fail_check(it, k, t);
+        } else {
+            go(it, k, t->target);
+        }
+    case fir.term_kind.tk_fail:
+        fail_check(it, k, t);
+    case fir.term_kind.tk_trap:
+        stop(it, outcome_kind.oc_trap, "trap");
+    case fir.term_kind.tk_unreachable:
+        fault(it, "unreachable");
+    }
+}
+
+// The `return` of frame `k`: the result `_0` goes to the caller, the frame ends, and the caller
+// ends its statement. At the bottom of the stack the result goes to `ret` and `dest`.
+// shadow: during the test of the owner counts, the value in `_0` counts as an owner.
+fn return_from(machine mut* it, u64 k) void {
+    frame callee = it->frames.items[k];
+    types.node* t = fir.local_at(callee.f, 0)->ty;
+    u64 size = size_of(t);
+    u64 result = callee.base + callee.offsets[0];
+    if (k == 0) {
+        if (size > 0 && !fir.type_aggregate(t)) {
+            it->ret = load_value(it, result, t);
+        }
+        if (it->dest != 0 && size > 0) {
+            copy_bytes(it, it->dest, result, size);
+        }
+        pop_frame(it);
+        return;
+    }
+    clear_scratch(it, size);
+    read_bytes(it, result, it->scratch[..size]);
+    pop_frame(it);
+    u64 c = k - 1;
+    frame* caller = &it->frames.items[c];
+    wait_kind wait = caller->wait;
+    it->frames.items[c].wait = wait_kind.wk_none;
+    switch (wait) {
+    case wait_kind.wk_assign:
+        fir.block* bl = fir.block_at(caller->f, caller->block);
+        fir.statement* s = &bl->statements.items[cast(caller->next, u64)];
+        types.node* mut dt = null;
+        u64 dest = place_address(it, c, s->place, &dt);
+        // a result wider than its place, which only a call through `oracle_call` gives, keeps
+        // the low bytes that fit, as a register does
+        u64 mut fits = size;
+        if (size_of(dt) < fits) {
+            fits = size_of(dt);
+        }
+        if (!has_ended(it) && fits > 0) {
+            write_bytes(it, dest, it->scratch[..fits]);
+        }
+    case wait_kind.wk_del:
+        zero_bytes(it, caller->addr, caller->size);
+    case wait_kind.wk_noreturn:
+        fault(it, "a noreturn runtime entry returned");
+    case wait_kind.wk_none:
+        // enter and call_values make each caller wait for its callee
+        fault(it, "a return to a frame that waits for no result");
+    }
+    advance(it, c);
+}
+
+// Ends the frame at the top of the stack.
+fn pop_frame(machine mut* it) void {
+    frame* top = &it->frames.items[it->frames.len - 1];
+    it->stack_bytes -= FRAME_BYTES;
+    u64 i = region_at(it, top->base);
+    it->frames.len -= 1;
+    kill_region(it, i);
+}
+
+// Runs the next item of the frame at the top of the stack.
+fn step(machine mut* it) void {
+    u64 k = it->frames.len - 1;
+    frame* fr = &it->frames.items[k];
+    fir.block* bl = fir.block_at(fr->f, fr->block);
+    if (cast(fr->next, u64) < bl->statements.len) {
+        execute(it, k, &bl->statements.items[cast(fr->next, u64)]);
+        return;
+    }
+    terminate(it, k, &bl->term);
+}
+
+// ---- externs ----------------------------------------------------------------------------------
+
+// The extern call `s` of frame `k`. `oracle_call` enters the function of its first argument; each
+// other modeled extern runs here, and its result goes to the place of `s`.
+fn run_extern(machine mut* it, u64 k, fir.statement* s) void {
+    fir.rvalue r = s->value;
+    fir.func* f = it->frames.items[k].f;
+    string name = r.callee_sym->name;
+    if (cast(r.ops_len, u64) > EXTERN_ARGS) {
+        stop(it, outcome_kind.oc_outside, name);
+        return;
+    }
+    if (name == "oracle_call" && r.ops_len > 0) {
+        types.node* mut t = null;
+        u64 addr = read_scalar(it, k, fir.rvalue_operand(f, r, 0), &t);
+        call_address(it, k, addr, r, 1);
+        return;
+    }
+    u64[EXTERN_ARGS] mut a = {};
+    types.node*[EXTERN_ARGS] mut t = {};
+    u32 mut i = 0;
+    while (i < r.ops_len) {
+        fir.operand o = fir.rvalue_operand(f, r, i);
+        if (fir.type_aggregate(fir.operand_type(f, o))) {
+            // D9.8 passes no aggregate to C, and no model takes one
+            stop(it, outcome_kind.oc_outside, name);
+            return;
+        }
+        a[cast(i, u64)] = read_scalar(it, k, o, &t[cast(i, u64)]);
+        i += 1;
+    }
+    u64 v = call_model(it, name, a[..cast(r.ops_len, u64)], t[..cast(r.ops_len, u64)]);
+    if (has_ended(it)) {
+        return;
+    }
+    types.node* ty = fir.place_type(f, s->place);
+    types.node* mut dt = null;
+    u64 dest = place_address(it, k, s->place, &dt);
+    store(it, dest, size_of(ty), v);
+    advance(it, k);
+}
+
+// The result of the extern `name` with the arguments `a` of the types `t`, or the end of the run.
+// The externs are those that `std.rt` reaches and the three model externs of the tests
+// (spec/ownership-design.md 3.2).
+fn call_model(machine mut* it, string name, u64@ a, types.node*@ t) u64 {
+    if (name == "exit" && a.len == 1) {
+        // the process status of `exit(s)` is `s & 0xFF`, so `exit(-1)` gives 255
+        it->end.status = cast(a[0] & BYTE_MASK, i32);
+        stop(it, outcome_kind.oc_exit, name);
+        return 0;
+    }
+    if (name == "abort") {
+        stop(it, outcome_kind.oc_abort, name);
+        return 0;
+    }
+    if (name == "write" && a.len == 3) {
+        return cast(write_out(it, cast(widen(a[0], WORD_BITS / 2), i32), a[1], a[2]), u64);
+    }
+    if (name == "calloc" && a.len == 2) {
+        // shadow: a new allocation
+        if (a[0] != 0 && a[1] > ALL_BITS / a[0]) {
+            return 0;
+        }
+        return make_region(it, region_kind.rk_heap, a[0] * a[1], false);
+    }
+    if (name == "free" && a.len == 1) {
+        release(it, a[0]);
+        return 0;
+    }
+    if (name == "isatty" && a.len == 1) {
+        if (it->capture) {
+            return 0;
+        }
+        i32 tty = libc.isatty(cast(widen(a[0], WORD_BITS / 2), i32));
+        if (tty == 0) {
+            store(it, it->errno_slot, I32_SIZE, cast(*libc.errno_slot(), u64));
+        }
+        return wrap(cast(tty, u64), WORD_BITS / 2);
+    }
+    if (name == "strlen" && a.len == 1) {
+        return cstring_at(it, a[0]).len;
+    }
+    if ((name == "memcpy" || name == "memmove") && a.len == 3) {
+        copy_bytes(it, a[0], a[1], a[2]);
+        return a[0];
+    }
+    if (name == "memcmp" && a.len == 3) {
+        return wrap(cast(compare_bytes(it, a[0], a[1], a[2]), u64), WORD_BITS / 2);
+    }
+    if (name == "__errno_location" || name == "__error") {
+        return it->errno_slot;
+    }
+    if (name == "snprintf" && a.len == 5 && is_float_format(it, a, t)) {
+        return format_float(it, a);
+    }
+    if ((name == "strtod" || name == "strtof") && a.len == 2 && a[1] == 0) {
+        return parse_float(it, a[0], name == "strtof");
+    }
+    if (name == "oracle_keep" && a.len == 1) {
+        // shadow: the value is kept outside every frame
+        store(it, it->kept, WORD, a[0]);
+        return 0;
+    }
+    if (name == "oracle_pass" && a.len == 1) {
+        return a[0];
+    }
+    stop(it, outcome_kind.oc_outside, name);
+    return 0;
+}
+
+// `write(fd, buf, n)`: the bytes go to descriptor `fd`, or to `out` or `err` with `capture`.
+fn write_out(machine mut* it, i32 fd, u64 buf, u64 n) i64 {
+    u8@ b = bytes_at(it, buf, n);
+    if (has_ended(it)) {
+        return -1;
+    }
+    if (it->capture) {
+        if (fd == 1) {
+            strbuf.append_bytes(&it->out, b);
+        } else if (fd == 2) {
+            strbuf.append_bytes(&it->err, b);
+        } else {
+            stop(it, outcome_kind.oc_outside, "write");
+        }
+        return cast(n, i64);
+    }
+    if (n == 0) {
+        return 0;
+    }
+    i64 written = libc.write(fd, b.ptr, n);
+    if (written < 0) {
+        store(it, it->errno_slot, I32_SIZE, cast(*libc.errno_slot(), u64));
+    }
+    return written;
+}
+
+// `free(p)`: the end of the allocation that starts at `p`. A null `p` does nothing.
+// shadow: the release of an allocation
+fn release(machine mut* it, u64 p) void {
+    if (p == 0) {
+        return;
+    }
+    u64 i = region_at(it, p);
+    if (i == NONE || it->regions.items[i].base != p
+        || it->regions.items[i].kind != region_kind.rk_heap || !it->regions.items[i].live) {
+        fault(it, "invalid release");
+        return;
+    }
+    kill_region(it, i);
+}
+
+// `memcmp(a, b, n)`: the difference of the first two bytes that differ, as unsigned bytes.
+fn compare_bytes(machine mut* it, u64 a, u64 b, u64 n) i32 {
+    u8@ x = bytes_at(it, a, n);
+    u8@ y = bytes_at(it, b, n);
+    u64 mut k = 0;
+    while (k < x.len && k < y.len) {
+        if (x[k] != y[k]) {
+            return cast(x[k], i32) - cast(y[k], i32);
+        }
+        k += 1;
+    }
+    return 0;
+}
+
+// Whether the arguments of `snprintf` have the one form that `std.rt` gives them: a buffer, its
+// size, the format `%.*e`, an i32 precision and an f64 (std.libc.snprintf_float).
+fn is_float_format(machine mut* it, u64@ a, types.node*@ t) bool {
+    if (t[3]->kind != types.type_kind.k_prim || t[3]->prim != prim.prim_kind.prim_i32
+        || t[4]->kind != types.type_kind.k_prim || t[4]->prim != prim.prim_kind.prim_f64) {
+        return false;
+    }
+    if (a[1] == 0 || a[1] > FORMAT_LIMIT) {
+        return false;
+    }
+    return cast(cstring_at(it, a[2]), string) == FLOAT_FORMAT;
+}
+
+// `snprintf(buf, size, "%.*e", precision, v)`, which the C library of the compiler formats.
+fn format_float(machine mut* it, u64@ a) u64 {
+    char mut@ own text = new(char, a[1]);
+    defer del(text);
+    i32 n = libc.snprintf_float(&text[0], a[1], FLOAT_FORMAT.ptr,
+                                cast(widen(a[3], WORD_BITS / 2), i32), f64_of(a[4]));
+    if (n >= 0) {
+        u64 mut written = cast(n, u64);
+        if (written > a[1] - 1) {
+            written = a[1] - 1;
+        }
+        write_bytes(it, a[0], cast(text[..written + 1], u8@));
+    }
+    return wrap(cast(n, u64), WORD_BITS / 2);
+}
+
+// `strtod(s, null)` or, with `single`, `strtof(s, null)`, which the C library of the compiler
+// reads, with the errno that it sets.
+fn parse_float(machine mut* it, u64 s, bool single) u64 {
+    u8@ b = cstring_at(it, s);
+    if (has_ended(it)) {
+        return 0;
+    }
+    char mut@ own text = new(char, b.len + 1);
+    defer del(text);
+    u64 mut k = 0;
+    while (k < b.len) {
+        text[k] = cast(b[k], char);
+        k += 1;
+    }
+    // the C library sets errno on a range error and leaves it alone otherwise, so the errno of
+    // the compiler goes to the slot of the run only when the call set it
+    i32 mut* slot = libc.errno_slot();
+    i32 saved = *slot;
+    *slot = 0;
+    u64 mut bits = 0;
+    if (single) {
+        bits = f32_bits(libc.strtof(&text[0], null));
+    } else {
+        bits = f64_bits(libc.strtod(&text[0], null));
+    }
+    i32 error = *slot;
+    *slot = saved;
+    if (error != 0) {
+        store(it, it->errno_slot, I32_SIZE, cast(error, u64));
+    }
+    return bits;
+}
+
+// ---- runs -------------------------------------------------------------------------------------
+
+// Calls the function `s` at the bottom of the stack with the arguments `values`, as write_values
+// takes them, and runs until it returns or the run ends. The bits of a scalar result go to `ret`
+// and, when `dest` is not 0, a copy of the result to `dest`.
+fn invoke(machine mut* it, ast.sym* s, u64@ values, u64 dest) void {
+    if (has_ended(it)) {
+        return;
+    }
+    it->dest = dest;
+    it->ret = 0;
+    if (s == null) {
+        fault(it, "a runtime entry that std.rt lacks");
+        return;
+    }
+    u64 r = find_routine(it, s);
+    if (!is_callable(it, r)) {
+        return;
+    }
+    u64 k = push_frame(it, r);
+    if (k == NONE) {
+        return;
+    }
+    write_values(it, k, values);
+    while (it->frames.len > 0 && !has_ended(it)) {
+        step(it);
+    }
+}
+
+/// Runs the program whose `main` is `main_fn` as the `main` that the compiler emits starts it
+/// (toolchain.md 6 item 22): `std.rt.args_init` with `argv`, then `std.rt.args`, then `main`,
+/// then `std.rt.flush_all`. The run then ends with the status of `main` & 0xFF, unless it ended
+/// before. A call of `exit` ends it at once.
+fn run_program(machine mut* it, ast.sym* main_fn, string@ argv) outcome {
+    u64 count = argv.len;
+    u64 vector = make_storage(it, region_kind.rk_slot, (count + 1) * WORD);
+    u64 mut i = 0;
+    while (i < count) {
+        u64 text = make_storage(it, region_kind.rk_slot, argv[i].len + 1);
+        write_bytes(it, text, cast(argv[i], u8@));
+        store(it, vector + i * WORD, WORD, text);
+        i += 1;
+    }
+    u64[2] mut values = {};
+    values[0] = wrap(count, WORD_BITS / 2);
+    values[1] = vector;
+    invoke(it, it->args_init_entry, values[..], 0);
+    u64 span = make_storage(it, region_kind.rk_slot, HEADER);
+    invoke(it, it->args_entry, values[..0], span);
+    values[0] = span;
+    if (main_fn->ty->params.len == 1) {
+        invoke(it, main_fn, values[..1], 0);
+    } else {
+        invoke(it, main_fn, values[..0], 0);
+    }
+    i32 status = cast(widen(it->ret, WORD_BITS / 2), i32);
+    invoke(it, it->flush_entry, values[..0], 0);
+    if (!has_ended(it)) {
+        it->end.status = status & STATUS_MASK;
+        it->end.kind = outcome_kind.oc_exit;
+    }
+    return it->end;
+}
+
+/// Runs the function `s` with the bits of a scalar for each parameter in `args`. A return ends
+/// the run with the result type of `s` and the bits of a scalar result.
+fn run_function(machine mut* it, ast.sym* s, u64@ args) outcome {
+    invoke(it, s, args, 0);
+    if (!has_ended(it)) {
+        it->end.kind = outcome_kind.oc_return;
+        it->end.ty = s->ty->elem;
+        it->end.value = it->ret;
+    }
+    return it->end;
+}
+
+// ---- the report -------------------------------------------------------------------------------
+
+// Writes `line:col` of `at`.
+fn write_at(diag.loc at, strbuf.str_buf mut* out) void {
+    strbuf.append(out, " at ");
+    strbuf.append_u64(out, cast(at.line, u64));
+    strbuf.push(out, ':');
+    strbuf.append_u64(out, cast(at.col, u64));
+}
+
+/// Writes the value `v` of the scalar type `t` as a FIR constant spells it: `true`, `i32 -3`,
+/// `u64 7`, `f64 0x3FF0000000000000`. A pointer writes its address in decimal.
+fn write_value(types.node* t, u64 v, strbuf.str_buf mut* out) void {
+    if (t->kind == types.type_kind.k_prim && t->prim == prim.prim_kind.prim_bool) {
+        if (v != 0) {
+            strbuf.append(out, "true");
+        } else {
+            strbuf.append(out, "false");
+        }
+        return;
+    }
+    types.type_to_str(t, out);
+    strbuf.push(out, ' ');
+    if (types.type_is_float(t)) {
+        fir_print.print_hex64(f64_bits(float_value(t, v)), out);
+    } else if (gen.gen_is_signed(t)) {
+        strbuf.append_i64(out, widen(v, width(t)));
+    } else {
+        strbuf.append_u64(out, v);
+    }
+}
+
+/// Writes the report of the run: the bytes that it wrote to descriptors 1 and 2 when it captures
+/// them, each as `stdout "..."` and `stderr "..."` in the quoting of spec/fir.md 13, then one line
+/// for its outcome: `return` and the value, `exit <status>`, `abort`, `trap at <line>:<col>`,
+/// `outside <name>`, or `fault <what> at <line>:<col>`.
+fn write_report(machine* it, strbuf.str_buf mut* out) void {
+    if (strbuf.view(&it->out).len > 0) {
+        strbuf.append(out, "stdout ");
+        fir_print.print_quoted(strbuf.view(&it->out), out);
+        strbuf.push(out, '\n');
+    }
+    if (strbuf.view(&it->err).len > 0) {
+        strbuf.append(out, "stderr ");
+        fir_print.print_quoted(strbuf.view(&it->err), out);
+        strbuf.push(out, '\n');
+    }
+    outcome* o = &it->end;
+    switch (o->kind) {
+    case outcome_kind.oc_none:
+        strbuf.append(out, "running");
+    case outcome_kind.oc_return:
+        strbuf.append(out, "return");
+        if (o->ty != null && fir.type_aggregate(o->ty)) {
+            // the report gives no bytes of an aggregate result
+            strbuf.push(out, ' ');
+            types.type_to_str(o->ty, out);
+            strbuf.append(out, ", an aggregate of ");
+            strbuf.append_u64(out, size_of(o->ty));
+            strbuf.append(out, " bytes");
+        } else if (o->ty != null && o->ty->kind != types.type_kind.k_void) {
+            strbuf.push(out, ' ');
+            write_value(o->ty, o->value, out);
+        }
+    case outcome_kind.oc_exit:
+        strbuf.append(out, "exit ");
+        strbuf.append_i64(out, cast(o->status, i64));
+    case outcome_kind.oc_abort:
+        strbuf.append(out, "abort");
+    case outcome_kind.oc_trap:
+        strbuf.append(out, "trap");
+        write_at(o->at, out);
+    case outcome_kind.oc_outside:
+        strbuf.append(out, "outside ");
+        strbuf.append(out, o->what);
+    case outcome_kind.oc_fault:
+        strbuf.append(out, "fault ");
+        strbuf.append(out, o->what);
+        write_at(o->at, out);
+    }
+    strbuf.push(out, '\n');
+}

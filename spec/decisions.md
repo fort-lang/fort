@@ -1791,7 +1791,8 @@ Sections:
   name is a usage error), `--fir-test` (read the entry file as a FIR test of `spec/fir.md`
   16.3: check its prelude as the module `main`, parse its FIR text against that module, run the
   passes that its `//! pass:` directives name, in their order, and write the module to stdout in
-  the textual form of `spec/fir.md` 13; a pass that the compiler does not run is an error with
+  the textual form of `spec/fir.md` 13, or, when it names the pass `run`, the report of each run
+  of the interpreter in its place; a pass that the compiler does not run is an error with
   status 2, and combining it with `--tokens`, `--ast`, `--check`, `--json`, `--index`, `--fir` or
   `--fir-after` is a usage error), `--fir-verify-report` (implies `--fir`, and writes in place of
   the FIR one line to stdout for each function that breaks a rule of `spec/fir.md` 10, its first
@@ -1801,7 +1802,17 @@ Sections:
   definitions of fort functions, and N equals M, because a function that the translator does
   not write is a compile error, `spec/fir.md` 9.8; a bodiless declaration of D9.11 is no
   definition; combining it with `--tokens`, `--ast`,
-  `--check`, `--index`, `--fir` or `--fir-test` is a usage error), `--lib <name> <root>`,
+  `--check`, `--index`, `--fir` or `--fir-test` is a usage error), `--fir-run` (check the closure
+  of a program and run its FIR with the interpreter of `spec/fir.md` 11 in place of a build, as the
+  `main` that a build emits starts it; it writes no file, takes the target rule of `--check`,
+  and ends as the checked build of the program ends: with its exit status, or by SIGABRT after
+  an abort and by the trap signal of the target after a trap; a call that the interpreter does
+  not run and an operation with no defined result are errors with status 2; combining it with
+  `--tokens`, `--ast`, `--check`, `--json`, `--index`, `--use`, `--lib`, `--release`,
+  `--no-bounds-check`, `--fir`, `--fir-after`, `--fir-verify-report`, `--fir-test` or
+  `--fir-stats` is a usage error; the run keeps each check of the checked mode), `--` (each
+  argument after it is an argument of the program of `--fir-run`, and it is a usage error
+  without `--fir-run`), `--lib <name> <root>`,
   `--use <name>=<path>` (repeatable), `--emit-interface`, `--cache-dir <dir>`, `--cache-stats`
   and `--ar <path>` (the library builds of D9.11), `--help`, `--version`.
   `--lib` takes no entry file; every other build takes one.
@@ -1865,6 +1876,9 @@ Sections:
   Amended 2026-10-23: a non-built `-S` target required `--std-dir` in every build. A library
   build reads no `--std-dir`: the used library `std`, or the root of `--lib std`, supplies the
   standard modules.
+  Amended 2026-10-24: `--fir-run` and `--` did not exist, and the passes of `--fir-test` were
+  `none`, `verify` and `build-mode`. `--fir-run` runs the run corpus of the reference semantics
+  of `spec/ownership-design.md` 3.5, and the pass `run` of `--fir-test` runs a FIR test with it.
 
 ### D14.2 Diagnostics and recovery
 - owner: `toolchain.md`.

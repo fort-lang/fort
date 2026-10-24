@@ -1,0 +1,459 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| options ok
+//| usage ok
+//| programs ok
+//| ends ok
+//| pass run ok
+//| pass run errors ok
+/// Checks the mode --fir-run and the pass `run` of --fir-test in src/fort/driver.ft: the
+/// options, the arguments after `--`, the status of each end of a run, and the reports.
+import capture;
+import fort.containers;
+import fort.driver;
+import run_env;
+import std.io;
+import std.libc;
+import std.os;
+import std.str;
+import std.strbuf;
+import std.sys;
+
+// Each run of the driver writes to stdout and to stderr, which support/capture.ft holds in files
+// of this test's directory. Each program runs from the standard directory `sstd`, whose runtime
+// is the runtime of run_env. Its std.libc declares `oracle_keep` as `noreturn`, so a program that
+// calls it reaches the `trap` after the call.
+
+// The exit statuses, as this suite spells them.
+i32 EXIT_OK = 0;
+i32 EXIT_COMPILE_ERROR = 1;
+i32 EXIT_USAGE = 2;
+
+// The usage line that follows each usage error.
+string USAGE = "usage: fort [options] entry.ft\n";
+
+// ---- running the driver with its output captured -------------------------------------------
+
+// The status of `fort <args>`, with stdout in `out.txt` and stderr in `err.txt`.
+fn run(string@ args) i32 {
+    i32 saved_out = capture.begin(io.STDOUT, "out.txt");
+    i32 saved_err = capture.begin(io.STDERR, "err.txt");
+    i32 status = driver.run(args);
+    capture.end(io.STDERR, saved_err);
+    capture.end(io.STDOUT, saved_out);
+    return status;
+}
+
+// Holds the captured stdout and stderr of the last run against `out` and `err`.
+fn said(string out, string err) void {
+    string own got_out = capture.text("out.txt");
+    defer del(got_out);
+    string own got_err = capture.text("err.txt");
+    defer del(got_err);
+    if (got_out != out || got_err != err) {
+        eprintln("driver_run_test: stdout <", got_out, "> stderr <", got_err, ">");
+        eprintln("driver_run_test: wanted <", out, "> and <", err, ">");
+        panic("driver_run_test.said: the output differs");
+    }
+}
+
+// Holds that the last run wrote nothing to stdout, and `head`, `tail` and the usage line to
+// stderr.
+fn said_usage(string head, string tail) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "fort: error: ");
+    strbuf.append(&b, head);
+    strbuf.append(&b, tail);
+    strbuf.push(&b, '\n');
+    strbuf.append(&b, USAGE);
+    said("", strbuf.view(&b));
+}
+
+fn err_has(string text) bool {
+    string own got = capture.text("err.txt");
+    defer del(got);
+    return str.find(got, text) >= 0;
+}
+
+fn out_has(string text) bool {
+    string own got = capture.text("out.txt");
+    defer del(got);
+    return str.find(got, text) >= 0;
+}
+
+fn write_file(string path, string text) void {
+    assert(io.write_file(path, cast(text, u8@)));
+}
+
+// Writes the lines of `lines`, each with a newline, as the file `path`.
+fn write_lines(string path, string@ lines) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    run_env.join(&b, lines);
+    write_file(path, strbuf.view(&b));
+}
+
+// The count of the lines of run_env.LIBC that the libc of `sstd` keeps: every line before the
+// three model externs.
+u64 LIBC_KEPT = 17;
+
+// Writes the standard directory `sstd`: the runtime of run_env, and its std.libc with
+// `oracle_keep` declared `noreturn`.
+fn write_std() void {
+    assert(libc.mkdir("sstd".ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
+    write_lines("sstd/rt.ft", run_env.RUNTIME[..]);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    run_env.join(&b, run_env.LIBC[..LIBC_KEPT]);
+    strbuf.append(&b, "extern fn oracle_keep(void* p) noreturn;\n");
+    write_file("sstd/libc.ft", strbuf.view(&b));
+}
+
+// Writes the program `path` and runs `fort --std-dir sstd --fir-run <path> -- <args>`.
+fn run_program(string path, string@ lines, string@ args) i32 {
+    write_lines(path, lines);
+    string[9] mut argv = {"fort", "--std-dir", "sstd", "--fir-run", path, "--", "", "", ""};
+    u64 mut n = 6;
+    u64 mut i = 0;
+    while (i < args.len) {
+        argv[n] = args[i];
+        n += 1;
+        i += 1;
+    }
+    return run(argv[..n]);
+}
+
+// ---- the options ---------------------------------------------------------------------------
+
+// --fir-run sets its flag, and every argument after `--` goes to the program, an option too.
+fn fir_run_takes_the_arguments_after_the_separator() void {
+    string[8] mut argv = {"fort", "--fir-run", "main.ft", "--", "-o", "--check", "x", "--"};
+    driver.options mut opts = driver.options_create();
+    defer driver.options_free(&opts);
+    assert(driver.parse(&opts, argv[..]) == driver.PARSE_OK);
+    assert(opts.fir_run && opts.have_run_args && !opts.check && !opts.have_output);
+    assert(opts.entry == "main.ft");
+    assert(opts.run_args.len == 4);
+    assert(containers.str_at(&opts.run_args, 0) == "-o");
+    assert(containers.str_at(&opts.run_args, 1) == "--check");
+    assert(containers.str_at(&opts.run_args, 2) == "x");
+    assert(containers.str_at(&opts.run_args, 3) == "--");
+}
+
+// With no `--` the program has no argument of its own, and with `--` at the end it has none
+// either. The flag may follow the entry file.
+fn fir_run_without_arguments() void {
+    string[4] mut argv = {"fort", "main.ft", "--fir-run", "--"};
+    driver.options mut opts = driver.options_create();
+    defer driver.options_free(&opts);
+    assert(driver.parse(&opts, argv[..3]) == driver.PARSE_OK);
+    assert(opts.fir_run && !opts.have_run_args && opts.run_args.len == 0);
+    driver.options mut dashed = driver.options_create();
+    defer driver.options_free(&dashed);
+    assert(driver.parse(&dashed, argv[..]) == driver.PARSE_OK);
+    assert(dashed.fir_run && dashed.have_run_args && dashed.run_args.len == 0);
+}
+
+fn options() void {
+    fir_run_takes_the_arguments_after_the_separator();
+    fir_run_without_arguments();
+    println("options ok");
+}
+
+// ---- usage errors --------------------------------------------------------------------------
+
+u64 ALONE_COUNT = 12;
+
+// The modes and the build modes that --fir-run does not combine with: each other --fir option,
+// and the two options of a build mode, because the run keeps each check of the checked mode.
+string[ALONE_COUNT] ALONE = {"--tokens", "--ast", "--check", "--json", "--index", "--fir",
+                             "--fir-after=lower", "--fir-verify-report", "--fir-test",
+                             "--fir-stats", "--release", "--no-bounds-check"};
+
+// The two parts of the error of --fir-run beside another mode.
+string ALONE_HEAD = "--fir-run does not combine with --tokens, --ast, --check, --json, ";
+string ALONE_TAIL = "--index, --use, --release, --no-bounds-check or another --fir option";
+
+fn usage() void {
+    u64 mut i = 0;
+    while (i < ALONE_COUNT) {
+        string[4] mut argv = {"fort", "--fir-run", ALONE[i], "main.ft"};
+        assert(run(argv[..]) == EXIT_USAGE);
+        said_usage(ALONE_HEAD, ALONE_TAIL);
+        i += 1;
+    }
+    // --fir-run runs the closure from source, so it reads no library artifact
+    string[5] mut used = {"fort", "--fir-run", "--use", "std=lib.flib", "main.ft"};
+    assert(run(used[..]) == EXIT_USAGE);
+    said_usage(ALONE_HEAD, ALONE_TAIL);
+    // `--` belongs to --fir-run alone
+    string[4] mut dashes = {"fort", "main.ft", "--", "a"};
+    assert(run(dashes[..]) == EXIT_USAGE);
+    said_usage("-- requires --fir-run", "");
+    // a library build runs nothing
+    string[5] mut lib = {"fort", "--lib", "std", "root", "--fir-run"};
+    assert(run(lib[..]) == EXIT_USAGE);
+    assert(err_has("--lib does not combine with -I, -l, --check, --json, --index, --tokens"));
+    string[6] mut lib_args = {"fort", "--lib", "std", "root", "--", "a"};
+    assert(run(lib_args[..]) == EXIT_USAGE);
+    assert(err_has("--lib does not combine with"));
+    // the target rule of --check: any form that the compiler accepts, and no other
+    string[5] mut target = {"fort", "--fir-run", "--target", "riscv", "main.ft"};
+    assert(run(target[..]) == EXIT_USAGE);
+    assert(err_has("unsupported target 'riscv'"));
+    println("usage ok");
+}
+
+// ---- programs ------------------------------------------------------------------------------
+
+string[6] ARGS = {
+    "fn main(string@ args) i32 {",
+    "    for (string a : args) {",
+    "        println(a);",
+    "    }",
+    "    return 3;",
+    "}",
+};
+
+string[3] BIG = {"fn main() i32 {", "    return 300;", "}"};
+
+string[3] MINUS = {"fn main() i32 {", "    return -1;", "}"};
+
+string[5] EXITS = {"import std.libc;", "fn main() i32 {", "    println(1);", "    libc.exit(7);",
+                   "}"};
+
+string[3] WRONG = {"fn main() i32 {", "    return true;", "}"};
+
+fn programs() void {
+    write_std();
+    string[3] args = {"-o", "x y", ""};
+    assert(run_program("args.ft", ARGS[..], args[..]) == 3);
+    said("args.ft\n-o\nx y\n\n", "");
+    assert(run_program("args.ft", ARGS[..], args[..0]) == 3);
+    said("args.ft\n", "");
+    // the status of `main` & 0xFF (D11.6)
+    assert(run_program("big.ft", BIG[..], args[..0]) == 44);
+    assert(run_program("minus.ft", MINUS[..], args[..0]) == 255);
+    // `exit` ends the run at once, with its status
+    assert(run_program("exits.ft", EXITS[..], args[..0]) == 7);
+    said("1\n", "");
+    // a compile error stops before the run
+    assert(run_program("wrong.ft", WRONG[..], args[..0]) == EXIT_COMPILE_ERROR);
+    assert(err_has("wrong.ft:2:12: error:"));
+    println("programs ok");
+}
+
+// ---- the ends of a run ---------------------------------------------------------------------
+
+string[7] ASSERTS = {
+    "fn zero() i32 {",
+    "    return 0;",
+    "}",
+    "fn main() i32 {",
+    "    assert(zero() > 0);",
+    "    return 0;",
+    "}",
+};
+
+string[4] TRAPS = {"import std.libc;", "fn main() i32 {", "    libc.oracle_keep(null);", "}"};
+
+string[5] READS = {
+    "import std.libc;",
+    "fn main() i32 {",
+    "    u8[1] mut b = {};",
+    "    return cast(libc.read(0, &b[0], 1), i32);",
+    "}",
+};
+
+string[4] NULL_LOAD = {"fn main() i32 {", "    i32* p = null;", "    return *p;", "}"};
+
+fn ends() void {
+    string[1] none = {""};
+    // a failed check: the message of the runtime entry, then the status of SIGABRT
+    assert(run_program("asserts.ft", ASSERTS[..], none[..0]) == -6);
+    said("", "5:5: assert zero() > 0\n");
+    // a trap: the trap signal of the target, SIGILL on x86-64 and SIGTRAP on arm64
+    i32 trap = run_program("traps.ft", TRAPS[..], none[..0]);
+    if (str.starts_with(os.TARGET, "x86_64")) {
+        assert(trap == -4);
+    } else {
+        assert(trap == -5);
+    }
+    string[7] mut x86 = {"fort", "--std-dir", "sstd", "--fir-run", "--target",
+                         "x86_64-linux-gnu", "traps.ft"};
+    assert(run(x86[..]) == -4);
+    string[7] mut arm = {"fort", "--std-dir", "sstd", "--fir-run", "--target",
+                         "arm64-apple-macosx11.0.0", "traps.ft"};
+    assert(run(arm[..]) == -5);
+    said("", "");
+    // a function that the interpreter does not run
+    assert(run_program("reads.ft", READS[..], none[..0]) == EXIT_USAGE);
+    said("", "fort: error: the run calls 'read', which the interpreter does not run\n");
+    // an operation with no defined result
+    assert(run_program("null.ft", NULL_LOAD[..], none[..0]) == EXIT_USAGE);
+    said("", "fort: error: the run stops at null.ft:3:12: null dereference\n");
+    // process_status passes each status that is no signal
+    assert(driver.process_status(0) == 0);
+    assert(driver.process_status(44) == 44);
+    assert(driver.process_status(255) == 255);
+    println("ends ok");
+}
+
+// ---- the pass `run` of --fir-test -----------------------------------------------------------
+
+string[5] FIR_PRELUDE = {
+    "\x2F/! prelude:",
+    "\x2F/| fn main(string@ args) i32 {",
+    "\x2F/|     println(args.len);",
+    "\x2F/|     return 5;",
+    "\x2F/| }",
+};
+
+// A function of two parameters that returns the first when the second is true.
+string[13] PICK = {
+    "fn main.pick(_1: i32, _2: bool) -> i32 {",
+    "    bb0: {",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _0 = copy _1;",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        _0 = const i32 -1;",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[6] BYTE = {
+    "fn main.byte(_1: u8) -> u8 {",
+    "    bb0: {",
+    "        _0 = copy _1;",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[5] POINT = {
+    "fn main.point(_1: i32*) -> void {",
+    "    bb0: {",
+    "        return;",
+    "    }",
+    "}",
+};
+
+// Writes `t.fir`: the pass directive of each line of `passes`, the prelude, then `text`.
+fn write_fir_test(string@ passes, string@ text) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u64 mut i = 0;
+    while (i < passes.len) {
+        strbuf.append(&b, "\x2F/! pass: ");
+        strbuf.append(&b, passes[i]);
+        strbuf.push(&b, '\n');
+        i += 1;
+    }
+    run_env.join(&b, FIR_PRELUDE[..]);
+    run_env.join(&b, text);
+    write_file("t.fir", strbuf.view(&b));
+}
+
+fn pass_run() void {
+    string[5] mut argv = {"fort", "--std-dir", "sstd", "--fir-test", "t.fir"};
+    string[1] one = {"run main.pick 3 true"};
+    write_fir_test(one[..], PICK[..]);
+    assert(run(argv[..]) == EXIT_OK);
+    said("return i32 3\n", "");
+    // the report of each run takes the place of the module, in the order of the passes
+    string[3] three = {"verify", "run main.pick -2147483648 true", "run main.pick 7 false"};
+    write_fir_test(three[..], PICK[..]);
+    assert(run(argv[..]) == EXIT_OK);
+    said("return i32 -2147483648\nreturn i32 -1\n", "");
+    // with no function the pass runs the program, whose one argument is the path of the test
+    string[1] program = {"run"};
+    write_fir_test(program[..], PICK[..]);
+    assert(run(argv[..]) == EXIT_OK);
+    said("stdout \"1\\x0A\"\nexit 5\n", "");
+    // a test with no pass `run` writes the module
+    string[1] nothing = {"none"};
+    write_fir_test(nothing[..], PICK[..]);
+    assert(run(argv[..]) == EXIT_OK);
+    assert(out_has("fn main.pick("));
+    string[1] top = {"run main.byte 255"};
+    write_fir_test(top[..], BYTE[..]);
+    assert(run(argv[..]) == EXIT_OK);
+    said("return u8 255\n", "");
+    println("pass run ok");
+}
+
+u64 BAD_RUN_COUNT = 10;
+
+// The arguments of the pass `run` that it refuses, and what each one says. The program `main`
+// of the prelude takes a span, which no argument gives.
+string[BAD_RUN_COUNT] BAD_RUNS = {
+    "run main.nothing",
+    "run pick 3 true",
+    "run main.pick 3",
+    "run main.pick 3 true 9",
+    "run main.pick 2147483648 true",
+    "run main.pick -2147483649 true",
+    "run main.pick 3 yes",
+    "run main.pick x true",
+    "run main.pick 3 1",
+    "run main.main",
+};
+
+string[BAD_RUN_COUNT] BAD_RUN_SAYS = {
+    "fort: error: the pass 'run' names no function 'main.nothing'\n",
+    "fort: error: the pass 'run' names no function 'pick'\n",
+    "fort: error: invalid argument '' of the pass 'run'\n",
+    "fort: error: invalid argument '9' of the pass 'run'\n",
+    "fort: error: invalid argument '2147483648' of the pass 'run'\n",
+    "fort: error: invalid argument '-2147483649' of the pass 'run'\n",
+    "fort: error: invalid argument 'yes' of the pass 'run'\n",
+    "fort: error: invalid argument 'x' of the pass 'run'\n",
+    "fort: error: invalid argument '1' of the pass 'run'\n",
+    "fort: error: invalid argument '' of the pass 'run'\n",
+};
+
+// A pass `run` with an argument that it cannot use is an error of the harness: exit 2 before any
+// pass runs, and no text.
+fn pass_run_errors() void {
+    string[5] mut argv = {"fort", "--std-dir", "sstd", "--fir-test", "t.fir"};
+    u64 mut i = 0;
+    while (i < BAD_RUN_COUNT) {
+        string[1] pass = {BAD_RUNS[i]};
+        write_fir_test(pass[..], PICK[..]);
+        assert(run(argv[..]) == EXIT_USAGE);
+        said("", BAD_RUN_SAYS[i]);
+        i += 1;
+    }
+    // a parameter that is no integer and no `bool` takes no argument
+    string[1] point = {"run main.point 1"};
+    write_fir_test(point[..], POINT[..]);
+    assert(run(argv[..]) == EXIT_USAGE);
+    said("", "fort: error: invalid argument '1' of the pass 'run'\n");
+    // an unsigned parameter takes no sign, and nothing past its range
+    string[1] negative = {"run main.byte -1"};
+    write_fir_test(negative[..], BYTE[..]);
+    assert(run(argv[..]) == EXIT_USAGE);
+    said("", "fort: error: invalid argument '-1' of the pass 'run'\n");
+    string[1] wide = {"run main.byte 256"};
+    write_fir_test(wide[..], BYTE[..]);
+    assert(run(argv[..]) == EXIT_USAGE);
+    said("", "fort: error: invalid argument '256' of the pass 'run'\n");
+    println("pass run errors ok");
+}
+
+fn main() i32 {
+    options();
+    usage();
+    programs();
+    ends();
+    pass_run();
+    pass_run_errors();
+    return 0;
+}

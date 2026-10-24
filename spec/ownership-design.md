@@ -108,10 +108,21 @@ so each import has one reading (`notes/style.md` 3.1 rule 1).
 - A whole program. The run starts as the emitted `main` of `toolchain.md` 6 item 22 starts: it
   calls `std.rt.args_init`, then `args`, then the entry `main`, then `std.rt.flush_all`.
 - A FIR test function, with the arguments that the test gives. `alloc` and `del` are operations of
-  the interpreter. A `call extern` runs for the externs that `std.rt` reaches: `exit`, `write`,
-  `calloc`, `free`, `abort`, `isatty` and `strlen`. Three model externs serve the tests: one keeps
-  its pointer argument in a hidden slot, one calls its function-pointer argument once, and one
-  returns its pointer argument. Any other extern ends the run as `outside`, which is no oracle case.
+  the interpreter.
+- The externs of this list, and no others. A `call extern` of one of them runs, from `std.rt` or
+  from the program:
+  - `exit`, `write`, `calloc`, `free`, `abort`, `isatty` and `strlen`;
+  - `memcpy`, `memmove` and `memcmp`;
+  - `__errno_location` and `__error`, the errno accessors of Linux and of Darwin;
+  - `strtod` and `strtof`, each with a null end pointer;
+  - `snprintf` only with the arguments of `std.libc.snprintf_float`: a buffer, a size from 1 to
+    4096, the format `%.*e`, an `i32` precision and an `f64`.
+  Three model externs serve the tests: one keeps its pointer argument in a hidden slot, one calls
+  its function-pointer argument once with the other arguments, up to the parameters of that
+  function, and one returns its pointer argument. Any other extern, and
+  a call of a listed extern in another form, ends the run as `outside`, which is no oracle case.
+  When the oracle keeps the output of a run, a `write` to a descriptor other than 1 and 2 also
+  ends the run as `outside`.
 - A call of `exit` ends the run at once, with no `leak at exit` test. That test runs only when the
   entry `main` returns.
 - The memory: a 64-bit address space that the interpreter never reuses. Each global, frame local
@@ -184,9 +195,9 @@ that no rule covers is counted apart, and it is no false accept:
 ### 3.5 The tests of the oracle
 
 - The run corpus: each program of `test/lang/run` and `test/lang/programs` whose externs are in
-  the list of 3.2. The oracle gives the output, the exit status and the runtime error that the test
-  expects. The test counts the programs that run, those that are `outside` and the differences,
-  which must be 0. It runs in 120 s or less in CI (estimated).
+  the list of 3.2, in the forms of that list. The oracle gives the output, the exit status and
+  the runtime error that the test expects. The test counts the programs that run, those that are
+  `outside` and the differences, which must be 0. It runs in 120 s or less in CI (estimated).
 - Each event has tests at its boundaries: the ends of an allocation and a span of length 0. Other
   tests cover a `del` of `null` and of an interior pointer, and a cycle of two owners. More tests
   cover a tag through a cast to `u64` and back, and a kept frame tag.

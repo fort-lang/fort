@@ -708,6 +708,60 @@ came here.
   reference. Without it, `tools/vm build debug fort` exits 1 at the step that builds HEAD with the
   pin: clang refuses the module with `error: use of undefined value '@std.rt.fail_overwrite'`.
   Remove the function when a pin moves past the static error.
+- **The FIR interpreter runs the FIR of a closure before the emptiness pass**
+  (`spec/ownership-design.md` 3, `src/fort/fir/interpreter.ft`). It is the reference semantics of
+  the ownership checks, and `--fir-run` and the pass `run` of `--fir-test` start it
+  (`toolchain.md` 1). It runs FIR as the lowering makes it, so each check of the checked mode is
+  there and `check(overwrite: p)` continues. The rules a change to it must keep:
+  - The address space has regions: each global, data constant, function, frame and allocation
+    takes a new range above `FIRST_ADDRESS` (65536), and no address comes twice. A frame region
+    holds each local of one call at the offset of its type. A load or a store finds its live
+    region, so a pointer is an address and `cast` to `u64` keeps it (D3.14); an access below
+    `FIRST_ADDRESS` is the fault `null dereference`, and one outside each live region is
+    `invalid access`. A constant and the bytes of a string constant are read-only (D7.10). The
+    bytes are little-endian and the layout is that of `types.type_layout_struct`.
+  - The order is the order of the translator (`spec/fir.md` 6, 7, 12.5): the operands in order,
+    a `move` zeroes its place after its read, an aggregate reads each member before its first
+    store, and the address of a destination comes after the right side. A positional `aggregate`
+    writes each member and keeps the padding of its destination; `aggregate zeroed` zeroes it.
+  - A call reads each argument before it pushes the new frame, so a fault in an argument names
+    the call and not the callee. It copies each argument into the parameters of the frame, the
+    caller-made copy of `toolchain.md` 6 item 7, and the result goes from the `_0` of the callee
+    to the destination after the callee ends. The frames stand on an explicit stack whose limit
+    is 8 MiB (`STACK_LIMIT`), and a push past the limit is a fault. Each frame counts 16 bytes
+    (`FRAME_BYTES`) and none of its locals: the `-O1` of a checked build keeps in a register
+    each local that has no address, so a native frame is often 16 bytes, the least frame of a
+    call on both targets. `r(n - 1) + 1` takes 16 bytes a frame natively and completes at
+    depth 522,931; a count of the 56 bytes of its FIR locals stopped the run at depth 116,506,
+    and a count of its two allocas would stop it at 262,144. The limit is approximate in the
+    other direction: a native frame that holds an array or a spill is larger, so a deep
+    recursion of such frames ends natively by SIGSEGV and here runs on, and a call that the
+    native build inlines or turns into a jump takes no native frame. A fort function that no
+    module of the run holds is lowered when the run calls it first, and the verifier tests it
+    then.
+  - A load gives the bits of a value as native code gives them. An integer narrower than 64 bits
+    is zero-extended, and a `bool` keeps only its low bit, because `toolchain.md` 6 item 2 loads
+    an `i8` and truncates it to `i1`. A bound of `slice_ptr` becomes 64 bits by its own
+    signedness, as `fir_llvm.bound_value` makes it.
+  - A failed check calls the runtime entry of its kind with its reported operands and the file, the
+    line and the column of its terminator, `alloc<T>(n)` calls `std.rt.alloc` with the location of
+    its statement, and `del` calls `std.rt.free` and then zeroes its place (`spec/fir.md` 12.2,
+    12.4). So the message of a runtime error is the message of `std.rt`, byte for byte.
+  - An extern of the list of `spec/ownership-design.md` 3.2 runs in `call_model`, from `std.rt` or
+    from the program: `exit`, `abort`, `write`, `calloc`, `free`, `isatty`, `strlen`, `memcpy`,
+    `memmove`, `memcmp`, `__errno_location`, `__error`, `strtod` and `strtof` with a null end
+    pointer, and `snprintf` with the one form of `std.libc.snprintf_float`. The model externs
+    `oracle_keep`, `oracle_pass` and `oracle_call` serve the tests. Each other extern, each other
+    form, and each function with no body, ends the run as `outside`. A `calloc` that the C
+    library of the compiler refuses gives the program null, as a native `calloc` does. The errno
+    of the compiler goes to the errno of the run only after a call that sets it.
+  - Each `shadow:` comment marks a point where the shadow state of `spec/ownership-design.md` 3.3
+    observes the run: a load, a store, a `move`, a `del`, `live`, `dead`, a new frame, a return and
+    the end of a region. The interpreter keeps the entry of a region that ended until 4096 of them
+    have ended (`COMPACT_FLOOR`), so the shadow state must keep the ranges it needs itself.
+  What it cannot see: a program whose native build has undefined behavior (D10.7) runs another
+  way or ends in a fault, and a value that depends on an address, such as `print_ptr`, differs
+  from the native one.
 - **The translator gives each local its storage in one scan, before it writes text** (T-249).
   `fir_llvm.classify` reads the blocks in number order. A scalar temporary is a register when
   one statement assigns it whole and every read has the statement index of that statement. Two

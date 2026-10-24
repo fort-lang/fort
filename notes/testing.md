@@ -27,15 +27,15 @@ bullet at a time and without a rewrite.
   server's tests, `lsp-modules` (`test/lsp`) and `lsp-binary`, so a CI job runs them apart from
   the compiler's (T-264). Unit:
   `test/fort` (`fort-modules-1-of-2` and `fort-modules-2-of-2`, and `fort-modules-shards`, which
-  holds the parts against the whole list), `test/lsp` (`lsp-modules`), `test/fir` (`fir`),
-  `long-imports` (`tools/long_imports.py --check`, which fails on a short import of a compiler
-  module), `long_imports_selftest` and `lang_harness_selftest` (the tool and the `--use` and
-  `--cache-dir` options of `run_tests.py`), `highlight_selftest`, `extension_selftest`,
-  `panic_coverage`, `panic_coverage_selftest` and one `mutation_anchors_<table>` test for each table
-  in `tools/mutations`, and the three `mutate_` tests of `--check` over the fixture
-  `test/mutate/strict_table.json`;
-  the 71 bootstrap0 C suites. Integration: the corpus (`lang`, `lang-json`), `library-interface`,
-  `library-artifact`, `library-use`, `library-cache`, `fixpoint`, `tty`,
+  holds the parts against the whole list), `test/lsp` (`lsp-modules`), `test/fir` (`fir` and
+  `fir-run-tests`), `long-imports` (`tools/long_imports.py --check`, which fails on a short
+  import of a compiler module), `long_imports_selftest` and `lang_harness_selftest` (the tool
+  and the `--use` and `--cache-dir` options of `run_tests.py`), `highlight_selftest`,
+  `extension_selftest`, `panic_coverage`, `panic_coverage_selftest` and one
+  `mutation_anchors_<table>` test for each table in `tools/mutations`, and the three `mutate_`
+  tests of `--check` over the fixture `test/mutate/strict_table.json`;
+  the 71 bootstrap0 C suites. Integration: the corpus (`lang`, `lang-json`), `fir-run`,
+  `library-interface`, `library-artifact`, `library-use`, `library-cache`, `fixpoint`, `tty`,
   `stack_depth` and `lsp-binary`; bootstrap0 has none, since building bootstrap-1 proves the C
   compiler. The label `libraries` holds `library-compiler` and `fort-modules-libraries`, which
   carry no step label, so `unit` and `integration` leave them out; the CI job `libraries` runs them
@@ -558,6 +558,37 @@ bullet at a time and without a rewrite.
   `green` and `green_func` accept a flow violation, and `flow_green` accepts none. A green `.fir`
   file keeps every rule, because the pass `verify` runs them all. `//! panic:` matches a
   substring, so a red file whose text passes 100 columns drops the prefix `fir.verify: ` (T-233).
+  **The pass `run` writes a report in place of the module** (`test/fir/run/`, `spec/fir.md`
+  16.3): what the run wrote to the descriptors 1 and 2, then one line for its end. The tests run
+  with the real `--std-dir`, so a failed check writes the message of `std.rt`. `run_tests.py
+  --run` (ctest `fir-run-tests`) runs each function of each test under the pass `run` in place of
+  the passes of the test, with 0 for each integer and `false` for each `bool`, and counts the
+  ends. A function whose parameter takes no such value, a run past 10 s and a test that expects a
+  panic or a diagnostic cannot run, and the harness counts each with its reason; it fails only
+  when the compiler fails. It found two defects before its first commit: a read of a `void`
+  local and the loop of `green_constant_pruned`, which never ends, also natively.
+- **The run corpus holds fir.interpreter against the native checked build** (ctest `fir-run`,
+  `spec/ownership-design.md` 3.5). `test/fir_run_test.py` runs each program of `test/lang/run` and
+  `test/lang/programs` under `fort --fir-run` with its flags, without `--release` and
+  `--no-bounds-check`, its arguments after `--` and its stdin. A program whose stderr holds `the
+  run calls '<name>', which the interpreter does not run` is `outside`. Each other program is
+  built in the checked mode with the same flags and run with the same input, and the two must give
+  the same stdout, stderr and status. The script prints the three counts, the count of the outside
+  programs for each function, and its time; the ticket log holds the measured numbers. A program
+  of the corpus that prints an address cannot pass, so the corpus holds none.
+- **The suites of fir.interpreter derive each expected value apart from the interpreter**
+  (`test/fort/fir/interpreter_test.ft`, `interpreter_source_test.ft`). Python's integers and IEEE
+  doubles gave each value at each boundary of each type when the cases were written: the wrap at
+  the width, the sign of `div`, `rem` and `shr`, the overflow tests, the saturation of a float to
+  an integer, and the rounding of a 64-bit integer to `f32`. No case makes a NaN: its bits differ
+  between x86-64 and arm64. `support/run_env.ft` gives the sandbox a runtime whose failed check
+  writes `<line>:<col>: <kind>` and its operands with no path, and a `std.libc` with the externs
+  that the interpreter runs; `run_in` runs one function of a parsed module, and `stack_limit`
+  lowers the stack limit in bytes for one run. A `bool` argument of `run_in` goes into its
+  parameter as a whole byte, so a case can give the byte 2 or 3 and test the low bit of each
+  load. A program of these suites runs in the process of the test, so a case that a `--fir-run`
+  process ends by a signal stands in `driver_abort_status_test.ft` and
+  `driver_trap_status_test.ft`.
 - **A test of the FIR lowering compares a whole function, and derives it before the run**
   (T-236). `test/fort/support/lower_env.ft` checks a source in a sandbox whose `std/rt.ft`
   declares the eleven entries of the check kinds and `str_eq`, lowers one function, runs

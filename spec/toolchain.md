@@ -42,6 +42,8 @@ file: `fort [options] --lib <name> <root>`.
 | `--fir-test`        | run the passes of a FIR test and write the FIR (D14.1)     | off        |
 | `--fir-verify-report` | write the first FIR violation of each function; stop (D14.1) | off   |
 | `--fir-stats`       | after the build, write `lowered N of M` (D14.1)            | off        |
+| `--fir-run`         | run the program's FIR with the interpreter (D14.1)         | off        |
+| `--`                | the arguments after it go to the program of `--fir-run`    | none       |
 | `--lib <name> <root>` | build the library `<name>` from `<root>` (D9.11)           | off        |
 | `--use <name>=<path>` | use the library artifact `<path>`; repeatable (D9.11)      | none       |
 | `--emit-interface`  | write the interface file of `--lib` and stop (D9.11)       | off        |
@@ -202,10 +204,37 @@ file: `fort [options] --lib <name> <root>`.
   reports nothing here. It then runs the build-mode pass with that proof, so an overwrite check
   that the emptiness pass does not prove stays. It does not run the verifier. Its arguments
   `--release` and `--no-bounds-check` select the mode, and with no argument it runs the default
-  mode. The compiler reads every directive before it runs a pass. An unknown pass, an argument of
-  `none` or `verify`, and an argument of `build-mode` that is no mode exit 2. `--fir-test` takes
+  mode. The pass `run` runs the module with the interpreter of `spec/fir.md` 11 and captures what
+  it writes to the descriptors 1 and 2. With no argument it runs the program `main.main` as
+  `--fir-run` does, with the path of the test as its one argument. Its arguments can also name a
+  function, as `main.f`, and a value for each parameter of it: a decimal integer that fits an
+  integer type, or `true` or `false` for a `bool`. When a test names the pass `run`, the
+  compiler writes the report of each run in place of the module (`spec/fir.md` 16.3). The
+  compiler reads every directive before it runs a pass. An unknown pass, an argument of
+  `none` or `verify`, an argument of `build-mode` that is no mode, and arguments of `run` that
+  name no function or give no value that fits each parameter exit 2. `--fir-test` takes
   the target rule of `--check` and is a usage error together with `--tokens`, `--ast`, `--check`,
   `--json`, `--index`, `--fir` or `--fir-after`.
+- `--fir-run` runs steps 0 to 3 of section 2 over the closure of a program, and then runs its FIR
+  with the interpreter of `spec/fir.md` 11 in place of steps 4 to 6 (D14.1). The run starts as the
+  `main` of section 6 item 22 starts: `std.rt.args_init` with the arguments, `std.rt.args`, the
+  entry `main` and `std.rt.flush_all`. The arguments are the entry file, as the compiler was given
+  it, then each argument after `--`. Each function goes through the lowering and the verifier, and
+  no emptiness pass and no build-mode pass runs, so the run has each check of the checked mode and
+  a `check(overwrite: p)` continues (`spec/ownership-design.md` 3.2). The program writes to the
+  descriptors of the compiler, and the run ends as the checked build of the program ends: with the
+  exit status of the program, or by SIGABRT after an abort and by the trap signal of the target
+  after a trap, SIGILL for `x86_64-linux-gnu` and SIGTRAP for `arm64-apple-macosxM.m.p`. A call
+  of a function that the interpreter does not run is the error `the run calls '<name>', which the
+  interpreter does not run`, and an operation with no defined result, such as a null dereference,
+  is the error `the run stops at <file>:<line>:<col>: <what>`; each exits with 2. A compile error
+  of the closure exits with 1 before the run. `--fir-run` writes no file and runs no `--cc`, so
+  `-o`, `-S`, `-c`, `-l`, `--cc` and `-Xcc` are unused. It takes the target rule of `--check`. It
+  is a usage error together with `--tokens`, `--ast`, `--check`, `--json`, `--index`, `--use`,
+  `--fir`, `--fir-after`, `--fir-verify-report`, `--fir-test` or `--fir-stats`, and with `--lib`
+  as `--lib` says. It is also a usage error together with `--release` or `--no-bounds-check`,
+  because the run keeps each check of the checked mode. `--` ends the options: each argument
+  after it, an option too, goes to the program, and `--` is a usage error without `--fir-run`.
 - `--fir-verify-report` implies `--fir` and takes its target rule. It lowers each function of
   the closure as `--fir` does and runs the verifier of `spec/fir.md` 10 in report mode, first on
   the output of the lowering and then, when the function keeps every rule, on the output of the
@@ -253,7 +282,7 @@ file: `fort [options] --lib <name> <root>`.
   argument. The default output is the artifact directory `<name>.flib` in the current directory;
   with `-c` it is `<name>.o` and with `-S` `<name>.ll`. `--lib` is a usage error together with
   `-I`, `-l`, `--check`, `--json`, `--index`, `--tokens`, `--ast`, `--fir`, `--fir-after`,
-  `--fir-test`, `--fir-verify-report` or `--fir-stats`. `--std-dir` is unused.
+  `--fir-test`, `--fir-verify-report`, `--fir-stats`, `--fir-run` or `--`. `--std-dir` is unused.
 - `--use <name>=<path>` names the artifact directory `<path>` of a built library. The argument
   splits at its first `=`. `<name>` must be a segment and `<path>` must not be empty. Two `--use`
   options of one name, or a `--use` of the `--lib` name, are a usage error. A build with `--use`
@@ -289,13 +318,16 @@ Exit status (D14.1):
 | 1      | at least one compile error was reported (section 4)                              |
 | 2      | usage error, unreadable entry file, internal error, or failure of `--cc`         |
 
+A run of `--fir-run` that the program ends exits as the program ends instead: with the status of
+the program, or by the signal of an abort or a trap.
+
 Usage errors, internal errors and failures of `--cc` are reported as `fort: error: <message>`
 on stderr, for example `fort: error: cannot read 'x.ft': No such file or directory` or
 `fort: error: cc failed with status 1`. `fort` with no arguments prints one usage line and exits
 with 2; `--help` prints that line and then the table above, and exits 0.
 
 These are all the `fort: error: <message>` texts. Each exits with status 2 (D14.1).
-Twenty report a command line the compiler cannot use and then print the usage line:
+Twenty-two report a command line the compiler cannot use and then print the usage line:
 `missing argument for option '<opt>'`, `unexpected argument '<arg>'` (a second entry file),
 `unknown option '<opt>'`, `no entry file`, `--json requires --check` (D20.2),
 `--tokens does not combine with --check, --json or --index`,
@@ -304,6 +336,9 @@ Twenty report a command line the compiler cannot use and then print the usage li
 `unknown --fir-after pass '<name>'`,
 `--fir-test does not combine with --tokens, --ast, --check, --json, --index or --fir`,
 `--fir-stats does not combine with --tokens, --ast, --check, --index, --fir or --fir-test`,
+`--fir-run does not combine with --tokens, --ast, --check, --json, --index, --use, --release,
+--no-bounds-check or another --fir option`,
+`-- requires --fir-run`,
 `invalid --cfg assignment '<entry>'`, `invalid --cfg key '<key>'`, `empty --cfg list entry`,
 `duplicate --cfg key '<key>'`, and `cannot override compiler configuration key '<key>'`,
 `unsupported target '<triple>'`, `--std-dir is required for cross-target -S`,
@@ -316,9 +351,12 @@ failed, with the system's error text as `<reason>`: `cannot read '<file>': <reas
 file), `cannot write '<file>': <reason>` (the LLVM IR module), `cannot create a temporary directory
 in '<dir>': <reason>` (`mkdtemp` under `$TMPDIR`) and `cannot run '<cc>': <reason>` (`--cc` could
 not be started). Two report the outcome of `--cc`: `cc failed with status <n>` and `cc failed with
-signal <n>`. Four report a FIR test that `--fir-test` cannot run: `the .fir test has no '//!
-pass:' directive`, `unknown pass '<name>'`, `the pass '<name>' takes no argument` and `unknown
-build mode '<argument>'`. The last two are the compiler's own failures: `internal error: <what>`
+signal <n>`. Six report a FIR test that `--fir-test` cannot run: `the .fir test has no '//!
+pass:' directive`, `unknown pass '<name>'`, `the pass '<name>' takes no argument`, `unknown
+build mode '<argument>'`, `the pass 'run' names no function '<name>'` and `invalid argument
+'<argument>' of the pass 'run'`. Two report a run of `--fir-run` that does not end as a program
+ends: `the run calls '<name>', which the interpreter does not run` and `the run stops at
+<file>:<line>:<col>: <what>`. The last two are the compiler's own failures: `internal error: <what>`
 and `out of memory`.
 
 A library build (D9.11) adds two groups of texts, each with status 2. Nine report a command line
@@ -363,6 +401,7 @@ fort --check --json main.ft                   # one JSON document on stdout, for
 fort --index main.ft                          # the same document with the identifier index
 fort --tokens main.ft                         # one line per token of that file, nothing else
 fort --fir main.ft                            # the FIR of the program, nothing else
+fort --fir-run main.ft -- a b                 # run the FIR of the program with the arguments a b
 FORT_STD_DIR=/opt/fort/std fort main.ft
 fort --lib std build/std                      # build std.flib from a standard root
 fort --lib geom lib/geom --use std=std.flib   # build geom.flib against std.flib

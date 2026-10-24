@@ -966,12 +966,41 @@ changes the function, and the verifier runs after it. The passes run in this ord
 FIR changes at two points of this order, and `--fir-after=<pass>` (D14.1) names them: `lower`
 is the output of the lowering (section 9), and `build-mode` is the output of step 4.
 
-Two passes can come later and need no change to FIR: a **check elimination** pass that proves a
-`check` false and replaces it by `goto`, such as the bounds check of `a[i]` inside
-`for (i = 0; i < 4; i++)`; and an **interpreter** that runs FIR at compile time, for the
-compile-time function evaluation D15 defers and as a second oracle beside the compiled binary.
-Check elimination runs after the build-mode pass, because a fact learned on the continuation edge
-of a check holds only in the modes that keep that check (section 14).
+A **check elimination** pass can come later and needs no change to FIR: it proves a `check`
+false and replaces it by `goto`, such as the bounds check of `a[i]` inside
+`for (i = 0; i < 4; i++)`. It runs after the build-mode pass, because a fact learned on the
+continuation edge of a check holds only in the modes that keep that check (section 14).
+
+The **interpreter** `fir.interpreter` (`src/fort/fir/interpreter.ft`) runs FIR and changes none
+of it. It is the reference semantics of the ownership checks (`spec/ownership-design.md` 3), and
+it can serve the compile-time function evaluation that D15 defers. It runs each function as the
+lowering makes it, after the verifier and before the emptiness pass, so it runs each check of the
+checked mode, and a `check(overwrite: p)` continues. It runs each function as the translator
+writes it (section 12), and it starts a program as `toolchain.md` 6 item 22 starts it:
+- Each global, data constant, function, frame and allocation takes a new range of a 64-bit
+  address space, and no address comes twice. A pointer is an address, so `cast<u64>` keeps it.
+  A place has the layout and the little-endian bytes of the target.
+- The operands of an rvalue are read in order, a `move` zeroes its place after its read, and the
+  address of the destination comes after the right side (sections 6 and 7, 12.5).
+- A failed check calls the runtime entry of its kind with its reported operands and the file, the
+  line and the column of the check (12.4). `alloc` calls `std.rt.alloc` and `del` calls
+  `std.rt.free` (12.2).
+- A call of an extern of the list of `spec/ownership-design.md` 3.2 runs, from `std.rt` or from
+  the program: `exit`, `abort`, `write`, `calloc`, `free`, `isatty`, `strlen`, `memcpy`,
+  `memmove`, `memcmp`, `__errno_location`, `__error`, `strtod` and `strtof` with a null end
+  pointer, and `snprintf` only with the arguments of `std.libc.snprintf_float`. Three model
+  externs serve the tests: `oracle_keep(void* p) void` keeps `p` in a slot of the run,
+  `oracle_pass(void* p) void*` returns `p`, and `oracle_call(f, a...)` calls `f` with the other
+  arguments, up to the parameters of `f`, and returns its result. A call of any other extern, a
+  call of a listed extern in another form, and a call of a function with no body end the run as
+  `outside`. When the run keeps the output of the program, a `write` to a descriptor other than
+  1 and 2 also ends the run as `outside`.
+- A run ends with the return of the function that it runs, an `exit`, an `abort`, a `trap`, an
+  `outside`, or a fault: an operation with no defined result, such as a load through null or
+  outside each live range.
+
+`fort --fir-run` runs a program with it, and the pass `run` of a FIR test runs a function or a
+program (`toolchain.md` 1, 16.3).
 
 ## 12. Translation to LLVM
 
@@ -1357,9 +1386,9 @@ translator and the analyses:
 
 - **Linear ownership and definite assignment**: an analysis over `move`, `dead` and the
   places. No change to the core.
-- **Compile-time function evaluation**: the interpreter of section 11. The checker must then
-  lower and run a function while it checks another one, so the pipeline of section 3 changes to
-  lower on demand. No change to the core.
+- **Compile-time function evaluation**: the interpreter of section 11, which lowers a function
+  when it first calls it. The checker must then run a function while it checks another one, so
+  the pipeline of section 3 changes to lower on demand. No change to the core.
 - **Tagged unions and `Result`**: the checker, and a lowering to `switch` on the tag. One
   projection: the variant.
 - **Closures and nested functions**: a lowering to a struct of captures and a function pointer.
@@ -1410,7 +1439,13 @@ below are the record of how it ran.
    gives the types and the symbols that the text names; `fort --fir-test` checks it as the
    module `main` (D14.1). The harness parses the input, runs the pass,
    prints the result and compares. The verifier's rules, the build-mode pass and each analysis
-   get their tests in this form, one file for each rule or each rewrite.
+   get their tests in this form, one file for each rule or each rewrite. The pass `run` runs the
+   module with the interpreter of section 11 and writes a report in place of the module: a line
+   `stdout "..."` and a line `stderr "..."` for the bytes that the run wrote to the descriptors 1
+   and 2, quoted as section 13 quotes a string, then one line for its end: `return` with the
+   type and the value of a scalar result (`true` or `false`, a decimal integer or address, or the
+   binary64 pattern of a float), `exit <status>`, `abort`, `trap at <line>:<col>`,
+   `outside <name>`, or `fault <what> at <line>:<col>`.
 4. **The gen suites.** The suites `test/fort/gen_*_test.ft` hold emitted text. A suite that tests
    one construct moves to FIR when the lowering supports that construct. Its assertions then read
    the FIR text for meaning and the translated text for the ABI.
