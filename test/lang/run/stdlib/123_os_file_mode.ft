@@ -1,0 +1,55 @@
+//! run
+//! stdout:
+//| true
+//| true true
+//| true true
+//| true true
+//| true true
+//| -1 true
+import std.io;
+import std.libc;
+import std.os;
+import std.str;
+import std.sys;
+
+// os.open_nonblocking and os.file_mode give the type of a file without a read (stdlib.md 2.14):
+// a regular file, a directory, a character device and a FIFO, whose open does not wait for a
+// writer. A path that does not exist gives -1 and ENOENT.
+u32 S_IFMT = 0o170000;
+u32 S_IFREG = 0o100000;
+u32 S_IFDIR = 0o040000;
+u32 S_IFCHR = 0o020000;
+u32 S_IFIFO = 0o010000;
+
+// mkfifo(3), whose mode_t is a u32 on Linux and a u16 on Mac (D9.8).
+$if ($cfg(target_os) == "linux") {
+    extern fn mkfifo(char* path, u32 mode) i32;
+} else {
+    extern fn mkfifo(char* path, u16 mode) i32;
+}
+
+// Whether the type of `path` reads, with its type bits in *kind.
+fn type_of(string path, u32 mut* kind) bool {
+    i32 fd = os.open_nonblocking(path);
+    if (fd < 0) {
+        return false;
+    }
+    u32 mut mode = 0;
+    bool ok = os.file_mode(fd, &mode);
+    libc.close(fd);
+    *kind = mode & S_IFMT;
+    return ok;
+}
+
+fn main() i32 {
+    println(io.write_file("t-mode.txt", cast("x", u8@)));
+    u32 mut kind = 0;
+    println(type_of("t-mode.txt", &kind), " ", kind == S_IFREG);
+    println(type_of(".", &kind), " ", kind == S_IFDIR);
+    println(type_of("/dev/null", &kind), " ", kind == S_IFCHR);
+    char mut@ own fifo = str.to_cstr("t-mode.fifo");
+    defer del(fifo);
+    println(mkfifo(fifo.ptr, 0o600) == 0 && type_of("t-mode.fifo", &kind), " ", kind == S_IFIFO);
+    println(os.open_nonblocking("t-mode-missing.txt"), " ", sys.errno() == libc.ENOENT);
+    return 0;
+}

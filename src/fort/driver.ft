@@ -19,6 +19,7 @@ import index;
 import json;
 import lexer;
 import library.artifact;
+import library.graph;
 import library.interface;
 import library.tree;
 import modules;
@@ -31,6 +32,7 @@ import std.os;
 import std.str;
 import std.strbuf;
 import std.sys;
+import std.vec;
 import types;
 
 // prim, consts, and types belong to the checker. These imports put them inside
@@ -134,6 +136,8 @@ struct options {
     bool emit_interface; // --emit-interface: the interface file of --lib on stdout
     bool have_ar; // --ar was given, which only --lib takes
     string ar; // --ar, the archiver that writes `lib.a`
+    containers.str_vec use_names; // the name of each --use, in command-line order
+    containers.str_vec use_paths; // the artifact of each --use, at the matching position
     containers.str_vec includes; // -I roots, searched in command-line order
     containers.str_vec libs;     // -l<lib> as given, passed to the linker in order
     containers.str_vec cc_args;  // -Xcc arguments, passed verbatim after the rest
@@ -155,6 +159,8 @@ fn options_free(options mut* opts) void {
     containers.str_free(&opts->cc_args);
     containers.str_free(&opts->cfg_keys);
     containers.str_free(&opts->cfg_values);
+    containers.str_free(&opts->use_names);
+    containers.str_free(&opts->use_paths);
 }
 
 // What --help prints after the usage line: the option table.
@@ -188,6 +194,8 @@ fn help() void {
     println("  --fir-stats        after the build, write `lowered N of M` functions");
     println("  --lib <name> <root>");
     println("                     build the library <name> from the directory <root>");
+    println("  --use <name>=<path>");
+    println("                     use the library artifact <path> as <name>; repeatable");
     println("  --emit-interface   write the interface file of --lib to stdout and stop");
     println("  --ar <path>        the archiver that writes the lib.a of --lib (default ",
             DEFAULT_AR, ")");
@@ -380,8 +388,9 @@ fn parse_valued(options mut* opts, string@ args, u64 mut* i, bool mut* ok) bool 
     bool is_cfg = arg == "--cfg";
     bool is_cc_arg = arg == "-Xcc";
     bool is_ar = arg == "--ar";
+    bool is_use = arg == "--use";
     if (!is_output && !is_include && !is_std_dir && !is_cc && !is_target && !is_cfg
-        && !is_cc_arg && !is_ar) {
+        && !is_cc_arg && !is_ar && !is_use) {
         return false;
     }
     string mut value = "";
@@ -408,9 +417,45 @@ fn parse_valued(options mut* opts, string@ args, u64 mut* i, bool mut* ok) bool 
     } else if (is_ar) {
         opts->have_ar = true;
         opts->ar = value;
+    } else if (is_use) {
+        if (!parse_use(opts, value)) {
+            *ok = false;
+        }
     } else {
         containers.str_push(&opts->cc_args, value);
     }
+    return true;
+}
+
+// Whether `v` holds `text`: a --use of a name, or a file of the check document.
+fn has_string(containers.str_vec* v, string text) bool {
+    u64 mut i = 0;
+    while (i < v->len) {
+        if (containers.str_at(v, i) == text) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+// Parses the argument of one `--use`, `<name>=<path>`, which splits at its first `=`: the name
+// must be a segment and the path must not be empty (toolchain.md 1). A second --use of one name
+// is a usage error.
+fn parse_use(options mut* opts, string value) bool {
+    i64 equal = str.index_of(value, '=');
+    if (equal < 0 || !tree.is_segment(value[..cast(equal, u64)])
+        || cast(equal, u64) + 1 == value.len) {
+        usage_error_arg("invalid --use argument", value);
+        return false;
+    }
+    string name = value[..cast(equal, u64)];
+    if (has_string(&opts->use_names, name)) {
+        usage_error_arg("duplicate library", name);
+        return false;
+    }
+    containers.str_push(&opts->use_names, name);
+    containers.str_push(&opts->use_paths, value[cast(equal, u64) + 1..]);
     return true;
 }
 
@@ -516,12 +561,20 @@ fn parse(options mut* opts, string@ args) i32 {
         usage_error("--json requires --check");
         return PARSE_ERROR;
     }
+    if (opts->use_names.len > 0 && !opts->tokens && !opts->ast
+        && !has_string(&opts->use_names, modules.STD_SEGMENT)) {
+        // every closure holds std.rt, and only the library std holds it (D9.10, D9.11)
+        usage_error(NEEDS_STD);
+        return PARSE_ERROR;
+    }
     return PARSE_OK;
 }
 
+// The usage error of a library build that names no library std.
+string NEEDS_STD = "a library build needs --use std=<path>";
+
 // The rules of a library build on the command line (toolchain.md 1, D9.11). A `--lib` build takes
-// no entry file. Only `--lib std` builds without `--use std=<path>`, which this compiler does not
-// read yet, so every other library is that usage error.
+// no entry file, and only `--lib std` builds without `--use std=<path>`.
 fn check_library_options(options* opts) i32 {
     if (!opts->have_lib && opts->emit_interface) {
         usage_error("--emit-interface requires --lib");
@@ -539,6 +592,11 @@ fn check_library_options(options* opts) i32 {
         usage_error_arg("invalid library name", opts->lib_name);
         return PARSE_ERROR;
     }
+    if (has_string(&opts->use_names, opts->lib_name)) {
+        // a library does not use itself
+        usage_error_arg("duplicate library", opts->lib_name);
+        return PARSE_ERROR;
+    }
     if (opts->includes.len > 0 || opts->libs.len > 0 || opts->check || opts->json || opts->index
         || opts->tokens || opts->ast || opts->fir || opts->fir_test || opts->fir_stats) {
         eprintln("fort: error: ", LIB_ALONE_HEAD, LIB_ALONE_TAIL);
@@ -550,8 +608,9 @@ fn check_library_options(options* opts) i32 {
         usage_error("--emit-interface does not combine with -S, -c or -o");
         return PARSE_ERROR;
     }
-    if (opts->lib_name != modules.STD_SEGMENT) {
-        usage_error("a library build needs --use std=<path>");
+    if (opts->lib_name != modules.STD_SEGMENT
+        && !has_string(&opts->use_names, modules.STD_SEGMENT)) {
+        usage_error(NEEDS_STD);
         return PARSE_ERROR;
     }
     return PARSE_OK;
@@ -637,7 +696,8 @@ fn target_allowed(options* opts) bool {
         return true;
     }
     if (opts->emit_ir) {
-        if (opts->have_std_dir) {
+        // a library build reads its standard modules from the used library std
+        if (opts->have_std_dir || opts->use_names.len > 0) {
             return true;
         }
         usage_error("--std-dir is required for cross-target -S");
@@ -1113,6 +1173,201 @@ fn run_tool(string role, containers.str_vec* argv) i32 {
     return EXIT_OK;
 }
 
+// ---- the used libraries -----------------------------------------------
+
+/// The used libraries of a build, read once and checked (toolchain.md 2.1, step 1): the contents
+/// of each artifact in command-line order, the path of its interface file, and the link order. A
+/// zero value holds no library.
+struct libraries {
+    artifact.contents mut@ own items; // in command-line order
+    u64 len;
+    containers.str_vec files; // the interface file of each, `<path>/interface.ft`
+    containers.pool pool; // the paths of `files`
+    vec.int_vec order; // the index of each library in the link order (module-system.md 10.4)
+}
+
+fn free_libraries(libraries mut* libs) void {
+    u64 mut i = 0;
+    while (i < libs->len) {
+        artifact.free(&libs->items[i]);
+        i += 1;
+    }
+    del(libs->items);
+    libs->len = 0;
+    containers.str_free(&libs->files);
+    containers.pool_free(&libs->pool);
+    vec.int_free(&libs->order);
+}
+
+// Reports `library '<path>' is corrupt`.
+fn error_corrupt(string path) void {
+    eprintln("fort: error: library '", path, "' is corrupt");
+}
+
+// Fills `*build` with the fields of this build that a used library must have (D9.11): the
+// compiler identity, the target, the two modes and the configuration map, whose storage is
+// `compiler`, `keys` and `values`. Returns false after the error of the compiler executable.
+fn build_fields(options* opts, artifact.manifest mut* build, strbuf.str_buf mut* compiler,
+                containers.str_vec mut* keys, containers.str_vec mut* values) bool {
+    strbuf.str_buf mut exe = strbuf.create();
+    defer strbuf.free(&exe);
+    if (!artifact.hash_compiler(compiler, &exe)) {
+        if (strbuf.view(&exe).len == 0) {
+            error("internal error: the system gives no path of the compiler executable");
+        } else {
+            error_path("cannot read", strbuf.view(&exe), str.from_cstr(libc.strerror(sys.errno())));
+        }
+        return false;
+    }
+    append_config(opts, keys, values);
+    build->compiler = strbuf.view(compiler);
+    build->target = opts->target;
+    build->release = opts->release;
+    build->no_bounds_check = opts->no_bounds_check;
+    build->cfg_keys = containers.str_items(keys);
+    build->cfg_values = containers.str_items(values);
+    return true;
+}
+
+// Reads the artifact of --use `i` into `libs->items[i]` and holds its own rules: it is valid, it
+// has the name that the --use gives, and it has the fields of `build`. Returns EXIT_OK, or
+// EXIT_USAGE after the message of the first rule that fails (toolchain.md 1).
+fn read_library(options* opts, artifact.manifest* build, libraries mut* libs, u64 i) i32 {
+    string name = containers.str_at(&opts->use_names, i);
+    string path = containers.str_at(&opts->use_paths, i);
+    artifact.contents mut* c = &libs->items[i];
+    i32 mut failure = 0;
+    artifact.verdict found = artifact.read(path, c, &failure);
+    if (found == artifact.verdict.v_unreadable) {
+        error_path("cannot read library", path, str.from_cstr(libc.strerror(failure)));
+        return EXIT_USAGE;
+    }
+    if (found == artifact.verdict.v_corrupt) {
+        error_corrupt(path);
+        return EXIT_USAGE;
+    }
+    if (c->fields.library != name) {
+        eprintln("fort: error: library '", path, "' is named '", c->fields.library, "', not '",
+                 name, "'");
+        return EXIT_USAGE;
+    }
+    string field = artifact.difference(&c->fields, build);
+    if (field.len > 0) {
+        eprintln("fort: error: library '", name, "' was built with another ", field);
+        return EXIT_USAGE;
+    }
+    return EXIT_OK;
+}
+
+// Reads and checks each used library (toolchain.md 2.1, step 1; D9.11). Each artifact is read
+// once and checked against its own rules, in command-line order. Then each library that a
+// manifest uses must be named with the interface that it records, and the uses must form no
+// cycle. Returns EXIT_OK with the link order in `libs->order`, or EXIT_USAGE after the message
+// of the first failure.
+fn read_libraries(options* opts, libraries mut* libs) i32 {
+    u64 n = opts->use_names.len;
+    if (n == 0) {
+        return EXIT_OK;
+    }
+    del(libs->items);
+    libs->items = new(artifact.contents, n);
+    libs->len = n;
+    strbuf.str_buf mut compiler = strbuf.create();
+    defer strbuf.free(&compiler);
+    containers.str_vec mut keys = containers.str_create();
+    defer containers.str_free(&keys);
+    containers.str_vec mut values = containers.str_create();
+    defer containers.str_free(&values);
+    artifact.manifest mut build = artifact.manifest{};
+    if (!build_fields(opts, &build, &compiler, &keys, &values)) {
+        return EXIT_USAGE;
+    }
+    u64 mut i = 0;
+    while (i < n) {
+        i32 status = read_library(opts, &build, libs, i);
+        if (status != EXIT_OK) {
+            return status;
+        }
+        i += 1;
+    }
+    graph.graph mut g = graph.graph{};
+    defer graph.free(&g);
+    i = 0;
+    while (i < n) {
+        artifact.manifest* m = &libs->items[i].fields;
+        graph.add(&g, containers.str_at(&opts->use_names, i), m->interface);
+        u64 mut k = 0;
+        while (k < m->use_names.len) {
+            graph.add_use(&g, m->use_names[k], m->use_hashes[k]);
+            k += 1;
+        }
+        i += 1;
+    }
+    strbuf.str_buf mut message = strbuf.create();
+    defer strbuf.free(&message);
+    if (!graph.check(&g, &message)) {
+        error(strbuf.view(&message));
+        return EXIT_USAGE;
+    }
+    graph.link_order(&g, &libs->order);
+    i = 0;
+    while (i < n) {
+        // `<path>/interface.ft`, with no second separator after a path that ends with one
+        string path = containers.str_at(&opts->use_paths, i);
+        string mut file = join_path(&libs->pool, path, artifact.INTERFACE_FILE, "");
+        if (path[path.len - 1] == '/') {
+            file = join_path(&libs->pool, "", path, artifact.INTERFACE_FILE);
+        }
+        containers.str_push(&libs->files, file);
+        i += 1;
+    }
+    return EXIT_OK;
+}
+
+// Adds each used library to the module set, so that a path of it resolves only in its interface
+// file (module-system.md 10.2). The interface text is the one that read_libraries checked.
+// Returns EXIT_OK, EXIT_COMPILE_ERROR after a lexical diagnostic in an interface file, or
+// EXIT_USAGE when a text is no interface file of its library.
+fn use_libraries(session.session mut* s, options* opts, libraries* libs, analysis mut* an) i32 {
+    u64 mut i = 0;
+    while (i < libs->len) {
+        u64 before = session.error_count(s);
+        string text = strbuf.view(&libs->items[i].interface);
+        if (!modules.use_library(s, &an->set, containers.str_at(&opts->use_names, i),
+                                 containers.str_at(&libs->files, i), text)) {
+            if (session.error_count(s) > before) {
+                return EXIT_COMPILE_ERROR;
+            }
+            error_corrupt(containers.str_at(&opts->use_paths, i));
+            return EXIT_USAGE;
+        }
+        i += 1;
+    }
+    return EXIT_OK;
+}
+
+// Checks the extern declarations of each module of each used library that the closure does not
+// hold, against the closure and against each other (module-system.md 10.4): the libraries in the
+// reverse of the link order, the modules of each in byte order of the path. Call it after the
+// closure checked with no diagnostic. Returns false after a diagnostic.
+fn check_outside(session.session mut* s, options* opts, libraries* libs, analysis mut* an) bool {
+    if (libs->len == 0) {
+        return true;
+    }
+    containers.str_vec mut names = containers.str_create();
+    defer containers.str_free(&names);
+    u64 mut k = libs->order.len;
+    while (k > 0) {
+        k -= 1;
+        containers.str_push(&names,
+                            containers.str_at(&opts->use_names, cast(libs->order.items[k], u64)));
+    }
+    if (!modules.load_outside(s, &an->set, containers.str_items(&names))) {
+        return false;
+    }
+    return check_stmt.check_outside(&an->ck, &an->set) && session.error_count(s) == 0;
+}
+
 // ---- the front end ---------------------------------
 
 // Keeps parsed modules and checker annotations available to later passes.
@@ -1156,8 +1411,11 @@ fn load_closure(session.session mut* s, options* opts, string program, analysis 
     }
     containers.pool mut p = containers.pool_create();
     defer containers.pool_free(&p);
-    // `std` is looked up in the standard library directory
-    modules.set_std_dir(&an->set, std_dir(&p, opts, program));
+    // `std` is looked up in the standard library directory. A library build has none: its
+    // `std` paths resolve in the interface file of the used library std (module-system.md 10.2).
+    if (opts->use_names.len == 0) {
+        modules.set_std_dir(&an->set, std_dir(&p, opts, program));
+    }
     return modules.load(s, &an->set, opts->entry);
 }
 
@@ -1179,7 +1437,8 @@ fn entry_opens(string path) bool {
 // cannot be opened is exit 2 and a compile diagnostic is exit 1. A closure that
 // loaded cleanly would be the checker's and the emitter's turn, which is the
 // internal error of `run` below.
-fn front_end(session.session mut* s, options* opts, string program, analysis mut* an) i32 {
+fn front_end(session.session mut* s, options* opts, string program, libraries* libs,
+             analysis mut* an) i32 {
     // The loader reads each file through the session.
     // This keeps a server buffer consistent across the closure.
     if (!entry_opens(opts->entry)) {
@@ -1189,6 +1448,10 @@ fn front_end(session.session mut* s, options* opts, string program, analysis mut
     // --json writes the document and no text line
     diag.set_text(session.diags(s), !opts->json);
     session.show_sources(s);
+    i32 used = use_libraries(s, opts, libs, an);
+    if (used != EXIT_OK) {
+        return used;
+    }
     bool loaded = load_closure(s, opts, program, an);
     // Check each parsed module in dependency order.
     // A parse failure in one file does not hide errors in other files.
@@ -1237,12 +1500,22 @@ fn emit_module(session.session mut* s, options* opts, analysis mut* an, string i
 // "version" is 1 for this form of the document.
 u64 JSON_VERSION = 1;
 
-// Copies module file names in load order.
-fn collect_files(containers.pool mut* p, modules.module_set* set,
+// Copies the names of the files that the run read, in that order and each once (D20.2): the
+// interface file of each used library, which step 1 of toolchain.md 2.1 reads, and then the file
+// of each module in load order. A section of an interface file names that file.
+fn collect_files(containers.pool mut* p, libraries* libs, modules.module_set* set,
                       containers.str_vec mut* files) void {
     u64 mut i = 0;
+    while (i < libs->files.len) {
+        containers.str_push(files, containers.pool_intern(p, containers.str_at(&libs->files, i)));
+        i += 1;
+    }
+    i = 0;
     while (i < modules.file_count(set)) {
-        containers.str_push(files, containers.pool_intern(p, modules.file_at(set, i)));
+        string file = modules.file_at(set, i);
+        if (!has_string(files, file)) {
+            containers.str_push(files, containers.pool_intern(p, file));
+        }
         i += 1;
     }
 }
@@ -1287,11 +1560,11 @@ fn write_document(session.session mut* s, containers.str_vec* files, index.index
 // --check --json writes the front-end document to stdout.
 // --index adds identifier records from checker annotations.
 // A usage, toolchain, or internal error causes exit 2 with empty stdout.
-fn check_document(session.session mut* s, options* opts, analysis mut* an,
+fn check_document(session.session mut* s, options* opts, libraries* libs, analysis mut* an,
                        containers.pool mut* p) void {
     containers.str_vec mut files = containers.str_create();
     defer containers.str_free(&files);
-    collect_files(p, &an->set, &files);
+    collect_files(p, libs, &an->set, &files);
     index.index mut ix = index.create();
     defer index.free(&ix);
     if (opts->index) {
@@ -1645,12 +1918,22 @@ fn fir_test_entry(options* opts, string program) i32 {
         }
         k += 1;
     }
+    libraries mut libs = libraries{};
+    defer free_libraries(&libs);
+    i32 read = read_libraries(opts, &libs);
+    if (read != EXIT_OK) {
+        return read;
+    }
     // The loader reads the prelude in place of the file, so a diagnostic of the prelude names
     // the line and the column of the file. No source line is shown under it.
     session.set_source(&s, opts->entry, strbuf.view(&t.prelude));
     diag.set_text(session.diags(&s), true);
     analysis mut an = analysis_create(&s);
     defer analysis_free(&an);
+    i32 used = use_libraries(&s, opts, &libs, &an);
+    if (used != EXIT_OK) {
+        return used;
+    }
     u64 mut i = 0;
     while (i < opts->includes.len) {
         modules.add_root(&an.set, containers.str_at(&opts->includes, i));
@@ -1658,12 +1941,17 @@ fn fir_test_entry(options* opts, string program) i32 {
     }
     containers.pool mut p = containers.pool_create();
     defer containers.pool_free(&p);
-    modules.set_std_dir(&an.set, std_dir(&p, opts, program));
+    if (libs.len == 0) {
+        modules.set_std_dir(&an.set, std_dir(&p, opts, program));
+    }
     bool loaded = modules.load_named(&s, &an.set, FIR_TEST_MODULE, opts->entry);
     // the prelude is no program, so it need not define main
     an.ck.require_main = false;
     bool checked = check_stmt.check_program(&an.ck, &an.set);
     if (!loaded || !checked || session.error_count(&s) > 0) {
+        return EXIT_COMPILE_ERROR;
+    }
+    if (!check_outside(&s, opts, &libs, &an)) {
         return EXIT_COMPILE_ERROR;
     }
     fir_parse.prelude pre = fir_parse.prelude{modules.entry(&an.set), &an.ck};
@@ -1692,6 +1980,12 @@ fn compile_entry(options* opts, string program) i32 {
     if (!front_only && !target_allowed(opts)) {
         return EXIT_USAGE;
     }
+    libraries mut libs = libraries{};
+    defer free_libraries(&libs);
+    i32 read = read_libraries(opts, &libs);
+    if (read != EXIT_OK) {
+        return read;
+    }
     containers.pool mut p = containers.pool_create();
     defer containers.pool_free(&p);
     session.session mut s = session.create();
@@ -1705,13 +1999,19 @@ fn compile_entry(options* opts, string program) i32 {
     analysis mut an = analysis_create(&s);
     bool mut analysis_live = true;
     defer analysis_release(&an, &analysis_live);
-    i32 mut status = front_end(&s, opts, program, &an);
-    if (status == EXIT_OK && opts->check) {
+    i32 mut status = front_end(&s, opts, program, &libs, &an);
+    // A build with --use runs the emptiness pass as --check does, and then the extern check of
+    // the used libraries (toolchain.md 2.1, step 4). A whole program runs the pass in the emitter
+    // or in --fir, and --fir-verify-report reports no overwrite error in either mode.
+    if (status == EXIT_OK && (opts->check || (libs.len > 0 && !opts->fir_report))) {
         status = overwrite_entry(&s, &an, opts);
+    }
+    if (status == EXIT_OK && !check_outside(&s, opts, &libs, &an)) {
+        status = EXIT_COMPILE_ERROR;
     }
     if (opts->check && opts->json && (status == EXIT_OK || status == EXIT_COMPILE_ERROR)) {
         // the document answers for both verdicts, so it goes first
-        check_document(&s, opts, &an, &p);
+        check_document(&s, opts, &libs, &an, &p);
         return status;
     }
     if (status != EXIT_OK) {
@@ -1750,11 +2050,108 @@ fn compile_entry(options* opts, string program) i32 {
     i32 mut built = emit_module(&s, opts, &an, ir_path);
     // Release analysis storage before fork duplicates the process page tables.
     analysis_release(&an, &analysis_live);
+    if (libs.len > 0) {
+        return build_entry_unit(opts, &libs, built, dir, ir_path, out_path);
+    }
     if (built == EXIT_OK) {
         built = run_cc(opts, ir_path, out_path);
     }
     remove_temp_dir(dir, ir_path);
     return built;
+}
+
+// The suffix of the copy of a `lib.a` in the temporary directory, `<name>.a`.
+string ARCHIVE_SUFFIX = ".a";
+
+// Writes the checked bytes of the `lib.a` of each used library to `<dir>/<name>.a` and pushes
+// each path to `paths` in the link order (toolchain.md 2.2, Reading). Returns false after the
+// error of the first file that cannot be written; the paths that it wrote are in `paths`.
+fn copy_archives(options* opts, libraries* libs, containers.pool mut* p, string dir,
+                 containers.str_vec mut* paths) bool {
+    u64 mut k = 0;
+    while (k < libs->order.len) {
+        u64 i = cast(libs->order.items[k], u64);
+        string path = join_path(p, dir, containers.str_at(&opts->use_names, i), ARCHIVE_SUFFIX);
+        if (!io.write_file(path, strbuf.bytes(&libs->items[i].archive))) {
+            i32 failure = sys.errno();
+            // a part of the file can stand, so the caller removes it
+            containers.str_push(paths, path);
+            error_path("cannot write", path, str.from_cstr(libc.strerror(failure)));
+            return false;
+        }
+        containers.str_push(paths, path);
+        k += 1;
+    }
+    return true;
+}
+
+// Runs the link line of toolchain.md 2.1, step 7: `<cc> --target=<triple> -o <out> <object>
+// <archives> <-l options> <-Xcc args>`, the archives in the link order.
+fn link_entry(options* opts, string object_path, containers.str_vec* archives, string out_path)
+    i32 {
+    containers.pool mut p = containers.pool_create();
+    defer containers.pool_free(&p);
+    containers.str_vec mut argv = containers.str_create();
+    defer containers.str_free(&argv);
+    containers.str_push(&argv, opts->cc);
+    containers.str_push(&argv, join_path(&p, "", "--target=", opts->target));
+    containers.str_push(&argv, "-o");
+    containers.str_push(&argv, out_path);
+    containers.str_push(&argv, object_path);
+    u64 mut i = 0;
+    while (i < archives->len) {
+        containers.str_push(&argv, containers.str_at(archives, i));
+        i += 1;
+    }
+    i = 0;
+    while (i < opts->libs.len) {
+        containers.str_push(&argv, containers.str_at(&opts->libs, i));
+        i += 1;
+    }
+    i = 0;
+    while (i < opts->cc_args.len) {
+        containers.str_push(&argv, containers.str_at(&opts->cc_args, i));
+        i += 1;
+    }
+    return run_tool("cc", &argv);
+}
+
+// Steps 6 and 7 of a build with --use (toolchain.md 2.1), after the emitter wrote the module of
+// the entry unit to `ir_path` with the status `built`: the compile line of a --lib build to the
+// -c output or to `<dir>/<entry>.o`, and then, without -c, the link line over the object and the
+// copy of each `lib.a`. Removes each file that it wrote in `dir`, and then `dir`.
+fn build_entry_unit(options* opts, libraries* libs, i32 built, string dir, string ir_path,
+                    string out_path) i32 {
+    containers.pool mut p = containers.pool_create();
+    defer containers.pool_free(&p);
+    containers.str_vec mut written = containers.str_create();
+    defer containers.str_free(&written);
+    containers.str_push(&written, ir_path);
+    string mut object_path = out_path;
+    if (!opts->compile_only) {
+        object_path = join_path(&p, dir, entry_base(opts->entry), OBJECT_SUFFIX);
+        containers.str_push(&written, object_path);
+    }
+    i32 mut status = built;
+    if (status == EXIT_OK) {
+        status = compile_library(opts, ir_path, object_path);
+    }
+    if (status == EXIT_OK && !opts->compile_only) {
+        containers.str_vec mut archives = containers.str_create();
+        defer containers.str_free(&archives);
+        if (!copy_archives(opts, libs, &p, dir, &archives)) {
+            status = EXIT_USAGE;
+        } else {
+            status = link_entry(opts, object_path, &archives, out_path);
+        }
+        u64 mut i = 0;
+        while (i < archives.len) {
+            containers.str_push(&written, containers.str_at(&archives, i));
+            i += 1;
+        }
+    }
+    remove_library_temp(dir, containers.str_items(&written));
+    return status;
 }
 
 // ---- the library build ---------------------------------------------
@@ -1824,11 +2221,11 @@ fn archive_library(options* opts, string archive_path, string object_path) i32 {
 
 // Writes the artifact `dir` (toolchain.md 2.1, step 9, and 2.2). It reads the archive once and
 // uses those bytes for its hash and for the copy in the artifact. `interface_text` is the
-// interface file and `source` the source hash of the library. The status is EXIT_USAGE after a
-// report: the archive or the compiler executable that cannot be read, or a file of the artifact
-// that cannot be written.
-fn write_artifact(options* opts, string dir, string interface_text, string source,
-                  string archive_path) i32 {
+// interface file and `source` the source hash of the library. The manifest records the interface
+// hash of each used library of `libs`. The status is EXIT_USAGE after a report: the archive or
+// the compiler executable that cannot be read, or a file of the artifact that cannot be written.
+fn write_artifact(options* opts, libraries* libs, string dir, string interface_text,
+                  string source, string archive_path) i32 {
     strbuf.str_buf mut archive = strbuf.create();
     defer strbuf.free(&archive);
     if (!io.read_file(archive_path, &archive)) {
@@ -1870,6 +2267,15 @@ fn write_artifact(options* opts, string dir, string interface_text, string sourc
     m.cc_args = containers.str_items(&opts->cc_args);
     m.ar = opts->ar;
     m.source = source;
+    containers.str_vec mut use_hashes = containers.str_create();
+    defer containers.str_free(&use_hashes);
+    u64 mut i = 0;
+    while (i < libs->len) {
+        containers.str_push(&use_hashes, libs->items[i].fields.interface);
+        i += 1;
+    }
+    m.use_names = containers.str_items(&opts->use_names);
+    m.use_hashes = containers.str_items(&use_hashes);
     m.interface = strbuf.view(&interface_hash);
     m.archive = strbuf.view(&archive_hash);
     strbuf.str_buf mut text = strbuf.create();
@@ -1911,6 +2317,12 @@ fn library_entry(options* opts) i32 {
     if (!has_usable_target(opts)) {
         return EXIT_USAGE;
     }
+    libraries mut libs = libraries{};
+    defer free_libraries(&libs);
+    i32 read = read_libraries(opts, &libs);
+    if (read != EXIT_OK) {
+        return read;
+    }
     tree.tree mut t = tree.tree{};
     defer tree.free(&t);
     i32 mut failure = 0;
@@ -1933,6 +2345,10 @@ fn library_entry(options* opts) i32 {
     analysis mut an = analysis_create(&s);
     bool mut analysis_live = true;
     defer analysis_release(&an, &analysis_live);
+    i32 used = use_libraries(&s, opts, &libs, &an);
+    if (used != EXIT_OK) {
+        return used;
+    }
     bool loaded = modules.load_library(&s, &an.set, opts->lib_name, opts->lib_root, &t);
     // D8.6 does not apply under --lib: a `main` of a library module is an ordinary function
     an.ck.require_main = false;
@@ -1940,10 +2356,14 @@ fn library_entry(options* opts) i32 {
     if (!loaded || !checked || session.error_count(&s) > 0) {
         return EXIT_COMPILE_ERROR;
     }
-    // lower, verify and run the emptiness pass over each body, as --check does (toolchain.md 2.1)
+    // lower, verify and run the emptiness pass over each body, as --check does, and then check
+    // the extern declarations of the used libraries (toolchain.md 2.1, step 4)
     i32 lowered = overwrite_entry(&s, &an, opts);
     if (lowered != EXIT_OK) {
         return lowered;
+    }
+    if (!check_outside(&s, opts, &libs, &an)) {
+        return EXIT_COMPILE_ERROR;
     }
     strbuf.str_buf mut text = strbuf.create();
     defer strbuf.free(&text);
@@ -1986,7 +2406,7 @@ fn library_entry(options* opts) i32 {
         built = archive_library(opts, archive_path, object_path);
     }
     if (built == EXIT_OK && !opts->compile_only) {
-        built = write_artifact(opts, out_path, strbuf.view(&text), strbuf.view(&source),
+        built = write_artifact(opts, &libs, out_path, strbuf.view(&text), strbuf.view(&source),
                                archive_path);
     }
     string[3] mut written = {ir_path, "", archive_path};

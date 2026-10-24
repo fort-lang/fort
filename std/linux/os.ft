@@ -48,3 +48,37 @@ fn real_path(string path, strbuf.str_buf mut* out) bool {
     strbuf.append(out, str.from_cstr(buf.ptr));
     return true;
 }
+
+// O_NONBLOCK of open(2) (Linux x86-64): an open of a FIFO returns at once.
+i32 O_NONBLOCK = 0o4000;
+
+// fstat(2) writes `struct stat` into `buf`. std.os declares it and std.libc does not, so only a
+// program that imports std.os binds the symbol (D9.8). A buffer of words and not a struct: a
+// struct would give the symbol a type that a program cannot write again.
+extern fn fstat(i32 fd, u64 mut* buf) i32;
+
+// `struct stat` (Linux x86-64) is STAT_WORDS 8-byte words with the alignment of C. `st_mode` is
+// a u32 at byte 24, the low half of word 3; MODE_BITS takes its type bits and its permission bits.
+u64 STAT_WORDS = 18;
+u64 STAT_MODE_WORD = 3;
+u64 STAT_MODE_SHIFT = 0;
+u64 MODE_BITS = 0xFFFF;
+
+/// Opens `path` to read and returns the descriptor, or -1 with the reason in sys.errno(). The
+/// open does not wait for the writer of a FIFO.
+fn open_nonblocking(string path) i32 {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    return libc.open(c_path.ptr, libc.O_RDONLY | O_NONBLOCK, 0);
+}
+
+/// Writes the type bits and the permission bits of the file that `fd` names, the low 16 bits of
+/// its `st_mode`, to `*mode`. Returns false with the reason in sys.errno() when fstat(2) fails.
+fn file_mode(i32 fd, u32 mut* mode) bool {
+    u64[STAT_WORDS] mut st = {};
+    if (fstat(fd, &st[0]) != 0) {
+        return false;
+    }
+    *mode = cast((st[STAT_MODE_WORD] >> STAT_MODE_SHIFT) & MODE_BITS, u32);
+    return true;
+}

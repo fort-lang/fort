@@ -266,6 +266,66 @@ fn the_main_symbol_is_reserved() void {
     assert(check_env.errors(&e) == 1);
 }
 
+// ---- the extern declarations that the checker holds back ------------------------------
+
+fn a_held_back_extern_is_compared_by_check_externs() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // with defer_externs set, the check compares no extern declaration
+    e.ck.defer_externs = true;
+    assert(two_modules(&e, "extern fn write(i32 fd) i64;\n", "extern fn write(i64 fd) i64;\n"));
+    assert(check_env.errors(&e) == 0);
+    e.ck.defer_externs = false;
+    // `other` registers the first declaration and `main` is the later one
+    assert(check.check_externs(&e.ck, check_env.module_at(&e, "other")));
+    assert(!check.check_externs(&e.ck, check_env.module_at(&e, "main")));
+    assert(check_env.errors(&e) == 1);
+    assert(check_env.said(&e, "conflicting declarations of extern 'write': parameter 1 differs"));
+    // the symbol of the later declaration fails, as in the closure
+    assert(check_env.sym_of(&e, "main", "write")->error);
+}
+
+fn check_externs_reads_the_order_of_its_calls() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    e.ck.defer_externs = true;
+    assert(two_modules(&e, "extern fn write(i32 fd) i64;\n", "extern fn write(i64 fd) i64;\n"));
+    e.ck.defer_externs = false;
+    // `main` first this time: the error stands at `other`
+    assert(check.check_externs(&e.ck, check_env.module_at(&e, "main")));
+    assert(!check.check_externs(&e.ck, check_env.module_at(&e, "other")));
+    assert(check_env.sym_of(&e, "other", "write")->error);
+    assert(!check_env.sym_of(&e, "main", "write")->error);
+}
+
+fn check_externs_skips_a_declaration_that_failed() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    e.ck.defer_externs = true;
+    // a string parameter fails the signature of the declaration in `main`
+    assert(!two_modules(&e, "extern fn write(string s) i64;\n", "extern fn write(i64 fd) i64;\n"));
+    u64 before = check_env.errors(&e);
+    e.ck.defer_externs = false;
+    assert(check.check_externs(&e.ck, check_env.module_at(&e, "main")));
+    assert(check.check_externs(&e.ck, check_env.module_at(&e, "other")));
+    assert(check_env.errors(&e) == before);
+}
+
+fn agreeing_held_back_externs_pass() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    e.ck.defer_externs = true;
+    assert(two_modules(&e, "extern fn write(i32 fd) i64;\n", "extern fn write(i32 fd) i64;\n"));
+    e.ck.defer_externs = false;
+    assert(check.check_externs(&e.ck, check_env.module_at(&e, "other")));
+    assert(check.check_externs(&e.ck, check_env.module_at(&e, "main")));
+    assert(check_env.errors(&e) == 0);
+}
+
 fn main() i32 {
     an_extern_signature_uses_scalars_and_pointers_only();
     an_extern_result_is_held_to_the_same_rule();
@@ -284,6 +344,10 @@ fn main() i32 {
     a_fort_rt_name_is_an_ordinary_extern_declaration();
     a_c_name_other_than_main_is_an_ordinary_extern_declaration();
     the_main_symbol_is_reserved();
+    a_held_back_extern_is_compared_by_check_externs();
+    check_externs_reads_the_order_of_its_calls();
+    check_externs_skips_a_declaration_that_failed();
+    agreeing_held_back_externs_pass();
     println("ok");
     return 0;
 }

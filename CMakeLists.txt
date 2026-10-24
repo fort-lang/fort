@@ -542,8 +542,9 @@ set_tests_properties(${FORT_MODULE_TESTS} lsp-modules lang lang-json
 
 # The interface file of std against its sources (D9.11): two runs and a moved copy of the root
 # write the same bytes, every section checks, and each program of test/lang checks to the same
-# error lines against the interface as against the sources. test/library/checker.ft reads the
-# interface in place of `--use`, which no build reads yet.
+# error lines against the interface as against the sources. test/library/checker.ft checks a
+# program against the interface that `--emit-interface` writes, with no artifact, and it writes
+# each section that the check read again as the same text.
 add_test(NAME library-interface
     COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/library/interface_test.py"
             --fort "${FORT_COMPILER_BINARY}"
@@ -558,8 +559,8 @@ set_tests_properties(library-interface PROPERTIES
 
 # The artifact of `--lib std` (D9.11): two builds write the same bytes, the manifest holds the
 # hashes that Python's hashlib gives, the IR module of each target verifies, and each program of
-# test/library/programs gives the same output linked against lib.a as built as a whole program.
-# test/library/builder.ft emits the entry unit, because no build reads an artifact yet.
+# test/library/programs gives the same output built with `--use std=<artifact>` as built as a
+# whole program.
 add_test(NAME library-artifact
     COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/library/artifact_test.py"
             --fort "${FORT_COMPILER_BINARY}"
@@ -570,6 +571,24 @@ add_test(NAME library-artifact
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(library-artifact PROPERTIES
     LABELS "fort;integration"
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
+# The run corpus of test/lang built against std.flib (D9.11): each program built with
+# `--use std=<artifact>` gives the stdout, stderr and status of its whole-program build, and the
+# IR module of each entry unit verifies. One artifact is built for each set of the build mode,
+# the bounds mode and the configuration that the programs give.
+add_test(NAME library-use
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/library/use_test.py"
+            --fort "${FORT_COMPILER_BINARY}"
+            --std-dir "${FORT_STD_DIR}"
+            --cc "${FORT_TARGET_CC_PATH}"
+            --target "${FORT_TARGET_TRIPLE}"
+            --opt "${FORT_OPT_PATH}"
+            -j "${FORT_LANG_JOBS}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(library-use PROPERTIES
+    LABELS "fort;integration"
+    PROCESSORS ${FORT_LANG_JOBS}
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
 # The interactive test checks line flushing when stdout is a terminal.

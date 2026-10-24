@@ -164,6 +164,9 @@ struct checker {
     ast.sym mut*[scope.UNIVERSE_COUNT] builtins; // the universe functions
     bool mute; // annotate without reporting, for an editor mode
     bool require_main; // the entry module defines main; off for a check-only run
+    // The module is outside the closure: its extern declarations wait for check_externs, which
+    // compares them in the order of module-system.md 10.4 and not in the order of the checker.
+    bool defer_externs;
     u64 errors;        // checker diagnostics, muted ones included
 
     // ---- the module and the function being checked ----
@@ -4432,10 +4435,34 @@ fn resolve_fn(checker mut* ck, ast.sym mut* s) void {
         return;
     }
     s->ty = types.type_fn(&ck->types, ret.ty, params[0..n], is_noreturn(decl->a));
-    if (is_extern && !check_extern_agreement(ck, decl, s)) {
+    if (is_extern && !ck->defer_externs && !check_extern_agreement(ck, decl, s)) {
         // no one signature, so the symbol is poisoned
         sym_fail(ck, s);
     }
+}
+
+/// Compares each extern declaration of the module `m`, which the checker read with
+/// `defer_externs` set, with the first declaration of its C symbol (D9.8). The closure and the
+/// modules that an earlier call read come first, so a conflict stands at a declaration of `m`
+/// (module-system.md 10.4). A declaration whose signature failed is skipped, as it is in the
+/// closure. `m` is a section of an interface file, which holds no `$if` (grammar.md section 2),
+/// so its declarations are the children of its tree. Returns false after a conflict.
+fn check_externs(checker mut* ck, modules.module* m) bool {
+    bool mut ok = true;
+    u64 mut i = 0;
+    while (m->ast != null && i < ast.ast_len(m->ast)) {
+        ast.node* decl = ast.ast_child(m->ast, i);
+        i += 1;
+        if (decl->kind != ast.ast_kind.k_fn_decl || (decl->flags & ast.FLAG_EXTERN) == 0
+            || decl->sym == null || decl->sym->error) {
+            continue;
+        }
+        if (!check_extern_agreement(ck, decl, decl->sym)) {
+            sym_fail(ck, decl->sym);
+            ok = false;
+        }
+    }
+    return ok;
 }
 
 fn resolve_var(checker mut* ck, ast.sym mut* s) void {

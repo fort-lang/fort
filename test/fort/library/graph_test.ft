@@ -1,0 +1,467 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| uses ok
+//| cycles ok
+//| order ok
+//| ok
+/// Checks the used libraries of a build in src/fort/library/graph.ft (D9.11, module-system.md
+/// 10.4, toolchain.md 1): each library that a manifest uses must be named with the interface
+/// hash that it records, the uses must form no cycle, and the link order puts each library before
+/// the libraries that it uses.
+import library.graph;
+import std.strbuf;
+import std.vec;
+
+// Three interface hashes, as a manifest writes them.
+string HASH_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+string HASH_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+string HASH_C = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+// Whether the check of `g` fails with the message `want`, printing the message when it does not.
+fn refuses(graph.graph* g, string want) bool {
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    bool passed = graph.check(g, &got);
+    if (passed || strbuf.view(&got) != want) {
+        println("got: ", strbuf.view(&got));
+    }
+    return !passed && strbuf.view(&got) == want;
+}
+
+// Whether the check of `g` passes and leaves the message empty.
+fn accepts(graph.graph* g) bool {
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    bool passed = graph.check(g, &got);
+    if (!passed) {
+        println("got: ", strbuf.view(&got));
+    }
+    return passed && strbuf.view(&got).len == 0;
+}
+
+// ---- uses --------------------------------------------------------------------------
+
+fn a_library_that_uses_nothing_passes() void {
+    graph.graph mut g = graph.graph{};
+    defer graph.free(&g);
+    graph.add(&g, "std", HASH_A);
+    assert(graph.count(&g) == 1);
+    assert(graph.name_at(&g, 0) == "std");
+    assert(accepts(&g));
+}
+
+fn an_empty_graph_passes() void {
+    graph.graph mut g = graph.graph{};
+    defer graph.free(&g);
+    assert(graph.count(&g) == 0);
+    assert(accepts(&g));
+}
+
+fn each_use_with_its_interface_passes() void {
+    graph.graph mut g = graph.graph{};
+    defer graph.free(&g);
+    graph.add(&g, "geom", HASH_B);
+    graph.add_use(&g, "std", HASH_A);
+    graph.add(&g, "std", HASH_A);
+    assert(accepts(&g));
+}
+
+fn a_use_that_no_library_names_is_refused() void {
+    graph.graph mut g = graph.graph{};
+    defer graph.free(&g);
+    graph.add(&g, "std", HASH_A);
+    graph.add(&g, "geom", HASH_B);
+    graph.add_use(&g, "std", HASH_A);
+    graph.add_use(&g, "util", HASH_C);
+    assert(refuses(&g, "library 'geom' uses library 'util', which no --use names"));
+}
+
+fn a_use_of_another_interface_is_refused() void {
+    graph.graph mut g = graph.graph{};
+    defer graph.free(&g);
+    graph.add(&g, "std", HASH_A);
+    graph.add(&g, "geom", HASH_B);
+    // geom was built against an older std, whose interface hash was HASH_C
+    graph.add_use(&g, "std", HASH_C);
+    assert(refuses(&g, "library 'geom' was built against another interface of 'std'"));
+}
+
+fn the_first_library_on_the_command_line_reports_first() void {
+    graph.graph mut g = graph.graph{};
+    defer graph.free(&g);
+    graph.add(&g, "zeta", HASH_A);
+    graph.add_use(&g, "missing", HASH_A);
+    graph.add(&g, "alpha", HASH_B);
+    graph.add_use(&g, "absent", HASH_A);
+    assert(refuses(&g, "library 'zeta' uses library 'missing', which no --use names"));
+}
+
+fn the_uses_of_one_library_report_in_their_order() void {
+    graph.graph mut g = graph.graph{};
+    defer graph.free(&g);
+    graph.add(&g, "std", HASH_A);
+    graph.add(&g, "app", HASH_B);
+    // the first use has another interface, the second names no library
+    graph.add_use(&g, "std", HASH_B);
+    graph.add_use(&g, "util", HASH_C);
+    assert(refuses(&g, "library 'app' was built against another interface of 'std'"));
+}
+
+fn a_missing_use_reports_before_a_cycle() void {
+    graph.graph mut g = graph.graph{};
+    defer graph.free(&g);
+    graph.add(&g, "a", HASH_A);
+    graph.add_use(&g, "b", HASH_B);
+    graph.add(&g, "b", HASH_B);
+    graph.add_use(&g, "a", HASH_A);
+    graph.add_use(&g, "c", HASH_C);
+    assert(refuses(&g, "library 'b' uses library 'c', which no --use names"));
+}
+
+// ---- cycles ------------------------------------------------------------------------
+
+fn two_libraries_that_use_each_other_are_a_cycle() void {
+    graph.graph mut g = graph.graph{};
+    defer graph.free(&g);
+    graph.add(&g, "b", HASH_B);
+    graph.add_use(&g, "a", HASH_A);
+    graph.add(&g, "a", HASH_A);
+    graph.add_use(&g, "b", HASH_B);
+    // the text starts and ends at the first library of the cycle in byte order of the name
+    assert(refuses(&g, "library cycle: 'a' uses 'b' uses 'a'"));
+}
+
+fn a_library_that_uses_itself_is_a_cycle() void {
+    graph.graph mut g = graph.graph{};
+    defer graph.free(&g);
+    graph.add(&g, "std", HASH_A);
+    graph.add(&g, "self", HASH_B);
+    graph.add_use(&g, "self", HASH_B);
+    assert(refuses(&g, "library cycle: 'self' uses 'self'"));
+}
+
+fn a_cycle_of_three_starts_at_its_first_name() void {
+    graph.graph mut g = graph.graph{};
+    defer graph.free(&g);
+    graph.add(&g, "zed", HASH_A);
+    graph.add_use(&g, "mid", HASH_B);
+    graph.add(&g, "mid", HASH_B);
+    graph.add_use(&g, "alpha", HASH_C);
+    graph.add(&g, "alpha", HASH_C);
+    graph.add_use(&g, "zed", HASH_A);
+    assert(refuses(&g, "library cycle: 'alpha' uses 'zed' uses 'mid' uses 'alpha'"));
+}
+
+fn a_cycle_beside_libraries_that_form_none_is_found() void {
+    graph.graph mut g = graph.graph{};
+    defer graph.free(&g);
+    graph.add(&g, "std", HASH_A);
+    graph.add(&g, "app", HASH_B);
+    graph.add_use(&g, "loop", HASH_C);
+    graph.add_use(&g, "std", HASH_A);
+    graph.add(&g, "loop", HASH_C);
+    graph.add_use(&g, "ring", HASH_A);
+    graph.add_use(&g, "std", HASH_A);
+    graph.add(&g, "ring", HASH_A);
+    graph.add_use(&g, "loop", HASH_C);
+    graph.add_use(&g, "std", HASH_A);
+    // `app` reaches the cycle and is no part of it
+    assert(refuses(&g, "library cycle: 'loop' uses 'ring' uses 'loop'"));
+}
+
+fn a_search_that_meets_a_cycle_late_still_starts_its_text_at_the_first_name() void {
+    graph.graph mut g = graph.graph{};
+    defer graph.free(&g);
+    // the search starts at `a`, which is no part of the cycle, and meets the cycle at `z`
+    graph.add(&g, "a", HASH_A);
+    graph.add_use(&g, "z", HASH_C);
+    graph.add(&g, "m", HASH_B);
+    graph.add_use(&g, "z", HASH_C);
+    graph.add(&g, "z", HASH_C);
+    graph.add_use(&g, "m", HASH_B);
+    assert(refuses(&g, "library cycle: 'm' uses 'z' uses 'm'"));
+}
+
+fn a_diamond_is_no_cycle() void {
+    graph.graph mut g = graph.graph{};
+    defer graph.free(&g);
+    graph.add(&g, "app", HASH_A);
+    graph.add_use(&g, "left", HASH_B);
+    graph.add_use(&g, "right", HASH_C);
+    graph.add(&g, "left", HASH_B);
+    graph.add_use(&g, "std", HASH_A);
+    graph.add(&g, "right", HASH_C);
+    graph.add_use(&g, "std", HASH_A);
+    graph.add(&g, "std", HASH_A);
+    assert(accepts(&g));
+}
+
+// ---- the link order ------------------------------------------------------------------
+
+// The names of `g` in its link order, joined with spaces.
+fn order_of(graph.graph* g, strbuf.str_buf mut* out) string {
+    vec.int_vec mut order = vec.int_create();
+    defer vec.int_free(&order);
+    graph.link_order(g, &order);
+    strbuf.clear(out);
+    u64 mut i = 0;
+    while (i < order.len) {
+        if (i > 0) {
+            strbuf.push(out, ' ');
+        }
+        strbuf.append(out, graph.name_at(g, cast(order.items[i], u64)));
+        i += 1;
+    }
+    return strbuf.view(out);
+}
+
+fn a_library_comes_before_each_library_that_it_uses() void {
+    graph.graph mut g = graph.graph{};
+    defer graph.free(&g);
+    // the command line names std first, and the link order puts it last
+    graph.add(&g, "std", HASH_A);
+    graph.add(&g, "geom", HASH_B);
+    graph.add_use(&g, "std", HASH_A);
+    graph.add(&g, "app", HASH_C);
+    graph.add_use(&g, "geom", HASH_B);
+    graph.add_use(&g, "std", HASH_A);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(order_of(&g, &b) == "app geom std");
+}
+
+fn a_choice_takes_the_first_name_in_byte_order() void {
+    graph.graph mut g = graph.graph{};
+    defer graph.free(&g);
+    graph.add(&g, "zeta", HASH_A);
+    graph.add_use(&g, "std", HASH_A);
+    graph.add(&g, "std", HASH_A);
+    graph.add(&g, "Alpha", HASH_B);
+    graph.add_use(&g, "std", HASH_A);
+    graph.add(&g, "beta", HASH_C);
+    graph.add_use(&g, "std", HASH_A);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    // byte order puts an uppercase letter before every lowercase one
+    assert(order_of(&g, &b) == "Alpha beta zeta std");
+}
+
+fn each_pick_reads_the_remaining_libraries_alone() void {
+    graph.graph mut g = graph.graph{};
+    defer graph.free(&g);
+    // `b` uses `a`; `c` is used by nothing. After `b` goes, `a` is free beside `c`.
+    graph.add(&g, "a", HASH_A);
+    graph.add_use(&g, "std", HASH_A);
+    graph.add(&g, "b", HASH_B);
+    graph.add_use(&g, "a", HASH_A);
+    graph.add(&g, "c", HASH_C);
+    graph.add_use(&g, "std", HASH_A);
+    graph.add(&g, "std", HASH_A);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    // `a` is used by `b` until `b` goes, so `b` and then `a` come before `c`
+    assert(order_of(&g, &b) == "b a c std");
+}
+
+fn one_library_is_its_own_link_order() void {
+    graph.graph mut g = graph.graph{};
+    defer graph.free(&g);
+    graph.add(&g, "std", HASH_A);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(order_of(&g, &b) == "std");
+}
+
+fn the_link_order_of_no_library_is_empty() void {
+    graph.graph mut g = graph.graph{};
+    defer graph.free(&g);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(order_of(&g, &b) == "");
+}
+
+fn a_freed_graph_is_empty_and_usable() void {
+    graph.graph mut g = graph.graph{};
+    graph.add(&g, "std", HASH_A);
+    graph.add_use(&g, "std", HASH_A);
+    graph.free(&g);
+    assert(graph.count(&g) == 0);
+    graph.add(&g, "geom", HASH_B);
+    assert(accepts(&g));
+    graph.free(&g);
+}
+
+// ---- larger graphs ---------------------------------------------------------------------
+
+fn a_chain_in_any_command_line_order_links_from_its_top() void {
+    graph.graph mut g = graph.graph{};
+    defer graph.free(&g);
+    // e uses d uses c uses b uses a, named in the order c a e b d
+    graph.add(&g, "c", HASH_C);
+    graph.add_use(&g, "b", HASH_B);
+    graph.add(&g, "a", HASH_A);
+    graph.add(&g, "e", HASH_A);
+    graph.add_use(&g, "d", HASH_B);
+    graph.add(&g, "b", HASH_B);
+    graph.add_use(&g, "a", HASH_A);
+    graph.add(&g, "d", HASH_B);
+    graph.add_use(&g, "c", HASH_C);
+    assert(accepts(&g));
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(order_of(&g, &b) == "e d c b a");
+}
+
+fn two_chains_interleave_by_byte_order() void {
+    graph.graph mut g = graph.graph{};
+    defer graph.free(&g);
+    // x2 uses x1 and y2 uses y1; x1 and y1 use std
+    graph.add(&g, "y1", HASH_A);
+    graph.add_use(&g, "std", HASH_A);
+    graph.add(&g, "x2", HASH_B);
+    graph.add_use(&g, "x1", HASH_C);
+    graph.add(&g, "std", HASH_A);
+    graph.add(&g, "x1", HASH_C);
+    graph.add_use(&g, "std", HASH_A);
+    graph.add(&g, "y2", HASH_B);
+    graph.add_use(&g, "y1", HASH_A);
+    assert(accepts(&g));
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    // the first pick is x2, then x1 and y2 are free and x1 comes first
+    assert(order_of(&g, &b) == "x2 x1 y2 y1 std");
+}
+
+fn a_cycle_of_four_names_each_library_once() void {
+    graph.graph mut g = graph.graph{};
+    defer graph.free(&g);
+    graph.add(&g, "d", HASH_A);
+    graph.add_use(&g, "a", HASH_A);
+    graph.add(&g, "c", HASH_A);
+    graph.add_use(&g, "d", HASH_A);
+    graph.add(&g, "b", HASH_A);
+    graph.add_use(&g, "c", HASH_A);
+    graph.add(&g, "a", HASH_A);
+    graph.add_use(&g, "b", HASH_A);
+    assert(refuses(&g, "library cycle: 'a' uses 'b' uses 'c' uses 'd' uses 'a'"));
+}
+
+fn of_two_cycles_the_search_from_the_first_name_reports() void {
+    graph.graph mut g = graph.graph{};
+    defer graph.free(&g);
+    // q and r form one cycle, b and c another; the search from `b` finds its own first
+    graph.add(&g, "q", HASH_A);
+    graph.add_use(&g, "r", HASH_A);
+    graph.add(&g, "r", HASH_A);
+    graph.add_use(&g, "q", HASH_A);
+    graph.add(&g, "c", HASH_A);
+    graph.add_use(&g, "b", HASH_A);
+    graph.add(&g, "b", HASH_A);
+    graph.add_use(&g, "c", HASH_A);
+    assert(refuses(&g, "library cycle: 'b' uses 'c' uses 'b'"));
+}
+
+fn the_uses_of_a_library_are_followed_in_byte_order() void {
+    graph.graph mut g = graph.graph{};
+    defer graph.free(&g);
+    // `a` uses `z` and `m`; each of them is in a cycle with `a`, and `m` comes first
+    graph.add(&g, "a", HASH_A);
+    graph.add_use(&g, "z", HASH_B);
+    graph.add_use(&g, "m", HASH_C);
+    graph.add(&g, "z", HASH_B);
+    graph.add_use(&g, "a", HASH_A);
+    graph.add(&g, "m", HASH_C);
+    graph.add_use(&g, "a", HASH_A);
+    assert(refuses(&g, "library cycle: 'a' uses 'm' uses 'a'"));
+}
+
+fn a_self_use_beside_a_long_chain_is_the_cycle() void {
+    graph.graph mut g = graph.graph{};
+    defer graph.free(&g);
+    graph.add(&g, "app", HASH_A);
+    graph.add_use(&g, "lib", HASH_B);
+    graph.add(&g, "lib", HASH_B);
+    graph.add_use(&g, "std", HASH_C);
+    graph.add(&g, "std", HASH_C);
+    graph.add_use(&g, "std", HASH_C);
+    assert(refuses(&g, "library cycle: 'std' uses 'std'"));
+}
+
+fn a_use_compares_the_whole_interface_hash() void {
+    graph.graph mut g = graph.graph{};
+    defer graph.free(&g);
+    graph.add(&g, "std", HASH_A);
+    graph.add(&g, "geom", HASH_B);
+    // the last digit differs
+    graph.add_use(&g, "std", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab");
+    assert(refuses(&g, "library 'geom' was built against another interface of 'std'"));
+}
+
+fn a_use_belongs_to_the_library_added_last() void {
+    graph.graph mut g = graph.graph{};
+    defer graph.free(&g);
+    graph.add(&g, "std", HASH_A);
+    graph.add(&g, "geom", HASH_B);
+    graph.add_use(&g, "std", HASH_A);
+    // std uses nothing, so it comes last; geom uses std, so it comes first
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(order_of(&g, &b) == "geom std");
+    graph.add(&g, "app", HASH_C);
+    graph.add_use(&g, "geom", HASH_B);
+    assert(accepts(&g));
+    assert(order_of(&g, &b) == "app geom std");
+    assert(graph.count(&g) == 3);
+    assert(graph.name_at(&g, 2) == "app");
+}
+
+fn the_link_order_ignores_a_use_of_a_name_it_does_not_hold() void {
+    graph.graph mut g = graph.graph{};
+    defer graph.free(&g);
+    graph.add(&g, "b", HASH_A);
+    graph.add_use(&g, "missing", HASH_A);
+    graph.add(&g, "a", HASH_B);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    // the check refuses it; the order of what it holds stays byte order
+    assert(refuses(&g, "library 'b' uses library 'missing', which no --use names"));
+    assert(order_of(&g, &b) == "a b");
+}
+
+fn main() i32 {
+    a_library_that_uses_nothing_passes();
+    an_empty_graph_passes();
+    each_use_with_its_interface_passes();
+    a_use_that_no_library_names_is_refused();
+    a_use_of_another_interface_is_refused();
+    the_first_library_on_the_command_line_reports_first();
+    the_uses_of_one_library_report_in_their_order();
+    a_missing_use_reports_before_a_cycle();
+    println("uses ok");
+    two_libraries_that_use_each_other_are_a_cycle();
+    a_library_that_uses_itself_is_a_cycle();
+    a_cycle_of_three_starts_at_its_first_name();
+    a_cycle_beside_libraries_that_form_none_is_found();
+    a_search_that_meets_a_cycle_late_still_starts_its_text_at_the_first_name();
+    a_diamond_is_no_cycle();
+    a_cycle_of_four_names_each_library_once();
+    of_two_cycles_the_search_from_the_first_name_reports();
+    the_uses_of_a_library_are_followed_in_byte_order();
+    a_self_use_beside_a_long_chain_is_the_cycle();
+    a_use_compares_the_whole_interface_hash();
+    println("cycles ok");
+    a_library_comes_before_each_library_that_it_uses();
+    a_choice_takes_the_first_name_in_byte_order();
+    each_pick_reads_the_remaining_libraries_alone();
+    one_library_is_its_own_link_order();
+    the_link_order_of_no_library_is_empty();
+    a_freed_graph_is_empty_and_usable();
+    a_chain_in_any_command_line_order_links_from_its_top();
+    two_chains_interleave_by_byte_order();
+    a_use_belongs_to_the_library_added_last();
+    the_link_order_ignores_a_use_of_a_name_it_does_not_hold();
+    println("order ok");
+    println("ok");
+    return 0;
+}

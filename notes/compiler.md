@@ -312,6 +312,36 @@ came here.
   No cache exists yet, so the build looks up no key. toolchain.md 2.1 puts the source hash in
   step 3, before the parse; with no cache that order changes no output, and a build that reads the
   cache must take the hash before the parse.
+- **`--use` reads each artifact once and keeps the bytes that it checked** (D9.11, toolchain.md
+  2.1 and 2.2). `driver.read_libraries` runs before the entry file or the root is opened.
+  `artifact.read` reads `manifest`, `interface.ft` and `lib.a` once each. `artifact.parse_manifest`
+  accepts a text only when `artifact.write_manifest` writes it again byte for byte from the parsed
+  fields, so the order of the lines, the value form, the byte order of the lists and the key of
+  rules 1 to 3 are one comparison. A hash gets a check of its own, because the writer writes any
+  value of a hash field as it is. An
+  absent file, and an entry that is no regular file after the link that it can be, are corrupt:
+  the open takes O_NONBLOCK and fstat(2) reads the type, so a FIFO does not stop the build. Each
+  other failure of a read is `cannot read library`. The checked
+  interface text is what `modules.use_library` lexes, and the link line names a copy of the checked
+  `lib.a` bytes in the temporary directory, `<tmp>/<name>.a`. `library.graph` holds the uses
+  between the libraries, the cycle rule and the link order. No build writes a cycle: a build of
+  `a` against `b` must name `a` with `--use` when `b` uses `a`, and a `--use` of the `--lib` name
+  is refused. So only a forged manifest reaches that message.
+- **The modules of a used library that the closure does not hold enter no order of a later pass**
+  (module-system.md 10.4). After a clean check of the closure, `modules.load_outside` loads each
+  other section, the libraries in the reverse of the link order. Such a module goes to
+  `outside_order`, an import before its importer, and to `outside_listed`, in byte order of the
+  path, never to `order`, and `pass_at` skips it. So the emitter, the lowering, the interface
+  writer, the source hash and the index never read it. The emptiness pass runs over the closure
+  before this check, in a build with `--use` as under `--lib` (toolchain.md 2.1, step 4), so an
+  overwrite error stops the build first, as it does in a whole program.
+  `check_stmt.check_outside` checks these modules with `checker.defer_externs` set, so
+  `resolve_fn` holds back each extern, and then
+  `check.check_externs` compares the externs in the listed order. The deferral keeps the order of
+  the errors when a section imports a later section, which the checker reads first
+  (`modules_outside_test.ft`). Under `--check --json` the `"files"` of D20.2 list the interface
+  file of each used library first, in command-line order, because step 1 reads them, and then each
+  other file once.
 - **A diagnostic about two declarations stands at the one in the module being checked**, and the
   other declaration is its note (D14.2, amended 2026-09-14 by T-112). The closure is checked in
   dependency order (D9.10), so that declaration is the later of the two and the note can name a

@@ -945,6 +945,31 @@ fn check_module(check.checker mut* ck, modules.module* m) bool {
     return ck->errors == before;
 }
 
+/// Checks the modules that modules.load_outside loaded, each import first, with their extern
+/// declarations held back, and then compares those declarations in the order of
+/// module-system.md 10.4: library by library and each in byte order of the path. Call it after
+/// check_program checked the closure. Returns true when no module reports an error.
+fn check_outside(check.checker mut* ck, modules.module_set* set) bool {
+    bool mut ok = true;
+    ck->defer_externs = true;
+    u64 mut i = 0;
+    while (i < modules.outside_count(set)) {
+        if (!check_module(ck, modules.outside_at(set, i))) {
+            ok = false;
+        }
+        i += 1;
+    }
+    ck->defer_externs = false;
+    i = 0;
+    while (i < modules.outside_count(set)) {
+        if (!check.check_externs(ck, modules.listed_outside_at(set, i))) {
+            ok = false;
+        }
+        i += 1;
+    }
+    return ok;
+}
+
 /// Checks modules in dependency order, then checks other parsed modules deepest first.
 /// This order gives editors diagnostics from files with failed imports.
 /// Returns true when no module reports an error.
