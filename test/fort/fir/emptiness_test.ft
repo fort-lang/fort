@@ -12,6 +12,7 @@
 //| fresh store ok
 //| memory ok
 //| calls ok
+//| after check ok
 //| globals ok
 //| held ok
 //| join ok
@@ -53,7 +54,7 @@ import std.strbuf;
 // The types, the globals and the functions that the FIR text of each case names. A `node` has
 // two owning fields, a fixed array of two owning pointers and an owning span of them. A `pair`
 // has two owning fields.
-string[18] PRELUDE = {
+string[37] PRELUDE = {
     "struct node {",
     "    node mut* own left;",
     "    node mut* own right;",
@@ -71,6 +72,25 @@ string[18] PRELUDE = {
     "}",
     "fn take(node mut* own n) void {",
     "    del(n);",
+    "}",
+    "fn make() node mut* own {",
+    "    return new(node);",
+    "}",
+    "fn fill(node mut* n) node mut* own {",
+    "    del(n->left);",
+    "    n->left = new(node);",
+    "    return new(node);",
+    "}",
+    "fn poke(node mut* n) void {",
+    "    del(n->left);",
+    "    n->left = new(node);",
+    "}",
+    "extern fn ext_touch(node mut* n) i32;",
+    "fn make_pair() pair {",
+    "    return pair{};",
+    "}",
+    "fn pick() u64 {",
+    "    return 1;",
     "}",
 };
 
@@ -1150,6 +1170,305 @@ string[97] CALLS = {
 };
 
 string[5] CALLS_VERDICTS = {"P", "UU", "U", "U", "UP"};
+
+// The first statement of the continuation block of a check runs after the check and before the
+// store writes, so the pass applies its kill rules at the check: the kill of a call, and the kill
+// rules of a store into another place than the place of the check (spec/fir.md 11, Proof).
+string[266] AFTER_CHECK = {
+    // a call into the place of the check through a fresh pointer: U
+    "fn main.cs1() -> void {",
+    "    let _1 (n): node mut* own;",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own;",
+    "        _2 = alloc<node>(const u64 1);",
+    "        _1 = move _2;",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = call fn main.fill(copy _1);",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a call into a local that is no memory, which no call can fill: P
+    "fn main.cs2() -> void {",
+    "    let _1 (p): node mut* own;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own;",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = call fn main.make();",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a call into a held address: U
+    "fn main.cs3(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own mut*;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        _2 = addr mut((*_1).0);",
+    "        check(overwrite: (*_2)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_2) = call fn main.fill(copy _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a call into a temporary, and then the store of the check: U
+    "fn main.cs4(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2 = call fn main.fill(copy _1);",
+    "        (*_1).0 = move _2;",
+    "        return;",
+    "    }",
+    "}",
+    // a call into a global: U
+    "fn main.cs5() -> void {",
+    "    bb0: {",
+    "        del(move global main.G);",
+    "        check(overwrite: global main.G) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        global main.G = call fn main.make();",
+    "        return;",
+    "    }",
+    "}",
+    // a call into a memory local: U
+    "fn main.cs6() -> void {",
+    "    let _1 (p): node mut* own;",
+    "    let _2: node mut* own*;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own;",
+    "        _2 = addr(_1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = call fn main.make();",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a continuation block with no statement: P
+    "fn main.cs7(_1 (b): node mut*) -> void {",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // the store of the check comes first, and a call follows it: P
+    "fn main.cs8(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own;",
+    "    let _3: void;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        _2 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _2;",
+    "        _3 = call fn main.g();",
+    "        return;",
+    "    }",
+    "}",
+    // two checks, and the call follows only the second: PU
+    "fn main.cs9(_1 (b): node mut*) -> void {",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        del(move (*_1).1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        check(overwrite: (*_1).1) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        (*_1).1 = call fn main.fill(copy _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a call into the whole local, and then the store into its field: U
+    "fn main.cs10() -> void {",
+    "    let _1 (s): pair;",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        _1 = const zero pair;",
+    "        _2 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = call fn main.make_pair();",
+    "        _1.0 = move _2;",
+    "        return;",
+    "    }",
+    "}",
+    // a call into the key of the place, and then the store: U
+    "fn main.cs11() -> void {",
+    "    let _1 (a): node mut* own[2];",
+    "    let _2 (k): u64;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _2 = const u64 0;",
+    "        _1 = const zero node mut* own[2];",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1[_2]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2 = call fn main.pick();",
+    "        _1[_2] = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // a store of a constant into the key, with no call: U
+    "fn main.cs12() -> void {",
+    "    let _1 (a): node mut* own[2];",
+    "    let _2 (k): u64;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _2 = const u64 0;",
+    "        _1 = const zero node mut* own[2];",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1[_2]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2 = const u64 1;",
+    "        _1[_2] = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // a store into a separate field through the same pointer: P
+    "fn main.cs13(_1 (b): node mut*, _2 (x): node mut* own) -> void {",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).1 = move _2;",
+    "        (*_1).0 = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // a store through another pointer, which can hold the value of `_1`: U
+    "fn main.cs14(_1 (b): node mut*, _2 (c): node mut*, _3 (x): node mut* own) -> void {",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_2).1 = move _3;",
+    "        (*_1).0 = move _4;",
+    "        return;",
+    "    }",
+    "}",
+    // a del, which has no kill rule: P
+    "fn main.cs15(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        _2 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        del(move (*_1).1);",
+    "        (*_1).0 = move _2;",
+    "        return;",
+    "    }",
+    "}",
+    // an extern call into a temporary: U
+    "fn main.cs16(_1 (b): node mut*) -> void {",
+    "    let _2: i32;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2 = call extern ext_touch(copy _1);",
+    "        (*_1).0 = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // a call through a function value into the place of the check: U
+    "fn main.cs17(_1 (b): node mut*) -> void {",
+    "    let _2: fn (node mut*) node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        _2 = const fn main.fill;",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = call copy _2(copy _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a call with a `void` result: U
+    "fn main.cs18(_1 (b): node mut*) -> void {",
+    "    let _2: void;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2 = call fn main.poke(copy _1);",
+    "        (*_1).0 = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // the store into the place of the check through another temporary with the same key, so the
+    // store keeps its kill rules for after the test: P
+    "fn main.cs19() -> void {",
+    "    let _1 (a): node mut* own[2];",
+    "    let _2 (k): u64;",
+    "    let _3: u64;",
+    "    let _4: u64;",
+    "    bb0: {",
+    "        _2 = const u64 0;",
+    "        _1 = const zero node mut* own[2];",
+    "        _3 = copy _2;",
+    "        _4 = copy _2;",
+    "        check(overwrite: _1[_3]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1[_4] = call fn main.make();",
+    "        return;",
+    "    }",
+    "}",
+    // a store into an element through the same pointer whose index can equal the index of the
+    // check: U
+    "fn main.cs20(_1 (v): node mut* own[2] mut*, _2 (i): u64, _3 (j): u64) -> void {",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1)[_2]);",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1)[_2]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1)[_3] = move _4;",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[20] AFTER_CHECK_VERDICTS = {
+    "U", "P", "U", "U", "U", "U", "P", "P", "PU", "U", "U", "U", "P", "U", "P", "U", "U", "U", "P",
+    "U",
+};
 
 // A global is a tracked place with no fact at the entry.
 string[30] GLOBALS = {
@@ -2688,7 +3007,7 @@ string[198] LOOPS = {
 string[8] LOOPS_VERDICTS = {"U", "P", "P", "U", "U", "P", "P", "U"};
 
 // Structs as places: a pointee moved whole, an aggregate result and a global struct.
-string[86] AGGREGATES = {
+string[88] AGGREGATES = {
     // a move of a pointee makes its fields empty, but no element of its span: PPU
     "fn main.a1(_1 (b): node mut*, _2 (k): u64) -> void {",
     "    let _3: node;",
@@ -2761,11 +3080,13 @@ string[86] AGGREGATES = {
     "        return;",
     "    }",
     "}",
-    // del through a fresh pointer, then a call: the call kills the fact: PU
+    // del through a fresh pointer, then a call: the call kills the fact: PU. A store into `_4`
+    // stands first after the first check, so the call kills after that check (AFTER_CHECK).
     "fn main.a7() -> void {",
     "    let _1 (n): node mut* own;",
     "    let _2: node mut* own;",
     "    let _3: void;",
+    "    let _4: u64;",
     "    bb0: {",
     "        _1 = const zero node mut* own;",
     "        _2 = alloc<node>(const u64 1);",
@@ -2774,6 +3095,7 @@ string[86] AGGREGATES = {
     "        check(overwrite: (*_1).1) -> bb1;",
     "    }",
     "    bb1: {",
+    "        _4 = const u64 0;",
     "        _3 = call fn main.g();",
     "        check(overwrite: (*_1).1) -> bb2;",
     "    }",
@@ -4475,6 +4797,11 @@ fn a_call_kills_each_fact_but_those_of_a_local_that_is_no_memory() void {
     expect(CALLS[..], CALLS_VERDICTS[..]);
 }
 
+// The first statement after a check applies its kill rules at the check.
+fn the_first_statement_after_a_check_kills_at_the_check() void {
+    expect(AFTER_CHECK[..], AFTER_CHECK_VERDICTS[..]);
+}
+
 // A global is a tracked place with no fact at the entry.
 fn a_global_has_no_fact_at_the_entry() void {
     expect(GLOBALS[..], GLOBALS_VERDICTS[..]);
@@ -5391,6 +5718,8 @@ fn main() i32 {
     println("memory ok");
     a_call_kills_each_fact_but_those_of_a_local_that_is_no_memory();
     println("calls ok");
+    the_first_statement_after_a_check_kills_at_the_check();
+    println("after check ok");
     a_global_has_no_fact_at_the_entry();
     println("globals ok");
     a_held_address_reads_as_its_place();

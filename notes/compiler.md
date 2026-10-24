@@ -711,7 +711,15 @@ came here.
   (`span_straight`, `span_global`) changed the header with no store into a local. So each such
   statement makes each held address stale (`writes_memory`, `apply_stale`); the earlier cases
   and the three families keep each count, and no source of the tree changes its verdict. The
-  two fort shapes are errors now (`test/lang/fail/ownership/062`). The
+  two fort shapes are errors now (`test/lang/fail/ownership/062`). Seven FIR cases were false
+  accepts too, because the first statement after `check(overwrite: p)` changed `p` before the
+  store: a call into `p` (`call_store`, and `call_value` through a function value), a call with a
+  `void` result (`call_void`), a call into the local of a field `p` (`store_whole`), a call into
+  the key of `p` (`call_key`), a store through a second pointer to the object of `p`
+  (`alias_store`) and a store straight into the global of `p` (`global_alias`). So the block of a
+  check takes the kill rules of that first statement, but not the kill rules of a store into `p`
+  itself, which come after the test (`kill_after_check`, `apply_kills`). The lowering puts the
+  right side before the check and the store first, so no check of the lowering changes. The
   place text of a report comes from the source: the pass finds the assignment at the position of the
   `=` in the tree of the function and takes the text from its first token to the `=`, with a `(`
   before it when the text needs one. A FIR text with no tree gives the FIR place. The emitter
