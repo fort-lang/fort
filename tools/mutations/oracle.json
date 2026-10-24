@@ -1,0 +1,190 @@
+{
+  "comment": [
+    "The mutants of fir.emptiness (src/fort/fir/emptiness.ft) that make the pass prove a store",
+    "that it must not prove, against the oracle test of rule (a) (test/fort/owner/oracle_test.ft,",
+    "spec/ownership-design.md 3.6). Each row is a row of tools/mutations/emptiness.json with the",
+    "same anchor. A row is caught when the test fails: a false accept makes it exit 134, and a",
+    "changed count changes its stdout. The log of a round shows which. D17.11-memory-pointer",
+    "changes only a count, because the pass stays sound with it: a place through a pointer local",
+    "that is memory changes only by a store into the local, which kills each fact with its base, by",
+    "a store through a pointer or a call, which kill each fact reached through memory, or by a",
+    "store into its pointee, which kills as any store does.",
+    "Of the 49 rows of tools/mutations/emptiness.json, 28 are not here: 12 make the pass prove",
+    "less, such as D17.11-memory-fixed and D17.11-straight-others; 4 change the work limit, which no",
+    "function of the sets reaches; 9 change the report, the driver or the build-mode pass; and 3",
+    "prove more and change no verdict of a run. D17.11-below and D17.11-key-return change no run:",
+    "after the gen, an element of the span fails its bounds check first, and only a store writes",
+    "_0, which kills each fact with its key. D17.11-held-fixed stays sound: the place of a held",
+    "address of fixed storage reads as a local that is memory. The table runs in the Linux VM with",
+    "the debug preset and the default runner. The md5 guard reads the product compiler, whose driver",
+    "imports fir.emptiness. The first rounds of a run can read stale (notes/testing.md 7), so the",
+    "first row is one that a full run caught."
+  ],
+  "sources": [
+    "src/fort/fir/emptiness.ft"
+  ],
+  "binary": "build/Linux/debug/fort",
+  "build": "ninja -C build/Linux/debug fort",
+  "stages": [
+    {
+      "name": "the oracle test of rule (a)",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 2 owner/oracle_test"
+    }
+  ],
+  "mutations": [
+    {
+      "decision": "D17.11-kill-key",
+      "file": "src/fort/fir/emptiness.ft",
+      "old": "        } else if (to_local && has_key(c, q, d.local)) {",
+      "new": "        } else if (false) {",
+      "what": "a store into a key local kills no fact with that key"
+    },
+    {
+      "decision": "D17.11-kill-base",
+      "file": "src/fort/fir/emptiness.ft",
+      "old": "        if (is_same_base(q, d) && !is_separate(c, q, d)) {",
+      "new": "        if (false) {",
+      "what": "a store kills no fact with its base"
+    },
+    {
+      "decision": "D17.11-kill-pointer",
+      "file": "src/fort/fir/emptiness.ft",
+      "old": "        if (is_through_memory(c, q) && !kept) {",
+      "new": "        if (false) {",
+      "what": "a store through a pointer kills no fact of another base"
+    },
+    {
+      "decision": "D17.11-kill-global",
+      "file": "src/fort/fir/emptiness.ft",
+      "old": "    if (to_local && !c->locals[cast(d.local, u64)].memory) {\n        return;\n    }",
+      "new": "    if (!to_local || !c->locals[cast(d.local, u64)].memory) {\n        return;\n    }",
+      "what": "a store straight into a global kills no fact through a pointer"
+    },
+    {
+      "decision": "D17.11-straight-alias",
+      "file": "src/fort/fir/emptiness.ft",
+      "old": "        if (is_indirect(c, q) && !is_through_fresh(c, q, fresh)) {",
+      "new": "        if (false) {",
+      "what": "a store straight into a memory local keeps a fact through a pointer that holds its address"
+    },
+    {
+      "decision": "D17.11-kill-call",
+      "file": "src/fort/fir/emptiness.ft",
+      "old": "        if (s->value.kind == fir.rvalue_kind.rv_call) {\n            kill_call(c, pr);",
+      "new": "        if (false) {\n            kill_call(c, pr);",
+      "what": "a call kills no fact"
+    },
+    {
+      "decision": "D17.11-order",
+      "file": "src/fort/fir/emptiness.ft",
+      "old": "        c->steps_len = mark;\n    }\n    apply_fresh_store(c, s, fresh);",
+      "new": "        c->steps_len = mark;\n    }\n    gen_reads(c, s, stale, pr);\n    apply_fresh_store(c, s, fresh);",
+      "what": "the gen of a move operand comes again after the kills of its statement"
+    },
+    {
+      "decision": "D17.11-fresh-copy",
+      "file": "src/fort/fir/emptiness.ft",
+      "old": "        fir_flow.bits_clear(fresh, o.place.local);",
+      "new": "        fir_flow.bits_get(fresh, o.place.local);",
+      "what": "a copy of a pointer local ends no freshness"
+    },
+    {
+      "decision": "D17.11-fresh-new",
+      "file": "src/fort/fir/emptiness.ft",
+      "old": "        || !is_single(c, o.place.local) || l->reads != 1) {",
+      "new": "        || !is_single(c, o.place.local)) {",
+      "what": "a temporary that a second item reads is a fresh new or a zero value"
+    },
+    {
+      "decision": "D17.11-zero-aggregate",
+      "file": "src/fort/fir/emptiness.ft",
+      "old": "        bool zero = o.kind == fir.operand_kind.ok_const\n            && (o.value.kind == fir.const_kind.ck_zero || o.value.kind == fir.const_kind.ck_null);",
+      "new": "        bool zero = true;",
+      "what": "an aggregate of any operands is the zero value"
+    },
+    {
+      "decision": "D17.11-value-memory",
+      "file": "src/fort/fir/emptiness.ft",
+      "old": "    return l->assigns == 1 && !l->memory;",
+      "new": "    return l->assigns == 1;",
+      "what": "a temporary that is memory keeps the value of its one store"
+    },
+    {
+      "decision": "D17.11-memory",
+      "file": "src/fort/fir/emptiness.ft",
+      "old": "    *out = r.place.local;\n    return true;",
+      "new": "    *out = r.place.local;\n    return false;",
+      "what": "an address of a local makes it no memory"
+    },
+    {
+      "decision": "D17.11-memory-pointer",
+      "file": "src/fort/fir/emptiness.ft",
+      "old": "            if (i != 0 || !pointer || c->locals[cast(src.local, u64)].memory) {",
+      "new": "            if (i != 0 || !pointer) {",
+      "what": "a place through a pointer local that is memory is tracked"
+    },
+    {
+      "decision": "D17.11-separate",
+      "file": "src/fort/fir/emptiness.ft",
+      "old": "            return x.kind == step_kind.sk_field && y.kind == step_kind.sk_field;",
+      "new": "            return true;",
+      "what": "two places that differ first at an index are separate"
+    },
+    {
+      "decision": "D17.11-separate-leaving",
+      "file": "src/fort/fir/emptiness.ft",
+      "old": "    if (is_leaving(c, a) || is_leaving(c, b)) {\n        return false;\n    }",
+      "new": "    if (false) {\n        return false;\n    }",
+      "what": "a path behind a second deref, such as p->next->g, is separate from p->g"
+    },
+    {
+      "decision": "D17.11-key-stale",
+      "file": "src/fort/fir/emptiness.ft",
+      "old": "        if (l->source.kind == key_kind.kk_local && !fir_flow.bits_get(stale, i)) {",
+      "new": "        if (l->source.kind == key_kind.kk_local) {",
+      "what": "a temporary keeps the key of its source after a store into the source"
+    },
+    {
+      "decision": "D17.11-held-memory",
+      "file": "src/fort/fir/emptiness.ft",
+      "old": "        l->held = !l->memory && is_held_address(c, k);",
+      "new": "        l->held = is_held_address(c, k);",
+      "what": "a held address that is memory stays a held address"
+    },
+    {
+      "decision": "D17.11-held-stale",
+      "file": "src/fort/fir/emptiness.ft",
+      "old": "    bool stale_held = held && fir_flow.bits_get(stale, p.local);",
+      "new": "    bool stale_held = false;",
+      "what": "a held address reads as its place after a store into a local that the place reads"
+    },
+    {
+      "decision": "D17.11-held-stale-path",
+      "file": "src/fort/fir/emptiness.ft",
+      "old": "        .tracked = !stale_held,",
+      "new": "        .tracked = true,",
+      "what": "a stale held address gives a tracked place"
+    },
+    {
+      "decision": "D17.11-held-stale-fresh",
+      "file": "src/fort/fir/emptiness.ft",
+      "old": "        if (held && fir_flow.bits_get(stale, s->place.local)) {",
+      "new": "        if (false) {",
+      "what": "a store through a stale held address keeps the facts through a fresh pointer"
+    },
+    {
+      "decision": "D17.11-join",
+      "file": "src/fort/fir/emptiness.ft",
+      "old": "        fir_flow.dataflow mut facts = fir_flow.dataflow_new(cast(c.fact_count, u32),\n                                                            fir_flow.join_kind.join_intersect,",
+      "new": "        fir_flow.dataflow mut facts = fir_flow.dataflow_new(cast(c.fact_count, u32),\n                                                            fir_flow.join_kind.join_union,",
+      "what": "the facts join by union"
+    },
+    {
+      "decision": "D17.11-join-fresh",
+      "file": "src/fort/fir/emptiness.ft",
+      "old": "    fir_flow.dataflow mut fresh = fir_flow.dataflow_new(fir.local_count(f),\n                                                        fir_flow.join_kind.join_intersect,",
+      "new": "    fir_flow.dataflow mut fresh = fir_flow.dataflow_new(fir.local_count(f),\n                                                        fir_flow.join_kind.join_union,",
+      "what": "freshness joins by union"
+    }
+  ]
+}
