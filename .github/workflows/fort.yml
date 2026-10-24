@@ -1,6 +1,7 @@
 # The checks of the fort compiler: the format of its C test helpers, the fort lint, a
 # Release bootstrap from bootstrap0 followed by the compiler tests, the module tests in
-# parts, and the language server build with its tests.
+# parts, the compiler built from libraries with the module tests against them, and the
+# language server build with its tests.
 #
 # Every job checks out the full history. Configure reads the pinned commit of
 # tools/bootstrap.ref with git, and a shallow clone does not hold it.
@@ -93,11 +94,12 @@ jobs:
           --target fort fort_std lang_ffi_helpers
       # The fort tests: the language corpus, the check mode, the fixpoint in four build
       # modes, the terminal test, and the FIR tests. The parts of the module corpus carry
-      # the label `modules`, and the job `modules` runs them.
+      # the label `modules`, and the job `modules` runs them. The job `libraries` runs the
+      # label `libraries`.
       - name: Run the fort tests
         run: |
           ulimit -c 0
-          ctest --preset release -L '^fort$' -LE '^modules$' --no-tests=error \
+          ctest --preset release -L '^fort$' -LE '^(modules|libraries)$' --no-tests=error \
             -j "$(getconf _NPROCESSORS_ONLN)"
       - name: Keep the fixpoint diffs
         if: failure()
@@ -142,6 +144,44 @@ jobs:
           ulimit -c 0
           ctest --preset release -L '^modules$' \
             -R '^fort-modules-${{ matrix.shard }}-of-2$' --no-tests=error
+
+  # The compiler from libraries (D9.11). The test library-compiler builds std.flib, then
+  # fort.flib from src/fort, then the compiler from the two, and holds the IR module that
+  # this compiler writes against the one of the whole-program compiler.
+  # fort-modules-libraries then runs the module corpus test/fort against the two artifacts.
+  # The second run reads the cache of the first, so the log gives the time of each step
+  # with a cold cache and with a warm cache.
+  libraries:
+    name: libraries (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, host: linux }
+          - { os: macos-latest, host: darwin }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install the tools
+        timeout-minutes: 14
+        run: tools/ci_setup.sh ${{ matrix.host }}
+      - name: Configure
+        run: cmake --preset release
+      - name: Bootstrap the compiler
+        run: >-
+          cmake --build --preset release
+          --target fort fort_std
+      - name: Build from libraries and run the module tests, cold cache
+        run: |
+          ulimit -c 0
+          ctest --preset release -L '^libraries$' --no-tests=error --output-on-failure -V
+      - name: Build from libraries and run the module tests, warm cache
+        run: |
+          ulimit -c 0
+          ctest --preset release -L '^libraries$' --no-tests=error --output-on-failure -V
 
   # The language server: fort-lsp and its tests, apart from the compiler's.
   lsp:

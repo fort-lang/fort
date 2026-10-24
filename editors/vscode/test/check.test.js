@@ -555,3 +555,23 @@ test('the text of each file is read once however many diagnostics it has', () =>
   check.diagnosticsByFile(document, PROJECT, counting);
   assert.deepEqual(reads, [MAIN]);
 });
+
+// ---- the search roots ---------------------------------------------------------
+
+// The compiler imports its modules as `fort.<path>` and the server as `lsp.<path>` (D9.11), so a
+// file of either tree is checked with the root `src`. Measured with the release compiler:
+// `fort --check src/fort/diag.ft` exits 1 with `module 'fort.containers' not found`, and with
+// `-I src` it exits 0.
+test('a file of src/fort or src/lsp needs the root src', () => {
+  assert.deepEqual(check.projectRoots('src/fort/diag.ft'), ['src']);
+  assert.deepEqual(check.projectRoots('src/fort/fir/emptiness.ft'), ['src']);
+  assert.deepEqual(check.projectRoots('src/lsp/json.ft'), ['src']);
+});
+
+test('any other file needs no project root', () => {
+  assert.deepEqual(check.projectRoots('main.ft'), []);
+  assert.deepEqual(check.projectRoots('src/main.ft'), []);
+  assert.deepEqual(check.projectRoots('src/other/x.ft'), []);
+  assert.deepEqual(check.projectRoots('test/fort/ast_test.ft'), []);
+  assert.deepEqual(check.projectRoots('lib/src/fort/x.ft'), []);
+});

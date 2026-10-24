@@ -1352,6 +1352,9 @@ class Config:
     timeout: float = DEFAULT_TIMEOUT
     keep: bool = False
     verbose: bool = False
+    # the `--use` arguments and the `--cache-dir` of a library build (D9.11), or empty
+    uses: list = dataclasses.field(default_factory=list)
+    cache_dir: str = ""
 
 
 def target_os(target):
@@ -1404,12 +1407,35 @@ def run_process(argv, cwd, env, timeout, stdin=b""):
     return Proc(argv, child.returncode, stdout, stderr)
 
 
+def library_options(config, cached):
+    """The options of a library build: each `--use`, then `--cache-dir` when `cached`.
+
+    A build with `--use` reads the used artifacts and ignores `--std-dir` (toolchain.md 1). Only
+    a build that writes an object or an executable reads the cache, and `--check` names none.
+    """
+    argv = []
+    for use in config.uses:
+        argv.extend(["--use", use])
+    if cached and config.uses and config.cache_dir:
+        argv.extend(["--cache-dir", config.cache_dir])
+    return argv
+
+
+def library_use(arg):
+    """`NAME=PATH` of `--use` with an absolute PATH, since each test runs in its own directory."""
+    name, sep, path = arg.partition("=")
+    if not sep or not name or not path:
+        raise argparse.ArgumentTypeError("expected NAME=PATH, got '%s'" % arg)
+    return "%s=%s" % (name, os.path.abspath(path))
+
+
 def compile_command(config, test, output, compile_only=False, emit_ir=False):
     """Build a fort compile command.
 
     `-S` stops after the LLVM IR module.
     """
     argv = [config.fort, "--cc", config.cc, "--std-dir", config.std_dir]
+    argv.extend(library_options(config, True))
     argv.extend(test.flags)
     if compile_only:
         argv.append("-c")
@@ -1426,6 +1452,7 @@ def check_command(config, test, as_json, indexed=False):
     `--json` writes one document to stdout. `--index` fills its identifier index.
     """
     argv = [config.fort, "--check", "--std-dir", config.std_dir]
+    argv.extend(library_options(config, False))
     if as_json:
         argv.append("--json")
     if indexed:
@@ -1607,6 +1634,19 @@ def parse_args(argv):
         "--cc", default=DEFAULT_CC, help="clang for --cc and link: (default: %(default)s)"
     )
     parser.add_argument(
+        "--use",
+        action="append",
+        default=[],
+        type=library_use,
+        metavar="NAME=PATH",
+        help="passed as --use to each compile and check command (D9.11); repeatable",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        default="",
+        help="passed as --cache-dir to each compile command with --use (D9.11)",
+    )
+    parser.add_argument(
         "--target", default=DEFAULT_TARGET, help="--target= of the link step (default: %(default)s)"
     )
     parser.add_argument(
@@ -1689,6 +1729,8 @@ def load_corpus(root, args):
 
 def main(argv=None):
     args = parse_args(argv)
+    if args.cache_dir and not args.use:
+        sys.exit("run_tests.py: error: --cache-dir requires --use")
     root = Path(args.root).resolve()
     tests, problems, xfail = load_corpus(root, args)
     # The name an XPASS tells the reader to edit: the list actually in use.
@@ -1743,6 +1785,8 @@ def main(argv=None):
         timeout=args.timeout,
         keep=args.keep,
         verbose=args.verbose,
+        uses=args.use,
+        cache_dir=os.path.abspath(args.cache_dir) if args.cache_dir else "",
     )
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     counts = dict.fromkeys(VERDICTS, 0)

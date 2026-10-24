@@ -28,20 +28,19 @@ from pathlib import Path
 
 # Pair each source group with the search roots that resolve its imports.
 # Language server modules use the `src` root, so their paths keep the `lsp.` prefix.
-# A nested module of src/fort imports its siblings from the root, `import fir.flow;`, and its
-# own directory is not that root. So it takes `src/fort` as a search root. The first matching
-# glob gives a file its roots, so a flat module of src/fort keeps none.
+# A module of src/fort imports its siblings as `fort.<path>`, as the library `fort` spells
+# them (D9.11), so it takes the root `src` too, flat or nested. The first matching glob gives a
+# file its roots.
 # STD_COMMON skips the directories of TARGETS; the target glob adds the one of the target.
 STD_COMMON = "std/**/*.ft"
 STD_TARGET = "std/linux/**/*.ft"
 SOURCE_SETS = (
     (STD_COMMON, ()),
     (STD_TARGET, ()),
-    ("src/fort/*.ft", ()),
-    ("src/fort/**/*.ft", ("src/fort",)),
-    ("src/lsp/**/*.ft", ("src", "src/fort")),
-    ("test/fort/**/*.ft", ("src", "src/fort", "test/fort/support")),
-    ("test/lsp/**/*.ft", ("src", "src/fort", "test/fort/support")),
+    ("src/fort/**/*.ft", ("src",)),
+    ("src/lsp/**/*.ft", ("src",)),
+    ("test/fort/**/*.ft", ("src", "test/fort/support")),
+    ("test/lsp/**/*.ft", ("src", "test/fort/support")),
 )
 SOURCE_GLOBS = tuple(glob for glob, _ in SOURCE_SETS)
 TARGETS = ("linux", "darwin")
@@ -142,9 +141,9 @@ def glob_base(pattern):
 def default_file_set(root, sets=SOURCE_SETS):
     """Return the default (path, include roots) pairs, sorted by path.
 
-    A file matched by two globs takes the roots of the first matching glob.
-    `src/fort/*.ft` and `src/fort/**/*.ft` overlap, and a flat module takes the
-    roots of the first. Thus, table order defines the set. Filesystem order does not.
+    A file matched by two globs takes the roots of the first matching glob. No two globs of
+    SOURCE_SETS overlap today: STD_COMMON skips the target directories. Thus, table order
+    defines the set when two globs overlap. Filesystem order does not.
     """
     skipped = {(root / name).resolve() for name in SKIPPED}
     chosen = {}
@@ -541,8 +540,8 @@ def lint_files(fort, root, files, std_dir=None):
                 # that closure. Thus, a run judges a file only when the roots
                 # agree. Std/ resolves through the copy beside the compiler, which is
                 # another file, and the test/fort and test/lsp tests carry the roots of
-                # test/fort/support. A nested module of src/fort carries `-I src/fort`,
-                # so a run of a flat module does not judge it, and it takes a run of its own.
+                # test/fort/support. A module of src/fort carries `-I src`, so a run of a
+                # module of src/lsp, which carries the same root, can judge it.
                 continue
             source = has_source_text(entries[other][3])
             segments = module_segments(entries[other][0])

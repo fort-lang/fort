@@ -85,7 +85,7 @@ def check_determinism(args, work):
 def build_checker(args, work):
     checker = work / "checker"
     proc = run([args.fort, "--std-dir", args.std_dir, "--cc", args.cc,
-                "-I", str(SOURCE_ROOT / "src" / "fort"), "-o", str(checker),
+                "-I", str(SOURCE_ROOT / "src"), "-o", str(checker),
                 str(HERE / "checker.ft")])
     if proc.returncode != 0:
         sys.stderr.write(proc.stderr.decode("utf-8", errors="replace"))

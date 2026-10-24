@@ -1035,6 +1035,10 @@ $B/fort --fir --std-dir $B/std <flags of the test> <each of the 514 entry files 
 $B/fort --fir --std-dir $B/std -I src/fort -I test/fort/support -I src <each of 328 module tests>
 ```
 
+At 90b50c0a the compiler imported its modules by short paths, so these commands name the root
+`src/fort`. Since the compiler imports them as `fort.<path>` (D9.11), each `-I src/fort` above
+is `-I src`.
+
 The corpora count each function once: 1,913 in `src/fort` outside `std`, 142 in `src/lsp`, 186 in
 `std`, 3,811 in the test and support modules of `test/fort`, and 1,248 in `test/lang`.
 

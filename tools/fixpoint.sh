@@ -60,7 +60,9 @@ done
 root=$(cd "$(dirname "$0")/.." && pwd)
 entry=${entry:-$root/src/fort/main.ft}
 std=${std:-$build/std}
-source_root=${source_root:-$(dirname "$entry")}
+# The compiler imports its modules as fort.<path> (D9.11). The entry is <src>/fort/main.ft, so
+# the default root is the parent of the directory of the entry.
+source_root=${source_root:-$(dirname "$(dirname "$entry")")}
 if [ -z "$compiler" ]; then
     echo "fixpoint.sh: --compiler is required" >&2
     exit 2

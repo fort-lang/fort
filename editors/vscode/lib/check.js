@@ -226,12 +226,32 @@ function diagnosticsByFile(document, baseDir, lineSource) {
   return byFile;
 }
 
+// ---- the search roots ---------------------------------------------------------
+
+// The directories of the fort repository whose modules import each other by a path from the
+// root `src`: `fort.<path>` for the compiler (D9.11) and `lsp.<path>` for the language server.
+const SOURCE_ROOT = 'src';
+const SOURCE_TREES = ['fort', 'lsp'];
+
+/**
+ * Returns the search roots that a file needs by its place in the workspace folder, relative to
+ * that folder. A file below `src/fort/` or `src/lsp/` needs the root `src`. Other files need none.
+ */
+function projectRoots(relativePath) {
+  const parts = relativePath.split(/[\\/]/);
+  if (parts.length > 2 && parts[0] === SOURCE_ROOT && SOURCE_TREES.includes(parts[1])) {
+    return [SOURCE_ROOT];
+  }
+  return [];
+}
+
 module.exports = {
   DOCUMENT_VERSION,
   diagnosticsByFile,
   filesUnder,
   isUnder,
   parseDocument,
+  projectRoots,
   resolveDocumentPath,
   splitLines,
   toEditorRange,
