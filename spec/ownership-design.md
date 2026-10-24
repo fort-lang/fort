@@ -433,6 +433,17 @@ These are all the assumptions of the rules. A program that breaks one gets no cl
 - **A7**: the C code of an extern keeps A1 to A5, and it frees no allocation that fort still owns.
   D17.13 already trusts the C side of an extern signature, and V1 trusts C no further: an extern
   call follows 4.6 as each call does. No rule can check C, so the design takes A7 (section 15).
+- **A8**: a value designates storage of a local of this run of F only when it derives from an
+  address of that local that this run took. It derives through copies, casts, arithmetic, stores and
+  loads, in F or in a callee. A8 is a question for the user, who rules on it before the ticket of
+  rule (b) starts. D10.7 lists no forged pointer as undefined behavior. So a callee can return
+  `cast(cast(p, u64) + 8, i32*)` for an argument `p`, and D10.7 defines a read through that value.
+  Rules (b) and (e) of V1 need A8 for such a read. Without A8 the read can name a local that is not
+  memory, and it is then no use (5.5 rule (b)) and no borrow (lemma (ii)). Refinement R6 needs A8
+  for each local (section 7). Rules (a) and (c), and kill rule 5 of D17.11, need only that no write
+  and no release goes through a forged pointer. D3.14 gives that, because a cast from an integer
+  marks no level `mut` and no level `own`. D10.6 gives it for an index in each build without
+  `--no-bounds-check`, and D10.7 gives it for a slice.
 
 ### 5.2 Outside the scopes
 
@@ -614,19 +625,19 @@ another pointee type with owners, so part 2 of rule (c) has 0 sites at a cast (m
 | (e)3 pinned owner: a call (4.6)  | 1,269/92  | 0/0     | 2/1   | 16,249/1,846 | 1,296/64  | ?    |
 | (e) all parts                    | 1,400/128 | 2/2     | 23/11 | 17,193/1,981 | 1,552/134 | ?    |
 
-The causes of the (e) counts in `src/fort`, from variants of P4 that are not sound:
+The causes of the (e) counts in `src/fort`, from variants of P4 (measured, `?`). A variant other
+than R1 and R6 is a bound, and it is not sound:
 - Premise 3 makes each copy through a pointer, of any type, borrow each memory owner. With
-  refinement R6 instead (section 7), (b) falls from 61/26 to 22/11 and (e) from 1,400/128 to
-  776/111. These counts rest on R6, which is unsound as written.
+  refinement R6 instead (section 7), (b) falls from 61/26 to 29/13 and (e) from 1,400/128 to
+  900/113. In `test/fort`, (b) stays 154/79 and (e) falls to 16,755/1,967.
 - Step 4 of 4.6 gives a result each local owner of each frame that an argument borrows. Without it,
-  (e)3 at a call falls from 1,269/92 to 1,116/70; with R6 too, to 26/5 (on R6, which is unsound as
-  written). In `diag.set_text(session.diags(&s), true)` the result borrows each owner of `s`, the
-  argument pins them, and each later call fails.
+  (e)3 at a call falls from 1,269/92 to 1,116/70; with R6 too, to 229/20. In
+  `diag.set_text(session.diags(&s), true)` the result borrows each owner of `s`, the argument pins
+  them, and each later call fails.
 - With results that borrow nothing, (e)2 falls from 54/38 to 8/7: `return containers.pool_intern(p,
   strbuf.view(&b))` in `driver.join_path` puts a frame borrow of `b` into `_0` through two results.
-- With R1, R6, results without those owners and no pin by a call argument, (e) is 63/47
-  (`test/fort` 1,944/581, `test/lang` 211/49): the floor of R3, R4 and R6. This floor rests on
-  R6, which is unsound as written.
+- With R1, R6, results without those owners and no pin by a call argument, (e) is 162/57
+  (`test/fort` 2,048/592, `test/lang` 242/52): the floor of R3, R4 and R6. Without R6 it is 696/96.
 
 ### 6.1 (a) Overwrite
 
@@ -748,19 +759,46 @@ counts of its rules before and after it. A report count can change the order of 
   keeps `S(x.p.q)` after step 3. It helps (b) and (e)1 for memory owners.
 - **R3 `result` lines.** A line names what a result borrows: the origins of argument `k`, or the
   owner at a path through it. It replaces step 4 of 4.6. Bound (P4): with R6, rule (e) in `src/fort`
-  falls from 776 sites to no fewer than 157; both counts rest on R6, which is unsound as written.
+  falls from 900/113 to no fewer than 365/87.
 - **R4 `keep` lines.** A line says that the callee can store a borrow of argument `k` outside its
   frame. An argument with no line pins nothing; a call that can change an owner that an argument
-  borrows stays an error. Bound (P4, with R1, R3 and R6): rule (e) falls to no fewer than 47
-  functions of `src/fort`, a count that rests on R6, which is unsound as written.
+  borrows stays an error. Bound (P4, with R1, R3 and R6): rule (e) falls to no fewer than 57
+  functions of `src/fort`. An argument with no line can also expose no frame for R6. With no
+  exposure by an argument, (e)3 at a call with R3 and R6 falls from 229/20 to 78/8 (a bound).
 - **R5 view places for aggregates**: a struct local with a view field tracks its borrows, with weak
   updates. It helps (e)2 and (e)3.
-- **R6 alias by borrow**, unsound as written; a later ticket must give it a sound rule before any
-  ticket uses it. A place through a pointer can be only a memory place of a frame that the pointer
-  borrows. X4 excludes a kept frame address only from rule (e), so for rules (a) and (b) a pointer
-  can reach a frame through a kept value: `keep(&x)` stores `&x` in a global `G`, and then
-  `del(*G); *G = new(i32); x = new(i32);` passes. Measured on the unsound rule (P4): (b) from 61/26
-  to 22/11 and (e) from 1,400/128 to 776/111 in `src/fort`.
+- **R6 alias by borrow and exposure.** A path **exposes** a memory local `x` when it sends a frame
+  borrow of `x` to a destination that pins an owner in 4.5. A call argument is one of them. `x` is
+  exposed at a point when a path to that point exposes it. A copy borrows the origin `exposed` when
+  its place is no view local, no local owner and no part of either. Such a place is a place through
+  a pointer, a global, `_0`, or a place of a local that is memory or of a type that is no view. A
+  call result borrows `exposed` too. Take a place through a pointer, and the pointer that its last
+  load reads. The place can be a place of a memory local `x` only when that pointer borrows the
+  frame of `x`, or borrows `exposed` while `x` is exposed. It can still be each other memory place.
+  4.5 applies this to each copy, load, `move`, `del` and store through a pointer.
+  Proof, with A8: the lemma of 5.3 gets (vi). A value that designates storage of a memory local `x`
+  is in a view local `v` whose `B(v)` names the frame of `x`, or names `exposed` while `x` is
+  exposed. In any other storage, `x` is exposed. An `addr` or a `slice` gives the frame borrow. A
+  copy, a `use` or a `cast` into a view local keeps it (4.5), and each other destination exposes the
+  frame. Each other copy borrows `exposed`, and by (vi) its frame is exposed already. A callee
+  reaches a frame of F only through an argument or through memory. So it writes and returns
+  addresses of exposed frames only. A join is a union, and no step ends an exposure. So a place that
+  R6 removes is never the storage of the access. The updates, uses and lends of 4.5 keep (i), (ii)
+  and (iv) for rules (a), (b), (c) and (e). In a call result, a frame that only an exposure reaches
+  is kept (X4) or failed part 2 of rule (e), as in V1, so step 4 of 4.6 stays. Five items of 5.4
+  change. A place through a pointer can be a place of a memory local only as above. `copy p` borrows
+  `exposed` when `p` is no view local, no local owner and no part of either. Through a pointer, it
+  borrows only the owners of the frames that the pointer reaches. `addr(p)` and `slice(p, lo, hi)`
+  through a pointer take the borrows of a copy of that pointer, so they can borrow `exposed` too. In
+  `call`, each argument exposes the frames that it borrows, and the result borrows `exposed`. In
+  `p = rvalue`, a destination that pins an owner also exposes each frame that the value borrows. R6
+  narrows kill rule 3 of D17.11 for memory locals, so its decision amends D17.11. Its facts keep
+  each charge of 4.8 under 2^24 (P4: 12,009,988 at most, in `test/fort`).
+  k2 fails: `keep(&x)` exposes `x`, and `p = G` borrows `exposed`. So `del(*p)` and `*p = new(i32)`
+  reach `x`, and `x = new(i32)` is an error of rule (a). Its rule (b) variant fails at `*x = 1`
+  (P4). Gain (measured, P4, `?`): (b) from 61/26 to 29/13 and (e) from 1,400/128 to 900/113 in
+  `src/fort`. The form of revision 4 gave such a copy no frame, and it accepted k2 and the hand case
+  `n4`.
 - **R7 edges of a null test**: a branch on `p == null` proves `p` empty there. It helps (c).
 - **R8 the `del` of a span of owners**: a loop rule or a builtin that empties each element (Q7).
 - **R9 privacy**: a memory local whose address only view locals hold keeps its facts at a call.
@@ -876,12 +914,12 @@ one PR (impl-hard, rev-deep). The oracle and the move are impl-hard and rev-deep
 7. `refine-empty` (R1, M), after 6.
 8. `aggregate-leak-*`, after 7: rule (c) part 1 on owning aggregates. Migration L, split by
    directory.
-9. `refine-alias` (R6, M), after 5 and after the later ticket that gives R6 a sound rule: it adds
-   `B` for the frames that view locals borrow.
-10. `move-*`, after 9: rule (b). Migration M.
+9. `refine-alias` (R6, M), after 5: it adds `B` for the frames that view locals borrow and the
+   origin `exposed`. It also adds one may-fact for each memory local: the local can be exposed.
+10. `move-*`, after 9 and the ruling on A8 (5.1): rule (b). Migration M.
 11. `refine-result` (R3, L), after 6. 12. `refine-keep` (R4, L), after 11.
-13. `view-*`, after 9, 11 and 12: rule (e). The report adds `T` and `P`. Migration L in at least
-    five tickets.
+13. `view-*`, after 9, 11, 12 and the ruling on A8: rule (e). The report adds `T` and `P`. Migration
+    L in at least five tickets.
 14. `refine-span-del` (R8, M), after 5, by the ruling on Q7.
 15. `refine-kept` (R2), `refine-view-aggregate` (R5), `refine-null-edge` (R7) and `refine-typed`
     (R10): M each, after 6 or 5, only when a report count needs one.
@@ -906,15 +944,16 @@ The questions, their options and their counts stay below as the record.
 **Q1. Which rules of V1 become errors, and when?**
 - Functions of V1 in `src/fort` (measured, P4): (c) on `own` locals 1, (c) part 2 10, (b) 26, (c)
   on owning aggregates 99 (48 with R1), (e) 128. In `test/fort`: (b) 79, (c) on aggregates 2,354
-  (2,076 with R1), (e) 1,981. With R6, which is unsound as written, (b) is 11 and (e) 111.
+  (2,076 with R1), (e) 1,981. With R6, (b) is 13 and (e) 113 (measured, P4). The user ruled on 11
+  and 111, the counts of the unsound form of R6 in revision 4.
 - Options: (1) all of V1 now, in the order (c), (b), (e), with the migrations of section 6; (2)
   (c) on `own` locals and (c) part 2 now; (b) after a sound R6; (c) on aggregates after R1, and
-  after R9 if the user rules for it; (e) after R3, R4 and a sound R6; (3) another order. Option (2)
-  waits for the later ticket that gives R6 a sound rule.
+  after R9 if the user rules for it; (e) after R3, R4 and a sound R6; (3) another order. Section 7
+  gives the sound R6 of option (2).
 - Recommendation: (2). The migration of (e) in V1 touches 1,981 test functions, and a function
   that lends an owner to a callee and then frees it has no fix in V1. After R1, R3, R4 and R6, (e)
-  can fall to 47 functions of `src/fort`, and no lower (section 6); that floor rests on R6 as
-  written, which is unsound.
+  can fall to 57 functions of `src/fort`, and no lower (section 6). The user ruled on 47, from the
+  unsound form.
 
 **Q2. May a function state its ownership contract in source, as an annotation?**
 - (A) No; each refinement infers its lines. A line can change with a body, and then a new error
@@ -938,10 +977,10 @@ The questions, their options and their counts stay below as the record.
   may lower its cost. In V1 it costs 1,269 sites in 92 functions of `src/fort`. Two design choices
   raise it. Step 4 of 4.6 makes a result borrow each owner of each frame that an argument borrows;
   without that part (R3) the cost is 1,116/70. Premise 3 makes a copy through any pointer borrow
-  each memory owner; with R6 in its place the cost is 661/63, and with both changes 26/5. These two
-  counts rest on R6 as written, which is unsound. The typed form of revision 3, which missed D17.4,
-  measured 658/63 and 12/3. Recommendation: confirm the call, and let R3 and a sound R6 lower its
-  cost.
+  each memory owner; with R6 in its place the cost is 780/68, and with both changes 229/20. The
+  user ruled on 661/63 and 26/5, from the unsound form of R6. The typed form of revision 3, which
+  missed D17.4, measured 658/63 and 12/3. Recommendation: confirm the call, and let R3 and a sound
+  R6 lower its cost.
 - (b) Two cases are outside the scope (X4). One is a lend that a callee keeps or writes out through
   an out-parameter, as `view_into(&b, &s)` in `n4`. The other is a frame address that a callee
   keeps. The option to cover both pins each owner of each frame that an argument borrows. Cost: rule
@@ -1008,10 +1047,12 @@ imports. A worklist runs the state of 4.4 to its fixpoint, and one more pass rec
 - The table gives no type to 72 places of `src/fort` through pointers to `node` and `module`,
   names that more than one module declares. Those places update and read no owner (low).
 - The column R1 computes the `empty` lines in components, callees first (8.1).
+- The struct table reads the sources of 71728460, and the FIR is that of 90b50c0a. With the table
+  of 90b50c0a, (b) for a direct memory owner in `test/fort` is 49/27, not 53/31 (measured).
 
-The variants of section 6 change premise 3, step 4 of 4.6 and the pin of a call argument; they are
-not sound. P3 of revision 3 had the type filter that this revision removes, and P0 to P2 measured
-rules of revision 1.
+The variants of section 6 change premise 3 (R6, sound), step 4 of 4.6 and the pin of a call
+argument (bounds, not sound). P3 of revision 3 had the type filter that this revision removes, and
+P0 to P2 measured rules of revision 1.
 
 ## 15. Choices that the coordinator ratified
 
