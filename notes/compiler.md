@@ -1223,5 +1223,17 @@ library (T-160).
     exception since T-212 is gen.c's `gen_fort_entry`, which the fort emitter no longer has: the
     emitted `main` calls the program's `main` directly.
 
+  **The compiler imports its own modules as `fort.<path>`** (D9.11, module-system.md 10.1).
+  The file `src/fort/a/b.ft` is the module `fort.a.b` of the library `fort`, and every
+  whole-program build reaches it through the search root `src`: the HEAD edge, the fixpoint,
+  `fort_lsp`, the lint, the VS Code extension and the `//! flags:` of `test/fort` and `test/lsp`
+  pass `-I src`. Each pin edge passes `-I <pin>/src` too, so a pin after this spelling builds;
+  the pin `0fe521c` finds its short imports beside its entry file and never reads that root.
+  The pinned bootstrap-1 builds HEAD with this spelling. `tools/long_imports.py` writes a short
+  import of a compiler module in the long spelling, and the ctest `long-imports` fails on one.
+  A branch that adds a short import runs the tool after its rebase. A branch that edits an
+  import header which the tool rewrote gets a conflict in that header: keep the branch side of
+  the header, then run the tool, which writes each short import of it in the long spelling.
+
 **The fort compiler can implement language forms that the C compiler does not implement.**
 Product tests hold these forms directly. The project does not maintain C-to-fort parity (T-160).

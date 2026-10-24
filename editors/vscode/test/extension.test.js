@@ -1426,3 +1426,26 @@ test('deactivation forgets the files that were checked', () => {
   // so its answer is dropped rather than published into a disposed collection.
   assert.equal(harness.state.diagnostics.size, 0);
 });
+
+// A module of the compiler imports its siblings as `fort.<path>` through the root `src` (D9.11).
+// Its check carries that root, or every import is `not found`.
+test('a check of a compiler module carries the root src', () => {
+  const { state } = fake.install({ workspaceFolder: PROJECT });
+  fake.save(state, path.join(PROJECT, 'src', 'fort', 'diag.ft'));
+  assert.equal(state.calls.length, 1);
+  assert.equal(state.calls[0].args[1], COMPILER + " --check --json -I 'src' 'src/fort/diag.ft'");
+});
+
+test('a check of a server module carries the root src once', () => {
+  const { state } = fake.install({ workspaceFolder: PROJECT });
+  const json = path.join(PROJECT, 'src', 'lsp', 'json.ft');
+  fake.save(state, json);
+  fake.complete(state.calls[0], { stdout: JSON.stringify({
+    version: 1,
+    files: ['src/lsp/json.ft'],
+    diagnostics: [],
+    symbols: [],
+  }) });
+  fake.save(state, json);
+  assert.equal(state.calls[1].args[1], COMPILER + " --check --json -I 'src' 'src/lsp/json.ft'");
+});

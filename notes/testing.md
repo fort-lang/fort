@@ -28,16 +28,21 @@ bullet at a time and without a rewrite.
   the compiler's (T-264). Unit:
   `test/fort` (`fort-modules-1-of-2` and `fort-modules-2-of-2`, and `fort-modules-shards`, which
   holds the parts against the whole list), `test/lsp` (`lsp-modules`), `test/fir` (`fir`),
-  `highlight_selftest`, `extension_selftest`, `panic_coverage`, `panic_coverage_selftest` and
-  one `mutation_anchors_<table>` test for each table in `tools/mutations`, and the three
-  `mutate_` tests of `--check` over the fixture `test/mutate/strict_table.json`;
+  `long-imports` (`tools/long_imports.py --check`, which fails on a short import of a compiler
+  module), `long_imports_selftest` and `lang_harness_selftest` (the tool and the `--use` and
+  `--cache-dir` options of `run_tests.py`), `highlight_selftest`, `extension_selftest`,
+  `panic_coverage`, `panic_coverage_selftest` and one `mutation_anchors_<table>` test for each table
+  in `tools/mutations`, and the three `mutate_` tests of `--check` over the fixture
+  `test/mutate/strict_table.json`;
   the 71 bootstrap0 C suites. Integration: the corpus (`lang`, `lang-json`), `library-interface`,
   `library-artifact`, `library-use`, `library-cache`, `fixpoint`, `tty`,
   `stack_depth` and `lsp-binary`; bootstrap0 has none, since building bootstrap-1 proves the C
-  compiler. `stack_depth` gives each compiler of the build a 1 MB stack and a type of 254
-  nested groups (D2.11). Before the checkers kept their suffixes on a stack of their own, that
-  type needed 1792 KB in a darwin debug build. The unit
-  tests of the tools (`lang_selftest`, `fort_lint_selftest`, `mutate_selftest`) went on 2026-09-26.
+  compiler. The label `libraries` holds `library-compiler` and `fort-modules-libraries`, which
+  carry no step label, so `unit` and `integration` leave them out; the CI job `libraries` runs them
+  (`notes/environment.md` 7). `stack_depth` gives each compiler of the build a 1 MB stack and a type
+  of 254 nested groups (D2.11). Before the checkers kept their suffixes on a stack of their own,
+  that type needed 1792 KB in a darwin debug build. The unit tests of the tools (`lang_selftest`,
+  `fort_lint_selftest`, `mutate_selftest`) went on 2026-09-26.
   On linux each target runs as `tools/vm <target>`.
 - **GitHub PR CI supplies the merge gate** (2026-10-01; T-306).
   `.github/workflows/ci.yml` runs on PRs against the repository.
@@ -345,19 +350,20 @@ bullet at a time and without a rewrite.
   `test/module_shards_test.py` (ctest `fort-modules-shards`) lists the whole corpus and each
   part with `--list` and fails when a test is in two parts or in none. It also fails unless the
   matrix of the CI job `modules` lists each part once. A `test/fort` test is an
-  ordinary run test in the D14.5 directives whose header carries `//! flags: -I ../../src/fort` (the
+  ordinary run test in the D14.5 directives whose header carries `//! flags: -I ../../src` (the
   compiler's working
-  directory is the corpus root, so the path has two `..`, not three). **The tests of `src/lsp`
-  stand in `test/lsp`** (T-264; `test/fort` until then), in the same format, and a test of a
-  server module carries `-I ../../src` beside that root, since a server module is `lsp.<name>`
-  under the root `src` (T-063). A corpus of its own lets the label `lsp` run the server's tests
-  apart from the compiler's. The files keep the `lsp_` prefix they took in `test/fort`
-  (`lsp_json_test.ft`, `json_test.ft` being the compiler writer's). A file name is
+  directory is the corpus root, so the path has two `..`, not three). A compiler module is
+  `fort.<path>` under that root, as the library `fort` spells it (D9.11), and
+  `tools/long_imports.py` writes a short import of one in that spelling. **The tests of `src/lsp`
+  stand in `test/lsp`** (T-264; `test/fort` until then), in the same format, and a server module is
+  `lsp.<name>` under the same root `src` (T-063). A corpus of its own lets the label `lsp` run the
+  server's tests apart from the compiler's. The files keep the `lsp_` prefix they took in
+  `test/fort` (`lsp_json_test.ft`, `json_test.ft` being the compiler writer's). A file name is
   `<module>_test.ft` or `<module>_<case>_panic_test.ft` for a test whose program must end in a
   panic, since a panic kills the program and each one needs a file; any other `.ft` at that root is
   `bad test name`, because a typo there would otherwise run nowhere and say nothing.
   **Code several of those tests share lives in `test/fort/support/*.ft`**, which they reach with a
-  second include root (`//! flags: -I ../../src/fort -I support`; `-I ../fort/support` from
+  second include root (`//! flags: -I ../../src -I support`; `-I ../fort/support` from
   `test/lsp`, whose tests share `support/heap.ft` with the compiler's): a `test/fort` test is a
   program rather than a translation unit, so the `#include`d helper a C suite would use
   (`bootstrap0/test/common/types_helpers.h`) has to be an imported module (`support/types_env.ft`,
@@ -369,20 +375,22 @@ bullet at a time and without a rewrite.
   `agents/lines.py` counts `test/**/*.ft` as test lines and `src/fort/**/*.ft`,
   `src/lsp/**/*.ft` and `std/**/*.ft` as source lines, `test/highlight_test.py` tokenizes them,
   and `tools/fort_lint.py` lints them with the search roots its `SOURCE_SETS` table pairs with
-  the glob (`-I src -I src/fort -I test/fort/support`); a file named on its command line takes
+  the glob (`-I src -I test/fort/support`); a file named on its command line takes
   the roots of its own `-I` options.
   **The lint's roots are a superset of the directives' and not a copy of them**, which is the
   property to keep. `grep -h '//! flags:' test/fort/*.ft | sort | uniq -c` counted three shapes
   among the 161 tests of T-063, before T-264 moved the server's tests to `test/lsp`: 87 carry
   `-I ../../src/fort -I support`, 53 carry `-I ../../src/fort` alone and 21 carry
-  `-I ../../src/fort -I support -I ../../src`. The lint gives all 161 the same three roots, in
-  another order. The two agree about which file answers an import only while no
-  root shadows another, and today nothing does, because `src/` holds no `.ft` of its own: a future
-  `src/<name>.ft` would be the module `<name>` under the lint's first root and something else
-  under a test's, and the lint would then judge a file the harness never compiles (T-063).
-  Without those roots `fort --index` reports
-  `module 'containers' not found` and every name in the file goes unjudged, which it did until
-  T-079. **`test/fort` is not a leak oracle**: the gate's `asan-debug` and `ubsan-debug`
+  `-I ../../src/fort -I support -I ../../src`. The lint gave all 161 the same three roots, in
+  another order. Since the compiler imports its modules as `fort.<path>` (D9.11), 372 of the 374
+  tests of `test/fort` and `test/lsp` carry flags in 3 shapes: 209 `-I ../../src -I support`, 129
+  `-I ../../src` alone and 34 `-I ../../src -I ../fort/support`, and the lint gives each the two
+  roots `src` and `test/fort/support`. The two agree about which file answers an import only while
+  no root shadows another, and today nothing does: `test/fort/support` holds no module named `fort`,
+  `lsp` or `std`, and no test directory holds a module that a support module also names, so a
+  support module answers the same import under both (T-063). Without those roots `fort --index`
+  reports `module 'fort.containers' not found` and every name in the file goes unjudged, which it
+  did until T-079. **`test/fort` is not a leak oracle**: the gate's `asan-debug` and `ubsan-debug`
   presets instrument the native compiler, not the x86-64 program the harness builds and runs under
   qemu, so a `del` a module forgets leaks silently through all three presets. A module that
   promises its allocations die with the value that owns them (D20.5) needs a witness of its own --
@@ -1087,8 +1095,8 @@ bullet at a time and without a rewrite.
 - **What checks `.ft` source, and what does not** (T-076). Three things do. `tools/fort_lint.py`
   (target `lint`) holds `std/**/*.ft` (outside the target directories), `std/<target>/**/*.ft`,
   `src/fort/**/*.ft` and `src/lsp/**/*.ft` to the identifier conventions of D1.4, to the naming
-  rules of `notes/style.md` 3.1 and to 100 columns. A nested module of `src/fort` takes
-  `-I src/fort`, because it imports its siblings from that root;
+  rules of `notes/style.md` 3.1 and to 100 columns. A module of `src/fort` takes
+  `-I src`, because it imports its siblings as `fort.<path>` from that root (D9.11);
   it reads `fort --index` (D20.3) rather than tokenizing
   fort a second time, so the kinds and types it reasons about are the checker's own answers, and a
   second tokenizer cannot drift from the language. `lint` passes `--target`, so each host lints
@@ -1111,7 +1119,7 @@ bullet at a time and without a rewrite.
   and `src/lsp/` is checked by nothing until a glob in `fort_lint.py` names it. A nested test
   module, `test/fort/fir/flow_test.ft`, runs and is linted: the harness takes each `*_test.ft`
   of a module corpus outside `run/`, `fail/`, `programs/` and `support/`. The compiler runs in
-  the corpus root, so a nested test spells `-I ../../src/fort -I support` as a root test does.
+  the corpus root, so a nested test spells `-I ../../src -I support` as a root test does.
   **One `fort --index` run judges every file
   of the closure it indexed**, not only the file it names: the run indexes the whole import
   closure and each record carries its own file (D20.3), so `lint_files` takes the first file it

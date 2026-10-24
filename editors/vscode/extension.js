@@ -106,13 +106,19 @@ function shellQuote(word) {
 
 // One check of the document the editor hands over. A file outside every
 // workspace folder is skipped. `tools/vm run` works in the directory matching
-// its own, and there is nothing to say about a file that has none.
+// its own, and there is nothing to say about a file that has none. A file of
+// `src/fort` or `src/lsp` imports its siblings through the root `src`, so the
+// check carries that root first (check.projectRoots).
 function run(document) {
   if (!isFortFile(document)) return;
   const filePath = document.uri.fsPath;
   const folder = folderOf(document.uri);
   if (folder === null) return;
-  startCheck(filePath, folder, knownRoots(filePath, folder), null);
+  const roots = check.projectRoots(path.relative(folder, filePath));
+  for (const root of knownRoots(filePath, folder)) {
+    if (!roots.includes(root)) roots.push(root);
+  }
+  startCheck(filePath, folder, roots, null);
 }
 
 // Returns prior search roots for this file and workspace folder.

@@ -58,6 +58,9 @@ set(FORT_STD_SRC_DIR "${CMAKE_SOURCE_DIR}/std")
 set(FORT_EDITORS_DIR "${CMAKE_SOURCE_DIR}/editors")
 set(FORT_STD_DIR "${CMAKE_BINARY_DIR}/std")
 set(FORT_FORT_SRC_DIR "${CMAKE_SOURCE_DIR}/src/fort")
+# The search root of the compiler's modules. The file src/fort/a/b.ft is the module fort.a.b
+# in a whole-program build through this root and in the library fort (D9.11).
+set(FORT_SOURCE_ROOT "${CMAKE_SOURCE_DIR}/src")
 option(FORT_ENABLE_BOOTSTRAP0 "Build fort through the C-started source chain" ON)
 set(FORT_STAGE1_COMPILER "" CACHE FILEPATH
     "External fort compiler that builds working-tree HEAD")
@@ -298,10 +301,13 @@ else()
             COMMENT "Extracting and assembling bootstrap-${pin_number}"
             VERBATIM
         )
+        # A pin whose compiler imports fort.<path> finds its modules through the root src.
+        # A pin before the long spelling (D9.11) finds them beside its entry file.
         add_custom_command(
             OUTPUT "${pin_binary}"
             COMMAND "${FORT_PREVIOUS_COMPILER}" ${FORT_STAGE_MODE_ARGS}
                 --std-dir "${pin_dir}/std"
+                -I "${pin_dir}/src"
                 --cc "${FORT_TARGET_CC_PATH}"
                 -o "${pin_binary}" "${pin_dir}/src/fort/main.ft"
             DEPENDS "${pin_stamp}" ${FORT_PREVIOUS_DEPENDENCY}
@@ -345,7 +351,7 @@ add_custom_command(
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${FORT_HEAD_DIR}"
     COMMAND "${FORT_PREVIOUS_COMPILER}" ${FORT_STAGE_MODE_ARGS}
         --std-dir "${FORT_HEAD_STD}"
-        -I "${FORT_FORT_SRC_DIR}"
+        -I "${FORT_SOURCE_ROOT}"
         --cc "${FORT_TARGET_CC_PATH}"
         -o "${FORT_HEAD_BINARY}" "${FORT_HEAD_ENTRY}"
     DEPENDS ${FORT_HEAD_STD_DEPENDENCY} ${FORT_FORT_SOURCES}
@@ -372,7 +378,7 @@ set(FORT_GRAPH_FIXPOINT_COMMAND
     --cc "${FORT_TARGET_CC_PATH}"
     --entry "${FORT_HEAD_ENTRY}"
     --std "${FORT_STD_DIR}"
-    --source-root "${FORT_FORT_SRC_DIR}"
+    --source-root "${FORT_SOURCE_ROOT}"
     --opt "${FORT_OPT_PATH}")
 add_test(NAME fixpoint
     COMMAND ${FORT_GRAPH_FIXPOINT_COMMAND}
@@ -384,8 +390,8 @@ set_tests_properties(fixpoint PROPERTIES LABELS "fort;integration")
 # build root. The C-started source chain builds that compiler for the native
 # target. The linux binary is x86-64 ELF. The darwin binary is arm64 Mach-O.
 #
-# The search roots are src, so that a server module is `lsp.<name>` and never
-# `<name>`. The other root is src/fort, which contains `flt`.
+# The search root is src, so that a server module is `lsp.<name>` and never
+# `<name>`, and a compiler module is `fort.<name>`, as `fort.flt`.
 # The entry file's directory is the first root. No import names a module there.
 set(FORT_LSP_SRC_DIR "${CMAKE_SOURCE_DIR}/src/lsp")
 file(GLOB_RECURSE FORT_LSP_SOURCES CONFIGURE_DEPENDS "${FORT_LSP_SRC_DIR}/*.ft")
@@ -397,7 +403,7 @@ add_custom_command(
     OUTPUT "${FORT_LSP_BINARY}"
     # The compiler builds for its own target, so no --target is passed (D14.1).
     COMMAND "${FORT_COMPILER_BINARY}" --std-dir "${FORT_STD_DIR}" --cc "${FORT_TARGET_CC_PATH}"
-            -I "${CMAKE_SOURCE_DIR}/src" -I "${FORT_FORT_SRC_DIR}"
+            -I "${FORT_SOURCE_ROOT}"
             -o "${FORT_LSP_BINARY}" "${FORT_LSP_SRC_DIR}/main.ft"
     # Depend on the input files and the target. A custom target creates only an
     # order edge. Without the file inputs, a module edit would not rebuild this binary.
@@ -471,6 +477,14 @@ foreach(part RANGE 1 ${FORT_MODULE_SHARDS})
         ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
     list(APPEND FORT_MODULE_TESTS "${name}")
 endforeach()
+# Each import of a compiler module names `fort.<path>` (D9.11): long-imports fails when
+# tools/long_imports.py would rewrite a file, and it names the file.
+add_test(NAME long-imports
+    COMMAND "${FORT_PYTHON3}" "${CMAKE_SOURCE_DIR}/tools/long_imports.py" --check
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(long-imports PROPERTIES
+    LABELS "fort;unit"
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 add_test(NAME fort-modules-shards
     COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/module_shards_test.py"
             --harness "${FORT_LANG_HARNESS}"
@@ -591,6 +605,36 @@ set_tests_properties(library-use PROPERTIES
     PROCESSORS ${FORT_LANG_JOBS}
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
+# The compiler from libraries (D9.11): library-compiler builds std.flib, then fort.flib from
+# src/fort, then the compiler from the two, and holds the IR module that this compiler writes for
+# src/fort/main.ft against the one of the product compiler. fort-modules-libraries runs the module
+# corpus against the two artifacts, so each test compiles its entry unit alone. The artifacts
+# and the cache stay in FORT_LIBRARY_WORK, so a second run is a warm build. The label
+# `libraries` holds the two tests, and the CI job `libraries` runs them apart from the
+# whole-program jobs. They carry no step label, so `unit` and `integration` leave them out.
+set(FORT_LIBRARY_WORK "${CMAKE_BINARY_DIR}/libraries")
+add_test(NAME library-compiler
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/library/compiler_test.py"
+            --fort "${FORT_COMPILER_BINARY}"
+            --std-dir "${FORT_STD_DIR}"
+            --source-root "${FORT_SOURCE_ROOT}"
+            --cc "${FORT_TARGET_CC_PATH}"
+            --work "${FORT_LIBRARY_WORK}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(library-compiler PROPERTIES
+    LABELS "fort;libraries"
+    FIXTURES_SETUP fort_libraries
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+add_test(NAME fort-modules-libraries
+    COMMAND ${FORT_MODULE_TEST_COMMAND}
+            --use "std=${FORT_LIBRARY_WORK}/std.flib"
+            --use "fort=${FORT_LIBRARY_WORK}/fort.flib"
+            --cache-dir "${FORT_LIBRARY_WORK}/cache")
+set_tests_properties(fort-modules-libraries PROPERTIES
+    LABELS "fort;libraries"
+    FIXTURES_REQUIRED fort_libraries
+    ENVIRONMENT "${FORT_SANITIZER_TEST_ENV}")
+
 # The cache of the library builds with the real tools (D9.11, toolchain.md 2.3): cold, fill and
 # warm builds of test/library/chain give the same program and the same diagnostics, the warm
 # build hits each unit, an edit of a body rebuilds one library and no dependent, an edit of a
@@ -644,6 +688,23 @@ add_test(NAME panic_coverage_selftest
     COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/panic_coverage_test.py"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(panic_coverage_selftest PROPERTIES
+    LABELS "fort;unit"
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
+# Hold tools/long_imports.py to small trees: a short import, a local module, the flags, the
+# import selectors of grammar.md 2 and a module named `fort`.
+add_test(NAME long_imports_selftest
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/long_imports_test.py"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(long_imports_selftest PROPERTIES
+    LABELS "fort;unit"
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
+# Hold the library options `--use` and `--cache-dir` of test/lang/run_tests.py (D9.11).
+add_test(NAME lang_harness_selftest
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/lang_harness_test.py"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(lang_harness_selftest PROPERTIES
     LABELS "fort;unit"
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 

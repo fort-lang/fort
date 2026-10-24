@@ -437,7 +437,8 @@ without a rewrite.
   `tools/assemble_std.sh` of a pin with `git archive`, moves the pin's `std` to `<dir>/std-pin` and
   runs the pin's own `tools/assemble_std.sh`, which writes the pin's standard root for the target to
   `<dir>/std`. The pin builds from
-  `<dir>/src/fort/main.ft` with that root. No compiler of the chain gets `--target`: each one
+  `<dir>/src/fort/main.ft` with that root and the search root `<dir>/src`, which a pin with the
+  long imports `fort.<path>` of D9.11 needs. No compiler of the chain gets `--target`: each one
   builds for its own built target, `std.os.TARGET` of its standard root (D14.1).
   The last source compiler builds working-tree HEAD as `fort`.
 - `FORT_BOOTSTRAP0_BUILD_TESTS` (default OFF; every preset sets it ON) adds the C unit tests on
@@ -633,13 +634,24 @@ without a rewrite.
   environment: a runner image, a toolchain or a mirror.
 - `fort.yml` builds and tests the language server in its job `lsp`, apart from the job
   `bootstrap` (T-264). `bootstrap` builds the default targets except `fort_lsp` and the C unit
-  suites, and runs the label `fort` without the label `modules`; `modules` runs the label
-  `modules`; `lsp` builds `fort_lsp` and runs the label `lsp`. Each job
-  bootstraps the compiler itself, as `lint` does, so no job waits for another. **The job
-  `bootstrap` names its targets**: `fort fort_std lang_ffi_helpers`, the default build without
-  `fort_lsp` and the C unit suites. A new `ALL` target in `CMakeLists.txt` gets no CI build
-  until its name joins that list or a job of its own; nothing reports the gap. Every `ctest` step
-  passes `--no-tests=error`, so a label that selects no test fails the job.
+  suites, and runs the label `fort` without the labels `modules` and `libraries`; `modules`
+  runs the label `modules`; `libraries` runs the label `libraries`; `lsp` builds `fort_lsp`
+  and runs the label `lsp`. Each job bootstraps the compiler itself, as `lint` does, so no
+  job waits for another. **The job `bootstrap` names its targets**: `fort fort_std
+  lang_ffi_helpers`, the default build without `fort_lsp` and the C unit suites. A new `ALL` target
+  in `CMakeLists.txt` gets no CI build until its name joins that list or a job of its own; nothing
+  reports the gap. Every `ctest` step passes `--no-tests=error`, so a label that selects no test
+  fails the job.
+- The job `libraries` builds the compiler from libraries (D9.11). It runs the label
+  `libraries` twice. The first run builds `std.flib`, `fort.flib` from `src/fort` and the
+  compiler from the two with a cold cache in `build/<Host>/release/libraries`, and then runs
+  `test/fort` against the two artifacts. The second run reads that cache. The file
+  `src/fort/a/b.ft` is the module `fort.a.b` in this build and, through the root `src`, in the
+  whole-program build, so one import spelling serves both. In the Linux VM the release
+  compiler built the compiler as a whole program in 6.8 to 6.9 s. The three library steps took
+  0.47, 6.74 and 0.24 s cold and 0.05, 0.13 and 0.18 s warm. The two parts of `test/fort` took
+  242.8 and 231.8 s as whole programs, and `fort-modules-libraries` took 117.1 s cold and
+  85.3 s warm, because each test compiles its entry unit alone.
 - `bootstrap0.yml`'s job `unit` runs the label `bootstrap0` under 8 presets on each Linux
   runner and 6 on macOS (T-266): `debug`, `release`, `asan-debug`, `asan-release`,
   `ubsan-debug`, `ubsan-release`, `msan-debug` and `msan-release`. Darwin has no msan. tsan

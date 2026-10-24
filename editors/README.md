@@ -197,11 +197,17 @@ grep -v "^test/\(fort\|lsp\)/" /tmp/painted.txt | grep -c "module 'std\." # 16
 
 170 of them are under `test/fort/` and `test/lsp/` (one directory when this was measured; T-264
 moved the server's tests), whose imports need the `-I ../../src/fort` of their own test
-directive, which no search root taken from a closure recovers. 16 name a `std.` module and answer
-to `tools/vm build release` instead, the `std/` beside the release binary being older than the
-checkout. That leaves 5: `src/lsp/json.ft`, which imports `flt` from `src/fort`; two fail tests and
-one fixture that import a module which does not exist on purpose; and
-`test/lang/run/modules/nested/util/strings.ft`, the one file with this shape.
+directive (now `-I ../../src`), which no search root taken from a closure recovers. 16 name a
+`std.` module and answer to `tools/vm build release` instead, the `std/` beside the release binary
+being older than the checkout. That left 5: `src/lsp/json.ft`, which imported `flt` from
+`src/fort`; two fail tests and one fixture that import a module which does not exist on purpose;
+and `test/lang/run/modules/nested/util/strings.ft`, the one file with this shape.
+
+The compiler now imports its own modules as `fort.<path>` (D9.11), and `src/lsp/json.ft` imports
+`fort.flt`. Both resolve only through the root `src`. So a check of a file below `src/fort/` or
+`src/lsp/` carries `-I src` first (`projectRoots` in `lib/check.js`). Without it,
+`fort --check src/fort/diag.ft` exits 1 with `module 'fort.containers' not found`; with it, the
+check exits 0, and so does the check of `src/lsp/json.ft`.
 
 A check of a module is faithful to the closure whose root it carries wherever one directory is
 enough. It is not faithful in general. D9.2 puts the directory of the file being checked first,
