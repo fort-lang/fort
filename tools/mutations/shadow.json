@@ -1,0 +1,258 @@
+{
+  "comment": [
+    "One row for each event of fir.shadow (src/fort/fir/shadow.ft, spec/ownership-design.md 3.4),",
+    "for a boundary of each, and for the tags of 3.3, with the interpreter lines that feed them",
+    "(src/fort/fir/interpreter.ft). A row names the line that decides the rule and a text that",
+    "breaks it. The first stage runs the suite of the shadow (test/fort/fir/shadow_test.ft), the",
+    "second the driver suite of --fir-events and the pass `run`, and the third the FIR tests. The",
+    "table runs in the Linux VM with the debug preset and the default runner. The md5 guard reads",
+    "the product compiler, whose interpreter calls fir.shadow. The first round of a run can read",
+    "stale (notes/testing.md 7), so the first row is one that a full run caught."
+  ],
+  "sources": [
+    "src/fort/fir/shadow.ft",
+    "src/fort/fir/interpreter.ft"
+  ],
+  "binary": "build/Linux/debug/fort",
+  "build": "ninja -C build/Linux/debug fort",
+  "stages": [
+    {
+      "name": "the suite of fir.shadow",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 2 fir/shadow_test"
+    },
+    {
+      "name": "the driver suite",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 2 driver_run_test"
+    },
+    {
+      "name": "the FIR tests",
+      "command": "python3 test/fir/run_tests.py --fort build/Linux/debug/fort --std-dir build/Linux/debug/std"
+    }
+  ],
+  "mutations": [
+    {
+      "decision": "leak",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "        if (r->live && r->owners == 0 && !r->reported) {\n            r->reported = true;\n            report(sh, event_kind.ev_leak, tag{});",
+      "new": "        if (r->live && r->owners == 0 && !r->reported && false) {\n            r->reported = true;\n            report(sh, event_kind.ev_leak, tag{});",
+      "what": "an allocation whose owner count becomes 0 makes no `leak`"
+    },
+    {
+      "decision": "overwrite",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "            if (write && r->live) {",
+      "new": "            if (write && r->live && false) {",
+      "what": "a store over an owner slot of a live allocation makes no `overwrite`"
+    },
+    {
+      "decision": "overwrite-word",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "    u64 first = slot_position(&sh->slots, lo - lo % WORD);",
+      "new": "    u64 first = slot_position(&sh->slots, lo);",
+      "what": "a store into a byte after the first of an owner word misses the slot"
+    },
+    {
+      "decision": "leak-transit",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "            r->owners -= r->transit;\n            r->transit = 0;",
+      "new": "            r->transit = 0;",
+      "what": "an owner that stays in transit is no `leak`"
+    },
+    {
+      "decision": "leak-quiet",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "    for (u64 mut i = 0; sh->sym != sh->quiet && i < sh->touched.len; i++) {",
+      "new": "    for (u64 mut i = 0; i < sh->touched.len; i++) {",
+      "what": "a `leak` inside std.rt.free stands there and not at the `del`"
+    },
+    {
+      "decision": "leak-return",
+      "file": "src/fort/fir/interpreter.ft",
+      "old": "    shadow.vacate(&it->sh, result, size);\n    pop_frame(it);\n    shadow.test(&it->sh, false);\n    u64 c = k - 1;",
+      "new": "    shadow.vacate(&it->sh, result, size);\n    pop_frame(it);\n    shadow.test(&it->sh, true);\n    u64 c = k - 1;",
+      "what": "the value of `_0` counts as no owner at the `return`"
+    },
+    {
+      "decision": "leak-at-exit",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "        if (r->live && !r->reached && !r->reported) {",
+      "new": "        if (r->live && !r->reached && !r->reported && false) {",
+      "what": "a cycle of owners makes no `leak at exit`"
+    },
+    {
+      "decision": "leak-at-exit-roots",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "    for (u64 mut g = 0; g < sh->roots.len; g++) {",
+      "new": "    for (u64 mut g = 0; g < 0; g++) {",
+      "what": "a global that owns a chain reaches no allocation of it"
+    },
+    {
+      "decision": "double-release",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "    } else if (!sh->allocations.items[a].live) {\n        report(sh, event_kind.ev_double_release, sh->value);",
+      "new": "    } else if (!sh->allocations.items[a].live) {\n        report(sh, event_kind.ev_invalid_release, sh->value);",
+      "what": "a `del` of a released start is an `invalid release`"
+    },
+    {
+      "decision": "invalid-release",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "        report(sh, event_kind.ev_invalid_release, sh->value);\n    } else if",
+      "new": "        report(sh, event_kind.ev_double_release, sh->value);\n    } else if",
+      "what": "a `del` of an interior pointer is a `double release`"
+    },
+    {
+      "decision": "use-after-release",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "    } else if (!low && has_dead(&sh->allocations, addr, len)) {",
+      "new": "    } else if (!low && has_dead(&sh->allocations, addr, len) && false) {",
+      "what": "an access in a released allocation makes no `use after release`"
+    },
+    {
+      "decision": "use-after-release-end",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "        if (!r->live && r->base < addr +% len && addr < r->base + r->size) {",
+      "new": "        if (!r->live && r->base < addr +% len && addr <= r->base + r->size) {",
+      "what": "the byte past the end of a released allocation is in its range"
+    },
+    {
+      "decision": "use-after-move",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "    } else if (low && p.f.kind == tag_kind.tg_moved) {",
+      "new": "    } else if (low && p.f.kind == tag_kind.tg_moved && false) {",
+      "what": "an access through a null from a vacated slot makes no `use after move`"
+    },
+    {
+      "decision": "use-after-move-callee",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "        sh->value.f.flag = k == NONE || k + 1 != sh->frames.len;",
+      "new": "        sh->value.f.flag = false;",
+      "what": "a callee that reads a vacated slot is not named"
+    },
+    {
+      "decision": "use-after-scope-dead",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "        if (d->base < addr + len && addr < d->base + d->size) {",
+      "new": "        if (d->base < addr && addr < d->base + d->size) {",
+      "what": "an access at the first byte of a dead local makes no `use after scope`"
+    },
+    {
+      "decision": "use-after-scope-revive",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "        if (sh->deads.items[i - 1].base == addr) {",
+      "new": "        if (sh->deads.items[i - 1].base == addr && false) {",
+      "what": "a `live` after a `dead` leaves the local dead"
+    },
+    {
+      "decision": "use-after-scope-returned",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "    } else if (!low && has_dead(&sh->ended, addr, len)) {",
+      "new": "    } else if (!low && has_dead(&sh->ended, addr, len) && false) {",
+      "what": "an access in a frame that returned makes no `use after scope`"
+    },
+    {
+      "decision": "duplicate-owner",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "        if (r->owners == 2) {",
+      "new": "        if (r->owners == 3) {",
+      "what": "a second owner slot makes no `duplicate owner`"
+    },
+    {
+      "decision": "transfer",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "    if (r->transit > 0) {\n        r->transit -= 1;",
+      "new": "    if (r->transit > 0 && false) {\n        r->transit -= 1;",
+      "what": "a store of a moved owner adds an owner, so each transfer is a `duplicate owner`"
+    },
+    {
+      "decision": "tag-lend",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "            t.o.kind = tag_kind.tg_owner;",
+      "new": "            t.o.kind = tag_kind.tg_lend;",
+      "what": "a lend that a call returns gets no owner tag"
+    },
+    {
+      "decision": "tag-stamp",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "            t.f.call = callee;",
+      "new": "            t.f.call = 0;",
+      "what": "a frame tag that F passes records no call, so a callee makes no lend"
+    },
+    {
+      "decision": "tag-kept",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "    kept.f.flag = t.f.flag || (t.f.kind == tag_kind.tg_frame && is_below(sh, t.f.frame)\n                               && find_frame(sh, addr) != top);",
+      "new": "    kept.f.flag = t.f.flag || (t.f.kind == tag_kind.tg_frame && is_below(sh, t.f.frame)\n                               && find_frame(sh, addr) == top);",
+      "what": "a value that a callee stores outside its frame is not kept"
+    },
+    {
+      "decision": "tag-cast",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "    if (t.f.kind != tag_kind.tg_moved && is_below(sh, t.f.frame)) {",
+      "new": "    if (t.f.kind != tag_kind.tg_moved && is_below(sh, t.f.frame) && false) {",
+      "what": "a cast to an integer in a callee keeps the tag of F"
+    },
+    {
+      "decision": "tag-frame",
+      "file": "src/fort/fir/interpreter.ft",
+      "old": "        if (fir.place_fixed(f, r.place)) {\n            it->sh.value = shadow.tag_address(&it->sh, a);",
+      "new": "        if (fir.place_fixed(f, r.place) && false) {\n            it->sh.value = shadow.tag_address(&it->sh, a);",
+      "what": "an address of a local makes no frame tag"
+    },
+    {
+      "decision": "tag-binary",
+      "file": "src/fort/fir/interpreter.ft",
+      "old": "        it->sh.value = shadow.merge(first, it->sh.value);",
+      "new": "        it->sh.value = shadow.merge(it->sh.value, first);",
+      "what": "an arithmetic rvalue takes the tag of its second operand"
+    },
+    {
+      "decision": "tag-extern-argument",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "            p = sh->args[i - 1];",
+      "new": "            p = tag{};",
+      "what": "an access that an extern makes through an argument has no tag"
+    },
+    {
+      "decision": "tag-extern-pass",
+      "file": "src/fort/fir/interpreter.ft",
+      "old": "        shadow.pass(&it->sh, cast(i, u64), a[cast(i, u64)]);",
+      "new": "        shadow.pass(&it->sh, cast(i, u64), 0);",
+      "what": "the value of an extern argument matches no access, so its tag is lost"
+    },
+    {
+      "decision": "tag-merge-owner",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "        r.o = b.o;",
+      "new": "        r.o = a.o;",
+      "what": "a binary rvalue drops the owner tag of its second operand"
+    },
+    {
+      "decision": "tag-merge-frame",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "        r.f = b.f;",
+      "new": "        r.f = a.f;",
+      "what": "a binary rvalue drops the frame tag of its second operand"
+    },
+    {
+      "decision": "tag-copy",
+      "file": "src/fort/fir/interpreter.ft",
+      "old": "    shadow.capture(&it->sh, src, n, 0, true);",
+      "new": "    shadow.capture(&it->sh, src, 0, 0, true);",
+      "what": "a copy of bytes by `memcpy` drops the tags of the words that it copies"
+    },
+    {
+      "decision": "tag-extern-ended",
+      "file": "src/fort/fir/interpreter.ft",
+      "old": "    if (has_ended(it)) {\n        // an argument ended the run, so the extern does not run and makes no access\n        return;\n    }",
+      "new": "    if (has_ended(it) && false) {\n        // an argument ended the run, so the extern does not run and makes no access\n        return;\n    }",
+      "what": "an extern runs after an argument faults, and its access takes the tag of another argument"
+    },
+    {
+      "decision": "vacate-copied-null",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "        } else if (s->t.f.kind != tag_kind.tg_moved || s->t.f.call != 1) {",
+      "new": "        } else if (s->t.f.kind != tag_kind.tg_moved) {",
+      "what": "a `move` keeps the moved tag of a word that holds a copied null"
+    }
+  ]
+}

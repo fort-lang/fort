@@ -1,0 +1,751 @@
+/// The shadow state of a run of fir.interpreter: the owners of each allocation, the tags of the
+/// values and the ownership events (spec/ownership-design.md 3.3, 3.4). It changes no outcome.
+//
+// An allocation counts its owner slots: the aligned words that hold its start after a store of an
+// owning value. A `move` or a `del` of an owner slot puts the owner in transit, and the next store
+// of an owning value takes it from there, so a transfer keeps the count. A slot record holds the
+// owner of a word or the tag of its value. A tag names a local of one run of a function by the
+// base of its frame, because the interpreter gives no address twice.
+import fort.ast;
+import fort.diag;
+import fort.fir;
+import fort.fir_print;
+import std.strbuf;
+import std.vec;
+
+// No allocation, frame or slot, and no local.
+u64 NONE = 18446744073709551615;
+u32 NO_LOCAL = 4294967295;
+
+// The size of a slot.
+u64 WORD = 8;
+
+/// The most arguments of an extern call that the run models.
+u64 EXTERN_ARGS = 8;
+
+/// The events of spec/ownership-design.md 3.4, in the order of EVENT_TEXT.
+enum event_kind {
+    ev_overwrite,
+    ev_leak,
+    ev_leak_at_exit,
+    ev_double_release,
+    ev_invalid_release,
+    ev_use_after_release,
+    ev_use_after_move,
+    ev_use_after_scope,
+    ev_duplicate_owner,
+}
+
+string[9] EVENT_TEXT = {
+    "overwrite", "leak", "leak at exit", "double release", "invalid release",
+    "use after release", "use after move", "use after scope", "duplicate owner",
+};
+
+/// What a tag names, in the order of TAG_TEXT. A lend is a lend that a callee made from an owner
+/// of F; it becomes the owner tag when the call `call` returns it to F. A moved tag names the
+/// vacated slot that gave a null.
+enum tag_kind {
+    tg_none,
+    tg_frame,
+    tg_owner,
+    tg_lend,
+    tg_moved,
+}
+
+string[5] TAG_TEXT = {"", " through frame ", " through owner ", "", " through moved "};
+
+/// The origin of a tag: local `local` of the run of `sym` whose frame starts at `frame`. `call` is
+/// the frame of the call that F passed a frame tag in, and 1 for the moved tag of the vacated slot
+/// itself. `flag` marks a frame tag that a callee of F stored outside its own frame (kept), and a
+/// moved tag of a vacated slot that a frame other than F read.
+struct origin {
+    tag_kind kind;
+    bool flag;
+    u32 local;
+    u64 frame;
+    u64 call;
+    ast.sym* sym;
+}
+
+/// The tags of a value: `o` is an owner tag or a lend, and `f` a frame tag or a moved tag.
+struct tag {
+    origin o;
+    origin f;
+}
+
+// An allocation, a dead local, a global or a frame that ended after it made a frame tag. `owners`
+// counts the owner slots of an allocation and its owners in transit, `transit` the second.
+// `reported` says that an event of a leak or an overwrite named the allocation.
+struct range {
+    u64 base;
+    u64 size;
+    bool live;
+    bool reported;
+    bool reached;
+    u32 owners;
+    u32 transit;
+}
+
+struct range_vec {
+    range mut@ own items;
+    u64 len;
+}
+
+// The record of a word: `owner` is the allocation of an owner slot, else NONE. A scratch record
+// has an offset in the scratch buffer of the machine for its address.
+struct slot {
+    u64 addr;
+    u64 owner;
+    tag t;
+}
+
+struct slot_vec {
+    slot mut@ own items;
+    u64 len;
+}
+
+// The shadow of a frame of the stack. Its dead locals are deads[dead..], up to the `dead` of the
+// next frame.
+struct frame {
+    u64 base;
+    u64 size;
+    ast.sym* sym;
+    u64@ offsets;
+    u64 dead;
+    bool tagged;
+}
+
+struct frame_vec {
+    frame mut@ own items;
+    u64 len;
+}
+
+/// An event, the item where it happened and the tag of the value that it went through.
+struct event {
+    event_kind kind;
+    ast.sym* sym;
+    diag.loc at;
+    tag t;
+}
+
+struct event_vec {
+    event mut@ own items;
+    u64 len;
+}
+
+/// The shadow state of one run, which reports its events only with `reporting`. `sym` and `at`
+/// name the item that runs. The items of `quiet`, the `std.rt.free` that a `del` calls, end with
+/// no test, so the test at the end of the `del` counts. `value` is the tag of the last value that
+/// a load gave or an rvalue made, and `place` the tag of the last address. The `nargs` arguments
+/// of the extern that runs have the values `arg_values` and the tags `args`.
+struct state {
+    bool reporting;
+    ast.sym* quiet;
+    ast.sym* sym;
+    diag.loc at;
+    tag value;
+    tag place;
+    range_vec allocations;
+    range_vec ended;
+    range_vec deads;
+    range_vec roots;
+    slot_vec slots;
+    slot_vec scratch;
+    frame_vec frames;
+    vec.int_vec touched;
+    event_vec events;
+    u64 nargs;
+    u64[EXTERN_ARGS] arg_values;
+    tag[EXTERN_ARGS] args;
+}
+
+fn free(state mut* sh) void {
+    del(sh->allocations.items);
+    del(sh->ended.items);
+    del(sh->deads.items);
+    del(sh->roots.items);
+    del(sh->slots.items);
+    del(sh->scratch.items);
+    del(sh->frames.items);
+    vec.int_free(&sh->touched);
+    del(sh->events.items);
+}
+
+fn push_range(range_vec mut* v, range r) void {
+    if (v->len == v->items.len) {
+        range mut@ own bigger = new(range, fir.grown_capacity(v->len, "fir.shadow: capacity"));
+        for (u64 mut i = 0; i < v->len; i++) {
+            bigger[i] = v->items[i];
+        }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = r;
+    v->len += 1;
+}
+
+// ---- searches ---------------------------------------------------------------------------------
+
+// The allocation that starts at `p`, or NONE. The allocations stand in the order of their bases.
+fn find_allocation(state* sh, u64 p) u64 {
+    u64 mut lo = 0;
+    u64 mut hi = sh->allocations.len;
+    while (lo < hi) {
+        u64 mid = lo + (hi - lo) / 2;
+        if (sh->allocations.items[mid].base < p) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if (lo < sh->allocations.len && sh->allocations.items[lo].base == p) {
+        return lo;
+    }
+    return NONE;
+}
+
+// Whether a dead range of `v` overlaps the `len` bytes at `addr`. Only a fault, once a run, asks.
+fn has_dead(range_vec* v, u64 addr, u64 len) bool {
+    for (u64 mut i = 0; i < v->len; i++) {
+        range* r = &v->items[i];
+        if (!r->live && r->base < addr +% len && addr < r->base + r->size) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The position of the first record of `v` whose address is at least `addr`.
+fn slot_position(slot_vec* v, u64 addr) u64 {
+    u64 mut lo = 0;
+    u64 mut hi = v->len;
+    while (lo < hi) {
+        u64 mid = lo + (hi - lo) / 2;
+        if (v->items[mid].addr < addr) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+// The record of the word at `addr`, or NONE.
+fn find_slot(slot_vec* v, u64 addr) u64 {
+    u64 i = slot_position(v, addr);
+    if (i < v->len && v->items[i].addr == addr) {
+        return i;
+    }
+    return NONE;
+}
+
+// Gives the word at `addr` of `v` the owner `owner` and the tag `t`.
+fn set_slot(slot_vec mut* v, u64 addr, u64 owner, tag t) void {
+    u64 at = slot_position(v, addr);
+    if (at < v->len && v->items[at].addr == addr) {
+        v->items[at] = slot{addr, owner, t};
+        return;
+    }
+    if (v->len == v->items.len) {
+        slot mut@ own bigger = new(slot, fir.grown_capacity(v->len, "fir.shadow: capacity"));
+        for (u64 mut i = 0; i < v->len; i++) {
+            bigger[i] = v->items[i];
+        }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    for (u64 mut i = v->len; i > at; i--) {
+        v->items[i] = v->items[i - 1];
+    }
+    v->items[at] = slot{addr, owner, t};
+    v->len += 1;
+}
+
+// The frame of the stack that holds `addr`, or NONE. The frames stand in the order of their bases.
+fn find_frame(state* sh, u64 addr) u64 {
+    u64 mut lo = 0;
+    u64 mut hi = sh->frames.len;
+    while (lo < hi) {
+        u64 mid = lo + (hi - lo) / 2;
+        if (sh->frames.items[mid].base <= addr) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if (lo == 0 || addr >= sh->frames.items[lo - 1].base + sh->frames.items[lo - 1].size) {
+        return NONE;
+    }
+    return lo - 1;
+}
+
+// The origin of `kind` for `addr` in frame `k`: the last local at an offset of at most that of
+// `addr`.
+fn origin_in(state* sh, tag_kind kind, u64 k, u64 addr) origin {
+    frame* fr = &sh->frames.items[k];
+    u64 mut n = 0;
+    while (n + 1 < fr->offsets.len && fr->offsets[n + 1] <= addr - fr->base) {
+        n += 1;
+    }
+    return origin{kind, false, cast(n, u32), fr->base, 0, fr->sym};
+}
+
+// Whether `base` is the frame of a run below the frame at the top.
+fn is_below(state* sh, u64 base) bool {
+    u64 k = find_frame(sh, base);
+    return k != NONE && k + 1 < sh->frames.len;
+}
+
+// ---- frames, locals, globals and allocations --------------------------------------------------
+
+/// A new frame of `size` bytes at `base` for the function `f`, whose local `n` is at `offsets[n]`.
+fn enter(state mut* sh, u64 base, u64 size, ast.sym* f, u64@ offsets) void {
+    frame_vec mut* v = &sh->frames;
+    if (v->len == v->items.len) {
+        frame mut@ own bigger = new(frame, fir.grown_capacity(v->len, "fir.shadow: capacity"));
+        for (u64 mut i = 0; i < v->len; i++) {
+            bigger[i] = v->items[i];
+        }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = frame{base, size, f, offsets, sh->deads.len, false};
+    v->len += 1;
+}
+
+/// Ends the frame at the top: its slots die. A frame that made a frame tag keeps its range, so an
+/// access in it later is a `use after scope`.
+fn leave(state mut* sh) void {
+    frame fr = sh->frames.items[sh->frames.len - 1];
+    cut(sh, fr.base, fr.base + fr.size, false);
+    if (fr.tagged) {
+        push_range(&sh->ended, range{fr.base, fr.size, false, false, false, 0, 0});
+    }
+    sh->deads.len = fr.dead;
+    sh->frames.len -= 1;
+}
+
+/// `dead` of the local of `size` bytes at `addr`: its slots die, and an access is a `use after
+/// scope` until its `live`.
+fn kill(state mut* sh, u64 addr, u64 size) void {
+    cut(sh, addr, addr + size, false);
+    push_range(&sh->deads, range{addr, size, false, false, false, 0, 0});
+}
+
+/// `live` of the local at `addr` in the frame at the top.
+fn revive(state mut* sh, u64 addr) void {
+    for (u64 mut i = sh->deads.len; i > sh->frames.items[sh->frames.len - 1].dead; i--) {
+        if (sh->deads.items[i - 1].base == addr) {
+            sh->deads.len -= 1;
+            sh->deads.items[i - 1] = sh->deads.items[sh->deads.len];
+            return;
+        }
+    }
+}
+
+/// A new allocation of `size` bytes at `base`, above each allocation before it; 0 is none.
+fn allocate(state mut* sh, u64 base, u64 size) void {
+    if (base != 0) {
+        push_range(&sh->allocations, range{base, size, true, false, false, 0, 0});
+    }
+}
+
+/// A new global of `size` bytes at `base`: a root of the test of `leak at exit`.
+fn add_root(state mut* sh, u64 base, u64 size) void {
+    push_range(&sh->roots, range{base, size, true, false, false, 0, 0});
+}
+
+/// The release of the allocation at `p`: the slots inside it die.
+fn release(state mut* sh, u64 p) void {
+    u64 a = find_allocation(sh, p);
+    if (a != NONE) {
+        sh->allocations.items[a].live = false;
+        cut(sh, p, p + sh->allocations.items[a].size, false);
+    }
+}
+
+// ---- owners -----------------------------------------------------------------------------------
+
+// Ends the records of the words that [lo, hi) overlaps, and each owner slot gives up its
+// allocation. With `write` a store writes the words: a store over an owner slot of a live
+// allocation is an `overwrite`, and an allocation that it leaves with no owner makes no `leak`.
+fn cut(state mut* sh, u64 lo, u64 hi, bool write) void {
+    u64 first = slot_position(&sh->slots, lo - lo % WORD);
+    u64 mut end = first;
+    while (lo < hi && end < sh->slots.len && sh->slots.items[end].addr < hi) {
+        u64 a = sh->slots.items[end].owner;
+        if (a != NONE) {
+            range mut* r = &sh->allocations.items[a];
+            r->owners -= 1;
+            vec.int_push(&sh->touched, cast(a, i64));
+            if (write && r->live) {
+                r->reported = r->reported || r->owners == 0;
+                report(sh, event_kind.ev_overwrite, tag{});
+            }
+        }
+        end += 1;
+    }
+    if (end == first) {
+        return;
+    }
+    for (u64 mut i = end; i < sh->slots.len; i++) {
+        sh->slots.items[first + i - end] = sh->slots.items[i];
+    }
+    sh->slots.len -= end - first;
+}
+
+/// A store of `n` bytes at `addr`: the words lose their records, which claim and mark then give.
+fn write(state mut* sh, u64 addr, u64 n) void {
+    cut(sh, addr, addr +% n, true);
+}
+
+/// After a store of an owning value `v` at `addr`: the word becomes an owner slot of the live
+/// allocation that starts at `v`. It takes an owner in transit, else a second owner is a
+/// `duplicate owner`.
+fn claim(state mut* sh, u64 addr, u64 v) void {
+    u64 a = find_allocation(sh, v);
+    if (a == NONE || !sh->allocations.items[a].live) {
+        return;
+    }
+    range mut* r = &sh->allocations.items[a];
+    if (r->transit > 0) {
+        r->transit -= 1;
+    } else {
+        r->owners += 1;
+        if (r->owners == 2) {
+            report(sh, event_kind.ev_duplicate_owner, tag{});
+        }
+    }
+    set_slot(&sh->slots, addr, a, tag{});
+}
+
+/// A `move` or a `del` that zeroes the `n` bytes at `addr`: each owner slot puts its allocation in
+/// transit and becomes vacated, with the moved tag of its local, and each other word that is not
+/// vacated loses its tags.
+fn vacate(state mut* sh, u64 addr, u64 n) void {
+    for (u64 mut i = slot_position(&sh->slots, addr);
+         i < sh->slots.len && sh->slots.items[i].addr < addr +% n; i++) {
+        slot mut* s = &sh->slots.items[i];
+        if (s->owner != NONE) {
+            u64 k = find_frame(sh, s->addr);
+            sh->allocations.items[s->owner].transit += 1;
+            vec.int_push(&sh->touched, cast(s->owner, i64));
+            s->t.f = origin{tag_kind.tg_moved, false, NO_LOCAL, 0, 1, null};
+            if (k != NONE) {
+                s->t.f = origin_in(sh, tag_kind.tg_moved, k, s->addr);
+                s->t.f.call = 1;
+            }
+        } else if (s->t.f.kind != tag_kind.tg_moved || s->t.f.call != 1) {
+            s->t.f = origin{};
+        }
+        s->owner = NONE;
+        s->t.o = origin{};
+    }
+}
+
+/// A `del` of the value `p` with the tag `value` from the slot at `addr`, before it frees `p`. A
+/// null does nothing (D17.9).
+fn free_through(state mut* sh, u64 addr, u64 p) void {
+    u64 a = find_allocation(sh, p);
+    u64 i = find_slot(&sh->slots, addr);
+    if (p == 0) {
+        return;
+    } else if (a == NONE) {
+        report(sh, event_kind.ev_invalid_release, sh->value);
+    } else if (!sh->allocations.items[a].live) {
+        report(sh, event_kind.ev_double_release, sh->value);
+    } else if (i != NONE && sh->slots.items[i].owner == a) {
+        vacate(sh, addr, WORD);
+    } else {
+        // the slot is no owner slot, and the value goes in transit as an owner would
+        report(sh, event_kind.ev_duplicate_owner, sh->value);
+        sh->allocations.items[a].owners += 1;
+        sh->allocations.items[a].transit += 1;
+        vec.int_push(&sh->touched, cast(a, i64));
+    }
+}
+
+/// The test of the owner counts at the end of a statement or a terminator: a live allocation whose
+/// count became 0 leaks. With `flush` the owners in transit end first. A `return` passes no
+/// `flush`, because the value in `_0` counts as an owner until the caller stores it.
+fn test(state mut* sh, bool flush) void {
+    for (u64 mut i = 0; sh->sym != sh->quiet && i < sh->touched.len; i++) {
+        range mut* r = &sh->allocations.items[cast(sh->touched.items[i], u64)];
+        if (flush) {
+            r->owners -= r->transit;
+            r->transit = 0;
+        }
+        if (r->live && r->owners == 0 && !r->reported) {
+            r->reported = true;
+            report(sh, event_kind.ev_leak, tag{});
+        }
+    }
+    if (flush && sh->sym != sh->quiet) {
+        sh->touched.len = 0;
+    }
+}
+
+// Reaches each allocation that an owner slot in [lo, hi) holds, and puts it on `touched`.
+fn reach(state mut* sh, u64 lo, u64 hi) void {
+    for (u64 mut i = slot_position(&sh->slots, lo);
+         i < sh->slots.len && sh->slots.items[i].addr < hi; i++) {
+        u64 a = sh->slots.items[i].owner;
+        if (a != NONE && !sh->allocations.items[a].reached) {
+            sh->allocations.items[a].reached = true;
+            vec.int_push(&sh->touched, cast(a, i64));
+        }
+    }
+}
+
+/// The test of `leak at exit` when `main` returns: a live allocation that no chain of owner slots
+/// from a global reaches leaks, unless an event named it before.
+fn test_exit(state mut* sh) void {
+    sh->touched.len = 0;
+    for (u64 mut g = 0; g < sh->roots.len; g++) {
+        reach(sh, sh->roots.items[g].base, sh->roots.items[g].base + sh->roots.items[g].size);
+    }
+    while (sh->touched.len > 0) {
+        range r = sh->allocations.items[cast(vec.int_pop(&sh->touched), u64)];
+        reach(sh, r.base, r.base + r.size);
+    }
+    for (u64 mut a = 0; a < sh->allocations.len; a++) {
+        range mut* r = &sh->allocations.items[a];
+        if (r->live && !r->reached && !r->reported) {
+            r->reported = true;
+            report(sh, event_kind.ev_leak_at_exit, tag{});
+        }
+    }
+}
+
+// ---- accesses and tags ------------------------------------------------------------------------
+
+/// An access of `len` bytes at `addr` through an address with the tag `place`. `found` says that
+/// a live region holds the bytes, and `low` that the address is below the first region.
+fn access(state mut* sh, u64 addr, u64 len, bool found, bool low) void {
+    // an extern reaches each byte through the argument whose value starts the access
+    tag mut p = sh->place;
+    for (u64 mut i = sh->nargs; i > 0; i--) {
+        if (sh->arg_values[i - 1] == addr) {
+            p = sh->args[i - 1];
+        }
+    }
+    // the dead locals of the frames above frame `k` lie outside it, so the search may read them
+    u64 mut k = NONE;
+    if (found && sh->deads.len > 0) {
+        k = find_frame(sh, addr);
+    }
+    for (u64 mut i = sh->deads.len; k != NONE && i > sh->frames.items[k].dead; i--) {
+        range* d = &sh->deads.items[i - 1];
+        if (d->base < addr + len && addr < d->base + d->size) {
+            report(sh, event_kind.ev_use_after_scope, p);
+            return;
+        }
+    }
+    if (found) {
+        return;
+    } else if (low && p.f.kind == tag_kind.tg_moved) {
+        report(sh, event_kind.ev_use_after_move, p);
+    } else if (!low && has_dead(&sh->allocations, addr, len)) {
+        report(sh, event_kind.ev_use_after_release, p);
+    } else if (!low && has_dead(&sh->ended, addr, len)) {
+        report(sh, event_kind.ev_use_after_scope, p);
+    }
+}
+
+/// Argument `i` of the extern that runs has the value `v` and the tag `value`. The interpreter
+/// sets `nargs` after it reads the last argument, so no access of an argument matches another.
+fn pass(state mut* sh, u64 i, u64 v) void {
+    sh->arg_values[i] = v;
+    sh->args[i] = sh->value;
+}
+
+/// Sets `value` to the tag of the value that a load of `size` bytes at `addr` gives in the frame
+/// at the top. A copy of an owner slot of frame F lends (spec/ownership-design.md 3.3): F makes
+/// its owner tag, and a callee that reaches the slot through a pointer that F passed in the call
+/// makes a lend. A frame tag that a load reaches through a kept frame tag is kept too.
+fn load(state mut* sh, u64 addr, u64 size) void {
+    u64 i = find_slot(&sh->slots, addr);
+    sh->value = tag{};
+    if (size != WORD || i == NONE) {
+        return;
+    }
+    slot s = sh->slots.items[i];
+    u64 k = find_frame(sh, addr);
+    tag p = sh->place;
+    if (s.owner != NONE && k != NONE && k + 1 == sh->frames.len) {
+        sh->value.o = origin_in(sh, tag_kind.tg_owner, k, addr);
+    } else if (s.owner != NONE && k != NONE && p.f.kind == tag_kind.tg_frame
+               && p.f.frame == sh->frames.items[k].base
+               && p.f.call == sh->frames.items[k + 1].base) {
+        sh->value.o = origin_in(sh, tag_kind.tg_lend, k, addr);
+        sh->value.o.call = p.f.call;
+    } else if (s.owner == NONE) {
+        sh->value = s.t;
+    }
+    if (s.owner == NONE && s.t.f.kind == tag_kind.tg_frame && p.f.kind == tag_kind.tg_frame) {
+        sh->value.f.flag = s.t.f.flag || p.f.flag;
+    }
+    if (s.owner == NONE && s.t.f.kind == tag_kind.tg_moved && s.t.f.call == 1) {
+        sh->value.f.call = 0;
+        sh->value.f.flag = k == NONE || k + 1 != sh->frames.len;
+    }
+}
+
+/// After a store of a scalar of 8 bytes with the tag `t` at `addr`. A callee of F that stores a
+/// frame tag of F outside its own frame keeps the value that it stores.
+fn mark(state mut* sh, u64 addr, tag t) void {
+    u64 i = find_slot(&sh->slots, addr);
+    u64 top = sh->frames.len -% 1;
+    if (is_empty(t) || addr % WORD != 0) {
+        return;
+    }
+    tag mut kept = t;
+    kept.f.flag = t.f.flag || (t.f.kind == tag_kind.tg_frame && is_below(sh, t.f.frame)
+                               && find_frame(sh, addr) != top);
+    if (i == NONE) {
+        set_slot(&sh->slots, addr, NONE, kept);
+    } else {
+        sh->slots.items[i].t = kept;
+    }
+}
+
+/// The frame tag of the address `addr` of fixed storage in the frame at the top.
+fn tag_address(state mut* sh, u64 addr) tag {
+    sh->frames.items[sh->frames.len - 1].tagged = true;
+    return tag{origin{}, origin_in(sh, tag_kind.tg_frame, sh->frames.len - 1, addr)};
+}
+
+/// The tags of a cast of a value with the tags `t` to an integer: a callee of F removes each tag
+/// of F.
+fn cast_tag(state* sh, tag t) tag {
+    tag mut r = t;
+    if (is_below(sh, t.o.frame)) {
+        r.o = origin{};
+    }
+    if (t.f.kind != tag_kind.tg_moved && is_below(sh, t.f.frame)) {
+        r.f = origin{};
+    }
+    return r;
+}
+
+/// The tags of a binary rvalue whose operands have the tags `a` and `b`: each tag of both, the tag
+/// of `a` where both have one, and of two frame tags one that is not kept.
+fn merge(tag a, tag b) tag {
+    tag mut r = a;
+    if (a.o.kind == tag_kind.tg_none) {
+        r.o = b.o;
+    }
+    if (a.f.kind == tag_kind.tg_none
+        || (a.f.kind == tag_kind.tg_frame && a.f.flag && b.f.kind == tag_kind.tg_frame)) {
+        r.f = b.f;
+    }
+    return r;
+}
+
+fn is_empty(tag t) bool {
+    return t.o.kind == tag_kind.tg_none && t.f.kind == tag_kind.tg_none;
+}
+
+/// Gives `value` to the scalar at offset `at` of the scratch buffer.
+fn hold(state mut* sh, u64 at) void {
+    if (!is_empty(sh->value)) {
+        set_slot(&sh->scratch, at, NONE, sh->value);
+    }
+}
+
+/// Gives offset `at` of the scratch buffer the tags of the `n` bytes at `src`, as a load of each
+/// word gives them. A `move` takes no tag from an owner slot, because its owner goes in transit.
+fn capture(state mut* sh, u64 src, u64 n, u64 at, bool moving) void {
+    for (u64 mut i = slot_position(&sh->slots, src);
+         i < sh->slots.len && sh->slots.items[i].addr < src +% n; i++) {
+        if (!moving || sh->slots.items[i].owner == NONE) {
+            load(sh, sh->slots.items[i].addr, WORD);
+            hold(sh, sh->slots.items[i].addr - src + at);
+        }
+    }
+}
+
+/// After a write of the scratch bytes [from, from + n) to `dest`, each word takes the tag of its
+/// scratch word. `callee` is the frame of a call: without `back`, the write fills its parameters,
+/// so each frame tag of the caller records the call; with `back`, the frame returned the result,
+/// so each lend of the call becomes an owner tag.
+fn apply(state mut* sh, u64 dest, u64 from, u64 n, u64 callee, bool back) void {
+    for (u64 mut i = slot_position(&sh->scratch, from);
+         i < sh->scratch.len && sh->scratch.items[i].addr < from + n; i++) {
+        tag mut t = sh->scratch.items[i].t;
+        if (!back && callee != 0 && t.f.kind == tag_kind.tg_frame
+            && t.f.frame == sh->frames.items[sh->frames.len - 2].base) {
+            t.f.call = callee;
+        }
+        if (back && t.o.kind == tag_kind.tg_lend && t.o.call == callee) {
+            t.o.kind = tag_kind.tg_owner;
+        }
+        mark(sh, dest + sh->scratch.items[i].addr - from, t);
+    }
+}
+
+// ---- events -----------------------------------------------------------------------------------
+
+// Records an event of `kind` at the item that runs, through a value with the tag `t`, once.
+fn report(state mut* sh, event_kind kind, tag t) void {
+    for (u64 mut i = 0; i < sh->events.len; i++) {
+        event* o = &sh->events.items[i];
+        if (o->kind == kind && o->sym == sh->sym && o->at.line == sh->at.line
+            && o->at.col == sh->at.col && is_same(o->t.o, t.o) && is_same(o->t.f, t.f)) {
+            return;
+        }
+    }
+    event_vec mut* v = &sh->events;
+    if (v->len == v->items.len) {
+        event mut@ own bigger = new(event, fir.grown_capacity(v->len, "fir.shadow: capacity"));
+        for (u64 mut i = 0; i < v->len; i++) {
+            bigger[i] = v->items[i];
+        }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = event{kind, sh->sym, sh->at, t};
+    v->len += 1;
+}
+
+fn is_same(origin a, origin b) bool {
+    return a.kind == b.kind && a.sym == b.sym && a.local == b.local && a.flag == b.flag;
+}
+
+// Writes ` through owner <function> _<n>`, ` through frame <function> _<n>` with ` kept`, or
+// ` through moved <function> _<n>` with ` by a callee`, for an origin that names a local.
+fn write_origin(origin* g, strbuf.str_buf mut* out) void {
+    string text = TAG_TEXT[cast(cast(g->kind, i32), u64)];
+    if (text.len == 0 || g->sym == null) {
+        return;
+    }
+    strbuf.append(out, text);
+    fir_print.print_symbol(g->sym, out);
+    strbuf.append(out, " _");
+    strbuf.append_u64(out, cast(g->local, u64));
+    if (g->flag && g->kind == tag_kind.tg_frame) {
+        strbuf.append(out, " kept");
+    } else if (g->flag) {
+        strbuf.append(out, " by a callee");
+    }
+}
+
+/// With `reporting`, writes each event of `sh` as a line after `prefix`: `event <kind> in
+/// <function> at <line>:<col>`, then the owner tag and the frame or moved tag of its value.
+fn write_events(state* sh, string prefix, strbuf.str_buf mut* out) void {
+    for (u64 mut i = 0; sh->reporting && i < sh->events.len; i++) {
+        event* e = &sh->events.items[i];
+        strbuf.append(out, prefix);
+        strbuf.append(out, "event ");
+        strbuf.append(out, EVENT_TEXT[cast(cast(e->kind, i32), u64)]);
+        strbuf.append(out, " in ");
+        fir_print.print_symbol(e->sym, out);
+        strbuf.append(out, " at ");
+        strbuf.append_u64(out, cast(e->at.line, u64));
+        strbuf.push(out, ':');
+        strbuf.append_u64(out, cast(e->at.col, u64));
+        write_origin(&e->t.o, out);
+        write_origin(&e->t.f, out);
+        strbuf.push(out, '\n');
+    }
+}
