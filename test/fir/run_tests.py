@@ -9,16 +9,25 @@ name, in order, and writes the module. The harness compares the result with
 the expectation of the test. `--bless` writes the `//! expect:` block of each
 selected test from the compiler's output.
 
+`--run` runs each function of each selected test under the pass `run` of
+fir.interpreter in place of the passes of the test: an integer parameter takes
+0 and a `bool` parameter takes `false`. It counts the outcome of each run and
+each function that cannot run, with the reason, and it fails when the compiler
+fails.
+
 Standard library only; Python 3.12.
 """
 
 import argparse
+import collections
 import difflib
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -123,17 +132,19 @@ def discover(root, filters):
     return tests
 
 
-def run_fort(args, test):
-    """Run `fort --fir-test` over the test; return its status, stdout and stderr."""
+def run_fort(args, test, cwd=None, timeout=None):
+    """Run `fort --fir-test` over the test in `cwd`, the root by default; return its status,
+    stdout and stderr. The status is None after a timeout, `--timeout` by default."""
     argv = [args.fort, "--fir-test", test.rel]
     if args.std_dir:
         argv[1:1] = ["--std-dir", args.std_dir]
+    seconds = timeout or args.timeout
     try:
         done = subprocess.run(
-            argv, cwd=args.root, capture_output=True, text=True, timeout=args.timeout
+            argv, cwd=cwd or args.root, capture_output=True, text=True, timeout=seconds
         )
     except subprocess.TimeoutExpired:
-        return None, "", "timed out after %g s" % args.timeout
+        return None, "", "timed out after %g s" % seconds
     except OSError as e:
         return None, "", "%s: %s" % (argv[0], e)
     return done.returncode, done.stdout, done.stderr
@@ -187,6 +198,106 @@ def bless(root, test, stdout):
     (root / test.rel).write_text("\n".join(lines))
 
 
+# The header line of a function of the textual form, and the types whose parameter the pass
+# `run` gives a value: 0 for an integer and `false` for a `bool`.
+FUNCTION_RE = re.compile(r"^fn (\S+)\((.*)\) -> ")
+RUN_VALUES = {"bool": "false"}
+RUN_VALUES.update({t: "0" for t in ("i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64")})
+
+
+def split_params(text):
+    """The parameters of a function header, split at the commas outside parentheses."""
+    params, depth, start = [], 0, 0
+    for i, ch in enumerate(text):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            params.append(text[start:i].strip())
+            start = i + 1
+    if text.strip():
+        params.append(text[start:].strip())
+    return params
+
+
+def functions_of(test):
+    """The name and the parameter types of each function of the FIR text of `test`."""
+    found = []
+    for line in test.lines[test.header_end :]:
+        match = FUNCTION_RE.match(line)
+        if match:
+            types = [p.split(": ", 1)[1] for p in split_params(match.group(2))]
+            found.append((match.group(1), types))
+    return found
+
+
+# The seconds that one run of `--run` takes at most. A run that takes longer does not end, as
+# `while (true) { }` does not.
+RUN_TIMEOUT = 10.0
+
+
+def run_one(args, test, name, values):
+    """Run `fort --fir-test` over a copy of `test` whose passes are `verify` and `run`."""
+    header = ["//! pass: verify", "//! pass: run %s" % " ".join([name] + values).strip()]
+    in_prelude = False
+    for line in test.lines[: test.header_end]:
+        if line.startswith("//!"):
+            in_prelude = line.startswith("//! prelude:")
+            if in_prelude:
+                header.append(line)
+        elif in_prelude:
+            header.append(line)
+    header.append("//! expect:")
+    work = tempfile.mkdtemp(prefix="fort-fir-run-")
+    try:
+        copy = Path(work) / test.rel
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        copy.write_text("\n".join(header + test.lines[test.header_end :]))
+        return run_fort(args, test, work, RUN_TIMEOUT)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def run_functions(args, tests):
+    """Run each function of `tests` under the pass `run`; return the exit status."""
+    outcomes = collections.Counter()
+    cannot = collections.Counter()
+    errors = 0
+    total = 0
+    for test in tests:
+        if test.expect is None:
+            # the text breaks a rule of the verifier or does not parse
+            what = "a panic" if test.panic else "a diagnostic"
+            cannot["tests that expect %s" % what] += 1
+            continue
+        for name, types in functions_of(test):
+            total += 1
+            values = [RUN_VALUES.get(t) for t in types]
+            if None in values:
+                cannot["functions with a parameter that takes no value"] += 1
+                continue
+            status, stdout, stderr = run_one(args, test, name, values)
+            if status == SIGABRT_STATUS and "fir.verify:" in stderr:
+                cannot["functions that break a rule of the verifier"] += 1
+            elif status is None and stderr.startswith("timed out"):
+                cannot["functions whose run does not end in %g s" % RUN_TIMEOUT] += 1
+            elif status == 0 and stdout:
+                outcomes[stdout.splitlines()[-1].split(" ", 1)[0]] += 1
+            else:
+                errors += 1
+                print("ERROR %s %s: exit %s\n%s" % (test.rel, name, status, stderr.rstrip()))
+    print(
+        "run_tests.py: %d functions of %d tests under the pass run: %s; %d errors"
+        % (total, len(tests), ", ".join("%s %d" % kv for kv in sorted(outcomes.items())), errors)
+    )
+    print(
+        "run_tests.py: cannot run: "
+        + "; ".join("%d %s" % (n, why) for why, n in sorted(cannot.items()))
+    )
+    return 1 if errors else 0
+
+
 def parse_args(argv):
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument(
@@ -217,6 +328,11 @@ def parse_args(argv):
     )
     parser.add_argument("--list", action="store_true", help="list the selected tests and exit")
     parser.add_argument(
+        "--run",
+        action="store_true",
+        help="run each function of each selected test under the pass run and count the ends",
+    )
+    parser.add_argument(
         "-v", "--verbose", action="store_true", help="show the output of each failure"
     )
     parser.add_argument("--root", default=str(ROOT), help=argparse.SUPPRESS)
@@ -245,6 +361,8 @@ def main(argv=None):
             print(p)
         print("run_tests.py: %d problem(s) in the directives" % len(problems))
         return 1
+    if args.run:
+        return run_functions(args, tests)
     counts = {"PASS": 0, "FAIL": 0, "ERROR": 0}
     for test in tests:
         status, stdout, stderr = run_fort(args, test)

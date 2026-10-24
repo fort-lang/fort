@@ -1,0 +1,1000 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| heap ok
+//| externs ok
+//| globals ok
+//| checks ok
+//| bools ok
+//| arguments ok
+//| depth ok
+//| programs ok
+/// Checks fir.interpreter over fort source that the run lowers when it calls a function: the
+/// heap, the externs that std.rt reaches, the initializers of globals, the location and the
+/// entry of each check, and the start of a program.
+import fort.fir;
+import run_env;
+
+// The cases of the group heap: `new` and `del`, `calloc` and `free`.
+string[115] HEAP = {
+    "import std.libc;",
+    "struct node {",
+    "    i64 value;",
+    "    node mut* own next;",
+    "}",
+    "fn new_and_del() i32 {",
+    "    i32 mut* own p = new(i32);",
+    "    *p = 5;",
+    "    i32 v = *p;",
+    "    del(p);",
+    "    return v;",
+    "}",
+    "fn del_empties() bool {",
+    "    i32 mut* own mut p = new(i32);",
+    "    del(p);",
+    "    return p == null;",
+    "}",
+    "fn del_null() bool {",
+    "    i32 mut* own mut p = null;",
+    "    del(p);",
+    "    return p == null;",
+    "}",
+    "fn read_after_del() i32 {",
+    "    i32 mut* own p = new(i32);",
+    "    i32* q = p;",
+    "    del(p);",
+    "    return *q; // after del",
+    "}",
+    "fn zero_count() u64 {",
+    "    u8 mut@ own s = new(u8, 0);",
+    "    u64 n = s.len;",
+    "    del(s);",
+    "    return n;",
+    "}",
+    "fn huge() i64 {",
+    "    return 4611686018427387904;",
+    "}",
+    "fn out_of_memory() void {",
+    "    u8 mut@ own s = new(u8, huge());",
+    "    del(s);",
+    "}",
+    "fn calloc_overflow() bool {",
+    "    void mut* own p = libc.calloc(18446744073709551615, 2);",
+    "    bool none = p == null;",
+    "    libc.free(move(p));",
+    "    return none;",
+    "}",
+    "fn calloc_zero() bool {",
+    "    void mut* own p = libc.calloc(0, 8);",
+    "    bool some = p != null;",
+    "    libc.free(move(p));",
+    "    return some;",
+    "}",
+    "fn calloc_zero_read() u8 {",
+    "    void mut* own p = libc.calloc(0, 8);",
+    "    u8* b = cast(p, u8*);",
+    "    u8 v = *b; // zero bytes",
+    "    libc.free(move(p));",
+    "    return v;",
+    "}",
+    "fn never_reused() bool {",
+    "    u8 mut* own a = new(u8);",
+    "    u64 first = cast(a, u64);",
+    "    del(a);",
+    "    u8 mut* own b = new(u8);",
+    "    u64 second = cast(b, u64);",
+    "    del(b);",
+    "    return second > first;",
+    "}",
+    "fn local_address() u64 {",
+    "    i32 x = 0;",
+    "    return cast(&x, u64);",
+    "}",
+    "fn two_frames() bool {",
+    "    u64 first = local_address();",
+    "    u64 second = local_address();",
+    "    return second > first;",
+    "}",
+    "fn twin() void {",
+    "    u8 mut* own a = new(u8);",
+    "    u8 mut* own mut b = null;",
+    "    libc.memcpy(cast(&b, u8 mut*), cast(&a, u8*), 8);",
+    "    del(a);",
+    "    del(b); // a second owner",
+    "}",
+    "fn interior() void {",
+    "    u8 mut@ own a = new(u8, 4);",
+    "    u64 inside = cast(a.ptr, u64) + 1;",
+    "    u8 mut* own mut b = null;",
+    "    libc.memcpy(cast(&b, u8 mut*), cast(&inside, u8*), 8);",
+    "    del(b); // inside an allocation",
+    "    a[0] = 1;",
+    "    del(a);",
+    "}",
+    "fn push(node mut* own head, i64 v) node mut* own {",
+    "    node mut* own n = new(node);",
+    "    n->value = v;",
+    "    n->next = move(head);",
+    "    return n;",
+    "}",
+    "fn list_sum(i64 count) i64 {",
+    "    node mut* own mut head = null;",
+    "    for (i64 mut i = 1; i <= count; i++) {",
+    "        node mut* own n = push(move(head), i);",
+    "        head = move(n);",
+    "    }",
+    "    i64 mut sum = 0;",
+    "    while (head != null) {",
+    "        sum += head->value;",
+    "        node mut* own rest = move(head->next);",
+    "        del(head);",
+    "        head = move(rest);",
+    "    }",
+    "    return sum;",
+    "}",
+};
+
+// The cases of the group externs: the C functions that std.rt reaches.
+string[104] EXTERNS = {
+    "import std.libc;",
+    "fn length() u64 {",
+    "    return libc.strlen(\"hello\".ptr);",
+    "}",
+    "fn unterminated() u64 {",
+    "    u8 mut@ own b = new(u8, 4);",
+    "    b[0] = 65;",
+    "    b[1] = 66;",
+    "    b[2] = 67;",
+    "    b[3] = 68;",
+    "    u64 n = libc.strlen(cast(b.ptr, char*)); // no NUL",
+    "    del(b);",
+    "    return n;",
+    "}",
+    "fn moves(bool forward, u64 at) u8 {",
+    "    u8[4] mut b = {1, 2, 3, 4};",
+    "    if (forward) {",
+    "        libc.memmove(&b[1], &b[0], 3);",
+    "    } else {",
+    "        libc.memmove(&b[0], &b[1], 3);",
+    "    }",
+    "    return b[at];",
+    "}",
+    "fn copies() u8 {",
+    "    u8[3] a = {7, 8, 9};",
+    "    u8[3] mut b = {};",
+    "    libc.memcpy(&b[0], &a[0], 3);",
+    "    return b[2];",
+    "}",
+    "fn compares(u64 which) i32 {",
+    "    string[3] left = {\"abc\", \"abc\", \"b\"};",
+    "    string[3] right = {\"abd\", \"abc\", \"a\"};",
+    "    u64 n = left[which].len;",
+    "    return libc.memcmp(cast(left[which], u8@).ptr, cast(right[which], u8@).ptr, n);",
+    "}",
+    "fn same_strings() bool {",
+    "    string a = \"two\";",
+    "    string b = \"two\";",
+    "    return a == b;",
+    "}",
+    "fn errno_slot() i32 {",
+    "    *libc.__errno_location() = 5;",
+    "    return *libc.__error();",
+    "}",
+    "fn formats() i32 {",
+    "    char[32] mut buf = {};",
+    "    i32 n = libc.snprintf(&buf[0], 32, \"%.*e\".ptr, cast(3, i32), 1.5);",
+    "    show(cast(buf[..], string)[0..cast(n, u64)]);",
+    "    return n;",
+    "}",
+    "fn show(string s) void {",
+    "    println(s);",
+    "}",
+    "fn formats_short(u64 at) u8 {",
+    "    char[4] mut buf = {'x', 'x', 'x', 'x'};",
+    "    libc.snprintf(&buf[0], 4, \"%.*e\".ptr, cast(3, i32), 1.5);",
+    "    return cast(buf[at], u8);",
+    "}",
+    "fn formats_other() i32 {",
+    "    char[32] mut buf = {};",
+    "    return libc.snprintf(&buf[0], 32, \"%d\".ptr, cast(3, i32), 1.5);",
+    "}",
+    "fn parses() f64 {",
+    "    return libc.strtod(\"2.5\".ptr, null);",
+    "}",
+    "fn parses_single() f32 {",
+    "    return libc.strtof(\"0.1\".ptr, null);",
+    "}",
+    "fn parses_end() f64 {",
+    "    char* mut end = null;",
+    "    return libc.strtod(\"2.5\".ptr, cast(&end, void*));",
+    "}",
+    "fn range_error(bool single) i32 {",
+    "    *libc.__errno_location() = 0;",
+    "    if (single) {",
+    "        f32 v = libc.strtof(\"1e99\".ptr, null);",
+    "        if (v < 1.0) {",
+    "            return -1;",
+    "        }",
+    "    } else {",
+    "        f64 v = libc.strtod(\"1e999\".ptr, null);",
+    "        if (v < 1.0) {",
+    "            return -1;",
+    "        }",
+    "    }",
+    "    return *libc.__errno_location();",
+    "}",
+    "fn no_error() i32 {",
+    "    *libc.__errno_location() = 5;",
+    "    f64 v = libc.strtod(\"2.5\".ptr, null);",
+    "    if (v != 2.5) {",
+    "        return -1;",
+    "    }",
+    "    return *libc.__errno_location();",
+    "}",
+    "fn reads() i64 {",
+    "    u8[4] mut b = {};",
+    "    return libc.read(0, &b[0], 4);",
+    "}",
+    "fn fills() u8 {",
+    "    u8[4] mut b = {};",
+    "    libc.memset(&b[0], 1, 4);",
+    "    return b[0];",
+    "}",
+};
+
+// The cases of the group globals: an initializer of each form.
+string[88] GLOBALS = {
+    "struct point {",
+    "    i32 x;",
+    "    i32 y;",
+    "}",
+    "struct shape {",
+    "    string name;",
+    "    point[2] corners;",
+    "    bool closed;",
+    "}",
+    "enum level {",
+    "    low,",
+    "    high = 7,",
+    "}",
+    "i64 BIG = -9223372036854775808;",
+    "u8 BYTE = 255;",
+    "f64 HALF = 0.5;",
+    "f32 TENTH = 0.1;",
+    "bool YES = true;",
+    "char LETTER = 'z';",
+    "level TOP = level.high;",
+    "string GREETING = \"hi there\";",
+    "string[2] WORDS = {\"one\", \"three\"};",
+    "point ORIGIN = point{3, -4};",
+    "point HALFWAY = point{.y = 9};",
+    "shape BOX = shape{\"box\", {point{1, 2}, point{3, 4}}, true};",
+    "i64 SAME = BIG;",
+    "u8* BYTE_AT = &BYTE;",
+    "fn add_one(i32 v) i32 {",
+    "    return v + 1;",
+    "}",
+    "fn (i32) i32 STEP = add_one;",
+    "i32 mut tally = 10;",
+    "fn big() i64 {",
+    "    return BIG;",
+    "}",
+    "fn byte() u8 {",
+    "    return BYTE;",
+    "}",
+    "fn half() f64 {",
+    "    return HALF;",
+    "}",
+    "fn tenth() f32 {",
+    "    return TENTH;",
+    "}",
+    "fn yes() bool {",
+    "    return YES;",
+    "}",
+    "fn letter() char {",
+    "    return LETTER;",
+    "}",
+    "fn top() i32 {",
+    "    return cast(TOP, i32);",
+    "}",
+    "fn greeting(u64 i) char {",
+    "    return GREETING[i];",
+    "}",
+    "fn word_length(u64 i) u64 {",
+    "    return WORDS[i].len;",
+    "}",
+    "fn origin() i32 {",
+    "    return ORIGIN.x * 10 + ORIGIN.y;",
+    "}",
+    "fn halfway() i32 {",
+    "    return HALFWAY.x * 10 + HALFWAY.y;",
+    "}",
+    "fn box_corner(u64 i) i32 {",
+    "    return BOX.corners[i].x * 10 + BOX.corners[i].y;",
+    "}",
+    "fn box_name() u64 {",
+    "    return BOX.name.len;",
+    "}",
+    "fn box_closed() bool {",
+    "    return BOX.closed;",
+    "}",
+    "fn same() i64 {",
+    "    return SAME;",
+    "}",
+    "fn byte_at() u8 {",
+    "    return *BYTE_AT;",
+    "}",
+    "fn step(i32 v) i32 {",
+    "    return STEP(v);",
+    "}",
+    "fn tally_twice() i32 {",
+    "    tally += 1;",
+    "    tally += 1;",
+    "    return tally;",
+    "}",
+};
+
+// The cases of the group checks: one source construct of each kind.
+string[42] CHECKS = {
+    "enum mood {",
+    "    calm,",
+    "    loud,",
+    "}",
+    "fn index(u64 i) i32 {",
+    "    i32[3] a = {1, 2, 3};",
+    "    return a[i];",
+    "}",
+    "fn add(i32 a, i32 b) i32 {",
+    "    return a + b;",
+    "}",
+    "fn divide(i32 a, i32 b) i32 {",
+    "    return a / b;",
+    "}",
+    "fn shift(i64 v, i32 n) i64 {",
+    "    return v << n;",
+    "}",
+    "fn count(i32 n) u64 {",
+    "    u8 mut@ own s = new(u8, n);",
+    "    u64 len = s.len;",
+    "    del(s);",
+    "    return len;",
+    "}",
+    "fn span(u64 hi) u64 {",
+    "    u8[3] a = {1, 2, 3};",
+    "    u8@ s = a[1..hi];",
+    "    return s.len;",
+    "}",
+    "fn sure(i32 x) void {",
+    "    assert(x > 0);",
+    "}",
+    "fn give_up() void {",
+    "    panic(\"gave up\");",
+    "}",
+    "fn name(mood m) i32 {",
+    "    switch (m) {",
+    "    case mood.calm:",
+    "        return 1;",
+    "    case mood.loud:",
+    "        return 2;",
+    "    }",
+    "}",
+};
+
+// The cases of the group bools: a `bool` whose byte holds 0 to 255.
+string[92] BOOLS = {
+    "struct holder {",
+    "    i32 n;",
+    "    bool flag;",
+    "}",
+    "fn as_int(u8 v) i32 {",
+    "    bool mut b = false;",
+    "    u8 mut* p = cast(&b, u8 mut*);",
+    "    *p = v;",
+    "    return cast(b, i32);",
+    "}",
+    "fn branch(u8 v) i32 {",
+    "    bool mut b = false;",
+    "    u8 mut* p = cast(&b, u8 mut*);",
+    "    *p = v;",
+    "    if (b) {",
+    "        return 1;",
+    "    }",
+    "    return 0;",
+    "}",
+    "fn both(u8 v, u8 w) bool {",
+    "    bool mut b = false;",
+    "    bool mut c = false;",
+    "    u8 mut* p = cast(&b, u8 mut*);",
+    "    u8 mut* q = cast(&c, u8 mut*);",
+    "    *p = v;",
+    "    *q = w;",
+    "    return b && c;",
+    "}",
+    "fn either(u8 v, u8 w) bool {",
+    "    bool mut b = false;",
+    "    bool mut c = false;",
+    "    u8 mut* p = cast(&b, u8 mut*);",
+    "    u8 mut* q = cast(&c, u8 mut*);",
+    "    *p = v;",
+    "    *q = w;",
+    "    return b || c;",
+    "}",
+    "fn negate(u8 v) bool {",
+    "    bool mut b = false;",
+    "    u8 mut* p = cast(&b, u8 mut*);",
+    "    *p = v;",
+    "    return !b;",
+    "}",
+    "fn sure(u8 v) void {",
+    "    bool mut b = false;",
+    "    u8 mut* p = cast(&b, u8 mut*);",
+    "    *p = v;",
+    "    assert(b);",
+    "}",
+    "fn show(u8 v) void {",
+    "    bool mut b = false;",
+    "    u8 mut* p = cast(&b, u8 mut*);",
+    "    *p = v;",
+    "    println(b);",
+    "}",
+    "fn pick(bool x) i32 {",
+    "    if (x) {",
+    "        return 1;",
+    "    }",
+    "    return 0;",
+    "}",
+    "fn pass(u8 v) i32 {",
+    "    bool mut b = false;",
+    "    u8 mut* p = cast(&b, u8 mut*);",
+    "    *p = v;",
+    "    return pick(b);",
+    "}",
+    "fn loop(u8 v) i32 {",
+    "    bool mut b = false;",
+    "    u8 mut* p = cast(&b, u8 mut*);",
+    "    *p = v;",
+    "    i32 mut n = 0;",
+    "    while (b && n < 3) {",
+    "        n += 1;",
+    "    }",
+    "    return n;",
+    "}",
+    "fn field(u8 v) i32 {",
+    "    holder mut h = holder{7, false};",
+    "    u8 mut* p = cast(&h.flag, u8 mut*);",
+    "    *p = v;",
+    "    if (h.flag) {",
+    "        return 1;",
+    "    }",
+    "    return 0;",
+    "}",
+    "fn element(u8 v) bool {",
+    "    bool[2] mut a = {};",
+    "    u8 mut* p = cast(&a[1], u8 mut*);",
+    "    *p = v;",
+    "    return a[1];",
+    "}",
+};
+
+// A call whose argument loads through null.
+string[7] ARGUMENTS = {
+    "fn show(i64 v) void {",
+    "    println(v);",
+    "}",
+    "fn null_argument() void {",
+    "    i64* p = null;",
+    "    show(*p);",
+    "}",
+};
+
+// A recursion whose native frame takes 16 bytes.
+string[6] DEPTH = {
+    "fn r(u64 n) u64 {",
+    "    if (n == 0) {",
+    "        return 0;",
+    "    }",
+    "    return r(n - 1) + 1;",
+    "}",
+};
+
+// A program that writes its arguments and returns 300.
+string[8] PROGRAM = {
+    "import std.libc;",
+    "fn main(string@ args) i32 {",
+    "    println(args.len);",
+    "    for (string a : args) {",
+    "        println(a);",
+    "    }",
+    "    return 300;",
+    "}",
+};
+
+// A program whose `main` takes no argument.
+string[3] QUIET = {
+    "fn main() i32 {",
+    "    return 4;",
+    "}",
+};
+
+// A program that calls `exit`.
+string[5] EXITS = {
+    "import std.libc;",
+    "fn main() i32 {",
+    "    println(\"before\");",
+    "    libc.exit(9);",
+    "}",
+};
+
+// A program whose index check fails with one argument.
+string[4] FAILS = {
+    "fn main(string@ args) i32 {",
+    "    println(args[1]);",
+    "    return 0;",
+    "}",
+};
+
+// `new` reaches `std.rt.alloc` and the extern `calloc`, and `del` reaches `std.rt.free` and
+// `free`. An allocation is a new range that no later allocation takes. A release of an
+// address that starts no live allocation and a load after a release end the run.
+fn heap(run_env.env mut* e) void {
+    run_env.check(e, HEAP[..]);
+    fir.module mut m = fir.module_new();
+    defer fir.module_free(&m);
+    u64[1] a1 = {0};
+    run_env.expect_line(run_env.run_in(e, &m, "new_and_del", a1[..0]), "return i32 5");
+    run_env.expect_line(run_env.run_in(e, &m, "del_empties", a1[..0]), "return true");
+    run_env.expect_line(run_env.run_in(e, &m, "del_null", a1[..0]), "return true");
+    run_env.expect_line(run_env.run_in(e, &m, "read_after_del", a1[..0]),
+                        "fault invalid access at 27:12");
+    run_env.expect_line(run_env.run_in(e, &m, "zero_count", a1[..0]), "return u64 0");
+    // the compiler has no storage for 2^62 bytes, so `calloc` gives null
+    string[2] w2 = {
+        "stderr \"39:21: out of memory\\x0A\"",
+        "abort",
+    };
+    run_env.expect(run_env.run_in(e, &m, "out_of_memory", a1[..0]), w2[..]);
+    run_env.expect_line(run_env.run_in(e, &m, "calloc_overflow", a1[..0]), "return true");
+    run_env.expect_line(run_env.run_in(e, &m, "calloc_zero", a1[..0]), "return true");
+    run_env.expect_line(run_env.run_in(e, &m, "calloc_zero_read", a1[..0]),
+                        "fault invalid access at 57:12");
+    run_env.expect_line(run_env.run_in(e, &m, "never_reused", a1[..0]), "return true");
+    // the frame of a second call takes a new range, also after the first frame ended
+    run_env.expect_line(run_env.run_in(e, &m, "two_frames", a1[..0]), "return true");
+    // the second `del` frees the released allocation, in the `free` of std.rt
+    run_env.expect_line(run_env.run_in(e, &m, "twin", a1[..0]), "fault invalid release at 116:14");
+    run_env.expect_line(run_env.run_in(e, &m, "interior", a1[..0]),
+                        "fault invalid release at 116:14");
+    u64[1] a3 = {0};
+    run_env.expect_line(run_env.run_in(e, &m, "list_sum", a3[..1]), "return i64 0");
+    u64[1] a4 = {1};
+    run_env.expect_line(run_env.run_in(e, &m, "list_sum", a4[..1]), "return i64 1");
+    u64[1] a5 = {3000};
+    run_env.expect_line(run_env.run_in(e, &m, "list_sum", a5[..1]), "return i64 4501500");
+    println("heap ok");
+}
+
+// The externs that std.rt reaches run over the storage of the run: `strlen`, `memcpy`,
+// `memmove` and `memcmp` read and write regions, errno is one slot, and `snprintf`, `strtod`
+// and `strtof` run in the C library of the compiler for the one form that std.rt gives them.
+// The errno that `strtod` and `strtof` set goes to the slot.
+fn externs(run_env.env mut* e) void {
+    run_env.check(e, EXTERNS[..]);
+    fir.module mut m = fir.module_new();
+    defer fir.module_free(&m);
+    u64[1] a6 = {0};
+    run_env.expect_line(run_env.run_in(e, &m, "length", a6[..0]), "return u64 5");
+    run_env.expect_line(run_env.run_in(e, &m, "unterminated", a6[..0]),
+                        "fault invalid access at 11:24");
+    u64[2] a7 = {1, 0};
+    run_env.expect_line(run_env.run_in(e, &m, "moves", a7[..2]), "return u8 1");
+    u64[2] a8 = {1, 1};
+    run_env.expect_line(run_env.run_in(e, &m, "moves", a8[..2]), "return u8 1");
+    u64[2] a9 = {1, 2};
+    run_env.expect_line(run_env.run_in(e, &m, "moves", a9[..2]), "return u8 2");
+    u64[2] a10 = {1, 3};
+    run_env.expect_line(run_env.run_in(e, &m, "moves", a10[..2]), "return u8 3");
+    u64[2] a11 = {0, 0};
+    run_env.expect_line(run_env.run_in(e, &m, "moves", a11[..2]), "return u8 2");
+    u64[2] a12 = {0, 1};
+    run_env.expect_line(run_env.run_in(e, &m, "moves", a12[..2]), "return u8 3");
+    u64[2] a13 = {0, 2};
+    run_env.expect_line(run_env.run_in(e, &m, "moves", a13[..2]), "return u8 4");
+    u64[2] a14 = {0, 3};
+    run_env.expect_line(run_env.run_in(e, &m, "moves", a14[..2]), "return u8 4");
+    run_env.expect_line(run_env.run_in(e, &m, "copies", a6[..0]), "return u8 9");
+    u64[1] a15 = {0};
+    run_env.expect_line(run_env.run_in(e, &m, "compares", a15[..1]), "return i32 -1");
+    u64[1] a16 = {1};
+    run_env.expect_line(run_env.run_in(e, &m, "compares", a16[..1]), "return i32 0");
+    u64[1] a17 = {2};
+    run_env.expect_line(run_env.run_in(e, &m, "compares", a17[..1]), "return i32 1");
+    run_env.expect_line(run_env.run_in(e, &m, "same_strings", a6[..0]), "return true");
+    run_env.expect_line(run_env.run_in(e, &m, "errno_slot", a6[..0]), "return i32 5");
+    string[2] w18 = {
+        "stdout \"1.500e+00\\x0A\"",
+        "return i32 9",
+    };
+    run_env.expect(run_env.run_in(e, &m, "formats", a6[..0]), w18[..]);
+    u64[1] a19 = {0};
+    // a short buffer takes size - 1 bytes and the NUL
+    run_env.expect_line(run_env.run_in(e, &m, "formats_short", a19[..1]), "return u8 49");
+    u64[1] a20 = {1};
+    run_env.expect_line(run_env.run_in(e, &m, "formats_short", a20[..1]), "return u8 46");
+    u64[1] a21 = {2};
+    run_env.expect_line(run_env.run_in(e, &m, "formats_short", a21[..1]), "return u8 53");
+    u64[1] a22 = {3};
+    run_env.expect_line(run_env.run_in(e, &m, "formats_short", a22[..1]), "return u8 0");
+    run_env.expect_line(run_env.run_in(e, &m, "formats_other", a6[..0]), "outside snprintf");
+    run_env.expect_line(run_env.run_in(e, &m, "parses", a6[..0]), "return f64 0x4004000000000000");
+    run_env.expect_line(run_env.run_in(e, &m, "parses_single", a6[..0]),
+                        "return f32 0x3FB99999A0000000");
+    run_env.expect_line(run_env.run_in(e, &m, "parses_end", a6[..0]), "outside strtod");
+    u64[1] a23 = {0};
+    // a range error sets errno to ERANGE, 34 on both targets
+    run_env.expect_line(run_env.run_in(e, &m, "range_error", a23[..1]), "return i32 34");
+    u64[1] a24 = {1};
+    run_env.expect_line(run_env.run_in(e, &m, "range_error", a24[..1]), "return i32 34");
+    // a call that sets no errno leaves the errno of the run
+    run_env.expect_line(run_env.run_in(e, &m, "no_error", a6[..0]), "return i32 5");
+    run_env.expect_line(run_env.run_in(e, &m, "reads", a6[..0]), "outside read");
+    // std.rt reaches no `memset`
+    run_env.expect_line(run_env.run_in(e, &m, "fills", a6[..0]), "outside memset");
+    println("externs ok");
+}
+
+// A global holds the value of its initializer as gen_data.const_value writes it: a folded
+// scalar, a string, an array, a positional and a designated struct, another constant, the
+// address of a global and a function. A `mut` global keeps its stores within one run.
+fn globals(run_env.env mut* e) void {
+    run_env.check(e, GLOBALS[..]);
+    fir.module mut m = fir.module_new();
+    defer fir.module_free(&m);
+    u64[1] a25 = {0};
+    run_env.expect_line(run_env.run_in(e, &m, "big", a25[..0]), "return i64 -9223372036854775808");
+    run_env.expect_line(run_env.run_in(e, &m, "byte", a25[..0]), "return u8 255");
+    run_env.expect_line(run_env.run_in(e, &m, "half", a25[..0]), "return f64 0x3FE0000000000000");
+    run_env.expect_line(run_env.run_in(e, &m, "tenth", a25[..0]), "return f32 0x3FB99999A0000000");
+    run_env.expect_line(run_env.run_in(e, &m, "yes", a25[..0]), "return true");
+    run_env.expect_line(run_env.run_in(e, &m, "letter", a25[..0]), "return char 122");
+    run_env.expect_line(run_env.run_in(e, &m, "top", a25[..0]), "return i32 7");
+    u64[1] a26 = {0};
+    run_env.expect_line(run_env.run_in(e, &m, "greeting", a26[..1]), "return char 104");
+    u64[1] a27 = {1};
+    run_env.expect_line(run_env.run_in(e, &m, "greeting", a27[..1]), "return char 105");
+    u64[1] a28 = {2};
+    run_env.expect_line(run_env.run_in(e, &m, "greeting", a28[..1]), "return char 32");
+    u64[1] a29 = {3};
+    run_env.expect_line(run_env.run_in(e, &m, "greeting", a29[..1]), "return char 116");
+    u64[1] a30 = {4};
+    run_env.expect_line(run_env.run_in(e, &m, "greeting", a30[..1]), "return char 104");
+    u64[1] a31 = {5};
+    run_env.expect_line(run_env.run_in(e, &m, "greeting", a31[..1]), "return char 101");
+    u64[1] a32 = {6};
+    run_env.expect_line(run_env.run_in(e, &m, "greeting", a32[..1]), "return char 114");
+    u64[1] a33 = {7};
+    run_env.expect_line(run_env.run_in(e, &m, "greeting", a33[..1]), "return char 101");
+    u64[1] a34 = {0};
+    run_env.expect_line(run_env.run_in(e, &m, "word_length", a34[..1]), "return u64 3");
+    u64[1] a35 = {1};
+    run_env.expect_line(run_env.run_in(e, &m, "word_length", a35[..1]), "return u64 5");
+    run_env.expect_line(run_env.run_in(e, &m, "origin", a25[..0]), "return i32 26");
+    run_env.expect_line(run_env.run_in(e, &m, "halfway", a25[..0]), "return i32 9");
+    u64[1] a36 = {0};
+    run_env.expect_line(run_env.run_in(e, &m, "box_corner", a36[..1]), "return i32 12");
+    u64[1] a37 = {1};
+    run_env.expect_line(run_env.run_in(e, &m, "box_corner", a37[..1]), "return i32 34");
+    run_env.expect_line(run_env.run_in(e, &m, "box_name", a25[..0]), "return u64 3");
+    run_env.expect_line(run_env.run_in(e, &m, "box_closed", a25[..0]), "return true");
+    run_env.expect_line(run_env.run_in(e, &m, "same", a25[..0]), "return i64 -9223372036854775808");
+    run_env.expect_line(run_env.run_in(e, &m, "byte_at", a25[..0]), "return u8 255");
+    u64[1] a38 = {0};
+    run_env.expect_line(run_env.run_in(e, &m, "step", a38[..1]), "return i32 1");
+    u64[1] a39 = {41};
+    run_env.expect_line(run_env.run_in(e, &m, "step", a39[..1]), "return i32 42");
+    u64[1] a40 = {4294967295};
+    run_env.expect_line(run_env.run_in(e, &m, "step", a40[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, &m, "tally_twice", a25[..0]), "return i32 12");
+    // a new run starts from the initializer again
+    run_env.expect_line(run_env.run_in(e, &m, "tally_twice", a25[..0]), "return i32 12");
+    println("globals ok");
+}
+
+// Each check of a checked build runs where the lowering puts it: an index, an operator, a
+// builtin and the `switch` of an enum, with the runtime entry of its kind (D11.4).
+fn checks(run_env.env mut* e) void {
+    run_env.check(e, CHECKS[..]);
+    fir.module mut m = fir.module_new();
+    defer fir.module_free(&m);
+    u64[1] a41 = {0};
+    u64[1] a42 = {0};
+    run_env.expect_line(run_env.run_in(e, &m, "index", a42[..1]), "return i32 1");
+    u64[1] a43 = {1};
+    run_env.expect_line(run_env.run_in(e, &m, "index", a43[..1]), "return i32 2");
+    u64[1] a44 = {2};
+    run_env.expect_line(run_env.run_in(e, &m, "index", a44[..1]), "return i32 3");
+    u64[1] a45 = {3};
+    string[2] w46 = {
+        "stderr \"7:13: bounds 3 3\\x0A\"",
+        "abort",
+    };
+    run_env.expect(run_env.run_in(e, &m, "index", a45[..1]), w46[..]);
+    u64[1] a47 = {18446744073709551615};
+    string[2] w48 = {
+        "stderr \"7:13: bounds -1 3\\x0A\"",
+        "abort",
+    };
+    run_env.expect(run_env.run_in(e, &m, "index", a47[..1]), w48[..]);
+    u64[2] a49 = {2147483646, 1};
+    run_env.expect_line(run_env.run_in(e, &m, "add", a49[..2]), "return i32 2147483647");
+    u64[2] a50 = {2147483647, 1};
+    string[2] w51 = {
+        "stderr \"10:14: overflow\\x0A\"",
+        "abort",
+    };
+    run_env.expect(run_env.run_in(e, &m, "add", a50[..2]), w51[..]);
+    u64[2] a52 = {4294967289, 2};
+    run_env.expect_line(run_env.run_in(e, &m, "divide", a52[..2]), "return i32 -3");
+    u64[2] a53 = {1, 0};
+    string[2] w54 = {
+        "stderr \"13:14: div_zero\\x0A\"",
+        "abort",
+    };
+    run_env.expect(run_env.run_in(e, &m, "divide", a53[..2]), w54[..]);
+    u64[2] a55 = {2147483648, 4294967295};
+    string[2] w56 = {
+        "stderr \"13:14: div_overflow\\x0A\"",
+        "abort",
+    };
+    run_env.expect(run_env.run_in(e, &m, "divide", a55[..2]), w56[..]);
+    u64[2] a57 = {1, 63};
+    run_env.expect_line(run_env.run_in(e, &m, "shift", a57[..2]),
+                        "return i64 -9223372036854775808");
+    u64[2] a58 = {1, 64};
+    string[2] w59 = {
+        "stderr \"16:14: shift 64 i64\\x0A\"",
+        "abort",
+    };
+    run_env.expect(run_env.run_in(e, &m, "shift", a58[..2]), w59[..]);
+    u64[1] a60 = {2};
+    run_env.expect_line(run_env.run_in(e, &m, "count", a60[..1]), "return u64 2");
+    u64[1] a61 = {4294967295};
+    string[2] w62 = {
+        "stderr \"19:21: alloc_count -1\\x0A\"",
+        "abort",
+    };
+    run_env.expect(run_env.run_in(e, &m, "count", a61[..1]), w62[..]);
+    u64[1] a63 = {3};
+    run_env.expect_line(run_env.run_in(e, &m, "span", a63[..1]), "return u64 2");
+    u64[1] a64 = {4};
+    string[2] w65 = {
+        "stderr \"26:14: span 1 4 3\\x0A\"",
+        "abort",
+    };
+    run_env.expect(run_env.run_in(e, &m, "span", a64[..1]), w65[..]);
+    u64[1] a66 = {1};
+    run_env.expect_line(run_env.run_in(e, &m, "sure", a66[..1]), "return");
+    u64[1] a67 = {0};
+    string[2] w68 = {
+        "stderr \"30:5: assert x > 0\\x0A\"",
+        "abort",
+    };
+    run_env.expect(run_env.run_in(e, &m, "sure", a67[..1]), w68[..]);
+    string[2] w69 = {
+        "stderr \"33:5: panic gave up\\x0A\"",
+        "abort",
+    };
+    run_env.expect(run_env.run_in(e, &m, "give_up", a41[..0]), w69[..]);
+    u64[1] a70 = {1};
+    run_env.expect_line(run_env.run_in(e, &m, "name", a70[..1]), "return i32 2");
+    u64[1] a71 = {5};
+    string[2] w72 = {
+        "stderr \"36:5: enum 5 mood\\x0A\"",
+        "abort",
+    };
+    run_env.expect(run_env.run_in(e, &m, "name", a71[..1]), w72[..]);
+    println("checks ok");
+}
+
+// A store through a `u8` pointer can leave any byte in a `bool` (D10.7). A load keeps the low
+// bit, as the `load i8` and the `trunc` of toolchain.md 6 item 2 keep it, in each construct
+// that reads a `bool`: a cast, `if`, `&&`, `||`, `!`, `assert`, `println`, an argument, a
+// loop condition, a field and an element.
+fn bools(run_env.env mut* e) void {
+    run_env.check(e, BOOLS[..]);
+    fir.module mut m = fir.module_new();
+    defer fir.module_free(&m);
+    u64[1] a73 = {0};
+    run_env.expect_line(run_env.run_in(e, &m, "as_int", a73[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, &m, "branch", a73[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, &m, "negate", a73[..1]), "return true");
+    string[2] w74 = {
+        "stderr \"48:5: assert b\\x0A\"",
+        "abort",
+    };
+    run_env.expect(run_env.run_in(e, &m, "sure", a73[..1]), w74[..]);
+    string[2] w75 = {
+        "stdout \"false\\x0A\"",
+        "return",
+    };
+    run_env.expect(run_env.run_in(e, &m, "show", a73[..1]), w75[..]);
+    run_env.expect_line(run_env.run_in(e, &m, "pass", a73[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, &m, "loop", a73[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, &m, "field", a73[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, &m, "element", a73[..1]), "return false");
+    u64[1] a76 = {1};
+    run_env.expect_line(run_env.run_in(e, &m, "as_int", a76[..1]), "return i32 1");
+    run_env.expect_line(run_env.run_in(e, &m, "branch", a76[..1]), "return i32 1");
+    run_env.expect_line(run_env.run_in(e, &m, "negate", a76[..1]), "return false");
+    run_env.expect_line(run_env.run_in(e, &m, "sure", a76[..1]), "return");
+    string[2] w77 = {
+        "stdout \"true\\x0A\"",
+        "return",
+    };
+    run_env.expect(run_env.run_in(e, &m, "show", a76[..1]), w77[..]);
+    run_env.expect_line(run_env.run_in(e, &m, "pass", a76[..1]), "return i32 1");
+    run_env.expect_line(run_env.run_in(e, &m, "loop", a76[..1]), "return i32 3");
+    run_env.expect_line(run_env.run_in(e, &m, "field", a76[..1]), "return i32 1");
+    run_env.expect_line(run_env.run_in(e, &m, "element", a76[..1]), "return true");
+    u64[1] a78 = {2};
+    run_env.expect_line(run_env.run_in(e, &m, "as_int", a78[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, &m, "branch", a78[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, &m, "negate", a78[..1]), "return true");
+    string[2] w79 = {
+        "stderr \"48:5: assert b\\x0A\"",
+        "abort",
+    };
+    run_env.expect(run_env.run_in(e, &m, "sure", a78[..1]), w79[..]);
+    string[2] w80 = {
+        "stdout \"false\\x0A\"",
+        "return",
+    };
+    run_env.expect(run_env.run_in(e, &m, "show", a78[..1]), w80[..]);
+    run_env.expect_line(run_env.run_in(e, &m, "pass", a78[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, &m, "loop", a78[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, &m, "field", a78[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, &m, "element", a78[..1]), "return false");
+    u64[1] a81 = {3};
+    run_env.expect_line(run_env.run_in(e, &m, "as_int", a81[..1]), "return i32 1");
+    run_env.expect_line(run_env.run_in(e, &m, "branch", a81[..1]), "return i32 1");
+    run_env.expect_line(run_env.run_in(e, &m, "negate", a81[..1]), "return false");
+    run_env.expect_line(run_env.run_in(e, &m, "sure", a81[..1]), "return");
+    string[2] w82 = {
+        "stdout \"true\\x0A\"",
+        "return",
+    };
+    run_env.expect(run_env.run_in(e, &m, "show", a81[..1]), w82[..]);
+    run_env.expect_line(run_env.run_in(e, &m, "pass", a81[..1]), "return i32 1");
+    run_env.expect_line(run_env.run_in(e, &m, "loop", a81[..1]), "return i32 3");
+    run_env.expect_line(run_env.run_in(e, &m, "field", a81[..1]), "return i32 1");
+    run_env.expect_line(run_env.run_in(e, &m, "element", a81[..1]), "return true");
+    u64[1] a83 = {254};
+    run_env.expect_line(run_env.run_in(e, &m, "as_int", a83[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, &m, "branch", a83[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, &m, "negate", a83[..1]), "return true");
+    string[2] w84 = {
+        "stderr \"48:5: assert b\\x0A\"",
+        "abort",
+    };
+    run_env.expect(run_env.run_in(e, &m, "sure", a83[..1]), w84[..]);
+    string[2] w85 = {
+        "stdout \"false\\x0A\"",
+        "return",
+    };
+    run_env.expect(run_env.run_in(e, &m, "show", a83[..1]), w85[..]);
+    run_env.expect_line(run_env.run_in(e, &m, "pass", a83[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, &m, "loop", a83[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, &m, "field", a83[..1]), "return i32 0");
+    run_env.expect_line(run_env.run_in(e, &m, "element", a83[..1]), "return false");
+    u64[1] a86 = {255};
+    run_env.expect_line(run_env.run_in(e, &m, "as_int", a86[..1]), "return i32 1");
+    run_env.expect_line(run_env.run_in(e, &m, "branch", a86[..1]), "return i32 1");
+    run_env.expect_line(run_env.run_in(e, &m, "negate", a86[..1]), "return false");
+    run_env.expect_line(run_env.run_in(e, &m, "sure", a86[..1]), "return");
+    string[2] w87 = {
+        "stdout \"true\\x0A\"",
+        "return",
+    };
+    run_env.expect(run_env.run_in(e, &m, "show", a86[..1]), w87[..]);
+    run_env.expect_line(run_env.run_in(e, &m, "pass", a86[..1]), "return i32 1");
+    run_env.expect_line(run_env.run_in(e, &m, "loop", a86[..1]), "return i32 3");
+    run_env.expect_line(run_env.run_in(e, &m, "field", a86[..1]), "return i32 1");
+    run_env.expect_line(run_env.run_in(e, &m, "element", a86[..1]), "return true");
+    u64[2] a88 = {3, 3};
+    run_env.expect_line(run_env.run_in(e, &m, "both", a88[..2]), "return true");
+    run_env.expect_line(run_env.run_in(e, &m, "either", a88[..2]), "return true");
+    u64[2] a89 = {3, 2};
+    run_env.expect_line(run_env.run_in(e, &m, "both", a89[..2]), "return false");
+    run_env.expect_line(run_env.run_in(e, &m, "either", a89[..2]), "return true");
+    u64[2] a90 = {2, 3};
+    run_env.expect_line(run_env.run_in(e, &m, "both", a90[..2]), "return false");
+    run_env.expect_line(run_env.run_in(e, &m, "either", a90[..2]), "return true");
+    u64[2] a91 = {2, 2};
+    run_env.expect_line(run_env.run_in(e, &m, "both", a91[..2]), "return false");
+    run_env.expect_line(run_env.run_in(e, &m, "either", a91[..2]), "return false");
+    u64[2] a92 = {1, 254};
+    run_env.expect_line(run_env.run_in(e, &m, "both", a92[..2]), "return false");
+    run_env.expect_line(run_env.run_in(e, &m, "either", a92[..2]), "return true");
+    u64[2] a93 = {255, 1};
+    run_env.expect_line(run_env.run_in(e, &m, "both", a93[..2]), "return true");
+    run_env.expect_line(run_env.run_in(e, &m, "either", a93[..2]), "return true");
+    println("bools ok");
+}
+
+// A call reads its arguments in the frame of the caller before the callee has a frame, so a
+// fault in an argument names the call and not a line of the callee.
+fn arguments(run_env.env mut* e) void {
+    run_env.check(e, ARGUMENTS[..]);
+    fir.module mut m = fir.module_new();
+    defer fir.module_free(&m);
+    u64[1] a94 = {0};
+    run_env.expect_line(run_env.run_in(e, &m, "null_argument", a94[..0]),
+                        "fault null dereference at 6:9");
+    println("arguments ok");
+}
+
+// The stack limit counts 16 bytes for each frame and no local, so a recursion runs as deep as
+// a native checked build runs it: the native build of `r` keeps its locals in registers and
+// completes `r(522931)` in an 8 MiB stack. The lowered `r` has 56 bytes of locals.
+fn depth(run_env.env mut* e) void {
+    run_env.check(e, DEPTH[..]);
+    fir.module mut m = fir.module_new();
+    defer fir.module_free(&m);
+    u64[1] a95 = {522931};
+    run_env.expect_line(run_env.run_in(e, &m, "r", a95[..1]), "return u64 522931");
+    u64[1] a96 = {524287};
+    run_env.expect_line(run_env.run_in(e, &m, "r", a96[..1]), "return u64 524287");
+    u64[1] a97 = {524288};
+    // 524288 frames of 16 bytes fill 8 MiB, so the frame of r(0) does not fit
+    run_env.expect_line(run_env.run_in(e, &m, "r", a97[..1]),
+                        "fault the stack passes its limit at 5:13");
+    println("depth ok");
+}
+
+// A program starts as the `main` that the compiler emits starts it (toolchain.md 6 item 22):
+// `args_init` with the arguments, `args`, then `main`, then `flush_all`, and its status is
+// the status of `main` & 0xFF. A call of `exit` ends it at once.
+fn programs(run_env.env mut* e) void {
+    string[3] argv = {"prog", "a b", ""};
+    string[2] w98 = {
+        "stdout \"3\\x0Aprog\\x0Aa b\\x0A\\x0A\"",
+        "exit 44",
+    };
+    run_env.expect(run_env.run_program(e, PROGRAM[..], argv[..]), w98[..]);
+    string[2] w99 = {
+        "stdout \"1\\x0Aprog\\x0A\"",
+        "exit 44",
+    };
+    run_env.expect(run_env.run_program(e, PROGRAM[..], argv[..1]), w99[..]);
+    run_env.expect_line(run_env.run_program(e, QUIET[..], argv[..]), "exit 4");
+    string[2] w100 = {
+        "stdout \"before\\x0A\"",
+        "exit 9",
+    };
+    run_env.expect(run_env.run_program(e, EXITS[..], argv[..]), w100[..]);
+    string[2] w101 = {
+        "stderr \"2:17: bounds 1 1\\x0A\"",
+        "abort",
+    };
+    run_env.expect(run_env.run_program(e, FAILS[..], argv[..1]), w101[..]);
+    string[2] w102 = {
+        "stdout \"a b\\x0A\"",
+        "exit 0",
+    };
+    run_env.expect(run_env.run_program(e, FAILS[..], argv[..2]), w102[..]);
+    println("programs ok");
+}
+
+fn main() i32 {
+    run_env.env mut e = run_env.env{};
+    run_env.open(&e);
+    defer run_env.close(&e);
+    heap(&e);
+    externs(&e);
+    globals(&e);
+    checks(&e);
+    bools(&e);
+    arguments(&e);
+    depth(&e);
+    programs(&e);
+    return 0;
+}

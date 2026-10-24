@@ -32,10 +32,17 @@ The passes run in the order of their `pass:` directives, each on every function 
   arguments select the mode: `--release`, `--no-bounds-check`, both in either order, or none for
   the default mode. Spaces separate the arguments. The pass does not run the verifier, so a test
   of it names `verify` in a second `pass:` directive.
+- `run` runs the module with the interpreter fir.interpreter (`spec/fir.md` 11), and a test with
+  it writes a report of each run in place of the module (`spec/fir.md` 16.3). With no argument
+  the pass runs the program `main.main` with the path of the test as its one argument. Its
+  arguments can name a function, `main.f`, and then a value for each of its parameters: a decimal
+  integer that fits an integer type, or `true` or `false` for a `bool`. The run has the real
+  `--std-dir` of the harness, so a failed check writes the message of `std.rt`.
 
-A pass that the compiler does not know, an argument of `none` or `verify`, and an argument of
-`build-mode` that is not a mode make the compiler exit 2 before any pass runs, and the harness
-reports an `ERROR`.
+A pass that the compiler does not know, an argument of `none` or `verify`, an argument of
+`build-mode` that is not a mode, and arguments of `run` that name no function or give a value
+that does not fit make the compiler exit 2 before any pass runs, and the harness reports an
+`ERROR`.
 
 The prelude keeps the lines and the columns of the file. The compiler replaces the `//|` of each
 prelude line with three spaces and blanks every other line, so a diagnostic of the prelude names
@@ -62,6 +69,7 @@ A test of the verifier names its rule instead of a number: `verify/vNN_name.fir`
 python3 test/fir/run_tests.py --fort build/Linux/debug/fort --std-dir build/Linux/debug/std
 python3 test/fir/run_tests.py --list                  # the tests, and nothing runs
 python3 test/fir/run_tests.py --bless none/003        # write the expect: block of a test
+python3 test/fir/run_tests.py --run                   # each function under the pass run
 ```
 
 A filter selects the tests whose path holds it. Each test is `PASS`, `FAIL` with its reason (a
@@ -70,3 +78,9 @@ start). The last line counts them, `run_tests.py: 3 tests: 3 passed, 0 failed, 0
 harness exits 1 when a test does not pass, and when a filter selects no test. A header with a
 problem stops the run before any test starts. `--bless` rewrites the `expect:` block of each
 selected test that exits 0; review the diff of the blessed files before a commit.
+
+`--run` runs each function of each selected test under the passes `verify` and `run` in place of
+its own passes, with 0 for each integer parameter and `false` for each `bool` parameter. It
+counts the end of each run, and each function or test that cannot run with its reason: a
+parameter that takes no such value, a run past 10 s, and a test that expects a panic or a
+diagnostic. It exits 1 only when the compiler fails. The ctest `fir-run-tests` runs it.

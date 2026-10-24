@@ -1,0 +1,394 @@
+/// Provides the environment of the tests of fir.interpreter. It checks a source in a sandbox whose
+/// standard library holds a small runtime, parses a FIR text against it when the test has one,
+/// runs a function or the whole program with what the run writes captured, and gives the report.
+//
+// The runtime of the sandbox has the entries that a run calls: the entry of each check kind, the
+// print functions, `str_eq`, `alloc`, `free`, `args_init`, `args` and `flush_all`. A failed check
+// writes `<line>:<col>: <kind>` and its reported values to descriptor 2 and calls `abort`, so a
+// report names the entry and its arguments and no sandbox path. Its `std.libc` declares the
+// externs that the interpreter runs and the three model externs. The text of a run stays valid
+// until the next run.
+import fort.ast;
+import check_env;
+import fort.fir;
+import fort.fir.interpreter;
+import fort.fir_parse;
+import fort.fir_print;
+import fort.fir_verify;
+import lower_env;
+import modules_env;
+import std.strbuf;
+
+// The count of the lines of LIBC.
+u64 LIBC_LINES = 21;
+
+// The sandbox std/libc.ft.
+string[LIBC_LINES] LIBC = {
+    "extern fn write(i32 fd, u8* buf, u64 n) i64;",
+    "extern fn read(i32 fd, u8 mut* buf, u64 n) i64;",
+    "extern fn abort() noreturn;",
+    "extern fn exit(i32 code) noreturn;",
+    "extern fn calloc(u64 n, u64 size) void mut* own;",
+    "extern fn free(void* own p) void;",
+    "extern fn strlen(char* s) u64;",
+    "extern fn memcmp(u8* a, u8* b, u64 n) i32;",
+    "extern fn memcpy(u8 mut* dst, u8* src, u64 n) u8 mut*;",
+    "extern fn memmove(u8 mut* dst, u8* src, u64 n) u8 mut*;",
+    "extern fn memset(u8 mut* dst, i32 v, u64 n) u8 mut*;",
+    "extern fn isatty(i32 fd) i32;",
+    "extern fn __errno_location() i32 mut*;",
+    "extern fn __error() i32 mut*;",
+    "extern fn snprintf(char mut* buf, u64 size, char* fmt, ...) i32;",
+    "extern fn strtod(char* s, void* end) f64;",
+    "extern fn strtof(char* s, void* end) f32;",
+    "extern fn oracle_keep(void* p) void;",
+    "extern fn oracle_pass(void* p) void*;",
+    "extern fn oracle_call(fn (i32) i32 f, i32 x) i32;",
+    "extern fn getpid() i32;",
+};
+
+// The count of the lines of RUNTIME.
+u64 RUNTIME_LINES = 172;
+
+// The sandbox std/rt.ft.
+string[RUNTIME_LINES] RUNTIME = {
+    "import std.libc;",
+    "struct enum_member {",
+    "    i32 value;",
+    "    char* name;",
+    "}",
+    "string mut@ own mut args_store = {};",
+    "fn put(i32 fd, string s) void {",
+    "    libc.write(fd, cast(s, u8@).ptr, s.len);",
+    "}",
+    "fn put_u64(i32 fd, u64 v) void {",
+    "    u8[20] mut d = {};",
+    "    u64 mut n = 20;",
+    "    u64 mut x = v;",
+    "    while (true) {",
+    "        n -= 1;",
+    "        d[n] = cast(48 + x % 10, u8);",
+    "        x = x / 10;",
+    "        if (x == 0) {",
+    "            break;",
+    "        }",
+    "    }",
+    "    libc.write(fd, &d[n], 20 - n);",
+    "}",
+    "fn put_i64(i32 fd, i64 v) void {",
+    "    if (v < 0) {",
+    "        put(fd, \"-\");",
+    "        put_u64(fd, 0 -% cast(v, u64));",
+    "        return;",
+    "    }",
+    "    put_u64(fd, cast(v, u64));",
+    "}",
+    "fn put_cstr(i32 fd, char* s) void {",
+    "    libc.write(fd, cast(s, u8*), libc.strlen(s));",
+    "}",
+    "fn at(u32 line, u32 col, string kind) void {",
+    "    put_u64(2, cast(line, u64));",
+    "    put(2, \":\");",
+    "    put_u64(2, cast(col, u64));",
+    "    put(2, \": \");",
+    "    put(2, kind);",
+    "}",
+    "fn stop() noreturn {",
+    "    put(2, \"\\n\");",
+    "    libc.abort();",
+    "}",
+    "fn fail_overflow(char* file, u32 line, u32 col) noreturn {",
+    "    at(line, col, \"overflow\");",
+    "    stop();",
+    "}",
+    "fn fail_shift(i64 count, char* type_name, char* file, u32 line, u32 col) noreturn {",
+    "    at(line, col, \"shift \");",
+    "    put_i64(2, count);",
+    "    put(2, \" \");",
+    "    put_cstr(2, type_name);",
+    "    stop();",
+    "}",
+    "fn fail_div_zero(char* file, u32 line, u32 col) noreturn {",
+    "    at(line, col, \"div_zero\");",
+    "    stop();",
+    "}",
+    "fn fail_div_overflow(char* file, u32 line, u32 col) noreturn {",
+    "    at(line, col, \"div_overflow\");",
+    "    stop();",
+    "}",
+    "fn fail_bounds(i64 index, u64 len, char* file, u32 line, u32 col) noreturn {",
+    "    at(line, col, \"bounds \");",
+    "    put_i64(2, index);",
+    "    put(2, \" \");",
+    "    put_u64(2, len);",
+    "    stop();",
+    "}",
+    "fn fail_span(i64 lo, i64 hi, u64 len, char* file, u32 line, u32 col) noreturn {",
+    "    at(line, col, \"span \");",
+    "    put_i64(2, lo);",
+    "    put(2, \" \");",
+    "    put_i64(2, hi);",
+    "    put(2, \" \");",
+    "    put_u64(2, len);",
+    "    stop();",
+    "}",
+    "fn fail_alloc_count(i64 n, char* file, u32 line, u32 col) noreturn {",
+    "    at(line, col, \"alloc_count \");",
+    "    put_i64(2, n);",
+    "    stop();",
+    "}",
+    "fn fail_enum(i64 v, char* type_name, char* file, u32 line, u32 col) noreturn {",
+    "    at(line, col, \"enum \");",
+    "    put_i64(2, v);",
+    "    put(2, \" \");",
+    "    put_cstr(2, type_name);",
+    "    stop();",
+    "}",
+    "fn assert_fail(char* text, char* file, u32 line, u32 col) noreturn {",
+    "    at(line, col, \"assert \");",
+    "    put_cstr(2, text);",
+    "    stop();",
+    "}",
+    "fn panic(char* ptr, u64 len, char* file, u32 line, u32 col) noreturn {",
+    "    at(line, col, \"panic \");",
+    "    libc.write(2, cast(ptr, u8*), len);",
+    "    stop();",
+    "}",
+    "fn alloc(u64 elem_size, u64 count, char* file, u32 line, u32 col) void mut* own {",
+    "    u64 mut size = elem_size * count;",
+    "    if (size == 0) {",
+    "        size = 1;",
+    "    }",
+    "    void mut* own p = libc.calloc(1, size);",
+    "    if (p == null) {",
+    "        at(line, col, \"out of memory\");",
+    "        stop();",
+    "    }",
+    "    return p;",
+    "}",
+    "fn free(void* own p) void {",
+    "    libc.free(move(p));",
+    "}",
+    "fn str_eq(char* a, u64 a_len, char* b, u64 b_len) bool {",
+    "    if (a_len != b_len) {",
+    "        return false;",
+    "    }",
+    "    return a_len == 0 || libc.memcmp(cast(a, u8*), cast(b, u8*), a_len) == 0;",
+    "}",
+    "fn print_i64(i32 fd, i64 v) void {",
+    "    put_i64(fd, v);",
+    "}",
+    "fn print_u64(i32 fd, u64 v) void {",
+    "    put_u64(fd, v);",
+    "}",
+    "fn print_bool(i32 fd, bool v) void {",
+    "    if (v) {",
+    "        put(fd, \"true\");",
+    "    } else {",
+    "        put(fd, \"false\");",
+    "    }",
+    "}",
+    "fn print_char(i32 fd, char c) void {",
+    "    u8[1] mut b = {};",
+    "    b[0] = cast(c, u8);",
+    "    libc.write(fd, &b[0], 1);",
+    "}",
+    "fn print_ptr(i32 fd, void* p) void {",
+    "    put_u64(fd, cast(p, u64));",
+    "}",
+    "fn print_str(i32 fd, char* ptr, u64 len) void {",
+    "    libc.write(fd, cast(ptr, u8*), len);",
+    "}",
+    "fn print_enum(i32 fd, i32 v, enum_member* m, u64 n) void {",
+    "    put_cstr(fd, m[0..n][cast(v, u64)].name);",
+    "}",
+    "fn print_f32(i32 fd, f32 v) void {",
+    "    put(fd, \"f32\");",
+    "}",
+    "fn print_f64(i32 fd, f64 v) void {",
+    "    put(fd, \"f64\");",
+    "}",
+    "fn args_init(i32 argc, char* mut* argv) void {",
+    "    u64 n = cast(argc, u64);",
+    "    string mut@ own a = new(string, n);",
+    "    char* mut@ view = argv[0..n];",
+    "    for (u64 mut i = 0; i < n; i++) {",
+    "        char* p = view[i];",
+    "        a[i] = cast(p[0..libc.strlen(p)], string);",
+    "    }",
+    "    del(args_store);",
+    "    args_store = move(a);",
+    "}",
+    "fn args() string@ {",
+    "    return args_store;",
+    "}",
+    "fn flush_all() void {",
+    "}",
+};
+
+/// The checker of the last source and the text of the last run. It must stay at the address that
+/// open filled, because the checker points into itself. A `stack_limit` that is not 0 replaces
+/// the stack limit of each run.
+struct env {
+    check_env.env c;
+    strbuf.str_buf text;
+    u64 stack_limit;
+}
+
+fn open(env mut* e) void {
+    check_env.open(&e->c);
+    e->text = strbuf.create();
+}
+
+fn close(env mut* e) void {
+    strbuf.free(&e->text);
+    check_env.close(&e->c);
+}
+
+// Appends each line of `lines` and a newline to `b`.
+fn join(strbuf.str_buf mut* b, string@ lines) void {
+    u64 mut i = 0;
+    while (i < lines.len) {
+        strbuf.append(b, lines[i]);
+        strbuf.push(b, '\n');
+        i += 1;
+    }
+}
+
+/// Checks `lines`, one line of source each, as the entry module `main` of a fresh sandbox with
+/// the runtime above. The source needs no `main`, and it must check with no diagnostic.
+fn check(env mut* e, string@ lines) void {
+    check_with(e, lines, RUNTIME[..]);
+}
+
+/// Checks `lines` as check does, with the lines of `runtime` as the sandbox std/rt.ft.
+fn check_with(env mut* e, string@ lines, string@ runtime) void {
+    check_env.reopen(&e->c);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    join(&b, runtime);
+    check_env.add(&e->c, "std/rt.ft", strbuf.view(&b));
+    strbuf.clear(&b);
+    join(&b, LIBC[..]);
+    check_env.add(&e->c, "std/libc.ft", strbuf.view(&b));
+    modules_env.std_dir_without_runtime(&e->c.m, "std");
+    strbuf.clear(&b);
+    join(&b, lines);
+    e->c.want_main = false;
+    if (!check_env.check_src(&e->c, strbuf.view(&b))) {
+        eprintln(check_env.report_text(&e->c, 0));
+        panic("run_env.check: the source does not check");
+    }
+}
+
+/// Parses `text`, the lines of a FIR module, against the checked source. The verifier does not
+/// see it, so a function of it can break a rule.
+fn parse_unverified(env mut* e, string@ text) fir.module {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    join(&b, text);
+    fir_parse.prelude pre = fir_parse.prelude{check_env.module_at(&e->c, "main"), &e->c.ck};
+    fir.module m = fir_parse.parse_module(&e->c.m.s, "t.fir", strbuf.view(&b), pre);
+    if (check_env.errors(&e->c) != 0) {
+        eprintln(check_env.report_text(&e->c, 0));
+        panic("run_env.parse: the text does not parse");
+    }
+    return m;
+}
+
+/// Parses `text` as parse_unverified does, and holds that each of its functions keeps every rule
+/// of the verifier.
+fn parse(env mut* e, string@ text) fir.module {
+    fir.module mut m = parse_unverified(e, text);
+    fir_verify.runtime rt = fir_verify.runtime_of(&e->c.ck);
+    u64 mut i = 0;
+    while (i < m.funcs.len) {
+        fir_verify.violation mut v = fir_verify.violation{};
+        if (fir_verify.find_violation(&m.funcs.items[i], &rt, &v)) {
+            strbuf.clear(&e->text);
+            fir_verify.violation_text(&m.funcs.items[i], &v, &e->text);
+            eprintln(strbuf.view(&e->text));
+            panic("run_env.parse: the verifier refuses the text");
+        }
+        i += 1;
+    }
+    return m;
+}
+
+/// The function of `m` or of the module `main` named `name`, a bare name or a dotted one.
+fn function(env* e, fir.module* m, string name) ast.sym* {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u64 mut i = 0;
+    while (i < m->funcs.len) {
+        strbuf.clear(&b);
+        fir_print.print_symbol(m->funcs.items[i].sym, &b);
+        if (strbuf.view(&b) == name || m->funcs.items[i].sym->name == name) {
+            return m->funcs.items[i].sym;
+        }
+        i += 1;
+    }
+    ast.sym* s = check_env.sym_main(&e->c, name);
+    if (s == null) {
+        panic("run_env.function: no such function");
+    }
+    return s;
+}
+
+/// Runs the function `name` of `m` or of the checked source with `args`, the bits of each
+/// argument, and gives the report.
+fn run_in(env mut* e, fir.module* m, string name, u64@ args) string {
+    interpreter.machine mut it = interpreter.machine{};
+    interpreter.init(&it, &e->c.ck, m, true);
+    defer interpreter.free(&it);
+    if (e->stack_limit != 0) {
+        it.stack_limit = e->stack_limit;
+    }
+    interpreter.run_function(&it, function(e, m, name), args);
+    strbuf.clear(&e->text);
+    interpreter.write_report(&it, &e->text);
+    return strbuf.view(&e->text);
+}
+
+/// Checks `source`, runs its function `name` with `args`, and gives the report.
+fn run(env mut* e, string@ source, string name, u64@ args) string {
+    check(e, source);
+    fir.module mut none = fir.module_new();
+    defer fir.module_free(&none);
+    return run_in(e, &none, name, args);
+}
+
+/// Checks `prelude`, parses `text` against it, runs the function `name` with `args`, and gives
+/// the report.
+fn run_text(env mut* e, string@ prelude, string@ text, string name, u64@ args) string {
+    check(e, prelude);
+    fir.module mut m = parse(e, text);
+    defer fir.module_free(&m);
+    return run_in(e, &m, name, args);
+}
+
+/// Checks `source` and runs it as a program whose `main` is the function `main`, with the
+/// arguments `argv`, and gives the report.
+fn run_program(env mut* e, string@ source, string@ argv) string {
+    check(e, source);
+    fir.module mut none = fir.module_new();
+    defer fir.module_free(&none);
+    interpreter.machine mut it = interpreter.machine{};
+    interpreter.init(&it, &e->c.ck, &none, true);
+    defer interpreter.free(&it);
+    interpreter.run_program(&it, function(e, &none, "main"), argv);
+    strbuf.clear(&e->text);
+    interpreter.write_report(&it, &e->text);
+    return strbuf.view(&e->text);
+}
+
+/// Holds `got` against the lines `want`, each ended by a newline, as lower_env.expect does.
+fn expect(string got, string@ want) void {
+    lower_env.expect(got, want);
+}
+
+/// Holds that the report `got` is the one line `want`.
+fn expect_line(string got, string want) void {
+    string[1] lines = {want};
+    lower_env.expect(got, lines[..]);
+}
