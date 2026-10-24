@@ -1,0 +1,275 @@
+/// Holds the used libraries of a build and the uses between them (D9.11, module-system.md 10.4).
+///
+/// The manifest of each used library names each library that it was built against, with the
+/// interface hash of that library. A build must name each of them with `--use`, with that
+/// interface, and the uses must form no cycle. The link order then puts each library before each
+/// library that it uses. This module uses no function-pointer table.
+import containers;
+import std.str;
+import std.strbuf;
+import std.vec;
+
+/// The libraries of a build in command-line order and the uses of each. Use `k` belongs to the
+/// library `owners[k]`, and the uses of one library are in the order of add_use. The strings are
+/// borrowed. A zero value is an empty graph.
+struct graph {
+    containers.str_vec names; // the name of each library
+    containers.str_vec interfaces; // the interface hash of each library
+    containers.str_vec use_names; // the library that each use names
+    containers.str_vec use_hashes; // the interface hash that each use records
+    vec.int_vec owners; // the library that each use belongs to
+}
+
+/// Releases the graph. The graph is empty and usable afterwards.
+fn free(graph mut* g) void {
+    containers.str_free(&g->names);
+    containers.str_free(&g->interfaces);
+    containers.str_free(&g->use_names);
+    containers.str_free(&g->use_hashes);
+    vec.int_free(&g->owners);
+}
+
+/// Adds the library `name`, whose interface hash is `interface`.
+fn add(graph mut* g, string name, string interface) void {
+    containers.str_push(&g->names, name);
+    containers.str_push(&g->interfaces, interface);
+}
+
+/// Adds a use of the library `name` with the interface hash `hash` to the library that add added
+/// last. A graph with no library breaks the precondition.
+fn add_use(graph mut* g, string name, string hash) void {
+    if (g->names.len == 0) {
+        panic("graph.add_use: no library to add the use to");
+    }
+    containers.str_push(&g->use_names, name);
+    containers.str_push(&g->use_hashes, hash);
+    vec.int_push(&g->owners, cast(g->names.len - 1, i64));
+}
+
+/// Returns the number of libraries.
+fn count(graph* g) u64 {
+    return g->names.len;
+}
+
+/// Returns the name of library `i`. An index at or past `count` breaks the precondition.
+fn name_at(graph* g, u64 i) string {
+    return containers.str_at(&g->names, i);
+}
+
+// The index of the library `name`, or -1 when the graph holds none.
+fn index_of(graph* g, string name) i64 {
+    u64 mut i = 0;
+    while (i < g->names.len) {
+        if (containers.str_at(&g->names, i) == name) {
+            return cast(i, i64);
+        }
+        i += 1;
+    }
+    return -1;
+}
+
+// Appends `'<name>'` to `out`.
+fn append_quoted(strbuf.str_buf mut* out, string name) void {
+    strbuf.push(out, '\'');
+    strbuf.append(out, name);
+    strbuf.push(out, '\'');
+}
+
+// Whether the library at `from` uses the library at `to`.
+fn uses(graph* g, u64 from, u64 to) bool {
+    string name = containers.str_at(&g->names, to);
+    u64 mut k = 0;
+    while (k < g->use_names.len) {
+        if (cast(g->owners.items[k], u64) == from && containers.str_at(&g->use_names, k) == name) {
+            return true;
+        }
+        k += 1;
+    }
+    return false;
+}
+
+// Appends the index of each library to `out` in byte order of the name, by insertion.
+fn by_name(graph* g, vec.int_vec mut* out) void {
+    u64 mut i = 0;
+    while (i < g->names.len) {
+        vec.int_push(out, cast(i, i64));
+        u64 mut k = out->len - 1;
+        while (k > 0 && str.cmp(containers.str_at(&g->names, i),
+                                containers.str_at(&g->names, cast(out->items[k - 1], u64))) < 0) {
+            out->items[k] = out->items[k - 1];
+            out->items[k - 1] = cast(i, i64);
+            k -= 1;
+        }
+        i += 1;
+    }
+}
+
+// The states of a library in the cycle search.
+i64 UNSEEN = 0;
+i64 ON_PATH = 1;
+i64 DONE = 2;
+
+// Searches for a cycle from the library `at` and returns the position on `path` of its first
+// library, or -1 when the search finds none. `state` holds one state for each library, `path`
+// holds the libraries from the start of the search to `at`, and `names` the libraries in byte
+// order of the name, the order in which the uses of each library are followed.
+fn find_cycle(graph* g, vec.int_vec* names, u64 at, vec.int_vec mut* state,
+              vec.int_vec mut* path) i64 {
+    state->items[at] = ON_PATH;
+    vec.int_push(path, cast(at, i64));
+    u64 mut n = 0;
+    while (n < names->len) {
+        u64 to = cast(names->items[n], u64);
+        n += 1;
+        if (!uses(g, at, to)) {
+            continue;
+        }
+        if (state->items[to] == ON_PATH) {
+            u64 mut k = 0;
+            while (cast(path->items[k], u64) != to) {
+                k += 1;
+            }
+            return cast(k, i64);
+        }
+        if (state->items[to] == UNSEEN) {
+            i64 found = find_cycle(g, names, to, state, path);
+            if (found >= 0) {
+                return found;
+            }
+        }
+    }
+    vec.int_pop(path);
+    state->items[at] = DONE;
+    return -1;
+}
+
+// Appends `library cycle: 'a' uses 'b' uses 'a'` for the cycle `path[first..]`, which starts
+// and ends at the library of the cycle whose name comes first in byte order.
+fn append_cycle(graph* g, vec.int_vec* path, u64 first, strbuf.str_buf mut* out) void {
+    u64 n = path->len - first;
+    u64 mut start = first;
+    u64 mut k = first + 1;
+    while (k < path->len) {
+        string name = containers.str_at(&g->names, cast(path->items[k], u64));
+        if (str.cmp(name, containers.str_at(&g->names, cast(path->items[start], u64))) < 0) {
+            start = k;
+        }
+        k += 1;
+    }
+    strbuf.append(out, "library cycle: ");
+    u64 mut i = 0;
+    while (i <= n) {
+        if (i > 0) {
+            strbuf.append(out, " uses ");
+        }
+        u64 at = first + (start - first + i) % n;
+        append_quoted(out, containers.str_at(&g->names, cast(path->items[at], u64)));
+        i += 1;
+    }
+}
+
+// Whether the uses form a cycle. Appends the message of the first cycle that a search finds to
+// `out`: the search starts at each library in byte order of the name.
+fn has_cycle(graph* g, strbuf.str_buf mut* out) bool {
+    vec.int_vec mut names = vec.int_create();
+    defer vec.int_free(&names);
+    by_name(g, &names);
+    vec.int_vec mut state = vec.int_create();
+    defer vec.int_free(&state);
+    vec.int_vec mut path = vec.int_create();
+    defer vec.int_free(&path);
+    u64 mut i = 0;
+    while (i < g->names.len) {
+        vec.int_push(&state, UNSEEN);
+        i += 1;
+    }
+    i = 0;
+    while (i < names.len) {
+        u64 start = cast(names.items[i], u64);
+        i += 1;
+        if (state.items[start] != UNSEEN) {
+            continue;
+        }
+        i64 first = find_cycle(g, &names, start, &state, &path);
+        if (first >= 0) {
+            append_cycle(g, &path, cast(first, u64), out);
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Checks the rules of D9.11 between the libraries (toolchain.md 2.1, step 1). Each library that
+/// a library uses must be in the graph with the interface hash that the use records, and the uses
+/// must form no cycle. Returns false at the first failure and appends its message to `out`: the
+/// libraries in command-line order and the uses of each in their order, then the cycle.
+fn check(graph* g, strbuf.str_buf mut* out) bool {
+    u64 mut k = 0;
+    while (k < g->use_names.len) {
+        string owner = containers.str_at(&g->names, cast(g->owners.items[k], u64));
+        string used = containers.str_at(&g->use_names, k);
+        i64 at = index_of(g, used);
+        if (at < 0) {
+            strbuf.append(out, "library ");
+            append_quoted(out, owner);
+            strbuf.append(out, " uses library ");
+            append_quoted(out, used);
+            strbuf.append(out, ", which no --use names");
+            return false;
+        }
+        if (containers.str_at(&g->interfaces, cast(at, u64))
+            != containers.str_at(&g->use_hashes, k)) {
+            strbuf.append(out, "library ");
+            append_quoted(out, owner);
+            strbuf.append(out, " was built against another interface of ");
+            append_quoted(out, used);
+            return false;
+        }
+        k += 1;
+    }
+    return !has_cycle(g, out);
+}
+
+// Whether a library of `left` other than `j` uses the library `j`. `left[i]` is true for each
+// library that no pick took yet.
+fn is_used_by_left(graph* g, vec.int_vec* left, u64 j) bool {
+    u64 mut i = 0;
+    while (i < g->names.len) {
+        if (left->items[i] != 0 && i != j && uses(g, i, j)) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+/// Appends the index of each library to `out` in the link order (module-system.md 10.4): each
+/// pick is the first name in byte order among the remaining libraries that no remaining library
+/// uses. A library that uses itself does not stop its own pick. A graph whose uses form a cycle
+/// of two or more libraries breaks the precondition, which check holds.
+fn link_order(graph* g, vec.int_vec mut* out) void {
+    vec.int_vec mut names = vec.int_create();
+    defer vec.int_free(&names);
+    by_name(g, &names);
+    vec.int_vec mut left = vec.int_create();
+    defer vec.int_free(&left);
+    u64 mut i = 0;
+    while (i < g->names.len) {
+        vec.int_push(&left, 1);
+        i += 1;
+    }
+    u64 mut picked = 0;
+    while (picked < g->names.len) {
+        u64 mut n = 0;
+        while (n < names.len && (left.items[cast(names.items[n], u64)] == 0
+                                 || is_used_by_left(g, &left, cast(names.items[n], u64)))) {
+            n += 1;
+        }
+        if (n == names.len) {
+            panic("graph.link_order: the uses form a cycle");
+        }
+        left.items[cast(names.items[n], u64)] = 0;
+        vec.int_push(out, names.items[n]);
+        picked += 1;
+    }
+}

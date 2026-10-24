@@ -149,7 +149,7 @@ import binding's name for a local even though D7.9 permits it.
 | `std.math`      | none                                        | float bit casts, abs, min, max   |
 | `std.sort`      | `libc`                                      | an array sorted in place         |
 | `std.net`       | `libc`, `str`, `sys`                        | a TCP listener and a connection  |
-| `std.os`        | `libc`, `str`, `strbuf`                     | triple, binary path, real path   |
+| `std.os`        | `libc`, `str`, `strbuf`                     | triple, paths, file mode         |
 
 `std.digest.sha256` imports nothing and gives the SHA-256 digest of bytes (2.15).
 
@@ -1207,7 +1207,9 @@ running binary: Linux reads the symbolic link `/proc/self/exe` with `libc.readli
 dyld's `_NSGetExecutablePath` and resolves the answer with `real_path` when the file still
 exists at that path. `_NSGetExecutablePath` is not a C library function, so `std/darwin/os.ft`
 declares it, and `std.libc` does not. `real_path` gives the canonical form of a path with
-`libc.realpath`: an absolute path with symbolic links, `.` and `..` resolved.
+`libc.realpath`: an absolute path with symbolic links, `.` and `..` resolved. `open_nonblocking`
+and `file_mode` give the type of a file without a read: the open of a FIFO does not wait for a
+writer, and `fstat(2)` gives the type bits.
 
 ```fort
 string TARGET = "x86_64-linux-gnu";          // std/linux/os.ft
@@ -1215,6 +1217,8 @@ string TARGET = "arm64-apple-macosx11.0.0";  // std/darwin/os.ft
 
 fn exe_path(strbuf.str_buf mut* out) bool;
 fn real_path(string path, strbuf.str_buf mut* out) bool;
+fn open_nonblocking(string path) i32;
+fn file_mode(i32 fd, u32 mut* mode) bool;
 ```
 
 `exe_path` appends the path to `out` and returns true. It returns false and leaves `out`
@@ -1224,6 +1228,14 @@ leaves `out` unchanged when `realpath(3)` fails. It
 allocates the buffer of `libc.PATH_MAX` bytes that `realpath` writes, with `new`, and frees it
 before it returns. This is the owning form of `realpath` that D17.13 describes: the `std.libc`
 declaration takes a buffer and returns a view of it.
+`open_nonblocking` opens `path` to read with `O_NONBLOCK` and returns the descriptor, or -1 with
+errno set. `file_mode` writes the low 16 bits of the `st_mode` of the file that `fd` names to
+`mode`, its type bits and its permission bits, and returns true. It returns false with errno set
+when `fstat(2)` fails. `std.os` declares `fstat` itself and `std.libc` does not, so only a
+program that imports `std.os` binds the C symbol (D9.8). The buffer is 18 words of 8 bytes, with
+the alignment of C, and not a struct, because a struct would give the symbol a type that a
+program cannot write again. `st_mode` is a u32 at byte 24 on Linux x86-64 and a u16 at byte 4 on
+Darwin arm64.
 
 ### 2.15 `std.digest.sha256`
 

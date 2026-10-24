@@ -32,7 +32,7 @@ bullet at a time and without a rewrite.
   one `mutation_anchors_<table>` test for each table in `tools/mutations`, and the three
   `mutate_` tests of `--check` over the fixture `test/mutate/strict_table.json`;
   the 71 bootstrap0 C suites. Integration: the corpus (`lang`, `lang-json`), `library-interface`,
-  `fixpoint`, `tty`,
+  `library-artifact`, `library-use`, `fixpoint`, `tty`,
   `stack_depth` and `lsp-binary`; bootstrap0 has none, since building bootstrap-1 proves the C
   compiler. `stack_depth` gives each compiler of the build a 1 MB stack and a type of 254
   nested groups (D2.11). Before the checkers kept their suffixes on a stack of their own, that
@@ -612,21 +612,38 @@ bullet at a time and without a rewrite.
   section must check clean, and the writer must write each section that a check read as the same
   text. Each program of `test/lang` must then give the same error lines and status against the
   interface as against the sources; notes are not compared, because a note can point into the
-  interface file. The checker is the test-only path until a build reads an interface file
-  through `--use`.
+  interface file. The checker reads the text of `--emit-interface` with no artifact, and only a
+  program over the compiler modules can write a checked section again, so `--use` does not
+  replace it.
 - **`library-artifact` holds the artifact of `--lib std` against a reading that shares no code
   with the compiler** (D9.11). `test/library/artifact_test.py` builds `std.flib` twice and
   requires the same bytes in each file. It writes the manifest from the table of toolchain.md 2.2
   with Python's hashlib and requires the same text. It verifies the IR module of the library and
   of the other target, from a root that it assembles for that target. Each program of
-  `test/library/programs` must give the same stdout, stderr and status when it is linked against
-  `lib.a` as when it is built whole, and each `declare` line of its entry unit must carry the
-  types of the definition in the library module. `test/library/builder.ft` emits the entry unit
-  against `interface.ft` until `--use` exists. The archiver of macOS writes the time stamp of
+  `test/library/programs` must give the same stdout, stderr and status when it is built with
+  `--use std=<artifact>` as when it is built whole, and each `declare` line of its entry unit
+  must carry the types of the definition in the library module. The archiver of macOS writes the
+  time stamp of
   each member unless `ZERO_AR_DATE=1` is set (probed with `/usr/bin/ar rcs` twice over one
   object), so the test sets it. GNU ar 2.42 of the VM writes zero stamps by default. The module
   suite `driver_artifact_test.ft` runs the build with a `--cc` and an `--ar` that are scripts, so
   the bytes of each file are known; only the ctest runs the real tools.
+- **`library-use` holds the run corpus of `test/lang` built against `std.flib`** (D9.11).
+  `test/library/use_test.py` builds each program whose kind is `run` twice, with `--std-dir` and
+  with `--use std=<artifact>`, and requires the same compile status and, from the two programs,
+  the same stdout, stderr and status. It also verifies the IR module of each entry unit. A
+  used library must have the build mode, the bounds mode and the configuration of the build, so
+  the script builds one artifact for each set of `--release`, `--no-bounds-check` and `--cfg`
+  that the programs give. A program with `//! link:` helpers is compiled with `-c` and linked by
+  hand, with the `lib.a` after the helpers. The program of `test/library/chain` is built against
+  `std.flib` and two more libraries, `zzz` using `aaa`; GNU ld resolves archives in the order of
+  the line, so it refuses `main.o aaa.a zzz.a`, and only the link order of module-system.md 10.4
+  links it. The artifact is built from the `--std-dir` of the
+  whole program, so a path in a runtime error message is the same in both builds (D11.4) and
+  stderr is compared byte for byte. The module suite `driver_use_test.ft` runs `--use` with a
+  `--cc` and an `--ar` that are scripts, and it forges manifests to reach each refusal of
+  toolchain.md 1: a cycle of used libraries comes from no build, because a build of `a` against
+  `b` must name `a` with `--use` when `b` uses `a`, and `--use` of the `--lib` name is refused.
 
 ## 5. Product tests and the fixed point
 

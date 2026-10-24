@@ -1,10 +1,13 @@
-/// Writes the artifact of a library build: the hashes that its manifest records, the manifest
-/// text and the files of the directory `<name>.flib/` (D9.11, toolchain.md 2.2).
+/// Writes the artifact of a library build and reads the artifact of a used library: the hashes
+/// that its manifest records, the manifest text and the files of the directory `<name>.flib/`
+/// (D9.11, toolchain.md 2.2).
 ///
 /// Every hash is SHA-256 (FIPS 180-4), written as 64 lowercase hex digits. The manifest has one
 /// field on each line, and its key is the hash of the lines from the format version to the last
 /// used library. The writer writes each file to a temporary name and renames it, and it writes
-/// the manifest last, so a reader that finds a manifest finds the files of the same build.
+/// the manifest last, so a reader that finds a manifest finds the files of the same build. The
+/// reader reads each file once and keeps the bytes that it checked.
+import containers;
 import modules;
 import std.digest.sha256;
 import std.io;
@@ -484,4 +487,373 @@ fn write(string dir, string interface_text, u8@ archive, string manifest_text,
         return false;
     }
     return true;
+}
+
+// ---- reading a used artifact -------------------------------------------------------
+
+// The number of hex digits of a hash.
+u64 HASH_DIGITS = 64;
+
+// The value of an escaped byte: its two uppercase hex digits.
+u64 HEX_DIGIT_TEN = 10;
+
+/// What reading an artifact found (toolchain.md 2.2, Validation).
+enum verdict {
+    v_valid, // every rule holds
+    v_unreadable, // the system refused a read; the errno value says why
+    v_corrupt, // a rule does not hold
+}
+
+/// A used artifact, read once: the fields of its manifest and the bytes of its interface file and
+/// its archive (toolchain.md 2.2, Reading). The strings and the spans of `fields` and `key` point
+/// into the other members, so a value is used and freed at one address. A zero value is empty.
+struct contents {
+    manifest fields;
+    string key; // the value of the key line
+    strbuf.str_buf text; // the bytes of `manifest`
+    strbuf.str_buf interface; // the bytes of `interface.ft`
+    strbuf.str_buf archive; // the bytes of `lib.a`
+    containers.pool values; // the decoded values
+    containers.str_vec cfg_keys;
+    containers.str_vec cfg_values;
+    containers.str_vec cc_args;
+    containers.str_vec use_names;
+    containers.str_vec use_hashes;
+}
+
+/// Releases the contents. The value is empty and usable afterwards.
+fn free(contents mut* c) void {
+    c->fields = manifest{};
+    c->key = "";
+    strbuf.free(&c->text);
+    strbuf.free(&c->interface);
+    strbuf.free(&c->archive);
+    containers.pool_free(&c->values);
+    containers.str_free(&c->cfg_keys);
+    containers.str_free(&c->cfg_values);
+    containers.str_free(&c->cc_args);
+    containers.str_free(&c->use_names);
+    containers.str_free(&c->use_hashes);
+}
+
+// The value of the hex digit `ch` in the form of a value, 0 to 15, or -1 for another byte: the
+// digits 0 to 9 and the uppercase letters A to F.
+fn upper_digit(char ch) i64 {
+    if (ch >= '0' && ch <= '9') {
+        return cast(ch, i64) - cast('0', i64);
+    }
+    if (ch >= 'A' && ch <= 'F') {
+        return cast(ch, i64) - cast('A', i64) + cast(HEX_DIGIT_TEN, i64);
+    }
+    return -1;
+}
+
+// Decodes the manifest value `text`, interned in `p`: each `\xHH` with two uppercase hex digits is
+// its byte, and each other byte stays as it is. parse_manifest then compares the text that the
+// writer writes from the decoded values with `text`, which refuses every other spelling: a byte
+// outside 0x21 to 0x7E, a `\` that starts no escape, and an escape of a byte that stays.
+fn decode(string text, containers.pool mut* p) string {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u64 mut i = 0;
+    while (i < text.len) {
+        if (text[i] == '\\' && i + 3 < text.len && text[i + 1] == 'x') {
+            i64 high = upper_digit(text[i + 2]);
+            i64 low = upper_digit(text[i + 3]);
+            if (high >= 0 && low >= 0) {
+                strbuf.push_byte(&b, cast((cast(high, u64) << HEX_SHIFT) | cast(low, u64), u8));
+                i += 4;
+                continue;
+            }
+        }
+        strbuf.push(&b, text[i]);
+        i += 1;
+    }
+    return containers.pool_intern(p, strbuf.view(&b));
+}
+
+/// Whether `text` is a hash: 64 lowercase hex digits.
+fn is_hash(string text) bool {
+    if (text.len != HASH_DIGITS) {
+        return false;
+    }
+    u64 mut i = 0;
+    while (i < text.len) {
+        char ch = text[i];
+        if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'))) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// Splits `text` at its first space into `*first` and `*second`. Returns false when it holds
+// no space.
+fn split_pair(string text, string mut* first, string mut* second) bool {
+    i64 space = str.index_of(text, ' ');
+    if (space < 0) {
+        return false;
+    }
+    *first = text[..cast(space, u64)];
+    *second = text[cast(space, u64) + 1..];
+    return true;
+}
+
+// Decodes the value pair `text` of a `cfg` or a `use` line and pushes its two values. Returns
+// false when the text holds no space.
+fn parse_pair(string text, containers.pool mut* p, containers.str_vec mut* firsts,
+              containers.str_vec mut* seconds) bool {
+    string mut first = "";
+    string mut second = "";
+    if (!split_pair(text, &first, &second)) {
+        return false;
+    }
+    containers.str_push(firsts, decode(first, p));
+    containers.str_push(seconds, decode(second, p));
+    return true;
+}
+
+// Reads one manifest line `<field> <value>` into `*c`. Returns false for a line with no value, a
+// field that a library manifest does not hold, and a hash that is not one: the writer writes any
+// value of a hash field as it is, so the comparison of parse_manifest cannot refuse it. The order
+// of the lines, the value form and the words of the versions and the modes are not read here.
+fn parse_line(string line, contents mut* c) bool {
+    string mut field = "";
+    string mut rest = "";
+    if (!split_pair(line, &field, &rest)) {
+        return false;
+    }
+    if (field == "cfg") {
+        return parse_pair(rest, &c->values, &c->cfg_keys, &c->cfg_values);
+    }
+    if (field == "use") {
+        if (!parse_pair(rest, &c->values, &c->use_names, &c->use_hashes)) {
+            return false;
+        }
+        return is_hash(containers.str_at(&c->use_hashes, c->use_hashes.len - 1));
+    }
+    string value = decode(rest, &c->values);
+    if (field == "compiler" || field == "source" || field == "key" || field == "interface"
+        || field == "archive") {
+        if (!is_hash(value)) {
+            return false;
+        }
+    }
+    if (field == "fort-manifest" || field == "summaries") {
+        // the writer writes the versions that this reader knows, so the comparison refuses others
+        return true;
+    } else if (field == "library") {
+        c->fields.library = value;
+    } else if (field == "compiler") {
+        c->fields.compiler = value;
+    } else if (field == "target") {
+        c->fields.target = value;
+    } else if (field == "mode") {
+        // another word reads as `checked`, which the comparison of parse_manifest refuses
+        c->fields.release = value == "release";
+    } else if (field == "bounds") {
+        c->fields.no_bounds_check = value == "off";
+    } else if (field == "cc") {
+        c->fields.cc = value;
+    } else if (field == "xcc") {
+        containers.str_push(&c->cc_args, value);
+    } else if (field == "ar") {
+        c->fields.ar = value;
+    } else if (field == "source") {
+        c->fields.source = value;
+    } else if (field == "key") {
+        c->key = value;
+    } else if (field == "interface") {
+        c->fields.interface = value;
+    } else if (field == "archive") {
+        c->fields.archive = value;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+/// Reads the manifest `text` of a library into `*c` and holds rules 1 to 3 of toolchain.md 2.2,
+/// Validation: each line has the form and the order of the table, the first line is
+/// `fort-manifest 1` and the last is `summaries 1`, and the key line holds the SHA-256 of the
+/// lines before it. Returns false when one does not hold. A manifest of an entry unit is no
+/// manifest of a library, so it is refused. The values are decoded into `c->values`, and the
+/// fields of an earlier parse are replaced.
+fn parse_manifest(string text, contents mut* c) bool {
+    c->fields = manifest{};
+    c->key = "";
+    c->cfg_keys.len = 0;
+    c->cfg_values.len = 0;
+    c->cc_args.len = 0;
+    c->use_names.len = 0;
+    c->use_hashes.len = 0;
+    u64 mut at = 0;
+    while (at < text.len) {
+        u64 mut end = at;
+        while (end < text.len && text[end] != '\n') {
+            end += 1;
+        }
+        if (end == text.len) {
+            // each line ends with one newline byte
+            return false;
+        }
+        if (!parse_line(text[at..end], c)) {
+            return false;
+        }
+        at = end + 1;
+    }
+    c->fields.cfg_keys = containers.str_items(&c->cfg_keys);
+    c->fields.cfg_values = containers.str_items(&c->cfg_values);
+    c->fields.cc_args = containers.str_items(&c->cc_args);
+    c->fields.use_names = containers.str_items(&c->use_names);
+    c->fields.use_hashes = containers.str_items(&c->use_hashes);
+    // The writer writes each field once, in the order of the table, the lists sorted and the key
+    // computed, so a text that it does not write again byte for byte breaks a rule.
+    strbuf.str_buf mut again = strbuf.create();
+    defer strbuf.free(&again);
+    write_manifest(&c->fields, &again);
+    return strbuf.view(&again) == text;
+}
+
+// The type bits of `st_mode` and the type of a regular file, the POSIX values of both targets.
+u32 S_IFMT = 0o170000;
+u32 S_IFREG = 0o100000;
+
+// Reads the file `<dir>/<name>` into `out`. Returns v_valid; v_corrupt when no entry stands at
+// the name or when the entry, after the link that it can be, is no regular file; or v_unreadable
+// with the errno value in `*error` for each other failure. The open does not wait for the writer
+// of a FIFO, and fstat(2) refuses the FIFO before a read.
+fn read_entry(string dir, string name, strbuf.str_buf mut* out, i32 mut* error) verdict {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.clear(out);
+    i32 fd = os.open_nonblocking(join(&b, dir, name));
+    if (fd < 0) {
+        if (sys.errno() == libc.ENOENT) {
+            return verdict.v_corrupt;
+        }
+        *error = sys.errno();
+        return verdict.v_unreadable;
+    }
+    defer libc.close(fd);
+    u32 mut mode = 0;
+    if (!os.file_mode(fd, &mode)) {
+        *error = sys.errno();
+        return verdict.v_unreadable;
+    }
+    if ((mode & S_IFMT) != S_IFREG) {
+        return verdict.v_corrupt;
+    }
+    if (!io.read_all(fd, out)) {
+        *error = sys.errno();
+        return verdict.v_unreadable;
+    }
+    return verdict.v_valid;
+}
+
+// Whether `data` hashes to `hash`.
+fn has_hash(u8@ data, string hash) bool {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    append_hash(&b, data);
+    return strbuf.view(&b) == hash;
+}
+
+/// Reads the artifact `dir` of a used library once and checks it (toolchain.md 2.2, Reading and
+/// Validation). It reads `manifest`, `interface.ft` and `lib.a` once each into `*c`, and the
+/// caller uses only those bytes. Returns v_valid when each rule holds, v_corrupt when one does
+/// not, and v_unreadable with the errno value in `*error` when the system refuses to open `dir`
+/// or to read a file of it. A file that is absent breaks a rule, and so does a `summaries` that is
+/// no directory or that is a symbolic link.
+fn read(string dir, contents mut* c, i32 mut* error) verdict {
+    char mut@ own c_dir = str.to_cstr(dir);
+    defer del(c_dir);
+    i32 fd = libc.open(c_dir.ptr, libc.O_RDONLY | libc.O_DIRECTORY, 0);
+    if (fd < 0) {
+        *error = sys.errno();
+        return verdict.v_unreadable;
+    }
+    libc.close(fd);
+    verdict mut found = read_entry(dir, MANIFEST_FILE, &c->text, error);
+    if (found != verdict.v_valid) {
+        return found;
+    }
+    if (!parse_manifest(strbuf.view(&c->text), c)) {
+        return verdict.v_corrupt;
+    }
+    found = read_entry(dir, INTERFACE_FILE, &c->interface, error);
+    if (found != verdict.v_valid) {
+        return found;
+    }
+    if (!has_hash(strbuf.bytes(&c->interface), c->fields.interface)) {
+        return verdict.v_corrupt;
+    }
+    found = read_entry(dir, ARCHIVE_FILE, &c->archive, error);
+    if (found != verdict.v_valid) {
+        return found;
+    }
+    if (!has_hash(strbuf.bytes(&c->archive), c->fields.archive)) {
+        return verdict.v_corrupt;
+    }
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    char mut@ own c_summaries = str.to_cstr(join(&b, dir, SUMMARIES_DIR));
+    defer del(c_summaries);
+    i32 sd = libc.open(c_summaries.ptr, libc.O_RDONLY | libc.O_DIRECTORY | libc.O_NOFOLLOW, 0);
+    if (sd < 0) {
+        i32 failure = sys.errno();
+        // no entry, an entry that is no directory, and a link (ELOOP on darwin, ENOTDIR on Linux)
+        if (failure == libc.ENOENT || failure == libc.ENOTDIR || failure == libc.ELOOP) {
+            return verdict.v_corrupt;
+        }
+        *error = failure;
+        return verdict.v_unreadable;
+    }
+    libc.close(sd);
+    return verdict.v_valid;
+}
+
+// Whether the pair `key` and `value` is one of `keys` and `values`.
+fn holds_pair(string@ keys, string@ values, string key, string value) bool {
+    u64 mut i = 0;
+    while (i < keys.len) {
+        if (keys[i] == key && values[i] == value) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+/// The first field that differs between the manifest of a used library `used` and the fields of
+/// the build `build`, in the order of the manifest: `compiler`, `target`, `build mode`, `bounds
+/// mode` or `configuration`, the word of the message `library '<name>' was built with another
+/// <field>` (toolchain.md 1). Empty when the five agree. The configuration maps agree when they
+/// hold the same pairs in any order. Each map holds each key once.
+fn difference(manifest* used, manifest* build) string {
+    if (used->compiler != build->compiler) {
+        return "compiler";
+    }
+    if (used->target != build->target) {
+        return "target";
+    }
+    if (used->release != build->release) {
+        return "build mode";
+    }
+    if (used->no_bounds_check != build->no_bounds_check) {
+        return "bounds mode";
+    }
+    if (used->cfg_keys.len != build->cfg_keys.len) {
+        return "configuration";
+    }
+    u64 mut i = 0;
+    while (i < build->cfg_keys.len) {
+        if (!holds_pair(used->cfg_keys, used->cfg_values, build->cfg_keys[i],
+                        build->cfg_values[i])) {
+            return "configuration";
+        }
+        i += 1;
+    }
+    return "";
 }

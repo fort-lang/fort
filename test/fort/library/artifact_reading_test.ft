@@ -1,0 +1,932 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| manifest ok
+//| forms ok
+//| directory ok
+//| fields ok
+//| ok
+/// Checks how src/fort/library/artifact.ft reads a used artifact (D9.11, toolchain.md 2.2,
+/// Reading and Validation): the manifest that the writer writes reads back to its fields, each
+/// other text is corrupt, each file is read once and held against its hash, and the fields that
+/// a build compares give the word of its message.
+import library.artifact;
+import std.io;
+import std.libc;
+import std.str;
+import std.strbuf;
+import std.sys;
+
+// Whether `got` is `want`, printing both when they differ.
+fn same(string got, string want) bool {
+    if (got != want) {
+        println("got:  ", got);
+        println("want: ", want);
+    }
+    return got == want;
+}
+
+string HASH_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+string HASH_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+string HASH_C = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+string HASH_D = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+
+// The pairs of the configuration map in an order that is not byte order, a value with a space
+// and a value with a backslash among them.
+string[5] CFG_KEYS = {"target_os", "target_arch", "target_abi", "zone", "mode"};
+string[5] CFG_VALUES = {"linux", "x86_64", "", "a b", "x\\y"};
+string[3] XCC = {"-g0", "-DX=1", "-O0"};
+string[2] USE_NAMES = {"zeta", "alpha"};
+string[2] USE_HASHES = {
+    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+};
+
+// A manifest with a field of each kind, every list among them.
+fn full() artifact.manifest {
+    artifact.manifest mut m = artifact.manifest{};
+    m.library = "geom";
+    m.compiler = HASH_A;
+    m.target = "x86_64-linux-gnu";
+    m.cfg_keys = CFG_KEYS[..];
+    m.cfg_values = CFG_VALUES[..];
+    m.cc = "/opt/my clang";
+    m.cc_args = XCC[..];
+    m.ar = "llvm-ar";
+    m.source = HASH_B;
+    m.use_names = USE_NAMES[..];
+    m.use_hashes = USE_HASHES[..];
+    m.interface = HASH_C;
+    m.archive = HASH_D;
+    return m;
+}
+
+// The manifest text of `m` in `out`.
+fn text_of(artifact.manifest* m, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    artifact.write_manifest(m, out);
+    return strbuf.view(out);
+}
+
+// Whether `text` parses, with the fields in `*c`.
+fn parses(string text, artifact.contents mut* c) bool {
+    return artifact.parse_manifest(text, c);
+}
+
+// Whether `text` is refused as a manifest.
+fn refused(string text) bool {
+    artifact.contents mut c = artifact.contents{};
+    defer artifact.free(&c);
+    bool passed = artifact.parse_manifest(text, &c);
+    if (passed) {
+        println("parsed: ", text);
+    }
+    return !passed;
+}
+
+// `text` with the first `old` replaced by `new` in `out`. The text must hold `old`.
+fn replaced(string text, string old, string new_text, strbuf.str_buf mut* out) string {
+    i64 at = str.find(text, old);
+    assert(at >= 0);
+    u64 from = cast(at, u64);
+    strbuf.clear(out);
+    strbuf.append(out, text[..from]);
+    strbuf.append(out, new_text);
+    strbuf.append(out, text[from + old.len..]);
+    return strbuf.view(out);
+}
+
+// The text of `m` with the line `old` replaced by `new`, and the key line made the hash of the
+// lines before it again, so only the replaced line can make the text wrong.
+fn rekeyed(string text, string old, string new_text, strbuf.str_buf mut* out) string {
+    strbuf.str_buf mut first = strbuf.create();
+    defer strbuf.free(&first);
+    string changed = replaced(text, old, new_text, &first);
+    i64 at = str.find(changed, "\nkey ");
+    assert(at > 0);
+    u64 head = cast(at, u64) + 1;
+    u64 mut end = head;
+    while (changed[end] != '\n') {
+        end += 1;
+    }
+    strbuf.clear(out);
+    strbuf.append(out, changed[..head]);
+    strbuf.append(out, "key ");
+    artifact.append_hash(out, cast(changed[..head], u8@));
+    strbuf.append(out, changed[end..]);
+    return strbuf.view(out);
+}
+
+// ---- the manifest ------------------------------------------------------------------
+
+fn the_written_manifest_reads_back_to_its_fields() void {
+    artifact.manifest m = full();
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string text = text_of(&m, &b);
+    artifact.contents mut c = artifact.contents{};
+    defer artifact.free(&c);
+    assert(parses(text, &c));
+    assert(same(c.fields.library, "geom"));
+    assert(same(c.fields.compiler, HASH_A));
+    assert(same(c.fields.target, "x86_64-linux-gnu"));
+    assert(!c.fields.release);
+    assert(!c.fields.no_bounds_check);
+    // the lists come back in the order of the text: the pairs in byte order of the key
+    assert(c.fields.cfg_keys.len == 5);
+    assert(same(c.fields.cfg_keys[0], "mode"));
+    assert(same(c.fields.cfg_values[0], "x\\y"));
+    assert(same(c.fields.cfg_keys[1], "target_abi"));
+    assert(same(c.fields.cfg_values[1], ""));
+    assert(same(c.fields.cfg_keys[4], "zone"));
+    assert(same(c.fields.cfg_values[4], "a b"));
+    assert(same(c.fields.cc, "/opt/my clang"));
+    assert(c.fields.cc_args.len == 3);
+    assert(same(c.fields.cc_args[0], "-g0"));
+    assert(same(c.fields.cc_args[2], "-O0"));
+    assert(same(c.fields.ar, "llvm-ar"));
+    assert(same(c.fields.source, HASH_B));
+    assert(c.fields.use_names.len == 2);
+    assert(same(c.fields.use_names[0], "alpha"));
+    assert(same(c.fields.use_hashes[0], USE_HASHES[1]));
+    assert(same(c.fields.use_names[1], "zeta"));
+    assert(same(c.fields.interface, HASH_C));
+    assert(same(c.fields.archive, HASH_D));
+    assert(c.key.len == 64);
+    assert(str.find(text, c.key) > 0);
+}
+
+fn release_and_bounds_off_read_back() void {
+    artifact.manifest mut m = full();
+    m.release = true;
+    m.no_bounds_check = true;
+    m.cfg_keys = CFG_KEYS[..0];
+    m.cfg_values = CFG_VALUES[..0];
+    m.cc_args = XCC[..0];
+    m.use_names = USE_NAMES[..0];
+    m.use_hashes = USE_HASHES[..0];
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    artifact.contents mut c = artifact.contents{};
+    defer artifact.free(&c);
+    assert(parses(text_of(&m, &b), &c));
+    assert(c.fields.release);
+    assert(c.fields.no_bounds_check);
+    assert(c.fields.cfg_keys.len == 0);
+    assert(c.fields.cc_args.len == 0);
+    assert(c.fields.use_names.len == 0);
+}
+
+fn a_second_parse_replaces_the_fields_of_the_first() void {
+    artifact.manifest m = full();
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    artifact.contents mut c = artifact.contents{};
+    defer artifact.free(&c);
+    assert(parses(text_of(&m, &b), &c));
+    artifact.manifest mut bare = full();
+    bare.cfg_keys = CFG_KEYS[..0];
+    bare.cfg_values = CFG_VALUES[..0];
+    bare.library = "std";
+    assert(parses(text_of(&bare, &b), &c));
+    assert(same(c.fields.library, "std"));
+    assert(c.fields.cfg_keys.len == 0);
+    assert(c.fields.use_names.len == 2);
+}
+
+// The manifest of `m` parsed again into `*c`, which must succeed.
+fn round_trip(artifact.manifest* m, artifact.contents mut* c) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(parses(text_of(m, &b), c));
+}
+
+fn each_byte_of_a_value_reads_back() void {
+    strbuf.str_buf mut all = strbuf.create();
+    defer strbuf.free(&all);
+    u64 mut i = 0;
+    while (i < 256) {
+        strbuf.push_byte(&all, cast(i, u8));
+        i += 1;
+    }
+    artifact.manifest mut m = full();
+    m.cc = strbuf.view(&all);
+    artifact.contents mut c = artifact.contents{};
+    defer artifact.free(&c);
+    round_trip(&m, &c);
+    assert(c.fields.cc.len == 256);
+    assert(c.fields.cc == strbuf.view(&all));
+}
+
+string[2] ODD_KEYS = {"a b", "k\\x"};
+string[2] ODD_VALUES = {"", "\n"};
+string[2] ODD_XCC = {"-DNAME=a b", ""};
+string[1] ODD_USES = {"_lib9"};
+
+fn the_values_of_each_list_read_back() void {
+    artifact.manifest mut m = full();
+    m.library = "my lib";
+    m.target = "";
+    m.cc = "";
+    m.ar = "x\\y";
+    m.cfg_keys = ODD_KEYS[..];
+    m.cfg_values = ODD_VALUES[..];
+    m.cc_args = ODD_XCC[..];
+    m.use_names = ODD_USES[..];
+    m.use_hashes = USE_HASHES[..1];
+    artifact.contents mut c = artifact.contents{};
+    defer artifact.free(&c);
+    round_trip(&m, &c);
+    assert(same(c.fields.library, "my lib"));
+    assert(same(c.fields.target, ""));
+    assert(same(c.fields.cc, ""));
+    assert(same(c.fields.ar, "x\\y"));
+    assert(same(c.fields.cfg_keys[0], "a b"));
+    assert(same(c.fields.cfg_values[0], ""));
+    assert(same(c.fields.cfg_keys[1], "k\\x"));
+    assert(same(c.fields.cfg_values[1], "\n"));
+    assert(same(c.fields.cc_args[0], "-DNAME=a b"));
+    assert(same(c.fields.cc_args[1], ""));
+    assert(same(c.fields.use_names[0], "_lib9"));
+    assert(same(c.fields.use_hashes[0], USE_HASHES[0]));
+}
+
+fn a_manifest_of_no_pair_reads_back() void {
+    // the reader asks for no pair: the comparison with the build finds a missing one
+    artifact.manifest mut m = full();
+    m.cfg_keys = CFG_KEYS[..0];
+    m.cfg_values = CFG_VALUES[..0];
+    artifact.contents mut c = artifact.contents{};
+    defer artifact.free(&c);
+    round_trip(&m, &c);
+    assert(c.fields.cfg_keys.len == 0);
+}
+
+fn a_free_contents_is_empty_and_reads_again() void {
+    artifact.contents mut c = artifact.contents{};
+    artifact.free(&c);
+    artifact.free(&c);
+    artifact.manifest m = full();
+    round_trip(&m, &c);
+    artifact.free(&c);
+    assert(c.fields.library.len == 0);
+    assert(c.key.len == 0);
+    assert(c.cfg_keys.len == 0);
+    round_trip(&m, &c);
+    assert(same(c.fields.library, "geom"));
+    artifact.free(&c);
+}
+
+// ---- the forms that are corrupt ------------------------------------------------------
+
+fn an_empty_text_and_a_text_with_no_last_newline_are_refused() void {
+    artifact.manifest m = full();
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string text = text_of(&m, &b);
+    assert(refused(""));
+    assert(refused("\n"));
+    assert(refused(text[..text.len - 1]));
+    // a line after the last one
+    strbuf.str_buf mut more = strbuf.create();
+    defer strbuf.free(&more);
+    strbuf.append(&more, text);
+    strbuf.append(&more, "summaries 1\n");
+    assert(refused(strbuf.view(&more)));
+    strbuf.clear(&more);
+    strbuf.append(&more, text);
+    strbuf.push(&more, '\n');
+    assert(refused(strbuf.view(&more)));
+}
+
+fn an_unknown_version_is_refused() void {
+    artifact.manifest m = full();
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string text = text_of(&m, &b);
+    strbuf.str_buf mut c = strbuf.create();
+    defer strbuf.free(&c);
+    assert(refused(rekeyed(text, "fort-manifest 1\n", "fort-manifest 2\n", &c)));
+    assert(refused(rekeyed(text, "fort-manifest 1\n", "fort-manifest 01\n", &c)));
+    assert(refused(replaced(text, "summaries 1\n", "summaries 2\n", &c)));
+    assert(refused(replaced(text, "summaries 1\n", "summaries\n", &c)));
+}
+
+fn a_key_that_is_not_the_hash_of_the_lines_before_it_is_refused() void {
+    artifact.manifest m = full();
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string text = text_of(&m, &b);
+    strbuf.str_buf mut c = strbuf.create();
+    defer strbuf.free(&c);
+    // a byte of a covered line changes and the key stays
+    assert(refused(replaced(text, "target x86_64", "target x86_65", &c)));
+    // with the key made again the text reads, and with another key it does not
+    artifact.contents mut parsed = artifact.contents{};
+    defer artifact.free(&parsed);
+    string good = rekeyed(text, "target x86_64", "target x86_65", &c);
+    assert(parses(good, &parsed));
+    strbuf.str_buf mut d = strbuf.create();
+    defer strbuf.free(&d);
+    strbuf.str_buf mut line = strbuf.create();
+    defer strbuf.free(&line);
+    strbuf.append(&line, "key ");
+    strbuf.append(&line, parsed.key);
+    strbuf.str_buf mut other = strbuf.create();
+    defer strbuf.free(&other);
+    strbuf.append(&other, "key ");
+    strbuf.append(&other, HASH_A);
+    assert(refused(replaced(good, strbuf.view(&line), strbuf.view(&other), &d)));
+}
+
+fn an_unknown_field_or_the_entry_form_is_refused() void {
+    artifact.manifest m = full();
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string text = text_of(&m, &b);
+    strbuf.str_buf mut c = strbuf.create();
+    defer strbuf.free(&c);
+    // the manifest of an entry unit names `entry` in place of `library`
+    assert(refused(rekeyed(text, "library geom\n", "entry main\n", &c)));
+    assert(refused(rekeyed(text, "library geom\n", "library geom\nname geom\n", &c)));
+    assert(refused(replaced(text, "summaries 1\n", "summaries 1\nobject 0\n", &c)));
+    assert(refused(replaced(text, "archive ", "object ", &c)));
+}
+
+fn a_line_out_of_its_order_or_twice_is_refused() void {
+    artifact.manifest m = full();
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string text = text_of(&m, &b);
+    strbuf.str_buf mut c = strbuf.create();
+    defer strbuf.free(&c);
+    strbuf.str_buf mut d = strbuf.create();
+    defer strbuf.free(&d);
+    // the two lines exchanged
+    string swapped = rekeyed(text, "mode checked\nbounds on\n", "bounds on\nmode checked\n", &c);
+    assert(refused(swapped));
+    assert(refused(rekeyed(text, "mode checked\n", "mode checked\nmode checked\n", &c)));
+    // the pairs out of byte order of the key, and a key twice
+    assert(refused(rekeyed(text, "cfg mode x\\x5Cy\ncfg target_abi \n",
+                           "cfg target_abi \ncfg mode x\\x5Cy\n", &c)));
+    assert(refused(rekeyed(text, "cfg zone a\\x20b\n", "cfg zone a\\x20b\ncfg zone b\n", &c)));
+    // the used libraries out of byte order of the name
+    string uses = rekeyed(text, "use alpha ", "use zzz ", &c);
+    assert(refused(uses));
+    // the -Xcc lines keep the command-line order, so an exchange of two is a valid text
+    string moved = rekeyed(text, "xcc -g0\nxcc -DX=1\n", "xcc -DX=1\nxcc -g0\n", &d);
+    artifact.contents mut parsed = artifact.contents{};
+    defer artifact.free(&parsed);
+    assert(parses(moved, &parsed));
+    assert(same(parsed.fields.cc_args[0], "-DX=1"));
+}
+
+fn a_value_in_another_spelling_is_refused() void {
+    artifact.manifest m = full();
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string text = text_of(&m, &b);
+    strbuf.str_buf mut c = strbuf.create();
+    defer strbuf.free(&c);
+    // a space stands as `\x20`, a kept byte as itself, and a hex digit is uppercase
+    assert(refused(rekeyed(text, "cc /opt/my\\x20clang\n", "cc /opt/my clang\n", &c)));
+    assert(refused(rekeyed(text, "library geom\n", "library g\\x65om\n", &c)));
+    assert(refused(rekeyed(text, "cfg mode x\\x5Cy\n", "cfg mode x\\x5cy\n", &c)));
+    assert(refused(rekeyed(text, "cfg mode x\\x5Cy\n", "cfg mode x\\y\n", &c)));
+    assert(refused(rekeyed(text, "cfg mode x\\x5Cy\n", "cfg mode x\\x5\n", &c)));
+    assert(refused(rekeyed(text, "cfg mode x\\x5Cy\n", "cfg mode x\\\n", &c)));
+    assert(refused(rekeyed(text, "ar llvm-ar\n", "ar llvm-ar\t\n", &c)));
+    assert(refused(rekeyed(text, "ar llvm-ar\n", "ar llvm-ar\r\n", &c)));
+    // a pair has two values and one space between them
+    assert(refused(rekeyed(text, "cfg target_abi \n", "cfg target_abi\n", &c)));
+    assert(refused(rekeyed(text, "cfg target_abi \n", "cfg target_abi  \n", &c)));
+    assert(refused(rekeyed(text, "cfg zone a\\x20b\n", "cfg zone a b\n", &c)));
+    // a field of one value takes no second one
+    assert(refused(rekeyed(text, "target x86_64-linux-gnu\n", "target x86_64 linux\n", &c)));
+}
+
+// The lines of a manifest of an entry unit (toolchain.md 2.2), whose key is the hash of the
+// lines before it as hashlib.sha256 gives it.
+string[11] ENTRY_LINES = {
+    "fort-manifest 1",
+    "entry main",
+    "compiler aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "target x86_64-linux-gnu",
+    "mode checked",
+    "bounds on",
+    "cc clang",
+    "source bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "use std cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "key 0000000000000000000000000000000000000000000000000000000000000000",
+    "object dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+};
+
+fn the_manifest_of_an_entry_unit_is_no_library() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u64 mut i = 0;
+    while (i < ENTRY_LINES.len) {
+        strbuf.append(&b, ENTRY_LINES[i]);
+        strbuf.push(&b, '\n');
+        i += 1;
+    }
+    string text = strbuf.view(&b);
+    // with the key made right, the form is still refused
+    strbuf.str_buf mut keyed = strbuf.create();
+    defer strbuf.free(&keyed);
+    i64 at = str.find(text, "\nkey ");
+    u64 head = cast(at, u64) + 1;
+    strbuf.append(&keyed, text[..head]);
+    strbuf.append(&keyed, "key ");
+    artifact.append_hash(&keyed, cast(text[..head], u8@));
+    strbuf.append(&keyed, text[head + 68..]);
+    assert(refused(strbuf.view(&keyed)));
+    assert(refused(text));
+}
+
+fn a_missing_line_is_refused() void {
+    artifact.manifest m = full();
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string text = text_of(&m, &b);
+    strbuf.str_buf mut c = strbuf.create();
+    defer strbuf.free(&c);
+    assert(refused(replaced(text, "summaries 1\n", "", &c)));
+    assert(refused(replaced(text, "\narchive ", "\n#", &c)));
+    assert(refused(rekeyed(text, "\nar llvm-ar\n", "\n", &c)));
+    assert(refused(rekeyed(text, "\ncc /opt/my\\x20clang\n", "\n", &c)));
+    assert(refused(rekeyed(text, "\nlibrary geom\n", "\n", &c)));
+    assert(refused(rekeyed(text, "\nsource ", "\nsourced ", &c)));
+}
+
+fn a_mode_or_a_bounds_mode_of_another_word_is_refused() void {
+    artifact.manifest m = full();
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string text = text_of(&m, &b);
+    strbuf.str_buf mut c = strbuf.create();
+    defer strbuf.free(&c);
+    assert(refused(rekeyed(text, "mode checked\n", "mode fast\n", &c)));
+    assert(refused(rekeyed(text, "mode checked\n", "mode Checked\n", &c)));
+    assert(refused(rekeyed(text, "mode checked\n", "mode \n", &c)));
+    assert(refused(rekeyed(text, "bounds on\n", "bounds yes\n", &c)));
+    assert(refused(rekeyed(text, "bounds on\n", "bounds\n", &c)));
+}
+
+fn a_hash_that_is_not_64_lowercase_hex_digits_is_refused() void {
+    artifact.manifest m = full();
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string text = text_of(&m, &b);
+    strbuf.str_buf mut c = strbuf.create();
+    defer strbuf.free(&c);
+    // 63 digits, 65 digits, an uppercase digit and a byte that is no hex digit
+    assert(refused(rekeyed(text, "compiler a", "compiler ", &c)));
+    assert(refused(rekeyed(text, "compiler a", "compiler aa", &c)));
+    assert(refused(rekeyed(text, "compiler a", "compiler A", &c)));
+    assert(refused(rekeyed(text, "compiler a", "compiler g", &c)));
+    assert(refused(rekeyed(text, "source b", "source B", &c)));
+    assert(refused(rekeyed(text, "use alpha f", "use alpha F", &c)));
+    assert(refused(replaced(text, "interface c", "interface C", &c)));
+    assert(refused(replaced(text, "archive d", "archive x", &c)));
+    // the outputs follow the key, so they need no new key to be read as a manifest
+    strbuf.str_buf mut d = strbuf.create();
+    defer strbuf.free(&d);
+    artifact.contents mut parsed = artifact.contents{};
+    defer artifact.free(&parsed);
+    assert(parses(replaced(text, "interface c", "interface 0", &d), &parsed));
+}
+
+// ---- the directory -------------------------------------------------------------------
+
+fn make_dir(string path) void {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    assert(libc.mkdir(c_path.ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
+}
+
+fn write_file(string path, string text) void {
+    assert(io.write_file(path, cast(text, u8@)));
+}
+
+fn remove(string path) void {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    libc.unlink(c_path.ptr);
+}
+
+fn remove_dir(string path) void {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    libc.rmdir(c_path.ptr);
+}
+
+fn link(string target, string path) void {
+    char mut@ own c_target = str.to_cstr(target);
+    defer del(c_target);
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    assert(libc.symlink(c_target.ptr, c_path.ptr) == 0);
+}
+
+// `<dir>/<name>` in `out`.
+fn under(string dir, string name, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    strbuf.append(out, dir);
+    strbuf.push(out, '/');
+    strbuf.append(out, name);
+    return strbuf.view(out);
+}
+
+// The interface file and the archive of the artifacts that this suite writes.
+// `\x2F` is the second `/` of each header line, which the harness reads as a directive mark.
+string INTERFACE_TEXT =
+    "/\x2F! fort interface 1\n/\x2F! library geom\n/\x2F! module geom.a\ni32 A = 1;\n";
+string ARCHIVE_TEXT = "!<arch>\nmember bytes\n";
+
+// Writes a valid artifact `dir` of the library `geom` with the writer of artifact.ft.
+fn write_artifact(string dir) void {
+    strbuf.str_buf mut interface = strbuf.create();
+    defer strbuf.free(&interface);
+    artifact.append_hash(&interface, cast(INTERFACE_TEXT, u8@));
+    strbuf.str_buf mut archive = strbuf.create();
+    defer strbuf.free(&archive);
+    artifact.append_hash(&archive, cast(ARCHIVE_TEXT, u8@));
+    artifact.manifest mut m = full();
+    m.interface = strbuf.view(&interface);
+    m.archive = strbuf.view(&archive);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    artifact.write_manifest(&m, &text);
+    strbuf.str_buf mut failed = strbuf.create();
+    defer strbuf.free(&failed);
+    i32 mut error = 0;
+    assert(artifact.write(dir, INTERFACE_TEXT, cast(ARCHIVE_TEXT, u8@), strbuf.view(&text),
+                          &failed, &error));
+}
+
+// The verdict of reading `dir`, with the errno value in `*error`.
+fn verdict_of(string dir, i32 mut* error) artifact.verdict {
+    artifact.contents mut c = artifact.contents{};
+    defer artifact.free(&c);
+    *error = 0;
+    return artifact.read(dir, &c, error);
+}
+
+fn is_corrupt(string dir) bool {
+    i32 mut error = 0;
+    return verdict_of(dir, &error) == artifact.verdict.v_corrupt;
+}
+
+fn a_valid_artifact_reads_its_files_once() void {
+    write_artifact("valid.flib");
+    artifact.contents mut c = artifact.contents{};
+    defer artifact.free(&c);
+    i32 mut error = 0;
+    assert(artifact.read("valid.flib", &c, &error) == artifact.verdict.v_valid);
+    assert(same(c.fields.library, "geom"));
+    assert(same(strbuf.view(&c.interface), INTERFACE_TEXT));
+    assert(same(strbuf.view(&c.archive), ARCHIVE_TEXT));
+    // the bytes that the read checked are the ones it keeps: a later change is not read
+    write_file("valid.flib/interface.ft", "changed\n");
+    assert(same(strbuf.view(&c.interface), INTERFACE_TEXT));
+    // a trailing separator names the same directory
+    write_artifact("valid.flib/");
+    assert(verdict_of("valid.flib/", &error) == artifact.verdict.v_valid);
+}
+
+fn a_directory_that_cannot_be_read_is_unreadable() void {
+    i32 mut error = 0;
+    assert(verdict_of("absent.flib", &error) == artifact.verdict.v_unreadable);
+    assert(error == libc.ENOENT);
+    write_file("plain.flib", "not a directory\n");
+    assert(verdict_of("plain.flib", &error) == artifact.verdict.v_unreadable);
+    assert(error == libc.ENOTDIR);
+    // a link to an artifact is the artifact
+    write_artifact("target.flib");
+    link("target.flib", "linked.flib");
+    assert(verdict_of("linked.flib", &error) == artifact.verdict.v_valid);
+}
+
+fn a_missing_or_wrong_manifest_is_corrupt() void {
+    write_artifact("nomanifest.flib");
+    remove("nomanifest.flib/manifest");
+    assert(is_corrupt("nomanifest.flib"));
+    write_artifact("badmanifest.flib");
+    write_file("badmanifest.flib/manifest", "fort-manifest 1\n");
+    assert(is_corrupt("badmanifest.flib"));
+    // an empty directory has no manifest
+    make_dir("empty.flib");
+    assert(is_corrupt("empty.flib"));
+}
+
+fn a_file_that_differs_from_its_hash_is_corrupt() void {
+    write_artifact("iface.flib");
+    write_file("iface.flib/interface.ft", "/\x2F! fort interface 1\n/\x2F! library geom\n");
+    assert(is_corrupt("iface.flib"));
+    write_artifact("noiface.flib");
+    remove("noiface.flib/interface.ft");
+    assert(is_corrupt("noiface.flib"));
+    write_artifact("arch.flib");
+    write_file("arch.flib/lib.a", "!<arch>\nmember byteS\n");
+    assert(is_corrupt("arch.flib"));
+    write_artifact("noarch.flib");
+    remove("noarch.flib/lib.a");
+    assert(is_corrupt("noarch.flib"));
+}
+
+fn an_artifact_with_no_summaries_directory_is_corrupt() void {
+    write_artifact("nosum.flib");
+    remove_dir("nosum.flib/summaries");
+    assert(is_corrupt("nosum.flib"));
+    write_file("nosum.flib/summaries", "a file\n");
+    assert(is_corrupt("nosum.flib"));
+    // the writer refuses a link at summaries, and the reader reads none either
+    remove("nosum.flib/summaries");
+    make_dir("elsewhere");
+    link("../elsewhere", "nosum.flib/summaries");
+    assert(is_corrupt("nosum.flib"));
+    // a file in summaries/ is no rule of the reader
+    write_artifact("fullsum.flib");
+    write_file("fullsum.flib/summaries/extra", "x\n");
+    i32 mut error = 0;
+    assert(verdict_of("fullsum.flib", &error) == artifact.verdict.v_valid);
+}
+
+// A directory of its own under $TMPDIR, where the permission bits of a file hold.
+fn make_temp(strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    string mut parent = "/tmp";
+    string mut value = "";
+    if (sys.env("TMPDIR", &value) && value.len > 0) {
+        parent = value;
+    }
+    strbuf.append(out, parent);
+    strbuf.append(out, "/fort-reading-XXXXXX");
+    char mut@ own tmpl = str.to_cstr(strbuf.view(out));
+    defer del(tmpl);
+    assert(libc.mkdtemp(&tmpl[0]) != null);
+    strbuf.clear(out);
+    strbuf.append(out, str.from_cstr(&tmpl[0]));
+    return strbuf.view(out);
+}
+
+// mkfifo(3), whose mode_t is a u32 on Linux and a u16 on darwin (D9.8).
+$if ($cfg(target_os) == "linux") {
+    extern fn mkfifo(char* path, u32 mode) i32;
+} else {
+    extern fn mkfifo(char* path, u16 mode) i32;
+}
+
+fn make_fifo(string path) void {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    assert(mkfifo(c_path.ptr, 0o600) == 0);
+}
+
+fn an_entry_that_is_no_regular_file_is_corrupt() void {
+    // a directory where a file stands
+    write_artifact("dirs.flib");
+    remove("dirs.flib/interface.ft");
+    make_dir("dirs.flib/interface.ft");
+    assert(is_corrupt("dirs.flib"));
+    write_artifact("dirman.flib");
+    remove("dirman.flib/manifest");
+    make_dir("dirman.flib/manifest");
+    assert(is_corrupt("dirman.flib"));
+    // a FIFO with no writer: the read neither waits nor reads
+    write_artifact("fifo.flib");
+    remove("fifo.flib/manifest");
+    make_fifo("fifo.flib/manifest");
+    assert(is_corrupt("fifo.flib"));
+    write_artifact("fifoarch.flib");
+    remove("fifoarch.flib/lib.a");
+    make_fifo("fifoarch.flib/lib.a");
+    assert(is_corrupt("fifoarch.flib"));
+    // a link to a device, which a read would never end
+    write_artifact("device.flib");
+    remove("device.flib/lib.a");
+    link("/dev/zero", "device.flib/lib.a");
+    assert(is_corrupt("device.flib"));
+    // a link to a regular file is the file
+    write_artifact("linkman.flib");
+    write_artifact("other.flib");
+    remove("linkman.flib/manifest");
+    link("../other.flib/manifest", "linkman.flib/manifest");
+    i32 mut error = 0;
+    assert(verdict_of("linkman.flib", &error) == artifact.verdict.v_valid);
+    // a link that leads nowhere at the directory is no directory
+    link("nowhere.flib", "dangling.flib");
+    assert(verdict_of("dangling.flib", &error) == artifact.verdict.v_unreadable);
+    assert(error == libc.ENOENT);
+    // a link that leads nowhere at a file is an absent file
+    write_artifact("dangfile.flib");
+    remove("dangfile.flib/interface.ft");
+    link("nowhere.ft", "dangfile.flib/interface.ft");
+    assert(is_corrupt("dangfile.flib"));
+}
+
+fn a_manifest_that_cannot_be_read_is_unreadable() void {
+    strbuf.str_buf mut dir = strbuf.create();
+    defer strbuf.free(&dir);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string root = make_temp(&dir);
+    string flib = under(root, "geom.flib", &b);
+    write_artifact(flib);
+    strbuf.str_buf mut m = strbuf.create();
+    defer strbuf.free(&m);
+    char mut@ own c_manifest = str.to_cstr(under(flib, "manifest", &m));
+    defer del(c_manifest);
+    assert(libc.chmod(c_manifest.ptr, 0) == 0);
+    i32 mut error = 0;
+    artifact.verdict mut got = verdict_of(flib, &error);
+    assert(libc.chmod(c_manifest.ptr, 0o644) == 0);
+    assert(got == artifact.verdict.v_unreadable);
+    assert(error == libc.EACCES);
+    // an archive and a summaries/ that the process cannot read
+    strbuf.str_buf mut a = strbuf.create();
+    defer strbuf.free(&a);
+    char mut@ own c_archive = str.to_cstr(under(flib, "lib.a", &a));
+    defer del(c_archive);
+    assert(libc.chmod(c_archive.ptr, 0) == 0);
+    got = verdict_of(flib, &error);
+    assert(libc.chmod(c_archive.ptr, 0o644) == 0);
+    assert(got == artifact.verdict.v_unreadable);
+    assert(error == libc.EACCES);
+    strbuf.str_buf mut s = strbuf.create();
+    defer strbuf.free(&s);
+    char mut@ own c_summaries = str.to_cstr(under(flib, "summaries", &s));
+    defer del(c_summaries);
+    assert(libc.chmod(c_summaries.ptr, 0) == 0);
+    got = verdict_of(flib, &error);
+    assert(libc.chmod(c_summaries.ptr, 0o755) == 0);
+    assert(got == artifact.verdict.v_unreadable);
+    assert(error == libc.EACCES);
+    assert(verdict_of(flib, &error) == artifact.verdict.v_valid);
+}
+
+// ---- the fields that a build compares ------------------------------------------------
+
+fn the_same_fields_have_no_difference() void {
+    artifact.manifest used = full();
+    artifact.manifest build = full();
+    assert(same(artifact.difference(&used, &build), ""));
+    // the fields that a build does not compare
+    artifact.manifest mut other = full();
+    other.library = "std";
+    other.cc = "clang-18";
+    other.cc_args = XCC[..1];
+    other.ar = "ar";
+    other.source = HASH_D;
+    other.use_names = USE_NAMES[..0];
+    other.use_hashes = USE_HASHES[..0];
+    other.interface = HASH_A;
+    other.archive = HASH_A;
+    assert(same(artifact.difference(&used, &other), ""));
+}
+
+fn each_compared_field_gives_its_word() void {
+    artifact.manifest used = full();
+    artifact.manifest mut build = full();
+    build.compiler = HASH_B;
+    assert(same(artifact.difference(&used, &build), "compiler"));
+    build = full();
+    build.target = "arm64-apple-macosx11.0.0";
+    assert(same(artifact.difference(&used, &build), "target"));
+    build = full();
+    build.release = true;
+    assert(same(artifact.difference(&used, &build), "build mode"));
+    build = full();
+    build.no_bounds_check = true;
+    assert(same(artifact.difference(&used, &build), "bounds mode"));
+}
+
+string[5] OTHER_ORDER_KEYS = {"zone", "mode", "target_abi", "target_os", "target_arch"};
+string[5] OTHER_ORDER_VALUES = {"a b", "x\\y", "", "linux", "x86_64"};
+string[5] OTHER_VALUES = {"linux", "x86_64", "", "a b", "x\\z"};
+string[6] MORE_KEYS = {"target_os", "target_arch", "target_abi", "zone", "mode", "extra"};
+string[6] MORE_VALUES = {"linux", "x86_64", "", "a b", "x\\y", ""};
+
+fn the_configuration_map_compares_as_a_set_of_pairs() void {
+    artifact.manifest used = full();
+    artifact.manifest mut build = full();
+    // the same pairs in another order are the same map
+    build.cfg_keys = OTHER_ORDER_KEYS[..];
+    build.cfg_values = OTHER_ORDER_VALUES[..];
+    assert(same(artifact.difference(&used, &build), ""));
+    // one value differs
+    build.cfg_keys = CFG_KEYS[..];
+    build.cfg_values = OTHER_VALUES[..];
+    assert(same(artifact.difference(&used, &build), "configuration"));
+    // one more pair, with an empty value, and one pair less
+    build.cfg_keys = MORE_KEYS[..];
+    build.cfg_values = MORE_VALUES[..];
+    assert(same(artifact.difference(&used, &build), "configuration"));
+    assert(same(artifact.difference(&build, &used), "configuration"));
+    build.cfg_keys = CFG_KEYS[..4];
+    build.cfg_values = CFG_VALUES[..4];
+    assert(same(artifact.difference(&used, &build), "configuration"));
+}
+
+string[1] ONE_KEY = {"zone"};
+string[1] ONE_VALUE = {"a"};
+string[1] ONE_OTHER = {"b"};
+string[1] OTHER_KEY = {"mode"};
+
+fn two_empty_maps_agree_and_one_pair_must_match() void {
+    artifact.manifest mut used = full();
+    artifact.manifest mut build = full();
+    used.cfg_keys = CFG_KEYS[..0];
+    used.cfg_values = CFG_VALUES[..0];
+    build.cfg_keys = CFG_KEYS[..0];
+    build.cfg_values = CFG_VALUES[..0];
+    assert(same(artifact.difference(&used, &build), ""));
+    used.cfg_keys = ONE_KEY[..];
+    used.cfg_values = ONE_VALUE[..];
+    build.cfg_keys = ONE_KEY[..];
+    build.cfg_values = ONE_OTHER[..];
+    assert(same(artifact.difference(&used, &build), "configuration"));
+    build.cfg_keys = OTHER_KEY[..];
+    build.cfg_values = ONE_VALUE[..];
+    assert(same(artifact.difference(&used, &build), "configuration"));
+    build.cfg_keys = ONE_KEY[..];
+    build.cfg_values = ONE_VALUE[..];
+    assert(same(artifact.difference(&used, &build), ""));
+}
+
+fn the_first_field_in_manifest_order_gives_the_word() void {
+    artifact.manifest used = full();
+    artifact.manifest mut build = full();
+    build.cfg_keys = CFG_KEYS[..1];
+    build.cfg_values = CFG_VALUES[..1];
+    build.no_bounds_check = true;
+    assert(same(artifact.difference(&used, &build), "bounds mode"));
+    build.release = true;
+    assert(same(artifact.difference(&used, &build), "build mode"));
+    build.target = "other";
+    assert(same(artifact.difference(&used, &build), "target"));
+    build.compiler = HASH_C;
+    assert(same(artifact.difference(&used, &build), "compiler"));
+}
+
+// ---- a hash ------------------------------------------------------------------------
+
+fn a_hash_has_exactly_64_lowercase_hex_digits() void {
+    assert(artifact.is_hash(HASH_A));
+    assert(artifact.is_hash("0000000000000000000000000000000000000000000000000000000000000000"));
+    assert(artifact.is_hash("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"));
+    // the first and the last byte of each range of digits, and one past each
+    assert(!artifact.is_hash("/123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"));
+    assert(!artifact.is_hash(":123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"));
+    assert(!artifact.is_hash("`123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"));
+    assert(!artifact.is_hash("0123456789abcdeg0123456789abcdef0123456789abcdef0123456789abcdef"));
+    assert(!artifact.is_hash("0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef"));
+    // one digit fewer and one more
+    assert(!artifact.is_hash(HASH_A[..63]));
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, HASH_A);
+    strbuf.push(&b, 'a');
+    assert(!artifact.is_hash(strbuf.view(&b)));
+    assert(!artifact.is_hash(""));
+}
+
+fn main() i32 {
+    the_written_manifest_reads_back_to_its_fields();
+    release_and_bounds_off_read_back();
+    a_second_parse_replaces_the_fields_of_the_first();
+    each_byte_of_a_value_reads_back();
+    the_values_of_each_list_read_back();
+    a_manifest_of_no_pair_reads_back();
+    a_free_contents_is_empty_and_reads_again();
+    a_hash_has_exactly_64_lowercase_hex_digits();
+    println("manifest ok");
+    an_empty_text_and_a_text_with_no_last_newline_are_refused();
+    an_unknown_version_is_refused();
+    a_key_that_is_not_the_hash_of_the_lines_before_it_is_refused();
+    an_unknown_field_or_the_entry_form_is_refused();
+    a_line_out_of_its_order_or_twice_is_refused();
+    a_value_in_another_spelling_is_refused();
+    the_manifest_of_an_entry_unit_is_no_library();
+    a_missing_line_is_refused();
+    a_mode_or_a_bounds_mode_of_another_word_is_refused();
+    a_hash_that_is_not_64_lowercase_hex_digits_is_refused();
+    println("forms ok");
+    a_valid_artifact_reads_its_files_once();
+    a_directory_that_cannot_be_read_is_unreadable();
+    a_missing_or_wrong_manifest_is_corrupt();
+    a_file_that_differs_from_its_hash_is_corrupt();
+    an_artifact_with_no_summaries_directory_is_corrupt();
+    an_entry_that_is_no_regular_file_is_corrupt();
+    a_manifest_that_cannot_be_read_is_unreadable();
+    println("directory ok");
+    the_same_fields_have_no_difference();
+    each_compared_field_gives_its_word();
+    the_configuration_map_compares_as_a_set_of_pairs();
+    two_empty_maps_agree_and_one_pair_must_match();
+    the_first_field_in_manifest_order_gives_the_word();
+    println("fields ok");
+    println("ok");
+    return 0;
+}

@@ -68,6 +68,9 @@ struct module {
     bool selected;     // compile-time selection completed without a diagnostic
     bool entry; // the module named on the command line
     bool interface; // a section of the interface file of a used library (D9.11)
+    // A section that the closure does not hold, loaded for the extern check of D9.8 alone
+    // (module-system.md 10.4). It is in no order that a later pass reads.
+    bool outside;
     module_state state;
 }
 
@@ -128,6 +131,10 @@ struct module_set {
     strmap.str_map listed; // module path -> position in `listed_files`: the modules of the walk
     containers.str_vec listed_files; // the file of each listed module
     used_libraries used; // the libraries that `--use` names
+    // ---- the sections that the closure does not hold (module-system.md 10.4) ----
+    bool outside; // load_outside is loading: a new section is outside the closure
+    module_vec outside_order; // an import before its importer, the order of the checker
+    module_vec outside_listed; // library by library, each in byte order of the path
 }
 
 // ---- the module vectors ------------------------------------------------------------
@@ -834,7 +841,11 @@ fn walk_module(session.session mut* s, module_set mut* set, module mut* m) modul
     }
     // post-order, so every import is in the order first
     m->state = module_state.m_ready;
-    vec_push(&set->order, m);
+    if (m->outside) {
+        vec_push(&set->outside_order, m);
+    } else {
+        vec_push(&set->order, m);
+    }
     return m;
 }
 
@@ -1044,6 +1055,7 @@ fn load_section(session.session mut* s, module_set mut* set, used_library* lib, 
     // A section has no file of its own, so it takes no place in the identity map.
     module mut* m = admit(set, path, lib->file, "", lib->source, false);
     m->interface = true;
+    m->outside = set->outside;
     u64 before = session.error_count(s);
     lexer.tok_vec mut toks = lexer.tokvec_create();
     defer lexer.tokvec_free(&toks);
@@ -1159,7 +1171,9 @@ fn resolve_used_items(session.session mut* s, module_set mut* set, module mut* m
 fn bind_symbol(session.session mut* s, module_set mut* set, module mut* m, module* from,
                     string name, string bound, diag.loc at, ast.node mut* decl) bool {
     scope.binding* target = scope.find(&from->names, name);
-    if (target == null) {
+    // An interface section keeps no import name of its source, only the bindings that the writer
+    // makes, so such a binding is no name of the module either (module-system.md 13).
+    if (target == null || (from->interface && !scope.is_declaration(target))) {
         error_no_declaration(s, set, at, from->path, name);
         return false;
     }
@@ -1464,6 +1478,11 @@ fn free(module_set mut* set) void {
     }
     del(set->used.items);
     set->used.len = 0;
+    set->outside = false;
+    del(set->outside_order.items);
+    set->outside_order.len = 0;
+    del(set->outside_listed.items);
+    set->outside_listed.len = 0;
     set->library = "";
     set->library_root = "";
     strmap.free(&set->listed);
@@ -1511,9 +1530,9 @@ fn is_ordered(module_set* set, module* m) bool {
 }
 
 // Whether the module belongs to the second group of the pass order: it parsed
-// and the loader never ordered it.
+// and the loader never ordered it. A module outside the closure is in neither group.
 fn is_unordered_pass_module(module_set* set, module* m) bool {
-    return m->parsed && m->selected && m->ast != null && !is_ordered(set, m);
+    return m->parsed && m->selected && m->ast != null && !m->outside && !is_ordered(set, m);
 }
 
 /// Returns the number of modules in whole-closure pass order.
@@ -1756,4 +1775,61 @@ fn load_library(session.session mut* s, module_set mut* set, string name, string
         i += 1;
     }
     return session.error_count(s) == before;
+}
+
+/// Loads each section of each used library that the closure does not hold, for the extern check
+/// of D9.8 across units (module-system.md 10.4). `names` gives the libraries in the order of the
+/// check, the reverse of the link order, and the sections of each are taken in byte order of the
+/// path. A section that an import of such a section reaches is loaded too. These modules enter
+/// neither the dependency order nor the pass order, so the emitter, the lowering and the index
+/// do not read them. Call it once, after the closure loaded with no diagnostic, with each used
+/// library in `names`, so that each module that it loads is listed once. Returns false after a
+/// diagnostic.
+fn load_outside(session.session mut* s, module_set mut* set, string@ names) bool {
+    u64 before = session.error_count(s);
+    set->outside = true;
+    u64 mut i = 0;
+    while (i < names.len) {
+        used_library* lib = used_named(set, names[i]);
+        i += 1;
+        if (lib == null) {
+            continue;
+        }
+        u64 mut k = 0;
+        while (k < lib->paths.len) {
+            diag.loc at = diag.loc_make(lib->file, cast(lib->lines.items[k], u32), 1);
+            module mut* m = load_section(s, set, lib, k, at);
+            if (m != null && m->outside) {
+                vec_push(&set->outside_listed, m);
+            }
+            k += 1;
+        }
+    }
+    set->outside = false;
+    return session.error_count(s) == before;
+}
+
+/// Returns the number of modules that load_outside loaded.
+fn outside_count(module_set* set) u64 {
+    return set->outside_order.len;
+}
+
+/// Returns module `i` of those that load_outside loaded, each import before its importers: the
+/// order in which the checker reads them. An index at or past `outside_count` breaks the
+/// precondition.
+fn outside_at(module_set* set, u64 i) module* {
+    if (i >= set->outside_order.len) {
+        panic("modules.outside_at: index out of range");
+    }
+    return set->outside_order.items[i];
+}
+
+/// Returns module `i` of those that load_outside loaded, library by library in the order that
+/// load_outside took and each in byte order of the path: the order of the extern check
+/// (module-system.md 10.4). An index at or past `outside_count` breaks the precondition.
+fn listed_outside_at(module_set* set, u64 i) module* {
+    if (i >= set->outside_listed.len) {
+        panic("modules.listed_outside_at: index out of range");
+    }
+    return set->outside_listed.items[i];
 }

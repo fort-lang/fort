@@ -1,0 +1,1712 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| usage ok
+//| artifact ok
+//| uses ok
+//| build ok
+//| closure ok
+//| library ok
+//| ok
+/// Checks `--use <name>=<path>` in src/fort/driver.ft (D9.11, toolchain.md 1, 2.1 and 2.2,
+/// module-system.md 10.2 and 10.4): the usage errors, the checks of each used artifact and of
+/// the uses between them, the compile line and the link line of the entry unit, the extern check
+/// across units, the modes that read the interface files, and a library build that uses another
+/// library. The artifacts come from `--lib` builds of this suite, whose --cc and --ar are
+/// scripts: the compile copies the IR module to the object and the archiver puts it after an
+/// archive header. test/library/use_test.py runs the real tools.
+import capture;
+import driver;
+import library.artifact;
+import std.io;
+import std.libc;
+import std.os;
+import std.str;
+import std.strbuf;
+import std.sys;
+
+i32 EXIT_OK = 0;
+i32 EXIT_COMPILE_ERROR = 1;
+i32 EXIT_USAGE = 2;
+
+// The status of `fort <args>`, with stdout in `out.txt` and stderr in `err.txt`.
+fn run(string@ args) i32 {
+    i32 saved_out = capture.begin(io.STDOUT, "out.txt");
+    i32 saved_err = capture.begin(io.STDERR, "err.txt");
+    i32 status = driver.run(args);
+    capture.end(io.STDERR, saved_err);
+    capture.end(io.STDOUT, saved_out);
+    return status;
+}
+
+fn err_is(string text) bool {
+    string own got = capture.text("err.txt");
+    defer del(got);
+    if (got != text) {
+        print(got);
+    }
+    return got == text;
+}
+
+fn err_has(string text) bool {
+    string own got = capture.text("err.txt");
+    defer del(got);
+    if (str.find(got, text) < 0) {
+        print(got);
+        return false;
+    }
+    return true;
+}
+
+fn out_is_empty() bool {
+    string own got = capture.text("out.txt");
+    defer del(got);
+    return got.len == 0;
+}
+
+fn make_dir(string path) void {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    assert(libc.mkdir(c_path.ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
+}
+
+fn write_file(string path, string text) void {
+    assert(io.write_file(path, cast(text, u8@)));
+}
+
+fn write_lines(string path, string@ lines) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u64 mut i = 0;
+    while (i < lines.len) {
+        strbuf.append(&b, lines[i]);
+        strbuf.push(&b, '\n');
+        i += 1;
+    }
+    write_file(path, strbuf.view(&b));
+}
+
+fn write_script(string path, string@ lines) void {
+    write_lines(path, lines);
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    assert(libc.chmod(c_path.ptr, 0o755) == 0);
+}
+
+fn exists(string path) bool {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    return libc.access(c_path.ptr, 0) == 0;
+}
+
+fn contents(string path) string own {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    io.read_file(path, &b);
+    return strbuf.take(&b);
+}
+
+fn remove(string path) void {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    libc.unlink(c_path.ptr);
+}
+
+fn set_env(string name, string value) void {
+    char mut@ own key = str.to_cstr(name);
+    defer del(key);
+    char mut@ own text = str.to_cstr(value);
+    defer del(text);
+    assert(libc.setenv(key.ptr, text.ptr, 1) == 0);
+}
+
+// Whether the directory `path` holds no entry but `.` and `..`.
+fn is_empty_dir(string path) bool {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    void mut* d = libc.opendir(c_path.ptr);
+    if (d == null) {
+        return false;
+    }
+    u64 mut n = 0;
+    libc.dirent* mut e = cast(libc.readdir(d), libc.dirent*);
+    while (e != null) {
+        string name = str.from_cstr(&e->name[0]);
+        if (name != "." && name != "..") {
+            println("left: ", name);
+            n += 1;
+        }
+        e = cast(libc.readdir(d), libc.dirent*);
+    }
+    libc.closedir(d);
+    return n == 0;
+}
+
+// `fort <head> <more>` in one list.
+fn run_with(string@ head, string@ more) i32 {
+    string[32] mut args = {};
+    u64 mut n = 0;
+    while (n < head.len) {
+        args[n] = head[n];
+        n += 1;
+    }
+    u64 mut i = 0;
+    while (i < more.len) {
+        args[n] = more[i];
+        n += 1;
+        i += 1;
+    }
+    return run(args[0..n]);
+}
+
+// ---- the tools and the libraries ---------------------------------------------------
+
+// The --cc of a case. It appends its arguments to cc.log, one on each line, and a line `--`
+// after them. A compile line (`-c`) copies the input module to the -o output, or exits 4 when
+// compile_fail.flag exists. A link line appends each archive that it names to archives.log and
+// writes `linked` to the output, or exits 3 when fail.flag exists.
+string[17] FAKE_CC = {
+    "#!/bin/sh",
+    "out=",
+    "in=",
+    "prev=",
+    "compile=",
+    "for a in \"$@\"; do",
+    "  if [ \"$prev\" = -o ]; then out=\"$a\"; fi",
+    "  case \"$a\" in *.ll) in=\"$a\";; -c) compile=1;; *.a) cat \"$a\" >> archives.log;; esac",
+    "  prev=\"$a\"",
+    "  echo \"$a\" >> cc.log",
+    "done",
+    "echo -- >> cc.log",
+    "if [ -n \"$compile\" ] && [ -f compile_fail.flag ]; then exit 4; fi",
+    "if [ -n \"$compile\" ]; then cp \"$in\" \"$out\"; exit 0; fi",
+    "if [ -f fail.flag ]; then exit 3; fi",
+    "echo linked > \"$out\"",
+    "exit 0",
+};
+
+// The --ar of a case: it writes the archive header and then the object to the archive.
+string[3] FAKE_AR = {
+    "#!/bin/sh",
+    "printf '!<arch>\\n' > \"$2\"",
+    "cat \"$3\" >> \"$2\"",
+};
+
+// The temporary directory of every build of this suite, which must be empty after each one.
+string TEMP = "temp";
+
+fn write_tools() void {
+    write_script("cc.sh", FAKE_CC[..]);
+    write_script("ar.sh", FAKE_AR[..]);
+    make_dir(TEMP);
+    set_env("TMPDIR", TEMP);
+    remove("cc.log");
+    remove("archives.log");
+    remove("fail.flag");
+    remove("compile_fail.flag");
+}
+
+// A standard root `<dir>`: a runtime, a module with a function, a constant and an extern, and a
+// module `std.zz` that no program of this suite imports.
+string RT_MODULE = "i32 B = 1;\n";
+string[6] IO_LINES = {
+    "import std.rt;",
+    "i32 A = rt.B + 1;",
+    "extern fn puts(char* s) i32;",
+    "fn f(i32 x) i32 {",
+    "    return x;",
+    "}",
+};
+string ZZ_MODULE = "extern fn abs(i32 x) i32;\nfn g() i32 {\n    return 2;\n}\n";
+
+fn write_std(string dir) void {
+    make_dir(dir);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, dir);
+    strbuf.append(&b, "/rt.ft");
+    write_file(strbuf.view(&b), RT_MODULE);
+    strbuf.clear(&b);
+    strbuf.append(&b, dir);
+    strbuf.append(&b, "/io.ft");
+    write_lines(strbuf.view(&b), IO_LINES[..]);
+    strbuf.clear(&b);
+    strbuf.append(&b, dir);
+    strbuf.append(&b, "/zz.ft");
+    write_file(strbuf.view(&b), ZZ_MODULE);
+}
+
+// The status of `fort --cc ./cc.sh --ar ./ar.sh --lib <name> <root> -o <out> <more>`, which
+// must leave the temporary directory empty.
+fn build_library(string name, string root, string out, string@ more) i32 {
+    string[9] head = {"fort", "--cc", "./cc.sh", "--ar", "./ar.sh", "--lib", name, root, "-o"};
+    string[16] mut all = {};
+    all[0] = out;
+    u64 mut n = 1;
+    u64 mut i = 0;
+    while (i < more.len) {
+        all[n] = more[i];
+        n += 1;
+        i += 1;
+    }
+    i32 status = run_with(head[..], all[..n]);
+    assert(is_empty_dir(TEMP));
+    return status;
+}
+
+// An empty list of options.
+string[1] NO_MORE = {""};
+
+// Builds `std.flib` from the root `std`, with the options `more`.
+fn build_std(string@ more) void {
+    write_tools();
+    write_std("std");
+    assert(build_library("std", "std", "std.flib", more) == EXIT_OK);
+    assert(err_is(""));
+}
+
+// A library `geom` at `geom` that imports `std.io`, built against `std.flib` into `geom.flib`.
+// The fake runtime has no entry of a check, so the body holds no checked operation.
+string VEC_MODULE = "import std.io;\nfn len(i32 x) i32 {\n    return io.f(x);\n}\n";
+
+fn build_geom(string@ more) void {
+    make_dir("geom");
+    write_file("geom/vec.ft", VEC_MODULE);
+    string[16] mut all = {};
+    all[0] = "--use";
+    all[1] = "std=std.flib";
+    u64 mut n = 2;
+    u64 mut i = 0;
+    while (i < more.len) {
+        all[n] = more[i];
+        n += 1;
+        i += 1;
+    }
+    assert(build_library("geom", "geom", "geom.flib", all[..n]) == EXIT_OK);
+    assert(err_is(""));
+}
+
+// The status of `fort --cc ./cc.sh <args>`, which must leave the temporary directory empty.
+fn use_run(string@ args) i32 {
+    string[3] head = {"fort", "--cc", "./cc.sh"};
+    i32 status = run_with(head[..], args);
+    assert(is_empty_dir(TEMP));
+    return status;
+}
+
+// A program that calls a function of `std.io`.
+string MAIN = "import std.io;\nfn main() i32 {\n    return io.f(io.A);\n}\n";
+
+// ---- usage errors ---------------------------------------------------------------------
+
+string USAGE_LINE = "\nusage: fort [options] entry.ft\n";
+
+fn usage_error_is(string@ args, string message) bool {
+    i32 status = run(args);
+    string own got = capture.text("err.txt");
+    defer del(got);
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    strbuf.append(&want, "fort: error: ");
+    strbuf.append(&want, message);
+    strbuf.append(&want, USAGE_LINE);
+    bool ok = status == EXIT_USAGE && got == strbuf.view(&want) && out_is_empty();
+    if (!ok) {
+        print(got);
+    }
+    return ok;
+}
+
+fn the_argument_of_use_is_a_name_and_a_path() void {
+    string[2] missing = {"fort", "--use"};
+    assert(usage_error_is(missing[..], "missing argument for option '--use'"));
+    string[4] no_equal = {"fort", "--use", "std", "main.ft"};
+    assert(usage_error_is(no_equal[..], "invalid --use argument 'std'"));
+    string[4] no_name = {"fort", "--use", "=std.flib", "main.ft"};
+    assert(usage_error_is(no_name[..], "invalid --use argument '=std.flib'"));
+    string[4] no_path = {"fort", "--use", "std=", "main.ft"};
+    assert(usage_error_is(no_path[..], "invalid --use argument 'std='"));
+    string[4] digit = {"fort", "--use", "9x=a.flib", "main.ft"};
+    assert(usage_error_is(digit[..], "invalid --use argument '9x=a.flib'"));
+    string[4] keyword = {"fort", "--use", "struct=a.flib", "main.ft"};
+    assert(usage_error_is(keyword[..], "invalid --use argument 'struct=a.flib'"));
+    string[4] dotted = {"fort", "--use", "a.b=a.flib", "main.ft"};
+    assert(usage_error_is(dotted[..], "invalid --use argument 'a.b=a.flib'"));
+}
+
+fn a_library_is_named_once() void {
+    string[6] twice = {"fort", "--use", "std=a.flib", "--use", "std=b.flib", "main.ft"};
+    assert(usage_error_is(twice[..], "duplicate library 'std'"));
+    // a --use of the name that --lib builds, whichever comes first
+    string[6] lib = {"fort", "--lib", "std", "root", "--use", "std=a.flib"};
+    assert(usage_error_is(lib[..], "duplicate library 'std'"));
+    string[6] first = {"fort", "--use", "geom=a.flib", "--lib", "geom", "root"};
+    assert(usage_error_is(first[..], "duplicate library 'geom'"));
+}
+
+fn a_library_build_needs_the_library_std() void {
+    string[4] other = {"fort", "--use", "geom=g.flib", "main.ft"};
+    assert(usage_error_is(other[..], "a library build needs --use std=<path>"));
+    string[6] lib = {"fort", "--lib", "geom", "root", "--use", "util=u.flib"};
+    assert(usage_error_is(lib[..], "a library build needs --use std=<path>"));
+    // --check and the FIR modes read the interface files too
+    string[5] check = {"fort", "--check", "--use", "geom=g.flib", "main.ft"};
+    assert(usage_error_is(check[..], "a library build needs --use std=<path>"));
+    string[5] fir = {"fort", "--fir", "--use", "geom=g.flib", "main.ft"};
+    assert(usage_error_is(fir[..], "a library build needs --use std=<path>"));
+}
+
+fn the_options_of_a_lib_build_still_need_lib() void {
+    string[6] ar = {"fort", "--ar", "ar", "--use", "std=s.flib", "main.ft"};
+    assert(usage_error_is(ar[..], "--ar requires --lib"));
+    string[5] emit = {"fort", "--emit-interface", "--use", "std=s.flib", "main.ft"};
+    assert(usage_error_is(emit[..], "--emit-interface requires --lib"));
+    // a used library is no entry file
+    string[3] no_entry = {"fort", "--use", "std=s.flib"};
+    assert(usage_error_is(no_entry[..], "no entry file"));
+}
+
+fn the_lexer_and_the_parser_read_no_used_library() void {
+    write_file("tiny.ft", "fn main() i32 {\n    return 0;\n}\n");
+    // the artifact does not exist and is not read: --use is unused here
+    string[5] tokens = {"fort", "--tokens", "--use", "geom=missing.flib", "tiny.ft"};
+    assert(run(tokens[..]) == EXIT_OK);
+    assert(err_is(""));
+    string[5] tree = {"fort", "--ast", "--use", "std=missing.flib", "tiny.ft"};
+    assert(run(tree[..]) == EXIT_OK);
+    assert(err_is(""));
+}
+
+// ---- the used artifact ------------------------------------------------------------------
+
+// The status of `fort --cc ./cc.sh --use <uses> -S -o main.ll main.ft`.
+fn use_ir(string@ uses) i32 {
+    string[16] mut all = {};
+    u64 mut n = 0;
+    u64 mut i = 0;
+    while (i < uses.len) {
+        all[n] = "--use";
+        all[n + 1] = uses[i];
+        n += 2;
+        i += 1;
+    }
+    all[n] = "-S";
+    all[n + 1] = "-o";
+    all[n + 2] = "main.ll";
+    all[n + 3] = "main.ft";
+    return use_run(all[..n + 4]);
+}
+
+fn an_artifact_that_cannot_be_read_is_exit_two() void {
+    write_tools();
+    write_file("main.ft", MAIN);
+    string[1] uses = {"std=missing.flib"};
+    assert(use_ir(uses[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: cannot read library 'missing.flib': No such file or directory\n"));
+    assert(out_is_empty());
+    assert(!exists("main.ll"));
+    write_file("plain.flib", "x\n");
+    string[1] plain = {"std=plain.flib"};
+    assert(use_ir(plain[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: cannot read library 'plain.flib': Not a directory\n"));
+}
+
+fn an_artifact_that_breaks_a_rule_is_corrupt() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", MAIN);
+    string[1] uses = {"std=std.flib"};
+    assert(use_ir(uses[..]) == EXIT_OK);
+    assert(err_is(""));
+    // a manifest that is not the text of the writer
+    string own manifest = contents("std.flib/manifest");
+    defer del(manifest);
+    write_file("std.flib/manifest", "fort-manifest 1\n");
+    remove("main.ll");
+    assert(use_ir(uses[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: library 'std.flib' is corrupt\n"));
+    assert(!exists("main.ll"));
+    // an interface file that differs from its hash
+    write_file("std.flib/manifest", manifest);
+    string own interface = contents("std.flib/interface.ft");
+    defer del(interface);
+    write_file("std.flib/interface.ft", "x\n");
+    assert(use_ir(uses[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: library 'std.flib' is corrupt\n"));
+    write_file("std.flib/interface.ft", interface);
+    assert(use_ir(uses[..]) == EXIT_OK);
+}
+
+// Writes `text` as the interface file of `std.flib` and makes the interface line of its manifest
+// the hash of `text`: the interface line follows the key, which does not cover it.
+fn replace_interface(string text) void {
+    string own manifest = contents("std.flib/manifest");
+    defer del(manifest);
+    i64 at = str.find(manifest, "\ninterface ");
+    assert(at > 0);
+    u64 from = cast(at, u64) + 11;
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, manifest[..from]);
+    artifact.append_hash(&b, cast(text, u8@));
+    strbuf.append(&b, manifest[from + 64..]);
+    write_file("std.flib/manifest", strbuf.view(&b));
+    write_file("std.flib/interface.ft", text);
+}
+
+fn an_interface_file_of_another_form_is_corrupt() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", MAIN);
+    // the hash agrees, and the text is no interface file of `std`
+    replace_interface("i32 X = 1;\n");
+    string[1] uses = {"std=std.flib"};
+    assert(use_ir(uses[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: library 'std.flib' is corrupt\n"));
+    // the interface file of another library
+    replace_interface("/\x2F! fort interface 1\n/\x2F! library geom\n/\x2F! module geom.a\n");
+    assert(use_ir(uses[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: library 'std.flib' is corrupt\n"));
+}
+
+fn a_lexical_error_in_an_interface_file_is_a_compile_error() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", MAIN);
+    string[4] lines = {"/\x2F! fort interface 1", "/\x2F! library std", "/\x2F! module std.rt",
+                       "i32 B = 1$;"};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut i = 0;
+    while (i < lines.len) {
+        strbuf.append(&text, lines[i]);
+        strbuf.push(&text, '\n');
+        i += 1;
+    }
+    replace_interface(strbuf.view(&text));
+    string[1] uses = {"std=std.flib"};
+    assert(use_ir(uses[..]) == EXIT_COMPILE_ERROR);
+    assert(err_has("std.flib/interface.ft:4:10: error: unexpected character '$'"));
+}
+
+// Replaces the line of `field` in the manifest of `std.flib` with `line` and makes the key the
+// hash of the lines before it again, as a manifest of another build holds them.
+fn forge(string field, string line) void {
+    forge_in("std.flib", field, line, false);
+}
+
+// Replaces the line of `field` in the manifest of the artifact `dir` with `line`, or puts `line`
+// before it when `before` is set, and makes the key the hash of the lines before it again.
+fn forge_in(string dir, string field, string line, bool before) void {
+    strbuf.str_buf mut path = strbuf.create();
+    defer strbuf.free(&path);
+    strbuf.append(&path, dir);
+    strbuf.append(&path, "/manifest");
+    string own manifest = contents(strbuf.view(&path));
+    defer del(manifest);
+    strbuf.str_buf mut head = strbuf.create();
+    defer strbuf.free(&head);
+    strbuf.push(&head, '\n');
+    strbuf.append(&head, field);
+    strbuf.push(&head, ' ');
+    i64 at = str.find(manifest, strbuf.view(&head));
+    assert(at > 0);
+    u64 start = cast(at, u64) + 1;
+    u64 mut end = start;
+    while (manifest[end] != '\n') {
+        end += 1;
+    }
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, manifest[..start]);
+    strbuf.append(&b, line);
+    if (before) {
+        strbuf.push(&b, '\n');
+        end = start;
+    }
+    strbuf.append(&b, manifest[end..]);
+    string changed = strbuf.view(&b);
+    i64 key = str.find(changed, "\nkey ");
+    assert(key > 0);
+    u64 key_start = cast(key, u64) + 1;
+    strbuf.str_buf mut c = strbuf.create();
+    defer strbuf.free(&c);
+    strbuf.append(&c, changed[..key_start]);
+    strbuf.append(&c, "key ");
+    artifact.append_hash(&c, cast(changed[..key_start], u8@));
+    strbuf.append(&c, changed[key_start + 68..]);
+    write_file(strbuf.view(&path), strbuf.view(&c));
+}
+
+fn an_artifact_of_another_format_version_is_corrupt() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", MAIN);
+    string own manifest = contents("std.flib/manifest");
+    defer del(manifest);
+    // version 2, with the key made again so that only the version is wrong
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "fort-manifest 2");
+    strbuf.append(&b, manifest["fort-manifest 1".len..]);
+    write_file("std.flib/manifest", strbuf.view(&b));
+    string own target = manifest_value("std.flib", "target");
+    defer del(target);
+    strbuf.str_buf mut line = strbuf.create();
+    defer strbuf.free(&line);
+    strbuf.append(&line, "target ");
+    strbuf.append(&line, target);
+    forge("target", strbuf.view(&line));
+    string[1] uses = {"std=std.flib"};
+    assert(use_ir(uses[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: library 'std.flib' is corrupt\n"));
+    // the archive and summaries/ are files of the artifact as well
+    build_std(NO_MORE[..0]);
+    write_file("std.flib/lib.a", "!<arch>\nother\n");
+    assert(use_ir(uses[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: library 'std.flib' is corrupt\n"));
+    build_std(NO_MORE[..0]);
+    char mut@ own c_summaries = str.to_cstr("std.flib/summaries");
+    defer del(c_summaries);
+    assert(libc.rmdir(c_summaries.ptr) == 0);
+    assert(use_ir(uses[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: library 'std.flib' is corrupt\n"));
+    build_std(NO_MORE[..0]);
+    assert(use_ir(uses[..]) == EXIT_OK);
+}
+
+fn an_artifact_of_another_name_is_refused() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", MAIN);
+    forge("library", "library geom");
+    remove("main.ll");
+    string[1] uses = {"std=std.flib"};
+    assert(use_ir(uses[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: library 'std.flib' is named 'geom', not 'std'\n"));
+    assert(!exists("main.ll"));
+}
+
+fn an_artifact_of_another_compiler_or_target_is_refused() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", MAIN);
+    forge("compiler", "compiler 0000000000000000000000000000000000000000000000000000000000000000");
+    string[1] uses = {"std=std.flib"};
+    assert(use_ir(uses[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: library 'std' was built with another compiler\n"));
+    build_std(NO_MORE[..0]);
+    forge("target", "target arm64-apple-macosx99.0.0");
+    assert(use_ir(uses[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: library 'std' was built with another target\n"));
+}
+
+fn an_artifact_of_another_mode_is_refused() void {
+    string[1] release = {"--release"};
+    build_std(release[..]);
+    write_file("main.ft", MAIN);
+    string[1] uses = {"std=std.flib"};
+    assert(use_ir(uses[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: library 'std' was built with another build mode\n"));
+    // a build of the same mode uses it
+    string[5] check = {"--release", "--check", "--use", "std=std.flib", "main.ft"};
+    assert(use_run(check[..]) == EXIT_OK);
+    assert(err_is(""));
+    string[1] unchecked = {"--no-bounds-check"};
+    build_std(unchecked[..]);
+    assert(use_ir(uses[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: library 'std' was built with another bounds mode\n"));
+    string[5] same = {"--no-bounds-check", "--check", "--use", "std=std.flib", "main.ft"};
+    assert(use_run(same[..]) == EXIT_OK);
+    assert(err_is(""));
+}
+
+fn an_artifact_of_another_configuration_is_refused() void {
+    string[2] configured = {"--cfg", "zone=a"};
+    build_std(configured[..]);
+    write_file("main.ft", MAIN);
+    string[1] uses = {"std=std.flib"};
+    assert(use_ir(uses[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: library 'std' was built with another configuration\n"));
+    // the same pair given to the build
+    string[6] same = {"--cfg", "zone=a", "--use", "std=std.flib", "--check", "main.ft"};
+    assert(use_run(same[..]) == EXIT_OK);
+    assert(err_is(""));
+    // another value of the pair
+    string[6] other = {"--cfg", "zone=b", "--use", "std=std.flib", "--check", "main.ft"};
+    assert(use_run(other[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: library 'std' was built with another configuration\n"));
+}
+
+fn the_first_failure_of_the_command_line_reports() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", MAIN);
+    // the second library cannot be read, and the first one is of another name
+    forge("library", "library geom");
+    string[2] uses = {"std=std.flib", "geom=missing.flib"};
+    assert(use_ir(uses[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: library 'std.flib' is named 'geom', not 'std'\n"));
+}
+
+// ---- the uses between the libraries ----------------------------------------------------
+
+fn each_used_library_of_a_manifest_must_be_named() void {
+    build_std(NO_MORE[..0]);
+    build_geom(NO_MORE[..0]);
+    write_file("main.ft", MAIN);
+    string[2] uses = {"std=std.flib", "geom=geom.flib"};
+    assert(use_ir(uses[..]) == EXIT_OK);
+    assert(err_is(""));
+    // a library that geom uses and the build does not name: util
+    make_dir("util");
+    write_file("util/text.ft", "i32 T = 1;\n");
+    string[2] with_util = {"--use", "std=std.flib"};
+    assert(build_library("util", "util", "util.flib", with_util[..]) == EXIT_OK);
+    string[2] more = {"--use", "util=util.flib"};
+    build_geom(more[..]);
+    assert(use_ir(uses[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: library 'geom' uses library 'util', which no --use names\n"));
+    string[3] all = {"std=std.flib", "geom=geom.flib", "util=util.flib"};
+    assert(use_ir(all[..]) == EXIT_OK);
+    assert(err_is(""));
+}
+
+fn a_library_built_against_another_interface_is_refused() void {
+    build_std(NO_MORE[..0]);
+    build_geom(NO_MORE[..0]);
+    write_file("main.ft", MAIN);
+    // std gains a declaration, so its interface hash changes and geom keeps the old one
+    write_file("std/rt.ft", "i32 B = 1;\ni32 NEW = 2;\n");
+    assert(build_library("std", "std", "std.flib", NO_MORE[..0]) == EXIT_OK);
+    string[2] uses = {"std=std.flib", "geom=geom.flib"};
+    assert(use_ir(uses[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: library 'geom' was built against another interface of 'std'\n"));
+    // a change of a body keeps the interface hash, so geom needs no new build
+    write_file("std/rt.ft", "i32 B = 1;\ni32 NEW = 2;\nfn h() i32 {\n    return 4;\n}\n");
+    assert(build_library("std", "std", "std.flib", NO_MORE[..0]) == EXIT_OK);
+    build_geom(NO_MORE[..0]);
+    write_file("std/rt.ft", "i32 B = 1;\ni32 NEW = 2;\nfn h() i32 {\n    return 5;\n}\n");
+    assert(build_library("std", "std", "std.flib", NO_MORE[..0]) == EXIT_OK);
+    assert(use_ir(uses[..]) == EXIT_OK);
+    assert(err_is(""));
+}
+
+// The value of the line `field` of the manifest of the artifact `dir`.
+fn manifest_value(string dir, string field) string own {
+    strbuf.str_buf mut path = strbuf.create();
+    defer strbuf.free(&path);
+    strbuf.append(&path, dir);
+    strbuf.append(&path, "/manifest");
+    string own manifest = contents(strbuf.view(&path));
+    defer del(manifest);
+    strbuf.str_buf mut head = strbuf.create();
+    defer strbuf.free(&head);
+    strbuf.push(&head, '\n');
+    strbuf.append(&head, field);
+    strbuf.push(&head, ' ');
+    i64 at = str.find(manifest, strbuf.view(&head));
+    assert(at > 0);
+    u64 start = cast(at, u64) + strbuf.view(&head).len;
+    u64 mut end = start;
+    while (manifest[end] != '\n') {
+        end += 1;
+    }
+    return str.dup(manifest[start..end]);
+}
+
+fn two_libraries_that_use_each_other_are_a_cycle() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", MAIN);
+    make_dir("a");
+    write_file("a/m.ft", "i32 A = 1;\n");
+    make_dir("b");
+    write_file("b/m.ft", "import a.m;\ni32 B = m.A;\n");
+    string[2] std_only = {"--use", "std=std.flib"};
+    assert(build_library("a", "a", "a.flib", std_only[..]) == EXIT_OK);
+    string[4] with_a = {"--use", "std=std.flib", "--use", "a=a.flib"};
+    assert(build_library("b", "b", "b.flib", with_a[..]) == EXIT_OK);
+    // A build of `a` against `b` must name `a` with --use, as `b` uses it, and a --use of the
+    // --lib name is refused: so no build writes a cycle, and this one is forged.
+    string[4] with_b = {"--use", "std=std.flib", "--use", "b=b.flib"};
+    assert(build_library("a", "a", "a.flib", with_b[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: library 'b' uses library 'a', which no --use names\n"));
+    string own b_interface = manifest_value("b.flib", "interface");
+    defer del(b_interface);
+    strbuf.str_buf mut line = strbuf.create();
+    defer strbuf.free(&line);
+    strbuf.append(&line, "use b ");
+    strbuf.append(&line, b_interface);
+    forge_in("a.flib", "use", strbuf.view(&line), true);
+    string[3] uses = {"std=std.flib", "b=b.flib", "a=a.flib"};
+    assert(use_ir(uses[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: library cycle: 'a' uses 'b' uses 'a'\n"));
+}
+
+// ---- the build of the entry unit -----------------------------------------------------------
+
+fn the_ir_module_of_the_entry_unit_declares_the_library() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", MAIN);
+    remove("cc.log");
+    string[1] uses = {"std=std.flib"};
+    assert(use_ir(uses[..]) == EXIT_OK);
+    assert(err_is(""));
+    assert(out_is_empty());
+    string own ir = contents("main.ll");
+    defer del(ir);
+    // the unit defines its own module and the C main, and declares each function of std
+    assert(str.find(ir, "define dso_local i32 @\"main.main\"() #0 {\n") > 0);
+    assert(str.find(ir, "define dso_local i32 @main(i32 %argc, ptr %argv) #0 {\n") > 0);
+    assert(str.find(ir, "declare dso_local i32 @\"std.io.f\"(i32) #0\n") > 0);
+    assert(str.find(ir, "define dso_local i32 @\"std.io.f\"") < 0);
+    // -S runs no tool
+    assert(!exists("cc.log"));
+}
+
+fn the_modules_outside_the_closure_add_nothing_to_the_module() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", MAIN);
+    string[1] uses = {"std=std.flib"};
+    assert(use_ir(uses[..]) == EXIT_OK);
+    string own with_zz = contents("main.ll");
+    defer del(with_zz);
+    assert(str.find(with_zz, "std.zz") < 0);
+    assert(str.find(with_zz, "@abs") < 0);
+    // the same library without the module std.zz gives the same module text
+    remove("std/zz.ft");
+    assert(build_library("std", "std", "std.flib", NO_MORE[..0]) == EXIT_OK);
+    assert(use_ir(uses[..]) == EXIT_OK);
+    string own without = contents("main.ll");
+    defer del(without);
+    assert(with_zz == without);
+}
+
+// The lines of cc.log, each invocation ended by `--`.
+fn cc_log() string own {
+    return contents("cc.log");
+}
+
+fn the_entry_unit_is_compiled_and_linked_with_each_archive() void {
+    build_std(NO_MORE[..0]);
+    build_geom(NO_MORE[..0]);
+    write_file("main.ft", MAIN);
+    remove("cc.log");
+    string[11] args = {"--use", "std=std.flib", "--use", "geom=geom.flib", "-o", "app", "-lm",
+                       "-Xcc", "-g0", "main.ft", ""};
+    assert(use_run(args[..10]) == EXIT_OK);
+    assert(err_is(""));
+    string own app = contents("app");
+    defer del(app);
+    assert(app == "linked\n");
+    string own log = cc_log();
+    defer del(log);
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    // the compile line of a --lib build over the module of the entry unit
+    strbuf.append(&want, "--target=");
+    strbuf.append(&want, os.TARGET);
+    strbuf.append(&want, "\n-O1\n-fPIE\n-Wno-override-module\n-c\n-o\n");
+    strbuf.append(&want, TEMP);
+    strbuf.append(&want, "/fort-");
+    assert(str.find(log, strbuf.view(&want)) >= 0);
+    assert(str.find(log, "/main.o\n") > 0);
+    assert(str.find(log, "/main.ll\n-g0\n--\n") > 0);
+    // the link line: the object, each archive in the link order, -l and -Xcc
+    strbuf.clear(&want);
+    strbuf.append(&want, "--\n--target=");
+    strbuf.append(&want, os.TARGET);
+    strbuf.append(&want, "\n-o\napp\n");
+    strbuf.append(&want, TEMP);
+    i64 link = str.find(log, strbuf.view(&want));
+    assert(link > 0);
+    string tail = log[cast(link, u64)..];
+    i64 object = str.find(tail, "/main.o\n");
+    i64 geom = str.find(tail, "/geom.a\n");
+    i64 std_archive = str.find(tail, "/std.a\n");
+    assert(object > 0 && geom > object && std_archive > geom);
+    assert(str.ends_with(tail, "/std.a\n-lm\n-g0\n--\n"));
+    // each archive is a copy of the checked bytes of its lib.a, in the link order
+    string own archives = contents("archives.log");
+    defer del(archives);
+    string own geom_archive = contents("geom.flib/lib.a");
+    defer del(geom_archive);
+    string own std_bytes = contents("std.flib/lib.a");
+    defer del(std_bytes);
+    strbuf.clear(&want);
+    strbuf.append(&want, geom_archive);
+    strbuf.append(&want, std_bytes);
+    assert(archives == strbuf.view(&want));
+}
+
+fn an_object_is_the_compile_line_alone() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", MAIN);
+    remove("cc.log");
+    string[4] args = {"--use", "std=std.flib", "-c", "main.ft"};
+    assert(use_run(args[..]) == EXIT_OK);
+    assert(err_is(""));
+    // the fake compile copies the module, which declares the functions of std
+    string own object = contents("main.o");
+    defer del(object);
+    assert(str.find(object, "declare dso_local i32 @\"std.io.f\"(i32) #0\n") > 0);
+    string own log = cc_log();
+    defer del(log);
+    assert(str.find(log, "\n-c\n-o\nmain.o\n") > 0);
+    // one invocation: no link line
+    assert(str.find(log, "--\n") == cast(log.len - 3, i64));
+}
+
+fn a_failed_link_is_exit_two() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", MAIN);
+    write_file("fail.flag", "1\n");
+    string[5] args = {"--use", "std=std.flib", "-o", "app", "main.ft"};
+    assert(use_run(args[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: cc failed with status 3\n"));
+}
+
+fn a_cross_target_module_needs_no_std_dir() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", MAIN);
+    string mut other = "arm64-apple-macosx11.0.0";
+    if (os.TARGET != "x86_64-linux-gnu") {
+        other = "x86_64-linux-gnu";
+    }
+    string[8] args = {"--use", "std=std.flib", "-S", "--target", other, "-o", "main.ll", "main.ft"};
+    assert(use_run(args[..]) == EXIT_USAGE);
+    // the artifact holds the built target, which the selected target must equal
+    assert(err_is("fort: error: library 'std' was built with another target\n"));
+}
+
+// ---- the closure ---------------------------------------------------------------------
+
+fn an_extern_of_an_unimported_module_conflicts_across_units() void {
+    build_std(NO_MORE[..0]);
+    // the program declares `abs` in another form than std.zz, which it does not import
+    write_file("main.ft", "extern fn abs(i64 x) i64;\nfn main() i32 {\n    return 0;\n}\n");
+    string[4] args = {"--use", "std=std.flib", "--check", "main.ft"};
+    assert(use_run(args[..]) == EXIT_COMPILE_ERROR);
+    // the module outside the closure is the later declaration
+    assert(err_has("std.flib/interface.ft:"));
+    assert(err_has(": error: conflicting declarations of extern 'abs': the result type differs"));
+    assert(err_has("main.ft:1:11: note: previous declaration of 'abs' here"));
+    // a whole-program build reads no module that it does not import
+    string[4] whole = {"--check", "--std-dir", "std", "main.ft"};
+    assert(use_run(whole[..]) == EXIT_OK);
+    assert(err_is(""));
+    // a build reports the same error and writes no module
+    remove("main.ll");
+    string[4] ir = {"-S", "--use", "std=std.flib", "main.ft"};
+    assert(use_run(ir[..]) == EXIT_COMPILE_ERROR);
+    assert(!exists("main.ll"));
+}
+
+// Builds the library `name` at `<name>/m.ft`, whose text is `text`, against `std.flib`.
+fn build_one(string name, string text) void {
+    make_dir(name);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, name);
+    strbuf.append(&b, "/m.ft");
+    write_file(strbuf.view(&b), text);
+    strbuf.clear(&b);
+    strbuf.append(&b, name);
+    strbuf.append(&b, ".flib");
+    string[2] uses = {"--use", "std=std.flib"};
+    assert(build_library(name, name, strbuf.view(&b), uses[..]) == EXIT_OK);
+    assert(err_is(""));
+}
+
+fn the_extern_check_reads_the_libraries_in_the_reverse_of_the_link_order() void {
+    build_std(NO_MORE[..0]);
+    // two libraries that use std and not each other, and declare `f` in two forms
+    build_one("x", "extern fn f(i32 a) void;\n");
+    build_one("y", "extern fn f(i64 a) void;\n");
+    write_file("main.ft", "fn main() i32 {\n    return 0;\n}\n");
+    // the link order is `x y std`, so the check reads std, then y, then x, and the error stands
+    // at the declaration of x; the command line gives the other order
+    string[8] args = {"--use", "y=y.flib", "--use", "x=x.flib", "--use", "std=std.flib", "--check",
+                      "main.ft"};
+    assert(use_run(args[..]) == EXIT_COMPILE_ERROR);
+    assert(err_has("x.flib/interface.ft:4:13: error: conflicting declarations of extern 'f'"));
+    assert(err_has("y.flib/interface.ft:4:11: note: previous declaration of 'f' here"));
+}
+
+fn the_check_document_lists_each_interface_file_once() void {
+    build_std(NO_MORE[..0]);
+    build_geom(NO_MORE[..0]);
+    write_file("main.ft", "import std.io;\nimport geom.vec;\ni32 X = io.A;\n");
+    string[6] args = {"fort", "--check", "--json", "--use", "geom=geom.flib", "--use"};
+    string[2] more = {"std=std.flib", "main.ft"};
+    assert(run_with(args[..], more[..]) == EXIT_OK);
+    string own doc = contents("out.txt");
+    defer del(doc);
+    // the interface files in command-line order, read first, and then the entry file
+    string geom = "\"files\":[\"geom.flib/interface.ft\",";
+    i64 files = str.find(doc, geom);
+    string rest = "\"std.flib/interface.ft\",\"main.ft\"],";
+    if (files < 0 || str.find(doc[cast(files, u64) + geom.len..], rest) != 0) {
+        print(doc);
+    }
+    assert(files > 0);
+    assert(str.find(doc, "\"version\":1") > 0);
+}
+
+fn the_index_records_no_module_outside_the_closure() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", MAIN);
+    string[4] args = {"fort", "--index", "--use", "std=std.flib"};
+    string[1] entry = {"main.ft"};
+    assert(run_with(args[..], entry[..]) == EXIT_OK);
+    string own doc = contents("out.txt");
+    defer del(doc);
+    assert(str.find(doc, "\"name\":\"g\"") < 0);
+    assert(str.find(doc, "\"name\":\"abs\"") < 0);
+    // the closure module std.io has its records at the positions of the interface file
+    assert(str.find(doc, "{\"file\":\"std.flib/interface.ft\"") > 0);
+    assert(str.find(doc, "\"name\":\"f\"") > 0);
+}
+
+fn the_fir_of_the_entry_unit_holds_its_own_functions() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", MAIN);
+    string[4] args = {"fort", "--fir", "--use", "std=std.flib"};
+    string[1] entry = {"main.ft"};
+    assert(run_with(args[..], entry[..]) == EXIT_OK);
+    assert(err_is(""));
+    string own fir = contents("out.txt");
+    defer del(fir);
+    // the one function with a body in the closure is main.main: a section has no body, and a
+    // whole program writes `fn std.io.f(` first
+    assert(str.starts_with(fir, "fn main.main() -> i32 {\n"));
+    assert(str.find(fir, "\nfn ") < 0);
+    assert(str.find(fir, "call fn std.io.f(const i32 2)") > 0);
+    assert(str.find(fir, "std.zz") < 0);
+}
+
+// A FIR test whose prelude imports std.io. `\x2F` is the second `/` of each header line, which
+// the harness reads as a directive mark.
+string[12] FIR_TEST = {
+    "/\x2F! pass: none",
+    "/\x2F! prelude:",
+    "/\x2F| import std.io;",
+    "/\x2F| i32 X = io.A;",
+    "/\x2F| fn g() i32 {",
+    "/\x2F|     return 1;",
+    "/\x2F| }",
+    "fn main.g() -> i32 {",
+    "    let _0: i32;",
+    "    bb0: {",
+    "        _0 = const i32 1;",
+    "        return;",
+};
+
+fn a_fir_test_reads_its_prelude_against_the_used_library() void {
+    build_std(NO_MORE[..0]);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u64 mut i = 0;
+    while (i < FIR_TEST.len) {
+        strbuf.append(&b, FIR_TEST[i]);
+        strbuf.push(&b, '\n');
+        i += 1;
+    }
+    strbuf.append(&b, "    }\n}\n");
+    write_file("t.fir", strbuf.view(&b));
+    string[4] args = {"fort", "--fir-test", "--use", "std=std.flib"};
+    string[1] entry = {"t.fir"};
+    assert(run_with(args[..], entry[..]) == EXIT_OK);
+    assert(err_is(""));
+    string own out = contents("out.txt");
+    defer del(out);
+    assert(str.find(out, "fn main.g() -> i32 {\n") == 0);
+    // without --use the prelude reads the standard directory, which holds no module here
+    string[3] none = {"fort", "--fir-test", "--std-dir"};
+    string[2] rest = {"nowhere", "t.fir"};
+    assert(run_with(none[..], rest[..]) == EXIT_COMPILE_ERROR);
+    assert(err_has("nowhere/rt.ft:1:1: error: cannot read 'nowhere/rt.ft'"));
+}
+
+// ---- a library build with --use -------------------------------------------------------
+
+fn a_library_build_records_each_used_library() void {
+    build_std(NO_MORE[..0]);
+    build_geom(NO_MORE[..0]);
+    string own manifest = contents("geom.flib/manifest");
+    defer del(manifest);
+    string own std_manifest = contents("std.flib/manifest");
+    defer del(std_manifest);
+    i64 at = str.find(std_manifest, "\ninterface ");
+    assert(at > 0);
+    u64 from = cast(at, u64) + 11;
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    strbuf.append(&want, "\nuse std ");
+    strbuf.append(&want, std_manifest[from..from + 64]);
+    strbuf.append(&want, "\nkey ");
+    assert(str.find(manifest, strbuf.view(&want)) > 0);
+    assert(str.find(manifest, "\nlibrary geom\n") > 0);
+    // the interface imports the module of std with its full path
+    string own interface = contents("geom.flib/interface.ft");
+    defer del(interface);
+    string section = "\n/\x2F! module geom.vec\nimport std.io as _0;\nfn len(i32 x) i32;\n";
+    assert(str.find(interface, section) > 0);
+    // the unit of geom defines its module alone and declares the function of std
+    string[3] ir = {"--use", "std=std.flib", "-S"};
+    assert(build_library("geom", "geom", "geom.ll", ir[..]) == EXIT_OK);
+    string own text = contents("geom.ll");
+    defer del(text);
+    assert(str.find(text, "define dso_local i32 @\"geom.vec.len\"(i32 %x.in) #0 {\n") > 0);
+    assert(str.find(text, "declare dso_local i32 @\"std.io.f\"(i32) #0\n") > 0);
+    assert(str.find(text, "@main(") < 0);
+}
+
+fn a_library_build_emits_its_interface_against_the_used_library() void {
+    build_std(NO_MORE[..0]);
+    make_dir("geom");
+    write_file("geom/vec.ft", VEC_MODULE);
+    string[5] args = {"fort", "--lib", "geom", "geom", "--emit-interface"};
+    string[2] uses = {"--use", "std=std.flib"};
+    assert(run_with(args[..], uses[..]) == EXIT_OK);
+    assert(err_is(""));
+    string own out = contents("out.txt");
+    defer del(out);
+    assert(str.find(out, "import std.io as _0;\n") > 0);
+    // a path of no library is the error of a --lib build
+    write_file("geom/vec.ft", "import util.text;\n");
+    assert(run_with(args[..], uses[..]) == EXIT_COMPILE_ERROR);
+    assert(err_has("geom/vec.ft:1:1: error: module 'util.text' is in no library"));
+}
+
+fn a_library_build_holds_its_externs_against_the_used_library() void {
+    build_std(NO_MORE[..0]);
+    make_dir("geom");
+    // `abs` of std.zz, which geom does not import, in another form
+    write_file("geom/vec.ft", "extern fn abs(i64 x) i64;\n");
+    string[5] args = {"fort", "--lib", "geom", "geom", "--emit-interface"};
+    string[2] uses = {"--use", "std=std.flib"};
+    assert(run_with(args[..], uses[..]) == EXIT_COMPILE_ERROR);
+    assert(err_has(": error: conflicting declarations of extern 'abs': the result type differs"));
+    assert(err_has("geom/vec.ft:1:11: note: previous declaration of 'abs' here"));
+}
+
+// ---- more of the build ------------------------------------------------------------------
+
+fn a_search_root_serves_the_paths_of_no_library() void {
+    build_std(NO_MORE[..0]);
+    make_dir("lib");
+    write_file("lib/helper.ft", "import std.io;\nfn twice(i32 x) i32 {\n    return io.f(x);\n}\n");
+    write_file("main.ft", "import helper;\nfn main() i32 {\n    return helper.twice(1);\n}\n");
+    string[6] args = {"-I", "lib", "--use", "std=std.flib", "-S", "main.ft"};
+    remove("main.ll");
+    assert(use_run(args[..]) == EXIT_OK);
+    assert(err_is(""));
+    string own ir = contents("main.ll");
+    defer del(ir);
+    // the module of the root is in the entry unit, and std stays in its library
+    assert(str.find(ir, "define dso_local i32 @\"helper.twice\"(i32 %x.in) #0 {\n") > 0);
+    assert(str.find(ir, "declare dso_local i32 @\"std.io.f\"(i32) #0\n") > 0);
+}
+
+fn a_symbol_import_reads_the_section_of_its_module() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", "import std.io.{f, A as a};\nfn main() i32 {\n    return f(a);\n}\n");
+    string[4] args = {"--use", "std=std.flib", "-S", "main.ft"};
+    assert(use_run(args[..]) == EXIT_OK);
+    assert(err_is(""));
+    string own ir = contents("main.ll");
+    defer del(ir);
+    // the folded constant A is 2 (module-system.md 10.4)
+    assert(str.find(ir, "call i32 @\"std.io.f\"(i32 2)") > 0);
+}
+
+fn a_module_that_the_interface_lacks_is_not_found_in_the_library() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", "import std.nope;\nfn main() i32 {\n    return 0;\n}\n");
+    // a file of the path beside the entry does not count: the path is the library's
+    make_dir("std");
+    write_file("std/nope.ft", "i32 N = 1;\n");
+    string[4] args = {"--use", "std=std.flib", "--check", "main.ft"};
+    assert(use_run(args[..]) == EXIT_COMPILE_ERROR);
+    assert(err_has("main.ft:1:1: error: module 'std.nope' not found\n"));
+    assert(err_has("main.ft:1:1: note: looked for std.nope in library 'std'\n"));
+    remove("std/nope.ft");
+}
+
+fn a_release_build_compiles_at_the_release_level() void {
+    string[1] release = {"--release"};
+    build_std(release[..]);
+    write_file("main.ft", MAIN);
+    remove("cc.log");
+    string[5] args = {"--release", "--use", "std=std.flib", "-c", "main.ft"};
+    assert(use_run(args[..]) == EXIT_OK);
+    assert(err_is(""));
+    string own log = cc_log();
+    defer del(log);
+    assert(str.find(log, "\n-O2\n-fPIE\n-Wno-override-module\n-c\n-o\nmain.o\n") > 0);
+}
+
+fn ir_and_object_together_stop_at_the_ir() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", MAIN);
+    remove("cc.log");
+    remove("main.ll");
+    remove("main.o");
+    string[5] args = {"--use", "std=std.flib", "-S", "-c", "main.ft"};
+    assert(use_run(args[..]) == EXIT_OK);
+    assert(exists("main.ll"));
+    assert(!exists("main.o"));
+    assert(!exists("cc.log"));
+}
+
+fn the_lowering_count_of_an_entry_unit_counts_its_own_functions() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", MAIN);
+    string[5] args = {"--use", "std=std.flib", "-S", "--fir-stats", "main.ft"};
+    assert(use_run(args[..]) == EXIT_OK);
+    string own out = contents("out.txt");
+    defer del(out);
+    // main.main alone: the functions of std are bodiless in the interface
+    assert(out == "lowered 1 of 1\n");
+}
+
+fn a_build_with_use_reads_no_standard_directory() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", MAIN);
+    // the directory does not exist, and the build does not open it
+    string[6] args = {"--std-dir", "nowhere", "--use", "std=std.flib", "-S", "main.ft"};
+    assert(use_run(args[..]) == EXIT_OK);
+    assert(err_is(""));
+    set_env("FORT_STD_DIR", "nowhere");
+    string[4] env = {"--use", "std=std.flib", "-S", "main.ft"};
+    assert(use_run(env[..]) == EXIT_OK);
+    assert(err_is(""));
+    set_env("FORT_STD_DIR", "");
+}
+
+fn a_link_writes_a_out_by_default() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", MAIN);
+    remove("a.out");
+    string[3] args = {"--use", "std=std.flib", "main.ft"};
+    assert(use_run(args[..]) == EXIT_OK);
+    string own out = contents("a.out");
+    defer del(out);
+    assert(out == "linked\n");
+}
+
+fn a_failed_compile_line_runs_no_link() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", MAIN);
+    remove("cc.log");
+    write_file("compile_fail.flag", "1\n");
+    string[5] args = {"--use", "std=std.flib", "-o", "app2", "main.ft"};
+    assert(use_run(args[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: cc failed with status 4\n"));
+    assert(!exists("app2"));
+    string own log = cc_log();
+    defer del(log);
+    // the compile line alone ran
+    assert(str.find(log, "--\n") == cast(log.len - 3, i64));
+    remove("compile_fail.flag");
+}
+
+fn a_compile_error_runs_no_tool() void {
+    build_std(NO_MORE[..0]);
+    write_file("bad.ft", "fn main() i32 {\n    return true;\n}\n");
+    remove("cc.log");
+    string[3] args = {"--use", "std=std.flib", "bad.ft"};
+    assert(use_run(args[..]) == EXIT_COMPILE_ERROR);
+    assert(err_has("bad.ft:2:12: error:"));
+    assert(!exists("cc.log"));
+}
+
+fn a_library_that_no_module_imports_is_still_linked() void {
+    build_std(NO_MORE[..0]);
+    build_geom(NO_MORE[..0]);
+    write_file("main.ft", "fn main() i32 {\n    return 0;\n}\n");
+    remove("cc.log");
+    remove("archives.log");
+    string[7] args = {"--use", "geom=geom.flib", "--use", "std=std.flib", "-o", "app3", "main.ft"};
+    assert(use_run(args[..]) == EXIT_OK);
+    string own log = cc_log();
+    defer del(log);
+    assert(str.find(log, "/geom.a\n") > 0);
+    assert(str.find(log, "/std.a\n") > 0);
+}
+
+fn the_target_of_an_object_is_refused_before_the_libraries_are_read() void {
+    string mut other = "arm64-apple-macosx11.0.0";
+    if (os.TARGET == other) {
+        other = "x86_64-linux-gnu";
+    }
+    // the artifact does not exist, and step 0 refuses the target first
+    string[6] args = {"--use", "std=missing.flib", "-c", "--target", other, "main.ft"};
+    assert(use_run(args[..]) == EXIT_USAGE);
+    assert(err_has("fort: error: cannot compile object for target '"));
+}
+
+fn the_used_libraries_are_read_before_the_entry_file() void {
+    string[3] args = {"--use", "std=missing.flib", "nope.ft"};
+    assert(use_run(args[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: cannot read library 'missing.flib': No such file or directory\n"));
+    build_std(NO_MORE[..0]);
+    string[3] valid = {"--use", "std=std.flib", "nope.ft"};
+    assert(use_run(valid[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: cannot read 'nope.ft': No such file or directory\n"));
+}
+
+fn a_manifest_that_cannot_be_read_is_exit_two() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", MAIN);
+    char mut@ own c_path = str.to_cstr("std.flib/manifest");
+    defer del(c_path);
+    assert(libc.chmod(c_path.ptr, 0) == 0);
+    string[4] args = {"--use", "std=std.flib", "-S", "main.ft"};
+    i32 status = use_run(args[..]);
+    assert(libc.chmod(c_path.ptr, 0o644) == 0);
+    assert(status == EXIT_USAGE);
+    assert(err_is("fort: error: cannot read library 'std.flib': Permission denied\n"));
+}
+
+fn a_closure_error_stops_before_the_extern_check() void {
+    build_std(NO_MORE[..0]);
+    // a wrong `abs` beside a type error: only the error of the closure stands
+    write_file("main.ft", "extern fn abs(i64 x) i64;\nbool B = 1;\n");
+    string[4] args = {"--use", "std=std.flib", "--check", "main.ft"};
+    assert(use_run(args[..]) == EXIT_COMPILE_ERROR);
+    assert(err_has("main.ft:2:10: error:"));
+    string own err = capture.text("err.txt");
+    defer del(err);
+    assert(str.find(err, "conflicting declarations") < 0);
+}
+
+fn the_cache_options_are_not_known_yet() void {
+    string[4] args = {"fort", "--cache-dir", "c", "main.ft"};
+    assert(usage_error_is(args[..], "unknown option '--cache-dir'"));
+    string[3] stats = {"fort", "--cache-stats", "main.ft"};
+    assert(usage_error_is(stats[..], "unknown option '--cache-stats'"));
+}
+
+fn a_path_that_holds_an_equal_sign_is_the_path() void {
+    write_file("main.ft", MAIN);
+    // the argument splits at its first `=`
+    string[4] args = {"--use", "std=a=b.flib", "-S", "main.ft"};
+    assert(use_run(args[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: cannot read library 'a=b.flib': No such file or directory\n"));
+}
+
+fn three_libraries_link_in_the_order_of_their_uses() void {
+    build_std(NO_MORE[..0]);
+    build_geom(NO_MORE[..0]);
+    // `app` uses geom and std; the command line names std, app and geom in that order
+    // an earlier case wrote the program `app`, so the root of the library has another name
+    make_dir("approot");
+    write_file("approot/run.ft", "import geom.vec;\nfn go() i32 {\n    return vec.len(1);\n}\n");
+    string[4] both = {"--use", "std=std.flib", "--use", "geom=geom.flib"};
+    assert(build_library("app", "approot", "app.flib", both[..]) == EXIT_OK);
+    assert(err_is(""));
+    write_file("main.ft", "import app.run;\nfn main() i32 {\n    return run.go();\n}\n");
+    remove("cc.log");
+    remove("archives.log");
+    string[9] args = {"--use", "std=std.flib", "--use", "app=app.flib", "--use", "geom=geom.flib",
+                      "-o", "app4", "main.ft"};
+    assert(use_run(args[..]) == EXIT_OK);
+    assert(err_is(""));
+    string own log = cc_log();
+    defer del(log);
+    i64 app = str.find(log, "/app.a\n");
+    i64 geom = str.find(log, "/geom.a\n");
+    i64 std_archive = str.find(log, "/std.a\n");
+    assert(app > 0 && geom > app && std_archive > geom);
+    // the entry unit declares each function of each interface module of its closure: app.run
+    // and geom.vec, which app.run imports (module-system.md 10.4)
+    string[6] ir = {"--use", "std=std.flib", "--use", "app=app.flib", "--use", "geom=geom.flib"};
+    string[4] more = {"-S", "-o", "app4.ll", "main.ft"};
+    string[3] head = {"fort", "--cc", "./cc.sh"};
+    string[10] mut all = {};
+    u64 mut i = 0;
+    while (i < 6) {
+        all[i] = ir[i];
+        i += 1;
+    }
+    while (i < 10) {
+        all[i] = more[i - 6];
+        i += 1;
+    }
+    assert(run_with(head[..], all[..]) == EXIT_OK);
+    string own text = contents("app4.ll");
+    defer del(text);
+    assert(str.find(text, "declare dso_local i32 @\"app.run.go\"() #0\n") > 0);
+    assert(str.find(text, "declare dso_local i32 @\"geom.vec.len\"(i32) #0\n") > 0);
+    assert(str.find(text, "define dso_local i32 @\"geom.vec.len\"") < 0);
+}
+
+fn the_index_holds_no_record_of_a_module_outside_the_closure() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", MAIN);
+    string[4] args = {"fort", "--index", "--use", "std=std.flib"};
+    string[1] entry = {"main.ft"};
+    assert(run_with(args[..], entry[..]) == EXIT_OK);
+    string own with_zz = contents("out.txt");
+    defer del(with_zz);
+    // std.zz sorts after std.rt and std.io, so without it no position of their sections moves
+    remove("std/zz.ft");
+    assert(build_library("std", "std", "std.flib", NO_MORE[..0]) == EXIT_OK);
+    assert(run_with(args[..], entry[..]) == EXIT_OK);
+    string own without = contents("out.txt");
+    defer del(without);
+    assert(with_zz == without);
+}
+
+fn the_check_document_holds_a_conflict_outside_the_closure() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", "extern fn abs(i64 x) i64;\n");
+    string[5] args = {"fort", "--check", "--json", "--use", "std=std.flib"};
+    string[1] entry = {"main.ft"};
+    assert(run_with(args[..], entry[..]) == EXIT_COMPILE_ERROR);
+    assert(err_is(""));
+    string own doc = contents("out.txt");
+    defer del(doc);
+    // the error stands in the interface file, which the document lists, and its note in main.ft
+    assert(str.find(doc, "\"files\":[\"std.flib/interface.ft\",\"main.ft\"]") > 0);
+    assert(str.find(doc, "{\"file\":\"std.flib/interface.ft\",\"line\":") > 0);
+    assert(str.find(doc, "the result type differs") > 0);
+    assert(str.find(doc, "\"notes\":[{\"file\":\"main.ft\",\"line\":1,\"col\":11") > 0);
+}
+
+fn a_trailing_separator_of_a_path_takes_no_second_one() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", MAIN);
+    string[5] args = {"fort", "--check", "--json", "--use", "std=std.flib/"};
+    string[1] entry = {"main.ft"};
+    assert(run_with(args[..], entry[..]) == EXIT_OK);
+    string own doc = contents("out.txt");
+    defer del(doc);
+    assert(str.find(doc, "\"files\":[\"std.flib/interface.ft\",\"main.ft\"]") > 0);
+}
+
+fn a_lexical_error_of_an_interface_file_is_in_the_check_document() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", MAIN);
+    string[4] lines = {"/\x2F! fort interface 1", "/\x2F! library std", "/\x2F! module std.rt",
+                       "i32 B = 1$;"};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut i = 0;
+    while (i < lines.len) {
+        strbuf.append(&text, lines[i]);
+        strbuf.push(&text, '\n');
+        i += 1;
+    }
+    replace_interface(strbuf.view(&text));
+    string[5] args = {"fort", "--check", "--json", "--use", "std=std.flib"};
+    string[1] entry = {"main.ft"};
+    assert(run_with(args[..], entry[..]) == EXIT_COMPILE_ERROR);
+    string own doc = contents("out.txt");
+    defer del(doc);
+    assert(str.find(doc, "{\"file\":\"std.flib/interface.ft\",\"line\":4,\"col\":10") > 0);
+    assert(str.find(doc, "\"files\":[\"std.flib/interface.ft\"]") > 0);
+}
+
+fn a_section_that_does_not_parse_is_a_compile_error_at_its_import() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", "import std.bad;\nfn main() i32 {\n    return 0;\n}\n");
+    string[6] lines = {"/\x2F! fort interface 1", "/\x2F! library std", "/\x2F! module std.bad",
+                       "fn f(;", "/\x2F! module std.rt", "i32 B = 1;"};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut i = 0;
+    while (i < lines.len) {
+        strbuf.append(&text, lines[i]);
+        strbuf.push(&text, '\n');
+        i += 1;
+    }
+    replace_interface(strbuf.view(&text));
+    string[4] args = {"--use", "std=std.flib", "--check", "main.ft"};
+    assert(use_run(args[..]) == EXIT_COMPILE_ERROR);
+    assert(err_has("std.flib/interface.ft:4:6: error: expected a type, found ';'"));
+    // a program that does not import it loads it for the extern check, and reports it there
+    write_file("main.ft", "fn main() i32 {\n    return 0;\n}\n");
+    assert(use_run(args[..]) == EXIT_COMPILE_ERROR);
+    assert(err_has("std.flib/interface.ft:4:6: error: expected a type, found ';'"));
+}
+
+fn the_compile_options_of_a_used_library_are_not_compared() void {
+    // the key covers --cc, -Xcc and --ar, and a build compares none of them
+    string[2] xcc = {"-Xcc", "-g0"};
+    build_std(xcc[..]);
+    write_file("main.ft", MAIN);
+    string[6] args = {"--use", "std=std.flib", "-Xcc", "-O0", "-S", "main.ft"};
+    assert(use_run(args[..]) == EXIT_OK);
+    assert(err_is(""));
+    string own manifest = contents("std.flib/manifest");
+    defer del(manifest);
+    assert(str.find(manifest, "\nxcc -g0\n") > 0);
+}
+
+// A program with an unproved store into an `own` local (D17.11) and a declaration of `abs` in
+// another form than std.zz, which it does not import.
+string[12] OVERWRITE_LINES = {
+    "extern fn abs(i64 x) i64;",
+    "fn make(i32 v) i32 mut* own {",
+    "    i32 mut* own p = new(i32);",
+    "    *p = v;",
+    "    return p;",
+    "}",
+    "fn main() i32 {",
+    "    i32 mut* own mut p = make(1);",
+    "    p = make(2);",
+    "    del(p);",
+    "    return 0;",
+    "}",
+};
+
+// The stderr of `fort --cc ./cc.sh <args>`, which must exit with `status`.
+fn stderr_of(string@ args, i32 status) string own {
+    assert(use_run(args) == status);
+    return capture.text("err.txt");
+}
+
+fn the_emptiness_pass_reports_before_the_extern_check_outside() void {
+    build_std(NO_MORE[..0]);
+    write_lines("main.ft", OVERWRITE_LINES[..]);
+    // a whole program reports the store alone: it reads no module that it does not import
+    string[4] whole_check = {"--check", "--std-dir", "std", "main.ft"};
+    string own want = stderr_of(whole_check[..], EXIT_COMPILE_ERROR);
+    defer del(want);
+    assert(str.find(want, "main.ft:9:7: error: overwriting owned value: cannot prove 'p' is") == 0);
+    // with --use the pass runs first and stops the build, as step 4 of toolchain.md 2.1 does
+    string[4] use_check = {"--use", "std=std.flib", "--check", "main.ft"};
+    string own got = stderr_of(use_check[..], EXIT_COMPILE_ERROR);
+    defer del(got);
+    assert(got == want);
+    string[4] whole_ir = {"--std-dir", "std", "-S", "main.ft"};
+    string own want_ir = stderr_of(whole_ir[..], EXIT_COMPILE_ERROR);
+    defer del(want_ir);
+    remove("main.ll");
+    string[4] use_ir_args = {"--use", "std=std.flib", "-S", "main.ft"};
+    string own got_ir = stderr_of(use_ir_args[..], EXIT_COMPILE_ERROR);
+    defer del(got_ir);
+    assert(got_ir == want_ir);
+    assert(!exists("main.ll"));
+    // with the store proved, the conflict outside the closure stands
+    write_file("main.ft", "extern fn abs(i64 x) i64;\nfn main() i32 {\n    return 0;\n}\n");
+    assert(use_run(use_check[..]) == EXIT_COMPILE_ERROR);
+    assert(err_has("conflicting declarations of extern 'abs'"));
+    // a library build runs the pass before the extern check as well
+    // (`main` of a library module is an ordinary function)
+    make_dir("store");
+    write_lines("store/m.ft", OVERWRITE_LINES[..]);
+    string[7] lib = {"fort", "--lib", "store", "store", "--emit-interface", "--use",
+                     "std=std.flib"};
+    assert(run(lib[..]) == EXIT_COMPILE_ERROR);
+    assert(err_has("store/m.ft:9:7: error: overwriting owned value: cannot prove 'p' is"));
+    string own lib_err = capture.text("err.txt");
+    defer del(lib_err);
+    assert(str.find(lib_err, "conflicting declarations") < 0);
+}
+
+fn an_import_binding_of_an_interface_section_is_no_declaration() void {
+    build_std(NO_MORE[..0]);
+    // std.io imports std.rt, and its section binds that import as `_0`
+    string[3] forms = {"import std.io._0;", "import std.io.{_0};", "import std.io.rt;"};
+    u64 mut i = 0;
+    while (i < forms.len) {
+        strbuf.str_buf mut b = strbuf.create();
+        defer strbuf.free(&b);
+        strbuf.append(&b, forms[i]);
+        strbuf.append(&b, "\nfn main() i32 {\n    return 0;\n}\n");
+        write_file("main.ft", strbuf.view(&b));
+        string[4] args = {"--use", "std=std.flib", "--check", "main.ft"};
+        assert(use_run(args[..]) == EXIT_COMPILE_ERROR);
+        // the binding is no name of the module (module-system.md 13)
+        assert(err_has("main.ft:1:1: error: module 'std.io' has no declaration named '"));
+        i += 1;
+    }
+    string own last = capture.text("err.txt");
+    defer del(last);
+    assert(str.find(last, "has no declaration named 'rt'") > 0);
+    // the source holds no binding `_0`, and the binding `rt` is an import there
+    string[4] whole = {"--check", "--std-dir", "std", "main.ft"};
+    assert(use_run(whole[..]) == EXIT_COMPILE_ERROR);
+    assert(err_has("main.ft:1:1: error: cannot import 'rt': it is an import of module 'std.io'"));
+    write_file("main.ft", "import std.io._0;\nfn main() i32 {\n    return 0;\n}\n");
+    assert(use_run(whole[..]) == EXIT_COMPILE_ERROR);
+    assert(err_has("main.ft:1:1: error: module 'std.io' has no declaration named '_0'"));
+}
+
+fn the_fir_modes_of_the_build_mode_and_the_report_read_the_used_library() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", MAIN);
+    string[4] after = {"--fir-after=build-mode", "--use", "std=std.flib", "main.ft"};
+    assert(use_run(after[..]) == EXIT_OK);
+    assert(err_is(""));
+    string own fir = contents("out.txt");
+    defer del(fir);
+    assert(str.starts_with(fir, "fn main.main() -> i32 {\n"));
+    assert(str.find(fir, "call fn std.io.f(const i32 2)") > 0);
+    string[4] report = {"--fir-verify-report", "--use", "std=std.flib", "main.ft"};
+    assert(use_run(report[..]) == EXIT_OK);
+    assert(err_is(""));
+    assert(out_is_empty());
+    // the report mode reports no overwrite error, with --use as without it
+    write_lines("main.ft", OVERWRITE_LINES[1..]);
+    assert(use_run(report[..]) == EXIT_OK);
+    assert(err_is(""));
+    string[4] whole = {"--fir-verify-report", "--std-dir", "std", "main.ft"};
+    assert(use_run(whole[..]) == EXIT_OK);
+    assert(err_is(""));
+}
+
+// ---- more of a library build with --use ------------------------------------------------
+
+fn a_library_build_reads_its_used_libraries_before_its_root() void {
+    string[6] args = {"fort", "--lib", "geom", "missing", "--use", "std=missing.flib"};
+    assert(run(args[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: cannot read library 'missing.flib': No such file or directory\n"));
+    build_std(NO_MORE[..0]);
+    string[6] root = {"fort", "--lib", "geom", "missing", "--use", "std=std.flib"};
+    assert(run(root[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: cannot read library root 'missing': No such file or directory\n"));
+}
+
+fn a_library_object_declares_the_used_library() void {
+    build_std(NO_MORE[..0]);
+    make_dir("geom");
+    write_file("geom/vec.ft", VEC_MODULE);
+    string[3] args = {"--use", "std=std.flib", "-c"};
+    remove("geom.o");
+    assert(build_library("geom", "geom", "geom.o", args[..]) == EXIT_OK);
+    string own object = contents("geom.o");
+    defer del(object);
+    assert(str.find(object, "declare dso_local i32 @\"std.io.f\"(i32) #0\n") > 0);
+    assert(str.find(object, "define dso_local i32 @\"std.io.f\"") < 0);
+}
+
+fn a_library_build_records_each_used_library_in_byte_order() void {
+    build_std(NO_MORE[..0]);
+    make_dir("util");
+    write_file("util/text.ft", "i32 T = 1;\n");
+    string[2] std_only = {"--use", "std=std.flib"};
+    assert(build_library("util", "util", "util.flib", std_only[..]) == EXIT_OK);
+    // the command line names util first, and the manifest writes std first
+    string[4] both = {"--use", "util=util.flib", "--use", "std=std.flib"};
+    make_dir("geom");
+    write_file("geom/vec.ft", VEC_MODULE);
+    assert(build_library("geom", "geom", "geom.flib", both[..]) == EXIT_OK);
+    string own manifest = contents("geom.flib/manifest");
+    defer del(manifest);
+    i64 std_line = str.find(manifest, "\nuse std ");
+    i64 util_line = str.find(manifest, "\nuse util ");
+    assert(std_line > 0 && util_line > std_line);
+    string own util_hash = manifest_value("util.flib", "interface");
+    defer del(util_hash);
+    assert(str.find(manifest, util_hash) == util_line + 10);
+}
+
+// ---- the artifact that a build writes reads back ---------------------------------------
+
+fn the_artifact_of_a_build_reads_back_with_the_fields_of_the_build() void {
+    string[3] configured = {"--no-bounds-check", "--cfg", "zone=a b"};
+    build_std(configured[..]);
+    artifact.contents mut c = artifact.contents{};
+    defer artifact.free(&c);
+    i32 mut error = 0;
+    assert(artifact.read("std.flib", &c, &error) == artifact.verdict.v_valid);
+    assert(c.fields.library == "std");
+    assert(c.fields.target == os.TARGET);
+    assert(!c.fields.release);
+    assert(c.fields.no_bounds_check);
+    assert(c.fields.cc == "./cc.sh");
+    assert(c.fields.ar == "./ar.sh");
+    assert(c.fields.use_names.len == 0);
+    // the running compiler is this program, which wrote the artifact
+    strbuf.str_buf mut compiler = strbuf.create();
+    defer strbuf.free(&compiler);
+    strbuf.str_buf mut exe = strbuf.create();
+    defer strbuf.free(&exe);
+    assert(artifact.hash_compiler(&compiler, &exe));
+    assert(c.fields.compiler == strbuf.view(&compiler));
+    // the configuration map: the three keys of the target and the pair of --cfg, in byte order
+    assert(c.fields.cfg_keys.len == 4);
+    assert(c.fields.cfg_keys[0] == "target_abi");
+    assert(c.fields.cfg_keys[3] == "zone");
+    assert(c.fields.cfg_values[3] == "a b");
+    // the bytes of the read are the files
+    string own interface = contents("std.flib/interface.ft");
+    defer del(interface);
+    assert(strbuf.view(&c.interface) == interface);
+    string own archive = contents("std.flib/lib.a");
+    defer del(archive);
+    assert(strbuf.view(&c.archive) == archive);
+}
+
+fn main() i32 {
+    the_argument_of_use_is_a_name_and_a_path();
+    a_library_is_named_once();
+    a_library_build_needs_the_library_std();
+    the_options_of_a_lib_build_still_need_lib();
+    the_lexer_and_the_parser_read_no_used_library();
+    println("usage ok");
+    an_artifact_that_cannot_be_read_is_exit_two();
+    an_artifact_that_breaks_a_rule_is_corrupt();
+    an_interface_file_of_another_form_is_corrupt();
+    a_lexical_error_in_an_interface_file_is_a_compile_error();
+    an_artifact_of_another_format_version_is_corrupt();
+    an_artifact_of_another_name_is_refused();
+    an_artifact_of_another_compiler_or_target_is_refused();
+    an_artifact_of_another_mode_is_refused();
+    an_artifact_of_another_configuration_is_refused();
+    the_first_failure_of_the_command_line_reports();
+    println("artifact ok");
+    each_used_library_of_a_manifest_must_be_named();
+    a_library_built_against_another_interface_is_refused();
+    two_libraries_that_use_each_other_are_a_cycle();
+    println("uses ok");
+    the_ir_module_of_the_entry_unit_declares_the_library();
+    the_modules_outside_the_closure_add_nothing_to_the_module();
+    the_entry_unit_is_compiled_and_linked_with_each_archive();
+    an_object_is_the_compile_line_alone();
+    a_failed_link_is_exit_two();
+    a_cross_target_module_needs_no_std_dir();
+    a_search_root_serves_the_paths_of_no_library();
+    a_symbol_import_reads_the_section_of_its_module();
+    a_module_that_the_interface_lacks_is_not_found_in_the_library();
+    a_release_build_compiles_at_the_release_level();
+    ir_and_object_together_stop_at_the_ir();
+    the_lowering_count_of_an_entry_unit_counts_its_own_functions();
+    a_build_with_use_reads_no_standard_directory();
+    a_link_writes_a_out_by_default();
+    a_failed_compile_line_runs_no_link();
+    a_compile_error_runs_no_tool();
+    a_library_that_no_module_imports_is_still_linked();
+    the_target_of_an_object_is_refused_before_the_libraries_are_read();
+    the_used_libraries_are_read_before_the_entry_file();
+    a_manifest_that_cannot_be_read_is_exit_two();
+    a_closure_error_stops_before_the_extern_check();
+    the_cache_options_are_not_known_yet();
+    a_path_that_holds_an_equal_sign_is_the_path();
+    three_libraries_link_in_the_order_of_their_uses();
+    a_trailing_separator_of_a_path_takes_no_second_one();
+    a_lexical_error_of_an_interface_file_is_in_the_check_document();
+    a_section_that_does_not_parse_is_a_compile_error_at_its_import();
+    the_compile_options_of_a_used_library_are_not_compared();
+    the_emptiness_pass_reports_before_the_extern_check_outside();
+    an_import_binding_of_an_interface_section_is_no_declaration();
+    the_fir_modes_of_the_build_mode_and_the_report_read_the_used_library();
+    println("build ok");
+    an_extern_of_an_unimported_module_conflicts_across_units();
+    the_extern_check_reads_the_libraries_in_the_reverse_of_the_link_order();
+    the_check_document_lists_each_interface_file_once();
+    the_index_records_no_module_outside_the_closure();
+    the_fir_of_the_entry_unit_holds_its_own_functions();
+    a_fir_test_reads_its_prelude_against_the_used_library();
+    the_index_holds_no_record_of_a_module_outside_the_closure();
+    the_check_document_holds_a_conflict_outside_the_closure();
+    println("closure ok");
+    a_library_build_records_each_used_library();
+    a_library_build_emits_its_interface_against_the_used_library();
+    a_library_build_holds_its_externs_against_the_used_library();
+    a_library_build_reads_its_used_libraries_before_its_root();
+    a_library_object_declares_the_used_library();
+    a_library_build_records_each_used_library_in_byte_order();
+    the_artifact_of_a_build_reads_back_with_the_fields_of_the_build();
+    println("library ok");
+    println("ok");
+    return 0;
+}

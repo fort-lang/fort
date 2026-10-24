@@ -11,10 +11,10 @@ with the compiler (toolchain.md 2.1 and 2.2, module-system.md 10.4).
    private data from 0. The IR module of the other target, from a standard root that this script
    assembles for it, passes the verifier and compiles to an object.
 4. Each program of test/library/programs gives the same stdout, stderr and exit status when it
-   is linked against the `lib.a` of the artifact as when it is built as one whole program. No
-   build reads an artifact yet, so test/library/builder.ft emits the IR module of the entry unit
-   against `interface.ft`, and this script compiles it and links the object with `lib.a`. Each
-   `declare` line of an entry unit carries the types of the definition in the library module.
+   is built with `--use std=<artifact>` as when it is built as one whole program. The build with
+   `--use` links the object of the entry unit with the `lib.a` of the artifact. Each `declare`
+   line of the IR module of the entry unit carries the types of the definition in the library
+   module.
 
 The archiver of macOS writes the time stamp of each member unless ZERO_AR_DATE is set, so the
 builds of this script set it. D9.11 asks for byte-deterministic IR text and `interface.ft` only.
@@ -241,11 +241,8 @@ def run_program(binary):
 
 
 def check_programs(args, work, artifact, library_ir):
-    builder = work / "builder"
-    must([args.fort, "--std-dir", args.std_dir, "--cc", args.cc,
-          "-I", SOURCE_ROOT / "src" / "fort", "-o", builder, HERE / "builder.ft"],
-         "the build of the builder")
     library = library_ir.read_text()
+    use = ["--cc", args.cc, "--use", "std=%s" % artifact]
     problems = []
     declarations = 0
     programs = sorted(PROGRAMS.glob("*.ft"))
@@ -255,20 +252,15 @@ def check_programs(args, work, artifact, library_ir):
         must([args.fort, "--std-dir", args.std_dir, "--cc", args.cc, "-o", whole, program],
              "the whole-program build of " + name)
         entry_ir = work / (name + ".ll")
-        must([builder, artifact / "interface.ft", "-S", "-o", entry_ir, program],
-             "the entry unit of " + name)
+        must([args.fort] + use + ["-S", "-o", entry_ir, program], "the entry unit of " + name)
         text = entry_ir.read_text()
         if re.search(r'^define .*@"std\.', text, re.M):
             problems.append("the entry unit of %s defines a function of std" % name)
         count, found = check_declarations(text, library)
         declarations += count
         problems.extend("%s: %s" % (name, p) for p in found)
-        entry_object = work / (name + ".o")
-        must([args.cc, "--target=" + args.target, "-O1", "-fPIE", "-Wno-override-module", "-c",
-              "-o", entry_object, entry_ir], "the compile of the entry unit of " + name)
         linked = work / ("linked_" + name)
-        must([args.cc, "--target=" + args.target, "-o", linked, entry_object,
-              artifact / "lib.a"], "the link of " + name)
+        must([args.fort] + use + ["-o", linked, program], "the build of %s with --use" % name)
         want = run_program(whole)
         got = run_program(linked)
         if got != want:
