@@ -1,0 +1,304 @@
+{
+  "comment": [
+    "The table of the cache of the library builds: the lookup, the store and the stats line in",
+    "src/fort/library/cache.ft, the manifest, the reader and the writer of the entry of an entry",
+    "unit and the source hash of a walk in src/fort/library/artifact.ft, and the options, the",
+    "builds that use the cache, the hits and the stores in src/fort/driver.ft (D9.11,",
+    "toolchain.md 1, 2.1, 2.2 and 2.3). Each row breaks one rule. The module suites compile the",
+    "mutated module themselves; the build links the compiler so that the md5 guard reads it, and",
+    "the last stage runs test/library/cache_test.py over that compiler. The table runs in the VM",
+    "with the default runner after `tools/vm configure` and `tools/vm build`. The build waits 2 s",
+    "and touches the sources in the guest first, as tools/mutations/use_fort.json does. The rule",
+    "that a hit of the entry unit checks nothing more has no row: a check that runs anyway writes",
+    "the same output, so only the time of the build shows it. The guard `libs.len > 0`",
+    "of a build with --use has no row either: without it a whole program looks its key up and",
+    "stores nothing, and no build stores an entry under that key (its compiler field is empty),",
+    "so the lookup is always a miss that writes nothing (driver_cache_test,",
+    "a_whole_program_touches_no_cache, holds that no cache directory appears)."
+  ],
+  "sources": [
+    "src/fort/library/cache.ft",
+    "src/fort/library/artifact.ft",
+    "src/fort/driver.ft"
+  ],
+  "binary": "build/Linux/debug/fort",
+  "build": "sleep 2 && touch src/fort/library/cache.ft src/fort/library/artifact.ft src/fort/driver.ft && cmake --build build/Linux/debug --target fort",
+  "stages": [
+    {
+      "name": "the module suites of the cache",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std library/cache library/artifact_entry library/artifact_reading library/artifact_test driver_cache driver_use driver_test driver_artifact"
+    },
+    {
+      "name": "the cache with the real tools",
+      "command": "python3 test/library/cache_test.py --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --cc clang --target x86_64-linux-gnu"
+    }
+  ],
+  "mutations": [
+    {
+      "decision": "D9.11-cache-key-line",
+      "file": "src/fort/library/cache.ft",
+      "what": "an entry whose key line holds another key hits",
+      "old": "    if (found == artifact.verdict.v_corrupt || c->key != key) {",
+      "new": "    if (found == artifact.verdict.v_corrupt) {"
+    },
+    {
+      "decision": "D9.11-cache-absent",
+      "file": "src/fort/library/cache.ft",
+      "what": "a missing entry reads as corrupt",
+      "old": "        if (failure == libc.ENOENT) {\n            return outcome.o_absent;",
+      "new": "        if (failure == libc.ENOENT) {\n            return outcome.o_corrupt;"
+    },
+    {
+      "decision": "D9.11-cache-entry-link",
+      "file": "src/fort/library/cache.ft",
+      "what": "the lookup follows a link at the entry",
+      "old": "    return libc.O_RDONLY | libc.O_DIRECTORY | libc.O_NOFOLLOW;",
+      "new": "    return libc.O_RDONLY | libc.O_DIRECTORY;"
+    },
+    {
+      "decision": "D9.11-cache-unreadable",
+      "file": "src/fort/library/cache.ft",
+      "what": "a cache directory that is a file reads as a corrupt entry",
+      "old": "        if (!is_directory(layout, true)) {\n            return outcome.o_unreadable;\n        }",
+      "new": "        if (false) {\n            return outcome.o_unreadable;\n        }"
+    },
+    {
+      "decision": "D9.11-cache-entry-unreadable",
+      "file": "src/fort/library/cache.ft",
+      "what": "an entry that cannot be read reads as corrupt",
+      "old": "    if (found == artifact.verdict.v_unreadable) {\n        return outcome.o_unreadable;",
+      "new": "    if (found == artifact.verdict.v_unreadable) {\n        return outcome.o_corrupt;"
+    },
+    {
+      "decision": "D9.11-cache-form",
+      "file": "src/fort/library/cache.ft",
+      "what": "the lookup reads every entry as a library entry",
+      "old": "    if (library) {\n        found = artifact.read(entry, c, &error);",
+      "new": "    if (true) {\n        found = artifact.read(entry, c, &error);"
+    },
+    {
+      "decision": "D9.11-cache-store-link",
+      "file": "src/fort/library/cache.ft",
+      "what": "the store writes through a link at the layout directory",
+      "old": "    return make_dir(dir, true) && make_dir(layout, false) && make_dir(entry, false);",
+      "new": "    return make_dir(dir, true) && make_dir(layout, true) && make_dir(entry, true);"
+    },
+    {
+      "decision": "D9.11-cache-stats-cause",
+      "file": "src/fort/library/cache.ft",
+      "what": "the stats line of a miss gives no cause",
+      "old": "    if (found != outcome.o_hit) {\n        strbuf.push(out, ' ');",
+      "new": "    if (false) {\n        strbuf.push(out, ' ');"
+    },
+    {
+      "decision": "D9.11-cache-stats-value",
+      "file": "src/fort/library/cache.ft",
+      "what": "the stats line writes the name with no escape",
+      "old": "    artifact.append_value(out, name);",
+      "new": "    strbuf.append(out, name);"
+    },
+    {
+      "decision": "D9.11-entry-no-ar",
+      "file": "src/fort/library/artifact.ft",
+      "what": "the manifest of an entry unit writes the archiver",
+      "old": "    if (!m->entry_unit) {\n        append_line(out, \"ar\", m->ar);",
+      "new": "    if (true) {\n        append_line(out, \"ar\", m->ar);"
+    },
+    {
+      "decision": "D9.11-entry-object",
+      "file": "src/fort/library/artifact.ft",
+      "what": "the manifest of an entry unit writes the outputs of a library",
+      "old": "    if (m->entry_unit) {\n        append_line(out, \"object\", m->object);",
+      "new": "    if (false) {\n        append_line(out, \"object\", m->object);"
+    },
+    {
+      "decision": "D9.11-read-object-hash",
+      "file": "src/fort/library/artifact.ft",
+      "what": "an object that differs from its hash is read",
+      "old": "    if (!has_hash(strbuf.bytes(&c->object), c->fields.object)) {",
+      "new": "    if (false) {"
+    },
+    {
+      "decision": "D9.11-object-hash-field",
+      "file": "src/fort/library/artifact.ft",
+      "what": "the object line is no hash field",
+      "old": "        || field == \"archive\" || field == \"object\") {",
+      "new": "        || field == \"archive\") {"
+    },
+    {
+      "decision": "D9.11-hash-texts",
+      "file": "src/fort/library/artifact.ft",
+      "what": "the source hash of a walk hashes the first file for each module",
+      "old": "        add_source(&st, paths[i], files[i], texts[i]);",
+      "new": "        add_source(&st, paths[i], files[i], texts[0]);"
+    },
+    {
+      "decision": "D9.11-write-object-manifest",
+      "file": "src/fort/library/artifact.ft",
+      "what": "the writer of an entry unit keeps the old manifest",
+      "old": "fn write_object(string dir, u8@ object, string manifest_text, strbuf.str_buf mut* failed,\n                i32 mut* error) bool {\n    if (!clear_manifest(dir, failed, error)) {",
+      "new": "fn write_object(string dir, u8@ object, string manifest_text, strbuf.str_buf mut* failed,\n                i32 mut* error) bool {\n    if (!make_dir(dir, error)) {"
+    },
+    {
+      "decision": "D9.11-option-stats",
+      "file": "src/fort/driver.ft",
+      "what": "--cache-stats needs no library build",
+      "old": "    if ((opts->have_cache_dir || opts->cache_stats) && !opts->have_lib",
+      "new": "    if ((opts->have_cache_dir) && !opts->have_lib"
+    },
+    {
+      "decision": "D9.11-option-dir-first",
+      "file": "src/fort/driver.ft",
+      "what": "--cache-stats reports before --cache-dir",
+      "old": "        if (opts->have_cache_dir) {\n            usage_error(\"--cache-dir requires --lib or --use\");",
+      "new": "        if (!opts->cache_stats) {\n            usage_error(\"--cache-dir requires --lib or --use\");"
+    },
+    {
+      "decision": "D9.11-cache-dir-option",
+      "file": "src/fort/driver.ft",
+      "what": "the build ignores --cache-dir",
+      "old": "    if (opts->have_cache_dir) {\n        strbuf.append(&u->dir, opts->cache_dir);",
+      "new": "    if (false) {\n        strbuf.append(&u->dir, opts->cache_dir);"
+    },
+    {
+      "decision": "D9.11-lib-modes",
+      "file": "src/fort/driver.ft",
+      "what": "a --lib build with -c uses the cache",
+      "old": "    u.active = !opts->emit_interface && !opts->emit_ir && !opts->compile_only && listed;",
+      "new": "    u.active = !opts->emit_interface && !opts->emit_ir && listed;"
+    },
+    {
+      "decision": "D9.11-lib-default-dir",
+      "file": "src/fort/driver.ft",
+      "what": "the default cache of --lib is in the current directory",
+      "old": "        find_unit(opts, opts->lib_root, &u);\n        if (u.found == cache.outcome.o_hit) {",
+      "new": "        find_unit(opts, \"\", &u);\n        if (u.found == cache.outcome.o_hit) {"
+    },
+    {
+      "decision": "D9.11-lib-hit",
+      "file": "src/fort/driver.ft",
+      "what": "a hit of a library builds it again",
+      "old": "        if (u.found == cache.outcome.o_hit) {\n            i32 copied = copy_entry(out_path, &u);",
+      "new": "        if (false) {\n            i32 copied = copy_entry(out_path, &u);"
+    },
+    {
+      "decision": "D9.11-lib-store",
+      "file": "src/fort/driver.ft",
+      "what": "a library build stores no entry",
+      "old": "    cache.store_library(strbuf.view(&u->dir), strbuf.view(&u->key), interface_text,",
+      "new": "    cache.store_library(\"\", strbuf.view(&u->key), interface_text,"
+    },
+    {
+      "decision": "D9.11-stats-success",
+      "file": "src/fort/driver.ft",
+      "what": "a library build whose tool failed writes the stats line",
+      "old": "    remove_library_temp(dir, written[..]);\n    if (built == EXIT_OK) {\n        write_stats(opts, &u);",
+      "new": "    remove_library_temp(dir, written[..]);\n    if (true) {\n        write_stats(opts, &u);"
+    },
+    {
+      "decision": "D9.11-use-modes",
+      "file": "src/fort/driver.ft",
+      "what": "a build with --fir-stats uses the cache",
+      "old": "    u.active = libs.len > 0 && !opts->check && !opts->fir && !opts->emit_ir && !opts->fir_stats;",
+      "new": "    u.active = libs.len > 0 && !opts->check && !opts->fir && !opts->emit_ir;"
+    },
+    {
+      "decision": "D9.11-entry-default-dir",
+      "file": "src/fort/driver.ft",
+      "what": "the default cache of an entry unit is in the current directory",
+      "old": "        find_unit(opts, opts->entry[..last_component(opts->entry)], u);",
+      "new": "        find_unit(opts, \"\", u);"
+    },
+    {
+      "decision": "D9.11-entry-store",
+      "file": "src/fort/driver.ft",
+      "what": "a build with --use stores no entry",
+      "old": "    if (u->active) {\n        store_entry(strbuf.bytes(object), u);",
+      "new": "    if (false) {\n        store_entry(strbuf.bytes(object), u);"
+    },
+    {
+      "decision": "D9.11-entry-hit-object",
+      "file": "src/fort/driver.ft",
+      "what": "a hit of the entry unit writes no object",
+      "old": "        strbuf.append_bytes(object, strbuf.bytes(&u->entry.object));",
+      "new": "        strbuf.append_bytes(object, strbuf.bytes(&u->entry.text));"
+    },
+    {
+      "decision": "D9.11-entry-name",
+      "file": "src/fort/driver.ft",
+      "what": "the entry line names the file and not the module",
+      "old": "        strbuf.append(&u->entry_path, modules.entry(&an->set)->path);",
+      "new": "        strbuf.append(&u->entry_path, opts->entry);"
+    },
+    {
+      "decision": "D9.11-zero-ar-date",
+      "file": "src/fort/driver.ft",
+      "what": "the archiver runs with the environment of the compiler",
+      "old": "        if (role == \"ar\") {\n            // a failure leaves",
+      "new": "        if (role == \"no\") {\n            // a failure leaves"
+    },
+    {
+      "decision": "D9.11-cache-layout-follow",
+      "file": "src/fort/library/cache.ft",
+      "what": "the check of the layout refuses a link at `1`, so a file at the entry behind it reads as unreadable",
+      "old": "        if (!is_directory(layout, true)) {",
+      "new": "        if (!is_directory(layout, false)) {"
+    },
+    {
+      "decision": "D9.11-object-output",
+      "file": "src/fort/driver.ft",
+      "what": "under -c a miss writes the hit object, an empty one, to the -c output",
+      "old": "        if (!artifact.write_output(out_path, strbuf.bytes(&object), &failure)) {",
+      "new": "        if (!artifact.write_output(out_path, strbuf.bytes(&u->entry.object), &failure)) {"
+    },
+    {
+      "decision": "D9.11-object-read-once",
+      "file": "src/fort/driver.ft",
+      "what": "the store reads the object back from the -c output",
+      "old": "    if (!io.read_file(object_path, object)) {",
+      "new": "    if (!io.read_file(opts->output, object)) {"
+    },
+    {
+      "decision": "D9.11-output-mode",
+      "file": "src/fort/library/artifact.ft",
+      "what": "a -c output gets 0644 and not 0666 less the umask",
+      "old": "i32 OUTPUT_MODE = 0o666;",
+      "new": "i32 OUTPUT_MODE = 0o644;"
+    },
+    {
+      "decision": "D9.11-output-in-place",
+      "file": "src/fort/library/artifact.ft",
+      "what": "a regular -c output is written in place",
+      "old": "    if (is_replaceable(path)) {\n        u64 mut start = 0;",
+      "new": "    if (false) {\n        u64 mut start = 0;"
+    },
+    {
+      "decision": "D9.11-output-device",
+      "file": "src/fort/library/artifact.ft",
+      "what": "a FIFO or a device at the -c output is replaced by a rename",
+      "old": "    return (mode & S_IFMT) == S_IFREG;",
+      "new": "    return true;"
+    },
+    {
+      "decision": "D9.11-output-absent",
+      "file": "src/fort/library/artifact.ft",
+      "what": "an absent -c output is written in place",
+      "old": "        return sys.errno() == libc.ENOENT;",
+      "new": "        return false;"
+    },
+    {
+      "decision": "D9.11-output-link",
+      "file": "src/fort/library/artifact.ft",
+      "what": "a link at the -c output is written through and not replaced",
+      "old": "    u32 mut mode = 0;\n    if (!os.path_mode(path, &mode)) {\n        return sys.errno() == libc.ENOENT;",
+      "new": "    u32 mut mode = 0;\n    if (is_link(path)) {\n        return false;\n    }\n    if (!os.path_mode(path, &mode)) {\n        return sys.errno() == libc.ENOENT;"
+    },
+    {
+      "decision": "D9.11-output-fallback",
+      "file": "src/fort/library/artifact.ft",
+      "what": "a -c output whose temporary file cannot be made is no write",
+      "old": "        if (ok || made) {\n            return ok;",
+      "new": "        if (true) {\n            return ok;"
+    }
+  ]
+}

@@ -57,6 +57,10 @@ i32 O_NONBLOCK = 0o4000;
 // struct would give the symbol a type that a program cannot write again.
 extern fn fstat(i32 fd, u64 mut* buf) i32;
 
+// stat(2) writes the `struct stat` of the file that `path` names, after each symbolic link, into
+// `buf`. std.os declares it for the reason of fstat.
+extern fn stat(char* path, u64 mut* buf) i32;
+
 // `struct stat` (Linux x86-64) is STAT_WORDS 8-byte words with the alignment of C. `st_mode` is
 // a u32 at byte 24, the low half of word 3; MODE_BITS takes its type bits and its permission bits.
 u64 STAT_WORDS = 18;
@@ -77,6 +81,21 @@ fn open_nonblocking(string path) i32 {
 fn file_mode(i32 fd, u32 mut* mode) bool {
     u64[STAT_WORDS] mut st = {};
     if (fstat(fd, &st[0]) != 0) {
+        return false;
+    }
+    *mode = cast((st[STAT_MODE_WORD] >> STAT_MODE_SHIFT) & MODE_BITS, u32);
+    return true;
+}
+
+/// Writes the type bits and the permission bits of the file that `path` names, after each
+/// symbolic link, the low 16 bits of its `st_mode`, to `*mode`. It opens nothing, so a FIFO and a
+/// file that the process cannot read give their mode too. Returns false with the reason in
+/// sys.errno() when stat(2) fails.
+fn path_mode(string path, u32 mut* mode) bool {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    u64[STAT_WORDS] mut st = {};
+    if (stat(c_path.ptr, &st[0]) != 0) {
         return false;
     }
     *mode = cast((st[STAT_MODE_WORD] >> STAT_MODE_SHIFT) & MODE_BITS, u32);

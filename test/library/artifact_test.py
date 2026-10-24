@@ -3,7 +3,8 @@
 with the compiler (toolchain.md 2.1 and 2.2, module-system.md 10.4).
 
 1. Two builds write `std.flib` into two directories, and each file has the same bytes:
-   `interface.ft`, `lib.a`, `manifest` and the empty `summaries/`.
+   `interface.ft`, `lib.a`, `manifest` and the empty `summaries/`. Each build has a cache
+   directory of its own, so both compile the library (toolchain.md 2.3).
 2. The manifest is the text that this script writes from the table of toolchain.md 2.2, and
    Python's hashlib gives each hash again: the compiler executable, the sources of the root, the
    key, the interface file and the archive.
@@ -16,8 +17,12 @@ with the compiler (toolchain.md 2.1 and 2.2, module-system.md 10.4).
    line of the IR module of the entry unit carries the types of the definition in the library
    module.
 
-The archiver of macOS writes the time stamp of each member unless ZERO_AR_DATE is set, so the
-builds of this script set it. D9.11 asks for byte-deterministic IR text and `interface.ft` only.
+The archiver of macOS writes the time stamp of each member unless ZERO_AR_DATE is set. The
+compiler runs the archiver with ZERO_AR_DATE=1 (toolchain.md 2.1, step 8), so this script removes
+the variable from the environment of its builds: on macOS the two archives of check 1 are equal
+only when the compiler sets it. D9.11 asks for byte-deterministic IR text and `interface.ft` only.
+Each build names a cache directory in the temporary directory of the script, so no build writes
+a cache entry beside the standard root or the programs.
 
 Exit 0 when all four hold, 1 when one does not, or 2 for an environment failure.
 """
@@ -61,7 +66,7 @@ def parse_args(argv):
 def environment():
     env = dict(os.environ)
     env.setdefault("QEMU_LD_PREFIX", DEFAULT_QEMU_LD_PREFIX)
-    env["ZERO_AR_DATE"] = "1"
+    env.pop("ZERO_AR_DATE", None)
     return env
 
 
@@ -145,8 +150,8 @@ def manifest_text(args, root, artifact):
 # ---- the four checks ----------------------------------------------------------------------
 
 def build_artifact(args, out):
-    must([args.fort, "--cc", args.cc, "--ar", args.ar, "--lib", "std", args.std_dir, "-o", out],
-         "fort --lib std")
+    must([args.fort, "--cc", args.cc, "--ar", args.ar, "--lib", "std", args.std_dir, "-o", out,
+          "--cache-dir", out.parent / "cache"], "fort --lib std")
 
 
 def check_determinism(args, work):
@@ -242,7 +247,7 @@ def run_program(binary):
 
 def check_programs(args, work, artifact, library_ir):
     library = library_ir.read_text()
-    use = ["--cc", args.cc, "--use", "std=%s" % artifact]
+    use = ["--cc", args.cc, "--use", "std=%s" % artifact, "--cache-dir", work / "cache"]
     problems = []
     declarations = 0
     programs = sorted(PROGRAMS.glob("*.ft"))

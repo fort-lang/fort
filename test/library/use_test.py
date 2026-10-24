@@ -24,6 +24,12 @@ artifact follows the helpers.
    line names them in byte order, and the link order names `zzz` first; GNU ld resolves the
    archives of a link in the order that the line names them.
 
+Each build with `--lib` or `--use` names a cache directory in the temporary directory of the
+script, so no build writes a cache entry beside the standard root, a program or the chain
+(toolchain.md 2.3). Each program is built against `std.flib` twice with one cache directory: the
+fill build stores the entry of the entry unit and the warm build links it, and the two give the
+same compile status and the same stdout, stderr and status of the program.
+
 Exit 0 when no program differs, 1 when one does, or 2 for an environment failure.
 """
 
@@ -92,6 +98,7 @@ def build_artifacts(args, tests, work):
         out = work / ("lib%d" % len(artifacts)) / "std.flib"
         out.parent.mkdir()
         argv = [args.fort, "--cc", args.cc, "--lib", "std", args.std_dir] + list(options)
+        argv += ["--cache-dir", str(work / "cache")]
         proc = subprocess.run(argv + ["-o", str(out)], capture_output=True, timeout=600)
         if proc.returncode != 0:
             sys.stderr.write(proc.stderr.decode("utf-8", errors="replace"))
@@ -126,8 +133,10 @@ class Build:
         return argv
 
 
-def build_and_run(args, build, test, workdir):
+def build_and_run(args, build, test, workdir, stats=None):
     """Build the program with `build` and run it in a new directory under `workdir`.
+
+    The stdout of the compile is appended to the list `stats` when it is given.
 
     Return (what, outcome): `what` names the step that the outcome comes from, `compile` or
     `run`, and the outcome is the status, or the status, stdout and stderr of the run.
@@ -139,10 +148,14 @@ def build_and_run(args, build, test, workdir):
         proc = run_tests.run_process(
             build.compile(test, obj, compile_only=True), LANG, env, args.timeout
         )
+        if stats is not None:
+            stats.append(proc.stdout)
         if proc.returncode == 0:
             proc = run_tests.run_process(build.link(test, prog, obj), workdir, env, args.timeout)
     else:
         proc = run_tests.run_process(build.compile(test, prog), LANG, env, args.timeout)
+        if stats is not None:
+            stats.append(proc.stdout)
     if proc.returncode != 0 or proc.timed_out:
         return "compile", (
             proc.returncode,
@@ -195,7 +208,7 @@ def describe(outcome):
 
 def make_dirs(workdir):
     """The directory of each of the two builds of one program."""
-    for name in ("whole", "library"):
+    for name in ("whole", "library", "warm"):
         os.mkdir(os.path.join(workdir, name))
 
 
@@ -203,15 +216,29 @@ def compare(args, artifacts, test):
     """Hold the library build of `test` against its whole-program build: a problem or ''."""
     test = run_tests.select_target_os(test, run_tests.target_os(args.target))
     artifact = artifacts[library_options(test.flags)]
-    whole = Build(args, [args.fort, "--cc", args.cc, "--std-dir", args.std_dir], None)
-    library = Build(
-        args, [args.fort, "--cc", args.cc, "--use", "std=%s" % artifact], artifact / "lib.a"
-    )
     workdir = tempfile.mkdtemp(prefix="fort-use-")
+    whole = Build(args, [args.fort, "--cc", args.cc, "--std-dir", args.std_dir], None)
+    # a cache directory of its own, so that no entry stands beside the program
+    cache = os.path.join(workdir, "cache")
+    head = [args.fort, "--cc", args.cc, "--use", "std=%s" % artifact, "--cache-dir", cache]
+    library = Build(args, head, artifact / "lib.a")
+    warm_build = Build(args, head + ["--cache-stats"], artifact / "lib.a")
     try:
         make_dirs(workdir)
         want = build_and_run(args, whole, test, os.path.join(workdir, "whole"))
         got = build_and_run(args, library, test, os.path.join(workdir, "library"))
+        # the warm build finds the entry that the fill build stored (toolchain.md 2.3)
+        stats = []
+        warm = build_and_run(args, warm_build, test, os.path.join(workdir, "warm"), stats)
+        if warm != got:
+            return "%s: the warm build against std.flib %s; the fill build %s" % (
+                test.path,
+                describe(warm),
+                describe(got),
+            )
+        hit = len(stats) == 1 and stats[0].startswith(b"cache hit entry ")
+        if warm[0] == "run" and not (hit and stats[0].count(b"\n") == 1):
+            return "%s: the warm build wrote %r, not one hit" % (test.path, stats)
         if want[0] != "run":
             return "%s: the whole-program build failed: %s" % (test.path, describe(want))
         if test.path in CONFLICTS:
@@ -250,7 +277,7 @@ def check_chain(args, artifact, work):
             raise SystemExit("use_test: %s exited %d" % (what, proc.returncode))
         return proc
 
-    base = [args.fort, "--cc", args.cc]
+    base = [args.fort, "--cc", args.cc, "--cache-dir", work / "chain-cache"]
     std = ["--use", "std=%s" % artifact]
     aaa, zzz = work / "aaa.flib", work / "zzz.flib"
     must(base + ["--lib", "aaa", CHAIN / "aaa", "-o", aaa] + std, "fort --lib aaa")
@@ -266,7 +293,8 @@ def check_chain(args, artifact, work):
         "the build of the chain with --use",
     )
     must(
-        base + ["--std-dir", args.std_dir, "-I", CHAIN, "-o", whole, CHAIN / "main.ft"],
+        [args.fort, "--cc", args.cc, "--std-dir", args.std_dir, "-I", CHAIN, "-o", whole,
+         CHAIN / "main.ft"],
         "the whole-program build of the chain",
     )
     got = must([used], "the chain against its libraries")

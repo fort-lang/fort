@@ -328,8 +328,8 @@ the compiler cannot use and then print the usage line: `invalid library name '<n
 `--emit-interface requires --lib`, `--emit-interface does not combine with -S, -c or -o`,
 `--ar requires --lib`, `<option> requires --lib or --use` (for `--cache-dir` and
 `--cache-stats`), and `a library build needs --use std=<path>`. Fifteen report an artifact,
-a library root, the archiver or the compiler executable: `cannot read library root '<root>':
-<reason>`,
+a library root, a file of the build, the archiver or the compiler executable:
+`cannot read library root '<root>': <reason>`,
 `library root '<root>' holds no module`, `cannot read library '<path>': <reason>`,
 `library '<path>' is corrupt`, `library '<path>' is named '<other>', not '<name>'`,
 `library '<name>' was built with another <field>`, where `<field>` is `compiler`, `target`,
@@ -338,11 +338,15 @@ a library root, the archiver or the compiler executable: `cannot read library ro
 `library '<name>' was built against another interface of '<dep>'`,
 `library cycle: '<a>' uses '<b>' uses '<a>'`, which starts and ends at the first library of
 the cycle in byte order of the name, `cannot write '<file>': <reason>` for a file of an artifact,
+the `-c` output of a build with `--use` or a file of the temporary directory,
 `cannot run '<ar>': <reason>`, `ar failed with status <n>`, `ar failed with signal <n>`,
-`cannot read '<file>': <reason>` for the `lib.a` of the archive line or the running compiler
+`cannot read '<file>': <reason>` for the `lib.a` of the archive line, the object
+`<tmp>/<entry>.o` of the compile line of a build with `--use` or the running compiler
 executable, and `internal error: the system gives no path of the compiler executable`. A
-`<file>` of `cannot write` is the path in the artifact, `D`, `D/F` or `D/summaries/<entry>`, and
-never the temporary name. A failure of the cache is no error (section 2.3).
+`<file>` of `cannot write` is the path in the artifact, `D`, `D/F` or `D/summaries/<entry>`, the
+`-c` output or the path in the temporary directory, and never a temporary name. A hit and a miss
+give the same `cannot write` text for the `-c` output. A failure of the cache is no error
+(section 2.3).
 
 ```sh
 fort main.ft -o main                          # build ./main in checked mode
@@ -490,8 +494,12 @@ these steps:
    ```
 
    An archiver can write a time stamp into the archive, so two builds can write two different
-   `lib.a` files. Only the IR text and `interface.ft` are byte-deterministic (D9.11, D19.5). The
-   manifest records the SHA-256 of the `lib.a` that it stands beside.
+   `lib.a` files. The compiler runs the archiver with `ZERO_AR_DATE=1` in its environment, which
+   makes the archiver of macOS write zero for each time stamp. GNU ar writes zero only when
+   binutils was built with deterministic archives as its default, as the ar of Ubuntu 24.04 was;
+   GNU ar ignores the variable.
+   Only the IR text and `interface.ft` are byte-deterministic (D9.11, D19.5). The manifest
+   records the SHA-256 of the `lib.a` that it stands beside.
 
 9. Write the cache entry and then the artifact (sections 2.2 and 2.3). Write the `--cache-stats`
    line. Remove the temporary directory.
@@ -504,16 +512,25 @@ A build with `--use` and without `--lib` has these steps:
    resolution of `module-system.md` 10.2. Read each file once. The entry unit is the set of
    closure modules that are in no used library. The source hash of step 3 uses the bytes that this
    step parsed.
-3. When the build writes an object or an executable, compute the source hash and the key of the
-   entry unit and look up its cache entry. On a hit, go to step 7 with the object of the entry.
+3. When the build writes an object or an executable and names no `--fir-stats`, compute the
+   source hash and the key of the entry unit and look up its cache entry. On a hit, go to step 7
+   with the object of the entry.
 4. Check, lower and verify every module of the closure, interface modules included, and run the
    emptiness pass, as in step 3 of section 2 (exit 1). Check the extern declarations of the used
    libraries. `--check` stops here.
 5. Emit the IR module of the entry unit to `<tmp>/<entry>.ll`, or to the `-S` output and stop.
-6. Run the compile line of a `--lib` build over it, with the output `<tmp>/<entry>.o`, or the
-   `-c` output under `-c`. Write the cache entry. Under `-c`, stop.
-7. Under `-c` after a hit, write the object of the entry to the `-c` output and stop. Else run the
-   link line:
+6. Run the compile line of a `--lib` build over it, with the output `<tmp>/<entry>.o`. Read the
+   object once and write those bytes to the cache entry, except under `--fir-stats`, which uses
+   no cache (section 2.3).
+7. Under `-c`, write the object, the bytes of step 6 or the object of the entry after a hit, to
+   the `-c` output and stop. The compiler writes it as clang writes an output. When stat(2),
+   which follows a symbolic link, finds a regular file or no file at the path, the bytes go to a
+   temporary file in its directory, which is renamed over the path: a failed write leaves the
+   old file, a link to a regular file is replaced and its target stays, and the new file has the
+   mode 0666 less the umask. A device, a FIFO or another type, such as `/dev/null` or
+   `/dev/stdout`, is written in place, and so is a path whose temporary file cannot be made. So
+   a hit and a miss write the `-c` output in one way, and the cache holds the object that the
+   compile line wrote whatever the `-c` output is. Else run the link line:
 
    ```sh
    clang --target=x86_64-linux-gnu -o <out> <object> <archives> <-l options> <-Xcc args>
@@ -579,7 +596,9 @@ between them. A hash is 64 lowercase hex digits. The lines come in this order:
   `use` line, each with its newline. The key line follows them. The lines after it give the
   outputs, which the key does not cover.
 - The `--cc`, `-Xcc` and `--ar` values change the object, so the key covers them. It covers the
-  text of the values and not the programs that they name.
+  text of the values and not the programs that they name. It covers no environment of the tools
+  either, such as `PATH`, `CCC_OVERRIDE_OPTIONS` or `SDKROOT`: a change there that changes the
+  object keeps the key, so the build then needs a new cache directory.
 
 **Write protocol.** The compiler writes an artifact or a cache entry `D` in this order. It makes
 `D` when it does not exist. It removes `D/manifest`. For a library, it makes `D/summaries` when it
@@ -635,7 +654,8 @@ exist. The 1 is the version of the cache layout. The cache entry of the key K is
 - The compiler never removes an entry.
 - Only two builds use the cache: a `--lib` build that writes an artifact, and a build with
   `--use` that writes an object or an executable. `--lib` with `-S` or `-c`, `-S`, `--check`,
-  `--fir` and `--emit-interface` do not read or write it.
+  `--fir`, `--fir-stats` and `--emit-interface` do not read or write it. A hit runs no emitter,
+  so a build with `--fir-stats` could not write its `lowered N of M` line (D9.11).
 
 **The rebuild rule.** The key of a unit covers the interface hash of each used library and not
 its source hash or its archive (section 2.2). A change to the body of a function of a library

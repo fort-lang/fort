@@ -591,6 +591,21 @@ set_tests_properties(library-use PROPERTIES
     PROCESSORS ${FORT_LANG_JOBS}
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
+# The cache of the library builds with the real tools (D9.11, toolchain.md 2.3): cold, fill and
+# warm builds of test/library/chain give the same program and the same diagnostics, the warm
+# build hits each unit, an edit of a body rebuilds one library and no dependent, an edit of a
+# declaration rebuilds each dependent, and a corrupt entry is a miss.
+add_test(NAME library-cache
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/library/cache_test.py"
+            --fort "${FORT_COMPILER_BINARY}"
+            --std-dir "${FORT_STD_DIR}"
+            --cc "${FORT_TARGET_CC_PATH}"
+            --target "${FORT_TARGET_TRIPLE}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+set_tests_properties(library-cache PROPERTIES
+    LABELS "fort;integration"
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
 # The interactive test checks line flushing when stdout is a terminal.
 # Language tests capture stdout through a pipe and take the non-interactive path.
 # test/tty_test.py drives one program through a real pty and a pipe.

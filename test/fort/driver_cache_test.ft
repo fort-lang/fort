@@ -1,0 +1,1161 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| usage ok
+//| library ok
+//| entry ok
+//| rebuild ok
+//| ok
+/// Checks the cache of src/fort/driver.ft (D9.11, toolchain.md 1, 2.1 and 2.3): the two options,
+/// the builds that use the cache and the ones that do not, the `--cache-stats` line of each hit and
+/// miss, the default cache directories, the rebuild rule over a body and a signature, and a cache
+/// that is corrupt or that cannot be read or written. The --cc and --ar of the suite are scripts:
+/// each run appends one line to runs.log, a compile copies the IR module to the object, a link
+/// writes `linked` and the archives that it names, and the archiver puts the object after an
+/// archive header. test/library/cache_test.py runs the real tools.
+import capture;
+import driver;
+import sandbox_tree;
+import std.io;
+import std.libc;
+import std.os;
+import std.str;
+import std.strbuf;
+import std.sys;
+
+i32 EXIT_OK = 0;
+i32 EXIT_COMPILE_ERROR = 1;
+i32 EXIT_USAGE = 2;
+
+// The status of `fort <args>`, with stdout in `out.txt` and stderr in `err.txt`.
+fn run(string@ args) i32 {
+    i32 saved_out = capture.begin(io.STDOUT, "out.txt");
+    i32 saved_err = capture.begin(io.STDERR, "err.txt");
+    i32 status = driver.run(args);
+    capture.end(io.STDERR, saved_err);
+    capture.end(io.STDOUT, saved_out);
+    return status;
+}
+
+fn same(string got, string want) bool {
+    if (got != want) {
+        println("got:  ", got);
+        println("want: ", want);
+    }
+    return got == want;
+}
+
+fn err_is(string text) bool {
+    string own got = capture.text("err.txt");
+    defer del(got);
+    return same(got, text);
+}
+
+fn out_is(string text) bool {
+    string own got = capture.text("out.txt");
+    defer del(got);
+    return same(got, text);
+}
+
+fn make_dir(string path) void {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    assert(libc.mkdir(c_path.ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
+}
+
+fn write_file(string path, string text) void {
+    assert(io.write_file(path, cast(text, u8@)));
+}
+
+fn write_lines(string path, string@ lines) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u64 mut i = 0;
+    while (i < lines.len) {
+        strbuf.append(&b, lines[i]);
+        strbuf.push(&b, '\n');
+        i += 1;
+    }
+    write_file(path, strbuf.view(&b));
+}
+
+fn write_script(string path, string@ lines) void {
+    write_lines(path, lines);
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    assert(libc.chmod(c_path.ptr, 0o755) == 0);
+}
+
+fn exists(string path) bool {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    return libc.access(c_path.ptr, 0) == 0;
+}
+
+fn contents(string path) string own {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    io.read_file(path, &b);
+    return strbuf.take(&b);
+}
+
+fn remove(string path) void {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    libc.unlink(c_path.ptr);
+}
+
+fn set_env(string name, string value) void {
+    char mut@ own key = str.to_cstr(name);
+    defer del(key);
+    char mut@ own text = str.to_cstr(value);
+    defer del(text);
+    assert(libc.setenv(key.ptr, text.ptr, 1) == 0);
+}
+
+// The number of entries of the directory `path` but `.` and `..`, or 0 when it cannot be read.
+fn entry_count(string path) u64 {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    void mut* d = libc.opendir(c_path.ptr);
+    if (d == null) {
+        return 0;
+    }
+    u64 mut n = 0;
+    libc.dirent* mut e = cast(libc.readdir(d), libc.dirent*);
+    while (e != null) {
+        string name = str.from_cstr(&e->name[0]);
+        if (name != "." && name != "..") {
+            n += 1;
+        }
+        e = cast(libc.readdir(d), libc.dirent*);
+    }
+    libc.closedir(d);
+    return n;
+}
+
+// The number of lines of runs.log that start with `word`: `compile`, `link` or `archive`.
+fn runs(string word) u64 {
+    string own log = contents("runs.log");
+    defer del(log);
+    u64 mut n = 0;
+    u64 mut at = 0;
+    while (at < log.len) {
+        u64 mut end = at;
+        while (end < log.len && log[end] != '\n') {
+            end += 1;
+        }
+        if (str.starts_with(log[at..end], word)) {
+            n += 1;
+        }
+        at = end + 1;
+    }
+    return n;
+}
+
+// ---- the tools and the libraries ---------------------------------------------------
+
+// The --cc of the suite. A compile line (`-c`) appends `compile <out>` to runs.log and copies
+// the input module to the -o output, or exits 4 when compile_fail.flag exists. A link line
+// appends `link <out>` and each archive that it names to archives.log, and writes `linked`.
+string[16] FAKE_CC = {
+    "#!/bin/sh",
+    "out=",
+    "in=",
+    "prev=",
+    "compile=",
+    "for a in \"$@\"; do",
+    "  if [ \"$prev\" = -o ]; then out=\"$a\"; fi",
+    "  case \"$a\" in *.ll) in=\"$a\";; -c) compile=1;; *.a) cat \"$a\" >> archives.log;; esac",
+    "  prev=\"$a\"",
+    "done",
+    "if [ -n \"$compile\" ] && [ -f compile_fail.flag ]; then exit 4; fi",
+    "if [ -n \"$compile\" ]; then echo \"compile $out\" >> runs.log; fi",
+    "if [ -n \"$compile\" ]; then cp \"$in\" \"$out\"; exit 0; fi",
+    "echo \"link $out\" >> runs.log",
+    "echo linked > \"$out\"",
+    "exit 0",
+};
+
+// The --ar of the suite: it appends the value of ZERO_AR_DATE to runs.log and writes the archive
+// header and then the object to the archive.
+string[4] FAKE_AR = {
+    "#!/bin/sh",
+    "echo \"archive ZERO_AR_DATE=$ZERO_AR_DATE\" >> runs.log",
+    "printf '!<arch>\\n' > \"$2\"",
+    "cat \"$3\" >> \"$2\"",
+};
+
+// The temporary directory of every build of this suite.
+string TEMP = "temp";
+
+// A standard root: a runtime and a module with a function and a constant.
+string RT_MODULE = "i32 B = 1;\n";
+string IO_MODULE = "import std.rt;\ni32 A = rt.B + 1;\nfn f(i32 x) i32 {\n    return x;\n}\n";
+
+// A library `geom` that imports std.io, in a body and in a signature form, and a library
+// `shapes` that uses geom.
+string GEOM_BODY_ONE = "import std.io;\nfn len(i32 x) i32 {\n    return io.f(x);\n}\n";
+string GEOM_BODY_TWO = "import std.io;\nfn len(i32 x) i32 {\n    return io.f(io.f(x));\n}\n";
+string GEOM_SIGNATURE = "import std.io;\nfn len(i64 x) i32 {\n    return io.f(1);\n}\n";
+string SHAPES_MODULE = "import geom.vec;\nfn size() i32 {\n    return 3;\n}\n";
+
+// A program that calls a function of geom.
+string MAIN = "import std.io;\nimport geom.vec;\nfn main() i32 {\n    return io.f(io.A);\n}\n";
+
+// Makes a new suite directory state: the tools, the standard root, no cache, no log.
+fn start() void {
+    write_script("cc.sh", FAKE_CC[..]);
+    write_script("ar.sh", FAKE_AR[..]);
+    make_dir(TEMP);
+    set_env("TMPDIR", TEMP);
+    sandbox_tree.remove_caches();
+    sandbox_tree.remove_tree("caches");
+    remove("runs.log");
+    remove("archives.log");
+    remove("compile_fail.flag");
+    make_dir("std");
+    write_file("std/rt.ft", RT_MODULE);
+    write_file("std/io.ft", IO_MODULE);
+    make_dir("geom");
+    write_file("geom/vec.ft", GEOM_BODY_ONE);
+    make_dir("shapes");
+    write_file("shapes/box.ft", SHAPES_MODULE);
+    write_file("main.ft", MAIN);
+}
+
+// `fort --cc ./cc.sh --ar ./ar.sh <args>`; the temporary directory is empty after it.
+fn fort(string@ args) i32 {
+    string[32] mut all = {};
+    all[0] = "fort";
+    all[1] = "--cc";
+    all[2] = "./cc.sh";
+    all[3] = "--ar";
+    all[4] = "./ar.sh";
+    u64 mut n = 5;
+    u64 mut i = 0;
+    while (i < args.len) {
+        all[n] = args[i];
+        n += 1;
+        i += 1;
+    }
+    // --ar is a usage error without --lib
+    bool mut lib = false;
+    i = 0;
+    while (i < args.len) {
+        lib = lib || args[i] == "--lib";
+        i += 1;
+    }
+    i32 mut status = 0;
+    if (lib) {
+        status = run(all[..n]);
+    } else {
+        all[2] = "fort";
+        all[3] = "--cc";
+        all[4] = "./cc.sh";
+        status = run(all[2..n]);
+    }
+    assert(entry_count(TEMP) == 0);
+    return status;
+}
+
+// `fort <head> <more>`, as fort runs it.
+fn fort_with(string@ head, string@ more) i32 {
+    string[32] mut all = {};
+    u64 mut n = 0;
+    while (n < head.len) {
+        all[n] = head[n];
+        n += 1;
+    }
+    u64 mut i = 0;
+    while (i < more.len) {
+        all[n] = more[i];
+        n += 1;
+        i += 1;
+    }
+    return fort(all[..n]);
+}
+
+// The --cache-stats builds of the suite.
+string[6] STD_ARGS = {"--cache-stats", "--lib", "std", "std", "-o", "std.flib"};
+string[8] GEOM_ARGS = {"--cache-stats", "--use", "std=std.flib", "--lib", "geom", "geom", "-o",
+                       "geom.flib"};
+string[10] SHAPES_ARGS = {"--cache-stats", "--use", "std=std.flib", "--use", "geom=geom.flib",
+                          "--lib", "shapes", "shapes", "-o", "shapes.flib"};
+string[5] USE_ARGS = {"--cache-stats", "--use", "std=std.flib", "--use", "geom=geom.flib"};
+string[3] MAIN_ARGS = {"-o", "app", "main.ft"};
+
+fn build_std(string@ more) i32 {
+    return fort_with(STD_ARGS[..], more);
+}
+
+fn build_geom() i32 {
+    return fort(GEOM_ARGS[..]);
+}
+
+fn build_shapes() i32 {
+    return fort(SHAPES_ARGS[..]);
+}
+
+fn build_main() i32 {
+    return fort_with(USE_ARGS[..], MAIN_ARGS[..]);
+}
+
+// The words of the --cache-stats line `line` in `words`: `cache`, `hit` or `miss`, the unit, the
+// name, the key and the cause of a miss. Returns the number of words.
+fn split_words(string line, string mut@ words) u64 {
+    string mut rest = line;
+    u64 mut n = 0;
+    while (rest.len > 0 && n < words.len) {
+        i64 space = str.index_of(rest, ' ');
+        if (space < 0) {
+            words[n] = rest;
+            rest = "";
+        } else {
+            words[n] = rest[..cast(space, u64)];
+            rest = rest[cast(space, u64) + 1..];
+        }
+        n += 1;
+    }
+    return n;
+}
+
+// Whether stdout holds one line, `cache <outcome> <unit> <name> <key>` and ` <cause>` after a
+// miss, with a key of 64 digits. The key goes to `key`.
+fn stats_hold(string outcome, string unit, string name, string cause, strbuf.str_buf mut* key)
+    bool {
+    string own got = capture.text("out.txt");
+    defer del(got);
+    if (got.len == 0 || str.index_of(got, '\n') != cast(got.len - 1, i64)) {
+        print("stats: ", got);
+        return false;
+    }
+    string[7] mut words = {};
+    u64 n = split_words(got[..got.len - 1], words[..]);
+    u64 mut want = 5;
+    if (cause.len > 0) {
+        want = 6;
+    }
+    bool ok = n == want && words[0] == "cache" && words[1] == outcome && words[2] == unit
+              && words[3] == name && words[4].len == 64 && words[5] == cause;
+    if (!ok) {
+        print("stats: ", got);
+        return false;
+    }
+    strbuf.clear(key);
+    strbuf.append(key, words[4]);
+    return true;
+}
+
+// Whether the --cache-stats line says `cache <outcome> <unit> <name> <key> [<cause>]`.
+fn stats_are(string outcome, string unit, string name, string cause) bool {
+    strbuf.str_buf mut key = strbuf.create();
+    defer strbuf.free(&key);
+    return stats_hold(outcome, unit, name, cause, &key);
+}
+
+// The key of the --cache-stats line in `out`, of any outcome.
+fn stats_key(strbuf.str_buf mut* out) string {
+    string own got = capture.text("out.txt");
+    defer del(got);
+    string[7] mut words = {};
+    assert(split_words(got, words[..]) >= 5);
+    strbuf.clear(out);
+    strbuf.append(out, words[4][..64]);
+    return strbuf.view(out);
+}
+
+// `<dir>/1/<key>/<name>` in `out`.
+fn entry_path(string dir, string key, string name, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    strbuf.append(out, dir);
+    strbuf.append(out, "/1/");
+    strbuf.append(out, key);
+    if (name.len > 0) {
+        strbuf.push(out, '/');
+        strbuf.append(out, name);
+    }
+    return strbuf.view(out);
+}
+
+// ---- usage ----------------------------------------------------------------------------
+
+string USAGE_LINE = "\nusage: fort [options] entry.ft\n";
+
+fn usage_error_is(string@ args, string message) bool {
+    i32 status = run(args);
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    strbuf.append(&want, "fort: error: ");
+    strbuf.append(&want, message);
+    strbuf.append(&want, USAGE_LINE);
+    return status == EXIT_USAGE && err_is(strbuf.view(&want)) && out_is("");
+}
+
+fn the_cache_options_need_a_library_build() void {
+    string[4] dir = {"fort", "--cache-dir", "c", "main.ft"};
+    assert(usage_error_is(dir[..], "--cache-dir requires --lib or --use"));
+    string[3] stats = {"fort", "--cache-stats", "main.ft"};
+    assert(usage_error_is(stats[..], "--cache-stats requires --lib or --use"));
+    // --cache-dir reports first, wherever it stands
+    string[5] both = {"fort", "--cache-stats", "--cache-dir", "c", "main.ft"};
+    assert(usage_error_is(both[..], "--cache-dir requires --lib or --use"));
+    string[2] missing = {"fort", "--cache-dir"};
+    assert(usage_error_is(missing[..], "missing argument for option '--cache-dir'"));
+    // the rule comes before the rules of --lib
+    string[5] ar = {"fort", "--ar", "ar", "--cache-stats", "main.ft"};
+    assert(usage_error_is(ar[..], "--cache-stats requires --lib or --use"));
+}
+
+fn the_cache_options_take_any_library_build() void {
+    start();
+    // the argument of --cache-dir is taken whatever it looks like, and the last one wins
+    string[12] args = {"--cache-dir", "-x", "--lib", "std", "std", "--cache-dir", "caches",
+                       "-o", "std.flib", "--cache-stats", "", ""};
+    assert(fort(args[..10]) == EXIT_OK);
+    assert(err_is(""));
+    assert(stats_are("miss", "library", "std", "absent"));
+    assert(entry_count("caches/1") == 1);
+    assert(!exists("-x"));
+    assert(!exists("std/.fort-cache"));
+}
+
+// ---- the library build ------------------------------------------------------------------
+
+fn a_second_build_of_a_library_is_a_hit() void {
+    start();
+    assert(build_std(NO_MORE[..0]) == EXIT_OK);
+    assert(err_is(""));
+    assert(stats_are("miss", "library", "std", "absent"));
+    strbuf.str_buf mut key = strbuf.create();
+    defer strbuf.free(&key);
+    stats_key(&key);
+    assert(runs("compile") == 1 && runs("archive") == 1);
+    string own interface = contents("std.flib/interface.ft");
+    defer del(interface);
+    string own archive = contents("std.flib/lib.a");
+    defer del(archive);
+    string own manifest = contents("std.flib/manifest");
+    defer del(manifest);
+    // the entry stands under the library root
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(exists(entry_path("std/.fort-cache", strbuf.view(&key), "manifest", &b)));
+    string own stored = contents(entry_path("std/.fort-cache", strbuf.view(&key), "manifest",
+                                            &b));
+    defer del(stored);
+    assert(same(stored, manifest));
+    // the warm build compiles nothing, writes the same artifact and names the same key
+    assert(build_std(NO_MORE[..0]) == EXIT_OK);
+    assert(err_is(""));
+    assert(stats_are("hit", "library", "std", ""));
+    strbuf.str_buf mut again = strbuf.create();
+    defer strbuf.free(&again);
+    assert(same(stats_key(&again), strbuf.view(&key)));
+    assert(runs("compile") == 1 && runs("archive") == 1);
+    string own interface2 = contents("std.flib/interface.ft");
+    defer del(interface2);
+    string own archive2 = contents("std.flib/lib.a");
+    defer del(archive2);
+    string own manifest2 = contents("std.flib/manifest");
+    defer del(manifest2);
+    assert(same(interface2, interface) && same(archive2, archive) && same(manifest2, manifest));
+    // a hit writes a removed artifact again, by the write protocol: the four entries
+    sandbox_tree.remove_tree("std.flib");
+    assert(build_std(NO_MORE[..0]) == EXIT_OK);
+    assert(stats_are("hit", "library", "std", ""));
+    assert(entry_count("std.flib") == 4);
+    assert(entry_count("std.flib/summaries") == 0);
+    string own archive3 = contents("std.flib/lib.a");
+    defer del(archive3);
+    assert(same(archive3, archive));
+}
+
+fn without_cache_stats_a_build_writes_nothing_to_stdout() void {
+    start();
+    string[5] args = {"--lib", "std", "std", "-o", "std.flib"};
+    assert(fort(args[..]) == EXIT_OK);
+    assert(out_is(""));
+    assert(fort(args[..]) == EXIT_OK);
+    assert(out_is(""));
+    assert(runs("compile") == 1);
+}
+
+fn a_library_build_that_writes_no_artifact_uses_no_cache() void {
+    start();
+    string[7] ir = {"--cache-stats", "--lib", "std", "std", "-S", "-o", "std.ll"};
+    assert(fort(ir[..]) == EXIT_OK);
+    assert(out_is(""));
+    string[7] object = {"--cache-stats", "--lib", "std", "std", "-c", "-o", "std.o"};
+    assert(fort(object[..]) == EXIT_OK);
+    assert(out_is(""));
+    assert(fort(object[..]) == EXIT_OK);
+    assert(out_is(""));
+    assert(runs("compile") == 2);
+    string[5] emit = {"--cache-stats", "--lib", "std", "std", "--emit-interface"};
+    assert(fort(emit[..]) == EXIT_OK);
+    string own text = capture.text("out.txt");
+    defer del(text);
+    assert(str.find(text, "cache ") < 0);
+    assert(!exists("std/.fort-cache"));
+}
+
+string[2] RELEASE = {"--release", ""};
+string[2] CFG = {"--cfg", "zone=a"};
+string[2] XCC = {"-Xcc", "-g0"};
+string[2] OTHER_AR = {"--ar", "././ar.sh"};
+string[2] OTHER_CC = {"--cc", "././cc.sh"};
+
+fn each_option_of_the_key_gives_its_own_entry() void {
+    start();
+    assert(build_std(NO_MORE[..0]) == EXIT_OK);
+    assert(stats_are("miss", "library", "std", "absent"));
+    assert(build_std(RELEASE[..1]) == EXIT_OK);
+    assert(stats_are("miss", "library", "std", "absent"));
+    assert(build_std(CFG[..]) == EXIT_OK);
+    assert(stats_are("miss", "library", "std", "absent"));
+    assert(build_std(XCC[..]) == EXIT_OK);
+    assert(stats_are("miss", "library", "std", "absent"));
+    assert(build_std(OTHER_AR[..]) == EXIT_OK);
+    assert(stats_are("miss", "library", "std", "absent"));
+    assert(build_std(OTHER_CC[..]) == EXIT_OK);
+    assert(stats_are("miss", "library", "std", "absent"));
+    string[1] bounds = {"--no-bounds-check"};
+    assert(build_std(bounds[..]) == EXIT_OK);
+    assert(stats_are("miss", "library", "std", "absent"));
+    assert(entry_count("std/.fort-cache/1") == 7);
+    // each of them hits after its first build, and -o is not in the key
+    assert(build_std(RELEASE[..1]) == EXIT_OK);
+    assert(stats_are("hit", "library", "std", ""));
+    assert(build_std(OTHER_AR[..]) == EXIT_OK);
+    assert(stats_are("hit", "library", "std", ""));
+    string[2] other_out = {"-o", "other.flib"};
+    assert(build_std(other_out[..]) == EXIT_OK);
+    assert(stats_are("hit", "library", "std", ""));
+    assert(entry_count("other.flib") == 4);
+    assert(runs("compile") == 7);
+}
+
+fn the_archiver_runs_with_zero_dates() void {
+    start();
+    set_env("ZERO_AR_DATE", "0");
+    assert(build_std(NO_MORE[..0]) == EXIT_OK);
+    string own log = contents("runs.log");
+    defer del(log);
+    assert(str.find(log, "archive ZERO_AR_DATE=1\n") >= 0);
+    // the compiler keeps the environment as it was
+    string mut value = "";
+    assert(sys.env("ZERO_AR_DATE", &value) && value == "0");
+    char mut@ own name = str.to_cstr("ZERO_AR_DATE");
+    defer del(name);
+    assert(libc.unsetenv(name.ptr) == 0);
+}
+
+fn a_corrupt_entry_is_a_miss_that_the_build_repairs() void {
+    start();
+    assert(build_std(NO_MORE[..0]) == EXIT_OK);
+    strbuf.str_buf mut key = strbuf.create();
+    defer strbuf.free(&key);
+    stats_key(&key);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    write_file(entry_path("std/.fort-cache", strbuf.view(&key), "lib.a", &b), "!<arch>\nx\n");
+    assert(build_std(NO_MORE[..0]) == EXIT_OK);
+    assert(err_is(""));
+    assert(stats_are("miss", "library", "std", "corrupt"));
+    assert(runs("compile") == 2);
+    // the build stored the entry again, and the next one hits
+    assert(build_std(NO_MORE[..0]) == EXIT_OK);
+    assert(stats_are("hit", "library", "std", ""));
+    // a manifest that is gone, and a manifest of another key at the entry
+    remove(entry_path("std/.fort-cache", strbuf.view(&key), "manifest", &b));
+    assert(build_std(NO_MORE[..0]) == EXIT_OK);
+    assert(stats_are("miss", "library", "std", "corrupt"));
+    assert(build_std(RELEASE[..1]) == EXIT_OK);
+    strbuf.str_buf mut other = strbuf.create();
+    defer strbuf.free(&other);
+    stats_key(&other);
+    string own foreign = contents(entry_path("std/.fort-cache", strbuf.view(&other), "manifest",
+                                             &b));
+    defer del(foreign);
+    write_file(entry_path("std/.fort-cache", strbuf.view(&key), "manifest", &b), foreign);
+    assert(build_std(NO_MORE[..0]) == EXIT_OK);
+    assert(stats_are("miss", "library", "std", "corrupt"));
+    // the artifact of a corrupt entry is the artifact of the build, never the entry
+    string own manifest = contents("std.flib/manifest");
+    defer del(manifest);
+    assert(str.find(manifest, "mode checked\n") > 0);
+}
+
+fn a_cache_that_cannot_be_read_or_written_is_no_error() void {
+    start();
+    write_file("plain", "a file\n");
+    string[2] plain = {"--cache-dir", "plain"};
+    assert(build_std(plain[..]) == EXIT_OK);
+    assert(err_is(""));
+    assert(stats_are("miss", "library", "std", "unreadable"));
+    assert(entry_count("std.flib") == 4);
+    // the next build misses again, because nothing was stored
+    assert(build_std(plain[..]) == EXIT_OK);
+    assert(stats_are("miss", "library", "std", "unreadable"));
+    // a cache directory whose parent does not exist: absent, and never made
+    string[2] deep = {"--cache-dir", "no/such/dir"};
+    assert(build_std(deep[..]) == EXIT_OK);
+    assert(err_is(""));
+    assert(stats_are("miss", "library", "std", "absent"));
+    assert(!exists("no"));
+    assert(runs("compile") == 3);
+}
+
+fn a_compile_error_stores_no_entry_and_writes_no_line() void {
+    start();
+    write_file("std/bad.ft", "fn g() i32 {\n    return true;\n}\n");
+    assert(build_std(NO_MORE[..0]) == EXIT_COMPILE_ERROR);
+    assert(out_is(""));
+    string own first = capture.text("err.txt");
+    defer del(first);
+    assert(str.find(first, "std/bad.ft:2:12: error:") >= 0);
+    assert(entry_count("std/.fort-cache/1") == 0);
+    // the warm run gives the same diagnostics
+    assert(build_std(NO_MORE[..0]) == EXIT_COMPILE_ERROR);
+    assert(err_is(first));
+    assert(out_is(""));
+    remove("std/bad.ft");
+    // a failed tool stores no entry either, and writes no line
+    write_file("compile_fail.flag", "1\n");
+    assert(build_std(NO_MORE[..0]) == EXIT_USAGE);
+    assert(out_is(""));
+    assert(entry_count("std/.fort-cache/1") == 0);
+    remove("compile_fail.flag");
+}
+
+fn a_hit_that_cannot_write_the_artifact_is_exit_two() void {
+    start();
+    assert(build_std(NO_MORE[..0]) == EXIT_OK);
+    sandbox_tree.remove_tree("std.flib");
+    write_file("std.flib", "a file\n");
+    assert(build_std(NO_MORE[..0]) == EXIT_USAGE);
+    assert(err_is("fort: error: cannot write 'std.flib': Not a directory\n"));
+    assert(out_is(""));
+    remove("std.flib");
+}
+
+// ---- the entry unit ---------------------------------------------------------------------
+
+fn a_second_build_of_a_program_links_the_stored_object() void {
+    start();
+    assert(build_std(NO_MORE[..0]) == EXIT_OK);
+    assert(build_geom() == EXIT_OK);
+    assert(stats_are("miss", "library", "geom", "absent"));
+    assert(build_main() == EXIT_OK);
+    assert(err_is(""));
+    assert(stats_are("miss", "entry", "main", "absent"));
+    assert(runs("compile") == 3 && runs("link") == 1);
+    strbuf.str_buf mut key = strbuf.create();
+    defer strbuf.free(&key);
+    stats_key(&key);
+    // the entry stands beside the entry file and holds the object and the manifest
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(entry_count(entry_path(".fort-cache", strbuf.view(&key), "", &b)) == 2);
+    assert(exists(entry_path(".fort-cache", strbuf.view(&key), "object.o", &b)));
+    assert(build_main() == EXIT_OK);
+    assert(err_is(""));
+    assert(stats_are("hit", "entry", "main", ""));
+    assert(runs("compile") == 3 && runs("link") == 2);
+    string own app = contents("app");
+    defer del(app);
+    assert(same(app, "linked\n"));
+}
+
+fn an_object_build_of_a_hit_writes_the_stored_object() void {
+    start();
+    assert(build_std(NO_MORE[..0]) == EXIT_OK);
+    assert(build_geom() == EXIT_OK);
+    string[8] args = {"--cache-stats", "--use", "std=std.flib", "--use", "geom=geom.flib", "-c",
+                      "-o", "main.o"};
+    string[9] mut all = {};
+    u64 mut i = 0;
+    while (i < args.len) {
+        all[i] = args[i];
+        i += 1;
+    }
+    all[8] = "main.ft";
+    assert(fort(all[..]) == EXIT_OK);
+    assert(stats_are("miss", "entry", "main", "absent"));
+    string own cold = contents("main.o");
+    defer del(cold);
+    remove("main.o");
+    assert(fort(all[..]) == EXIT_OK);
+    assert(stats_are("hit", "entry", "main", ""));
+    string own warm = contents("main.o");
+    defer del(warm);
+    assert(same(warm, cold));
+    assert(runs("compile") == 3 && runs("link") == 0);
+    // the -c object and the object of a link share the entry
+    assert(build_main() == EXIT_OK);
+    assert(stats_are("hit", "entry", "main", ""));
+    // an output that cannot be written is the error of a write, after a hit and after a miss
+    all[7] = "nowhere/main.o";
+    assert(fort(all[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: cannot write 'nowhere/main.o': No such file or directory\n"));
+    assert(out_is(""));
+    sandbox_tree.remove_tree(".fort-cache");
+    assert(fort(all[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: cannot write 'nowhere/main.o': No such file or directory\n"));
+    assert(out_is(""));
+    // the miss stored the compiled object all the same
+    assert(entry_count(".fort-cache/1") == 1);
+}
+
+// The arguments of `fort --use std=std.flib --use geom=geom.flib -c -o <out> main.ft`.
+fn object_args(string out, string mut@ all) void {
+    string[7] head = {"--use", "std=std.flib", "--use", "geom=geom.flib", "-c", "-o", ""};
+    u64 mut i = 0;
+    while (i < 6) {
+        all[i] = head[i];
+        i += 1;
+    }
+    all[6] = out;
+    all[7] = "main.ft";
+}
+
+fn the_stored_object_is_the_compiled_object_whatever_the_output() void {
+    start();
+    assert(build_std(NO_MORE[..0]) == EXIT_OK);
+    assert(build_geom() == EXIT_OK);
+    // the cold object, with a cache of its own
+    string[8] mut all = {};
+    object_args("cold.o", all[..]);
+    string[10] mut cold_args = {};
+    u64 mut i = 0;
+    while (i < 8) {
+        cold_args[i] = all[i];
+        i += 1;
+    }
+    cold_args[8] = "--cache-dir";
+    cold_args[9] = "caches";
+    assert(fort(cold_args[..]) == EXIT_OK);
+    string own cold = contents("cold.o");
+    defer del(cold);
+    assert(cold.len > 0);
+    // an object to /dev/null fills the entry with the compiled object, and a link then hits it
+    object_args("/dev/null", all[..]);
+    assert(fort(all[..]) == EXIT_OK);
+    assert(err_is(""));
+    strbuf.str_buf mut key = strbuf.create();
+    defer strbuf.free(&key);
+    assert(build_main() == EXIT_OK);
+    assert(stats_hold("hit", "entry", "main", "", &key));
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string own stored = contents(entry_path(".fort-cache", strbuf.view(&key), "object.o", &b));
+    defer del(stored);
+    assert(same(stored, cold));
+    string own app = contents("app");
+    defer del(app);
+    assert(same(app, "linked\n"));
+    // an object to stdout writes the bytes of the object after a hit and after a miss
+    object_args("/dev/stdout", all[..]);
+    assert(fort(all[..]) == EXIT_OK);
+    assert(out_is(cold));
+    sandbox_tree.remove_tree(".fort-cache");
+    assert(fort(all[..]) == EXIT_OK);
+    assert(out_is(cold));
+    assert(entry_count(".fort-cache/1") == 1);
+    assert(runs("compile") == 5);
+}
+
+fn a_build_with_use_that_emits_no_object_uses_no_cache() void {
+    start();
+    assert(build_std(NO_MORE[..0]) == EXIT_OK);
+    assert(build_geom() == EXIT_OK);
+    sandbox_tree.remove_tree(".fort-cache");
+    string[5] head = {"--cache-stats", "--use", "std=std.flib", "--use", "geom=geom.flib"};
+    string[4] modes = {"-S", "--check", "--fir", "--fir-stats"};
+    u64 mut k = 0;
+    while (k < modes.len) {
+        string[7] mut all = {};
+        u64 mut i = 0;
+        while (i < head.len) {
+            all[i] = head[i];
+            i += 1;
+        }
+        all[5] = modes[k];
+        all[6] = "main.ft";
+        i32 status = fort(all[..]);
+        assert(status == EXIT_OK);
+        string own text = capture.text("out.txt");
+        defer del(text);
+        assert(str.find(text, "cache ") < 0);
+        k += 1;
+    }
+    assert(!exists(".fort-cache"));
+    // --fir-stats writes an executable and counts the functions that the emitter writes
+    assert(runs("compile") == 3);
+}
+
+fn the_entry_directory_holds_the_default_cache() void {
+    start();
+    assert(build_std(NO_MORE[..0]) == EXIT_OK);
+    assert(build_geom() == EXIT_OK);
+    make_dir("app_dir");
+    write_file("app_dir/tool.ft", MAIN);
+    string[8] args = {"--cache-stats", "--use", "std=std.flib", "--use", "geom=geom.flib", "-o",
+                      "tool", "app_dir/tool.ft"};
+    assert(fort(args[..]) == EXIT_OK);
+    assert(stats_are("miss", "entry", "tool", "absent"));
+    assert(entry_count("app_dir/.fort-cache/1") == 1);
+    assert(!exists(".fort-cache"));
+}
+
+fn a_compile_error_of_a_program_stores_no_entry() void {
+    start();
+    assert(build_std(NO_MORE[..0]) == EXIT_OK);
+    assert(build_geom() == EXIT_OK);
+    write_file("main.ft", "import geom.vec;\nfn main() i32 {\n    return true;\n}\n");
+    assert(build_main() == EXIT_COMPILE_ERROR);
+    assert(out_is(""));
+    string own first = capture.text("err.txt");
+    defer del(first);
+    assert(str.find(first, "main.ft:3:12: error:") >= 0);
+    assert(build_main() == EXIT_COMPILE_ERROR);
+    assert(err_is(first));
+    assert(!exists(".fort-cache"));
+    // a load error is a compile error before the lookup
+    write_file("main.ft", "import geom.missing;\nfn main() i32 {\n    return 0;\n}\n");
+    assert(build_main() == EXIT_COMPILE_ERROR);
+    assert(out_is(""));
+    assert(!exists(".fort-cache"));
+}
+
+fn a_corrupt_entry_of_a_program_is_a_miss() void {
+    start();
+    assert(build_std(NO_MORE[..0]) == EXIT_OK);
+    assert(build_geom() == EXIT_OK);
+    assert(build_main() == EXIT_OK);
+    strbuf.str_buf mut key = strbuf.create();
+    defer strbuf.free(&key);
+    stats_key(&key);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    write_file(entry_path(".fort-cache", strbuf.view(&key), "object.o", &b), "other\n");
+    assert(build_main() == EXIT_OK);
+    assert(err_is(""));
+    assert(stats_are("miss", "entry", "main", "corrupt"));
+    assert(runs("compile") == 4);
+    assert(build_main() == EXIT_OK);
+    assert(stats_are("hit", "entry", "main", ""));
+}
+
+fn a_whole_program_touches_no_cache() void {
+    start();
+    write_file("whole.ft", "fn main() i32 {\n    return 0;\n}\n");
+    // an executable, the one output of a build with --use that the cache serves
+    string[4] args = {"--std-dir", "std", "-o", "whole"};
+    string[5] mut all = {};
+    u64 mut i = 0;
+    while (i < args.len) {
+        all[i] = args[i];
+        i += 1;
+    }
+    all[4] = "whole.ft";
+    assert(fort(all[..]) == EXIT_OK);
+    assert(fort(all[..]) == EXIT_OK);
+    assert(out_is(""));
+    string own whole = contents("whole");
+    defer del(whole);
+    assert(same(whole, "linked\n"));
+    assert(runs("link") == 2);
+    assert(!exists(".fort-cache"));
+    assert(!exists("std/.fort-cache"));
+}
+
+fn the_suite_removes_no_cache_through_a_link() void {
+    start();
+    // `linked_root` links to a directory below `deep`, and its cache is not the suite's
+    make_dir("deep");
+    make_dir("deep/outside");
+    make_dir("deep/outside/.fort-cache");
+    write_file("deep/outside/.fort-cache/kept", "k\n");
+    char mut@ own target = str.to_cstr("deep/outside");
+    defer del(target);
+    char mut@ own name = str.to_cstr("linked_root");
+    defer del(name);
+    remove("linked_root");
+    assert(libc.symlink(target.ptr, name.ptr) == 0);
+    make_dir("plain_root");
+    make_dir("plain_root/.fort-cache");
+    sandbox_tree.remove_caches();
+    assert(exists("deep/outside/.fort-cache/kept"));
+    assert(!exists("plain_root/.fort-cache"));
+    remove("linked_root");
+}
+
+// umask(2), whose mode_t is a u32 on Linux and a u16 on darwin (D9.8).
+$if ($cfg(target_os) == "linux") {
+    extern fn umask(u32 mask) u32;
+} else {
+    extern fn umask(u16 mask) u16;
+}
+
+// The permission bits of the file `path`.
+fn permissions(string path) u32 {
+    i32 fd = os.open_nonblocking(path);
+    assert(fd >= 0);
+    u32 mut mode = 0;
+    assert(os.file_mode(fd, &mode));
+    libc.close(fd);
+    return mode & 0o777;
+}
+
+// `<path>.tmp.<pid>`, the temporary name of an output.
+fn temp_name(string path, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    strbuf.append(out, path);
+    strbuf.append(out, ".tmp.");
+    strbuf.append_i64(out, cast(libc.getpid(), i64));
+    return strbuf.view(out);
+}
+
+fn the_object_output_is_replaced_with_the_mode_of_the_umask() void {
+    start();
+    assert(build_std(NO_MORE[..0]) == EXIT_OK);
+    assert(build_geom() == EXIT_OK);
+    string[8] mut all = {};
+    object_args("moded.o", all[..]);
+    // a new output gets 0666 less the umask, as a compiler gives it, after a miss and a hit
+    umask(0);
+    assert(fort(all[..]) == EXIT_OK);
+    u32 open_mode = permissions("moded.o");
+    umask(0o077);
+    remove("moded.o");
+    assert(fort(all[..]) == EXIT_OK);
+    u32 closed_mode = permissions("moded.o");
+    umask(0o022);
+    assert(open_mode == 0o666);
+    assert(closed_mode == 0o600);
+    string own good = contents("moded.o");
+    defer del(good);
+    // a directory at the temporary name: no temporary file can be made, so the output is
+    // written in place, as a compiler writes it
+    write_file("moded.o", "old\n");
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    make_dir(temp_name("moded.o", &b));
+    assert(fort(all[..]) == EXIT_OK);
+    assert(err_is(""));
+    string own in_place = contents("moded.o");
+    defer del(in_place);
+    assert(same(in_place, good));
+    char mut@ own c_temp = str.to_cstr(temp_name("moded.o", &b));
+    defer del(c_temp);
+    assert(libc.rmdir(c_temp.ptr) == 0);
+    // a stale file of this pid at the temporary name goes, and a link there is not followed
+    write_file("victim", "victim\n");
+    char mut@ own victim = str.to_cstr("victim");
+    defer del(victim);
+    assert(libc.symlink(victim.ptr, c_temp.ptr) == 0);
+    write_file("moded.o", "old\n");
+    assert(fort(all[..]) == EXIT_OK);
+    string own after = contents("moded.o");
+    defer del(after);
+    assert(same(after, good));
+    string own untouched = contents("victim");
+    defer del(untouched);
+    assert(same(untouched, "victim\n"));
+    assert(!exists(temp_name("moded.o", &b)));
+}
+
+// mkfifo(3), whose mode_t is a u32 on Linux and a u16 on darwin (D9.8).
+$if ($cfg(target_os) == "linux") {
+    extern fn mkfifo(char* path, u32 mode) i32;
+} else {
+    extern fn mkfifo(char* path, u16 mode) i32;
+}
+
+fn set_mode(string path, u32 mode) void {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    assert(libc.chmod(c_path.ptr, mode) == 0);
+}
+
+// The type bits of the file that `path` names, after each link, or 0 when there is none.
+fn type_of(string path) u32 {
+    u32 mut mode = 0;
+    if (!os.path_mode(path, &mode)) {
+        return 0;
+    }
+    return mode & 0o170000;
+}
+
+u32 S_IFREG = 0o100000;
+u32 S_IFIFO = 0o010000;
+
+fn the_object_output_follows_its_type_as_a_compiler_does() void {
+    start();
+    assert(build_std(NO_MORE[..0]) == EXIT_OK);
+    assert(build_geom() == EXIT_OK);
+    string[8] mut all = {};
+    object_args("good.o", all[..]);
+    assert(fort(all[..]) == EXIT_OK);
+    string own good = contents("good.o");
+    defer del(good);
+    // a link to a regular file is replaced by the new file, and its target keeps its bytes
+    write_file("target.o", "old\n");
+    char mut@ own target = str.to_cstr("target.o");
+    defer del(target);
+    char mut@ own linked = str.to_cstr("linked.o");
+    defer del(linked);
+    remove("linked.o");
+    assert(libc.symlink(target.ptr, linked.ptr) == 0);
+    object_args("linked.o", all[..]);
+    assert(fort(all[..]) == EXIT_OK);
+    string own kept = contents("target.o");
+    defer del(kept);
+    assert(same(kept, "old\n"));
+    string own replaced = contents("linked.o");
+    defer del(replaced);
+    assert(same(replaced, good));
+    char[8] mut buf = {};
+    assert(libc.readlink(linked.ptr, &buf[0], 8) < 0);
+    // a writable file in a directory that the process cannot write is written in place
+    make_dir("locked");
+    write_file("locked/out.o", "old\n");
+    set_mode("locked/out.o", 0o666);
+    set_mode("locked", 0o555);
+    object_args("locked/out.o", all[..]);
+    i32 mut status = fort(all[..]);
+    u64 left = entry_count("locked");
+    set_mode("locked", 0o755);
+    assert(status == EXIT_OK);
+    assert(err_is(""));
+    assert(left == 1);
+    string own locked = contents("locked/out.o");
+    defer del(locked);
+    assert(same(locked, good));
+    // a FIFO that the process cannot read is written in place, to its reader, and stays a FIFO
+    char mut@ own fifo = str.to_cstr("pipe.o");
+    defer del(fifo);
+    remove("pipe.o");
+    assert(mkfifo(fifo.ptr, 0o600) == 0);
+    i32 reader = os.open_nonblocking("pipe.o");
+    assert(reader >= 0);
+    set_mode("pipe.o", 0o200);
+    object_args("pipe.o", all[..]);
+    status = fort(all[..]);
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    bool read = io.read_all(reader, &got);
+    libc.close(reader);
+    assert(status == EXIT_OK);
+    assert(read);
+    assert(same(strbuf.view(&got), good));
+    assert(type_of("pipe.o") == S_IFIFO);
+    assert(type_of("good.o") == S_IFREG);
+    remove("pipe.o");
+}
+
+// ---- the rebuild rule ---------------------------------------------------------------------
+
+fn a_change_of_a_body_rebuilds_one_library_and_no_dependent() void {
+    start();
+    assert(build_std(NO_MORE[..0]) == EXIT_OK);
+    assert(build_geom() == EXIT_OK);
+    assert(build_shapes() == EXIT_OK);
+    assert(stats_are("miss", "library", "shapes", "absent"));
+    assert(build_main() == EXIT_OK);
+    assert(runs("compile") == 4);
+    string own interface = contents("geom.flib/interface.ft");
+    defer del(interface);
+    string own old_archive = contents("geom.flib/lib.a");
+    defer del(old_archive);
+    remove("archives.log");
+    write_file("geom/vec.ft", GEOM_BODY_TWO);
+    // the build tool runs each step again, dependencies first: only geom compiles
+    assert(build_std(NO_MORE[..0]) == EXIT_OK);
+    assert(stats_are("hit", "library", "std", ""));
+    assert(build_geom() == EXIT_OK);
+    assert(stats_are("miss", "library", "geom", "absent"));
+    assert(build_shapes() == EXIT_OK);
+    assert(stats_are("hit", "library", "shapes", ""));
+    assert(build_main() == EXIT_OK);
+    assert(stats_are("hit", "entry", "main", ""));
+    assert(runs("compile") == 5);
+    string own interface2 = contents("geom.flib/interface.ft");
+    defer del(interface2);
+    assert(same(interface2, interface));
+    // the link names the new archive of geom
+    string own archives = contents("archives.log");
+    defer del(archives);
+    string own new_archive = contents("geom.flib/lib.a");
+    defer del(new_archive);
+    assert(new_archive != old_archive);
+    assert(str.find(archives, new_archive) >= 0);
+    assert(str.find(archives, old_archive) < 0);
+    // the cache never removes an entry: both builds of geom stay
+    assert(entry_count("geom/.fort-cache/1") == 2);
+    // the first body again hits its old entry
+    write_file("geom/vec.ft", GEOM_BODY_ONE);
+    assert(build_geom() == EXIT_OK);
+    assert(stats_are("hit", "library", "geom", ""));
+}
+
+fn a_change_of_a_signature_rebuilds_each_dependent() void {
+    start();
+    assert(build_std(NO_MORE[..0]) == EXIT_OK);
+    assert(build_geom() == EXIT_OK);
+    assert(build_shapes() == EXIT_OK);
+    assert(build_main() == EXIT_OK);
+    assert(runs("compile") == 4);
+    write_file("geom/vec.ft", GEOM_SIGNATURE);
+    assert(build_std(NO_MORE[..0]) == EXIT_OK);
+    assert(stats_are("hit", "library", "std", ""));
+    assert(build_geom() == EXIT_OK);
+    assert(stats_are("miss", "library", "geom", "absent"));
+    assert(build_shapes() == EXIT_OK);
+    assert(stats_are("miss", "library", "shapes", "absent"));
+    assert(build_main() == EXIT_OK);
+    assert(stats_are("miss", "entry", "main", "absent"));
+    assert(runs("compile") == 7);
+    // a second round compiles nothing
+    assert(build_geom() == EXIT_OK && build_shapes() == EXIT_OK && build_main() == EXIT_OK);
+    assert(stats_are("hit", "entry", "main", ""));
+    assert(runs("compile") == 7);
+}
+
+// An empty list of options.
+string[1] NO_MORE = {""};
+
+fn main() i32 {
+    the_cache_options_need_a_library_build();
+    the_cache_options_take_any_library_build();
+    println("usage ok");
+    a_second_build_of_a_library_is_a_hit();
+    without_cache_stats_a_build_writes_nothing_to_stdout();
+    a_library_build_that_writes_no_artifact_uses_no_cache();
+    each_option_of_the_key_gives_its_own_entry();
+    the_archiver_runs_with_zero_dates();
+    a_corrupt_entry_is_a_miss_that_the_build_repairs();
+    a_cache_that_cannot_be_read_or_written_is_no_error();
+    a_compile_error_stores_no_entry_and_writes_no_line();
+    a_hit_that_cannot_write_the_artifact_is_exit_two();
+    println("library ok");
+    a_second_build_of_a_program_links_the_stored_object();
+    an_object_build_of_a_hit_writes_the_stored_object();
+    the_stored_object_is_the_compiled_object_whatever_the_output();
+    the_object_output_is_replaced_with_the_mode_of_the_umask();
+    the_object_output_follows_its_type_as_a_compiler_does();
+    a_build_with_use_that_emits_no_object_uses_no_cache();
+    the_entry_directory_holds_the_default_cache();
+    a_compile_error_of_a_program_stores_no_entry();
+    a_corrupt_entry_of_a_program_is_a_miss();
+    a_whole_program_touches_no_cache();
+    the_suite_removes_no_cache_through_a_link();
+    println("entry ok");
+    a_change_of_a_body_rebuilds_one_library_and_no_dependent();
+    a_change_of_a_signature_rebuilds_each_dependent();
+    println("rebuild ok");
+    println("ok");
+    return 0;
+}

@@ -1354,7 +1354,8 @@ Sections:
   malformed line, has a key that is not the hash of its lines, or names a file whose hash differs.
   A corrupt cache entry is a miss. A cache that the compiler cannot read or write gives a miss and
   no error. Only two builds use the cache: a `--lib` build that writes an artifact, and a build
-  with `--use` that writes an object or an executable.
+  with `--use` that writes an object or an executable. A build with `--fir-stats` does not use
+  it, because a hit runs no emitter and so cannot count what the emitter writes.
 
   The command line adds `--lib <name> <root>`, `--use <name>=<path>` (repeatable),
   `--emit-interface` (with `--lib`: write the interface file to stdout and stop), `--cache-dir
@@ -1407,6 +1408,9 @@ Sections:
   compiler now empties `summaries/` and refuses a link at it, removes a file or a link at a
   temporary name and refuses an entry that stays there, and leaves no manifest after a failed
   write; ratified by the coordinator, 2026-10-23.
+  Amended 2026-10-23: a build with `--use` and `--fir-stats` wrote an executable and so used the
+  cache, and a hit could not write the `lowered N of M` line. Such a build now uses no cache;
+  ratified by the coordinator, 2026-10-23.
 
 ## D10 Memory and runtime checks
 

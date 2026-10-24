@@ -1,0 +1,208 @@
+/// Finds and stores the cache entries of library builds (D9.11, toolchain.md 2.3).
+///
+/// The cache entry of the key K is the directory `<cache>/1/K/`, where 1 is the version of the
+/// layout. A library entry holds the four entries of an artifact, and an entry of the entry unit
+/// holds `object.o` and `manifest`. A lookup is a hit when the entry is valid and its key line
+/// holds K; each other outcome is a miss with its cause. The compiler then builds the unit and
+/// stores the entry by the write protocol of library.artifact. A failure of the cache is never an
+/// error: it is a miss, or an entry that the build does not store. The compiler never removes an
+/// entry. This module uses no function-pointer table.
+import library.artifact;
+import std.libc;
+import std.str;
+import std.strbuf;
+import std.sys;
+
+/// The version of the layout of the cache directory, the name of its one subdirectory.
+string LAYOUT_VERSION = "1";
+
+/// The name of the default cache directory, under the library root or the entry directory.
+string DEFAULT_DIR = ".fort-cache";
+
+/// What a lookup found (toolchain.md 2.3). Each outcome but a hit is a miss with a cause.
+enum outcome {
+    o_absent, // no entry; the zero value
+    o_corrupt, // a corrupt entry
+    o_unreadable, // a cache directory that the compiler cannot read
+    o_hit, // the entry is valid and its key line holds the key
+}
+
+/// The cause of a miss, the last word of its `--cache-stats` line: `absent`, `corrupt` or
+/// `unreadable`. Empty for a hit.
+fn cause(outcome found) string {
+    switch (found) {
+    case outcome.o_absent:
+        return "absent";
+    case outcome.o_corrupt:
+        return "corrupt";
+    case outcome.o_unreadable:
+        return "unreadable";
+    case outcome.o_hit:
+        return "";
+    }
+}
+
+/// Appends the default cache directory of a build: `<base>/.fort-cache`, where `base` is the
+/// library root under `--lib` and the directory of the entry file otherwise. An empty `base` is
+/// the current directory, and a `base` that ends in `/` takes no second one.
+fn append_default(strbuf.str_buf mut* out, string base) void {
+    strbuf.append(out, base);
+    if (base.len > 0 && base[base.len - 1] != '/') {
+        strbuf.push(out, '/');
+    }
+    strbuf.append(out, DEFAULT_DIR);
+}
+
+// The flags of an open(2) that checks a directory of the layout: a symbolic link there is no
+// directory of the compiler, so it is refused.
+fn layout_flags() i32 {
+    return libc.O_RDONLY | libc.O_DIRECTORY | libc.O_NOFOLLOW;
+}
+
+// Whether `path` opens as a directory. `follow` accepts a symbolic link to a directory.
+fn is_directory(string path, bool follow) bool {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    i32 mut flags = layout_flags();
+    if (follow) {
+        flags = libc.O_RDONLY | libc.O_DIRECTORY;
+    }
+    i32 fd = libc.open(c_path.ptr, flags, 0);
+    if (fd < 0) {
+        return false;
+    }
+    libc.close(fd);
+    return true;
+}
+
+/// Looks up the entry of `key` in the cache directory `dir` and reads it once into `*c`
+/// (toolchain.md 2.2, Reading, and 2.3). `library` selects the form of a library entry, else the
+/// entry is the form of an entry unit. Returns o_hit when the entry is valid and its key line
+/// holds `key`, with the checked bytes in `*c`. Returns o_absent when no entry stands at
+/// `<dir>/1/<key>`, and o_unreadable when the system refuses to read the directory `<dir>/1` or a
+/// file of the entry. Returns o_corrupt for each other entry: one that is a symbolic link or no
+/// directory, and one that breaks a rule of toolchain.md 2.2, Validation.
+fn find(string dir, string key, bool library, artifact.contents mut* c) outcome {
+    strbuf.str_buf mut layout_buf = strbuf.create();
+    defer strbuf.free(&layout_buf);
+    string layout = artifact.join(&layout_buf, dir, LAYOUT_VERSION);
+    strbuf.str_buf mut entry_buf = strbuf.create();
+    defer strbuf.free(&entry_buf);
+    string entry = artifact.join(&entry_buf, layout, key);
+    char mut@ own c_entry = str.to_cstr(entry);
+    defer del(c_entry);
+    i32 fd = libc.open(c_entry.ptr, layout_flags(), 0);
+    if (fd < 0) {
+        i32 failure = sys.errno();
+        if (failure == libc.ENOENT) {
+            return outcome.o_absent;
+        }
+        // The entry is corrupt only when the layout directory reads: a link or a file at the
+        // entry gives ELOOP or ENOTDIR, and so does a file at `<dir>` or at `<dir>/1`. The open of
+        // the entry follows a link at `<dir>/1`, so this check follows it too.
+        if (!is_directory(layout, true)) {
+            return outcome.o_unreadable;
+        }
+        if (failure == libc.ENOTDIR || failure == libc.ELOOP) {
+            return outcome.o_corrupt;
+        }
+        return outcome.o_unreadable;
+    }
+    libc.close(fd);
+    i32 mut error = 0;
+    artifact.verdict mut found = artifact.verdict.v_valid;
+    if (library) {
+        found = artifact.read(entry, c, &error);
+    } else {
+        found = artifact.read_object(entry, c, &error);
+    }
+    if (found == artifact.verdict.v_unreadable) {
+        return outcome.o_unreadable;
+    }
+    if (found == artifact.verdict.v_corrupt || c->key != key) {
+        return outcome.o_corrupt;
+    }
+    return outcome.o_hit;
+}
+
+// Makes the directory `path` when it does not exist. Returns false when mkdir(2) fails for
+// another reason, or when `path` is a symbolic link or no directory, so the writer writes
+// through no link that it did not make. `follow` accepts a link to a directory: the cache
+// directory itself is the choice of the caller, as an artifact `-o` is.
+fn make_dir(string path, bool follow) bool {
+    // artifact.make_dir follows a link to a directory
+    i32 mut error = 0;
+    if (!artifact.make_dir(path, &error)) {
+        return false;
+    }
+    return follow || is_directory(path, false);
+}
+
+// Makes `<dir>`, `<dir>/1` and `<dir>/1/<key>` when they do not exist and puts the last path in
+// `out`. Returns false when one cannot be made or is no directory.
+fn make_entry(string dir, string key, strbuf.str_buf mut* out) bool {
+    strbuf.str_buf mut layout_buf = strbuf.create();
+    defer strbuf.free(&layout_buf);
+    string layout = artifact.join(&layout_buf, dir, LAYOUT_VERSION);
+    string entry = artifact.join(out, layout, key);
+    return make_dir(dir, true) && make_dir(layout, false) && make_dir(entry, false);
+}
+
+/// Stores the library entry of `key` in the cache directory `dir` by the write protocol of
+/// toolchain.md 2.2: the interface file, the archive and the manifest of the artifact. Returns
+/// false when a step fails; the caller goes on, because a cache that cannot be written is no
+/// error (toolchain.md 2.3). A failed write leaves no manifest, so the entry is corrupt.
+fn store_library(string dir, string key, string interface_text, u8@ archive,
+                 string manifest_text) bool {
+    strbuf.str_buf mut entry = strbuf.create();
+    defer strbuf.free(&entry);
+    if (!make_entry(dir, key, &entry)) {
+        return false;
+    }
+    strbuf.str_buf mut failed = strbuf.create();
+    defer strbuf.free(&failed);
+    i32 mut error = 0;
+    return artifact.write(strbuf.view(&entry), interface_text, archive, manifest_text, &failed,
+                          &error);
+}
+
+/// Stores the entry of `key` of an entry unit in the cache directory `dir` by the write protocol
+/// of toolchain.md 2.2: the object and the manifest. Returns false when a step fails, which the
+/// caller does not report (toolchain.md 2.3).
+fn store_object(string dir, string key, u8@ object, string manifest_text) bool {
+    strbuf.str_buf mut entry = strbuf.create();
+    defer strbuf.free(&entry);
+    if (!make_entry(dir, key, &entry)) {
+        return false;
+    }
+    strbuf.str_buf mut failed = strbuf.create();
+    defer strbuf.free(&failed);
+    i32 mut error = 0;
+    return artifact.write_object(strbuf.view(&entry), object, manifest_text, &failed, &error);
+}
+
+/// Appends the `--cache-stats` line of a build, with its newline (toolchain.md 1):
+/// `cache hit <unit> <name> <key>` or `cache miss <unit> <name> <key> <cause>`. `<unit>` is
+/// `library` or `entry`, and `<name>` is the library name or the entry module path, written as a
+/// manifest value.
+fn append_stats(strbuf.str_buf mut* out, bool library, string name, string key, outcome found)
+    void {
+    if (found == outcome.o_hit) {
+        strbuf.append(out, "cache hit ");
+    } else {
+        strbuf.append(out, "cache miss ");
+    }
+    if (library) {
+        strbuf.append(out, "library ");
+    } else {
+        strbuf.append(out, "entry ");
+    }
+    artifact.append_value(out, name);
+    strbuf.push(out, ' ');
+    strbuf.append(out, key);
+    if (found != outcome.o_hit) {
+        strbuf.push(out, ' ');
+        strbuf.append(out, cause(found));
+    }
+    strbuf.push(out, '\n');
+}

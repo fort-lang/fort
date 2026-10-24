@@ -296,9 +296,8 @@ came here.
   **`--lib` without `--emit-interface` builds the artifact** (toolchain.md 2.1).
   `driver.library_entry` checks, lowers and runs the emptiness pass, writes the interface text,
   emits the IR module of the unit, and runs the compile line and the archive line through
-  `driver.run_tool`. `library.artifact.write` then writes the directory. The source hash reads
-  `module.source`, the bytes that the session read once for the parse, so it runs before the
-  analysis is released. The archive is read once, and those bytes are hashed and copied. The
+  `driver.run_tool`. `library.artifact.write` then writes the directory. The archive is read
+  once, and those bytes are hashed and copied. The
   writer removes the manifest first and writes it last, each file through a temporary name and
   rename(2), so a failure at any step leaves no manifest (`test/fort/library/artifact_test.ft`).
   It empties `summaries/` before it writes a file, so a file of an older build does not stay. It
@@ -309,9 +308,30 @@ came here.
   When unlinkat(2) refuses an entry and its AT_REMOVEDIR form gives ENOTDIR, the error is the one
   of the first call: darwin gives ENOTDIR there and Linux gives EACCES for both (probed with a
   directory of mode 0500).
-  No cache exists yet, so the build looks up no key. toolchain.md 2.1 puts the source hash in
-  step 3, before the parse; with no cache that order changes no output, and a build that reads the
-  cache must take the hash before the parse.
+- **A library build looks its key up before it checks, and a hit replaces the build** (D9.11,
+  toolchain.md 2.1 and 2.3). `library.cache` holds the layout `<cache>/1/<key>/`, the lookup, the
+  store and the `--cache-stats` line; `driver.cached_unit` holds the fields of the key. `--lib`
+  reads each module file of the walk through `session.read_source` before the parse
+  (`driver.read_listed`), and `artifact.hash_texts` hashes those bytes; the parse then reads the
+  same bytes from the session. A build with `--use` hashes after the load, from `module.source`, and
+  before the check (`driver.front_end`). The key is `artifact.append_key`, the hash of the manifest
+  lines that `write_manifest` writes before the key line, so the key of a lookup and the key line of
+  the stored manifest are one function. A hit of a library writes the checked bytes of the entry to
+  the artifact; a hit of the entry unit writes the checked `object.o` to the object path and links
+  it. The compile line of the entry unit always writes `<tmp>/<entry>.o`. The build reads that file
+  once and stores the bytes. `-c` writes its output from the same bytes, after a hit and after a
+  miss. So `-c -o /dev/null` stores the object, and no read waits on `-c -o /dev/stdout`.
+  `artifact.write_output` classifies the `-c` output with stat(2), which follows a link, as clang
+  does. A regular or absent output gets a temporary file and a rename with mode 0666, so the umask
+  applies and a link to a regular file is replaced. A device, a FIFO, and a path whose temporary
+  file cannot be made are written in place. A miss stores the entry by the write protocol of the
+  artifact, and a store that fails is no error. A lookup refuses a link or a file at
+  `<cache>/1/<key>` (corrupt), and the store refuses a link at `1` or at the entry, so it writes
+  through no link that it did not make. The cache directory itself may be a link. Only a build that
+  writes the artifact, or that writes an object or an executable with `--use`, uses the cache;
+  `--fir-stats` does not, because a hit runs no emitter. The archiver runs with `ZERO_AR_DATE=1` in
+  its environment, which `driver.run_tool` sets in the child after fork(2), so the archive of macOS
+  holds no time stamp (`test/fort/driver_cache_test.ft`, `test/library/cache_test.py`).
 - **`--use` reads each artifact once and keeps the bytes that it checked** (D9.11, toolchain.md
   2.1 and 2.2). `driver.read_libraries` runs before the entry file or the root is opened.
   `artifact.read` reads `manifest`, `interface.ft` and `lib.a` once each. `artifact.parse_manifest`
