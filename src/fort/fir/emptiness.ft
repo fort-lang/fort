@@ -6,8 +6,10 @@
 // tracked place that a `check(overwrite: p)` names. No gen rule and no kill rule of one fact reads
 // another fact, so a fact that no check names changes no verdict. Three forward dataflows of
 // fir_flow run in this order, each with gen and kill sets for each block:
-// - the stale index temporaries, joined by union. A temporary `_t = copy _k` is stale at a point
-//   when a store into `_k` can stand between the assignment of `_t` and that point;
+// - the stale index temporaries and held addresses, joined by union. A temporary `_t = copy _k`
+//   is stale at a point when a store into `_k` can stand between the assignment of `_t` and that
+//   point. A held address is stale when a store into a local that its place reads, a call or a
+//   store into memory can stand there;
 // - the fresh pointer locals, joined by intersection;
 // - the facts, joined by intersection. A walk of each block gives its sets, with the stale set and
 //   the fresh set before each statement.
@@ -142,15 +144,16 @@ struct reader {
 
 // The state of one call of prove. `first_source[k]` is the first index temporary whose source is
 // the local `k`, and `first_reader[k]` the first entry of `readers` for a held address whose
-// place reads the local `k`. `steps[..steps_len]` holds the steps of the facts and of the path in
-// use, and `facts[..fact_count]` the facts. `block_fact[b]` is the fact of the check that ends
-// block `b`.
+// place reads the local `k`. `held` lists the held addresses. `steps[..steps_len]` holds the steps
+// of the facts and of the path in use, and `facts[..fact_count]` the facts. `block_fact[b]` is the
+// fact of the check that ends block `b`.
 struct context {
     fir.func* f;
     local_info mut@ own locals;
     u32 mut@ own first_source;
     u32 mut@ own first_reader;
     reader mut@ own readers;
+    u32 mut@ own held;
     step mut@ own steps;
     u64 steps_len;
     path mut@ own facts;
@@ -164,6 +167,7 @@ fn free_context(context mut* c) void {
     del(c->first_source);
     del(c->first_reader);
     del(c->readers);
+    del(c->held);
     del(c->steps);
     del(c->facts);
     del(c->block_fact);
@@ -345,16 +349,18 @@ fn mark_memory(context mut* c) void {
     mark_readers(c);
 }
 
-// Records each held address as a reader of the locals that the address of its place reads: the
-// base of the place and each index local.
+// Lists the held addresses, and records each one as a reader of the locals that the address of
+// its place reads: the base of the place and each index local.
 fn mark_readers(context mut* c) void {
     fir.func* f = c->f;
     u32 n = fir.local_count(f);
     u64 mut count = 0;
+    u64 mut held = 0;
     u32 mut k = 0;
     while (k < n) {
         if (c->locals[cast(k, u64)].held) {
             count += 1 + cast(store_of(c, k)->value.place.proj_len, u64);
+            held += 1;
         }
         k += 1;
     }
@@ -362,15 +368,20 @@ fn mark_readers(context mut* c) void {
     c->first_reader = new(u32, cast(n, u64));
     del(c->readers);
     c->readers = new(reader, count);
+    del(c->held);
+    c->held = new(u32, held);
     k = 0;
     while (k < n) {
         c->first_reader[cast(k, u64)] = NO_LOCAL;
         k += 1;
     }
     u32 mut at = 0;
+    held = 0;
     k = 0;
     while (k < n) {
         if (c->locals[cast(k, u64)].held) {
+            c->held[held] = k;
+            held += 1;
             fir.place p = store_of(c, k)->value.place;
             add_reader(c, p.local, k, &at);
             u32 mut i = 0;
@@ -474,11 +485,23 @@ fn stale_steps(context* c) u64 {
 }
 
 // The effect of the statement `s` on the stale set: a store into a local makes each temporary
-// with that source stale, and each held address whose place reads the local, and the store of
-// such a temporary or held address makes it fresh again. A held address has one check, so its
-// steps here stay within a small multiple of the statements times the checks of the work.
+// with that source stale, and each held address whose place reads the local. A statement that can
+// write memory makes each held address stale, because its place can read a span or `string`
+// header in memory. The store of such a temporary or held address makes it fresh again. A held
+// address has one check, so its steps here stay within a small multiple of the statements times
+// the checks of the work.
 fn apply_stale(context* c, fir.statement* s, fir_flow.bits mut* stale) void {
-    if (s->kind != fir.stmt_kind.st_assign || s->place.base != fir.base_kind.bk_local) {
+    if (s->kind != fir.stmt_kind.st_assign) {
+        return;
+    }
+    if (writes_memory(c, s)) {
+        u64 mut h = 0;
+        while (h < c->held.len) {
+            fir_flow.bits_set(stale, c->held[h]);
+            h += 1;
+        }
+    }
+    if (s->place.base != fir.base_kind.bk_local) {
         return;
     }
     u32 mut t = c->first_source[cast(s->place.local, u64)];
@@ -495,6 +518,16 @@ fn apply_stale(context* c, fir.statement* s, fir_flow.bits mut* stale) void {
     if (s->place.proj_len == 0 && (l->source.kind == key_kind.kk_local || l->held)) {
         fir_flow.bits_clear(stale, s->place.local);
     }
+}
+
+// Whether the assignment `s` can write memory: a `call`, a store through a pointer, or a store
+// straight into a memory local or a global. A store into fixed storage of a local that is no
+// memory writes no memory, and `alloc` writes only new storage.
+fn writes_memory(context* c, fir.statement* s) bool {
+    if (s->value.kind == fir.rvalue_kind.rv_call || !fir.place_fixed(c->f, s->place)) {
+        return true;
+    }
+    return c->locals[cast(s->place.local, u64)].memory;
 }
 
 // ---- the fresh pointer locals ------------------------------------------------------------------
@@ -590,6 +623,16 @@ fn is_fresh(context* c, fir_flow.bits* fresh, u32 n) bool {
 
 // ---- the path of a place -----------------------------------------------------------------------
 
+// Whether `p` is `(*_a)` for a held address `_a`.
+fn is_held_place(context* c, fir.place p) bool {
+    return is_deref_local(c->f, p) && c->locals[cast(p.local, u64)].held;
+}
+
+// Whether `p` is `(*_a)` for a held address `_a` that is stale in `stale`.
+fn is_stale_held(context* c, fir.place p, fir_flow.bits* stale) bool {
+    return is_held_place(c, p) && fir_flow.bits_get(stale, p.local);
+}
+
 // The key of the index local `i` at a point whose stale set is `stale`. A temporary has the key
 // of its source, unless the source is a local and the temporary is stale. A named local or a
 // parameter that is no memory is its own key. The return place is no key.
@@ -621,10 +664,10 @@ fn key_of(context* c, u32 i, fir_flow.bits* stale) key {
 fn trace(context mut* c, fir.place p, fir_flow.bits* stale) path {
     fir.func* f = c->f;
     fir.place mut src = p;
-    bool held = is_deref_local(f, p) && c->locals[cast(p.local, u64)].held;
+    bool held = is_held_place(c, p);
     // a stale held address can name a place in a fresh object, whose freshness its `addr` did
     // not end, so it gives no tracked place
-    bool stale_held = held && fir_flow.bits_get(stale, p.local);
+    bool stale_held = is_stale_held(c, p, stale);
     if (held && !stale_held) {
         src = store_of(c, p.local)->value.place;
     }
@@ -995,8 +1038,7 @@ fn apply_facts(context mut* c, fir.statement* s, fir_flow.bits mut* stale,
         path d = trace(c, s->place, stale);
         // a store through a stale held address can write a place through a fresh pointer local,
         // because the `addr` of a held address ends no freshness, so no fresh fact survives it
-        bool held = is_deref_local(c->f, s->place) && c->locals[cast(s->place.local, u64)].held;
-        if (held && fir_flow.bits_get(stale, s->place.local)) {
+        if (is_stale_held(c, s->place, stale)) {
             kill_store(c, d, null, pr);
         } else {
             kill_store(c, d, fresh, pr);

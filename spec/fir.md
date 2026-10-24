@@ -868,10 +868,23 @@ changes the function, and the verifier runs after it. The passes run in this ord
      writes, `p` designates no fixed storage, `_a` is no memory, and only that check and that
      store read `_a`. That `addr` makes no local memory and ends no freshness. An `addr mut` of
      fixed storage is no held address: it makes its local memory, so a store through `*&x`
-     needs a fact of that place, which no gen rule gives (D17.11). A store into a local that
-     the address of `p` reads, its base or an index local, makes `_a` stale until its own
-     store, as a store into the source of an index temporary does (**Keys**). A stale `_a` gives
-     no tracked place, so its check is not proved and no item gives `(*_a)` a fact. The store
+     needs a fact of that place, which no gen rule gives (D17.11). Two kinds of statement make
+     `_a` stale until its own store. The first is a store into a local that the address of `p`
+     reads, its base or an index local, as a store into the source of an index temporary is
+     (**Keys**). The second is a statement that can write memory: a `call` rvalue, a store
+     through a pointer, or a store straight into a place of a memory local or of a global
+     (**Kill**). An `index` on a span or a `string` reads the header of the span or the
+     `string`, and that header can be in memory, so such a statement can change the place that
+     `p` names with no store into a local. The second kind makes each held address stale, also
+     one whose place reads no header in memory. A `del` and a `move` operand make no held
+     address stale. A `move` of a header writes the zero value, whose length is 0, so each later
+     `index` through it is out of bounds until a store or a call writes the header again. A `del`
+     of a header also frees the storage that `_a` names, so the store through `(*_a)` writes
+     through a dangling pointer. A `move` of field 0 of a header leaves `null` with the length,
+     so a later `index` through it dereferences `null`. D17.11 assumes that each index stays in
+     bounds (D10.6) and that no operation accesses storage through a dangling pointer or through
+     `null` (D10.7), so these cases are outside its guarantee. A stale `_a` gives no tracked
+     place, so the pass proves no check of `(*_a)`, and no item gives `(*_a)` a fact. The store
      through it kills as a store through a pointer and keeps no fact through a fresh pointer
      local, because the `addr` ended no freshness.
    - **Values.** A store writes a fresh `new` when its rvalue is `alloc<T>(c)`, or `move _t`

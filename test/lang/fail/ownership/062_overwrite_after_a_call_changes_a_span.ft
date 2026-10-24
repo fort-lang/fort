@@ -1,0 +1,46 @@
+//! fail
+// A store into an element of a span holds the address of the element before its right side
+// (D6.3). A call in the right side can change the span, through a pointer or through `&s`, with no
+// store into a local of the function. Then the store writes the old element, and a `move` of the
+// new element proves nothing about it, so each store below is an error. A `move` from another
+// element writes zero and changes no span, so the store in `remove` passes.
+struct two {
+    i32 mut* own mut@ cur;
+    i32 mut* own mut@ other;
+}
+
+fn flip(two mut* t) bool {
+    i32 mut* own mut@ x = t->cur;
+    t->cur = t->other;
+    t->other = x;
+    return true;
+}
+
+fn store_field(two mut* t, u64 i) void {
+    t->cur[i] = flip(t) ? move(t->cur[i]) : move(t->cur[i]); //! error: prove 't->cur[i]' is empty
+}
+
+fn flip_local(i32 mut* own mut@ mut* s, i32 mut* own mut@ other) bool {
+    *s = other;
+    return true;
+}
+
+fn store_local(i32 mut* own mut@ a, i32 mut* own mut@ b, u64 i) void {
+    i32 mut* own mut@ mut s = a;
+    s[i] = flip_local(&s, b) ? move(s[i]) : move(s[i]); //! error: cannot prove 's[i]' is empty
+}
+
+fn remove(i32 mut* own mut@ v, u64 i, u64 j) void {
+    del(v[i]);
+    v[i] = move(v[j]);
+}
+
+fn main() i32 {
+    i32 mut* own[2] mut a = {};
+    i32 mut* own[2] mut b = {};
+    two mut t = two{.cur = a[..], .other = b[..]};
+    store_field(&t, 0);
+    store_local(a[..], b[..], 0);
+    remove(a[..], 0, 1);
+    return 0;
+}

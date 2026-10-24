@@ -2444,6 +2444,8 @@ says ownership is "by convention", this section supersedes it.
   span or a `string`. No other pointer can name the object of a fresh `n`. This rule assumes that
   no operation accesses storage through a dangling pointer, such as a pointer to an allocation
   that a `del` freed. Such an access is outside the guarantee of this rule.
+  It also assumes that each index stays in bounds and that no operation accesses storage through
+  `null`, as D10.6 and D10.7 give, so a build with `--no-bounds-check` is outside the guarantee.
   These gen rules make a fact true:
   1. Entry zeroing: the entry block stores the zero value once into each local of `own`
      reference type (D19.4, `fir.md` 9.2).
@@ -2479,6 +2481,9 @@ says ownership is "by convention", this section supersedes it.
   kills before the store. `del` and `move` are no stores, and they apply only their gen rule.
   Each store into an `own` reference-typed place needs the fact of that place after the
   right-hand side and before its own kill rules.
+  That place is the destination, the storage that the store writes and whose address D6.3
+  computes before the right-hand side, so a right-hand side that can change the storage that the
+  lvalue names makes the store an error.
   The proof of one function has a limit. Its work is the sum of three counts in the FIR of the
   function: its statements and terminators times its overwrite checks; its blocks times its
   locals; and, for each local `k` that is not memory, the stores whose place has the base `k`
@@ -2545,6 +2550,12 @@ says ownership is "by convention", this section supersedes it.
   with a copy of a local that is not memory, whether or not an index reads it, and the count
   now says so. A later review found that the errors of a function past the limit did not name
   the limit. The coordinator ruled that the first error takes the second note above.
+  Amended 2026-10-24: a store tests the fact of its destination, whose address D6.3 computes
+  before the right-hand side, and the rule assumes that each index stays in bounds and that no
+  access goes through `null` (D10.6, D10.7); ratified by the coordinator, 2026-10-24. Before, the
+  text read word for word as the fact of the lvalue after the right-hand side. That proved
+  `t->cur[i] = flip(t) ? move(t->cur[i]) : move(t->cur[i]);`, where `flip` changes `t->cur`, and
+  the analysis accepted the store, which wrote over a live allocation.
 
 ### D17.12 Owned strings
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,
