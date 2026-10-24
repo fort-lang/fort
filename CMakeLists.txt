@@ -539,8 +539,9 @@ set_tests_properties(fir-run-tests PROPERTIES
     ENVIRONMENT "${FORT_SANITIZER_TEST_ENV};PYTHONDONTWRITEBYTECODE=1")
 
 # The run corpus under fir.interpreter (spec/ownership-design.md 3.5): each program of
-# test/lang/run and test/lang/programs runs under `fort --fir-run`, and each one whose externs
-# the interpreter runs gives the stdout, the stderr and the status of its native checked build.
+# test/lang/run and test/lang/programs runs under `fort --fir-run --fir-events`, and each one whose
+# externs the interpreter runs gives the stdout, the stderr and the status of its native checked
+# build. Only the programs of EXPECTED_EVENTS in the script make an ownership event.
 add_test(NAME fir-run
     COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/fir_run_test.py"
             --fort "${FORT_COMPILER_BINARY}"
@@ -548,6 +549,7 @@ add_test(NAME fir-run
             --cc "${FORT_TARGET_CC_PATH}"
             --target "${FORT_TARGET_TRIPLE}"
             -j "${FORT_LANG_JOBS}"
+            --events
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(fir-run PROPERTIES
     LABELS "fort;integration"

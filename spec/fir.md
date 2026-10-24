@@ -998,9 +998,23 @@ writes it (section 12), and it starts a program as `toolchain.md` 6 item 22 star
 - A run ends with the return of the function that it runs, an `exit`, an `abort`, a `trap`, an
   `outside`, or a fault: an operation with no defined result, such as a load through null or
   outside each live range.
+- The shadow state `fir.shadow` (`src/fort/fir/shadow.ft`) observes each run and changes none of
+  its outcome. It keeps the owner slots, the tags and the events of `spec/ownership-design.md`
+  3.3 and 3.4. A run reports each event once, as the line `event <kind> in <function> at
+  <line>:<col>`, where `<kind>` is a name of the table of 3.4 and the location is that of the
+  statement or the terminator that runs. The line ends with the tags of the value of the access
+  or of the `del` that name a local `_<n>`: ` through owner <function> _<n>`, then ` through frame
+  <function> _<n>` or ` through moved <function> _<n>`. A frame tag that a callee kept adds
+  ` kept`, and a vacated slot that a callee read adds ` by a callee`. An extern reaches memory
+  through the tags of the argument whose value starts the access. A `leak` stands at the item
+  where the owner count became 0, and an event inside the `std.rt.free` of a `del` stands at the
+  `del`. A `use after release`, `use after scope` of a frame that returned, `double release` and
+  `invalid release` stand before the fault that ends the run, and a `use after move` before the
+  fault `null dereference`.
 
 `fort --fir-run` runs a program with it, and the pass `run` of a FIR test runs a function or a
-program (`toolchain.md` 1, 16.3).
+program (`toolchain.md` 1, 16.3). `fort --fir-run --fir-events` writes the events to stderr after
+the run, each line after `fort: `, and the pass `run` writes them in its report.
 
 ## 12. Translation to LLVM
 
@@ -1442,10 +1456,11 @@ below are the record of how it ran.
    get their tests in this form, one file for each rule or each rewrite. The pass `run` runs the
    module with the interpreter of section 11 and writes a report in place of the module: a line
    `stdout "..."` and a line `stderr "..."` for the bytes that the run wrote to the descriptors 1
-   and 2, quoted as section 13 quotes a string, then one line for its end: `return` with the
-   type and the value of a scalar result (`true` or `false`, a decimal integer or address, or the
-   binary64 pattern of a float), `exit <status>`, `abort`, `trap at <line>:<col>`,
-   `outside <name>`, or `fault <what> at <line>:<col>`.
+   and 2, quoted as section 13 quotes a string, then a line for each ownership event of the run
+   (section 11), then one line for its end: `return` with the type and the value of a scalar
+   result (`true` or `false`, a decimal integer or address, or the binary64 pattern of a float),
+   `exit <status>`, `abort`, `trap at <line>:<col>`, `outside <name>`, or `fault <what> at
+   <line>:<col>`.
 4. **The gen suites.** The suites `test/fort/gen_*_test.ft` hold emitted text. A suite that tests
    one construct moves to FIR when the lowering supports that construct. Its assertions then read
    the FIR text for meaning and the translated text for the ABI.

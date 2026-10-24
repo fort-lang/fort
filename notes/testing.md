@@ -575,7 +575,16 @@ bullet at a time and without a rewrite.
   built in the checked mode with the same flags and run with the same input, and the two must give
   the same stdout, stderr and status. The script prints the three counts, the count of the outside
   programs for each function, and its time; the ticket log holds the measured numbers. A program
-  of the corpus that prints an address cannot pass, so the corpus holds none.
+  of the corpus that prints an address cannot pass, so the corpus holds none. The ctest passes
+  `--events`, so each run has `--fir-events`: the comparison of stderr leaves the event lines out,
+  and only the programs of `EXPECTED_EVENTS`, each with its ownership defect, may make an event.
+  A new program that leaks makes the test fail; fix the program or list it with its defect.
+- **The suite of fir.shadow derives each report from the design** (`test/fort/fir/shadow_test.ft`).
+  Each event of `spec/ownership-design.md` 3.4 has a run that makes it and a run at its boundary
+  that makes none: the first and the last byte of an allocation and of an owner word, a span of
+  length 0, a `del` of null and of an interior pointer, a cycle of two owners, a tag through a
+  cast to `u64` and back, and a kept frame tag. A person derived each expected report from the
+  design; no case was blessed from a run. `run_env.events` turns the report of the events on.
 - **The suites of fir.interpreter derive each expected value apart from the interpreter**
   (`test/fort/fir/interpreter_test.ft`, `interpreter_source_test.ft`). Python's integers and IEEE
   doubles gave each value at each boundary of each type when the cases were written: the wrap at

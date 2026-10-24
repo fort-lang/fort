@@ -755,10 +755,31 @@ came here.
     form, and each function with no body, ends the run as `outside`. A `calloc` that the C
     library of the compiler refuses gives the program null, as a native `calloc` does. The errno
     of the compiler goes to the errno of the run only after a call that sets it.
-  - Each `shadow:` comment marks a point where the shadow state of `spec/ownership-design.md` 3.3
-    observes the run: a load, a store, a `move`, a `del`, `live`, `dead`, a new frame, a return and
-    the end of a region. The interpreter keeps the entry of a region that ended until 4096 of them
-    have ended (`COMPACT_FLOOR`), so the shadow state must keep the ranges it needs itself.
+  - The shadow state `fir.shadow` (`src/fort/fir/shadow.ft`) observes each run, with or without
+    `--fir-events`, and changes no outcome. The interpreter calls it at each access (`reach`),
+    load, store, move zeroing (`zero_bytes`), `del`, `live`, `dead`, frame push and pop, `calloc`,
+    release and global. The interpreter drops the entry of a region that ended after 4096 of them
+    (`COMPACT_FLOOR`), so the shadow keeps its own ranges: every allocation, live or released,
+    and each frame that ended after it made a frame tag. The shadow runs in each run, so it adds
+    to the time of each run; `test/fir_run_test.py` prints the time of the run corpus.
+  - The owner count of an allocation counts its owner slots and its owners in transit. A `move`
+    or a `del` of an owner slot puts the owner in transit and the next typed store of an owning
+    word (`settle`) takes it, so a transfer keeps the count; the test at the end of each statement
+    and terminator ends the owners still in transit and reports a count of 0 as a `leak`. A
+    `return` tests with `_0` in transit, and the items of the `std.rt.free` that a `del` calls
+    test nothing, so an owner inside a freed object leaks at the `del`.
+  - The tags of a value stand in `sh.value` while it is in flight and in the record of its word in
+    memory. A value holds one owner tag or lend (`o`) and one frame or moved tag (`f`), and a
+    binary rvalue keeps each part of both operands; of two owner tags it keeps the first. A load
+    gives a copy of an owner slot of the frame that runs its owner tag, and a store of a word other
+    than 8 bytes keeps no tag, so a comparison drops it. The tags of an aggregate, an argument and
+    a result go through the scratch buffer of the machine, in `sh.scratch`, and `memcpy` keeps
+    the tags of the words that it copies. An extern reaches memory through the tags of the
+    argument whose value starts the access (`sh.args`).
+  - Two known limits. A `use after move` needs an access below `FIRST_ADDRESS` (65536): a field
+    far past a null base, or an index of 65536 bytes or more, faults as `invalid access` with no
+    event. And `ended` keeps the range of each frame that made a frame tag, one for each such call,
+    so a run of many such calls holds as many ranges.
   What it cannot see: a program whose native build has undefined behavior (D10.7) runs another
   way or ends in a fault, and a value that depends on an address, such as `print_ptr`, differs
   from the native one.
