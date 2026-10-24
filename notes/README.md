@@ -32,6 +32,15 @@ The files below stand in `spec/`. Each one implements the decisions it cites and
 | `spec/toolchain.md` | the command line, the build pipeline, diagnostics, the runtime, codegen |
 | `spec/fir.md` | FIR, the representation between the checker and the LLVM IR text (D19.8) |
 
+## Designs
+
+A design in `spec/` proposes rules and has no force until its decisions land. The user rules on its
+open questions first.
+
+| file | holds |
+|---|---|
+| `spec/ownership-design.md` | ownership checks: an oracle, a coarse analysis on FIR, refinements |
+
 ## Engineering knowledge
 
 These four files describe the machine, the tests, the compiler and the conventions. They describe
