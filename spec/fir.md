@@ -865,8 +865,15 @@ changes the function, and the verifier runs after it. The passes run in this ord
      `_a = addr mut(p)` and writes `(*_a)` in place of `p` (9.3). The pass reads the place
      `(*_a)` of that `check(overwrite: (*_a))` and of that store as `p`, for the fact, the kill
      rules and the gen rules. This holds when `_a` is a temporary that exactly one assignment
-     writes, and only that check and that store read `_a`. That `addr` makes no local memory and
-     ends no freshness.
+     writes, `p` designates no fixed storage, `_a` is no memory, and only that check and that
+     store read `_a`. That `addr` makes no local memory and ends no freshness. An `addr mut` of
+     fixed storage is no held address: it makes its local memory, so a store through `*&x`
+     needs a fact of that place, which no gen rule gives (D17.11). A store into a local that
+     the address of `p` reads, its base or an index local, makes `_a` stale until its own
+     store, as a store into the source of an index temporary does (**Keys**). A stale `_a` gives
+     no tracked place, so its check is not proved and no item gives `(*_a)` a fact. The store
+     through it kills as a store through a pointer and keeps no fact through a fresh pointer
+     local, because the `addr` ended no freshness.
    - **Values.** A store writes a fresh `new` when its rvalue is `alloc<T>(c)`, or `move _t`
      where `_t` is a temporary that exactly one assignment writes, with an `alloc`, and that only
      this `move` reads. A store writes the zero value when its rvalue is `const zero T`, `null T`,
@@ -1006,11 +1013,12 @@ writes it (section 12), and it starts a program as `toolchain.md` 6 item 22 star
   or of the `del` that name a local `_<n>`: ` through owner <function> _<n>`, then ` through frame
   <function> _<n>` or ` through moved <function> _<n>`. A frame tag that a callee kept adds
   ` kept`, and a vacated slot that a callee read adds ` by a callee`. An extern reaches memory
-  through the tags of the argument whose value starts the access. A `leak` stands at the item
-  where the owner count became 0, and an event inside the `std.rt.free` of a `del` stands at the
-  `del`. A `use after release`, `use after scope` of a frame that returned, `double release` and
-  `invalid release` stand before the fault that ends the run, and a `use after move` before the
-  fault `null dereference`.
+  through the tags of an argument whose value starts the access: of such arguments, the one with
+  the lowest index that has a tag. A `leak` stands at the item where the owner count became 0,
+  and an event inside the `std.rt.free` of a `del` stands at the `del`. A `use after release`,
+  `use after scope` of a frame that returned, `double release` and `invalid release` stand
+  before the fault that ends the run, and a `use after move` before the fault
+  `null dereference`.
 
 `fort --fir-run` runs a program with it, and the pass `run` of a FIR test runs a function or a
 program (`toolchain.md` 1, 16.3). `fort --fir-run --fir-events` writes the events to stderr after

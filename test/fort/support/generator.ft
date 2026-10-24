@@ -1,0 +1,884 @@
+/// Writes the fort source of the functions that test an ownership rule against the oracle, in the
+/// three families of spec/ownership-design.md 3.7: the exhaustive family, the seeded family and
+/// the shapes. A batch is the text of one entry module, and the oracle test checks it, lowers each
+/// function and runs it in fir.interpreter.
+//
+// A function of the exhaustive family takes the parameters `q`, `b` and `i` of design 3.7. The
+// function `drive` of PRELUDE builds `*q` and calls it, so a run can give each input: each value
+// of the `bool`, the index 0 or 1, and each field of `*q` null or live. A shape takes no
+// parameter. A variant of the seeded family is a whole program, whose functions carry the number
+// of the variant in their names. The generator keeps no state: the same index gives the same text.
+import std.str;
+import std.strbuf;
+
+// ---- the declarations of a batch ---------------------------------------------------------------
+
+/// The declarations that a batch of the exhaustive family or of the shapes starts with: the struct
+/// parameter with two owning fields, the struct local with an owning field and a view field, a
+/// struct with a view field, the owning global, a global view, a callee that can change an owner
+/// through a pointer, the callback of `oracle_call`, a callee that returns its view, a callee
+/// that keeps its view, the sibling of no function, and `drive`.
+u64 PRELUDE_LINES = 47;
+
+string[PRELUDE_LINES] PRELUDE = {
+    "import std.libc;",
+    "struct pair {",
+    "    i32 mut* own a;",
+    "    i32 mut* own b;",
+    "}",
+    "struct cell {",
+    "    i32 mut* own o;",
+    "    i32* v;",
+    "}",
+    "struct holder {",
+    "    i32* v;",
+    "}",
+    "i32 mut* own mut G = null;",
+    "i32* mut VIEW = null;",
+    "fn put(i32 mut* own mut* s) void {",
+    "    del(*s);",
+    "    *s = new(i32);",
+    "}",
+    "fn cb(i32 n) i32 {",
+    "    del(G);",
+    "    G = new(i32);",
+    "    return n;",
+    "}",
+    "fn id(i32* v) i32* {",
+    "    return v;",
+    "}",
+    "fn keep(i32* v) void {",
+    "    VIEW = v;",
+    "}",
+    "fn none(pair mut* q, bool b, u64 i) void {",
+    "}",
+    "fn drive(fn (pair mut*, bool, u64) void f, bool b, u64 i, bool la, bool lb) i32 {",
+    "    pair mut s = pair{};",
+    "    if (la) {",
+    "        s.a = new(i32);",
+    "        *s.a = 1;",
+    "    }",
+    "    if (lb) {",
+    "        s.b = new(i32);",
+    "        *s.b = 2;",
+    "    }",
+    "    f(&s, b, i);",
+    "    del(s.a);",
+    "    del(s.b);",
+    "    del(G);",
+    "    return 0;",
+    "}",
+};
+
+/// The name of the function that runs a function of the exhaustive family with one input.
+string DRIVE = "drive";
+
+/// Appends each line of `lines` and a newline to `b`.
+fn write_lines(strbuf.str_buf mut* b, string@ lines) void {
+    for (u64 mut i = 0; i < lines.len; i++) {
+        strbuf.append(b, lines[i]);
+        strbuf.push(b, '\n');
+    }
+}
+
+/// Appends PRELUDE to `b`.
+fn write_prelude(strbuf.str_buf mut* b) void {
+    write_lines(b, PRELUDE[..]);
+}
+
+// Appends `depth` levels of indentation, four spaces each.
+fn indent(strbuf.str_buf mut* b, u64 depth) void {
+    for (u64 mut d = 0; d < depth; d++) {
+        strbuf.append(b, "    ");
+    }
+}
+
+// Appends `prefix` and the decimal `n`.
+fn append_name(strbuf.str_buf mut* b, string prefix, u64 n) void {
+    strbuf.append(b, prefix);
+    strbuf.append_u64(b, n);
+}
+
+// ---- the exhaustive family ---------------------------------------------------------------------
+
+/// The prefix of the name of a function of the exhaustive family; its index follows.
+string EXHAUSTIVE_PREFIX = "gen";
+
+/// The locals that a function of the exhaustive family can declare, in the order of their
+/// declarations: two owning pointers, an owning array of two elements, two index locals, two view
+/// locals, the struct local, a pointer to an owning local, a pointer to that pointer and a `u64`.
+/// A function declares a local only when a statement names it, so `x` is memory only in a function
+/// that names `p` or `pp`. `p` needs `x`, and `pp` needs `p`.
+u64 LOCAL_COUNT = 11;
+string[LOCAL_COUNT] LOCAL_NAME = {"x", "y", "arr", "j", "k", "v", "w", "c", "p", "pp", "u"};
+string[LOCAL_COUNT] LOCAL_DECL = {
+    "i32 mut* own mut x = null;",
+    "i32 mut* own mut y = null;",
+    "i32 mut* own[2] mut arr = {};",
+    "u64 j = i;",
+    "u64 mut k = 0;",
+    "i32* mut v = null;",
+    "i32* mut w = null;",
+    "cell mut c = cell{};",
+    "i32 mut* own mut* p = &x;",
+    "i32 mut* own mut** pp = &p;",
+    "u64 mut u = 0;",
+};
+
+// The bit of `x`, `p` and `pp` in a mask of LOCAL_NAME.
+u32 LOCAL_X = 1;
+u32 LOCAL_P = 256;
+u32 LOCAL_PP = 512;
+
+/// The statements of the vocabulary of design 3.7. `#` stands for the position of the statement in
+/// its function, and `$` for the name of the sibling of the function. A statement that ends with
+/// `{` opens a block that holds each statement after it. The owner places are `x`, `y`, `arr[j]`,
+/// `arr[k]`, `c.o`, `q->a`, `q->b`, `G`, `*p` and `**pp`: an `alloc`, a `del` and a store of null
+/// into each, and a `move` from and into each. Then a lend into each view local and into the view
+/// field, a lend from a field through the parameter, a load through each view, a cast to `u64`
+/// and back, two deferred `del`s, a call of each model extern, a call that can change each owner
+/// through a pointer, a call of the sibling, `panic`, a store into an index local, an `if` on the
+/// `bool`, a loop of two iterations and `return`.
+u64 VOCABULARY_SIZE = 77;
+string[VOCABULARY_SIZE] VOCABULARY = {
+    "x = new(i32);",
+    "y = new(i32);",
+    "arr[j] = new(i32);",
+    "arr[k] = new(i32);",
+    "c.o = new(i32);",
+    "q->a = new(i32);",
+    "q->b = new(i32);",
+    "G = new(i32);",
+    "*p = new(i32);",
+    "**pp = new(i32);",
+    "del(x);",
+    "del(y);",
+    "del(arr[j]);",
+    "del(arr[k]);",
+    "del(c.o);",
+    "del(q->a);",
+    "del(q->b);",
+    "del(G);",
+    "del(*p);",
+    "del(**pp);",
+    "x = null;",
+    "y = null;",
+    "arr[j] = null;",
+    "arr[k] = null;",
+    "c.o = null;",
+    "q->a = null;",
+    "q->b = null;",
+    "G = null;",
+    "*p = null;",
+    "**pp = null;",
+    "y = move(x);",
+    "x = move(y);",
+    "arr[j] = move(x);",
+    "x = move(arr[k]);",
+    "c.o = move(y);",
+    "y = move(c.o);",
+    "q->a = move(x);",
+    "x = move(q->b);",
+    "G = move(y);",
+    "y = move(G);",
+    "*p = move(y);",
+    "y = move(*p);",
+    "**pp = move(y);",
+    "y = move(**pp);",
+    "arr[k] = move(y);",
+    "y = move(arr[j]);",
+    "q->b = move(y);",
+    "y = move(q->a);",
+    "v = x;",
+    "w = y;",
+    "v = arr[j];",
+    "c.v = x;",
+    "w = q->a;",
+    "v = G;",
+    "w = *p;",
+    "u = cast(*v, u64);",
+    "u = cast(*w, u64);",
+    "u = cast(*c.v, u64);",
+    "u = cast(x, u64);",
+    "v = cast(u, i32*);",
+    "defer del(x);",
+    "defer del(y);",
+    "libc.oracle_keep(cast(x, void*));",
+    "v = cast(libc.oracle_pass(cast(x, void*)), i32*);",
+    "libc.oracle_call(cb, 0);",
+    "put(&y);",
+    "put(p);",
+    "put(&arr[j]);",
+    "put(&c.o);",
+    "put(&q->a);",
+    "put(&G);",
+    "if (b) { $(q, false, i); }",
+    "panic(\"stop\");",
+    "k = j;",
+    "if (b) {",
+    "for (u64 mut t# = 0; t# < 2; t#++) {",
+    "return;",
+};
+
+/// The statements that a function of the exhaustive family can start with: a release of each
+/// owner that has no fact at the entry of the function, so a statement after it can kill a fact.
+/// A function with PROLOGUE declares `p`, so `x` is memory there.
+string[4] PROLOGUE = {"del(q->a);", "del(q->b);", "del(G);", "del(*p);"};
+
+/// The inputs that a function reads, as bits of a mask: the `bool`, the index, and the fields of
+/// `*q`. The sibling reads them all.
+u32 READS_B = 1;
+u32 READS_I = 2;
+u32 READS_Q = 4;
+u32 READS_ALL = 7;
+
+// Whether `c` can stand in an identifier.
+fn is_word(char c) bool {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+}
+
+// The locals that `text` names, as bits of LOCAL_NAME, with the locals that they need. The inputs
+// that it reads go into *reads as READS bits. `j` reads the index, and `$` reads each input.
+fn scan(string text, u32 mut* reads) u32 {
+    u32 mut names = 0;
+    u64 mut at = 0;
+    while (at < text.len) {
+        if (text[at] == '$') {
+            *reads = *reads | READS_ALL;
+        }
+        if (!is_word(text[at])) {
+            at += 1;
+            continue;
+        }
+        u64 start = at;
+        while (at < text.len && is_word(text[at])) {
+            at += 1;
+        }
+        string word = text[start..at];
+        for (u64 mut n = 0; n < LOCAL_COUNT; n++) {
+            if (word == LOCAL_NAME[n]) {
+                names = names | (cast(1, u32) << cast(n, u32));
+            }
+        }
+        if (word == "b") {
+            *reads = *reads | READS_B;
+        } else if (word == "i" || word == "j") {
+            *reads = *reads | READS_I;
+        } else if (word == "q") {
+            *reads = *reads | READS_Q;
+        }
+    }
+    if ((names & LOCAL_PP) != 0) {
+        names = names | LOCAL_P;
+    }
+    if ((names & LOCAL_P) != 0) {
+        names = names | LOCAL_X;
+    }
+    return names;
+}
+
+// Appends `text` with `#` replaced by `pos` and `$` by `sibling`.
+fn append_statement(strbuf.str_buf mut* b, string text, u64 pos, string sibling) void {
+    for (u64 mut i = 0; i < text.len; i++) {
+        if (text[i] == '#') {
+            strbuf.append_u64(b, pos);
+        } else if (text[i] == '$') {
+            strbuf.append(b, sibling);
+        } else {
+            strbuf.push(b, text[i]);
+        }
+    }
+}
+
+// The count of the sequences of at most `n` statements of VOCABULARY.
+fn sequences(u64 n) u64 {
+    u64 mut total = 1;
+    u64 mut level = 1;
+    for (u64 mut k = 0; k < n; k++) {
+        level = level * VOCABULARY_SIZE;
+        total += level;
+    }
+    return total;
+}
+
+/// The count of the functions of the exhaustive family with at most `n` statements: each sequence
+/// of at most `n` statements of VOCABULARY, once as it is and once after PROLOGUE.
+fn exhaustive_count(u64 n) u64 {
+    return 2 * sequences(n);
+}
+
+// The statements of sequence `index` into `body`, indexes into VOCABULARY, and their count. The
+// sequence of 0 statements comes first, then those of 1, and so on, each length in the order of
+// its digits.
+fn fill_body(u64 index, u64 mut@ body) u64 {
+    u64 mut rest = index;
+    u64 mut len = 0;
+    u64 mut level = 1;
+    while (rest >= level) {
+        rest -= level;
+        len += 1;
+        level = level * VOCABULARY_SIZE;
+    }
+    for (u64 mut pos = len; pos > 0; pos--) {
+        body[pos - 1] = rest % VOCABULARY_SIZE;
+        rest = rest / VOCABULARY_SIZE;
+    }
+    return len;
+}
+
+/// The most statements of a function of the exhaustive family.
+u64 MOST_STATEMENTS = 4;
+
+/// Appends function `index` of the exhaustive family with at most `n` statements, and gives the
+/// inputs that it reads as READS bits. Its sibling is the function whose index differs in the
+/// lowest bit, or `none` when the family has no such function, so a batch of an even count from
+/// an even index holds the sibling of each function.
+fn write_exhaustive(strbuf.str_buf mut* b, u64 index, u64 n) u32 {
+    if (n > MOST_STATEMENTS) {
+        panic("generator.write_exhaustive: too many statements");
+    }
+    u64 count = sequences(n);
+    u64[MOST_STATEMENTS] mut body = {};
+    u64 len = fill_body(index % count, body[..]);
+    strbuf.str_buf mut sibling = strbuf.create();
+    defer strbuf.free(&sibling);
+    if ((index ^ 1) < 2 * count) {
+        append_name(&sibling, EXHAUSTIVE_PREFIX, index ^ 1);
+    } else {
+        strbuf.append(&sibling, "none");
+    }
+    u32 mut reads = 0;
+    u32 mut names = 0;
+    for (u64 mut pos = 0; pos < len; pos++) {
+        names = names | scan(VOCABULARY[body[pos]], &reads);
+    }
+    if (index >= count) {
+        names = names | LOCAL_P | LOCAL_X;
+    }
+    strbuf.append(b, "fn ");
+    append_name(b, EXHAUSTIVE_PREFIX, index);
+    strbuf.append(b, "(pair mut* q, bool b, u64 i) void {\n");
+    for (u64 mut k = 0; k < LOCAL_COUNT; k++) {
+        if ((names & (cast(1, u32) << cast(k, u32))) != 0) {
+            indent(b, 1);
+            strbuf.append(b, LOCAL_DECL[k]);
+            strbuf.push(b, '\n');
+        }
+    }
+    if (index >= count) {
+        for (string line : PROLOGUE) {
+            indent(b, 1);
+            strbuf.append(b, line);
+            strbuf.push(b, '\n');
+        }
+    }
+    u64 mut depth = 1;
+    for (u64 mut pos = 0; pos < len; pos++) {
+        string text = VOCABULARY[body[pos]];
+        indent(b, depth);
+        append_statement(b, text, pos, strbuf.view(&sibling));
+        strbuf.push(b, '\n');
+        if (text[text.len - 1] == '{') {
+            depth += 1;
+        }
+    }
+    while (depth > 0) {
+        depth -= 1;
+        indent(b, depth);
+        strbuf.append(b, "}\n");
+    }
+    return reads;
+}
+
+// ---- the shapes --------------------------------------------------------------------------------
+
+/// The prefix of the name of a shape; its index follows.
+string SHAPE_PREFIX = "shape";
+
+/// The most links of a chain of pointers from `&x`.
+u64 MOST_LINKS = 4;
+
+/// The destinations of a borrow of `x`, in the order of BORROW_DECL: a view local, a field, an
+/// element, memory, `_0` of a callee, a call argument that a callee keeps, and a `u64`.
+u64 DESTINATIONS = 7;
+string[DESTINATIONS] BORROW_DECL = {
+    "i32* v = x;",
+    "holder h = holder{x};",
+    "i32*[2] e = {x, null};",
+    "VIEW = x;",
+    "i32* v = id(x);",
+    "keep(x);",
+    "u64 u = cast(x, u64);",
+};
+
+// A read through the borrow of each destination.
+string[DESTINATIONS] BORROW_READ = {
+    "i32 r = *v;",
+    "i32 r = *h.v;",
+    "i32 r = *e[0];",
+    "i32 r = *VIEW;",
+    "i32 r = *v;",
+    "i32 r = *VIEW;",
+    "i32 r = *cast(u, i32*);",
+};
+
+// The releases of `x` after a borrow: none, a `del`, a `move`, a `del` through a pointer and a call
+// that can change `x`.
+u64 BORROW_RELEASES = 5;
+string[BORROW_RELEASES] BORROW_RELEASE = {"", "del(x);", "y = move(x);", "del(*p);", "put(&x);"};
+
+// The count of the chains of `links` links: each link after the first is a copy or an address.
+fn chains(u64 links) u64 {
+    return cast(1, u64) << (links - 1);
+}
+
+// The releases of `x` after a chain of `links` links: none, a `del`, a `move`, a `del` through
+// each link and a call through each link that can change `x`.
+fn chain_releases(u64 links) u64 {
+    return 3 + 2 * links;
+}
+
+// The last statements after a chain of `links` links: a read through each link, a store into `x`
+// and a store through each link.
+fn chain_finals(u64 links) u64 {
+    return 1 + 2 * links;
+}
+
+// The count of the shapes of the chains.
+fn chain_shapes() u64 {
+    u64 mut total = 0;
+    for (u64 mut links = 1; links <= MOST_LINKS; links++) {
+        total += chains(links) * chain_releases(links) * chain_finals(links);
+    }
+    return total;
+}
+
+/// The count of the shapes: each chain of 1 to MOST_LINKS pointers with each release and each last
+/// statement, then each destination of a borrow with each release, a read and a store.
+fn shapes_count() u64 {
+    return chain_shapes() + DESTINATIONS * BORROW_RELEASES * 2;
+}
+
+// The dereferences of link `k` of a chain to reach `x`: one for the first link and one more for
+// each later link that takes the address of the link before it. Bit `k - 2` of `kinds` marks an
+// address.
+fn depth_of(u64 kinds, u64 k) u64 {
+    u64 mut d = 1;
+    for (u64 mut n = 2; n <= k; n++) {
+        if ((kinds & (cast(1, u64) << (n - 2))) != 0) {
+            d += 1;
+        }
+    }
+    return d;
+}
+
+// Appends `stars` dereferences and link `k`.
+fn append_link(strbuf.str_buf mut* b, u64 stars, u64 k) void {
+    for (u64 mut s = 0; s < stars; s++) {
+        strbuf.push(b, '*');
+    }
+    append_name(b, "l", k);
+}
+
+// Appends the declaration of link `k` of a chain whose kinds of links are `kinds`.
+fn write_link(strbuf.str_buf mut* b, u64 kinds, u64 k) void {
+    indent(b, 1);
+    strbuf.append(b, "i32 mut* own mut");
+    for (u64 mut s = 0; s < depth_of(kinds, k); s++) {
+        strbuf.push(b, '*');
+    }
+    strbuf.push(b, ' ');
+    append_name(b, "l", k);
+    if (k == 1) {
+        strbuf.append(b, " = &x;\n");
+    } else if (depth_of(kinds, k) > depth_of(kinds, k - 1)) {
+        strbuf.append(b, " = &");
+        append_name(b, "l", k - 1);
+        strbuf.append(b, ";\n");
+    } else {
+        strbuf.append(b, " = ");
+        append_name(b, "l", k - 1);
+        strbuf.append(b, ";\n");
+    }
+}
+
+// Appends the body of the chain shape `index`, below the chain shapes.
+fn write_chain(strbuf.str_buf mut* b, u64 index) void {
+    u64 mut rest = index;
+    u64 mut links = 1;
+    while (rest >= chains(links) * chain_releases(links) * chain_finals(links)) {
+        rest -= chains(links) * chain_releases(links) * chain_finals(links);
+        links += 1;
+    }
+    u64 last = rest % chain_finals(links);
+    rest = rest / chain_finals(links);
+    u64 release = rest % chain_releases(links);
+    u64 kinds = rest / chain_releases(links);
+    for (u64 mut k = 1; k <= links; k++) {
+        write_link(b, kinds, k);
+    }
+    indent(b, 1);
+    if (release == 1) {
+        strbuf.append(b, "del(x);");
+    } else if (release == 2) {
+        strbuf.append(b, "y = move(x);");
+    } else if (release >= 3 && release < 3 + links) {
+        strbuf.append(b, "del(");
+        u64 k = release - 2;
+        append_link(b, depth_of(kinds, k), k);
+        strbuf.append(b, ");");
+    } else if (release >= 3 + links) {
+        strbuf.append(b, "put(");
+        u64 k = release - 2 - links;
+        append_link(b, depth_of(kinds, k) - 1, k);
+        strbuf.append(b, ");");
+    }
+    strbuf.push(b, '\n');
+    indent(b, 1);
+    if (last < links) {
+        strbuf.append(b, "i32 r = ");
+        append_link(b, depth_of(kinds, last + 1) + 1, last + 1);
+        strbuf.append(b, ";");
+    } else if (last == links) {
+        strbuf.append(b, "x = new(i32);");
+    } else {
+        u64 k = last - links;
+        append_link(b, depth_of(kinds, k), k);
+        strbuf.append(b, " = new(i32);");
+    }
+    strbuf.push(b, '\n');
+}
+
+/// Appends shape `index`: a function of no parameter that holds a new allocation in `x`. A chain
+/// shape makes a chain of pointers from `&x`, each a copy or the address of the one before. It then
+/// releases `x`, and it ends with a read or a store through a link, or a store into `x`. A borrow
+/// shape lends `x` into one destination, releases `x`, and reads through the borrow or stores
+/// into `x`. Each shape then deletes `x` and `y`.
+fn write_shape(strbuf.str_buf mut* b, u64 index) void {
+    strbuf.append(b, "fn ");
+    append_name(b, SHAPE_PREFIX, index);
+    strbuf.append(b, "() void {\n");
+    indent(b, 1);
+    strbuf.append(b, "i32 mut* own mut x = new(i32);\n");
+    indent(b, 1);
+    strbuf.append(b, "i32 mut* own mut y = null;\n");
+    if (index < chain_shapes()) {
+        write_chain(b, index);
+    } else {
+        u64 rest = index - chain_shapes();
+        u64 store = rest % 2;
+        u64 release = (rest / 2) % BORROW_RELEASES;
+        u64 destination = rest / 2 / BORROW_RELEASES;
+        if (release == 3) {
+            indent(b, 1);
+            strbuf.append(b, "i32 mut* own mut* p = &x;\n");
+        }
+        indent(b, 1);
+        strbuf.append(b, BORROW_DECL[destination]);
+        strbuf.push(b, '\n');
+        if (release != 0) {
+            indent(b, 1);
+            strbuf.append(b, BORROW_RELEASE[release]);
+            strbuf.push(b, '\n');
+        }
+        indent(b, 1);
+        if (store == 1) {
+            strbuf.append(b, "x = new(i32);");
+        } else {
+            strbuf.append(b, BORROW_READ[destination]);
+        }
+        strbuf.push(b, '\n');
+    }
+    indent(b, 1);
+    strbuf.append(b, "del(x);\n");
+    indent(b, 1);
+    strbuf.append(b, "del(y);\n");
+    strbuf.append(b, "}\n");
+}
+
+// ---- the seeded family -------------------------------------------------------------------------
+
+// A hand case is the lines of a whole program. Its first line names its owner places, each with
+// the type that it points to: `// places: x:i32 *pp:i32`. `$` marks each name of a function of the
+// case, and a variant replaces it with `_` and its number, so the variants of one case can stand
+// in one batch. A line outside each function is a declaration, which a batch holds once.
+
+/// The declaration that a batch of the seeded family adds to those of its case: a callee that can
+/// change an owner of type `i32 mut* own` through a pointer.
+string[4] SEEDED_PRELUDE = {
+    "fn seeded_put(i32 mut* own mut* s) void {",
+    "    del(*s);",
+    "    *s = new(i32);",
+    "}",
+};
+
+/// The most owner places of a hand case.
+u64 MOST_PLACES = 8;
+
+// An owner place of a hand case: its text and the type that it points to.
+struct place {
+    string text;
+    string ty;
+}
+
+// The owner places that the first line of `lines` names, into `out`, and their count.
+fn read_places(string@ lines, place mut@ out) u64 {
+    string head = "// places:";
+    if (lines.len == 0 || !str.starts_with(lines[0], head)) {
+        panic("generator.read_places: a hand case starts with its places");
+    }
+    string line = lines[0];
+    u64 mut n = 0;
+    u64 mut at = head.len;
+    while (at < line.len) {
+        if (line[at] == ' ') {
+            at += 1;
+            continue;
+        }
+        u64 start = at;
+        while (at < line.len && line[at] != ' ') {
+            at += 1;
+        }
+        string word = line[start..at];
+        i64 colon = str.index_of(word, ':');
+        if (colon < 0 || n == out.len) {
+            panic("generator.read_places: a place is `<place>:<type>`");
+        }
+        u64 c = cast(colon, u64);
+        out[n] = place{word[..c], word[c + 1..]};
+        n += 1;
+    }
+    return n;
+}
+
+// The kinds of a line of a hand case.
+enum line_kind {
+    lk_declaration, // a line outside each function
+    lk_head, // the line that starts a function
+    lk_body, // a line inside the body of a function
+    lk_end, // the line that ends a function
+}
+
+// The kind of each line of `lines` into `out`. A line that starts with `fn ` starts a function,
+// and the function ends at the first line `}` after it, or at the same line when that line ends
+// with `}`. The first line, which names the places, is a declaration.
+fn classify(string@ lines, line_kind mut@ out) void {
+    bool mut inside = false;
+    for (u64 mut i = 0; i < lines.len; i++) {
+        string line = lines[i];
+        if (inside && line == "}") {
+            out[i] = line_kind.lk_end;
+            inside = false;
+        } else if (inside) {
+            out[i] = line_kind.lk_body;
+        } else if (i > 0 && str.starts_with(line, "fn ")) {
+            out[i] = line_kind.lk_head;
+            inside = !str.ends_with(line, "}");
+        } else {
+            out[i] = line_kind.lk_declaration;
+        }
+    }
+}
+
+// Whether line `i` of kind `kinds[i]` takes an insertion before it: a line of a body or the end
+// of a function.
+fn is_point(line_kind kind) bool {
+    return kind == line_kind.lk_body || kind == line_kind.lk_end;
+}
+
+// Whether line `line` of kind `kind` is a statement that a variant can remove: a line of a body
+// that opens and closes no block.
+fn is_removable(line_kind kind, string line) bool {
+    return kind == line_kind.lk_body && str.index_of(line, '{') < 0
+        && str.index_of(line, '}') < 0;
+}
+
+// The count of the statements that a variant can insert over `places`: an `alloc`, a `del` and a
+// store of null into each place, a call of `seeded_put` with the address of each place of type
+// `i32` that is no dereference, and a `move` into each place from each other place of its type.
+fn insert_count(place@ places) u64 {
+    u64 mut n = 0;
+    for (u64 mut k = 0; k < places.len; k++) {
+        n += 3;
+        if (is_put_place(places[k])) {
+            n += 1;
+        }
+        for (u64 mut m = 0; m < places.len; m++) {
+            if (m != k && places[m].ty == places[k].ty) {
+                n += 1;
+            }
+        }
+    }
+    return n;
+}
+
+// Whether `seeded_put` can take the address of `p`.
+fn is_put_place(place p) bool {
+    return p.ty == "i32" && p.text.len > 0 && p.text[0] != '*';
+}
+
+// Appends insertion statement `s` over `places`, in the order of insert_count.
+fn write_insert(strbuf.str_buf mut* b, place@ places, u64 s) void {
+    u64 mut rest = s;
+    for (u64 mut k = 0; k < places.len; k++) {
+        place p = places[k];
+        if (rest == 0) {
+            strbuf.append(b, p.text);
+            strbuf.append(b, " = new(");
+            strbuf.append(b, p.ty);
+            strbuf.append(b, ");");
+            return;
+        } else if (rest == 1) {
+            strbuf.append(b, "del(");
+            strbuf.append(b, p.text);
+            strbuf.append(b, ");");
+            return;
+        } else if (rest == 2) {
+            strbuf.append(b, p.text);
+            strbuf.append(b, " = null;");
+            return;
+        }
+        rest -= 3;
+        if (is_put_place(p)) {
+            if (rest == 0) {
+                strbuf.append(b, "seeded_put(&");
+                strbuf.append(b, p.text);
+                strbuf.append(b, ");");
+                return;
+            }
+            rest -= 1;
+        }
+        for (u64 mut m = 0; m < places.len; m++) {
+            if (m != k && places[m].ty == p.ty) {
+                if (rest == 0) {
+                    strbuf.append(b, p.text);
+                    strbuf.append(b, " = move(");
+                    strbuf.append(b, places[m].text);
+                    strbuf.append(b, ");");
+                    return;
+                }
+                rest -= 1;
+            }
+        }
+    }
+    panic("generator.write_insert: no such statement");
+}
+
+// The count of the points of `kinds` and of the lines that a variant can remove, into *removable.
+fn count_points(string@ lines, line_kind@ kinds, u64 mut* removable) u64 {
+    u64 mut points = 0;
+    for (u64 mut i = 0; i < lines.len; i++) {
+        if (is_point(kinds[i])) {
+            points += 1;
+        }
+        if (is_removable(kinds[i], lines[i])) {
+            *removable += 1;
+        }
+    }
+    return points;
+}
+
+/// The most lines of a hand case.
+u64 MOST_LINES = 64;
+
+/// The count of the variants of the hand case `lines`: the case with each statement of
+/// insert_count inserted before each line of a body and before the end of each function, then
+/// the case with each statement line removed.
+fn seeded_count(string@ lines) u64 {
+    if (lines.len > MOST_LINES) {
+        panic("generator.seeded_count: a hand case has too many lines");
+    }
+    place[MOST_PLACES] mut places = {};
+    u64 n = read_places(lines, places[..]);
+    line_kind[MOST_LINES] mut kinds = {};
+    classify(lines, kinds[..lines.len]);
+    u64 mut removable = 0;
+    u64 points = count_points(lines, kinds[..lines.len], &removable);
+    return points * insert_count(places[..n]) + removable;
+}
+
+// Appends `line` with each `$` replaced by `_` and `variant`.
+fn append_renamed(strbuf.str_buf mut* b, string line, u64 variant) void {
+    for (u64 mut i = 0; i < line.len; i++) {
+        if (line[i] == '$') {
+            strbuf.push(b, '_');
+            strbuf.append_u64(b, variant);
+        } else {
+            strbuf.push(b, line[i]);
+        }
+    }
+}
+
+/// Appends the hand case `lines` itself, each line in its place, with the number 0 in the name of
+/// each function. So line `n` of the batch is line `n` of the case, and the entry is `main_0`.
+fn write_case(strbuf.str_buf mut* b, string@ lines) void {
+    for (u64 mut i = 0; i < lines.len; i++) {
+        append_renamed(b, lines[i], 0);
+        strbuf.push(b, '\n');
+    }
+}
+
+/// Appends the declarations of the hand case `lines` and SEEDED_PRELUDE: the part of a batch of
+/// its variants that comes once.
+fn write_declarations(strbuf.str_buf mut* b, string@ lines) void {
+    line_kind[MOST_LINES] mut kinds = {};
+    classify(lines, kinds[..lines.len]);
+    for (u64 mut i = 0; i < lines.len; i++) {
+        if (kinds[i] == line_kind.lk_declaration) {
+            strbuf.append(b, lines[i]);
+            strbuf.push(b, '\n');
+        }
+    }
+    write_lines(b, SEEDED_PRELUDE[..]);
+}
+
+/// Appends the functions of variant `variant` of the hand case `lines`, from 1 to seeded_count,
+/// in the order of seeded_count. The entry of the variant is `main_` and its number.
+fn write_seeded(strbuf.str_buf mut* b, string@ lines, u64 variant) void {
+    place[MOST_PLACES] mut places = {};
+    u64 n = read_places(lines, places[..]);
+    line_kind[MOST_LINES] mut kinds = {};
+    classify(lines, kinds[..lines.len]);
+    u64 inserts = insert_count(places[..n]);
+    u64 mut removable = 0;
+    u64 points = count_points(lines, kinds[..lines.len], &removable);
+    if (variant == 0 || variant > points * inserts + removable) {
+        panic("generator.write_seeded: no such variant");
+    }
+    // the point of the insertion, or the line to remove, each counted from 0
+    u64 mut point = NONE;
+    u64 mut remove = NONE;
+    u64 mut statement = 0;
+    if (variant <= points * inserts) {
+        point = (variant - 1) / inserts;
+        statement = (variant - 1) % inserts;
+    } else {
+        remove = variant - 1 - points * inserts;
+    }
+    u64 mut at_point = 0;
+    u64 mut at_removable = 0;
+    for (u64 mut i = 0; i < lines.len; i++) {
+        if (kinds[i] == line_kind.lk_declaration) {
+            continue;
+        }
+        if (is_point(kinds[i])) {
+            if (at_point == point) {
+                indent(b, 1);
+                write_insert(b, places[..n], statement);
+                strbuf.push(b, '\n');
+            }
+            at_point += 1;
+        }
+        if (is_removable(kinds[i], lines[i])) {
+            at_removable += 1;
+            if (at_removable - 1 == remove) {
+                continue;
+            }
+        }
+        append_renamed(b, lines[i], variant);
+        strbuf.push(b, '\n');
+    }
+}
+
+// No point and no line.
+u64 NONE = 18446744073709551615;

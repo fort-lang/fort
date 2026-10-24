@@ -987,7 +987,7 @@ string[100] OWNER_TAGS = {
 };
 
 // The functions of the group flows.
-string[626] FLOWS = {
+string[661] FLOWS = {
     "fn main.pass_tag() -> i32 {",
     "    let _1 (x): i32;",
     "    let _2: i32*;",
@@ -1612,6 +1612,41 @@ string[626] FLOWS = {
     "        _6 = copy _3.1 #7:1;",
     "        _0 = copy (*_6) #8:1;",
     "        return #9:1;",
+    "    }",
+    "}",
+    "fn main.launder(_1 (p): u8*) -> u8* {",
+    "    let _2: u64;",
+    "    bb0: {",
+    "        _2 = cast<u64>(copy _1) #2:1;",
+    "        _0 = cast<u8*>(copy _2) #3:1;",
+    "        return #4:1;",
+    "    }",
+    "}",
+    "fn main.args_owner() -> i32 {",
+    "    let _1 (p): u8 mut* own;",
+    "    let _2: u8*;",
+    "    let _3: u8*;",
+    "    bb0: {",
+    "        _1 = alloc<u8>(const u64 8) #2:1;",
+    "        _2 = cast<u8*>(copy _1) #3:1;",
+    "        _3 = call fn main.launder(copy _2) #4:1;",
+    "        del(move _1) #5:1;",
+    "        _0 = call extern memcmp(copy _3, copy _2, const u64 1) #6:1;",
+    "        return #7:1;",
+    "    }",
+    "}",
+    "fn main.args_frame() -> i32 {",
+    "    let _1 (x): u8[8];",
+    "    let _2: u64;",
+    "    let _3: u8*;",
+    "    let _4: u8*;",
+    "    bb0: {",
+    "        _2 = const u64 0 #2:1;",
+    "        _3 = addr(_1[_2]) #3:1;",
+    "        _4 = call fn main.launder(copy _3) #4:1;",
+    "        dead(_1) #5:1;",
+    "        _0 = call extern memcmp(copy _4, copy _3, const u64 1) #6:1;",
+    "        return #7:1;",
     "    }",
     "}",
 };
@@ -2526,6 +2561,20 @@ fn flows(run_env.env mut* e) void {
         "return i32 3",
     };
     run_env.expect(run_env.run_in(e, &m, "main.nest_leak", a99[..1]), w99[..]);
+    u64[1] a100 = {0};
+    // two arguments of an extern hold one address, and only the later one has a tag: the access
+    // takes the tag of the lowest argument that has one
+    string[2] w100 = {
+        "event use after release in main.args_owner at 6:1 through owner main.args_owner _1",
+        "fault invalid access at 6:1",
+    };
+    run_env.expect(run_env.run_in(e, &m, "main.args_owner", a100[..0]), w100[..]);
+    u64[1] a101 = {0};
+    string[2] w101 = {
+        "event use after scope in main.args_frame at 6:1 through frame main.args_frame _1",
+        "return i32 0",
+    };
+    run_env.expect(run_env.run_in(e, &m, "main.args_frame", a101[..0]), w101[..]);
     println("flows ok");
 }
 

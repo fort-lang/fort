@@ -585,6 +585,24 @@ bullet at a time and without a rewrite.
   length 0, a `del` of null and of an interior pointer, a cycle of two owners, a tag through a
   cast to `u64` and back, and a kept frame tag. A person derived each expected report from the
   design; no case was blessed from a run. `run_env.events` turns the report of the events on.
+- **The oracle test holds a rule against the runs of the oracle** (`test/fort/owner/oracle_test.ft`,
+  `spec/ownership-design.md` 3.6). It checks a batch of fort source in a sandbox, lowers each
+  function, runs the pass of the rule on it and runs it in `fir.interpreter`. A site is a function
+  and the location of a `check(overwrite: p)`, and the lowering puts the store at that location
+  (`spec/fir.md` 9.3). An `overwrite` event at a store into a place of an `own` reference type
+  marks its site. A site with no error and such an event is a false accept, which fails the test.
+  A site with an error and no such event is a false reject, which the test counts. The sets are
+  the hand cases of the design reviews, an accept case and a reject case for each item of design
+  5.4 that the rule uses, and the three families of `test/fort/support/generator.ft`. The test
+  keeps only the functions that check, lower and verify: a function whose lines hold a diagnostic
+  leaves its batch, and the test checks the batch again. Two checks at one location stop the
+  test, because their verdicts would join. The expected stdout holds every count and the ends of
+  the runs of each set (return, exit, abort, trap, outside, fault), so a change of the pass or of
+  the oracle changes the text. A person derived each reject line
+  of the hand and item cases from the rule; the counts of the families are measured.
+  `tools/mutations/oracle.json` holds the mutants of `fir.emptiness` that prove too much, with the
+  oracle test as its one stage. The log of a round says whether the test printed a false accept
+  or only a changed count.
 - **The suites of fir.interpreter derive each expected value apart from the interpreter**
   (`test/fort/fir/interpreter_test.ft`, `interpreter_source_test.ft`). Python's integers and IEEE
   doubles gave each value at each boundary of each type when the cases were written: the wrap at
@@ -931,7 +949,9 @@ bullet at a time and without a rewrite.
   `ninja` ran only `Publishing build/fort` and did not build HEAD again, and the next rounds did.
   Host and guest clocks agreed within 0.2 s. `--only` keeps the order of the table, so add a row
   that an earlier run caught and that stands before the others, or run the first row by hand
-  with `touch` in the guest before `ninja`, and quote the md5 of its mutant.
+  with `touch` in the guest before `ninja`, and quote the md5 of its mutant. On 2026-10-24 the
+  first two rounds of one run of that table read `stale` in VM slot 3, with the clocks equal:
+  put two such rows before the rows that you measure.
   **Each table describes itself.** `ls tools/mutations/*.json` lists the tables.
   `jq -r '[input_filename] + .sources | join(" ")' tools/mutations/*.json` prints each table and
   the files that it covers. That is the `"sources"` list that the runner saves. The `comment` list

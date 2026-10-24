@@ -691,7 +691,21 @@ came here.
   measure 4451 or less (`proof.work`). The memory marks take one scan and one walk: a held address
   that is memory ends once. Two paths are separate only while neither leaves its object, by a deref
   or a span index after its first step: `p->next->g` can be `p->g`. A held address `(*_a)` reads as
-  the place of its `addr mut` when one check and one store read `_a` and nothing else does. The
+  the place of its `addr mut` when one check and one store read `_a` and nothing else does, `_a`
+  is no memory, and the place is no fixed storage. An operand or a `del` through `(*_a)` is no
+  read of `_a` as a whole, so it does not end the held address. A held address of fixed storage
+  gave three false accepts in `test/fort/owner/oracle_test.ft` (FIR cases `held_value`,
+  `held_fresh` and `held_copy`): the store through it wrote a local that the counts of the local,
+  its freshness and the value of its one store did not see. So an `addr mut` of fixed storage is
+  no held address and makes its local memory. The lowering of an assignment holds no address of
+  fixed storage (`fir_lower.target_place`, `hold_base`), but `*&x = e` lowers to the same shape,
+  `_t = addr mut(_x)` and a check of `(*_t)`: since an `addr mut` of fixed storage is no held
+  address, such a store is an error, as D17.11 says, though `x` is empty
+  (`test/lang/fail/ownership/061`). Two more false accepts (`stale_base`, `stale_key`) read a
+  held address as its place after a store into the base or an index local of the place: such a
+  store makes the held address stale in the stale dataflow (`first_reader`, `apply_stale`). A
+  stale held address gives no tracked place (`stale_alias`), and the store through it keeps no
+  fact through a fresh pointer local (`stale_fresh`). The
   place text of a report comes from the source: the pass finds the assignment at the position of the
   `=` in the tree of the function and takes the text from its first token to the `=`, with a `(`
   before it when the text needs one. A FIR text with no tree gives the FIR place. The emitter
@@ -775,7 +789,10 @@ came here.
     than 8 bytes keeps no tag, so a comparison drops it. The tags of an aggregate, an argument and
     a result go through the scratch buffer of the machine, in `sh.scratch`, and `memcpy` keeps
     the tags of the words that it copies. An extern reaches memory through the tags of the
-    argument whose value starts the access (`sh.args`).
+    argument whose value starts the access (`sh.args`). Of such arguments, the one with the
+    lowest index that has a tag gives the tags: in `memcmp(laundered, p, 1)`, where a callee
+    cast away the tag of the first argument, the access takes the owner tag of `p` (case
+    `args_owner` of `test/fort/fir/shadow_test.ft`).
   - Four known limits. A `use after move` needs an access below `FIRST_ADDRESS` (65536): a field
     far past a null base, or an index of 65536 bytes or more, faults as `invalid access` with no
     event. `ended` keeps the range of each frame that made a frame tag, one for each such call,

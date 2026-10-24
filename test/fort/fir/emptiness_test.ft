@@ -1289,7 +1289,8 @@ string[128] HELD = {
     "        return;",
     "    }",
     "}",
-    // the held address of a field makes no memory: P
+    // an address of a field of a local is no held address, so the check reads `(*_2)`, which no
+    // gen rule makes empty: U
     "fn main.h6() -> void {",
     "    let _1 (s): node;",
     "    let _2: node mut* own mut*;",
@@ -1329,7 +1330,208 @@ string[128] HELD = {
     "}",
 };
 
-string[7] HELD_VERDICTS = {"P", "U", "U", "PU", "PPP", "P", "U"};
+string[7] HELD_VERDICTS = {"P", "U", "U", "PU", "PPP", "U", "U"};
+
+// An address of fixed storage is no held address, so a store through it writes a memory local, and
+// the pass takes no value of that local from its one store. A held address that is memory is no
+// held address either.
+string[72] HELD_STORE = {
+    // the store through the address gives the temporary another value, and the move of it is no
+    // fresh new: PPPU
+    "fn main.h8() -> void {",
+    "    let _1 (n): node mut* own;",
+    "    let _2: node mut* own;",
+    "    let _3: node mut* own mut*;",
+    "    let _4: node mut* own;",
+    "    let _5: node mut* own;",
+    "    let _6: node mut* own;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own;",
+    "        _2 = alloc<node>(const u64 1);",
+    "        _3 = addr mut(_2);",
+    "        _4 = alloc<node>(const u64 1);",
+    "        _5 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_4).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_4).0 = move _5;",
+    "        del(move (*_3));",
+    "        check(overwrite: (*_3)) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        (*_3) = move _4;",
+    "        check(overwrite: _1) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        _1 = move _2;",
+    "        _6 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        (*_1).0 = move _6;",
+    "        return;",
+    "    }",
+    "}",
+    // an address of the held address makes it memory, so the check reads its own place: U
+    "fn main.h9(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own mut*;",
+    "    let _3: node mut* own;",
+    "    let _4: node mut* own mut**;",
+    "    bb0: {",
+    "        _2 = addr mut((*_1).0);",
+    "        _4 = addr(_2);",
+    "        del(move (*_1).0);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_2)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_2) = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // an address of fixed storage is no held address, so the `del` through it gives no fact to
+    // the local: UU
+    "fn main.h10() -> void {",
+    "    let _1: node mut* own;",
+    "    let _2: node mut* own mut*;",
+    "    let _3: node mut* own;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1);",
+    "        _2 = addr mut(_1);",
+    "        del(move (*_2));",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _4;",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_2)) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        (*_2) = move _3;",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[3] HELD_STORE_VERDICTS = {"PPPU", "U", "UU"};
+
+// A store into a local that the place of a held address reads makes the address stale, so its
+// check reads `(*_a)` and not the place. A store through a stale held address keeps no fact
+// through a fresh pointer, because the `addr` of the held address ended no freshness.
+string[103] HELD_STALE = {
+    // a store into the base of the place: PU
+    "fn main.s1() -> void {",
+    "    let _1: node mut* own;",
+    "    let _2: node mut* own mut*;",
+    "    let _3: node mut* own;",
+    "    let _4: node mut* own;",
+    "    let _5: node mut* own;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _3;",
+    "        _2 = addr mut((*_1).0);",
+    "        _5 = move _1;",
+    "        _1 = alloc<node>(const u64 1);",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_2)) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        (*_2) = move _4;",
+    "        return;",
+    "    }",
+    "}",
+    // a store into the index of the place: PU
+    "fn main.s2() -> void {",
+    "    let _1: node mut* own;",
+    "    let _2 (i): u64;",
+    "    let _3: node mut* own;",
+    "    let _4: node mut* own mut*;",
+    "    let _5: node mut* own;",
+    "    bb0: {",
+    "        _2 = const u64 0;",
+    "        _1 = alloc<node>(const u64 1);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).2[_2]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).2[_2] = move _3;",
+    "        _4 = addr mut((*_1).2[_2]);",
+    "        _2 = const u64 1;",
+    "        del(move (*_1).2[_2]);",
+    "        _5 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_4)) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        (*_4) = move _5;",
+    "        return;",
+    "    }",
+    "}",
+    // the store through the stale address kills the fact through the fresh pointer: UU
+    "fn main.s3() -> void {",
+    "    let _1: node mut* own;",
+    "    let _2 (i): u64;",
+    "    let _3 (j): u64;",
+    "    let _4: node mut* own mut*;",
+    "    let _5: node mut* own;",
+    "    let _6: node mut* own;",
+    "    bb0: {",
+    "        _2 = const u64 0;",
+    "        _3 = const u64 0;",
+    "        _1 = alloc<node>(const u64 1);",
+    "        _4 = addr mut((*_1).2[_2]);",
+    "        _2 = const u64 1;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_4)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_4) = move _5;",
+    "        _6 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).2[_3]) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        (*_1).2[_3] = move _6;",
+    "        return;",
+    "    }",
+    "}",
+    // a stale held address gives no tracked place, so the move through it gives no fact that a
+    // store through the fresh pointer keeps: PU
+    "fn main.s4() -> void {",
+    "    let _1: node mut* own;",
+    "    let _2 (i): u64;",
+    "    let _3 (j): u64;",
+    "    let _4: node mut* own mut*;",
+    "    let _5: node mut* own;",
+    "    let _6: node mut* own;",
+    "    let _7: node mut* own;",
+    "    bb0: {",
+    "        _2 = const u64 0;",
+    "        _3 = const u64 0;",
+    "        _1 = alloc<node>(const u64 1);",
+    "        _4 = addr mut((*_1).2[_2]);",
+    "        _2 = const u64 1;",
+    "        _7 = move (*_4);",
+    "        _6 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).2[_3]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).2[_3] = move _6;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_4)) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        (*_4) = move _5;",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[4] HELD_STALE_VERDICTS = {"PU", "PU", "UU", "PU"};
 
 // A fact holds at the start of a block when it holds at the end of each predecessor.
 string[124] JOIN = {
@@ -3709,8 +3911,8 @@ string[87] HELD_SHAPES = {
     "        return;",
     "    }",
     "}",
-    // an address of the held address makes it memory, so its own address makes its local memory:
-    // UU
+    // an address of a field of a local is no held address, so it makes the local memory, and an
+    // address of it makes it memory too: UU
     "fn main.o6(_1 (x): node mut* own) -> void {",
     "    let _2 (s): node;",
     "    let _3: node mut* own mut*;",
@@ -4027,6 +4229,8 @@ fn a_global_has_no_fact_at_the_entry() void {
 // A held address `(*_a)` reads as the place of its `addr mut`.
 fn a_held_address_reads_as_its_place() void {
     expect(HELD[..], HELD_VERDICTS[..]);
+    expect(HELD_STORE[..], HELD_STORE_VERDICTS[..]);
+    expect(HELD_STALE[..], HELD_STALE_VERDICTS[..]);
 }
 
 // A fact holds at the start of a block when it holds at the end of each predecessor.
