@@ -12,7 +12,8 @@
 //   store into memory can stand there;
 // - the fresh pointer locals, joined by intersection;
 // - the facts, joined by intersection. A walk of each block gives its sets, with the stale set and
-//   the fresh set before each statement.
+//   the fresh set before each statement. The block of a check also takes the kill rules of the
+//   first statement after the check, which runs before the store of the check.
 // The module uses switches and no function-pointer dispatch table. It holds no module-level
 // mutable state: each vector belongs to one call of prove, or to the proof that it returns.
 import fort.ast;
@@ -1022,6 +1023,26 @@ fn gen_reads(context mut* c, fir.statement* s, fir_flow.bits* stale, probes mut*
     }
 }
 
+// The kill rules of the assignment `s` in their order: the kill of a `call`, then, when `store`
+// holds, the kill rules of its store into `d`, the path of its destination. `stale` holds the
+// stale set before `s`, and `fresh` the fresh set after its right side.
+fn apply_kills(context* c, fir.statement* s, path d, bool store, fir_flow.bits* stale,
+               fir_flow.bits* fresh, probes mut* pr) void {
+    if (s->value.kind == fir.rvalue_kind.rv_call) {
+        kill_call(c, pr);
+    }
+    if (!store) {
+        return;
+    }
+    // a store through a stale held address can write a place through a fresh pointer local,
+    // because the `addr` of a held address ends no freshness, so no fresh fact survives it
+    if (is_stale_held(c, s->place, stale)) {
+        kill_store(c, d, null, pr);
+    } else {
+        kill_store(c, d, fresh, pr);
+    }
+}
+
 // The effect of the statement `s` on the facts, in the order of the rules: the reads of its
 // operands, the kill of a `call`, the kill rules of its store and then its gen rule. `stale` and
 // `fresh` hold the sets before `s`, and the function moves them past `s`. A terminator changes no
@@ -1031,18 +1052,9 @@ fn apply_facts(context mut* c, fir.statement* s, fir_flow.bits mut* stale,
     gen_reads(c, s, stale, pr);
     apply_fresh_reads(c, s, fresh);
     if (s->kind == fir.stmt_kind.st_assign) {
-        if (s->value.kind == fir.rvalue_kind.rv_call) {
-            kill_call(c, pr);
-        }
         u64 mark = c->steps_len;
         path d = trace(c, s->place, stale);
-        // a store through a stale held address can write a place through a fresh pointer local,
-        // because the `addr` of a held address ends no freshness, so no fresh fact survives it
-        if (is_stale_held(c, s->place, stale)) {
-            kill_store(c, d, null, pr);
-        } else {
-            kill_store(c, d, fresh, pr);
-        }
+        apply_kills(c, s, d, true, stale, fresh, pr);
         if (is_zero_value(c, s->value)) {
             gen_below(c, d, pr);
         }
@@ -1201,7 +1213,37 @@ fn collect_facts(context mut* c, fir_flow.dataflow* stale) void {
     }
 }
 
-// Runs the facts dataflow: an intersection from the entry, which holds no fact.
+// The kill rules that the first statement of the continuation block of the check that ends
+// block `b` applies before the store of the check writes (spec/fir.md 11, Proof): each kill rule
+// of that statement, but not the kill rules of a store into the place of the check, which come
+// after the test of that place (D17.11). Only an assignment has kill rules. `stale` and `fresh`
+// hold the sets at the end of block `b`, which rule V11 makes the sets before that statement, and
+// the function moves `fresh` past its right side.
+fn kill_after_check(context mut* c, u32 b, fir_flow.bits* stale, fir_flow.bits mut* fresh,
+                    probes mut* pr) void {
+    fir.func* f = c->f;
+    u32 fact = c->block_fact[cast(b, u64)];
+    // a block that ends in no check, or in a check of a place that is not tracked, has no fact
+    if (fact == NO_FACT) {
+        return;
+    }
+    u32 next = fir.block_at(f, b)->term.target;
+    if (fir.block_statement_count(f, next) == 0) {
+        return;
+    }
+    fir.statement* s = fir.block_statement(f, next, 0);
+    if (s->kind != fir.stmt_kind.st_assign) {
+        return;
+    }
+    apply_fresh_reads(c, s, fresh);
+    u64 mark = c->steps_len;
+    path d = trace(c, s->place, stale);
+    apply_kills(c, s, d, !is_same(c, d, c->facts[cast(fact, u64)]), stale, fresh, pr);
+    c->steps_len = mark;
+}
+
+// Runs the facts dataflow: an intersection from the entry, which holds no fact. The block of a
+// check ends with the kill rules of the first statement after the check (kill_after_check).
 fn run_facts(context mut* c, fir.pred_table* pt, fir_flow.dataflow* stale,
              fir_flow.dataflow* fresh, fir_flow.dataflow mut* d) void {
     fir.func* f = c->f;
@@ -1232,6 +1274,7 @@ fn run_facts(context mut* c, fir.pred_table* pt, fir_flow.dataflow* stale,
             apply_facts(c, fir.block_statement(f, b, i), &at_stale, &at_fresh, &pr);
             i += 1;
         }
+        kill_after_check(c, b, &at_stale, &at_fresh, &pr);
         split_probes(&pr, gens, kills, b);
         b += 1;
     }
@@ -1240,7 +1283,9 @@ fn run_facts(context mut* c, fir.pred_table* pt, fir_flow.dataflow* stale,
 }
 
 /// Proves each `check(overwrite: p)` of the verified function `f` within WORK_LIMIT. A check is
-/// proved when `p` is a tracked place whose fact holds at the end of the block of the check.
+/// proved when `p` is a tracked place whose fact holds at the end of the block of the check, after
+/// the kill rules of the first statement of its continuation block, but for the kill rules of a
+/// store into `p`.
 fn prove(fir.func* f) proof {
     return prove_within(f, WORK_LIMIT);
 }

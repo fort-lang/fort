@@ -939,7 +939,19 @@ changes the function, and the verifier runs after it. The passes run in this ord
      every edge, the edge that V9 prunes on a constant `switch` included, and it iterates to a
      fixpoint.
    - **Proof.** A `check(overwrite: p)` is proved when `p` is a tracked place and its fact holds at
-     the end of its block. The work of a function is the sum of three counts: its statements and
+     the end of its block. The first statement of the continuation block of the check runs after
+     the check and before the store writes `p`. So the pass also applies the kill rules of that
+     statement (**Kill**) at the end of the block of the check, in their order: the kill of a
+     `call`, then the kill rules of its store. When that statement stores into `p` itself, the pass
+     applies only the kill of its `call`: D17.11 tests the fact after the right-hand side and before
+     the kill rules of the store. A store into `p` itself is a store whose destination the pass
+     reads as `p`. So `(*_1).0 = call fn f(copy _1)` after `check(overwrite: (*_1).0)`, and
+     `_2 = const u64 1` after `check(overwrite: _1[_2])`, leave the check unproved. The lowering
+     writes the right-hand side before the check, and `p = move _t` first in the continuation block
+     (9.3), so the rule changes no check of the lowering. Only the first statement counts: a later
+     statement or a `goto` between the check and its store is outside the guarantee of the pass,
+     and the lowering makes neither. The work of a function is the sum of three counts: its
+     statements and
      terminators times its `check(overwrite: p)` terminators, its blocks times its locals, and for
      each local `_k` that is not memory the assignments whose place has the base `_k` times the
      temporaries `_t` that are not memory and that exactly one assignment writes, with the rvalue
