@@ -1209,7 +1209,8 @@ exists at that path. `_NSGetExecutablePath` is not a C library function, so `std
 declares it, and `std.libc` does not. `real_path` gives the canonical form of a path with
 `libc.realpath`: an absolute path with symbolic links, `.` and `..` resolved. `open_nonblocking`
 and `file_mode` give the type of a file without a read: the open of a FIFO does not wait for a
-writer, and `fstat(2)` gives the type bits.
+writer, and `fstat(2)` gives the type bits. `path_mode` gives them from a path with `stat(2)`,
+which opens nothing.
 
 ```fort
 string TARGET = "x86_64-linux-gnu";          // std/linux/os.ft
@@ -1219,6 +1220,7 @@ fn exe_path(strbuf.str_buf mut* out) bool;
 fn real_path(string path, strbuf.str_buf mut* out) bool;
 fn open_nonblocking(string path) i32;
 fn file_mode(i32 fd, u32 mut* mode) bool;
+fn path_mode(string path, u32 mut* mode) bool;
 ```
 
 `exe_path` appends the path to `out` and returns true. It returns false and leaves `out`
@@ -1235,7 +1237,10 @@ when `fstat(2)` fails. `std.os` declares `fstat` itself and `std.libc` does not,
 program that imports `std.os` binds the C symbol (D9.8). The buffer is 18 words of 8 bytes, with
 the alignment of C, and not a struct, because a struct would give the symbol a type that a
 program cannot write again. `st_mode` is a u32 at byte 24 on Linux x86-64 and a u16 at byte 4 on
-Darwin arm64.
+Darwin arm64. `path_mode` writes the same bits of the file that `path` names, after each
+symbolic link, and returns true; it returns false with errno set when `stat(2)` fails. It opens
+nothing, so a FIFO that has no writer and a file that the process cannot read give their mode.
+`std.os` declares `stat` for the reason of `fstat`, with the same buffer.
 
 ### 2.15 `std.digest.sha256`
 

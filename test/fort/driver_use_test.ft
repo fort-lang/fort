@@ -14,10 +14,12 @@
 /// across units, the modes that read the interface files, and a library build that uses another
 /// library. The artifacts come from `--lib` builds of this suite, whose --cc and --ar are
 /// scripts: the compile copies the IR module to the object and the archiver puts it after an
-/// archive header. test/library/use_test.py runs the real tools.
+/// archive header. test/library/use_test.py runs the real tools. Each build starts with no cache
+/// directory, so each build compiles its unit; driver_cache_test holds the cache.
 import capture;
 import driver;
 import library.artifact;
+import sandbox_tree;
 import std.io;
 import std.libc;
 import std.os;
@@ -142,8 +144,9 @@ fn is_empty_dir(string path) bool {
     return n == 0;
 }
 
-// `fort <head> <more>` in one list.
+// `fort <head> <more>` in one list, with no cache directory left by an earlier build.
 fn run_with(string@ head, string@ more) i32 {
+    sandbox_tree.remove_caches();
     string[32] mut args = {};
     u64 mut n = 0;
     while (n < head.len) {
@@ -845,7 +848,11 @@ fn an_object_is_the_compile_line_alone() void {
     assert(str.find(object, "declare dso_local i32 @\"std.io.f\"(i32) #0\n") > 0);
     string own log = cc_log();
     defer del(log);
-    assert(str.find(log, "\n-c\n-o\nmain.o\n") > 0);
+    // the compile line writes the object in the temporary directory, and the build writes the
+    // -c output from the bytes that it read there (toolchain.md 2.1, steps 6 and 7)
+    assert(str.find(log, "\n-c\n-o\ntemp/fort-") > 0);
+    assert(str.find(log, "/main.o\n") > 0);
+    assert(str.find(log, "\nmain.o\n") < 0);
     // one invocation: no link line
     assert(str.find(log, "--\n") == cast(log.len - 3, i64));
 }
@@ -1137,7 +1144,7 @@ fn a_release_build_compiles_at_the_release_level() void {
     assert(err_is(""));
     string own log = cc_log();
     defer del(log);
-    assert(str.find(log, "\n-O2\n-fPIE\n-Wno-override-module\n-c\n-o\nmain.o\n") > 0);
+    assert(str.find(log, "\n-O2\n-fPIE\n-Wno-override-module\n-c\n-o\ntemp/fort-") > 0);
 }
 
 fn ir_and_object_together_stop_at_the_ir() void {
@@ -1275,11 +1282,11 @@ fn a_closure_error_stops_before_the_extern_check() void {
     assert(str.find(err, "conflicting declarations") < 0);
 }
 
-fn the_cache_options_are_not_known_yet() void {
+fn the_cache_options_need_a_library_build() void {
     string[4] args = {"fort", "--cache-dir", "c", "main.ft"};
-    assert(usage_error_is(args[..], "unknown option '--cache-dir'"));
+    assert(usage_error_is(args[..], "--cache-dir requires --lib or --use"));
     string[3] stats = {"fort", "--cache-stats", "main.ft"};
-    assert(usage_error_is(stats[..], "unknown option '--cache-stats'"));
+    assert(usage_error_is(stats[..], "--cache-stats requires --lib or --use"));
 }
 
 fn a_path_that_holds_an_equal_sign_is_the_path() void {
@@ -1679,7 +1686,7 @@ fn main() i32 {
     the_used_libraries_are_read_before_the_entry_file();
     a_manifest_that_cannot_be_read_is_exit_two();
     a_closure_error_stops_before_the_extern_check();
-    the_cache_options_are_not_known_yet();
+    the_cache_options_need_a_library_build();
     a_path_that_holds_an_equal_sign_is_the_path();
     three_libraries_link_in_the_order_of_their_uses();
     a_trailing_separator_of_a_path_takes_no_second_one();

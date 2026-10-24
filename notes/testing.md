@@ -32,7 +32,7 @@ bullet at a time and without a rewrite.
   one `mutation_anchors_<table>` test for each table in `tools/mutations`, and the three
   `mutate_` tests of `--check` over the fixture `test/mutate/strict_table.json`;
   the 71 bootstrap0 C suites. Integration: the corpus (`lang`, `lang-json`), `library-interface`,
-  `library-artifact`, `library-use`, `fixpoint`, `tty`,
+  `library-artifact`, `library-use`, `library-cache`, `fixpoint`, `tty`,
   `stack_depth` and `lsp-binary`; bootstrap0 has none, since building bootstrap-1 proves the C
   compiler. `stack_depth` gives each compiler of the build a 1 MB stack and a type of 254
   nested groups (D2.11). Before the checkers kept their suffixes on a stack of their own, that
@@ -625,7 +625,9 @@ bullet at a time and without a rewrite.
   must carry the types of the definition in the library module. The archiver of macOS writes the
   time stamp of
   each member unless `ZERO_AR_DATE=1` is set (probed with `/usr/bin/ar rcs` twice over one
-  object), so the test sets it. GNU ar 2.42 of the VM writes zero stamps by default. The module
+  object). The compiler sets it for the archiver (toolchain.md 2.1, step 8), so the test removes
+  it from its environment, and on macOS the two archives are equal only through the compiler.
+  GNU ar 2.42 of the VM writes zero stamps by default. The module
   suite `driver_artifact_test.ft` runs the build with a `--cc` and an `--ar` that are scripts, so
   the bytes of each file are known; only the ctest runs the real tools.
 - **`library-use` holds the run corpus of `test/lang` built against `std.flib`** (D9.11).
@@ -644,6 +646,19 @@ bullet at a time and without a rewrite.
   `--cc` and an `--ar` that are scripts, and it forges manifests to reach each refusal of
   toolchain.md 1: a cycle of used libraries comes from no build, because a build of `a` against
   `b` must name `a` with `--use` when `b` uses `a`, and `--use` of the `--lib` name is refused.
+  Each program is built against `std.flib` twice with one cache directory, so the warm build links
+  the object that the fill build stored and must give the same outcome.
+- **A library build of a test reads and writes the cache, so name its cache directory** (D9.11,
+  toolchain.md 2.3). By default `--lib` writes `<root>/.fort-cache` and `--use` writes
+  `<entry dir>/.fort-cache`, which puts entries into `test/lang` or a standard root. The scripts
+  of `test/library` pass `--cache-dir` in their temporary directory; `find test std -name
+  .fort-cache` after a `use_test.py` run gave 0. A suite that builds one unit twice and asserts
+  the compile line gets a hit the second time: `driver_use_test.ft` calls
+  `sandbox_tree.remove_caches()` (`test/fort/support/sandbox_tree.ft`) before each build, so its
+  builds compile as before, and `driver_cache_test.ft` counts the compile lines of hits and
+  misses. `library-cache` (`test/library/cache_test.py`) builds `test/library/chain` cold, fill
+  and warm with the real tools and holds the rebuild rule over an edit of a body and of a
+  declaration.
 
 ## 5. Product tests and the fixed point
 

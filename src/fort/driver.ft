@@ -19,6 +19,7 @@ import index;
 import json;
 import lexer;
 import library.artifact;
+import library.cache;
 import library.graph;
 import library.interface;
 import library.tree;
@@ -136,6 +137,9 @@ struct options {
     bool emit_interface; // --emit-interface: the interface file of --lib on stdout
     bool have_ar; // --ar was given, which only --lib takes
     string ar; // --ar, the archiver that writes `lib.a`
+    bool have_cache_dir; // --cache-dir was given, which only a library build takes
+    string cache_dir; // --cache-dir, read only when have_cache_dir
+    bool cache_stats; // --cache-stats: the line of the cache outcome on stdout after the build
     containers.str_vec use_names; // the name of each --use, in command-line order
     containers.str_vec use_paths; // the artifact of each --use, at the matching position
     containers.str_vec includes; // -I roots, searched in command-line order
@@ -199,6 +203,8 @@ fn help() void {
     println("  --emit-interface   write the interface file of --lib to stdout and stop");
     println("  --ar <path>        the archiver that writes the lib.a of --lib (default ",
             DEFAULT_AR, ")");
+    println("  --cache-dir <dir>  the cache directory of a library build");
+    println("  --cache-stats      write the cache outcome of a library build to stdout");
     println("  --help             print this help and exit");
     println("  --version          print the compiler version and exit");
 }
@@ -326,8 +332,8 @@ fn parse_cfg(options mut* opts, string list) bool {
 }
 
 // The options that carry no value: -S, -c, --release, --no-bounds-check, --check, --json,
-// --index, --tokens, --ast, --fir, --fir-test, --fir-verify-report, --fir-stats and
-// --emit-interface, each of which sets one flag.
+// --index, --tokens, --ast, --fir, --fir-test, --fir-verify-report, --fir-stats,
+// --emit-interface and --cache-stats, each of which sets one flag.
 fn parse_flag(options mut* opts, string arg) bool {
     if (arg == "-S") {
         opts->emit_ir = true;
@@ -368,6 +374,9 @@ fn parse_flag(options mut* opts, string arg) bool {
     } else if (arg == "--emit-interface") {
         // writes the interface file of the library and stops (D9.11)
         opts->emit_interface = true;
+    } else if (arg == "--cache-stats") {
+        // writes the cache outcome of a library build (D9.11)
+        opts->cache_stats = true;
     } else {
         return false;
     }
@@ -376,8 +385,8 @@ fn parse_flag(options mut* opts, string arg) bool {
 
 // The options that take the following argument. Returns false when `arg` is not
 // one of them; *ok is false when the argument was missing. The last -o,
-// --std-dir, --cc, --target and --ar win, while -I, --cfg, -l and -Xcc accumulate
-// in command-line order. A duplicate configuration key is an error.
+// --std-dir, --cc, --target, --ar and --cache-dir win, while -I, --cfg, -l and -Xcc
+// accumulate in command-line order. A duplicate configuration key is an error.
 fn parse_valued(options mut* opts, string@ args, u64 mut* i, bool mut* ok) bool {
     string arg = args[*i];
     bool is_output = arg == "-o";
@@ -389,8 +398,9 @@ fn parse_valued(options mut* opts, string@ args, u64 mut* i, bool mut* ok) bool 
     bool is_cc_arg = arg == "-Xcc";
     bool is_ar = arg == "--ar";
     bool is_use = arg == "--use";
+    bool is_cache_dir = arg == "--cache-dir";
     if (!is_output && !is_include && !is_std_dir && !is_cc && !is_target && !is_cfg
-        && !is_cc_arg && !is_ar && !is_use) {
+        && !is_cc_arg && !is_ar && !is_use && !is_cache_dir) {
         return false;
     }
     string mut value = "";
@@ -421,6 +431,9 @@ fn parse_valued(options mut* opts, string@ args, u64 mut* i, bool mut* ok) bool 
         if (!parse_use(opts, value)) {
             *ok = false;
         }
+    } else if (is_cache_dir) {
+        opts->have_cache_dir = true;
+        opts->cache_dir = value;
     } else {
         containers.str_push(&opts->cc_args, value);
     }
@@ -522,6 +535,16 @@ fn parse(options mut* opts, string@ args) i32 {
             }
         }
         i += 1;
+    }
+    if ((opts->have_cache_dir || opts->cache_stats) && !opts->have_lib
+        && opts->use_names.len == 0) {
+        // only a library build has a cache (D9.11); --cache-dir reports first
+        if (opts->have_cache_dir) {
+            usage_error("--cache-dir requires --lib or --use");
+        } else {
+            usage_error("--cache-stats requires --lib or --use");
+        }
+        return PARSE_ERROR;
     }
     if (opts->have_lib || opts->emit_interface || opts->have_ar) {
         return check_library_options(opts);
@@ -1091,14 +1114,25 @@ fn run_cc(options* opts, string ir_path, string out_path) i32 {
     return run_tool("cc", &argv);
 }
 
+// The variable that makes Apple ar write zero for the time of each member, so that two archives
+// of one object are the same bytes (toolchain.md 2.1, step 8). GNU ar and llvm-ar ignore it.
+string ZERO_AR_DATE = "ZERO_AR_DATE";
+string ZERO_AR_DATE_VALUE = "1";
+
 // Runs the command `argv`, whose first argument names the program, and waits for it. `role` is
-// `cc` or `ar`, the word of the status messages. Returns EXIT_OK, or EXIT_USAGE after reporting
-// the failure: `cannot run '<program>': <reason>`, or `<role> failed with status <n>` or
-// `... with signal <n>`.
+// `cc` or `ar`, the word of the status messages. The archiver runs with ZERO_AR_DATE=1 in its
+// environment and the other tools with the environment of the compiler. Returns EXIT_OK, or
+// EXIT_USAGE after reporting the failure: `cannot run '<program>': <reason>`, or `<role> failed
+// with status <n>` or `... with signal <n>`.
 fn run_tool(string role, containers.str_vec* argv) i32 {
     string program = containers.str_at(argv, 0);
     cc_command mut cmd = cc_command_build(argv);
     defer cc_command_free(&cmd);
+    // made before fork(2), so the child only calls setenv(3) and execvp(3)
+    char mut@ own env_name = str.to_cstr(ZERO_AR_DATE);
+    defer del(env_name);
+    char mut@ own env_value = str.to_cstr(ZERO_AR_DATE_VALUE);
+    defer del(env_value);
     i32[2] mut fds = {};
     if (libc.pipe(&fds[0]) != 0) {
         error_path("cannot run", program, str.from_cstr(libc.strerror(sys.errno())));
@@ -1126,6 +1160,10 @@ fn run_tool(string role, containers.str_vec* argv) i32 {
         // The child replaces itself with --cc. Reaching the line after execvp means it failed. The
         // child sends errno through the pipe. The parent reports it as a posix_spawnp result.
         io.close(fds[0]);
+        if (role == "ar") {
+            // a failure leaves the environment as it was, and the archive can then hold a time
+            libc.setenv(env_name.ptr, env_value.ptr, 1);
+        }
         libc.execvp(&cmd.bytes[0], cast(&cmd.items[0], void*));
         u64 e = cast(sys.errno(), u64);
         u8[4] mut buf = {};
@@ -1184,6 +1222,7 @@ struct libraries {
     containers.str_vec files; // the interface file of each, `<path>/interface.ft`
     containers.pool pool; // the paths of `files`
     vec.int_vec order; // the index of each library in the link order (module-system.md 10.4)
+    strbuf.str_buf compiler; // the compiler identity, empty until hash_identity computes it
 }
 
 fn free_libraries(libraries mut* libs) void {
@@ -1197,6 +1236,7 @@ fn free_libraries(libraries mut* libs) void {
     containers.str_free(&libs->files);
     containers.pool_free(&libs->pool);
     vec.int_free(&libs->order);
+    strbuf.free(&libs->compiler);
 }
 
 // Reports `library '<path>' is corrupt`.
@@ -1204,14 +1244,16 @@ fn error_corrupt(string path) void {
     eprintln("fort: error: library '", path, "' is corrupt");
 }
 
-// Fills `*build` with the fields of this build that a used library must have (D9.11): the
-// compiler identity, the target, the two modes and the configuration map, whose storage is
-// `compiler`, `keys` and `values`. Returns false after the error of the compiler executable.
-fn build_fields(options* opts, artifact.manifest mut* build, strbuf.str_buf mut* compiler,
-                containers.str_vec mut* keys, containers.str_vec mut* values) bool {
+// Puts the compiler identity of D9.11 in `libs->compiler` when it is not there yet, so a build
+// reads the compiler executable once. Returns false after the error of the compiler executable.
+fn hash_identity(libraries mut* libs) bool {
+    if (strbuf.view(&libs->compiler).len > 0) {
+        return true;
+    }
     strbuf.str_buf mut exe = strbuf.create();
     defer strbuf.free(&exe);
-    if (!artifact.hash_compiler(compiler, &exe)) {
+    if (!artifact.hash_compiler(&libs->compiler, &exe)) {
+        strbuf.clear(&libs->compiler);
         if (strbuf.view(&exe).len == 0) {
             error("internal error: the system gives no path of the compiler executable");
         } else {
@@ -1219,8 +1261,20 @@ fn build_fields(options* opts, artifact.manifest mut* build, strbuf.str_buf mut*
         }
         return false;
     }
+    return true;
+}
+
+// Fills `*build` with the fields of this build that a used library must have (D9.11): the
+// compiler identity, the target, the two modes and the configuration map, whose storage is
+// `libs->compiler`, `keys` and `values`. Returns false after the error of the compiler
+// executable.
+fn build_fields(options* opts, libraries mut* libs, artifact.manifest mut* build,
+                containers.str_vec mut* keys, containers.str_vec mut* values) bool {
+    if (!hash_identity(libs)) {
+        return false;
+    }
     append_config(opts, keys, values);
-    build->compiler = strbuf.view(compiler);
+    build->compiler = strbuf.view(&libs->compiler);
     build->target = opts->target;
     build->release = opts->release;
     build->no_bounds_check = opts->no_bounds_check;
@@ -1272,14 +1326,12 @@ fn read_libraries(options* opts, libraries mut* libs) i32 {
     del(libs->items);
     libs->items = new(artifact.contents, n);
     libs->len = n;
-    strbuf.str_buf mut compiler = strbuf.create();
-    defer strbuf.free(&compiler);
     containers.str_vec mut keys = containers.str_create();
     defer containers.str_free(&keys);
     containers.str_vec mut values = containers.str_create();
     defer containers.str_free(&values);
     artifact.manifest mut build = artifact.manifest{};
-    if (!build_fields(opts, &build, &compiler, &keys, &values)) {
+    if (!build_fields(opts, libs, &build, &keys, &values)) {
         return EXIT_USAGE;
     }
     u64 mut i = 0;
@@ -1436,9 +1488,11 @@ fn entry_opens(string path) bool {
 // file, then parse the import closure. An entry file that
 // cannot be opened is exit 2 and a compile diagnostic is exit 1. A closure that
 // loaded cleanly would be the checker's and the emitter's turn, which is the
-// internal error of `run` below.
+// internal error of `run` below. A build that uses the cache looks up the key of the entry unit
+// after a load with no diagnostic (toolchain.md 2.1, step 3), and a hit checks nothing more:
+// the build that stored the entry checked the same sources against the same interfaces.
 fn front_end(session.session mut* s, options* opts, string program, libraries* libs,
-             analysis mut* an) i32 {
+             analysis mut* an, cached_unit mut* u) i32 {
     // The loader reads each file through the session.
     // This keeps a server buffer consistent across the closure.
     if (!entry_opens(opts->entry)) {
@@ -1453,6 +1507,17 @@ fn front_end(session.session mut* s, options* opts, string program, libraries* l
         return used;
     }
     bool loaded = load_closure(s, opts, program, an);
+    if (u->active && loaded && session.error_count(s) == 0) {
+        fill_unit(opts, libs, u);
+        u->fields.entry_unit = true;
+        strbuf.append(&u->entry_path, modules.entry(&an->set)->path);
+        u->fields.entry = strbuf.view(&u->entry_path);
+        artifact.hash_sources(&an->set, &u->source);
+        find_unit(opts, opts->entry[..last_component(opts->entry)], u);
+        if (u->found == cache.outcome.o_hit) {
+            return EXIT_OK;
+        }
+    }
     // Check each parsed module in dependency order.
     // A parse failure in one file does not hide errors in other files.
     // Keep the analysis available for the emitter and index walk. A compilation builds a
@@ -1999,14 +2064,20 @@ fn compile_entry(options* opts, string program) i32 {
     analysis mut an = analysis_create(&s);
     bool mut analysis_live = true;
     defer analysis_release(&an, &analysis_live);
-    i32 mut status = front_end(&s, opts, program, &libs, &an);
+    // Only a build with --use that writes an object or an executable uses the cache (toolchain.md
+    // 2.3). --fir-stats counts what the emitter writes, which a hit does not run.
+    cached_unit mut u = cached_unit{};
+    defer free_unit(&u);
+    u.active = libs.len > 0 && !opts->check && !opts->fir && !opts->emit_ir && !opts->fir_stats;
+    i32 mut status = front_end(&s, opts, program, &libs, &an, &u);
+    bool hit = status == EXIT_OK && u.active && u.found == cache.outcome.o_hit;
     // A build with --use runs the emptiness pass as --check does, and then the extern check of
     // the used libraries (toolchain.md 2.1, step 4). A whole program runs the pass in the emitter
     // or in --fir, and --fir-verify-report reports no overwrite error in either mode.
-    if (status == EXIT_OK && (opts->check || (libs.len > 0 && !opts->fir_report))) {
+    if (!hit && status == EXIT_OK && (opts->check || (libs.len > 0 && !opts->fir_report))) {
         status = overwrite_entry(&s, &an, opts);
     }
-    if (status == EXIT_OK && !check_outside(&s, opts, &libs, &an)) {
+    if (!hit && status == EXIT_OK && !check_outside(&s, opts, &libs, &an)) {
         status = EXIT_COMPILE_ERROR;
     }
     if (opts->check && opts->json && (status == EXIT_OK || status == EXIT_COMPILE_ERROR)) {
@@ -2046,12 +2117,22 @@ fn compile_entry(options* opts, string program) i32 {
                    str.from_cstr(libc.strerror(failure)));
         return EXIT_USAGE;
     }
-    string ir_path = join_path(&p, dir, entry_base(opts->entry), IR_SUFFIX);
-    i32 mut built = emit_module(&s, opts, &an, ir_path);
+    string mut ir_path = join_path(&p, dir, entry_base(opts->entry), IR_SUFFIX);
+    i32 mut built = EXIT_OK;
+    if (hit) {
+        // the object of the entry replaces steps 4 to 6 (toolchain.md 2.1)
+        ir_path = "";
+    } else {
+        built = emit_module(&s, opts, &an, ir_path);
+    }
     // Release analysis storage before fork duplicates the process page tables.
     analysis_release(&an, &analysis_live);
     if (libs.len > 0) {
-        return build_entry_unit(opts, &libs, built, dir, ir_path, out_path);
+        built = build_entry_unit(opts, &libs, &u, built, dir, ir_path, out_path);
+        if (built == EXIT_OK) {
+            write_stats(opts, &u);
+        }
+        return built;
     }
     if (built == EXIT_OK) {
         built = run_cc(opts, ir_path, out_path);
@@ -2116,27 +2197,78 @@ fn link_entry(options* opts, string object_path, containers.str_vec* archives, s
     return run_tool("cc", &argv);
 }
 
+// Writes `object`, the object of the entry unit, and its manifest to the cache entry of the key
+// (toolchain.md 2.1, step 6). A cache entry that cannot be written is no error (toolchain.md
+// 2.3).
+fn store_entry(u8@ object, cached_unit mut* u) void {
+    strbuf.str_buf mut object_hash = strbuf.create();
+    defer strbuf.free(&object_hash);
+    artifact.append_hash(&object_hash, object);
+    u->fields.object = strbuf.view(&object_hash);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    artifact.write_manifest(&u->fields, &text);
+    // the field points into a buffer of this call, so it goes before the buffer does
+    u->fields.object = "";
+    cache.store_object(strbuf.view(&u->dir), strbuf.view(&u->key), object, strbuf.view(&text));
+}
+
+// The object of the entry unit in `*object`: the checked `object.o` of a hit, or else the object
+// that the compile line writes to `object_path` in the temporary directory, read once and stored
+// in the cache when the build uses it. A link reads the object at `object_path`, so a hit writes
+// it there too. Returns EXIT_OK, or EXIT_USAGE after the report of a tool or a file.
+fn make_object(options* opts, cached_unit mut* u, string ir_path, string object_path,
+               strbuf.str_buf mut* object) i32 {
+    if (u->active && u->found == cache.outcome.o_hit) {
+        strbuf.append_bytes(object, strbuf.bytes(&u->entry.object));
+        if (!opts->compile_only && !io.write_file(object_path, strbuf.bytes(object))) {
+            error_path("cannot write", object_path, str.from_cstr(libc.strerror(sys.errno())));
+            return EXIT_USAGE;
+        }
+        return EXIT_OK;
+    }
+    i32 status = compile_library(opts, ir_path, object_path);
+    if (status != EXIT_OK) {
+        return status;
+    }
+    if (!io.read_file(object_path, object)) {
+        error_path("cannot read", object_path, str.from_cstr(libc.strerror(sys.errno())));
+        return EXIT_USAGE;
+    }
+    if (u->active) {
+        store_entry(strbuf.bytes(object), u);
+    }
+    return EXIT_OK;
+}
+
 // Steps 6 and 7 of a build with --use (toolchain.md 2.1), after the emitter wrote the module of
-// the entry unit to `ir_path` with the status `built`: the compile line of a --lib build to the
-// -c output or to `<dir>/<entry>.o`, and then, without -c, the link line over the object and the
-// copy of each `lib.a`. Removes each file that it wrote in `dir`, and then `dir`.
-fn build_entry_unit(options* opts, libraries* libs, i32 built, string dir, string ir_path,
-                    string out_path) i32 {
+// the entry unit to `ir_path` with the status `built`: the compile line of a --lib build to
+// `<dir>/<entry>.o` and the cache entry of the object, or the object of a hit, with `ir_path`
+// empty. Under -c the build writes those bytes to the -c output, so a hit and a miss write one
+// file the same way; else it runs the link line over the object and the copy of each `lib.a`.
+// Removes each file that it wrote in `dir`, and then `dir`.
+fn build_entry_unit(options* opts, libraries* libs, cached_unit mut* u, i32 built, string dir,
+                    string ir_path, string out_path) i32 {
     containers.pool mut p = containers.pool_create();
     defer containers.pool_free(&p);
     containers.str_vec mut written = containers.str_create();
     defer containers.str_free(&written);
     containers.str_push(&written, ir_path);
-    string mut object_path = out_path;
-    if (!opts->compile_only) {
-        object_path = join_path(&p, dir, entry_base(opts->entry), OBJECT_SUFFIX);
-        containers.str_push(&written, object_path);
-    }
+    string object_path = join_path(&p, dir, entry_base(opts->entry), OBJECT_SUFFIX);
+    containers.str_push(&written, object_path);
+    strbuf.str_buf mut object = strbuf.create();
+    defer strbuf.free(&object);
     i32 mut status = built;
     if (status == EXIT_OK) {
-        status = compile_library(opts, ir_path, object_path);
+        status = make_object(opts, u, ir_path, object_path, &object);
     }
-    if (status == EXIT_OK && !opts->compile_only) {
+    if (status == EXIT_OK && opts->compile_only) {
+        i32 mut failure = 0;
+        if (!artifact.write_output(out_path, strbuf.bytes(&object), &failure)) {
+            error_path("cannot write", out_path, str.from_cstr(libc.strerror(failure)));
+            status = EXIT_USAGE;
+        }
+    } else if (status == EXIT_OK) {
         containers.str_vec mut archives = containers.str_create();
         defer containers.str_free(&archives);
         if (!copy_archives(opts, libs, &p, dir, &archives)) {
@@ -2152,6 +2284,98 @@ fn build_entry_unit(options* opts, libraries* libs, i32 built, string dir, strin
     }
     remove_library_temp(dir, containers.str_items(&written));
     return status;
+}
+
+// ---- the cache -----------------------------------------------------
+
+/// The unit of a build that uses the cache (toolchain.md 2.2 and 2.3): the fields of its manifest
+/// and the storage of their strings, its key, the cache directory and what the lookup found, with
+/// the checked bytes of a hit. A zero value is a build that uses no cache.
+struct cached_unit {
+    bool active; // the build reads and writes the cache
+    artifact.manifest fields; // the strings point into the members below, `libs` and `opts`
+    containers.str_vec cfg_keys;
+    containers.str_vec cfg_values;
+    containers.str_vec use_hashes;
+    strbuf.str_buf source; // the source hash
+    strbuf.str_buf key;
+    strbuf.str_buf dir; // the cache directory
+    strbuf.str_buf entry_path; // the entry module path, which outlives the analysis
+    cache.outcome found;
+    artifact.contents entry; // the files of the entry after a hit
+}
+
+fn free_unit(cached_unit mut* u) void {
+    containers.str_free(&u->cfg_keys);
+    containers.str_free(&u->cfg_values);
+    containers.str_free(&u->use_hashes);
+    strbuf.free(&u->source);
+    strbuf.free(&u->key);
+    strbuf.free(&u->dir);
+    strbuf.free(&u->entry_path);
+    artifact.free(&u->entry);
+}
+
+// Fills the fields of the manifest of the unit that the key covers, except the unit line and the
+// source hash: the compiler identity, the target, the two modes, the configuration map, `--cc`,
+// each `-Xcc` argument, `--ar`, and the interface hash of each used library (toolchain.md 2.2).
+// `libs->compiler` holds the compiler identity.
+fn fill_unit(options* opts, libraries* libs, cached_unit mut* u) void {
+    append_config(opts, &u->cfg_keys, &u->cfg_values);
+    u64 mut i = 0;
+    while (i < libs->len) {
+        containers.str_push(&u->use_hashes, libs->items[i].fields.interface);
+        i += 1;
+    }
+    artifact.manifest mut* m = &u->fields;
+    m->compiler = strbuf.view(&libs->compiler);
+    m->target = opts->target;
+    m->release = opts->release;
+    m->no_bounds_check = opts->no_bounds_check;
+    m->cfg_keys = containers.str_items(&u->cfg_keys);
+    m->cfg_values = containers.str_items(&u->cfg_values);
+    m->cc = opts->cc;
+    m->cc_args = containers.str_items(&opts->cc_args);
+    m->ar = opts->ar;
+    m->use_names = containers.str_items(&opts->use_names);
+    m->use_hashes = containers.str_items(&u->use_hashes);
+}
+
+// Computes the key of the unit from its fields and the source hash in `u->source`, and the cache
+// directory: `--cache-dir`, else `<base>/.fort-cache` (toolchain.md 2.3).
+fn compute_key(options* opts, string base, cached_unit mut* u) void {
+    u->fields.source = strbuf.view(&u->source);
+    strbuf.clear(&u->key);
+    artifact.append_key(&u->fields, &u->key);
+    strbuf.clear(&u->dir);
+    if (opts->have_cache_dir) {
+        strbuf.append(&u->dir, opts->cache_dir);
+    } else {
+        cache.append_default(&u->dir, base);
+    }
+}
+
+// Computes the key of the unit and looks it up in the cache directory (toolchain.md 2.3). Sets
+// `u->found`, and on a hit `u->entry` holds the checked files of the entry.
+fn find_unit(options* opts, string base, cached_unit mut* u) void {
+    compute_key(opts, base, u);
+    u->found = cache.find(strbuf.view(&u->dir), strbuf.view(&u->key), !u->fields.entry_unit,
+                          &u->entry);
+}
+
+// Writes the `--cache-stats` line of a build that used the cache (toolchain.md 1).
+fn write_stats(options* opts, cached_unit* u) void {
+    if (!opts->cache_stats || !u->active) {
+        return;
+    }
+    string mut name = u->fields.library;
+    if (u->fields.entry_unit) {
+        name = u->fields.entry;
+    }
+    strbuf.str_buf mut line = strbuf.create();
+    defer strbuf.free(&line);
+    cache.append_stats(&line, !u->fields.entry_unit, name, strbuf.view(&u->key), u->found);
+    print(strbuf.view(&line));
 }
 
 // ---- the library build ---------------------------------------------
@@ -2219,29 +2443,18 @@ fn archive_library(options* opts, string archive_path, string object_path) i32 {
     return run_tool("ar", &argv);
 }
 
-// Writes the artifact `dir` (toolchain.md 2.1, step 9, and 2.2). It reads the archive once and
-// uses those bytes for its hash and for the copy in the artifact. `interface_text` is the
-// interface file and `source` the source hash of the library. The manifest records the interface
-// hash of each used library of `libs`. The status is EXIT_USAGE after a report: the archive or
-// the compiler executable that cannot be read, or a file of the artifact that cannot be written.
-fn write_artifact(options* opts, libraries* libs, string dir, string interface_text,
-                  string source, string archive_path) i32 {
+// Writes the cache entry and then the artifact `dir` (toolchain.md 2.1, step 9, and 2.2). It
+// reads the archive once and uses those bytes for its hash and for both copies.
+// `interface_text` is the interface file, and `u` holds the fields of the manifest that the key
+// covers and the key. A cache entry that cannot be written is no error (toolchain.md 2.3). The
+// status is EXIT_USAGE after a report: the archive that cannot be read, or a file of the artifact
+// that cannot be written.
+fn write_artifact(string dir, string interface_text, string archive_path, cached_unit mut* u)
+    i32 {
     strbuf.str_buf mut archive = strbuf.create();
     defer strbuf.free(&archive);
     if (!io.read_file(archive_path, &archive)) {
         error_path("cannot read", archive_path, str.from_cstr(libc.strerror(sys.errno())));
-        return EXIT_USAGE;
-    }
-    strbuf.str_buf mut compiler = strbuf.create();
-    defer strbuf.free(&compiler);
-    strbuf.str_buf mut exe = strbuf.create();
-    defer strbuf.free(&exe);
-    if (!artifact.hash_compiler(&compiler, &exe)) {
-        if (strbuf.view(&exe).len == 0) {
-            error("internal error: the system gives no path of the compiler executable");
-        } else {
-            error_path("cannot read", strbuf.view(&exe), str.from_cstr(libc.strerror(sys.errno())));
-        }
         return EXIT_USAGE;
     }
     strbuf.str_buf mut interface_hash = strbuf.create();
@@ -2250,37 +2463,16 @@ fn write_artifact(options* opts, libraries* libs, string dir, string interface_t
     strbuf.str_buf mut archive_hash = strbuf.create();
     defer strbuf.free(&archive_hash);
     artifact.append_hash(&archive_hash, strbuf.bytes(&archive));
-    containers.str_vec mut keys = containers.str_create();
-    defer containers.str_free(&keys);
-    containers.str_vec mut values = containers.str_create();
-    defer containers.str_free(&values);
-    append_config(opts, &keys, &values);
-    artifact.manifest mut m = artifact.manifest{};
-    m.library = opts->lib_name;
-    m.compiler = strbuf.view(&compiler);
-    m.target = opts->target;
-    m.release = opts->release;
-    m.no_bounds_check = opts->no_bounds_check;
-    m.cfg_keys = containers.str_items(&keys);
-    m.cfg_values = containers.str_items(&values);
-    m.cc = opts->cc;
-    m.cc_args = containers.str_items(&opts->cc_args);
-    m.ar = opts->ar;
-    m.source = source;
-    containers.str_vec mut use_hashes = containers.str_create();
-    defer containers.str_free(&use_hashes);
-    u64 mut i = 0;
-    while (i < libs->len) {
-        containers.str_push(&use_hashes, libs->items[i].fields.interface);
-        i += 1;
-    }
-    m.use_names = containers.str_items(&opts->use_names);
-    m.use_hashes = containers.str_items(&use_hashes);
-    m.interface = strbuf.view(&interface_hash);
-    m.archive = strbuf.view(&archive_hash);
+    u->fields.interface = strbuf.view(&interface_hash);
+    u->fields.archive = strbuf.view(&archive_hash);
     strbuf.str_buf mut text = strbuf.create();
     defer strbuf.free(&text);
-    artifact.write_manifest(&m, &text);
+    artifact.write_manifest(&u->fields, &text);
+    // the two fields point into buffers of this call, so they go before the buffers do
+    u->fields.interface = "";
+    u->fields.archive = "";
+    cache.store_library(strbuf.view(&u->dir), strbuf.view(&u->key), interface_text,
+                        strbuf.bytes(&archive), strbuf.view(&text));
     strbuf.str_buf mut failed = strbuf.create();
     defer strbuf.free(&failed);
     i32 mut failure = 0;
@@ -2290,6 +2482,41 @@ fn write_artifact(options* opts, libraries* libs, string dir, string interface_t
         return EXIT_USAGE;
     }
     return EXIT_OK;
+}
+
+// Writes the files of the cache entry that a lookup found to the artifact `dir` by the write
+// protocol (toolchain.md 2.1, step 3): the bytes that the lookup checked. Returns EXIT_USAGE
+// after the report of a file of the artifact that cannot be written.
+fn copy_entry(string dir, cached_unit* u) i32 {
+    artifact.contents* c = &u->entry;
+    strbuf.str_buf mut failed = strbuf.create();
+    defer strbuf.free(&failed);
+    i32 mut failure = 0;
+    if (!artifact.write(dir, strbuf.view(&c->interface), strbuf.bytes(&c->archive),
+                        strbuf.view(&c->text), &failed, &failure)) {
+        error_path("cannot write", strbuf.view(&failed), str.from_cstr(libc.strerror(failure)));
+        return EXIT_USAGE;
+    }
+    return EXIT_OK;
+}
+
+// Reads each module file of the walk `t` once, through the session, and pushes its bytes to
+// `texts` (toolchain.md 2.1, step 2). The parse reads the same bytes from the session. Returns
+// false when a file cannot be read; the load then reports it.
+fn read_listed(session.session mut* s, tree.tree* t, containers.str_vec mut* paths,
+               containers.str_vec mut* files, containers.str_vec mut* texts) bool {
+    u64 mut i = 0;
+    while (i < tree.count(t)) {
+        string mut text = "";
+        if (!session.read_source(s, tree.file_at(t, i), &text)) {
+            return false;
+        }
+        containers.str_push(paths, tree.path_at(t, i));
+        containers.str_push(files, tree.file_at(t, i));
+        containers.str_push(texts, text);
+        i += 1;
+    }
+    return true;
 }
 
 // Removes the files that a library build wrote in the temporary directory, and then the
@@ -2307,12 +2534,15 @@ fn remove_library_temp(string dir, string@ files) void {
     remove_temp_dir(dir, "");
 }
 
-// `--lib <name> <root>` (toolchain.md 2.1, D9.11): walks the root, loads and checks every module
-// of the library, and lowers and verifies each body as --check does. --emit-interface then writes
-// the interface file to stdout. Else the build emits one IR module for the library, which -S
-// writes to its output. It compiles the module to an object, which -c writes to its output, and
-// else archives the object and writes the artifact `<name>.flib`. A root that cannot be read or
-// holds no module is exit 2, and a compile diagnostic is exit 1.
+// `--lib <name> <root>` (toolchain.md 2.1, D9.11): walks the root and reads each module file once.
+// A build that writes the artifact then takes the source hash and the key and looks the key up in
+// the cache; on a hit it writes the files of the entry to the artifact and stops. Else it loads
+// and checks every module of the library, and lowers and verifies each body as --check does.
+// --emit-interface then writes the interface file to stdout. Else the build emits one IR module
+// for the library, which -S writes to its output. It compiles the module to an object, which -c
+// writes to its output, and else archives the object and writes the cache entry and the artifact
+// `<name>.flib`. A root that cannot be read or holds no module is exit 2, and a compile
+// diagnostic is exit 1.
 fn library_entry(options* opts) i32 {
     if (!has_usable_target(opts)) {
         return EXIT_USAGE;
@@ -2340,6 +2570,38 @@ fn library_entry(options* opts) i32 {
     configure(&s, opts);
     diag.set_text(session.diags(&s), true);
     session.show_sources(&s);
+    containers.str_vec mut paths = containers.str_create();
+    defer containers.str_free(&paths);
+    containers.str_vec mut files = containers.str_create();
+    defer containers.str_free(&files);
+    containers.str_vec mut texts = containers.str_create();
+    defer containers.str_free(&texts);
+    bool listed = read_listed(&s, &t, &paths, &files, &texts);
+    containers.pool mut p = containers.pool_create();
+    defer containers.pool_free(&p);
+    string out_path = library_output(&p, opts);
+    // Only a build that writes the artifact uses the cache (toolchain.md 2.3). A file that cannot
+    // be read gives no source hash, and the load reports it.
+    cached_unit mut u = cached_unit{};
+    defer free_unit(&u);
+    u.active = !opts->emit_interface && !opts->emit_ir && !opts->compile_only && listed;
+    if (u.active) {
+        if (!hash_identity(&libs)) {
+            return EXIT_USAGE;
+        }
+        fill_unit(opts, &libs, &u);
+        u.fields.library = opts->lib_name;
+        artifact.hash_texts(containers.str_items(&paths), containers.str_items(&files),
+                            containers.str_items(&texts), &u.source);
+        find_unit(opts, opts->lib_root, &u);
+        if (u.found == cache.outcome.o_hit) {
+            i32 copied = copy_entry(out_path, &u);
+            if (copied == EXIT_OK) {
+                write_stats(opts, &u);
+            }
+            return copied;
+        }
+    }
     // The build path releases the analysis before it spawns --cc, as compile_entry does, and the
     // flag makes one of the two calls do the work.
     analysis mut an = analysis_create(&s);
@@ -2372,16 +2634,22 @@ fn library_entry(options* opts) i32 {
         print(strbuf.view(&text));
         return EXIT_OK;
     }
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
-    string out_path = library_output(&p, opts);
     if (opts->emit_ir) {
         return emit_module(&s, opts, &an, out_path);
     }
-    // The source hash reads the bytes that the build parsed, which the analysis holds.
-    strbuf.str_buf mut source = strbuf.create();
-    defer strbuf.free(&source);
-    artifact.hash_sources(&an.set, &source);
+    if (!opts->compile_only && !u.active) {
+        // A file of the walk that the first read refused and the parse read: the source hash
+        // takes the bytes that the build parsed, and the build looked up no entry.
+        if (!hash_identity(&libs)) {
+            return EXIT_USAGE;
+        }
+        u.active = true;
+        fill_unit(opts, &libs, &u);
+        u.fields.library = opts->lib_name;
+        artifact.hash_sources(&an.set, &u.source);
+        compute_key(opts, opts->lib_root, &u);
+        u.found = cache.outcome.o_absent;
+    }
     string mut parent = TMP_DIR_DEFAULT;
     string dir = make_temp_dir(&p, &parent, &failure);
     if (dir.len == 0) {
@@ -2406,14 +2674,16 @@ fn library_entry(options* opts) i32 {
         built = archive_library(opts, archive_path, object_path);
     }
     if (built == EXIT_OK && !opts->compile_only) {
-        built = write_artifact(opts, &libs, out_path, strbuf.view(&text), strbuf.view(&source),
-                               archive_path);
+        built = write_artifact(out_path, strbuf.view(&text), archive_path, &u);
     }
     string[3] mut written = {ir_path, "", archive_path};
     if (!opts->compile_only) {
         written[1] = object_path;
     }
     remove_library_temp(dir, written[..]);
+    if (built == EXIT_OK) {
+        write_stats(opts, &u);
+    }
     return built;
 }
 

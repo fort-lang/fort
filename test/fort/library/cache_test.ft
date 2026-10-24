@@ -1,0 +1,540 @@
+//! run
+//! flags: -I ../../src/fort -I support
+//! stdout:
+//| words ok
+//| find ok
+//| corrupt ok
+//| unreadable ok
+//| store ok
+//| ok
+/// Checks src/fort/library/cache.ft (D9.11, toolchain.md 2.3): the cause of each miss, the default
+/// cache directory, the `--cache-stats` line, the lookup of an entry with each outcome, and the
+/// store of an entry, which makes the layout and writes through no link that it did not make.
+import library.artifact;
+import library.cache;
+import std.io;
+import std.libc;
+import std.str;
+import std.strbuf;
+import std.sys;
+
+// Whether `got` is `want`, printing both when they differ.
+fn same(string got, string want) bool {
+    if (got != want) {
+        println("got:  ", got);
+        println("want: ", want);
+    }
+    return got == want;
+}
+
+fn make_dir(string path) void {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    assert(libc.mkdir(c_path.ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
+}
+
+fn write_file(string path, string text) void {
+    assert(io.write_file(path, cast(text, u8@)));
+}
+
+fn remove(string path) void {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    libc.unlink(c_path.ptr);
+}
+
+fn link(string target, string path) void {
+    char mut@ own c_target = str.to_cstr(target);
+    defer del(c_target);
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    assert(libc.symlink(c_target.ptr, c_path.ptr) == 0);
+}
+
+fn exists(string path) bool {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    return libc.access(c_path.ptr, 0) == 0;
+}
+
+fn set_mode(string path, u32 mode) void {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    assert(libc.chmod(c_path.ptr, mode) == 0);
+}
+
+fn contents(string path) string own {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(io.read_file(path, &b));
+    return strbuf.take(&b);
+}
+
+// `<dir>/<name>` in `out`.
+fn under(string dir, string name, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    strbuf.append(out, dir);
+    strbuf.push(out, '/');
+    strbuf.append(out, name);
+    return strbuf.view(out);
+}
+
+// A directory of its own under $TMPDIR, where the permission bits of a file hold.
+fn make_temp(strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    string mut parent = "/tmp";
+    string mut value = "";
+    if (sys.env("TMPDIR", &value) && value.len > 0) {
+        parent = value;
+    }
+    strbuf.append(out, parent);
+    strbuf.append(out, "/fort-cache-XXXXXX");
+    char mut@ own tmpl = str.to_cstr(strbuf.view(out));
+    defer del(tmpl);
+    assert(libc.mkdtemp(&tmpl[0]) != null);
+    strbuf.clear(out);
+    strbuf.append(out, str.from_cstr(&tmpl[0]));
+    return strbuf.view(out);
+}
+
+string HASH_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+string HASH_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+string HASH_C = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+// The source hashes of two units.
+string SOURCE_ONE = "1111111111111111111111111111111111111111111111111111111111111111";
+string SOURCE_TWO = "2222222222222222222222222222222222222222222222222222222222222222";
+
+// The files of the entries of this suite. `\x2F` is the second `/` of each header line, which
+// the harness reads as a directive mark.
+string INTERFACE_TEXT =
+    "/\x2F! fort interface 1\n/\x2F! library geom\n/\x2F! module geom.a\ni32 A = 1;\n";
+string ARCHIVE_TEXT = "!<arch>\nmember bytes\n";
+string OBJECT_TEXT = "\x7FELF object bytes\n";
+
+// The manifest of an entry of this suite: the library `geom`, or the entry unit `main` when
+// `entry_unit` is set. `source` tells two units apart.
+fn fields(bool entry_unit, string source) artifact.manifest {
+    artifact.manifest mut m = artifact.manifest{};
+    m.entry_unit = entry_unit;
+    m.library = "geom";
+    m.entry = "main";
+    m.compiler = HASH_A;
+    m.target = "x86_64-linux-gnu";
+    m.cc = "clang";
+    m.ar = "ar";
+    m.source = source;
+    return m;
+}
+
+// The key of `m` in `out`.
+fn key_of(artifact.manifest* m, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    artifact.append_key(m, out);
+    return strbuf.view(out);
+}
+
+// Stores the library entry of the unit `source` in the cache `dir`, under the key of its own
+// manifest or under `key` when it is not empty. The key of the manifest is in `out`.
+fn store_library(string dir, string source, string key, strbuf.str_buf mut* out) bool {
+    artifact.manifest mut m = fields(false, source);
+    string own_key = key_of(&m, out);
+    strbuf.str_buf mut interface = strbuf.create();
+    defer strbuf.free(&interface);
+    artifact.append_hash(&interface, cast(INTERFACE_TEXT, u8@));
+    strbuf.str_buf mut archive = strbuf.create();
+    defer strbuf.free(&archive);
+    artifact.append_hash(&archive, cast(ARCHIVE_TEXT, u8@));
+    m.interface = strbuf.view(&interface);
+    m.archive = strbuf.view(&archive);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    artifact.write_manifest(&m, &text);
+    string mut at = own_key;
+    if (key.len > 0) {
+        at = key;
+    }
+    return cache.store_library(dir, at, INTERFACE_TEXT, cast(ARCHIVE_TEXT, u8@),
+                               strbuf.view(&text));
+}
+
+// Stores the entry of the entry unit `source` in the cache `dir` under the key of its manifest,
+// which is in `out`.
+fn store_object(string dir, string source, strbuf.str_buf mut* out) bool {
+    artifact.manifest mut m = fields(true, source);
+    string key = key_of(&m, out);
+    strbuf.str_buf mut object = strbuf.create();
+    defer strbuf.free(&object);
+    artifact.append_hash(&object, cast(OBJECT_TEXT, u8@));
+    m.object = strbuf.view(&object);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    artifact.write_manifest(&m, &text);
+    return cache.store_object(dir, key, cast(OBJECT_TEXT, u8@), strbuf.view(&text));
+}
+
+// What a lookup of `key` in `dir` finds.
+fn found(string dir, string key, bool library) cache.outcome {
+    artifact.contents mut c = artifact.contents{};
+    defer artifact.free(&c);
+    return cache.find(dir, key, library, &c);
+}
+
+// ---- the words ----------------------------------------------------------------------
+
+// A struct that holds an outcome, whose zero value the suite reads.
+struct holder {
+    cache.outcome found;
+}
+
+fn each_miss_has_its_cause() void {
+    assert(same(cache.cause(cache.outcome.o_absent), "absent"));
+    assert(same(cache.cause(cache.outcome.o_corrupt), "corrupt"));
+    assert(same(cache.cause(cache.outcome.o_unreadable), "unreadable"));
+    assert(same(cache.cause(cache.outcome.o_hit), ""));
+    // the zero value is a miss
+    holder h = holder{};
+    assert(h.found == cache.outcome.o_absent);
+}
+
+fn the_default_directory_is_beside_the_root_or_the_entry_file() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    cache.append_default(&b, "lib/geom");
+    assert(same(strbuf.view(&b), "lib/geom/.fort-cache"));
+    strbuf.clear(&b);
+    cache.append_default(&b, "lib/geom/");
+    assert(same(strbuf.view(&b), "lib/geom/.fort-cache"));
+    strbuf.clear(&b);
+    // an entry file with no directory: the current directory
+    cache.append_default(&b, "");
+    assert(same(strbuf.view(&b), ".fort-cache"));
+    strbuf.clear(&b);
+    cache.append_default(&b, "/");
+    assert(same(strbuf.view(&b), "/.fort-cache"));
+}
+
+fn the_stats_line_names_the_unit_the_key_and_the_cause() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    cache.append_stats(&b, true, "geom", HASH_A, cache.outcome.o_hit);
+    strbuf.append(&want, "cache hit library geom ");
+    strbuf.append(&want, HASH_A);
+    strbuf.push(&want, '\n');
+    assert(same(strbuf.view(&b), strbuf.view(&want)));
+    strbuf.clear(&b);
+    strbuf.clear(&want);
+    cache.append_stats(&b, false, "main", HASH_B, cache.outcome.o_absent);
+    strbuf.append(&want, "cache miss entry main ");
+    strbuf.append(&want, HASH_B);
+    strbuf.append(&want, " absent\n");
+    assert(same(strbuf.view(&b), strbuf.view(&want)));
+    strbuf.clear(&b);
+    cache.append_stats(&b, true, "geom", HASH_C, cache.outcome.o_corrupt);
+    assert(str.ends_with(strbuf.view(&b), " corrupt\n"));
+    assert(str.starts_with(strbuf.view(&b), "cache miss library geom "));
+    strbuf.clear(&b);
+    cache.append_stats(&b, true, "geom", HASH_C, cache.outcome.o_unreadable);
+    assert(str.ends_with(strbuf.view(&b), " unreadable\n"));
+    strbuf.clear(&b);
+    // the entry module path is a manifest value: a space and a backslash are escaped
+    cache.append_stats(&b, false, "my main\\x", HASH_A, cache.outcome.o_hit);
+    assert(str.starts_with(strbuf.view(&b), "cache hit entry my\\x20main\\x5Cx aaaa"));
+}
+
+// ---- finding an entry -----------------------------------------------------------------
+
+fn a_missing_directory_is_absent() void {
+    // no cache directory, no layout directory and no entry
+    assert(found("nocache", HASH_A, true) == cache.outcome.o_absent);
+    make_dir("empty");
+    assert(found("empty", HASH_A, true) == cache.outcome.o_absent);
+    make_dir("empty/1");
+    assert(found("empty", HASH_A, false) == cache.outcome.o_absent);
+}
+
+fn a_stored_entry_is_a_hit_with_its_bytes() void {
+    strbuf.str_buf mut key = strbuf.create();
+    defer strbuf.free(&key);
+    assert(store_library("c", SOURCE_ONE, "", &key));
+    artifact.contents mut c = artifact.contents{};
+    defer artifact.free(&c);
+    assert(cache.find("c", strbuf.view(&key), true, &c) == cache.outcome.o_hit);
+    assert(same(strbuf.view(&c.interface), INTERFACE_TEXT));
+    assert(same(strbuf.view(&c.archive), ARCHIVE_TEXT));
+    assert(same(c.key, strbuf.view(&key)));
+    assert(same(c.fields.library, "geom"));
+    // the entry stands at `<dir>/1/<key>/`, with the four entries of an artifact
+    strbuf.str_buf mut path = strbuf.create();
+    defer strbuf.free(&path);
+    strbuf.append(&path, "c/1/");
+    strbuf.append(&path, strbuf.view(&key));
+    strbuf.append(&path, "/summaries");
+    assert(exists(strbuf.view(&path)));
+    // the entry of an entry unit holds the object
+    strbuf.str_buf mut object_key = strbuf.create();
+    defer strbuf.free(&object_key);
+    assert(store_object("c", SOURCE_TWO, &object_key));
+    artifact.contents mut o = artifact.contents{};
+    defer artifact.free(&o);
+    assert(cache.find("c", strbuf.view(&object_key), false, &o) == cache.outcome.o_hit);
+    assert(same(strbuf.view(&o.object), OBJECT_TEXT));
+    assert(same(o.fields.entry, "main"));
+    // a cache directory that ends in `/` names the same entries
+    assert(found("c/", strbuf.view(&key), true) == cache.outcome.o_hit);
+}
+
+fn the_bytes_of_a_hit_are_the_bytes_that_the_lookup_checked() void {
+    strbuf.str_buf mut key = strbuf.create();
+    defer strbuf.free(&key);
+    assert(store_library("checked", SOURCE_ONE, "", &key));
+    artifact.contents mut c = artifact.contents{};
+    defer artifact.free(&c);
+    assert(cache.find("checked", strbuf.view(&key), true, &c) == cache.outcome.o_hit);
+    strbuf.str_buf mut path = strbuf.create();
+    defer strbuf.free(&path);
+    strbuf.append(&path, "checked/1/");
+    strbuf.append(&path, strbuf.view(&key));
+    strbuf.append(&path, "/lib.a");
+    write_file(strbuf.view(&path), "replaced\n");
+    assert(same(strbuf.view(&c.archive), ARCHIVE_TEXT));
+}
+
+// ---- corrupt entries ----------------------------------------------------------------------
+
+// `checked/1/<key>/<name>` for the entry `key` of the cache `dir` in `out`.
+fn entry_file(string dir, string key, string name, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    strbuf.append(out, dir);
+    strbuf.append(out, "/1/");
+    strbuf.append(out, key);
+    if (name.len > 0) {
+        strbuf.push(out, '/');
+        strbuf.append(out, name);
+    }
+    return strbuf.view(out);
+}
+
+fn an_entry_of_the_other_form_is_corrupt() void {
+    strbuf.str_buf mut key = strbuf.create();
+    defer strbuf.free(&key);
+    assert(store_library("forms", SOURCE_ONE, "", &key));
+    assert(found("forms", strbuf.view(&key), false) == cache.outcome.o_corrupt);
+    strbuf.str_buf mut object_key = strbuf.create();
+    defer strbuf.free(&object_key);
+    assert(store_object("forms", SOURCE_TWO, &object_key));
+    assert(found("forms", strbuf.view(&object_key), true) == cache.outcome.o_corrupt);
+}
+
+fn an_entry_whose_key_line_is_another_key_is_corrupt() void {
+    strbuf.str_buf mut key = strbuf.create();
+    defer strbuf.free(&key);
+    // a valid entry of the key of its manifest, stored under the name HASH_B
+    assert(store_library("keys", SOURCE_ONE, HASH_B, &key));
+    assert(strbuf.view(&key) != HASH_B);
+    assert(found("keys", HASH_B, true) == cache.outcome.o_corrupt);
+    assert(found("keys", strbuf.view(&key), true) == cache.outcome.o_absent);
+}
+
+fn an_entry_that_breaks_a_rule_is_corrupt() void {
+    strbuf.str_buf mut key = strbuf.create();
+    defer strbuf.free(&key);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    // a changed archive, a changed interface file, no manifest, no summaries/
+    assert(store_library("rules", SOURCE_ONE, "", &key));
+    write_file(entry_file("rules", strbuf.view(&key), "lib.a", &b), "!<arch>\nother\n");
+    assert(found("rules", strbuf.view(&key), true) == cache.outcome.o_corrupt);
+    assert(store_library("rules", SOURCE_ONE, "", &key));
+    assert(found("rules", strbuf.view(&key), true) == cache.outcome.o_hit);
+    write_file(entry_file("rules", strbuf.view(&key), "interface.ft", &b), "i32 A = 2;\n");
+    assert(found("rules", strbuf.view(&key), true) == cache.outcome.o_corrupt);
+    assert(store_library("rules", SOURCE_ONE, "", &key));
+    remove(entry_file("rules", strbuf.view(&key), "manifest", &b));
+    assert(found("rules", strbuf.view(&key), true) == cache.outcome.o_corrupt);
+    assert(store_library("rules", SOURCE_ONE, "", &key));
+    char mut@ own c_summaries = str.to_cstr(entry_file("rules", strbuf.view(&key), "summaries",
+                                                       &b));
+    defer del(c_summaries);
+    assert(libc.rmdir(c_summaries.ptr) == 0);
+    assert(found("rules", strbuf.view(&key), true) == cache.outcome.o_corrupt);
+    // a part of a manifest, as a write that stopped can leave none
+    assert(store_library("rules", SOURCE_ONE, "", &key));
+    write_file(entry_file("rules", strbuf.view(&key), "manifest", &b), "fort-manifest 1\n");
+    assert(found("rules", strbuf.view(&key), true) == cache.outcome.o_corrupt);
+    // a changed object, and an object that is gone
+    strbuf.str_buf mut object_key = strbuf.create();
+    defer strbuf.free(&object_key);
+    assert(store_object("rules", SOURCE_TWO, &object_key));
+    write_file(entry_file("rules", strbuf.view(&object_key), "object.o", &b), "other\n");
+    assert(found("rules", strbuf.view(&object_key), false) == cache.outcome.o_corrupt);
+    remove(entry_file("rules", strbuf.view(&object_key), "object.o", &b));
+    assert(found("rules", strbuf.view(&object_key), false) == cache.outcome.o_corrupt);
+}
+
+fn an_entry_that_is_no_directory_or_a_link_is_corrupt() void {
+    strbuf.str_buf mut key = strbuf.create();
+    defer strbuf.free(&key);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    make_dir("shapes");
+    make_dir("shapes/1");
+    write_file(entry_file("shapes", HASH_A, "", &b), "a file\n");
+    assert(found("shapes", HASH_A, true) == cache.outcome.o_corrupt);
+    // a link to a valid entry of the same key is no entry that the compiler made
+    assert(store_library("valid", SOURCE_ONE, "", &key));
+    strbuf.str_buf mut target = strbuf.create();
+    defer strbuf.free(&target);
+    strbuf.append(&target, "../../");
+    strbuf.append(&target, entry_file("valid", strbuf.view(&key), "", &b));
+    link(strbuf.view(&target), entry_file("shapes", strbuf.view(&key), "", &b));
+    assert(found("valid", strbuf.view(&key), true) == cache.outcome.o_hit);
+    assert(found("shapes", strbuf.view(&key), true) == cache.outcome.o_corrupt);
+    // a dangling link
+    link("nowhere", entry_file("shapes", HASH_C, "", &b));
+    assert(found("shapes", HASH_C, true) == cache.outcome.o_corrupt);
+    // the lookup follows a link at `1`, so a file at the entry behind it is corrupt too
+    make_dir("linked_layout");
+    make_dir("real_layout");
+    link("../real_layout", "linked_layout/1");
+    write_file(under("real_layout", HASH_A, &b), "a file\n");
+    assert(found("linked_layout", HASH_A, true) == cache.outcome.o_corrupt);
+    // a link at `1` that names nothing is absent, as no `1` is
+    make_dir("broken_layout");
+    link("nowhere", "broken_layout/1");
+    assert(found("broken_layout", HASH_A, true) == cache.outcome.o_absent);
+}
+
+// ---- unreadable caches ------------------------------------------------------------------
+
+fn a_cache_that_is_no_directory_is_unreadable() void {
+    write_file("plain", "a file\n");
+    assert(found("plain", HASH_A, true) == cache.outcome.o_unreadable);
+    make_dir("layout");
+    write_file("layout/1", "a file\n");
+    assert(found("layout", HASH_A, false) == cache.outcome.o_unreadable);
+}
+
+fn a_cache_that_the_process_cannot_read_is_unreadable() void {
+    strbuf.str_buf mut dir = strbuf.create();
+    defer strbuf.free(&dir);
+    strbuf.str_buf mut key = strbuf.create();
+    defer strbuf.free(&key);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string root = make_temp(&dir);
+    assert(store_library(root, SOURCE_ONE, "", &key));
+    // the layout directory, the entry and a file of the entry
+    string layout = under(root, "1", &b);
+    set_mode(layout, 0);
+    cache.outcome mut got = found(root, strbuf.view(&key), true);
+    set_mode(layout, 0o700);
+    assert(got == cache.outcome.o_unreadable);
+    string entry = entry_file(root, strbuf.view(&key), "", &b);
+    set_mode(entry, 0);
+    got = found(root, strbuf.view(&key), true);
+    set_mode(entry, 0o700);
+    assert(got == cache.outcome.o_unreadable);
+    string archive = entry_file(root, strbuf.view(&key), "lib.a", &b);
+    set_mode(archive, 0);
+    got = found(root, strbuf.view(&key), true);
+    set_mode(archive, 0o644);
+    assert(got == cache.outcome.o_unreadable);
+    assert(found(root, strbuf.view(&key), true) == cache.outcome.o_hit);
+}
+
+// ---- storing an entry -------------------------------------------------------------------
+
+fn a_store_makes_the_layout() void {
+    strbuf.str_buf mut key = strbuf.create();
+    defer strbuf.free(&key);
+    assert(!exists("made"));
+    assert(store_object("made", SOURCE_TWO, &key));
+    assert(exists("made/1"));
+    // one level only: the parent of the cache directory must exist
+    assert(!store_object("no/such/cache", SOURCE_TWO, &key));
+    assert(!exists("no"));
+    // a cache directory that is a link to a directory is the choice of the caller
+    make_dir("real");
+    link("real", "linked");
+    assert(store_object("linked", SOURCE_TWO, &key));
+    assert(exists("real/1"));
+}
+
+fn a_store_writes_through_no_link_of_the_layout() void {
+    strbuf.str_buf mut key = strbuf.create();
+    defer strbuf.free(&key);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    // a link at `1` and a link at the entry: the store fails and writes nothing at the target
+    make_dir("outside");
+    make_dir("guarded");
+    link("../outside", "guarded/1");
+    assert(!store_object("guarded", SOURCE_TWO, &key));
+    assert(!exists(under("outside", strbuf.view(&key), &b)));
+    make_dir("guarded2");
+    make_dir("guarded2/1");
+    make_dir("outside2");
+    link("../../outside2", entry_file("guarded2", strbuf.view(&key), "", &b));
+    assert(!store_object("guarded2", SOURCE_TWO, &key));
+    assert(!exists("outside2/manifest"));
+    assert(!exists("outside2/object.o"));
+    // a file at the entry fails the store too
+    make_dir("filed");
+    make_dir("filed/1");
+    write_file(entry_file("filed", strbuf.view(&key), "", &b), "a file\n");
+    assert(!store_object("filed", SOURCE_TWO, &key));
+    string own kept = contents(entry_file("filed", strbuf.view(&key), "", &b));
+    defer del(kept);
+    assert(same(kept, "a file\n"));
+}
+
+fn a_store_replaces_a_corrupt_entry() void {
+    strbuf.str_buf mut key = strbuf.create();
+    defer strbuf.free(&key);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(store_library("repair", SOURCE_ONE, "", &key));
+    write_file(entry_file("repair", strbuf.view(&key), "lib.a", &b), "broken\n");
+    assert(found("repair", strbuf.view(&key), true) == cache.outcome.o_corrupt);
+    assert(store_library("repair", SOURCE_ONE, "", &key));
+    assert(found("repair", strbuf.view(&key), true) == cache.outcome.o_hit);
+    // a store that fails leaves no manifest, so the entry stays a miss and never a wrong hit
+    remove(entry_file("repair", strbuf.view(&key), "summaries", &b));
+    char mut@ own c_summaries = str.to_cstr(entry_file("repair", strbuf.view(&key), "summaries",
+                                                       &b));
+    defer del(c_summaries);
+    libc.rmdir(c_summaries.ptr);
+    make_dir("elsewhere");
+    link("../../../elsewhere", entry_file("repair", strbuf.view(&key), "summaries", &b));
+    assert(!store_library("repair", SOURCE_ONE, "", &key));
+    assert(!exists(entry_file("repair", strbuf.view(&key), "manifest", &b)));
+    assert(found("repair", strbuf.view(&key), true) == cache.outcome.o_corrupt);
+}
+
+fn main() i32 {
+    each_miss_has_its_cause();
+    the_default_directory_is_beside_the_root_or_the_entry_file();
+    the_stats_line_names_the_unit_the_key_and_the_cause();
+    println("words ok");
+    a_missing_directory_is_absent();
+    a_stored_entry_is_a_hit_with_its_bytes();
+    the_bytes_of_a_hit_are_the_bytes_that_the_lookup_checked();
+    println("find ok");
+    an_entry_of_the_other_form_is_corrupt();
+    an_entry_whose_key_line_is_another_key_is_corrupt();
+    an_entry_that_breaks_a_rule_is_corrupt();
+    an_entry_that_is_no_directory_or_a_link_is_corrupt();
+    println("corrupt ok");
+    a_cache_that_is_no_directory_is_unreadable();
+    a_cache_that_the_process_cannot_read_is_unreadable();
+    println("unreadable ok");
+    a_store_makes_the_layout();
+    a_store_writes_through_no_link_of_the_layout();
+    a_store_replaces_a_corrupt_entry();
+    println("store ok");
+    println("ok");
+    return 0;
+}
