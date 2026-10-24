@@ -462,6 +462,87 @@ fn a_clean_program_is_emitted_and_handed_to_the_cc() void {
     assert(quiet == "");
 }
 
+// Whether a file named `-` stands in the working directory.
+fn a_dash_file_exists() bool {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    return io.read_file("-", &b);
+}
+
+// `-S -o -` writes the module to stdout and makes no file named `-` (toolchain.md 1). The bytes
+// are the bytes that `-S -o <file>` writes, and with --fir-stats the line of the counts follows
+// them.
+fn dash_output_under_s_is_stdout() void {
+    write_file("dash.ft", "fn main() i32 {\n    return 0;\n}\n");
+    string[5] mut to_file = {"fort", "-S", "dash.ft", "-o", "dash.ll"};
+    assert(run(to_file[0..5]) == EXIT_OK);
+    strbuf.str_buf mut module = strbuf.create();
+    defer strbuf.free(&module);
+    assert(io.read_file("dash.ll", &module));
+    assert(strbuf.view(&module).len > 0);
+    string[5] mut to_stdout = {"fort", "-S", "dash.ft", "-o", "-"};
+    assert(run(to_stdout[0..5]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    assert(!a_dash_file_exists());
+    string own text = captured_out();
+    defer del(text);
+    assert(text == strbuf.view(&module));
+    // -S and -c together stop at the IR, so they write the module to stdout as well
+    string[6] mut both = {"fort", "-S", "-c", "dash.ft", "-o", "-"};
+    assert(run(both[0..6]) == EXIT_OK);
+    assert(!a_dash_file_exists());
+    string own again = captured_out();
+    defer del(again);
+    assert(again == strbuf.view(&module));
+    string[6] mut stats = {"fort", "-S", "--fir-stats", "dash.ft", "-o", "-"};
+    assert(run(stats[0..6]) == EXIT_OK);
+    assert(!a_dash_file_exists());
+    string own counted = captured_out();
+    defer del(counted);
+    assert(str.starts_with(counted, strbuf.view(&module)));
+    assert(counted[strbuf.view(&module).len..] == "lowered 1 of 1\n");
+}
+
+// Whether `args` parse to PARSE_OK, in options of their own.
+fn parses(string@ args) bool {
+    driver.options mut opts = driver.options_create();
+    defer driver.options_free(&opts);
+    return driver.parse(&opts, args) == driver.PARSE_OK;
+}
+
+// A link writes an executable, so `-o -` without -S or -c is a usage error before the front end
+// runs (toolchain.md 1). -c alone parses, since clang writes the object to stdout. The modes
+// that do not use -o accept the value.
+fn dash_output_needs_s_or_c() void {
+    string[4] mut link = {"fort", "-o", "-", "nosuch.ft"};
+    assert(run(link[0..4]) == EXIT_USAGE);
+    string own err = captured_err();
+    defer del(err);
+    assert(err == "fort: error: -o - requires -S or -c\nusage: fort [options] entry.ft\n");
+    assert(!a_dash_file_exists());
+    string[5] mut release = {"fort", "--release", "-o", "-", "nosuch.ft"};
+    assert(run(release[0..5]) == EXIT_USAGE);
+    assert(err_has("fort: error: -o - requires -S or -c\n"));
+    string[5] mut object = {"fort", "-c", "-o", "-", "entry.ft"};
+    assert(parses(object[0..5]));
+    string[5] mut checked = {"fort", "--check", "-o", "-", "entry.ft"};
+    assert(parses(checked[0..5]));
+    string[5] mut tokens = {"fort", "--tokens", "-o", "-", "entry.ft"};
+    assert(parses(tokens[0..5]));
+    string[5] mut ast = {"fort", "--ast", "-o", "-", "entry.ft"};
+    assert(parses(ast[0..5]));
+    string[5] mut fir = {"fort", "--fir", "-o", "-", "entry.ft"};
+    assert(parses(fir[0..5]));
+    string[5] mut fir_test = {"fort", "--fir-test", "-o", "-", "entry.fir"};
+    assert(parses(fir_test[0..5]));
+    string[5] mut fir_run = {"fort", "--fir-run", "-o", "-", "entry.ft"};
+    assert(parses(fir_run[0..5]));
+    // the check of the value runs on `-`, and a file of that name is an output like any other
+    string[4] mut named = {"fort", "-o", "./-", "nosuch.ft"};
+    assert(run(named[0..4]) == EXIT_USAGE);
+    assert(err_has("fort: error: cannot read 'nosuch.ft'"));
+}
+
 fn target_error_is(string message) bool {
     strbuf.str_buf mut want = strbuf.create();
     defer strbuf.free(&want);
@@ -2228,6 +2309,8 @@ fn main() i32 {
     cfg_pairs_are_checked_and_the_target_keys_are_the_compilers();
     a_conditional_import_follows_the_target();
     the_default_output_follows_the_mode();
+    dash_output_under_s_is_stdout();
+    dash_output_needs_s_or_c();
     a_syntax_error_is_exit_one();
     a_lexical_error_is_exit_one();
     a_missing_import_is_exit_one();

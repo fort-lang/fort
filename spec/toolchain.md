@@ -73,6 +73,15 @@ file: `fort [options] --lib <name> <root>`.
 - The default output is `a.out`; with `-c` it is `<entry>.o` and with `-S` `<entry>.ll` (D14.1),
   where `<entry>` is the entry file's base name without `.ft`, placed in the current directory as
   `cc` does.
+- `-o -` names stdout. With `-S` the compiler writes the IR module to stdout. With `-c` the
+  object goes to stdout. The compile line gets `-o -` in a whole-program build and in a `--lib`
+  build, and clang writes the object to stdout. A build with `--use` writes the object to stdout
+  itself (section 2.1, step 6). Neither mode makes a file named `-`; `-o ./-` names that file.
+  A link writes an executable and a `--lib` build writes an artifact directory, so `-o -`
+  without `-S` or `-c` is the usage error `-o - requires -S or -c` in both. `--emit-interface`
+  always writes to stdout and takes no `-o`. `--check`, `--tokens`, `--ast`, `--fir`,
+  `--fir-after`, `--fir-verify-report`, `--fir-test` and `--fir-run` do not use `-o`, so `-o -`
+  changes nothing there.
 - The default standard library directory is `$FORT_STD_DIR` when set, else `std` beside
   the running `fort` binary. Linux reads its binary path from `/proc/self/exe`.
   Mac reads it from `_NSGetExecutablePath`, then uses `realpath` when it succeeds.
@@ -327,9 +336,10 @@ on stderr, for example `fort: error: cannot read 'x.ft': No such file or directo
 with 2; `--help` prints that line and then the table above, and exits 0.
 
 These are all the `fort: error: <message>` texts. Each exits with status 2 (D14.1).
-Twenty-two report a command line the compiler cannot use and then print the usage line:
+Twenty-three report a command line the compiler cannot use and then print the usage line:
 `missing argument for option '<opt>'`, `unexpected argument '<arg>'` (a second entry file),
-`unknown option '<opt>'`, `no entry file`, `--json requires --check` (D20.2),
+`unknown option '<opt>'`, `no entry file`, `-o - requires -S or -c`, `--json requires --check`
+(D20.2),
 `--tokens does not combine with --check, --json or --index`,
 `--ast does not combine with --tokens, --check, --json or --index`,
 `--fir does not combine with --tokens, --ast, --check, --json or --index`,
@@ -359,8 +369,9 @@ ends: `the run calls '<name>', which the interpreter does not run` and `the run 
 <file>:<line>:<col>: <what>`. The last two are the compiler's own failures: `internal error: <what>`
 and `out of memory`.
 
-A library build (D9.11) adds two groups of texts, each with status 2. Nine report a command line
-the compiler cannot use and then print the usage line: `invalid library name '<name>'`,
+A library build (D9.11) adds two groups of texts, each with status 2. Ten report a command line
+the compiler cannot use and then print the usage line: `-o - requires -S or -c` (an artifact
+build), `invalid library name '<name>'`,
 `invalid --use argument '<arg>'`, `duplicate library '<name>'`,
 `--lib does not combine with -I, -l, --check, --json, --index, --tokens, --ast or a --fir option`,
 `--emit-interface requires --lib`, `--emit-interface does not combine with -S, -c or -o`,

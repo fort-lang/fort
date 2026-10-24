@@ -165,10 +165,11 @@ fn run_with(string@ head, string@ more) i32 {
 // ---- the tools and the libraries ---------------------------------------------------
 
 // The --cc of a case. It appends its arguments to cc.log, one on each line, and a line `--`
-// after them. A compile line (`-c`) copies the input module to the -o output, or exits 4 when
-// compile_fail.flag exists. A link line appends each archive that it names to archives.log and
-// writes `linked` to the output, or exits 3 when fail.flag exists.
-string[17] FAKE_CC = {
+// after them. A compile line (`-c`) copies the input module to the -o output, to stdout for
+// `-o -` as clang does, or exits 4 when compile_fail.flag exists. A link line appends each
+// archive that it names to archives.log and writes `linked` to the output, or exits 3 when
+// fail.flag exists.
+string[18] FAKE_CC = {
     "#!/bin/sh",
     "out=",
     "in=",
@@ -182,6 +183,7 @@ string[17] FAKE_CC = {
     "done",
     "echo -- >> cc.log",
     "if [ -n \"$compile\" ] && [ -f compile_fail.flag ]; then exit 4; fi",
+    "if [ -n \"$compile\" ] && [ \"$out\" = - ]; then cat \"$in\"; exit 0; fi",
     "if [ -n \"$compile\" ]; then cp \"$in\" \"$out\"; exit 0; fi",
     "if [ -f fail.flag ]; then exit 3; fi",
     "echo linked > \"$out\"",
@@ -855,6 +857,54 @@ fn an_object_is_the_compile_line_alone() void {
     assert(str.find(log, "\nmain.o\n") < 0);
     // one invocation: no link line
     assert(str.find(log, "--\n") == cast(log.len - 3, i64));
+}
+
+// `-o -` names stdout (toolchain.md 1). Under -c the build writes the object that it read from
+// the temporary directory to stdout; under -S the entry unit and the library build write the
+// module there. None of them makes a file named `-`.
+fn a_dash_output_is_stdout() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", MAIN);
+    remove("-");
+    string[6] object = {"--use", "std=std.flib", "-c", "-o", "-", "main.ft"};
+    assert(use_run(object[..]) == EXIT_OK);
+    assert(err_is(""));
+    assert(!exists("-"));
+    string own bytes = contents("out.txt");
+    defer del(bytes);
+    // the fake compile copies the module, so the object holds its declarations
+    assert(str.find(bytes, "declare dso_local i32 @\"std.io.f\"(i32) #0\n") > 0);
+    string[6] module = {"--use", "std=std.flib", "-S", "-o", "-", "main.ft"};
+    assert(use_run(module[..]) == EXIT_OK);
+    assert(err_is(""));
+    assert(!exists("-"));
+    string own text = contents("out.txt");
+    defer del(text);
+    assert(text == bytes);
+    string[1] ir = {"-S"};
+    assert(build_library("std", "std", "-", ir[..]) == EXIT_OK);
+    assert(err_is(""));
+    assert(!exists("-"));
+    string own library = contents("out.txt");
+    defer del(library);
+    assert(str.find(library, "define dso_local i32 @\"std.io.f\"(") > 0);
+    // an artifact is a directory, which stdout cannot take
+    assert(build_library("std", "std", "-", NO_MORE[..0]) == EXIT_USAGE);
+    assert(err_is("fort: error: -o - requires -S or -c\nusage: fort [options] entry.ft\n"));
+    assert(!exists("-"));
+    string[1] object_only = {"-c"};
+    assert(build_library("std", "std", "-", object_only[..]) == EXIT_OK);
+    assert(err_is(""));
+    assert(!exists("-"));
+    string own library_object = contents("out.txt");
+    defer del(library_object);
+    // the fake compile copies the module to the -o output of the compile line
+    assert(str.find(library_object, "define dso_local i32 @\"std.io.f\"(") > 0);
+    // a link writes an executable, which stdout cannot take
+    string[5] link = {"--use", "std=std.flib", "-o", "-", "main.ft"};
+    assert(use_run(link[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: -o - requires -S or -c\nusage: fort [options] entry.ft\n"));
+    assert(!exists("-"));
 }
 
 fn a_failed_link_is_exit_two() void {
@@ -1669,6 +1719,7 @@ fn main() i32 {
     the_modules_outside_the_closure_add_nothing_to_the_module();
     the_entry_unit_is_compiled_and_linked_with_each_archive();
     an_object_is_the_compile_line_alone();
+    a_dash_output_is_stdout();
     a_failed_link_is_exit_two();
     a_cross_target_module_needs_no_std_dir();
     a_search_root_serves_the_paths_of_no_library();
