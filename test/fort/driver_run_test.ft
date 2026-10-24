@@ -192,6 +192,13 @@ fn usage() void {
     string[4] mut dashes = {"fort", "main.ft", "--", "a"};
     assert(run(dashes[..]) == EXIT_USAGE);
     said_usage("-- requires --fir-run", "");
+    // --fir-events reports the events of a run, so it needs --fir-run, before or after it
+    string[3] mut events = {"fort", "--fir-events", "main.ft"};
+    assert(run(events[..]) == EXIT_USAGE);
+    said_usage("--fir-events requires --fir-run", "");
+    string[4] mut check_events = {"fort", "--check", "--fir-events", "main.ft"};
+    assert(run(check_events[..]) == EXIT_USAGE);
+    said_usage("--fir-events requires --fir-run", "");
     // a library build runs nothing
     string[5] mut lib = {"fort", "--lib", "std", "root", "--fir-run"};
     assert(run(lib[..]) == EXIT_USAGE);
@@ -226,6 +233,10 @@ string[5] EXITS = {"import std.libc;", "fn main() i32 {", "    println(1);", "  
 
 string[3] WRONG = {"fn main() i32 {", "    return true;", "}"};
 
+// A program that prints, and then leaks `p` at its `dead` at the `return`, line 4 column 5.
+string[5] LEAKS = {"fn main() i32 {", "    i32 mut* own p = new(i32);", "    println(2);",
+                   "    return 0;", "}"};
+
 fn programs() void {
     write_std();
     string[3] args = {"-o", "x y", ""};
@@ -242,6 +253,15 @@ fn programs() void {
     // a compile error stops before the run
     assert(run_program("wrong.ft", WRONG[..], args[..0]) == EXIT_COMPILE_ERROR);
     assert(err_has("wrong.ft:2:12: error:"));
+    // with --fir-events the events go to stderr, and the run ends as without it
+    assert(run_program("leaks.ft", LEAKS[..], args[..0]) == 0);
+    said("2\n", "");
+    string[6] mut ev = {"fort", "--std-dir", "sstd", "--fir-events", "--fir-run", "leaks.ft"};
+    assert(run(ev[..]) == 0);
+    said("2\n", "fort: event leak in leaks.main at 4:5\n");
+    string[6] mut quiet = {"fort", "--std-dir", "sstd", "--fir-run", "--fir-events", "args.ft"};
+    assert(run(quiet[..]) == 3);
+    said("args.ft\n", "");
     println("programs ok");
 }
 
@@ -337,6 +357,18 @@ string[6] BYTE = {
     "}",
 };
 
+// A function whose owner `p` leaks at its return, which stands at 4:2.
+string[8] LEAKY = {
+    "fn main.leaky() -> i32 {",
+    "    let _1 (p): i32 mut* own;",
+    "    bb0: {",
+    "        _1 = alloc<i32>(const u64 1) #2:2;",
+    "        _0 = const i32 0 #3:2;",
+    "        return #4:2;",
+    "    }",
+    "}",
+};
+
 string[5] POINT = {
     "fn main.point(_1: i32*) -> void {",
     "    bb0: {",
@@ -386,6 +418,11 @@ fn pass_run() void {
     write_fir_test(top[..], BYTE[..]);
     assert(run(argv[..]) == EXIT_OK);
     said("return u8 255\n", "");
+    // the report of the pass `run` names each event of the run before its end
+    string[1] leaky = {"run main.leaky"};
+    write_fir_test(leaky[..], LEAKY[..]);
+    assert(run(argv[..]) == EXIT_OK);
+    said("event leak in main.leaky at 4:2\nreturn i32 0\n", "");
     println("pass run ok");
 }
 

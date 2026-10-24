@@ -1792,16 +1792,16 @@ Sections:
   16.3: check its prelude as the module `main`, parse its FIR text against that module, run the
   passes that its `//! pass:` directives name, in their order, and write the module to stdout in
   the textual form of `spec/fir.md` 13, or, when it names the pass `run`, the report of each run
-  of the interpreter in its place; a pass that the compiler does not run is an error with
-  status 2, and combining it with `--tokens`, `--ast`, `--check`, `--json`, `--index`, `--fir` or
-  `--fir-after` is a usage error), `--fir-verify-report` (implies `--fir`, and writes in place of
-  the FIR one line to stdout for each function that breaks a rule of `spec/fir.md` 10, its first
-  violation after the lowering or after the build-mode pass of the selected mode, then exits 0;
-  `--fir-after` does not change the report), `--fir-stats` (after a build writes its module,
-  write the line `lowered N of M` to stdout: N functions that the translator wrote of M
-  definitions of fort functions, and N equals M, because a function that the translator does
-  not write is a compile error, `spec/fir.md` 9.8; a bodiless declaration of D9.11 is no
-  definition; combining it with `--tokens`, `--ast`,
+  of the interpreter in its place, with the events of the run; a pass that the compiler does not
+  run is an error with status 2, and combining it with `--tokens`, `--ast`, `--check`, `--json`,
+  `--index`, `--fir` or `--fir-after` is a usage error), `--fir-verify-report` (implies `--fir`, and
+  writes in place of the FIR one line to stdout for each function that breaks a rule of
+  `spec/fir.md` 10, its first violation after the lowering or after the build-mode pass of the
+  selected mode, then exits 0; `--fir-after` does not change the report), `--fir-stats` (after a
+  build writes its module, write the line `lowered N of M` to stdout: N functions that the
+  translator wrote of M definitions of fort functions, and N equals M, because a function that the
+  translator does not write is a compile error, `spec/fir.md` 9.8; a bodiless declaration of D9.11
+  is no definition; combining it with `--tokens`, `--ast`,
   `--check`, `--index`, `--fir` or `--fir-test` is a usage error), `--fir-run` (check the closure
   of a program and run its FIR with the interpreter of `spec/fir.md` 11 in place of a build, as the
   `main` that a build emits starts it; it writes no file, takes the target rule of `--check`,
@@ -1810,9 +1810,11 @@ Sections:
   not run and an operation with no defined result are errors with status 2; combining it with
   `--tokens`, `--ast`, `--check`, `--json`, `--index`, `--use`, `--lib`, `--release`,
   `--no-bounds-check`, `--fir`, `--fir-after`, `--fir-verify-report`, `--fir-test` or
-  `--fir-stats` is a usage error; the run keeps each check of the checked mode), `--` (each
-  argument after it is an argument of the program of `--fir-run`, and it is a usage error
-  without `--fir-run`), `--lib <name> <root>`,
+  `--fir-stats` is a usage error; the run keeps each check of the checked mode), `--fir-events`
+  (with `--fir-run`, write each ownership event of the run to stderr after the run, one line
+  each, as `spec/fir.md` 11 spells it; it changes no status, and it is a usage error without
+  `--fir-run`), `--` (each argument after it is an argument of the program of `--fir-run`, and
+  it is a usage error without `--fir-run`), `--lib <name> <root>`,
   `--use <name>=<path>` (repeatable), `--emit-interface`, `--cache-dir <dir>`, `--cache-stats`
   and `--ar <path>` (the library builds of D9.11), `--help`, `--version`.
   `--lib` takes no entry file; every other build takes one.
@@ -1879,6 +1881,8 @@ Sections:
   Amended 2026-10-24: `--fir-run` and `--` did not exist, and the passes of `--fir-test` were
   `none`, `verify` and `build-mode`. `--fir-run` runs the run corpus of the reference semantics
   of `spec/ownership-design.md` 3.5, and the pass `run` of `--fir-test` runs a FIR test with it.
+  Amended 2026-10-24: `--fir-events` did not exist, and the report of the pass `run` held no
+  event. Both report the events of the shadow state of `spec/ownership-design.md` 3.3 and 3.4.
 
 ### D14.2 Diagnostics and recovery
 - owner: `toolchain.md`.

@@ -9,6 +9,7 @@ import fort.diag;
 import fort.fir;
 import fort.fir.emptiness;
 import fort.fir.interpreter;
+import fort.fir.shadow;
 import fort.fir_lower;
 import fort.fir_parse;
 import fort.fir_passes;
@@ -158,6 +159,7 @@ struct options {
     bool fir_report; // --fir-verify-report: the first violation of each function, not the FIR
     bool fir_stats; // --fir-stats: after the build, `lowered N of M` on stdout
     bool fir_run; // --fir-run: run the FIR of the program with fir.interpreter
+    bool fir_events; // --fir-events: --fir-run reports the ownership events of the run
     bool have_run_args; // `--` was given, which only --fir-run takes
     containers.str_vec run_args; // the arguments after `--`, which go to the program
     bool have_lib; // --lib <name> <root>: a library build (D9.11)
@@ -227,6 +229,7 @@ fn help() void {
     println("                     write the first FIR violation of each function and stop");
     println("  --fir-stats        after the build, write `lowered N of M` functions");
     println("  --fir-run          run the program's FIR; the arguments after -- go to it");
+    println("  --fir-events       with --fir-run, report the ownership events of the run");
     println("  --lib <name> <root>");
     println("                     build the library <name> from the directory <root>");
     println("  --use <name>=<path>");
@@ -405,6 +408,8 @@ fn parse_flag(options mut* opts, string arg) bool {
     } else if (arg == "--fir-run") {
         // runs the FIR of the program in place of a build
         opts->fir_run = true;
+    } else if (arg == "--fir-events") {
+        opts->fir_events = true;
     } else if (arg == "--emit-interface") {
         // writes the interface file of the library and stops (D9.11)
         opts->emit_interface = true;
@@ -641,6 +646,10 @@ fn parse(options mut* opts, string@ args) i32 {
         && !opts->fir_test && !opts->fir_run) {
         // a link writes an executable, and stdout is no place for one (toolchain.md 1)
         usage_error("-o - requires -S or -c");
+        return PARSE_ERROR;
+    }
+    if (opts->fir_events && !opts->fir_run) {
+        usage_error("--fir-events requires --fir-run");
         return PARSE_ERROR;
     }
     if (opts->json && !opts->check) {
@@ -2025,17 +2034,14 @@ fn fir_test_pass(string text, test_pass mut* out) i32 {
 fn find_function(fir.module* m, check.checker* ck, string name) ast.sym* {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
-    u64 mut i = 0;
-    while (i < m->funcs.len) {
+    for (u64 mut i = 0; i < m->funcs.len; i++) {
         strbuf.clear(&b);
         fir_print.print_symbol(m->funcs.items[i].sym, &b);
         if (strbuf.view(&b) == name) {
             return m->funcs.items[i].sym;
         }
-        i += 1;
     }
-    i = 0;
-    while (i < check.check_sym_count(ck)) {
+    for (u64 mut i = 0; i < check.check_sym_count(ck); i++) {
         ast.sym* s = check.check_sym_at(ck, i);
         if (s->kind == ast.sym_kind.s_fn) {
             strbuf.clear(&b);
@@ -2044,7 +2050,6 @@ fn find_function(fir.module* m, check.checker* ck, string name) ast.sym* {
                 return s;
             }
         }
-        i += 1;
     }
     return null;
 }
@@ -2125,12 +2130,13 @@ fn resolve_run(fir.module* m, check.checker* ck, test_pass mut* p) i32 {
 
 // The pass `run` of a `.fir` test: fir.interpreter runs the function of `p` with its values, or
 // the program `main.main` with the path of the test as its one argument, and captures what it
-// writes. The report of fir.interpreter.write_report goes to `out`.
+// writes. The report of fir.interpreter.write_report, with the events of the run, goes to `out`.
 fn run_test(check.checker mut* ck, fir.module* m, test_pass* p, string entry,
             strbuf.str_buf mut* out) void {
     interpreter.machine mut it = interpreter.machine{};
     interpreter.init(&it, ck, m, true);
     defer interpreter.free(&it);
+    it.sh.reporting = true;
     if (p->text.len == 0) {
         string[1] argv = {entry};
         interpreter.run_program(&it, p->function, argv[..]);
@@ -2276,7 +2282,7 @@ fn fir_test_entry(options* opts, string program) i32 {
 // --fir-run runs the FIR of the checked program with fir.interpreter, as the `main` that a build
 // emits starts it (toolchain.md 6 item 22), with the entry file and the arguments after `--` as
 // its arguments. The program writes to the descriptors of the compiler, and run_status gives
-// the status of its end.
+// the status of its end. With --fir-events the events go to stderr, each as `fort: event ...`.
 fn run_entry(analysis mut* an, options* opts) i32 {
     ast.node* decl = gen_fir.find_main(modules.entry(&an->set)->ast);
     fir.module mut none = fir.module_new();
@@ -2287,12 +2293,15 @@ fn run_entry(analysis mut* an, options* opts) i32 {
     containers.str_vec mut argv = containers.str_create();
     defer containers.str_free(&argv);
     containers.str_push(&argv, opts->entry);
-    u64 mut i = 0;
-    while (i < opts->run_args.len) {
+    for (u64 mut i = 0; i < opts->run_args.len; i++) {
         containers.str_push(&argv, containers.str_at(&opts->run_args, i));
-        i += 1;
     }
+    it.sh.reporting = opts->fir_events;
     interpreter.outcome o = interpreter.run_program(&it, decl->sym, containers.str_items(&argv));
+    strbuf.str_buf mut events = strbuf.create();
+    defer strbuf.free(&events);
+    shadow.write_events(&it.sh, "fort: ", &events);
+    eprint(strbuf.view(&events));
     return run_status(&o, opts->target);
 }
 
