@@ -792,8 +792,8 @@ came here.
   compare the largest of each corpus with D17.11. The error names the declared name of a named local
   or a parameter and the source text of the expression of a temporary (`report.write_owner`). The
   temporary option `--leak-report` implies `--check` and lists on stdout only the leak sites that
-  are no error yet, so it writes nothing until the report of part 2 adds its sites; it refuses
-  `--json` and `--index`, which write to stdout too. A leak at `continue` always comes with the
+  are no error yet, the sites of part 2 (the next entry); it refuses `--json` and `--index`, which
+  write to stdout too. A leak at `continue` always comes with the
   error of D17.11 at the declaration of the next round, because the back edge carries the live local
   there. The pass follows the edge of `while (true)` that no run takes, so the `dead` before the
   `return` of `spin` in `test/fort/owner/prover_test.ft` is unproved; D17.20 keeps that obligation,
@@ -806,6 +806,36 @@ came here.
   A memory owner is unknown after each call, so its `del` must come after the last call of the
   function. Register the `defer del` of a memory owner before every other `defer`, so that it runs
   last, after the last call (D17.20; `test/lang/run/stdlib/053_io_open_errors.ft`).
+- **The emptiness pass proves part 2 of the leak rule, and only reports it** (D17.20,
+  `spec/fir.md` 11, Inner owners). `owner.prover.find_inners` lists in `proof.inners` each `del` of
+  a `T* own` and each `cast` that carries `own` from one to a pointer to another type, where `T`
+  holds an inner owner (`place.count_owners`), and `judge_inners` tests the fact of the path of each
+  inner owner (`place.inner_path`) right before the statement. `proof.inner_leaks` counts the sites
+  that it does not prove, and `prover.has_error` does not read it, so no build and no `--check`
+  changes its verdict; `driver.overwrite_entry` writes the lines of `report.write_inners` to stdout
+  under `--leak-report` alone. The inner owners take facts of their own, so a function with such a
+  site and with no check, no store and no owner local gets a proof too. The inner work has its own
+  limit over the leak work, so a function whose inner owners pass 2^20 keeps the verdicts of
+  D17.11 and of part 1, and its sites of part 2 are unproved. Each inner owner of each site takes a
+  fact of its own with no search (`collect_inner_facts`), and one walk of the type gives each path
+  (`place.put_inner_paths`): a search for an earlier fact of each owner took the square of the
+  owners, which the inner work does not count (`the_proof_of_part_2_is_linear_in_the_inner_owners`
+  in `test/fort/owner/prover_test.ft`). Each path copies its steps, so the inner work counts the
+  steps of the paths (`count_inner_steps`) and not the owners alone: the owners at the end of a
+  long chain of structs take the owners times the depth in memory. The layout of each struct keeps
+  its count of inner owners and their depth (`types.type_layout_struct`, `types.type_owner_count`,
+  `types.type_owner_depth`): a walk of each field of each struct took 2^n steps for a chain of n
+  structs that each hold two fields of the struct below
+  (`the_inner_owners_of_a_doubling_chain_take_one_walk`). **A `del` of a place that is no
+  whole pointer local is always a site that the pass cannot prove** (`del(n->left)`,
+  `del(v->items[k])`, `del(*pp)`, `del(s.next)`), because D17.11 tracks no place through it, and a
+  call before the `del` kills the facts of the inner owners, which are reached through memory: move
+  each inner owner into a local and `del` it first. A deferred `del` expands at each exit with one
+  location, so the report gives one line for each location, at the first inner owner that the pass
+  does not prove. The place text comes from the tree: `report.find_release` finds the call of `del`
+  whose name stands at the location of the FIR `del`, or the `cast` that starts there. To count the
+  sites, run `--leak-report` over each entry of the corpora and group the lines by the directory of
+  their file; the counts stand in the ticket of the change.
 - **The FIR interpreter runs the FIR of a closure before the emptiness pass**
   (`spec/ownership-design.md` 3, `src/fort/fir/interpreter.ft`). It is the reference semantics of
   the ownership checks, and `--fir-run` and the pass `run` of `--fir-test` start it

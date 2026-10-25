@@ -1879,14 +1879,17 @@ fn run_emptiness(session.session mut* s, fir.func* f) prover.proof {
 // overwrite check, each store and each exit that the pass does not prove, as a build does, and
 // returns EXIT_COMPILE_ERROR after an error and EXIT_OK otherwise. A function that the lowering
 // does not lower, or whose checks name a runtime entry that `std.rt` lacks, does not take part,
-// because a build reports it. --leak-report lists the leak sites that are no error yet. Part 1 of
-// the leak rule is an error, so the report lists none until part 2 reports its sites (D17.20).
+// because a build reports it. --leak-report lists the leak sites that are no error yet on stdout,
+// with one print: the lines of report.write_inners for each site of part 2 of the leak rule that
+// the pass does not prove. Part 2 only reports, so no such site changes the verdict (D17.20).
 fn overwrite_entry(session.session mut* s, analysis mut* an, options* opts) i32 {
     fir_verify.runtime mut rt = fir_verify.runtime_of(&an->ck);
     fir_verify.excuse_mode(&rt, opts->release, opts->no_bounds_check);
     gen.node_ref_vec mut decls = gen.node_ref_vec{};
     defer gen.refs_free(&decls);
     fir_lower.program_functions(&an->set, &decls);
+    strbuf.str_buf mut leaks = strbuf.create();
+    defer strbuf.free(&leaks);
     bool mut proved = true;
     u64 mut i = 0;
     while (i < decls.len) {
@@ -1897,6 +1900,9 @@ fn overwrite_entry(session.session mut* s, analysis mut* an, options* opts) i32 
             if (fir_verify.runtime_holds(&f, &rt, &missing)) {
                 fir_verify.verify(&f, &rt);
                 prover.proof mut verdicts = run_emptiness(s, &f);
+                if (opts->leak_report) {
+                    report.write_inners(&f, &verdicts, s, &leaks);
+                }
                 if (prover.has_error(&verdicts)) {
                     proved = false;
                 }
@@ -1905,6 +1911,9 @@ fn overwrite_entry(session.session mut* s, analysis mut* an, options* opts) i32 
             fir.func_free(&f);
         }
         i += 1;
+    }
+    if (opts->leak_report) {
+        print(strbuf.view(&leaks));
     }
     if (!proved) {
         return EXIT_COMPILE_ERROR;

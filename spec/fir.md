@@ -831,8 +831,10 @@ changes the function, and the verifier runs after it. The passes run in this ord
    The leak rule of D17.20 uses the facts of this pass at each `dead` marker, at each `return`,
    and at each `del` and `own` cast of a pointer to owners. The pass proves part 1 of the rule
    (**Exits**) and reports the error of D17.20 for each exit that it cannot prove, in every build
-   mode, under `--check` and under `--fir`, as for a store. Part 2 comes later, as a report first:
-   `--leak-report` lists only the sites that are no error yet, so part 1 adds no line to it.
+   mode, under `--check` and under `--fir`, as for a store. It proves part 2 too (**Inner
+   owners**), as a report first: `--leak-report` lists each site of part 2 that the pass cannot
+   prove, and such a site is no error, so no build and no `--check` changes its verdict. Part 1
+   adds no line to the report.
    `--fir-verify-report` and the pass `build-mode` of a FIR test run it too, for its proof, and
    report nothing.
    The pass is the forward must-empty analysis of D17.11, and it reads FIR this way:
@@ -1044,6 +1046,56 @@ changes the function, and the verifier runs after it. The passes run in this ord
      of the leak work, which names no limit of D17.11. The message names the declared name of a
      named local or a parameter, and the source text of the expression of a temporary, from its
      first token to its last; FIR text with no tree gives the FIR place.
+   - **Inner owners.** An inner owner of a type `T` is an `own` reference in the fixed storage of
+     `T` (5.5): `T` itself when it is an `own` reference, else each inner owner of each field of a
+     struct and of each element of a fixed array. A pointer that does not own, a span and a
+     `string` hold no inner owner, and the walk does not go through them. The inner owners of `T`
+     are numbered in this order: the fields in the order of their declarations and the elements
+     from the first, each with its own inner owners before those of the next. A site of part 2 of
+     D17.20 is a `del(move p)` where the type of `p` is `T* own` and `T` holds an inner owner, or
+     an assignment `_t = cast<U>(a)` where `U` is `V* own` or `void* own`, `a` is a `copy` or
+     `move` operand of such a place `p`, and `V` is another type than `T`, with its marks. A cast
+     to a pointer to `T` keeps each owner, so it has no obligation, and a `const` operand is null.
+     The obligation of a site is the fact of each inner owner of `*p` right before the statement,
+     after the statements before it in its block (**Order**). The fact of an inner owner is the
+     fact of its path: `(*_p)`, then a `field` step for a field and an `index` step with a constant
+     key for an element. The path is a tracked place when `p` is a whole local `_p` that is no
+     memory (**Facts**). Else no place through `p` is tracked, and the site is unproved: a `del` of
+     a field, of an element, of a global or of `(*_a)` of a held address, and of a memory local.
+     A `del` of a span or of a `string`, and of a pointer to an object with no inner owner, is no
+     site. So a span whose elements hold owners waits for refinement R8 (D17.20). A site in an
+     abort block keeps its obligation, because D17.20 gives part 2 no exception. A deferred `del`
+     expands at each exit with one location, and the pass proves each expansion. After a `cast`,
+     no obligation tests the object through a pointer to a type with no inner owner, so a store
+     through a view of the object after the `cast` can give it an owner that the `del` of the new
+     pointer frees with it. The view can come from the old pointer before the `cast` or from the
+     new pointer after it. This case is outside the guarantee of part 2. The facts of the inner
+     owners join the facts of **Facts**, and no gen rule or kill rule changes for them. Each inner
+     owner of each site takes a fact of its own, with no search for an earlier fact of its place:
+     no rule reads the number of a fact, so two facts of one place hold the same value, and one
+     walk of `T` gives the path of each inner owner.
+     The inner work of a function adds its statements and terminators times the steps of the paths
+     of the inner owners of its sites to the leak work of **Exits**. The steps of a site are its
+     inner owners times 1 more than the most steps from `T` to one of them, the deref of each path
+     included. The layout of each struct keeps its count of inner owners and that depth, so no
+     count walks a struct twice. Each path takes that many steps of memory, and each walk of the
+     facts reads them, so the count bounds both. A count of steps stops at 2^32 (4294967296), so
+     the product stays in a `u64`. When the inner work passes 1048576, the pass proves no site of
+     part 2; the leak work and the work of **Proof** keep their own limits, so the verdicts of
+     D17.11 and of part 1 do not change. `--leak-report` writes two lines for each location of a
+     site that the pass does not prove, in the order of the sites, at the `del` keyword or at the
+     `cast`: `<file>:<line>:<col>: leak: cannot prove '<place>' is empty before this del`, or
+     `before this cast`, and `<file>:<line>:<col>: note: move '<place>' into a local and del it
+     first`. `<place>` names the first inner owner that the pass does not prove. It is the source
+     text of `p`, without a `move( )` around it, at a `cast` or at a `del`, and in a parenthesis
+     unless it is a name, a call, a `cast`, an index, a field, `new` or `sizeof`. Then `->` and the
+     name of a first field, `.` and the name of each later field, and `[n]` for element `n`, with
+     `(*p)[n]` for a first step that is an element and `*p` for an object that is itself the owner.
+     The text of `p` in `del(move(q))` is `q`. So `del(q)` of a `q` whose `a` holds an allocation
+     names `q->a`, and `del(n->left)` names
+     `n->left->left` for a `node` whose first field is `left`. FIR text with no tree gives
+     `(*<the FIR place of p>)` and `.<field number>` and `[n]`: `(*_1).1[1]`. Past the limit the
+     first line of a function takes a third line, the note of the leak limit of **Exits**.
    - **Rewrite.** The pass rewrites nothing, so the verifier does not run after it.
 4. **The build-mode pass**, which rewrites for the selected mode (D11.1, D10.6, D17.11):
    - In every mode, it replaces each `check(overwrite: p)` that the emptiness pass proved by

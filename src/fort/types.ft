@@ -57,12 +57,16 @@ enum layout_state {
     l_error, // infinite size; sizeof yields 0 and alignof 1
 }
 
-// What a laid-out struct knows about itself.
+// What a laid-out struct knows about itself. `owners` and `owner_depth` keep what
+// type_owner_count and type_owner_depth answer for the struct, so that no query walks
+// the fields of a struct a second time.
 struct layout {
     layout_state state;
     u64 size;
     u64 align;
     bool owning; // a field is an `own` reference or an owning aggregate
+    u64 owners; // the `own` references in fixed storage, at most OWNER_CAP
+    u64 owner_depth; // the most steps from the struct to one of them
 }
 
 /// Describes one type. Fields unused by its kind hold zero values.
@@ -632,6 +636,62 @@ fn type_ref_at(node* t, u64 k) node* {
 fn type_level_mut(node* t, u64 k) bool {
     node* r = type_ref_at(t, k);
     return r != null && r->is_mut;
+}
+
+/// The most inner owners that type_owner_count counts. A count past it stays at
+/// OWNER_CAP, so that the sum of two counts and the product of a count and a count of
+/// statements stay in a `u64`.
+u64 OWNER_CAP = 4294967296;
+
+/// The sum of `a` and `b`, or OWNER_CAP when it passes OWNER_CAP.
+fn capped_sum(u64 a, u64 b) u64 {
+    if (a >= OWNER_CAP || b >= OWNER_CAP - a) {
+        return OWNER_CAP;
+    }
+    return a + b;
+}
+
+/// The product of `a` and `b`, or OWNER_CAP when it passes OWNER_CAP.
+fn capped_product(u64 a, u64 b) u64 {
+    if (a != 0 && b >= OWNER_CAP / a) {
+        return OWNER_CAP;
+    }
+    return a * b;
+}
+
+/// The count of the inner owners of `t`, the `own` references in its fixed storage
+/// (spec/fir.md 5.5), at most OWNER_CAP: 1 for an `own` reference, the length of a
+/// fixed array times the count of its element, and for a struct the count that its
+/// layout keeps (type_layout_struct). A pointer that does not own, a span and a
+/// `string` hold none in fixed storage. The time is the nesting of the fixed arrays.
+fn type_owner_count(node* t) u64 {
+    if (type_is_reference(t)) {
+        if (t->is_own) {
+            return 1;
+        }
+        return 0;
+    }
+    if (!type_is_owning_aggregate(t)) {
+        return 0;
+    }
+    if (t->kind == type_kind.k_array) {
+        return capped_product(t->len, type_owner_count(t->elem));
+    }
+    return t->layout->owners;
+}
+
+/// The most steps from `t` to one of its inner owners: 0 for an `own` reference and
+/// for a type with no inner owner, 1 more than its element for a fixed array, and for
+/// a struct the depth that its layout keeps, 1 more than its deepest field with an
+/// inner owner (type_layout_struct).
+fn type_owner_depth(node* t) u64 {
+    if (type_is_reference(t) || type_owner_count(t) == 0) {
+        return 0;
+    }
+    if (t->kind == type_kind.k_array) {
+        return 1 + type_owner_depth(t->elem);
+    }
+    return t->layout->owner_depth;
 }
 
 /// Whether a struct or fixed array contains an `own` reference by value, directly
@@ -1206,6 +1266,8 @@ fn type_layout_fail(node* s) void {
     l->size = 0;
     l->align = 1;
     l->owning = false;
+    l->owners = 0;
+    l->owner_depth = 0;
 }
 
 /// Returns the unresolved struct needed to compute `sizeof(t)`.
@@ -1243,6 +1305,8 @@ fn type_layout_struct(node* s, node*@ fields, u64 mut@ offsets) bool {
     u64 mut off = 0;
     u64 mut align = 1;
     bool mut owning = false;
+    u64 mut owners = 0;
+    u64 mut depth = 0;
     u64 mut i = 0;
     while (i < fields.len) {
         node* f = fields[i];
@@ -1266,6 +1330,12 @@ fn type_layout_struct(node* s, node*@ fields, u64 mut@ offsets) bool {
         if ((type_is_reference(f) && f->is_own) || type_is_owning_aggregate(f)) {
             owning = true;
         }
+        // the layout of a struct field keeps its count, so this reads each field once
+        u64 count = type_owner_count(f);
+        owners = capped_sum(owners, count);
+        if (count > 0 && 1 + type_owner_depth(f) > depth) {
+            depth = 1 + type_owner_depth(f);
+        }
         i += 1;
     }
     // rounded up to the alignment, as C lays the same struct out
@@ -1275,6 +1345,8 @@ fn type_layout_struct(node* s, node*@ fields, u64 mut@ offsets) bool {
     }
     l->align = align;
     l->owning = owning;
+    l->owners = owners;
+    l->owner_depth = depth;
     l->state = layout_state.l_resolved;
     return true;
 }

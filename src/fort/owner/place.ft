@@ -823,3 +823,136 @@ fn is_through_fresh(survey* c, path q, fir_flow.bits* fresh) bool {
     return fresh != null && q.base == fir.base_kind.bk_local && is_fresh(c, fresh, q.local)
         && is_through(c, q, q.local);
 }
+
+// ---- the inner owners --------------------------------------------------------------------------
+
+/// The count of the inner owners of the type `t`, the owners in its fixed storage (fir.md 5.5),
+/// at most types.OWNER_CAP (types.type_owner_count). The layout of a struct keeps its count, so
+/// no call walks the fields of a struct.
+fn count_owners(types.node* t) u64 {
+    return types.type_owner_count(t);
+}
+
+/// One step from a type toward one of its inner owners: field `field` of a struct, whose name is
+/// `name`, or element `index` of a fixed array, with `element`. `ty` is the type that the step
+/// reaches.
+struct owner_step {
+    bool element;
+    u32 field;
+    string name;
+    u64 index;
+    types.node* ty;
+}
+
+/// The step from the type `t` toward its inner owner `k`, in the order of count_owners: the fields
+/// of a struct in the order of their declarations and the elements of a fixed array from the first,
+/// each with its own owners before those of the next. *rest takes the number of that owner among
+/// the inner owners of the type of the step. False when `t` is itself the owner, an `own`
+/// reference, and then nothing is written.
+fn next_owner_step(types.node* t, u64 k, owner_step mut* out, u64 mut* rest) bool {
+    if (types.type_is_reference(t)) {
+        return false;
+    }
+    if (t->kind == types.type_kind.k_array) {
+        u64 each = count_owners(t->elem);
+        *out = owner_step{.element = true, .index = k / each, .ty = t->elem};
+        *rest = k % each;
+        return true;
+    }
+    ast.node* decl = fir.struct_decl(t);
+    u64 mut left = k;
+    u32 mut field = 0;
+    u64 mut i = 0;
+    while (i < ast.ast_len(decl)) {
+        ast.node* n = ast.ast_child(decl, i);
+        if (n->kind == ast.ast_kind.k_field_decl) {
+            u64 count = count_owners(n->ty);
+            if (left < count) {
+                *out = owner_step{.field = field, .name = n->name, .ty = n->ty};
+                *rest = left;
+                return true;
+            }
+            left -= count;
+            field += 1;
+        }
+        i += 1;
+    }
+    panic("owner.place.next_owner_step: no such inner owner");
+}
+
+// The most steps from the type `t` to one of its inner owners (types.type_owner_depth). The
+// layout of a struct keeps its depth, so no call walks the fields of a struct.
+fn depth_to_owners(types.node* t) u64 {
+    return types.type_owner_depth(t);
+}
+
+/// Writes into `out` the path of each inner owner of the type `t` through the pointer local `n`,
+/// in the order of next_owner_step, with one walk of `t`: `(*_n)`, then a field step for a field
+/// and an index step with a constant key for an element. A path is a tracked place when `n` is no
+/// memory (D17.11). Its steps stand at the end of the steps of `c`. `out` has room for
+/// count_owners(t) paths, and the walk writes no more. The walk enters each field of each struct
+/// and each element of each fixed array on the way to an inner owner once, and it searches for no
+/// owner, so its time is the inner owners times their steps, and the fields of the structs that it
+/// enters.
+fn put_inner_paths(survey mut* c, u32 n, types.node* t, path mut@ out) void {
+    step mut@ own prefix = new(step, depth_to_owners(t));
+    defer del(prefix);
+    u64 mut at = 0;
+    walk_owners(c, n, t, prefix, 0, out, &at);
+}
+
+// Writes into `out[*at..]` the path of each inner owner of `t` after the steps `prefix[..depth]`
+// (put_inner_paths). A type with no inner owner writes no step into `prefix`, so `prefix` needs
+// room for depth_to_owners of the type of the walk only, and the walk enters no field and no
+// element that holds no owner.
+fn walk_owners(survey mut* c, u32 n, types.node* t, step mut@ prefix, u64 depth, path mut@ out,
+               u64 mut* at) void {
+    if (*at >= out.len || count_owners(t) == 0) {
+        return;
+    }
+    if (types.type_is_reference(t)) {
+        if (t->is_own) {
+            path mut p = path{
+                .base = fir.base_kind.bk_local,
+                .local = n,
+                .first = cast(c->steps_len, u32),
+                .tracked = !c->locals[cast(n, u64)].memory,
+            };
+            push_step(c, step{.kind = step_kind.sk_deref});
+            u64 mut i = 0;
+            while (i < depth) {
+                push_step(c, prefix[i]);
+                i += 1;
+            }
+            p.len = cast(depth, u32) + 1;
+            out[*at] = p;
+            *at += 1;
+        }
+        return;
+    }
+    if (!types.type_is_owning_aggregate(t)) {
+        return;
+    }
+    if (t->kind == types.type_kind.k_array) {
+        u64 mut i = 0;
+        while (i < t->len && *at < out.len) {
+            key index = key{key_kind.kk_constant, 0, consts.cv_from_u64(i)};
+            prefix[depth] = step{.kind = step_kind.sk_index, .key = index};
+            walk_owners(c, n, t->elem, prefix, depth + 1, out, at);
+            i += 1;
+        }
+        return;
+    }
+    ast.node* decl = fir.struct_decl(t);
+    u32 mut field = 0;
+    u64 mut i = 0;
+    while (i < ast.ast_len(decl) && *at < out.len) {
+        ast.node* member = ast.ast_child(decl, i);
+        if (member->kind == ast.ast_kind.k_field_decl) {
+            prefix[depth] = step{.kind = step_kind.sk_field, .field = field};
+            walk_owners(c, n, member->ty, prefix, depth + 1, out, at);
+            field += 1;
+        }
+        i += 1;
+    }
+}

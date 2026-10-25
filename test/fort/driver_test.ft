@@ -1922,35 +1922,133 @@ fn each_unproved_exit_is_an_error_in_every_mode() void {
     assert(reported_leak_sites());
 }
 
+// The lines of --leak-report for LEAK_SITES: the `del(p)` of the parameter `p`, whose inner owner
+// `p->next` has no fact at the entry (D17.20 part 2).
+string[2] LEAK_SITES_LISTED = {
+    "leak_sites.ft:9:5: leak: cannot prove 'p->next' is empty before this del\n",
+    "leak_sites.ft:9:5: note: move 'p->next' into a local and del it first\n",
+};
+
+// The lines of --leak-report for OW_SITES: the `del` of the field `b->left`, which is no pointer
+// local, so no place through it is tracked.
+string[2] OW_SITES_LISTED = {
+    "ow_sites.ft:8:5: leak: cannot prove 'b->left->left' is empty before this del\n",
+    "ow_sites.ft:8:5: note: move 'b->left->left' into a local and del it first\n",
+};
+
+// The lines of --leak-report for OW_PROVED: its two `del`s of a field. The `del(p)` of the fresh
+// local `p` of `leak` is proved and has no line.
+string[4] OW_PROVED_LISTED = {
+    "ow_proved.ft:5:5: leak: cannot prove 'b->left->left' is empty before this del\n",
+    "ow_proved.ft:5:5: note: move 'b->left->left' into a local and del it first\n",
+    "ow_proved.ft:9:5: leak: cannot prove 'b->left->left' is empty before this del\n",
+    "ow_proved.ft:9:5: note: move 'b->left->left' into a local and del it first\n",
+};
+
+// A program whose one leak site is a `cast` of part 2: `q->a` holds an allocation at the `cast`
+// to `void* own`, so the `del` of `v` frees an object with a live owner. Part 1 holds: `q` moves
+// into the cast and `v` takes the `del`.
+string[10] CAST_SITE = {
+    "struct box {",
+    "    i32 mut* own a;",
+    "}",
+    "fn main() i32 {",
+    "    box mut* own q = new(box);",
+    "    q->a = new(i32);",
+    "    void* own v = cast(move(q), void* own);",
+    "    del(v);",
+    "    return 0;",
+    "}",
+};
+
+// The lines of --leak-report for CAST_SITE, at the `cast`.
+string[2] CAST_SITE_LISTED = {
+    "cast_site.ft:7:19: leak: cannot prove 'q->a' is empty before this cast\n",
+    "cast_site.ft:7:19: note: move 'q->a' into a local and del it first\n",
+};
+
+// Whether the last run wrote the lines of `want` to stdout, in order, and nothing else.
+fn listed(string@ want) bool {
+    string own out = captured_out();
+    defer del(out);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut k = 0;
+    while (k < want.len) {
+        strbuf.append(&text, want[k]);
+        k += 1;
+    }
+    if (out != strbuf.view(&text)) {
+        eprintln(out, "and not\n", strbuf.view(&text));
+        return false;
+    }
+    return true;
+}
+
 // --leak-report implies --check, and it lists on stdout only the leak sites that are no error
-// yet. Part 1 of the leak rule is an error, so the report lists none (D17.20): the run gives the
-// diagnostics and the status of --check and an empty stdout. A program with no error exits 0 and
-// writes nothing, and no build runs, so no module file appears.
-fn the_leak_report_lists_no_error() void {
+// yet: the sites of part 2 of the leak rule that the pass does not prove, with the message and the
+// note at the `del` keyword (D17.20). Part 1 is an error, so it has no line there: the run gives
+// the diagnostics and the status of --check, and the lines of part 2. A site of part 2 changes no
+// verdict: OW_PROVED, whose only leak sites are of part 2, exits 0 with no diagnostic, and no
+// build runs, so no module file appears. --check alone lists nothing. Each mode of MODES gives the
+// same lines and the same status, because `-S` with --leak-report builds nothing.
+fn the_leak_report_lists_each_site_of_part_2() void {
     write_runtime();
     write_lines("leak_sites.ft", LEAK_SITES[..]);
     string[3] mut report = {"fort", "--leak-report", "leak_sites.ft"};
     assert(run(report[0..3]) == EXIT_COMPILE_ERROR);
     assert(reported_leak_sites());
-    string own listed = captured_out();
-    defer del(listed);
-    assert(listed == "");
+    assert(listed(LEAK_SITES_LISTED[..]));
     write_lines("ow_sites.ft", OW_SITES[..]);
     string[3] mut both = {"fort", "--leak-report", "ow_sites.ft"};
     assert(run(both[0..3]) == EXIT_COMPILE_ERROR);
     assert(reported_ow_sites());
-    string own none = captured_out();
-    defer del(none);
-    assert(none == "");
+    assert(listed(OW_SITES_LISTED[..]));
     write_lines("ow_proved.ft", OW_PROVED[..]);
     remove_file("a.out");
     string[3] mut clean = {"fort", "--leak-report", "ow_proved.ft"};
     assert(run(clean[0..3]) == EXIT_OK);
     assert(captured_err_is_empty());
-    string own empty = captured_out();
-    defer del(empty);
-    assert(empty == "");
+    assert(listed(OW_PROVED_LISTED[..]));
     assert(!file_exists("a.out"));
+    string[3] mut check = {"fort", "--check", "ow_proved.ft"};
+    assert(run(check[0..3]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    assert(listed(LEAK_SITES_LISTED[..0]));
+    // the checked, the release and the unchecked mode list the same sites with the same verdict
+    string[4] mut moded = {"fort", "--leak-report", "-S", "ow_proved.ft"};
+    for (string mode : MODES) {
+        moded[2] = mode;
+        assert(run(moded[0..4]) == EXIT_OK);
+        assert(captured_err_is_empty());
+        assert(listed(OW_PROVED_LISTED[..]));
+    }
+    moded[3] = "leak_sites.ft";
+    for (string mode : MODES) {
+        moded[2] = mode;
+        assert(run(moded[0..4]) == EXIT_COMPILE_ERROR);
+        assert(reported_leak_sites());
+        assert(listed(LEAK_SITES_LISTED[..]));
+    }
+}
+
+// --leak-report lists a site of part 2 at a `cast` as at a `del`, and a build of the program in
+// each mode writes its module with no diagnostic, because a site of part 2 is no error (D17.20).
+fn the_leak_report_lists_a_site_at_a_cast() void {
+    write_runtime();
+    write_lines("cast_site.ft", CAST_SITE[..]);
+    string[3] mut report = {"fort", "--leak-report", "cast_site.ft"};
+    assert(run(report[0..3]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    assert(listed(CAST_SITE_LISTED[..]));
+    string[6] mut build = {"fort", "-S", "-S", "cast_site.ft", "-o", "cast_site.ll"};
+    for (string mode : MODES) {
+        remove_file("cast_site.ll");
+        build[2] = mode;
+        assert(run(build[0..6]) == EXIT_OK);
+        assert(captured_err_is_empty());
+        assert(file_exists("cast_site.ll"));
+    }
 }
 
 // The report and the document of --json both go to stdout, so the two do not combine, and
@@ -2482,7 +2580,8 @@ fn main() i32 {
     overwrite_report_is_an_unknown_option();
     each_unproved_store_is_an_error_in_every_mode();
     each_unproved_exit_is_an_error_in_every_mode();
-    the_leak_report_lists_no_error();
+    the_leak_report_lists_each_site_of_part_2();
+    the_leak_report_lists_a_site_at_a_cast();
     the_leak_report_refuses_the_document();
     a_proved_store_leaves_no_check_in_any_mode();
     fir_test_parses_as_a_flag();

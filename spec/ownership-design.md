@@ -618,7 +618,8 @@ cell gives sites/functions (measured with P4). The direction says how the real c
 The probe gives no key to an index that a local holds (high), and it loses the type of 72 places of
 `src/fort` (low, section 14). `?` means both directions. `pass` marks a row that the report-only
 mode of the real pass measured in place of P4. No cast in the corpora carries `own` to
-another pointee type with owners, so part 2 of rule (c) has 0 sites at a cast (measured, P4).
+another pointee type with owners, so part 2 of rule (c) has 0 sites at a cast (measured, P4 and
+`--leak-report`).
 
 | rule and variant                 | src/fort  | src/lsp | std   | test/fort    | test/lang | dir  |
 |----------------------------------|----------:|--------:|------:|-------------:|----------:|------|
@@ -628,7 +629,7 @@ another pointee type with owners, so part 2 of rule (c) has 0 sites at a cast (m
 | (c) `own` local, parameter, temp | 2/2       | 0/0     | 0/0   | 0/0          | 32/24     | pass |
 | (c) owning aggregate local, V1   | 199/99    | 1/1     | 2/1   | 2,424/2,354  | 93/77     | ?    |
 | (c) owning aggregate local, R1   | 106/48    | 1/1     | 0/0   | 2,116/2,076  | 35/30     | ?    |
-| (c) part 2, a pointer            | 11/10     | 2/2     | 0/0   | 0/0          | 34/16     | ?    |
+| (c) part 2, a pointer            | 14/13     | 2/2     | 0/0   | 0/0          | 41/18     | pass |
 | (c) part 2, a span (Q7)          | 29/21     | 4/4     | 0/0   | 2/1          | 8/5       | ?    |
 | (d) a maybe-vacated `del`        | 5/4       | 0/0     | 0/0   | 1/1          | 63/34     | ?    |
 | (e)1 stale view local read       | 122/44    | 0/0     | 0/0   | 2,137/699    | 39/18     | ?    |
@@ -710,8 +711,21 @@ whose elements hold owners, for which no element is tracked, waits for R8.
   26 locations in 21 functions, as P4 did. Most aggregate sites are memory locals after their last
   call. A test environment whose `close` frees two fields with two calls is an example: the second
   call kills the fact of the first, also with R1.
-- Migration of part 2 (measured, P4, then read): 10 functions of `src/fort`, and no cast. A span
-  with owners, as the span of `bits` in `fir.emptiness`, adds 21 functions (Q7).
+- Migration of part 2 (measured with `--leak-report`, then read; the row `pass` of the table is the
+  count of the real pass, which replaces the 11/10, 2/2 and 34/16 of P4, and no site is a `cast`).
+  Of the 14 sites of `src/fort`, 8 free an element of a vector of owning pointers before a store
+  into it (`types.reserve`, `types.node_new`, `ast.arena_reserve`, `ast.ast_new`,
+  `modules.owned_reserve`, `modules.admit`, `modules.used_reserve`, `modules.use_library`), as the
+  2 sites of `src/lsp` do (`lsp.json.chunks_reserve`, `lsp.json.add_chunk`): no pointer local
+  names the element, so no place through it is tracked, and the element is null at run time. 4
+  free an object after a call that frees its inner owners (`ast.ast_arena_free`,
+  `fir.interpreter.free` and two in `modules.free`), and the call kills their facts.
+  `containers.pool_free` frees `block` after its loop, where it is null (R7), and
+  `fir.interpreter.make_routine`, a module after the probe, frees a fresh `made` after a call. The
+  41 sites of `test/lang` stand in 4 programs and 3 tests of `run/ownership`. The shallow `del`s of
+  `programs/expr_eval.ft` (320:11) and `programs/json.ft` (439:11, 441:11) leak at run time
+  (`EXPECTED_EVENTS` of `test/fir_run_test.py`). The pass and P4 were not compared site by site.
+  A span with owners, as the span of `bits` in `fir.emptiness`, adds 21 functions (Q7).
 - Size: decision S, report M, migration M (the `own` locals, part 2) or L (the aggregates), error S.
 
 ### 6.4 (d) A double `del`

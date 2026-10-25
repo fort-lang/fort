@@ -1,14 +1,17 @@
 /// Writes the error of D17.11 for each overwrite check that owner.prover does not prove: the text
 /// and the position of each error (spec/fir.md 11, spec/ownership-design.md 4.1). It also writes
-/// the error of part 1 of the leak rule (D17.20) for each exit that owner.prover does not prove.
+/// the error of part 1 of the leak rule (D17.20) for each exit that owner.prover does not prove,
+/// and the line of `--leak-report` for each site of part 2 that it does not prove.
 //
 // The module holds no module-level mutable state: each buffer belongs to one call.
 import fort.ast;
 import fort.diag;
 import fort.fir;
 import fort.fir_print;
+import fort.owner.place;
 import fort.owner.prover;
 import fort.session;
+import fort.types;
 import std.strbuf;
 
 /// The second note of the first error of a function past prover.WORK_LIMIT (D17.11).
@@ -410,6 +413,242 @@ fn write_leaks(fir.func* f, prover.proof* p, session.session mut* s) void {
         prover.exit* e = &p->exits[k];
         if (!e->proved && !is_leak_repeated(f, p, k)) {
             write_leak(f, e, p->leak_over && !limit_told, s, &place, &text);
+            limit_told = true;
+        }
+        k += 1;
+    }
+}
+
+// ---- the report of part 2 of the leak rule -----------------------------------------------------
+
+// The `del` or the `cast` of the tree `n` that stands at `at`, or null: a call of `del` whose name
+// starts at `at`, where the lowering puts its FIR `del` (spec/fir.md 9.4), or a `cast` that starts
+// at `at`, where the lowering puts the statement of the cast.
+fn find_release(ast.node* n, diag.loc at) ast.node* {
+    if (n == null) {
+        return null;
+    }
+    ast.node* callee = n->a;
+    bool del_call = n->kind == ast.ast_kind.k_call && callee != null
+        && callee->kind == ast.ast_kind.k_ident && callee->name == "del" && ast.ast_len(n) == 1
+        && callee->loc.line == at.line && callee->loc.col == at.col;
+    bool cast_node = n->kind == ast.ast_kind.k_cast && n->loc.line == at.line
+        && n->loc.col == at.col;
+    if (del_call || cast_node) {
+        return n;
+    }
+    ast.node* mut found = find_release(n->a, at);
+    if (found == null) {
+        found = find_release(n->b, at);
+    }
+    if (found == null) {
+        found = find_release(n->c, at);
+    }
+    if (found == null) {
+        found = find_release(n->d, at);
+    }
+    u64 mut i = 0;
+    while (found == null && i < ast.ast_len(n)) {
+        found = find_release(ast.ast_child(n, i), at);
+        i += 1;
+    }
+    return found;
+}
+
+// Whether the expression `n` is `move(e)`.
+fn is_move(ast.node* n) bool {
+    return n->kind == ast.ast_kind.k_call && n->a != null && n->a->kind == ast.ast_kind.k_ident
+        && n->a->name == "move" && ast.ast_len(n) == 1;
+}
+
+// Whether the source text of the expression `n` stands as one operand before `->`, `[` and after
+// `*` with no parenthesis: a name, a call, a `cast`, an index, a field, `new` or `sizeof`.
+fn is_postfix(ast.node* n) bool {
+    switch (n->kind) {
+    case ast.ast_kind.k_ident, ast.ast_kind.k_call, ast.ast_kind.k_cast, ast.ast_kind.k_index,
+         ast.ast_kind.k_field, ast.ast_kind.k_arrow, ast.ast_kind.k_new, ast.ast_kind.k_sizeof:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// Appends the source text of the expression `n`, from its first token to its last, with each run
+// of white space as one space. False when the source is not there.
+fn write_text(ast.node* n, session.session mut* s, strbuf.str_buf mut* out) bool {
+    diag.loc mut first = diag.loc{};
+    find_start(n, &first);
+    string mut src = "";
+    if (first.line == 0 || !session.read_source(s, n->loc.file, &src)) {
+        return false;
+    }
+    u64 start = offset(src, first.line, first.col);
+    u64 end = offset(src, n->loc.end_line, n->loc.end_col);
+    if (start >= end) {
+        return false;
+    }
+    append_flat(out, src[start..end]);
+    return true;
+}
+
+// Appends the source text of `p` of the `del(p)` or of the `cast` that stands at `at` in `f`,
+// without the `move( )` of a `cast(move(p), T)`, and says in *postfix whether it needs no
+// parenthesis (is_postfix). False when the source or the tree is not there.
+fn write_released(fir.func* f, diag.loc at, session.session mut* s, strbuf.str_buf mut* out,
+                  bool mut* postfix) bool {
+    if (f->sym == null || f->sym->node == null || at.line == 0) {
+        return false;
+    }
+    ast.node* n = find_release(f->sym->node, at);
+    if (n == null) {
+        return false;
+    }
+    ast.node* mut e = n->a;
+    if (n->kind == ast.ast_kind.k_call) {
+        e = ast.ast_child(n, 0);
+    }
+    if (is_move(e)) {
+        e = ast.ast_child(e, 0);
+    }
+    *postfix = is_postfix(e);
+    return write_text(e, s, out);
+}
+
+// Appends `text`, in a parenthesis unless `postfix`.
+fn append_operand(strbuf.str_buf mut* out, string text, bool postfix) void {
+    if (!postfix) {
+        strbuf.push(out, '(');
+    }
+    strbuf.append(out, text);
+    if (!postfix) {
+        strbuf.push(out, ')');
+    }
+}
+
+// Appends the steps of next_owner_step from the type `t` to its inner owner `k`: `.<name>` for a
+// field and `[<index>]` for an element, or with `numbered` `.<number>` for a field, as the FIR
+// place names it.
+fn append_steps(types.node* t, u64 k, bool numbered, strbuf.str_buf mut* out) void {
+    types.node* mut at = t;
+    u64 mut left = k;
+    place.owner_step mut step = place.owner_step{};
+    while (place.next_owner_step(at, left, &step, &left)) {
+        if (step.element) {
+            strbuf.push(out, '[');
+            strbuf.append_u64(out, step.index);
+            strbuf.push(out, ']');
+        } else if (numbered) {
+            strbuf.push(out, '.');
+            strbuf.append_u64(out, cast(step.field, u64));
+        } else {
+            strbuf.push(out, '.');
+            strbuf.append(out, step.name);
+        }
+        at = step.ty;
+    }
+}
+
+/// Appends the text that names the first inner owner that the obligation `e` of `f` does not prove
+/// (D17.20): the source text of `p` and the names of the fields, `p->items` or `p->a.b`, with
+/// `(*p)[0]` for an element of an array that `p` points to, and `*p` when the object of `p` is
+/// itself the owner. A FIR text with no tree gives the FIR place, `(*_1).0`.
+fn write_inner_owner(fir.func* f, prover.inner* e, session.session mut* s,
+                     strbuf.str_buf mut* out) void {
+    fir.place p = prover.inner_place(f, e);
+    types.node* t = fir.place_type(f, p)->elem;
+    strbuf.str_buf mut base = strbuf.create();
+    defer strbuf.free(&base);
+    bool mut postfix = false;
+    if (!write_released(f, fir.block_statement(f, e->block, e->index)->loc, s, &base, &postfix)) {
+        strbuf.append(out, "(*");
+        fir_print.print_place(f, p, out);
+        strbuf.push(out, ')');
+        append_steps(t, e->first, true, out);
+        return;
+    }
+    place.owner_step mut step = place.owner_step{};
+    u64 mut rest = 0;
+    if (!place.next_owner_step(t, e->first, &step, &rest)) {
+        strbuf.push(out, '*');
+        append_operand(out, strbuf.view(&base), postfix);
+    } else if (step.element) {
+        strbuf.append(out, "(*");
+        append_operand(out, strbuf.view(&base), postfix);
+        strbuf.append(out, ")[");
+        strbuf.append_u64(out, step.index);
+        strbuf.push(out, ']');
+        append_steps(step.ty, rest, false, out);
+    } else {
+        append_operand(out, strbuf.view(&base), postfix);
+        strbuf.append(out, "->");
+        strbuf.append(out, step.name);
+        append_steps(step.ty, rest, false, out);
+    }
+}
+
+// Whether an obligation of part 2 before obligation `k` of `p` that `p` does not prove stands at
+// the location of obligation `k`: a deferred `del` expands at each exit with its own location.
+fn is_inner_repeated(fir.func* f, prover.proof* p, u64 k) bool {
+    diag.loc at = fir.block_statement(f, p->inners[k].block, p->inners[k].index)->loc;
+    u64 mut j = 0;
+    while (j < k) {
+        prover.inner* x = &p->inners[j];
+        if (!x->proved && is_same_loc(fir.block_statement(f, x->block, x->index)->loc, at)) {
+            return true;
+        }
+        j += 1;
+    }
+    return false;
+}
+
+// Appends `<file>:<line>:<col>: ` for the position `at`.
+fn write_position(diag.loc at, strbuf.str_buf mut* out) void {
+    strbuf.append(out, at.file);
+    strbuf.push(out, ':');
+    strbuf.append_u64(out, cast(at.line, u64));
+    strbuf.push(out, ':');
+    strbuf.append_u64(out, cast(at.col, u64));
+    strbuf.append(out, ": ");
+}
+
+/// Appends the lines of `--leak-report` for each site of part 2 of the leak rule of `f` that `p`
+/// does not prove, once for each location, in the order of the obligations (D17.20):
+/// `<file>:<line>:<col>: leak: cannot prove '<place>' is empty before this del`, or `before this
+/// cast`, at the `del` keyword or at the `cast`, and the line of the note `move '<place>' into a
+/// local and del it first` at the same position. `<place>` names the first inner owner that the
+/// pass does not prove (write_inner_owner). When the inner work of `f` passed prover.WORK_LIMIT, a
+/// line of the note LEAK_LIMIT_NOTE follows the first site. Part 2 is no error yet, so the lines go
+/// to `out` and not to the diagnostics.
+fn write_inners(fir.func* f, prover.proof* p, session.session mut* s, strbuf.str_buf mut* out)
+    void {
+    strbuf.str_buf mut owner = strbuf.create();
+    defer strbuf.free(&owner);
+    bool mut limit_told = false;
+    u64 mut k = 0;
+    while (k < p->inners.len) {
+        prover.inner* e = &p->inners[k];
+        if (!e->proved && !is_inner_repeated(f, p, k)) {
+            fir.statement* st = fir.block_statement(f, e->block, e->index);
+            strbuf.clear(&owner);
+            write_inner_owner(f, e, s, &owner);
+            write_position(st->loc, out);
+            strbuf.append(out, "leak: cannot prove '");
+            strbuf.append(out, strbuf.view(&owner));
+            if (st->kind == fir.stmt_kind.st_del) {
+                strbuf.append(out, "' is empty before this del\n");
+            } else {
+                strbuf.append(out, "' is empty before this cast\n");
+            }
+            write_position(st->loc, out);
+            strbuf.append(out, "note: move '");
+            strbuf.append(out, strbuf.view(&owner));
+            strbuf.append(out, "' into a local and del it first\n");
+            if (p->inner_over && !limit_told) {
+                write_position(st->loc, out);
+                strbuf.append(out, "note: ");
+                strbuf.append(out, LEAK_LIMIT_NOTE);
+                strbuf.push(out, '\n');
+            }
             limit_told = true;
         }
         k += 1;
