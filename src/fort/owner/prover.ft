@@ -1,0 +1,596 @@
+/// Proves at compile time that each store into an `own` reference finds its destination empty:
+/// the forward must-empty analysis of the overwrite check (D17.11, spec/fir.md 11). It reads one
+/// verified FIR function before the build-mode pass, and it reads no other function. It holds the
+/// emptiness fact of spec/ownership-design.md 4.4 and no other fact.
+//
+// A fact says that a tracked place holds the zero value. The analysis keeps one fact for each
+// tracked place that a `check(overwrite: p)` names. No gen rule and no kill rule of one fact reads
+// another fact, so a fact that no check names changes no verdict. Three forward dataflows of
+// fir_flow run in this order, each with gen and kill sets for each block: the stale index
+// temporaries and held addresses, and the fresh pointer locals, whose transfer owner.place holds,
+// then the facts, joined by intersection. A walk of each block gives its sets, with the stale set
+// and the fresh set before each statement. The block of a check also takes the kill rules of the
+// first statement after the check, which runs before the store of the check.
+// The module uses switches and no function-pointer dispatch table. It holds no module-level
+// mutable state: each vector belongs to one call of prove, or to the proof that it returns.
+import fort.fir;
+import fort.fir_flow;
+import fort.owner.place;
+import fort.types;
+
+// The fact of a check whose place is not tracked, and of a block that ends in no check.
+u32 NO_FACT = 4294967295;
+
+/// The most work that the proof of one function takes. The work is the sum of three counts: the
+/// statements and the terminators times the overwrite checks, the blocks times the locals, and
+/// the steps of the stale chains (stale_steps). A function past it gets no proof, and each of its
+/// checks stays unproved.
+u64 WORK_LIMIT = 1048576;
+
+// ---- the proof ---------------------------------------------------------------------------------
+
+/// The verdict of each `check(overwrite: p)` of one function. `proved[b]` says whether the check
+/// that ends block `b` is proved. It is true for a block that ends in another terminator.
+/// `checks` counts the checks, and `unproved` counts the checks that the analysis does not prove.
+/// `work` is the work of the function, as WORK_LIMIT counts it, and `over` says that it passed
+/// the limit.
+struct proof {
+    bool mut@ own proved;
+    u32 checks;
+    u32 unproved;
+    u64 work;
+    bool over;
+}
+
+fn free(proof mut* p) void {
+    del(p->proved);
+    p->checks = 0;
+    p->unproved = 0;
+}
+
+/// Whether the check that ends block `b` is proved, or true when block `b` ends in another
+/// terminator.
+fn is_proved(proof* p, u32 b) bool {
+    return p->proved[cast(b, u64)];
+}
+
+// The state of one call of prove: the survey of the places, and the facts. `facts[..fact_count]`
+// holds the facts, whose steps the survey keeps. `block_fact[b]` is the fact of the check that
+// ends block `b`.
+struct context {
+    place.survey places;
+    place.path mut@ own facts;
+    u64 fact_count;
+    u32 mut@ own block_fact;
+}
+
+fn free_context(context mut* c) void {
+    place.free(&c->places);
+    del(c->facts);
+    del(c->block_fact);
+}
+
+// Appends `p` to the facts and returns its number.
+fn push_fact(context mut* c, place.path p) u32 {
+    if (c->fact_count == c->facts.len) {
+        u64 cap = fir.grown_capacity(c->facts.len, "owner.prover: too many facts");
+        place.path mut@ own bigger = new(place.path, cap);
+        u64 mut i = 0;
+        while (i < c->fact_count) {
+            bigger[i] = c->facts[i];
+            i += 1;
+        }
+        del(c->facts);
+        c->facts = move(bigger);
+    }
+    c->facts[c->fact_count] = p;
+    c->fact_count += 1;
+    return cast(c->fact_count - 1, u32);
+}
+
+// ---- the gen and kill rules --------------------------------------------------------------------
+
+// The two probes of one block: the effect of its statements on the empty set and on the full set.
+// For a transfer of gen and kill sets, the first is the gen set and the second the complement of
+// the kill set less the gen set.
+struct probes {
+    fir_flow.bits none;
+    fir_flow.bits all;
+}
+
+fn gen(probes mut* pr, u32 fact) void {
+    fir_flow.bits_set(&pr->none, fact);
+    fir_flow.bits_set(&pr->all, fact);
+}
+
+fn kill(probes mut* pr, u32 fact) void {
+    fir_flow.bits_clear(&pr->none, fact);
+    fir_flow.bits_clear(&pr->all, fact);
+}
+
+// Makes `p` and each tracked place below `p` empty.
+fn gen_below(context* c, place.path p, probes mut* pr) void {
+    u64 mut k = 0;
+    while (k < c->fact_count) {
+        if (place.is_below(&c->places, c->facts[k], p)) {
+            gen(pr, cast(k, u32));
+        }
+        k += 1;
+    }
+}
+
+// The gen rule of `del(move p)`: it makes `p` empty.
+fn gen_exact(context* c, place.path p, probes mut* pr) void {
+    u64 mut k = 0;
+    while (k < c->fact_count) {
+        if (place.is_same(&c->places, c->facts[k], p)) {
+            gen(pr, cast(k, u32));
+        }
+        k += 1;
+    }
+}
+
+// The kill rule of a `call`: it keeps the facts about a local that is no memory and about its
+// places that are not reached through memory.
+fn kill_call(context* c, probes mut* pr) void {
+    u64 mut k = 0;
+    while (k < c->fact_count) {
+        if (place.is_through_memory(&c->places, c->facts[k])) {
+            kill(pr, cast(k, u32));
+        }
+        k += 1;
+    }
+}
+
+// The kill rules of a store into `d`, with the fresh set after its right side:
+// - each fact with the base of `d` that is not separate from `d` dies, and a store into a local
+//   kills each fact with that local as a key;
+// - a store through a fresh pointer local kills nothing more;
+// - any other store through a pointer kills each fact reached through memory, but a fact through
+//   a fresh pointer local and a fact with the base of `d` that is separate from `d` survive;
+// - a store straight into a memory local or a global kills each fact through a pointer that is
+//   not fresh, because the pointer can hold its address, and keeps the facts of other locals and
+//   other globals, whose bytes it does not write.
+fn kill_store(context* c, place.path d, fir_flow.bits* fresh, probes mut* pr) void {
+    bool to_local = d.base == fir.base_kind.bk_local;
+    u64 mut k = 0;
+    while (k < c->fact_count) {
+        place.path q = c->facts[k];
+        if (place.is_same_base(q, d) && !place.is_separate(&c->places, q, d)) {
+            kill(pr, cast(k, u32));
+        } else if (to_local && place.has_key(&c->places, q, d.local)) {
+            kill(pr, cast(k, u32));
+        }
+        k += 1;
+    }
+    if (place.is_through_fresh(&c->places, d, fresh)) {
+        return;
+    }
+    if (place.is_indirect(&c->places, d)) {
+        k = 0;
+        while (k < c->fact_count) {
+            place.path q = c->facts[k];
+            // the loop above killed each fact of the base that is not separate from `d`
+            bool kept = place.is_through_fresh(&c->places, q, fresh) || place.is_same_base(q, d);
+            if (place.is_through_memory(&c->places, q) && !kept) {
+                kill(pr, cast(k, u32));
+            }
+            k += 1;
+        }
+        return;
+    }
+    if (to_local && !c->places.locals[cast(d.local, u64)].memory) {
+        return;
+    }
+    k = 0;
+    while (k < c->fact_count) {
+        place.path q = c->facts[k];
+        if (place.is_indirect(&c->places, q) && !place.is_through_fresh(&c->places, q, fresh)) {
+            kill(pr, cast(k, u32));
+        }
+        k += 1;
+    }
+}
+
+// Whether the rvalue `r` is a zero value of its own: `const zero T`, `null T`, or an `aggregate`
+// whose operands are all such constants.
+fn is_zero_rvalue(fir.func* f, fir.rvalue r) bool {
+    if (r.kind != fir.rvalue_kind.rv_use && r.kind != fir.rvalue_kind.rv_aggregate) {
+        return false;
+    }
+    u32 mut i = 0;
+    while (i < r.ops_len) {
+        fir.operand o = fir.rvalue_operand(f, r, i);
+        bool zero = o.kind == fir.operand_kind.ok_const
+            && (o.value.kind == fir.const_kind.ck_zero || o.value.kind == fir.const_kind.ck_null);
+        if (!zero) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// Whether the store of the rvalue `r` writes the zero value: a zero rvalue, or the `move` of a
+// temporary that one store writes with a zero rvalue and that only this `move` reads.
+fn is_zero_value(context* c, fir.rvalue r) bool {
+    if (is_zero_rvalue(c->places.f, r)) {
+        return true;
+    }
+    u32 mut t = 0;
+    if (!place.find_moved_temp(&c->places, r, &t)) {
+        return false;
+    }
+    return is_zero_rvalue(c->places.f, place.store_of(&c->places, t)->value);
+}
+
+// The gen rule of each `move` operand of `s`, in operand order: it makes its place and each
+// tracked place below it empty. `del(move p)` makes `p` empty.
+fn gen_reads(context mut* c, fir.statement* s, fir_flow.bits* stale, probes mut* pr) void {
+    u64 mark = c->places.steps_len;
+    if (s->kind == fir.stmt_kind.st_del) {
+        place.path p = place.trace(&c->places, s->place, stale);
+        gen_exact(c, p, pr);
+        c->places.steps_len = mark;
+        return;
+    }
+    fir.operand mut o = fir.operand{};
+    u32 mut i = 0;
+    while (fir.stmt_reads(c->places.f, s, i, &o)) {
+        if (o.kind == fir.operand_kind.ok_move) {
+            place.path p = place.trace(&c->places, o.place, stale);
+            gen_below(c, p, pr);
+            c->places.steps_len = mark;
+        }
+        i += 1;
+    }
+}
+
+// The kill rules of the assignment `s` in their order: the kill of a `call`, then, when `store`
+// holds, the kill rules of its store into `d`, the path of its destination. `stale` holds the
+// stale set before `s`, and `fresh` the fresh set after its right side.
+fn apply_kills(context* c, fir.statement* s, place.path d, bool store, fir_flow.bits* stale,
+               fir_flow.bits* fresh, probes mut* pr) void {
+    if (s->value.kind == fir.rvalue_kind.rv_call) {
+        kill_call(c, pr);
+    }
+    if (!store) {
+        return;
+    }
+    // a store through a stale held address can write a place through a fresh pointer local,
+    // because the `addr` of a held address ends no freshness, so no fresh fact survives it
+    if (place.is_stale_held(&c->places, s->place, stale)) {
+        kill_store(c, d, null, pr);
+    } else {
+        kill_store(c, d, fresh, pr);
+    }
+}
+
+// The effect of the statement `s` on the facts, in the order of the rules: the reads of its
+// operands, the kill of a `call`, the kill rules of its store and then its gen rule. `stale` and
+// `fresh` hold the sets before `s`, and the function moves them past `s`. A terminator changes no
+// fact: rule V6 puts no `move` operand in a terminator.
+fn apply_facts(context mut* c, fir.statement* s, fir_flow.bits mut* stale,
+              fir_flow.bits mut* fresh, probes mut* pr) void {
+    gen_reads(c, s, stale, pr);
+    place.apply_fresh_reads(&c->places, s, fresh);
+    if (s->kind == fir.stmt_kind.st_assign) {
+        u64 mark = c->places.steps_len;
+        place.path d = place.trace(&c->places, s->place, stale);
+        apply_kills(c, s, d, true, stale, fresh, pr);
+        if (is_zero_value(c, s->value)) {
+            gen_below(c, d, pr);
+        }
+        bool pointer = d.len == 0 && d.base == fir.base_kind.bk_local
+            && fir.local_at(c->places.f, d.local)->ty->kind == types.type_kind.k_ptr;
+        if (pointer && place.is_fresh_new(&c->places, s->value)) {
+            u64 mut k = 0;
+            while (k < c->fact_count) {
+                if (place.is_through(&c->places, c->facts[k], d.local)) {
+                    gen(pr, cast(k, u32));
+                }
+                k += 1;
+            }
+        }
+        c->places.steps_len = mark;
+    }
+    place.apply_fresh_store(&c->places, s, fresh);
+    place.apply_stale(&c->places, s, stale);
+}
+
+// ---- the dataflows -----------------------------------------------------------------------------
+
+// The transfer that fir_flow.dataflow_new takes. prove gives each transfer as sets and never
+// calls it.
+fn transfer_none(fir.func* f, u32 b, fir_flow.bits mut* set) void {
+}
+
+// One set of `count` numbers for each of the `n` blocks.
+fn make_sets(u32 n, u32 count) fir_flow.bits mut@ own {
+    fir_flow.bits mut@ own sets = new(fir_flow.bits, cast(n, u64));
+    u64 mut b = 0;
+    while (b < sets.len) {
+        sets[b] = fir_flow.bits_new(count);
+        b += 1;
+    }
+    return sets;
+}
+
+fn free_sets(fir_flow.bits mut@ sets) void {
+    u64 mut b = 0;
+    while (b < sets.len) {
+        fir_flow.bits_free(&sets[b]);
+        b += 1;
+    }
+}
+
+// Writes the gen and the kill set of the two probes `pr` of block `b` into `gens[b]` and
+// `kills[b]`. The caller passes the sets and not the address of an element, so that its own
+// locals of the sets take no address and stay no memory.
+fn split_probes(probes* pr, fir_flow.bits mut@ gens, fir_flow.bits mut@ kills, u32 b) void {
+    u64 at = cast(b, u64);
+    fir_flow.bits_copy(&gens[at], &pr->none);
+    fir_flow.bits_fill(&kills[at]);
+    fir_flow.bits_subtract(&kills[at], &pr->all);
+}
+
+fn make_probes(u32 count) probes {
+    probes mut pr = probes{};
+    pr.none = fir_flow.bits_new(count);
+    pr.all = fir_flow.bits_new(count);
+    return pr;
+}
+
+fn free_probes(probes mut* pr) void {
+    fir_flow.bits_free(&pr->none);
+    fir_flow.bits_free(&pr->all);
+}
+
+// Empties the first probe and fills the second.
+fn reset_probes(probes mut* pr) void {
+    u64 mut w = 0;
+    while (w < pr->none.words.len) {
+        pr->none.words[w] = 0;
+        w += 1;
+    }
+    fir_flow.bits_fill(&pr->all);
+}
+
+// Runs the stale dataflow, a union from an entry where every temporary is stale, or with
+// `fresh` the fresh dataflow, an intersection from an entry where no local is fresh.
+fn run_locals(context mut* c, fir.pred_table* pt, fir_flow.dataflow mut* d, bool fresh) void {
+    fir.func* f = c->places.f;
+    u32 n = fir.block_count(f);
+    u32 count = fir.local_count(f);
+    fir_flow.bits mut@ own gens = make_sets(n, count);
+    fir_flow.bits mut@ own kills = make_sets(n, count);
+    defer {
+        free_sets(gens);
+        free_sets(kills);
+        del(gens);
+        del(kills);
+    }
+    probes mut pr = make_probes(count);
+    defer free_probes(&pr);
+    u32 mut b = 0;
+    while (b < n) {
+        reset_probes(&pr);
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, i);
+            if (fresh) {
+                place.apply_fresh_reads(&c->places, s, &pr.none);
+                place.apply_fresh_store(&c->places, s, &pr.none);
+                place.apply_fresh_reads(&c->places, s, &pr.all);
+                place.apply_fresh_store(&c->places, s, &pr.all);
+            } else {
+                place.apply_stale(&c->places, s, &pr.none);
+                place.apply_stale(&c->places, s, &pr.all);
+            }
+            i += 1;
+        }
+        if (fresh) {
+            fir.terminator* t = &fir.block_at(f, b)->term;
+            place.apply_fresh_term(&c->places, t, &pr.none);
+            place.apply_fresh_term(&c->places, t, &pr.all);
+        }
+        split_probes(&pr, gens, kills, b);
+        b += 1;
+    }
+    if (fresh) {
+        fir_flow.bits_fill(&d->init);
+    } else {
+        fir_flow.bits_fill(&d->entry);
+    }
+    fir_flow.dataflow_forward_sets(f, pt, d, gens, kills);
+}
+
+// Gives each check its fact: the path of its place at the end of its block, a fact of its own or
+// the fact of an earlier check of the same place. A check whose place is not tracked gets
+// NO_FACT. The search for an earlier fact takes at most the checks times the facts.
+fn collect_facts(context mut* c, fir_flow.dataflow* stale) void {
+    fir.func* f = c->places.f;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        c->block_fact[cast(b, u64)] = NO_FACT;
+        fir.terminator* t = &fir.block_at(f, b)->term;
+        if (t->kind == fir.term_kind.tk_check_overwrite) {
+            u64 mark = c->places.steps_len;
+            place.path p = place.trace(&c->places, t->place, &stale->outs[cast(b, u64)]);
+            if (p.tracked) {
+                u64 mut k = 0;
+                while (k < c->fact_count && !place.is_same(&c->places, c->facts[k], p)) {
+                    k += 1;
+                }
+                if (k < c->fact_count) {
+                    c->places.steps_len = mark;
+                    c->block_fact[cast(b, u64)] = cast(k, u32);
+                } else {
+                    c->block_fact[cast(b, u64)] = push_fact(c, p);
+                }
+            } else {
+                c->places.steps_len = mark;
+            }
+        }
+        b += 1;
+    }
+}
+
+// The kill rules that the first statement of the continuation block of the check that ends
+// block `b` applies before the store of the check writes (spec/fir.md 11, Proof): each kill rule
+// of that statement, but not the kill rules of a store into the place of the check, which come
+// after the test of that place (D17.11). Only an assignment has kill rules. `stale` and `fresh`
+// hold the sets at the end of block `b`, which rule V11 makes the sets before that statement, and
+// the function moves `fresh` past its right side.
+fn kill_after_check(context mut* c, u32 b, fir_flow.bits* stale, fir_flow.bits mut* fresh,
+                    probes mut* pr) void {
+    fir.func* f = c->places.f;
+    u32 fact = c->block_fact[cast(b, u64)];
+    // a block that ends in no check, or in a check of a place that is not tracked, has no fact
+    if (fact == NO_FACT) {
+        return;
+    }
+    u32 next = fir.block_at(f, b)->term.target;
+    if (fir.block_statement_count(f, next) == 0) {
+        return;
+    }
+    fir.statement* s = fir.block_statement(f, next, 0);
+    if (s->kind != fir.stmt_kind.st_assign) {
+        return;
+    }
+    place.apply_fresh_reads(&c->places, s, fresh);
+    u64 mark = c->places.steps_len;
+    place.path d = place.trace(&c->places, s->place, stale);
+    bool store = !place.is_same(&c->places, d, c->facts[cast(fact, u64)]);
+    apply_kills(c, s, d, store, stale, fresh, pr);
+    c->places.steps_len = mark;
+}
+
+// Runs the facts dataflow: an intersection from the entry, which holds no fact. The block of a
+// check ends with the kill rules of the first statement after the check (kill_after_check).
+fn run_facts(context mut* c, fir.pred_table* pt, fir_flow.dataflow* stale,
+             fir_flow.dataflow* fresh, fir_flow.dataflow mut* d) void {
+    fir.func* f = c->places.f;
+    u32 n = fir.block_count(f);
+    u32 count = cast(c->fact_count, u32);
+    u32 locals = fir.local_count(f);
+    fir_flow.bits mut@ own gens = make_sets(n, count);
+    fir_flow.bits mut@ own kills = make_sets(n, count);
+    defer {
+        free_sets(gens);
+        free_sets(kills);
+        del(gens);
+        del(kills);
+    }
+    probes mut pr = make_probes(count);
+    defer free_probes(&pr);
+    fir_flow.bits mut at_stale = fir_flow.bits_new(locals);
+    defer fir_flow.bits_free(&at_stale);
+    fir_flow.bits mut at_fresh = fir_flow.bits_new(locals);
+    defer fir_flow.bits_free(&at_fresh);
+    u32 mut b = 0;
+    while (b < n) {
+        reset_probes(&pr);
+        fir_flow.bits_copy(&at_stale, &stale->ins[cast(b, u64)]);
+        fir_flow.bits_copy(&at_fresh, &fresh->ins[cast(b, u64)]);
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, b)) {
+            apply_facts(c, fir.block_statement(f, b, i), &at_stale, &at_fresh, &pr);
+            i += 1;
+        }
+        kill_after_check(c, b, &at_stale, &at_fresh, &pr);
+        split_probes(&pr, gens, kills, b);
+        b += 1;
+    }
+    fir_flow.bits_fill(&d->init);
+    fir_flow.dataflow_forward_sets(f, pt, d, gens, kills);
+}
+
+/// Proves each `check(overwrite: p)` of the verified function `f` within WORK_LIMIT. A check is
+/// proved when `p` is a tracked place whose fact holds at the end of the block of the check, after
+/// the kill rules of the first statement of its continuation block, but for the kill rules of a
+/// store into `p`.
+fn prove(fir.func* f) proof {
+    return prove_within(f, WORK_LIMIT);
+}
+
+/// Proves as prove does, with `limit` as the most work. A function whose work passes `limit` gets
+/// no proof: each of its checks stays unproved. The test comes before any dataflow.
+fn prove_within(fir.func* f, u64 limit) proof {
+    u32 n = fir.block_count(f);
+    proof mut out = proof{};
+    out.proved = new(bool, cast(n, u64));
+    u64 mut units = 0;
+    u32 mut b = 0;
+    while (b < n) {
+        out.proved[cast(b, u64)] = true;
+        units += cast(fir.block_statement_count(f, b), u64) + 1;
+        if (fir.block_at(f, b)->term.kind == fir.term_kind.tk_check_overwrite) {
+            out.checks += 1;
+        }
+        b += 1;
+    }
+    if (out.checks == 0) {
+        return out;
+    }
+    u64 locals = cast(fir.local_count(f), u64);
+    // `context{}` is the zero value of the struct, so the pass proves the stores into its fields
+    // below. A designated literal such as `context{.fact_count = n}` is no zero value.
+    context mut c = context{};
+    c.places.f = f;
+    c.places.locals = new(place.local_info, locals);
+    c.places.first_source = new(u32, locals);
+    c.block_fact = new(u32, cast(n, u64));
+    defer free_context(&c);
+    place.count_uses(&c.places);
+    place.mark_memory(&c.places);
+    place.mark_sources(&c.places);
+    out.work = units * cast(out.checks, u64) + cast(n, u64) * locals
+        + place.stale_steps(&c.places);
+    if (out.work > limit) {
+        out.over = true;
+        judge(&c, null, &out);
+        return out;
+    }
+    fir.pred_table mut pt = fir.func_predecessors(f);
+    defer fir.pred_table_free(&pt);
+    fir_flow.dataflow mut stale = fir_flow.dataflow_new(fir.local_count(f),
+                                                        fir_flow.join_kind.join_union,
+                                                        transfer_none);
+    defer fir_flow.dataflow_free(&stale);
+    run_locals(&c, &pt, &stale, false);
+    fir_flow.dataflow mut fresh = fir_flow.dataflow_new(fir.local_count(f),
+                                                        fir_flow.join_kind.join_intersect,
+                                                        transfer_none);
+    defer fir_flow.dataflow_free(&fresh);
+    run_locals(&c, &pt, &fresh, true);
+    collect_facts(&c, &stale);
+    if (c.fact_count > 0) {
+        fir_flow.dataflow mut facts = fir_flow.dataflow_new(cast(c.fact_count, u32),
+                                                            fir_flow.join_kind.join_intersect,
+                                                            transfer_none);
+        defer fir_flow.dataflow_free(&facts);
+        run_facts(&c, &pt, &stale, &fresh, &facts);
+        judge(&c, &facts, &out);
+    } else {
+        judge(&c, null, &out);
+    }
+    return out;
+}
+
+// Writes the verdict of each check into `out`: proved when its fact holds at the end of its
+// block in the facts dataflow `d`. With no fact, `d` is null and no check is proved.
+fn judge(context* c, fir_flow.dataflow* d, proof mut* out) void {
+    u32 mut b = 0;
+    while (b < fir.block_count(c->places.f)) {
+        u32 fact = c->block_fact[cast(b, u64)];
+        bool check = fir.block_at(c->places.f, b)->term.kind == fir.term_kind.tk_check_overwrite;
+        bool held = fact != NO_FACT && d != null
+            && fir_flow.bits_get(&d->outs[cast(b, u64)], fact);
+        if (check && !held) {
+            out->proved[cast(b, u64)] = false;
+            out->unproved += 1;
+        }
+        b += 1;
+    }
+}

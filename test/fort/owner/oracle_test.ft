@@ -161,7 +161,7 @@
 //| shapes outside rule (a): leak 0, leak at exit 0, double release 0, invalid release 0
 //| shapes outside rule (a): use after release 21, use after move 271, use after scope 0
 //| shapes outside rule (a): duplicate owner 0, overwrite of no own reference 0
-/// Tests rule (a), the overwrite check of D17.11 that fir.emptiness proves, against the oracle:
+/// Tests rule (a), the overwrite check of D17.11 that owner.prover proves, against the oracle:
 /// the runs of fir.interpreter and the events of fir.shadow (spec/ownership-design.md 3.6). The
 /// hand cases of the design reviews run as programs, and the three families of generator.ft run
 /// with each input that they read. For each set the test prints its counts, its false accepts,
@@ -189,12 +189,12 @@ import fort.ast;
 import fort.check;
 import fort.diag;
 import fort.fir;
-import fort.fir.emptiness;
 import fort.fir.interpreter;
 import fort.fir.shadow;
 import fort.fir_lower;
 import fort.fir_parse;
 import fort.fir_verify;
+import fort.owner.prover;
 import fort.types;
 import generator;
 import modules_env;
@@ -1357,7 +1357,7 @@ string[ITEM_CASES] ITEM_NAMES = {
 // local of the field of the check, and in `call_key` a call stores into the key of the place of the
 // check. With no call, a store through a second pointer to the object of the check comes first in
 // `alias_store`, and a store straight into the global that the pointer of the check names in
-// `global_alias`. These were false accepts of fir.emptiness: `held_value`, `held_fresh` and
+// `global_alias`. These were false accepts of the emptiness pass: `held_value`, `held_fresh` and
 // `held_copy` while an `addr mut` of fixed storage could be a held address, `stale_base` and
 // `stale_key` while a held address read as its place after such a store, `stale_alias` while a
 // stale held address gave a tracked place, the three span cases while only a store into a local
@@ -2584,15 +2584,15 @@ fn prove_batch(batch mut* bt) void {
     for (u64 mut i = 0; i < bt->m.funcs.len; i++) {
         fir.func* f = &bt->m.funcs.items[i];
         u64 owner = item_of(bt, f->sym);
-        emptiness.proof mut p = emptiness.prove(f);
+        prover.proof mut p = prover.prove(f);
         for (u32 mut b = 0; b < fir.block_count(f); b++) {
             fir.terminator* t = &fir.block_at(f, b)->term;
             if (t->kind == fir.term_kind.tk_check_overwrite) {
                 add_site(&bt->sites, site{f->sym, t->loc.line, t->loc.col, owner,
-                                          !emptiness.is_proved(&p, b), false}, true);
+                                          !prover.is_proved(&p, b), false}, true);
             }
         }
-        emptiness.free(&p);
+        prover.free(&p);
     }
 }
 

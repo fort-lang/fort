@@ -1,0 +1,278 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| report ok
+/// Checks owner.report: the error and the note of D17.11 at each check that owner.prover does not
+/// prove, with the source text of its place, at its position, once for each location, and the
+/// note of the work limit.
+import check_env;
+import fort.fir;
+import fort.fir_lower;
+import fort.owner.prover;
+import fort.owner.report;
+import lower_env;
+import modules_env;
+import pass_env;
+import std.str;
+
+// The types and the global that the FIR text of TEXT_REPORTED names.
+string[5] PRELUDE = {
+    "struct node {",
+    "    node mut* own left;",
+    "    node mut* own right;",
+    "}",
+    "node mut* own mut G = null;",
+};
+
+// Lowers the function `name` of the checked source of `e` into *out, and holds that the
+// verifier accepts it.
+fn lower(lower_env.env mut* e, string name, fir.func mut* out) void {
+    fir_lower.report mut why = fir_lower.report{};
+    if (!fir_lower.lower_function(&e->c.ck, lower_env.decl(e, name), out, &why)) {
+        panic("report_test: the lowering refuses the function");
+    }
+    pass_env.verified(e, out, "report_test: the verifier refuses the lowering");
+}
+
+// ---- the report --------------------------------------------------------------------------------
+
+// Sources whose checks the pass does not prove. The report names the source text of each target,
+// each parenthesis that it needs included, with each run of white space as one space, and the
+// declared name of a declaration. The `defer` expands into two checks at one location.
+string[60] REPORTED = {
+    "struct node {",
+    "    node mut* own left;",
+    "    node mut* own right;",
+    "}",
+    "node mut* own mut G = null;",
+    "fn refill(node mut* b) void {",
+    "    b->left = new(node);",
+    "}",
+    "fn paren(node mut* q, node mut* own x) void {",
+    "    (*q).right = move(x);",
+    "}",
+    "fn global_alone(node mut* own x) void {",
+    "    G = move(x);",
+    "}",
+    "fn loop_leak() void {",
+    "    for (i32 mut i = 0; i < 3; i++) {",
+    "        node mut* own p = new(node);",
+    "    }",
+    "}",
+    "fn param(node mut* own mut p) void {",
+    "    p = new(node);",
+    "    del(p);",
+    "}",
+    "fn deferred(node mut* b, bool c) void {",
+    "    defer b->left = new(node);",
+    "    if (c) {",
+    "        return;",
+    "    }",
+    "}",
+    "fn nested(node mut* q, node mut* own x) void {",
+    "    ((*q)).right = move(x);",
+    "}",
+    "fn first(u64 n) u64 {",
+    "    return n;",
+    "}",
+    "fn index_call(node mut* own[4] mut* a, node mut* own x) void {",
+    "    (*a)[first(1)] = move(x);",
+    "}",
+    "fn multi(node mut* q, node mut* own x) void {",
+    "    q",
+    "        ->right = move(x);",
+    "}",
+    "struct tree {",
+    "    node mut* own[2] kids;",
+    "    tree mut* own sub;",
+    "}",
+    "fn kid(tree mut* t, node mut* own x) void {",
+    "    t->kids[1] = move(x);",
+    "}",
+    "fn deep(tree mut* t, node mut* own x) void {",
+    "    t->sub->kids[0] = move(x);",
+    "}",
+    "fn star(node mut* own mut* out, node mut* own x) void {",
+    "    *out = move(x);",
+    "}",
+    "fn local_field(node mut* own x) void {",
+    "    tree mut t = tree{};",
+    "    t.kids[0] = move(x);",
+    "    t.kids[0] = null;",
+    "}",
+};
+
+string[13] REPORTED_NAMES = {
+    "refill", "paren", "global_alone", "loop_leak", "param", "deferred", "nested", "index_call",
+    "multi", "kid", "deep", "star", "local_field",
+};
+
+// The error and the note of each function of REPORTED, in order.
+string[26] REPORTS = {
+    "7:13: overwriting owned value: cannot prove 'b->left' is empty here",
+    "7:13: del or move 'b->left' before this store",
+    "10:16: overwriting owned value: cannot prove '(*q).right' is empty here",
+    "10:16: del or move '(*q).right' before this store",
+    "13:7: overwriting owned value: cannot prove 'G' is empty here",
+    "13:7: del or move 'G' before this store",
+    "17:23: overwriting owned value: cannot prove 'p' is empty here",
+    "17:23: del or move 'p' before this store",
+    "21:7: overwriting owned value: cannot prove 'p' is empty here",
+    "21:7: del or move 'p' before this store",
+    "25:19: overwriting owned value: cannot prove 'b->left' is empty here",
+    "25:19: del or move 'b->left' before this store",
+    "31:18: overwriting owned value: cannot prove '((*q)).right' is empty here",
+    "31:18: del or move '((*q)).right' before this store",
+    "37:20: overwriting owned value: cannot prove '(*a)[first(1)]' is empty here",
+    "37:20: del or move '(*a)[first(1)]' before this store",
+    "41:17: overwriting owned value: cannot prove 'q ->right' is empty here",
+    "41:17: del or move 'q ->right' before this store",
+    "48:16: overwriting owned value: cannot prove 't->kids[1]' is empty here",
+    "48:16: del or move 't->kids[1]' before this store",
+    "51:21: overwriting owned value: cannot prove 't->sub->kids[0]' is empty here",
+    "51:21: del or move 't->sub->kids[0]' before this store",
+    "54:10: overwriting owned value: cannot prove '*out' is empty here",
+    "54:10: del or move '*out' before this store",
+    "59:15: overwriting owned value: cannot prove 't.kids[0]' is empty here",
+    "59:15: del or move 't.kids[0]' before this store",
+};
+
+// The report of each check that the pass does not prove: the error and its note at the `=` of
+// an assignment, a range of the one character, or at the declared name of a declaration, once
+// for each location, in the file of the function.
+fn the_report_names_each_place_at_its_position() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, REPORTED[..], true);
+    u64 mut k = 0;
+    while (k < REPORTED_NAMES.len) {
+        fir.func mut f = fir.func{};
+        lower(&e, REPORTED_NAMES[k], &f);
+        prover.proof mut p = prover.prove(&f);
+        u64 before = check_env.reports(&e.c);
+        report.write(&f, &p, &e.c.m.s);
+        assert(check_env.reports(&e.c) == before + 2);
+        assert(check_env.report_severity(&e.c, before) == "error");
+        assert(check_env.report_severity(&e.c, before + 1) == "note");
+        assert(check_env.report_file(&e.c, before) == check_env.report_file(&e.c, before + 1));
+        assert(str.ends_with(check_env.report_file(&e.c, before), "main.ft"));
+        prover.free(&p);
+        fir.func_free(&f);
+        k += 1;
+    }
+    k = 0;
+    while (k < REPORTS.len) {
+        if (check_env.report_text(&e.c, k) != REPORTS[k]) {
+            eprintln(check_env.report_text(&e.c, k), " and not ", REPORTS[k]);
+            panic("report_test: a report differs");
+        }
+        k += 1;
+    }
+    // the error at `=` covers the one character
+    assert(modules_env.report_at(&e.c.m, 0).loc.end_col == 14);
+    // the error at a declared name covers the name
+    assert(modules_env.report_at(&e.c.m, 6).loc.end_col == 24);
+}
+
+// A FIR text with locations and no tree: the report names the FIR place of an assignment, at the
+// one character of its location, and the declared name of a declaration, at its location.
+string[19] TEXT_REPORTED = {
+    "fn main.r1(_1 (b): node mut*) -> void {",
+    "    let _2 (p): node mut* own #9:5;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1 #7:13;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _3;",
+    "        check(overwrite: _2) -> bb2 #9:5;",
+    "    }",
+    "    bb2: {",
+    "        check(overwrite: global main.G) -> bb3 #11:7;",
+    "    }",
+    "    bb3: {",
+    "        del(move global main.G);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+// The report of the three checks of TEXT_REPORTED, none of which the pass proves.
+string[6] TEXT_REPORTS = {
+    "7:13: overwriting owned value: cannot prove '(*_1).0' is empty here",
+    "7:13: del or move '(*_1).0' before this store",
+    "9:5: overwriting owned value: cannot prove 'p' is empty here",
+    "9:5: del or move 'p' before this store",
+    "11:7: overwriting owned value: cannot prove 'global main.G' is empty here",
+    "11:7: del or move 'global main.G' before this store",
+};
+
+// With no tree, the report names the FIR place, and a declaration its name.
+fn the_report_of_a_fir_text_names_the_fir_place() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    fir.module mut m = pass_env.parse(&e, PRELUDE[..], TEXT_REPORTED[..]);
+    defer fir.module_free(&m);
+    fir.func* f = &m.funcs.items[0];
+    prover.proof mut p = prover.prove(f);
+    defer prover.free(&p);
+    assert(p.checks == 3 && p.unproved == 3);
+    u64 before = check_env.reports(&e.c);
+    report.write(f, &p, &e.c.m.s);
+    assert(check_env.reports(&e.c) == before + 6);
+    u64 mut k = 0;
+    while (k < TEXT_REPORTS.len) {
+        assert(check_env.report_text(&e.c, before + k) == TEXT_REPORTS[k]);
+        assert(check_env.report_file(&e.c, before + k) == "t.fir");
+        k += 1;
+    }
+}
+
+// The diagnostics of TEXT_REPORTED past the work limit: the error and the note of each check, and
+// the second note of the first error, which names the limit (D17.11).
+string[7] LIMIT_REPORTS = {
+    "7:13: overwriting owned value: cannot prove '(*_1).0' is empty here",
+    "7:13: del or move '(*_1).0' before this store",
+    "7:13: the function exceeds the work limit of D17.11; split it",
+    "9:5: overwriting owned value: cannot prove 'p' is empty here",
+    "9:5: del or move 'p' before this store",
+    "11:7: overwriting owned value: cannot prove 'global main.G' is empty here",
+    "11:7: del or move 'global main.G' before this store",
+};
+
+// Past the work limit each check of the function is unproved, and the first error takes a
+// second note that names the limit; the other errors take none (D17.11). A limit of 0 puts the
+// three checks of TEXT_REPORTED past it, and the report under the limit names no limit
+// (the_report_of_a_fir_text_names_the_fir_place).
+fn the_first_error_past_the_work_limit_names_the_limit() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    fir.module mut m = pass_env.parse(&e, PRELUDE[..], TEXT_REPORTED[..]);
+    defer fir.module_free(&m);
+    fir.func* f = &m.funcs.items[0];
+    prover.proof mut p = prover.prove_within(f, 0);
+    defer prover.free(&p);
+    assert(p.over && p.checks == 3 && p.unproved == 3);
+    u64 before = check_env.reports(&e.c);
+    report.write(f, &p, &e.c.m.s);
+    assert(check_env.reports(&e.c) == before + LIMIT_REPORTS.len);
+    u64 mut k = 0;
+    while (k < LIMIT_REPORTS.len) {
+        assert(check_env.report_text(&e.c, before + k) == LIMIT_REPORTS[k]);
+        k += 1;
+    }
+    assert(check_env.report_severity(&e.c, before + 2) == "note");
+    assert(report.LIMIT_NOTE == "the function exceeds the work limit of D17.11; split it");
+}
+
+fn main() i32 {
+    the_report_names_each_place_at_its_position();
+    the_report_of_a_fir_text_names_the_fir_place();
+    the_first_error_past_the_work_limit_names_the_limit();
+    println("report ok");
+    return 0;
+}

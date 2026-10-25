@@ -1,0 +1,240 @@
+/// Writes the error of D17.11 for each overwrite check that owner.prover does not prove: the text
+/// and the position of each error (spec/fir.md 11, spec/ownership-design.md 4.1).
+//
+// The module holds no module-level mutable state: each buffer belongs to one call.
+import fort.ast;
+import fort.diag;
+import fort.fir;
+import fort.fir_print;
+import fort.owner.prover;
+import fort.session;
+import std.strbuf;
+
+/// The second note of the first error of a function past prover.WORK_LIMIT (D17.11).
+string LIMIT_NOTE = "the function exceeds the work limit of D17.11; split it";
+
+// The offset of `line`:`col` in `src`, or the length of `src` past its end.
+fn offset(string src, u32 line, u32 col) u64 {
+    u64 mut at = 0;
+    u32 mut here = 1;
+    while (here < line && at < src.len) {
+        if (src[at] == '\n') {
+            here += 1;
+        }
+        at += 1;
+    }
+    u64 c = cast(col, u64);
+    if (c == 0 || at + c - 1 > src.len) {
+        return src.len;
+    }
+    return at + c - 1;
+}
+
+// Whether `a` starts before `b`.
+fn is_before(diag.loc a, diag.loc b) bool {
+    return a.line < b.line || (a.line == b.line && a.col < b.col);
+}
+
+// The earliest start of a node of the tree `n`, in *first.
+fn find_start(ast.node* n, diag.loc mut* first) void {
+    if (n == null) {
+        return;
+    }
+    if (n->loc.line > 0 && (first->line == 0 || is_before(n->loc, *first))) {
+        *first = n->loc;
+    }
+    find_start(n->a, first);
+    find_start(n->b, first);
+    find_start(n->c, first);
+    find_start(n->d, first);
+    u64 mut i = 0;
+    while (i < ast.ast_len(n)) {
+        find_start(ast.ast_child(n, i), first);
+        i += 1;
+    }
+}
+
+// The assignment of the tree `n` whose operator stands at `at`, or null.
+fn find_assign(ast.node* n, diag.loc at) ast.node* {
+    if (n == null) {
+        return null;
+    }
+    if (n->kind == ast.ast_kind.k_assign && n->loc.line == at.line && n->loc.col == at.col) {
+        return n;
+    }
+    ast.node* mut found = find_assign(n->a, at);
+    if (found == null) {
+        found = find_assign(n->b, at);
+    }
+    if (found == null) {
+        found = find_assign(n->c, at);
+    }
+    if (found == null) {
+        found = find_assign(n->d, at);
+    }
+    u64 mut i = 0;
+    while (found == null && i < ast.ast_len(n)) {
+        found = find_assign(ast.ast_child(n, i), at);
+        i += 1;
+    }
+    return found;
+}
+
+// Counts `(` less `)` in `text`.
+fn paren_depth(string text) i64 {
+    i64 mut depth = 0;
+    for (char ch : text) {
+        if (ch == '(') {
+            depth += 1;
+        } else if (ch == ')') {
+            depth -= 1;
+        }
+    }
+    return depth;
+}
+
+// Appends `text` to `out` with each run of white space as one space.
+fn append_flat(strbuf.str_buf mut* out, string text) void {
+    bool mut space = false;
+    u64 mut i = 0;
+    while (i < text.len) {
+        char ch = text[i];
+        if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') {
+            space = true;
+        } else {
+            if (space) {
+                strbuf.push(out, ' ');
+            }
+            space = false;
+            strbuf.push(out, ch);
+        }
+        i += 1;
+    }
+}
+
+// Appends the source text of the target of the assignment that stands at `at`: the text from the
+// first token of the target to the `=`. The parser gives no node for a parenthesis, so the text
+// starts at each `(` before the first node that the text needs. False when the source or the
+// assignment is not there.
+fn write_target(fir.func* f, diag.loc at, session.session mut* s,
+                strbuf.str_buf mut* out) bool {
+    if (f->sym == null || f->sym->node == null || at.line == 0) {
+        return false;
+    }
+    ast.node* n = find_assign(f->sym->node, at);
+    if (n == null) {
+        return false;
+    }
+    diag.loc mut first = diag.loc{};
+    find_start(n->a, &first);
+    string mut src = "";
+    if (first.line == 0 || !session.read_source(s, at.file, &src)) {
+        return false;
+    }
+    u64 mut start = offset(src, first.line, first.col);
+    u64 mut end = offset(src, at.line, at.col);
+    if (start >= end) {
+        return false;
+    }
+    while (paren_depth(src[start..end]) < 0 && start > 0) {
+        u64 mut back = start;
+        while (back > 0 && (src[back - 1] == ' ' || src[back - 1] == '\t')) {
+            back -= 1;
+        }
+        if (back == 0 || src[back - 1] != '(') {
+            break;
+        }
+        start = back - 1;
+    }
+    while (end > start && (src[end - 1] == ' ' || src[end - 1] == '\t' || src[end - 1] == '\n')) {
+        end -= 1;
+    }
+    append_flat(out, src[start..end]);
+    return true;
+}
+
+// Whether the check `t` stands for a declaration: its place is a named local, and the check
+// stands at the name of that local.
+fn is_declaration(fir.func* f, fir.terminator* t) bool {
+    if (t->place.base != fir.base_kind.bk_local || t->place.proj_len != 0) {
+        return false;
+    }
+    fir.local* l = fir.local_at(f, t->place.local);
+    return l->kind == fir.local_kind.lk_named && l->loc.line == t->loc.line
+        && l->loc.col == t->loc.col && l->loc.line > 0;
+}
+
+/// Appends the text that the diagnostic of the check `t` names: the declared name for a
+/// declaration, the source text of the target for an assignment, and the FIR place when the
+/// source is not there.
+fn write_place(fir.func* f, fir.terminator* t, session.session mut* s,
+               strbuf.str_buf mut* out) void {
+    if (is_declaration(f, t)) {
+        strbuf.append(out, fir.local_name(fir.local_at(f, t->place.local)));
+        return;
+    }
+    if (!write_target(f, t->loc, s, out)) {
+        fir_print.print_place(f, t->place, out);
+    }
+}
+
+// The location of the diagnostic of the check `t`: the declared name, or the `=` of an
+// assignment.
+fn site(fir.func* f, fir.terminator* t) diag.loc {
+    if (is_declaration(f, t) || t->loc.line == 0) {
+        return t->loc;
+    }
+    return diag.loc_range(t->loc.file, t->loc.line, t->loc.col, t->loc.line, t->loc.col + 1);
+}
+
+// Whether a check of a block before `b` that `p` does not prove stands at the location of the
+// check of `b`: a deferred store expands into one check at each exit.
+fn is_repeated(fir.func* f, prover.proof* p, u32 b) bool {
+    diag.loc at = fir.block_at(f, b)->term.loc;
+    u32 mut e = 0;
+    while (e < b) {
+        diag.loc other = fir.block_at(f, e)->term.loc;
+        if (!p->proved[cast(e, u64)] && other.line == at.line && other.col == at.col
+            && other.file == at.file) {
+            return true;
+        }
+        e += 1;
+    }
+    return false;
+}
+
+/// Reports each check of `f` that `p` does not prove, once for each location, in block order:
+/// the error `overwriting owned value: cannot prove '<place>' is empty here` and the note
+/// `del or move '<place>' before this store`, at the declared name or at the `=`. When the work
+/// of `f` passed prover.WORK_LIMIT, the first error takes a second note, LIMIT_NOTE (D17.11).
+fn write(fir.func* f, prover.proof* p, session.session mut* s) void {
+    strbuf.str_buf mut place = strbuf.create();
+    defer strbuf.free(&place);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    bool mut limit_told = false;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        fir.terminator* t = &fir.block_at(f, b)->term;
+        if (!p->proved[cast(b, u64)] && !is_repeated(f, p, b)) {
+            strbuf.clear(&place);
+            write_place(f, t, s, &place);
+            diag.loc at = site(f, t);
+            strbuf.clear(&text);
+            strbuf.append(&text, "overwriting owned value: cannot prove '");
+            strbuf.append(&text, strbuf.view(&place));
+            strbuf.append(&text, "' is empty here");
+            diag.error(session.diags(s), at, strbuf.view(&text));
+            strbuf.clear(&text);
+            strbuf.append(&text, "del or move '");
+            strbuf.append(&text, strbuf.view(&place));
+            strbuf.append(&text, "' before this store");
+            diag.note(session.diags(s), at, strbuf.view(&text));
+            if (p->over && !limit_told) {
+                diag.note(session.diags(s), at, LIMIT_NOTE);
+                limit_told = true;
+            }
+        }
+        b += 1;
+    }
+}
