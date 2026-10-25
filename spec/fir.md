@@ -828,6 +828,9 @@ changes the function, and the verifier runs after it. The passes run in this ord
    that needs a proof (**Stores**) and each `check(overwrite: p)`, and it reports the error of
    D17.11 for each one that it cannot prove. A function with an error reaches no later pass, and
    the run writes no module and no FIR.
+   The leak rule of D17.20 uses the facts of this pass at each `dead` marker, at each `return`,
+   and at each `del` and `own` cast of a pointer to owners. A later change adds it to this pass, as
+   a report first and as an error after that.
    `--fir-verify-report` and the pass `build-mode` of a FIR test run it too, for its proof, and
    report nothing.
    The pass is the forward must-empty analysis of D17.11, and it reads FIR this way:

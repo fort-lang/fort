@@ -821,7 +821,11 @@ the mark is erased in generated code. It is part of type identity (section 6): `
 `node*` are different types, and so are `fn (node* own) void` and `fn (node*) void`. `own` on a
 scalar, a struct, a fixed array or a function-pointer type is an error; a struct or array that
 contains an `own` reference is an owning aggregate instead (section 8.5). Ownership is a typing
-discipline, not a linear check: a use after `move` and a leak are not diagnosed (D17.14, D15).
+discipline, not a linear check: a use after `move` is not diagnosed (D17.14, D15). A leak is
+diagnosed only by D17.20. It covers a named local of `own` reference type at the end of its scope,
+or such a parameter or temporary at a `return`, that can hold an allocation. It also covers a
+`del` or an `own` cast that frees an object whose owners can hold allocations. The compiler first
+reports each site and accepts the program; a later change makes each site a compile error.
 
 ```fort
 node mut* own n = new(node);         // an owned node
@@ -992,7 +996,8 @@ would strand the rest (D17.8). `del` of an aggregate is an error, because `del` 
 struct frees its own fields, one `del` per `own` field, and a container exposes a `free`
 function that does so (D13.5). Functions therefore take an owning struct by pointer, `vec*` or
 `vec mut*`, and a range `for` over owning elements is an error (`core-language.md` 6.4).
-An owning aggregate assignment has no fieldwise overwrite check (D17.11).
+An owning aggregate assignment has no fieldwise overwrite check (D17.11), and the leak rule of
+D17.20 does not check an owning aggregate local at the exit of its scope.
 
 ```fort
 struct vec { i32 mut@ own data; u64 len; }
@@ -1468,8 +1473,8 @@ void* lost = malloc(16);             // error: owning temporary would leak
 Generics, unions (tagged or untagged), `Result`, methods, closures, overloading, default and
 named arguments, type aliases, struct, array and span equality, alignment and packed attributes,
 `alignof`, `sizeof(expr)`, string `switch` and linear ownership (compile-time detection of leaks
-and of use after `move`, of which section 8 is the intended base, D17.14) are deferred; D15
-lists each with the idiom to use instead (a fat struct with a kind field for unions, `bool` plus
-out-parameters for results, an opaque `u8[N]` field with a C shim for alignment, `defer del`
-for ownership). An array suffix after a trailing reference suffix does not parse within one group.
-Group the complete inner type or use a struct (D3.6).
+outside D17.20 and of use after `move`, of which section 8 is the intended base, D17.14) are
+deferred; D15 lists each with the idiom to use instead (a fat struct with a kind field for
+unions, `bool` plus out-parameters for results, an opaque `u8[N]` field with a C shim for
+alignment, `defer del` for ownership). An array suffix after a trailing reference suffix does
+not parse within one group. Group the complete inner type or use a struct (D3.6).

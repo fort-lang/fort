@@ -427,7 +427,7 @@ Prefer `defer` immediately after the `new` it undoes, before the variable is reb
 `own` is erased: a `T* own` is the same eight bytes as a `T*`, a `T@ own` or `string own`
 the same sixteen as a view, with the same alignment, layout and calling convention, and
 `extern` signatures with `own` name the same C functions (D17.1, D17.13). The compiler emits
-exactly two things for ownership, and it checks one more at compile time:
+exactly two things for ownership, and it checks two more at compile time:
 
 - **`move(lv)`** loads the operand's value and stores its zero value into the operand: eight
   zero bytes for a pointer or `void*`, sixteen for a span or string, the whole value for an
@@ -452,6 +452,24 @@ exactly two things for ownership, and it checks one more at compile time:
   local is zeroed once on entry, so a declaration in a loop whose body does not `del` or `move`
   the local is an error: the back edge brings a live value to the declaration. Assignments of
   owning aggregates are not checked field by field.
+- **The leak rule (D17.20).** A named local of `own` reference type at the end of its scope, and
+  such a parameter or temporary at a `return`, must hold the zero value. The compiler proves it
+  with the facts of the overwrite check. Otherwise the exit is a compile error, because the
+  allocation can leak: `leak: cannot prove '<place>' is empty at this exit`, with the note
+  `del or move '<place>' before this exit`. The error stands at the closing brace, or at the
+  `return`, `break` or `continue` that leaves the scope. `del(p)` of a `T* own`, where `T` holds
+  owners in its fixed storage, needs each owner of `*p` proved empty:
+  `leak: cannot prove '<place>' is empty before this del`, at the `del` keyword, with the note
+  `move '<place>' into a local and del it first`. A `cast` that carries `own` from
+  `T* own` to another pointee type needs the same proof, and its error ends `before this cast`.
+  `<place>` is source text, such as `p->items`, and never names a FIR local. The owners of `*p`
+  are tracked only through a pointer local that is not memory (D17.11), so such a `del` or `cast`
+  of any other operand is an error. `del` fixes a leak at an exit, and it does nothing on an
+  empty owner (D17.9). For a `del(p)` whose `*p` can hold live owners, the fix moves each inner
+  owner into a local first. D17.20 does not check an owning aggregate local at an exit. A `del`
+  or a `cast` of a span whose elements hold owners needs no proof for those owners, but a span
+  local still needs the zero value at an exit. The compiler first reports each site of the rule
+  and accepts the program; a later change makes each site a compile error (D17.20).
 
 ```fort
 u8 mut@ own mut buf = new(u8, 4);
@@ -467,9 +485,10 @@ l = list{};                          // not checked: an aggregate assignment (D1
 
 What is not tracked, exactly as in C (D10.7, D17.14): a view, or a copy of an `own` value made
 before a `move` or `del`, that is used after the allocation was freed; an `own` value that is never
-freed (a leak); and `del` of an `extern` result that is not the start of an allocation. The first
-and last are undefined behavior (section 8); a leak is merely a leak. The compile-time (linear)
-check that would make leaks and use after `move` errors is deferred (D15); `move` and `del` zero
+freed (a leak), outside the leak rule of D17.20; and `del` of an `extern` result that is not the
+start of an allocation. The first and last are undefined behavior (section 8); a leak is merely a
+leak. The compile-time (linear) check that would make the other leaks and use after `move` errors
+is deferred (D15); `move` and `del` zero
 what they take so that those mistakes surface as `null` dereferences rather than as writes to freed
 memory.
 
@@ -940,7 +959,7 @@ through one reference is a no-op (D17.9), and through two copies it is the first
 a view, a sub-span, a `.ptr`, a stack address or a literal is a compile error (D17.9), and no
 cast adds `own` to such a value (D3.14). So the second row needs an `extern` that says `own` of
 a result that does not start an allocation. Not undefined and not detected: an `own` value that
-is never freed (D17.14).
+is never freed, outside the leak rule of D17.20 (D17.14).
 
 Explicitly not undefined: there is no strict-aliasing rule. Reading an object through a pointer
 to another type of the same size is defined and yields the bit pattern (D10.7):
@@ -1146,9 +1165,9 @@ a `string own` from `take` (D13.2, D13.5).
 
 ## 10. Not in v1
 
-Arena allocators as a language feature, leak detection, use-after-free detection, alignment and
-packed attributes, and compile-time (linear) ownership tracking are outside v1; D15 lists the
-deferred features with the idiom to use for each. `own` records who frees, and `move` and `del`
-zero what they take (D17), so a leak stays a leak and a use after `move` or `del` is a `null`
-dereference rather than a write into freed memory (D17.14). The `extern` boundary reaches every
-C allocator and every C library in the meantime.
+Arena allocators as a language feature, leak detection outside D17.20, use-after-free detection,
+alignment and packed attributes, and compile-time (linear) ownership tracking are outside v1;
+D15 lists the deferred features with the idiom to use for each. `own` records who frees, and
+`move` and `del` zero what they take (D17), so a leak stays a leak and a use after `move` or
+`del` is a `null` dereference rather than a write into freed memory (D17.14). The `extern`
+boundary reaches every C allocator and every C library in the meantime.
