@@ -263,12 +263,14 @@ file: `fort [options] --lib <name> <root>`.
   lowering does not support writes nothing. `--fir-after` does not change the report
   (`spec/fir.md` 16.5).
 - A build writes each function through FIR: the lowering, the verifier, the emptiness pass, the
-  build-mode pass and the translator (`spec/fir.md` 3). Each of three cases is a compile error
+  build-mode pass and the translator (`spec/fir.md` 3). Each of four cases is a compile error
   with exit 1 and no module. The first is a function that the lowering does not support
   (`spec/fir.md` 9.8). The second is a function that needs a print function, `str_eq` or the
   entry of a check kind of `std.rt` that the closure lacks or declares in another form
   (`spec/fir.md` 9.8). The third is a function with an overwrite check that the emptiness pass
-  does not prove, which is the error of D17.11 (`spec/fir.md` 11). For a print function or
+  does not prove, which is the error of D17.11 (`spec/fir.md` 11). The fourth is a function with
+  an exit of an owner local that the emptiness pass does not prove, which is the error of part 1
+  of D17.20 (`spec/fir.md` 11). For a print function or
   `str_eq`, another form is another signature (`spec/fir.md` 9.8). For the entry of a check
   kind, another form is other parameters than rule V7 requires. A check that the selected mode
   removes needs no entry.
@@ -457,7 +459,7 @@ Section 2.1 gives the steps of a library build (D9.11).
 3. Check every module in dependency order, imported modules first (exit 1).
    In every build mode, lower and verify each fort body of the closure, and run the emptiness
    pass of `fir.md` 11 on it (D17.11). An overwrite check that the pass cannot prove is a source
-   error (exit 1).
+   error (exit 1), and so is an exit of an owner local that the pass cannot prove (D17.20).
 4. Emit one LLVM IR module for the closure to `<tmp>/<entry>.ll` (D19.1), or to the `-S` output
    and stop.
 5. Run `<cc>` over that module once: it compiles and links in one invocation (D14.3), exit 2 on
@@ -485,8 +487,8 @@ Section 2.1 gives the steps of a library build (D9.11).
 `--check` stops after step 3 (D20.1): it emits no module, creates no temporary directory, runs no
 `--cc`, and does not apply the entry-point rule of D8.6, since the file it is given is a module
 under inspection rather than a program.
-`--check` runs the emptiness pass of step 3 too, so it reports each overwrite error that a build
-reports (D17.11).
+`--check` runs the emptiness pass of step 3 too, so it reports each overwrite error and each leak
+error that a build reports (D17.11, D17.20).
 
 - The temporary directory comes from `mkdtemp` under `$TMPDIR` (default `/tmp`) and is removed
   whether or not `--cc` succeeded.
@@ -2315,11 +2317,12 @@ implementable; the design is to be planned in the implementation phase.
   and, on each assignment, whether the target is an `own` lvalue that needs the overwrite check.
 - **Codegen.** For each function, the lowering makes FIR from the annotated AST and expands the
   deferred statements statically at each exit (D7.8, D19.8); the verifier tests the FIR, the
-  emptiness pass proves each overwrite check (D17.11), the build-mode pass applies the selected
-  mode, and the verifier tests it again; the translator then appends the text of section 6 to a
-  single LLVM IR module (D19.1), with no libLLVM and no register allocation: locals are `alloca`s in
-  the entry block and intermediates are SSA temporaries or `%tmp` slots (`fir.md` 3, 11, 12). A
-  function that the lowering does not support is a compile error (`fir.md` 9.8).
+  emptiness pass proves each overwrite check (D17.11) and each exit of an owner local (D17.20), the
+  build-mode pass applies the selected mode, and the verifier tests it again; the translator then
+  appends the text of section 6 to a single LLVM IR module (D19.1), with no libLLVM and no register
+  allocation: locals are `alloca`s in the entry block and intermediates are SSA temporaries or
+  `%tmp` slots (`fir.md` 3, 11, 12). A function that the lowering does not support is a compile
+  error (`fir.md` 9.8).
 - **Memory.** Arenas per compilation; nothing is freed before exit.
 
 ## 9. Editor support

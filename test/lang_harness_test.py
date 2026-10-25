@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Test the library options of test/lang/run_tests.py: `--use` and `--cache-dir` (D9.11)."""
+"""Test the library options of test/lang/run_tests.py, `--use` and `--cache-dir` (D9.11), and
+the flags that its check command leaves out."""
 
 import argparse
 import contextlib
@@ -73,6 +74,28 @@ class LibraryOptionsTest(unittest.TestCase):
         with self.assertRaises(SystemExit) as caught:
             run_tests.main(["--cache-dir", "c", "--list"])
         self.assertEqual(str(caught.exception), "run_tests.py: error: --cache-dir requires --use")
+
+
+class CheckCommandTest(unittest.TestCase):
+    FIR = types.SimpleNamespace(flags=["--fir", "-I", "../../src"], entry="t.ft")
+
+    def test_a_check_leaves_out_the_flag_of_fir(self):
+        self.assertEqual(run_tests.check_command(config(), self.FIR, False),
+                         ["/bin/fort", "--check", "--std-dir", "/std", "-I", "../../src", "t.ft"])
+        self.assertEqual(run_tests.check_command(config(), self.FIR, True, True),
+                         ["/bin/fort", "--check", "--std-dir", "/std", "--json", "--index", "-I",
+                          "../../src", "t.ft"])
+
+    def test_a_build_keeps_the_flag_of_fir(self):
+        self.assertEqual(run_tests.compile_command(config(), self.FIR, "out"),
+                         ["/bin/fort", "--cc", run_tests.DEFAULT_CC, "--std-dir", "/std", "--fir",
+                          "-I", "../../src", "-o", "out", "t.ft"])
+
+    def test_only_the_flag_of_fir_stays_out(self):
+        self.assertEqual(run_tests.NOT_WITH_CHECK, ("--fir",))
+        other = types.SimpleNamespace(flags=["--fir-after=lower", "--release"], entry="t.ft")
+        self.assertEqual(run_tests.check_command(config(), other, False)[-3:],
+                         ["--fir-after=lower", "--release", "t.ft"])
 
 
 if __name__ == "__main__":

@@ -2109,8 +2109,11 @@ Amended 2026-10-24: D17.20 detects two kinds of leak, and linear ownership defer
 (`spec/ownership-design.md` 6.6; user, 2026-10-24). The first is a named local of `own` reference
 type at the end of its scope, or such a parameter or temporary at a `return`, that can hold an
 allocation. The second is a `del` or an `own` cast that frees an object whose owners can hold
-allocations. The compiler first reports each site and accepts the program; a later change makes
-each site a compile error. Before, linear ownership deferred the detection of every leak.
+allocations. Each site of the first kind is a compile error. The compiler first reports each site
+of the second kind and accepts the program; a later change makes each such site a compile error.
+Before, linear ownership deferred the detection of every leak.
+Amended 2026-10-25: a site of the first kind is a compile error (D17.20). Before, the compiler
+reported each site of both kinds and accepted the program.
 
 Deferred at the C boundary (2026-09-11, T-025): an extern link name or alias.
 An extern still has no link name of its own; its declared name is its C symbol (D9.8).
@@ -2623,15 +2626,17 @@ says ownership is "by convention", this section supersedes it.
   D17.20 makes two kinds of leak compile errors. The first is a named local of `own` reference
   type at the end of its scope, or such a parameter or temporary at a `return`, that can hold an
   allocation. The second is a `del` or an `own` cast that frees an object whose owners can hold
-  allocations. The compiler first reports each site and accepts the program; a later change makes
-  each site a compile error (D17.20). The linear check that would
-  make the other leaks and use after `move` compile errors is deferred (D15); this design is its
-  intended base and adds no syntax it would not need.
+  allocations. Each site of the first kind is a compile error. The compiler first reports each
+  site of the second kind and accepts the program; a later change makes each such site a compile
+  error (D17.20). The linear check that would make the other leaks and use after `move` compile
+  errors is deferred (D15); this design is its intended base and adds no syntax it would not need.
 - history: Amended 2026-09-29 (T-257): the list held "two `own` copies made through `cast`". A cast
   no longer adds `own` (D3.14), and `cast(move(x), ...)` ends the source binding (D17.5).
   Amended 2026-10-24: D17.20 takes the part that it covers out of this list
   (`spec/ownership-design.md` 6.6; user, 2026-10-24). Before, the list held "an `own` value that
   is never freed" with no exception, and the deferred linear check covered every leak.
+  Amended 2026-10-25: a site of the first kind is a compile error (D17.20). Before, the compiler
+  reported each site of both kinds and accepted the program.
 
 ### D17.20 Leak
 - owner: `memory-model.md` (`move`, `del`, transfer, lending, the overwrite check, the leak rule),
@@ -2647,8 +2652,34 @@ says ownership is "by convention", this section supersedes it.
   The analysis must prove that each local owner in it holds the zero value. Otherwise the exit is a
   compile error, because the allocation can leak: `leak: cannot prove '<place>' is empty at this
   exit`, with the note `del or move '<place>' before this exit`. The error stands at the `dead`
-  marker or the `return` of `fir.md` 9.5: the closing brace, or the `return`, `break` or
-  `continue` that leaves the scope. An exit into an abort block has no obligation.
+  marker or the `return` of `fir.md` 9.5: the closing brace, the end of a `case` clause, or the
+  `return`, `break` or `continue` that leaves the scope. A `case` clause has no closing brace, so
+  its scope ends at its last token: the `;` of its last statement, or the closing brace of a block
+  that ends the clause. An exit into an abort block has no obligation. An exit that no run reaches
+  keeps its obligation where `fir.md` 9.5 places it, because the analysis follows each edge of
+  the FIR, also the edge out of `while (true)` that no run takes (`fir.md` 11, Join). So a
+  `void` function whose body ends in `while (true)` needs the zero value of each local owner at
+  the closing brace of its body. The end of a `noreturn` body is an abort block, so it has no
+  obligation. There is one
+  error for each location and owner local, so a deferred block that expands at two exits with one
+  location gives one error for each owner local there. Checked and release builds give the same
+  verdict, and `--check` gives it too (D20.1).
+  The proof of the exits of one function has a limit. Its leak work is the sum of the three counts
+  of the work of D17.11 and a fourth count: the statements and terminators of the function times its
+  owner locals that are no scratch local. A scratch local is a temporary, or the result `_0`, of an
+  `own` reference type that is not memory (`fir.md` 11, Scratch). The exit of a scratch temporary
+  reads one bit, which the second count of D17.11 bounds. The leak work takes the three counts also
+  in a function with no check and no store that needs a proof, whose work of D17.11 is 0. When the
+  leak work passes 1048576 (2^20), the analysis proves no exit of the function, with two exceptions.
+  First, an exit of a scratch local holds, because D17.8 keeps the lowering from a `return` while a
+  temporary holds an allocation. Second, a named local has no obligation at a `return`. FIR text can
+  reach a `return` with a named local whose scope no `dead` ended (`fir.md` 11, Exits), but the
+  lowering writes the `dead` of each named local of each scope that a `return` leaves (`fir.md`
+  9.5), so the obligation of a lowered named local stands at a `dead`. The first error of part 1 in
+  such a function has a second note at the same position: `the function exceeds the work limit of
+  the leak rule; split it`. The note names no limit of D17.11. The work of D17.11 and its verdicts
+  do not change, so the first error of D17.11 in a function past both limits takes the note of
+  D17.11. Only `big` of `fail/ownership/060` passes the limit of the leak work, on purpose.
   Until refinement R1 of `spec/ownership-design.md` 7, part 1 applies only to a named local, a
   parameter or a temporary whose type is an `own` reference. A local of an owning aggregate type
   (D17.7) has no obligation of part 1 until then, and its leak is outside the guarantee of this
@@ -2671,7 +2702,8 @@ says ownership is "by convention", this section supersedes it.
   `<place>` is source text. For a named local or a parameter, it is the declared name. An owner
   of `*p` is written in source form, from the source text of `p` and its field names (`p->items`,
   `p->a.b`). A temporary is written as the source text of the expression whose value it holds. No
-  message names a FIR local.
+  message about fort source names a FIR local. For FIR text with no source tree, the message names
+  the FIR place (`fir.md` 11, Exits).
   What the analysis cannot prove: a value that the owner holds on some paths only, and a memory
   owner after a call. Each is an error. `del` is always a fix for part 1: it frees what the
   function still owns, and it does nothing on a vacated or a null owner (D17.9). For part 2, the
@@ -2681,9 +2713,10 @@ says ownership is "by convention", this section supersedes it.
   b; }`, `pair mut* own q = new(pair); del(q);` passes, because `new` fills `*q` with zero (D10.2).
   For a parameter `q` of type `pair mut* own`, `del(q);` alone is an error, because the entry
   values of `q->a` and `q->b` are unknown, and `del(q->a); del(q->b); del(q);` passes.
-  The rule starts as a report. A first change lists each site that the analysis cannot prove and
-  accepts the program. A later change makes each such site a compile error and amends this entry,
-  as the overwrite check of D17.11 went from a report (5152c9fd) to an error (d8a9e096).
+  Part 2 starts as a report. A first change lists each site of part 2 that the analysis cannot
+  prove and accepts the program. A later change makes each such site a compile error and amends
+  this entry. Part 1 took this path, from a report (e0bb6c0a) to an error, as the overwrite check
+  of D17.11 went from a report (5152c9fd) to an error (d8a9e096).
 - rationale: an obligation that the analysis cannot prove is an error, as in D17.11 ("Unknown is
   an error", the user, 2026-10-22), so the rule keeps no list of known gaps. `del` is shallow
   (D17.7), so a `del` of an object whose owners hold allocations leaks them. The order of the
@@ -2696,6 +2729,16 @@ says ownership is "by convention", this section supersedes it.
   the ruling on Q7, the cases of X3, what the analysis cannot prove, the examples, and the report
   stage. The number is D17.20 and not D17.15, because `notes/ownership-retrospective.md` cites
   D17.13 to D17.19 of the tag `ownership-wave-final` (`spec/ownership-design.md` 6.6).
+  Amended 2026-10-25: part 1 is a compile error. Before, the compiler listed each site of part 1
+  under the option `--leak-report` and accepted the program (e0bb6c0a). The entry also takes the
+  leak work, its limit, the two exceptions past the limit and the note of the limit, which `fir.md`
+  11 held alone, and the rule of one error for each location and owner local; the coordinator
+  ratified both on 2026-10-25. `spec/ownership-design.md` 4.8 gives another limit, 2^24, and another
+  note, for the analysis of each rule of its design. The coordinator ruled in review round 1 that
+  the entry states the end of a `case` clause and its position, the obligation of an exit that no
+  run reaches, and the FIR place in a message about FIR text with no source tree. Before, the
+  entry named only the closing brace, `return`, `break` and `continue`, and it said that no message
+  names a FIR local.
 
 ## D18 Float printing in the runtime
 

@@ -6652,7 +6652,8 @@ fn each_exit_kind_of_lowered_source_has_its_obligation() void {
 u64 PROOFS = 20;
 
 // Appends the place that the report names for each check of `f` that `p` does not prove, as
-// report.write writes it, and writes no diagnostic.
+// report.write writes it, and the owner that the error names for each exit that `p` does not
+// prove, as report.write_leaks writes it. Writes no diagnostic.
 fn write_unproved(fir.func* f, prover.proof* p, session.session mut* s,
                   strbuf.str_buf mut* out) void {
     u32 mut b = 0;
@@ -6664,10 +6665,18 @@ fn write_unproved(fir.func* f, prover.proof* p, session.session mut* s,
         }
         b += 1;
     }
+    u64 mut k = 0;
+    while (k < p->exits.len) {
+        if (!p->exits[k].proved) {
+            report.write_owner(f, p->exits[k].local, s, out);
+            strbuf.push(out, '\n');
+        }
+        k += 1;
+    }
 }
 
 // Each round proves each function of HELD and of EXITS PROOFS times, writes its places and the
-// lines of its exits that it does not prove, and frees its proof. A proof that keeps a vector of
+// owners of its exits that it does not prove, and frees its proof. A proof that keeps a vector of
 // its context, a set of a dataflow or the probes of a walk keeps 32 bytes or more in each proof,
 // so 4480 bytes or more in each round, and the program break moves. The probe runs first in main,
 // as the probe of fir_flow_test does: after the other tests, the allocator can serve a leak out of
@@ -6700,7 +6709,6 @@ fn the_proofs_leave_the_heap_where_it_was() void {
                 prover.proof mut p = prover.prove(&m.funcs.items[i]);
                 strbuf.clear(&out);
                 write_unproved(&m.funcs.items[i], &p, &e.c.m.s, &out);
-                report.write_leaks(&m.funcs.items[i], &p, &e.c.m.s, &out);
                 prover.free(&p);
                 i += 1;
             }

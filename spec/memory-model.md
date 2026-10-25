@@ -468,8 +468,9 @@ exactly two things for ownership, and it checks two more at compile time:
   empty owner (D17.9). For a `del(p)` whose `*p` can hold live owners, the fix moves each inner
   owner into a local first. D17.20 does not check an owning aggregate local at an exit. A `del`
   or a `cast` of a span whose elements hold owners needs no proof for those owners, but a span
-  local still needs the zero value at an exit. The compiler first reports each site of the rule
-  and accepts the program; a later change makes each site a compile error (D17.20).
+  local of `own` type still needs the zero value at an exit. An exit that the compiler cannot
+  prove is a compile error. The compiler first reports each `del` and each `cast` that it cannot
+  prove and accepts the program; a later change makes each such site a compile error (D17.20).
 
 ```fort
 u8 mut@ own mut buf = new(u8, 4);

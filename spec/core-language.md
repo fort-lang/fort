@@ -321,9 +321,10 @@ discipline, not a linear check: whether every allocation is freed exactly once i
 (D17.14, D15), and the idiom is `defer del(x);` (6.6). The leak rule of D17.20 is the one
 exception. It covers a named local of `own` reference type at the end of its scope, or such a
 parameter or temporary at a `return`, that can hold an allocation. It also covers a `del` or an
-`own` cast that frees an object whose owners can hold allocations (`memory-model.md` 2.5). The
-compiler first reports each site and accepts the program; a later change makes each site a
-compile error.
+`own` cast that frees an object whose owners can hold allocations (`memory-model.md` 2.5). An exit
+of such a local, parameter or temporary that the compiler cannot prove is a compile error. The
+compiler first reports each such `del` and `cast` that it cannot prove and accepts the program; a
+later change makes each of them a compile error.
 
 **Placement (D17.2).** An `own` follows a `*` or an `@` and marks the reference that suffix
 introduces as owning its target; `string`, a reference without a suffix, takes it directly

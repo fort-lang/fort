@@ -190,14 +190,16 @@ bullet at a time and without a rewrite.
   `$if ($cfg(target_os) == ...)` instead, so its expected output is the same on both targets.
   The harness has no bootstrap expectation list. `run_tests.py --lint`
   validates directives without a compiler and runs before every test run;
-  `run_tests.py --check-json` is a mode of its own (ctest `lang-json`, label
-  `integration`) that holds the document of `fort --check --json` against the text form on every
-  fail test and ignores `xfail.txt`, since it judges the
-  two forms of one run rather than the test. It also selects a test with an `index.json` beside
-  it, runs that one with `--index` and holds its `"symbols"` against the file byte for byte
-  (D20.3): the golden is one record per line as `render_index` spells it, it and
-  `expected.stderr` (the next bullet) are the two non-`.ft` files a directory test may hold, and
-  `--lint` checks its shape without a compiler, so a golden
+  `run_tests.py --check-json` is a mode of its own (ctest `lang-json`, label `integration`) that
+  holds the document of `fort --check --json` against the text form on every fail test and ignores
+  `xfail.txt`, since it judges the two forms of one run rather than the test. Its `--check` runs
+  leave the flag `--fir` of a test out (`NOT_WITH_CHECK`), because `--fir` does not combine with
+  `--check` and would exit 2; the test run holds the status of `--fir`
+  (`fail/ownership/074_leak_under_fir.ft`). It also selects a test with an `index.json` beside it,
+  runs that one with `--index` and holds its `"symbols"` against the file byte for byte (D20.3): the
+  golden is one record per line as `render_index` spells it, it and `expected.stderr` (the next
+  bullet) are the two non-`.ft` files a directory test may hold, and `--lint` checks its shape
+  without a compiler, so a golden
   edited by hand into another spelling of the same records fails the lint rather than the run.
   Regenerate one with `fort --index` and `render_index`, never by hand. A compiler exit status
   other than 0 or 1 is an `ERROR`, which `xfail.txt` still covers. Discovery matches a test file's
@@ -789,7 +791,11 @@ bullet at a time and without a rewrite.
   `std/rt.ft` of the sandbox, and `open_module` keeps the empty one for a case that holds the
   refusal (`gen_fir_test.ft`). A suite of one expression reads the FIR text of the whole `main`
   (`gen_env.main_text`, which runs the block check), so its expected lines carry the numbers
-  that they have in that definition (T-255).
+  that they have in that definition (T-255). **The source of a gen suite must free each `own`
+  local.** An exit that the emptiness pass cannot prove is an error (D17.20), so the emitter
+  writes no `main`, and the suite stops at `report == BLOCKS_OK` with `the module holds no closed
+  definition`. A `defer del(x)` right after the declaration runs after the store of the result,
+  so it changes no expected line before the `return` (`test/fort/gen_multidim_test.ft`).
 - **`tools/ir_snapshot.sh <fort> <std-dir> <out-dir>` writes the `-S` output of the run
   tests of `run_tests.py --list run/`** in three modes: `default`, `release` and `nobounds`
   (T-192). `<std-dir>` is the staged `build/<Host>/debug/std`, not `std/`, which the compiler

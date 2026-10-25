@@ -830,9 +830,9 @@ changes the function, and the verifier runs after it. The passes run in this ord
    the run writes no module and no FIR.
    The leak rule of D17.20 uses the facts of this pass at each `dead` marker, at each `return`,
    and at each `del` and `own` cast of a pointer to owners. The pass proves part 1 of the rule
-   (**Exits**) and only reports it: `--leak-report` lists each exit that it does not prove, and no
-   build, `--check` or `--fir` changes its verdict for it. A later change makes each such exit an
-   error. Part 2 comes later, as a report first.
+   (**Exits**) and reports the error of D17.20 for each exit that it cannot prove, in every build
+   mode, under `--check` and under `--fir`, as for a store. Part 2 comes later, as a report first:
+   `--leak-report` lists only the sites that are no error yet, so part 1 adds no line to it.
    `--fir-verify-report` and the pass `build-mode` of a FIR test run it too, for its proof, and
    report nothing.
    The pass is the forward must-empty analysis of D17.11, and it reads FIR this way:
@@ -1014,9 +1014,10 @@ changes the function, and the verifier runs after it. The passes run in this ord
      reference. `_0` passes its value to the caller, and a local of an owning aggregate waits for
      refinement R1 (D17.20). An exit has the obligation that its owner local holds the zero value,
      which its fact proves, or, for a scratch local, its bit (**Scratch**). The exits are these:
-     - each `dead(_n)` of a named owner local, at the closing brace, or at the `return`, `break`
-       or `continue` that leaves its scope (9.5). A `dead` in an abort block has none: a runtime
-       error runs no deferred code (D7.8, D11.4), so a leak there is outside the guarantee;
+     - each `dead(_n)` of a named owner local, at the closing brace, at the last token of a `case`
+       clause, or at the `return`, `break` or `continue` that leaves its scope (9.5). A `dead` in
+       an abort block has none: a runtime error runs no deferred code (D7.8, D11.4), so a leak
+       there is outside the guarantee. A `dead` that no run reaches keeps its obligation (**Join**);
      - each `return`, for each parameter and each temporary that is an owner local;
      - each `return`, for each named owner local whose scope can be open there. A fifth dataflow,
        an intersection, gives one bit for each named owner local: its scope has ended. `bb0` starts
@@ -1036,12 +1037,13 @@ changes the function, and the verifier runs after it. The passes run in this ord
      a scratch local, and a named local has no exit at a `return`; the overwrite proof keeps its own
      limit. So FIR text past that limit that returns with a live scratch local, or with a live named
      local that no `dead` ends, is outside the guarantee of the leak rule; the lowered FIR stays
-     sound by D17.8 and by 9.5. The report lists each exit that the pass does not prove, once for
-     each location and owner local, with the message of D17.20 at the location of the `dead` or of
-     the `return`. Past the limit the first line takes a note of the limit of the leak work, which
-     names no limit of D17.11. The report names the declared name of a named local or a parameter,
-     and the source text of the expression of a temporary, from its first token to its last; FIR
-     text with no tree gives the FIR place.
+     sound by D17.8 and by 9.5. The pass reports the error of D17.20 and its note at each exit that
+     it does not prove, once for each location and owner local, at the location of the `dead` or of
+     the `return`. The errors of a function stand in the order of its exits, after its errors of
+     D17.11. Past the limit the first error takes the second note of D17.20, the note of the limit
+     of the leak work, which names no limit of D17.11. The message names the declared name of a
+     named local or a parameter, and the source text of the expression of a temporary, from its
+     first token to its last; FIR text with no tree gives the FIR place.
    - **Rewrite.** The pass rewrites nothing, so the verifier does not run after it.
 4. **The build-mode pass**, which rewrites for the selected mode (D11.1, D10.6, D17.11):
    - In every mode, it replaces each `check(overwrite: p)` that the emptiness pass proved by

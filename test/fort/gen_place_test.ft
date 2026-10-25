@@ -263,8 +263,9 @@ fn a_string_value_is_its_two_header_fields() void {
 // ---- the ownership operations ----------------------------------------------------------------
 
 // The module the ownership assertions are made against: `p` is slot 0, `s`
-// slot 1, `t` slot 2 and `u` slot 3. And the three `del` statements are
-// statements 3, 4 and 5 of the body.
+// slot 1, `t` slot 2 and `u` slot 3. And the first three `del` statements are
+// statements 3, 4 and 5 of the body. The last two free `t` and `u`, so that
+// no owner holds an allocation at the end of the body (D17.20).
 fn open_own(gen_env.env mut* e) bool {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
@@ -276,6 +277,8 @@ fn open_own(gen_env.env mut* e) bool {
     strbuf.append(&b, "    del(s);\n");
     strbuf.append(&b, "    del(new(i32));\n");
     strbuf.append(&b, "    i32 mut* own mut u = move(p);\n");
+    strbuf.append(&b, "    del(t);\n");
+    strbuf.append(&b, "    del(u);\n");
     strbuf.append(&b, "    return 0;\n}\n");
     return gen_env.open_src(e, strbuf.view(&b));
 }
@@ -322,12 +325,13 @@ fn an_unsigned_count_needs_no_branch_at_all() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
-    string[2] mut lines = {"    u64 mut m = 3;", "    i32 mut@ own mut s = new(i32, m);"};
+    string[3] mut lines = {"    u64 mut m = 3;", "    i32 mut@ own mut s = new(i32, m);",
+                           "    del(s);"};
     assert(gen_env.open_lines(&e, lines[..]));
     // An unsigned count is never negative. So the check is on the signed path
     // alone and the width already agrees, so nothing widens it either (item
-    // 9). The store into `s` has no check either, so the function has no
-    // branch at all.
+    // 9). The store into `s` has no check either, and the `del` that ends the
+    // allocation (D17.20) has no branch, so the function has no branch at all.
     string[6] want = {
         "  %t0 = load i64, ptr %m.0, align 8\n",
         "  %t1 = call ptr @\"std.rt.alloc\"(i64 4, i64 %t0, ptr @.file.0, i32 3, i32 26)\n",
@@ -347,7 +351,8 @@ fn a_negative_count_is_checked_and_the_check_survives_release_mode() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open_with(&e, gen.gen_options{true, true, ""});
     defer gen_env.close(&e);
-    string[2] mut lines = {"    i32 mut n = 3;", "    i32 mut@ own mut s = new(i32, n);"};
+    string[3] mut lines = {"    i32 mut n = 3;", "    i32 mut@ own mut s = new(i32, n);",
+                           "    del(s);"};
     assert(gen_env.open_lines(&e, lines[..]));
     // It is not a bounds check, so neither `--release` nor
     // `--no-bounds-check` removes it, and it is reported with the signed
