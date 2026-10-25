@@ -4,7 +4,9 @@
 Before the rule of D17.11 became static, each program of FORMER_SITES stopped a checked build at
 run time with `runtime error: overwriting owned value`, at the line and the column that the table
 gives. Each one is a fail test of test/lang now. The emptiness pass must report the error of
-D17.11 and its note at each of those positions, and nowhere else.
+D17.11 and its note at each of those positions, and nowhere else. A program of LEAK_SITES also
+keeps an allocation at an exit on purpose, so its runs give the error of the leak rule and its note
+there too, after the errors of D17.11 (D17.20), and no other error of the leak rule.
 
 The test compiles each program in four modes: a checked build, a `--release` build, a
 `--no-bounds-check` build and `--check`. A mode flag in the `//! flags:` of a program does not
@@ -64,6 +66,13 @@ FORMER_SITES = {
 }
 # The count of the sites of FORMER_SITES: the runtime tests trapped at 8 sites, and 054 adds one.
 SITE_COUNT = 9
+# The programs of FORMER_SITES with an exit that the leak rule refuses, with the file name, the
+# line, the column and the owner of each such exit. The loop body of 048 ends at its closing brace
+# with `leaked` live, which is also why its declaration is an error.
+LEAK_SITES = {
+    "fail/ownership/048_declaration_overwrites.ft": [
+        ("048_declaration_overwrites.ft", 23, 5, "leaked")],
+}
 # The run tests that store after a `del` or a `move`: the fixes that the note names.
 FIXED = (
     "run/modes/008_store_after_del_no_bounds_check.ft",
@@ -110,13 +119,17 @@ def compile_in(entry, mode):
     return done.returncode, found, wrote
 
 
-def expected(sites):
-    """The error and the note of each site, in order."""
+def expected(sites, leaks=()):
+    """The error and the note of each site, in order, and then those of each leak."""
     out = []
     for name, line, col, place in sites:
         out.append((name, line, col, "error",
                     "overwriting owned value: cannot prove '%s' is empty here" % place))
         out.append((name, line, col, "note", "del or move '%s' before this store" % place))
+    for name, line, col, place in leaks:
+        out.append((name, line, col, "error",
+                    "leak: cannot prove '%s' is empty at this exit" % place))
+        out.append((name, line, col, "note", "del or move '%s' before this exit" % place))
     return out
 
 
@@ -126,7 +139,7 @@ class OracleTest(unittest.TestCase):
         runs = 0
         for entry, where in FORMER_SITES.items():
             self.assertTrue((LANG / entry).read_text().startswith("//! fail\n"), entry)
-            want = expected(where)
+            want = expected(where, LEAK_SITES.get(entry, ()))
             for mode in MODES:
                 with self.subTest(program=entry, mode=" ".join(mode) or "checked"):
                     status, found, wrote = compile_in(entry, mode)
@@ -139,6 +152,7 @@ class OracleTest(unittest.TestCase):
         # less than it says.
         self.assertEqual(sites, SITE_COUNT)
         self.assertEqual(runs, FORMER_RUNS)
+        self.assertTrue(set(LEAK_SITES) <= set(FORMER_SITES))
 
     def test_each_fix_compiles_in_every_mode(self):
         runs = 0

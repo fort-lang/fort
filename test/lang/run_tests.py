@@ -86,6 +86,11 @@ SIGNALS = {
 }
 VERDICTS = ("PASS", "FAIL", "XFAIL", "XPASS", "ERROR")
 
+# The flag of a test that selects an output mode that does not combine with `--check`. The test
+# run holds the status of that mode; check_command leaves the flag out, so the `--check` runs of
+# `--check-json` hold the same diagnostics.
+NOT_WITH_CHECK = ("--fir",)
+
 # The `fort --check --json` document keys, the keys of a
 # diagnostic and of a note, and the version this harness reads.
 DOCUMENT_KEYS = ("version", "files", "diagnostics", "symbols")
@@ -1450,6 +1455,7 @@ def check_command(config, test, as_json, indexed=False):
 
     `--check` does not use `-o`, `-c`, `-S`, or `--cc`.
     `--json` writes one document to stdout. `--index` fills its identifier index.
+    A flag of NOT_WITH_CHECK stays out.
     """
     argv = [config.fort, "--check", "--std-dir", config.std_dir]
     argv.extend(library_options(config, False))
@@ -1457,7 +1463,7 @@ def check_command(config, test, as_json, indexed=False):
         argv.append("--json")
     if indexed:
         argv.append("--index")
-    argv.extend(test.flags)
+    argv.extend(flag for flag in test.flags if flag not in NOT_WITH_CHECK)
     argv.append(test.entry)
     return argv
 

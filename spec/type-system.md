@@ -824,8 +824,10 @@ contains an `own` reference is an owning aggregate instead (section 8.5). Owners
 discipline, not a linear check: a use after `move` is not diagnosed (D17.14, D15). A leak is
 diagnosed only by D17.20. It covers a named local of `own` reference type at the end of its scope,
 or such a parameter or temporary at a `return`, that can hold an allocation. It also covers a
-`del` or an `own` cast that frees an object whose owners can hold allocations. The compiler first
-reports each site and accepts the program; a later change makes each site a compile error.
+`del` or an `own` cast that frees an object whose owners can hold allocations. An exit of such a
+local, parameter or temporary that the compiler cannot prove is a compile error. The compiler first
+reports each such `del` and `cast` that it cannot prove and accepts the program; a later change
+makes each of them a compile error.
 
 ```fort
 node mut* own n = new(node);         // an owned node

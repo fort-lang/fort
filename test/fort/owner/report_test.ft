@@ -2,11 +2,12 @@
 //! flags: -I ../../src -I support
 //! stdout:
 //| report ok
-//| leak report ok
+//| leak errors ok
 /// Checks owner.report: the error and the note of D17.11 at each check and each store that
 /// owner.prover does not prove, with the source text of its place, at its position, once for each
-/// location, and the note of the work limit. Then the line of the leak report (D17.20) at each exit
-/// that owner.prover does not prove, with the text of its owner, once for each location and owner.
+/// location, and the note of the work limit. Then the error and the note of the leak rule (D17.20)
+/// at each exit that owner.prover does not prove, with the text of its owner, once for each
+/// location and owner, and the note of the leak limit.
 import check_env;
 import fort.fir;
 import fort.fir_lower;
@@ -16,7 +17,6 @@ import lower_env;
 import modules_env;
 import pass_env;
 import std.str;
-import std.strbuf;
 
 // The types, the global and the function that the FIR texts of the cases name.
 string[8] PRELUDE = {
@@ -156,6 +156,9 @@ fn the_report_names_each_place_at_its_position() void {
         fir.func mut f = fir.func{};
         lower(&e, REPORTED_NAMES[k], &f);
         prover.proof mut p = prover.prove(&f);
+        // `loop_leak` also leaks `p` at the end of its loop body, and report.write writes no error
+        // of the leak rule (report.write_leaks writes it)
+        assert((p.leaks == 1) == (REPORTED_NAMES[k] == "loop_leak"));
         u64 before = check_env.reports(&e.c);
         report.write(&f, &p, &e.c.m.s);
         assert(check_env.reports(&e.c) == before + 2);
@@ -448,7 +451,7 @@ fn the_report_merges_the_errors_at_one_location() void {
     expect_reports(&e, g, &q, SPLIT_REPORTS[..]);
 }
 
-// ---- the leak report ---------------------------------------------------------------------------
+// ---- the errors of the leak rule ---------------------------------------------------------------
 
 // Sources whose exits hold an allocation, one function for each exit kind and for each rule of the
 // text. `spread` leaks `n` at two exits, and `deferred` at the closing brace of a deferred block,
@@ -522,57 +525,74 @@ string[9] LEAK_NAMES = {
     "brace", "early", "leave", "again", "two", "deferred", "spread", "temp", "clean",
 };
 
-// The lines of the leak report of the functions of LEAKED, in order, each after the file of the
-// function. The closing brace of a block, the `return`, the `break` and the `continue` give the
-// position. The report names the declared name of a named local and of a parameter, once for each
-// location and owner. `clean` frees its parameter at its one exit, and `temp` has no line.
-string[10] LEAK_LINES = {
+// The error and the note of each exit of the functions of LEAKED that the pass does not prove, in
+// order, each in the file of the function. The closing brace of a block, the `return`, the `break`
+// and the `continue` give the position. The errors name the declared name of a named local and of
+// a parameter, once for each location and owner. `clean` frees its parameter at its one exit, and
+// `temp` has no error.
+string[20] LEAK_REPORTS = {
     "10:5: leak: cannot prove 'n' is empty at this exit",
+    "10:5: del or move 'n' before this exit",
     "15:9: leak: cannot prove 'n' is empty at this exit",
+    "15:9: del or move 'n' before this exit",
     "15:9: leak: cannot prove 'p' is empty at this exit",
+    "15:9: del or move 'p' before this exit",
     "24:13: leak: cannot prove 'n' is empty at this exit",
+    "24:13: del or move 'n' before this exit",
     "33:13: leak: cannot prove 'n' is empty at this exit",
+    "33:13: del or move 'n' before this exit",
     "41:1: leak: cannot prove 'a' is empty at this exit",
+    "41:1: del or move 'a' before this exit",
     "41:1: leak: cannot prove 'b' is empty at this exit",
+    "41:1: del or move 'b' before this exit",
     "45:5: leak: cannot prove 'm' is empty at this exit",
+    "45:5: del or move 'm' before this exit",
     "53:9: leak: cannot prove 'n' is empty at this exit",
+    "53:9: del or move 'n' before this exit",
     "55:1: leak: cannot prove 'n' is empty at this exit",
+    "55:1: del or move 'n' before this exit",
 };
 
-// The line of `temp` once its call is gone: the text of the expression of the temporary, from its
+// The error of `temp` once its call is gone: the text of the expression of the temporary, from its
 // first token to its last, with each run of white space as one space.
-string[1] TEMP_LINE = {"59:1: leak: cannot prove 'new ( node)' is empty at this exit"};
-
-// The lines of `early` past the work limit: no exit is proved but that of the temporary, and the
-// first line takes the note of the leak limit, though the work of D17.11 passes the limit too.
-string[5] EARLY_LIMIT_LINES = {
-    "15:9: leak: cannot prove 'n' is empty at this exit",
-    "15:9: note: the function exceeds the work limit of the leak rule; split it",
-    "15:9: leak: cannot prove 'p' is empty at this exit",
-    "19:1: leak: cannot prove 'n' is empty at this exit",
-    "19:1: leak: cannot prove 'p' is empty at this exit",
+string[2] TEMP_REPORTS = {
+    "59:1: leak: cannot prove 'new ( node)' is empty at this exit",
+    "59:1: del or move 'new ( node)' before this exit",
 };
 
-// Holds that the lines of `text` are those of `want`, in order, each after the file `file` and a
-// `:`.
-fn expect_lines(string text, string file, string@ want) void {
+// The errors of `early` past the work limit: no exit is proved but that of the temporary, and the
+// first error takes the note of the leak limit, though the work of D17.11 passes the limit too.
+string[9] EARLY_LIMIT_REPORTS = {
+    "15:9: leak: cannot prove 'n' is empty at this exit",
+    "15:9: del or move 'n' before this exit",
+    "15:9: the function exceeds the work limit of the leak rule; split it",
+    "15:9: leak: cannot prove 'p' is empty at this exit",
+    "15:9: del or move 'p' before this exit",
+    "19:1: leak: cannot prove 'n' is empty at this exit",
+    "19:1: del or move 'n' before this exit",
+    "19:1: leak: cannot prove 'p' is empty at this exit",
+    "19:1: del or move 'p' before this exit",
+};
+
+// Holds that the diagnostics from `before` on are those of `want`, in order and each in the file
+// `file`: an error for each text of the leak rule and a note for each other text.
+fn expect_leaks(lower_env.env mut* e, u64 before, string file, string@ want) void {
+    assert(check_env.reports(&e->c) == before + want.len);
     u64 mut k = 0;
-    u64 mut start = 0;
-    for (u64 mut i = 0; i < text.len; i++) {
-        if (text[i] != '\n') {
-            continue;
+    while (k < want.len) {
+        if (check_env.report_text(&e->c, before + k) != want[k]) {
+            eprintln(check_env.report_text(&e->c, before + k), " and not ", want[k]);
+            panic("report_test: an error of the leak rule differs");
         }
-        string line = text[start..i];
-        start = i + 1;
-        bool fits = k < want.len && line.len > file.len + 1 && str.starts_with(line, file)
-            && line[file.len] == ':' && line[file.len + 1..] == want[k];
-        if (!fits) {
-            eprintln(line);
-            panic("report_test: a leak line differs");
+        string severity = check_env.report_severity(&e->c, before + k);
+        if (str.find(want[k], ": leak: cannot prove '") >= 0) {
+            assert(severity == "error");
+        } else {
+            assert(severity == "note");
         }
+        assert(check_env.report_file(&e->c, before + k) == file);
         k += 1;
     }
-    assert(k == want.len && start == text.len);
 }
 
 // Removes the last statement of the block of the first `return` of `f`: in `temp`, the call that
@@ -585,29 +605,32 @@ fn drop_call(fir.func mut* f) void {
     fir.block_mut(f, b)->statements.len -= 1;
 }
 
-// The leak report names the owner of each exit that the pass does not prove, at its position, once
-// for each location and owner, in the file of the function, and past the work limit the first line
-// takes the note of the limit (D17.20).
-fn the_leak_report_names_each_owner_at_its_exit() void {
+// The errors of the leak rule name the owner of each exit that the pass does not prove, at its
+// position, once for each location and owner, in the file of the function, and past the work limit
+// the first error takes the note of the limit (D17.20). The `continue` of `again` also leaves an
+// error of D17.11 at the declaration of `n`, which report.write_leaks does not write.
+fn the_leak_errors_name_each_owner_at_its_exit() void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
     defer lower_env.close(&e);
     lower_env.check_lines(&e, LEAKED[..], true);
     string file = lower_env.decl(&e, "brace")->loc.file;
     assert(str.ends_with(file, "main.ft"));
-    strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
+    u64 mut before = check_env.reports(&e.c);
     u64 mut k = 0;
     while (k < LEAK_NAMES.len) {
         fir.func mut f = fir.func{};
         lower(&e, LEAK_NAMES[k], &f);
         prover.proof mut p = prover.prove(&f);
-        report.write_leaks(&f, &p, &e.c.m.s, &text);
+        u64 mark = check_env.reports(&e.c);
+        report.write_leaks(&f, &p, &e.c.m.s);
+        // an error of the leak rule is an error of the proof, with or without one of D17.11
+        assert(check_env.reports(&e.c) == mark || prover.has_error(&p));
         prover.free(&p);
         fir.func_free(&f);
         k += 1;
     }
-    expect_lines(strbuf.view(&text), file, LEAK_LINES[..]);
+    expect_leaks(&e, before, file, LEAK_REPORTS[..]);
     // the temporary of `new` reaches the `return` only once its call is gone
     fir.func mut t = fir.func{};
     defer fir.func_free(&t);
@@ -615,19 +638,19 @@ fn the_leak_report_names_each_owner_at_its_exit() void {
     drop_call(&t);
     prover.proof mut dropped = prover.prove(&t);
     defer prover.free(&dropped);
-    assert(dropped.leaks == 1);
-    strbuf.clear(&text);
-    report.write_leaks(&t, &dropped, &e.c.m.s, &text);
-    expect_lines(strbuf.view(&text), file, TEMP_LINE[..]);
+    assert(dropped.leaks == 1 && dropped.unproved == 0 && prover.has_error(&dropped));
+    before = check_env.reports(&e.c);
+    report.write_leaks(&t, &dropped, &e.c.m.s);
+    expect_leaks(&e, before, file, TEMP_REPORTS[..]);
     fir.func mut early = fir.func{};
     defer fir.func_free(&early);
     lower(&e, "early", &early);
     prover.proof mut over = prover.prove_within(&early, 0);
     defer prover.free(&over);
     assert(over.leak_over && over.leaks == 4);
-    strbuf.clear(&text);
-    report.write_leaks(&early, &over, &e.c.m.s, &text);
-    expect_lines(strbuf.view(&text), file, EARLY_LIMIT_LINES[..]);
+    before = check_env.reports(&e.c);
+    report.write_leaks(&early, &over, &e.c.m.s);
+    expect_leaks(&e, before, file, EARLY_LIMIT_REPORTS[..]);
 }
 
 // A FIR text with locations and no tree: a named local and a parameter give their declared names,
@@ -651,10 +674,13 @@ string[16] TEXT_LEAKED = {
     "}",
 };
 
-string[3] TEXT_LEAK_LINES = {
+string[6] TEXT_LEAK_REPORTS = {
     "4:1: leak: cannot prove 'n' is empty at this exit",
+    "4:1: del or move 'n' before this exit",
     "4:1: leak: cannot prove 'p' is empty at this exit",
+    "4:1: del or move 'p' before this exit",
     "4:1: leak: cannot prove '_3' is empty at this exit",
+    "4:1: del or move '_3' before this exit",
 };
 
 // A function whose leak work alone passes the limit: it has no check and no store that needs a
@@ -671,18 +697,23 @@ string[8] LEAK_LIMIT = {
     "}",
 };
 
-// Under the limit the line of the `dead`; past the leak limit, with the note of the leak limit,
-// which names no limit of D17.11.
-string[1] LEAK_LIMIT_UNDER = {"2:1: leak: cannot prove 'n' is empty at this exit"};
-
-string[2] LEAK_LIMIT_OVER = {
+// Under the limit the error of the `dead` and its note; past the leak limit, with the note of the
+// leak limit, which names no limit of D17.11.
+string[2] LEAK_LIMIT_UNDER = {
     "2:1: leak: cannot prove 'n' is empty at this exit",
-    "2:1: note: the function exceeds the work limit of the leak rule; split it",
+    "2:1: del or move 'n' before this exit",
+};
+
+string[3] LEAK_LIMIT_OVER = {
+    "2:1: leak: cannot prove 'n' is empty at this exit",
+    "2:1: del or move 'n' before this exit",
+    "2:1: the function exceeds the work limit of the leak rule; split it",
 };
 
 // The note of a function whose leak work alone passes the limit names the leak limit and not the
 // limit of D17.11. The leak work of `r7` is its 3 statements and terminators times its one owner
-// local, and 1 block times 2 locals.
+// local, and 1 block times 2 locals. Only the leak rule gives an error, so has_error holds with no
+// unproved check or store.
 fn the_leak_limit_takes_its_own_note() void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
@@ -690,25 +721,25 @@ fn the_leak_limit_takes_its_own_note() void {
     fir.module mut m = pass_env.parse(&e, PRELUDE[..], LEAK_LIMIT[..]);
     defer fir.module_free(&m);
     fir.func* f = &m.funcs.items[0];
-    strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
     prover.proof mut under = prover.prove(f);
     defer prover.free(&under);
     assert(under.work == 0 && under.leak_work == 5 && !under.leak_over && under.leaks == 1);
-    report.write_leaks(f, &under, &e.c.m.s, &text);
-    expect_lines(strbuf.view(&text), "t.fir", LEAK_LIMIT_UNDER[..]);
+    assert(under.unproved == 0 && prover.has_error(&under));
+    u64 mut before = check_env.reports(&e.c);
+    report.write_leaks(f, &under, &e.c.m.s);
+    expect_leaks(&e, before, "t.fir", LEAK_LIMIT_UNDER[..]);
     prover.proof mut over = prover.prove_within(f, 4);
     defer prover.free(&over);
     assert(over.work == 0 && !over.over && over.leak_over && over.unproved == 0);
-    strbuf.clear(&text);
-    report.write_leaks(f, &over, &e.c.m.s, &text);
-    expect_lines(strbuf.view(&text), "t.fir", LEAK_LIMIT_OVER[..]);
+    before = check_env.reports(&e.c);
+    report.write_leaks(f, &over, &e.c.m.s);
+    expect_leaks(&e, before, "t.fir", LEAK_LIMIT_OVER[..]);
     string note = "the function exceeds the work limit of the leak rule; split it";
     assert(report.LEAK_LIMIT_NOTE == note);
 }
 
-// With no tree, the leak report names a temporary by its FIR place.
-fn the_leak_report_of_a_fir_text_names_the_fir_place() void {
+// With no tree, the errors of the leak rule name a temporary by its FIR place.
+fn the_leak_errors_of_a_fir_text_name_the_fir_place() void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
     defer lower_env.close(&e);
@@ -718,10 +749,27 @@ fn the_leak_report_of_a_fir_text_names_the_fir_place() void {
     prover.proof mut p = prover.prove(f);
     defer prover.free(&p);
     assert(p.unproved == 0 && p.exits.len == 3 && p.leaks == 3);
-    strbuf.str_buf mut text = strbuf.create();
-    defer strbuf.free(&text);
-    report.write_leaks(f, &p, &e.c.m.s, &text);
-    expect_lines(strbuf.view(&text), "t.fir", TEXT_LEAK_LINES[..]);
+    u64 before = check_env.reports(&e.c);
+    report.write_leaks(f, &p, &e.c.m.s);
+    expect_leaks(&e, before, "t.fir", TEXT_LEAK_REPORTS[..]);
+}
+
+// A proof with no unproved check, store or exit leaves no error, and report.write_leaks writes
+// nothing for it.
+fn a_proof_with_no_leak_has_no_error() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, LEAKED[..], true);
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    lower(&e, "clean", &f);
+    prover.proof mut p = prover.prove(&f);
+    defer prover.free(&p);
+    assert(p.exits.len > 0 && p.leaks == 0 && p.unproved == 0 && !prover.has_error(&p));
+    u64 before = check_env.reports(&e.c);
+    report.write_leaks(&f, &p, &e.c.m.s);
+    assert(check_env.reports(&e.c) == before);
 }
 
 fn main() i32 {
@@ -731,9 +779,10 @@ fn main() i32 {
     the_report_names_each_store_that_no_check_guards();
     the_report_merges_the_errors_at_one_location();
     println("report ok");
-    the_leak_report_names_each_owner_at_its_exit();
-    the_leak_report_of_a_fir_text_names_the_fir_place();
+    the_leak_errors_name_each_owner_at_its_exit();
+    the_leak_errors_of_a_fir_text_name_the_fir_place();
     the_leak_limit_takes_its_own_note();
-    println("leak report ok");
+    a_proof_with_no_leak_has_no_error();
+    println("leak errors ok");
     return 0;
 }

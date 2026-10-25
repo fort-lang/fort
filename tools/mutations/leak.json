@@ -3,22 +3,26 @@
     "One row for each rule of part 1 of the leak rule of D17.20 in the emptiness pass",
     "(src/fort/owner/prover.ft): the obligation of each exit kind, the scope of a named local at a",
     "`return`, the facts and the bits that prove an exit, and the work limit. Then one row for each",
-    "rule of the leak report (src/fort/owner/report.ft) and of the option --leak-report",
-    "(src/fort/driver.ft). The first stage runs the cases over FIR text and over lowered fort source",
+    "rule of the error of the leak rule (src/fort/owner/report.ft), for the error in a build",
+    "(src/fort/gen_fir.ft) and under --check and --fir (src/fort/driver.ft), and for the option",
+    "--leak-report. The first stage runs the cases over FIR text and over lowered fort source",
     "(test/fort/owner/prover_test.ft), with one case for each exit kind: the closing brace, `return`,",
-    "`break`, `continue` and an exit into an abort block, and the report",
-    "(test/fort/owner/report_test.ft). The second runs the driver test, which holds that no build",
-    "changes its verdict. The third runs the oracle test, which prints a false accept for each row",
-    "that makes the pass prove an exit that a run leaks at. The table runs in the Linux VM with the",
-    "debug preset and the default runner. The md5 guard reads the product compiler, whose driver",
-    "imports owner.prover and owner.report.",
+    "`break`, `continue` and an exit into an abort block, and the errors",
+    "(test/fort/owner/report_test.ft). The second runs the driver test, which holds the error in",
+    "each build mode, under --check and under --fir, and the empty list of --leak-report. The third",
+    "runs the oracle test, which prints a false accept for each row that makes the pass prove an exit",
+    "that a run leaks at. The fourth runs the fail tests of test/lang/fail/ownership, whose goldens",
+    "hold the error at each exit kind. The table runs in the Linux VM with the debug preset and the",
+    "default runner. The md5 guard reads the product compiler, whose driver and emitter import",
+    "owner.prover and owner.report.",
     "The first round of a run can read stale (notes/testing.md 7), so the first row is one that",
     "a full run caught."
   ],
   "sources": [
     "src/fort/owner/prover.ft",
     "src/fort/owner/report.ft",
-    "src/fort/driver.ft"
+    "src/fort/driver.ft",
+    "src/fort/gen_fir.ft"
   ],
   "binary": "build/Linux/debug/fort",
   "build": "ninja -C build/Linux/debug fort",
@@ -34,6 +38,10 @@
     {
       "name": "the oracle test",
       "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 2 owner/oracle_test"
+    },
+    {
+      "name": "the fail tests of ownership",
+      "command": "python3 test/lang/run_tests.py --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 2 fail/ownership"
     }
   ],
   "mutations": [
@@ -136,46 +144,88 @@
       "what": "the leak work counts no fact of an exit"
     },
     {
-      "decision": "D17.20-no-error",
+      "decision": "D17.20-error",
       "file": "src/fort/owner/prover.ft",
-      "old": "            if (!e->proved) {\n                out->leaks += 1;\n            }\n            k += 1;",
-      "new": "            if (!e->proved) {\n                out->leaks += 1;\n                out->unproved += 1;\n            }\n            k += 1;",
-      "what": "an exit that the pass does not prove is an error of the build"
+      "old": "    return p->unproved > 0 || p->leaks > 0;",
+      "new": "    return p->unproved > 0;",
+      "what": "an exit that the pass does not prove is no error: a build, --check and --fir accept the function"
+    },
+    {
+      "decision": "D17.20-build-error",
+      "file": "src/fort/gen_fir.ft",
+      "old": "        report.write_leaks(f, &verdicts, g->sess);\n        g->failed = true;",
+      "new": "        g->failed = true;",
+      "what": "a build stops at an exit that the pass does not prove and reports no error"
+    },
+    {
+      "decision": "D17.20-check-error",
+      "file": "src/fort/driver.ft",
+      "old": "    report.write_leaks(f, &verdicts, s);\n    return verdicts;",
+      "new": "    return verdicts;",
+      "what": "--check and --fir stop at an exit that the pass does not prove and report no error"
+    },
+    {
+      "decision": "D17.20-build-status",
+      "file": "src/fort/gen_fir.ft",
+      "old": "    if (prover.has_error(&verdicts)) {\n        report.write(f, &verdicts, g->sess);",
+      "new": "    if (verdicts.unproved > 0) {\n        report.write(f, &verdicts, g->sess);",
+      "what": "a build emits a function whose only errors are of the leak rule and reports none"
+    },
+    {
+      "decision": "D17.20-fir-status",
+      "file": "src/fort/driver.ft",
+      "old": "            if (prover.has_error(&verdicts)) {\n                proved = false;\n            }\n            if (build) {",
+      "new": "            if (verdicts.unproved > 0) {\n                proved = false;\n            }\n            if (build) {",
+      "what": "--fir and --fir-after write the FIR and exit 0 after errors of the leak rule alone"
+    },
+    {
+      "decision": "D17.20-check-status",
+      "file": "src/fort/driver.ft",
+      "old": "                if (prover.has_error(&verdicts)) {\n                    proved = false;\n                }\n                prover.free(&verdicts);",
+      "new": "                if (verdicts.unproved > 0) {\n                    proved = false;\n                }\n                prover.free(&verdicts);",
+      "what": "--check, a --lib build and a --use build exit 0 after errors of the leak rule alone"
+    },
+    {
+      "decision": "D17.20-message",
+      "file": "src/fort/owner/report.ft",
+      "old": "    strbuf.append(text, \"' is empty at this exit\");",
+      "new": "    strbuf.append(text, \"' is empty here\");",
+      "what": "the error of the leak rule takes the end of the message of D17.11"
+    },
+    {
+      "decision": "D17.20-note",
+      "file": "src/fort/owner/report.ft",
+      "old": "    strbuf.append(text, \"' before this exit\");",
+      "new": "    strbuf.append(text, \"' before this store\");",
+      "what": "the note of the leak rule names a store"
     },
     {
       "decision": "D17.20-report-repeat",
       "file": "src/fort/owner/report.ft",
       "old": "        if (!x->proved && x->local == e->local && is_same_loc(exit_loc(f, x), at)) {",
       "new": "        if (false) {",
-      "what": "the report lists one exit of one owner at one location twice"
+      "what": "one owner at one location takes two errors"
     },
     {
       "decision": "D17.20-report-position",
       "file": "src/fort/owner/report.ft",
       "old": "    if (e->index < fir.block_statement_count(f, e->block)) {\n        return fir.block_statement(f, e->block, e->index)->loc;\n    }",
       "new": "    if (false) {\n        return fir.block_statement(f, e->block, e->index)->loc;\n    }",
-      "what": "the report gives the position of the terminator of the block for a `dead`"
+      "what": "the error of a `dead` stands at the terminator of its block"
     },
     {
       "decision": "D17.20-report-temp",
       "file": "src/fort/owner/report.ft",
       "old": "        if (write_expression(f, l->loc, s, out)) {\n            return;\n        }",
       "new": "        if (false) {\n            return;\n        }",
-      "what": "the report names a temporary by its FIR place"
+      "what": "the error names a temporary by its FIR place"
     },
     {
       "decision": "D17.20-report-note",
       "file": "src/fort/owner/report.ft",
-      "old": "            if (p->leak_over && !limit_told) {",
-      "new": "            if (false) {",
-      "what": "past the work limit the report gives no note"
-    },
-    {
-      "decision": "D17.20-report-option",
-      "file": "src/fort/driver.ft",
-      "old": "                if (opts->leak_report) {\n                    report.write_leaks(&f, &verdicts, s, &leaks);",
-      "new": "                if (false) {\n                    report.write_leaks(&f, &verdicts, s, &leaks);",
-      "what": "--leak-report lists nothing"
+      "old": "            write_leak(f, e, p->leak_over && !limit_told, s, &place, &text);",
+      "new": "            write_leak(f, e, false, s, &place, &text);",
+      "what": "past the work limit the first error of the leak rule takes no note"
     },
     {
       "decision": "D17.20-report-check",
