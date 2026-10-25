@@ -66,10 +66,6 @@ EXPECTED_EVENTS = {
             "fort: event leak at exit in json.main at 472:5",
         ],
     ),
-    "run/control/012_range_for_multidim.ft": (
-        "`main` frees no span `g`",
-        ["fort: event leak in 012_range_for_multidim.main at 94:5"],
-    ),
 }
 # The longest run of a program under the interpreter in a debug build in the Linux VM was 70 s
 # (run/stdlib/095_rt_round_trip_floats.ft), so a program gets more time than the corpus gives.
