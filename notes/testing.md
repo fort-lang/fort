@@ -588,21 +588,21 @@ bullet at a time and without a rewrite.
 - **The oracle test holds a rule against the runs of the oracle** (`test/fort/owner/oracle_test.ft`,
   `spec/ownership-design.md` 3.6). It checks a batch of fort source in a sandbox, lowers each
   function, runs the pass of the rule on it and runs it in `fir.interpreter`. A site is a function
-  and the location of a `check(overwrite: p)`, and the lowering puts the store at that location
-  (`spec/fir.md` 9.3). An `overwrite` event at a store into a place of an `own` reference type
-  marks its site. A site with no error and such an event is a false accept, which fails the test.
-  A site with an error and no such event is a false reject, which the test counts. The sets are
-  the hand cases of the design reviews, an accept case and a reject case for each item of design
-  5.4 that the rule uses, and the three families of `test/fort/support/generator.ft`. The test
-  keeps only the functions that check, lower and verify: a function whose lines hold a diagnostic
-  leaves its batch, and the test checks the batch again. Two checks at one location stop the
-  test, because their verdicts would join. The expected stdout holds every count and the ends of
+  and the location of a `check(overwrite: p)` or of a store that needs a proof, and the lowering
+  puts the store at the location of its check (`spec/fir.md` 9.3), so the two share a site, which is
+  rejected when the pass proves either not. An `overwrite` event at a store into a place of an `own`
+  reference type marks its site. A site with no error and such an event is a false accept, which
+  fails the test. A site with an error and no such event is a false reject, which the test counts.
+  The sets are the hand cases of the design reviews, an accept case and a reject case for each item
+  of design 5.4 that the rule uses, and the three families of `test/fort/support/generator.ft`. The
+  test keeps only the functions that check, lower and verify: a function whose lines hold a
+  diagnostic leaves its batch, and the test checks the batch again. Two checks at one location stop
+  the test, because their verdicts would join. The expected stdout holds every count and the ends of
   the runs of each set (return, exit, abort, trap, outside, fault), so a change of the pass or of
-  the oracle changes the text. A person derived each reject line
-  of the hand and item cases from the rule; the counts of the families are measured.
-  `tools/mutations/oracle.json` holds the mutants of `owner.prover` that prove too much, with the
-  oracle test as its one stage. The log of a round says whether the test printed a false accept
-  or only a changed count.
+  the oracle changes the text. A person derived each reject line of the hand and item cases from the
+  rule; the counts of the families are measured. `tools/mutations/oracle.json` holds the mutants of
+  `owner.place` and `owner.prover` that prove too much, with the oracle test as its one stage. The
+  log of a round says whether the test printed a false accept or only a changed count.
 - **The suites of fir.interpreter derive each expected value apart from the interpreter**
   (`test/fort/fir/interpreter_test.ft`, `interpreter_source_test.ft`). Python's integers and IEEE
   doubles gave each value at each boundary of each type when the cases were written: the wrap at

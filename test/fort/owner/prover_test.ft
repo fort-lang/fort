@@ -29,6 +29,8 @@
 //| held shapes ok
 //| addresses ok
 //| straight stores ok
+//| guards ok
+//| stores ok
 //| examples ok
 //| work ok
 /// Checks owner.prover, the proof of each overwrite check (spec/fir.md 11). Each gen rule, each
@@ -52,7 +54,7 @@ import std.strbuf;
 // The types, the globals and the functions that the FIR text of each case names. A `node` has
 // two owning fields, a fixed array of two owning pointers and an owning span of them. A `pair`
 // has two owning fields.
-string[37] PRELUDE = {
+string[41] PRELUDE = {
     "struct node {",
     "    node mut* own left;",
     "    node mut* own right;",
@@ -90,13 +92,19 @@ string[37] PRELUDE = {
     "fn pick() u64 {",
     "    return 1;",
     "}",
+    "fn put(node mut* own mut* p) void {",
+    "    del(*p);",
+    "    *p = new(node);",
+    "}",
 };
 
 // ---- the cases over FIR text ----------------------------------------------------------------
 
 // Each group is a FIR module and the verdicts of its functions: the verdict of each check of a
 // function, in block order, `P` for a check that the pass proves and `U` for one that it does
-// not prove.
+// not prove. After a `/` come the verdicts of the stores that need a proof and that no check
+// stands right before (write_verdicts). The comment of a case gives the verdicts of its checks,
+// and of its stores when the case is about them.
 
 // The store of the zero value in the entry block makes a named local empty.
 string[39] ENTRY = {
@@ -144,7 +152,7 @@ string[39] ENTRY = {
     "}",
 };
 
-string[3] ENTRY_VERDICTS = {"P", "U", "U"};
+string[3] ENTRY_VERDICTS = {"P/P", "U/P", "U/P"};
 
 // `del(move p)` makes `p` empty, and only `p`.
 string[47] DEL = {
@@ -201,7 +209,7 @@ string[47] DEL = {
     "}",
 };
 
-string[4] DEL_VERDICTS = {"P", "U", "U", "P"};
+string[4] DEL_VERDICTS = {"P/P", "U/P", "U/P", "P/P"};
 
 // A `move` operand makes its place and each tracked place below it empty.
 string[82] MOVE = {
@@ -293,7 +301,7 @@ string[82] MOVE = {
     "}",
 };
 
-string[4] MOVE_VERDICTS = {"PP", "PU", "PPU", "PU"};
+string[4] MOVE_VERDICTS = {"PP/P", "PU/P", "PPU/PPP", "PU/PPP"};
 
 // A store of the zero value makes its place and each tracked place below it empty.
 string[112] ZERO = {
@@ -418,7 +426,7 @@ string[112] ZERO = {
     "}",
 };
 
-string[7] ZERO_VERDICTS = {"UP", "P", "PP", "U", "U", "U", "U"};
+string[7] ZERO_VERDICTS = {"UP/PP", "P/UP", "PP/PP", "U/P", "U/PUP", "U/PUP", "U/PUP"};
 
 // A store of a fresh `new` makes each tracked place through the pointer empty.
 string[88] FRESH = {
@@ -516,7 +524,7 @@ string[88] FRESH = {
     "}",
 };
 
-string[4] FRESH_VERDICTS = {"PPP", "PU", "PU", "PU"};
+string[4] FRESH_VERDICTS = {"PPP/PPP", "PU/P", "PU/PP", "PU/PP"};
 
 // A store kills the fact of each place with its base that is not separate from it.
 string[67] SAME_BASE = {
@@ -593,7 +601,7 @@ string[67] SAME_BASE = {
     "}",
 };
 
-string[4] SAME_BASE_VERDICTS = {"U", "P", "U", "PU"};
+string[4] SAME_BASE_VERDICTS = {"U/PPP", "P/PUP", "U/P", "PU/PPPP"};
 
 // Two elements with one key are one place, and an element with no key is not tracked.
 string[142] KEYS = {
@@ -750,7 +758,7 @@ string[142] KEYS = {
     "}",
 };
 
-string[9] KEYS_VERDICTS = {"P", "U", "U", "PU", "U", "U", "P", "U", "U"};
+string[9] KEYS_VERDICTS = {"P/P", "U/P", "U/P", "PU/PP", "U/PUP", "U/P", "P/P", "U/P", "U/P"};
 
 // A store through a fresh pointer local kills only the facts with its base.
 string[98] FRESH_STORE = {
@@ -858,7 +866,7 @@ string[98] FRESH_STORE = {
     "}",
 };
 
-string[4] FRESH_STORE_VERDICTS = {"P", "U", "U", "U"};
+string[4] FRESH_STORE_VERDICTS = {"P/PPPPP", "U/PPPPP", "U/PPPPP", "U/PPPPUP"};
 
 // A store through a pointer or into memory kills each fact reached through memory.
 string[185] MEMORY = {
@@ -1059,7 +1067,9 @@ string[185] MEMORY = {
     "}",
 };
 
-string[10] MEMORY_VERDICTS = {"U", "U", "P", "UP", "U", "P", "U", "U", "U", "U"};
+string[10] MEMORY_VERDICTS = {
+    "U/PUP", "U/PPP", "P/PPP", "UP/PUPP", "U/PUP", "P/PPPUP", "U/PPPUP", "U/PUP", "U/PUP", "U/P",
+};
 
 // A call kills each fact but the facts of a local that is no memory.
 string[97] CALLS = {
@@ -1167,11 +1177,12 @@ string[97] CALLS = {
     "}",
 };
 
-string[5] CALLS_VERDICTS = {"P", "UU", "U", "U", "UP"};
+string[5] CALLS_VERDICTS = {"P/P", "UU/PP", "U/P", "U/PPP", "UP/PP"};
 
 // The first statement of the continuation block of a check runs after the check and before the
-// store writes, so the pass applies its kill rules at the check: the kill of a call, and the kill
-// rules of a store into another place than the place of the check (spec/fir.md 11, Proof).
+// store writes. The store takes each kill rule of each statement before it, and the kill of its
+// own call, before its test, and the check takes the verdict of the store (spec/fir.md 11,
+// Proof). A store into another place than the place of the check has a verdict of its own.
 string[266] AFTER_CHECK = {
     // a call into the place of the check through a fresh pointer: U
     "fn main.cs1() -> void {",
@@ -1448,7 +1459,8 @@ string[266] AFTER_CHECK = {
     "    }",
     "}",
     // a store into an element through the same pointer whose index can equal the index of the
-    // check: U
+    // check: the check guards no store and its place keeps its fact, so the check is proved, and
+    // the store needs a fact of its own place, which no rule gives: P/U
     "fn main.cs20(_1 (v): node mut* own[2] mut*, _2 (i): u64, _3 (j): u64) -> void {",
     "    let _4: node mut* own;",
     "    bb0: {",
@@ -1464,8 +1476,8 @@ string[266] AFTER_CHECK = {
 };
 
 string[20] AFTER_CHECK_VERDICTS = {
-    "U", "P", "U", "U", "U", "U", "P", "P", "PU", "U", "U", "U", "P", "U", "P", "U", "U", "U", "P",
-    "U",
+    "U/PP", "P", "U", "U/PU", "U", "U", "P", "P/P", "PU", "U/PU", "U/PU", "U/PU", "P/PUP", "U/PUU",
+    "P/PP", "U/PU", "U", "U/PU", "P/P", "P/PU",
 };
 
 // A global is a tracked place with no fact at the entry.
@@ -1505,7 +1517,7 @@ string[30] GLOBALS = {
     "}",
 };
 
-string[3] GLOBALS_VERDICTS = {"P", "U", "P"};
+string[3] GLOBALS_VERDICTS = {"P", "U", "P/U"};
 
 // A held address `(*_a)` reads as the place of its `addr mut`.
 string[128] HELD = {
@@ -1647,7 +1659,7 @@ string[128] HELD = {
     "}",
 };
 
-string[7] HELD_VERDICTS = {"P", "U", "U", "PU", "PPP", "U", "U"};
+string[7] HELD_VERDICTS = {"P/P", "U/P", "U/P", "PU/PP", "PPP/PPP", "U/P", "U/P"};
 
 // An address of fixed storage is no held address, so a store through it writes a memory local, and
 // the pass takes no value of that local from its one store. A held address that is memory is no
@@ -1732,7 +1744,7 @@ string[72] HELD_STORE = {
     "}",
 };
 
-string[3] HELD_STORE_VERDICTS = {"PPPU", "U", "UU"};
+string[3] HELD_STORE_VERDICTS = {"PPPU/PPPP", "U/P", "UU/PPP"};
 
 // A store into a local that the place of a held address reads makes the address stale. A stale
 // held address gives no tracked place, so the pass proves no check of it, and a `move` through it
@@ -1904,7 +1916,7 @@ string[154] HELD_STALE = {
     "}",
 };
 
-string[6] HELD_STALE_VERDICTS = {"PU", "PU", "UU", "PU", "UU", "U"};
+string[6] HELD_STALE_VERDICTS = {"PU/PPPPP", "PU/PPP", "UU/PPP", "PU/PPPP", "UU/PPP", "U/P"};
 
 // A call, a store through a pointer and a store straight into a memory local or a global make
 // each held address stale: they can change a span header that the place of the address reads,
@@ -2102,7 +2114,9 @@ string[176] HELD_MEMORY = {
     "}",
 };
 
-string[10] HELD_MEMORY_VERDICTS = {"U", "U", "U", "U", "P", "U", "P", "P", "P", "P"};
+string[10] HELD_MEMORY_VERDICTS = {
+    "U/PP", "U/PP", "U/PP", "U/UPP", "P/P", "U/PP", "P/PP", "P/P", "P/PPP", "P/PP",
+};
 
 // A fact holds at the start of a block when it holds at the end of each predecessor.
 string[124] JOIN = {
@@ -2238,7 +2252,7 @@ string[124] JOIN = {
     "}",
 };
 
-string[6] JOIN_VERDICTS = {"P", "U", "U", "P", "P", "U"};
+string[6] JOIN_VERDICTS = {"P/P", "U/P", "U/P", "P/P", "P/P", "U/P"};
 
 // The sets of more than one word, a function with no check, and a check that no fact can prove.
 string[444] BOUNDS = {
@@ -2695,7 +2709,7 @@ string[444] BOUNDS = {
 };
 
 string[5] BOUNDS_VERDICTS = {
-    "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPUUP", "", "U", "PP", "U",
+    "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPUUP", "", "U/P", "PP/PP", "U",
 };
 
 // Two constant keys name one element when their values are equal.
@@ -2790,7 +2804,7 @@ string[81] CONSTANTS = {
     "}",
 };
 
-string[6] CONSTANTS_VERDICTS = {"P", "U", "P", "P", "P", "U"};
+string[6] CONSTANTS_VERDICTS = {"P", "U", "P", "P", "P", "U/PU"};
 
 // A loop carries a kill, a store into a key local and an end of freshness around its back edge.
 string[198] LOOPS = {
@@ -3002,7 +3016,7 @@ string[198] LOOPS = {
     "}",
 };
 
-string[8] LOOPS_VERDICTS = {"U", "P", "P", "U", "U", "P", "P", "U"};
+string[8] LOOPS_VERDICTS = {"U", "P", "P/PPPU", "U/PPPU", "U/P", "P/P", "P", "U"};
 
 // Structs as places: a pointee moved whole, an aggregate result and a global struct.
 string[88] AGGREGATES = {
@@ -3104,7 +3118,7 @@ string[88] AGGREGATES = {
     "}",
 };
 
-string[7] AGGREGATES_VERDICTS = {"PPU", "U", "P", "P", "P", "U", "PU"};
+string[7] AGGREGATES_VERDICTS = {"PPU", "U", "P", "P/U", "P/U", "U/U", "PU/PP"};
 
 // Each kind of store against each kind of fact, in the order F1 to F7.
 string[689] KILL_MATRIX = {
@@ -3816,8 +3830,9 @@ string[689] KILL_MATRIX = {
 };
 
 string[15] KILL_MATRIX_VERDICTS = {
-    "PPPPPPP", "PPPPPPP", "PPPUPUU", "PPPUPUU", "PUUPPUU", "PPPPPPP", "PUUUPUU", "PUUUPUP",
-    "PUUUUUU", "PPPUPUP", "PPPPPUP", "PUUPPUU", "PPPPPPP", "PUUUPUU", "UUUUPUU",
+    "PPPPPPP/PP", "PPPPPPP/PPP", "PPPUPUU/PPP", "PPPUPUU/PPU", "PUUPPUU/PPU", "PPPPPPP/PPP",
+    "PUUUPUU/PPP", "PUUUPUP/PPU", "PUUUUUU/PP", "PPPUPUP/PP", "PPPPPUP/PP", "PUUPPUU/PPP",
+    "PPPPPPP/PP", "PUUUPUU/PPU", "UUUUPUU/PPU",
 };
 
 // A store of null into each kind of place in order: each store makes its place empty and kills by
@@ -3920,7 +3935,7 @@ string[93] ZERO_SEQUENCE = {
     "}",
 };
 
-string[2] ZERO_SEQUENCE_VERDICTS = {"PUUUPUP", "PPPPPPP"};
+string[2] ZERO_SEQUENCE_VERDICTS = {"PUUUPUP/PPUUUUPUU", "PPPPPPP/PPPPPPPPP"};
 
 // What ends the freshness of a pointer local, and what does not.
 string[236] FRESHNESS = {
@@ -4177,7 +4192,8 @@ string[236] FRESHNESS = {
 };
 
 string[14] FRESHNESS_VERDICTS = {
-    "P", "U", "U", "U", "U", "U", "P", "P", "P", "P", "U", "U", "P", "U",
+    "P/PPU", "U/PPU", "U/PPU", "U/PPU", "U/PPU", "U/PPU", "P/PPU", "P/PPU", "P/PPPU", "P/PPPPU",
+    "U/PPPU", "U/PPU", "P/PPPU", "U/PPU",
 };
 
 // Which right sides store the zero value.
@@ -4285,7 +4301,9 @@ string[92] ZERO_VALUES = {
     "}",
 };
 
-string[9] ZERO_VALUES_VERDICTS = {"P", "P", "P", "U", "U", "U", "U", "U", "U"};
+string[9] ZERO_VALUES_VERDICTS = {
+    "P/U", "P/U", "P/PU", "U/U", "U/U", "U/PU", "U/U", "U/PU", "U/PPU",
+};
 
 // The shapes of an index temporary that give it the key of a local.
 string[105] KEY_SHAPES = {
@@ -4692,10 +4710,755 @@ string[106] STRAIGHT = {
     "}",
 };
 
-string[7] STRAIGHT_VERDICTS = {"PP", "PP", "U", "U", "P", "U", "P"};
+string[7] STRAIGHT_VERDICTS = {"PP/U", "PP/U", "U/P", "U/U", "P/PPU", "U/U", "P/U"};
+
+// A check takes the verdict of each store that it guards: each store into its place that a path
+// from the check reaches before another store into that place (spec/fir.md 11, Proof). A check
+// also keeps the test of its own place at its end.
+string[333] GUARDS = {
+    // a statement between a check and its store, which a call fills, so the check takes the verdict
+    // of the store: U/U
+    "fn main.gu1(_1 (b): node mut*) -> void {",
+    "    let _2: u64;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2 = const u64 0;",
+    "        (*_1).0 = call fn main.fill(copy _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a `goto` between a check and its store, which a call fills: U/U
+    "fn main.gu2(_1 (b): node mut*) -> void {",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        goto bb2;",
+    "    }",
+    "    bb2: {",
+    "        (*_1).0 = call fn main.fill(copy _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a `goto` between a check and its store, which the pass proves: P/PP
+    "fn main.gu3(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        _2 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        goto bb2;",
+    "    }",
+    "    bb2: {",
+    "        (*_1).0 = move _2;",
+    "        return;",
+    "    }",
+    "}",
+    // two paths from the check to two stores, and a call fills the place on one of them: U/PPU
+    "fn main.gu4(_1 (b): node mut*, _2 (c): bool) -> void {",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        switch(copy _2) -> [true: bb2, otherwise: bb3];",
+    "    }",
+    "    bb2: {",
+    "        (*_1).0 = move _3;",
+    "        return;",
+    "    }",
+    "    bb3: {",
+    "        (*_1).0 = call fn main.fill(copy _1);",
+    "        del(move _3);",
+    "        return;",
+    "    }",
+    "}",
+    // the walk stops at the first store into the place, so the check does not guard the second
+    // store, which finds the allocation of the first: P/PPU
+    "fn main.gu5(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        _2 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _2;",
+    "        _3 = alloc<node>(const u64 1);",
+    "        (*_1).0 = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // a loop after the check with no store: the walk enters each block once, and the check keeps
+    // the test of its own place: P
+    "fn main.gu6(_1 (b): node mut*, _2 (c): bool) -> void {",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        goto bb2;",
+    "    }",
+    "    bb2: {",
+    "        switch(copy _2) -> [true: bb2, otherwise: bb3];",
+    "    }",
+    "    bb3: {",
+    "        return;",
+    "    }",
+    "}",
+    // a `del` between the check and its store: the pass proves the store, and the check keeps the
+    // test of its own place, which a parameter fails: U/PP
+    "fn main.gu7(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        _2 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        del(move (*_1).0);",
+    "        (*_1).0 = move _2;",
+    "        return;",
+    "    }",
+    "}",
+    // a store into a temporary that is memory right after a check of it needs a proof, and the call
+    // kills the fact of a memory local: U/P
+    "fn main.gu8() -> void {",
+    "    let _1: node mut* own;",
+    "    let _2: node mut* own*;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own;",
+    "        _2 = addr(_1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = call fn main.make();",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // two checks guard one store, which a call fills: UU/U
+    "fn main.gu9(_1 (b): node mut*, _2 (c): bool) -> void {",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        check(overwrite: (*_1).0) -> bb3;",
+    "    }",
+    "    bb2: {",
+    "        check(overwrite: (*_1).0) -> bb4;",
+    "    }",
+    "    bb3: {",
+    "        goto bb5;",
+    "    }",
+    "    bb4: {",
+    "        goto bb5;",
+    "    }",
+    "    bb5: {",
+    "        (*_1).0 = call fn main.fill(copy _1);",
+    "        return;",
+    "    }",
+    "}",
+    // the walk follows the edge that a constant `switch` prunes (rule V9), so the check guards the
+    // store there, which a call fills: U/U
+    "fn main.gu10(_1 (b): node mut*) -> void {",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        switch(const true) -> [true: bb2, otherwise: bb3];",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "    bb3: {",
+    "        (*_1).0 = call fn main.fill(copy _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a loop leads from the continuation back to the check: the walk enters each block once and
+    // ends at the store on the other edge, which the pass proves: P/PP
+    "fn main.gu11(_1 (b): node mut*, _2 (c): bool) -> void {",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        check(overwrite: (*_1).0) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        switch(copy _2) -> [true: bb3, otherwise: bb4];",
+    "    }",
+    "    bb3: {",
+    "        goto bb1;",
+    "    }",
+    "    bb4: {",
+    "        _3 = alloc<node>(const u64 1);",
+    "        (*_1).0 = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // a store through another index temporary with the same key writes the element of the check,
+    // but a check guards only a store into its own FIR place, so the store needs a proof of its
+    // own: P/PP
+    "fn main.gu12() -> void {",
+    "    let _1 (a): node mut* own[2];",
+    "    let _2 (k): u64;",
+    "    let _3: u64;",
+    "    let _4: u64;",
+    "    let _5: node mut* own;",
+    "    bb0: {",
+    "        _2 = const u64 0;",
+    "        _1 = const zero node mut* own[2];",
+    "        _3 = copy _2;",
+    "        _4 = copy _2;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1[_3]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1[_4] = move _5;",
+    "        return;",
+    "    }",
+    "}",
+    // a store through an address of the place of the check is no store into its FIR place, and an
+    // address with no check of its own is no held address, so the store has no fact: P/PU
+    "fn main.gu13(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own mut*;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        _2 = addr mut((*_1).0);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_2) = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // a held address and a call between its check and its store: the call makes the address stale,
+    // and the store reads its place with the stale set before it: U/PU
+    "fn main.gu14(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own mut*;",
+    "    let _3: void;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        _2 = addr mut((*_1).0);",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_2)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _3 = call fn main.g();",
+    "        (*_2) = move _4;",
+    "        return;",
+    "    }",
+    "}",
+    // a held address and a statement that writes no memory between its check and its store: the
+    // address stays held, and the store reads `(*_2)` as `(*_1).0`: P/PP
+    "fn main.gu15(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own mut*;",
+    "    let _3: u64;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        _2 = addr mut((*_1).0);",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_2)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _3 = const u64 0;",
+    "        (*_2) = move _4;",
+    "        return;",
+    "    }",
+    "}",
+    // p1 of the review: a check of a temporary that is memory, then a call that fills the temporary
+    // through its address, then its store: the store needs a proof, which the call kills: U/PPU
+    "fn main.gu16() -> void {",
+    "    let _1: node mut* own;",
+    "    let _2: node mut* own mut*;",
+    "    let _3: void;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own;",
+    "        _2 = addr mut(_1);",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _3 = call fn main.put(copy _2);",
+    "        _1 = move _4;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // p2 of the review: the same through `_0`, which is no aggregate, so its stores need a proof:
+    // its empty start proves the first, and the call kills the fact of the second: U/PPU
+    "fn main.gu17() -> node mut* own {",
+    "    let _1: node mut* own mut*;",
+    "    let _2: void;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _0 = const zero node mut* own;",
+    "        _1 = addr mut(_0);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: _0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2 = call fn main.put(copy _1);",
+    "        _0 = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // p3 of the review: p1 with a `goto` between the check and the call: U/PPU
+    "fn main.gu18() -> void {",
+    "    let _1: node mut* own;",
+    "    let _2: node mut* own mut*;",
+    "    let _3: void;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own;",
+    "        _2 = addr mut(_1);",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        goto bb2;",
+    "    }",
+    "    bb2: {",
+    "        _3 = call fn main.put(copy _2);",
+    "        _1 = move _4;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // g1 of the review: a check of a field of an aggregate `_0`, whose store needs no proof, and a
+    // call that fills that field through its address: the check guards a store with no proof: U/P
+    "fn main.gu19() -> pair {",
+    "    let _1: node mut* own mut*;",
+    "    let _2: void;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _0 = const zero pair;",
+    "        _1 = addr mut(_0.0);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: _0.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2 = call fn main.put(copy _1);",
+    "        _0.0 = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // g2 of the review: an `_0` that is no aggregate and is memory, and a call on one of two paths
+    // to its store, which kills its fact there: U/PPU
+    "fn main.gu20(_1 (c): bool) -> node mut* own {",
+    "    let _2: node mut* own mut*;",
+    "    let _3: void;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        _0 = const zero node mut* own;",
+    "        _2 = addr mut(_0);",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: _0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        switch(copy _1) -> [true: bb2, otherwise: bb3];",
+    "    }",
+    "    bb2: {",
+    "        _3 = call fn main.put(copy _2);",
+    "        goto bb3;",
+    "    }",
+    "    bb3: {",
+    "        _0 = move _4;",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[20] GUARDS_VERDICTS = {
+    "U/U", "U/U", "P/PP", "U/PPU", "P/PPU", "P", "U/PP", "U/P", "UU/U", "U/U", "P/PP", "P/PP",
+    "P/PU", "U/PU", "P/PP", "U/PPU", "U/PPU", "U/PPU", "U/P", "U/PPU",
+};
+
+// The stores that need a proof (spec/fir.md 11): each store into a place of an `own` reference
+// type, a store into a temporary or into `_0` included, but for an entry zeroing and a store into
+// fixed storage of an aggregate `_0`. A temporary and an `_0` that is no aggregate start empty. A
+// verdict that starts with `/` gives the verdicts of the stores of a function with no check, the
+// stores into temporaries among them.
+string[282] NEEDS = {
+    // the entry zeroing needs no proof, and a later store of the zero value into the local needs
+    // one: /PPP
+    "fn main.ne1() -> void {",
+    "    let _1 (p): node mut* own;",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own;",
+    "        _2 = alloc<node>(const u64 1);",
+    "        _1 = move _2;",
+    "        del(move _1);",
+    "        _1 = const zero node mut* own;",
+    "        return;",
+    "    }",
+    "}",
+    // a store of the zero value after a store into the local is no entry zeroing: /UU
+    "fn main.ne2() -> void {",
+    "    let _1 (p): node mut* own;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1);",
+    "        _1 = const zero node mut* own;",
+    "        return;",
+    "    }",
+    "}",
+    // a store of the zero value after an address of the local is no entry zeroing: /U
+    "fn main.ne3() -> void {",
+    "    let _1 (p): node mut* own;",
+    "    let _2: node mut* own mut*;",
+    "    bb0: {",
+    "        _2 = addr mut(_1);",
+    "        _1 = const zero node mut* own;",
+    "        return;",
+    "    }",
+    "}",
+    // a store of the zero value into a parameter is no entry zeroing: /U
+    "fn main.ne4(_1 (p): node mut* own) -> void {",
+    "    bb0: {",
+    "        _1 = const zero node mut* own;",
+    "        return;",
+    "    }",
+    "}",
+    // a store of the zero value into a named local after `bb0` is no entry zeroing: /U
+    "fn main.ne5() -> void {",
+    "    let _1 (p): node mut* own;",
+    "    bb0: {",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = const zero node mut* own;",
+    "        return;",
+    "    }",
+    "}",
+    // a store into a temporary and a store into an `_0` that is no aggregate need a proof, which
+    // their empty start gives: /PP
+    "fn main.ne6() -> node mut* own {",
+    "    let _1: node mut* own;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1);",
+    "        _0 = move _1;",
+    "        return;",
+    "    }",
+    "}",
+    // a store into a field of a temporary needs a proof, which the zero value of the temporary
+    // gives, and so does the store into the temporary `_3`: /PP
+    "fn main.ne7(_1 (x): node mut* own) -> void {",
+    "    let _2: pair;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _2 = const zero pair;",
+    "        _2.0 = move _1;",
+    "        _3 = move _2.0;",
+    "        del(move _3);",
+    "        return;",
+    "    }",
+    "}",
+    // a store through a temporary pointer needs a proof: /U
+    "fn main.ne8(_1 (b): node mut*, _2 (x): node mut* own) -> void {",
+    "    let _3: node mut*;",
+    "    bb0: {",
+    "        _3 = copy _1;",
+    "        (*_3).0 = move _2;",
+    "        return;",
+    "    }",
+    "}",
+    // `live` writes no place, so the zeroing after it is an entry zeroing: /PP
+    "fn main.ne9() -> void {",
+    "    let _1 (p): node mut* own;",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        live(_1);",
+    "        _1 = const zero node mut* own;",
+    "        _2 = alloc<node>(const u64 1);",
+    "        _1 = move _2;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a `del` of the local writes it, so the zeroing after it needs a proof, which the `del` gives:
+    // /P
+    "fn main.ne10() -> void {",
+    "    let _1 (p): node mut* own;",
+    "    bb0: {",
+    "        del(move _1);",
+    "        _1 = const zero node mut* own;",
+    "        return;",
+    "    }",
+    "}",
+    // the second zeroing of one local needs a proof, which the first gives: /P
+    "fn main.ne11() -> void {",
+    "    let _1 (p): node mut* own;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own;",
+    "        _1 = const zero node mut* own;",
+    "        return;",
+    "    }",
+    "}",
+    // an address of another local and a store into another local leave the zeroing an entry
+    // zeroing: /PP
+    "fn main.ne12() -> void {",
+    "    let _1 (p): node mut* own;",
+    "    let _2 (q): node;",
+    "    let _3: node mut* own mut*;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        _2 = const zero node;",
+    "        _3 = addr mut(_2.0);",
+    "        _1 = const zero node mut* own;",
+    "        _4 = alloc<node>(const u64 1);",
+    "        _1 = move _4;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a check of an `_0` that is no aggregate finds its empty start, and so does its store: P/P
+    "fn main.ne13() -> node mut* own {",
+    "    let _1: node mut* own;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1);",
+    "        check(overwrite: _0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _0 = move _1;",
+    "        return;",
+    "    }",
+    "}",
+    // a store of `null` is a store of the zero value, so it can be the entry zeroing: no verdict
+    "fn main.ne14() -> void {",
+    "    let _1 (p): node mut* own;",
+    "    bb0: {",
+    "        _1 = const null node mut* own;",
+    "        return;",
+    "    }",
+    "}",
+    // an `alloc` into a named local in `bb0` is no entry zeroing, and the local has no fact: /U
+    "fn main.ne15() -> void {",
+    "    let _1 (p): node mut* own;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1);",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a store into a field of a named local needs a proof, which the zero value of the local gives:
+    // /PP
+    "fn main.ne16(_1 (x): node mut* own) -> void {",
+    "    let _2 (s): pair;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _2 = const zero pair;",
+    "        _2.0 = move _1;",
+    "        _3 = move _2.0;",
+    "        del(move _3);",
+    "        return;",
+    "    }",
+    "}",
+    // a store into a global needs a proof, and a global has no fact at the entry: /U
+    "fn main.ne17(_1 (x): node mut* own) -> void {",
+    "    bb0: {",
+    "        global main.H = move _1;",
+    "        return;",
+    "    }",
+    "}",
+    // two stores into a temporary, the second over the live allocation of the first: the empty
+    // start of the temporary proves the first store, and the first store kills its fact, so the
+    // second has none; a run of the function overwrites the first allocation: /PU
+    "fn main.ne18() -> void {",
+    "    let _1: node mut* own;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1);",
+    "        _1 = alloc<node>(const u64 1);",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // p7 of the review: one store into a temporary in a loop that runs twice: the back edge brings
+    // the allocation of the first round to the store, so the bit of the temporary is clear: /U
+    "fn main.ne19() -> void {",
+    "    let _1: node mut* own;",
+    "    let _2 (c): bool;",
+    "    bb0: {",
+    "        _2 = const true;",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = alloc<node>(const u64 1);",
+    "        switch(copy _2) -> [true: bb2, otherwise: bb3];",
+    "    }",
+    "    bb2: {",
+    "        _2 = const false;",
+    "        goto bb1;",
+    "    }",
+    "    bb3: {",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a store into `_0` right after a check of `_0` needs a proof, which the zero value of `_0`
+    // gives, so the check is proved, and so is the zero store: P/PP
+    "fn main.ne20() -> node mut* own {",
+    "    let _1: node mut* own;",
+    "    bb0: {",
+    "        _0 = const zero node mut* own;",
+    "        _1 = alloc<node>(const u64 1);",
+    "        check(overwrite: _0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _0 = move _1;",
+    "        return;",
+    "    }",
+    "}",
+    // z1 of the review: two stores into an `_0` that is no aggregate: its bit at the entry proves
+    // the first, and the first clears it: /PU
+    "fn main.ne21() -> node mut* own {",
+    "    bb0: {",
+    "        _0 = alloc<node>(const u64 1);",
+    "        _0 = alloc<node>(const u64 1);",
+    "        return;",
+    "    }",
+    "}",
+    // a `move` of a whole temporary and a `del` of one set its bit, so the next store into it is
+    // proved; the store into the named local takes the fact of its entry zeroing: /PPPP
+    "fn main.ne22() -> void {",
+    "    let _1 (p): node mut* own;",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own;",
+    "        _2 = alloc<node>(const u64 1);",
+    "        _1 = move _2;",
+    "        _2 = alloc<node>(const u64 1);",
+    "        del(move _2);",
+    "        _2 = alloc<node>(const u64 1);",
+    "        del(move _2);",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a store into field 0 of a span temporary takes the fact of its entry and clears the bit of
+    // the temporary, so a later store into the whole temporary is not proved: /PPU
+    "fn main.ne23() -> void {",
+    "    let _1: node mut@ own;",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        _2 = alloc<node>(const u64 1);",
+    "        _1.0 = move _2;",
+    "        _1 = const zero node mut@ own;",
+    "        return;",
+    "    }",
+    "}",
+    // a store into a field of an aggregate `_0` right after a check of that field needs a proof,
+    // which the zero store into `_0` gives, so the check is proved: P/P
+    "fn main.ne24() -> pair {",
+    "    let _1: node mut* own;",
+    "    bb0: {",
+    "        _0 = const zero pair;",
+    "        _1 = alloc<node>(const u64 1);",
+    "        check(overwrite: _0.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _0.0 = move _1;",
+    "        return;",
+    "    }",
+    "}",
+    // s8 of the review: a store of the zero value into field 1 of a live span temporary clears its
+    // bit, so the later store of the zero value into the whole temporary is not proved: /PPU
+    "fn main.ne25() -> void {",
+    "    let _1: node mut@ own;",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        _2 = alloc<node>(const u64 1);",
+    "        _1.0 = move _2;",
+    "        _1.1 = const zero u64;",
+    "        _1 = const zero node mut@ own;",
+    "        return;",
+    "    }",
+    "}",
+    // s9 of the review: a `move` of the pointee of a pointer temporary leaves the bit of the
+    // temporary clear, so the later store into the temporary is not proved: /PPPPU
+    "fn main.ne26() -> void {",
+    "    let _1: node mut* own mut* own;",
+    "    let _2: node mut* own;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _1 = alloc<node mut* own>(const u64 1);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        (*_1) = move _3;",
+    "        _2 = move (*_1);",
+    "        del(move _2);",
+    "        _1 = alloc<node mut* own>(const u64 1);",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // s10 of the review: a `del` of the pointee of a pointer temporary leaves the bit of the
+    // temporary clear, so the later store into the temporary is not proved: /PPPU
+    "fn main.ne27() -> void {",
+    "    let _1: node mut* own mut* own;",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        _1 = alloc<node mut* own>(const u64 1);",
+    "        _2 = alloc<node>(const u64 1);",
+    "        (*_1) = move _2;",
+    "        del(move (*_1));",
+    "        _1 = alloc<node mut* own>(const u64 1);",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[27] NEEDS_VERDICTS = {
+    "/PPP", "/UU", "/U", "/U", "/U", "/PP", "/PP", "/U", "/PP", "/P", "/P", "/PP", "P/P", "", "/U",
+    "/PP", "/U", "/PU", "/U", "P/PP", "/PU", "/PPPP", "/PPU", "P/P", "/PPU", "/PPPPU",
+    "/PPPU",
+};
+
+// No block.
+u32 NO_BLOCK = 4294967295;
+
+// The block of the check that stands right before the store `st` of `f`: a check whose
+// continuation block starts with `st` and whose place is the place of `st`. NO_BLOCK for none.
+fn check_before(fir.func* f, prover.store* st) u32 {
+    if (st->index != 0) {
+        return NO_BLOCK;
+    }
+    fir.place written = fir.block_statement(f, st->block, 0)->place;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        fir.terminator* t = &fir.block_at(f, b)->term;
+        if (t->kind == fir.term_kind.tk_check_overwrite && t->target == st->block
+            && fir.is_same_place(f, t->place, written)) {
+            return b;
+        }
+        b += 1;
+    }
+    return NO_BLOCK;
+}
 
 // Writes the verdict of each check of `f` into `out`, in block order: `P` for a check that `p`
-// proves, and `U` for one that it does not prove. Holds the two counts of `p` against them.
+// proves, and `U` for one that it does not prove. Then, after a `/`, the verdict of each store of
+// `p` that no check stands right before, in block order. A check guards the store that stands
+// right after it, so the test holds that such a store is proved when its check is. Holds the two
+// counts of `p` against the verdicts.
 fn write_verdicts(fir.func* f, prover.proof* p, strbuf.str_buf mut* out) void {
     strbuf.clear(out);
     u32 mut unproved = 0;
@@ -4714,6 +5477,29 @@ fn write_verdicts(fir.func* f, prover.proof* p, strbuf.str_buf mut* out) void {
         b += 1;
     }
     assert(cast(p->checks, u64) == strbuf.view(out).len);
+    bool mut alone = false;
+    u64 mut k = 0;
+    while (k < p->stores.len) {
+        prover.store* st = &p->stores[k];
+        if (!st->proved) {
+            unproved += 1;
+        }
+        u32 check = check_before(f, st);
+        if (check != NO_BLOCK) {
+            assert(!prover.is_proved(p, check) || st->proved);
+        } else {
+            if (!alone) {
+                strbuf.push(out, '/');
+                alone = true;
+            }
+            if (st->proved) {
+                strbuf.push(out, 'P');
+            } else {
+                strbuf.push(out, 'U');
+            }
+        }
+        k += 1;
+    }
     assert(p->unproved == unproved);
 }
 
@@ -4795,8 +5581,8 @@ fn a_call_kills_each_fact_but_those_of_a_local_that_is_no_memory() void {
     expect(CALLS[..], CALLS_VERDICTS[..]);
 }
 
-// The first statement after a check applies its kill rules at the check.
-fn the_first_statement_after_a_check_kills_at_the_check() void {
+// The store of a check takes each kill before it, and the check takes its verdict.
+fn the_store_of_a_check_takes_each_kill_before_it() void {
     expect(AFTER_CHECK[..], AFTER_CHECK_VERDICTS[..]);
 }
 
@@ -4883,6 +5669,88 @@ fn only_an_address_of_fixed_storage_makes_a_local_memory() void {
 // and kills each fact through a pointer that can hold its address.
 fn a_store_straight_into_a_local_keeps_other_locals() void {
     expect(STRAIGHT[..], STRAIGHT_VERDICTS[..]);
+}
+
+// A check takes the verdict of each store that it guards, and a store has a verdict of its own.
+fn a_check_takes_the_verdict_of_each_store_that_it_guards() void {
+    expect(GUARDS[..], GUARDS_VERDICTS[..]);
+}
+
+// Each store into an `own` reference needs a proof, but for the entry zeroing, a temporary and
+// `_0`.
+fn each_store_but_an_entry_zeroing_or_a_temporary_needs_a_proof() void {
+    expect(NEEDS[..], NEEDS_VERDICTS[..]);
+}
+
+// A function with stores that need a proof in two blocks and no check. The entry zeroing of `_4`
+// needs none. The store into `(*_1).0` follows its `del`, the store into `(*_1).1` writes a place
+// through a parameter, which has no fact, and the store into `_4` finds its entry zeroing.
+string[15] ORDER = {
+    "fn main.o1(_1 (b): node mut*, _2 (x): node mut* own, _3 (y): node mut* own) -> void {",
+    "    let _4 (p): node mut* own;",
+    "    bb0: {",
+    "        _4 = const zero node mut* own;",
+    "        del(move (*_1).0);",
+    "        (*_1).0 = move _2;",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).1 = move _3;",
+    "        _4 = alloc<node>(const u64 1);",
+    "        del(move _4);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+// A check with the store right after it, and a store that no check stands right before.
+string[13] ORDER_CHECKED = {
+    "fn main.o2(_1 (b): node mut*, _2 (x): node mut* own) -> void {",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _3;",
+    "        (*_1).1 = move _2;",
+    "        return;",
+    "    }",
+    "}",
+};
+
+// The proof lists each store that needs a proof by its block and its statement, in block order,
+// with its verdict, and counts the unproved ones. The work of ORDER is 8 statements and terminators
+// times the 3 stores that no check stands right before, plus 2 blocks times 5 locals. The work of
+// ORDER_CHECKED is 6 statements and terminators times its check and its one store that no check
+// stands right before and that writes no scratch local, plus 2 blocks times 4 locals: the store
+// into the temporary `_3` adds nothing to the first count. prover.free ends the list.
+fn the_proof_lists_each_store_in_block_order() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    fir.module mut m = pass_env.parse(&e, PRELUDE[..], ORDER[..]);
+    defer fir.module_free(&m);
+    fir.func* f = &m.funcs.items[0];
+    pass_env.verified(&e, f, "prover_test: the verifier refuses the input");
+    prover.proof mut p = prover.prove(f);
+    assert(p.checks == 0 && p.stores.len == 3 && p.unproved == 1 && !p.over);
+    assert(p.work == 34);
+    assert(p.stores[0].block == 0 && p.stores[0].index == 2 && p.stores[0].proved);
+    assert(p.stores[1].block == 1 && p.stores[1].index == 0 && !p.stores[1].proved);
+    assert(p.stores[2].block == 1 && p.stores[2].index == 1 && p.stores[2].proved);
+    assert(prover.is_proved(&p, 0) && prover.is_proved(&p, 1));
+    prover.free(&p);
+    assert(p.stores.len == 0 && p.proved.len == 0 && p.checks == 0 && p.unproved == 0);
+    fir.module mut c = pass_env.parse(&e, PRELUDE[..], ORDER_CHECKED[..]);
+    defer fir.module_free(&c);
+    fir.func* g = &c.funcs.items[0];
+    prover.proof mut q = prover.prove(g);
+    defer prover.free(&q);
+    assert(q.checks == 1 && q.stores.len == 3 && q.unproved == 1 && q.work == 20);
+    assert(q.stores[0].block == 0 && q.stores[0].index == 1 && q.stores[0].proved);
+    assert(prover.is_proved(&q, 0) && q.stores[1].proved && !q.stores[2].proved);
 }
 
 // ---- the examples over fort source -------------------------------------------------------------
@@ -5189,9 +6057,10 @@ string[38] EXAMPLE_NAMES = {
 };
 
 string[38] EXAMPLE_VERDICTS = {
-    "P", "U", "P", "PPP", "UU", "P", "U", "PPP", "P", "U", "PP", "P", "U", "PP", "PPU", "PP",
-    "PPP", "", "U", "PP", "P", "U", "P", "U", "U", "P", "U", "PP", "UU", "UU", "UU", "UU", "UUU",
-    "UU", "UU", "U", "U", "P",
+    "P/PP", "U/PP", "P/P", "PPP/PPPP", "UU/PP", "P/P", "U/P", "PPP/PPP", "P/P", "U/P", "PP/PP",
+    "P/P", "U/P", "PP/PP", "PPU/PPPP", "PP/PPP", "PPP/PPP", "/PP", "U/P", "PP/PP", "P/P", "U/P",
+    "P/P", "U/P", "U/P", "P/P", "U/P", "PP/PP", "UU/PP", "UU/PP", "UU/PP", "UU/PP", "UUU/PPP",
+    "UU/PP", "UU/PP", "U/PP", "U/PP", "P/P",
 };
 
 // Lowers the function `name` of the checked source of `e` into *out, and holds that the
@@ -5241,7 +6110,8 @@ fn write_unproved(fir.func* f, prover.proof* p, session.session mut* s,
     u32 mut b = 0;
     while (b < fir.block_count(f)) {
         if (!prover.is_proved(p, b)) {
-            report.write_place(f, &fir.block_at(f, b)->term, s, out);
+            fir.terminator* t = &fir.block_at(f, b)->term;
+            report.write_place(f, t->place, t->loc, s, out);
             strbuf.push(out, '\n');
         }
         b += 1;
@@ -5395,6 +6265,90 @@ fn write_chain(u64 n, strbuf.str_buf mut* out) void {
     strbuf.append(out, "    bb1: {\n        return;\n    }\n}\n");
 }
 
+// Writes into `out` the FIR text of a function with no check and 2n stores that need a proof:
+// `_k = alloc`, `del(move (*_1).0)` and `(*_1).0 = move _k` for each temporary `_k`. Its work is
+// 3n^2 + 2n + 2: 3n statements and one terminator times the n stores into `(*_1).0`, plus one
+// block times n + 2 locals. A store into a scratch local `_k` adds nothing to the first count.
+fn write_lone(u64 n, strbuf.str_buf mut* out) void {
+    strbuf.clear(out);
+    strbuf.append(out, "fn main.lone(_1 (b): node mut*) -> void {\n");
+    u64 mut k = 0;
+    while (k < n) {
+        strbuf.append(out, "    let _");
+        strbuf.append_u64(out, k + 2);
+        strbuf.append(out, ": node mut* own;\n");
+        k += 1;
+    }
+    strbuf.append(out, "    bb0: {\n");
+    k = 0;
+    while (k < n) {
+        strbuf.append(out, "        _");
+        strbuf.append_u64(out, k + 2);
+        strbuf.append(out, " = alloc<node>(const u64 1);\n        del(move (*_1).0);\n");
+        strbuf.append(out, "        (*_1).0 = move _");
+        strbuf.append_u64(out, k + 2);
+        strbuf.append(out, ";\n");
+        k += 1;
+    }
+    strbuf.append(out, "        return;\n    }\n}\n");
+}
+
+// Writes into `out` the FIR text of a function with `n` owning temporaries and no check, each
+// stored with `alloc` and moved into a call of `take`, as `take(new(node))` lowers: `_k = alloc`
+// and `_v = call fn main.take(move _k)` for each `k`. Its work is 2n + 1: no store adds to the
+// first count, because each writes a scratch local, and one block times 2n + 1 locals.
+fn write_scratch(u64 n, strbuf.str_buf mut* out) void {
+    strbuf.clear(out);
+    strbuf.append(out, "fn main.scratch() -> void {\n");
+    u64 mut k = 0;
+    while (k < n) {
+        strbuf.append(out, "    let _");
+        strbuf.append_u64(out, 2 * k + 1);
+        strbuf.append(out, ": node mut* own;\n    let _");
+        strbuf.append_u64(out, 2 * k + 2);
+        strbuf.append(out, ": void;\n");
+        k += 1;
+    }
+    strbuf.append(out, "    bb0: {\n");
+    k = 0;
+    while (k < n) {
+        strbuf.append(out, "        _");
+        strbuf.append_u64(out, 2 * k + 1);
+        strbuf.append(out, " = alloc<node>(const u64 1);\n        _");
+        strbuf.append_u64(out, 2 * k + 2);
+        strbuf.append(out, " = call fn main.take(move _");
+        strbuf.append_u64(out, 2 * k + 1);
+        strbuf.append(out, ");\n");
+        k += 1;
+    }
+    strbuf.append(out, "        return;\n    }\n}\n");
+}
+
+// Parses the one function of `text`, which has no check and `n` stores that need a proof, `lvalue`
+// of them into no scratch local, holds that the verifier accepts it, proves it, and holds its work
+// and its verdicts: with `proved`, each store is proved; else `over` is set, and each store into
+// no scratch local is unproved, but a store into a scratch local is no error (D17.11).
+fn expect_store_work(lower_env.env mut* e, fir_parse.prelude pre, string text, u64 n, u64 lvalue,
+                     u64 work, bool proved) void {
+    fir.module mut m = fir_parse.parse_module(&e->c.m.s, "t.fir", text, pre);
+    defer fir.module_free(&m);
+    assert(check_env.errors(&e->c) == 0 && m.funcs.len == 1);
+    fir.func* f = &m.funcs.items[0];
+    pass_env.verified(e, f, "prover_test: the verifier refuses the generated function");
+    prover.proof mut p = prover.prove(f);
+    defer prover.free(&p);
+    if (p.work != work) {
+        eprintln("work ", p.work, " and not ", work);
+        panic("prover_test: the work differs");
+    }
+    assert(p.checks == 0 && p.stores.len == n);
+    if (proved) {
+        assert(!p.over && p.unproved == 0);
+    } else {
+        assert(p.over && cast(p.unproved, u64) == lvalue);
+    }
+}
+
 // Parses the one function of `text`, holds that the verifier accepts it, proves it, and holds
 // its work and its verdicts: with `proved`, each check is proved; else no check is, and `over`
 // is set.
@@ -5421,7 +6375,9 @@ fn expect_work(lower_env.env mut* e, fir_parse.prelude pre, string text, u64 wor
 
 // The work limit, at its value, for each of its three counts: 511 elements take 1046530 work and
 // are proved, 512 take 1050626 and are not; 1022 blocks take 1048573 and 1023 take 1049599; 1021
-// stores into a source of 1021 temporaries take 1046534 and 1022 take 1048581. A limit equal to
+// stores into a source of 1021 temporaries take 1046534 and 1022 take 1048581; 590 temporaries,
+// each with two stores and no check, take 1045482 and 591 take 1049027, and 5000 temporaries
+// that a call takes take 10001. A limit equal to
 // the work of a small function proves it, and a limit one less proves none of its checks.
 fn the_work_limit_stops_the_proof_of_a_function() void {
     assert(prover.WORK_LIMIT == 1048576);
@@ -5444,6 +6400,14 @@ fn the_work_limit_stops_the_proof_of_a_function() void {
     expect_work(&e, pre, strbuf.view(&text), 1046534, true);
     write_chain(1022, &text);
     expect_work(&e, pre, strbuf.view(&text), 1048581, false);
+    // the stores that no check stands right before count in the first count as checks do
+    write_lone(590, &text);
+    expect_store_work(&e, pre, strbuf.view(&text), 1180, 590, 1045482, true);
+    write_lone(591, &text);
+    expect_store_work(&e, pre, strbuf.view(&text), 1182, 591, 1049027, false);
+    // 5000 owning temporaries, each passed on, as `take(new(node))` lowers: a work of 10001
+    write_scratch(5000, &text);
+    expect_store_work(&e, pre, strbuf.view(&text), 5000, 0, 10001, true);
     fir.module mut held = pass_env.parse(&e, PRELUDE[..], HELD[..]);
     defer fir.module_free(&held);
     fir.func* f = &held.funcs.items[4];
@@ -5455,7 +6419,9 @@ fn the_work_limit_stops_the_proof_of_a_function() void {
     assert(at.unproved == 0 && !at.over && at.work == whole.work);
     prover.proof mut under = prover.prove_within(f, whole.work - 1);
     defer prover.free(&under);
-    assert(under.over && under.unproved == 3);
+    // past the limit, each of the three checks and each of the three stores of `h5` into no
+    // scratch local is unproved; its three stores into temporaries are no error (D17.11)
+    assert(under.over && under.stores.len == 6 && under.unproved == 6);
 }
 
 fn main() i32 {
@@ -5481,7 +6447,7 @@ fn main() i32 {
     println("memory ok");
     a_call_kills_each_fact_but_those_of_a_local_that_is_no_memory();
     println("calls ok");
-    the_first_statement_after_a_check_kills_at_the_check();
+    the_store_of_a_check_takes_each_kill_before_it();
     println("after check ok");
     a_global_has_no_fact_at_the_entry();
     println("globals ok");
@@ -5515,6 +6481,11 @@ fn main() i32 {
     println("addresses ok");
     a_store_straight_into_a_local_keeps_other_locals();
     println("straight stores ok");
+    a_check_takes_the_verdict_of_each_store_that_it_guards();
+    println("guards ok");
+    each_store_but_an_entry_zeroing_or_a_temporary_needs_a_proof();
+    the_proof_lists_each_store_in_block_order();
+    println("stores ok");
     the_examples_of_the_rule_hold_over_lowered_source();
     println("examples ok");
     the_work_limit_stops_the_proof_of_a_function();

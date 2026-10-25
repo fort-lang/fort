@@ -153,58 +153,93 @@ fn write_target(fir.func* f, diag.loc at, session.session mut* s,
     return true;
 }
 
-// Whether the check `t` stands for a declaration: its place is a named local, and the check
-// stands at the name of that local.
-fn is_declaration(fir.func* f, fir.terminator* t) bool {
-    if (t->place.base != fir.base_kind.bk_local || t->place.proj_len != 0) {
+// Whether the check or the store at `at` of the place `p` stands for a declaration: `p` is a named
+// local, and the item stands at the name of that local.
+fn is_declaration(fir.func* f, fir.place p, diag.loc at) bool {
+    if (p.base != fir.base_kind.bk_local || p.proj_len != 0) {
         return false;
     }
-    fir.local* l = fir.local_at(f, t->place.local);
-    return l->kind == fir.local_kind.lk_named && l->loc.line == t->loc.line
-        && l->loc.col == t->loc.col && l->loc.line > 0;
+    fir.local* l = fir.local_at(f, p.local);
+    return l->kind == fir.local_kind.lk_named && l->loc.line == at.line && l->loc.col == at.col
+        && l->loc.line > 0;
 }
 
-/// Appends the text that the diagnostic of the check `t` names: the declared name for a
-/// declaration, the source text of the target for an assignment, and the FIR place when the
-/// source is not there.
-fn write_place(fir.func* f, fir.terminator* t, session.session mut* s,
+/// Appends the text that the diagnostic of the check or the store at `at` of the place `p` names:
+/// the declared name for a declaration, the source text of the target for an assignment, and the
+/// FIR place when the source is not there.
+fn write_place(fir.func* f, fir.place p, diag.loc at, session.session mut* s,
                strbuf.str_buf mut* out) void {
-    if (is_declaration(f, t)) {
-        strbuf.append(out, fir.local_name(fir.local_at(f, t->place.local)));
+    if (is_declaration(f, p, at)) {
+        strbuf.append(out, fir.local_name(fir.local_at(f, p.local)));
         return;
     }
-    if (!write_target(f, t->loc, s, out)) {
-        fir_print.print_place(f, t->place, out);
+    if (!write_target(f, at, s, out)) {
+        fir_print.print_place(f, p, out);
     }
 }
 
-// The location of the diagnostic of the check `t`: the declared name, or the `=` of an
-// assignment.
-fn site(fir.func* f, fir.terminator* t) diag.loc {
-    if (is_declaration(f, t) || t->loc.line == 0) {
-        return t->loc;
+// The location of the diagnostic of the check or the store at `at` of the place `p`: the declared
+// name, or the `=` of an assignment.
+fn site(fir.func* f, fir.place p, diag.loc at) diag.loc {
+    if (is_declaration(f, p, at) || at.line == 0) {
+        return at;
     }
-    return diag.loc_range(t->loc.file, t->loc.line, t->loc.col, t->loc.line, t->loc.col + 1);
+    return diag.loc_range(at.file, at.line, at.col, at.line, at.col + 1);
 }
 
-// Whether a check of a block before `b` that `p` does not prove stands at the location of the
-// check of `b`: a deferred store expands into one check at each exit.
-fn is_repeated(fir.func* f, prover.proof* p, u32 b) bool {
-    diag.loc at = fir.block_at(f, b)->term.loc;
+// Whether `a` and `b` name one position of one file.
+fn is_same_loc(diag.loc a, diag.loc b) bool {
+    return a.line == b.line && a.col == b.col && a.file == b.file;
+}
+
+// Whether a check of the first `blocks` blocks, or one of the first `stores` stores of `p`, that
+// `p` does not prove stands at `at`: a deferred store expands into one check and one store at
+// each exit, and the lowering puts a check and its store at one location (spec/fir.md 9.3).
+fn is_repeated(fir.func* f, prover.proof* p, u32 blocks, u64 stores, diag.loc at) bool {
     u32 mut e = 0;
-    while (e < b) {
-        diag.loc other = fir.block_at(f, e)->term.loc;
-        if (!p->proved[cast(e, u64)] && other.line == at.line && other.col == at.col
-            && other.file == at.file) {
+    while (e < blocks) {
+        if (!p->proved[cast(e, u64)] && is_same_loc(fir.block_at(f, e)->term.loc, at)) {
             return true;
         }
         e += 1;
     }
+    u64 mut k = 0;
+    while (k < stores) {
+        prover.store* st = &p->stores[k];
+        if (!st->proved && is_same_loc(fir.block_statement(f, st->block, st->index)->loc, at)) {
+            return true;
+        }
+        k += 1;
+    }
     return false;
 }
 
-/// Reports each check of `f` that `p` does not prove, once for each location, in block order:
-/// the error `overwriting owned value: cannot prove '<place>' is empty here` and the note
+// Reports the error of D17.11 and its note at the check or the store at `at` of the place `p`,
+// and the note LIMIT_NOTE after them when `limit` holds. `place` and `text` are buffers of the
+// caller.
+fn write_error(fir.func* f, fir.place p, diag.loc at, bool limit, session.session mut* s,
+               strbuf.str_buf mut* place, strbuf.str_buf mut* text) void {
+    strbuf.clear(place);
+    write_place(f, p, at, s, place);
+    diag.loc where = site(f, p, at);
+    strbuf.clear(text);
+    strbuf.append(text, "overwriting owned value: cannot prove '");
+    strbuf.append(text, strbuf.view(place));
+    strbuf.append(text, "' is empty here");
+    diag.error(session.diags(s), where, strbuf.view(text));
+    strbuf.clear(text);
+    strbuf.append(text, "del or move '");
+    strbuf.append(text, strbuf.view(place));
+    strbuf.append(text, "' before this store");
+    diag.note(session.diags(s), where, strbuf.view(text));
+    if (limit) {
+        diag.note(session.diags(s), where, LIMIT_NOTE);
+    }
+}
+
+/// Reports each check and each store of `f` that `p` does not prove, once for each location: in
+/// block order, the stores of a block in statement order and then its check. Each takes the
+/// error `overwriting owned value: cannot prove '<place>' is empty here` and the note
 /// `del or move '<place>' before this store`, at the declared name or at the `=`. When the work
 /// of `f` passed prover.WORK_LIMIT, the first error takes a second note, LIMIT_NOTE (D17.11).
 fn write(fir.func* f, prover.proof* p, session.session mut* s) void {
@@ -213,27 +248,22 @@ fn write(fir.func* f, prover.proof* p, session.session mut* s) void {
     strbuf.str_buf mut text = strbuf.create();
     defer strbuf.free(&text);
     bool mut limit_told = false;
+    u64 mut k = 0;
     u32 mut b = 0;
     while (b < fir.block_count(f)) {
-        fir.terminator* t = &fir.block_at(f, b)->term;
-        if (!p->proved[cast(b, u64)] && !is_repeated(f, p, b)) {
-            strbuf.clear(&place);
-            write_place(f, t, s, &place);
-            diag.loc at = site(f, t);
-            strbuf.clear(&text);
-            strbuf.append(&text, "overwriting owned value: cannot prove '");
-            strbuf.append(&text, strbuf.view(&place));
-            strbuf.append(&text, "' is empty here");
-            diag.error(session.diags(s), at, strbuf.view(&text));
-            strbuf.clear(&text);
-            strbuf.append(&text, "del or move '");
-            strbuf.append(&text, strbuf.view(&place));
-            strbuf.append(&text, "' before this store");
-            diag.note(session.diags(s), at, strbuf.view(&text));
-            if (p->over && !limit_told) {
-                diag.note(session.diags(s), at, LIMIT_NOTE);
+        while (k < p->stores.len && p->stores[k].block == b) {
+            prover.store* st = &p->stores[k];
+            fir.statement* sm = fir.block_statement(f, b, st->index);
+            if (!st->proved && !is_repeated(f, p, b, k, sm->loc)) {
+                write_error(f, sm->place, sm->loc, p->over && !limit_told, s, &place, &text);
                 limit_told = true;
             }
+            k += 1;
+        }
+        fir.terminator* t = &fir.block_at(f, b)->term;
+        if (!p->proved[cast(b, u64)] && !is_repeated(f, p, b, k, t->loc)) {
+            write_error(f, t->place, t->loc, p->over && !limit_told, s, &place, &text);
+            limit_told = true;
         }
         b += 1;
     }

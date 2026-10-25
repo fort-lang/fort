@@ -2,9 +2,9 @@
 //! flags: -I ../../src -I support
 //! stdout:
 //| report ok
-/// Checks owner.report: the error and the note of D17.11 at each check that owner.prover does not
-/// prove, with the source text of its place, at its position, once for each location, and the
-/// note of the work limit.
+/// Checks owner.report: the error and the note of D17.11 at each check and each store that
+/// owner.prover does not prove, with the source text of its place, at its position, once for each
+/// location, and the note of the work limit.
 import check_env;
 import fort.fir;
 import fort.fir_lower;
@@ -15,13 +15,16 @@ import modules_env;
 import pass_env;
 import std.str;
 
-// The types and the global that the FIR text of TEXT_REPORTED names.
-string[5] PRELUDE = {
+// The types, the global and the function that the FIR texts of the cases name.
+string[8] PRELUDE = {
     "struct node {",
     "    node mut* own left;",
     "    node mut* own right;",
     "}",
     "node mut* own mut G = null;",
+    "fn make() node mut* own {",
+    "    return new(node);",
+    "}",
 };
 
 // Lowers the function `name` of the checked source of `e` into *out, and holds that the
@@ -176,17 +179,19 @@ fn the_report_names_each_place_at_its_position() void {
 }
 
 // A FIR text with locations and no tree: the report names the FIR place of an assignment, at the
-// one character of its location, and the declared name of a declaration, at its location.
+// one character of its location, and the declared name of a declaration, at its location. The
+// store of the first check stands at the location of the check, as the lowering puts it, and the
+// store into the temporary `_3`, which its empty start proves, at its own.
 string[19] TEXT_REPORTED = {
     "fn main.r1(_1 (b): node mut*) -> void {",
     "    let _2 (p): node mut* own #9:5;",
     "    let _3: node mut* own;",
     "    bb0: {",
-    "        _3 = alloc<node>(const u64 1);",
+    "        _3 = alloc<node>(const u64 1) #6:1;",
     "        check(overwrite: (*_1).0) -> bb1 #7:13;",
     "    }",
     "    bb1: {",
-    "        (*_1).0 = move _3;",
+    "        (*_1).0 = move _3 #7:13;",
     "        check(overwrite: _2) -> bb2 #9:5;",
     "    }",
     "    bb2: {",
@@ -199,7 +204,9 @@ string[19] TEXT_REPORTED = {
     "}",
 };
 
-// The report of the three checks of TEXT_REPORTED, none of which the pass proves.
+// The report of the three checks of TEXT_REPORTED, none of which the pass proves. The store of the
+// first check, which the pass does not prove either, stands at the location of that check, so it
+// takes no error of its own.
 string[6] TEXT_REPORTS = {
     "7:13: overwriting owned value: cannot prove '(*_1).0' is empty here",
     "7:13: del or move '(*_1).0' before this store",
@@ -219,7 +226,7 @@ fn the_report_of_a_fir_text_names_the_fir_place() void {
     fir.func* f = &m.funcs.items[0];
     prover.proof mut p = prover.prove(f);
     defer prover.free(&p);
-    assert(p.checks == 3 && p.unproved == 3);
+    assert(p.checks == 3 && p.stores.len == 2 && p.unproved == 4 && p.stores[0].proved);
     u64 before = check_env.reports(&e.c);
     report.write(f, &p, &e.c.m.s);
     assert(check_env.reports(&e.c) == before + 6);
@@ -232,7 +239,8 @@ fn the_report_of_a_fir_text_names_the_fir_place() void {
 }
 
 // The diagnostics of TEXT_REPORTED past the work limit: the error and the note of each check, and
-// the second note of the first error, which names the limit (D17.11).
+// the second note of the first error, which names the limit (D17.11). The store into the scratch
+// local `_3` is no error past the limit, so no error names a temporary.
 string[7] LIMIT_REPORTS = {
     "7:13: overwriting owned value: cannot prove '(*_1).0' is empty here",
     "7:13: del or move '(*_1).0' before this store",
@@ -243,10 +251,10 @@ string[7] LIMIT_REPORTS = {
     "11:7: del or move 'global main.G' before this store",
 };
 
-// Past the work limit each check of the function is unproved, and the first error takes a
-// second note that names the limit; the other errors take none (D17.11). A limit of 0 puts the
-// three checks of TEXT_REPORTED past it, and the report under the limit names no limit
-// (the_report_of_a_fir_text_names_the_fir_place).
+// Past the work limit each check and each store into no scratch local is unproved, and the first
+// error takes a second note that names the limit; the other errors take none (D17.11). A limit of
+// 0 puts the three checks and the two stores of TEXT_REPORTED past it, and the report under the
+// limit names no limit (the_report_of_a_fir_text_names_the_fir_place).
 fn the_first_error_past_the_work_limit_names_the_limit() void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
@@ -256,7 +264,7 @@ fn the_first_error_past_the_work_limit_names_the_limit() void {
     fir.func* f = &m.funcs.items[0];
     prover.proof mut p = prover.prove_within(f, 0);
     defer prover.free(&p);
-    assert(p.over && p.checks == 3 && p.unproved == 3);
+    assert(p.over && p.checks == 3 && p.unproved == 4 && p.stores[0].proved);
     u64 before = check_env.reports(&e.c);
     report.write(f, &p, &e.c.m.s);
     assert(check_env.reports(&e.c) == before + LIMIT_REPORTS.len);
@@ -269,10 +277,180 @@ fn the_first_error_past_the_work_limit_names_the_limit() void {
     assert(report.LIMIT_NOTE == "the function exceeds the work limit of D17.11; split it");
 }
 
+// Stores that need a proof and that no check guards, in a FIR text with locations and no tree. The
+// entry zeroing of `_2` needs no proof, and the empty start of the temporary `_3` proves its store.
+// The store into `(*_1).0` writes a place through a parameter, which holds no fact. The first store
+// into `_2` finds the zero value of the entry zeroing, so the pass proves it; the second one finds
+// the allocation of the first. `_4` has no entry zeroing.
+string[16] STORE_REPORTED = {
+    "fn main.r2(_1 (b): node mut*) -> void {",
+    "    let _2 (p): node mut* own #4:5;",
+    "    let _3: node mut* own;",
+    "    let _4 (q): node mut* own #7:5;",
+    "    bb0: {",
+    "        _2 = const zero node mut* own #4:5;",
+    "        _3 = alloc<node>(const u64 1) #5:1;",
+    "        (*_1).0 = move _3 #5:9;",
+    "        _2 = alloc<node>(const u64 1) #4:5;",
+    "        _2 = alloc<node>(const u64 1) #6:3;",
+    "        del(move _2) #6:9;",
+    "        _4 = alloc<node>(const u64 1) #7:5;",
+    "        del(move _4) #7:9;",
+    "        return;",
+    "    }",
+    "}",
+};
+
+// The report of STORE_REPORTED: one error and its note at each store that the pass does not prove,
+// in statement order. A store into a named local at its declared name names that name, and any
+// other store the FIR place.
+string[6] STORE_REPORTS = {
+    "5:9: overwriting owned value: cannot prove '(*_1).0' is empty here",
+    "5:9: del or move '(*_1).0' before this store",
+    "6:3: overwriting owned value: cannot prove '_2' is empty here",
+    "6:3: del or move '_2' before this store",
+    "7:5: overwriting owned value: cannot prove 'q' is empty here",
+    "7:5: del or move 'q' before this store",
+};
+
+// The report of STORE_REPORTED past the work limit: each store into no scratch local is an error,
+// the first one with the note of the limit, and the first store into `_2` names the declared name
+// `p`. The store into the temporary `_3` is none.
+string[9] STORE_LIMIT_REPORTS = {
+    "5:9: overwriting owned value: cannot prove '(*_1).0' is empty here",
+    "5:9: del or move '(*_1).0' before this store",
+    "5:9: the function exceeds the work limit of D17.11; split it",
+    "4:5: overwriting owned value: cannot prove 'p' is empty here",
+    "4:5: del or move 'p' before this store",
+    "6:3: overwriting owned value: cannot prove '_2' is empty here",
+    "6:3: del or move '_2' before this store",
+    "7:5: overwriting owned value: cannot prove 'q' is empty here",
+    "7:5: del or move 'q' before this store",
+};
+
+// Writes the report of `f` with the proof `p` and holds that its diagnostics are `want`, each in
+// the FIR file, but for one at the zero location, which names no file.
+fn expect_reports(lower_env.env mut* e, fir.func* f, prover.proof* p, string@ want) void {
+    u64 before = check_env.reports(&e->c);
+    report.write(f, p, &e->c.m.s);
+    assert(check_env.reports(&e->c) == before + want.len);
+    u64 mut k = 0;
+    while (k < want.len) {
+        if (check_env.report_text(&e->c, before + k) != want[k]) {
+            eprintln(check_env.report_text(&e->c, before + k), " and not ", want[k]);
+            panic("report_test: a report differs");
+        }
+        if (str.starts_with(want[k], "0:0:")) {
+            assert(check_env.report_file(&e->c, before + k) == "");
+        } else {
+            assert(check_env.report_file(&e->c, before + k) == "t.fir");
+        }
+        k += 1;
+    }
+}
+
+// A store that no check guards takes its error at its own location (spec/fir.md 11), under the
+// limit and past it.
+fn the_report_names_each_store_that_no_check_guards() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    fir.module mut m = pass_env.parse(&e, PRELUDE[..], STORE_REPORTED[..]);
+    defer fir.module_free(&m);
+    fir.func* f = &m.funcs.items[0];
+    prover.proof mut p = prover.prove(f);
+    defer prover.free(&p);
+    assert(p.checks == 0 && p.stores.len == 5 && p.unproved == 3 && !p.over);
+    assert(p.stores[0].proved && !p.stores[1].proved && p.stores[2].proved);
+    assert(!p.stores[3].proved && !p.stores[4].proved);
+    expect_reports(&e, f, &p, STORE_REPORTS[..]);
+    prover.proof mut over = prover.prove_within(f, 0);
+    defer prover.free(&over);
+    assert(over.over && over.unproved == 4 && over.stores[0].proved);
+    expect_reports(&e, f, &over, STORE_LIMIT_REPORTS[..]);
+}
+
+// Stores and checks at shared locations, in a FIR text with no tree. In `r3` the store into
+// `(*_1).0` has no location, and the store into `(*_2).1` and the check of its block stand at the
+// location of the store into `(*_2).0`. In `r4` a `goto` stands between a check and its store,
+// which have two locations. The pass proves no store and no check of the two functions.
+string[29] MERGED_REPORTED = {
+    "fn main.r3(_1 (b): node mut*, _2 (c): node mut*) -> void {",
+    "    let _3: node mut* own;",
+    "    let _4: node mut* own;",
+    "    let _5: node mut* own;",
+    "    bb0: {",
+    "        _3 = alloc<node>(const u64 1) #2:1;",
+    "        (*_1).0 = move _3;",
+    "        _4 = alloc<node>(const u64 1) #3:1;",
+    "        (*_2).0 = move _4 #3:9;",
+    "        _5 = alloc<node>(const u64 1) #3:1;",
+    "        (*_2).1 = move _5 #3:9;",
+    "        check(overwrite: (*_2).1) -> bb1 #3:9;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    "fn main.r4(_1 (b): node mut*) -> void {",
+    "    bb0: {",
+    "        check(overwrite: (*_1).0) -> bb1 #5:1;",
+    "    }",
+    "    bb1: {",
+    "        goto bb2 #5:2;",
+    "    }",
+    "    bb2: {",
+    "        (*_1).0 = call fn main.make() #6:1;",
+    "        return;",
+    "    }",
+    "}",
+};
+
+// The report of `r3`: the store with no location stands at the zero location, and the store and
+// the check at the location of an earlier error take no error of their own.
+string[4] MERGED_REPORTS = {
+    "0:0: overwriting owned value: cannot prove '(*_1).0' is empty here",
+    "0:0: del or move '(*_1).0' before this store",
+    "3:9: overwriting owned value: cannot prove '(*_2).0' is empty here",
+    "3:9: del or move '(*_2).0' before this store",
+};
+
+// The report of `r4`: the check and its store each take an error at their location, the check
+// first, because its block comes first.
+string[4] SPLIT_REPORTS = {
+    "5:1: overwriting owned value: cannot prove '(*_1).0' is empty here",
+    "5:1: del or move '(*_1).0' before this store",
+    "6:1: overwriting owned value: cannot prove '(*_1).0' is empty here",
+    "6:1: del or move '(*_1).0' before this store",
+};
+
+// The report merges each error at the location of an earlier one, a check with a store and a
+// store with a store, and a check and its store at two locations take two errors.
+fn the_report_merges_the_errors_at_one_location() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    fir.module mut m = pass_env.parse(&e, PRELUDE[..], MERGED_REPORTED[..]);
+    defer fir.module_free(&m);
+    fir.func* f = &m.funcs.items[0];
+    prover.proof mut p = prover.prove(f);
+    defer prover.free(&p);
+    assert(p.checks == 1 && p.stores.len == 6 && p.unproved == 4);
+    assert(!prover.is_proved(&p, 0));
+    expect_reports(&e, f, &p, MERGED_REPORTS[..]);
+    fir.func* g = &m.funcs.items[1];
+    prover.proof mut q = prover.prove(g);
+    defer prover.free(&q);
+    assert(q.checks == 1 && q.stores.len == 1 && q.unproved == 2);
+    expect_reports(&e, g, &q, SPLIT_REPORTS[..]);
+}
+
 fn main() i32 {
     the_report_names_each_place_at_its_position();
     the_report_of_a_fir_text_names_the_fir_place();
     the_first_error_past_the_work_limit_names_the_limit();
+    the_report_names_each_store_that_no_check_guards();
+    the_report_merges_the_errors_at_one_location();
     println("report ok");
     return 0;
 }

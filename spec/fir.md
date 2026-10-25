@@ -339,8 +339,10 @@ Rules:
 - `live` and `dead` mark the scope of a named local. They do not allocate: every local has
   storage for the whole function (D19.4). The lowering writes `dead` for each local of a scope at
   each exit of that scope, after the deferred statements of that scope (section 9.5).
-- A write into a place of an `own` reference type stands right after a `check(overwrite: p)`
-  before the build-mode pass (D17.11, section 9.3).
+- The lowering puts each store of D17.11, a write into a place of an `own` reference type that
+  an lvalue of the source names, right after a `check(overwrite: p)` before the build-mode pass
+  (D17.11, section 9.3). The emptiness pass proves each store that needs a proof, with a check or
+  with none (section 11).
 - Every statement and terminator carries its location and its statement index (principle 12).
   A statement that a pass makes takes the index of the statement it replaces.
 - A statement or a terminator **reads** a place when it loads the storage of that place. It
@@ -822,9 +824,10 @@ changes the function, and the verifier runs after it. The passes run in this ord
 2. The flow analyses (section 14), which report and never rewrite.
 3. **The emptiness pass**, a reporting pass (D17.11). The modules `owner.place`, `owner.prover`
    and `owner.report` (`src/fort/owner/`) hold it (`spec/ownership-design.md` 4.1). It runs in
-   every build mode, under `--check` and under `--fir` (`toolchain.md` 1). It proves each
-   `check(overwrite: p)`, and it reports the error of D17.11 for each one that it cannot prove.
-   A function with an error reaches no later pass, and the run writes no module and no FIR.
+   every build mode, under `--check` and under `--fir` (`toolchain.md` 1). It proves each store
+   that needs a proof (**Stores**) and each `check(overwrite: p)`, and it reports the error of
+   D17.11 for each one that it cannot prove. A function with an error reaches no later pass, and
+   the run writes no module and no FIR.
    `--fir-verify-report` and the pass `build-mode` of a FIR test run it too, for its proof, and
    report nothing.
    The pass is the forward must-empty analysis of D17.11, and it reads FIR this way:
@@ -920,49 +923,88 @@ changes the function, and the verifier runs after it. The passes run in this ord
      b->items = new(i32, 8);` lowers to `del(move (*_1).0)`, then `_3 = addr mut((*_1).0)`, the
      `new` into `_5`, `check(overwrite: (*_3))` and `(*_3) = move _5`. The pass reads `(*_3)` as
      `(*_1).0`, whose fact the `del` made, so the check is proved; without the `del`, it is
-     unproved, because `bb0` starts with no fact. For parameters `_2` and `_4`, a store into
-     `(*_2).0` keeps the fact of `(*_2).1`, and a later store `(*_4).0 = const i32 0` kills it,
-     because `_4` can hold the value of `_2`. For a parameter `_1` of type `node_vec mut*` and the
-     local `_5` (`k`), the source `u64 k = v->len; del(v->items[k]); v->items[k] = move(n);`
-     gives `_6 = copy _5` and `del(move (*_1).0[_6])`, then `_8 = copy _5`,
+     unproved, because `bb0` starts with no fact of a place through a parameter. For parameters `_2`
+     and `_4`, a store into `(*_2).0` keeps the fact of `(*_2).1`, and a later store `(*_4).0 =
+     const i32 0` kills it, because `_4` can hold the value of `_2`. For a parameter `_1` of type
+     `node_vec mut*` and the local `_5` (`k`), the source `u64 k = v->len; del(v->items[k]);
+     v->items[k] = move(n);` gives `_6 = copy _5` and `del(move (*_1).0[_6])`, then `_8 = copy _5`,
      `_9 = addr mut((*_1).0[_8])` and `check(overwrite: (*_9))`. The pass reads `(*_9)` as
      `(*_1).0[_8]`, and `_6` and `_8` both have the key `_5`, so the check is proved. For a
-     parameter `_1` of type `list mut*`, the source `node mut* own n = new(node);
-     n->next = move(l->head); l->head = move(n);` passes: the held address of `n->next` ends no
-     freshness, so the store into `n->next` keeps the fact of `(*_1).0` (`l->head`) that the
-     `move` made.
+     parameter `_1` of type `list mut*`, the source `node mut* own n = new(node); n->next =
+     move(l->head); l->head = move(n);` passes: the held address of `n->next` ends no freshness, so
+     the store into `n->next` keeps the fact of `(*_1).0` (`l->head`) that the `move` made.
    - **Order.** Within a statement, the pass applies the reads of its operands first, in operand
-     order, then the kill of a `call`, then the kill rules of the store, then its gen rule.
-     `live` and `dead` change no fact.
-   - **Join.** A block starts with the intersection of the facts at the end of its
-     predecessors. `bb0` starts with no fact, and every other block starts with all facts before
-     the first iteration, so a block that no edge reaches passes, as in V13. The pass follows
-     every edge, the edge that V9 prunes on a constant `switch` included, and it iterates to a
-     fixpoint.
-   - **Proof.** A `check(overwrite: p)` is proved when `p` is a tracked place and its fact holds at
-     the end of its block. The first statement of the continuation block of the check runs after
-     the check and before the store writes `p`. So the pass also applies the kill rules of that
-     statement (**Kill**) at the end of the block of the check, in their order: the kill of a
-     `call`, then the kill rules of its store. When that statement stores into `p` itself, the pass
-     applies only the kill of its `call`: D17.11 tests the fact after the right-hand side and before
-     the kill rules of the store. A store into `p` itself is a store whose destination the pass
-     reads as `p`. So `(*_1).0 = call fn f(copy _1)` after `check(overwrite: (*_1).0)`, and
-     `_2 = const u64 1` after `check(overwrite: _1[_2])`, leave the check unproved. The lowering
-     writes the right-hand side before the check, and `p = move _t` first in the continuation block
-     (9.3), so the rule changes no check of the lowering. Only the first statement counts: a later
-     statement or a `goto` between the check and its store is outside the guarantee of the pass,
-     and the lowering makes neither. The work of a function is the sum of three counts: its
-     statements and
-     terminators times its `check(overwrite: p)` terminators, its blocks times its locals, and for
-     each local `_k` that is not memory the assignments whose place has the base `_k` times the
-     temporaries `_t` that are not memory and that exactly one assignment writes, with the rvalue
-     `copy _k` or `cast<u64>(copy _k)`. The third count includes such a `_t` whether or not an
-     `index` reads it. The pass measures the work before any dataflow. When it passes 1048576
-     (2^20), the pass proves no check of the function (D17.11), and the first error of the
-     function takes the second note of D17.11. A function with no such check has no work. The
-     pass reports an unproved check at the location of the check, which is the `=` of an
-     assignment or the declared name of a declaration (9.3). The message and its note name the
-     source text of the lvalue (D17.11).
+     order, then the kill of a `call`, then the test of a store that needs a proof (**Proof**),
+     then the kill rules of the store, then its gen rule. `live` and `dead` change no fact.
+   - **Join.** A block starts with the intersection of the facts at the end of its predecessors.
+     `bb0` starts with the fact of each tracked place in fixed storage of a temporary, or of `_0`
+     when its type is no aggregate, and with no other fact. That storage holds no allocation before
+     its first store (`spec/ownership-design.md` 4.4). An aggregate `_0` starts with no fact: it is
+     memory (**Facts**), and the caller can give it storage that holds an allocation. Every other
+     block starts with all facts before the first iteration, so a block that no edge reaches
+     passes, as in V13. The pass follows every edge, the edge that V9 prunes on a constant `switch`
+     included, and it iterates to a fixpoint.
+   - **Scratch.** A scratch local is a temporary, or `_0`, of an `own` reference type that is not
+     memory. The pass keeps one bit for each scratch local, and the bit says that the whole local
+     holds the zero value. `bb0` starts with each bit set, and the bits join as the facts join. A
+     `move` operand whose place is the whole local, and a `del` of the whole local, set its bit
+     with the reads of **Order**. A store of the zero value into the whole local sets its bit, and
+     each other store into fixed storage of the local clears it, after the test of **Order**. No
+     other statement changes the bit: no pointer names the storage of a local that is not memory,
+     and no `call` writes it. A store into a whole scratch local takes its bit and no fact.
+   - **Stores.** A store needs a proof when it is an assignment into a place of an `own` reference
+     type, a store into a temporary or into `_0` included, with two exceptions that no check stands
+     right before. A check stands right before a store when the store is the first statement of the
+     continuation block of the check and the place of the store is the place of the check: one
+     base and equal projections, index locals included. The first exception is a store into fixed
+     storage of an aggregate `_0`, the destination of the caller (5.3). No lvalue of the source
+     names `_0`, and the lowering stores into it once on each path to `return`. FIR text that stores
+     into an aggregate `_0` over an allocation is the first of two shapes outside the guarantee of
+     the pass; **Proof** gives the second. An entry fact for an aggregate `_0` would reject fort
+     source: the storage of an `own` span or `string` result is memory, and each `call` before its
+     store kills its fact. The second exception is the entry zeroing of 9.2: a store of the zero
+     value into a whole named local in `bb0`, when no statement of `bb0` before it writes a place of
+     that local or takes the address of one. No edge enters `bb0` (V2), so the local holds no
+     allocation of the call there. Each other store needs a proof, with a check or with none.
+   - **Proof.** A store that needs a proof is proved when its destination is a tracked place and its
+     fact holds after the reads of its operands and the kill of its `call`, before the kill rules of
+     the store (**Order**). That is the test of D17.11: the fact after the right-hand side and
+     before the kill rules of the store. A store into a whole scratch local is proved when its bit
+     holds at that point (**Scratch**). The pass reads the destination with the stale set before
+     the statement. A `check(overwrite: p)` guards each store into `p` that a path from the start of
+     its continuation block reaches before any other store into `p`. A store into `p` is an
+     assignment whose place is `p` by the test of **Stores**, and the path follows every edge. The
+     check is proved when `p` is a tracked place, its fact holds at the end of its block, and each
+     store that it guards needs a proof and is proved: a store of an exception gives the check no
+     fact. So a statement, a call or a `goto` between a check and its store applies its kill rules
+     before the test of the store, and the check takes the verdict of the store. For example,
+     `(*_1).0 = call fn f(copy _1)` after `check(overwrite: (*_1).0)`, and `_2 = const u64 1` and
+     then `_1[_2] = move _3` after `check(overwrite: _1[_2])`, leave the check unproved. The
+     lowering writes the right-hand side before the check and `p = move _t` first in the
+     continuation block (9.3). The store then has the fact of the end of the block of the check: V11
+     gives the continuation block one predecessor, and `move _t` makes no fact of `p` empty. So the
+     store and its check have one verdict. The work of a function is the sum of three counts. The
+     first is its statements and terminators times its `check(overwrite: p)` terminators and its
+     stores that need a proof, that no check stands right before and that write no whole scratch
+     local. The second is its blocks times its locals, and it bounds the dataflows of the fresh
+     pointer locals and of the scratch locals. The third is, for each local `_k` that is not memory,
+     the assignments whose place has the base `_k` times the temporaries `_t` that are not memory
+     and that exactly one assignment writes, with the rvalue `copy _k` or `cast<u64>(copy _k)`. The
+     third count includes such a `_t` whether or not an `index` reads it. The lowering stores into a
+     temporary with no check. The second count takes such a store when the temporary is a scratch
+     local, and the first count takes it otherwise (D17.11). The pass measures the work before any
+     dataflow. When it passes 1048576 (2^20), the pass proves no check and no store of the function
+     (D17.11). A store into a whole scratch local is then no error: no lvalue names it, and D17.8
+     keeps the lowering from a store over a live one. So FIR text past the limit that stores over a
+     live scratch local is the second shape outside the guarantee. The lowered FIR past the limit
+     stays sound by D17.8. A scratch dataflow past the limit would not help: its sets are the second
+     count, which alone puts `big` of `fail/ownership/060` past the limit. The first error of the
+     function takes the second note of D17.11. A function with no check and no store that needs a
+     proof has no work. The pass reports each check and each store that it does not prove, once for
+     each location, in block order and the stores of a block before its check. It reports at the
+     location of the item, which is the `=` of an assignment or the declared name of a declaration
+     (9.3), so a check and its store of the lowering share one error. The message and its note name
+     the source text of the lvalue, or the FIR place when the source is not there (D17.11).
    - **Rewrite.** The pass rewrites nothing, so the verifier does not run after it.
 4. **The build-mode pass**, which rewrites for the selected mode (D11.1, D10.6, D17.11):
    - In every mode, it replaces each `check(overwrite: p)` that the emptiness pass proved by

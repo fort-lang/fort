@@ -2407,7 +2407,9 @@ says ownership is "by convention", this section supersedes it.
   The proof is a forward must-empty analysis over the FIR of one function (`fir.md` 11). A fact
   says that a tracked place holds the zero value. The analysis joins facts by intersection: a fact
   holds at the start of a block only when it holds at the end of each predecessor. The entry block
-  starts with no fact. The analysis reads no other function.
+  starts with the fact of each place in the storage of a temporary of the lowering and of a result
+  that is no aggregate, which hold no allocation before their first store, and with no other fact.
+  The analysis reads no other function.
   The tracked places are these, and no fact names another place:
   - a local or a global, then field projections and keyed index projections;
   - a place through a pointer local: a local of pointer type that is not memory, parameters
@@ -2480,26 +2482,34 @@ says ownership is "by convention", this section supersedes it.
   A store applies the kill rules first and its gen rule after them. A call in the right-hand side
   kills before the store. `del` and `move` are no stores, and they apply only their gen rule.
   Each store into an `own` reference-typed place needs the fact of that place after the
-  right-hand side and before its own kill rules.
+  right-hand side and before its own kill rules. The entry zeroing of gen rule 1 needs none unless
+  a check stands right before it. A store into an aggregate result, or into a part of it that the
+  place reaches through no pointer and no span, needs none unless a check stands right before it
+  (`fir.md` 11).
   That place is the destination, the storage that the store writes and whose address D6.3
   computes before the right-hand side, so a right-hand side that can change the storage that the
   lvalue names makes the store an error.
   The proof of one function has a limit. Its work is the sum of three counts in the FIR of the
-  function: its statements and terminators times its overwrite checks; its blocks times its
-  locals; and, for each local `k` that is not memory, the stores whose place has the base `k`
-  times the temporaries of the lowering that are not memory and that exactly one store writes,
-  with a copy of `k` or with a copy of `k` cast to `u64`. The third count includes such a
-  temporary whether or not an index reads it (`fir.md` 11). The first count bounds the walk of
-  the facts, because a check names at most one fact, and the search for an equal fact. The
-  second bounds the sets of the dataflows of the stale index temporaries and of the fresh pointer
-  locals. The third bounds the steps that mark the index temporaries stale. The analysis measures
-  the work before any dataflow. When the work passes 1048576 (2^20), the analysis proves no store
-  of the function, so each store into an `own` reference-typed place of that function is an
-  error. The first of those errors has a second note at the same position: `the function
-  exceeds the work limit of D17.11; split it`. A function with no overwrite check has no work.
-  The functions of the compiler, its language server and the standard library measure 4451 or
-  less, and a function of the language tests 23608 or less. The one exception is `big` of
-  `fail/ownership/060`, which passes the limit on purpose.
+  function: its statements and terminators times the sum of its overwrite checks and its stores into
+  an `own` reference-typed place that need a proof, that no check stands right before and that write
+  no whole temporary or result that is no memory (`fir.md` 11); its blocks times its locals; and,
+  for each local `k` that is not memory, the stores whose place has the base `k` times the
+  temporaries of the lowering that are not memory and that exactly one store writes, with a copy of
+  `k` or with a copy of `k` cast to `u64`. The third count includes such a temporary whether or not
+  an index reads it (`fir.md` 11). The first count bounds the walk of the facts, because a check or
+  a store names at most one fact and a store right after a check of its place names the fact of that
+  check, and the search for an equal fact. The second bounds the sets of the dataflows of the stale
+  index temporaries, of the fresh pointer locals and of the whole temporaries and results that are
+  no memory, whose fact takes one bit of the local. The third bounds the steps that mark the index
+  temporaries stale. The analysis measures the work before any dataflow. When the work passes
+  1048576 (2^20), the analysis proves no store of the function, so each store into an `own`
+  reference-typed place of that function is an error, but for a store into a whole temporary or
+  result that is no memory, which no lvalue names: D17.8 keeps the lowering from a store over a live
+  one. The first of those errors has a second note at the same position: `the function exceeds the
+  work limit of D17.11; split it`. A function with no overwrite check and no store that needs a
+  proof has no work. The functions of the compiler, its language server and the standard library
+  measure 11872 or less, and a function of the language tests 23608 or less. The one exception is
+  `big` of `fail/ownership/060`, which passes the limit on purpose.
   `del` and `move` leave zero behind. So for locals `v`, `a` and `b`, `del(v.data); v.data =
   new(...)` passes, `a = move(b)` after `move(a)` passes, and a store into a local that holds `{}`
   or `null` passes.
@@ -2556,6 +2566,15 @@ says ownership is "by convention", this section supersedes it.
   text read word for word as the fact of the lvalue after the right-hand side. That proved
   `t->cur[i] = flip(t) ? move(t->cur[i]) : move(t->cur[i]);`, where `flip` changes `t->cur`, and
   the analysis accepted the store, which wrote over a live allocation.
+  Amended 2026-10-24: the entry block starts with the fact of the storage of each temporary and
+  of a result that is no aggregate, so a store into a temporary or a result needs the proof too.
+  The first count of the work takes the overwrite checks and the stores that need a proof, that no
+  check stands right before and that write no whole temporary or result that is no memory, whose
+  fact takes one bit of the local; a function with such a store has work, and past the limit a
+  store into such a local is no error. The measured maxima are 11872 and 23608. Ratified by the
+  coordinator, 2026-10-24. Before, the entry block started with no fact, the first count took the
+  overwrite checks alone, a function with no overwrite check had no work, and the functions of the
+  compiler, the server and the standard library measured 4451 or less.
 
 ### D17.12 Owned strings
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,

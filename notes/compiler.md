@@ -677,65 +677,91 @@ came here.
   `--fir-verify-report` and a FIR test bring one to it, and the translator panics on one. So
   the default mode changes each function that stores into an `own` reference: the checked IR of
   the compiler lost 180 calls of `std.rt.fail_overwrite`.
-- **The emptiness pass keeps one fact for each place that a check names** (`spec/fir.md` 11).
-  `owner.prover.prove` reads one verified function before the build-mode pass. No gen rule and no
-  kill rule of one fact reads another fact, so the pass tracks only the places of the
-  `check(overwrite: p)` terminators, and a function with no such check costs one scan of its blocks.
-  Three dataflows of `fir_flow` run with gen and kill sets: the stale index temporaries (a union
-  from a full entry set), the fresh pointer locals and the facts (both an intersection from an empty
-  entry set). A walk of each block applies each statement to an empty probe and to a full probe, so
-  the first gives the gen set and the second the kill set; the walk of the facts reads the stale and
-  the fresh set before each statement. Before any dataflow the pass measures the work: statements
-  and terminators times checks, plus blocks times locals, plus the steps of the stale chains. Past
-  `owner.prover.WORK_LIMIT` (2^20) the function gets no proof; the compiler, the server and `std`
-  measure 4451 or less (`proof.work`). The memory marks take one scan and one walk: a held address
-  that is memory ends once. Two paths are separate only while neither leaves its object, by a deref
-  or a span index after its first step: `p->next->g` can be `p->g`. A held address `(*_a)` reads as
-  the place of its `addr mut` when one check and one store read `_a` and nothing else does, `_a`
-  is no memory, and the place is no fixed storage. An operand or a `del` through `(*_a)` is no
-  read of `_a` as a whole, so it does not end the held address. A held address of fixed storage
-  gave three false accepts in `test/fort/owner/oracle_test.ft` (FIR cases `held_value`,
-  `held_fresh` and `held_copy`): the store through it wrote a local that the counts of the local,
-  its freshness and the value of its one store did not see. So an `addr mut` of fixed storage is
-  no held address and makes its local memory. The lowering of an assignment holds no address of
-  fixed storage (`fir_lower.target_place`, `hold_base`), but `*&x = e` lowers to the same shape,
-  `_t = addr mut(_x)` and a check of `(*_t)`: since an `addr mut` of fixed storage is no held
-  address, such a store is an error, as D17.11 says, though `x` is empty
-  (`test/lang/fail/ownership/061`). Two more false accepts (`stale_base`, `stale_key`) read a
-  held address as its place after a store into the base or an index local of the place: such a
-  store makes the held address stale in the stale dataflow (`first_reader`, `apply_stale`). A
-  stale held address gives no tracked place (`stale_alias`), and the store through it keeps no
-  fact through a fresh pointer local (`stale_fresh`). Five more false accepts held the address
-  of an element of a span whose header is in memory: a call (`span_flip`, `span_local`), a
-  store through a pointer (`span_alias`), or a store straight into a memory local or a global
-  (`span_straight`, `span_global`) changed the header with no store into a local. So each such
-  statement makes each held address stale (`writes_memory`, `apply_stale`); the earlier cases
-  and the three families keep each count, and no source of the tree changes its verdict. The
-  two fort shapes are errors now (`test/lang/fail/ownership/062`). Seven FIR cases were false
-  accepts too, because the first statement after `check(overwrite: p)` changed `p` before the
-  store: a call into `p` (`call_store`, and `call_value` through a function value), a call with a
-  `void` result (`call_void`), a call into the local of a field `p` (`store_whole`), a call into
-  the key of `p` (`call_key`), a store through a second pointer to the object of `p`
-  (`alias_store`) and a store straight into the global of `p` (`global_alias`). So the block of a
-  check takes the kill rules of that first statement, but not the kill rules of a store into `p`
-  itself, which come after the test (`kill_after_check`, `apply_kills`). The lowering puts the
-  right side before the check and the store first, so no check of the lowering changes. The
-  place text of a report comes from the source: the pass finds the assignment at the position of the
-  `=` in the tree of the function and takes the text from its first token to the `=`, with a `(`
-  before it when the text needs one. A FIR text with no tree gives the FIR place. The emitter
-  (`gen_fir.check_fir`), `--check` and `--lib` (`driver.overwrite_entry`), and `--fir` and
-  `--fir-after` (`driver.fir_entry`) run the pass and report each check that it does not prove with
-  `owner.report.write`; a function with such a check reaches no later pass, and the run exits 1 with
-  no module, no interface file and no FIR. Past the work limit the first error of a function takes
-  the note `owner.report.LIMIT_NOTE` (`fail/ownership/060` passes the limit with 1000 checked
-  additions). `--check` skips a function whose check names a runtime entry that `std.rt` lacks,
-  because the verifier would panic and a build reports the function. A `check(overwrite: p)` names
-  no runtime entry, so the empty runtime of a test needs none for it. `std/rt.ft` keeps
-  `fail_overwrite` with no row in `runtime_sig.ft`: the pin of `tools/bootstrap.ref` builds HEAD
-  with HEAD's `std` in a checked build and emits a call of it for each store into an `own`
-  reference. Without it, `tools/vm build debug fort` exits 1 at the step that builds HEAD with the
-  pin: clang refuses the module with `error: use of undefined value '@std.rt.fail_overwrite'`.
-  Remove the function when a pin moves past the static error.
+- **The emptiness pass keeps one fact for each place that a check or a store names** (`spec/fir.md`
+  11). `owner.prover.prove` reads one verified function before the build-mode pass; `owner.place`
+  holds the paths, the keys, the memory locals and the stale and fresh sets, and `owner.report` the
+  errors. No gen rule and no kill rule of one fact reads another fact, so the pass tracks only the
+  places of the `check(overwrite: p)` terminators and of the stores that need a proof
+  (`find_stores`), and a function with neither costs one scan of its statements. Four dataflows of
+  `fir_flow` run with gen and kill sets: the stale index temporaries (a union from a full entry
+  set), the fresh pointer locals (an intersection from an empty entry set), the scratch locals (an
+  intersection from a full entry set) and the facts (an intersection from the facts of the storage
+  that is empty at the entry). A walk of each block applies each statement to an empty probe and to
+  a full probe, so the first gives the gen set and the second the kill set; the walk of the facts
+  reads the stale and the fresh set before each statement. Before any dataflow the pass measures the
+  work: statements and terminators times the checks and the stores that no check stands right before
+  and that write no whole scratch local, plus blocks times locals, plus the steps of the stale
+  chains. Past `owner.prover.WORK_LIMIT` (2^20) the function gets no proof; the compiler, the server
+  and `std` measure 11872 or less, and the language tests 23608 or less (`proof.work`, a probe build
+  over the corpora, 2026-10-24). The memory marks take one scan and one walk: a held address that is
+  memory ends once. Two paths are separate only while neither leaves its object, by a deref or a
+  span index after its first step: `p->next->g` can be `p->g`. A held address `(*_a)` reads as the
+  place of its `addr mut` when one check and one store read `_a` and nothing else does, `_a` is no
+  memory, and the place is no fixed storage. An operand or a `del` through `(*_a)` is no read of
+  `_a` as a whole, so it does not end the held address. A held address of fixed storage gave three
+  false accepts in `test/fort/owner/oracle_test.ft` (FIR cases `held_value`, `held_fresh` and
+  `held_copy`): the store through it wrote a local that the counts of the local, its freshness and
+  the value of its one store did not see. So an `addr mut` of fixed storage is no held address and
+  makes its local memory. The lowering of an assignment holds no address of fixed storage
+  (`fir_lower.target_place`, `hold_base`), but `*&x = e` lowers to the same shape, `_t = addr
+  mut(_x)` and a check of `(*_t)`: since an `addr mut` of fixed storage is no held address, such a
+  store is an error, as D17.11 says, though `x` is empty (`test/lang/fail/ownership/061`). Two more
+  false accepts (`stale_base`, `stale_key`) read a held address as its place after a store into the
+  base or an index local of the place: such a store makes the held address stale in the stale
+  dataflow (`first_reader`, `apply_stale`). A stale held address gives no tracked place
+  (`stale_alias`), and the store through it keeps no fact through a fresh pointer local
+  (`stale_fresh`). Five more false accepts held the address of an element of a span whose header is
+  in memory: a call (`span_flip`, `span_local`), a store through a pointer (`span_alias`), or a
+  store straight into a memory local or a global (`span_straight`, `span_global`) changed the header
+  with no store into a local. So each such statement makes each held address stale (`writes_memory`,
+  `apply_stale`); the earlier cases and the three families keep each count, and no source of the
+  tree changes its verdict. The two fort shapes are errors now (`test/lang/fail/ownership/062`).
+  Seven FIR cases were false accepts too, because the first statement after `check(overwrite: p)`
+  changed `p` before the store: a call into `p` (`call_store`, and `call_value` through a function
+  value), a call with a `void` result (`call_void`), a call into the local of a field `p`
+  (`store_whole`), a call into the key of `p` (`call_key`), a store through a second pointer to the
+  object of `p` (`alias_store`) and a store straight into the global of `p` (`global_alias`). A rule
+  for the first statement closed them, and three more FIR cases stayed open: a statement or a `goto`
+  between a check and its store (`mid_store`, `goto_store`), and a store with no check
+  (`lone_store`). So the pass proves each store that needs a proof, at the test of D17.11 after the
+  kill of its call and before its own kill rules (`judge_stores`, `apply_facts`), and a check takes
+  the verdict of each store into its place that a path from it reaches before another store into
+  that place (`guards_proved`); a guarded store that needs no proof leaves the check unproved. A
+  store into a temporary or into `_0` needs a proof, and each tracked place in fixed storage of a
+  temporary, or of an `_0` that is no aggregate, has its fact at the entry
+  (`place.is_empty_at_entry`, `run_facts`), the state `S = {null}` of design 4.4. A store into fixed
+  storage of an aggregate `_0` needs none unless a check stands right before it, and FIR text that
+  stores over a live aggregate `_0` is the first of two shapes outside the guarantee: an entry fact
+  for it rejected fort source, because an `own` span or `string` result is memory and each call
+  before `return` kills its fact. The entry zeroing needs none while no statement of `bb0` before it
+  writes its local (`mark_written`). A temporary or `_0` of an `own` reference type that is no
+  memory is a scratch local (`place.is_scratch`): a store into the whole local takes one bit of the
+  scratch dataflow (`run_scratch`) and no fact, adds nothing to the first count of the work, and
+  past the limit is no error. So FIR text past the limit that stores over a live scratch local is
+  the second shape outside the guarantee: past the limit, the store in a loop of ne19
+  (`test/fort/owner/prover_test.ft`) is proved, and its run writes over an allocation. The lowered
+  FIR past the limit stays sound by D17.8, and a scratch dataflow past the limit would not help: its
+  sets are the second count, which alone puts 060 `big` past the limit. When the first count took
+  each store into a temporary, a function of 800 calls `take(new(u8))` passed the limit with 800
+  errors that named temporaries `_N`; 5000 such calls now measure 10001 and compile (`write_scratch`
+  in `test/fort/owner/prover_test.ft`). The lowering puts the right side before the check and the
+  store first, so each store of the lowering has the verdict of its check. The place text of a
+  report comes from the source: the pass finds the assignment at the position of the `=` in the tree
+  of the function and takes the text from its first token to the `=`, with a `(` before it when the
+  text needs one. A FIR text with no tree gives the FIR place. The emitter (`gen_fir.check_fir`),
+  `--check` and `--lib` (`driver.overwrite_entry`), and `--fir` and `--fir-after`
+  (`driver.fir_entry`) run the pass and report each check and each store that it does not prove with
+  `owner.report.write`, once for each location; a function with such an error reaches no later pass,
+  and the run exits 1 with no module, no interface file and no FIR. Past the work limit the first
+  error of a function takes the note `owner.report.LIMIT_NOTE` (`fail/ownership/060` passes the
+  limit with 1000 checked additions). `--check` skips a function whose check names a runtime entry
+  that `std.rt` lacks, because the verifier would panic and a build reports the function. A
+  `check(overwrite: p)` names no runtime entry, so the empty runtime of a test needs none for it.
+  `std/rt.ft` keeps `fail_overwrite` with no row in `runtime_sig.ft`: the pin of
+  `tools/bootstrap.ref` builds HEAD with HEAD's `std` in a checked build and emits a call of it for
+  each store into an `own` reference. Without it, `tools/vm build debug fort` exits 1 at the step
+  that builds HEAD with the pin: clang refuses the module with `error: use of undefined value
+  '@std.rt.fail_overwrite'`. Remove the function when a pin moves past the static error.
 - **The FIR interpreter runs the FIR of a closure before the emptiness pass**
   (`spec/ownership-design.md` 3, `src/fort/fir/interpreter.ft`). It is the reference semantics of
   the ownership checks, and `--fir-run` and the pass `run` of `--fir-test` start it
