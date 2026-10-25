@@ -1,0 +1,188 @@
+{
+  "comment": [
+    "One row for each rule of part 1 of the leak rule of D17.20 in the emptiness pass",
+    "(src/fort/owner/prover.ft): the obligation of each exit kind, the scope of a named local at a",
+    "`return`, the facts and the bits that prove an exit, and the work limit. Then one row for each",
+    "rule of the leak report (src/fort/owner/report.ft) and of the option --leak-report",
+    "(src/fort/driver.ft). The first stage runs the cases over FIR text and over lowered fort source",
+    "(test/fort/owner/prover_test.ft), with one case for each exit kind: the closing brace, `return`,",
+    "`break`, `continue` and an exit into an abort block, and the report",
+    "(test/fort/owner/report_test.ft). The second runs the driver test, which holds that no build",
+    "changes its verdict. The third runs the oracle test, which prints a false accept for each row",
+    "that makes the pass prove an exit that a run leaks at. The table runs in the Linux VM with the",
+    "debug preset and the default runner. The md5 guard reads the product compiler, whose driver",
+    "imports owner.prover and owner.report.",
+    "The first round of a run can read stale (notes/testing.md 7), so the first row is one that",
+    "a full run caught."
+  ],
+  "sources": [
+    "src/fort/owner/prover.ft",
+    "src/fort/owner/report.ft",
+    "src/fort/driver.ft"
+  ],
+  "binary": "build/Linux/debug/fort",
+  "build": "ninja -C build/Linux/debug fort",
+  "stages": [
+    {
+      "name": "the prover and report module tests",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 2 owner/prover_test owner/report_test"
+    },
+    {
+      "name": "the driver test",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 2 driver_test"
+    },
+    {
+      "name": "the oracle test",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 2 owner/oracle_test"
+    }
+  ],
+  "mutations": [
+    {
+      "decision": "D17.20-abort",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        while (i < count && !fir.term_is_abort(t)) {",
+      "new": "        while (i < count) {",
+      "what": "a `dead` marker in an abort block keeps its obligation"
+    },
+    {
+      "decision": "D17.20-dead",
+      "file": "src/fort/owner/prover.ft",
+      "old": "            if (s->kind == fir.stmt_kind.st_dead && is_owner_local(f, s->local)) {",
+      "new": "            if (false) {",
+      "what": "a `dead` marker has no obligation: the closing brace, the `break` and the `continue` lose theirs"
+    },
+    {
+      "decision": "D17.20-return-param",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    if (fir.local_at(f, n)->kind != fir.local_kind.lk_named) {\n        return true;\n    }",
+      "new": "    if (fir.local_at(f, n)->kind != fir.local_kind.lk_named) {\n        return fir.local_at(f, n)->kind == fir.local_kind.lk_temp;\n    }",
+      "what": "a parameter has no obligation at a `return`"
+    },
+    {
+      "decision": "D17.20-return-temp",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    if (fir.local_at(f, n)->kind != fir.local_kind.lk_named) {\n        return true;\n    }",
+      "new": "    if (fir.local_at(f, n)->kind != fir.local_kind.lk_named) {\n        return fir.local_at(f, n)->kind == fir.local_kind.lk_param;\n    }",
+      "what": "a temporary has no obligation at a `return`"
+    },
+    {
+      "decision": "D17.20-return-named",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    return ended != null && !fir_flow.bits_get(&ended->outs[cast(b, u64)], n);",
+      "new": "    return false;",
+      "what": "a named local whose scope did not end has no obligation at a `return`"
+    },
+    {
+      "decision": "D17.20-ended-dead",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    if (s->kind == fir.stmt_kind.st_dead) {\n        fir_flow.bits_set(set, s->local);\n        return;\n    }",
+      "new": "    if (s->kind == fir.stmt_kind.st_dead) {\n        return;\n    }",
+      "what": "a `dead` ends no scope, so each named local has an obligation at each `return` after its store"
+    },
+    {
+      "decision": "D17.20-ended-store",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    if (fixed && !is_zero_value(c, s->value)) {",
+      "new": "    if (false) {",
+      "what": "a store into a named local starts no scope"
+    },
+    {
+      "decision": "D17.20-ended-taken",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    if (place.find_taken(&c->places, s, &taken)) {\n        fir_flow.bits_clear(set, taken);\n    }",
+      "new": "    if (false) {\n        fir_flow.bits_clear(set, taken);\n    }",
+      "what": "an address of a named local starts no scope"
+    },
+    {
+      "decision": "D17.20-ended-entry",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        if (fir.local_at(f, k)->kind == fir.local_kind.lk_named && is_owner_local(f, k)) {\n            fir_flow.bits_set(&d->entry, k);",
+      "new": "        if (false) {\n            fir_flow.bits_set(&d->entry, k);",
+      "what": "the scope of a named local has not ended at the entry"
+    },
+    {
+      "decision": "D17.20-scratch",
+      "file": "src/fort/owner/prover.ft",
+      "old": "                e->proved = fir_flow.bits_get(&at_scratch, e->local);",
+      "new": "                e->proved = true;",
+      "what": "the exit of a scratch local holds whatever its bit says"
+    },
+    {
+      "decision": "D17.20-fact",
+      "file": "src/fort/owner/prover.ft",
+      "old": "                e->proved = d != null && fir_flow.bits_get(&pr.none, fact);",
+      "new": "                e->proved = d != null;",
+      "what": "the exit of a local with a fact holds whatever its fact says"
+    },
+    {
+      "decision": "D17.20-walk",
+      "file": "src/fort/owner/prover.ft",
+      "old": "            while (i < e->index) {",
+      "new": "            while (i + 1 < e->index) {",
+      "what": "the walk of an exit skips the statement right before it"
+    },
+    {
+      "decision": "D17.20-limit",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        out->exits[k].proved = place.is_scratch(&c->places, out->exits[k].local);",
+      "new": "        out->exits[k].proved = true;",
+      "what": "past the work limit each exit holds"
+    },
+    {
+      "decision": "D17.20-work",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    out.leak_work = units * (checked + count_owner_facts(&c)) + sets;",
+      "new": "    out.leak_work = units * checked + sets;",
+      "what": "the leak work counts no fact of an exit"
+    },
+    {
+      "decision": "D17.20-no-error",
+      "file": "src/fort/owner/prover.ft",
+      "old": "            if (!e->proved) {\n                out->leaks += 1;\n            }\n            k += 1;",
+      "new": "            if (!e->proved) {\n                out->leaks += 1;\n                out->unproved += 1;\n            }\n            k += 1;",
+      "what": "an exit that the pass does not prove is an error of the build"
+    },
+    {
+      "decision": "D17.20-report-repeat",
+      "file": "src/fort/owner/report.ft",
+      "old": "        if (!x->proved && x->local == e->local && is_same_loc(exit_loc(f, x), at)) {",
+      "new": "        if (false) {",
+      "what": "the report lists one exit of one owner at one location twice"
+    },
+    {
+      "decision": "D17.20-report-position",
+      "file": "src/fort/owner/report.ft",
+      "old": "    if (e->index < fir.block_statement_count(f, e->block)) {\n        return fir.block_statement(f, e->block, e->index)->loc;\n    }",
+      "new": "    if (false) {\n        return fir.block_statement(f, e->block, e->index)->loc;\n    }",
+      "what": "the report gives the position of the terminator of the block for a `dead`"
+    },
+    {
+      "decision": "D17.20-report-temp",
+      "file": "src/fort/owner/report.ft",
+      "old": "        if (write_expression(f, l->loc, s, out)) {\n            return;\n        }",
+      "new": "        if (false) {\n            return;\n        }",
+      "what": "the report names a temporary by its FIR place"
+    },
+    {
+      "decision": "D17.20-report-note",
+      "file": "src/fort/owner/report.ft",
+      "old": "            if (p->leak_over && !limit_told) {",
+      "new": "            if (false) {",
+      "what": "past the work limit the report gives no note"
+    },
+    {
+      "decision": "D17.20-report-option",
+      "file": "src/fort/driver.ft",
+      "old": "                if (opts->leak_report) {\n                    report.write_leaks(&f, &verdicts, s, &leaks);",
+      "new": "                if (false) {\n                    report.write_leaks(&f, &verdicts, s, &leaks);",
+      "what": "--leak-report lists nothing"
+    },
+    {
+      "decision": "D17.20-report-check",
+      "file": "src/fort/driver.ft",
+      "old": "        opts->leak_report = true;\n        opts->check = true;",
+      "new": "        opts->leak_report = true;",
+      "what": "--leak-report does not imply --check, so the run builds the program"
+    }
+  ]
+}

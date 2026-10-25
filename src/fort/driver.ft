@@ -150,6 +150,7 @@ struct options {
     bool release;         // --release
     bool no_bounds_check; // --no-bounds-check
     bool check; // --check: the front end alone
+    bool leak_report; // --leak-report: each exit of the leak rule not proved, on stdout
     bool json; // --json, the document on stdout
     bool index; // --index, the identifier index in it
     bool tokens; // --tokens: the entry file's tokens on stdout
@@ -219,6 +220,7 @@ fn help() void {
     println("  --cfg <list>       set key=value pairs; repeatable");
     println("  -Xcc <arg>         pass <arg> to --cc verbatim; repeatable, in order");
     println("  --check            check the program and its overwrite stores; emit nothing");
+    println("  --leak-report      as --check, and write each exit where an owner can leak");
     println("  --json             write the check document to stdout; needs --check");
     println("  --index            fill the document's identifier index; implies --check --json");
     println("  --tokens           write the entry file's tokens to stdout and stop");
@@ -366,9 +368,9 @@ fn parse_cfg(options mut* opts, string list) bool {
     return true;
 }
 
-// The options that carry no value: -S, -c, --release, --no-bounds-check, --check, --json,
-// --index, --tokens, --ast, --fir, --fir-test, --fir-verify-report, --fir-stats, --fir-run,
-// --emit-interface and --cache-stats, each of which sets one flag.
+// The options that carry no value: -S, -c, --release, --no-bounds-check, --check,
+// --leak-report, --json, --index, --tokens, --ast, --fir, --fir-test, --fir-verify-report,
+// --fir-stats, --fir-run, --emit-interface and --cache-stats, each of which sets one flag.
 fn parse_flag(options mut* opts, string arg) bool {
     if (arg == "-S") {
         opts->emit_ir = true;
@@ -379,6 +381,10 @@ fn parse_flag(options mut* opts, string arg) bool {
     } else if (arg == "--no-bounds-check") {
         opts->no_bounds_check = true;
     } else if (arg == "--check") {
+        opts->check = true;
+    } else if (arg == "--leak-report") {
+        // --leak-report implies --check, which runs the emptiness pass
+        opts->leak_report = true;
         opts->check = true;
     } else if (arg == "--json") {
         opts->json = true;
@@ -656,6 +662,11 @@ fn parse(options mut* opts, string@ args) i32 {
     if (opts->json && !opts->check) {
         // a build spawns a `--cc` that inherits stdout
         usage_error("--json requires --check");
+        return PARSE_ERROR;
+    }
+    if (opts->leak_report && opts->json) {
+        // the report and the document both go to stdout
+        usage_error("--leak-report does not combine with --json or --index");
         return PARSE_ERROR;
     }
     if (opts->use_names.len > 0 && !opts->tokens && !opts->ast
@@ -1866,13 +1877,17 @@ fn prove_overwrites(session.session mut* s, fir.func* f) prover.proof {
 // overwrite check that the pass does not prove, as a build does, and returns EXIT_COMPILE_ERROR
 // after a report and EXIT_OK otherwise. A function that the lowering does not lower, or whose
 // checks name a runtime entry that `std.rt` lacks, does not take part, because a build reports
-// it.
+// it. With --leak-report, it writes the line of report.write_leaks for each exit of the leak rule
+// that the pass does not prove to stdout, with one print. No such exit changes the verdict: the
+// leak rule only reports for now (D17.20).
 fn overwrite_entry(session.session mut* s, analysis mut* an, options* opts) i32 {
     fir_verify.runtime mut rt = fir_verify.runtime_of(&an->ck);
     fir_verify.excuse_mode(&rt, opts->release, opts->no_bounds_check);
     gen.node_ref_vec mut decls = gen.node_ref_vec{};
     defer gen.refs_free(&decls);
     fir_lower.program_functions(&an->set, &decls);
+    strbuf.str_buf mut leaks = strbuf.create();
+    defer strbuf.free(&leaks);
     bool mut proved = true;
     u64 mut i = 0;
     while (i < decls.len) {
@@ -1886,11 +1901,17 @@ fn overwrite_entry(session.session mut* s, analysis mut* an, options* opts) i32 
                 if (verdicts.unproved > 0) {
                     proved = false;
                 }
+                if (opts->leak_report) {
+                    report.write_leaks(&f, &verdicts, s, &leaks);
+                }
                 prover.free(&verdicts);
             }
             fir.func_free(&f);
         }
         i += 1;
+    }
+    if (opts->leak_report) {
+        print(strbuf.view(&leaks));
     }
     if (!proved) {
         return EXIT_COMPILE_ERROR;

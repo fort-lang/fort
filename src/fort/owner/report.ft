@@ -1,5 +1,7 @@
 /// Writes the error of D17.11 for each overwrite check that owner.prover does not prove: the text
-/// and the position of each error (spec/fir.md 11, spec/ownership-design.md 4.1).
+/// and the position of each error (spec/fir.md 11, spec/ownership-design.md 4.1). It also writes
+/// the line of each exit of part 1 of the leak rule (D17.20) that owner.prover does not prove,
+/// which the report of `--leak-report` lists and which is no error yet.
 //
 // The module holds no module-level mutable state: each buffer belongs to one call.
 import fort.ast;
@@ -12,6 +14,12 @@ import std.strbuf;
 
 /// The second note of the first error of a function past prover.WORK_LIMIT (D17.11).
 string LIMIT_NOTE = "the function exceeds the work limit of D17.11; split it";
+
+/// The note after the first line of the leak report of a function whose leak work passed
+/// prover.WORK_LIMIT. The leak work has a limit of its own, which the work of D17.11 does not
+/// reach, so the note does not name D17.11.
+string LEAK_LIMIT_NOTE =
+    "the function exceeds the work limit of the leak rule; split it";
 
 // The offset of `line`:`col` in `src`, or the length of `src` past its end.
 fn offset(string src, u32 line, u32 col) u64 {
@@ -266,5 +274,140 @@ fn write(fir.func* f, prover.proof* p, session.session mut* s) void {
             limit_told = true;
         }
         b += 1;
+    }
+}
+
+// ---- the leak report ---------------------------------------------------------------------------
+
+// The node of the tree `n` that starts at `at`, the outermost one first, or null.
+fn find_node(ast.node* n, diag.loc at) ast.node* {
+    if (n == null) {
+        return null;
+    }
+    if (n->loc.line == at.line && n->loc.col == at.col) {
+        return n;
+    }
+    ast.node* mut found = find_node(n->a, at);
+    if (found == null) {
+        found = find_node(n->b, at);
+    }
+    if (found == null) {
+        found = find_node(n->c, at);
+    }
+    if (found == null) {
+        found = find_node(n->d, at);
+    }
+    u64 mut i = 0;
+    while (found == null && i < ast.ast_len(n)) {
+        found = find_node(ast.ast_child(n, i), at);
+        i += 1;
+    }
+    return found;
+}
+
+// Appends the source text of the expression of the tree of `f` that starts at `at`: the text from
+// its first token to its last, with each run of white space as one space. False when the source
+// or the expression is not there.
+fn write_expression(fir.func* f, diag.loc at, session.session mut* s,
+                    strbuf.str_buf mut* out) bool {
+    if (f->sym == null || f->sym->node == null || at.line == 0) {
+        return false;
+    }
+    ast.node* n = find_node(f->sym->node, at);
+    if (n == null) {
+        return false;
+    }
+    diag.loc mut first = diag.loc{};
+    find_start(n, &first);
+    string mut src = "";
+    if (!session.read_source(s, at.file, &src)) {
+        return false;
+    }
+    u64 start = offset(src, first.line, first.col);
+    u64 end = offset(src, n->loc.end_line, n->loc.end_col);
+    if (start >= end) {
+        return false;
+    }
+    append_flat(out, src[start..end]);
+    return true;
+}
+
+/// Appends the text that names the owner local `n` of `f` in the leak rule (D17.20): the declared
+/// name of a named local or a parameter, and the source text of the expression whose value a
+/// temporary holds. A FIR text with no tree gives the FIR place.
+fn write_owner(fir.func* f, u32 n, session.session mut* s, strbuf.str_buf mut* out) void {
+    fir.local* l = fir.local_at(f, n);
+    if (l->kind == fir.local_kind.lk_temp) {
+        if (write_expression(f, l->loc, s, out)) {
+            return;
+        }
+    } else if (fir.local_name(l).len > 0) {
+        strbuf.append(out, fir.local_name(l));
+        return;
+    }
+    fir_print.print_place(f, fir.place_local(n), out);
+}
+
+/// The location of the exit `e` of `f`: its `dead` marker, or the `return` that ends its block.
+fn exit_loc(fir.func* f, prover.exit* e) diag.loc {
+    if (e->index < fir.block_statement_count(f, e->block)) {
+        return fir.block_statement(f, e->block, e->index)->loc;
+    }
+    return fir.block_at(f, e->block)->term.loc;
+}
+
+// Whether an exit before exit `k` of `p` that `p` does not prove names the local of exit `k` at its
+// location: a deferred statement expands at each exit with its own location.
+fn is_leak_repeated(fir.func* f, prover.proof* p, u64 k) bool {
+    prover.exit* e = &p->exits[k];
+    diag.loc at = exit_loc(f, e);
+    u64 mut j = 0;
+    while (j < k) {
+        prover.exit* x = &p->exits[j];
+        if (!x->proved && x->local == e->local && is_same_loc(exit_loc(f, x), at)) {
+            return true;
+        }
+        j += 1;
+    }
+    return false;
+}
+
+// Appends `<file>:<line>:<col>: ` for the position `at`.
+fn write_position(diag.loc at, strbuf.str_buf mut* out) void {
+    strbuf.append(out, at.file);
+    strbuf.push(out, ':');
+    strbuf.append_u64(out, cast(at.line, u64));
+    strbuf.push(out, ':');
+    strbuf.append_u64(out, cast(at.col, u64));
+    strbuf.append(out, ": ");
+}
+
+/// Appends one line for each exit of `f` that `p` does not prove, once for each location and
+/// local, in the order of the exits: `<file>:<line>:<col>: leak: cannot prove '<place>' is empty at
+/// this exit`, at the `dead` marker or at the `return` (D17.20). When the leak work of `f` passed
+/// prover.WORK_LIMIT, a line `<file>:<line>:<col>: note: ` and LEAK_LIMIT_NOTE follows the first
+/// one, also when the work of D17.11 passed it too, because the leak work stopped the proof of the
+/// exits.
+fn write_leaks(fir.func* f, prover.proof* p, session.session mut* s, strbuf.str_buf mut* out)
+    void {
+    bool mut limit_told = false;
+    u64 mut k = 0;
+    while (k < p->exits.len) {
+        prover.exit* e = &p->exits[k];
+        if (!e->proved && !is_leak_repeated(f, p, k)) {
+            diag.loc at = exit_loc(f, e);
+            write_position(at, out);
+            strbuf.append(out, "leak: cannot prove '");
+            write_owner(f, e->local, s, out);
+            strbuf.append(out, "' is empty at this exit\n");
+            if (p->leak_over && !limit_told) {
+                write_position(at, out);
+                strbuf.append(out, "note: ");
+                strbuf.append(out, LEAK_LIMIT_NOTE);
+                strbuf.push(out, '\n');
+            }
+            limit_told = true;
+        }
+        k += 1;
     }
 }

@@ -603,6 +603,29 @@ bullet at a time and without a rewrite.
   rule; the counts of the families are measured. `tools/mutations/oracle.json` holds the mutants of
   `owner.place` and `owner.prover` that prove too much, with the oracle test as its one stage. The
   log of a round says whether the test printed a false accept or only a changed count.
+  **The test holds part 1 of the leak rule of D17.20 too.** An exit site is a function and the
+  location of a `dead` of an owner local outside an abort block, or of a `return`, and a `leak`
+  event at it is in the scope of the rule. The sites come from the FIR, and the exits of the proof
+  only mark them rejected: with sites from the proof alone, row D17.20-dead of
+  `tools/mutations/oracle.json`, which drops each obligation of a `dead`, changed only counts and
+  printed no false accept. The run reports a `leak` with no tag, at the item where the count of the
+  allocation becomes 0, and the `dead` markers of one scope share a location, so the test moves each
+  `dead` to a line of its own from `DEAD_LINE` before it proves and runs the batch (`relocate`); a
+  `dead` changes no fact and no run. Without the move, a `leak` of a struct local at a closing brace
+  would mark the site of an `own` local at that brace. The move gives each `leak` of two locals at
+  one brace its own event, so a change of the move changes the count `outside rule (a): leak` with
+  no change of a run. **The owners at one `return` share one site, and their `leak` has no tag.** So
+  one owner that the pass does not prove at a `return` hides a wrong proof of another owner at that
+  `return`: the site is a reject with an event either way. The parameters and the temporaries end at
+  the `return` together, and only a tag on the event would part them. A `leak` at the `return` of a
+  function with a parameter or a temporary of an owning aggregate type counts apart (`unsure
+  return`), because no event tells it from that of an owner local. **No other condition of a run
+  counts a `leak` apart.** A leak after a store through a dangling pointer is outside the guarantee
+  of D17.11, but a test that counted each `leak` of a run with a `use after scope` apart hid two
+  false accepts of mutants (`dangle_mix`, `late_dangle`): the access and the leak need not touch one
+  owner. Such a case stands in `test/fort/owner/prover_test.ft` with a comment, and not in the
+  oracle sets. The exit cases (`EXIT_CASES`) hold one case for each exit kind, and the seeded family
+  inserts into them as into the hand cases.
 - **The suites of fir.interpreter derive each expected value apart from the interpreter**
   (`test/fort/fir/interpreter_test.ft`, `interpreter_source_test.ft`). Python's integers and IEEE
   doubles gave each value at each boundary of each type when the cases were written: the wrap at
