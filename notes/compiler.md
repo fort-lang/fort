@@ -794,6 +794,9 @@ came here.
   `test/fort/owner/prover_test.ft` is unproved. Time a change of the pass with five interleaved
   `fort --check src/fort/main.ft` runs of main and of the change (`notes/environment.md` 1); the
   limit is +0.10 s (`spec/ownership-design.md` 9).
+  A memory owner is unknown after each call, so its `del` must come after the last call of the
+  function. Register the `defer del` of a memory owner before every other `defer`, so that it runs
+  last, after the last call (D17.20; `test/lang/run/stdlib/053_io_open_errors.ft`).
 - **The FIR interpreter runs the FIR of a closure before the emptiness pass**
   (`spec/ownership-design.md` 3, `src/fort/fir/interpreter.ft`). It is the reference semantics of
   the ownership checks, and `--fir-run` and the pass `run` of `--fir-test` start it
