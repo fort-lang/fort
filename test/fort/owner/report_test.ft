@@ -3,11 +3,14 @@
 //! stdout:
 //| report ok
 //| leak errors ok
+//| part 2 ok
 /// Checks owner.report: the error and the note of D17.11 at each check and each store that
 /// owner.prover does not prove, with the source text of its place, at its position, once for each
 /// location, and the note of the work limit. Then the error and the note of the leak rule (D17.20)
 /// at each exit that owner.prover does not prove, with the text of its owner, once for each
-/// location and owner, and the note of the leak limit.
+/// location and owner, and the note of the leak limit. Then the lines of `--leak-report` for each
+/// site of part 2 that owner.prover does not prove, with the text of its first inner owner, once
+/// for each location.
 import check_env;
 import fort.fir;
 import fort.fir_lower;
@@ -17,6 +20,7 @@ import lower_env;
 import modules_env;
 import pass_env;
 import std.str;
+import std.strbuf;
 
 // The types, the global and the function that the FIR texts of the cases name.
 string[8] PRELUDE = {
@@ -772,6 +776,314 @@ fn a_proof_with_no_leak_has_no_error() void {
     assert(check_env.reports(&e.c) == before);
 }
 
+
+// ---- the report of part 2 ----------------------------------------------------------------------
+
+// Sources whose obligations of part 2 the pass does not prove. The report names the first inner
+// owner that the pass does not prove, from the source text of `p` and the names of the fields. A
+// `del` of `*pp` takes a parenthesis, a pointer to an array an element, and a pointer to an owner
+// the owner `*p`. The deferred `del` expands at two exits with one location, and `clean` has no
+// site that the pass does not prove. A `shelf` has the inner owners of its two `bin`s, then its
+// owning `string`: `shelf_late` leaves the second element of the second `bin`, and `named` the
+// `string`. The operand of `index` is an index, that of `pairs` points to an array of structs, and
+// the `cast` of `cast_call` takes the result of a call. The deferred `del` of `deferred_late`
+// expands first at the closing brace, where the pass proves it, and then at the `return`, where
+// the store into `q->a` leaves an owner: the line stands for the second expansion.
+string[96] RELEASED = {
+    "struct bin {",
+    "    i32 mut* own a;",
+    "    i32 mut* own[2] e;",
+    "}",
+    "struct outer {",
+    "    bin in;",
+    "}",
+    "struct holder {",
+    "    bin mut* own b;",
+    "}",
+    "fn make() bin mut* own {",
+    "    return new(bin);",
+    "}",
+    "fn param(bin mut* own p) void {",
+    "    del(p);",
+    "}",
+    "fn nested(outer mut* own o) void {",
+    "    del(o);",
+    "}",
+    "fn array(i32 mut* own[2] mut* own p) void {",
+    "    del(p);",
+    "}",
+    "fn owner(i32 mut* own mut* own p) void {",
+    "    del(p);",
+    "}",
+    "fn through(bin mut* own mut* pp) void {",
+    "    del(*pp);",
+    "}",
+    "fn field(holder mut h) void {",
+    "    del(h.b);",
+    "}",
+    "fn rvalue() void {",
+    "    del(make());",
+    "}",
+    "fn cast_owner(bin mut* own q) void {",
+    "    void* own v = cast(move(q), void* own);",
+    "    del(v);",
+    "}",
+    "fn deferred(bool c, bin mut* own q) void {",
+    "    defer del(q);",
+    "    if (c) {",
+    "        return;",
+    "    }",
+    "}",
+    "fn later(bin mut* own q) void {",
+    "    del(q->a);",
+    "    del(q->e[0]);",
+    "    del(q);",
+    "}",
+    "fn clean() void {",
+    "    bin mut* own q = new(bin);",
+    "    del(q);",
+    "}",
+    "struct shelf {",
+    "    bin[2] bins;",
+    "    string own name;",
+    "}",
+    "fn shelf_late(shelf mut* own s) void {",
+    "    del(s->bins[0].a);",
+    "    del(s->bins[0].e[0]);",
+    "    del(s->bins[0].e[1]);",
+    "    del(s->bins[1].a);",
+    "    del(s->bins[1].e[1]);",
+    "    del(s);",
+    "}",
+    "fn named(shelf mut* own s) void {",
+    "    del(s->bins[0].a);",
+    "    del(s->bins[0].e[0]);",
+    "    del(s->bins[0].e[1]);",
+    "    del(s->bins[1].a);",
+    "    del(s->bins[1].e[0]);",
+    "    del(s->bins[1].e[1]);",
+    "    del(s);",
+    "}",
+    "fn index(bin mut* own mut@ v, u64 i) void {",
+    "    del(v[i]);",
+    "}",
+    "fn pairs(bin[2] mut* own p) void {",
+    "    del(p);",
+    "}",
+    "fn cast_call() void {",
+    "    void* own v = cast(make(), void* own);",
+    "    del(v);",
+    "}",
+    "fn two_sites(bin mut* own p, bin mut* own q) void {",
+    "    del(p);",
+    "    del(q);",
+    "}",
+    "fn deferred_late(bool c) void {",
+    "    bin mut* own q = new(bin);",
+    "    defer del(q);",
+    "    if (c) {",
+    "        q->a = new(i32);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[19] RELEASED_NAMES = {
+    "param", "nested", "array", "owner", "through", "field", "rvalue", "cast_owner", "deferred",
+    "later", "clean", "make", "shelf_late", "named", "index", "pairs", "cast_call", "two_sites",
+    "deferred_late",
+};
+
+// The lines of each site of RELEASED that the pass does not prove, in order, after the file of
+// the function: the message and the note at the `del` keyword or at the `cast`.
+string[36] RELEASED_LINES = {
+    ":15:5: leak: cannot prove 'p->a' is empty before this del",
+    ":15:5: note: move 'p->a' into a local and del it first",
+    ":18:5: leak: cannot prove 'o->in.a' is empty before this del",
+    ":18:5: note: move 'o->in.a' into a local and del it first",
+    ":21:5: leak: cannot prove '(*p)[0]' is empty before this del",
+    ":21:5: note: move '(*p)[0]' into a local and del it first",
+    ":24:5: leak: cannot prove '*p' is empty before this del",
+    ":24:5: note: move '*p' into a local and del it first",
+    ":27:5: leak: cannot prove '(*pp)->a' is empty before this del",
+    ":27:5: note: move '(*pp)->a' into a local and del it first",
+    ":30:5: leak: cannot prove 'h.b->a' is empty before this del",
+    ":30:5: note: move 'h.b->a' into a local and del it first",
+    ":33:5: leak: cannot prove 'make()->a' is empty before this del",
+    ":33:5: note: move 'make()->a' into a local and del it first",
+    ":36:19: leak: cannot prove 'q->a' is empty before this cast",
+    ":36:19: note: move 'q->a' into a local and del it first",
+    ":40:11: leak: cannot prove 'q->a' is empty before this del",
+    ":40:11: note: move 'q->a' into a local and del it first",
+    ":48:5: leak: cannot prove 'q->e[1]' is empty before this del",
+    ":48:5: note: move 'q->e[1]' into a local and del it first",
+    ":64:5: leak: cannot prove 's->bins[1].e[0]' is empty before this del",
+    ":64:5: note: move 's->bins[1].e[0]' into a local and del it first",
+    ":73:5: leak: cannot prove 's->name' is empty before this del",
+    ":73:5: note: move 's->name' into a local and del it first",
+    ":76:5: leak: cannot prove 'v[i]->a' is empty before this del",
+    ":76:5: note: move 'v[i]->a' into a local and del it first",
+    ":79:5: leak: cannot prove '(*p)[0].a' is empty before this del",
+    ":79:5: note: move '(*p)[0].a' into a local and del it first",
+    ":82:19: leak: cannot prove 'make()->a' is empty before this cast",
+    ":82:19: note: move 'make()->a' into a local and del it first",
+    ":86:5: leak: cannot prove 'p->a' is empty before this del",
+    ":86:5: note: move 'p->a' into a local and del it first",
+    ":87:5: leak: cannot prove 'q->a' is empty before this del",
+    ":87:5: note: move 'q->a' into a local and del it first",
+    ":91:11: leak: cannot prove 'q->a' is empty before this del",
+    ":91:11: note: move 'q->a' into a local and del it first",
+};
+
+// The lines of `two_sites` past the work limit: only the first line of the function takes the note
+// of the leak limit.
+string[5] TWO_LIMIT_LINES = {
+    ":86:5: leak: cannot prove 'p->a' is empty before this del",
+    ":86:5: note: move 'p->a' into a local and del it first",
+    ":86:5: note: the function exceeds the work limit of the leak rule; split it",
+    ":87:5: leak: cannot prove 'q->a' is empty before this del",
+    ":87:5: note: move 'q->a' into a local and del it first",
+};
+
+// The lines of `later` past the work limit: no obligation is proved, so the line names its first
+// inner owner, and the note of the leak limit follows it.
+string[3] RELEASED_LIMIT_LINES = {
+    ":48:5: leak: cannot prove 'q->a' is empty before this del",
+    ":48:5: note: move 'q->a' into a local and del it first",
+    ":48:5: note: the function exceeds the work limit of the leak rule; split it",
+};
+
+// Holds that `got` holds the lines of `want`, each after `file`, in order and nothing else.
+fn expect_lines(string got, string file, string@ want) void {
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut k = 0;
+    while (k < want.len) {
+        strbuf.append(&text, file);
+        strbuf.append(&text, want[k]);
+        strbuf.push(&text, '\n');
+        k += 1;
+    }
+    if (got != strbuf.view(&text)) {
+        eprintln(got, "and not\n", strbuf.view(&text));
+        panic("report_test: the lines of part 2 differ");
+    }
+}
+
+// The report of part 2 names the first inner owner of each site that the pass does not prove, at
+// the `del` keyword or at the `cast`, once for each location, in the file of the function. It
+// writes no diagnostic: part 2 is no error yet (D17.20). Past the work limit the first line takes
+// the note of the leak limit.
+fn the_report_of_part_2_names_the_first_inner_owner_of_each_site() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, RELEASED[..], true);
+    string file = lower_env.decl(&e, "param")->loc.file;
+    assert(str.ends_with(file, "main.ft"));
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    u64 before = check_env.reports(&e.c);
+    u64 mut k = 0;
+    while (k < RELEASED_NAMES.len) {
+        fir.func mut f = fir.func{};
+        lower(&e, RELEASED_NAMES[k], &f);
+        prover.proof mut p = prover.prove(&f);
+        report.write_inners(&f, &p, &e.c.m.s, &got);
+        prover.free(&p);
+        fir.func_free(&f);
+        k += 1;
+    }
+    assert(check_env.reports(&e.c) == before);
+    expect_lines(strbuf.view(&got), file, RELEASED_LINES[..]);
+    fir.func mut later = fir.func{};
+    defer fir.func_free(&later);
+    lower(&e, "later", &later);
+    prover.proof mut over = prover.prove_within(&later, 0);
+    defer prover.free(&over);
+    assert(over.inner_over && over.inner_leaks == 1);
+    strbuf.clear(&got);
+    report.write_inners(&later, &over, &e.c.m.s, &got);
+    expect_lines(strbuf.view(&got), file, RELEASED_LIMIT_LINES[..]);
+    fir.func mut two = fir.func{};
+    defer fir.func_free(&two);
+    lower(&e, "two_sites", &two);
+    prover.proof mut both = prover.prove_within(&two, 0);
+    defer prover.free(&both);
+    assert(both.inner_over && both.inner_leaks == 2);
+    strbuf.clear(&got);
+    report.write_inners(&two, &both, &e.c.m.s, &got);
+    expect_lines(strbuf.view(&got), file, TWO_LIMIT_LINES[..]);
+    assert(check_env.reports(&e.c) == before);
+}
+
+// The type of the FIR texts of TEXT_RELEASED.
+string[4] TEXT_PRELUDE = {
+    "struct bin {",
+    "    i32 mut* own a;",
+    "    i32 mut* own[2] e;",
+    "}",
+};
+
+// FIR texts with locations and no tree: the report names the FIR place of the inner owner, with
+// the number of each field and the index of each element.
+string[18] TEXT_RELEASED = {
+    "fn main.r1(_1 (q): bin mut* own) -> void {",
+    "    let _2: u64;",
+    "    bb0: {",
+    "        del(move (*_1).0) #2:1;",
+    "        _2 = const u64 0 #3:1;",
+    "        del(move (*_1).1[_2]) #3:1;",
+    "        del(move _1) #4:1;",
+    "        return #5:1;",
+    "    }",
+    "}",
+    "fn main.r2(_1 (q): bin mut* own) -> void {",
+    "    let _2: void* own;",
+    "    bb0: {",
+    "        _2 = cast<void* own>(move _1) #7:1;",
+    "        del(move _2) #8:1;",
+    "        return #9:1;",
+    "    }",
+    "}",
+};
+
+string[4] TEXT_RELEASED_LINES = {
+    "t.fir:4:1: leak: cannot prove '(*_1).1[1]' is empty before this del\n",
+    "t.fir:4:1: note: move '(*_1).1[1]' into a local and del it first\n",
+    "t.fir:7:1: leak: cannot prove '(*_1).0' is empty before this cast\n",
+    "t.fir:7:1: note: move '(*_1).0' into a local and del it first\n",
+};
+
+// With no tree, the report of part 2 names the FIR place.
+fn the_report_of_part_2_in_a_fir_text_names_the_fir_place() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    fir.module mut m = pass_env.parse(&e, TEXT_PRELUDE[..], TEXT_RELEASED[..]);
+    defer fir.module_free(&m);
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    u64 mut f = 0;
+    while (f < m.funcs.len) {
+        prover.proof mut p = prover.prove(&m.funcs.items[f]);
+        report.write_inners(&m.funcs.items[f], &p, &e.c.m.s, &got);
+        prover.free(&p);
+        f += 1;
+    }
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    u64 mut k = 0;
+    while (k < TEXT_RELEASED_LINES.len) {
+        strbuf.append(&want, TEXT_RELEASED_LINES[k]);
+        k += 1;
+    }
+    if (strbuf.view(&got) != strbuf.view(&want)) {
+        eprintln(strbuf.view(&got));
+        panic("report_test: the lines of part 2 of a FIR text differ");
+    }
+}
+
 fn main() i32 {
     the_report_names_each_place_at_its_position();
     the_report_of_a_fir_text_names_the_fir_place();
@@ -784,5 +1096,8 @@ fn main() i32 {
     the_leak_limit_takes_its_own_note();
     a_proof_with_no_leak_has_no_error();
     println("leak errors ok");
+    the_report_of_part_2_names_the_first_inner_owner_of_each_site();
+    the_report_of_part_2_in_a_fir_text_names_the_fir_place();
+    println("part 2 ok");
     return 0;
 }

@@ -106,11 +106,12 @@ string EXHAUSTIVE_PREFIX = "gen";
 
 /// The locals that a function of the exhaustive family can declare, in the order of their
 /// declarations: two owning pointers, an owning array of two elements, two index locals, two view
-/// locals, the struct local, a pointer to an owning local, a pointer to that pointer and a `u64`.
-/// A function declares a local only when a statement names it, so `x` is memory only in a function
-/// that names `p` or `pp`. `p` needs `x`, and `pp` needs `p`.
-u64 LOCAL_COUNT = 11;
-string[LOCAL_COUNT] LOCAL_NAME = {"x", "y", "arr", "j", "k", "v", "w", "c", "p", "pp", "u"};
+/// locals, the struct local, a pointer to an owning local, a pointer to that pointer, a `u64`, and
+/// an owning pointer to a `pair`, whose deferred `del` frees it at each exit with its inner owners
+/// (part 2 of D17.20). A function declares a local only when a statement names it, so `x` is memory
+/// only in a function that names `p` or `pp`. `p` needs `x`, and `pp` needs `p`.
+u64 LOCAL_COUNT = 12;
+string[LOCAL_COUNT] LOCAL_NAME = {"x", "y", "arr", "j", "k", "v", "w", "c", "p", "pp", "u", "r"};
 string[LOCAL_COUNT] LOCAL_DECL = {
     "i32 mut* own mut x = null;",
     "i32 mut* own mut y = null;",
@@ -123,6 +124,7 @@ string[LOCAL_COUNT] LOCAL_DECL = {
     "i32 mut* own mut* p = &x;",
     "i32 mut* own mut** pp = &p;",
     "u64 mut u = 0;",
+    "pair mut* own r = new(pair);\n    defer del(r);",
 };
 
 // The bit of `x`, `p` and `pp` in a mask of LOCAL_NAME.
@@ -134,12 +136,14 @@ u32 LOCAL_PP = 512;
 /// its function, and `$` for the name of the sibling of the function. A statement that ends with
 /// `{` opens a block that holds each statement after it. The owner places are `x`, `y`, `arr[j]`,
 /// `arr[k]`, `c.o`, `q->a`, `q->b`, `G`, `*p` and `**pp`: an `alloc`, a `del` and a store of null
-/// into each, and a `move` from and into each. Then a lend into each view local and into the view
+/// into each, and a `move` from and into each. The inner owner `r->a` takes an `alloc`, a `del`,
+/// a `move` into `x` and a call that can change it through a pointer, so the deferred `del(r)`
+/// finds it empty or live. Then a lend into each view local and into the view
 /// field, a lend from a field through the parameter, a load through each view, a cast to `u64`
 /// and back, two deferred `del`s, a call of each model extern, a call that can change each owner
 /// through a pointer, a call of the sibling, `panic`, a store into an index local, an `if` on the
 /// `bool`, a loop of two iterations and `return`.
-u64 VOCABULARY_SIZE = 77;
+u64 VOCABULARY_SIZE = 81;
 string[VOCABULARY_SIZE] VOCABULARY = {
     "x = new(i32);",
     "y = new(i32);",
@@ -218,6 +222,10 @@ string[VOCABULARY_SIZE] VOCABULARY = {
     "if (b) {",
     "for (u64 mut t# = 0; t# < 2; t#++) {",
     "return;",
+    "r->a = new(i32);",
+    "del(r->a);",
+    "x = move(r->a);",
+    "put(&r->a);",
 };
 
 /// The statements that a function of the exhaustive family can start with: a release of each

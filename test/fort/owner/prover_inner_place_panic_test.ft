@@ -1,0 +1,47 @@
+//! run
+//! flags: -I ../../src -I support
+//! abort
+//! stderr: panic: owner.prover.inner_place: the statement releases no object with inner owners
+//! stdout:
+//| 1 1 1
+/// inner_place gives the place of the `del` or of the operand of the `cast` of an obligation of
+/// part 2 of the leak rule. The proof of `f` holds one obligation, the `del` of `_1`, statement 1
+/// of `bb0`. The test then asks for the place of an obligation at statement 0, a store of a
+/// constant, which releases nothing. owner.prover makes an obligation only at a release.
+import fort.fir;
+import fort.owner.prover;
+import lower_env;
+import pass_env;
+
+string[3] PRELUDE = {
+    "struct bin {",
+    "    i32 mut* own a;",
+    "}",
+};
+
+string[8] TEXT = {
+    "fn main.f(_1 (q): bin mut* own) -> void {",
+    "    let _2: u64;",
+    "    bb0: {",
+    "        _2 = const u64 0;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+fn main() i32 {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    fir.module mut m = pass_env.parse(&e, PRELUDE[..], TEXT[..]);
+    defer fir.module_free(&m);
+    fir.func* f = &m.funcs.items[0];
+    prover.proof mut p = prover.prove(f);
+    defer prover.free(&p);
+    fir.place q = prover.inner_place(f, &p.inners[0]);
+    println(p.inners.len, " ", p.inners[0].index, " ", q.local);
+    prover.inner wrong = prover.inner{0, 0, 1, 0, false};
+    prover.inner_place(f, &wrong);
+    return 0;
+}

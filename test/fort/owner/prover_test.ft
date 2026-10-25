@@ -36,6 +36,12 @@
 //| exit kinds ok
 //| work ok
 //| leak work ok
+//| inners ok
+//| inner kinds ok
+//| inner work ok
+//| inner order ok
+//| inner scale ok
+//| inner doubling ok
 /// Checks owner.prover, the proof of each overwrite check (spec/fir.md 11). Each gen rule, each
 /// kill rule and each definition of the rule has a group of cases over FIR text, and each group
 /// holds a case that the pass proves and a case that it does not prove. The examples of the rule
@@ -46,18 +52,28 @@ import fort.fir;
 import fir_env;
 import fort.fir_lower;
 import fort.fir_parse;
+import fort.owner.place;
 import fort.owner.prover;
 import fort.owner.report;
 import heap;
 import lower_env;
 import pass_env;
 import fort.session;
+import fort.types;
+import std.str;
 import std.strbuf;
 
 // The types, the globals and the functions that the FIR text of each case names. A `node` has
 // two owning fields, a fixed array of two owning pointers and an owning span of them. A `pair`
-// has two owning fields.
-string[41] PRELUDE = {
+// has two owning fields. A `bin` has an owning field and a fixed array of two owning pointers, its
+// three inner owners, and a `holder` has an owning pointer to a `bin`. A `shelf` has nine inner
+// owners: the three of each of its two `bin`s, an owning `string`, an owning `void*` and an owning
+// span, and a pointer that does not own. A `big` has 2^32 + 1 inner owners, past
+// types.OWNER_CAP. A `plain` has no inner owner, and a `label` has one, an owning `string`. A
+// `wide` has 170000 inner owners in a fixed array and a `wide2` 100000, and a `deep` 101000 in
+// 1000 `block`s of 101, each under the limit of the inner work. The chain `c0` to `c9` holds 50000
+// inner owners at the end of 11 steps, past the limit.
+string[108] PRELUDE = {
     "struct node {",
     "    node mut* own left;",
     "    node mut* own right;",
@@ -98,6 +114,73 @@ string[41] PRELUDE = {
     "fn put(node mut* own mut* p) void {",
     "    del(*p);",
     "    *p = new(node);",
+    "}",
+    "struct bin {",
+    "    i32 mut* own a;",
+    "    i32 mut* own[2] e;",
+    "}",
+    "struct holder {",
+    "    bin mut* own b;",
+    "}",
+    "struct shelf {",
+    "    bin[2] bins;",
+    "    string own name;",
+    "    void* own any;",
+    "    i32* view;",
+    "    bin mut@ own list;",
+    "}",
+    "struct big {",
+    "    i32 mut* own[4294967297] e;",
+    "}",
+    "struct plain {",
+    "    i32 v;",
+    "    i32* w;",
+    "}",
+    "struct label {",
+    "    string own text;",
+    "}",
+    "struct wide {",
+    "    i32 mut* own[170000] e;",
+    "}",
+    "struct wide2 {",
+    "    i32 mut* own[100000] e;",
+    "}",
+    "struct block {",
+    "    i32 mut* own[100] e;",
+    "    i32 mut* own f;",
+    "}",
+    "struct deep {",
+    "    block[1000] blocks;",
+    "}",
+    "struct c0 {",
+    "    c1 n;",
+    "}",
+    "struct c1 {",
+    "    c2 n;",
+    "}",
+    "struct c2 {",
+    "    c3 n;",
+    "}",
+    "struct c3 {",
+    "    c4 n;",
+    "}",
+    "struct c4 {",
+    "    c5 n;",
+    "}",
+    "struct c5 {",
+    "    c6 n;",
+    "}",
+    "struct c6 {",
+    "    c7 n;",
+    "}",
+    "struct c7 {",
+    "    c8 n;",
+    "}",
+    "struct c8 {",
+    "    c9 n;",
+    "}",
+    "struct c9 {",
+    "    i32 mut* own[50000] e;",
     "}",
 };
 
@@ -6646,14 +6729,1076 @@ fn each_exit_kind_of_lowered_source_has_its_obligation() void {
     }
 }
 
+// ---- the inner owners of part 2 of the leak rule -----------------------------------------------
+
+// Each case is a FIR function and the verdicts of its obligations of part 2 (write_inners). The
+// comment of a case gives them. A `del` of `p`, and a `cast` that carries `own` from `p` to a
+// pointer to another type, where the type of `p` is `T* own` and `T` holds inner owners, has the
+// obligation that each inner owner of `*p` holds the zero value right before it (D17.20 part 2).
+// The inner owners of a `bin` are `a`, `e[0]` and `e[1]`, numbered 0 to 2.
+string[418] INNERS = {
+    // a parameter has no fact of its inner owners at the entry: dU0
+    "fn main.i1(_1 (q): bin mut* own) -> void {",
+    "    bb0: {",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a `del` of each inner owner first, the elements with the constant keys 0 and 1: dP
+    "fn main.i2(_1 (q): bin mut* own) -> void {",
+    "    let _2: u64;",
+    "    let _3: u64;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        _2 = const u64 0;",
+    "        del(move (*_1).1[_2]);",
+    "        _3 = const u64 1;",
+    "        del(move (*_1).1[_3]);",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // the same with no `del` of the last element, inner owner 2: dU2
+    "fn main.i3(_1 (q): bin mut* own) -> void {",
+    "    let _2: u64;",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        _2 = const u64 0;",
+    "        del(move (*_1).1[_2]);",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a fresh `new` makes each inner owner empty: dP
+    "fn main.i4() -> void {",
+    "    let _1 (q): bin mut* own;",
+    "    let _2: bin mut* own;",
+    "    bb0: {",
+    "        _1 = const zero bin mut* own;",
+    "        live(_1);",
+    "        _2 = alloc<bin>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _2;",
+    "        del(move _1);",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // a store into an inner owner after the `new` kills its fact: dU0
+    "fn main.i5() -> void {",
+    "    let _1 (q): bin mut* own;",
+    "    let _2: bin mut* own;",
+    "    let _3: i32 mut* own;",
+    "    bb0: {",
+    "        _1 = const zero bin mut* own;",
+    "        live(_1);",
+    "        _2 = alloc<bin>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _2;",
+    "        _3 = alloc<i32>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        (*_1).0 = move _3;",
+    "        del(move _1);",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // a call kills each fact through `_1`, which is reached through memory: dU0
+    "fn main.i6() -> void {",
+    "    let _1 (q): bin mut* own;",
+    "    let _2: bin mut* own;",
+    "    let _3: void;",
+    "    bb0: {",
+    "        _1 = const zero bin mut* own;",
+    "        live(_1);",
+    "        _2 = alloc<bin>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _2;",
+    "        _3 = call fn main.g();",
+    "        del(move _1);",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // the address of `_1` makes it memory, so no place through it is tracked: dU0
+    "fn main.i7() -> void {",
+    "    let _1 (q): bin mut* own;",
+    "    let _2: bin mut* own;",
+    "    let _3: bin mut* own mut*;",
+    "    bb0: {",
+    "        _1 = const zero bin mut* own;",
+    "        live(_1);",
+    "        _2 = alloc<bin>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _2;",
+    "        _3 = addr mut(_1);",
+    "        del(move _1);",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // a `cast` of a fresh pointer to `void* own`: cP; the `del` of its result has no obligation
+    "fn main.i8() -> void {",
+    "    let _1 (q): bin mut* own;",
+    "    let _2: bin mut* own;",
+    "    let _3: void* own;",
+    "    bb0: {",
+    "        _1 = const zero bin mut* own;",
+    "        live(_1);",
+    "        _2 = alloc<bin>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _2;",
+    "        _3 = cast<void* own>(move _1);",
+    "        del(move _3);",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // a store into element 1 kills the facts of both elements, whose keys can be equal, and keeps
+    // the fact of the separate field `a`: cU1
+    "fn main.i9() -> void {",
+    "    let _1 (q): bin mut* own;",
+    "    let _2: bin mut* own;",
+    "    let _3: void* own;",
+    "    let _4: u64;",
+    "    let _5: i32 mut* own;",
+    "    bb0: {",
+    "        _1 = const zero bin mut* own;",
+    "        live(_1);",
+    "        _2 = alloc<bin>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _2;",
+    "        _4 = const u64 1;",
+    "        _5 = alloc<i32>(const u64 1);",
+    "        check(overwrite: (*_1).1[_4]) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        (*_1).1[_4] = move _5;",
+    "        _3 = cast<void* own>(move _1);",
+    "        del(move _3);",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // a `cast` to a pointer to `bin` keeps each owner and has no obligation, and the store of its
+    // result kills each fact through `_3`: dU0
+    "fn main.i10() -> void {",
+    "    let _1 (q): bin mut* own;",
+    "    let _2: bin mut* own;",
+    "    let _3: bin* own;",
+    "    bb0: {",
+    "        _1 = const zero bin mut* own;",
+    "        live(_1);",
+    "        _2 = alloc<bin>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _2;",
+    "        _3 = cast<bin* own>(move _1);",
+    "        del(move _3);",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // a span whose elements hold owners waits for refinement R8: no obligation
+    "fn main.i11(_1 (s): bin mut@ own) -> void {",
+    "    bb0: {",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a `del` of a field: the place is no pointer local, so no place through it is tracked, and
+    // the function has no owner local and no store: dU0
+    "fn main.i12(_1 (h): holder mut*) -> void {",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        return;",
+    "    }",
+    "}",
+    // a pointer to an owner: the object is itself the inner owner: dU0
+    "fn main.i13(_1 (p): i32 mut* own mut* own) -> void {",
+    "    bb0: {",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // the `del` of the object first, which holds no inner owner: dP
+    "fn main.i14(_1 (p): i32 mut* own mut* own) -> void {",
+    "    bb0: {",
+    "        del(move (*_1));",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a pointer to an object with no owner: no obligation
+    "fn main.i15(_1 (p): i32 mut* own) -> void {",
+    "    bb0: {",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // D17.20 gives part 2 no exception for an abort block: dU0
+    "fn main.i16(_1 (q): bin mut* own) -> void {",
+    "    bb0: {",
+    "        del(move _1);",
+    "        trap;",
+    "    }",
+    "}",
+    // a store of the zero value into the object makes each inner owner empty: dP
+    "fn main.i17(_1 (q): bin mut* own) -> void {",
+    "    bb0: {",
+    "        (*_1) = const zero bin;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // the temporary of `del(new(bin))`: dP
+    "fn main.i18() -> void {",
+    "    let _1: bin mut* own;",
+    "    bb0: {",
+    "        _1 = alloc<bin>(const u64 1);",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // the temporary of `del(move(q))`: its store kills each fact through it: dU0
+    "fn main.i19(_1 (q): bin mut* own) -> void {",
+    "    let _2: bin mut* own;",
+    "    bb0: {",
+    "        _2 = move _1;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // two `del`s of fields through one parameter: dU0 dU0
+    "fn main.i20(_1 (h): holder mut*) -> void {",
+    "    bb0: {",
+    "        del(move (*_1).0);",
+    "        del(move (*_1).0);",
+    "        return;",
+    "    }",
+    "}",
+    // the inner owners of a `shelf` are `bins[0].a`, `bins[0].e[0]`, `bins[0].e[1]`, then those
+    // of `bins[1]`, then `name`, `any` and `list`; each but `bins[1].e[0]` is freed: dU4
+    "fn main.i21(_1 (s): shelf mut* own) -> void {",
+    "    let _2: u64;",
+    "    let _3: u64;",
+    "    bb0: {",
+    "        _2 = const u64 0;",
+    "        _3 = const u64 1;",
+    "        del(move (*_1).0[_2].0);",
+    "        del(move (*_1).0[_2].1[_2]);",
+    "        del(move (*_1).0[_2].1[_3]);",
+    "        del(move (*_1).0[_3].0);",
+    "        del(move (*_1).0[_3].1[_3]);",
+    "        del(move (*_1).1);",
+    "        del(move (*_1).2);",
+    "        del(move (*_1).4);",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // the same with each inner owner freed, the span `list` and the `string` with no site: dP
+    "fn main.i22(_1 (s): shelf mut* own) -> void {",
+    "    let _2: u64;",
+    "    let _3: u64;",
+    "    bb0: {",
+    "        _2 = const u64 0;",
+    "        _3 = const u64 1;",
+    "        del(move (*_1).0[_2].0);",
+    "        del(move (*_1).0[_2].1[_2]);",
+    "        del(move (*_1).0[_2].1[_3]);",
+    "        del(move (*_1).0[_3].0);",
+    "        del(move (*_1).0[_3].1[_2]);",
+    "        del(move (*_1).0[_3].1[_3]);",
+    "        del(move (*_1).1);",
+    "        del(move (*_1).2);",
+    "        del(move (*_1).4);",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // 2^32 + 1 inner owners pass the limit of the inner work, so the site is unproved with no
+    // fact of its own: dU0
+    "fn main.i23(_1 (b): big mut* own) -> void {",
+    "    bb0: {",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a cast to `u64` and a cast from `void mut* own` carry no inner owner, and the `del` of the
+    // result has no fact: dU0 dU0
+    "fn main.i24(_1 (q): bin mut* own, _2 (v): void mut* own) -> void {",
+    "    let _3: u64;",
+    "    let _4: bin mut* own;",
+    "    bb0: {",
+    "        _3 = cast<u64>(copy _1);",
+    "        _4 = cast<bin mut* own>(move _2);",
+    "        del(move _4);",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a `del` in a block that no edge reaches holds each fact: dU0 dP
+    "fn main.i25(_1 (q): bin mut* own) -> void {",
+    "    bb0: {",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "    bb1: {",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a fresh `new` on one edge and a parameter on the other: the join holds no fact, dU0 dU0
+    "fn main.i26(_1 (c): bool, _2 (p): bin mut* own) -> void {",
+    "    let _3 (q): bin mut* own;",
+    "    let _4: bin mut* own;",
+    "    bb0: {",
+    "        _3 = const zero bin mut* own;",
+    "        live(_3);",
+    "        switch(copy _1) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _4 = alloc<bin>(const u64 1);",
+    "        check(overwrite: _3) -> bb3;",
+    "    }",
+    "    bb2: {",
+    "        check(overwrite: _3) -> bb4;",
+    "    }",
+    "    bb3: {",
+    "        _3 = move _4;",
+    "        del(move _2);",
+    "        goto bb5;",
+    "    }",
+    "    bb4: {",
+    "        _3 = move _2;",
+    "        goto bb5;",
+    "    }",
+    "    bb5: {",
+    "        del(move _3);",
+    "        dead(_3);",
+    "        return;",
+    "    }",
+    "}",
+    // two sites in one block: the first finds the facts of the fresh `_1`, and the call between
+    // them kills each fact through `_2`: dP dU0
+    "fn main.i27() -> void {",
+    "    let _1 (q): bin mut* own;",
+    "    let _2 (r): bin mut* own;",
+    "    let _3: bin mut* own;",
+    "    let _4: bin mut* own;",
+    "    let _5: void;",
+    "    bb0: {",
+    "        _1 = const zero bin mut* own;",
+    "        _2 = const zero bin mut* own;",
+    "        live(_1);",
+    "        live(_2);",
+    "        _3 = alloc<bin>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _3;",
+    "        _4 = alloc<bin>(const u64 1);",
+    "        check(overwrite: _2) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        _2 = move _4;",
+    "        del(move _1);",
+    "        _5 = call fn main.g();",
+    "        del(move _2);",
+    "        dead(_1);",
+    "        dead(_2);",
+    "        return;",
+    "    }",
+    "}",
+    // a cast to a pointer to another struct with inner owners takes the obligation of `bin`, and
+    // the `del` of its result takes that of `holder`: cU0 dU0
+    "fn main.i28(_1 (q): bin mut* own) -> void {",
+    "    let _2: holder mut* own;",
+    "    bb0: {",
+    "        _2 = cast<holder mut* own>(move _1);",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // a struct with no inner owner: no obligation
+    "fn main.i29(_1 (p): plain mut* own) -> void {",
+    "    bb0: {",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // an owning `string` is an inner owner, and its `del` makes it empty: dU0 dP
+    "fn main.i30(_1 (l): label mut* own, _2 (m): label mut* own) -> void {",
+    "    bb0: {",
+    "        del(move _1);",
+    "        del(move (*_2).0);",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // a cast to a pointer that does not own lends the object and keeps each owner: no
+    // obligation; the `del` after it has no fact through the parameter: dU0
+    "fn main.lend(_1 (q): bin mut* own) -> void {",
+    "    let _2: void*;",
+    "    bb0: {",
+    "        _2 = cast<void*>(copy _1);",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a cast that drops only the `own` of the pointee: `i32 mut*` is another type than `i32 mut*
+    // own` with its marks, so the cast takes the obligation, and the `del` of its result, whose
+    // object holds no owner, has none: cU0
+    "fn main.marks(_1 (pp): i32 mut* own mut* own) -> void {",
+    "    let _2: i32 mut** own;",
+    "    bb0: {",
+    "        _2 = cast<i32 mut** own>(move _1);",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // a loop: the `del` of each round finds the fresh `new` of that round, as the back edge
+    // carries the `del` of the round before: dP
+    "fn main.i31(_1 (c): bool) -> void {",
+    "    let _2 (q): bin mut* own;",
+    "    let _3: bin mut* own;",
+    "    bb0: {",
+    "        _2 = const zero bin mut* own;",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        switch(copy _1) -> [true: bb2, otherwise: bb4];",
+    "    }",
+    "    bb2: {",
+    "        live(_2);",
+    "        _3 = alloc<bin>(const u64 1);",
+    "        check(overwrite: _2) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        _2 = move _3;",
+    "        del(move _2);",
+    "        dead(_2);",
+    "        goto bb1;",
+    "    }",
+    "    bb4: {",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[33] INNERS_VERDICTS = {
+    "dU0", "dP", "dU2", "dP", "dU0", "dU0", "dU0", "cP", "cU1", "dU0", "", "dU0", "dU0", "dP", "",
+    "dU0", "dP", "dP", "dU0", "dU0 dU0", "dU4", "dP", "dU0", "dU0 dU0", "dU0 dP", "dU0 dU0",
+    "dP dU0", "cU0 dU0", "", "dU0 dP", "dU0", "cU0", "dP",
+};
+
+// The obligations of part 2 over lowered fort source: a `del` of a pointer local whose inner
+// owners are empty and one whose inner owner holds an allocation, a parameter, a memory pointer,
+// a call, a `cast` to `void* own` and to a pointer to the same type, a span whose elements hold
+// owners, a nested struct, a deferred `del`, a `del` before a `panic`, the fix that D17.20 names
+// and a `del` in a loop. A comment gives the
+// verdicts of each function (write_inners).
+string[117] INNER_KINDS = {
+    "struct bin {",
+    "    i32 mut* own a;",
+    "    i32 mut* own[2] e;",
+    "}",
+    "struct outer {",
+    "    i32 mut* own a;",
+    "    bin in;",
+    "}",
+    "fn g() void {",
+    "}",
+    // dP
+    "fn fresh() void {",
+    "    bin mut* own q = new(bin);",
+    "    del(q);",
+    "}",
+    // dU0
+    "fn live() void {",
+    "    bin mut* own q = new(bin);",
+    "    q->a = new(i32);",
+    "    del(q);",
+    "}",
+    // dP
+    "fn emptied() void {",
+    "    bin mut* own q = new(bin);",
+    "    q->a = new(i32);",
+    "    del(q->a);",
+    "    del(q);",
+    "}",
+    // dU0
+    "fn param(bin mut* own q) void {",
+    "    del(q);",
+    "}",
+    // dP
+    "fn param_emptied(bin mut* own q) void {",
+    "    del(q->a);",
+    "    del(q->e[0]);",
+    "    del(q->e[1]);",
+    "    del(q);",
+    "}",
+    // the address of `q` makes it memory: dU0
+    "fn memory() void {",
+    "    bin mut* own q = new(bin);",
+    "    bin mut* own* r = &q;",
+    "    del(q);",
+    "}",
+    // the call kills each fact through `q`: dU0
+    "fn called() void {",
+    "    bin mut* own q = new(bin);",
+    "    g();",
+    "    del(q);",
+    "}",
+    // cP
+    "fn cast_fresh() void {",
+    "    bin mut* own q = new(bin);",
+    "    void* own v = cast(move(q), void* own);",
+    "    del(v);",
+    "}",
+    // the store into `e[1]` kills the facts of both elements: cU1
+    "fn cast_live() void {",
+    "    bin mut* own q = new(bin);",
+    "    q->e[1] = new(i32);",
+    "    void* own v = cast(move(q), void* own);",
+    "    del(v);",
+    "}",
+    // no obligation at the cast to a pointer to `bin`, and the `del` of its result has no fact: dU0
+    "fn cast_same() void {",
+    "    bin mut* own q = new(bin);",
+    "    bin* own r = cast(move(q), bin* own);",
+    "    del(r);",
+    "}",
+    // a span whose elements hold owners waits for refinement R8: no obligation
+    "fn span() void {",
+    "    i32 mut* own mut@ own s = new(i32 mut* own, 2);",
+    "    del(s);",
+    "}",
+    // the inner owners of `outer` are `a`, `in.a`, `in.e[0]` and `in.e[1]`: dU3
+    "fn nested(outer mut* own o) void {",
+    "    del(o->a);",
+    "    del(o->in.a);",
+    "    del(o->in.e[0]);",
+    "    del(o);",
+    "}",
+    // the deferred `del` expands at the closing brace, whose block comes first, and at the
+    // `return`, after a store into `q->a`: dP dU0
+    "fn deferred(bool c) void {",
+    "    bin mut* own q = new(bin);",
+    "    defer del(q);",
+    "    if (c) {",
+    "        q->a = new(i32);",
+    "        return;",
+    "    }",
+    "}",
+    // a `del` before a `panic` keeps its obligation: dU0
+    "fn aborting() void {",
+    "    bin mut* own q = new(bin);",
+    "    q->a = new(i32);",
+    "    del(q);",
+    "    panic(\"stop\");",
+    "}",
+    // the fix of D17.20: the `del` of the field is a site that the pass cannot prove, and the
+    // inner owner moved into a local first gives a site that it proves: dU0 dP
+    "struct holder {",
+    "    bin mut* own b;",
+    "}",
+    "fn fix(holder mut* h, holder mut* k) void {",
+    "    del(h->b);",
+    "    bin mut* own b = move(k->b);",
+    "    del(b->a);",
+    "    del(b->e[0]);",
+    "    del(b->e[1]);",
+    "    del(b);",
+    "}",
+    // each round of the loop frees its own fresh `bin`: dP
+    "fn looped(u64 n) void {",
+    "    for (u64 mut i = 0; i < n; i++) {",
+    "        bin mut* own q = new(bin);",
+    "        del(q);",
+    "    }",
+    "}",
+    // outside the guarantee: the `cast` finds each inner owner empty, but the view `v` of the old
+    // pointer writes an owner into the object after it, and the `del` of `w`, which has no
+    // obligation, frees it with that owner (spec/fir.md 11, Inner owners): cP
+    "fn cast_alias() void {",
+    "    bin mut* own q = new(bin);",
+    "    bin mut* v = q;",
+    "    void* own w = cast(move(q), void* own);",
+    "    del(v->a);",
+    "    v->a = new(i32);",
+    "    del(w);",
+    "}",
+    // the same with a view that the new pointer lends after the `cast`: cP
+    "fn cast_view() void {",
+    "    bin mut* own q = new(bin);",
+    "    void mut* own w = cast(move(q), void mut* own);",
+    "    bin mut* v = cast(w, bin mut*);",
+    "    del(v->a);",
+    "    v->a = new(i32);",
+    "    del(w);",
+    "}",
+};
+
+string[19] INNER_KIND_NAMES = {
+    "fresh", "live", "emptied", "param", "param_emptied", "memory", "called", "cast_fresh",
+    "cast_live", "cast_same", "span", "nested", "deferred", "aborting", "g", "fix", "looped",
+    "cast_alias", "cast_view",
+};
+
+string[19] INNER_KIND_VERDICTS = {
+    "dP", "dU0", "dP", "dU0", "dP", "dU0", "dU0", "cP", "cU1", "dU0", "", "dU3", "dP dU0", "dU0",
+    "", "dU0 dP", "dP", "cP", "cP",
+};
+
+// Writes the verdict of each obligation of part 2 of `p` into `out`, in order, with a space
+// between two: `d` for a `del` or `c` for a `cast`, then `P` for one that `p` proves, or `U` and
+// the number of the first inner owner that `p` does not prove. Holds the count of `p` against the
+// verdicts.
+fn write_inners(fir.func* f, prover.proof* p, strbuf.str_buf mut* out) void {
+    strbuf.clear(out);
+    u32 mut leaks = 0;
+    u64 mut k = 0;
+    while (k < p->inners.len) {
+        prover.inner* x = &p->inners[k];
+        if (k > 0) {
+            strbuf.push(out, ' ');
+        }
+        fir.statement* s = fir.block_statement(f, x->block, x->index);
+        if (s->kind == fir.stmt_kind.st_del) {
+            strbuf.push(out, 'd');
+        } else {
+            assert(s->kind == fir.stmt_kind.st_assign && s->value.kind == fir.rvalue_kind.rv_cast);
+            strbuf.push(out, 'c');
+        }
+        if (x->proved) {
+            assert(x->first == x->owners);
+            strbuf.push(out, 'P');
+        } else {
+            assert(x->first < x->owners);
+            strbuf.push(out, 'U');
+            strbuf.append_u64(out, x->first);
+            leaks += 1;
+        }
+        k += 1;
+    }
+    assert(p->inner_leaks == leaks);
+}
+
+// Parses `text` against PRELUDE, holds that the verifier accepts each function, proves each one,
+// and holds that function `k` of the module gives the verdicts of part 2 `want[k]`. An obligation
+// of part 2 is no error: has_error holds only with an error of D17.11 or of part 1.
+fn expect_inners(string@ text, string@ want) void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    fir.module mut m = pass_env.parse(&e, PRELUDE[..], text);
+    defer fir.module_free(&m);
+    assert(m.funcs.len == want.len);
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    u64 mut k = 0;
+    while (k < m.funcs.len) {
+        fir.func* f = &m.funcs.items[k];
+        pass_env.verified(&e, f, "prover_test: the verifier refuses the input");
+        prover.proof mut p = prover.prove(f);
+        write_inners(f, &p, &got);
+        assert(prover.has_error(&p) == (p.unproved > 0 || p.leaks > 0));
+        prover.free(&p);
+        if (strbuf.view(&got) != want[k]) {
+            eprintln("function ", k, " gives ", strbuf.view(&got), " and not ", want[k]);
+            panic("prover_test: a verdict of part 2 differs");
+        }
+        k += 1;
+    }
+}
+
+// Each `del` and each owning `cast` of a pointer to an object with inner owners has the obligation
+// of part 2, and no other statement has one.
+fn each_release_holds_the_obligation_of_its_inner_owners() void {
+    expect_inners(INNERS[..], INNERS_VERDICTS[..]);
+}
+
+// The obligations of part 2 hold in the lowering of fort source too.
+fn each_release_of_lowered_source_has_its_obligation() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, INNER_KINDS[..], true);
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    u64 mut k = 0;
+    while (k < INNER_KIND_NAMES.len) {
+        fir.func mut f = fir.func{};
+        lower(&e, INNER_KIND_NAMES[k], &f);
+        prover.proof mut p = prover.prove(&f);
+        write_inners(&f, &p, &got);
+        prover.free(&p);
+        fir.func_free(&f);
+        if (strbuf.view(&got) != INNER_KIND_VERDICTS[k]) {
+            eprintln(INNER_KIND_NAMES[k], " gives ", strbuf.view(&got), " and not ",
+                     INNER_KIND_VERDICTS[k]);
+            panic("prover_test: a release of lowered source gives another verdict");
+        }
+        k += 1;
+    }
+}
+
+// Writes the steps of each inner owner of the type `t` into `out`, in their order, as
+// report.append_steps writes them, with `numbered` the FIR form, and a space between two.
+fn write_owner_steps(types.node* t, bool numbered, strbuf.str_buf mut* out) void {
+    strbuf.clear(out);
+    u64 n = place.count_owners(t);
+    u64 mut k = 0;
+    while (k < n) {
+        if (k > 0) {
+            strbuf.push(out, ' ');
+        }
+        report.append_steps(t, k, numbered, out);
+        k += 1;
+    }
+}
+
+// The steps of the nine inner owners of a `shelf`, by name and in the FIR form.
+string[9] SHELF_NAMED = {
+    ".bins[0].a", ".bins[0].e[0]", ".bins[0].e[1]", ".bins[1].a", ".bins[1].e[0]",
+    ".bins[1].e[1]", ".name", ".any", ".list",
+};
+
+string[9] SHELF_NUMBERED = {
+    ".0[0].0", ".0[0].1[0]", ".0[0].1[1]", ".0[1].0", ".0[1].1[0]", ".0[1].1[1]", ".1", ".2", ".4",
+};
+
+// Writes the words of `words` into `out` with a space between two.
+fn join_words(string@ words, strbuf.str_buf mut* out) void {
+    strbuf.clear(out);
+    u64 mut k = 0;
+    while (k < words.len) {
+        if (k > 0) {
+            strbuf.push(out, ' ');
+        }
+        strbuf.append(out, words[k]);
+        k += 1;
+    }
+}
+
+// The FIR text of the scale cases: a `del` of a parameter that points to a `wide` and one that
+// points to a `deep`, a `del` of a fresh `wide2`, and a `del` of a parameter that points to a `c0`.
+string[26] SCALE = {
+    "fn main.w1(_1 (w): wide mut* own) -> void {",
+    "    bb0: {",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    "fn main.w2(_1 (w): deep mut* own) -> void {",
+    "    bb0: {",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    "fn main.w3() -> void {",
+    "    let _1: wide2 mut* own;",
+    "    bb0: {",
+    "        _1 = alloc<wide2>(const u64 1);",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    "fn main.w4(_1 (c): c0 mut* own) -> void {",
+    "    bb0: {",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+// The proof of part 2 takes a time and a memory linear in the steps of the paths of the inner
+// owners: each owner takes a fact of its own with no search for an earlier one, and one walk of
+// the type gives the path of each. A `wide` holds 170000 inner owners in a fixed array, and a
+// `deep` 101000 in the fields and the arrays of its `block`s. A search for each owner takes about
+// 1.4 * 10^10 steps for `wide`, past the time that the harness gives the test. A walk of the
+// fields for each owner stays within 128 steps for each struct on its path, because a struct holds
+// at most 128 fields. The inner work of each is its statements and terminators times the steps of
+// the paths, an owner times its deref and the steps to it, and the leak work. Under the limit the
+// pass judges the site: no fact holds through a parameter, and the fresh `new` of `w3` gives each
+// fact. The 50000 owners of `c0` are 11 steps deep, so their 600000 steps pass the limit, which
+// keeps the memory of the paths within the limit too.
+fn the_proof_of_part_2_is_linear_in_the_inner_owners() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    fir.module mut m = pass_env.parse(&e, PRELUDE[..], SCALE[..]);
+    defer fir.module_free(&m);
+    u64[4] owners = {170000, 101000, 100000, 50000};
+    u64[4] steps = {3, 5, 3, 12};
+    u64[4] units = {2, 2, 3, 2};
+    bool[4] proved = {false, false, true, false};
+    u64 mut k = 0;
+    while (k < 4) {
+        fir.func* f = &m.funcs.items[k];
+        prover.proof mut p = prover.prove(f);
+        assert(p.inners.len == 1 && p.inners[0].owners == owners[k]);
+        assert(p.inner_work == p.leak_work + units[k] * owners[k] * steps[k]);
+        assert(p.inner_over == (k == 3) && !p.leak_over);
+        assert(p.inner_work <= prover.WORK_LIMIT || k == 3);
+        assert(p.inners[0].proved == proved[k]);
+        if (proved[k]) {
+            assert(p.inners[0].first == owners[k] && p.inner_leaks == 0);
+        } else {
+            assert(p.inners[0].first == 0 && p.inner_leaks == 1);
+        }
+        prover.free(&p);
+        k += 1;
+    }
+    // the order of the owners of a `deep`: the 100 elements of a block, then its field `f`; its
+    // deepest path, `blocks[i].e[j]`, takes 4 steps
+    types.node* deep = fir.local_at(&m.funcs.items[1], 1)->ty->elem;
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    report.append_steps(deep, 100, false, &got);
+    assert(strbuf.view(&got) == ".blocks[0].f");
+    strbuf.clear(&got);
+    report.append_steps(deep, 101, false, &got);
+    assert(strbuf.view(&got) == ".blocks[1].e[0]");
+    strbuf.clear(&got);
+    report.append_steps(deep, owners[1] - 1, false, &got);
+    assert(strbuf.view(&got) == ".blocks[999].f" && place.depth_to_owners(deep) == 4);
+}
+
+// The top level of the doubling chain: `d0` holds one inner owner, and `d<k>` two fields of
+// `d<k - 1>`, so `d<k>` holds 2^k. `d60` would take 2^63 bytes, past the size of a type.
+u64 DOUBLING = 59;
+
+// The FIR text of the doubling chain: a `del` of a pointer to `d59` and of one to `d30`.
+string[12] DOUBLING_TEXT = {
+    "fn main.top(_1 (d): d59 mut* own) -> void {",
+    "    bb0: {",
+    "        del(move _1) #3:1;",
+    "        return #4:1;",
+    "    }",
+    "}",
+    "fn main.half(_1 (d): d30 mut* own) -> void {",
+    "    bb0: {",
+    "        del(move _1) #9:1;",
+    "        return #10:1;",
+    "    }",
+    "}",
+};
+
+// A chain of structs in which each holds two fields of the one below doubles its inner owners at
+// each level. The layout of each struct keeps its count and its depth (types.type_layout_struct),
+// so the count, the depth, the proof and the report read each struct once: a walk of each field of
+// each struct would take 2^59 steps for `d59`. The count of `d59` stops at OWNER_CAP, so its site
+// passes the limit of the inner work, and the report writes its first inner owner, 60 field steps
+// deep. `d30` holds 2^30 inner owners, under the cap, 31 steps deep.
+fn the_inner_owners_of_a_doubling_chain_take_one_walk() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "struct d0 {\n    i32 mut* own p;\n}");
+    u64 mut k = 1;
+    while (k <= DOUBLING) {
+        strbuf.append(&b, "\nstruct d");
+        strbuf.append_u64(&b, k);
+        strbuf.append(&b, " {\n    d");
+        strbuf.append_u64(&b, k - 1);
+        strbuf.append(&b, " a;\n    d");
+        strbuf.append_u64(&b, k - 1);
+        strbuf.append(&b, " b;\n}");
+        k += 1;
+    }
+    string text = strbuf.view(&b);
+    u64 mut count = 1;
+    u64 mut i = 0;
+    while (i < text.len) {
+        if (text[i] == '\n') {
+            count += 1;
+        }
+        i += 1;
+    }
+    string mut@ own lines = new(string, count);
+    defer del(lines);
+    u64 mut start = 0;
+    u64 mut at = 0;
+    i = 0;
+    while (i <= text.len) {
+        if (i == text.len || text[i] == '\n') {
+            lines[at] = text[start..i];
+            at += 1;
+            start = i + 1;
+        }
+        i += 1;
+    }
+    fir.module mut m = pass_env.parse(&e, lines, DOUBLING_TEXT[..]);
+    defer fir.module_free(&m);
+    types.node* top = fir.local_at(&m.funcs.items[0], 1)->ty->elem;
+    types.node* half = fir.local_at(&m.funcs.items[1], 1)->ty->elem;
+    assert(place.count_owners(top) == types.OWNER_CAP && place.depth_to_owners(top) == 60);
+    assert(place.count_owners(half) == 1073741824 && place.depth_to_owners(half) == 31);
+    prover.proof mut p = prover.prove(&m.funcs.items[0]);
+    defer prover.free(&p);
+    assert(p.inners.len == 1 && p.inners[0].owners == types.OWNER_CAP && p.inner_over);
+    assert(!p.inners[0].proved && p.inners[0].first == 0 && !prover.has_error(&p));
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    report.write_inners(&m.funcs.items[0], &p, &e.c.m.s, &got);
+    strbuf.str_buf mut owner = strbuf.create();
+    defer strbuf.free(&owner);
+    strbuf.append(&owner, "(*_1)");
+    k = 0;
+    while (k <= DOUBLING) {
+        strbuf.append(&owner, ".0");
+        k += 1;
+    }
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    strbuf.append(&want, "t.fir:3:1: leak: cannot prove '");
+    strbuf.append(&want, strbuf.view(&owner));
+    strbuf.append(&want, "' is empty before this del\n");
+    assert(str.starts_with(strbuf.view(&got), strbuf.view(&want)));
+    prover.proof mut q = prover.prove(&m.funcs.items[1]);
+    defer prover.free(&q);
+    assert(q.inners.len == 1 && q.inners[0].owners == 1073741824 && q.inner_over);
+}
+
+// The inner owners of a type: the fields in the order of their declarations and the elements from
+// the first, each with its own owners before those of the next, through no pointer that does not
+// own, no span and no `string`. The type of the object of a parameter of INNERS gives each case:
+// a `shelf` (i21), a `bin` (i1), a `holder` (i12), a pointer to an owner (i13), a `plain` (i29)
+// and a `label` (i30). A `big` (i23) counts OWNER_CAP.
+fn the_inner_owners_of_a_type_follow_their_order() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    fir.module mut m = pass_env.parse(&e, PRELUDE[..], INNERS[..]);
+    defer fir.module_free(&m);
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    types.node* shelf = fir.local_at(&m.funcs.items[20], 1)->ty->elem;
+    assert(place.count_owners(shelf) == 9);
+    write_owner_steps(shelf, false, &got);
+    join_words(SHELF_NAMED[..], &want);
+    assert(strbuf.view(&got) == strbuf.view(&want));
+    write_owner_steps(shelf, true, &got);
+    join_words(SHELF_NUMBERED[..], &want);
+    assert(strbuf.view(&got) == strbuf.view(&want));
+    types.node* bin = fir.local_at(&m.funcs.items[0], 1)->ty->elem;
+    write_owner_steps(bin, false, &got);
+    assert(place.count_owners(bin) == 3 && strbuf.view(&got) == ".a .e[0] .e[1]");
+    types.node* holder = fir.local_at(&m.funcs.items[11], 1)->ty->elem;
+    write_owner_steps(holder, false, &got);
+    assert(place.count_owners(holder) == 1 && strbuf.view(&got) == ".b");
+    // the pointer that does not own, `holder mut*` itself, holds no inner owner
+    assert(place.count_owners(fir.local_at(&m.funcs.items[11], 1)->ty) == 0);
+    types.node* owner = fir.local_at(&m.funcs.items[12], 1)->ty->elem;
+    write_owner_steps(owner, false, &got);
+    assert(place.count_owners(owner) == 1 && strbuf.view(&got) == "");
+    types.node* plain = fir.local_at(&m.funcs.items[28], 1)->ty->elem;
+    assert(place.count_owners(plain) == 0);
+    types.node* label = fir.local_at(&m.funcs.items[29], 1)->ty->elem;
+    write_owner_steps(label, false, &got);
+    assert(place.count_owners(label) == 1 && strbuf.view(&got) == ".text");
+    types.node* big = fir.local_at(&m.funcs.items[22], 1)->ty->elem;
+    assert(place.count_owners(big) == types.OWNER_CAP);
+    // the steps of the deepest path after its deref bound the prefix of place.put_inner_paths:
+    // `bins[i].e[j]` of a `shelf` takes 4, `e[j]` of a `bin` 2 and `text` of a `label` 1
+    assert(place.depth_to_owners(shelf) == 4 && place.depth_to_owners(bin) == 2);
+    assert(place.depth_to_owners(holder) == 1 && place.depth_to_owners(owner) == 0);
+    assert(place.depth_to_owners(plain) == 0 && place.depth_to_owners(label) == 1);
+    assert(place.depth_to_owners(big) == 2);
+    // the last element of the 2^32 + 1 has its own step, past the cap of the count
+    place.owner_step mut step = place.owner_step{};
+    u64 mut rest = 0;
+    assert(place.next_owner_step(big, types.OWNER_CAP - 1, &step, &rest));
+    assert(step.field == 0 && !step.element && rest == types.OWNER_CAP - 1);
+}
+
+// The inner work adds the statements and terminators times the inner owners of the obligations to
+// the leak work. Past the limit no obligation of part 2 is proved and each takes its first inner
+// owner, and the verdicts of D17.11 and of part 1 do not change, because the leak work keeps its
+// own count.
+fn the_inner_work_stops_the_proof_of_part_2() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    fir.module mut m = pass_env.parse(&e, PRELUDE[..], INNERS[..]);
+    defer fir.module_free(&m);
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    strbuf.str_buf mut exits = strbuf.create();
+    defer strbuf.free(&exits);
+    // i2: 6 statements and 1 terminator, no check, 1 block and 4 locals, so a leak work of 7 for
+    // its parameter and 4; the 3 inner owners of its one obligation take 9 steps, `(*_1).0` and
+    // `(*_1).1[c]` with their deref, and add 9 * 7
+    fir.func* i2 = &m.funcs.items[1];
+    prover.proof mut whole = prover.prove(i2);
+    assert(whole.work == 0 && whole.leak_work == 11 && whole.inner_work == 74);
+    assert(!whole.leak_over && !whole.inner_over && whole.inner_leaks == 0);
+    prover.free(&whole);
+    prover.proof mut at = prover.prove_within(i2, 74);
+    write_inners(i2, &at, &got);
+    assert(!at.inner_over && strbuf.view(&got) == "dP");
+    prover.free(&at);
+    prover.proof mut past = prover.prove_within(i2, 73);
+    write_inners(i2, &past, &got);
+    write_exits(i2, &past, &exits);
+    assert(past.inner_over && !past.leak_over && strbuf.view(&got) == "dU0");
+    assert(strbuf.view(&exits) == "rqP" && !prover.has_error(&past));
+    prover.free(&past);
+    // i4: the leak work passes the limit too, so the exit of `q` is unproved
+    fir.func* i4 = &m.funcs.items[3];
+    prover.proof mut both = prover.prove_within(i4, 0);
+    write_inners(i4, &both, &got);
+    assert(both.inner_over && both.leak_over && strbuf.view(&got) == "dU0");
+    prover.free(&both);
+    // i23: the 2^32 + 1 inner owners of a `big` count OWNER_CAP, and their product with the 2
+    // statements and terminators stops at OWNER_CAP too, so the inner work alone passes the limit
+    fir.func* i23 = &m.funcs.items[22];
+    prover.proof mut wide = prover.prove(i23);
+    write_inners(i23, &wide, &got);
+    write_exits(i23, &wide, &exits);
+    assert(wide.inners.len == 1 && wide.inners[0].owners == types.OWNER_CAP);
+    assert(wide.inner_work == wide.leak_work + types.OWNER_CAP);
+    assert(wide.inner_over && !wide.leak_over && strbuf.view(&got) == "dU0");
+    assert(strbuf.view(&exits) == "rbP");
+    prover.free(&wide);
+    // the caps of the sums and the products, at their boundaries
+    assert(types.capped_product(types.OWNER_CAP, 2) == types.OWNER_CAP);
+    assert(types.capped_product(3, 5) == 15 && types.capped_product(0, types.OWNER_CAP) == 0);
+    assert(types.capped_sum(types.OWNER_CAP - 1, 1) == types.OWNER_CAP);
+    assert(types.capped_sum(2, 3) == 5);
+}
+
 // ---- the release of each allocation ------------------------------------------------------------
 
 // The count of the rounds of proofs between two samples of the release probe.
 u64 PROOFS = 20;
 
 // Appends the place that the report names for each check of `f` that `p` does not prove, as
-// report.write writes it, and the owner that the error names for each exit that `p` does not
-// prove, as report.write_leaks writes it. Writes no diagnostic.
+// report.write writes it, the owner that the error names for each exit that `p` does not prove,
+// as report.write_leaks writes it, and the inner owner that the report names for each obligation
+// of part 2 that `p` does not prove, as report.write_inners writes it. Writes no diagnostic.
 fn write_unproved(fir.func* f, prover.proof* p, session.session mut* s,
                   strbuf.str_buf mut* out) void {
     u32 mut b = 0;
@@ -6673,26 +7818,36 @@ fn write_unproved(fir.func* f, prover.proof* p, session.session mut* s,
         }
         k += 1;
     }
+    k = 0;
+    while (k < p->inners.len) {
+        if (!p->inners[k].proved) {
+            report.write_inner_owner(f, &p->inners[k], s, out);
+            strbuf.push(out, '\n');
+        }
+        k += 1;
+    }
 }
 
-// Each round proves each function of HELD and of EXITS PROOFS times, writes its places and the
-// owners of its exits that it does not prove, and frees its proof. A proof that keeps a vector of
-// its context, a set of a dataflow or the probes of a walk keeps 32 bytes or more in each proof,
-// so 4480 bytes or more in each round, and the program break moves. The probe runs first in main,
-// as the probe of fir_flow_test does: after the other tests, the allocator can serve a leak out of
-// the free chunks that they left.
+// Each round proves each function of HELD, of EXITS and of INNERS PROOFS times, writes its places,
+// the owners of its exits and the inner owners that it does not prove, and frees its proof. A
+// proof that keeps a vector of its context, a set of a dataflow or the probes of a walk keeps 32
+// bytes or more in each proof, so 30720 bytes or more in each round of the 48 functions, and the
+// program break moves. The probe runs first in main, as the probe of fir_flow_test does: after the
+// other tests, the allocator can serve a leak out of the free chunks that they left.
 fn the_proofs_leave_the_heap_where_it_was() void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
     defer lower_env.close(&e);
     // one module holds both texts: a second parse in one environment checks the prelude again
-    string mut@ own text = new(string, HELD.len + EXITS.len);
+    string mut@ own text = new(string, HELD.len + EXITS.len + INNERS.len);
     defer del(text);
     for (u64 mut i = 0; i < text.len; i++) {
         if (i < HELD.len) {
             text[i] = HELD[i];
-        } else {
+        } else if (i < HELD.len + EXITS.len) {
             text[i] = EXITS[i - HELD.len];
+        } else {
+            text[i] = INNERS[i - HELD.len - EXITS.len];
         }
     }
     fir.module mut m = pass_env.parse(&e, PRELUDE[..], text);
@@ -7121,5 +8276,17 @@ fn main() i32 {
     println("work ok");
     the_leak_work_stops_the_proof_of_the_exits();
     println("leak work ok");
+    each_release_holds_the_obligation_of_its_inner_owners();
+    println("inners ok");
+    each_release_of_lowered_source_has_its_obligation();
+    println("inner kinds ok");
+    the_inner_work_stops_the_proof_of_part_2();
+    println("inner work ok");
+    the_inner_owners_of_a_type_follow_their_order();
+    println("inner order ok");
+    the_proof_of_part_2_is_linear_in_the_inner_owners();
+    println("inner scale ok");
+    the_inner_owners_of_a_doubling_chain_take_one_walk();
+    println("inner doubling ok");
     return 0;
 }

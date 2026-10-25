@@ -628,6 +628,30 @@ bullet at a time and without a rewrite.
   owner. Such a case stands in `test/fort/owner/prover_test.ft` with a comment, and not in the
   oracle sets. The exit cases (`EXIT_CASES`) hold one case for each exit kind, and the seeded family
   inserts into them as into the hand cases.
+  **The test holds part 2 of the leak rule too.** A site of part 2 is a function and the location of
+  a `del` of a `T* own`, or of a `cast` whose operand moves a `T* own`, where `T` holds an owner by
+  the checker's mark of its type (`holds_owners`), and not by `owner.place`, so that the sites come
+  from the FIR and a pass that lists no obligation has a site too. The test reads the operand of a
+  `cast` and not its target type, which the pass reads, so it copies no condition of the pass: a
+  `cast` to a pointer to `T` is a site that the pass does not reject, and its object leaks at the
+  `del` of the new pointer, which has a site of its own. The run reports a `leak` at a `del` that
+  frees an object with an owner slot of a live allocation, so the event marks the site of that
+  `del`. No event stands at a `cast`: a `leak` at a
+  `del` of a pointer to an object with no owner by its type comes after a `cast` that hid the
+  owners, and it marks the `cast` sites of its function, or of the batch when its function has
+  none; with no `cast` site the test counts a false accept. So a hand case with two `cast` sites
+  of one function cannot tell them apart. A `leak` at a `del` of a span counts apart (`span
+  leaks`): a span whose elements hold owners waits for refinement R8. So the `other` count of
+  part 1 holds no `leak` at a `del`. The cases of part 2 (`DEL_CASES`) give each kind of site, and
+  the seeded family inserts into them. The exhaustive family reaches part 2 through the local `r`
+  of `generator.LOCAL_DECL`, an owning pointer to a `pair` with a deferred `del`, and four
+  statements over `r->a`. A set prints its line of part 2 only when it holds a site of part 2 or a
+  leak of a span, so a case with neither adds no line to the expected stdout. A store through a view
+  after a proved `cast` gives the object an owner that the `del` of the new pointer leaks, and no
+  site has that event, so the case would count a false accept: it stands in
+  `test/fort/owner/prover_test.ft` (`cast_alias` with a view of the old pointer, `cast_view` with a
+  view of the new one) with a comment that it is outside the guarantee, and not in the oracle
+  sets.
 - **The suites of fir.interpreter derive each expected value apart from the interpreter**
   (`test/fort/fir/interpreter_test.ft`, `interpreter_source_test.ft`). Python's integers and IEEE
   doubles gave each value at each boundary of each type when the cases were written: the wrap at
