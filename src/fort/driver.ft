@@ -7,7 +7,6 @@ import fort.consts;
 import fort.containers;
 import fort.diag;
 import fort.fir;
-import fort.fir.emptiness;
 import fort.fir.interpreter;
 import fort.fir.shadow;
 import fort.fir_lower;
@@ -26,6 +25,8 @@ import fort.library.graph;
 import fort.library.interface;
 import fort.library.tree;
 import fort.modules;
+import fort.owner.prover;
+import fort.owner.report;
 import fort.parser;
 import fort.prim;
 import fort.session;
@@ -1767,7 +1768,7 @@ fn fir_entry(session.session mut* s, analysis mut* an, options* opts) i32 {
         fir_lower.report mut why = fir_lower.report{};
         if (fir_lower.lower_function(&an->ck, gen.refs_at(&decls, i), &f, &why)) {
             fir_verify.verify(&f, &rt);
-            emptiness.proof mut verdicts = prove_overwrites(s, &f);
+            prover.proof mut verdicts = prove_overwrites(s, &f);
             if (verdicts.unproved > 0) {
                 proved = false;
             }
@@ -1775,7 +1776,7 @@ fn fir_entry(session.session mut* s, analysis mut* an, options* opts) i32 {
                 fir_passes.build_mode(&f, opts->release, opts->no_bounds_check, &verdicts);
                 fir_verify.verify(&f, &rt);
             }
-            emptiness.free(&verdicts);
+            prover.free(&verdicts);
             fir_print.print_function(&f, &text);
             fir.module_add_function(&m, move(f));
         } else {
@@ -1818,8 +1819,8 @@ fn report_function(fir.func mut* f, fir_verify.runtime* rt, diag.loc at, bool re
                    bool no_bounds, strbuf.str_buf mut* out) void {
     if (report_violation(f, rt, at, out)) {
         // the proof decides which overwrite checks the pass removes, and reports nothing here
-        emptiness.proof mut verdicts = emptiness.prove(f);
-        defer emptiness.free(&verdicts);
+        prover.proof mut verdicts = prover.prove(f);
+        defer prover.free(&verdicts);
         fir_passes.build_mode(f, release, no_bounds, &verdicts);
         report_violation(f, rt, at, out);
     }
@@ -1854,9 +1855,9 @@ fn fir_report_entry(analysis mut* an, options* opts) i32 {
 // Runs the emptiness pass on the verified function `f` and reports the error of D17.11 and its
 // notes at each overwrite check that the pass does not prove (spec/fir.md 11). Returns the proof,
 // which the caller frees.
-fn prove_overwrites(session.session mut* s, fir.func* f) emptiness.proof {
-    emptiness.proof verdicts = emptiness.prove(f);
-    emptiness.report(f, &verdicts, s);
+fn prove_overwrites(session.session mut* s, fir.func* f) prover.proof {
+    prover.proof verdicts = prover.prove(f);
+    report.write(f, &verdicts, s);
     return verdicts;
 }
 
@@ -1881,11 +1882,11 @@ fn overwrite_entry(session.session mut* s, analysis mut* an, options* opts) i32 
             fir.check_kind mut missing = fir.check_kind.chk_overflow;
             if (fir_verify.runtime_holds(&f, &rt, &missing)) {
                 fir_verify.verify(&f, &rt);
-                emptiness.proof mut verdicts = prove_overwrites(s, &f);
+                prover.proof mut verdicts = prove_overwrites(s, &f);
                 if (verdicts.unproved > 0) {
                     proved = false;
                 }
-                emptiness.free(&verdicts);
+                prover.free(&verdicts);
             }
             fir.func_free(&f);
         }
@@ -2166,9 +2167,9 @@ fn run_test_passes(fir.module mut* m, test_pass@ passes, fir_verify.runtime* rt,
                 fir_verify.verify(f, rt);
             } else if (p.kind == test_pass_kind.tp_build) {
                 // the pass removes the overwrite checks that the emptiness pass proves
-                emptiness.proof mut verdicts = emptiness.prove(f);
+                prover.proof mut verdicts = prover.prove(f);
                 fir_passes.build_mode(f, p.release, p.no_bounds, &verdicts);
-                emptiness.free(&verdicts);
+                prover.free(&verdicts);
             }
             k += 1;
         }

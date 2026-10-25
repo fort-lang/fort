@@ -566,7 +566,7 @@ library `<name>` from the directory `<root>` into the artifact `<name>.flib/` (`
   and in a module outside it (section 10.2). No short form exists. The user ruled "long spelling
   only" on 2026-10-23. `std` imports its modules this way, as `std.libc`. The compiler, the
   library `fort` with the root `src/fort`, imports its modules as `fort.ast` and
-  `fort.fir.emptiness`, and a whole-program build reaches them through the root `src`.
+  `fort.owner.prover`, and a whole-program build reaches them through the root `src`.
   `src/lsp` imports its own modules as `lsp.text` and the compiler module as `fort.flt`.
 - A library has no module whose path is `<name>` alone, as `std` is no module (section 3).
 

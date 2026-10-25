@@ -600,7 +600,7 @@ bullet at a time and without a rewrite.
   the runs of each set (return, exit, abort, trap, outside, fault), so a change of the pass or of
   the oracle changes the text. A person derived each reject line
   of the hand and item cases from the rule; the counts of the families are measured.
-  `tools/mutations/oracle.json` holds the mutants of `fir.emptiness` that prove too much, with the
+  `tools/mutations/oracle.json` holds the mutants of `owner.prover` that prove too much, with the
   oracle test as its one stage. The log of a round says whether the test printed a false accept
   or only a changed count.
 - **The suites of fir.interpreter derive each expected value apart from the interpreter**

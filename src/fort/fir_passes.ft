@@ -6,8 +6,8 @@
 // call returns.
 import fort.consts;
 import fort.fir;
-import fort.fir.emptiness;
 import fort.fir_flow;
+import fort.owner.prover;
 import fort.prim;
 import fort.types;
 
@@ -56,7 +56,7 @@ struct mask_table {
     u32 mut@ own next;
 }
 
-/// Rewrites `f` for the build mode. `verdicts` is the proof that emptiness.prove gave for `f`.
+/// Rewrites `f` for the build mode. `verdicts` is the proof that prover.prove gave for `f`.
 /// Every mode removes each `check(overwrite: p)` that `verdicts` proves, and each other one stays.
 /// `release` removes the checks of the kinds `overflow` and `shift`, and `no_bounds` removes the
 /// kinds `bounds` and `span`. Every other check and every `fail` stays. The pass then removes
@@ -66,7 +66,7 @@ struct mask_table {
 // The steps keep the order of spec/fir.md 11. The verifier accepts the result when it accepts
 // `f`; the callers run it after the pass. A build reaches the pass with no unproved check, and
 // the translator refuses one that stays (fir_llvm.translate_terminator).
-fn build_mode(fir.func mut* f, bool release, bool no_bounds, emptiness.proof* verdicts) void {
+fn build_mode(fir.func mut* f, bool release, bool no_bounds, prover.proof* verdicts) void {
     u64 n = f->blocks.len;
     if (verdicts->proved.len != n) {
         panic("fir_passes.build_mode: the proof is of another function");
@@ -88,14 +88,14 @@ fn build_mode(fir.func mut* f, bool release, bool no_bounds, emptiness.proof* ve
 // statement index of the check, and records it in `done`. An overwrite check goes only when
 // `verdicts` proves it. A shift check leaves its mask at the end of its block and in `masks`.
 // Returns the count of the masks.
-fn remove_checks(fir.func mut* f, bool release, bool no_bounds, emptiness.proof* verdicts,
+fn remove_checks(fir.func mut* f, bool release, bool no_bounds, prover.proof* verdicts,
                  removal mut@ done, mask mut@ masks) u64 {
     u64 mut count = 0;
     u32 mut b = 0;
     while (b < fir.block_count(f)) {
         fir.terminator t = fir.block_at(f, b)->term;
         bool checks = t.kind == fir.term_kind.tk_check
-            || (t.kind == fir.term_kind.tk_check_overwrite && emptiness.is_proved(verdicts, b));
+            || (t.kind == fir.term_kind.tk_check_overwrite && prover.is_proved(verdicts, b));
         if (checks && fir.term_removable(t.check, release, no_bounds)) {
             u64 at = cast(b, u64);
             done[at].removed = true;
@@ -528,7 +528,7 @@ fn fold_store(fir.func mut* f, u32 b, fir.place p, u32@ uses) void {
     }
     fir.statement* store = &cont->statements.items[0];
     if (store->kind != fir.stmt_kind.st_assign || store->value.kind != fir.rvalue_kind.rv_use
-        || !same_place(f, store->place, p)) {
+        || !fir.is_same_place(f, store->place, p)) {
         return;
     }
     fir.operand o = fir.rvalue_operand(f, store->value, 0);
@@ -543,23 +543,6 @@ fn fold_store(fir.func mut* f, u32 b, fir.place p, u32@ uses) void {
         i += 1;
     }
     cont->statements.len -= 1;
-}
-
-// Whether two places have the same base and the same projections, index locals included.
-fn same_place(fir.func* f, fir.place a, fir.place b) bool {
-    if (!fir.same_base(a, b) || a.proj_len != b.proj_len) {
-        return false;
-    }
-    u32 mut i = 0;
-    while (i < a.proj_len) {
-        fir.projection x = fir.place_projection(f, a, i);
-        fir.projection y = fir.place_projection(f, b, i);
-        if (x.kind != y.kind || x.field != y.field || x.index != y.index) {
-            return false;
-        }
-        i += 1;
-    }
-    return true;
 }
 
 // ---- the merge of the blocks -------------------------------------------------------------------
