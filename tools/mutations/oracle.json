@@ -2,24 +2,28 @@
   "comment": [
     "The mutants of owner.place and owner.prover (src/fort/owner/) that make the pass prove a store",
     "that it must not prove, against the oracle test of rule (a) (test/fort/owner/oracle_test.ft,",
-    "spec/ownership-design.md 3.6). Each row is a row of tools/mutations/emptiness.json with the",
-    "same anchor. A row is caught when the test fails: a false accept makes it exit 134, and a",
-    "changed count changes its stdout. The log of a round shows which. D17.11-memory-pointer",
-    "changes only a count, because the pass stays sound with it: a place through a pointer local",
-    "that is memory changes only by a store into the local, which kills each fact with its base, by",
-    "a store through a pointer or a call, which kill each fact reached through memory, or by a",
-    "store into its pointee, which kills as any store does.",
-    "Of the 61 rows of tools/mutations/emptiness.json, 29 are not here: 13 make the pass prove",
-    "less, such as D17.11-memory-fixed, D17.11-straight-others and D17.11-call-after-check-same; 4",
-    "change the work limit, which no function of the sets reaches; 9 change the report, the driver",
-    "or the build-mode pass; and 3",
-    "prove more and change no verdict of a run. D17.11-below and D17.11-key-return change no run:",
-    "after the gen, an element of the span fails its bounds check first, and only a store writes",
-    "_0, which kills each fact with its key. D17.11-held-fixed stays sound: the place of a held",
-    "address of fixed storage reads as a local that is memory. The table runs in the Linux VM with",
-    "the debug preset and the default runner. The md5 guard reads the product compiler, whose driver",
-    "imports owner.prover. The first rounds of a run can read stale (notes/testing.md 7), so the",
-    "first row is one that a full run caught."
+    "spec/ownership-design.md 3.6). Each row is a row of tools/mutations/emptiness.json with the same",
+    "anchor. A row is caught when the test fails: a false accept makes it exit 134, and a changed",
+    "count changes its stdout. The log of a round shows which. D17.11-memory-pointer changes only a",
+    "count, because the pass stays sound with it: a place through a pointer local that is memory",
+    "changes only by a store into the local, which kills each fact with its base, by a store through",
+    "a pointer or a call, which kill each fact reached through memory, or by a store into its",
+    "pointee, which kills as any store does. Of the 86 rows of tools/mutations/emptiness.json, 37 are",
+    "not here: 19 make the pass prove less, such as D17.11-memory-fixed, D17.11-straight-others,",
+    "D17.11-store-test-kills, D17.11-entry-temp and D17.11-scratch-entry; 6 change the work limit or",
+    "the verdicts past it, which no function of the sets reaches; 9 change the report, the driver or",
+    "the build-mode pass; and 3 prove more and change no verdict of a run. D17.11-below and",
+    "D17.11-key-return change no run: after the gen, an element of the span fails its bounds check",
+    "first, and only a store writes _0, which kills each fact with its key. D17.11-guard-edges proves",
+    "a check whose store the pass does not prove, and the site of that store stays rejected.",
+    "D17.11-held-fixed and D17.11-store-hidden-checked change only a count, because the pass stays",
+    "sound with them: the place of a held address of fixed storage reads as a local that is memory,",
+    "and the check that guards a store into an aggregate _0 with no proof stays unproved.",
+    "D17.11-entry-local changes only a count too: it gives a named local a fact at the entry, which",
+    "no case of the sets runs over a live allocation, and the first store of late_zero loses its",
+    "false reject. The table runs in the Linux VM with the debug preset and the default runner. The",
+    "md5 guard reads the product compiler, whose driver imports owner.prover. The first rounds of a",
+    "run can read stale (notes/testing.md 7), so the first row is one that a full run caught."
   ],
   "sources": [
     "src/fort/owner/place.ft",
@@ -73,37 +77,156 @@
     {
       "decision": "D17.11-kill-call",
       "file": "src/fort/owner/prover.ft",
-      "old": "    if (s->value.kind == fir.rvalue_kind.rv_call) {\n        kill_call(c, pr);",
-      "new": "    if (false) {\n        kill_call(c, pr);",
+      "old": "        if (s->value.kind == fir.rvalue_kind.rv_call) {\n            kill_call(c, pr);",
+      "new": "        if (false) {\n            kill_call(c, pr);",
       "what": "a call kills no fact"
     },
     {
-      "decision": "D17.11-call-after-check",
+      "decision": "D17.11-store-test",
       "file": "src/fort/owner/prover.ft",
-      "old": "    if (fact == NO_FACT) {\n        return;\n    }\n    u32 next = fir.block_at(f, b)->term.target;",
-      "new": "    if (true || fact == NO_FACT) {\n        return;\n    }\n    u32 next = fir.block_at(f, b)->term.target;",
-      "what": "the first statement after a check applies no kill rule at the check"
+      "old": "            *held = fir_flow.bits_get(&pr->none, fact);",
+      "new": "            *held = true;",
+      "what": "a store that needs a proof is proved with no fact"
     },
     {
-      "decision": "D17.11-call-after-check-store",
+      "decision": "D17.11-store-test-call",
       "file": "src/fort/owner/prover.ft",
-      "old": "    bool store = !place.is_same(&c->places, d, c->facts[cast(fact, u64)]);",
-      "new": "    bool store = false && !place.is_same(&c->places, d, c->facts[cast(fact, u64)]);",
-      "what": "the first statement after a check applies only the kill of its call at the check"
+      "old": "        if (s->value.kind == fir.rvalue_kind.rv_call) {\n            kill_call(c, pr);\n        }\n        if (fact != NO_FACT) {\n            *held = fir_flow.bits_get(&pr->none, fact);\n        }",
+      "new": "        if (fact != NO_FACT) {\n            *held = fir_flow.bits_get(&pr->none, fact);\n        }\n        if (s->value.kind == fir.rvalue_kind.rv_call) {\n            kill_call(c, pr);\n        }",
+      "what": "a store tests its fact before the kill of its call"
     },
     {
-      "decision": "D17.11-call-after-check-direct",
+      "decision": "D17.11-store-replay",
       "file": "src/fort/owner/prover.ft",
-      "old": "    fir.statement* s = fir.block_statement(f, next, 0);\n    if (s->kind != fir.stmt_kind.st_assign) {",
-      "new": "    fir.statement* s = fir.block_statement(f, next, 0);\n    if (s->kind != fir.stmt_kind.st_assign\n        || (s->value.kind == fir.rvalue_kind.rv_call && s->value.callee != fir.callee_kind.cl_fn)) {",
-      "what": "an extern call or a call through a function value after a check applies no kill rule at the check"
+      "old": "            bool mut held = false;\n            if (d != null) {",
+      "new": "            bool mut held = false;\n            if (d != null && here) {",
+      "what": "the walk to a store applies no statement before it"
     },
     {
-      "decision": "D17.11-call-after-check-void",
+      "decision": "D17.11-store-alone",
       "file": "src/fort/owner/prover.ft",
-      "old": "    fir.statement* s = fir.block_statement(f, next, 0);\n    if (s->kind != fir.stmt_kind.st_assign) {",
-      "new": "    fir.statement* s = fir.block_statement(f, next, 0);\n    if (s->kind != fir.stmt_kind.st_assign\n        || fir.place_type(f, s->place)->kind == types.type_kind.k_void) {",
-      "what": "a statement with a `void` destination after a check applies no kill rule at the check"
+      "old": "    if (hidden && !*checked) {\n        return false;\n    }",
+      "new": "    if (!*checked) {\n        return false;\n    }",
+      "what": "a store that no check stands right before needs no proof"
+    },
+    {
+      "decision": "D17.11-zeroing-written",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    bool zeroing = b == 0 && is_entry_zeroing(f, s) && !fir_flow.bits_get(written, s->place.local);",
+      "new": "    bool zeroing = b == 0 && is_entry_zeroing(f, s);",
+      "what": "a store of the zero value into a named local after a store into it in bb0 needs no proof"
+    },
+    {
+      "decision": "D17.11-zeroing-block",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    bool zeroing = b == 0 && is_entry_zeroing(f, s) && !fir_flow.bits_get(written, s->place.local);",
+      "new": "    bool zeroing = is_entry_zeroing(f, s) && !fir_flow.bits_get(written, s->place.local);",
+      "what": "a store of the zero value into a named local in a block after bb0 needs no proof"
+    },
+    {
+      "decision": "D17.11-result-hidden",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    return l->kind == fir.local_kind.lk_return && fir.type_aggregate(l->ty);",
+      "new": "    return l->kind == fir.local_kind.lk_return;",
+      "what": "a store into an `_0` that is no aggregate needs no proof"
+    },
+    {
+      "decision": "D17.11-scratch-store",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    } else {\n        fir_flow.bits_clear(set, s->place.local);\n    }",
+      "new": "    }",
+      "what": "a store into a scratch local leaves its bit as it was"
+    },
+    {
+      "decision": "D17.11-scratch-field",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        || !fir.place_fixed(c->places.f, s->place)",
+      "new": "        || s->place.proj_len != 0",
+      "what": "a store into a field of a scratch local leaves its bit as it was"
+    },
+    {
+      "decision": "D17.11-scratch-del-whole",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        if (place.is_local(s->place) && place.is_scratch(&c->places, s->place.local)) {",
+      "new": "        if (s->place.base == fir.base_kind.bk_local && place.is_scratch(&c->places, s->place.local)) {",
+      "what": "a del through a scratch pointer local sets its bit"
+    },
+    {
+      "decision": "D17.11-scratch-move-whole",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        if (o.kind == fir.operand_kind.ok_move && place.is_local(o.place)",
+      "new": "        if (o.kind == fir.operand_kind.ok_move && o.place.base == fir.base_kind.bk_local",
+      "what": "a move through a scratch pointer local sets its bit"
+    },
+    {
+      "decision": "D17.11-scratch-zero-field",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    if (s->place.proj_len == 0 && is_zero_value(c, s->value)) {",
+      "new": "    if (is_zero_value(c, s->value)) {",
+      "what": "a store of the zero value into a field of a scratch local sets its bit"
+    },
+    {
+      "decision": "D17.11-scratch-join",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    fir_flow.dataflow mut scratch = fir_flow.dataflow_new(fir.local_count(f),\n                                                          fir_flow.join_kind.join_intersect,",
+      "new": "    fir_flow.dataflow mut scratch = fir_flow.dataflow_new(fir.local_count(f),\n                                                          fir_flow.join_kind.join_union,",
+      "what": "the scratch bits join by union"
+    },
+    {
+      "decision": "D17.11-scratch-memory",
+      "file": "src/fort/owner/place.ft",
+      "old": "    return kind && !c->locals[cast(n, u64)].memory && types.type_is_reference(l->ty)",
+      "new": "    return kind && types.type_is_reference(l->ty)",
+      "what": "a temporary that is memory is a scratch local"
+    },
+    {
+      "decision": "D17.11-guard",
+      "file": "src/fort/owner/prover.ft",
+      "old": "            && fir_flow.bits_get(&d->outs[cast(b, u64)], fact)\n            && guards_proved(c, b, out, &seen, queue);",
+      "new": "            && fir_flow.bits_get(&d->outs[cast(b, u64)], fact);",
+      "what": "a check takes no verdict of the stores that it guards"
+    },
+    {
+      "decision": "D17.11-held-fixed",
+      "file": "src/fort/owner/place.ft",
+      "old": "    return r.kind == fir.rvalue_kind.rv_addr && r.is_mut && !fir.place_fixed(c->f, r.place)",
+      "new": "    return r.kind == fir.rvalue_kind.rv_addr && r.is_mut",
+      "what": "an `addr mut` of fixed storage is a held address"
+    },
+    {
+      "decision": "D17.11-store-hidden-checked",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    if (hidden && !*checked) {\n        return false;\n    }",
+      "new": "    if (hidden) {\n        return false;\n    }",
+      "what": "a store into an aggregate `_0` needs no proof right after a check of it"
+    },
+    {
+      "decision": "D17.11-entry-local",
+      "file": "src/fort/owner/place.ft",
+      "old": "    return l->kind == fir.local_kind.lk_temp;\n}",
+      "new": "    return l->kind != fir.local_kind.lk_param;\n}",
+      "what": "a named local has a fact at the entry, as a temporary has"
+    },
+    {
+      "decision": "D17.11-guard-exempt",
+      "file": "src/fort/owner/prover.ft",
+      "old": "                if (k >= out->stores.len || !out->stores[k].proved) {",
+      "new": "                if (k < out->stores.len && !out->stores[k].proved) {",
+      "what": "a check that guards a store that needs no proof takes no verdict from it"
+    },
+    {
+      "decision": "D17.11-kill-call-direct",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        if (s->value.kind == fir.rvalue_kind.rv_call) {\n            kill_call(c, pr);",
+      "new": "        if (s->value.kind == fir.rvalue_kind.rv_call && s->value.callee == fir.callee_kind.cl_fn) {\n            kill_call(c, pr);",
+      "what": "an extern call or a call through a function value kills no fact"
+    },
+    {
+      "decision": "D17.11-kill-call-void",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        if (s->value.kind == fir.rvalue_kind.rv_call) {\n            kill_call(c, pr);",
+      "new": "        if (s->value.kind == fir.rvalue_kind.rv_call\n            && fir.place_type(c->places.f, s->place)->kind != types.type_kind.k_void) {\n            kill_call(c, pr);",
+      "what": "a call with a `void` destination kills no fact"
     },
     {
       "decision": "D17.11-order",

@@ -996,6 +996,88 @@ fn the_proof_decides_each_overwrite() void {
     }
 }
 
+// A check takes the verdict of each store that it guards (spec/fir.md 11, Proof). In `mid` a
+// store into the named local `_2` stands between the check and its store, which the pass proves,
+// so the check goes in every mode; the store does not fold, because it does not follow its
+// temporary. In `call_mid` a store into a named local and then a call stand there, and the call
+// can fill `(*_1).0`, so the pass does not prove the store, and the check stays in every mode.
+fn a_check_takes_the_verdict_of_the_store_after_it() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    string[31] text = {
+        "fn main.mid(_1 (q): holder mut*) -> void {",
+        "    let _2 (n): u64;",
+        "    let _3: u8 mut* own;",
+        "    bb0: {",
+        "        _2 = const u64 0;",
+        "        del(move (*_1).0);",
+        "        _3 = alloc<u8>(const u64 1);",
+        "        check(overwrite: (*_1).0) -> bb1;",
+        "    }",
+        "    bb1: {",
+        "        _2 = const u64 1;",
+        "        (*_1).0 = move _3;",
+        "        return;",
+        "    }",
+        "}",
+        "fn main.call_mid(_1 (q): holder mut*) -> void {",
+        "    let _2 (n): i32;",
+        "    let _3: u8 mut* own;",
+        "    let _4 (k): u64;",
+        "    bb0: {",
+        "        del(move (*_1).0);",
+        "        _3 = alloc<u8>(const u64 1);",
+        "        check(overwrite: (*_1).0) -> bb1;",
+        "    }",
+        "    bb1: {",
+        "        _4 = const u64 1;",
+        "        _2 = call fn main.five();",
+        "        (*_1).0 = move _3;",
+        "        return;",
+        "    }",
+        "}",
+    };
+    string[33] want = {
+        "fn main.mid(_1 (q): holder mut*) -> void {",
+        "    let _0: void;",
+        "    let _2 (n): u64;",
+        "    let _3: u8 mut* own;",
+        "",
+        "    bb0: {",
+        "        _2 = const u64 0;",
+        "        del(move (*_1).0);",
+        "        _3 = alloc<u8>(const u64 1);",
+        "        _2 = const u64 1;",
+        "        (*_1).0 = move _3;",
+        "        return;",
+        "    }",
+        "}",
+        "",
+        "fn main.call_mid(_1 (q): holder mut*) -> void {",
+        "    let _0: void;",
+        "    let _2 (n): i32;",
+        "    let _3: u8 mut* own;",
+        "    let _4 (k): u64;",
+        "",
+        "    bb0: {",
+        "        del(move (*_1).0);",
+        "        _3 = alloc<u8>(const u64 1);",
+        "        check(overwrite: (*_1).0) -> bb1;",
+        "    }",
+        "    bb1: {",
+        "        _4 = const u64 1;",
+        "        _2 = call fn main.five();",
+        "        (*_1).0 = move _3;",
+        "        return;",
+        "    }",
+        "}",
+    };
+    for (pass_env.mode m : pass_env.MODES) {
+        lower_env.expect(pass_env.run(&e, USE_PRELUDE[..], text[..], m), want[..]);
+    }
+}
+
 // A temporary with two assignments and no reader loses both. A chain of four temporaries, each
 // read only by the next, goes in four rounds, the last one first.
 fn the_removal_repeats_until_nothing_changes() void {
@@ -1069,6 +1151,7 @@ fn main() i32 {
     each_use_keeps_its_temporary();
     the_pointer_of_an_overwrite_check_stays_as_the_pointer_of_its_store();
     the_proof_decides_each_overwrite();
+    a_check_takes_the_verdict_of_the_store_after_it();
     the_removal_repeats_until_nothing_changes();
     println("uses ok");
     return 0;

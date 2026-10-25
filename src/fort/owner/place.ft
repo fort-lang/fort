@@ -769,6 +769,33 @@ fn is_indirect(survey* c, path q) bool {
     return false;
 }
 
+/// Whether `q` lies in storage that holds no allocation at the entry: fixed storage of a temporary,
+/// or of `_0` when its type is no aggregate. The frame of the call gives that storage, and no
+/// store wrote it before, so its places start empty: the state `S = {null}` of
+/// spec/ownership-design.md 4.4. The storage of an aggregate `_0` is the destination of the
+/// caller, which can hold owners, because D17.11 checks no store of an owning aggregate.
+fn is_empty_at_entry(survey* c, path q) bool {
+    if (q.base != fir.base_kind.bk_local || is_indirect(c, q)) {
+        return false;
+    }
+    fir.local* l = fir.local_at(c->f, q.local);
+    if (l->kind == fir.local_kind.lk_return) {
+        return !fir.type_aggregate(l->ty);
+    }
+    return l->kind == fir.local_kind.lk_temp;
+}
+
+/// Whether the local `n` is a scratch local: a temporary, or `_0`, of an `own` reference type
+/// that is no memory. No pointer names its storage and no call writes it, so one bit for each
+/// local holds the fact of the whole local (owner.prover, run_scratch), as the fresh pointer
+/// locals take one bit each.
+fn is_scratch(survey* c, u32 n) bool {
+    fir.local* l = fir.local_at(c->f, n);
+    bool kind = l->kind == fir.local_kind.lk_temp || l->kind == fir.local_kind.lk_return;
+    return kind && !c->locals[cast(n, u64)].memory && types.type_is_reference(l->ty)
+        && l->ty->is_own;
+}
+
 // Whether `q` is reached through memory: a place of a memory local or of a global, or a place
 // that holds a deref or an index on a span or a `string`.
 fn is_through_memory(survey* c, path q) bool {
