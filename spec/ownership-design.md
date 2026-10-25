@@ -616,7 +616,8 @@ error. A migration splits by directory when it passes one agent-day. The overwri
 The probe P4 of section 14 runs V1, and the column R1 adds the first refinement of section 7. Each
 cell gives sites/functions (measured with P4). The direction says how the real count can differ.
 The probe gives no key to an index that a local holds (high), and it loses the type of 72 places of
-`src/fort` (low, section 14). `?` means both directions. No cast in the corpora carries `own` to
+`src/fort` (low, section 14). `?` means both directions. `pass` marks a row that the report-only
+mode of the real pass measured in place of P4. No cast in the corpora carries `own` to
 another pointee type with owners, so part 2 of rule (c) has 0 sites at a cast (measured, P4).
 
 | rule and variant                 | src/fort  | src/lsp | std   | test/fort    | test/lang | dir  |
@@ -624,7 +625,7 @@ another pointee type with owners, so part 2 of rule (c) has 0 sites at a cast (m
 | (b) local, not memory            | 0/0       | 0/0     | 0/0   | 0/0          | 0/0       | ?    |
 | (b) memory owner, direct         | 22/11     | 0/0     | 0/0   | 53/31        | 99/29     | ?    |
 | (b) memory owner, by a pointer   | 39/15     | 0/0     | 0/0   | 103/50       | 6/3       | ?    |
-| (c) `own` local, parameter, temp | 1/1       | 0/0     | 0/0   | 0/0          | 26/21     | high |
+| (c) `own` local, parameter, temp | 2/2       | 0/0     | 0/0   | 0/0          | 32/24     | pass |
 | (c) owning aggregate local, V1   | 199/99    | 1/1     | 2/1   | 2,424/2,354  | 93/77     | ?    |
 | (c) owning aggregate local, R1   | 106/48    | 1/1     | 0/0   | 2,116/2,076  | 35/30     | ?    |
 | (c) part 2, a pointer            | 11/10     | 2/2     | 0/0   | 0/0          | 34/16     | ?    |
@@ -699,11 +700,16 @@ whose elements hold owners, for which no element is tracked, waits for R8.
   call. Each is an error. `del` is always a fix for part 1: it frees what the function still owns,
   and it does nothing on a vacated or a null owner (D17.9). For part 2, the fix moves each inner
   owner into a local first.
-- Migration of part 1 (measured, P4, then read): the one `own` site of `src/fort` is
-  `containers.pool_free`, whose loop ends when `block` is null; a `del(block)` after the loop fixes
-  it. In `test/lang`, most programs end `main` with a live owner. Most aggregate sites are memory
-  locals after their last call. A test environment whose `close` frees two fields with two calls is
-  an example: the second call kills the fact of the first, also with R1.
+- Migration of part 1 (measured with `--leak-report`, then read; the row `pass` of the table is the
+  count of the real pass, which replaces the 1/1 and 26/21 of P4): the `own` sites of `src/fort`
+  are `containers.pool_free`, whose loop ends when `block` is null, so a `del(block)` after the
+  loop fixes it, and `fir.interpreter.make_region`, a module after the probe, whose `return 0`
+  after `if (p == null)` finds `p` null (R7). In `test/lang`, most programs end `main` with a live
+  owner. The report counts each owner at each exit: two exits there each leak two locals, and the
+  three tests of `fail/` whose overwrite error stops `--fir` add 4/3, so `run` and `programs` give
+  26 locations in 21 functions, as P4 did. Most aggregate sites are memory locals after their last
+  call. A test environment whose `close` frees two fields with two calls is an example: the second
+  call kills the fact of the first, also with R1.
 - Migration of part 2 (measured, P4, then read): 10 functions of `src/fort`, and no cast. A span
   with owners, as the span of `bits` in `fir.emptiness`, adds 21 functions (Q7).
 - Size: decision S, report M, migration M (the `own` locals, part 2) or L (the aggregates), error S.

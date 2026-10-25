@@ -829,8 +829,10 @@ changes the function, and the verifier runs after it. The passes run in this ord
    D17.11 for each one that it cannot prove. A function with an error reaches no later pass, and
    the run writes no module and no FIR.
    The leak rule of D17.20 uses the facts of this pass at each `dead` marker, at each `return`,
-   and at each `del` and `own` cast of a pointer to owners. A later change adds it to this pass, as
-   a report first and as an error after that.
+   and at each `del` and `own` cast of a pointer to owners. The pass proves part 1 of the rule
+   (**Exits**) and only reports it: `--leak-report` lists each exit that it does not prove, and no
+   build, `--check` or `--fir` changes its verdict for it. A later change makes each such exit an
+   error. Part 2 comes later, as a report first.
    `--fir-verify-report` and the pass `build-mode` of a FIR test run it too, for its proof, and
    report nothing.
    The pass is the forward must-empty analysis of D17.11, and it reads FIR this way:
@@ -1008,6 +1010,38 @@ changes the function, and the verifier runs after it. The passes run in this ord
      location of the item, which is the `=` of an assignment or the declared name of a declaration
      (9.3), so a check and its store of the lowering share one error. The message and its note name
      the source text of the lvalue, or the FIR place when the source is not there (D17.11).
+   - **Exits.** An owner local is a named local, a parameter or a temporary whose type is an `own`
+     reference. `_0` passes its value to the caller, and a local of an owning aggregate waits for
+     refinement R1 (D17.20). An exit has the obligation that its owner local holds the zero value,
+     which its fact proves, or, for a scratch local, its bit (**Scratch**). The exits are these:
+     - each `dead(_n)` of a named owner local, at the closing brace, or at the `return`, `break`
+       or `continue` that leaves its scope (9.5). A `dead` in an abort block has none: a runtime
+       error runs no deferred code (D7.8, D11.4), so a leak there is outside the guarantee;
+     - each `return`, for each parameter and each temporary that is an owner local;
+     - each `return`, for each named owner local whose scope can be open there. A fifth dataflow,
+       an intersection, gives one bit for each named owner local: its scope has ended. `bb0` starts
+       with each bit set, because the frame of a call holds no allocation of the call. `dead(_n)`
+       sets the bit of `_n`. A store into fixed storage of `_n` of a value that is not the zero
+       value, and an `addr` or a `slice` of that storage, clear it. A later store through a pointer
+       goes through such an address, or through an address from before the `dead`, which dangles
+       (D17.11). The lowering writes the `dead` of each named local of each scope that a `return`
+       leaves (9.5), so only FIR text has such an exit with its bit clear.
+     The fact of an exit is the fact of the whole local, a tracked place; it joins the facts of
+     **Facts**. A `dead` changes no fact, and a `return` reads `_0`, so each exit tests the fact or
+     the bit after the statements before it in its block. The leak work of a function adds its
+     statements and terminators times its owner locals that are no scratch local, the most facts
+     that the exits add, to the work of **Proof**, and the fifth dataflow has the sets of the second
+     count. The work of D17.11 does not change: a function with no check and no store that needs a
+     proof keeps no work. When the leak work passes 1048576, the pass proves no exit but an exit of
+     a scratch local, and a named local has no exit at a `return`; the overwrite proof keeps its own
+     limit. So FIR text past that limit that returns with a live scratch local, or with a live named
+     local that no `dead` ends, is outside the guarantee of the leak rule; the lowered FIR stays
+     sound by D17.8 and by 9.5. The report lists each exit that the pass does not prove, once for
+     each location and owner local, with the message of D17.20 at the location of the `dead` or of
+     the `return`. Past the limit the first line takes a note of the limit of the leak work, which
+     names no limit of D17.11. The report names the declared name of a named local or a parameter,
+     and the source text of the expression of a temporary, from its first token to its last; FIR
+     text with no tree gives the FIR place.
    - **Rewrite.** The pass rewrites nothing, so the verifier does not run after it.
 4. **The build-mode pass**, which rewrites for the selected mode (D11.1, D10.6, D17.11):
    - In every mode, it replaces each `check(overwrite: p)` that the emptiness pass proved by

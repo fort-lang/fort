@@ -32,7 +32,10 @@
 //| guards ok
 //| stores ok
 //| examples ok
+//| exits ok
+//| exit kinds ok
 //| work ok
+//| leak work ok
 /// Checks owner.prover, the proof of each overwrite check (spec/fir.md 11). Each gen rule, each
 /// kill rule and each definition of the rule has a group of cases over FIR text, and each group
 /// holds a case that the pass proves and a case that it does not prove. The examples of the rule
@@ -6098,6 +6101,551 @@ fn the_examples_of_the_rule_hold_over_lowered_source() void {
     }
 }
 
+// ---- the exits of the leak rule ----------------------------------------------------------------
+
+// Each case is a FIR function and the verdicts of its exits (write_exits). The comment of a case
+// gives them. A named owner local has an obligation at each `dead` marker outside an abort block,
+// and at a `return` where its scope may not have ended. A parameter and a temporary have one at
+// each `return` (D17.20 part 1).
+string[274] EXITS = {
+    // a named local that holds an allocation at its `dead`: dnU, and the moved temporary: rtP
+    "fn main.x1() -> void {",
+    "    let _1 (n): node mut* own;",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own;",
+    "        live(_1);",
+    "        _2 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _2;",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // the `del` right before the `dead` empties it: dnP rtP
+    "fn main.x2() -> void {",
+    "    let _1 (n): node mut* own;",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own;",
+    "        live(_1);",
+    "        _2 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _2;",
+    "        del(move _1);",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // a parameter has no fact at the entry: rpU
+    "fn main.x3(_1 (p): node mut* own) -> void {",
+    "    bb0: {",
+    "        return;",
+    "    }",
+    "}",
+    // a `del` of the parameter: rpP
+    "fn main.x4(_1 (p): node mut* own) -> void {",
+    "    bb0: {",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a `move` into a call: rpP
+    "fn main.x5(_1 (p): node mut* own) -> void {",
+    "    let _2: void;",
+    "    bb0: {",
+    "        _2 = call fn main.take(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a temporary that holds an allocation at the `return`: rtU
+    "fn main.x6() -> void {",
+    "    let _1: node mut* own;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1);",
+    "        return;",
+    "    }",
+    "}",
+    // a temporary that a call takes: rtP
+    "fn main.x7() -> void {",
+    "    let _1: node mut* own;",
+    "    let _2: void;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1);",
+    "        _2 = call fn main.take(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a temporary that is memory takes the fact, and the call kills it: rtU
+    "fn main.x8() -> void {",
+    "    let _1: node mut* own;",
+    "    let _2: node mut* own mut*;",
+    "    let _3: void;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1);",
+    "        _2 = addr mut(_1);",
+    "        del(move _1);",
+    "        _3 = call fn main.g();",
+    "        return;",
+    "    }",
+    "}",
+    // the same with no call: rtP
+    "fn main.x9() -> void {",
+    "    let _1: node mut* own;",
+    "    let _2: node mut* own mut*;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1);",
+    "        _2 = addr mut(_1);",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a `dead` in a block that ends in `trap` or `fail`, an abort block, has no obligation, and
+    // neither block has a `return`: no exit
+    "fn main.x10(_1 (c): bool) -> void {",
+    "    let _2 (n): node mut* own;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _2 = const zero node mut* own;",
+    "        live(_2);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: _2) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2 = move _3;",
+    "        switch(copy _1) -> [true: bb2, otherwise: bb3];",
+    "    }",
+    "    bb2: {",
+    "        dead(_2);",
+    "        trap;",
+    "    }",
+    "    bb3: {",
+    "        dead(_2);",
+    "        fail(panic, const bytes \"stop\", const u64 4);",
+    "    }",
+    "}",
+    // the same `dead` before a `goto` to the abort block has its obligation: dnU
+    "fn main.x11() -> void {",
+    "    let _1 (n): node mut* own;",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own;",
+    "        live(_1);",
+    "        _2 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _2;",
+    "        dead(_1);",
+    "        goto bb2;",
+    "    }",
+    "    bb2: {",
+    "        trap;",
+    "    }",
+    "}",
+    // a named local with no `dead` that holds an allocation at the `return`: its scope did not end,
+    // so it has an obligation there: rnU rtP
+    "fn main.x12() -> void {",
+    "    let _1 (n): node mut* own;",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own;",
+    "        _2 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _2;",
+    "        return;",
+    "    }",
+    "}",
+    // the same after a `del`: rnP rtP
+    "fn main.x13() -> void {",
+    "    let _1 (n): node mut* own;",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own;",
+    "        _2 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _2;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // the address of a named local starts its scope, and the store through it kills its fact:
+    // rnU rtP
+    "fn main.x14() -> void {",
+    "    let _1 (n): node mut* own;",
+    "    let _2: node mut* own mut*;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own;",
+    "        _2 = addr mut(_1);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_2)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_2) = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // a store of the zero value starts no scope: rtP
+    "fn main.x15() -> void {",
+    "    let _1 (n): node mut* own;",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own;",
+    "        _2 = alloc<node>(const u64 1);",
+    "        del(move _2);",
+    "        _1 = const null node mut* own;",
+    "        return;",
+    "    }",
+    "}",
+    // the scope that a `dead` ends stays ended over `live` with no store: dnU rtP
+    "fn main.x16() -> void {",
+    "    let _1 (n): node mut* own;",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own;",
+    "        live(_1);",
+    "        _2 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _2;",
+    "        dead(_1);",
+    "        live(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // a named local that is memory and is not declared on the path of the first `return`: a call
+    // there kills its fact, but its scope has not started, so the first `return` has no obligation
+    // for it: rtP dnP rtP
+    "fn main.x17(_1 (c): bool) -> void {",
+    "    let _2 (n): node mut* own;",
+    "    let _3: node mut* own;",
+    "    let _4: node mut* own mut*;",
+    "    let _5: void;",
+    "    bb0: {",
+    "        _2 = const zero node mut* own;",
+    "        _5 = call fn main.g();",
+    "        switch(copy _1) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        live(_2);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        _2 = move _3;",
+    "        _4 = addr mut(_2);",
+    "        del(move _2);",
+    "        dead(_2);",
+    "        return;",
+    "    }",
+    "}",
+    // a temporary moved on one path only: rtP rtU
+    "fn main.x18(_1 (c): bool) -> void {",
+    "    let _2: node mut* own;",
+    "    let _3: void;",
+    "    bb0: {",
+    "        _2 = alloc<node>(const u64 1);",
+    "        switch(copy _1) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _3 = call fn main.take(move _2);",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "}",
+    // a parameter that is memory: the call after its `del` kills its fact: rpU
+    "fn main.x19(_1 (p): node mut* own) -> void {",
+    "    let _2: node mut* own mut*;",
+    "    let _3: void;",
+    "    bb0: {",
+    "        _2 = addr mut(_1);",
+    "        del(move _1);",
+    "        _3 = call fn main.g();",
+    "        return;",
+    "    }",
+    "}",
+    // `_0` passes its value to the caller, and an owning aggregate waits for R1: no exit
+    "fn main.x20() -> node mut* own {",
+    "    let _1 (s): pair;",
+    "    bb0: {",
+    "        _1 = aggregate pair(const null node mut* own, const null node mut* own);",
+    "        live(_1);",
+    "        _1.0 = alloc<node>(const u64 1);",
+    "        dead(_1);",
+    "        _0 = alloc<node>(const u64 1);",
+    "        return;",
+    "    }",
+    "}",
+    // outside the guarantee: a store through the address of `n` after its `dead` gives it an
+    // allocation that the `return` leaks. It writes through a dangling pointer, which D17.11
+    // assumes no store does, so the `dead` keeps the fact of the entry zeroing and the `return`
+    // has no obligation for `n`: dnP rtP (probe `fb` of the review)
+    "fn main.x21() -> i32 {",
+    "    let _1 (n): node mut* own;",
+    "    let _2: node mut* own mut*;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own;",
+    "        live(_1);",
+    "        _2 = addr mut(_1);",
+    "        dead(_1);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        del(move (*_2));",
+    "        check(overwrite: (*_2)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_2) = move _3;",
+    "        _0 = const i32 0;",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[21] EXITS_VERDICTS = {
+    "dnU rtP", "dnP rtP", "rpU", "rpP", "rpP", "rtU", "rtP", "rtU", "rtP", "", "dnU", "rnU rtP",
+    "rnP rtP", "rnU rtP", "rtP", "dnU rtP", "rtP dnP rtP", "rtP rtU", "rpU", "", "dnP rtP",
+};
+
+// The exit kinds of D17.20 over lowered fort source: the closing brace, `return`, `break`,
+// `continue`, and an exit into an abort block, each with a function whose exit holds an allocation
+// and one whose exit does not. The `dead` of an exit stands at the closing brace or at the keyword
+// (spec/fir.md 9.5). A comment gives the verdicts of each function (write_exits).
+string[104] EXIT_KINDS = {
+    "struct node {",
+    "    node mut* own next;",
+    "}",
+    "fn take(node mut* own n) void {",
+    "    del(n);",
+    "}",
+    // dnU rtP
+    "fn brace_leak() void {",
+    "    {",
+    "        node mut* own n = new(node);",
+    "    }",
+    "}",
+    // dnP rtP
+    "fn brace_del() void {",
+    "    {",
+    "        node mut* own n = new(node);",
+    "        del(n);",
+    "    }",
+    "}",
+    // the `return` ends `n`, then the parameter and the temporary: dnU rpU rtP dnP rpP rtP
+    "fn return_leak(bool c, node mut* own p) void {",
+    "    node mut* own n = new(node);",
+    "    if (c) {",
+    "        return;",
+    "    }",
+    "    del(n);",
+    "    del(p);",
+    "}",
+    // dnP rpP rtP dnP rpP rtP
+    "fn return_del(bool c, node mut* own p) void {",
+    "    node mut* own n = new(node);",
+    "    if (c) {",
+    "        del(n);",
+    "        take(move(p));",
+    "        return;",
+    "    }",
+    "    del(n);",
+    "    del(p);",
+    "}",
+    // the block of the `return` comes first: rtP dnU dnP
+    "fn break_leak(bool c) void {",
+    "    while (c) {",
+    "        node mut* own n = new(node);",
+    "        if (c) {",
+    "            break;",
+    "        }",
+    "        del(n);",
+    "    }",
+    "}",
+    // rtP dnP dnP
+    "fn break_del(bool c) void {",
+    "    while (c) {",
+    "        node mut* own n = new(node);",
+    "        if (c) {",
+    "            del(n);",
+    "            break;",
+    "        }",
+    "        del(n);",
+    "    }",
+    "}",
+    // the back edge also carries `n` to its declaration, an error of D17.11: rtP dnU dnP
+    "fn continue_leak(bool c) void {",
+    "    while (c) {",
+    "        node mut* own n = new(node);",
+    "        if (c) {",
+    "            continue;",
+    "        }",
+    "        del(n);",
+    "    }",
+    "}",
+    // rtP dnP dnP
+    "fn continue_del(bool c) void {",
+    "    while (c) {",
+    "        node mut* own n = new(node);",
+    "        if (c) {",
+    "            del(n);",
+    "            continue;",
+    "        }",
+    "        del(n);",
+    "    }",
+    "}",
+    // the `dead` of the block stands in the block of the `panic`, an abort block: no exit
+    "fn abort_end() void {",
+    "    {",
+    "        node mut* own n = new(node);",
+    "    }",
+    "    panic(\"stop\");",
+    "}",
+    // the same `dead` before an `if`: dnU rtP
+    "fn abort_twin(bool c) void {",
+    "    {",
+    "        node mut* own n = new(node);",
+    "    }",
+    "    if (c) {",
+    "        panic(\"stop\");",
+    "    }",
+    "}",
+    // the end of a `noreturn` body is a `trap`, an abort block: no exit
+    "fn die() noreturn {",
+    "    node mut* own n = new(node);",
+    "    while (true) {",
+    "    }",
+    "}",
+    // the pass follows the edge that no run takes, so the `dead` before the `return` is unproved:
+    // dnU rtP
+    "fn spin() void {",
+    "    node mut* own n = new(node);",
+    "    while (true) {",
+    "    }",
+    "}",
+    // the deferred `del` runs before the `dead` of each exit: dnP rtP dnP rtP
+    "fn deferred(bool c) void {",
+    "    node mut* own n = new(node);",
+    "    defer del(n);",
+    "    if (c) {",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[13] EXIT_KIND_NAMES = {
+    "brace_leak", "brace_del", "return_leak", "return_del", "break_leak", "break_del",
+    "continue_leak", "continue_del", "abort_end", "abort_twin", "die", "spin", "deferred",
+};
+
+string[13] EXIT_KIND_VERDICTS = {
+    "dnU rtP", "dnP rtP", "dnU rpU rtP dnP rpP rtP", "dnP rpP rtP dnP rpP rtP", "rtP dnU dnP",
+    "rtP dnP dnP", "rtP dnU dnP", "rtP dnP dnP", "", "dnU rtP", "", "dnU rtP", "dnP rtP dnP rtP",
+};
+
+// Writes the verdict of each exit of `p` into `out`, in the order of the exits, with a space
+// between two: `d` for a `dead` marker or `r` for a `return`, then the name of a named local or a
+// parameter or `t` for a temporary, then `P` for an exit that `p` proves and `U` for one that it
+// does not prove. Holds the count of `p` against the verdicts.
+fn write_exits(fir.func* f, prover.proof* p, strbuf.str_buf mut* out) void {
+    strbuf.clear(out);
+    u32 mut leaks = 0;
+    u64 mut k = 0;
+    while (k < p->exits.len) {
+        prover.exit* x = &p->exits[k];
+        if (k > 0) {
+            strbuf.push(out, ' ');
+        }
+        if (x->index < fir.block_statement_count(f, x->block)) {
+            assert(fir.block_statement(f, x->block, x->index)->kind == fir.stmt_kind.st_dead);
+            strbuf.push(out, 'd');
+        } else {
+            assert(fir.block_at(f, x->block)->term.kind == fir.term_kind.tk_return);
+            strbuf.push(out, 'r');
+        }
+        fir.local* l = fir.local_at(f, x->local);
+        if (l->kind == fir.local_kind.lk_temp) {
+            strbuf.push(out, 't');
+        } else {
+            strbuf.append(out, fir.local_name(l));
+        }
+        if (x->proved) {
+            strbuf.push(out, 'P');
+        } else {
+            strbuf.push(out, 'U');
+            leaks += 1;
+        }
+        k += 1;
+    }
+    assert(p->leaks == leaks);
+}
+
+// Parses `text` against PRELUDE, holds that the verifier accepts each function, proves each one,
+// and holds that function `k` of the module gives the exit verdicts `want[k]`.
+fn expect_exits(string@ text, string@ want) void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    fir.module mut m = pass_env.parse(&e, PRELUDE[..], text);
+    defer fir.module_free(&m);
+    assert(m.funcs.len == want.len);
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    u64 mut k = 0;
+    while (k < m.funcs.len) {
+        fir.func* f = &m.funcs.items[k];
+        pass_env.verified(&e, f, "prover_test: the verifier refuses the input");
+        prover.proof mut p = prover.prove(f);
+        write_exits(f, &p, &got);
+        prover.free(&p);
+        if (strbuf.view(&got) != want[k]) {
+            eprintln("function ", k, " gives ", strbuf.view(&got), " and not ", want[k]);
+            panic("prover_test: an exit verdict differs");
+        }
+        k += 1;
+    }
+}
+
+// Each owner local has its obligation at each exit of its scope, and no other local has one.
+fn each_exit_holds_the_obligation_of_its_owner_local() void {
+    expect_exits(EXITS[..], EXITS_VERDICTS[..]);
+}
+
+// Each exit kind of D17.20 has its obligation in the lowering of fort source.
+fn each_exit_kind_of_lowered_source_has_its_obligation() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, EXIT_KINDS[..], true);
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    u64 mut k = 0;
+    while (k < EXIT_KIND_NAMES.len) {
+        fir.func mut f = fir.func{};
+        lower(&e, EXIT_KIND_NAMES[k], &f);
+        prover.proof mut p = prover.prove(&f);
+        write_exits(&f, &p, &got);
+        prover.free(&p);
+        fir.func_free(&f);
+        if (strbuf.view(&got) != EXIT_KIND_VERDICTS[k]) {
+            eprintln(EXIT_KIND_NAMES[k], " gives ", strbuf.view(&got), " and not ",
+                     EXIT_KIND_VERDICTS[k]);
+            panic("prover_test: an exit kind gives another verdict");
+        }
+        k += 1;
+    }
+}
+
 // ---- the release of each allocation ------------------------------------------------------------
 
 // The count of the rounds of proofs between two samples of the release probe.
@@ -6118,16 +6666,27 @@ fn write_unproved(fir.func* f, prover.proof* p, session.session mut* s,
     }
 }
 
-// Each round proves each function of HELD PROOFS times, writes its places and frees its proof. A
-// proof that keeps a vector of its context, a set of a dataflow or the probes of a walk keeps 32
-// bytes or more in each proof, so 4480 bytes or more in each round, and the program break moves.
-// The probe runs first in main, as the probe of fir_flow_test does: after the other tests, the
-// allocator can serve a leak out of the free chunks that they left.
+// Each round proves each function of HELD and of EXITS PROOFS times, writes its places and the
+// lines of its exits that it does not prove, and frees its proof. A proof that keeps a vector of
+// its context, a set of a dataflow or the probes of a walk keeps 32 bytes or more in each proof,
+// so 4480 bytes or more in each round, and the program break moves. The probe runs first in main,
+// as the probe of fir_flow_test does: after the other tests, the allocator can serve a leak out of
+// the free chunks that they left.
 fn the_proofs_leave_the_heap_where_it_was() void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
     defer lower_env.close(&e);
-    fir.module mut m = pass_env.parse(&e, PRELUDE[..], HELD[..]);
+    // one module holds both texts: a second parse in one environment checks the prelude again
+    string mut@ own text = new(string, HELD.len + EXITS.len);
+    defer del(text);
+    for (u64 mut i = 0; i < text.len; i++) {
+        if (i < HELD.len) {
+            text[i] = HELD[i];
+        } else {
+            text[i] = EXITS[i - HELD.len];
+        }
+    }
+    fir.module mut m = pass_env.parse(&e, PRELUDE[..], text);
     defer fir.module_free(&m);
     strbuf.str_buf mut out = strbuf.create();
     defer strbuf.free(&out);
@@ -6141,6 +6700,7 @@ fn the_proofs_leave_the_heap_where_it_was() void {
                 prover.proof mut p = prover.prove(&m.funcs.items[i]);
                 strbuf.clear(&out);
                 write_unproved(&m.funcs.items[i], &p, &e.c.m.s, &out);
+                report.write_leaks(&m.funcs.items[i], &p, &e.c.m.s, &out);
                 prover.free(&p);
                 i += 1;
             }
@@ -6424,6 +6984,63 @@ fn the_work_limit_stops_the_proof_of_a_function() void {
     assert(under.over && under.stores.len == 6 && under.unproved == 6);
 }
 
+// The leak work adds the statements and the terminators times the owner locals that are no scratch
+// local to the work of D17.11. Past the limit no exit is proved but an exit of a scratch local,
+// and a named local has no obligation at a `return`. The work of D17.11 and the verdicts of the
+// overwrite proof do not change below their own limit.
+fn the_leak_work_stops_the_proof_of_the_exits() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    fir.module mut m = pass_env.parse(&e, PRELUDE[..], EXITS[..]);
+    defer fir.module_free(&m);
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    // x2: 8 statements and terminators, 1 check, 2 blocks and 3 locals: a work of 8 * 1 + 6, and
+    // the fact of `n` adds 8
+    fir.func* x2 = &m.funcs.items[1];
+    prover.proof mut whole = prover.prove(x2);
+    assert(whole.work == 14 && whole.leak_work == 22 && !whole.over && !whole.leak_over);
+    prover.free(&whole);
+    prover.proof mut at = prover.prove_within(x2, 22);
+    write_exits(x2, &at, &got);
+    assert(!at.leak_over && at.unproved == 0 && strbuf.view(&got) == "dnP rtP");
+    prover.free(&at);
+    prover.proof mut leak_under = prover.prove_within(x2, 21);
+    write_exits(x2, &leak_under, &got);
+    assert(leak_under.leak_over && !leak_under.over && leak_under.unproved == 0);
+    assert(strbuf.view(&got) == "dnU rtP");
+    prover.free(&leak_under);
+    // past the limit of D17.11 the check and its store are unproved too
+    prover.proof mut under = prover.prove_within(x2, 13);
+    write_exits(x2, &under, &got);
+    assert(under.over && under.leak_over && under.unproved == 2 && strbuf.view(&got) == "dnU rtP");
+    prover.free(&under);
+    // x4: no check and no store, so no work of D17.11; 2 * 1 + 2 with its parameter
+    fir.func* x4 = &m.funcs.items[3];
+    prover.proof mut param = prover.prove_within(x4, 4);
+    write_exits(x4, &param, &got);
+    assert(param.work == 0 && param.leak_work == 4 && !param.leak_over);
+    assert(strbuf.view(&got) == "rpP");
+    prover.free(&param);
+    prover.proof mut param_under = prover.prove_within(x4, 3);
+    write_exits(x4, &param_under, &got);
+    assert(param_under.leak_over && !param_under.over && strbuf.view(&got) == "rpU");
+    prover.free(&param_under);
+    // x6: past the limit, the exit of a scratch local holds even when it holds an allocation
+    fir.func* x6 = &m.funcs.items[5];
+    prover.proof mut temp = prover.prove_within(x6, 1);
+    write_exits(x6, &temp, &got);
+    assert(temp.leak_work == 2 && temp.leak_over && strbuf.view(&got) == "rtP");
+    prover.free(&temp);
+    // x12: past the limit, a named local has no obligation at a `return`
+    fir.func* x12 = &m.funcs.items[11];
+    prover.proof mut named = prover.prove_within(x12, 0);
+    write_exits(x12, &named, &got);
+    assert(named.leak_over && strbuf.view(&got) == "rtP");
+    prover.free(&named);
+}
+
 fn main() i32 {
     the_proofs_leave_the_heap_where_it_was();
     println("release ok");
@@ -6488,7 +7105,13 @@ fn main() i32 {
     println("stores ok");
     the_examples_of_the_rule_hold_over_lowered_source();
     println("examples ok");
+    each_exit_holds_the_obligation_of_its_owner_local();
+    println("exits ok");
+    each_exit_kind_of_lowered_source_has_its_obligation();
+    println("exit kinds ok");
     the_work_limit_stops_the_proof_of_a_function();
     println("work ok");
+    the_leak_work_stops_the_proof_of_the_exits();
+    println("leak work ok");
     return 0;
 }

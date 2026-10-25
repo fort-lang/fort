@@ -340,8 +340,10 @@ fn help_prints_the_usage_line_and_the_option_table() void {
     assert(str.starts_with(out, "usage: fort [options] entry.ft\noptions:\n"));
     // One line per option follows the usage line and the
     // `options:` header.
-    assert(capture.line_count(out) == 37);
+    assert(capture.line_count(out) == 38);
     assert(str.find(out, "--overwrite-report") < 0);
+    string leak = "  --leak-report      as --check, and write each exit where an owner can leak\n";
+    assert(str.find(out, leak) >= 0);
     string ar = "  --ar <path>        the archiver that writes the lib.a of --lib (default ar)\n";
     assert(str.find(out, ar) >= 0);
     string cache_dir = "  --cache-dir <dir>  the cache directory of a library build\n";
@@ -1825,6 +1827,92 @@ fn a_proved_store_leaves_no_check_in_any_mode() void {
     }
 }
 
+// ---- the leak report ---------------------------------------------------------------------------
+
+// A program whose exits can leak: `n` and the parameter `p` at the `return` of line 7, `n` again
+// at the closing brace of line 10, and `m` at the `return` of line 13.
+string[14] LEAK_SITES = {
+    "struct node {",
+    "    node mut* own next;",
+    "}",
+    "fn early(bool c, node mut* own p) void {",
+    "    node mut* own n = new(node);",
+    "    if (c) {",
+    "        return;",
+    "    }",
+    "    del(p);",
+    "}",
+    "fn main() i32 {",
+    "    node mut* own m = new(node);",
+    "    return 0;",
+    "}",
+};
+
+// The lines of the report of LEAK_SITES on stdout, in the order of the functions and of their
+// exits.
+string[4] LEAK_REPORT = {
+    "leak_sites.ft:7:9: leak: cannot prove 'n' is empty at this exit\n",
+    "leak_sites.ft:7:9: leak: cannot prove 'p' is empty at this exit\n",
+    "leak_sites.ft:10:1: leak: cannot prove 'n' is empty at this exit\n",
+    "leak_sites.ft:13:5: leak: cannot prove 'm' is empty at this exit\n",
+};
+
+// --leak-report implies --check. It writes the line of each exit that the emptiness pass does not
+// prove to stdout, and the run exits 0, because no leak is an error yet (D17.20). --check alone,
+// a build of each mode and --fir give the same verdict and write no line of a leak. With an
+// overwrite error, the report lists the leaks too, and the run exits 1 as --check does.
+fn the_leak_report_lists_each_exit_and_changes_no_verdict() void {
+    write_runtime();
+    write_lines("leak_sites.ft", LEAK_SITES[..]);
+    string[3] mut report = {"fort", "--leak-report", "leak_sites.ft"};
+    assert(run(report[0..3]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    string own out = captured_out();
+    defer del(out);
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    for (string line : LEAK_REPORT) {
+        strbuf.append(&want, line);
+    }
+    assert(out == strbuf.view(&want));
+    string[3] mut check = {"fort", "--check", "leak_sites.ft"};
+    assert(run(check[0..3]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    string own quiet = captured_out();
+    defer del(quiet);
+    assert(quiet == "");
+    string[6] mut build = {"fort", "-S", "-S", "leak_sites.ft", "-o", "leak_sites.ll"};
+    for (string mode : MODES) {
+        remove_file("leak_sites.ll");
+        build[2] = mode;
+        assert(run(build[0..6]) == EXIT_OK);
+        assert(captured_err_is_empty());
+        assert(file_exists("leak_sites.ll"));
+    }
+    string[3] mut fir_mode = {"fort", "--fir", "leak_sites.ft"};
+    assert(run(fir_mode[0..3]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    assert(!out_has("leak: "));
+    write_lines("ow_sites.ft", OW_SITES[..]);
+    string[3] mut both = {"fort", "--leak-report", "ow_sites.ft"};
+    assert(run(both[0..3]) == EXIT_COMPILE_ERROR);
+    assert(reported_ow_sites());
+    string own listed = captured_out();
+    defer del(listed);
+    assert(listed == "ow_sites.ft:14:5: leak: cannot prove 'p' is empty at this exit\n");
+}
+
+// The report and the document of --json both go to stdout, so the two do not combine, and
+// --index sets --json.
+fn the_leak_report_refuses_the_document() void {
+    string[4] mut json = {"fort", "--leak-report", "--json", "entry.ft"};
+    assert(run(json[0..4]) == EXIT_USAGE);
+    assert(err_has("fort: error: --leak-report does not combine with --json or --index\n"));
+    string[4] mut index = {"fort", "--index", "--leak-report", "entry.ft"};
+    assert(run(index[0..4]) == EXIT_USAGE);
+    assert(err_has("fort: error: --leak-report does not combine with --json or --index\n"));
+}
+
 // `if (c) { return 1; }` falling off the end of a function that returns a value: a path from
 // `bb0` reaches `unreachable`, which rule V9 refuses (test/fir/verify/v09_reachable.fir).
 string[12] FIR_V9_TEXT = {
@@ -2342,6 +2430,8 @@ fn main() i32 {
     fir_verify_report_names_a_check_with_no_runtime_entry();
     overwrite_report_is_an_unknown_option();
     each_unproved_store_is_an_error_in_every_mode();
+    the_leak_report_lists_each_exit_and_changes_no_verdict();
+    the_leak_report_refuses_the_document();
     a_proved_store_leaves_no_check_in_any_mode();
     fir_test_parses_as_a_flag();
     fir_test_combines_with_no_other_mode();

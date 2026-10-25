@@ -1,7 +1,8 @@
 /// Proves at compile time that each store into an `own` reference finds its destination empty:
 /// the forward must-empty analysis of the overwrite check (D17.11, spec/fir.md 11). It reads one
 /// verified FIR function before the build-mode pass, and it reads no other function. It holds the
-/// emptiness fact of spec/ownership-design.md 4.4 and no other fact.
+/// emptiness fact of spec/ownership-design.md 4.4, and with it it proves part 1 of the leak rule
+/// (D17.20): an owner local holds the zero value at each exit of its scope.
 //
 // The analysis proves each store into a place of an `own` reference type that needs a proof
 // (find_stores): the fact of its place holds after its right side and before its own kill rules. A
@@ -13,7 +14,10 @@
 // the fresh pointer locals, whose transfer owner.place holds, the scratch locals (run_scratch),
 // whose bit holds the fact of a whole temporary or `_0` that is no memory, then the facts, joined
 // by intersection. A walk of each block gives its sets, with the stale set and the fresh set before
-// each statement. A second walk of each block that holds a store tests its fact.
+// each statement. A second walk of each block that holds a store tests its fact. The leak rule
+// adds the fact of each owner local whose obligation needs one, and a fifth dataflow (run_ended)
+// that says where the scope of a named owner local has ended; a third walk of each block that
+// holds an exit tests its obligation (judge_exits).
 // The module uses switches and no function-pointer dispatch table. It holds no module-level
 // mutable state: each vector belongs to one call of prove, or to the proof that it returns.
 import fort.fir;
@@ -45,26 +49,48 @@ struct store {
     bool proved;
 }
 
-/// The verdict of each `check(overwrite: p)` and of each store that needs a proof in one function.
-/// `proved[b]` says whether the check that ends block `b` is proved. It is true for a block that
-/// ends in another terminator. `stores` holds the stores that need a proof, in block order and in
-/// statement order. `checks` counts the checks, and `unproved` counts the checks and the stores
-/// that the analysis does not prove. `work` is the work of the function, as WORK_LIMIT counts it,
-/// and `over` says that it passed the limit.
+/// An obligation of part 1 of the leak rule (D17.20): the owner local `local` must hold the zero
+/// value at an exit of its scope. The exit is statement `index` of block `block`, a `dead` marker,
+/// or the `return` that ends the block when `index` is the count of the statements of the block.
+/// `proved` says whether the analysis proves the obligation.
+struct exit {
+    u32 block;
+    u32 index;
+    u32 local;
+    bool proved;
+}
+
+/// The verdict of each `check(overwrite: p)` and of each store that needs a proof in one function,
+/// and of each obligation of part 1 of the leak rule. `proved[b]` says whether the check that ends
+/// block `b` is proved. It is true for a block that ends in another terminator. `stores` holds the
+/// stores that need a proof, in block order and in statement order. `exits` holds the obligations
+/// of the leak rule in block order: the `dead` markers of a block in statement order, then its
+/// `return`, one for each local in number order (find_exits). `checks` counts the checks,
+/// `unproved` counts the checks and the stores that the analysis does not prove, and `leaks`
+/// counts the exits that it does not prove. No leak is an error yet: the report lists them
+/// (D17.20). `work` is the work of the overwrite proof, as WORK_LIMIT counts it, and `over` says
+/// that it passed the limit. `leak_work` adds the facts of the exits (count_owner_facts), and
+/// `leak_over` says that it passed the limit.
 struct proof {
     bool mut@ own proved;
     store mut@ own stores;
+    exit mut@ own exits;
     u32 checks;
     u32 unproved;
+    u32 leaks;
     u64 work;
+    u64 leak_work;
     bool over;
+    bool leak_over;
 }
 
 fn free(proof mut* p) void {
     del(p->proved);
     del(p->stores);
+    del(p->exits);
     p->checks = 0;
     p->unproved = 0;
+    p->leaks = 0;
 }
 
 /// Whether the check that ends block `b` is proved, or true when block `b` ends in another
@@ -75,14 +101,16 @@ fn is_proved(proof* p, u32 b) bool {
 
 // The state of one call of prove: the survey of the places, and the facts. `facts[..fact_count]`
 // holds the facts, whose steps the survey keeps. `block_fact[b]` is the fact of the check that
-// ends block `b`, and `store_fact[k]` the fact of store `k` of the proof. The stores of block `b`
-// are the stores `first_store[b]` to `first_store[b + 1] - 1` of the proof.
+// ends block `b`, `store_fact[k]` the fact of store `k` of the proof, and `exit_fact[k]` the fact
+// of exit `k`. The stores of block `b` are the stores `first_store[b]` to `first_store[b + 1] - 1`
+// of the proof.
 struct context {
     place.survey places;
     place.path mut@ own facts;
     u64 fact_count;
     u32 mut@ own block_fact;
     u32 mut@ own store_fact;
+    u32 mut@ own exit_fact;
     u64 mut@ own first_store;
 }
 
@@ -91,6 +119,7 @@ fn free_context(context mut* c) void {
     del(c->facts);
     del(c->block_fact);
     del(c->store_fact);
+    del(c->exit_fact);
     del(c->first_store);
 }
 
@@ -713,13 +742,15 @@ fn find_store(context* c, proof* out, u32 b, u32 i) u64 {
 /// within WORK_LIMIT. A store is proved when its place is a tracked place whose fact holds after
 /// the reads of its operands and the kill of its `call`, before the kill rules of the store. A
 /// check is proved when `p` is a tracked place whose fact holds at the end of the block of the
-/// check, and each store that the check guards is proved (guards_proved).
+/// check, and each store that the check guards is proved (guards_proved). It also proves each
+/// obligation of part 1 of the leak rule (find_exits, judge_exits).
 fn prove(fir.func* f) proof {
     return prove_within(f, WORK_LIMIT);
 }
 
 /// Proves as prove does, with `limit` as the most work. A function whose work passes `limit` gets
-/// no proof: each of its checks and its stores stays unproved. The test comes before any dataflow.
+/// no proof: each of its checks and its stores stays unproved. A function whose leak work passes
+/// `limit` gets no proof of its exits (pass_exits). The test comes before any dataflow.
 fn prove_within(fir.func* f, u64 limit) proof {
     u32 n = fir.block_count(f);
     proof mut out = proof{};
@@ -744,7 +775,8 @@ fn prove_within(fir.func* f, u64 limit) proof {
         b += 1;
     }
     find_stores(f, check_of, &out);
-    if (out.checks == 0 && out.stores.len == 0) {
+    bool overwrite = out.checks > 0 || out.stores.len > 0;
+    if (!overwrite && !has_owner(f, false)) {
         return out;
     }
     u64 locals = cast(fir.local_count(f), u64);
@@ -762,43 +794,82 @@ fn prove_within(fir.func* f, u64 limit) proof {
     place.count_uses(&c.places);
     place.mark_memory(&c.places);
     place.mark_sources(&c.places);
-    u64 alone = count_alone(&c, check_of, &out);
-    out.work = units * (cast(out.checks, u64) + alone) + cast(n, u64) * locals
-        + place.stale_steps(&c.places);
-    if (out.work > limit) {
-        out.over = true;
+    u64 checked = cast(out.checks, u64) + count_alone(&c, check_of, &out);
+    u64 sets = cast(n, u64) * locals + place.stale_steps(&c.places);
+    // a function with no check and no store that needs a proof has no work (D17.11)
+    if (overwrite) {
+        out.work = units * checked + sets;
+    }
+    out.leak_work = units * (checked + count_owner_facts(&c)) + sets;
+    out.over = out.work > limit;
+    out.leak_over = out.leak_work > limit;
+    if (out.leak_over) {
+        find_exits(&c, null, &out);
+        pass_exits(&c, &out);
+    }
+    if (out.over) {
         judge(&c, null, null, null, null, &out);
         return out;
     }
+    run_dataflows(&c, &out);
+    return out;
+}
+
+// Runs the dataflows of the proof `c` within the limit and writes the verdict of each check and
+// each store into `out`, and of each exit unless the leak work passed the limit. Its own function
+// keeps the work of prove_within, a function of the compiler, within the measure of D17.11.
+fn run_dataflows(context mut* c, proof mut* out) void {
+    fir.func* f = c->places.f;
+    u32 locals = fir.local_count(f);
     fir.pred_table mut pt = fir.func_predecessors(f);
     defer fir.pred_table_free(&pt);
-    fir_flow.dataflow mut stale = fir_flow.dataflow_new(fir.local_count(f),
-                                                        fir_flow.join_kind.join_union,
+    fir_flow.dataflow mut stale = fir_flow.dataflow_new(locals, fir_flow.join_kind.join_union,
                                                         transfer_none);
     defer fir_flow.dataflow_free(&stale);
-    run_locals(&c, &pt, &stale, false);
-    fir_flow.dataflow mut fresh = fir_flow.dataflow_new(fir.local_count(f),
-                                                        fir_flow.join_kind.join_intersect,
+    run_locals(c, &pt, &stale, false);
+    fir_flow.dataflow mut fresh = fir_flow.dataflow_new(locals, fir_flow.join_kind.join_intersect,
                                                         transfer_none);
     defer fir_flow.dataflow_free(&fresh);
-    run_locals(&c, &pt, &fresh, true);
-    fir_flow.dataflow mut scratch = fir_flow.dataflow_new(fir.local_count(f),
+    run_locals(c, &pt, &fresh, true);
+    fir_flow.dataflow mut scratch = fir_flow.dataflow_new(locals,
                                                           fir_flow.join_kind.join_intersect,
                                                           transfer_none);
     defer fir_flow.dataflow_free(&scratch);
-    run_scratch(&c, &pt, &scratch);
-    collect_facts(&c, &stale, &out);
-    if (c.fact_count > 0) {
-        fir_flow.dataflow mut facts = fir_flow.dataflow_new(cast(c.fact_count, u32),
+    run_scratch(c, &pt, &scratch);
+    if (!out->leak_over && has_owner(f, true)) {
+        // the ended dataflow runs only for a function with a named owner local
+        fir_flow.dataflow mut ended = fir_flow.dataflow_new(locals,
                                                             fir_flow.join_kind.join_intersect,
                                                             transfer_none);
-        defer fir_flow.dataflow_free(&facts);
-        run_facts(&c, &pt, &stale, &fresh, &facts);
-        judge(&c, &stale, &fresh, &facts, &scratch, &out);
-    } else {
-        judge(&c, &stale, &fresh, null, &scratch, &out);
+        defer fir_flow.dataflow_free(&ended);
+        run_ended(c, &pt, &ended);
+        find_exits(c, &ended, out);
+    } else if (!out->leak_over) {
+        find_exits(c, null, out);
     }
-    return out;
+    collect_facts(c, &stale, out);
+    // the store follows a `del`, because each call above can change the fields of `*c`
+    del(c->exit_fact);
+    c->exit_fact = new(u32, out->exits.len);
+    if (!out->leak_over) {
+        collect_exit_facts(c, &stale, out);
+    }
+    if (c->fact_count == 0) {
+        judge(c, &stale, &fresh, null, &scratch, out);
+        if (!out->leak_over) {
+            judge_exits(c, &stale, &fresh, null, &scratch, out);
+        }
+        return;
+    }
+    fir_flow.dataflow mut facts = fir_flow.dataflow_new(cast(c->fact_count, u32),
+                                                        fir_flow.join_kind.join_intersect,
+                                                        transfer_none);
+    defer fir_flow.dataflow_free(&facts);
+    run_facts(c, &pt, &stale, &fresh, &facts);
+    judge(c, &stale, &fresh, &facts, &scratch, out);
+    if (!out->leak_over) {
+        judge_exits(c, &stale, &fresh, &facts, &scratch, out);
+    }
 }
 
 // Writes the verdict of each store and of each check into `out`, and counts the ones that are not
@@ -1028,4 +1099,252 @@ fn guards_proved(context* c, u32 b, proof* out, fir_flow.bits mut* seen, u32 mut
         }
     }
     return true;
+}
+
+// ---- the leak rule -----------------------------------------------------------------------------
+
+// Whether the local `n` is an owner local of part 1 of the leak rule (D17.20): a named local, a
+// parameter or a temporary whose type is an `own` reference. `_0` passes its value to the caller,
+// and a local of an owning aggregate waits for refinement R1.
+fn is_owner_local(fir.func* f, u32 n) bool {
+    fir.local* l = fir.local_at(f, n);
+    return l->kind != fir.local_kind.lk_return && is_own_reference(l->ty);
+}
+
+// Whether `f` has an owner local, or with `named` a named owner local.
+fn has_owner(fir.func* f, bool named) bool {
+    u32 mut n = 0;
+    while (n < fir.local_count(f)) {
+        bool kind = !named || fir.local_at(f, n)->kind == fir.local_kind.lk_named;
+        if (kind && is_owner_local(f, n)) {
+            return true;
+        }
+        n += 1;
+    }
+    return false;
+}
+
+// The count of the owner locals that are no scratch local: the most facts that the exits add, which
+// the leak work counts as the first count of the work counts the checks. An exit of a scratch local
+// takes its bit of the scratch dataflow, whose sets the second count bounds.
+fn count_owner_facts(context* c) u64 {
+    fir.func* f = c->places.f;
+    u64 mut count = 0;
+    u32 mut n = 0;
+    while (n < fir.local_count(f)) {
+        if (is_owner_local(f, n) && !place.is_scratch(&c->places, n)) {
+            count += 1;
+        }
+        n += 1;
+    }
+    return count;
+}
+
+// Whether the owner local `n` has an obligation at the `return` that ends block `b`. A parameter
+// and a temporary have one. A named local has one when `ended` does not prove that its scope ended
+// on each path to the end of the block. With a null `ended` it has none: the lowering writes the
+// `dead` of each named local of each scope that a `return` leaves (spec/fir.md 9.5).
+fn has_return_obligation(fir.func* f, fir_flow.dataflow* ended, u32 b, u32 n) bool {
+    if (!is_owner_local(f, n)) {
+        return false;
+    }
+    if (fir.local_at(f, n)->kind != fir.local_kind.lk_named) {
+        return true;
+    }
+    return ended != null && !fir_flow.bits_get(&ended->outs[cast(b, u64)], n);
+}
+
+// Counts the exits of `f` in the order of find_exits, and with `fill` writes them into out->exits,
+// which has room for each.
+fn scan_exits(fir.func* f, fir_flow.dataflow* ended, proof mut* out, bool fill) u64 {
+    u64 mut k = 0;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        fir.terminator* t = &fir.block_at(f, b)->term;
+        u32 count = fir.block_statement_count(f, b);
+        u32 mut i = 0;
+        while (i < count && !fir.term_is_abort(t)) {
+            fir.statement* s = fir.block_statement(f, b, i);
+            if (s->kind == fir.stmt_kind.st_dead && is_owner_local(f, s->local)) {
+                if (fill) {
+                    out->exits[k] = exit{b, i, s->local, false};
+                }
+                k += 1;
+            }
+            i += 1;
+        }
+        u32 mut n = 0;
+        while (t->kind == fir.term_kind.tk_return && n < fir.local_count(f)) {
+            if (has_return_obligation(f, ended, b, n)) {
+                if (fill) {
+                    out->exits[k] = exit{b, count, n, false};
+                }
+                k += 1;
+            }
+            n += 1;
+        }
+        b += 1;
+    }
+    return k;
+}
+
+// Lists in out->exits each obligation of part 1 of the leak rule, in block order. The `dead`
+// marker of an owner local is one, but in an abort block: a runtime error runs no deferred code
+// (D7.8, D11.4), so an exit into an abort block has no obligation. Rule V10 lets a `dead` name a
+// named local only. A `return` has one for each owner local of has_return_obligation.
+fn find_exits(context* c, fir_flow.dataflow* ended, proof mut* out) void {
+    u64 count = scan_exits(c->places.f, ended, out, false);
+    if (count == 0) {
+        return;
+    }
+    del(out->exits);
+    out->exits = new(exit, count);
+    scan_exits(c->places.f, ended, out, true);
+}
+
+// Writes the verdict of each exit past the work limit. Only an exit of a scratch local holds: no
+// lvalue names it, and D17.8 keeps the lowering from a `return` while one holds an allocation.
+fn pass_exits(context* c, proof mut* out) void {
+    u64 mut k = 0;
+    while (k < out->exits.len) {
+        out->exits[k].proved = place.is_scratch(&c->places, out->exits[k].local);
+        if (!out->exits[k].proved) {
+            out->leaks += 1;
+        }
+        k += 1;
+    }
+}
+
+// Gives each exit of `out` the fact of its whole local, a tracked place, or NO_FACT for a scratch
+// local, whose bit the scratch dataflow keeps.
+fn collect_exit_facts(context mut* c, fir_flow.dataflow* stale, proof* out) void {
+    u64 mut k = 0;
+    while (k < out->exits.len) {
+        exit* e = &out->exits[k];
+        c->exit_fact[k] = NO_FACT;
+        if (!place.is_scratch(&c->places, e->local)) {
+            fir_flow.bits* at = &stale->ins[cast(e->block, u64)];
+            c->exit_fact[k] = fact_of(c, fir.place_local(e->local), at);
+        }
+        k += 1;
+    }
+}
+
+// Writes the verdict of each exit of `out`: the fact of its local, or the bit of a scratch local,
+// holds at its `dead` marker, which changes no fact, or at the end of the block of its `return`.
+// The walk of each block that holds an exit starts from the sets that its entry has in the
+// dataflows, and it gives both probes one set. With a null `d`, no fact holds.
+fn judge_exits(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fresh,
+               fir_flow.dataflow* d, fir_flow.dataflow* scratch, proof mut* out) void {
+    fir.func* f = c->places.f;
+    u32 locals = fir.local_count(f);
+    probes mut pr = make_probes(cast(c->fact_count, u32));
+    defer free_probes(&pr);
+    fir_flow.bits mut at_stale = fir_flow.bits_new(locals);
+    defer fir_flow.bits_free(&at_stale);
+    fir_flow.bits mut at_fresh = fir_flow.bits_new(locals);
+    defer fir_flow.bits_free(&at_fresh);
+    fir_flow.bits mut at_scratch = fir_flow.bits_new(locals);
+    defer fir_flow.bits_free(&at_scratch);
+    bool mut unused = false;
+    u64 mut k = 0;
+    while (k < out->exits.len) {
+        u32 b = out->exits[k].block;
+        if (d != null) {
+            fir_flow.bits_copy(&pr.none, &d->ins[cast(b, u64)]);
+            fir_flow.bits_copy(&pr.all, &d->ins[cast(b, u64)]);
+        }
+        fir_flow.bits_copy(&at_stale, &stale->ins[cast(b, u64)]);
+        fir_flow.bits_copy(&at_fresh, &fresh->ins[cast(b, u64)]);
+        fir_flow.bits_copy(&at_scratch, &scratch->ins[cast(b, u64)]);
+        u32 mut i = 0;
+        while (k < out->exits.len && out->exits[k].block == b) {
+            exit mut* e = &out->exits[k];
+            while (i < e->index) {
+                fir.statement* s = fir.block_statement(f, b, i);
+                if (d != null) {
+                    apply_facts(c, s, &at_stale, &at_fresh, &pr, NO_FACT, &unused);
+                }
+                apply_scratch_reads(c, s, &at_scratch);
+                apply_scratch_store(c, s, &at_scratch);
+                i += 1;
+            }
+            u32 fact = c->exit_fact[k];
+            if (fact == NO_FACT) {
+                e->proved = fir_flow.bits_get(&at_scratch, e->local);
+            } else {
+                e->proved = d != null && fir_flow.bits_get(&pr.none, fact);
+            }
+            if (!e->proved) {
+                out->leaks += 1;
+            }
+            k += 1;
+        }
+    }
+}
+
+// ---- the ended scopes --------------------------------------------------------------------------
+
+// The effect of the statement `s` on the ended set. `dead(_n)` ends the scope of the named local
+// `_n`. A store of a value that is not the zero value into fixed storage of a local, and an `addr`
+// or a `slice` of that storage, start it again, because only they can give the local an
+// allocation. A later store through a pointer goes through such an address of this scope, or
+// through an address from before the `dead`, which dangles (D17.11). `live` changes no bit: a
+// local whose scope ended holds no allocation, whatever its bytes hold.
+fn apply_ended(context* c, fir.statement* s, fir_flow.bits mut* set) void {
+    if (s->kind == fir.stmt_kind.st_dead) {
+        fir_flow.bits_set(set, s->local);
+        return;
+    }
+    u32 mut taken = 0;
+    if (place.find_taken(&c->places, s, &taken)) {
+        fir_flow.bits_clear(set, taken);
+    }
+    bool fixed = s->kind == fir.stmt_kind.st_assign && fir.place_fixed(c->places.f, s->place);
+    if (fixed && !is_zero_value(c, s->value)) {
+        fir_flow.bits_clear(set, s->place.local);
+    }
+}
+
+// Runs the ended dataflow: an intersection from an entry where the scope of each named owner local
+// has ended, because the frame of a call holds no allocation before its first store. Its bit for a
+// named owner local says that the local holds no allocation, on each path: no store and no address
+// above started its scope since the entry or since its last `dead`. Its sets are those of the
+// fresh dataflow, so the second count of the work bounds them.
+fn run_ended(context mut* c, fir.pred_table* pt, fir_flow.dataflow mut* d) void {
+    fir.func* f = c->places.f;
+    u32 n = fir.block_count(f);
+    u32 count = fir.local_count(f);
+    fir_flow.bits mut@ own gens = make_sets(n, count);
+    fir_flow.bits mut@ own kills = make_sets(n, count);
+    defer {
+        free_sets(gens);
+        free_sets(kills);
+        del(gens);
+        del(kills);
+    }
+    probes mut pr = make_probes(count);
+    defer free_probes(&pr);
+    u32 mut b = 0;
+    while (b < n) {
+        reset_probes(&pr);
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, i);
+            apply_ended(c, s, &pr.none);
+            apply_ended(c, s, &pr.all);
+            i += 1;
+        }
+        split_probes(&pr, gens, kills, b);
+        b += 1;
+    }
+    u32 mut k = 0;
+    while (k < count) {
+        if (fir.local_at(f, k)->kind == fir.local_kind.lk_named && is_owner_local(f, k)) {
+            fir_flow.bits_set(&d->entry, k);
+        }
+        k += 1;
+    }
+    fir_flow.bits_fill(&d->init);
+    fir_flow.dataflow_forward_sets(f, pt, d, gens, kills);
 }

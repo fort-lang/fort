@@ -682,8 +682,10 @@ came here.
   holds the paths, the keys, the memory locals and the stale and fresh sets, and `owner.report` the
   errors. No gen rule and no kill rule of one fact reads another fact, so the pass tracks only the
   places of the `check(overwrite: p)` terminators and of the stores that need a proof
-  (`find_stores`), and a function with neither costs one scan of its statements. Four dataflows of
-  `fir_flow` run with gen and kill sets: the stale index temporaries (a union from a full entry
+  (`find_stores`), and a function with neither and with no owner local of the leak rule costs one
+  scan of its statements. Four dataflows of `fir_flow` run with gen and kill sets for the overwrite
+  proof, and the leak rule adds a fifth (the next entry): the stale index temporaries (a union from
+  a full entry
   set), the fresh pointer locals (an intersection from an empty entry set), the scratch locals (an
   intersection from a full entry set) and the facts (an intersection from the facts of the storage
   that is empty at the entry). A walk of each block applies each statement to an empty probe and to
@@ -762,6 +764,36 @@ came here.
   each store into an `own` reference. Without it, `tools/vm build debug fort` exits 1 at the step
   that builds HEAD with the pin: clang refuses the module with `error: use of undefined value
   '@std.rt.fail_overwrite'`. Remove the function when a pin moves past the static error.
+- **The emptiness pass proves part 1 of the leak rule and only reports it** (D17.20, `spec/fir.md`
+  11, Exits). `owner.prover.prove` lists in `proof.exits` each `dead` of a named owner local outside
+  an abort block, and at each `return` each parameter and temporary of an `own` reference type
+  (`find_exits`), and proves each with the fact of its whole local, or the scratch bit of a scratch
+  local (`judge_exits`). `proof.leaks` counts the exits that it does not prove, and it never joins
+  `proof.unproved`, so no build, `--check` or `--fir` changes its verdict. To hold that, run `fort
+  --check` over each entry of the corpora with main and with the change, and compare the status, the
+  stderr and the stdout. A fifth dataflow (`run_ended`) gives a named local an exit at a `return`
+  where its scope can be open; it runs only in a function with a named owner local. The lowering
+  ends each named local before each `return`, so only FIR text has such an exit unproved, and
+  without it the oracle test finds a false accept in FIR text that returns with a live named local
+  and no `dead` (row D17.20-return-named of `tools/mutations/oracle.json`). The leak work adds the
+  statements and terminators times the owner locals that are no scratch local (`proof.leak_work`),
+  and past 2^20 no exit is proved but that of a scratch local; the first line of the report then
+  takes `owner.report.LEAK_LIMIT_NOTE`, which names no limit of D17.11. `proof.work` keeps the count
+  of D17.11, so a function past the leak limit alone keeps its overwrite verdicts. **A change to
+  `owner.prover` can move the work of a compiler function past the maximum that D17.11 states.**
+  With the dataflows inline, the work of `prove_within` passed it, so `run_dataflows` holds them.
+  After such a change, build a compiler that prints `proof.work` and `proof.leak_work` of each
+  function, run `--check` with it over the entries of the corpora, and compare the largest of each
+  corpus with D17.11. The temporary option `--leak-report` implies `--check` and writes the line of
+  `owner.report.write_leaks` for each exit that the pass does not prove, once for each location and
+  owner local, with the declared name of a named local or a parameter and the source text of the
+  expression of a temporary (`report.write_owner`); it refuses `--json` and `--index`, which write
+  to stdout too. A leak at `continue` always comes with the error of D17.11 at the declaration of
+  the next round, because the back edge carries the live local there. The pass follows the edge of
+  `while (true)` that no run takes, so the `dead` before the `return` of `spin` in
+  `test/fort/owner/prover_test.ft` is unproved. Time a change of the pass with five interleaved
+  `fort --check src/fort/main.ft` runs of main and of the change (`notes/environment.md` 1); the
+  limit is +0.10 s (`spec/ownership-design.md` 9).
 - **The FIR interpreter runs the FIR of a closure before the emptiness pass**
   (`spec/ownership-design.md` 3, `src/fort/fir/interpreter.ft`). It is the reference semantics of
   the ownership checks, and `--fir-run` and the pass `run` of `--fir-test` start it
