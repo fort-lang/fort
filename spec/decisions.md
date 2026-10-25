@@ -2101,9 +2101,16 @@ compilation; labeled `break` (idiom: a flag or a
 helper function); raw strings; a blank identifier; compile-time function evaluation; `alignof`;
 `sizeof(expr)`; array suffixes after a trailing pointer suffix (`i32[4]*[2]`, idiom: a struct);
 string `switch`; linear ownership, that is compile-time detection of leaks and of use after
-`move` (idiom: `defer del`, and the zeroing that `move` and `del` leave behind, D17); `goto`
+`move`, except the leaks of D17.20 (idiom: `defer del`, and the zeroing that `move` and `del`
+leave behind, D17); `goto`
 (never). Amended 2026-09-10: spans were called slices (D3.5). Amended 2026-10-22: the list
 held "separate compilation and interface files". D9.11 adds both as library builds.
+Amended 2026-10-24: D17.20 detects two kinds of leak, and linear ownership defers the others
+(`spec/ownership-design.md` 6.6; user, 2026-10-24). The first is a named local of `own` reference
+type at the end of its scope, or such a parameter or temporary at a `return`, that can hold an
+allocation. The second is a `del` or an `own` cast that frees an object whose owners can hold
+allocations. The compiler first reports each site and accepts the program; a later change makes
+each site a compile error. Before, linear ownership deferred the detection of every leak.
 
 Deferred at the C boundary (2026-09-11, T-025): an extern link name or alias.
 An extern still has no link name of its own; its declared name is its C symbol (D9.8).
@@ -2612,11 +2619,83 @@ says ownership is "by convention", this section supersedes it.
   `del`, transfer, lending, the overwrite check), `core-language.md` (the `move` builtin,
   statements).
 - rule: Not tracked, exactly as in C: a view, or a copy made before a `move` or `del`, used after
-  the allocation was freed; an `own` value that is never freed. The linear check that would make
-  leaks and use after `move` compile errors is deferred (D15); this design is its intended base
-  and adds no syntax it would not need.
+  the allocation was freed; an `own` value that is never freed, except where D17.20 applies.
+  D17.20 makes two kinds of leak compile errors. The first is a named local of `own` reference
+  type at the end of its scope, or such a parameter or temporary at a `return`, that can hold an
+  allocation. The second is a `del` or an `own` cast that frees an object whose owners can hold
+  allocations. The compiler first reports each site and accepts the program; a later change makes
+  each site a compile error (D17.20). The linear check that would
+  make the other leaks and use after `move` compile errors is deferred (D15); this design is its
+  intended base and adds no syntax it would not need.
 - history: Amended 2026-09-29 (T-257): the list held "two `own` copies made through `cast`". A cast
   no longer adds `own` (D3.14), and `cast(move(x), ...)` ends the source binding (D17.5).
+  Amended 2026-10-24: D17.20 takes the part that it covers out of this list
+  (`spec/ownership-design.md` 6.6; user, 2026-10-24). Before, the list held "an `own` value that
+  is never freed" with no exception, and the deferred linear check covered every leak.
+
+### D17.20 Leak
+- owner: `memory-model.md` (`move`, `del`, transfer, lending, the overwrite check, the leak rule),
+  `type-system.md` (the `own` qualifier, owning aggregates), `core-language.md` (`del`,
+  statements), `fir.md` 11 (the pass).
+- rule: Leak. The terms are those of `spec/ownership-design.md` 2. An owner is a tracked place of
+  D17.11 whose type is an `own` reference (D17.1). A local owner is an owner in the fixed storage of
+  a local (`fir.md` 5.5). A memory owner is a local owner of a memory local of D17.11. The analysis
+  reads the FIR of one function and no other function. An owner holds the zero value, or is empty,
+  at a point when the analysis proves the emptiness fact of D17.11 for that owner at that point
+  (`spec/ownership-design.md` 4.4 and 4.7).
+  Part 1. Take a named local at the end of its scope, or a parameter or a temporary at a `return`.
+  The analysis must prove that each local owner in it holds the zero value. Otherwise the exit is a
+  compile error, because the allocation can leak: `leak: cannot prove '<place>' is empty at this
+  exit`, with the note `del or move '<place>' before this exit`. The error stands at the `dead`
+  marker or the `return` of `fir.md` 9.5: the closing brace, or the `return`, `break` or
+  `continue` that leaves the scope. An exit into an abort block has no obligation.
+  Until refinement R1 of `spec/ownership-design.md` 7, part 1 applies only to a named local, a
+  parameter or a temporary whose type is an `own` reference. A local of an owning aggregate type
+  (D17.7) has no obligation of part 1 until then, and its leak is outside the guarantee of this
+  rule.
+  Part 2. Take `del(p)` where the type of `p` is `T* own`, of each mutability, and `T` holds owners
+  in its fixed storage. The analysis must prove each owner of `*p` empty, as a tracked place of
+  D17.11 through `p`. Otherwise the `del` is a compile error, because it frees an object whose
+  owners can hold allocations: `leak: cannot prove '<place>' is empty before this del`. The error
+  stands at the `del` keyword, with the note `move '<place>' into a local and del it first`. A
+  `cast` that carries `own` from `T* own` to `U* own`, where `U` is another type, `void` included,
+  has the same obligation for each owner of `*p`. Its error is `leak: cannot prove
+  '<place>' is empty before this cast` at the `cast`, with the same note. When `p` is no pointer
+  local that is not memory, D17.11 tracks no place through it, so the `del` or the `cast` is an
+  error. By the ruling on Q7 (`spec/ownership-design.md` 12), a span whose elements hold owners,
+  for which no element is tracked, waits for refinement R8 of `spec/ownership-design.md` 7. Until
+  then, a `del` or a `cast`
+  of such a span has no obligation of part 2, and its leak is outside the guarantee of this rule.
+  A leak through a cycle of owners, and a leak on a path that calls `exit` or ends in a runtime
+  error, are outside the guarantee of this rule too (`spec/ownership-design.md` 5.2, X3).
+  `<place>` is source text. For a named local or a parameter, it is the declared name. An owner
+  of `*p` is written in source form, from the source text of `p` and its field names (`p->items`,
+  `p->a.b`). A temporary is written as the source text of the expression whose value it holds. No
+  message names a FIR local.
+  What the analysis cannot prove: a value that the owner holds on some paths only, and a memory
+  owner after a call. Each is an error. `del` is always a fix for part 1: it frees what the
+  function still owns, and it does nothing on a vacated or a null owner (D17.9). For part 2, the
+  fix moves each inner owner into a local first.
+  So `{ i32 mut* own n = new(i32); }` is an error at the closing brace, and
+  `{ i32 mut* own n = new(i32); defer del(n); }` passes. For `struct pair { i32* own a; i32* own
+  b; }`, `pair mut* own q = new(pair); del(q);` passes, because `new` fills `*q` with zero (D10.2).
+  For a parameter `q` of type `pair mut* own`, `del(q);` alone is an error, because the entry
+  values of `q->a` and `q->b` are unknown, and `del(q->a); del(q->b); del(q);` passes.
+  The rule starts as a report. A first change lists each site that the analysis cannot prove and
+  accepts the program. A later change makes each such site a compile error and amends this entry,
+  as the overwrite check of D17.11 went from a report (5152c9fd) to an error (d8a9e096).
+- rationale: an obligation that the analysis cannot prove is an error, as in D17.11 ("Unknown is
+  an error", the user, 2026-10-22), so the rule keeps no list of known gaps. `del` is shallow
+  (D17.7), so a `del` of an object whose owners hold allocations leaks them. The order of the
+  rules follows the ruling on Q1 (`spec/ownership-design.md` 12): the `own` locals and the shallow
+  `del` come first, the owning aggregates follow R1, and a span of owners follows R8.
+- history: Amended 2026-10-24: the user approved parts 1 and 2 of spec/ownership-design.md 6.3
+  (user, 2026-10-24). The coordinator ruled the position and the note of the error of part 2, the
+  message of a `cast` and the text of `<place>`. The coordinator also ratified seven additions to
+  the text of the design: the terms and the emptiness fact, the limit of R1, the limit of R8 by
+  the ruling on Q7, the cases of X3, what the analysis cannot prove, the examples, and the report
+  stage. The number is D17.20 and not D17.15, because `notes/ownership-retrospective.md` cites
+  D17.13 to D17.19 of the tag `ownership-wave-final` (`spec/ownership-design.md` 6.6).
 
 ## D18 Float printing in the runtime
 

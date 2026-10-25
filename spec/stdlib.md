@@ -1388,8 +1388,9 @@ Deliberately absent, with the idiom to use instead; the language-level list is D
   for pointer values (2.8).
 - Containers that own their elements: copy `std.vec` with a `node mut* own mut@ own` slot type
   and a `free` that `del`s every element (2.7).
-- Compile-time leak and use-after-`move` detection (D15, D17.14): the idiom is `defer del`
-  right after the declaration, and the zero value that `move` and `del` leave behind (1.3).
+- Compile-time leak and use-after-`move` detection (D15, D17.14), outside the leak rule of
+  D17.20: the idiom is `defer del` right after the declaration, and the zero value that `move`
+  and `del` leave behind (1.3).
 - Unicode: strings are bytes (D3.7); the classification functions are ASCII-only.
 - Floating-point formatting and parsing beyond what the print family emits (D11.7): the library
   gives that one text and no other, to a descriptor or to a `str_buf` (2.12); a program that needs

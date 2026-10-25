@@ -309,7 +309,7 @@ fn f(i32 n) void {
 }
 ```
 
-### 3.9 Ownership (D17.1-D17.8, D17.11, D17.14)
+### 3.9 Ownership (D17.1-D17.8, D17.11, D17.14, D17.20)
 
 A pointer, `void*`, span or `string` type may be qualified `own`. An `own` reference designates the
 start of a live heap allocation, obtained from `new` (5.10) or answered by an `extern` whose
@@ -318,7 +318,12 @@ and `node*` are different types (`type-system.md` section 8), and it is erased a
 a non-reference type or on a function-pointer type is an error; a struct or fixed array that
 contains an `own` reference by value is an owning aggregate (below). Ownership is a typing
 discipline, not a linear check: whether every allocation is freed exactly once is not tracked
-(D17.14, D15), and the idiom is `defer del(x);` (6.6).
+(D17.14, D15), and the idiom is `defer del(x);` (6.6). The leak rule of D17.20 is the one
+exception. It covers a named local of `own` reference type at the end of its scope, or such a
+parameter or temporary at a `return`, that can hold an allocation. It also covers a `del` or an
+`own` cast that frees an object whose owners can hold allocations (`memory-model.md` 2.5). The
+compiler first reports each site and accepts the program; a later change makes each site a
+compile error.
 
 **Placement (D17.2).** An `own` follows a `*` or an `@` and marks the reference that suffix
 introduces as owning its target; `string`, a reference without a suffix, takes it directly
@@ -1378,7 +1383,7 @@ fn main() void { }                // error: 'main' must return i32
 `new(T)`, `new(T, n)`, `sizeof(T)` and `cast(e, T)` are keywords that take type operands; they
 are specified in 5.9 and 5.10.
 
-### 8.2 Universe functions (D12.2, D10.3, D11.4, D17.6, D17.9)
+### 8.2 Universe functions (D12.2, D10.3, D11.4, D17.6, D17.9, D17.20)
 
 `del(x)`, `move(lv)`, `assert(cond)`, `panic(msg)`, `print(...)`, `println(...)`, `eprint(...)`,
 `eprintln(...)`, `fprint(fd, ...)` and `fprintln(fd, ...)` live in the universe scope, use
@@ -1395,8 +1400,10 @@ string are no-ops, so `del(buf); del(buf);` frees once and a use after `del` der
 `null`. `del` is shallow:
 `del(kids)` on a `node mut* own mut@ own` frees the slots, not the nodes, and `del` of a struct
 or
-array is an error. A view, a sub-span, a `.ptr`, a stack address, a literal and a `string` that
-is not `own` are compile errors, because none of them has an `own` type. Allocations have no
+array is an error. So `del(p)` of a `T* own` whose `T` holds owners needs each owner of `*p`
+proved empty first (D17.20, `memory-model.md` 2.5). A view, a sub-span, a `.ptr`, a stack
+address, a literal and a `string` that is not `own` are compile errors, because none of them has
+an `own` type. Allocations have no
 header, so `new`/`del` and C `malloc`/`free` are interchangeable, and C memory is owned when its
 `extern` says `own` (D17.13).
 
@@ -1489,6 +1496,6 @@ println(str.dup("x"));                      // error: owning temporary would lea
 A number of familiar features are deliberately absent from v1: generics, unions, methods,
 closures, variadic fort function definitions, variadic function-pointer types, overloading,
 visibility modifiers, type aliases, labeled `break`, string
-`switch`, linear ownership (compile-time detection of leaks and of use after `move`, D17.14) and
-others. D15 in `decisions.md` is the authoritative list; it names each feature with
-the idiom to use instead, and this document does not repeat it.
+`switch`, linear ownership (compile-time detection of leaks outside D17.20 and of use after
+`move`, D17.14) and others. D15 in `decisions.md` is the authoritative list; it names each
+feature with the idiom to use instead, and this document does not repeat it.

@@ -315,7 +315,9 @@ Enforcement:
   that holds a float, while the sentence three lines above it still said "as a root of every
   closure", and the run exited 0 because `--allow D18.1` excused the whole entry. Read the whole
   `rule` field after an edit, not the diff alone, and repair the sentence the new one contradicts
-  in the same commit (T-096).
+  in the same commit (T-096). The tool has no flag for a new entry: `--against` reports a new
+  entry as "in one revision only" and exits 1, as for D17.20. `--allow` takes only a fielded
+  entry, so `--allow D15` fails, because D15 is a section. Name the new entry in the Log instead.
 - **Renaming a term**: sweep the stem, not the word. `grep -rni slice` never matches "Slicing",
   so a rename of `slice` to `span` must sweep `slic` (and any other inflected stem) with
   `grep -rni` before the criterion is ticked; markdown width is not covered by the gate, so run the
