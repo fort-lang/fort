@@ -1,9 +1,9 @@
-/// heap: the two views of the heap that the leak probes of test/fort share.
+/// heap: the views of the heap that the leak probes of test/fort share.
 //
 // A leak probe runs many identical rounds and holds an early sample of the
 // heap against the late ones. A round that gives every block back leaves the
-// heap where it was. A round that keeps a block moves it. The probe watches
-// two views, because each view is blind to what the other view sees.
+// heap where it was. A round that keeps a block moves it. The system view and
+// the block view are each blind to what the other view sees.
 //
 // The system view is what the allocator holds from the operating system. It
 // moves for a leak the allocator serves with new memory. It does not move for
@@ -14,7 +14,13 @@
 // `analysis_free`, the block view read 0 while the system view moved by
 // megabytes.
 //
-// Each target gives the two views its own way, and the values of the two
+// The live view counts the bytes of the blocks that the allocator does not
+// hold as free. A leaked block is in that count. On Linux a free block in the
+// thread cache of glibc is in that count too, so the view does not see a
+// release of a small block until that cache is full. It is the view that
+// test/fort/support/lifetime.ft adds to the other two.
+//
+// Each target gives the views its own way, and the values of the two
 // targets are not comparable. A probe compares two samples of one view on one
 // target, so a distance in bytes means the same thing on both.
 //
@@ -22,11 +28,17 @@
 // sbrk(0) reports without moving it. glibc serves a block above 128 KB by
 // mmap, so the break does not move for a leak of such a block. The block view
 // is the address of a fresh 32-byte block, which the probe frees at once. A
-// round that kept a block gives the next round a different address.
+// round that kept a block gives the next round a different address. The live
+// view is the sum of two fields of glibc's mallinfo2(3): `uordblks`, the heap
+// bytes in use, and `hblkhd`, the bytes of the mmap blocks. The emitter probe
+// watches no block view. Under glibc 2.39 its break did not move for a deleted
+// `strbuf.free(&g->globals)` or `strbuf.free(&g->scratch)`, because glibc
+// served each leak out of free chunks. The live view moved by 77984 and 29280
+// bytes. Under glibc 2.43 it moved by 68048 and 19360 bytes.
 //
-// On macOS both views count the bytes of every live block, which the
+// On macOS all three views count the bytes of every live block, which the
 // allocator's own enumerator reports zone by zone, as the `heap` tool does.
-// One exact count covers what the two Linux views cover between them. The
+// One exact count covers what the Linux views cover between them. The
 // statistics of `malloc_zone_statistics` are no view there: `size_in_use`
 // steps by 16384 bytes at a round the program does not choose, and the
 // address of a fresh block comes from a per-CPU magazine, so two rounds get
@@ -103,6 +115,10 @@ $if ($cfg(target_os) == "macos") {
     fn block_view() u64 {
         return system_view();
     }
+
+    fn live_view() u64 {
+        return system_view();
+    }
 } else {
     // sbrk(0) moves nothing and reports the break. std has no binding for it
     // and this module is its one caller.
@@ -120,6 +136,39 @@ $if ($cfg(target_os) == "macos") {
         u64 at = cast(block.ptr, u64);
         del(block);
         return at;
+    }
+
+    $if ($cfg(target_arch) == "x86_64") {
+        // <malloc.h>: struct mallinfo2 of glibc 2.33 and later, ten size_t fields.
+        struct malloc_counts {
+            u64 arena;
+            u64 ordblks;
+            u64 smblks;
+            u64 hblks;
+            u64 hblkhd;
+            u64 usmblks;
+            u64 fsmblks;
+            u64 uordblks;
+            u64 fordblks;
+            u64 keepcost;
+        }
+
+        // mallinfo2(3) returns its struct by value, and D9.8 excludes a struct
+        // result from an extern signature. The x86-64 System V ABI returns a
+        // struct of 80 bytes through a hidden pointer in the first integer
+        // register. So this declaration gives that pointer as the one
+        // parameter. Another architecture has no live view, and a probe that
+        // calls live_view there does not build. std has no binding for
+        // mallinfo2 and this module is its one caller.
+        extern fn mallinfo2(malloc_counts mut* result) void;
+
+        fn live_view() u64 {
+            malloc_counts mut counts = {};
+            mallinfo2(&counts);
+            // The bytes of the heap blocks that glibc does not hold as free, its
+            // thread cache included, and the bytes of the mmap blocks.
+            return counts.uordblks + counts.hblkhd;
+        }
     }
 }
 

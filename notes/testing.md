@@ -403,7 +403,18 @@ bullet at a time and without a rewrite.
   Verify such a witness by deleting the `del` it covers and watching it go red; two of them in
   `types.ft` had no witness at all until that was measured.
   **An allocator probe needs two views, because each is blind to what the other sees** (T-034), and
-  both of them are blind to a leaked block above 128 KB (section 4 of this file, T-094).
+  both of them can miss a leaked block above 128 KB (section 4 of this file). They do not always
+  miss it: a deleted `strbuf.free(&g->out)` moved the break of `driver_lifetime_emitter_test.ft`
+  by 109043712 bytes. **The lifetime probes add a third view, the live view.** On Linux it is
+  `uordblks + hblkhd` of glibc's `mallinfo2(3)`, so it counts the mmap blocks. On macOS it is the
+  system view. On Linux it also counts the free blocks in the thread cache of glibc. So it does
+  not see the release of a small block while that cache has space: `test/fort/heap_test.ft`
+  measures what it sees. The break of `driver_lifetime_emitter_test.ft` did not move for a
+  deleted `strbuf.free(&g->scratch)` under glibc 2.39 or 2.43. It did not move for a deleted
+  `strbuf.free(&g->globals)` under 2.39. The live view moved by 19360 to 77984 bytes for these
+  deletions. With nothing deleted, it read 0 for each of the six probes. D9.8 excludes a struct
+  result from an `extern`. So `test/fort/support/heap.ft` declares `mallinfo2` with the hidden
+  result pointer of the x86-64 System V ABI.
   The address a round is handed catches a leak the allocator serves out of its own free chunks --
   a 64-byte vector -- and misses a large one, because a small probe block still comes back at the
   same address while the heap has grown: with `defer analysis_free` deleted in the driver the
