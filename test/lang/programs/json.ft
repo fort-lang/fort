@@ -29,8 +29,8 @@
 // A JSON reader without floats: it parses objects, arrays, strings with the
 // usual escapes, integers, `true`, `false` and `null` into an owning tree,
 // prints the tree back in a canonical form and answers dotted-path queries.
-// Every child is owned by its parent, so freeing the root frees the document
-// (D17), and the parser reports the first error with its offset instead of
+// Every child is owned by its parent, so free_value of the root frees the
+// document (D17), and the parser reports the first error with its offset instead of
 // trapping.
 enum jkind {
     jnull,
@@ -186,6 +186,33 @@ fn keep(arena mut* head, char mut@ own block) void {
     cell->block = move(block);
     cell->next = move(head->next);
     head->next = move(cell);
+}
+
+// `del` is shallow, so each cell gives up its tail before it is freed. The
+// loop tests `head->next`, so no local holds the null at the end.
+fn free_arena(arena mut* head) void {
+    while (head->next != null) {
+        arena mut* own cell = move(head->next);
+        arena mut* own rest = move(cell->next);
+        del(cell->block);
+        del(cell);
+        head->next = move(rest);
+    }
+}
+
+// Frees a value with its children and the siblings after it.
+fn free_value(jvalue mut* own v) void {
+    if (v == null) {
+        // The leak rule cannot prove that a tested pointer is null, so it
+        // reports this `del`, which frees nothing.
+        del(v);
+        return;
+    }
+    jvalue mut* own first = move(v->first);
+    jvalue mut* own next = move(v->next);
+    del(v);
+    free_value(move(first));
+    free_value(move(next));
 }
 
 fn parse_value(reader mut* r, arena mut* strings) jvalue mut* own {
@@ -436,9 +463,9 @@ string[6] PATHS = {"name", "tags.1", "a.b.c.2", "a.b.missing", "tags.9", ""};
 fn inspect(string src) void {
     reader mut r = reader{src, 0, false, "", 0};
     arena mut strings = {};
-    defer del(strings.next);
+    defer free_arena(&strings);
     jvalue mut* own doc = parse_value(&r, &strings);
-    defer del(doc);
+    defer free_value(move(doc));
     skip_space(&r);
     if (!r.failed && r.pos != src.len) {
         fail(&r, "trailing input");

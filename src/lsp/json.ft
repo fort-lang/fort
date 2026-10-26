@@ -118,12 +118,19 @@ struct node {
 // One chunk of `NODE_CHUNK` nodes.
 struct node_chunk {
     node mut@ own slots;
+    // The chunk that the document added before this one: the document owns its chunks through
+    // this chain.
+    node_chunk mut* own made_before;
 }
 
 // A parsed document. The first parsed value uses handle 1.
 struct doc {
-    node_chunk mut* own mut@ own chunks;
+    node_chunk mut* mut@ own chunks; // in the order of the nodes
     u64 chunk_count;
+    // The last chunk added. `del` is shallow, and the leak rule cannot prove that a slot of a new
+    // span of owners is null, so the document owns its chunks through a chain and not through
+    // `chunks`.
+    node_chunk mut* own last;
     u64 count;
     strbuf.str_buf bytes;
     u32 root_node;
@@ -158,13 +165,13 @@ fn set_max_bytes(doc mut* d, u64 limit) void {
 
 // Empties the document and releases its storage. A second call has no effect.
 fn free(doc mut* d) void {
-    u64 mut i = 0;
-    while (i < d->chunk_count) {
+    while (d->last != null) {
         // `del` is shallow, so delete the slots before the chunk.
-        node_chunk mut* own chunk = move(d->chunks[i]);
+        node_chunk mut* own chunk = move(d->last);
+        node_chunk mut* own before = move(chunk->made_before);
         del(chunk->slots);
         del(chunk);
-        i += 1;
+        d->last = move(before);
     }
     del(d->chunks);
     d->chunk_count = 0;
@@ -199,11 +206,10 @@ fn chunks_reserve(doc mut* d) void {
         }
         cap = d->chunks.len * 2;
     }
-    node_chunk mut* own mut@ own bigger = new(node_chunk mut* own, cap);
+    node_chunk mut* mut@ own bigger = new(node_chunk mut*, cap);
     u64 mut i = 0;
     while (i < d->chunk_count) {
-        del(bigger[i]);
-        bigger[i] = move(d->chunks[i]);
+        bigger[i] = d->chunks[i];
         i += 1;
     }
     del(d->chunks);
@@ -215,9 +221,10 @@ fn add_chunk(doc mut* d) void {
     chunks_reserve(d);
     node_chunk mut* own chunk = new(node_chunk);
     chunk->slots = new(node, NODE_CHUNK);
-    u64 k = d->chunk_count;
-    del(d->chunks[k]);
-    d->chunks[k] = move(chunk);
+    chunk->made_before = move(d->last);
+    node_chunk mut* added = chunk;
+    d->last = move(chunk);
+    d->chunks[d->chunk_count] = added;
     d->chunk_count += 1;
 }
 

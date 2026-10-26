@@ -15,6 +15,8 @@ import fort.diag;
 import fort.library.tree;
 import library_env;
 import fort.modules;
+import fort.session;
+import heap;
 import modules_env;
 import fort.scope;
 import std.libc;
@@ -582,6 +584,85 @@ fn two_used_libraries_each_own_their_paths() void {
     assert(sa != null && ga != null && sa->file != ga->file);
 }
 
+// The release probe of the used libraries: rounds that each use two libraries in a fresh set and
+// a fresh session and free both, the round of the early sample, the late rounds that it is held
+// against, the distance in bytes that fails it, and the sections of each interface file. The
+// address of a fresh block runs through a cycle over rounds that keep nothing, so the probe takes
+// the smallest distance over the late rounds. A round that keeps one library keeps its record, its
+// tokens and its section map.
+u64 USED_ROUNDS = 400;
+u64 USED_EARLY = 200;
+u64 USED_LATE = 16;
+u64 USED_BOUND = 1024;
+u64 USED_SECTIONS = 40;
+
+// The interface file of the library `name`, with USED_SECTIONS sections of one constant each.
+fn interface_of(string name, strbuf.str_buf mut* out) void {
+    strbuf.str_buf mut marked = strbuf.create();
+    defer strbuf.free(&marked);
+    strbuf.append(&marked, "== fort interface 1\n== library ");
+    strbuf.append(&marked, name);
+    strbuf.push(&marked, '\n');
+    u64 mut k = 0;
+    while (k < USED_SECTIONS) {
+        strbuf.append(&marked, "== module ");
+        strbuf.append(&marked, name);
+        strbuf.append(&marked, ".m");
+        strbuf.append_u64(&marked, k);
+        strbuf.append(&marked, "\ni32 V = ");
+        strbuf.append_u64(&marked, k);
+        strbuf.append(&marked, ";\n");
+        k += 1;
+    }
+    library_env.unmark(strbuf.view(&marked), out);
+}
+
+// modules.free releases each used library of the set, the first one used as well as the last.
+fn two_used_libraries_are_released_with_the_set() void {
+    strbuf.str_buf mut shapes = strbuf.create();
+    defer strbuf.free(&shapes);
+    interface_of("shapes", &shapes);
+    strbuf.str_buf mut forms = strbuf.create();
+    defer strbuf.free(&forms);
+    interface_of("forms", &forms);
+    u64 mut early_break = 0;
+    u64 mut early_block = 0;
+    u64 mut break_moved = 0;
+    u64 mut block_moved = 0;
+    bool mut sampled = false;
+    u64 mut round = 0;
+    while (round < USED_ROUNDS) {
+        session.session mut s = session.create();
+        modules.module_set mut set = modules.create();
+        assert(modules.use_library(&s, &set, "shapes", "shapes.flib/interface.ft",
+                                   strbuf.view(&shapes)));
+        assert(modules.use_library(&s, &set, "forms", "forms.flib/interface.ft",
+                                   strbuf.view(&forms)));
+        assert(set.used.len == 2);
+        modules.free(&set);
+        session.free(&s);
+        if (round == USED_EARLY) {
+            early_break = heap.system_view();
+            early_block = heap.block_view();
+        }
+        if (round + USED_LATE >= USED_ROUNDS) {
+            u64 break_now = heap.distance(heap.system_view(), early_break);
+            u64 block_now = heap.distance(heap.block_view(), early_block);
+            if (!sampled || break_now < break_moved) {
+                break_moved = break_now;
+            }
+            if (!sampled || block_now < block_moved) {
+                block_moved = block_now;
+            }
+            sampled = true;
+        }
+        round += 1;
+    }
+    assert(early_break != 0 && early_block != 0 && sampled);
+    assert(break_moved < USED_BOUND);
+    assert(!heap.ADDRESS_IS_A_VIEW || block_moved < USED_BOUND);
+}
+
 fn a_listed_module_that_vanished_is_a_read_error() void {
     library_env.env mut e = library_env.env{};
     library_env.open(&e);
@@ -780,6 +861,7 @@ fn main() i32 {
     both_readings_of_a_library_path_are_ambiguous();
     a_used_library_path_never_reaches_a_search_root();
     two_used_libraries_each_own_their_paths();
+    two_used_libraries_are_released_with_the_set();
     a_listed_module_that_vanished_is_a_read_error();
     a_prefix_that_does_not_parse_is_probed_without_a_report();
     a_declaration_of_a_section_stands_at_its_place_in_the_file();
