@@ -908,7 +908,70 @@ changes the function, and the verifier runs after it. The passes run in this ord
      the zero value into `p` make `p` and each tracked place below `p` empty. `del(move p)`
      makes `p` empty. Each `move p` operand makes `p` and each tracked place below `p` empty
      when it reads `p`. A store of a fresh `new` into `_n` makes each tracked place through `_n`
-     empty.
+     empty. A test against null makes its place empty on one edge (**Tests**).
+   - **Tests.** A test against null gives facts on one edge, gen rule 6 of D17.11 (refinement R7 of
+     `spec/ownership-design.md` 7). A flag is a whole temporary of type `bool` that is not memory.
+     A named local or a parameter is no flag, because gen rule 6 names a branch on the test itself
+     and the lowering keeps the value of a test in a temporary (9.4). A block `S` tests the place
+     `p` against null when it ends in `switch(copy _c)` on a flag `_c`, and the last statement of
+     `S` that stores into `_c` is one of these:
+     - `_c = eq(copy p, k)`, `_c = eq(k, copy p)`, `_c = ne(copy p, k)` or `_c = ne(k, copy p)`,
+       where `k` is `const null T` or `const zero T` and the type of `p` is a pointer type. This
+       statement is the test statement, and it reads `p`. `_c` is true exactly when `p` held the
+       zero value at that read, and false for `ne`;
+     - `_c = copy _d` or `_c = not(copy _d)`, where `_d` is a flag and the last statement of `S`
+       before it that stores into `_d` is one of these forms in turn. `copy` keeps the value of
+       `_d`, and `not` gives the other value.
+     The lowering writes these forms for `==`, `!=` and `!`, and for the left operand of `&&` and
+     `||` (9.4). Let `v` be the value of `_c` when `p` held the zero value. The edge of the test
+     goes from `S` to the block `X` that the `switch` names for `v`: the arm of `v`, or `otherwise`
+     when no arm has `v`. When the block of the other value is `X` too, `S` has no edge of a test.
+     The pass finds the facts of the edge with a walk of `S`. The walk starts with the stale set and
+     the fresh set of the entry of `S` and with no fact. Right before the test statement, it adds
+     the fact of each tracked place that is the same as `p`, and it reads `p` with the stale set
+     before that statement. It then applies each statement from the test statement to the end of
+     `S`, with its reads, kills and gens of **Order**. Each fact that remains holds on the edge, on
+     top of the facts at the end of `S`. For a whole scratch local `p`, the edge also holds the bit
+     of `p` when no store into `p` from the test statement to the end of `S` clears it
+     (**Scratch**). No other edge, no `check` and no `switch` on any other operand gives a fact of a
+     test. So the edge of `&&` and `||` into the right operand holds the fact of the left operand,
+     and the edges of the `switch` that reads the value of `&&` or `||` hold none: that `switch`
+     stands alone in the block where the two operands join, and no store into its flag stands there.
+     A test adds no fact to the facts of the pass: it makes the facts of the checks, the stores, the
+     exits and the inner owners hold on its edge. The walk of `S` that gives its gen and kill sets
+     fills the edge set too, with a third set beside its two probes, so the counts of the work do
+     not change.
+     **Proof of the tests**, in the form of `spec/ownership-design.md` 5. The lemma of the facts
+     says that at each point that a run reaches, the place of each fact of the pass at that point
+     holds the zero value. The proof of D17.11 gives it for each gen rule and each kill rule, under
+     the assumptions of D17.11 and of `spec/ownership-design.md` 5.1. Take the edge of a test of
+     `p` from `S` to `X`, and a run that takes it.
+     1. `_c` holds `v` at the `switch`. Rule V4 gives each arm of a `switch` on a `bool` the value
+        `true` or `false`, and no two arms one value, and a value with no arm goes to `otherwise`
+        (section 8). So the block of each value is the one that the pass names. `eq`, `ne`, `not`
+        and a `copy` of a flag give `true` or `false`. The block of the other value is not `X`, so
+        the run goes to `X` only when `_c` holds `v`.
+     2. `_c` holds the value of its last store in `S`. The run executes the statements of `S` in
+        order, and no statement after that store and before the `switch` stores into `_c`. `_c` is
+        no memory, so no pointer names its storage (**Facts**). A call writes only memory, rule V5
+        lets no `move` and no `del` take a `bool`, and no write goes through a forged pointer
+        (D3.14, `spec/ownership-design.md` 5.1, A8). Each flag `_d` of the chain holds the value of
+        its last store at the statement that reads it, for the same reasons.
+     3. So `p` held the zero value at the read of the test statement. `eq` is true and `ne` is
+        false exactly when the two pointers are equal, a pointer is null exactly when it holds the
+        zero value of its type (D17.1, A3), and each `not` of the chain gives the other value.
+     4. Each fact that the walk adds names, right before the test statement, the place that `p`
+        names at its read, because the walk reads `p` with the stale set there (**Keys**, **Held
+        address**). So each such fact holds at that point. Each later statement of `S` applies its
+        rules to the set of the walk as the pass applies them to its facts, and by the lemma those
+        rules keep each fact that holds. A fact that a statement of `S` makes holds after it on
+        each run. So each fact of the edge holds at the end of `S` on the run, and at the start of
+        `X` on that edge. The bit of a scratch local takes the same steps: only the statements of
+        **Scratch** change it, and the walk applies each of them.
+     5. A block starts with the intersection over the edges into it (**Join**), and each edge holds
+        its own facts on each run that takes it, so the lemma holds at the start of `X`.
+     A test of a flag that is memory, a test whose value a named local holds, a test in another
+     block than its `switch`, and a `check` give no fact, so no step of the proof covers them.
    - **Kill.** A store into a place `d` whose base is a local or a global kills the fact of each
      tracked place with that base that is not separate from `d`, so a store into `_p` kills each
      fact through `_p`. A store into a local that is a key kills each fact whose place has that key.
@@ -943,7 +1006,9 @@ changes the function, and the verifier runs after it. The passes run in this ord
    - **Order.** Within a statement, the pass applies the reads of its operands first, in operand
      order, then the kill of a `call`, then the test of a store that needs a proof (**Proof**),
      then the kill rules of the store, then its gen rule. `live` and `dead` change no fact.
-   - **Join.** A block starts with the intersection of the facts at the end of its predecessors.
+   - **Join.** A block starts with the intersection of the facts at the end of its predecessors,
+     where the facts at the end of a block on the edge of its test also hold the facts of that edge
+     (**Tests**).
      `bb0` starts with the fact of each tracked place in fixed storage of a temporary, or of `_0`
      when its type is no aggregate, and with no other fact. That storage holds no allocation before
      its first store (`spec/ownership-design.md` 4.4). An aggregate `_0` starts with no fact: it is
@@ -1060,8 +1125,17 @@ changes the function, and the verifier runs after it. The passes run in this ord
      after the statements before it in its block (**Order**). The fact of an inner owner is the
      fact of its path: `(*_p)`, then a `field` step for a field and an `index` step with a constant
      key for an element. The path is a tracked place when `p` is a whole local `_p` that is no
-     memory (**Facts**). Else no place through `p` is tracked, and the site is unproved: a `del` of
-     a field, of an element, of a global or of `(*_a)` of a held address, and of a memory local.
+     memory (**Facts**). Else no place through `p` is tracked, and only the fact of `p` itself can
+     prove the site: a `del` of a field, of an element, of a global or of `(*_a)` of a held address,
+     and of a memory local. A site is also proved when the fact of `p` holds right before the
+     statement, or for a whole scratch local `p` its bit (**Scratch**): `p` holds the zero value,
+     so the `del` frees no object (D17.9), and the `cast` gives the zero value and hides no owner.
+     The fact of `p` is the fact of its path, read with the stale set before the statement, and it
+     takes a fact of its own, as an inner owner does. A `del` of a place that a `move` or a `del`
+     emptied, and of a place that a test against null finds null (**Tests**), is so proved. The
+     proof: by the lemma of the facts (**Tests**), `p` holds the zero value at the statement on each
+     run that reaches it, and a `del` of the zero value frees nothing, so no `leak` event comes
+     from it; a `cast` of the zero value gives the zero value, whose later `del` frees nothing too.
      A `del` of a span or of a `string`, and of a pointer to an object with no inner owner, is no
      site. So a span whose elements hold owners waits for refinement R8 (D17.20). A site in an
      abort block keeps its obligation, because D17.20 gives part 2 no exception. A deferred `del`
@@ -1077,8 +1151,10 @@ changes the function, and the verifier runs after it. The passes run in this ord
      The inner work of a function adds its statements and terminators times the steps of the paths
      of the inner owners of its sites to the leak work of **Exits**. The steps of a site are its
      inner owners times 1 more than the most steps from `T` to one of them, the deref of each path
-     included. The layout of each struct keeps its count of inner owners and that depth, so no
-     count walks a struct twice. Each path takes that many steps of memory, and each walk of the
+     included, plus 1 more than the steps of the path of `p` for the fact of `p`: its projections,
+     or those of the place of the `addr mut` of a held address `(*_a)` when they are more. The
+     layout of each struct keeps its count of inner owners and that depth, so no count walks a
+     struct twice. Each path takes that many steps of memory, and each walk of the
      facts reads them, so the count bounds both. A count of steps stops at 2^32 (4294967296), so
      the product stays in a `u64`. When the inner work passes 1048576, the pass proves no site of
      part 2; the leak work and the work of **Proof** keep their own limits, so the verdicts of

@@ -674,6 +674,17 @@ bullet at a time and without a rewrite.
   `test/fort/owner/prover_test.ft` (`cast_alias` with a view of the old pointer, `cast_view` with a
   view of the new one) with a comment that it is outside the guarantee, and not in the oracle
   sets.
+  **The test holds the tests against null of D17.11 gen rule 6 too.** The vocabulary of
+  `generator.ft` holds an `if` on `==`, `!=`, a negation, `&&` and the `else` arm of `||`, over `x`,
+  `y`, `q->a`, `*p`, `r->a`, `G` and `arr[j]`, and a loop on `!=` that a `del` ends; the items
+  `test_null`, `test_loop` and `test_alias`, the exit case `tested` and the part 2 cases `tested`
+  and `tested_field` give each edge and a call or a store after the test. Only FIR text puts a
+  statement between the read of a test and its `switch`, so the FIR cases `null_call`,
+  `null_alias`, `null_place`, `null_temp` and `null_stale` hold those kills, and `null_leak` and
+  `null_del` hold the edge of the other value. **A seeded case names no place that a loop of the
+  case tests**: the seeded family inserts a store into each place before the end of the loop body,
+  and the loop then never ends. With `l->head` in the places of `tested_field`, the test ran for
+  more than 8 minutes before it was stopped, with no line of output past its buffer.
 - **The suites of fir.interpreter derive each expected value apart from the interpreter**
   (`test/fort/fir/interpreter_test.ft`, `interpreter_source_test.ft`). Python's integers and IEEE
   doubles gave each value at each boundary of each type when the cases were written: the wrap at

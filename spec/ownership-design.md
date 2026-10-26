@@ -830,7 +830,17 @@ counts of its rules before and after it. A report count can change the order of 
   (P4). Gain (measured, P4, `?`): (b) from 61/26 to 29/13 and (e) from 1,400/128 to 900/113 in
   `src/fort`. The form of revision 4 gave such a copy no frame, and it accepted k2 and the hand case
   `n4`.
-- **R7 edges of a null test**: a branch on `p == null` proves `p` empty there. It helps (c).
+- **R7 edges of a null test**: a branch on `p == null` proves `p` empty there. It helps (c). Its
+  decision is gen rule 6 of D17.11 and the amendment of part 2 of D17.20: a branch on a test of a
+  tracked place `p` against `null` makes `p` empty on the edge where the test finds `null`, and the
+  kill rules apply from the read of the test on; a `del` or an owning `cast` of a `p` that holds
+  the zero value frees nothing, so its obligation of part 2 holds. `fir.md` 11 (Tests) gives the
+  FIR form and the proof in the form of section 5. The value of `&&` and `||` makes no fact; only
+  the right operand gets the fact of the left one. Gain (measured with `--leak-report` over the
+  1233 entries of the five trees before this change): part 2 in `test/lang` falls from 33 sites in
+  14 functions to 23 in 11, the sites of a local, a parameter or a field that a test finds null;
+  rule (a) and part 1 keep each site of those entries, and none of them changes its status or its
+  errors.
 - **R8 the `del` of a span of owners**: a loop rule or a builtin that empties each element (Q7).
 - **R9 privacy**: a memory local whose address only view locals hold keeps its facts at a call.
   The ruling of 2026-10-23 removed it from V1. It helps (c) for aggregates.

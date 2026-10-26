@@ -42,6 +42,8 @@
 //| inner order ok
 //| inner scale ok
 //| inner doubling ok
+//| null edges ok
+//| null kinds ok
 /// Checks owner.prover, the proof of each overwrite check (spec/fir.md 11). Each gen rule, each
 /// kill rule and each definition of the rule has a group of cases over FIR text, and each group
 /// holds a case that the pass proves and a case that it does not prove. The examples of the rule
@@ -6984,7 +6986,8 @@ string[418] INNERS = {
     "        return;",
     "    }",
     "}",
-    // two `del`s of fields through one parameter: dU0 dU0
+    // two `del`s of one field through one parameter: the first frees an object whose owners are
+    // not known, and the second frees nothing, because the first left the zero value: dU0 dP
     "fn main.i20(_1 (h): holder mut*) -> void {",
     "    bb0: {",
     "        del(move (*_1).0);",
@@ -7204,7 +7207,7 @@ string[418] INNERS = {
 
 string[33] INNERS_VERDICTS = {
     "dU0", "dP", "dU2", "dP", "dU0", "dU0", "dU0", "cP", "cU1", "dU0", "", "dU0", "dU0", "dP", "",
-    "dU0", "dP", "dP", "dU0", "dU0 dU0", "dU4", "dP", "dU0", "dU0 dU0", "dU0 dP", "dU0 dU0",
+    "dU0", "dP", "dP", "dU0", "dU0 dP", "dU4", "dP", "dU0", "dU0 dU0", "dU0 dP", "dU0 dU0",
     "dP dU0", "cU0 dU0", "", "dU0 dP", "dU0", "cU0", "dP",
 };
 
@@ -7555,7 +7558,8 @@ fn the_proof_of_part_2_is_linear_in_the_inner_owners() void {
         fir.func* f = &m.funcs.items[k];
         prover.proof mut p = prover.prove(f);
         assert(p.inners.len == 1 && p.inners[0].owners == owners[k]);
-        assert(p.inner_work == p.leak_work + units[k] * owners[k] * steps[k]);
+        // the fact of `_1`, the place of the `del`, adds 1 step
+        assert(p.inner_work == p.leak_work + units[k] * (owners[k] * steps[k] + 1));
         assert(p.inner_over == (k == 3) && !p.leak_over);
         assert(p.inner_work <= prover.WORK_LIMIT || k == 3);
         assert(p.inners[0].proved == proved[k]);
@@ -7750,17 +7754,18 @@ fn the_inner_work_stops_the_proof_of_part_2() void {
     defer strbuf.free(&exits);
     // i2: 6 statements and 1 terminator, no check, 1 block and 4 locals, so a leak work of 7 for
     // its parameter and 4; the 3 inner owners of its one obligation take 9 steps, `(*_1).0` and
-    // `(*_1).1[c]` with their deref, and add 9 * 7
+    // `(*_1).1[c]` with their deref, and the fact of `_1`, the place of the `del`, takes 1 more
+    // than its 0 projections, so they add 10 * 7
     fir.func* i2 = &m.funcs.items[1];
     prover.proof mut whole = prover.prove(i2);
-    assert(whole.work == 0 && whole.leak_work == 11 && whole.inner_work == 74);
+    assert(whole.work == 0 && whole.leak_work == 11 && whole.inner_work == 81);
     assert(!whole.leak_over && !whole.inner_over && whole.inner_leaks == 0);
     prover.free(&whole);
-    prover.proof mut at = prover.prove_within(i2, 74);
+    prover.proof mut at = prover.prove_within(i2, 81);
     write_inners(i2, &at, &got);
     assert(!at.inner_over && strbuf.view(&got) == "dP");
     prover.free(&at);
-    prover.proof mut past = prover.prove_within(i2, 73);
+    prover.proof mut past = prover.prove_within(i2, 80);
     write_inners(i2, &past, &got);
     write_exits(i2, &past, &exits);
     assert(past.inner_over && !past.leak_over && strbuf.view(&got) == "dU0");
@@ -7788,6 +7793,947 @@ fn the_inner_work_stops_the_proof_of_part_2() void {
     assert(types.capped_product(3, 5) == 15 && types.capped_product(0, types.OWNER_CAP) == 0);
     assert(types.capped_sum(types.OWNER_CAP - 1, 1) == types.OWNER_CAP);
     assert(types.capped_sum(2, 3) == 5);
+}
+
+// ---- the tests against null -------------------------------------------------------------------
+
+// Each case is a FIR function and all of its verdicts (write_all): those of the checks and the
+// stores, of the exits and of part 2. The comment of a case names the verdicts that it is about. A
+// block that ends in `switch(copy _c)` on a flag `_c`, a `bool` temporary that is no memory, tests
+// a place against null when the last store into `_c` of the block is an `eq` or an `ne` of the
+// place with a zero constant, or a `copy` or a `not` of another such flag (spec/fir.md 11, Tests).
+// On the edge where the test finds null, each fact of the place holds that the statements after the
+// read leave (D17.11 gen rule 6). A `del` or an owning `cast` of an empty place has its obligation
+// of part 2 (D17.20).
+string[643] NULLS = {
+    // `eq`: the arm where the test finds null frees nothing, and the other arm frees an object of
+    // unknown owners: dP dU0
+    "fn main.n1(_1 (p): node mut* own) -> void {",
+    "    let _2: bool;",
+    "    bb0: {",
+    "        _2 = eq(copy _1, const null node mut* own);",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // `eq`: the parameter is empty at the `return` of the arm where the test finds null: rpP rpU
+    "fn main.n2(_1 (p): node mut* own) -> void {",
+    "    let _2: bool;",
+    "    bb0: {",
+    "        _2 = eq(copy _1, const null node mut* own);",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "}",
+    // `ne`: the `otherwise` edge is the edge where the test finds null: rpU rpP
+    "fn main.n3(_1 (p): node mut* own) -> void {",
+    "    let _2: bool;",
+    "    bb0: {",
+    "        _2 = ne(copy _1, const null node mut* own);",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "}",
+    // the constant first: rpP rpU
+    "fn main.n4(_1 (p): node mut* own) -> void {",
+    "    let _2: bool;",
+    "    bb0: {",
+    "        _2 = eq(const null node mut* own, copy _1);",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "}",
+    // `const zero` is the zero value too: rpP rpU
+    "fn main.n5(_1 (p): node mut* own) -> void {",
+    "    let _2: bool;",
+    "    bb0: {",
+    "        _2 = eq(copy _1, const zero node mut* own);",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "}",
+    // a negation of `ne`, the lowering of `!(p != null)`: rpP rpU
+    "fn main.n6(_1 (p): node mut* own) -> void {",
+    "    let _2: bool;",
+    "    let _3: bool;",
+    "    bb0: {",
+    "        _2 = ne(copy _1, const null node mut* own);",
+    "        _3 = not(copy _2);",
+    "        switch(copy _3) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "}",
+    // two negations and a `copy`: rpP rpU
+    "fn main.n7(_1 (p): node mut* own) -> void {",
+    "    let _2: bool;",
+    "    let _3: bool;",
+    "    let _4: bool;",
+    "    let _5: bool;",
+    "    bb0: {",
+    "        _2 = eq(copy _1, const null node mut* own);",
+    "        _3 = not(copy _2);",
+    "        _4 = not(copy _3);",
+    "        _5 = copy _4;",
+    "        switch(copy _5) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "}",
+    // an arm of `false`: `true` goes to `otherwise`: rpP rpU
+    "fn main.n8(_1 (p): node mut* own) -> void {",
+    "    let _2: bool;",
+    "    bb0: {",
+    "        _2 = eq(copy _1, const null node mut* own);",
+    "        switch(copy _2) -> [false: bb2, otherwise: bb1];",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "}",
+    // both values go to one block, so no edge is the edge of the test: rpU
+    "fn main.n9(_1 (p): node mut* own) -> void {",
+    "    let _2: bool;",
+    "    bb0: {",
+    "        _2 = eq(copy _1, const null node mut* own);",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb1];",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // a field through a parameter, a tracked place: the check in the arm: P
+    "fn main.n10(_1 (b): node mut*) -> void {",
+    "    let _2: bool;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        _2 = eq(copy (*_1).0, const null node mut* own);",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb3;",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "    bb3: {",
+    "        (*_1).0 = move _3;",
+    "        goto bb2;",
+    "    }",
+    "}",
+    // a `del` of the field that the test finds null frees nothing: dP dU0
+    "fn main.n11(_1 (b): node mut*) -> void {",
+    "    let _2: bool;",
+    "    bb0: {",
+    "        _2 = eq(copy (*_1).0, const null node mut* own);",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        del(move (*_1).0);",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        del(move (*_1).0);",
+    "        return;",
+    "    }",
+    "}",
+    // a loop condition: the edge out of the loop: rpP
+    "fn main.n12(_1 (p): node mut* own) -> void {",
+    "    let _2: bool;",
+    "    let _3: void;",
+    "    bb0: {",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2 = ne(copy _1, const null node mut* own);",
+    "        switch(copy _2) -> [true: bb2, otherwise: bb3];",
+    "    }",
+    "    bb2: {",
+    "        _3 = call fn main.take(move _1);",
+    "        goto bb1;",
+    "    }",
+    "    bb3: {",
+    "        return;",
+    "    }",
+    "}",
+    // a `break` joins the edge out of the loop with a live parameter: rpU
+    "fn main.n13(_1 (p): node mut* own, _2 (c): bool) -> void {",
+    "    let _3: bool;",
+    "    let _4: void;",
+    "    bb0: {",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        _3 = ne(copy _1, const null node mut* own);",
+    "        switch(copy _3) -> [true: bb2, otherwise: bb3];",
+    "    }",
+    "    bb2: {",
+    "        switch(copy _2) -> [true: bb3, otherwise: bb4];",
+    "    }",
+    "    bb3: {",
+    "        return;",
+    "    }",
+    "    bb4: {",
+    "        _4 = call fn main.take(move _1);",
+    "        goto bb1;",
+    "    }",
+    "}",
+    // the lowering of `p == null && q == null`: the right operand finds `p` null, so its check is
+    // P; the arm gets no fact, because the `switch` of the join block reads a flag that no store of
+    // its block writes: rpU rqU
+    "fn main.n14(_1 (p): node mut* own, _2 (q): node mut* own) -> void {",
+    "    let _3: bool;",
+    "    let _4: bool;",
+    "    let _5: bool;",
+    "    let _6: node mut* own;",
+    "    bb0: {",
+    "        _4 = eq(copy _1, const null node mut* own);",
+    "        _3 = copy _4;",
+    "        switch(copy _3) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _6 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1) -> bb5;",
+    "    }",
+    "    bb2: {",
+    "        switch(copy _3) -> [true: bb3, otherwise: bb4];",
+    "    }",
+    "    bb3: {",
+    "        return;",
+    "    }",
+    "    bb4: {",
+    "        del(move _1);",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "    bb5: {",
+    "        _1 = move _6;",
+    "        _5 = eq(copy _2, const null node mut* own);",
+    "        _3 = copy _5;",
+    "        goto bb2;",
+    "    }",
+    "}",
+    // the lowering of `p != null || q != null`: the right operand finds `p` null: P, and the arm
+    // where both are null gets no fact: rpU rqU
+    "fn main.n15(_1 (p): node mut* own, _2 (q): node mut* own) -> void {",
+    "    let _3: bool;",
+    "    let _4: bool;",
+    "    let _5: bool;",
+    "    let _6: node mut* own;",
+    "    bb0: {",
+    "        _4 = ne(copy _1, const null node mut* own);",
+    "        _3 = copy _4;",
+    "        switch(copy _3) -> [true: bb2, otherwise: bb1];",
+    "    }",
+    "    bb1: {",
+    "        _6 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1) -> bb5;",
+    "    }",
+    "    bb2: {",
+    "        switch(copy _3) -> [true: bb3, otherwise: bb4];",
+    "    }",
+    "    bb3: {",
+    "        del(move _1);",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "    bb4: {",
+    "        return;",
+    "    }",
+    "    bb5: {",
+    "        _1 = move _6;",
+    "        _5 = ne(copy _2, const null node mut* own);",
+    "        _3 = copy _5;",
+    "        goto bb2;",
+    "    }",
+    "}",
+    // a call between the read and the `switch` kills the fact of a field through a pointer: U
+    "fn main.k1(_1 (b): node mut*) -> void {",
+    "    let _2: bool;",
+    "    let _3: void;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        _2 = eq(copy (*_1).0, const null node mut* own);",
+    "        _3 = call fn main.g();",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb3;",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "    bb3: {",
+    "        (*_1).0 = move _4;",
+    "        goto bb2;",
+    "    }",
+    "}",
+    // a call keeps the fact of a local that is no memory: P
+    "fn main.k2(_1 (p): node mut* own) -> void {",
+    "    let _2: bool;",
+    "    let _3: void;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        _2 = eq(copy _1, const null node mut* own);",
+    "        _3 = call fn main.g();",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1) -> bb3;",
+    "    }",
+    "    bb2: {",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "    bb3: {",
+    "        _1 = move _4;",
+    "        goto bb2;",
+    "    }",
+    "}",
+    // a store through a second pointer between the read and the `switch`: U
+    "fn main.k3(_1 (b): node mut*, _2 (s): plain mut*) -> void {",
+    "    let _3: bool;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        _3 = eq(copy (*_1).0, const null node mut* own);",
+    "        (*_2).0 = const i32 1;",
+    "        switch(copy _3) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb3;",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "    bb3: {",
+    "        (*_1).0 = move _4;",
+    "        goto bb2;",
+    "    }",
+    "}",
+    // a store into the tested place between the read and the `switch`: U, and the store itself: U
+    "fn main.k4(_1 (b): node mut*) -> void {",
+    "    let _2: bool;",
+    "    let _3: node mut* own;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        _2 = eq(copy (*_1).0, const null node mut* own);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        (*_1).0 = move _3;",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb3;",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "    bb3: {",
+    "        (*_1).0 = move _4;",
+    "        goto bb2;",
+    "    }",
+    "}",
+    // a store into the pointer local of the tested place, its prefix: U
+    "fn main.k5(_1 (b): node mut*, _2 (r): node mut*) -> void {",
+    "    let _3: bool;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        _3 = eq(copy (*_1).0, const null node mut* own);",
+    "        _1 = copy _2;",
+    "        switch(copy _3) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb3;",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "    bb3: {",
+    "        (*_1).0 = move _4;",
+    "        goto bb2;",
+    "    }",
+    "}",
+    // a store into the flag after the test: the flag no longer holds the test: rpU
+    "fn main.k6(_1 (p): node mut* own) -> void {",
+    "    let _2: bool;",
+    "    bb0: {",
+    "        _2 = eq(copy _1, const null node mut* own);",
+    "        _2 = const true;",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a store into the first flag after its `copy`: the copy holds the test: rpP
+    "fn main.k7(_1 (p): node mut* own) -> void {",
+    "    let _2: bool;",
+    "    let _3: bool;",
+    "    bb0: {",
+    "        _2 = eq(copy _1, const null node mut* own);",
+    "        _3 = copy _2;",
+    "        _2 = const false;",
+    "        switch(copy _3) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a flag that is memory: a store through a pointer can change it, so it holds no test: rpU
+    "fn main.k8(_1 (p): node mut* own) -> void {",
+    "    let _2: bool;",
+    "    let _3: bool*;",
+    "    bb0: {",
+    "        _3 = addr(_2);",
+    "        _2 = eq(copy _1, const null node mut* own);",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a `copy` of a flag that is memory ends the chain: a store through a pointer can write the
+    // flag between the test and the `copy`: rpU
+    "fn main.k12(_1 (p): node mut* own) -> void {",
+    "    let _2: bool;",
+    "    let _3: bool mut*;",
+    "    let _4: bool;",
+    "    bb0: {",
+    "        _3 = addr mut(_2);",
+    "        _2 = eq(copy _1, const null node mut* own);",
+    "        (*_3) = const true;",
+    "        _4 = copy _2;",
+    "        switch(copy _4) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a named local holds the test, and the `switch` reads it: a flag is a temporary of the
+    // lowering, and gen rule 6 names a branch on the test itself: rpU
+    "fn main.k13(_1 (p): node mut* own) -> void {",
+    "    let _2 (b): bool;",
+    "    bb0: {",
+    "        _2 = eq(copy _1, const null node mut* own);",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a held address that the call makes stale before the test gives no tracked place, so the test
+    // gives the field no fact: UU
+    "fn main.k9(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own mut*;",
+    "    let _3: void;",
+    "    let _4: bool;",
+    "    let _5: node mut* own;",
+    "    let _6: node mut* own;",
+    "    bb0: {",
+    "        _2 = addr mut((*_1).0);",
+    "        _3 = call fn main.g();",
+    "        _4 = eq(copy (*_2), const null node mut* own);",
+    "        switch(copy _4) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _5 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb3;",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "    bb3: {",
+    "        (*_1).0 = move _5;",
+    "        _6 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_2)) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        (*_2) = move _6;",
+    "        goto bb2;",
+    "    }",
+    "}",
+    // the same with no call: the held address reads as the field, whose check is P; the store into
+    // the field makes the held address stale: PU
+    "fn main.k10(_1 (b): node mut*) -> void {",
+    "    let _2: node mut* own mut*;",
+    "    let _3: bool;",
+    "    let _4: node mut* own;",
+    "    let _5: node mut* own;",
+    "    bb0: {",
+    "        _2 = addr mut((*_1).0);",
+    "        _3 = eq(copy (*_2), const null node mut* own);",
+    "        switch(copy _3) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb3;",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "    bb3: {",
+    "        (*_1).0 = move _4;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_2)) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        (*_2) = move _5;",
+    "        goto bb2;",
+    "    }",
+    "}",
+    // a call in the arm, after the `switch`, kills the fact as each kill rule does: U
+    "fn main.k11(_1 (b): node mut*) -> void {",
+    "    let _2: bool;",
+    "    let _3: void;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        _2 = eq(copy (*_1).0, const null node mut* own);",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _3 = call fn main.g();",
+    "        _4 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb3;",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "    bb3: {",
+    "        (*_1).0 = move _4;",
+    "        goto bb2;",
+    "    }",
+    "}",
+    // a scratch temporary that the test finds null takes its bit on the edge: rtP rtP
+    "fn main.s1() -> void {",
+    "    let _1: node mut* own;",
+    "    let _2: bool;",
+    "    let _3: void;",
+    "    bb0: {",
+    "        _1 = call fn main.make();",
+    "        _2 = eq(copy _1, const null node mut* own);",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        _3 = call fn main.take(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a store into the scratch temporary between the read and the `switch` clears its bit: rtU
+    "fn main.s2() -> void {",
+    "    let _1: node mut* own;",
+    "    let _2: bool;",
+    "    let _3: void;",
+    "    let _4: void;",
+    "    bb0: {",
+    "        _1 = call fn main.make();",
+    "        _2 = eq(copy _1, const null node mut* own);",
+    "        _3 = call fn main.take(move _1);",
+    "        _1 = call fn main.make();",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        _4 = call fn main.take(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // an owning `cast` of a pointer that the test finds null hides no owner: cP dU0
+    "fn main.b1(_1 (p): node mut* own) -> void {",
+    "    let _2: bool;",
+    "    let _3: void* own;",
+    "    bb0: {",
+    "        _2 = eq(copy _1, const null node mut* own);",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _3 = cast<void* own>(move _1);",
+    "        del(move _3);",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a `del` after a `move` of the pointer frees nothing, with no test: dP
+    "fn main.b2(_1 (p): node mut* own) -> void {",
+    "    let _2: void;",
+    "    bb0: {",
+    "        _2 = call fn main.take(move _1);",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a memory local that the test finds null, and the same after a call, which kills its fact: dP
+    // dU0
+    "fn main.b3(_1 (c): bool) -> void {",
+    "    let _2 (p): node mut* own;",
+    "    let _3: node mut* own mut*;",
+    "    let _4: bool;",
+    "    let _5: void;",
+    "    bb0: {",
+    "        _2 = const zero node mut* own;",
+    "        live(_2);",
+    "        _3 = addr mut(_2);",
+    "        _5 = call fn main.put(copy _3);",
+    "        _4 = eq(copy _2, const null node mut* own);",
+    "        switch(copy _4) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        del(move _2);",
+    "        dead(_2);",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        _5 = call fn main.g();",
+    "        del(move _2);",
+    "        dead(_2);",
+    "        return;",
+    "    }",
+    "}",
+    // a scratch temporary that the test finds null: dP, and on the other edge its store killed each
+    // fact through it: dU0
+    "fn main.b4() -> void {",
+    "    let _1: node mut* own;",
+    "    let _2: bool;",
+    "    bb0: {",
+    "        _1 = call fn main.make();",
+    "        _2 = eq(copy _1, const null node mut* own);",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // the place of a site reads with the stale set before its statement: the store into `i` makes
+    // `_3` stale, so the second `del` names no tracked place, and the first `del` empties the
+    // element of the new `i` only: dU0 dU0
+    "fn main.b5(_1 (b): node mut*, _2 (i): u64) -> void {",
+    "    let _3: u64;",
+    "    let _4: u64;",
+    "    bb0: {",
+    "        _3 = copy _2;",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2 = const u64 1;",
+    "        _4 = copy _2;",
+    "        del(move (*_1).2[_4]);",
+    "        del(move (*_1).2[_3]);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[35] NULLS_VERDICTS = {
+    " | rpP rpP | dP dU0", " | rpP rpU | ", " | rpU rpP | ", " | rpP rpU | ", " | rpP rpU | ",
+    " | rpP rpU | ", " | rpP rpU | ", " | rpP rpU | ", " | rpU | ", "P/P | rtP | ", " |  | dP dU0",
+    " | rpP | ", " | rpU | ", "P/P | rpU rqU rtP rpP rqP rtP | dU0 dU0",
+    "P/P | rpP rqP rtP rpU rqU rtP | dU0 dU0", "U/P | rtP | ", "P/P | rpP rtP | dU0",
+    "U/P | rtP | ", "U/PUP | rtP rtP | ", "U/P | rtP | ", " | rpU rpP | dU0", " | rpP rpP | dU0",
+    " | rpU rpP | dU0", " | rpU rpP | dU0", " | rpU rpP | dU0", "UU/PP | rtP rtP | ",
+    "PU/PP | rtP rtP | ", "U/P | rtP | ", "/P | rtP rtP | ", "/PP | rtU rtP | ",
+    "/P | rpP rtP rpP rtP | cP dU0", " | rpP | dP", " | dpP dpP | dP dU0", "/P | rtP rtP | dP dU0",
+    " |  | dU0 dU0",
+};
+
+// Writes all the verdicts of `p` for `f` into `out`: those of the checks and the stores
+// (write_verdicts), then ` | ` and those of the exits (write_exits), then ` | ` and those of
+// part 2 (write_inners).
+fn write_all(fir.func* f, prover.proof* p, strbuf.str_buf mut* out) void {
+    strbuf.str_buf mut part = strbuf.create();
+    defer strbuf.free(&part);
+    strbuf.clear(out);
+    write_verdicts(f, p, &part);
+    strbuf.append(out, strbuf.view(&part));
+    strbuf.append(out, " | ");
+    write_exits(f, p, &part);
+    strbuf.append(out, strbuf.view(&part));
+    strbuf.append(out, " | ");
+    write_inners(f, p, &part);
+    strbuf.append(out, strbuf.view(&part));
+}
+
+// Parses `text` against PRELUDE, holds that the verifier accepts each function, proves each one,
+// and holds that function `k` of the module gives all the verdicts `want[k]` (write_all).
+fn expect_all(string@ text, string@ want) void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    fir.module mut m = pass_env.parse(&e, PRELUDE[..], text);
+    defer fir.module_free(&m);
+    assert(m.funcs.len == want.len);
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    u64 mut k = 0;
+    while (k < m.funcs.len) {
+        fir.func* f = &m.funcs.items[k];
+        pass_env.verified(&e, f, "prover_test: the verifier refuses the input");
+        prover.proof mut p = prover.prove(f);
+        write_all(f, &p, &got);
+        prover.free(&p);
+        if (strbuf.view(&got) != want[k]) {
+            eprintln("function ", k, " gives ", strbuf.view(&got), " and not ", want[k]);
+            panic("prover_test: a verdict after a test against null differs");
+        }
+        k += 1;
+    }
+}
+
+// The edge where a test against null finds null holds the fact of the tested place, and only
+// that edge, while no kill rule applies after the read.
+fn the_edge_of_a_test_against_null_holds_the_fact_of_its_place() void {
+    expect_all(NULLS[..], NULLS_VERDICTS[..]);
+}
+
+// The tests against null of lowered fort source, each with a comment that gives the verdicts of
+// part 2 of its function and whether the function has an error of D17.11 or of part 1: the forms
+// of the null sites of test/lang/programs, a call after the test, a negation, `&&`, a named local
+// that holds the test, `while` and `do while`.
+string[111] NULL_KINDS = {
+    "struct node {",
+    "    node mut* own next;",
+    "}",
+    "struct list {",
+    "    node mut* own head;",
+    "}",
+    "struct tnode {",
+    "    tnode mut* own left;",
+    "    tnode mut* own right;",
+    "}",
+    "fn g() void {",
+    "}",
+    // a parameter that a test finds null frees nothing, and the second `del` follows a
+    // `move` of its owner: dP dP dU0 ok
+    "fn param(node mut* own n) void {",
+    "    if (n == null) {",
+    "        del(n);",
+    "        return;",
+    "    }",
+    "    node mut* own rest = move(n->next);",
+    "    del(n);",
+    "    del(rest);",
+    "}",
+    // a field that the loop finds null at its end: dP dP ok
+    "fn clear(list mut* l) void {",
+    "    while (l->head != null) {",
+    "        node mut* own gone = move(l->head);",
+    "        node mut* own rest = move(gone->next);",
+    "        del(gone);",
+    "        l->head = move(rest);",
+    "    }",
+    "    del(l->head);",
+    "}",
+    // the arm stores into the field that the test finds null with no `del`, and the loop
+    // walks to the last node, whose `next` it finds null: dP ok
+    "fn push_back(list mut* l, node mut* own fresh) void {",
+    "    if (l->head == null) {",
+    "        l->head = move(fresh);",
+    "        return;",
+    "    }",
+    "    node mut* mut tail = l->head;",
+    "    while (tail->next != null) {",
+    "        tail = tail->next;",
+    "    }",
+    "    del(tail->next);",
+    "    tail->next = move(fresh);",
+    "}",
+    // the edge where the test finds null and the arm both leave `p` empty at the closing brace: ok
+    "fn drop(i32 mut* own p) void {",
+    "    if (p != null) {",
+    "        del(p);",
+    "    }",
+    "}",
+    // the arm stores into the field that the test finds null: ok
+    "fn fill(list mut* l) void {",
+    "    if (l->head == null) {",
+    "        l->head = new(node);",
+    "    }",
+    "}",
+    // a call between the test and the store kills the fact: error
+    "fn fill_late(list mut* l) void {",
+    "    if (l->head == null) {",
+    "        g();",
+    "        l->head = new(node);",
+    "    }",
+    "}",
+    // a negation: ok
+    "fn negated(i32 mut* own p) void {",
+    "    if (!(p != null)) {",
+    "        return;",
+    "    }",
+    "    del(p);",
+    "}",
+    // the arm of `&&` gets no fact of the two tests: error
+    "fn both(i32 mut* own p, i32 mut* own q) void {",
+    "    if (p == null && q == null) {",
+    "        return;",
+    "    }",
+    "    del(p);",
+    "    del(q);",
+    "}",
+    // a named local holds the test, and the `if` reads the local, not the test: no fact: error
+    "fn fill_flag(list mut* l) void {",
+    "    bool b = l->head == null;",
+    "    if (b) {",
+    "        l->head = new(node);",
+    "    }",
+    "}",
+    // the edge out of a `while` leaves the parameter empty: dP ok
+    "fn drain(node mut* own mut p) void {",
+    "    while (p != null) {",
+    "        node mut* own n = move(p);",
+    "        p = move(n->next);",
+    "        del(n);",
+    "    }",
+    "}",
+    // the edge out of a `do while`: dP ok
+    "fn drain_do(node mut* own mut p) void {",
+    "    if (p == null) {",
+    "        return;",
+    "    }",
+    "    do {",
+    "        node mut* own n = move(p);",
+    "        p = move(n->next);",
+    "        del(n);",
+    "    } while (p != null);",
+    "}",
+    // a named local that the loop finds null at its end: dP dP ok
+    "fn drain_local(node mut* own p) void {",
+    "    node mut* own mut done = move(p);",
+    "    while (done != null) {",
+    "        node mut* own gone = move(done);",
+    "        done = move(gone->next);",
+    "        del(gone);",
+    "    }",
+    "    del(done);",
+    "}",
+    // a field of a local that the test finds null, and a field that moves out: dP ok
+    "fn unlink(tnode mut* own node) tnode mut* own {",
+    "    if (node->left == null) {",
+    "        tnode mut* own right = move(node->right);",
+    "        del(node);",
+    "        return move(right);",
+    "    }",
+    "    return move(node);",
+    "}",
+};
+
+string[14] NULL_KIND_NAMES = {
+    "param", "clear", "push_back", "drop", "fill", "fill_late", "negated", "both", "fill_flag",
+    "drain", "drain_do", "drain_local", "unlink", "g",
+};
+
+string[14] NULL_KIND_VERDICTS = {
+    "dP dP dU0 ok", "dP dP ok", "dP ok", "ok", "ok", "error", "ok", "error", "error", "dP ok",
+    "dP ok", "dP dP ok", "dP ok", "ok",
+};
+
+// The tests against null of lowered fort source give their facts: each function gives the
+// verdicts of part 2 (write_inners) and `ok`, or `error` for an error of D17.11 or of part 1.
+fn each_test_against_null_of_lowered_source_gives_its_fact() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, NULL_KINDS[..], true);
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    u64 mut k = 0;
+    while (k < NULL_KIND_NAMES.len) {
+        fir.func mut f = fir.func{};
+        lower(&e, NULL_KIND_NAMES[k], &f);
+        prover.proof mut p = prover.prove(&f);
+        write_inners(&f, &p, &got);
+        if (strbuf.view(&got).len > 0) {
+            strbuf.push(&got, ' ');
+        }
+        if (prover.has_error(&p)) {
+            strbuf.append(&got, "error");
+        } else {
+            strbuf.append(&got, "ok");
+        }
+        prover.free(&p);
+        fir.func_free(&f);
+        if (strbuf.view(&got) != NULL_KIND_VERDICTS[k]) {
+            eprintln(NULL_KIND_NAMES[k], " gives ", strbuf.view(&got), " and not ",
+                     NULL_KIND_VERDICTS[k]);
+            panic("prover_test: a test against null of lowered source gives another verdict");
+        }
+        k += 1;
+    }
 }
 
 // ---- the release of each allocation ------------------------------------------------------------
@@ -8288,5 +9234,9 @@ fn main() i32 {
     println("inner scale ok");
     the_inner_owners_of_a_doubling_chain_take_one_walk();
     println("inner doubling ok");
+    the_edge_of_a_test_against_null_holds_the_fact_of_its_place();
+    println("null edges ok");
+    each_test_against_null_of_lowered_source_gives_its_fact();
+    println("null kinds ok");
     return 0;
 }

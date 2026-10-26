@@ -2416,7 +2416,9 @@ says ownership is "by convention", this section supersedes it.
   aggregates are not checked field by field.
   The proof is a forward must-empty analysis over the FIR of one function (`fir.md` 11). A fact
   says that a tracked place holds the zero value. The analysis joins facts by intersection: a fact
-  holds at the start of a block only when it holds at the end of each predecessor. The entry block
+  holds at the start of a block only when it holds at the end of each predecessor, on the edge from
+  that predecessor. The edge where a test against `null` finds `null` also holds the facts of gen
+  rule 6 (`fir.md` 11, Join). The entry block
   starts with the fact of each place in the storage of a temporary of the lowering and of a result
   that is no aggregate, which hold no allocation before their first store, and with no other fact.
   The analysis reads no other function.
@@ -2467,6 +2469,16 @@ says ownership is "by convention", this section supersedes it.
      empty.
   5. A store of a fresh `new` into a pointer local `n` makes each tracked place through `n` empty,
      because `new` fills its storage with zero (D10.2).
+  6. A test against `null` (refinement R7 of `spec/ownership-design.md` 7): a branch on `p == null`
+     or `p != null`, with the operands in either order, where `p` is a tracked place of a pointer
+     type, makes `p` empty on the edge where the test finds `null`. The test reads `p` once, before
+     the branch, and the fact holds from that read: the kill rules of each operation after the read
+     apply to it, also between the read and the branch. The branch is that of an `if`, of a loop
+     condition or of `?:`, and the test can stand under `!`. A test that is the left operand of `&&`
+     or of `||` makes `p` empty in the right operand when the right operand runs only where the test
+     finds `null`, as in `p == null && e` and `p != null || e`. The value of a whole `&&` or `||`
+     makes no fact, because the lowering joins its two operands before the branch. `fir.md` 11
+     (Tests) gives the FIR form of a test and of its edge.
   These kill rules make a fact false:
   1. A store into a place `d` whose base is a local or a global kills the fact of each tracked
      place with that base that is not separate from `d`. So a store into a pointer local `p` kills
@@ -2536,6 +2548,11 @@ says ownership is "by convention", this section supersedes it.
   For a parameter `l` of type `list mut*`, `node mut* own n = new(node); n->next = move(l->head);
   l->head = move(n);` passes: `n` is fresh, so the store into `n->next` keeps the fact of
   `l->head` that the `move` made.
+  For the same `l`, `if (l->head == null) { l->head = new(node); }` passes, because the test makes
+  `l->head` empty in the arm (gen rule 6). `if (l->head == null) { g(); l->head = new(node); }` is
+  an error, because the call `g()` kills that fact (kill rule 5). For a parameter `p` of type `i32
+  mut* own`, `if (p != null) { del(p); }` leaves `p` empty after the `if`: on the edge where the
+  test finds `null`, and after the arm.
   A declaration in a loop is an error when the loop body does not `del` or `move` the local:
   `for (i32 mut i = 0; i < 3; i++) { i32 mut* own p = new(i32); }` is an error at `p`,
   because the back edge joins a live `p` with the entry zeroing.
@@ -2585,6 +2602,10 @@ says ownership is "by convention", this section supersedes it.
   coordinator, 2026-10-24. Before, the entry block started with no fact, the first count took the
   overwrite checks alone, a function with no overwrite check had no work, and the functions of the
   compiler, the server and the standard library measured 4451 or less.
+  Amended 2026-10-26: gen rule 6, the edge of a test against `null` (refinement R7 of
+  `spec/ownership-design.md` 7); proposed 2026-10-26, ratified by the user 2026-10-26. Before, no
+  rule made a fact of a test, so for a parameter `l` of type `list mut*`, `if (l->head == null) {
+  l->head = new(node); }` was an error, and the program needed a `del` of the null `l->head` first.
 
 ### D17.12 Owned strings
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,
@@ -2691,12 +2712,15 @@ says ownership is "by convention", this section supersedes it.
   stands at the `del` keyword, with the note `move '<place>' into a local and del it first`. A
   `cast` that carries `own` from `T* own` to `U* own`, where `U` is another type, `void` included,
   has the same obligation for each owner of `*p`. Its error is `leak: cannot prove
-  '<place>' is empty before this cast` at the `cast`, with the same note. When `p` is no pointer
-  local that is not memory, D17.11 tracks no place through it, so the `del` or the `cast` is an
-  error. By the ruling on Q7 (`spec/ownership-design.md` 12), a span whose elements hold owners,
-  for which no element is tracked, waits for refinement R8 of `spec/ownership-design.md` 7. Until
-  then, a `del` or a `cast`
-  of such a span has no obligation of part 2, and its leak is outside the guarantee of this rule.
+  '<place>' is empty before this cast` at the `cast`, with the same note. The obligation also
+  holds when the analysis proves `p` itself empty right before the `del` or the `cast`, by the fact
+  of D17.11 for `p` (refinement R7 of `spec/ownership-design.md` 7): a `del` of the zero value frees
+  nothing (D17.9), and a `cast` of it gives the zero value. When `p` is no pointer local that is not
+  memory, D17.11 tracks no place through it, so the `del` or the `cast` is an error, unless the
+  analysis proves `p` empty. By the ruling on Q7 (`spec/ownership-design.md` 12), a span whose
+  elements hold owners, for which no element is tracked, waits for refinement R8 of
+  `spec/ownership-design.md` 7. Until then, a `del` or a `cast` of such a span has no obligation
+  of part 2, and its leak is outside the guarantee of this rule.
   A leak through a cycle of owners, and a leak on a path that calls `exit` or ends in a runtime
   error, are outside the guarantee of this rule too (`spec/ownership-design.md` 5.2, X3).
   `<place>` is source text. For a named local or a parameter, it is the declared name. An owner
@@ -2712,7 +2736,12 @@ says ownership is "by convention", this section supersedes it.
   `{ i32 mut* own n = new(i32); defer del(n); }` passes. For `struct pair { i32* own a; i32* own
   b; }`, `pair mut* own q = new(pair); del(q);` passes, because `new` fills `*q` with zero (D10.2).
   For a parameter `q` of type `pair mut* own`, `del(q);` alone is an error, because the entry
-  values of `q->a` and `q->b` are unknown, and `del(q->a); del(q->b); del(q);` passes.
+  values of `q->a` and `q->b` are unknown, and `del(q->a); del(q->b); del(q);` passes. In
+  `if (q == null) { del(q); return; }`, the `del` passes too, because the test makes `q` empty in
+  the arm (D17.11 gen rule 6). For a parameter `l` of type `list mut*` whose field `head` is a
+  `node mut* own`, the `del` of `while (l->head != null) { ... } del(l->head);` passes when the
+  loop ends only at its condition: the edge out of the loop makes `l->head` empty, so the `del`
+  frees nothing.
   Part 2 starts as a report. A first change lists each site of part 2 that the analysis cannot
   prove and accepts the program. A later change makes each such site a compile error and amends
   this entry. Part 1 took this path, from a report (e0bb6c0a) to an error, as the overwrite check
@@ -2739,6 +2768,11 @@ says ownership is "by convention", this section supersedes it.
   run reaches, and the FIR place in a message about FIR text with no source tree. Before, the
   entry named only the closing brace, `return`, `break` and `continue`, and it said that no message
   names a FIR local.
+  Amended 2026-10-26: the obligation of part 2 holds when the analysis proves `p` empty, and a test
+  against `null` can prove it (D17.11 gen rule 6, refinement R7 of `spec/ownership-design.md` 7);
+  proposed 2026-10-26, ratified by the user 2026-10-26. Before, `if (q == null) { del(q); }` was a
+  site that the analysis could not prove for a parameter `q`, and so were `del(l->head)` after a
+  loop on `l->head != null`, and `del(p)` after `move(p)` or after `del(p)`, with no test.
 
 ## D18 Float printing in the runtime
 

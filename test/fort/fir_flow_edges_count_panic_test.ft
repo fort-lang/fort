@@ -1,0 +1,33 @@
+//! run
+//! flags: -I ../../src -I support
+//! abort
+//! stderr: panic: fir_flow.dataflow_forward_edges: the edge counts differ from the block count
+//! stdout:
+//| ready
+/// dataflow_forward_edges takes one edge set and one target for each block. The function has one
+/// block, and the test gives one gen set and one kill set but no edge set, so the function panics
+/// before it reads an edge set.
+import fort.fir;
+import fir_env;
+import fort.fir_flow;
+
+// The transfer that dataflow_new takes. The set transfer never calls it.
+fn no_transfer(fir.func* f, u32 b, fir_flow.bits mut* set) void {
+}
+
+fn main() i32 {
+    fir_env.env mut e = fir_env.env{};
+    fir_env.open(&e);
+    fir.func mut f = fir_env.func_of(&e, "nothing");
+    fir.block_set_terminator(&f, 0, fir.term_return(fir_env.at(1, 1), 0));
+    fir.pred_table mut pt = fir.func_predecessors(&f);
+    fir_flow.dataflow mut d = fir_flow.dataflow_new(1, fir_flow.join_kind.join_union,
+                                                   no_transfer);
+    fir_flow.bits[1] mut gens = {fir_flow.bits_new(1)};
+    fir_flow.bits[1] mut kills = {fir_flow.bits_new(1)};
+    fir_flow.bits@ none = {};
+    u32@ nowhere = {};
+    println("ready");
+    fir_flow.dataflow_forward_edges(&f, &pt, &d, gens[..], kills[..], nowhere, none);
+    return 0;
+}

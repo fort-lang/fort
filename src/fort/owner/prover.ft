@@ -16,11 +16,13 @@
 // the fresh pointer locals, whose transfer owner.place holds, the scratch locals (run_scratch),
 // whose bit holds the fact of a whole temporary or `_0` that is no memory, then the facts, joined
 // by intersection. A walk of each block gives its sets, with the stale set and the fresh set before
-// each statement. A second walk of each block that holds a store tests its fact. The leak rule
-// adds the fact of each owner local whose obligation needs one, and a fifth dataflow (run_ended)
-// that says where the scope of a named owner local has ended; a third walk of each block that
-// holds an exit tests its obligation (judge_exits). Part 2 adds the fact of each inner owner of
-// each `del` or owning `cast` (find_inners), and a fourth walk tests them (judge_inners).
+// each statement. A block that ends in a test against null gives the facts and the scratch bit of
+// the tested place to the edge where the test finds null (find_tests, add_test_facts). A second
+// walk of each block that holds a store tests its fact. The leak rule adds the fact of each owner
+// local whose obligation needs one, and a fifth dataflow (run_ended) that says where the scope of a
+// named owner local has ended; a third walk of each block that holds an exit tests its obligation
+// (judge_exits). Part 2 adds the fact of each inner owner of each `del` or owning `cast`
+// (find_inners), and a fourth walk tests them (judge_inners).
 // The module uses switches and no function-pointer dispatch table. It holds no module-level
 // mutable state: each vector belongs to one call of prove, or to the proof that it returns.
 import fort.fir;
@@ -138,7 +140,9 @@ fn has_error(proof* p) bool {
 // ends block `b`, `store_fact[k]` the fact of store `k` of the proof, and `exit_fact[k]` the fact
 // of exit `k`. The stores of block `b` are the stores `first_store[b]` to `first_store[b + 1] - 1`
 // of the proof. The facts of the inner owners of inner `k` of the proof are the entries
-// `first_inner[k]` to `first_inner[k + 1] - 1` of `inner_fact`, in the order of the owners.
+// `first_inner[k]` to `first_inner[k + 1] - 1` of `inner_fact`, in the order of the owners, and
+// `site_fact[k]` is the fact of the place that inner `k` releases. `tested[b]` says that block `b`
+// ends in a test against null, and then `tests[b]` is that test (find_tests).
 struct context {
     place.survey places;
     place.path mut@ own facts;
@@ -149,6 +153,9 @@ struct context {
     u64 mut@ own first_store;
     u32 mut@ own inner_fact;
     u64 mut@ own first_inner;
+    u32 mut@ own site_fact;
+    bool mut@ own tested;
+    place.test mut@ own tests;
 }
 
 fn free_context(context mut* c) void {
@@ -160,6 +167,9 @@ fn free_context(context mut* c) void {
     del(c->first_store);
     del(c->inner_fact);
     del(c->first_inner);
+    del(c->site_fact);
+    del(c->tested);
+    del(c->tests);
 }
 
 // Appends `p` to the facts and returns its number.
@@ -182,22 +192,29 @@ fn push_fact(context mut* c, place.path p) u32 {
 
 // ---- the gen and kill rules --------------------------------------------------------------------
 
-// The two probes of one block: the effect of its statements on the empty set and on the full set.
-// For a transfer of gen and kill sets, the first is the gen set and the second the complement of
-// the kill set less the gen set.
+// The two probes of one block, the effect of its statements on the empty set and on the full set,
+// and the edge set of the test against null that ends it. For a transfer of gen and kill sets, the
+// first is the gen set and the second the complement of the kill set less the gen set. The edge set
+// starts empty as the first probe does, and the walk adds to it the facts of the tested place right
+// before the test statement (add_test_facts), so at the end it holds the gens of the block and
+// each of those facts that the statements after the read leave (spec/fir.md 11, Tests). A walk
+// that tests no edge reads no edge set.
 struct probes {
     fir_flow.bits none;
     fir_flow.bits all;
+    fir_flow.bits edge;
 }
 
 fn gen(probes mut* pr, u32 fact) void {
     fir_flow.bits_set(&pr->none, fact);
     fir_flow.bits_set(&pr->all, fact);
+    fir_flow.bits_set(&pr->edge, fact);
 }
 
 fn kill(probes mut* pr, u32 fact) void {
     fir_flow.bits_clear(&pr->none, fact);
     fir_flow.bits_clear(&pr->all, fact);
+    fir_flow.bits_clear(&pr->edge, fact);
 }
 
 // Makes `p` and each tracked place below `p` empty.
@@ -432,19 +449,22 @@ fn make_probes(u32 count) probes {
     probes mut pr = probes{};
     pr.none = fir_flow.bits_new(count);
     pr.all = fir_flow.bits_new(count);
+    pr.edge = fir_flow.bits_new(count);
     return pr;
 }
 
 fn free_probes(probes mut* pr) void {
     fir_flow.bits_free(&pr->none);
     fir_flow.bits_free(&pr->all);
+    fir_flow.bits_free(&pr->edge);
 }
 
-// Empties the first probe and fills the second.
+// Empties the first probe and the edge set, and fills the second probe.
 fn reset_probes(probes mut* pr) void {
     u64 mut w = 0;
     while (w < pr->none.words.len) {
         pr->none.words[w] = 0;
+        pr->edge.words[w] = 0;
         w += 1;
     }
     fir_flow.bits_fill(&pr->all);
@@ -581,19 +601,36 @@ fn run_facts(context mut* c, fir.pred_table* pt, fir_flow.dataflow* stale,
     defer fir_flow.bits_free(&at_stale);
     fir_flow.bits mut at_fresh = fir_flow.bits_new(locals);
     defer fir_flow.bits_free(&at_fresh);
+    fir_flow.bits mut@ own edge_gens = make_sets(n, count);
+    u32 mut@ own edge_to = new(u32, cast(n, u64));
+    defer {
+        free_sets(edge_gens);
+        del(edge_gens);
+        del(edge_to);
+    }
     bool mut unused = false;
     u32 mut b = 0;
     while (b < n) {
         reset_probes(&pr);
         fir_flow.bits_copy(&at_stale, &stale->ins[cast(b, u64)]);
         fir_flow.bits_copy(&at_fresh, &fresh->ins[cast(b, u64)]);
+        bool tested = c->tested[cast(b, u64)];
+        place.test* t = &c->tests[cast(b, u64)];
         u32 mut i = 0;
         while (i < fir.block_statement_count(f, b)) {
+            if (tested && i == t->index) {
+                add_test_facts(c, t, &at_stale, &pr);
+            }
             apply_facts(c, fir.block_statement(f, b, i), &at_stale, &at_fresh, &pr, NO_FACT,
                         &unused);
             i += 1;
         }
         split_probes(&pr, gens, kills, b);
+        edge_to[cast(b, u64)] = fir_flow.NO_EDGE;
+        if (tested) {
+            edge_to[cast(b, u64)] = t->target;
+            fir_flow.bits_copy(&edge_gens[cast(b, u64)], &pr.edge);
+        }
         b += 1;
     }
     u64 mut k = 0;
@@ -604,7 +641,42 @@ fn run_facts(context mut* c, fir.pred_table* pt, fir_flow.dataflow* stale,
         k += 1;
     }
     fir_flow.bits_fill(&d->init);
-    fir_flow.dataflow_forward_sets(f, pt, d, gens, kills);
+    fir_flow.dataflow_forward_edges(f, pt, d, gens, kills, edge_to, edge_gens);
+}
+
+// Adds to the edge set of `pr` the fact of each tracked place that is the same as the place of the
+// test `t`, the gen rule of a test against null (spec/fir.md 11, Tests). The walk calls it right
+// before the test statement, so `stale` holds the stale set there, and the place held the zero
+// value at that read on the edge of the test. The statements from the test statement on apply
+// their rules to the edge set as to the probes, so the kill rules after the read apply to it.
+fn add_test_facts(context mut* c, place.test* t, fir_flow.bits* stale, probes mut* pr) void {
+    u64 mark = c->places.steps_len;
+    place.path q = place.trace(&c->places, t->place, stale);
+    u64 mut k = 0;
+    while (q.tracked && k < c->fact_count) {
+        if (place.is_same(&c->places, c->facts[k], q)) {
+            fir_flow.bits_set(&pr->edge, cast(k, u32));
+        }
+        k += 1;
+    }
+    c->places.steps_len = mark;
+}
+
+// Gives `tested` and `tests` their entries: whether each block ends in a test against null, and
+// which one (place.find_test). The facts dataflow and the scratch dataflow read them.
+fn find_tests(context mut* c) void {
+    u32 n = fir.block_count(c->places.f);
+    del(c->tested);
+    c->tested = new(bool, cast(n, u64));
+    del(c->tests);
+    c->tests = new(place.test, cast(n, u64));
+    u32 mut b = 0;
+    while (b < n) {
+        place.test mut t = place.test{};
+        c->tested[cast(b, u64)] = place.find_test(&c->places, b, &t);
+        c->tests[cast(b, u64)] = t;
+        b += 1;
+    }
 }
 
 // ---- the stores that need a proof --------------------------------------------------------------
@@ -850,7 +922,7 @@ fn prove_within(fir.func* f, u64 limit) proof {
     }
     out.leak_work = units * (checked + count_owner_facts(&c)) + sets;
     // a separate count keeps each verdict of part 1 when only the inner owners pass the limit
-    out.inner_work = out.leak_work + types.capped_product(units, count_inner_steps(f, &out));
+    out.inner_work = out.leak_work + types.capped_product(units, count_inner_steps(&c, &out));
     out.over = out.work > limit;
     out.leak_over = out.leak_work > limit;
     out.inner_over = out.inner_work > limit;
@@ -886,6 +958,7 @@ fn run_dataflows(context mut* c, proof mut* out) void {
                                                         transfer_none);
     defer fir_flow.dataflow_free(&fresh);
     run_locals(c, &pt, &fresh, true);
+    find_tests(c);
     fir_flow.dataflow mut scratch = fir_flow.dataflow_new(locals,
                                                           fir_flow.join_kind.join_intersect,
                                                           transfer_none);
@@ -910,7 +983,7 @@ fn run_dataflows(context mut* c, proof mut* out) void {
         collect_exit_facts(c, &stale, out);
     }
     if (!out->inner_over) {
-        collect_inner_facts(c, out);
+        collect_inner_facts(c, &stale, out);
     }
     if (c->fact_count == 0) {
         judge(c, &stale, &fresh, null, &scratch, out);
@@ -918,7 +991,7 @@ fn run_dataflows(context mut* c, proof mut* out) void {
             judge_exits(c, &stale, &fresh, null, &scratch, out);
         }
         if (!out->inner_over) {
-            judge_inners(c, &stale, &fresh, null, out);
+            judge_inners(c, &stale, &fresh, null, &scratch, out);
         }
         return;
     }
@@ -932,7 +1005,7 @@ fn run_dataflows(context mut* c, proof mut* out) void {
         judge_exits(c, &stale, &fresh, &facts, &scratch, out);
     }
     if (!out->inner_over) {
-        judge_inners(c, &stale, &fresh, &facts, out);
+        judge_inners(c, &stale, &fresh, &facts, &scratch, out);
     }
 }
 
@@ -1076,34 +1149,55 @@ fn apply_scratch_store(context* c, fir.statement* s, fir_flow.bits mut* set) voi
 // Runs the scratch dataflow: an intersection from an entry where each scratch local is empty, the
 // state `S = {null}` of spec/ownership-design.md 4.4. A scratch local is no memory, so a call and a
 // store through a pointer leave its bit, and only its own statements change it. Its sets are those
-// of the fresh dataflow, so the second count of the work bounds them.
+// of the fresh dataflow, so the second count of the work bounds them. A block that ends in a test
+// of a whole scratch local gives its bit to the edge of the test: the walk sets the bit in the edge
+// set right before the test statement, and each statement from there on applies to it, so a store
+// into the local after the read clears it (spec/fir.md 11, Tests).
 fn run_scratch(context mut* c, fir.pred_table* pt, fir_flow.dataflow mut* d) void {
     fir.func* f = c->places.f;
     u32 n = fir.block_count(f);
     u32 count = fir.local_count(f);
     fir_flow.bits mut@ own gens = make_sets(n, count);
     fir_flow.bits mut@ own kills = make_sets(n, count);
+    fir_flow.bits mut@ own edge_gens = make_sets(n, count);
+    u32 mut@ own edge_to = new(u32, cast(n, u64));
     defer {
         free_sets(gens);
         free_sets(kills);
+        free_sets(edge_gens);
         del(gens);
         del(kills);
+        del(edge_gens);
+        del(edge_to);
     }
     probes mut pr = make_probes(count);
     defer free_probes(&pr);
     u32 mut b = 0;
     while (b < n) {
         reset_probes(&pr);
+        place.test* t = &c->tests[cast(b, u64)];
+        bool tested = c->tested[cast(b, u64)] && place.is_local(t->place)
+            && place.is_scratch(&c->places, t->place.local);
         u32 mut i = 0;
         while (i < fir.block_statement_count(f, b)) {
             fir.statement* s = fir.block_statement(f, b, i);
+            if (tested && i == t->index) {
+                fir_flow.bits_set(&pr.edge, t->place.local);
+            }
             apply_scratch_reads(c, s, &pr.none);
             apply_scratch_store(c, s, &pr.none);
             apply_scratch_reads(c, s, &pr.all);
             apply_scratch_store(c, s, &pr.all);
+            apply_scratch_reads(c, s, &pr.edge);
+            apply_scratch_store(c, s, &pr.edge);
             i += 1;
         }
         split_probes(&pr, gens, kills, b);
+        edge_to[cast(b, u64)] = fir_flow.NO_EDGE;
+        if (tested) {
+            edge_to[cast(b, u64)] = t->target;
+            fir_flow.bits_copy(&edge_gens[cast(b, u64)], &pr.edge);
+        }
         b += 1;
     }
     u32 mut k = 0;
@@ -1114,7 +1208,7 @@ fn run_scratch(context mut* c, fir.pred_table* pt, fir_flow.dataflow mut* d) voi
         k += 1;
     }
     fir_flow.bits_fill(&d->init);
-    fir_flow.dataflow_forward_sets(f, pt, d, gens, kills);
+    fir_flow.dataflow_forward_edges(f, pt, d, gens, kills, edge_to, edge_gens);
 }
 
 // Whether each store that the check that ends block `b` guards needs a proof and is proved. The
@@ -1486,19 +1580,22 @@ fn find_inners(fir.func* f, proof mut* out) void {
     scan_inners(f, out, true);
 }
 
-// The count of the steps of the paths of the inner owners of the obligations of `out` in `f`: for
-// each inner owner its deref and at most place.depth_to_owners of the type of `*p` steps. Each
-// owner takes a fact, its path takes that many steps of memory, and each walk of the facts reads
-// them, so the inner work counts them as the leak work counts the owner locals. It stops at
-// types.OWNER_CAP.
-fn count_inner_steps(fir.func* f, proof* out) u64 {
+// The count of the steps of the paths of the inner owners of the obligations of `out`: for each
+// inner owner its deref and at most place.depth_to_owners of the type of `*p` steps, and for the
+// fact of the place `p` 1 more than the steps of its path (place.trace_steps). Each owner takes a
+// fact, its path takes that many steps of memory, and each walk of the facts reads them, so the
+// inner work counts them as the leak work counts the owner locals. It stops at types.OWNER_CAP.
+fn count_inner_steps(context* c, proof* out) u64 {
+    fir.func* f = c->places.f;
     u64 mut sum = 0;
     u64 mut k = 0;
     while (k < out->inners.len) {
         inner* e = &out->inners[k];
-        types.node* t = fir.place_type(f, inner_place(f, e))->elem;
+        fir.place p = inner_place(f, e);
+        types.node* t = fir.place_type(f, p)->elem;
         u64 steps = types.capped_product(e->owners, place.depth_to_owners(t) + 1);
         sum = types.capped_sum(sum, steps);
+        sum = types.capped_sum(sum, place.trace_steps(&c->places, p) + 1);
         k += 1;
     }
     return sum;
@@ -1531,11 +1628,16 @@ fn inner_place(fir.func* f, inner* e) fir.place {
 // whole local and so no place through it is tracked (D17.11). A place through a memory local is no
 // tracked place either. No gen rule and no kill rule reads the number of a fact, so a second fact
 // of one place holds what the first holds, and no search for an earlier fact takes the square of
-// the owners. Called within the inner work, which bounds the count of the owners.
-fn collect_inner_facts(context mut* c, proof* out) void {
+// the owners. Each obligation also gives the place `p` that it releases a fact of its own, the
+// path of `p` with the stale set before its statement (collect_site_facts), or NO_FACT when `p` is
+// a whole scratch local, whose bit the scratch dataflow keeps, or no tracked place. Called within
+// the inner work, which bounds the count of the owners and the steps of each `p`.
+fn collect_inner_facts(context mut* c, fir_flow.dataflow* stale, proof* out) void {
     fir.func* f = c->places.f;
     del(c->first_inner);
     c->first_inner = new(u64, out->inners.len + 1);
+    del(c->site_fact);
+    c->site_fact = new(u32, out->inners.len);
     u64 mut total = 0;
     u64 mut k = 0;
     while (k < out->inners.len) {
@@ -1544,6 +1646,7 @@ fn collect_inner_facts(context mut* c, proof* out) void {
         k += 1;
     }
     c->first_inner[out->inners.len] = total;
+    collect_site_facts(c, stale, out);
     del(c->inner_fact);
     c->inner_fact = new(u32, total);
     k = 0;
@@ -1572,13 +1675,61 @@ fn collect_inner_facts(context mut* c, proof* out) void {
     }
 }
 
+// Gives the place `p` that each obligation of `out` releases its fact (collect_inner_facts). The
+// walk of each block that holds an obligation reads the stale set before each statement.
+fn collect_site_facts(context mut* c, fir_flow.dataflow* stale, proof* out) void {
+    fir.func* f = c->places.f;
+    fir_flow.bits mut at_stale = fir_flow.bits_new(fir.local_count(f));
+    defer fir_flow.bits_free(&at_stale);
+    u64 mut k = 0;
+    while (k < out->inners.len) {
+        u32 b = out->inners[k].block;
+        fir_flow.bits_copy(&at_stale, &stale->ins[cast(b, u64)]);
+        u32 mut i = 0;
+        while (k < out->inners.len && out->inners[k].block == b) {
+            inner* site = &out->inners[k];
+            while (i < site->index) {
+                place.apply_stale(&c->places, fir.block_statement(f, b, i), &at_stale);
+                i += 1;
+            }
+            fir.place p = inner_place(f, site);
+            c->site_fact[k] = NO_FACT;
+            if (!place.is_local(p) || !place.is_scratch(&c->places, p.local)) {
+                u64 mark = c->places.steps_len;
+                place.path q = place.trace(&c->places, p, &at_stale);
+                if (q.tracked) {
+                    c->site_fact[k] = push_fact(c, q);
+                } else {
+                    c->places.steps_len = mark;
+                }
+            }
+            k += 1;
+        }
+    }
+}
+
+// Whether the place that the obligation `k` of part 2 releases holds the zero value, at a point of
+// its walk where the first probe of `pr` holds the facts and `scratch` the scratch bits: its fact
+// holds, or for a whole scratch local its bit. A `del` of the zero value frees no object (D17.9),
+// and a `cast` of it gives the zero value, so the obligation holds (D17.20 part 2). With a null
+// `d`, no fact holds.
+fn releases_nothing(context* c, proof* out, u64 k, fir_flow.dataflow* d, probes* pr,
+                    fir_flow.bits* scratch) bool {
+    fir.place p = inner_place(c->places.f, &out->inners[k]);
+    if (place.is_local(p) && place.is_scratch(&c->places, p.local)) {
+        return fir_flow.bits_get(scratch, p.local);
+    }
+    u32 fact = c->site_fact[k];
+    return fact != NO_FACT && d != null && fir_flow.bits_get(&pr->none, fact);
+}
+
 // Writes the verdict of each obligation of part 2 of `out`: the fact of each inner owner holds
-// right before its `del` or its `cast`, after the statements before it in its block. The first
-// owner whose fact does not hold is `first`. The walk of each block that holds an obligation
-// starts from the sets that its entry has in the dataflows, and it gives both probes one set. With
-// a null `d`, no fact holds.
+// right before its `del` or its `cast`, after the statements before it in its block, or the place
+// that it releases holds the zero value there (releases_nothing). The first owner whose fact does
+// not hold is `first`. The walk of each block that holds an obligation starts from the sets that
+// its entry has in the dataflows, and it gives both probes one set. With a null `d`, no fact holds.
 fn judge_inners(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fresh,
-                fir_flow.dataflow* d, proof mut* out) void {
+                fir_flow.dataflow* d, fir_flow.dataflow* scratch, proof mut* out) void {
     fir.func* f = c->places.f;
     u32 locals = fir.local_count(f);
     probes mut pr = make_probes(cast(c->fact_count, u32));
@@ -1587,6 +1738,8 @@ fn judge_inners(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fre
     defer fir_flow.bits_free(&at_stale);
     fir_flow.bits mut at_fresh = fir_flow.bits_new(locals);
     defer fir_flow.bits_free(&at_fresh);
+    fir_flow.bits mut at_scratch = fir_flow.bits_new(locals);
+    defer fir_flow.bits_free(&at_scratch);
     bool mut unused = false;
     u64 mut k = 0;
     while (k < out->inners.len) {
@@ -1597,18 +1750,24 @@ fn judge_inners(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fre
         }
         fir_flow.bits_copy(&at_stale, &stale->ins[cast(b, u64)]);
         fir_flow.bits_copy(&at_fresh, &fresh->ins[cast(b, u64)]);
+        fir_flow.bits_copy(&at_scratch, &scratch->ins[cast(b, u64)]);
         u32 mut i = 0;
         while (k < out->inners.len && out->inners[k].block == b) {
             inner mut* x = &out->inners[k];
             while (i < x->index) {
+                fir.statement* s = fir.block_statement(f, b, i);
                 if (d != null) {
-                    apply_facts(c, fir.block_statement(f, b, i), &at_stale, &at_fresh, &pr,
-                                NO_FACT, &unused);
+                    apply_facts(c, s, &at_stale, &at_fresh, &pr, NO_FACT, &unused);
                 }
+                apply_scratch_reads(c, s, &at_scratch);
+                apply_scratch_store(c, s, &at_scratch);
                 i += 1;
             }
             x->first = x->owners;
             u64 mut m = 0;
+            if (releases_nothing(c, out, k, d, &pr, &at_scratch)) {
+                m = x->owners;
+            }
             while (m < x->owners && x->first == x->owners) {
                 u32 fact = c->inner_fact[c->first_inner[k] + m];
                 if (fact == NO_FACT || d == null || !fir_flow.bits_get(&pr.none, fact)) {
