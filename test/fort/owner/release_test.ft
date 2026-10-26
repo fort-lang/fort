@@ -1,0 +1,187 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| proved ok
+//| unproved ok
+/// Holds the forms of code that free an object with owners against part 2 of the leak rule
+/// (D17.20). The pass proves the forms that src/fort, src/lsp and test/lang use, and it does not
+/// prove the forms next to them, each for the reason that its comment names.
+import check_env;
+import fort.fir;
+import fort.fir_lower;
+import fort.owner.prover;
+import fort.owner.report;
+import lower_env;
+import pass_env;
+import std.str;
+import std.strbuf;
+
+// A `cell` is a link of a chain that a `holder` owns. A `page` has two owners, both spans, which
+// page_free frees through a pointer.
+string[67] FORMS = {
+    "struct cell {",
+    "    i32 mut@ own block;",
+    "    cell mut* own next;",
+    "}",
+    "struct holder {",
+    "    cell mut* own last;",
+    "}",
+    "struct page {",
+    "    i32 mut@ own a;",
+    "    i32 mut@ own b;",
+    "}",
+    "fn page_free(page mut* p) void {",
+    "    del(p->a);",
+    "    del(p->b);",
+    "}",
+    // proved: the loop tests the place in memory, and the store into it comes after the `del`
+    "fn walk_free(holder mut* h) void {",
+    "    while (h->last != null) {",
+    "        cell mut* own c = move(h->last);",
+    "        cell mut* own rest = move(c->next);",
+    "        del(c->block);",
+    "        del(c);",
+    "        h->last = move(rest);",
+    "    }",
+    "}",
+    // proved: the object moves out whole into a local that is not memory before its `del`
+    "fn whole_free(page mut* own p) void {",
+    "    page kept = move(*p);",
+    "    del(p);",
+    "    page mut body = move(kept);",
+    "    page_free(&body);",
+    "}",
+    // not proved: the store into the memory local `body` kills each fact through `p`
+    "fn memory_free(page mut* own p) void {",
+    "    page mut body = move(*p);",
+    "    del(p);",
+    "    page_free(&body);",
+    "}",
+    // not proved: the call kills each fact through `p`
+    "fn call_free(page mut* own p) void {",
+    "    page_free(p);",
+    "    del(p);",
+    "}",
+    // not proved: the store into `h->last` through a pointer kills the fact of `c->next`
+    "fn store_first(holder mut* h) void {",
+    "    while (h->last != null) {",
+    "        cell mut* own c = move(h->last);",
+    "        h->last = move(c->next);",
+    "        del(c->block);",
+    "        del(c);",
+    "    }",
+    "}",
+    // not proved: the loop tests a local, and no rule makes a fact of the test
+    "fn local_walk(cell mut* own head) void {",
+    "    cell mut* own mut rest = move(head);",
+    "    while (rest != null) {",
+    "        cell mut* own c = move(rest);",
+    "        rest = move(c->next);",
+    "        del(c->block);",
+    "        del(c);",
+    "    }",
+    "    del(rest);",
+    "}",
+    // not proved: the first `del`, of a parameter that the test finds null
+    "fn chain_free(cell mut* own c) void {",
+    "    if (c == null) {",
+    "        del(c);",
+    "        return;",
+    "    }",
+    "    cell mut* own rest = move(c->next);",
+    "    del(c->block);",
+    "    del(c);",
+    "    chain_free(move(rest));",
+    "}",
+};
+
+string[2] PROVED = {"walk_free", "whole_free"};
+
+string[5] UNPROVED = {"memory_free", "call_free", "store_first", "local_walk", "chain_free"};
+
+// The lines of each function of UNPROVED, in order, after the file of the function.
+string[10] UNPROVED_LINES = {
+    ":33:5: leak: cannot prove 'p->a' is empty before this del",
+    ":33:5: note: move 'p->a' into a local and del it first",
+    ":38:5: leak: cannot prove 'p->a' is empty before this del",
+    ":38:5: note: move 'p->a' into a local and del it first",
+    ":45:9: leak: cannot prove 'c->next' is empty before this del",
+    ":45:9: note: move 'c->next' into a local and del it first",
+    ":56:5: leak: cannot prove 'rest->block' is empty before this del",
+    ":56:5: note: move 'rest->block' into a local and del it first",
+    ":60:9: leak: cannot prove 'c->block' is empty before this del",
+    ":60:9: note: move 'c->block' into a local and del it first",
+};
+
+// Lowers the function `name` of the checked source of `e` into *out, and holds that the
+// verifier accepts it.
+fn lower(lower_env.env mut* e, string name, fir.func mut* out) void {
+    fir_lower.report mut why = fir_lower.report{};
+    if (!fir_lower.lower_function(&e->c.ck, lower_env.decl(e, name), out, &why)) {
+        panic("release_test: the lowering refuses the function");
+    }
+    pass_env.verified(e, out, "release_test: the verifier refuses the lowering");
+}
+
+// Appends the lines of `--leak-report` for each function of `names` to *got.
+fn report_all(lower_env.env mut* e, string@ names, strbuf.str_buf mut* got) void {
+    u64 mut k = 0;
+    while (k < names.len) {
+        fir.func mut f = fir.func{};
+        lower(e, names[k], &f);
+        prover.proof mut p = prover.prove(&f);
+        report.write_inners(&f, &p, &e->c.m.s, got);
+        prover.free(&p);
+        fir.func_free(&f);
+        k += 1;
+    }
+}
+
+// The pass proves each obligation of part 2 of the forms of PROVED, so the report has no line.
+fn the_pass_proves_the_forms_of_the_migration() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, FORMS[..], true);
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    report_all(&e, PROVED[..], &got);
+    if (strbuf.view(&got) != "") {
+        eprintln(strbuf.view(&got));
+        panic("release_test: the report names a site of a proved form");
+    }
+}
+
+// The report names one site of each form of UNPROVED, at the `del` keyword.
+fn the_pass_does_not_prove_the_forms_next_to_them() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, FORMS[..], true);
+    string file = lower_env.decl(&e, "walk_free")->loc.file;
+    assert(str.ends_with(file, "main.ft"));
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    report_all(&e, UNPROVED[..], &got);
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    u64 mut k = 0;
+    while (k < UNPROVED_LINES.len) {
+        strbuf.append(&want, file);
+        strbuf.append(&want, UNPROVED_LINES[k]);
+        strbuf.push(&want, '\n');
+        k += 1;
+    }
+    if (strbuf.view(&got) != strbuf.view(&want)) {
+        eprintln(strbuf.view(&got), "and not\n", strbuf.view(&want));
+        panic("release_test: the lines of the unproved forms differ");
+    }
+}
+
+fn main() i32 {
+    the_pass_proves_the_forms_of_the_migration();
+    println("proved ok");
+    the_pass_does_not_prove_the_forms_next_to_them();
+    println("unproved ok");
+    return 0;
+}

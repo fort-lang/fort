@@ -48,25 +48,10 @@ OUTSIDE_RE = re.compile(
 # A line of `fort --fir-run --fir-events` for an ownership event of the run.
 EVENT_RE = re.compile(rb"^fort: event [^\n]*\n?", re.MULTILINE)
 # The programs of the corpus that make an event: each with its ownership defect and the lines of
-# its events, in the order of the run.
-EXPECTED_EVENTS = {
-    "programs/expr_eval.ft": (
-        "a `defer del(tree)` frees the root of the tree and no other node",
-        [
-            "fort: event leak in expr_eval.run_one at 320:11",
-            "fort: event leak at exit in expr_eval.main at 345:5",
-        ],
-    ),
-    "programs/json.ft": (
-        "a `defer del(doc)` frees the root value, and `del(strings.next)` the first block of the "
-        "arena",
-        [
-            "fort: event leak in json.inspect at 441:11",
-            "fort: event leak in json.inspect at 439:11",
-            "fort: event leak at exit in json.main at 472:5",
-        ],
-    ),
-}
+# its events, in the order of the run, as
+# `"programs/<name>.ft": ("<defect>", ["fort: event leak in <function> at <line>:<col>"])`.
+# No program of the corpus makes one.
+EXPECTED_EVENTS = {}
 # The longest run of a program under the interpreter in a debug build in the Linux VM was 70 s
 # (run/stdlib/095_rt_round_trip_floats.ft), so a program gets more time than the corpus gives.
 TIMEOUT = 300.0

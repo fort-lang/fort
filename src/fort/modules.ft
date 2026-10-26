@@ -72,12 +72,19 @@ struct module {
     // (module-system.md 10.4). It is in no order that a later pass reads.
     bool outside;
     module_state state;
+    // The module that the set admitted before this one: the set owns its modules through this
+    // chain.
+    module mut* own made_before;
 }
 
 // Stores modules at stable addresses for the order and stack vectors.
 struct owned_modules {
-    module mut* own mut@ own items;
+    module mut* mut@ own items;
     u64 len;
+    // The last module admitted. `del` is shallow, and the leak rule cannot prove that a slot of a
+    // new span of owners is null, so the vector owns its modules through a chain and not through
+    // `items`.
+    module mut* own last;
 }
 
 // Stores the dependency order or the import path being walked.
@@ -101,12 +108,17 @@ struct used_library {
     vec.int_vec ends; // the token after the last token of each section
     vec.int_vec lines; // the line of the `//! module` line of each section
     vec.int_vec offsets; // the byte offset of that line
+    // The library that the set used before this one: the set owns its libraries through this
+    // chain.
+    used_library mut* own made_before;
 }
 
 // Stores the used libraries at stable addresses, in the order the caller added them.
 struct used_libraries {
-    used_library mut* own mut@ own items;
+    used_library mut* mut@ own items;
     u64 len;
+    // The last library used, the owner of the chain, as in `owned_modules`.
+    used_library mut* own last;
 }
 
 /// Holds an import closure, search roots, and loader state.
@@ -153,11 +165,10 @@ fn owned_reserve(owned_modules mut* v) void {
         }
         cap = v->items.len * 2;
     }
-    module mut* own mut@ own bigger = new(module mut* own, cap);
+    module mut* mut@ own bigger = new(module mut*, cap);
     u64 mut i = 0;
     while (i < v->len) {
-        del(bigger[i]);
-        bigger[i] = move(v->items[i]);
+        bigger[i] = v->items[i];
         i += 1;
     }
     del(v->items);
@@ -812,13 +823,13 @@ fn admit(module_set mut* set, string path, string file, string real, string sour
     fresh->source = source;
     fresh->entry = entry;
     fresh->state = module_state.m_loading;
-    scope.init(&fresh->names, scope.scope_kind.s_module, null);
+    fresh->made_before = move(set->modules.last);
+    module mut* m = fresh;
+    set->modules.last = move(fresh);
+    scope.init(&m->names, scope.scope_kind.s_module, null);
     owned_reserve(&set->modules);
-    u64 k = set->modules.len;
-    del(set->modules.items[k]);
-    set->modules.items[k] = move(fresh);
+    set->modules.items[set->modules.len] = m;
     set->modules.len += 1;
-    module mut* m = set->modules.items[set->modules.len - 1];
     strmap.put(&set->by_path, m->path, cast(set->modules.len - 1, i64));
     return m;
 }
@@ -864,11 +875,10 @@ fn used_reserve(used_libraries mut* v) void {
         }
         cap = v->items.len * 2;
     }
-    used_library mut* own mut@ own bigger = new(used_library mut* own, cap);
+    used_library mut* mut@ own bigger = new(used_library mut*, cap);
     u64 mut i = 0;
     while (i < v->len) {
-        del(bigger[i]);
-        bigger[i] = move(v->items[i]);
+        bigger[i] = v->items[i];
         i += 1;
     }
     del(v->items);
@@ -999,15 +1009,16 @@ fn use_library(session.session mut* s, module_set mut* set, string name, string 
         panic("modules.use_library: the session lost a source it was given");
     }
     used_reserve(&set->used);
+    string kept_name = containers.pool_intern(&set->pool, name);
     used_library mut* own fresh = new(used_library);
-    fresh->name = containers.pool_intern(&set->pool, name);
+    fresh->name = kept_name;
     fresh->file = kept_file;
     fresh->source = source;
-    u64 k = set->used.len;
-    del(set->used.items[k]);
-    set->used.items[k] = move(fresh);
+    fresh->made_before = move(set->used.last);
+    used_library mut* lib = fresh;
+    set->used.last = move(fresh);
+    set->used.items[set->used.len] = lib;
     set->used.len += 1;
-    used_library mut* lib = set->used.items[set->used.len - 1];
     if (!lexer.lex_file(s, lib->file, lib->source, &lib->toks)) {
         return false;
     }
@@ -1441,12 +1452,15 @@ fn create() module_set {
 // and usable afterwards. Every string it handed out dies here, the sources
 // excepted: those belong to the session that read them.
 fn free(module_set mut* set) void {
-    u64 mut i = 0;
-    while (i < set->modules.len) {
-        module mut* own m = move(set->modules.items[i]);
-        scope.free(&m->names);
+    // `del` is shallow. So each object moves out whole before its `del`, and its owners are
+    // freed after it.
+    while (set->modules.last != null) {
+        module mut* own m = move(set->modules.last);
+        module kept = move(*m);
         del(m);
-        i += 1;
+        set->modules.last = move(kept.made_before);
+        module mut body = move(kept);
+        scope.free(&body.names);
     }
     del(set->modules.items);
     set->modules.len = 0;
@@ -1463,18 +1477,19 @@ fn free(module_set mut* set) void {
     set->std_dir = "";
     set->cwd = "";
     set->stopped = false;
-    i = 0;
-    while (i < set->used.len) {
-        used_library mut* own lib = move(set->used.items[i]);
-        lexer.tokvec_free(&lib->toks);
-        containers.str_free(&lib->paths);
-        strmap.free(&lib->sections);
-        vec.int_free(&lib->firsts);
-        vec.int_free(&lib->ends);
-        vec.int_free(&lib->lines);
-        vec.int_free(&lib->offsets);
+    while (set->used.last != null) {
+        used_library mut* own lib = move(set->used.last);
+        used_library kept = move(*lib);
         del(lib);
-        i += 1;
+        set->used.last = move(kept.made_before);
+        used_library mut body = move(kept);
+        lexer.tokvec_free(&body.toks);
+        containers.str_free(&body.paths);
+        strmap.free(&body.sections);
+        vec.int_free(&body.firsts);
+        vec.int_free(&body.ends);
+        vec.int_free(&body.lines);
+        vec.int_free(&body.offsets);
     }
     del(set->used.items);
     set->used.len = 0;

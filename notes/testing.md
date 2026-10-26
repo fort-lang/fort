@@ -422,6 +422,17 @@ bullet at a time and without a rewrite.
   early one whatever the period, while a leak moves all of them. Two late samples were the rule
   until T-038 measured a period of **eight** over the emitter's round and read 26512 with nothing
   leaking; the window has to cover the cycle, and sixteen covers every period seen so far.
+  **Take the early sample after the heap reaches its steady size.** On glibc 2.43 (Ubuntu 26.04,
+  the `ubuntu-latest` runner) the break of 400 emitter rounds grew once by 176128 bytes between
+  round 200 and round 300 and then stayed flat to round 1199, with nothing kept, after the AST
+  arena, the type table and the module vectors began to free their objects from the newest. The
+  three chains cause the step together: the old free of any one of them removes it. The early
+  sample at round 200 fell before the step and the probe went red (PR 179).
+  `driver_lifetime_emitter_test.ft` runs 800 rounds since, and a mutant that keeps one module of
+  each round still turns it red. To measure another glibc in the Linux VM, extract its
+  `libc6_<version>_amd64.deb`, link `lib` and `lib64` to `usr/lib` and
+  `usr/lib64`, and pass `--runner "qemu-x86_64-static -L <root>"` to `run_tests.py`. Running its
+  loader directly moves the start of the break and made a probe red on the base tree too.
   On macOS the address of a buffer is no view of the heap: the allocator serves a block from a
   per-CPU magazine, so `heap.ADDRESS_IS_A_VIEW` in `test/fort/support/heap.ft` is false there,
   `fir_env.address_moved` answers 0, and each probe that samples an address asserts on it only

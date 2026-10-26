@@ -836,6 +836,23 @@ came here.
   whose name stands at the location of the FIR `del`, or the `cast` that starts there. To count the
   sites, run `--leak-report` over each entry of the corpora and group the lines by the directory of
   their file; the counts stand in the ticket of the change.
+- **Free an object with owners in a form that part 2 of the leak rule proves** (D17.20,
+  `test/fort/owner/release_test.ft`). No rule makes a fact of a test against `null`, so the pass
+  cannot prove a null that a test finds: a local or a parameter that a loop or an `if` finds null
+  is a site at its `del`, and so is a field that a test finds null. Two forms of a free pass, and
+  `release_test.ft` holds both. First, a loop that frees a chain tests the place in memory
+  (`while (h->last != null)`), moves the link and its tail into locals, frees the link and then
+  stores the tail back (`containers.pool_free`). Second, an object whose owners a call frees moves
+  out whole into a local that is not memory (`module kept = move(*m); del(m);`), and a second local
+  takes it for the call: a store into a memory local kills each fact through `m` (`modules.free`).
+  A vector of objects with owners keeps a chain of owners (`made_before`, `last`) beside a span of
+  views (`ast.arena`, `types.table`, `modules.owned_modules`, `lsp.json.doc`), and the first form
+  frees it: a slot of a new span of owners is null, but no rule proves it, so its `del` before a
+  store is a site. Link a new object into the chain before any call, because a call kills the
+  facts through the new pointer (D17.11). A chain frees its objects from the newest. With the
+  chains of the AST arena, the type table and the module vectors together, a heap probe of
+  repeated runs reaches its steady size later: take its early sample after that
+  (`driver_lifetime_emitter_test.ft`, `notes/testing.md`).
 - **The FIR interpreter runs the FIR of a closure before the emptiness pass**
   (`spec/ownership-design.md` 3, `src/fort/fir/interpreter.ft`). It is the reference semantics of
   the ownership checks, and `--fir-run` and the pass `run` of `--fir-test` start it

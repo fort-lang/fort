@@ -287,9 +287,13 @@ fn free(machine mut* it) void {
     for (u64 mut i = 0; i < it->routines.len; i++) {
         routine mut* r = &it->routines.items[i];
         if (r->lowered != null) {
-            fir.func_free(r->lowered);
+            // `del` is shallow: the function moves out whole, and its vectors go after it.
+            fir.func mut* own lowered = move(r->lowered);
+            fir.func kept = move(*lowered);
+            del(lowered);
+            fir.func mut body = move(kept);
+            fir.func_free(&body);
         }
-        del(r->lowered);
         del(r->offsets);
     }
     del(it->routines.items);
@@ -762,7 +766,12 @@ fn make_routine(machine mut* it, ast.sym* s) routine {
             lowered = move(made);
         } else {
             refused = true;
+            // The refused lowering freed the vectors of `made`. The moves prove them empty
+            // before the shallow `del`.
+            fir.func kept = move(*made);
             del(made);
+            fir.func mut body = move(kept);
+            fir.func_free(&body);
         }
     }
     u64 mut count = 0;

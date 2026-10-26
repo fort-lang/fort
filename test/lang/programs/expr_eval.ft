@@ -171,6 +171,21 @@ fn branch(kind op, expr mut* own l, expr mut* own r) expr mut* own {
     return move(e);
 }
 
+// Frees a tree. `del` is shallow, so the children go after their parent.
+fn free_tree(expr mut* own e) void {
+    if (e == null) {
+        // The leak rule cannot prove that a tested pointer is null, so it
+        // reports this `del`, which frees nothing.
+        del(e);
+        return;
+    }
+    expr mut* own left = move(e->left);
+    expr mut* own right = move(e->right);
+    del(e);
+    free_tree(move(left));
+    free_tree(move(right));
+}
+
 fn parse_atom(parser mut* p) expr mut* own {
     token t = peek(p);
     if (t.k == kind.num) {
@@ -317,7 +332,7 @@ fn run_one(string src, env* vars) void {
     parser mut p = parser{.toks = lex_all(src)};
     defer del(p.toks);
     expr mut* own tree = parse_sum(&p);
-    defer del(tree);
+    defer free_tree(move(tree));
     if (!p.failed && peek(&p).k != kind.eof) {
         fail(&p, "trailing input");
     }

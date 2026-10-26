@@ -86,6 +86,8 @@ struct node {
     // `void mut*`. A cast adds no `mut`.
     void mut* decl;
     layout mut* own layout; // k_struct; null otherwise
+    // The node that the table made before this one: the table owns its nodes through this chain.
+    node mut* own made_before;
 }
 
 // The fields that decide whether an interned node already exists.
@@ -103,8 +105,11 @@ struct key {
 /// Stores interned types for one analysis. A zero value is ready for use.
 struct table {
     // Nodes in creation order. `count` is the used slot count.
-    node mut* own mut@ own nodes;
+    node mut* mut@ own nodes;
     u64 count;
+    // The last node made. `del` is shallow, and the leak rule cannot prove that a slot of a new
+    // span of owners is null, so the table owns its nodes through a chain and not through `nodes`.
+    node mut* own last;
     node* void_type;
     node* null_type;
     node* error_type;
@@ -125,13 +130,13 @@ struct table {
 
 // Clears the table.
 fn type_table_free(table mut* tt) void {
-    u64 mut i = 0;
-    while (i < tt->count) {
-        node mut* own t = move(tt->nodes[i]);
+    while (tt->last != null) {
+        node mut* own t = move(tt->last);
+        node mut* own before = move(t->made_before);
         del(t->params);
         del(t->layout);
         del(t);
-        i += 1;
+        tt->last = move(before);
     }
     del(tt->nodes);
     tt->count = 0;
@@ -161,11 +166,10 @@ fn reserve(table mut* tt) void {
         }
         cap = tt->nodes.len * 2;
     }
-    node mut* own mut@ own bigger = new(node mut* own, cap);
+    node mut* mut@ own bigger = new(node mut*, cap);
     u64 mut i = 0;
     while (i < tt->count) {
-        del(bigger[i]);
-        bigger[i] = move(tt->nodes[i]);
+        bigger[i] = tt->nodes[i];
         i += 1;
     }
     del(tt->nodes);
@@ -176,12 +180,13 @@ fn reserve(table mut* tt) void {
 fn node_new(table mut* tt, type_kind kind) node mut* {
     node mut* own fresh = new(node);
     fresh->kind = kind;
+    fresh->made_before = move(tt->last);
+    node mut* made = fresh;
+    tt->last = move(fresh);
     reserve(tt);
-    u64 k = tt->count;
-    del(tt->nodes[k]);
-    tt->nodes[k] = move(fresh);
+    tt->nodes[tt->count] = made;
     tt->count += 1;
-    return tt->nodes[tt->count - 1];
+    return made;
 }
 
 // Structural equality of an interned node and a key by child identity:

@@ -133,6 +133,8 @@ struct node {
     /// Pass annotations. A bit in `ann` defines the meaning of `aux`.
     u32 ann;
     u64 aux;
+    // The node that the arena made before this one: the arena owns its nodes through this chain.
+    node mut* own made_before;
 }
 
 // The variable-length children of one node. `items.len` is the capacity.
@@ -140,12 +142,6 @@ struct node {
 struct node_vec {
     node mut* mut@ own items;
     u64 len;
-}
-
-// Clears one child list.
-fn list_free(node_vec mut* v) void {
-    del(v->items);
-    v->len = 0;
 }
 
 // Ensures room for one more child, growing to the largest of LIST_MIN_CAP and
@@ -241,8 +237,11 @@ fn sym_kind_name(sym_kind kind) string {
 
 /// Stores the nodes of one syntax tree. `arena{}` is an empty arena.
 struct arena {
-    node mut* own mut@ own nodes;
+    node mut* mut@ own nodes; // in creation order
     u64 count;
+    // The last node made. `del` is shallow, and the leak rule cannot prove that a slot of a new
+    // span of owners is null, so the arena owns its nodes through a chain and not through `nodes`.
+    node mut* own last;
 }
 
 // `arena{}` is an empty arena, ready for use. An arena needs no init function: one that wrote
@@ -250,12 +249,12 @@ struct arena {
 
 /// Removes all nodes and makes the arena empty.
 fn ast_arena_free(arena mut* ar) void {
-    u64 mut i = 0;
-    while (i < ar->count) {
-        node mut* own n = move(ar->nodes[i]);
-        list_free(&n->list);
+    while (ar->last != null) {
+        node mut* own n = move(ar->last);
+        node mut* own before = move(n->made_before);
+        del(n->list.items);
         del(n);
-        i += 1;
+        ar->last = move(before);
     }
     del(ar->nodes);
     ar->count = 0;
@@ -278,11 +277,10 @@ fn arena_reserve(arena mut* ar) void {
         }
         cap = ar->nodes.len * 2;
     }
-    node mut* own mut@ own bigger = new(node mut* own, cap);
+    node mut* mut@ own bigger = new(node mut*, cap);
     u64 mut i = 0;
     while (i < ar->count) {
-        del(bigger[i]);
-        bigger[i] = move(ar->nodes[i]);
+        bigger[i] = ar->nodes[i];
         i += 1;
     }
     del(ar->nodes);
@@ -294,12 +292,13 @@ fn ast_new(arena mut* ar, ast_kind kind, diag.loc at_loc) node mut* {
     node mut* own fresh = new(node);
     fresh->kind = kind;
     fresh->loc = at_loc;
+    fresh->made_before = move(ar->last);
+    node mut* made = fresh;
+    ar->last = move(fresh);
     arena_reserve(ar);
-    u64 k = ar->count;
-    del(ar->nodes[k]);
-    ar->nodes[k] = move(fresh);
+    ar->nodes[ar->count] = made;
     ar->count += 1;
-    return ar->nodes[ar->count - 1];
+    return made;
 }
 
 // ---- children ------------------------------------------------------------------
