@@ -448,10 +448,12 @@ exactly two things for ownership, and it checks two more at compile time:
   is always an error. An `own` field through a parameter needs
   `del` or `move` first, because its entry value is unknown. `del` and `move` leave zero behind,
   so for locals `v`, `a` and `b`, `del(v.data); v.data = new(...)`, `a = move(b)` after
-  `move(a)`, and a store into a local that holds `{}` or `null` all pass. The slot of an owning
-  local is zeroed once on entry, so a declaration in a loop whose body does not `del` or `move`
-  the local is an error: the back edge brings a live value to the declaration. Assignments of
-  owning aggregates are not checked field by field.
+  `move(a)`, and a store into a local that holds `{}` or `null` all pass. A test against `null`
+  makes the place that it tests empty on the edge where it finds `null`, until a kill rule of
+  D17.11 applies, so `if (l->head == null) { l->head = new(node); }` passes (gen rule 6). The slot
+  of an owning local is zeroed once on entry, so a declaration in a loop whose body does not `del`
+  or `move` the local is an error: the back edge brings a live value to the declaration.
+  Assignments of owning aggregates are not checked field by field.
 - **The leak rule (D17.20).** A named local of `own` reference type at the end of its scope, and
   such a parameter or temporary at a `return`, must hold the zero value. The compiler proves it
   with the facts of the overwrite check. Otherwise the exit is a compile error, because the
@@ -464,13 +466,16 @@ exactly two things for ownership, and it checks two more at compile time:
   `T* own` to another pointee type needs the same proof, and its error ends `before this cast`.
   `<place>` is source text, such as `p->items`, and never names a FIR local. The owners of `*p`
   are tracked only through a pointer local that is not memory (D17.11), so such a `del` or `cast`
-  of any other operand is an error. `del` fixes a leak at an exit, and it does nothing on an
-  empty owner (D17.9). For a `del(p)` whose `*p` can hold live owners, the fix moves each inner
-  owner into a local first. D17.20 does not check an owning aggregate local at an exit. A `del`
-  or a `cast` of a span whose elements hold owners needs no proof for those owners, but a span
-  local of `own` type still needs the zero value at an exit. An exit that the compiler cannot
-  prove is a compile error. The compiler first reports each `del` and each `cast` that it cannot
-  prove and accepts the program; a later change makes each such site a compile error (D17.20).
+  of any other operand is an error, unless the compiler proves `p` itself empty: a `del` or such a
+  `cast` of the zero value frees nothing, so it needs no proof of the owners of `*p`, as after
+  `move(p)`, after `del(p)` and in the arm where a test finds `p` null (D17.20). `del` fixes a leak
+  at an exit, and it does nothing on an empty owner (D17.9). For a `del(p)` whose `*p` can hold
+  live owners, the fix moves each inner owner into a local first. D17.20 does not check an owning
+  aggregate local at an exit. A `del` or a `cast` of a span whose elements hold owners needs no
+  proof for those owners, but a span local of `own` type still needs the zero value at an exit. An
+  exit that the compiler cannot prove is a compile error. The compiler first reports each `del` and
+  each `cast` that it cannot prove and accepts the program; a later change makes each such site a
+  compile error (D17.20).
 
 ```fort
 u8 mut@ own mut buf = new(u8, 4);

@@ -3,9 +3,12 @@
 //! stdout:
 //| subtract ok
 //| sets ok
-/// Checks bits_subtract and dataflow_forward_sets. The transfer that a gen set and a kill set give
-/// must reach the fixpoint that the same transfer reaches as a function: the same in-set and
-/// out-set at each block, after the same count of transfers, under each join.
+//| edges ok
+/// Checks bits_subtract, dataflow_forward_sets and dataflow_forward_edges. The transfer that a gen
+/// set and a kill set give must reach the fixpoint that the same transfer reaches as a function:
+/// the same in-set and out-set at each block, after the same count of transfers, under each join.
+/// An edge set must give the fixpoint that a new block on that edge gives, whose gen set is the
+/// edge set.
 import fort.fir;
 import fir_env;
 import fort.fir_flow;
@@ -276,11 +279,286 @@ fn a_second_run_with_sets_replaces_the_result() void {
     }
 }
 
+// ---- the edge sets -------------------------------------------------------------------------
+
+// The gen and the kill sets of scope_sets for each block of `f`, and empty sets for the blocks of
+// `f` past `blocks`, which split an edge.
+fn sets_of(fir.func* f, u32 count, fir_flow.bits mut@ gens, fir_flow.bits mut@ kills) void {
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        gens[cast(b, u64)] = fir_flow.bits_new(count);
+        kills[cast(b, u64)] = fir_flow.bits_new(count);
+        scope_sets(f, b, &gens[cast(b, u64)], &kills[cast(b, u64)]);
+        b += 1;
+    }
+}
+
+fn free_sets(fir_flow.bits mut@ sets) void {
+    u64 mut b = 0;
+    while (b < sets.len) {
+        fir_flow.bits_free(&sets[b]);
+        b += 1;
+    }
+}
+
+// One edge set: block `from` adds `numbers` on each edge to block `to`.
+struct edge {
+    u32 from;
+    u32 to;
+    u32@ numbers;
+}
+
+// Runs the dataflow of `join` over `f` with the edge sets `es`, and over `split`, the same blocks
+// with a new block on each edge of `es`, whose gen set holds the numbers of the edge. The new
+// block of edge `k` is block `fir.block_count(f) + k` of `split`. Holds that each block of `f`
+// has the same in-set and out-set in both runs, and returns the steps of the first run.
+fn agree_edges(fir.func* f, fir.func* split, u32 count, edge@ es, fir_flow.join_kind join)
+    u64 {
+    u32 n = fir.block_count(f);
+    u32 m = fir.block_count(split);
+    assert(cast(m, u64) == cast(n, u64) + es.len);
+    fir.pred_table mut pt = fir.func_predecessors(f);
+    defer fir.pred_table_free(&pt);
+    fir.pred_table mut spt = fir.func_predecessors(split);
+    defer fir.pred_table_free(&spt);
+    fir_flow.dataflow mut by_edges = fir_flow.dataflow_new(count, join, refused);
+    defer fir_flow.dataflow_free(&by_edges);
+    fir_flow.dataflow mut by_blocks = fir_flow.dataflow_new(count, join, refused);
+    defer fir_flow.dataflow_free(&by_blocks);
+    if (join == fir_flow.join_kind.join_intersect) {
+        fir_flow.bits_fill(&by_edges.init);
+        fir_flow.bits_fill(&by_blocks.init);
+    }
+    fir_flow.bits mut@ own gens = new(fir_flow.bits, cast(n, u64));
+    fir_flow.bits mut@ own kills = new(fir_flow.bits, cast(n, u64));
+    fir_flow.bits mut@ own edge_gens = new(fir_flow.bits, cast(n, u64));
+    u32 mut@ own edge_to = new(u32, cast(n, u64));
+    fir_flow.bits mut@ own split_gens = new(fir_flow.bits, cast(m, u64));
+    fir_flow.bits mut@ own split_kills = new(fir_flow.bits, cast(m, u64));
+    defer {
+        free_sets(gens);
+        free_sets(kills);
+        free_sets(edge_gens);
+        free_sets(split_gens);
+        free_sets(split_kills);
+        del(gens);
+        del(kills);
+        del(edge_gens);
+        del(edge_to);
+        del(split_gens);
+        del(split_kills);
+    }
+    sets_of(f, count, gens, kills);
+    sets_of(split, count, split_gens, split_kills);
+    u32 mut b = 0;
+    while (b < n) {
+        edge_gens[cast(b, u64)] = fir_flow.bits_new(count);
+        edge_to[cast(b, u64)] = fir_flow.NO_EDGE;
+        b += 1;
+    }
+    u64 mut k = 0;
+    while (k < es.len) {
+        u64 at = cast(es[k].from, u64);
+        edge_to[at] = es[k].to;
+        u64 mut i = 0;
+        while (i < es[k].numbers.len) {
+            fir_flow.bits_set(&edge_gens[at], es[k].numbers[i]);
+            fir_flow.bits_set(&split_gens[cast(n, u64) + k], es[k].numbers[i]);
+            i += 1;
+        }
+        k += 1;
+    }
+    fir_flow.dataflow_forward_edges(f, &pt, &by_edges, gens, kills, edge_to, edge_gens);
+    fir_flow.dataflow_forward_sets(split, &spt, &by_blocks, split_gens, split_kills);
+    b = 0;
+    while (b < n) {
+        u64 at = cast(b, u64);
+        assert(fir_flow.bits_equal(&by_edges.ins[at], &by_blocks.ins[at]));
+        assert(fir_flow.bits_equal(&by_edges.outs[at], &by_blocks.outs[at]));
+        b += 1;
+    }
+    return by_edges.steps;
+}
+
+// Runs agree_edges under both joins.
+fn agree_edges_all(fir.func* f, fir.func* split, u32 count, edge@ es) void {
+    assert(agree_edges(f, split, count, es, fir_flow.join_kind.join_intersect) > 0);
+    assert(agree_edges(f, split, count, es, fir_flow.join_kind.join_union) > 0);
+}
+
+// Parses two texts of `f` into the two functions of one module, `f` and `g`. The function stays
+// valid until the next call.
+fn parse_pair(env mut* e, string@ blocks, string@ split) void {
+    fir.module_free(&e->m);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string[2] names = {"f", "g"};
+    u64 mut n = 0;
+    while (n < 2) {
+        strbuf.append(&b, "fn main.");
+        strbuf.append(&b, names[n]);
+        strbuf.append(&b, "(_1 (c): bool) -> i32 {\n");
+        strbuf.append(&b, LETS);
+        strbuf.push(&b, '\n');
+        string@ mut lines = blocks;
+        if (n == 1) {
+            lines = split;
+        }
+        u64 mut k = 0;
+        while (k < lines.len) {
+            strbuf.append(&b, lines[k]);
+            strbuf.push(&b, '\n');
+            k += 1;
+        }
+        strbuf.append(&b, "}\n");
+        n += 1;
+    }
+    u64 before = fir_env.errors(&e->fx);
+    e->m = fir_parse.parse_module(&e->fx.c.m.s, "t.fir", strbuf.view(&b), fir_env.prelude(&e->fx));
+    if (fir_env.errors(&e->fx) != before) {
+        eprintln(strbuf.view(&b));
+        panic("fir_flow_sets_test.parse_pair: a text does not parse");
+    }
+}
+
+// The in-set of block `b` of the last run of `d` holds `number`.
+fn holds(fir_flow.dataflow* d, u32 b, u32 number) bool {
+    return fir_flow.bits_get(&d->ins[cast(b, u64)], number);
+}
+
+fn an_edge_set_holds_on_its_edge_as_a_block_on_that_edge_does() void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    u32[1] three = {3};
+    u32[2] two_four = {2, 4};
+    u32@ nothing = {};
+    // a diamond: the edge set of bb0 holds on the edge into bb1 and not on the edge into bb2
+    string[4] diamond = {
+        "bb0: { live(_2); switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
+        "bb1: { dead(_2); goto bb3; }",
+        "bb2: { live(_4); goto bb3; }",
+        "bb3: { unreachable; }",
+    };
+    string[5] diamond_split = {
+        "bb0: { live(_2); switch(copy _1) -> [true: bb4, otherwise: bb2]; }",
+        "bb1: { dead(_2); goto bb3; }",
+        "bb2: { live(_4); goto bb3; }",
+        "bb3: { unreachable; }",
+        "bb4: { goto bb1; }",
+    };
+    parse_pair(&e, diamond[..], diamond_split[..]);
+    fir.func* mut f = fir.module_function_at(&e.m, 0);
+    fir.func* mut g = fir.module_function_at(&e.m, 1);
+    edge[1] into_then = {edge{0, 1, three[..]}};
+    agree_edges_all(f, g, 5, into_then[..]);
+    // the same edge set on the edge into bb2, the `otherwise` edge
+    string[5] other_split = {
+        "bb0: { live(_2); switch(copy _1) -> [true: bb1, otherwise: bb4]; }",
+        "bb1: { dead(_2); goto bb3; }",
+        "bb2: { live(_4); goto bb3; }",
+        "bb3: { unreachable; }",
+        "bb4: { goto bb2; }",
+    };
+    parse_pair(&e, diamond[..], other_split[..]);
+    f = fir.module_function_at(&e.m, 0);
+    g = fir.module_function_at(&e.m, 1);
+    edge[1] into_else = {edge{0, 2, three[..]}};
+    agree_edges_all(f, g, 5, into_else[..]);
+    // the in-sets by hand: the number holds in bb2 and not in bb1, and the intersection at bb3
+    // drops it, because the edge from bb1 lacks it
+    fir.pred_table mut pt = fir.func_predecessors(f);
+    defer fir.pred_table_free(&pt);
+    fir_flow.dataflow mut d = fir_flow.dataflow_new(5, fir_flow.join_kind.join_intersect, refused);
+    defer fir_flow.dataflow_free(&d);
+    fir_flow.bits_fill(&d.init);
+    fir_flow.bits mut@ own gens = new(fir_flow.bits, 4);
+    fir_flow.bits mut@ own kills = new(fir_flow.bits, 4);
+    fir_flow.bits mut@ own edge_gens = new(fir_flow.bits, 4);
+    u32[4] mut edge_to = {fir_flow.NO_EDGE, fir_flow.NO_EDGE, fir_flow.NO_EDGE, fir_flow.NO_EDGE};
+    sets_of(f, 5, gens, kills);
+    u64 mut k = 0;
+    while (k < 4) {
+        edge_gens[k] = fir_flow.bits_new(5);
+        k += 1;
+    }
+    edge_to[0] = 2;
+    fir_flow.bits_set(&edge_gens[0], 3);
+    fir_flow.dataflow_forward_edges(f, &pt, &d, gens, kills, edge_to[..], edge_gens);
+    assert(holds(&d, 2, 3) && !holds(&d, 1, 3) && !holds(&d, 3, 3));
+    assert(holds(&d, 1, 2) && !holds(&d, 3, 2) && !holds(&d, 3, 4));
+    // an edge set that names a block that no terminator of its block names changes nothing
+    edge_to[0] = 3;
+    fir_flow.dataflow_forward_edges(f, &pt, &d, gens, kills, edge_to[..], edge_gens);
+    assert(!holds(&d, 1, 3) && !holds(&d, 2, 3) && !holds(&d, 3, 3));
+    fir_flow.dataflow mut plain = fir_flow.dataflow_new(5, fir_flow.join_kind.join_intersect,
+                                                        refused);
+    defer fir_flow.dataflow_free(&plain);
+    fir_flow.bits_fill(&plain.init);
+    fir_flow.dataflow_forward_sets(f, &pt, &plain, gens, kills);
+    u64 mut b = 0;
+    while (b < 4) {
+        assert(fir_flow.bits_equal(&d.ins[b], &plain.ins[b]));
+        assert(fir_flow.bits_equal(&d.outs[b], &plain.outs[b]));
+        b += 1;
+    }
+    assert(d.steps == plain.steps);
+    free_sets(gens);
+    free_sets(kills);
+    free_sets(edge_gens);
+    del(gens);
+    del(kills);
+    del(edge_gens);
+    // a loop: the edge set of the head holds on the edge out of the loop, and a second edge set
+    // holds on the back edge of the body
+    string[4] loop = {
+        "bb0: { live(_2); live(_3); goto bb1; }",
+        "bb1: { switch(copy _1) -> [true: bb2, otherwise: bb3]; }",
+        "bb2: { dead(_2); dead(_3); goto bb1; }",
+        "bb3: { unreachable; }",
+    };
+    string[6] loop_split = {
+        "bb0: { live(_2); live(_3); goto bb1; }",
+        "bb1: { switch(copy _1) -> [true: bb2, otherwise: bb4]; }",
+        "bb2: { dead(_2); dead(_3); goto bb5; }",
+        "bb3: { unreachable; }",
+        "bb4: { goto bb3; }",
+        "bb5: { goto bb1; }",
+    };
+    parse_pair(&e, loop[..], loop_split[..]);
+    f = fir.module_function_at(&e.m, 0);
+    g = fir.module_function_at(&e.m, 1);
+    edge[2] around = {edge{1, 3, two_four[..]}, edge{2, 1, three[..]}};
+    agree_edges_all(f, g, 5, around[..]);
+    // a block that loops to itself, with its edge set on that edge, and an empty edge set
+    string[4] apart = {
+        "bb0: { live(_2); goto bb2; }",
+        "bb1: { dead(_2); live(_3); goto bb2; }",
+        "bb2: { dead(_2); switch(copy _1) -> [true: bb2, otherwise: bb3]; }",
+        "bb3: { live(_2); unreachable; }",
+    };
+    string[6] apart_split = {
+        "bb0: { live(_2); goto bb4; }",
+        "bb1: { dead(_2); live(_3); goto bb2; }",
+        "bb2: { dead(_2); switch(copy _1) -> [true: bb5, otherwise: bb3]; }",
+        "bb3: { live(_2); unreachable; }",
+        "bb4: { goto bb2; }",
+        "bb5: { goto bb2; }",
+    };
+    parse_pair(&e, apart[..], apart_split[..]);
+    f = fir.module_function_at(&e.m, 0);
+    g = fir.module_function_at(&e.m, 1);
+    edge[2] looped = {edge{0, 2, nothing}, edge{2, 2, two_four[..]}};
+    agree_edges_all(f, g, 5, looped[..]);
+}
+
 fn main() i32 {
     subtract_removes_the_numbers_of_the_source_word_by_word();
     println("subtract ok");
     the_set_transfer_reaches_the_fixpoint_of_the_function_transfer();
     a_second_run_with_sets_replaces_the_result();
     println("sets ok");
+    an_edge_set_holds_on_its_edge_as_a_block_on_that_edge_does();
+    println("edges ok");
     return 0;
 }

@@ -1,7 +1,7 @@
 /// Reads the places of one verified FIR function for the ownership analysis (spec/fir.md 11,
 /// spec/ownership-design.md 4.3): the tracked places as paths with keys, the memory locals, the
-/// index temporaries and their keys, the held addresses, and the stale and fresh sets of the
-/// locals.
+/// index temporaries and their keys, the held addresses, the stale and fresh sets of the locals,
+/// and the tests against null that end a block.
 //
 // A path is a place with the key of each index in place of its index local. owner.prover keeps
 // one fact for each path that it proves. Two forward dataflows of fir_flow read the transfer of
@@ -21,6 +21,9 @@ import fort.types;
 
 // The end of a chain of index temporaries.
 u32 NO_LOCAL = 4294967295;
+
+// No statement of a block (last_store).
+u32 NO_STATEMENT = 4294967295;
 
 // ---- paths -------------------------------------------------------------------------------------
 
@@ -642,6 +645,19 @@ fn trace(survey mut* c, fir.place p, fir_flow.bits* stale) path {
     return out;
 }
 
+/// The most steps that the path of the place `p` takes (trace): its projections, or for `(*_a)` of
+/// a held address the projections of the place of its `addr mut` when they are more.
+fn trace_steps(survey* c, fir.place p) u64 {
+    u64 mut steps = cast(p.proj_len, u64);
+    if (is_held_place(c, p)) {
+        u64 held = cast(store_of(c, p.local)->value.place.proj_len, u64);
+        if (held > steps) {
+            steps = held;
+        }
+    }
+    return steps;
+}
+
 // Whether two keys name one element: both are keys, of one kind, of one local or one value.
 fn is_same_key(key a, key b) bool {
     if (a.kind == key_kind.kk_none || a.kind != b.kind) {
@@ -822,6 +838,131 @@ fn has_key(survey* c, path q, u32 k) bool {
 fn is_through_fresh(survey* c, path q, fir_flow.bits* fresh) bool {
     return fresh != null && q.base == fir.base_kind.bk_local && is_fresh(c, fresh, q.local)
         && is_through(c, q, q.local);
+}
+
+// ---- the tests against null --------------------------------------------------------------------
+
+/// A test against null that ends a block (spec/fir.md 11, Tests): statement `index` of the block
+/// reads `place`, a place of a pointer type, and compares it with the zero value. A run takes the
+/// edge into block `target` only when `place` held the zero value at that read.
+struct test {
+    u32 index;
+    fir.place place;
+    u32 target;
+}
+
+// Whether the operand `o` is a `copy` of a flag: a whole temporary of type `bool` that is no
+// memory. No pointer names its storage and no call writes it, and rule V5 lets no `move` and no
+// `del` take it, so only a store into it changes its value. A named local or a parameter is no
+// flag: gen rule 6 of D17.11 names a branch on the test, and the lowering keeps the value of a
+// test in a temporary (spec/fir.md 9.4).
+fn is_flag(survey* c, fir.operand o) bool {
+    if (o.kind != fir.operand_kind.ok_copy || !is_local(o.place)) {
+        return false;
+    }
+    fir.local* l = fir.local_at(c->f, o.place.local);
+    return l->kind == fir.local_kind.lk_temp && !c->locals[cast(o.place.local, u64)].memory
+        && types.is_prim(l->ty, prim.prim_kind.prim_bool);
+}
+
+// The last statement of block `b` before statement `end` that stores into the local `n`, or
+// NO_STATEMENT when no such statement stands there.
+fn last_store(fir.func* f, u32 b, u32 end, u32 n) u32 {
+    u32 mut i = end;
+    while (i > 0) {
+        i -= 1;
+        fir.statement* s = fir.block_statement(f, b, i);
+        if (s->kind == fir.stmt_kind.st_assign && s->place.base == fir.base_kind.bk_local
+            && s->place.local == n) {
+            return i;
+        }
+    }
+    return NO_STATEMENT;
+}
+
+// Whether `o` is the zero value of its type: `const null T` or `const zero T`.
+fn is_zero_constant(fir.operand o) bool {
+    return o.kind == fir.operand_kind.ok_const
+        && (o.value.kind == fir.const_kind.ck_null || o.value.kind == fir.const_kind.ck_zero);
+}
+
+// Whether the rvalue `r` compares a place of a pointer type with the zero value: `eq` or `ne` of
+// a `copy` of the place and a zero constant, in either order. The place goes into *out. A null
+// pointer is the zero value of its type, so `eq` is true exactly when the place holds it.
+fn compared_place(fir.func* f, fir.rvalue r, fir.place mut* out) bool {
+    bool compare = r.kind == fir.rvalue_kind.rv_eq || r.kind == fir.rvalue_kind.rv_ne;
+    if (!compare || r.ops_len != 2) {
+        return false;
+    }
+    fir.operand a = fir.rvalue_operand(f, r, 0);
+    fir.operand b = fir.rvalue_operand(f, r, 1);
+    if (a.kind == fir.operand_kind.ok_copy && is_zero_constant(b)) {
+        *out = a.place;
+    } else if (b.kind == fir.operand_kind.ok_copy && is_zero_constant(a)) {
+        *out = b.place;
+    } else {
+        return false;
+    }
+    return types.is_ptr_like(fir.place_type(f, *out));
+}
+
+// The block that the `switch` `t` on a `bool` goes to for the value `v`: the target of the arm of
+// `v`, or `otherwise` when no arm has `v` (spec/fir.md 8). Rule V4 gives each arm of a `bool` the
+// value `true` or `false` and no two arms one value, so the first arm of `v` is its one arm.
+fn bool_target(fir.func* f, fir.terminator* t, bool v) u32 {
+    u32 mut i = 0;
+    while (i < t->arms_len) {
+        fir.arm a = fir.term_arm(f, t, i);
+        if (a.value.kind == consts.cval_kind.cv_bool && (a.value.mag != 0) == v) {
+            return a.target;
+        }
+        i += 1;
+    }
+    return t->otherwise;
+}
+
+/// Whether block `b` ends in a test against null, and which one in *out (spec/fir.md 11, Tests).
+/// The block ends in `switch(copy _c)` on a flag `_c`, a temporary (is_flag). The last statement of
+/// the block that stores into `_c` gives its value at the `switch`: an `eq` or an `ne` of a place
+/// with the zero value (compared_place), or a `copy` or a `not` of another flag, whose last store
+/// before that statement gives its value in turn. The edge goes to the block of the value that `_c`
+/// holds when the place held the zero value, and the other value must go to another block. The walk
+/// reads each statement of the block at most once.
+fn find_test(survey* c, u32 b, test mut* out) bool {
+    fir.func* f = c->f;
+    fir.terminator* t = &fir.block_at(f, b)->term;
+    if (t->kind != fir.term_kind.tk_switch || !is_flag(c, t->cond)) {
+        return false;
+    }
+    u32 mut flag = t->cond.place.local;
+    u32 mut end = fir.block_statement_count(f, b);
+    bool mut flipped = false;
+    while (true) {
+        u32 i = last_store(f, b, end, flag);
+        if (i == NO_STATEMENT || fir.block_statement(f, b, i)->place.proj_len != 0) {
+            return false;
+        }
+        fir.rvalue r = fir.block_statement(f, b, i)->value;
+        fir.place mut p = fir.place{};
+        if (compared_place(f, r, &p)) {
+            bool null_value = (r.kind == fir.rvalue_kind.rv_eq) != flipped;
+            u32 target = bool_target(f, t, null_value);
+            if (target == bool_target(f, t, !null_value)) {
+                return false;
+            }
+            *out = test{i, p, target};
+            return true;
+        }
+        bool chained = r.kind == fir.rvalue_kind.rv_use || r.kind == fir.rvalue_kind.rv_not;
+        if (!chained || !is_flag(c, fir.rvalue_operand(f, r, 0))) {
+            return false;
+        }
+        if (r.kind == fir.rvalue_kind.rv_not) {
+            flipped = !flipped;
+        }
+        flag = fir.rvalue_operand(f, r, 0).place.local;
+        end = i;
+    }
 }
 
 // ---- the inner owners --------------------------------------------------------------------------

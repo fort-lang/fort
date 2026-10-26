@@ -199,9 +199,22 @@ fn dataflow_free(dataflow mut* d) void {
     bits_free(&d->init);
 }
 
+/// The entry of `edge_to` of dataflow_forward_edges for a block whose edge set reaches no block.
+u32 NO_EDGE = 4294967295;
+
+// The edge sets of dataflow_forward_edges: `to[p]` is the block that the edge set `gens[p]` of
+// block `p` reaches, or NO_EDGE. With no entry, no block has an edge set. `joined` holds the
+// out-set of a predecessor with its edge set while block_in joins it.
+struct edges {
+    u32@ to;
+    bits@ gens;
+    bits joined;
+}
+
 // Sets the in-set of block `b`: the join of the entry set, for `bb0`, and of the out-set of each
-// predecessor. A block with none of these takes the initial set.
-fn block_in(dataflow mut* d, fir.pred_table* pt, u32 b) void {
+// predecessor. The out-set of a predecessor `p` whose edge set reaches `b` takes the numbers of
+// that edge set first. A block with none of these takes the initial set.
+fn block_in(dataflow mut* d, fir.pred_table* pt, u32 b, edges mut* e) void {
     bits mut* in = &d->ins[cast(b, u64)];
     bool mut first = true;
     if (b == 0) {
@@ -211,7 +224,13 @@ fn block_in(dataflow mut* d, fir.pred_table* pt, u32 b) void {
     u32 count = fir.pred_count(pt, b);
     u32 mut i = 0;
     while (i < count) {
-        bits* out = &d->outs[cast(fir.pred_at(pt, b, i), u64)];
+        u32 p = fir.pred_at(pt, b, i);
+        bits* mut out = &d->outs[cast(p, u64)];
+        if (e->to.len > 0 && e->to[cast(p, u64)] == b) {
+            bits_copy(&e->joined, out);
+            bits_union(&e->joined, &e->gens[cast(p, u64)]);
+            out = &e->joined;
+        }
         if (first) {
             bits_copy(in, out);
             first = false;
@@ -271,7 +290,8 @@ fn dataflow_forward(fir.func* f, dataflow mut* d) void {
 // transfer, so it changes at most once for each number, and the loop ends.
 fn dataflow_forward_with(fir.func* f, fir.pred_table* pt, dataflow mut* d) void {
     bits@ none = {};
-    forward(f, pt, d, none, none, false);
+    edges mut e = edges{};
+    forward(f, pt, d, none, none, &e, false);
 }
 
 /// Runs the dataflow `d` as dataflow_forward_with does, with a transfer that two sets give:
@@ -285,13 +305,38 @@ fn dataflow_forward_sets(fir.func* f, fir.pred_table* pt, dataflow mut* d, bits@
     if (gens.len != blocks || kills.len != blocks) {
         panic("fir_flow.dataflow_forward_sets: the set counts differ from the block count");
     }
-    forward(f, pt, d, gens, kills, true);
+    edges mut e = edges{};
+    forward(f, pt, d, gens, kills, &e, true);
 }
 
-// The loop of dataflow_forward_with and dataflow_forward_sets. `by_sets` selects the transfer
-// that `gens` and `kills` give over `d->transfer`.
+/// Runs the dataflow `d` as dataflow_forward_sets does, with one edge set for each block. Each
+/// edge from block `p` to block `edge_to[p]` adds the numbers of `edge_gens[p]` to the out-set of
+/// `p` before the in-set of `edge_to[p]` joins it. Each other edge from `p` joins the out-set of
+/// `p` alone, so an edge set holds on one edge, such as the edge of a `switch` that a test selects.
+/// `edge_to[p]` is NO_EDGE, or a block that no terminator of `p` names, when `p` has no edge set.
+/// Such a transfer is monotone. `edge_to` and `edge_gens` hold one entry for each block of `f`, and
+/// each edge set holds `d->count` numbers. The function panics when either holds another count of
+/// entries.
+fn dataflow_forward_edges(fir.func* f, fir.pred_table* pt, dataflow mut* d, bits@ gens,
+                          bits@ kills, u32@ edge_to, bits@ edge_gens) void {
+    u64 blocks = cast(fir.block_count(f), u64);
+    if (gens.len != blocks || kills.len != blocks) {
+        panic("fir_flow.dataflow_forward_edges: the set counts differ from the block count");
+    }
+    if (edge_to.len != blocks || edge_gens.len != blocks) {
+        panic("fir_flow.dataflow_forward_edges: the edge counts differ from the block count");
+    }
+    edges mut e = edges{.to = edge_to, .gens = edge_gens};
+    e.joined = bits_new(d->count);
+    defer bits_free(&e.joined);
+    forward(f, pt, d, gens, kills, &e, true);
+}
+
+// The loop of dataflow_forward_with, dataflow_forward_sets and dataflow_forward_edges. `by_sets`
+// selects the transfer that `gens` and `kills` give over `d->transfer`, and `e` holds the edge
+// sets, or none.
 fn forward(fir.func* f, fir.pred_table* pt, dataflow mut* d, bits@ gens, bits@ kills,
-           bool by_sets) void {
+           edges mut* e, bool by_sets) void {
     results_free(d);
     u32 n = fir.block_count(f);
     u64 size = cast(n, u64);
@@ -317,7 +362,7 @@ fn forward(fir.func* f, fir.pred_table* pt, dataflow mut* d, bits@ gens, bits@ k
     defer bits_free(&next);
     while (wl.len > 0) {
         u32 at = work_pop(&wl);
-        block_in(d, pt, at);
+        block_in(d, pt, at, e);
         bits_copy(&next, &d->ins[cast(at, u64)]);
         if (by_sets) {
             bits_subtract(&next, &kills[cast(at, u64)]);

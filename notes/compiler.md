@@ -836,23 +836,46 @@ came here.
   whose name stands at the location of the FIR `del`, or the `cast` that starts there. To count the
   sites, run `--leak-report` over each entry of the corpora and group the lines by the directory of
   their file; the counts stand in the ticket of the change.
+- **A test against null makes the facts of its place hold on one edge** (D17.11 gen rule 6,
+  `spec/fir.md` 11, Tests). `owner.place.find_test` reads a block that ends in `switch(copy _c)` on
+  a flag, a `bool` temporary that is no memory, and goes back through the last store into the
+  flag: an `eq` or an `ne` of a pointer place with a zero constant, or a `copy` or a `not` of
+  another flag. A named local is no flag (`bool b = p == null; if (b)` gives no fact, `k13` and
+  `fill_flag` in `test/fort/owner/prover_test.ft`): gen rule 6 names a branch on the test. The edge
+  is the target of the value that the flag holds when the place is null, and the other value must
+  go to another block. `owner.prover.find_tests` finds the test of each block once, and the walk
+  that gives the gen and kill sets of the block fills a third set of its probes, the edge set:
+  `add_test_facts` puts the facts of the place there right before the test statement, and each
+  later statement kills and gens in it as in the probes, so a call, a store through a pointer, a
+  store into the place or its pointer local and a store into the flag kill as they kill any fact;
+  `run_scratch` does the same for the bit of a tested scratch local.
+  `fir_flow.dataflow_forward_edges` joins the out-set of a block with its edge set on that one edge
+  (`test/fort/fir_flow_sets_test.ft` holds it against a new block on the edge). A test makes no
+  new fact, so the counts of the work do not change. Part 2 also takes the fact of the released
+  place itself (`collect_site_facts`, `releases_nothing`), read with the stale set before its
+  statement (`b5`): a `del` or an owning `cast` of an empty place frees nothing, so `del(p)` after
+  `move(p)`, after `del(p)` or in the arm where a test finds `p` null is proved, and that fact
+  counts in the inner work. The `switch` that reads the value of `&&` or `||` stands alone in the
+  block where its operands join, so no store into its flag stands there and its edges hold no
+  fact; only the right operand gets the fact of the left one (`n14`, `n15`).
 - **Free an object with owners in a form that part 2 of the leak rule proves** (D17.20,
-  `test/fort/owner/release_test.ft`). No rule makes a fact of a test against `null`, so the pass
-  cannot prove a null that a test finds: a local or a parameter that a loop or an `if` finds null
-  is a site at its `del`, and so is a field that a test finds null. Two forms of a free pass, and
-  `release_test.ft` holds both. First, a loop that frees a chain tests the place in memory
-  (`while (h->last != null)`), moves the link and its tail into locals, frees the link and then
-  stores the tail back (`containers.pool_free`). Second, an object whose owners a call frees moves
-  out whole into a local that is not memory (`module kept = move(*m); del(m);`), and a second local
-  takes it for the call: a store into a memory local kills each fact through `m` (`modules.free`).
-  A vector of objects with owners keeps a chain of owners (`made_before`, `last`) beside a span of
-  views (`ast.arena`, `types.table`, `modules.owned_modules`, `lsp.json.doc`), and the first form
-  frees it: a slot of a new span of owners is null, but no rule proves it, so its `del` before a
-  store is a site. Link a new object into the chain before any call, because a call kills the
-  facts through the new pointer (D17.11). A chain frees its objects from the newest. With the
-  chains of the AST arena, the type table and the module vectors together, a heap probe of
-  repeated runs reaches its steady size later: take its early sample after that
-  (`driver_lifetime_emitter_test.ft`, `notes/testing.md`).
+  `test/fort/owner/release_test.ft`). A test against `null` proves a place empty on its edge (the
+  entry above), so a `del` of a local, a parameter or a field that a loop or an `if` finds null
+  frees nothing and is proved (`local_walk`, `chain_free`); a call between the test and the `del`
+  kills the fact of a field, which is reached through memory (`walk_then_call`). Two forms of a free
+  that has owners to free pass, and `release_test.ft` holds both. First, a loop that frees a chain
+  tests the place in memory (`while (h->last != null)`), moves the link and its tail into locals,
+  frees the link and then stores the tail back (`containers.pool_free`). Second, an object whose
+  owners a call frees moves out whole into a local that is not memory (`module kept = move(*m);
+  del(m);`), and a second local takes it for the call: a store into a memory local kills each fact
+  through `m` (`modules.free`). A vector of objects with owners keeps a chain of owners
+  (`made_before`, `last`) beside a span of views (`ast.arena`, `types.table`,
+  `modules.owned_modules`, `lsp.json.doc`), and the first form frees it: a slot of a new span of
+  owners is null, but no rule proves it until refinement R8, so its `del` before a store is a site.
+  Link a new object into the chain before any call, because a call kills the facts through the new
+  pointer (D17.11). A chain frees its objects from the newest. With the chains of the AST arena, the
+  type table and the module vectors together, a heap probe of repeated runs reaches its steady size
+  later: take its early sample after that (`driver_lifetime_emitter_test.ft`, `notes/testing.md`).
 - **The FIR interpreter runs the FIR of a closure before the emptiness pass**
   (`spec/ownership-design.md` 3, `src/fort/fir/interpreter.ft`). It is the reference semantics of
   the ownership checks, and `--fir-run` and the pass `run` of `--fir-test` start it
