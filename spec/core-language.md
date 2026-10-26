@@ -766,7 +766,9 @@ because `len` counts elements); pointer to span; struct or array casts. An untyp
 first takes its default type (D4.5) and then converts with the semantics above, so
 `cast(0x80000000, i32)` is `-2147483648` and `cast(-1, u32)` is `4294967295`. `null` is not a valid
 operand, because it has no type of its own (D10.5). There is no strict aliasing: reading an object
-through a pointer of another type, as in `*cast(&x, u64*)` for an `f64 x`, is defined. The result of
+through a pointer of another type, as in `*cast(&x, u64*)` for an `f64 x`, is defined. A read or a
+write of a local through a pointer that a cast makes can still be undefined: D10.7 gives the whole
+rule for an access to a local through a forged value. The result of
 a cast is `own` exactly when its target type says `own` (D3.14): an `own` source cast to a non-`own`
 target lends, so the result is a view; a non-`own` source cast to an `own` target is an error,
 because a cast never adds `own`; and an `own` lvalue cast to an `own` target is a copy into an `own`

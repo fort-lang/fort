@@ -1489,12 +1489,59 @@ Sections:
 - rule: Undefined behavior in v1 is limited to: using a view, or a copy made before a `move` or
   `del`, after the allocation was freed; `del` of an `extern` result that is not the start of an
   allocation; dereferencing `null` or a dangling pointer; `p[lo..hi]` beyond the object, calling a
-  null function pointer, and data races. Everything else is defined or a diagnosed error. In
-  particular there is no strict-aliasing rule: reading an object through a pointer to another type
-  of the same size (`*cast(&x, u64*)` for an `f64 x`) is defined and yields the bit pattern.
+  null function pointer, data races, and an access to a local through a forged value (below).
+  Everything else is defined or a diagnosed error. In particular there is no strict-aliasing rule:
+  reading an object through a pointer to another type of the same size (`*cast(&x, u64*)` for an
+  `f64 x`) is defined and yields the bit pattern.
+  **An access to a local through a forged value.** A read or a write of the storage of a local of
+  a run of a fort function is undefined when the pointer or span that the access goes through does
+  not derive from an address of that local that this run took. The terms are exact:
+  A run is one call of a fort function. Each call starts a new run with its own locals.
+  A local of a run is a parameter, a named local or a temporary (D6.3) of the run. Each entry of
+  the block that declares a named local starts a new local, so an address that an earlier entry
+  took is no address of the new local. The storage of a local is each byte of it, its fields, its
+  elements and its padding included. A read or a write by a fort function of a byte of the frame of
+  a run that is no storage of a local, such as padding between locals, a spilled register or the
+  return address, is undefined too, through a pointer or a span. The storage of a frame of a C
+  function is outside this item, for an access by fort code and by C code. So a read by fort code of
+  a C local through a pointer that C code gave it is defined, because the C storage is outside this
+  item.
+  An address of a local that a run took is a pointer or a span that an operation of that run
+  computes from a place `e` that is the local or a part of it: `&e` (D5.8), and a span expression
+  of `e` when `e` is a fixed array (D6.9). A part is a field or an element of a fixed array, at any
+  depth, that the place reaches through no pointer and no span.
+  A value derives from an address `a` when it is `a`, when an operation computes it from operands of
+  which one or more derive from `a` (`?:` is an exception below), or when a load reads it from
+  storage that a store of a value that derives from `a` wrote. Each operation carries it: a copy, a
+  `move`, an argument, a result, a field, an element, a `.ptr` or a `.len` of a value, an aggregate
+  literal, `?:`, a cast (D3.14), an arithmetic, bitwise or shift operator, `&` or a span expression
+  of a place reached through a value that derives from `a`, `p[lo..hi]` (D6.9), and each other
+  operation. A call is no operation of this rule: its result derives only from what the value that
+  the callee returns derives from, and the stores of the callee follow the rule for a store. A
+  branch carries no derivation: the condition of an `if`, of a `switch` or of a loop gives no
+  derivation to a value that a branch assigns. `?:` gives its result the derivation of the operand
+  that it yields, and none from its condition or from the other operand. The load and the store can
+  have different types, and a load that reads only some bytes of the store derives as well. Each of
+  these steps can happen in any function, fort or C. A value derives from an address only through
+  these steps: an integer constant, or bytes that no store of the program wrote, derive from no
+  address, even when they are equal to one.
+  An access by the name of a local in its own run goes through no value, so this item does not
+  apply to it. The item covers each read and each write, of each type.
+  D3.14 lets no cast from an integer mark a level `mut` or `own`, so a cast alone gives no forged
+  write. A same-size reinterpretation, which stays defined, can still give a `mut` pointer from an
+  integer: a store of the integer and a load of the same bytes as a `mut` pointer. When the pointer
+  does not derive from an address of a local that the run of the local took, this item makes a read
+  or a write of that local through it undefined. The item adds no strict-aliasing rule: the
+  derivation of the value decides, and the type of the access and the type of the address do not.
+  The item covers only the frames of fort runs: it does not make an access to a global, to an
+  allocation or to a frame of a C function undefined.
 - history: Amended 2026-09-29 (T-257): the list held "`del` of adopted memory (D17.3) that is not
   the start of an allocation" and "writing through a cast that added mutability into read-only
   memory". A cast adds neither `own` nor `mut` (D3.14); the second item was stale since T-085.
+  Amended 2026-10-26: the user ruled "Yes, add A8 to D10.7", for assumption A8 of
+  `ownership-design.md` 5.1. Before, the list had no forged pointer, so a callee could return
+  `cast(cast(p, u64) + 8, i32*)` for `p = &x` of an `i32 x`, and a read through it was defined.
+  Rules (b) and (e) and refinement R6 of `ownership-design.md` need the item.
 
 ### D10.8 Stack probes
 - owner: `memory-model.md`.

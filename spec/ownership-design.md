@@ -1,8 +1,8 @@
 # Ownership checks: a coarse and sound design
 
-Status: a design. The user ruled on its questions on 2026-10-23 (section 12). It adds no rule to
-fort. `decisions.md` and `grammar.md` win over it (D1.2). A rule of section 6 enters the language
-only through a decision of its own, in the order of section 11.
+Status: a design. The user ruled on its questions on 2026-10-23, and on assumption A8 on 2026-10-26
+(section 12). It adds no rule to fort. `decisions.md` and `grammar.md` win over it (D1.2). A rule of
+section 6 enters the language only through a decision of its own, in the order of section 11.
 
 The plan of 2026-10-22 asks for this design as its step 4. The design applies the eight rules for
 the next design of `notes/ownership-retrospective.md` 8, and section 13 checks each of them.
@@ -446,15 +446,23 @@ These are all the assumptions of the rules. A program that breaks one gets no cl
   call follows 4.6 as each call does. No rule can check C, so the design takes A7 (section 15).
 - **A8**: a value designates storage of a local of this run of F only when it derives from an
   address of that local that this run took. It derives through copies, casts, arithmetic, stores and
-  loads, in F or in a callee. A8 is a question for the user, who rules on it before the ticket of
-  rule (b) starts. D10.7 lists no forged pointer as undefined behavior. So a callee can return
-  `cast(cast(p, u64) + 8, i32*)` for an argument `p`, and D10.7 defines a read through that value.
-  Rules (b) and (e) of V1 need A8 for such a read. Without A8 the read can name a local that is not
-  memory, and it is then no use (5.5 rule (b)) and no borrow (lemma (ii)). Refinement R6 needs A8
-  for each local (section 7). Rules (a) and (c), and kill rule 5 of D17.11, need only that no write
-  and no release goes through a forged pointer. D3.14 gives that, because a cast from an integer
-  marks no level `mut` and no level `own`. D10.6 gives it for an index in each build without
-  `--no-bounds-check`, and D10.7 gives it for a slice.
+  loads, in F or in a callee. The user ruled on 2026-10-26: "Yes, add A8 to D10.7" (section 12).
+  D10.7 now makes a read or a write of a local through a value that does not derive this way
+  undefined behavior, and it gives the exact terms. Before the ruling, D10.7 listed no forged
+  pointer. So a callee could return `cast(cast(p, u64) + 8, i32*)` for an argument `p`, and D10.7
+  defined a read through that value. Rules (b) and (e) of V1 need A8 for such a read. Without A8 the
+  read can name a local that is not memory, and it is then no use (5.5 rule (b)) and no borrow
+  (lemma (ii)). Refinement R6 needs A8 for each local (section 7). Rules (a) and (c), and kill rule
+  5 of D17.11, need only that no write and no release goes through a forged pointer. D3.14 gives
+  that for a cast alone, because a cast from an integer marks no level `mut` and no level `own`.
+  D10.6 gives it for an index in each build without `--no-bounds-check`, and D10.7 gives it for a
+  slice. A same-size reinterpretation can still load a `mut` or an `own` pointer from the bytes of
+  an integer. D10.7 (A8) makes an access to a local through such a forged value undefined. A write
+  through a same-size reinterpretation of a value that derives from the address of the slot stays
+  defined: `*cast(cast(&o, void mut*), u64 mut*) = cast(&y, u64)` forges the owner slot of a local
+  `o`. So a forged owner slot in a local, a global or an allocation is outside the guarantee of
+  rules (a) and (c). It stays outside until a rule forbids a cast that yields a `mut` pointer and
+  hides an owner place of its source.
 
 ### 5.2 Outside the scopes
 
@@ -829,7 +837,7 @@ counts of its rules before and after it. A report count can change the order of 
   reach `x`, and `x = new(i32)` is an error of rule (a). Its rule (b) variant fails at `*x = 1`
   (P4). Gain (measured, P4, `?`): (b) from 61/26 to 29/13 and (e) from 1,400/128 to 900/113 in
   `src/fort`. The form of revision 4 gave such a copy no frame, and it accepted k2 and the hand case
-  `n4`.
+  `n4`. The ruling on A8 that the proof needs is done (D10.7, 2026-10-26).
 - **R7 edges of a null test**: a branch on `p == null` proves `p` empty there. It helps (c). Its
   decision is gen rule 6 of D17.11 and the amendment of part 2 of D17.20: a branch on a test of a
   tracked place `p` against `null` makes `p` empty on the edge where the test finds `null`, and the
@@ -957,10 +965,10 @@ one PR (impl-hard, rev-deep). The oracle and the move are impl-hard and rev-deep
    directory.
 9. `refine-alias` (R6, M), after 5: it adds `B` for the frames that view locals borrow and the
    origin `exposed`. It also adds one may-fact for each memory local: the local can be exposed.
-10. `move-*`, after 9 and the ruling on A8 (5.1): rule (b). Migration M.
+10. `move-*`, after 9: rule (b). Migration M. The ruling on A8 (5.1) is done (D10.7, 2026-10-26).
 11. `refine-result` (R3, L), after 6. 12. `refine-keep` (R4, L), after 11.
-13. `view-*`, after 9, 11, 12 and the ruling on A8: rule (e). The report adds `T` and `P`. Migration
-    L in at least five tickets.
+13. `view-*`, after 9, 11 and 12: rule (e). The report adds `T` and `P`. Migration L in at least
+    five tickets. The ruling on A8 (5.1) is done (D10.7, 2026-10-26).
 14. `refine-span-del` (R8, M), after 5, by the ruling on Q7.
 15. `refine-kept` (R2), `refine-view-aggregate` (R5), `refine-null-edge` (R7) and `refine-typed`
     (R10): M each, after 6 or 5, only when a report count needs one.
@@ -979,6 +987,13 @@ The user ruled on each question on 2026-10-23, each as its recommendation says:
 - Q4: (a) the call of 4.6 step 3 stays; (b) what a callee keeps or writes out stays outside (X4).
 - Q5: (1), the list of 6.2. Q6: (1), 8,000 lines for the analysis and 3,500 for the oracle.
 - Q7: (1), a `del` or a `cast` of a span whose elements hold owners waits for R8.
+
+The user ruled on assumption A8 (5.1) on 2026-10-26: "Yes, add A8 to D10.7". D10.7 now lists a read
+or a write of the storage of a local of a run through a value that does not derive from an address
+of that local that the run took as undefined behavior. So in each program that D10.7 defines, A8
+holds for each read and each write of a local. D10.7 does not cover a `del`, so it gives A8 for no
+`del` through a forged `own`. The rule of 5.1 on a cast that hides an owner place is to close that
+case. Items 10 and 13 of section 11, and R6 of section 7, no longer wait for a ruling.
 
 The questions, their options and their counts stay below as the record.
 
