@@ -955,6 +955,7 @@ a diagnosed error (D10.7). None of these is detected.
 | `p[lo..hi]` beyond the object                  | `i32 one = 0; i32@ s = (&one)[0..4];`     |
 | calling a null function pointer                | `fn () void f = null; f();`                 |
 | data races                                     | two threads from `extern` writing one `g`  |
+| an access to a local through a forged value    | `*cast(cast(&x, u64) + 8, i32*)`, `i32 x`  |
 
 Returning or storing a span of a local array is the span form of the dangling-pointer case
 (section 4.3). Reading an object after its `del` through any alias, including a copy of the
@@ -966,6 +967,50 @@ a view, a sub-span, a `.ptr`, a stack address or a literal is a compile error (D
 cast adds `own` to such a value (D3.14). So the second row needs an `extern` that says `own` of
 a result that does not start an allocation. Not undefined and not detected: an `own` value that
 is never freed, outside the leak rule of D17.20 (D17.14).
+
+The last row is assumption A8 of `ownership-design.md` 5.1, which the user ruled into D10.7 on
+2026-10-26. A read or a write of the storage of a local of a run of a fort function is undefined
+when the pointer or span that it goes through does not derive from an address of that local that
+this run took. A run is one call of a fort function, and a local is a parameter, a named local or a
+temporary of the run. A read or a write by fort code of another byte of a fort frame, such as
+padding between locals, a spilled register or the return address, is undefined too. The storage of a
+frame of a C function is outside the item, so fort code that reads a C local through a pointer that
+C code gave it reads defined storage. The run takes the address of a local with `&` or with a span
+expression of a local fixed array, on the local or on a field or an element of it. A value that an
+operation computes from its operands derives from each address that an operand derives from: a copy,
+a `move`, an aggregate literal, a cast and arithmetic carry it. `?:` carries the derivation of the
+operand that it yields. A branch carries none from its condition to a value that the branch assigns.
+A load derives from each address that the stored value derives from, for a store and a load of any
+type, in a fort or a C function. An integer constant, or bytes that no store of the program wrote,
+derive from no address, even when they are equal to one. D10.7 gives the exact terms.
+
+```fort
+fn next(i32* p) i32* {
+    return cast(cast(p, u64) + 4, i32*);   // the result derives from p
+}
+
+fn f() i32 {
+    i32[2] pair = {1, 2};
+    i32 one = 3;
+    i32 a = *next(&pair[0]);               // 2: derives from &pair[0], and reads pair[1]
+    u64 bits = cast(&one, u64);
+    i32 b = *cast(bits, i32*);             // 3: derives from &one through two casts
+    u64 mut guess = 0;
+    for (u64 mut k = 0; k < 64; k++) {
+        if (((bits >> k) & 1) == 1) {
+            guess = guess | (cast(1, u64) << k);   // the if carries nothing from its condition
+        }
+    }
+    i32 c = *cast(guess, i32*);            // undefined: guess equals &one, but derives from nothing
+    return a + b + c;
+}
+```
+
+The last row covers only fort frames. It adds no strict-aliasing rule: the derivation decides, and
+the types of the access and of the address do not. D3.14 lets no cast from an integer mark a level
+`mut` or `own`. A same-size reinterpretation, which stays defined, can still load a `mut` pointer
+from the bytes of an integer, and a write of a local through it is undefined unless it derives from
+an address of that local that the run took.
 
 Explicitly not undefined: there is no strict-aliasing rule. Reading an object through a pointer
 to another type of the same size is defined and yields the bit pattern (D10.7):
