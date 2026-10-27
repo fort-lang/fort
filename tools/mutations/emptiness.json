@@ -17,9 +17,20 @@
     "edge, the kills after the read, the value of the edge, `not`, a named flag, a `switch` whose two",
     "values go to one block, a flag that is memory, the chain of flags, the pointer type of the",
     "place, the bit of a scratch local and the join of an edge set. The prover test holds each over",
-    "FIR text (NULLS in test/fort/owner/prover_test.ft)."
+    "FIR text (NULLS in test/fort/owner/prover_test.ft).",
+    "The rows D17.11-alias hold refinement R6 of spec/ownership-design.md 7, the alias by borrow",
+    "and exposure of src/fort/owner/alias.ft that kill rules 3 and 4 of D17.11 read: the exposure of",
+    "a call, the result of a call, the copy of storage that a pointer can reach, the exposure of a",
+    "store, the operands of an rvalue, the frame of an address, the join, the back edge, the `own`",
+    "pointer, the two answers of alias.can_be, the last load of a path and the straight store; and,",
+    "proving less, the whole store, the rank of an aggregate result, the limit and the fixpoint",
+    "itself. The first stage runs test/fort/owner/alias_test.ft too, which holds each of them.",
+    "D17.11-alias-limit-loop, -limit-first, -slice-index, -callee and -address-own came from the",
+    "review of R6: the loop that passes the limit on a later turn, the first transfer past it, and",
+    "three precision rules; test/fort/owner/alias_test.ft holds each."
   ],
   "sources": [
+    "src/fort/owner/alias.ft",
     "src/fort/owner/place.ft",
     "src/fort/owner/prover.ft",
     "src/fort/owner/report.ft",
@@ -32,8 +43,8 @@
   "build": "ninja -C build/Linux/debug fort",
   "stages": [
     {
-      "name": "the prover and report module tests",
-      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 2 owner/prover_test owner/report_test"
+      "name": "the prover, report and alias module tests",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 2 owner/prover_test owner/report_test owner/alias_test"
     },
     {
       "name": "the build-mode suite",
@@ -108,8 +119,8 @@
     {
       "decision": "D17.11-kill-survivor-fresh",
       "file": "src/fort/owner/prover.ft",
-      "old": "            bool kept = place.is_through_fresh(&c->places, q, fresh) || place.is_same_base(q, d);",
-      "new": "            bool kept = place.is_same_base(q, d);",
+      "old": "            bool kept = place.is_through_fresh(&c->places, q, fresh) || place.is_same_base(q, d)\n                || is_apart(c, aliased, d, q);",
+      "new": "            bool kept = place.is_same_base(q, d)\n                || is_apart(c, aliased, d, q);",
       "what": "a store through a pointer kills a fact through a fresh pointer"
     },
     {
@@ -129,15 +140,15 @@
     {
       "decision": "D17.11-straight-alias",
       "file": "src/fort/owner/prover.ft",
-      "old": "        if (place.is_indirect(&c->places, q) && !place.is_through_fresh(&c->places, q, fresh)) {",
+      "old": "        if (place.is_indirect(&c->places, q) && !kept) {",
       "new": "        if (false) {",
       "what": "a store straight into a memory local keeps a fact through a pointer that holds its address"
     },
     {
       "decision": "D17.11-straight-others",
       "file": "src/fort/owner/prover.ft",
-      "old": "        if (place.is_indirect(&c->places, q) && !place.is_through_fresh(&c->places, q, fresh)) {",
-      "new": "        if (place.is_through_memory(&c->places, q) && !place.is_through_fresh(&c->places, q, fresh)) {",
+      "old": "        if (place.is_indirect(&c->places, q) && !kept) {",
+      "new": "        if (place.is_through_memory(&c->places, q) && !kept) {",
       "what": "a store straight into a memory local kills the facts of other memory locals and globals"
     },
     {
@@ -164,8 +175,8 @@
     {
       "decision": "D17.11-store-test-kills",
       "file": "src/fort/owner/prover.ft",
-      "old": "            *held = fir_flow.bits_get(&pr->none, fact);\n        }\n        apply_kills(c, s, d, stale, fresh, pr);",
-      "new": "            *held = fir_flow.bits_get(&pr->none, fact);\n        }\n        apply_kills(c, s, d, stale, fresh, pr);\n        if (fact != NO_FACT) {\n            *held = fir_flow.bits_get(&pr->none, fact);\n        }",
+      "old": "            *held = fir_flow.bits_get(&pr->none, fact);\n        }\n        apply_kills(c, s, d, stale, fresh, aliased, pr);",
+      "new": "            *held = fir_flow.bits_get(&pr->none, fact);\n        }\n        apply_kills(c, s, d, stale, fresh, aliased, pr);\n        if (fact != NO_FACT) {\n            *held = fir_flow.bits_get(&pr->none, fact);\n        }",
       "what": "a store tests its fact after its own kill rules"
     },
     {
@@ -734,6 +745,160 @@
       "old": "    return l->kind == fir.local_kind.lk_temp && !c->locals[cast(o.place.local, u64)].memory\n        && types.is_prim(l->ty, prim.prim_kind.prim_bool);",
       "new": "    return !c->locals[cast(o.place.local, u64)].memory\n        && types.is_prim(l->ty, prim.prim_kind.prim_bool);",
       "what": "a named `bool` local that holds a test is a flag, and a branch on it gives a fact"
+    },
+    {
+      "decision": "D17.11-alias-call",
+      "file": "src/fort/owner/alias.ft",
+      "old": "    if (s->kind != fir.stmt_kind.st_assign || s->value.kind != fir.rvalue_kind.rv_call) {\n        return;\n    }\n    fir.operand mut o = fir.operand{};",
+      "new": "    if (true) {\n        return;\n    }\n    fir.operand mut o = fir.operand{};",
+      "what": "a call exposes no frame of its operands"
+    },
+    {
+      "decision": "D17.11-alias-result",
+      "file": "src/fort/owner/alias.ft",
+      "old": "    case fir.rvalue_kind.rv_call:\n        fir_flow.bits_set(out, m->frames);\n        return;",
+      "new": "    case fir.rvalue_kind.rv_call:\n        return;",
+      "what": "the result of a call borrows nothing"
+    },
+    {
+      "decision": "D17.11-alias-copy",
+      "file": "src/fort/owner/alias.ft",
+      "old": "            add_local(m, state, r, out);\n            return;\n        }\n    }\n    fir_flow.bits_set(out, m->frames);\n}",
+      "new": "            add_local(m, state, r, out);\n            return;\n        }\n    }\n}",
+      "what": "a copy of storage that a pointer can reach, of a global or of a memory local borrows nothing"
+    },
+    {
+      "decision": "D17.11-alias-store",
+      "file": "src/fort/owner/alias.ft",
+      "old": "    if (r == NO_RANK) {\n        expose(m, state, scratch);\n        return;\n    }",
+      "new": "    if (r == NO_RANK) {\n        return;\n    }",
+      "what": "a store into storage that a pointer can reach exposes no frame of its value"
+    },
+    {
+      "decision": "D17.11-alias-operands",
+      "file": "src/fort/owner/alias.ft",
+      "old": "    u32 mut i = 0;\n    while (i < r.ops_len) {\n        add_operand(",
+      "new": "    u32 mut i = r.ops_len;\n    while (i < r.ops_len) {\n        add_operand(",
+      "what": "a cast, an arithmetic and each other rvalue borrow nothing from their operands"
+    },
+    {
+      "decision": "D17.11-alias-address",
+      "file": "src/fort/owner/alias.ft",
+      "old": "        if (k != NO_RANK) {\n            fir_flow.bits_set(out, k);\n        }\n        return;",
+      "new": "        if (k != NO_RANK) {\n        }\n        return;",
+      "what": "an address of fixed storage borrows no frame"
+    },
+    {
+      "decision": "D17.11-alias-join",
+      "file": "src/fort/owner/alias.ft",
+      "old": "            fir_flow.bits_union(in, &outs[cast(fir.pred_at(pt, at, p), u64)]);",
+      "new": "            fir_flow.bits_intersect(in, &outs[cast(fir.pred_at(pt, at, p), u64)]);",
+      "what": "the state of a block joins its predecessors by intersection"
+    },
+    {
+      "decision": "D17.11-alias-fixpoint",
+      "file": "src/fort/owner/alias.ft",
+      "old": "                if (!fir_flow.bits_get(&listed, target)) {",
+      "new": "                if (false) {",
+      "what": "the fixpoint takes each block once, and a back edge brings no origin"
+    },
+    {
+      "decision": "D17.11-alias-own",
+      "file": "src/fort/owner/alias.ft",
+      "old": "    return pointer && t->is_own;",
+      "new": "    return pointer;",
+      "what": "a copy of each pointer borrows no frame"
+    },
+    {
+      "decision": "D17.11-alias-exposed",
+      "file": "src/fort/owner/alias.ft",
+      "old": "    case place.via_kind.vk_other:\n        return exposed;",
+      "new": "    case place.via_kind.vk_other:\n        return false;",
+      "what": "a pointer that borrows `exposed` names no memory local"
+    },
+    {
+      "decision": "D17.11-alias-frame",
+      "file": "src/fort/owner/alias.ft",
+      "old": "        return fir_flow.bits_get(state, origin_bit(m, r, k))\n            || (exposed",
+      "new": "        return (exposed",
+      "what": "a pointer that borrows the frame of a memory local does not name the local"
+    },
+    {
+      "decision": "D17.11-alias-via",
+      "file": "src/fort/owner/place.ft",
+      "old": "    if (t->is_own) {\n        out->via = via_kind.vk_owner;",
+      "new": "    if (true) {\n        out->via = via_kind.vk_owner;",
+      "what": "each last load reads an `own` pointer, so no place through a pointer is a memory local"
+    },
+    {
+      "decision": "D17.11-alias-straight",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        bool kept = place.is_through_fresh(&c->places, q, fresh) || is_apart(c, aliased, q, d);",
+      "new": "        bool kept = place.is_through_fresh(&c->places, q, fresh) || c->aliases.on;",
+      "what": "a store straight into a memory local keeps each fact through a pointer"
+    },
+    {
+      "decision": "D17.11-alias-whole",
+      "file": "src/fort/owner/alias.ft",
+      "old": "        } else if (d.proj_len == 0) {\n            fir_flow.bits_clear(state, bit);",
+      "new": "        } else if (false) {\n            fir_flow.bits_clear(state, bit);",
+      "what": "a store into a whole borrow local adds to its origins and replaces none"
+    },
+    {
+      "decision": "D17.11-alias-result-frame",
+      "file": "src/fort/owner/alias.ft",
+      "old": "        } else if (!is_aggregate_result(f, k)) {\n            m.frame_rank[cast(k, u64)] = next_frame;",
+      "new": "        } else if (true) {\n            m.frame_rank[cast(k, u64)] = next_frame;",
+      "what": "an aggregate result takes a frame rank, so a store through a parameter keeps its facts"
+    },
+    {
+      "decision": "D17.11-alias-limit",
+      "file": "src/fort/owner/alias.ft",
+      "old": "        if (m->work > WORK_LIMIT) {\n            return;\n        }",
+      "new": "        if (m->work >= WORK_LIMIT) {\n            return;\n        }",
+      "what": "a charge equal to the limit turns the map off"
+    },
+    {
+      "decision": "D17.11-alias-run",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    alias.run(&c->aliases, pt);",
+      "new": "",
+      "what": "the fixpoint of owner.alias never runs, so the kill rules read no map"
+    },
+    {
+      "decision": "D17.11-alias-limit-loop",
+      "file": "src/fort/owner/alias.ft",
+      "old": "        if (m->work > WORK_LIMIT) {\n            return;\n        }\n        fir_flow.bits mut* in",
+      "new": "        fir_flow.bits mut* in",
+      "what": "the fixpoint never stops at the limit once its first pass fits"
+    },
+    {
+      "decision": "D17.11-alias-limit-first",
+      "file": "src/fort/owner/alias.ft",
+      "old": "    if (m.work > WORK_LIMIT) {\n        return m;\n    }",
+      "new": "",
+      "what": "the map takes its ranks and its state when its first pass passes the limit"
+    },
+    {
+      "decision": "D17.11-alias-slice-index",
+      "file": "src/fort/owner/alias.ft",
+      "old": "            add_indexes(m, state, r.place, out);\n            add_content(m, state, r.place, out);",
+      "new": "            add_content(m, state, r.place, out);",
+      "what": "a slice of a span borrows nothing from the index locals of its place"
+    },
+    {
+      "decision": "D17.11-alias-callee",
+      "file": "src/fort/owner/alias.ft",
+      "old": "    u32 mut i = 0;\n    while (fir.stmt_reads(m->f, s, i, &o)) {",
+      "new": "    u32 mut i = 0;\n    if (s->value.callee == fir.callee_kind.cl_value) {\n        i = 1;\n    }\n    while (fir.stmt_reads(m->f, s, i, &o)) {",
+      "what": "a call through a value exposes no frame of its callee operand"
+    },
+    {
+      "decision": "D17.11-alias-address-own",
+      "file": "src/fort/owner/alias.ft",
+      "old": "    if (owning) {\n        return;\n    }\n    fir.place mut pointer = p;",
+      "new": "    fir.place mut pointer = p;",
+      "what": "an address through an `own` pointer or span borrows what a copy of it borrows"
     }
   ]
 }

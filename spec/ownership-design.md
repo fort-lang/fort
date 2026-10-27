@@ -253,6 +253,7 @@ the count of each family, and the three run in 60 s or less in CI.
 | `owner.prover`   | `src/fort/owner/prover.ft`   | the state, the transfer, the obligations   |
 | `owner.report`   | `src/fort/owner/report.ft`   | the text and the position of each error    |
 | `owner.summary`  | `src/fort/owner/summary.ft`  | refinements only: summaries (section 8)    |
+| `owner.alias`    | `src/fort/owner/alias.ft`    | refinement R6: the borrows, the exposure   |
 
 Each module is one noun in the directory `owner/`, and no leaf repeats it (`notes/style.md` 3.1).
 `prover` is a doer noun, so its functions start with its verb (`prover.prove`); `analysis` would
@@ -496,6 +497,10 @@ of the run: each form of 5.4 keeps (i) to (v), and a join is a union, so it keep
   argument of an active call, then `P(o) = 1`;
 - (v) a value with a frame tag `(F, x)` is in a view local of F, in an argument of an active call,
   or in a value that a callee kept.
+- (vi) with refinement R6 (section 7) and A8: a value in storage that derives from an address of a
+  memory local `x` that this run took is in a local `v` that is not memory, and then `B(v)` names
+  the frame of `x`, or names `exposed` while `x` is exposed; in any other storage, `x` is exposed.
+  `spec/fir.md` 11 (Alias) gives the proof for each form of 5.4.
 
 ### 5.4 The forms of `fir.md` 5.5 to 8
 
@@ -833,6 +838,30 @@ counts of its rules before and after it. A report count can change the order of 
   `p = rvalue`, a destination that pins an owner also exposes each frame that the value borrows. R6
   narrows kill rule 3 of D17.11 for memory locals, so its decision amends D17.11. Its facts keep
   each charge of 4.8 under 2^24 (P4: 12,009,988 at most, in `test/fort`).
+  **The decision.** D17.11 (Borrows) holds R6 for the overwrite rule and the leak rule, and
+  `spec/fir.md` 11 (Alias) gives its FIR form and the proof of (vi); the user ratifies it. The
+  decision differs from the text above in five points, and lemma (vi) holds each of them:
+  1. Each local that is not memory keeps its origins, not only a view local, and each operation
+     carries the origins of its operands, an arithmetic and a comparison too. D10.7 derives a value
+     through each operation, so a chain of comparisons can carry an address into an integer. A
+     store into an integer or a struct local that is not memory then exposes nothing.
+  2. The type decides the `own` pointer: a copy of a place of an `own` pointer type borrows no
+     frame, and a place whose last load reads an `own` pointer is a place of no memory local (4.3).
+     The text above gives a copy of a local owner its owner origin only.
+  3. The address of a place of a global borrows no origin, and the frame of an aggregate `_0`, the
+     storage of the caller, is no origin.
+  4. R6 narrows kill rule 4 as well as kill rule 3: a store straight into a memory local `x` keeps
+     a fact through a pointer that cannot be a place of `x`.
+  5. Past the charge of 2^24, the kill rules read no origin, as before R6, so the limit turns no
+     verdict into an error, and kill rule 5 stays at each call (premise 1).
+  Measured over the five trees: the largest charge is 3,037,320 in `test/fort` and 2,883,987 in
+  `src/fort`, in 370 functions with an origin on Linux and 371 on darwin, where `std.os.exe_path`
+  takes one too (4,802), each within the limit. The 22 sites of D17.11 and the 22 of part 1 of
+  D17.20 stay, and part 2 falls from 23 sites to 22: `test/lang` loses `062:30:9`, whose fact
+  through the `own` pointer `step` a store into the memory local `head` killed. The tests of the
+  examples of D17.11, `fail/ownership` 076 and 077, add two sites of D17.11, so `test/lang` holds 24
+  at the head. The oracle test keeps 0 false accepts in each set, and its exhaustive family loses 72
+  false rejects of rule (a) and 873 of part 1.
   k2 fails: `keep(&x)` exposes `x`, and `p = G` borrows `exposed`. So `del(*p)` and `*p = new(i32)`
   reach `x`, and `x = new(i32)` is an error of rule (a). Its rule (b) variant fails at `*x = 1`
   (P4). Gain (measured, P4, `?`): (b) from 61/26 to 29/13 and (e) from 1,400/128 to 900/113 in
@@ -974,6 +1003,7 @@ one PR (impl-hard, rev-deep). The oracle and the move are impl-hard and rev-deep
    directory.
 9. `refine-alias` (R6, M), after 5: it adds `B` for the frames that view locals borrow and the
    origin `exposed`. It also adds one may-fact for each memory local: the local can be exposed.
+   Its decision is D17.11 (Borrows), with the five points of R6 (section 7).
 10. `move-*`, after 9: rule (b). Migration M. The ruling on A8 (5.1) is done (D10.7, 2026-10-26).
 11. `refine-result` (R3, L), after 6. 12. `refine-keep` (R4, L), after 11.
 13. `view-*`, after 9, 11 and 12: rule (e). The report adds `T` and `P`. Migration L in at least

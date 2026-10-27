@@ -1,0 +1,445 @@
+/// Says which memory locals a place through a pointer can name, for the kill rules of the
+/// emptiness pass (spec/fir.md 11, Alias): refinement R6 of spec/ownership-design.md 7, alias by
+/// borrow and exposure. A place through a pointer can be a place of a memory local `x` only when
+/// the pointer that its last load reads borrows the frame of `x`, or borrows `exposed` while `x`
+/// is exposed. A place whose last load reads an `own` pointer lies in an allocation, in no frame.
+//
+// A borrow local is a local that is no memory. An origin is the frame of a memory local that is
+// no aggregate `_0`, or `exposed`. The state at a point holds one bit for each borrow local and
+// each origin, the set B of the local, and one bit for each such memory local: the local can be
+// exposed. The sets join by union from an entry that holds no bit, and a forward fixpoint over the
+// blocks gives the state at the start of each block. owner.prover walks each block from that
+// state with apply_reads before the kill rules of a statement and apply_store after them.
+// The module uses switches and no function-pointer dispatch table. It holds no module-level
+// mutable state: each vector belongs to one map, which one call of owner.prover.prove makes.
+import fort.fir;
+import fort.fir_flow;
+import fort.owner.place;
+import fort.types;
+
+/// The rank of a local that has none: a memory local among the borrow locals, and a local that
+/// is no memory, or an aggregate `_0`, among the frames.
+u32 NO_RANK = 4294967295;
+
+/// The most charge of the fixpoint of one function (2^24). Each transfer of a block charges its
+/// statements and its terminator times the bits of the state. Past it, the map is off, and the
+/// kill rules read each place through a pointer as a possible place of each memory local.
+u64 WORK_LIMIT = 16777216;
+
+/// The bits of the state of one function and the fixpoint over them. `borrow_rank[n]` is the rank
+/// of the local `n` among the borrow locals, and `frame_rank[n]` its rank among the memory locals
+/// whose frames are origins. A borrow local of rank `r` holds the bits `r * (frames + 1)` to
+/// `r * (frames + 1) + frames`: one for the frame of each memory local, in rank order, then one
+/// for `exposed`. The exposure bit of the memory local of rank `k` is `borrows * (frames + 1) +
+/// k`. `ins[b]` is the state at the start of block `b`. `work` is the charge of the fixpoint, and
+/// `on` says that the fixpoint ended within WORK_LIMIT, so the kill rules read the map.
+struct map {
+    fir.func* f;
+    u32 mut@ own borrow_rank;
+    u32 mut@ own frame_rank;
+    u32 borrows;
+    u32 frames;
+    u32 count;
+    u64 work;
+    bool on;
+    fir_flow.bits mut@ own ins;
+}
+
+/// Frees the vectors of `m`.
+fn free(map mut* m) void {
+    del(m->borrow_rank);
+    del(m->frame_rank);
+    u64 mut b = 0;
+    while (b < m->ins.len) {
+        fir_flow.bits_free(&m->ins[b]);
+        b += 1;
+    }
+    del(m->ins);
+    m->on = false;
+}
+
+/// The map of the function of the survey `c`, after owner.place.mark_memory, with no state yet:
+/// the ranks of its borrow locals and of its frames, and the count of the bits of a state. `units`
+/// is the count of the statements and the terminators of the function. A function with no frame
+/// gets a map with no rank, which stays off, because no kill rule reads it. When `units` times the
+/// count passes WORK_LIMIT, the first pass of the fixpoint would pass it, so the map holds no rank
+/// either, and its work is that product.
+fn make(place.survey* c, u64 units) map {
+    fir.func* f = c->f;
+    u32 n = fir.local_count(f);
+    u64 mut borrows = 0;
+    u64 mut frames = 0;
+    u32 mut k = 0;
+    while (k < n) {
+        if (!c->locals[cast(k, u64)].memory) {
+            borrows += 1;
+        } else if (!is_aggregate_result(f, k)) {
+            frames += 1;
+        }
+        k += 1;
+    }
+    map mut m = map{.f = f};
+    // with no frame, no kill rule reads the map
+    if (frames == 0) {
+        return m;
+    }
+    u64 count = borrows * (frames + 1) + frames;
+    m.work = types.capped_product(units, count);
+    if (m.work > WORK_LIMIT) {
+        return m;
+    }
+    m.borrows = cast(borrows, u32);
+    m.frames = cast(frames, u32);
+    m.count = cast(count, u32);
+    del(m.borrow_rank);
+    m.borrow_rank = new(u32, cast(n, u64));
+    del(m.frame_rank);
+    m.frame_rank = new(u32, cast(n, u64));
+    u32 mut next_borrow = 0;
+    u32 mut next_frame = 0;
+    k = 0;
+    while (k < n) {
+        m.borrow_rank[cast(k, u64)] = NO_RANK;
+        m.frame_rank[cast(k, u64)] = NO_RANK;
+        if (!c->locals[cast(k, u64)].memory) {
+            m.borrow_rank[cast(k, u64)] = next_borrow;
+            next_borrow += 1;
+        } else if (!is_aggregate_result(f, k)) {
+            m.frame_rank[cast(k, u64)] = next_frame;
+            next_frame += 1;
+        }
+        k += 1;
+    }
+    m.work = 0;
+    return m;
+}
+
+// Whether the local `n` is `_0` of an aggregate type. Its storage is the destination of the
+// caller, which is no storage of a local of this run, so its frame is no origin.
+fn is_aggregate_result(fir.func* f, u32 n) bool {
+    fir.local* l = fir.local_at(f, n);
+    return l->kind == fir.local_kind.lk_return && fir.type_aggregate(l->ty);
+}
+
+/// Whether the local `n` is a memory local whose frame is an origin: it has a frame rank.
+fn is_frame(map* m, u32 n) bool {
+    return m->on && m->frame_rank[cast(n, u64)] != NO_RANK;
+}
+
+// The bit of the origin `o` of the borrow local of rank `r`: the frame of rank `o`, or `exposed`
+// for `o` equal to the count of the frames.
+fn origin_bit(map* m, u32 r, u32 o) u32 {
+    return r * (m->frames + 1) + o;
+}
+
+// The exposure bit of the memory local of frame rank `k`.
+fn exposure_bit(map* m, u32 k) u32 {
+    return m->borrows * (m->frames + 1) + k;
+}
+
+/// A set of origins: one bit for the frame of each memory local, in rank order, then one for
+/// `exposed`.
+fn origins(map* m) fir_flow.bits {
+    return fir_flow.bits_new(m->frames + 1);
+}
+
+// Whether `t` is an `own` pointer, whose value designates the start of an allocation or null.
+fn is_own_pointer(types.node* t) bool {
+    bool pointer = t->kind == types.type_kind.k_ptr || t->kind == types.type_kind.k_voidptr;
+    return pointer && t->is_own;
+}
+
+// Adds to `out` the origins of the borrow local of rank `r` in `state`.
+fn add_local(map* m, fir_flow.bits* state, u32 r, fir_flow.bits mut* out) void {
+    u32 mut o = 0;
+    while (o <= m->frames) {
+        if (fir_flow.bits_get(state, origin_bit(m, r, o))) {
+            fir_flow.bits_set(out, o);
+        }
+        o += 1;
+    }
+}
+
+// Adds to `out` the origins that a copy or a move of the place `q` borrows in `state`. An `own`
+// pointer borrows no frame. A copy of fixed storage of a borrow local borrows the origins of the
+// local. Each other copy reads storage that a pointer can reach, a global or `_0`, and a store
+// that left a frame there exposed it, so it borrows `exposed`.
+fn add_content(map* m, fir_flow.bits* state, fir.place q, fir_flow.bits mut* out) void {
+    fir.func* f = m->f;
+    if (is_own_pointer(fir.place_type(f, q))) {
+        return;
+    }
+    if (q.base == fir.base_kind.bk_local && fir.place_fixed(f, q)) {
+        u32 r = m->borrow_rank[cast(q.local, u64)];
+        if (r != NO_RANK) {
+            add_local(m, state, r, out);
+            return;
+        }
+    }
+    fir_flow.bits_set(out, m->frames);
+}
+
+// Adds to `out` the origins that the operand `o` borrows in `state`. A constant borrows none.
+fn add_operand(map* m, fir_flow.bits* state, fir.operand o, fir_flow.bits mut* out) void {
+    if (o.kind != fir.operand_kind.ok_const) {
+        add_content(m, state, o.place, out);
+    }
+}
+
+// Adds to `out` the origins of the local of each index of the place `p`.
+fn add_indexes(map* m, fir_flow.bits* state, fir.place p, fir_flow.bits mut* out) void {
+    u32 mut i = 0;
+    while (i < p.proj_len) {
+        fir.projection pj = fir.place_projection(m->f, p, i);
+        if (pj.kind == fir.proj_kind.pj_index) {
+            add_content(m, state, fir.place_local(pj.index), out);
+        }
+        i += 1;
+    }
+}
+
+// Adds to `out` the origins that the address of the place `p` borrows, with the origins of each
+// index local of `p`. The address of fixed storage borrows the frame of its local, and the address
+// of a place of a global that reads no pointer borrows no frame. The address of a place through a
+// pointer borrows what the pointer of its last load borrows: a deref reads a pointer, and an index
+// on a span or a `string` reads the pointer field of the span, which an `own` span or `string`
+// holds as an `own` pointer.
+fn add_address(map* m, fir_flow.bits* state, fir.place p, fir_flow.bits mut* out) void {
+    fir.func* f = m->f;
+    add_indexes(m, state, p, out);
+    if (fir.place_fixed(f, p)) {
+        u32 k = m->frame_rank[cast(p.local, u64)];
+        if (k != NO_RANK) {
+            fir_flow.bits_set(out, k);
+        }
+        return;
+    }
+    if (!fir.place_indirect(f, p)) {
+        return;
+    }
+    types.node* mut t = fir.base_type(f, p);
+    u32 mut last = 0;
+    bool mut owning = false;
+    u32 mut i = 0;
+    while (i < p.proj_len) {
+        fir.projection pj = fir.place_projection(f, p, i);
+        bool header = t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string;
+        if (pj.kind == fir.proj_kind.pj_deref || (pj.kind == fir.proj_kind.pj_index && header)) {
+            last = i;
+            owning = t->is_own;
+        }
+        t = fir.apply_projection(f, t, pj);
+        i += 1;
+    }
+    if (owning) {
+        return;
+    }
+    fir.place mut pointer = p;
+    pointer.proj_len = last;
+    add_content(m, state, pointer, out);
+}
+
+// Adds to `out` the origins that the rvalue `r` borrows in `state`. A call borrows `exposed`: the
+// callee reaches a frame of this run only through an operand or through storage that a pointer
+// reaches, and the call exposes each frame of its operands. `alloc` gives a new allocation and a
+// constant borrows nothing. Each other rvalue borrows the origins of each operand, because its
+// value derives from each of them.
+fn add_rvalue(map* m, fir_flow.bits* state, fir.rvalue r, fir_flow.bits mut* out) void {
+    fir.func* f = m->f;
+    switch (r.kind) {
+    case fir.rvalue_kind.rv_call:
+        fir_flow.bits_set(out, m->frames);
+        return;
+    case fir.rvalue_kind.rv_alloc:
+        return;
+    case fir.rvalue_kind.rv_addr:
+        add_address(m, state, r.place, out);
+    case fir.rvalue_kind.rv_slice:
+        if (fir.place_type(f, r.place)->kind == types.type_kind.k_array) {
+            add_address(m, state, r.place, out);
+        } else {
+            add_indexes(m, state, r.place, out);
+            add_content(m, state, r.place, out);
+        }
+    default:
+    }
+    u32 mut i = 0;
+    while (i < r.ops_len) {
+        add_operand(m, state, fir.rvalue_operand(f, r, i), out);
+        i += 1;
+    }
+}
+
+// Sets in `state` the exposure bit of each memory local whose frame is in `value`.
+fn expose(map* m, fir_flow.bits mut* state, fir_flow.bits* value) void {
+    u32 mut k = 0;
+    while (k < m->frames) {
+        if (fir_flow.bits_get(value, k)) {
+            fir_flow.bits_set(state, exposure_bit(m, k));
+        }
+        k += 1;
+    }
+}
+
+/// The effect on `state` of the reads of the statement `s`, before its kill rules: a call exposes
+/// the frame of each memory local that one of its operands borrows, the callee operand of a call
+/// through a value included. `scratch` is a set of origins (origins), which the call overwrites.
+fn apply_reads(map* m, fir.statement* s, fir_flow.bits mut* state, fir_flow.bits mut* scratch)
+    void {
+    if (s->kind != fir.stmt_kind.st_assign || s->value.kind != fir.rvalue_kind.rv_call) {
+        return;
+    }
+    fir.operand mut o = fir.operand{};
+    u32 mut i = 0;
+    while (fir.stmt_reads(m->f, s, i, &o)) {
+        fir_flow.bits_clear_all(scratch);
+        add_operand(m, state, o, scratch);
+        expose(m, state, scratch);
+        i += 1;
+    }
+}
+
+/// The effect on `state` of the store of the statement `s`, after its kill rules. A store into
+/// the whole of a borrow local sets its origins to those of the value, and a store into a part of
+/// it adds them. A store into any other place exposes each frame that the value borrows.
+/// `scratch` is a set of origins (origins), which the call overwrites.
+fn apply_store(map* m, fir.statement* s, fir_flow.bits mut* state, fir_flow.bits mut* scratch)
+    void {
+    if (s->kind != fir.stmt_kind.st_assign) {
+        return;
+    }
+    fir_flow.bits_clear_all(scratch);
+    add_rvalue(m, state, s->value, scratch);
+    fir.place d = s->place;
+    u32 mut r = NO_RANK;
+    if (d.base == fir.base_kind.bk_local && fir.place_fixed(m->f, d)) {
+        r = m->borrow_rank[cast(d.local, u64)];
+    }
+    if (r == NO_RANK) {
+        expose(m, state, scratch);
+        return;
+    }
+    u32 mut o = 0;
+    while (o <= m->frames) {
+        u32 bit = origin_bit(m, r, o);
+        if (fir_flow.bits_get(scratch, o)) {
+            fir_flow.bits_set(state, bit);
+        } else if (d.proj_len == 0) {
+            fir_flow.bits_clear(state, bit);
+        }
+        o += 1;
+    }
+}
+
+/// Whether the path `q`, which holds a deref or an index on a span or a `string`, can be a place
+/// of the memory local `x` in `state`: the pointer of its last load borrows the frame of `x`, or
+/// borrows `exposed` while `x` is exposed. An `own` pointer designates an allocation. When the map
+/// is off, or `x` has no frame rank, each such path can be each place.
+fn can_be(map* m, fir_flow.bits* state, place.path q, u32 x) bool {
+    if (!m->on || m->frame_rank[cast(x, u64)] == NO_RANK) {
+        return true;
+    }
+    u32 k = m->frame_rank[cast(x, u64)];
+    bool exposed = fir_flow.bits_get(state, exposure_bit(m, k));
+    switch (q.via) {
+    case place.via_kind.vk_none:
+        return true;
+    case place.via_kind.vk_owner:
+        return false;
+    case place.via_kind.vk_local:
+        u32 r = m->borrow_rank[cast(q.via_local, u64)];
+        if (r == NO_RANK) {
+            return true;
+        }
+        return fir_flow.bits_get(state, origin_bit(m, r, k))
+            || (exposed && fir_flow.bits_get(state, origin_bit(m, r, m->frames)));
+    case place.via_kind.vk_other:
+        return exposed;
+    }
+}
+
+/// Runs the fixpoint of the map `m` over the blocks of its function with the predecessor table
+/// `pt`, and keeps the state at the start of each block in `m->ins`. The worklist takes each block
+/// in the order of its number and then each successor of a block whose state at its end changed,
+/// first in first out, as fir_flow does. Each transfer of a block charges its statements and its
+/// terminator times the bits of the state. When the charge passes WORK_LIMIT, the map stays off.
+fn run(map mut* m, fir.pred_table* pt) void {
+    fir.func* f = m->f;
+    if (m->borrow_rank.len == 0) {
+        return;
+    }
+    u32 n = fir.block_count(f);
+    u64 size = cast(n, u64);
+    fir_flow.bits mut@ own outs = new(fir_flow.bits, size);
+    del(m->ins);
+    m->ins = new(fir_flow.bits, size);
+    u32 mut@ own ring = new(u32, size);
+    fir_flow.bits mut listed = fir_flow.bits_new(n);
+    fir_flow.bits mut next = fir_flow.bits_new(m->count);
+    fir_flow.bits mut scratch = origins(m);
+    defer {
+        u64 mut i = 0;
+        while (i < outs.len) {
+            fir_flow.bits_free(&outs[i]);
+            i += 1;
+        }
+        del(outs);
+        del(ring);
+        fir_flow.bits_free(&listed);
+        fir_flow.bits_free(&next);
+        fir_flow.bits_free(&scratch);
+    }
+    u64 mut head = 0;
+    u64 mut len = 0;
+    u32 mut b = 0;
+    while (b < n) {
+        m->ins[cast(b, u64)] = fir_flow.bits_new(m->count);
+        outs[cast(b, u64)] = fir_flow.bits_new(m->count);
+        ring[cast(b, u64)] = b;
+        fir_flow.bits_set(&listed, b);
+        len += 1;
+        b += 1;
+    }
+    while (len > 0) {
+        u32 at = ring[head];
+        head = (head + 1) % size;
+        len -= 1;
+        fir_flow.bits_clear(&listed, at);
+        u32 count = fir.block_statement_count(f, at);
+        m->work = types.capped_sum(m->work, types.capped_product(cast(count, u64) + 1,
+                                                                 cast(m->count, u64)));
+        if (m->work > WORK_LIMIT) {
+            return;
+        }
+        fir_flow.bits mut* in = &m->ins[cast(at, u64)];
+        fir_flow.bits_clear_all(in);
+        u32 mut p = 0;
+        while (p < fir.pred_count(pt, at)) {
+            fir_flow.bits_union(in, &outs[cast(fir.pred_at(pt, at, p), u64)]);
+            p += 1;
+        }
+        fir_flow.bits_copy(&next, in);
+        u32 mut i = 0;
+        while (i < count) {
+            fir.statement* s = fir.block_statement(f, at, i);
+            apply_reads(m, s, &next, &scratch);
+            apply_store(m, s, &next, &scratch);
+            i += 1;
+        }
+        if (!fir_flow.bits_equal(&next, &outs[cast(at, u64)])) {
+            fir_flow.bits_copy(&outs[cast(at, u64)], &next);
+            fir.block* bl = fir.block_at(f, at);
+            u32 mut e = 0;
+            u32 mut target = 0;
+            while (bl->terminated && fir.term_targets(f, &bl->term, e, &target)) {
+                if (!fir_flow.bits_get(&listed, target)) {
+                    fir_flow.bits_set(&listed, target);
+                    ring[(head + len) % size] = target;
+                    len += 1;
+                }
+                e += 1;
+            }
+        }
+    }
+    m->on = true;
+}

@@ -977,18 +977,115 @@ changes the function, and the verifier runs after it. The passes run in this ord
      fact through `_p`. A store into a local that is a key kills each fact whose place has that key.
      A store into a place through a fresh pointer local kills nothing more. Every other store whose
      destination contains a `deref`, or an `index` on a span or a `string` (5.5), is a store through
-     a pointer. It kills each fact about a place reached through memory. Two facts survive it: a
-     fact about a place through a fresh pointer local, and a fact about a place with the base of the
-     destination that is separate from it. A destination with a `deref` or an `index` on a span or a
-     `string` after its first projection is separate from no place, so such a store kills each fact
-     reached through memory except the facts through a fresh pointer local. A store straight into a
-     place of a memory local or of a global, whose destination contains no `deref` and no `index` on
-     a span or a `string`, kills each fact about a place that contains a `deref` or an `index` on a
-     span or a `string`, except a fact about a place through a fresh pointer local: a pointer can
-     hold the address of that local or global. It writes no byte of another local or another global,
-     so it keeps their facts. A `call` rvalue kills each fact except the facts about a local that is
-     not memory and about its places that are not reached through memory. `alloc` and `del` are no
-     calls.
+     a pointer. It kills each fact about a place reached through memory. Three facts survive it: a
+     fact about a place through a fresh pointer local, a fact about a place with the base of the
+     destination that is separate from it, and a fact about a place in fixed storage of a memory
+     local whose frame is an origin when the destination cannot be a place of that local
+     (**Alias**). A destination with a `deref` or an `index` on a span or a `string` after its first
+     projection is separate from no place, so such a store kills each fact reached through memory
+     except the facts through a fresh pointer local and such facts of a memory local. A store
+     straight into a place of a memory local or of a global, whose destination contains no `deref`
+     and no `index` on a span or a `string`, kills each fact about a place that contains a `deref`
+     or an `index` on a span or a `string`, with two exceptions: a fact about a place through a
+     fresh pointer local, and, for a store into a memory local `_x` whose frame is an origin, a fact
+     about a place that cannot be a place of `_x` (**Alias**). A pointer can hold the address of
+     that local or global. It writes no byte of another local or another global, so it keeps their
+     facts. A `call` rvalue kills each fact except the facts about a local that is not memory and
+     about its places that are not reached through memory. `alloc` and `del` are no calls.
+   - **Alias.** The borrows of refinement R6 of `spec/ownership-design.md` 7 (D17.11, Borrows),
+     which the module `owner.alias` holds. A borrow local is a local that is not memory. An origin
+     is the frame of a memory local, but of `_0` of an aggregate type, or `exposed`. The state at a
+     point holds one bit for each borrow local and each origin, the origins of the local, and one
+     bit for each memory local whose frame is an origin, its exposure. The rvalue of `p = rvalue`
+     borrows these origins:
+     - `copy q` and `move q`: none when the type of `q` is `T* own` or `void* own`, with each mark;
+       else the origins of `_v` when `q` designates fixed storage of the borrow local `_v`; else
+       `exposed`;
+     - `addr(q)`, and `slice(q, lo, hi)` of a fixed array: the frame of `_x` when `q` designates
+       fixed storage of a memory local `_x`, and none for an aggregate `_0`; none when `q` has a
+       global base and no `deref` and no `index` on a span or a `string`; else the origins of `copy`
+       of the place before the last such projection of `q`, and none when the pointer there is
+       `own`: the type before a `deref`, or the span or `string` before an `index`, marks it `own`.
+       `slice(q, lo, hi)` of a span or a `string` borrows the origins of `copy q`. Each also borrows
+       the origins of `copy _i` for each index local `_i` of `q`, and a `slice` the origins of `lo`
+       and `hi`;
+     - `call`: `exposed`. `alloc` and a `const` operand: none. Each other rvalue: the origins of
+       each of its operands.
+     A `call` exposes each memory local whose frame one of its operands borrows, the callee operand
+     of a call through a value included. After its gen rule, the store gives the origins of its
+     rvalue to `_v` when `p` is the whole borrow local `_v`, adds them to `_v` when `p` designates
+     fixed storage of `_v` with projections, and else exposes each memory local whose frame they
+     hold (**Order**). `del`, `live`, `dead` and the terminators change no bit. The sets join by
+     union, and each block starts with no bit before the first iteration, `bb0` at the entry too.
+     The pointer that the last load of a place reads is the place before its last `deref`, or the
+     pointer field of the span or `string` before its last `index` on a span or a `string`. A place
+     with such a projection can be a place in fixed storage of a memory local `_x` whose frame is an
+     origin in two cases: that pointer is fixed storage of a borrow local whose origins hold the
+     frame of `_x`, or hold `exposed` while `_x` is exposed; or it is any other place, while `_x` is
+     exposed. When that pointer is `own`, the place is a place of no such local. It can still be
+     each other place reached through memory: each place of an aggregate `_0` and of a global, and
+     each place with a `deref` or an `index` on a span or a `string`. Each kill rule of **Kill**
+     reads this relation with the state after the exposures of the `call` of its statement, and
+     before its borrows. A held address `(*_a)` reads its place for the relation as it reads it for
+     the facts (**Held address**), and a stale one reads the pointer `_a`.
+     The bits of the state are the borrow locals times 1 more than the memory locals whose frames
+     are origins, plus those memory locals. The fixpoint takes each block in the order of its
+     number, and then each successor of a block whose state at its end changed, first in first
+     out, as `fir_flow` does. Each transfer of a block charges its statements and its terminator
+     times the bits. When the charges pass 16777216 (2^24), and so before any transfer when the
+     statements and terminators of the function times the bits pass it, the relation answers that
+     each place with a `deref` or an `index` on a span or a `string` can be a place of each memory
+     local, the reading of **Kill** before R6. A function with no memory local whose frame is an
+     origin, or with no fact, takes no fixpoint and no charge. The work of **Proof**, the leak work
+     and the inner work do not change.
+     **Proof of the alias**, in the form of `spec/ownership-design.md` 5, with A8 (D10.7). Lemma
+     (vi): at each point of a run of F, for each memory local `_x` whose frame is an origin and each
+     value `w` in storage that derives from an address of `_x` that this run took, (a) when `w` is
+     in fixed storage of a borrow local `_v`, the origins of `_v` hold the frame of `_x`, or hold
+     `exposed` while `_x` is exposed, and (b) when `w` is in any other storage, `_x` is exposed. The
+     proof is an induction over the steps of the run.
+     1. At the entry, the run has taken no address, so no value derives from one (D10.7), and (vi)
+        holds with no bit.
+     2. The borrows of `copy q` or `move q` hold, for each `_x` whose address the value derives
+        from, the frame of `_x` or `exposed` while `_x` is exposed. For fixed storage of a borrow
+        local, (a) gives it. An `own` pointer holds the start of an allocation or `null` (D17.1,
+        A3), and no cast adds `own` (D3.14), so its value derives from no address of a local; a
+        forged owner slot is outside the guarantee (`spec/ownership-design.md` 5.1, A8). For any
+        other place, (b) makes `_x` exposed, and the operand borrows `exposed`. An `addr` or a
+        `slice` derives from the address of its base: `_x` itself, a global, which is no local, or
+        the pointer that the last load reads and the index locals, whose borrows this step gives.
+     3. A `call`: after its exposures, each `_x` whose address an operand derives from is exposed,
+        by step 2. The callee reaches the storage of F only through a value that derives from an
+        address of a local of F (D10.7), so only the storage of an exposed memory local, and it
+        reaches no borrow local, whose address the run never took. So each value that the callee
+        writes or returns derives from addresses of exposed locals only: (b) holds after the call,
+        and the result, which borrows `exposed`, keeps (a).
+     4. Any other store `p = rvalue`: by D10.7 the value derives from what its operands derive
+        from, an `alloc` and a constant from nothing, and an `addr` or a `slice` from its base, so
+        the borrows of the rvalue hold what step 2 gives for each operand. A store into a whole
+        borrow local replaces its value and its origins; a store into a part adds to its origins and
+        keeps its other values. A store into any other place exposes each frame that its value
+        borrows, and a value that borrows only `exposed` derives from addresses of exposed locals
+        only. No store through a pointer writes a borrow local, whose address the run never took.
+     5. `del`, `move`, `live` and `dead` write only the zero value, which derives from no address,
+        or free storage, and a terminator writes nothing. `alloc` and `del` call `std.rt.alloc` and
+        `std.rt.free` (12.2), which keep no operand and write no storage of F, so they expose
+        nothing. A block starts with the union over its edges, and each edge holds (vi) on each run
+        that takes it.
+     So a store through a pointer writes the storage of `_x` only through a pointer that derives
+     from an address of `_x` (D10.7): the pointer that the last load of its destination reads. By
+     (vi) and step 2, that pointer is a borrow local whose origins hold the frame of `_x` or hold
+     `exposed` while `_x` is exposed, or a place in other storage while `_x` is exposed, and an
+     `own` pointer designates no frame. So a store that the relation keeps apart from `_x` writes no
+     byte of `_x`, and each fact of `_x` holds after it (kill rule 3). A fact through a pointer
+     local `_p` names the storage that the value of `_p` designates, and a store into `_p` kills the
+     fact (kill rule 1), so that storage stays one while the fact lives; when the relation keeps the
+     place apart from `_x`, that storage is no storage of `_x`, and a store straight into `_x` keeps
+     the fact (kill rule 4). An aggregate `_0` is the storage of the caller, which no address that
+     this run took names, so the lemma says nothing of it, and each kill rule reads each place
+     through a pointer as a possible place of it, as before R6. Past the limit, the relation keeps
+     nothing apart, and the proof of D17.11 holds as before. No step of the proof needs the end of
+     an exposure, and none ends one.
    - **Examples.** For a parameter `_1` of type `int_buf mut*`, the source `del(b->items);
      b->items = new(i32, 8);` lowers to `del(move (*_1).0)`, then `_3 = addr mut((*_1).0)`, the
      `new` into `_5`, `check(overwrite: (*_3))` and `(*_3) = move _5`. The pass reads `(*_3)` as
@@ -1004,8 +1101,9 @@ changes the function, and the verifier runs after it. The passes run in this ord
      move(l->head); l->head = move(n);` passes: the held address of `n->next` ends no freshness, so
      the store into `n->next` keeps the fact of `(*_1).0` (`l->head`) that the `move` made.
    - **Order.** Within a statement, the pass applies the reads of its operands first, in operand
-     order, then the kill of a `call`, then the test of a store that needs a proof (**Proof**),
-     then the kill rules of the store, then its gen rule. `live` and `dead` change no fact.
+     order, then the exposures and the kill of a `call`, then the test of a store that needs a proof
+     (**Proof**), then the kill rules of the store, then its gen rule, and last the borrows of the
+     store (**Alias**). `live` and `dead` change no fact.
    - **Join.** A block starts with the intersection of the facts at the end of its predecessors,
      where the facts at the end of a block on the edge of its test also hold the facts of that edge
      (**Tests**).

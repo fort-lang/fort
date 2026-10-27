@@ -22,11 +22,14 @@
 // local whose obligation needs one, and a fifth dataflow (run_ended) that says where the scope of a
 // named owner local has ended; a third walk of each block that holds an exit tests its obligation
 // (judge_exits). Part 2 adds the fact of each inner owner of each `del` or owning `cast`
-// (find_inners), and a fourth walk tests them (judge_inners).
+// (find_inners), and a fourth walk tests them (judge_inners). Before the facts dataflow, the
+// fixpoint of owner.alias (run_aliases) gives the origins and the exposures that kill rules 3 and
+// 4 read (is_apart), and each walk moves that state past each statement (apply_facts).
 // The module uses switches and no function-pointer dispatch table. It holds no module-level
 // mutable state: each vector belongs to one call of prove, or to the proof that it returns.
 import fort.fir;
 import fort.fir_flow;
+import fort.owner.alias;
 import fort.owner.place;
 import fort.types;
 
@@ -92,7 +95,9 @@ struct inner {
 /// `work` is the work of the overwrite proof, as WORK_LIMIT counts it, and `over` says that it
 /// passed the limit. `leak_work` adds the facts of the exits (count_owner_facts), and `leak_over`
 /// says that it passed the limit. `inner_work` adds the steps of the paths of the inner owners to
-/// `leak_work` (count_inner_steps), and `inner_over` says that it passed the limit.
+/// `leak_work` (count_inner_steps), and `inner_over` says that it passed the limit. `alias_work` is
+/// the charge of the fixpoint of owner.alias, and `alias_on` says that the kill rules read its
+/// map: the fixpoint ran and ended within alias.WORK_LIMIT.
 struct proof {
     bool mut@ own proved;
     store mut@ own stores;
@@ -105,9 +110,11 @@ struct proof {
     u64 work;
     u64 leak_work;
     u64 inner_work;
+    u64 alias_work;
     bool over;
     bool leak_over;
     bool inner_over;
+    bool alias_on;
 }
 
 fn free(proof mut* p) void {
@@ -142,7 +149,10 @@ fn has_error(proof* p) bool {
 // of the proof. The facts of the inner owners of inner `k` of the proof are the entries
 // `first_inner[k]` to `first_inner[k + 1] - 1` of `inner_fact`, in the order of the owners, and
 // `site_fact[k]` is the fact of the place that inner `k` releases. `tested[b]` says that block `b`
-// ends in a test against null, and then `tests[b]` is that test (find_tests).
+// ends in a test against null, and then `tests[b]` is that test (find_tests). `aliases` says which
+// memory locals a place through a pointer can be (alias.can_be), and `origins` is the set of
+// origins that the walks of its state use. `units` counts the statements and the terminators of
+// the function (count_units).
 struct context {
     place.survey places;
     place.path mut@ own facts;
@@ -156,6 +166,9 @@ struct context {
     u32 mut@ own site_fact;
     bool mut@ own tested;
     place.test mut@ own tests;
+    alias.map aliases;
+    fir_flow.bits origins;
+    u64 units;
 }
 
 fn free_context(context mut* c) void {
@@ -170,6 +183,8 @@ fn free_context(context mut* c) void {
     del(c->site_fact);
     del(c->tested);
     del(c->tests);
+    alias.free(&c->aliases);
+    fir_flow.bits_free(&c->origins);
 }
 
 // Appends `p` to the facts and returns its number.
@@ -251,16 +266,20 @@ fn kill_call(context* c, probes mut* pr) void {
     }
 }
 
-// The kill rules of a store into `d`, with the fresh set after its right side:
+// The kill rules of a store into `d`, with the fresh set after its right side and the state
+// `aliased` of owner.alias before the store:
 // - each fact with the base of `d` that is not separate from `d` dies, and a store into a local
 //   kills each fact with that local as a key;
 // - a store through a fresh pointer local kills nothing more;
 // - any other store through a pointer kills each fact reached through memory, but a fact through
-//   a fresh pointer local and a fact with the base of `d` that is separate from `d` survive;
+//   a fresh pointer local, a fact with the base of `d` that is separate from `d`, and a fact of a
+//   memory local that `d` cannot be (is_apart) survive;
 // - a store straight into a memory local or a global kills each fact through a pointer that is
-//   not fresh, because the pointer can hold its address, and keeps the facts of other locals and
-//   other globals, whose bytes it does not write.
-fn kill_store(context* c, place.path d, fir_flow.bits* fresh, probes mut* pr) void {
+//   not fresh, because the pointer can hold its address, but a fact whose place cannot be the
+//   memory local (is_apart), and keeps the facts of other locals and other globals, whose bytes it
+//   does not write.
+fn kill_store(context* c, place.path d, fir_flow.bits* fresh, fir_flow.bits* aliased,
+              probes mut* pr) void {
     bool to_local = d.base == fir.base_kind.bk_local;
     u64 mut k = 0;
     while (k < c->fact_count) {
@@ -280,7 +299,8 @@ fn kill_store(context* c, place.path d, fir_flow.bits* fresh, probes mut* pr) vo
         while (k < c->fact_count) {
             place.path q = c->facts[k];
             // the loop above killed each fact of the base that is not separate from `d`
-            bool kept = place.is_through_fresh(&c->places, q, fresh) || place.is_same_base(q, d);
+            bool kept = place.is_through_fresh(&c->places, q, fresh) || place.is_same_base(q, d)
+                || is_apart(c, aliased, d, q);
             if (place.is_through_memory(&c->places, q) && !kept) {
                 kill(pr, cast(k, u32));
             }
@@ -294,11 +314,26 @@ fn kill_store(context* c, place.path d, fir_flow.bits* fresh, probes mut* pr) vo
     k = 0;
     while (k < c->fact_count) {
         place.path q = c->facts[k];
-        if (place.is_indirect(&c->places, q) && !place.is_through_fresh(&c->places, q, fresh)) {
+        bool kept = place.is_through_fresh(&c->places, q, fresh) || is_apart(c, aliased, q, d);
+        if (place.is_indirect(&c->places, q) && !kept) {
             kill(pr, cast(k, u32));
         }
         k += 1;
     }
+}
+
+// Whether the path `fixed`, a place of a memory local whose frame is an origin, cannot be the
+// storage of the path `through`, a place through a pointer, in the state `aliased` of owner.alias
+// (alias.can_be). A global and an aggregate `_0` have no frame, so each place through a pointer
+// can be one of their places.
+fn is_apart(context* c, fir_flow.bits* aliased, place.path through, place.path fixed) bool {
+    if (fixed.base != fir.base_kind.bk_local || place.is_indirect(&c->places, fixed)) {
+        return false;
+    }
+    if (!alias.is_frame(&c->aliases, fixed.local)) {
+        return false;
+    }
+    return !alias.can_be(&c->aliases, aliased, through, fixed.local);
 }
 
 // Whether the rvalue `r` is a zero value of its own: `const zero T`, `null T`, or an `aggregate`
@@ -358,27 +393,32 @@ fn gen_reads(context mut* c, fir.statement* s, fir_flow.bits* stale, probes mut*
 // The kill rules of the store of the assignment `s` into `d`, the path of its destination.
 // `stale` holds the stale set before `s`, and `fresh` the fresh set after its right side.
 fn apply_kills(context* c, fir.statement* s, place.path d, fir_flow.bits* stale,
-               fir_flow.bits* fresh, probes mut* pr) void {
+               fir_flow.bits* fresh, fir_flow.bits* aliased, probes mut* pr) void {
     // a store through a stale held address can write a place through a fresh pointer local,
     // because the `addr` of a held address ends no freshness, so no fresh fact survives it
     if (place.is_stale_held(&c->places, s->place, stale)) {
-        kill_store(c, d, null, pr);
+        kill_store(c, d, null, aliased, pr);
     } else {
-        kill_store(c, d, fresh, pr);
+        kill_store(c, d, fresh, aliased, pr);
     }
 }
 
 // The effect of the statement `s` on the facts, in the order of the rules: the reads of its
-// operands, the kill of a `call`, the kill rules of its store and then its gen rule. `stale` and
-// `fresh` hold the sets before `s`, and the function moves them past `s`. A `fact` that is no
+// operands, the exposures of a `call` and its kill, the kill rules of its store and then its gen
+// rule, and last the borrows of its store. `stale`, `fresh` and `aliased` hold the sets and the
+// state of owner.alias before `s`, and the function moves them past `s`. A `fact` that is no
 // NO_FACT is the fact of the place of `s`, a store that needs a proof: *held then says whether the
 // first probe holds it after the kill of the `call` and before the kill rules of the store, the
 // test of D17.11. A walk that tests a store gives both probes one set. A terminator changes no
 // fact: rule V6 puts no `move` operand in a terminator.
 fn apply_facts(context mut* c, fir.statement* s, fir_flow.bits mut* stale,
-              fir_flow.bits mut* fresh, probes mut* pr, u32 fact, bool mut* held) void {
+              fir_flow.bits mut* fresh, fir_flow.bits mut* aliased, probes mut* pr, u32 fact,
+              bool mut* held) void {
     gen_reads(c, s, stale, pr);
     place.apply_fresh_reads(&c->places, s, fresh);
+    if (c->aliases.on) {
+        alias.apply_reads(&c->aliases, s, aliased, &c->origins);
+    }
     if (s->kind == fir.stmt_kind.st_assign) {
         u64 mark = c->places.steps_len;
         place.path d = place.trace(&c->places, s->place, stale);
@@ -388,7 +428,7 @@ fn apply_facts(context mut* c, fir.statement* s, fir_flow.bits mut* stale,
         if (fact != NO_FACT) {
             *held = fir_flow.bits_get(&pr->none, fact);
         }
-        apply_kills(c, s, d, stale, fresh, pr);
+        apply_kills(c, s, d, stale, fresh, aliased, pr);
         if (is_zero_value(c, s->value)) {
             gen_below(c, d, pr);
         }
@@ -407,6 +447,25 @@ fn apply_facts(context mut* c, fir.statement* s, fir_flow.bits mut* stale,
     }
     place.apply_fresh_store(&c->places, s, fresh);
     place.apply_stale(&c->places, s, stale);
+    if (c->aliases.on) {
+        alias.apply_store(&c->aliases, s, aliased, &c->origins);
+    }
+}
+
+// The state of owner.alias at the start of block `b` in `at`: the state that its fixpoint gives
+// when the kill rules read it, and else no bit of a set of no bits.
+fn alias_in(context* c, u32 b, fir_flow.bits mut* at) void {
+    if (c->aliases.on) {
+        fir_flow.bits_copy(at, &c->aliases.ins[cast(b, u64)]);
+    }
+}
+
+// A set of the bits of a state of owner.alias, empty when the kill rules do not read it.
+fn alias_state(context* c) fir_flow.bits {
+    if (c->aliases.on) {
+        return fir_flow.bits_new(c->aliases.count);
+    }
+    return fir_flow.bits_new(0);
 }
 
 // ---- the dataflows -----------------------------------------------------------------------------
@@ -461,12 +520,8 @@ fn free_probes(probes mut* pr) void {
 
 // Empties the first probe and the edge set, and fills the second probe.
 fn reset_probes(probes mut* pr) void {
-    u64 mut w = 0;
-    while (w < pr->none.words.len) {
-        pr->none.words[w] = 0;
-        pr->edge.words[w] = 0;
-        w += 1;
-    }
+    fir_flow.bits_clear_all(&pr->none);
+    fir_flow.bits_clear_all(&pr->edge);
     fir_flow.bits_fill(&pr->all);
 }
 
@@ -601,6 +656,8 @@ fn run_facts(context mut* c, fir.pred_table* pt, fir_flow.dataflow* stale,
     defer fir_flow.bits_free(&at_stale);
     fir_flow.bits mut at_fresh = fir_flow.bits_new(locals);
     defer fir_flow.bits_free(&at_fresh);
+    fir_flow.bits mut at_alias = alias_state(c);
+    defer fir_flow.bits_free(&at_alias);
     fir_flow.bits mut@ own edge_gens = make_sets(n, count);
     u32 mut@ own edge_to = new(u32, cast(n, u64));
     defer {
@@ -614,6 +671,7 @@ fn run_facts(context mut* c, fir.pred_table* pt, fir_flow.dataflow* stale,
         reset_probes(&pr);
         fir_flow.bits_copy(&at_stale, &stale->ins[cast(b, u64)]);
         fir_flow.bits_copy(&at_fresh, &fresh->ins[cast(b, u64)]);
+        alias_in(c, b, &at_alias);
         bool tested = c->tested[cast(b, u64)];
         place.test* t = &c->tests[cast(b, u64)];
         u32 mut i = 0;
@@ -621,8 +679,8 @@ fn run_facts(context mut* c, fir.pred_table* pt, fir_flow.dataflow* stale,
             if (tested && i == t->index) {
                 add_test_facts(c, t, &at_stale, &pr);
             }
-            apply_facts(c, fir.block_statement(f, b, i), &at_stale, &at_fresh, &pr, NO_FACT,
-                        &unused);
+            apply_facts(c, fir.block_statement(f, b, i), &at_stale, &at_fresh, &at_alias, &pr,
+                        NO_FACT, &unused);
             i += 1;
         }
         split_probes(&pr, gens, kills, b);
@@ -866,6 +924,17 @@ fn prove(fir.func* f) proof {
     return prove_within(f, WORK_LIMIT);
 }
 
+// The statements and the terminators of `f`, which each count of the work takes.
+fn count_units(fir.func* f) u64 {
+    u64 mut units = 0;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        units += cast(fir.block_statement_count(f, b), u64) + 1;
+        b += 1;
+    }
+    return units;
+}
+
 /// Proves as prove does, with `limit` as the most work. A function whose work passes `limit` gets
 /// no proof: each of its checks and its stores stays unproved. A function whose leak work passes
 /// `limit` gets no proof of its exits (pass_exits), and one whose inner work passes it gets no
@@ -876,7 +945,7 @@ fn prove_within(fir.func* f, u64 limit) proof {
     out.proved = new(bool, cast(n, u64));
     u32 mut@ own check_of = new(u32, cast(n, u64));
     defer del(check_of);
-    u64 mut units = 0;
+    u64 units = count_units(f);
     u32 mut b = 0;
     while (b < n) {
         out.proved[cast(b, u64)] = true;
@@ -885,7 +954,6 @@ fn prove_within(fir.func* f, u64 limit) proof {
     }
     b = 0;
     while (b < n) {
-        units += cast(fir.block_statement_count(f, b), u64) + 1;
         fir.terminator* t = &fir.block_at(f, b)->term;
         if (t->kind == fir.term_kind.tk_check_overwrite) {
             out.checks += 1;
@@ -904,6 +972,7 @@ fn prove_within(fir.func* f, u64 limit) proof {
     // below. A designated literal such as `context{.fact_count = n}` is no zero value.
     context mut c = context{};
     c.places.f = f;
+    c.units = units;
     c.places.locals = new(place.local_info, locals);
     c.places.first_source = new(u32, locals);
     c.block_fact = new(u32, cast(n, u64));
@@ -995,6 +1064,7 @@ fn run_dataflows(context mut* c, proof mut* out) void {
         }
         return;
     }
+    run_aliases(c, &pt, out);
     fir_flow.dataflow mut facts = fir_flow.dataflow_new(cast(c->fact_count, u32),
                                                         fir_flow.join_kind.join_intersect,
                                                         transfer_none);
@@ -1006,6 +1076,22 @@ fn run_dataflows(context mut* c, proof mut* out) void {
     }
     if (!out->inner_over) {
         judge_inners(c, &stale, &fresh, &facts, &scratch, out);
+    }
+}
+
+// Runs the fixpoint of owner.alias for the facts of `c`, before the facts dataflow, whose kill
+// rules read its state: refinement R6 of spec/ownership-design.md 7. A function with no memory
+// local whose frame is an origin gets no map, because no kill rule reads one. The charge of the
+// fixpoint goes into out->alias_work, and out->alias_on says that the kill rules read the map.
+fn run_aliases(context mut* c, fir.pred_table* pt, proof mut* out) void {
+    alias.free(&c->aliases);
+    c->aliases = alias.make(&c->places, c->units);
+    alias.run(&c->aliases, pt);
+    out->alias_work = c->aliases.work;
+    out->alias_on = c->aliases.on;
+    fir_flow.bits_free(&c->origins);
+    if (c->aliases.on) {
+        c->origins = alias.origins(&c->aliases);
     }
 }
 
@@ -1068,6 +1154,8 @@ fn judge_stores(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fre
     defer fir_flow.bits_free(&at_fresh);
     fir_flow.bits mut at_scratch = fir_flow.bits_new(locals);
     defer fir_flow.bits_free(&at_scratch);
+    fir_flow.bits mut at_alias = alias_state(c);
+    defer fir_flow.bits_free(&at_alias);
     u32 mut b = 0;
     while (b < fir.block_count(f)) {
         u64 mut k = c->first_store[cast(b, u64)];
@@ -1080,6 +1168,7 @@ fn judge_stores(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fre
             fir_flow.bits_copy(&at_stale, &stale->ins[cast(b, u64)]);
             fir_flow.bits_copy(&at_fresh, &fresh->ins[cast(b, u64)]);
             fir_flow.bits_copy(&at_scratch, &scratch->ins[cast(b, u64)]);
+            alias_in(c, b, &at_alias);
         }
         u32 mut i = 0;
         while (k < end) {
@@ -1091,7 +1180,7 @@ fn judge_stores(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fre
             }
             bool mut held = false;
             if (d != null) {
-                apply_facts(c, s, &at_stale, &at_fresh, &pr, fact, &held);
+                apply_facts(c, s, &at_stale, &at_fresh, &at_alias, &pr, fact, &held);
             }
             apply_scratch_reads(c, s, &at_scratch);
             if (here) {
@@ -1404,6 +1493,8 @@ fn judge_exits(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fres
     defer fir_flow.bits_free(&at_fresh);
     fir_flow.bits mut at_scratch = fir_flow.bits_new(locals);
     defer fir_flow.bits_free(&at_scratch);
+    fir_flow.bits mut at_alias = alias_state(c);
+    defer fir_flow.bits_free(&at_alias);
     bool mut unused = false;
     u64 mut k = 0;
     while (k < out->exits.len) {
@@ -1415,13 +1506,14 @@ fn judge_exits(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fres
         fir_flow.bits_copy(&at_stale, &stale->ins[cast(b, u64)]);
         fir_flow.bits_copy(&at_fresh, &fresh->ins[cast(b, u64)]);
         fir_flow.bits_copy(&at_scratch, &scratch->ins[cast(b, u64)]);
+        alias_in(c, b, &at_alias);
         u32 mut i = 0;
         while (k < out->exits.len && out->exits[k].block == b) {
             exit mut* e = &out->exits[k];
             while (i < e->index) {
                 fir.statement* s = fir.block_statement(f, b, i);
                 if (d != null) {
-                    apply_facts(c, s, &at_stale, &at_fresh, &pr, NO_FACT, &unused);
+                    apply_facts(c, s, &at_stale, &at_fresh, &at_alias, &pr, NO_FACT, &unused);
                 }
                 apply_scratch_reads(c, s, &at_scratch);
                 apply_scratch_store(c, s, &at_scratch);
@@ -1740,6 +1832,8 @@ fn judge_inners(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fre
     defer fir_flow.bits_free(&at_fresh);
     fir_flow.bits mut at_scratch = fir_flow.bits_new(locals);
     defer fir_flow.bits_free(&at_scratch);
+    fir_flow.bits mut at_alias = alias_state(c);
+    defer fir_flow.bits_free(&at_alias);
     bool mut unused = false;
     u64 mut k = 0;
     while (k < out->inners.len) {
@@ -1751,13 +1845,14 @@ fn judge_inners(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fre
         fir_flow.bits_copy(&at_stale, &stale->ins[cast(b, u64)]);
         fir_flow.bits_copy(&at_fresh, &fresh->ins[cast(b, u64)]);
         fir_flow.bits_copy(&at_scratch, &scratch->ins[cast(b, u64)]);
+        alias_in(c, b, &at_alias);
         u32 mut i = 0;
         while (k < out->inners.len && out->inners[k].block == b) {
             inner mut* x = &out->inners[k];
             while (i < x->index) {
                 fir.statement* s = fir.block_statement(f, b, i);
                 if (d != null) {
-                    apply_facts(c, s, &at_stale, &at_fresh, &pr, NO_FACT, &unused);
+                    apply_facts(c, s, &at_stale, &at_fresh, &at_alias, &pr, NO_FACT, &unused);
                 }
                 apply_scratch_reads(c, s, &at_scratch);
                 apply_scratch_store(c, s, &at_scratch);
