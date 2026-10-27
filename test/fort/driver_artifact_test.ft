@@ -368,6 +368,13 @@ fn interface_text() string own {
     return capture.text("out.txt");
 }
 
+// The summary file of the library, as --emit-summaries writes it.
+fn summaries_text() string own {
+    string[5] args = {"fort", "--lib", "std", "root", "--emit-summaries"};
+    assert(run(args[..]) == EXIT_OK);
+    return capture.text("out.txt");
+}
+
 // The SHA-256 of `text` as a manifest writes it.
 fn hash_of(string text, strbuf.str_buf mut* out) string {
     strbuf.clear(out);
@@ -399,6 +406,10 @@ fn the_artifact_holds_the_interface_the_archive_and_the_manifest() void {
     write_tools();
     string own iface = interface_text();
     defer del(iface);
+    string own sums = summaries_text();
+    defer del(sums);
+    // V1 has no kind of line, so the summary file holds its two header lines
+    assert(sums == "fort-summaries 1\nlibrary std\n");
     string[1] ir_args = {"-S"};
     assert(build(ir_args[..]) == EXIT_OK);
     string own ir = contents("std.ll");
@@ -422,17 +433,24 @@ fn the_artifact_holds_the_interface_the_archive_and_the_manifest() void {
     assert(str.ends_with(ar_log, "/std.o\n"));
     assert(capture.line_count(ar_log) == 3);
     assert(exists("std.flib/summaries"));
+    // the summary file of the artifact holds the bytes that --emit-summaries writes
+    string own got_sums = contents("std.flib/summaries/ownership");
+    defer del(got_sums);
+    assert(got_sums == sums);
     string own manifest = contents("std.flib/manifest");
     defer del(manifest);
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
-    assert(field_of(manifest, "interface") == hash_of(iface, &b));
+    // the interface hash covers the interface file and the summary file
+    artifact.append_interface_hash(&b, iface, sums);
+    assert(field_of(manifest, "interface") == strbuf.view(&b));
+    assert(field_of(manifest, "interface") != hash_of(iface, &b));
     assert(field_of(manifest, "archive") == hash_of(archive, &b));
     // the key is the hash of the lines before it
     i64 key_at = str.find(manifest, "\nkey ");
     assert(key_at > 0);
     assert(field_of(manifest, "key") == hash_of(manifest[0..cast(key_at, u64) + 1], &b));
-    assert(str.ends_with(manifest, "\nsummaries 1\n"));
+    assert(str.ends_with(manifest, "\nsummaries 2\n"));
 }
 
 fn the_manifest_names_the_build() void {

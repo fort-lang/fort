@@ -27,6 +27,7 @@ import fort.library.tree;
 import fort.modules;
 import fort.owner.prover;
 import fort.owner.report;
+import fort.owner.summary;
 import fort.parser;
 import fort.prim;
 import fort.session;
@@ -168,6 +169,7 @@ struct options {
     string lib_name; // the name of --lib, read only when have_lib
     string lib_root; // the root of --lib, read only when have_lib
     bool emit_interface; // --emit-interface: the interface file of --lib on stdout
+    bool emit_summaries; // --emit-summaries: the summary file of --lib on stdout
     bool have_ar; // --ar was given, which only --lib takes
     string ar; // --ar, the archiver that writes `lib.a`
     bool have_cache_dir; // --cache-dir was given, which only a library build takes
@@ -238,6 +240,7 @@ fn help() void {
     println("  --use <name>=<path>");
     println("                     use the library artifact <path> as <name>; repeatable");
     println("  --emit-interface   write the interface file of --lib to stdout and stop");
+    println("  --emit-summaries   write the ownership summaries of --lib to stdout and stop");
     println("  --ar <path>        the archiver that writes the lib.a of --lib (default ",
             DEFAULT_AR, ")");
     println("  --cache-dir <dir>  the cache directory of a library build");
@@ -370,7 +373,8 @@ fn parse_cfg(options mut* opts, string list) bool {
 
 // The options that carry no value: -S, -c, --release, --no-bounds-check, --check,
 // --leak-report, --json, --index, --tokens, --ast, --fir, --fir-test, --fir-verify-report,
-// --fir-stats, --fir-run, --emit-interface and --cache-stats, each of which sets one flag.
+// --fir-stats, --fir-run, --emit-interface, --emit-summaries and --cache-stats, each of which
+// sets one flag.
 fn parse_flag(options mut* opts, string arg) bool {
     if (arg == "-S") {
         opts->emit_ir = true;
@@ -420,6 +424,9 @@ fn parse_flag(options mut* opts, string arg) bool {
     } else if (arg == "--emit-interface") {
         // writes the interface file of the library and stops (D9.11)
         opts->emit_interface = true;
+    } else if (arg == "--emit-summaries") {
+        // writes the summary file of the library and stops (D9.11)
+        opts->emit_summaries = true;
     } else if (arg == "--cache-stats") {
         // writes the cache outcome of a library build (D9.11)
         opts->cache_stats = true;
@@ -600,7 +607,7 @@ fn parse(options mut* opts, string@ args) i32 {
         }
         return PARSE_ERROR;
     }
-    if (opts->have_lib || opts->emit_interface || opts->have_ar) {
+    if (opts->have_lib || opts->emit_interface || opts->emit_summaries || opts->have_ar) {
         return check_library_options(opts);
     }
     if (!opts->have_entry) {
@@ -688,6 +695,10 @@ fn check_library_options(options* opts) i32 {
         usage_error("--emit-interface requires --lib");
         return PARSE_ERROR;
     }
+    if (!opts->have_lib && opts->emit_summaries) {
+        usage_error("--emit-summaries requires --lib");
+        return PARSE_ERROR;
+    }
     if (!opts->have_lib) {
         usage_error("--ar requires --lib");
         return PARSE_ERROR;
@@ -715,6 +726,12 @@ fn check_library_options(options* opts) i32 {
     if (opts->emit_interface && (opts->emit_ir || opts->compile_only || opts->have_output)) {
         // the interface goes to stdout, so the command line names no file to write
         usage_error("--emit-interface does not combine with -S, -c or -o");
+        return PARSE_ERROR;
+    }
+    if (opts->emit_summaries
+        && (opts->emit_ir || opts->compile_only || opts->have_output || opts->emit_interface)) {
+        // the summaries go to stdout, which one text fills
+        usage_error("--emit-summaries does not combine with -S, -c, -o or --emit-interface");
         return PARSE_ERROR;
     }
     if (opts->have_output && opts->output == STDOUT_OUTPUT && !opts->emit_ir
@@ -1641,7 +1658,9 @@ fn front_end(session.session mut* s, options* opts, string program, libraries* l
 // Each function goes through FIR (spec/fir.md 3). A function that the lowering does not support
 // is a compile error (spec/fir.md 9.8). With --fir-stats, a module that was written adds the line
 // `lowered N of M` to stdout: N functions that the translator wrote, of M definitions of fort
-// functions, the C `main` excluded.
+// functions, the C `main` excluded. A whole program runs no overwrite_entry, so the emitter
+// computes its ownership summaries (spec/ownership-design.md 8.2), which stay in the process; a
+// library build has them from overwrite_entry.
 fn emit_module(session.session mut* s, options* opts, analysis mut* an, string ir_path) i32 {
     gen.gen_options mut gopts = gen.gen_options{};
     gopts.release = opts->release;
@@ -1650,7 +1669,13 @@ fn emit_module(session.session mut* s, options* opts, analysis mut* an, string i
     gen.emitter mut g = gen.emitter{};
     gen.gen_init(&g, s, gopts);
     defer gen.gen_free(&g);
-    if (!gen_fir.gen_program(&g, &an->ck, &an->set)) {
+    summary.graph mut calls = summary.graph{};
+    defer summary.free(&calls);
+    summary.graph mut* mut taken = null;
+    if (opts->use_names.len == 0 && !opts->have_lib) {
+        taken = &calls;
+    }
+    if (!gen_fir.emit_program(&g, &an->ck, &an->set, taken)) {
         return EXIT_COMPILE_ERROR;
     }
     bool mut written = false;
@@ -1882,7 +1907,11 @@ fn run_emptiness(session.session mut* s, fir.func* f) prover.proof {
 // because a build reports it. --leak-report lists the leak sites that are no error yet on stdout,
 // with one print: the lines of report.write_inners for each site of part 2 of the leak rule that
 // the pass does not prove. Part 2 only reports, so no such site changes the verdict (D17.20).
-fn overwrite_entry(session.session mut* s, analysis mut* an, options* opts) i32 {
+// `*calls` takes each function that the pass proves with no error, its direct calls and the work
+// of its proof, and after a run with no error it is solved: it holds the ownership summaries of
+// spec/ownership-design.md 8. `*calls` must be empty.
+fn overwrite_entry(session.session mut* s, analysis mut* an, options* opts,
+                   summary.graph mut* calls) i32 {
     fir_verify.runtime mut rt = fir_verify.runtime_of(&an->ck);
     fir_verify.excuse_mode(&rt, opts->release, opts->no_bounds_check);
     gen.node_ref_vec mut decls = gen.node_ref_vec{};
@@ -1905,6 +1934,8 @@ fn overwrite_entry(session.session mut* s, analysis mut* an, options* opts) i32 
                 }
                 if (prover.has_error(&verdicts)) {
                     proved = false;
+                } else {
+                    summary.add(calls, &f, verdicts.inner_work);
                 }
                 prover.free(&verdicts);
             }
@@ -1918,6 +1949,7 @@ fn overwrite_entry(session.session mut* s, analysis mut* an, options* opts) i32 
     if (!proved) {
         return EXIT_COMPILE_ERROR;
     }
+    summary.solve(calls, summary.WORK_LIMIT);
     return EXIT_OK;
 }
 
@@ -2413,8 +2445,10 @@ fn compile_entry(options* opts, string program) i32 {
     // A build with --use runs the emptiness pass as --check does, and then the extern check of
     // the used libraries (toolchain.md 2.1, step 4). A whole program runs the pass in the emitter
     // or in --fir, and --fir-verify-report reports no error of the pass in either mode.
+    summary.graph mut calls = summary.graph{};
+    defer summary.free(&calls);
     if (!hit && status == EXIT_OK && (opts->check || (libs.len > 0 && !opts->fir_report))) {
-        status = overwrite_entry(&s, &an, opts);
+        status = overwrite_entry(&s, &an, opts, &calls);
     }
     if (!hit && status == EXIT_OK && !check_outside(&s, opts, &libs, &an)) {
         status = EXIT_COMPILE_ERROR;
@@ -2753,15 +2787,16 @@ fn library_output(containers.pool mut* p, options* opts) string {
 }
 
 // Whether a library build can use its target. It reports the usage error when it cannot, before
-// the build reads the root (toolchain.md 2.1, step 0). --emit-interface and -S write text, so they
-// take any target form; -c and the artifact compile an object, so they take the built target
-// alone.
+// the build reads the root (toolchain.md 2.1, step 0). --emit-interface, --emit-summaries and -S
+// write text, so they take any target form; -c and the artifact compile an object, so they take
+// the built target alone.
 fn has_usable_target(options* opts) bool {
     if (!target_form(opts->target)) {
         usage_error_arg("unsupported target", opts->target);
         return false;
     }
-    if (opts->emit_interface || opts->emit_ir || opts->target == os.TARGET) {
+    if (opts->emit_interface || opts->emit_summaries || opts->emit_ir
+        || opts->target == os.TARGET) {
         return true;
     }
     eprintln("fort: error: cannot compile object for target '", opts->target, "' with a '",
@@ -2795,12 +2830,12 @@ fn archive_library(options* opts, string archive_path, string object_path) i32 {
 
 // Writes the cache entry and then the artifact `dir` (toolchain.md 2.1, step 9, and 2.2). It
 // reads the archive once and uses those bytes for its hash and for both copies.
-// `interface_text` is the interface file, and `u` holds the fields of the manifest that the key
-// covers and the key. A cache entry that cannot be written is no error (toolchain.md 2.3). The
-// status is EXIT_USAGE after a report: the archive that cannot be read, or a file of the artifact
-// that cannot be written.
-fn write_artifact(string dir, string interface_text, string archive_path, cached_unit mut* u)
-    i32 {
+// `interface_text` is the interface file, `summaries_text` the summary file, whose interface hash
+// covers both, and `u` holds the fields of the manifest that the key covers and the key. A cache
+// entry that cannot be written is no error (toolchain.md 2.3). The status is EXIT_USAGE after a
+// report: the archive that cannot be read, or a file of the artifact that cannot be written.
+fn write_artifact(string dir, string interface_text, string summaries_text, string archive_path,
+                  cached_unit mut* u) i32 {
     strbuf.str_buf mut archive = strbuf.create();
     defer strbuf.free(&archive);
     if (!io.read_file(archive_path, &archive)) {
@@ -2809,7 +2844,7 @@ fn write_artifact(string dir, string interface_text, string archive_path, cached
     }
     strbuf.str_buf mut interface_hash = strbuf.create();
     defer strbuf.free(&interface_hash);
-    artifact.append_hash(&interface_hash, cast(interface_text, u8@));
+    artifact.append_interface_hash(&interface_hash, interface_text, summaries_text);
     strbuf.str_buf mut archive_hash = strbuf.create();
     defer strbuf.free(&archive_hash);
     artifact.append_hash(&archive_hash, strbuf.bytes(&archive));
@@ -2822,12 +2857,12 @@ fn write_artifact(string dir, string interface_text, string archive_path, cached
     u->fields.interface = "";
     u->fields.archive = "";
     cache.store_library(strbuf.view(&u->dir), strbuf.view(&u->key), interface_text,
-                        strbuf.bytes(&archive), strbuf.view(&text));
+                        summaries_text, strbuf.bytes(&archive), strbuf.view(&text));
     strbuf.str_buf mut failed = strbuf.create();
     defer strbuf.free(&failed);
     i32 mut failure = 0;
-    if (!artifact.write(dir, interface_text, strbuf.bytes(&archive), strbuf.view(&text), &failed,
-                        &failure)) {
+    if (!artifact.write(dir, interface_text, summaries_text, strbuf.bytes(&archive),
+                        strbuf.view(&text), &failed, &failure)) {
         error_path("cannot write", strbuf.view(&failed), str.from_cstr(libc.strerror(failure)));
         return EXIT_USAGE;
     }
@@ -2842,8 +2877,8 @@ fn copy_entry(string dir, cached_unit* u) i32 {
     strbuf.str_buf mut failed = strbuf.create();
     defer strbuf.free(&failed);
     i32 mut failure = 0;
-    if (!artifact.write(dir, strbuf.view(&c->interface), strbuf.bytes(&c->archive),
-                        strbuf.view(&c->text), &failed, &failure)) {
+    if (!artifact.write(dir, strbuf.view(&c->interface), strbuf.view(&c->summaries),
+                        strbuf.bytes(&c->archive), strbuf.view(&c->text), &failed, &failure)) {
         error_path("cannot write", strbuf.view(&failed), str.from_cstr(libc.strerror(failure)));
         return EXIT_USAGE;
     }
@@ -2888,11 +2923,11 @@ fn remove_library_temp(string dir, string@ files) void {
 // A build that writes the artifact then takes the source hash and the key and looks the key up in
 // the cache; on a hit it writes the files of the entry to the artifact and stops. Else it loads
 // and checks every module of the library, and lowers and verifies each body as --check does.
-// --emit-interface then writes the interface file to stdout. Else the build emits one IR module
-// for the library, which -S writes to its output. It compiles the module to an object, which -c
-// writes to its output, and else archives the object and writes the cache entry and the artifact
-// `<name>.flib`. A root that cannot be read or holds no module is exit 2, and a compile
-// diagnostic is exit 1.
+// --emit-interface then writes the interface file to stdout, and --emit-summaries the summary
+// file. Else the build emits one IR module for the library, which -S writes to its output. It
+// compiles the module to an object, which -c writes to its output, and else archives the object
+// and writes the cache entry and the artifact `<name>.flib`. A root that cannot be read or holds
+// no module is exit 2, and a compile diagnostic is exit 1.
 fn library_entry(options* opts) i32 {
     if (!has_usable_target(opts)) {
         return EXIT_USAGE;
@@ -2934,7 +2969,8 @@ fn library_entry(options* opts) i32 {
     // be read gives no source hash, and the load reports it.
     cached_unit mut u = cached_unit{};
     defer free_unit(&u);
-    u.active = !opts->emit_interface && !opts->emit_ir && !opts->compile_only && listed;
+    u.active = !opts->emit_interface && !opts->emit_summaries && !opts->emit_ir
+        && !opts->compile_only && listed;
     if (u.active) {
         if (!hash_identity(&libs)) {
             return EXIT_USAGE;
@@ -2968,9 +3004,12 @@ fn library_entry(options* opts) i32 {
     if (!loaded || !checked || session.error_count(&s) > 0) {
         return EXIT_COMPILE_ERROR;
     }
-    // lower, verify and run the emptiness pass over each body, as --check does, and then check
-    // the extern declarations of the used libraries (toolchain.md 2.1, step 4)
-    i32 lowered = overwrite_entry(&s, &an, opts);
+    // lower, verify and run the emptiness pass over each body, as --check does, with the
+    // summaries, and then check the extern declarations of the used libraries (toolchain.md 2.1,
+    // step 4)
+    summary.graph mut calls = summary.graph{};
+    defer summary.free(&calls);
+    i32 lowered = overwrite_entry(&s, &an, opts, &calls);
     if (lowered != EXIT_OK) {
         return lowered;
     }
@@ -2982,6 +3021,16 @@ fn library_entry(options* opts) i32 {
     interface.write(&an.ck, &an.set, opts->lib_name, &text);
     if (opts->emit_interface) {
         print(strbuf.view(&text));
+        return EXIT_OK;
+    }
+    summary.table mut summaries = summary.table{};
+    defer summary.free_table(&summaries);
+    summary.collect(&calls, &summaries);
+    strbuf.str_buf mut summary_text = strbuf.create();
+    defer strbuf.free(&summary_text);
+    summary.write(&summaries, opts->lib_name, &summary_text);
+    if (opts->emit_summaries) {
+        print(strbuf.view(&summary_text));
         return EXIT_OK;
     }
     if (opts->emit_ir) {
@@ -3024,7 +3073,8 @@ fn library_entry(options* opts) i32 {
         built = archive_library(opts, archive_path, object_path);
     }
     if (built == EXIT_OK && !opts->compile_only) {
-        built = write_artifact(out_path, strbuf.view(&text), archive_path, &u);
+        built = write_artifact(out_path, strbuf.view(&text), strbuf.view(&summary_text),
+                               archive_path, &u);
     }
     string[3] mut written = {ir_path, "", archive_path};
     if (!opts->compile_only) {

@@ -875,25 +875,34 @@ A component with one function and no call to itself takes one pass. In each othe
 must line (`empty`, `kept`) starts present, and a round can only remove it. A may line (`result`,
 `keep`) starts absent, and a round can only add it. So the rounds end, and the errors of the members
 come from the last round. Each fixpoint is sound for a call that returns, by induction on the
-depth of the recursion. Past a charge of 2^26 for a component, each member gets no line.
+depth of the recursion. Past a charge of 2^26 for a component, each member takes the safe value of
+each kind: each must line (`empty`, `kept`) is absent, and each may line (`result`, `keep`) is
+present. The may lines are finite: `result _k` and `keep _k` for each parameter `k`. They say that
+the result can borrow each origin of each argument and that the callee can store a borrow of each
+argument, which is what step 4 of 4.6 and V1 assume of a call.
 
 ### 8.2 The text form, the hash and the rebuild rule
 
 A library build writes `summaries/ownership`. `name` is the name of the library, `symbol` a dotted
-symbol of D9.7, `digits` a decimal number and `nl` one newline byte.
+symbol of D9.7, `digit` a byte `0` to `9`, `nonzero` a byte `1` to `9` and `nl` one newline byte.
+`toolchain.md` 2.2 gives the byte rules of the file, and this grammar is the same.
 
 ```ebnf
 file     = "fort-summaries 1" nl "library " name nl { function } ;
-function = "fn " symbol nl { item nl } ;
+function = "fn " symbol nl item nl { item nl } ;
 item     = "empty " path | "kept " path | "result " token | "keep " token ;
 token    = "_" digits | path ;
 path     = "(*_" digits ")" { "." digits | "[" digits "]" } ;
+digits   = "0" | nonzero { digit } ;
 ```
 
 - Each function with a body and at least one item has an `fn` line, in byte order of the symbol.
   The items follow the order of the `item` rule, each kind in byte order. A field is its
   declaration index, which `interface.ft` fixes (`fir.md` 13). P4 gives `std.strbuf.free` the
   line `empty (*_1).0`.
+- The reader holds the form of a line and not its meaning. It takes `_0`, a `k` past the
+  parameters of the function and a number past the u64 range, so a refinement that reads a line
+  checks `k`, each field and each index against the declaration first.
 - The bytes are a function of the inputs of `interface.ft` (D9.11) and of the summary files of
   the used libraries, in every build mode. `--emit-summaries` writes the text to stdout.
 - The interface hash of D9.11 becomes the SHA-256 of one byte string. For `interface.ft` and then

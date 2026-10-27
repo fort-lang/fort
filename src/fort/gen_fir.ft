@@ -13,6 +13,7 @@ import fort.gen_data;
 import fort.modules;
 import fort.owner.prover;
 import fort.owner.report;
+import fort.owner.summary;
 import std.strbuf;
 import fort.types;
 
@@ -26,10 +27,13 @@ fn emits(ast.node* fn_node) bool {
 
 /// What the lowering of one program reads: the checker, which the lowering takes as `mut`, and
 /// the runtime entries of the checks, which the verifier reads, with the kinds that the mode
-/// removes excused (fir_verify.excuse_mode). gen_program makes it once.
+/// removes excused (fir_verify.excuse_mode). `calls` takes each function that the emptiness pass
+/// proves, for the ownership summaries, or is null when the build computes none. emit_program
+/// makes it once.
 struct fir_path {
     check.checker mut* ck;
     fir_verify.runtime rt;
+    summary.graph mut* calls;
 }
 
 /// The passes between the lowering and the translator (spec/fir.md 3): the verifier, the
@@ -42,6 +46,13 @@ struct fir_path {
 /// error of the leak rule and its notes at each such exit (D17.20), in every mode, and `f` reaches
 /// no later pass (spec/fir.md 11).
 fn check_fir(gen.emitter mut* g, fir_verify.runtime* rt, fir.func mut* f) bool {
+    return check_proved(g, rt, f, null);
+}
+
+// The passes of check_fir. After a proof with no error, `calls` takes `f` with the work of its
+// proof and its direct calls, before the build-mode pass changes `f`, when `calls` is not null.
+fn check_proved(gen.emitter mut* g, fir_verify.runtime* rt, fir.func mut* f,
+                summary.graph mut* calls) bool {
     fir_verify.verify(f, rt);
     prover.proof mut verdicts = prover.prove(f);
     defer prover.free(&verdicts);
@@ -50,6 +61,9 @@ fn check_fir(gen.emitter mut* g, fir_verify.runtime* rt, fir.func mut* f) bool {
         report.write_leaks(f, &verdicts, g->sess);
         g->failed = true;
         return false;
+    }
+    if (calls != null) {
+        summary.add(calls, f, verdicts.inner_work);
     }
     fir_passes.build_mode(f, g->opts.release, g->opts.no_bounds_check, &verdicts);
     fir_verify.runtime strict = fir_verify.unexcused(rt);
@@ -127,7 +141,7 @@ fn emit_fir(gen.emitter mut* g, fir_path mut* fp, fir.func f) bool {
     defer fir.module_free(&m);
     fir.module_add_function(&m, move(f));
     fir.func mut* added = &m.funcs.items[0];
-    if (!check_fir(g, &fp->rt, added)) {
+    if (!check_proved(g, &fp->rt, added, fp->calls)) {
         return false;
     }
     fir.module_collect_externs(&m);
@@ -285,8 +299,16 @@ fn find_main_node(ast.node* decl) ast.node* {
 // nothing ever reads it back, so it stays a parameter here. The lowering takes
 // `ck` as `mut`, and the emitter keeps a pointer that does not write.
 fn gen_program(gen.emitter mut* g, check.checker mut* ck, modules.module_set* set) bool {
+    return emit_program(g, ck, set, null);
+}
+
+/// Emits the program as gen_program does. When `calls` is not null, it also adds each function
+/// that the emptiness pass proves to `calls`, with the work of its proof, and after a run with no
+/// compile error it solves `calls`: the ownership summaries (spec/ownership-design.md 8.2).
+fn emit_program(gen.emitter mut* g, check.checker mut* ck, modules.module_set* set,
+                summary.graph mut* calls) bool {
     g->ck = ck;
-    fir_path mut fp = fir_path{.ck = ck, .rt = fir_verify.runtime_of(ck)};
+    fir_path mut fp = fir_path{.ck = ck, .rt = fir_verify.runtime_of(ck), .calls = calls};
     fir_verify.excuse_mode(&fp.rt, g->opts.release, g->opts.no_bounds_check);
     // The named types every module carries, used or not.
     strbuf.append(&g->named, gen.SPAN_TYPE);
@@ -308,5 +330,8 @@ fn gen_program(gen.emitter mut* g, check.checker mut* ck, modules.module_set* se
         }
     }
     gen_data.gen_finish(g);
+    if (calls != null && !g->failed) {
+        summary.solve(calls, summary.WORK_LIMIT);
+    }
     return !g->failed;
 }

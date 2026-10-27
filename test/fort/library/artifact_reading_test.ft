@@ -11,6 +11,7 @@
 /// other text is corrupt, each file is read once and held against its hash, and the fields that
 /// a build compares give the word of its message.
 import fort.library.artifact;
+import fort.owner.summary;
 import std.io;
 import std.libc;
 import std.str;
@@ -291,7 +292,7 @@ fn an_empty_text_and_a_text_with_no_last_newline_are_refused() void {
     strbuf.str_buf mut more = strbuf.create();
     defer strbuf.free(&more);
     strbuf.append(&more, text);
-    strbuf.append(&more, "summaries 1\n");
+    strbuf.append(&more, "summaries 2\n");
     assert(refused(strbuf.view(&more)));
     strbuf.clear(&more);
     strbuf.append(&more, text);
@@ -308,8 +309,12 @@ fn an_unknown_version_is_refused() void {
     defer strbuf.free(&c);
     assert(refused(rekeyed(text, "fort-manifest 1\n", "fort-manifest 2\n", &c)));
     assert(refused(rekeyed(text, "fort-manifest 1\n", "fort-manifest 01\n", &c)));
-    assert(refused(replaced(text, "summaries 1\n", "summaries 2\n", &c)));
-    assert(refused(replaced(text, "summaries 1\n", "summaries\n", &c)));
+    // the version of summaries/ is 2 since it holds the summary file; 1 is a build before it
+    assert(refused(replaced(text, "summaries 2\n", "summaries 1\n", &c)));
+    assert(refused(replaced(text, "summaries 2\n", "summaries 3\n", &c)));
+    assert(refused(replaced(text, "summaries 2\n", "summaries 02\n", &c)));
+    assert(refused(replaced(text, "summaries 2\n", "summaries\n", &c)));
+    assert(str.ends_with(text, "\nsummaries 2\n"));
 }
 
 fn a_key_that_is_not_the_hash_of_the_lines_before_it_is_refused() void {
@@ -349,7 +354,7 @@ fn an_unknown_field_or_the_entry_form_is_refused() void {
     // the manifest of an entry unit names `entry` in place of `library`
     assert(refused(rekeyed(text, "library geom\n", "entry main\n", &c)));
     assert(refused(rekeyed(text, "library geom\n", "library geom\nname geom\n", &c)));
-    assert(refused(replaced(text, "summaries 1\n", "summaries 1\nobject 0\n", &c)));
+    assert(refused(replaced(text, "summaries 2\n", "summaries 2\nobject 0\n", &c)));
     assert(refused(replaced(text, "archive ", "object ", &c)));
 }
 
@@ -458,7 +463,7 @@ fn a_missing_line_is_refused() void {
     string text = text_of(&m, &b);
     strbuf.str_buf mut c = strbuf.create();
     defer strbuf.free(&c);
-    assert(refused(replaced(text, "summaries 1\n", "", &c)));
+    assert(refused(replaced(text, "summaries 2\n", "", &c)));
     assert(refused(replaced(text, "\narchive ", "\n#", &c)));
     assert(refused(rekeyed(text, "\nar llvm-ar\n", "\n", &c)));
     assert(refused(rekeyed(text, "\ncc /opt/my\\x20clang\n", "\n", &c)));
@@ -545,17 +550,19 @@ fn under(string dir, string name, strbuf.str_buf mut* out) string {
     return strbuf.view(out);
 }
 
-// The interface file and the archive of the artifacts that this suite writes.
+// The interface file, the summary file and the archive of the artifacts that this suite writes.
 // `\x2F` is the second `/` of each header line, which the harness reads as a directive mark.
 string INTERFACE_TEXT =
     "/\x2F! fort interface 1\n/\x2F! library geom\n/\x2F! module geom.a\ni32 A = 1;\n";
+string SUMMARY_TEXT = "fort-summaries 1\nlibrary geom\n";
 string ARCHIVE_TEXT = "!<arch>\nmember bytes\n";
 
-// Writes a valid artifact `dir` of the library `geom` with the writer of artifact.ft.
-fn write_artifact(string dir) void {
+// Writes a valid artifact `dir` of the library `geom` with the writer of artifact.ft, whose
+// interface file is `interface_text` and whose summary file is `summary_text`.
+fn write_files(string dir, string interface_text, string summary_text) void {
     strbuf.str_buf mut interface = strbuf.create();
     defer strbuf.free(&interface);
-    artifact.append_hash(&interface, cast(INTERFACE_TEXT, u8@));
+    artifact.append_interface_hash(&interface, interface_text, summary_text);
     strbuf.str_buf mut archive = strbuf.create();
     defer strbuf.free(&archive);
     artifact.append_hash(&archive, cast(ARCHIVE_TEXT, u8@));
@@ -568,8 +575,13 @@ fn write_artifact(string dir) void {
     strbuf.str_buf mut failed = strbuf.create();
     defer strbuf.free(&failed);
     i32 mut error = 0;
-    assert(artifact.write(dir, INTERFACE_TEXT, cast(ARCHIVE_TEXT, u8@), strbuf.view(&text),
-                          &failed, &error));
+    assert(artifact.write(dir, interface_text, summary_text, cast(ARCHIVE_TEXT, u8@),
+                          strbuf.view(&text), &failed, &error));
+}
+
+// Writes a valid artifact `dir` of the library `geom` with an empty summary file.
+fn write_artifact(string dir) void {
+    write_files(dir, INTERFACE_TEXT, SUMMARY_TEXT);
 }
 
 // The verdict of reading `dir`, with the errno value in `*error`.
@@ -593,10 +605,14 @@ fn a_valid_artifact_reads_its_files_once() void {
     assert(artifact.read("valid.flib", &c, &error) == artifact.verdict.v_valid);
     assert(same(c.fields.library, "geom"));
     assert(same(strbuf.view(&c.interface), INTERFACE_TEXT));
+    assert(same(strbuf.view(&c.summaries), SUMMARY_TEXT));
+    assert(summary.entry_count(&c.ownership) == 0);
     assert(same(strbuf.view(&c.archive), ARCHIVE_TEXT));
     // the bytes that the read checked are the ones it keeps: a later change is not read
     write_file("valid.flib/interface.ft", "changed\n");
+    write_file("valid.flib/summaries/ownership", "changed\n");
     assert(same(strbuf.view(&c.interface), INTERFACE_TEXT));
+    assert(same(strbuf.view(&c.summaries), SUMMARY_TEXT));
     // a trailing separator names the same directory
     write_artifact("valid.flib/");
     assert(verdict_of("valid.flib/", &error) == artifact.verdict.v_valid);
@@ -644,6 +660,7 @@ fn a_file_that_differs_from_its_hash_is_corrupt() void {
 
 fn an_artifact_with_no_summaries_directory_is_corrupt() void {
     write_artifact("nosum.flib");
+    remove("nosum.flib/summaries/ownership");
     remove_dir("nosum.flib/summaries");
     assert(is_corrupt("nosum.flib"));
     write_file("nosum.flib/summaries", "a file\n");
@@ -653,11 +670,198 @@ fn an_artifact_with_no_summaries_directory_is_corrupt() void {
     make_dir("elsewhere");
     link("../elsewhere", "nosum.flib/summaries");
     assert(is_corrupt("nosum.flib"));
-    // a file in summaries/ is no rule of the reader
+    // another file in summaries/ is no rule of the reader
     write_artifact("fullsum.flib");
     write_file("fullsum.flib/summaries/extra", "x\n");
     i32 mut error = 0;
     assert(verdict_of("fullsum.flib", &error) == artifact.verdict.v_valid);
+}
+
+// ---- the summary file ----------------------------------------------------------------
+
+// An interface file of `geom` with three modules: `geom.a` declares the bodiless functions `f`
+// and `fa`, an extern `ext`, a constant of a function type and a struct, `geom.b` declares `gh`
+// and a global, and `geom.bc`, whose path `geom.b` starts, declares `only_bc`.
+string[14] TWO_MODULES = {
+    "/\x2F! fort interface 1",
+    "/\x2F! library geom",
+    "/\x2F! module geom.a",
+    "extern fn ext(i32 x) i32;",
+    "fn f(i32 x) i32;",
+    "fn fa() void;",
+    "fn (i32) i32 H = f;",
+    "struct s { i32 v; }",
+    "/\x2F! module geom.b",
+    "import geom.a as _0;",
+    "fn gh(_0.s* p) void;",
+    "i32 fb = 1;",
+    "/\x2F! module geom.bc",
+    "fn only_bc() void;",
+};
+
+// The text of the lines `lines`, each with a newline, in `out`.
+fn lines_text(string@ lines, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    u64 mut i = 0;
+    while (i < lines.len) {
+        strbuf.append(out, lines[i]);
+        strbuf.push(out, '\n');
+        i += 1;
+    }
+    return strbuf.view(out);
+}
+
+// The verdict of an artifact of TWO_MODULES whose summary file holds the one function `name`
+// with the one line `keep _1`.
+fn verdict_of_summary(string name) artifact.verdict {
+    strbuf.str_buf mut iface = strbuf.create();
+    defer strbuf.free(&iface);
+    strbuf.str_buf mut sums = strbuf.create();
+    defer strbuf.free(&sums);
+    strbuf.append(&sums, "fort-summaries 1\nlibrary geom\nfn ");
+    strbuf.append(&sums, name);
+    strbuf.append(&sums, "\nkeep _1\n");
+    write_files("named.flib", lines_text(TWO_MODULES[..], &iface), strbuf.view(&sums));
+    i32 mut error = 0;
+    return verdict_of("named.flib", &error);
+}
+
+fn a_summary_file_reads_into_the_summaries_of_the_artifact() void {
+    strbuf.str_buf mut iface = strbuf.create();
+    defer strbuf.free(&iface);
+    string[6] lines = {
+        "fort-summaries 1", "library geom", "fn geom.a.f", "empty (*_1).0", "fn geom.b.gh",
+        "keep _1",
+    };
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    string sums = lines_text(lines[..], &text);
+    write_files("sums.flib", lines_text(TWO_MODULES[..], &iface), sums);
+    artifact.contents mut c = artifact.contents{};
+    defer artifact.free(&c);
+    i32 mut error = 0;
+    assert(artifact.read("sums.flib", &c, &error) == artifact.verdict.v_valid);
+    assert(same(strbuf.view(&c.summaries), sums));
+    assert(summary.entry_count(&c.ownership) == 2);
+    assert(same(summary.symbol(&c.ownership, 0), "geom.a.f"));
+    assert(same(summary.symbol(&c.ownership, 1), "geom.b.gh"));
+    assert(summary.lines(&c.ownership, 0)[0].kind == summary.kind.k_empty);
+    assert(same(summary.lines(&c.ownership, 0)[0].text, "(*_1).0"));
+    assert(summary.find(&c.ownership, "geom.b.gh") == 1);
+    // a second read of the same contents replaces the summaries of the first
+    write_artifact("sums2.flib");
+    assert(artifact.read("sums2.flib", &c, &error) == artifact.verdict.v_valid);
+    assert(summary.entry_count(&c.ownership) == 0);
+    // a free leaves the contents empty
+    assert(artifact.read("sums.flib", &c, &error) == artifact.verdict.v_valid);
+    artifact.free(&c);
+    assert(summary.entry_count(&c.ownership) == 0);
+    assert(strbuf.view(&c.summaries).len == 0);
+}
+
+fn a_missing_summary_file_is_corrupt() void {
+    write_artifact("nofile.flib");
+    remove("nofile.flib/summaries/ownership");
+    assert(is_corrupt("nofile.flib"));
+    // a directory, a FIFO and a link to nowhere at its name
+    write_artifact("dirfile.flib");
+    remove("dirfile.flib/summaries/ownership");
+    make_dir("dirfile.flib/summaries/ownership");
+    assert(is_corrupt("dirfile.flib"));
+    write_artifact("fifofile.flib");
+    remove("fifofile.flib/summaries/ownership");
+    make_fifo("fifofile.flib/summaries/ownership");
+    assert(is_corrupt("fifofile.flib"));
+    write_artifact("deadlink.flib");
+    remove("deadlink.flib/summaries/ownership");
+    link("missing", "deadlink.flib/summaries/ownership");
+    assert(is_corrupt("deadlink.flib"));
+    // a link to a regular file with the same bytes is the file
+    write_artifact("linkfile.flib");
+    write_file("same_summary", SUMMARY_TEXT);
+    remove("linkfile.flib/summaries/ownership");
+    link("../../same_summary", "linkfile.flib/summaries/ownership");
+    i32 mut error = 0;
+    assert(verdict_of("linkfile.flib", &error) == artifact.verdict.v_valid);
+}
+
+fn a_summary_file_that_differs_from_the_interface_hash_is_corrupt() void {
+    write_artifact("diff.flib");
+    write_file("diff.flib/summaries/ownership", "fort-summaries 1\nlibrary geon\n");
+    assert(is_corrupt("diff.flib"));
+    // one more byte, one byte less
+    write_artifact("more.flib");
+    write_file("more.flib/summaries/ownership", "fort-summaries 1\nlibrary geom\n\n");
+    assert(is_corrupt("more.flib"));
+    write_artifact("less.flib");
+    write_file("less.flib/summaries/ownership", "fort-summaries 1\nlibrary geom");
+    assert(is_corrupt("less.flib"));
+    // the bytes of the summary file at the end of the interface file, which the counts refuse
+    strbuf.str_buf mut both = strbuf.create();
+    defer strbuf.free(&both);
+    strbuf.append(&both, INTERFACE_TEXT);
+    strbuf.append(&both, SUMMARY_TEXT);
+    write_artifact("moved.flib");
+    write_file("moved.flib/interface.ft", strbuf.view(&both));
+    write_file("moved.flib/summaries/ownership", "");
+    assert(is_corrupt("moved.flib"));
+    // an interface line that holds the hash of interface.ft alone, as a build before the summaries
+    write_artifact("old.flib");
+    strbuf.str_buf mut old = strbuf.create();
+    defer strbuf.free(&old);
+    artifact.append_hash(&old, cast(INTERFACE_TEXT, u8@));
+    strbuf.str_buf mut now = strbuf.create();
+    defer strbuf.free(&now);
+    artifact.append_interface_hash(&now, INTERFACE_TEXT, SUMMARY_TEXT);
+    strbuf.str_buf mut manifest = strbuf.create();
+    defer strbuf.free(&manifest);
+    assert(io.read_file("old.flib/manifest", &manifest));
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    write_file("old.flib/manifest", replaced(strbuf.view(&manifest), strbuf.view(&now),
+                                             strbuf.view(&old), &b));
+    assert(is_corrupt("old.flib"));
+}
+
+fn a_malformed_summary_file_is_corrupt() void {
+    // each text has an interface hash that holds, so the reader of the text refuses it
+    write_files("bad1.flib", INTERFACE_TEXT, "");
+    assert(is_corrupt("bad1.flib"));
+    write_files("bad2.flib", INTERFACE_TEXT, "fort-summaries 2\nlibrary geom\n");
+    assert(is_corrupt("bad2.flib"));
+    // the summary file of another library
+    write_files("bad3.flib", INTERFACE_TEXT, "fort-summaries 1\nlibrary std\n");
+    assert(is_corrupt("bad3.flib"));
+    write_files("bad4.flib", INTERFACE_TEXT, "fort-summaries 1\nlibrary geom\nkeep _1\n");
+    assert(is_corrupt("bad4.flib"));
+    write_files("bad5.flib", INTERFACE_TEXT, "fort-summaries 1\nlibrary geom\nfn geom.a.f\n");
+    assert(is_corrupt("bad5.flib"));
+}
+
+fn a_summary_of_a_function_that_the_interface_does_not_declare_is_corrupt() void {
+    // the bodiless functions of each module
+    assert(verdict_of_summary("geom.a.f") == artifact.verdict.v_valid);
+    assert(verdict_of_summary("geom.a.fa") == artifact.verdict.v_valid);
+    assert(verdict_of_summary("geom.b.gh") == artifact.verdict.v_valid);
+    assert(verdict_of_summary("geom.bc.only_bc") == artifact.verdict.v_valid);
+    // no declaration, an extern, a constant of a function type, a struct and a global
+    assert(verdict_of_summary("geom.a.h") == artifact.verdict.v_corrupt);
+    assert(verdict_of_summary("geom.a.ext") == artifact.verdict.v_corrupt);
+    assert(verdict_of_summary("geom.a.H") == artifact.verdict.v_corrupt);
+    assert(verdict_of_summary("geom.a.s") == artifact.verdict.v_corrupt);
+    assert(verdict_of_summary("geom.b.fb") == artifact.verdict.v_corrupt);
+    // a name that a declared name starts, one that starts a declared name, and another case
+    assert(verdict_of_summary("geom.b.g") == artifact.verdict.v_corrupt);
+    assert(verdict_of_summary("geom.a.fab") == artifact.verdict.v_corrupt);
+    assert(verdict_of_summary("geom.a.F") == artifact.verdict.v_corrupt);
+    // a function of another section, of a section whose path a path starts, and of no section
+    assert(verdict_of_summary("geom.b.f") == artifact.verdict.v_corrupt);
+    assert(verdict_of_summary("geom.b.only_bc") == artifact.verdict.v_corrupt);
+    assert(verdict_of_summary("geom.bc.gh") == artifact.verdict.v_corrupt);
+    assert(verdict_of_summary("geom.a.b.g") == artifact.verdict.v_corrupt);
+    assert(verdict_of_summary("geom.c.f") == artifact.verdict.v_corrupt);
+    assert(verdict_of_summary("geom.f") == artifact.verdict.v_corrupt);
+    assert(verdict_of_summary("std.a.f") == artifact.verdict.v_corrupt);
 }
 
 // A directory of its own under $TMPDIR, where the permission bits of a file hold.
@@ -770,7 +974,121 @@ fn a_manifest_that_cannot_be_read_is_unreadable() void {
     assert(libc.chmod(c_summaries.ptr, 0o755) == 0);
     assert(got == artifact.verdict.v_unreadable);
     assert(error == libc.EACCES);
+    // a summary file that the process cannot read
+    strbuf.str_buf mut o = strbuf.create();
+    defer strbuf.free(&o);
+    char mut@ own c_ownership = str.to_cstr(under(flib, "summaries/ownership", &o));
+    defer del(c_ownership);
+    assert(libc.chmod(c_ownership.ptr, 0) == 0);
+    got = verdict_of(flib, &error);
+    assert(libc.chmod(c_ownership.ptr, 0o644) == 0);
+    assert(got == artifact.verdict.v_unreadable);
+    assert(error == libc.EACCES);
     assert(verdict_of(flib, &error) == artifact.verdict.v_valid);
+}
+
+// An interface file of `geom` whose module `geom.a` declares `count` bodiless functions `f1000`
+// and up, and a summary file with a line for each of them, and with the line of `f<1000 + count>`,
+// which the interface does not declare, when `extra` is set. Each in `out`.
+fn many_functions(u64 count, bool extra, strbuf.str_buf mut* iface, strbuf.str_buf mut* sums)
+    void {
+    strbuf.clear(iface);
+    strbuf.clear(sums);
+    strbuf.append(iface, "/\x2F! fort interface 1\n/\x2F! library geom\n/\x2F! module geom.a\n");
+    strbuf.append(sums, "fort-summaries 1\nlibrary geom\n");
+    u64 mut k = 0;
+    while (k < count) {
+        strbuf.append(iface, "fn f");
+        strbuf.append_u64(iface, 1000 + k);
+        strbuf.append(iface, "(i32 x) i32;\n");
+        strbuf.append(sums, "fn geom.a.f");
+        strbuf.append_u64(sums, 1000 + k);
+        strbuf.append(sums, "\nkeep _1\n");
+        k += 1;
+    }
+    if (extra) {
+        strbuf.append(sums, "fn geom.a.f");
+        strbuf.append_u64(sums, 1000 + count);
+        strbuf.append(sums, "\nkeep _1\n");
+    }
+}
+
+fn a_summary_file_of_many_functions_reads_its_declarations_once() void {
+    // 3000 lines against 3000 declarations: the reader reads the declarations into a set once,
+    // where a scan of the interface for each line took the product of the two counts
+    strbuf.str_buf mut iface = strbuf.create();
+    defer strbuf.free(&iface);
+    strbuf.str_buf mut sums = strbuf.create();
+    defer strbuf.free(&sums);
+    many_functions(3000, false, &iface, &sums);
+    write_files("many.flib", strbuf.view(&iface), strbuf.view(&sums));
+    artifact.contents mut c = artifact.contents{};
+    defer artifact.free(&c);
+    i32 mut error = 0;
+    assert(artifact.read("many.flib", &c, &error) == artifact.verdict.v_valid);
+    assert(summary.entry_count(&c.ownership) == 3000);
+    assert(summary.find(&c.ownership, "geom.a.f3999") == 2999);
+    // one line more, of a function that the interface lacks, is corrupt
+    many_functions(3000, true, &iface, &sums);
+    write_files("many.flib", strbuf.view(&iface), strbuf.view(&sums));
+    assert(is_corrupt("many.flib"));
+    // the first and the last declaration count, and a declaration before the first section
+    // declares nothing
+    many_functions(1, false, &iface, &sums);
+    write_files("one.flib", strbuf.view(&iface), strbuf.view(&sums));
+    assert(!is_corrupt("one.flib"));
+    string early = "fn f1000(i32 x) i32;\n/\x2F! module geom.b\n";
+    write_files("early.flib", early, "fort-summaries 1\nlibrary geom\nfn geom.b.f1000\nkeep _1\n");
+    assert(is_corrupt("early.flib"));
+}
+
+fn a_summary_file_with_each_kind_reads_through_the_artifact() void {
+    strbuf.str_buf mut iface = strbuf.create();
+    defer strbuf.free(&iface);
+    string[11] lines = {
+        "fort-summaries 1", "library geom", "fn geom.a.f", "empty (*_1).0", "empty (*_1)[3]",
+        "kept (*_2).1", "result _1", "result (*_1).0", "keep _2", "fn geom.a.fa",
+        "kept (*_1)",
+    };
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    string sums = lines_text(lines[..], &text);
+    // `result _1` comes after `result (*_1).0` in byte order, so the text is refused as written
+    write_files("kinds.flib", lines_text(TWO_MODULES[..], &iface), sums);
+    assert(is_corrupt("kinds.flib"));
+    string[11] sorted = {
+        "fort-summaries 1", "library geom", "fn geom.a.f", "empty (*_1).0", "empty (*_1)[3]",
+        "kept (*_2).1", "result (*_1).0", "result _1", "keep _2", "fn geom.a.fa",
+        "kept (*_1)",
+    };
+    strbuf.str_buf mut good = strbuf.create();
+    defer strbuf.free(&good);
+    string ordered = lines_text(sorted[..], &good);
+    write_files("kinds.flib", lines_text(TWO_MODULES[..], &iface), ordered);
+    artifact.contents mut c = artifact.contents{};
+    defer artifact.free(&c);
+    i32 mut error = 0;
+    assert(artifact.read("kinds.flib", &c, &error) == artifact.verdict.v_valid);
+    assert(summary.entry_count(&c.ownership) == 2);
+    summary.line@ first = summary.lines(&c.ownership, 0);
+    assert(first.len == 6);
+    assert(first[0].kind == summary.kind.k_empty && same(first[0].text, "(*_1).0"));
+    assert(first[1].kind == summary.kind.k_empty && same(first[1].text, "(*_1)[3]"));
+    assert(first[2].kind == summary.kind.k_kept && same(first[2].text, "(*_2).1"));
+    assert(first[3].kind == summary.kind.k_result && same(first[3].text, "(*_1).0"));
+    assert(first[4].kind == summary.kind.k_result && same(first[4].text, "_1"));
+    assert(first[5].kind == summary.kind.k_keep && same(first[5].text, "_2"));
+    summary.line@ second = summary.lines(&c.ownership, 1);
+    assert(second.len == 1 && second[0].kind == summary.kind.k_kept);
+    // the summaries are the ones of the bytes that the read checked
+    write_file("kinds.flib/summaries/ownership", SUMMARY_TEXT);
+    assert(summary.entry_count(&c.ownership) == 2);
+    assert(same(strbuf.view(&c.summaries), ordered));
+    // the manifest of a used library names the hash that its dependents hold
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    artifact.append_interface_hash(&want, lines_text(TWO_MODULES[..], &iface), ordered);
+    assert(same(c.fields.interface, strbuf.view(&want)));
 }
 
 // ---- the fields that a build compares ------------------------------------------------
@@ -925,6 +1243,13 @@ fn main() i32 {
     a_missing_or_wrong_manifest_is_corrupt();
     a_file_that_differs_from_its_hash_is_corrupt();
     an_artifact_with_no_summaries_directory_is_corrupt();
+    a_summary_file_reads_into_the_summaries_of_the_artifact();
+    a_missing_summary_file_is_corrupt();
+    a_summary_file_that_differs_from_the_interface_hash_is_corrupt();
+    a_malformed_summary_file_is_corrupt();
+    a_summary_of_a_function_that_the_interface_does_not_declare_is_corrupt();
+    a_summary_file_with_each_kind_reads_through_the_artifact();
+    a_summary_file_of_many_functions_reads_its_declarations_once();
     an_entry_that_is_no_regular_file_is_corrupt();
     a_manifest_that_cannot_be_read_is_unreadable();
     println("directory ok");

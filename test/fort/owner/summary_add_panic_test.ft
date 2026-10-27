@@ -1,0 +1,38 @@
+//! run
+//! flags: -I ../../src -I support
+//! abort
+//! stderr: panic: summary.add: a second function with the symbol of a node
+//! stdout:
+//| 1
+/// Each function of a unit has its own symbol (D9.7), so owner.summary.add takes a function once.
+/// The test adds one function and then the same function again, which breaks the precondition.
+import fort.fir;
+import lower_env;
+import fort.owner.summary;
+import pass_env;
+
+string[1] PRELUDE = {
+    "i32 UNUSED = 0;",
+};
+
+string[5] ONE = {
+    "fn main.one() -> void {",
+    "    bb0: {",
+    "        return;",
+    "    }",
+    "}",
+};
+
+fn main() i32 {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    fir.module mut m = pass_env.parse(&e, PRELUDE[..], ONE[..]);
+    defer fir.module_free(&m);
+    summary.graph mut g = summary.graph{};
+    defer summary.free(&g);
+    summary.add(&g, &m.funcs.items[0], 1);
+    println(summary.node_count(&g));
+    summary.add(&g, &m.funcs.items[0], 1);
+    return 0;
+}

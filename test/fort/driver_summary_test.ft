@@ -1,0 +1,190 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| graph ok
+//| errors ok
+//| ok
+/// Checks that `driver.overwrite_entry`, the emptiness pass of `--check`, of a build with `--use`
+/// and of `--lib`, computes the ownership summaries (spec/ownership-design.md 8,
+/// toolchain.md 2.1 step 4): each function that the pass proves is a node of the graph that the
+/// caller gives, with its direct calls, and after a run with no error the graph is solved. A
+/// function with an error is no node, and a run with an error solves nothing. The three modes call
+/// this one function, and the overwrite errors of each mode hold that they call it
+/// (driver_test, driver_use_test, driver_library_test).
+import capture;
+import fort.check_stmt;
+import fort.diag;
+import fort.driver;
+import fort.owner.summary;
+import fort.session;
+import std.io;
+import std.libc;
+import std.str;
+import std.strbuf;
+import std.sys;
+
+fn make_dir(string path) void {
+    char mut@ own c_path = str.to_cstr(path);
+    defer del(c_path);
+    assert(libc.mkdir(c_path.ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
+}
+
+fn write_file(string path, string text) void {
+    assert(io.write_file(path, cast(text, u8@)));
+}
+
+fn same(string got, string want) bool {
+    if (got != want) {
+        println("got:  ", got);
+        println("want: ", want);
+    }
+    return got == want;
+}
+
+// Checks the program `lines`, each ended by a newline, as `main.ft` with an empty runtime, as
+// `fort --check --std-dir std main.ft` does, and runs `driver.overwrite_entry` with the graph
+// `calls`. Gives the status of overwrite_entry, or 2 when the program does not check. The
+// diagnostics go to `err.txt`.
+fn check(string@ lines, summary.graph mut* calls) i32 {
+    make_dir("std");
+    write_file("std/rt.ft", "// the empty runtime of a driver test\n");
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    u64 mut i = 0;
+    while (i < lines.len) {
+        strbuf.append(&src, lines[i]);
+        strbuf.push(&src, '\n');
+        i += 1;
+    }
+    write_file("main.ft", strbuf.view(&src));
+    string[5] args = {"fort", "--check", "--std-dir", "std", "main.ft"};
+    driver.options mut opts = driver.options_create();
+    defer driver.options_free(&opts);
+    assert(driver.parse(&opts, args[..]) == driver.PARSE_OK);
+    i32 saved_err = capture.begin(io.STDERR, "err.txt");
+    session.session mut s = session.create();
+    defer session.free(&s);
+    driver.configure(&s, &opts);
+    diag.set_text(session.diags(&s), true);
+    session.show_sources(&s);
+    driver.analysis mut an = driver.analysis_create(&s);
+    defer driver.analysis_free(&an);
+    i32 mut status = 2;
+    bool loaded = driver.load_closure(&s, &opts, "fort", &an);
+    an.ck.require_main = false;
+    bool checked = check_stmt.check_program(&an.ck, &an.set);
+    if (loaded && checked && session.error_count(&s) == 0) {
+        status = driver.overwrite_entry(&s, &an, &opts, calls);
+    }
+    capture.end(io.STDERR, saved_err);
+    return status;
+}
+
+// The components of `g` in order, as `<members> | <members>`, with `*` before the first member
+// of a cyclic component.
+fn components_of(summary.graph* g, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    u64 mut c = 0;
+    while (c < summary.component_count(g)) {
+        if (c > 0) {
+            strbuf.append(out, " | ");
+        }
+        summary.component comp = summary.component_at(g, c);
+        if (comp.cyclic) {
+            strbuf.push(out, '*');
+        }
+        u64 mut k = 0;
+        while (k < comp.count) {
+            if (k > 0) {
+                strbuf.push(out, ' ');
+            }
+            strbuf.append(out, summary.node_symbol(g, summary.member(g, c, k)));
+            k += 1;
+        }
+        c += 1;
+    }
+    return strbuf.view(out);
+}
+
+// `even` and `odd` call each other, `odd` calls `base`, and `top` calls `even`. `take` holds an
+// owner, so its proof has work.
+string[19] PROGRAM = {
+    "fn base() bool {",
+    "    return true;",
+    "}",
+    "fn even(bool n) bool {",
+    "    if (n) {",
+    "        return odd(false);",
+    "    }",
+    "    return true;",
+    "}",
+    "fn odd(bool n) bool {",
+    "    return even(base());",
+    "}",
+    "fn top() bool {",
+    "    return even(true);",
+    "}",
+    "fn take(i32 mut* own p) void {",
+    "    del(p);",
+    "}",
+    "",
+};
+
+fn the_check_adds_each_proved_function_and_solves_the_graph() void {
+    summary.graph mut g = summary.graph{};
+    defer summary.free(&g);
+    assert(check(PROGRAM[..], &g) == driver.EXIT_OK);
+    assert(summary.node_count(&g) == 5);
+    assert(same(summary.node_symbol(&g, 0), "main.base"));
+    assert(same(summary.node_symbol(&g, 4), "main.take"));
+    // the graph is solved: its components stand, callees first, each with one round
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string want = "main.base | *main.even main.odd | main.top | main.take";
+    assert(same(components_of(&g, &b), want));
+    u64 mut c = 0;
+    while (c < summary.component_count(&g)) {
+        assert(summary.component_at(&g, c).rounds == 1);
+        c += 1;
+    }
+    // each node has the work of its proof
+    assert(g.nodes.items[4].work > 0);
+    assert(g.nodes.items[0].work == 0);
+    assert(g.nodes.items[4].params == 1);
+    // V1 gives no line
+    summary.table mut t = summary.table{};
+    defer summary.free_table(&t);
+    summary.collect(&g, &t);
+    assert(summary.entry_count(&t) == 0);
+}
+
+// `fill` stores into an `own` reference that the pass cannot prove empty; `fine` calls nothing.
+string[6] ERROR = {
+    "fn fill(i32 mut* own mut* out) void {",
+    "    *out = new(i32);",
+    "}",
+    "fn fine() i32 {",
+    "    return 1;",
+    "}",
+};
+
+fn a_function_with_an_error_is_no_node_and_nothing_is_solved() void {
+    summary.graph mut g = summary.graph{};
+    defer summary.free(&g);
+    assert(check(ERROR[..], &g) == driver.EXIT_COMPILE_ERROR);
+    string own err = capture.text("err.txt");
+    defer del(err);
+    assert(str.find(err, "overwriting owned value") >= 0);
+    assert(summary.node_count(&g) == 1);
+    assert(same(summary.node_symbol(&g, 0), "main.fine"));
+    assert(summary.component_count(&g) == 0);
+}
+
+fn main() i32 {
+    the_check_adds_each_proved_function_and_solves_the_graph();
+    println("graph ok");
+    a_function_with_an_error_is_no_node_and_nothing_is_solved();
+    println("errors ok");
+    println("ok");
+    return 0;
+}

@@ -1,0 +1,274 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| graph ok
+//| errors ok
+//| ok
+/// Checks that src/fort/gen_fir.ft gives each function that the emptiness pass proves to the
+/// call graph of the ownership summaries (spec/ownership-design.md 8.2), so a whole-program build
+/// computes the summaries in the process: each emitted function is a node, with its direct calls
+/// and the work of its proof, and the graph orders the components callees first. A function with
+/// an error of the pass is no node, and an emitter with no graph takes none.
+import check_env;
+import fort.gen;
+import gen_env;
+import fort.gen_fir;
+import fort.owner.summary;
+import std.str;
+import std.strbuf;
+
+// Opens `e` over the source `lines`, each ended by its newline, with an empty runtime, and emits
+// the whole program with the graph `calls`. Gives what emit_program gives.
+fn emit(gen_env.env mut* e, string@ lines, summary.graph mut* calls) bool {
+    gen_env.open_with(e, gen.gen_options{});
+    strbuf.str_buf mut src = strbuf.create();
+    defer strbuf.free(&src);
+    u64 mut i = 0;
+    while (i < lines.len) {
+        strbuf.append(&src, lines[i]);
+        i += 1;
+    }
+    assert(gen_env.open_module(e, strbuf.view(&src)));
+    return gen_fir.emit_program(&e->g, &e->c.ck, &e->c.m.set, calls);
+}
+
+// The components of `g` in order, as `<members> | <members>`, with `*` before the first member
+// of a cyclic component.
+fn components_of(summary.graph* g, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    u64 mut c = 0;
+    while (c < summary.component_count(g)) {
+        if (c > 0) {
+            strbuf.append(out, " | ");
+        }
+        summary.component comp = summary.component_at(g, c);
+        if (comp.cyclic) {
+            strbuf.push(out, '*');
+        }
+        u64 mut k = 0;
+        while (k < comp.count) {
+            if (k > 0) {
+                strbuf.push(out, ' ');
+            }
+            strbuf.append(out, summary.node_symbol(g, summary.member(g, c, k)));
+            k += 1;
+        }
+        c += 1;
+    }
+    return strbuf.view(out);
+}
+
+fn same(string got, string want) bool {
+    if (got != want) {
+        println("got:  ", got);
+        println("want: ", want);
+    }
+    return got == want;
+}
+
+// A program whose `main` calls `ping`, `ping` and `pong` call each other, `pong` calls `leaf` and
+// an extern, and `leaf` calls `pong` through a function value. `spare` is a function that no
+// function calls.
+string[21] PROGRAM = {
+    "extern fn abs(i32 x) i32;\n",
+    "fn ping(i32 n) i32 {\n",
+    "    if (n == 0) {\n",
+    "        return 0;\n",
+    "    }\n",
+    "    return pong(n);\n",
+    "}\n",
+    "fn pong(i32 n) i32 {\n",
+    "    i32 a = abs(n);\n",
+    "    leaf();\n",
+    "    return ping(a);\n",
+    "}\n",
+    "fn leaf() void {\n",
+    "    fn (i32) i32 back = pong;\n",
+    "    i32 r = back(0);\n",
+    "}\n",
+    "fn spare() void {\n",
+    "}\n",
+    "fn main() i32 {\n",
+    "    return ping(1);\n",
+    "}\n",
+};
+
+fn the_emitter_adds_each_proved_function_with_its_direct_calls() void {
+    gen_env.env mut e = gen_env.env{};
+    defer gen_env.close(&e);
+    summary.graph mut g = summary.graph{};
+    defer summary.free(&g);
+    assert(emit(&e, PROGRAM[..], &g));
+    // the functions in the order that the emitter writes them
+    assert(summary.node_count(&g) == 5);
+    assert(same(summary.node_symbol(&g, 0), "main.ping"));
+    assert(same(summary.node_symbol(&g, 1), "main.pong"));
+    assert(same(summary.node_symbol(&g, 2), "main.leaf"));
+    assert(same(summary.node_symbol(&g, 3), "main.spare"));
+    assert(same(summary.node_symbol(&g, 4), "main.main"));
+    // `pong` calls `ping` and `leaf` directly; the extern and the function value are no edge
+    assert(g.nodes.items[1].call_count == 2);
+    assert(g.nodes.items[2].call_count == 0);
+    // emit_program solved the graph: the components stand, callees first
+    assert(summary.component_count(&g) == 4);
+    assert(summary.component_at(&g, 1).cyclic && summary.component_at(&g, 1).rounds == 1);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string want = "main.leaf | *main.ping main.pong | main.spare | main.main";
+    assert(same(components_of(&g, &b), want));
+    // V1 gives no line, so the table of the program is empty
+    summary.table mut t = summary.table{};
+    defer summary.free_table(&t);
+    summary.collect(&g, &t);
+    assert(summary.entry_count(&t) == 0);
+}
+
+// A program whose `fill` stores into an `own` reference that the pass cannot prove empty, and
+// whose `fine` has no error.
+string[9] ERROR = {
+    "fn fill(i32 mut* own mut* out) void {\n",
+    "    *out = new(i32);\n",
+    "}\n",
+    "fn fine() i32 {\n",
+    "    return 1;\n",
+    "}\n",
+    "fn main() i32 {\n",
+    "    return fine();\n",
+    "}\n",
+};
+
+fn a_function_with_an_error_of_the_pass_is_no_node() void {
+    gen_env.env mut e = gen_env.env{};
+    defer gen_env.close(&e);
+    summary.graph mut g = summary.graph{};
+    defer summary.free(&g);
+    assert(!emit(&e, ERROR[..], &g));
+    assert(gen_env.errors(&e) == 1);
+    assert(summary.node_count(&g) == 2);
+    // a run with a compile error solves no graph
+    assert(summary.component_count(&g) == 0);
+    assert(same(summary.node_symbol(&g, 0), "main.fine"));
+    assert(same(summary.node_symbol(&g, 1), "main.main"));
+}
+
+fn a_function_with_a_proof_charges_the_work_of_the_proof() void {
+    // `take` holds an owner local, so its proof has work; `plain` holds none, so its proof has none
+    string[8] lines = {
+        "fn take(i32 mut* own p) void {\n",
+        "    del(p);\n",
+        "}\n",
+        "fn plain() void {\n",
+        "}\n",
+        "fn main() i32 {\n",
+        "    return 0;\n",
+        "}\n",
+    };
+    gen_env.env mut e = gen_env.env{};
+    defer gen_env.close(&e);
+    summary.graph mut g = summary.graph{};
+    defer summary.free(&g);
+    assert(emit(&e, lines[..], &g));
+    assert(summary.node_count(&g) == 3);
+    assert(g.nodes.items[0].work > 0);
+    assert(g.nodes.items[1].work == 0);
+}
+
+fn an_emitter_with_no_graph_writes_the_same_module() void {
+    gen_env.env mut e = gen_env.env{};
+    defer gen_env.close(&e);
+    summary.graph mut g = summary.graph{};
+    defer summary.free(&g);
+    assert(emit(&e, PROGRAM[..], &g));
+    strbuf.str_buf mut with_graph = strbuf.create();
+    defer strbuf.free(&with_graph);
+    strbuf.append(&with_graph, gen_env.funcs(&e));
+    gen_env.env mut f = gen_env.env{};
+    defer gen_env.close(&f);
+    assert(emit(&f, PROGRAM[..], null));
+    assert(gen_env.funcs(&f) == strbuf.view(&with_graph));
+}
+
+// A module `helper` whose `even` and `odd` call each other, and whose `base` they call; the
+// entry module calls `even` and calls itself.
+string[12] HELPER = {
+    "fn base() i32 {\n",
+    "    return 0;\n",
+    "}\n",
+    "fn even(i32 n) i32 {\n",
+    "    if (n == 0) {\n",
+    "        return base();\n",
+    "    }\n",
+    "    return odd(n);\n",
+    "}\n",
+    "fn odd(i32 n) i32 {\n",
+    "    return even(n);\n",
+    "}\n",
+};
+string[7] ENTRY = {
+    "import helper;\n",
+    "fn spin(i32 n) i32 {\n",
+    "    return spin(helper.even(n));\n",
+    "}\n",
+    "fn main() i32 {\n",
+    "    return spin(1);\n",
+    "}\n",
+};
+
+// The lines `lines` joined, in `out`.
+fn joined(string@ lines, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    u64 mut i = 0;
+    while (i < lines.len) {
+        strbuf.append(out, lines[i]);
+        i += 1;
+    }
+    return strbuf.view(out);
+}
+
+fn a_callee_of_an_imported_module_comes_first() void {
+    gen_env.env mut e = gen_env.env{};
+    gen_env.open(&e);
+    defer gen_env.close(&e);
+    strbuf.str_buf mut helper = strbuf.create();
+    defer strbuf.free(&helper);
+    check_env.add(&e.c, "helper.ft", joined(HELPER[..], &helper));
+    strbuf.str_buf mut entry = strbuf.create();
+    defer strbuf.free(&entry);
+    assert(gen_env.open_module(&e, joined(ENTRY[..], &entry)));
+    summary.graph mut g = summary.graph{};
+    defer summary.free(&g);
+    assert(gen_fir.emit_program(&e.g, &e.c.ck, &e.c.m.set, &g));
+    // the emitter writes the imported module first
+    assert(summary.node_count(&g) == 5);
+    assert(same(summary.node_symbol(&g, 0), "helper.base"));
+    assert(same(summary.node_symbol(&g, 3), "main.spin"));
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string want = "helper.base | *helper.even helper.odd | *main.spin | main.main";
+    assert(same(components_of(&g, &b), want));
+    // each cycle stays inside its module (D9.5)
+    u64 mut c = 0;
+    while (c < summary.component_count(&g)) {
+        summary.component comp = summary.component_at(&g, c);
+        string first = summary.node_symbol(&g, summary.member(&g, c, 0));
+        u64 mut k = 1;
+        while (k < comp.count) {
+            string other = summary.node_symbol(&g, summary.member(&g, c, k));
+            assert(str.starts_with(other, "helper.") == str.starts_with(first, "helper."));
+            k += 1;
+        }
+        c += 1;
+    }
+}
+
+fn main() i32 {
+    the_emitter_adds_each_proved_function_with_its_direct_calls();
+    a_function_with_a_proof_charges_the_work_of_the_proof();
+    an_emitter_with_no_graph_writes_the_same_module();
+    a_callee_of_an_imported_module_comes_first();
+    println("graph ok");
+    a_function_with_an_error_of_the_pass_is_no_node();
+    println("errors ok");
+    println("ok");
+    return 0;
+}
