@@ -2911,6 +2911,172 @@ says ownership is "by convention", this section supersedes it.
   site that the analysis could not prove for a parameter `q`, and so were `del(l->head)` after a
   loop on `l->head != null`, and `del(p)` after `move(p)` or after `del(p)`, with no test.
 
+### D17.21 Use after move or del
+- owner: `memory-model.md` (`move`, `del`, transfer, lending, the overwrite check, the leak rule,
+  the use rule), `core-language.md` (`move`, `del`, statements), `fir.md` 11 (the pass).
+- rule: Use after `move` or `del`. The terms owner, local owner and memory owner are those of
+  D17.20, and the analysis reads the FIR of one function and no other function. Places,
+  tracked places, keys, separate places, fixed storage and the Borrows are those of D17.11. A
+  place contains `p` when `p` is a tracked place below it (D17.11). A fixed array of owners has an
+  owner at each constant index in its bounds. A `move` or a `del` of a place vacates it: it
+  leaves the zero value there (D17.6, D17.9).
+  An owner that is no local owner has no obligation of this rule: a global, a place through a
+  pointer such as `p->next`, and an element of a span such as `kids[i]`. A use of it after a
+  `move` or a `del` is outside the guarantee of this rule.
+  A place can overlap a local owner `p` when one of these is true:
+  - It is a place in the fixed storage of the local of `p`, and it is not separate from `p`
+    (D17.11). So `p` itself, a place that contains `p` and a part of `p`, such as `p.ptr`, can
+    overlap `p`. For an owner `b[k]` of a fixed array `b`, `b[j]` can overlap it, also for a key
+    `j` other than `k` and for an index that is no key.
+  - It has a dereference or an index into a span or a `string`, and it can be a place in the
+    fixed storage of the local of `p` (D17.11, Borrows). Then `p` is a memory owner. The type of
+    the place does not change this (D10.7). Past the limit of the charges of the Borrows, such a
+    place can be a place of each memory local, as for the kill rules of D17.11.
+  A local owner `p` can be vacated at a point when a path of the FIR reaches the point through
+  one of these operations, and no event that ends the state follows the operation on that path:
+  1. a `move` or a `del` of a place that can overlap `p`, also the implicit `move` of `return x`
+     (D17.5, D17.7);
+  2. a call, when `p` is a memory owner. Kill rule 5 of D17.11 kills each fact of a memory owner
+     at a call, and this rule takes `p` as vacated after the call. `new` and `del` are no calls.
+  Two events end the state:
+  - a store whose destination is `p` or contains `p`, when no store into the local that is the
+    key of an index of that destination follows the store on the path;
+  - the edge where a test against `null` finds a value that is not `null`, because a vacated owner
+    holds the zero value. The test compares `p` with `null`, or `p.ptr` when `p` is a span or a
+    `string` (D10.5), in the forms of gen rule 6 of D17.11: the branch of an `if`, of a loop
+    condition or of `?:`, with the operands in either order, also under `!`. A test that is the
+    left operand of `&&` or of `||` ends the state in the right operand when the right operand
+    runs only where the test finds a value that is not `null`, as in `p != null && e` and
+    `p == null || e`. The value of a whole `&&` or `||` ends nothing. The event holds from the
+    read of the test, so an operation of the list above between that read and the branch vacates
+    `p` again. It ends the state when no store into the local that is the key of an index of `p`
+    follows the read on the path.
+  Inside one statement, the reads come in the order of `fir.md` 7: the operands in evaluation
+  order, each index local before its place, and the pointers that the destination of a store
+  loads after the right side. A `move` operand vacates its place right after its read, so a later
+  read in the same statement can see the zero value: `take(move(p), *p)` reads `p` after its
+  `move`, and that read is a use. A `del` vacates its operand after the reads of its access path.
+  A call vacates after the reads of its callee and of its arguments, and before the store of its
+  result. A store ends the state after the reads of its right side and of its destination. A
+  terminator reads its operands. `check(overwrite: p)` reads the pointers that the address of `p`
+  loads, and its test of `p` is no read of this rule (`fir.md` 7).
+  A use of a local owner `p` is a read of one of these places:
+  - a tracked place in fixed storage that is `p`, that contains `p`, or that is a part of `p`,
+    such as `p.ptr`. So a read of `b[k]` is a use of the owner `b[k]` and of no other element;
+  - a place in fixed storage that is no tracked place, because an index of it is no key, when it
+    can overlap `p`. So a read of `b[i]` for an index `i` that is no key is a use of each owner
+    of `b`;
+  - a place with a dereference or an index into a span or a `string`, when it can overlap `p`.
+  The reads of an operation are the read of the value of each operand and the reads of each
+  access path: `p->f` and `p[i]` read `p`, and `**q` reads `*q`. An access path reads in this way
+  also when the operation stores into the place, takes its address, or moves or deletes it. So a
+  load through `p` (`*p`, `p->f`,
+  `p[i]`), a span expression of `p`, and a copy of `p`, of `p.ptr` or of a place that contains
+  `p` are uses, and so is a read of an element of a fixed array of owners whose index is no key.
+  A copy is each read of the value of a place: as an operand, an argument, an
+  initializer or a lend (D17.4).
+  Three reads of a place in fixed storage are no uses, by the ruling on Q5
+  (`spec/ownership-design.md` 12). D17.6 and D17.9 define the zero value that each of them sees:
+  - the read of the operand of a `move` or a `del`. The reads of its access path stay uses, so
+    `del(p->f)` uses `p`;
+  - a read of the `.len` of a span or a `string`;
+  - a comparison of a pointer, or of the `.ptr` of a span or a `string`, with `null`.
+  A store into a place reads no value of it, so a store into `p` is no use. A read of a place
+  with a dereference or an index into a span or a `string` is a use of each memory owner that the
+  place can overlap, with two exceptions: the read of the operand of a `move` or a `del`, and a
+  comparison with `null`. A read of a `.len` there is a use, because the analysis reads no type
+  through a pointer.
+  The analysis must prove at each use of a local owner `p` that `p` cannot be vacated there.
+  Otherwise the use is a compile error, because the read can see the zero value that a `move` or
+  a `del` left, and a load through that value dereferences `null` (D10.5, D17.9):
+  `use after move or del: '<place>' can be vacated here`. A note names one operation of the list
+  above from which a path reaches the use with no event that ends the state:
+  `'<place>' is moved here` at a `move` or at the `return` of an implicit `move`,
+  `'<place>' is deleted here` at a `del`, and `'<place>' can change in this call` at a call. When
+  more than one operation does this, the note names the first in the order of the source
+  positions. The error stands at the source expression whose read is the use. A use in an abort
+  block keeps its obligation. There is one error for each location and each local whose owner
+  the use reads, so a deferred statement that expands at two exits with one location gives one
+  error for each such local there. Checked and release builds give the same verdict, and `--check`
+  gives it too (D20.1).
+  `<place>` is source text, as in D17.20. When the use reads a place of an `own` reference type in
+  the fixed storage of the local of the owner, `<place>` is the source text of that place (`p`,
+  `s.b`, `b[k]`, `b[i]`). Otherwise it is the first owner of that local that can be vacated there,
+  in the order of its fields and indexes, written as the declared name with the field names and
+  the constant indexes in source form (`s.b` for a copy of `s`, `x` for `**px`). A temporary is
+  written as the source text of the expression whose value it holds. No message about fort source
+  names a FIR local. For FIR text with no source tree, the message names the FIR place.
+  The proof of one function has a limit of work, as D17.11 and D17.20 give theirs. The change
+  that adds the report gives its count, its value and its note in this entry. Past the limit, the
+  analysis proves no use of the function.
+  The rule takes the assumptions of D17.11, those of its Borrows included (D10.7, D17.1). A use
+  of `p` that cannot be vacated is no error of this rule, also when `p` holds a `null` that a
+  store wrote or the entry value of a parameter: a load through `null` stays undefined (D10.5,
+  D10.7). A view or a copy of the value of `p` that a lend made before the `move` or the `del`
+  designates the allocation and not the storage of `p`, so a read through it is no use of `p`. A
+  use of it after the free stays undefined (D10.7, D17.14). A read of a vacated owner of this
+  function that a callee makes through a pointer is outside the guarantee of this rule
+  (`spec/ownership-design.md` 5.2, X2).
+  What the analysis cannot prove: a use after a `move` or a `del` on some paths only, a use of a
+  memory owner after a call, and a use after a `move` or a `del` of a place that can overlap the
+  owner and does not contain it, such as another element of one fixed array or a place through a
+  pointer. Each is an error. The fix moves the access into a function that takes a pointer, where
+  the owner is no local owner of that function (X2).
+  So `i32 mut* own p = new(i32); del(p); *p = 1;` is an error, with the note
+  `'p' is deleted here` at the `del`. For `i32 mut* own mut p`, `del(p); p = new(i32); *p = 1;`
+  passes, because the store into `p` follows the `del`. After `if (c) { del(p); }`,
+  `if (p != null) { *p = 1; }` passes, because the edge into the arm finds `p` not `null`. For a
+  function `take` with the parameters `i32 mut* own a` and `i32 v`, `take(move(p), *p);` is an
+  error, because the read of `p` in `*p` comes after the `move`.
+  For `u8 mut@ own buf = new(u8, 4)`, `u8 mut@ own c = move(buf); u64 n = buf.len;` and then
+  `if (buf.ptr == null) { del(buf); }` pass: a read of `.len`, a test against `null` and a `del`
+  are no uses. `u8 x = buf[0];` after the `move` is an error.
+  For `struct pair { i32* own a; i32* own b; }` and `pair mut s = {}`,
+  `s.a = new(i32); s.b = new(i32); del(s.a); i32 v = *s.b;` passes, because `s.a` and `s.b` are
+  separate. After it, `pair t = move(s); i32 w = *s.b;` is an error, because the `move` of `s`
+  vacates `s.b`.
+  For `i32 mut* own[2] mut b = {}` and `u64 mut k = 0`, the code
+  `del(b[k]); k = 1; del(b[k]); b[k] = new(i32); k = 0; i32 v = *b[k];` is an error with the
+  `<place>` `b[k]`: the store into `k` follows the store into `b[k]`, so that store ends no state.
+  For the same `b` and `u64 mut k = 1`, `del(b[k]); b[k] = new(i32); *b[k] = 9;` passes: the
+  store into `b[k]` ends the state of `b[k]`, and the read of `b[k]` uses no other element.
+  For a local `i32 mut* own mut x = new(i32)` and `i32 mut* own mut* px = &x`, `x` is a memory
+  owner, and `px` borrows the frame of `x` (D17.11, Borrows). `del(*px); *x = 1;` is an error,
+  with the note `'x' is deleted here` at the `del`. `del(x); i32 v = **px;` is an error, because
+  the read of `*px` can overlap `x`. `del(x); del(*px);` passes, because the operand of a `del` is
+  no use, also through a pointer. For a parameter `r` of type `i32 mut* own mut*`,
+  `del(*r); *x = 1;` passes, because `r` borrows no origin. `f(); *x = 1;` is an error for each
+  call `f()`, with the note `'x' can change in this call`.
+  In a function that returns `i32 mut* own`, `i32 mut* own p = new(i32); defer *p = 0; return p;`
+  is an error, because `return p` moves `p` before the deferred code runs (D7.8, D17.5).
+  The rule starts as a report. A first change lists each use that the analysis cannot prove and
+  accepts the program. A later change makes each such use a compile error and amends this entry,
+  as part 1 of the leak rule of D17.20 went from a report (e0bb6c0a) to an error, and the
+  overwrite check of D17.11 from a report (5152c9fd) to an error (d8a9e096). That later change
+  also amends D15 and D17.14 by the part that this rule covers (`spec/ownership-design.md` 6.6).
+- rationale: a `move` or a `del` leaves the zero value (D17.6, D17.9), so a later load through a
+  vacated owner dereferences `null` (D10.5), and an index into a vacated span fails its bounds
+  check (D10.6). An obligation that the analysis cannot prove is an error, as in D17.11 ("Unknown
+  is an error", the user, 2026-10-22), so the rule keeps no list of known gaps. The exempt reads
+  see the zero value that D17.6 and D17.9 define, so they need no proof (the ruling on Q5). A
+  vacated owner holds the zero value, so a test that finds another value proves that no `move` and
+  no `del` emptied it since its last store. The analysis reads no other function, so kill rule 5
+  stays at each call (premise 1 of `spec/ownership-design.md`). By the ruling on Q1, the rule
+  follows a sound refinement R6, which D17.11 (Borrows) holds.
+- history: Added 2026-10-27 from rule (b) of `spec/ownership-design.md` 6.2, with the reads of the
+  ruling on Q5 (section 12), the borrows of refinement R6 (D17.11, Borrows) and assumption A8
+  (D10.7). Proposed 2026-10-27; approved by the user 2026-10-27. The user ruled two points on
+  2026-10-27. Through a pointer, the operand of a `move` or a `del` and a comparison with `null` are
+  no uses ("Exempt move/del and null test"). The edge where a test finds a value that is not `null`
+  ends the state ("Yes, the non-null edge clears it"). The coordinator ratified on 2026-10-27 the
+  other choices that the design leaves open: the position of the error, the note, `<place>`, one
+  error for each location and local, a use in an abort block, the limit of work, and no amendment of
+  D15 and D17.14 before the error. Review round 1 added the order inside a statement and the keys of
+  an event that ends the state. The coordinator ruled in review round 2 that a read of a tracked
+  place in fixed storage is a use of that place and of the owners below it only, and that the
+  non-null edge takes each form of gen rule 6 and the test of `p.ptr`. The number follows D17.20
+  (`spec/ownership-design.md` 6.6).
+
 ## D18 Float printing in the runtime
 
 Names the entry points that produce D11.7's float text and settles what D11.7 leaves to the runtime.

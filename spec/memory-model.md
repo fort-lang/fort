@@ -496,7 +496,8 @@ start of an allocation. The first and last are undefined behavior (section 8); a
 leak. The compile-time (linear) check that would make the other leaks and use after `move` errors
 is deferred (D15); `move` and `del` zero
 what they take so that those mistakes surface as `null` dereferences rather than as writes to freed
-memory.
+memory. The use rule of D17.21 covers a use of a local owner after its `move` or `del`,
+and it starts as a report that rejects no program.
 
 ## 3. Pointers
 
