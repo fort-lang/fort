@@ -1,0 +1,139 @@
+//! run
+//! stdout:
+//| 5 6
+//| 3
+//| 4
+//| 8 9
+//| 13 14
+//| 2
+//| 2 2
+//| 3
+//| 2
+//| 1
+//| 12
+//| 21
+// A cast whose result can change a level is legal when the first such level of
+// the target holds each pointer place of the source at its byte with the same
+// type, and no other, and when neither holds a pointer place (D3.14).
+struct holder {
+    u64 count;
+    u64 mut* own data;
+}
+
+// The layout of a holder, with other names.
+struct mirror {
+    u64 tally;
+    u64 mut* own payload;
+}
+
+struct wrap {
+    u64 mut* own p;
+}
+
+struct pair {
+    u64 mut* own a;
+    u64 mut* own b;
+}
+
+struct halves {
+    u64 mut* own[2] low;
+    u64 mut* own[2] high;
+}
+
+struct node {
+    i32 v;
+}
+
+// The context of a callback: a view of the holder. It holds a pointer, so it
+// goes to the callback as a `void*`, and its field still writes the holder.
+struct holder_ref {
+    holder mut* h;
+}
+
+fn bump(void* ctx) void {
+    holder_ref* r = cast(ctx, holder_ref*);
+    r->h->count += 1;
+}
+
+fn main() i32 {
+    holder mut h = holder{.count = 1, .data = new(u64)};
+    mirror mut* m = cast(&h, mirror mut*);
+    m->tally = 5;
+    *m->payload = 6;
+    println(h.count, " ", *h.data);
+    // An owner slot seen as a struct that holds it at byte 0.
+    wrap mut cell = wrap{.p = new(u64)};
+    wrap mut* w = cast(&cell.p, wrap mut*);
+    *w->p = 3;
+    println(*cell.p);
+    // An array of owners seen as a struct of owners at the same bytes.
+    u64 mut* own[2] mut slots = {new(u64), new(u64)};
+    pair mut* pr = cast(&slots, pair mut*);
+    *pr->b = 4;
+    println(*slots[1]);
+    // An array of structs seen as an array of the same layout, and four owners
+    // seen as two arrays of two.
+    holder[2] mut hs = {holder{.count = 8, .data = new(u64)}, holder{.count = 9, .data = new(u64)}};
+    mirror[2] mut* ms = cast(&hs, mirror[2] mut*);
+    println((*ms)[0].tally, " ", (*ms)[1].tally);
+    u64 mut* own[4] mut four = {new(u64), new(u64), new(u64), new(u64)};
+    halves mut* hv = cast(&four, halves mut*);
+    *hv->low[1] = 13;
+    *hv->high[0] = 14;
+    println(*four[1], " ", *four[2]);
+    // A source that holds no owner place, and the way back from `void mut*`.
+    u64 mut x = 1;
+    u8 mut* b = cast(&x, u8 mut*);
+    *b = 2;
+    void mut* anon = cast(&x, void mut*);
+    u64 mut* again = cast(anon, u64 mut*);
+    println(*again);
+    // A span that drops only its outermost `own` keeps each element whole.
+    node mut* own mut@ own kids = new(node mut* own, 2);
+    node mut* own mut@ lent = cast(kids, node mut* own mut@);
+    println(kids.len, " ", lent.len);
+    // A span of structs with owners keeps each element when it drops its outermost `own`.
+    holder mut@ own many = new(holder, 2);
+    holder mut@ lent_many = cast(many, holder mut@);
+    lent_many[1].count = 3;
+    println(many[1].count);
+    // A callback context that holds a view, through a read-only `void*`.
+    holder_ref ref = holder_ref{.h = &h};
+    bump(cast(&ref, void*));
+    bump(cast(&ref, void*));
+    println(h.count - 5);
+    // An owning result whose pointee holds no owner place.
+    void mut* own block = cast(new(u64), void mut* own);
+    u64 mut* own kept = cast(move(block), u64 mut* own);
+    *kept = 1;
+    println(*kept);
+    // Level 1 of the result is read-only, and level 2 holds the pointer places
+    // of the source.
+    holder mut* mut ph = &h;
+    mirror mut** pm = cast(&ph, mirror mut**);
+    (*pm)->tally = 12;
+    println(h.count);
+    // Fixed arrays at the read-only level 1 on both sides keep the levels in
+    // step, and level 2 holds the pointer place of the source.
+    wrap mut kept_cell = wrap{.p = new(u64)};
+    u64 mut* own mut*[1] mut slots_of = {&kept_cell.p};
+    wrap mut*[1]* as_wraps = cast(&slots_of, wrap mut*[1]*);
+    *(*as_wraps)[0]->p = 21;
+    println(*kept_cell.p);
+    del(kept);
+    del(many);
+    del(kids);
+    u64 mut i = 0;
+    while (i < 4) {
+        del(four[i]);
+        i += 1;
+    }
+    del(hs[0].data);
+    del(hs[1].data);
+    del(slots[0]);
+    del(slots[1]);
+    del(kept_cell.p);
+    del(cell.p);
+    del(h.data);
+    return 0;
+}

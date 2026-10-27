@@ -347,12 +347,14 @@ Sections:
   outermost position of a cast target is an error: a cast result has no binding); a span to a span
   of the same element type whose marks differ only in mutability, dropped at any level (the drop
   reaches every level, which the implicit conversion does not; adding is refused by the rule
-  below); any cast that only drops mutability or ownership, at any level (**not** a no-op: D5.4
-  and D17.4 cover the drop at a level
-  `k` only when every level between 1 and `k - 1` is immutable in the target, and the cast alone
-  reaches the rest. `void mut* mut@` converts to `void*@` and to `void mut*@`, and a cast alone
-  takes it to `void* mut@`); identity. The result of a cast is `own` exactly when its target type
-  says `own`: an `own` source cast to a non-`own` target lends (the result is a view), and an
+  below); any cast that only drops mutability or ownership, at any level, except a drop that the
+  rule of the pointer places below refuses (**not** a no-op: D5.4 and D17.4 cover the drop at a
+  level `k` only when every level between 1 and `k - 1` is immutable in the target, and the cast
+  alone reaches the rest where the levels above are read-only. `void mut* mut@` converts to
+  `void*@` and to `void mut*@`, and no cast takes it to `void* mut@`, which would change the type
+  of a pointer place behind the `mut` level 1); identity. The result of a cast is `own` exactly
+  when its target type says `own`: an `own` source cast to a non-`own` target lends (the result is
+  a view), and an
   `own` lvalue cast to an `own` target is a copy that must be written `cast(move(x), ...)`
   (D17.5). The rule below refuses a non-`own` source cast to an `own` target. Forbidden:
   integer to `bool`, any other span-to-span cast (the element type of a span never changes, because
@@ -369,10 +371,11 @@ Sections:
   foreign storage is a declaration that says `void mut*`, which the fort programmer writes, and
   `std.libc`'s `malloc` does. An `extern` that lies about a C function stays unsafe, and no rule
   inside fort reaches it. The library follows the rule and does not bend it: `std.sort_ptr` takes
-  `void* mut@`, which a caller holding `void mut* mut@` reaches with a dropping cast, and
-  `std.ptr_vec` keeps `void mut*` slots, because `ptr_push` takes a pointer and `ptr_pop` gives one
-  back and a round trip through `void*` slots would lose the `mut` for good (`stdlib.md` 2.7,
-  2.10).
+  `void* mut@`, which a caller holds as slots of `void*`, because a cast from slots of `void mut*`
+  would change the type of a pointer place behind a `mut` level (the rule of the pointer places
+  below). `std.ptr_vec` keeps `void mut*` slots, because `ptr_push` takes a pointer and `ptr_pop`
+  gives one back and a round trip through `void*` slots would lose the `mut` for good (`stdlib.md`
+  2.7, 2.10).
   **A cast never adds `own`, from any source.** The target marks a level `own` only where the
   source marks the level at the same depth `own` too. Where the source has no reference at that
   depth -- an integer, the `void` behind a `void*`, or a pointee type the cast reinterprets -- the
@@ -384,6 +387,79 @@ Sections:
   conservative reading, and a later amendment may relax the `mut` and the `own` walk together. A
   cast carries `own` or drops it, and it never adds it. Ownership enters a program only through
   `new` and through an `extern` signature that says `own` (D17.3, D17.13).
+  **A `mut` cast keeps the pointer places that its result can change.** The result of a cast can
+  change level `k` (D5.2) when its type marks a level from 1 to `k` `mut`: by a store when it
+  marks level `k` `mut`, and by a store of another pointer when it marks a level above `k` `mut`.
+  At the first level that the result marks `mut`, the storage of the target and the storage of the
+  source must hold the same pointer places: the same pointer types at the same bytes, with none
+  hidden, none added and none changed. A pointer place is a reference -- a pointer, a `void*`, a
+  span or a `string`, `own` or not -- or a function pointer, in the fixed storage of the level: a
+  field or an element of a fixed array, at any depth of fields and elements, or the storage itself
+  when it is one. An owner place is a pointer place. Two pointer places are the same when their
+  types are identical (`type-system.md` 6, D6.2), with the `mut` and `own` marks and the type that
+  they reach. So each deeper level, and each storage that a pointer field reaches, has the same
+  type on both sides, and the comparison reads no deeper level. Above that first level the result
+  is read-only. There the levels of the two types correspond through each reference, and through a
+  fixed array only where both types have one; where one chain ends there, the result marks no
+  deeper level `mut`. The storage of a span is one element, because each element holds the same
+  places. The storage of a `void*` holds no pointer place, and a `string` and an integer reach no
+  level. No byte past the end of the storage type of one side holds a pointer place of that side.
+  A place that holds no pointer stays free to pun: the bits of a float as an integer, two `u32` as
+  one `u64`, an integer as bytes. The error is
+  `cannot cast S to T: a 'mut' cast hides the pointer P at byte N` for a place of the source that
+  the target does not hold, and `cannot cast S to T: a 'mut' cast adds the pointer P at byte N`
+  for a place of the target that the source does not hold, at the cast. ` of level K` follows when
+  `K` is 2 or more. A hidden place is named before an added one, each the first in the order of
+  the fields and the elements. `N` counts from the start of the storage of the level. A result
+  that can change no level, a read-only view, may hide, add and change pointer places, because no
+  store goes through it. The reason: through a level that the result can change, a store writes
+  any bits into a pointer slot of the source, or the source reads bits that no pointer wrote, and
+  an owner that holds such bits frees what is no allocation.
+  `*cast(&slot, u64 mut*) = cast(&o, u64)` for a `u64 mut* mut slot` makes the next store through
+  `slot` write the owner slot `o`; `*cast(&po, u64 mut*) = cast(&fake, u64)` gives `*po` a slot
+  that holds no owner; and `del(cast(&x, wrap mut*)->p)` frees the bits of a `u64 mut x`. D17.4
+  refuses the implicit form, a dropped mark behind a `mut` level, for the same reason, and this
+  rule refuses it to a cast too: `cast(kids, node mut* mut@)` is an error for a
+  `node mut* own mut@ own kids`, and so is `cast(slots, void* mut@)` for a `void mut* mut@ slots`.
+  **The work limit:** the check takes at most 65536 steps, each a comparison of a run of copies
+  with a part of the other side. Past it the check proves nothing, and the cast is an error,
+  `cannot cast S to T: the check of a 'mut' cast passes its work limit of 65536 steps`, with the
+  note `the check cannot prove that the cast keeps its pointer places`, as D17.11 treats its limit
+  ("Unknown is an error"). The casts of `src`, `std`, `test/fort`, `test/lsp` and `test/lang` take
+  10 steps or fewer, but for `fail/casts/027`, which passes the limit on purpose. **The
+  exemption:** a cast that is itself an argument of a call of an `extern fn` (D9.8) is legal. The
+  parser keeps no node for parentheses, so `f((cast(p, void mut*)))` is the same call. C sees no
+  `own` (D17.13), and the design trusts the C side of an extern signature (A7 of
+  `ownership-design.md` 5.1). A cast inside such an argument is not the argument. An argument of a
+  fort function and an argument of a call through a function pointer get no exemption. A fort
+  callback gets its context as a `void*` to a wrapper of views: a cast of a context that holds a
+  pointer to `void mut*` hides that pointer, and the callback casts the `void*` back to a
+  read-only view whose pointer fields still write what they reach. `session.session_ref` is the
+  wrapper for `diag.set_lookup`. Three forms stay outside the guarantee of the rule, and A8 of
+  `ownership-design.md` 5.1 names them: a view that C gives back from an exempt argument, as
+  `memmove(dst, src, 0)` returns `dst` (A7); a call through a function pointer to which a cast
+  through `void*` gave another type, which a later change reads; and a read-only view whose
+  pointer place carries `mut` or `own` where the source holds other bytes, a pointer of another
+  type included, which a later change forbids. Examples, with `holder` a
+  struct of a `u64 count` and a `u64* own data`, `mirror` a struct of a `u64` and a `u64* own`,
+  and `wrap` a struct of one `u64* own`:
+
+  | Operand                | Cast                              | Result                            |
+  |------------------------|-----------------------------------|-----------------------------------|
+  | `holder mut h`         | `cast(&h, void mut*)`             | error: hides `u64* own` at byte 8 |
+  | `holder mut h`         | `cast(&h, u64*)`                  | ok: no level can change           |
+  | `holder mut h`         | `cast(&h, mirror mut*)`           | ok: the same pointer at byte 8    |
+  | `u64* own mut o`       | `cast(&o, u64 mut*)`              | error: hides `u64* own` at byte 0 |
+  | `u64 mut* mut s`       | `cast(&s, u64 mut*)`              | error: hides `u64 mut*` at byte 0 |
+  | `u64 mut* mut s`       | `cast(&s, u64* mut*)`             | error: the mark changes the type  |
+  | `f64 mut f`            | `cast(&f, u64 mut*)`              | ok: no pointer place              |
+  | `u64 mut x`            | `cast(&x, wrap mut*)`             | error: adds `u64* own` at byte 0  |
+  | `void mut* v`          | `cast(v, holder mut*)`            | error: adds `u64* own` at byte 8  |
+  | `u64* own mut* mut@ k` | `cast(k, u64* mut*@)`             | error: hides at byte 0 of level 2 |
+  | `holder mut* own p`    | `cast(move(p), void mut* own)`    | error: hides `u64* own` at byte 8 |
+  | `holder[2] mut a`      | `qsort(cast(&a, void mut*), ...)` | ok: `qsort` is an `extern fn`     |
+  | `holder mut h`         | `keep(cast(&h, void mut*))`       | error: `keep` is a fort function  |
+
 - history: Amended 2026-09-14 (T-085): a cast could add `mut` -- to a pointer at any level, to a
   span at any level, from a `void*`, from a `u64` and from a `string` -- which left `mut` on a
   reference a suggestion. The user withdrew the escape on 2026-09-11, `void*` included. The cost,
@@ -405,6 +481,38 @@ Sections:
   covers that memory, and every allocating `extern` in `std` says `own`. The cast was then the one
   way a view of fort memory got a second owner, which D17.14 listed as untracked and no analysis
   can close. The user withdrew adoption on 2026-09-29, as T-085 withdrew the added `mut`.
+  Amended 2026-10-26: the rule of a `mut` cast that hides an owner. The user said, on a forged
+  `own` through a `mut` view of another type: "We can always retain own for extern callbacks. It
+  doesn't affect C-interop." (2026-10-26). The coordinator read it as this static rule, in place
+  of an undefined behavior for a `del` of a forged owner. Before, a cast to a `mut` target could
+  hide an owner place, and `*cast(&o, u64 mut*) = cast(&y, u64)` compiled; the dropping-cast
+  clause allowed each drop of `own`. A count at b30fe51d over `src`, `std`, `test/fort`,
+  `test/lsp` and `test/lang` found 4 such casts: `src/fort/session.ft:113`, the context of
+  `diag.set_lookup`, and 3 in `test/fort/session_test.ft`. They now cast a
+  `session.session_ref`. The same count reads 0 such casts but the 7 arguments of `extern fn`
+  calls in `test/lang/run/casts/014_mut_cast_as_an_extern_argument.ft`, which are exempt. The
+  count reads no program that a suite holds as text, and two such programs had the cast: hand case
+  k1 of `test/fort/owner/oracle_test.ft` now reaches the slot through `memmove`, and the case
+  `cast_view` of `test/fort/owner/prover_test.ft` is gone.
+  Amended 2026-10-26, a second time: the rule covered level 1 and the owners of the source only,
+  and three forms still forged an owner slot: a target that adds an owner, a dropped `own` behind
+  a `mut` level 2, and a store of another pointer through a `mut` level 1. The user ruled
+  "Generalize" (2026-10-26), and the rule became the rule of the owner places of each level that
+  the result can change. The verdicts over the same trees read 0 more casts that break. A review
+  of the same day found that the comparison stopped where the chain of the target ended:
+  `*cast(&po, u64 mut*) = cast(&fake, u64); del(*po)` compiled and freed a local. Each owner
+  place of a deeper level of the source now counts as hidden.
+  Amended 2026-10-27: the rule kept the owner places only, so a `mut` view that saw a pointer as
+  an integer wrote an owner slot with no owner hidden: `*cast(&slot, u64 mut*) = cast(&o, u64)`
+  for a `u64 mut* mut slot`. The user ruled "Full static: no mut punning of pointers"
+  (2026-10-27). The rule now keeps every pointer place with its exact type at the first level
+  that the result marks `mut`, which also covers a pointer in a field of a struct and the end of
+  a chain. The check has a work limit, past which the cast is an error, as D17.11 does. The
+  wider rule broke 5 casts of `src` and `std`: `check.nominal_sym` and the two casts that give a
+  type its declaration (the declaration is now a `void*`), the context of `diag.set_lookup`
+  (now a `void*`), and `std.sort.sort_ptr` (its slots go to `libc.qsort` as an exempt argument).
+  The dropping cast to `void* mut@` that a caller of `sort_ptr` made is refused now, and the
+  callers hold slots of `void*`.
 
 ### D3.15 sizeof
 - owner: `type-system.md`.
@@ -2351,6 +2459,10 @@ says ownership is "by convention", this section supersedes it.
   shape: otherwise `node* mut@ w = kids; w[0] = &local;` would let `del(kids[0])` free a stack
   address) and only if no outer level keeps `own` (`node mut* own mut@ own` to `node mut* mut@ own`
   is an error, since the inner objects would then be owned by nobody); lend the whole thing instead.
+  A cast is no escape from this rule behind a level that its result marks `mut`: at the first
+  such level the cast must keep each pointer place of its source with its exact type, `own` mark
+  included, except as an argument of an `extern fn` (D3.14). So `cast(kids, node mut* mut@)` is
+  an error as `node mut* mut@ w = kids` is.
   Operands of `==`, `!=` and `?:` lend, so an `own` **lvalue** never blocks a comparison; an `own`
   **rvalue** operand is the error of D17.8 instead, `make() == null` above all, since lending it
   would leave nothing able to free it. `?:` is the exception: it yields `own` when both operands are
@@ -2370,6 +2482,14 @@ says ownership is "by convention", this section supersedes it.
   subset, and it still listed nothing stage1 lacks. So the note above needed a date and no
   correction. Amended 2026-09-24: "Stage1" in the rule became "Bootstrap-0", the new name of the
   C compiler. The notes above use the old name.
+  Amended 2026-10-26: the sentence on a cast to a target that marks level 1 `mut`. A cast was the
+  escape from the drop rule at each level. D3.14 now refuses such a cast when it hides an owner
+  place of its source, which is the form of this rule with a change of type. The user said "We
+  can always retain own for extern callbacks. It doesn't affect C-interop." (2026-10-26), so an
+  argument of an `extern fn` keeps the escape. The user then ruled "Generalize" (2026-10-26):
+  the refusal covers each level that the result of the cast can change, and an added owner too.
+  Amended 2026-10-27: the user ruled "Full static: no mut punning of pointers" (2026-10-27), and
+  the cast keeps each pointer place, owner or not, with its exact type.
 
 ### D17.5 Transfer
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,

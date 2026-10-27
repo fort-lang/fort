@@ -15,6 +15,15 @@ struct session {
     // Maps each configuration key to its index in `config_values`.
     strmap.str_map config;
     containers.str_vec config_values;
+    // The context that show_sources gives the sink: a view of this session.
+    session_ref lookup_ref;
+}
+
+/// A view of a session, the context of the source lookup. The sink takes the context as a `void*`,
+/// and the lookup casts it back to a `session_ref*`, whose field still writes the session. A cast
+/// of a session or of this wrapper to `void mut*` would hide their pointers, which D3.14 refuses.
+struct session_ref {
+    session mut* s;
 }
 
 fn create() session {
@@ -100,17 +109,19 @@ fn read_source(session mut* s, string path, string mut* out) bool {
     return true;
 }
 
-// The source lookup of the diagnostic text form. `ctx` is the session that
+// The source lookup of the diagnostic text form. `ctx` is the session_ref that
 // show_sources installed.
-fn lookup_source(void mut* ctx, string path, string mut* out) bool {
-    return read_source(cast(ctx, session mut*), path, out);
+fn lookup_source(void* ctx, string path, string mut* out) bool {
+    session_ref* r = cast(ctx, session_ref*);
+    return read_source(r->s, path, out);
 }
 
 // Makes the text form of the diagnostics show the source line of each
 // diagnostic, read through read_source. The session must not move while its
 // sink writes text.
 fn show_sources(session mut* s) void {
-    diag.set_lookup(&s->diags, lookup_source, cast(s, void mut*));
+    s->lookup_ref = session_ref{.s = s};
+    diag.set_lookup(&s->diags, lookup_source, cast(&s->lookup_ref, void*));
 }
 
 // Whether the session already holds the contents of `path`, from set_source or

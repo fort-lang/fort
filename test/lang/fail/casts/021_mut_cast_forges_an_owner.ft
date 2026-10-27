@@ -1,0 +1,36 @@
+//! fail
+// The two forms that write any bits into an owner slot through a `mut` view
+// (D3.14). A later `del` would free what is no allocation. Then the casts that
+// the exemption of an extern argument does not cover: an argument of a fort
+// function, an argument of a call through a function pointer, and a cast inside
+// an argument of an extern call that is not the argument itself.
+import std.libc;
+
+struct holder {
+    u64 count;
+    u64* own data;
+}
+
+// Keeps no context: the callee is fort code, which the rule does not trust.
+fn keep(void mut* ctx) void {
+    return;
+}
+
+fn by_count(void* a, void* b) i32 {
+    return 0;
+}
+
+fn main() i32 {
+    u64 mut y = 0;
+    u64* own mut o = new(u64);
+    *cast(&o, u64 mut*) = cast(&y, u64); //! error: cannot cast u64* own mut* to u64 mut*: a 'mut' cast hides the pointer u64* own at byte 0
+    holder mut h = holder{.count = 1, .data = new(u64)};
+    *cast(cast(&h, void mut*), u64 mut*) = cast(&y, u64); //! error: cannot cast holder mut* to void mut*: a 'mut' cast hides the pointer u64* own at byte 8
+    keep(cast(&h, void mut*)); //! error: cannot cast holder mut* to void mut*: a 'mut' cast hides the pointer u64* own at byte 8
+    fn (void mut*) void call = keep;
+    call(cast(&h, void mut*)); //! error: cannot cast holder mut* to void mut*: a 'mut' cast hides the pointer u64* own at byte 8
+    libc.qsort(cast(cast(&h, void mut*), void mut*), 1, sizeof(holder), by_count); //! error: cannot cast holder mut* to void mut*: a 'mut' cast hides the pointer u64* own at byte 8
+    del(o);
+    del(h.data);
+    return 0;
+}

@@ -244,6 +244,28 @@ came here.
   `EMPTY_READONLY`, an immutable indirection is `EMPTY_IMMUTABLE`, and the read-only memory stops
   at the first indirection. Reading `mut` where `empty` is meant silently lets `move(view[0])`
   through or refuses `del(buf)` on an immutable binding.
+- **A `mut` cast keeps the pointer places of its first `mut` level** (D3.14).
+  `check_pointer_places` in `src/fort/check.ft` follows the two chains of references through the
+  read-only levels of the result, and through fixed arrays on both sides, to the first level that
+  the result marks `mut`. There each pointer place -- a reference, `own` or not, or a function
+  pointer -- must stand on both sides with an identical type: `first_hidden` runs in each
+  direction, so a hidden place is named before an added one. The type of a pointer includes what it
+  reaches, so the walk stops at that level. `types.type_pointer_count` answers whether a type
+  holds a place, from the count that `types.type_layout_struct` keeps beside the owner count.
+  `first_hidden` reads the byte offset of a field from the `aux` that `resolve_struct` writes, so
+  both storages need a layout: a struct in error, or a layout that still waits in a module-level
+  initializer, ends the walk. A run of copies goes to the smallest part of the other side that
+  holds it, with its byte in that part, and over an array with its byte modulo the element size;
+  `place_memo` keeps each run, part and byte whose places are all held. **The work is bounded, not
+  linear:** two arrays whose elements meet at many offsets cost one step for each offset, so the
+  walk stops after `POINTER_WORK_LIMIT` (65536) steps and the cast is an error with a note. The
+  casts of the five trees take 10 steps or fewer; `fail/casts/027` passes the limit on purpose,
+  and a check that stops there takes 0.2 s and 18 MB. `ck->extern_arg` is the argument of the
+  `extern fn` call that the checker checks, and `check_call` gives the outer value back after its
+  arguments. So an extern call in the operand of an exempt cast keeps the exemption
+  (`run/casts/014`). `types.node.decl` is a `void*`: the checker writes a struct or enum symbol
+  through `ast.node.sym` of its declaration (`check.nominal_sym_mut`), because a `mut` cast of the
+  symbol would hide its pointers.
 
 ## 5. Modules, the driver and the diagnostics
 

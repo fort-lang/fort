@@ -1,0 +1,78 @@
+//! run
+//! stdout:
+//| 7 7 true
+//| true 2
+//| 2 2
+//| 2
+//| 0 0 9 false
+// A cast whose result can change no level may hide an owner place of its
+// source, or add one (D3.14): no store and no release goes through it. A read
+// through it yields the bits, as D10.7 defines for a pointer to another type
+// of the same size.
+import std.str;
+
+struct holder {
+    u64 count;
+    u64* own data;
+}
+
+// The two words of a span or a `string` header.
+struct header {
+    u64 ptr;
+    u64 len;
+}
+
+struct node {
+    i32 v;
+}
+
+// One owner at byte 0.
+struct wrap {
+    u64* own p;
+}
+
+// Owners whose slots the program takes the address of.
+struct slots {
+    u64* own one;
+    string own text;
+    u8 mut@ own buf;
+}
+
+fn main() i32 {
+    holder mut h = holder{.count = 7, .data = new(u64)};
+    u64* first = cast(&h, u64*);
+    void* anon = cast(&h, void*);
+    holder* back = cast(anon, holder*);
+    u64* bits = cast(&h.data, u64*);
+    println(*first, " ", back->count, " ", *bits == cast(h.data, u64));
+    slots mut k = slots{.one = new(u64), .text = str.dup("ab"), .buf = new(u8, 2)};
+    u64* slot = cast(&k.one, u64*);
+    header* words = cast(&k.text, header*);
+    println(*slot == cast(k.one, u64), " ", words->len);
+    // A span of owners seen through read-only elements.
+    node mut* own mut@ own kids = new(node mut* own, 2);
+    node mut*@ ro = cast(kids, node mut*@);
+    node mut* own@ kept = cast(kids, node mut* own@);
+    println(ro.len, " ", kept.len);
+    // A read-only view of an owning span header.
+    header* span_words = cast(&k.buf, header*);
+    println(span_words->len);
+    // Read-only views that add an owner place: of an integer, of the storage
+    // behind a `void mut*`, and two levels down.
+    u64 mut word = 0;
+    wrap* seen = cast(&word, wrap*);
+    void mut* anon_word = cast(&word, void mut*);
+    holder* from_void = cast(anon_word, holder*);
+    u64 mut nine = 9;
+    u64 mut* mut pn = &nine;
+    u64** deep = cast(&pn, u64**);
+    wrap** deep_wrap = cast(&pn, wrap**);
+    println(cast(seen->p, u64), " ", from_void->count, " ", **deep, " ",
+            (*deep_wrap)->p == null);
+    del(kids);
+    del(k.buf);
+    del(k.text);
+    del(k.one);
+    del(h.data);
+    return 0;
+}

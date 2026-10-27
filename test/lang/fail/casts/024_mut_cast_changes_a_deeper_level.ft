@@ -1,0 +1,41 @@
+//! fail
+// The first level that the result marks `mut` must hold the pointer places of the source (D3.14).
+// It is level 2 when level 1 of the result is read-only, and the error names the level. At a `mut`
+// level 1 the pointer that leads to level 2 is a pointer place itself, so a store of another
+// pointer there is refused at level 1. Without the rule, each line lets a store put the address of
+// a local or of an integer where the source sees an owner.
+struct node {
+    i32 v;
+}
+
+struct box {
+    u64* own p;
+}
+
+struct wrap {
+    u64* own p;
+}
+
+fn main() i32 {
+    // Level 1 is immutable and level 2 is `mut`: `*view[0] = &local` would write an owner slot.
+    node mut* own mut* mut@ own slots = new(node mut* own mut*, 1);
+    node mut* mut*@ view = cast(slots, node mut* mut*@); //! error: cannot cast node mut* own mut* mut@ own to node mut* mut*@: a 'mut' cast hides the pointer node mut* own at byte 0 of level 2
+    // Level 1 is `mut`: `*t = &fake` would give `*po` a slot that holds no owner.
+    box mut b = box{.p = new(u64)};
+    u64* own mut* mut po = &b.p;
+    u64** mut* t = cast(&po, u64** mut*); //! error: cannot cast u64* own mut* mut* to u64** mut*: a 'mut' cast hides the pointer u64* own mut* at byte 0
+    // Two levels down: a store at level 1 replaces level 2 and level 3 as well.
+    u64* own mut* mut* mut ppo = &po;
+    u64*** mut* tt = cast(&ppo, u64*** mut*); //! error: cannot cast u64* own mut* mut* mut* to u64*** mut*: a 'mut' cast hides the pointer u64* own mut* mut* at byte 0
+    // A fixed array at the read-only level 1 keeps the two chains in step.
+    u64* own mut*[2] mut pair = {&b.p, &b.p};
+    u64* mut*[2]* arr = cast(&pair, u64* mut*[2]*); //! error: cannot cast u64* own mut*[2] mut* to u64* mut*[2]*: a 'mut' cast hides the pointer u64* own at byte 0 of level 2
+    // A deeper level may not add a pointer place either.
+    u64 mut word = 0;
+    u64 mut* mut pw = &word;
+    wrap mut** pwrap = cast(&pw, wrap mut**); //! error: cannot cast u64 mut* mut* to wrap mut**: a 'mut' cast adds the pointer u64* own at byte 0 of level 2
+    println(view.len, t == null, tt == null, arr == null, pwrap == null);
+    del(slots);
+    del(b.p);
+    return 0;
+}

@@ -175,6 +175,9 @@ struct checker {
     ast.sym mut* fn_sym; // the function whose body is being checked
     // an `extern fn` name is a callee and nowhere a value
     ast.node* callee;
+    // The argument of an `extern fn` call that the checker is checking. A cast that is this node
+    // may hide or add a pointer place (D3.14).
+    ast.node* extern_arg;
     // Whether the checker needs an operand address instead of its value.
     // `node N = node{&N};` is a legal self-reference. An address of a module
     // declaration is available from all modules, including its own module.
@@ -664,8 +667,20 @@ fn error_unknown_name(checker mut* ck, string name, diag.loc at) void {
 
 /// The declaring symbol of a struct or enum type, which the checker stored in
 /// the node when it made it (types.ft keeps it opaque).
-fn nominal_sym(types.node* t) ast.sym mut* {
-    return cast(t->decl, ast.sym mut*);
+fn nominal_sym(types.node* t) ast.sym* {
+    return cast(t->decl, ast.sym*);
+}
+
+// The declaring symbol of the struct or enum type `t`, writable. A struct or enum symbol has its
+// declaration, and collect_declaration gives the declaration the symbol before the type, so
+// `node->sym` is the symbol again, with the `mut` mark that `ast.node.sym` carries.
+// A type that a test makes with no declaration has no symbol, and the answer is null.
+fn nominal_sym_mut(types.node* t) ast.sym mut* {
+    ast.sym* s = nominal_sym(t);
+    if (s == null || s->node == null) {
+        return null;
+    }
+    return s->node->sym;
 }
 
 fn error_too_large(checker mut* ck, diag.loc at, types.node* t) void {
@@ -787,12 +802,12 @@ fn check_layout(checker mut* ck, types.node* t) bool {
     types.node* mut pending = types.type_layout_pending(t);
     if (pending != null) {
         // a struct is laid out when a declaration first needs it
-        resolve_sym(ck, nominal_sym(pending));
+        resolve_sym(ck, nominal_sym_mut(pending));
         pending = types.type_layout_pending(t);
     }
     if (pending != null) {
         // still resolving means it contains itself by value
-        ast.sym mut* s = nominal_sym(pending);
+        ast.sym mut* s = nominal_sym_mut(pending);
         check_msg_begin(ck);
         msg_str(ck, "struct ");
         msg_str(ck, pending->name);
@@ -3009,6 +3024,369 @@ fn check_span_expr(checker mut* ck, ast.node mut* n, expr mut* out) void {
     out->ty = types.type_span(&ck->types, elem, false, is_mut);
 }
 
+// ---- the pointer places that a `mut` cast keeps (D3.14) ---------------------------
+
+// A pointer place that one side of a cast holds and the other does not: the type of the pointer
+// and the byte where it starts in the storage of its level.
+struct pointer_place {
+    types.node* ty;
+    u64 at;
+}
+
+// The most calls of first_hidden for one cast. Past it the check proves nothing, and the cast is
+// an error (D3.14), as a store that D17.11 cannot prove empty is one.
+u64 POINTER_WORK_LIMIT = 65536;
+
+// A part of the type of one view of a storage: its type and the byte where it starts in that
+// storage. A null type is no part.
+struct target_part {
+    types.node* ty;
+    u64 at;
+}
+
+// The greatest common divisor of `a` and `b`.
+fn common_divisor(u64 a, u64 b) u64 {
+    u64 mut x = a;
+    u64 mut y = b;
+    while (y != 0) {
+        u64 rest = x % y;
+        x = y;
+        y = rest;
+    }
+    return x;
+}
+
+// Whether the struct behind the fixed arrays of `t` has a layout, or `t` is no struct.
+fn has_layout(types.node* t) bool {
+    types.node* s = struct_of(t);
+    return s == null || types.type_layout_state(s) == types.layout_state.l_resolved;
+}
+
+// The field or the element of `p` that holds the byte `pos`, or no part. A reference and a scalar
+// have no field and no element, and padding and the bytes past the end of `p` are in none.
+// `pos` is not before the start of `p`.
+fn part_at(target_part p, u64 pos) target_part {
+    if (p.ty == null) {
+        return target_part{};
+    }
+    if (p.ty->kind == types.type_kind.k_array) {
+        // a laid-out element has a size above 0, because an array length is above 0
+        u64 size = types.type_sizeof(p.ty->elem);
+        u64 index = (pos - p.at) / size;
+        if (index >= p.ty->len) {
+            return target_part{};
+        }
+        return target_part{.ty = p.ty->elem, .at = p.at + index * size};
+    }
+    if (p.ty->kind != types.type_kind.k_struct) {
+        return target_part{};
+    }
+    // resolve_struct writes the byte offset of each field into its `aux`
+    ast.node* decl = nominal_sym(p.ty)->node;
+    u64 mut i = 0;
+    while (i < ast.ast_len(decl)) {
+        ast.node* f = ast.ast_child(decl, i);
+        if (f->kind == ast.ast_kind.k_field_decl) {
+            u64 start = p.at + f->aux;
+            if (pos >= start && pos - start < types.type_sizeof(f->ty)) {
+                return target_part{.ty = f->ty, .at = start};
+            }
+        }
+        i += 1;
+    }
+    return target_part{};
+}
+
+// The smallest part of the type `u` that holds each byte of [at, at + len): the walk goes down from
+// `u` through the fields and the elements while one of them holds all the bytes. A null `u` is the
+// storage of a `void*`, which has no part.
+fn cover_of(types.node* u, u64 at, u64 len) target_part {
+    target_part mut c = target_part{.ty = u, .at = 0};
+    bool mut deeper = u != null;
+    while (deeper) {
+        target_part p = part_at(c, at);
+        deeper = p.ty != null && at + len <= p.at + types.type_sizeof(p.ty);
+        if (deeper) {
+            c = p;
+        }
+    }
+    return c;
+}
+
+// The runs of copies that hold each of their pointer places in the other view, for one cast
+// (D3.14). The walk stops at the first pointer place that the other view does not hold, so a run
+// that holds each one is the one result that it reads twice. A key names a run and a part by the
+// addresses of their types, so a memo lives for one cast. `work` counts the calls of first_hidden;
+// past POINTER_WORK_LIMIT, `over` holds and the walk stops.
+struct place_memo {
+    strmap.str_map held;
+    containers.pool keys; // the text of each key of `held`, which keeps no copy
+    strbuf.str_buf text;
+    u64 work;
+    bool over;
+}
+
+fn memo_free(place_memo mut* m) void {
+    strmap.free(&m->held);
+    containers.pool_free(&m->keys);
+    strbuf.free(&m->text);
+}
+
+// The key of `count` copies of `t` from byte `at` of the part `u`, valid until the next call.
+fn memo_key(place_memo mut* m, types.node* t, u64 count, u64 at, types.node* u) string {
+    strbuf.clear(&m->text);
+    strbuf.append_u64(&m->text, cast(t, u64));
+    strbuf.push(&m->text, ':');
+    strbuf.append_u64(&m->text, count);
+    strbuf.push(&m->text, ':');
+    strbuf.append_u64(&m->text, at);
+    strbuf.push(&m->text, ':');
+    strbuf.append_u64(&m->text, cast(u, u64));
+    return strbuf.view(&m->text);
+}
+
+// Finds the first pointer place, in the order of the fields and the elements, of `count` copies of
+// the type `t` from byte `at` of one view of a storage, that the other view `u` does not hold. `u`
+// holds a pointer place when a pointer place of the same type (types.type_equal) starts at the
+// same byte of `u`. The copies follow each other as the elements of a fixed array do. The function
+// writes the place, with its byte in `u`, into `out`. A run inside `u` goes to the smallest part of
+// `u` that holds it, with its byte in that part; over an array the byte is taken modulo the element
+// size, because each element is the same. So `m` keeps one result for each run, part and byte. Past
+// POINTER_WORK_LIMIT calls, `m->over` holds and the function answers true with no place.
+fn first_hidden(place_memo mut* m, types.node* t, u64 count, u64 at, types.node* u,
+                pointer_place mut* out) bool {
+    if (types.type_pointer_count(t) == 0) {
+        return false;
+    }
+    m->work += 1;
+    if (m->work > POINTER_WORK_LIMIT) {
+        m->over = true;
+        return true;
+    }
+    u64 size = types.type_sizeof(t);
+    u64 mut end = 0;
+    if (u != null) {
+        end = types.type_sizeof(u);
+    }
+    if (at + size * count > end) {
+        if (count == 1) {
+            return hidden_in_copy(m, t, at, u, out);
+        }
+        // The copies before the end of `u` are one run. A copy past the end has a hidden place, so
+        // the loop stops at the second copy after the run at the latest.
+        u64 mut fit = 0;
+        if (end > at) {
+            fit = (end - at) / size;
+        }
+        if (fit > 0 && first_hidden(m, t, fit, at, u, out)) {
+            return true;
+        }
+        u64 mut k = fit;
+        while (k < count) {
+            if (first_hidden(m, t, 1, at + k * size, u, out)) {
+                return true;
+            }
+            k += 1;
+        }
+        return false;
+    }
+    target_part c = cover_of(u, at, size * count);
+    u64 mut rel = at - c.at;
+    if (c.ty->kind == types.type_kind.k_array) {
+        // the run spans two elements or more, and a shift by whole elements keeps it inside
+        rel = rel % types.type_sizeof(c.ty->elem);
+    }
+    if (strmap.has(&m->held, memo_key(m, t, count, rel, c.ty))) {
+        return false;
+    }
+    if (hidden_in_part(m, t, count, rel, c.ty, out)) {
+        out->at += at - rel;
+        return true;
+    }
+    strmap.put(&m->held, containers.pool_intern(&m->keys, memo_key(m, t, count, rel, c.ty)), 0);
+    return false;
+}
+
+// first_hidden for a run of `count` copies of `t` from byte `at` of `u` that `u` holds whole and
+// that no part of `u` holds whole. The byte of `out` is a byte of `u`.
+fn hidden_in_part(place_memo mut* m, types.node* t, u64 count, u64 at, types.node* u,
+                  pointer_place mut* out) bool {
+    if (count == 1) {
+        if (at == 0 && types.type_equal(u, t)) {
+            // `u` holds the same type at the same byte, and so each pointer place of it
+            return false;
+        }
+        return hidden_in_copy(m, t, at, u, out);
+    }
+    u64 size = types.type_sizeof(t);
+    u64 mut copies = count;
+    if (u->kind == types.type_kind.k_array) {
+        // Copy k + period meets the elements of `u` where copy k meets them, so the first hidden
+        // place is in the first period copies.
+        u64 step = types.type_sizeof(u->elem);
+        u64 period = step / common_divisor(size, step);
+        if (copies > period) {
+            copies = period;
+        }
+    }
+    u64 mut k = 0;
+    while (k < copies) {
+        u64 start = at + k * size;
+        // the copies from `start` that one part of `u` holds whole, and at least 1
+        u64 mut run = 1;
+        target_part p = part_at(target_part{.ty = u, .at = 0}, start);
+        if (p.ty != null) {
+            u64 room = (p.at + types.type_sizeof(p.ty) - start) / size;
+            if (room > run) {
+                run = room;
+            }
+            if (run > copies - k) {
+                run = copies - k;
+            }
+        }
+        if (first_hidden(m, t, run, start, u, out)) {
+            return true;
+        }
+        k += run;
+    }
+    return false;
+}
+
+// first_hidden for one copy of `t` at byte `at` of `u` that `u` does not hold as the same type:
+// the place itself, or the places of its elements and of its fields in order.
+fn hidden_in_copy(place_memo mut* m, types.node* t, u64 at, types.node* u, pointer_place mut* out)
+    bool {
+    if (types.type_is_pointer_place(t)) {
+        *out = pointer_place{.ty = t, .at = at};
+        return true;
+    }
+    if (t->kind == types.type_kind.k_array) {
+        return first_hidden(m, t->elem, t->len, at, u, out);
+    }
+    ast.node* decl = nominal_sym(t)->node;
+    u64 mut i = 0;
+    while (i < ast.ast_len(decl)) {
+        ast.node* f = ast.ast_child(decl, i);
+        if (f->kind == ast.ast_kind.k_field_decl
+            && first_hidden(m, f->ty, 1, at + f->aux, u, out)) {
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+// Reports that the cast `n` of `src` to `dst` hides or adds, as `verb` says, the pointer place `h`
+// of the storage of level `level`.
+fn report_pointer_place(checker mut* ck, ast.node* n, types.node* src, types.node* dst,
+                        string verb, pointer_place h, u64 level) void {
+    check_msg_begin(ck);
+    msg_str(ck, "cannot cast ");
+    check_msg_type(ck, src);
+    msg_str(ck, " to ");
+    check_msg_type(ck, dst);
+    msg_str(ck, ": a 'mut' cast ");
+    msg_str(ck, verb);
+    msg_str(ck, " the pointer ");
+    check_msg_type(ck, h.ty);
+    msg_str(ck, " at byte ");
+    msg_uint(ck, h.at);
+    if (level > 1) {
+        msg_str(ck, " of level ");
+        msg_uint(ck, level);
+    }
+    check_msg_end(ck, n->loc);
+}
+
+// Reports that the walk of the cast `n` of `src` to `dst` passed POINTER_WORK_LIMIT, with the note
+// that it cannot prove the cast keeps its pointer places.
+fn report_pointer_limit(checker mut* ck, ast.node* n, types.node* src, types.node* dst) void {
+    check_msg_begin(ck);
+    msg_str(ck, "cannot cast ");
+    check_msg_type(ck, src);
+    msg_str(ck, " to ");
+    check_msg_type(ck, dst);
+    msg_str(ck, ": the check of a 'mut' cast passes its work limit of ");
+    msg_uint(ck, POINTER_WORK_LIMIT);
+    msg_str(ck, " steps");
+    check_msg_end(ck, n->loc);
+    if (!ck->mute) {
+        check_msg_begin(ck);
+        msg_str(ck, "the check cannot prove that the cast keeps its pointer places");
+        check_note_end(ck, n->loc);
+    }
+}
+
+// Reports the cast `n` of a value of the type `src` to the type `dst` when the first level that the
+// result marks `mut` does not hold exactly the pointer places that the source holds there (D3.14).
+// A pointer place is a reference, `own` or not, or a function pointer, and its type includes the
+// type that it reaches. So when that level holds the same pointer places, each deeper level has the
+// same type on both sides, and the walk stops. The levels above it are read-only in the result, and
+// the walk follows the two chains of references through them, and through fixed arrays on both
+// sides; where one chain ends there, the result marks no deeper level `mut`. Through a `mut` level
+// a store can write any bits into a pointer slot of the source, and the source can read bits that
+// no pointer wrote. A cast that is itself an argument of an `extern fn` call is exempt. Returns
+// whether it reported.
+fn check_pointer_places(checker mut* ck, ast.node* n, types.node* src, types.node* dst) bool {
+    if (n == ck->extern_arg) {
+        return false;
+    }
+    types.node* mut s = src;
+    types.node* mut d = dst;
+    u64 mut level = 1;
+    // a `string` and an integer reach no storage level
+    while (types.has_target_level(s) && types.has_target_level(d)) {
+        // the storage of a `void*` has no type and holds no pointer place
+        types.node* mut sp = null;
+        if (s->kind != types.type_kind.k_voidptr) {
+            sp = s->elem;
+        }
+        types.node* mut dp = null;
+        if (d->kind != types.type_kind.k_voidptr) {
+            dp = d->elem;
+        }
+        // A struct in error has reported. A layout waits only in a module-level initializer, and
+        // D4.6 makes no pointer cast a constant, so that initializer is an error already.
+        if ((sp != null && !has_layout(sp)) || (dp != null && !has_layout(dp))) {
+            return false;
+        }
+        if (d->is_mut) {
+            place_memo mut m = place_memo{};
+            defer memo_free(&m);
+            pointer_place mut h = pointer_place{};
+            bool hides = sp != null && first_hidden(&m, sp, 1, 0, dp, &h);
+            if (!m.over && hides) {
+                report_pointer_place(ck, n, src, dst, "hides", h, level);
+                return true;
+            }
+            bool adds = !m.over && dp != null && first_hidden(&m, dp, 1, 0, sp, &h);
+            if (!m.over && adds) {
+                report_pointer_place(ck, n, src, dst, "adds", h, level);
+                return true;
+            }
+            if (m.over) {
+                report_pointer_limit(ck, n, src, dst);
+                return true;
+            }
+            return false;
+        }
+        if (sp == null || dp == null) {
+            return false;
+        }
+        // a fixed array adds no level, so the two chains stay in step through arrays on both sides
+        types.node* mut sn = sp;
+        types.node* mut dn = dp;
+        while (sn->kind == types.type_kind.k_array && dn->kind == types.type_kind.k_array) {
+            sn = sn->elem;
+            dn = dn->elem;
+        }
+        s = sn;
+        d = dn;
+        level += 1;
+    }
+    return false;
+}
+
 // ---- cast, sizeof and new ----------------------------------------------------------
 
 fn check_cast(checker mut* ck, ast.node mut* n, expr mut* out) void {
@@ -3073,6 +3451,9 @@ fn check_cast(checker mut* ck, ast.node mut* n, expr mut* out) void {
             return;
         }
     } else if (check_owning_temporary(ck, n->loc, &a, "the cast target does not own it")) {
+        return;
+    }
+    if (check_pointer_places(ck, n, a.ty, target.ty)) {
         return;
     }
     out->ty = target.ty;
@@ -3428,9 +3809,15 @@ fn check_call(checker mut* ck, ast.node mut* n, expr mut* out) void {
             return;
         }
     }
+    // C sees no `own` (D17.13), so a cast that is an argument of an `extern fn` may pun pointers.
+    bool trusted = f.sym != null && f.sym->kind == ast.sym_kind.s_extern_fn;
+    ast.node* outer_arg = ck->extern_arg;
     u64 mut i = 0;
     while (i < ast.ast_len(n)) {
         expr mut arg = expr{};
+        if (trusted) {
+            ck->extern_arg = ast.ast_child(n, i);
+        }
         if (known && i < f.ty->params.len) {
             check_expr_as(ck, ast_child_mut(n, i), f.ty->params[i], "the argument", &arg);
         } else {
@@ -3445,6 +3832,8 @@ fn check_call(checker mut* ck, ast.node mut* n, expr mut* out) void {
         }
         i += 1;
     }
+    // An extern call in an argument of an extern call gives the outer argument back.
+    ck->extern_arg = outer_arg;
     if (!known) {
         return;
     }
@@ -4018,10 +4407,11 @@ fn resolve_struct(checker mut* ck, ast.sym mut* s) void {
         ast.node mut* f = ast_child_mut(decl, k);
         if (f->kind == ast.ast_kind.k_field_decl) {
             // Records the field byte offset on its declaration. The emitter names
-            // fields by index and lets LLVM use the same layout. Only checker
-            // suites read these offsets. They record the compiler answer for a
-            // complete declaration. The loop visits exactly the fields in the IR
-            // struct type. Each failed field already left `ok` false.
+            // fields by index and lets LLVM use the same layout. The checker suites
+            // and the pointer places of a cast (D3.14) read these offsets. They
+            // record the compiler answer for a complete declaration. The loop
+            // visits exactly the fields in the IR struct type. Each failed field
+            // already left `ok` false.
             f->aux = offsets[at];
             at += 1;
         }
@@ -4756,9 +5146,9 @@ fn collect_declaration(checker mut* ck, ast.node mut* decl, ast.sym mut* owner) 
     current->sym = s;
     if (kind == ast.sym_kind.s_struct) {
         // the type exists before the fields are read
-        s->ty = types.type_struct(&ck->types, current->name, cast(s, void mut*));
+        s->ty = types.type_struct(&ck->types, current->name, cast(s, void*));
     } else if (kind == ast.sym_kind.s_enum) {
-        s->ty = types.type_enum(&ck->types, current->name, cast(s, void mut*));
+        s->ty = types.type_enum(&ck->types, current->name, cast(s, void*));
     }
 }
 

@@ -1,0 +1,49 @@
+//! fail
+// The owner place is an element of a fixed array (D3.14). The error names the
+// first owner that the target does not hold, in the order of the elements and
+// the fields, and the byte where it starts in the pointee.
+struct half {
+    u64* own first;
+    u64 second;
+}
+
+struct shifted {
+    u64 tag;
+    u64* own only;
+}
+
+struct tagged {
+    u64 tag;
+    u64* own[2] slots;
+}
+
+struct holder {
+    u64 count;
+    u64* own data;
+}
+
+fn main() i32 {
+    u64* own[2] mut two = {new(u64), new(u64)};
+    // The first element is held at byte 0, and the second is not.
+    half mut* h = cast(&two, half mut*); //! error: cannot cast u64* own[2] mut* to half mut*: a 'mut' cast hides the pointer u64* own at byte 8
+    u64 mut* w = cast(&two, u64 mut*); //! error: cannot cast u64* own[2] mut* to u64 mut*: a 'mut' cast hides the pointer u64* own at byte 0
+    // An array in a struct: element 0 is held at byte 8, and element 1 at
+    // byte 16 is past the end of the target.
+    tagged mut t = tagged{.tag = 1, .slots = {new(u64), new(u64)}};
+    shifted mut* s = cast(&t, shifted mut*); //! error: cannot cast tagged mut* to shifted mut*: a 'mut' cast hides the pointer u64* own at byte 16
+    // An array of structs: the first struct is held whole, and the owner of the
+    // second stands at byte 24.
+    holder[2] mut hs = {holder{.count = 2, .data = new(u64)}, holder{.count = 3, .data = new(u64)}};
+    holder mut* first = cast(&hs, holder mut*); //! error: cannot cast holder[2] mut* to holder mut*: a 'mut' cast hides the pointer u64* own at byte 24
+    // Four owners over two halves: bytes 0 and 16 are held, and byte 8 is the
+    // first that is not.
+    u64* own[4] mut four = {new(u64), new(u64), new(u64), new(u64)};
+    half[2] mut* halves = cast(&four, half[2] mut*); //! error: cannot cast u64* own[4] mut* to half[2] mut*: a 'mut' cast hides the pointer u64* own at byte 8
+    // Three owners over a shorter target: the third, at byte 16, is past the end
+    // of the array of two, and the second, at byte 8, meets the integer of half.
+    u64* own[3] mut three = {new(u64), new(u64), new(u64)};
+    u64* own[2] mut* pair = cast(&three, u64* own[2] mut*); //! error: cannot cast u64* own[3] mut* to u64* own[2] mut*: a 'mut' cast hides the pointer u64* own at byte 16
+    half mut* one = cast(&three, half mut*); //! error: cannot cast u64* own[3] mut* to half mut*: a 'mut' cast hides the pointer u64* own at byte 8
+    println(h == null, *w, s->tag, first->count, halves == null, pair == null, one == null);
+    return 0;
+}

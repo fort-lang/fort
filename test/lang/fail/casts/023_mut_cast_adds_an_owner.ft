@@ -1,0 +1,30 @@
+//! fail
+// A level that the result can change must not hold an owner place that the source does not hold
+// there (D3.14): the result could release bits that no owner wrote. A byte past the end of the
+// source pointee holds no owner of the source. The memory of C has an owner only where its
+// `extern` says `own` (D17.13).
+struct wrap {
+    u64* own p;
+}
+
+struct holder {
+    u64 count;
+    u64* own data;
+}
+
+// C keeps this storage and frees it itself.
+extern fn shared_block() void mut*;
+
+fn main() i32 {
+    u64 mut x = 1234;
+    wrap mut* w = cast(&x, wrap mut*); //! error: cannot cast u64 mut* to wrap mut*: a 'mut' cast adds the pointer u64* own at byte 0
+    // The cast back from `void mut*` adds the owners that the cast to it would hide.
+    void mut* v = cast(&x, void mut*);
+    holder mut* h = cast(v, holder mut*); //! error: cannot cast void mut* to holder mut*: a 'mut' cast adds the pointer u64* own at byte 8
+    wrap mut* c = cast(shared_block(), wrap mut*); //! error: cannot cast void mut* to wrap mut*: a 'mut' cast adds the pointer u64* own at byte 0
+    // The source pointee is one byte, so byte 0 to 7 of the target are past its end.
+    u8 mut* own raw = new(u8);
+    wrap mut* own adopted = cast(move(raw), wrap mut* own); //! error: cannot cast u8 mut* own to wrap mut* own: a 'mut' cast adds the pointer u64* own at byte 0
+    println(w == null, h == null, c == null, adopted == null);
+    return 0;
+}

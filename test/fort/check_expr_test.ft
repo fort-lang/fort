@@ -7,7 +7,9 @@
 import fort.ast;
 import fort.check;
 import check_env;
+import fort.prim;
 import std.strbuf;
+import std.strmap;
 import fort.types;
 
 //
@@ -145,15 +147,22 @@ fn the_tail_stands_only_where_the_mark_is_the_reason() void {
     assert(check_env.errors(&e) == 1);
 }
 
-fn a_cast_that_drops_mut_is_allowed_at_every_level() void {
+fn a_cast_drops_mut_behind_read_only_levels_only() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // The drop behind a mutable level is the one the implicit conversion
-    // refuses and the cast makes. And it is how a caller reaches std.sort_ptr.
+    // Behind a read-only level 1 the cast drops the mark of level 2.
     assert(check_env.check_body(&e,
-        "    i32 mut* mut@ s = {};\n    println(cast(s, i32* mut@).len);"));
+        "    i32 mut* mut@ s = {};\n    println(cast(s, i32*@).len);"));
     assert(check_env.errors(&e) == 0);
+    // Behind a `mut` level 1 the drop changes the type of a pointer place that the result can
+    // write, which the implicit conversion refuses too (D3.14, D5.4).
+    check_env.close(&e);
+    check_env.open(&e);
+    assert(!check_env.check_body(&e,
+        "    i32 mut* mut@ s = {};\n    println(cast(s, i32* mut@).len);"));
+    assert(check_env.errors(&e) == 1);
+    assert(check_env.said(&e, "a 'mut' cast hides the pointer i32 mut* at byte 0"));
 }
 
 fn null_is_not_a_cast_operand() void {
@@ -171,6 +180,576 @@ fn a_cast_target_carries_no_outermost_mut() void {
     defer check_env.close(&e);
     assert(!check_env.check_decls(&e, "i32 k = 1;\ni32* p = cast(&k, i32* mut);\n"));
     assert(check_env.said(&e, "a cast result has no binding: remove the outermost"));
+}
+
+// ---- a `mut` cast that hides an owner (D3.14) ----------------------------------------
+
+// The line of `fn main` in the module of check_hiding: line n of the body, from 1, is on line
+// HIDE_MAIN + n of the module.
+u64 HIDE_MAIN = 28;
+
+// Checks `lines` as the body of `main`, each indented by four spaces, after the declarations that
+// the probes of the rule use: a holder with an owner at byte 8, the same layout with other names,
+// structs of owners, two extern functions and two fort functions.
+fn check_hiding(check_env.env mut* e, string@ lines) bool {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "struct holder {\n    u64 count;\n    u64* own data;\n}\n");
+    strbuf.append(&b, "struct mirror {\n    u64 tally;\n    u64* own payload;\n}\n");
+    strbuf.append(&b, "struct cell {\n    u64* own p;\n}\n");
+    strbuf.append(&b, "struct half {\n    u64* own first;\n    u64 second;\n}\n");
+    strbuf.append(&b, "struct twice {\n    u64* own a;\n    u64* own b;\n}\n");
+    strbuf.append(&b, "extern fn take(void mut* p) void;\n");
+    strbuf.append(&b, "extern fn same(void mut* p) void mut*;\n");
+    strbuf.append(&b, "fn keep(void mut* p) void {\n    return;\n}\n");
+    strbuf.append(&b, "fn holder_at(holder mut* h, void mut* p) holder mut* {\n");
+    strbuf.append(&b, "    return h;\n}\n");
+    strbuf.append(&b, "fn main() i32 {\n");
+    u64 mut i = 0;
+    while (i < lines.len) {
+        strbuf.append(&b, "    ");
+        strbuf.append(&b, lines[i]);
+        strbuf.push(&b, '\n');
+        i += 1;
+    }
+    strbuf.append(&b, "    return 0;\n}\n");
+    return check_env.check_src(e, strbuf.view(&b));
+}
+
+// Whether report `i` of `e` stands at `pos` and says `cast` and then `hidden`.
+fn reported_at(check_env.env mut* e, u64 i, string pos, string cast_text, string hidden) bool {
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    strbuf.append(&want, pos);
+    strbuf.append(&want, ": ");
+    strbuf.append(&want, cast_text);
+    strbuf.append(&want, hidden);
+    return check_env.report_text(e, i) == strbuf.view(&want);
+}
+
+fn a_mut_cast_that_hides_an_owner_is_one_error_at_the_cast() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    string[2] lines = {"holder mut h = {};", "void mut* v = cast(&h, void mut*);"};
+    assert(!check_hiding(&e, lines[..]));
+    // One report, at the cast and not at the binding, because a second report on the line would
+    // leave the corpus green.
+    assert(check_env.errors(&e) == 1);
+    assert(reported_at(&e, 0, "30:19", "cannot cast holder mut* to void mut*",
+                       ": a 'mut' cast hides the pointer u64* own at byte 8"));
+}
+
+fn a_read_only_cast_may_hide_an_owner() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // No store goes through a view whose level 1 is immutable.
+    string[4] lines = {"holder mut h = {};", "void* v = cast(&h, void*);",
+                       "u64* w = cast(&h, u64*);", "println(v == null, *w);"};
+    assert(check_hiding(&e, lines[..]));
+    assert(check_env.errors(&e) == 0);
+}
+
+fn a_target_that_holds_each_owner_at_its_byte_hides_none() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The same owner type at the same byte, under other names, in a struct and in an array.
+    string[6] lines = {"holder mut h = {};", "mirror mut* m = cast(&h, mirror mut*);",
+                       "u64* own[2] mut two = {};", "twice mut* t = cast(&two, twice mut*);",
+                       "cell mut* c = cast(&h.data, cell mut*);",
+                       "println(m == null, t == null, c == null);"};
+    assert(check_hiding(&e, lines[..]));
+    assert(check_env.errors(&e) == 0);
+}
+
+fn the_error_names_the_first_owner_that_the_target_does_not_hold() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // `half` holds the owner at byte 0 and an integer at byte 8.
+    string[2] lines = {"twice mut t = {};", "half mut* h = cast(&t, half mut*);"};
+    assert(!check_hiding(&e, lines[..]));
+    assert(check_env.errors(&e) == 1);
+    assert(reported_at(&e, 0, "30:19", "cannot cast twice mut* to half mut*",
+                       ": a 'mut' cast hides the pointer u64* own at byte 8"));
+}
+
+fn an_argument_of_an_extern_call_is_exempt_and_of_a_fort_call_is_not() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // C sees no `own`, and fort trusts the C side of an extern signature. Parentheses change
+    // nothing. A fort callee has no such trust.
+    string[4] lines = {"holder mut h = {};", "take(cast(&h, void mut*));",
+                       "take((cast(&h, void mut*)));", "keep(cast(&h, void mut*));"};
+    assert(!check_hiding(&e, lines[..]));
+    assert(check_env.errors(&e) == 1);
+    assert(reported_at(&e, 0, "32:10", "cannot cast holder mut* to void mut*",
+                       ": a 'mut' cast hides the pointer u64* own at byte 8"));
+}
+
+fn an_extern_call_in_the_operand_leaves_the_cast_exempt() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The inner call gives the argument of the outer call back when it ends.
+    string[2] lines = {"holder mut h = {};",
+                       "take(cast(holder_at(&h, same(cast(&h, void mut*))), void mut*));"};
+    assert(check_hiding(&e, lines[..]));
+    assert(check_env.errors(&e) == 0);
+}
+
+fn a_cast_inside_an_extern_argument_is_not_exempt() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // Only the cast that is the argument itself is exempt, here the outer one.
+    string[2] lines = {"holder mut h = {};", "take(cast(cast(&h, void mut*), void mut*));"};
+    assert(!check_hiding(&e, lines[..]));
+    assert(check_env.errors(&e) == 1);
+    assert(reported_at(&e, 0, "30:15", "cannot cast holder mut* to void mut*",
+                       ": a 'mut' cast hides the pointer u64* own at byte 8"));
+}
+
+fn a_fort_call_inside_an_extern_argument_is_not_exempt() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The inner cast is an argument of `holder_at`, a fort function, although the call of
+    // `holder_at` stands in an argument of `take`.
+    string[2] lines = {"holder mut h = {};",
+                       "take(cast(holder_at(&h, cast(&h, void mut*)), void mut*));"};
+    assert(!check_hiding(&e, lines[..]));
+    assert(check_env.errors(&e) == 1);
+    assert(reported_at(&e, 0, "30:29", "cannot cast holder mut* to void mut*",
+                       ": a 'mut' cast hides the pointer u64* own at byte 8"));
+}
+
+fn a_call_through_a_function_pointer_is_not_exempt() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // A function pointer can hold a fort function, and an `extern fn` name is no value.
+    string[3] lines = {"holder mut h = {};", "fn (void mut*) void call = keep;",
+                       "call(cast(&h, void mut*));"};
+    assert(!check_hiding(&e, lines[..]));
+    assert(check_env.errors(&e) == 1);
+    assert(reported_at(&e, 0, "31:10", "cannot cast holder mut* to void mut*",
+                       ": a 'mut' cast hides the pointer u64* own at byte 8"));
+}
+
+fn a_span_that_drops_the_own_of_its_elements_hides_them() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The pointee of a span is one element. The read-only view of the same elements is legal.
+    string[4] lines = {"u64* own mut@ own k = new(u64* own, 2);",
+                       "u64* mut@ v = cast(k, u64* mut@);", "u64* own@ r = cast(k, u64* own@);",
+                       "println(v.len, r.len);"};
+    assert(!check_hiding(&e, lines[..]));
+    assert(check_env.errors(&e) == 1);
+    assert(reported_at(&e, 0, "30:19", "cannot cast u64* own mut@ own to u64* mut@",
+                       ": a 'mut' cast hides the pointer u64* own at byte 0"));
+}
+
+fn an_owning_target_hides_as_a_view_does() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The result marks level 1 `mut`, and a later cast back from `void mut* own` would write the
+    // first word of the holder.
+    string[2] lines = {"holder mut* own p = new(holder);",
+                       "void mut* own v = cast(move(p), void mut* own);"};
+    assert(!check_hiding(&e, lines[..]));
+    assert(check_env.errors(&e) == 1);
+    assert(reported_at(&e, 0, "30:23", "cannot cast holder mut* own to void mut* own",
+                       ": a 'mut' cast hides the pointer u64* own at byte 8"));
+}
+
+fn the_error_names_the_first_owner_in_the_order_of_the_fields() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // `mirror` holds the owner of `twice` at byte 8 and an integer at byte 0, so the owner at
+    // byte 0 is the one named.
+    string[2] lines = {"twice mut t = {};", "mirror mut* m = cast(&t, mirror mut*);"};
+    assert(!check_hiding(&e, lines[..]));
+    assert(check_env.errors(&e) == 1);
+    assert(reported_at(&e, 0, "30:21", "cannot cast twice mut* to mirror mut*",
+                       ": a 'mut' cast hides the pointer u64* own at byte 0"));
+}
+
+fn a_module_level_cast_reads_a_layout_only_when_it_has_one() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // `later` has no layout when the initializer of `early` is checked, so the initializer alone
+    // is the error. The pointee of `void mut*` needs no layout, so the rule reports `known`.
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "struct holder {\n    u64 count;\n    u64* own data;\n}\n");
+    strbuf.append(&b, "holder mut g = {};\n");
+    strbuf.append(&b, "later mut* early = cast(&g, later mut*);\n");
+    strbuf.append(&b, "void mut* known = cast(&g, void mut*);\n");
+    strbuf.append(&b, "struct later {\n    u64 a;\n}\n");
+    assert(!check_env.check_decls(&e, strbuf.view(&b)));
+    assert(check_env.errors(&e) == 2);
+    assert(check_env.report_text(&e, 0)
+           == "6:20: a module-level initializer must be a constant expression");
+    assert(reported_at(&e, 1, "7:19", "cannot cast holder mut* to void mut*",
+                       ": a 'mut' cast hides the pointer u64* own at byte 8"));
+}
+
+fn a_cast_that_adds_an_owner_is_one_error() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // Through the result, `del(c->p)` would free the bits of an integer.
+    string[2] lines = {"u64 mut x = 0;", "cell mut* c = cast(&x, cell mut*);"};
+    assert(!check_hiding(&e, lines[..]));
+    assert(check_env.errors(&e) == 1);
+    assert(reported_at(&e, 0, "30:19", "cannot cast u64 mut* to cell mut*",
+                       ": a 'mut' cast adds the pointer u64* own at byte 0"));
+}
+
+fn a_mut_level_below_an_immutable_level_1_can_change() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The elements of `v` are read-only, but `*v[0]` is a store into the owner slot.
+    string[3] lines = {"u64* own mut* mut@ own k = new(u64* own mut*, 1);",
+                       "u64* mut*@ v = cast(k, u64* mut*@);", "println(v.len);"};
+    assert(!check_hiding(&e, lines[..]));
+    assert(check_env.errors(&e) == 1);
+    assert(reported_at(&e, 0, "30:20", "cannot cast u64* own mut* mut@ own to u64* mut*@",
+                       ": a 'mut' cast hides the pointer u64* own at byte 0 of level 2"));
+}
+
+fn a_mut_level_1_lets_each_level_below_it_change() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // Level 2 is immutable in the target, but `*t = &other` replaces it: the pointer at level 1 is
+    // a pointer place, and its type changes.
+    string[3] lines = {"cell mut c = {};", "u64* own mut* mut p = &c.p;",
+                       "u64** mut* t = cast(&p, u64** mut*);"};
+    assert(!check_hiding(&e, lines[..]));
+    assert(check_env.errors(&e) == 1);
+    assert(reported_at(&e, 0, "31:20", "cannot cast u64* own mut* mut* to u64** mut*",
+                       ": a 'mut' cast hides the pointer u64* own mut* at byte 0"));
+}
+
+fn a_view_that_can_change_no_level_may_add_and_hide() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // No level of these results is `mut`, so no store and no release goes through them.
+    string[6] lines = {"u64 mut x = 0;", "cell* c = cast(&x, cell*);", "u64 mut* mut q = &x;",
+                       "cell** d = cast(&q, cell**);", "holder mut h = {};",
+                       "println(c == null, d == null, cast(&h, u64**) == null);"};
+    assert(check_hiding(&e, lines[..]));
+    assert(check_env.errors(&e) == 0);
+}
+
+fn a_hidden_owner_is_named_before_an_added_one() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // `half` holds an owner at byte 0 and `mirror` at byte 8: the first is hidden and the second
+    // added, and the hidden one is named.
+    string[2] lines = {"half mut h = {};", "mirror mut* m = cast(&h, mirror mut*);"};
+    assert(!check_hiding(&e, lines[..]));
+    assert(check_env.errors(&e) == 1);
+    assert(reported_at(&e, 0, "30:21", "cannot cast half mut* to mirror mut*",
+                       ": a 'mut' cast hides the pointer u64* own at byte 0"));
+}
+
+fn each_source_level_below_the_end_of_the_target_chain_can_change() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // `*t = cast(&fake, u64)` would give `*p` a slot that holds no owner. The read-only view of
+    // the same bits is legal.
+    string[4] lines = {"cell mut c = {};", "u64* own mut* mut p = &c.p;",
+                       "u64 mut* t = cast(&p, u64 mut*);", "println(*t, *cast(&p, u64*));"};
+    assert(!check_hiding(&e, lines[..]));
+    assert(check_env.errors(&e) == 1);
+    assert(reported_at(&e, 0, "31:18", "cannot cast u64* own mut* mut* to u64 mut*",
+                       ": a 'mut' cast hides the pointer u64* own mut* at byte 0"));
+}
+
+// Appends `struct <name>1` with `width` fields of `leaf`, and `struct <name>k`, for k from 2 to
+// `depth`, with `width` fields of `s(k-1)`. When `last` is not empty, the last field of
+// `<name>1` has the type `last` and the last field of `<name>k` the type `<name>(k-1)`.
+fn append_nested(strbuf.str_buf mut* b, string name, u64 depth, u64 width, string leaf,
+                 string last) void {
+    u64 mut k = 1;
+    while (k <= depth) {
+        strbuf.append(b, "struct ");
+        strbuf.append(b, name);
+        strbuf.append_u64(b, k);
+        strbuf.append(b, " {\n");
+        u64 mut j = 0;
+        while (j < width) {
+            strbuf.append(b, "    ");
+            if (j + 1 == width && last.len > 0 && k == 1) {
+                strbuf.append(b, last);
+            } else if (j + 1 == width && last.len > 0) {
+                strbuf.append(b, name);
+                strbuf.append_u64(b, k - 1);
+            } else if (k == 1) {
+                strbuf.append(b, leaf);
+            } else {
+                strbuf.append(b, "s");
+                strbuf.append_u64(b, k - 1);
+            }
+            // `f32` and `f64` are type names, so the fields are `x0` to `x127`
+            strbuf.append(b, " x");
+            strbuf.append_u64(b, j);
+            strbuf.append(b, ";\n");
+            j += 1;
+        }
+        strbuf.append(b, "}\n");
+        k += 1;
+    }
+}
+
+// The check of `fn view(<from> p) <to> { return cast(p, <to>); }` after the declarations in `b`.
+fn check_view(check_env.env mut* e, strbuf.str_buf mut* b, string from, string to) bool {
+    strbuf.append(b, "fn view(");
+    strbuf.append(b, from);
+    strbuf.append(b, " p) ");
+    strbuf.append(b, to);
+    strbuf.append(b, " {\n    return cast(p, ");
+    strbuf.append(b, to);
+    strbuf.append(b, ");\n}\n");
+    return check_env.check_decls(e, strbuf.view(b));
+}
+
+fn a_flat_array_over_nested_structs_takes_no_walk_of_each_owner() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // 128 to the power 6 owners on both sides. A walk of each owner, or of each path to one,
+    // would not end within the timeout of the suite; the memo of first_hidden reads each part
+    // once. The run takes about 0.1 s.
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    append_nested(&b, "s", 6, 128, "u64* own", "");
+    assert(check_view(&e, &b, "u64* own[4398046511104] mut*", "s6 mut*"));
+    assert(check_env.errors(&e) == 0);
+}
+
+fn nested_structs_over_arrays_of_parts_take_no_walk_of_each_owner() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The target nests an array field in each struct, so each run of the source meets an array
+    // of parts, and a byte modulo the element size is the key of each part.
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    append_nested(&b, "s", 6, 128, "u64* own", "");
+    strbuf.append(&b, "struct r1 {\n    u64* own[128] xs;\n}\n");
+    u64 mut k = 2;
+    while (k <= 6) {
+        strbuf.append(&b, "struct r");
+        strbuf.append_u64(&b, k);
+        strbuf.append(&b, " {\n    r");
+        strbuf.append_u64(&b, k - 1);
+        strbuf.append(&b, "[128] xs;\n}\n");
+        k += 1;
+    }
+    assert(check_view(&e, &b, "s6 mut*", "r6 mut*"));
+    assert(check_env.errors(&e) == 0);
+}
+
+fn the_last_owner_that_differs_is_found_after_each_equal_part() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The target is the source but for its last owner, a `u8* own`: the walk verifies each part
+    // before it, once for each kind of part.
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    append_nested(&b, "s", 6, 128, "u64* own", "");
+    append_nested(&b, "z", 6, 128, "u64* own", "u8* own");
+    assert(!check_view(&e, &b, "s6 mut*", "z6 mut*"));
+    assert(check_env.errors(&e) == 1);
+    assert(check_env.said(&e, "cannot cast s6 mut* to z6 mut*"));
+    assert(check_env.said(&e, "hides the pointer u64* own at byte 35184372088824"));
+}
+
+fn each_end_of_the_target_chain_at_a_mut_level_hides_the_pointer_to_the_next() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The chain of the target ends at an integer, at a `void`, and at a fixed array on the source
+    // side and on the target side. Each line is one report, at the cast.
+    string[6] lines = {"cell mut c = {};", "u64* own mut* mut p = &c.p;",
+                       "u64* own mut*[1] mut a = {&c.p};", "println(cast(&p, u64 mut*) == null,",
+                       "        cast(&p, void mut*) == null, cast(&a, u64** mut*) == null,",
+                       "        cast(&p, u64**[1] mut*) == null);"};
+    assert(!check_hiding(&e, lines[..]));
+    assert(check_env.errors(&e) == 4);
+    assert(reported_at(&e, 0, "32:13", "cannot cast u64* own mut* mut* to u64 mut*",
+                       ": a 'mut' cast hides the pointer u64* own mut* at byte 0"));
+    assert(reported_at(&e, 1, "33:13", "cannot cast u64* own mut* mut* to void mut*",
+                       ": a 'mut' cast hides the pointer u64* own mut* at byte 0"));
+    assert(reported_at(&e, 2, "33:42", "cannot cast u64* own mut*[1] mut* to u64** mut*",
+                       ": a 'mut' cast hides the pointer u64* own mut* at byte 0"));
+    assert(reported_at(&e, 3, "34:13", "cannot cast u64* own mut* mut* to u64**[1] mut*",
+                       ": a 'mut' cast hides the pointer u64* own mut* at byte 0"));
+}
+
+// The type `u64* own`, one owner.
+fn one_owner(check_env.env mut* e) types.node* {
+    types.node* word = types.type_prim(&e->ck.types, prim.prim_kind.prim_u64);
+    return types.type_ptr(&e->ck.types, word, true, false);
+}
+
+fn the_memo_keeps_one_key_for_each_kind_of_part_and_not_for_each_owner() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    append_nested(&b, "s", 6, 128, "u64* own", "");
+    assert(check_env.check_decls(&e, strbuf.view(&b)));
+    types.node* nest = check_env.sym_main(&e, "s6")->ty;
+    types.node* flat = types.type_array(&e.ck.types, one_owner(&e), 4398046511104);
+    // A flat array over the nesting: the array, the run of its owners over each of the six
+    // structs, and the one owner. A walk of each owner would read 128 to the power 6 of them.
+    check.place_memo mut m = check.place_memo{};
+    defer check.memo_free(&m);
+    check.pointer_place mut h = check.pointer_place{};
+    assert(!check.first_hidden(&m, flat, 1, 0, nest, &h));
+    assert(strmap.count(&m.held) == 8);
+    // The nesting over the flat array: each struct at a byte that is 0 modulo the element size of
+    // the array, and the one owner.
+    check.place_memo mut back = check.place_memo{};
+    defer check.memo_free(&back);
+    assert(!check.first_hidden(&back, nest, 1, 0, flat, &h));
+    assert(strmap.count(&back.held) == 7);
+}
+
+fn the_memo_keeps_no_key_for_a_run_with_a_hidden_owner() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    append_nested(&b, "s", 2, 4, "u64* own", "");
+    assert(check_env.check_decls(&e, strbuf.view(&b)));
+    types.node* nest = check_env.sym_main(&e, "s2")->ty;
+    // Fifteen owners of the flat array are held, and the sixteenth is past the end of `s2`. The
+    // memo keeps the runs that hold each owner and none of the runs that lead to the sixteenth.
+    types.node* flat = types.type_array(&e.ck.types, one_owner(&e), 17);
+    check.place_memo mut m = check.place_memo{};
+    defer check.memo_free(&m);
+    check.pointer_place mut h = check.pointer_place{};
+    assert(check.first_hidden(&m, flat, 1, 0, nest, &h));
+    assert(h.at == 128);
+    assert(types.type_equal(h.ty, one_owner(&e)));
+    assert(strmap.count(&m.held) == 3);
+}
+
+fn a_part_holds_its_own_bytes_and_padding_and_the_end_hold_none() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    assert(check_env.check_decls(&e, "struct pad {\n    u8 a;\n    u64* own b;\n}\n"));
+    types.node* pad = check_env.sym_main(&e, "pad")->ty;
+    check.target_part whole = check.target_part{.ty = pad, .at = 0};
+    // byte 0 is the field `a`, bytes 1 to 7 are padding, and the field `b` is bytes 8 to 15
+    assert(check.part_at(whole, 0).at == 0);
+    assert(check.part_at(whole, 3).ty == null);
+    assert(check.part_at(whole, 8).at == 8);
+    assert(types.type_equal(check.part_at(whole, 15).ty, one_owner(&e)));
+    assert(check.part_at(whole, 16).ty == null);
+    // the last element of an array, and the byte past it
+    types.node* words = types.type_array(&e.ck.types, one_owner(&e), 3);
+    check.target_part list = check.target_part{.ty = words, .at = 0};
+    assert(check.part_at(list, 23).at == 16);
+    assert(check.part_at(list, 24).ty == null);
+    // The cover of the bytes of `b` is `b`; the cover of both fields, and of bytes past the end,
+    // is the struct itself; a void storage has no cover.
+    assert(check.cover_of(pad, 8, 8).at == 8);
+    assert(types.type_equal(check.cover_of(pad, 8, 8).ty, one_owner(&e)));
+    assert(check.cover_of(pad, 0, 16).ty == pad);
+    assert(check.cover_of(pad, 8, 16).ty == pad);
+    assert(check.cover_of(null, 0, 8).ty == null);
+}
+
+fn a_mut_view_keeps_each_pointer_place_and_puns_the_rest() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // A `u64 mut*` slot seen as an integer, a pointer field of another type, and a mark that
+    // changes: three reports. The bits of a float and the bytes of an integer pun freely.
+    string[8] lines = {"u64 mut x = 0;", "u64 mut* mut slot = &x;", "f64 mut f = 1.0;",
+                       "u64 mut* bits = cast(&slot, u64 mut*);",
+                       "u8* mut* view = cast(&slot, u8* mut*);",
+                       "u64* mut* drop = cast(&slot, u64* mut*);",
+                       "u64 mut* fb = cast(&f, u64 mut*);",
+                       "println(*bits, view == null, drop == null, *fb, *cast(&x, u8 mut*));"};
+    assert(!check_hiding(&e, lines[..]));
+    assert(check_env.errors(&e) == 3);
+    assert(reported_at(&e, 0, "32:21", "cannot cast u64 mut* mut* to u64 mut*",
+                       ": a 'mut' cast hides the pointer u64 mut* at byte 0"));
+    assert(reported_at(&e, 1, "33:21", "cannot cast u64 mut* mut* to u8* mut*",
+                       ": a 'mut' cast hides the pointer u64 mut* at byte 0"));
+    assert(reported_at(&e, 2, "34:22", "cannot cast u64 mut* mut* to u64* mut*",
+                       ": a 'mut' cast hides the pointer u64 mut* at byte 0"));
+}
+
+fn the_work_limit_makes_a_cast_an_error_with_a_note() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The two arrays hold the same owners, and their elements meet at about 100003 offsets, so
+    // the check passes its limit before it proves the cast. One error, and one note after it.
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "struct src_elem {\n    u64* own[100003] a;\n}\n");
+    strbuf.append(&b, "struct dst_elem {\n    u64* own[100019] a;\n}\n");
+    assert(!check_view(&e, &b, "src_elem[100019] mut*", "dst_elem[100003] mut*"));
+    assert(check_env.errors(&e) == 1);
+    assert(check_env.reports(&e) == 2);
+    assert(check_env.said(&e, "the check of a 'mut' cast passes its work limit of 65536 steps"));
+    assert(check_env.report_severity(&e, 1) == "note");
+    assert(check_env.said(&e, "the check cannot prove that the cast keeps its pointer places"));
+    // Below the limit the same shape is proved: the elements meet at about 1000 offsets.
+    check_env.close(&e);
+    check_env.open(&e);
+    strbuf.clear(&b);
+    strbuf.append(&b, "struct src_elem {\n    u64* own[1000] a;\n}\n");
+    strbuf.append(&b, "struct dst_elem {\n    u64* own[1001] a;\n}\n");
+    assert(check_view(&e, &b, "src_elem[1001] mut*", "dst_elem[1000] mut*"));
+    assert(check_env.errors(&e) == 0);
+}
+
+fn the_rule_reads_no_long_array_element_by_element() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // A billion owners each time: a walk of each element would not end within the timeout of the
+    // suite. The first cast holds each owner, the second loses the last one, and in the third the
+    // owner at byte 8 meets the integer of the first half.
+    string[5] lines = {"u64* own[1000000000] mut* p = null;",
+                       "cell[1000000000] mut* q = cast(p, cell[1000000000] mut*);",
+                       "u64* own[999999999] mut* r = cast(p, u64* own[999999999] mut*);",
+                       "half[500000000] mut* s = cast(p, half[500000000] mut*);",
+                       "println(q == null, r == null, s == null);"};
+    assert(!check_hiding(&e, lines[..]));
+    assert(check_env.errors(&e) == 2);
+    assert(reported_at(&e, 0, "31:34",
+                       "cannot cast u64* own[1000000000] mut* to u64* own[999999999] mut*",
+                       ": a 'mut' cast hides the pointer u64* own at byte 7999999992"));
+    assert(reported_at(&e, 1, "32:30",
+                       "cannot cast u64* own[1000000000] mut* to half[500000000] mut*",
+                       ": a 'mut' cast hides the pointer u64* own at byte 8"));
 }
 
 // ---- sizeof ------------------------------------------------------------------------
@@ -1036,9 +1615,38 @@ fn main() i32 {
     a_cast_never_adds_mut();
     the_diagnostic_names_the_rule_that_refused();
     the_tail_stands_only_where_the_mark_is_the_reason();
-    a_cast_that_drops_mut_is_allowed_at_every_level();
+    a_cast_drops_mut_behind_read_only_levels_only();
     null_is_not_a_cast_operand();
     a_cast_target_carries_no_outermost_mut();
+    a_mut_cast_that_hides_an_owner_is_one_error_at_the_cast();
+    a_read_only_cast_may_hide_an_owner();
+    a_target_that_holds_each_owner_at_its_byte_hides_none();
+    the_error_names_the_first_owner_that_the_target_does_not_hold();
+    an_argument_of_an_extern_call_is_exempt_and_of_a_fort_call_is_not();
+    an_extern_call_in_the_operand_leaves_the_cast_exempt();
+    a_cast_inside_an_extern_argument_is_not_exempt();
+    a_fort_call_inside_an_extern_argument_is_not_exempt();
+    a_call_through_a_function_pointer_is_not_exempt();
+    a_span_that_drops_the_own_of_its_elements_hides_them();
+    an_owning_target_hides_as_a_view_does();
+    the_error_names_the_first_owner_in_the_order_of_the_fields();
+    a_module_level_cast_reads_a_layout_only_when_it_has_one();
+    a_cast_that_adds_an_owner_is_one_error();
+    a_mut_level_below_an_immutable_level_1_can_change();
+    a_mut_level_1_lets_each_level_below_it_change();
+    a_view_that_can_change_no_level_may_add_and_hide();
+    a_hidden_owner_is_named_before_an_added_one();
+    each_source_level_below_the_end_of_the_target_chain_can_change();
+    a_flat_array_over_nested_structs_takes_no_walk_of_each_owner();
+    nested_structs_over_arrays_of_parts_take_no_walk_of_each_owner();
+    the_last_owner_that_differs_is_found_after_each_equal_part();
+    each_end_of_the_target_chain_at_a_mut_level_hides_the_pointer_to_the_next();
+    the_memo_keeps_one_key_for_each_kind_of_part_and_not_for_each_owner();
+    the_memo_keeps_no_key_for_a_run_with_a_hidden_owner();
+    a_part_holds_its_own_bytes_and_padding_and_the_end_hold_none();
+    a_mut_view_keeps_each_pointer_place_and_puns_the_rest();
+    the_work_limit_makes_a_cast_an_error_with_a_note();
+    the_rule_reads_no_long_array_element_by_element();
     sizeof_yields_an_untyped_constant_of_the_type_s_size();
     sizeof_needs_a_sized_type();
     new_yields_an_owning_pointer_and_a_counted_new_an_owning_span();
