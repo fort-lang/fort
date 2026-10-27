@@ -672,6 +672,32 @@ the emptiness fact where kill rules 3 and 4 end it, so each verdict stays.
 
 ### 6.2 (b) A use after `move` or `del`
 
+D17.21 holds the rule. It starts from the proposed text below and the ruling on Q5 (section 12).
+It differs from that text in these points:
+1. Refinement R6 (D17.11, Borrows) narrows "also through any pointer". A `move`, a `del` or a read
+   of a place through a pointer reaches a memory owner only when the place can be a place of its
+   local.
+2. A read of a place that can be `p` and does not contain it is a use too, when an index of the
+   place is no key or the place is through a pointer, because the proof of rule (b) in 5.5 needs
+   it. A read of a tracked element `b[j]` uses `b[j]` only (point 9).
+3. The exempt reads of Q5 hold for a place in fixed storage. The text says "A load through a
+   pointer, of any type, is a use of each memory owner". The user ruled on 2026-10-27 that the
+   operand of a `move` or a `del` and a comparison with `null` through a pointer are no uses. A
+   read of a `.len` through a pointer stays a use, because the analysis reads no type there.
+4. The user ruled on 2026-10-27 that the edge where a test finds a value that is not `null` ends
+   the vacated state. The test takes each form of gen rule 6 of D17.11, `&&` and `||` included,
+   and the test of `p.ptr` for a span or a `string`.
+5. The implicit `move` of `return x` vacates `x` (D17.5). Inside one statement, a `move` operand
+   vacates its place right after its read, in the order of `fir.md` 7.
+6. A store ends the vacated state only when no store into a key of its destination follows it.
+7. The message says "can be vacated", and there is one error for each location and each local
+   whose owner the use reads.
+8. The rule starts as a report, as D17.20 did. It also gives the position of the error, the choice
+   of the note, `<place>` and a limit of work.
+9. A read of a tracked place in fixed storage, such as `b[k]`, is a use of that place and of the
+   owners below it only. A read through a pointer, or through an index that is no key, is a use of
+   each owner that it can overlap.
+
 Proposed text: Take a local owner `p`. A use of `p` is a compile error when the analysis cannot
 prove that `p` is not vacated there. `p` is vacated after a `move` or a `del` of `p` or of a place
 that contains it, until a store into `p`. A `move` or a `del` of a place that can be `p` gives `p`
@@ -1024,8 +1050,14 @@ The user ruled on each question on 2026-10-23, each as its recommendation says:
   waits for a sound R6, the aggregates for R1, and rule (e) for R3, R4 and a sound R6.
 - Q2: (A), no annotation. Q3: (1), no error for a `del` of an owner that can be vacated.
 - Q4: (a) the call of 4.6 step 3 stays; (b) what a callee keeps or writes out stays outside (X4).
-- Q5: (1), the list of 6.2. Q6: (1), 8,000 lines for the analysis and 3,500 for the oracle.
+- Q5: (1), the list of 6.2, now in D17.21. Q6: (1), 8,000 lines for the analysis and 3,500
+  for the oracle.
 - Q7: (1), a `del` or a `cast` of a span whose elements hold owners waits for R8.
+
+The user ruled on two questions of D17.21 on 2026-10-27. Through a pointer, the operand of a
+`move` or a `del` and a comparison with `null` are no uses: "Exempt move/del and null test". The
+edge where a test finds a value that is not `null` ends the vacated state: "Yes, the non-null
+edge clears it".
 
 The user ruled on assumption A8 (5.1) on 2026-10-26: "Yes, add A8 to D10.7". D10.7 now lists a read
 or a write of the storage of a local of a run through a value that does not derive from an address
