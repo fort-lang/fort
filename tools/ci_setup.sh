@@ -106,14 +106,27 @@ setup_linux() {
     # packages take 1 to 4 seconds. In region westus3 on Ubuntu 26.04 its libllvm18
     # download stalled for 6 minutes and more. So the first download gets 30 seconds.
     # After a failure, the script skips the azure mirror and downloads from
-    # archive.ubuntu.com, at most 2 times. A mirror outage once made `apt-get update`
-    # hang until GitHub cancelled the job after about 45 minutes, so each apt-get call has
-    # a bound.
+    # archive.ubuntu.com, at most 3 times with a bound of 90 s. A mirror outage once made
+    # `apt-get update` hang until GitHub cancelled the job after about 45 minutes, so each
+    # apt-get call has a bound.
+    # The fallback had 2 attempts of 60 s. In merge-group runs 40565608599 and 40568754082
+    # both attempts ended at the bound, because one file trickled on one connection. In
+    # run 40568754082 the other files came at 3 MB/s and more, but 3.9 MB did not end in
+    # 55 s, a rate of 0.071 MB/s or less. At that rate 95 MB takes about 1340 s, so no
+    # single bound fits. A new attempt opens a new connection, so the script uses more
+    # attempts and not a longer bound.
+    # apt keeps the finished files and resumes a partial file in the apt cache: in run
+    # 40568754082 the second attempt needed 53.3 of 80.9 MB, and the 13.5 MB file that did
+    # not end in 49 s came in 1.3 s.
+    # Worst case of this function: 70 + 40 s for the first download, 3 x (70 + 100) s for
+    # the fallback, 2 x (70 + 130) s for the unpacks and 3 sleeps of 10 s: 1050 s. The
+    # step bound in the workflows is 1200 s (timeout-minutes: 20), so the last attempt can
+    # run to its end.
     local start=$SECONDS
     if ! apt_fetch 30 "${packages[@]}"; then
         echo "ci_setup.sh: the download from the first mirror failed or took more than 30 s" >&2
         skip_azure_mirror
-        retry 2 apt_fetch 60 "${packages[@]}"
+        retry 3 apt_fetch 90 "${packages[@]}"
     fi
     retry 2 apt_unpack "${packages[@]}"
     echo "ci_setup.sh: apt installed the packages in $((SECONDS - start)) s"

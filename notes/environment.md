@@ -695,18 +695,24 @@ without a rewrite.
   connection after 30 s, retries it 3 times, and runs under `sudo timeout -k 10 <bound>`, so
   the signal goes to `apt-get` and not to `sudo`. The first download uses the list of the
   image and has a bound of 30 s. If it fails, the script deletes the azure line from the list,
-  and downloads from `archive.ubuntu.com` at most 2 times with a bound of 60 s. Then it unpacks
+  and downloads from `archive.ubuntu.com` at most 3 times with a bound of 90 s. Then it unpacks
   from the apt cache at most 2 times with a bound of 120 s. Each `apt-get update` has a bound
   of 60 s and may fail or only warn, because an old index often still holds the packages. Each
   unpack first runs `dpkg --configure -a` with a bound of 60 s, because a timeout during an
   unpack leaves dpkg interrupted. The script writes `apt installed the packages in <n> s` to the
-  log. Each "Install the tools" step has `timeout-minutes: 14`. The worst case is 810 s: 70 +
-  40 s for the first download, 2 x (70 + 70) s for the next 2, 2 x (70 + 130) s for the unpacks
-  and 2 sleeps of 10 s. That is inside the 840 s step bound, so the last attempt can run to its
-  end. In the 3 attempts of PR CI run 40089164921 the apt install took 8 to 50 s in 51 jobs on
-  `ubuntu-24.04` and 10 to 48 s in 51 jobs on `ubuntu-latest`. 2 of the 51 `ubuntu-latest` jobs
-  used the fallback, in the region `westus`, and took 46 and 48 s. A normal install took 21 to
-  52 seconds on Darwin.
+  log. Each "Install the tools" step has `timeout-minutes: 20`. The worst case is 1050 s: 70 +
+  40 s for the first download, 3 x (70 + 100) s for the next 3, 2 x (70 + 130) s for the unpacks
+  and 3 sleeps of 10 s. That is inside the 1200 s step bound, so the last attempt can run to its
+  end. The 3 jobs that had `timeout-minutes: 20` now have 30. The fallback had 2 attempts of 60 s
+  until merge-group runs 40565608599 and 40568754082 failed in both. In each run one file trickled
+  on one connection. In run 40568754082 the other files came at 3 MB/s and more, but a 3.9 MB file
+  did not end in 55 s, a rate of 0.071 MB/s or less, so 95 MB at that rate takes about 1340 s. A new
+  attempt opens a new connection, and apt resumes the partial file from the apt cache: in the same
+  run the second attempt needed 53.3 of 80.9 MB, and a 13.5 MB file that did not end in 49 s came in
+  1.3 s. In the 3 attempts of PR CI run 40089164921 the apt install took 8 to 50 s in 51 jobs on
+  `ubuntu-24.04` and 10 to 48 s in 51 jobs on `ubuntu-latest`. 2 of the 51 `ubuntu-latest` jobs used
+  the fallback, in the region `westus`, and took 46 and 48 s. A normal install took 21 to 52 seconds
+  on Darwin.
 - The `bootstrap` job builds the chain and runs the label `fort` without the label `modules`.
   The job `modules` runs the module corpus `test/fort` in 2 parts
   (`FORT_MODULE_SHARDS` in `CMakeLists.txt`, `notes/testing.md`). Each host runs 2 `modules`
@@ -741,5 +747,5 @@ without a rewrite.
 - The revert of the ownership wave on 2026-10-22 removed the audit step and its 4 enforce steps
   from `bootstrap`, and the ownership tests from the module corpus. In PR CI run 39899589232 the
   3 `bootstrap` jobs took 2m10s to 3m9s, and the 6 `modules` jobs took 3m20s to 5m53s. The bound
-  of `bootstrap` is 30 minutes and the bound of `modules` is 20 minutes. A PR run must show each
+  of `bootstrap` is 30 minutes and the bound of `modules` is 30 minutes. A PR run must show each
   job under half its bound. Measure the job time of a run before you change a bound.
