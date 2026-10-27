@@ -1,0 +1,309 @@
+{
+  "comment": [
+    "The table of the ownership summaries of spec/ownership-design.md 8: the order of the",
+    "strongly connected components of the direct calls, the rounds and the work of a component,",
+    "and the text form in src/fort/owner/summary.ft (8.1, 8.2); the interface hash, the summary",
+    "file of the artifact and its reader in src/fort/library/artifact.ft (8.2, toolchain.md 2.2);",
+    "--emit-summaries in src/fort/driver.ft; and the graph of a whole program in",
+    "src/fort/gen_fir.ft. A decision `O8.n-<rule>` names the section of the design that owns the",
+    "rule. Each row breaks one rule. The module suites compile the mutated module themselves; the",
+    "build links the compiler so that the md5 guard reads it, and the second stage runs",
+    "test/library/cache_test.py over that compiler, which holds a changed summary against the",
+    "rebuild of each dependent. The table runs in the VM with the default runner after",
+    "`tools/vm configure` and `tools/vm build`. The build waits 2 s and touches the sources in",
+    "the guest first, as tools/mutations/artifact_fort.json does."
+  ],
+  "sources": [
+    "src/fort/owner/summary.ft",
+    "src/fort/library/artifact.ft",
+    "src/fort/driver.ft",
+    "src/fort/gen_fir.ft"
+  ],
+  "binary": "build/Linux/debug/fort",
+  "build": "sleep 2 && touch src/fort/owner/summary.ft src/fort/library/artifact.ft src/fort/driver.ft src/fort/gen_fir.ft && cmake --build build/Linux/debug --target fort",
+  "stages": [
+    {
+      "name": "the module suites of the summaries",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --verify-ir -j 4 owner/summary library/artifact gen_fir_summary driver_library driver_summary"
+    },
+    {
+      "name": "the cache of the library builds",
+      "command": "python3 test/library/cache_test.py --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --cc clang --target x86_64-linux-gnu"
+    }
+  ],
+  "mutations": [
+    {
+      "decision": "O8.1-order-extern-edge",
+      "file": "src/fort/owner/summary.ft",
+      "what": "a call of an extern is a direct call of the graph",
+      "old": "                && s->value.callee == fir.callee_kind.cl_fn) {",
+      "new": "                && s->value.callee != fir.callee_kind.cl_value) {"
+    },
+    {
+      "decision": "O8.1-order-low-lost",
+      "file": "src/fort/owner/summary.ft",
+      "what": "the least number that a callee reaches does not go back to its caller",
+      "old": "                if (w.low[v] < w.low[caller]) {",
+      "new": "                if (false) {"
+    },
+    {
+      "decision": "O8.1-order-low-number",
+      "file": "src/fort/owner/summary.ft",
+      "what": "a caller takes the number of its callee in place of the least number that the callee reaches",
+      "old": "                    w.low[caller] = w.low[v];",
+      "new": "                    w.low[caller] = w.number[v];"
+    },
+    {
+      "decision": "O8.1-order-closed-edge",
+      "file": "src/fort/owner/summary.ft",
+      "what": "a call of a node of a closed component lowers the least number of the caller",
+      "old": "                } else if (w.on_stack[t] && w.number[t] < w.low[v]) {",
+      "new": "                } else if (w.number[t] < w.low[v]) {"
+    },
+    {
+      "decision": "O8.1-order-self-call",
+      "file": "src/fort/owner/summary.ft",
+      "what": "a function that calls itself takes one pass",
+      "old": "                v->calls_itself = true;",
+      "new": "                v->calls_itself = false;"
+    },
+    {
+      "decision": "O8.1-order-cycle",
+      "file": "src/fort/owner/summary.ft",
+      "what": "a component of two members takes one pass",
+      "old": "    bool cyclic = count > 1 || g->nodes.items[v].calls_itself;",
+      "new": "    bool cyclic = g->nodes.items[v].calls_itself;"
+    },
+    {
+      "decision": "O8.1-work-limit",
+      "file": "src/fort/owner/summary.ft",
+      "what": "the work of a component passes its limit when it equals it",
+      "old": "    if (c->work > limit) {",
+      "new": "    if (c->work >= limit) {"
+    },
+    {
+      "decision": "O8.1-work-sum",
+      "file": "src/fort/owner/summary.ft",
+      "what": "an analysis replaces the work of its component in place of adding to it",
+      "old": "        c->work += work;",
+      "new": "        c->work = work;"
+    },
+    {
+      "decision": "O8.1-work-cap",
+      "file": "src/fort/owner/summary.ft",
+      "what": "a sum that passes the largest u64 takes the last work",
+      "old": "        c->work = containers.U64_MAX;",
+      "new": "        c->work = work;"
+    },
+    {
+      "decision": "O8.1-work-two-to-26",
+      "file": "src/fort/owner/summary.ft",
+      "what": "the limit of a component is one less than 2^26",
+      "old": "u64 WORK_LIMIT = 67108864;",
+      "new": "u64 WORK_LIMIT = 67108863;"
+    },
+    {
+      "decision": "O8.1-over-no-line",
+      "file": "src/fort/owner/summary.ft",
+      "what": "a member of a component past its limit keeps its lines and takes no safe value",
+      "old": "            set_safe(g, cast(g->members.items[comp->first + k], u64));",
+      "new": "            g->nodes.items[cast(g->members.items[comp->first + k], u64)].work += 0;"
+    },
+    {
+      "decision": "O8.1-over-stops",
+      "file": "src/fort/owner/summary.ft",
+      "what": "the rounds of a component go on past its limit",
+      "old": "    if (comp->cyclic && changed && !comp->over) {",
+      "new": "    if (comp->cyclic && changed) {"
+    },
+    {
+      "decision": "O8.1-one-pass",
+      "file": "src/fort/owner/summary.ft",
+      "what": "a component of no cycle takes a second round after a change",
+      "old": "    if (comp->cyclic && changed && !comp->over) {",
+      "new": "    if (changed && !comp->over) {"
+    },
+    {
+      "decision": "O8.1-must-only-goes",
+      "file": "src/fort/owner/summary.ft",
+      "what": "a must line that a member does not hold comes in",
+      "old": "            if (!is_must(g->found.items[j].kind)) {",
+      "new": "            if (true) {"
+    },
+    {
+      "decision": "O8.1-may-only-comes",
+      "file": "src/fort/owner/summary.ft",
+      "what": "a may line that the analysis does not find again goes",
+      "old": "            if (!is_must(old[i].kind)) {",
+      "new": "            if (false) {"
+    },
+    {
+      "decision": "O8.1-may-starts-absent",
+      "file": "src/fort/owner/summary.ft",
+      "what": "a may line of the start state is taken",
+      "old": "        if (is_must(g->found.items[i].kind)) {",
+      "new": "        if (true) {"
+    },
+    {
+      "decision": "O8.2-text-item-newline",
+      "file": "src/fort/owner/summary.ft",
+      "what": "an item line ends with no newline",
+      "old": "            strbuf.append(out, held[k].text);\n            strbuf.push(out, '\\n');",
+      "new": "            strbuf.append(out, held[k].text);"
+    },
+    {
+      "decision": "O8.2-read-leading-zero",
+      "file": "src/fort/owner/summary.ft",
+      "what": "a number with a leading zero reads",
+      "old": "    if (text[*at] == '0') {",
+      "new": "    if (false) {"
+    },
+    {
+      "decision": "O8.2-read-empty-function",
+      "file": "src/fort/owner/summary.ft",
+      "what": "a last function with no item reads",
+      "old": "    return at == text.len && (n == 0 || lines(t, n - 1).len > 0);",
+      "new": "    return at == text.len;"
+    },
+    {
+      "decision": "O8.2-read-symbol-twice",
+      "file": "src/fort/owner/summary.ft",
+      "what": "a function that stands twice reads",
+      "old": "    if (n > 0 && (str.cmp(name, symbol(t, n - 1)) <= 0 || lines(t, n - 1).len == 0)) {",
+      "new": "    if (n > 0 && (str.cmp(name, symbol(t, n - 1)) < 0 || lines(t, n - 1).len == 0)) {"
+    },
+    {
+      "decision": "O8.2-read-item-twice",
+      "file": "src/fort/owner/summary.ft",
+      "what": "an item that stands twice reads",
+      "old": "    if (held.len > 0 && compare(held[held.len - 1], l) >= 0) {",
+      "new": "    if (held.len > 0 && compare(held[held.len - 1], l) > 0) {"
+    },
+    {
+      "decision": "O8.2-read-must-token",
+      "file": "src/fort/owner/summary.ft",
+      "what": "a must line takes a token",
+      "old": "    if (is_must(k) && !is_path(operand)) {",
+      "new": "    if (is_must(k) && !is_token(operand)) {"
+    },
+    {
+      "decision": "O8.2-read-library",
+      "file": "src/fort/owner/summary.ft",
+      "what": "the library line of another library reads",
+      "old": "        || l[LIBRARY_WORD.len..] != library) {",
+      "new": "        || l[LIBRARY_WORD.len..].len == 0) {"
+    },
+    {
+      "decision": "O8.2-hash-summaries",
+      "file": "src/fort/library/artifact.ft",
+      "what": "the interface hash does not cover the summary file",
+      "old": "    add_file(&st, OWNERSHIP_PATH, summaries_text);",
+      "new": "    add_file(&st, OWNERSHIP_PATH, \"\");"
+    },
+    {
+      "decision": "O8.2-hash-names",
+      "file": "src/fort/library/artifact.ft",
+      "what": "the interface hash holds no file name",
+      "old": "    strbuf.append(&head, name);",
+      "new": "    strbuf.append(&head, \"\");"
+    },
+    {
+      "decision": "O8.2-hash-read",
+      "file": "src/fort/library/artifact.ft",
+      "what": "the reader holds the interface line against the summary file of no build",
+      "old": "    append_interface_hash(&b, strbuf.view(&c->interface), strbuf.view(&c->summaries));",
+      "new": "    append_interface_hash(&b, strbuf.view(&c->interface), \"fort-summaries 1\\nlibrary geom\\n\");"
+    },
+    {
+      "decision": "O8.2-read-declared",
+      "file": "src/fort/library/artifact.ft",
+      "what": "a summary of a function that the interface does not declare reads",
+      "old": "        || !declares_each(strbuf.view(&c->interface), &c->ownership)) {",
+      "new": "        || false) {"
+    },
+    {
+      "decision": "O8.2-declared-whole-name",
+      "file": "src/fort/library/artifact.ft",
+      "what": "a declaration whose name has one more byte than the summary declares it",
+      "old": "        strbuf.append(&b, l[FUNCTION_DECL.len..cast(paren, u64)]);",
+      "new": "        strbuf.append(&b, l[FUNCTION_DECL.len..cast(paren, u64) - 1]);"
+    },
+    {
+      "decision": "O8.2-declared-section",
+      "file": "src/fort/library/artifact.ft",
+      "what": "a declaration of a later section counts in the section of the first one",
+      "old": "        if (str.starts_with(l, modules.INTERFACE_SECTION)) {\n            section = l[modules.INTERFACE_SECTION.len..];\n            continue;\n        }",
+      "new": "        if (str.starts_with(l, modules.INTERFACE_SECTION)) {\n            if (section.len == 0) {\n                section = l[modules.INTERFACE_SECTION.len..];\n            }\n            continue;\n        }"
+    },
+    {
+      "decision": "O8.2-version",
+      "file": "src/fort/library/artifact.ft",
+      "what": "the version of summaries/ stays 1",
+      "old": "string SUMMARIES_VERSION = \"2\";",
+      "new": "string SUMMARIES_VERSION = \"1\";"
+    },
+    {
+      "decision": "O8.2-write-file",
+      "file": "src/fort/library/artifact.ft",
+      "what": "the writer writes no summary file",
+      "old": "    if (!replace(sums_dir, OWNERSHIP_FILE, cast(summaries_text, u8@), error)) {",
+      "new": "    if (!replace(sums_dir, OWNERSHIP_FILE, cast(\"\", u8@), error)) {"
+    },
+    {
+      "decision": "O8.2-emit-summaries",
+      "file": "src/fort/driver.ft",
+      "what": "--emit-summaries writes the interface file",
+      "old": "        print(strbuf.view(&summary_text));",
+      "new": "        print(strbuf.view(&text));"
+    },
+    {
+      "decision": "O8.2-whole-program",
+      "file": "src/fort/gen_fir.ft",
+      "what": "the emitter of a whole program gives no function to the graph",
+      "old": "    if (calls != null) {",
+      "new": "    if (false) {"
+    },
+    {
+      "decision": "O8.1-safe-each-parameter",
+      "file": "src/fort/owner/summary.ft",
+      "what": "the safe value of a member past the limit names one parameter too few",
+      "old": "    while (k <= params) {",
+      "new": "    while (k < params) {"
+    },
+    {
+      "decision": "O8.1-safe-may-result",
+      "file": "src/fort/owner/summary.ft",
+      "what": "the safe value of a member past the limit holds no `result` line",
+      "old": "        push_line(&g->merged, line{kind.k_result, token});\n",
+      "new": ""
+    },
+    {
+      "decision": "O8.1-params",
+      "file": "src/fort/owner/summary.ft",
+      "what": "add counts no parameter",
+      "old": "        n.params += 1;",
+      "new": "        n.params += 0;\n        break;"
+    },
+    {
+      "decision": "O8.2-check-add",
+      "file": "src/fort/driver.ft",
+      "what": "--check, --use and --lib add no function to the graph",
+      "old": "                    summary.add(calls, &f, verdicts.inner_work);",
+      "new": "                    // removed"
+    },
+    {
+      "decision": "O8.2-check-solve",
+      "file": "src/fort/driver.ft",
+      "what": "--check, --use and --lib solve no graph",
+      "old": "    summary.solve(calls, summary.WORK_LIMIT);\n    return EXIT_OK;\n}",
+      "new": "    return EXIT_OK;\n}"
+    },
+    {
+      "decision": "O8.2-whole-program-solve",
+      "file": "src/fort/gen_fir.ft",
+      "what": "a whole program solves no graph",
+      "old": "    if (calls != null && !g->failed) {\n        summary.solve(calls, summary.WORK_LIMIT);\n    }",
+      "new": "    if (false) {\n        summary.solve(calls, summary.WORK_LIMIT);\n    }"
+    }
+  ]
+}

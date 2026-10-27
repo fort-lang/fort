@@ -1313,7 +1313,8 @@ Sections:
   the unit, the compiler identity, the target, the build mode, the bounds mode, each configuration
   pair (D21.1), `--cc`, each `-Xcc` argument, `--ar`, the source hash, the interface hash of each
   used library, the key, the interface hash, the archive hash and the summaries version.
-  `summaries/` holds no file, and its version is 1. A later decision gives it content.
+  `summaries/` holds the file `ownership`, the ownership summaries of the functions of the
+  library (`spec/ownership-design.md` 8), and its version is 2.
 
   The interface file holds one section for each module of the library, in byte order of the
   module path. A section starts with one import for each module that the source module selects
@@ -1332,14 +1333,16 @@ Sections:
   Every hash is SHA-256 (FIPS 180-4), written as 64 lowercase hex digits. The compiler identity
   is the hash of the bytes of the running compiler executable. The source hash covers the module
   path, the opened file path and the bytes of each module of the unit. The interface hash is the
-  hash of `interface.ft`. The key is the hash of the manifest lines from the format version to
-  the last used library. So the key covers the compiler identity, the options that change the
+  hash of `interface.ft` and `summaries/ownership`, each with its name and its byte count
+  (`toolchain.md` 2.2). The key is the hash of the manifest lines from the format version to the
+  last used library. So the key covers the compiler identity, the options that change the
   object, the target, the configuration, the source hash and the interface hash of each used
   library. It does not cover the source hash or the archive of a used library.
 
   The rebuild rule: the compiler rebuilds a unit when its key has no valid cache entry. A change
   to a library that keeps its interface hash keeps the key of each dependent, so no dependent is
-  rebuilt. A change of its interface hash changes the key of each unit that uses the library.
+  rebuilt. A change of its interface hash changes the key of each unit that uses the library. A
+  change of a summary changes the interface hash, so it rebuilds each dependent.
 
   The cache directory is `--cache-dir <dir>`. Its default is `<root>/.fort-cache/` under `--lib`
   and `<entry dir>/.fort-cache/` otherwise. The cache entry of the key K is `<dir>/1/K/`. The
@@ -1358,7 +1361,8 @@ Sections:
   it, because a hit runs no emitter and so cannot count what the emitter writes.
 
   The command line adds `--lib <name> <root>`, `--use <name>=<path>` (repeatable),
-  `--emit-interface` (with `--lib`: write the interface file to stdout and stop), `--cache-dir
+  `--emit-interface` (with `--lib`: write the interface file to stdout and stop),
+  `--emit-summaries` (with `--lib`: write the summary file to stdout and stop), `--cache-dir
   <dir>`, `--cache-stats` (write one line about the cache to stdout, with the cause of each
   miss) and `--ar <path>` (default
   `ar`). The manifest of a used library must name `<name>`. Its compiler identity, target, build
@@ -1388,7 +1392,8 @@ Sections:
   than `-o`, `--cache-dir` and `--cache-stats`. A program that a library build makes writes the
   same output and exits with the same status as its whole-program build. The one exception is a
   path in a runtime error message (D11.4): it is the path that the build of the library opened.
-  Only the IR text and `interface.ft` are byte-deterministic; an object and `lib.a` need not be.
+  Only the IR text, `interface.ft` and `summaries/ownership` are byte-deterministic; an object
+  and `lib.a` need not be.
 - rationale: the user asked for "non-trivial caching resulting in e.g. static libraries --
   something similar to crates" on 2026-10-22. An interface file is fort text, so the parser and
   the checker read it and no second format needs a reader. A key that holds the interface hash of
@@ -1411,6 +1416,10 @@ Sections:
   Amended 2026-10-23: a build with `--use` and `--fir-stats` wrote an executable and so used the
   cache, and a hit could not write the `lowered N of M` line. Such a build now uses no cache;
   ratified by the coordinator, 2026-10-23.
+  Amended 2026-10-26: `summaries/` held no file, its version was 1, and the interface hash was
+  the hash of `interface.ft` alone. `spec/ownership-design.md` 8.2 gives the file
+  `summaries/ownership`, the version 2, the interface hash of both files and `--emit-summaries`,
+  so a change of a summary rebuilds each dependent; ratified by the coordinator, 2026-10-26.
 
 ## D10 Memory and runtime checks
 
@@ -1862,8 +1871,8 @@ Sections:
   each, as `spec/fir.md` 11 spells it; it changes no status, and it is a usage error without
   `--fir-run`), `--` (each argument after it is an argument of the program of `--fir-run`, and
   it is a usage error without `--fir-run`), `--lib <name> <root>`,
-  `--use <name>=<path>` (repeatable), `--emit-interface`, `--cache-dir <dir>`, `--cache-stats`
-  and `--ar <path>` (the library builds of D9.11), `--help`, `--version`.
+  `--use <name>=<path>` (repeatable), `--emit-interface`, `--emit-summaries`, `--cache-dir
+  <dir>`, `--cache-stats` and `--ar <path>` (the library builds of D9.11), `--help`, `--version`.
   `--lib` takes no entry file; every other build takes one.
   Exit status: 0 success, 1 compile error, 2 usage, toolchain (`--cc` failed) or internal error;
   usage and toolchain errors are printed as `fort: error: <message>`.
@@ -1925,6 +1934,8 @@ Sections:
   Amended 2026-10-23: a non-built `-S` target required `--std-dir` in every build. A library
   build reads no `--std-dir`: the used library `std`, or the root of `--lib std`, supplies the
   standard modules.
+  Amended 2026-10-26: `--emit-summaries` did not exist. It writes the summary file of a library
+  (D9.11, `spec/ownership-design.md` 8.2); ratified by the coordinator, 2026-10-26.
   Amended 2026-10-24: `--fir-run` and `--` did not exist, and the passes of `--fir-test` were
   `none`, `verify` and `build-mode`. `--fir-run` runs the run corpus of the reference semantics
   of `spec/ownership-design.md` 3.5, and the pass `run` of `--fir-test` runs a FIR test with it.

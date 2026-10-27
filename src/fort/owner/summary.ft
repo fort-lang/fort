@@ -1,0 +1,1032 @@
+/// Computes the ownership summary of each function of a unit, and writes and reads the text form
+/// that a library artifact holds in `summaries/ownership` (spec/ownership-design.md 8). A summary
+/// holds lines of four kinds. Each refinement adds the analysis of one kind. V1 has none, so the
+/// analysis of each function finds no line and each summary is empty.
+//
+// The order: the strongly connected components of the direct calls, callees first (Tarjan's
+// algorithm). The walk keeps a stack of its own, so a long chain of calls does not reach the stack
+// of the process. A call through a function value or of an extern adds no edge, and neither does a
+// call of a function that the graph does not hold. A cycle of calls stays inside one module,
+// because a call needs an import and D9.5 forbids a circular import, so the components of a unit
+// are the components of its modules.
+// The fixpoint: a component of one function that does not call itself takes one pass, and its
+// lines are what the pass finds. Each other component takes rounds. A member starts with its must
+// lines and no may line. A round keeps a must line only when the analysis finds it again, and it
+// keeps each may line and adds each one that the analysis finds. So the rounds end. Each analysis
+// charges its work to its component. Past the limit of the component, each member takes the safe
+// value of each kind: no must line, and the may lines `result _k` and `keep _k` for each parameter
+// `k`, which assume of a call what the analysis assumes with no summary.
+// The module uses switches and no function-pointer dispatch table. It holds no module-level
+// mutable state: each vector belongs to one graph or to one table.
+import fort.ast;
+import fort.containers;
+import fort.fir;
+import fort.fir_print;
+import std.str;
+import std.strbuf;
+import std.strmap;
+import std.vec;
+
+/// The most work that the analyses of one component take (spec/ownership-design.md 8.1). Past
+/// it, each member of the component takes the safe value of each kind (end_round).
+u64 WORK_LIMIT = 67108864;
+
+/// The first line of the text form, with the version of the form.
+string HEADER = "fort-summaries 1";
+
+// The words that start the second line and each function line of the text form.
+string LIBRARY_WORD = "library ";
+string FUNCTION_WORD = "fn ";
+
+// ---- lines ---------------------------------------------------------------------------------
+
+/// The kind of a line, in the order of the `item` rule of the text form.
+enum kind {
+    k_empty, // the owner at the path is empty at each return
+    k_kept, // the owner at the path holds its entry value at each return
+    k_result, // the result borrows what the token names
+    k_keep, // the callee can store a borrow of what the token names
+}
+
+/// The word of `k` in the text form.
+fn word(kind k) string {
+    switch (k) {
+    case kind.k_empty:
+        return "empty";
+    case kind.k_kept:
+        return "kept";
+    case kind.k_result:
+        return "result";
+    case kind.k_keep:
+        return "keep";
+    }
+}
+
+/// Whether a line of kind `k` is a must line, which starts present in a cycle and which a round can
+/// only remove. Each other line is a may line, which starts absent and which a round can only add.
+fn is_must(kind k) bool {
+    return k == kind.k_empty || k == kind.k_kept;
+}
+
+/// One line of a summary: its kind and its operand as the text form spells it, a path for a must
+/// line and a token for a may line.
+struct line {
+    kind kind;
+    string text;
+}
+
+/// The order of two lines in a summary: the order of their kinds, then the byte order of their
+/// operands. -1, 0 or 1.
+fn compare(line a, line b) i32 {
+    u64 ka = cast(a.kind, u64);
+    u64 kb = cast(b.kind, u64);
+    if (ka < kb) {
+        return -1;
+    }
+    if (ka > kb) {
+        return 1;
+    }
+    return str.cmp(a.text, b.text);
+}
+
+// `items[..len]` holds the lines. `items.len` is the capacity.
+struct line_vec {
+    line mut@ own items;
+    u64 len;
+}
+
+fn push_line(line_vec mut* v, line l) void {
+    if (v->len == v->items.len) {
+        u64 cap = fir.grown_capacity(v->items.len, "summary.push_line: capacity overflow");
+        line mut@ own bigger = new(line, cap);
+        u64 mut i = 0;
+        while (i < v->len) {
+            bigger[i] = v->items[i];
+            i += 1;
+        }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = l;
+    v->len += 1;
+}
+
+fn free_lines(line_vec mut* v) void {
+    del(v->items);
+    v->len = 0;
+}
+
+// Puts the lines of `found` into `out` in the order of compare, with no line twice.
+fn put_sorted(line@ found, line_vec mut* out) void {
+    out->len = 0;
+    u64 mut k = 0;
+    while (k < found.len) {
+        line l = found[k];
+        k += 1;
+        push_line(out, l);
+        u64 mut j = out->len - 1;
+        while (j > 0 && compare(l, out->items[j - 1]) < 0) {
+            out->items[j] = out->items[j - 1];
+            j -= 1;
+        }
+        out->items[j] = l;
+    }
+    u64 mut kept = 0;
+    u64 mut i = 0;
+    while (i < out->len) {
+        if (kept == 0 || compare(out->items[i], out->items[kept - 1]) != 0) {
+            out->items[kept] = out->items[i];
+            kept += 1;
+        }
+        i += 1;
+    }
+    out->len = kept;
+}
+
+// Whether the two lists hold the same lines in the same order.
+fn same_lines(line@ a, line@ b) bool {
+    if (a.len != b.len) {
+        return false;
+    }
+    u64 mut i = 0;
+    while (i < a.len) {
+        if (compare(a[i], b[i]) != 0) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// ---- the graph -----------------------------------------------------------------------------
+
+// One function of the graph. `calls[first_call..first_call + call_count]` holds the callee of each
+// of its direct calls, and `arena[first_line..first_line + line_count]` its lines in the order of
+// compare. `work` is the work of one analysis of the function, and `params` its parameter count.
+// `calls_itself` says that a direct call names the function itself (order).
+struct node {
+    string symbol;
+    u64 work;
+    u64 params;
+    u64 first_call;
+    u64 call_count;
+    bool calls_itself;
+    u64 first_line;
+    u64 line_count;
+}
+
+// `items[..len]` holds the nodes in the order of add.
+struct node_vec {
+    node mut@ own items;
+    u64 len;
+}
+
+// `items[..len]` holds the callee of each direct call.
+struct sym_vec {
+    ast.sym* mut@ own items;
+    u64 len;
+}
+
+/// One strongly connected component of the direct calls. `members[first..first + count]` of its
+/// graph holds its nodes in node order. `cyclic` says that it takes rounds: it has more than one
+/// member, or a member that calls itself. `rounds` counts its rounds, `work` the work that its
+/// analyses charged, and `over` says that the work passed the limit, so each member has the safe
+/// value of each kind.
+struct component {
+    u64 first;
+    u64 count;
+    bool cyclic;
+    u64 rounds;
+    u64 work;
+    bool over;
+}
+
+// `items[..len]` holds the components, callees first.
+struct component_vec {
+    component mut@ own items;
+    u64 len;
+}
+
+/// The direct calls of the functions of one unit, their components and their summaries. add
+/// gives the nodes, order gives the components, and solve gives the lines. A zero value is an
+/// empty graph.
+struct graph {
+    containers.pool texts; // the symbols and the operands of the lines
+    strmap.str_map index; // the node of each symbol
+    node_vec nodes; // in the order of add
+    sym_vec calls; // the callee of each direct call of each node
+    vec.int_vec targets; // the node of each call, or -1 (order)
+    vec.int_vec members; // the nodes of the components, component by component (order)
+    component_vec components; // callees first (order)
+    line_vec arena; // the lines of the nodes
+    line_vec found; // the lines that an analysis found, in order (give)
+    line_vec merged; // the lines that a merge makes (give)
+}
+
+/// Releases the graph. The graph is empty and usable afterwards.
+fn free(graph mut* g) void {
+    containers.pool_free(&g->texts);
+    strmap.free(&g->index);
+    del(g->nodes.items);
+    g->nodes.len = 0;
+    del(g->calls.items);
+    g->calls.len = 0;
+    vec.int_free(&g->targets);
+    vec.int_free(&g->members);
+    del(g->components.items);
+    g->components.len = 0;
+    free_lines(&g->arena);
+    free_lines(&g->found);
+    free_lines(&g->merged);
+}
+
+fn push_node(node_vec mut* v, node n) void {
+    if (v->len == v->items.len) {
+        u64 cap = fir.grown_capacity(v->items.len, "summary.push_node: capacity overflow");
+        node mut@ own bigger = new(node, cap);
+        u64 mut i = 0;
+        while (i < v->len) {
+            bigger[i] = v->items[i];
+            i += 1;
+        }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = n;
+    v->len += 1;
+}
+
+fn push_sym(sym_vec mut* v, ast.sym* s) void {
+    if (v->len == v->items.len) {
+        u64 cap = fir.grown_capacity(v->items.len, "summary.push_sym: capacity overflow");
+        ast.sym* mut@ own bigger = new(ast.sym*, cap);
+        u64 mut i = 0;
+        while (i < v->len) {
+            bigger[i] = v->items[i];
+            i += 1;
+        }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = s;
+    v->len += 1;
+}
+
+fn push_component(component_vec mut* v, component c) void {
+    if (v->len == v->items.len) {
+        u64 cap = fir.grown_capacity(v->items.len, "summary.push_component: capacity overflow");
+        component mut@ own bigger = new(component, cap);
+        u64 mut i = 0;
+        while (i < v->len) {
+            bigger[i] = v->items[i];
+            i += 1;
+        }
+        del(v->items);
+        v->items = move(bigger);
+    }
+    v->items[v->len] = c;
+    v->len += 1;
+}
+
+/// Adds the function `f`, which the analysis proved, with the work of one analysis of it, and the
+/// callee of each direct call of its body. A call through a function value or of an extern is no
+/// direct call. Each function of a unit has its own symbol (D9.7), so a second function with the
+/// symbol of a node breaks the precondition.
+fn add(graph mut* g, fir.func* f, u64 work) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    fir_print.print_symbol(f->sym, &b);
+    string name = containers.pool_intern(&g->texts, strbuf.view(&b));
+    if (!strmap.put(&g->index, name, cast(g->nodes.len, i64))) {
+        panic("summary.add: a second function with the symbol of a node");
+    }
+    node mut n = node{name, work, 0, g->calls.len, 0, false, 0, 0};
+    // the parameters are `_1` to `_n`, the locals after `_0`
+    while (n.params + 1 < cast(fir.local_count(f), u64)
+           && fir.local_at(f, cast(n.params + 1, u32))->kind == fir.local_kind.lk_param) {
+        n.params += 1;
+    }
+    u32 mut bk = 0;
+    while (bk < fir.block_count(f)) {
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, bk)) {
+            fir.statement* s = fir.block_statement(f, bk, i);
+            if (s->kind == fir.stmt_kind.st_assign && s->value.kind == fir.rvalue_kind.rv_call
+                && s->value.callee == fir.callee_kind.cl_fn) {
+                push_sym(&g->calls, s->value.callee_sym);
+                n.call_count += 1;
+            }
+            i += 1;
+        }
+        bk += 1;
+    }
+    push_node(&g->nodes, n);
+}
+
+/// The count of the nodes.
+fn node_count(graph* g) u64 {
+    return g->nodes.len;
+}
+
+/// The symbol of node `n`, in the order of add.
+fn node_symbol(graph* g, u64 n) string {
+    return g->nodes.items[n].symbol;
+}
+
+/// The count of the components that order gave.
+fn component_count(graph* g) u64 {
+    return g->components.len;
+}
+
+/// Component `c` that order gave: component 0 is first, and no component calls a later one.
+fn component_at(graph* g, u64 c) component {
+    return g->components.items[c];
+}
+
+/// Node `k` of the members of component `c`, in node order.
+fn member(graph* g, u64 c, u64 k) u64 {
+    component comp = g->components.items[c];
+    return cast(g->members.items[comp.first + k], u64);
+}
+
+/// The lines of node `n`, in the order of compare.
+fn node_lines(graph* g, u64 n) line@ {
+    node at = g->nodes.items[n];
+    return g->arena.items[at.first_line..at.first_line + at.line_count];
+}
+
+// Finds the node of each call: `targets[k]` is the node of the callee of call `k`, or -1 for a
+// function that the graph does not hold. Sets the calls_itself of each node.
+fn resolve(graph mut* g) void {
+    g->targets.len = 0;
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u64 mut k = 0;
+    while (k < g->calls.len) {
+        strbuf.clear(&b);
+        fir_print.print_symbol(g->calls.items[k], &b);
+        i64 mut at = -1;
+        strmap.get(&g->index, strbuf.view(&b), &at);
+        vec.int_push(&g->targets, at);
+        k += 1;
+    }
+    u64 mut n = 0;
+    while (n < g->nodes.len) {
+        node mut* v = &g->nodes.items[n];
+        v->calls_itself = false;
+        u64 mut e = 0;
+        while (e < v->call_count) {
+            if (g->targets.items[v->first_call + e] == cast(n, i64)) {
+                v->calls_itself = true;
+            }
+            e += 1;
+        }
+        n += 1;
+    }
+}
+
+// Puts the members `members[from..]` in node order.
+fn sort_members(vec.int_vec mut* members, u64 from) void {
+    u64 mut i = from + 1;
+    while (i < members->len) {
+        i64 v = members->items[i];
+        u64 mut j = i;
+        while (j > from && members->items[j - 1] > v) {
+            members->items[j] = members->items[j - 1];
+            j -= 1;
+        }
+        members->items[j] = v;
+        i += 1;
+    }
+}
+
+// The walk of order: the number of each node in the order of the visits, from 1, and 0 for a node
+// that the walk did not reach; the least number that each node reaches; whether a node is on the
+// stack of the open components; that stack; and the frames of the walk, a node and the index of
+// its next call each.
+struct walk {
+    u64 mut@ own number;
+    u64 mut@ own low;
+    bool mut@ own on_stack;
+    vec.int_vec stack;
+    vec.int_vec frames;
+    vec.int_vec next_call;
+    u64 visits;
+}
+
+fn free_walk(walk mut* w) void {
+    del(w->number);
+    del(w->low);
+    del(w->on_stack);
+    vec.int_free(&w->stack);
+    vec.int_free(&w->frames);
+    vec.int_free(&w->next_call);
+}
+
+// Visits node `v`: gives it the next number and puts it on the stack and in a new frame.
+fn visit(walk mut* w, u64 v) void {
+    w->visits += 1;
+    w->number[v] = w->visits;
+    w->low[v] = w->visits;
+    w->on_stack[v] = true;
+    vec.int_push(&w->stack, cast(v, i64));
+    vec.int_push(&w->frames, cast(v, i64));
+    vec.int_push(&w->next_call, 0);
+}
+
+// Closes the component whose first visit is node `v`: the nodes of the stack down to `v`.
+fn close_component(graph mut* g, walk mut* w, u64 v) void {
+    u64 first = g->members.len;
+    while (true) {
+        u64 m = cast(vec.int_pop(&w->stack), u64);
+        w->on_stack[m] = false;
+        vec.int_push(&g->members, cast(m, i64));
+        if (m == v) {
+            break;
+        }
+    }
+    sort_members(&g->members, first);
+    u64 count = g->members.len - first;
+    bool cyclic = count > 1 || g->nodes.items[v].calls_itself;
+    push_component(&g->components, component{first, count, cyclic, 0, 0, false});
+}
+
+/// Gives the strongly connected components of the direct calls, callees first: no component
+/// calls a component after it. The walk starts at each node in the order of add and takes the
+/// calls of a node in the order of its body, so the order is a function of the functions that
+/// add gave. It replaces the components of an earlier call.
+fn order(graph mut* g) void {
+    resolve(g);
+    g->members.len = 0;
+    g->components.len = 0;
+    u64 n = g->nodes.len;
+    walk mut w = walk{};
+    defer free_walk(&w);
+    w.number = new(u64, n);
+    w.low = new(u64, n);
+    w.on_stack = new(bool, n);
+    u64 mut root = 0;
+    while (root < n) {
+        if (w.number[root] != 0) {
+            root += 1;
+            continue;
+        }
+        visit(&w, root);
+        while (w.frames.len > 0) {
+            u64 top = w.frames.len - 1;
+            u64 v = cast(w.frames.items[top], u64);
+            u64 e = cast(w.next_call.items[top], u64);
+            node at = g->nodes.items[v];
+            if (e < at.call_count) {
+                w.next_call.items[top] = cast(e + 1, i64);
+                i64 target = g->targets.items[at.first_call + e];
+                if (target < 0) {
+                    continue;
+                }
+                u64 t = cast(target, u64);
+                if (w.number[t] == 0) {
+                    visit(&w, t);
+                } else if (w.on_stack[t] && w.number[t] < w.low[v]) {
+                    w.low[v] = w.number[t];
+                }
+                continue;
+            }
+            vec.int_pop(&w.frames);
+            vec.int_pop(&w.next_call);
+            if (w.low[v] == w.number[v]) {
+                close_component(g, &w, v);
+            }
+            if (w.frames.len > 0) {
+                u64 caller = cast(w.frames.items[w.frames.len - 1], u64);
+                if (w.low[v] < w.low[caller]) {
+                    w.low[caller] = w.low[v];
+                }
+            }
+        }
+        root += 1;
+    }
+}
+
+// ---- the fixpoint --------------------------------------------------------------------------
+
+// Puts the lines `taken` into the arena as the lines of node `n`. Each operand goes into the pool
+// of the graph, so the lines do not borrow the storage of the caller.
+fn set_lines(graph mut* g, u64 n, line@ taken) void {
+    u64 first = g->arena.len;
+    u64 mut k = 0;
+    while (k < taken.len) {
+        line l = taken[k];
+        push_line(&g->arena, line{l.kind, containers.pool_intern(&g->texts, l.text)});
+        k += 1;
+    }
+    node mut* v = &g->nodes.items[n];
+    v->first_line = first;
+    v->line_count = taken.len;
+}
+
+/// Starts the rounds of a cyclic component for its member `n`: its lines become the must lines of
+/// `must`. A may line of `must` is not taken, because a may line starts absent.
+fn start(graph mut* g, u64 n, line@ must) void {
+    put_sorted(must, &g->found);
+    g->merged.len = 0;
+    u64 mut i = 0;
+    while (i < g->found.len) {
+        if (is_must(g->found.items[i].kind)) {
+            push_line(&g->merged, g->found.items[i]);
+        }
+        i += 1;
+    }
+    set_lines(g, n, g->merged.items[..g->merged.len]);
+}
+
+// Charges `work` to the component `c`. The work of `c` passes `limit` when it is greater than it.
+// A sum that passes the largest u64 stays at it.
+fn charge(component mut* c, u64 work, u64 limit) void {
+    if (work > containers.U64_MAX - c->work) {
+        c->work = containers.U64_MAX;
+    } else {
+        c->work += work;
+    }
+    if (c->work > limit) {
+        c->over = true;
+    }
+}
+
+/// Gives the lines `found` that one analysis of member `n` of component `c` found in a round, and
+/// the work of that analysis, which is charged to `c` against `limit`. In a component that is not
+/// cyclic, the lines of `n` become `found`. In a cyclic one, `n` keeps each must line that `found`
+/// holds too and each may line, and takes each may line of `found`. Returns whether the lines of
+/// `n` changed.
+fn give(graph mut* g, u64 c, u64 n, line@ found, u64 work, u64 limit) bool {
+    component mut* comp = &g->components.items[c];
+    charge(comp, work, limit);
+    put_sorted(found, &g->found);
+    line@ old = node_lines(g, n);
+    if (!comp->cyclic) {
+        if (same_lines(old, g->found.items[..g->found.len])) {
+            return false;
+        }
+        set_lines(g, n, g->found.items[..g->found.len]);
+        return true;
+    }
+    g->merged.len = 0;
+    u64 mut i = 0;
+    u64 mut j = 0;
+    while (i < old.len || j < g->found.len) {
+        i32 mut side = 0;
+        if (i == old.len) {
+            side = 1;
+        } else if (j == g->found.len) {
+            side = -1;
+        } else {
+            side = compare(old[i], g->found.items[j]);
+        }
+        if (side < 0) {
+            // a line that the analysis did not find again: a may line stays
+            if (!is_must(old[i].kind)) {
+                push_line(&g->merged, old[i]);
+            }
+            i += 1;
+        } else if (side > 0) {
+            // a line that the member did not hold: a may line comes in
+            if (!is_must(g->found.items[j].kind)) {
+                push_line(&g->merged, g->found.items[j]);
+            }
+            j += 1;
+        } else {
+            push_line(&g->merged, old[i]);
+            i += 1;
+            j += 1;
+        }
+    }
+    if (same_lines(old, g->merged.items[..g->merged.len])) {
+        return false;
+    }
+    set_lines(g, n, g->merged.items[..g->merged.len]);
+    return true;
+}
+
+// Gives node `n` the safe value of each kind (spec/ownership-design.md 8.1): no must line, and
+// the may lines `result _k` and `keep _k` for each parameter `k`. The result can borrow each
+// origin of each argument, and the callee can store a borrow of each argument, which is what the
+// analysis assumes of a call that reads no summary.
+fn set_safe(graph mut* g, u64 n) void {
+    g->merged.len = 0;
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u64 params = g->nodes.items[n].params;
+    u64 mut k = 1;
+    while (k <= params) {
+        strbuf.clear(&b);
+        strbuf.push(&b, '_');
+        strbuf.append_u64(&b, k);
+        string token = containers.pool_intern(&g->texts, strbuf.view(&b));
+        push_line(&g->merged, line{kind.k_result, token});
+        push_line(&g->merged, line{kind.k_keep, token});
+        k += 1;
+    }
+    put_sorted(g->merged.items[..g->merged.len], &g->found);
+    set_lines(g, n, g->found.items[..g->found.len]);
+}
+
+/// Ends a round of component `c`, in which a member changed when `changed` is set. Returns whether
+/// another round runs: `c` is cyclic, the round changed a member and the work of `c` did not pass
+/// its limit. When it returns false and the work passed the limit, each member takes the safe value
+/// of each kind: no must line, and `result _k` and `keep _k` for each parameter `k`.
+fn end_round(graph mut* g, u64 c, bool changed) bool {
+    component mut* comp = &g->components.items[c];
+    comp->rounds += 1;
+    if (comp->cyclic && changed && !comp->over) {
+        return true;
+    }
+    if (comp->over) {
+        u64 mut k = 0;
+        while (k < comp->count) {
+            set_safe(g, cast(g->members.items[comp->first + k], u64));
+            k += 1;
+        }
+    }
+    return false;
+}
+
+// The analysis of node `n` in a round: the lines that its body proves with the lines of the other
+// nodes, in `out`, and its work. V1 has no kind of line, so it finds none, and its work is the
+// work of the proof of the function, which add recorded.
+fn infer(graph* g, u64 n, line_vec mut* out) u64 {
+    out->len = 0;
+    return g->nodes.items[n].work;
+}
+
+/// Orders the graph and gives each node its lines: the components in order, callees first, each
+/// with its rounds, each analysis charged against `limit` (WORK_LIMIT in a build).
+fn solve(graph mut* g, u64 limit) void {
+    order(g);
+    g->arena.len = 0;
+    u64 mut n = 0;
+    while (n < g->nodes.len) {
+        g->nodes.items[n].first_line = 0;
+        g->nodes.items[n].line_count = 0;
+        n += 1;
+    }
+    line_vec mut none = line_vec{};
+    defer free_lines(&none);
+    u64 mut c = 0;
+    while (c < g->components.len) {
+        component comp = g->components.items[c];
+        if (comp.cyclic) {
+            // V1 gives no must line to start with
+            u64 mut k = 0;
+            while (k < comp.count) {
+                start(g, member(g, c, k), none.items[..0]);
+                k += 1;
+            }
+        }
+        bool mut again = true;
+        while (again) {
+            bool mut changed = false;
+            u64 mut k = 0;
+            while (k < comp.count) {
+                u64 m = member(g, c, k);
+                u64 work = infer(g, m, &none);
+                if (give(g, c, m, none.items[..none.len], work, limit)) {
+                    changed = true;
+                }
+                k += 1;
+            }
+            again = end_round(g, c, changed);
+        }
+        c += 1;
+    }
+}
+
+// ---- the table -----------------------------------------------------------------------------
+
+/// The summaries of the functions of one unit or of one used library: the entries in byte order
+/// of the symbol, each with its lines in the order of compare. A zero value is an empty table.
+struct table {
+    containers.pool texts; // the symbols and the operands
+    containers.str_vec symbols; // the symbol of each entry
+    vec.int_vec ends; // entry `i` holds `lines[ends[i - 1]..ends[i]]`, from 0 for entry 0
+    line_vec lines;
+}
+
+/// Releases the table. The table is empty and usable afterwards.
+fn free_table(table mut* t) void {
+    containers.pool_free(&t->texts);
+    containers.str_free(&t->symbols);
+    vec.int_free(&t->ends);
+    free_lines(&t->lines);
+}
+
+/// The count of the entries.
+fn entry_count(table* t) u64 {
+    return t->symbols.len;
+}
+
+/// The symbol of entry `i`.
+fn symbol(table* t, u64 i) string {
+    return containers.str_at(&t->symbols, i);
+}
+
+// The first line of entry `i`.
+fn first_line(table* t, u64 i) u64 {
+    if (i == 0) {
+        return 0;
+    }
+    return cast(t->ends.items[i - 1], u64);
+}
+
+/// The lines of entry `i`, in the order of compare.
+fn lines(table* t, u64 i) line@ {
+    return t->lines.items[first_line(t, i)..cast(t->ends.items[i], u64)];
+}
+
+/// The entry of the function `name`, a symbol of D9.7, or -1 when the table holds none.
+fn find(table* t, string name) i64 {
+    u64 mut low = 0;
+    u64 mut high = t->symbols.len;
+    while (low < high) {
+        u64 mid = low + (high - low) / 2;
+        i32 side = str.cmp(containers.str_at(&t->symbols, mid), name);
+        if (side == 0) {
+            return cast(mid, i64);
+        }
+        if (side < 0) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    return -1;
+}
+
+// Appends an entry for the function `name` with no line yet.
+fn append_entry(table mut* t, string name) void {
+    containers.str_push(&t->symbols, containers.pool_intern(&t->texts, name));
+    vec.int_push(&t->ends, cast(t->lines.len, i64));
+}
+
+// Appends the line `l` to the last entry.
+fn append_line(table mut* t, line l) void {
+    push_line(&t->lines, line{l.kind, containers.pool_intern(&t->texts, l.text)});
+    t->ends.items[t->ends.len - 1] = cast(t->lines.len, i64);
+}
+
+/// Adds an entry for the function `name` after the entries of `t`. Returns false when `name`
+/// does not come after the symbol of the last entry in byte order, or when the last entry has no
+/// line.
+fn add_function(table mut* t, string name) bool {
+    u64 n = t->symbols.len;
+    if (n > 0 && (str.cmp(name, symbol(t, n - 1)) <= 0 || lines(t, n - 1).len == 0)) {
+        return false;
+    }
+    append_entry(t, name);
+    return true;
+}
+
+/// Adds the line `l` to the last entry of `t`. Returns false when the table has no entry, or when
+/// `l` does not come after the last line of that entry in the order of compare.
+fn add_line(table mut* t, line l) bool {
+    u64 n = t->symbols.len;
+    if (n == 0) {
+        return false;
+    }
+    line@ held = lines(t, n - 1);
+    if (held.len > 0 && compare(held[held.len - 1], l) >= 0) {
+        return false;
+    }
+    append_line(t, l);
+    return true;
+}
+
+/// Adds an entry to `t`, which must be empty, for each node of `g` that has a line, in byte order
+/// of the symbol, with its lines.
+fn collect(graph* g, table mut* t) void {
+    vec.int_vec mut picked = vec.int_vec{};
+    defer vec.int_free(&picked);
+    u64 mut n = 0;
+    while (n < g->nodes.len) {
+        if (g->nodes.items[n].line_count > 0) {
+            vec.int_push(&picked, cast(n, i64));
+            u64 mut j = picked.len - 1;
+            while (j > 0
+                   && str.cmp(node_symbol(g, n),
+                              node_symbol(g, cast(picked.items[j - 1], u64))) < 0) {
+                picked.items[j] = picked.items[j - 1];
+                j -= 1;
+            }
+            picked.items[j] = cast(n, i64);
+        }
+        n += 1;
+    }
+    u64 mut k = 0;
+    while (k < picked.len) {
+        u64 at = cast(picked.items[k], u64);
+        append_entry(t, node_symbol(g, at));
+        line@ taken = node_lines(g, at);
+        u64 mut i = 0;
+        while (i < taken.len) {
+            append_line(t, taken[i]);
+            i += 1;
+        }
+        k += 1;
+    }
+}
+
+// ---- the text form -------------------------------------------------------------------------
+
+/// Writes the text form of the summaries `t` of the library `library` to `out`
+/// (spec/ownership-design.md 8.2): `fort-summaries 1` and `library <name>`, then the `fn` line of
+/// each entry and one line for each of its lines, each with one newline byte.
+fn write(table* t, string library, strbuf.str_buf mut* out) void {
+    strbuf.append(out, HEADER);
+    strbuf.push(out, '\n');
+    strbuf.append(out, LIBRARY_WORD);
+    strbuf.append(out, library);
+    strbuf.push(out, '\n');
+    u64 mut i = 0;
+    while (i < entry_count(t)) {
+        strbuf.append(out, FUNCTION_WORD);
+        strbuf.append(out, symbol(t, i));
+        strbuf.push(out, '\n');
+        line@ held = lines(t, i);
+        u64 mut k = 0;
+        while (k < held.len) {
+            strbuf.append(out, word(held[k].kind));
+            strbuf.push(out, ' ');
+            strbuf.append(out, held[k].text);
+            strbuf.push(out, '\n');
+            k += 1;
+        }
+        i += 1;
+    }
+}
+
+// The line of `text` that starts at `*at`, with no newline, in `*out`, and `*at` after its newline.
+// False at the end of the text, and for a last line with no newline, which leaves `*at` there.
+fn next_line(string text, u64 mut* at, string mut* out) bool {
+    u64 mut end = *at;
+    while (end < text.len && text[end] != '\n') {
+        end += 1;
+    }
+    if (end == text.len) {
+        return false;
+    }
+    *out = text[*at..end];
+    *at = end + 1;
+    return true;
+}
+
+// Whether `ch` can start an identifier, and whether it can stand in one.
+fn is_first(char ch) bool {
+    return str.is_alpha(ch) || ch == '_';
+}
+
+fn is_inner(char ch) bool {
+    return str.is_alnum(ch) || ch == '_';
+}
+
+/// Whether `text` is a symbol of D9.7: two or more identifiers with a `.` between each two.
+fn is_symbol(string text) bool {
+    u64 mut segments = 0;
+    u64 mut i = 0;
+    bool mut more = true;
+    while (more) {
+        if (i == text.len || !is_first(text[i])) {
+            return false;
+        }
+        i += 1;
+        while (i < text.len && is_inner(text[i])) {
+            i += 1;
+        }
+        segments += 1;
+        more = i < text.len;
+        if (more && text[i] != '.') {
+            return false;
+        }
+        i += 1;
+    }
+    return segments >= 2;
+}
+
+// Reads the decimal number at `*at` of `text`: `0`, or a digit 1 to 9 and the digits after it.
+// Returns false when no digit stands at `*at`. A `0` takes no digit after it, and each caller
+// wants a separator or the end there, so a number with a leading zero is refused.
+fn take_number(string text, u64 mut* at) bool {
+    if (*at == text.len || !str.is_digit(text[*at])) {
+        return false;
+    }
+    if (text[*at] == '0') {
+        *at += 1;
+        return true;
+    }
+    while (*at < text.len && str.is_digit(text[*at])) {
+        *at += 1;
+    }
+    return true;
+}
+
+/// Whether `text` is a path of the text form: `(*_k)`, then any number of `.n` and `[n]`.
+fn is_path(string text) bool {
+    if (!str.starts_with(text, "(*_")) {
+        return false;
+    }
+    u64 mut at = 3;
+    if (!take_number(text, &at) || at == text.len || text[at] != ')') {
+        return false;
+    }
+    at += 1;
+    while (at < text.len) {
+        if (text[at] == '.') {
+            at += 1;
+            if (!take_number(text, &at)) {
+                return false;
+            }
+        } else if (text[at] == '[') {
+            at += 1;
+            if (!take_number(text, &at) || at == text.len || text[at] != ']') {
+                return false;
+            }
+            at += 1;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Whether `text` is a token of the text form: `_k` or a path.
+fn is_token(string text) bool {
+    if (str.starts_with(text, "_")) {
+        u64 mut at = 1;
+        return take_number(text, &at) && at == text.len;
+    }
+    return is_path(text);
+}
+
+// Reads the item `text` into `*out`: a word of a kind, one space, and a path for a must kind or a
+// token for a may kind. Returns false for each other text.
+fn parse_item(string text, line mut* out) bool {
+    i64 space = str.index_of(text, ' ');
+    if (space < 0) {
+        return false;
+    }
+    string head = text[..cast(space, u64)];
+    string operand = text[cast(space, u64) + 1..];
+    kind mut k = kind.k_empty;
+    if (head == "empty") {
+        k = kind.k_empty;
+    } else if (head == "kept") {
+        k = kind.k_kept;
+    } else if (head == "result") {
+        k = kind.k_result;
+    } else if (head == "keep") {
+        k = kind.k_keep;
+    } else {
+        return false;
+    }
+    if (is_must(k) && !is_path(operand)) {
+        return false;
+    }
+    if (!is_must(k) && !is_token(operand)) {
+        return false;
+    }
+    *out = line{k, operand};
+    return true;
+}
+
+/// Reads the text form `text` of the summaries of the library `library` into `t`, which must be
+/// empty (spec/ownership-design.md 8.2). Returns false for each text that write does not write:
+/// a first line other than `fort-summaries 1`, a second line other than `library <library>`, a
+/// line with no newline byte, a line that is no `fn <symbol>` and no item, an item before the
+/// first `fn` line, an `fn` line with no item, a symbol that does not come after the one before
+/// it, and an item that does not come after the one before it. `t` then holds what it read
+/// before the failure. The reader holds the form of each line and not its meaning: it takes `_0`,
+/// a `k` past the parameters of the function and a number past the u64 range, so a refinement that
+/// reads a line checks `k`, each field and each index against the declaration first.
+fn parse(string text, string library, table mut* t) bool {
+    u64 mut at = 0;
+    string mut l = "";
+    if (!next_line(text, &at, &l) || l != HEADER) {
+        return false;
+    }
+    if (!next_line(text, &at, &l) || !str.starts_with(l, LIBRARY_WORD)
+        || l[LIBRARY_WORD.len..] != library) {
+        return false;
+    }
+    while (next_line(text, &at, &l)) {
+        if (str.starts_with(l, FUNCTION_WORD)) {
+            string name = l[FUNCTION_WORD.len..];
+            if (!is_symbol(name) || !add_function(t, name)) {
+                return false;
+            }
+            continue;
+        }
+        line mut item = line{};
+        if (!parse_item(l, &item) || !add_line(t, item)) {
+            return false;
+        }
+    }
+    u64 n = entry_count(t);
+    return at == text.len && (n == 0 || lines(t, n - 1).len > 0);
+}

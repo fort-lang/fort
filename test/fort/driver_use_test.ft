@@ -442,20 +442,63 @@ fn an_artifact_that_breaks_a_rule_is_corrupt() void {
 }
 
 // Writes `text` as the interface file of `std.flib` and makes the interface line of its manifest
-// the hash of `text`: the interface line follows the key, which does not cover it.
+// the interface hash of `text` and the summary file: the interface line follows the key, which
+// does not cover it.
 fn replace_interface(string text) void {
     string own manifest = contents("std.flib/manifest");
     defer del(manifest);
+    string own summaries = contents("std.flib/summaries/ownership");
+    defer del(summaries);
     i64 at = str.find(manifest, "\ninterface ");
     assert(at > 0);
     u64 from = cast(at, u64) + 11;
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     strbuf.append(&b, manifest[..from]);
-    artifact.append_hash(&b, cast(text, u8@));
+    artifact.append_interface_hash(&b, text, summaries);
     strbuf.append(&b, manifest[from + 64..]);
     write_file("std.flib/manifest", strbuf.view(&b));
     write_file("std.flib/interface.ft", text);
+}
+
+// Writes `text` as the summary file of `std.flib` and makes the interface line of its manifest
+// the interface hash of the interface file and `text`.
+fn replace_summaries(string text) void {
+    string own manifest = contents("std.flib/manifest");
+    defer del(manifest);
+    string own interface = contents("std.flib/interface.ft");
+    defer del(interface);
+    i64 at = str.find(manifest, "\ninterface ");
+    assert(at > 0);
+    u64 from = cast(at, u64) + 11;
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, manifest[..from]);
+    artifact.append_interface_hash(&b, interface, text);
+    strbuf.append(&b, manifest[from + 64..]);
+    write_file("std.flib/manifest", strbuf.view(&b));
+    write_file("std.flib/summaries/ownership", text);
+}
+
+fn a_summary_file_that_the_interface_hash_holds_is_read_as_text() void {
+    build_std(NO_MORE[..0]);
+    write_file("main.ft", MAIN);
+    string[1] uses = {"std=std.flib"};
+    // the hash agrees, and the text is no summary file of `std`
+    replace_summaries("fort-summaries 1\nlibrary std\nempty (*_1).0\n");
+    assert(use_ir(uses[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: library 'std.flib' is corrupt\n"));
+    replace_summaries("fort-summaries 1\nlibrary geom\n");
+    assert(use_ir(uses[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: library 'std.flib' is corrupt\n"));
+    // a summary of a function that std declares with no bodiless declaration
+    replace_summaries("fort-summaries 1\nlibrary std\nfn std.rt.no_such_function\nkeep _1\n");
+    assert(use_ir(uses[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: library 'std.flib' is corrupt\n"));
+    // a summary of a bodiless function of std reads, and the build goes on
+    replace_summaries("fort-summaries 1\nlibrary std\nfn std.io.f\nkeep _1\n");
+    assert(use_ir(uses[..]) == EXIT_OK);
+    assert(err_is(""));
 }
 
 fn an_interface_file_of_another_form_is_corrupt() void {
@@ -561,12 +604,23 @@ fn an_artifact_of_another_format_version_is_corrupt() void {
     string[1] uses = {"std=std.flib"};
     assert(use_ir(uses[..]) == EXIT_USAGE);
     assert(err_is("fort: error: library 'std.flib' is corrupt\n"));
-    // the archive and summaries/ are files of the artifact as well
+    // the archive, the summary file and summaries/ are files of the artifact as well
     build_std(NO_MORE[..0]);
     write_file("std.flib/lib.a", "!<arch>\nother\n");
     assert(use_ir(uses[..]) == EXIT_USAGE);
     assert(err_is("fort: error: library 'std.flib' is corrupt\n"));
     build_std(NO_MORE[..0]);
+    write_file("std.flib/summaries/ownership", "fort-summaries 1\nlibrary std\n\n");
+    assert(use_ir(uses[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: library 'std.flib' is corrupt\n"));
+    build_std(NO_MORE[..0]);
+    char mut@ own c_ownership = str.to_cstr("std.flib/summaries/ownership");
+    defer del(c_ownership);
+    assert(libc.unlink(c_ownership.ptr) == 0);
+    assert(use_ir(uses[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: library 'std.flib' is corrupt\n"));
+    build_std(NO_MORE[..0]);
+    assert(libc.unlink(c_ownership.ptr) == 0);
     char mut@ own c_summaries = str.to_cstr("std.flib/summaries");
     defer del(c_summaries);
     assert(libc.rmdir(c_summaries.ptr) == 0);
@@ -582,6 +636,11 @@ fn an_artifact_of_another_name_is_refused() void {
     forge("library", "library geom");
     remove("main.ll");
     string[1] uses = {"std=std.flib"};
+    // the summary file names the library `std`, so the artifact is corrupt, which the reader
+    // finds before the rule of the name (toolchain.md 2.1, step 1)
+    assert(use_ir(uses[..]) == EXIT_USAGE);
+    assert(err_is("fort: error: library 'std.flib' is corrupt\n"));
+    replace_summaries("fort-summaries 1\nlibrary geom\n");
     assert(use_ir(uses[..]) == EXIT_USAGE);
     assert(err_is("fort: error: library 'std.flib' is named 'geom', not 'std'\n"));
     assert(!exists("main.ll"));
@@ -640,8 +699,10 @@ fn an_artifact_of_another_configuration_is_refused() void {
 fn the_first_failure_of_the_command_line_reports() void {
     build_std(NO_MORE[..0]);
     write_file("main.ft", MAIN);
-    // the second library cannot be read, and the first one is of another name
+    // the second library cannot be read, and the first one is of another name: its manifest and
+    // its summary file name `geom`
     forge("library", "library geom");
+    replace_summaries("fort-summaries 1\nlibrary geom\n");
     string[2] uses = {"std=std.flib", "geom=missing.flib"};
     assert(use_ir(uses[..]) == EXIT_USAGE);
     assert(err_is("fort: error: library 'std.flib' is named 'geom', not 'std'\n"));
@@ -711,6 +772,33 @@ fn manifest_value(string dir, string field) string own {
         end += 1;
     }
     return str.dup(manifest[start..end]);
+}
+
+fn a_dependent_holds_the_interface_hash_of_both_files_of_its_library() void {
+    build_std(NO_MORE[..0]);
+    build_geom(NO_MORE[..0]);
+    // geom names its own library in its summary file
+    string own sums = contents("geom.flib/summaries/ownership");
+    defer del(sums);
+    assert(sums == "fort-summaries 1\nlibrary geom\n");
+    // the `use std` line of geom holds the interface line of std, the hash of both its files
+    string own std_hash = manifest_value("std.flib", "interface");
+    defer del(std_hash);
+    string own use = manifest_value("geom.flib", "use");
+    defer del(use);
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    strbuf.append(&want, "std ");
+    strbuf.append(&want, std_hash);
+    assert(use == strbuf.view(&want));
+    string own iface = contents("std.flib/interface.ft");
+    defer del(iface);
+    string own std_sums = contents("std.flib/summaries/ownership");
+    defer del(std_sums);
+    strbuf.str_buf mut hash = strbuf.create();
+    defer strbuf.free(&hash);
+    artifact.append_interface_hash(&hash, iface, std_sums);
+    assert(std_hash == strbuf.view(&hash));
 }
 
 fn two_libraries_that_use_each_other_are_a_cycle() void {
@@ -1703,6 +1791,8 @@ fn main() i32 {
     an_artifact_that_cannot_be_read_is_exit_two();
     an_artifact_that_breaks_a_rule_is_corrupt();
     an_interface_file_of_another_form_is_corrupt();
+    a_summary_file_that_the_interface_hash_holds_is_read_as_text();
+    a_dependent_holds_the_interface_hash_of_both_files_of_its_library();
     a_lexical_error_in_an_interface_file_is_a_compile_error();
     an_artifact_of_another_format_version_is_corrupt();
     an_artifact_of_another_name_is_refused();

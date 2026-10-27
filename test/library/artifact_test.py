@@ -3,11 +3,13 @@
 with the compiler (toolchain.md 2.1 and 2.2, module-system.md 10.4).
 
 1. Two builds write `std.flib` into two directories, and each file has the same bytes:
-   `interface.ft`, `lib.a`, `manifest` and the empty `summaries/`. Each build has a cache
-   directory of its own, so both compile the library (toolchain.md 2.3).
+   `interface.ft`, `lib.a`, `manifest` and `summaries/ownership`, the one file of `summaries/`,
+   which holds the two header lines of the text form of spec/ownership-design.md 8.2, because
+   no summary has a line yet. Each build has a cache directory of its own, so both compile the
+   library (toolchain.md 2.3).
 2. The manifest is the text that this script writes from the table of toolchain.md 2.2, and
    Python's hashlib gives each hash again: the compiler executable, the sources of the root, the
-   key, the interface file and the archive.
+   key, the interface hash of the interface file and the summary file, and the archive.
 3. The IR module of the library passes `opt -passes=verify`, defines no C `main` and numbers its
    private data from 0. The IR module of the other target, from a standard root that this script
    assembles for it, passes the verifier and compiles to an object.
@@ -47,6 +49,8 @@ TARGETS = {
     "x86_64-linux-gnu": ("linux", "x86_64", "x86_64-unknown-linux-gnu"),
     "arm64-apple-macosx11.0.0": ("darwin", "aarch64", "arm64-apple-macosx11.0.0"),
 }
+# The summary file of `std` when no function has a line (spec/ownership-design.md 8.2).
+EMPTY_SUMMARIES = b"fort-summaries 1\nlibrary std\n"
 # The arguments that each program of PROGRAMS is run with.
 PROGRAM_ARGS = ["one", "two words"]
 SEGMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
@@ -128,6 +132,17 @@ def source_hash(root):
     return digest.hexdigest()
 
 
+def interface_hash(artifact):
+    """The interface hash of toolchain.md 2.2: for `interface.ft` and then `summaries/ownership`,
+    the file name, a newline, the byte count in decimal, a newline and the bytes."""
+    digest = hashlib.sha256()
+    for name in ("interface.ft", "summaries/ownership"):
+        data = (artifact / name).read_bytes()
+        digest.update(("%s\n%d\n" % (name, len(data))).encode())
+        digest.update(data)
+    return digest.hexdigest()
+
+
 def manifest_text(args, root, artifact):
     """The manifest that toolchain.md 2.2 gives for this build."""
     os_name, arch, _ = TARGETS[args.target]
@@ -141,9 +156,9 @@ def manifest_text(args, root, artifact):
     lines += ["cc " + value(args.cc), "ar " + value(args.ar), "source " + source_hash(root)]
     head = "".join(line + "\n" for line in lines)
     tail = ["key " + sha256(head.encode()),
-            "interface " + sha256((artifact / "interface.ft").read_bytes()),
+            "interface " + interface_hash(artifact),
             "archive " + sha256((artifact / "lib.a").read_bytes()),
-            "summaries 1"]
+            "summaries 2"]
     return head + "".join(line + "\n" for line in tail)
 
 
@@ -165,9 +180,13 @@ def check_determinism(args, work):
         entries = sorted(p.name for p in artifact.iterdir())
         if entries != ["interface.ft", "lib.a", "manifest", "summaries"]:
             problems.append("%s holds %s" % (artifact, entries))
-        if any((artifact / "summaries").iterdir()):
-            problems.append("%s/summaries holds a file" % artifact)
-    for name in ("interface.ft", "lib.a", "manifest"):
+        summaries = sorted(p.name for p in (artifact / "summaries").iterdir())
+        if summaries != ["ownership"]:
+            problems.append("%s/summaries holds %s" % (artifact, summaries))
+        elif (artifact / "summaries" / "ownership").read_bytes() != EMPTY_SUMMARIES:
+            problems.append("%s/summaries/ownership holds %r" % (
+                artifact, (artifact / "summaries" / "ownership").read_bytes()))
+    for name in ("interface.ft", "lib.a", "manifest", "summaries/ownership"):
         if (first / name).read_bytes() != (second / name).read_bytes():
             problems.append("two builds wrote different bytes of %s" % name)
     return first, problems

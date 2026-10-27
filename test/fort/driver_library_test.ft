@@ -5,10 +5,10 @@
 //| root ok
 //| build ok
 //| ok
-/// Checks `--lib <name> <root> --emit-interface` in src/fort/driver.ft (D9.11, toolchain.md 1
-/// and 2.1): the usage errors of a library build, a root that cannot be read or holds no module,
-/// a compile error, an overwrite error of D17.11, and the interface file on stdout, which two
-/// runs write alike.
+/// Checks `--lib <name> <root> --emit-interface` and `--emit-summaries` in src/fort/driver.ft
+/// (D9.11, toolchain.md 1 and 2.1): the usage errors of a library build, a root that cannot be
+/// read or holds no module, a compile error, an overwrite error of D17.11, and the interface file
+/// and the summary file on stdout, which two runs write alike.
 import capture;
 import fort.driver;
 import library_env;
@@ -156,6 +156,94 @@ fn the_usage_errors_of_a_library_build() void {
     assert(usage_error_is(ar_emit[..], "--emit-interface requires --lib"));
     string[5] other_ar = {"fort", "--lib", "geom", "root", "--ar"};
     assert(usage_error_is(other_ar[..], "missing argument for option '--ar'"));
+}
+
+// The usage error of --emit-summaries beside an option that names another output.
+string SUMMARIES_ALONE = "--emit-summaries does not combine with -S, -c, -o or --emit-interface";
+
+fn the_usage_errors_of_the_summaries_option() void {
+    string[2] alone = {"fort", "--emit-summaries"};
+    assert(usage_error_is(alone[..], "--emit-summaries requires --lib"));
+    string[3] program = {"fort", "--emit-summaries", "main.ft"};
+    assert(usage_error_is(program[..], "--emit-summaries requires --lib"));
+    string[4] used = {"fort", "--emit-summaries", "--use", "std=std.flib"};
+    assert(usage_error_is(used[..], "--emit-summaries requires --lib"));
+    // --emit-interface requires --lib as well, and the parse names it first
+    string[3] both_alone = {"fort", "--emit-summaries", "--emit-interface"};
+    assert(usage_error_is(both_alone[..], "--emit-interface requires --lib"));
+    string[6] ir = {"fort", "--lib", "std", "root", "--emit-summaries", "-S"};
+    assert(usage_error_is(ir[..], SUMMARIES_ALONE));
+    string[6] object = {"fort", "--lib", "std", "root", "--emit-summaries", "-c"};
+    assert(usage_error_is(object[..], SUMMARIES_ALONE));
+    string[7] output = {"fort", "--lib", "std", "root", "--emit-summaries", "-o", "x"};
+    assert(usage_error_is(output[..], SUMMARIES_ALONE));
+    string[7] dash = {"fort", "--lib", "std", "root", "--emit-summaries", "-o", "-"};
+    assert(usage_error_is(dash[..], SUMMARIES_ALONE));
+    // the two texts go to stdout, which one of them fills
+    string[6] interface = {"fort", "--lib", "std", "root", "--emit-summaries",
+                           "--emit-interface"};
+    assert(usage_error_is(interface[..], SUMMARIES_ALONE));
+    string[6] check = {"fort", "--lib", "std", "root", "--emit-summaries", "--check"};
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "--lib does not combine with -I, -l, --check, --json, --index, ");
+    strbuf.append(&b, "--tokens, --ast or a --fir option");
+    assert(usage_error_is(check[..], strbuf.view(&b)));
+    string[5] other = {"fort", "--lib", "geom", "root", "--emit-summaries"};
+    assert(usage_error_is(other[..], "a library build needs --use std=<path>"));
+}
+
+// The summary file of the library `std` with no line, which V1 writes for each library.
+string EMPTY_SUMMARIES = "fort-summaries 1\nlibrary std\n";
+
+fn the_summary_file_is_written_to_stdout_alike_twice() void {
+    write_root();
+    string[5] args = {"fort", "--lib", "std", "root", "--emit-summaries"};
+    assert(run(args[..]) == EXIT_OK);
+    assert(err_is(""));
+    string own first = capture.text("out.txt");
+    defer del(first);
+    assert(first == EMPTY_SUMMARIES);
+    assert(run(args[..]) == EXIT_OK);
+    string own second = capture.text("out.txt");
+    defer del(second);
+    assert(first == second);
+    // the bytes do not depend on the build mode
+    string[6] release = {"fort", "--lib", "std", "root", "--emit-summaries", "--release"};
+    assert(run(release[..]) == EXIT_OK);
+    string own third = capture.text("out.txt");
+    defer del(third);
+    assert(third == EMPTY_SUMMARIES);
+    string[6] bounds = {"fort", "--lib", "std", "root", "--emit-summaries",
+                        "--no-bounds-check"};
+    assert(run(bounds[..]) == EXIT_OK);
+    string own fourth = capture.text("out.txt");
+    defer del(fourth);
+    assert(fourth == EMPTY_SUMMARIES);
+    // a text form of any target, as --emit-interface takes
+    string[8] other = {"fort", "--lib", "std", "root", "--emit-summaries", "--target",
+                       "arm64-apple-macosx11.0.0", "--cache-stats"};
+    assert(run(other[..]) == EXIT_OK);
+    string own fifth = capture.text("out.txt");
+    defer del(fifth);
+    // the summaries use no cache, so no cache line follows them
+    assert(fifth == EMPTY_SUMMARIES);
+}
+
+fn the_summaries_need_a_library_with_no_error() void {
+    // an overwrite error stops the build before the summaries
+    make_dir("bad_root");
+    write_file("bad_root/rt.ft", "i32 B = 1;\n");
+    write_file("bad_root/cell.ft", LEAKY_CELL);
+    string[5] args = {"fort", "--lib", "std", "bad_root", "--emit-summaries"};
+    assert(run(args[..]) == EXIT_COMPILE_ERROR);
+    assert(out_is_empty());
+    assert(err_has("overwriting owned value"));
+    // a root with no module is exit 2 before any check
+    make_dir("empty_root");
+    string[5] none = {"fort", "--lib", "std", "empty_root", "--emit-summaries"};
+    assert(run(none[..]) == EXIT_USAGE);
+    assert(out_is_empty());
 }
 
 // ---- the root ----------------------------------------------------------------------
@@ -394,6 +482,7 @@ fn an_output_option_anywhere_is_a_usage_error() void {
 
 fn main() i32 {
     the_usage_errors_of_a_library_build();
+    the_usage_errors_of_the_summaries_option();
     println("usage ok");
     a_root_that_cannot_be_read_is_exit_two();
     a_root_with_no_module_is_exit_two();
@@ -403,6 +492,8 @@ fn main() i32 {
     a_compile_error_in_a_module_is_exit_one();
     an_unproved_overwrite_store_is_exit_one();
     the_interface_file_is_written_to_stdout_alike_twice();
+    the_summary_file_is_written_to_stdout_alike_twice();
+    the_summaries_need_a_library_with_no_error();
     the_interface_follows_the_target_and_the_configuration();
     each_module_with_an_error_reports_it();
     a_path_in_no_library_is_a_compile_error_of_the_build();

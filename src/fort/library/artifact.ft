@@ -5,22 +5,27 @@
 ///
 /// Every hash is SHA-256 (FIPS 180-4), written as 64 lowercase hex digits. The manifest has one
 /// field on each line, and its key is the hash of the lines from the format version to the last
-/// used library. The writer writes each file to a temporary name and renames it, and it writes
-/// the manifest last, so a reader that finds a manifest finds the files of the same build. The
-/// reader reads each file once and keeps the bytes that it checked.
+/// used library. The interface hash covers `interface.ft` and `summaries/ownership`, the
+/// ownership summaries of spec/ownership-design.md 8.2. The writer writes each file to a temporary
+/// name and renames it, and it writes the manifest last, so a reader that finds a manifest finds
+/// the files of the same build. The reader reads each file once and keeps the bytes that it
+/// checked.
 import fort.containers;
 import fort.modules;
+import fort.owner.summary;
 import std.digest.sha256;
 import std.io;
 import std.libc;
 import std.os;
 import std.str;
 import std.strbuf;
+import std.strmap;
 import std.sys;
 
-// The version of the manifest format and the version of the directory `summaries/`.
+// The version of the manifest format and the version of the directory `summaries/`, which holds
+// the file `ownership` since version 2.
 string FORMAT_VERSION = "1";
-string SUMMARIES_VERSION = "1";
+string SUMMARIES_VERSION = "2";
 
 // The bytes that a manifest value keeps as they are: 0x21 to 0x7E, except `\`.
 u64 VALUE_FIRST = 33;
@@ -37,6 +42,11 @@ string INTERFACE_FILE = "interface.ft";
 string ARCHIVE_FILE = "lib.a";
 string MANIFEST_FILE = "manifest";
 string SUMMARIES_DIR = "summaries";
+
+/// The file of the ownership summaries in `summaries/`, and its path in the artifact, which the
+/// interface hash names.
+string OWNERSHIP_FILE = "ownership";
+string OWNERSHIP_PATH = "summaries/ownership";
 
 /// The object of a cache entry of the entry unit (toolchain.md 2.3).
 string OBJECT_FILE = "object.o";
@@ -86,6 +96,33 @@ fn append_digest(strbuf.str_buf mut* out, u8@ digest) void {
 /// Appends the SHA-256 of `data` as 64 lowercase hex digits.
 fn append_hash(strbuf.str_buf mut* out, u8@ data) void {
     u8[32] digest = sha256.hash(data);
+    append_digest(out, digest[..]);
+}
+
+// Adds one file to the interface hash in `*st`: its name, a newline, its byte count in decimal, a
+// newline and its bytes.
+fn add_file(sha256.state mut* st, string name, string text) void {
+    strbuf.str_buf mut head = strbuf.create();
+    defer strbuf.free(&head);
+    strbuf.append(&head, name);
+    strbuf.push(&head, '\n');
+    strbuf.append_u64(&head, text.len);
+    strbuf.push(&head, '\n');
+    sha256.update(st, strbuf.bytes(&head));
+    sha256.update(st, cast(text, u8@));
+}
+
+/// Appends the interface hash of a library (toolchain.md 2.2): the SHA-256 of one byte string.
+/// For `interface.ft` and then `summaries/ownership`, the string holds the file name, a newline,
+/// the byte count in decimal, a newline and the bytes. So the bytes of one file cannot move to the
+/// other file and keep the hash.
+fn append_interface_hash(strbuf.str_buf mut* out, string interface_text, string summaries_text)
+    void {
+    sha256.state mut st = sha256.state{};
+    sha256.init(&st);
+    add_file(&st, INTERFACE_FILE, interface_text);
+    add_file(&st, OWNERSHIP_PATH, summaries_text);
+    u8[32] digest = sha256.finish(&st);
     append_digest(out, digest[..]);
 }
 
@@ -520,11 +557,11 @@ fn replace_with_mode(string dir, string name, u8@ data, i32 mode, bool mut* made
 /// Writes the artifact `dir` by the write protocol of toolchain.md 2.2: it makes `dir` when it
 /// does not exist and removes `dir/manifest`. It makes `dir/summaries` when it does not exist and
 /// removes each entry in it, and it refuses a `summaries` that is a symbolic link. It writes
-/// `interface.ft` and then `lib.a`, each to a new temporary name that it renames, and it writes
-/// the manifest last in the same way. Returns false at the first step that fails, with the path
-/// of that step in `*failed` and the errno value in `*error`.
-fn write(string dir, string interface_text, u8@ archive, string manifest_text,
-         strbuf.str_buf mut* failed, i32 mut* error) bool {
+/// `interface.ft`, `summaries/ownership` and then `lib.a`, each to a new temporary name that it
+/// renames, and it writes the manifest last in the same way. Returns false at the first step that
+/// fails, with the path of that step in `*failed` and the errno value in `*error`.
+fn write(string dir, string interface_text, string summaries_text, u8@ archive,
+         string manifest_text, strbuf.str_buf mut* failed, i32 mut* error) bool {
     if (!clear_manifest(dir, failed, error)) {
         return false;
     }
@@ -536,6 +573,13 @@ fn write(string dir, string interface_text, u8@ archive, string manifest_text,
     }
     if (!replace(dir, INTERFACE_FILE, cast(interface_text, u8@), error)) {
         strbuf.append(failed, join(&b, dir, INTERFACE_FILE));
+        return false;
+    }
+    strbuf.str_buf mut sums = strbuf.create();
+    defer strbuf.free(&sums);
+    string sums_dir = join(&sums, dir, SUMMARIES_DIR);
+    if (!replace(sums_dir, OWNERSHIP_FILE, cast(summaries_text, u8@), error)) {
+        strbuf.append(failed, join(&b, sums_dir, OWNERSHIP_FILE));
         return false;
     }
     if (!replace(dir, ARCHIVE_FILE, archive, error)) {
@@ -651,14 +695,17 @@ enum verdict {
 }
 
 /// A used artifact or a cache entry, read once: the fields of its manifest and the bytes of its
-/// interface file and its archive, or of the object of an entry unit (toolchain.md 2.2,
-/// Reading). The strings and the spans of `fields` and `key` point into the other members, so a
-/// value is used and freed at one address. A zero value is empty.
+/// interface file, its summary file and its archive, with the summaries that the summary file
+/// gives, or the bytes of the object of an entry unit (toolchain.md 2.2, Reading). The strings and
+/// the spans of `fields` and `key` point into the other members, so a value is used and freed at
+/// one address. A zero value is empty.
 struct contents {
     manifest fields;
     string key; // the value of the key line
     strbuf.str_buf text; // the bytes of `manifest`
     strbuf.str_buf interface; // the bytes of `interface.ft`
+    strbuf.str_buf summaries; // the bytes of `summaries/ownership`
+    summary.table ownership; // the summaries that `summaries/ownership` gives
     strbuf.str_buf archive; // the bytes of `lib.a`
     strbuf.str_buf object; // the bytes of `object.o`
     containers.pool values; // the decoded values
@@ -675,6 +722,8 @@ fn free(contents mut* c) void {
     c->key = "";
     strbuf.free(&c->text);
     strbuf.free(&c->interface);
+    strbuf.free(&c->summaries);
+    summary.free_table(&c->ownership);
     strbuf.free(&c->archive);
     strbuf.free(&c->object);
     containers.pool_free(&c->values);
@@ -831,7 +880,7 @@ fn parse_line(string line, contents mut* c) bool {
 
 /// Reads the manifest `text` of a library or of an entry unit into `*c` and holds rules 1 to 3 of
 /// toolchain.md 2.2, Validation: each line has the form and the order of the table, the first
-/// line is `fort-manifest 1`, the last of a library is `summaries 1`, and the key line holds the
+/// line is `fort-manifest 1`, the last of a library is `summaries 2`, and the key line holds the
 /// SHA-256 of the lines before it. Returns false when one does not hold. `c->fields.entry_unit`
 /// says which form the text has. The values are decoded into `c->values`, and the fields of an
 /// earlier parse are replaced.
@@ -915,12 +964,73 @@ fn has_hash(u8@ data, string hash) bool {
     return strbuf.view(&b) == hash;
 }
 
+// The start of a bodiless function declaration in an interface file, before its name.
+string FUNCTION_DECL = "fn ";
+
+// Puts into `out` the symbol of each bodiless function that the interface text `text` declares, a
+// line `fn <decl>(` in the section `//! module <path>`, as `<path>.<decl>` (module-system.md 10.3).
+// Each declaration of an interface file stands on one line, so one scan reads each. The symbols
+// go into `p`, which `out` borrows them from.
+fn put_declared(string text, containers.pool mut* p, strmap.str_map mut* out) void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string mut section = "";
+    u64 mut at = 0;
+    while (at < text.len) {
+        u64 mut end = at;
+        while (end < text.len && text[end] != '\n') {
+            end += 1;
+        }
+        string l = text[at..end];
+        at = end + 1;
+        if (str.starts_with(l, modules.INTERFACE_SECTION)) {
+            section = l[modules.INTERFACE_SECTION.len..];
+            continue;
+        }
+        i64 paren = str.index_of(l, '(');
+        // a constant of a function type, `fn (T) R NAME`, has its `(` right after `fn `
+        if (section.len == 0 || !str.starts_with(l, FUNCTION_DECL)
+            || paren <= cast(FUNCTION_DECL.len, i64)) {
+            continue;
+        }
+        strbuf.clear(&b);
+        strbuf.append(&b, section);
+        strbuf.push(&b, '.');
+        strbuf.append(&b, l[FUNCTION_DECL.len..cast(paren, u64)]);
+        strmap.put(out, containers.pool_intern(p, strbuf.view(&b)), 1);
+    }
+}
+
+// Whether each function of the summaries `t` is a bodiless function that the interface text
+// `text` declares (spec/ownership-design.md 8.2). The declarations are read once, and a table
+// with no entry reads none.
+fn declares_each(string text, summary.table* t) bool {
+    if (summary.entry_count(t) == 0) {
+        return true;
+    }
+    containers.pool mut names = containers.pool_create();
+    defer containers.pool_free(&names);
+    strmap.str_map mut declared = strmap.create();
+    defer strmap.free(&declared);
+    put_declared(text, &names, &declared);
+    u64 mut i = 0;
+    while (i < summary.entry_count(t)) {
+        if (!strmap.has(&declared, summary.symbol(t, i))) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
 /// Reads the artifact `dir` of a used library once and checks it (toolchain.md 2.2, Reading and
-/// Validation). It reads `manifest`, `interface.ft` and `lib.a` once each into `*c`, and the
-/// caller uses only those bytes. Returns v_valid when each rule holds, v_corrupt when one does
-/// not, and v_unreadable with the errno value in `*error` when the system refuses to open `dir`
-/// or to read a file of it. A file that is absent breaks a rule, and so does a `summaries` that is
-/// no directory or that is a symbolic link.
+/// Validation). It reads `manifest`, `interface.ft`, `summaries/ownership` and `lib.a` once each
+/// into `*c`, and the caller uses only those bytes and the summaries in `c->ownership`. Returns
+/// v_valid when each rule holds, v_corrupt when one does not, and v_unreadable with the errno
+/// value in `*error` when the system refuses to open `dir` or to read a file of it. A file that is
+/// absent breaks a rule, and so does a `summaries` that is no directory or that is a symbolic
+/// link, a summary file that is no text form of the library, and a summary of a function that
+/// `interface.ft` declares with no bodiless `fn` declaration.
 fn read(string dir, contents mut* c, i32 mut* error) verdict {
     char mut@ own c_dir = str.to_cstr(dir);
     defer del(c_dir);
@@ -935,23 +1045,13 @@ fn read(string dir, contents mut* c, i32 mut* error) verdict {
         return found;
     }
     // The manifest of an entry unit is no manifest of a library: its `interface` field is empty,
-    // and no file hashes to the empty string, so the check of interface.ft refuses it.
+    // and no interface hash is the empty string, so the check of the interface hash refuses it.
     if (!parse_manifest(strbuf.view(&c->text), c)) {
         return verdict.v_corrupt;
     }
     found = read_entry(dir, INTERFACE_FILE, &c->interface, error);
     if (found != verdict.v_valid) {
         return found;
-    }
-    if (!has_hash(strbuf.bytes(&c->interface), c->fields.interface)) {
-        return verdict.v_corrupt;
-    }
-    found = read_entry(dir, ARCHIVE_FILE, &c->archive, error);
-    if (found != verdict.v_valid) {
-        return found;
-    }
-    if (!has_hash(strbuf.bytes(&c->archive), c->fields.archive)) {
-        return verdict.v_corrupt;
     }
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
@@ -968,6 +1068,27 @@ fn read(string dir, contents mut* c, i32 mut* error) verdict {
         return verdict.v_unreadable;
     }
     libc.close(sd);
+    found = read_entry(join(&b, dir, SUMMARIES_DIR), OWNERSHIP_FILE, &c->summaries, error);
+    if (found != verdict.v_valid) {
+        return found;
+    }
+    strbuf.clear(&b);
+    append_interface_hash(&b, strbuf.view(&c->interface), strbuf.view(&c->summaries));
+    if (strbuf.view(&b) != c->fields.interface) {
+        return verdict.v_corrupt;
+    }
+    found = read_entry(dir, ARCHIVE_FILE, &c->archive, error);
+    if (found != verdict.v_valid) {
+        return found;
+    }
+    if (!has_hash(strbuf.bytes(&c->archive), c->fields.archive)) {
+        return verdict.v_corrupt;
+    }
+    summary.free_table(&c->ownership);
+    if (!summary.parse(strbuf.view(&c->summaries), c->fields.library, &c->ownership)
+        || !declares_each(strbuf.view(&c->interface), &c->ownership)) {
+        return verdict.v_corrupt;
+    }
     return verdict.v_valid;
 }
 

@@ -123,6 +123,72 @@ fn a_digest_writes_each_byte_high_digit_first() void {
     assert(same(strbuf.view(&b)[0..6], "key ba"));
 }
 
+// The interface hash of an empty interface file and an empty summary file, and of the files
+// `i32 A = 1;` and the header of the summaries of `geom`, as Python's hashlib gives them over
+// the strings of toolchain.md 2.2.
+string EMPTY_INTERFACE_HASH = "29cfe20c0c51911eb2634c65f6d60472c409c42d3ab071a33b3d32db8313bd3a";
+string GEOM_INTERFACE_HASH = "8c341638ae0fa7787a6ea41b3e5e3d68b23478b296f2b6ba8a356076c894ed1d";
+
+// The interface hash of the two texts, in `out`.
+fn interface_hash(string interface_text, string summaries_text, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    artifact.append_interface_hash(out, interface_text, summaries_text);
+    return strbuf.view(out);
+}
+
+fn the_interface_hash_is_the_hash_of_both_files_with_names_and_counts() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(same(interface_hash("", "", &b), EMPTY_INTERFACE_HASH));
+    assert(same(interface_hash("i32 A = 1;\n", "fort-summaries 1\nlibrary geom\n", &b),
+                GEOM_INTERFACE_HASH));
+    // the string that the hash takes, written out
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    strbuf.append(&text, "interface.ft\n3\nab\nsummaries/ownership\n2\nc\n");
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    artifact.append_hash(&want, strbuf.bytes(&text));
+    assert(same(interface_hash("ab\n", "c\n", &b), strbuf.view(&want)));
+    // a hash appends after what the buffer holds
+    strbuf.clear(&b);
+    strbuf.append(&b, "interface ");
+    artifact.append_interface_hash(&b, "", "");
+    assert(strbuf.view(&b).len == 74);
+    assert(same(strbuf.view(&b)[10..], EMPTY_INTERFACE_HASH));
+}
+
+fn a_byte_of_either_file_moves_the_interface_hash() void {
+    strbuf.str_buf mut base = strbuf.create();
+    defer strbuf.free(&base);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string first = interface_hash("i32 A = 1;\n", "fort-summaries 1\nlibrary geom\n", &base);
+    // a changed summary changes the hash, and so does a changed interface file
+    assert(interface_hash("i32 A = 1;\n", "fort-summaries 1\nlibrary geom\nfn geom.a.f\nkeep _1\n",
+                          &b) != first);
+    assert(interface_hash("i32 A = 2;\n", "fort-summaries 1\nlibrary geom\n", &b) != first);
+    assert(interface_hash("i32 A = 1;\n", "fort-summaries 1\nlibrary geon\n", &b) != first);
+    // the same two files give the same hash, as a change of a body that keeps both does
+    assert(interface_hash("i32 A = 1;\n", "fort-summaries 1\nlibrary geom\n", &b) == first);
+    // the interface hash is not the hash of interface.ft alone, which it was before the summaries
+    strbuf.clear(&b);
+    artifact.append_hash(&b, cast("i32 A = 1;\n", u8@));
+    assert(strbuf.view(&b) != first);
+}
+
+fn the_bytes_of_one_file_cannot_move_to_the_other() void {
+    strbuf.str_buf mut a = strbuf.create();
+    defer strbuf.free(&a);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(interface_hash("ab", "c", &a) != interface_hash("a", "bc", &b));
+    assert(interface_hash("abc", "", &a) != interface_hash("", "abc", &b));
+    assert(interface_hash("", "", &a) != interface_hash("x", "", &b));
+    // bytes that look like the names and the counts move no file
+    assert(interface_hash("a\nsummaries/ownership\n1\nb", "", &a) != interface_hash("a", "b", &b));
+}
+
 fn the_compiler_identity_is_the_hash_of_the_running_executable() void {
     strbuf.str_buf mut got = strbuf.create();
     defer strbuf.free(&got);
@@ -211,7 +277,7 @@ string[23] FULL_LINES = {
     "key 90cd5baff21cda8e17fb731029dc787de318eff52818f95c428e72f8b0d0bede",
     "interface cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     "archive dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-    "summaries 1",
+    "summaries 2",
 };
 
 // The lines joined, each with its newline.
@@ -257,7 +323,7 @@ string[13] BARE_LINES = {
     "key 53582e5b1c72d667a6daaecb84b78f6b6bf8b754de81fee205014483a2c7f34e",
     "interface 0303030303030303030303030303030303030303030303030303030303030303",
     "archive 0404040404040404040404040404040404040404040404040404040404040404",
-    "summaries 1",
+    "summaries 2",
 };
 
 fn release_off_and_empty_lists_give_no_line_for_a_list() void {
@@ -559,8 +625,9 @@ fn an_empty_unit_hashes_the_empty_string() void {
 
 // ---- the artifact directory --------------------------------------------------------
 
-// The bytes of the three files that a case writes.
+// The bytes of the four files that a case writes.
 string IFACE_TEXT = "import std.rt as _0;\nfn f(i32 x) i32;\n";
+string SUMMARY_TEXT = "fort-summaries 1\nlibrary std\nfn std.rt.f\nkeep _1\n";
 string ARCHIVE_TEXT = "!<arch>\nmember\x00\x01\xFF";
 string MANIFEST_TEXT = "fort-manifest 1\nlibrary std\n";
 
@@ -646,11 +713,11 @@ fn entries(string path, strbuf.str_buf mut* out) string {
     return strbuf.view(out);
 }
 
-// Writes the three files to `dir` and asserts the outcome `ok`, with `failed` and the errno that
-// a failure gives.
+// Writes the four files to `dir`, with `failed` and the errno that a failure gives.
 fn write_to(string dir, strbuf.str_buf mut* failed, i32 mut* error) bool {
     *error = 0;
-    return artifact.write(dir, IFACE_TEXT, cast(ARCHIVE_TEXT, u8@), MANIFEST_TEXT, failed, error);
+    return artifact.write(dir, IFACE_TEXT, SUMMARY_TEXT, cast(ARCHIVE_TEXT, u8@), MANIFEST_TEXT,
+                          failed, error);
 }
 
 // The temporary name of `name` in `dir`.
@@ -677,7 +744,9 @@ fn a_fresh_artifact_holds_the_four_entries() void {
     assert(holds("fresh.flib/lib.a", ARCHIVE_TEXT));
     assert(holds("fresh.flib/manifest", MANIFEST_TEXT));
     assert(is_dir("fresh.flib/summaries"));
-    assert(same(entries("fresh.flib/summaries", &b), ""));
+    assert(same(entries("fresh.flib/summaries", &b), "ownership\n"));
+    assert(holds("fresh.flib/summaries/ownership", SUMMARY_TEXT));
+    assert(artifact.OWNERSHIP_PATH == "summaries/ownership");
 }
 
 fn a_trailing_separator_takes_no_second_one() void {
@@ -718,7 +787,7 @@ fn a_second_write_replaces_each_file_and_empties_summaries() void {
     defer strbuf.free(&b);
     // no temporary file is left
     assert(same(entries("again.flib", &b), "interface.ft\nlib.a\nmanifest\nnotes\nsummaries\n"));
-    assert(same(entries("again.flib/summaries", &b), ""));
+    assert(same(entries("again.flib/summaries", &b), "ownership\n"));
 }
 
 fn summaries_loses_each_file_and_each_empty_directory() void {
@@ -733,11 +802,12 @@ fn summaries_loses_each_file_and_each_empty_directory() void {
     assert(write_to("old.flib", &failed, &error));
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
-    assert(same(entries("old.flib/summaries", &b), ""));
+    assert(same(entries("old.flib/summaries", &b), "ownership\n"));
     assert(holds("old.flib/manifest", MANIFEST_TEXT));
-    // a second write over an empty summaries/ succeeds too
+    // a second write over the summary file of a first one succeeds too
     assert(write_to("old.flib", &failed, &error));
     assert(same(entries("old.flib", &b), "interface.ft\nlib.a\nmanifest\nsummaries\n"));
+    assert(same(entries("old.flib/summaries", &b), "ownership\n"));
 }
 
 // A fresh directory under /tmp, a string the caller owns. The shared folder of the VM, where the
@@ -797,9 +867,9 @@ fn a_file_that_cannot_be_removed_gives_the_error_of_unlink() void {
         assert(holds(file, "f"));
     }
     // a process that writes every directory, such as root, removes the file
-    string[6] parts = {"locked.flib/summaries/f", "locked.flib/summaries",
-                       "locked.flib/interface.ft", "locked.flib/lib.a", "locked.flib/manifest",
-                       "locked.flib"};
+    string[7] parts = {"locked.flib/summaries/f", "locked.flib/summaries/ownership",
+                       "locked.flib/summaries", "locked.flib/interface.ft", "locked.flib/lib.a",
+                       "locked.flib/manifest", "locked.flib"};
     u64 mut i = 0;
     while (i < parts.len) {
         string own path = under(root, parts[i]);
@@ -900,7 +970,7 @@ fn a_link_in_summaries_goes_and_its_target_stays() void {
     assert(write_to("inner.flib", &failed, &error));
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
-    assert(same(entries("inner.flib/summaries", &b), ""));
+    assert(same(entries("inner.flib/summaries", &b), "ownership\n"));
     assert(holds("target_dir/t", "t"));
     assert(holds("target_file", "f"));
 }
@@ -1003,8 +1073,9 @@ fn the_manifest_goes_before_the_first_file_is_written() void {
     assert(!exists("stale.flib/manifest"));
     assert(!exists("stale.flib/interface.ft"));
     assert(!exists("stale.flib/lib.a"));
-    // summaries/ comes before the first file
+    // summaries/ comes before the first file, and its file after interface.ft
     assert(is_dir("stale.flib/summaries"));
+    assert(!exists("stale.flib/summaries/ownership"));
 }
 
 fn a_failed_rename_leaves_no_temporary_file() void {
@@ -1024,6 +1095,7 @@ fn a_failed_rename_leaves_no_temporary_file() void {
     assert(!exists(temp_name("busy.flib", "lib.a", &b)));
     // the steps before it are done and the manifest after it is not
     assert(holds("busy.flib/interface.ft", IFACE_TEXT));
+    assert(holds("busy.flib/summaries/ownership", SUMMARY_TEXT));
     assert(!exists("busy.flib/manifest"));
     assert(same(entries("busy.flib", &b), "interface.ft\nlib.a\nsummaries\n"));
 }
@@ -1056,7 +1128,99 @@ fn a_manifest_that_cannot_be_renamed_is_the_failed_path() void {
     assert(holds("last.flib/interface.ft", IFACE_TEXT));
     assert(holds("last.flib/lib.a", ARCHIVE_TEXT));
     assert(is_dir("last.flib/summaries"));
+    assert(holds("last.flib/summaries/ownership", SUMMARY_TEXT));
     assert(!exists("last.flib/manifest"));
+}
+
+fn a_summary_file_that_cannot_be_written_is_the_failed_path() void {
+    string own root = make_temp();
+    defer del(root);
+    string own dir = under(root, "ro.flib");
+    defer del(dir);
+    string own sums = under(root, "ro.flib/summaries");
+    defer del(sums);
+    make_dir(dir);
+    make_dir(sums);
+    char mut@ own c_sums = str.to_cstr(sums);
+    defer del(c_sums);
+    // an empty summaries/ that its owner cannot write: the writer empties it, and then the
+    // temporary file of the summary file cannot be made
+    assert(libc.chmod(c_sums.ptr, 0o555) == 0);
+    strbuf.str_buf mut failed = strbuf.create();
+    defer strbuf.free(&failed);
+    i32 mut error = 0;
+    bool written = write_to(dir, &failed, &error);
+    assert(libc.chmod(c_sums.ptr, 0o700) == 0);
+    string own iface = under(root, "ro.flib/interface.ft");
+    defer del(iface);
+    string own archive = under(root, "ro.flib/lib.a");
+    defer del(archive);
+    string own manifest = under(root, "ro.flib/manifest");
+    defer del(manifest);
+    if (!written) {
+        string own file = under(root, "ro.flib/summaries/ownership");
+        defer del(file);
+        assert(same(strbuf.view(&failed), file));
+        assert(error == libc.EACCES);
+        // interface.ft comes before the summary file, and lib.a and the manifest after it
+        assert(holds(iface, IFACE_TEXT));
+        assert(!exists(archive));
+        assert(!exists(manifest));
+    }
+    // a process that writes every directory, such as root, writes the file
+    string[6] parts = {"ro.flib/summaries/ownership", "ro.flib/summaries", "ro.flib/interface.ft",
+                       "ro.flib/lib.a", "ro.flib/manifest", "ro.flib"};
+    u64 mut i = 0;
+    while (i < parts.len) {
+        string own path = under(root, parts[i]);
+        defer del(path);
+        remove(path);
+        i += 1;
+    }
+    remove(root);
+}
+
+fn a_directory_at_the_summary_file_stops_the_write_before_any_file() void {
+    make_dir("nosum.flib");
+    make_dir("nosum.flib/summaries");
+    // a directory with an entry at the name of the summary file, which the emptying refuses
+    make_dir("nosum.flib/summaries/ownership");
+    assert(io.write_file("nosum.flib/summaries/ownership/x", cast("x", u8@)));
+    strbuf.str_buf mut failed = strbuf.create();
+    defer strbuf.free(&failed);
+    i32 mut error = 0;
+    assert(!write_to("nosum.flib", &failed, &error));
+    assert(same(strbuf.view(&failed), "nosum.flib/summaries/ownership"));
+    assert(!exists("nosum.flib/manifest"));
+    assert(!exists("nosum.flib/interface.ft"));
+    assert(holds("nosum.flib/summaries/ownership/x", "x"));
+    // an empty directory there goes, and the file takes its name
+    make_dir("nosum3.flib");
+    make_dir("nosum3.flib/summaries");
+    make_dir("nosum3.flib/summaries/ownership");
+    assert(write_to("nosum3.flib", &failed, &error));
+    assert(holds("nosum3.flib/summaries/ownership", SUMMARY_TEXT));
+}
+
+fn a_link_at_the_temporary_name_of_the_summary_file_is_not_written_through() void {
+    assert(io.write_file("sum_victim", cast("old", u8@)));
+    make_dir("sumtrap.flib");
+    make_dir("sumtrap.flib/summaries");
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    // the writer empties summaries/ first, so a link there goes before the temporary name is
+    // made; a link that a run with this pid leaves at the temporary name goes too
+    link("../../sum_victim", temp_name("sumtrap.flib/summaries", "ownership", &b));
+    strbuf.str_buf mut failed = strbuf.create();
+    defer strbuf.free(&failed);
+    i32 mut error = 0;
+    assert(write_to("sumtrap.flib", &failed, &error));
+    assert(holds("sum_victim", "old"));
+    assert(!exists(temp_name("sumtrap.flib/summaries", "ownership", &b)));
+    assert(holds("sumtrap.flib/summaries/ownership", SUMMARY_TEXT));
+    strbuf.str_buf mut names = strbuf.create();
+    defer strbuf.free(&names);
+    assert(same(entries("sumtrap.flib/summaries", &names), "ownership\n"));
 }
 
 fn the_failed_path_is_cleared_by_a_write_that_succeeds() void {
@@ -1076,6 +1240,9 @@ fn main() i32 {
     println("values ok");
     a_hash_is_64_lowercase_hex_digits();
     a_digest_writes_each_byte_high_digit_first();
+    the_interface_hash_is_the_hash_of_both_files_with_names_and_counts();
+    a_byte_of_either_file_moves_the_interface_hash();
+    the_bytes_of_one_file_cannot_move_to_the_other();
     the_compiler_identity_is_the_hash_of_the_running_executable();
     println("hashes ok");
     the_manifest_has_each_line_in_the_order_of_the_table();
@@ -1109,6 +1276,9 @@ fn main() i32 {
     a_failed_rename_leaves_no_temporary_file();
     a_manifest_that_cannot_be_removed_stops_the_write();
     a_manifest_that_cannot_be_renamed_is_the_failed_path();
+    a_summary_file_that_cannot_be_written_is_the_failed_path();
+    a_directory_at_the_summary_file_stops_the_write_before_any_file();
+    a_link_at_the_temporary_name_of_the_summary_file_is_not_written_through();
     the_failed_path_is_cleared_by_a_write_that_succeeds();
     println("directory ok");
     println("ok");

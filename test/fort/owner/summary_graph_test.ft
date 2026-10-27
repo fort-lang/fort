@@ -1,0 +1,611 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| shapes ok
+//| sizes ok
+//| rounds ok
+//| collect ok
+//| ok
+/// Checks the order of src/fort/owner/summary.ft over call graphs of more shapes
+/// (spec/ownership-design.md 8.1): a diamond, cycles that share a callee, a cycle inside a cycle,
+/// a graph whose callees come first in the order of add, a wide fan of calls and a deep one; the
+/// rounds of a component of three members; and the table that collect gives for many functions.
+/// Each graph is a list of lines `<name>: <callee> <callee> ...`, which graph_text turns into FIR
+/// text with one direct call for each callee, in the order of the line.
+import fort.fir;
+import lower_env;
+import fort.owner.summary;
+import pass_env;
+import std.str;
+import std.strbuf;
+
+string[1] PRELUDE = {
+    "i32 UNUSED = 0;",
+};
+
+// Appends the FIR text of the function of the line `spec`, `<name>: <callee> ...`, to `out`.
+fn function_text(string spec, strbuf.str_buf mut* out) void {
+    i64 colon = str.index_of(spec, ':');
+    assert(colon > 0);
+    string name = spec[..cast(colon, u64)];
+    string rest = spec[cast(colon, u64) + 1..];
+    strbuf.append(out, "fn main.");
+    strbuf.append(out, name);
+    strbuf.append(out, "() -> void {\n");
+    // one local for each call, `_1` and up
+    u64 mut calls = 0;
+    u64 mut i = 0;
+    while (i < rest.len) {
+        if (rest[i] != ' ' && (i == 0 || rest[i - 1] == ' ')) {
+            calls += 1;
+            strbuf.append(out, "    let _");
+            strbuf.append_u64(out, calls);
+            strbuf.append(out, ": void;\n");
+        }
+        i += 1;
+    }
+    strbuf.append(out, "    bb0: {\n");
+    u64 mut k = 0;
+    i = 0;
+    while (i < rest.len) {
+        if (rest[i] == ' ') {
+            i += 1;
+            continue;
+        }
+        u64 mut end = i;
+        while (end < rest.len && rest[end] != ' ') {
+            end += 1;
+        }
+        k += 1;
+        strbuf.append(out, "        _");
+        strbuf.append_u64(out, k);
+        strbuf.append(out, " = call fn main.");
+        strbuf.append(out, rest[i..end]);
+        strbuf.append(out, "();\n");
+        i = end;
+    }
+    strbuf.append(out, "        return;\n    }\n}\n");
+}
+
+// The FIR text of the graph `specs`, one function for each line, in `out`.
+fn graph_text(string@ specs, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    u64 mut i = 0;
+    while (i < specs.len) {
+        function_text(specs[i], out);
+        i += 1;
+    }
+    return strbuf.view(out);
+}
+
+// The components of `g` in order, as `<members> | <members>`, the symbols without `main.`, with `*`
+// before the first member of a cyclic component.
+fn components_of(summary.graph* g, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    u64 mut c = 0;
+    while (c < summary.component_count(g)) {
+        if (c > 0) {
+            strbuf.append(out, " | ");
+        }
+        summary.component comp = summary.component_at(g, c);
+        if (comp.cyclic) {
+            strbuf.push(out, '*');
+        }
+        u64 mut k = 0;
+        while (k < comp.count) {
+            if (k > 0) {
+                strbuf.push(out, ' ');
+            }
+            string name = summary.node_symbol(g, summary.member(g, c, k));
+            assert(str.starts_with(name, "main."));
+            strbuf.append(out, name[5..]);
+            k += 1;
+        }
+        c += 1;
+    }
+    return strbuf.view(out);
+}
+
+fn same(string got, string want) bool {
+    if (got != want) {
+        println("got:  ", got);
+        println("want: ", want);
+    }
+    return got == want;
+}
+
+// Whether no component of `g` calls a component after it: each call of each member of component
+// `c` names a node of a component at or before `c`, or no node.
+fn callees_come_first(summary.graph* g) bool {
+    u64 n = summary.node_count(g);
+    u64 mut@ own at = new(u64, n);
+    defer del(at);
+    u64 mut c = 0;
+    while (c < summary.component_count(g)) {
+        u64 mut k = 0;
+        while (k < summary.component_at(g, c).count) {
+            at[summary.member(g, c, k)] = c;
+            k += 1;
+        }
+        c += 1;
+    }
+    u64 mut v = 0;
+    while (v < n) {
+        u64 mut e = 0;
+        while (e < g->nodes.items[v].call_count) {
+            i64 t = g->targets.items[g->nodes.items[v].first_call + e];
+            if (t >= 0 && at[cast(t, u64)] > at[v]) {
+                return false;
+            }
+            e += 1;
+        }
+        v += 1;
+    }
+    return true;
+}
+
+// Builds the graph of `specs` with the work 1 for each function, orders it, and holds its
+// components against `want` and the rule that callees come first.
+fn expect(string@ specs, string want) void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    string[1] lines = {graph_text(specs, &text)};
+    fir.module mut m = pass_env.parse(&e, PRELUDE[..], lines[..]);
+    defer fir.module_free(&m);
+    summary.graph mut g = summary.graph{};
+    defer summary.free(&g);
+    u64 mut i = 0;
+    while (i < m.funcs.len) {
+        summary.add(&g, &m.funcs.items[i], 1);
+        i += 1;
+    }
+    summary.order(&g);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(same(components_of(&g, &b), want));
+    assert(callees_come_first(&g));
+}
+
+// ---- the shapes ----------------------------------------------------------------------------
+
+fn a_diamond_closes_its_bottom_first() void {
+    string[4] specs = {"top: left right", "left: bottom", "right: bottom", "bottom:"};
+    expect(specs[..], "bottom | left | right | top");
+}
+
+fn the_callees_of_add_order_do_not_change_the_rule() void {
+    // the callees come first in the order of add, so each root closes at once
+    string[4] specs = {"bottom:", "right: bottom", "left: bottom", "top: left right"};
+    expect(specs[..], "bottom | right | left | top");
+}
+
+fn two_cycles_that_share_a_callee_stay_two_components() void {
+    string[5] specs = {"a1: a2 shared", "a2: a1", "b1: b2", "b2: b1 shared", "shared:"};
+    expect(specs[..], "shared | *a1 a2 | *b1 b2");
+}
+
+fn a_cycle_that_reaches_another_cycle_comes_after_it() void {
+    string[4] specs = {"x1: x2", "x2: x1 y1", "y1: y2", "y2: y1"};
+    expect(specs[..], "*y1 y2 | *x1 x2");
+}
+
+fn a_cycle_inside_a_cycle_is_one_component() void {
+    // `in1` and `in2` call each other, and `in2` goes back to `out` through `back`
+    string[4] specs = {"out: in1", "in1: in2", "in2: in1 back", "back: out"};
+    expect(specs[..], "*out in1 in2 back");
+}
+
+fn a_cycle_through_a_self_call_keeps_both() void {
+    string[3] specs = {"p: p q", "q: p", "r: r"};
+    expect(specs[..], "*p q | *r");
+}
+
+fn a_caller_of_a_cycle_and_a_callee_of_it_stand_on_each_side() void {
+    string[5] specs = {"caller: c1", "c1: c2", "c2: c3", "c3: c1 callee", "callee:"};
+    expect(specs[..], "callee | *c1 c2 c3 | caller");
+}
+
+fn a_call_of_a_function_twice_and_of_itself_twice_is_one_edge() void {
+    string[2] specs = {"twin: twin other twin other", "other:"};
+    expect(specs[..], "other | *twin");
+}
+
+fn a_late_back_edge_joins_the_whole_chain() void {
+    // the walk reaches `e5` through four calls, and its call of `e1` joins all five
+    string[5] specs = {"e1: e2", "e2: e3", "e3: e4", "e4: e5", "e5: e1"};
+    expect(specs[..], "*e1 e2 e3 e4 e5");
+}
+
+fn an_early_back_edge_and_a_late_one_make_two_components() void {
+    // `f2` goes back to `f1`, and `f4` goes back to `f3`, which `f2` calls
+    string[4] specs = {"f1: f2", "f2: f1 f3", "f3: f4", "f4: f3"};
+    expect(specs[..], "*f3 f4 | *f1 f2");
+}
+
+fn the_members_of_a_component_are_in_node_order() void {
+    // the walk visits `m3` before `m2`, and the component lists them in the order of add
+    string[3] specs = {"m1: m3", "m2: m1", "m3: m2"};
+    expect(specs[..], "*m1 m2 m3");
+}
+
+// ---- the sizes -----------------------------------------------------------------------------
+
+// The FIR text of a fan: `hub` calls each of `n` leaves, `leaf0` to `leaf<n-1>`, in that order.
+fn fan_text(u64 n, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    strbuf.str_buf mut spec = strbuf.create();
+    defer strbuf.free(&spec);
+    strbuf.append(&spec, "hub:");
+    u64 mut i = 0;
+    while (i < n) {
+        strbuf.append(&spec, " leaf");
+        strbuf.append_u64(&spec, i);
+        i += 1;
+    }
+    function_text(strbuf.view(&spec), out);
+    i = 0;
+    while (i < n) {
+        strbuf.clear(&spec);
+        strbuf.append(&spec, "leaf");
+        strbuf.append_u64(&spec, i);
+        strbuf.push(&spec, ':');
+        function_text(strbuf.view(&spec), out);
+        i += 1;
+    }
+    return strbuf.view(out);
+}
+
+fn a_wide_fan_closes_each_leaf_in_the_order_of_the_calls() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 n = 300;
+    string[1] lines = {fan_text(n, &text)};
+    fir.module mut m = pass_env.parse(&e, PRELUDE[..], lines[..]);
+    defer fir.module_free(&m);
+    summary.graph mut g = summary.graph{};
+    defer summary.free(&g);
+    u64 mut i = 0;
+    while (i < m.funcs.len) {
+        summary.add(&g, &m.funcs.items[i], i);
+        i += 1;
+    }
+    summary.solve(&g, summary.WORK_LIMIT);
+    assert(summary.component_count(&g) == n + 1);
+    assert(g.nodes.items[0].call_count == n);
+    // the walk takes the calls of `hub` in order, so leaf k closes as component k
+    u64 mut c = 0;
+    while (c < n) {
+        assert(summary.member(&g, c, 0) == c + 1);
+        assert(summary.component_at(&g, c).work == c + 1);
+        c += 1;
+    }
+    assert(summary.member(&g, n, 0) == 0);
+    assert(summary.component_at(&g, n).work == 0);
+    assert(callees_come_first(&g));
+}
+
+// The FIR text of a ring of `n` functions, `ring0` to `ring<n-1>`, each of which calls the next
+// one, and the last of which calls the first.
+fn ring_text(u64 n, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    strbuf.str_buf mut spec = strbuf.create();
+    defer strbuf.free(&spec);
+    u64 mut i = 0;
+    while (i < n) {
+        strbuf.clear(&spec);
+        strbuf.append(&spec, "ring");
+        strbuf.append_u64(&spec, i);
+        strbuf.append(&spec, ": ring");
+        strbuf.append_u64(&spec, (i + 1) % n);
+        function_text(strbuf.view(&spec), out);
+        i += 1;
+    }
+    return strbuf.view(out);
+}
+
+fn a_long_ring_is_one_component_with_the_work_of_each_member() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 n = 1500;
+    string[1] lines = {ring_text(n, &text)};
+    fir.module mut m = pass_env.parse(&e, PRELUDE[..], lines[..]);
+    defer fir.module_free(&m);
+    summary.graph mut g = summary.graph{};
+    defer summary.free(&g);
+    u64 mut i = 0;
+    while (i < m.funcs.len) {
+        summary.add(&g, &m.funcs.items[i], 2);
+        i += 1;
+    }
+    summary.solve(&g, summary.WORK_LIMIT);
+    assert(summary.component_count(&g) == 1);
+    summary.component ring = summary.component_at(&g, 0);
+    assert(ring.count == n && ring.cyclic && ring.rounds == 1 && ring.work == 2 * n);
+    // node order inside the component
+    u64 mut k = 0;
+    while (k < n) {
+        assert(summary.member(&g, 0, k) == k);
+        k += 1;
+    }
+    // past a limit of one less than its work, the ring is over
+    summary.solve(&g, 2 * n - 1);
+    assert(summary.component_at(&g, 0).over);
+}
+
+// ---- the rounds ----------------------------------------------------------------------------
+
+summary.line EMPTY_A = summary.line{summary.kind.k_empty, "(*_1).0"};
+summary.line EMPTY_B = summary.line{summary.kind.k_empty, "(*_1).1"};
+summary.line KEEP_A = summary.line{summary.kind.k_keep, "_1"};
+summary.line RESULT_A = summary.line{summary.kind.k_result, "(*_2)"};
+
+// The lines of node `n` as `<word> <operand>`, separated by `, `.
+fn lines_of(summary.graph* g, u64 n, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    summary.line@ held = summary.node_lines(g, n);
+    u64 mut i = 0;
+    while (i < held.len) {
+        if (i > 0) {
+            strbuf.append(out, ", ");
+        }
+        strbuf.append(out, summary.word(held[i].kind));
+        strbuf.push(out, ' ');
+        strbuf.append(out, held[i].text);
+        i += 1;
+    }
+    return strbuf.view(out);
+}
+
+// The graph of three functions in one cycle, `t1` to `t2` to `t3` and back, ordered.
+fn three_cycle(lower_env.env mut* e, summary.graph mut* g, strbuf.str_buf mut* text) fir.module {
+    string[3] specs = {"t1: t2", "t2: t3", "t3: t1"};
+    string[1] lines = {graph_text(specs[..], text)};
+    fir.module m = pass_env.parse(e, PRELUDE[..], lines[..]);
+    u64 mut i = 0;
+    while (i < m.funcs.len) {
+        summary.add(g, &m.funcs.items[i], 1);
+        i += 1;
+    }
+    summary.order(g);
+    assert(summary.component_count(g) == 1);
+    assert(summary.component_at(g, 0).count == 3);
+    return m;
+}
+
+fn a_loss_goes_round_a_cycle_of_three_in_three_rounds() void {
+    // each member holds a line while its callee holds it: `t3` loses it, then `t2`, then `t1`
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    summary.graph mut g = summary.graph{};
+    defer summary.free(&g);
+    fir.module mut m = three_cycle(&e, &g, &text);
+    defer fir.module_free(&m);
+    summary.line[2] both = {EMPTY_A, EMPTY_B};
+    summary.line[1] one = {EMPTY_B};
+    u64 mut k = 0;
+    while (k < 3) {
+        summary.start(&g, k, both[..]);
+        k += 1;
+    }
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    // the analysis of a member finds EMPTY_A when its callee holds it, and EMPTY_B always; the
+    // body of `t3` loses EMPTY_A of its own
+    bool mut again = true;
+    u64 mut count = 0;
+    while (again) {
+        bool mut changed = false;
+        u64 mut n = 0;
+        while (n < 3) {
+            u64 callee = (n + 1) % 3;
+            bool held = summary.node_lines(&g, callee).len == 2 && n != 2;
+            if (held) {
+                if (summary.give(&g, 0, n, both[..], 1, summary.WORK_LIMIT)) {
+                    changed = true;
+                }
+            } else if (summary.give(&g, 0, n, one[..], 1, summary.WORK_LIMIT)) {
+                changed = true;
+            }
+            n += 1;
+        }
+        again = summary.end_round(&g, 0, changed);
+        count += 1;
+        assert(count < 10);
+    }
+    // a round takes the members in node order, and each reads the lines that the round gave the
+    // members before it: round 1 takes EMPTY_A from `t3`, after `t2` read it; round 2 takes it
+    // from `t2` and round 3 from `t1`; round 4 changes nothing
+    assert(summary.component_at(&g, 0).rounds == 4);
+    assert(summary.component_at(&g, 0).work == 12);
+    k = 0;
+    while (k < 3) {
+        assert(same(lines_of(&g, k, &b), "empty (*_1).1"));
+        k += 1;
+    }
+}
+
+fn a_may_line_goes_round_a_cycle_of_three() void {
+    // a member can keep a borrow when its callee can: `t1` finds it in its own body first
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    summary.graph mut g = summary.graph{};
+    defer summary.free(&g);
+    fir.module mut m = three_cycle(&e, &g, &text);
+    defer fir.module_free(&m);
+    summary.line[1] none = {};
+    summary.line[1] keep = {KEEP_A};
+    u64 mut k = 0;
+    while (k < 3) {
+        summary.start(&g, k, none[..0]);
+        k += 1;
+    }
+    bool mut again = true;
+    u64 mut count = 0;
+    while (again) {
+        bool mut changed = false;
+        u64 mut n = 0;
+        while (n < 3) {
+            u64 callee = (n + 1) % 3;
+            bool found = n == 0 || summary.node_lines(&g, callee).len > 0;
+            summary.line@ mut lines = none[..0];
+            if (found) {
+                lines = keep[..];
+            }
+            if (summary.give(&g, 0, n, lines, 2, summary.WORK_LIMIT)) {
+                changed = true;
+            }
+            n += 1;
+        }
+        again = summary.end_round(&g, 0, changed);
+        count += 1;
+        assert(count < 10);
+    }
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    k = 0;
+    while (k < 3) {
+        assert(same(lines_of(&g, k, &b), "keep _1"));
+        k += 1;
+    }
+    // round 1 gives the line to `t1` and then to `t3`, which reads `t1` after it; round 2 gives it
+    // to `t2`; round 3 changes nothing
+    assert(summary.component_at(&g, 0).rounds == 3);
+    assert(summary.component_at(&g, 0).work == 18);
+}
+
+fn give_sorts_and_merges_a_list_with_repeats() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    summary.graph mut g = summary.graph{};
+    defer summary.free(&g);
+    fir.module mut m = three_cycle(&e, &g, &text);
+    defer fir.module_free(&m);
+    summary.line[3] begin = {EMPTY_B, EMPTY_A, EMPTY_B};
+    summary.start(&g, 1, begin[..]);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(same(lines_of(&g, 1, &b), "empty (*_1).0, empty (*_1).1"));
+    summary.line[5] found = {KEEP_A, RESULT_A, EMPTY_B, KEEP_A, RESULT_A};
+    assert(summary.give(&g, 0, 1, found[..], 1, summary.WORK_LIMIT));
+    assert(same(lines_of(&g, 1, &b), "empty (*_1).1, result (*_2), keep _1"));
+    // a second start replaces the lines of the first
+    summary.line[1] other = {EMPTY_A};
+    summary.start(&g, 1, other[..]);
+    assert(same(lines_of(&g, 1, &b), "empty (*_1).0"));
+}
+
+// ---- collect -------------------------------------------------------------------------------
+
+fn collect_sorts_many_entries_by_their_symbols() void {
+    // 40 functions with no call, added in the reverse byte order of their names, each with a
+    // line; byte order puts `main.n10` before `main.n2`
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    strbuf.str_buf mut spec = strbuf.create();
+    defer strbuf.free(&spec);
+    u64 n = 40;
+    u64 mut i = 0;
+    while (i < n) {
+        strbuf.clear(&spec);
+        strbuf.append(&spec, "n");
+        strbuf.append_u64(&spec, n - 1 - i);
+        strbuf.push(&spec, ':');
+        function_text(strbuf.view(&spec), &text);
+        i += 1;
+    }
+    string[1] lines = {strbuf.view(&text)};
+    fir.module mut m = pass_env.parse(&e, PRELUDE[..], lines[..]);
+    defer fir.module_free(&m);
+    summary.graph mut g = summary.graph{};
+    defer summary.free(&g);
+    i = 0;
+    while (i < m.funcs.len) {
+        summary.add(&g, &m.funcs.items[i], 1);
+        i += 1;
+    }
+    summary.order(&g);
+    assert(summary.component_count(&g) == n);
+    summary.line[1] found = {KEEP_A};
+    u64 mut c = 0;
+    while (c < n) {
+        // every third function keeps no line
+        if (summary.member(&g, c, 0) % 3 != 0) {
+            assert(summary.give(&g, c, summary.member(&g, c, 0), found[..], 1,
+                                summary.WORK_LIMIT));
+        }
+        c += 1;
+    }
+    summary.table mut t = summary.table{};
+    defer summary.free_table(&t);
+    summary.collect(&g, &t);
+    // the nodes 0, 3, ..., 39 have no line: 14 of 40
+    assert(summary.entry_count(&t) == n - 14);
+    u64 mut k = 1;
+    while (k < summary.entry_count(&t)) {
+        assert(str.cmp(summary.symbol(&t, k - 1), summary.symbol(&t, k)) < 0);
+        assert(summary.lines(&t, k).len == 1);
+        k += 1;
+    }
+    assert(summary.symbol(&t, 0) == "main.n1");
+    assert(summary.find(&t, "main.n10") >= 0);
+    assert(summary.find(&t, "main.n39") == -1);
+    // the text form of the table reads back to the same table
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    summary.write(&t, "main", &out);
+    summary.table mut back = summary.table{};
+    defer summary.free_table(&back);
+    assert(summary.parse(strbuf.view(&out), "main", &back));
+    assert(summary.entry_count(&back) == summary.entry_count(&t));
+    strbuf.str_buf mut again = strbuf.create();
+    defer strbuf.free(&again);
+    summary.write(&back, "main", &again);
+    assert(strbuf.view(&again) == strbuf.view(&out));
+}
+
+fn main() i32 {
+    a_diamond_closes_its_bottom_first();
+    the_callees_of_add_order_do_not_change_the_rule();
+    two_cycles_that_share_a_callee_stay_two_components();
+    a_cycle_that_reaches_another_cycle_comes_after_it();
+    a_cycle_inside_a_cycle_is_one_component();
+    a_cycle_through_a_self_call_keeps_both();
+    a_caller_of_a_cycle_and_a_callee_of_it_stand_on_each_side();
+    a_call_of_a_function_twice_and_of_itself_twice_is_one_edge();
+    a_late_back_edge_joins_the_whole_chain();
+    an_early_back_edge_and_a_late_one_make_two_components();
+    the_members_of_a_component_are_in_node_order();
+    println("shapes ok");
+    a_wide_fan_closes_each_leaf_in_the_order_of_the_calls();
+    a_long_ring_is_one_component_with_the_work_of_each_member();
+    println("sizes ok");
+    a_loss_goes_round_a_cycle_of_three_in_three_rounds();
+    a_may_line_goes_round_a_cycle_of_three();
+    give_sorts_and_merges_a_list_with_repeats();
+    println("rounds ok");
+    collect_sorts_many_entries_by_their_symbols();
+    println("collect ok");
+    println("ok");
+    return 0;
+}

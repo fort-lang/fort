@@ -22,11 +22,18 @@ and reads the line of each build.
    `-c -o /dev/null`, a link build hits and gives the program of the whole build, and
    `-c -o /dev/stdout` into a pipe exits 0 and writes the bytes of the object, after a miss and
    after a hit.
+7. A change of a summary rebuilds each dependent (spec/ownership-design.md 8.2): the summary
+   file of `aaa` with a line, and the interface hash of its two files, change the key of `zzz`
+   and of the entry unit, so both miss, and the program gives the output of the whole program.
+   A summary of a function that `aaa` does not declare makes the artifact corrupt. An edit of a
+   body of `aaa` keeps its summary file and its interface hash (check 3). No product build writes
+   a line yet, so the script writes the summary file itself.
 
 Exit 0 when each holds, 1 when one does not, or 2 for an environment failure.
 """
 
 import argparse
+import hashlib
 import os
 import pathlib
 import shutil
@@ -49,6 +56,9 @@ TIMEOUT = 600
 BODY = "    counter += 1;\n"
 EDITED_BODY = "    counter += 2;\n"
 NEW_DECLARATION = "\nfn extra() i32 {\n    return 1;\n}\n"
+
+# The summary file of `aaa` when no function has a line (spec/ownership-design.md 8.2).
+EMPTY_SUMMARIES = b"fort-summaries 1\nlibrary aaa\n"
 
 # A program whose import names no declaration of zzz.top.
 BAD_PROGRAM = "import zzz.top;\n\nfn main() i32 {\n    return top.missing();\n}\n"
@@ -161,7 +171,8 @@ class Rig:
 
 def artifact_bytes(work, names):
     return {(name, f): (work / (name + ".flib") / f).read_bytes()
-            for name in names for f in ("interface.ft", "lib.a", "manifest")}
+            for name in names
+            for f in ("interface.ft", "lib.a", "manifest", "summaries/ownership")}
 
 
 def entry_count(cache):
@@ -213,15 +224,42 @@ def edit(path, old, new):
     path.write_text(text.replace(old, new, 1))
 
 
+def manifest_value(artifact, field):
+    """The value of the line `<field> <value>` of the manifest of `artifact`."""
+    for line in (artifact / "manifest").read_text().splitlines():
+        if line.startswith(field + " "):
+            return line[len(field) + 1:]
+    raise SystemExit("cache_test: %s/manifest has no %s line" % (artifact, field))
+
+
+def interface_hash(artifact):
+    """The interface hash of toolchain.md 2.2 over the two files of `artifact`."""
+    digest = hashlib.sha256()
+    for name in ("interface.ft", "summaries/ownership"):
+        data = (artifact / name).read_bytes()
+        digest.update(("%s\n%d\n" % (name, len(data))).encode())
+        digest.update(data)
+    return digest.hexdigest()
+
+
 def check_body_edit(rig):
     base = rig.chain / "aaa" / "base.ft"
-    interface = (rig.work / "aaa.flib" / "interface.ft").read_bytes()
+    artifact = rig.work / "aaa.flib"
+    interface = (artifact / "interface.ft").read_bytes()
+    summaries = (artifact / "summaries" / "ownership").read_bytes()
+    hash_line = manifest_value(artifact, "interface")
     edit(base, BODY, EDITED_BODY)
     outcomes = rig.build_all()
     rig.expect("an edit of a body", outcomes, {"std": "hit", "aaa": "absent", "zzz": "hit",
                                                "main": "hit"})
-    if (rig.work / "aaa.flib" / "interface.ft").read_bytes() != interface:
+    if (artifact / "interface.ft").read_bytes() != interface:
         rig.problems.append("an edit of a body changed the interface of aaa")
+    if (artifact / "summaries" / "ownership").read_bytes() != summaries:
+        rig.problems.append("an edit of a body changed the summary file of aaa")
+    if manifest_value(artifact, "interface") != hash_line:
+        rig.problems.append("an edit of a body changed the interface hash of aaa")
+    if hash_line != interface_hash(artifact):
+        rig.problems.append("the interface line of aaa is not the hash of its two files")
     before = rig.run_program(rig.work / "cold")
     after = rig.same_program("an edit of a body")
     if after == before:
@@ -235,6 +273,63 @@ def check_signature_edit(rig):
     rig.expect("an edit of a declaration", outcomes,
                {"std": "hit", "aaa": "absent", "zzz": "absent", "main": "absent"})
     rig.same_program("an edit of a declaration")
+
+
+# The summary file of `aaa` with a line of `aaa.base.bump`, a bodiless function of its interface,
+# and with a line of a function that it does not declare.
+FORGED_SUMMARIES = b"fort-summaries 1\nlibrary aaa\nfn aaa.base.bump\nkeep _1\n"
+UNDECLARED_SUMMARIES = b"fort-summaries 1\nlibrary aaa\nfn aaa.base.missing\nkeep _1\n"
+
+
+def forge_summaries(rig, text):
+    """Writes `text` as the summary file of `aaa.flib` and its interface hash as the interface
+    line of its manifest, which the key does not cover, as a build of `aaa` whose summary
+    changed writes them."""
+    artifact = rig.work / "aaa.flib"
+    (artifact / "summaries" / "ownership").write_bytes(text)
+    manifest = artifact / "manifest"
+    lines = manifest.read_text().split("\n")
+    lines = ["interface " + interface_hash(artifact) if line.startswith("interface ") else line
+             for line in lines]
+    manifest.write_text("\n".join(lines))
+
+
+def check_summary_edit(rig):
+    outcomes = rig.build_all()
+    rig.expect("a build before the summary edit", outcomes,
+               {"std": "hit", "aaa": "hit", "zzz": "hit", "main": "hit"})
+    if (rig.work / "aaa.flib" / "summaries" / "ownership").read_bytes() != EMPTY_SUMMARIES:
+        rig.problems.append("the summary file of aaa holds a line")
+    before = manifest_value(rig.work / "aaa.flib", "interface")
+    forge_summaries(rig, FORGED_SUMMARIES)
+    if manifest_value(rig.work / "aaa.flib", "interface") == before:
+        rig.problems.append("a changed summary kept the interface hash of aaa")
+    # zzz and the entry unit read the new hash in their `use` line, so their keys change
+    zzz = rig.library("zzz", rig.chain / "zzz", ["std", "aaa"])
+    proc = rig.program(rig.chain / "main.ft", rig.work / "app")
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stderr.decode("utf-8", errors="replace"))
+        raise SystemExit("cache_test: the build after the summary edit exited %d"
+                         % proc.returncode)
+    rig.expect("a changed summary", {"zzz": zzz, "main": rig.stats(proc)},
+               {"zzz": "absent", "main": "absent"})
+    rig.same_program("a changed summary")
+    # a summary of a function that aaa does not declare makes the artifact corrupt
+    forge_summaries(rig, UNDECLARED_SUMMARIES)
+    argv = ["--cache-dir", rig.cache, "--lib", "zzz", rig.chain / "zzz", "-o",
+            rig.work / "zzz.flib", "--use", "std=%s" % (rig.work / "std.flib"), "--use",
+            "aaa=%s" % (rig.work / "aaa.flib")]
+    proc = rig.fort(argv)
+    want = "fort: error: library '%s' is corrupt\n" % (rig.work / "aaa.flib")
+    if proc.returncode != 2 or proc.stderr.decode() != want:
+        rig.problems.append("an undeclared summary gave %d and %r" % (proc.returncode,
+                                                                     proc.stderr))
+    # a build of aaa hits and writes its entry again, so each dependent hits its old entry
+    outcomes = rig.build_all()
+    rig.expect("a build after the summary edit", outcomes,
+               {"std": "hit", "aaa": "hit", "zzz": "hit", "main": "hit"})
+    if manifest_value(rig.work / "aaa.flib", "interface") != before:
+        rig.problems.append("the hit of aaa did not write its interface hash again")
 
 
 def check_corrupt(rig):
@@ -287,6 +382,7 @@ def main(argv=None):
         check_diagnostics(rig)
         check_body_edit(rig)
         check_signature_edit(rig)
+        check_summary_edit(rig)
         check_corrupt(rig)
         total = entry_count(rig.cache)
         check_object_outputs(rig)

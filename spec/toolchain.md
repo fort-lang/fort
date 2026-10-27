@@ -48,6 +48,7 @@ file: `fort [options] --lib <name> <root>`.
 | `--lib <name> <root>` | build the library `<name>` from `<root>` (D9.11)           | off        |
 | `--use <name>=<path>` | use the library artifact `<path>`; repeatable (D9.11)      | none       |
 | `--emit-interface`  | write the interface file of `--lib` and stop (D9.11)       | off        |
+| `--emit-summaries`  | write the summary file of `--lib` and stop (D9.11)         | off        |
 | `--cache-dir <dir>` | the cache directory of a library build (D9.11)             | see below  |
 | `--cache-stats`     | write the cache outcome of a library build (D9.11)         | off        |
 | `--ar <path>`       | the archiver of a `--lib` build (D9.11)                    | `ar`       |
@@ -80,9 +81,9 @@ file: `fort [options] --lib <name> <root>`.
   itself (section 2.1, step 6). Neither mode makes a file named `-`; `-o ./-` names that file.
   A link writes an executable and a `--lib` build writes an artifact directory, so `-o -`
   without `-S` or `-c` is the usage error `-o - requires -S or -c` in both. `--emit-interface`
-  always writes to stdout and takes no `-o`. `--check`, `--tokens`, `--ast`, `--fir`,
-  `--fir-after`, `--fir-verify-report`, `--fir-test` and `--fir-run` do not use `-o`, so `-o -`
-  changes nothing there.
+  and `--emit-summaries` always write to stdout and take no `-o`. `--check`, `--tokens`,
+  `--ast`, `--fir`, `--fir-after`, `--fir-verify-report`, `--fir-test` and `--fir-run` do not use
+  `-o`, so `-o -` changes nothing there.
 - The default standard library directory is `$FORT_STD_DIR` when set, else `std` beside
   the running `fort` binary. Linux reads its binary path from `/proc/self/exe`.
   Mac reads it from `_NSGetExecutablePath`, then uses `realpath` when it succeeds.
@@ -313,6 +314,11 @@ file: `fort [options] --lib <name> <root>`.
   stdout (`module-system.md` 10.3) and stops, so it writes no file and runs no `--cc`. Its bytes
   are the bytes of the `interface.ft` of the artifact. It is a usage error together with `-S`,
   `-c` or `-o`.
+- `--emit-summaries` requires `--lib`. It checks the library, writes its summary file to stdout
+  (section 2.2, `spec/ownership-design.md` 8.2) and stops, so it writes no file, uses no cache
+  and runs no `--cc`. Its bytes are the bytes of the `summaries/ownership` of the artifact. It is
+  a usage error together with `-S`, `-c`, `-o` or `--emit-interface`, because each of them names
+  another output.
 - `--cache-dir <dir>` selects the cache directory of section 2.3. The default is
   `<root>/.fort-cache` under `--lib` and `<entry dir>/.fort-cache` otherwise. `--cache-stats`
   writes one line to stdout after the build: `cache hit <unit> <name> <key>` or
@@ -378,14 +384,16 @@ ends: `the run calls '<name>', which the interpreter does not run` and `the run 
 <file>:<line>:<col>: <what>`. The last two are the compiler's own failures: `internal error: <what>`
 and `out of memory`.
 
-A library build (D9.11) adds two groups of texts, each with status 2. Ten report a command line
-the compiler cannot use and then print the usage line: `-o - requires -S or -c` (an artifact
-build), `invalid library name '<name>'`,
+A library build (D9.11) adds two groups of texts, each with status 2. Twelve report a command
+line the compiler cannot use and then print the usage line: `-o - requires -S or -c` (an
+artifact build), `invalid library name '<name>'`,
 `invalid --use argument '<arg>'`, `duplicate library '<name>'`,
 `--lib does not combine with -I, -l, --check, --json, --index, --tokens, --ast or a --fir option`,
 `--emit-interface requires --lib`, `--emit-interface does not combine with -S, -c or -o`,
-`--ar requires --lib`, `<option> requires --lib or --use` (for `--cache-dir` and
-`--cache-stats`), and `a library build needs --use std=<path>`. Fifteen report an artifact,
+`--emit-summaries requires --lib`,
+`--emit-summaries does not combine with -S, -c, -o or --emit-interface`, `--ar requires --lib`,
+`<option> requires --lib or --use` (for `--cache-dir` and `--cache-stats`), and
+`a library build needs --use std=<path>`. Fifteen report an artifact,
 a library root, a file of the build, the archiver or the compiler executable:
 `cannot read library root '<root>': <reason>`,
 `library root '<root>' holds no module`, `cannot read library '<path>': <reason>`,
@@ -428,6 +436,7 @@ fort --lib std build/std                      # build std.flib from a standard r
 fort --lib geom lib/geom --use std=std.flib   # build geom.flib against std.flib
 fort --use std=std.flib --use geom=geom.flib -o app main.ft
 fort --lib geom lib/geom --use std=std.flib --emit-interface   # the interface on stdout
+fort --lib geom lib/geom --use std=std.flib --emit-summaries   # the summaries on stdout
 ```
 
 The only environment variables read are `FORT_STD_DIR` (D14.1) and `TMPDIR`, which locates the
@@ -523,11 +532,11 @@ these steps:
    standard modules, and step 1 requires its target to equal the selected target. `--lib std`
    uses no library: its root supplies the standard modules, and the caller must give a root that
    matches the selected target, as for `--std-dir` (section 1).
-1. Read the manifest and the `interface.ft` of each `--use` artifact once and validate them
-   (section 2.2). Later steps use the bytes that this step checked. Apply the rules of
-   D9.11 to the used libraries: the name, the compiler identity, the target, the build mode, the
-   bounds mode and the configuration map; each library that a manifest uses; no cycle. Exit 2 on
-   the first failure, with the message of section 1.
+1. Read the manifest, the `interface.ft` and the `summaries/ownership` of each `--use` artifact
+   once and validate them (section 2.2). Later steps use the bytes that this step checked.
+   Apply the rules of D9.11 to the used libraries: the name, the compiler identity, the target,
+   the build mode, the bounds mode and the configuration map; each library that a manifest uses;
+   no cycle. Exit 2 on the first failure, with the message of section 1.
 2. Walk `<root>` and list the modules of the library in byte order of the module path. Read each
    module file once. The source hash of step 3 and the parse of step 4 use these bytes, and no
    step reads the file again. Exit 2 when the root cannot be read or holds no module.
@@ -536,9 +545,11 @@ these steps:
    artifact (section 2.2), write the `--cache-stats` line and exit 0.
 4. Parse each root and each newly reached module, as in step 2 of section 2, with the roots and
    the resolution of `module-system.md` 10.2. Check, lower and verify every module, and run the
-   emptiness pass, as in step 3 of section 2 (exit 1). Check the extern declarations of the used
-   libraries (`module-system.md` 10.4).
-5. Write the interface file. Under `--emit-interface`, write it to stdout and stop.
+   emptiness pass, as in step 3 of section 2 (exit 1). Compute the ownership summary of each
+   function that the pass proves (`spec/ownership-design.md` 8.1). Check the extern declarations
+   of the used libraries (`module-system.md` 10.4).
+5. Write the interface file and the summary file. Under `--emit-interface`, write the interface
+   file to stdout and stop. Under `--emit-summaries`, write the summary file to stdout and stop.
 6. Emit the IR module of the unit to `<tmp>/<name>.ll`, or to the `-S` output and stop.
 7. Run the compile line, to the `-c` output and stop under `-c`:
 
@@ -558,8 +569,8 @@ these steps:
    makes the archiver of macOS write zero for each time stamp. GNU ar writes zero only when
    binutils was built with deterministic archives as its default, as the ar of Ubuntu 24.04 was;
    GNU ar ignores the variable.
-   Only the IR text and `interface.ft` are byte-deterministic (D9.11, D19.5). The manifest
-   records the SHA-256 of the `lib.a` that it stands beside.
+   Only the IR text, `interface.ft` and `summaries/ownership` are byte-deterministic (D9.11,
+   D19.5). The manifest records the SHA-256 of the `lib.a` that it stands beside.
 
 9. Write the cache entry and then the artifact (sections 2.2 and 2.3). Write the `--cache-stats`
    line. Remove the temporary directory.
@@ -576,8 +587,9 @@ A build with `--use` and without `--lib` has these steps:
    source hash and the key of the entry unit and look up its cache entry. On a hit, go to step 7
    with the object of the entry.
 4. Check, lower and verify every module of the closure, interface modules included, and run the
-   emptiness pass, as in step 3 of section 2 (exit 1). Check the extern declarations of the used
-   libraries. `--check` stops here.
+   emptiness pass, as in step 3 of section 2 (exit 1). Compute the ownership summaries of the
+   entry unit as in step 4 of a `--lib` build; they stay in the process. Check the extern
+   declarations of the used libraries. `--check` stops here.
 5. Emit the IR module of the entry unit to `<tmp>/<entry>.ll`, or to the `-S` output and stop.
 6. Run the compile line of a `--lib` build over it, with the output `<tmp>/<entry>.o`. Read the
    object once and write those bytes to the cache entry, except under `--fir-stats`, which uses
@@ -615,7 +627,7 @@ The artifact `<name>.flib/` is a directory with four entries:
 | `interface.ft` | the interface file of `module-system.md` 10.3                              |
 | `lib.a`        | the archive of the archive line of section 2.1, with the member `<name>.o` |
 | `manifest`     | the fields below                                                           |
-| `summaries/`   | an empty directory; the manifest gives its version, 1                      |
+| `summaries/`   | the summary file `ownership` (below); the manifest gives the version, 2    |
 
 The manifest is text. Each line is `<field>` or `<field> <value>`, and it ends with one newline
 byte. In a value, the bytes 0x21 to 0x7E stay as they are, except `\`. Every other byte, a space
@@ -638,9 +650,9 @@ between them. A hash is 64 lowercase hex digits. The lines come in this order:
 | `source <hash>`     | both    | the source hash                                         |
 | `use <name> <hash>` | both    | one line for each `--use`: its interface hash           |
 | `key <hash>`        | both    | the key                                                 |
-| `interface <hash>`  | `--lib` | the SHA-256 of `interface.ft`                           |
+| `interface <hash>`  | `--lib` | the interface hash of the two files (below)             |
 | `archive <hash>`    | `--lib` | the SHA-256 of `lib.a`                                  |
-| `summaries 1`       | `--lib` | the version of `summaries/`                             |
+| `summaries 2`       | `--lib` | the version of `summaries/`                             |
 | `object <hash>`     | entry   | the SHA-256 of `object.o` (section 2.3)                 |
 
 - The `cfg` lines hold the whole configuration map, the three target keys included, in byte
@@ -655,16 +667,47 @@ between them. A hash is 64 lowercase hex digits. The lines come in this order:
 - The **key** is the SHA-256 of the bytes of the manifest lines from `fort-manifest 1` to the last
   `use` line, each with its newline. The key line follows them. The lines after it give the
   outputs, which the key does not cover.
+- The **interface hash** is the SHA-256 of one byte string. For `interface.ft` and then
+  `summaries/ownership`, the string holds the file name as this sentence writes it, a newline,
+  the byte count of the file in decimal, a newline and the bytes of the file. So the bytes of one
+  file cannot move to the other file and keep the hash. The `use` line of a dependent holds the
+  interface hash, and the key covers the `use` lines, so a change of a summary changes the key of
+  each dependent (`spec/ownership-design.md` 8.2).
 - The `--cc`, `-Xcc` and `--ar` values change the object, so the key covers them. It covers the
   text of the values and not the programs that they name. It covers no environment of the tools
   either, such as `PATH`, `CCC_OVERRIDE_OPTIONS` or `SDKROOT`: a change there that changes the
   object keeps the key, so the build then needs a new cache directory.
 
+**The summary file.** `summaries/ownership` holds the ownership summaries of the library
+(`spec/ownership-design.md` 8). It is text. `name` is the name of the library, `symbol` a dotted
+symbol of D9.7, and `nl` one newline byte:
+
+```ebnf
+file     = "fort-summaries 1" nl "library " name nl { function } ;
+function = "fn " symbol nl item nl { item nl } ;
+item     = "empty " path | "kept " path | "result " token | "keep " token ;
+token    = "_" digits | path ;
+path     = "(*_" digits ")" { "." digits | "[" digits "]" } ;
+digits   = "0" | nonzero { digit } ;
+```
+
+`digit` is a byte `0` to `9` and `nonzero` a byte `1` to `9`, so a number has no leading zero.
+The `fn` lines come in byte order of the symbol, and each function has at least one item. The
+items of a function come in the order of the `item` rule, and the items of one kind in byte order
+of the bytes after the word; no item stands twice. No other byte stands in the file. The bytes of
+the file are a function of the inputs of `interface.ft` and of the summary files of the used
+libraries, in every build mode. While no refinement of `spec/ownership-design.md` 7 gives a kind
+of line, the file holds its two header lines and the lines of the functions of a component past
+the limit of `spec/ownership-design.md` 8.1, which have the safe value: `result _k` and `keep _k`
+for each parameter `k`. The reader holds the form of each line and not its meaning (8.2 there): a
+refinement that reads a line checks it against the declaration of its function.
+
 **Write protocol.** The compiler writes an artifact or a cache entry `D` in this order. It makes
 `D` when it does not exist. It removes `D/manifest`. For a library, it makes `D/summaries` when it
 does not exist and removes each entry in it, so a file of an older build does not stay. It writes
 each other file `F` to `D/F.tmp.<pid>`, where `<pid>` is the process id in decimal, and renames
-it to `D/F`. Then it writes `D/manifest` in the same way. Each step can fail the write: a
+it to `D/F`: for a library `interface.ft`, `summaries/ownership` and `lib.a`, in this order. Then
+it writes `D/manifest` in the same way. Each step can fail the write: a
 `D/summaries` that is a symbolic link, to a directory or to a file, an entry of it that is a
 directory with an entry, and an entry at `D/F.tmp.<pid>` that unlink(2) does not remove, such as
 a directory. A file or a link at that name, which an earlier run with the same process id can
@@ -676,20 +719,24 @@ with status 2. A reader that opens `D/manifest` between two steps finds none. A 
 the manifest before a writer started can then read a file of the newer build. The SHA-256 of that
 file differs from its manifest line, so rule 4 below makes the directory corrupt for that reader.
 
-**Reading.** A reader reads each file of a directory once: the manifest, `interface.ft`, and
-`lib.a` or `object.o`. It checks the bytes that it read, and then it uses only those bytes. It
-parses the `interface.ft` bytes that it checked, it writes the checked bytes when it copies an
-entry to an artifact, and it links a copy of the checked `lib.a` or `object.o` that it writes to
-the temporary directory. So a file that a writer replaces after the check never reaches the
-build.
+**Reading.** A reader reads each file of a directory once: the manifest, `interface.ft`,
+`summaries/ownership`, and `lib.a` or `object.o`. It checks the bytes that it read, and then it
+uses only those bytes. It parses the `interface.ft` and `summaries/ownership` bytes that it
+checked, it writes the checked bytes when it copies an entry to an artifact, and it links a copy
+of the checked `lib.a` or `object.o` that it writes to the temporary directory. So a file that a
+writer replaces after the check never reaches the build.
 
 **Validation.** A directory is valid when all of these are true; else it is corrupt:
 
 1. `manifest` exists, and each of its lines has the form and the order of the table above.
-2. The first line is `fort-manifest 1`, and a library has `summaries 1`.
+2. The first line is `fort-manifest 1`, and a library has `summaries 2`.
 3. The key line holds the SHA-256 of the lines before it.
-4. The SHA-256 of each file that an output line names equals that line.
-5. A library has the directory `summaries/`.
+4. The SHA-256 of each file that an output line names equals that line. The `interface` line
+   names `interface.ft` and `summaries/ownership`, and it holds their interface hash.
+5. A library has the directory `summaries/`, and in it the file `ownership`. The file is a
+   summary file of the form above whose `library` line names the library of the manifest, and
+   each of its `fn` lines names a function that `interface.ft` declares with a bodiless `fn`
+   declaration (`module-system.md` 10.3). Another entry of `summaries/` breaks no rule.
 
 A corrupt `--use` artifact is the error `library '<path>' is corrupt`. A corrupt cache entry is a
 miss (section 2.3).
@@ -714,15 +761,17 @@ exist. The 1 is the version of the cache layout. The cache entry of the key K is
 - The compiler never removes an entry.
 - Only two builds use the cache: a `--lib` build that writes an artifact, and a build with
   `--use` that writes an object or an executable. `--lib` with `-S` or `-c`, `-S`, `--check`,
-  `--fir`, `--fir-stats` and `--emit-interface` do not read or write it. A hit runs no emitter,
-  so a build with `--fir-stats` could not write its `lowered N of M` line (D9.11).
+  `--fir`, `--fir-stats`, `--emit-interface` and `--emit-summaries` do not read or write it. A
+  hit runs no emitter, so a build with `--fir-stats` could not write its `lowered N of M` line
+  (D9.11).
 
 **The rebuild rule.** The key of a unit covers the interface hash of each used library and not
 its source hash or its archive (section 2.2). A change to the body of a function of a library
-changes its source hash, so that library misses and is rebuilt. Its interface hash stays the
-same, so each library and entry unit that uses it keeps its key and hits. The link line of the
-program then names the new archive. A change of a declaration changes the interface hash, so
-each unit that uses the library misses and is rebuilt. A build tool runs `fort` for each library
+changes its source hash, so that library misses and is rebuilt. When the change keeps each
+declaration and each summary, its interface hash stays the same, so each library and entry unit
+that uses it keeps its key and hits. The link line of the program then names the new archive. A
+change of a declaration or of a summary changes the interface hash, so each unit that uses the
+library misses and is rebuilt. A build tool runs `fort` for each library
 in dependency order and then for the program, and the cache decides what each run compiles.
 
 ## 3. Build modes

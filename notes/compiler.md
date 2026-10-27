@@ -300,7 +300,10 @@ came here.
   once, and those bytes are hashed and copied. The
   writer removes the manifest first and writes it last, each file through a temporary name and
   rename(2), so a failure at any step leaves no manifest (`test/fort/library/artifact_test.ft`).
-  It empties `summaries/` before it writes a file, so a file of an older build does not stay. It
+  It empties `summaries/` before it writes a file, so a file of an older build does not stay, and
+  it writes `summaries/ownership`, the text of `owner.summary.write`, after `interface.ft` and
+  before `lib.a`. The `interface` line of the manifest is `artifact.append_interface_hash` of the
+  two files, each with its name and its byte count (toolchain.md 2.2). It
   opens `summaries/` with O_NOFOLLOW and removes each entry with unlinkat(2) on that descriptor,
   so a link at `summaries` fails the write (ELOOP) and no entry outside the artifact goes. A
   file or a link at a temporary name, which a run with the same pid can leave, is removed with
@@ -332,21 +335,28 @@ came here.
   `--fir-stats` does not, because a hit runs no emitter. The archiver runs with `ZERO_AR_DATE=1` in
   its environment, which `driver.run_tool` sets in the child after fork(2), so the archive of macOS
   holds no time stamp (`test/fort/driver_cache_test.ft`, `test/library/cache_test.py`).
-- **`--use` reads each artifact once and keeps the bytes that it checked** (D9.11, toolchain.md
-  2.1 and 2.2). `driver.read_libraries` runs before the entry file or the root is opened.
-  `artifact.read` reads `manifest`, `interface.ft` and `lib.a` once each. `artifact.parse_manifest`
-  accepts a text only when `artifact.write_manifest` writes it again byte for byte from the parsed
-  fields, so the order of the lines, the value form, the byte order of the lists and the key of
-  rules 1 to 3 are one comparison. A hash gets a check of its own, because the writer writes any
-  value of a hash field as it is. An
-  absent file, and an entry that is no regular file after the link that it can be, are corrupt:
-  the open takes O_NONBLOCK and fstat(2) reads the type, so a FIFO does not stop the build. Each
-  other failure of a read is `cannot read library`. The checked
-  interface text is what `modules.use_library` lexes, and the link line names a copy of the checked
-  `lib.a` bytes in the temporary directory, `<tmp>/<name>.a`. `library.graph` holds the uses
-  between the libraries, the cycle rule and the link order. No build writes a cycle: a build of
-  `a` against `b` must name `a` with `--use` when `b` uses `a`, and a `--use` of the `--lib` name
-  is refused. So only a forged manifest reaches that message.
+- **`--use` reads each artifact once and keeps the bytes that it checked** (D9.11, toolchain.md 2.1
+  and 2.2). `driver.read_libraries` runs before the entry file or the root is opened.
+  `artifact.read` reads `manifest`, `interface.ft`, `summaries/ownership` and `lib.a` once each. It
+  holds the two text files against the interface hash, reads the summary file into
+  `contents.ownership` with `summary.parse`, and holds each `fn` line against the set of the lines
+  `fn <name>(` of the sections of the interface text, which one scan reads
+  (`artifact.put_declared`); each failure is corrupt. A scan for each line took 1.53 s for a
+  `--check` with `--use` of a `fort.flib` with 2,297 lines, and the set takes 0.19 s against 0.18 s
+  with no line (VM slot 3). The summary file names its library, so a forged `library` line of a
+  manifest alone now reads as corrupt and no longer as `is named`: the validation of toolchain.md
+  2.1 step 1 comes before the rule of the name (`test/fort/driver_use_test.ft`).
+  `artifact.parse_manifest` accepts a text only when `artifact.write_manifest` writes it again byte
+  for byte from the parsed fields, so the order of the lines, the value form, the byte order of the
+  lists and the key of rules 1 to 3 are one comparison. A hash gets a check of its own, because the
+  writer writes any value of a hash field as it is. An absent file, and an entry that is no regular
+  file after the link that it can be, are corrupt: the open takes O_NONBLOCK and fstat(2) reads the
+  type, so a FIFO does not stop the build. Each other failure of a read is `cannot read library`.
+  The checked interface text is what `modules.use_library` lexes, and the link line names a copy of
+  the checked `lib.a` bytes in the temporary directory, `<tmp>/<name>.a`. `library.graph` holds the
+  uses between the libraries, the cycle rule and the link order. No build writes a cycle: a build of
+  `a` against `b` must name `a` with `--use` when `b` uses `a`, and a `--use` of the `--lib` name is
+  refused. So only a forged manifest reaches that message.
 - **The modules of a used library that the closure does not hold enter no order of a later pass**
   (module-system.md 10.4). After a clean check of the closure, `modules.load_outside` loads each
   other section, the libraries in the reverse of the link order. Such a module goes to
@@ -876,6 +886,32 @@ came here.
   pointer (D17.11). A chain frees its objects from the newest. With the chains of the AST arena, the
   type table and the module vectors together, a heap probe of repeated runs reaches its steady size
   later: take its early sample after that (`driver_lifetime_emitter_test.ft`, `notes/testing.md`).
+- **The ownership summaries come from the call graph of the proved functions**
+  (`spec/ownership-design.md` 8, `src/fort/owner/summary.ft`). `summary.add` takes each function
+  that the emptiness pass proves with no error, with `proof.inner_work` (the largest of the three
+  counts of the proof) and the callee symbol of each `call fn`; a call through a function value,
+  a call of an extern and a call of a function that the graph does not hold add no edge.
+  `driver.overwrite_entry` adds them under `--check`, `--use` and `--lib` to a graph that its
+  caller owns and solves it after a run with no error (`test/fort/driver_summary_test.ft`), and
+  `gen_fir.check_proved` adds them in a whole program, whose `gen_fir.emit_program` solves the
+  graph (`driver.emit_module` passes one only when the build names no `--lib` and no `--use`, so
+  no build adds a function twice). `summary.order` gives
+  the strongly connected components callees first (Tarjan, with a stack of its own: a chain of
+  2000 calls in `test/fort/owner/summary_test.ft`); the order is a function of the order of `add`
+  and of each body. `summary.solve` runs the rounds through `start`, `give` and `end_round`, which
+  the tests drive by hand with lines of each kind; the work of a component passes
+  `summary.WORK_LIMIT` (2^26) only when it is greater, and a sum stays at the largest u64. Past it,
+  `summary.set_safe` gives each member the safe value of each kind: no must line, and
+  `result _k` and `keep _k` for each parameter `k` (`node.params`, the `lk_param` locals). V1 has
+  no kind of line: `summary.infer` finds none and charges the work that `add` recorded, so each
+  component takes one round and each table is empty. **A refinement that adds a kind changes
+  `infer`**: it must run the prover of the member in each round with the lines of its callees, so
+  the prover must run in the order of the components and keep the FIR of a component while its
+  rounds run; today each function is proved once, in module order, and freed. The text form is
+  `summary.write` and `summary.parse`, which accepts only a text that `write` writes
+  (`test/fort/owner/summary_text_test.ft`); it holds the form of a line and not its meaning, so a
+  refinement checks each `k`, field and index against the declaration. `src/lsp` runs no check
+  yet, so it computes nothing.
 - **The FIR interpreter runs the FIR of a closure before the emptiness pass**
   (`spec/ownership-design.md` 3, `src/fort/fir/interpreter.ft`). It is the reference semantics of
   the ownership checks, and `--fir-run` and the pass `run` of `--fir-test` start it

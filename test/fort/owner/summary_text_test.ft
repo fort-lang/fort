@@ -1,0 +1,778 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| write ok
+//| read ok
+//| refuse ok
+//| table ok
+//| ok
+/// Checks the text form of the ownership summaries in src/fort/owner/summary.ft
+/// (spec/ownership-design.md 8.2): the writer writes the EBNF byte for byte, the reader reads
+/// each text that the writer writes back to its table, and it refuses each other text, one
+/// malformed line at a time.
+import fort.owner.summary;
+import std.str;
+import std.strbuf;
+
+// Whether `got` is `want`, printing both when they differ.
+fn same(string got, string want) bool {
+    if (got != want) {
+        println("got:  ", got);
+        println("want: ", want);
+    }
+    return got == want;
+}
+
+fn line_of(summary.kind k, string text) summary.line {
+    return summary.line{k, text};
+}
+
+// A table of two functions with a line of each kind, as add_function and add_line take them.
+fn fill(summary.table mut* t) void {
+    assert(summary.add_function(t, "geom.a.f"));
+    assert(summary.add_line(t, line_of(summary.kind.k_empty, "(*_1).0")));
+    assert(summary.add_line(t, line_of(summary.kind.k_empty, "(*_1).1[2]")));
+    assert(summary.add_line(t, line_of(summary.kind.k_kept, "(*_2)")));
+    assert(summary.add_line(t, line_of(summary.kind.k_result, "(*_1).3")));
+    assert(summary.add_line(t, line_of(summary.kind.k_result, "_1")));
+    assert(summary.add_line(t, line_of(summary.kind.k_keep, "_2")));
+    assert(summary.add_function(t, "geom.b.g"));
+    assert(summary.add_line(t, line_of(summary.kind.k_keep, "(*_1)[0].4")));
+}
+
+// The lines of the text of the table of fill. `(` is 0x28 and `_` is 0x5F, so `(*_1).3` comes
+// before `_1`.
+string[11] VALID_LINES = {
+    "fort-summaries 1",
+    "library geom",
+    "fn geom.a.f",
+    "empty (*_1).0",
+    "empty (*_1).1[2]",
+    "kept (*_2)",
+    "result (*_1).3",
+    "result _1",
+    "keep _2",
+    "fn geom.b.g",
+    "keep (*_1)[0].4",
+};
+
+// The text of the table of fill: each line of VALID_LINES and a newline, in `out`.
+fn valid(strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    u64 mut i = 0;
+    while (i < VALID_LINES.len) {
+        strbuf.append(out, VALID_LINES[i]);
+        strbuf.push(out, '\n');
+        i += 1;
+    }
+    return strbuf.view(out);
+}
+
+// The text of the lines `lines` of a summary file, each with a newline, in `out`.
+fn joined(string@ lines, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    u64 mut i = 0;
+    while (i < lines.len) {
+        strbuf.append(out, lines[i]);
+        strbuf.push(out, '\n');
+        i += 1;
+    }
+    return strbuf.view(out);
+}
+
+// The text that write writes for `t` and the library `library`, in `out`.
+fn text_of(summary.table* t, string library, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    summary.write(t, library, out);
+    return strbuf.view(out);
+}
+
+// Whether the reader reads `text` of the library `geom`.
+fn reads(string text) bool {
+    summary.table mut t = summary.table{};
+    defer summary.free_table(&t);
+    return summary.parse(text, "geom", &t);
+}
+
+// Whether the reader refuses `text` of the library `geom`, printing it when it does not.
+fn refused(string text) bool {
+    bool passed = reads(text);
+    if (passed) {
+        println("read: ", text);
+    }
+    return !passed;
+}
+
+// `text` with the first `old` replaced by `new_text` in `out`. The text must hold `old`.
+fn replaced(string text, string old, string new_text, strbuf.str_buf mut* out) string {
+    i64 at = str.find(text, old);
+    assert(at >= 0);
+    u64 from = cast(at, u64);
+    strbuf.clear(out);
+    strbuf.append(out, text[..from]);
+    strbuf.append(out, new_text);
+    strbuf.append(out, text[from + old.len..]);
+    return strbuf.view(out);
+}
+
+// Whether the valid text with the first `old` replaced by `new_text` is refused.
+fn refused_with(string old, string new_text) bool {
+    strbuf.str_buf mut v = strbuf.create();
+    defer strbuf.free(&v);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    return refused(replaced(valid(&v), old, new_text, &b));
+}
+
+// Whether the valid text with the first `old` replaced by `new_text` reads.
+fn reads_with(string old, string new_text) bool {
+    strbuf.str_buf mut v = strbuf.create();
+    defer strbuf.free(&v);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string text = replaced(valid(&v), old, new_text, &b);
+    bool passed = reads(text);
+    if (!passed) {
+        println("refused: ", text);
+    }
+    return passed;
+}
+
+// The text of a summary file of `geom` with one function `geom.a.f` and the one item `item`.
+fn one_item(string item, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    strbuf.append(out, "fort-summaries 1\nlibrary geom\nfn geom.a.f\n");
+    strbuf.append(out, item);
+    strbuf.push(out, '\n');
+    return strbuf.view(out);
+}
+
+fn item_reads(string item) bool {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    bool passed = reads(one_item(item, &b));
+    if (!passed) {
+        println("refused item: ", item);
+    }
+    return passed;
+}
+
+fn item_refused(string item) bool {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    return refused(one_item(item, &b));
+}
+
+// ---- the writer ----------------------------------------------------------------------------
+
+fn an_empty_table_writes_the_two_header_lines() void {
+    summary.table mut t = summary.table{};
+    defer summary.free_table(&t);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(same(text_of(&t, "std", &b), "fort-summaries 1\nlibrary std\n"));
+    assert(same(text_of(&t, "fort", &b), "fort-summaries 1\nlibrary fort\n"));
+    assert(summary.HEADER == "fort-summaries 1");
+}
+
+fn each_kind_has_its_word_and_each_line_its_newline() void {
+    summary.table mut t = summary.table{};
+    defer summary.free_table(&t);
+    fill(&t);
+    strbuf.str_buf mut v = strbuf.create();
+    defer strbuf.free(&v);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(same(text_of(&t, "geom", &b), valid(&v)));
+}
+
+fn write_appends_to_its_output() void {
+    summary.table mut t = summary.table{};
+    defer summary.free_table(&t);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "head\n");
+    summary.write(&t, "std", &b);
+    assert(same(strbuf.view(&b), "head\nfort-summaries 1\nlibrary std\n"));
+}
+
+// ---- the reader ----------------------------------------------------------------------------
+
+fn the_written_text_reads_back_to_its_table() void {
+    strbuf.str_buf mut v = strbuf.create();
+    defer strbuf.free(&v);
+    string text = valid(&v);
+    summary.table mut t = summary.table{};
+    defer summary.free_table(&t);
+    assert(summary.parse(text, "geom", &t));
+    assert(summary.entry_count(&t) == 2);
+    assert(summary.symbol(&t, 0) == "geom.a.f");
+    assert(summary.symbol(&t, 1) == "geom.b.g");
+    summary.line@ first = summary.lines(&t, 0);
+    assert(first.len == 6);
+    assert(first[0].kind == summary.kind.k_empty && first[0].text == "(*_1).0");
+    assert(first[1].kind == summary.kind.k_empty && first[1].text == "(*_1).1[2]");
+    assert(first[2].kind == summary.kind.k_kept && first[2].text == "(*_2)");
+    assert(first[3].kind == summary.kind.k_result && first[3].text == "(*_1).3");
+    assert(first[4].kind == summary.kind.k_result && first[4].text == "_1");
+    assert(first[5].kind == summary.kind.k_keep && first[5].text == "_2");
+    summary.line@ second = summary.lines(&t, 1);
+    assert(second.len == 1);
+    assert(second[0].kind == summary.kind.k_keep && second[0].text == "(*_1)[0].4");
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(same(text_of(&t, "geom", &b), text));
+}
+
+fn the_lines_that_the_reader_keeps_do_not_borrow_the_text() void {
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 size = valid(&text).len;
+    summary.table mut t = summary.table{};
+    defer summary.free_table(&t);
+    assert(summary.parse(strbuf.view(&text), "geom", &t));
+    strbuf.clear(&text);
+    u64 mut i = 0;
+    while (i < size) {
+        strbuf.push(&text, 'X');
+        i += 1;
+    }
+    assert(summary.symbol(&t, 1) == "geom.b.g");
+    assert(summary.lines(&t, 1)[0].text == "(*_1)[0].4");
+}
+
+fn a_text_with_no_function_reads() void {
+    summary.table mut t = summary.table{};
+    defer summary.free_table(&t);
+    assert(summary.parse("fort-summaries 1\nlibrary geom\n", "geom", &t));
+    assert(summary.entry_count(&t) == 0);
+}
+
+fn the_extremes_of_the_grammar_read() void {
+    // a number 0, numbers past the u64 range, which the text form does not bound
+    assert(item_reads("empty (*_0)"));
+    assert(item_reads("result _0"));
+    assert(item_reads("keep _10"));
+    assert(item_reads("empty (*_100)"));
+    assert(item_reads("empty (*_18446744073709551616).18446744073709551616"));
+    // a path of fields and indexes, in each order
+    assert(item_reads("kept (*_1).0[1].2[3]"));
+    assert(item_reads("kept (*_1)[0][0].0.0"));
+    assert(item_reads("result (*_2)[9]"));
+    assert(item_reads("keep (*_3).0"));
+    // a symbol of digits and underscores, and one of many segments
+    assert(reads_with("fn geom.a.f", "fn geom._a1.f_2"));
+    assert(reads_with("fn geom.a.f", "fn geom.a.b.c.d.e.f"));
+    assert(reads_with("fn geom.a.f", "fn _._"));
+}
+
+fn symbols_read_in_byte_order() void {
+    // `.` is 0x2E and `_` is 0x5F; `Z` is 0x5A and `a` is 0x61; a prefix comes first
+    assert(reads("fort-summaries 1\nlibrary geom\nfn geom.a.b\nkeep _1\nfn geom.a_b\nkeep _1\n"));
+    assert(refused("fort-summaries 1\nlibrary geom\nfn geom.a_b\nkeep _1\nfn geom.a.b\nkeep _1\n"));
+    assert(reads("fort-summaries 1\nlibrary geom\nfn geom.Z\nkeep _1\nfn geom.a\nkeep _1\n"));
+    assert(refused("fort-summaries 1\nlibrary geom\nfn geom.a\nkeep _1\nfn geom.Z\nkeep _1\n"));
+    assert(reads("fort-summaries 1\nlibrary geom\nfn geom.a\nkeep _1\nfn geom.a.b\nkeep _1\n"));
+    assert(refused("fort-summaries 1\nlibrary geom\nfn geom.a.b\nkeep _1\nfn geom.a\nkeep _1\n"));
+}
+
+fn items_read_in_the_order_of_their_kinds_and_bytes() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    // the four kinds in the order of the item rule
+    string[7] kinds = {
+        "fort-summaries 1", "library geom", "fn geom.a.f", "empty (*_1)", "kept (*_1)",
+        "result _1", "keep _1",
+    };
+    assert(reads(joined(kinds[..], &b)));
+    // `(*_1).10` comes before `(*_1).2`
+    assert(reads("fort-summaries 1\nlibrary geom\nfn geom.a.f\nempty (*_1).10\nempty (*_1).2\n"));
+    assert(refused("fort-summaries 1\nlibrary geom\nfn geom.a.f\nempty (*_1).2\nempty (*_1).10\n"));
+    // `(*_1)` comes before `(*_1).0`, which it starts
+    assert(reads("fort-summaries 1\nlibrary geom\nfn geom.a.f\nkept (*_1)\nkept (*_1).0\n"));
+    assert(refused("fort-summaries 1\nlibrary geom\nfn geom.a.f\nkept (*_1).0\nkept (*_1)\n"));
+}
+
+// ---- the refusals --------------------------------------------------------------------------
+
+fn a_wrong_header_is_refused() void {
+    assert(refused(""));
+    assert(refused("\n"));
+    assert(refused("fort-summaries 1\n"));
+    assert(refused("fort-summaries 1"));
+    assert(refused("library geom\n"));
+    assert(refused_with("fort-summaries 1\n", "fort-summaries 2\n"));
+    assert(refused_with("fort-summaries 1\n", "fort-summaries 0\n"));
+    assert(refused_with("fort-summaries 1\n", "fort-summaries  1\n"));
+    assert(refused_with("fort-summaries 1\n", "fort-summaries 1 \n"));
+    assert(refused_with("fort-summaries 1\n", "fort-summaries 1\r\n"));
+    assert(refused_with("fort-summaries 1\n", "fort-manifest 1\n"));
+    assert(refused_with("fort-summaries 1\n", "\nfort-summaries 1\n"));
+    assert(refused_with("fort-summaries 1\n", ""));
+}
+
+fn a_wrong_library_line_is_refused() void {
+    assert(refused_with("library geom\n", "library other\n"));
+    assert(refused_with("library geom\n", "library geomx\n"));
+    assert(refused_with("library geom\n", "library geo\n"));
+    assert(refused_with("library geom\n", "library  geom\n"));
+    assert(refused_with("library geom\n", "library geom \n"));
+    assert(refused_with("library geom\n", "library geom\r\n"));
+    assert(refused_with("library geom\n", "library\n"));
+    assert(refused_with("library geom\n", "Library geom\n"));
+    assert(refused_with("library geom\n", ""));
+    // the library that the caller names decides
+    strbuf.str_buf mut v = strbuf.create();
+    defer strbuf.free(&v);
+    summary.table mut t = summary.table{};
+    defer summary.free_table(&t);
+    assert(!summary.parse(valid(&v), "std", &t));
+}
+
+fn a_line_with_no_newline_is_refused() void {
+    strbuf.str_buf mut v = strbuf.create();
+    defer strbuf.free(&v);
+    string text = valid(&v);
+    assert(refused(text[..text.len - 1]));
+    assert(refused("fort-summaries 1\nlibrary geom"));
+    assert(refused_with("keep (*_1)[0].4\n", "keep (*_1)[0].4"));
+    // and an empty line, at the end or between two lines
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, text);
+    strbuf.push(&b, '\n');
+    assert(refused(strbuf.view(&b)));
+    assert(refused_with("\nfn geom.b.g", "\n\nfn geom.b.g"));
+    assert(refused_with("library geom\n", "library geom\n\n"));
+    // a CR is a byte of its line
+    assert(refused_with("kept (*_2)\n", "kept (*_2)\r\n"));
+    assert(refused_with("fn geom.b.g\n", "fn geom.b.g\r\n"));
+}
+
+fn an_unknown_word_is_refused() void {
+    assert(refused_with("empty (*_1).0", "empties (*_1).0"));
+    assert(refused_with("empty (*_1).0", "Empty (*_1).0"));
+    assert(refused_with("empty (*_1).0", "emptyx (*_1).0"));
+    assert(refused_with("kept (*_2)", "keeps (*_2)"));
+    assert(refused_with("result _1", "results _1"));
+    assert(refused_with("keep _2", "kep _2"));
+    assert(refused_with("keep _2", "drop _2"));
+    assert(refused_with("fn geom.b.g", "func geom.b.g"));
+    assert(refused_with("fn geom.b.g", "Fn geom.b.g"));
+    // no space, two spaces, a tab and a space at the end
+    assert(refused_with("empty (*_1).0", "empty(*_1).0"));
+    assert(refused_with("empty (*_1).0", "empty  (*_1).0"));
+    assert(refused_with("empty (*_1).0", "empty\t(*_1).0"));
+    assert(refused_with("empty (*_1).0", "empty (*_1).0 "));
+    assert(refused_with("empty (*_1).0", " empty (*_1).0"));
+    assert(refused_with("empty (*_1).0", "empty"));
+    assert(refused_with("empty (*_1).0", "empty "));
+}
+
+fn a_malformed_path_is_refused() void {
+    assert(item_reads("empty (*_1).0"));
+    assert(item_refused("empty (*_)"));
+    assert(item_refused("empty (*_1"));
+    assert(item_refused("empty (*_1)."));
+    assert(item_refused("empty (*_1)[]"));
+    assert(item_refused("empty (*_1)[x]"));
+    assert(item_refused("empty (*_1)[2"));
+    assert(item_refused("empty (*_1)2]"));
+    assert(item_refused("empty (*_1)]"));
+    assert(item_refused("empty (*_1).a"));
+    assert(item_refused("empty (*_1) .0"));
+    assert(item_refused("empty (*_1). 0"));
+    assert(item_refused("empty (*_1).-1"));
+    assert(item_refused("empty (*_1).+1"));
+    assert(item_refused("empty (*_1)0"));
+    assert(item_refused("empty (*1).0"));
+    assert(item_refused("empty (* _1).0"));
+    assert(item_refused("empty (_1).0"));
+    assert(item_refused("empty *_1"));
+    assert(item_refused("empty ((*_1))"));
+    assert(item_refused("empty (*_a)"));
+    assert(item_refused("empty (*_1x)"));
+    assert(item_refused("empty (*_1)x"));
+    // a number has no leading zero
+    assert(item_refused("empty (*_01)"));
+    assert(item_refused("empty (*_00)"));
+    assert(item_refused("empty (*_1).00"));
+    assert(item_refused("empty (*_1).01"));
+    assert(item_refused("empty (*_1)[01]"));
+    assert(item_refused("empty (*_1)[00]"));
+    // a must line takes a path and no other token
+    assert(item_refused("empty _1"));
+    assert(item_refused("kept _2"));
+    assert(item_refused("kept _0"));
+}
+
+fn a_malformed_token_is_refused() void {
+    assert(item_reads("result _1"));
+    assert(item_reads("keep (*_1).0"));
+    assert(item_refused("result _"));
+    assert(item_refused("result _1x"));
+    assert(item_refused("result _1 "));
+    assert(item_refused("result 1"));
+    assert(item_refused("result __1"));
+    assert(item_refused("keep _-1"));
+    assert(item_refused("keep _+1"));
+    assert(item_refused("result _01"));
+    assert(item_refused("result _00"));
+    assert(item_refused("keep (*_1"));
+    assert(item_refused("keep (*_1).01"));
+    assert(item_refused("keep x"));
+    assert(item_refused("keep "));
+    assert(item_refused("keep"));
+}
+
+fn an_item_before_the_first_function_is_refused() void {
+    assert(refused("fort-summaries 1\nlibrary geom\nempty (*_1).0\n"));
+    assert(refused("fort-summaries 1\nlibrary geom\nkeep _1\nfn geom.a.f\nkeep _1\n"));
+    assert(refused_with("library geom\n", "library geom\nkept (*_2)\n"));
+}
+
+fn a_function_with_no_item_is_refused() void {
+    // at the end, and between two functions
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    valid(&b);
+    strbuf.append(&b, "fn geom.c.h\n");
+    assert(refused(strbuf.view(&b)));
+    assert(refused_with("fn geom.b.g\n", "fn geom.a.g\nfn geom.b.g\n"));
+    assert(refused("fort-summaries 1\nlibrary geom\nfn geom.a.f\n"));
+}
+
+fn a_malformed_symbol_is_refused() void {
+    assert(refused_with("fn geom.a.f", "fn geom"));
+    assert(refused_with("fn geom.a.f", "fn geom..f"));
+    assert(refused_with("fn geom.a.f", "fn .geom.f"));
+    assert(refused_with("fn geom.a.f", "fn geom.f."));
+    assert(refused_with("fn geom.a.f", "fn 1geom.f"));
+    assert(refused_with("fn geom.a.f", "fn geom.1f"));
+    assert(refused_with("fn geom.a.f", "fn geom.a-b"));
+    assert(refused_with("fn geom.a.f", "fn geom.a f"));
+    assert(refused_with("fn geom.a.f", "fn  geom.a.f"));
+    assert(refused_with("fn geom.a.f", "fn geom.a.f "));
+    assert(refused_with("fn geom.a.f", "fn geom.a.f()"));
+    assert(refused_with("fn geom.a.f", "fn "));
+    assert(refused_with("fn geom.a.f", "fn"));
+    assert(refused_with("fn geom.a.f", "fn ."));
+    assert(refused_with("fn geom.a.f", "fn geom.a\x00f"));
+}
+
+fn a_function_out_of_order_or_twice_is_refused() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    // the two functions in the other order
+    strbuf.append(&b, "fort-summaries 1\nlibrary geom\nfn geom.b.g\nkeep (*_1)[0].4\n");
+    strbuf.append(&b, "fn geom.a.f\nempty (*_1).0\n");
+    assert(refused(strbuf.view(&b)));
+    // one function twice
+    assert(refused_with("fn geom.b.g", "fn geom.a.f"));
+}
+
+fn an_item_out_of_order_or_twice_is_refused() void {
+    // a kind before a kind that comes first
+    assert(refused_with("empty (*_1).0\nempty (*_1).1[2]\nkept (*_2)\n",
+                        "kept (*_2)\nempty (*_1).0\nempty (*_1).1[2]\n"));
+    assert(refused_with("result (*_1).3\nresult _1\nkeep _2\n",
+                        "result (*_1).3\nkeep _2\nresult _1\n"));
+    // two items of one kind in the other byte order
+    assert(refused_with("empty (*_1).0\nempty (*_1).1[2]\n", "empty (*_1).1[2]\nempty (*_1).0\n"));
+    assert(refused_with("result (*_1).3\nresult _1\n", "result _1\nresult (*_1).3\n"));
+    // one item twice
+    assert(refused_with("kept (*_2)\n", "kept (*_2)\nkept (*_2)\n"));
+    assert(refused_with("keep _2\n", "keep _2\nkeep _2\n"));
+    // one operand under two kinds is two items
+    assert(reads_with("result _1\n", "result _1\nkeep _1\n"));
+}
+
+// The valid text with the byte at `at` left out, in `out`.
+fn without_byte(string text, u64 at, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    strbuf.append(out, text[..at]);
+    strbuf.append(out, text[at + 1..]);
+    return strbuf.view(out);
+}
+
+// The bytes of the valid text whose loss leaves a text that reads: each makes a symbol of another
+// function that still comes in byte order, `fn eom.a.f`, `fn gem.a.f`, `fn geo.a.f`,
+// `fn geom.af`, `fn gom.b.g`, `fn geomb.g` and `fn geom.bg`. A model of the reader in Python
+// over the same text gave the same seven positions.
+u64[7] READ_WITHOUT = {33, 35, 36, 39, 121, 124, 126};
+
+fn each_text_that_lacks_one_byte_is_refused_but_for_a_byte_of_a_symbol() void {
+    strbuf.str_buf mut v = strbuf.create();
+    defer strbuf.free(&v);
+    string text = valid(&v);
+    assert(text.len == 145);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u64 mut at = 0;
+    u64 mut refusals = 0;
+    u64 mut next = 0;
+    while (at < text.len) {
+        string less = without_byte(text, at, &b);
+        if (next < READ_WITHOUT.len && READ_WITHOUT[next] == at) {
+            assert(reads(less));
+            next += 1;
+        } else {
+            assert(refused(less));
+            refusals += 1;
+        }
+        at += 1;
+    }
+    assert(next == 7);
+    assert(refusals == 138);
+}
+
+// The valid text with line `k` of VALID_LINES twice, in `out`.
+fn with_line_twice(u64 k, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    u64 mut i = 0;
+    while (i < VALID_LINES.len) {
+        strbuf.append(out, VALID_LINES[i]);
+        strbuf.push(out, '\n');
+        if (i == k) {
+            strbuf.append(out, VALID_LINES[i]);
+            strbuf.push(out, '\n');
+        }
+        i += 1;
+    }
+    return strbuf.view(out);
+}
+
+fn each_text_with_a_line_twice_is_refused() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u64 mut k = 0;
+    while (k < VALID_LINES.len) {
+        assert(refused(with_line_twice(k, &b)));
+        k += 1;
+    }
+}
+
+// The valid text with lines `k` and `k + 1` of VALID_LINES in the other order, in `out`.
+fn with_lines_swapped(u64 k, strbuf.str_buf mut* out) string {
+    strbuf.clear(out);
+    u64 mut i = 0;
+    while (i < VALID_LINES.len) {
+        u64 mut at = i;
+        if (i == k) {
+            at = k + 1;
+        } else if (i == k + 1) {
+            at = k;
+        }
+        strbuf.append(out, VALID_LINES[at]);
+        strbuf.push(out, '\n');
+        i += 1;
+    }
+    return strbuf.view(out);
+}
+
+fn each_text_with_two_lines_in_the_other_order_is_refused() void {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u64 mut k = 0;
+    while (k + 1 < VALID_LINES.len) {
+        assert(refused(with_lines_swapped(k, &b)));
+        k += 1;
+    }
+}
+
+fn each_text_that_lacks_one_line_reads_or_is_refused_by_its_rule() void {
+    // a missing line is refused, but for an item of a function with another item, which a
+    // summary with one line less writes
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    u64 mut reads = 0;
+    u64 mut k = 0;
+    while (k < VALID_LINES.len) {
+        strbuf.clear(&b);
+        u64 mut i = 0;
+        while (i < VALID_LINES.len) {
+            if (i != k) {
+                strbuf.append(&b, VALID_LINES[i]);
+                strbuf.push(&b, '\n');
+            }
+            i += 1;
+        }
+        bool read = reads_text(strbuf.view(&b));
+        // lines 3 to 8 are the six items of `geom.a.f`
+        assert(read == (k >= 3 && k <= 8));
+        if (read) {
+            reads += 1;
+        }
+        k += 1;
+    }
+    assert(reads == 6);
+}
+
+// Whether the reader reads `text` of the library `geom`, with no print.
+fn reads_text(string text) bool {
+    return reads(text);
+}
+
+// A table of `n` functions `big.m.f<k>`, k from 1000 to 1000 + n - 1, with `lines` lines each,
+// one `empty (*_1).<j>` for each j below `lines`.
+fn big_table(u64 n, u64 lines, summary.table mut* t) void {
+    strbuf.str_buf mut name = strbuf.create();
+    defer strbuf.free(&name);
+    strbuf.str_buf mut path = strbuf.create();
+    defer strbuf.free(&path);
+    u64 mut k = 0;
+    while (k < n) {
+        strbuf.clear(&name);
+        strbuf.append(&name, "big.m.f");
+        strbuf.append_u64(&name, 1000 + k);
+        assert(summary.add_function(t, strbuf.view(&name)));
+        // the operands in byte order: `(*_1).0` to `(*_1).9`, then `(*_1).10` before `(*_1).2`
+        // would break it, so each index has one digit
+        u64 mut j = 0;
+        while (j < lines) {
+            strbuf.clear(&path);
+            strbuf.append(&path, "(*_1).");
+            strbuf.append_u64(&path, j);
+            assert(summary.add_line(t, line_of(summary.kind.k_empty, strbuf.view(&path))));
+            j += 1;
+        }
+        k += 1;
+    }
+}
+
+fn a_large_table_reads_back_byte_for_byte() void {
+    summary.table mut t = summary.table{};
+    defer summary.free_table(&t);
+    big_table(500, 10, &t);
+    strbuf.str_buf mut first = strbuf.create();
+    defer strbuf.free(&first);
+    summary.write(&t, "big", &first);
+    summary.table mut back = summary.table{};
+    defer summary.free_table(&back);
+    assert(summary.parse(strbuf.view(&first), "big", &back));
+    assert(summary.entry_count(&back) == 500);
+    u64 mut k = 0;
+    while (k < 500) {
+        assert(summary.symbol(&back, k) == summary.symbol(&t, k));
+        assert(summary.lines(&back, k).len == 10);
+        k += 1;
+    }
+    strbuf.str_buf mut second = strbuf.create();
+    defer strbuf.free(&second);
+    summary.write(&back, "big", &second);
+    assert(strbuf.view(&second) == strbuf.view(&first));
+    // 2 header lines, then 500 functions of 11 lines each
+    u64 mut newlines = 0;
+    string all = strbuf.view(&first);
+    u64 mut i = 0;
+    while (i < all.len) {
+        if (all[i] == '\n') {
+            newlines += 1;
+        }
+        i += 1;
+    }
+    assert(newlines == 2 + 500 * 11);
+    assert(summary.find(&back, "big.m.f1000") == 0);
+    assert(summary.find(&back, "big.m.f1499") == 499);
+    assert(summary.find(&back, "big.m.f1250") == 250);
+    assert(summary.find(&back, "big.m.f1500") == -1);
+    assert(summary.find(&back, "big.m.f999") == -1);
+}
+
+// ---- the table -----------------------------------------------------------------------------
+
+fn add_refuses_what_breaks_the_order_of_the_table() void {
+    summary.table mut t = summary.table{};
+    defer summary.free_table(&t);
+    // a line before any function
+    assert(!summary.add_line(&t, line_of(summary.kind.k_empty, "(*_1)")));
+    assert(summary.add_function(&t, "geom.b"));
+    // a second function while the first has no line
+    assert(!summary.add_function(&t, "geom.c"));
+    assert(summary.add_line(&t, line_of(summary.kind.k_kept, "(*_1)")));
+    // a line that is not after the last one
+    assert(!summary.add_line(&t, line_of(summary.kind.k_kept, "(*_1)")));
+    assert(!summary.add_line(&t, line_of(summary.kind.k_empty, "(*_9)")));
+    assert(summary.add_line(&t, line_of(summary.kind.k_kept, "(*_1).0")));
+    // a function that is not after the last one
+    assert(!summary.add_function(&t, "geom.b"));
+    assert(!summary.add_function(&t, "geom.a"));
+    assert(summary.add_function(&t, "geom.c"));
+    assert(summary.entry_count(&t) == 2);
+    assert(summary.lines(&t, 0).len == 2);
+    assert(summary.lines(&t, 1).len == 0);
+}
+
+fn find_searches_the_entries_in_byte_order() void {
+    summary.table mut t = summary.table{};
+    defer summary.free_table(&t);
+    assert(summary.find(&t, "geom.a") == -1);
+    string[5] names = {"geom.b", "geom.d", "geom.f", "geom.h", "geom.j"};
+    u64 mut k = 0;
+    while (k < names.len) {
+        assert(summary.add_function(&t, names[k]));
+        assert(summary.add_line(&t, line_of(summary.kind.k_keep, "_1")));
+        k += 1;
+    }
+    i64 mut i = 0;
+    while (i < 5) {
+        assert(summary.find(&t, names[cast(i, u64)]) == i);
+        i += 1;
+    }
+    // before the first, between two, after the last
+    assert(summary.find(&t, "geom.a") == -1);
+    assert(summary.find(&t, "geom.c") == -1);
+    assert(summary.find(&t, "geom.i") == -1);
+    assert(summary.find(&t, "geom.k") == -1);
+    assert(summary.find(&t, "") == -1);
+    assert(summary.find(&t, "geom.b.x") == -1);
+}
+
+fn a_freed_table_is_empty_and_reads_again() void {
+    strbuf.str_buf mut v = strbuf.create();
+    defer strbuf.free(&v);
+    summary.table mut t = summary.table{};
+    defer summary.free_table(&t);
+    assert(summary.parse(valid(&v), "geom", &t));
+    summary.free_table(&t);
+    assert(summary.entry_count(&t) == 0);
+    assert(summary.parse(valid(&v), "geom", &t));
+    assert(summary.entry_count(&t) == 2);
+}
+
+fn main() i32 {
+    an_empty_table_writes_the_two_header_lines();
+    each_kind_has_its_word_and_each_line_its_newline();
+    write_appends_to_its_output();
+    println("write ok");
+    the_written_text_reads_back_to_its_table();
+    the_lines_that_the_reader_keeps_do_not_borrow_the_text();
+    a_text_with_no_function_reads();
+    the_extremes_of_the_grammar_read();
+    symbols_read_in_byte_order();
+    items_read_in_the_order_of_their_kinds_and_bytes();
+    println("read ok");
+    a_wrong_header_is_refused();
+    a_wrong_library_line_is_refused();
+    a_line_with_no_newline_is_refused();
+    an_unknown_word_is_refused();
+    a_malformed_path_is_refused();
+    a_malformed_token_is_refused();
+    an_item_before_the_first_function_is_refused();
+    a_function_with_no_item_is_refused();
+    a_malformed_symbol_is_refused();
+    a_function_out_of_order_or_twice_is_refused();
+    an_item_out_of_order_or_twice_is_refused();
+    each_text_that_lacks_one_byte_is_refused_but_for_a_byte_of_a_symbol();
+    each_text_with_a_line_twice_is_refused();
+    each_text_with_two_lines_in_the_other_order_is_refused();
+    each_text_that_lacks_one_line_reads_or_is_refused_by_its_rule();
+    println("refuse ok");
+    a_large_table_reads_back_byte_for_byte();
+    add_refuses_what_breaks_the_order_of_the_table();
+    find_searches_the_entries_in_byte_order();
+    a_freed_table_is_empty_and_reads_again();
+    println("table ok");
+    println("ok");
+    return 0;
+}

@@ -15,6 +15,7 @@
 /// archive header. test/library/cache_test.py runs the real tools.
 import capture;
 import fort.driver;
+import fort.library.artifact;
 import sandbox_tree;
 import std.io;
 import std.libc;
@@ -465,7 +466,10 @@ fn a_second_build_of_a_library_is_a_hit() void {
     assert(build_std(NO_MORE[..0]) == EXIT_OK);
     assert(stats_are("hit", "library", "std", ""));
     assert(entry_count("std.flib") == 4);
-    assert(entry_count("std.flib/summaries") == 0);
+    assert(entry_count("std.flib/summaries") == 1);
+    string own summaries3 = contents("std.flib/summaries/ownership");
+    defer del(summaries3);
+    assert(same(summaries3, "fort-summaries 1\nlibrary std\n"));
     string own archive3 = contents("std.flib/lib.a");
     defer del(archive3);
     assert(same(archive3, archive));
@@ -1068,6 +1072,8 @@ fn a_change_of_a_body_rebuilds_one_library_and_no_dependent() void {
     assert(runs("compile") == 4);
     string own interface = contents("geom.flib/interface.ft");
     defer del(interface);
+    string own manifest1 = contents("geom.flib/manifest");
+    defer del(manifest1);
     string own old_archive = contents("geom.flib/lib.a");
     defer del(old_archive);
     remove("archives.log");
@@ -1085,6 +1091,13 @@ fn a_change_of_a_body_rebuilds_one_library_and_no_dependent() void {
     string own interface2 = contents("geom.flib/interface.ft");
     defer del(interface2);
     assert(same(interface2, interface));
+    // the summary file and the interface hash stay too, so the key of each dependent stays
+    string own summaries2 = contents("geom.flib/summaries/ownership");
+    defer del(summaries2);
+    assert(same(summaries2, "fort-summaries 1\nlibrary geom\n"));
+    string own manifest2 = contents("geom.flib/manifest");
+    defer del(manifest2);
+    assert(same(manifest_field(manifest2, "interface"), manifest_field(manifest1, "interface")));
     // the link names the new archive of geom
     string own archives = contents("archives.log");
     defer del(archives);
@@ -1124,6 +1137,124 @@ fn a_change_of_a_signature_rebuilds_each_dependent() void {
     assert(runs("compile") == 7);
 }
 
+// The value of the line `<field> <value>` of the manifest text `text`, or the empty string.
+fn manifest_field(string text, string field) string {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.push(&b, '\n');
+    strbuf.append(&b, field);
+    strbuf.push(&b, ' ');
+    i64 at = str.find(text, strbuf.view(&b));
+    if (at < 0) {
+        return "";
+    }
+    u64 from = cast(at, u64) + strbuf.view(&b).len;
+    u64 mut end = from;
+    while (end < text.len && text[end] != '\n') {
+        end += 1;
+    }
+    return text[from..end];
+}
+
+// Writes `summaries` as the summary file of `geom.flib` and its interface hash as the interface
+// line of its manifest, which the key does not cover, as a build of geom whose summary changed
+// writes them.
+fn forge_summaries(string summaries) void {
+    string own manifest = contents("geom.flib/manifest");
+    defer del(manifest);
+    string own interface = contents("geom.flib/interface.ft");
+    defer del(interface);
+    i64 at = str.find(manifest, "\ninterface ");
+    assert(at > 0);
+    u64 from = cast(at, u64) + 11;
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, manifest[..from]);
+    artifact.append_interface_hash(&b, interface, summaries);
+    strbuf.append(&b, manifest[from + 64..]);
+    write_file("geom.flib/manifest", strbuf.view(&b));
+    write_file("geom.flib/summaries/ownership", summaries);
+}
+
+fn a_change_of_a_summary_rebuilds_each_dependent() void {
+    start();
+    assert(build_std(NO_MORE[..0]) == EXIT_OK);
+    assert(build_geom() == EXIT_OK);
+    assert(build_shapes() == EXIT_OK);
+    assert(build_main() == EXIT_OK);
+    assert(runs("compile") == 4);
+    string own before = contents("geom.flib/manifest");
+    defer del(before);
+    // no build writes a line yet, so the suite writes the summary file of `geom.vec.len`, a
+    // bodiless function of the interface of geom, and its hash
+    forge_summaries("fort-summaries 1\nlibrary geom\nfn geom.vec.len\nkeep _1\n");
+    string own after = contents("geom.flib/manifest");
+    defer del(after);
+    assert(manifest_field(after, "interface") != manifest_field(before, "interface"));
+    // shapes and the entry unit name the new interface hash of geom in their `use` line
+    assert(build_shapes() == EXIT_OK);
+    assert(stats_are("miss", "library", "shapes", "absent"));
+    string own shapes = contents("shapes.flib/manifest");
+    defer del(shapes);
+    strbuf.str_buf mut use = strbuf.create();
+    defer strbuf.free(&use);
+    strbuf.append(&use, "\nuse geom ");
+    strbuf.append(&use, manifest_field(after, "interface"));
+    strbuf.push(&use, '\n');
+    assert(str.find(shapes, strbuf.view(&use)) > 0);
+    assert(build_main() == EXIT_OK);
+    assert(stats_are("miss", "entry", "main", "absent"));
+    assert(runs("compile") == 6);
+    // a summary of a function that geom does not declare is a corrupt artifact
+    forge_summaries("fort-summaries 1\nlibrary geom\nfn geom.vec.size\nkeep _1\n");
+    assert(build_shapes() == EXIT_USAGE);
+    assert(err_is("fort: error: library 'geom.flib' is corrupt\n"));
+    // a build of geom hits and writes its entry again, so each dependent hits its first entry
+    assert(build_geom() == EXIT_OK);
+    assert(stats_are("hit", "library", "geom", ""));
+    string own restored = contents("geom.flib/manifest");
+    defer del(restored);
+    assert(same(restored, before));
+    assert(build_shapes() == EXIT_OK);
+    assert(stats_are("hit", "library", "shapes", ""));
+    assert(build_main() == EXIT_OK);
+    assert(stats_are("hit", "entry", "main", ""));
+    assert(runs("compile") == 6);
+}
+
+fn a_hit_writes_the_summary_file_of_its_entry_and_a_changed_one_is_a_miss() void {
+    start();
+    assert(build_std(NO_MORE[..0]) == EXIT_OK);
+    strbuf.str_buf mut key = strbuf.create();
+    defer strbuf.free(&key);
+    stats_key(&key);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    string own stored = contents(entry_path("std/.fort-cache", strbuf.view(&key),
+                                            "summaries/ownership", &b));
+    defer del(stored);
+    assert(same(stored, "fort-summaries 1\nlibrary std\n"));
+    // a removed summary file of the artifact comes back from the entry
+    remove("std.flib/summaries/ownership");
+    assert(build_std(NO_MORE[..0]) == EXIT_OK);
+    assert(stats_are("hit", "library", "std", ""));
+    string own written = contents("std.flib/summaries/ownership");
+    defer del(written);
+    assert(same(written, stored));
+    // a changed summary file of the entry breaks its interface hash: a miss that the build repairs
+    write_file(entry_path("std/.fort-cache", strbuf.view(&key), "summaries/ownership", &b),
+               "fort-summaries 1\nlibrary std\nfn std.io.f\nkeep _1\n");
+    assert(build_std(NO_MORE[..0]) == EXIT_OK);
+    assert(stats_are("miss", "library", "std", "corrupt"));
+    assert(build_std(NO_MORE[..0]) == EXIT_OK);
+    assert(stats_are("hit", "library", "std", ""));
+    string own repaired = contents(entry_path("std/.fort-cache", strbuf.view(&key),
+                                              "summaries/ownership", &b));
+    defer del(repaired);
+    assert(same(repaired, stored));
+    assert(runs("compile") == 2);
+}
+
 // An empty list of options.
 string[1] NO_MORE = {""};
 
@@ -1155,6 +1286,8 @@ fn main() i32 {
     println("entry ok");
     a_change_of_a_body_rebuilds_one_library_and_no_dependent();
     a_change_of_a_signature_rebuilds_each_dependent();
+    a_change_of_a_summary_rebuilds_each_dependent();
+    a_hit_writes_the_summary_file_of_its_entry_and_a_changed_one_is_a_miss();
     println("rebuild ok");
     println("ok");
     return 0;
