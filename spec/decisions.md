@@ -2518,6 +2518,59 @@ says ownership is "by convention", this section supersedes it.
   that a `del` freed. Such an access is outside the guarantee of this rule.
   It also assumes that each index stays in bounds and that no operation accesses storage through
   `null`, as D10.6 and D10.7 give, so a build with `--no-bounds-check` is outside the guarantee.
+  Borrows (refinement R6 of `spec/ownership-design.md` 7). The terms run and derive are those of
+  D10.7: a run is one call of the function. A borrow local is a local that is not memory. An origin
+  is the frame of a memory local, or `exposed`. The storage of an aggregate result is the
+  destination of the caller, so its frame is no origin. At each point, the analysis
+  gives each borrow local `v` the origins that the value of `v` can borrow, and it marks each memory
+  local that can be exposed. The marks join by union: an origin or an exposure holds at the start of
+  a block when it holds at the end of one predecessor. The entry block starts with no origin and no
+  exposure, because no value derives from an address of a local before the run takes one.
+  No step removes an exposure. A value borrows these origins:
+  - a copy or a move of a place whose type is an `own` pointer: no origin, because the value holds
+    the start of an allocation or `null` (D17.1), and an allocation shares no storage with a frame;
+  - any other copy or move of the fixed storage of a borrow local `v`: the origins of `v`;
+  - any other copy or move, of a place with a dereference or an index into a span or a `string`,
+    of a global, of a memory local or of an aggregate result: `exposed`;
+  - an `&`, or a slice of a fixed array, of the fixed storage of a local `x`: the frame of `x`, or
+    no origin when `x` is an aggregate result. Of a place of a global that contains no dereference
+    and no index into a span or a `string`: no origin. Of any other place: the origins of a copy of
+    the pointer that the last load of the place reads, or no origin when that pointer is an `own`
+    pointer or the pointer of an `own` span or `string`. A slice of a span or a `string`: the
+    origins of a copy of it. Each of these also borrows the origins of a copy of each index of its
+    place, and a slice also the origins of its bounds;
+  - a call: `exposed`. A `new` and a constant: no origin. Each other operation: the origins of each
+    of its operands, also an arithmetic, a comparison and a cast to an integer.
+  A store into the whole of a borrow local `v` gives `v` the origins of its value, and a store into
+  a part of `v` adds them. A store into any other place exposes each memory local whose frame its
+  value borrows, and a call exposes each memory local whose frame one of its operands borrows,
+  the callee of a call through a function value included. In a statement, the exposures of a call
+  come before the kill rules, and the origins and the exposures of a store come after them.
+  The pointer that the last load of a place reads is the pointer of its last dereference, or the
+  pointer of the span or the `string` of its last index into a span or a `string`. A place with a
+  dereference or such an index can be a place in the fixed storage of a memory local `x` whose
+  frame is an origin only when that pointer borrows the frame of `x`, or borrows `exposed` while
+  `x` can be exposed. When that pointer is an `own` pointer, or the pointer of an `own` span or
+  `string`, the place is a place of no such local. Such a place can still be each other place
+  reached through memory: each place of an aggregate result and of a global, and each place with
+  a dereference or an index into a span or a `string`. Fixed storage is a place with no
+  dereference and no index into a span or a `string`.
+  This rule assumes that no operation accesses the storage of a local through a value that does
+  not derive from an address of that local that the run took, as D10.7 gives, and that an `own`
+  pointer holds the start of an allocation or `null` (D17.1). A same-size reinterpretation that
+  writes an address of a local into the bytes of an owner slot is outside the guarantee
+  (`spec/ownership-design.md` 5.1, A8).
+  The origins have a limit of their own. Their bits are the borrow locals times 1 more than the
+  memory locals whose frames are origins, plus those memory locals. A forward fixpoint over the
+  blocks gives the origins at the start of each block. It takes each block in the order of its
+  number, and then each successor of a block whose state at its end changed, its origins or its
+  exposures, first in, first out.
+  Each transfer of a block charges its statements and its terminator times the bits. When the
+  charges pass 16777216 (2^24), the kill rules read each place with a dereference or an index into a
+  span or a `string` as a possible place of each memory local, as before refinement R6. A function
+  with no memory local whose frame is an origin, or with no fact, takes no fixpoint and no charge.
+  The functions of the compiler, its language server and the standard library charge 2883987 or
+  less, and a function of the module tests or of the language tests 3037320 or less.
   These gen rules make a fact true:
   1. Entry zeroing: the entry block stores the zero value once into each local of `own`
      reference type (D19.4, `fir.md` 9.2).
@@ -2544,19 +2597,25 @@ says ownership is "by convention", this section supersedes it.
      local that is a key kills each fact whose place has that key.
   2. A store into a place through a fresh pointer local kills only what rule 1 kills.
   3. Any other store through a pointer kills each fact about a place reached through memory, with
-     two exceptions. It keeps a fact about a place through a fresh pointer local. It keeps a fact
-     that rule 1 keeps for the same base. A store is through a pointer when its destination contains
-     a dereference or an index into a span or a `string`. A destination with a dereference or an
-     index into a span or a `string` after its first projection, such as `p->next->g`, can name any
-     object, so the store kills each fact reached through memory except a fact through a fresh
-     pointer local. One pointer value names one object, and the separate fields of one object do not
-     overlap. Another pointer can hold the value of `p`, so its store kills each fact through `p`.
+     three exceptions. It keeps a fact about a place through a fresh pointer local. It keeps a fact
+     that rule 1 keeps for the same base. It keeps a fact about a place in the fixed storage of a
+     memory local whose frame is an origin when its destination cannot be a place of that local
+     (Borrows above). A store is through a pointer when its destination contains a dereference or
+     an index into a span or a `string`. A destination with a dereference or an index into a span
+     or a `string` after its first projection, such as `p->next->g`, can name any object but such
+     a memory local that it cannot be, so the store kills each fact reached through memory except a
+     fact through a fresh pointer local and such a fact of a memory local.
+     One pointer value names one object, and the separate fields of one object do not overlap.
+     Another pointer can hold the value of `p`, so its store kills each fact through `p`.
   4. A store straight into a place of a memory local or of a global, whose destination contains
      no dereference and no index into a span or a `string`, kills each fact about a place that
-     contains a dereference or an index into a span or a `string`, except a fact about a place
-     through a fresh pointer local. A pointer can hold the address of that local or global, so a
-     place through the pointer can name the bytes of the store. The store writes no byte of
-     another local or another global, so it keeps their facts. Rule 1 applies to its own base.
+     contains a dereference or an index into a span or a `string`, with two exceptions. It keeps a
+     fact about a place through a fresh pointer local. For a store into a memory local `x` whose
+     frame is an origin, it keeps a fact about a place that cannot be a place of `x` (Borrows
+     above); a store into an aggregate result keeps no such fact. A pointer can hold the address of
+     that local or global, so a place through the pointer can name the bytes of the store. The store
+     writes no byte of another local or another global, so it keeps their facts. Rule 1 applies to
+     its own base.
   5. A call kills each fact except the facts about a local that is not memory and about its
      places that are not reached through memory. `new` and `del` are no calls under this rule.
   A store applies the kill rules first and its gen rule after them. A call in the right-hand side
@@ -2611,6 +2670,15 @@ says ownership is "by convention", this section supersedes it.
   an error, because the call `g()` kills that fact (kill rule 5). For a parameter `p` of type `i32
   mut* own`, `if (p != null) { del(p); }` leaves `p` empty after the `if`: on the edge where the
   test finds `null`, and after the arm.
+  For `struct cell { i32 mut* own o; u64 v; }` and a parameter `q` of type `cell mut*`, `i32 mut*
+  own mut x = null; i32 mut* own mut* px = &x; del(q->o); q->o = new(i32); x = new(i32);` passes:
+  `q` borrows no origin, because no address that the run takes reaches a parameter, so the store
+  into `q->o` keeps the fact of `x`. For a global `P` of type `i32 mut* own mut*` and a function
+  `keep` that stores its argument into `P`, `keep(&x); del(x); i32 mut* own mut* p = P; del(*p); *p
+  = new(i32); x = new(i32);` is an error at `x`: the call exposes `x`, the copy of `P` borrows
+  `exposed`, and the store through `p` kills the fact of `x`. `P = &x;` in place of the call exposes
+  `x` too. For a parameter `n` of type `cell mut* own`, `P = &x; del(x); n->v = 1; x = new(i32);`
+  passes, because `n` holds the start of an allocation (D17.1).
   A declaration in a loop is an error when the loop body does not `del` or `move` the local:
   `for (i32 mut i = 0; i < 3; i++) { i32 mut* own p = new(i32); }` is an error at `p`,
   because the back edge joins a live `p` with the entry zeroing.
@@ -2664,6 +2732,17 @@ says ownership is "by convention", this section supersedes it.
   `spec/ownership-design.md` 7); proposed 2026-10-26, ratified by the user 2026-10-26. Before, no
   rule made a fact of a test, so for a parameter `l` of type `list mut*`, `if (l->head == null) {
   l->head = new(node); }` was an error, and the program needed a `del` of the null `l->head` first.
+  Amended 2026-10-27: the borrows and the exposure of refinement R6 of `spec/ownership-design.md` 7
+  narrow kill rules 3 and 4, and the origins take a limit of their own; proposed 2026-10-27,
+  ratified by the user 2026-10-27. Before, a store through a pointer killed each fact of each memory
+  local, and a store straight into a memory local killed each fact through a pointer that is not
+  fresh. So `x = new(i32)` after a store through a parameter `q` was an error for a memory local
+  `x`, though no address of `x` can reach `q`, and the `del` of an `own` pointer whose inner owners
+  a store into a memory local followed was a site of part 2 of D17.20. No verdict of the five
+  trees turned into an error: the 22 sites of D17.11 and the 22 of part 1 stayed, and part 2 lost
+  one of 23 sites, in `test/lang/run/ownership/062`. The examples above add `run/ownership` 071 and
+  072 and `fail/ownership` 076 and 077, whose two errors bring the sites of D17.11 in `test/lang`
+  to 24.
 
 ### D17.12 Owned strings
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,

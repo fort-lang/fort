@@ -685,6 +685,27 @@ bullet at a time and without a rewrite.
   case tests**: the seeded family inserts a store into each place before the end of the loop body,
   and the loop then never ends. With `l->head` in the places of `tested_field`, the test ran for
   more than 8 minutes before it was stopped, with no line of output past its buffer.
+  **The test holds refinement R6 of the kill rules too** (D17.11, Borrows; `owner.alias`). The
+  hand cases `k2` and `k2r` to `k2l` bring the address of a memory local `x` to a store through a
+  pointer by each path of R6: a call argument and a call result, a memory local that a callee
+  writes (`n4a`, the case `n4` of the design for rule (a)), a store into a global and through a
+  pointer, an integer that a store puts into memory, a join and a back edge; each run overwrites
+  `x`, so a mutant that drops one path prints a false accept; `k2v` stores through a pointer that
+  it loads from a global with no copy into a local. `k2o` and `k2p` store through an `own` pointer
+  and a parameter, and their runs hold that R6 may keep the fact of `x`. A step that
+  no run can show, such as a comparison that carries an address or the frame of an aggregate
+  `_0`, stands in `test/fort/owner/alias_test.ft` over FIR text, and the rows `D17.11-alias` of
+  `tools/mutations/emptiness.json` hold it there. A case of `alias_test.ft` frees its memory
+  local before any call that follows its check: a call kills each fact of a memory local, so a
+  call between the `del` and the exit makes the exit unproved for a reason that is not R6.
+  **The oracle reports no event for an access through a forged pointer**, which D10.7 (A8) makes
+  undefined: a run that writes `x` through `cast(py, u64) + 8` for `py = &y` stores over `x` with
+  no event that names A8, and the test would count the store as a false accept, though R6 may keep
+  the fact of `x` there. The generator forges no pointer to a local: its one cast of an integer to
+  a pointer, `v = cast(u, i32*)`, reads back an integer of an `own` value or of an `i32`, and no
+  hand case forges a pointer to a local, so each false accept that the sets count is in scope
+  (read). A later change
+  gives the oracle an event for such an access.
 - **The suites of fir.interpreter derive each expected value apart from the interpreter**
   (`test/fort/fir/interpreter_test.ft`, `interpreter_source_test.ft`). Python's integers and IEEE
   doubles gave each value at each boundary of each type when the cases were written: the wrap at

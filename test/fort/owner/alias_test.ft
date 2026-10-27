@@ -1,0 +1,1889 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| borrows ok
+//| exposure ok
+//| calls ok
+//| straight ok
+//| source ok
+//| charge ok
+//| limit ok
+/// Checks owner.alias, refinement R6 of the kill rules of the emptiness pass: a place through a
+/// pointer can be a place of a memory local `x` only when the pointer that its last load reads
+/// borrows the frame of `x`, or borrows `exposed` while `x` is exposed. Each group is a FIR module
+/// and the verdicts of its functions. A person derived each verdict from the rule before the first
+/// run; the comment of a case names the step that it holds. Each case that the refinement proves
+/// stands beside a case that it does not prove. The lowered cases run the same steps over fort
+/// source, the hand cases k2 and n4 of the design among them.
+import check_env;
+import fort.fir;
+import fort.fir_lower;
+import fort.fir_parse;
+import fort.owner.alias;
+import fort.owner.prover;
+import lower_env;
+import pass_env;
+import std.strbuf;
+
+// The types, the globals and the functions that the FIR text of each case names. A `slot` holds a
+// pointer to an owner, and a `cell` an owner and a number. `P` is a global pointer to an owner,
+// `keep` stores its argument into `P`, `pass` returns its argument, `give` stores its first
+// argument through its second, and `drop` frees a `cell` with its owner. A `hook` holds a function
+// value and a pointer to an owner, and `nums` returns an owning span.
+string[35] PRELUDE = {
+    "struct slot {",
+    "    i32 mut* own mut* at;",
+    "}",
+    "struct cell {",
+    "    i32 mut* own o;",
+    "    u64 v;",
+    "}",
+    "struct pair {",
+    "    i32 mut* own a;",
+    "    i32 mut* own b;",
+    "}",
+    "i32 mut* own mut G = null;",
+    "i32 mut* own mut* mut P = null;",
+    "fn g() void {",
+    "}",
+    "fn keep(i32 mut* own mut* p) void {",
+    "    P = p;",
+    "}",
+    "fn pass(i32 mut* own mut* p) i32 mut* own mut* {",
+    "    return p;",
+    "}",
+    "fn give(i32 mut* own mut* p, i32 mut* own mut* mut* out) void {",
+    "    *out = p;",
+    "}",
+    "fn drop(cell mut* own c) void {",
+    "    del(c->o);",
+    "    del(c);",
+    "}",
+    "struct hook {",
+    "    fn (i32 mut* own mut*) void f;",
+    "    i32 mut* own mut* p;",
+    "}",
+    "fn nums() u64 mut@ own {",
+    "    return new(u64, 2);",
+    "}",
+};
+
+// ---- the verdicts ------------------------------------------------------------------------------
+
+// No block.
+u32 NO_BLOCK = 4294967295;
+
+// The block of the check that stands right before the store `st` of `f`, or NO_BLOCK.
+fn check_before(fir.func* f, prover.store* st) u32 {
+    if (st->index != 0) {
+        return NO_BLOCK;
+    }
+    fir.place written = fir.block_statement(f, st->block, 0)->place;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        fir.terminator* t = &fir.block_at(f, b)->term;
+        if (t->kind == fir.term_kind.tk_check_overwrite && t->target == st->block
+            && fir.is_same_place(f, t->place, written)) {
+            return b;
+        }
+        b += 1;
+    }
+    return NO_BLOCK;
+}
+
+// Writes the verdicts of `p` into `out`: `P` or `U` for each check in block order, then `/` and
+// one for each store that no check stands right before; then ` | ` and each exit, `d` or `r`,
+// the name of its local or `t` for a temporary, and `P` or `U`; then ` | ` and each obligation
+// of part 2, `d` or `c`, and `P`, or `U` with the first inner owner that is not proved. A
+// store with a check right before it takes the verdict of the check.
+fn write_all(fir.func* f, prover.proof* p, strbuf.str_buf mut* out) void {
+    strbuf.clear(out);
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        if (fir.block_at(f, b)->term.kind == fir.term_kind.tk_check_overwrite) {
+            strbuf.push(out, verdict(prover.is_proved(p, b)));
+        }
+        b += 1;
+    }
+    bool mut alone = false;
+    u64 mut k = 0;
+    while (k < p->stores.len) {
+        prover.store* st = &p->stores[k];
+        u32 check = check_before(f, st);
+        if (check != NO_BLOCK) {
+            assert(!prover.is_proved(p, check) || st->proved);
+        } else {
+            if (!alone) {
+                strbuf.push(out, '/');
+                alone = true;
+            }
+            strbuf.push(out, verdict(st->proved));
+        }
+        k += 1;
+    }
+    strbuf.append(out, " |");
+    k = 0;
+    while (k < p->exits.len) {
+        prover.exit* x = &p->exits[k];
+        strbuf.push(out, ' ');
+        if (x->index < fir.block_statement_count(f, x->block)) {
+            strbuf.push(out, 'd');
+        } else {
+            strbuf.push(out, 'r');
+        }
+        fir.local* l = fir.local_at(f, x->local);
+        if (l->kind == fir.local_kind.lk_temp) {
+            strbuf.push(out, 't');
+        } else {
+            strbuf.append(out, fir.local_name(l));
+        }
+        strbuf.push(out, verdict(x->proved));
+        k += 1;
+    }
+    strbuf.append(out, " |");
+    k = 0;
+    while (k < p->inners.len) {
+        prover.inner* x = &p->inners[k];
+        strbuf.push(out, ' ');
+        if (fir.block_statement(f, x->block, x->index)->kind == fir.stmt_kind.st_del) {
+            strbuf.push(out, 'd');
+        } else {
+            strbuf.push(out, 'c');
+        }
+        strbuf.push(out, verdict(x->proved));
+        if (!x->proved) {
+            strbuf.append_u64(out, x->first);
+        }
+        k += 1;
+    }
+}
+
+fn verdict(bool proved) char {
+    if (proved) {
+        return 'P';
+    }
+    return 'U';
+}
+
+// Parses `text` against PRELUDE, holds that the verifier accepts each function, proves each one,
+// and holds that function `k` of the module gives the verdicts `want[k]` (write_all), and that
+// the kill rules read the map of owner.alias in each function that has one.
+fn expect(string@ text, string@ want) void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    fir.module mut m = pass_env.parse(&e, PRELUDE[..], text);
+    defer fir.module_free(&m);
+    assert(m.funcs.len == want.len);
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    u64 mut k = 0;
+    while (k < m.funcs.len) {
+        fir.func* f = &m.funcs.items[k];
+        pass_env.verified(&e, f, "alias_test: the verifier refuses the input");
+        prover.proof mut p = prover.prove(f);
+        write_all(f, &p, &got);
+        assert(p.alias_on == (p.alias_work > 0));
+        prover.free(&p);
+        if (strbuf.view(&got) != want[k]) {
+            eprintln("function ", k, " gives ", strbuf.view(&got), " and not ", want[k]);
+            panic("alias_test: a verdict differs");
+        }
+        k += 1;
+    }
+}
+
+// ---- the borrows of a value --------------------------------------------------------------------
+
+// The origins that a value borrows, and where a store puts them. In each case `x` is a memory local
+// and the check of `x` stands after a store through a pointer, so its verdict says whether that
+// pointer can hold the address of `x`.
+string[466] BORROWS = {
+    // an address of fixed storage borrows the frame of its local, so a store through it kills the
+    // fact of the local: U
+    "fn main.b1() -> void {",
+    "    let _1 (x): i32 mut* own;",
+    "    let _2: i32 mut* own mut*;",
+    "    let _3: i32 mut* own;",
+    "    let _4: i32 mut* own;",
+    "    bb0: {",
+    "        _1 = const zero i32 mut* own;",
+    "        _2 = addr mut(_1);",
+    "        del(move (*_2));",
+    "        _3 = alloc<i32>(const u64 1);",
+    "        (*_2) = move _3;",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _4;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a copy of a borrow local borrows what the local borrows: U
+    "fn main.b2() -> void {",
+    "    let _1 (x): i32 mut* own;",
+    "    let _2: i32 mut* own mut*;",
+    "    let _3: i32 mut* own;",
+    "    let _4: i32 mut* own;",
+    "    let _5: i32 mut* own mut*;",
+    "    bb0: {",
+    "        _1 = const zero i32 mut* own;",
+    "        _2 = addr mut(_1);",
+    "        _5 = copy _2;",
+    "        del(move (*_5));",
+    "        _3 = alloc<i32>(const u64 1);",
+    "        (*_5) = move _3;",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _4;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a parameter borrows no frame of the call, so a store through it keeps the fact: P
+    "fn main.b3(_1 (b): cell mut*) -> void {",
+    "    let _2 (x): i32 mut* own;",
+    "    let _3: i32 mut* own mut*;",
+    "    let _4: i32 mut* own;",
+    "    let _5: i32 mut* own;",
+    "    bb0: {",
+    "        _2 = const zero i32 mut* own;",
+    "        _3 = addr mut(_2);",
+    "        del(move (*_1).0);",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        (*_1).0 = move _4;",
+    "        _5 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _2) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2 = move _5;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // a store into a whole borrow local replaces its origins: P
+    "fn main.b4(_1 (q): i32 mut* own mut*) -> void {",
+    "    let _2 (x): i32 mut* own;",
+    "    let _3: i32 mut* own mut*;",
+    "    let _4: i32 mut* own;",
+    "    let _5: i32 mut* own;",
+    "    let _6: i32 mut* own mut*;",
+    "    bb0: {",
+    "        _2 = const zero i32 mut* own;",
+    "        _3 = addr mut(_2);",
+    "        _6 = copy _3;",
+    "        _6 = copy _1;",
+    "        del(move (*_6));",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        (*_6) = move _4;",
+    "        _5 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _2) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2 = move _5;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // a store into a part of a borrow local adds to its origins, and a copy of a part borrows them:
+    // U
+    "fn main.b5() -> void {",
+    "    let _1 (x): i32 mut* own;",
+    "    let _2: i32 mut* own mut*;",
+    "    let _3: i32 mut* own;",
+    "    let _4: i32 mut* own;",
+    "    let _5 (s): slot;",
+    "    let _6: i32 mut* own mut*;",
+    "    bb0: {",
+    "        _1 = const zero i32 mut* own;",
+    "        _5 = const zero slot;",
+    "        _2 = addr mut(_1);",
+    "        _5.0 = copy _2;",
+    "        _6 = copy _5.0;",
+    "        del(move (*_6));",
+    "        _3 = alloc<i32>(const u64 1);",
+    "        (*_6) = move _3;",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _4;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // the origins join by union: the address of `x` reaches the store on one edge: U
+    "fn main.b6(_1 (c): bool, _2 (q): i32 mut* own mut*) -> void {",
+    "    let _3 (x): i32 mut* own;",
+    "    let _4: i32 mut* own mut*;",
+    "    let _5: i32 mut* own;",
+    "    let _6: i32 mut* own;",
+    "    let _7: i32 mut* own mut*;",
+    "    bb0: {",
+    "        _3 = const zero i32 mut* own;",
+    "        _4 = addr mut(_3);",
+    "        switch(copy _1) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _7 = copy _4;",
+    "        goto bb3;",
+    "    }",
+    "    bb2: {",
+    "        _7 = copy _2;",
+    "        goto bb3;",
+    "    }",
+    "    bb3: {",
+    "        del(move (*_7));",
+    "        _5 = alloc<i32>(const u64 1);",
+    "        (*_7) = move _5;",
+    "        _6 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _3) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        _3 = move _6;",
+    "        del(move _3);",
+    "        return;",
+    "    }",
+    "}",
+    // a loop carries the origins around its back edge: the second round stores through the
+    // address of `x`: U
+    "fn main.b7(_1 (c): bool, _2 (q): i32 mut* own mut*) -> void {",
+    "    let _3 (x): i32 mut* own;",
+    "    let _4: i32 mut* own mut*;",
+    "    let _5: i32 mut* own;",
+    "    let _6: i32 mut* own;",
+    "    let _7: i32 mut* own mut*;",
+    "    bb0: {",
+    "        _3 = const zero i32 mut* own;",
+    "        _4 = addr mut(_3);",
+    "        _7 = copy _2;",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        switch(copy _1) -> [true: bb2, otherwise: bb3];",
+    "    }",
+    "    bb2: {",
+    "        del(move (*_7));",
+    "        _5 = alloc<i32>(const u64 1);",
+    "        (*_7) = move _5;",
+    "        _7 = copy _4;",
+    "        goto bb1;",
+    "    }",
+    "    bb3: {",
+    "        _6 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _3) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        _3 = move _6;",
+    "        del(move _3);",
+    "        return;",
+    "    }",
+    "}",
+    // an address through a pointer borrows what the pointer of its last load borrows: U
+    "fn main.b8() -> void {",
+    "    let _1 (x): i32 mut* own;",
+    "    let _2: i32 mut* own mut*;",
+    "    let _3: i32 mut* own;",
+    "    let _4: i32 mut* own;",
+    "    let _5: i32 mut* own mut*;",
+    "    bb0: {",
+    "        _1 = const zero i32 mut* own;",
+    "        _2 = addr mut(_1);",
+    "        _5 = addr mut((*_2));",
+    "        del(move (*_5));",
+    "        _3 = alloc<i32>(const u64 1);",
+    "        (*_5) = move _3;",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _4;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a slice of a fixed array borrows the frame of its local, and a slice of a span borrows what
+    // the span borrows, so a store into an element of the second slice kills an element of `a`: U
+    "fn main.b9() -> void {",
+    "    let _1 (a): i32 mut* own[2];",
+    "    let _2: i32 mut* own mut@;",
+    "    let _3: i32 mut* own mut@;",
+    "    let _4: i32 mut* own;",
+    "    let _5: i32 mut* own;",
+    "    let _6: u64;",
+    "    let _7: u64;",
+    "    bb0: {",
+    "        _1 = const zero i32 mut* own[2];",
+    "        _2 = slice mut(_1, const u64 0, const u64 2);",
+    "        _3 = slice(_2, const u64 0, const u64 2);",
+    "        _6 = const u64 0;",
+    "        _7 = const u64 1;",
+    "        del(move _3[_6]);",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        _3[_6] = move _4;",
+    "        _5 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _1[_7]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1[_7] = move _5;",
+    "        return;",
+    "    }",
+    "}",
+    // each other rvalue borrows the origins of its operands: a cast and an addition carry the
+    // address of `x` into an integer, a store of the integer into the bytes of the memory local
+    // `m` exposes `x`, and a copy of `m` reads it back as a pointer: U
+    "fn main.b10() -> void {",
+    "    let _1 (x): i32 mut* own;",
+    "    let _2: i32 mut* own mut*;",
+    "    let _3: u64;",
+    "    let _4: u64;",
+    "    let _5 (m): i32 mut* own mut*;",
+    "    let _6: i32 mut* own mut* mut*;",
+    "    let _7: u64 mut*;",
+    "    let _8: i32 mut* own mut*;",
+    "    let _9: i32 mut* own;",
+    "    let _10: i32 mut* own;",
+    "    bb0: {",
+    "        _1 = const zero i32 mut* own;",
+    "        _2 = addr mut(_1);",
+    "        _3 = cast<u64>(copy _2);",
+    "        _4 = add(copy _3, const u64 0);",
+    "        _6 = addr mut(_5);",
+    "        _7 = cast<u64 mut*>(copy _6);",
+    "        (*_7) = copy _4;",
+    "        _8 = copy _5;",
+    "        del(move (*_8));",
+    "        _9 = alloc<i32>(const u64 1);",
+    "        (*_8) = move _9;",
+    "        _10 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _10;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // the address of a global borrows no frame: a store through it keeps the fact of `x` while
+    // `x` is exposed: P
+    "fn main.b11() -> void {",
+    "    let _1 (x): i32 mut* own;",
+    "    let _2: i32 mut* own mut*;",
+    "    let _3: i32 mut* own;",
+    "    let _4: i32 mut* own;",
+    "    let _5: i32 mut* own mut*;",
+    "    bb0: {",
+    "        _1 = const zero i32 mut* own;",
+    "        _2 = addr mut(_1);",
+    "        global main.P = copy _2;",
+    "        _5 = addr mut(global main.G);",
+    "        del(move (*_5));",
+    "        _3 = alloc<i32>(const u64 1);",
+    "        (*_5) = move _3;",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _4;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a comparison carries the origins of its operands: the flag of a test of the address of `x`
+    // goes into an integer that a store puts into the bytes of the memory local `m`, and a copy of
+    // `m` reads it back as a pointer: U
+    "fn main.b12() -> void {",
+    "    let _1 (x): i32 mut* own;",
+    "    let _2: i32 mut* own mut*;",
+    "    let _3: bool;",
+    "    let _4: u64;",
+    "    let _5 (m): i32 mut* own mut*;",
+    "    let _6: i32 mut* own mut* mut*;",
+    "    let _7: u64 mut*;",
+    "    let _8: i32 mut* own mut*;",
+    "    let _9: i32 mut* own;",
+    "    let _10: i32 mut* own;",
+    "    bb0: {",
+    "        _1 = const zero i32 mut* own;",
+    "        _2 = addr mut(_1);",
+    "        _3 = eq(copy _2, const null i32 mut* own mut*);",
+    "        _4 = cast<u64>(copy _3);",
+    "        _6 = addr mut(_5);",
+    "        _7 = cast<u64 mut*>(copy _6);",
+    "        (*_7) = copy _4;",
+    "        _8 = copy _5;",
+    "        del(move (*_8));",
+    "        _9 = alloc<i32>(const u64 1);",
+    "        (*_8) = move _9;",
+    "        _10 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _10;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // an address borrows the origins of its index local too: the index derives from the address of
+    // `x`, so the address of an element of the memory array `a` can be a place of `x`: U
+    "fn main.b13() -> void {",
+    "    let _1 (x): i32 mut* own;",
+    "    let _2: i32 mut* own mut*;",
+    "    let _3 (a): u64[2];",
+    "    let _4: u64;",
+    "    let _5: u64 mut*;",
+    "    let _6: i32 mut* own;",
+    "    bb0: {",
+    "        _1 = const zero i32 mut* own;",
+    "        _3 = const zero u64[2];",
+    "        _2 = addr mut(_1);",
+    "        _4 = cast<u64>(copy _2);",
+    "        _5 = addr mut(_3[_4]);",
+    "        (*_5) = const u64 0;",
+    "        _6 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _6;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // `slice_ptr` borrows the origins of its pointer: a store into an element of the span kills the
+    // fact of `x`: U
+    "fn main.b14() -> void {",
+    "    let _1 (x): i32 mut* own;",
+    "    let _2: i32 mut* own mut*;",
+    "    let _3: i32 mut* own mut@;",
+    "    let _4: u64;",
+    "    let _5: i32 mut* own;",
+    "    let _6: i32 mut* own;",
+    "    bb0: {",
+    "        _1 = const zero i32 mut* own;",
+    "        _2 = addr mut(_1);",
+    "        _3 = slice_ptr(copy _2, const u64 0, const u64 1);",
+    "        _4 = const u64 0;",
+    "        del(move _3[_4]);",
+    "        _5 = alloc<i32>(const u64 1);",
+    "        _3[_4] = move _5;",
+    "        _6 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _6;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a held address reads as the place of its `addr mut`, a place through a parameter, so the
+    // store through it keeps the fact of `x`: P
+    "fn main.b15(_1 (b): cell mut*) -> void {",
+    "    let _2 (x): i32 mut* own;",
+    "    let _3: i32 mut* own mut*;",
+    "    let _4: i32 mut* own mut*;",
+    "    let _5: i32 mut* own;",
+    "    let _6: i32 mut* own;",
+    "    bb0: {",
+    "        _2 = const zero i32 mut* own;",
+    "        _3 = addr mut(_2);",
+    "        del(move (*_1).0);",
+    "        _4 = addr mut((*_1).0);",
+    "        _5 = alloc<i32>(const u64 1);",
+    "        check(overwrite: (*_4)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_4) = move _5;",
+    "        _6 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _2) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        _2 = move _6;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // a call through a value exposes the frames that its callee operand borrows: the copy of the
+    // field `f` of the borrow local `h` borrows the origins of `h`, which hold the frame of `x`: U
+    "fn main.b16(_1 (q): i32 mut* own mut*) -> void {",
+    "    let _2 (x): i32 mut* own;",
+    "    let _3: i32 mut* own mut*;",
+    "    let _4: i32 mut* own;",
+    "    let _5: i32 mut* own;",
+    "    let _6: i32 mut* own mut*;",
+    "    let _7 (h): hook;",
+    "    let _8: fn (i32 mut* own mut*) void;",
+    "    let _9: void;",
+    "    bb0: {",
+    "        _2 = const zero i32 mut* own;",
+    "        _3 = addr mut(_2);",
+    "        _7 = aggregate hook(const fn main.keep, copy _3);",
+    "        _8 = copy _7.0;",
+    "        _9 = call copy _8(copy _1);",
+    "        del(move _2);",
+    "        _6 = copy global main.P;",
+    "        del(move (*_6));",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        (*_6) = move _4;",
+    "        _5 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _2) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2 = move _5;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // a slice of a span borrows the origins of the index locals of its place too: the index of
+    // `a[k]` derives from the address of `x`: U
+    "fn main.b17() -> void {",
+    "    let _1 (x): i32 mut* own;",
+    "    let _2: i32 mut* own mut*;",
+    "    let _3 (a): i32 mut* own mut@[2];",
+    "    let _4: u64;",
+    "    let _5: i32 mut* own mut@;",
+    "    let _6: u64;",
+    "    let _7: i32 mut* own;",
+    "    let _8: i32 mut* own;",
+    "    bb0: {",
+    "        _1 = const zero i32 mut* own;",
+    "        _3 = const zero i32 mut* own mut@[2];",
+    "        _2 = addr mut(_1);",
+    "        _4 = cast<u64>(copy _2);",
+    "        _5 = slice(_3[_4], const u64 0, const u64 1);",
+    "        _6 = const u64 0;",
+    "        del(move _5[_6]);",
+    "        _7 = alloc<i32>(const u64 1);",
+    "        _5[_6] = move _7;",
+    "        _8 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _8;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // the address of an element of an `own` span borrows nothing, though a copy of the span
+    // borrows `exposed`: the store through the address keeps the fact of `x` while `x` is
+    // exposed: P
+    "fn main.b18() -> void {",
+    "    let _1 (x): i32 mut* own;",
+    "    let _2: i32 mut* own mut*;",
+    "    let _3: u64 mut@ own;",
+    "    let _4 (s): u64 mut@ own;",
+    "    let _5: u64;",
+    "    let _6: u64 mut*;",
+    "    let _7: i32 mut* own;",
+    "    bb0: {",
+    "        _1 = const zero i32 mut* own;",
+    "        _4 = const zero u64 mut@ own;",
+    "        _2 = addr mut(_1);",
+    "        global main.P = copy _2;",
+    "        _3 = call fn main.nums();",
+    "        _4 = move _3;",
+    "        del(move _1);",
+    "        _5 = const u64 0;",
+    "        _6 = addr mut(_4[_5]);",
+    "        (*_6) = const u64 1;",
+    "        _7 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _7;",
+    "        del(move _1);",
+    "        del(move _4);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[18] BORROWS_VERDICTS = {
+    "U/PPP | rxP rtP rtP |",
+    "U/PPP | rxP rtP rtP |",
+    "P/PPP | rxP rtP rtP |",
+    "P/PPP | rxP rtP rtP |",
+    "U/PPP | rxP rtP rtP |",
+    "U/PPP | rxP rtP rtP |",
+    "U/PPP | rxP rtP rtP |",
+    "U/PPP | rxP rtP rtP |",
+    "U/PPP | rtP rtP |",
+    "U/PPP | rxP rtP rtP |",
+    "P/PPP | rxP rtP rtP |",
+    "U/PPP | rxP rtP rtP |",
+    "U/P | rxP rtP |",
+    "U/PPP | rxP rtP rtP |",
+    "PP/PP | rxP rtP rtP |",
+    "U/PPP | rxP rtP rtP |",
+    "U/PPP | rxP rtP rtP |",
+    "P/PPP | rxP rtP rsP rtP |",
+};
+
+fn each_value_borrows_the_origins_of_its_operands() void {
+    expect(BORROWS[..], BORROWS_VERDICTS[..]);
+}
+
+// ---- the exposure of a frame -------------------------------------------------------------------
+
+// A store into storage that a pointer can reach exposes each frame that the value borrows, and a
+// copy of such storage borrows `exposed`. Each case stores through such a copy after the store
+// that exposes `x`, or with no such store.
+string[282] EXPOSURE = {
+    // a store into a global exposes `x`, and a copy of the global borrows `exposed`: U
+    "fn main.e1() -> void {",
+    "    let _1 (x): i32 mut* own;",
+    "    let _2: i32 mut* own mut*;",
+    "    let _3: i32 mut* own;",
+    "    let _4: i32 mut* own;",
+    "    let _5: i32 mut* own mut*;",
+    "    bb0: {",
+    "        _1 = const zero i32 mut* own;",
+    "        _2 = addr mut(_1);",
+    "        global main.P = copy _2;",
+    "        _5 = copy global main.P;",
+    "        del(move (*_5));",
+    "        _3 = alloc<i32>(const u64 1);",
+    "        (*_5) = move _3;",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _4;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // with no store that exposes `x`, the copy of the global cannot hold its address: P
+    "fn main.e2() -> void {",
+    "    let _1 (x): i32 mut* own;",
+    "    let _2: i32 mut* own mut*;",
+    "    let _3: i32 mut* own;",
+    "    let _4: i32 mut* own;",
+    "    let _5: i32 mut* own mut*;",
+    "    bb0: {",
+    "        _1 = const zero i32 mut* own;",
+    "        _2 = addr mut(_1);",
+    "        _5 = copy global main.P;",
+    "        del(move (*_5));",
+    "        _3 = alloc<i32>(const u64 1);",
+    "        (*_5) = move _3;",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _4;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a store through a pointer exposes `x`, and a copy of a place through a pointer borrows
+    // `exposed`: U
+    "fn main.e3(_1 (s): slot mut*) -> void {",
+    "    let _2 (x): i32 mut* own;",
+    "    let _3: i32 mut* own mut*;",
+    "    let _4: i32 mut* own;",
+    "    let _5: i32 mut* own;",
+    "    let _6: i32 mut* own mut*;",
+    "    bb0: {",
+    "        _2 = const zero i32 mut* own;",
+    "        _3 = addr mut(_2);",
+    "        (*_1).0 = copy _3;",
+    "        _6 = copy (*_1).0;",
+    "        del(move (*_6));",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        (*_6) = move _4;",
+    "        _5 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _2) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2 = move _5;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // a store into a memory local exposes `x`, and a copy of a memory local borrows `exposed`: U
+    "fn main.e4() -> void {",
+    "    let _1 (x): i32 mut* own;",
+    "    let _2: i32 mut* own mut*;",
+    "    let _3: i32 mut* own;",
+    "    let _4: i32 mut* own;",
+    "    let _5: i32 mut* own mut*;",
+    "    let _6 (o): i32 mut* own mut*;",
+    "    let _7: i32 mut* own mut* mut*;",
+    "    bb0: {",
+    "        _1 = const zero i32 mut* own;",
+    "        _2 = addr mut(_1);",
+    "        _7 = addr mut(_6);",
+    "        (*_7) = copy _2;",
+    "        _5 = copy _6;",
+    "        del(move (*_5));",
+    "        _3 = alloc<i32>(const u64 1);",
+    "        (*_5) = move _3;",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _4;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a store into a part of a borrow local exposes nothing: no pointer names the storage of the
+    // local, so the copy of the global cannot hold the address of `x`: P
+    "fn main.e5() -> void {",
+    "    let _1 (x): i32 mut* own;",
+    "    let _2: i32 mut* own mut*;",
+    "    let _3: i32 mut* own;",
+    "    let _4: i32 mut* own;",
+    "    let _5: i32 mut* own mut*;",
+    "    let _6 (s): slot;",
+    "    bb0: {",
+    "        _1 = const zero i32 mut* own;",
+    "        _6 = const zero slot;",
+    "        _2 = addr mut(_1);",
+    "        _6.0 = copy _2;",
+    "        _5 = copy global main.P;",
+    "        del(move (*_5));",
+    "        _3 = alloc<i32>(const u64 1);",
+    "        (*_5) = move _3;",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _4;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // the exposure joins by union: `x` is exposed on one edge into the store: U
+    "fn main.e6(_1 (c): bool) -> void {",
+    "    let _2 (x): i32 mut* own;",
+    "    let _3: i32 mut* own mut*;",
+    "    let _4: i32 mut* own;",
+    "    let _5: i32 mut* own;",
+    "    let _6: i32 mut* own mut*;",
+    "    bb0: {",
+    "        _2 = const zero i32 mut* own;",
+    "        _3 = addr mut(_2);",
+    "        switch(copy _1) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        global main.P = copy _3;",
+    "        goto bb2;",
+    "    }",
+    "    bb2: {",
+    "        _6 = copy global main.P;",
+    "        del(move (*_6));",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        (*_6) = move _4;",
+    "        _5 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _2) -> bb3;",
+    "    }",
+    "    bb3: {",
+    "        _2 = move _5;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // a copy of a place of an `own` pointer type borrows no frame, so a store through the copy
+    // keeps the fact of `x` while `x` is exposed: P
+    "fn main.e7(_1 (q): cell mut*, _2 (n): cell mut* own) -> void {",
+    "    let _3 (x): i32 mut* own;",
+    "    let _4: i32 mut* own mut*;",
+    "    let _5: i32 mut* own;",
+    "    let _6: i32 mut*;",
+    "    let _7: void;",
+    "    bb0: {",
+    "        _3 = const zero i32 mut* own;",
+    "        _4 = addr mut(_3);",
+    "        global main.P = copy _4;",
+    "        _6 = copy (*_1).0;",
+    "        (*_6) = const i32 0;",
+    "        _5 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _3) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _3 = move _5;",
+    "        del(move _3);",
+    "        dead(_3);",
+    "        _7 = call fn main.drop(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // a store through an `own` pointer keeps the fact of `x` while `x` is exposed: P
+    "fn main.e8(_1 (n): cell mut* own) -> void {",
+    "    let _2 (x): i32 mut* own;",
+    "    let _3: i32 mut* own mut*;",
+    "    let _4: i32 mut* own;",
+    "    let _5: void;",
+    "    bb0: {",
+    "        _2 = const zero i32 mut* own;",
+    "        _3 = addr mut(_2);",
+    "        global main.P = copy _3;",
+    "        (*_1).1 = const u64 0;",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _2) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2 = move _4;",
+    "        del(move _2);",
+    "        dead(_2);",
+    "        _5 = call fn main.drop(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a result that is no aggregate is a borrow local, which no pointer names, so a store of the
+    // address of `x` into it exposes nothing: P
+    "fn main.e9() -> i32 mut* own mut* {",
+    "    let _1 (x): i32 mut* own;",
+    "    let _2: i32 mut* own mut*;",
+    "    let _3: i32 mut* own;",
+    "    let _4: i32 mut* own;",
+    "    let _5: i32 mut* own mut*;",
+    "    bb0: {",
+    "        _1 = const zero i32 mut* own;",
+    "        _2 = addr mut(_1);",
+    "        _0 = copy _2;",
+    "        _5 = copy global main.P;",
+    "        del(move (*_5));",
+    "        _3 = alloc<i32>(const u64 1);",
+    "        (*_5) = move _3;",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _4;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // the store that exposes `x` stands after the store through the copy of the global in the
+    // body of a loop, so the second round of the store can write `x`: U
+    "fn main.e10(_1 (c): bool) -> void {",
+    "    let _2 (x): i32 mut* own;",
+    "    let _3: i32 mut* own mut*;",
+    "    let _4: i32 mut* own;",
+    "    let _5: i32 mut* own;",
+    "    let _6: i32 mut* own mut*;",
+    "    bb0: {",
+    "        _2 = const zero i32 mut* own;",
+    "        _3 = addr mut(_2);",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        switch(copy _1) -> [true: bb2, otherwise: bb3];",
+    "    }",
+    "    bb2: {",
+    "        _6 = copy global main.P;",
+    "        del(move (*_6));",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        (*_6) = move _4;",
+    "        global main.P = copy _3;",
+    "        goto bb1;",
+    "    }",
+    "    bb3: {",
+    "        _5 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _2) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        _2 = move _5;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // a store whose last load reads a pointer in memory, with no copy into a local: it can write
+    // `x` once `x` is exposed: U
+    "fn main.e11(_1 (s): slot mut*) -> void {",
+    "    let _2 (x): i32 mut* own;",
+    "    let _3: i32 mut* own mut*;",
+    "    let _4: i32 mut* own;",
+    "    bb0: {",
+    "        _2 = const zero i32 mut* own;",
+    "        _3 = addr mut(_2);",
+    "        (*_1).0 = copy _3;",
+    "        (*(*_1).0) = const zero i32 mut* own;",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _2) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2 = move _4;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // the same store with no exposure of `x`: P
+    "fn main.e12(_1 (s): slot mut*) -> void {",
+    "    let _2 (x): i32 mut* own;",
+    "    let _3: i32 mut* own mut*;",
+    "    let _4: i32 mut* own;",
+    "    bb0: {",
+    "        _2 = const zero i32 mut* own;",
+    "        _3 = addr mut(_2);",
+    "        (*(*_1).0) = const zero i32 mut* own;",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _2) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2 = move _4;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[12] EXPOSURE_VERDICTS = {
+    "U/PPP | rxP rtP rtP |",
+    "P/PPP | rxP rtP rtP |",
+    "U/PPP | rxP rtP rtP |",
+    "U/PPP | rxP rtP rtP |",
+    "P/PPP | rxP rtP rtP |",
+    "U/PPP | rxP rtP rtP |",
+    "P/P | dxP rnP rtP |",
+    "P/P | dxP rnP rtP |",
+    "P/PPP | rxP rtP rtP |",
+    "U/PPP | rxP rtP rtP |",
+    "U/UP | rxP rtP |",
+    "P/UP | rxP rtP |",
+};
+
+fn a_store_into_memory_exposes_each_frame_of_its_value() void {
+    expect(EXPOSURE[..], EXPOSURE_VERDICTS[..]);
+}
+
+// ---- calls -------------------------------------------------------------------------------------
+
+// A call exposes each frame of its operands, and its result borrows `exposed`. A call kills each
+// fact of a memory local (D17.11 kill rule 5), so each case empties `x` again after the call, and
+// a store through a pointer after it decides the check.
+string[124] CALLS = {
+    // an argument exposes `x`, and the callee keeps it in `P`: the hand case k2 of the design: U
+    "fn main.c1() -> void {",
+    "    let _1 (x): i32 mut* own;",
+    "    let _2: i32 mut* own mut*;",
+    "    let _3: i32 mut* own;",
+    "    let _4: i32 mut* own;",
+    "    let _5: i32 mut* own mut*;",
+    "    let _6: void;",
+    "    bb0: {",
+    "        _1 = const zero i32 mut* own;",
+    "        _2 = addr mut(_1);",
+    "        _6 = call fn main.keep(copy _2);",
+    "        del(move _1);",
+    "        _5 = copy global main.P;",
+    "        del(move (*_5));",
+    "        _3 = alloc<i32>(const u64 1);",
+    "        (*_5) = move _3;",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _4;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a call with no operand that borrows `x` exposes nothing: P
+    "fn main.c2() -> void {",
+    "    let _1 (x): i32 mut* own;",
+    "    let _2: i32 mut* own mut*;",
+    "    let _3: i32 mut* own;",
+    "    let _4: i32 mut* own;",
+    "    let _5: i32 mut* own mut*;",
+    "    let _6: void;",
+    "    bb0: {",
+    "        _1 = const zero i32 mut* own;",
+    "        _2 = addr mut(_1);",
+    "        _6 = call fn main.g();",
+    "        del(move _1);",
+    "        _5 = copy global main.P;",
+    "        del(move (*_5));",
+    "        _3 = alloc<i32>(const u64 1);",
+    "        (*_5) = move _3;",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _4;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // the result of a call borrows `exposed`, and the argument exposed `x`: U
+    "fn main.c3() -> void {",
+    "    let _1 (x): i32 mut* own;",
+    "    let _2: i32 mut* own mut*;",
+    "    let _3: i32 mut* own;",
+    "    let _4: i32 mut* own;",
+    "    let _5: i32 mut* own mut*;",
+    "    bb0: {",
+    "        _1 = const zero i32 mut* own;",
+    "        _2 = addr mut(_1);",
+    "        _5 = call fn main.pass(copy _2);",
+    "        del(move _1);",
+    "        del(move (*_5));",
+    "        _3 = alloc<i32>(const u64 1);",
+    "        (*_5) = move _3;",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _4;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // the result borrows `exposed`, but no store and no call exposed `x`: P
+    "fn main.c4(_1 (q): i32 mut* own mut*) -> void {",
+    "    let _2 (x): i32 mut* own;",
+    "    let _3: i32 mut* own mut*;",
+    "    let _4: i32 mut* own;",
+    "    let _5: i32 mut* own;",
+    "    let _6: i32 mut* own mut*;",
+    "    bb0: {",
+    "        _2 = const zero i32 mut* own;",
+    "        _3 = addr mut(_2);",
+    "        _6 = call fn main.pass(copy _1);",
+    "        del(move _2);",
+    "        del(move (*_6));",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        (*_6) = move _4;",
+    "        _5 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _2) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2 = move _5;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // the callee writes the address of `x` into the memory local `o` through its out-parameter, and
+    // a copy of `o` borrows `exposed`: the hand case n4 of the design for rule (a): U
+    "fn main.c5() -> void {",
+    "    let _1 (x): i32 mut* own;",
+    "    let _2: i32 mut* own mut*;",
+    "    let _3: i32 mut* own;",
+    "    let _4: i32 mut* own;",
+    "    let _5: i32 mut* own mut*;",
+    "    let _6 (o): i32 mut* own mut*;",
+    "    let _7: i32 mut* own mut* mut*;",
+    "    let _8: void;",
+    "    bb0: {",
+    "        _1 = const zero i32 mut* own;",
+    "        _2 = addr mut(_1);",
+    "        _7 = addr mut(_6);",
+    "        _8 = call fn main.give(copy _2, copy _7);",
+    "        del(move _1);",
+    "        _5 = copy _6;",
+    "        del(move (*_5));",
+    "        _3 = alloc<i32>(const u64 1);",
+    "        (*_5) = move _3;",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1 = move _4;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[5] CALLS_VERDICTS = {
+    "U/PPP | rxP rtP rtP |",
+    "P/PPP | rxP rtP rtP |",
+    "U/PPP | rxP rtP rtP |",
+    "P/PPP | rxP rtP rtP |",
+    "U/PPP | rxP rtP rtP |",
+};
+
+fn a_call_exposes_its_operands_and_its_result_borrows_exposed() void {
+    expect(CALLS[..], CALLS_VERDICTS[..]);
+}
+
+// ---- a store straight into a memory local ------------------------------------------------------
+
+// A store straight into a memory local kills a fact through a pointer only when the pointer can
+// hold the address of the local (D17.11 kill rule 4).
+string[212] STRAIGHT = {
+    // the pointer holds the address of `x`: U
+    "fn main.s1() -> void {",
+    "    let _1 (x): i32 mut* own;",
+    "    let _2: i32 mut* own mut*;",
+    "    let _3: i32 mut* own;",
+    "    let _4: i32 mut* own;",
+    "    bb0: {",
+    "        _1 = const zero i32 mut* own;",
+    "        _2 = addr mut(_1);",
+    "        del(move (*_2));",
+    "        _3 = alloc<i32>(const u64 1);",
+    "        _1 = move _3;",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        check(overwrite: (*_2)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_2) = move _4;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // the pointer is a parameter: P
+    "fn main.s2(_1 (q): i32 mut* own mut*) -> void {",
+    "    let _2 (x): i32 mut* own;",
+    "    let _3: i32 mut* own mut*;",
+    "    let _4: i32 mut* own;",
+    "    let _5: i32 mut* own;",
+    "    bb0: {",
+    "        _2 = const zero i32 mut* own;",
+    "        _3 = addr mut(_2);",
+    "        del(move (*_1));",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        _2 = move _4;",
+    "        _5 = alloc<i32>(const u64 1);",
+    "        check(overwrite: (*_1)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1) = move _5;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // the pointer borrows `exposed` and a store exposed `x`: U
+    "fn main.s3() -> void {",
+    "    let _1 (x): i32 mut* own;",
+    "    let _2: i32 mut* own mut*;",
+    "    let _3: i32 mut* own;",
+    "    let _4: i32 mut* own;",
+    "    let _5: i32 mut* own mut*;",
+    "    bb0: {",
+    "        _1 = const zero i32 mut* own;",
+    "        _2 = addr mut(_1);",
+    "        global main.P = copy _2;",
+    "        _5 = copy global main.P;",
+    "        del(move (*_5));",
+    "        _3 = alloc<i32>(const u64 1);",
+    "        _1 = move _3;",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        check(overwrite: (*_5)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_5) = move _4;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // the pointer borrows `exposed`, but nothing exposed `x`: P
+    "fn main.s4() -> void {",
+    "    let _1 (x): i32 mut* own;",
+    "    let _2: i32 mut* own mut*;",
+    "    let _3: i32 mut* own;",
+    "    let _4: i32 mut* own;",
+    "    let _5: i32 mut* own mut*;",
+    "    bb0: {",
+    "        _1 = const zero i32 mut* own;",
+    "        _2 = addr mut(_1);",
+    "        _5 = copy global main.P;",
+    "        del(move (*_5));",
+    "        _3 = alloc<i32>(const u64 1);",
+    "        _1 = move _3;",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        check(overwrite: (*_5)) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_5) = move _4;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // the last load reads an `own` pointer: P
+    "fn main.s5(_1 (n): cell mut* own) -> void {",
+    "    let _2 (x): i32 mut* own;",
+    "    let _3: i32 mut* own mut*;",
+    "    let _4: i32 mut* own;",
+    "    let _5: i32 mut* own;",
+    "    let _6: void;",
+    "    bb0: {",
+    "        _2 = const zero i32 mut* own;",
+    "        _3 = addr mut(_2);",
+    "        global main.P = copy _3;",
+    "        del(move (*_1).0);",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        _2 = move _4;",
+    "        _5 = alloc<i32>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _5;",
+    "        del(move _2);",
+    "        dead(_2);",
+    "        _6 = call fn main.drop(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // an element through a slice of the memory array `a` dies at a store into an element of `a`: U
+    "fn main.s6() -> void {",
+    "    let _1 (a): i32 mut* own[2];",
+    "    let _2: i32 mut* own mut@;",
+    "    let _3: i32 mut* own;",
+    "    let _4: i32 mut* own;",
+    "    let _5: u64;",
+    "    let _6: u64;",
+    "    bb0: {",
+    "        _1 = const zero i32 mut* own[2];",
+    "        _2 = slice mut(_1, const u64 0, const u64 2);",
+    "        _5 = const u64 0;",
+    "        _6 = const u64 1;",
+    "        del(move _2[_5]);",
+    "        _3 = alloc<i32>(const u64 1);",
+    "        _1[_6] = move _3;",
+    "        _4 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _2[_5]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _2[_5] = move _4;",
+    "        return;",
+    "    }",
+    "}",
+    // a global has no frame: a store through a parameter kills its fact, as before the refinement:
+    // U
+    "fn main.s7(_1 (b): cell mut*) -> void {",
+    "    let _2: i32 mut* own;",
+    "    let _3: i32 mut* own;",
+    "    bb0: {",
+    "        del(move global main.G);",
+    "        del(move (*_1).0);",
+    "        _2 = alloc<i32>(const u64 1);",
+    "        (*_1).0 = move _2;",
+    "        _3 = alloc<i32>(const u64 1);",
+    "        check(overwrite: global main.G) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        global main.G = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // an aggregate result is the storage of the caller and has no frame either: a store through a
+    // parameter kills the fact of its field, beside the memory local `y`, which has a frame: U
+    "fn main.s8(_1 (b): cell mut*) -> pair {",
+    "    let _2: i32 mut* own;",
+    "    let _3: i32 mut* own;",
+    "    let _4 (y): u64;",
+    "    let _5: u64*;",
+    "    bb0: {",
+    "        _5 = addr(_4);",
+    "        _0 = const zero pair;",
+    "        del(move (*_1).0);",
+    "        _2 = alloc<i32>(const u64 1);",
+    "        (*_1).0 = move _2;",
+    "        _3 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _0.0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _0.0 = move _3;",
+    "        return;",
+    "    }",
+    "}",
+    // the span local `s` is memory, so the pointer of the fact `s[k]` is in memory: a store into
+    // `x` kills the fact once `x` is exposed: U. The store into `s[k]` can write `x` in turn, so
+    // the exit of `x` is unproved
+    "fn main.s9() -> void {",
+    "    let _1 (x): i32 mut* own;",
+    "    let _2: i32 mut* own mut*;",
+    "    let _3 (s): i32 mut* own mut@;",
+    "    let _4: i32 mut* own mut@ mut*;",
+    "    let _5: u64;",
+    "    let _6: i32 mut* own;",
+    "    bb0: {",
+    "        _1 = const zero i32 mut* own;",
+    "        _2 = addr mut(_1);",
+    "        _4 = addr mut(_3);",
+    "        global main.P = copy _2;",
+    "        _5 = const u64 0;",
+    "        del(move _3[_5]);",
+    "        _1 = const null i32 mut* own;",
+    "        _6 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _3[_5]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _3[_5] = move _6;",
+    "        return;",
+    "    }",
+    "}",
+    // the same with no exposure of `x`: P
+    "fn main.s10() -> void {",
+    "    let _1 (x): i32 mut* own;",
+    "    let _2: i32 mut* own mut*;",
+    "    let _3 (s): i32 mut* own mut@;",
+    "    let _4: i32 mut* own mut@ mut*;",
+    "    let _5: u64;",
+    "    let _6: i32 mut* own;",
+    "    bb0: {",
+    "        _1 = const zero i32 mut* own;",
+    "        _2 = addr mut(_1);",
+    "        _4 = addr mut(_3);",
+    "        _5 = const u64 0;",
+    "        del(move _3[_5]);",
+    "        _1 = const null i32 mut* own;",
+    "        _6 = alloc<i32>(const u64 1);",
+    "        check(overwrite: _3[_5]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _3[_5] = move _6;",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[10] STRAIGHT_VERDICTS = {
+    "U/PPP | rxP rtP rtP |",
+    "P/PPP | rxP rtP rtP |",
+    "U/PPP | rxP rtP rtP |",
+    "P/PPP | rxP rtP rtP |",
+    "P/PPP | dxP rnP rtP rtP |",
+    "U/PPP | rtP rtP |",
+    "U/PPP | rtP rtP |",
+    "U/PPP | rtP rtP |",
+    "U/PP | rxU rtP |",
+    "P/PP | rxP rtP |",
+};
+
+fn a_straight_store_kills_a_fact_only_through_a_pointer_that_can_reach_it() void {
+    expect(STRAIGHT[..], STRAIGHT_VERDICTS[..]);
+}
+
+// ---- lowered source ----------------------------------------------------------------------------
+
+// The steps over fort source. The verdict of a function is each obligation of part 2 of the leak
+// rule (write_all), then `ok` when the function has no error of D17.11 and of part 1, and else
+// `error` with the count of the checks and the stores that the pass does not prove and the count
+// of the exits. The lowering puts a store right after its check, so one store of the source that
+// the pass does not prove counts twice. Each case has one obligation that the refinement decides.
+string[109] SOURCE = {
+    "struct cell {",
+    "    i32 mut* own o;",
+    "    u64 v;",
+    "}",
+    "struct slot {",
+    "    i32 mut* own mut* at;",
+    "}",
+    "i32 mut* own mut* mut P = null;",
+    "fn keep(i32 mut* own mut* p) void {",
+    "    P = p;",
+    "}",
+    "fn pass(i32 mut* own mut* p) i32 mut* own mut* {",
+    "    return p;",
+    "}",
+    "fn give(i32 mut* own mut* p, i32 mut* own mut* mut* out) void {",
+    "    *out = p;",
+    "}",
+    "fn drop(cell mut* own c) void {",
+    "    del(c->o);",
+    "    del(c);",
+    "}",
+    // ok: the store through the parameter `q` keeps the fact of `x`
+    "fn through_param(cell mut* q) void {",
+    "    i32 mut* own mut x = null;",
+    "    i32 mut* own mut* px = &x;",
+    "    del(q->o);",
+    "    q->o = new(i32);",
+    "    x = new(i32);",
+    "    del(x);",
+    "}",
+    // error: `keep(&x)` exposes `x`, `p = P` borrows `exposed`, and the store through `p` kills
+    // the fact of `x`: the hand case k2 of the design
+    "fn k2() void {",
+    "    i32 mut* own mut x = new(i32);",
+    "    keep(&x);",
+    "    del(x);",
+    "    i32 mut* own mut* p = P;",
+    "    del(*p);",
+    "    *p = new(i32);",
+    "    x = new(i32);",
+    "    del(x);",
+    "}",
+    // error: the callee writes the address of `x` into the memory local `o`, and a copy of `o`
+    // borrows `exposed`: the hand case n4 of the design for rule (a)
+    "fn n4() void {",
+    "    i32 mut* own mut x = null;",
+    "    i32 mut* own mut* mut o = null;",
+    "    give(&x, &o);",
+    "    del(x);",
+    "    i32 mut* own mut* p = o;",
+    "    del(*p);",
+    "    *p = new(i32);",
+    "    x = new(i32);",
+    "    del(x);",
+    "}",
+    // error: the result of a call borrows `exposed`
+    "fn result() void {",
+    "    i32 mut* own mut x = null;",
+    "    i32 mut* own mut* p = pass(&x);",
+    "    del(x);",
+    "    del(*p);",
+    "    *p = new(i32);",
+    "    x = new(i32);",
+    "    del(x);",
+    "}",
+    // error: a store into a global exposes `x` with no call
+    "fn global_store() void {",
+    "    i32 mut* own mut x = null;",
+    "    P = &x;",
+    "    i32 mut* own mut* p = P;",
+    "    del(*p);",
+    "    *p = new(i32);",
+    "    x = new(i32);",
+    "    del(x);",
+    "}",
+    // ok: a struct local that is no memory holds the address, so nothing exposes `x`
+    "fn field_local() void {",
+    "    i32 mut* own mut x = null;",
+    "    slot s = slot{&x};",
+    "    i32 mut* own mut* p = P;",
+    "    del(*p);",
+    "    *p = new(i32);",
+    "    x = new(i32);",
+    "    del(x);",
+    "}",
+    // ok: a store through an `own` pointer cannot write `x`, though `x` is exposed
+    "fn own_store(cell mut* own n) void {",
+    "    {",
+    "        i32 mut* own mut x = null;",
+    "        P = &x;",
+    "        n->v = 1;",
+    "        x = new(i32);",
+    "        del(x);",
+    "    }",
+    "    drop(move(n));",
+    "}",
+    // ok: the exit of the memory owner `x` keeps its fact past the store through `q` (part 1)
+    "fn exit_kept(cell mut* q) void {",
+    "    i32 mut* own mut x = new(i32);",
+    "    i32 mut* own mut* px = &x;",
+    "    del(x);",
+    "    q->v = 1;",
+    "}",
+    // error: the store through a copy of `P` can write `x`, which `P = &x` exposed (part 1)
+    "fn exit_exposed() void {",
+    "    i32 mut* own mut x = new(i32);",
+    "    P = &x;",
+    "    del(x);",
+    "    u64 mut* w = cast(P, u64 mut*);",
+    "    *w = 0;",
+    "}",
+    // dP ok: the store into the memory local `k` keeps the fact of `c->o`, which `c` reaches
+    // through an `own` pointer (part 2)
+    "fn inner_kept(cell mut* own c) void {",
+    "    i32 mut* own o = move(c->o);",
+    "    u64 mut k = 0;",
+    "    u64 mut* pk = &k;",
+    "    k = 1;",
+    "    del(c);",
+    "    del(o);",
+    "    *pk = 2;",
+    "}",
+};
+
+string[10] SOURCE_NAMES = {
+    "through_param", "k2", "n4", "result", "global_store", "field_local", "own_store",
+    "exit_kept", "exit_exposed", "inner_kept",
+};
+
+string[10] SOURCE_VERDICTS = {
+    "ok", "error 2 0", "error 2 0", "error 2 0", "error 2 0", "ok", "ok", "ok", "error 0 1",
+    "dP ok",
+};
+
+// Lowers the function `name` of the checked source of `e` into *out, and holds that the verifier
+// accepts it.
+fn lower(lower_env.env mut* e, string name, fir.func mut* out) void {
+    fir_lower.report mut why = fir_lower.report{};
+    if (!fir_lower.lower_function(&e->c.ck, lower_env.decl(e, name), out, &why)) {
+        panic("alias_test: the lowering refuses the function");
+    }
+    pass_env.verified(e, out, "alias_test: the verifier refuses the lowering");
+}
+
+fn each_step_holds_over_lowered_source() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, SOURCE[..], true);
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    strbuf.str_buf mut all = strbuf.create();
+    defer strbuf.free(&all);
+    u64 mut k = 0;
+    while (k < SOURCE_NAMES.len) {
+        fir.func mut f = fir.func{};
+        lower(&e, SOURCE_NAMES[k], &f);
+        prover.proof mut p = prover.prove(&f);
+        write_all(&f, &p, &all);
+        strbuf.clear(&got);
+        string inners = strbuf.view(&all)[str_after_last(strbuf.view(&all), '|')..];
+        if (inners.len > 0) {
+            strbuf.append(&got, inners[1..]);
+            strbuf.push(&got, ' ');
+        }
+        if (prover.has_error(&p)) {
+            strbuf.append(&got, "error ");
+            strbuf.append_u64(&got, cast(p.unproved, u64));
+            strbuf.push(&got, ' ');
+            strbuf.append_u64(&got, cast(p.leaks, u64));
+        } else {
+            strbuf.append(&got, "ok");
+        }
+        prover.free(&p);
+        fir.func_free(&f);
+        if (strbuf.view(&got) != SOURCE_VERDICTS[k]) {
+            eprintln(SOURCE_NAMES[k], " gives ", strbuf.view(&got), " and not ",
+                     SOURCE_VERDICTS[k]);
+            panic("alias_test: a lowered case gives another verdict");
+        }
+        k += 1;
+    }
+}
+
+// The position after the last `c` of `s`.
+fn str_after_last(string s, char c) u64 {
+    u64 mut at = s.len;
+    while (at > 0 && s[at - 1] != c) {
+        at -= 1;
+    }
+    return at;
+}
+
+// ---- the charge --------------------------------------------------------------------------------
+
+// A loop whose back edge brings the address of `x` into `_4`. The state holds 9 bits: four borrow
+// locals (`_0`, `c`, `_3`, `_4`) times two origins, the frame of `x` and `exposed`, and the
+// exposure of `x`. The fixpoint takes bb0 to bb4, then bb1 again, whose state grew on the back
+// edge, then bb2, bb3 and bb4: 15 statements and terminators, which charge 15 times 9.
+string[24] CHARGE = {
+    "fn main.ch(_1 (c): bool) -> void {",
+    "    let _2 (x): i32 mut* own;",
+    "    let _3: i32 mut* own mut*;",
+    "    let _4: i32 mut* own mut*;",
+    "    bb0: {",
+    "        _2 = const zero i32 mut* own;",
+    "        _3 = addr mut(_2);",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        switch(copy _1) -> [true: bb2, otherwise: bb3];",
+    "    }",
+    "    bb2: {",
+    "        _4 = copy _3;",
+    "        goto bb1;",
+    "    }",
+    "    bb3: {",
+    "        check(overwrite: _2) -> bb4;",
+    "    }",
+    "    bb4: {",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+// Each transfer of a block charges its statements and its terminator times the bits of the state:
+// a function with no memory local gets no map and no charge.
+fn each_transfer_of_a_block_charges_its_units() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    fir.module mut m = pass_env.parse(&e, PRELUDE[..], CHARGE[..]);
+    defer fir.module_free(&m);
+    fir.func* f = &m.funcs.items[0];
+    pass_env.verified(&e, f, "alias_test: the verifier refuses the input");
+    prover.proof mut p = prover.prove(f);
+    defer prover.free(&p);
+    if (p.alias_work != 135 || !p.alias_on) {
+        eprintln("charge ", p.alias_work, " and not 135");
+        panic("alias_test: the charge differs");
+    }
+    // s7 of STRAIGHT has no memory local
+    fir.module mut none = pass_env.parse(&e, PRELUDE[..], STRAIGHT[..]);
+    defer fir.module_free(&none);
+    prover.proof mut q = prover.prove(&none.funcs.items[6]);
+    defer prover.free(&q);
+    assert(q.alias_work == 0 && !q.alias_on);
+}
+
+// ---- the limit ---------------------------------------------------------------------------------
+
+// The filler temporaries of write_limit.
+u64 LIMIT_TEMPS = 676;
+
+// Writes a function of two blocks with `fillers` stores of a constant into 676 temporaries. Its
+// state holds 2048 bits: 682 borrow locals times three origins, the frames of `x` and `y` and
+// `exposed`, and the exposures of `x` and `y`. Its statements and terminators are 11 more than
+// `fillers`, and each block takes one transfer, so 8181 fillers charge 8192 times 2048, which is
+// 2^24, and 8182 charge 2048 more. The store through the parameter `b` keeps the fact of `x` only
+// within the limit.
+fn write_limit(u64 fillers, strbuf.str_buf mut* out) void {
+    strbuf.clear(out);
+    strbuf.append(out, "fn main.limit(_1 (b): cell mut*) -> void {\n");
+    strbuf.append(out, "    let _2 (x): i32 mut* own;\n    let _3 (y): u64;\n");
+    strbuf.append(out, "    let _4: i32 mut* own mut*;\n    let _5: u64*;\n");
+    strbuf.append(out, "    let _6: i32 mut* own;\n    let _7: i32 mut* own;\n");
+    u64 mut k = 0;
+    while (k < LIMIT_TEMPS) {
+        strbuf.append(out, "    let _");
+        strbuf.append_u64(out, 8 + k);
+        strbuf.append(out, ": u64;\n");
+        k += 1;
+    }
+    strbuf.append(out, "    bb0: {\n        _2 = const zero i32 mut* own;\n");
+    strbuf.append(out, "        _4 = addr mut(_2);\n        _5 = addr(_3);\n");
+    strbuf.append(out, "        del(move (*_1).0);\n        _7 = alloc<i32>(const u64 1);\n");
+    strbuf.append(out, "        (*_1).0 = move _7;\n        _6 = alloc<i32>(const u64 1);\n");
+    k = 0;
+    while (k < fillers) {
+        strbuf.append(out, "        _");
+        strbuf.append_u64(out, 8 + k % LIMIT_TEMPS);
+        strbuf.append(out, " = const u64 0;\n");
+        k += 1;
+    }
+    strbuf.append(out, "        check(overwrite: _2) -> bb1;\n    }\n");
+    strbuf.append(out, "    bb1: {\n        _2 = move _6;\n        del(move _2);\n");
+    strbuf.append(out, "        return;\n    }\n}\n");
+}
+
+// Parses the one function of `text`, proves it, and holds its charge and its verdicts.
+fn expect_limit(lower_env.env mut* e, fir_parse.prelude pre, string text, u64 work, string want)
+    void {
+    fir.module mut m = fir_parse.parse_module(&e->c.m.s, "t.fir", text, pre);
+    defer fir.module_free(&m);
+    assert(check_env.errors(&e->c) == 0 && m.funcs.len == 1);
+    fir.func* f = &m.funcs.items[0];
+    pass_env.verified(e, f, "alias_test: the verifier refuses the generated function");
+    prover.proof mut p = prover.prove(f);
+    defer prover.free(&p);
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    write_all(f, &p, &got);
+    if (p.alias_work != work || strbuf.view(&got) != want) {
+        eprintln("charge ", p.alias_work, " and not ", work, "; ", strbuf.view(&got), " and not ",
+                 want);
+        panic("alias_test: the limit gives another verdict");
+    }
+    assert(p.alias_on == (work <= alias.WORK_LIMIT));
+}
+
+// The filler temporaries of write_loop.
+u64 LOOP_TEMPS = 676;
+
+// Writes a function whose loop moves the frame of `y` one step along a chain of `chain` named
+// pointer locals on each turn, with `fillers` stores of a constant into 676 temporaries in the
+// body of the loop. The fixpoint transfers the blocks of the loop once for each turn, so a later
+// pass can pass the limit while the first pass fits. The store through the parameter `b` keeps the
+// fact of `x` only within the limit. A person derived the charges apart from the compiler, with a
+// model of the worklist: each block in order, then each successor of a block whose state changed,
+// first in first out; the bits are 3 times the 7 + `chain` + 676 borrow locals, plus 2; the blocks
+// take 4, 1, `chain` + `fillers` + 2, 4 and 3 units; and each turn moves the frame of `y` one link,
+// so the body changes `chain` + 1 times. 3 links and 676 stores charge 7104940, with a first pass
+// of 1427580; 8 links and 900 stores have a first pass of 1913150 and stop at 17137425, past 2^24.
+fn write_loop(u64 chain, u64 fillers, strbuf.str_buf mut* out) void {
+    strbuf.clear(out);
+    strbuf.append(out, "fn main.loop(_1 (b): cell mut*, _2 (c): bool) -> void {\n");
+    strbuf.append(out, "    let _3 (x): i32 mut* own;\n    let _4 (y): u64;\n");
+    strbuf.append(out, "    let _5: i32 mut* own mut*;\n    let _6 (c0): u64 mut*;\n");
+    strbuf.append(out, "    let _7: i32 mut* own;\n    let _8: i32 mut* own;\n");
+    u64 mut k = 1;
+    while (k <= chain) {
+        strbuf.append(out, "    let _");
+        strbuf.append_u64(out, 8 + k);
+        strbuf.append(out, " (c");
+        strbuf.append_u64(out, k);
+        strbuf.append(out, "): u64 mut*;\n");
+        k += 1;
+    }
+    k = 0;
+    while (k < LOOP_TEMPS) {
+        strbuf.append(out, "    let _");
+        strbuf.append_u64(out, 9 + chain + k);
+        strbuf.append(out, ": u64;\n");
+        k += 1;
+    }
+    strbuf.append(out, "    bb0: {\n        _3 = const zero i32 mut* own;\n");
+    strbuf.append(out, "        _5 = addr mut(_3);\n        del(move (*_1).0);\n");
+    strbuf.append(out, "        goto bb1;\n    }\n");
+    strbuf.append(out, "    bb1: {\n");
+    strbuf.append(out, "        switch(copy _2) -> [true: bb2, otherwise: bb3];\n    }\n");
+    strbuf.append(out, "    bb2: {\n");
+    k = chain;
+    while (k > 0) {
+        strbuf.append(out, "        _");
+        strbuf.append_u64(out, 8 + k);
+        strbuf.append(out, " = copy _");
+        if (k == 1) {
+            strbuf.append_u64(out, 6);
+        } else {
+            strbuf.append_u64(out, 7 + k);
+        }
+        strbuf.append(out, ";\n");
+        k -= 1;
+    }
+    strbuf.append(out, "        _6 = addr mut(_4);\n");
+    k = 0;
+    while (k < fillers) {
+        strbuf.append(out, "        _");
+        strbuf.append_u64(out, 9 + chain + k % LOOP_TEMPS);
+        strbuf.append(out, " = const u64 0;\n");
+        k += 1;
+    }
+    strbuf.append(out, "        goto bb1;\n    }\n");
+    strbuf.append(out, "    bb3: {\n        _7 = alloc<i32>(const u64 1);\n");
+    strbuf.append(out, "        (*_1).0 = move _7;\n        _8 = alloc<i32>(const u64 1);\n");
+    strbuf.append(out, "        check(overwrite: _3) -> bb4;\n    }\n");
+    strbuf.append(out, "    bb4: {\n        _3 = move _8;\n        del(move _3);\n");
+    strbuf.append(out, "        return;\n    }\n}\n");
+}
+
+// The charge 2^24 keeps the map, and one more transfer of 2048 bits passes the limit: the kill
+// rules then read each place through a pointer as a possible place of `x`, as before the
+// refinement, and no verdict of D17.11 turns into an error that the refinement did not give. When
+// the first transfer alone passes the limit, the map takes no rank and no state, and its work is
+// the statements and terminators times the bits, 8211 times 2048, and not the charge of that
+// transfer, 8208 times 2048: the bound of the memory of the state. A loop whose first pass fits
+// passes the limit on a later turn and turns the map off there.
+fn the_limit_falls_back_to_the_kill_rules_before_the_refinement() void {
+    assert(alias.WORK_LIMIT == 16777216);
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, PRELUDE[..], true);
+    fir_parse.prelude pre = fir_parse.prelude{check_env.module_at(&e.c, "main"), &e.c.ck};
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    write_limit(8181, &text);
+    expect_limit(&e, pre, strbuf.view(&text), 16777216, "P/PPP | rxP rtP rtP |");
+    write_limit(8182, &text);
+    expect_limit(&e, pre, strbuf.view(&text), 16779264, "U/PPP | rxP rtP rtP |");
+    write_limit(8200, &text);
+    expect_limit(&e, pre, strbuf.view(&text), 16816128, "U/PPP | rxP rtP rtP |");
+    write_loop(3, 676, &text);
+    expect_limit(&e, pre, strbuf.view(&text), 7104940, "P/PPP | rxP rtP rtP |");
+    write_loop(8, 900, &text);
+    expect_limit(&e, pre, strbuf.view(&text), 17137425, "U/PPP | rxP rtP rtP |");
+}
+
+fn main() i32 {
+    each_value_borrows_the_origins_of_its_operands();
+    println("borrows ok");
+    a_store_into_memory_exposes_each_frame_of_its_value();
+    println("exposure ok");
+    a_call_exposes_its_operands_and_its_result_borrows_exposed();
+    println("calls ok");
+    a_straight_store_kills_a_fact_only_through_a_pointer_that_can_reach_it();
+    println("straight ok");
+    each_step_holds_over_lowered_source();
+    println("source ok");
+    each_transfer_of_a_block_charges_its_units();
+    println("charge ok");
+    the_limit_falls_back_to_the_kill_rules_before_the_refinement();
+    println("limit ok");
+    return 0;
+}

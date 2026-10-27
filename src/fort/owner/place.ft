@@ -57,9 +57,21 @@ struct step {
     bool header;
 }
 
+/// What the last load of a path reads: the pointer of its last deref, or the pointer field of the
+/// span or `string` of its last index on one (owner.alias). `vk_none` is a path with neither, in
+/// fixed storage. `vk_owner` is an `own` pointer, which designates the start of an allocation or
+/// null, so the place lies in no frame. `vk_local` is fixed storage of the local `via_local`,
+/// which is no memory. `vk_other` is each other pointer: one in memory, in a global or in `_0`.
+enum via_kind {
+    vk_none,
+    vk_owner,
+    vk_local,
+    vk_other,
+}
+
 // A place with the key of each index in place of its index local. Entries `first` to
 // `first + len - 1` of the steps of the survey hold its projections. `tracked` says that the
-// path is a tracked place.
+// path is a tracked place. `via` and `via_local` say what its last load reads.
 struct path {
     fir.base_kind base;
     u32 local;
@@ -67,6 +79,8 @@ struct path {
     u32 first;
     u32 len;
     bool tracked;
+    via_kind via;
+    u32 via_local;
 }
 
 // What the analysis knows of one local before the dataflows. `assigns` counts the stores into the
@@ -637,12 +651,32 @@ fn trace(survey mut* c, fir.place p, fir_flow.bits* stale) path {
                 out.tracked = false;
             }
         }
+        if (s.kind == step_kind.sk_deref || s.header) {
+            set_via(c, &out, src, t);
+        }
         push_step(c, s);
         out.len += 1;
         t = fir.apply_projection(f, t, pj);
         i += 1;
     }
     return out;
+}
+
+// Records in *out what the load of the next projection of `src` reads: a deref or an index on a
+// span or a `string` whose place before it, of type `t`, holds the pointer. An `own` pointer, or
+// the pointer field of an `own` span or `string`, designates an allocation. The place before the
+// projection is fixed storage of its local when no deref and no such index stand before it.
+fn set_via(survey* c, path mut* out, fir.place src, types.node* t) void {
+    bool fixed = out->via == via_kind.vk_none && src.base == fir.base_kind.bk_local;
+    out->via_local = 0;
+    if (t->is_own) {
+        out->via = via_kind.vk_owner;
+    } else if (fixed && !c->locals[cast(src.local, u64)].memory) {
+        out->via = via_kind.vk_local;
+        out->via_local = src.local;
+    } else {
+        out->via = via_kind.vk_other;
+    }
 }
 
 /// The most steps that the path of the place `p` takes (trace): its projections, or for `(*_a)` of
@@ -1053,11 +1087,13 @@ fn walk_owners(survey mut* c, u32 n, types.node* t, step mut@ prefix, u64 depth,
     }
     if (types.type_is_reference(t)) {
         if (t->is_own) {
+            // `n` has the type `T* own` of the place of a `del` or an owning `cast`
             path mut p = path{
                 .base = fir.base_kind.bk_local,
                 .local = n,
                 .first = cast(c->steps_len, u32),
                 .tracked = !c->locals[cast(n, u64)].memory,
+                .via = via_kind.vk_owner,
             };
             push_step(c, step{.kind = step_kind.sk_deref});
             u64 mut i = 0;

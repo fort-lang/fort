@@ -868,6 +868,29 @@ came here.
   counts in the inner work. The `switch` that reads the value of `&&` or `||` stands alone in the
   block where its operands join, so no store into its flag stands there and its edges hold no
   fact; only the right operand gets the fact of the left one (`n14`, `n15`).
+- **The kill rules read the borrows and the exposure of `owner.alias`** (D17.11, Borrows;
+  `spec/fir.md` 11, Alias; refinement R6 of `spec/ownership-design.md` 7). Kill rule 3 keeps a fact
+  of a memory local that the destination of a store through a pointer cannot be, and kill rule 4
+  keeps a fact through a pointer that cannot be a place of the memory local of a straight store.
+  `alias.make` ranks the locals that are not memory, the borrow locals, and the memory locals whose
+  frames are origins (an aggregate `_0` has none); `alias.run` is a worklist fixpoint of its own,
+  in the order of `fir_flow`, because its transfer copies the origins of one local into another,
+  which no gen and kill set holds. `prover.run_aliases` runs it after the facts are collected and
+  before the facts dataflow, and each walk of `apply_facts` moves the state with
+  `alias.apply_reads` before the kill rules and `alias.apply_store` after them. A path keeps what
+  its last load reads (`place.via_kind`, set by `place.trace` and `put_inner_paths`), and
+  `alias.can_be` answers from it. Every rvalue carries the origins of its operands, a comparison
+  too, because D10.7 derives through each operation; only an `own` pointer type, a call, `alloc`
+  and a constant cut them. Past `alias.WORK_LIMIT` (2^24 of charge, `proof.alias_work`) the map is
+  off and each verdict is that of the rules without R6, so the limit turns no verdict into an
+  error; the five trees charge 3,037,320 or less (`test/fort/owner/alias_test.ft` holds the
+  boundary, 2^24 and 2^24 + 2048, a loop that passes it on a later turn, and a first transfer that
+  passes it, which allocates no state). A function with no memory local whose frame is an origin,
+  or with no fact, makes no map.
+  The time of `fort --check src/fort/main.ft` went from 1.31 to 1.34 s to 1.32 to 1.34 s (five
+  interleaved runs). A change that moves a value of an address must keep lemma (vi) of
+  `spec/fir.md` 11: a forged pointer is outside it only by D10.7, and an `own` pointer only by
+  D17.1.
 - **Free an object with owners in a form that part 2 of the leak rule proves** (D17.20,
   `test/fort/owner/release_test.ft`). A test against `null` proves a place empty on its edge (the
   entry above), so a `del` of a local, a parameter or a field that a loop or an `if` finds null
@@ -877,15 +900,17 @@ came here.
   tests the place in memory (`while (h->last != null)`), moves the link and its tail into locals,
   frees the link and then stores the tail back (`containers.pool_free`). Second, an object whose
   owners a call frees moves out whole into a local that is not memory (`module kept = move(*m);
-  del(m);`), and a second local takes it for the call: a store into a memory local kills each fact
-  through `m` (`modules.free`). A vector of objects with owners keeps a chain of owners
-  (`made_before`, `last`) beside a span of views (`ast.arena`, `types.table`,
-  `modules.owned_modules`, `lsp.json.doc`), and the first form frees it: a slot of a new span of
-  owners is null, but no rule proves it until refinement R8, so its `del` before a store is a site.
-  Link a new object into the chain before any call, because a call kills the facts through the new
-  pointer (D17.11). A chain frees its objects from the newest. With the chains of the AST arena, the
-  type table and the module vectors together, a heap probe of repeated runs reaches its steady size
-  later: take its early sample after that (`driver_lifetime_emitter_test.ft`, `notes/testing.md`).
+  del(m);`), and a second local takes it for the call (`modules.free`). Since refinement R6 the
+  second local is not needed: a store into a memory local keeps each fact through the `own` pointer
+  `m`, which holds an allocation (`memory_free` in `release_test.ft`). A vector of objects with
+  owners keeps a chain of owners (`made_before`, `last`) beside a span of views (`ast.arena`,
+  `types.table`, `modules.owned_modules`, `lsp.json.doc`), and the first form frees it: a slot of a
+  new span of owners is null, but no rule proves it until refinement R8, so its `del` before a
+  store is a site. Link a new object into the chain before any call, because a call kills the facts
+  through the new pointer (D17.11). A chain frees its objects from the newest. With the chains of
+  the AST arena, the type table and the module vectors together, a heap probe of repeated runs
+  reaches its steady size later: take its early sample after that
+  (`driver_lifetime_emitter_test.ft`, `notes/testing.md`).
 - **The ownership summaries come from the call graph of the proved functions**
   (`spec/ownership-design.md` 8, `src/fort/owner/summary.ft`). `summary.add` takes each function
   that the emptiness pass proves with no error, with `proof.inner_work` (the largest of the three
