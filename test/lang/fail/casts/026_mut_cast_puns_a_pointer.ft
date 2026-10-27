@@ -1,0 +1,56 @@
+//! fail
+// The first level that a cast marks `mut` keeps each pointer place of the source with its exact
+// type, `own` or not, marks included (D3.14). Through such a view a store writes any bits into a
+// pointer slot, or the source reads bits that no pointer wrote. The user ruled "Full static: no
+// mut punning of pointers". Each line below holds no owner place that the result hides.
+struct wrapper {
+    u64* own x;
+}
+
+struct holder {
+    wrapper* p;
+}
+
+struct holder2 {
+    u64 mut* q;
+}
+
+struct with_fn {
+    fn () i32 f;
+}
+
+struct with_word {
+    u64 w;
+}
+
+fn one() i32 {
+    return 1;
+}
+
+fn main() i32 {
+    u64 mut x = 0;
+    u64* own mut o = new(u64);
+    // A slot of `u64 mut*` written as bits: the next store through `slot` writes the owner `o`.
+    u64 mut* mut slot = &x;
+    *cast(&slot, u64 mut*) = cast(&o, u64); //! error: cannot cast u64 mut* mut* to u64 mut*: a 'mut' cast hides the pointer u64 mut* at byte 0
+    // A pointer field of another type: a store through `q` writes the owner of `w`.
+    wrapper mut w = wrapper{.x = new(u64)};
+    holder mut h = holder{.p = &w};
+    holder2 mut* g = cast(&h, holder2 mut*); //! error: cannot cast holder mut* to holder2 mut*: a 'mut' cast hides the pointer wrapper* at byte 0
+    // A function pointer is a pointer place.
+    with_fn mut wf = with_fn{.f = one};
+    with_word mut* ww = cast(&wf, with_word mut*); //! error: cannot cast with_fn mut* to with_word mut*: a 'mut' cast hides the pointer fn () i32 at byte 0
+    // A mark that changes is a change of type: the drop of `mut` at level 2 behind a `mut` level 1.
+    u64 mut* mut pm = &x;
+    u64* mut* pr = cast(&pm, u64* mut*); //! error: cannot cast u64 mut* mut* to u64* mut*: a 'mut' cast hides the pointer u64 mut* at byte 0
+    // The slots of `void mut*` that a caller of std.sort_ptr once cast to its element type.
+    void mut*[2] mut slots = {null, null};
+    void* mut@ view = cast(slots[..], void* mut@); //! error: cannot cast void mut* mut@ to void* mut@: a 'mut' cast hides the pointer void mut* at byte 0
+    // A `string` and a span of bytes have one layout and two types.
+    string mut s = "ab";
+    u8@ mut* bytes = cast(&s, u8@ mut*); //! error: cannot cast string mut* to u8@ mut*: a 'mut' cast hides the pointer string at byte 0
+    println(g == null, ww == null, pr == null, view.len, bytes == null, x);
+    del(o);
+    del(w.x);
+    return 0;
+}

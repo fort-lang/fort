@@ -1,0 +1,203 @@
+{
+ "comment": [
+  "The table of the fort checker: the rule of D3.14 that the first level that the result of a cast",
+  "marks `mut` keeps each pointer place of the source with its exact type, with the exemption of an",
+  "argument of an `extern fn` and a work limit (src/fort/check.ft: check_pointer_places,",
+  "first_hidden, part_at and check_call; src/fort/types.ft: type_is_pointer_place and the pointer",
+  "count of type_layout_struct). Each row breaks one rule of that walk. The stages are the cast",
+  "corpus of test/lang, whose fail tests pin the message, the byte and the level of each place,",
+  "and the checker suite, which pins the count and the position of each report. The table runs in",
+  "the VM: pass a --runner that runs tools/vm run in one slot and then syncs, as",
+  "notes/environment.md says. The md5 guard reads the product compiler that the build links. Put",
+  "a row that an earlier run caught first, because the first round of a run in the VM can read",
+  "stale (notes/testing.md). The checker suite runs with --timeout 120: the rows D3.14-keep-memo",
+  "and D3.14-keep-modulo change the time of the walk and not its answer, and the shapes of 128 to",
+  "the power 6 owners in check_expr_test.ft then pass the timeout."
+ ],
+ "sources": [
+  "src/fort/check.ft",
+  "src/fort/types.ft"
+ ],
+ "binary": "build/Linux/debug/fort",
+ "build": "sleep 2 && touch src/fort/check.ft src/fort/types.ft && ninja -C build/Linux/debug fort",
+ "stages": [
+  {
+   "name": "the cast corpus",
+   "command": "python3 test/lang/run_tests.py --fort build/Linux/debug/fort --std-dir build/Linux/debug/std -j 4 fail/casts/ run/casts/"
+  },
+  {
+   "name": "the checker suite",
+   "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 120 -j 4 check_expr_test session_test"
+  }
+ ],
+ "mutations": [
+  {
+   "decision": "D3.14-keep-hides",
+   "file": "src/fort/check.ft",
+   "old": "            bool hides = sp != null && first_hidden(&m, sp, 1, 0, dp, &h);",
+   "new": "            bool hides = sp != null && first_hidden(&m, sp, 1, 0, dp, &h) && false;",
+   "what": "a cast that hides a pointer place reports nothing"
+  },
+  {
+   "decision": "D3.14-keep-adds",
+   "file": "src/fort/check.ft",
+   "old": "            bool adds = !m.over && dp != null && first_hidden(&m, dp, 1, 0, sp, &h);",
+   "new": "            bool adds = !m.over && dp != null && first_hidden(&m, dp, 1, 0, sp, &h) && false;",
+   "what": "a cast that adds a pointer place reports nothing"
+  },
+  {
+   "decision": "D3.14-keep-read-only",
+   "file": "src/fort/check.ft",
+   "old": "        if (d->is_mut) {",
+   "new": "        if (d->is_mut || true) {",
+   "what": "a result that can change no level may not change a pointer place"
+  },
+  {
+   "decision": "D3.14-keep-deeper-level",
+   "file": "src/fort/check.ft",
+   "old": "        if (d->is_mut) {",
+   "new": "        if (d->is_mut && level == 1) {",
+   "what": "a `mut` level below a read-only level 1 is not read"
+  },
+  {
+   "decision": "D3.14-keep-pointer",
+   "file": "src/fort/check.ft",
+   "old": "    if (types.type_is_pointer_place(t)) {\n        *out = pointer_place{.ty = t, .at = at};",
+   "new": "    if (types.type_is_reference(t) && t->is_own) {\n        *out = pointer_place{.ty = t, .at = at};",
+   "what": "only an owner is a place that a cast keeps"
+  },
+  {
+   "decision": "D3.14-keep-fn",
+   "file": "src/fort/types.ft",
+   "old": "    return type_is_reference(t) || t->kind == type_kind.k_fn;",
+   "new": "    return type_is_reference(t) || (t->kind == type_kind.k_fn && false);",
+   "what": "a function pointer is no pointer place"
+  },
+  {
+   "decision": "D3.14-keep-count",
+   "file": "src/fort/types.ft",
+   "old": "        pointers = capped_sum(pointers, type_pointer_count(f));",
+   "new": "        pointers = capped_sum(pointers, 0 * type_pointer_count(f));",
+   "what": "a struct counts no pointer place of its fields"
+  },
+  {
+   "decision": "D3.14-keep-limit",
+   "file": "src/fort/check.ft",
+   "old": "    if (m->work > POINTER_WORK_LIMIT) {",
+   "new": "    if (m->work > POINTER_WORK_LIMIT && false) {",
+   "what": "the check has no work limit"
+  },
+  {
+   "decision": "D3.14-keep-limit-place",
+   "file": "src/fort/check.ft",
+   "old": "            if (!m.over && hides) {",
+   "new": "            if (hides) {",
+   "what": "a check past its limit names a place that it did not find"
+  },
+  {
+   "decision": "D3.14-keep-arrays",
+   "file": "src/fort/check.ft",
+   "old": "        while (sn->kind == types.type_kind.k_array && dn->kind == types.type_kind.k_array) {",
+   "new": "        while (sn->kind == types.type_kind.k_array && dn->kind == types.type_kind.k_array && false) {",
+   "what": "a fixed array on both sides ends the walk of the levels"
+  },
+  {
+   "decision": "D3.14-keep-level",
+   "file": "src/fort/check.ft",
+   "old": "        s = sn;\n        d = dn;\n        level += 1;",
+   "new": "        s = sn;\n        d = dn;\n        level += 2;",
+   "what": "the error names another level"
+  },
+  {
+   "decision": "D3.14-keep-span",
+   "file": "src/fort/check.ft",
+   "old": "    while (types.has_target_level(s) && types.has_target_level(d)) {",
+   "new": "    while (s->kind != types.type_kind.k_span && types.has_target_level(s) && types.has_target_level(d)) {",
+   "what": "a span source keeps no owner place"
+  },
+  {
+   "decision": "D3.14-hide-exempt",
+   "file": "src/fort/check.ft",
+   "old": "    if (n == ck->extern_arg) {",
+   "new": "    if (n == ck->extern_arg && false) {",
+   "what": "an argument of an `extern fn` gets no exemption"
+  },
+  {
+   "decision": "D3.14-hide-layout",
+   "file": "src/fort/check.ft",
+   "old": "        if ((sp != null && !has_layout(sp)) || (dp != null && !has_layout(dp))) {",
+   "new": "        if (((sp != null && !has_layout(sp)) || (dp != null && !has_layout(dp))) && false) {",
+   "what": "the rule reads a level with no layout or in error"
+  },
+  {
+   "decision": "D3.14-hide-extern-callee",
+   "file": "src/fort/check.ft",
+   "old": "    bool trusted = f.sym != null && f.sym->kind == ast.sym_kind.s_extern_fn;",
+   "new": "    bool trusted = f.sym != null;",
+   "what": "an argument of a fort function is exempt too"
+  },
+  {
+   "decision": "D3.14-hide-restore",
+   "file": "src/fort/check.ft",
+   "old": "    ck->extern_arg = outer_arg;",
+   "new": "    if (outer_arg != outer_arg) {\n        ck->extern_arg = outer_arg;\n    }",
+   "what": "an extern call in the operand of an exempt cast takes its exemption"
+  },
+  {
+   "decision": "D3.14-hide-same-type",
+   "file": "src/fort/check.ft",
+   "old": "        if (at == 0 && types.type_equal(u, t)) {",
+   "new": "        if (at == 0 && types.type_same_shape(u, t)) {",
+   "what": "an owner whose marks differ counts as the same owner"
+  },
+  {
+   "decision": "D3.14-hide-period",
+   "file": "src/fort/check.ft",
+   "old": "        u64 period = step / common_divisor(size, step);",
+   "new": "        u64 period = step / step;",
+   "what": "the walk reads one copy where the period over a target array is longer"
+  },
+  {
+   "decision": "D3.14-hide-past-end",
+   "file": "src/fort/check.ft",
+   "old": "        u64 mut k = fit;\n        while (k < count) {",
+   "new": "        u64 mut k = count + 0 * fit;\n        while (k < count) {",
+   "what": "the copies past the end of the other view are not read"
+  },
+  {
+   "decision": "D3.14-hide-fit",
+   "file": "src/fort/check.ft",
+   "old": "        if (fit > 0 && first_hidden(m, t, fit, at, u, out)) {",
+   "new": "        if (fit > 0 && false && first_hidden(m, t, fit, at, u, out)) {",
+   "what": "the copies before the end of the target are not read"
+  },
+  {
+   "decision": "D3.14-hide-target-offset",
+   "file": "src/fort/check.ft",
+   "old": "            u64 start = p.at + f->aux;",
+   "new": "            u64 start = p.at;",
+   "what": "each field of a target struct starts at the start of the struct"
+  },
+  {
+   "decision": "D3.14-hide-source-offset",
+   "file": "src/fort/check.ft",
+   "old": "            && first_hidden(m, f->ty, 1, at + f->aux, u, out)) {",
+   "new": "            && first_hidden(m, f->ty, 1, at, u, out)) {",
+   "what": "each field of a source struct starts at the start of the struct"
+  },
+  {
+   "decision": "D3.14-keep-memo",
+   "file": "src/fort/check.ft",
+   "old": "    if (strmap.has(&m->held, memo_key(m, t, count, rel, c.ty))) {",
+   "new": "    if (false && strmap.has(&m->held, memo_key(m, t, count, rel, c.ty))) {",
+   "what": "the walk reads each run again, so its time grows with the owners"
+  },
+  {
+   "decision": "D3.14-keep-modulo",
+   "file": "src/fort/check.ft",
+   "old": "        rel = rel % types.type_sizeof(c.ty->elem);",
+   "new": "        rel = rel + 0 * types.type_sizeof(c.ty->elem);",
+   "what": "a run over an array keeps its byte, so each element is a key of its own"
+  }
+ ]
+}

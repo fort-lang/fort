@@ -54,16 +54,26 @@ fn demo() i64 {
 struct sym { string name; i64 offset; }
 
 struct sym_tab {
-    strmap.str_map index;   // name to position in syms
-    vec.ptr_vec syms;       // sym* in declaration order, owned by whoever declared them
+    strmap.str_map index;     // name to position in syms
+    sym mut* mut@ own syms;   // sym* in declaration order, owned by whoever declared them
+    u64 len;
 }
 
 fn declare(sym_tab mut* t, sym mut* s) bool {
     if (strmap.has(&t->index, s->name)) {
         return false;
     }
-    strmap.put(&t->index, s->name, cast(t->syms.len, i64));
-    vec.ptr_push(&t->syms, cast(s, void mut*));
+    if (t->len == t->syms.len) {
+        sym mut* mut@ own bigger = new(sym mut*, 2 * t->len + 4);
+        for (u64 mut i = 0; i < t->len; i += 1) {
+            bigger[i] = t->syms[i];
+        }
+        del(t->syms);
+        t->syms = move(bigger);
+    }
+    strmap.put(&t->index, s->name, cast(t->len, i64));
+    t->syms[t->len] = s;
+    t->len += 1;
     return true;
 }
 
@@ -72,12 +82,13 @@ fn lookup(sym_tab* t, string name) sym* {
     if (!strmap.get(&t->index, name, &i)) {
         return null;
     }
-    return cast(t->syms.items[cast(i, u64)], sym*);
+    return t->syms[cast(i, u64)];
 }
 
 fn symtab_free(sym_tab mut* t) void {
     strmap.free(&t->index);
-    vec.ptr_free(&t->syms);   // the sym values are borrowed and stay alive
+    del(t->syms);   // the sym values are borrowed and stay alive
+    t->len = 0;
 }
 
 fn main() i32 {
@@ -99,10 +110,9 @@ fn main() i32 {
             lookup(&t, "x")->name, " ", lookup(&t, "y")->name);
     println(lookup(&t, "zzz") == null, " ", lookup(&t, "x") == null);
 
-    // symtab_free releases the map and the vector and leaves the symbols,
+    // symtab_free releases the map and the slots and leaves the symbols,
     // which belong to this function.
     symtab_free(&t);
-    println(x.offset + y.offset - 6, " ", t.index.live, " ", t.syms.len, " ",
-            t.syms.items.ptr == null);
+    println(x.offset + y.offset - 6, " ", t.index.live, " ", t.len, " ", t.syms.ptr == null);
     return 0;
 }

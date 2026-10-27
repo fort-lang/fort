@@ -128,7 +128,7 @@
 //| hand k2s: reject with an event at 12:7
 //| hand k2s: sites 8, rejected 1, with an event 1, false rejects 0
 //| hand k2s: leak sites 3, rejected 0, with an event 0, false rejects 0
-//| hand k2i: reject with an event at 10:7
+//| hand k2i: reject with an event at 13:7
 //| hand k2i: sites 6, rejected 1, with an event 1, false rejects 0
 //| hand k2i: leak sites 2, rejected 0, with an event 0, false rejects 0
 //| hand k2j: reject with an event at 11:7
@@ -435,13 +435,13 @@
 //| exhaustive leak outside part 1: aggregate 4566, abort 0, unsure return 0, other 0
 //| exhaustive part 2: sites 1792, rejected 840, with an event 684
 //| exhaustive part 2: false accepts 0, false rejects 156, span leaks 0
-//| seeded: items 3634, dropped 4392, runs 3634
-//| seeded ends: return 0, exit 2492, abort 66, trap 0, outside 41, fault 1035
-//| seeded: sites 24777, rejected 2649, with an event 1727, false accepts 0, false rejects 922
+//| seeded: items 3643, dropped 4403, runs 3643
+//| seeded ends: return 0, exit 2501, abort 66, trap 0, outside 41, fault 1035
+//| seeded: sites 24839, rejected 2663, with an event 1736, false accepts 0, false rejects 927
 //| seeded outside rule (a): leak 1387, leak at exit 69, double release 2, invalid release 0
 //| seeded outside rule (a): use after release 445, use after move 416, use after scope 0
 //| seeded outside rule (a): duplicate owner 30, overwrite of no own reference 6
-//| seeded leak: sites 13435, rejected 717, with an event 353
+//| seeded leak: sites 13453, rejected 717, with an event 353
 //| seeded leak: false accepts 0, false rejects 364
 //| seeded leak outside part 1: aggregate 37, abort 0, unsure return 0, other 0
 //| seeded part 2: sites 2753, rejected 1577, with an event 949
@@ -586,9 +586,14 @@ string[STRBUF_LINES] STRBUF = {
 // (a)), a global, a place through a pointer, an integer that a store puts into memory, a join and
 // a back edge. In k2o and k2p, R6 keeps the fact of `x` past a store through an `own` pointer and
 // through a parameter, and the runs hold that it may. k2v stores through a pointer that it loads
-// from a global with no copy into a local.
+// from a global with no copy into a local. k1 stores an integer into the owner slot of `y`, and
+// k2i stores one into the slot of `m`. D3.14 refuses the cast of `&y` and of `&m` to `u64 mut*`,
+// so each address passes `memmove`, an extern whose argument may hide an owner. In k2i the call
+// kills the fact of `x`, and `del(x)` makes `x` empty again before the store of the integer. The
+// analysis keeps less across a call, and the seeded family has more false rejects than with the
+// cast.
 // The count of the lines of HAND.
-u64 HAND_LINES = 699;
+u64 HAND_LINES = 703;
 
 string[HAND_LINES] HAND = {
     "// places: arr[i]:i32 arr[j]:i32",
@@ -1034,12 +1039,13 @@ string[HAND_LINES] HAND = {
     "    return cast(s[0], i32);",
     "}",
     "// places: x:i32 y:i32",
+    "import std.libc;",
     "fn main$() i32 {",
     "    i32 mut* own x = new(i32);",
     "    *x = 5;",
     "    i32* v = x;",
     "    i32 mut* own mut y = null;",
-    "    u64 mut* q = cast(&y, u64 mut*);",
+    "    u64 mut* q = cast(libc.memmove(cast(&y, u8 mut*), cast(&y, u8*), 0), u64 mut*);",
     "    *q = cast(x, u64);",
     "    del(y);",
     "    i32 r = *v;",
@@ -1200,11 +1206,14 @@ string[HAND_LINES] HAND = {
     "    return 0;",
     "}",
     "// places: x:i32 *p:i32",
+    "import std.libc;",
     "fn main$() i32 {",
     "    i32 mut* own mut x = null;",
     "    u64 a = cast(&x, u64) + 0;",
     "    i32 mut* own mut* mut m = null;",
-    "    *cast(&m, u64 mut*) = a;",
+    "    u64 mut* q = cast(libc.memmove(cast(&m, u8 mut*), cast(&m, u8*), 0), u64 mut*);",
+    "    del(x);",
+    "    *q = a;",
     "    i32 mut* own mut* p = m;",
     "    del(*p);",
     "    *p = new(i32);",

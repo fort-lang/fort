@@ -162,11 +162,17 @@ fn columns_count_bytes() void {
 // The files the lookup below answers for. Any other name is a file it cannot read.
 string SHOWN = "fn main() i32 {\n    u8 b = 300;\n    return 0;\n}\n";
 
-// A test lookup: counts its calls in the u64 behind `ctx` and answers
-// "shown.ft" with SHOWN.
-fn lookup(void mut* ctx, string path, string mut* out) bool {
-    u64 mut* calls = cast(ctx, u64 mut*);
-    *calls += 1;
+// The context of the test lookup: a view of its call count. The sink takes a `void*`, and the
+// pointer in the wrapper still writes the count.
+struct counter {
+    u64 mut* calls;
+}
+
+// A test lookup: counts its calls in the u64 that the `counter` behind `ctx` points at, and
+// answers "shown.ft" with SHOWN.
+fn lookup(void* ctx, string path, string mut* out) bool {
+    counter* c = cast(ctx, counter*);
+    *c->calls += 1;
     if (path == "shown.ft") {
         *out = SHOWN;
         return true;
@@ -179,7 +185,8 @@ fn reported(u64 mut* calls) string own {
     diag.sink mut s = diag.create();
     defer diag.free(&s);
     diag.set_text(&s, true);
-    diag.set_lookup(&s, lookup, cast(calls, void mut*));
+    counter c = counter{.calls = calls};
+    diag.set_lookup(&s, lookup, cast(&c, void*));
     i32 saved = capture.begin(io.STDERR, "err.txt");
     diag.error(&s, diag.loc_range("shown.ft", 2, 12, 2, 15), "constant 300 does not fit u8");
     diag.note(&s, diag.loc_range("shown.ft", 2, 5, 2, 7), "the type is here");
@@ -226,7 +233,8 @@ fn a_file_the_lookup_cannot_read_shows_the_header_alone() void {
     diag.sink mut s = diag.create();
     defer diag.free(&s);
     diag.set_text(&s, true);
-    diag.set_lookup(&s, lookup, cast(&calls, void mut*));
+    counter c = counter{.calls = &calls};
+    diag.set_lookup(&s, lookup, cast(&c, void*));
     i32 saved = capture.begin(io.STDERR, "gone.txt");
     // Line 1 is where an empty text has a line of its own, so a sink that
     // rendered the empty text after a false answer would show it here.
@@ -258,7 +266,8 @@ fn the_rendered_lines_reach_stderr() void {
     diag.sink mut s = diag.create();
     defer diag.free(&s);
     diag.set_text(&s, true);
-    diag.set_lookup(&s, lookup, cast(&calls, void mut*));
+    counter c = counter{.calls = &calls};
+    diag.set_lookup(&s, lookup, cast(&c, void*));
     diag.error(&s, diag.loc_range("shown.ft", 2, 12, 2, 15), "constant 300 does not fit u8");
     diag.note(&s, diag.loc_range("shown.ft", 2, 5, 2, 7), "the type is here");
     assert(calls == 2);

@@ -434,10 +434,13 @@ These are all the assumptions of the rules. A program that breaks one gets no cl
   a new allocation (D17.13). The 15 casts of an address in `src` and `std` cast no owning value
   (measured with `grep`, then read). The oracle reports a break as `duplicate owner` or `invalid
   release`. A store of another type can copy an owner into a second slot, and that breaks A2 too. An
-  example is `*q = cast(x, u64)` with `q = cast(&y, u64 mut*)`. A later `del(y)` frees through a
-  slot that is no owner slot of its allocation, and the oracle reports `duplicate owner`. A2 says
-  nothing of types: D10.7 has no strict-aliasing rule, so no rule of V1 reads the type of a place
-  through a pointer.
+  example was `*q = cast(x, u64)` with `q = cast(&y, u64 mut*)`. A later `del(y)` frees through a
+  slot that is no owner slot of its allocation, and the oracle reports `duplicate owner`. D3.14 now
+  refuses `cast(&y, u64 mut*)`, because the view hides the owner `y`. Such a store still reaches an
+  owner slot through an argument of an `extern fn` (A7) and through the three forms that A8 below
+  names, which the rule of D3.14 does not read. A2 says nothing of types:
+  D10.7 has no strict-aliasing rule, so no rule of V1 reads the type of a place through a
+  pointer.
 - **A3**: an `own` reference designates the start of a live allocation, or it is null (D17.1).
 - **A4**: a frame and an allocation never share storage (D10.1).
 - **A5**: one thread: no data race (D10.7).
@@ -445,6 +448,11 @@ These are all the assumptions of the rules. A program that breaks one gets no cl
 - **A7**: the C code of an extern keeps A1 to A5, and it frees no allocation that fort still owns.
   D17.13 already trusts the C side of an extern signature, and V1 trusts C no further: an extern
   call follows 4.6 as each call does. No rule can check C, so the design takes A7 (section 15).
+  A7 also covers a view that C gives back: a cast that is itself an argument of an `extern fn`
+  may hide a pointer place (D3.14), and `memmove(dst, src, 0)` returns `dst` to fort code as a
+  `u8 mut*`.
+  A store through that result reaches the owner slot, so A7 asks that such a view not be used to
+  write an owner slot either.
 - **A8**: a value designates storage of a local of this run of F only when it derives from an
   address of that local that this run took. It derives through copies, casts, arithmetic, stores and
   loads, in F or in a callee. The user ruled on 2026-10-26: "Yes, add A8 to D10.7" (section 12).
@@ -460,10 +468,38 @@ These are all the assumptions of the rules. A program that breaks one gets no cl
   slice. A same-size reinterpretation can still load a `mut` or an `own` pointer from the bytes of
   an integer. D10.7 (A8) makes an access to a local through such a forged value undefined. A write
   through a same-size reinterpretation of a value that derives from the address of the slot stays
-  defined: `*cast(cast(&o, void mut*), u64 mut*) = cast(&y, u64)` forges the owner slot of a local
-  `o`. So a forged owner slot in a local, a global or an allocation is outside the guarantee of
-  rules (a) and (c). It stays outside until a rule forbids a cast that yields a `mut` pointer and
-  hides an owner place of its source.
+  defined as an access, but D3.14 refuses the cast that makes the view: at the first level that
+  its result marks `mut`, a cast must keep each pointer place of its source with its exact type,
+  owner or not, with none hidden, none added and none changed. So
+  `*cast(cast(&o, void mut*), u64 mut*) = cast(&y, u64)`, which forges the owner slot of a local
+  `o`, does not compile. Nor do six forms that compiled before the user ruled "Generalize"
+  (2026-10-26) and "Full static: no mut punning of pointers" (2026-10-27): a target that adds an
+  owner place (`cast(&x, wrap mut*)` for a `u64 mut x` and a `struct wrap { u64* own p; }`, then
+  `del(w->p)`); a dropped `own` behind a `mut` level 2 under an immutable level 1
+  (`cast(slots, node mut* mut*@)` for a `node mut* own mut* mut@ own slots`, then
+  `*view[0] = &local`); a store of another pointer through a `mut` level 1
+  (`cast(&po, u64** mut*)` for a `u64* own mut* mut po`, then `*t = &fake`); the same store where
+  the chain of the target ends (`*cast(&po, u64 mut*) = cast(&fake, u64)`); a pointer seen as an
+  integer (`*cast(&slot, u64 mut*) = cast(&o, u64)` for a `u64 mut* mut slot`, then a store
+  through `slot`); and a pointer in a field of a struct (`cast(&h, holder2 mut*)` for a
+  `struct holder { wrapper* p; }` and a `struct holder2 { u64 mut* q; }`, then `*g->q = 1234`).
+  The guarantee of rules (a) and (c) now covers an owner slot in a local, a global or an
+  allocation against such views, but three forms stay outside it, and each compiled on
+  2026-10-27 (probed):
+  - a view that C gives back from an exempt argument (A7):
+    `cast(memmove(cast(&o, u8 mut*), cast(&o, u8*), 0), u64 mut*)` for a `u64* own mut o`, then a
+    store of an integer;
+  - a call through a function pointer to which a cast through `void*` gave another type:
+    `cast(cast(take, void*), fn (u64) void)` for a `fn take(u64* own p) void`, then a call with
+    the address of a local, which `take` frees; a later change reads it;
+  - a read-only view whose pointer place carries `mut` or `own` where the source holds other
+    bytes, a pointer of another type included: `cast(&bits, holder2*)` for a `u64 bits` that
+    holds the address of a `struct wrapper { u64* own x; }`, and `cast(&h, holder2*)` for a
+    `struct holder { wrapper* p; }`, then `*g->q = 1234` over the owner `x`. No rule of D3.14
+    reads a mark of a pointer place in a read-only view, and a later change forbids the form.
+
+  An owner slot that one of these three forms forges is outside the guarantee of rules (a) and
+  (c).
 
 ### 5.2 Outside the scopes
 
@@ -480,8 +516,9 @@ These cases are outside the scope of every rule. The oracle counts their events 
   callee. To cover it costs 93 more sites in 20 more functions of `src/fort`, 6 in `std` and in
   `test/fort`, and 40 in `test/lang` (measured, P4). The sources hold one global owner (read).
 - **X6**: no rule checks a store of another type over an owner slot, because rule (a) checks only
-  `own` reference places (D17.11). No rule checks a `double release` through a value with no tag
-  (X4, X5).
+  `own` reference places (D17.11). D3.14 refuses the `mut` view that such a store needs, except
+  for an argument of an `extern fn` and the three forms that A8 names. No rule
+  checks a `double release` through a value with no tag (X4, X5).
 
 ### 5.3 The state lemma
 

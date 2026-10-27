@@ -546,14 +546,16 @@ bullet at a time and without a rewrite.
   after a `switch` that names every member of an enum is dead, because D7.7 gives that switch a
   trapping `default`. `cast(250, types.type_kind)` stopped with `enum value 250 is not a member of
   type_kind`. **A length can be forged, so a guard on the `.len` of a span is reachable.**
-  `p[lo..hi]` on a pointer makes a view with no runtime check (D6.9). A pointer cast (D3.14) and a
-  same-size reinterpretation (D10.7) can write the pointer or the length of an `own` span:
+  `p[lo..hi]` on a pointer makes a view with no runtime check (D6.9). A same-size
+  reinterpretation (D10.7) can write the pointer or the length of a span:
   `cast(&tt.nodes, raw mut*)->len = n`, with `raw` a struct of two `u64`, reached
-  `types.reserve`. D6.9 and D10.7 make such a view undefined behavior. No test forges a length or
-  a pointer, so such a site stays listed. A site that needs more memory or time than a test can
-  use stays listed too. The comment lines above an entry or a group give the reason. The list
-  holds 17 of 215 sites, each a site that needs a forged length (`python3 tools/panic_coverage.py`
-  prints the totals).
+  `types.reserve` before D3.14 refused that cast, which hides the owner `tt.nodes`. An argument
+  of an `extern fn` still reaches the header (`libc.memcpy` over `&tt.nodes`), and so does a
+  span that owns nothing. D6.9 and D10.7 make such a view undefined behavior. No test forges a
+  length or a pointer, so such a site stays listed. A site that needs more memory or time than a
+  test can use stays listed too. The comment lines above an entry or a group give the reason. The
+  list holds 17 of 215 sites, each a site that needs a forged length
+  (`python3 tools/panic_coverage.py` prints the totals).
 - **`test/fir` holds the FIR tests**, one `.fir` file each, in the format that `test/fir/README.md`
   gives (`spec/fir.md` 16.3). The header is the leading run of `//!` and `//|` lines: one or more
   `//! pass: <name>`, an optional `//! prelude:` block of fort declarations, and one outcome,
@@ -671,9 +673,9 @@ bullet at a time and without a rewrite.
   leak of a span, so a case with neither adds no line to the expected stdout. A store through a view
   after a proved `cast` gives the object an owner that the `del` of the new pointer leaks, and no
   site has that event, so the case would count a false accept: it stands in
-  `test/fort/owner/prover_test.ft` (`cast_alias` with a view of the old pointer, `cast_view` with a
-  view of the new one) with a comment that it is outside the guarantee, and not in the oracle
-  sets.
+  `test/fort/owner/prover_test.ft` (`cast_alias` with a view of the old pointer) with a comment that
+  it is outside the guarantee, and not in the oracle sets. The form with a view of the new pointer
+  does not compile since D3.14 refuses a cast that hides an owner place, so `cast_view` is gone.
   **The test holds the tests against null of D17.11 gen rule 6 too.** The vocabulary of
   `generator.ft` holds an `if` on `==`, `!=`, a negation, `&&` and the `else` arm of `||`, over `x`,
   `y`, `q->a`, `*p`, `r->a`, `G` and `arr[j]`, and a loop on `!=` that a `del` ends; the items
@@ -691,13 +693,16 @@ bullet at a time and without a rewrite.
   writes (`n4a`, the case `n4` of the design for rule (a)), a store into a global and through a
   pointer, an integer that a store puts into memory, a join and a back edge; each run overwrites
   `x`, so a mutant that drops one path prints a false accept; `k2v` stores through a pointer that
-  it loads from a global with no copy into a local. `k2o` and `k2p` store through an `own` pointer
-  and a parameter, and their runs hold that R6 may keep the fact of `x`. A step that
-  no run can show, such as a comparison that carries an address or the frame of an aggregate
-  `_0`, stands in `test/fort/owner/alias_test.ft` over FIR text, and the rows `D17.11-alias` of
-  `tools/mutations/emptiness.json` hold it there. A case of `alias_test.ft` frees its memory
-  local before any call that follows its check: a call kills each fact of a memory local, so a
-  call between the `del` and the exit makes the exit unproved for a reason that is not R6.
+  it loads from a global with no copy into a local. D3.14 refuses `cast(&m, u64 mut*)`, so `k2i`
+  gets its view of the slot `m` from `libc.memmove`; the call kills the fact of `x`, and a
+  `del(x)` after it makes `x` empty again before the store of the integer. `k2o` and `k2p` store
+  through an `own` pointer and a parameter, and their runs hold that R6 may keep the fact of `x`.
+  A step that no run can show, such as a comparison that carries an address or the frame of an
+  aggregate `_0`, stands in `test/fort/owner/alias_test.ft` over FIR text, and the rows
+  `D17.11-alias` of `tools/mutations/emptiness.json` hold it there. A case of `alias_test.ft` frees
+  its memory local before any call that follows its check: a call kills each fact of a memory
+  local, so a call between the `del` and the exit makes the exit unproved for a reason that is not
+  R6.
   **The oracle reports no event for an access through a forged pointer**, which D10.7 (A8) makes
   undefined: a run that writes `x` through `cast(py, u64) + 8` for `py = &y` stores over `x` with
   no event that names A8, and the test would count the store as a false accept, though R6 may keep
@@ -1067,7 +1072,8 @@ bullet at a time and without a rewrite.
   `comment`, not into this file. `--check` exits 1 for a table whose `comment` list is empty or
   absent. Two earlier changes
   mutated `src/fort/check.ft`, and then both compilers, by hand, because no table covered either
-  file. No table covers the fort checker today.
+  file. `tools/mutations/checker_fort.json` covers one rule of the fort checker, the pointer places
+  that a cast keeps (D3.14), since 2026-10-26. No table covers the rest of the fort checker.
   **The checker table reads its rows from history.** Commit 39a58dd8 deleted every `Dn.m`
   citation of `bootstrap0/src/check.c` and `check_stmt.c` and kept the code. The table has one
   row for each of the 78 decisions those files cited at `39a58dd8^`, one row for each of the 6

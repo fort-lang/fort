@@ -759,7 +759,10 @@ to guess whether a parenthesized name is a type, and it never traps. Allowed:
   and so is `cast(line[0..n], char mut@ own)`, because a span expression is a view. C memory is
   owned only where its `extern` says `own` (D17.13);
 - dropping `own` at any level: a no-op wherever 3.9 already converts, and the escape where the
-  monotone rule of 3.9 refuses the implicit form (`node mut* own mut@ own` to `node mut* mut@`).
+  monotone rule of 3.9 refuses the implicit form, behind read-only levels. At the first level that
+  its result marks `mut`, a cast must keep each pointer place of its source with its exact type,
+  except as an argument of an `extern fn` (D3.14). So `node mut* own mut@ own` to
+  `node mut* mut@` is an error, as its implicit form is.
 
 Forbidden: integer to `bool`; any other span-to-span cast (the element type of a span never changes,
 because `len` counts elements); pointer to span; struct or array casts. An untyped constant operand

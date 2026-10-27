@@ -953,8 +953,10 @@ outside it is `own` and every level between the binding and the storage holding 
 is immutable. The first condition keeps a container from being freed while its elements are
 owned by nobody; the second closes the `T** -> const T**` hole for ownership, where a borrowed
 value could be stored, through the copy, into a slot the source still sees as owned. A `cast`
-is the escape from the monotone rule for a drop (section 9.2). No conversion or cast adds `own`
-(D3.14).
+is the escape from the monotone rule for a drop (section 9.2) behind read-only levels only: at
+the first level that the result marks `mut`, the cast must keep each pointer place of its source
+with its exact type, unless it is an argument of an `extern fn` (D3.14, D17.4). No conversion or
+cast adds `own` (D3.14).
 
 | Conversion                                        | Result | Reason                          |
 |---------------------------------------------------|--------|---------------------------------|
@@ -1111,6 +1113,7 @@ first takes its default type (D4.5) and is then converted with the runtime seman
 | `T@`                | `T mut@`                 | error: a cast never adds `mut`                |
 | any reference       | a target that adds `own` | error: a cast never adds `own`                |
 | `own` reference     | same, `own` dropped at any level | lends; refused on an `own` rvalue     |
+| pointer or span     | result changes a pointer place   | error, except as an `extern` argument |
 | `own` rvalue        | any `own` target above   | transfer: the result is `own`                 |
 | `own` lvalue        | any `own` target above   | error unless `cast(move(x), T)` (D17.5)       |
 | `T mut*`            | `T*`                     | drop mutability, as the implicit conversion   |
@@ -1142,13 +1145,68 @@ target marks no `own` at that depth or below it. So `cast(p, i32* own)` fails fo
 and C memory is owned only where its `extern` says `own` (D3.14, D17.13). A view never becomes
 an owner, so no cast makes a second owner of an allocation.
 
+**A `mut` cast keeps the pointer places that its result can change** (D3.14). The result can
+change level `k` when it marks a level from 1 to `k` `mut`. At the first level that it marks
+`mut`, the storage of the target and of the source must hold the same pointer places: the same
+pointer types at the same bytes, with none hidden, none added and none changed. A pointer place
+is a reference -- a pointer, a `void*`, a span or a `string`, `own` or not -- or a function
+pointer, in the fixed storage of the level, at any depth of fields and elements, or the storage
+itself when it is one; an owner place is one of them. The same type is type identity (section
+6), with the `mut` and `own` marks and the type that the pointer reaches, so each deeper level
+and each storage that a pointer field reaches has the same type on both sides. Above the first
+`mut` level the result is read-only, and the levels correspond through each reference and
+through fixed arrays on both sides. The storage of a span is one element, and the storage of a
+`void*` holds no pointer place. No byte past the end of the storage of one side holds a pointer
+place of that side. A place that holds no pointer stays free to pun: a float as an integer, an
+integer as bytes. The error names the first place that differs, its byte from the start of the
+storage, and its level from level 2 on: `cannot cast holder mut* to void mut*: a 'mut' cast
+hides the pointer u64* own at byte 8`. A place of the target that the source lacks reads `adds
+the pointer`. Through such a level a store writes any bits into a pointer slot of the source, or
+the source reads bits that no pointer wrote. A read-only view, which can change no level, hides,
+adds and changes pointer places freely, and a read through it gives the bits (D10.7). The check
+has a work limit of 65536 steps; past it the cast is an error with the note `the check cannot
+prove that the cast keeps its pointer places`. The exemption: a cast that is itself an argument
+of a call of an `extern fn` is legal, because C sees no `own` (D17.13). A cast inside that
+argument, an argument of a fort function and an argument of a call through a function pointer
+get no exemption. A fort callback takes its context as a `void*` to a wrapper of views, such as
+`struct session_ref { session mut* s; }`, and casts it back to a read-only view, whose pointer
+fields still write what they reach. Three forms are outside the rule (D3.14,
+`ownership-design.md` 5.1): a view that C gives back from an exempt argument, a call through a
+function pointer to which a cast through `void*` gave another type, and a read-only view whose
+pointer place carries `mut` or `own` where the source holds other bytes, a pointer of another
+type included, which a later change forbids.
+
+```fort
+struct holder { u64 count; u64* own data; }
+struct mirror { u64 tally; u64* own payload; }
+struct wrap { u64* own p; }
+holder mut h = holder{.count = 1, .data = new(u64)};
+void mut* v = cast(&h, void mut*);        // error: hides the pointer u64* own at byte 8
+void* r = cast(&h, void*);                // ok: no level can change
+mirror mut* m = cast(&h, mirror mut*);    // ok: the same pointer type at byte 8
+u64 mut x = 0;
+void mut* vx = cast(&x, void mut*);       // ok: neither side holds a pointer place
+holder mut* hx = cast(vx, holder mut*);   // error: adds the pointer u64* own at byte 8
+wrap mut* w = cast(&x, wrap mut*);        // error: adds the pointer u64* own at byte 0
+wrap* seen = cast(&x, wrap*);             // ok: no level can change
+f64 mut f = 1.0;
+u64 mut* bits = cast(&f, u64 mut*);       // ok: a float holds no pointer place
+u64 mut* mut slot = &x;
+*cast(&slot, u64 mut*) = 0;               // error: hides the pointer u64 mut* at byte 0
+u64* mut* ro = cast(&slot, u64* mut*);    // error: the mark changes the type of the place
+libc.memset(cast(&h, u8 mut*), 0, sizeof(holder));   // ok: an argument of an extern fn
+```
+
 Ownership in casts (D3.14, D17.3, D17.12): the result of a cast is `own` exactly when its target
 type says `own`, and the source then says `own` at the same levels. A cast may drop `own` at any
 level, including where the implicit drop of section 8.4 refuses, and then lends: the result is a
-view and the source keeps ownership. An `own` rvalue cast to an `own` target transfers. An `own`
-lvalue cast to an `own` target is a copy into an `own` place and must be written `cast(move(x), T)`
-(D17.5), which empties `x`. A `cast` to an `own` type yields an `own` rvalue, which must land
-(section 8.3), and a cast that drops `own` from an `own` rvalue is refused (D17.8).
+view and the source keeps ownership. The rule of the pointer places above is the exception: a
+drop at the first level that the result marks `mut` changes the type of a pointer place, and it
+is an error. An `own` rvalue
+cast to an `own` target transfers. An `own` lvalue cast to an `own` target is a copy into an `own`
+place and must be written `cast(move(x), T)` (D17.5), which empties `x`. A `cast` to an `own`
+type yields an `own` rvalue, which must land (section 8.3), and a cast that drops `own` from an
+`own` rvalue is refused (D17.8).
 
 ```fort
 i64 w = cast(cast(-1, i8), i64);     // -1: sign-extended because i8 is signed
@@ -1178,7 +1236,8 @@ point pt = cast(r, point);           // error: no struct casts
 u8 mut* own m = cast(libc.malloc(64), u8 mut* own);    // own rvalue to own type; del(m) frees it
 u8 mut@ own got = cast(p2[0..n], u8 mut@ own);         // error: a span expression is a view
 node mut* own mut@ own kids = new(node mut* own, 8);   // owned slots (section 8.3)
-node mut* mut@ esc = cast(kids, node mut* mut@);       // ok: drops own where 8.4 refuses
+node mut* mut@ esc = cast(kids, node mut* mut@);       // error: hides the owner node mut* own
+node mut*@ seen = cast(kids, node mut*@);              // ok: no level can change
 string own t = cast(move(buf), string own);            // the target says own; buf is emptied
 string own t2 = cast(buf, string own);                 // error: copying own lvalue 'buf' needs move
 string t5 = cast(buf, string);                         // ok: lends; buf still owns the bytes

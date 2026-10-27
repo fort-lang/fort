@@ -747,7 +747,9 @@ copied and belong to someone else (an arena, a fixed array, an owner that outliv
 store `cast(p, void mut*)` and cast back on retrieval; the slots are `void mut*` and `ptr_pop`
 answers `void mut*`, so a `node mut*` survives the round trip with the mark it went in with. A
 `node*` does not go in at all, because `ptr_push` takes a `void mut*` and no cast adds the mark
-(D3.14). A container of immutable pointers is a different container, and this pattern makes one:
+(D3.14). The element type holds no pointer place, because the cast of a pointer to it to
+`void mut*` would hide each pointer place and the cast back would add them (D3.14). A container of
+immutable pointers is a different container, and this pattern makes one:
 copy the file with the slot type `void*`. When the vector is to own its elements, copy
 the file with the slot type `node mut* own mut@ own items;` instead, an owned span of owned nodes
 (D17.2):
@@ -844,27 +846,38 @@ fn count(str_map* m) u64
 - `get`: `true` and `*out = val` when present; `false` with `*out` unchanged otherwise. `has`:
   the presence test alone. `remove`: `true` when the key was present. `count`: `live`.
 
-To map names to pointers, keep a `vec.ptr_vec` beside the map and store the index. A struct that
-holds two containers is itself an owning aggregate (D17.7), so it is passed by pointer and gets
-a `free` of its own:
+To map names to pointers, keep the pointers in a span beside the map and store the index. A
+`sym` holds a `string`, a pointer place, so a pointer to it goes into no `vec.ptr_vec`: the cast
+to `void mut*` would hide that place (D3.14). The table copies the vector pattern with the slot
+type `sym mut*` (2.7). A struct that holds two containers is itself an owning aggregate (D17.7),
+so it is passed by pointer and gets a `free` of its own:
 
 ```fort
 import std.strmap;
-import std.vec;
 
 struct sym { string name; i64 offset; }
 
 struct sym_tab {
-    strmap.str_map index;   // name to position in syms
-    vec.ptr_vec syms;       // sym* in declaration order, owned by whoever declared them
+    strmap.str_map index;     // name to position in syms
+    sym mut* mut@ own syms;   // sym* in declaration order, owned by whoever declared them
+    u64 len;
 }
 
 fn declare(sym_tab mut* t, sym mut* s) bool {
     if (strmap.has(&t->index, s->name)) {
         return false;
     }
-    strmap.put(&t->index, s->name, cast(t->syms.len, i64));
-    vec.ptr_push(&t->syms, cast(s, void mut*));
+    if (t->len == t->syms.len) {
+        sym mut* mut@ own bigger = new(sym mut*, 2 * t->len + 4);
+        for (u64 mut i = 0; i < t->len; i += 1) {
+            bigger[i] = t->syms[i];
+        }
+        del(t->syms);
+        t->syms = move(bigger);
+    }
+    strmap.put(&t->index, s->name, cast(t->len, i64));
+    t->syms[t->len] = s;
+    t->len += 1;
     return true;
 }
 
@@ -873,12 +886,13 @@ fn lookup(sym_tab* t, string name) sym* {
     if (!strmap.get(&t->index, name, &i)) {
         return null;
     }
-    return cast(t->syms.items[cast(i, u64)], sym*);
+    return t->syms[cast(i, u64)];
 }
 
 fn symtab_free(sym_tab mut* t) void {
     strmap.free(&t->index);
-    vec.ptr_free(&t->syms);   // the sym values are borrowed and stay alive
+    del(t->syms);   // the sym values are borrowed and stay alive
+    t->len = 0;
 }
 ```
 
@@ -949,9 +963,12 @@ fn cmp_u64(void* a, void* b) i32
 ```
 
 - `sort`: orders the `n` elements of `elem_size` bytes that start at `base`, in place, so that
-  `cmp` answers zero or less for every adjacent pair. The order is **not stable**: two elements
-  the comparator calls equal come out in an unspecified order, because `qsort` is what C
-  specifies. Panics with `"sort.sort: element size is zero"` when `elem_size` is 0, with
+  `cmp` answers zero or less for every adjacent pair. The element type holds no pointer place:
+  `sort` is a fort function, so the cast of the elements to `void mut*` for its `base` would hide
+  each pointer place (D3.14); `libc.qsort`, an `extern fn`, takes such elements. The order is **not
+  stable**: two elements the comparator calls equal come out in an unspecified order, because
+  `qsort` is what C specifies. Panics with `"sort.sort: element size is zero"` when `elem_size` is
+  0, with
   `"sort.sort: null comparator"` when `cmp` is `null`, since calling a null function pointer is
   undefined (D3.10), and with `"sort.sort: null base"` when `base` is `null` and `n` is above 0.
   **The three tests come before the count**, so `sort(base, 0, 0, cmp)` panics and
@@ -960,19 +977,19 @@ fn cmp_u64(void* a, void* b) i32
   C call, which is how the null `.ptr` of a zero span (D3.5) stays out of C. The three typed
   entries below delegate, so their panics name `sort.sort` as well. Ownership: none; `base` is a
   view and no `own` crosses to C (1.4, D17.13).
-- `sort_i64`, `sort_u64`, `sort_ptr`: `sort(cast(items.ptr, void mut*), items.len, sizeof(T),
-  cmp)` for `T` equal to `i64`, `u64` and `void*`. A span carries its length (D3.5) and its
-  element type fixes `sizeof` (D3.15), so two of the four arguments disappear and the caller
-  cannot pass a count or an element size that disagrees with the storage. The parameter is
-  `T mut@`, which is the second thing these entries add: the elements must be mutable and the
-  compiler checks it here, whereas a `void mut*` says that the bytes may be written and nothing
-  about how many or how wide (D3.11), so `sort` can check nothing else. `sort_ptr` marks the slots
-  and not the pointees, because the sort permutes the slots and never writes through a pointee.
-  A caller holding `void mut* mut@`, which is what `vec.ptr_vec` holds (2.7), reaches it with a
-  cast that drops the mark at level 2: the implicit conversion refuses that drop behind a mutable
-  level 1 (D5.4) and the cast makes it (D3.14). The other direction is closed, since a cast never
-  adds `mut`, so a caller that holds immutable pointers keeps holding them. Ownership: none; an
-  `own` span argument lends (D17.4).
+- `sort_i64`, `sort_u64`, `sort_ptr`: `sort(cast(items.ptr, void mut*), items.len, sizeof(T), cmp)`
+  for `T` equal to `i64` and `u64`; `sort_ptr` makes the checks of `sort` and passes its slots,
+  pointer places, to `libc.qsort` as an exempt argument (D3.14). A span carries its length (D3.5)
+  and its element type fixes `sizeof` (D3.15), so two of the four arguments disappear and the caller
+  cannot pass a count or an element size that disagrees with the storage. The parameter is `T mut@`,
+  which is the second thing these entries add: the elements must be mutable and the compiler checks
+  it here, whereas a `void mut*` says that the bytes may be written and nothing about how many or
+  how wide (D3.11), so `sort` can check nothing else. `sort_ptr` marks the slots and not the
+  pointees, because the sort permutes the slots and never writes through a pointee. A caller holds
+  slots of `void*`: from `void mut* mut@`, which is what `vec.ptr_vec` holds (2.7), no conversion
+  and no cast reaches `void* mut@`, because the drop of the mark at level 2 behind the `mut` level 1
+  changes the type of a pointer place (D5.4, D3.14). Ownership: none; an `own` span argument lends
+  (D17.4).
 - `cmp_i64`, `cmp_u64`: ready-made ascending comparators, `-1`, `0` or `1`. `cmp_u64` compares
   unsigned, so it orders `0xFFFFFFFFFFFFFFFF` last where `cmp_i64` on the same bytes orders it
   first. A qualified function name is a value (D3.10), so a call reads

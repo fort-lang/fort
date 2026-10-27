@@ -1,0 +1,64 @@
+//! fail
+// A cast whose target marks level 1 `mut` must not hide an owner place of its
+// source (D3.14). Here the owner place is a field, at any depth of the fixed
+// storage of the pointee. At its byte the target holds no owner, or an owner of
+// another type. The byte counts from the start of the pointee.
+import std.str;
+
+struct holder {
+    u64 count;
+    u64* own data;
+}
+
+struct nest {
+    u64 tag;
+    holder inner;
+}
+
+struct plain {
+    u64 a;
+    u64 b;
+}
+
+// An owner at byte 8, of another type.
+struct other_owner {
+    u64 count;
+    u8* own data;
+}
+
+// An owner at byte 8 whose `mut` mark the source does not have.
+struct other_mark {
+    u64 count;
+    u64 mut* own data;
+}
+
+struct named {
+    u64 id;
+    string own name;
+}
+
+fn main() i32 {
+    holder mut h = holder{.count = 1, .data = new(u64)};
+    void mut* v = cast(&h, void mut*); //! error: cannot cast holder mut* to void mut*: a 'mut' cast hides the pointer u64* own at byte 8
+    u64 mut* w = cast(&h, u64 mut*); //! error: cannot cast holder mut* to u64 mut*: a 'mut' cast hides the pointer u64* own at byte 8
+    plain mut* p = cast(&h, plain mut*); //! error: cannot cast holder mut* to plain mut*: a 'mut' cast hides the pointer u64* own at byte 8
+    other_owner mut* o = cast(&h, other_owner mut*); //! error: cannot cast holder mut* to other_owner mut*: a 'mut' cast hides the pointer u64* own at byte 8
+    other_mark mut* m = cast(&h, other_mark mut*); //! error: cannot cast holder mut* to other_mark mut*: a 'mut' cast hides the pointer u64* own at byte 8
+    // A pointer value hides as the address of a local does.
+    holder mut* ph = &h;
+    void mut* through = cast(ph, void mut*); //! error: cannot cast holder mut* to void mut*: a 'mut' cast hides the pointer u64* own at byte 8
+    // A field of a field: the owner of `inner` stands at byte 16 of a `nest`.
+    nest mut n = nest{.tag = 2, .inner = holder{.count = 3, .data = new(u64)}};
+    plain mut* q = cast(&n, plain mut*); //! error: cannot cast nest mut* to plain mut*: a 'mut' cast hides the pointer u64* own at byte 16
+    // An owning `string` is an owner place too.
+    named mut s = named{.id = 4, .name = str.dup("x")};
+    u64 mut* r = cast(&s, u64 mut*); //! error: cannot cast named mut* to u64 mut*: a 'mut' cast hides the pointer string own at byte 8
+    // An owning result hides the owners of its pointee as a view does.
+    holder mut* own boxed = new(holder);
+    void mut* own whole = cast(move(boxed), void mut* own); //! error: cannot cast holder mut* own to void mut* own: a 'mut' cast hides the pointer u64* own at byte 8
+    println(v == null, *w, p->a, o->count, m->count, through == null, q->b, *r, whole == null);
+    del(h.data);
+    del(n.inner.data);
+    del(s.name);
+    return 0;
+}
