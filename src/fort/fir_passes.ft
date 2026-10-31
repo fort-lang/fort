@@ -560,19 +560,26 @@ fn merge_blocks(fir.func mut* f, removal mut@ done) void {
     defer del(gone);
     u64 mut k = 0;
     while (k < n) {
-        while (!gone[k] && done[k].removed) {
-            u32 next = fir.block_at(f, cast(k, u32))->term.target;
-            u64 at = cast(next, u64);
-            if (next == 0 || at == k || gone[at] || fir.pred_count(&pt, next) != 1) {
-                break;
-            }
-            absorb(f, cast(k, u32), next);
-            done[k].removed = done[at].removed;
-            gone[at] = true;
-        }
+        merge_chain(f, done, &pt, gone, k);
         k += 1;
     }
     renumber(f, gone);
+}
+
+// Merges into block `k` the chain of continuations of its removed checks, for merge_blocks, and
+// marks each merged block in `gone`. The caller keeps `pt`, so it is no local owner here.
+fn merge_chain(fir.func mut* f, removal mut@ done, fir.pred_table* pt, bool mut@ gone, u64 k)
+    void {
+    while (!gone[k] && done[k].removed) {
+        u32 next = fir.block_at(f, cast(k, u32))->term.target;
+        u64 at = cast(next, u64);
+        if (next == 0 || at == k || gone[at] || fir.pred_count(pt, next) != 1) {
+            break;
+        }
+        absorb(f, cast(k, u32), next);
+        done[k].removed = done[at].removed;
+        gone[at] = true;
+    }
 }
 
 // Appends the statements of block `c` to block `k`, gives `k` the terminator of `c`, and frees

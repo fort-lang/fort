@@ -69,15 +69,7 @@ fn make(place.survey* c, u64 units) map {
     u32 n = fir.local_count(f);
     u64 mut borrows = 0;
     u64 mut frames = 0;
-    u32 mut k = 0;
-    while (k < n) {
-        if (!c->locals[cast(k, u64)].memory) {
-            borrows += 1;
-        } else if (!is_aggregate_result(f, k)) {
-            frames += 1;
-        }
-        k += 1;
-    }
+    count_locals(c, &borrows, &frames);
     map mut m = map{.f = f};
     // with no frame, no kill rule reads the map
     if (frames == 0) {
@@ -95,23 +87,45 @@ fn make(place.survey* c, u64 units) map {
     m.borrow_rank = new(u32, cast(n, u64));
     del(m.frame_rank);
     m.frame_rank = new(u32, cast(n, u64));
+    fill_ranks(c, m.borrow_rank, m.frame_rank);
+    m.work = 0;
+    return m;
+}
+
+// Counts the borrow locals and the frames of the survey `c`, for make. The result of make is no
+// local owner here.
+fn count_locals(place.survey* c, u64 mut* borrows, u64 mut* frames) void {
+    u32 n = fir.local_count(c->f);
+    u32 mut k = 0;
+    while (k < n) {
+        if (!c->locals[cast(k, u64)].memory) {
+            *borrows += 1;
+        } else if (!is_aggregate_result(c->f, k)) {
+            *frames += 1;
+        }
+        k += 1;
+    }
+}
+
+// Gives each borrow local of the survey `c` its rank in `borrow_rank` and each frame its rank in
+// `frame_rank`, and NO_RANK to each other local, for make. The result of make is no local owner
+// here.
+fn fill_ranks(place.survey* c, u32 mut@ borrow_rank, u32 mut@ frame_rank) void {
     u32 mut next_borrow = 0;
     u32 mut next_frame = 0;
-    k = 0;
-    while (k < n) {
-        m.borrow_rank[cast(k, u64)] = NO_RANK;
-        m.frame_rank[cast(k, u64)] = NO_RANK;
-        if (!c->locals[cast(k, u64)].memory) {
-            m.borrow_rank[cast(k, u64)] = next_borrow;
+    u64 mut k = 0;
+    while (k < borrow_rank.len) {
+        borrow_rank[k] = NO_RANK;
+        frame_rank[k] = NO_RANK;
+        if (!c->locals[k].memory) {
+            borrow_rank[k] = next_borrow;
             next_borrow += 1;
-        } else if (!is_aggregate_result(f, k)) {
-            m.frame_rank[cast(k, u64)] = next_frame;
+        } else if (!is_aggregate_result(c->f, cast(k, u32))) {
+            frame_rank[k] = next_frame;
             next_frame += 1;
         }
         k += 1;
     }
-    m.work = 0;
-    return m;
 }
 
 // Whether the local `n` is `_0` of an aggregate type. Its storage is the destination of the
@@ -428,18 +442,25 @@ fn run(map mut* m, fir.pred_table* pt) void {
         }
         if (!fir_flow.bits_equal(&next, &outs[cast(at, u64)])) {
             fir_flow.bits_copy(&outs[cast(at, u64)], &next);
-            fir.block* bl = fir.block_at(f, at);
-            u32 mut e = 0;
-            u32 mut target = 0;
-            while (bl->terminated && fir.term_targets(f, &bl->term, e, &target)) {
-                if (!fir_flow.bits_get(&listed, target)) {
-                    fir_flow.bits_set(&listed, target);
-                    ring[(head + len) % size] = target;
-                    len += 1;
-                }
-                e += 1;
-            }
+            list_successors(f, at, &listed, ring, head, &len);
         }
     }
     m->on = true;
+}
+
+// Appends to the worklist `ring` of run, whose `len` entries start at `head`, each successor of the
+// block `at` that `listed` does not hold. The caller keeps `listed`, so it is no local owner here.
+fn list_successors(fir.func* f, u32 at, fir_flow.bits mut* listed, u32 mut@ ring, u64 head,
+                   u64 mut* len) void {
+    fir.block* bl = fir.block_at(f, at);
+    u32 mut e = 0;
+    u32 mut target = 0;
+    while (bl->terminated && fir.term_targets(f, &bl->term, e, &target)) {
+        if (!fir_flow.bits_get(listed, target)) {
+            fir_flow.bits_set(listed, target);
+            ring[(head + *len) % ring.len] = target;
+            *len += 1;
+        }
+        e += 1;
+    }
 }

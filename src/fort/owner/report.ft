@@ -258,6 +258,13 @@ fn write(fir.func* f, prover.proof* p, session.session mut* s) void {
     defer strbuf.free(&place);
     strbuf.str_buf mut text = strbuf.create();
     defer strbuf.free(&text);
+    write_errors(f, p, s, &place, &text);
+}
+
+// The errors of write, with the scratch buffers `place` and `text`. The caller keeps the buffers,
+// so they are no local owners here.
+fn write_errors(fir.func* f, prover.proof* p, session.session mut* s, strbuf.str_buf mut* place,
+                strbuf.str_buf mut* text) void {
     bool mut limit_told = false;
     u64 mut k = 0;
     u32 mut b = 0;
@@ -266,14 +273,14 @@ fn write(fir.func* f, prover.proof* p, session.session mut* s) void {
             prover.store* st = &p->stores[k];
             fir.statement* sm = fir.block_statement(f, b, st->index);
             if (!st->proved && !is_repeated(f, p, b, k, sm->loc)) {
-                write_error(f, sm->place, sm->loc, p->over && !limit_told, s, &place, &text);
+                write_error(f, sm->place, sm->loc, p->over && !limit_told, s, place, text);
                 limit_told = true;
             }
             k += 1;
         }
         fir.terminator* t = &fir.block_at(f, b)->term;
         if (!p->proved[cast(b, u64)] && !is_repeated(f, p, b, k, t->loc)) {
-            write_error(f, t->place, t->loc, p->over && !limit_told, s, &place, &text);
+            write_error(f, t->place, t->loc, p->over && !limit_told, s, place, text);
             limit_told = true;
         }
         b += 1;
@@ -624,17 +631,24 @@ fn write_inners(fir.func* f, prover.proof* p, session.session mut* s, strbuf.str
     void {
     strbuf.str_buf mut owner = strbuf.create();
     defer strbuf.free(&owner);
+    write_inner_lines(f, p, s, &owner, out);
+}
+
+// The lines of write_inners, with the scratch buffer `owner`. The caller keeps `owner`, so it is no
+// local owner here.
+fn write_inner_lines(fir.func* f, prover.proof* p, session.session mut* s,
+                     strbuf.str_buf mut* owner, strbuf.str_buf mut* out) void {
     bool mut limit_told = false;
     u64 mut k = 0;
     while (k < p->inners.len) {
         prover.inner* e = &p->inners[k];
         if (!e->proved && !is_inner_repeated(f, p, k)) {
             fir.statement* st = fir.block_statement(f, e->block, e->index);
-            strbuf.clear(&owner);
-            write_inner_owner(f, e, s, &owner);
+            strbuf.clear(owner);
+            write_inner_owner(f, e, s, owner);
             write_position(st->loc, out);
             strbuf.append(out, "leak: cannot prove '");
-            strbuf.append(out, strbuf.view(&owner));
+            strbuf.append(out, strbuf.view(owner));
             if (st->kind == fir.stmt_kind.st_del) {
                 strbuf.append(out, "' is empty before this del\n");
             } else {
@@ -642,7 +656,7 @@ fn write_inners(fir.func* f, prover.proof* p, session.session mut* s, strbuf.str
             }
             write_position(st->loc, out);
             strbuf.append(out, "note: move '");
-            strbuf.append(out, strbuf.view(&owner));
+            strbuf.append(out, strbuf.view(owner));
             strbuf.append(out, "' into a local and del it first\n");
             if (p->inner_over && !limit_told) {
                 write_position(st->loc, out);

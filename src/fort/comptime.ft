@@ -1429,6 +1429,19 @@ fn select_tree(selector mut* s, ast.node mut* n) void {
     }
 }
 
+// Selects each import `$if` of `module`. The caller keeps `s`, so it is no local owner here.
+fn select_imports(selector mut* s, ast.node mut* module) void {
+    u64 mut i = 0;
+    while (i < ast.ast_len(module)) {
+        ast.node mut* child = ast.ast_child_mut(module, i);
+        if (child->kind == ast.ast_kind.k_compile_if
+            && (child->flags & ast.FLAG_IMPORT_SELECTOR) != 0) {
+            select_tree(s, child);
+        }
+        i += 1;
+    }
+}
+
 /// Selects each import `$if` before declaration names exist, then selects the
 /// declaration and statement forms. The caller stops before it constructs a
 /// module namespace when this reports an error.
@@ -1437,20 +1450,12 @@ fn select_module(session.session mut* sess, ast.node mut* module) bool {
     defer del(s.entries);
     defer strbuf.free(&s.msg);
     clear_selection(module);
-    u64 mut i = 0;
-    while (i < ast.ast_len(module)) {
-        ast.node mut* child = ast.ast_child_mut(module, i);
-        if (child->kind == ast.ast_kind.k_compile_if
-            && (child->flags & ast.FLAG_IMPORT_SELECTOR) != 0) {
-            select_tree(&s, child);
-        }
-        i += 1;
-    }
+    select_imports(&s, module);
     if (!s.ok) {
         return false;
     }
     s.imports = false;
-    i = 0;
+    u64 mut i = 0;
     while (i < ast.ast_len(module)) {
         add_constant(&s, ast.ast_child_mut(module, i));
         i += 1;

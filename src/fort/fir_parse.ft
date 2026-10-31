@@ -857,6 +857,35 @@ fn type_end(fir_parser* p) u64 {
 /// because a FIR type has no binding.
 fn parse_type_text(fir_parser mut* p, string text, diag.loc at) types.node* {
     u64 before = session.error_count(p->sess);
+    ast.node mut* n = parse_type_tree(p, text, at, before);
+    if (n == null) {
+        return null;
+    }
+    check.checker mut* ck = p->pre.ck;
+    modules.module* saved_module = ck->module;
+    scope.scope mut* saved_scope = ck->scope;
+    ck->module = p->pre.module;
+    ck->scope = null;
+    check.written_type w = check.check_type(ck, n, check.type_pos.pos_binding);
+    ck->module = saved_module;
+    ck->scope = saved_scope;
+    if (check.check_poisoned(w.ty)) {
+        if (session.error_count(p->sess) == before) {
+            fail_at(p, at, "the type does not resolve in the prelude");
+        }
+        return null;
+    }
+    if (w.mut0) {
+        fail_at(p, at, "a FIR type has no binding: remove the outermost 'mut'");
+        return null;
+    }
+    return w.ty;
+}
+
+// Lexes and parses the type spelling `text` of parse_type_text, whose error count was `before`.
+// Null after a diagnostic. The tokens and the parser stay local here, so the caller loads through
+// `p->pre.ck` with no local owner that a call can vacate.
+fn parse_type_tree(fir_parser mut* p, string text, diag.loc at, u64 before) ast.node mut* {
     lexer.tok_vec mut toks = lexer.tokvec_create();
     defer lexer.tokvec_free(&toks);
     lexer.lexer mut lx = lexer.lexer{
@@ -898,25 +927,7 @@ fn parse_type_text(fir_parser mut* p, string text, diag.loc at) types.node* {
         fail_at(p, rest_at, "expected the end of the type");
         return null;
     }
-    check.checker mut* ck = p->pre.ck;
-    modules.module* saved_module = ck->module;
-    scope.scope mut* saved_scope = ck->scope;
-    ck->module = p->pre.module;
-    ck->scope = null;
-    check.written_type w = check.check_type(ck, n, check.type_pos.pos_binding);
-    ck->module = saved_module;
-    ck->scope = saved_scope;
-    if (check.check_poisoned(w.ty)) {
-        if (session.error_count(p->sess) == before) {
-            fail_at(p, at, "the type does not resolve in the prelude");
-        }
-        return null;
-    }
-    if (w.mut0) {
-        fail_at(p, at, "a FIR type has no binding: remove the outermost 'mut'");
-        return null;
-    }
-    return w.ty;
+    return n;
 }
 
 // Reads the type spelling at the cursor into *out.
@@ -2148,12 +2159,18 @@ fn parse_module(session.session mut* s, string file, string text, prelude pre) f
     pos_vec mut bodies = pos_vec{};
     defer del(bodies.items);
     read_headers(&p, &m, &bodies);
-    u64 mut i = 0;
-    while (i < bodies.len) {
-        p.pos = bodies.items[i];
-        parse_body(&p, &m.funcs.items[i]);
-        i += 1;
-    }
+    parse_bodies(&p, &m, &bodies);
     fir.module_collect_externs(&m);
     return m;
+}
+
+// Parses the body of each function of `m`, which starts at its position in `bodies`. The caller
+// keeps `m` and `bodies`, so they are no local owners here.
+fn parse_bodies(fir_parser mut* p, fir.module mut* m, pos_vec* bodies) void {
+    u64 mut i = 0;
+    while (i < bodies->len) {
+        p->pos = bodies->items[i];
+        parse_body(p, &m->funcs.items[i]);
+        i += 1;
+    }
 }
