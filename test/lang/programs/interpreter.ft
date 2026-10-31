@@ -333,10 +333,25 @@ fn parse_int(string w, bool mut* ok) i64 {
     return v;
 }
 
+// assemble returns a span, and a read through src or through a local span after a call could
+// read that result, which the call can change. So each pass reads in a function of its own,
+// which returns no span (D17.21).
 fn assemble(string@ src, string mut* error) insn mut@ own {
-    // Pass one: count instructions and note each label's address.
-    u64 mut n = 0;
     u64 mut label_count = 0;
+    u64 n = count_lines(src, &label_count);
+    string mut@ own names = new(string, label_count);
+    defer del(names);
+    u64 mut@ own places = new(u64, label_count);
+    defer del(places);
+    u64 seen = collect_labels(src, names, places);
+    insn mut@ own code = new(insn, n);
+    emit(src, names, places, seen, code, error);
+    return move(code);
+}
+
+// Pass one: count the instructions and the labels.
+fn count_lines(string@ src, u64 mut* label_count) u64 {
+    u64 mut n = 0;
     {
         string@ range_values = src;
         u64 mut range_index = 0;
@@ -348,16 +363,17 @@ fn assemble(string@ src, string mut* error) insn mut@ own {
                 continue;
             }
             if (is_label(line)) {
-                label_count++;
+                *label_count += 1;
             } else {
                 n++;
             }
         }
     }
-    string mut@ own names = new(string, label_count);
-    defer del(names);
-    u64 mut@ own places = new(u64, label_count);
-    defer del(places);
+    return n;
+}
+
+// Note each label's address; returns the count of the labels.
+fn collect_labels(string@ src, string mut@ names, u64 mut@ places) u64 {
     u64 mut seen = 0;
     u64 mut here = 0;
     {
@@ -379,9 +395,12 @@ fn assemble(string@ src, string mut* error) insn mut@ own {
             }
         }
     }
+    return seen;
+}
 
-    // Pass two: emit, resolving a label operand against the table.
-    insn mut@ own code = new(insn, n);
+// Pass two: emit, resolving a label operand against the table.
+fn emit(string@ src, string@ names, u64@ places, u64 seen, insn mut@ code,
+        string mut* error) void {
     u64 mut at = 0;
     {
         string@ range_values = src;
@@ -397,7 +416,7 @@ fn assemble(string@ src, string mut* error) insn mut@ own {
             op what = mnemonic(word(line, 0), &ok);
             if (!ok) {
                 *error = "unknown mnemonic";
-                return move(code);
+                return;
             }
             string operand = word(line, 1);
             i64 mut arg = 0;
@@ -411,20 +430,19 @@ fn assemble(string@ src, string mut* error) insn mut@ own {
                 }
                 if (!found) {
                     *error = "unknown label";
-                    return move(code);
+                    return;
                 }
             } else if (operand.len > 0) {
                 arg = parse_int(operand, &ok);
                 if (!ok) {
                     *error = "bad operand";
-                    return move(code);
+                    return;
                 }
             }
             code[at] = insn{what, arg};
             at++;
         }
     }
-    return move(code);
 }
 
 fn run(insn@ code, i64@ args, string name) i64 {

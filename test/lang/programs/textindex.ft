@@ -154,6 +154,65 @@ fn conjunction(index* ix, string@ words) void {
     println();
 }
 
+// The functions below read the text and the index through parameters, so a read there uses no
+// local owner of main (D17.21).
+// Adds each word of text with the number of its line.
+fn index_text(index mut* ix, string text) void {
+    i64 mut line = 1;
+    u64 mut i = 0;
+    while (i < text.len) {
+        if (text[i] == '\n') {
+            line++;
+            i++;
+            continue;
+        }
+        if (!str.is_alnum(text[i])) {
+            i++;
+            continue;
+        }
+        u64 start = i;
+        while (i < text.len && str.is_alnum(text[i])) {
+            i++;
+        }
+        add(ix, text[start..i], line);
+    }
+    ix->line_count = cast(line - 1, u64);
+}
+
+// The dictionary in insertion order, which is the order of first sight.
+fn show_dictionary(index* ix) void {
+    print("dictionary:");
+    for (u64 mut w = 0; w < ix->count; w++) {
+        print(" ", ix->postings[w].word);
+    }
+    println();
+}
+
+fn total_occurrences(index* ix) u64 {
+    u64 mut total = 0;
+    for (u64 mut w = 0; w < ix->count; w++) {
+        total += ix->postings[w].occurrences;
+    }
+    return total;
+}
+
+// The words of text, counted in a second pass that shares no state with the index.
+fn count_words(string text) u64 {
+    u64 mut words_seen = 0;
+    u64 mut j = 0;
+    while (j < text.len) {
+        if (!str.is_alnum(text[j])) {
+            j++;
+            continue;
+        }
+        while (j < text.len && str.is_alnum(text[j])) {
+            j++;
+        }
+        words_seen++;
+    }
+    return words_seen;
+}
+
 string[2] QUERY_A = {"the", "fox"};
 string[2] QUERY_B = {"quick", "dog"};
 string[3] QUERY_C = {"the", "dog", "fox"};
@@ -173,35 +232,12 @@ fn main(string@ args) i32 {
     index mut ix = create(64);
     defer free_index(&ix);
 
-    i64 mut line = 1;
-    u64 mut i = 0;
-    while (i < text.len) {
-        if (text[i] == '\n') {
-            line++;
-            i++;
-            continue;
-        }
-        if (!str.is_alnum(text[i])) {
-            i++;
-            continue;
-        }
-        u64 start = i;
-        while (i < text.len && str.is_alnum(text[i])) {
-            i++;
-        }
-        add(&ix, text[start..i], line);
-    }
-    ix.line_count = cast(line - 1, u64);
+    index_text(&ix, text);
 
     println("lines=", ix.line_count, " distinct=", ix.count, " map=",
             strmap.count(&ix.words));
 
-    // The dictionary in insertion order, which is the order of first sight.
-    print("dictionary:");
-    for (u64 mut w = 0; w < ix.count; w++) {
-        print(" ", ix.postings[w].word);
-    }
-    println();
+    show_dictionary(&ix);
 
     show_postings(&ix, "the");
     show_postings(&ix, "fox");
@@ -214,22 +250,8 @@ fn main(string@ args) i32 {
     conjunction(&ix, QUERY_D[0..QUERY_D.len]);
 
     // The totals must agree with a second pass that shares no state.
-    u64 mut total = 0;
-    for (u64 mut w = 0; w < ix.count; w++) {
-        total += ix.postings[w].occurrences;
-    }
-    u64 mut words_seen = 0;
-    u64 mut j = 0;
-    while (j < text.len) {
-        if (!str.is_alnum(text[j])) {
-            j++;
-            continue;
-        }
-        while (j < text.len && str.is_alnum(text[j])) {
-            j++;
-        }
-        words_seen++;
-    }
+    u64 total = total_occurrences(&ix);
+    u64 words_seen = count_words(text);
     println("occurrences=", total, " words=", words_seen, " agree=", total == words_seen);
     return 0;
 }

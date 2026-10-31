@@ -45,12 +45,28 @@ struct node {
     i32 v;
 }
 
+// Fixed arrays at the read-only level 1 on both sides keep the levels in
+// step, and level 2 holds the pointer place of the source. The store loads a pointer from
+// memory, which can be each owner whose address a store or a call took. In main a call can
+// change those owners, so the part is a function of its own (D17.21).
+fn fixed_levels() void {
+    wrap mut kept_cell = wrap{.p = new(u64)};
+    u64 mut* own mut*[1] mut slots_of = {&kept_cell.p};
+    u64 mut* own mut*[1]* as_slots = cast(&slots_of, u64 mut* own mut*[1]*);
+    **(*as_slots)[0] = 21;
+    println(*kept_cell.p);
+    del(kept_cell.p);
+}
+
 fn main() i32 {
     holder mut h = holder{.count = 1, .data = new(u64)};
     mirror mut* m = cast(&h, mirror mut*);
     m->tally = 5;
     *m->payload = 6;
-    println(h.count, " ", *h.data);
+    // main takes the address of each owner, so a print call can change them, and a read of one
+    // after a call is a use that D17.21 cannot prove. So the reads come before the print.
+    u64 data = *h.data;
+    println(h.count, " ", data);
     // An owner slot seen as a struct that holds it at byte 0.
     wrap mut cell = wrap{.p = new(u64)};
     wrap mut* w = cast(&cell.p, wrap mut*);
@@ -65,12 +81,14 @@ fn main() i32 {
     // seen as two arrays of two.
     holder[2] mut hs = {holder{.count = 8, .data = new(u64)}, holder{.count = 9, .data = new(u64)}};
     mirror[2] mut* ms = cast(&hs, mirror[2] mut*);
-    println((*ms)[0].tally, " ", (*ms)[1].tally);
+    u64 second = (*ms)[1].tally;
+    println((*ms)[0].tally, " ", second);
     u64 mut* own[4] mut four = {new(u64), new(u64), new(u64), new(u64)};
     halves mut* hv = cast(&four, halves mut*);
     *hv->low[1] = 13;
     *hv->high[0] = 14;
-    println(*four[1], " ", *four[2]);
+    u64 third = *four[2];
+    println(*four[1], " ", third);
     // A source that holds no owner place, and the way back from `void mut*`.
     u64 mut x = 1;
     u8 mut* b = cast(&x, u8 mut*);
@@ -98,13 +116,7 @@ fn main() i32 {
     holder mut** pm = cast(&ph, holder mut**);
     (*pm)->count = 12;
     println(h.count);
-    // Fixed arrays at the read-only level 1 on both sides keep the levels in
-    // step, and level 2 holds the pointer place of the source.
-    wrap mut kept_cell = wrap{.p = new(u64)};
-    u64 mut* own mut*[1] mut slots_of = {&kept_cell.p};
-    u64 mut* own mut*[1]* as_slots = cast(&slots_of, u64 mut* own mut*[1]*);
-    **(*as_slots)[0] = 21;
-    println(*kept_cell.p);
+    fixed_levels();
     del(kept);
     del(many);
     del(kids);
@@ -117,7 +129,6 @@ fn main() i32 {
     del(hs[1].data);
     del(slots[0]);
     del(slots[1]);
-    del(kept_cell.p);
     del(cell.p);
     del(h.data);
     return 0;
