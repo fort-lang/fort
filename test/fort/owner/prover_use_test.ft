@@ -1,0 +1,2445 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| vacate ok
+//| overlap ok
+//| keys ok
+//| borrows ok
+//| ends ok
+//| order ok
+//| reads ok
+//| paths ok
+//| spans ok
+//| temps ok
+//| calls ok
+//| tempkeys ok
+//| forms ok
+//| aborts ok
+//| nested ok
+//| operands ok
+//| joins ok
+//| consts ok
+//| expose ok
+//| limit ok
+/// Checks the proof of rule (b) in owner.prover (D17.21): a use of a local owner after a `move`
+/// or a `del`. Each group of cases over FIR text holds one part of the rule, with a case that the
+/// pass proves and a case that it does not prove: the operations that vacate an owner, the places
+/// that overlap it, the keys, the borrows of a place through a pointer, the events that end the
+/// state, the order inside one statement, the reads that are uses and those that are not, and the
+/// paths. Then the limit of the work. report_use_test checks the lines of the report over lowered
+/// fort source.
+import fort.fir;
+import fort.owner.prover;
+import lower_env;
+import pass_env;
+import std.strbuf;
+
+// The types, the globals and the functions that the FIR text of each case names. A `node` has two
+// owning fields and an `i32`, and a `pair` two owning fields. `keep` stores its pointer in the
+// global `P`, which `get` returns.
+string[48] PRELUDE = {
+    "struct node {",
+    "    node mut* own left;",
+    "    node mut* own right;",
+    "    i32 v;",
+    "    i64 w;",
+    "}",
+    "struct pair {",
+    "    node mut* own a;",
+    "    node mut* own b;",
+    "}",
+    "node mut* own mut G = null;",
+    "node mut* own mut* mut P = null;",
+    "fn g() void {",
+    "}",
+    "fn take(node mut* own n, i32 v) void {",
+    "    del(n);",
+    "}",
+    "fn take2(i32 v, node mut* own n) void {",
+    "    del(n);",
+    "}",
+    "fn make() node mut* own {",
+    "    return new(node);",
+    "}",
+    "fn fill(node mut* n) node mut* own {",
+    "    return new(node);",
+    "}",
+    "fn keep(node mut* own mut* p) void {",
+    "    P = p;",
+    "}",
+    "fn get() node mut* own mut* {",
+    "    return P;",
+    "}",
+    "struct bag {",
+    "    u8 mut@ own data;",
+    "    u64 n;",
+    "}",
+    "fn peek(node mut* n) void {",
+    "}",
+    "extern fn ext_touch(node mut* own mut* n) i32;",
+    "struct outer {",
+    "    pair p;",
+    "    node mut* own[2] e;",
+    "}",
+    "pair mut GS = pair{.a = null, .b = null};",
+    "struct mix {",
+    "    node mut* own o;",
+    "    i32 v;",
+    "}",
+};
+
+// Each group is a FIR module and the uses of each of its functions (write_uses), one word for each
+// use in the order of prover.proof.uses: `P` and the local for a use that the pass proves, and `U`
+// and the local for one that it does not prove, then the kind of the operation of its note (`m`
+// for a `move`, `d` for a `del`, `c` for a call, `n` past the limit) and its block and statement,
+// and `#` and the number of the owner when it is not 0. The comment of a case gives its uses.
+
+// ---- the cases over FIR text ---------------------------------------------------------------
+
+// The operations that vacate a local owner: a `move` or a `del` of a place that can overlap it, the
+// implicit `move` of `return x`, and a call when the owner is memory. `alloc` and `del` are no
+// calls.
+string[87] VACATE = {
+    // a `del` vacates its place, and a load through it is a use: U1d0.0
+    "fn main.v1(_1 (p): node mut* own) -> void {",
+    "    let _2: i32;",
+    "    bb0: {",
+    "        del(move _1);",
+    "        _2 = copy (*_1).2;",
+    "        return;",
+    "    }",
+    "}",
+    // a load before the `del` is proved: P1
+    "fn main.v2(_1 (p): node mut* own) -> void {",
+    "    let _2: i32;",
+    "    bb0: {",
+    "        _2 = copy (*_1).2;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a `move` vacates its place: U1m0.0
+    "fn main.v3(_1 (p): node mut* own) -> void {",
+    "    let _2: node mut* own;",
+    "    let _3: i32;",
+    "    bb0: {",
+    "        _2 = move _1;",
+    "        _3 = copy (*_1).2;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // the implicit `move` of `return x` vacates `x`, and the `return` reads `_0`: U1m0.0 P0
+    "fn main.v4(_1 (p): node mut* own) -> node mut* own {",
+    "    let _0: node mut* own;",
+    "    let _2: i32;",
+    "    bb0: {",
+    "        _0 = move _1;",
+    "        _2 = copy (*_1).2;",
+    "        return;",
+    "    }",
+    "}",
+    // a call vacates a memory owner: U1c0.2
+    "fn main.v5() -> void {",
+    "    let _1 (p): node mut* own;",
+    "    let _2: node mut* own mut*;",
+    "    let _3: void;",
+    "    let _4: i32;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1);",
+    "        _2 = addr mut(_1);",
+    "        _3 = call fn main.g();",
+    "        _4 = copy (*_1).2;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a call keeps an owner that is no memory: P1
+    "fn main.v6() -> void {",
+    "    let _1 (p): node mut* own;",
+    "    let _2: void;",
+    "    let _3: i32;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1);",
+    "        _2 = call fn main.g();",
+    "        _3 = copy (*_1).2;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // `alloc` and `del` of another local are no calls: P1
+    "fn main.v7() -> void {",
+    "    let _1 (p): node mut* own;",
+    "    let _2: node mut* own mut*;",
+    "    let _3: node mut* own;",
+    "    let _4: i32;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1);",
+    "        _2 = addr mut(_1);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        del(move _3);",
+    "        _4 = copy (*_1).2;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a global and a place through a parameter are no local owners: no use
+    "fn main.v8(_1 (q): pair mut*) -> void {",
+    "    let _2: i32;",
+    "    let _3: i32;",
+    "    bb0: {",
+    "        del(move global main.G);",
+    "        _2 = copy (*global main.G).2;",
+    "        del(move (*_1).0);",
+    "        _3 = copy (*(*_1).0).2;",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[8] VACATE_USES = {"U1d0.0", "P1", "U1m0.0", "U1m0.0 P0", "U1c0.2", "P1", "P1", ""};
+
+// A place in the fixed storage of the local of an owner that is not separate from it can overlap
+// it: the owner, a place that contains it and each element of one fixed array. A read of a tracked
+// place uses the owners below it and the owner of which it is a part; a read with an index that is
+// no key uses each owner that it can overlap.
+string[89] OVERLAP = {
+    // a `del` of `s.a` keeps `s.b`: P1 U1d0.0
+    "fn main.o1(_1 (s): pair) -> void {",
+    "    let _2: i32;",
+    "    let _3: i32;",
+    "    bb0: {",
+    "        del(move _1.0);",
+    "        _2 = copy (*_1.1).2;",
+    "        _3 = copy (*_1.0).2;",
+    "        return;",
+    "    }",
+    "}",
+    // a `move` of `s` vacates `s.b`: U1m0.0
+    "fn main.o2(_1 (s): pair) -> void {",
+    "    let _2: pair;",
+    "    let _3: i32;",
+    "    bb0: {",
+    "        _2 = move _1;",
+    "        _3 = copy (*_1.1).2;",
+    "        return;",
+    "    }",
+    "}",
+    // a read of a whole struct reads each owner of it: the `return` reads `_0`, whose first owner
+    // that can be vacated is `_0.b`: U0d0.1#1
+    "fn main.o3(_1 (s): pair) -> pair {",
+    "    let _0: pair;",
+    "    bb0: {",
+    "        _0 = move _1;",
+    "        del(move _0.1);",
+    "        return;",
+    "    }",
+    "}",
+    // a `del` of `b[k]` vacates `b[j]`: U1d0.0
+    "fn main.o4(_1 (b): node mut* own[2], _2 (k): u64, _3 (j): u64) -> void {",
+    "    let _4: i32;",
+    "    bb0: {",
+    "        del(move _1[_2]);",
+    "        _4 = copy (*_1[_3]).2;",
+    "        return;",
+    "    }",
+    "}",
+    // a store into `b[k]` ends the state of `b[k]` and of no other element: P1 U1d0.0
+    "fn main.o5(_1 (b): node mut* own[2], _2 (k): u64, _3 (j): u64) -> void {",
+    "    let _4: node mut* own;",
+    "    let _5: i32;",
+    "    let _6: i32;",
+    "    bb0: {",
+    "        del(move _1[_2]);",
+    "        _4 = alloc<node>(const u64 1);",
+    "        _1[_2] = move _4;",
+    "        _5 = copy (*_1[_2]).2;",
+    "        _6 = copy (*_1[_3]).2;",
+    "        return;",
+    "    }",
+    "}",
+    // an index with no key reads each owner of `b`, and `b[1]` can be vacated; the read itself is
+    // of an `own` type, so the use names it: U1d0.3
+    "fn main.o6(_1 (b): node mut* own[2], _2 (k): u64) -> void {",
+    "    let _3: u64;",
+    "    let _4: u64;",
+    "    let _5: node mut* own;",
+    "    let _6: i32;",
+    "    bb0: {",
+    "        _3 = const u64 0;",
+    "        _3 = const u64 1;",
+    "        _4 = const u64 0;",
+    "        del(move _1[_2]);",
+    "        _5 = alloc<node>(const u64 1);",
+    "        _1[_4] = move _5;",
+    "        _6 = copy (*_1[_3]).2;",
+    "        return;",
+    "    }",
+    "}",
+    // a constant key names one owner: P1
+    "fn main.o7(_1 (b): node mut* own[2]) -> void {",
+    "    let _2: u64;",
+    "    let _3: u64;",
+    "    let _4: node mut* own;",
+    "    let _5: i32;",
+    "    bb0: {",
+    "        _2 = const u64 0;",
+    "        _3 = cast<u64>(const i32 0);",
+    "        del(move _1[_2]);",
+    "        _4 = alloc<node>(const u64 1);",
+    "        _1[_2] = move _4;",
+    "        _5 = copy (*_1[_3]).2;",
+    "        return;",
+    "    }",
+    "}",
+    // a read through a pointer reads each owner of the memory local; the first that can be vacated
+    // is `s.b`: U1d0.1#1
+    "fn main.o8(_1 (s): pair) -> void {",
+    "    let _2: pair*;",
+    "    let _3: bool;",
+    "    bb0: {",
+    "        _2 = addr(_1);",
+    "        del(move _1.1);",
+    "        _3 = eq(copy (*_2).0, copy (*_2).1);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[8] OVERLAP_USES = {
+    "P1 U1d0.0", "U1m0.0", "U0d0.1#1", "U1d0.0", "P1 U1d0.0", "U1d0.3", "P1", "U1d0.1#1",
+};
+
+// A store ends the state only when no store into a key of its destination follows it on the path. A
+// store into the whole array has no key, and its end holds.
+string[107] KEYS = {
+    // D17.21: `del(b[k]); k = 1; del(b[k]); b[k] = new(i32); k = 0; *b[k]`: U1d0.2, the first `del`
+    "fn main.k1() -> void {",
+    "    let _1 (b): node mut* own[2];",
+    "    let _2 (k): u64;",
+    "    let _3: node mut* own;",
+    "    let _4: i32;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own[2];",
+    "        _2 = const u64 0;",
+    "        del(move _1[_2]);",
+    "        _2 = const u64 1;",
+    "        del(move _1[_2]);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        _1[_2] = move _3;",
+    "        _2 = const u64 0;",
+    "        _4 = copy (*_1[_2]).2;",
+    "        return;",
+    "    }",
+    "}",
+    // D17.21: with no store into `k` after the store into `b[k]`: P1
+    "fn main.k2() -> void {",
+    "    let _1 (b): node mut* own[2];",
+    "    let _2 (k): u64;",
+    "    let _3: node mut* own;",
+    "    let _4: i32;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own[2];",
+    "        _2 = const u64 1;",
+    "        del(move _1[_2]);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        _1[_2] = move _3;",
+    "        _4 = copy (*_1[_2]).2;",
+    "        return;",
+    "    }",
+    "}",
+    // a store into the whole array ends the state of `b[k]`, and a later store into `k` undoes
+    // nothing: P1
+    "fn main.k3() -> void {",
+    "    let _1 (b): node mut* own[2];",
+    "    let _2 (k): u64;",
+    "    let _3: i32;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own[2];",
+    "        _2 = const u64 0;",
+    "        del(move _1[_2]);",
+    "        _1 = const zero node mut* own[2];",
+    "        _2 = const u64 1;",
+    "        _3 = copy (*_1[_2]).2;",
+    "        return;",
+    "    }",
+    "}",
+    // a store into `k` before the store into `b[k]` undoes nothing: P1
+    "fn main.k4() -> void {",
+    "    let _1 (b): node mut* own[2];",
+    "    let _2 (k): u64;",
+    "    let _3: node mut* own;",
+    "    let _4: i32;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own[2];",
+    "        _2 = const u64 0;",
+    "        del(move _1[_2]);",
+    "        _2 = const u64 1;",
+    "        _3 = alloc<node>(const u64 1);",
+    "        _1[_2] = move _3;",
+    "        _4 = copy (*_1[_2]).2;",
+    "        return;",
+    "    }",
+    "}",
+    // two keys: a store into the outer key undoes the end of the store into `c[i][k]`, which holds
+    // both keys: U3d0.3
+    "fn main.k5(_1 (i): u64, _2 (k): u64) -> void {",
+    "    let _3 (c): node mut* own[2][2];",
+    "    let _4: node mut* own;",
+    "    let _5: i32;",
+    "    bb0: {",
+    "        _3 = const zero node mut* own[2][2];",
+    "        _1 = const u64 0;",
+    "        _2 = const u64 0;",
+    "        del(move _3[_1][_2]);",
+    "        _4 = alloc<node>(const u64 1);",
+    "        _3[_1][_2] = move _4;",
+    "        _1 = const u64 1;",
+    "        _5 = copy (*_3[_1][_2]).2;",
+    "        return;",
+    "    }",
+    "}",
+    // two keys: a store into `c[i]`, which holds only the outer key, ends the state, and a store
+    // into the inner key undoes nothing: P3
+    "fn main.k6(_1 (i): u64, _2 (k): u64) -> void {",
+    "    let _3 (c): node mut* own[2][2];",
+    "    let _4: i32;",
+    "    bb0: {",
+    "        _3 = const zero node mut* own[2][2];",
+    "        _1 = const u64 0;",
+    "        _2 = const u64 0;",
+    "        del(move _3[_1][_2]);",
+    "        _3[_1] = const zero node mut* own[2];",
+    "        _2 = const u64 1;",
+    "        _4 = copy (*_3[_1][_2]).2;",
+    "        return;",
+    "    }",
+    "}",
+    // a read with a local key two blocks after the `del`: U1d0.0
+    "fn main.k7(_1 (b): node mut* own[2], _2 (k): u64, _3 (c): bool) -> void {",
+    "    let _4: i32;",
+    "    bb0: {",
+    "        del(move _1[_2]);",
+    "        switch(copy _3) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _4 = copy (*_1[_2]).2;",
+    "        goto bb2;",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[7] KEYS_USES = {"U1d0.2", "P1", "P1", "P1", "U3d0.3", "P3", "U1d0.0"};
+
+// A `move`, a `del` or a read of a place through a pointer reaches a memory owner only when the
+// place can be a place of its local (D17.11, Borrows), also a place through a global. A place
+// through an `own` pointer lies in an allocation.
+string[187] BORROWS = {
+    // D17.21: `del(*px); *x = 1;`: U1d0.2
+    "fn main.b1() -> void {",
+    "    let _1 (x): node mut* own;",
+    "    let _2 (px): node mut* own mut*;",
+    "    let _3: i32;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1);",
+    "        _2 = addr mut(_1);",
+    "        del(move (*_2));",
+    "        _3 = copy (*_1).2;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // D17.21: `del(*r); *x = 1;` for a parameter `r`, which borrows no origin: P2
+    "fn main.b2(_1 (r): node mut* own mut*) -> void {",
+    "    let _2 (x): node mut* own;",
+    "    let _3 (px): node mut* own mut*;",
+    "    let _4: i32;",
+    "    bb0: {",
+    "        _2 = alloc<node>(const u64 1);",
+    "        _3 = addr mut(_2);",
+    "        del(move (*_1));",
+    "        _4 = copy (*_2).2;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // D17.21: `del(x); **px`: the read of `*px` can overlap `x`: U1d0.2
+    "fn main.b3() -> void {",
+    "    let _1 (x): node mut* own;",
+    "    let _2 (px): node mut* own mut*;",
+    "    let _3: i32;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1);",
+    "        _2 = addr mut(_1);",
+    "        del(move _1);",
+    "        _3 = copy (*(*_2)).2;",
+    "        return;",
+    "    }",
+    "}",
+    // D17.21: `del(x); del(*px);`: the operand of a `del` is no use, also through a pointer: no use
+    "fn main.b4() -> void {",
+    "    let _1 (x): node mut* own;",
+    "    let _2 (px): node mut* own mut*;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1);",
+    "        _2 = addr mut(_1);",
+    "        del(move _1);",
+    "        del(move (*_2));",
+    "        return;",
+    "    }",
+    "}",
+    // a read through a parameter, which borrows no origin, uses no memory owner: no use
+    "fn main.b5(_1 (r): node mut* own mut*) -> void {",
+    "    let _2 (x): node mut* own;",
+    "    let _3 (px): node mut* own mut*;",
+    "    let _4: i32;",
+    "    bb0: {",
+    "        _2 = alloc<node>(const u64 1);",
+    "        _3 = addr mut(_2);",
+    "        del(move _2);",
+    "        _4 = copy (*(*_1)).2;",
+    "        return;",
+    "    }",
+    "}",
+    // a read through an `own` pointer uses no memory owner, and reads the pointer: P1
+    "fn main.b6(_1 (n): pair mut* own) -> void {",
+    "    let _2 (x): node mut* own;",
+    "    let _3 (px): node mut* own mut*;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        _2 = alloc<node>(const u64 1);",
+    "        _3 = addr mut(_2);",
+    "        del(move _2);",
+    "        _4 = move (*_1).0;",
+    "        del(move _4);",
+    "        return;",
+    "    }",
+    "}",
+    // an exposed local: a pointer from a call can name it: U1d0.5
+    "fn main.b7() -> void {",
+    "    let _1 (x): node mut* own;",
+    "    let _2: node mut* own mut*;",
+    "    let _3: void;",
+    "    let _4: node mut* own mut*;",
+    "    let _5: i32;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1);",
+    "        _2 = addr mut(_1);",
+    "        _3 = call fn main.keep(copy _2);",
+    "        _4 = call fn main.get();",
+    "        _1 = alloc<node>(const u64 1);",
+    "        del(move (*_4));",
+    "        _5 = copy (*_1).2;",
+    "        return;",
+    "    }",
+    "}",
+    // a local that is not exposed: the pointer from a call names no frame of the function: P1
+    "fn main.b8() -> void {",
+    "    let _1 (x): node mut* own;",
+    "    let _2: node mut* own mut*;",
+    "    let _3: node mut* own mut*;",
+    "    let _4: i32;",
+    "    bb0: {",
+    "        _2 = addr mut(_1);",
+    "        _3 = call fn main.get();",
+    "        _1 = alloc<node>(const u64 1);",
+    "        del(move (*_3));",
+    "        _4 = copy (*_1).2;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // the `.len` of a span through a pointer is a use of the memory owner: U1m0.1
+    "fn main.b9(_1 (buf): u8 mut@ own) -> void {",
+    "    let _2: u8 mut@ own*;",
+    "    let _3: u8 mut@ own;",
+    "    let _4: u64;",
+    "    bb0: {",
+    "        _2 = addr(_1);",
+    "        _3 = move _1;",
+    "        _4 = copy (*_2).1;",
+    "        del(move _3);",
+    "        return;",
+    "    }",
+    "}",
+    // a comparison with null through a pointer is no use: no use
+    "fn main.b10() -> void {",
+    "    let _1 (x): node mut* own;",
+    "    let _2 (px): node mut* own mut*;",
+    "    let _3: bool;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1);",
+    "        _2 = addr mut(_1);",
+    "        del(move _1);",
+    "        _3 = eq(copy (*_2), const null node mut* own);",
+    "        return;",
+    "    }",
+    "}",
+    // a load through a global that holds the address of a memory owner can read it, with no call:
+    // U1d0.2
+    "fn main.b11() -> void {",
+    "    let _1 (x): node mut* own;",
+    "    let _2: i32;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1);",
+    "        global main.P = addr mut(_1);",
+    "        del(move _1);",
+    "        _2 = copy (*(*global main.P)).2;",
+    "        return;",
+    "    }",
+    "}",
+    // a `del` through a global that holds the address of a memory owner vacates it, with no call:
+    // U1d0.2
+    "fn main.b12() -> void {",
+    "    let _1 (x): node mut* own;",
+    "    let _2: i32;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1);",
+    "        global main.P = addr mut(_1);",
+    "        del(move (*global main.P));",
+    "        _2 = copy (*_1).2;",
+    "        return;",
+    "    }",
+    "}",
+    // a `move` through a global vacates the memory owner, with no call: U1m0.2
+    "fn main.b13() -> void {",
+    "    let _1 (x): node mut* own;",
+    "    let _2: node mut* own;",
+    "    let _3: i32;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1);",
+    "        global main.P = addr mut(_1);",
+    "        _2 = move (*global main.P);",
+    "        _3 = copy (*_1).2;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // a place through an `own` global lies in an allocation, and a global itself holds no local
+    // owner: P1
+    "fn main.b14() -> void {",
+    "    let _1 (x): node mut* own;",
+    "    let _2: node mut* own mut*;",
+    "    let _3: i32;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1);",
+    "        _2 = addr mut(_1);",
+    "        del(move (*global main.G).0);",
+    "        del(move global main.G);",
+    "        _3 = copy (*_1).2;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a `del` of a field of a global in fixed storage vacates no owner of the memory `_0`: P0
+    "fn main.b15() -> pair {",
+    "    let _0: pair;",
+    "    bb0: {",
+    "        _0 = const zero pair;",
+    "        del(move global main.GS.0);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[15] BORROWS_USES = {
+    "U1d0.2", "P2", "U1d0.2", "", "", "P1", "U1d0.5", "P1", "U1m0.1", "", "U1d0.2", "U1d0.2",
+    "U1m0.2", "P1", "P0",
+};
+
+// A store into the owner or into a place that contains it ends the state, and a store into a part
+// of it does not. The edge where a test against null finds another value than null ends the state
+// of the place that it compares, or of the span whose `.ptr` it compares, from the read of the
+// test.
+string[145] ENDS = {
+    // a store into the struct ends the state of its owners: P1
+    "fn main.e1(_1 (s): pair) -> void {",
+    "    let _2: node mut* own;",
+    "    let _3: node mut* own;",
+    "    let _4: i32;",
+    "    bb0: {",
+    "        del(move _1.0);",
+    "        _2 = alloc<node>(const u64 1);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        _1 = aggregate pair(move _2, move _3);",
+    "        _4 = copy (*_1.0).2;",
+    "        return;",
+    "    }",
+    "}",
+    // a store into the `.len` of a span ends nothing: U1m0.0
+    "fn main.e2(_1 (buf): u8 mut@ own) -> void {",
+    "    let _2: u8 mut@ own;",
+    "    let _3: u8 mut*;",
+    "    bb0: {",
+    "        _2 = move _1;",
+    "        _1.1 = const u64 0;",
+    "        _3 = copy _1.0;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // the edge where `ne` finds another value ends the state; the other edge does not: P1 U1d0.0
+    "fn main.e3(_1 (p): node mut* own) -> void {",
+    "    let _2: bool;",
+    "    let _3: i32;",
+    "    let _4: i32;",
+    "    bb0: {",
+    "        del(move _1);",
+    "        _2 = ne(copy _1, const null node mut* own);",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _3 = copy (*_1).2;",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        _4 = copy (*_1).2;",
+    "        return;",
+    "    }",
+    "}",
+    // a `del` between the read of the test and the branch vacates again: U1d0.1
+    "fn main.e4(_1 (p): node mut* own) -> void {",
+    "    let _2: bool;",
+    "    let _3: i32;",
+    "    bb0: {",
+    "        _2 = ne(copy _1, const null node mut* own);",
+    "        del(move _1);",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _3 = copy (*_1).2;",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "}",
+    // a store into the key after the read of the test undoes the end: U1d0.0
+    "fn main.e5(_1 (b): node mut* own[2], _2 (k): u64) -> void {",
+    "    let _3: bool;",
+    "    let _4: i32;",
+    "    bb0: {",
+    "        del(move _1[_2]);",
+    "        _3 = ne(copy _1[_2], const null node mut* own);",
+    "        _2 = const u64 1;",
+    "        switch(copy _3) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _4 = copy (*_1[_2]).2;",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "}",
+    // with no store into the key the edge ends the state: P1
+    "fn main.e6(_1 (b): node mut* own[2], _2 (k): u64) -> void {",
+    "    let _3: bool;",
+    "    let _4: i32;",
+    "    bb0: {",
+    "        del(move _1[_2]);",
+    "        _3 = ne(copy _1[_2], const null node mut* own);",
+    "        switch(copy _3) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _4 = copy (*_1[_2]).2;",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "}",
+    // a test of the `.ptr` of a span ends the state of the span on the edge of another value: P1
+    // U1m0.0
+    "fn main.e7(_1 (buf): u8 mut@ own) -> void {",
+    "    let _2: u8 mut@ own;",
+    "    let _3: bool;",
+    "    let _4: u8 mut*;",
+    "    let _5: u8 mut*;",
+    "    bb0: {",
+    "        _2 = move _1;",
+    "        _3 = eq(copy _1.0, const null u8 mut*);",
+    "        switch(copy _3) -> [true: bb2, otherwise: bb1];",
+    "    }",
+    "    bb1: {",
+    "        _4 = copy _1.0;",
+    "        goto bb3;",
+    "    }",
+    "    bb2: {",
+    "        _5 = copy _1.0;",
+    "        goto bb3;",
+    "    }",
+    "    bb3: {",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // a test that finds null ends nothing on its other edge when both values go to one block:
+    // U1d0.0
+    "fn main.e8(_1 (p): node mut* own) -> void {",
+    "    let _2: bool;",
+    "    let _3: i32;",
+    "    bb0: {",
+    "        del(move _1);",
+    "        _2 = ne(copy _1, const null node mut* own);",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb1];",
+    "    }",
+    "    bb1: {",
+    "        _3 = copy (*_1).2;",
+    "        return;",
+    "    }",
+    "}",
+    // a negation: the arm of `!(p == null)` ends the state: P1
+    "fn main.e9(_1 (p): node mut* own) -> void {",
+    "    let _2: bool;",
+    "    let _3: bool;",
+    "    let _4: i32;",
+    "    bb0: {",
+    "        del(move _1);",
+    "        _2 = eq(copy _1, const null node mut* own);",
+    "        _3 = not(copy _2);",
+    "        switch(copy _3) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _4 = copy (*_1).2;",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[9] ENDS_USES = {
+    "P1", "U1m0.0", "P1 U1d0.0", "U1d0.1", "U1d0.0", "P1", "P1 U1m0.0", "U1d0.0", "P1",
+};
+
+// Inside one statement the reads come in evaluation order, and a `move` operand vacates its place
+// right after its read. A `del` vacates its operand after the reads of its access path. A call
+// vacates after the reads of its operands and before the reads of the pointers of its destination,
+// and a store ends the state after the reads of its right side and of its destination. A terminator
+// reads its operands, and `check(overwrite: p)` reads the pointers of the address of `p` and no
+// value of `p`.
+string[93] ORDER = {
+    // D17.21: `take(move(p), *p)` reads `p` after its `move`: U1m0.0
+    "fn main.r1(_1 (p): node mut* own) -> void {",
+    "    let _2: void;",
+    "    bb0: {",
+    "        _2 = call fn main.take(move _1, copy (*_1).2);",
+    "        return;",
+    "    }",
+    "}",
+    // the read before the `move` in one statement is proved: P1
+    "fn main.r2(_1 (p): node mut* own) -> void {",
+    "    let _2: void;",
+    "    bb0: {",
+    "        _2 = call fn main.take2(copy (*_1).2, move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a `del` reads its access path, and a `del` of `p` vacated it: U1d0.0
+    "fn main.r3(_1 (p): node mut* own) -> void {",
+    "    bb0: {",
+    "        del(move _1);",
+    "        del(move (*_1).0);",
+    "        return;",
+    "    }",
+    "}",
+    // a call vacates a memory owner before the reads of the pointers of its destination: U1c0.2
+    "fn main.r4() -> void {",
+    "    let _1 (p): node mut* own;",
+    "    let _2: node mut* own mut*;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1);",
+    "        _2 = addr mut(_1);",
+    "        (*_1).0 = call fn main.make();",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // the store of the result of a call ends the state that the call left: P1
+    "fn main.r5() -> void {",
+    "    let _1 (p): node mut* own;",
+    "    let _2: node mut* own mut*;",
+    "    let _3: i32;",
+    "    bb0: {",
+    "        _2 = addr mut(_1);",
+    "        _1 = call fn main.make();",
+    "        _3 = copy (*_1).2;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // the right side of a store reads before the store ends the state: U1d0.0
+    "fn main.r6(_1 (p): node mut* own) -> void {",
+    "    let _2: i32;",
+    "    bb0: {",
+    "        del(move _1);",
+    "        _1 = call fn main.fill(copy _1);",
+    "        _2 = copy (*_1).2;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // `return` reads `_0`: U0m0.1
+    "fn main.r7() -> node mut* own {",
+    "    let _0: node mut* own;",
+    "    let _1: node mut* own;",
+    "    bb0: {",
+    "        _0 = alloc<node>(const u64 1);",
+    "        _1 = move _0;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // `check(overwrite: (*p).0)` reads `p`, and `check(overwrite: p)` reads no value: U1d0.0 U1d0.0
+    "fn main.r8(_1 (p): node mut* own) -> void {",
+    "    let _2: node mut* own;",
+    "    let _3: node mut* own;",
+    "    bb0: {",
+    "        del(move _1);",
+    "        _2 = alloc<node>(const u64 1);",
+    "        check(overwrite: (*_1).0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        (*_1).0 = move _2;",
+    "        _3 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1) -> bb2;",
+    "    }",
+    "    bb2: {",
+    "        _1 = move _3;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // two reads of one local in one item give one use, and two locals two: U1d0.0 P2
+    "fn main.r9(_1 (p): node mut* own, _2 (q): node mut* own) -> void {",
+    "    let _3: i32;",
+    "    let _4: i32;",
+    "    bb0: {",
+    "        del(move _1);",
+    "        _3 = add(copy (*_1).2, copy (*_2).2);",
+    "        _4 = add(copy (*_2).2, copy (*_2).2);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[9] ORDER_USES = {
+    "U1m0.0", "P1", "U1d0.0", "U1c0.2", "P1", "U1d0.0 P1", "U0m0.1", "U1d0.0 U1d0.0",
+    "U1d0.0 P2 P2",
+};
+
+// A use is a copy of the owner, of its `.ptr`, or of a place that contains it, a load through it
+// and a span expression of it. The operand of a `move` or of a `del`, a read of the `.len` of a
+// span or a `string` in fixed storage, a comparison with null, a store and an address are no uses.
+string[85] READS = {
+    // the operands of a `move` and of a `del` are no uses: no use
+    "fn main.u1(_1 (p): node mut* own) -> void {",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        del(move _1);",
+    "        _2 = move _1;",
+    "        del(move _1);",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // the `.len` of a span in fixed storage is no use: no use
+    "fn main.u2(_1 (buf): u8 mut@ own) -> void {",
+    "    let _2: u8 mut@ own;",
+    "    let _3: u64;",
+    "    bb0: {",
+    "        _2 = move _1;",
+    "        _3 = copy _1.1;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // a comparison with null, of the owner and of its `.ptr`, is no use: no use
+    "fn main.u3(_1 (p): node mut* own, _2 (buf): u8 mut@ own) -> void {",
+    "    let _3: bool;",
+    "    let _4: bool;",
+    "    let _5: u8 mut@ own;",
+    "    bb0: {",
+    "        del(move _1);",
+    "        _5 = move _2;",
+    "        _3 = eq(const null node mut* own, copy _1);",
+    "        _4 = ne(copy _2.0, const zero u8 mut*);",
+    "        del(move _5);",
+    "        return;",
+    "    }",
+    "}",
+    // a comparison with another pointer is a use: U1d0.0
+    "fn main.u4(_1 (p): node mut* own, _2 (q): node mut*) -> void {",
+    "    let _3: bool;",
+    "    bb0: {",
+    "        del(move _1);",
+    "        _3 = eq(copy _1, copy _2);",
+    "        return;",
+    "    }",
+    "}",
+    // a store and an address are no uses: no use
+    "fn main.u5(_1 (p): node mut* own) -> void {",
+    "    let _2: node mut* own;",
+    "    let _3: node mut* own*;",
+    "    bb0: {",
+    "        del(move _1);",
+    "        _3 = addr(_1);",
+    "        _2 = alloc<node>(const u64 1);",
+    "        _1 = move _2;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a span expression of the owner and a copy of its `.ptr` are uses: U1m0.0 U1m0.0
+    "fn main.u6(_1 (buf): u8 mut@ own) -> void {",
+    "    let _2: u8 mut@ own;",
+    "    let _3: u8 mut@;",
+    "    let _4: u8 mut*;",
+    "    bb0: {",
+    "        _2 = move _1;",
+    "        _3 = slice(_1, const u64 0, const u64 0);",
+    "        _4 = copy _1.0;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // an index into a span reads its header, a use: U1m0.0
+    "fn main.u7(_1 (buf): u8 mut@ own) -> void {",
+    "    let _2: u8 mut@ own;",
+    "    let _3: u64;",
+    "    let _4: u8;",
+    "    bb0: {",
+    "        _2 = move _1;",
+    "        _3 = const u64 0;",
+    "        _4 = copy _1[_3];",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // a copy of the owner into a view is a use: U1d0.0
+    "fn main.u8(_1 (p): node mut* own) -> void {",
+    "    let _2: node mut*;",
+    "    bb0: {",
+    "        del(move _1);",
+    "        _2 = copy _1;",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[8] READS_USES = {"", "", "", "U1d0.0", "", "U1m0.0 U1m0.0", "U1m0.0", "U1d0.0"};
+
+// The state joins by union: a `move` or a `del` on one path reaches the read. A loop carries it
+// around its back edge. A block that no edge reaches holds no operation, and a use in an abort
+// block keeps its obligation.
+string[67] PATHS = {
+    // a `del` in one arm reaches the join: U1d1.0
+    "fn main.p1(_1 (p): node mut* own, _2 (c): bool) -> void {",
+    "    let _3: i32;",
+    "    bb0: {",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        del(move _1);",
+    "        goto bb2;",
+    "    }",
+    "    bb2: {",
+    "        _3 = copy (*_1).2;",
+    "        return;",
+    "    }",
+    "}",
+    // a `del` at the end of a loop body reaches the read at its head: U1d2.1
+    "fn main.p2(_1 (p): node mut* own, _2 (c): bool) -> void {",
+    "    let _3: i32;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        _3 = copy (*_1).2;",
+    "        switch(copy _2) -> [true: bb2, otherwise: bb3];",
+    "    }",
+    "    bb2: {",
+    "        _4 = alloc<node>(const u64 1);",
+    "        del(move _1);",
+    "        goto bb1;",
+    "    }",
+    "    bb3: {",
+    "        return;",
+    "    }",
+    "}",
+    // a block that no edge reaches holds no operation: P1
+    "fn main.p3(_1 (p): node mut* own) -> void {",
+    "    let _2: i32;",
+    "    bb0: {",
+    "        return;",
+    "    }",
+    "    bb1: {",
+    "        _2 = copy (*_1).2;",
+    "        return;",
+    "    }",
+    "}",
+    // a use in an abort block keeps its obligation: U1d0.0
+    "fn main.p4(_1 (p): node mut* own, _2 (c): bool) -> void {",
+    "    let _3: i32;",
+    "    bb0: {",
+    "        del(move _1);",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _3 = copy (*_1).2;",
+    "        fail(panic, const bytes \"stop\", const u64 4);",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "}",
+    // a function with no `move`, no `del` and no call that vacates proves each use: P1 P1
+    "fn main.p5(_1 (p): node mut* own) -> void {",
+    "    let _2: i32;",
+    "    let _3: void;",
+    "    bb0: {",
+    "        _2 = copy (*_1).2;",
+    "        _3 = call fn main.g();",
+    "        _2 = copy (*_1).2;",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[5] PATHS_USES = {"U1d1.0", "U1d2.1", "P1", "U1d0.0", "P1 P1"};
+
+// An owning span or `string` is an owner: its `.ptr` is a part of it, and a read of its header for
+// an index or a slice is a use. Its `.len` in fixed storage and a comparison of its `.ptr` with
+// null are no uses, and a store into its `.len` or its `.ptr` ends no state.
+string[87] SPANS = {
+    // a copy of the `.ptr` after a `del` is a use: U1d0.0
+    "fn main.s1(_1 (buf): u8 mut@ own) -> void {",
+    "    let _2: u8 mut*;",
+    "    bb0: {",
+    "        del(move _1);",
+    "        _2 = copy _1.0;",
+    "        return;",
+    "    }",
+    "}",
+    // an index reads the header, and the `.len` is no use: U1d0.0
+    "fn main.s2(_1 (buf): u8 mut@ own) -> void {",
+    "    let _2: u64;",
+    "    let _3: u64;",
+    "    let _4: u8;",
+    "    bb0: {",
+    "        del(move _1);",
+    "        _2 = copy _1.1;",
+    "        _3 = const u64 0;",
+    "        _4 = copy _1[_3];",
+    "        return;",
+    "    }",
+    "}",
+    // a store into the `.ptr` ends nothing: U1m0.0
+    "fn main.s3(_1 (buf): u8 mut@ own) -> void {",
+    "    let _2: u8 mut@ own;",
+    "    let _3: u64;",
+    "    let _4: u8;",
+    "    bb0: {",
+    "        _2 = move _1;",
+    "        _1.0 = const null u8 mut* own;",
+    "        _3 = const u64 0;",
+    "        _4 = copy _1[_3];",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // a store of a new header ends the state: P1
+    "fn main.s4(_1 (buf): u8 mut@ own) -> void {",
+    "    let _2: u8 mut@ own;",
+    "    let _3: u8 mut* own;",
+    "    let _4: u64;",
+    "    let _5: u8;",
+    "    bb0: {",
+    "        _2 = move _1;",
+    "        _3 = alloc<u8>(const u64 4);",
+    "        _1 = aggregate u8 mut@ own(move _3, const u64 4);",
+    "        _4 = const u64 0;",
+    "        _5 = copy _1[_4];",
+    "        del(move _2);",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // an owning `string` is an owner too: U1d0.0
+    "fn main.s5(_1 (s): string own) -> void {",
+    "    let _2: string;",
+    "    bb0: {",
+    "        del(move _1);",
+    "        _2 = slice(_1, const u64 0, const u64 0);",
+    "        return;",
+    "    }",
+    "}",
+    // a span field of a struct: its index reads it, and its `.len` is no use: U1d0.0
+    "fn main.s6(_1 (b): bag) -> void {",
+    "    let _2: u64;",
+    "    let _3: u64;",
+    "    let _4: u8;",
+    "    bb0: {",
+    "        del(move _1.0);",
+    "        _2 = copy _1.0.1;",
+    "        _3 = const u64 1;",
+    "        _4 = copy _1.0[_3];",
+    "        return;",
+    "    }",
+    "}",
+    // the null edge of a test of the `.ptr` of a field ends nothing; the other edge does: U1d0.0 P1
+    "fn main.s7(_1 (b): bag) -> void {",
+    "    let _2: bool;",
+    "    let _3: u8 mut*;",
+    "    let _4: u8 mut*;",
+    "    bb0: {",
+    "        del(move _1.0);",
+    "        _2 = eq(copy _1.0.0, const null u8 mut*);",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _3 = copy _1.0.0;",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        _4 = copy _1.0.0;",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[7] SPANS_USES = {"U1d0.0", "U1d0.0", "U1m0.0", "P1", "U1d0.0", "U1d0.0", "U1d0.0 P1"};
+
+// A temporary of an `own` reference type and `_0` are local owners. A `move` of a temporary vacates
+// it, and `return` reads `_0`.
+string[63] TEMPS = {
+    // a temporary that a call fills and a load reads: P2
+    "fn main.t1() -> void {",
+    "    let _1: i32;",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        _2 = call fn main.make();",
+    "        _1 = copy (*_2).2;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // a temporary that a `move` empties and a call fills again: the store of the call ends the
+    // state, and V12 refuses a read of a temporary between its `move` and its next store: P2
+    "fn main.t2() -> void {",
+    "    let _1: i32;",
+    "    let _2: node mut* own;",
+    "    let _3: void;",
+    "    bb0: {",
+    "        _2 = call fn main.make();",
+    "        _3 = call fn main.take(move _2, const i32 0);",
+    "        _2 = call fn main.make();",
+    "        _1 = copy (*_2).2;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // `_0` of an `own` pointer that a `del` empties before the `return`: U0d0.1
+    "fn main.t3() -> node mut* own {",
+    "    let _0: node mut* own;",
+    "    bb0: {",
+    "        _0 = alloc<node>(const u64 1);",
+    "        del(move _0);",
+    "        return;",
+    "    }",
+    "}",
+    // `_0` of an aggregate is memory: a call vacates its owners, and a store into a field ends only
+    // that field: U0c0.1#1
+    "fn main.t4() -> pair {",
+    "    let _0: pair;",
+    "    let _1: void;",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        _0 = const zero pair;",
+    "        _1 = call fn main.g();",
+    "        _2 = alloc<node>(const u64 1);",
+    "        _0.0 = move _2;",
+    "        return;",
+    "    }",
+    "}",
+    // a store into the whole `_0` after the call ends the state: P0
+    "fn main.t5() -> pair {",
+    "    let _0: pair;",
+    "    let _1: void;",
+    "    bb0: {",
+    "        _1 = call fn main.g();",
+    "        _0 = const zero pair;",
+    "        return;",
+    "    }",
+    "}",
+    // a read through a parameter can be a place of `_0`: U0c0.0
+    "fn main.t6(_1 (v): i32*) -> pair {",
+    "    let _0: pair;",
+    "    let _2: void;",
+    "    let _3: i32;",
+    "    bb0: {",
+    "        _2 = call fn main.g();",
+    "        _3 = copy (*_1);",
+    "        _0 = const zero pair;",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[6] TEMPS_USES = {"P2", "P2", "U0d0.1", "U0c0.1#1", "P0", "U0c0.0 P0"};
+
+// Each call vacates each memory owner: a call of a fort function, a call through a function value
+// and a call of an extern. A call reads its callee and its arguments before it vacates, and an
+// argument that reads a vacated owner is a use.
+string[85] CALLS = {
+    // a call through a function value: U1c0.3
+    "fn main.c1() -> void {",
+    "    let _1 (x): node mut* own;",
+    "    let _2: node mut* own mut*;",
+    "    let _3: fn () void;",
+    "    let _4: void;",
+    "    let _5: i32;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1);",
+    "        _2 = addr mut(_1);",
+    "        _3 = const fn main.g;",
+    "        _4 = call copy _3();",
+    "        _5 = copy (*_1).2;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a call of an extern: U1c0.2
+    "fn main.c2() -> void {",
+    "    let _1 (x): node mut* own;",
+    "    let _2: node mut* own mut*;",
+    "    let _3: i32;",
+    "    let _4: i32;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1);",
+    "        _2 = addr mut(_1);",
+    "        _3 = call extern ext_touch(copy _2);",
+    "        _4 = copy (*_1).2;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // an argument that reads a vacated owner is a use: U1d0.0
+    "fn main.c3(_1 (p): node mut* own) -> void {",
+    "    let _2: node mut*;",
+    "    let _3: void;",
+    "    bb0: {",
+    "        del(move _1);",
+    "        _3 = call fn main.peek(copy _1);",
+    "        return;",
+    "    }",
+    "}",
+    // the argument reads the memory owner before the call vacates it: P1 U1c0.2
+    "fn main.c4() -> void {",
+    "    let _1 (x): node mut* own;",
+    "    let _2: node mut* own mut*;",
+    "    let _3: void;",
+    "    let _4: i32;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1);",
+    "        _2 = addr mut(_1);",
+    "        _3 = call fn main.peek(copy _1);",
+    "        _4 = copy (*_1).2;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // two calls: the note names the first in the order of the source positions: U1c0.2
+    "fn main.c5() -> void {",
+    "    let _1 (x): node mut* own;",
+    "    let _2: node mut* own mut*;",
+    "    let _3: void;",
+    "    let _4: void;",
+    "    let _5: i32;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1) #2:1;",
+    "        _2 = addr mut(_1) #3:1;",
+    "        _3 = call fn main.g() #4:1;",
+    "        _4 = call fn main.g() #5:1;",
+    "        _5 = copy (*_1).2 #6:1;",
+    "        del(move _1) #7:1;",
+    "        return #8:1;",
+    "    }",
+    "}",
+    // a later call in the text that stands first in the source: its position orders the note:
+    // U1c0.3
+    "fn main.c6() -> void {",
+    "    let _1 (x): node mut* own;",
+    "    let _2: node mut* own mut*;",
+    "    let _3: void;",
+    "    let _4: void;",
+    "    let _5: i32;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1) #2:1;",
+    "        _2 = addr mut(_1) #3:1;",
+    "        _3 = call fn main.g() #5:1;",
+    "        _4 = call fn main.g() #4:1;",
+    "        _5 = copy (*_1).2 #6:1;",
+    "        del(move _1) #7:1;",
+    "        return #8:1;",
+    "    }",
+    "}",
+};
+
+string[6] CALLS_USES = {"U1c0.3", "U1c0.2", "U1d0.0", "P1 U1c0.2", "U1c0.2", "U1c0.3"};
+
+// The key of an index temporary is the local that it copies, also through a cast to `u64`, while no
+// store into that local follows its copy; a stale temporary has no key, and its place reads each
+// owner of the array.
+string[82] TEMPKEYS = {
+    // a temporary that copies `k` keys the element `b[k]`, and the store into `b[k]` ends its
+    // state: P1
+    "fn main.y1(_1 (b): node mut* own[2], _2 (k): u64) -> void {",
+    "    let _3: u64;",
+    "    let _4: node mut* own;",
+    "    let _5: u64;",
+    "    let _6: i32;",
+    "    bb0: {",
+    "        _3 = copy _2;",
+    "        del(move _1[_3]);",
+    "        _4 = alloc<node>(const u64 1);",
+    "        _1[_3] = move _4;",
+    "        _5 = cast<u64>(copy _2);",
+    "        _6 = copy (*_1[_5]).2;",
+    "        return;",
+    "    }",
+    "}",
+    // a store into `k` between the copy and the read makes the copy stale: the read reads each
+    // owner: U1d0.1
+    "fn main.y2(_1 (b): node mut* own[2], _2 (k): u64) -> void {",
+    "    let _3: u64;",
+    "    let _4: node mut* own;",
+    "    let _5: i32;",
+    "    bb0: {",
+    "        _3 = copy _2;",
+    "        del(move _1[_3]);",
+    "        _4 = alloc<node>(const u64 1);",
+    "        _1[_3] = move _4;",
+    "        _2 = const u64 1;",
+    "        _5 = copy (*_1[_3]).2;",
+    "        return;",
+    "    }",
+    "}",
+    // a constant through a cast keys the element `b[1]`: a store into `b[1]` ends its state: P1
+    "fn main.y3(_1 (b): node mut* own[2]) -> void {",
+    "    let _2: u64;",
+    "    let _3: node mut* own;",
+    "    let _4: u64;",
+    "    let _5: i32;",
+    "    bb0: {",
+    "        _2 = cast<u64>(const i32 1);",
+    "        del(move _1[_2]);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        _1[_2] = move _3;",
+    "        _4 = const u64 1;",
+    "        _5 = copy (*_1[_4]).2;",
+    "        return;",
+    "    }",
+    "}",
+    // a key that is memory is no key: the read reads each owner: U1d0.2
+    "fn main.y4(_1 (b): node mut* own[2]) -> void {",
+    "    let _2 (k): u64;",
+    "    let _3: u64*;",
+    "    let _4: node mut* own;",
+    "    let _5: i32;",
+    "    bb0: {",
+    "        _2 = const u64 0;",
+    "        _3 = addr(_2);",
+    "        del(move _1[_2]);",
+    "        _4 = alloc<node>(const u64 1);",
+    "        _1[_2] = move _4;",
+    "        _5 = copy (*_1[_2]).2;",
+    "        return;",
+    "    }",
+    "}",
+    // a loop that stores into its index: the back edge undoes the end of the store into `b[k]`:
+    // U1d2.0
+    "fn main.y5(_1 (b): node mut* own[2], _2 (c): bool) -> void {",
+    "    let _3 (k): u64;",
+    "    let _4: node mut* own;",
+    "    let _5: i32;",
+    "    bb0: {",
+    "        _3 = const u64 0;",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        _5 = copy (*_1[_3]).2;",
+    "        switch(copy _2) -> [true: bb2, otherwise: bb3];",
+    "    }",
+    "    bb2: {",
+    "        del(move _1[_3]);",
+    "        _4 = alloc<node>(const u64 1);",
+    "        _1[_3] = move _4;",
+    "        _3 = const u64 1;",
+    "        goto bb1;",
+    "    }",
+    "    bb3: {",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[5] TEMPKEYS_USES = {"P1", "U1d0.1", "P1", "U1d0.2", "U1d2.0"};
+
+// The forms of a test against null of gen rule 6 of D17.11: a copy of a flag, a negation, the left
+// operand of `&&` and of `||`, whose edge into the right operand ends the state, and the value of a
+// whole `&&`, which ends nothing.
+string[145] FORMS = {
+    // a copy of the flag keeps the edge: P1
+    "fn main.f1(_1 (p): node mut* own) -> void {",
+    "    let _2: bool;",
+    "    let _3: bool;",
+    "    let _4: i32;",
+    "    bb0: {",
+    "        del(move _1);",
+    "        _2 = ne(copy _1, const null node mut* own);",
+    "        _3 = copy _2;",
+    "        switch(copy _3) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _4 = copy (*_1).2;",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "}",
+    // the left operand of `&&`: the right operand runs on the edge where the test finds another
+    // value: P1
+    "fn main.f2(_1 (p): node mut* own) -> void {",
+    "    let _2: bool;",
+    "    let _3: bool;",
+    "    let _4: i32;",
+    "    bb0: {",
+    "        del(move _1);",
+    "        _2 = ne(copy _1, const null node mut* own);",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _4 = copy (*_1).2;",
+    "        _3 = eq(copy _4, const i32 1);",
+    "        goto bb3;",
+    "    }",
+    "    bb2: {",
+    "        _3 = const false;",
+    "        goto bb3;",
+    "    }",
+    "    bb3: {",
+    "        switch(copy _3) -> [true: bb4, otherwise: bb5];",
+    "    }",
+    "    bb4: {",
+    "        return;",
+    "    }",
+    "    bb5: {",
+    "        return;",
+    "    }",
+    "}",
+    // the value of a whole `&&` ends nothing: the arm of its `switch` reads a vacated owner: U1d0.0
+    "fn main.f3(_1 (p): node mut* own, _2 (c): bool) -> void {",
+    "    let _3: bool;",
+    "    let _4: bool;",
+    "    let _5: i32;",
+    "    bb0: {",
+    "        del(move _1);",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _4 = ne(copy _1, const null node mut* own);",
+    "        _3 = copy _4;",
+    "        goto bb3;",
+    "    }",
+    "    bb2: {",
+    "        _3 = const false;",
+    "        goto bb3;",
+    "    }",
+    "    bb3: {",
+    "        switch(copy _3) -> [true: bb4, otherwise: bb5];",
+    "    }",
+    "    bb4: {",
+    "        _5 = copy (*_1).2;",
+    "        return;",
+    "    }",
+    "    bb5: {",
+    "        return;",
+    "    }",
+    "}",
+    // the left operand of `||` with `==`: the right operand runs on the edge of another value: P1
+    "fn main.f4(_1 (p): node mut* own) -> void {",
+    "    let _2: bool;",
+    "    let _3: bool;",
+    "    let _4: i32;",
+    "    bb0: {",
+    "        del(move _1);",
+    "        _2 = eq(copy _1, const null node mut* own);",
+    "        switch(copy _2) -> [true: bb2, otherwise: bb1];",
+    "    }",
+    "    bb1: {",
+    "        _4 = copy (*_1).2;",
+    "        _3 = eq(copy _4, const i32 1);",
+    "        goto bb3;",
+    "    }",
+    "    bb2: {",
+    "        _3 = const true;",
+    "        goto bb3;",
+    "    }",
+    "    bb3: {",
+    "        return;",
+    "    }",
+    "}",
+    // a flag that is a named local is no test: U1d0.0
+    "fn main.f5(_1 (p): node mut* own) -> void {",
+    "    let _2 (ok): bool;",
+    "    let _3: i32;",
+    "    bb0: {",
+    "        del(move _1);",
+    "        _2 = ne(copy _1, const null node mut* own);",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _3 = copy (*_1).2;",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "}",
+    // a store into the flag after the test makes no test: U1d0.0
+    "fn main.f6(_1 (p): node mut* own) -> void {",
+    "    let _2: bool;",
+    "    let _3: i32;",
+    "    bb0: {",
+    "        del(move _1);",
+    "        _2 = ne(copy _1, const null node mut* own);",
+    "        _2 = const true;",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _3 = copy (*_1).2;",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "}",
+    // a test of a place through a pointer ends the state of no local owner: U1d0.0
+    "fn main.f7(_1 (p): node mut* own, _2 (q): node mut* own mut*) -> void {",
+    "    let _3: bool;",
+    "    let _4: i32;",
+    "    bb0: {",
+    "        del(move _1);",
+    "        _3 = ne(copy (*_2), const null node mut* own);",
+    "        switch(copy _3) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _4 = copy (*_1).2;",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[7] FORMS_USES = {"P1", "P1", "U1d0.0", "P1", "U1d0.0", "U1d0.0", "U1d0.0"};
+
+// A use in a block that ends in `fail`, `trap` or `unreachable` keeps its obligation, and the
+// operands of `check` and `fail` are reads.
+string[43] ABORTS = {
+    // a use before a `trap`: U1d0.0
+    "fn main.a1(_1 (p): node mut* own, _2 (c): bool) -> void {",
+    "    let _3: i32;",
+    "    bb0: {",
+    "        del(move _1);",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _3 = copy (*_1).2;",
+    "        trap;",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "}",
+    // the reported operand of a `check` reads the owner: U1d0.0
+    "fn main.a2(_1 (p): node mut* own) -> void {",
+    "    let _2: bool;",
+    "    bb0: {",
+    "        del(move _1);",
+    "        _2 = const false;",
+    "        check(copy _2, bounds, copy (*_1).3, const u64 0) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "}",
+    // the operand of a `switch` that loads through the owner: U1d0.0
+    "fn main.a3(_1 (p): node mut* own) -> void {",
+    "    bb0: {",
+    "        del(move _1);",
+    "        switch(copy (*_1).2) -> [i32 1: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "}",
+    // the operands of a `fail` are reads: the `.ptr` of a deleted `string` is a use, and its `.len`
+    // is not: U1d0.0
+    "fn main.a4(_1 (s): string own) -> void {",
+    "    bb0: {",
+    "        del(move _1);",
+    "        fail(panic, copy _1.0, copy _1.1);",
+    "    }",
+    "}",
+};
+
+string[4] ABORTS_USES = {"U1d0.0", "U1d0.0", "U1d0.0", "U1d0.0"};
+
+// A struct with a struct field and a fixed array of owners: a `move` or a `del` vacates the owners
+// that it can overlap, and a use names the first owner that the read reads and that can be vacated,
+// numbered in the type of the read or of the local.
+string[47] NESTED = {
+    // a `del` of `t.e[0]` vacates `t.e[1]` and keeps `t.p.a`: P1 U1d0.1
+    "fn main.n1(_1 (t): outer) -> void {",
+    "    let _2: u64;",
+    "    let _3: u64;",
+    "    let _4: i32;",
+    "    let _5: i32;",
+    "    bb0: {",
+    "        _2 = const u64 0;",
+    "        del(move _1.1[_2]);",
+    "        _4 = copy (*_1.0.0).2;",
+    "        _3 = const u64 1;",
+    "        _5 = copy (*_1.1[_3]).2;",
+    "        return;",
+    "    }",
+    "}",
+    // a `move` of `t.p` vacates `t.p.a` and `t.p.b` and keeps `t.e`: U1m0.0 P1
+    "fn main.n2(_1 (t): outer) -> void {",
+    "    let _2: pair;",
+    "    let _3: i32;",
+    "    let _4: u64;",
+    "    let _5: i32;",
+    "    bb0: {",
+    "        _2 = move _1.0;",
+    "        _3 = copy (*_1.0.1).2;",
+    "        _4 = const u64 0;",
+    "        _5 = copy (*_1.1[_4]).2;",
+    "        return;",
+    "    }",
+    "}",
+    // a read through a pointer names the first owner of the local that can be vacated, `t.e[0]`,
+    // number 2: U1d0.2#2
+    "fn main.n3(_1 (t): outer) -> void {",
+    "    let _2: outer*;",
+    "    let _3: u64;",
+    "    let _4: bool;",
+    "    bb0: {",
+    "        _2 = addr(_1);",
+    "        _3 = const u64 1;",
+    "        del(move _1.1[_3]);",
+    "        _4 = eq(copy (*_2).0.0, copy (*_2).0.1);",
+    "        return;",
+    "    }",
+    "}",
+    // the `return` of a whole `outer` names its first owner that can be vacated, `_0.p.b`: U0d0.1#1
+    "fn main.n4(_1 (t): outer) -> outer {",
+    "    let _0: outer;",
+    "    bb0: {",
+    "        _0 = move _1;",
+    "        del(move _0.0.1);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[4] NESTED_USES = {"P1 U1d0.1", "U1m0.0 P1", "U1d0.2#2", "U0d0.1#1"};
+
+// The reads of the operands of an `aggregate`, a `cast` and a `slice` come in operand order, and a
+// `move` operand vacates its place right after its read, also for a later operand of the same
+// rvalue.
+string[34] OPERANDS = {
+    // a `move` and then a read of one place in one `aggregate`: U1m0.0
+    "fn main.d1(_1 (p): node mut* own) -> void {",
+    "    let _2: mix;",
+    "    bb0: {",
+    "        _2 = aggregate mix(move _1, copy (*_1).2);",
+    "        return;",
+    "    }",
+    "}",
+    // a read and then a `move` of one place in one `aggregate`: P1
+    "fn main.d2(_1 (p): node mut* own, _2 (q): node mut* own) -> void {",
+    "    let _3: pair;",
+    "    bb0: {",
+    "        _3 = aggregate pair(move (*_1).0, move _1);",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // an owning `cast` moves its operand: U1m0.0
+    "fn main.d3(_1 (p): node mut* own) -> void {",
+    "    let _2: void* own;",
+    "    let _3: i32;",
+    "    bb0: {",
+    "        _2 = cast<void* own>(move _1);",
+    "        _3 = copy (*_1).2;",
+    "        return;",
+    "    }",
+    "}",
+    // the bounds of a `slice` read after the place: U2d0.0
+    "fn main.d4(_1 (buf): u8 mut@ own, _2 (p): node mut* own) -> void {",
+    "    let _3: u8 mut@;",
+    "    let _4: u64;",
+    "    bb0: {",
+    "        del(move _2);",
+    "        _4 = cast<u64>(copy (*_2).2);",
+    "        _3 = slice(_1, const u64 0, copy _4);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[4] OPERANDS_USES = {"U1m0.0", "P1", "U1m0.0", "U2d0.0 P1"};
+
+// The state joins by union at each block with more than one predecessor, from each arm of a
+// `switch` and along each `goto`. A store on each path ends the state, and a store on one path only
+// does not. `live` and `dead` store nothing, and a parameter is not vacated at the entry.
+string[159] JOINS = {
+    // a `del` in the middle arm of three reaches the join: U2d2.0
+    "fn main.j1(_1 (k): i32) -> void {",
+    "    let _2 (p): node mut* own;",
+    "    let _3: i32;",
+    "    bb0: {",
+    "        _2 = alloc<node>(const u64 1);",
+    "        switch(copy _1) -> [i32 0: bb1, i32 1: bb2, otherwise: bb3];",
+    "    }",
+    "    bb1: {",
+    "        goto bb4;",
+    "    }",
+    "    bb2: {",
+    "        del(move _2);",
+    "        goto bb4;",
+    "    }",
+    "    bb3: {",
+    "        goto bb4;",
+    "    }",
+    "    bb4: {",
+    "        _3 = copy (*_2).2;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // a chain of `goto` carries the state: U1d0.1
+    "fn main.j2() -> void {",
+    "    let _1 (p): node mut* own;",
+    "    let _2: i32;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1);",
+    "        del(move _1);",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        goto bb2;",
+    "    }",
+    "    bb2: {",
+    "        _2 = copy (*_1).2;",
+    "        return;",
+    "    }",
+    "}",
+    // a block that is its own successor carries its `del` to its first read: U2d1.1
+    "fn main.j3(_1 (c): bool) -> void {",
+    "    let _2 (p): node mut* own;",
+    "    let _3: i32;",
+    "    bb0: {",
+    "        _2 = alloc<node>(const u64 1);",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        _3 = copy (*_2).2;",
+    "        del(move _2);",
+    "        switch(copy _1) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "}",
+    // a store on each arm after the `del` ends the state at the join: P2
+    "fn main.j4(_1 (c): bool) -> void {",
+    "    let _2 (p): node mut* own;",
+    "    let _3: i32;",
+    "    bb0: {",
+    "        _2 = alloc<node>(const u64 1);",
+    "        del(move _2);",
+    "        switch(copy _1) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _2 = alloc<node>(const u64 1);",
+    "        goto bb3;",
+    "    }",
+    "    bb2: {",
+    "        _2 = alloc<node>(const u64 1);",
+    "        goto bb3;",
+    "    }",
+    "    bb3: {",
+    "        _3 = copy (*_2).2;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // a store on one arm only leaves the other path vacated: U2d0.1
+    "fn main.j5(_1 (c): bool) -> void {",
+    "    let _2 (p): node mut* own;",
+    "    let _3: i32;",
+    "    bb0: {",
+    "        _2 = alloc<node>(const u64 1);",
+    "        del(move _2);",
+    "        switch(copy _1) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        _2 = alloc<node>(const u64 1);",
+    "        goto bb3;",
+    "    }",
+    "    bb2: {",
+    "        goto bb3;",
+    "    }",
+    "    bb3: {",
+    "        _3 = copy (*_2).2;",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // `dead` and `live` store nothing and end no state: U1d0.1
+    "fn main.j6() -> void {",
+    "    let _1 (p): node mut* own;",
+    "    let _2: i32;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1);",
+    "        del(move _1);",
+    "        dead(_1);",
+    "        live(_1);",
+    "        _2 = copy (*_1).2;",
+    "        return;",
+    "    }",
+    "}",
+    // a parameter is not vacated at the entry: P1
+    "fn main.j7(_1 (p): node mut* own) -> void {",
+    "    let _2: i32;",
+    "    bb0: {",
+    "        _2 = copy (*_1).2;",
+    "        del(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a loop whose body stores after its `del` proves the read at its head: P2
+    "fn main.j8(_1 (c): bool) -> void {",
+    "    let _2 (p): node mut* own;",
+    "    let _3: i32;",
+    "    bb0: {",
+    "        _2 = alloc<node>(const u64 1);",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        _3 = copy (*_2).2;",
+    "        switch(copy _1) -> [true: bb2, otherwise: bb3];",
+    "    }",
+    "    bb2: {",
+    "        del(move _2);",
+    "        _2 = alloc<node>(const u64 1);",
+    "        goto bb1;",
+    "    }",
+    "    bb3: {",
+    "        del(move _2);",
+    "        return;",
+    "    }",
+    "}",
+    // a `del` on each arm: the note names the first in the order of the source positions, the `del`
+    // of bb2: U2d2.0
+    "fn main.j9(_1 (c): bool) -> void {",
+    "    let _2 (p): node mut* own;",
+    "    let _3: i32;",
+    "    bb0: {",
+    "        _2 = alloc<node>(const u64 1) #2:1;",
+    "        switch(copy _1) -> [true: bb1, otherwise: bb2] #3:1;",
+    "    }",
+    "    bb1: {",
+    "        del(move _2) #6:1;",
+    "        goto bb3 #6:1;",
+    "    }",
+    "    bb2: {",
+    "        del(move _2) #4:1;",
+    "        goto bb3 #4:1;",
+    "    }",
+    "    bb3: {",
+    "        _3 = copy (*_2).2 #8:1;",
+    "        return #9:1;",
+    "    }",
+    "}",
+};
+
+string[9] JOINS_USES = {
+    "U2d2.0", "U1d0.1", "U2d1.1", "P2", "U2d0.1", "U1d0.1", "P1", "P2", "U2d2.0",
+};
+
+// The keys at their boundaries: a parameter index is its own key, a store into it undoes an end,
+// `_0` is no key, two constant keys of other values differ, and a constant of any integer type
+// through a cast to `u64` is a key.
+string[69] CONSTS = {
+    // a store into a parameter key after the store into `b[k]` undoes its end: U1d0.0
+    "fn main.k1(_1 (b): node mut* own[2], _2 (k): u64) -> void {",
+    "    let _3: node mut* own;",
+    "    let _4: i32;",
+    "    bb0: {",
+    "        del(move _1[_2]);",
+    "        _3 = alloc<node>(const u64 1);",
+    "        _1[_2] = move _3;",
+    "        _2 = const u64 1;",
+    "        _4 = copy (*_1[_2]).2;",
+    "        return;",
+    "    }",
+    "}",
+    // `_0` is no key: the store into `b[_0]` ends nothing, and its read reads each owner: U1d0.1
+    "fn main.k2(_1 (b): node mut* own[2]) -> u64 {",
+    "    let _0: u64;",
+    "    let _2: node mut* own;",
+    "    let _3: i32;",
+    "    bb0: {",
+    "        _0 = const u64 0;",
+    "        del(move _1[_0]);",
+    "        _2 = alloc<node>(const u64 1);",
+    "        _1[_0] = move _2;",
+    "        _3 = copy (*_1[_0]).2;",
+    "        return;",
+    "    }",
+    "}",
+    // the `del` of `b[0]` vacates `b[1]`, and the store into `b[0]` ends only `b[0]`: U1d0.2 P1
+    "fn main.k3(_1 (b): node mut* own[2]) -> void {",
+    "    let _2: u64;",
+    "    let _3: u64;",
+    "    let _4: node mut* own;",
+    "    let _5: i32;",
+    "    let _6: i32;",
+    "    bb0: {",
+    "        _2 = const u64 0;",
+    "        _3 = const u64 1;",
+    "        del(move _1[_2]);",
+    "        _4 = alloc<node>(const u64 1);",
+    "        _1[_2] = move _4;",
+    "        _5 = copy (*_1[_3]).2;",
+    "        _6 = copy (*_1[_2]).2;",
+    "        return;",
+    "    }",
+    "}",
+    // an `i8` constant through a cast to `u64` keys the element of the `u64` constant of one value:
+    // P1
+    "fn main.k4(_1 (b): node mut* own[2]) -> void {",
+    "    let _2: u64;",
+    "    let _3: u64;",
+    "    let _4: node mut* own;",
+    "    let _5: i32;",
+    "    bb0: {",
+    "        _2 = cast<u64>(const i8 1);",
+    "        _3 = const u64 1;",
+    "        del(move _1[_3]);",
+    "        _4 = alloc<node>(const u64 1);",
+    "        _1[_2] = move _4;",
+    "        _5 = copy (*_1[_3]).2;",
+    "        return;",
+    "    }",
+    "}",
+    // in a nested array the first index that differs makes two elements overlap: U1d0.2
+    "fn main.k5(_1 (m): node mut* own[2][2]) -> void {",
+    "    let _2: u64;",
+    "    let _3: u64;",
+    "    let _4: i32;",
+    "    bb0: {",
+    "        _2 = const u64 0;",
+    "        _3 = const u64 1;",
+    "        del(move _1[_2][_3]);",
+    "        _4 = copy (*_1[_3][_3]).2;",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[5] CONSTS_USES = {"U1d0.0", "U1d0.1", "U1d0.2 P1", "P1", "U1d0.2"};
+
+// A local is memory when the function takes the address of a place in its fixed storage: a field or
+// an element of a fixed array. An address through an index into a span names no byte of the local,
+// and a call then vacates nothing.
+string[61] EXPOSE = {
+    // the address of a field makes the struct memory, and a call vacates its other field; the read
+    // names its own place, number 0 in the type of the read: U1c0.4
+    "fn main.x1() -> void {",
+    "    let _1 (s): pair;",
+    "    let _2: node mut* own mut*;",
+    "    let _3: void;",
+    "    let _4: i32;",
+    "    let _5: node mut* own;",
+    "    bb0: {",
+    "        _1 = const zero pair;",
+    "        _5 = alloc<node>(const u64 1);",
+    "        _1.1 = move _5;",
+    "        _2 = addr mut(_1.0);",
+    "        _3 = call fn main.g();",
+    "        _4 = copy (*_1.1).2;",
+    "        return;",
+    "    }",
+    "}",
+    // the address of an element of a span names no byte of the local: P1 P1
+    "fn main.x2(_1 (b): bag) -> void {",
+    "    let _2: u8 mut*;",
+    "    let _3: u64;",
+    "    let _4: void;",
+    "    let _5: u8;",
+    "    bb0: {",
+    "        _3 = const u64 0;",
+    "        _2 = addr mut(_1.0[_3]);",
+    "        _4 = call fn main.g();",
+    "        _5 = copy _1.0[_3];",
+    "        return;",
+    "    }",
+    "}",
+    // the address of the other field of the struct makes it memory: U1c0.2
+    "fn main.x3(_1 (b): bag) -> void {",
+    "    let _2: u64 mut*;",
+    "    let _3: u64;",
+    "    let _4: void;",
+    "    let _5: u8;",
+    "    bb0: {",
+    "        _3 = const u64 0;",
+    "        _2 = addr mut(_1.1);",
+    "        _4 = call fn main.g();",
+    "        _5 = copy _1.0[_3];",
+    "        return;",
+    "    }",
+    "}",
+    // the address of an element makes the fixed array memory, and each read names the element that
+    // it reads: U1c0.3 U1c0.3
+    "fn main.x4() -> void {",
+    "    let _1 (b): node mut* own[2];",
+    "    let _2: node mut* own mut*;",
+    "    let _3: u64;",
+    "    let _4: void;",
+    "    let _5: i32;",
+    "    let _6: u64;",
+    "    let _7: i32;",
+    "    bb0: {",
+    "        _1 = const zero node mut* own[2];",
+    "        _3 = const u64 0;",
+    "        _2 = addr mut(_1[_3]);",
+    "        _4 = call fn main.g();",
+    "        _5 = copy (*_1[_3]).2;",
+    "        _6 = const u64 1;",
+    "        _7 = copy (*_1[_6]).2;",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[4] EXPOSE_USES = {"U1c0.4", "P1 P1", "U1c0.2", "U1c0.3 U1c0.3"};
+
+// ---- the harness -------------------------------------------------------------------------------
+
+// The letter of the operation of a use.
+fn op_letter(prover.operation_kind k) char {
+    switch (k) {
+    case prover.operation_kind.op_move:
+        return 'm';
+    case prover.operation_kind.op_del:
+        return 'd';
+    case prover.operation_kind.op_call:
+        return 'c';
+    case prover.operation_kind.op_none:
+        return 'n';
+    }
+}
+
+/// Writes the uses of `p` into `out`, one word each (see above), and holds the count of the uses
+/// that `p` does not prove against the words.
+fn write_uses(prover.proof* p, strbuf.str_buf mut* out) void {
+    strbuf.clear(out);
+    u32 mut unproved = 0;
+    u64 mut k = 0;
+    while (k < p->uses.len) {
+        prover.use* u = &p->uses[k];
+        if (k > 0) {
+            strbuf.push(out, ' ');
+        }
+        if (u->proved) {
+            strbuf.push(out, 'P');
+            strbuf.append_u64(out, cast(u->local, u64));
+        } else {
+            unproved += 1;
+            strbuf.push(out, 'U');
+            strbuf.append_u64(out, cast(u->local, u64));
+            strbuf.push(out, op_letter(u->op_kind));
+            if (u->op_kind != prover.operation_kind.op_none) {
+                strbuf.append_u64(out, cast(u->op_block, u64));
+                strbuf.push(out, '.');
+                strbuf.append_u64(out, cast(u->op_index, u64));
+            }
+            if (u->owner != 0) {
+                strbuf.push(out, '#');
+                strbuf.append_u64(out, u->owner);
+            }
+        }
+        k += 1;
+    }
+    assert(p->use_unproved == unproved);
+}
+
+// Parses `text` against PRELUDE, holds that the verifier accepts each function, proves each one,
+// and holds that function `k` of the module gives the uses `want[k]`.
+fn expect(string@ text, string@ want) void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    fir.module mut m = pass_env.parse(&e, PRELUDE[..], text);
+    defer fir.module_free(&m);
+    assert(m.funcs.len == want.len);
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    u64 mut k = 0;
+    while (k < m.funcs.len) {
+        fir.func* f = &m.funcs.items[k];
+        pass_env.verified(&e, f, "prover_use_test: the verifier refuses the input");
+        prover.proof mut p = prover.prove(f);
+        write_uses(&p, &got);
+        assert(!p.use_over);
+        prover.free(&p);
+        if (strbuf.view(&got) != want[k]) {
+            eprintln("function ", k, " gives '", strbuf.view(&got), "' and not '", want[k], "'");
+            panic("prover_use_test: the uses differ");
+        }
+        k += 1;
+    }
+}
+
+// The cases of VACATE.
+fn the_vacate_group_holds() void {
+    expect(VACATE[..], VACATE_USES[..]);
+    println("vacate ok");
+}
+
+// The cases of OVERLAP.
+fn the_overlap_group_holds() void {
+    expect(OVERLAP[..], OVERLAP_USES[..]);
+    println("overlap ok");
+}
+
+// The cases of KEYS.
+fn the_keys_group_holds() void {
+    expect(KEYS[..], KEYS_USES[..]);
+    println("keys ok");
+}
+
+// The cases of BORROWS.
+fn the_borrows_group_holds() void {
+    expect(BORROWS[..], BORROWS_USES[..]);
+    println("borrows ok");
+}
+
+// The cases of ENDS.
+fn the_ends_group_holds() void {
+    expect(ENDS[..], ENDS_USES[..]);
+    println("ends ok");
+}
+
+// The cases of ORDER.
+fn the_order_group_holds() void {
+    expect(ORDER[..], ORDER_USES[..]);
+    println("order ok");
+}
+
+// The cases of READS.
+fn the_reads_group_holds() void {
+    expect(READS[..], READS_USES[..]);
+    println("reads ok");
+}
+
+// The cases of PATHS.
+fn the_paths_group_holds() void {
+    expect(PATHS[..], PATHS_USES[..]);
+    println("paths ok");
+}
+
+// The cases of SPANS.
+fn the_spans_group_holds() void {
+    expect(SPANS[..], SPANS_USES[..]);
+    println("spans ok");
+}
+
+// The cases of TEMPS.
+fn the_temps_group_holds() void {
+    expect(TEMPS[..], TEMPS_USES[..]);
+    println("temps ok");
+}
+
+// The cases of CALLS.
+fn the_calls_group_holds() void {
+    expect(CALLS[..], CALLS_USES[..]);
+    println("calls ok");
+}
+
+// The cases of TEMPKEYS.
+fn the_tempkeys_group_holds() void {
+    expect(TEMPKEYS[..], TEMPKEYS_USES[..]);
+    println("tempkeys ok");
+}
+
+// The cases of FORMS.
+fn the_forms_group_holds() void {
+    expect(FORMS[..], FORMS_USES[..]);
+    println("forms ok");
+}
+
+// The cases of ABORTS.
+fn the_aborts_group_holds() void {
+    expect(ABORTS[..], ABORTS_USES[..]);
+    println("aborts ok");
+}
+
+// The cases of NESTED.
+fn the_nested_group_holds() void {
+    expect(NESTED[..], NESTED_USES[..]);
+    println("nested ok");
+}
+
+// The cases of OPERANDS.
+fn the_operands_group_holds() void {
+    expect(OPERANDS[..], OPERANDS_USES[..]);
+    println("operands ok");
+}
+
+// The cases of JOINS.
+fn the_joins_group_holds() void {
+    expect(JOINS[..], JOINS_USES[..]);
+    println("joins ok");
+}
+
+// The cases of CONSTS.
+fn the_consts_group_holds() void {
+    expect(CONSTS[..], CONSTS_USES[..]);
+    println("consts ok");
+}
+
+// The cases of EXPOSE.
+fn the_expose_group_holds() void {
+    expect(EXPOSE[..], EXPOSE_USES[..]);
+    println("expose ok");
+}
+
+// ---- the limit of the work ---------------------------------------------------------------------
+
+// Proves function `k` of `m` within `limit`, holds its uses against `want` and its charge against
+// `work`, and gives whether it passed the limit.
+fn expect_limit(fir.module* m, u64 k, u64 limit, string want, u64 work) bool {
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    prover.proof mut p = prover.prove_limits(&m->funcs.items[k], prover.WORK_LIMIT, limit);
+    defer prover.free(&p);
+    write_uses(&p, &got);
+    if (strbuf.view(&got) != want || p.use_work != work) {
+        eprintln("gives '", strbuf.view(&got), "' with the work ", p.use_work);
+        panic("prover_use_test: the limit gives another proof");
+    }
+    return p.use_over;
+}
+
+// The charge of v1 is one walk of its one block: its 2 statements, its terminator and its 3 acts
+// (the `del`, the read of `_1`, and the key of the store into `_2`, an `i32`, which holds no owner
+// and so takes no end) times 1 value, the state of `_1`: 6. p2 charges 1 for bb0, 4 for bb1 (the
+// read and the key of its store), 6 for bb2 (the end and the key of the `alloc` into `_4`, and the
+// `del`) and 1 for bb3, 12 in its first pass. The fixpoint walks bb0, bb1, bb2 and bb3, then bb1
+// again after the `del` of bb2, then bb2 and bb3 again: 23. At the limit the proof holds; past it
+// no use is proved and no note names an operation, and the charge is the charge at the walk that
+// passed the limit: 23 past 22, and 16, the second walk of bb1, past 12. A function whose first
+// pass passes the limit takes no state. The first pass charges the weight of the blocks (their
+// statements, terminators and acts, twice for a block with a test) times the values, and the count
+// of the values stops at the first local or read whose owners pass the limit: the charge is the
+// weight times the values counted up to there, also when the limit is below the charge of the
+// first blocks.
+fn the_limit_of_the_work_stops_the_proof() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    fir.module mut vacate = pass_env.parse(&e, PRELUDE[..], VACATE[..]);
+    defer fir.module_free(&vacate);
+    assert(!expect_limit(&vacate, 0, 6, "U1d0.0", 6));
+    assert(expect_limit(&vacate, 0, 5, "U1n", 6));
+    assert(!expect_limit(&vacate, 0, prover.USE_LIMIT, "U1d0.0", 6));
+    // a function that reads no owner takes no charge
+    assert(!expect_limit(&vacate, 7, 0, "", 0));
+    fir.module mut paths = pass_env.parse(&e, PRELUDE[..], PATHS[..]);
+    defer fir.module_free(&paths);
+    assert(!expect_limit(&paths, 1, 23, "U1d2.1", 23));
+    assert(expect_limit(&paths, 1, 22, "U1n", 23));
+    assert(expect_limit(&paths, 1, 12, "U1n", 16));
+    assert(expect_limit(&paths, 1, 11, "U1n", 12));
+    // the first pass passes 5 at bb2, with 11, and its charge is still that of the whole pass
+    assert(expect_limit(&paths, 1, 5, "U1n", 12));
+    // a function with no `move`, no `del` and no call that vacates takes no charge, also past a
+    // limit of 0
+    assert(!expect_limit(&paths, 4, 0, "P1 P1", 0));
+    // k2 has 7 items and 11 acts in its one block, 18, and one owner, `b[k]`, with one local key:
+    // 2 values, so its first pass charges 36, and its fixpoint walks the block once
+    fir.module mut keys = pass_env.parse(&e, PRELUDE[..], KEYS[..]);
+    defer fir.module_free(&keys);
+    assert(!expect_limit(&keys, 1, 36, "P1", 36));
+    assert(expect_limit(&keys, 1, 35, "U1n", 36));
+    // below 18 the one owner of the read `b[k]` passes the limit before its key counts: 18 times 1
+    assert(expect_limit(&keys, 1, 17, "U1n", 18));
+    // k7 weighs 3, 4 and 1 in its three blocks, 8, with the 2 values of `b[k]`: 16. At 13 the count
+    // stops at the key of `b[k]`, 16, before the fixpoint, which would stop at bb1 with 14; at 7
+    // the owner alone passes it: 8
+    assert(!expect_limit(&keys, 6, 16, "U1d0.0", 16));
+    assert(expect_limit(&keys, 6, 15, "U1n", 16));
+    assert(expect_limit(&keys, 6, 13, "U1n", 16));
+    assert(expect_limit(&keys, 6, 7, "U1n", 8));
+    // n3 has 5 items and 9 acts, 14, and the 4 owners of the memory local `t`: 56. Past the limit
+    // its read through `_2` names the first owner of `t`
+    fir.module mut nested = pass_env.parse(&e, PRELUDE[..], NESTED[..]);
+    defer fir.module_free(&nested);
+    assert(!expect_limit(&nested, 2, 56, "U1d0.2#2", 56));
+    assert(expect_limit(&nested, 2, 55, "U1n", 56));
+    // the default limit is 2^24
+    assert(prover.USE_LIMIT == 16777216);
+    println("limit ok");
+}
+
+fn main() i32 {
+    the_vacate_group_holds();
+    the_overlap_group_holds();
+    the_keys_group_holds();
+    the_borrows_group_holds();
+    the_ends_group_holds();
+    the_order_group_holds();
+    the_reads_group_holds();
+    the_paths_group_holds();
+    the_spans_group_holds();
+    the_temps_group_holds();
+    the_calls_group_holds();
+    the_tempkeys_group_holds();
+    the_forms_group_holds();
+    the_aborts_group_holds();
+    the_nested_group_holds();
+    the_operands_group_holds();
+    the_joins_group_holds();
+    the_consts_group_holds();
+    the_expose_group_holds();
+    the_limit_of_the_work_stops_the_proof();
+    return 0;
+}

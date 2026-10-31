@@ -8,6 +8,7 @@ import fort.ast;
 import fort.diag;
 import fort.fir;
 import fort.fir_print;
+import fort.lexer;
 import fort.owner.place;
 import fort.owner.prover;
 import fort.session;
@@ -647,6 +648,405 @@ fn write_inners(fir.func* f, prover.proof* p, session.session mut* s, strbuf.str
                 write_position(st->loc, out);
                 strbuf.append(out, "note: ");
                 strbuf.append(out, LEAK_LIMIT_NOTE);
+                strbuf.push(out, '\n');
+            }
+            limit_told = true;
+        }
+        k += 1;
+    }
+}
+
+// ---- the report of rule (b) --------------------------------------------------------------------
+
+/// The note after the first line of rule (b) of a function whose charge passed prover.USE_LIMIT
+/// (D17.21). Past it the analysis proves no use, and no note names an operation.
+string USE_LIMIT_NOTE = "the function exceeds the work limit of D17.21; split it";
+
+// The name of field `k` of the type `t`: a field of a struct by its declaration index, or `ptr`
+// and `len` of a span or a `string`.
+fn field_name(types.node* t, u32 k) string {
+    if (t->kind != types.type_kind.k_struct) {
+        if (k == 0) {
+            return "ptr";
+        }
+        return "len";
+    }
+    if (k >= fir.struct_field_count(t)) {
+        return "";
+    }
+    return types.field_at(t, cast(k, u64)).name;
+}
+
+// Whether the expression `e` names the base of the place `r` of `f`: an identifier of its local or
+// of its global, or for a temporary the expression whose value it holds, which starts at the
+// location of the temporary.
+fn names_base(fir.func* f, ast.node* e, fir.place r) bool {
+    if (r.base == fir.base_kind.bk_global) {
+        return e->kind == ast.ast_kind.k_ident && cast(e->sym, ast.sym*) == r.global;
+    }
+    fir.local* l = fir.local_at(f, r.local);
+    if (l->kind == fir.local_kind.lk_temp) {
+        return l->loc.line > 0 && e->loc.line == l->loc.line && e->loc.col == l->loc.col;
+    }
+    return e->kind == ast.ast_kind.k_ident && l->sym != null
+        && cast(e->sym, ast.sym*) == l->sym;
+}
+
+// Whether the expression `e` names the place `r` of `f` with its first `len` projections: the base
+// (names_base), then for each projection a `*`, a `.` or a `->` with the name of its field, or an
+// index.
+fn names_place(fir.func* f, ast.node* e, fir.place r, u32 len) bool {
+    if (e == null) {
+        return false;
+    }
+    if (len == 0) {
+        return names_base(f, e, r);
+    }
+    fir.place mut head = r;
+    head.proj_len = len - 1;
+    fir.projection pj = fir.place_projection(f, r, len - 1);
+    switch (pj.kind) {
+    case fir.proj_kind.pj_deref:
+        return e->kind == ast.ast_kind.k_unary && cast(e->op, lexer.tok_kind) == lexer.tok_kind.star
+            && names_place(f, e->a, r, len - 1);
+    case fir.proj_kind.pj_field:
+        string name = field_name(fir.place_type(f, head), pj.field);
+        if (e->kind == ast.ast_kind.k_field && e->name == name) {
+            return names_place(f, e->a, r, len - 1);
+        }
+        bool deref = len >= 2 && fir.place_projection(f, r, len - 2).kind == fir.proj_kind.pj_deref;
+        return e->kind == ast.ast_kind.k_arrow && e->name == name && deref
+            && names_place(f, e->a, r, len - 2);
+    case fir.proj_kind.pj_index:
+        return e->kind == ast.ast_kind.k_index && names_place(f, e->a, r, len - 1);
+    }
+}
+
+// Whether `e` is a call of the builtin `name` with one argument, such as `move(x)`.
+fn is_builtin(ast.node* e, string name) bool {
+    return e->kind == ast.ast_kind.k_call && e->a != null && e->a->kind == ast.ast_kind.k_ident
+        && e->a->name == name && ast.ast_len(e) == 1;
+}
+
+// Whether the operand `side` of the expression `e` is no read of its value by rule (b) (D17.21):
+// the operand of `&`, of `move` and of `del`, of a comparison with `null`, the target of an
+// assignment with `=`, and the operand of a field or an index that loads no pointer of it.
+fn is_unread(ast.node* e, ast.node* side) bool {
+    switch (e->kind) {
+    case ast.ast_kind.k_unary:
+        return cast(e->op, lexer.tok_kind) == lexer.tok_kind.amp;
+    case ast.ast_kind.k_call:
+        return is_builtin(e, "move") || is_builtin(e, "del");
+    case ast.ast_kind.k_binary:
+        lexer.tok_kind op = cast(e->op, lexer.tok_kind);
+        bool compare = op == lexer.tok_kind.eq || op == lexer.tok_kind.ne;
+        bool null_test = (e->a != null && e->a->kind == ast.ast_kind.k_null)
+            || (e->b != null && e->b->kind == ast.ast_kind.k_null);
+        return compare && null_test;
+    case ast.ast_kind.k_assign:
+        return cast(e->op, lexer.tok_kind) == lexer.tok_kind.assign
+            && side == cast(e->a, ast.node*);
+    case ast.ast_kind.k_field:
+        return true;
+    case ast.ast_kind.k_index:
+        return side == cast(e->a, ast.node*) && side->ty != null
+            && side->ty->kind == types.type_kind.k_array;
+    default:
+        return false;
+    }
+}
+
+// The first expression of the tree `n`, in the order of its children, that names the place `r` of
+// `f` and whose value an item reads (is_unread), or null. `unread` says that `n` is such an
+// operand of its parent.
+fn find_read(fir.func* f, ast.node* n, fir.place r, bool unread) ast.node* {
+    if (n == null) {
+        return null;
+    }
+    if (!unread && names_place(f, n, r, r.proj_len)) {
+        return n;
+    }
+    ast.node* mut found = find_read(f, n->a, r, is_unread(n, n->a));
+    if (found == null) {
+        found = find_read(f, n->b, r, is_unread(n, n->b));
+    }
+    if (found == null) {
+        found = find_read(f, n->c, r, is_unread(n, n->c));
+    }
+    if (found == null) {
+        found = find_read(f, n->d, r, is_unread(n, n->d));
+    }
+    u64 mut i = 0;
+    while (found == null && i < ast.ast_len(n)) {
+        ast.node* child = ast.ast_child(n, i);
+        found = find_read(f, child, r, is_unread(n, child));
+        i += 1;
+    }
+    return found;
+}
+
+// The `move` of the tree `n` whose operand names the place `p` of `f`, or null.
+fn find_move(fir.func* f, ast.node* n, fir.place p) ast.node* {
+    if (n == null) {
+        return null;
+    }
+    if (is_builtin(n, "move") && names_place(f, ast.ast_child(n, 0), p, p.proj_len)) {
+        return n;
+    }
+    ast.node* mut found = find_move(f, n->a, p);
+    if (found == null) {
+        found = find_move(f, n->b, p);
+    }
+    if (found == null) {
+        found = find_move(f, n->c, p);
+    }
+    if (found == null) {
+        found = find_move(f, n->d, p);
+    }
+    u64 mut i = 0;
+    while (found == null && i < ast.ast_len(n)) {
+        found = find_move(f, ast.ast_child(n, i), p);
+        i += 1;
+    }
+    return found;
+}
+
+// The `return` of the tree `n` whose value starts at `at`, or with no value the `return` at
+// `at`, or null.
+fn find_return(ast.node* n, diag.loc at) ast.node* {
+    if (n == null) {
+        return null;
+    }
+    if (n->kind == ast.ast_kind.k_return) {
+        bool value = n->a != null && n->a->loc.line == at.line && n->a->loc.col == at.col;
+        bool keyword = n->loc.line == at.line && n->loc.col == at.col;
+        if (value || keyword) {
+            return n;
+        }
+    }
+    ast.node* mut found = find_return(n->a, at);
+    if (found == null) {
+        found = find_return(n->b, at);
+    }
+    if (found == null) {
+        found = find_return(n->c, at);
+    }
+    if (found == null) {
+        found = find_return(n->d, at);
+    }
+    u64 mut i = 0;
+    while (found == null && i < ast.ast_len(n)) {
+        found = find_return(ast.ast_child(n, i), at);
+        i += 1;
+    }
+    return found;
+}
+
+// The tree of `f`, or null for FIR text with no source.
+fn tree_of(fir.func* f) ast.node* {
+    if (f->sym == null) {
+        return null;
+    }
+    return f->sym->node;
+}
+
+// The location of item `index` of block `b` of `f`: a statement, or the terminator when `index` is
+// the count of the statements.
+fn item_loc(fir.func* f, u32 b, u32 index) diag.loc {
+    if (index < fir.block_statement_count(f, b)) {
+        return fir.block_statement(f, b, index)->loc;
+    }
+    return fir.block_at(f, b)->term.loc;
+}
+
+// The expression of the use `u` of `f`: the expression of the tree of its item that names its
+// read and whose value the item reads (find_read), or null.
+fn use_node(fir.func* f, prover.use* u) ast.node* {
+    ast.node* tree = tree_of(f);
+    diag.loc at = item_loc(f, u->block, u->index);
+    if (tree == null || at.line == 0) {
+        return null;
+    }
+    return find_read(f, find_node(tree, at), u->read, false);
+}
+
+// Appends the text of the whole local `n` of `f` as rule (b) names it at the item at `at`: the
+// declared name of a named local or a parameter, the source text of the expression of a temporary,
+// and for `_0` the source text of the value of the `return` at `at`, or else the name of the
+// function and `()`, the call whose value `_0` holds. *postfix says whether the text needs no
+// parenthesis before a field. False for FIR text with no tree.
+fn write_local(fir.func* f, u32 n, diag.loc at, session.session mut* s, strbuf.str_buf mut* out,
+               bool mut* postfix) bool {
+    fir.local* l = fir.local_at(f, n);
+    *postfix = true;
+    if (l->kind == fir.local_kind.lk_named || l->kind == fir.local_kind.lk_param) {
+        if (fir.local_name(l).len > 0) {
+            strbuf.append(out, fir.local_name(l));
+            return true;
+        }
+    }
+    ast.node* mut e = null;
+    if (l->kind == fir.local_kind.lk_temp && tree_of(f) != null && l->loc.line > 0) {
+        e = find_node(tree_of(f), l->loc);
+    } else if (l->kind == fir.local_kind.lk_return && tree_of(f) != null) {
+        ast.node* ret = find_return(tree_of(f), at);
+        if (ret == null || ret->a == null) {
+            strbuf.append(out, f->sym->name);
+            strbuf.append(out, "()");
+            return true;
+        }
+        e = ret->a;
+    }
+    if (e != null) {
+        *postfix = is_postfix(e);
+        return write_text(e, s, out);
+    }
+    return false;
+}
+
+/// Appends the text that the use `u` of `f` names (D17.21): the source text of the base of the
+/// use, its read or its whole local, then the steps of next_owner_step from the type of the base
+/// to the owner of the use: `.<field>` and `[<index>]`. FIR text with no tree gives the FIR place
+/// of the base and `.<field number>`.
+fn write_use_place(fir.func* f, prover.use* u, session.session mut* s, strbuf.str_buf mut* out)
+    void {
+    types.node* t = fir.place_type(f, u->base);
+    diag.loc at = item_loc(f, u->block, u->index);
+    strbuf.str_buf mut base = strbuf.create();
+    defer strbuf.free(&base);
+    bool mut postfix = true;
+    bool mut written = false;
+    types.node* mut ty = t;
+    u64 mut owner = u->owner;
+    if (u->base.proj_len == 0 && u->base.base == fir.base_kind.bk_local) {
+        written = write_local(f, u->base.local, at, s, &base, &postfix);
+    } else {
+        ast.node* e = use_node(f, u);
+        if (e != null) {
+            postfix = is_postfix(e);
+            written = write_text(e, s, &base);
+        } else if (u->local_owner != prover.NO_RANK) {
+            // a read that the lowering made, such as the element of a `for` over a fixed array,
+            // has no source text: the use names the owner in the type of its local
+            ty = fir.local_at(f, u->local)->ty;
+            owner = u->local_owner;
+            written = write_local(f, u->local, at, s, &base, &postfix);
+        }
+    }
+    if (!written) {
+        fir_print.print_place(f, u->base, out);
+        append_steps(t, u->owner, true, out);
+        return;
+    }
+    place.owner_step mut step = place.owner_step{};
+    u64 mut rest = 0;
+    if (place.next_owner_step(ty, owner, &step, &rest)) {
+        append_operand(out, strbuf.view(&base), postfix);
+    } else {
+        strbuf.append(out, strbuf.view(&base));
+    }
+    append_steps(ty, owner, false, out);
+}
+
+// The location of the error of the use `u` of `f`: the first token of the expression whose read
+// is the use, or the location of its item.
+fn use_loc(fir.func* f, prover.use* u) diag.loc {
+    ast.node* e = use_node(f, u);
+    diag.loc mut first = diag.loc{};
+    find_start(e, &first);
+    if (first.line == 0) {
+        return item_loc(f, u->block, u->index);
+    }
+    return first;
+}
+
+// The location of the note of the use `u` of `f`: the `del`, the `move` or the first token of the
+// call of its operation, or the `return` of an implicit `move` of `return x`.
+fn op_loc(fir.func* f, prover.use* u) diag.loc {
+    fir.statement* st = fir.block_statement(f, u->op_block, u->op_index);
+    ast.node* tree = tree_of(f);
+    if (u->op_kind == prover.operation_kind.op_del || tree == null || st->loc.line == 0) {
+        return st->loc;
+    }
+    if (u->op_kind == prover.operation_kind.op_call) {
+        diag.loc mut first = diag.loc{};
+        find_start(find_node(tree, st->loc), &first);
+        if (first.line == 0) {
+            return st->loc;
+        }
+        return first;
+    }
+    ast.node* m = find_move(f, find_node(tree, st->loc), u->op_place);
+    if (m != null) {
+        return m->a->loc;
+    }
+    bool result = st->kind == fir.stmt_kind.st_assign && place.is_local(st->place)
+        && st->place.local == 0;
+    ast.node* ret = find_return(tree, st->loc);
+    if (result && ret != null) {
+        return ret->loc;
+    }
+    return st->loc;
+}
+
+// Whether a use before use `k` of `p` that `p` does not prove names the local of use `k` at its
+// location: a deferred statement expands at each exit with its own location. `locs[j]` is the
+// location of the unproved use `j` (use_loc), so no tree is walked again.
+fn is_use_repeated(prover.proof* p, diag.loc@ locs, u64 k) bool {
+    u64 mut j = 0;
+    while (j < k) {
+        prover.use* x = &p->uses[j];
+        if (!x->proved && x->local == p->uses[k].local && is_same_loc(locs[j], locs[k])) {
+            return true;
+        }
+        j += 1;
+    }
+    return false;
+}
+
+/// Appends the lines of the report of rule (b) for each use of `f` that `p` does not prove, once
+/// for each location and local, in the order of the uses (D17.21): `<file>:<line>:<col>: use after
+/// move or del: '<place>' can be vacated here` at the expression whose read is the use, and the
+/// line of the note `'<place>' is moved here`, `is deleted here` or `can change in this call` at
+/// its operation. Past prover.USE_LIMIT no note names an operation, and a line of the note
+/// USE_LIMIT_NOTE follows the first use. Rule (b) is no error yet, so the lines go to `out`.
+fn write_uses(fir.func* f, prover.proof* p, session.session mut* s, strbuf.str_buf mut* out)
+    void {
+    strbuf.str_buf mut owner = strbuf.create();
+    defer strbuf.free(&owner);
+    diag.loc mut@ own locs = new(diag.loc, p->uses.len);
+    defer del(locs);
+    bool mut limit_told = false;
+    u64 mut k = 0;
+    while (k < p->uses.len) {
+        prover.use* u = &p->uses[k];
+        if (!u->proved) {
+            locs[k] = use_loc(f, u);
+        }
+        diag.loc at = locs[k];
+        if (!u->proved && !is_use_repeated(p, locs, k)) {
+            strbuf.clear(&owner);
+            write_use_place(f, u, s, &owner);
+            write_position(at, out);
+            strbuf.append(out, "use after move or del: '");
+            strbuf.append(out, strbuf.view(&owner));
+            strbuf.append(out, "' can be vacated here\n");
+            if (u->op_kind != prover.operation_kind.op_none) {
+                write_position(op_loc(f, u), out);
+                strbuf.append(out, "note: '");
+                strbuf.append(out, strbuf.view(&owner));
+                if (u->op_kind == prover.operation_kind.op_move) {
+                    strbuf.append(out, "' is moved here\n");
+                } else if (u->op_kind == prover.operation_kind.op_del) {
+                    strbuf.append(out, "' is deleted here\n");
+                } else {
+                    strbuf.append(out, "' can change in this call\n");
+                }
+            }
+            if (p->use_over && !limit_told) {
+                write_position(at, out);
+                strbuf.append(out, "note: ");
+                strbuf.append(out, USE_LIMIT_NOTE);
                 strbuf.push(out, '\n');
             }
             limit_told = true;
