@@ -93,6 +93,9 @@ fn check_proved(gen.emitter mut* g, fir_verify.runtime* rt, fir.func mut* f,
 // Only a stub `std.rt` of a test or an old --std-dir meets the second, the third and the fourth.
 // A violation of a rule of the verifier ends the compiler with a panic.
 fn fir_function(gen.emitter mut* g, fir_path mut* fp, ast.node* fn_node) bool {
+    // read before the first call, because prover.prove_uses takes each call as a change of `f` and
+    // `text`
+    string name = fn_node->sym->name;
     fir.func mut f = fir.func{};
     fir_lower.report mut why = fir_lower.report{};
     strbuf.str_buf mut text = strbuf.create();
@@ -106,11 +109,11 @@ fn fir_function(gen.emitter mut* g, fir_path mut* fp, ast.node* fn_node) bool {
             } else {
                 strbuf.append(&text, "`, which `");
             }
-            strbuf.append(&text, fn_node->sym->name);
+            strbuf.append(&text, name);
             strbuf.append(&text, "` needs");
         } else {
             strbuf.append(&text, "cannot lower `");
-            strbuf.append(&text, fn_node->sym->name);
+            strbuf.append(&text, name);
             strbuf.append(&text, "` to FIR: the lowering does not support the node `");
             strbuf.append(&text, ast.ast_kind_name(why.kind));
             strbuf.push(&text, '`');
@@ -124,7 +127,7 @@ fn fir_function(gen.emitter mut* g, fir_path mut* fp, ast.node* fn_node) bool {
         strbuf.append(&text, "the runtime `std.rt` has no entry `");
         strbuf.append(&text, fir.check_entry(missing));
         strbuf.append(&text, "` with the parameters that `");
-        strbuf.append(&text, fn_node->sym->name);
+        strbuf.append(&text, name);
         strbuf.append(&text, "` needs");
         gen.gen_error(g, fn_node->name_loc, strbuf.view(&text));
         return false;
@@ -140,12 +143,17 @@ fn emit_fir(gen.emitter mut* g, fir_path mut* fp, fir.func f) bool {
     fir.module mut m = fir.module_new();
     defer fir.module_free(&m);
     fir.module_add_function(&m, move(f));
-    fir.func mut* added = &m.funcs.items[0];
-    if (!check_proved(g, &fp->rt, added, fp->calls)) {
+    return emit_module(g, fp, &m);
+}
+
+// Checks and writes the one function of `m`, for emit_fir. The caller keeps `m`, so it is no local
+// owner here.
+fn emit_module(gen.emitter mut* g, fir_path mut* fp, fir.module mut* m) bool {
+    if (!check_proved(g, &fp->rt, &m->funcs.items[0], fp->calls)) {
         return false;
     }
-    fir.module_collect_externs(&m);
-    fir_llvm.translate_module(g, &m);
+    fir.module_collect_externs(m);
+    fir_llvm.translate_module(g, m);
     return true;
 }
 

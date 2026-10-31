@@ -97,17 +97,23 @@ fn func_new(types.table mut* tt, ast.sym* s, types.node* ty) func {
     f.sym = s;
     f.ty = ty;
     f.tt = tt;
-    diag.loc none = diag.loc{};
-    // type_fn stores `void` as the result of a `noreturn` function
-    local_add(&f, ty->elem, local_kind.lk_return, null, none);
-    u64 mut i = 0;
-    while (i < ty->params.len) {
-        local_add(&f, ty->params[i], local_kind.lk_param, param_sym(s, i), none);
-        i += 1;
-    }
+    add_signature_locals(&f, s, ty);
     // bb0, the entry block
     block_new(&f);
     return f;
+}
+
+// Adds `_0` and the parameter locals of the function type `ty` of `s` to `f`, for func_new. The
+// result of func_new is no local owner here.
+fn add_signature_locals(func mut* f, ast.sym* s, types.node* ty) void {
+    diag.loc none = diag.loc{};
+    // type_fn stores `void` as the result of a `noreturn` function
+    local_add(f, ty->elem, local_kind.lk_return, null, none);
+    u64 mut i = 0;
+    while (i < ty->params.len) {
+        local_add(f, ty->params[i], local_kind.lk_param, param_sym(s, i), none);
+        i += 1;
+    }
 }
 
 // The symbol of parameter `i` of the function `s`, or null when the declaration is not there.
@@ -1892,25 +1898,31 @@ fn walk_edges(func* f, pred_table mut* pt, u32 mut@ cursor, bool fill) void {
 
 /// Builds the predecessor table of `f` in one pass over the terminators and a prefix sum.
 fn func_predecessors(func* f) pred_table {
-    u64 n = f->blocks.len;
     pred_table mut pt = pred_table{};
-    pt.first = new(u32, n + 1);
+    pt.first = new(u32, f->blocks.len + 1);
+    fill_predecessors(f, &pt);
+    return pt;
+}
+
+// Fills the table `pt` of func_predecessors, whose `first` has one entry for each block of `f` and
+// one more. The caller keeps `pt`, so it is no local owner here.
+fn fill_predecessors(func* f, pred_table mut* pt) void {
+    u64 n = f->blocks.len;
     u32 mut@ own cursor = new(u32, n + 1);
-    walk_edges(f, &pt, cursor, false);
+    walk_edges(f, pt, cursor, false);
     u64 mut b = 0;
     while (b < n) {
-        pt.first[b + 1] += pt.first[b];
-        cursor[b] = pt.first[b];
+        pt->first[b + 1] += pt->first[b];
+        cursor[b] = pt->first[b];
         b += 1;
     }
-    u64 total = cast(pt.first[n], u64);
+    u64 total = cast(pt->first[n], u64);
     if (total > 0) {
-        del(pt.preds);
-        pt.preds = new(u32, total);
-        walk_edges(f, &pt, cursor, true);
+        del(pt->preds);
+        pt->preds = new(u32, total);
+        walk_edges(f, pt, cursor, true);
     }
     del(cursor);
-    return pt;
 }
 
 /// The count of the predecessors of block `b`.

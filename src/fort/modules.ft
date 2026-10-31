@@ -799,6 +799,16 @@ fn load_module(session.session mut* s, module_set mut* set, string path, string 
     module mut* m = admit(set, path, file, real, source, entry);
     strmap.put(&set->by_real, m->real, cast(set->modules.len - 1, i64));
 
+    parse_file(s, set, m);
+    if (!m->parsed) {
+        return null;
+    }
+    return walk_module(s, set, m);
+}
+
+// Lexes and parses the source of `m` into `m->ast`, for load_module. `m` is a parameter here, so a
+// load through it reads no local owner of this function.
+fn parse_file(session.session mut* s, module_set mut* set, module mut* m) void {
     // the diagnostic count says whether the file parsed, not null
     u64 before = session.error_count(s);
     lexer.tok_vec mut toks = lexer.tokvec_create();
@@ -807,10 +817,6 @@ fn load_module(session.session mut* s, module_set mut* set, string path, string 
     m->ast = parser.parse_module(s, m->file, &toks, &set->arena);
     lexer.tokvec_free(&toks);
     m->parsed = session.error_count(s) == before;
-    if (!m->parsed) {
-        return null;
-    }
-    return walk_module(s, set, m);
 }
 
 // Adds a new module in the loading state and enters it in the path map. The caller enters a module
@@ -1069,16 +1075,23 @@ fn load_section(session.session mut* s, module_set mut* set, used_library* lib, 
     module mut* m = admit(set, path, lib->file, "", lib->source, false);
     m->interface = true;
     m->outside = set->outside;
+    parse_section(s, set, lib, k, m);
+    if (!m->parsed) {
+        return null;
+    }
+    return walk_module(s, set, m);
+}
+
+// Parses the tokens of section `k` of `lib` into `m->ast`, for load_section. `m` is a parameter
+// here, so a load through it reads no local owner of this function.
+fn parse_section(session.session mut* s, module_set mut* set, used_library* lib, u64 k,
+                 module mut* m) void {
     u64 before = session.error_count(s);
     lexer.tok_vec mut toks = lexer.tokvec_create();
     defer lexer.tokvec_free(&toks);
     copy_tokens(lib, k, &toks);
     m->ast = parser.parse_interface(s, m->file, &toks, &set->arena);
     m->parsed = session.error_count(s) == before;
-    if (!m->parsed) {
-        return null;
-    }
-    return walk_module(s, set, m);
 }
 
 // Whether section `k` of `lib` declares `name`, which the symbol reading asks. A loaded section
@@ -1110,6 +1123,14 @@ fn has_declaration(session.session mut* s, module_set mut* set, used_library* li
     return declares;
 }
 
+// The section of `lib` whose module path is the first `n` segments of `path`, or -1. The buffer of
+// the path stays a local here, so resolve_used_path has no local owner that a call can vacate.
+fn path_section(used_library* lib, ast.node* path, u64 n) i64 {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    return section_of(lib, path_view(&b, path, n));
+}
+
 // Resolves `import a.b.c;` whose first segment names a used library, by the two readings over
 // the sections of its interface file (module-system.md 10.2 item 1).
 fn resolve_used_path(session.session mut* s, module_set mut* set, module mut* m,
@@ -1121,12 +1142,10 @@ fn resolve_used_path(session.session mut* s, module_set mut* set, module mut* m,
     if (imp->b != null) {
         bound = imp->b->name;
     }
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
-    i64 module_k = section_of(lib, path_view(&b, path, n));
+    i64 module_k = path_section(lib, path, n);
     i64 mut prefix_k = -1;
     if (n >= 2) {
-        prefix_k = section_of(lib, path_view(&b, path, n - 1));
+        prefix_k = path_section(lib, path, n - 1);
     }
     if (module_k >= 0) {
         if (prefix_k >= 0 && has_declaration(s, set, lib, cast(prefix_k, u64), last)) {
@@ -1735,11 +1754,14 @@ fn load_library_runtime(session.session mut* s, module_set mut* set) bool {
             string runtime = containers.str_at(&set->listed_files, cast(listed, u64));
             return load_module(s, set, path, runtime, file_start(runtime), false) != null;
         }
+        // read before `b` exists, because prover.prove_uses takes each later call as a change of
+        // `b`
+        string root = set->library_root;
+        bool separate = root.len > 0 && root[root.len - 1] != DIRECTORY_SEPARATOR;
         strbuf.str_buf mut b = strbuf.create();
         defer strbuf.free(&b);
-        strbuf.append(&b, set->library_root);
-        if (set->library_root.len > 0
-            && set->library_root[set->library_root.len - 1] != DIRECTORY_SEPARATOR) {
+        strbuf.append(&b, root);
+        if (separate) {
             strbuf.push(&b, DIRECTORY_SEPARATOR);
         }
         strbuf.append(&b, RUNTIME_FILE);

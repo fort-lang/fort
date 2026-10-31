@@ -995,6 +995,20 @@ came here.
   the AST arena, the type table and the module vectors together, a heap probe of repeated runs
   reaches its steady size later: take its early sample after that
   (`driver_lifetime_emitter_test.ft`, `notes/testing.md`).
+- **Write a read after a call in a form that rule (b) proves** (D17.21,
+  `test/fort/owner/prover_use_source_test.ft`, the pairs `*_before` and `*_after`). The proof
+  takes each call as a change of each memory owner, and of each owner of an aggregate `_0` before
+  its store, so a read of such an owner after a call is a use that it does not prove. Five forms
+  remove such a use, and none adds a `move`/store pair. Split: the function keeps the owner local
+  and its cleanup, and a function that takes the local as a pointer does the work after the first
+  call (`check_stmt.check_range_in`), where the owner is no local owner (X2 of
+  `spec/ownership-design.md` 6.2). Fill: a function that returns an aggregate with an owner
+  allocates it with no load through a pointer after a call, and a function that takes its spans
+  fills it (`driver.cc_command_fill`); a fill through a pointer into a new `own` field fails the
+  overwrite check of D17.11. Narrow: the owner local and its calls go into a function that returns
+  a plain value (`summary.intern_symbol`). Read early: a load through a pointer comes before the
+  first call or before the owner exists (`driver.run_entry`). Method: a direct read of an `own`
+  field of a memory local goes through a function that takes the struct (`prover.start_walk`).
 - **The ownership summaries come from the call graph of the proved functions**
   (`spec/ownership-design.md` 8, `src/fort/owner/summary.ft`). `summary.add` takes each function
   that the emptiness pass proves with no error, with `proof.inner_work` (the largest of the three

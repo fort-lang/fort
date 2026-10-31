@@ -224,45 +224,52 @@ fn classify(fir.func* f, storage mut@ out) void {
 /// Makes the translator of `f`, which writes through `g`, and classifies the locals of `f`.
 /// write_locals comes before the first statement.
 fn open(gen.emitter mut* g, fir.func* f) translator {
-    translator mut t = translator{.g = g, .f = f};
     u64 n = f->locals.len;
-    del(t.locals);
-    t.locals = new(local_state, n);
+    u64 blocks = f->blocks.len;
+    translator t = translator{
+        .g = g,
+        .f = f,
+        .locals = new(local_state, n),
+        .notes = new(overflow_note, blocks),
+        .cont_of = new(u32, blocks),
+        .fail_label = new(u64, blocks),
+    };
+    fill_tables(f, t.locals, t.cont_of, t.fail_label);
+    return t;
+}
+
+// Fills the tables of the translator of `f` that open makes: the storage of each local, the
+// continuation of each overflow check, and the failure label of each block. The result of open is
+// no local owner here.
+fn fill_tables(fir.func* f, local_state mut@ locals, u32 mut@ cont_of, u64 mut@ fail_label) void {
+    u64 n = locals.len;
     storage mut@ own kinds = new(storage, n);
     defer del(kinds);
     classify(f, kinds);
     u64 mut i = 0;
     while (i < n) {
-        t.locals[i].kind = kinds[i];
+        locals[i].kind = kinds[i];
         i += 1;
     }
-    u64 blocks = f->blocks.len;
-    del(t.notes);
-    t.notes = new(overflow_note, blocks);
-    del(t.cont_of);
-    t.cont_of = new(u32, blocks);
     u32 mut b = 0;
     while (b < fir.block_count(f)) {
         fir.block* bl = fir.block_at(f, b);
         bool check = bl->terminated && bl->term.kind == fir.term_kind.tk_check;
         if (check && bl->term.check == fir.check_kind.chk_overflow) {
-            t.cont_of[cast(bl->term.target, u64)] = b + 1;
+            cont_of[cast(bl->term.target, u64)] = b + 1;
         }
         b += 1;
     }
     // the k-th failure block in the order of the blocks that make them is `%L<B + k>`
-    del(t.fail_label);
-    t.fail_label = new(u64, blocks);
-    u64 mut next = blocks;
+    u64 mut next = f->blocks.len;
     b = 0;
     while (b < fir.block_count(f)) {
         if (makes_failure(f, b)) {
-            t.fail_label[cast(b, u64)] = next;
+            fail_label[cast(b, u64)] = next;
             next += 1;
         }
         b += 1;
     }
-    return t;
 }
 
 fn close(translator mut* t) void {
@@ -947,20 +954,26 @@ fn call_of(translator mut* t, fir.statement* s) gen.gen_val {
         gen.gen_val dst = place_addr(t, s->place);
         gen.gen_args_add_ext(&text, dst, gen.sret_attr(g, &sig));
     }
-    k = 0;
-    while (k < r.ops_len) {
-        held* h = &args[cast(k, u64)];
+    add_arguments(&text, args, &sig);
+    bool pointer = r.callee == fir.callee_kind.cl_value;
+    return gen.gen_call_sig(g, &sig, callee, pointer, &text);
+}
+
+// Adds the held arguments `args` of call_of to `text`, each fixed argument with the extension
+// attribute of its parameter in `sig`. The caller keeps `sig`, so it is no local owner here.
+fn add_arguments(gen.gen_args mut* text, held@ args, gen.signature* sig) void {
+    u64 mut k = 0;
+    while (k < args.len) {
+        held* h = &args[k];
         if (h->aggregate) {
-            gen.gen_args_add(&text, h->addr);
-        } else if (cast(k, u64) < sig.params.len) {
-            gen.gen_args_add_ext(&text, h->value, sig.params[cast(k, u64)].attr);
+            gen.gen_args_add(text, h->addr);
+        } else if (k < sig->params.len) {
+            gen.gen_args_add_ext(text, h->value, sig->params[k].attr);
         } else {
-            gen.gen_args_add(&text, h->value);
+            gen.gen_args_add(text, h->value);
         }
         k += 1;
     }
-    bool pointer = r.callee == fir.callee_kind.cl_value;
-    return gen.gen_call_sig(g, &sig, callee, pointer, &text);
 }
 
 /// The value of the scalar rvalue of the assignment `s` (spec/fir.md 12.2). The function reads

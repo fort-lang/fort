@@ -216,18 +216,32 @@ fn const_struct(gen.emitter mut* g, strbuf.str_buf mut* out, types.node* t, ast.
         gen.gen_todo(g, n->loc, "this initializer");
         return true;
     }
-    bool designated = (n->flags & ast.FLAG_DESIGNATED) != 0;
     strbuf.str_buf mut buf = strbuf.create();
     defer strbuf.free(&buf);
+    strbuf.append(&buf, "{ ");
+    bool zero = const_fields(g, &buf, s, n);
+    strbuf.append(&buf, " }");
+    // An all-zero aggregate is `zeroinitializer` whatever its shape.
+    if (zero) {
+        strbuf.append(out, "zeroinitializer");
+    } else {
+        strbuf.append(out, strbuf.view(&buf));
+    }
+    return zero;
+}
+
+// Appends to `buf` the fields of the struct `s` that the initializer `n` gives, for const_struct.
+// Returns whether each field is zero. The caller keeps `buf`, so it is no local owner here.
+fn const_fields(gen.emitter mut* g, strbuf.str_buf mut* buf, ast.sym* s, ast.node* n) bool {
+    bool designated = (n->flags & ast.FLAG_DESIGNATED) != 0;
     bool mut zero = true;
     u64 mut at = 0;
-    strbuf.append(&buf, "{ ");
     u64 mut i = 0;
     while (i < ast.ast_len(s->node)) {
         ast.node* f = ast.ast_child(s->node, i);
         if (f->kind == ast.ast_kind.k_field_decl) {
             if (at > 0) {
-                strbuf.append(&buf, ", ");
+                strbuf.append(buf, ", ");
             }
             ast.node* mut v = null;
             if (designated) {
@@ -235,7 +249,7 @@ fn const_struct(gen.emitter mut* g, strbuf.str_buf mut* out, types.node* t, ast.
             } else if (at < ast.ast_len(n)) {
                 v = ast.ast_child(n, at);
             }
-            const_member(g, &buf, f->ty, v, &zero);
+            const_member(g, buf, f->ty, v, &zero);
             if (g->failed) {
                 // One report per initializer: the walk stops at the first
                 // member the emitter cannot lower.
@@ -244,13 +258,6 @@ fn const_struct(gen.emitter mut* g, strbuf.str_buf mut* out, types.node* t, ast.
             at += 1;
         }
         i += 1;
-    }
-    strbuf.append(&buf, " }");
-    // An all-zero aggregate is `zeroinitializer` whatever its shape.
-    if (zero) {
-        strbuf.append(out, "zeroinitializer");
-    } else {
-        strbuf.append(out, strbuf.view(&buf));
     }
     return zero;
 }
@@ -397,6 +404,13 @@ fn gen_global(gen.emitter mut* g, ast.node* decl) void {
     strbuf.str_buf mut init = strbuf.create();
     defer strbuf.free(&init);
     const_value(g, &init, s->ty, decl->b);
+    define_global(g, s, name, ty, strbuf.view(&init));
+}
+
+// `<name> = dso_local global <type> <value>, align <n>`, or `constant` for an immutable
+// declaration: the definition of the global or constant `s`, for gen_global. The caller keeps the
+// buffer of `value`, so it is no local owner here.
+fn define_global(gen.emitter mut* g, ast.sym* s, string name, string ty, string value) void {
     strbuf.append(&g->globals, name);
     // An immutable declaration lives in read-only memory and a `mut` one in writable
     // memory. No section is named, since LLVM picks it from the initializer.
@@ -409,7 +423,7 @@ fn gen_global(gen.emitter mut* g, ast.node* decl) void {
     }
     strbuf.append(&g->globals, ty);
     strbuf.push(&g->globals, ' ');
-    strbuf.append(&g->globals, strbuf.view(&init));
+    strbuf.append(&g->globals, value);
     // an explicit `align N` from the compiler's own layout
     strbuf.append(&g->globals, ", align ");
     strbuf.append_u64(&g->globals, types.type_alignof(s->ty));
@@ -451,28 +465,52 @@ fn emit_declaration(gen.emitter mut* g, strbuf.str_buf mut* out, ast.sym* s) voi
     strbuf.push(out, ' ');
     strbuf.append(out, callee);
     strbuf.push(out, '(');
+    append_declared_params(out, &sig);
+    strbuf.append(out, ") #0\n");
+    gen.gen_use_attr(g, gen.ATTR_FN);
+}
+
+// Appends the parameters of the declaration of emit_declaration: the `sret` pointer of an aggregate
+// result, then the type and the attributes of each parameter of `sig`. The caller keeps `sig`, so
+// it is no local owner here.
+fn append_declared_params(strbuf.str_buf mut* out, gen.signature* sig) void {
     u64 mut written = 0;
-    if (sig.sret.len > 0) {
+    if (sig->sret.len > 0) {
         strbuf.append(out, "ptr sret(");
-        strbuf.append(out, sig.sret);
+        strbuf.append(out, sig->sret);
         strbuf.push(out, ')');
         written += 1;
     }
     u64 mut i = 0;
-    while (i < sig.params.len) {
+    while (i < sig->params.len) {
         if (written > 0) {
             strbuf.append(out, ", ");
         }
         written += 1;
-        strbuf.append(out, sig.params[i].ty);
-        if (sig.params[i].attr.len > 0) {
+        strbuf.append(out, sig->params[i].ty);
+        if (sig->params[i].attr.len > 0) {
             strbuf.push(out, ' ');
-            strbuf.append(out, sig.params[i].attr);
+            strbuf.append(out, sig->params[i].attr);
         }
         i += 1;
     }
-    strbuf.append(out, ") #0\n");
-    gen.gen_use_attr(g, gen.ATTR_FN);
+}
+
+// Appends the type and the attribute of each parameter of `sig` of emit_extern. The caller keeps
+// `sig`, so it is no local owner here.
+fn append_extern_params(strbuf.str_buf mut* out, gen.signature* sig) void {
+    u64 mut i = 0;
+    while (i < sig->params.len) {
+        if (i > 0) {
+            strbuf.append(out, ", ");
+        }
+        strbuf.append(out, sig->params[i].ty);
+        if (sig->params[i].attr.len > 0) {
+            strbuf.push(out, ' ');
+            strbuf.append(out, sig->params[i].attr);
+        }
+        i += 1;
+    }
 }
 
 // `declare <ret> @name(<params>) nobuiltin` for the `extern fn` `s`, from the signature map of
@@ -492,18 +530,7 @@ fn emit_extern(gen.emitter mut* g, strbuf.str_buf mut* out, ast.sym* s) void {
     // one spelling for every `@` name. An extern comes out bare
     gen.gen_append_name(out, "", s->name, false);
     strbuf.push(out, '(');
-    u64 mut i = 0;
-    while (i < sig.params.len) {
-        if (i > 0) {
-            strbuf.append(out, ", ");
-        }
-        strbuf.append(out, sig.params[i].ty);
-        if (sig.params[i].attr.len > 0) {
-            strbuf.push(out, ' ');
-            strbuf.append(out, sig.params[i].attr);
-        }
-        i += 1;
-    }
+    append_extern_params(out, &sig);
     if (sig.variadic) {
         if (sig.params.len > 0) {
             strbuf.append(out, ", ");

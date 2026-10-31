@@ -621,27 +621,35 @@ fn collect_facts(context mut* c, fir_flow.dataflow* stale, proof* out) void {
     defer fir_flow.bits_free(&at_stale);
     u32 mut b = 0;
     while (b < fir.block_count(f)) {
-        u64 mut k = c->first_store[cast(b, u64)];
-        u64 end = c->first_store[cast(b, u64) + 1];
-        fir_flow.bits_copy(&at_stale, &stale->ins[cast(b, u64)]);
-        u32 mut i = 0;
-        while (k < end) {
-            while (i < out->stores[k].index) {
-                place.apply_stale(&c->places, fir.block_statement(f, b, i), &at_stale);
-                i += 1;
-            }
-            c->store_fact[k] = NO_FACT;
-            if (!is_scratch_store(c, &out->stores[k])) {
-                c->store_fact[k] = fact_of(c, fir.block_statement(f, b, i)->place, &at_stale);
-            }
-            k += 1;
-        }
-        c->block_fact[cast(b, u64)] = NO_FACT;
-        fir.terminator* t = &fir.block_at(f, b)->term;
-        if (t->kind == fir.term_kind.tk_check_overwrite) {
-            c->block_fact[cast(b, u64)] = fact_of(c, t->place, &stale->outs[cast(b, u64)]);
-        }
+        collect_block_facts(c, stale, out, b, &at_stale);
         b += 1;
+    }
+}
+
+// The facts of collect_facts in block `b`, with `at_stale` as the stale set at each statement. The
+// caller keeps `at_stale`, so it is no local owner here.
+fn collect_block_facts(context mut* c, fir_flow.dataflow* stale, proof* out, u32 b,
+                       fir_flow.bits mut* at_stale) void {
+    fir.func* f = c->places.f;
+    u64 mut k = c->first_store[cast(b, u64)];
+    u64 end = c->first_store[cast(b, u64) + 1];
+    fir_flow.bits_copy(at_stale, &stale->ins[cast(b, u64)]);
+    u32 mut i = 0;
+    while (k < end) {
+        while (i < out->stores[k].index) {
+            place.apply_stale(&c->places, fir.block_statement(f, b, i), at_stale);
+            i += 1;
+        }
+        c->store_fact[k] = NO_FACT;
+        if (!is_scratch_store(c, &out->stores[k])) {
+            c->store_fact[k] = fact_of(c, fir.block_statement(f, b, i)->place, at_stale);
+        }
+        k += 1;
+    }
+    c->block_fact[cast(b, u64)] = NO_FACT;
+    fir.terminator* t = &fir.block_at(f, b)->term;
+    if (t->kind == fir.term_kind.tk_check_overwrite) {
+        c->block_fact[cast(b, u64)] = fact_of(c, t->place, &stale->outs[cast(b, u64)]);
     }
 }
 
@@ -854,11 +862,7 @@ fn find_stores(fir.func* f, u32@ check_of, proof mut* out) void {
     del(out->stores);
     out->stores = new(store, count);
     u64 mut k = 0;
-    u64 mut w = 0;
-    while (w < written.words.len) {
-        written.words[w] = 0;
-        w += 1;
-    }
+    fir_flow.bits_clear_all(&written);
     b = 0;
     while (b < fir.block_count(f)) {
         u32 mut i = 0;
@@ -955,6 +959,28 @@ fn prove_within(fir.func* f, u64 limit) proof {
     return prove_limits(f, limit, USE_LIMIT);
 }
 
+// Takes each check of `out` as proved, counts the checks of `f`, and gives in `check_of` the block
+// of the check before each continuation, or NO_BLOCK, for prove_limits. The result of prove_limits
+// is no local owner here.
+fn mark_checks(fir.func* f, proof mut* out, u32 mut@ check_of) void {
+    u32 n = fir.block_count(f);
+    u32 mut b = 0;
+    while (b < n) {
+        out->proved[cast(b, u64)] = true;
+        check_of[cast(b, u64)] = NO_BLOCK;
+        b += 1;
+    }
+    b = 0;
+    while (b < n) {
+        fir.terminator* t = &fir.block_at(f, b)->term;
+        if (t->kind == fir.term_kind.tk_check_overwrite) {
+            out->checks += 1;
+            check_of[cast(t->target, u64)] = b;
+        }
+        b += 1;
+    }
+}
+
 /// Proves as prove_within does, and proves rule (b) within `use_limit` (prove_uses) after the
 /// facts of the emptiness proof (run_dataflows) and apart from them: it reads their survey of the
 /// places, their stale set, their tests and their map of owner.alias, and it changes no fact.
@@ -965,21 +991,7 @@ fn prove_limits(fir.func* f, u64 limit, u64 use_limit) proof {
     u32 mut@ own check_of = new(u32, cast(n, u64));
     defer del(check_of);
     u64 units = count_units(f);
-    u32 mut b = 0;
-    while (b < n) {
-        out.proved[cast(b, u64)] = true;
-        check_of[cast(b, u64)] = NO_BLOCK;
-        b += 1;
-    }
-    b = 0;
-    while (b < n) {
-        fir.terminator* t = &fir.block_at(f, b)->term;
-        if (t->kind == fir.term_kind.tk_check_overwrite) {
-            out.checks += 1;
-            check_of[cast(t->target, u64)] = b;
-        }
-        b += 1;
-    }
+    mark_checks(f, &out, check_of);
     find_stores(f, check_of, &out);
     find_inners(f, &out);
     bool overwrite = out.checks > 0 || out.stores.len > 0;
@@ -1157,13 +1169,21 @@ fn judge(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fresh,
     defer fir_flow.bits_free(&seen);
     u32 mut@ own queue = new(u32, cast(fir.block_count(f), u64));
     defer del(queue);
+    judge_checks(c, d, out, &seen, queue);
+}
+
+// Writes the verdict of each check of `out` for judge, with `seen` and `queue` as the scratch of
+// guards_proved. The caller keeps `seen`, so it is no local owner here.
+fn judge_checks(context mut* c, fir_flow.dataflow* d, proof mut* out, fir_flow.bits mut* seen,
+                u32 mut@ queue) void {
+    fir.func* f = c->places.f;
     u32 mut b = 0;
     while (b < fir.block_count(f)) {
         u32 fact = c->block_fact[cast(b, u64)];
         bool check = fir.block_at(f, b)->term.kind == fir.term_kind.tk_check_overwrite;
         bool held = fact != NO_FACT && d != null
             && fir_flow.bits_get(&d->outs[cast(b, u64)], fact)
-            && guards_proved(c, b, out, &seen, queue);
+            && guards_proved(c, b, out, seen, queue);
         if (check && !held) {
             out->proved[cast(b, u64)] = false;
             out->unproved += 1;
@@ -1220,7 +1240,7 @@ fn judge_stores(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fre
             apply_scratch_reads(c, s, &at_scratch);
             if (here) {
                 if (is_scratch_store(c, &out->stores[k])) {
-                    out->stores[k].proved = fir_flow.bits_get(&at_scratch, s->place.local);
+                    out->stores[k].proved = holds_local_of(&at_scratch, s);
                 } else {
                     out->stores[k].proved = fact != NO_FACT && held;
                 }
@@ -1231,6 +1251,12 @@ fn judge_stores(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fre
         }
         b += 1;
     }
+}
+
+// Whether `set` holds the local of the place of the statement `s`, for judge_stores. `s` is a
+// parameter here, so a load through it reads no local owner of this function.
+fn holds_local_of(fir_flow.bits* set, fir.statement* s) bool {
+    return fir_flow.bits_get(set, s->place.local);
 }
 
 // ---- the scratch locals ------------------------------------------------------------------------
@@ -1623,15 +1649,21 @@ fn run_ended(context mut* c, fir.pred_table* pt, fir_flow.dataflow mut* d) void 
         split_probes(&pr, gens, kills, b);
         b += 1;
     }
+    mark_named_owners(f, &d->entry);
+    fir_flow.bits_fill(&d->init);
+    fir_flow.dataflow_forward_sets(f, pt, d, gens, kills);
+}
+
+// Adds each named owner local of `f` to `entry`, for run_ended. The caller keeps its probes, so
+// they are no local owners here.
+fn mark_named_owners(fir.func* f, fir_flow.bits mut* entry) void {
     u32 mut k = 0;
-    while (k < count) {
+    while (k < fir.local_count(f)) {
         if (fir.local_at(f, k)->kind == fir.local_kind.lk_named && is_owner_local(f, k)) {
-            fir_flow.bits_set(&d->entry, k);
+            fir_flow.bits_set(entry, k);
         }
         k += 1;
     }
-    fir_flow.bits_fill(&d->init);
-    fir_flow.dataflow_forward_sets(f, pt, d, gens, kills);
 }
 
 // ---- the inner owners --------------------------------------------------------------------------
@@ -2134,19 +2166,7 @@ fn prove_uses(context mut* c, fir.pred_table* preds, fir_flow.dataflow* stale, p
     u.first_act = new(u64, cast(n, u64) + 1);
     u.whole = new(bool, cast(locals, u64));
     mark_memory_owners(c, &u);
-    fir_flow.bits mut at_stale = fir_flow.bits_new(locals);
-    defer fir_flow.bits_free(&at_stale);
-    u32 mut b = 0;
-    while (b < n) {
-        u.first_act[cast(b, u64)] = u.act_count;
-        u.block = b;
-        if (stale != null) {
-            fir_flow.bits_copy(&at_stale, &stale->ins[cast(b, u64)]);
-        }
-        collect_acts(c, &u, b, &at_stale);
-        b += 1;
-    }
-    u.first_act[cast(n, u64)] = u.act_count;
+    collect_usage(c, stale, &u);
     // a function that reads no owner has no use
     if (u.reads == 0) {
         return;
@@ -2169,7 +2189,7 @@ fn prove_uses(context mut* c, fir.pred_table* preds, fir_flow.dataflow* stale, p
         // the first pass of the fixpoint charges each block once, `weight` for each value of the
         // state, so a function past the limit with that charge takes no state
         u64 mut weight = 0;
-        b = 0;
+        u32 mut b = 0;
         while (b < n) {
             weight = types.capped_sum(weight, walk_charge(c, &u, b, 1));
             b += 1;
@@ -2187,12 +2207,39 @@ fn prove_uses(context mut* c, fir.pred_table* preds, fir_flow.dataflow* stale, p
     judge_uses(c, &u, ins, over);
     out->use_over = over;
     out->use_work = u.charge;
+    copy_uses(&u, out);
+}
+
+// Gives u->first_act and the acts of each block of the function of `c` (collect_acts), with the
+// stale set of `stale` at the entry of each block, for prove_uses. The caller keeps `u`, so it is
+// no local owner here.
+fn collect_usage(context mut* c, fir_flow.dataflow* stale, usage mut* u) void {
+    fir.func* f = c->places.f;
+    u32 n = fir.block_count(f);
+    fir_flow.bits mut at_stale = fir_flow.bits_new(fir.local_count(f));
+    defer fir_flow.bits_free(&at_stale);
+    u32 mut b = 0;
+    while (b < n) {
+        u->first_act[cast(b, u64)] = u->act_count;
+        u->block = b;
+        if (stale != null) {
+            fir_flow.bits_copy(&at_stale, &stale->ins[cast(b, u64)]);
+        }
+        collect_acts(c, u, b, &at_stale);
+        b += 1;
+    }
+    u->first_act[cast(n, u64)] = u->act_count;
+}
+
+// Lists the records of `u` in out->uses and counts the ones that are not proved, for prove_uses.
+// The caller keeps `u`, so it is no local owner here.
+fn copy_uses(usage* u, proof mut* out) void {
     del(out->uses);
-    out->uses = new(use, u.record_count);
+    out->uses = new(use, u->record_count);
     u64 mut k = 0;
-    while (k < u.record_count) {
-        out->uses[k] = u.records[k];
-        if (!u.records[k].proved) {
+    while (k < u->record_count) {
+        out->uses[k] = u->records[k];
+        if (!u->records[k].proved) {
             out->use_unproved += 1;
         }
         k += 1;
@@ -2927,11 +2974,20 @@ fn block_entry(context* c, fir.pred_table* pt, u32 b, u64@ outs, u64@ edges, u64
 // owner.alias does, and keeps the state at the start of each block in u->ins. Each walk adds its
 // charge (walk_charge), and the run stops when the charge passes `limit`.
 fn run_uses(context mut* c, usage mut* u, fir.pred_table* pt, u64 limit) u64 mut@ own {
+    u64 values = u->values;
+    u64 size = cast(fir.block_count(c->places.f), u64);
+    u64 mut@ own ins = new(u64, size * values);
+    iterate_uses(c, u, pt, limit, ins);
+    return ins;
+}
+
+// The fixpoint of run_uses, which keeps the state at the start of each block in `ins`. The result
+// of run_uses is no local owner here.
+fn iterate_uses(context mut* c, usage mut* u, fir.pred_table* pt, u64 limit, u64 mut@ ins) void {
     fir.func* f = c->places.f;
     u32 n = fir.block_count(f);
     u64 size = cast(n, u64);
     u64 values = u->values;
-    u64 mut@ own ins = new(u64, size * values);
     u64 mut@ own outs = new(u64, size * values);
     u64 mut@ own edges = new(u64, size * values);
     u32 mut@ own ring = new(u32, size);
@@ -2970,31 +3026,52 @@ fn run_uses(context mut* c, usage mut* u, fir.pred_table* pt, u64 limit) u64 mut
         fir_flow.bits_clear(&listed, at);
         u->charge = types.capped_sum(u->charge, walk_charge(c, u, at, values));
         if (u->charge > limit) {
-            return ins;
+            return;
         }
         u64 lo = cast(at, u64) * values;
         block_entry(c, pt, at, outs, edges, values, ins[lo..lo + values]);
-        copy_values(w.s, ins[lo..lo + values]);
+        start_walk(&w, ins[lo..lo + values]);
         walk_block(c, u, at, &w, false, false);
-        bool changed = !same_values(w.s, outs[lo..lo + values])
-            || !same_values(w.edge, edges[lo..lo + values]);
-        if (changed) {
-            copy_values(outs[lo..lo + values], w.s);
-            copy_values(edges[lo..lo + values], w.edge);
-            fir.block* bl = fir.block_at(f, at);
-            u32 mut e = 0;
-            u32 mut target = 0;
-            while (bl->terminated && fir.term_targets(f, &bl->term, e, &target)) {
-                if (!fir_flow.bits_get(&listed, target)) {
-                    fir_flow.bits_set(&listed, target);
-                    ring[(head + len) % size] = target;
-                    len += 1;
-                }
-                e += 1;
-            }
+        if (keep_end(&w, outs[lo..lo + values], edges[lo..lo + values])) {
+            list_successors(f, at, &listed, ring, head, &len);
         }
     }
-    return ins;
+}
+
+// Appends to the worklist `ring` of iterate_uses, whose `len` entries start at `head`, each
+// successor of the block `at` that `listed` does not hold. The caller keeps `listed`, so it is no
+// local owner here.
+fn list_successors(fir.func* f, u32 at, fir_flow.bits mut* listed, u32 mut@ ring, u64 head,
+                   u64 mut* len) void {
+    fir.block* bl = fir.block_at(f, at);
+    u32 mut e = 0;
+    u32 mut target = 0;
+    while (bl->terminated && fir.term_targets(f, &bl->term, e, &target)) {
+        if (!fir_flow.bits_get(listed, target)) {
+            fir_flow.bits_set(listed, target);
+            ring[(head + *len) % ring.len] = target;
+            *len += 1;
+        }
+        e += 1;
+    }
+}
+
+// Starts the walk `w` from the state `from`. `w` is a parameter here, so a load through it reads no
+// local owner of this function.
+fn start_walk(walk mut* w, u64@ from) void {
+    copy_values(w->s, from);
+}
+
+// Copies the state at the end of the walk `w` into `out` and its edge state into `edge` when one of
+// them differs, and returns whether one differs. `w` is a parameter here, so a load through it
+// reads no local owner of this function.
+fn keep_end(walk* w, u64 mut@ out, u64 mut@ edge) bool {
+    if (same_values(w->s, out) && same_values(w->edge, edge)) {
+        return false;
+    }
+    copy_values(out, w->s);
+    copy_values(edge, w->edge);
+    return true;
 }
 
 // Writes the verdict of each use into u->records. Within the limit, a walk of each block from its
@@ -3013,7 +3090,7 @@ fn judge_uses(context mut* c, usage mut* u, u64@ ins, bool over) void {
     while (b < fir.block_count(f)) {
         if (!stateless) {
             u64 lo = cast(b, u64) * values;
-            copy_values(w.s, ins[lo..lo + values]);
+            start_walk(&w, ins[lo..lo + values]);
         }
         walk_block(c, u, b, &w, true, stateless);
         b += 1;

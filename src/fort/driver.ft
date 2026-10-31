@@ -1150,32 +1150,43 @@ struct cc_command {
 }
 
 fn cc_command_build(containers.str_vec* argv) cc_command {
+    u64 count = argv->len;
+    u64 total = cc_command_size(argv);
+    cc_command c = cc_command{new(char, total), new(char mut*, count + 1)};
+    cc_command_fill(c.bytes, c.items, argv);
+    return c;
+}
+
+// The bytes of every argument of `argv`, each with its NUL.
+fn cc_command_size(containers.str_vec* argv) u64 {
     u64 mut total = 0;
     u64 mut i = 0;
     while (i < argv->len) {
         total += containers.str_at(argv, i).len + 1;
         i += 1;
     }
-    cc_command mut c = cc_command{};
-    c.bytes = new(char, total);
-    c.items = new(char mut*, argv->len + 1);
+    return total;
+}
+
+// Copies the arguments of `argv` into `bytes` and points `items` at them. The result of
+// cc_command_build is no local owner here.
+fn cc_command_fill(char mut@ bytes, char mut* mut@ items, containers.str_vec* argv) void {
     u64 mut at = 0;
-    i = 0;
+    u64 mut i = 0;
     while (i < argv->len) {
         string arg = containers.str_at(argv, i);
-        c.items[i] = &c.bytes[at];
+        items[i] = &bytes[at];
         u64 mut k = 0;
         while (k < arg.len) {
-            c.bytes[at] = arg[k];
+            bytes[at] = arg[k];
             at += 1;
             k += 1;
         }
-        c.bytes[at] = '\0';
+        bytes[at] = '\0';
         at += 1;
         i += 1;
     }
-    c.items[argv->len] = null;
-    return c;
+    items[argv->len] = null;
 }
 
 fn cc_command_free(cc_command mut* c) void {
@@ -1258,6 +1269,9 @@ fn run_tool(string role, containers.str_vec* argv) i32 {
     string program = containers.str_at(argv, 0);
     cc_command mut cmd = cc_command_build(argv);
     defer cc_command_free(&cmd);
+    // taken before the first call, because prover.prove_uses takes each call as a change of `cmd`
+    char* path = &cmd.bytes[0];
+    void* args = cast(&cmd.items[0], void*);
     // made before fork(2), so the child only calls setenv(3) and execvp(3)
     char mut@ own env_name = str.to_cstr(ZERO_AR_DATE);
     defer del(env_name);
@@ -1294,7 +1308,7 @@ fn run_tool(string role, containers.str_vec* argv) i32 {
             // a failure leaves the environment as it was, and the archive can then hold a time
             libc.setenv(env_name.ptr, env_value.ptr, 1);
         }
-        libc.execvp(&cmd.bytes[0], cast(&cmd.items[0], void*));
+        libc.execvp(path, args);
         u64 e = cast(sys.errno(), u64);
         u8[4] mut buf = {};
         u64 mut i = 0;
@@ -1474,17 +1488,7 @@ fn read_libraries(options* opts, libraries mut* libs) i32 {
     }
     graph.graph mut g = graph.graph{};
     defer graph.free(&g);
-    i = 0;
-    while (i < n) {
-        artifact.manifest* m = &libs->items[i].fields;
-        graph.add(&g, containers.str_at(&opts->use_names, i), m->interface);
-        u64 mut k = 0;
-        while (k < m->use_names.len) {
-            graph.add_use(&g, m->use_names[k], m->use_hashes[k]);
-            k += 1;
-        }
-        i += 1;
-    }
+    add_libraries(&g, opts, libs);
     strbuf.str_buf mut message = strbuf.create();
     defer strbuf.free(&message);
     if (!graph.check(&g, &message)) {
@@ -1492,8 +1496,30 @@ fn read_libraries(options* opts, libraries mut* libs) i32 {
         return EXIT_USAGE;
     }
     graph.link_order(&g, &libs->order);
-    i = 0;
-    while (i < n) {
+    add_interface_files(opts, libs);
+    return EXIT_OK;
+}
+
+// Adds each library of `libs` and the uses of its manifest to `g`. The caller keeps `g`, so it is
+// no local owner here.
+fn add_libraries(graph.graph mut* g, options* opts, libraries* libs) void {
+    u64 mut i = 0;
+    while (i < libs->len) {
+        artifact.manifest* m = &libs->items[i].fields;
+        graph.add(g, containers.str_at(&opts->use_names, i), m->interface);
+        u64 mut k = 0;
+        while (k < m->use_names.len) {
+            graph.add_use(g, m->use_names[k], m->use_hashes[k]);
+            k += 1;
+        }
+        i += 1;
+    }
+}
+
+// Adds the path of the interface file of each used library to `libs->files`.
+fn add_interface_files(options* opts, libraries mut* libs) void {
+    u64 mut i = 0;
+    while (i < libs->len) {
         // `<path>/interface.ft`, with no second separator after a path that ends with one
         string path = containers.str_at(&opts->use_paths, i);
         string mut file = join_path(&libs->pool, path, artifact.INTERFACE_FILE, "");
@@ -1503,7 +1529,6 @@ fn read_libraries(options* opts, libraries mut* libs) i32 {
         containers.str_push(&libs->files, file);
         i += 1;
     }
-    return EXIT_OK;
 }
 
 // Adds each used library to the module set, so that a path of it resolves only in its interface
@@ -1885,17 +1910,23 @@ fn fir_report_entry(analysis mut* an, options* opts) i32 {
     defer strbuf.free(&text);
     u64 mut i = 0;
     while (i < decls.len) {
-        ast.node* decl = gen.refs_at(&decls, i);
-        fir.func mut f = fir.func{};
-        fir_lower.report mut why = fir_lower.report{};
-        if (fir_lower.lower_function(&an->ck, decl, &f, &why)) {
-            report_function(&f, &rt, decl->name_loc, opts->release, opts->no_bounds_check, &text);
-            fir.func_free(&f);
-        }
+        report_declaration(an, opts, gen.refs_at(&decls, i), &rt, &text);
         i += 1;
     }
     print(strbuf.view(&text));
     return EXIT_OK;
+}
+
+// Lowers `decl` and runs report_function on it, for fir_report_entry. `decl` is a parameter here,
+// so a load through it reads no local owner of this function.
+fn report_declaration(analysis mut* an, options* opts, ast.node* decl, fir_verify.runtime* rt,
+                      strbuf.str_buf mut* text) void {
+    fir.func mut f = fir.func{};
+    fir_lower.report mut why = fir_lower.report{};
+    if (fir_lower.lower_function(&an->ck, decl, &f, &why)) {
+        report_function(&f, rt, decl->name_loc, opts->release, opts->no_bounds_check, text);
+        fir.func_free(&f);
+    }
 }
 
 // Runs the emptiness pass on the verified function `f`. It reports the error of D17.11 and its
@@ -2105,19 +2136,25 @@ fn fir_test_pass(string text, test_pass mut* out) i32 {
 fn find_function(fir.module* m, check.checker* ck, string name) ast.sym* {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
+    return find_by_name(m, ck, name, &b);
+}
+
+// find_function with the buffer `b` for the dotted names. The caller keeps `b`, so it is no local
+// owner here.
+fn find_by_name(fir.module* m, check.checker* ck, string name, strbuf.str_buf mut* b) ast.sym* {
     for (u64 mut i = 0; i < m->funcs.len; i++) {
-        strbuf.clear(&b);
-        fir_print.print_symbol(m->funcs.items[i].sym, &b);
-        if (strbuf.view(&b) == name) {
+        strbuf.clear(b);
+        fir_print.print_symbol(m->funcs.items[i].sym, b);
+        if (strbuf.view(b) == name) {
             return m->funcs.items[i].sym;
         }
     }
     for (u64 mut i = 0; i < check.check_sym_count(ck); i++) {
         ast.sym* s = check.check_sym_at(ck, i);
         if (s->kind == ast.sym_kind.s_fn) {
-            strbuf.clear(&b);
-            fir_print.print_symbol(s, &b);
-            if (strbuf.view(&b) == name) {
+            strbuf.clear(b);
+            fir_print.print_symbol(s, b);
+            if (strbuf.view(b) == name) {
                 return s;
             }
         }
@@ -2355,7 +2392,8 @@ fn fir_test_entry(options* opts, string program) i32 {
 // its arguments. The program writes to the descriptors of the compiler, and run_status gives
 // the status of its end. With --fir-events the events go to stderr, each as `fort: event ...`.
 fn run_entry(analysis mut* an, options* opts) i32 {
-    ast.node* decl = gen_fir.find_main(modules.entry(&an->set)->ast);
+    // read before the first call that can change an owner of this function
+    ast.sym* entry = gen_fir.find_main(modules.entry(&an->set)->ast)->sym;
     fir.module mut none = fir.module_new();
     defer fir.module_free(&none);
     interpreter.machine mut it = interpreter.machine{};
@@ -2368,7 +2406,7 @@ fn run_entry(analysis mut* an, options* opts) i32 {
         containers.str_push(&argv, containers.str_at(&opts->run_args, i));
     }
     it.sh.reporting = opts->fir_events;
-    interpreter.outcome o = interpreter.run_program(&it, decl->sym, containers.str_items(&argv));
+    interpreter.outcome o = interpreter.run_program(&it, entry, containers.str_items(&argv));
     strbuf.str_buf mut events = strbuf.create();
     defer strbuf.free(&events);
     shadow.write_events(&it.sh, "fort: ", &events);

@@ -356,7 +356,12 @@ fn write_float(u64 bits, strbuf.str_buf mut* out) void {
     defer strbuf.free(&digits);
     i64 mut exponent = 0;
     flt.shortest(bits, &digits, &exponent);
-    string d = strbuf.view(&digits);
+    write_digits(strbuf.view(&digits), exponent, out);
+}
+
+// Writes the decimal digits `d` and the exponent of write_float as `<d>.<digits>e<exponent>`. The
+// caller keeps the buffer of `d`, so it is no local owner here.
+fn write_digits(string d, i64 exponent, strbuf.str_buf mut* out) void {
     strbuf.push(out, d[0]);
     strbuf.push(out, '.');
     if (d.len > 1) {
@@ -482,12 +487,25 @@ fn designated(ast.node* lit, string field) ast.node* {
 // order, or `{}` when each leaf is zero. A field that the literal omits is zero.
 fn write_struct(section mut* sec, types.node* t, ast.node* n, strbuf.str_buf mut* out) bool {
     ast.sym* s = check.nominal_sym(sec->ck, t);
-    bool is_designated = (n->flags & ast.FLAG_DESIGNATED) != 0;
     strbuf.str_buf mut buf = strbuf.create();
     defer strbuf.free(&buf);
+    strbuf.push(&buf, '{');
+    bool zero = write_fields(sec, s, n, &buf);
+    strbuf.push(&buf, '}');
+    if (zero) {
+        strbuf.append(out, "{}");
+    } else {
+        strbuf.append(out, strbuf.view(&buf));
+    }
+    return zero;
+}
+
+// Writes the fields of the struct `s` that the literal `n` gives, for write_struct. Returns whether
+// each leaf is zero. The caller keeps `buf`, so it is no local owner here.
+fn write_fields(section mut* sec, ast.sym* s, ast.node* n, strbuf.str_buf mut* buf) bool {
+    bool is_designated = (n->flags & ast.FLAG_DESIGNATED) != 0;
     bool mut zero = true;
     u64 mut at = 0;
-    strbuf.push(&buf, '{');
     u64 mut i = 0;
     while (i < ast.ast_len(s->node)) {
         ast.node* f = ast.ast_child(s->node, i);
@@ -496,7 +514,7 @@ fn write_struct(section mut* sec, types.node* t, ast.node* n, strbuf.str_buf mut
             continue;
         }
         if (at > 0) {
-            strbuf.append(&buf, ", ");
+            strbuf.append(buf, ", ");
         }
         ast.node* mut v = null;
         if (is_designated) {
@@ -504,19 +522,13 @@ fn write_struct(section mut* sec, types.node* t, ast.node* n, strbuf.str_buf mut
         } else if (at < ast.ast_len(n)) {
             v = ast.ast_child(n, at);
         }
-        strbuf.push(&buf, PATH_SEPARATOR);
-        strbuf.append(&buf, f->name);
-        strbuf.append(&buf, " = ");
-        if (!write_value(sec, f->ty, v, &buf)) {
+        strbuf.push(buf, PATH_SEPARATOR);
+        strbuf.append(buf, f->name);
+        strbuf.append(buf, " = ");
+        if (!write_value(sec, f->ty, v, buf)) {
             zero = false;
         }
         at += 1;
-    }
-    strbuf.push(&buf, '}');
-    if (zero) {
-        strbuf.append(out, "{}");
-    } else {
-        strbuf.append(out, strbuf.view(&buf));
     }
     return zero;
 }
@@ -742,17 +754,13 @@ fn write_section(check.checker* ck, modules.module* m, strbuf.str_buf mut* out) 
     sec.collecting = true;
     strbuf.str_buf mut scratch = strbuf.create();
     defer strbuf.free(&scratch);
-    u64 mut i = 0;
-    while (i < decls.len) {
-        write_decl(&sec, decls.items[i], &scratch);
-        i += 1;
-    }
+    write_decls(&sec, &decls, &scratch);
     sort_paths(&sec.imports);
     sec.collecting = false;
     strbuf.append(out, modules.INTERFACE_SECTION);
     strbuf.append(out, m->path);
     strbuf.push(out, '\n');
-    i = 0;
+    u64 mut i = 0;
     while (i < sec.imports.len) {
         strbuf.append(out, "import ");
         strbuf.append(out, containers.str_at(&sec.imports, i));
@@ -762,10 +770,30 @@ fn write_section(check.checker* ck, modules.module* m, strbuf.str_buf mut* out) 
         strbuf.append(out, ";\n");
         i += 1;
     }
-    i = 0;
-    while (i < decls.len) {
-        write_decl(&sec, decls.items[i], out);
+    write_decls(&sec, &decls, out);
+}
+
+// Runs write_decl on each declaration of `decls`. The caller keeps `decls`, so it is no local owner
+// here.
+fn write_decls(section mut* sec, decl_list* decls, strbuf.str_buf mut* out) void {
+    u64 mut i = 0;
+    while (i < decls->len) {
+        write_decl(sec, decls->items[i], out);
         i += 1;
+    }
+}
+
+// Adds to `paths` the path of each module of the library `name` in `set`, for write. The caller
+// keeps `paths`, so it is no local owner here.
+fn add_library_paths(modules.module_set* set, string name, containers.str_vec mut* paths) void {
+    u64 mut i = 0;
+    while (i < modules.count(set)) {
+        modules.module* m = modules.at(set, i);
+        i += 1;
+        if (!m->interface && m->path.len > name.len && str.starts_with(m->path, name)
+            && m->path[name.len] == PATH_SEPARATOR) {
+            containers.str_push(paths, m->path);
+        }
     }
 }
 
@@ -776,22 +804,14 @@ fn write_section(check.checker* ck, modules.module* m, strbuf.str_buf mut* out) 
 fn write(check.checker* ck, modules.module_set* set, string name, strbuf.str_buf mut* out) void {
     containers.str_vec mut paths = containers.str_create();
     defer containers.str_free(&paths);
-    u64 mut i = 0;
-    while (i < modules.count(set)) {
-        modules.module* m = modules.at(set, i);
-        i += 1;
-        if (!m->interface && m->path.len > name.len && str.starts_with(m->path, name)
-            && m->path[name.len] == PATH_SEPARATOR) {
-            containers.str_push(&paths, m->path);
-        }
-    }
+    add_library_paths(set, name, &paths);
     sort_paths(&paths);
     strbuf.append(out, modules.INTERFACE_FORMAT);
     strbuf.push(out, '\n');
     strbuf.append(out, modules.INTERFACE_LIBRARY);
     strbuf.append(out, name);
     strbuf.push(out, '\n');
-    i = 0;
+    u64 mut i = 0;
     while (i < paths.len) {
         write_section(ck, modules.find(set, containers.str_at(&paths, i)), out);
         i += 1;

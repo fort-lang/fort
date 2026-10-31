@@ -288,15 +288,21 @@ fn push_component(component_vec mut* v, component c) void {
     v->len += 1;
 }
 
+// The symbol of `f`, interned in the texts of `g`. Its buffer stays a local here, so add has no
+// local owner that a call can vacate.
+fn intern_symbol(graph mut* g, fir.func* f) string {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    fir_print.print_symbol(f->sym, &b);
+    return containers.pool_intern(&g->texts, strbuf.view(&b));
+}
+
 /// Adds the function `f`, which the analysis proved, with the work of one analysis of it, and the
 /// callee of each direct call of its body. A call through a function value or of an extern is no
 /// direct call. Each function of a unit has its own symbol (D9.7), so a second function with the
 /// symbol of a node breaks the precondition.
 fn add(graph mut* g, fir.func* f, u64 work) void {
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
-    fir_print.print_symbol(f->sym, &b);
-    string name = containers.pool_intern(&g->texts, strbuf.view(&b));
+    string name = intern_symbol(g, f);
     if (!strmap.put(&g->index, name, cast(g->nodes.len, i64))) {
         panic("summary.add: a second function with the symbol of a node");
     }
@@ -465,41 +471,48 @@ fn order(graph mut* g) void {
     w.number = new(u64, n);
     w.low = new(u64, n);
     w.on_stack = new(bool, n);
+    visit_all(g, &w);
+}
+
+// The walk of order from each node of `g` that `w` has not numbered. The caller keeps `w`, so it is
+// no local owner here.
+fn visit_all(graph mut* g, walk mut* w) void {
+    u64 n = g->nodes.len;
     u64 mut root = 0;
     while (root < n) {
-        if (w.number[root] != 0) {
+        if (w->number[root] != 0) {
             root += 1;
             continue;
         }
-        visit(&w, root);
-        while (w.frames.len > 0) {
-            u64 top = w.frames.len - 1;
-            u64 v = cast(w.frames.items[top], u64);
-            u64 e = cast(w.next_call.items[top], u64);
+        visit(w, root);
+        while (w->frames.len > 0) {
+            u64 top = w->frames.len - 1;
+            u64 v = cast(w->frames.items[top], u64);
+            u64 e = cast(w->next_call.items[top], u64);
             node at = g->nodes.items[v];
             if (e < at.call_count) {
-                w.next_call.items[top] = cast(e + 1, i64);
+                w->next_call.items[top] = cast(e + 1, i64);
                 i64 target = g->targets.items[at.first_call + e];
                 if (target < 0) {
                     continue;
                 }
                 u64 t = cast(target, u64);
-                if (w.number[t] == 0) {
-                    visit(&w, t);
-                } else if (w.on_stack[t] && w.number[t] < w.low[v]) {
-                    w.low[v] = w.number[t];
+                if (w->number[t] == 0) {
+                    visit(w, t);
+                } else if (w->on_stack[t] && w->number[t] < w->low[v]) {
+                    w->low[v] = w->number[t];
                 }
                 continue;
             }
-            vec.int_pop(&w.frames);
-            vec.int_pop(&w.next_call);
-            if (w.low[v] == w.number[v]) {
-                close_component(g, &w, v);
+            vec.int_pop(&w->frames);
+            vec.int_pop(&w->next_call);
+            if (w->low[v] == w->number[v]) {
+                close_component(g, w, v);
             }
-            if (w.frames.len > 0) {
-                u64 caller = cast(w.frames.items[w.frames.len - 1], u64);
-                if (w.low[v] < w.low[caller]) {
-                    w.low[caller] = w.low[v];
+            if (w->frames.len > 0) {
+                u64 caller = cast(w->frames.items[w->frames.len - 1], u64);
+                if (w->low[v] < w->low[caller]) {
+                    w->low[caller] = w->low[v];
                 }
             }
         }
@@ -670,6 +683,12 @@ fn solve(graph mut* g, u64 limit) void {
     }
     line_vec mut none = line_vec{};
     defer free_lines(&none);
+    solve_components(g, &none, limit);
+}
+
+// The rounds of solve over each component of `g`, with `none` as the scratch list of the lines. The
+// caller keeps `none`, so it is no local owner here.
+fn solve_components(graph mut* g, line_vec mut* none, u64 limit) void {
     u64 mut c = 0;
     while (c < g->components.len) {
         component comp = g->components.items[c];
@@ -677,7 +696,7 @@ fn solve(graph mut* g, u64 limit) void {
             // V1 gives no must line to start with
             u64 mut k = 0;
             while (k < comp.count) {
-                start(g, member(g, c, k), none.items[..0]);
+                start(g, member(g, c, k), none->items[..0]);
                 k += 1;
             }
         }
@@ -687,8 +706,8 @@ fn solve(graph mut* g, u64 limit) void {
             u64 mut k = 0;
             while (k < comp.count) {
                 u64 m = member(g, c, k);
-                u64 work = infer(g, m, &none);
-                if (give(g, c, m, none.items[..none.len], work, limit)) {
+                u64 work = infer(g, m, none);
+                if (give(g, c, m, none->items[..none->len], work, limit)) {
                     changed = true;
                 }
                 k += 1;
@@ -804,24 +823,36 @@ fn add_line(table mut* t, line l) bool {
 fn collect(graph* g, table mut* t) void {
     vec.int_vec mut picked = vec.int_vec{};
     defer vec.int_free(&picked);
+    pick_nodes(g, &picked);
+    append_entries(g, &picked, t);
+}
+
+// Adds to `picked` each node of `g` that has a line, in byte order of the symbol, for collect. The
+// caller keeps `picked`, so it is no local owner here.
+fn pick_nodes(graph* g, vec.int_vec mut* picked) void {
     u64 mut n = 0;
     while (n < g->nodes.len) {
         if (g->nodes.items[n].line_count > 0) {
-            vec.int_push(&picked, cast(n, i64));
-            u64 mut j = picked.len - 1;
+            vec.int_push(picked, cast(n, i64));
+            u64 mut j = picked->len - 1;
             while (j > 0
                    && str.cmp(node_symbol(g, n),
-                              node_symbol(g, cast(picked.items[j - 1], u64))) < 0) {
-                picked.items[j] = picked.items[j - 1];
+                              node_symbol(g, cast(picked->items[j - 1], u64))) < 0) {
+                picked->items[j] = picked->items[j - 1];
                 j -= 1;
             }
-            picked.items[j] = cast(n, i64);
+            picked->items[j] = cast(n, i64);
         }
         n += 1;
     }
+}
+
+// Adds to `t` an entry with its lines for each node of `picked`, for collect. The caller keeps
+// `picked`, so it is no local owner here.
+fn append_entries(graph* g, vec.int_vec* picked, table mut* t) void {
     u64 mut k = 0;
-    while (k < picked.len) {
-        u64 at = cast(picked.items[k], u64);
+    while (k < picked->len) {
+        u64 at = cast(picked->items[k], u64);
         append_entry(t, node_symbol(g, at));
         line@ taken = node_lines(g, at);
         u64 mut i = 0;

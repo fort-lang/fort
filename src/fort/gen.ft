@@ -1327,29 +1327,36 @@ struct signature {
 // is the same on both targets: a fixed declaration, and the variadic form only for a declaration
 // that writes `...`.
 fn signature_of(emitter mut* g, types.node* sig, ast.sym* ext) signature {
-    signature mut s = signature{.no_return = sig->is_noreturn};
-    s.ret = gen_result_type(g, sig->elem);
-    s.ret_attr = gen_ext_attr(sig->elem);
+    signature mut s = signature{
+        .params = new(sig_param, sig->params.len),
+        .no_return = sig->is_noreturn,
+    };
+    fill_signature(g, sig, ext, &s);
+    return s;
+}
+
+// Fills the types and the attributes of `s` for signature_of, whose `params` has one entry for each
+// parameter of `sig`. The result of signature_of is no local owner here.
+fn fill_signature(emitter mut* g, types.node* sig, ast.sym* ext, signature mut* s) void {
+    s->ret = gen_result_type(g, sig->elem);
+    s->ret_attr = gen_ext_attr(sig->elem);
     if (gen_is_aggregate(sig->elem)) {
-        s.sret = gen_mem_type(g, sig->elem);
+        s->sret = gen_mem_type(g, sig->elem);
     }
-    del(s.params);
-    s.params = new(sig_param, sig->params.len);
     u64 mut i = 0;
     while (i < sig->params.len) {
         types.node* pt = sig->params[i];
         if (gen_is_aggregate(pt)) {
-            s.params[i] = sig_param{"ptr", ""};
+            s->params[i] = sig_param{"ptr", ""};
         } else {
-            s.params[i] = sig_param{gen_value_type(g, pt), gen_ext_attr(pt)};
+            s->params[i] = sig_param{gen_value_type(g, pt), gen_ext_attr(pt)};
         }
         i += 1;
     }
     if (ext != null) {
-        s.is_extern = true;
-        s.variadic = ext->node != null && (ext->node->flags & ast.FLAG_VARIADIC) != 0;
+        s->is_extern = true;
+        s->variadic = ext->node != null && (ext->node->flags & ast.FLAG_VARIADIC) != 0;
     }
-    return s;
 }
 
 fn signature_free(signature mut* s) void {
@@ -1552,9 +1559,10 @@ fn gen_main(emitter mut* g, ast.sym* main_sym) void {
     gen_args_free(&args_args);
     // The program's `main` takes the span at `%args` when it declares the parameter. The span is
     // the caller-made copy of an aggregate argument, so the callee uses it in place.
+    gen_args mut main_args = gen_args_init();
+    // made after main_args, because prover.prove_uses takes each call as a change of `s`
     signature mut s = signature_of(g, main_sym->ty, null);
     defer signature_free(&s);
-    gen_args mut main_args = gen_args_init();
     if (s.params.len == 1) {
         gen_args_add_ext(&main_args, span, s.params[0].attr);
     }

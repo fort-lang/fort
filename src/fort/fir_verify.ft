@@ -1099,26 +1099,38 @@ fn v9_reachable(walk mut* w) bool {
     defer fir_flow.bits_free(&seen);
     u32 mut@ own stack = new(u32, cast(n, u64));
     defer del(stack);
+    mark_reachable(w->f, &seen, stack);
+    return check_reached(w, &seen);
+}
+
+// The walk of v9_reachable: it marks in `seen` each block that it reaches, with `stack` as its
+// stack. The caller keeps `seen`, so it is no local owner here.
+fn mark_reachable(fir.func* f, fir_flow.bits mut* seen, u32 mut@ stack) void {
     u64 mut top = 0;
-    reach(&seen, stack, &top, 0);
+    reach(seen, stack, &top, 0);
     while (top > 0) {
         top -= 1;
-        fir.terminator* t = &fir.block_at(w->f, stack[top])->term;
+        fir.terminator* t = &fir.block_at(f, stack[top])->term;
         if (t->kind == fir.term_kind.tk_switch && t->cond.kind == fir.operand_kind.ok_const) {
-            reach(&seen, stack, &top, selected_target(w->f, t));
+            reach(seen, stack, &top, selected_target(f, t));
         } else {
             u32 mut i = 0;
             u32 mut target = 0;
-            while (fir.term_targets(w->f, t, i, &target)) {
-                reach(&seen, stack, &top, target);
+            while (fir.term_targets(f, t, i, &target)) {
+                reach(seen, stack, &top, target);
                 i += 1;
             }
         }
     }
+}
+
+// The V9 violation at the first block in `seen` that ends in `unreachable`, for v9_reachable. The
+// caller keeps `seen`, so it is no local owner here.
+fn check_reached(walk mut* w, fir_flow.bits* seen) bool {
     u32 mut b = 0;
-    while (b < n) {
+    while (b < fir.block_count(w->f)) {
         fir.block* bl = fir.block_at(w->f, b);
-        if (fir_flow.bits_get(&seen, b) && bl->term.kind == fir.term_kind.tk_unreachable) {
+        if (fir_flow.bits_get(seen, b) && bl->term.kind == fir.term_kind.tk_unreachable) {
             return fail(w, RULE_V9, V9_REACHED, b, fir.block_statement_count(w->f, b));
         }
         b += 1;
@@ -1229,28 +1241,36 @@ fn effects_of(fir.func* f) effects {
     e.first = new(u64, cast(n, u64) + 1);
     fir.read_list mut reads = fir.read_list{};
     defer fir.read_list_free(&reads);
+    collect_effects(f, &reads, &e);
+    return e;
+}
+
+// Collects the effects of effects_of into `e`, whose `first` has one entry for each block of `f`
+// and one more, with `reads` as the scratch list. The caller keeps `reads` and `e`, so they are no
+// local owners here.
+fn collect_effects(fir.func* f, fir.read_list mut* reads, effects mut* e) void {
+    u32 n = fir.block_count(f);
     u32 mut b = 0;
     while (b < n) {
-        e.first[cast(b, u64)] = e.len;
+        e->first[cast(b, u64)] = e->len;
         u32 count = fir.block_statement_count(f, b);
         u32 mut i = 0;
         while (i < count) {
             fir.statement* s = fir.block_statement(f, b, i);
-            fir.stmt_read_all(f, s, &reads);
-            read_effects(f, &reads, i, &e);
+            fir.stmt_read_all(f, s, reads);
+            read_effects(f, reads, i, e);
             fir.place p = s->place;
             bool whole = p.base == fir.base_kind.bk_local && p.proj_len == 0;
             if (s->kind == fir.stmt_kind.st_assign && whole && is_temp(f, p.local)) {
-                effect_push(&e, effect_kind.ef_fill, p.local, i);
+                effect_push(e, effect_kind.ef_fill, p.local, i);
             }
             i += 1;
         }
-        fir.term_read_all(f, &fir.block_at(f, b)->term, &reads);
-        read_effects(f, &reads, count, &e);
+        fir.term_read_all(f, &fir.block_at(f, b)->term, reads);
+        read_effects(f, reads, count, e);
         b += 1;
     }
-    e.first[cast(n, u64)] = e.len;
-    return e;
+    e->first[cast(n, u64)] = e->len;
 }
 
 // Whether an effect of `kind` decides a temporary for `rule`, so that it adds the temporary to

@@ -754,13 +754,17 @@ fn module_function(fir.module* m, ast.sym* s) fir.func* {
 // which the verifier tests. A declaration with no body, and a function that the lowering refuses
 // (spec/fir.md 9.8), have no function.
 fn make_routine(machine mut* it, ast.sym* s) routine {
+    // read before the first call, which prover.prove_uses takes as a change of the result
+    check.checker mut* ck = it->ck;
+    ast.node* decl = s->node;
+    bool has_body = s->kind == ast.sym_kind.s_fn && decl != null && decl->b != null;
     fir.func* mut f = module_function(it->m, s);
     fir.func mut* own mut lowered = null;
     bool mut refused = false;
-    if (f == null && s->kind == ast.sym_kind.s_fn && s->node != null && s->node->b != null) {
+    if (f == null && has_body) {
         fir.func mut* own made = new(fir.func);
         fir_lower.report mut why = fir_lower.report{};
-        if (fir_lower.lower_function(it->ck, s->node, made, &why)) {
+        if (fir_lower.lower_function(ck, decl, made, &why)) {
             fir_verify.verify(made, &it->rt);
             f = made;
             lowered = move(made);
@@ -779,8 +783,15 @@ fn make_routine(machine mut* it, ast.sym* s) routine {
         count = cast(fir.local_count(f), u64);
     }
     u64 mut@ own offsets = new(u64, count);
+    u64 size = fill_offsets(f, offsets);
+    return routine{s, f, refused, move(lowered), move(offsets), size, 0};
+}
+
+// Fills `offsets` with the offset of each local of `f` in its frame, and returns the size of the
+// frame, for make_routine. The result of make_routine is no local owner here.
+fn fill_offsets(fir.func* f, u64 mut@ offsets) u64 {
     u64 mut size = 0;
-    for (u64 mut n = 0; n < count; n++) {
+    for (u64 mut n = 0; n < offsets.len; n++) {
         types.node* t = fir.local_at(f, cast(n, u32))->ty;
         if (t->kind != types.type_kind.k_void) {
             size = align_up(size, types.type_alignof(t));
@@ -788,7 +799,7 @@ fn make_routine(machine mut* it, ast.sym* s) routine {
         offsets[n] = size;
         size += size_of(t);
     }
-    return routine{s, f, refused, move(lowered), move(offsets), size, 0};
+    return size;
 }
 
 // The address of the function `s` as a value: a region that holds no byte.
