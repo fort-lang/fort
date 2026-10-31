@@ -203,10 +203,10 @@ fn the_layout_keeps_a_struct_field_and_an_array_field_whole() void {
     assert(types.field_at(e.point, 1).at == 4);
 }
 
-// The layout keeps two values for check.carries_mark, which types reads nothing of: the mark of
-// the struct for the life of the table, and its place in the stack of a walk. Both start at 0, a
-// new struct has its own, and a failed layout forgets the mark. They take the padding of the
-// record, so the layout keeps its size.
+// The layout keeps three values for check.carries_mark, which types reads nothing of. They are
+// the mark of the struct, its mark for a function pointer alone, and its place in the stack of a
+// walk. Each starts at 0, a new struct has its own, and a failed layout forgets both marks. They
+// take the padding of the record, so the layout keeps its size.
 fn the_layout_keeps_the_mark_and_the_walk_place_of_the_checker() void {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
@@ -215,19 +215,25 @@ fn the_layout_keeps_the_mark_and_the_walk_place_of_the_checker() void {
     types.node* first = types.type_struct(&e.tt, "first_marked", decl_at(26));
     types.node* second = types.type_struct(&e.tt, "second_marked", decl_at(27));
     assert(types.mark_of(first) == 0 && types.walk_of(first) == 0);
+    assert(types.fn_mark_of(first) == 0);
     types.keep_mark(first, 3);
     types.keep_walk(first, 4294967295);
     assert(types.mark_of(first) == 3);
     assert(types.walk_of(first) == 4294967295);
+    // the two marks are two values
+    assert(types.fn_mark_of(first) == 0);
+    types.keep_fn_mark(first, 2);
+    assert(types.fn_mark_of(first) == 2 && types.mark_of(first) == 3);
     assert(types.mark_of(second) == 0 && types.walk_of(second) == 0);
+    assert(types.fn_mark_of(second) == 0);
     // a mark kept before the layout survives it, as the checker writes one after it
     types.node*[1] mut fields = {u64t};
     u64[1] mut offsets = {};
     assert(types.type_layout_begin(first));
     assert(types.type_layout_struct(first, fields[..], offsets[..]));
-    assert(types.mark_of(first) == 3);
+    assert(types.mark_of(first) == 3 && types.fn_mark_of(first) == 2);
     types.type_layout_fail(first);
-    assert(types.mark_of(first) == 0);
+    assert(types.mark_of(first) == 0 && types.fn_mark_of(first) == 0);
     assert(sizeof(types.layout) == 72);
 }
 
