@@ -14,12 +14,18 @@ import std.strbuf;
 
 // ---- a source file ------------------------------------------------------------------
 
-fn a_bodiless_function_in_a_source_file_is_one_error_at_its_semicolon() void {
+// Makes a `parse_env.env`, runs `body` on it, and releases it. `body` reads the value through a
+// pointer, so the use rule of `move` and `del` (D17.21) asks no proof of its reads after a call.
+fn run(fn (parse_env.env mut*) void body) void {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
-    ast.node* mod = parse_env.parse(&e, "fn f(i32 x) i32;\nfn g() void {\n}\n");
-    assert(parse_env.errors(&e) == 1);
-    assert(parse_env.diag_at(&e, 0) == "1:16: error: expected '{', found ';'");
+    body(&e);
+}
+
+fn a_bodiless_function_in_a_source_file_is_one_error_at_its_semicolon(parse_env.env mut* e) void {
+    ast.node* mod = parse_env.parse(e, "fn f(i32 x) i32;\nfn g() void {\n}\n");
+    assert(parse_env.errors(e) == 1);
+    assert(parse_env.diag_at(e, 0) == "1:16: error: expected '{', found ';'");
     // recovery keeps the declaration that follows
     u64 mut functions = 0;
     u64 mut i = 0;
@@ -44,12 +50,10 @@ fn an_extern_in_a_source_file_still_has_no_body() void {
 
 // ---- a section of an interface file ---------------------------------------------
 
-fn a_section_holds_imports_and_bodiless_declarations() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+fn a_section_holds_imports_and_bodiless_declarations(parse_env.env mut* e) void {
     ast.node* mod = parse_env.parse_interface(
-        &e, "import geom.math as _0;\nfn add(i32 a, _0.vector b) i32;\nfn none() void;\n");
-    assert(parse_env.errors(&e) == 0);
+        e, "import geom.math as _0;\nfn add(i32 a, _0.vector b) i32;\nfn none() void;\n");
+    assert(parse_env.errors(e) == 0);
     assert(ast.ast_len(mod) == 3);
     ast.node* imp = ast.ast_child(mod, 0);
     assert(imp->kind == ast.ast_kind.k_import && ast.ast_len(imp->a) == 2);
@@ -61,18 +65,16 @@ fn a_section_holds_imports_and_bodiless_declarations() void {
     assert(ast.ast_child(mod, 2)->b == null);
     string head = "(fn (type (prim i32)) add (params (param (type (prim i32)) a) ";
     string tail = "(param (type (name _0 vector)) b)) nil)";
-    assert(parse_env.dump(&e, f) == parse_env.join2(&e, head, tail));
+    assert(parse_env.dump(e, f) == parse_env.join2(e, head, tail));
 }
 
-fn every_other_declaration_reads_as_in_a_source_file() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+fn every_other_declaration_reads_as_in_a_source_file(parse_env.env mut* e) void {
     string head = "extern fn printf(char* f, ...) i32;\nstruct p { i32 x; }\n";
     string middle = "enum c { a = 0, b = -1 }\ni32 mut n = 0;\n";
     string tail = "fn (i32) i32 F = null;\nf64 H = -5.0e-1;\n";
     // the source must outlive the parse, and join3 keeps it in a buffer that parse leaves alone
-    ast.node* mod = parse_env.parse_interface(&e, parse_env.join3(&e, head, middle, tail));
-    assert(parse_env.errors(&e) == 0);
+    ast.node* mod = parse_env.parse_interface(e, parse_env.join3(e, head, middle, tail));
+    assert(parse_env.errors(e) == 0);
     assert(ast.ast_len(mod) == 6);
     assert((ast.ast_child(mod, 0)->flags & ast.FLAG_VARIADIC) != 0);
     assert(ast.ast_child(mod, 1)->kind == ast.ast_kind.k_struct_decl);
@@ -117,24 +119,29 @@ fn a_configuration_read_in_a_section_is_an_error() void {
     assert(parse_env.diag_at(&e, 0) == "1:13: error: an interface file holds no '$cfg'");
 }
 
-// The section of an interface file whose lines are `lines`, joined in the buffer `out`, which
-// must outlive the parse.
-fn section(string@ lines, strbuf.str_buf mut* out) string {
-    strbuf.clear(out);
+// The section of an interface file whose lines are `lines`, as one owned string, which must
+// outlive the parse. A test keeps this string and no buffer, because the use rule of `move` and
+// `del` (D17.21) asks a proof of each read through a pointer after a call that a buffer of the
+// test is lent to.
+fn section(string@ lines) string own {
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    append_lines(lines, &out);
+    return strbuf.take(&out);
+}
+
+// Appends each of `lines` and a newline to `out`. section lends its buffer to each call, so the
+// reads of `lines` stand in this frame, for the reason that section gives.
+fn append_lines(string@ lines, strbuf.str_buf mut* out) void {
     u64 mut i = 0;
     while (i < lines.len) {
         strbuf.append(out, lines[i]);
         strbuf.push(out, '\n');
         i += 1;
     }
-    return strbuf.view(out);
 }
 
-fn an_error_in_one_declaration_leaves_the_next_ones() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+fn an_error_in_one_declaration_leaves_the_next_ones(parse_env.env mut* e) void {
     string[5] lines = {
         "fn f() i32 { return 1; }",
         "i32 A = 1;",
@@ -142,10 +149,12 @@ fn an_error_in_one_declaration_leaves_the_next_ones() void {
         "struct p { i32 x; }",
         "fn h() void;",
     };
-    ast.node* mod = parse_env.parse_interface(&e, section(lines[..], &b));
-    assert(parse_env.errors(&e) == 2);
-    assert(parse_env.diag_at(&e, 0) == "1:12: error: expected ';', found '{'");
-    assert(parse_env.diag_at(&e, 1) == "4:1: error: expected ';', found 'struct'");
+    string own text = section(lines[..]);
+    defer del(text);
+    ast.node* mod = parse_env.parse_interface(e, text);
+    assert(parse_env.errors(e) == 2);
+    assert(parse_env.diag_at(e, 0) == "1:12: error: expected ';', found '{'");
+    assert(parse_env.diag_at(e, 1) == "4:1: error: expected ';', found 'struct'");
     // `A`, the struct and `h` remain
     u64 mut named = 0;
     u64 mut i = 0;
@@ -199,19 +208,13 @@ fn a_compile_time_if_among_the_imports_is_a_syntax_error() void {
     assert(parse_env.diag_at(&e, 0) == "1:1: error: expected a type, found '$if'");
 }
 
-fn an_empty_section_is_an_empty_module() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
-    ast.node* mod = parse_env.parse_interface(&e, "");
-    assert(parse_env.errors(&e) == 0);
+fn an_empty_section_is_an_empty_module(parse_env.env mut* e) void {
+    ast.node* mod = parse_env.parse_interface(e, "");
+    assert(parse_env.errors(e) == 0);
     assert(mod->kind == ast.ast_kind.k_module && ast.ast_len(mod) == 0);
 }
 
-fn a_signature_takes_each_result_form() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+fn a_signature_takes_each_result_form(parse_env.env mut* e) void {
     string[5] lines = {
         "fn stop() noreturn;",
         "fn pick() fn (i32) i32;",
@@ -219,8 +222,10 @@ fn a_signature_takes_each_result_form() void {
         "fn bytes(u8 mut@ own buf) u8@ own;",
         "fn (i32) i32 F = null;",
     };
-    ast.node* mod = parse_env.parse_interface(&e, section(lines[..], &b));
-    assert(parse_env.errors(&e) == 0);
+    string own text = section(lines[..]);
+    defer del(text);
+    ast.node* mod = parse_env.parse_interface(e, text);
+    assert(parse_env.errors(e) == 0);
     assert(ast.ast_len(mod) == 5);
     u64 mut i = 0;
     while (i < 4) {
@@ -230,17 +235,15 @@ fn a_signature_takes_each_result_form() void {
     }
     // a function type that opens a line is a global of that type, as in a source file
     assert(ast.ast_child(mod, 4)->kind == ast.ast_kind.k_var_decl);
-    assert(parse_env.dump(&e, ast.ast_child(mod, 0)) == "(fn (type (noreturn)) stop (params) nil)");
+    assert(parse_env.dump(e, ast.ast_child(mod, 0)) == "(fn (type (noreturn)) stop (params) nil)");
 }
 
-fn each_declaration_of_a_section_keeps_its_place_in_the_file() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+fn each_declaration_of_a_section_keeps_its_place_in_the_file(parse_env.env mut* e) void {
     string[3] lines = {"import geom.a as _0;", "", "    fn f(_0.point p) void;"};
-    ast.node* mod = parse_env.parse_interface(&e, section(lines[..], &b));
-    assert(parse_env.errors(&e) == 0);
+    string own text = section(lines[..]);
+    defer del(text);
+    ast.node* mod = parse_env.parse_interface(e, text);
+    assert(parse_env.errors(e) == 0);
     ast.node* f = ast.ast_child(mod, 1);
     assert(f->loc.line == 3 && f->loc.col == 5);
     assert(f->name_loc.line == 3 && f->name_loc.col == 8);
@@ -264,8 +267,6 @@ fn a_struct_and_an_enum_of_a_section_keep_the_source_rules() void {
 fn a_section_reads_each_value_form_of_the_writer() void {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
     string[9] lines = {
         "pair P = {.tag = 0, .value = 1};",
         "i32[3] R = {1, 2, 3};",
@@ -277,19 +278,19 @@ fn a_section_reads_each_value_form_of_the_writer() void {
         "string S = \"a\\\"b\\x0A\";",
         "pair Z = {};",
     };
-    ast.node* mod = parse_env.parse_interface(&e, section(lines[..], &b));
+    string own text = section(lines[..]);
+    defer del(text);
+    ast.node* mod = parse_env.parse_interface(&e, text);
     assert(parse_env.errors(&e) == 0);
     assert(ast.ast_len(mod) == 9);
 }
 
-fn a_section_of_only_imports_holds_no_declaration() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+fn a_section_of_only_imports_holds_no_declaration(parse_env.env mut* e) void {
     string[3] lines = {"import geom.a as _0;", "import geom.b.c as _1;", "import std.io as _2;"};
-    ast.node* mod = parse_env.parse_interface(&e, section(lines[..], &b));
-    assert(parse_env.errors(&e) == 0);
+    string own text = section(lines[..]);
+    defer del(text);
+    ast.node* mod = parse_env.parse_interface(e, text);
+    assert(parse_env.errors(e) == 0);
     assert(ast.ast_len(mod) == 3);
     u64 mut i = 0;
     while (i < 3) {
@@ -302,26 +303,26 @@ fn a_section_of_only_imports_holds_no_declaration() void {
 }
 
 fn main() i32 {
-    a_bodiless_function_in_a_source_file_is_one_error_at_its_semicolon();
+    run(a_bodiless_function_in_a_source_file_is_one_error_at_its_semicolon);
     an_extern_in_a_source_file_still_has_no_body();
     println("source ok");
-    a_section_holds_imports_and_bodiless_declarations();
-    every_other_declaration_reads_as_in_a_source_file();
+    run(a_section_holds_imports_and_bodiless_declarations);
+    run(every_other_declaration_reads_as_in_a_source_file);
     a_function_body_in_a_section_is_a_syntax_error();
     an_import_without_its_binding_is_a_syntax_error();
     a_compile_time_if_in_a_section_is_a_syntax_error();
     a_configuration_read_in_a_section_is_an_error();
-    an_error_in_one_declaration_leaves_the_next_ones();
+    run(an_error_in_one_declaration_leaves_the_next_ones);
     an_import_after_a_declaration_is_the_source_error();
     an_extern_with_a_body_is_a_syntax_error_in_both_files();
     a_configuration_read_stands_nowhere_in_a_section();
     a_compile_time_if_among_the_imports_is_a_syntax_error();
-    an_empty_section_is_an_empty_module();
-    a_signature_takes_each_result_form();
-    each_declaration_of_a_section_keeps_its_place_in_the_file();
+    run(an_empty_section_is_an_empty_module);
+    run(a_signature_takes_each_result_form);
+    run(each_declaration_of_a_section_keeps_its_place_in_the_file);
     a_struct_and_an_enum_of_a_section_keep_the_source_rules();
     a_section_reads_each_value_form_of_the_writer();
-    a_section_of_only_imports_holds_no_declaration();
+    run(a_section_of_only_imports_holds_no_declaration);
     println("interface ok");
     println("ok");
     return 0;

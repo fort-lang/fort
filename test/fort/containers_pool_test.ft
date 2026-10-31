@@ -13,22 +13,28 @@ import std.strbuf;
 // containers_test.ft holds the pool's contract. This file holds the boundaries
 // of its arithmetic and the integrity of the bytes across many blocks.
 
-// A block is 4096 bytes: 4095 fits, one more byte still fits, and the byte
-// after that starts a second block.
-fn the_block_boundary_is_four_kilobytes() void {
+// Makes a `containers.pool`, runs `body` on it, and releases it. `body` reads the value through a
+// pointer, so the use rule of `move` and `del` (D17.21) asks no proof of its reads after a call.
+fn run(fn (containers.pool mut*) void body) void {
     containers.pool mut p = containers.pool_create();
     defer containers.pool_free(&p);
-    u8 mut@ most = containers.pool_bytes(&p, 4095);
+    body(&p);
+}
+
+// A block is 4096 bytes: 4095 fits, one more byte still fits, and the byte
+// after that starts a second block.
+fn the_block_boundary_is_four_kilobytes(containers.pool mut* p) void {
+    u8 mut@ most = containers.pool_bytes(p, 4095);
     assert(most.len == 4095);
-    assert(containers.pool_block_count(&p) == 1);
-    u8 mut@ last = containers.pool_bytes(&p, 1);
+    assert(containers.pool_block_count(p) == 1);
+    u8 mut@ last = containers.pool_bytes(p, 1);
     assert(last.len == 1);
-    assert(containers.pool_block_count(&p) == 1);
-    assert(containers.pool_used(&p) == 4096);
-    u8 mut@ next = containers.pool_bytes(&p, 1);
+    assert(containers.pool_block_count(p) == 1);
+    assert(containers.pool_used(p) == 4096);
+    u8 mut@ next = containers.pool_bytes(p, 1);
     assert(next.len == 1);
-    assert(containers.pool_block_count(&p) == 2);
-    assert(containers.pool_used(&p) == 4097);
+    assert(containers.pool_block_count(p) == 2);
+    assert(containers.pool_used(p) == 4097);
     // The three views are distinct storage.
     most[0] = 1;
     last[0] = 2;
@@ -39,16 +45,14 @@ fn the_block_boundary_is_four_kilobytes() void {
 }
 
 // A request of exactly a block fills one. The next request starts another.
-fn a_request_of_exactly_one_block_fills_it() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
-    u8 mut@ whole = containers.pool_bytes(&p, 4096);
+fn a_request_of_exactly_one_block_fills_it(containers.pool mut* p) void {
+    u8 mut@ whole = containers.pool_bytes(p, 4096);
     assert(whole.len == 4096);
-    assert(containers.pool_block_count(&p) == 1);
-    u8 mut@ after = containers.pool_bytes(&p, 4096);
+    assert(containers.pool_block_count(p) == 1);
+    u8 mut@ after = containers.pool_bytes(p, 4096);
     assert(after.len == 4096);
-    assert(containers.pool_block_count(&p) == 2);
-    assert(containers.pool_used(&p) == 8192);
+    assert(containers.pool_block_count(p) == 2);
+    assert(containers.pool_used(p) == 8192);
     whole[4095] = 11;
     after[4095] = 22;
     assert(whole[4095] == 11);
@@ -57,15 +61,13 @@ fn a_request_of_exactly_one_block_fills_it() void {
 
 // A request one byte past a block gets a block of its own, exactly its size.
 // So nothing is wasted and the next request starts another block.
-fn a_request_past_a_block_gets_an_exact_block() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
-    u8 mut@ big = containers.pool_bytes(&p, 4097);
+fn a_request_past_a_block_gets_an_exact_block(containers.pool mut* p) void {
+    u8 mut@ big = containers.pool_bytes(p, 4097);
     assert(big.len == 4097);
-    assert(containers.pool_block_count(&p) == 1);
-    u8 mut@ tiny = containers.pool_bytes(&p, 1);
-    assert(containers.pool_block_count(&p) == 2);
-    assert(containers.pool_used(&p) == 4098);
+    assert(containers.pool_block_count(p) == 1);
+    u8 mut@ tiny = containers.pool_bytes(p, 1);
+    assert(containers.pool_block_count(p) == 2);
+    assert(containers.pool_used(p) == 4098);
     big[4096] = 5;
     tiny[0] = 6;
     assert(big[4096] == 5);
@@ -74,19 +76,17 @@ fn a_request_past_a_block_gets_an_exact_block() void {
 
 // A big request does not disturb the block being packed. The pool keeps
 // handing small requests out of a block it has room in, before and after.
-fn a_big_request_between_small_ones() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
-    u8 mut@ before = containers.pool_bytes(&p, 8);
-    assert(containers.pool_block_count(&p) == 1);
-    u8 mut@ big = containers.pool_bytes(&p, 9000);
+fn a_big_request_between_small_ones(containers.pool mut* p) void {
+    u8 mut@ before = containers.pool_bytes(p, 8);
+    assert(containers.pool_block_count(p) == 1);
+    u8 mut@ big = containers.pool_bytes(p, 9000);
     assert(big.len == 9000);
-    assert(containers.pool_block_count(&p) == 2);
-    u8 mut@ after = containers.pool_bytes(&p, 8);
+    assert(containers.pool_block_count(p) == 2);
+    u8 mut@ after = containers.pool_bytes(p, 8);
     // The big block is full, so the small request that follows it starts a
     // third block rather than being refused or splitting the big one.
-    assert(containers.pool_block_count(&p) == 3);
-    assert(containers.pool_used(&p) == 9016);
+    assert(containers.pool_block_count(p) == 3);
+    assert(containers.pool_used(p) == 9016);
     before[0] = 1;
     big[8999] = 2;
     after[7] = 3;
@@ -115,23 +115,30 @@ fn many_sizes_share_one_block() void {
     assert(containers.pool_block_count(&p) == 1);
 }
 
-// A string as long as a block is interned whole, in a block of its own.
-fn a_long_string_is_interned_whole() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
+// `count` bytes 'x' as one owned string. A test keeps this string and no buffer, because the use
+// rule of `move` and `del` (D17.21) asks a proof of each read through a pointer after a call that a
+// buffer of the test is lent to.
+fn xs(u64 count) string own {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     u64 mut i = 0;
-    while (i < 5000) {
+    while (i < count) {
         strbuf.push(&b, 'x');
         i += 1;
     }
-    string kept = containers.pool_intern(&p, strbuf.view(&b));
+    return strbuf.take(&b);
+}
+
+// A string as long as a block is interned whole, in a block of its own.
+fn a_long_string_is_interned_whole(containers.pool mut* p) void {
+    string own text = xs(5000);
+    defer del(text);
+    string kept = containers.pool_intern(p, text);
     assert(kept.len == 5000);
     assert(kept[0] == 'x');
     assert(kept[4999] == 'x');
-    assert(containers.pool_block_count(&p) == 1);
-    assert(containers.pool_used(&p) == 5000);
+    assert(containers.pool_block_count(p) == 1);
+    assert(containers.pool_used(p) == 5000);
 }
 
 // Interning across a block boundary keeps every earlier copy readable: the
@@ -161,14 +168,12 @@ fn interning_across_a_boundary_keeps_the_copies() void {
 // Every byte handed out belongs to one view. Writing a pattern through each
 // view and reading them all back afterwards finds no overlap, across as many
 // blocks as it takes.
-fn views_never_overlap_across_blocks() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
+fn views_never_overlap_across_blocks(containers.pool mut* p) void {
     containers.str_vec mut kept = containers.str_create();
     defer containers.str_free(&kept);
     u64 mut i = 0;
     while (i < 300) {
-        u8 mut@ got = containers.pool_bytes(&p, 100);
+        u8 mut@ got = containers.pool_bytes(p, 100);
         u64 mut j = 0;
         while (j < got.len) {
             got[j] = cast(i % 251, u8);
@@ -178,13 +183,20 @@ fn views_never_overlap_across_blocks() void {
         i += 1;
     }
     assert(kept.len == 300);
-    assert(containers.pool_used(&p) == 30000);
+    assert(containers.pool_used(p) == 30000);
     // 4096 bytes to a block and 100 to a view: 40 views to a block, so 300
     // views take eight.
-    assert(containers.pool_block_count(&p) == 8);
-    i = 0;
+    assert(containers.pool_block_count(p) == 8);
+    views_hold_their_index(&kept);
+}
+
+// Each of the 300 views of `kept` is 100 bytes long, and its first and last byte are its index
+// modulo 251. The test above lends `kept` to each call, so the use rule of `move` and `del`
+// (D17.21) asks a proof of each read through a pointer after the call; the reads stand here.
+fn views_hold_their_index(containers.str_vec* kept) void {
+    u64 mut i = 0;
     while (i < 300) {
-        string view = containers.str_at(&kept, i);
+        string view = containers.str_at(kept, i);
         assert(view.len == 100);
         assert(view[0] == cast(i % 251, char));
         assert(view[99] == cast(i % 251, char));
@@ -228,35 +240,31 @@ fn a_thousand_names_come_back_unchanged() void {
 // A pool that is freed and filled again reuses nothing of what it held. The
 // counters start at zero and the new copies are correct, which is what a
 // second analysis through one value needs.
-fn a_pool_refilled_after_a_free_is_correct() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
+fn a_pool_refilled_after_a_free_is_correct(containers.pool mut* p) void {
     u64 mut round = 0;
     while (round < 50) {
         u64 mut i = 0;
         while (i < 200) {
-            string kept = containers.pool_intern(&p, "one hundred bytes would be longer");
+            string kept = containers.pool_intern(p, "one hundred bytes would be longer");
             assert(kept.len == 33);
             assert(kept[0] == 'o');
             i += 1;
         }
-        assert(containers.pool_used(&p) == 6600);
-        assert(containers.pool_block_count(&p) == 2);
-        containers.pool_free(&p);
-        assert(containers.pool_used(&p) == 0);
-        assert(containers.pool_block_count(&p) == 0);
+        assert(containers.pool_used(p) == 6600);
+        assert(containers.pool_block_count(p) == 2);
+        containers.pool_free(p);
+        assert(containers.pool_used(p) == 0);
+        assert(containers.pool_block_count(p) == 0);
         round += 1;
     }
 }
 
 // Zeroed storage is zeroed in every block, not only in the first: a block
 // added later comes from new like the first one.
-fn every_block_is_zeroed() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
+fn every_block_is_zeroed(containers.pool mut* p) void {
     u64 mut i = 0;
     while (i < 10) {
-        u8 mut@ got = containers.pool_bytes(&p, 3000);
+        u8 mut@ got = containers.pool_bytes(p, 3000);
         assert(got[0] == 0);
         assert(got[1500] == 0);
         assert(got[2999] == 0);
@@ -264,23 +272,23 @@ fn every_block_is_zeroed() void {
         got[2999] = 1;
         i += 1;
     }
-    assert(containers.pool_block_count(&p) == 10);
-    assert(containers.pool_used(&p) == 30000);
+    assert(containers.pool_block_count(p) == 10);
+    assert(containers.pool_used(p) == 30000);
 }
 
 fn main() i32 {
-    the_block_boundary_is_four_kilobytes();
-    a_request_of_exactly_one_block_fills_it();
-    a_request_past_a_block_gets_an_exact_block();
-    a_big_request_between_small_ones();
+    run(the_block_boundary_is_four_kilobytes);
+    run(a_request_of_exactly_one_block_fills_it);
+    run(a_request_past_a_block_gets_an_exact_block);
+    run(a_big_request_between_small_ones);
     many_sizes_share_one_block();
-    a_long_string_is_interned_whole();
+    run(a_long_string_is_interned_whole);
     interning_across_a_boundary_keeps_the_copies();
     println("boundaries ok");
-    views_never_overlap_across_blocks();
+    run(views_never_overlap_across_blocks);
     a_thousand_names_come_back_unchanged();
-    a_pool_refilled_after_a_free_is_correct();
-    every_block_is_zeroed();
+    run(a_pool_refilled_after_a_free_is_correct);
+    run(every_block_is_zeroed);
     println("integrity ok");
     println("ok");
     return 0;

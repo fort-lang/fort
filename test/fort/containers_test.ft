@@ -51,11 +51,17 @@ fn a_freed_pool_is_usable_again() void {
     assert(containers.pool_used(&p) == 6);
 }
 
-// An interned string has the bytes and the length of its source.
-fn interning_copies_the_bytes() void {
+// Makes a `containers.pool`, runs `body` on it, and releases it. `body` reads the value through a
+// pointer, so the use rule of `move` and `del` (D17.21) asks no proof of its reads after a call.
+fn run(fn (containers.pool mut*) void body) void {
     containers.pool mut p = containers.pool_create();
     defer containers.pool_free(&p);
-    string kept = containers.pool_intern(&p, "hello");
+    body(&p);
+}
+
+// An interned string has the bytes and the length of its source.
+fn interning_copies_the_bytes(containers.pool mut* p) void {
+    string kept = containers.pool_intern(p, "hello");
     assert(kept == "hello");
     assert(kept.len == 5);
     assert(kept[0] == 'h');
@@ -122,51 +128,45 @@ fn small_requests_share_a_block() void {
 
 // A block holds 4096 bytes. A request that does not fit starts the next block.
 // Earlier allocations do not move.
-fn a_full_block_is_followed_by_another() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
-    u8 mut@ first = containers.pool_bytes(&p, 4096);
+fn a_full_block_is_followed_by_another(containers.pool mut* p) void {
+    u8 mut@ first = containers.pool_bytes(p, 4096);
     assert(first.len == 4096);
-    assert(containers.pool_block_count(&p) == 1);
+    assert(containers.pool_block_count(p) == 1);
     first[0] = 7;
     first[4095] = 9;
-    u8 mut@ second = containers.pool_bytes(&p, 1);
+    u8 mut@ second = containers.pool_bytes(p, 1);
     assert(second.len == 1);
-    assert(containers.pool_block_count(&p) == 2);
-    assert(containers.pool_used(&p) == 4097);
+    assert(containers.pool_block_count(p) == 2);
+    assert(containers.pool_used(p) == 4097);
     // The first block was not moved or reused by the second allocation.
     assert(first[0] == 7);
     assert(first[4095] == 9);
 }
 
 // A request larger than a block gets a block of its own, exactly its size.
-fn a_large_request_gets_its_own_block() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
-    u8 mut@ big = containers.pool_bytes(&p, 5000);
+fn a_large_request_gets_its_own_block(containers.pool mut* p) void {
+    u8 mut@ big = containers.pool_bytes(p, 5000);
     assert(big.len == 5000);
-    assert(containers.pool_block_count(&p) == 1);
+    assert(containers.pool_block_count(p) == 1);
     big[4999] = 3;
     assert(big[4999] == 3);
     // The full block makes the next byte start another block.
-    u8 mut@ small = containers.pool_bytes(&p, 1);
+    u8 mut@ small = containers.pool_bytes(p, 1);
     assert(small.len == 1);
-    assert(containers.pool_block_count(&p) == 2);
-    assert(containers.pool_used(&p) == 5001);
+    assert(containers.pool_block_count(p) == 2);
+    assert(containers.pool_used(p) == 5001);
 }
 
 // pool_bytes hands out zeroed storage, writable through the view, and two
 // views of one block do not overlap.
-fn pool_bytes_is_zeroed_and_writable() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
-    u8 mut@ a = containers.pool_bytes(&p, 4);
+fn pool_bytes_is_zeroed_and_writable(containers.pool mut* p) void {
+    u8 mut@ a = containers.pool_bytes(p, 4);
     assert(a.len == 4);
     assert(a[0] == 0);
     assert(a[1] == 0);
     assert(a[2] == 0);
     assert(a[3] == 0);
-    u8 mut@ b = containers.pool_bytes(&p, 4);
+    u8 mut@ b = containers.pool_bytes(p, 4);
     assert(b[0] == 0);
     a[0] = 1;
     a[3] = 2;
@@ -175,7 +175,7 @@ fn pool_bytes_is_zeroed_and_writable() void {
     assert(a[3] == 2);
     assert(b[0] == 3);
     assert(b[1] == 0);
-    assert(containers.pool_used(&p) == 8);
+    assert(containers.pool_used(p) == 8);
 }
 
 // A zero-byte request is an empty view and costs nothing.
@@ -190,15 +190,13 @@ fn pool_bytes_of_zero_is_empty() void {
 
 // An interned string keeps the bytes of an arbitrary buffer, including one
 // holding a zero byte. This is because a fort string is a pointer and a length.
-fn interning_keeps_embedded_zero_bytes() void {
-    containers.pool mut p = containers.pool_create();
-    defer containers.pool_free(&p);
-    u8 mut@ raw = containers.pool_bytes(&p, 3);
+fn interning_keeps_embedded_zero_bytes(containers.pool mut* p) void {
+    u8 mut@ raw = containers.pool_bytes(p, 3);
     raw[0] = 97;
     raw[1] = 0;
     raw[2] = 98;
     string source = cast(raw, string);
-    string kept = containers.pool_intern(&p, source);
+    string kept = containers.pool_intern(p, source);
     assert(kept.len == 3);
     assert(kept[0] == 'a');
     assert(kept[1] == '\0');
@@ -315,18 +313,24 @@ fn set_replaces_one_element() void {
     assert(v.len == 3);
 }
 
-// str_items is a view of the live elements alone, not of the capacity.
-fn items_covers_the_live_elements() void {
+// Makes a `containers.str_vec`, runs `body` on it, and releases it. `body` reads the value through
+// a pointer, so the use rule of `move` and `del` (D17.21) asks no proof of its reads after a call.
+fn run_vec(fn (containers.str_vec mut*) void body) void {
     containers.str_vec mut v = containers.str_create();
     defer containers.str_free(&v);
-    containers.str_push(&v, "one");
-    containers.str_push(&v, "two");
-    string@ items = containers.str_items(&v);
+    body(&v);
+}
+
+// str_items is a view of the live elements alone, not of the capacity.
+fn items_covers_the_live_elements(containers.str_vec mut* v) void {
+    containers.str_push(v, "one");
+    containers.str_push(v, "two");
+    string@ items = containers.str_items(v);
     assert(items.len == 2);
     assert(items[0] == "one");
     assert(items[1] == "two");
     u64 mut seen = 0;
-    for (string s : containers.str_items(&v)) {
+    for (string s : containers.str_items(v)) {
         assert(s.len == 3);
         seen += 1;
     }
@@ -405,16 +409,16 @@ fn main() i32 {
     empty_pool_allocates_nothing();
     freeing_an_empty_pool_twice_is_a_no_op();
     a_freed_pool_is_usable_again();
-    interning_copies_the_bytes();
+    run(interning_copies_the_bytes);
     an_interned_string_outlives_its_source();
     interning_the_empty_string_allocates_nothing();
     interning_does_not_deduplicate();
     small_requests_share_a_block();
-    a_full_block_is_followed_by_another();
-    a_large_request_gets_its_own_block();
-    pool_bytes_is_zeroed_and_writable();
+    run(a_full_block_is_followed_by_another);
+    run(a_large_request_gets_its_own_block);
+    run(pool_bytes_is_zeroed_and_writable);
     pool_bytes_of_zero_is_empty();
-    interning_keeps_embedded_zero_bytes();
+    run(interning_keeps_embedded_zero_bytes);
     a_thousand_names_cost_the_blocks_the_bytes_imply();
     println("pool ok");
     an_empty_vector_allocates_nothing();
@@ -423,7 +427,7 @@ fn main() i32 {
     growth_keeps_every_element();
     reserve_takes_room_without_adding_elements();
     set_replaces_one_element();
-    items_covers_the_live_elements();
+    run_vec(items_covers_the_live_elements);
     freeing_leaves_the_vector_usable();
     the_vector_borrows_its_elements();
     a_vector_of_interned_names();

@@ -24,31 +24,37 @@ fn decl_at(u64 i) u64 {
 
 // ---- the node vector ------------------------------------------------------------
 
+// Makes a `types.table`, runs `body` on it, and releases it. `body` reads the value through a
+// pointer, so the use rule of `move` and `del` (D17.21) asks no proof of its reads after a call.
+fn run_table(fn (types.table mut*) void body) void {
+    types.table mut tt = types.table{};
+    defer types.type_table_free(&tt);
+    body(&tt);
+}
+
 // Interning far past the first capacity keeps every node alive and unique: the
 // vector grows by moving its owned pointers. So a node interned before a
 // growth must still be the node its spelling interns to after it.
-fn a_node_survives_every_growth_of_the_table() void {
-    types.table mut tt = types.table{};
-    defer types.type_table_free(&tt);
-    types.node* i32t = types.type_prim(&tt, prim.prim_kind.prim_i32);
-    types.node* first = types.type_ptr(&tt, i32t, false, false);
+fn a_node_survives_every_growth_of_the_table(types.table mut* tt) void {
+    types.node* i32t = types.type_prim(tt, prim.prim_kind.prim_i32);
+    types.node* first = types.type_ptr(tt, i32t, false, false);
     // 300 distinct array types, which is 19 doublings past the first capacity
     // of 16 (types.ft's NODE_MIN_CAP).
     types.node*[300] mut made = {};
     u64 mut n = 0;
     while (n < 300) {
-        made[n] = types.type_array(&tt, i32t, n + 1);
+        made[n] = types.type_array(tt, i32t, n + 1);
         assert(made[n]->len == n + 1);
         n += 1;
     }
     // Every node made before the growths is still itself, and still what its
     // arguments intern to.
-    assert(first == types.type_ptr(&tt, i32t, false, false));
-    assert(i32t == types.type_prim(&tt, prim.prim_kind.prim_i32));
+    assert(first == types.type_ptr(tt, i32t, false, false));
+    assert(i32t == types.type_prim(tt, prim.prim_kind.prim_i32));
     assert(types.type_sizeof(first) == 8);
     n = 0;
     while (n < 300) {
-        assert(made[n] == types.type_array(&tt, i32t, n + 1));
+        assert(made[n] == types.type_array(tt, i32t, n + 1));
         assert(made[n]->len == n + 1);
         assert(types.type_sizeof(made[n]) == (n + 1) * 4);
         // No two of them are one node.
@@ -57,7 +63,7 @@ fn a_node_survives_every_growth_of_the_table() void {
         }
         n += 1;
     }
-    assert(tt.count == 302);
+    assert(tt->count == 302);
 }
 
 // A nominal type is found by its declaration however many nodes stand before
@@ -154,6 +160,22 @@ fn moved(u64 early, u64 late, u64 last) u64 {
     return other;
 }
 
+// The address of the parameter list of `f`, of the layout of `s` and of the node vector of `tt`.
+// The test below lends `tt` to each call, so the use rule of `move` and `del` (D17.21) asks a proof
+// of each read of `tt` or through a pointer after the call; these reads stand in frames of their
+// own.
+fn params_address(types.node* f) u64 {
+    return cast(f->params.ptr, u64);
+}
+
+fn layout_address(types.node* s) u64 {
+    return cast(s->layout, u64);
+}
+
+fn nodes_address(types.table* tt) u64 {
+    return cast(tt->nodes.ptr, u64);
+}
+
 fn the_blocks_a_node_owns_are_released_with_it() void {
     u64[3] mut break_at = {};
     u64[3] mut param_at = {};
@@ -190,9 +212,9 @@ fn the_blocks_a_node_owns_are_released_with_it() void {
         // The addresses are read while the table still holds them, the system view
         // after it is freed, which is where a round's keeping shows.
         if (slot < 3) {
-            param_at[slot] = cast(f->params.ptr, u64);
-            layout_at[slot] = cast(s->layout, u64);
-            nodes_at[slot] = cast(tt.nodes.ptr, u64);
+            param_at[slot] = params_address(f);
+            layout_at[slot] = layout_address(s);
+            nodes_at[slot] = nodes_address(&tt);
         }
         types.type_table_free(&tt);
         if (slot < 3) {
@@ -208,94 +230,94 @@ fn the_blocks_a_node_owns_are_released_with_it() void {
 
 // ---- the parameter list ---------------------------------------------------------
 
-// The node owns a copy of the list: writing to the caller's array afterwards
-// changes nothing, which is what "the parameter list is copied" means.
-fn the_parameter_list_is_copied_out_of_the_caller_s_array() void {
+// Makes a `types_env.env`, runs `body` on it, and releases it. `body` reads the value through a
+// pointer, so the use rule of `move` and `del` (D17.21) asks no proof of its reads after a call.
+fn run(fn (types_env.env mut*) void body) void {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
     defer types_env.free(&e);
-    types.node* i32t = types.type_prim(&e.tt, prim.prim_kind.prim_i32);
-    types.node* i64t = types.type_prim(&e.tt, prim.prim_kind.prim_i64);
-    types.node* v = types.type_void(&e.tt);
+    body(&e);
+}
+
+// The node owns a copy of the list: writing to the caller's array afterwards
+// changes nothing, which is what "the parameter list is copied" means.
+fn the_parameter_list_is_copied_out_of_the_caller_s_array(types_env.env mut* e) void {
+    types.node* i32t = types.type_prim(&e->tt, prim.prim_kind.prim_i32);
+    types.node* i64t = types.type_prim(&e->tt, prim.prim_kind.prim_i64);
+    types.node* v = types.type_void(&e->tt);
     types.node*[2] mut params = {i32t, i32t};
-    types.node* f = types.type_fn(&e.tt, v, params[..], false);
-    assert(types_env.str_of(&e, f) == "fn (i32, i32) void");
+    types.node* f = types.type_fn(&e->tt, v, params[..], false);
+    assert(types_env.str_of(e, f) == "fn (i32, i32) void");
     // The caller's array is its own storage: overwriting it leaves the type.
     params[0] = i64t;
     params[1] = i64t;
-    assert(types_env.str_of(&e, f) == "fn (i32, i32) void");
+    assert(types_env.str_of(e, f) == "fn (i32, i32) void");
     assert(f->params.len == 2);
     assert(f->params[0] == i32t);
     assert(f->params[1] == i32t);
     // The new list is a different type and interns on its own.
-    types.node* g = types.type_fn(&e.tt, v, params[..], false);
+    types.node* g = types.type_fn(&e->tt, v, params[..], false);
     assert(g != f);
-    assert(types_env.str_of(&e, g) == "fn (i64, i64) void");
+    assert(types_env.str_of(e, g) == "fn (i64, i64) void");
     assert(!types.type_equal(f, g));
     // Interning still answers by value, from a third array with the first
     // contents.
     types.node*[2] mut again = {i32t, i32t};
-    assert(types.type_fn(&e.tt, v, again[..], false) == f);
+    assert(types.type_fn(&e->tt, v, again[..], false) == f);
 }
 
 // A span carries its own length, so the C's `nparams` is `params.len` here and
 // the arity is part of identity at every width.
-fn the_arity_is_the_length_of_the_span() void {
-    types_env.env mut e = types_env.env{};
-    types_env.init(&e);
-    defer types_env.free(&e);
-    types.node* i32t = types.type_prim(&e.tt, prim.prim_kind.prim_i32);
-    types.node* v = types.type_void(&e.tt);
+fn the_arity_is_the_length_of_the_span(types_env.env mut* e) void {
+    types.node* i32t = types.type_prim(&e->tt, prim.prim_kind.prim_i32);
+    types.node* v = types.type_void(&e->tt);
     types.node*[8] mut params = {i32t, i32t, i32t, i32t, i32t, i32t, i32t, i32t};
     types.node*[9] mut made = {};
     u64 mut n = 0;
     while (n <= 8) {
-        made[n] = types.type_fn(&e.tt, v, params[..n], false);
+        made[n] = types.type_fn(&e->tt, v, params[..n], false);
         assert(made[n]->params.len == n);
         // The same prefix interns to the same node.
-        assert(made[n] == types.type_fn(&e.tt, v, params[..n], false));
+        assert(made[n] == types.type_fn(&e->tt, v, params[..n], false));
         if (n > 0) {
             assert(made[n] != made[n - 1]);
             assert(!types.type_equal(made[n], made[n - 1]));
         }
         n += 1;
     }
-    assert(types_env.str_of(&e, made[0]) == "fn () void");
-    assert(types_env.str_of(&e, made[1]) == "fn (i32) void");
-    assert(types_env.str_of(&e, made[3]) == "fn (i32, i32, i32) void");
+    assert(types_env.str_of(e, made[0]) == "fn () void");
+    assert(types_env.str_of(e, made[1]) == "fn (i32) void");
+    assert(types_env.str_of(e, made[3]) == "fn (i32, i32, i32) void");
     // A function type with no parameters allocates no list at all.
     assert(made[0]->params.len == 0);
 }
 
 // The copied list holds the caller's nodes, not copies of them, so identity
 // inside the list is still pointer equality.
-fn the_copied_list_holds_the_same_nodes() void {
-    types_env.env mut e = types_env.env{};
-    types_env.init(&e);
-    defer types_env.free(&e);
-    types.node* v = types.type_void(&e.tt);
-    types.node* owned = types_env.type_of(&e, "node mut* own mut@ own");
-    types.node* plain = types_env.type_of(&e, "node*");
+fn the_copied_list_holds_the_same_nodes(types_env.env mut* e) void {
+    types.node* v = types.type_void(&e->tt);
+    types.node* owned = types_env.type_of(e, "node mut* own mut@ own");
+    types.node* plain = types_env.type_of(e, "node*");
     types.node*[2] mut params = {owned, plain};
-    types.node* f = types.type_fn(&e.tt, v, params[..], false);
+    types.node* f = types.type_fn(&e->tt, v, params[..], false);
     assert(f->params[0] == owned);
     assert(f->params[1] == plain);
-    assert(types_env.str_of(&e, f) == "fn (node mut* own mut@ own, node*) void");
+    assert(types_env.str_of(e, f) == "fn (node mut* own mut@ own, node*) void");
     // The marks of a parameter are part of the type's identity, which is what
     // the copy has to keep.
-    types.node*[2] mut lent = {types_env.type_of(&e, "node mut* mut@"), plain};
-    assert(types.type_fn(&e.tt, v, lent[..], false) != f);
+    types.node*[2] mut lent = {types_env.type_of(e, "node mut* mut@"), plain};
+    assert(types.type_fn(&e->tt, v, lent[..], false) != f);
 }
 
 fn main() i32 {
-    a_node_survives_every_growth_of_the_table();
+    run_table(a_node_survives_every_growth_of_the_table);
     a_nominal_type_is_found_after_a_growth();
     a_grown_table_frees_everything_it_made();
     the_blocks_a_node_owns_are_released_with_it();
     println("growth ok");
-    the_parameter_list_is_copied_out_of_the_caller_s_array();
-    the_arity_is_the_length_of_the_span();
-    the_copied_list_holds_the_same_nodes();
+    run(the_parameter_list_is_copied_out_of_the_caller_s_array);
+    run(the_arity_is_the_length_of_the_span);
+    run(the_copied_list_holds_the_same_nodes);
     println("params ok");
     println("ok");
     return 0;

@@ -190,20 +190,26 @@ fn a_span_of_arrays_strides_by_the_row() void {
     gen_env.expect_in(gen_env.main_text(&e), gen_env.join_lines(&e, want[..]));
 }
 
-fn the_element_type_of_that_span_is_the_row() void {
+// Makes a `gen_env.env`, runs `body` on it, and releases it. `body` reads the value through a
+// pointer, so the use rule of `move` and `del` (D17.21) asks no proof of its reads after a call.
+fn run(fn (gen_env.env mut*) void body) void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
+    body(&e);
+}
+
+fn the_element_type_of_that_span_is_the_row(gen_env.env mut* e) void {
     string[2] mut lines = {"    i32[3] mut@ own g = new(i32[3], 2);", "    defer del(g);"};
-    assert(gen_env.open_lines(&e, lines[..]));
+    assert(gen_env.open_lines(e, lines[..]));
     // A span is two words whatever it spans, and its element carries the row's
     // size, which is what the GEP above strides by.
-    types.node* span = gen_env.type_of(&e, "g");
+    types.node* span = gen_env.type_of(e, "g");
     assert(types.type_sizeof(span) == 16);
     assert(types.type_sizeof(span->elem) == 12);
     assert(span->elem->kind == types.type_kind.k_array);
     assert(span->elem->len == 3);
-    assert(check_env.type_text(&e.c, span) == "i32[3] mut@ own");
+    assert(check_env.type_text(&e->c, span) == "i32[3] mut@ own");
 }
 
 // ---- the array of spans and the span of spans ----------------------------------------
@@ -325,7 +331,7 @@ fn main() i32 {
     one_row_copies_the_row_alone();
     println("copy ok");
     a_span_of_arrays_strides_by_the_row();
-    the_element_type_of_that_span_is_the_row();
+    run(the_element_type_of_that_span_is_the_row);
     an_array_of_spans_strides_by_the_header();
     a_span_of_spans_strides_by_the_header_too();
     println("span ok");

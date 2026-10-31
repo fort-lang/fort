@@ -18,50 +18,52 @@ import parse_env;
 
 // ---- positions: where a node starts --------------------------------------------
 
-fn a_declaration_starts_at_its_type() void {
+// Makes a `parse_env.env`, runs `body` on it, and releases it. `body` reads the value through a
+// pointer, so the use rule of `move` and `del` (D17.21) asks no proof of its reads after a call.
+fn run(fn (parse_env.env mut*) void body) void {
     parse_env.env mut e = parse_env.create();
     defer parse_env.free(&e);
-    ast.node mut* mod = parse_env.parse(&e, "i32 N = 4;\nfn f(i32 a) i32 {\n    return a;\n}\n");
-    assert(parse_env.loc_of(&e, mod) == "1:1");
-    assert(parse_env.loc_of(&e, parse_env.decl(mod, 0)) == "1:1");
-    assert(parse_env.loc_of(&e, parse_env.decl(mod, 0)->a) == "1:1");
-    assert(parse_env.loc_of(&e, parse_env.decl(mod, 0)->b) == "1:9");
-    assert(parse_env.loc_of(&e, parse_env.decl(mod, 1)) == "2:1");
+    body(&e);
+}
+
+fn a_declaration_starts_at_its_type(parse_env.env mut* e) void {
+    ast.node mut* mod = parse_env.parse(e, "i32 N = 4;\nfn f(i32 a) i32 {\n    return a;\n}\n");
+    assert(parse_env.loc_of(e, mod) == "1:1");
+    assert(parse_env.loc_of(e, parse_env.decl(mod, 0)) == "1:1");
+    assert(parse_env.loc_of(e, parse_env.decl(mod, 0)->a) == "1:1");
+    assert(parse_env.loc_of(e, parse_env.decl(mod, 0)->b) == "1:9");
+    assert(parse_env.loc_of(e, parse_env.decl(mod, 1)) == "2:1");
     // The return type starts after the parameter list, and the parameter at
     // its own type.
-    assert(parse_env.loc_of(&e, parse_env.decl(mod, 1)->a) == "2:13");
-    assert(parse_env.loc_of(&e, parse_env.child(parse_env.decl(mod, 1), 0)) == "2:6");
-    assert(parse_env.loc_of(&e, parse_env.decl(mod, 1)->b) == "2:17");
-    assert(parse_env.loc_of(&e, parse_env.body_stmt(mod, 1, 0)) == "3:5");
-    assert(parse_env.loc_of(&e, parse_env.body_stmt(mod, 1, 0)->a) == "3:12");
+    assert(parse_env.loc_of(e, parse_env.decl(mod, 1)->a) == "2:13");
+    assert(parse_env.loc_of(e, parse_env.child(parse_env.decl(mod, 1), 0)) == "2:6");
+    assert(parse_env.loc_of(e, parse_env.decl(mod, 1)->b) == "2:17");
+    assert(parse_env.loc_of(e, parse_env.body_stmt(mod, 1, 0)) == "3:5");
+    assert(parse_env.loc_of(e, parse_env.body_stmt(mod, 1, 0)->a) == "3:12");
 }
 
-fn an_operator_node_is_at_its_operator() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+fn an_operator_node_is_at_its_operator(parse_env.env mut* e) void {
     // An operator node carries its operator, which is where a diagnostic
     // about the operation points.
-    ast.node mut* mod = parse_env.parse(&e, "i32 x = a + b * c;\n");
+    ast.node mut* mod = parse_env.parse(e, "i32 x = a + b * c;\n");
     ast.node mut* sum = parse_env.decl(mod, 0)->b;
-    assert(parse_env.loc_of(&e, sum) == "1:11");
-    assert(parse_env.loc_of(&e, sum->a) == "1:9");
-    assert(parse_env.loc_of(&e, sum->b) == "1:15");
-    assert(parse_env.loc_of(&e, sum->b->a) == "1:13");
-    assert(parse_env.loc_of(&e, sum->b->b) == "1:17");
+    assert(parse_env.loc_of(e, sum) == "1:11");
+    assert(parse_env.loc_of(e, sum->a) == "1:9");
+    assert(parse_env.loc_of(e, sum->b) == "1:15");
+    assert(parse_env.loc_of(e, sum->b->a) == "1:13");
+    assert(parse_env.loc_of(e, sum->b->b) == "1:17");
 }
 
-fn unary_and_postfix_nodes_are_at_their_own_token() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
-    string src = parse_env.join4(&e, "i32 a = -x;\ni32 b = f(1);\n", "i32 c = v[0];\n",
+fn unary_and_postfix_nodes_are_at_their_own_token(parse_env.env mut* e) void {
+    string src = parse_env.join4(e, "i32 a = -x;\ni32 b = f(1);\n", "i32 c = v[0];\n",
                                  "i32 d = p.f;\ni32 e = p->f;\n", "i32 g = s[1..2];\n");
-    ast.node mut* mod = parse_env.parse(&e, src);
-    assert(parse_env.loc_of(&e, parse_env.decl(mod, 0)->b) == "1:9");
-    assert(parse_env.loc_of(&e, parse_env.decl(mod, 1)->b) == "2:10");
-    assert(parse_env.loc_of(&e, parse_env.decl(mod, 2)->b) == "3:10");
-    assert(parse_env.loc_of(&e, parse_env.decl(mod, 3)->b) == "4:10");
-    assert(parse_env.loc_of(&e, parse_env.decl(mod, 4)->b) == "5:10");
-    assert(parse_env.loc_of(&e, parse_env.decl(mod, 5)->b) == "6:10");
+    ast.node mut* mod = parse_env.parse(e, src);
+    assert(parse_env.loc_of(e, parse_env.decl(mod, 0)->b) == "1:9");
+    assert(parse_env.loc_of(e, parse_env.decl(mod, 1)->b) == "2:10");
+    assert(parse_env.loc_of(e, parse_env.decl(mod, 2)->b) == "3:10");
+    assert(parse_env.loc_of(e, parse_env.decl(mod, 3)->b) == "4:10");
+    assert(parse_env.loc_of(e, parse_env.decl(mod, 4)->b) == "5:10");
+    assert(parse_env.loc_of(e, parse_env.decl(mod, 5)->b) == "6:10");
 }
 
 fn a_statement_starts_at_its_keyword_or_target() void {
@@ -85,37 +87,33 @@ fn a_statement_starts_at_its_keyword_or_target() void {
     assert(parse_env.loc_of(&e, parse_env.body_stmt(mod, 0, 7)) == "9:5");
 }
 
-fn a_type_and_its_suffixes_carry_their_own_positions() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+fn a_type_and_its_suffixes_carry_their_own_positions(parse_env.env mut* e) void {
     // A type starts at its base type and every suffix at its own token, so a
     // placement diagnostic points at the marker it is about.
-    ast.node mut* mod = parse_env.parse(&e, "node* mut@ own x = 0;\ni32[4] mut y = 0;\n");
+    ast.node mut* mod = parse_env.parse(e, "node* mut@ own x = 0;\ni32[4] mut y = 0;\n");
     ast.node mut* first = parse_env.decl(mod, 0)->a;
-    assert(parse_env.loc_of(&e, first) == "1:1");
-    assert(parse_env.loc_of(&e, first->a) == "1:1");
-    assert(parse_env.loc_of(&e, parse_env.child(first, 0)) == "1:5");
-    assert(parse_env.loc_of(&e, parse_env.child(first, 1)) == "1:10");
+    assert(parse_env.loc_of(e, first) == "1:1");
+    assert(parse_env.loc_of(e, first->a) == "1:1");
+    assert(parse_env.loc_of(e, parse_env.child(first, 0)) == "1:5");
+    assert(parse_env.loc_of(e, parse_env.child(first, 1)) == "1:10");
     ast.node mut* second = parse_env.decl(mod, 1)->a;
-    assert(parse_env.loc_of(&e, parse_env.child(second, 0)) == "2:4");
-    assert(parse_env.loc_of(&e, parse_env.child(second, 0)->a) == "2:5");
+    assert(parse_env.loc_of(e, parse_env.child(second, 0)) == "2:4");
+    assert(parse_env.loc_of(e, parse_env.child(second, 0)->a) == "2:5");
 }
 
 // ---- ranges: where a node ends -------------------------------------------------
 
-fn a_declaration_covers_its_terminator() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+fn a_declaration_covers_its_terminator(parse_env.env mut* e) void {
     // A node's range runs to one past the last byte of the construct's last
     // token, which shows as the source text it covers.
-    string src = parse_env.join2(&e, "i32 n = 4 + 1;\n", "fn f(i32 a) i32 {\n    return a;\n}\n");
-    ast.node mut* mod = parse_env.parse(&e, src);
-    assert(parse_env.node_text(&e, parse_env.decl(mod, 0)) == "i32 n = 4 + 1;");
-    assert(parse_env.node_text(&e, parse_env.decl(mod, 0)->a) == "i32");
-    string body = parse_env.node_text(&e, parse_env.decl(mod, 1)->b);
+    string src = parse_env.join2(e, "i32 n = 4 + 1;\n", "fn f(i32 a) i32 {\n    return a;\n}\n");
+    ast.node mut* mod = parse_env.parse(e, src);
+    assert(parse_env.node_text(e, parse_env.decl(mod, 0)) == "i32 n = 4 + 1;");
+    assert(parse_env.node_text(e, parse_env.decl(mod, 0)->a) == "i32");
+    string body = parse_env.node_text(e, parse_env.decl(mod, 1)->b);
     assert(body == "{\n    return a;\n}");
-    assert(parse_env.node_text(&e, parse_env.child(parse_env.decl(mod, 1), 0)) == "i32 a");
-    assert(parse_env.node_text(&e, parse_env.body_stmt(mod, 1, 0)) == "return a;");
+    assert(parse_env.node_text(e, parse_env.child(parse_env.decl(mod, 1), 0)) == "i32 a");
+    assert(parse_env.node_text(e, parse_env.body_stmt(mod, 1, 0)) == "return a;");
 }
 
 fn the_module_covers_the_whole_file() void {
@@ -129,150 +127,132 @@ fn the_module_covers_the_whole_file() void {
     assert(parse_env.range_of(&e, empty) == "1:1-1:1");
 }
 
-fn an_operator_node_runs_from_its_operator_to_its_last_operand() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
-    string src = parse_env.join2(&e, "i32 x = a + b * c;\n",
+fn an_operator_node_runs_from_its_operator_to_its_last_operand(parse_env.env mut* e) void {
+    string src = parse_env.join2(e, "i32 x = a + b * c;\n",
                                  "fn f(i32 mut y) void {\n    y += g(1, 2);\n    y++;\n}\n");
-    ast.node mut* mod = parse_env.parse(&e, src);
+    ast.node mut* mod = parse_env.parse(e, src);
     ast.node mut* sum = parse_env.decl(mod, 0)->b;
-    assert(parse_env.node_text(&e, sum) == "+ b * c");
-    assert(parse_env.node_text(&e, sum->a) == "a");
-    assert(parse_env.node_text(&e, sum->b) == "* c");
-    assert(parse_env.node_text(&e, parse_env.body_stmt(mod, 1, 0)) == "+= g(1, 2);");
-    assert(parse_env.node_text(&e, parse_env.body_stmt(mod, 1, 0)->b) == "(1, 2)");
-    assert(parse_env.node_text(&e, parse_env.body_stmt(mod, 1, 1)) == "++;");
+    assert(parse_env.node_text(e, sum) == "+ b * c");
+    assert(parse_env.node_text(e, sum->a) == "a");
+    assert(parse_env.node_text(e, sum->b) == "* c");
+    assert(parse_env.node_text(e, parse_env.body_stmt(mod, 1, 0)) == "+= g(1, 2);");
+    assert(parse_env.node_text(e, parse_env.body_stmt(mod, 1, 0)->b) == "(1, 2)");
+    assert(parse_env.node_text(e, parse_env.body_stmt(mod, 1, 1)) == "++;");
 }
 
-fn postfix_and_unary_nodes_cover_their_own_tokens() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
-    string src = parse_env.join4(&e, "i32 a = -x;\ni32 b = f(1);\n", "i32 c = v[0];\n",
+fn postfix_and_unary_nodes_cover_their_own_tokens(parse_env.env mut* e) void {
+    string src = parse_env.join4(e, "i32 a = -x;\ni32 b = f(1);\n", "i32 c = v[0];\n",
                                  "i32 d = p.f;\ni32 e = p->f;\n", "i32 g = s[1..2];\n");
-    ast.node mut* mod = parse_env.parse(&e, src);
-    assert(parse_env.node_text(&e, parse_env.decl(mod, 0)->b) == "-x");
-    assert(parse_env.node_text(&e, parse_env.decl(mod, 1)->b) == "(1)");
-    assert(parse_env.node_text(&e, parse_env.decl(mod, 2)->b) == "[0]");
-    assert(parse_env.node_text(&e, parse_env.decl(mod, 3)->b) == ".f");
-    assert(parse_env.node_text(&e, parse_env.decl(mod, 4)->b) == "->f");
-    assert(parse_env.node_text(&e, parse_env.decl(mod, 5)->b) == "[1..2]");
+    ast.node mut* mod = parse_env.parse(e, src);
+    assert(parse_env.node_text(e, parse_env.decl(mod, 0)->b) == "-x");
+    assert(parse_env.node_text(e, parse_env.decl(mod, 1)->b) == "(1)");
+    assert(parse_env.node_text(e, parse_env.decl(mod, 2)->b) == "[0]");
+    assert(parse_env.node_text(e, parse_env.decl(mod, 3)->b) == ".f");
+    assert(parse_env.node_text(e, parse_env.decl(mod, 4)->b) == "->f");
+    assert(parse_env.node_text(e, parse_env.decl(mod, 5)->b) == "[1..2]");
 }
 
-fn a_parenthesized_expression_does_not_cover_its_parentheses() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+fn a_parenthesized_expression_does_not_cover_its_parentheses(parse_env.env mut* e) void {
     // parse_paren_expr returns the expression itself and calls no finish, so
     // the `)` it consumed is not part of it and its start cannot move over
     // the `(`.
-    ast.node mut* mod = parse_env.parse(&e, "i32 x = (a + b);\n");
-    assert(parse_env.node_text(&e, parse_env.decl(mod, 0)->b) == "+ b");
-    assert(parse_env.node_text(&e, parse_env.decl(mod, 0)) == "i32 x = (a + b);");
+    ast.node mut* mod = parse_env.parse(e, "i32 x = (a + b);\n");
+    assert(parse_env.node_text(e, parse_env.decl(mod, 0)->b) == "+ b");
+    assert(parse_env.node_text(e, parse_env.decl(mod, 0)) == "i32 x = (a + b);");
 }
 
-fn literal_and_keyword_expressions_cover_their_whole_form() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+fn literal_and_keyword_expressions_cover_their_whole_form(parse_env.env mut* e) void {
     string one = "i32 a = cast(x, i32);\ni32 b = sizeof(u8);\n";
     string two = "i32 c = new(node);\npoint d = point{1};\n";
     string three = "i32 e = i32[1]{0};\nstring f = \"hi\";\nbool g = true;\nnode* h = null;\n";
-    ast.node mut* mod = parse_env.parse(&e, parse_env.join3(&e, one, two, three));
-    assert(parse_env.node_text(&e, parse_env.decl(mod, 0)->b) == "cast(x, i32)");
-    assert(parse_env.node_text(&e, parse_env.decl(mod, 1)->b) == "sizeof(u8)");
-    assert(parse_env.node_text(&e, parse_env.decl(mod, 2)->b) == "new(node)");
-    assert(parse_env.node_text(&e, parse_env.decl(mod, 3)->b) == "point{1}");
-    assert(parse_env.node_text(&e, parse_env.decl(mod, 3)->b->b) == "{1}");
-    assert(parse_env.node_text(&e, parse_env.decl(mod, 4)->b) == "i32[1]{0}");
-    assert(parse_env.node_text(&e, parse_env.decl(mod, 5)->b) == "\"hi\"");
-    assert(parse_env.node_text(&e, parse_env.decl(mod, 6)->b) == "true");
-    assert(parse_env.node_text(&e, parse_env.decl(mod, 7)->b) == "null");
+    ast.node mut* mod = parse_env.parse(e, parse_env.join3(e, one, two, three));
+    assert(parse_env.node_text(e, parse_env.decl(mod, 0)->b) == "cast(x, i32)");
+    assert(parse_env.node_text(e, parse_env.decl(mod, 1)->b) == "sizeof(u8)");
+    assert(parse_env.node_text(e, parse_env.decl(mod, 2)->b) == "new(node)");
+    assert(parse_env.node_text(e, parse_env.decl(mod, 3)->b) == "point{1}");
+    assert(parse_env.node_text(e, parse_env.decl(mod, 3)->b->b) == "{1}");
+    assert(parse_env.node_text(e, parse_env.decl(mod, 4)->b) == "i32[1]{0}");
+    assert(parse_env.node_text(e, parse_env.decl(mod, 5)->b) == "\"hi\"");
+    assert(parse_env.node_text(e, parse_env.decl(mod, 6)->b) == "true");
+    assert(parse_env.node_text(e, parse_env.decl(mod, 7)->b) == "null");
 }
 
-fn a_type_covers_its_suffixes_and_markers() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+fn a_type_covers_its_suffixes_and_markers(parse_env.env mut* e) void {
     // A type covers its base and every marker and suffix written after it,
     // and each suffix covers its own marker. A marker-only suffix tail is
     // exactly what a missed finish would drop.
-    string src = parse_env.join3(&e, "node* mut@ own x = 0;\n", "i32[4] mut y = 0;\n",
+    string src = parse_env.join3(e, "node* mut@ own x = 0;\n", "i32[4] mut y = 0;\n",
                                  "string own s = \"\";\n");
-    ast.node mut* mod = parse_env.parse(&e, src);
+    ast.node mut* mod = parse_env.parse(e, src);
     ast.node mut* first = parse_env.decl(mod, 0)->a;
-    assert(parse_env.node_text(&e, first) == "node* mut@ own");
-    assert(parse_env.node_text(&e, first->a) == "node");
-    assert(parse_env.node_text(&e, parse_env.child(first, 0)) == "* mut");
-    assert(parse_env.node_text(&e, parse_env.child(first, 1)) == "@ own");
+    assert(parse_env.node_text(e, first) == "node* mut@ own");
+    assert(parse_env.node_text(e, first->a) == "node");
+    assert(parse_env.node_text(e, parse_env.child(first, 0)) == "* mut");
+    assert(parse_env.node_text(e, parse_env.child(first, 1)) == "@ own");
     ast.node mut* second = parse_env.decl(mod, 1)->a;
-    assert(parse_env.node_text(&e, second) == "i32[4] mut");
-    assert(parse_env.node_text(&e, parse_env.child(second, 0)) == "[4] mut");
-    assert(parse_env.node_text(&e, parse_env.child(second, 0)->a) == "4");
-    assert(parse_env.node_text(&e, parse_env.decl(mod, 2)->a) == "string own");
+    assert(parse_env.node_text(e, second) == "i32[4] mut");
+    assert(parse_env.node_text(e, parse_env.child(second, 0)) == "[4] mut");
+    assert(parse_env.node_text(e, parse_env.child(second, 0)->a) == "4");
+    assert(parse_env.node_text(e, parse_env.decl(mod, 2)->a) == "string own");
 }
 
-fn a_statement_covers_its_block_or_semicolon() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+fn a_statement_covers_its_block_or_semicolon(parse_env.env mut* e) void {
     string one = "fn f() void {\n    if (c) { g(); } else { h(); }\n    while (c) { }\n";
     string two = "    for (i32 mut i = 0; i < 4; i++) { }\n    for (i32 v : xs) { }\n";
     string three = "    switch (c) { case 1: g(); default: }\n    defer g();\n";
     string four = "    x = 1;\n    g();\n    return;\n}\n";
-    string src = parse_env.join4(&e, one, two, three, four);
-    ast.node mut* mod = parse_env.parse(&e, src);
-    assert(parse_env.node_text(&e, parse_env.body_stmt(mod, 0, 0))
+    string src = parse_env.join4(e, one, two, three, four);
+    ast.node mut* mod = parse_env.parse(e, src);
+    assert(parse_env.node_text(e, parse_env.body_stmt(mod, 0, 0))
            == "if (c) { g(); } else { h(); }");
-    assert(parse_env.node_text(&e, parse_env.body_stmt(mod, 0, 1)) == "while (c) { }");
-    assert(parse_env.node_text(&e, parse_env.body_stmt(mod, 0, 2))
+    assert(parse_env.node_text(e, parse_env.body_stmt(mod, 0, 1)) == "while (c) { }");
+    assert(parse_env.node_text(e, parse_env.body_stmt(mod, 0, 2))
            == "for (i32 mut i = 0; i < 4; i++) { }");
-    assert(parse_env.node_text(&e, parse_env.body_stmt(mod, 0, 2)->a) == "i32 mut i = 0");
-    assert(parse_env.node_text(&e, parse_env.body_stmt(mod, 0, 3)) == "for (i32 v : xs) { }");
-    assert(parse_env.node_text(&e, parse_env.body_stmt(mod, 0, 4))
+    assert(parse_env.node_text(e, parse_env.body_stmt(mod, 0, 2)->a) == "i32 mut i = 0");
+    assert(parse_env.node_text(e, parse_env.body_stmt(mod, 0, 3)) == "for (i32 v : xs) { }");
+    assert(parse_env.node_text(e, parse_env.body_stmt(mod, 0, 4))
            == "switch (c) { case 1: g(); default: }");
     ast.node mut* clause = parse_env.child(parse_env.body_stmt(mod, 0, 4), 0);
-    assert(parse_env.node_text(&e, clause) == "case 1: g();");
-    assert(parse_env.node_text(&e, clause->a) == "g();");
-    assert(parse_env.node_text(&e, parse_env.body_stmt(mod, 0, 5)) == "defer g();");
-    assert(parse_env.node_text(&e, parse_env.body_stmt(mod, 0, 6)) == "= 1;");
-    assert(parse_env.node_text(&e, parse_env.body_stmt(mod, 0, 7)) == "g();");
-    assert(parse_env.node_text(&e, parse_env.body_stmt(mod, 0, 8)) == "return;");
+    assert(parse_env.node_text(e, clause) == "case 1: g();");
+    assert(parse_env.node_text(e, clause->a) == "g();");
+    assert(parse_env.node_text(e, parse_env.body_stmt(mod, 0, 5)) == "defer g();");
+    assert(parse_env.node_text(e, parse_env.body_stmt(mod, 0, 6)) == "= 1;");
+    assert(parse_env.node_text(e, parse_env.body_stmt(mod, 0, 7)) == "g();");
+    assert(parse_env.node_text(e, parse_env.body_stmt(mod, 0, 8)) == "return;");
 }
 
-fn every_if_of_a_chain_ends_at_the_end_of_the_chain() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+fn every_if_of_a_chain_ends_at_the_end_of_the_chain(parse_env.env mut* e) void {
     ast.node mut* mod =
-        parse_env.parse(&e, "fn f() void {\n    if (a) { } else if (b) { } else { }\n}\n");
+        parse_env.parse(e, "fn f() void {\n    if (a) { } else if (b) { } else { }\n}\n");
     ast.node mut* outer = parse_env.body_stmt(mod, 0, 0);
-    assert(parse_env.node_text(&e, outer) == "if (a) { } else if (b) { } else { }");
-    assert(parse_env.node_text(&e, outer->c) == "if (b) { } else { }");
-    assert(parse_env.node_text(&e, outer->c->c) == "{ }");
+    assert(parse_env.node_text(e, outer) == "if (a) { } else if (b) { } else { }");
+    assert(parse_env.node_text(e, outer->c) == "if (b) { } else { }");
+    assert(parse_env.node_text(e, outer->c->c) == "{ }");
 }
 
-fn an_empty_case_body_is_an_empty_range_after_the_colon() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+fn an_empty_case_body_is_an_empty_range_after_the_colon(parse_env.env mut* e) void {
     // An empty case body has no token of its own, so it is the empty range
     // just after the ':' and stays inside its clause.
-    ast.node mut* mod = parse_env.parse(&e, "fn f() void {\n    switch (c) { case 1: }\n}\n");
+    ast.node mut* mod = parse_env.parse(e, "fn f() void {\n    switch (c) { case 1: }\n}\n");
     ast.node mut* clause = parse_env.child(parse_env.body_stmt(mod, 0, 0), 0);
-    assert(parse_env.range_of(&e, clause) == "2:18-2:25");
-    assert(parse_env.range_of(&e, clause->a) == "2:25-2:25");
-    assert(parse_env.node_text(&e, clause->a) == "");
+    assert(parse_env.range_of(e, clause) == "2:18-2:25");
+    assert(parse_env.range_of(e, clause->a) == "2:25-2:25");
+    assert(parse_env.node_text(e, clause->a) == "");
 }
 
-fn an_import_covers_its_semicolon_and_its_items() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
-    string src = parse_env.join3(&e, "import std.io;\n", "import util.strings as s;\n",
+fn an_import_covers_its_semicolon_and_its_items(parse_env.env mut* e) void {
+    string src = parse_env.join3(e, "import std.io;\n", "import util.strings as s;\n",
                                  "import a.b.{c, d as e};\n");
-    ast.node mut* mod = parse_env.parse(&e, src);
-    assert(parse_env.node_text(&e, parse_env.decl(mod, 0)) == "import std.io;");
-    assert(parse_env.node_text(&e, parse_env.decl(mod, 0)->a) == "std.io");
-    assert(parse_env.node_text(&e, parse_env.decl(mod, 1)) == "import util.strings as s;");
-    assert(parse_env.node_text(&e, parse_env.decl(mod, 1)->b) == "as s");
-    assert(parse_env.node_text(&e, parse_env.decl(mod, 2)) == "import a.b.{c, d as e};");
+    ast.node mut* mod = parse_env.parse(e, src);
+    assert(parse_env.node_text(e, parse_env.decl(mod, 0)) == "import std.io;");
+    assert(parse_env.node_text(e, parse_env.decl(mod, 0)->a) == "std.io");
+    assert(parse_env.node_text(e, parse_env.decl(mod, 1)) == "import util.strings as s;");
+    assert(parse_env.node_text(e, parse_env.decl(mod, 1)->b) == "as s");
+    assert(parse_env.node_text(e, parse_env.decl(mod, 2)) == "import a.b.{c, d as e};");
     // The path ends at its last segment. The item list is not part of it.
-    assert(parse_env.node_text(&e, parse_env.decl(mod, 2)->a) == "a.b");
-    assert(parse_env.node_text(&e, parse_env.child(parse_env.decl(mod, 2), 0)) == "c");
-    assert(parse_env.node_text(&e, parse_env.child(parse_env.decl(mod, 2), 1)) == "d as e");
+    assert(parse_env.node_text(e, parse_env.decl(mod, 2)->a) == "a.b");
+    assert(parse_env.node_text(e, parse_env.child(parse_env.decl(mod, 2), 0)) == "c");
+    assert(parse_env.node_text(e, parse_env.child(parse_env.decl(mod, 2), 1)) == "d as e");
 }
 
 fn a_struct_an_enum_and_an_extern_cover_their_whole_declaration() void {
@@ -291,16 +271,14 @@ fn a_struct_an_enum_and_an_extern_cover_their_whole_declaration() void {
     assert(parse_env.node_text(&e, parse_env.decl(mod, 2)) == "extern fn abort() void;");
 }
 
-fn break_and_continue_cover_their_semicolon() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+fn break_and_continue_cover_their_semicolon(parse_env.env mut* e) void {
     // A childless node's range is invisible to the walk below, since it has
     // no child to leave it, so it is asserted here by hand.
     string src = "fn f() void {\n    while (c) {\n        break;\n        continue;\n    }\n}\n";
-    ast.node mut* mod = parse_env.parse(&e, src);
+    ast.node mut* mod = parse_env.parse(e, src);
     ast.node mut* body = parse_env.body_stmt(mod, 0, 0)->b;
-    assert(parse_env.node_text(&e, parse_env.child(body, 0)) == "break;");
-    assert(parse_env.node_text(&e, parse_env.child(body, 1)) == "continue;");
+    assert(parse_env.node_text(e, parse_env.child(body, 0)) == "break;");
+    assert(parse_env.node_text(e, parse_env.child(body, 1)) == "continue;");
 }
 
 // ---- name ranges ---------------------------------------------------------------
@@ -330,39 +308,35 @@ fn a_name_range_is_the_name_token() void {
     assert(parse_env.name_range_of(&e, parse_env.decl(mod, 0)) == "1:5-1:10");
 }
 
-fn mentions_of_a_name_carry_its_range() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+fn mentions_of_a_name_carry_its_range(parse_env.env mut* e) void {
     string one = "import std.io;\nimport a.{b as c};\npoint d = point{.x = 1};\n";
     string two = "i32 e = f.g;\ni32 h = p->q;\nio.writer w = 0;\n";
     string three = "fn k(i32@ xs) void {\n    for (i32 v : xs) { }\n}\n";
-    ast.node mut* mod = parse_env.parse(&e, parse_env.join3(&e, one, two, three));
-    assert(parse_env.name_text(&e, parse_env.child(parse_env.decl(mod, 0)->a, 0)) == "std");
-    assert(parse_env.name_text(&e, parse_env.child(parse_env.decl(mod, 0)->a, 1)) == "io");
-    assert(parse_env.name_text(&e, parse_env.child(parse_env.decl(mod, 1), 0)) == "b");
-    assert(parse_env.name_text(&e, parse_env.child(parse_env.decl(mod, 1), 0)->a) == "c");
-    assert(parse_env.name_text(&e, parse_env.decl(mod, 2)->b->a) == "point");
-    assert(parse_env.name_text(&e, parse_env.child(parse_env.decl(mod, 2)->b->b, 0)) == "x");
-    assert(parse_env.name_text(&e, parse_env.decl(mod, 3)->b) == "g");
-    assert(parse_env.name_text(&e, parse_env.decl(mod, 3)->b->a) == "f");
-    assert(parse_env.name_text(&e, parse_env.decl(mod, 4)->b) == "q");
-    assert(parse_env.name_text(&e, parse_env.decl(mod, 5)->a->a) == "io");
-    assert(parse_env.name_text(&e, parse_env.decl(mod, 5)->a->a->a) == "writer");
-    assert(parse_env.name_text(&e, parse_env.body_stmt(mod, 6, 0)) == "v");
+    ast.node mut* mod = parse_env.parse(e, parse_env.join3(e, one, two, three));
+    assert(parse_env.name_text(e, parse_env.child(parse_env.decl(mod, 0)->a, 0)) == "std");
+    assert(parse_env.name_text(e, parse_env.child(parse_env.decl(mod, 0)->a, 1)) == "io");
+    assert(parse_env.name_text(e, parse_env.child(parse_env.decl(mod, 1), 0)) == "b");
+    assert(parse_env.name_text(e, parse_env.child(parse_env.decl(mod, 1), 0)->a) == "c");
+    assert(parse_env.name_text(e, parse_env.decl(mod, 2)->b->a) == "point");
+    assert(parse_env.name_text(e, parse_env.child(parse_env.decl(mod, 2)->b->b, 0)) == "x");
+    assert(parse_env.name_text(e, parse_env.decl(mod, 3)->b) == "g");
+    assert(parse_env.name_text(e, parse_env.decl(mod, 3)->b->a) == "f");
+    assert(parse_env.name_text(e, parse_env.decl(mod, 4)->b) == "q");
+    assert(parse_env.name_text(e, parse_env.decl(mod, 5)->a->a) == "io");
+    assert(parse_env.name_text(e, parse_env.decl(mod, 5)->a->a->a) == "writer");
+    assert(parse_env.name_text(e, parse_env.body_stmt(mod, 6, 0)) == "v");
 }
 
-fn nodes_without_a_name_carry_an_empty_name_range() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+fn nodes_without_a_name_carry_an_empty_name_range(parse_env.env mut* e) void {
     // A node no name declares or mentions carries the empty range.
-    ast.node mut* mod = parse_env.parse(&e, "i32 a = 1 + 2;\nstring b = \"hi\";\n");
+    ast.node mut* mod = parse_env.parse(e, "i32 a = 1 + 2;\nstring b = \"hi\";\n");
     ast.node mut* sum = parse_env.decl(mod, 0)->b;
     assert(sum->name_loc.line == 0);
     assert(sum->name_loc.col == 0);
-    assert(parse_env.name_text(&e, sum) == "");
-    assert(parse_env.name_text(&e, sum->a) == "");
-    assert(parse_env.name_text(&e, parse_env.decl(mod, 0)->a) == "");
-    assert(parse_env.name_text(&e, parse_env.decl(mod, 1)->b) == "");
+    assert(parse_env.name_text(e, sum) == "");
+    assert(parse_env.name_text(e, sum->a) == "");
+    assert(parse_env.name_text(e, parse_env.decl(mod, 0)->a) == "");
+    assert(parse_env.name_text(e, parse_env.decl(mod, 1)->b) == "");
 }
 
 // ---- the invariants over a corpus ----------------------------------------------
@@ -463,11 +437,9 @@ fn every_node_of_a_corpus_keeps_its_children_inside_itself() void {
 // A `finish` that is dropped shows up as a child leaving its parent, which is
 // what the walk reports. This holds the walk itself against a tree that
 // violates the invariant, so a green walk means something.
-fn the_walk_reports_a_child_that_leaves_its_parent() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
+fn the_walk_reports_a_child_that_leaves_its_parent(parse_env.env mut* e) void {
     parse_env.walk_begin();
-    ast.node mut* mod = parse_env.parse(&e, "i32 a = 1 + 2;\n");
+    ast.node mut* mod = parse_env.parse(e, "i32 a = 1 + 2;\n");
     // The declaration's range is shortened to its first token, which is what
     // a missed finish leaves behind. Its initializer then leaves it.
     ast.node mut* d0 = parse_env.decl(mod, 0);
@@ -479,42 +451,40 @@ fn the_walk_reports_a_child_that_leaves_its_parent() void {
     assert(parse_env.violations() == "");
 }
 
-fn a_grouped_type_keeps_its_parentheses_and_inner_range() void {
-    parse_env.env mut e = parse_env.create();
-    defer parse_env.free(&e);
-    ast.node mut* mod = parse_env.parse(&e, "(fn (i32) i32)[2] TABLE = {};\n");
-    assert(parse_env.errors(&e) == 0);
+fn a_grouped_type_keeps_its_parentheses_and_inner_range(parse_env.env mut* e) void {
+    ast.node mut* mod = parse_env.parse(e, "(fn (i32) i32)[2] TABLE = {};\n");
+    assert(parse_env.errors(e) == 0);
     ast.node* t = parse_env.decl(mod, 0)->a;
-    assert(parse_env.range_of(&e, t) == "1:1-1:18");
-    assert(parse_env.range_of(&e, t->a) == "1:2-1:14");
+    assert(parse_env.range_of(e, t) == "1:1-1:18");
+    assert(parse_env.range_of(e, t->a) == "1:2-1:14");
 }
 
 fn main() i32 {
-    a_grouped_type_keeps_its_parentheses_and_inner_range();
-    a_declaration_starts_at_its_type();
-    an_operator_node_is_at_its_operator();
-    unary_and_postfix_nodes_are_at_their_own_token();
+    run(a_grouped_type_keeps_its_parentheses_and_inner_range);
+    run(a_declaration_starts_at_its_type);
+    run(an_operator_node_is_at_its_operator);
+    run(unary_and_postfix_nodes_are_at_their_own_token);
     a_statement_starts_at_its_keyword_or_target();
-    a_type_and_its_suffixes_carry_their_own_positions();
-    a_declaration_covers_its_terminator();
+    run(a_type_and_its_suffixes_carry_their_own_positions);
+    run(a_declaration_covers_its_terminator);
     the_module_covers_the_whole_file();
-    an_operator_node_runs_from_its_operator_to_its_last_operand();
-    postfix_and_unary_nodes_cover_their_own_tokens();
-    a_parenthesized_expression_does_not_cover_its_parentheses();
-    literal_and_keyword_expressions_cover_their_whole_form();
-    a_type_covers_its_suffixes_and_markers();
-    a_statement_covers_its_block_or_semicolon();
-    every_if_of_a_chain_ends_at_the_end_of_the_chain();
-    an_empty_case_body_is_an_empty_range_after_the_colon();
-    an_import_covers_its_semicolon_and_its_items();
+    run(an_operator_node_runs_from_its_operator_to_its_last_operand);
+    run(postfix_and_unary_nodes_cover_their_own_tokens);
+    run(a_parenthesized_expression_does_not_cover_its_parentheses);
+    run(literal_and_keyword_expressions_cover_their_whole_form);
+    run(a_type_covers_its_suffixes_and_markers);
+    run(a_statement_covers_its_block_or_semicolon);
+    run(every_if_of_a_chain_ends_at_the_end_of_the_chain);
+    run(an_empty_case_body_is_an_empty_range_after_the_colon);
+    run(an_import_covers_its_semicolon_and_its_items);
     a_struct_an_enum_and_an_extern_cover_their_whole_declaration();
-    break_and_continue_cover_their_semicolon();
+    run(break_and_continue_cover_their_semicolon);
     declarations_carry_the_range_of_their_name();
     a_name_range_is_the_name_token();
-    mentions_of_a_name_carry_its_range();
-    nodes_without_a_name_carry_an_empty_name_range();
+    run(mentions_of_a_name_carry_its_range);
+    run(nodes_without_a_name_carry_an_empty_name_range);
     every_node_of_a_corpus_keeps_its_children_inside_itself();
-    the_walk_reports_a_child_that_leaves_its_parent();
+    run(the_walk_reports_a_child_that_leaves_its_parent);
     parse_env.walk_free();
     println("ok");
     return 0;

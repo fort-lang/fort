@@ -9,20 +9,23 @@
 /// be emitted for whatever one of them happens to name.
 import fort.gen;
 import gen_env;
-import std.strbuf;
+
+// The steps of the test, which end in the panic. They read `e` through a pointer, so the use
+// rule of `move` and `del` (D17.21) asks no proof of their reads after a call.
+fn trigger(gen_env.env mut* e) void {
+    string src = gen_env.join2(e, "extern fn puts(char* s) i32;\n",
+                               "fn main() i32 {\n    return 0;\n}\n");
+    assert(gen_env.open_src(e, src));
+    gen.gen_use_extern(&e->g, gen_env.sym_main(e, "puts"));
+    assert(e->g.externs.len == 1);
+    println(gen.syms_at(&e->g.externs, 0)->name);
+    gen.syms_at(&e->g.externs, 1);
+}
 
 fn main() i32 {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
-    strbuf.append(&b, "extern fn puts(char* s) i32;\n");
-    strbuf.append(&b, "fn main() i32 {\n    return 0;\n}\n");
-    assert(gen_env.open_src(&e, strbuf.view(&b)));
-    gen.gen_use_extern(&e.g, gen_env.sym_main(&e, "puts"));
-    assert(e.g.externs.len == 1);
-    println(gen.syms_at(&e.g.externs, 0)->name);
-    gen.syms_at(&e.g.externs, 1);
+    trigger(&e);
     return 0;
 }

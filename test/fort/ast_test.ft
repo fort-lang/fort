@@ -83,11 +83,17 @@ fn arena_starts_empty() void {
     assert(ast.ast_arena_count(&e.arena) == 0);
 }
 
-fn arena_hands_out_zeroed_nodes() void {
+// Makes a `env`, runs `body` on it, and releases it. `body` reads the value through a pointer, so
+// the use rule of `move` and `del` (D17.21) asks no proof of its reads after a call.
+fn run(fn (env mut*) void body) void {
     env mut e = open();
     defer close(&e);
-    ast.node mut* n = ast.ast_new(&e.arena, ast.ast_kind.k_int, at(3, 7));
-    assert(ast.ast_arena_count(&e.arena) == 1);
+    body(&e);
+}
+
+fn arena_hands_out_zeroed_nodes(env mut* e) void {
+    ast.node mut* n = ast.ast_new(&e->arena, ast.ast_kind.k_int, at(3, 7));
+    assert(ast.ast_arena_count(&e->arena) == 1);
     assert(n->kind == ast.ast_kind.k_int);
     assert(n->loc.line == 3);
     assert(n->loc.col == 7);
@@ -102,48 +108,42 @@ fn arena_hands_out_zeroed_nodes() void {
     assert(n->tail_loc.line == 0);
 }
 
-fn arena_nodes_are_stable_while_it_grows() void {
-    env mut e = open();
-    defer close(&e);
+fn arena_nodes_are_stable_while_it_grows(env mut* e) void {
     // The arena owns a pointer per node, so a node never moves however many
     // are handed out after it. The first one still reads back its own value
     // after the vector has grown several times.
-    ast.node mut* first = int_lit(&e, 11);
+    ast.node mut* first = int_lit(e, 11);
     u64 mut i = 0;
     while (i < 500) {
-        ast.node mut* n = int_lit(&e, i);
+        ast.node mut* n = int_lit(e, i);
         assert(n->ival == i);
         i += 1;
     }
-    assert(ast.ast_arena_count(&e.arena) == 501);
+    assert(ast.ast_arena_count(&e->arena) == 501);
     assert(first->ival == 11);
     assert(first->kind == ast.ast_kind.k_int);
 }
 
-fn arena_free_empties_and_is_reusable() void {
-    env mut e = open();
-    defer close(&e);
+fn arena_free_empties_and_is_reusable(env mut* e) void {
     u64 mut i = 0;
     while (i < 40) {
-        ast.ast_push(node(&e, ast.ast_kind.k_block), int_lit(&e, i));
+        ast.ast_push(node(e, ast.ast_kind.k_block), int_lit(e, i));
         i += 1;
     }
-    assert(ast.ast_arena_count(&e.arena) == 80);
-    ast.ast_arena_free(&e.arena);
-    assert(ast.ast_arena_count(&e.arena) == 0);
+    assert(ast.ast_arena_count(&e->arena) == 80);
+    ast.ast_arena_free(&e->arena);
+    assert(ast.ast_arena_count(&e->arena) == 0);
     // The arena is usable afterwards, which is what makes a second analysis
     // in one process independent of the first.
-    ast.node mut* n = int_lit(&e, 5);
-    assert(ast.ast_arena_count(&e.arena) == 1);
+    ast.node mut* n = int_lit(e, 5);
+    assert(ast.ast_arena_count(&e->arena) == 1);
     assert(n->ival == 5);
 }
 
 // `arena{}` is an empty arena, ready for use without an init function.
-fn a_fresh_arena_is_empty() void {
-    env mut e = open();
-    defer close(&e);
-    assert(ast.ast_arena_count(&e.arena) == 0);
-    assert(int_lit(&e, 1)->ival == 1);
+fn a_fresh_arena_is_empty(env mut* e) void {
+    assert(ast.ast_arena_count(&e->arena) == 0);
+    assert(int_lit(e, 1)->ival == 1);
 }
 
 // The arena owns every node, every node's list and the vector of nodes
@@ -185,6 +185,17 @@ fn moved(u64 early, u64 late, u64 last) u64 {
     return other;
 }
 
+// The address of the child list of `n` and of the node vector of the arena of `e`. The test below
+// lends `e` to each call, so the use rule of `move` and `del` (D17.21) asks a proof of each read of
+// `e` or through a pointer after the call; these reads stand in frames of their own.
+fn list_address(ast.node* n) u64 {
+    return cast(n->list.items.ptr, u64);
+}
+
+fn nodes_address(env* e) u64 {
+    return cast(e->arena.nodes.ptr, u64);
+}
+
 fn the_nodes_and_their_lists_are_released_with_the_arena() void {
     u64[3] mut break_at = {};
     u64[3] mut list_at = {};
@@ -211,8 +222,8 @@ fn the_nodes_and_their_lists_are_released_with_the_arena() void {
         // The addresses are read while the arena still holds them, the system view
         // after it is freed, which is where a round's keeping shows.
         if (slot < 3) {
-            list_at[slot] = cast(parent->list.items.ptr, u64);
-            nodes_at[slot] = cast(e.arena.nodes.ptr, u64);
+            list_at[slot] = list_address(parent);
+            nodes_at[slot] = nodes_address(&e);
         }
         close(&e);
         if (slot < 3) {
@@ -231,13 +242,11 @@ fn the_nodes_and_their_lists_are_released_with_the_arena() void {
 
 // ---- children ------------------------------------------------------------------
 
-fn children_are_pushed_and_read_back() void {
-    env mut e = open();
-    defer close(&e);
-    ast.node mut* parent = node(&e, ast.ast_kind.k_block);
+fn children_are_pushed_and_read_back(env mut* e) void {
+    ast.node mut* parent = node(e, ast.ast_kind.k_block);
     assert(ast.ast_len(parent) == 0);
-    ast.node mut* first = int_lit(&e, 1);
-    ast.node mut* second = int_lit(&e, 2);
+    ast.node mut* first = int_lit(e, 1);
+    ast.node mut* second = int_lit(e, 2);
     ast.ast_push(parent, first);
     ast.ast_push(parent, second);
     assert(ast.ast_len(parent) == 2);
@@ -246,7 +255,7 @@ fn children_are_pushed_and_read_back() void {
     // The list grows past its first capacity and keeps every child in order.
     u64 mut i = 2;
     while (i < 100) {
-        ast.ast_push(parent, int_lit(&e, i));
+        ast.ast_push(parent, int_lit(e, i));
         i += 1;
     }
     assert(ast.ast_len(parent) == 100);
@@ -443,15 +452,13 @@ fn dump_of_a_declaration_and_of_a_module() void {
     assert(dump(&e, fn_decl) == "(extern-fn (void) abort (params) nil)");
 }
 
-fn dump_of_a_compile_time_condition_keeps_both_branches() void {
-    env mut e = open();
-    defer close(&e);
-    ast.node mut* branch = node(&e, ast.ast_kind.k_compile_if);
-    branch->a = node(&e, ast.ast_kind.k_bool);
+fn dump_of_a_compile_time_condition_keeps_both_branches(env mut* e) void {
+    ast.node mut* branch = node(e, ast.ast_kind.k_compile_if);
+    branch->a = node(e, ast.ast_kind.k_bool);
     branch->a->ival = 1;
-    branch->b = node(&e, ast.ast_kind.k_block);
-    branch->c = node(&e, ast.ast_kind.k_block);
-    assert(dump(&e, branch) == "(compile-if (bool true) (block) (block))");
+    branch->b = node(e, ast.ast_kind.k_block);
+    branch->c = node(e, ast.ast_kind.k_block);
+    assert(dump(e, branch) == "(compile-if (bool true) (block) (block))");
 }
 
 fn dump_of_a_case_clause_and_a_designator() void {
@@ -474,12 +481,12 @@ fn dump_of_a_case_clause_and_a_designator() void {
 
 fn main() i32 {
     arena_starts_empty();
-    arena_hands_out_zeroed_nodes();
-    arena_nodes_are_stable_while_it_grows();
-    arena_free_empties_and_is_reusable();
-    a_fresh_arena_is_empty();
+    run(arena_hands_out_zeroed_nodes);
+    run(arena_nodes_are_stable_while_it_grows);
+    run(arena_free_empties_and_is_reusable);
+    run(a_fresh_arena_is_empty);
     the_nodes_and_their_lists_are_released_with_the_arena();
-    children_are_pushed_and_read_back();
+    run(children_are_pushed_and_read_back);
     marks_are_read_from_the_flags();
     every_kind_has_a_name();
     dump_of_null_is_nil();
@@ -491,7 +498,7 @@ fn main() i32 {
     dump_of_named_string_void_and_function_types();
     dump_keeps_the_position_of_absent_children();
     dump_of_a_declaration_and_of_a_module();
-    dump_of_a_compile_time_condition_keeps_both_branches();
+    run(dump_of_a_compile_time_condition_keeps_both_branches);
     dump_of_a_case_clause_and_a_designator();
     println("ok");
     return 0;

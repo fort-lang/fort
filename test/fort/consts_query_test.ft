@@ -247,27 +247,33 @@ fn an_integer_reads_back_as_its_decimal() void {
     defer strbuf.free(&b);
     u64 mut k = 0;
     while (k < grid_len()) {
-        consts.cval v = grid_at(k);
-        string text = text_of(v, &b);
-        assert(text.len > 0);
-        string mut digits = text;
-        if (v.neg) {
-            assert(text[0] == '-');
-            digits = text[1..text.len];
-        } else {
-            assert(text[0] != '-');
-        }
-        u64 mut parsed = 0;
-        assert(str.parse_u64(digits, 10, &parsed));
-        assert(parsed == v.mag);
-        // No leading zero, and the digits are digits.
-        assert(digits.len == 1 || digits[0] != '0');
-        u64 mut j = 0;
-        while (j < digits.len) {
-            assert(str.is_digit(digits[j]));
-            j += 1;
-        }
+        integer_reads_back(grid_at(k), &b);
         k += 1;
+    }
+}
+
+// Asserts that the text of `v` is its decimal behind its sign. The test above
+// lends its buffer to each call, so the use rule of `move` and `del` (D17.21) asks a proof of
+// each read through a pointer after the call; the reads stand in this frame.
+fn integer_reads_back(consts.cval v, strbuf.str_buf mut* b) void {
+    string text = text_of(v, b);
+    assert(text.len > 0);
+    string mut digits = text;
+    if (v.neg) {
+        assert(text[0] == '-');
+        digits = text[1..text.len];
+    } else {
+        assert(text[0] != '-');
+    }
+    u64 mut parsed = 0;
+    assert(str.parse_u64(digits, 10, &parsed));
+    assert(parsed == v.mag);
+    // No leading zero, and the digits are digits.
+    assert(digits.len == 1 || digits[0] != '0');
+    u64 mut j = 0;
+    while (j < digits.len) {
+        assert(str.is_digit(digits[j]));
+        j += 1;
     }
 }
 
@@ -320,22 +326,30 @@ fn every_char_literal_is_escaped_by_d2_8() void {
     defer strbuf.free(&model);
     u64 mut code = 0;
     while (code <= 255) {
-        string text = text_of(consts.cv_from_char(code), &b);
-        assert(text.len >= 3);
-        assert(text[0] == '\'');
-        assert(text[text.len - 1] == '\'');
-        string body = text[1..text.len - 1];
-        assert(body == escape_model(code, '\'', &model));
-        // A literal never carries a bare quote, a newline or a NUL, so a
-        // diagnostic holding one stays on its line.
-        u64 mut j = 0;
-        while (j < body.len) {
-            assert(body[j] != '\n');
-            assert(body[j] != '\r');
-            assert(cast(body[j], u64) != 0);
-            j += 1;
-        }
+        char_is_escaped(code, &b, &model);
         code += 1;
+    }
+}
+
+// Asserts that the char literal of `code` is the escape of the model between single quotes. The
+// test above
+// lends its buffers to each call, so the use rule of `move` and `del` (D17.21) asks a proof of
+// each read through a pointer after the call; the reads stand in this frame.
+fn char_is_escaped(u64 code, strbuf.str_buf mut* b, strbuf.str_buf mut* model) void {
+    string text = text_of(consts.cv_from_char(code), b);
+    assert(text.len >= 3);
+    assert(text[0] == '\'');
+    assert(text[text.len - 1] == '\'');
+    string body = text[1..text.len - 1];
+    assert(body == escape_model(code, '\'', model));
+    // A literal never carries a bare quote, a newline or a NUL, so a
+    // diagnostic holding one stays on its line.
+    u64 mut j = 0;
+    while (j < body.len) {
+        assert(body[j] != '\n');
+        assert(body[j] != '\r');
+        assert(cast(body[j], u64) != 0);
+        j += 1;
     }
 }
 
@@ -357,14 +371,20 @@ fn every_byte_of_a_string_is_escaped_by_d2_8() void {
     }
     string all = strbuf.view(&bytes);
     assert(all.len == 256);
-    string text = text_of(consts.cv_from_str(all), &b);
+    bytes_are_escaped(text_of(consts.cv_from_str(all), &b), &model);
+}
+
+// Asserts that `text` is the escapes of the bytes 0 to 255 between double quotes. The test above
+// lends its buffers to each call, so the use rule of `move` and `del` (D17.21) asks a proof of
+// each read through a pointer after the call; the reads stand in this frame.
+fn bytes_are_escaped(string text, strbuf.str_buf mut* model) void {
     assert(text[0] == '"');
     assert(text[text.len - 1] == '"');
     // The body is the concatenation of the escapes, byte by byte.
     u64 mut at = 1;
-    code = 0;
+    u64 mut code = 0;
     while (code <= 255) {
-        string want = escape_model(code, '"', &model);
+        string want = escape_model(code, '"', model);
         assert(at + want.len <= text.len);
         assert(text[at..at + want.len] == want);
         at += want.len;

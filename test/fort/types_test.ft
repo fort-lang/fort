@@ -320,29 +320,35 @@ fn the_levels_of_a_chain_of_suffixes() void {
     assert(types.type_levels(types_env.type_of(&e, "i32@[4]")) == 1);
 }
 
-fn ref_at_walks_the_chain_outermost_first() void {
+// Makes a `types_env.env`, runs `body` on it, and releases it. `body` reads the value through a
+// pointer, so the use rule of `move` and `del` (D17.21) asks no proof of its reads after a call.
+fn run(fn (types_env.env mut*) void body) void {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
     defer types_env.free(&e);
-    types.node* t = types_env.type_of(&e, "node mut* own mut@ own");
+    body(&e);
+}
+
+fn ref_at_walks_the_chain_outermost_first(types_env.env mut* e) void {
+    types.node* t = types_env.type_of(e, "node mut* own mut@ own");
     assert(types.type_ref_at(t, 1) == t);
     assert(types.type_ref_at(t, 2) == t->elem);
     assert(types.type_ref_at(t, 3) == null);
     // A fixed array is transparent: the reference behind it is level 1.
-    types.node* arr = types_env.type_of(&e, "node* own[4]");
+    types.node* arr = types_env.type_of(e, "node* own[4]");
     assert(types.type_ref_at(arr, 1) == arr->elem);
     assert(types.type_ref_at(arr, 1)->is_own);
     assert(types.type_ref_at(arr, 2) == null);
     // `string` carries an `own` mark but adds no level.
-    assert(types.type_ref_at(types_env.type_of(&e, "string own"), 1)->is_own);
-    assert(types.type_ref_at(types_env.type_of(&e, "string own"), 2) == null);
+    assert(types.type_ref_at(types_env.type_of(e, "string own"), 1)->is_own);
+    assert(types.type_ref_at(types_env.type_of(e, "string own"), 2) == null);
     // A `void*` is the reference at level 1 and its target has no type, so the
     // walk stops there.
-    assert(types.type_ref_at(types_env.type_of(&e, "void* own"), 1)->is_own);
-    assert(types.type_ref_at(types_env.type_of(&e, "void mut*"), 1)->is_mut);
-    assert(types.type_ref_at(types_env.type_of(&e, "void mut*"), 2) == null);
-    assert(types.type_ref_at(types_env.type_of(&e, "i32"), 1) == null);
-    assert(types.type_ref_at(types_env.type_of(&e, "i32[3][4]"), 1) == null);
+    assert(types.type_ref_at(types_env.type_of(e, "void* own"), 1)->is_own);
+    assert(types.type_ref_at(types_env.type_of(e, "void mut*"), 1)->is_mut);
+    assert(types.type_ref_at(types_env.type_of(e, "void mut*"), 2) == null);
+    assert(types.type_ref_at(types_env.type_of(e, "i32"), 1) == null);
+    assert(types.type_ref_at(types_env.type_of(e, "i32[3][4]"), 1) == null);
 }
 
 fn level_mut_reports_the_level_of_each_reference() void {
@@ -387,7 +393,7 @@ fn main() i32 {
     same_shape_ignores_mut_and_own();
     println("identity ok");
     the_levels_of_a_chain_of_suffixes();
-    ref_at_walks_the_chain_outermost_first();
+    run(ref_at_walks_the_chain_outermost_first);
     level_mut_reports_the_level_of_each_reference();
     println("levels ok");
     println("ok");

@@ -14,6 +14,7 @@ import fort.diag;
 import fort.gen;
 import gen_env;
 import fort.runtime_sig;
+import std.str;
 import std.strbuf;
 import fort.types;
 
@@ -66,16 +67,22 @@ fn an_array_element_is_reached_with_two_indices() void {
                         "  %t0 = getelementptr inbounds [3 x i32], ptr %v_arr.0, i64 0, i64 %i\n");
 }
 
-fn an_element_behind_a_pointer_is_reached_with_one() void {
+// Makes a `gen_env.env`, runs `body` on it, and releases it. `body` reads the value through a
+// pointer, so the use rule of `move` and `del` (D17.21) asks no proof of its reads after a call.
+fn run(fn (gen_env.env mut*) void body) void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
-    assert(open_shapes(&e));
-    gen_env.begin(&e);
+    body(&e);
+}
+
+fn an_element_behind_a_pointer_is_reached_with_one(gen_env.env mut* e) void {
+    assert(open_shapes(e));
+    gen_env.begin(e);
     // the element shape names the element type.
-    types.node* span_type = gen_env.type_of(&e, "v_span");
-    gen.gen_gep_element(&e.g, span_type->elem, ptr_to("%p"), operand("i64", "%i"));
-    gen_env.expect_text(gen_env.body(&e),
+    types.node* span_type = gen_env.type_of(e, "v_span");
+    gen.gen_gep_element(&e->g, span_type->elem, ptr_to("%p"), operand("i64", "%i"));
+    gen_env.expect_text(gen_env.body(e),
                         "  %t0 = getelementptr inbounds i32, ptr %p, i64 %i\n");
 }
 
@@ -214,10 +221,7 @@ fn a_switch_is_one_terminator_written_over_several_lines() void {
 
 // ---- the checks and their failure blocks -----------------------------------------------
 
-fn a_failure_block_no_branch_reaches_is_written_the_same_way() void {
-    gen_env.env mut e = gen_env.env{};
-    gen_env.open(&e);
-    defer gen_env.close(&e);
+fn a_failure_block_no_branch_reaches_is_written_the_same_way(gen_env.env mut* e) void {
     // The default of a `switch` over an enum with no `default` clause arrives
     // by the switch's own default edge. So the block is emitted with no
     // branch of its own.
@@ -225,20 +229,15 @@ fn a_failure_block_no_branch_reaches_is_written_the_same_way() void {
     gen.gen_args mut args = gen.gen_args_init();
     defer gen.gen_args_free(&args);
     gen.gen_args_add(&args, operand("i32", "%v"));
-    gen.gen_fail_block(&e.g, label, runtime_sig.rt_entry.rt_fail_enum, &args, where_at());
-    gen_env.expect_text(gen_env.body(&e), "");
+    gen.gen_fail_block(&e->g, label, runtime_sig.rt_entry.rt_fail_enum, &args, where_at());
+    gen_env.expect_text(gen_env.body(e), "");
     gen_env.expect_text(
-        gen_env.fail(&e),
-        gen_env.join3(&e, "\nL0:\n",
+        gen_env.fail(e),
+        gen_env.join3(e, "\nL0:\n",
                       "  call void @\"std.rt.fail_enum\"(i32 %v, ptr @.file.0, i32 7, i32 3)\n",
                       "  unreachable\n"));
     // no attribute is put on a failure call site.
-    string text = gen_env.fail(&e);
-    u64 mut i = 0;
-    while (i < text.len) {
-        assert(text[i] != '#');
-        i += 1;
-    }
+    assert(str.index_of(gen_env.fail(e), '#') < 0);
 }
 
 // ---- the private data ----------------------------------------------------------
@@ -392,7 +391,7 @@ fn an_unlowered_construct_is_a_diagnostic_and_never_wrong_code() void {
 
 fn main() i32 {
     an_array_element_is_reached_with_two_indices();
-    an_element_behind_a_pointer_is_reached_with_one();
+    run(an_element_behind_a_pointer_is_reached_with_one);
     a_field_is_reached_with_two_i32_indices();
     the_pointer_is_field_zero_of_a_header();
     a_header_is_written_pointer_first();
@@ -402,7 +401,7 @@ fn main() i32 {
     println("shapes ok");
     a_branch_ends_a_block_and_a_label_opens_one();
     a_switch_is_one_terminator_written_over_several_lines();
-    a_failure_block_no_branch_reaches_is_written_the_same_way();
+    run(a_failure_block_no_branch_reaches_is_written_the_same_way);
     println("blocks ok");
     a_file_is_numbered_once_however_often_it_is_named();
     a_string_constant_is_never_deduplicated_by_content();

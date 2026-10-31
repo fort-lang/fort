@@ -291,14 +291,20 @@ fn a_byte_a_quoted_name_cannot_hold_is_a_hex_pair() void {
     gen_env.expect_text(strbuf.view(&b), "\" ~\\7F\"");
 }
 
-fn a_field_takes_the_index_of_its_declaration() void {
+// Makes a `gen_env.env`, runs `body` on it, and releases it. `body` reads the value through a
+// pointer, so the use rule of `move` and `del` (D17.21) asks no proof of its reads after a call.
+fn run(fn (gen_env.env mut*) void body) void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
-    assert(open_types(&e));
+    body(&e);
+}
+
+fn a_field_takes_the_index_of_its_declaration(gen_env.env mut* e) void {
+    assert(open_types(e));
     // This map gives each field symbol its declaration
     // index. The named type writes fields in that order.
-    ast.sym* point = gen_env.sym_main(&e, "point");
+    ast.sym* point = gen_env.sym_main(e, "point");
     ast.node* decl = point->node;
     u64 mut k = 0;
     assert(gen.gen_field_index(ast.ast_child(decl, 0)->sym, &k));
@@ -307,7 +313,7 @@ fn a_field_takes_the_index_of_its_declaration() void {
     assert(k == 1);
     // A symbol that is not a field of a declaration has no index.
     assert(!gen.gen_field_index(null, &k));
-    assert(!gen.gen_field_index(gen_env.sym_main(&e, "helper"), &k));
+    assert(!gen.gen_field_index(gen_env.sym_main(e, "helper"), &k));
 }
 
 // ---- values and the instructions that shape them -----------------
@@ -474,7 +480,7 @@ fn main() i32 {
     an_extern_name_is_unmangled_and_unquoted();
     a_name_llvm_admits_bare_is_written_bare();
     a_byte_a_quoted_name_cannot_hold_is_a_hex_pair();
-    a_field_takes_the_index_of_its_declaration();
+    run(a_field_takes_the_index_of_its_declaration);
     println("names ok");
     an_instruction_result_is_a_temporary_in_emission_order();
     a_comparison_is_an_icmp_whose_result_is_one_bit();
