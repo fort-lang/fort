@@ -6,6 +6,7 @@
 import fort.containers;
 import fort.json;
 import std.strbuf;
+import std.strmap;
 
 // The lexer and parser share this error limit. Later passes do not use it.
 u64 MAX_PER_FILE = 20;
@@ -63,6 +64,21 @@ struct record {
     string msg;
 }
 
+/// The text of each source file by its path, which the source lookup of the text form answers
+/// from. The caller that installs the lookup owns the store and fills it.
+struct sources {
+    containers.pool pool; // the paths and the texts, and every other text of the owner
+    strmap.str_map index; // a path -> the position of its text in `texts`
+    containers.str_vec texts;
+}
+
+/// Frees the texts, the paths and the pool of `store`.
+fn free_sources(sources mut* store) void {
+    strmap.free(&store->index);
+    containers.str_free(&store->texts);
+    containers.pool_free(&store->pool);
+}
+
 /// The diagnostics and output modes for one analysis. `sink{}` is an empty sink.
 struct sink {
     containers.pool pool;
@@ -78,11 +94,10 @@ struct sink {
     u64 mute_file_errors;
     // Answers the bytes of a file for the lines under a header line. Null
     // shows no lines. The sink passes `lookup_ctx` back and does not read it.
-    // The context is a `void*`: a context that holds pointers reaches the
-    // lookup through a read-only view, and its pointers can still be `mut`,
-    // while a `mut` cast of it to `void mut*` would hide them (D3.14).
-    fn (void*, string, string mut*) bool lookup;
-    void* lookup_ctx;
+    // The context has a type of this module, so no cast gives it back: a cast
+    // from `void*` to a type that holds a `mut` pointer is an error (D3.14).
+    fn (sources mut*, string, string mut*) bool lookup;
+    sources mut* lookup_ctx;
 }
 
 /// The empty sink; allocates nothing and writes nothing until set_text.
@@ -149,7 +164,8 @@ fn set_text(sink mut* s, bool on) void {
 /// sink asks `lookup` for the bytes of the diagnostic's file and shows the line
 /// of its range. A false answer shows no line. `ctx` must stay valid while the
 /// sink writes text.
-fn set_lookup(sink mut* s, fn (void*, string, string mut*) bool lookup, void* ctx) void {
+fn set_lookup(sink mut* s, fn (sources mut*, string, string mut*) bool lookup, sources mut* ctx)
+    void {
     s->lookup = lookup;
     s->lookup_ctx = ctx;
 }

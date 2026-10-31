@@ -170,6 +170,8 @@ struct checker {
     u64 errors;        // checker diagnostics, muted ones included
 
     // ---- the module and the function being checked ----
+    // The module set of the program, whose modules the module bindings name (module_of).
+    modules.module_set* set;
     modules.module* module;
     ast.sym mut* module_sym;
     ast.sym mut* fn_sym; // the function whose body is being checked
@@ -212,6 +214,12 @@ struct checker {
     sized_check mut@ own sized;
     u64 sized_len;
     bool sized_draining; // sized_drain is active
+}
+
+/// Gives the checker the module set whose modules its module bindings name. check_stmt's
+/// check_program and check_outside call it; a caller that checks one module calls it first.
+fn set_modules(checker mut* ck, modules.module_set* set) void {
+    ck->set = set;
 }
 
 /// Prepares a checker that reports through `s` and defines the universe symbols.
@@ -537,12 +545,12 @@ fn sym_fail(checker mut* ck, ast.sym mut* s) void {
 // record is mutable, because the resolution writes the type and the flags of
 // the declaration it looked up. A binding holds an immutable view of the node,
 // and `ast.node.sym` carries the `mut` through it, so no cast adds one.
-fn sym_of_binding(scope.binding* b) ast.sym mut* {
+fn sym_of_binding(checker* ck, scope.binding* b) ast.sym mut* {
     if (b == null) {
         return null;
     }
     if (b->kind == scope.bind_kind.b_module) {
-        modules.module* m = cast(b->module, modules.module*);
+        modules.module* m = module_of(ck, b);
         if (m != null && m->ast != null) {
             return m->ast->sym;
         }
@@ -665,22 +673,19 @@ fn error_unknown_name(checker mut* ck, string name, diag.loc at) void {
 
 // ---- types -------------------------------------------------------------------------
 
-/// The declaring symbol of a struct or enum type, which the checker stored in
-/// the node when it made it (types.ft keeps it opaque).
-fn nominal_sym(types.node* t) ast.sym* {
-    return cast(t->decl, ast.sym*);
+/// The declaring symbol of a struct or enum type of the checker `ck`, or null for a type that a
+/// test makes with no declaration.
+fn nominal_sym(checker* ck, types.node* t) ast.sym* {
+    return nominal_sym_mut(ck, t);
 }
 
-// The declaring symbol of the struct or enum type `t`, writable. A struct or enum symbol has its
-// declaration, and collect_declaration gives the declaration the symbol before the type, so
-// `node->sym` is the symbol again, with the `mut` mark that `ast.node.sym` carries.
-// A type that a test makes with no declaration has no symbol, and the answer is null.
-fn nominal_sym_mut(types.node* t) ast.sym mut* {
-    ast.sym* s = nominal_sym(t);
-    if (s == null || s->node == null) {
+// The declaring symbol of the struct or enum type `t`, writable. The type keeps the handle that
+// collect_declaration gave it: `k + 1` for the symbol `ck->syms[k]` (types.node.decl).
+fn nominal_sym_mut(checker* ck, types.node* t) ast.sym mut* {
+    if (t->decl == 0) {
         return null;
     }
-    return s->node->sym;
+    return ck->syms[t->decl - 1];
 }
 
 fn error_too_large(checker mut* ck, diag.loc at, types.node* t) void {
@@ -802,12 +807,12 @@ fn check_layout(checker mut* ck, types.node* t) bool {
     types.node* mut pending = types.type_layout_pending(t);
     if (pending != null) {
         // a struct is laid out when a declaration first needs it
-        resolve_sym(ck, nominal_sym_mut(pending));
+        resolve_sym(ck, nominal_sym_mut(ck, pending));
         pending = types.type_layout_pending(t);
     }
     if (pending != null) {
         // still resolving means it contains itself by value
-        ast.sym mut* s = nominal_sym_mut(pending);
+        ast.sym mut* s = nominal_sym_mut(ck, pending);
         check_msg_begin(ck);
         msg_str(ck, "struct ");
         msg_str(ck, pending->name);
@@ -856,7 +861,7 @@ fn named_type(checker mut* ck, ast.node mut* n, bool stores_base) types.node* {
         }
         return types.type_error(&ck->types);
     }
-    ast.sym mut* mut s = sym_of_binding(b);
+    ast.sym mut* mut s = sym_of_binding(ck, b);
     n->sym = s;
     ast.node mut* tail = n->a;
     if (tail != null) {
@@ -867,7 +872,7 @@ fn named_type(checker mut* ck, ast.node mut* n, bool stores_base) types.node* {
             check_msg_end(ck, n->name_loc);
             return types.type_error(&ck->types);
         }
-        modules.module* m = cast(b->module, modules.module*);
+        modules.module* m = module_of(ck, b);
         scope.binding* inner = module_declaration(m, tail->name);
         if (inner == null) {
             check_msg_begin(ck);
@@ -882,7 +887,7 @@ fn named_type(checker mut* ck, ast.node mut* n, bool stores_base) types.node* {
             check_msg_end(ck, tail->name_loc);
             return types.type_error(&ck->types);
         }
-        s = sym_of_binding(inner);
+        s = sym_of_binding(ck, inner);
         tail->sym = s;
     }
     if (s == null || (s->kind != ast.sym_kind.s_struct && s->kind != ast.sym_kind.s_enum)) {
@@ -2544,7 +2549,7 @@ fn check_ident(checker mut* ck, ast.node mut* n, expr mut* out) void {
         error_unknown_name(ck, n->name, n->name_loc);
         return;
     }
-    ast.sym mut* s = sym_of_binding(b);
+    ast.sym mut* s = sym_of_binding(ck, b);
     n->sym = s;
     if (s == null) {
         return;
@@ -2553,12 +2558,15 @@ fn check_ident(checker mut* ck, ast.node mut* n, expr mut* out) void {
 }
 
 // The module a binding denotes, or null: only the module reading of an import
-// binds one.
-fn module_of(scope.binding* b) modules.module* {
-    if (b != null && b->kind == scope.bind_kind.b_module) {
-        return cast(b->module, modules.module*);
+// binds one. The binding keeps the handle of the module in the module set of the checker.
+fn module_of(checker* ck, scope.binding* b) modules.module* {
+    if (b == null || b->kind != scope.bind_kind.b_module || b->module == 0) {
+        return null;
     }
-    return null;
+    if (ck->set == null) {
+        panic("check.module_of: the checker has no module set");
+    }
+    return modules.read_at(ck->set, b->module - 1);
 }
 
 // What an expression names when it is not a value: a module or a type, which
@@ -2573,9 +2581,9 @@ fn names_module_or_type(checker mut* ck, ast.node mut* n) scope.binding* {
         // Imports are not re-exported. Thus, `m.other.f` is an
         // error even when `m` imports `other`.
         // `m.other.f` is an error even when `m` imports `other`
-        b = module_declaration(module_of(names_module_or_type(ck, n->a)), n->name);
+        b = module_declaration(module_of(ck, names_module_or_type(ck, n->a)), n->name);
     }
-    ast.sym mut* s = sym_of_binding(b);
+    ast.sym mut* s = sym_of_binding(ck, b);
     if (s == null
         || (s->kind != ast.sym_kind.s_module && s->kind != ast.sym_kind.s_struct
             && s->kind != ast.sym_kind.s_enum)) {
@@ -2621,8 +2629,8 @@ fn pseudo_field(checker mut* ck, ast.node mut* n, types.node* t, expr mut* out) 
 fn check_field(checker mut* ck, ast.node mut* n, expr mut* out, bool arrow) void {
     if (!arrow) {
         scope.binding* qb = names_module_or_type(ck, n->a);
-        ast.sym mut* q = sym_of_binding(qb);
-        modules.module* qm = module_of(qb);
+        ast.sym mut* q = sym_of_binding(ck, qb);
+        modules.module* qm = module_of(ck, qb);
         if (qm != null) {
             scope.binding* b = module_declaration(qm, n->name);
             if (b == null) {
@@ -2634,7 +2642,7 @@ fn check_field(checker mut* ck, ast.node mut* n, expr mut* out, bool arrow) void
                 check_msg_end(ck, n->name_loc);
                 return;
             }
-            ast.sym mut* s = sym_of_binding(b);
+            ast.sym mut* s = sym_of_binding(ck, b);
             n->sym = s;
             if (s != null) {
                 value_of_sym(ck, n, s, out);
@@ -2718,7 +2726,7 @@ fn check_field(checker mut* ck, ast.node mut* n, expr mut* out, bool arrow) void
         check_msg_end(ck, n->name_loc);
         return;
     }
-    ast.sym* s = nominal_sym(t);
+    ast.sym* s = nominal_sym(ck, t);
     ast.node* mut f = null;
     if (s != null) {
         f = struct_field(s, n->name);
@@ -3024,7 +3032,7 @@ fn check_span_expr(checker mut* ck, ast.node mut* n, expr mut* out) void {
     out->ty = types.type_span(&ck->types, elem, false, is_mut);
 }
 
-// ---- the pointer places that a `mut` cast keeps (D3.14) ---------------------------
+// ---- the pointer places that a cast keeps (D3.14) ---------------------------------
 
 // A pointer place that one side of a cast holds and the other does not: the type of the pointer
 // and the byte where it starts in the storage of its level.
@@ -3033,8 +3041,10 @@ struct pointer_place {
     u64 at;
 }
 
-// The most calls of first_hidden for one cast. Past it the check proves nothing, and the cast is
-// an error (D3.14), as a store that D17.11 cannot prove empty is one.
+// The most steps of one walk of the check of a cast: each call of first_hidden and each struct
+// that the walk of the marks enters (enter_struct). The rule of a `mut` cast and the rule of the
+// marks each walk with a memo of their own. Past the limit the walk proves nothing, and the cast
+// is an error (D3.14), as a store that D17.11 cannot prove empty is one.
 u64 POINTER_WORK_LIMIT = 65536;
 
 // A part of the type of one view of a storage: its type and the byte where it starts in that
@@ -3081,16 +3091,13 @@ fn part_at(target_part p, u64 pos) target_part {
     if (p.ty->kind != types.type_kind.k_struct) {
         return target_part{};
     }
-    // resolve_struct writes the byte offset of each field into its `aux`
-    ast.node* decl = nominal_sym(p.ty)->node;
+    // the layout keeps the byte offset of each field
     u64 mut i = 0;
-    while (i < ast.ast_len(decl)) {
-        ast.node* f = ast.ast_child(decl, i);
-        if (f->kind == ast.ast_kind.k_field_decl) {
-            u64 start = p.at + f->aux;
-            if (pos >= start && pos - start < types.type_sizeof(f->ty)) {
-                return target_part{.ty = f->ty, .at = start};
-            }
+    while (i < types.field_count(p.ty)) {
+        types.field f = types.field_at(p.ty, i);
+        u64 start = p.at + f.at;
+        if (pos >= start && pos - start < types.type_sizeof(f.ty)) {
+            return target_part{.ty = f.ty, .at = start};
         }
         i += 1;
     }
@@ -3117,19 +3124,230 @@ fn cover_of(types.node* u, u64 at, u64 len) target_part {
 // (D3.14). The walk stops at the first pointer place that the other view does not hold, so a run
 // that holds each one is the one result that it reads twice. A key names a run and a part by the
 // addresses of their types, so a memo lives for one cast. `work` counts the calls of first_hidden;
-// past POINTER_WORK_LIMIT, `over` holds and the walk stops.
+// past POINTER_WORK_LIMIT, `over` holds and the walk stops. With `marked`, the walk reads only the
+// places that carry a mark (carries_mark), whose walk counts against the same limit.
 struct place_memo {
     strmap.str_map held;
     containers.pool keys; // the text of each key of `held`, which keeps no copy
     strbuf.str_buf text;
     u64 work;
     bool over;
+    bool marked;
+    // carries_mark: the walk met a struct whose layout waits, so a "no mark" answer is not final
+    bool uncertain;
+    mark_frame mut@ own frames; // the structs of the walk of the marks, from the first
+    u64 depth;
+    // The structs that the walk of the marks entered and has not answered for, in the order of
+    // entry: the stack of Tarjan's algorithm. types.walk_of gives the place of each.
+    types.node* mut@ own entered;
+    u64 entered_len;
 }
+
+// One struct of the walk of the marks, the next of its fields that the walk reads, and the
+// smallest place in `place_memo.entered` of a struct that the walk reached from it and that is
+// still there.
+struct mark_frame {
+    types.node* ty;
+    u64 next;
+    u64 low;
+}
+
+// The mark of a struct (types.layout.mark): no answer yet, a walk is in it, it reaches no
+// reference marked `mut` or `own`, it reaches one.
+u8 MARK_UNKNOWN = 0;
+u8 MARK_WALKING = 1;
+u8 MARK_NONE = 2;
+u8 MARK_SOME = 3;
 
 fn memo_free(place_memo mut* m) void {
     strmap.free(&m->held);
     containers.pool_free(&m->keys);
     strbuf.free(&m->text);
+    del(m->frames);
+    m->depth = 0;
+    del(m->entered);
+    m->entered_len = 0;
+}
+
+// Whether a value of `t` can write or free through a pointer (D3.14): `t` is or holds, in its
+// fixed storage or in each storage that one of its pointers reaches, a reference marked `mut` or
+// `own`. A pointer that carries no mark gives a read and nothing else. A function pointer carries
+// none, and a struct with no layout or in error carries none. Each struct keeps its answer in its
+// layout for the life of the checker, so the walk enters a struct once at most. Each struct that it
+// enters is a step of POINTER_WORK_LIMIT; past it, `m->over` holds and the answer is false.
+fn carries_mark(place_memo mut* m, types.node* t) bool {
+    m->uncertain = false;
+    types.node* mut s = null;
+    u8 first = mark_step(m, t, &s);
+    if (first == MARK_SOME) {
+        return true;
+    }
+    if (first != MARK_UNKNOWN) {
+        return false;
+    }
+    m->depth = 0;
+    m->entered_len = 0;
+    bool marked = walk_marks(m, s);
+    // A struct that the walk did not answer for, after a mark or the limit, has no answer yet.
+    u64 mut k = 0;
+    while (k < m->entered_len) {
+        if (types.mark_of(m->entered[k]) == MARK_WALKING) {
+            types.keep_mark(m->entered[k], MARK_UNKNOWN);
+        }
+        k += 1;
+    }
+    m->entered_len = 0;
+    return marked;
+}
+
+// What carries_mark learns of the type `t` with no walk of a struct: MARK_SOME for a reference
+// marked `mut` or `own` that `t` is or reaches through fixed arrays and references, MARK_NONE where
+// that chain ends with no mark or at a struct that answered MARK_NONE, and for a struct with the
+// mark MARK_UNKNOWN or MARK_WALKING, that mark with the struct in *enter. A struct with no layout
+// answers MARK_NONE, and a layout that waits makes the walk uncertain.
+fn mark_step(place_memo mut* m, types.node* t, types.node* mut* enter) u8 {
+    types.node* mut cur = t;
+    // a fixed array leads to its element, and a reference with no mark to what it reaches; the
+    // characters of a `string` and the storage of a `void*` hold no pointer
+    while (cur->kind == types.type_kind.k_array
+           || (types.type_is_reference(cur) && !cur->is_mut && !cur->is_own
+               && cur->kind != types.type_kind.k_string
+               && cur->kind != types.type_kind.k_voidptr)) {
+        cur = cur->elem;
+    }
+    if (types.type_is_reference(cur) && (cur->is_mut || cur->is_own)) {
+        return MARK_SOME;
+    }
+    if (cur->kind != types.type_kind.k_struct) {
+        return MARK_NONE;
+    }
+    if (types.type_layout_state(cur) != types.layout_state.l_resolved) {
+        // a struct in error has reported, and a layout that waits can still reach a mark
+        if (types.type_layout_state(cur) != types.layout_state.l_error) {
+            m->uncertain = true;
+        }
+        return MARK_NONE;
+    }
+    u8 kept = types.mark_of(cur);
+    if (kept == MARK_UNKNOWN || kept == MARK_WALKING) {
+        *enter = cur;
+    }
+    return kept;
+}
+
+// The walk of carries_mark from the struct `root`: Tarjan's algorithm over the structs and the
+// fields that lead to structs, depth first with a stack of frames, so that a long chain of
+// structs needs no deep recursion. A frame that ends with its own place as `low` is the first
+// struct of a set of structs that reach each other, and the walk read each struct that the set
+// reaches: with no mark found, each struct of the set keeps MARK_NONE. Each struct on the stack
+// of frames reaches the struct above it, so a mark found keeps MARK_SOME for each of them.
+// Returns whether it found a mark.
+fn walk_marks(place_memo mut* m, types.node* root) bool {
+    if (!enter_struct(m, root)) {
+        return false;
+    }
+    while (m->depth > 0) {
+        u64 at = m->depth - 1;
+        types.node* ty = m->frames[at].ty;
+        u64 next = m->frames[at].next;
+        if (next == types.field_count(ty)) {
+            m->depth = at;
+            u64 low = m->frames[at].low;
+            u64 place = cast(types.walk_of(ty), u64);
+            if (low == place) {
+                close_set(m, place);
+            }
+            if (at > 0 && low < m->frames[at - 1].low) {
+                m->frames[at - 1].low = low;
+            }
+            continue;
+        }
+        m->frames[at].next = next + 1;
+        types.node* mut s = null;
+        u8 found = mark_step(m, types.field_at(ty, next).ty, &s);
+        if (found == MARK_SOME) {
+            u64 mut k = 0;
+            while (k < m->depth) {
+                types.keep_mark(m->frames[k].ty, MARK_SOME);
+                k += 1;
+            }
+            return true;
+        }
+        if (found == MARK_WALKING) {
+            // a struct of a set that is still open, so this struct belongs to the set too
+            u64 place = cast(types.walk_of(s), u64);
+            if (place < m->frames[at].low) {
+                m->frames[at].low = place;
+            }
+        } else if (found == MARK_UNKNOWN && !enter_struct(m, s)) {
+            return false;
+        }
+    }
+    return false;
+}
+
+// Answers for the structs from place `first` of the entered stack to its top, a set that the walk
+// closed with no mark found: MARK_NONE, or MARK_UNKNOWN when the walk met a layout that waits.
+fn close_set(place_memo mut* m, u64 first) void {
+    u8 mut answer = MARK_NONE;
+    if (m->uncertain) {
+        answer = MARK_UNKNOWN;
+    }
+    u64 mut k = first;
+    while (k < m->entered_len) {
+        types.keep_mark(m->entered[k], answer);
+        k += 1;
+    }
+    m->entered_len = first;
+}
+
+// Enters the struct `s` in the walk of the marks: a step of POINTER_WORK_LIMIT, the mark
+// MARK_WALKING, its place in the entered stack and a frame. Returns false past the limit, with
+// `m->over`.
+fn enter_struct(place_memo mut* m, types.node* s) bool {
+    m->work += 1;
+    if (m->work > POINTER_WORK_LIMIT) {
+        m->over = true;
+        return false;
+    }
+    if (m->entered_len == m->entered.len) {
+        types.node* mut@ own more = new(types.node*, grown_size(m->entered.len));
+        u64 mut i = 0;
+        while (i < m->entered_len) {
+            more[i] = m->entered[i];
+            i += 1;
+        }
+        del(m->entered);
+        m->entered = move(more);
+    }
+    u64 place = m->entered_len;
+    types.keep_mark(s, MARK_WALKING);
+    // the work limit keeps the place below 2^32
+    types.keep_walk(s, cast(place, u32));
+    m->entered[place] = s;
+    m->entered_len = place + 1;
+    if (m->depth == m->frames.len) {
+        mark_frame mut@ own deeper = new(mark_frame, grown_size(m->frames.len));
+        u64 mut i = 0;
+        while (i < m->depth) {
+            deeper[i] = m->frames[i];
+            i += 1;
+        }
+        del(m->frames);
+        m->frames = move(deeper);
+    }
+    m->frames[m->depth] = mark_frame{.ty = s, .next = 0, .low = place};
+    m->depth += 1;
+    return true;
+}
+
+// The capacity of a vector of the walk of the marks that holds `len` items and needs one more:
+// 16, or twice `len`. The work limit keeps `len` far below an overflow.
+fn grown_size(u64 len) u64 {
+    if (len < 16) {
+        return 16;
+    }
+    return len * 2;
 }
 
 // The key of `count` copies of `t` from byte `at` of the part `u`, valid until the next call.
@@ -3157,6 +3375,10 @@ fn first_hidden(place_memo mut* m, types.node* t, u64 count, u64 at, types.node*
                 pointer_place mut* out) bool {
     if (types.type_pointer_count(t) == 0) {
         return false;
+    }
+    if (m->marked && !carries_mark(m, t)) {
+        // past the limit the walk proves nothing, and first_hidden answers true with no place
+        return m->over;
     }
     m->work += 1;
     if (m->work > POINTER_WORK_LIMIT) {
@@ -3256,6 +3478,7 @@ fn hidden_in_part(place_memo mut* m, types.node* t, u64 count, u64 at, types.nod
 // the place itself, or the places of its elements and of its fields in order.
 fn hidden_in_copy(place_memo mut* m, types.node* t, u64 at, types.node* u, pointer_place mut* out)
     bool {
+    // with `m->marked`, first_hidden calls this only for a `t` that carries a mark
     if (types.type_is_pointer_place(t)) {
         *out = pointer_place{.ty = t, .at = at};
         return true;
@@ -3263,12 +3486,10 @@ fn hidden_in_copy(place_memo mut* m, types.node* t, u64 at, types.node* u, point
     if (t->kind == types.type_kind.k_array) {
         return first_hidden(m, t->elem, t->len, at, u, out);
     }
-    ast.node* decl = nominal_sym(t)->node;
     u64 mut i = 0;
-    while (i < ast.ast_len(decl)) {
-        ast.node* f = ast.ast_child(decl, i);
-        if (f->kind == ast.ast_kind.k_field_decl
-            && first_hidden(m, f->ty, 1, at + f->aux, u, out)) {
+    while (i < types.field_count(t)) {
+        types.field f = types.field_at(t, i);
+        if (first_hidden(m, f.ty, 1, at + f.at, u, out)) {
             return true;
         }
         i += 1;
@@ -3277,15 +3498,18 @@ fn hidden_in_copy(place_memo mut* m, types.node* t, u64 at, types.node* u, point
 }
 
 // Reports that the cast `n` of `src` to `dst` hides or adds, as `verb` says, the pointer place `h`
-// of the storage of level `level`.
+// of the storage of level `level`. `what` names the rule: "a 'mut' cast" for the first level that
+// the result marks `mut`, and "a cast" for a place that carries a mark in any view.
 fn report_pointer_place(checker mut* ck, ast.node* n, types.node* src, types.node* dst,
-                        string verb, pointer_place h, u64 level) void {
+                        string what, string verb, pointer_place h, u64 level) void {
     check_msg_begin(ck);
     msg_str(ck, "cannot cast ");
     check_msg_type(ck, src);
     msg_str(ck, " to ");
     check_msg_type(ck, dst);
-    msg_str(ck, ": a 'mut' cast ");
+    msg_str(ck, ": ");
+    msg_str(ck, what);
+    msg_str(ck, " ");
     msg_str(ck, verb);
     msg_str(ck, " the pointer ");
     check_msg_type(ck, h.ty);
@@ -3299,14 +3523,18 @@ fn report_pointer_place(checker mut* ck, ast.node* n, types.node* src, types.nod
 }
 
 // Reports that the walk of the cast `n` of `src` to `dst` passed POINTER_WORK_LIMIT, with the note
-// that it cannot prove the cast keeps its pointer places.
-fn report_pointer_limit(checker mut* ck, ast.node* n, types.node* src, types.node* dst) void {
+// that it cannot prove the cast keeps its pointer places. `what` names the rule, as
+// report_pointer_place says.
+fn report_pointer_limit(checker mut* ck, ast.node* n, types.node* src, types.node* dst,
+                        string what) void {
     check_msg_begin(ck);
     msg_str(ck, "cannot cast ");
     check_msg_type(ck, src);
     msg_str(ck, " to ");
     check_msg_type(ck, dst);
-    msg_str(ck, ": the check of a 'mut' cast passes its work limit of ");
+    msg_str(ck, ": the check of ");
+    msg_str(ck, what);
+    msg_str(ck, " passes its work limit of ");
     msg_uint(ck, POINTER_WORK_LIMIT);
     msg_str(ck, " steps");
     check_msg_end(ck, n->loc);
@@ -3325,7 +3553,8 @@ fn report_pointer_limit(checker mut* ck, ast.node* n, types.node* src, types.nod
 // the walk follows the two chains of references through them, and through fixed arrays on both
 // sides; where one chain ends there, the result marks no deeper level `mut`. Through a `mut` level
 // a store can write any bits into a pointer slot of the source, and the source can read bits that
-// no pointer wrote. A cast that is itself an argument of an `extern fn` call is exempt. Returns
+// no pointer wrote. Then check_marked_places reads level 1 for each pointer place that carries a
+// mark. A cast that is itself an argument of an `extern fn` call is exempt from both. Returns
 // whether it reported.
 fn check_pointer_places(checker mut* ck, ast.node* n, types.node* src, types.node* dst) bool {
     if (n == ck->extern_arg) {
@@ -3356,22 +3585,27 @@ fn check_pointer_places(checker mut* ck, ast.node* n, types.node* src, types.nod
             pointer_place mut h = pointer_place{};
             bool hides = sp != null && first_hidden(&m, sp, 1, 0, dp, &h);
             if (!m.over && hides) {
-                report_pointer_place(ck, n, src, dst, "hides", h, level);
+                report_pointer_place(ck, n, src, dst, "a 'mut' cast", "hides", h, level);
                 return true;
             }
             bool adds = !m.over && dp != null && first_hidden(&m, dp, 1, 0, sp, &h);
             if (!m.over && adds) {
-                report_pointer_place(ck, n, src, dst, "adds", h, level);
+                report_pointer_place(ck, n, src, dst, "a 'mut' cast", "adds", h, level);
                 return true;
             }
             if (m.over) {
-                report_pointer_limit(ck, n, src, dst);
+                report_pointer_limit(ck, n, src, dst, "a 'mut' cast");
                 return true;
             }
-            return false;
+            if (level == 1) {
+                // level 1 holds each pointer place of the source with its type, the marked ones
+                // among them, so the walk of the marks has nothing to add
+                return false;
+            }
+            break;
         }
         if (sp == null || dp == null) {
-            return false;
+            break;
         }
         // a fixed array adds no level, so the two chains stay in step through arrays on both sides
         types.node* mut sn = sp;
@@ -3383,6 +3617,43 @@ fn check_pointer_places(checker mut* ck, ast.node* n, types.node* src, types.nod
         s = sn;
         d = dn;
         level += 1;
+    }
+    return check_marked_places(ck, n, src, dst);
+}
+
+// Reports the cast `n` of `src` to `dst` when level 1 of the result holds a pointer place that
+// carries a mark (carries_mark) where the source holds no pointer place of the same type, in a
+// read-only view as in a `mut` one (D3.14). Through such a place the result writes or frees the
+// storage that bits reach, and no pointer of that type wrote the bits. A place with no mark is
+// free, because through it a view only reads. A place of the same type reaches the same types,
+// so level 1 answers for each deeper level. The source of a `void*` and an integer holds no
+// pointer place at level 1, so each place of the target that carries a mark is added. A struct
+// with no layout is in error, which has reported, or waits in a module-level initializer, which
+// D4.6 refuses, so the rule reads nothing then. Returns whether it reported.
+fn check_marked_places(checker mut* ck, ast.node* n, types.node* src, types.node* dst) bool {
+    if (!types.has_target_level(dst) || dst->kind == types.type_kind.k_voidptr) {
+        return false;
+    }
+    types.node* dp = dst->elem;
+    // an integer, a `string` and the storage of a `void*` hold no pointer place
+    types.node* mut sp = null;
+    if (types.has_target_level(src) && src->kind != types.type_kind.k_voidptr) {
+        sp = src->elem;
+    }
+    if (!has_layout(dp) || (sp != null && !has_layout(sp))) {
+        return false;
+    }
+    place_memo mut m = place_memo{.marked = true};
+    defer memo_free(&m);
+    pointer_place mut h = pointer_place{};
+    bool adds = first_hidden(&m, dp, 1, 0, sp, &h);
+    if (m.over) {
+        report_pointer_limit(ck, n, src, dst, "a cast");
+        return true;
+    }
+    if (adds) {
+        report_pointer_place(ck, n, src, dst, "a cast", "adds", h, 1);
+        return true;
     }
     return false;
 }
@@ -3848,7 +4119,7 @@ fn check_call(checker mut* ck, ast.node mut* n, expr mut* out) void {
 // The designated form: any order, omitted fields zeroed, no duplicates, and
 // designators only on structs.
 fn check_designated(checker mut* ck, ast.node mut* n, types.node* t, expr mut* out) void {
-    ast.sym* s = nominal_sym(t);
+    ast.sym* s = nominal_sym(ck, t);
     u64 mut i = 0;
     while (i < ast.ast_len(n)) {
         ast.node mut* d = ast_child_mut(n, i);
@@ -3931,7 +4202,7 @@ fn check_brace(checker mut* ck, ast.node mut* n, types.node* t, expr mut* out) v
         return;
     }
     if (t->kind == types.type_kind.k_struct) {
-        ast.sym* s = nominal_sym(t);
+        ast.sym* s = nominal_sym(ck, t);
         u64 mut fields = 0;
         u64 mut i = 0;
         while (s != null && s->node != null && i < ast.ast_len(s->node)) {
@@ -4356,6 +4627,7 @@ fn resolve_struct(checker mut* ck, ast.sym mut* s) void {
     }
     types.node*[MAX_MEMBERS] mut fields = {};
     u64[MAX_MEMBERS] mut offsets = {};
+    string[MAX_MEMBERS] mut names = {};
     u64 mut n = 0;
     bool mut ok = true;
     u64 mut i = 0;
@@ -4382,6 +4654,7 @@ fn resolve_struct(checker mut* ck, ast.sym mut* s) void {
             continue;
         }
         fields[n] = ft.ty;
+        names[n] = f->name;
         n += 1;
     }
     if (!ok || n == 0) {
@@ -4401,6 +4674,7 @@ fn resolve_struct(checker mut* ck, ast.sym mut* s) void {
         sym_fail(ck, s);
         return;
     }
+    types.name_fields(record, names[0..n]);
     u64 mut at = 0;
     u64 mut k = 0;
     while (k < ast.ast_len(decl)) {
@@ -4408,8 +4682,9 @@ fn resolve_struct(checker mut* ck, ast.sym mut* s) void {
         if (f->kind == ast.ast_kind.k_field_decl) {
             // Records the field byte offset on its declaration. The emitter names
             // fields by index and lets LLVM use the same layout. The checker suites
-            // and the pointer places of a cast (D3.14) read these offsets. They
-            // record the compiler answer for a complete declaration. The loop
+            // read these offsets; the pointer places of a cast (D3.14) read the
+            // layout (types.field_at). They record the compiler answer for a
+            // complete declaration. The loop
             // visits exactly the fields in the IR struct type. Each failed field
             // already left `ok` false.
             f->aux = offsets[at];
@@ -4944,9 +5219,9 @@ fn owning_module(ast.sym* s) ast.sym mut* {
     return null;
 }
 
-fn annotate_import(scope.binding* b) void {
+fn annotate_import(checker* ck, scope.binding* b) void {
     ast.node mut* n = b->node;
-    ast.sym mut* s = sym_of_binding(b);
+    ast.sym mut* s = sym_of_binding(ck, b);
     if (n == null) {
         return;
     }
@@ -5112,7 +5387,7 @@ fn collect_module(checker mut* ck, modules.module* m) void {
     while (k < scope.count(&m->names)) {
         scope.binding* b = scope.at(&m->names, k);
         if (b->kind == scope.bind_kind.b_module || b->kind == scope.bind_kind.b_symbol) {
-            annotate_import(b);
+            annotate_import(ck, b);
         }
         k += 1;
     }
@@ -5144,11 +5419,13 @@ fn collect_declaration(checker mut* ck, ast.node mut* decl, ast.sym mut* owner) 
     }
     ast.sym mut* s = check_sym_new(ck, kind, current->name, current, owner);
     current->sym = s;
+    // check_sym_new put `s` last, so its handle is the count (nominal_sym)
+    u64 handle = ck->syms_len;
     if (kind == ast.sym_kind.s_struct) {
         // the type exists before the fields are read
-        s->ty = types.type_struct(&ck->types, current->name, cast(s, void*));
+        s->ty = types.type_struct(&ck->types, current->name, handle);
     } else if (kind == ast.sym_kind.s_enum) {
-        s->ty = types.type_enum(&ck->types, current->name, cast(s, void*));
+        s->ty = types.type_enum(&ck->types, current->name, handle);
     }
 }
 
@@ -5196,7 +5473,7 @@ fn resolve_declarations(checker mut* ck, ast.node* list) void {
 // The entry module defines `fn main() i32` or `fn main(string@ args) i32`.
 fn check_main(checker mut* ck, modules.module* m) void {
     scope.binding* b = scope.find(&m->names, "main");
-    ast.sym mut* s = sym_of_binding(b);
+    ast.sym mut* s = sym_of_binding(ck, b);
     bool mut ok = s != null && s->kind == ast.sym_kind.s_fn && !check_poisoned(s->ty)
         && s->ty->kind == types.type_kind.k_fn && !s->ty->is_noreturn
         && types.type_equal(s->ty->elem, types.type_prim(&ck->types, prim.prim_kind.prim_i32));

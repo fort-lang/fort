@@ -1,0 +1,56 @@
+//! fail
+// A read-only level of a cast result keeps the type of each pointer place that carries a mark
+// (D3.14): a view that reads another pointer type there writes through bits that no pointer of
+// that type wrote. This holds where the two pointees hold the same pointer places, and where
+// they hold none.
+struct wrapper {
+    u64* own x;
+}
+
+struct holder {
+    wrapper* p;
+}
+
+struct holder2 {
+    u64 mut* q;
+}
+
+struct box {
+    u64 count;
+    u64 mut* own data;
+}
+
+// The layout of a box, with other names.
+struct mirror {
+    u64 tally;
+    u64 mut* own payload;
+}
+
+struct wrap {
+    u64 mut* own p;
+}
+
+fn main() i32 {
+    // The bytes hold a `wrapper*`, and the view reads them as a `u64 mut*`: `*g->q = 1234` writes
+    // the owner slot of `w`.
+    wrapper mut w = wrapper{.x = new(u64)};
+    holder h = holder{.p = &w};
+    holder2* g = cast(&h, holder2*); //! error: cannot cast holder* to holder2*: a cast adds the pointer u64 mut* at byte 0
+    // Level 2 holds the same pointer places on both sides, and the type at level 1 changes.
+    box mut b = box{.count = 1, .data = new(u64)};
+    box mut* mut pb = &b;
+    mirror mut** pm = cast(&pb, mirror mut**); //! error: cannot cast box mut* mut* to mirror mut**: a cast adds the pointer mirror mut* at byte 0
+    // The same through fixed arrays at level 1 on both sides.
+    wrap mut cell = wrap{.p = new(u64)};
+    u64 mut* own mut*[1] mut slots = {&cell.p};
+    wrap mut*[1]* as_wraps = cast(&slots, wrap mut*[1]*); //! error: cannot cast u64 mut* own mut*[1] mut* to wrap mut*[1]*: a cast adds the pointer wrap mut* at byte 0
+    // Two scalars behind a pointer that carries `mut`.
+    u64 mut y = 0;
+    u64 mut* mut py = &y;
+    f64 mut** pf = cast(&py, f64 mut**); //! error: cannot cast u64 mut* mut* to f64 mut**: a cast adds the pointer f64 mut* at byte 0
+    println(g == null, pm == null, as_wraps == null, pf == null);
+    del(cell.p);
+    del(b.data);
+    del(w.x);
+    return 0;
+}

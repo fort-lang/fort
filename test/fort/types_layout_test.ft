@@ -18,11 +18,9 @@ import types_env;
 // 2^63 - 1, the largest object the compiler admits.
 u64 MAX_SIZE = 9223372036854775807;
 
-// A distinct declaration pointer per nominal type built here.
-i64[24] mut decls = {};
-
-fn decl_at(u64 i) void mut* {
-    return cast(&decls[i], void mut*);
+// A distinct declaration handle for each nominal type built here: 0 is no declaration.
+fn decl_at(u64 i) u64 {
+    return i + 1;
 }
 
 fn size_of(types_env.env mut* e, string text) u64 {
@@ -154,6 +152,83 @@ fn layout_of_a_map_entry_is_40_bytes() void {
     assert(offsets[3] == 32);
     assert(types.type_sizeof(entry) == 40);
     assert(types.type_alignof(entry) == 8);
+}
+
+// The layout keeps each field, in declaration order, with the offset that it gave the caller, so
+// a reader of the fields needs no declaration (D9.5). The names come later, from name_fields.
+fn the_layout_keeps_the_type_offset_and_name_of_each_field() void {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    types.node* u8t = types_env.type_of(&e, "u8");
+    types.node* ptr = types_env.type_of(&e, "u64* own");
+    types.node* rec = types.type_struct(&e.tt, "rec_with_owner", decl_at(24));
+    types.node*[3] mut fields = {u8t, ptr, u8t};
+    u64[3] mut offsets = {};
+    assert(types.type_layout_begin(rec));
+    assert(types.type_layout_struct(rec, fields[..], offsets[..]));
+    assert(types.field_count(rec) == 3);
+    assert(types.field_at(rec, 0).ty == u8t && types.field_at(rec, 0).at == 0);
+    assert(types.field_at(rec, 1).ty == ptr && types.field_at(rec, 1).at == 8);
+    assert(types.field_at(rec, 2).ty == u8t && types.field_at(rec, 2).at == 16);
+    assert(types.field_at(rec, 2).name == "");
+    string[3] names = {"tag", "data", "end"};
+    types.name_fields(rec, names[..]);
+    assert(types.field_at(rec, 0).name == "tag");
+    assert(types.field_at(rec, 1).name == "data");
+    assert(types.field_at(rec, 2).name == "end");
+    // a failed layout keeps no field, so no reader sees a half record
+    types.type_layout_fail(rec);
+    assert(types.layout_of(rec)->fields.len == 0);
+}
+
+// A field that is a struct or a fixed array is one field of the record, at its offset, with its
+// own type: the record does not flatten the fields of a field, and the inner struct keeps its own.
+fn the_layout_keeps_a_struct_field_and_an_array_field_whole() void {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    types.node* u8t = types_env.type_of(&e, "u8");
+    types.node* arr = types_env.type_of(&e, "i32[3]");
+    types.node* outer = types.type_struct(&e.tt, "outer_record", decl_at(25));
+    types.node*[3] mut fields = {u8t, e.point, arr};
+    u64[3] mut offsets = {};
+    assert(types.type_layout_begin(outer));
+    assert(types.type_layout_struct(outer, fields[..], offsets[..]));
+    assert(types.field_count(outer) == 3);
+    assert(types.field_at(outer, 1).ty == e.point && types.field_at(outer, 1).at == 4);
+    assert(types.field_at(outer, 2).ty == arr && types.field_at(outer, 2).at == 12);
+    assert(types.type_sizeof(outer) == 24);
+    assert(types.field_count(e.point) == 2);
+    assert(types.field_at(e.point, 1).at == 4);
+}
+
+// The layout keeps two values for check.carries_mark, which types reads nothing of: the mark of
+// the struct for the life of the table, and its place in the stack of a walk. Both start at 0, a
+// new struct has its own, and a failed layout forgets the mark. They take the padding of the
+// record, so the layout keeps its size.
+fn the_layout_keeps_the_mark_and_the_walk_place_of_the_checker() void {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    types.node* u64t = types_env.type_of(&e, "u64");
+    types.node* first = types.type_struct(&e.tt, "first_marked", decl_at(26));
+    types.node* second = types.type_struct(&e.tt, "second_marked", decl_at(27));
+    assert(types.mark_of(first) == 0 && types.walk_of(first) == 0);
+    types.keep_mark(first, 3);
+    types.keep_walk(first, 4294967295);
+    assert(types.mark_of(first) == 3);
+    assert(types.walk_of(first) == 4294967295);
+    assert(types.mark_of(second) == 0 && types.walk_of(second) == 0);
+    // a mark kept before the layout survives it, as the checker writes one after it
+    types.node*[1] mut fields = {u64t};
+    u64[1] mut offsets = {};
+    assert(types.type_layout_begin(first));
+    assert(types.type_layout_struct(first, fields[..], offsets[..]));
+    assert(types.mark_of(first) == 3);
+    types.type_layout_fail(first);
+    assert(types.mark_of(first) == 0);
+    assert(sizeof(types.layout) == 72);
 }
 
 // struct outer { u8 a; point p; u8 b; }: point is 8 bytes, aligned 4.
@@ -660,6 +735,9 @@ fn main() i32 {
     println("sizes ok");
     layout_of_rec_matches_the_c_abi();
     layout_of_a_map_entry_is_40_bytes();
+    the_layout_keeps_the_type_offset_and_name_of_each_field();
+    the_layout_keeps_a_struct_field_and_an_array_field_whole();
+    the_layout_keeps_the_mark_and_the_walk_place_of_the_checker();
     layout_of_a_struct_with_a_struct_field();
     layout_of_arrays_spans_and_pointers_in_a_struct();
     layout_of_a_struct_holding_a_struct_array();

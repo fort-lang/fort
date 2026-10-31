@@ -72,6 +72,7 @@ struct module {
     // (module-system.md 10.4). It is in no order that a later pass reads.
     bool outside;
     module_state state;
+    u64 index; // the position of the module in the set, in read order (read_at)
     // The module that the set admitted before this one: the set owns its modules through this
     // chain.
     module mut* own made_before;
@@ -823,6 +824,7 @@ fn admit(module_set mut* set, string path, string file, string real, string sour
     fresh->source = source;
     fresh->entry = entry;
     fresh->state = module_state.m_loading;
+    fresh->index = set->modules.len;
     fresh->made_before = move(set->modules.last);
     module mut* m = fresh;
     set->modules.last = move(fresh);
@@ -1140,7 +1142,7 @@ fn resolve_used_path(session.session mut* s, module_set mut* set, module mut* m,
         if (bound_module == null) {
             return false;
         }
-        bound_module->module = cast(target, void*);
+        bound_module->module = target->index + 1;
         return true;
     }
     if (prefix_k >= 0) {
@@ -1367,7 +1369,7 @@ fn resolve_path(session.session mut* s, module_set mut* set, module mut* m,
         if (b == null) {
             return false;
         }
-        b->module = cast(target, void*);
+        b->module = target->index + 1;
         return true;
     }
     if (have_prefix) {
@@ -1601,6 +1603,15 @@ fn file_at(module_set* set, u64 i) string {
         panic("modules.file_at: index out of range");
     }
     return set->modules.items[i]->file;
+}
+
+/// The module at position `k` of the set, in read order: the module whose `index` is `k`.
+/// A position at or past `count` breaks the precondition.
+fn read_at(module_set* set, u64 k) module* {
+    if (k >= set->modules.len) {
+        panic("modules.read_at: index out of range");
+    }
+    return set->modules.items[k];
 }
 
 /// Returns the read module of `path`, or null when no read module has that path.

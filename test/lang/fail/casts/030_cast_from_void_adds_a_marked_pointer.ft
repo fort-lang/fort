@@ -1,0 +1,50 @@
+//! fail
+// The storage of a `void*` holds no pointer place, so a cast whose source pointee is `void` gives
+// a target whose level 1 holds no pointer place that carries a mark (D3.14). A callback that
+// writes through its context takes a context of a named type, and a comparator reads an element
+// through a view whose pointers carry no mark.
+struct holder {
+    u64 count;
+    u64* own data;
+}
+
+struct entry {
+    i64 key;
+    string own name;
+}
+
+// A view of a holder, the context of a callback.
+struct holder_ref {
+    holder mut* h;
+}
+
+fn bump(void* ctx) void {
+    holder_ref* r = cast(ctx, holder_ref*); //! error: cannot cast void* to holder_ref*: a cast adds the pointer holder mut* at byte 0
+    r->h->count += 1;
+}
+
+fn by_key(void* a, void* b) i32 {
+    entry* x = cast(a, entry*); //! error: cannot cast void* to entry*: a cast adds the pointer string own at byte 8
+    entry* y = cast(b, entry*); //! error: cannot cast void* to entry*: a cast adds the pointer string own at byte 8
+    return cast(x->key - y->key, i32);
+}
+
+fn main() i32 {
+    holder mut h = holder{.count = 7, .data = new(u64)};
+    void* anon = cast(&h, void*);
+    holder* back = cast(anon, holder*); //! error: cannot cast void* to holder*: a cast adds the pointer u64* own at byte 8
+    void mut* writable = cast(&h.count, void mut*);
+    holder* from_mut = cast(writable, holder*); //! error: cannot cast void mut* to holder*: a cast adds the pointer u64* own at byte 8
+    holder** twice = cast(anon, holder**); //! error: cannot cast void* to holder**: a cast adds the pointer holder* at byte 0
+    // An owning target is a view at level 1 as well: the owner of the source gives no place.
+    holder mut* own hp = new(holder);
+    void* own vb = cast(move(hp), void* own);
+    holder* own back_owner = cast(move(vb), holder* own); //! error: cannot cast void* own to holder* own: a cast adds the pointer u64* own at byte 8
+    void* own again = cast(move(back_owner), void* own);
+    del(again);
+    holder_ref ref = holder_ref{.h = &h};
+    bump(cast(&ref, void*));
+    println(back == null, from_mut == null, twice == null, by_key(anon, anon));
+    del(h.data);
+    return 0;
+}

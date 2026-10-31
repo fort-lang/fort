@@ -402,6 +402,29 @@ fn a_module_level_cast_reads_a_layout_only_when_it_has_one() void {
                        ": a 'mut' cast hides the pointer u64* own at byte 8"));
 }
 
+fn a_struct_whose_layout_waits_carries_no_mark_for_a_while() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // `holder` reaches `later` through a pointer, so `later` has no layout when the initializer of
+    // `early` is checked. The walk of the marks reads no field of it: the initializer alone is the
+    // error (D4.6), and the walk does not stop the check. Nor does `holder` keep that answer: in
+    // the body of `view`, `later` has its layout, and `holder` reaches its `u64 mut*`.
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "struct holder {\n    later* p;\n}\n");
+    strbuf.append(&b, "u64 mut x = 0;\n");
+    strbuf.append(&b, "holder* early = cast(&x, holder*);\n");
+    strbuf.append(&b, "struct later {\n    u64 mut* q;\n}\n");
+    strbuf.append(&b, "fn view(u64* a) holder* {\n    return cast(a, holder*);\n}\n");
+    assert(!check_env.check_decls(&e, strbuf.view(&b)));
+    assert(check_env.errors(&e) == 2);
+    assert(check_env.report_text(&e, 0)
+           == "5:17: a module-level initializer must be a constant expression");
+    assert(reported_at(&e, 1, "10:12", "cannot cast u64* to holder*",
+                       ": a cast adds the pointer later* at byte 0"));
+}
+
 fn a_cast_that_adds_an_owner_is_one_error() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
@@ -441,16 +464,130 @@ fn a_mut_level_1_lets_each_level_below_it_change() void {
                        ": a 'mut' cast hides the pointer u64* own mut* at byte 0"));
 }
 
-fn a_view_that_can_change_no_level_may_add_and_hide() void {
+fn a_view_that_can_change_no_level_may_hide_and_add_an_unmarked_place() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // No level of these results is `mut`, so no store and no release goes through them.
-    string[6] lines = {"u64 mut x = 0;", "cell* c = cast(&x, cell*);", "u64 mut* mut q = &x;",
-                       "cell** d = cast(&q, cell**);", "holder mut h = {};",
-                       "println(c == null, d == null, cast(&h, u64**) == null);"};
+    // No level of these results is `mut`, and no pointer place of a target carries `mut` or
+    // `own`, so a view only reads: it may hide an owner and add a `u64*`, from any source.
+    string[7] lines = {"u64 mut x = 0;", "u64** b = cast(&x, u64**);", "holder mut h = {};",
+                       "u64** w = cast(&h, u64**);", "void* v = cast(&h, void*);",
+                       "u64** n = cast(cast(&x, u64), u64**);",
+                       "println(b == null, w == null, cast(v, u64**) == null, n == null);"};
     assert(check_hiding(&e, lines[..]));
     assert(check_env.errors(&e) == 0);
+}
+
+fn a_read_only_view_that_adds_a_marked_place_is_one_error_each() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // A place that carries `mut` or `own` writes or frees through any view (D3.14): from a
+    // pointer, through the struct that a pointer reaches, from a `void*` and from an integer.
+    string[8] lines = {"u64 mut x = 0;", "cell* c = cast(&x, cell*);", "u64 mut* mut q = &x;",
+                       "cell** d = cast(&q, cell**);", "void* v = cast(&x, void*);",
+                       "holder* g = cast(v, holder*);", "cell* i = cast(cast(&x, u64), cell*);",
+                       "println(c == null, d == null, g == null, i == null);"};
+    assert(!check_hiding(&e, lines[..]));
+    // one report for each cast, at the cast
+    assert(check_env.errors(&e) == 4);
+    assert(reported_at(&e, 0, "30:15", "cannot cast u64 mut* to cell*",
+                       ": a cast adds the pointer u64* own at byte 0"));
+    assert(reported_at(&e, 1, "32:16", "cannot cast u64 mut* mut* to cell**",
+                       ": a cast adds the pointer cell* at byte 0"));
+    assert(reported_at(&e, 2, "34:17", "cannot cast void* to holder*",
+                       ": a cast adds the pointer u64* own at byte 8"));
+    assert(reported_at(&e, 3, "35:15", "cannot cast u64 to cell*",
+                       ": a cast adds the pointer u64* own at byte 0"));
+}
+
+fn the_exemption_of_an_extern_argument_covers_a_read_only_view() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // C sees no `own` (D17.13), so an argument of an `extern fn` may add a place that carries a
+    // mark, as it may hide one. The same cast as an argument of a fort function is one error.
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "struct cell {\n    u64* own p;\n}\n");
+    strbuf.append(&b, "extern fn peek(cell* c) u64;\n");
+    strbuf.append(&b, "fn look(cell* c) u64 {\n    return 0;\n}\n");
+    strbuf.append(&b, "fn main() i32 {\n    u64 mut x = 0;\n");
+    strbuf.append(&b, "    u64 a = peek(cast(&x, cell*));\n");
+    strbuf.append(&b, "    u64 c = look(cast(&x, cell*));\n");
+    strbuf.append(&b, "    return cast(a + c, i32);\n}\n");
+    assert(!check_env.check_src(&e, strbuf.view(&b)));
+    assert(check_env.errors(&e) == 1);
+    assert(reported_at(&e, 0, "11:18", "cannot cast u64 mut* to cell*",
+                       ": a cast adds the pointer u64* own at byte 0"));
+}
+
+fn a_mark_counts_in_each_kind_of_pointer_place() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // A function pointer, a `void*`, a `string` and a struct that reaches no mark carry none; a
+    // `mut` span, a `string own`, a `void mut*` and an owner in an array do. An owner that the
+    // source holds in an array is the same place as the target's field at that byte (D3.14).
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "struct plain {\n");
+    strbuf.append(&b, "    u64* p;\n");
+    strbuf.append(&b, "    string s;\n");
+    strbuf.append(&b, "    void* v;\n");
+    strbuf.append(&b, "    fn () i32 f;\n");
+    strbuf.append(&b, "}\n");
+    strbuf.append(&b, "struct deep {\n");
+    strbuf.append(&b, "    plain* next;\n");
+    strbuf.append(&b, "    u64 n;\n");
+    strbuf.append(&b, "}\n");
+    strbuf.append(&b, "struct marked_span {\n");
+    strbuf.append(&b, "    u8 mut@ bytes;\n");
+    strbuf.append(&b, "}\n");
+    strbuf.append(&b, "struct owned_text {\n");
+    strbuf.append(&b, "    string own s;\n");
+    strbuf.append(&b, "}\n");
+    strbuf.append(&b, "struct by_void {\n");
+    strbuf.append(&b, "    void mut* v;\n");
+    strbuf.append(&b, "}\n");
+    strbuf.append(&b, "struct in_array {\n");
+    strbuf.append(&b, "    u64 n;\n");
+    strbuf.append(&b, "    u64* own[2] slots;\n");
+    strbuf.append(&b, "}\n");
+    strbuf.append(&b, "struct pair_owners {\n");
+    strbuf.append(&b, "    u64 n;\n");
+    strbuf.append(&b, "    u64* own a;\n");
+    strbuf.append(&b, "    u64* own b;\n");
+    strbuf.append(&b, "}\n");
+    strbuf.append(&b, "fn main() i32 {\n");
+    strbuf.append(&b, "    u64 mut x = 0;\n");
+    strbuf.append(&b, "    plain* a = cast(&x, plain*);\n");
+    strbuf.append(&b, "    deep* b = cast(&x, deep*);\n");
+    strbuf.append(&b, "    marked_span* c = cast(&x, marked_span*);\n");
+    strbuf.append(&b, "    owned_text* d = cast(&x, owned_text*);\n");
+    strbuf.append(&b, "    by_void* e = cast(&x, by_void*);\n");
+    strbuf.append(&b, "    in_array* f = cast(&x, in_array*);\n");
+    strbuf.append(&b, "    u64*[3] mut words = {};\n");
+    strbuf.append(&b, "    in_array* g = cast(&words, in_array*);\n");
+    strbuf.append(&b, "    in_array mut ia = {};\n");
+    strbuf.append(&b, "    pair_owners* h = cast(&ia, pair_owners*);\n");
+    strbuf.append(&b, "    println(a == null, b == null, c == null, d == null);\n");
+    strbuf.append(&b, "    println(e == null, f == null, g == null, h == null);\n");
+    strbuf.append(&b, "    return 0;\n");
+    strbuf.append(&b, "}\n");
+    assert(!check_env.check_src(&e, strbuf.view(&b)));
+    // one report for each cast whose target adds a place that carries a mark, at the cast
+    assert(check_env.errors(&e) == 5);
+    assert(reported_at(&e, 0, "33:22", "cannot cast u64 mut* to marked_span*",
+                       ": a cast adds the pointer u8 mut@ at byte 0"));
+    assert(reported_at(&e, 1, "34:21", "cannot cast u64 mut* to owned_text*",
+                       ": a cast adds the pointer string own at byte 0"));
+    assert(reported_at(&e, 2, "35:18", "cannot cast u64 mut* to by_void*",
+                       ": a cast adds the pointer void mut* at byte 0"));
+    assert(reported_at(&e, 3, "36:19", "cannot cast u64 mut* to in_array*",
+                       ": a cast adds the pointer u64* own at byte 8"));
+    assert(reported_at(&e, 4, "38:19", "cannot cast u64*[3] mut* to in_array*",
+                       ": a cast adds the pointer u64* own at byte 8"));
 }
 
 fn a_hidden_owner_is_named_before_an_added_one() void {
@@ -702,6 +839,239 @@ fn a_mut_view_keeps_each_pointer_place_and_puns_the_rest() void {
                        ": a 'mut' cast hides the pointer u64 mut* at byte 0"));
     assert(reported_at(&e, 2, "34:22", "cannot cast u64 mut* mut* to u64* mut*",
                        ": a 'mut' cast hides the pointer u64 mut* at byte 0"));
+}
+
+// Appends `struct c<k> { c<k+1>* n; }` for k from 0 to `n` - 1, the last with a `u64 x` in
+// place of the pointer: a chain of structs that reaches no mark.
+fn append_chain(strbuf.str_buf mut* b, u64 n) void {
+    append_chain_ending(b, n, "u64 x");
+}
+
+// The same chain, whose last struct holds the field `last` in place of the pointer.
+fn append_chain_ending(strbuf.str_buf mut* b, u64 n, string last) void {
+    u64 mut k = 0;
+    while (k < n) {
+        strbuf.append(b, "struct c");
+        strbuf.append_u64(b, k);
+        if (k + 1 < n) {
+            strbuf.append(b, " {\n    c");
+            strbuf.append_u64(b, k + 1);
+            strbuf.append(b, "* n;\n}\n");
+        } else {
+            strbuf.append(b, " {\n    ");
+            strbuf.append(b, last);
+            strbuf.append(b, ";\n}\n");
+        }
+        k += 1;
+    }
+}
+
+// Appends `struct <name> { <first><k * step>* g<k>; ... u64 mut* m; }` with `count` pointer
+// fields, the k-th to the struct `<first><k * step>`.
+fn append_roots(strbuf.str_buf mut* b, string name, string first, u64 count, u64 step) void {
+    strbuf.append(b, "struct ");
+    strbuf.append(b, name);
+    strbuf.append(b, " {\n");
+    u64 mut k = 0;
+    while (k < count) {
+        strbuf.append(b, "    ");
+        strbuf.append(b, first);
+        strbuf.append_u64(b, k * step);
+        strbuf.append(b, "* g");
+        strbuf.append_u64(b, k);
+        strbuf.append(b, ";\n");
+        k += 1;
+    }
+    strbuf.append(b, "    u64 mut* m;\n}\n");
+}
+
+fn the_walk_of_the_marks_enters_each_struct_once_for_the_checker() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // 100 pointer places reach one chain of 2000 structs. A walk for each place that read the
+    // chain again would enter about 100000 structs and pass the work limit of 65536; the struct
+    // keeps its answer, so the cast is legal (D3.14). `tw` holds the places under other names.
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    append_chain(&b, 2000);
+    append_roots(&b, "t", "c", 100, 20);
+    append_roots(&b, "tw", "c", 100, 20);
+    strbuf.append(&b, "fn view(tw* a) t* {\n    return cast(a, t*);\n}\n");
+    assert(check_env.check_decls(&e, strbuf.view(&b)));
+    assert(check_env.errors(&e) == 0);
+    assert(kept_mark(&e, "c1999") == check.MARK_NONE);
+    assert(kept_mark(&e, "t") == check.MARK_SOME);
+}
+
+fn the_path_to_a_mark_keeps_it_for_each_struct() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // 100 pointer places reach one chain of 2000 structs whose last struct holds a `u64 mut*`. The
+    // walk of the first place keeps the mark for each struct on its path, so the walk of each
+    // later place answers at once. Walks that kept it for their first struct only would enter
+    // about 148500 structs and pass the work limit of 65536 (D3.14).
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    append_chain_ending(&b, 2000, "u64 mut* m");
+    append_roots(&b, "t", "c", 100, 10);
+    append_roots(&b, "tw", "c", 100, 10);
+    strbuf.append(&b, "fn view(tw* a) t* {\n    return cast(a, t*);\n}\n");
+    assert(check_env.check_decls(&e, strbuf.view(&b)));
+    assert(check_env.errors(&e) == 0);
+    assert(kept_mark(&e, "c1000") == check.MARK_SOME);
+    assert(kept_mark(&e, "c1999") == check.MARK_SOME);
+}
+
+fn a_struct_with_no_mark_behind_a_mark_is_walked_once() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // 70 structs each reach a chain of 1000 structs with no mark and then a `u64 mut*`. The walk
+    // of the first one closes the chain with no mark, so no later walk enters it again: 70 walks
+    // that each read the chain would enter 70070 structs and pass the work limit (D3.14).
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    append_chain(&b, 1000);
+    u64 mut k = 0;
+    while (k < 70) {
+        strbuf.append(&b, "struct s");
+        strbuf.append_u64(&b, k);
+        strbuf.append(&b, " {\n    c0* shared;\n    u64 mut* m;\n}\n");
+        k += 1;
+    }
+    append_roots(&b, "t", "s", 70, 1);
+    append_roots(&b, "tw", "s", 70, 1);
+    strbuf.append(&b, "fn view(tw* a) t* {\n    return cast(a, t*);\n}\n");
+    assert(check_env.check_decls(&e, strbuf.view(&b)));
+    assert(check_env.errors(&e) == 0);
+}
+
+fn a_struct_that_reaches_a_mark_through_a_cycle_keeps_it() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The walk of the first cast enters `b`, then `a`, which reaches `b` again and ends there: `a`
+    // and `b` reach each other, and the mark of `b` is the mark of `a`. A walk that answered for
+    // `a` alone when it left `a` would give it no mark, and the second cast would pass (D3.14).
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "struct a {\n");
+    strbuf.append(&b, "    b* first;\n");
+    strbuf.append(&b, "}\n");
+    strbuf.append(&b, "struct b {\n");
+    strbuf.append(&b, "    a* back;\n");
+    strbuf.append(&b, "    u64 mut* m;\n");
+    strbuf.append(&b, "}\n");
+    strbuf.append(&b, "struct hb {\n");
+    strbuf.append(&b, "    b* p;\n");
+    strbuf.append(&b, "}\n");
+    strbuf.append(&b, "struct ha {\n");
+    strbuf.append(&b, "    a* p;\n");
+    strbuf.append(&b, "}\n");
+    strbuf.append(&b, "fn main() i32 {\n");
+    strbuf.append(&b, "    u64 mut x = 0;\n");
+    strbuf.append(&b, "    hb* one = cast(&x, hb*);\n");
+    strbuf.append(&b, "    ha* two = cast(&x, ha*);\n");
+    strbuf.append(&b, "    println(one == null, two == null);\n");
+    strbuf.append(&b, "    return 0;\n");
+    strbuf.append(&b, "}\n");
+    assert(!check_env.check_src(&e, strbuf.view(&b)));
+    assert(check_env.errors(&e) == 2);
+    assert(reported_at(&e, 0, "16:15", "cannot cast u64 mut* to hb*",
+                       ": a cast adds the pointer b* at byte 0"));
+    assert(reported_at(&e, 1, "17:15", "cannot cast u64 mut* to ha*",
+                       ": a cast adds the pointer a* at byte 0"));
+}
+
+// The mark that the struct `name` of the checked module keeps (types.layout.mark).
+fn kept_mark(check_env.env mut* e, string name) u8 {
+    return types.mark_of(check_env.sym_main(e, name)->ty);
+}
+
+fn a_closed_walk_keeps_no_mark_for_each_struct_it_entered() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The walk of `t` enters `t`, then the chain from `c0`, which it closes with no mark, and
+    // finds the `u64 mut*` of `t`. The chain keeps MARK_NONE and `t`, the path, MARK_SOME. `tw` is
+    // the source, whose places the walk of the marks does not read, and `c9` is reached by no
+    // walk: both keep no answer (D3.14).
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    append_chain(&b, 5);
+    append_roots(&b, "t", "c", 2, 2);
+    append_roots(&b, "tw", "c", 2, 2);
+    strbuf.append(&b, "struct c9 {\n    c0* n;\n}\n");
+    strbuf.append(&b, "fn view(tw* a) t* {\n    return cast(a, t*);\n}\n");
+    // The second cast reads the kept answer of the chain: `c1*` adds no place with a mark, so a
+    // view of the bits of a `u64` as a chain is legal.
+    strbuf.append(&b, "fn bits(u64* a) c1** {\n    return cast(a, c1**);\n}\n");
+    assert(check_env.check_decls(&e, strbuf.view(&b)));
+    assert(check_env.errors(&e) == 0);
+    assert(kept_mark(&e, "c1") == check.MARK_NONE);
+    assert(kept_mark(&e, "c3") == check.MARK_NONE);
+    assert(kept_mark(&e, "t") == check.MARK_SOME);
+    assert(kept_mark(&e, "c0") == check.MARK_NONE);
+    assert(kept_mark(&e, "c2") == check.MARK_NONE);
+    assert(kept_mark(&e, "c4") == check.MARK_NONE);
+    assert(kept_mark(&e, "tw") == check.MARK_UNKNOWN);
+    assert(kept_mark(&e, "c9") == check.MARK_UNKNOWN);
+}
+
+fn a_walk_that_finds_a_mark_keeps_it_on_its_path_only() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The walk of `hb` enters `b`, then `a`, which reaches `b` again: `a` and `b` are one set that
+    // is still open when the walk finds the `u64 mut*` of `b`. `b` is on the path and keeps
+    // MARK_SOME; `a` has left the stack of frames and keeps no answer, since an open set proves
+    // nothing for it. The second cast walks `a` again and gives it MARK_SOME.
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "struct a {\n    b* first;\n}\n");
+    strbuf.append(&b, "struct b {\n    a* back;\n    u64 mut* m;\n}\n");
+    strbuf.append(&b, "struct hb {\n    b* p;\n}\n");
+    strbuf.append(&b, "struct ha {\n    a* p;\n}\n");
+    strbuf.append(&b, "fn one(u64* x) hb* {\n    return cast(x, hb*);\n}\n");
+    assert(!check_env.check_decls(&e, strbuf.view(&b)));
+    assert(check_env.errors(&e) == 1);
+    assert(kept_mark(&e, "b") == check.MARK_SOME);
+    assert(kept_mark(&e, "hb") == check.MARK_SOME);
+    assert(kept_mark(&e, "a") == check.MARK_UNKNOWN);
+    assert(kept_mark(&e, "ha") == check.MARK_UNKNOWN);
+    check_env.reopen(&e);
+    strbuf.append(&b, "fn two(u64* x) ha* {\n    return cast(x, ha*);\n}\n");
+    assert(!check_env.check_decls(&e, strbuf.view(&b)));
+    assert(check_env.errors(&e) == 2);
+    assert(kept_mark(&e, "a") == check.MARK_SOME);
+    assert(kept_mark(&e, "ha") == check.MARK_SOME);
+}
+
+fn a_walk_that_meets_a_layout_that_waits_keeps_no_answer_until_later() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // The cast of the module-level initializer meets `later` before its layout: `holder` keeps no
+    // answer then. The cast of `view` reads `later` and keeps MARK_SOME for both. `broken`, a
+    // struct in error, comes first in `holder`, and the walk enters no struct with no layout.
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "struct holder {\n    broken* q;\n    later* p;\n}\n");
+    strbuf.append(&b, "u64 mut x = 0;\n");
+    strbuf.append(&b, "holder* early = cast(&x, holder*);\n");
+    strbuf.append(&b, "struct later {\n    u64 mut* q;\n}\n");
+    strbuf.append(&b, "struct broken {\n    missing m;\n}\n");
+    strbuf.append(&b, "fn view(u64* a) holder* {\n    return cast(a, holder*);\n}\n");
+    assert(!check_env.check_decls(&e, strbuf.view(&b)));
+    assert(check_env.said(&e, "a module-level initializer must be a constant expression"));
+    assert(check_env.said(&e, "cannot cast u64* to holder*"));
+    assert(check_env.said(&e, ": a cast adds the pointer later* at byte 8"));
+    assert(kept_mark(&e, "holder") == check.MARK_SOME);
+    assert(kept_mark(&e, "later") == check.MARK_SOME);
+    // the symbol of a struct in error has the error type, and its node has no answer to keep
+    assert(check_env.sym_main(&e, "broken")->error);
 }
 
 fn the_work_limit_makes_a_cast_an_error_with_a_note() void {
@@ -1631,10 +2001,14 @@ fn main() i32 {
     an_owning_target_hides_as_a_view_does();
     the_error_names_the_first_owner_in_the_order_of_the_fields();
     a_module_level_cast_reads_a_layout_only_when_it_has_one();
+    a_struct_whose_layout_waits_carries_no_mark_for_a_while();
     a_cast_that_adds_an_owner_is_one_error();
     a_mut_level_below_an_immutable_level_1_can_change();
     a_mut_level_1_lets_each_level_below_it_change();
-    a_view_that_can_change_no_level_may_add_and_hide();
+    a_view_that_can_change_no_level_may_hide_and_add_an_unmarked_place();
+    a_read_only_view_that_adds_a_marked_place_is_one_error_each();
+    the_exemption_of_an_extern_argument_covers_a_read_only_view();
+    a_mark_counts_in_each_kind_of_pointer_place();
     a_hidden_owner_is_named_before_an_added_one();
     each_source_level_below_the_end_of_the_target_chain_can_change();
     a_flat_array_over_nested_structs_takes_no_walk_of_each_owner();
@@ -1645,6 +2019,13 @@ fn main() i32 {
     the_memo_keeps_no_key_for_a_run_with_a_hidden_owner();
     a_part_holds_its_own_bytes_and_padding_and_the_end_hold_none();
     a_mut_view_keeps_each_pointer_place_and_puns_the_rest();
+    the_walk_of_the_marks_enters_each_struct_once_for_the_checker();
+    a_struct_with_no_mark_behind_a_mark_is_walked_once();
+    the_path_to_a_mark_keeps_it_for_each_struct();
+    a_struct_that_reaches_a_mark_through_a_cycle_keeps_it();
+    a_closed_walk_keeps_no_mark_for_each_struct_it_entered();
+    a_walk_that_finds_a_mark_keeps_it_on_its_path_only();
+    a_walk_that_meets_a_layout_that_waits_keeps_no_answer_until_later();
     the_work_limit_makes_a_cast_an_error_with_a_note();
     the_rule_reads_no_long_array_element_by_element();
     sizeof_yields_an_untyped_constant_of_the_type_s_size();

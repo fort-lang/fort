@@ -5,7 +5,6 @@
 //! stdout:
 //| ready
 /// Checks that fir.place_type refuses a field number past the fields of a struct.
-import fort.ast;
 import fort.diag;
 import fort.fir;
 import fort.prim;
@@ -19,17 +18,13 @@ fn main() i32 {
     types.node* fnty = types.type_fn(&tt, i32t, params[..], false);
     fir.func mut f = fir.func_new(&tt, null, fnty);
     defer fir.func_free(&f);
-    ast.arena mut ar = ast.arena{};
-    defer ast.ast_arena_free(&ar);
     diag.loc here = diag.loc_make("t.ft", 1, 1);
-    ast.node mut* decl = ast.ast_new(&ar, ast.ast_kind.k_struct_decl, here);
-    ast.node mut* field = ast.ast_new(&ar, ast.ast_kind.k_field_decl, here);
-    field->ty = i32t;
-    ast.ast_push(decl, field);
-    ast.sym mut s = ast.sym{};
-    s.kind = ast.sym_kind.s_struct;
-    s.node = decl;
-    types.node* one = types.type_struct(&tt, "one", cast(&s, void*));
+    // a struct of one i32 field, laid out as the checker lays it out
+    types.node* one = types.type_struct(&tt, "one", 1);
+    types.node*[1] fields = {i32t};
+    u64[1] mut offsets = {};
+    assert(types.type_layout_begin(one));
+    assert(types.type_layout_struct(one, fields[..], offsets[..]));
     u32 n = fir.local_add(&f, one, fir.local_kind.lk_temp, null, here);
     assert(fir.place_type(&f, fir.place_field(&f, fir.place_local(n), 0)) == i32t);
     fir.place p = fir.place_field(&f, fir.place_local(n), 1);

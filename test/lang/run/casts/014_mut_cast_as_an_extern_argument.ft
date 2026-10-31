@@ -4,11 +4,13 @@
 //| abc
 //| abc
 //| cba
+//| cba
 // A cast that is itself an argument of a call of an `extern fn` may hide an
 // owner place of its source (D3.14). C sees no `own` (D17.13), and fort trusts
 // the C side of an extern signature. Parentheses around the cast change
 // nothing, and an extern call inside the operand of the cast leaves the cast an
-// argument of the outer call.
+// argument of the outer call. The comparator reads an element through a view whose fields carry
+// no mark, because a cast of its `void*` to `entry*` would add the owner `name`.
 import std.libc;
 import std.str;
 
@@ -17,9 +19,19 @@ struct entry {
     string own name;
 }
 
+// C clears `n` bytes at `e`. The parameter names an entry, so a read-only cast to it adds the owner
+// `name`, which the exemption of an argument of an `extern fn` allows too.
+extern fn bzero(entry* e, u64 n) void;
+
+// An entry seen through fields that carry neither `mut` nor `own`.
+struct entry_view {
+    i64 key;
+    string name;
+}
+
 fn by_key(void* a, void* b) i32 {
-    entry* x = cast(a, entry*);
-    entry* y = cast(b, entry*);
+    entry_view* x = cast(a, entry_view*);
+    entry_view* y = cast(b, entry_view*);
     if (x->key < y->key) {
         return -1;
     }
@@ -55,6 +67,11 @@ fn main() i32 {
     libc.memcpy(cast(&items[0], u8 mut*), cast(&items[2], u8*), sizeof(entry));
     libc.memcpy(cast(&items[2], u8 mut*), cast(&spare, u8*), sizeof(entry));
     libc.memset(cast(&spare, u8 mut*), 0, sizeof(entry));
+    println(items[0].name, items[1].name, items[2].name);
+    // A read-only cast from a `void*` that adds the owner `name`, as an argument of an `extern fn`:
+    // C clears no byte for a count of 0.
+    void* anon = cast(&items[1], void*);
+    bzero(cast(anon, entry*), 0);
     println(items[0].name, items[1].name, items[2].name);
     del(items[0].name);
     del(items[1].name);

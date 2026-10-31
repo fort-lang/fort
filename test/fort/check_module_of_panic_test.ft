@@ -1,0 +1,28 @@
+//! run
+//! flags: -I ../../src -I support
+//! abort
+//! stderr: panic: check.module_of: the checker has no module set
+//! stdout:
+//| true
+/// A module binding keeps the position of its module in the module set, so the checker reads the
+/// module through the set that check_program or check.set_modules gave it. A checker with no set
+/// cannot read the module of `import util`.
+import fort.check;
+import fort.check_stmt;
+import fort.modules;
+import modules_env;
+
+fn main() i32 {
+    modules_env.env mut m = modules_env.open();
+    defer modules_env.close(&m);
+    modules_env.add(&m, "main.ft", "import util;\nfn main() i32 { return util.add(1, 2); }\n");
+    modules_env.add(&m, "util.ft", modules_env.src_add());
+    assert(modules_env.load(&m, "main.ft"));
+    check.checker mut ck = check.checker{};
+    check.check_init(&ck, &m.s);
+    defer check.check_free(&ck);
+    // util imports nothing, so its check reads no module binding
+    println(check_stmt.check_module(&ck, modules.find(&m.set, "util")));
+    check_stmt.check_module(&ck, modules.find(&m.set, "main"));
+    return 0;
+}

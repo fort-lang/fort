@@ -520,20 +520,27 @@ These are all the assumptions of the rules. A program that breaks one gets no cl
   integer (`*cast(&slot, u64 mut*) = cast(&o, u64)` for a `u64 mut* mut slot`, then a store
   through `slot`); and a pointer in a field of a struct (`cast(&h, holder2 mut*)` for a
   `struct holder { wrapper* p; }` and a `struct holder2 { u64 mut* q; }`, then `*g->q = 1234`).
+  Nor, since the user ruled "Forbid it; typed handles" (2026-10-27), do a read-only view whose
+  pointer place carries `mut` or `own` where the source holds other bytes (`cast(&bits, holder2*)`
+  for a `u64 bits` that holds the address of a `struct wrapper { u64* own x; }`, and
+  `cast(&h, holder2*)` for the `holder` above, then `*g->q = 1234` over the owner `x`), and a cast
+  from a `void*` or from an integer to such a view (`cast(v, holder*)` for a `void* v`):
+  D3.14 keeps each pointer place that carries a mark, with its exact type, in any view.
   The guarantee of rules (a) and (c) now covers an owner slot in a local, a global or an
   allocation against such views, but three forms stay outside it, and each compiled on
-  2026-10-27 (probed):
+  2026-10-30 (probed):
   - a view that C gives back from an exempt argument (A7):
     `cast(memmove(cast(&o, u8 mut*), cast(&o, u8*), 0), u64 mut*)` for a `u64* own mut o`, then a
     store of an integer;
   - a call through a function pointer to which a cast through `void*` gave another type:
     `cast(cast(take, void*), fn (u64) void)` for a `fn take(u64* own p) void`, then a call with
     the address of a local, which `take` frees; a later change reads it;
-  - a read-only view whose pointer place carries `mut` or `own` where the source holds other
-    bytes, a pointer of another type included: `cast(&bits, holder2*)` for a `u64 bits` that
-    holds the address of a `struct wrapper { u64* own x; }`, and `cast(&h, holder2*)` for a
-    `struct holder { wrapper* p; }`, then `*g->q = 1234` over the owner `x`. No rule of D3.14
-    reads a mark of a pointer place in a read-only view, and a later change forbids the form.
+  - a read-only view that adds or changes a function pointer place at any level:
+    `cast(&o, view_cb*)` for a `struct owner_cb { fn (u64* own) void f; }` and a
+    `struct view_cb { fn (u64*) void f; }`, then `v->f(&y)` for a local `y`, which the function
+    frees. A view over a `u64` or a `void*` can add such a place, and a view of a pointer to an
+    `owner_cb` as a pointer to a `view_cb` changes it at level 2. A function pointer carries no
+    mark (D3.14), so the rule reads no such place; a later change reads it.
 
   An owner slot that one of these three forms forges is outside the guarantee of rules (a) and
   (c). The oracle reports a break of A8 as `forged` (3.4).

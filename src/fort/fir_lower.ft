@@ -2189,7 +2189,7 @@ fn print_entry(lowerer mut* lw, print_kind k) ast.sym* {
                     print_kind kind = cast(j, print_kind);
                     if (s->name == print_name(kind)) {
                         lw->prints[j] = s;
-                        lw->fits[j] = print_fits(s->ty, kind);
+                        lw->fits[j] = print_fits(lw->ck, s->ty, kind);
                     }
                     j += 1;
                 }
@@ -2229,7 +2229,7 @@ fn print_arity(print_kind k) u64 {
     }
 }
 
-// Whether the fort type `ft` of the print function of `k` has the signature of
+// Whether the fort type `ft` of the print function of `k`, a type of `ck`, has the signature of
 // spec/toolchain.md 5.1: `i32 fd`, then the value in the form that lower_print_arg passes. A
 // `string` is `char* ptr, u64 len`, and an enum is `i32 v, enum_member* m, u64 n`. A pointer
 // parameter with `mut` or `own` is another signature: a cast to it adds a mark, which D3.14
@@ -2237,7 +2237,7 @@ fn print_arity(print_kind k) u64 {
 // signature too: call_runtime ends no block after the call, which rule V8 requires. The result
 // of a print that returns does not count, because call_runtime puts it in a temporary of its own
 // type.
-fn print_fits(types.node* ft, print_kind k) bool {
+fn print_fits(check.checker* ck, types.node* ft, print_kind k) bool {
     if (ft->is_noreturn || ft->params.len != print_arity(k)
         || !types.is_prim(ft->params[0], prim.prim_kind.prim_i32)) {
         return false;
@@ -2257,7 +2257,7 @@ fn print_fits(types.node* ft, print_kind k) bool {
     case print_kind.pk_str:
         return char_pointer(v) && types.is_prim(ft->params[2], prim.prim_kind.prim_u64);
     case print_kind.pk_enum:
-        return types.is_prim(v, prim.prim_kind.prim_i32) && enum_table(ft->params[2])
+        return types.is_prim(v, prim.prim_kind.prim_i32) && enum_table(ck, ft->params[2])
             && types.is_prim(ft->params[3], prim.prim_kind.prim_u64);
     case print_kind.pk_f32:
         return types.is_prim(v, prim.prim_kind.prim_f32);
@@ -2289,14 +2289,14 @@ fn char_pointer(types.node* t) bool {
         && types.is_prim(t->elem, prim.prim_kind.prim_char);
 }
 
-// Whether `t` is a pointer to the `struct enum_member` of std.rt, the member record that the
-// enum table of a print holds, with neither `mut` nor `own`.
-fn enum_table(types.node* t) bool {
+// Whether `t`, a type of `ck`, is a pointer to the `struct enum_member` of std.rt, the member
+// record that the enum table of a print holds, with neither `mut` nor `own`.
+fn enum_table(check.checker* ck, types.node* t) bool {
     if (t->kind != types.type_kind.k_ptr || !unmarked(t)
         || t->elem->kind != types.type_kind.k_struct) {
         return false;
     }
-    ast.sym* s = check.nominal_sym(t->elem);
+    ast.sym* s = check.nominal_sym(ck, t->elem);
     return s != null && s->name == ENUM_MEMBER && runtime_member(s);
 }
 
@@ -2422,7 +2422,7 @@ fn lower_print_arg(lowerer mut* lw, ast.node* a, fir.operand fd) bool {
         call_runtime(lw, entry, first, 2, a->loc);
         return true;
     }
-    ast.sym* e = check.nominal_sym(a->ty);
+    ast.sym* e = check.nominal_sym(lw->ck, a->ty);
     fir.constant table = fir.const_enum_table(e, param_type(entry, 2));
     fir.operand_push(lw->f, fir.operand_const(table));
     fir.operand_push(lw->f, int_const(param_type(entry, 3), false, gen.gen_enum_count(e)));

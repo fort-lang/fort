@@ -363,7 +363,10 @@ bullet at a time and without a rewrite.
   `test/fort` (`lsp_json_test.ft`, `json_test.ft` being the compiler writer's). A file name is
   `<module>_test.ft` or `<module>_<case>_panic_test.ft` for a test whose program must end in a
   panic, since a panic kills the program and each one needs a file; any other `.ft` at that root is
-  `bad test name`, because a typo there would otherwise run nowhere and say nothing.
+  `bad test name`, because a typo there would otherwise run nowhere and say nothing. Check that
+  a new name is free before you write the file: a change wrote a new `modules_at_panic_test.ft`
+  over the test of `modules.at` and then renamed it, and only ctest `panic_coverage` saw the lost
+  site (`modules.ft`, "modules.at: index out of range").
   **Code several of those tests share lives in `test/fort/support/*.ft`**, which they reach with a
   second include root (`//! flags: -I ../../src -I support`; `-I ../fort/support` from
   `test/lsp`, whose tests share `support/heap.ft` with the compiler's): a `test/fort` test is a

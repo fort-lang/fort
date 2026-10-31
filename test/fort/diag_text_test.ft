@@ -21,6 +21,7 @@
 /// directives in this test's header are those lines, so
 /// any change to the format fails here.
 import capture;
+import fort.containers;
 import fort.diag;
 import std.io;
 import std.strbuf;
@@ -162,17 +163,10 @@ fn columns_count_bytes() void {
 // The files the lookup below answers for. Any other name is a file it cannot read.
 string SHOWN = "fn main() i32 {\n    u8 b = 300;\n    return 0;\n}\n";
 
-// The context of the test lookup: a view of its call count. The sink takes a `void*`, and the
-// pointer in the wrapper still writes the count.
-struct counter {
-    u64 mut* calls;
-}
-
-// A test lookup: counts its calls in the u64 that the `counter` behind `ctx` points at, and
-// answers "shown.ft" with SHOWN.
-fn lookup(void* ctx, string path, string mut* out) bool {
-    counter* c = cast(ctx, counter*);
-    *c->calls += 1;
+// A test lookup: records each path that the sink asks for in the store that the sink passes
+// back, and answers "shown.ft" with SHOWN. The texts of the store are the asked paths, in order.
+fn lookup(diag.sources mut* asked, string path, string mut* out) bool {
+    containers.str_push(&asked->texts, path);
     if (path == "shown.ft") {
         *out = SHOWN;
         return true;
@@ -180,13 +174,12 @@ fn lookup(void* ctx, string path, string mut* out) bool {
     return false;
 }
 
-// The stderr of `report` with a lookup installed, and the lookup's call count.
-fn reported(u64 mut* calls) string own {
+// The stderr of `report` with a lookup installed, and the paths that the lookup was asked for.
+fn reported(diag.sources mut* asked) string own {
     diag.sink mut s = diag.create();
     defer diag.free(&s);
     diag.set_text(&s, true);
-    counter c = counter{.calls = calls};
-    diag.set_lookup(&s, lookup, cast(&c, void*));
+    diag.set_lookup(&s, lookup, asked);
     i32 saved = capture.begin(io.STDERR, "err.txt");
     diag.error(&s, diag.loc_range("shown.ft", 2, 12, 2, 15), "constant 300 does not fit u8");
     diag.note(&s, diag.loc_range("shown.ft", 2, 5, 2, 7), "the type is here");
@@ -207,8 +200,9 @@ fn reported(u64 mut* calls) string own {
 
 // Each header line is followed by the lines of its range, in report order.
 fn the_sink_writes_the_lines_after_each_header() void {
-    u64 mut calls = 0;
-    string own got = reported(&calls);
+    diag.sources mut asked = diag.sources{};
+    defer diag.free_sources(&asked);
+    string own got = reported(&asked);
     defer del(got);
     strbuf.str_buf mut want = strbuf.create();
     defer strbuf.free(&want);
@@ -223,18 +217,21 @@ fn the_sink_writes_the_lines_after_each_header() void {
     assert(got == strbuf.view(&want));
     // shown.ft twice and gone.ft once. The 1:1 error, the muted error and the
     // error with the text off ask nothing.
-    assert(calls == 3);
+    assert(asked.texts.len == 3);
+    assert(containers.str_at(&asked.texts, 0) == "shown.ft");
+    assert(containers.str_at(&asked.texts, 1) == "shown.ft");
+    assert(containers.str_at(&asked.texts, 2) == "gone.ft");
     assert(capture.line_count(got) == 8);
 }
 
 // A file the lookup cannot read shows the header line alone.
 fn a_file_the_lookup_cannot_read_shows_the_header_alone() void {
-    u64 mut calls = 0;
+    diag.sources mut asked = diag.sources{};
+    defer diag.free_sources(&asked);
     diag.sink mut s = diag.create();
     defer diag.free(&s);
     diag.set_text(&s, true);
-    counter c = counter{.calls = &calls};
-    diag.set_lookup(&s, lookup, cast(&c, void*));
+    diag.set_lookup(&s, lookup, &asked);
     i32 saved = capture.begin(io.STDERR, "gone.txt");
     // Line 1 is where an empty text has a line of its own, so a sink that
     // rendered the empty text after a false answer would show it here.
@@ -243,7 +240,7 @@ fn a_file_the_lookup_cannot_read_shows_the_header_alone() void {
     string own got = capture.text("gone.txt");
     defer del(got);
     assert(got == "gone.ft:1:5: error: nothing to show\n");
-    assert(calls == 1);
+    assert(asked.texts.len == 1);
 }
 
 // Without a lookup the sink writes the header lines alone.
@@ -262,15 +259,15 @@ fn no_lookup_writes_the_header_alone() void {
 // The header lines of this test's header directives, with the lines under
 // them, on the real stderr.
 fn the_rendered_lines_reach_stderr() void {
-    u64 mut calls = 0;
+    diag.sources mut asked = diag.sources{};
+    defer diag.free_sources(&asked);
     diag.sink mut s = diag.create();
     defer diag.free(&s);
     diag.set_text(&s, true);
-    counter c = counter{.calls = &calls};
-    diag.set_lookup(&s, lookup, cast(&c, void*));
+    diag.set_lookup(&s, lookup, &asked);
     diag.error(&s, diag.loc_range("shown.ft", 2, 12, 2, 15), "constant 300 does not fit u8");
     diag.note(&s, diag.loc_range("shown.ft", 2, 5, 2, 7), "the type is here");
-    assert(calls == 2);
+    assert(asked.texts.len == 2);
 }
 
 fn main() i32 {

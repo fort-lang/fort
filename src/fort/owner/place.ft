@@ -1034,23 +1034,19 @@ fn next_owner_step(types.node* t, u64 k, owner_step mut* out, u64 mut* rest) boo
         *rest = k % each;
         return true;
     }
-    ast.node* decl = fir.struct_decl(t);
+    u32 count = fir.struct_field_count(t);
     u64 mut left = k;
     u32 mut field = 0;
-    u64 mut i = 0;
-    while (i < ast.ast_len(decl)) {
-        ast.node* n = ast.ast_child(decl, i);
-        if (n->kind == ast.ast_kind.k_field_decl) {
-            u64 count = count_owners(n->ty);
-            if (left < count) {
-                *out = owner_step{.field = field, .name = n->name, .ty = n->ty};
-                *rest = left;
-                return true;
-            }
-            left -= count;
-            field += 1;
+    while (field < count) {
+        types.field f = types.field_at(t, cast(field, u64));
+        u64 owners = count_owners(f.ty);
+        if (left < owners) {
+            *out = owner_step{.field = field, .name = f.name, .ty = f.ty};
+            *rest = left;
+            return true;
         }
-        i += 1;
+        left -= owners;
+        field += 1;
     }
     panic("owner.place.next_owner_step: no such inner owner");
 }
@@ -1120,16 +1116,11 @@ fn walk_owners(survey mut* c, u32 n, types.node* t, step mut@ prefix, u64 depth,
         }
         return;
     }
-    ast.node* decl = fir.struct_decl(t);
+    u32 count = fir.struct_field_count(t);
     u32 mut field = 0;
-    u64 mut i = 0;
-    while (i < ast.ast_len(decl) && *at < out.len) {
-        ast.node* member = ast.ast_child(decl, i);
-        if (member->kind == ast.ast_kind.k_field_decl) {
-            prefix[depth] = step{.kind = step_kind.sk_field, .field = field};
-            walk_owners(c, n, member->ty, prefix, depth + 1, out, at);
-            field += 1;
-        }
-        i += 1;
+    while (field < count && *at < out.len) {
+        prefix[depth] = step{.kind = step_kind.sk_field, .field = field};
+        walk_owners(c, n, types.field_at(t, cast(field, u64)).ty, prefix, depth + 1, out, at);
+        field += 1;
     }
 }
