@@ -1,0 +1,76 @@
+//! run
+//! stdout:
+//| 42 42 true
+//| true true
+//| 1 2 3
+//| true
+//| 7 14
+//| 9
+//| true
+// The legal forms of a function pointer in a cast (D3.14). A function pointer goes to `void*`, and
+// the `void*` compares by identity. An identity cast keeps it. `null` is a function pointer of
+// each type. A view keeps a function pointer place with its type, a `mut` view included. A
+// read-only view may hide the place, because it only reads the bits. An `extern fn` gets a
+// function by its name, with no cast, and a cast of the data pointer beside it is exempt.
+import std.libc;
+
+fn twice(u64 x) u64 {
+    return 2 * x;
+}
+
+fn thrice(u64 x) u64 {
+    return 3 * x;
+}
+
+fn by_value(void* a, void* b) i32 {
+    u64* x = cast(a, u64*);
+    u64* y = cast(b, u64*);
+    if (*x < *y) {
+        return -1;
+    }
+    if (*x > *y) {
+        return 1;
+    }
+    return 0;
+}
+
+struct op {
+    fn (u64) u64 f;
+}
+
+// The same function pointer type at the same byte, under other names.
+struct same_op {
+    fn (u64) u64 g;
+}
+
+struct ops {
+    u64 n;
+    (fn (u64) u64)[2] table;
+}
+
+fn main() i32 {
+    fn (u64) u64 f = twice;
+    void* fv = cast(f, void*);
+    fn (u64) u64 same = cast(f, fn (u64) u64);
+    println(f(21), " ", same(21), " ", cast(same, void*) == fv);
+    fn (u64) u64 none = null;
+    println(none == null, " ", cast(none, void*) == null);
+    u64[3] mut words = {3, 1, 2};
+    libc.qsort(cast(&words, void mut*), 3, sizeof(u64), by_value);
+    println(words[0], " ", words[1], " ", words[2]);
+    op o = op{.f = twice};
+    u64* bits = cast(&o, u64*);
+    void* hidden = cast(&o, void*);
+    println(*bits == cast(fv, u64) && hidden != null);
+    same_op* seen = cast(&o, same_op*);
+    ops t = ops{.n = 2, .table = {thrice, twice}};
+    op* second = cast(&t.table[1], op*);
+    println(seen->g(7) / 2, " ", second->f(7));
+    op mut m = op{.f = twice};
+    same_op mut* view = cast(&m, same_op mut*);
+    view->g = thrice;
+    println(m.f(3));
+    fn (u64) u64 back = seen->g;
+    println(back == f);
+    return 0;
+}

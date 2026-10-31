@@ -1,0 +1,85 @@
+//! fail
+// The walk of an exempt argument reaches a function pointer through each step of the walk of the
+// marks (D3.14). The steps are a span, a fixed array, and each reference, marked or not. Each
+// error gives C a function pointer place that the source does not hold with its type. A view that
+// hides the place behind a `void*` field, or keeps an `own` place with its type, stays exempt.
+struct owner_cb {
+    fn (u64* own) void f;
+}
+
+struct view_cb {
+    fn (u64*) void f;
+}
+
+struct cbs {
+    (fn () void)@ s;
+}
+
+struct table {
+    u64 n;
+    (fn () void)[2] fs;
+}
+
+struct vp {
+    void* p;
+}
+
+struct fp {
+    (fn (u64* own) void)* p;
+}
+
+struct oh {
+    owner_cb* p;
+}
+
+struct vh {
+    view_cb* p;
+}
+
+struct a_t {
+    owner_cb* own p;
+    u64 n;
+}
+
+struct b_t {
+    owner_cb* own q;
+    u64 m;
+}
+
+struct c_t {
+    owner_cb* q;
+    u64 m;
+}
+
+extern fn peek_cbs(cbs* c) void;
+extern fn peek_arr((fn () void)[2]* p) void;
+extern fn peek_table(table* t) void;
+extern fn set_cb(view_cb mut* v) void;
+extern fn peek_vp(vp* v) void;
+extern fn peek_fp(fp* v) void;
+extern fn call_held(vh* h, u64* p) void;
+extern fn peek_b(b_t* p) void;
+extern fn peek_c(c_t* p) void;
+
+fn take(u64* own p) void {
+    del(p);
+}
+
+fn main() i32 {
+    u64[3] mut words = {4096, 4096, 4096};
+    peek_cbs(cast(&words, cbs*)); //! error: cannot cast u64[3] mut* to cbs*: a cast adds the pointer (fn () void)@ at byte 0
+    peek_arr(cast(&words, (fn () void)[2]*)); //! error: cannot cast u64[3] mut* to (fn () void)[2]*: a cast adds the pointer fn () void at byte 0
+    peek_table(cast(&words, table*)); //! error: cannot cast u64[3] mut* to table*: a cast adds the pointer fn () void at byte 8
+    owner_cb mut o = owner_cb{.f = take};
+    set_cb(cast(&o, view_cb mut*)); //! error: cannot cast owner_cb mut* to view_cb mut*: a cast adds the pointer fn (u64*) void at byte 0
+    vp hold = vp{.p = cast(&o, void*)};
+    peek_vp(cast(&o, vp*));
+    peek_fp(cast(&hold, fp*)); //! error: cannot cast vp* to fp*: a cast adds the pointer (fn (u64* own) void)* at byte 0
+    oh h = oh{.p = &o};
+    u64 mut y = 7;
+    call_held(cast(&h, vh*), &y); //! error: cannot cast oh* to vh*: a cast adds the pointer view_cb* at byte 0
+    a_t mut x = a_t{.p = null, .n = 1};
+    peek_b(cast(&x, b_t*));
+    peek_c(cast(&x, c_t*)); //! error: cannot cast a_t mut* to c_t*: a cast adds the pointer owner_cb* at byte 0
+    return 0;
+}

@@ -744,12 +744,15 @@ to guess whether a parenthesized name is a type, and it never traps. Allowed:
   target's range, NaN becomes 0; float to float;
 - `bool` to integer (0 or 1); `char` to and from any integer type; enum to and from any integer
   type (integer to enum is unchecked);
-- any pointer to any pointer or `void*`; a cast never adds `mut`, so the storage a pointer
-  reaches is writable through the result only where the source says so; pointer to and
-  from `u64`; function pointer to and from `void*`. In any view, each pointer place of the target
-  that carries `mut` or `own`, in its own type or in a type that it reaches, sits where the
-  source holds a pointer place of the same type (D3.14). A `void*` and an integer hold none, so
-  `cast(v, holder*)` is an error for a `void* v` and a `holder` with a `u64* own` field;
+- any pointer to any pointer or `void*`; pointer to and from `u64`; function pointer to `void*`.
+  A cast never adds `mut`, so the storage a pointer reaches is writable through the result only
+  where the source says so. In any view, each marked pointer place of the target sits where the
+  source holds a pointer place of the same type (D3.14). A place carries a mark when it is a
+  function pointer or marks a reference `mut` or `own`. A type that it reaches can carry the
+  mark too. A `void*` and an integer hold no place. So
+  `cast(v, holder*)` is an error for a `void* v` and a `holder` with a `u64* own` field. A cast
+  from a `void*` to a function pointer type is an error too, as an argument of an `extern fn`
+  as elsewhere;
 - among `string`, `char@`, `u8@`, `char mut@` and `u8 mut@`, and their `own` forms, where
   the result is `own` exactly when the target spells it: `cast(move(buf), string own)` for a
   `u8 mut@ own buf`, and `cast(buf, string)` lends a view (D17.12); `T mut@` to `T@`;

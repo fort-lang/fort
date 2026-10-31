@@ -526,7 +526,7 @@ fn a_mark_counts_in_each_kind_of_pointer_place() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    // A function pointer, a `void*`, a `string` and a struct that reaches no mark carry none; a
+    // A `void*`, a `string`, a span with no mark and a struct that reaches no mark carry none. A
     // `mut` span, a `string own`, a `void mut*` and an owner in an array do. An owner that the
     // source holds in an array is the same place as the target's field at that byte (D3.14).
     strbuf.str_buf mut b = strbuf.create();
@@ -535,7 +535,7 @@ fn a_mark_counts_in_each_kind_of_pointer_place() void {
     strbuf.append(&b, "    u64* p;\n");
     strbuf.append(&b, "    string s;\n");
     strbuf.append(&b, "    void* v;\n");
-    strbuf.append(&b, "    fn () i32 f;\n");
+    strbuf.append(&b, "    u8@ bytes;\n");
     strbuf.append(&b, "}\n");
     strbuf.append(&b, "struct deep {\n");
     strbuf.append(&b, "    plain* next;\n");
@@ -588,6 +588,148 @@ fn a_mark_counts_in_each_kind_of_pointer_place() void {
                        ": a cast adds the pointer u64* own at byte 8"));
     assert(reported_at(&e, 4, "38:19", "cannot cast u64*[3] mut* to in_array*",
                        ": a cast adds the pointer u64* own at byte 8"));
+}
+
+// ---- a function pointer place (D3.14) ----------------------------------------------------
+
+fn a_function_pointer_place_carries_a_mark_in_any_view() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // A call through a function pointer runs the function that the bits name. So a read-only view
+    // keeps each function pointer place with its type, and each place that reaches one. The same
+    // type under another name and a view that hides the place are legal.
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "struct owner_cb {\n    fn (u64* own) void f;\n}\n");
+    strbuf.append(&b, "struct view_cb {\n    fn (u64*) void f;\n}\n");
+    strbuf.append(&b, "struct same_cb {\n    fn (u64* own) void g;\n}\n");
+    strbuf.append(&b, "struct oh {\n    owner_cb* p;\n}\n");
+    strbuf.append(&b, "struct vh {\n    view_cb* p;\n}\n");
+    strbuf.append(&b, "fn take(u64* own p) void {\n    del(p);\n}\n");
+    strbuf.append(&b, "fn main() i32 {\n");
+    strbuf.append(&b, "    u64 mut x = 0;\n");
+    strbuf.append(&b, "    owner_cb o = owner_cb{.f = take};\n");
+    strbuf.append(&b, "    view_cb* a = cast(&o, view_cb*);\n");
+    strbuf.append(&b, "    same_cb* b = cast(&o, same_cb*);\n");
+    strbuf.append(&b, "    u64* c = cast(&o, u64*);\n");
+    strbuf.append(&b, "    view_cb* d = cast(&x, view_cb*);\n");
+    strbuf.append(&b, "    oh h = oh{.p = &o};\n");
+    strbuf.append(&b, "    vh* e = cast(&h, vh*);\n");
+    strbuf.append(&b, "    oh* f = cast(&h, oh*);\n");
+    strbuf.append(&b, "    println(a == null, b == null, c == null, d == null);\n");
+    strbuf.append(&b, "    println(e == null, f == null);\n");
+    strbuf.append(&b, "    return 0;\n}\n");
+    assert(!check_env.check_src(&e, strbuf.view(&b)));
+    // one report for each cast that adds or changes a function pointer place, at the cast
+    assert(check_env.errors(&e) == 3);
+    assert(reported_at(&e, 0, "22:18", "cannot cast owner_cb* to view_cb*",
+                       ": a cast adds the pointer fn (u64*) void at byte 0"));
+    assert(reported_at(&e, 1, "25:18", "cannot cast u64 mut* to view_cb*",
+                       ": a cast adds the pointer fn (u64*) void at byte 0"));
+    assert(reported_at(&e, 2, "27:13", "cannot cast oh* to vh*",
+                       ": a cast adds the pointer view_cb* at byte 0"));
+}
+
+fn a_cast_to_a_function_pointer_type_keeps_its_type() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // A `void*` reaches no type, so a cast of it to a function pointer type adds a function
+    // pointer, with no byte in the error. The cast gets no exemption as an argument of an
+    // `extern fn` or of a fort function. A cast to `void*`, an identity cast and a function
+    // pointer with no cast are legal.
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "extern fn keep_cb(fn (u64) u64 f) void;\n");
+    strbuf.append(&b, "fn twice(u64 x) u64 {\n    return 2 * x;\n}\n");
+    strbuf.append(&b, "fn hold(fn (u64) u64 f) void {\n    return;\n}\n");
+    strbuf.append(&b, "fn main() i32 {\n");
+    strbuf.append(&b, "    fn (u64) u64 f = twice;\n");
+    strbuf.append(&b, "    void* v = cast(f, void*);\n");
+    strbuf.append(&b, "    fn (u64) u64 g = cast(f, fn (u64) u64);\n");
+    strbuf.append(&b, "    fn (u64) u64 h = cast(v, fn (u64) u64);\n");
+    strbuf.append(&b, "    keep_cb(cast(v, fn (u64) u64));\n");
+    strbuf.append(&b, "    hold(cast(v, fn (u64) u64));\n");
+    strbuf.append(&b, "    u64 mut x = 0;\n");
+    strbuf.append(&b, "    void mut* w = cast(&x, void mut*);\n");
+    strbuf.append(&b, "    fn () void j = cast(w, fn () void);\n");
+    strbuf.append(&b, "    keep_cb(g);\n");
+    strbuf.append(&b, "    println(g == h, j == null);\n");
+    strbuf.append(&b, "    return 0;\n}\n");
+    assert(!check_env.check_src(&e, strbuf.view(&b)));
+    assert(check_env.errors(&e) == 4);
+    assert(reported_at(&e, 0, "12:22", "cannot cast void* to fn (u64) u64",
+                       ": a cast adds the function pointer fn (u64) u64"));
+    assert(reported_at(&e, 1, "13:13", "cannot cast void* to fn (u64) u64",
+                       ": a cast adds the function pointer fn (u64) u64"));
+    assert(reported_at(&e, 2, "14:10", "cannot cast void* to fn (u64) u64",
+                       ": a cast adds the function pointer fn (u64) u64"));
+    assert(reported_at(&e, 3, "17:20", "cannot cast void mut* to fn () void",
+                       ": a cast adds the function pointer fn () void"));
+}
+
+fn an_extern_argument_keeps_each_function_pointer_place() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // C calls a function as its type says, so the exemption of an argument of an `extern fn`
+    // covers no function pointer place. It still covers a place that carries `mut` or `own` and
+    // reaches no function pointer. The walk of a function pointer alone keeps its own answer.
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "struct cell {\n    u64* own p;\n}\n");
+    strbuf.append(&b, "struct view_cb {\n    fn (u64*) void f;\n}\n");
+    strbuf.append(&b, "struct both {\n    u64* own p;\n    fn (u64*) void f;\n}\n");
+    strbuf.append(&b, "extern fn peek_cell(cell* c) u64;\n");
+    strbuf.append(&b, "extern fn peek_cb(view_cb* v) u64;\n");
+    strbuf.append(&b, "extern fn peek_both(both* b) u64;\n");
+    strbuf.append(&b, "fn main() i32 {\n");
+    strbuf.append(&b, "    u64 mut x = 0;\n");
+    strbuf.append(&b, "    u64 a = peek_cell(cast(&x, cell*));\n");
+    strbuf.append(&b, "    u64 b = peek_cb(cast(&x, view_cb*));\n");
+    strbuf.append(&b, "    u64[2] mut w = {};\n");
+    strbuf.append(&b, "    u64 c = peek_both(cast(&w, both*));\n");
+    strbuf.append(&b, "    return cast(a + b + c, i32);\n}\n");
+    assert(!check_env.check_src(&e, strbuf.view(&b)));
+    // one report for each exempt cast that adds a function pointer place, at the cast
+    assert(check_env.errors(&e) == 2);
+    assert(reported_at(&e, 0, "17:21", "cannot cast u64 mut* to view_cb*",
+                       ": a cast adds the pointer fn (u64*) void at byte 0"));
+    assert(reported_at(&e, 1, "19:23", "cannot cast u64[2] mut* to both*",
+                       ": a cast adds the pointer fn (u64*) void at byte 8"));
+    // the exempt walks read the mark of a function pointer alone, and keep no mark of each kind
+    assert(types.fn_mark_of(check_env.sym_main(&e, "cell")->ty) == check.MARK_NONE);
+    assert(types.fn_mark_of(check_env.sym_main(&e, "both")->ty) == check.MARK_SOME);
+    assert(kept_mark(&e, "cell") == check.MARK_UNKNOWN);
+    assert(kept_mark(&e, "both") == check.MARK_UNKNOWN);
+}
+
+fn the_walk_of_the_marks_ends_at_a_function_pointer() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    // `self_cb` reaches itself through the parameter of its function pointer. The walk reads no
+    // parameter, so it ends at the function pointer, and each struct on the path keeps the mark.
+    // A struct whose pointers carry no mark keeps none.
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "struct self_cb {\n    fn (self_cb*) void f;\n}\n");
+    strbuf.append(&b, "struct holds {\n    u64 n;\n    self_cb* p;\n}\n");
+    strbuf.append(&b, "struct quiet {\n    u64 n;\n    u64* p;\n}\n");
+    strbuf.append(&b, "fn main() i32 {\n");
+    strbuf.append(&b, "    u64[2] mut words = {};\n");
+    strbuf.append(&b, "    holds* a = cast(&words, holds*);\n");
+    strbuf.append(&b, "    quiet* b = cast(&words, quiet*);\n");
+    strbuf.append(&b, "    println(a == null, b == null);\n");
+    strbuf.append(&b, "    return 0;\n}\n");
+    assert(!check_env.check_src(&e, strbuf.view(&b)));
+    assert(check_env.errors(&e) == 1);
+    assert(reported_at(&e, 0, "14:16", "cannot cast u64[2] mut* to holds*",
+                       ": a cast adds the pointer self_cb* at byte 8"));
+    assert(kept_mark(&e, "self_cb") == check.MARK_SOME);
+    assert(kept_mark(&e, "holds") == check.MARK_SOME);
+    assert(kept_mark(&e, "quiet") == check.MARK_NONE);
 }
 
 fn a_hidden_owner_is_named_before_an_added_one() void {
@@ -911,7 +1053,7 @@ fn the_path_to_a_mark_keeps_it_for_each_struct() void {
     // 100 pointer places reach one chain of 2000 structs whose last struct holds a `u64 mut*`. The
     // walk of the first place keeps the mark for each struct on its path, so the walk of each
     // later place answers at once. Walks that kept it for their first struct only would enter
-    // about 148500 structs and pass the work limit of 65536 (D3.14).
+    // 152501 structs and pass the work limit of 65536 (D3.14).
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     append_chain_ending(&b, 2000, "u64 mut* m");
@@ -2009,6 +2151,10 @@ fn main() i32 {
     a_read_only_view_that_adds_a_marked_place_is_one_error_each();
     the_exemption_of_an_extern_argument_covers_a_read_only_view();
     a_mark_counts_in_each_kind_of_pointer_place();
+    a_function_pointer_place_carries_a_mark_in_any_view();
+    a_cast_to_a_function_pointer_type_keeps_its_type();
+    the_walk_of_the_marks_ends_at_a_function_pointer();
+    an_extern_argument_keeps_each_function_pointer_place();
     a_hidden_owner_is_named_before_an_added_one();
     each_source_level_below_the_end_of_the_target_chain_can_change();
     a_flat_array_over_nested_structs_takes_no_walk_of_each_owner();

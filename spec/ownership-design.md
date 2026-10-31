@@ -474,8 +474,8 @@ These are all the assumptions of the rules. A program that breaks one gets no cl
   example was `*q = cast(x, u64)` with `q = cast(&y, u64 mut*)`. A later `del(y)` frees through a
   slot that is no owner slot of its allocation, and the oracle reports `duplicate owner`. D3.14 now
   refuses `cast(&y, u64 mut*)`, because the view hides the owner `y`. Such a store still reaches an
-  owner slot through an argument of an `extern fn` (A7) and through the three forms that A8 below
-  names, which the rule of D3.14 does not read. A2 says nothing of types:
+  owner slot through an argument of an `extern fn` (A7). It also reaches one through the form
+  that A8 below names, which the rule of D3.14 does not read. A2 says nothing of types:
   D10.7 has no strict-aliasing rule, so no rule of V1 reads the type of a place through a
   pointer.
 - **A3**: an `own` reference designates the start of a live allocation, or it is null (D17.1).
@@ -489,7 +489,9 @@ These are all the assumptions of the rules. A program that breaks one gets no cl
   may hide a pointer place (D3.14), and `memmove(dst, src, 0)` returns `dst` to fort code as a
   `u8 mut*`.
   A store through that result reaches the owner slot, so A7 asks that such a view not be used to
-  write an owner slot either.
+  write an owner slot either. A7 also asks that a function pointer that C gives to fort code
+  names a function of its type. The exemption covers no function pointer place (D3.14), so fort
+  gives C no function pointer of another type.
 - **A8**: a value designates storage of a local of this run of F only when it derives from an
   address of that local that this run took. It derives through copies, casts, arithmetic, stores and
   loads, in F or in a callee. The user ruled on 2026-10-26: "Yes, add A8 to D10.7" (section 12).
@@ -526,24 +528,30 @@ These are all the assumptions of the rules. A program that breaks one gets no cl
   `cast(&h, holder2*)` for the `holder` above, then `*g->q = 1234` over the owner `x`), and a cast
   from a `void*` or from an integer to such a view (`cast(v, holder*)` for a `void* v`):
   D3.14 keeps each pointer place that carries a mark, with its exact type, in any view.
-  The guarantee of rules (a) and (c) now covers an owner slot in a local, a global or an
-  allocation against such views, but three forms stay outside it, and each compiled on
-  2026-10-30 (probed):
-  - a view that C gives back from an exempt argument (A7):
-    `cast(memmove(cast(&o, u8 mut*), cast(&o, u8*), 0), u64 mut*)` for a `u64* own mut o`, then a
-    store of an integer;
+  Since the user ruled "A: always marked" (2026-10-31), four more forms do not compile. A
+  function pointer place carries a mark, and the exemption covers no function pointer place. A
+  cast from a `void*` to a function pointer type is an error, as an argument of an `extern fn`
+  too (D3.14):
   - a call through a function pointer to which a cast through `void*` gave another type:
     `cast(cast(take, void*), fn (u64) void)` for a `fn take(u64* own p) void`, then a call with
-    the address of a local, which `take` frees; a later change reads it;
+    the address of a local, which `take` frees;
+  - the same cast as an argument of an `extern fn`: `qsort` calls an exempt
+    `cast(code, fn (void*, void*) i32)` for a `void* code` that holds a function that frees its
+    first argument, and the run frees a local;
   - a read-only view that adds or changes a function pointer place at any level:
     `cast(&o, view_cb*)` for a `struct owner_cb { fn (u64* own) void f; }` and a
     `struct view_cb { fn (u64*) void f; }`, then `v->f(&y)` for a local `y`, which the function
-    frees. A view over a `u64` or a `void*` can add such a place, and a view of a pointer to an
-    `owner_cb` as a pointer to a `view_cb` changes it at level 2. A function pointer carries no
-    mark (D3.14), so the rule reads no such place; a later change reads it.
+    frees. A view over a `u64` or a `void*` added such a place. A view of a pointer to an
+    `owner_cb` as a pointer to a `view_cb` changed it at level 2;
+  - the same view as an argument of an `extern fn`: `call_view(cast(&bits, view_cb*), &y)` gives
+    C a function pointer place over the bits of an integer, and C can call it.
 
-  An owner slot that one of these three forms forges is outside the guarantee of rules (a) and
-  (c). The oracle reports a break of A8 as `forged` (3.4).
+  The guarantee of rules (a) and (c) now covers an owner slot in a local, a global or an
+  allocation against such views. One form stays outside it, and it compiled on 2026-10-30
+  (probed). It is a view that C gives back from an exempt argument (A7). An example is
+  `cast(memmove(cast(&o, u8 mut*), cast(&o, u8*), 0), u64 mut*)` for a `u64* own mut o`, then a
+  store of an integer. An owner slot that this form forges is outside the guarantee of rules (a)
+  and (c). The oracle reports a break of A8 as `forged` (3.4).
 
 ### 5.2 Outside the scopes
 
@@ -561,7 +569,7 @@ These cases are outside the scope of every rule. The oracle counts their events 
   `test/fort`, and 40 in `test/lang` (measured, P4). The sources hold one global owner (read).
 - **X6**: no rule checks a store of another type over an owner slot, because rule (a) checks only
   `own` reference places (D17.11). D3.14 refuses the `mut` view that such a store needs, except
-  for an argument of an `extern fn` and the three forms that A8 names. No rule
+  for an argument of an `extern fn` and the form that A8 names. No rule
   checks a `double release` through a value with no tag (X4, X5).
 
 ### 5.3 The state lemma

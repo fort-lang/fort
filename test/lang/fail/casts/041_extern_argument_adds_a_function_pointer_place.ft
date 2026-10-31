@@ -1,0 +1,65 @@
+//! fail
+// The exemption of an argument of an `extern fn` covers no function pointer place (D3.14). C
+// calls a function as its type says, so an exempt view keeps each place that is or reaches a
+// function pointer with its type. Each error gives C a function pointer that no name of its type
+// gave. The place is over an integer, of another type, or behind a `mut` pointer. A view that
+// keeps the place with its type, or hides it, stays exempt.
+import std.libc;
+
+struct owner_cb {
+    fn (u64* own) void f;
+}
+
+struct view_cb {
+    fn (u64*) void f;
+}
+
+struct same_cb {
+    fn (u64* own) void g;
+}
+
+struct oh {
+    owner_cb mut* p;
+}
+
+struct vh {
+    view_cb mut* p;
+}
+
+// Two structs that reach each other, and `ring_a` holds a function pointer after its pointer to
+// `ring_b`. The walk from `ring_a` finds the mark while `ring_b` is open, so `ring_b` keeps no
+// answer, and the walk from `ring_b` reads it again.
+struct ring_a {
+    ring_b* b;
+    fn () void f;
+}
+
+struct ring_b {
+    ring_a* a;
+}
+
+extern fn call_view(view_cb* v, u64* p) void;
+extern fn call_held(vh* h, u64* p) void;
+extern fn call_same(same_cb* s) void;
+extern fn peek_a(ring_a* p) void;
+extern fn peek_b(ring_b* p) void;
+
+fn take(u64* own p) void {
+    del(p);
+}
+
+fn main() i32 {
+    u64 bits = 4096;
+    u64 mut y = 7;
+    call_view(cast(&bits, view_cb*), &y); //! error: cannot cast u64* to view_cb*: a cast adds the pointer fn (u64*) void at byte 0
+    owner_cb mut o = owner_cb{.f = take};
+    call_view(cast(&o, view_cb*), &y); //! error: cannot cast owner_cb mut* to view_cb*: a cast adds the pointer fn (u64*) void at byte 0
+    oh h = oh{.p = &o};
+    call_held(cast(&h, vh*), &y); //! error: cannot cast oh* to vh*: a cast adds the pointer view_cb mut* at byte 0
+    call_same(cast(&o, same_cb*));
+    libc.memset(cast(&o, u8 mut*), 0, 0);
+    u64[2] mut w = {};
+    peek_a(cast(&w, ring_a*)); //! error: cannot cast u64[2] mut* to ring_a*: a cast adds the pointer ring_b* at byte 0
+    peek_b(cast(&w, ring_b*)); //! error: cannot cast u64[2] mut* to ring_b*: a cast adds the pointer ring_a* at byte 0
+    return 0;
+}

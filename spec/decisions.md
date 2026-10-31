@@ -338,21 +338,23 @@ Sections:
 ### D3.14 Conversions and casts
 - owner: `type-system.md`.
 - rule: Conversions. The only implicit conversion is dropping mutability (D5.4). Everything else is
-  `cast(expr, Type)` (D6.4). Allowed casts: integer to integer (widening sign- or zero-extends by
-  the source's signedness, narrowing truncates, same-width sign change reinterprets); integer to
-  float (round to nearest); float to integer (truncate toward zero, saturate at the target's range,
-  NaN becomes 0); float to float; `bool` to integer; `char` to and from integer; enum to and from
-  integer; any pointer to any pointer or `void*`; pointer to and from `u64`; function pointer to
-  and from `void*`; among `string`, `char@`, `u8@`, `char mut@` and `u8 mut@` (a `mut` in the
-  outermost position of a cast target is an error: a cast result has no binding); a span to a span
-  of the same element type whose marks differ only in mutability, dropped at any level (the drop
-  reaches every level, which the implicit conversion does not; adding is refused by the rule
-  below); any cast that only drops mutability or ownership, at any level, except a drop that the
-  rule of the pointer places below refuses (**not** a no-op: D5.4 and D17.4 cover the drop at a
-  level `k` only when every level between 1 and `k - 1` is immutable in the target, and the cast
-  alone reaches the rest where the levels above are read-only. `void mut* mut@` converts to
-  `void*@` and to `void mut*@`, and no cast takes it to `void* mut@`, which would change the type
-  of a pointer place behind the `mut` level 1); identity. The result of a cast is `own` exactly
+  `cast(expr, Type)` (D6.4). The allowed casts follow. Integer to integer: widening sign- or
+  zero-extends by the source's signedness, narrowing truncates, and a same-width sign change
+  reinterprets. Integer to float rounds to nearest. Float to integer truncates toward zero and
+  saturates at the target's range, and NaN becomes 0. Float to float, `bool` to integer, `char`
+  to and from integer, and enum to and from integer are allowed too. So are any pointer to any
+  pointer or `void*`, pointer to and from `u64`, and function pointer to `void*`. Casts among
+  `string`, `char@`, `u8@`, `char mut@` and `u8 mut@` are allowed. A `mut` in the outermost
+  position of a cast target is an error, because a cast result has no binding. A span casts to a
+  span of the same element type whose marks differ only in mutability, dropped at any level. The
+  drop reaches every level, which the implicit conversion does not, and the rule below refuses an
+  addition. Any cast that only drops mutability or ownership, at any level, is allowed, except a
+  drop that the rule of the pointer places below refuses. Such a cast is **not** a no-op. D5.4
+  and D17.4 cover the drop at a level `k` only when every level between 1 and `k - 1` is
+  immutable in the target. The cast alone reaches the rest, where the levels above are read-only.
+  `void mut* mut@` converts to `void*@` and to `void mut*@`. No cast takes it to `void* mut@`,
+  which would change the type of a pointer place behind the `mut` level 1. Identity is a cast
+  too. The result of a cast is `own` exactly
   when its target type says `own`: an `own` source cast to a non-`own` target lends (the result is
   a view), and an
   `own` lvalue cast to an `own` target is a copy that must be written `cast(move(x), ...)`
@@ -434,16 +436,23 @@ Sections:
   `own` (D17.13), and the design trusts the C side of an extern signature (A7 of
   `ownership-design.md` 5.1). A cast inside such an argument is not the argument. An argument of a
   fort function and an argument of a call through a function pointer get no exemption. The
-  exemption covers the rule of the marked places below too.
+  exemption covers the rule of the marked places below too, but it covers no function pointer
+  place. C calls a function as its type says. So an exempt view keeps each place that is or
+  reaches a function pointer with its type. A cast to a function pointer type is an error
+  (below).
   **A cast keeps each pointer place that carries a mark, in any view.** A pointer place carries
-  a mark when its type marks a reference `mut` or `own`, or when a type that it reaches does. A
+  a mark in three cases. Its type marks a reference `mut` or `own`, it is a function pointer, or
+  a type that it reaches does one of the two. A
   reference reaches its pointee or its element, a fixed array its element, and a struct the type
   of each field, at any depth; the walk enters each struct once, because a struct can reach
   itself, and a struct keeps its answer for the rest of the check. Each struct that the walk
   enters is a step of the work limit, as each comparison is. So at the limit, the verdict of a
   cast can depend on the casts that the checker read before it. It can also depend on the build:
-  a build with `--use` checks the modules in another order. A `string` and a `void*` reach no
-  type, and a function pointer carries no mark. At
+  a build with `--use` checks the modules in another order. A `string`, a `void*` and a function
+  pointer reach no type. The walk reads no parameter and no result of a function pointer, so no
+  cycle passes through a function type. A function pointer place carries a mark always, whatever
+  its parameters and its result. A call through it runs the function that its bits name, and a
+  call is no read. At
   level 1 of the result, in a read-only view as in a `mut` one, each pointer place of the target
   that carries a mark must sit at a byte where the source holds a pointer place of the same type
   (`type-system.md` 6, D6.2), the marks included. A pointer place of the same type reaches the
@@ -465,16 +474,30 @@ Sections:
   of a named type and not a `void*`, because the cast back from `void*` adds each pointer place
   that carries a mark: `diag.set_lookup` takes the source store that `diag` declares. A
   comparator of `qsort` reads an element whose pointers carry a mark through a view whose
-  pointers carry none. Three forms stay outside the guarantee of the rule, and A8 of
-  `ownership-design.md` 5.1 names them: a view that C gives back from an exempt argument, as
-  `memmove(dst, src, 0)` returns `dst` (A7); a call through a function pointer to which a cast
-  through `void*` gave another type; and a read-only view that adds or changes a function
-  pointer place at any level. `cast(&o, view_cb*)` reads a `fn (u64* own) void` as a
-  `fn (u64*) void`, and a view over a `u64` or a `void*` adds one. `cast(&h, vh*)` changes one
-  at level 2, for an `h` that holds an `owner_cb*` and a `vh` that holds a `view_cb*`. A later
-  change reads the last two. Examples, with `holder` a
-  struct of a `u64 count` and a `u64* own data`, `mirror` a struct of a `u64` and a `u64* own`,
-  and `wrap` a struct of one `u64* own`:
+  pointers carry none.
+  **A cast to a function pointer type keeps the type of the function.** A `void*` is its one
+  source other than the same type. A `void*` reaches no type, so a cast from a `void*` to a
+  function pointer type adds a function pointer, and it is an error:
+  `cannot cast void* to fn (u64) void: a cast adds the function pointer fn (u64) void`. The error
+  names no byte, because a function pointer value has no storage level. The exemption of an
+  argument of an `extern fn` does not cover this rule. An integer reaches a function pointer
+  type only through a `void*`. A view that adds a function pointer place meets the rule of the
+  marked places above. So a function pointer holds `null`, a fort function of its type (D3.10),
+  or a value that C gave (A7). A cast of a function pointer to `void*` stays legal. A read-only
+  view may hide a pointer place, and no cast gives the bits a function pointer type again. The
+  reason: a call through another function type gives the function arguments that its parameter
+  types do not describe. For a `fn take(u64* own p) void`, a call through
+  `cast(cast(take, void*), fn (u64) void)` frees the address of a local. `qsort` calls its
+  comparator the same way, so an argument of an `extern fn` gets no exemption. With no mark on
+  either side, the call still writes or jumps. A struct parameter or result goes through a hidden
+  pointer (`type-system.md` 11.2). So `fn () pair` called as `fn (u64) void` writes its result at
+  the address that the integer holds. Bits that no function name gave jump to any code.
+  One form stays outside the guarantee of the rules of the pointer places, and A8 of
+  `ownership-design.md` 5.1 names it. It is a view that C gives back from an exempt argument, as
+  `memmove(dst, src, 0)` returns `dst` (A7). The examples use these structs. `holder` holds a
+  `u64 count` and a `u64* own data`, and `mirror` a `u64` and a `u64* own`. `wrap` holds one
+  `u64* own`. `owner_cb` and `same_cb` hold one `fn (u64* own) void`, and `view_cb` one
+  `fn (u64*) void`. `oh` holds one `owner_cb*`, and `vh` one `view_cb*`:
 
   | Operand                | Cast                              | Result                            |
   |------------------------|-----------------------------------|-----------------------------------|
@@ -498,6 +521,13 @@ Sections:
   | `holder mut* mut ph`   | `cast(&ph, mirror mut**)`         | error: adds `mirror mut*` at 0    |
   | `holder h`             | `cast(&h, mirror*)`               | ok: the same pointer at byte 8    |
   | `void* v`              | `cast(v, u64**)`                  | ok: `u64*` carries no mark        |
+  | `owner_cb o`           | `cast(&o, view_cb*)`              | error: adds `fn (u64*) void` at 0 |
+  | `owner_cb o`           | `cast(&o, same_cb*)`              | ok: the same type at byte 0       |
+  | `owner_cb o`           | `cast(&o, u64*)`                  | ok: a read-only view hides it     |
+  | `oh h`                 | `cast(&h, vh*)`                   | error: adds `view_cb*` at byte 0  |
+  | `u64 x`                | `cast(&x, view_cb*)`              | error: adds `fn (u64*) void` at 0 |
+  | `void* v`              | `cast(v, fn (u64) void)`          | error: adds the function pointer  |
+  | `fn (u64* own) void f` | `cast(f, void*)`                  | ok: a `void*` holds no place      |
 
 - history: Amended 2026-09-14 (T-085): a cast could add `mut` -- to a pointer at any level, to a
   span at any level, from a `void*`, from a `u64` and from a `string` -- which left `mut` on a
@@ -567,10 +597,28 @@ Sections:
   symbols of the checker, an index into the module set and the source store that `diag`
   declares, and the layout of a struct keeps its fields, so a reader of the fields needs no
   declaration. The same count reads 0 casts outside `test/lang/fail`.
-  The reviews of the same day named a third form outside the guarantee: a read-only view that
-  adds or changes a function pointer place at any level, which a later change reads. A struct
-  keeps the answer of the walk of the marks, and each struct entered is a step of the work limit.
-  So at the limit, the verdict of a cast can depend on the casts before it and on the build.
+  Reviews of 2026-10-30 and 2026-10-31 named a third form outside the guarantee. It was a
+  read-only view that added or changed a function pointer place, at level 1 or at level 2. A
+  struct keeps the answer of the walk of the marks, and each struct entered is a step of the work
+  limit. So at the limit, the verdict of a cast can depend on the casts before it and on the build.
+  Amended 2026-10-31: a function pointer carried no mark, and a cast from a `void*` to a function
+  pointer type was legal. So `cast(cast(take, void*), fn (u64) void)` and a read-only view such
+  as `cast(&o, view_cb*)` gave a function another type, and a call through it freed a local. With
+  no mark on either side, a call through bits that no function name gave jumped to any code. A
+  struct result went through its hidden pointer to the address that an integer held. The user
+  ruled "A: always marked" (2026-10-31). A function pointer place carries a mark, and a cast from
+  a `void*` to a function pointer type is an error. A count at 924d133e over `src`, `std`,
+  `test/fort`, `test/lsp` and `test/lang` found 3 such casts, each in `test/lang/run`.
+  `casts/003_pointer_forms.ft` and `pointers/007` cast a `void*` back to a function pointer type,
+  and `casts/016` read a struct with a function pointer field from an integer. They now keep the
+  function pointer in its own type. A rule that read only the marks of the parameters and of the
+  result found 0 casts. It kept the jump and the write through the hidden result. A review
+  of the same day gave `qsort` an exempt `cast(code, fn (void*, void*) i32)` for a `void* code`
+  that held a function that frees its first argument. The run freed a local, so the exemption
+  does not cover a cast to a function pointer type. An exempt view that added a function pointer
+  place over an integer compiled too, and C could call it. So the exemption now covers no
+  function pointer place. The exemption of a place that carries `mut` or `own` and reaches no
+  function pointer stays. The five trees hold 3 such casts, and they stay legal.
 
 ### D3.15 sizeof
 - owner: `type-system.md`.

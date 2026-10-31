@@ -269,21 +269,31 @@ came here.
   the `mut` levels, `check_marked_places` runs `first_hidden` once more over level 1 of the target
   with `place_memo.marked` set: the walk skips each type that `carries_mark` answers false for, so
   only a place that carries `mut` or `own`, in its own chain or in a struct that it reaches, needs a
-  place of the same type at its byte in the source. `walk_marks` is Tarjan's algorithm over the
-  structs, with explicit stacks (`place_memo.frames` and `entered`), so a chain of 65600 structs
-  needs no deep recursion. A struct keeps its answer in `types.layout.mark` for the life of the
-  checker: MARK_SOME on the path to a mark, MARK_NONE for each struct of a set of structs that reach
-  each other once the walk closes the set with no mark, and no answer after a layout that waits or
-  the work limit. So the walk enters each struct once, and each entry is a step of
-  POINTER_WORK_LIMIT (`check_mark_limit_test.ft`). Before the cache, one legal cast of a 15248-line
-  program took 15.65 s, because each pointer place walked its chain again. A `void*` or an integer
-  source has no level-1 storage, so each marked place of the target is added. **No compiler module
-  casts a `void*` back to a type that holds such a place.** A type keeps a `u64` handle of its
-  declaration, `k + 1` for `ck->syms[k]` (`check.nominal_sym`), and the layout of a struct keeps the
-  type, the offset and the name of each field, so the FIR, the interpreter and `owner/place` read
-  the fields with no declaration. `scope.binding.module` is `k + 1` for module `k` of the set
-  (`check.module_of`, `modules.read_at`), and the source lookup of `diag` takes the `diag.sources`
-  that the session embeds.
+  place of the same type at its byte in the source. A function pointer carries a mark always
+  (`mark_step` answers MARK_SOME). The walk reads none of its parameters and not its result, so
+  no cycle passes through a function type. A cast to a function pointer type from another type
+  (the matrix allows only `void*`) is the error of `report_function_pointer`, with no byte. The
+  test stands at the top of `check_pointer_places`, before the exemption of an `extern` argument.
+  C calls a function as the type of its parameter says (`fail/casts/036` to `038` and `040`,
+  `run/casts/017`). Under the exemption, `check_marked_places` walks with `place_memo.fn_only`.
+  There a mark is a function pointer alone, and a reference marked `mut` or `own` leads on to
+  what it reaches. That walk keeps its answer in `types.layout.fn_mark`, apart from
+  `layout.mark`, and counts against the same POINTER_WORK_LIMIT (`fail/casts/041` to `043`,
+  `run/casts/018`). `walk_marks` is Tarjan's algorithm over the structs, with explicit stacks
+  (`place_memo.frames` and `entered`), so a chain of 65600 structs needs no deep recursion. A
+  struct keeps its answer in `types.layout.mark` for the life of the checker: MARK_SOME on the path
+  to a mark, MARK_NONE for each struct of a set of structs that reach each other once the walk
+  closes the set with no mark, and no answer after a layout that waits or the work limit. So the
+  walk enters each struct once, and each entry is a step of POINTER_WORK_LIMIT
+  (`check_mark_limit_test.ft`). Before the cache, one legal cast of a 15248-line program took
+  15.65 s, because each pointer place walked its chain again. A `void*` or an integer source has no
+  level-1 storage, so each marked place of the target is added. **No compiler module casts a `void*`
+  back to a type that holds such a place.** A type keeps a `u64` handle of its declaration, `k + 1`
+  for `ck->syms[k]` (`check.nominal_sym`), and the layout of a struct keeps the type, the offset and
+  the name of each field, so the FIR, the interpreter and `owner/place` read the fields with no
+  declaration. `scope.binding.module` is `k + 1` for module `k` of the set (`check.module_of`,
+  `modules.read_at`), and the source lookup of `diag` takes the `diag.sources` that the session
+  embeds.
 
 ## 5. Modules, the driver and the diagnostics
 

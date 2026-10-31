@@ -1102,8 +1102,8 @@ first takes its default type (D4.5) and is then converted with the runtime seman
 | `u64`               | `T mut*`, `void mut*`    | error: an integer marks no level `mut`        |
 | pointer             | other integer types      | error                                         |
 | function pointer    | `void*`                  | reinterpret                                   |
-| `void*`             | function pointer         | reinterpret                                   |
-| function pointer    | `u64`, other fn type     | error (go through `void*`)                    |
+| `void*`             | function pointer         | error, as an `extern` argument too            |
+| function pointer    | `u64`, other fn type     | error                                         |
 | `string`            | `char@`, `u8@`           | reinterpret the header                        |
 | `string`            | `char mut@`, `u8 mut@`   | error: the bytes of a `string` are immutable  |
 | `char@`, `u8@`      | `string`, each other     | reinterpret the header                        |
@@ -1169,24 +1169,28 @@ it gives the bits (D10.7). The check has a work limit of 65536 steps; past it th
 with the note `the check cannot prove that the cast keeps its pointer places`. The exemption: a
 cast that is itself an argument of a call of an `extern fn` is legal, because C sees no `own`
 (D17.13). A cast inside that argument, an argument of a fort function and an argument of a call
-through a function pointer get no exemption. Three forms are outside the rule (D3.14,
-`ownership-design.md` 5.1): a view that C gives back from an exempt argument, a call through a
-function pointer to which a cast through `void*` gave another type, and a read-only view that
-adds or changes a function pointer place at any level.
+through a function pointer get no exemption. One form is outside the rule (D3.14,
+`ownership-design.md` 5.1): a view that C gives back from an exempt argument.
 
 **A cast keeps each pointer place that carries a mark, in any view** (D3.14). A pointer place
-carries a mark when its type marks a reference `mut` or `own`, or when a type that it reaches
-does: its pointee or element, the element of a fixed array, and the type of each field of a
-struct, at any depth, each struct once. A `string`, a `void*` and a function pointer reach no
-type. At level 1 of the result, read-only or `mut`, each pointer place of the target that
-carries a mark sits at a byte where the source holds a pointer place of the same type (section
-6), the marks included; level 1 then answers for each deeper level. The storage of a `void*`
+carries a mark when its type marks a reference `mut` or `own`, or when it is a function pointer.
+It carries one too when a type that it reaches does one of the two. A place reaches its pointee
+or element, the element of a fixed array, and the type of each field of a struct. It reaches
+them at any depth, each struct once. A `string`, a `void*` and a function pointer reach no type,
+so the walk reads no parameter and no result of a function pointer. A function pointer place
+carries a mark always. A call through it runs the function that its bits name, and a call is no
+read. At level 1 of the result, read-only or
+`mut`, each marked pointer place of the target needs a pointer place of the source. That place
+starts at the same byte and has the same type, the marks included (section 6). Level 1 then
+answers for each deeper level. The storage of a `void*`
 holds no pointer place and an integer reaches no level, so a cast from a `void*` or from an
 integer gives a target whose level 1 holds no pointer place that carries a mark. A place that
 carries no mark stays free to pun, because through it a view only reads. The error reads
 `cannot cast u64* to holder2*: a cast adds the pointer u64 mut* at byte 0`, and the error of the
-`mut` rule comes first. The exemption of an `extern` argument and the work limit hold here too,
-and each struct that the walk enters is a step of the limit. A struct keeps its answer for the
+`mut` rule comes first. The exemption of an `extern` argument and the work limit hold here too.
+The exemption covers no function pointer place: an exempt view keeps each place that is or
+reaches a function pointer with its type.
+Each struct that the walk enters is a step of the limit. A struct keeps its answer for the
 rest of the check. So at the limit, the verdict of a cast can depend on the casts before it and on
 the build.
 A drop of a mark that the implicit conversion of section 8.4 makes is no exception: the cast
@@ -1195,10 +1199,25 @@ storage that the place reaches. A callback that writes through its context takes
 named type, and a comparator of `qsort` reads an element whose pointers carry a mark through a
 view type whose pointers carry none.
 
+**A cast to a function pointer type keeps the type of the function** (D3.14). The matrix gives a
+function pointer type one source other than itself, a `void*`, and a `void*` reaches no type. So
+the cast adds a function pointer and is an error, as an argument of an `extern fn` too:
+`cannot cast void* to fn (u64) void: a cast adds the function pointer fn (u64) void`. The error
+names no byte, because a function pointer value has no storage level. A function pointer thus
+holds `null`, a fort function of its type, or a value that C gave. A cast of a function pointer
+to `void*` stays legal. So does a read-only view that hides a function pointer place, because
+no cast gives the bits a function pointer type again. A call through another function type is no
+read. For `fn take(u64* own p) void`, a call through `cast(cast(take, void*), fn (u64) void)`
+frees the address of a local. `qsort` calls an exempt comparator the same way. With no mark on
+either side, a struct result goes through its hidden pointer (section 11.2). It goes to the
+address that an integer argument holds. Bits that no function name gave jump to any code.
+
 ```fort
 struct holder { u64 count; u64* own data; }
 struct mirror { u64 tally; u64* own payload; }
 struct wrap { u64* own p; }
+struct owner_cb { fn (u64* own) void f; }
+struct view_cb { fn (u64*) void f; }
 holder mut h = holder{.count = 1, .data = new(u64)};
 void mut* v = cast(&h, void mut*);        // error: hides the pointer u64* own at byte 8
 void* r = cast(&h, void*);                // ok: the storage of a `void*` holds no place
@@ -1217,6 +1236,11 @@ u64 mut* mut slot = &x;
 *cast(&slot, u64 mut*) = 0;               // error: hides the pointer u64 mut* at byte 0
 u64* mut* ro = cast(&slot, u64* mut*);    // error: the mark changes the type of the place
 libc.memset(cast(&h, u8 mut*), 0, sizeof(holder));   // ok: an argument of an extern fn
+owner_cb o = owner_cb{.f = take};         // `fn take(u64* own p) void` frees its argument
+void* code = cast(o.f, void*);            // ok: a function pointer goes to `void*`
+fn (u64*) void call = cast(code, fn (u64*) void);   // error: adds the function pointer
+view_cb* vc = cast(&o, view_cb*);         // error: adds the pointer fn (u64*) void at byte 0
+u64* word = cast(&o, u64*);               // ok: a read-only view hides the place
 ```
 
 Ownership in casts (D3.14, D17.3, D17.12): the result of a cast is `own` exactly when its target

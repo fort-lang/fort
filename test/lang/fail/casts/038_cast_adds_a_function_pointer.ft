@@ -1,0 +1,56 @@
+//! fail
+// A view over storage that holds no function pointer adds one, and the bits that it reads can name
+// any code (D3.14). The sources here are a `u64`, the storage of a `void*` and an integer. A
+// read-only view that hides the place stays legal: it only reads the bits.
+fn take(u64* own p) void {
+    del(p);
+}
+
+struct owner_cb {
+    fn (u64* own) void f;
+}
+
+struct view_cb {
+    fn (u64*) void f;
+}
+
+// The struct reaches itself through the parameter of its function pointer. The walk of the marks
+// reads no parameter, so it ends at the function pointer.
+struct self_cb {
+    fn (self_cb*) void f;
+    u64 n;
+}
+
+// A span field and a pointer field with no mark reach a function pointer, so each carries a mark.
+struct cbs {
+    (fn () void)@ s;
+}
+
+struct inner {
+    u64 n;
+    (fn () void)* p;
+}
+
+struct outer {
+    u64 k;
+    inner[2] items;
+}
+
+fn main() i32 {
+    u64 mut y = 7;
+    owner_cb o = owner_cb{.f = take};
+    u64* w = cast(&o, u64*);
+    u64 bits = *w;
+    view_cb* v = cast(&bits, view_cb*); //! error: cannot cast u64* to view_cb*: a cast adds the pointer fn (u64*) void at byte 0
+    v->f(&y);
+    void* any = cast(&o, void*);
+    view_cb* r = cast(any, view_cb*); //! error: cannot cast void* to view_cb*: a cast adds the pointer fn (u64*) void at byte 0
+    r->f(&y);
+    owner_cb* back = cast(cast(&o, u64), owner_cb*); //! error: cannot cast u64 to owner_cb*: a cast adds the pointer fn (u64* own) void at byte 0
+    (fn () void)* slot = cast(&bits, (fn () void)*); //! error: cannot cast u64* to (fn () void)*: a cast adds the pointer fn () void at byte 0
+    self_cb* s = cast(&bits, self_cb*); //! error: cannot cast u64* to self_cb*: a cast adds the pointer fn (self_cb*) void at byte 0
+    u64[8] ints = {4096, 1, 0, 0, 0, 0, 0, 0};
+    cbs* c = cast(&ints, cbs*); //! error: cannot cast u64[8]* to cbs*: a cast adds the pointer (fn () void)@ at byte 0
+    outer* nest = cast(&ints, outer*); //! error: cannot cast u64[8]* to outer*: a cast adds the pointer (fn () void)* at byte 16
+    return 0;
+}

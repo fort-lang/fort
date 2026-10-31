@@ -72,14 +72,21 @@ struct field {
 struct layout {
     layout_state state;
     // The place of the struct in the stack of the walk of check.carries_mark while the mark is
-    // that of a walk, and nothing at any other time.
+    // that of a walk, and nothing at any other time. One walk runs at a time, of one kind, so the
+    // two marks below share this place.
     u32 walk;
     u64 size;
     u64 align;
     bool owning; // a field is an `own` reference or an owning aggregate
-    // Whether the struct reaches a reference marked `mut` or `own`, as check.carries_mark answers
-    // it for the life of the table (D3.14); 0 until a walk of the checker gives a final answer.
+    // Whether the struct reaches a reference marked `mut` or `own`, or a function pointer
+    // (D3.14). check.carries_mark answers it for the life of the table. It is 0 until a walk of
+    // the checker gives a final answer.
     u8 mark;
+    // Whether the struct reaches a function pointer, for an argument of an `extern fn` (D3.14).
+    // A reference marked `mut` or `own` is no mark here, and the walk goes on to what it reaches.
+    // The checker answers it in check.carries_mark for the life of the table. It is 0 until a
+    // final answer.
+    u8 fn_mark;
     u64 owners; // the `own` references in fixed storage, at most OWNER_CAP
     u64 owner_depth; // the most steps from the struct to one of them
     u64 pointers; // the pointer places in fixed storage (type_pointer_count), at most OWNER_CAP
@@ -1137,8 +1144,8 @@ fn type_cast_allowed(node* dst, node* src) bool {
         return scalar_cast_allowed(dst, src);
     }
     if (is_ptr_like(src)) {
-        // A pointer converts to another pointer or to `u64`.
-        // A function pointer converts only through `void*`.
+        // A pointer converts to another pointer or to `u64`. The matrix admits a `void*` to a
+        // function pointer type, and check.check_pointer_places refuses it (D3.14).
         return is_ptr_like(dst) || is_u64(dst) ||
                (src->kind == type_kind.k_voidptr && dst->kind == type_kind.k_fn);
     }
@@ -1317,6 +1324,7 @@ fn type_layout_fail(node* s) void {
     l->owner_depth = 0;
     l->pointers = 0;
     l->mark = 0;
+    l->fn_mark = 0;
     del(l->fields);
 }
 
@@ -1439,6 +1447,16 @@ fn mark_of(node* s) u8 {
 /// Keeps `mark` as the mark of the struct `s` (layout.mark).
 fn keep_mark(node* s, u8 mark) void {
     layout_of(s)->mark = mark;
+}
+
+/// The mark of the struct `s` for a function pointer alone (layout.fn_mark).
+fn fn_mark_of(node* s) u8 {
+    return layout_of(s)->fn_mark;
+}
+
+/// Keeps `mark` as the mark of the struct `s` for a function pointer alone (layout.fn_mark).
+fn keep_fn_mark(node* s, u8 mark) void {
+    layout_of(s)->fn_mark = mark;
 }
 
 /// The place of the struct `s` in the stack of a walk of check.carries_mark (layout.walk).
