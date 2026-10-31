@@ -720,6 +720,35 @@ bullet at a time and without a rewrite.
   integer to a pointer, `v = cast(u, i32*)`, reads back an integer of an `own` value or of an
   `i32`, and no hand case forges a pointer to a local. So each set prints `forged 0`, and the other
   counts did not change when the event came (measured).
+  **The test holds rule (b) of D17.21 too.** A site of rule (b) is a function, the location of an
+  item and a local whose owner the item reads, from `proof.uses`, rejected when the pass does not
+  prove the use. A `use after move` event is in the scope of rule (b) when its moved tag names a
+  local of the function whose frame read the slot (no ` by a callee`, X2); an event of a slot of no
+  local, a global or an allocation, counts apart. The event stands at the load through the null, and
+  it does not name the read of the vacated slot that gave the null, which can be an earlier copy
+  (`v = x;` and then `*v`), so it marks each site of its function and local: a false accept is such
+  an event with no rejected site of that function and local. So a wrong proof of one read hides
+  behind a rejected read of the same local in the same function, and a site with no event can count
+  as one with an event (`h4`). A slot that held no allocation gives no moved tag, so the locals of
+  the exhaustive family, null at the entry, gave no event in two statements: the local `z` of
+  `generator.LOCAL_DECL` holds an allocation from its declaration, and five statements over `z` and
+  its pointer `pz` (a `del` and a load, directly and through `pz`, and a `move`) give the family its
+  events. The 24 programs of `USE_CASES` hold rule (b) as hand cases, and the seeded family inserts
+  into them. A rejected use with no event at or after a `forged` event of its function counts apart,
+  as the sites of the other rules do. The measurement found 0 false accepts in each set, and 10,
+  1234, 661 and 292 false rejects in the hand set (3 of them in the FIR cases), the exhaustive
+  family, the seeded family and the shapes: a `del` of one element can vacate another element of a
+  fixed array, a call can vacate a memory owner, and a store through a pointer ends no state. A load
+  of an element of a span after its `move` gives no event: the bounds check of the empty span aborts
+  the run first (`use span`). The rows D17.21 of `tools/mutations/oracle.json` make the pass prove
+  too much, and each one makes the test print a false accept of rule (b); D17.21-test-both needed
+  the hand case `null_edge`, whose load stands on the edge where its test finds null. The case
+  `global_ptr` loads through a global that holds the address of the owner: no program before it
+  stored a local address into a global, so the oracle did not see that the pass named no owner
+  through a global. A seeded variant inserts or removes one statement, so a hand case whose loop
+  ends through one statement of its body only can run forever: a removed `del`, or an inserted store
+  into the tested place when the places line names it, keeps the test true. The first `while_test`
+  hung the test for 30 minutes; its loop now has a second exit, a `break`.
 - **The suites of fir.interpreter derive each expected value apart from the interpreter**
   (`test/fort/fir/interpreter_test.ft`, `interpreter_source_test.ft`). Python's integers and IEEE
   doubles gave each value at each boundary of each type when the cases were written: the wrap at

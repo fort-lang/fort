@@ -3126,9 +3126,21 @@ says ownership is "by convention", this section supersedes it.
   the constant indexes in source form (`s.b` for a copy of `s`, `x` for `**px`). A temporary is
   written as the source text of the expression whose value it holds. No message about fort source
   names a FIR local. For FIR text with no source tree, the message names the FIR place.
-  The proof of one function has a limit of work, as D17.11 and D17.20 give theirs. The change
-  that adds the report gives its count, its value and its note in this entry. Past the limit, the
-  analysis proves no use of the function.
+  The proof of one function has a limit of work, as D17.11 and D17.20 give theirs. Its charge
+  counts the walks of the blocks in its fixpoint. A walk of a block charges the statements, the
+  terminator and the acts of the block times the values of the state, and a walk of a block that
+  ends in a test against `null` charges twice. An act is one step of this rule in a block: a read
+  that can read an owner, a `move` or a `del` that can vacate one, a call when a memory local holds
+  an owner, which counts twice (its exposures and its vacating), a store into a place whose base is
+  a local, which can store into a key, and the read of a test against `null`. A store counts once
+  more when its place is a tracked place in fixed storage of a local whose type holds an owner,
+  and once more when a memory local holds an owner (its borrows). The values are the owners that
+  the reads of the function name, each with one value more for each local key of its place. The
+  analysis charges the first pass over the blocks before it makes the state. When the charge
+  passes 16777216 (2^24), the analysis proves no use of the function. Then each error names the
+  first owner that its use reads, no note names an operation, and the first error of the function
+  has the note `the function exceeds the work limit of D17.21; split it`. A function with no
+  `move`, no `del` and no call that can vacate an owner takes no fixpoint and no charge.
   The rule takes the assumptions of D17.11, those of its Borrows included (D10.7, D17.1). A use
   of `p` that cannot be vacated is no error of this rule, also when `p` holds a `null` that a
   store wrote or the entry value of a parameter: a load through `null` stays undefined (D10.5,
@@ -3196,6 +3208,10 @@ says ownership is "by convention", this section supersedes it.
   place in fixed storage is a use of that place and of the owners below it only, and that the
   non-null edge takes each form of gen rule 6 and the test of `p.ptr`. The number follows D17.20
   (`spec/ownership-design.md` 6.6).
+  Amended 2026-10-30: the report. The option `--move-report` lists each use that the analysis
+  does not prove, and no verdict of a build or of `--check` changes. The entry takes the charge,
+  the value and the note of the limit of work. Before, it said only that the change that adds the
+  report gives them. `spec/ownership-design.md` 6.2 gives the uses that the report lists.
 
 ## D18 Float printing in the runtime
 

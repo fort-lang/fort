@@ -710,9 +710,9 @@ another pointee type with owners, so part 2 of rule (c) has 0 sites at a cast (m
 
 | rule and variant                 | src/fort  | src/lsp | std   | test/fort    | test/lang | dir  |
 |----------------------------------|----------:|--------:|------:|-------------:|----------:|------|
-| (b) local, not memory            | 0/0       | 0/0     | 0/0   | 0/0          | 0/0       | ?    |
-| (b) memory owner, direct         | 22/11     | 0/0     | 0/0   | 53/31        | 99/29     | ?    |
-| (b) memory owner, by a pointer   | 39/15     | 0/0     | 0/0   | 103/50       | 6/3       | ?    |
+| (b) local, not memory            | 0/0       | 0/0     | 0/0   | 0/0          | 5/2       | pass |
+| (b) memory owner, direct         | 58/20     | 0/0     | 0/0   | 141/72       | 123/36    | pass |
+| (b) memory owner, by a pointer   | 164/42    | 0/0     | 0/0   | 1,260/291    | 138/34    | pass |
 | (c) `own` local, parameter, temp | 2/2       | 0/0     | 0/0   | 0/0          | 32/24     | pass |
 | (c) owning aggregate local, V1   | 199/99    | 1/1     | 2/1   | 2,424/2,354  | 93/77     | ?    |
 | (c) owning aggregate local, R1   | 106/48    | 1/1     | 0/0   | 2,116/2,076  | 35/30     | ?    |
@@ -790,6 +790,15 @@ from which a path reaches the use: `'<place>' is moved here`, `'<place>' is dele
   of `test/fort` and 31 of `test/lang` for memory owners. In `src/fort`, each site follows a call:
   a read of a field of a memory local (`fir.func_predecessors`) or a load through a pointer
   (`check_stmt.check_range_for`, read).
+- Report (measured with `--move-report`, the rows `pass` of the table): 222 uses in 56 functions
+  of `src/fort`, none in `src/lsp` and `std`, 1,401 in 350 functions of `test/fort`, 33 in 10 of
+  `test/lsp`, which the table leaves out, and 266 in 61 of `test/lang`. The report counts more
+  than P4, because an exposure of D17.11 (Borrows) holds until the end of the function: a pointer
+  that a call gives can be a place of each memory local whose address a call took before. 125 of
+  the uses read the result `_0` of an aggregate type through a pointer, after a call and before
+  the store into `_0`: 44 in 11 functions of `src/fort`, 8 in 7 of `test/fort` and 73 in 14 of
+  `test/lang`. The 5 uses of local owners that are not memory read another element of a fixed
+  array after a `del` of one element, which can overlap it.
 - Size: decision S, report M, migration M, error S.
 
 ### 6.3 (c) A live owner at the end of its scope, and a shallow `del`

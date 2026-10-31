@@ -108,10 +108,15 @@ string EXHAUSTIVE_PREFIX = "gen";
 /// declarations: two owning pointers, an owning array of two elements, two index locals, two view
 /// locals, the struct local, a pointer to an owning local, a pointer to that pointer, a `u64`, and
 /// an owning pointer to a `pair`, whose deferred `del` frees it at each exit with its inner owners
-/// (part 2 of D17.20). A function declares a local only when a statement names it, so `x` is memory
-/// only in a function that names `p` or `pp`. `p` needs `x`, and `pp` needs `p`.
-u64 LOCAL_COUNT = 12;
-string[LOCAL_COUNT] LOCAL_NAME = {"x", "y", "arr", "j", "k", "v", "w", "c", "p", "pp", "u", "r"};
+/// (part 2 of D17.20). Then an owning pointer `z` that holds an allocation from its declaration,
+/// whose deferred `del` frees it, so that two statements can vacate it and read it (rule (b) of
+/// D17.21), and a pointer to it. A function declares a local only when a statement names it, so
+/// `x` is memory only in a function that names `p` or `pp`, and `z` only in one that names `pz`.
+/// `p` needs `x`, `pp` needs `p`, and `pz` needs `z`.
+u64 LOCAL_COUNT = 14;
+string[LOCAL_COUNT] LOCAL_NAME = {
+    "x", "y", "arr", "j", "k", "v", "w", "c", "p", "pp", "u", "r", "z", "pz",
+};
 string[LOCAL_COUNT] LOCAL_DECL = {
     "i32 mut* own mut x = null;",
     "i32 mut* own mut y = null;",
@@ -125,12 +130,16 @@ string[LOCAL_COUNT] LOCAL_DECL = {
     "i32 mut* own mut** pp = &p;",
     "u64 mut u = 0;",
     "pair mut* own r = new(pair);\n    defer del(r);",
+    "i32 mut* own mut z = new(i32);\n    defer del(z);",
+    "i32 mut* own mut* pz = &z;",
 };
 
-// The bit of `x`, `p` and `pp` in a mask of LOCAL_NAME.
+// The bit of `x`, `p`, `pp`, `z` and `pz` in a mask of LOCAL_NAME.
 u32 LOCAL_X = 1;
 u32 LOCAL_P = 256;
 u32 LOCAL_PP = 512;
+u32 LOCAL_Z = 4096;
+u32 LOCAL_PZ = 8192;
 
 /// The statements of the vocabulary of design 3.7. `#` stands for the position of the statement in
 /// its function, and `$` for the name of the sibling of the function. A statement that ends with
@@ -145,8 +154,10 @@ u32 LOCAL_PP = 512;
 /// `bool`, a loop of two iterations and `return`. Then the tests against null (D17.11 gen rule 6):
 /// an `if` on `==`, on `!=`, on a negation, on `&&` and on `||`, whose `else` arm opens the block,
 /// over `x`, `y`, `q->a`, `*p`, `r->a`, `G` and `arr[j]`, and a loop on `!=` that ends when a
-/// `del` empties `y`.
-u64 VOCABULARY_SIZE = 92;
+/// `del` empties `y`. Last the statements of rule (b) over `z`, which holds an allocation: a `del`
+/// of it, directly and through `pz`, a `move` of it, and a load through it, directly and through
+/// `pz`.
+u64 VOCABULARY_SIZE = 97;
 string[VOCABULARY_SIZE] VOCABULARY = {
     "x = new(i32);",
     "y = new(i32);",
@@ -240,6 +251,11 @@ string[VOCABULARY_SIZE] VOCABULARY = {
     "if (x == null && y == null) {",
     "if (x != null || q->a != null) { } else {",
     "while (y != null) { del(y); }",
+    "del(z);",
+    "y = move(z);",
+    "u = cast(*z, u64);",
+    "del(*pz);",
+    "u = cast(**pz, u64);",
 };
 
 /// The statements that a function of the exhaustive family can start with: a release of each
@@ -295,6 +311,9 @@ fn scan(string text, u32 mut* reads) u32 {
     }
     if ((names & LOCAL_P) != 0) {
         names = names | LOCAL_X;
+    }
+    if ((names & LOCAL_PZ) != 0) {
+        names = names | LOCAL_Z;
     }
     return names;
 }

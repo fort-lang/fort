@@ -27,6 +27,7 @@
 // 4 read (is_apart), and each walk moves that state past each statement (apply_facts).
 // The module uses switches and no function-pointer dispatch table. It holds no module-level
 // mutable state: each vector belongs to one call of prove, or to the proof that it returns.
+import fort.diag;
 import fort.fir;
 import fort.fir_flow;
 import fort.owner.alias;
@@ -97,7 +98,10 @@ struct inner {
 /// says that it passed the limit. `inner_work` adds the steps of the paths of the inner owners to
 /// `leak_work` (count_inner_steps), and `inner_over` says that it passed the limit. `alias_work` is
 /// the charge of the fixpoint of owner.alias, and `alias_on` says that the kill rules read its
-/// map: the fixpoint ran and ended within alias.WORK_LIMIT.
+/// map: the fixpoint ran and ended within alias.WORK_LIMIT. `uses` holds the uses of rule (b) in
+/// block order and in the order of the reads (D17.21, prove_uses), and `use_unproved` counts those
+/// that the analysis does not prove, which are no error yet. `use_work` is the charge of the proof
+/// of rule (b), as USE_LIMIT counts it, and `use_over` says that it passed USE_LIMIT.
 struct proof {
     bool mut@ own proved;
     store mut@ own stores;
@@ -115,6 +119,10 @@ struct proof {
     bool leak_over;
     bool inner_over;
     bool alias_on;
+    use mut@ own uses;
+    u32 use_unproved;
+    u64 use_work;
+    bool use_over;
 }
 
 fn free(proof mut* p) void {
@@ -122,10 +130,12 @@ fn free(proof mut* p) void {
     del(p->stores);
     del(p->exits);
     del(p->inners);
+    del(p->uses);
     p->checks = 0;
     p->unproved = 0;
     p->leaks = 0;
     p->inner_leaks = 0;
+    p->use_unproved = 0;
 }
 
 /// Whether the check that ends block `b` is proved, or true when block `b` ends in another
@@ -169,6 +179,8 @@ struct context {
     alias.map aliases;
     fir_flow.bits origins;
     u64 units;
+    bool owners;
+    u64 use_limit;
 }
 
 fn free_context(context mut* c) void {
@@ -940,6 +952,13 @@ fn count_units(fir.func* f) u64 {
 /// `limit` gets no proof of its exits (pass_exits), and one whose inner work passes it gets no
 /// proof of the obligations of part 2 (pass_inners). The test comes before any dataflow.
 fn prove_within(fir.func* f, u64 limit) proof {
+    return prove_limits(f, limit, USE_LIMIT);
+}
+
+/// Proves as prove_within does, and proves rule (b) within `use_limit` (prove_uses) after the
+/// facts of the emptiness proof (run_dataflows) and apart from them: it reads their survey of the
+/// places, their stale set, their tests and their map of owner.alias, and it changes no fact.
+fn prove_limits(fir.func* f, u64 limit, u64 use_limit) proof {
     u32 n = fir.block_count(f);
     proof mut out = proof{};
     out.proved = new(bool, cast(n, u64));
@@ -964,7 +983,10 @@ fn prove_within(fir.func* f, u64 limit) proof {
     find_stores(f, check_of, &out);
     find_inners(f, &out);
     bool overwrite = out.checks > 0 || out.stores.len > 0;
-    if (!overwrite && !has_owner(f, false) && out.inners.len == 0) {
+    // rule (b) needs a local owner, also one in a local of an owning aggregate or in `_0`
+    bool emptiness = overwrite || has_owner(f, false) || out.inners.len > 0;
+    bool owners = has_local_owner(f);
+    if (!emptiness && !owners) {
         return out;
     }
     u64 locals = cast(fir.local_count(f), u64);
@@ -980,9 +1002,19 @@ fn prove_within(fir.func* f, u64 limit) proof {
     c.first_store = new(u64, cast(n, u64) + 1);
     defer free_context(&c);
     index_stores(&c, &out);
-    place.count_uses(&c.places);
+    if (emptiness) {
+        place.count_uses(&c.places);
+    } else {
+        place.count_stores(&c.places);
+    }
     place.mark_memory(&c.places);
     place.mark_sources(&c.places);
+    c.owners = owners;
+    c.use_limit = use_limit;
+    if (!emptiness) {
+        prove_uses_alone(&c, &out);
+        return out;
+    }
     u64 checked = cast(out.checks, u64) + count_alone(&c, check_of, &out);
     u64 sets = cast(n, u64) * locals + place.stale_steps(&c.places);
     // a function with no check and no store that needs a proof has no work (D17.11)
@@ -1004,6 +1036,7 @@ fn prove_within(fir.func* f, u64 limit) proof {
     }
     if (out.over) {
         judge(&c, null, null, null, null, &out);
+        prove_uses_alone(&c, &out);
         return out;
     }
     run_dataflows(&c, &out);
@@ -1062,6 +1095,7 @@ fn run_dataflows(context mut* c, proof mut* out) void {
         if (!out->inner_over) {
             judge_inners(c, &stale, &fresh, null, &scratch, out);
         }
+        prove_uses(c, &pt, &stale, out);
         return;
     }
     run_aliases(c, &pt, out);
@@ -1077,6 +1111,7 @@ fn run_dataflows(context mut* c, proof mut* out) void {
     if (!out->inner_over) {
         judge_inners(c, &stale, &fresh, &facts, &scratch, out);
     }
+    prove_uses(c, &pt, &stale, out);
 }
 
 // Runs the fixpoint of owner.alias for the facts of `c`, before the facts dataflow, whose kill
@@ -1877,4 +1912,1336 @@ fn judge_inners(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fre
             k += 1;
         }
     }
+}
+
+// ---- rule (b): a use after `move` or `del` -----------------------------------------------------
+
+/// The most charge of the proof of rule (b) for one function (D17.21). Each walk of a block in the
+/// fixpoint charges its statements, its terminator and its acts times the values of the state,
+/// and a walk of a block that ends in a test against null charges twice. Past it, the analysis
+/// proves no use of the function.
+u64 USE_LIMIT = 16777216;
+
+/// The value of a state entry that no path reaches with an operation that vacates the owner.
+u64 NO_RANK = 18446744073709551615;
+
+/// The kind of the operation that the note of an unproved use names (D17.21).
+enum operation_kind {
+    op_none, // no operation: the function passed USE_LIMIT
+    op_move, // a `move` operand, also the implicit `move` of `return x`
+    op_del,  // a `del`
+    op_call, // a call, which vacates each memory owner
+}
+
+/// A use of rule (b) (D17.21): item `index` of block `block`, a statement or the terminator when
+/// `index` is the count of the statements of the block, reads an owner of the local `local`.
+/// `memory` says that the local is memory. `proved` says that the analysis proves each read of an
+/// owner of the local there: no owner that the read reads can be vacated there. Else `read` is the
+/// first read that it does not prove, and `through` says that `read` has a deref or an index into
+/// a span or a `string`. `owner` is the first owner that the read reads and that can be vacated
+/// there, numbered in the order of next_owner_step from the type of `base`: `base` is `read` for a
+/// tracked place in fixed storage and for a place of an `own` reference type there, and else the
+/// whole local. `op_kind` names the first operation in the order of the source positions from
+/// which a path reaches the read with no event that ends the state: statement `op_index` of block
+/// `op_block`, and `op_place` the place of a `move`. `local_owner` numbers the same owner in the
+/// type of the local, or is NO_RANK when its path has a local key; the report names it so when no
+/// source expression names the read. A use that the analysis proves keeps its first read in
+/// `read`.
+struct use {
+    u32 block;
+    u32 index;
+    u32 local;
+    bool memory;
+    bool proved;
+    fir.place read;
+    bool through;
+    fir.place base;
+    u64 owner;
+    u64 local_owner;
+    operation_kind op_kind;
+    u32 op_block;
+    u32 op_index;
+    fir.place op_place;
+}
+
+// An owner of rule (b): a local owner whose state the analysis keeps. Entry `value` of a state is
+// the first rank (act.rank) of an operation that vacates it on a path with no event that ends the
+// state since. Entry `value + m`, for `m` from 1 to `keys`, is the same for the paths where an
+// event whose destination holds the first `m` local keys of `path` ends the state, which a store
+// into one of those keys undoes (D17.21). `keys` is the count of the local keys of `path`.
+struct owner {
+    place.path path;
+    u32 value;
+    u32 keys;
+}
+
+// The kinds of the acts of a block, the steps of rule (b) in the order of spec/fir.md 7.
+enum act_kind {
+    ak_use, // a read of the place `place`, whose path is `path`, that can read an owner
+    ak_vacate, // a `move` or a `del` of `path` at `position`
+    ak_call, // a call at `position`, which vacates each memory owner
+    ak_end, // a store into `path`, a tracked place in fixed storage with `keys` local keys
+    ak_key, // a store into the local `keys`, which can be a key of an owner
+    ak_expose, // the exposures of the call of statement `index` (alias.apply_reads)
+    ak_borrow, // the borrows of the store of statement `index` (alias.apply_store)
+    ak_test, // the read of the test against null of the block: the owner `path` is not null
+}
+
+// One act of item `index` of block `block`. `through` says that `path` has a deref or an index
+// into a span or a `string`. `rank` numbers each `move`, `del` and call of the function in the
+// order of their source positions, and of the acts for one position (rank_ops).
+struct act {
+    act_kind kind;
+    u32 block;
+    u32 index;
+    u64 rank;
+    place.path path;
+    fir.place place;
+    u32 keys;
+    u64 position;
+    bool through;
+}
+
+// The state of one proof of rule (b). `acts[first_act[b]..first_act[b + 1]]` are the acts of block
+// `b`. `owners[first_owner[n]..first_owner[n + 1]]` are the owners of the local `n`: its owners in
+// its type when `whole[n]`, in the order of next_owner_step, then the owners that a read with local
+// keys names, the reads `named`. `memory` lists the memory locals with an owner in their type,
+// `owned` marks each local with an owner in its type, and `keyed` lists the owners with a local
+// key. `records` holds the uses that the judge writes, `ops[r]` is the act of rank `r`, and `block`
+// is the block of the acts that the walk appends. `through` says that an act goes through a
+// pointer, and `reads` counts the acts of a use. `values` is the length of a state, and `charge`
+// the charge of the fixpoint (USE_LIMIT).
+struct usage {
+    act mut@ own acts;
+    u64 act_count;
+    u64 mut@ own first_act;
+    owner mut@ own owners;
+    u64 owner_count;
+    u64 mut@ own first_owner;
+    bool mut@ own whole;
+    u32 mut@ own memory;
+    u32 mut@ own keyed;
+    u64 keyed_count;
+    place.path mut@ own named;
+    u64 named_count;
+    use mut@ own records;
+    u64 record_count;
+    u64 mut@ own ops;
+    u32 block;
+    bool through;
+    u64 reads;
+    bool mut@ own owned;
+    u64 values;
+    u64 charge;
+}
+
+fn free_usage(usage mut* u) void {
+    del(u->acts);
+    del(u->first_act);
+    del(u->owners);
+    del(u->first_owner);
+    del(u->whole);
+    del(u->memory);
+    del(u->keyed);
+    del(u->named);
+    del(u->records);
+    del(u->ops);
+    del(u->owned);
+}
+
+// Appends `a` to the acts of `u`, in block `u->block`.
+fn push_act(usage mut* u, act a) void {
+    if (u->act_count == u->acts.len) {
+        act mut@ own bigger = new(act, fir.grown_capacity(u->acts.len, "owner.prover: acts"));
+        u64 mut i = 0;
+        while (i < u->act_count) {
+            bigger[i] = u->acts[i];
+            i += 1;
+        }
+        del(u->acts);
+        u->acts = move(bigger);
+    }
+    u->acts[u->act_count] = a;
+    u->acts[u->act_count].block = u->block;
+    u->act_count += 1;
+    u->through = u->through || a.through;
+    if (a.kind == act_kind.ak_use) {
+        u->reads += 1;
+    }
+}
+
+// The source position of `at`, as one number that orders positions in one file.
+fn position(diag.loc at) u64 {
+    return (cast(at.line, u64) << 32) | cast(at.col, u64);
+}
+
+// Whether `f` has a local with an owner in its type, a local owner of D17.20.
+fn has_local_owner(fir.func* f) bool {
+    u32 mut n = 0;
+    while (n < fir.local_count(f)) {
+        if (place.count_owners(fir.local_at(f, n)->ty) > 0) {
+            return true;
+        }
+        n += 1;
+    }
+    return false;
+}
+
+// Proves rule (b) for the function of `c` as prove_uses does, with the predecessors and the stale
+// dataflow that it makes: the emptiness proof made none for the function. With no index temporary
+// that takes its key from a local and no held address, the stale set changes no key, so the
+// function takes no stale dataflow and the walk reads an empty set.
+fn prove_uses_alone(context mut* c, proof mut* out) void {
+    if (!c->owners) {
+        return;
+    }
+    fir.func* f = c->places.f;
+    fir.pred_table mut pt = fir.func_predecessors(f);
+    defer fir.pred_table_free(&pt);
+    find_tests(c);
+    if (!place.has_local_sources(&c->places) && c->places.held.len == 0) {
+        prove_uses(c, &pt, null, out);
+        return;
+    }
+    fir_flow.dataflow mut flow = fir_flow.dataflow_new(fir.local_count(f),
+                                                       fir_flow.join_kind.join_union,
+                                                       transfer_none);
+    defer fir_flow.dataflow_free(&flow);
+    run_locals(c, &pt, &flow, false);
+    prove_uses(c, &pt, &flow, out);
+}
+
+/// Proves rule (b) for the function of `c` within c->use_limit (D17.21) after the emptiness proof,
+/// with the predecessors `preds` and the stale dataflow `stale` of the function, or null when the
+/// stale set changes no key (prove_uses_alone), and lists each use in out->uses: each read of a
+/// local owner, in block order and in the order of the reads. It reads the tests against null and
+/// the map of owner.alias that the emptiness proof left in `c`, and makes the map when a `move`, a
+/// `del` or a read goes through a pointer and the proof made none. The proof is a forward
+/// may-dataflow over the acts of each block with a union join. A use is proved when no owner that
+/// it reads can be vacated at its read. out->use_unproved counts the uses that it does not prove,
+/// which are no error yet (has_error does not read it).
+fn prove_uses(context mut* c, fir.pred_table* preds, fir_flow.dataflow* stale, proof mut* out)
+    void {
+    if (!c->owners) {
+        return;
+    }
+    fir.func* f = c->places.f;
+    u32 n = fir.block_count(f);
+    u32 locals = fir.local_count(f);
+    u64 limit = c->use_limit;
+    usage mut u = usage{};
+    defer free_usage(&u);
+    u.first_act = new(u64, cast(n, u64) + 1);
+    u.whole = new(bool, cast(locals, u64));
+    mark_memory_owners(c, &u);
+    fir_flow.bits mut at_stale = fir_flow.bits_new(locals);
+    defer fir_flow.bits_free(&at_stale);
+    u32 mut b = 0;
+    while (b < n) {
+        u.first_act[cast(b, u64)] = u.act_count;
+        u.block = b;
+        if (stale != null) {
+            fir_flow.bits_copy(&at_stale, &stale->ins[cast(b, u64)]);
+        }
+        collect_acts(c, &u, b, &at_stale);
+        b += 1;
+    }
+    u.first_act[cast(n, u64)] = u.act_count;
+    // a function that reads no owner has no use
+    if (u.reads == 0) {
+        return;
+    }
+    if (u.through && c->aliases.f == null) {
+        c->aliases = alias.make(&c->places, c->units);
+        alias.run(&c->aliases, preds);
+        fir_flow.bits_free(&c->origins);
+        if (c->aliases.on) {
+            c->origins = alias.origins(&c->aliases);
+        }
+    }
+    rank_ops(&u);
+    u64 mut@ own mut ins = new(u64, 0);
+    defer del(ins);
+    bool mut over = false;
+    // with no `move`, no `del` and no call that vacates, no owner can be vacated: the proof takes
+    // no fixpoint and no charge
+    if (u.ops.len > 0) {
+        // the first pass of the fixpoint charges each block once, `weight` for each value of the
+        // state, so a function past the limit with that charge takes no state
+        u64 mut weight = 0;
+        b = 0;
+        while (b < n) {
+            weight = types.capped_sum(weight, walk_charge(c, &u, b, 1));
+            b += 1;
+        }
+        over = !make_owners(c, &u, weight, limit);
+        if (over) {
+            u.charge = types.capped_product(weight, u.values);
+            u.values = 0;
+        } else {
+            del(ins);
+            ins = run_uses(c, &u, preds, limit);
+            over = u.charge > limit;
+        }
+    }
+    judge_uses(c, &u, ins, over);
+    out->use_over = over;
+    out->use_work = u.charge;
+    del(out->uses);
+    out->uses = new(use, u.record_count);
+    u64 mut k = 0;
+    while (k < u.record_count) {
+        out->uses[k] = u.records[k];
+        if (!u.records[k].proved) {
+            out->use_unproved += 1;
+        }
+        k += 1;
+    }
+}
+
+// Lists the memory locals with an owner in their type in u->memory, and marks in u->owned each
+// local with an owner in its type.
+fn mark_memory_owners(context* c, usage mut* u) void {
+    fir.func* f = c->places.f;
+    u64 locals = cast(fir.local_count(f), u64);
+    del(u->owned);
+    u->owned = new(bool, locals);
+    u32 mut k = 0;
+    while (k < fir.local_count(f)) {
+        u->owned[cast(k, u64)] = place.count_owners(fir.local_at(f, k)->ty) > 0;
+        k += 1;
+    }
+    u64 mut count = 0;
+    u32 mut pass = 0;
+    while (pass < 2) {
+        u32 mut n = 0;
+        count = 0;
+        while (n < fir.local_count(f)) {
+            bool owners = place.count_owners(fir.local_at(f, n)->ty) > 0;
+            if (owners && c->places.locals[cast(n, u64)].memory) {
+                if (pass == 1) {
+                    u->memory[count] = n;
+                }
+                count += 1;
+            }
+            n += 1;
+        }
+        if (pass == 0) {
+            del(u->memory);
+            u->memory = new(u32, count);
+        }
+        pass += 1;
+    }
+}
+
+// ---- the acts of a block -----------------------------------------------------------------------
+
+// Appends the acts of block `b` to u->acts, in the order of the reads of spec/fir.md 7, with the
+// stale set `stale` of the entry of the block, which the call moves to its end. The act of the test
+// against null of the block follows the acts of its test statement.
+fn collect_acts(context mut* c, usage mut* u, u32 b, fir_flow.bits mut* stale) void {
+    fir.func* f = c->places.f;
+    u32 count = fir.block_statement_count(f, b);
+    place.test* t = &c->tests[cast(b, u64)];
+    u32 mut i = 0;
+    while (i < count) {
+        fir.statement* s = fir.block_statement(f, b, i);
+        statement_acts(c, u, i, s, stale);
+        if (c->tested[cast(b, u64)] && i == t->index) {
+            test_act(c, u, i, t->place, stale);
+        }
+        place.apply_stale(&c->places, s, stale);
+        i += 1;
+    }
+    terminator_acts(c, u, count, &fir.block_at(f, b)->term, stale);
+}
+
+// The acts of the statement `s`, item `i`: the reads of its right side, each `move` operand
+// vacating its place right after its read, then the exposures and the call, the reads of the
+// pointers of its destination, the end of the state of its destination, the store into a key and
+// the borrows. A `del` reads the pointers of its place and then vacates it; the read of its
+// operand and of a `move` operand is no use (D17.21).
+fn statement_acts(context mut* c, usage mut* u, u32 i, fir.statement* s, fir_flow.bits* stale)
+    void {
+    fir.func* f = c->places.f;
+    u64 at = position(s->loc);
+    if (s->kind == fir.stmt_kind.st_del) {
+        pointer_acts(c, u, i, s->place, stale);
+        vacate_act(c, u, i, s->place, at, stale);
+        return;
+    }
+    if (s->kind != fir.stmt_kind.st_assign) {
+        return;
+    }
+    fir.rvalue r = s->value;
+    if (r.kind == fir.rvalue_kind.rv_addr) {
+        pointer_acts(c, u, i, r.place, stale);
+    } else if (r.kind == fir.rvalue_kind.rv_slice) {
+        types.type_kind k = fir.place_type(f, r.place)->kind;
+        pointer_acts(c, u, i, r.place, stale);
+        if (k == types.type_kind.k_span || k == types.type_kind.k_string) {
+            use_act(c, u, i, r.place, stale);
+        }
+    }
+    if (r.kind == fir.rvalue_kind.rv_call && r.callee == fir.callee_kind.cl_value) {
+        operand_acts(c, u, i, r.callee_op, false, at, stale);
+    }
+    u32 mut k = 0;
+    while (k < r.ops_len) {
+        operand_acts(c, u, i, fir.rvalue_operand(f, r, k), is_null_test(f, r, k), at, stale);
+        k += 1;
+    }
+    bool memory = u->memory.len > 0;
+    if (r.kind == fir.rvalue_kind.rv_call && memory) {
+        push_act(u, act{.kind = act_kind.ak_expose, .index = i});
+        push_act(u, act{.kind = act_kind.ak_call, .index = i, .position = at});
+    }
+    pointer_acts(c, u, i, s->place, stale);
+    bool fixed = s->place.base == fir.base_kind.bk_local && fir.place_fixed(f, s->place);
+    if (fixed && u->owned[cast(s->place.local, u64)]) {
+        place.path d = place.trace(&c->places, s->place, stale);
+        if (d.tracked) {
+            push_act(u, act{.kind = act_kind.ak_end, .index = i, .path = d, .place = s->place,
+                            .keys = place.local_keys(&c->places, d)});
+        }
+    }
+    if (s->place.base == fir.base_kind.bk_local) {
+        push_act(u, act{.kind = act_kind.ak_key, .index = i, .keys = s->place.local});
+    }
+    if (memory) {
+        push_act(u, act{.kind = act_kind.ak_borrow, .index = i});
+    }
+}
+
+// The acts of the terminator `t`, item `i` of its block: the reads of its operands, the reads of
+// the pointers of the place of `check(overwrite: p)`, whose test of `p` is no read of rule (b), and
+// the read of `_0` by a `return` (spec/fir.md 7).
+fn terminator_acts(context mut* c, usage mut* u, u32 i, fir.terminator* t, fir_flow.bits* stale)
+    void {
+    fir.func* f = c->places.f;
+    u64 at = position(t->loc);
+    if (t->kind == fir.term_kind.tk_switch || t->kind == fir.term_kind.tk_check) {
+        operand_acts(c, u, i, t->cond, false, at, stale);
+    }
+    if (t->kind == fir.term_kind.tk_check || t->kind == fir.term_kind.tk_fail) {
+        u32 mut k = 0;
+        while (k < t->args_len) {
+            operand_acts(c, u, i, fir.operand_at(f, t->args_first + k), false, at, stale);
+            k += 1;
+        }
+    }
+    if (t->kind == fir.term_kind.tk_check_overwrite) {
+        pointer_acts(c, u, i, t->place, stale);
+    }
+    bool value = fir.local_at(f, 0)->ty->kind != types.type_kind.k_void;
+    if (t->kind == fir.term_kind.tk_return && value) {
+        use_act(c, u, i, fir.place_local(0), stale);
+    }
+}
+
+// Whether an act of the place `p` can name an owner: a place in fixed storage of a local with an
+// owner in its type, or a place through a pointer when a memory local holds an owner, also a place
+// through a global (alias.can_be). A global itself holds no local owner. The test reads no path,
+// so the walk traces only the places that pass it.
+fn can_name_owner(context* c, usage* u, fir.place p) bool {
+    if (p.base != fir.base_kind.bk_local) {
+        return u->memory.len > 0 && fir.place_indirect(c->places.f, p);
+    }
+    if (fir.place_fixed(c->places.f, p)) {
+        return u->owned[cast(p.local, u64)];
+    }
+    return u->memory.len > 0;
+}
+
+// The acts of the operand `o`: the reads of the pointers of its place, then the read of its value,
+// which is no use for a `move`, for a comparison with null (`null_test`) or for the `.len` of a
+// span or a `string` in fixed storage. A `move` vacates its place after the read.
+fn operand_acts(context mut* c, usage mut* u, u32 i, fir.operand o, bool null_test, u64 at,
+                fir_flow.bits* stale) void {
+    if (o.kind == fir.operand_kind.ok_const) {
+        return;
+    }
+    pointer_acts(c, u, i, o.place, stale);
+    if (o.kind == fir.operand_kind.ok_move) {
+        vacate_act(c, u, i, o.place, at, stale);
+    } else if (!null_test && !is_fixed_length(c->places.f, o.place)) {
+        use_act(c, u, i, o.place, stale);
+    }
+}
+
+// The reads of the pointers that the address of `p` loads: the prefix of `p` before each deref and
+// before each index into a span or a `string`, in the order of the projections.
+fn pointer_acts(context mut* c, usage mut* u, u32 i, fir.place p, fir_flow.bits* stale) void {
+    fir.func* f = c->places.f;
+    types.node* mut t = fir.base_type(f, p);
+    u32 mut k = 0;
+    while (k < p.proj_len) {
+        fir.projection pj = fir.place_projection(f, p, k);
+        bool header = t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string;
+        if (pj.kind == fir.proj_kind.pj_deref || (pj.kind == fir.proj_kind.pj_index && header)) {
+            fir.place mut prefix = p;
+            prefix.proj_len = k;
+            use_act(c, u, i, prefix, stale);
+        }
+        t = fir.apply_projection(f, t, pj);
+        k += 1;
+    }
+}
+
+// Whether operand `k` of the rvalue `r` is the place of a comparison with null: `eq` or `ne` of a
+// `copy` of a place of a pointer type and a zero constant (D17.21). The read of its value is no
+// use.
+fn is_null_test(fir.func* f, fir.rvalue r, u32 k) bool {
+    bool compare = r.kind == fir.rvalue_kind.rv_eq || r.kind == fir.rvalue_kind.rv_ne;
+    if (!compare || r.ops_len != 2) {
+        return false;
+    }
+    fir.operand o = fir.rvalue_operand(f, r, k);
+    fir.operand other = fir.rvalue_operand(f, r, 1 - k);
+    return o.kind == fir.operand_kind.ok_copy && place.is_zero_constant(other)
+        && types.is_ptr_like(fir.place_type(f, o.place));
+}
+
+// Whether `p` is the `.len` of a span or a `string` in fixed storage, whose read is no use. Through
+// a pointer the analysis reads no type, so there such a read is a use (D17.21).
+fn is_fixed_length(fir.func* f, fir.place p) bool {
+    if (p.proj_len == 0 || !fir.place_fixed(f, p)) {
+        return false;
+    }
+    fir.projection last = fir.place_projection(f, p, p.proj_len - 1);
+    fir.place mut header = p;
+    header.proj_len = p.proj_len - 1;
+    types.type_kind k = fir.place_type(f, header)->kind;
+    bool span = k == types.type_kind.k_span || k == types.type_kind.k_string;
+    return span && last.kind == fir.proj_kind.pj_field && last.field == 1;
+}
+
+// The act of a read of the value of `p` that can read an owner: a place in fixed storage that reads
+// an owner of its local (place.first_read_owner), or a place with a deref or an index into a span
+// or a `string` when a memory local holds an owner. A read in fixed storage marks the owners that
+// it reads: those of its type below it when it has a local key, else the owners of its local.
+fn use_act(context mut* c, usage mut* u, u32 i, fir.place p, fir_flow.bits* stale) void {
+    if (!can_name_owner(c, u, p)) {
+        return;
+    }
+    u64 mark = c->places.steps_len;
+    place.path r = place.trace(&c->places, p, stale);
+    bool through = place.is_indirect(&c->places, r);
+    u64 mut rank = 0;
+    bool mut below = false;
+    if (through && u->memory.len == 0) {
+        c->places.steps_len = mark;
+        return;
+    }
+    if (!through && !place.first_read_owner(&c->places, r, &rank, &below)) {
+        c->places.steps_len = mark;
+        return;
+    }
+    push_act(u, act{.kind = act_kind.ak_use, .index = i, .path = r, .place = p,
+                    .through = through});
+    if (through) {
+        u64 mut k = 0;
+        while (k < u->memory.len) {
+            u->whole[cast(u->memory[k], u64)] = true;
+            k += 1;
+        }
+    } else if (r.tracked && place.local_keys(&c->places, r) > 0) {
+        add_named(c, u, r);
+    } else {
+        u->whole[cast(r.local, u64)] = true;
+    }
+}
+
+// Records the read `r`, a tracked place in fixed storage with a local key, whose owners
+// make_owners adds: those of its type below it, and the owner of which it is a part. A read of
+// the same place adds nothing.
+fn add_named(context* c, usage mut* u, place.path r) void {
+    u64 mut k = 0;
+    while (k < u->named_count) {
+        if (place.is_same(&c->places, u->named[k], r)) {
+            return;
+        }
+        k += 1;
+    }
+    if (u->named_count == u->named.len) {
+        u64 cap = fir.grown_capacity(u->named.len, "owner.prover: reads");
+        place.path mut@ own bigger = new(place.path, cap);
+        u64 mut i = 0;
+        while (i < u->named_count) {
+            bigger[i] = u->named[i];
+            i += 1;
+        }
+        del(u->named);
+        u->named = move(bigger);
+    }
+    u->named[u->named_count] = r;
+    u->named_count += 1;
+}
+
+// The act of a `move` or a `del` of `p` at the position `at`: in fixed storage of a local, or with
+// a deref or an index into a span or a `string` when a memory local holds an owner. A global holds
+// no local owner, and a place through a global can be a place of a memory local.
+fn vacate_act(context mut* c, usage mut* u, u32 i, fir.place p, u64 at, fir_flow.bits* stale)
+    void {
+    if (!can_name_owner(c, u, p)) {
+        return;
+    }
+    u64 mark = c->places.steps_len;
+    place.path m = place.trace(&c->places, p, stale);
+    bool through = place.is_indirect(&c->places, m);
+    if (through && u->memory.len == 0) {
+        c->places.steps_len = mark;
+        return;
+    }
+    push_act(u, act{.kind = act_kind.ak_vacate, .index = i, .path = m, .place = p,
+                    .position = at, .through = through});
+}
+
+// The act of the read of the test against null of the block, at its statement `i`: the edge where
+// it finds another value than null ends the state of the owner that it compares, the place itself
+// or the span or the `string` of its `.ptr` (D17.21).
+fn test_act(context mut* c, usage mut* u, u32 i, fir.place p, fir_flow.bits* stale) void {
+    fir.func* f = c->places.f;
+    fir.place mut owner = p;
+    if (p.proj_len > 0) {
+        fir.place mut header = p;
+        header.proj_len = p.proj_len - 1;
+        types.type_kind k = fir.place_type(f, header)->kind;
+        fir.projection last = fir.place_projection(f, p, p.proj_len - 1);
+        bool span = k == types.type_kind.k_span || k == types.type_kind.k_string;
+        if (span && last.kind == fir.proj_kind.pj_field && last.field == 0) {
+            owner = header;
+        }
+    }
+    bool fixed = owner.base == fir.base_kind.bk_local && fir.place_fixed(f, owner);
+    if (!fixed || !u->owned[cast(owner.local, u64)]) {
+        return;
+    }
+    u64 mark = c->places.steps_len;
+    place.path q = place.trace(&c->places, owner, stale);
+    if (!q.tracked) {
+        c->places.steps_len = mark;
+        return;
+    }
+    push_act(u, act{.kind = act_kind.ak_test, .index = i, .path = q, .place = owner,
+                    .keys = place.local_keys(&c->places, q)});
+}
+
+// ---- the owners and the state ------------------------------------------------------------------
+
+// The owners of the type of the read `r` below it.
+fn owners_of_read(context* c, place.path r) u64 {
+    return place.count_owners(path_type(c, r));
+}
+
+// The type of the place of the path `p`, a place in fixed storage.
+fn path_type(context* c, place.path p) types.node* {
+    types.node* mut t = fir.local_at(c->places.f, p.local)->ty;
+    u32 mut i = 0;
+    while (i < p.len) {
+        place.step s = place.step_at(&c->places, p, i);
+        if (s.kind == place.step_kind.sk_index) {
+            t = t->elem;
+        } else {
+            t = fir.apply_projection(c->places.f, t,
+                                     fir.projection{fir.proj_kind.pj_field, s.field, 0});
+        }
+        i += 1;
+    }
+    return t;
+}
+
+// Appends the owner `o` to the owners of `u`, which grow by doubling.
+fn push_owner(usage mut* u, owner o) void {
+    if (u->owner_count == u->owners.len) {
+        u64 cap = fir.grown_capacity(u->owners.len, "owner.prover: owners");
+        owner mut@ own bigger = new(owner, cap);
+        u64 mut i = 0;
+        while (i < u->owner_count) {
+            bigger[i] = u->owners[i];
+            i += 1;
+        }
+        del(u->owners);
+        u->owners = move(bigger);
+    }
+    u->owners[u->owner_count] = o;
+    u->owner_count += 1;
+}
+
+// Appends the owner of the path `q` to the owners of `u`, unless an owner of its local from index
+// `from` on is the same place.
+fn add_owner(context* c, usage mut* u, place.path q, u64 from) void {
+    u64 mut k = from;
+    while (k < u->owner_count) {
+        if (place.is_same(&c->places, u->owners[k].path, q)) {
+            return;
+        }
+        k += 1;
+    }
+    u32 keys = place.local_keys(&c->places, q);
+    push_owner(u, owner{q, cast(u->values, u32), keys});
+    u->values += 1 + cast(keys, u64);
+}
+
+// Makes the owners of `u`, grouped by local in the order of the locals: the owners of the type of
+// each local whose owners a read reads, in the order of next_owner_step, then for each read with a
+// local key the owners of its type below it and the owner of which it is a part, once each. Each
+// owner takes one value, and one more for each local key of its place: u->values counts the values
+// of D17.21. Then it lists the owners with a local key in u->keyed. The first pass of the fixpoint
+// charges `weight` for each value, so the call stops and gives false as soon as `weight` times
+// u->values passes `limit`; the owners in the type of a local count before any path is made.
+fn make_owners(context mut* c, usage mut* u, u64 weight, u64 limit) bool {
+    fir.func* f = c->places.f;
+    u32 locals = fir.local_count(f);
+    del(u->first_owner);
+    u->first_owner = new(u64, cast(locals, u64) + 1);
+    u32 mut n = 0;
+    while (n < locals) {
+        u->first_owner[cast(n, u64)] = u->owner_count;
+        if (u->whole[cast(n, u64)]) {
+            u64 count = place.count_owners(fir.local_at(f, n)->ty);
+            if (types.capped_product(weight, types.capped_sum(u->values, count)) > limit) {
+                u->values = types.capped_sum(u->values, count);
+                return false;
+            }
+            place.path mut@ own paths = new(place.path, count);
+            place.put_local_owners(&c->places, n, paths);
+            u64 mut k = 0;
+            while (k < count) {
+                push_owner(u, owner{paths[k], cast(u->values, u32), 0});
+                u->values += 1;
+                k += 1;
+            }
+            del(paths);
+        }
+        u64 named_from = u->owner_count;
+        u64 mut k = 0;
+        while (k < u->named_count) {
+            bool own_read = u->named[k].local == n;
+            if (own_read && !add_read_owners(c, u, u->named[k], named_from, weight, limit)) {
+                return false;
+            }
+            k += 1;
+        }
+        n += 1;
+    }
+    u->first_owner[cast(locals, u64)] = u->owner_count;
+    u64 mut keyed = 0;
+    u64 mut k = 0;
+    while (k < u->owner_count) {
+        if (u->owners[k].keys > 0) {
+            keyed += 1;
+        }
+        k += 1;
+    }
+    del(u->keyed);
+    u->keyed = new(u32, keyed);
+    k = 0;
+    while (k < u->owner_count) {
+        if (u->owners[k].keys > 0) {
+            u->keyed[u->keyed_count] = cast(k, u32);
+            u->keyed_count += 1;
+        }
+        k += 1;
+    }
+    return true;
+}
+
+// Adds the owners of the read `r` with a local key: each owner of its type below it, and each
+// place of which it is a part whose type is an `own` reference. It gives false when `weight` times
+// the values passes `limit`. The owners below `r` are distinct, so their count bounds the values
+// from below before their paths are made.
+fn add_read_owners(context mut* c, usage mut* u, place.path r, u64 from, u64 weight, u64 limit)
+    bool {
+    u64 count = owners_of_read(c, r);
+    if (types.capped_product(weight, count) > limit) {
+        if (count > u->values) {
+            u->values = count;
+        }
+        return false;
+    }
+    place.path mut@ own paths = new(place.path, count);
+    defer del(paths);
+    place.put_owners_below(&c->places, r, path_type(c, r), paths);
+    u64 mut k = 0;
+    while (k < count) {
+        add_owner(c, u, paths[k], from);
+        k += 1;
+    }
+    u32 mut len = 1;
+    while (len < r.len) {
+        place.path mut head = r;
+        head.len = len;
+        types.node* t = path_type(c, head);
+        if (types.type_is_reference(t) && t->is_own) {
+            add_owner(c, u, head, from);
+        }
+        len += 1;
+    }
+    return types.capped_product(weight, u->values) <= limit;
+}
+
+// The owners `k` of the local `n` are those from first_owner(u, n) to first_owner(u, n + 1).
+fn first_owner(usage* u, u32 n) u64 {
+    return u->first_owner[cast(n, u64)];
+}
+
+// Makes the owner `o` vacated by the operation at `at` (D17.21).
+fn vacate_owner(owner* o, u64 at, u64 mut@ s) void {
+    u64 v = cast(o->value, u64);
+    if (at < s[v]) {
+        s[v] = at;
+    }
+}
+
+// The event that ends the state of the owner `o` and holds the first `m` local keys of its path:
+// a store into a place that contains it, or the edge of a test against null that finds another
+// value. With no key the end holds on each path. Else a store into one of those keys undoes it,
+// and the operations before it wait in entry `value + m`, or in a lower entry that an end with
+// fewer keys gave them.
+fn end_owner(owner* o, u32 m, u64 mut@ s) void {
+    u64 v = cast(o->value, u64);
+    if (m == 0) {
+        u64 mut j = 0;
+        while (j <= cast(o->keys, u64)) {
+            s[v + j] = NO_RANK;
+            j += 1;
+        }
+        return;
+    }
+    u64 mut first = s[v];
+    u64 mut j = cast(m, u64) + 1;
+    while (j <= cast(o->keys, u64)) {
+        if (s[v + j] < first) {
+            first = s[v + j];
+        }
+        s[v + j] = NO_RANK;
+        j += 1;
+    }
+    if (first < s[v + cast(m, u64)]) {
+        s[v + cast(m, u64)] = first;
+    }
+    s[v] = NO_RANK;
+}
+
+// A store into the key of rank `rank` of the owner `o` undoes each end whose keys hold it: the
+// operations that wait in entry `value + rank` or a higher one can again reach a use.
+fn undo_ends(owner* o, u32 rank, u64 mut@ s) void {
+    u64 v = cast(o->value, u64);
+    u64 mut first = s[v];
+    u64 mut j = cast(rank, u64);
+    while (j <= cast(o->keys, u64)) {
+        if (s[v + j] < first) {
+            first = s[v + j];
+        }
+        s[v + j] = NO_RANK;
+        j += 1;
+    }
+    s[v] = first;
+}
+
+// Applies the act `a` to the state `s`, with the state `aliased` of owner.alias.
+fn apply_act(context* c, usage* u, act* a, fir_flow.bits* aliased, u64 mut@ s) void {
+    switch (a->kind) {
+    case act_kind.ak_vacate:
+        if (a->through) {
+            vacate_memory(c, u, a, aliased, s);
+            return;
+        }
+        u64 mut k = first_owner(u, a->path.local);
+        while (k < first_owner(u, a->path.local + 1)) {
+            if (!place.is_separate(&c->places, u->owners[k].path, a->path)) {
+                vacate_owner(&u->owners[k], a->rank, s);
+            }
+            k += 1;
+        }
+    case act_kind.ak_call:
+        vacate_memory(c, u, a, null, s);
+    case act_kind.ak_end:
+        u64 mut k = first_owner(u, a->path.local);
+        while (k < first_owner(u, a->path.local + 1)) {
+            if (place.is_below(&c->places, u->owners[k].path, a->path)) {
+                end_owner(&u->owners[k], a->keys, s);
+            }
+            k += 1;
+        }
+    case act_kind.ak_key:
+        u64 mut k = 0;
+        while (k < u->keyed_count) {
+            owner* o = &u->owners[cast(u->keyed[k], u64)];
+            u32 rank = place.key_rank(&c->places, o->path, a->keys);
+            if (rank > 0) {
+                undo_ends(o, rank, s);
+            }
+            k += 1;
+        }
+    case act_kind.ak_test:
+        u64 mut k = first_owner(u, a->path.local);
+        while (k < first_owner(u, a->path.local + 1)) {
+            if (place.is_same(&c->places, u->owners[k].path, a->path)) {
+                end_owner(&u->owners[k], u->owners[k].keys, s);
+            }
+            k += 1;
+        }
+    default:
+    }
+}
+
+// Vacates each owner of each memory local, or with a state `aliased` of a `move` or a `del` through
+// a pointer each owner of each memory local that the place of `a` can be (alias.can_be).
+fn vacate_memory(context* c, usage* u, act* a, fir_flow.bits* aliased, u64 mut@ s) void {
+    u64 mut m = 0;
+    while (m < u->memory.len) {
+        u32 x = u->memory[m];
+        bool reached = aliased == null || alias.can_be(&c->aliases, aliased, a->path, x);
+        u64 mut k = first_owner(u, x);
+        while (reached && k < first_owner(u, x + 1)) {
+            vacate_owner(&u->owners[k], a->rank, s);
+            k += 1;
+        }
+        m += 1;
+    }
+}
+
+// ---- the fixpoint and the verdicts -------------------------------------------------------------
+
+// The state of the walk of one block: `s` the state, `edge` the state on the edge where the test
+// against null of the block finds another value than null, and `aliased` the state of
+// owner.alias. `edged` says that the walk passed the act of the test.
+struct walk {
+    u64 mut@ own s;
+    u64 mut@ own edge;
+    fir_flow.bits aliased;
+    bool edged;
+}
+
+fn free_walk(walk mut* w) void {
+    del(w->s);
+    del(w->edge);
+    fir_flow.bits_free(&w->aliased);
+}
+
+// Walks the acts of block `b` from the state in w.s, and moves w.s to the end of the block. With
+// an edge state, w.edge takes the state at the act of the test with the end of its owner, and each
+// later act; with no test, the state at the end of the block. With `judging`, each act of a use
+// writes its verdict into u->records (judge_use). Past the limit the walk keeps no state of the
+// owners, only the state of owner.alias.
+fn walk_block(context mut* c, usage mut* u, u32 b, walk mut* w, bool judging, bool over) void {
+    fir.func* f = c->places.f;
+    alias_in(c, b, &w->aliased);
+    w->edged = false;
+    u64 mut k = u->first_act[cast(b, u64)];
+    while (k < u->first_act[cast(b, u64) + 1]) {
+        act* a = &u->acts[k];
+        if (a->kind == act_kind.ak_use && judging) {
+            judge_use(c, u, b, k, w, over);
+        } else if (a->kind == act_kind.ak_expose && c->aliases.on) {
+            alias.apply_reads(&c->aliases, fir.block_statement(f, b, a->index), &w->aliased,
+                              &c->origins);
+        } else if (a->kind == act_kind.ak_borrow && c->aliases.on) {
+            alias.apply_store(&c->aliases, fir.block_statement(f, b, a->index), &w->aliased,
+                              &c->origins);
+        } else if (a->kind == act_kind.ak_test && w->edge.len > 0 && !over) {
+            copy_values(w->edge, w->s);
+            apply_act(c, u, a, &w->aliased, w->edge);
+            w->edged = true;
+        } else if (a->kind != act_kind.ak_test && a->kind != act_kind.ak_use && !over) {
+            apply_act(c, u, a, &w->aliased, w->s);
+            if (w->edged) {
+                apply_act(c, u, a, &w->aliased, w->edge);
+            }
+        }
+        k += 1;
+    }
+    if (w->edge.len > 0 && !w->edged) {
+        copy_values(w->edge, w->s);
+    }
+}
+
+fn copy_values(u64 mut@ to, u64@ from) void {
+    u64 mut i = 0;
+    while (i < to.len) {
+        to[i] = from[i];
+        i += 1;
+    }
+}
+
+// Joins `from` into `to`: each entry keeps the first rank of the two.
+fn join_values(u64 mut@ to, u64@ from) void {
+    u64 mut i = 0;
+    while (i < to.len) {
+        if (from[i] < to[i]) {
+            to[i] = from[i];
+        }
+        i += 1;
+    }
+}
+
+fn same_values(u64@ a, u64@ b) bool {
+    u64 mut i = 0;
+    while (i < a.len) {
+        if (a[i] != b[i]) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+// The charge of one walk of block `b`: its statements, its terminator and its acts times `values`,
+// the values of the state, twice for a block that ends in a test against null.
+fn walk_charge(context* c, usage* u, u32 b, u64 values) u64 {
+    u64 acts = u->first_act[cast(b, u64) + 1] - u->first_act[cast(b, u64)];
+    u64 items = cast(fir.block_statement_count(c->places.f, b), u64) + 1 + acts;
+    u64 mut charge = types.capped_product(items, values);
+    if (c->tested[cast(b, u64)]) {
+        charge = types.capped_sum(charge, charge);
+    }
+    return charge;
+}
+
+// The state at the start of block `b` into `to`: the join of the state at the end of each
+// predecessor, or of its edge state on the edge of its test that finds another value than null.
+fn block_entry(context* c, fir.pred_table* pt, u32 b, u64@ outs, u64@ edges, u64 values,
+               u64 mut@ to) void {
+    u64 mut i = 0;
+    while (i < to.len) {
+        to[i] = NO_RANK;
+        i += 1;
+    }
+    u32 mut p = 0;
+    while (p < fir.pred_count(pt, b)) {
+        u32 from = fir.pred_at(pt, b, p);
+        u64 at = cast(from, u64) * values;
+        if (c->tested[cast(from, u64)] && c->tests[cast(from, u64)].other == b) {
+            join_values(to, edges[at..at + values]);
+        } else {
+            join_values(to, outs[at..at + values]);
+        }
+        p += 1;
+    }
+}
+
+// Runs the fixpoint of rule (b) over the blocks, in the order of their numbers and then each
+// successor of a block whose state at its end or on its edge changed, first in, first out, as
+// owner.alias does, and keeps the state at the start of each block in u->ins. Each walk adds its
+// charge (walk_charge), and the run stops when the charge passes `limit`.
+fn run_uses(context mut* c, usage mut* u, fir.pred_table* pt, u64 limit) u64 mut@ own {
+    fir.func* f = c->places.f;
+    u32 n = fir.block_count(f);
+    u64 size = cast(n, u64);
+    u64 values = u->values;
+    u64 mut@ own ins = new(u64, size * values);
+    u64 mut@ own outs = new(u64, size * values);
+    u64 mut@ own edges = new(u64, size * values);
+    u32 mut@ own ring = new(u32, size);
+    fir_flow.bits mut listed = fir_flow.bits_new(n);
+    walk mut w = walk{};
+    w.s = new(u64, values);
+    w.edge = new(u64, values);
+    w.aliased = alias_state(c);
+    defer {
+        del(outs);
+        del(edges);
+        del(ring);
+        fir_flow.bits_free(&listed);
+        free_walk(&w);
+    }
+    u64 mut i = 0;
+    while (i < ins.len) {
+        ins[i] = NO_RANK;
+        outs[i] = NO_RANK;
+        edges[i] = NO_RANK;
+        i += 1;
+    }
+    u64 mut head = 0;
+    u64 mut len = 0;
+    u32 mut b = 0;
+    while (b < n) {
+        ring[cast(b, u64)] = b;
+        fir_flow.bits_set(&listed, b);
+        len += 1;
+        b += 1;
+    }
+    while (len > 0) {
+        u32 at = ring[head];
+        head = (head + 1) % size;
+        len -= 1;
+        fir_flow.bits_clear(&listed, at);
+        u->charge = types.capped_sum(u->charge, walk_charge(c, u, at, values));
+        if (u->charge > limit) {
+            return ins;
+        }
+        u64 lo = cast(at, u64) * values;
+        block_entry(c, pt, at, outs, edges, values, ins[lo..lo + values]);
+        copy_values(w.s, ins[lo..lo + values]);
+        walk_block(c, u, at, &w, false, false);
+        bool changed = !same_values(w.s, outs[lo..lo + values])
+            || !same_values(w.edge, edges[lo..lo + values]);
+        if (changed) {
+            copy_values(outs[lo..lo + values], w.s);
+            copy_values(edges[lo..lo + values], w.edge);
+            fir.block* bl = fir.block_at(f, at);
+            u32 mut e = 0;
+            u32 mut target = 0;
+            while (bl->terminated && fir.term_targets(f, &bl->term, e, &target)) {
+                if (!fir_flow.bits_get(&listed, target)) {
+                    fir_flow.bits_set(&listed, target);
+                    ring[(head + len) % size] = target;
+                    len += 1;
+                }
+                e += 1;
+            }
+        }
+    }
+    return ins;
+}
+
+// Writes the verdict of each use into u->records. Within the limit, a walk of each block from its
+// state of the fixpoint in `ins` judges each use. Past it, no use is proved, and the walk keeps
+// only the state of owner.alias. With no operation that vacates, each use is proved, and the walk
+// keeps no state of the owners either.
+fn judge_uses(context mut* c, usage mut* u, u64@ ins, bool over) void {
+    fir.func* f = c->places.f;
+    u64 values = u->values;
+    bool stateless = over || u->ops.len == 0;
+    walk mut w = walk{};
+    w.s = new(u64, values);
+    w.aliased = alias_state(c);
+    defer free_walk(&w);
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        if (!stateless) {
+            u64 lo = cast(b, u64) * values;
+            copy_values(w.s, ins[lo..lo + values]);
+        }
+        walk_block(c, u, b, &w, true, stateless);
+        b += 1;
+    }
+}
+
+// Judges the act `k` of a use in block `b` of the walk `w`: for a place in fixed storage, the
+// owners of its local that it reads, and for a place through a pointer, the owners of each memory
+// local that it can be (alias.can_be), each in the order of the owners (judge_local).
+fn judge_use(context mut* c, usage mut* u, u32 b, u64 k, walk* w, bool over) void {
+    act* a = &u->acts[k];
+    if (!a->through) {
+        judge_local(c, u, b, k, a->path.local, w, over);
+        return;
+    }
+    u64 mut m = 0;
+    while (m < u->memory.len) {
+        u32 x = u->memory[m];
+        if (alias.can_be(&c->aliases, &w->aliased, a->path, x)) {
+            judge_local(c, u, b, k, x, w, over);
+        }
+        m += 1;
+    }
+}
+
+// Whether the read of the act `a` reads the owner `o` of the local of its path or of a memory
+// local (D17.21): a tracked place in fixed storage reads each owner below it with no other local
+// key and the owner of which it is a part; a place in fixed storage with an index that is no key
+// reads each owner in the type of its local that it is not separate from; a place through a
+// pointer reads each owner in the type of the local.
+fn is_read(context* c, act* a, owner* o) bool {
+    place.path r = a->path;
+    if (a->through) {
+        return o->keys == 0;
+    }
+    if (!r.tracked) {
+        return o->keys == 0 && !place.is_separate(&c->places, o->path, r);
+    }
+    if (place.is_part(&c->places, r, o->path)) {
+        return true;
+    }
+    return place.is_below(&c->places, o->path, r)
+        && o->keys == place.local_keys(&c->places, r);
+}
+
+// Judges the read of the act `k` in block `b` for the local `n`: the first owner of `n` that it
+// reads and that can be vacated in w.s, or past the limit the first owner that it reads, makes the
+// use of item `index` and local `n` unproved, unless an earlier read made it so (record_of).
+fn judge_local(context mut* c, usage mut* u, u32 b, u64 k, u32 n, walk* w, bool over) void {
+    act* a = &u->acts[k];
+    use mut* rec = record_of(c, u, b, a, n);
+    // with no operation that vacates, the proof holds each use and takes no limit
+    if (!rec->proved || u->ops.len == 0) {
+        return;
+    }
+    fir.func* f = c->places.f;
+    bool owning = types.type_is_reference(fir.place_type(f, a->place))
+        && fir.place_type(f, a->place)->is_own;
+    rec->base = a->place;
+    if (over) {
+        // a read through a pointer names the first owner of the memory local `n`; its path is a
+        // path of another local, so it gives no rank in the type of `n`
+        u64 mut rank = 0;
+        bool mut below = !a->through;
+        if (!a->through) {
+            place.first_read_owner(&c->places, a->path, &rank, &below);
+        }
+        rec->local_owner = rank;
+        if (below && place.local_keys(&c->places, a->path) > 0) {
+            rec->local_owner = NO_RANK;
+        } else if (below) {
+            rec->local_owner = place.rank_in(&c->places, fir.local_at(f, n)->ty, a->path, 0);
+        }
+        if (a->through || (!below && !owning)) {
+            rec->base = fir.place_local(n);
+            rec->owner = rank;
+        }
+        rec->proved = false;
+        rec->read = a->place;
+        rec->through = a->through;
+        rec->op_kind = operation_kind.op_none;
+        return;
+    }
+    u64 mut q = first_owner(u, n);
+    while (q < first_owner(u, n + 1)) {
+        owner* o = &u->owners[q];
+        u64 at = w->s[cast(o->value, u64)];
+        if (at != NO_RANK && is_read(c, a, o)) {
+            rec->proved = false;
+            rec->read = a->place;
+            rec->through = a->through;
+            rec->local_owner = NO_RANK;
+            if (o->keys == 0) {
+                rec->local_owner = place.rank_in(&c->places, fir.local_at(f, n)->ty, o->path, 0);
+            }
+            if (a->through || (!a->path.tracked && !owning)) {
+                rec->base = fir.place_local(n);
+                rec->owner = place.rank_in(&c->places, fir.local_at(f, n)->ty, o->path, 0);
+            } else if (!place.is_part(&c->places, a->path, o->path)) {
+                rec->owner = place.rank_in(&c->places, path_type(c, a->path), o->path,
+                                              a->path.len);
+            }
+            find_op(c, u, at, rec);
+            return;
+        }
+        q += 1;
+    }
+}
+
+// The use of item `index` of block `b` for the local `n`: the record that an earlier read of the
+// item made, which stands at the end of u->records, or a new proved record with the read of `a`.
+fn record_of(context* c, usage mut* u, u32 b, act* a, u32 n) use mut* {
+    u64 mut k = u->record_count;
+    while (k > 0 && u->records[k - 1].block == b && u->records[k - 1].index == a->index) {
+        if (u->records[k - 1].local == n) {
+            return &u->records[k - 1];
+        }
+        k -= 1;
+    }
+    if (u->record_count == u->records.len) {
+        use mut@ own bigger = new(use, fir.grown_capacity(u->records.len, "owner.prover: uses"));
+        u64 mut i = 0;
+        while (i < u->record_count) {
+            bigger[i] = u->records[i];
+            i += 1;
+        }
+        del(u->records);
+        u->records = move(bigger);
+    }
+    use mut* rec = &u->records[u->record_count];
+    *rec = use{};
+    rec->block = b;
+    rec->index = a->index;
+    rec->local = n;
+    rec->memory = c->places.locals[cast(n, u64)].memory;
+    rec->proved = true;
+    rec->read = a->place;
+    rec->through = a->through;
+    u->record_count += 1;
+    return rec;
+}
+
+// Writes into `rec` the operation of rank `at`, a `move`, a `del` or a call (rank_ops).
+fn find_op(context* c, usage* u, u64 at, use mut* rec) void {
+    act* a = &u->acts[u->ops[at]];
+    fir.func* f = c->places.f;
+    rec->op_block = a->block;
+    rec->op_index = a->index;
+    rec->op_place = a->place;
+    rec->op_kind = operation_kind.op_call;
+    if (a->kind == act_kind.ak_vacate) {
+        rec->op_kind = operation_kind.op_move;
+        if (fir.block_statement(f, a->block, a->index)->kind == fir.stmt_kind.st_del) {
+            rec->op_kind = operation_kind.op_del;
+        }
+    }
+}
+
+// Ranks the `move`, `del` and call acts of `u` in the order of their source positions, and for one
+// position in the order of the acts: u->ops[r] is the act of rank `r`. A merge sort of the acts
+// keeps the order of the acts for one position.
+fn rank_ops(usage mut* u) void {
+    u64 mut count = 0;
+    u64 mut k = 0;
+    while (k < u->act_count) {
+        if (u->acts[k].kind == act_kind.ak_vacate || u->acts[k].kind == act_kind.ak_call) {
+            count += 1;
+        }
+        k += 1;
+    }
+    del(u->ops);
+    u->ops = new(u64, count);
+    u64 mut@ own spare = new(u64, count);
+    defer del(spare);
+    count = 0;
+    k = 0;
+    while (k < u->act_count) {
+        if (u->acts[k].kind == act_kind.ak_vacate || u->acts[k].kind == act_kind.ak_call) {
+            u->ops[count] = k;
+            count += 1;
+        }
+        k += 1;
+    }
+    u64 mut width = 1;
+    while (width < count) {
+        u64 mut lo = 0;
+        while (lo < count) {
+            merge_ops(u, spare, lo, width, count);
+            lo += 2 * width;
+        }
+        k = 0;
+        while (k < count) {
+            u->ops[k] = spare[k];
+            k += 1;
+        }
+        width *= 2;
+    }
+    k = 0;
+    while (k < count) {
+        u->acts[u->ops[k]].rank = k;
+        k += 1;
+    }
+}
+
+// Merges the runs `ops[lo..lo + width]` and the run after it, each in order, into `out` at `lo`.
+fn merge_ops(usage* u, u64 mut@ out, u64 lo, u64 width, u64 count) void {
+    u64 mid = min_u64(lo + width, count);
+    u64 hi = min_u64(lo + 2 * width, count);
+    u64 mut i = lo;
+    u64 mut j = mid;
+    u64 mut at = lo;
+    while (at < hi) {
+        bool left = j >= hi
+            || (i < mid && u->acts[u->ops[i]].position <= u->acts[u->ops[j]].position);
+        if (left) {
+            out[at] = u->ops[i];
+            i += 1;
+        } else {
+            out[at] = u->ops[j];
+            j += 1;
+        }
+        at += 1;
+    }
+}
+
+fn min_u64(u64 a, u64 b) u64 {
+    if (a < b) {
+        return a;
+    }
+    return b;
 }
