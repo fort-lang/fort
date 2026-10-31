@@ -493,11 +493,11 @@ What is not tracked, exactly as in C (D10.7, D17.14): a view, or a copy of an `o
 before a `move` or `del`, that is used after the allocation was freed; an `own` value that is never
 freed (a leak), outside the leak rule of D17.20; and `del` of an `extern` result that is not the
 start of an allocation. The first and last are undefined behavior (section 8); a leak is merely a
-leak. The compile-time (linear) check that would make the other leaks and use after `move` errors
-is deferred (D15); `move` and `del` zero
+leak. The compile-time (linear) check that would make the other leaks and the other uses after
+`move` errors is deferred (D15); `move` and `del` zero
 what they take so that those mistakes surface as `null` dereferences rather than as writes to freed
-memory. The use rule of D17.21 covers a use of a local owner after its `move` or `del`,
-and it starts as a report that rejects no program.
+memory. The use rule of D17.21 covers a use of a local owner after its `move` or `del`: a use of
+such a local owner that a `move`, a `del` or a call can have vacated is a compile error.
 
 ## 3. Pointers
 
@@ -1221,5 +1221,6 @@ Arena allocators as a language feature, leak detection outside D17.20, use-after
 alignment and packed attributes, and compile-time (linear) ownership tracking are outside v1;
 D15 lists the deferred features with the idiom to use for each. `own` records who frees, and
 `move` and `del` zero what they take (D17), so a leak stays a leak and a use after `move` or
-`del` is a `null` dereference rather than a write into freed memory (D17.14). The `extern`
+`del` that D17.21 does not reject is a `null` dereference rather than a write into freed memory
+(D17.14). The `extern`
 boundary reaches every C allocator and every C library in the meantime.

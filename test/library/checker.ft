@@ -44,26 +44,44 @@ fn section_of(string text, string path) string {
     return text[start..end];
 }
 
+// Whether the closure read the section of the module `m` and a write gives it again as other text.
+// `m` is a parameter here, so a read through it after a call is no use of the buffer `b` (D17.21).
+fn section_changed(driver.analysis* an, modules.module* m, string text) bool {
+    if (!m->interface) {
+        return false;
+    }
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    interface.write_section(&an->ck, m, &b);
+    if (strbuf.view(&b) == section_of(text, m->path)) {
+        return false;
+    }
+    eprintln("checker: the section ", m->path, " is written again as other text");
+    eprint(strbuf.view(&b));
+    return true;
+}
+
 // Writes each section that the closure read again and returns the number that changed.
 fn count_changed(driver.analysis* an, string text) u64 {
     u64 mut changed = 0;
     u64 mut i = 0;
     while (i < modules.count(&an->set)) {
-        modules.module* m = modules.at(&an->set, i);
-        i += 1;
-        if (!m->interface) {
-            continue;
-        }
-        strbuf.str_buf mut b = strbuf.create();
-        defer strbuf.free(&b);
-        interface.write_section(&an->ck, m, &b);
-        if (strbuf.view(&b) != section_of(text, m->path)) {
-            eprintln("checker: the section ", m->path, " is written again as other text");
-            eprint(strbuf.view(&b));
+        if (section_changed(an, modules.at(&an->set, i), text)) {
             changed += 1;
         }
+        i += 1;
     }
     return changed;
+}
+
+// Adds each root of the `-I` options of `opts` to `set`. `opts` is a parameter here, so a read of
+// its roots after the parse is no use of the options of main (D17.21).
+fn add_roots(modules.module_set mut* set, driver.options* opts) void {
+    u64 mut i = 0;
+    while (i < opts->includes.len) {
+        modules.add_root(set, opts->includes.items[i]);
+        i += 1;
+    }
 }
 
 fn main(string@ args) i32 {
@@ -90,11 +108,7 @@ fn main(string@ args) i32 {
     session.show_sources(&s);
     driver.analysis mut an = driver.analysis_create(&s);
     defer driver.analysis_free(&an);
-    u64 mut i = 0;
-    while (i < opts.includes.len) {
-        modules.add_root(&an.set, opts.includes.items[i]);
-        i += 1;
-    }
+    add_roots(&an.set, &opts);
     if (!modules.use_library(&s, &an.set, "std", args[1], strbuf.view(&text))) {
         eprintln("checker: '", args[1], "' is no interface file of the library std");
         return 2;
@@ -105,8 +119,8 @@ fn main(string@ args) i32 {
     if (!loaded || !checked || session.error_count(&s) > 0) {
         return 1;
     }
-    // a store or an exit that the emptiness pass does not prove is an error (D17.11, D17.20); the
-    // pass also gives the ownership summaries, which this check does not read
+    // a store, an exit or a use that the emptiness pass does not prove is an error (D17.11,
+    // D17.20, D17.21); the pass also gives the ownership summaries, which this check does not read
     summary.graph mut calls = summary.graph{};
     defer summary.free(&calls);
     if (driver.overwrite_entry(&s, &an, &opts, &calls) != driver.EXIT_OK) {

@@ -836,8 +836,9 @@ changes the function, and the verifier runs after it. The passes run in this ord
    prove, and such a site is no error, so no build and no `--check` changes its verdict. Part 1
    adds no line to the report.
    Rule (b) of D17.21, a use after `move` or `del`, reads the places of this pass, its tests against
-   null and its borrows, and adds a state of its own (**Uses**). It is a report first:
-   `--move-report` lists each use that the pass cannot prove, and such a use is no error.
+   null and its borrows, and adds a state of its own (**Uses**). The pass reports the error of
+   D17.21 for each use that it cannot prove, in every build mode, under `--check` and under
+   `--fir`, as for a store.
    `--fir-verify-report` and the pass `build-mode` of a FIR test run it too, for its proof, and
    report nothing.
    The pass is the forward must-empty analysis of D17.11, and it reads FIR this way:
@@ -1273,7 +1274,7 @@ changes the function, and the verifier runs after it. The passes run in this ord
      `n->left->left` for a `node` whose first field is `left`. FIR text with no tree gives
      `(*<the FIR place of p>)` and `.<field number>` and `[n]`: `(*_1).1[1]`. Past the limit the
      first line of a function takes a third line, the note of the leak limit of **Exits**.
-   - **Uses.** Rule (b) of D17.21 runs after the facts, apart from them, so it changes no verdict of
+   - **Uses.** Rule (b) of D17.21 runs after the facts, apart from them, so it changes no fact of
      D17.11 or of D17.20. It runs for each function with a local whose type holds an owner (D17.20),
      `_0` included. A walk of each block, with the stale set of **Keys**, turns its items into acts
      in the order of section 7: the read of each place that can read an owner, the pointers of each
@@ -1297,18 +1298,21 @@ changes the function, and the verifier runs after it. The passes run in this ord
      order of `fir_flow` gives the fixpoint, and a last walk judges each read: the use is proved
      when no owner that it reads has an operation. `proof.uses` holds one use for each item and
      local, with the first read that the pass does not prove, its owner and its operation.
-     `has_error` reads no use. The charge of the limit of D17.21 counts each walk of a block, the
-     statements, the terminator and the acts times the entries of the state, twice for a block with
-     a test; the pass charges the first pass before it makes the state, and past `prover.USE_LIMIT`
-     (2^24) it proves no use. A function with no act of an operation takes no charge. The pass
-     reuses the stale dataflow, the tests and the map of **Alias** of the facts, and makes the map
-     only when an act goes through a pointer. `--move-report` writes two lines for each use that the
-     pass does not prove, once for each location and local, in the order of the uses:
-     `<file>:<line>:<col>: use after move or del: '<place>' can be vacated here` at the first token
-     of the expression whose read is the use, and `<file>:<line>:<col>: note: '<place>' is moved
-     here`, `is deleted here` or `can change in this call` at the `move`, the `del` or the first
-     token of the call, or at the `return` of the implicit `move` of `return x`. Past the limit no
-     line names an operation, and the first one takes the note of the limit of D17.21.
+     `has_error` holds when a use is not proved. The charge of the limit of D17.21 counts each walk
+     of a block, the statements, the terminator and the acts times the entries of the state, twice
+     for a block with a test; the pass charges the first pass before it makes the state, and past
+     `prover.USE_LIMIT` (2^24) it proves no use. A function with no act of an operation takes no
+     charge. The pass reuses the stale dataflow, the tests and the map of **Alias** of the facts,
+     and makes the map only when an act goes through a pointer. The pass reports the error of D17.21
+     and its note for each use that it does not prove, once for each location and local, in the
+     order of the uses and after the errors of D17.11 and D17.20 of the function: `use after move or
+     del: '<place>' can be vacated here` at the first token of the expression whose read is the use,
+     and the note `'<op>' is moved here` or `'<op>' is deleted here` at the `move` or the `del`, or
+     at the `return` of the implicit `move` of `return x`, or `'<place>' can change in this call` at
+     the first token of the call. `<op>` is the source text of the operand of the `move` or the
+     `del`, or of the `x` of `return x`: a `return x` of an aggregate type whose function runs
+     deferred code first moves `x` into a temporary at the first token of `x` (9.6). Past the
+     limit no note names an operation, and the first error takes the note of the limit of D17.21.
    - **Rewrite.** The pass rewrites nothing, so the verifier does not run after it.
 4. **The build-mode pass**, which rewrites for the selected mode (D11.1, D10.6, D17.11):
    - In every mode, it replaces each `check(overwrite: p)` that the emptiness pass proved by

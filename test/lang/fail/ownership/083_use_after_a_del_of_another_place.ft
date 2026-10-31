@@ -1,0 +1,112 @@
+//! fail
+// The note names the place that the `del` or the `move` vacates, and the error names the owner
+// that the use reads (D17.21). Two elements of one fixed array are not separate places (D17.11), so
+// `del(kids[1])` can vacate `kids[0]`. A `move` of `s` vacates each owner of `s`. In `memory_field`
+// `t` is memory, and `del(t.arr[1].b)` can vacate `t.arr[0].a`. In `through_field` the read through
+// `pt` can be each owner of `t`, and the error names the first one that can be vacated (D17.21,
+// `<place>`). The parser gives no node for a parenthesis, and the text of a read or of an operand
+// keeps each `(` that it needs: `(s).a` and `(*ps).a`. In `keyed` the store into `k` follows the
+// store into `b[k]`, so that store ends no state, and the read of `b[k]` uses the element that the
+// first `del` vacated (the key example of D17.21). In `separate` the two fields are separate
+// places, and a store into `kids[1]` ends the state of that element, so it passes.
+struct pair {
+    i32 mut* own a;
+    i32 mut* own b;
+}
+
+struct table {
+    pair[2] arr;
+}
+
+fn element() void {
+    i32 mut* own[2] mut kids = {new(i32), new(i32)};
+    del(kids[1]);
+    i32 v = *kids[0]; //! error: use after move or del: 'kids[0]' can be vacated here
+    del(kids[0]);
+}
+
+fn whole() void {
+    pair mut s = pair{new(i32), new(i32)};
+    pair t = move(s);
+    i32 w = *s.b; //! error: use after move or del: 's.b' can be vacated here
+    del(t.a);
+    del(t.b);
+}
+
+fn memory_field() void {
+    table mut t = table{};
+    table* pt = &t;
+    t.arr[1].b = new(i32);
+    del(t.arr[1].b);
+    i32 u = *t.arr[0].a; //! error: use after move or del: 't.arr[0].a' can be vacated here
+}
+
+fn through_field() void {
+    table mut t = table{};
+    table* pt = &t;
+    t.arr[1].b = new(i32);
+    del(t.arr[1].b);
+    i32 v = *pt->arr[1].b; //! error: use after move or del: 't.arr[0].a' can be vacated here
+}
+
+fn separate() void {
+    pair mut s = pair{new(i32), new(i32)};
+    del(s.a);
+    i32 v = *s.b;
+    del(s.b);
+    i32 mut* own[2] mut kids = {new(i32), new(i32)};
+    del(kids[1]);
+    kids[1] = new(i32);
+    i32 w = *kids[1];
+    del(kids[0]);
+    del(kids[1]);
+}
+
+fn parenthesized() void {
+    pair mut s = pair{new(i32), new(i32)};
+    del((s).a);
+    i32 v = *s.a; //! error: use after move or del: 's.a' can be vacated here
+    del(s.b);
+}
+
+fn parenthesized_read() void {
+    pair mut s = pair{new(i32), new(i32)};
+    del(s.a);
+    i32* v = (s).a; //! error: use after move or del: '(s).a' can be vacated here
+    del(s.b);
+}
+
+fn parenthesized_pointer() void {
+    pair mut s = pair{new(i32), new(i32)};
+    pair mut* ps = &s;
+    del((*ps).a);
+    i32 v = *s.b; //! error: use after move or del: 's.b' can be vacated here
+    del(s.a);
+    del(s.b);
+}
+
+fn keyed() void {
+    i32 mut* own[2] mut b = {};
+    u64 mut k = 0;
+    del(b[k]);
+    k = 1;
+    del(b[k]);
+    b[k] = new(i32);
+    k = 0;
+    i32 v = *b[k]; //! error: use after move or del: 'b[k]' can be vacated here
+    del(b[0]);
+    del(b[1]);
+}
+
+fn main() i32 {
+    element();
+    whole();
+    memory_field();
+    through_field();
+    parenthesized();
+    parenthesized_read();
+    parenthesized_pointer();
+    keyed();
+    separate();
+    return 0;
+}

@@ -821,13 +821,13 @@ the mark is erased in generated code. It is part of type identity (section 6): `
 `node*` are different types, and so are `fn (node* own) void` and `fn (node*) void`. `own` on a
 scalar, a struct, a fixed array or a function-pointer type is an error; a struct or array that
 contains an `own` reference is an owning aggregate instead (section 8.5). Ownership is a typing
-discipline, not a linear check: a use after `move` is not diagnosed (D17.14, D15). A leak is
-diagnosed only by D17.20. It covers a named local of `own` reference type at the end of its scope,
-or such a parameter or temporary at a `return`, that can hold an allocation. It also covers a
-`del` or an `own` cast that frees an object whose owners can hold allocations. An exit of such a
-local, parameter or temporary that the compiler cannot prove is a compile error. The compiler first
-reports each such `del` and `cast` that it cannot prove and accepts the program; a later change
-makes each of them a compile error.
+discipline, not a linear check: a use after `move` is diagnosed only by D17.21, for a local owner
+(D17.14, D15). A leak is diagnosed only by D17.20. It covers a named local of `own` reference type
+at the end of its scope, or such a parameter or temporary at a `return`, that can hold an
+allocation. It also covers a `del` or an `own` cast that frees an object whose owners can hold
+allocations. An exit of such a local, parameter or temporary that the compiler cannot prove is a
+compile error. The compiler first reports each such `del` and `cast` that it cannot prove and
+accepts the program; a later change makes each of them a compile error.
 
 ```fort
 node mut* own n = new(node);         // an owned node
@@ -1582,7 +1582,8 @@ void* lost = malloc(16);             // error: owning temporary would leak
 Generics, unions (tagged or untagged), `Result`, methods, closures, overloading, default and
 named arguments, type aliases, struct, array and span equality, alignment and packed attributes,
 `alignof`, `sizeof(expr)`, string `switch` and linear ownership (compile-time detection of leaks
-outside D17.20 and of use after `move`, of which section 8 is the intended base, D17.14) are
+outside D17.20 and of use after `move` outside D17.21, of which section 8 is the intended base,
+D17.14) are
 deferred; D15 lists each with the idiom to use instead (a fat struct with a kind field for
 unions, `bool` plus out-parameters for results, an opaque `u8[N]` field with a C shim for
 alignment, `defer del` for ownership). An array suffix after a trailing reference suffix does

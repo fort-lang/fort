@@ -100,8 +100,9 @@ struct inner {
 /// the charge of the fixpoint of owner.alias, and `alias_on` says that the kill rules read its
 /// map: the fixpoint ran and ended within alias.WORK_LIMIT. `uses` holds the uses of rule (b) in
 /// block order and in the order of the reads (D17.21, prove_uses), and `use_unproved` counts those
-/// that the analysis does not prove, which are no error yet. `use_work` is the charge of the proof
-/// of rule (b), as USE_LIMIT counts it, and `use_over` says that it passed USE_LIMIT.
+/// that the analysis does not prove. Each of them is a compile error too (has_error). `use_work` is
+/// the charge of the proof of rule (b), as USE_LIMIT counts it, and `use_over` says that it passed
+/// USE_LIMIT.
 struct proof {
     bool mut@ own proved;
     store mut@ own stores;
@@ -145,11 +146,12 @@ fn is_proved(proof* p, u32 b) bool {
 }
 
 /// Whether `p` leaves a compile error: a check or a store that it does not prove, the error of
-/// D17.11, or an exit that it does not prove, the error of part 1 of the leak rule (D17.20). A
-/// function with an error reaches no later pass. An obligation of part 2 that it does not prove is
-/// no error yet: part 2 only reports (D17.20).
+/// D17.11, an exit that it does not prove, the error of part 1 of the leak rule (D17.20), or a use
+/// that it does not prove, the error of rule (b) (D17.21). A function with an error reaches no
+/// later pass. An obligation of part 2 that it does not prove is no error yet: part 2 only reports
+/// (D17.20).
 fn has_error(proof* p) bool {
-    return p->unproved > 0 || p->leaks > 0;
+    return p->unproved > 0 || p->leaks > 0 || p->use_unproved > 0;
 }
 
 // The state of one call of prove: the survey of the places, and the facts. `facts[..fact_count]`
@@ -1975,10 +1977,10 @@ enum operation_kind {
 /// tracked place in fixed storage and for a place of an `own` reference type there, and else the
 /// whole local. `op_kind` names the first operation in the order of the source positions from
 /// which a path reaches the read with no event that ends the state: statement `op_index` of block
-/// `op_block`, and `op_place` the place of a `move`. `local_owner` numbers the same owner in the
-/// type of the local, or is NO_RANK when its path has a local key; the report names it so when no
-/// source expression names the read. A use that the analysis proves keeps its first read in
-/// `read`.
+/// `op_block`, and `op_place` the place of its operation, the operand of a `move` or a `del`.
+/// `local_owner` numbers the same owner in the type of the local, or is NO_RANK when its path has a
+/// local key; the report names it so when no source expression names the read. A use that the
+/// analysis proves keeps its first read in `read`.
 struct use {
     u32 block;
     u32 index;
@@ -2151,7 +2153,7 @@ fn prove_uses_alone(context mut* c, proof mut* out) void {
 /// `del` or a read goes through a pointer and the proof made none. The proof is a forward
 /// may-dataflow over the acts of each block with a union join. A use is proved when no owner that
 /// it reads can be vacated at its read. out->use_unproved counts the uses that it does not prove,
-/// which are no error yet (has_error does not read it).
+/// and each of them is a compile error (has_error).
 fn prove_uses(context mut* c, fir.pred_table* preds, fir_flow.dataflow* stale, proof mut* out)
     void {
     if (!c->owners) {

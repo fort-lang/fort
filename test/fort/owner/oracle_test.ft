@@ -671,14 +671,14 @@
 // a site of part 2 or a leak of a span.
 //
 // A site of rule (b) is a function, the location of an item and a local whose owner the item reads
-// (a use of D17.21), from the proof: rejected when the pass does not prove the use. A `use after
-// move` event is in the scope of rule (b) when the run of a function F read the vacated slot of a
-// local of F (design 3.4): its moved tag names F and the local, and no frame other than that of F
-// read the slot (no ` by a callee`). The event does not name the read that gave its null, so it
-// marks each site of that function and local: a false accept is such an event with no rejected
-// site of its function and local, and a false reject is a rejected site with no such event. An
-// event of a slot of no local (a global or an allocation), or that a callee read (X2), counts
-// apart.
+// (a use of D17.21), from the proof: rejected when the pass does not prove the use, which makes the
+// function an error (has_error), so the test holds the verdict of the error. A `use after move`
+// event is in the scope of rule (b) when the run of a function F read the vacated slot of a local
+// of F (design 3.4): its moved tag names F and the local, and no frame other than that of F read
+// the slot (no ` by a callee`). The event does not name the read that gave its null, so it marks
+// each site of that function and local: a false accept is such an event with no rejected site of
+// its function and local, and a false reject is a rejected site with no such event. An event of a
+// slot of no local (a global or an allocation), or that a callee read (X2), counts apart.
 //
 // A site is a function and the location of a `check(overwrite: p)` or of a store that needs a
 // proof, where rule (a) reports its error; the lowering puts the store into `p` at the location of
@@ -5374,15 +5374,17 @@ fn add_inners(batch mut* bt, fir.func* f, prover.proof* p) void {
     }
 }
 
-// Records a site of rule (b) for each use of `p`, rejected when the pass does not prove it, or
-// joins it to the site of its function, location and local: a deferred statement expands at each
-// exit with one location.
+// Records a site of rule (b) for each use of `p`, rejected when the pass does not prove it and so
+// gives the error of D17.21 (has_error), or joins it to the site of its function, location and
+// local: a deferred statement expands at each exit with one location.
 fn add_uses(batch mut* bt, fir.func* f, prover.proof* p) void {
     u64 owner = item_of(bt, f->sym);
+    bool error = prover.has_error(p);
     for (u64 mut k = 0; k < p->uses.len; k++) {
         prover.use* u = &p->uses[k];
         diag.loc at = report.item_loc(f, u->block, u->index);
-        add_use(&bt->uses, use_site{f->sym, at.line, at.col, u->local, owner, !u->proved, false});
+        bool rejected = !u->proved && error;
+        add_use(&bt->uses, use_site{f->sym, at.line, at.col, u->local, owner, rejected, false});
     }
 }
 

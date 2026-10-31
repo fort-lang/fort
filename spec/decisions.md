@@ -2373,8 +2373,8 @@ compilation; labeled `break` (idiom: a flag or a
 helper function); raw strings; a blank identifier; compile-time function evaluation; `alignof`;
 `sizeof(expr)`; array suffixes after a trailing pointer suffix (`i32[4]*[2]`, idiom: a struct);
 string `switch`; linear ownership, that is compile-time detection of leaks and of use after
-`move`, except the leaks of D17.20 (idiom: `defer del`, and the zeroing that `move` and `del`
-leave behind, D17); `goto`
+`move`, except the leaks of D17.20 and the uses of D17.21 (idiom: `defer del`, and the zeroing
+that `move` and `del` leave behind, D17); `goto`
 (never). Amended 2026-09-10: spans were called slices (D3.5). Amended 2026-10-22: the list
 held "separate compilation and interface files". D9.11 adds both as library builds.
 Amended 2026-10-24: D17.20 detects two kinds of leak, and linear ownership defers the others
@@ -2386,6 +2386,9 @@ of the second kind and accepts the program; a later change makes each such site 
 Before, linear ownership deferred the detection of every leak.
 Amended 2026-10-25: a site of the first kind is a compile error (D17.20). Before, the compiler
 reported each site of both kinds and accepted the program.
+Amended 2026-10-31: D17.21 makes each use of a local owner that a `move`, a `del` or a call can
+have vacated a compile error, and linear ownership defers the other uses after `move`. Before,
+linear ownership deferred the detection of each use after `move`.
 
 Deferred at the C boundary (2026-09-11, T-025): an extern link name or alias.
 An extern still has no link name of its own; its declared name is its C symbol (D9.8).
@@ -3017,8 +3020,10 @@ says ownership is "by convention", this section supersedes it.
   allocation. The second is a `del` or an `own` cast that frees an object whose owners can hold
   allocations. Each site of the first kind is a compile error. The compiler first reports each
   site of the second kind and accepts the program; a later change makes each such site a compile
-  error (D17.20). The linear check that would make the other leaks and use after `move` compile
-  errors is deferred (D15); this design is its intended base and adds no syntax it would not need.
+  error (D17.20). D17.21 makes each use of a local owner that a `move`, a `del` or a call can have
+  vacated a compile error. The linear check that would make the other leaks and the other uses
+  after `move` compile errors is deferred (D15); this design is its intended base and adds no
+  syntax it would not need.
 - history: Amended 2026-09-29 (T-257): the list held "two `own` copies made through `cast`". A cast
   no longer adds `own` (D3.14), and `cast(move(x), ...)` ends the source binding (D17.5).
   Amended 2026-10-24: D17.20 takes the part that it covers out of this list
@@ -3026,6 +3031,8 @@ says ownership is "by convention", this section supersedes it.
   is never freed" with no exception, and the deferred linear check covered every leak.
   Amended 2026-10-25: a site of the first kind is a compile error (D17.20). Before, the compiler
   reported each site of both kinds and accepted the program.
+  Amended 2026-10-31: D17.21 takes the uses of a local owner after its `move` or `del` out of the
+  deferred linear check. Before, the deferred check covered each use after `move`.
 
 ### D17.20 Leak
 - owner: `memory-model.md` (`move`, `del`, transfer, lending, the overwrite check, the leak rule),
@@ -3222,8 +3229,8 @@ says ownership is "by convention", this section supersedes it.
   a `del` left, and a load through that value dereferences `null` (D10.5, D17.9):
   `use after move or del: '<place>' can be vacated here`. A note names one operation of the list
   above from which a path reaches the use with no event that ends the state:
-  `'<place>' is moved here` at a `move` or at the `return` of an implicit `move`,
-  `'<place>' is deleted here` at a `del`, and `'<place>' can change in this call` at a call. When
+  `'<op>' is moved here` at a `move` or at the `return` of an implicit `move`,
+  `'<op>' is deleted here` at a `del`, and `'<place>' can change in this call` at a call. When
   more than one operation does this, the note names the first in the order of the source
   positions. The error stands at the source expression whose read is the use. A use in an abort
   block keeps its obligation. There is one error for each location and each local whose owner
@@ -3237,6 +3244,13 @@ says ownership is "by convention", this section supersedes it.
   the constant indexes in source form (`s.b` for a copy of `s`, `x` for `**px`). A temporary is
   written as the source text of the expression whose value it holds. No message about fort source
   names a FIR local. For FIR text with no source tree, the message names the FIR place.
+  `<op>` is the place that the `move` or the `del` vacates, which can differ from `<place>`: the
+  source text of the operand of the `move` or the `del`, or of the `x` of `return x`. So
+  `del(b[1]); i32 v = *b[0];` gives the error `'b[0]' can be vacated here` and the note
+  `'b[1]' is deleted here`. When the source holds no `move`, `del` or `return` at the operation,
+  `<op>` is `<place>`. For FIR text with no source tree, `<op>` is the declared name of a named
+  local or a parameter when the operand is that whole local, and otherwise the FIR place of the
+  operand. A call vacates the owner that the use reads, so its note names `<place>`.
   The proof of one function has a limit of work, as D17.11 and D17.20 give theirs. Its charge
   counts the walks of the blocks in its fixpoint. A walk of a block charges the statements, the
   terminator and the acts of the block times the values of the state, and a walk of a block that
@@ -3284,19 +3298,21 @@ says ownership is "by convention", this section supersedes it.
   For the same `b` and `u64 mut k = 1`, `del(b[k]); b[k] = new(i32); *b[k] = 9;` passes: the
   store into `b[k]` ends the state of `b[k]`, and the read of `b[k]` uses no other element.
   For a local `i32 mut* own mut x = new(i32)` and `i32 mut* own mut* px = &x`, `x` is a memory
-  owner, and `px` borrows the frame of `x` (D17.11, Borrows). `del(*px); *x = 1;` is an error,
-  with the note `'x' is deleted here` at the `del`. `del(x); i32 v = **px;` is an error, because
-  the read of `*px` can overlap `x`. `del(x); del(*px);` passes, because the operand of a `del` is
-  no use, also through a pointer. For a parameter `r` of type `i32 mut* own mut*`,
-  `del(*r); *x = 1;` passes, because `r` borrows no origin. `f(); *x = 1;` is an error for each
-  call `f()`, with the note `'x' can change in this call`.
+  owner, and `px` borrows the frame of `x` (D17.11, Borrows). `del(*px); *x = 1;` is an error
+  `'x' can be vacated here`, with the note `'*px' is deleted here` at the `del`.
+  `del(x); i32 v = **px;` is an error, because the read of `*px` can overlap `x`.
+  `del(x); del(*px);` passes, because the operand of a `del` is no use, also through a pointer.
+  For a parameter `r` of type `i32 mut* own mut*`, `del(*r); *x = 1;` passes, because `r` borrows
+  no origin. `f(); *x = 1;` is an error for each call `f()`, with the note
+  `'x' can change in this call`.
   In a function that returns `i32 mut* own`, `i32 mut* own p = new(i32); defer *p = 0; return p;`
   is an error, because `return p` moves `p` before the deferred code runs (D7.8, D17.5).
-  The rule starts as a report. A first change lists each use that the analysis cannot prove and
-  accepts the program. A later change makes each such use a compile error and amends this entry,
-  as part 1 of the leak rule of D17.20 went from a report (e0bb6c0a) to an error, and the
-  overwrite check of D17.11 from a report (5152c9fd) to an error (d8a9e096). That later change
-  also amends D15 and D17.14 by the part that this rule covers (`spec/ownership-design.md` 6.6).
+  The rule started as a report (02968a64) that listed each use that the analysis cannot prove and
+  accepted the program. The uses of the corpora then moved into functions that take pointers, and
+  each such use became a compile error, as part 1 of the leak rule of D17.20 went from a report
+  (e0bb6c0a) to an error (f9d56037), and the overwrite check of D17.11 from a report (5152c9fd) to
+  an error (d8a9e096). D15 and D17.14 take the part that this rule covers
+  (`spec/ownership-design.md` 6.6).
 - rationale: a `move` or a `del` leaves the zero value (D17.6, D17.9), so a later load through a
   vacated owner dereferences `null` (D10.5), and an index into a vacated span fails its bounds
   check (D10.6). An obligation that the analysis cannot prove is an error, as in D17.11 ("Unknown
@@ -3323,6 +3339,12 @@ says ownership is "by convention", this section supersedes it.
   does not prove, and no verdict of a build or of `--check` changes. The entry takes the charge,
   the value and the note of the limit of work. Before, it said only that the change that adds the
   report gives them. `spec/ownership-design.md` 6.2 gives the uses that the report lists.
+  Amended 2026-10-31: each use that the analysis does not prove is a compile error, after the
+  migration of the uses that the user ruled ("Migrate only", 2026-10-31; `spec/ownership-design.md`
+  6.2), and the option `--move-report` goes. The note of a `move` or a `del` names `<op>`, the place
+  that the operation vacates. Before, the compiler listed each use under `--move-report` and
+  accepted the program, and each note named `<place>`, so `del(t.e[1]); *t.e[0]` gave the note
+  `'t.e[0]' is deleted here`. The change amends D15 and D17.14 too.
 
 ## D18 Float printing in the runtime
 

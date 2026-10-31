@@ -896,19 +896,21 @@ came here.
   whose name stands at the location of the FIR `del`, or the `cast` that starts there. To count the
   sites, run `--leak-report` over each entry of the corpora and group the lines by the directory of
   their file; the counts stand in the ticket of the change.
-- **The emptiness pass proves rule (b) of D17.21, and only reports it** (`spec/fir.md` 11, Uses).
-  `owner.prover.prove_uses` runs after the facts, in the same context, so it reuses the survey of
-  the places, the stale dataflow, the tests against null and the map of `owner.alias`, and it
-  changes no fact: `prove_limits` keeps each line of the emptiness proof, and `has_error` reads no
-  use, so no verdict of `--check` changes. A function with a local owner and no work of D17.11 or
-  D17.20 takes a light survey (`place.count_stores`, which counts no read and marks no held address,
-  and none reads an owner), and no stale dataflow when no index temporary takes its key from a
-  local. Each block turns into acts once (`collect_acts`), and the fixpoint and the judge read the
-  acts and trace no place again. An act traces a place only when its local holds an owner in its
-  type, or for a place through a pointer, also through a global, when a memory local holds one
-  (`can_name_owner`). A place through a global that holds `&x` can be `x` (`alias.can_be` gives the
-  exposure of `x`), and a refusal of each global place let `P = &x; del(x); **P` pass with no line.
-  A walk that traced each place of each function took 0.05 s more of
+- **The emptiness pass proves rule (b) of D17.21, and each use that it does not prove is an error**
+  (`spec/fir.md` 11, Uses). `owner.prover.prove_uses` runs after the facts, in the same context, so
+  it reuses the survey of the places, the stale dataflow, the tests against null and the map of
+  `owner.alias`, and it changes no fact: `prove_limits` keeps each line of the emptiness proof.
+  `has_error` reads `proof.use_unproved`, and `report.write_uses` writes the errors after those of
+  D17.11 and D17.20, in `gen_fir.check_proved` for a build and in `driver.run_emptiness` for
+  `--check`, `--fir` and a library build. A function with a local owner and no work of D17.11 or
+  D17.20 takes a light survey (`place.count_stores`, which counts no read and marks no held
+  address, and none reads an owner), and no stale dataflow when no index temporary takes its key
+  from a local. Each block turns into acts once (`collect_acts`), and the fixpoint and the judge
+  read the acts and trace no place again. An act traces a place only when its local holds an owner
+  in its type, or for a place through a pointer, also through a global, when a memory local holds
+  one (`can_name_owner`). A place through a global that holds `&x` can be `x` (`alias.can_be`
+  gives the exposure of `x`), and a refusal of each global place let `P = &x; del(x); **P` pass with
+  no line. A walk that traced each place of each function took 0.05 s more of
   `fort --check src/fort/main.ft`. The state holds ranks, not bits: the rank of an operation orders
   the `move`, `del` and call acts by their source positions (`rank_ops`), so the least rank of an
   owner names the operation of the note, and a tie at one position cannot name an operation that
@@ -918,18 +920,22 @@ came here.
   each local key, which the charge of D17.21 counts; a bound that counted a read `b[k]` twice let
   the first pass stop before the limit. The map of `owner.alias` is made only when an act goes
   through a pointer; a map that rule (b) made before the facts and that the facts made again cost
-  0.05 s. `--move-report` writes the lines of `report.write_uses` in the print of `--leak-report`.
-  The error names the expression of the read in the tree of the item (`report.find_read`), which
-  matches a `*`, a `.`, a `->` or an index to each projection of the FIR place and skips the operand
-  of `&`, `move`, `del`, a comparison with `null`, the target of `=` and the operand of a field or
-  of an index into a fixed array, which load no pointer of it. A read that the lowering made, such
-  as the element of a `for` over a fixed array, has no expression; the use then names its owner in
-  the type of its local (`use.local_owner`), and FIR text gives the FIR place. The result `_0` of an
-  aggregate type, which a read through a pointer can reach before its store, is named as the call of
-  the function, `make()`. To count the uses, run `--move-report` over each entry of the corpora and
-  group the lines by the directory of their file; a probe compiler whose report also writes
-  `use.memory` and `use.through` gives the variants. The counts stand in `spec/ownership-design.md`
-  6.2.
+  0.05 s. The error names the expression of the read in the tree of the item (`report.find_read`),
+  which matches a `*`, a `.`, a `->` or an index to each projection of the FIR place and skips the
+  operand of `&`, `move`, `del`, a comparison with `null`, the target of `=` and the operand of a
+  field or of an index into a fixed array, which load no pointer of it. A read that the lowering
+  made, such as the element of a `for` over a fixed array, has no expression; the use then names its
+  owner in the type of its local (`use.local_owner`), and FIR text gives the FIR place. The result
+  `_0` of an aggregate type, which a read through a pointer can reach before its store, is named as
+  the call of the function, `make()`. The note of a `move` or a `del` names the place that it
+  vacates, the source text of its operand (`report.write_op_place`), and so
+  `del(kids[1]); *kids[0]` names `kids[1]` in the note and `kids[0]` in the error. A `return x` of
+  an aggregate type whose function runs deferred code moves `x` into a temporary at the first token
+  of `x`, not into `_0` (`fir_lower.lower_return`), so `report.returned_by` finds the implicit
+  `move` by that position; before, the note of such a `return s` stood at `s` and named the owner
+  of the error. The text of an operand or of a read takes each `(` that it needs
+  (`report.open_start`): the parser gives no node for a parenthesis, so `del((s).a)` once gave the
+  note `'s).a' is deleted here`.
 - **A test against null makes the facts of its place hold on one edge** (D17.11 gen rule 6,
   `spec/fir.md` 11, Tests). `owner.place.find_test` reads a block that ends in `switch(copy _c)` on
   a flag, a `bool` temporary that is no memory, and goes back through the last store into the
@@ -998,8 +1004,9 @@ came here.
 - **Write a read after a call in a form that rule (b) proves** (D17.21,
   `test/fort/owner/prover_use_source_test.ft`, the pairs `*_before` and `*_after`). The proof
   takes each call as a change of each memory owner, and of each owner of an aggregate `_0` before
-  its store, so a read of such an owner after a call is a use that it does not prove. Five forms
-  remove such a use, and none adds a `move`/store pair. Split: the function keeps the owner local
+  its store, so a read of such an owner after a call is a use that it does not prove. Ten forms
+  remove such a use, five in the compiler and five more in the tests, and none adds a
+  `move`/store pair. Split: the function keeps the owner local
   and its cleanup, and a function that takes the local as a pointer does the work after the first
   call (`check_stmt.check_range_in`), where the owner is no local owner (X2 of
   `spec/ownership-design.md` 6.2). Fill: a function that returns an aggregate with an owner
@@ -1009,6 +1016,19 @@ came here.
   a plain value (`summary.intern_symbol`). Read early: a load through a pointer comes before the
   first call or before the owner exists (`driver.run_entry`). Method: a direct read of an `own`
   field of a memory local goes through a function that takes the struct (`prover.start_walk`).
+  Accessor: a one-line function takes a pointer and returns one read (`node_at(&g, 0).call_count`
+  for `g.nodes.items[0].call_count` in `test/fort/gen_fir_summary_test.ft`,
+  `fir.module_function_at`). Parameter: a loop or a check over a value that a call gave, which can
+  borrow `exposed`, goes into a function that takes the value (`spot_check(strbuf.view(&buf))` in
+  `test/lang/run/stdlib/054`, `expect_param` in `test/fort/fir_local_test.ft`), or into a function
+  of `std` (`str.index_of`). Part: the rest of a test whose owners lend their addresses goes into a
+  function that takes them by pointer; the `run` of a support module (`check_env.run`,
+  `modules_env.run`) makes the value, passes its address to the test and frees it, and a panic
+  test passes it to `trigger`. Owned string: a builder returns a `string own` whose address no call
+  takes, in place of a buffer that the test lends. One initializer: a fixed array of owners takes
+  each element in its initializer, so no `del` of one element comes before a read of another
+  (`test/lang/run/ownership/016`). Read early and one initializer are no forms of X2; the
+  coordinator ratified both as simpler forms that remove the use.
 - **The ownership summaries come from the call graph of the proved functions**
   (`spec/ownership-design.md` 8, `src/fort/owner/summary.ft`). `summary.add` takes each function
   that the emptiness pass proves with no error, with `proof.inner_work` (the largest of the three

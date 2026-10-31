@@ -719,15 +719,16 @@ The probe P4 of section 14 runs V1, and the column R1 adds the first refinement 
 cell gives sites/functions (measured with P4). The direction says how the real count can differ.
 The probe gives no key to an index that a local holds (high), and it loses the type of 72 places of
 `src/fort` (low, section 14). `?` means both directions. `pass` marks a row that the report-only
-mode of the real pass measured in place of P4. No cast in the corpora carries `own` to
+mode of the real pass measured in place of P4. Rule (b) is an error (6.2), so its rows hold 0: the
+error rejects each use. No cast in the corpora carries `own` to
 another pointee type with owners, so part 2 of rule (c) has 0 sites at a cast (measured, P4 and
 `--leak-report`).
 
 | rule and variant                 | src/fort  | src/lsp | std   | test/fort    | test/lang | dir  |
 |----------------------------------|----------:|--------:|------:|-------------:|----------:|------|
-| (b) local, not memory            | 0/0       | 0/0     | 0/0   | 0/0          | 5/2       | pass |
-| (b) memory owner, direct         | 58/20     | 0/0     | 0/0   | 141/72       | 126/36    | pass |
-| (b) memory owner, by a pointer   | 165/43    | 0/0     | 0/0   | 1,291/297    | 140/34    | pass |
+| (b) local, not memory            | 0/0       | 0/0     | 0/0   | 0/0          | 0/0       | pass |
+| (b) memory owner, direct         | 0/0       | 0/0     | 0/0   | 0/0          | 0/0       | pass |
+| (b) memory owner, by a pointer   | 0/0       | 0/0     | 0/0   | 0/0          | 0/0       | pass |
 | (c) `own` local, parameter, temp | 2/2       | 0/0     | 0/0   | 0/0          | 32/24     | pass |
 | (c) owning aggregate local, V1   | 199/99    | 1/1     | 2/1   | 2,424/2,354  | 93/77     | ?    |
 | (c) owning aggregate local, R1   | 106/48    | 1/1     | 0/0   | 2,116/2,076  | 35/30     | ?    |
@@ -781,8 +782,9 @@ It differs from that text in these points:
 6. A store ends the vacated state only when no store into a key of its destination follows it.
 7. The message says "can be vacated", and there is one error for each location and each local
    whose owner the use reads.
-8. The rule starts as a report, as D17.20 did. It also gives the position of the error, the choice
-   of the note, `<place>` and a limit of work.
+8. The rule started as a report, as D17.20 did, and is an error since the migration. It also gives
+   the position of the error, the choice of the note, `<place>`, the place `<op>` that the note of a
+   `move` or a `del` names, and a limit of work.
 9. A read of a tracked place in fixed storage, such as `b[k]`, is a use of that place and of the
    owners below it only. A read through a pointer, or through an index that is no key, is a use of
    each owner that it can overlap.
@@ -805,15 +807,19 @@ from which a path reaches the use: `'<place>' is moved here`, `'<place>' is dele
   of `test/fort` and 31 of `test/lang` for memory owners. In `src/fort`, each site follows a call:
   a read of a field of a memory local (`fir.func_predecessors`) or a load through a pointer
   (`check_stmt.check_range_for`, read).
-- Report (measured with `--move-report`, the rows `pass` of the table): 223 uses in 57 functions
-  of `src/fort`, none in `src/lsp` and `std`, 1,432 in 356 functions of `test/fort`, 33 in 10 of
-  `test/lsp`, which the table leaves out, and 271 in 61 of `test/lang`. The report counts more
-  than P4, because an exposure of D17.11 (Borrows) holds until the end of the function: a pointer
-  that a call gives can be a place of each memory local whose address a call took before. 125 of
-  the uses read the result `_0` of an aggregate type through a pointer, after a call and before
-  the store into `_0`: 44 in 11 functions of `src/fort`, 8 in 7 of `test/fort` and 73 in 14 of
-  `test/lang`. The 5 uses of local owners that are not memory read another element of a fixed
-  array after a `del` of one element, which can overlap it.
+- The report counted more uses than P4, because an exposure of D17.11 (Borrows) holds until the
+  end of the function: a pointer that a call gives can be a place of each memory local whose
+  address a call took before. Its uses fell in six classes: an owner of an aggregate `_0` read
+  through a pointer after a call and before the first store into `_0`; a memory owner read
+  directly after a call, whose local cannot be exposed at the use, or can be; a memory owner read
+  through a pointer that borrows the frame of its local, or that borrows `exposed`; and another
+  element of a fixed array of local owners after a `del` of one element, which can overlap it.
+- Ruling: migrate only (the user, 2026-10-31, "Migrate only"). No refinement of D17.21 came before
+  the error. Each use moved into a function that takes a pointer (X2), or into another form that
+  the entry on rule (b) of `notes/compiler.md` 6 names, and then each use that the analysis cannot
+  prove became a compile error. The refinements that the user did not adopt stay candidates: an
+  exposure gate, a result `_0` before its first store, two constant indexes, callee summaries, and
+  an exposure that ends.
 - Size: decision S, report M, migration M, error S.
 
 ### 6.3 (c) A live owner at the end of its scope, and a shallow `del`
@@ -1131,6 +1137,7 @@ one PR (impl-hard, rev-deep). The oracle and the move are impl-hard and rev-deep
    origin `exposed`. It also adds one may-fact for each memory local: the local can be exposed.
    Its decision is D17.11 (Borrows), with the five points of R6 (section 7).
 10. `move-*`, after 9: rule (b). Migration M. The ruling on A8 (5.1) is done (D10.7, 2026-10-26).
+    The user ruled "Migrate only" for its migration (6.2, 2026-10-31).
 11. `refine-result` (R3, L), after 6. 12. `refine-keep` (R4, L), after 11.
 13. `view-*`, after 9, 11 and 12: rule (e). The report adds `T` and `P`. Migration L in at least
     five tickets. The ruling on A8 (5.1) is done (D10.7, 2026-10-26).

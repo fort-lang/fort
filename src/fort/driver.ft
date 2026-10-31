@@ -152,7 +152,6 @@ struct options {
     bool no_bounds_check; // --no-bounds-check
     bool check; // --check: the front end alone
     bool leak_report; // --leak-report: each leak site that is no error yet, on stdout
-    bool move_report; // --move-report: each use after move or del that is no error yet, on stdout
     bool json; // --json, the document on stdout
     bool index; // --index, the identifier index in it
     bool tokens; // --tokens: the entry file's tokens on stdout
@@ -222,9 +221,8 @@ fn help() void {
             os.TARGET, ")");
     println("  --cfg <list>       set key=value pairs; repeatable");
     println("  -Xcc <arg>         pass <arg> to --cc verbatim; repeatable, in order");
-    println("  --check            check the program, its overwrites and its leaks; emit nothing");
+    println("  --check            check the program, its overwrites, leaks and uses; emit nothing");
     println("  --leak-report      as --check, and write each leak site that is no error yet");
-    println("  --move-report      as --check, and write each use after move or del");
     println("  --json             write the check document to stdout; needs --check");
     println("  --index            fill the document's identifier index; implies --check --json");
     println("  --tokens           write the entry file's tokens to stdout and stop");
@@ -374,7 +372,7 @@ fn parse_cfg(options mut* opts, string list) bool {
 }
 
 // The options that carry no value: -S, -c, --release, --no-bounds-check, --check,
-// --leak-report, --move-report, --json, --index, --tokens, --ast, --fir, --fir-test,
+// --leak-report, --json, --index, --tokens, --ast, --fir, --fir-test,
 // --fir-verify-report, --fir-stats, --fir-run, --emit-interface, --emit-summaries and
 // --cache-stats, each of which sets one flag.
 fn parse_flag(options mut* opts, string arg) bool {
@@ -391,10 +389,6 @@ fn parse_flag(options mut* opts, string arg) bool {
     } else if (arg == "--leak-report") {
         // --leak-report implies --check, which runs the emptiness pass
         opts->leak_report = true;
-        opts->check = true;
-    } else if (arg == "--move-report") {
-        // --move-report implies --check, which runs the proof of rule (b) with the emptiness pass
-        opts->move_report = true;
         opts->check = true;
     } else if (arg == "--json") {
         opts->json = true;
@@ -680,10 +674,6 @@ fn parse(options mut* opts, string@ args) i32 {
     if (opts->leak_report && opts->json) {
         // the report and the document both go to stdout
         usage_error("--leak-report does not combine with --json or --index");
-        return PARSE_ERROR;
-    }
-    if (opts->move_report && opts->json) {
-        usage_error("--move-report does not combine with --json or --index");
         return PARSE_ERROR;
     }
     if (opts->use_names.len > 0 && !opts->tokens && !opts->ast
@@ -1812,8 +1802,9 @@ fn check_document(session.session mut* s, options* opts, libraries* libs, analys
 // order, with a blank line between two functions. The verifier tests each function after the
 // lowering, and a violation ends the compiler with a panic that names the rule. The emptiness
 // pass then runs on it, as in step 3 of toolchain.md 2. An overwrite check that the pass does not
-// prove is the error of D17.11. After such an error the run writes no FIR and returns
-// EXIT_COMPILE_ERROR. With `--fir-after=build-mode`, the build-mode pass then rewrites each
+// prove is the error of D17.11, an exit that it does not prove is the error of D17.20, and a use
+// that it does not prove is the error of D17.21. After such an error the run writes no FIR and
+// returns EXIT_COMPILE_ERROR. With `--fir-after=build-mode`, the build-mode pass then rewrites each
 // function for the mode that --release and --no-bounds-check select, and the verifier tests it
 // again (spec/fir.md 11). A function that the lowering does not lower writes the line of
 // fir_lower.write_report in its place.
@@ -1930,26 +1921,27 @@ fn report_declaration(analysis mut* an, options* opts, ast.node* decl, fir_verif
 }
 
 // Runs the emptiness pass on the verified function `f`. It reports the error of D17.11 and its
-// notes at each overwrite check and each store that the pass does not prove, and then the error
-// of the leak rule and its notes at each exit that the pass does not prove (D17.20, spec/fir.md
+// notes at each overwrite check and each store that the pass does not prove, then the error of
+// the leak rule and its notes at each exit that the pass does not prove (D17.20), and then the
+// error of rule (b) and its notes at each use that the pass does not prove (D17.21, spec/fir.md
 // 11). Returns the proof, which the caller frees.
 fn run_emptiness(session.session mut* s, fir.func* f) prover.proof {
     prover.proof verdicts = prover.prove(f);
     report.write(f, &verdicts, s);
     report.write_leaks(f, &verdicts, s);
+    report.write_uses(f, &verdicts, s);
     return verdicts;
 }
 
 // --check lowers each function of a checked program, runs the verifier on it and then the
 // emptiness pass, before the build-mode pass, as a build does (spec/fir.md 11). It reports each
-// overwrite check, each store and each exit that the pass does not prove, as a build does, and
-// returns EXIT_COMPILE_ERROR after an error and EXIT_OK otherwise. A function that the lowering
-// does not lower, or whose checks name a runtime entry that `std.rt` lacks, does not take part,
-// because a build reports it. --leak-report lists the leak sites that are no error yet on stdout,
-// with one print: the lines of report.write_inners for each site of part 2 of the leak rule that
-// the pass does not prove. Part 2 only reports, so no such site changes the verdict (D17.20).
-// --move-report lists on stdout, in the same print, the lines of report.write_uses for each use of
-// rule (b) that the pass does not prove, which changes no verdict either (D17.21).
+// overwrite check, each store, each exit and each use that the pass does not prove, as a build
+// does, and returns EXIT_COMPILE_ERROR after an error and EXIT_OK otherwise. A function that the
+// lowering does not lower, or whose checks name a runtime entry that `std.rt` lacks, does not take
+// part, because a build reports it. --leak-report lists the leak sites that are no error yet on
+// stdout, with one print: the lines of report.write_inners for each site of part 2 of the leak
+// rule that the pass does not prove. Part 2 only reports, so no such site changes the verdict
+// (D17.20).
 // `*calls` takes each function that the pass proves with no error, its direct calls and the work
 // of its proof, and after a run with no error it is solved: it holds the ownership summaries of
 // spec/ownership-design.md 8. `*calls` must be empty.
@@ -1975,9 +1967,6 @@ fn overwrite_entry(session.session mut* s, analysis mut* an, options* opts,
                 if (opts->leak_report) {
                     report.write_inners(&f, &verdicts, s, &leaks);
                 }
-                if (opts->move_report) {
-                    report.write_uses(&f, &verdicts, s, &leaks);
-                }
                 if (prover.has_error(&verdicts)) {
                     proved = false;
                 } else {
@@ -1989,7 +1978,7 @@ fn overwrite_entry(session.session mut* s, analysis mut* an, options* opts,
         }
         i += 1;
     }
-    if (opts->leak_report || opts->move_report) {
+    if (opts->leak_report) {
         print(strbuf.view(&leaks));
     }
     if (!proved) {
