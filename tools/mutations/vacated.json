@@ -1,0 +1,422 @@
+{
+  "comment": [
+    "One row for each rule of rule (b) of D17.21, a use after `move` or `del`, in the proof of",
+    "src/fort/owner/prover.ft: the operations that vacate an owner, the places that overlap it, the",
+    "borrows of a place through a pointer, the events that end the state and the keys that undo an",
+    "end, the edge of a test against null, the reads that are uses and the reads that are not, the",
+    "order inside one statement, the join and the loops, the owner that a use names, the operation of",
+    "its note, and the limit of the work. Then the owners of a local and the keys of src/fort/owner/",
+    "place.ft, the lines of the report of rule (b) in src/fort/owner/report.ft, and the option",
+    "--move-report of src/fort/driver.ft. D17.21-error makes rule (b) an error, which no build gives",
+    "yet. The first stage runs the cases over FIR text (test/fort/owner/prover_use_test.ft) and the",
+    "lines of the report over lowered fort source (test/fort/owner/report_use_test.ft). The second",
+    "runs the driver test, which holds the lines of --move-report and that rule (b) changes no status.",
+    "The third runs the oracle test, which prints a false accept of rule (b) for a row that makes the",
+    "pass prove a use that a run reads after a `move` or a `del`. The table runs in the Linux VM with",
+    "the debug preset and the default runner. The md5 guard reads the product compiler, whose driver",
+    "imports owner.prover and owner.report. The first round of a run can read stale",
+    "(notes/testing.md 7), so the first row is one that a full run caught."
+  ],
+  "sources": [
+    "src/fort/owner/prover.ft",
+    "src/fort/owner/place.ft",
+    "src/fort/owner/report.ft",
+    "src/fort/driver.ft"
+  ],
+  "binary": "build/Linux/debug/fort",
+  "build": "ninja -C build/Linux/debug fort",
+  "stages": [
+    {
+      "name": "the module tests of rule (b)",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 2 owner/prover_use_test owner/report_use_test"
+    },
+    {
+      "name": "the driver test",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 2 driver_test"
+    },
+    {
+      "name": "the oracle test",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 2 owner/oracle_test"
+    }
+  ],
+  "mutations": [
+    {
+      "decision": "D17.21-del",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        vacate_act(c, u, i, s->place, at, stale);",
+      "new": "        u->reads += 0;",
+      "what": "a `del` vacates no owner"
+    },
+    {
+      "decision": "D17.21-move",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        vacate_act(c, u, i, o.place, at, stale);",
+      "new": "        u->reads += 0;",
+      "what": "a `move` operand vacates no owner, also the implicit `move` of `return x`"
+    },
+    {
+      "decision": "D17.21-call",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        push_act(u, act{.kind = act_kind.ak_call, .index = i, .position = at});",
+      "new": "        u->reads += 0;",
+      "what": "a call vacates no memory owner"
+    },
+    {
+      "decision": "D17.21-overlap",
+      "file": "src/fort/owner/prover.ft",
+      "old": "            if (!place.is_separate(&c->places, u->owners[k].path, a->path)) {",
+      "new": "            if (place.is_same(&c->places, u->owners[k].path, a->path)) {",
+      "what": "a `move` or a `del` vacates only the owner that it names: no other element of a fixed array and no owner below its place"
+    },
+    {
+      "decision": "D17.21-borrows-vacate",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        bool reached = aliased == null || alias.can_be(&c->aliases, aliased, a->path, x);",
+      "new": "        bool reached = aliased == null;",
+      "what": "a `move` or a `del` through a pointer vacates no memory owner"
+    },
+    {
+      "decision": "D17.21-borrows-read",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        if (alias.can_be(&c->aliases, &w->aliased, a->path, x)) {",
+      "new": "        if (false) {",
+      "what": "a read through a pointer uses no memory owner"
+    },
+    {
+      "decision": "D17.21-end-keys",
+      "file": "src/fort/owner/prover.ft",
+      "old": "                            .keys = place.local_keys(&c->places, d)});",
+      "new": "                            .keys = 0});",
+      "what": "a store into a place with a local key ends the state for good, also when a store into the key follows"
+    },
+    {
+      "decision": "D17.21-key-undo",
+      "file": "src/fort/owner/prover.ft",
+      "old": "            if (rank > 0) {",
+      "new": "            if (false) {",
+      "what": "a store into a key undoes no end"
+    },
+    {
+      "decision": "D17.21-key-rank",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    u64 mut j = cast(rank, u64);",
+      "new": "    u64 mut j = cast(rank, u64) + 1;",
+      "what": "a store into a key undoes only the ends that hold a later key too"
+    },
+    {
+      "decision": "D17.21-end-below",
+      "file": "src/fort/owner/prover.ft",
+      "old": "            if (place.is_below(&c->places, u->owners[k].path, a->path)) {",
+      "new": "            if (place.is_below(&c->places, a->path, u->owners[k].path)) {",
+      "what": "a store into a part of an owner, such as the `.len` of a span, ends its state"
+    },
+    {
+      "decision": "D17.21-test-edge",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        if (c->tested[cast(from, u64)] && c->tests[cast(from, u64)].other == b) {",
+      "new": "        if (c->tested[cast(from, u64)] && c->tests[cast(from, u64)].target == b) {",
+      "what": "the edge where a test finds null ends the state, and the edge of another value does not"
+    },
+    {
+      "decision": "D17.21-test-both",
+      "file": "src/fort/owner/prover.ft",
+      "old": "            copy_values(w->edge, w->s);\n            apply_act(c, u, a, &w->aliased, w->edge);",
+      "new": "            copy_values(w->edge, w->s);\n            apply_act(c, u, a, &w->aliased, w->s);",
+      "what": "a test against null ends the state on each edge"
+    },
+    {
+      "decision": "D17.21-test-later",
+      "file": "src/fort/owner/prover.ft",
+      "old": "            if (w->edged) {\n                apply_act(c, u, a, &w->aliased, w->edge);",
+      "new": "            if (w->edged) {\n                u64 none = 0;",
+      "what": "an operation between the read of a test and its branch vacates nothing on the edge"
+    },
+    {
+      "decision": "D17.21-null-read",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    return o.kind == fir.operand_kind.ok_copy && place.is_zero_constant(other)",
+      "new": "    return o.kind == fir.operand_kind.ok_copy",
+      "what": "a comparison with any value, not only null, is no use"
+    },
+    {
+      "decision": "D17.21-len-read",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    if (p.proj_len == 0 || !fir.place_fixed(f, p)) {",
+      "new": "    if (p.proj_len == 0) {",
+      "what": "a read of a `.len` through a pointer is no use"
+    },
+    {
+      "decision": "D17.21-copy-read",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    } else if (!null_test && !is_fixed_length(c->places.f, o.place)) {",
+      "new": "    } else if (false) {",
+      "what": "the read of the value of an operand is no use"
+    },
+    {
+      "decision": "D17.21-path-read",
+      "file": "src/fort/owner/prover.ft",
+      "old": "            use_act(c, u, i, prefix, stale);",
+      "new": "            u->reads += 0;",
+      "what": "the reads of the pointers of an access path are no uses: `*p` and `p->f` use no `p`"
+    },
+    {
+      "decision": "D17.21-store-read",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    pointer_acts(c, u, i, s->place, stale);\n    bool fixed =",
+      "new": "    u->reads += 0;\n    bool fixed =",
+      "what": "the pointers that the destination of a store loads are no reads"
+    },
+    {
+      "decision": "D17.21-return-read",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        use_act(c, u, i, fir.place_local(0), stale);",
+      "new": "        u->reads += 0;",
+      "what": "a `return` reads no `_0`"
+    },
+    {
+      "decision": "D17.21-check-read",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        pointer_acts(c, u, i, t->place, stale);",
+      "new": "        u->reads += 0;",
+      "what": "`check(overwrite: p)` reads no pointer of the address of `p`"
+    },
+    {
+      "decision": "D17.21-join",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        if (from[i] < to[i]) {",
+      "new": "        if (false) {",
+      "what": "a block starts with no operation of its predecessors: no union join"
+    },
+    {
+      "decision": "D17.21-loop",
+      "file": "src/fort/owner/prover.ft",
+      "old": "            while (bl->terminated && fir.term_targets(f, &bl->term, e, &target)) {",
+      "new": "            while (false) {",
+      "what": "the fixpoint walks each block once, so no operation goes around a back edge"
+    },
+    {
+      "decision": "D17.21-limit",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        if (u->charge > limit) {",
+      "new": "        if (u->charge >= limit) {",
+      "what": "a charge equal to the limit passes it"
+    },
+    {
+      "decision": "D17.21-limit-first",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        over = !make_owners(c, &u, weight, limit);",
+      "new": "        over = false;\n        make_owners(c, &u, weight, limit);",
+      "what": "the first pass of a function past the limit makes its state"
+    },
+    {
+      "decision": "D17.21-limit-value",
+      "file": "src/fort/owner/prover.ft",
+      "old": "u64 USE_LIMIT = 16777216;",
+      "new": "u64 USE_LIMIT = 1048576;",
+      "what": "the limit of the work of rule (b) is 2^20 and not 2^24"
+    },
+    {
+      "decision": "D17.21-part",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    if (place.is_part(&c->places, r, o->path)) {",
+      "new": "    if (false) {",
+      "what": "a read of a part of an owner, such as its `.ptr`, is no use of it"
+    },
+    {
+      "decision": "D17.21-no-key",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        return o->keys == 0 && !place.is_separate(&c->places, o->path, r);",
+      "new": "        return false;",
+      "what": "a read with an index that is no key uses no owner"
+    },
+    {
+      "decision": "D17.21-owner-rank",
+      "file": "src/fort/owner/prover.ft",
+      "old": "                rec->owner = place.rank_in(&c->places, fir.local_at(f, n)->ty, o->path, 0);",
+      "new": "                rec->owner = 0;",
+      "what": "a use names the first owner of its local, and not the first that can be vacated"
+    },
+    {
+      "decision": "D17.21-op-order",
+      "file": "src/fort/owner/prover.ft",
+      "old": "            || (i < mid && u->acts[u->ops[i]].position <= u->acts[u->ops[j]].position);",
+      "new": "            || (i < mid && u->acts[u->ops[i]].position >= u->acts[u->ops[j]].position);",
+      "what": "the note names the last operation in the order of the source positions"
+    },
+    {
+      "decision": "D17.21-op-del",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        if (fir.block_statement(f, a->block, a->index)->kind == fir.stmt_kind.st_del) {",
+      "new": "        if (false) {",
+      "what": "the note of a `del` says that the owner is moved"
+    },
+    {
+      "decision": "D17.21-unread",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        if (at != NO_RANK && is_read(c, a, o)) {",
+      "new": "        if (false) {",
+      "what": "the analysis proves each use"
+    },
+    {
+      "decision": "D17.21-no-op",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    if (!rec->proved || u->ops.len == 0) {",
+      "new": "    if (!rec->proved) {",
+      "what": "a function with no operation that vacates reads the owners that it never made"
+    },
+    {
+      "decision": "D17.21-error",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    return p->unproved > 0 || p->leaks > 0;",
+      "new": "    return p->unproved > 0 || p->leaks > 0 || p->use_unproved > 0;",
+      "what": "an unproved use of rule (b) is a compile error, which no build gives yet"
+    },
+    {
+      "decision": "D17.21-local-owners",
+      "file": "src/fort/owner/place.ft",
+      "old": "            key element = key{key_kind.kk_constant, 0, consts.cv_from_u64(i)};",
+      "new": "            key element = key{key_kind.kk_constant, 0, consts.cv_from_u64(0)};",
+      "what": "each element of a fixed array of owners of a local is the owner at index 0"
+    },
+    {
+      "decision": "D17.21-key-rank-local",
+      "file": "src/fort/owner/place.ft",
+      "old": "            if (s.key.local == k) {",
+      "new": "            if (s.key.local != k) {",
+      "what": "the rank of a key names the first key that is another local"
+    },
+    {
+      "decision": "D17.21-message",
+      "file": "src/fort/owner/report.ft",
+      "old": "            strbuf.append(out, \"' can be vacated here\\n\");",
+      "new": "            strbuf.append(out, \"' can be empty here\\n\");",
+      "what": "the message of rule (b) takes the text of the design and not that of D17.21"
+    },
+    {
+      "decision": "D17.21-note-move",
+      "file": "src/fort/owner/report.ft",
+      "old": "                    strbuf.append(out, \"' is moved here\\n\");",
+      "new": "                    strbuf.append(out, \"' is deleted here\\n\");",
+      "what": "the note of a `move` says that the owner is deleted"
+    },
+    {
+      "decision": "D17.21-note-del",
+      "file": "src/fort/owner/report.ft",
+      "old": "                    strbuf.append(out, \"' is deleted here\\n\");",
+      "new": "                    strbuf.append(out, \"' is moved here\\n\");",
+      "what": "the note of a `del` says that the owner is moved"
+    },
+    {
+      "decision": "D17.21-note-call",
+      "file": "src/fort/owner/report.ft",
+      "old": "                    strbuf.append(out, \"' can change in this call\\n\");",
+      "new": "                    strbuf.append(out, \"' is moved here\\n\");",
+      "what": "the note of a call says that the owner is moved"
+    },
+    {
+      "decision": "D17.21-unread-move",
+      "file": "src/fort/owner/report.ft",
+      "old": "        return is_builtin(e, \"move\") || is_builtin(e, \"del\");",
+      "new": "        return false;",
+      "what": "the error stands at the operand of a `move` that reads the same place before the use"
+    },
+    {
+      "decision": "D17.21-repeat",
+      "file": "src/fort/owner/report.ft",
+      "old": "        if (!x->proved && x->local == p->uses[k].local && is_same_loc(locs[j], locs[k])) {",
+      "new": "        if (false) {",
+      "what": "a deferred use gives one line for each exit"
+    },
+    {
+      "decision": "D17.21-limit-note",
+      "file": "src/fort/owner/report.ft",
+      "old": "            if (p->use_over && !limit_told) {",
+      "new": "            if (false) {",
+      "what": "the first line past the limit takes no note of the limit"
+    },
+    {
+      "decision": "D17.21-call-note",
+      "file": "src/fort/owner/report.ft",
+      "old": "        find_start(find_node(tree, st->loc), &first);",
+      "new": "        first = st->loc;",
+      "what": "the note of a call stands at its parenthesis and not at its first token"
+    },
+    {
+      "decision": "D17.21-return-note",
+      "file": "src/fort/owner/report.ft",
+      "old": "    if (result && ret != null) {",
+      "new": "    if (false) {",
+      "what": "the note of the implicit `move` of `return x` stands at `x` and not at the `return`"
+    },
+    {
+      "decision": "D17.21-result-name",
+      "file": "src/fort/owner/report.ft",
+      "old": "            strbuf.append(out, \"()\");",
+      "new": "            strbuf.append(out, \"\");",
+      "what": "the result `_0` is named by the name of the function alone"
+    },
+    {
+      "decision": "D17.21-owner-fallback",
+      "file": "src/fort/owner/report.ft",
+      "old": "        } else if (u->local_owner != prover.NO_RANK) {",
+      "new": "        } else if (false) {",
+      "what": "a read that no source expression names gives the FIR place"
+    },
+    {
+      "decision": "D17.21-position",
+      "file": "src/fort/owner/report.ft",
+      "old": "    find_start(e, &first);",
+      "new": "    first = item_loc(f, u->block, u->index);",
+      "what": "the error stands at the item and not at the first token of the expression"
+    },
+    {
+      "decision": "D17.21-null-text",
+      "file": "src/fort/owner/report.ft",
+      "old": "        return compare && null_test;",
+      "new": "        return false;",
+      "what": "the error stands at the operand of a comparison with null that reads the same place first"
+    },
+    {
+      "decision": "D17.21-report-option",
+      "file": "src/fort/driver.ft",
+      "old": "                    report.write_uses(&f, &verdicts, s, &leaks);",
+      "new": "",
+      "what": "--move-report lists no use"
+    },
+    {
+      "decision": "D17.21-report-print",
+      "file": "src/fort/driver.ft",
+      "old": "    if (opts->leak_report || opts->move_report) {",
+      "new": "    if (opts->leak_report) {",
+      "what": "--move-report alone prints nothing"
+    },
+    {
+      "decision": "D17.21-report-check",
+      "file": "src/fort/driver.ft",
+      "old": "        opts->move_report = true;",
+      "new": "        opts->move_report = false;",
+      "what": "--move-report runs --check and lists nothing"
+    },
+    {
+      "decision": "D17.21-global",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        return u->memory.len > 0 && fir.place_indirect(c->places.f, p);",
+      "new": "        return false;",
+      "what": "a place through a global names no owner, also when the global holds the address of a memory local"
+    },
+    {
+      "decision": "D17.21-limit-through",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        bool mut below = !a->through;",
+      "new": "        bool mut below = true;",
+      "what": "past the limit a read through a pointer takes a rank in the type of the memory local"
+    },
+    {
+      "decision": "D17.21-values",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    u->values += 1 + cast(keys, u64);",
+      "new": "    u->values += 2 + 2 * cast(keys, u64);",
+      "what": "an owner that a read with a local key names takes twice its values"
+    }
+  ]
+}

@@ -236,6 +236,42 @@ fn count_uses(survey mut* c) void {
     }
 }
 
+/// Counts the stores into the storage of each local and records the store of each local that has
+/// one, as count_uses does, and counts no read and no check. A survey with only these counts marks
+/// no held address (mark_memory), which rule (b) of owner.prover does not read: only a check and a
+/// store read a held address, and neither reads an owner through it.
+fn count_stores(survey mut* c) void {
+    fir.func* f = c->f;
+    u32 mut b = 0;
+    while (b < fir.block_count(f)) {
+        u32 mut i = 0;
+        while (i < fir.block_statement_count(f, b)) {
+            fir.statement* s = fir.block_statement(f, b, i);
+            if (s->kind == fir.stmt_kind.st_assign && fir.place_fixed(f, s->place)) {
+                local_info mut* l = &c->locals[cast(s->place.local, u64)];
+                l->assigns += 1;
+                l->def_block = b;
+                l->def_index = i;
+            }
+            i += 1;
+        }
+        b += 1;
+    }
+}
+
+/// Whether some index temporary of the survey takes its key from a local (mark_sources), so that
+/// its key depends on the stale set.
+fn has_local_sources(survey* c) bool {
+    u64 mut k = 0;
+    while (k < c->locals.len) {
+        if (c->locals[k].sourced > 0) {
+            return true;
+        }
+        k += 1;
+    }
+    return false;
+}
+
 // Whether the local `a` can be a held address: a temporary that one store writes with
 // `addr mut(p)`, and that one check of `(*_a)` and one store into `(*_a)` read, and nothing else.
 // `p` is no fixed storage, as in the lowering: an address of fixed storage makes its local memory.
@@ -878,11 +914,13 @@ fn is_through_fresh(survey* c, path q, fir_flow.bits* fresh) bool {
 
 /// A test against null that ends a block (spec/fir.md 11, Tests): statement `index` of the block
 /// reads `place`, a place of a pointer type, and compares it with the zero value. A run takes the
-/// edge into block `target` only when `place` held the zero value at that read.
+/// edge into block `target` only when `place` held the zero value at that read, and the edge into
+/// block `other` only when it held another value (D17.21).
 struct test {
     u32 index;
     fir.place place;
     u32 target;
+    u32 other;
 }
 
 // Whether the operand `o` is a `copy` of a flag: a whole temporary of type `bool` that is no
@@ -981,10 +1019,11 @@ fn find_test(survey* c, u32 b, test mut* out) bool {
         if (compared_place(f, r, &p)) {
             bool null_value = (r.kind == fir.rvalue_kind.rv_eq) != flipped;
             u32 target = bool_target(f, t, null_value);
-            if (target == bool_target(f, t, !null_value)) {
+            u32 other = bool_target(f, t, !null_value);
+            if (target == other) {
                 return false;
             }
-            *out = test{i, p, target};
+            *out = test{i, p, target, other};
             return true;
         }
         bool chained = r.kind == fir.rvalue_kind.rv_use || r.kind == fir.rvalue_kind.rv_not;
@@ -1132,4 +1171,198 @@ fn walk_owners(survey mut* c, u32 n, types.node* t, step mut@ prefix, u64 depth,
         }
         i += 1;
     }
+}
+
+// ---- the owners of a local ---------------------------------------------------------------------
+
+/// Writes into `out` the path of each inner owner of the type `t` below the path `b`, a tracked
+/// place in fixed storage whose type is `t`, in the order of next_owner_step: the steps of `b`,
+/// then a field step for a field and an index step with a constant key for an element. A fixed
+/// array of owners has an owner at each constant index in its bounds (D17.21). Each path is a
+/// tracked place in fixed storage, and its steps stand at the end of the steps of `c`. `out` has
+/// room for count_owners(t) paths, and the walk writes no more.
+fn put_owners_below(survey mut* c, path b, types.node* t, path mut@ out) void {
+    step mut@ own prefix = new(step, depth_to_owners(t));
+    defer del(prefix);
+    u64 mut at = 0;
+    walk_below(c, b, t, prefix, 0, out, &at);
+}
+
+/// Writes into `out` the path of each inner owner of the type of the local `n` in its fixed
+/// storage, as put_owners_below writes them below the whole local.
+fn put_local_owners(survey mut* c, u32 n, path mut@ out) void {
+    path b = path{.base = fir.base_kind.bk_local, .local = n, .first = 0, .tracked = true};
+    put_owners_below(c, b, fir.local_at(c->f, n)->ty, out);
+}
+
+// Writes into `out[*at..]` the path of each inner owner of `t` below `b`, after the steps
+// `prefix[..depth]` (put_owners_below), as walk_owners does through a pointer.
+fn walk_below(survey mut* c, path b, types.node* t, step mut@ prefix, u64 depth,
+              path mut@ out, u64 mut* at) void {
+    if (*at >= out.len || count_owners(t) == 0) {
+        return;
+    }
+    if (types.type_is_reference(t)) {
+        path mut p = b;
+        p.first = cast(c->steps_len, u32);
+        p.len = b.len + cast(depth, u32);
+        u32 mut i = 0;
+        while (i < b.len) {
+            push_step(c, step_at(c, b, i));
+            i += 1;
+        }
+        u64 mut k = 0;
+        while (k < depth) {
+            push_step(c, prefix[k]);
+            k += 1;
+        }
+        out[*at] = p;
+        *at += 1;
+        return;
+    }
+    if (t->kind == types.type_kind.k_array) {
+        u64 mut i = 0;
+        while (i < t->len && *at < out.len) {
+            key element = key{key_kind.kk_constant, 0, consts.cv_from_u64(i)};
+            prefix[depth] = step{.kind = step_kind.sk_index, .key = element};
+            walk_below(c, b, t->elem, prefix, depth + 1, out, at);
+            i += 1;
+        }
+        return;
+    }
+    ast.node* decl = fir.struct_decl(t);
+    u32 mut field = 0;
+    u64 mut i = 0;
+    while (i < ast.ast_len(decl) && *at < out.len) {
+        ast.node* member = ast.ast_child(decl, i);
+        if (member->kind == ast.ast_kind.k_field_decl) {
+            prefix[depth] = step{.kind = step_kind.sk_field, .field = field};
+            walk_below(c, b, member->ty, prefix, depth + 1, out, at);
+            field += 1;
+        }
+        i += 1;
+    }
+}
+
+/// The count of the index steps of `q` whose key is a local (D17.21 calls them the keys of `q`).
+fn local_keys(survey* c, path q) u32 {
+    u32 mut count = 0;
+    u32 mut i = 0;
+    while (i < q.len) {
+        step s = step_at(c, q, i);
+        if (s.kind == step_kind.sk_index && s.key.kind == key_kind.kk_local) {
+            count += 1;
+        }
+        i += 1;
+    }
+    return count;
+}
+
+/// The local keys of the first `len` steps of `q` (local_keys).
+fn local_keys_before(survey* c, path q, u32 len) u32 {
+    path mut head = q;
+    if (len < q.len) {
+        head.len = len;
+    }
+    return local_keys(c, head);
+}
+
+/// The rank of the first key of `q` that is the local `k`, from 1, among the local keys of `q`
+/// in the order of its steps, or 0 when no key of `q` is `k`.
+fn key_rank(survey* c, path q, u32 k) u32 {
+    u32 mut rank = 0;
+    u32 mut i = 0;
+    while (i < q.len) {
+        step s = step_at(c, q, i);
+        if (s.kind == step_kind.sk_index && s.key.kind == key_kind.kk_local) {
+            rank += 1;
+            if (s.key.local == k) {
+                return rank;
+            }
+        }
+        i += 1;
+    }
+    return 0;
+}
+
+/// Whether `q` is a part of `p`: `q` is below `p` and longer, so it is a field of `p`, an element
+/// of a fixed array of `p`, or a part of one of them, such as the `.ptr` of a span `p`.
+fn is_part(survey* c, path q, path p) bool {
+    return q.len > p.len && is_below(c, q, p);
+}
+
+/// The number of the inner owner that the steps `from` to the end of `q` reach from the type `t`,
+/// in the order of next_owner_step: each step adds the owners of the fields before its field, or
+/// its constant index times the owners of an element. A path that stops above an owner gives the
+/// number of the first owner below it. The steps are fields and constant indexes.
+fn rank_in(survey* c, types.node* t, path q, u32 from) u64 {
+    types.node* mut at = t;
+    u64 mut rank = 0;
+    u32 mut i = from;
+    while (i < q.len && !types.type_is_reference(at)) {
+        step s = step_at(c, q, i);
+        if (s.kind == step_kind.sk_index) {
+            u64 mut index = 0;
+            if (s.key.kind == key_kind.kk_constant && consts.cv_to_u64(s.key.value, &index)) {
+                rank = types.capped_sum(rank, types.capped_product(index, count_owners(at->elem)));
+            }
+            at = at->elem;
+        } else {
+            ast.node* decl = fir.struct_decl(at);
+            u32 mut field = 0;
+            u64 mut k = 0;
+            while (k < ast.ast_len(decl)) {
+                ast.node* member = ast.ast_child(decl, k);
+                if (member->kind == ast.ast_kind.k_field_decl) {
+                    if (field == s.field) {
+                        at = member->ty;
+                        k = ast.ast_len(decl);
+                    } else {
+                        rank = types.capped_sum(rank, count_owners(member->ty));
+                        field += 1;
+                    }
+                }
+                k += 1;
+            }
+        }
+        i += 1;
+    }
+    return rank;
+}
+
+/// Whether a read of the path `r`, a place in fixed storage, reads an owner of its local in the
+/// type of the local (D17.21), and which one first in *rank, counted in the type of the local, or
+/// in *below from `r` itself when `r` is tracked. A tracked `r` reads each owner below it and each
+/// owner of which it is a part. A place with an index that is no key reads each owner that it can
+/// overlap: each owner of the fixed array of its first index, whose other elements are not
+/// separate from it (is_separate). *below says that the rank counts from `r`.
+fn first_read_owner(survey* c, path r, u64 mut* rank, bool mut* below) bool {
+    types.node* mut t = fir.local_at(c->f, r.local)->ty;
+    u32 mut i = 0;
+    while (i < r.len) {
+        step s = step_at(c, r, i);
+        if (types.type_is_reference(t) && t->is_own) {
+            // `r` is a part of an owner, such as `p.ptr`
+            *rank = 0;
+            *below = true;
+            return true;
+        }
+        if (s.kind == step_kind.sk_index && !r.tracked) {
+            path mut head = r;
+            head.len = i;
+            *rank = rank_in(c, fir.local_at(c->f, r.local)->ty, head, 0);
+            *below = false;
+            return count_owners(t) > 0;
+        }
+        if (s.kind == step_kind.sk_index) {
+            t = t->elem;
+        } else {
+            t = fir.apply_projection(c->f, t,
+                                     fir.projection{fir.proj_kind.pj_field, s.field, 0});
+        }
+        i += 1;
+    }
+    *rank = 0;
+    *below = true;
+    return count_owners(t) > 0;
 }
