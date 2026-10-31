@@ -71,6 +71,20 @@ fn every_other_byte_is_an_uppercase_hex_escape() void {
     assert(same(value_of("C:\\fort dir\\x", &b), "C:\\x5Cfort\\x20dir\\x5Cx"));
 }
 
+// Whether each byte of `text` is a printable ASCII byte that is no space, `!` to `~`. The callers
+// lend buffers, so the use rule of `move` and `del` needs this read through `text` in a frame of
+// its own.
+fn printable(string text) bool {
+    u64 mut k = 0;
+    while (k < text.len) {
+        if (text[k] < '!' || text[k] > '~') {
+            return false;
+        }
+        k += 1;
+    }
+    return true;
+}
+
 fn an_escaped_value_holds_no_byte_outside_the_kept_range() void {
     strbuf.str_buf mut all = strbuf.create();
     defer strbuf.free(&all);
@@ -84,11 +98,7 @@ fn an_escaped_value_holds_no_byte_outside_the_kept_range() void {
     string escaped = value_of(strbuf.view(&all), &b);
     // 94 bytes stay, `\` among them escaped, so 93 stay and 163 take four bytes each
     assert(escaped.len == 93 + 163 * 4);
-    u64 mut k = 0;
-    while (k < escaped.len) {
-        assert(escaped[k] >= '!' && escaped[k] <= '~');
-        k += 1;
-    }
+    assert(printable(escaped));
 }
 
 // ---- hashes ------------------------------------------------------------------------
@@ -694,10 +704,9 @@ fn entries(string path, strbuf.str_buf mut* out) string {
         bool mut found = false;
         u64 mut at = 0;
         while (at < all.len) {
-            u64 mut end = at;
-            while (all[end] != '\n') {
-                end += 1;
-            }
+            i64 eol = str.find(all[at..], "\n");
+            assert(eol >= 0);
+            u64 end = at + cast(eol, u64);
             string line = all[at..end];
             if ((k == 0 || str.cmp(line, last) > 0) && (!found || str.cmp(line, best) < 0)) {
                 best = line;

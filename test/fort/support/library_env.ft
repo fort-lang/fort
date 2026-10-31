@@ -42,6 +42,15 @@ fn close(env mut* e) void {
     modules_env.close(&e->m);
 }
 
+// Prepares an environment, runs `body` on it, and releases it. `body` reaches the environment
+// through a pointer, so the use rule of `move` and `del` asks no proof of its reads after a call.
+fn run(fn (env mut*) void body) void {
+    env mut e = env{};
+    open(&e);
+    defer close(&e);
+    body(&e);
+}
+
 // Writes a file at `rel` under the sandbox.
 fn add(env mut* e, string rel, string text) void {
     modules_env.add(&e->m, rel, text);
@@ -188,6 +197,17 @@ fn join(string@ lines, strbuf.str_buf mut* out) void {
     }
 }
 
+// The interface text of `lines`, as join and unmark write it.
+fn interface_text(string@ lines) string own {
+    strbuf.str_buf mut joined = strbuf.create();
+    defer strbuf.free(&joined);
+    join(lines, &joined);
+    strbuf.str_buf mut out = strbuf.create();
+    defer strbuf.free(&out);
+    unmark(strbuf.view(&joined), &out);
+    return strbuf.take(&out);
+}
+
 // The marker that an expected interface text writes in place of the directive mark at the start
 // of a line, because the harness allows that mark after code only for an error (D14.5).
 string MARK = "== ";
@@ -294,6 +314,13 @@ fn section_of(string text, string path) string {
 // whether each one is the text it was read from: the interface file is a fixed point of the
 // writer. A difference prints both texts.
 fn rewrites_alike(env mut* e, string text) bool {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    return sections_alike(e, text, &b);
+}
+
+// rewrites_alike with the buffer `b` of each section that it writes again.
+fn sections_alike(env mut* e, string text, strbuf.str_buf mut* b) bool {
     bool mut alike = true;
     u64 mut i = 0;
     while (i < modules.count(&e->m.set)) {
@@ -302,14 +329,13 @@ fn rewrites_alike(env mut* e, string text) bool {
         if (!m->interface) {
             continue;
         }
-        strbuf.str_buf mut b = strbuf.create();
-        defer strbuf.free(&b);
-        interface.write_section(&e->ck, m, &b);
-        if (strbuf.view(&b) != section_of(text, m->path)) {
+        strbuf.clear(b);
+        interface.write_section(&e->ck, m, b);
+        if (strbuf.view(b) != section_of(text, m->path)) {
             println("read:");
             print(section_of(text, m->path));
             println("written again:");
-            print(strbuf.view(&b));
+            print(strbuf.view(b));
             alike = false;
         }
     }
@@ -536,6 +562,13 @@ fn ordered_section(string@ lines, bool report) bool {
     return true;
 }
 
+// Whether `path` names a module of the library `name`: `name` and a dot start it. The caller
+// lends buffers, so the use rule of `move` and `del` needs this read through `path` in a frame of
+// its own.
+fn in_library(string path, string name) bool {
+    return str.starts_with(path, name) && path[name.len] == '.';
+}
+
 // Whether `text` has the two header lines of the library `name`, its sections in byte order of
 // a path of the library, and each section ordered.
 fn well_formed(string text, string name, bool report) bool {
@@ -568,8 +601,7 @@ fn well_formed(string text, string name, bool report) bool {
             return false;
         }
         string path = head[modules.INTERFACE_SECTION.len..head.len];
-        if (!str.starts_with(path, name) || path[name.len] != '.'
-            || (last.len > 0 && str.cmp(last, path) >= 0)) {
+        if (!in_library(path, name) || (last.len > 0 && str.cmp(last, path) >= 0)) {
             say(report, "well formed: the section ", path);
             return false;
         }

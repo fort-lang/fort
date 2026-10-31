@@ -5018,26 +5018,36 @@ fn lower_batch(check_env.env mut* c, batch mut* bt) bool {
     bool mut accepted = true;
     for (u64 mut i = 0; i < check.check_sym_count(&c->ck); i++) {
         ast.sym* s = check.check_sym_at(&c->ck, i);
-        if (s->kind != ast.sym_kind.s_fn || s->node == null || s->node->b == null) {
-            continue;
+        if (s->kind == ast.sym_kind.s_fn && s->node != null && s->node->b != null
+            && !lower_one(c, bt, s, &rt)) {
+            accepted = false;
         }
-        fir.func mut f = fir.func{};
-        fir_lower.report mut why = fir_lower.report{};
-        bool lowered = fir_lower.lower_function(&c->ck, s->node, &f, &why);
-        fir_verify.violation mut v = fir_verify.violation{};
-        if (lowered && !fir_verify.find_violation(&f, &rt, &v)) {
-            fir.module_add_function(&bt->m, move(f));
-            continue;
-        }
-        if (lowered) {
-            fir.func_free(&f);
-        }
-        if (!is_in_main(s) || !drop_at(bt, s->decl.line)) {
-            panic("oracle_test.lower_batch: the lowering or the verifier refuses a declaration");
-        }
-        accepted = false;
     }
     return accepted;
+}
+
+// Lowers the function `s` into `bt->m`, and gives whether the lowering and the verifier accept
+// it. A refused function leaves the batch with its item. The function reads `s` before it lends
+// its own FIR function, so the use rule of `move` and `del` holds each read.
+fn lower_one(check_env.env mut* c, batch mut* bt, ast.sym* s, fir_verify.runtime* rt) bool {
+    ast.node* body = s->node;
+    u32 line = s->decl.line;
+    bool in_main = is_in_main(s);
+    fir.func mut f = fir.func{};
+    fir_lower.report mut why = fir_lower.report{};
+    bool lowered = fir_lower.lower_function(&c->ck, body, &f, &why);
+    fir_verify.violation mut v = fir_verify.violation{};
+    if (lowered && !fir_verify.find_violation(&f, rt, &v)) {
+        fir.module_add_function(&bt->m, move(f));
+        return true;
+    }
+    if (lowered) {
+        fir.func_free(&f);
+    }
+    if (!in_main || !drop_at(bt, line)) {
+        panic("oracle_test.lower_batch: the lowering or the verifier refuses a declaration");
+    }
+    return false;
 }
 
 // Parses the FIR text of `bt` against its checked declarations into `bt->m`, and holds that each
@@ -5140,25 +5150,31 @@ fn prove_batch(batch mut* bt) void {
         fir.func* f = &bt->m.funcs.items[i];
         u64 owner = item_of(bt, f->sym);
         prover.proof mut p = prover.prove(f);
-        for (u32 mut b = 0; b < fir.block_count(f); b++) {
-            fir.terminator* t = &fir.block_at(f, b)->term;
-            if (t->kind == fir.term_kind.tk_check_overwrite) {
-                add_site(&bt->sites, site{f->sym, t->loc.line, t->loc.col, owner,
-                                          !prover.is_proved(&p, b), false},
-                         site_kind.sk_check);
-            }
-        }
-        for (u64 mut k = 0; k < p.stores.len; k++) {
-            prover.store* st = &p.stores[k];
-            diag.loc at = fir.block_statement(f, st->block, st->index)->loc;
-            add_site(&bt->sites, site{f->sym, at.line, at.col, owner, !st->proved, false},
-                     site_kind.sk_store);
-        }
-        add_exits(bt, f, &p);
-        add_inners(bt, f, &p);
-        add_uses(bt, f, &p);
+        add_proof(bt, f, owner, &p);
         prover.free(&p);
     }
+}
+
+// Records the sites of the proof `p` of the function `f` of the item `owner`, as prove_batch
+// gives them.
+fn add_proof(batch mut* bt, fir.func* f, u64 owner, prover.proof* p) void {
+    for (u32 mut b = 0; b < fir.block_count(f); b++) {
+        fir.terminator* t = &fir.block_at(f, b)->term;
+        if (t->kind == fir.term_kind.tk_check_overwrite) {
+            add_site(&bt->sites, site{f->sym, t->loc.line, t->loc.col, owner,
+                                      !prover.is_proved(p, b), false},
+                     site_kind.sk_check);
+        }
+    }
+    for (u64 mut k = 0; k < p->stores.len; k++) {
+        prover.store* st = &p->stores[k];
+        diag.loc at = fir.block_statement(f, st->block, st->index)->loc;
+        add_site(&bt->sites, site{f->sym, at.line, at.col, owner, !st->proved, false},
+                 site_kind.sk_store);
+    }
+    add_exits(bt, f, p);
+    add_inners(bt, f, p);
+    add_uses(bt, f, p);
 }
 
 // Moves each `dead` marker of each function of `bt` to its own line, DEAD_LINE and its position

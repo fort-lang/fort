@@ -27,6 +27,18 @@ fn same(string got, string want) bool {
     return got == want;
 }
 
+// Whether the value `i` of `values` is `want`, printing both when they differ. The tests lend
+// their buffers, so the use rule of `move` and `del` needs this read through `values` in a frame
+// of its own.
+fn same_at(string@ values, u64 i, string want) bool {
+    return same(values[i], want);
+}
+
+// Whether the line `i` of `lines` has the kind `k` and the text `text`, as same_at reads it.
+fn line_is(summary.line@ lines, u64 i, summary.kind k, string text) bool {
+    return lines[i].kind == k && same(lines[i].text, text);
+}
+
 string HASH_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 string HASH_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 string HASH_C = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
@@ -106,10 +118,9 @@ fn rekeyed(string text, string old, string new_text, strbuf.str_buf mut* out) st
     i64 at = str.find(changed, "\nkey ");
     assert(at > 0);
     u64 head = cast(at, u64) + 1;
-    u64 mut end = head;
-    while (changed[end] != '\n') {
-        end += 1;
-    }
+    i64 eol = str.find(changed[head..], "\n");
+    assert(eol >= 0);
+    u64 end = head + cast(eol, u64);
     strbuf.clear(out);
     strbuf.append(out, changed[..head]);
     strbuf.append(out, "key ");
@@ -135,22 +146,22 @@ fn the_written_manifest_reads_back_to_its_fields() void {
     assert(!c.fields.no_bounds_check);
     // the lists come back in the order of the text: the pairs in byte order of the key
     assert(c.fields.cfg_keys.len == 5);
-    assert(same(c.fields.cfg_keys[0], "mode"));
-    assert(same(c.fields.cfg_values[0], "x\\y"));
-    assert(same(c.fields.cfg_keys[1], "target_abi"));
-    assert(same(c.fields.cfg_values[1], ""));
-    assert(same(c.fields.cfg_keys[4], "zone"));
-    assert(same(c.fields.cfg_values[4], "a b"));
+    assert(same_at(c.fields.cfg_keys, 0, "mode"));
+    assert(same_at(c.fields.cfg_values, 0, "x\\y"));
+    assert(same_at(c.fields.cfg_keys, 1, "target_abi"));
+    assert(same_at(c.fields.cfg_values, 1, ""));
+    assert(same_at(c.fields.cfg_keys, 4, "zone"));
+    assert(same_at(c.fields.cfg_values, 4, "a b"));
     assert(same(c.fields.cc, "/opt/my clang"));
     assert(c.fields.cc_args.len == 3);
-    assert(same(c.fields.cc_args[0], "-g0"));
-    assert(same(c.fields.cc_args[2], "-O0"));
+    assert(same_at(c.fields.cc_args, 0, "-g0"));
+    assert(same_at(c.fields.cc_args, 2, "-O0"));
     assert(same(c.fields.ar, "llvm-ar"));
     assert(same(c.fields.source, HASH_B));
     assert(c.fields.use_names.len == 2);
-    assert(same(c.fields.use_names[0], "alpha"));
-    assert(same(c.fields.use_hashes[0], USE_HASHES[1]));
-    assert(same(c.fields.use_names[1], "zeta"));
+    assert(same_at(c.fields.use_names, 0, "alpha"));
+    assert(same_at(c.fields.use_hashes, 0, USE_HASHES[1]));
+    assert(same_at(c.fields.use_names, 1, "zeta"));
     assert(same(c.fields.interface, HASH_C));
     assert(same(c.fields.archive, HASH_D));
     assert(c.key.len == 64);
@@ -242,14 +253,14 @@ fn the_values_of_each_list_read_back() void {
     assert(same(c.fields.target, ""));
     assert(same(c.fields.cc, ""));
     assert(same(c.fields.ar, "x\\y"));
-    assert(same(c.fields.cfg_keys[0], "a b"));
-    assert(same(c.fields.cfg_values[0], ""));
-    assert(same(c.fields.cfg_keys[1], "k\\x"));
-    assert(same(c.fields.cfg_values[1], "\n"));
-    assert(same(c.fields.cc_args[0], "-DNAME=a b"));
-    assert(same(c.fields.cc_args[1], ""));
-    assert(same(c.fields.use_names[0], "_lib9"));
-    assert(same(c.fields.use_hashes[0], USE_HASHES[0]));
+    assert(same_at(c.fields.cfg_keys, 0, "a b"));
+    assert(same_at(c.fields.cfg_values, 0, ""));
+    assert(same_at(c.fields.cfg_keys, 1, "k\\x"));
+    assert(same_at(c.fields.cfg_values, 1, "\n"));
+    assert(same_at(c.fields.cc_args, 0, "-DNAME=a b"));
+    assert(same_at(c.fields.cc_args, 1, ""));
+    assert(same_at(c.fields.use_names, 0, "_lib9"));
+    assert(same_at(c.fields.use_hashes, 0, USE_HASHES[0]));
 }
 
 fn a_manifest_of_no_pair_reads_back() void {
@@ -383,7 +394,7 @@ fn a_line_out_of_its_order_or_twice_is_refused() void {
     artifact.contents mut parsed = artifact.contents{};
     defer artifact.free(&parsed);
     assert(parses(moved, &parsed));
-    assert(same(parsed.fields.cc_args[0], "-DX=1"));
+    assert(same_at(parsed.fields.cc_args, 0, "-DX=1"));
 }
 
 fn a_value_in_another_spelling_is_refused() void {
@@ -745,8 +756,7 @@ fn a_summary_file_reads_into_the_summaries_of_the_artifact() void {
     assert(summary.entry_count(&c.ownership) == 2);
     assert(same(summary.symbol(&c.ownership, 0), "geom.a.f"));
     assert(same(summary.symbol(&c.ownership, 1), "geom.b.gh"));
-    assert(summary.lines(&c.ownership, 0)[0].kind == summary.kind.k_empty);
-    assert(same(summary.lines(&c.ownership, 0)[0].text, "(*_1).0"));
+    assert(line_is(summary.lines(&c.ownership, 0), 0, summary.kind.k_empty, "(*_1).0"));
     assert(summary.find(&c.ownership, "geom.b.gh") == 1);
     // a second read of the same contents replaces the summaries of the first
     write_artifact("sums2.flib");
@@ -1072,14 +1082,14 @@ fn a_summary_file_with_each_kind_reads_through_the_artifact() void {
     assert(summary.entry_count(&c.ownership) == 2);
     summary.line@ first = summary.lines(&c.ownership, 0);
     assert(first.len == 6);
-    assert(first[0].kind == summary.kind.k_empty && same(first[0].text, "(*_1).0"));
-    assert(first[1].kind == summary.kind.k_empty && same(first[1].text, "(*_1)[3]"));
-    assert(first[2].kind == summary.kind.k_kept && same(first[2].text, "(*_2).1"));
-    assert(first[3].kind == summary.kind.k_result && same(first[3].text, "(*_1).0"));
-    assert(first[4].kind == summary.kind.k_result && same(first[4].text, "_1"));
-    assert(first[5].kind == summary.kind.k_keep && same(first[5].text, "_2"));
+    assert(line_is(first, 0, summary.kind.k_empty, "(*_1).0"));
+    assert(line_is(first, 1, summary.kind.k_empty, "(*_1)[3]"));
+    assert(line_is(first, 2, summary.kind.k_kept, "(*_2).1"));
+    assert(line_is(first, 3, summary.kind.k_result, "(*_1).0"));
+    assert(line_is(first, 4, summary.kind.k_result, "_1"));
+    assert(line_is(first, 5, summary.kind.k_keep, "_2"));
     summary.line@ second = summary.lines(&c.ownership, 1);
-    assert(second.len == 1 && second[0].kind == summary.kind.k_kept);
+    assert(second.len == 1 && line_is(second, 0, summary.kind.k_kept, "(*_1)"));
     // the summaries are the ones of the bytes that the read checked
     write_file("kinds.flib/summaries/ownership", SUMMARY_TEXT);
     assert(summary.entry_count(&c.ownership) == 2);

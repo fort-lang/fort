@@ -172,9 +172,21 @@ fn place_of(fir.func mut* f, u32 n, string text) fir.place {
     return p;
 }
 
-// Parses LOCALS and gives its survey and its function, which the caller frees.
-fn open_locals(lower_env.env mut* e, fir.module mut* m) void {
+// Parses LOCALS into `*m`, which the caller frees, and gives its function.
+fn open_locals(lower_env.env mut* e, fir.module mut* m) fir.func mut* {
     *m = pass_env.parse(e, PRELUDE[..], LOCALS[..]);
+    assert(m->funcs.len >= 1);
+    return &m->funcs.items[0];
+}
+
+// The type of the local `n` of `f`.
+fn local_type(fir.func* f, u32 n) types.node* {
+    return fir.local_at(f, n)->ty;
+}
+
+// The facts of the local `k` of `c`.
+fn info_at(place.survey* c, u64 k) place.local_info {
+    return c->locals[k];
 }
 
 // The owners of a local in its type and below a place: none for a type with no owner and for a
@@ -185,9 +197,8 @@ fn the_owners_follow_the_order_of_the_type() void {
     lower_env.open(&e);
     defer lower_env.close(&e);
     fir.module mut m = fir.module{};
-    open_locals(&e, &m);
+    fir.func mut* f = open_locals(&e, &m);
     defer fir.module_free(&m);
-    fir.func mut* f = &m.funcs.items[0];
     place.survey mut c = survey_of(f);
     defer place.free(&c);
     expect_local_owners(&c, 1, "_1.0.0 _1.0.1 _1.2[0] _1.2[1] _1.3");
@@ -231,9 +242,8 @@ fn the_keys_of_a_path_count_and_rank_their_locals() void {
     lower_env.open(&e);
     defer lower_env.close(&e);
     fir.module mut m = fir.module{};
-    open_locals(&e, &m);
+    fir.func mut* f = open_locals(&e, &m);
     defer fir.module_free(&m);
-    fir.func mut* f = &m.funcs.items[0];
     place.survey mut c = survey_of(f);
     defer place.free(&c);
     fir_flow.bits mut stale = fir_flow.bits_new(fir.local_count(f));
@@ -281,15 +291,14 @@ fn the_rank_of_an_owner_follows_the_type() void {
     lower_env.open(&e);
     defer lower_env.close(&e);
     fir.module mut m = fir.module{};
-    open_locals(&e, &m);
+    fir.func mut* f = open_locals(&e, &m);
     defer fir.module_free(&m);
-    fir.func mut* f = &m.funcs.items[0];
     place.survey mut c = survey_of(f);
     defer place.free(&c);
     fir_flow.bits mut stale = fir_flow.bits_new(fir.local_count(f));
     defer fir_flow.bits_free(&stale);
-    types.node* shelf = fir.local_at(f, 2)->ty;
-    types.node* box = fir.local_at(f, 1)->ty;
+    types.node* shelf = local_type(f, 2);
+    types.node* box = local_type(f, 1);
     // `s.boxes[1].e[?]`: the five owners of `boxes[0]`, then `p.a` and `p.b`; an index with no key
     // adds nothing
     place.path deep = place.trace(&c, place_of(f, 2, ".0[9].2[10]"), &stale);
@@ -336,9 +345,8 @@ fn the_owner_of_a_read_follows_its_place() void {
     lower_env.open(&e);
     defer lower_env.close(&e);
     fir.module mut m = fir.module{};
-    open_locals(&e, &m);
+    fir.func mut* f = open_locals(&e, &m);
     defer fir.module_free(&m);
-    fir.func mut* f = &m.funcs.items[0];
     place.survey mut c = survey_of(f);
     defer place.free(&c);
     expect_read(&c, f, 1, "", true, 0, true);
@@ -367,9 +375,8 @@ fn a_part_is_a_longer_place_below() void {
     lower_env.open(&e);
     defer lower_env.close(&e);
     fir.module mut m = fir.module{};
-    open_locals(&e, &m);
+    fir.func mut* f = open_locals(&e, &m);
     defer fir.module_free(&m);
-    fir.func mut* f = &m.funcs.items[0];
     place.survey mut c = survey_of(f);
     defer place.free(&c);
     fir_flow.bits mut stale = fir_flow.bits_new(fir.local_count(f));
@@ -423,7 +430,7 @@ fn a_light_survey_counts_the_stores() void {
     defer lower_env.close(&e);
     fir.module mut m = pass_env.parse(&e, PRELUDE[..], HELD[..]);
     defer fir.module_free(&m);
-    fir.func* f = &m.funcs.items[0];
+    fir.func* f = fir.module_function_at(&m, 0);
     place.survey mut full = survey_of(f);
     defer place.free(&full);
     u64 n = cast(fir.local_count(f), u64);
@@ -437,23 +444,23 @@ fn a_light_survey_counts_the_stores() void {
     place.mark_sources(&light);
     u64 mut k = 0;
     while (k < n) {
-        place.local_info* a = &full.locals[k];
-        place.local_info* b = &light.locals[k];
-        assert(a->assigns == b->assigns && a->memory == b->memory);
-        if (a->assigns > 0) {
-            assert(a->def_block == b->def_block && a->def_index == b->def_index);
+        place.local_info a = info_at(&full, k);
+        place.local_info b = info_at(&light, k);
+        assert(a.assigns == b.assigns && a.memory == b.memory);
+        if (a.assigns > 0) {
+            assert(a.def_block == b.def_block && a.def_index == b.def_index);
         }
-        assert(b->reads == 0 && b->checks == 0 && b->stores == 0 && !b->held);
+        assert(b.reads == 0 && b.checks == 0 && b.stores == 0 && !b.held);
         k += 1;
     }
     // `_5` takes three stores, `_2` one, and `_3` one, a held address in the full survey only
-    assert(light.locals[5].assigns == 3 && light.locals[2].assigns == 1);
-    assert(full.locals[3].held && light.held.len == 0 && full.held.len == 1);
+    assert(info_at(&light, 5).assigns == 3 && info_at(&light, 2).assigns == 1);
+    assert(info_at(&full, 3).held && light.held.len == 0 && full.held.len == 1);
     assert(!place.has_local_sources(&full) && !place.has_local_sources(&light));
     fir.module mut locals = fir.module{};
-    open_locals(&e, &locals);
+    fir.func mut* first = open_locals(&e, &locals);
     defer fir.module_free(&locals);
-    place.survey mut sourced = survey_of(&locals.funcs.items[0]);
+    place.survey mut sourced = survey_of(first);
     defer place.free(&sourced);
     assert(place.has_local_sources(&sourced));
     println("stores ok");

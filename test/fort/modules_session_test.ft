@@ -37,23 +37,25 @@ fn a_load_leaves_every_source_in_the_session() void {
     assert(session.has_source(&e.s, entry));
 }
 
+// The address of the source of `m`.
+fn source_address(modules.module* m) u64 {
+    return cast(m->source.ptr, u64);
+}
+
 // A module's `source` is the session's copy. And a second set loading the
 // same closure through one session reads the same bytes at the same address.
 // The session remembers a file it has read.
-fn a_file_is_read_once_for_the_life_of_the_session() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", modules_env.src_main());
-    string own entry = modules_env.in_sandbox(&e, "main.ft");
+fn a_file_is_read_once_for_the_life_of_the_session(modules_env.env mut* e) void {
+    modules_env.add(e, "main.ft", modules_env.src_main());
+    string own entry = modules_env.in_sandbox(e, "main.ft");
     defer del(entry);
-    assert(modules.load(&e.s, &e.set, entry));
-    modules.module* first = modules.at(&e.set, 0);
-    u64 address = cast(first->source.ptr, u64);
+    assert(modules.load(&e->s, &e->set, entry));
+    u64 address = source_address(modules.at(&e->set, 0));
     modules.module_set mut second = modules.create();
     defer modules.free(&second);
-    assert(modules.load(&e.s, &second, entry));
-    assert(cast(modules.at(&second, 0)->source.ptr, u64) == address);
-    assert(session.source_count(&e.s) == 1);
+    assert(modules.load(&e->s, &second, entry));
+    assert(source_address(modules.at(&second, 0)) == address);
+    assert(session.source_count(&e->s) == 1);
 }
 
 // The probe of the symbol reading reads through the session too. A file it looked at is
@@ -152,26 +154,24 @@ fn a_buffer_that_is_no_file_does_not_resolve_as_an_import() void {
 // Two sets over one session share its sources and nothing else. Each holds
 // its own modules, its own namespaces and its own diagnostic count of the
 // load it made.
-fn two_sets_over_one_session_share_only_the_sources() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", modules_env.src_main());
-    modules_env.add(&e, "other.ft", "fn one() i32 { return 1; }\n");
-    string own entry = modules_env.in_sandbox(&e, "main.ft");
+fn two_sets_over_one_session_share_only_the_sources(modules_env.env mut* e) void {
+    modules_env.add(e, "main.ft", modules_env.src_main());
+    modules_env.add(e, "other.ft", "fn one() i32 { return 1; }\n");
+    string own entry = modules_env.in_sandbox(e, "main.ft");
     defer del(entry);
-    string own other = modules_env.in_sandbox(&e, "other.ft");
+    string own other = modules_env.in_sandbox(e, "other.ft");
     defer del(other);
     modules.module_set mut second = modules.create();
     defer modules.free(&second);
-    assert(modules.load(&e.s, &e.set, entry));
-    assert(modules.load(&e.s, &second, other));
-    assert(modules.count(&e.set) == 1);
+    assert(modules.load(&e->s, &e->set, entry));
+    assert(modules.load(&e->s, &second, other));
+    assert(modules.count(&e->set) == 1);
     assert(modules.count(&second) == 1);
-    assert(modules.at(&e.set, 0)->path == "main");
-    assert(modules.at(&second, 0)->path == "other");
-    assert(modules.find(&e.set, "other") == null);
+    assert(modules_env.path_of(modules.at(&e->set, 0)) == "main");
+    assert(modules_env.path_of(modules.at(&second, 0)) == "other");
+    assert(modules.find(&e->set, "other") == null);
     assert(modules.find(&second, "main") == null);
-    assert(session.source_count(&e.s) == 2);
+    assert(session.source_count(&e->s) == 2);
 }
 
 // A set freed before its session leaves the session whole. The sources are
@@ -221,30 +221,28 @@ fn two_sessions_share_nothing() void {
 // needs.
 u64 RELOADS = 100;
 
-fn a_hundred_loads_through_one_session_answer_alike() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "import util;\nfn main() i32 { return util.add(1, 2); }\n");
-    modules_env.add(&e, "util.ft", modules_env.src_add());
-    string own entry = modules_env.in_sandbox(&e, "main.ft");
+fn a_hundred_loads_through_one_session_answer_alike(modules_env.env mut* e) void {
+    modules_env.add(e, "main.ft", "import util;\nfn main() i32 { return util.add(1, 2); }\n");
+    modules_env.add(e, "util.ft", modules_env.src_add());
+    string own entry = modules_env.in_sandbox(e, "main.ft");
     defer del(entry);
     u64 mut round = 0;
     while (round < RELOADS) {
         modules.module_set mut set = modules.create();
-        assert(modules.load(&e.s, &set, entry));
+        assert(modules.load(&e->s, &set, entry));
         assert(modules.count(&set) == 2);
-        assert(modules.at(&set, 0)->path == "util");
+        assert(modules_env.path_of(modules.at(&set, 0)) == "util");
         modules.free(&set);
         round += 1;
     }
     // The two files were read once between them and nothing was reported.
-    assert(session.source_count(&e.s) == 2);
-    assert(session.error_count(&e.s) == 0);
+    assert(session.source_count(&e->s) == 2);
+    assert(session.error_count(&e->s) == 0);
 }
 
 fn main() i32 {
     a_load_leaves_every_source_in_the_session();
-    a_file_is_read_once_for_the_life_of_the_session();
+    modules_env.run(a_file_is_read_once_for_the_life_of_the_session);
     the_prefix_probe_reads_through_the_session();
     an_inactive_import_does_not_read_its_source();
     println("session ok");
@@ -253,11 +251,11 @@ fn main() i32 {
     an_imported_buffer_is_read_when_the_file_exists();
     a_buffer_that_is_no_file_does_not_resolve_as_an_import();
     println("buffers ok");
-    two_sets_over_one_session_share_only_the_sources();
+    modules_env.run(two_sets_over_one_session_share_only_the_sources);
     a_set_freed_before_its_session_leaves_the_sources();
     println("sharing ok");
     two_sessions_share_nothing();
-    a_hundred_loads_through_one_session_answer_alike();
+    modules_env.run(a_hundred_loads_through_one_session_answer_alike);
     println("reentrancy ok");
     println("ok");
     return 0;
