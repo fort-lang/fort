@@ -43,16 +43,22 @@ fn a_struct_stored_by_value_is_resolved_before_its_holder() void {
     assert(check_env.field_offset(&e, "outer", "part") == 8);
 }
 
-fn an_array_of_a_struct_carries_the_base_through() void {
+// Makes a `check_env.env`, runs `body` on it, and releases it. `body` reads the value through a
+// pointer, so the use rule of `move` and `del` (D17.21) asks no proof of its reads after a call.
+fn run(fn (check_env.env mut*) void body) void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
+    body(&e);
+}
+
+fn an_array_of_a_struct_carries_the_base_through(check_env.env mut* e) void {
     // A fixed array is N of its element, so the array's holder stores the
     // element by value and the element is a resolution edge.
-    assert(decls(&e, "struct outer {\n    inner[2] parts;\n}\n",
+    assert(decls(e, "struct outer {\n    inner[2] parts;\n}\n",
                  "struct inner {\n    i64 a;\n}\n", "outer o = {{{1}, {2}}};\n"));
-    assert(check_env.sym_main(&e, "o") != null);
-    assert(types.type_sizeof(check_env.sym_main(&e, "o")->ty) == 16);
+    assert(check_env.sym_main(e, "o") != null);
+    assert(types.type_sizeof(check_env.sym_main(e, "o")->ty) == 16);
 }
 
 // The struct the two layout tests below hold, one field to a line.
@@ -62,36 +68,30 @@ string GROUPED_HOLDER =
 // A group stores what it groups (D3.6). A grouped pointer is one word whatever
 // its pointee is, and a grouped array of function pointers holds its pointers
 // by value. The offsets are C's for the same fields without the parentheses.
-fn a_grouped_field_is_laid_out_as_the_type_it_groups() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(decls(&e, GROUPED_HOLDER,
+fn a_grouped_field_is_laid_out_as_the_type_it_groups(check_env.env mut* e) void {
+    assert(decls(e, GROUPED_HOLDER,
                  "struct b {\n    a value;\n}\n", "b x = {};\n"));
-    assert(check_env.field_offset(&e, "a", "table") == 8);
-    assert(check_env.field_offset(&e, "a", "link") == 24);
-    assert(check_env.field_offset(&e, "a", "last") == 32);
-    assert(types.type_sizeof(check_env.sym_main(&e, "x")->ty) == 40);
-    check_env.reopen(&e);
-    assert(decls(&e, "struct b {\n    a value;\n}\n", GROUPED_HOLDER, "b x = {};\n"));
-    assert(check_env.field_offset(&e, "a", "last") == 32);
-    assert(types.type_sizeof(check_env.sym_main(&e, "x")->ty) == 40);
+    assert(check_env.field_offset(e, "a", "table") == 8);
+    assert(check_env.field_offset(e, "a", "link") == 24);
+    assert(check_env.field_offset(e, "a", "last") == 32);
+    assert(types.type_sizeof(check_env.sym_main(e, "x")->ty) == 40);
+    check_env.reopen(e);
+    assert(decls(e, "struct b {\n    a value;\n}\n", GROUPED_HOLDER, "b x = {};\n"));
+    assert(check_env.field_offset(e, "a", "last") == 32);
+    assert(types.type_sizeof(check_env.sym_main(e, "x")->ty) == 40);
 }
 
 // A group around a struct stores the struct by value, so it is a resolution
 // edge as the plain field is, and a group around a pointer to it is not.
-fn a_grouped_struct_field_is_a_resolution_edge() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(decls(&e, "struct a {\n    i32 tag;\n    ((b)) part;\n}\n",
+fn a_grouped_struct_field_is_a_resolution_edge(check_env.env mut* e) void {
+    assert(decls(e, "struct a {\n    i32 tag;\n    ((b)) part;\n}\n",
                  "struct b {\n    i64 v;\n    (a)* back;\n}\n", "a x = {};\n"));
-    assert(check_env.field_offset(&e, "a", "part") == 8);
-    assert(types.type_sizeof(check_env.sym_main(&e, "x")->ty) == 24);
-    check_env.reopen(&e);
-    assert(!decls(&e, "struct a {\n    ((b)) part;\n}\n", "struct b {\n    (a) whole;\n}\n",
+    assert(check_env.field_offset(e, "a", "part") == 8);
+    assert(types.type_sizeof(check_env.sym_main(e, "x")->ty) == 24);
+    check_env.reopen(e);
+    assert(!decls(e, "struct a {\n    ((b)) part;\n}\n", "struct b {\n    (a) whole;\n}\n",
                   ""));
-    assert(check_env.said(&e, "infinite size"));
+    assert(check_env.said(e, "infinite size"));
 }
 
 fn a_struct_behind_a_reference_is_identity_only() void {
@@ -110,31 +110,25 @@ fn a_struct_behind_a_reference_is_identity_only() void {
     assert(check_env.field_offset(&e, "first", "v") == 8);
 }
 
-fn a_span_of_a_struct_is_identity_only_as_well() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+fn a_span_of_a_struct_is_identity_only_as_well(check_env.env mut* e) void {
     // A span is two words whatever it views, so it stores no value of its
     // element type either.
-    assert(decls(&e, "struct holder {\n    item@ items;\n}\n",
+    assert(decls(e, "struct holder {\n    item@ items;\n}\n",
                  "struct item {\n    holder mut* owner;\n}\n", "holder h = {};\n"));
-    assert(check_env.errors(&e) == 0);
-    assert(types.type_sizeof(check_env.sym_main(&e, "h")->ty) == 16);
+    assert(check_env.errors(e) == 0);
+    assert(types.type_sizeof(check_env.sym_main(e, "h")->ty) == 16);
 }
 
-fn a_pair_that_reaches_through_a_span_checks_in_either_order() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+fn a_pair_that_reaches_through_a_span_checks_in_either_order(check_env.env mut* e) void {
     // `vec` holds a span of pointers to `node` and `node` holds a `vec` by
     // value. Neither layout depends on the other, so the pair checks whichever
     // order the file declares them in. Resolving `node` from `vec`'s pointer
     // field puts `vec` on its own resolution path through the value field.
     // The cycle makes the layout read an infinite size.
-    assert(decls(&e, "struct vec {\n    node mut* mut@ own items;\n}\n",
+    assert(decls(e, "struct vec {\n    node mut* mut@ own items;\n}\n",
                  "struct node {\n    vec kids;\n    i32 tag;\n}\n", "vec v = {};\n"));
-    assert(check_env.errors(&e) == 0);
-    assert(types.type_sizeof(check_env.sym_main(&e, "v")->ty) == 16);
+    assert(check_env.errors(e) == 0);
+    assert(types.type_sizeof(check_env.sym_main(e, "v")->ty) == 16);
     check_env.env mut f = check_env.env{};
     check_env.open(&f);
     defer check_env.close(&f);
@@ -147,18 +141,15 @@ fn a_pair_that_reaches_through_a_span_checks_in_either_order() void {
     assert(check_env.field_offset(&f, "node", "tag") == 16);
 }
 
-fn a_reference_behind_two_array_levels_is_identity_only() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+fn a_reference_behind_two_array_levels_is_identity_only(check_env.env mut* e) void {
     // `node*[2][3]` is six pointers: the array levels carry the base through
     // and the `*` ends the containment. So `vec` stores no `node` by value and
     // the pair checks in this order. This is the rank-two half of the rule,
     // which bootstrap-0 cannot write at all.
-    assert(decls(&e, "struct vec {\n    node mut*[2][3] rows;\n}\n",
+    assert(decls(e, "struct vec {\n    node mut*[2][3] rows;\n}\n",
                  "struct node {\n    vec kids;\n    i32 tag;\n}\n", "vec v = {};\n"));
-    assert(check_env.errors(&e) == 0);
-    assert(types.type_sizeof(check_env.sym_main(&e, "v")->ty) == 48);
+    assert(check_env.errors(e) == 0);
+    assert(types.type_sizeof(check_env.sym_main(e, "v")->ty) == 48);
     check_env.env mut f = check_env.env{};
     check_env.open(&f);
     defer check_env.close(&f);
@@ -170,17 +161,14 @@ fn a_reference_behind_two_array_levels_is_identity_only() void {
     assert(check_env.field_offset(&f, "node", "tag") == 48);
 }
 
-fn a_span_of_arrays_of_a_struct_is_identity_only_as_well() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+fn a_span_of_arrays_of_a_struct_is_identity_only_as_well(check_env.env mut* e) void {
     // `node[3] mut@ own` is two words whatever it views, the array level inside
     // it included. So it opens no resolution edge and the pair checks in both
     // orders.
-    assert(decls(&e, "struct vec {\n    node[3] mut@ own rows;\n}\n",
+    assert(decls(e, "struct vec {\n    node[3] mut@ own rows;\n}\n",
                  "struct node {\n    vec kids;\n    i32 tag;\n}\n", "vec v = {};\n"));
-    assert(check_env.errors(&e) == 0);
-    assert(types.type_sizeof(check_env.sym_main(&e, "v")->ty) == 16);
+    assert(check_env.errors(e) == 0);
+    assert(types.type_sizeof(check_env.sym_main(e, "v")->ty) == 16);
     check_env.env mut f = check_env.env{};
     check_env.open(&f);
     defer check_env.close(&f);
@@ -255,16 +243,13 @@ fn a_cycle_between_two_constants_is_reported_once() void {
     assert(check_env.errors(&e) == 1);
 }
 
-fn a_declaration_may_hold_its_own_address() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+fn a_declaration_may_hold_its_own_address(check_env.env mut* e) void {
     // `&N` inside N's own initializer asks for an address and not for a value.
     // And a module-level initializer admits `&` of a module-level declaration
     // from any module, this one included: a self-pointing sentinel is legal.
-    assert(decls(&e, "struct node {\n    node* self;\n}\n", "node n = node{&n};\n", ""));
-    assert(check_env.errors(&e) == 0);
-    assert(check_env.sym_main(&e, "n")->kind == ast.sym_kind.s_const);
+    assert(decls(e, "struct node {\n    node* self;\n}\n", "node n = node{&n};\n", ""));
+    assert(check_env.errors(e) == 0);
+    assert(check_env.sym_main(e, "n")->kind == ast.sym_kind.s_const);
 }
 
 fn an_enum_value_may_not_refer_to_its_own_enum() void {
@@ -279,16 +264,13 @@ fn an_enum_value_may_not_refer_to_its_own_enum() void {
 
 // ---- failure is local --------------------------------------------------------------
 
-fn a_declaration_that_failed_silences_everything_that_reads_it() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+fn a_declaration_that_failed_silences_everything_that_reads_it(check_env.env mut* e) void {
     // The type is unknown, so the declaration fails. The two that read it say
     // nothing further, because the error type poisons through.
-    assert(!decls(&e, "nosuch k = 1;\n", "i32 a = k;\n", "i32 b = k + 1;\n"));
-    assert(check_env.errors(&e) == 1);
-    assert(check_env.sym_main(&e, "k")->error);
-    assert(check_env.type_text(&e, check_env.sym_main(&e, "k")->ty) == "<error>");
+    assert(!decls(e, "nosuch k = 1;\n", "i32 a = k;\n", "i32 b = k + 1;\n"));
+    assert(check_env.errors(e) == 1);
+    assert(check_env.sym_main(e, "k")->error);
+    assert(check_env.type_text(e, check_env.sym_main(e, "k")->ty) == "<error>");
 }
 
 fn a_use_of_a_name_an_import_failed_to_bind_is_silent() void {
@@ -310,22 +292,22 @@ fn a_use_of_a_name_an_import_failed_to_bind_is_silent() void {
 
 fn main() i32 {
     a_struct_stored_by_value_is_resolved_before_its_holder();
-    an_array_of_a_struct_carries_the_base_through();
-    a_grouped_field_is_laid_out_as_the_type_it_groups();
-    a_grouped_struct_field_is_a_resolution_edge();
+    run(an_array_of_a_struct_carries_the_base_through);
+    run(a_grouped_field_is_laid_out_as_the_type_it_groups);
+    run(a_grouped_struct_field_is_a_resolution_edge);
     a_struct_behind_a_reference_is_identity_only();
-    a_span_of_a_struct_is_identity_only_as_well();
-    a_pair_that_reaches_through_a_span_checks_in_either_order();
-    a_reference_behind_two_array_levels_is_identity_only();
-    a_span_of_arrays_of_a_struct_is_identity_only_as_well();
+    run(a_span_of_a_struct_is_identity_only_as_well);
+    run(a_pair_that_reaches_through_a_span_checks_in_either_order);
+    run(a_reference_behind_two_array_levels_is_identity_only);
+    run(a_span_of_arrays_of_a_struct_is_identity_only_as_well);
     an_array_of_arrays_of_a_struct_contains_it_by_value();
     a_function_type_stores_neither_its_result_nor_its_parameters();
     two_structs_that_contain_each_other_by_value_have_infinite_size();
     a_constant_reached_from_another_is_resolved_on_the_spot();
     a_cycle_between_two_constants_is_reported_once();
-    a_declaration_may_hold_its_own_address();
+    run(a_declaration_may_hold_its_own_address);
     an_enum_value_may_not_refer_to_its_own_enum();
-    a_declaration_that_failed_silences_everything_that_reads_it();
+    run(a_declaration_that_failed_silences_everything_that_reads_it);
     a_use_of_a_name_an_import_failed_to_bind_is_silent();
     println("ok");
     return 0;

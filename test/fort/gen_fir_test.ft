@@ -246,13 +246,19 @@ fn both_modes_need_no_entry_for_an_index_or_a_shift() void {
     assert(str.find(text, "fail_shift") < 0);
 }
 
-// A construct that the lowering does not lower, which no checked program holds: the statement of
-// `f` is made a struct declaration by hand. It is a compile error at that node that names the
-// function and the kind of the node, and no text (spec/fir.md 9.8).
-fn a_construct_that_the_lowering_refuses_is_an_error() void {
+// Makes a `gen_env.env`, runs `body` on it, and releases it. `body` reads the value through a
+// pointer, so the use rule of `move` and `del` (D17.21) asks no proof of its reads after a call.
+fn run(fn (gen_env.env mut*) void body) void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
+    body(&e);
+}
+
+// A construct that the lowering does not lower, which no checked program holds: the statement of
+// `f` is made a struct declaration by hand. It is a compile error at that node that names the
+// function and the kind of the node, and no text (spec/fir.md 9.8).
+fn a_construct_that_the_lowering_refuses_is_an_error(gen_env.env mut* e) void {
     string[8] src = {
         "fn f() void {\n",
         "    g();\n",
@@ -263,17 +269,17 @@ fn a_construct_that_the_lowering_refuses_is_an_error() void {
         "    return 0;\n",
         "}\n",
     };
-    assert(gen_env.open_module(&e, gen_env.join_lines(&e, src[..])));
-    ast.node mut* decl = check_env.sym_main(&e.c, "f")->node;
+    assert(gen_env.open_module(e, gen_env.join_lines(e, src[..])));
+    ast.node mut* decl = check_env.sym_main(&e->c, "f")->node;
     ast.node mut* call = ast.ast_child_mut(decl->b, 0);
     call->kind = ast.ast_kind.k_struct_decl;
-    assert(!gen_fir.gen_program(&e.g, &e.c.ck, &e.c.m.set));
-    assert(gen_env.said(&e, "cannot lower `f` to FIR: the lowering does not support the node"));
-    assert(gen_env.said(&e, " the node `struct`"));
-    assert(gen_env.errors(&e) == 1);
-    assert(str.find(gen_env.funcs(&e), "main.f\"") < 0);
-    assert(e.g.functions == 3);
-    assert(e.g.lowered == 2);
+    assert(!gen_fir.gen_program(&e->g, &e->c.ck, &e->c.m.set));
+    assert(gen_env.said(e, "cannot lower `f` to FIR: the lowering does not support the node"));
+    assert(gen_env.said(e, " the node `struct`"));
+    assert(gen_env.errors(e) == 1);
+    assert(str.find(gen_env.funcs(e), "main.f\"") < 0);
+    assert(e->g.functions == 3);
+    assert(e->g.lowered == 2);
 }
 
 // `stop` ends in a `fail(panic)` and `drop` holds a `check(overwrite)` at the declaration of an
@@ -544,7 +550,7 @@ fn main() i32 {
     a_check_that_the_mode_removes_needs_no_runtime_entry();
     each_mode_excuses_only_the_kinds_that_it_removes();
     both_modes_need_no_entry_for_an_index_or_a_shift();
-    a_construct_that_the_lowering_refuses_is_an_error();
+    run(a_construct_that_the_lowering_refuses_is_an_error);
     a_fail_with_no_runtime_entry_is_an_error_and_an_overwrite_check_needs_none();
     a_designated_literal_zeroes_its_padding();
     println("functions ok");

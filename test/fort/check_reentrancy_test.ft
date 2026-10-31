@@ -31,15 +31,21 @@ fn two_checkers_are_independent() void {
     assert(check.check_sym_count(&first.ck) == made);
 }
 
-// The universe functions are one record each per checker, which is what makes
-// every use of a builtin denote the same symbol.
-fn every_checker_makes_its_own_universe() void {
+// Makes a `check_env.env`, runs `body` on it, and releases it. `body` reads the value through a
+// pointer, so the use rule of `move` and `del` (D17.21) asks no proof of its reads after a call.
+fn run(fn (check_env.env mut*) void body) void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    assert(check.check_sym_count(&e.ck) == 10);
-    assert(check.check_sym_at(&e.ck, 0)->name == "del");
-    assert(check.check_sym_at(&e.ck, 9)->name == "fprintln");
+    body(&e);
+}
+
+// The universe functions are one record each per checker, which is what makes
+// every use of a builtin denote the same symbol.
+fn every_checker_makes_its_own_universe(check_env.env mut* e) void {
+    assert(check.check_sym_count(&e->ck) == 10);
+    assert(check.check_sym_at(&e->ck, 0)->name == "del");
+    assert(check.check_sym_at(&e->ck, 9)->name == "fprintln");
 }
 
 // A hundred analyses of one document answer alike, which is the question a
@@ -60,7 +66,7 @@ fn a_hundred_analyses_of_one_document_answer_alike() void {
 
 fn main() i32 {
     two_checkers_are_independent();
-    every_checker_makes_its_own_universe();
+    run(every_checker_makes_its_own_universe);
     a_hundred_analyses_of_one_document_answer_alike();
     println("ok");
     return 0;

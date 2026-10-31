@@ -458,6 +458,17 @@ fn shape_of(string line, u64 from, strbuf.str_buf mut* out) string {
     return strbuf.view(out);
 }
 
+// The index of the first `ch` in `text` at or after `from`. `text` holds one there. The test below
+// lends its buffers to each call, so the use rule of `move` and `del` (D17.21) asks a proof of each
+// read through a pointer after the call; these reads stand in a frame of their own.
+fn next_of(string text, u64 from, char ch) u64 {
+    u64 mut i = from;
+    while (text[i] != ch) {
+        i += 1;
+    }
+    return i;
+}
+
 fn each_declaration_carries_the_types_of_the_whole_program_definition() void {
     strbuf.str_buf mut unit = strbuf.create();
     defer strbuf.free(&unit);
@@ -481,18 +492,12 @@ fn each_declaration_carries_the_types_of_the_whole_program_definition() void {
     u64 mut matched = 0;
     u64 mut at = 0;
     while (at < declared.len) {
-        u64 mut end = at;
-        while (declared[end] != '\n') {
-            end += 1;
-        }
+        u64 end = next_of(declared, at, '\n');
         string line = declared[at..end];
         string want = shape_of(line, "declare dso_local ".len, &a);
         // the definition of the same symbol in the whole program
         u64 name_at = cast(str.find(line, "@\""), u64);
-        u64 mut name_end = name_at + 2;
-        while (line[name_end] != '"') {
-            name_end += 1;
-        }
+        u64 name_end = next_of(line, name_at + 2, '"');
         strbuf.str_buf mut name = strbuf.create();
         defer strbuf.free(&name);
         strbuf.append(&name, line[name_at..name_end + 1]);
@@ -500,10 +505,7 @@ fn each_declaration_carries_the_types_of_the_whole_program_definition() void {
         u64 mut d = 0;
         u64 mut found = 0;
         while (d < defined.len) {
-            u64 mut e = d;
-            while (defined[e] != '\n') {
-                e += 1;
-            }
+            u64 e = next_of(defined, d, '\n');
             string def = defined[d..e];
             if (str.find(def, strbuf.view(&name)) >= 0) {
                 assert(same(shape_of(def, "define dso_local ".len, &b), want));

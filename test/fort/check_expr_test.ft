@@ -8,6 +8,7 @@ import fort.ast;
 import fort.check;
 import check_env;
 import fort.prim;
+import std.str;
 import std.strbuf;
 import std.strmap;
 import fort.types;
@@ -882,22 +883,37 @@ fn each_end_of_the_target_chain_at_a_mut_level_hides_the_pointer_to_the_next() v
                        ": a 'mut' cast hides the pointer u64* own mut* at byte 0"));
 }
 
+// The declarations of append_nested as one owned string. A test that keeps a buffer lends it to
+// each call, so the use rule of `move` and `del` (D17.21) asks a proof of each read through a
+// pointer after the call. A test keeps this string, whose address it lends to no call.
+fn nested(string name, u64 depth, u64 width, string leaf, string last) string own {
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    append_nested(&b, name, depth, width, leaf, last);
+    return strbuf.take(&b);
+}
+
 // The type `u64* own`, one owner.
 fn one_owner(check_env.env mut* e) types.node* {
     types.node* word = types.type_prim(&e->ck.types, prim.prim_kind.prim_u64);
     return types.type_ptr(&e->ck.types, word, true, false);
 }
 
-fn the_memo_keeps_one_key_for_each_kind_of_part_and_not_for_each_owner() void {
+// Makes a `check_env.env`, runs `body` on it, and releases it. `body` reads the value through a
+// pointer, so the use rule of `move` and `del` (D17.21) asks no proof of its reads after a call.
+fn run(fn (check_env.env mut*) void body) void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
-    append_nested(&b, "s", 6, 128, "u64* own", "");
-    assert(check_env.check_decls(&e, strbuf.view(&b)));
-    types.node* nest = check_env.sym_main(&e, "s6")->ty;
-    types.node* flat = types.type_array(&e.ck.types, one_owner(&e), 4398046511104);
+    body(&e);
+}
+
+fn the_memo_keeps_one_key_for_each_kind_of_part_and_not_for_each_owner(check_env.env mut* e) void {
+    string own decls = nested("s", 6, 128, "u64* own", "");
+    defer del(decls);
+    assert(check_env.check_decls(e, decls));
+    types.node* nest = check_env.sym_main(e, "s6")->ty;
+    types.node* flat = types.type_array(&e->ck.types, one_owner(e), 4398046511104);
     // A flat array over the nesting: the array, the run of its owners over each of the six
     // structs, and the one owner. A walk of each owner would read 128 to the power 6 of them.
     check.place_memo mut m = check.place_memo{};
@@ -913,49 +929,42 @@ fn the_memo_keeps_one_key_for_each_kind_of_part_and_not_for_each_owner() void {
     assert(strmap.count(&back.held) == 7);
 }
 
-fn the_memo_keeps_no_key_for_a_run_with_a_hidden_owner() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
-    append_nested(&b, "s", 2, 4, "u64* own", "");
-    assert(check_env.check_decls(&e, strbuf.view(&b)));
-    types.node* nest = check_env.sym_main(&e, "s2")->ty;
+fn the_memo_keeps_no_key_for_a_run_with_a_hidden_owner(check_env.env mut* e) void {
+    string own decls = nested("s", 2, 4, "u64* own", "");
+    defer del(decls);
+    assert(check_env.check_decls(e, decls));
+    types.node* nest = check_env.sym_main(e, "s2")->ty;
     // Fifteen owners of the flat array are held, and the sixteenth is past the end of `s2`. The
     // memo keeps the runs that hold each owner and none of the runs that lead to the sixteenth.
-    types.node* flat = types.type_array(&e.ck.types, one_owner(&e), 17);
+    types.node* flat = types.type_array(&e->ck.types, one_owner(e), 17);
     check.place_memo mut m = check.place_memo{};
     defer check.memo_free(&m);
     check.pointer_place mut h = check.pointer_place{};
     assert(check.first_hidden(&m, flat, 1, 0, nest, &h));
     assert(h.at == 128);
-    assert(types.type_equal(h.ty, one_owner(&e)));
+    assert(types.type_equal(h.ty, one_owner(e)));
     assert(strmap.count(&m.held) == 3);
 }
 
-fn a_part_holds_its_own_bytes_and_padding_and_the_end_hold_none() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(check_env.check_decls(&e, "struct pad {\n    u8 a;\n    u64* own b;\n}\n"));
-    types.node* pad = check_env.sym_main(&e, "pad")->ty;
+fn a_part_holds_its_own_bytes_and_padding_and_the_end_hold_none(check_env.env mut* e) void {
+    assert(check_env.check_decls(e, "struct pad {\n    u8 a;\n    u64* own b;\n}\n"));
+    types.node* pad = check_env.sym_main(e, "pad")->ty;
     check.target_part whole = check.target_part{.ty = pad, .at = 0};
     // byte 0 is the field `a`, bytes 1 to 7 are padding, and the field `b` is bytes 8 to 15
     assert(check.part_at(whole, 0).at == 0);
     assert(check.part_at(whole, 3).ty == null);
     assert(check.part_at(whole, 8).at == 8);
-    assert(types.type_equal(check.part_at(whole, 15).ty, one_owner(&e)));
+    assert(types.type_equal(check.part_at(whole, 15).ty, one_owner(e)));
     assert(check.part_at(whole, 16).ty == null);
     // the last element of an array, and the byte past it
-    types.node* words = types.type_array(&e.ck.types, one_owner(&e), 3);
+    types.node* words = types.type_array(&e->ck.types, one_owner(e), 3);
     check.target_part list = check.target_part{.ty = words, .at = 0};
     assert(check.part_at(list, 23).at == 16);
     assert(check.part_at(list, 24).ty == null);
     // The cover of the bytes of `b` is `b`; the cover of both fields, and of bytes past the end,
     // is the struct itself; a void storage has no cover.
     assert(check.cover_of(pad, 8, 8).at == 8);
-    assert(types.type_equal(check.cover_of(pad, 8, 8).ty, one_owner(&e)));
+    assert(types.type_equal(check.cover_of(pad, 8, 8).ty, one_owner(e)));
     assert(check.cover_of(pad, 0, 16).ty == pad);
     assert(check.cover_of(pad, 8, 16).ty == pad);
     assert(check.cover_of(null, 0, 8).ty == null);
@@ -1191,13 +1200,8 @@ fn a_walk_that_finds_a_mark_keeps_it_on_its_path_only() void {
     assert(kept_mark(&e, "ha") == check.MARK_SOME);
 }
 
-fn a_walk_that_meets_a_layout_that_waits_keeps_no_answer_until_later() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    // The cast of the module-level initializer meets `later` before its layout: `holder` keeps no
-    // answer then. The cast of `view` reads `later` and keeps MARK_SOME for both. `broken`, a
-    // struct in error, comes first in `holder`, and the walk enters no struct with no layout.
+// The declarations of the test below, as one owned string (see nested).
+fn waiting_decls() string own {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     strbuf.append(&b, "struct holder {\n    broken* q;\n    later* p;\n}\n");
@@ -1206,14 +1210,23 @@ fn a_walk_that_meets_a_layout_that_waits_keeps_no_answer_until_later() void {
     strbuf.append(&b, "struct later {\n    u64 mut* q;\n}\n");
     strbuf.append(&b, "struct broken {\n    missing m;\n}\n");
     strbuf.append(&b, "fn view(u64* a) holder* {\n    return cast(a, holder*);\n}\n");
-    assert(!check_env.check_decls(&e, strbuf.view(&b)));
-    assert(check_env.said(&e, "a module-level initializer must be a constant expression"));
-    assert(check_env.said(&e, "cannot cast u64* to holder*"));
-    assert(check_env.said(&e, ": a cast adds the pointer later* at byte 8"));
-    assert(kept_mark(&e, "holder") == check.MARK_SOME);
-    assert(kept_mark(&e, "later") == check.MARK_SOME);
+    return strbuf.take(&b);
+}
+
+fn a_walk_that_meets_a_layout_that_waits_keeps_no_answer_until_later(check_env.env mut* e) void {
+    // The cast of the module-level initializer meets `later` before its layout: `holder` keeps no
+    // answer then. The cast of `view` reads `later` and keeps MARK_SOME for both. `broken`, a
+    // struct in error, comes first in `holder`, and the walk enters no struct with no layout.
+    string own decls = waiting_decls();
+    defer del(decls);
+    assert(!check_env.check_decls(e, decls));
+    assert(check_env.said(e, "a module-level initializer must be a constant expression"));
+    assert(check_env.said(e, "cannot cast u64* to holder*"));
+    assert(check_env.said(e, ": a cast adds the pointer later* at byte 8"));
+    assert(kept_mark(e, "holder") == check.MARK_SOME);
+    assert(kept_mark(e, "later") == check.MARK_SOME);
     // the symbol of a struct in error has the error type, and its node has no answer to keep
-    assert(check_env.sym_main(&e, "broken")->error);
+    assert(check_env.sym_main(e, "broken")->error);
 }
 
 fn the_work_limit_makes_a_cast_an_error_with_a_note() void {
@@ -1627,10 +1640,9 @@ fn the_five_place_forms_carry_the_lvalue_mark() void {
     assert(!check_env.has_ann(check_env.body_expr(&e, "probe", 0), check.ANN_LVALUE));
 }
 
-fn the_five_rvalue_forms_carry_no_lvalue_mark() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
+// The probe of the test below, one statement for each rvalue form, as one owned string (see
+// nested).
+fn rvalue_probe() string own {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     strbuf.append(&b, "fn probe() void {\n");
@@ -1641,22 +1653,27 @@ fn the_five_rvalue_forms_carry_no_lvalue_mark() void {
     strbuf.append(&b, "    s_i32(7);\n");
     strbuf.append(&b, "    s_point(&p);\n");
     strbuf.append(&b, "}\n");
-    strbuf.str_buf mut x = strbuf.create();
-    defer strbuf.free(&x);
-    strbuf.append(&x, "fn one() i32 {\n    return 1;\n}\n");
-    strbuf.append(&x, "fn s_point(point* v) void {\n    return;\n}\n");
-    assert(open_probe2(&e, strbuf.view(&b), strbuf.view(&x)));
-    probe_all(&e, 5);
-    assert(check_env.errors(&e) == 0);
+    return strbuf.take(&b);
+}
+
+fn the_five_rvalue_forms_carry_no_lvalue_mark(check_env.env mut* e) void {
+    string own probe = rvalue_probe();
+    defer del(probe);
+    string own extra = str.concat("fn one() i32 {\n    return 1;\n}\n",
+                                  "fn s_point(point* v) void {\n    return;\n}\n");
+    defer del(extra);
+    assert(open_probe2(e, probe, extra));
+    probe_all(e, 5);
+    assert(check_env.errors(e) == 0);
     // D17.5 names the own rvalues. `del` of one of them only frees (D17.9).
-    assert(!check_env.has_ann(probe_node(&e, 0, ast.ast_kind.k_new, ""), check.ANN_LVALUE));
-    ast.node* call = ast.ast_child(check_env.body_expr(&e, "probe", 1), 0);
+    assert(!check_env.has_ann(probe_node(e, 0, ast.ast_kind.k_new, ""), check.ANN_LVALUE));
+    ast.node* call = ast.ast_child(check_env.body_expr(e, "probe", 1), 0);
     assert(call->kind == ast.ast_kind.k_call);
     assert(!check_env.has_ann(call, check.ANN_LVALUE));
-    assert(!check_env.has_ann(probe_node(&e, 2, ast.ast_kind.k_cast, ""), check.ANN_LVALUE));
-    assert(!check_env.has_ann(probe_node(&e, 3, ast.ast_kind.k_int, ""), check.ANN_LVALUE));
+    assert(!check_env.has_ann(probe_node(e, 2, ast.ast_kind.k_cast, ""), check.ANN_LVALUE));
+    assert(!check_env.has_ann(probe_node(e, 3, ast.ast_kind.k_int, ""), check.ANN_LVALUE));
     // `&p` needs an lvalue operand and is not one itself.
-    ast.node* addr = probe_node(&e, 4, ast.ast_kind.k_unary, "");
+    ast.node* addr = probe_node(e, 4, ast.ast_kind.k_unary, "");
     assert(!check_env.has_ann(addr, check.ANN_LVALUE));
     assert(check_env.has_ann(addr->a, check.ANN_LVALUE));
 }
@@ -1682,25 +1699,22 @@ fn an_index_or_field_of_an_rvalue_and_a_function_name_are_not_lvalues() void {
     assert(!check_env.has_ann(probe_node(&e, 0, ast.ast_kind.k_ident, "three"), check.ANN_LVALUE));
 }
 
-fn a_call_of_move_carries_the_move_mark_and_no_other_call_does() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_lines(&e, "    del(move(owned));\n", "    del(owned);\n", "    s_i32(one());\n",
+fn a_call_of_move_carries_the_move_mark_and_no_other_call_does(check_env.env mut* e) void {
+    assert(open_lines(e, "    del(move(owned));\n", "    del(owned);\n", "    s_i32(one());\n",
                       "", "point mut* own mut owned = null;\nfn one() i32 {\n    return 1;\n}\n"));
-    probe_all(&e, 3);
-    assert(check_env.errors(&e) == 0);
+    probe_all(e, 3);
+    assert(check_env.errors(e) == 0);
     // The emitter reads the mark and not the name of the callee.
-    ast.node* moved = ast.ast_child(check_env.body_expr(&e, "probe", 0), 0);
+    ast.node* moved = ast.ast_child(check_env.body_expr(e, "probe", 0), 0);
     assert(moved->kind == ast.ast_kind.k_call);
     assert(check_env.has_ann(moved, check.ANN_MOVE));
     // D17.5: `move(...)` is an rvalue. Its operand is the lvalue it empties.
     assert(!check_env.has_ann(moved, check.ANN_LVALUE));
     assert(check_env.has_ann(ast.ast_child(moved, 0), check.ANN_LVALUE));
     // `del` and an ordinary call are not `move`.
-    assert(!check_env.has_ann(check_env.body_expr(&e, "probe", 0), check.ANN_MOVE));
-    assert(!check_env.has_ann(check_env.body_expr(&e, "probe", 1), check.ANN_MOVE));
-    ast.node* ordinary = check_env.body_expr(&e, "probe", 2);
+    assert(!check_env.has_ann(check_env.body_expr(e, "probe", 0), check.ANN_MOVE));
+    assert(!check_env.has_ann(check_env.body_expr(e, "probe", 1), check.ANN_MOVE));
+    ast.node* ordinary = check_env.body_expr(e, "probe", 2);
     assert(!check_env.has_ann(ordinary, check.ANN_MOVE));
     assert(!check_env.has_ann(ast.ast_child(ordinary, 0), check.ANN_MOVE));
 }
@@ -1781,71 +1795,60 @@ fn own_storage_and_a_mutable_indirection_are_emptiable() void {
     assert(!check_env.has_ann(place(&e, 3), check.ANN_EMPTY_IMMUTABLE));
 }
 
-fn a_constant_and_a_member_of_one_are_read_only() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_places(&e));
-    assert(check_env.errors(&e) == 0);
+fn a_constant_and_a_member_of_one_are_read_only(check_env.env mut* e) void {
+    assert(open_places(e));
+    assert(check_env.errors(e) == 0);
     check.empty_kind ro = check.empty_kind.empty_readonly;
     // D7.10: a module-level constant lives in read-only memory, and an element
     // or a field of it does too.
-    assert(empty_at(&e, 8, ast.ast_kind.k_ident) == ro);
-    assert(empty_at(&e, 9, ast.ast_kind.k_index) == ro);
-    assert(empty_at(&e, 10, ast.ast_kind.k_field) == ro);
+    assert(empty_at(e, 8, ast.ast_kind.k_ident) == ro);
+    assert(empty_at(e, 9, ast.ast_kind.k_index) == ro);
+    assert(empty_at(e, 10, ast.ast_kind.k_field) == ro);
     // The base of the member carries the same mark.
-    assert(check.empty_of(place(&e, 9)->a) == ro);
-    assert(check.empty_of(place(&e, 10)->a) == ro);
-    assert(check_env.has_ann(place(&e, 8), check.ANN_EMPTY_READONLY));
-    assert(!check_env.has_ann(place(&e, 8), check.ANN_EMPTY_IMMUTABLE));
+    assert(check.empty_of(place(e, 9)->a) == ro);
+    assert(check.empty_of(place(e, 10)->a) == ro);
+    assert(check_env.has_ann(place(e, 8), check.ANN_EMPTY_READONLY));
+    assert(!check_env.has_ann(place(e, 8), check.ANN_EMPTY_IMMUTABLE));
     // The read-only memory stops at the first indirection: level 1 of the
     // constant `KM` is mutable, so `KM->x` is emptiable and `KM` is not.
-    assert(empty_at(&e, 15, ast.ast_kind.k_arrow) == check.empty_kind.empty_ok);
-    assert(check.empty_of(place(&e, 15)->a) == ro);
+    assert(empty_at(e, 15, ast.ast_kind.k_arrow) == check.empty_kind.empty_ok);
+    assert(check.empty_of(place(e, 15)->a) == ro);
 }
 
-fn an_immutable_indirection_is_not_emptiable() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    assert(open_places(&e));
-    assert(check_env.errors(&e) == 0);
+fn an_immutable_indirection_is_not_emptiable(check_env.env mut* e) void {
+    assert(open_places(e));
+    assert(check_env.errors(e) == 0);
     check.empty_kind im = check.empty_kind.empty_immutable;
     // Nothing may be taken out of what was only lent (D17.9).
-    assert(empty_at(&e, 11, ast.ast_kind.k_arrow) == im);
-    assert(empty_at(&e, 12, ast.ast_kind.k_unary) == im);
-    assert(empty_at(&e, 13, ast.ast_kind.k_index) == im);
+    assert(empty_at(e, 11, ast.ast_kind.k_arrow) == im);
+    assert(empty_at(e, 12, ast.ast_kind.k_unary) == im);
+    assert(empty_at(e, 13, ast.ast_kind.k_index) == im);
     // A field below the immutable indirection keeps the reason.
-    assert(empty_at(&e, 14, ast.ast_kind.k_field) == im);
-    assert(check.empty_of(place(&e, 14)->a) == im);
+    assert(empty_at(e, 14, ast.ast_kind.k_field) == im);
+    assert(check.empty_of(place(e, 14)->a) == im);
     // The parameter itself is the function's own storage.
-    assert(check.empty_of(place(&e, 11)->a) == check.empty_kind.empty_ok);
-    assert(check_env.has_ann(place(&e, 11), check.ANN_EMPTY_IMMUTABLE));
-    assert(!check_env.has_ann(place(&e, 11), check.ANN_EMPTY_READONLY));
+    assert(check.empty_of(place(e, 11)->a) == check.empty_kind.empty_ok);
+    assert(check_env.has_ann(place(e, 11), check.ANN_EMPTY_IMMUTABLE));
+    assert(!check_env.has_ann(place(e, 11), check.ANN_EMPTY_READONLY));
 }
 
-fn an_rvalue_carries_no_emptiability_mark() void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    strbuf.str_buf mut x = strbuf.create();
-    defer strbuf.free(&x);
-    strbuf.append(&x, "fn three() i32[3] {\n    return nums;\n}\n");
-    strbuf.append(&x, "fn mk() point {\n    return point{1, 2};\n}\n");
-    assert(open_lines(&e, "    s_i32(three()[0]);\n", "    s_i32(mk().x);\n", "", "",
-                      strbuf.view(&x)));
-    probe_all(&e, 2);
-    assert(check_env.errors(&e) == 0);
+fn an_rvalue_carries_no_emptiability_mark(check_env.env mut* e) void {
+    string own extra = str.concat("fn three() i32[3] {\n    return nums;\n}\n",
+                                  "fn mk() point {\n    return point{1, 2};\n}\n");
+    defer del(extra);
+    assert(open_lines(e, "    s_i32(three()[0]);\n", "    s_i32(mk().x);\n", "", "", extra));
+    probe_all(e, 2);
+    assert(check_env.errors(e) == 0);
     // The checker leaves `empty` at empty_immutable on an rvalue, where it has
     // no meaning. So the write must stay under the lvalue test.
     u32 both = check.ANN_EMPTY_READONLY | check.ANN_EMPTY_IMMUTABLE;
-    assert((probe_node(&e, 0, ast.ast_kind.k_index, "")->ann & both) == 0);
-    assert((probe_node(&e, 1, ast.ast_kind.k_field, "x")->ann & both) == 0);
+    assert((probe_node(e, 0, ast.ast_kind.k_index, "")->ann & both) == 0);
+    assert((probe_node(e, 1, ast.ast_kind.k_field, "x")->ann & both) == 0);
     // The two calls that the index and the field read.
-    assert((probe_node(&e, 0, ast.ast_kind.k_index, "")->a->ann & both) == 0);
-    assert((probe_node(&e, 1, ast.ast_kind.k_field, "x")->a->ann & both) == 0);
+    assert((probe_node(e, 0, ast.ast_kind.k_index, "")->a->ann & both) == 0);
+    assert((probe_node(e, 1, ast.ast_kind.k_field, "x")->a->ann & both) == 0);
     // The call of the sink.
-    assert((check_env.body_expr(&e, "probe", 1)->ann & both) == 0);
+    assert((check_env.body_expr(e, "probe", 1)->ann & both) == 0);
 }
 
 // A `string` element and a constant of another module. D6.7 makes `e[i]` an
@@ -2161,9 +2164,9 @@ fn main() i32 {
     nested_structs_over_arrays_of_parts_take_no_walk_of_each_owner();
     the_last_owner_that_differs_is_found_after_each_equal_part();
     each_end_of_the_target_chain_at_a_mut_level_hides_the_pointer_to_the_next();
-    the_memo_keeps_one_key_for_each_kind_of_part_and_not_for_each_owner();
-    the_memo_keeps_no_key_for_a_run_with_a_hidden_owner();
-    a_part_holds_its_own_bytes_and_padding_and_the_end_hold_none();
+    run(the_memo_keeps_one_key_for_each_kind_of_part_and_not_for_each_owner);
+    run(the_memo_keeps_no_key_for_a_run_with_a_hidden_owner);
+    run(a_part_holds_its_own_bytes_and_padding_and_the_end_hold_none);
     a_mut_view_keeps_each_pointer_place_and_puns_the_rest();
     the_walk_of_the_marks_enters_each_struct_once_for_the_checker();
     a_struct_with_no_mark_behind_a_mark_is_walked_once();
@@ -2171,7 +2174,7 @@ fn main() i32 {
     a_struct_that_reaches_a_mark_through_a_cycle_keeps_it();
     a_closed_walk_keeps_no_mark_for_each_struct_it_entered();
     a_walk_that_finds_a_mark_keeps_it_on_its_path_only();
-    a_walk_that_meets_a_layout_that_waits_keeps_no_answer_until_later();
+    run(a_walk_that_meets_a_layout_that_waits_keeps_no_answer_until_later);
     the_work_limit_makes_a_cast_an_error_with_a_note();
     the_rule_reads_no_long_array_element_by_element();
     sizeof_yields_an_untyped_constant_of_the_type_s_size();
@@ -2198,13 +2201,13 @@ fn main() i32 {
     assert_and_panic_take_one_argument_each();
     a_universe_function_is_callable_and_nothing_else();
     the_five_place_forms_carry_the_lvalue_mark();
-    the_five_rvalue_forms_carry_no_lvalue_mark();
+    run(the_five_rvalue_forms_carry_no_lvalue_mark);
     an_index_or_field_of_an_rvalue_and_a_function_name_are_not_lvalues();
-    a_call_of_move_carries_the_move_mark_and_no_other_call_does();
+    run(a_call_of_move_carries_the_move_mark_and_no_other_call_does);
     own_storage_and_a_mutable_indirection_are_emptiable();
-    a_constant_and_a_member_of_one_are_read_only();
-    an_immutable_indirection_is_not_emptiable();
-    an_rvalue_carries_no_emptiability_mark();
+    run(a_constant_and_a_member_of_one_are_read_only);
+    run(an_immutable_indirection_is_not_emptiable);
+    run(an_rvalue_carries_no_emptiability_mark);
     a_string_element_and_an_imported_constant_carry_their_marks();
     move_and_del_read_the_mark_on_their_operand();
     a_declaration_of_an_imported_module_is_reached_through_its_name();

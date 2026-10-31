@@ -120,17 +120,28 @@ fn takes(strbuf.str_buf mut* b, string base, types.type_kind kind, u64 inner, u6
     check_env.open(&e);
     defer check_env.close(&e);
     string decl = deep_decl(b, base, suffix_of(kind), inner, outer, init_of(kind));
-    if (!check_env.check_decls(&e, decl)) {
-        return false;
-    }
-    types.node* mut t = check_env.sym_main(&e, "deep")->ty;
+    return check_env.check_decls(&e, decl) && took(&e, base, kind, count);
+}
+
+// The type of `deep` in the entry module of `e`. A caller that holds an environment lends it to
+// each call, so the use rule of `move` and `del` (D17.21) asks a proof of each read through a
+// pointer after the call; this read stands in a frame of its own.
+fn deep_type(check_env.env* e) types.node* {
+    return check_env.sym_main(e, "deep")->ty;
+}
+
+// Whether the checker gave `deep` `count` levels of `kind` above the type spelled `base`, and
+// closed each frame of its suffix stack. takes holds the environment, and this function reads it
+// through a pointer, for the reason that deep_type gives.
+fn took(check_env.env mut* e, string base, types.type_kind kind, u64 count) bool {
+    types.node* mut t = deep_type(e);
     u64 mut n = 0;
     while (t->kind == kind) {
         n += 1;
         t = t->elem;
     }
-    return check_env.errors(&e) == 0 && n == count && check_env.type_text(&e, t) == base
-           && e.ck.suffix_top == 0;
+    return check_env.errors(e) == 0 && n == count && check_env.type_text(e, t) == base
+           && e->ck.suffix_top == 0;
 }
 
 // Checks the declaration of `deep_decl` with the suffix of `kind` in a fresh
@@ -225,7 +236,7 @@ fn a_type_in_an_array_length_grows_the_suffix_stack() void {
     check_env.open(&e);
     defer check_env.close(&e);
     assert(check_env.check_decls(&e, deep_decl(&b, strbuf.view(&base), "*", 0, 50, "null")));
-    assert(check_env.type_text(&e, check_env.sym_main(&e, "deep")->ty)
+    assert(check_env.type_text(&e, deep_type(&e))
            == "i32[8]**************************************************");
     assert(e.ck.suffix_top == 0);
     assert(e.ck.suffixes.len >= 251);
