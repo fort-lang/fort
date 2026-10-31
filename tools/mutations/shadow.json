@@ -1,7 +1,8 @@
 {
   "comment": [
     "One row for each event of fir.shadow (src/fort/fir/shadow.ft, spec/ownership-design.md 3.4),",
-    "for a boundary of each, and for the tags of 3.3, with the interpreter lines that feed them",
+    "for a boundary of each, for the tags of 3.3, and for each step of the derivation of D10.7",
+    "that the event `forged` reads, with the interpreter lines that feed them",
     "(src/fort/fir/interpreter.ft). A row names the line that decides the rule and a text that",
     "breaks it. The first stage runs the suite of the shadow (test/fort/fir/shadow_test.ft), the",
     "second the driver suite of --fir-events and the pass `run`, and the third the FIR tests. The",
@@ -180,8 +181,8 @@
     {
       "decision": "tag-kept",
       "file": "src/fort/fir/shadow.ft",
-      "old": "    kept.f.flag = t.f.flag || (t.f.kind == tag_kind.tg_frame && is_below(sh, t.f.frame)\n                               && find_frame(sh, addr) != top);",
-      "new": "    kept.f.flag = t.f.flag || (t.f.kind == tag_kind.tg_frame && is_below(sh, t.f.frame)\n                               && find_frame(sh, addr) == top);",
+      "old": "        kept.f.flag = t.f.flag || (t.f.kind == tag_kind.tg_frame && is_below(sh, t.f.frame)\n                                   && find_frame(sh, addr) != top);",
+      "new": "        kept.f.flag = t.f.flag || (t.f.kind == tag_kind.tg_frame && is_below(sh, t.f.frame)\n                                   && find_frame(sh, addr) == top);",
       "what": "a value that a callee stores outside its frame is not kept"
     },
     {
@@ -194,8 +195,8 @@
     {
       "decision": "tag-frame",
       "file": "src/fort/fir/interpreter.ft",
-      "old": "        if (fir.place_fixed(f, r.place)) {\n            it->sh.value = shadow.tag_address(&it->sh, a);",
-      "new": "        if (fir.place_fixed(f, r.place) && false) {\n            it->sh.value = shadow.tag_address(&it->sh, a);",
+      "old": "        if (fir.place_fixed(f, r.place)) {\n            it->sh.value = shadow.tag_address(&it->sh, a, local_address(it, k, r.place.local));",
+      "new": "        if (fir.place_fixed(f, r.place) && false) {\n            it->sh.value = shadow.tag_address(&it->sh, a, local_address(it, k, r.place.local));",
       "what": "an address of a local makes no frame tag"
     },
     {
@@ -208,8 +209,8 @@
     {
       "decision": "tag-extern-argument",
       "file": "src/fort/fir/shadow.ft",
-      "old": "            p = sh->args[i - 1];",
-      "new": "            p = tag{};",
+      "old": "            p = tag{a.o, a.f, p.d};",
+      "new": "            p = tag{origin{}, origin{}, p.d};",
       "what": "an access that an extern makes through an argument has no tag"
     },
     {
@@ -264,9 +265,324 @@
     {
       "decision": "tag-extern-lowest",
       "file": "src/fort/fir/shadow.ft",
-      "old": "        if (sh->arg_values[i - 1] == addr && !is_empty(sh->args[i - 1])) {",
+      "old": "        if (sh->arg_values[i - 1] == addr && !is_empty(tag{a.o, a.f, derivation{}})) {",
       "new": "        if (sh->arg_values[i - 1] == addr) {",
       "what": "of two extern arguments with one value, the lowest wins when it has no tag, and the access loses the tag of the other"
+    },
+    {
+      "decision": "forged-event",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "        if (is_forged(sh, addr, len, p.d)) {",
+      "new": "        if (is_forged(sh, addr, len, p.d) && false) {",
+      "what": "an access of a local through a value that does not derive from an address of it makes no `forged`"
+    },
+    {
+      "decision": "forged-entry",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "        if (!has_id(d, entry_id(sh, fr->base + fr->offsets[n], false))) {",
+      "new": "        if (entry_id(sh, fr->base + fr->offsets[n], false) == NONE) {",
+      "what": "an access is `forged` only when the run took no address of the local, whatever the value derives from"
+    },
+    {
+      "decision": "forged-first-local",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "         n < fr->offsets.len && fr->base + fr->offsets[n] < addr + len; n++) {",
+      "new": "         n < fr->offsets.len && fr->base + fr->offsets[n] < addr + 1; n++) {",
+      "what": "an access of two locals tests only the first"
+    },
+    {
+      "decision": "forged-named",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "    if (!d.named && !d.all) {",
+      "new": "    if (!d.all) {",
+      "what": "an access by the name of a local is tested as an access through a value"
+    },
+    {
+      "decision": "forged-after",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "        if (o->kind == event_kind.ev_forged\n",
+      "new": "        if (false\n",
+      "what": "a run reports events after a `forged` event"
+    },
+    {
+      "decision": "forged-live",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "        sh->entries.items[e].owner = NONE;",
+      "new": "        sh->entries.items[e].owner = sh->entries.items[e].owner;",
+      "what": "an address of the entry before a `live` reaches the new entry of the local"
+    },
+    {
+      "decision": "forged-make",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "    d.ids[0] = entry_id(sh, base, true);",
+      "new": "    d.ids[0] = entry_id(sh, base, false);",
+      "what": "an address of a local gives the entry of the local no id"
+    },
+    {
+      "decision": "derive-overflow",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "        if (k == DERIVATION_IDS) {\n            r.all = true;",
+      "new": "        if (k == DERIVATION_IDS) {\n            r.all = r.all;",
+      "what": "a value that derives from more entries than DERIVATION_IDS loses the last ones"
+    },
+    {
+      "decision": "derive-join",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "    for (u64 mut i = 0; i < DERIVATION_IDS && b.ids[i] != 0; i++) {",
+      "new": "    for (u64 mut i = 0; i < DERIVATION_IDS && b.ids[i] != 0 && false; i++) {",
+      "what": "a join keeps only the derivation of its first operand"
+    },
+    {
+      "decision": "derive-merge",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "    r.d = join(a.d, b.d);\n    return r;",
+      "new": "    return r;",
+      "what": "a binary rvalue keeps only the derivation of its first operand"
+    },
+    {
+      "decision": "derive-load-part",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "            sh->value.d = join(sh->value.d, sh->slots.items[j].t.d);",
+      "new": "            sh->value.d = sh->value.d;",
+      "what": "a load of some bytes of a word derives from no address"
+    },
+    {
+      "decision": "derive-mark-part",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "    tag mut kept = tag{origin{}, origin{}, t.d};",
+      "new": "    tag mut kept = tag{};",
+      "what": "a store of other bytes than one word writes no derivation"
+    },
+    {
+      "decision": "derive-whole-keep",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "            kept.d = join(kept.d, sh->slots.items[i].t.d);",
+      "new": "            kept.d = kept.d;",
+      "what": "a copy that ends inside a word drops the derivation of the bytes after it"
+    },
+    {
+      "decision": "derive-cut-keep",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "        if ((s.addr < lo || s.addr + WORD > hi) && derives(s.t.d)) {",
+      "new": "        if ((s.addr < lo || s.addr + WORD > hi) && derives(s.t.d) && false) {",
+      "what": "a store into one byte of a word drops the derivation of its other bytes"
+    },
+    {
+      "decision": "derive-vacate",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "        s->t.d = derivation{};",
+      "new": "        s->t.d = s->t.d;",
+      "what": "the zero bytes of a `move` keep the derivation of the bytes before it"
+    },
+    {
+      "decision": "derive-capture-part",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "    for (u64 mut i = slot_position(&sh->slots, src - src % WORD);",
+      "new": "    for (u64 mut i = slot_position(&sh->slots, src);",
+      "what": "a copy from inside a word drops the derivation of that word"
+    },
+    {
+      "decision": "derive-is-empty",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "    return t.o.kind == tag_kind.tg_none && t.f.kind == tag_kind.tg_none && !derives(t.d);",
+      "new": "    return t.o.kind == tag_kind.tg_none && t.f.kind == tag_kind.tg_none;",
+      "what": "a value with a derivation and no other tag is stored as no tag"
+    },
+    {
+      "decision": "derive-extern-args",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "            p = tag{a.o, a.f, p.d};",
+      "new": "            p = tag{a.o, a.f, a.d};",
+      "what": "an access of an extern derives only from the argument that gives its tag"
+    },
+    {
+      "decision": "derive-index-of-address",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "               join(d, sh->place.d)};",
+      "new": "               d};",
+      "what": "an address of an element of a fixed array drops the derivation of its index"
+    },
+    {
+      "decision": "derive-base-local",
+      "file": "src/fort/fir/interpreter.ft",
+      "old": "            it->sh.value = shadow.tag_address(&it->sh, a, local_address(it, k, r.place.local));",
+      "new": "            it->sh.value = shadow.tag_address(&it->sh, a, a);",
+      "what": "an address of a part of a local derives from the local at that address and not from the local of its place"
+    },
+    {
+      "decision": "derive-move",
+      "file": "src/fort/fir/interpreter.ft",
+      "old": "        it->sh.value = shadow.tag{shadow.origin{}, shadow.origin{}, it->sh.value.d};\n        zero_bytes(it, addr, size);",
+      "new": "        it->sh.value = shadow.tag{};\n        zero_bytes(it, addr, size);",
+      "what": "a `move` drops the derivation of its value"
+    },
+    {
+      "decision": "derive-move-argument",
+      "file": "src/fort/fir/interpreter.ft",
+      "old": "        if (o.kind == fir.operand_kind.ok_move) {\n            it->sh.value = shadow.tag{shadow.origin{}, shadow.origin{}, it->sh.value.d};\n        }",
+      "new": "        if (o.kind == fir.operand_kind.ok_move) {\n            it->sh.value = shadow.tag{};\n        }",
+      "what": "a scalar that a `move` passes as an argument drops its derivation"
+    },
+    {
+      "decision": "derive-own-store",
+      "file": "src/fort/fir/interpreter.ft",
+      "old": "        shadow.mark(&it->sh, addr, WORD, shadow.tag{shadow.origin{}, shadow.origin{}, tg.d});\n",
+      "new": "",
+      "what": "an `own` reference that holds no start of an allocation drops its derivation"
+    },
+    {
+      "decision": "derive-narrow-store",
+      "file": "src/fort/fir/interpreter.ft",
+      "old": "    } else {\n        shadow.mark(&it->sh, addr, size_of(t), tg);",
+      "new": "    } else if (size_of(t) == WORD) {\n        shadow.mark(&it->sh, addr, size_of(t), tg);",
+      "what": "a store of a scalar of other than 8 bytes writes no derivation"
+    },
+    {
+      "decision": "derive-index",
+      "file": "src/fort/fir/interpreter.ft",
+      "old": "            at.d = shadow.join(at.d, ix);",
+      "new": "            at.d = at.d;",
+      "what": "the address of an element of a span drops the derivation of its index"
+    },
+    {
+      "decision": "derive-index-named",
+      "file": "src/fort/fir/interpreter.ft",
+      "old": "            it->sh.place.d.named = true;\n            u64 index = load(",
+      "new": "            u64 index = load(",
+      "what": "the load of an index local goes through the last address that the run loaded"
+    },
+    {
+      "decision": "derive-place-named",
+      "file": "src/fort/fir/interpreter.ft",
+      "old": "    at.d.named = true;\n",
+      "new": "",
+      "what": "an access by the name of a local goes through a value"
+    },
+    {
+      "decision": "derive-frame-named",
+      "file": "src/fort/fir/interpreter.ft",
+      "old": "    // the run writes the parameters of the new frame by their names\n    it->sh.place.d.named = true;",
+      "new": "    // the run writes the parameters of the new frame by their names",
+      "what": "the parameters of a new frame are written through the last address of the caller"
+    },
+    {
+      "decision": "derive-return-named",
+      "file": "src/fort/fir/interpreter.ft",
+      "old": "    // the run reads the result and zeroes the place of a `del` by their names\n    it->sh.place.d.named = true;",
+      "new": "    // the run reads the result and zeroes the place of a `del` by their names",
+      "what": "the result of a frame is read through the last address of the callee"
+    },
+    {
+      "decision": "derive-slice-bounds",
+      "file": "src/fort/fir/interpreter.ft",
+      "old": "    it->sh.value.d = shadow.join(pointer.d, bounds.d);",
+      "new": "    it->sh.value.d = pointer.d;",
+      "what": "the bounds of a slice give its pointer no derivation"
+    },
+    {
+      "decision": "derive-slice-length",
+      "file": "src/fort/fir/interpreter.ft",
+      "old": "    it->sh.value = bounds;\n    shadow.hold(&it->sh, WORD);",
+      "new": "    it->sh.value = bounds;",
+      "what": "the length of a slice derives from no bound"
+    },
+    {
+      "decision": "derive-extern-result",
+      "file": "src/fort/fir/interpreter.ft",
+      "old": "        tg.d = shadow.join(tg.d, it->sh.value.d);",
+      "new": "        tg.d = tg.d;",
+      "what": "the result of an extern derives from no argument"
+    },
+    {
+      "decision": "derive-dead-keep",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "        if ((s.addr < lo || s.addr + WORD > hi) && derives(s.t.d)) {",
+      "new": "        if (write && (s.addr < lo || s.addr + WORD > hi) && derives(s.t.d)) {",
+      "what": "the `dead` of a local drops the derivation of a word that it shares with a live local"
+    },
+    {
+      "decision": "derive-claim",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "        d = sh->slots.items[i].t.d;",
+      "new": "        d = derivation{};",
+      "what": "an owner slot drops the derivation of the value that it holds"
+    },
+    {
+      "decision": "derive-owner-load",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "    sh->value.d = s.t.d;\n",
+      "new": "",
+      "what": "a load of an owner slot gives no derivation"
+    },
+    {
+      "decision": "derive-owner-move",
+      "file": "src/fort/fir/shadow.ft",
+      "old": "                sh->value = tag{origin{}, origin{}, sh->value.d};",
+      "new": "                sh->value = tag{};",
+      "what": "a `move` of an owner slot drops its derivation"
+    },
+    {
+      "decision": "derive-entry-argument",
+      "file": "src/fort/fir/interpreter.ft",
+      "old": "            tg.d = from[i];",
+      "new": "            tg.d = tg.d;",
+      "what": "a scalar argument of a runtime entry drops its derivation"
+    },
+    {
+      "decision": "derive-check-operand",
+      "file": "src/fort/fir/interpreter.ft",
+      "old": "        from[cast(i, u64)] = it->sh.value.d;\n",
+      "new": "",
+      "what": "an operand of a failed check gives its runtime entry no derivation"
+    },
+    {
+      "decision": "derive-alloc-count",
+      "file": "src/fort/fir/interpreter.ft",
+      "old": "    from[1] = it->sh.value.d;\n",
+      "new": "",
+      "what": "the count of `alloc` gives `std.rt.alloc` no derivation"
+    },
+    {
+      "decision": "forged-del-place",
+      "file": "src/fort/fir/interpreter.ft",
+      "old": "    if (find_region(it, addr, types.type_sizeof(t)) != NONE) {\n        shadow.access(&it->sh, addr, types.type_sizeof(t), true, false);\n    }\n",
+      "new": "",
+      "what": "a `del` tests only the pointer word of its place"
+    },
+    {
+      "decision": "derive-addr-through",
+      "file": "src/fort/fir/interpreter.ft",
+      "old": "        it->sh.value = it->sh.place;\n        it->sh.value.d.named = false;\n        if (fir.place_fixed(f, r.place)) {",
+      "new": "        it->sh.value = shadow.tag{};\n        it->sh.value.d.named = false;\n        if (fir.place_fixed(f, r.place)) {",
+      "what": "an address of a place through a value drops the derivation of that value"
+    },
+    {
+      "decision": "derive-addr-named",
+      "file": "src/fort/fir/interpreter.ft",
+      "old": "        it->sh.value.d.named = false;\n        if (fir.place_fixed(f, r.place)) {",
+      "new": "        if (fir.place_fixed(f, r.place)) {",
+      "what": "an address of a place of a global goes through no value, and so does each access through it"
+    },
+    {
+      "decision": "derive-slice-through",
+      "file": "src/fort/fir/interpreter.ft",
+      "old": "    it->sh.value = it->sh.place;\n    it->sh.value.d.named = false;\n    if (t->kind != types.type_kind.k_array) {",
+      "new": "    it->sh.value = shadow.tag{};\n    it->sh.value.d.named = false;\n    if (t->kind != types.type_kind.k_array) {",
+      "what": "a slice of an array through a value drops the derivation of that value"
+    },
+    {
+      "decision": "derive-slice-named",
+      "file": "src/fort/fir/interpreter.ft",
+      "old": "    it->sh.value.d.named = false;\n    if (t->kind != types.type_kind.k_array) {",
+      "new": "    if (t->kind != types.type_kind.k_array) {",
+      "what": "a slice of a global array goes through no value, and so does each access through it"
+    },
+    {
+      "decision": "forged-del-no-fault",
+      "file": "src/fort/fir/interpreter.ft",
+      "old": "    if (find_region(it, addr, types.type_sizeof(t)) != NONE) {\n        shadow.access(&it->sh, addr, types.type_sizeof(t), true, false);\n    }\n",
+      "new": "    reach(it, addr, types.type_sizeof(t), true);\n",
+      "what": "the test of the whole place of a `del` faults where no region holds it, so the shadow changes the outcome"
     }
   ]
 }

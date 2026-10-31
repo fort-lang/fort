@@ -1030,6 +1030,28 @@ came here.
     lowest index that has a tag gives the tags: in `memcmp(laundered, p, 1)`, where a callee
     cast away the tag of the first argument, the access takes the owner tag of `p` (case
     `args_owner` of `test/fort/fir/shadow_test.ft`).
+  - The derivation of D10.7 stands in the `d` of each tag (`shadow.derivation`): the ids of the
+    entries of the locals whose addresses the value derives from. An `addr` or a slice of fixed
+    storage gives the id of the entry of the base local of its place (`tag_address`), which the
+    first such address makes and the next `live` ends (`revive`); the entries of a frame end with
+    it. A binary rvalue joins both derivations, a load joins those of the words that it reads, and a
+    store adds its derivation to each word that it writes; `cut` keeps the derivation of a word that
+    a store writes in part. A `move` keeps the derivation and drops the other tags. A place that
+    loads no pointer is `named`, and the interpreter marks `sh.place` named before it reads an index
+    local, writes the parameters of a new frame, or reads the `_0` of a returning frame. So a change
+    that adds an access must set `sh.place` first, or the access is tested against the last address.
+    An access of a local of a frame that stands, through a value whose derivation has no id of the
+    entry of that local, is `forged` (`is_forged`), and the run reports no event after it. The
+    arguments of a runtime entry keep their derivation (`write_values`), an owner slot keeps it
+    (`claim`), a `dead` keeps that of a word that it shares with a live local (`cut`), and a `del`
+    tests the access of its whole place. Three limits give fewer events than D10.7: a value that
+    derives from more than 4 entries (`DERIVATION_IDS`) derives from each; a byte of padding counts
+    as a byte of the local before it; and a word keeps its derivation until a store writes the whole
+    word, so a `u32` local keeps the derivation of an earlier value (case `copy_partial_word` uses
+    new locals for this reason). One gives more: the bytes that `snprintf` writes derive from no
+    address, and the results of `memcmp`, `strlen` and `strtod` derive only from their arguments
+    and not from the bytes that they read, so a value that C computes from such bytes loses their
+    derivation.
   - Four known limits. A `use after move` needs an access below `FIRST_ADDRESS` (65536): a field
     far past a null base, or an index of 65536 bytes or more, faults as `invalid access` with no
     event. `ended` keeps the range of each frame that made a frame tag, one for each such call,

@@ -418,6 +418,7 @@
 //| hand outside rule (a): leak 39, leak at exit 1, double release 0, invalid release 0
 //| hand outside rule (a): use after release 19, use after move 5, use after scope 4
 //| hand outside rule (a): duplicate owner 1, overwrite of no own reference 0
+//| hand outside each rule (A8): forged 0, rejected sites after it 0
 //| hand leak: sites 468, rejected 27, with an event 19
 //| hand leak: false accepts 0, false rejects 8
 //| hand leak outside part 1: aggregate 0, abort 2, unsure return 0, other 0
@@ -430,6 +431,7 @@
 //| exhaustive outside rule (a): leak 10932, leak at exit 0, double release 0, invalid release 0
 //| exhaustive outside rule (a): use after release 0, use after move 2, use after scope 0
 //| exhaustive outside rule (a): duplicate owner 0, overwrite of no own reference 0
+//| exhaustive outside each rule (A8): forged 0, rejected sites after it 0
 //| exhaustive leak: sites 40030, rejected 8422, with an event 2197
 //| exhaustive leak: false accepts 0, false rejects 6225
 //| exhaustive leak outside part 1: aggregate 4566, abort 0, unsure return 0, other 0
@@ -441,6 +443,7 @@
 //| seeded outside rule (a): leak 1387, leak at exit 69, double release 2, invalid release 0
 //| seeded outside rule (a): use after release 445, use after move 416, use after scope 0
 //| seeded outside rule (a): duplicate owner 30, overwrite of no own reference 6
+//| seeded outside each rule (A8): forged 0, rejected sites after it 0
 //| seeded leak: sites 13453, rejected 717, with an event 353
 //| seeded leak: false accepts 0, false rejects 364
 //| seeded leak outside part 1: aggregate 37, abort 0, unsure return 0, other 0
@@ -452,6 +455,7 @@
 //| shapes outside rule (a): leak 0, leak at exit 0, double release 0, invalid release 0
 //| shapes outside rule (a): use after release 21, use after move 271, use after scope 0
 //| shapes outside rule (a): duplicate owner 0, overwrite of no own reference 0
+//| shapes outside each rule (A8): forged 0, rejected sites after it 0
 //| shapes leak: sites 3597, rejected 0, with an event 0
 //| shapes leak: false accepts 0, false rejects 0
 //| shapes leak outside part 1: aggregate 0, abort 0, unsure return 0, other 0
@@ -4288,12 +4292,14 @@ u32 DEAD_LINE = 1000000;
 
 // The counts of one set or one batch. `ends` counts the runs by interpreter.outcome_kind, the
 // way that each run ended. `kinds` counts the events outside the scope of rule (a) by
-// shadow.event_kind, and `stores` counts the `overwrite` events at a store that is not into a
-// place of an `own` reference type. `leak` counts the exit sites of rule (c) part 1 as the fields
-// before `stores` count the sites of rule (a). `outside` counts the `leak` events outside the scope
-// of part 1 and of part 2 by leak_kind. `inner` counts the sites of rule (c) part 2 as `leak`
-// counts those of part 1, and `spans` the `leak` events at a `del` of a span, which wait for
-// refinement R8 (D17.20, Q7).
+// shadow.event_kind: a `forged` event breaks assumption A8 (D10.7), so it is outside each rule,
+// and the run reports no event after it. `stores` counts the `overwrite` events at a store that
+// is not into a place of an `own` reference type. `leak` counts the exit sites of rule (c) part 1
+// as the fields before `stores` count the sites of rule (a). `outside` counts the `leak` events
+// outside the scope of part 1 and of part 2 by leak_kind. `inner` counts the sites of rule (c)
+// part 2 as `leak` counts those of part 1, and `spans` the `leak` events at a `del` of a span,
+// which wait for refinement R8 (D17.20, Q7). `after_forged` counts the rejected sites of each
+// rule with no event at or after a `forged` event of their function (is_after_forged).
 struct counts {
     u64 items;
     u64 dropped;
@@ -4305,11 +4311,12 @@ struct counts {
     u64 false_accepts;
     u64 false_rejects;
     u64 stores;
-    u64[9] kinds;
+    u64[10] kinds;
     u64[5] leak;
     u64[4] outside;
     u64[5] inner;
     u64 spans;
+    u64 after_forged;
 }
 
 // The fields of `counts.leak` and of `counts.inner`.
@@ -4335,6 +4342,7 @@ enum leak_kind {
 // and its sites. `lines` is the hand case of a batch of the hand set or of the seeded family, and
 // the FIR text of a batch of FIR cases, whose item `k` is function `k` of the text.
 // `inners` holds the sites of rule (c) part 2 at a `del`, and `casts` those at a `cast`.
+// `forged` holds the location of each `forged` event of its runs.
 struct batch {
     family kind;
     string@ lines;
@@ -4346,6 +4354,7 @@ struct batch {
     dead_vec deads;
     site_vec inners;
     site_vec casts;
+    site_vec forged;
 }
 
 fn free_batch(batch mut* bt) void {
@@ -4357,6 +4366,7 @@ fn free_batch(batch mut* bt) void {
     del(bt->deads.items);
     del(bt->inners.items);
     del(bt->casts.items);
+    del(bt->forged.items);
 }
 
 // Whether `s` is a function of the entry module of the batch.
@@ -4952,7 +4962,8 @@ fn collect_leak(batch mut* bt, shadow.event* ev, counts mut* n) void {
 
 // Counts the run of `it` and its events: an `overwrite` event in the scope of rule (a) marks its
 // site, a `leak` event marks its exit site (collect_leak), and each other event counts by its
-// kind. A `leak` event counts by its kind too, outside rule (a).
+// kind. A `leak` event counts by its kind too, outside rule (a). A `forged` event keeps its
+// location in `bt->forged`, because the run reports no event after it.
 fn collect(batch mut* bt, interpreter.machine* it, counts mut* n) void {
     n->runs += 1;
     if (it->end.kind == interpreter.outcome_kind.oc_none) {
@@ -4965,6 +4976,10 @@ fn collect(batch mut* bt, interpreter.machine* it, counts mut* n) void {
         if (ev->kind == shadow.event_kind.ev_leak) {
             collect_leak(bt, ev, n);
         }
+        if (ev->kind == shadow.event_kind.ev_forged) {
+            add_site(&bt->forged, site{ev->sym, ev->at.line, ev->at.col, NONE, false, true},
+                     site_kind.sk_event);
+        }
         if (ev->kind != shadow.event_kind.ev_overwrite) {
             n->kinds[cast(cast(ev->kind, i32), u64)] += 1;
         } else if (f != null && is_own_store(f, ev->at)) {
@@ -4974,6 +4989,20 @@ fn collect(batch mut* bt, interpreter.machine* it, counts mut* n) void {
             n->stores += 1;
         }
     }
+}
+
+// Whether the site at `line`:`col` of the function `fn_sym` stands after a `forged` event of
+// `fn_sym`, at its location or later in the text: such a site is outside each rule (design 3.4),
+// because the run reports no event after `forged`, so a reject with no event there is no false
+// reject. A site of another function, or before the event, keeps its count.
+fn is_after_forged(batch* bt, ast.sym* fn_sym, u32 line, u32 col) bool {
+    for (u64 mut i = 0; i < bt->forged.len; i++) {
+        site* f = &bt->forged.items[i];
+        if (f->sym == fn_sym && (line > f->line || (line == f->line && col >= f->col))) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // The symbol of the function `prefix` and `index` of the entry module.
@@ -5111,11 +5140,15 @@ fn judge(batch* bt, string name, bool listed, counts mut* n) void {
         if (s->event) {
             n->events += 1;
         }
-        if (s->rejected && !s->event) {
+        if (s->rejected && !s->event && is_after_forged(bt, s->sym, s->line, s->col)) {
+            n->after_forged += 1;
+        } else if (s->rejected && !s->event) {
             n->false_rejects += 1;
         }
         if (listed && s->rejected && s->event) {
             print_site(bt, name, s, "reject with an event");
+        } else if (listed && s->rejected && is_after_forged(bt, s->sym, s->line, s->col)) {
+            print_site(bt, name, s, "reject after forged");
         } else if (listed && s->rejected) {
             print_site(bt, name, s, "false reject");
         }
@@ -5147,13 +5180,17 @@ fn judge_exits(batch* bt, string name, bool listed, counts mut* n) void {
         if (s->event) {
             n->leak[LEAK_EVENTS] += 1;
         }
-        if (s->rejected && !s->event) {
+        if (s->rejected && !s->event && is_after_forged(bt, s->sym, s->at.line, s->at.col)) {
+            n->after_forged += 1;
+        } else if (s->rejected && !s->event) {
             n->leak[LEAK_FALSE_REJECTS] += 1;
         }
         diag.loc at = s->at;
         site shown = site{s->sym, at.line, at.col, s->item, s->rejected, s->event};
         if (listed && s->rejected && s->event) {
             print_site(bt, name, &shown, "leak reject with an event");
+        } else if (listed && s->rejected && is_after_forged(bt, s->sym, at.line, at.col)) {
+            print_site(bt, name, &shown, "leak reject after forged");
         } else if (listed && s->rejected) {
             print_site(bt, name, &shown, "leak false reject");
         }
@@ -5184,11 +5221,15 @@ fn judge_inner_sites(batch* bt, site_vec* v, string name, bool listed, counts mu
         if (s->event) {
             n->inner[LEAK_EVENTS] += 1;
         }
-        if (s->rejected && !s->event) {
+        if (s->rejected && !s->event && is_after_forged(bt, s->sym, s->line, s->col)) {
+            n->after_forged += 1;
+        } else if (s->rejected && !s->event) {
             n->inner[LEAK_FALSE_REJECTS] += 1;
         }
         if (listed && s->rejected && s->event) {
             print_site(bt, name, s, "part 2 reject with an event");
+        } else if (listed && s->rejected && is_after_forged(bt, s->sym, s->line, s->col)) {
+            print_site(bt, name, s, "part 2 reject after forged");
         } else if (listed && s->rejected) {
             print_site(bt, name, s, "part 2 false reject");
         }
@@ -5215,7 +5256,7 @@ fn add_counts(counts mut* to, counts* from) void {
     to->false_accepts += from->false_accepts;
     to->false_rejects += from->false_rejects;
     to->stores += from->stores;
-    for (u64 mut k = 0; k < 9; k++) {
+    for (u64 mut k = 0; k < 10; k++) {
         to->kinds[k] += from->kinds[k];
     }
     for (u64 mut k = 0; k < 5; k++) {
@@ -5228,13 +5269,15 @@ fn add_counts(counts mut* to, counts* from) void {
         to->inner[k] += from->inner[k];
     }
     to->spans += from->spans;
+    to->after_forged += from->after_forged;
 }
 
 // Prints the counts of the set `name`: its items, the items that left it, its runs and the way
 // that they end, its sites, the sites that rule (a) rejects and those with an event, its false
-// accepts and false rejects, then its events outside the scope of rule (a) by kind. Then the same
-// counts of its exit sites of rule (c) part 1, its `leak` events outside part 1 and part 2 by
-// leak_kind, and the counts of its sites of part 2 with its `leak` events at a `del` of a span.
+// accepts and false rejects, then its events outside the scope of rule (a) by kind, with `forged`
+// and the rejected sites after it on a line of its own. Then the same counts of its exit sites
+// of rule (c) part 1, its `leak` events outside part 1 and part 2 by leak_kind, and the counts
+// of its sites of part 2 with its `leak` events at a `del` of a span.
 fn print_counts(string name, counts* n) void {
     println(name, ": items ", n->items, ", dropped ", n->dropped, ", runs ", n->runs);
     println(name, " ends: return ", n->ends[1], ", exit ", n->ends[2], ", abort ", n->ends[3],
@@ -5248,6 +5291,8 @@ fn print_counts(string name, counts* n) void {
             n->kinds[6], ", use after scope ", n->kinds[7]);
     println(name, " outside rule (a): duplicate owner ", n->kinds[8],
             ", overwrite of no own reference ", n->stores);
+    println(name, " outside each rule (A8): forged ", n->kinds[9], ", rejected sites after it ",
+            n->after_forged);
     println(name, " leak: sites ", n->leak[LEAK_SITES], ", rejected ", n->leak[LEAK_REJECTED],
             ", with an event ", n->leak[LEAK_EVENTS]);
     println(name, " leak: false accepts ", n->leak[LEAK_FALSE_ACCEPTS], ", false rejects ",
