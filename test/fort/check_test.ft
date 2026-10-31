@@ -7,6 +7,8 @@
 import fort.ast;
 import fort.check;
 import check_env;
+import fort.modules;
+import fort.scope;
 import std.strbuf;
 import fort.types;
 
@@ -27,6 +29,61 @@ fn declarations_are_order_independent() void {
     assert(check_env.init_int(&e, "first", &v));
     assert(v == 3);
     assert(check_env.decl_type(&e, "first") == "i32");
+}
+
+// A struct or enum type keeps the handle of its declaration, and the checker finds the symbol
+// through it with no cast (D3.14). The layout of a struct keeps the type, the offset and the
+// name of each field, in declaration order.
+fn a_nominal_type_finds_its_symbol_and_keeps_its_fields() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    string src = "struct pair {\n    u8 tag;\n    u64* own data;\n}\nenum hue {\n    red,\n}\n";
+    assert(check_env.check_decls(&e, src));
+    ast.sym* pair = check_env.sym_main(&e, "pair");
+    ast.sym* hue = check_env.sym_main(&e, "hue");
+    assert(check.nominal_sym(&e.ck, pair->ty) == pair);
+    assert(check.nominal_sym(&e.ck, hue->ty) == hue);
+    assert(pair->ty->decl != 0 && pair->ty->decl != hue->ty->decl);
+    assert(types.field_count(pair->ty) == 2);
+    assert(types.field_at(pair->ty, 0).name == "tag" && types.field_at(pair->ty, 0).at == 0);
+    assert(types.field_at(pair->ty, 1).name == "data" && types.field_at(pair->ty, 1).at == 8);
+    types.node* data = types.field_at(pair->ty, 1).ty;
+    assert(data->kind == types.type_kind.k_ptr && data->is_own && !data->is_mut);
+    // a type with no declaration has no symbol
+    types.node* anon = types.type_struct(&e.ck.types, "anon", 0);
+    assert(check.nominal_sym(&e.ck, anon) == null);
+}
+
+// A module binding keeps the place of its module in the module set, and the checker reads the
+// module through the set: a plain import, an alias of the same module and an alias of another
+// module each name the module of their path, and a qualified name reaches its declarations. A
+// name the module does not declare is one error that names the module by its path.
+fn a_module_binding_names_its_module_through_the_set() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    check_env.add(&e, "util.ft", "fn add(i64 a, i64 b) i64 {\n    return a + b;\n}\n");
+    check_env.add(&e, "extra.ft", "struct point {\n    i64 x;\n}\n");
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    strbuf.append(&b, "import util;\nimport util as u;\nimport extra as ex;\n");
+    strbuf.append(&b, "fn main() i32 {\n");
+    strbuf.append(&b, "    ex.point p = ex.point{.x = util.add(1, u.add(2, 3))};\n");
+    strbuf.append(&b, "    return cast(p.x + u.nope, i32);\n}\n");
+    check_env.add(&e, "main.ft", strbuf.view(&b));
+    assert(!check_env.check_entry(&e, "main.ft"));
+    assert(check_env.errors(&e) == 1);
+    assert(check_env.said(&e, "module 'util' has no declaration named 'nope'"));
+    modules.module* main_module = check_env.module_at(&e, "main");
+    scope.binding* plain = scope.find(&main_module->names, "util");
+    scope.binding* alias = scope.find(&main_module->names, "u");
+    scope.binding* other = scope.find(&main_module->names, "ex");
+    assert(plain->module != 0 && plain->module == alias->module);
+    assert(check.module_of(&e.ck, plain) == check_env.module_at(&e, "util"));
+    assert(check.module_of(&e.ck, other) == check_env.module_at(&e, "extra"));
+    // the declaration of a module is no module binding
+    assert(check.module_of(&e.ck, scope.find(&main_module->names, "main")) == null);
 }
 
 fn a_declaration_defined_in_terms_of_itself_is_one_error() void {
@@ -1721,6 +1778,8 @@ fn main() i32 {
     grouped_types_preserve_identity_and_layout_dependencies();
     declarations_are_order_independent();
     a_declaration_defined_in_terms_of_itself_is_one_error();
+    a_module_binding_names_its_module_through_the_set();
+    a_nominal_type_finds_its_symbol_and_keeps_its_fields();
     a_module_level_initializer_is_a_constant_expression();
     a_mut_module_declaration_is_a_global_and_a_plain_one_a_constant();
     reading_a_mut_global_is_not_a_constant_expression();

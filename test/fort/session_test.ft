@@ -207,6 +207,24 @@ fn a_second_set_source_replaces_the_text() void {
     assert(containers.pool_used(session.pool(&s)) == used + 6);
 }
 
+// The source store of the session holds the one pool of the session: a text, a path and a
+// configuration pair all take bytes of `session.pool`, and the lookup that show_sources installs
+// answers from the store that read_source fills.
+fn the_store_holds_the_pool_of_the_session() void {
+    session.session mut s = session.create();
+    defer session.free(&s);
+    u64 empty = containers.pool_used(session.pool(&s));
+    session.set_source(&s, "store.ft", "abcd");
+    // the four bytes of the text and the eight of the path
+    assert(containers.pool_used(session.pool(&s)) == empty + 12);
+    session.config_set(&s, "key", "value");
+    assert(containers.pool_used(session.pool(&s)) == empty + 20);
+    string mut text = "";
+    assert(session.lookup_source(&s.files, "store.ft", &text));
+    assert(text == "abcd");
+    assert(session.source_count(&s) == 1);
+}
+
 // Several documents live side by side and keep their own text.
 fn several_documents_live_side_by_side() void {
     session.session mut s = session.create();
@@ -383,17 +401,16 @@ fn the_lookup_reads_through_the_session() void {
     session.session mut s = session.create();
     defer session.free(&s);
     session.set_source(&s, "overlay.ft", "in the editor");
-    // The context is a view of the session, as show_sources gives it.
-    session.session_ref r = session.session_ref{.s = &s};
+    // The context is the source store of the session, as show_sources gives it.
     string mut text = "";
-    assert(session.lookup_source(cast(&r, void*), "overlay.ft", &text));
+    assert(session.lookup_source(&s.files, "overlay.ft", &text));
     assert(text == "in the editor");
-    assert(session.lookup_source(cast(&r, void*), "looked_up.ft", &text));
+    assert(session.lookup_source(&s.files, "looked_up.ft", &text));
     assert(text == "on disk");
     // The file read for the lookup is remembered like any other read.
     assert(session.has_source(&s, "looked_up.ft"));
     text = "untouched";
-    assert(!session.lookup_source(cast(&r, void*), "never_there.ft", &text));
+    assert(!session.lookup_source(&s.files, "never_there.ft", &text));
     assert(text == "untouched");
     assert(session.source_count(&s) == 2);
 }
@@ -505,6 +522,7 @@ fn main() i32 {
     a_set_source_copies_the_path();
     a_second_set_source_replaces_the_text();
     several_documents_live_side_by_side();
+    the_store_holds_the_pool_of_the_session();
     an_empty_document_is_held();
     println("sources ok");
     configuration_belongs_to_one_session();

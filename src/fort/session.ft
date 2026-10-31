@@ -7,36 +7,28 @@ import std.strbuf;
 import std.strmap;
 
 struct session {
-    containers.pool pool;
     diag.sink diags;
-    // Maps each path to its index in `texts`.
-    strmap.str_map sources;
-    containers.str_vec texts;
+    // The text of each source file by its path, and the pool of every text of the session: the
+    // context that show_sources gives the sink.
+    diag.sources files;
     // Maps each configuration key to its index in `config_values`.
     strmap.str_map config;
     containers.str_vec config_values;
-    // The context that show_sources gives the sink: a view of this session.
-    session_ref lookup_ref;
-}
-
-/// A view of a session, the context of the source lookup. The sink takes the context as a `void*`,
-/// and the lookup casts it back to a `session_ref*`, whose field still writes the session. A cast
-/// of a session or of this wrapper to `void mut*` would hide their pointers, which D3.14 refuses.
-struct session_ref {
-    session mut* s;
 }
 
 fn create() session {
     return session{};
 }
 
+// Releases the sink, the source store and then the configuration. The order of the releases
+// decides how the heap of glibc 2.43 settles: with the store released last,
+// driver_lifetime_emitter_test.ft saw its break step by 184320 bytes after the early sample,
+// with no byte kept.
 fn free(session mut* s) void {
     diag.free(&s->diags);
-    strmap.free(&s->sources);
+    diag.free_sources(&s->files);
     strmap.free(&s->config);
-    containers.str_free(&s->texts);
     containers.str_free(&s->config_values);
-    containers.pool_free(&s->pool);
 }
 
 // Adds one configuration pair. Panics when the key already exists.
@@ -44,8 +36,8 @@ fn config_set(session mut* s, string key, string value) void {
     if (strmap.has(&s->config, key)) {
         panic("session.config_set: duplicate key");
     }
-    string kept_key = containers.pool_intern(&s->pool, key);
-    string kept_value = containers.pool_intern(&s->pool, value);
+    string kept_key = containers.pool_intern(&s->files.pool, key);
+    string kept_value = containers.pool_intern(&s->files.pool, value);
     containers.str_push(&s->config_values, kept_value);
     strmap.put(&s->config, kept_key, cast(s->config_values.len - 1, i64));
 }
@@ -62,7 +54,7 @@ fn config_get(session* s, string key, string mut* out) bool {
 }
 
 fn pool(session mut* s) containers.pool mut* {
-    return &s->pool;
+    return &s->files.pool;
 }
 
 fn diags(session mut* s) diag.sink mut* {
@@ -77,24 +69,32 @@ fn error_count(session* s) u64 {
 
 // Sets the text for `path` without reading the file. A later call replaces that text.
 fn set_source(session mut* s, string path, string text) void {
-    string kept = containers.pool_intern(&s->pool, text);
+    diag.sources mut* files = &s->files;
+    string kept = containers.pool_intern(&files->pool, text);
     i64 mut idx = 0;
     // Intern the path only for a new entry. Repeated updates then allocate no path copy.
-    if (strmap.get(&s->sources, path, &idx)) {
-        containers.str_set(&s->texts, cast(idx, u64), kept);
+    if (strmap.get(&files->index, path, &idx)) {
+        containers.str_set(&files->texts, cast(idx, u64), kept);
         return;
     }
-    containers.str_push(&s->texts, kept);
-    strmap.put(&s->sources, containers.pool_intern(&s->pool, path), cast(s->texts.len - 1, i64));
+    containers.str_push(&files->texts, kept);
+    strmap.put(&files->index, containers.pool_intern(&files->pool, path),
+               cast(files->texts.len - 1, i64));
 }
 
 // Returns cached text or reads and caches `path`. On failure, `out` is unchanged.
 // sys.errno() identifies the failed file operation. This function reports no diagnostic.
 fn read_source(session mut* s, string path, string mut* out) bool {
+    return lookup_source(&s->files, path, out);
+}
+
+// The source lookup of the diagnostic text form, and the reader of read_source: the text of
+// `path` in `files`, or the file read into `files` first. On failure, `out` is unchanged.
+fn lookup_source(diag.sources mut* files, string path, string mut* out) bool {
     i64 mut idx = 0;
     // re-reading one file allocates nothing after the first read
-    if (strmap.get(&s->sources, path, &idx)) {
-        *out = containers.str_at(&s->texts, cast(idx, u64));
+    if (strmap.get(&files->index, path, &idx)) {
+        *out = containers.str_at(&files->texts, cast(idx, u64));
         return true;
     }
     strbuf.str_buf mut buf = strbuf.create();
@@ -102,35 +102,28 @@ fn read_source(session mut* s, string path, string mut* out) bool {
     if (!io.read_file(path, &buf)) {
         return false;
     }
-    string kept = containers.pool_intern(&s->pool, strbuf.view(&buf));
-    containers.str_push(&s->texts, kept);
-    strmap.put(&s->sources, containers.pool_intern(&s->pool, path), cast(s->texts.len - 1, i64));
+    string kept = containers.pool_intern(&files->pool, strbuf.view(&buf));
+    containers.str_push(&files->texts, kept);
+    strmap.put(&files->index, containers.pool_intern(&files->pool, path),
+               cast(files->texts.len - 1, i64));
     *out = kept;
     return true;
-}
-
-// The source lookup of the diagnostic text form. `ctx` is the session_ref that
-// show_sources installed.
-fn lookup_source(void* ctx, string path, string mut* out) bool {
-    session_ref* r = cast(ctx, session_ref*);
-    return read_source(r->s, path, out);
 }
 
 // Makes the text form of the diagnostics show the source line of each
 // diagnostic, read through read_source. The session must not move while its
 // sink writes text.
 fn show_sources(session mut* s) void {
-    s->lookup_ref = session_ref{.s = s};
-    diag.set_lookup(&s->diags, lookup_source, cast(&s->lookup_ref, void*));
+    diag.set_lookup(&s->diags, lookup_source, &s->files);
 }
 
 // Whether the session already holds the contents of `path`, from set_source or
 // from an earlier read_source; it opens nothing.
 fn has_source(session* s, string path) bool {
-    return strmap.has(&s->sources, path);
+    return strmap.has(&s->files.index, path);
 }
 
 // The number of files the session holds the contents of.
 fn source_count(session* s) u64 {
-    return strmap.count(&s->sources);
+    return strmap.count(&s->files.index);
 }

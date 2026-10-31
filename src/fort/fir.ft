@@ -320,48 +320,28 @@ fn base_type(func* f, place p) types.node* {
     return local_at(f, p.local)->ty;
 }
 
-// The declaration of the struct type `t`. The function panics when the type has none, because
-// the checker gives every struct type its declaration.
-fn struct_decl(types.node* t) ast.node* {
-    ast.sym* s = cast(t->decl, ast.sym*);
-    if (s == null || s->node == null) {
-        panic("fir.place_type: a struct with no declaration");
+// Panics when the struct type `t` has no layout, which keeps its fields: the checker lays out
+// each struct whose fields a function reads.
+fn require_layout(types.node* t) void {
+    if (types.type_layout_state(t) != types.layout_state.l_resolved) {
+        panic("fir.require_layout: a struct with no layout");
     }
-    return s->node;
 }
 
 /// The count of the fields of the struct type `t`.
 fn struct_field_count(types.node* t) u32 {
-    ast.node* decl = struct_decl(t);
-    u32 mut count = 0;
-    u64 mut i = 0;
-    while (i < ast.ast_len(decl)) {
-        if (ast.ast_child(decl, i)->kind == ast.ast_kind.k_field_decl) {
-            count += 1;
-        }
-        i += 1;
-    }
-    return count;
+    require_layout(t);
+    return cast(types.field_count(t), u32);
 }
 
 // The declared type of field `k` of the struct type `t`, or null when the struct has fewer
-// fields. The checker writes the type of each field into its declaration node, in declaration
-// order.
+// fields. The layout keeps the type of each field, in declaration order.
 fn struct_field_type(types.node* t, u32 k) types.node* {
-    ast.node* decl = struct_decl(t);
-    u32 mut at = 0;
-    u64 mut i = 0;
-    while (i < ast.ast_len(decl)) {
-        ast.node* field = ast.ast_child(decl, i);
-        if (field->kind == ast.ast_kind.k_field_decl) {
-            if (at == k) {
-                return field->ty;
-            }
-            at += 1;
-        }
-        i += 1;
+    require_layout(t);
+    if (cast(k, u64) >= types.field_count(t)) {
+        return null;
     }
-    return null;
+    return types.field_at(t, cast(k, u64)).ty;
 }
 
 /// Why a projection does not apply to a type (spec/fir.md 5.5).

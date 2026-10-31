@@ -334,9 +334,35 @@ fn an_import_binds_the_short_name_to_the_module() void {
     scope.binding* b = modules_env.bound(&e, "main", "util");
     assert(b != null);
     assert(b->kind == scope.bind_kind.b_module);
-    // The binding denotes the module itself, held as an opaque pointer the
-    // loader casts back.
-    assert(b->module == cast(modules.find(&e.set, "util"), void*));
+    // The binding denotes the module itself, as its position in the set plus 1, and the
+    // position gives the module back.
+    modules.module* util = modules.find(&e.set, "util");
+    assert(b->module == util->index + 1);
+    assert(modules.read_at(&e.set, b->module - 1) == util);
+    // the entry module is read first, so it holds position 0
+    assert(modules.find(&e.set, "main")->index == 0);
+}
+
+// Each module keeps its position in the set, in read order, and read_at gives it back. A module
+// binding holds that position plus 1.
+fn each_module_keeps_its_position_in_read_order() void {
+    modules_env.env mut e = modules_env.open();
+    defer modules_env.close(&e);
+    modules_env.add2(&e, "main.ft", "import util;\nimport extra;\n",
+                     "fn main() i32 { return util.add(1, 2); }\n");
+    modules_env.add(&e, "util.ft", modules_env.src_add());
+    modules_env.add(&e, "extra.ft", "u64 N = 1;\n");
+    assert(modules_env.load(&e, "main.ft"));
+    u64 mut k = 0;
+    while (k < 3) {
+        assert(modules.read_at(&e.set, k)->index == k);
+        k += 1;
+    }
+    scope.binding* util = modules_env.bound(&e, "main", "util");
+    scope.binding* extra = modules_env.bound(&e, "main", "extra");
+    assert(modules.read_at(&e.set, util->module - 1) == modules.find(&e.set, "util"));
+    assert(modules.read_at(&e.set, extra->module - 1) == modules.find(&e.set, "extra"));
+    assert(util->module != extra->module);
 }
 
 fn a_nested_path_names_a_file_in_a_directory() void {
@@ -857,6 +883,7 @@ fn main() i32 {
     each_file_has_a_budget_of_its_own();
     println("errors ok");
     an_import_binds_the_short_name_to_the_module();
+    each_module_keeps_its_position_in_read_order();
     a_nested_path_names_a_file_in_a_directory();
     as_renames_a_module_binding();
     import_paths_are_root_relative_and_not_file_relative();

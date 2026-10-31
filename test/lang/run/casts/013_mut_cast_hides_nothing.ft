@@ -8,13 +8,14 @@
 //| 2
 //| 2 2
 //| 3
-//| 2
 //| 1
 //| 12
 //| 21
 // A cast whose result can change a level is legal when the first such level of
 // the target holds each pointer place of the source at its byte with the same
-// type, and no other, and when neither holds a pointer place (D3.14).
+// type, and no other, and when neither holds a pointer place (D3.14). Above that
+// level each pointer place of the target that carries a mark has the type of
+// the source place at its byte.
 struct holder {
     u64 count;
     u64 mut* own data;
@@ -42,17 +43,6 @@ struct halves {
 
 struct node {
     i32 v;
-}
-
-// The context of a callback: a view of the holder. It holds a pointer, so it
-// goes to the callback as a `void*`, and its field still writes the holder.
-struct holder_ref {
-    holder mut* h;
-}
-
-fn bump(void* ctx) void {
-    holder_ref* r = cast(ctx, holder_ref*);
-    r->h->count += 1;
 }
 
 fn main() i32 {
@@ -97,28 +87,23 @@ fn main() i32 {
     holder mut@ lent_many = cast(many, holder mut@);
     lent_many[1].count = 3;
     println(many[1].count);
-    // A callback context that holds a view, through a read-only `void*`.
-    holder_ref ref = holder_ref{.h = &h};
-    bump(cast(&ref, void*));
-    bump(cast(&ref, void*));
-    println(h.count - 5);
     // An owning result whose pointee holds no owner place.
     void mut* own block = cast(new(u64), void mut* own);
     u64 mut* own kept = cast(move(block), u64 mut* own);
     *kept = 1;
     println(*kept);
-    // Level 1 of the result is read-only, and level 2 holds the pointer places
-    // of the source.
+    // Level 1 of the result is read-only and holds the pointer place of the
+    // source with its type, so level 2 holds the pointer places of the source.
     holder mut* mut ph = &h;
-    mirror mut** pm = cast(&ph, mirror mut**);
-    (*pm)->tally = 12;
+    holder mut** pm = cast(&ph, holder mut**);
+    (*pm)->count = 12;
     println(h.count);
     // Fixed arrays at the read-only level 1 on both sides keep the levels in
     // step, and level 2 holds the pointer place of the source.
     wrap mut kept_cell = wrap{.p = new(u64)};
     u64 mut* own mut*[1] mut slots_of = {&kept_cell.p};
-    wrap mut*[1]* as_wraps = cast(&slots_of, wrap mut*[1]*);
-    *(*as_wraps)[0]->p = 21;
+    u64 mut* own mut*[1]* as_slots = cast(&slots_of, u64 mut* own mut*[1]*);
+    **(*as_slots)[0] = 21;
     println(*kept_cell.p);
     del(kept);
     del(many);

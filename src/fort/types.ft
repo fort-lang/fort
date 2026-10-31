@@ -57,17 +57,33 @@ enum layout_state {
     l_error, // infinite size; sizeof yields 0 and alignof 1
 }
 
+/// One field of a laid-out struct: its type, its byte offset and its name.
+struct field {
+    node* ty;
+    u64 at;
+    string name; // "" until name_fields gives the names
+}
+
 // What a laid-out struct knows about itself. `owners` and `owner_depth` keep what
 // type_owner_count and type_owner_depth answer for the struct, so that no query walks
-// the fields of a struct a second time.
+// the fields of a struct a second time. `fields` holds the fields in declaration order once the
+// layout is resolved, and nothing in every other state: a reader of the fields of a type needs
+// no declaration, which a module below `ast` cannot name (D9.5).
 struct layout {
     layout_state state;
+    // The place of the struct in the stack of the walk of check.carries_mark while the mark is
+    // that of a walk, and nothing at any other time.
+    u32 walk;
     u64 size;
     u64 align;
     bool owning; // a field is an `own` reference or an owning aggregate
+    // Whether the struct reaches a reference marked `mut` or `own`, as check.carries_mark answers
+    // it for the life of the table (D3.14); 0 until a walk of the checker gives a final answer.
+    u8 mark;
     u64 owners; // the `own` references in fixed storage, at most OWNER_CAP
     u64 owner_depth; // the most steps from the struct to one of them
     u64 pointers; // the pointer places in fixed storage (type_pointer_count), at most OWNER_CAP
+    field mut@ own fields;
 }
 
 /// Describes one type. Fields unused by its kind hold zero values.
@@ -82,10 +98,10 @@ struct node {
     // k_fn parameter types
     node* mut@ own params;
     string name;            // k_struct, k_enum: the spelling in diagnostics
-    // k_struct, k_enum: the declaring symbol, opaque. A `void*` and not a `void mut*`: the symbol
-    // holds pointers, and a `mut` cast of it to `void mut*` would hide them (D3.14). The checker
-    // writes the record through `ast.node.sym` of the declaration (check.nominal_sym_mut).
-    void* decl;
+    // k_struct, k_enum: the handle of the declaration, 0 for none. Two nodes with one handle
+    // are one type. The checker gives `k + 1` for its symbol `k` (check.nominal_sym): a cast of
+    // a `void*` back to a symbol would add its pointers, which D3.14 refuses.
+    u64 decl;
     layout mut* own layout; // k_struct; null otherwise
     // The node that the table made before this one: the table owns its nodes through this chain.
     node mut* own made_before;
@@ -135,6 +151,9 @@ fn type_table_free(table mut* tt) void {
         node mut* own t = move(tt->last);
         node mut* own before = move(t->made_before);
         del(t->params);
+        if (t->layout != null) {
+            del(t->layout->fields);
+        }
         del(t->layout);
         del(t);
         tt->last = move(before);
@@ -524,10 +543,10 @@ fn type_fn(table mut* tt, node* ret, node*@ params, bool is_noreturn) node* {
 
 // A nominal type has one node per declaration because the declaration defines
 // identity. Another call with the same `decl` returns the first node. Thus, one
-// struct cannot split its derived types across nodes. A null
-// `decl` is anonymous and always makes a node.
-fn nominal(table mut* tt, type_kind kind, string name, void* decl) node* {
-    if (decl != null) {
+// struct cannot split its derived types across nodes. A `decl` of 0
+// is anonymous and always makes a node.
+fn nominal(table mut* tt, type_kind kind, string name, u64 decl) node* {
+    if (decl != 0) {
         u64 mut i = 0;
         while (i < tt->count) {
             node* t = tt->nodes[i];
@@ -553,13 +572,13 @@ fn nominal(table mut* tt, type_kind kind, string name, void* decl) node* {
 }
 
 /// Creates a nominal type with unresolved layout.
-/// Non-null `decl` values define nominal identity.
-fn type_struct(table mut* tt, string name, void* decl) node* {
+/// A `decl` other than 0 defines nominal identity.
+fn type_struct(table mut* tt, string name, u64 decl) node* {
     return nominal(tt, type_kind.k_struct, name, decl);
 }
 
-/// Creates a nominal enum type. Non-null `decl` values define nominal identity.
-fn type_enum(table mut* tt, string name, void* decl) node* {
+/// Creates a nominal enum type. A `decl` other than 0 defines nominal identity.
+fn type_enum(table mut* tt, string name, u64 decl) node* {
     return nominal(tt, type_kind.k_enum, name, decl);
 }
 
@@ -786,7 +805,7 @@ fn same(node* a, node* b, bool bits) bool {
         }
         return true;
     case type_kind.k_struct, type_kind.k_enum:
-        return a->decl != null && a->decl == b->decl;
+        return a->decl != 0 && a->decl == b->decl;
     }
     // panic-coverage: unreachable: probed: D7.7 traps a kind outside type_kind at the switch.
     panic("types.same: unknown type kind");
@@ -1297,6 +1316,8 @@ fn type_layout_fail(node* s) void {
     l->owners = 0;
     l->owner_depth = 0;
     l->pointers = 0;
+    l->mark = 0;
+    del(l->fields);
 }
 
 /// Returns the unresolved struct needed to compute `sizeof(t)`.
@@ -1379,8 +1400,68 @@ fn type_layout_struct(node* s, node*@ fields, u64 mut@ offsets) bool {
     l->owners = owners;
     l->owner_depth = depth;
     l->pointers = pointers;
+    del(l->fields);
+    l->fields = new(field, fields.len);
+    u64 mut k = 0;
+    while (k < fields.len) {
+        l->fields[k] = field{.ty = fields[k], .at = offsets[k]};
+        k += 1;
+    }
     l->state = layout_state.l_resolved;
     return true;
+}
+
+// The fields of the resolved struct `s`. The function panics for any other type.
+fn fields_of(node* s) field@ {
+    layout* l = layout_of(s);
+    if (l->state != layout_state.l_resolved) {
+        panic("types.fields_of: a struct with no layout");
+    }
+    return l->fields;
+}
+
+/// The count of the fields of the resolved struct `s`.
+fn field_count(node* s) u64 {
+    return fields_of(s).len;
+}
+
+/// Field `k` of the resolved struct `s`: its type, its offset and its name. `k` is below
+/// field_count(s).
+fn field_at(node* s, u64 k) field {
+    return fields_of(s)[k];
+}
+
+/// The mark of the struct `s` that check.carries_mark keeps (layout.mark).
+fn mark_of(node* s) u8 {
+    return layout_of(s)->mark;
+}
+
+/// Keeps `mark` as the mark of the struct `s` (layout.mark).
+fn keep_mark(node* s, u8 mark) void {
+    layout_of(s)->mark = mark;
+}
+
+/// The place of the struct `s` in the stack of a walk of check.carries_mark (layout.walk).
+fn walk_of(node* s) u32 {
+    return layout_of(s)->walk;
+}
+
+/// Keeps `at` as the place of the struct `s` in the stack of a walk (layout.walk).
+fn keep_walk(node* s, u32 at) void {
+    layout_of(s)->walk = at;
+}
+
+/// Gives the fields of the resolved struct `s` their names, in declaration order.
+fn name_fields(node* s, string@ names) void {
+    layout mut* l = layout_of(s);
+    if (l->state != layout_state.l_resolved || names.len != l->fields.len) {
+        panic("types.name_fields: the names do not match the fields");
+    }
+    u64 mut k = 0;
+    while (k < names.len) {
+        l->fields[k].name = names[k];
+        k += 1;
+    }
 }
 
 // ---- spelling ------------------------------------------------------------------

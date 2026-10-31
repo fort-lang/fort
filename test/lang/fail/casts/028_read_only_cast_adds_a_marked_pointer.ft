@@ -1,0 +1,46 @@
+//! fail
+// A cast keeps each pointer place that carries a mark, in any view (D3.14). A pointer place
+// carries a mark when its type marks a reference `mut` or `own`, or when a type that it reaches
+// does. Through such a place a view that changes no level still writes or frees the storage that
+// the place reaches. The user ruled "Forbid it; typed handles".
+struct wrapper {
+    u64* own x;
+}
+
+struct holder2 {
+    u64 mut* q;
+}
+
+struct wrap {
+    u64* own p;
+}
+
+// A struct that reaches an owner only through a pointer to another struct.
+struct outer {
+    wrap* inner;
+}
+
+struct node {
+    i32 v;
+}
+
+fn main() i32 {
+    // The bits of a `u64` hold the address of a `wrapper`: a store through `q` writes its owner.
+    wrapper mut w = wrapper{.x = new(u64)};
+    u64 bits = cast(&w, u64);
+    holder2* g = cast(&bits, holder2*); //! error: cannot cast u64* to holder2*: a cast adds the pointer u64 mut* at byte 0
+    // A pointer seen as a pointer to a struct with an owner, one level down.
+    u64 mut nine = 9;
+    u64 mut* mut pn = &nine;
+    wrap** deep = cast(&pn, wrap**); //! error: cannot cast u64 mut* mut* to wrap**: a cast adds the pointer wrap* at byte 0
+    // The owner is two pointers away: `outer` reaches it through `wrap*`.
+    outer* o = cast(&nine, outer*); //! error: cannot cast u64 mut* to outer*: a cast adds the pointer wrap* at byte 0
+    // A lend of the elements converts implicitly, but a cast keeps the exact type of each place.
+    node mut* own mut@ own kids = new(node mut* own, 2);
+    node mut*@ lent = kids;
+    node mut*@ seen = cast(kids, node mut*@); //! error: cannot cast node mut* own mut@ own to node mut*@: a cast adds the pointer node mut* at byte 0
+    println(g == null, deep == null, o == null, lent.len, seen.len);
+    del(kids);
+    del(w.x);
+    return 0;
+}

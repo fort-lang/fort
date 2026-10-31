@@ -746,7 +746,10 @@ to guess whether a parenthesized name is a type, and it never traps. Allowed:
   type (integer to enum is unchecked);
 - any pointer to any pointer or `void*`; a cast never adds `mut`, so the storage a pointer
   reaches is writable through the result only where the source says so; pointer to and
-  from `u64`; function pointer to and from `void*`;
+  from `u64`; function pointer to and from `void*`. In any view, each pointer place of the target
+  that carries `mut` or `own`, in its own type or in a type that it reaches, sits where the
+  source holds a pointer place of the same type (D3.14). A `void*` and an integer hold none, so
+  `cast(v, holder*)` is an error for a `void* v` and a `holder` with a `u64* own` field;
 - among `string`, `char@`, `u8@`, `char mut@` and `u8 mut@`, and their `own` forms, where
   the result is `own` exactly when the target spells it: `cast(move(buf), string own)` for a
   `u8 mut@ own buf`, and `cast(buf, string)` lends a view (D17.12); `T mut@` to `T@`;
@@ -762,7 +765,9 @@ to guess whether a parenthesized name is a type, and it never traps. Allowed:
   monotone rule of 3.9 refuses the implicit form, behind read-only levels. At the first level that
   its result marks `mut`, a cast must keep each pointer place of its source with its exact type,
   except as an argument of an `extern fn` (D3.14). So `node mut* own mut@ own` to
-  `node mut* mut@` is an error, as its implicit form is.
+  `node mut* mut@` is an error, as its implicit form is. In a read-only view the cast keeps each
+  pointer place that carries a mark with its exact type too, so `node mut* own mut@ own` to
+  `node mut*@` is an error, although its implicit form lends.
 
 Forbidden: integer to `bool`; any other span-to-span cast (the element type of a span never changes,
 because `len` counts elements); pointer to span; struct or array casts. An untyped constant operand

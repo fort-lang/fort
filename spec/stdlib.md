@@ -998,7 +998,11 @@ fn cmp_u64(void* a, void* b) i32
 
 **The comparator.** Its type is C's, `fn (void*, void*) i32`, because `qsort` is what calls it;
 fort has neither generics nor overloading (D8.3, D15), so there is no per-element comparator
-type and every comparator reads its two elements through `*cast(a, T*)` (D3.11). It answers a
+type and every comparator reads its two elements through `*cast(a, T*)` (D3.11). A cast from
+`void*` gives no pointer place that carries `mut` or `own` (D3.14), so for an element whose
+pointers carry a mark `T` is a view type of the same layout whose pointers carry none:
+`struct item_view { u64 key; u8* buf; }` reads a `struct item { u64 key; u8 mut* buf; }`.
+It answers a
 negative `i32` when the element at `a` sorts before the element at `b`, `0` when the two tie, and
 a positive one when it sorts after. It must be a total order and it must be consistent between
 calls; it must not change the elements, and it must not call `sort` on the same array. C leaves

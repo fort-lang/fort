@@ -122,9 +122,9 @@ came here.
 - **`src/fort` carries the `mut` in the declaration, where the C casts a `const` away.** The
   bootstrap holds a tree of `const ast_node_t*` and a record of `const sym_t*` and casts the
   qualifier off at each of the ten places the resolution writes through one. T-085 made a
-  mut-adding cast an error (D3.14), so the fort compiler cannot copy that. Five fields carry the
-  mark instead -- `ast.node.sym`, `ast.sym.node`, `ast.sym.owner`, `scope.binding.node` and
-  `types.node.decl` -- and `ast.ast_child_mut` answers a child of a node the same way. The shallow
+  mut-adding cast an error (D3.14), so the fort compiler cannot copy that. Four fields carry the
+  mark instead -- `ast.node.sym`, `ast.sym.node`, `ast.sym.owner` and `scope.binding.node` --
+  and `ast.ast_child_mut` answers a child of a node the same way. The shallow
   model is what makes this work: immutability of a path never propagates through a pointer the
   path contains (D5.9), so `b->node->sym` reads a `sym mut*` through an immutable `binding*` and
   no cast stands anywhere. Three comparisons pay for it, because `==` wants identical types
@@ -252,10 +252,11 @@ came here.
   direction, so a hidden place is named before an added one. The type of a pointer includes what it
   reaches, so the walk stops at that level. `types.type_pointer_count` answers whether a type
   holds a place, from the count that `types.type_layout_struct` keeps beside the owner count.
-  `first_hidden` reads the byte offset of a field from the `aux` that `resolve_struct` writes, so
-  both storages need a layout: a struct in error, or a layout that still waits in a module-level
-  initializer, ends the walk. A run of copies goes to the smallest part of the other side that
-  holds it, with its byte in that part, and over an array with its byte modulo the element size;
+  `first_hidden` reads the type and the byte offset of each field from the layout
+  (`types.field_at`), so both storages need a layout: a struct in error, or a layout that still
+  waits in a module-level initializer, ends the walk. A run of copies goes to the smallest part
+  of the other side that holds it, with its byte in that part, and over an array with its byte
+  modulo the element size;
   `place_memo` keeps each run, part and byte whose places are all held. **The work is bounded, not
   linear:** two arrays whose elements meet at many offsets cost one step for each offset, so the
   walk stops after `POINTER_WORK_LIMIT` (65536) steps and the cast is an error with a note. The
@@ -263,9 +264,26 @@ came here.
   and a check that stops there takes 0.2 s and 18 MB. `ck->extern_arg` is the argument of the
   `extern fn` call that the checker checks, and `check_call` gives the outer value back after its
   arguments. So an extern call in the operand of an exempt cast keeps the exemption
-  (`run/casts/014`). `types.node.decl` is a `void*`: the checker writes a struct or enum symbol
-  through `ast.node.sym` of its declaration (`check.nominal_sym_mut`), because a `mut` cast of the
-  symbol would hide its pointers.
+  (`run/casts/014`).
+- **A cast keeps each pointer place that carries a mark, in any view** (D3.14). After the walk of
+  the `mut` levels, `check_marked_places` runs `first_hidden` once more over level 1 of the target
+  with `place_memo.marked` set: the walk skips each type that `carries_mark` answers false for, so
+  only a place that carries `mut` or `own`, in its own chain or in a struct that it reaches, needs a
+  place of the same type at its byte in the source. `walk_marks` is Tarjan's algorithm over the
+  structs, with explicit stacks (`place_memo.frames` and `entered`), so a chain of 65600 structs
+  needs no deep recursion. A struct keeps its answer in `types.layout.mark` for the life of the
+  checker: MARK_SOME on the path to a mark, MARK_NONE for each struct of a set of structs that reach
+  each other once the walk closes the set with no mark, and no answer after a layout that waits or
+  the work limit. So the walk enters each struct once, and each entry is a step of
+  POINTER_WORK_LIMIT (`check_mark_limit_test.ft`). Before the cache, one legal cast of a 15248-line
+  program took 15.65 s, because each pointer place walked its chain again. A `void*` or an integer
+  source has no level-1 storage, so each marked place of the target is added. **No compiler module
+  casts a `void*` back to a type that holds such a place.** A type keeps a `u64` handle of its
+  declaration, `k + 1` for `ck->syms[k]` (`check.nominal_sym`), and the layout of a struct keeps the
+  type, the offset and the name of each field, so the FIR, the interpreter and `owner/place` read
+  the fields with no declaration. `scope.binding.module` is `k + 1` for module `k` of the set
+  (`check.module_of`, `modules.read_at`), and the source lookup of `diag` takes the `diag.sources`
+  that the session embeds.
 
 ## 5. Modules, the driver and the diagnostics
 
@@ -1438,8 +1456,10 @@ library (T-160).
     and no fort module can name a type of a module that names one of its own. C gets away with it
     through the incomplete type a header may declare (`struct ast_node` in `sym.h`), so the C
     file boundary is not a guide: `ast.h`'s node and `sym.h`'s record are one module in fort
-    (`src/fort/ast.ft`), and `scope.ft`'s `void* module` is the other way out where one of the
-    two may be opaque. **The same cut applies to two C files that call each other**: `check.c`
+    (`src/fort/ast.ft`), and an index is the other way out where one of the two may be opaque:
+    `scope.binding.module` holds `k + 1` for module `k` of the set, because a cast back from
+    `void*` adds each pointer place that carries a mark (D3.14). **The same cut applies to two
+    C files that call each other**: `check.c`
     and `check_stmt.c` do, so `src/fort/check.ft` stops where the single reverse edge is --
     `check_module_decls` resolves the declarations, `check_module_finish` ends the pass, and the
     body loop between them, with `check_module` and `check_program` themselves, is

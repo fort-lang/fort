@@ -1,10 +1,13 @@
 {
  "comment": [
   "The table of the fort checker: the rule of D3.14 that the first level that the result of a cast",
-  "marks `mut` keeps each pointer place of the source with its exact type, with the exemption of an",
-  "argument of an `extern fn` and a work limit (src/fort/check.ft: check_pointer_places,",
-  "first_hidden, part_at and check_call; src/fort/types.ft: type_is_pointer_place and the pointer",
-  "count of type_layout_struct). Each row breaks one rule of that walk. The stages are the cast",
+  "marks `mut` keeps each pointer place of the source with its exact type, and the rule that level 1",
+  "of each view keeps each pointer place that carries `mut` or `own` with its exact type, with the",
+  "exemption of an argument of an `extern fn` and a work limit (src/fort/check.ft:",
+  "check_pointer_places, check_marked_places, carries_mark, mark_step, walk_marks, close_set,",
+  "enter_struct, first_hidden, part_at and check_call; src/fort/types.ft: type_is_pointer_place,",
+  "the pointer count of type_layout_struct and the mark of a layout). Each row breaks one rule of",
+  "that walk. The stages are the cast",
   "corpus of test/lang, whose fail tests pin the message, the byte and the level of each place,",
   "and the checker suite, which pins the count and the position of each report. The table runs in",
   "the VM: pass a --runner that runs tools/vm run in one slot and then syncs, as",
@@ -12,7 +15,9 @@
   "a row that an earlier run caught first, because the first round of a run in the VM can read",
   "stale (notes/testing.md). The checker suite runs with --timeout 120: the rows D3.14-keep-memo",
   "and D3.14-keep-modulo change the time of the walk and not its answer, and the shapes of 128 to",
-  "the power 6 owners in check_expr_test.ft then pass the timeout."
+  "the power 6 owners in check_expr_test.ft then pass the timeout.",
+  "The checker suite holds check_mark_limit_test.ft, the one witness of D3.14-mark-count:",
+  "its chain of 65600 structs takes about 13 s in the VM."
  ],
  "sources": [
   "src/fort/check.ft",
@@ -27,7 +32,7 @@
   },
   {
    "name": "the checker suite",
-   "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 120 -j 4 check_expr_test session_test"
+   "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 120 -j 4 check_expr_test session_test check_mark_limit_test"
   }
  ],
  "mutations": [
@@ -83,8 +88,8 @@
   {
    "decision": "D3.14-keep-limit",
    "file": "src/fort/check.ft",
-   "old": "    if (m->work > POINTER_WORK_LIMIT) {",
-   "new": "    if (m->work > POINTER_WORK_LIMIT && false) {",
+   "old": "    if (m->work > POINTER_WORK_LIMIT) {\n        m->over = true;\n        return true;",
+   "new": "    if (m->work > POINTER_WORK_LIMIT && false) {\n        m->over = true;\n        return true;",
    "what": "the check has no work limit"
   },
   {
@@ -174,15 +179,15 @@
   {
    "decision": "D3.14-hide-target-offset",
    "file": "src/fort/check.ft",
-   "old": "            u64 start = p.at + f->aux;",
-   "new": "            u64 start = p.at;",
+   "old": "        u64 start = p.at + f.at;",
+   "new": "        u64 start = p.at;",
    "what": "each field of a target struct starts at the start of the struct"
   },
   {
    "decision": "D3.14-hide-source-offset",
    "file": "src/fort/check.ft",
-   "old": "            && first_hidden(m, f->ty, 1, at + f->aux, u, out)) {",
-   "new": "            && first_hidden(m, f->ty, 1, at, u, out)) {",
+   "old": "        if (first_hidden(m, f.ty, 1, at + f.at, u, out)) {",
+   "new": "        if (first_hidden(m, f.ty, 1, at, u, out)) {",
    "what": "each field of a source struct starts at the start of the struct"
   },
   {
@@ -198,6 +203,146 @@
    "old": "        rel = rel % types.type_sizeof(c.ty->elem);",
    "new": "        rel = rel + 0 * types.type_sizeof(c.ty->elem);",
    "what": "a run over an array keeps its byte, so each element is a key of its own"
+  },
+  {
+   "decision": "D3.14-mark-view",
+   "file": "src/fort/check.ft",
+   "old": "    return check_marked_places(ck, n, src, dst);",
+   "new": "    return false;",
+   "what": "a read-only view keeps no pointer place that carries a mark"
+  },
+  {
+   "decision": "D3.14-mark-void",
+   "file": "src/fort/check.ft",
+   "old": "    if (types.has_target_level(src) && src->kind != types.type_kind.k_voidptr) {\n        sp = src->elem;",
+   "new": "    if (types.has_target_level(src)) {\n        sp = src->elem;",
+   "what": "the storage of a `void*` source has the type `void`"
+  },
+  {
+   "decision": "D3.14-mark-integer",
+   "file": "src/fort/check.ft",
+   "old": "    if (!has_layout(dp) || (sp != null && !has_layout(sp))) {",
+   "new": "    if (!has_layout(dp) || (sp != null && !has_layout(sp)) || !types.has_target_level(src)) {",
+   "what": "a cast from an integer keeps no pointer place that carries a mark"
+  },
+  {
+   "decision": "D3.14-mark-limit",
+   "file": "src/fort/check.ft",
+   "old": "    if (m.over) {\n        report_pointer_limit(ck, n, src, dst, \"a cast\");",
+   "new": "    if (m.over && false) {\n        report_pointer_limit(ck, n, src, dst, \"a cast\");",
+   "what": "the walk of the marks has no work limit"
+  },
+  {
+   "decision": "D3.14-mark-text",
+   "file": "src/fort/check.ft",
+   "old": "        report_pointer_place(ck, n, src, dst, \"a cast\", \"adds\", h, 1);",
+   "new": "        report_pointer_place(ck, n, src, dst, \"a 'mut' cast\", \"adds\", h, 1);",
+   "what": "the error of a read-only view names a `mut` cast"
+  },
+  {
+   "decision": "D3.14-mark-own",
+   "file": "src/fort/check.ft",
+   "old": "    if (types.type_is_reference(cur) && (cur->is_mut || cur->is_own)) {",
+   "new": "    if (types.type_is_reference(cur) && cur->is_mut) {",
+   "what": "an `own` reference carries no mark"
+  },
+  {
+   "decision": "D3.14-mark-mut",
+   "file": "src/fort/check.ft",
+   "old": "    if (types.type_is_reference(cur) && (cur->is_mut || cur->is_own)) {",
+   "new": "    if (types.type_is_reference(cur) && cur->is_own) {",
+   "what": "a `mut` reference carries no mark"
+  },
+  {
+   "decision": "D3.14-mark-pointee",
+   "file": "src/fort/check.ft",
+   "old": "           || (types.type_is_reference(cur) && !cur->is_mut && !cur->is_own",
+   "new": "           || (false && types.type_is_reference(cur) && !cur->is_mut && !cur->is_own",
+   "what": "a reference carries only its own marks, not those of what it reaches"
+  },
+  {
+   "decision": "D3.14-mark-field",
+   "file": "src/fort/check.ft",
+   "old": "        if (next == types.field_count(ty)) {",
+   "new": "        if (true) {",
+   "what": "a struct carries no mark of its fields"
+  },
+  {
+   "decision": "D3.14-mark-cycle",
+   "file": "src/fort/check.ft",
+   "old": "        if (found == MARK_WALKING) {\n            // a struct of a set",
+   "new": "        if (found == MARK_WALKING && enter_struct(m, s)) {\n            // a struct of a set",
+   "what": "the walk of the marks enters a struct that it is in again"
+  },
+  {
+   "decision": "D3.14-mark-low",
+   "file": "src/fort/check.ft",
+   "old": "            if (place < m->frames[at].low) {",
+   "new": "            if (false && place < m->frames[at].low) {",
+   "what": "a struct that reaches a struct of an open set closes a set of its own"
+  },
+  {
+   "decision": "D3.14-mark-close",
+   "file": "src/fort/check.ft",
+   "old": "    u8 mut answer = MARK_NONE;",
+   "new": "    u8 mut answer = MARK_UNKNOWN;",
+   "what": "a struct keeps no answer of no mark, so each cast walks it again"
+  },
+  {
+   "decision": "D3.14-mark-path",
+   "file": "src/fort/check.ft",
+   "old": "                types.keep_mark(m->frames[k].ty, MARK_SOME);",
+   "new": "                types.keep_mark(m->frames[k].ty, MARK_NONE);",
+   "what": "the structs on the path to a mark keep the answer of no mark"
+  },
+  {
+   "decision": "D3.14-mark-count",
+   "file": "src/fort/check.ft",
+   "old": "    m->work += 1;\n    if (m->work > POINTER_WORK_LIMIT) {\n        m->over = true;\n        return false;",
+   "new": "    m->work += 0;\n    if (m->work > POINTER_WORK_LIMIT) {\n        m->over = true;\n        return false;",
+   "what": "a struct that the walk of the marks enters is no step of the work limit"
+  },
+  {
+   "decision": "D3.14-mark-layout",
+   "file": "src/fort/check.ft",
+   "old": "    if (types.type_layout_state(cur) != types.layout_state.l_resolved) {\n        // a struct in error",
+   "new": "    if (false && types.type_layout_state(cur) != types.layout_state.l_resolved) {\n        // a struct in error",
+   "what": "the walk of the marks reads the fields of a struct with no layout"
+  },
+  {
+   "decision": "D3.14-mark-uncertain",
+   "file": "src/fort/check.ft",
+   "old": "            m->uncertain = true;",
+   "new": "            m->uncertain = false;",
+   "what": "an answer that met a layout that waits is kept"
+  },
+  {
+   "decision": "D3.14-mark-filter",
+   "file": "src/fort/check.ft",
+   "old": "    if (m->marked && !carries_mark(m, t)) {",
+   "new": "    if (m->marked && false) {",
+   "what": "a read-only view keeps each pointer place, a place with no mark included"
+  },
+  {
+   "decision": "D3.14-mark-parent-low",
+   "file": "src/fort/check.ft",
+   "old": "            if (at > 0 && low < m->frames[at - 1].low) {",
+   "new": "            if (false && at > 0 && low < m->frames[at - 1].low) {",
+   "what": "a frame that ends gives its low to no parent: a struct of a ring closes a set of its own"
+  },
+  {
+   "decision": "D3.14-mark-low-always",
+   "file": "src/fort/check.ft",
+   "old": "            if (place < m->frames[at].low) {",
+   "new": "            if (true || place < m->frames[at].low) {",
+   "what": "a struct of an open set takes the place of each struct it reaches in the set, a higher one too"
+  },
+  {
+   "decision": "D3.14-mark-path-each",
+   "file": "src/fort/check.ft",
+   "old": "            while (k < m->depth) {",
+   "new": "            while (k < 1) {",
+   "what": "only the first struct of a walk keeps the mark that the walk found"
   }
  ]
 }
