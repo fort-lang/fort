@@ -1,0 +1,83 @@
+//! fail
+// A `del` leaves the zero value in its operand, so a later load through it reads null (D17.9,
+// D17.21). `deleted` loads through `p` after its `del`: the error stands at the first token of
+// `*p`, and its note at the `del` names the place that the `del` vacates. A use in an abort block
+// keeps its obligation (`stopped`). `refilled` stores a new allocation into `p` before the load,
+// and `tested` loads only on the edge where a test finds `p` not null, so neither is an error. A
+// read of `.len`, a test against null and a `del` read no value of `buf`, so `exempt` passes. In
+// `chained` the left operand of the second `&&` is the whole value of `c && p != null`, which ends
+// no state, so `*p` is an error; in `grouped` the test is the left operand of the `&&` whose right
+// operand reads `*p`, so the read is no error (D17.21).
+fn deleted() void {
+    i32 mut* own mut p = new(i32);
+    del(p);
+    i32 v = *p; //! error: use after move or del: 'p' can be vacated here
+}
+
+fn stopped(bool c) void {
+    i32 mut* own mut p = new(i32);
+    del(p);
+    if (c) {
+        println(*p); //! error: use after move or del: 'p' can be vacated here
+        panic("stopped");
+    }
+}
+
+fn refilled() void {
+    i32 mut* own mut p = new(i32);
+    del(p);
+    p = new(i32);
+    *p = 1;
+    del(p);
+}
+
+fn tested(bool c) void {
+    i32 mut* own mut p = new(i32);
+    if (c) {
+        del(p);
+    }
+    if (p != null) {
+        *p = 2;
+    }
+    del(p);
+}
+
+fn exempt() u64 {
+    u8 mut@ own buf = new(u8, 4);
+    del(buf);
+    u64 n = buf.len;
+    if (buf.ptr == null) {
+        del(buf);
+    }
+    return n;
+}
+
+fn chained(bool c) bool {
+    i32 mut* own mut p = new(i32);
+    if (c) {
+        del(p);
+    }
+    bool one = c && p != null && *p == 1; //! error: use after move or del: 'p' can be vacated here
+    del(p);
+    return one;
+}
+
+fn grouped(bool c) bool {
+    i32 mut* own mut p = new(i32);
+    if (c) {
+        del(p);
+    }
+    bool one = c && (p != null && *p == 1);
+    del(p);
+    return one;
+}
+
+fn main() i32 {
+    deleted();
+    stopped(false);
+    refilled();
+    tested(true);
+    chained(false);
+    grouped(false);
+    return cast(exempt(), i32);
+}

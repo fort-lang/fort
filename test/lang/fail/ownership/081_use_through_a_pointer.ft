@@ -1,0 +1,67 @@
+//! fail
+// A load through a pointer that can reach the storage of a memory local is a use of each owner of
+// that local (D17.21, D17.11 Borrows). In `framed` the pointer `px` borrows the frame of `x`: the
+// `del(x)` vacates `x`, and `**px` reads it. In `deleted_through` the `del` goes through `px`, so
+// its note names `*px`, the place that the `del` vacates. In `lent_frame` a call vacates `x`. In
+// `exposed`, `view` returns a pointer that can be a place of `h`, whose address a call took, and a
+// later call can vacate `h.v`. A `del` through `px` is no use of `x` (`freed_through`).
+struct holder {
+    i32 mut* own v;
+}
+
+fn look(i32 mut* own mut* p) void {
+}
+
+fn note() void {
+}
+
+fn view(holder* h) i32* {
+    return h->v;
+}
+
+fn framed() void {
+    i32 mut* own mut x = new(i32);
+    i32 mut* own mut* px = &x;
+    del(x);
+    i32 v = **px; //! error: use after move or del: 'x' can be vacated here
+}
+
+fn deleted_through() void {
+    i32 mut* own mut x = new(i32);
+    i32 mut* own mut* px = &x;
+    del(*px);
+    i32 v = *x; //! error: use after move or del: 'x' can be vacated here
+    del(x);
+}
+
+fn lent_frame() void {
+    i32 mut* own mut x = new(i32);
+    i32 mut* own mut* px = &x;
+    look(px);
+    i32 v = **px; //! error: use after move or del: 'x' can be vacated here
+    del(x);
+}
+
+fn exposed() void {
+    holder mut h = holder{new(i32)};
+    i32* p = view(&h);
+    note();
+    i32 v = *p; //! error: use after move or del: 'h.v' can be vacated here
+    del(h.v);
+}
+
+fn freed_through() void {
+    i32 mut* own mut x = new(i32);
+    i32 mut* own mut* px = &x;
+    del(x);
+    del(*px);
+}
+
+fn main() i32 {
+    framed();
+    deleted_through();
+    lent_frame();
+    exposed();
+    freed_through();
+    return 0;
+}

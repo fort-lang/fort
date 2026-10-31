@@ -725,9 +725,11 @@ bullet at a time and without a rewrite.
   counts did not change when the event came (measured).
   **The test holds rule (b) of D17.21 too.** A site of rule (b) is a function, the location of an
   item and a local whose owner the item reads, from `proof.uses`, rejected when the pass does not
-  prove the use. A `use after move` event is in the scope of rule (b) when its moved tag names a
-  local of the function whose frame read the slot (no ` by a callee`, X2); an event of a slot of no
-  local, a global or an allocation, counts apart. The event stands at the load through the null, and
+  prove the use and `prover.has_error` holds, so the test holds the verdict of the error and the
+  row D17.21-error of `tools/mutations/oracle.json` prints false accepts. A `use after move` event
+  is in the scope of rule (b) when its moved tag names a local of the function whose frame read the
+  slot (no ` by a callee`, X2); an event of a slot of no local, a global or an allocation, counts
+  apart. The event stands at the load through the null, and
   it does not name the read of the vacated slot that gave the null, which can be an earlier copy
   (`v = x;` and then `*v`), so it marks each site of its function and local: a false accept is such
   an event with no rejected site of that function and local. So a wrong proof of one read hides

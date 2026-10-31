@@ -340,13 +340,13 @@ fn help_prints_the_usage_line_and_the_option_table() void {
     assert(str.starts_with(out, "usage: fort [options] entry.ft\noptions:\n"));
     // One line per option follows the usage line and the
     // `options:` header.
-    assert(capture.line_count(out) == 40);
+    assert(capture.line_count(out) == 39);
     assert(str.find(out, "--overwrite-report") < 0);
     string leak =
         "  --leak-report      as --check, and write each leak site that is no error yet\n";
     assert(str.find(out, leak) >= 0);
-    string uses = "  --move-report      as --check, and write each use after move or del\n";
-    assert(str.find(out, uses) >= 0);
+    // rule (b) is an error, so its report option is gone (D17.21)
+    assert(str.find(out, "--move-report") < 0);
     string ar = "  --ar <path>        the archiver that writes the lib.a of --lib (default ar)\n";
     assert(str.find(out, ar) >= 0);
     string cache_dir = "  --cache-dir <dir>  the cache directory of a library build\n";
@@ -355,7 +355,7 @@ fn help_prints_the_usage_line_and_the_option_table() void {
         "  --cache-stats      write the cache outcome of a library build to stdout\n";
     assert(str.find(out, cache_stats) >= 0);
     string check =
-        "  --check            check the program, its overwrites and its leaks; emit nothing\n";
+        "  --check            check the program, its overwrites, leaks and uses; emit nothing\n";
     assert(str.find(out, check) >= 0);
     assert(str.find(out, "  --cfg <list>       set key=value pairs; repeatable\n") >= 0);
     assert(str.find(out, "  --help             print this help and exit\n") >= 0);
@@ -2081,45 +2081,70 @@ string[7] USE_SITE = {
     "}",
 };
 
-// The lines of --move-report for USE_SITE: the read of `p` in `*p`, and the note at the `move`.
-string[2] USE_SITE_LISTED = {
-    "use_site.ft:4:14: use after move or del: 'p' can be vacated here\n",
+// The diagnostic lines of USE_SITE: the error of rule (b) at the read of `p` in `*p`, and its note
+// at the `move` (D17.21).
+string[2] USE_ERRORS = {
+    "use_site.ft:4:14: error: use after move or del: 'p' can be vacated here\n",
     "use_site.ft:3:22: note: 'p' is moved here\n",
 };
 
-// --move-report implies --check, and it lists on stdout each use of rule (b) that the pass does
-// not prove, with the message and the note of D17.21. Rule (b) is no error yet, so the run exits 0
-// with no diagnostic, --check alone lists nothing, and a build in each mode writes its module with
-// no diagnostic. With --leak-report too, one print holds the lines of both, those of part 2 of
-// the leak rule first.
-fn the_move_report_lists_each_use_of_rule_b() void {
+// Whether the last run reported the lines of `want` in that order on stderr, and no other line that
+// starts with `prefix`.
+fn reported_in_order(string prefix, string@ want) bool {
+    string own err = captured_err();
+    defer del(err);
+    i64 mut at = 0;
+    u64 mut k = 0;
+    while (k < want.len) {
+        i64 found = str.find(err[cast(at, u64)..err.len], want[k]);
+        if (found < 0) {
+            eprintln(err, "lacks ", want[k]);
+            return false;
+        }
+        at += found + cast(want[k].len, i64);
+        k += 1;
+    }
+    return lines_with(err, prefix) == want.len;
+}
+
+// A use that the emptiness pass does not prove is the error of rule (b) with its note, in each
+// build mode, under --check, --check --release, --check --json, --fir and --fir-after (D17.21,
+// spec/fir.md 11): the run exits 1 and writes no module, no FIR and no line but the diagnostics,
+// as for an exit (each_unproved_exit_is_an_error_in_every_mode).
+fn each_unproved_use_is_an_error_in_every_mode() void {
     write_runtime();
     write_lines("use_site.ft", USE_SITE[..]);
-    remove_file("a.out");
-    string[3] mut report = {"fort", "--move-report", "use_site.ft"};
-    assert(run(report[0..3]) == EXIT_OK);
-    assert(captured_err_is_empty());
-    assert(listed(USE_SITE_LISTED[..]));
-    assert(!file_exists("a.out"));
-    string[3] mut check = {"fort", "--check", "use_site.ft"};
-    assert(run(check[0..3]) == EXIT_OK);
-    assert(captured_err_is_empty());
-    assert(listed(USE_SITE_LISTED[..0]));
     string[6] mut build = {"fort", "-S", "-S", "use_site.ft", "-o", "use_site.ll"};
     for (string mode : MODES) {
         remove_file("use_site.ll");
         build[2] = mode;
-        assert(run(build[0..6]) == EXIT_OK);
-        assert(captured_err_is_empty());
-        assert(file_exists("use_site.ll"));
+        assert(run(build[0..6]) == EXIT_COMPILE_ERROR);
+        assert(reported_in_order("use_site.ft:", USE_ERRORS[..]));
+        assert(!file_exists("use_site.ll"));
     }
-    write_lines("cast_site.ft", CAST_SITE[..]);
-    string[4] mut both = {"fort", "--move-report", "--leak-report", "cast_site.ft"};
-    assert(run(both[0..4]) == EXIT_OK);
-    assert(listed(CAST_SITE_LISTED[..]));
-    string[4] mut neither = {"fort", "--leak-report", "--move-report", "use_site.ft"};
-    assert(run(neither[0..4]) == EXIT_OK);
-    assert(listed(USE_SITE_LISTED[..]));
+    string[3] mut check = {"fort", "--check", "use_site.ft"};
+    assert(run(check[0..3]) == EXIT_COMPILE_ERROR);
+    assert(reported_in_order("use_site.ft:", USE_ERRORS[..]));
+    string own quiet = captured_out();
+    defer del(quiet);
+    assert(quiet == "");
+    string[4] mut released = {"fort", "--check", "--release", "use_site.ft"};
+    assert(run(released[0..4]) == EXIT_COMPILE_ERROR);
+    assert(reported_in_order("use_site.ft:", USE_ERRORS[..]));
+    string[4] mut document = {"fort", "--check", "--json", "use_site.ft"};
+    assert(run(document[0..4]) == EXIT_COMPILE_ERROR);
+    assert(captured_err_is_empty());
+    assert(out_has("use after move or del: 'p' can be vacated here"));
+    assert(out_has("'p' is moved here"));
+    string[3] mut fir_mode = {"fort", "--fir", "use_site.ft"};
+    assert(run(fir_mode[0..3]) == EXIT_COMPILE_ERROR);
+    assert(reported_in_order("use_site.ft:", USE_ERRORS[..]));
+    string own no_fir = captured_out();
+    defer del(no_fir);
+    assert(no_fir == "");
+    string[3] mut after = {"fort", "--fir-after=build-mode", "use_site.ft"};
+    assert(run(after[0..3]) == EXIT_COMPILE_ERROR);
+    assert(reported_in_order("use_site.ft:", USE_ERRORS[..]));
 }
 
 // A program whose one use of rule (b) is the index of a span after its `move` (D17.21): the
@@ -2146,45 +2171,86 @@ string[7] SPAN_SITE = {
     "}",
 };
 
-// The lines of --move-report for SPAN_SITE: the read of `buf` in `buf[1]`, and the note at the
-// `move`.
-string[2] SPAN_SITE_LISTED = {
-    "span_site.ft:4:12: use after move or del: 'buf' can be vacated here\n",
+// The diagnostic lines of SPAN_SITE: the error at the read of `buf` in `buf[1]`, and its note at
+// the `move`.
+string[2] SPAN_ERRORS = {
+    "span_site.ft:4:12: error: use after move or del: 'buf' can be vacated here\n",
     "span_site.ft:3:21: note: 'buf' is moved here\n",
 };
 
-// Checked and release builds give the same verdict of rule (b) (D17.21): --move-report lists the
-// same lines alone, with --release, and with --no-bounds-check, which drops the bounds check that
-// reads the header of the span. The run reads SPAN_RUNTIME: rule V7 refuses a check whose entry
-// the runtime lacks (fir.md 10), and the report names no use of a function that is not lowered.
-fn the_move_report_is_the_same_in_each_mode() void {
+// Checked and release builds give the same verdict of rule (b) (D17.21): --check gives the same
+// error alone, with --release, and with --no-bounds-check, which drops the bounds check that reads
+// the header of the span, and so does a build in each mode. The run reads SPAN_RUNTIME: rule V7
+// refuses a check whose entry the runtime lacks (fir.md 10), and no use of a function that is not
+// lowered is an error.
+fn the_use_error_is_the_same_in_each_mode() void {
     assert(libc.mkdir("std_span".ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
     write_lines("std_span/rt.ft", SPAN_RUNTIME[..]);
     write_lines("span_site.ft", SPAN_SITE[..]);
-    string[5] mut alone = {"fort", "--std-dir", "std_span", "--move-report", "span_site.ft"};
-    assert(run(alone[0..5]) == EXIT_OK);
-    assert(captured_err_is_empty());
-    assert(listed(SPAN_SITE_LISTED[..]));
+    string[5] mut alone = {"fort", "--std-dir", "std_span", "--check", "span_site.ft"};
+    assert(run(alone[0..5]) == EXIT_COMPILE_ERROR);
+    assert(reported_in_order("span_site.ft:", SPAN_ERRORS[..]));
     string[2] modes = {"--release", "--no-bounds-check"};
-    string[6] mut report = {"fort", "--std-dir", "std_span", "--move-report", "--release",
-                            "span_site.ft"};
+    string[6] mut check = {"fort", "--std-dir", "std_span", "--check", "--release",
+                           "span_site.ft"};
     for (string mode : modes) {
-        report[4] = mode;
-        assert(run(report[0..6]) == EXIT_OK);
-        assert(captured_err_is_empty());
-        assert(listed(SPAN_SITE_LISTED[..]));
+        check[4] = mode;
+        assert(run(check[0..6]) == EXIT_COMPILE_ERROR);
+        assert(reported_in_order("span_site.ft:", SPAN_ERRORS[..]));
+    }
+    string[8] mut build = {"fort", "--std-dir", "std_span", "-S", "-S", "span_site.ft", "-o",
+                           "span_site.ll"};
+    for (string mode : MODES) {
+        remove_file("span_site.ll");
+        build[4] = mode;
+        assert(run(build[0..8]) == EXIT_COMPILE_ERROR);
+        assert(reported_in_order("span_site.ft:", SPAN_ERRORS[..]));
+        assert(!file_exists("span_site.ll"));
     }
 }
 
-// The report of rule (b) goes to stdout as the document of --json does, so the two do not
-// combine.
-fn the_move_report_refuses_the_document() void {
-    string[4] mut json = {"fort", "--move-report", "--json", "entry.ft"};
-    assert(run(json[0..4]) == EXIT_USAGE);
-    assert(err_has("fort: error: --move-report does not combine with --json or --index\n"));
-    string[4] mut index = {"fort", "--index", "--move-report", "entry.ft"};
-    assert(run(index[0..4]) == EXIT_USAGE);
-    assert(err_has("fort: error: --move-report does not combine with --json or --index\n"));
+// One function with an error of each rule of the emptiness pass: the store into `p` on line 3 of
+// D17.11, the leak of `q` at the `return` of line 7 of D17.20, and the use of `p` on line 6 of
+// D17.21. The errors stand in the order of the rules, D17.11, D17.20 and then D17.21, and not in
+// the order of the lines (spec/fir.md 11, Uses).
+string[8] THREE_RULES = {
+    "fn main() i32 {",
+    "    i32 mut* own mut p = new(i32);",
+    "    p = new(i32);",
+    "    i32 mut* own q = new(i32);",
+    "    del(p);",
+    "    i32 v = *p;",
+    "    return v;",
+    "}",
+};
+
+string[6] THREE_RULES_ERRORS = {
+    "three_rules.ft:3:7: error: overwriting owned value: cannot prove 'p' is empty here\n",
+    "three_rules.ft:3:7: note: del or move 'p' before this store\n",
+    "three_rules.ft:7:5: error: leak: cannot prove 'q' is empty at this exit\n",
+    "three_rules.ft:7:5: note: del or move 'q' before this exit\n",
+    "three_rules.ft:6:14: error: use after move or del: 'p' can be vacated here\n",
+    "three_rules.ft:5:5: note: 'p' is deleted here\n",
+};
+
+// A build and --check give the errors of THREE_RULES in the order of the rules.
+fn the_errors_of_one_function_stand_in_the_order_of_the_rules() void {
+    write_runtime();
+    write_lines("three_rules.ft", THREE_RULES[..]);
+    string[5] mut build = {"fort", "-S", "three_rules.ft", "-o", "three_rules.ll"};
+    assert(run(build[0..5]) == EXIT_COMPILE_ERROR);
+    assert(reported_in_order("three_rules.ft:", THREE_RULES_ERRORS[..]));
+    string[3] mut check = {"fort", "--check", "three_rules.ft"};
+    assert(run(check[0..3]) == EXIT_COMPILE_ERROR);
+    assert(reported_in_order("three_rules.ft:", THREE_RULES_ERRORS[..]));
+}
+
+// Rule (b) is an error, so its report option is gone (D17.21), as --overwrite-report went when the
+// overwrite check became one.
+fn move_report_is_an_unknown_option() void {
+    string[3] mut argv = {"fort", "--move-report", "entry.ft"};
+    assert(run(argv[0..3]) == EXIT_USAGE);
+    assert(err_has("fort: error: unknown option '--move-report'\n"));
 }
 
 // `if (c) { return 1; }` falling off the end of a function that returns a value: a path from
@@ -2715,9 +2781,10 @@ fn main() i32 {
     the_leak_report_lists_each_site_of_part_2();
     the_leak_report_lists_a_site_at_a_cast();
     the_leak_report_refuses_the_document();
-    the_move_report_lists_each_use_of_rule_b();
-    the_move_report_refuses_the_document();
-    the_move_report_is_the_same_in_each_mode();
+    each_unproved_use_is_an_error_in_every_mode();
+    the_use_error_is_the_same_in_each_mode();
+    the_errors_of_one_function_stand_in_the_order_of_the_rules();
+    move_report_is_an_unknown_option();
     a_proved_store_leaves_no_check_in_any_mode();
     fir_test_parses_as_a_flag();
     fir_test_combines_with_no_other_mode();

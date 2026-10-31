@@ -1,7 +1,8 @@
 /// Writes the error of D17.11 for each overwrite check that owner.prover does not prove: the text
 /// and the position of each error (spec/fir.md 11, spec/ownership-design.md 4.1). It also writes
 /// the error of part 1 of the leak rule (D17.20) for each exit that owner.prover does not prove,
-/// and the line of `--leak-report` for each site of part 2 that it does not prove.
+/// the error of rule (b) (D17.21) for each use that it does not prove, and the line of
+/// `--leak-report` for each site of part 2 that it does not prove.
 //
 // The module holds no module-level mutable state: each buffer belongs to one call.
 import fort.ast;
@@ -123,10 +124,27 @@ fn append_flat(strbuf.str_buf mut* out, string text) void {
     }
 }
 
+// The start of the source text `src[start..end]` with each `(` before `start` that the text needs:
+// the parser gives no node for a parenthesis, so the first node of `(s).a` starts at `s`, and the
+// text `s).a` closes a parenthesis that it does not open.
+fn open_start(string src, u64 start, u64 end) u64 {
+    u64 mut first = start;
+    while (paren_depth(src[first..end]) < 0 && first > 0) {
+        u64 mut back = first;
+        while (back > 0 && (src[back - 1] == ' ' || src[back - 1] == '\t')) {
+            back -= 1;
+        }
+        if (back == 0 || src[back - 1] != '(') {
+            break;
+        }
+        first = back - 1;
+    }
+    return first;
+}
+
 // Appends the source text of the target of the assignment that stands at `at`: the text from the
-// first token of the target to the `=`. The parser gives no node for a parenthesis, so the text
-// starts at each `(` before the first node that the text needs. False when the source or the
-// assignment is not there.
+// first token of the target to the `=`, with each `(` that it needs (open_start). False when the
+// source or the assignment is not there.
 fn write_target(fir.func* f, diag.loc at, session.session mut* s,
                 strbuf.str_buf mut* out) bool {
     if (f->sym == null || f->sym->node == null || at.line == 0) {
@@ -142,21 +160,12 @@ fn write_target(fir.func* f, diag.loc at, session.session mut* s,
     if (first.line == 0 || !session.read_source(s, at.file, &src)) {
         return false;
     }
-    u64 mut start = offset(src, first.line, first.col);
+    u64 node_start = offset(src, first.line, first.col);
     u64 mut end = offset(src, at.line, at.col);
-    if (start >= end) {
+    if (node_start >= end) {
         return false;
     }
-    while (paren_depth(src[start..end]) < 0 && start > 0) {
-        u64 mut back = start;
-        while (back > 0 && (src[back - 1] == ' ' || src[back - 1] == '\t')) {
-            back -= 1;
-        }
-        if (back == 0 || src[back - 1] != '(') {
-            break;
-        }
-        start = back - 1;
-    }
+    u64 start = open_start(src, node_start, end);
     while (end > start && (src[end - 1] == ' ' || src[end - 1] == '\t' || src[end - 1] == '\n')) {
         end -= 1;
     }
@@ -481,8 +490,9 @@ fn is_postfix(ast.node* n) bool {
     }
 }
 
-// Appends the source text of the expression `n`, from its first token to its last, with each run
-// of white space as one space. False when the source is not there.
+// Appends the source text of the expression `n`, from its first token to its last, with each `(`
+// that the text needs (open_start) and each run of white space as one space. False when the source
+// is not there.
 fn write_text(ast.node* n, session.session mut* s, strbuf.str_buf mut* out) bool {
     diag.loc mut first = diag.loc{};
     find_start(n, &first);
@@ -495,7 +505,7 @@ fn write_text(ast.node* n, session.session mut* s, strbuf.str_buf mut* out) bool
     if (start >= end) {
         return false;
     }
-    append_flat(out, src[start..end]);
+    append_flat(out, src[open_start(src, start, end)..end]);
     return true;
 }
 
@@ -670,10 +680,10 @@ fn write_inner_lines(fir.func* f, prover.proof* p, session.session mut* s,
     }
 }
 
-// ---- the report of rule (b) --------------------------------------------------------------------
+// ---- the errors of rule (b) --------------------------------------------------------------------
 
-/// The note after the first line of rule (b) of a function whose charge passed prover.USE_LIMIT
-/// (D17.21). Past it the analysis proves no use, and no note names an operation.
+/// The second note of the first error of rule (b) of a function whose charge passed
+/// prover.USE_LIMIT (D17.21). Past it the analysis proves no use, and no note names an operation.
 string USE_LIMIT_NOTE = "the function exceeds the work limit of D17.21; split it";
 
 // The name of field `k` of the type `t`: a field of a struct by its declaration index, or `ptr`
@@ -974,6 +984,19 @@ fn use_loc(fir.func* f, prover.use* u) diag.loc {
     return first;
 }
 
+// The `return x` of the tree `tree` whose implicit `move` the statement `st` is, or null: `st`
+// stands at the first token of `x`, where the lowering puts the `move` of `x` into `_0`. For a
+// `return x` of an aggregate type whose function runs deferred code before the `return`, the
+// lowering moves `x` into a temporary there (fir_lower.lower_return).
+fn returned_by(ast.node* tree, fir.statement* st) ast.node* {
+    ast.node* ret = find_return(tree, st->loc);
+    if (ret == null || ret->a == null || ret->a->loc.line != st->loc.line
+        || ret->a->loc.col != st->loc.col) {
+        return null;
+    }
+    return ret;
+}
+
 // The location of the note of the use `u` of `f`: the `del`, the `move` or the first token of the
 // call of its operation, or the `return` of an implicit `move` of `return x`.
 fn op_loc(fir.func* f, prover.use* u) diag.loc {
@@ -994,10 +1017,8 @@ fn op_loc(fir.func* f, prover.use* u) diag.loc {
     if (m != null) {
         return m->a->loc;
     }
-    bool result = st->kind == fir.stmt_kind.st_assign && place.is_local(st->place)
-        && st->place.local == 0;
-    ast.node* ret = find_return(tree, st->loc);
-    if (result && ret != null) {
+    ast.node* ret = returned_by(tree, st);
+    if (ret != null) {
         return ret->loc;
     }
     return st->loc;
@@ -1018,16 +1039,82 @@ fn is_use_repeated(prover.proof* p, diag.loc@ locs, u64 k) bool {
     return false;
 }
 
-/// Appends the lines of the report of rule (b) for each use of `f` that `p` does not prove, once
-/// for each location and local, in the order of the uses (D17.21): `<file>:<line>:<col>: use after
-/// move or del: '<place>' can be vacated here` at the expression whose read is the use, and the
-/// line of the note `'<place>' is moved here`, `is deleted here` or `can change in this call` at
-/// its operation. Past prover.USE_LIMIT no note names an operation, and a line of the note
-/// USE_LIMIT_NOTE follows the first use. Rule (b) is no error yet, so the lines go to `out`.
-fn write_uses(fir.func* f, prover.proof* p, session.session mut* s, strbuf.str_buf mut* out)
-    void {
+// Appends the source text of the place that the `move` or the `del` of the use `u` of `f` vacates
+// (D17.21): the operand of the `del` or of the `move`, or the value of the `return` of an implicit
+// `move`. FIR text with no tree gives the declared name of a named local or a parameter that is the
+// whole place, and else the FIR place. False when the tree holds no such operation: then the note
+// names the place of the error, so that no message about fort source names a FIR local.
+fn write_op_place(fir.func* f, prover.use* u, session.session mut* s, strbuf.str_buf mut* out)
+    bool {
+    fir.statement* st = fir.block_statement(f, u->op_block, u->op_index);
+    ast.node* tree = tree_of(f);
+    if (tree == null) {
+        bool mut postfix = true;
+        bool whole = u->op_place.base == fir.base_kind.bk_local && u->op_place.proj_len == 0;
+        if (!whole || !write_local(f, u->op_place.local, st->loc, s, out, &postfix)) {
+            fir_print.print_place(f, u->op_place, out);
+        }
+        return true;
+    }
+    if (u->op_kind == prover.operation_kind.op_del) {
+        bool mut postfix = true;
+        return write_released(f, st->loc, s, out, &postfix);
+    }
+    ast.node* m = find_move(f, find_node(tree, st->loc), u->op_place);
+    if (m != null) {
+        return write_text(ast.ast_child(m, 0), s, out);
+    }
+    ast.node* ret = returned_by(tree, st);
+    if (ret != null) {
+        return write_text(ret->a, s, out);
+    }
+    return false;
+}
+
+// Reports the error of rule (b) and its note for the use `u` of `f` at `at`, and the note
+// USE_LIMIT_NOTE after them when `limit` holds. `owner` and `text` are buffers of the caller.
+fn write_use(fir.func* f, prover.use* u, diag.loc at, bool limit, session.session mut* s,
+             strbuf.str_buf mut* owner, strbuf.str_buf mut* text) void {
+    strbuf.clear(owner);
+    write_use_place(f, u, s, owner);
+    strbuf.clear(text);
+    strbuf.append(text, "use after move or del: '");
+    strbuf.append(text, strbuf.view(owner));
+    strbuf.append(text, "' can be vacated here");
+    diag.error(session.diags(s), at, strbuf.view(text));
+    if (u->op_kind != prover.operation_kind.op_none) {
+        strbuf.clear(text);
+        strbuf.append(text, "'");
+        // a call vacates the owner of the error, and a `move` or a `del` the place of its operand
+        if (u->op_kind == prover.operation_kind.op_call || !write_op_place(f, u, s, text)) {
+            strbuf.append(text, strbuf.view(owner));
+        }
+        if (u->op_kind == prover.operation_kind.op_move) {
+            strbuf.append(text, "' is moved here");
+        } else if (u->op_kind == prover.operation_kind.op_del) {
+            strbuf.append(text, "' is deleted here");
+        } else {
+            strbuf.append(text, "' can change in this call");
+        }
+        diag.note(session.diags(s), op_loc(f, u), strbuf.view(text));
+    }
+    if (limit) {
+        diag.note(session.diags(s), at, USE_LIMIT_NOTE);
+    }
+}
+
+/// Reports each use of `f` that `p` does not prove, once for each location and local, in the
+/// order of the uses (D17.21). Each takes the error `use after move or del: '<place>' can be
+/// vacated here` at the expression whose read is the use, and a note at its operation: `'<op>' is
+/// moved here` at a `move` or at the `return` of an implicit `move`, `'<op>' is deleted here` at a
+/// `del`, where `<op>` is the place that the operation vacates (write_op_place), and `'<place>'
+/// can change in this call` at the first token of a call. Past prover.USE_LIMIT no note names an
+/// operation, and the first error takes the second note USE_LIMIT_NOTE.
+fn write_uses(fir.func* f, prover.proof* p, session.session mut* s) void {
     strbuf.str_buf mut owner = strbuf.create();
     defer strbuf.free(&owner);
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
     diag.loc mut@ own locs = new(diag.loc, p->uses.len);
     defer del(locs);
     bool mut limit_told = false;
@@ -1037,32 +1124,8 @@ fn write_uses(fir.func* f, prover.proof* p, session.session mut* s, strbuf.str_b
         if (!u->proved) {
             locs[k] = use_loc(f, u);
         }
-        diag.loc at = locs[k];
         if (!u->proved && !is_use_repeated(p, locs, k)) {
-            strbuf.clear(&owner);
-            write_use_place(f, u, s, &owner);
-            write_position(at, out);
-            strbuf.append(out, "use after move or del: '");
-            strbuf.append(out, strbuf.view(&owner));
-            strbuf.append(out, "' can be vacated here\n");
-            if (u->op_kind != prover.operation_kind.op_none) {
-                write_position(op_loc(f, u), out);
-                strbuf.append(out, "note: '");
-                strbuf.append(out, strbuf.view(&owner));
-                if (u->op_kind == prover.operation_kind.op_move) {
-                    strbuf.append(out, "' is moved here\n");
-                } else if (u->op_kind == prover.operation_kind.op_del) {
-                    strbuf.append(out, "' is deleted here\n");
-                } else {
-                    strbuf.append(out, "' can change in this call\n");
-                }
-            }
-            if (p->use_over && !limit_told) {
-                write_position(at, out);
-                strbuf.append(out, "note: ");
-                strbuf.append(out, USE_LIMIT_NOTE);
-                strbuf.push(out, '\n');
-            }
+            write_use(f, u, locs[k], p->use_over && !limit_told, s, &owner, &text);
             limit_told = true;
         }
         k += 1;

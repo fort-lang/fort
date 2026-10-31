@@ -1,0 +1,100 @@
+//! run
+//! stdout:
+//| refilled 1
+//| tested 0 0
+//| tested 1 2
+//| exempt 4
+//| freed_through
+//| separate 3 4
+//| grouped false true
+// The forms that pass beside the fail tests of rule (b) (D17.21), each in a run that prints what
+// it reads: a store of a new allocation after the `del` (`refilled`), a load on the edge where a
+// test finds the owner not null (`tested`), the reads that are no uses, `.len`, a test against
+// null and a `del` (`exempt`), a `del` through a pointer after the `del` of its owner
+// (`freed_through`, whose caller prints, because a call after the `del` would end the fact of the
+// memory owner `x` and leave a leak error of D17.20), two separate fields and a store into an element after its `del`
+// (`separate`), and a test against null that is the left operand of the `&&` whose right operand
+// reads the owner (`grouped`). fail/ownership/078, 081 and 083 hold the errors beside them.
+struct pair {
+    i32 mut* own a;
+    i32 mut* own b;
+}
+
+fn refilled() void {
+    i32 mut* own mut p = new(i32);
+    del(p);
+    p = new(i32);
+    *p = 1;
+    println("refilled ", *p);
+    del(p);
+}
+
+fn tested(bool c) void {
+    i32 mut* own mut p = new(i32);
+    if (c) {
+        del(p);
+    }
+    i32 mut seen = 0;
+    if (p != null) {
+        *p = 2;
+        seen = *p;
+    }
+    println("tested ", cast(p != null, i32), " ", seen);
+    del(p);
+}
+
+fn exempt() void {
+    u8 mut@ own buf = new(u8, 4);
+    u64 n = buf.len;
+    del(buf);
+    if (buf.ptr == null) {
+        del(buf);
+    }
+    println("exempt ", n + buf.len);
+}
+
+fn freed_through() void {
+    i32 mut* own mut x = new(i32);
+    i32 mut* own mut* px = &x;
+    del(x);
+    del(*px);
+}
+
+fn separate() void {
+    pair mut s = pair{new(i32), new(i32)};
+    *s.b = 3;
+    del(s.a);
+    i32 v = *s.b;
+    del(s.b);
+    i32 mut* own[2] mut kids = {new(i32), new(i32)};
+    del(kids[1]);
+    kids[1] = new(i32);
+    *kids[1] = 4;
+    i32 w = *kids[1];
+    del(kids[0]);
+    del(kids[1]);
+    println("separate ", v, " ", w);
+}
+
+fn grouped(bool c) bool {
+    i32 mut* own mut p = new(i32);
+    *p = 1;
+    if (c) {
+        del(p);
+    }
+    bool one = !c && (p != null && *p == 1);
+    del(p);
+    return one;
+}
+
+fn main() i32 {
+    refilled();
+    tested(true);
+    tested(false);
+    exempt();
+    freed_through();
+    println("freed_through");
+    separate();
+    println("grouped ", grouped(true), " ", grouped(false));
+    return 0;
+}

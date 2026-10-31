@@ -1,0 +1,49 @@
+//! fail
+// A `move` leaves the zero value in its operand (D17.6), so a later load through it reads null
+// (D17.21). In `moved` the note stands at the `move`. In `argument` the read of `p` in `*p` comes
+// after the `move` of `p` in one call, in evaluation order (fir.md 7). In `returned` the `return p`
+// moves `p` before the deferred print runs (D7.8, D17.5), so the note stands at the `return`. In
+// `deferred` the deferred read expands at two exits with one location, which gives one error.
+fn take(i32 mut* own a, i32 v) void {
+    del(a);
+}
+
+fn moved() void {
+    i32 mut* own mut p = new(i32);
+    i32 mut* own q = move(p);
+    i32 v = *p; //! error: use after move or del: 'p' can be vacated here
+    del(q);
+}
+
+fn argument() void {
+    i32 mut* own mut p = new(i32);
+    take(move(p), *p); //! error: use after move or del: 'p' can be vacated here
+}
+
+fn returned() i32 mut* own {
+    i32 mut* own p = new(i32);
+    defer println(*p); //! error: use after move or del: 'p' can be vacated here
+    return p;
+}
+
+fn deferred(bool c) void {
+    i32 mut* own mut p = new(i32);
+    i32 mut* own q = move(p);
+    defer {
+        i32 v = *p; //! error: use after move or del: 'p' can be vacated here
+    }
+    if (c) {
+        del(q);
+        return;
+    }
+    del(q);
+}
+
+fn main() i32 {
+    moved();
+    argument();
+    i32 mut* own r = returned();
+    del(r);
+    deferred(true);
+    return 0;
+}

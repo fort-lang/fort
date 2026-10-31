@@ -1410,8 +1410,8 @@ mutability: an `own` pointer, `void* own`, `own` span or `string own`, as an lva
 rvalue (D17.9, D10.3). On an lvalue, `del` empties the operand as `move` does (3.9), so the
 binding need not be `mut` but a level reached through `*p`, `p->f` or `s[i]` must be; on an
 rvalue it only frees. `del(null)` (the literal adopts `void* own`) and `del` of a zero span or
-string are no-ops, so `del(buf); del(buf);` frees once and a use after `del` dereferences
-`null`. `del` is shallow:
+string are no-ops, so `del(buf); del(buf);` frees once. A use of a local owner after its `del` is
+a compile error (D17.21), and another use after `del` dereferences `null`. `del` is shallow:
 `del(kids)` on a `node mut* own mut@ own` frees the slots, not the nodes, and `del` of a struct
 or
 array is an error. So `del(p)` of a `T* own` whose `T` holds owners needs each owner of `*p`

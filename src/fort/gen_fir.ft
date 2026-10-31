@@ -41,10 +41,11 @@ struct fir_path {
 /// among them stay on. The first verifier excuses the check kinds that `rt` excuses; the second
 /// excuses none, so a check that the pass keeps needs its runtime entry (rule V7). A violation of
 /// a rule ends the compiler with a panic that names it. The build-mode pass reads the proof of
-/// the emptiness pass. False when that pass does not prove an overwrite check, a store or an exit
-/// of `f`. Then it reports the error of D17.11 and its notes at each such check and store, and the
-/// error of the leak rule and its notes at each such exit (D17.20), in every mode, and `f` reaches
-/// no later pass (spec/fir.md 11).
+/// the emptiness pass. False when that pass does not prove an overwrite check, a store, an exit or
+/// a use of `f`. Then it reports the error of D17.11 and its notes at each such check and store,
+/// the error of the leak rule and its notes at each such exit (D17.20), and the error of rule (b)
+/// and its notes at each such use (D17.21), in every mode, and `f` reaches no later pass
+/// (spec/fir.md 11).
 fn check_fir(gen.emitter mut* g, fir_verify.runtime* rt, fir.func mut* f) bool {
     return check_proved(g, rt, f, null);
 }
@@ -59,6 +60,7 @@ fn check_proved(gen.emitter mut* g, fir_verify.runtime* rt, fir.func mut* f,
     if (prover.has_error(&verdicts)) {
         report.write(f, &verdicts, g->sess);
         report.write_leaks(f, &verdicts, g->sess);
+        report.write_uses(f, &verdicts, g->sess);
         g->failed = true;
         return false;
     }
@@ -72,7 +74,7 @@ fn check_proved(gen.emitter mut* g, fir_verify.runtime* rt, fir.func mut* f,
 }
 
 // Writes the definition of `fn_node` through FIR: the lowering, check_fir and the translator
-// (spec/fir.md 3). Six cases write no text, and each is a compile error (spec/fir.md 9.8,
+// (spec/fir.md 3). Seven cases write no text, and each is a compile error (spec/fir.md 9.8,
 // spec/fir.md 11, spec/toolchain.md 1):
 // - the lowering does not support a construct of the function: at the construct,
 //   `cannot lower `<f>` to FIR: the lowering does not support the node `<kind>``;
@@ -89,7 +91,10 @@ fn check_proved(gen.emitter mut* g, fir_verify.runtime* rt, fir.func mut* f,
 //   `overwriting owned value: cannot prove '<place>' is empty here` and a note (D17.11);
 // - the emptiness pass does not prove an exit of an owner local: at the closing brace or at the
 //   `return`, `break` or `continue`, `leak: cannot prove '<place>' is empty at this exit` and a
-//   note (D17.20).
+//   note (D17.20);
+// - the emptiness pass does not prove a use of a local owner after a `move`, a `del` or a call: at
+//   the first token of the read, `use after move or del: '<place>' can be vacated here` and a note
+//   (D17.21).
 // Only a stub `std.rt` of a test or an old --std-dir meets the second, the third and the fourth.
 // A violation of a rule of the verifier ends the compiler with a panic.
 fn fir_function(gen.emitter mut* g, fir_path mut* fp, ast.node* fn_node) bool {

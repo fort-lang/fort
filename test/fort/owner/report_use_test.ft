@@ -4,15 +4,18 @@
 //| uses ok
 //| fir text ok
 //| limit ok
-/// Checks the report of rule (b) in owner.report (D17.21): for each use that owner.prover does
-/// not prove, the line `use after move or del: '<place>' can be vacated here` at the first token of
-/// the expression whose read is the use, and the line of its note at the operation: `is moved
-/// here` at a `move` or at the `return` of an implicit `move`, `is deleted here` at a `del`, and
-/// `can change in this call` at the first token of a call. `<place>` is the source text of the
-/// read of an `own` reference, or the first owner of the local that can be vacated, with the names
-/// of its fields. A deferred use gives one line for each location and local. FIR text with no
-/// tree names the FIR place. Past the limit the first line takes the note of the limit, and no
-/// line names an operation.
+//| fallback ok
+/// Checks the errors of rule (b) in owner.report (D17.21): for each use that owner.prover does
+/// not prove, the error `use after move or del: '<place>' can be vacated here` at the first token
+/// of the expression whose read is the use, and its note at the operation: `'<op>' is moved here`
+/// at a `move` or at the `return` of an implicit `move`, `'<op>' is deleted here` at a `del`, and
+/// `'<place>' can change in this call` at the first token of a call. `<place>` is the source text
+/// of the read of an `own` reference, or the first owner of the local that can be vacated, with
+/// the names of its fields. `<op>` is the place that the `move` or the `del` vacates, the source
+/// text of its operand. A deferred use gives one error for each location and local. FIR text with
+/// no tree names the FIR place. Past the limit the first error takes the note of the limit, and no
+/// note names an operation.
+import fort.diag;
 import fort.fir;
 import fort.fir_lower;
 import fort.owner.prover;
@@ -40,8 +43,12 @@ import std.strbuf;
 // through an address that the function takes after the `del`, and an arm of a `switch`.
 // `null_store_text` stores `null` after the `del`: the store ends the state, and its load
 // through `null` stays undefined (D10.5). `array_through` reads a fixed array of owners through
-// a pointer to it.
-string[388] USES = {
+// a pointer to it. In `result_call` the only call stores into `_0` and is the value of a `return`,
+// and its note names the owner of the error and not the call. In `returned_whole` the implicit
+// `move` of `return s` vacates `s`, which its note names, and the deferred read uses `s.b`. In
+// `paren_text` the parser gives no node for the parenthesis of `(s).a`, and the text of the read
+// and of the operand of the `del` keeps it.
+string[411] USES = {
     "struct pair {",
     "    i32* own a;",
     "    i32* own b;",
@@ -430,8 +437,31 @@ string[388] USES = {
     "    del(b[0]); //@op",
     "    i32 w = *(*pb)[0]; //@use",
     "}",
+    "fn make_pair() pair {",
+    "    return pair{};",
+    "}",
+    "fn result_call() pair {",
+    "    i32 mut* own mut x = new(i32);",
+    "    defer {",
+    "        *x = 1; //@use",
+    "        del(x);",
+    "    }",
+    "    i32 mut* own mut* px = &x;",
+    "    return make_pair(); //@op",
+    "}",
+    "fn returned_whole() pair {",
+    "    pair mut s = pair{new(i32), new(i32)};",
+    "    defer println(*s.b); //@use",
+    "    return s; //@op",
+    "}",
+    "fn paren_text() void {",
+    "    pair mut s = pair{};",
+    "    s.a = new(i32);",
+    "    del((s).a); //@op",
+    "    i32* v = (s).a; //@use",
+    "}",
 };
-string[48] USE_NAMES = {
+string[51] USE_NAMES = {
     "deleted", "refilled", "tested", "argument", "span", "fields", "keyed", "unkeyed", "pointer",
     "called", "returned", "deferred", "forms", "result", "built", "ranged", "nested_text",
     "through_text", "keyed_text", "string_text", "literal_note", "cast_note", "two_moves",
@@ -439,13 +469,14 @@ string[48] USE_NAMES = {
     "field_call", "element_field", "null_operand", "null_first", "null_left", "matrix_text",
     "bag_text", "keep_note", "while_text", "compound_text", "pointer_len_text",
     "outer_element_text", "ternary_text", "index_text", "argument_text", "address_after_text",
-    "switch_text", "null_store_text", "array_through",
+    "switch_text", "null_store_text", "array_through", "result_call", "returned_whole",
+    "paren_text",
 };
 
 // The lines of the report of USES, each after the file, in the order of the functions. Each was
 // derived from the source: the column of the first token of the read, and of the `del`, the
 // `move`, the `return` or the call of the note.
-string[90] USE_LINES = {
+string[96] USE_LINES = {
     ":13:14: use after move or del: 'p' can be vacated here",
     ":12:5: note: 'p' is deleted here",
     ":34:20: use after move or del: 'q' can be vacated here",
@@ -453,13 +484,13 @@ string[90] USE_LINES = {
     ":43:12: use after move or del: 'buf' can be vacated here",
     ":38:21: note: 'buf' is moved here",
     ":53:14: use after move or del: 's.b' can be vacated here",
-    ":52:14: note: 's.b' is moved here",
+    ":52:14: note: 's' is moved here",
     ":65:14: use after move or del: 'b[k]' can be vacated here",
     ":60:5: note: 'b[k]' is deleted here",
     ":72:14: use after move or del: 'b[i % 2]' can be vacated here",
-    ":71:5: note: 'b[i % 2]' is deleted here",
+    ":71:5: note: 'b[1]' is deleted here",
     ":79:6: use after move or del: 'x' can be vacated here",
-    ":78:5: note: 'x' is deleted here",
+    ":78:5: note: '*px' is deleted here",
     ":82:14: use after move or del: 'x' can be vacated here",
     ":81:5: note: 'x' is deleted here",
     ":89:6: use after move or del: 'x' can be vacated here",
@@ -473,9 +504,9 @@ string[90] USE_LINES = {
     ":140:13: use after move or del: 'built().a' can be vacated here",
     ":139:5: note: 'built().a' can change in this call",
     ":148:23: use after move or del: 'kids[0]' can be vacated here",
-    ":146:5: note: 'kids[0]' is deleted here",
+    ":146:5: note: 'kids[1]' is deleted here",
     ":173:14: use after move or del: 't.e[0]' can be vacated here",
-    ":172:5: note: 't.e[0]' is deleted here",
+    ":172:5: note: 't.e[1]' is deleted here",
     ":181:17: use after move or del: 's.b' can be vacated here",
     ":179:5: note: 's.b' is deleted here",
     ":187:14: use after move or del: 'arr[k].a' can be vacated here",
@@ -505,7 +536,7 @@ string[90] USE_LINES = {
     ":265:14: use after move or del: 's.a' can be vacated here",
     ":264:5: note: 's.a' can change in this call",
     ":271:14: use after move or del: 't.e[i]' can be vacated here",
-    ":270:5: note: 't.e[i]' is deleted here",
+    ":270:5: note: 't.e[0]' is deleted here",
     ":277:14: use after move or del: 'p' can be vacated here",
     ":275:5: note: 'p' is deleted here",
     ":284:22: use after move or del: 'p' can be vacated here",
@@ -513,7 +544,7 @@ string[90] USE_LINES = {
     ":289:22: use after move or del: 'p' can be vacated here",
     ":288:22: note: 'p' is moved here",
     ":302:14: use after move or del: 'm[1][0]' can be vacated here",
-    ":301:5: note: 'm[1][0]' is deleted here",
+    ":301:5: note: 'm[0][1]' is deleted here",
     ":309:12: use after move or del: 'b.data' can be vacated here",
     ":308:5: note: 'b.data' is deleted here",
     ":314:6: use after move or del: 'x' can be vacated here",
@@ -536,6 +567,12 @@ string[90] USE_LINES = {
     ":370:9: note: 'p' is deleted here",
     ":387:15: use after move or del: 'b[0]' can be vacated here",
     ":386:5: note: 'b[0]' is deleted here",
+    ":395:10: use after move or del: 'x' can be vacated here",
+    ":399:12: note: 'x' can change in this call",
+    ":403:20: use after move or del: 's.b' can be vacated here",
+    ":404:5: note: 's' is moved here",
+    ":410:15: use after move or del: '(s).a' can be vacated here",
+    ":409:5: note: '(s).a' is deleted here",
 };
 
 // Lowers the function `name` of the checked source of `e` into *out, and holds that the
@@ -546,6 +583,51 @@ fn lower(lower_env.env mut* e, string name, fir.func mut* out) void {
         panic("report_use_test: the lowering refuses the function");
     }
     pass_env.verified(e, out, "report_use_test: the verifier refuses the lowering");
+}
+
+// Appends each diagnostic of `e` from `before` on to `got` in the form of a header line of the
+// compiler without the word `error:`: `<file>:<line>:<col>: <message>`, with `note: ` before the
+// message of a note, and a newline. So an error and a note with one text give two lines.
+fn diagnostics(lower_env.env mut* e, u64 before, strbuf.str_buf mut* got) void {
+    u64 mut k = before;
+    while (k < check_env.reports(&e->c)) {
+        strbuf.append(got, check_env.report_file(&e->c, k));
+        strbuf.push(got, ':');
+        bool note = check_env.report_severity(&e->c, k) == "note";
+        string text = check_env.report_text(&e->c, k);
+        u64 at = cast(str.find(text, ": "), u64) + 2;
+        strbuf.append(got, text[..at]);
+        if (note) {
+            strbuf.append(got, "note: ");
+        }
+        strbuf.append(got, text[at..]);
+        strbuf.push(got, '\n');
+        k += 1;
+    }
+}
+
+// The count of the lines of `want` that are no note: the errors.
+fn error_lines(string@ want) u64 {
+    u64 mut n = 0;
+    u64 mut k = 0;
+    while (k < want.len) {
+        if (str.find(want[k], ": note: ") < 0) {
+            n += 1;
+        }
+        k += 1;
+    }
+    return n;
+}
+
+// Holds that the diagnostics of `e` from `before` on are the lines of `want`, each after `file`,
+// in order, and that the errors among them are those of `want` (diagnostics).
+fn expect_diagnostics(lower_env.env mut* e, u64 before, u64 errors, string file, string@ want)
+    void {
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    diagnostics(e, before, &got);
+    expect_lines(strbuf.view(&got), file, want);
+    assert(check_env.errors(&e->c) == errors + error_lines(want));
 }
 
 // Holds that `got` holds the lines of `want`, each after `file` and with a newline, and nothing
@@ -566,30 +648,32 @@ fn expect_lines(string got, string file, string@ want) void {
     }
 }
 
-// The report names each use of USES that the pass does not prove, in the file of the function,
-// and writes no diagnostic: rule (b) is no error yet.
-fn the_report_names_each_unproved_use() void {
+// The errors name each use of USES that the pass does not prove, in the file of the function,
+// each with its note, and each such use is an error of the proof (has_error).
+fn the_errors_name_each_unproved_use() void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
     defer lower_env.close(&e);
     lower_env.check_lines(&e, USES[..], true);
     string file = lower_env.decl_file(&e, "deleted");
     assert(str.ends_with(file, "main.ft"));
-    strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
     u64 before = check_env.reports(&e.c);
+    u64 errors = check_env.errors(&e.c);
     u64 mut k = 0;
     while (k < USE_NAMES.len) {
         fir.func mut f = fir.func{};
         lower(&e, USE_NAMES[k], &f);
         prover.proof mut p = prover.prove(&f);
-        report.write_uses(&f, &p, &e.c.m.s, &got);
+        u64 mark = check_env.errors(&e.c);
+        report.write_uses(&f, &p, &e.c.m.s);
+        // an error of rule (b) is an error of the proof, and a proof with no use writes none
+        assert(prover.has_error(&p) == (p.use_unproved > 0 || p.unproved > 0 || p.leaks > 0));
+        assert((check_env.errors(&e.c) > mark) == (p.use_unproved > 0));
         prover.free(&p);
         fir.func_free(&f);
         k += 1;
     }
-    assert(check_env.reports(&e.c) == before);
-    expect_lines(strbuf.view(&got), file, USE_LINES[..]);
+    expect_diagnostics(&e, before, errors, file, USE_LINES[..]);
     println("uses ok");
 }
 
@@ -644,47 +728,40 @@ string[33] TEXT_USES = {
     "}",
 };
 
+// The note of t1 names the parameter that the `del` vacates, `p`, and that of t2 the FIR place of
+// the operand of its `del`, `_1.1`, because a FIR text has no source text of the operand. The error
+// of t2 names the owner that the read reads, `s.b`.
 string[6] TEXT_USE_LINES = {
-    "t.fir:3:1: use after move or del: 'p' can be vacated here\n",
-    "t.fir:2:1: note: 'p' is deleted here\n",
-    "t.fir:8:1: use after move or del: 's.b' can be vacated here\n",
-    "t.fir:7:1: note: 's.b' is deleted here\n",
-    "t.fir:13:1: use after move or del: '_1' can be vacated here\n",
-    "t.fir:12:1: note: '_1' is deleted here\n",
+    ":3:1: use after move or del: 'p' can be vacated here",
+    ":2:1: note: 'p' is deleted here",
+    ":8:1: use after move or del: 's.b' can be vacated here",
+    ":7:1: note: '_1.1' is deleted here",
+    ":13:1: use after move or del: '_1' can be vacated here",
+    ":12:1: note: '_1' is deleted here",
 };
 
-// With no tree, the report of rule (b) names the FIR place where no name stands.
-fn the_report_of_a_fir_text_names_the_fir_place() void {
+// With no tree, the errors of rule (b) name the FIR place where no name stands.
+fn the_errors_of_a_fir_text_name_the_fir_place() void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
     defer lower_env.close(&e);
     fir.module mut m = pass_env.parse(&e, TEXT_PRELUDE[..], TEXT_USES[..]);
     defer fir.module_free(&m);
-    strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
+    u64 before = check_env.reports(&e.c);
+    u64 errors = check_env.errors(&e.c);
     u64 mut f = 0;
     while (f < m.funcs.len) {
         prover.proof mut p = prover.prove(fir.module_function_at(&m, f));
-        report.write_uses(fir.module_function_at(&m, f), &p, &e.c.m.s, &got);
+        report.write_uses(fir.module_function_at(&m, f), &p, &e.c.m.s);
         prover.free(&p);
         f += 1;
     }
-    strbuf.str_buf mut want = strbuf.create();
-    defer strbuf.free(&want);
-    u64 mut k = 0;
-    while (k < TEXT_USE_LINES.len) {
-        strbuf.append(&want, TEXT_USE_LINES[k]);
-        k += 1;
-    }
-    if (strbuf.view(&got) != strbuf.view(&want)) {
-        eprintln(strbuf.view(&got));
-        panic("report_use_test: the lines of a FIR text differ");
-    }
+    expect_diagnostics(&e, before, errors, "t.fir", TEXT_USE_LINES[..]);
     println("fir text ok");
 }
 
-// The lines of `pointer` past the limit: each use is unproved, no line names an operation, and only
-// the first line takes the note of the limit.
+// The diagnostics of `pointer` past the limit: each use is unproved, no note names an operation,
+// and only the first error takes the note of the limit.
 string[3] POINTER_LIMIT_LINES = {
     ":79:6: use after move or del: 'x' can be vacated here",
     ":79:6: note: the function exceeds the work limit of D17.21; split it",
@@ -698,55 +775,99 @@ string[2] REFILLED_LIMIT_LINES = {
     ":19:14: note: the function exceeds the work limit of D17.21; split it",
 };
 
-// The lines of `array_through` past the limit: its read through `pb` names the first owner of the
-// memory local `b`, `b[0]`, and no operation.
+// The diagnostics of `array_through` past the limit: its read through `pb` names the first owner of
+// the memory local `b`, `b[0]`, and no operation.
 string[2] THROUGH_LIMIT_LINES = {
     ":387:15: use after move or del: 'b[0]' can be vacated here",
     ":387:15: note: the function exceeds the work limit of D17.21; split it",
 };
 
-fn the_first_line_past_the_limit_names_the_limit() void {
+// Lowers the function `name` of USES, which `e` checked, proves it within a limit of rule (b) of
+// 0, and holds that its diagnostics are those of `want` and that `unproved` uses are not proved.
+fn expect_past_limit(lower_env.env mut* e, string name, u32 unproved, string@ want) void {
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    lower(e, name, &f);
+    prover.proof mut over = prover.prove_limits(&f, prover.WORK_LIMIT, 0);
+    defer prover.free(&over);
+    assert(over.use_over && over.use_unproved == unproved && prover.has_error(&over));
+    u64 before = check_env.reports(&e->c);
+    u64 errors = check_env.errors(&e->c);
+    report.write_uses(&f, &over, &e->c.m.s);
+    expect_diagnostics(e, before, errors, lower_env.decl_file(e, name), want);
+}
+
+fn the_first_error_past_the_limit_names_the_limit() void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
     defer lower_env.close(&e);
     lower_env.check_lines(&e, USES[..], true);
-    string file = lower_env.decl_file(&e, "pointer");
-    strbuf.str_buf mut got = strbuf.create();
-    defer strbuf.free(&got);
-    fir.func mut f = fir.func{};
-    defer fir.func_free(&f);
-    lower(&e, "pointer", &f);
-    prover.proof mut over = prover.prove_limits(&f, prover.WORK_LIMIT, 0);
-    defer prover.free(&over);
-    assert(over.use_over && over.use_unproved == 2);
-    report.write_uses(&f, &over, &e.c.m.s, &got);
-    expect_lines(strbuf.view(&got), file, POINTER_LIMIT_LINES[..]);
+    expect_past_limit(&e, "pointer", 2, POINTER_LIMIT_LINES[..]);
     fir.func mut g = fir.func{};
     defer fir.func_free(&g);
     lower(&e, "refilled", &g);
     prover.proof mut proved = prover.prove(&g);
     defer prover.free(&proved);
-    assert(!proved.use_over && proved.use_unproved == 0);
-    prover.proof mut past = prover.prove_limits(&g, prover.WORK_LIMIT, 0);
-    defer prover.free(&past);
-    strbuf.clear(&got);
-    report.write_uses(&g, &past, &e.c.m.s, &got);
-    expect_lines(strbuf.view(&got), file, REFILLED_LIMIT_LINES[..]);
-    fir.func mut h = fir.func{};
-    defer fir.func_free(&h);
-    lower(&e, "array_through", &h);
-    prover.proof mut through = prover.prove_limits(&h, prover.WORK_LIMIT, 0);
-    defer prover.free(&through);
-    assert(through.use_over && through.use_unproved == 1);
-    strbuf.clear(&got);
-    report.write_uses(&h, &through, &e.c.m.s, &got);
-    expect_lines(strbuf.view(&got), file, THROUGH_LIMIT_LINES[..]);
+    assert(!proved.use_over && proved.use_unproved == 0 && !prover.has_error(&proved));
+    expect_past_limit(&e, "refilled", 1, REFILLED_LIMIT_LINES[..]);
+    expect_past_limit(&e, "array_through", 1, THROUGH_LIMIT_LINES[..]);
     println("limit ok");
 }
 
+// The notes of `unkeyed` and of `fields` once their `del` and their `move` stand where the tree
+// holds no such operation: each note names the place of the error, as for an operation that the
+// lowering made, and so names no FIR local (D17.21). The note stands at the moved statement, the
+// location of the item of the use: the `*` of the load, column 13. The error stands at the first
+// token of the read, column 14.
+string[4] FALLBACK_LINES = {
+    ":72:14: use after move or del: 'b[i % 2]' can be vacated here",
+    ":72:13: note: 'b[i % 2]' is deleted here",
+    ":53:14: use after move or del: 's.b' can be vacated here",
+    ":53:13: note: 's.b' is moved here",
+};
+
+// Moves the operation of the note of the first unproved use of `p` to the location of the item of
+// that use in `f`, where no `del` and no `move` stands. `f` and `p` are parameters here, so they
+// are no local owners.
+fn move_operation(fir.func mut* f, prover.proof* p) void {
+    u64 mut k = 0;
+    while (p->uses[k].proved) {
+        k += 1;
+    }
+    prover.use* u = &p->uses[k];
+    diag.loc at = report.item_loc(f, u->block, u->index);
+    fir.block_mut(f, u->op_block)->statements.items[cast(u->op_index, u64)].loc = at;
+}
+
+// Lowers the function `name` of USES, which `e` checked, moves the operation of the note of its
+// first unproved use (move_operation), and writes the errors of the function.
+fn write_moved_operation(lower_env.env mut* e, string name) void {
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    lower(e, name, &f);
+    prover.proof mut p = prover.prove(&f);
+    defer prover.free(&p);
+    move_operation(&f, &p);
+    report.write_uses(&f, &p, &e->c.m.s);
+}
+
+fn a_note_with_no_operation_in_the_tree_names_the_place_of_the_error() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, USES[..], true);
+    u64 before = check_env.reports(&e.c);
+    u64 errors = check_env.errors(&e.c);
+    write_moved_operation(&e, "unkeyed");
+    write_moved_operation(&e, "fields");
+    expect_diagnostics(&e, before, errors, lower_env.decl_file(&e, "fields"), FALLBACK_LINES[..]);
+    println("fallback ok");
+}
+
 fn main() i32 {
-    the_report_names_each_unproved_use();
-    the_report_of_a_fir_text_names_the_fir_place();
-    the_first_line_past_the_limit_names_the_limit();
+    the_errors_name_each_unproved_use();
+    the_errors_of_a_fir_text_name_the_fir_place();
+    the_first_error_past_the_limit_names_the_limit();
+    a_note_with_no_operation_in_the_tree_names_the_place_of_the_error();
     return 0;
 }
