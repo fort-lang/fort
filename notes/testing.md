@@ -608,9 +608,16 @@ bullet at a time and without a rewrite.
 - **The suite of fir.shadow derives each report from the design** (`test/fort/fir/shadow_test.ft`).
   Each event of `spec/ownership-design.md` 3.4 has a run that makes it and a run at its boundary
   that makes none: the first and the last byte of an allocation and of an owner word, a span of
-  length 0, a `del` of null and of an interior pointer, a cycle of two owners, a tag through a
-  cast to `u64` and back, and a kept frame tag. A person derived each expected report from the
-  design; no case was blessed from a run. `run_env.events` turns the report of the events on.
+  length 0, a `del` of null and of an interior pointer, a cycle of two owners, a tag through a cast
+  to `u64` and back, and a kept frame tag. The group `forged` holds 49 runs: each step of the
+  derivation that `spec/ownership-design.md` 3.3 lists reaches a run with no event, and each kind of
+  access through a value, the whole place of a `del` included, reaches a run with one. Four fort
+  cases hold a `del` through a forged pointer, a panic message in a buffer of the run and of its
+  caller, and the `dead` of a `u32` that shares a word with a live `u32`. A frame holds its locals
+  in the order of their numbers, so `&y + 8` reaches `x` in most of its cases. A store of a byte
+  beside an owner word goes through an address of the same local, because a byte of the next local
+  or of padding through `&p` is `forged`. A person derived each expected report from the design; no
+  case was blessed from a run. `run_env.events` turns the report of the events on.
 - **The oracle test holds a rule against the runs of the oracle** (`test/fort/owner/oracle_test.ft`,
   `spec/ownership-design.md` 3.6). It checks a batch of fort source in a sandbox, lowers each
   function, runs the pass of the rule on it and runs it in `fir.interpreter`. A site is a function
@@ -703,14 +710,16 @@ bullet at a time and without a rewrite.
   its memory local before any call that follows its check: a call kills each fact of a memory
   local, so a call between the `del` and the exit makes the exit unproved for a reason that is not
   R6.
-  **The oracle reports no event for an access through a forged pointer**, which D10.7 (A8) makes
-  undefined: a run that writes `x` through `cast(py, u64) + 8` for `py = &y` stores over `x` with
-  no event that names A8, and the test would count the store as a false accept, though R6 may keep
-  the fact of `x` there. The generator forges no pointer to a local: its one cast of an integer to
-  a pointer, `v = cast(u, i32*)`, reads back an integer of an `own` value or of an `i32`, and no
-  hand case forges a pointer to a local, so each false accept that the sets count is in scope
-  (read). A later change
-  gives the oracle an event for such an access.
+  **The oracle reports an access through a forged pointer as `forged`**, which D10.7 (A8) makes
+  undefined (`spec/ownership-design.md` 3.4): a run that writes `x` through `cast(py, u64) + 8` for
+  `py = &y` reports `forged` at the access and no event after it, so the test counts no false
+  accept there, though R6 may keep the fact of `x`. Each set prints its count of `forged` events
+  on a line of its own (`outside each rule (A8)`), with its rejected sites that have no event at
+  or after a `forged` event of their function: such a site is no false reject, because the run
+  reports no event after `forged`. The generator forges no pointer to a local: its one cast of an
+  integer to a pointer, `v = cast(u, i32*)`, reads back an integer of an `own` value or of an
+  `i32`, and no hand case forges a pointer to a local. So each set prints `forged 0`, and the other
+  counts did not change when the event came (measured).
 - **The suites of fir.interpreter derive each expected value apart from the interpreter**
   (`test/fort/fir/interpreter_test.ft`, `interpreter_source_test.ft`). Python's integers and IEEE
   doubles gave each value at each boundary of each type when the cases were written: the wrap at

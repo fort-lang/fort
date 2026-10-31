@@ -1348,7 +1348,9 @@ fn field_at(types.node* t, u32 k, types.node* mut* ty) u64 {
 // The address of the place `p` of frame `k`, and its type in *ty. A `deref` and an index on a
 // span or a `string` load a pointer (spec/fir.md 5.5). The address of a place through null is
 // below FIRST_ADDRESS, and an access there is a null dereference. The tag of the address goes to
-// `sh.place`: the tag of the last pointer that the place loads.
+// `sh.place`: the tag of the last pointer that the place loads, and the derivation of each index
+// after it. A place that loads no pointer names a local or a global, and an access through it
+// goes through no value (D10.7).
 fn place_address(machine mut* it, u64 k, fir.place p, types.node* mut* ty) u64 {
     fir.func* f = it->frames.items[k].f;
     u64 mut addr = 0;
@@ -1361,6 +1363,7 @@ fn place_address(machine mut* it, u64 k, fir.place p, types.node* mut* ty) u64 {
         t = fir.local_at(f, p.local)->ty;
     }
     shadow.tag mut at = shadow.tag{};
+    at.d.named = true;
     for (u32 mut i = 0; i < p.proj_len && !has_ended(it); i++) {
         fir.projection pj = fir.place_projection(f, p, i);
         switch (pj.kind) {
@@ -1380,13 +1383,16 @@ fn place_address(machine mut* it, u64 k, fir.place p, types.node* mut* ty) u64 {
                 t = fir.apply_projection(f, t, pj);
             }
         case fir.proj_kind.pj_index:
+            it->sh.place.d.named = true;
             u64 index = load(it, local_address(it, k, pj.index), WORD);
+            shadow.derivation ix = it->sh.value.d;
             types.node* elem = fir.apply_projection(f, t, pj);
             if (t->kind != types.type_kind.k_array) {
                 it->sh.place = at;
                 addr = load(it, addr, WORD);
                 at = it->sh.value;
             }
+            at.d = shadow.join(at.d, ix);
             addr = addr +% index *% types.type_sizeof(elem);
             t = elem;
         }
@@ -1411,8 +1417,8 @@ fn read_scalar(machine mut* it, u64 k, fir.operand o, types.node* mut* ty) u64 {
     u64 size = size_of(*ty);
     u64 v = load_value(it, addr, *ty);
     if (o.kind == fir.operand_kind.ok_move) {
-        // a moved value passes its owner and no tag
-        it->sh.value = shadow.tag{};
+        // a moved value passes its owner and its derivation, and no other tag
+        it->sh.value = shadow.tag{shadow.origin{}, shadow.origin{}, it->sh.value.d};
         zero_bytes(it, addr, size);
     }
     return v;
@@ -1456,8 +1462,9 @@ fn evaluate_scalar(machine mut* it, u64 k, fir.rvalue r) u64 {
     case fir.rvalue_kind.rv_addr:
         u64 a = place_address(it, k, r.place, &t);
         it->sh.value = it->sh.place;
+        it->sh.value.d.named = false;
         if (fir.place_fixed(f, r.place)) {
-            it->sh.value = shadow.tag_address(&it->sh, a);
+            it->sh.value = shadow.tag_address(&it->sh, a, local_address(it, k, r.place.local));
         }
         return a;
     case fir.rvalue_kind.rv_slice, fir.rvalue_kind.rv_slice_ptr, fir.rvalue_kind.rv_alloc,
@@ -1533,11 +1540,12 @@ fn read_member(machine mut* it, u64 k, fir.operand o, u64 at, types.node* ty) vo
         read_bytes(it, src, it->scratch[at..at + size]);
         shadow.capture(&it->sh, src, size, at, o.kind == fir.operand_kind.ok_move);
     } else {
-        // a scalar is a value, so a `bool` keeps its low bit
+        // a scalar is a value, so a `bool` keeps its low bit; a moved one keeps its derivation
         put(it, at, size, load_value(it, src, t));
-        if (o.kind != fir.operand_kind.ok_move) {
-            shadow.hold(&it->sh, at);
+        if (o.kind == fir.operand_kind.ok_move) {
+            it->sh.value = shadow.tag{shadow.origin{}, shadow.origin{}, it->sh.value.d};
         }
+        shadow.hold(&it->sh, at);
     }
     if (o.kind == fir.operand_kind.ok_move) {
         zero_bytes(it, src, size);
@@ -1553,10 +1561,11 @@ fn element_base(machine mut* it, u64 k, fir.place p, u64 lo, u64 mut* size) u64 
     *size = types.type_sizeof(fir.apply_projection(it->frames.items[k].f, t, index));
     u64 mut base = addr;
     it->sh.value = it->sh.place;
+    it->sh.value.d.named = false;
     if (t->kind != types.type_kind.k_array) {
         base = load(it, addr, WORD);
     } else if (fir.place_fixed(it->frames.items[k].f, p)) {
-        it->sh.value = shadow.tag_address(&it->sh, addr);
+        it->sh.value = shadow.tag_address(&it->sh, addr, local_address(it, k, p.local));
     }
     return base +% lo *% *size;
 }
@@ -1577,28 +1586,45 @@ fn evaluate_aggregate(machine mut* it, u64 k, fir.rvalue r, types.node* ty) void
             read_member(it, k, fir.rvalue_operand(f, r, m), at, mt);
         }
     case fir.rvalue_kind.rv_slice:
+        // the pointer derives from the place and the bounds, and the length from the bounds
         u64 lo = read_scalar(it, k, fir.rvalue_operand(f, r, 0), &t);
+        shadow.derivation dl = it->sh.value.d;
         u64 hi = read_scalar(it, k, fir.rvalue_operand(f, r, 1), &t);
+        shadow.tag bounds = shadow.tag{shadow.origin{}, shadow.origin{},
+                                       shadow.join(dl, it->sh.value.d)};
         u64 mut size = 0;
         u64 base = element_base(it, k, r.place, lo, &size);
-        shadow.hold(&it->sh, 0);
+        hold_slice(it, it->sh.value, bounds);
         put(it, 0, WORD, base);
         put(it, WORD, WORD, hi -% lo);
     case fir.rvalue_kind.rv_slice_ptr:
         // each bound becomes 64 bits by its own signedness (fir_llvm.bound_value)
         u64 p = read_scalar(it, k, fir.rvalue_operand(f, r, 0), &t);
-        shadow.hold(&it->sh, 0);
+        shadow.tag pointer = it->sh.value;
         types.node* elem = t->elem;
         types.node* mut lt = null;
         u64 lo = extend(read_scalar(it, k, fir.rvalue_operand(f, r, 1), &lt), lt);
+        shadow.derivation dl = it->sh.value.d;
         types.node* mut ht = null;
         u64 hi = extend(read_scalar(it, k, fir.rvalue_operand(f, r, 2), &ht), ht);
+        hold_slice(it, pointer, shadow.tag{shadow.origin{}, shadow.origin{},
+                                           shadow.join(dl, it->sh.value.d)});
         put(it, 0, WORD, p +% lo *% types.type_sizeof(elem));
         put(it, WORD, WORD, hi -% lo);
     default:
         // rule V4 gives no other rvalue an aggregate place
         fault(it, "a scalar rvalue in an aggregate place");
     }
+}
+
+// Gives the header of a slice in `scratch` the tags `pointer` of its pointer, joined with the
+// derivation of the bounds `bounds`, and `bounds` of its length (D10.7).
+fn hold_slice(machine mut* it, shadow.tag pointer, shadow.tag bounds) void {
+    it->sh.value = pointer;
+    it->sh.value.d = shadow.join(pointer.d, bounds.d);
+    shadow.hold(&it->sh, 0);
+    it->sh.value = bounds;
+    shadow.hold(&it->sh, WORD);
 }
 
 // Writes `scratch` into the place of type `ty` at `dest`. An `aggregate` that is not `zeroed`
@@ -1622,13 +1648,14 @@ fn write_aggregate(machine mut* it, u64 k, u64 dest, fir.rvalue r, types.node* t
 }
 
 // After a store of a value of type `t` with the tag `tg` at `addr`: each owning word, an `own`
-// reference or the pointer of an owning span or `string`, becomes an owner slot, and a word of a
-// scalar takes the tag.
+// reference or the pointer of an owning span or `string`, becomes an owner slot, and a scalar
+// takes the tag. An `own` reference that holds no start of an allocation keeps the derivation.
 fn settle(machine mut* it, u64 addr, types.node* t, shadow.tag tg) void {
     if (has_ended(it)) {
         return;
     }
     if (types.type_is_reference(t) && t->is_own) {
+        shadow.mark(&it->sh, addr, WORD, shadow.tag{shadow.origin{}, shadow.origin{}, tg.d});
         shadow.claim(&it->sh, addr, load(it, addr, WORD));
     } else if (t->kind == types.type_kind.k_array && types.type_is_owning_aggregate(t)) {
         for (u64 mut i = 0; i < t->len; i++) {
@@ -1640,8 +1667,8 @@ fn settle(machine mut* it, u64 addr, types.node* t, shadow.tag tg) void {
             u64 at = field_at(t, n, &ft);
             settle(it, addr + at, ft, shadow.tag{});
         }
-    } else if (size_of(t) == WORD) {
-        shadow.mark(&it->sh, addr, tg);
+    } else {
+        shadow.mark(&it->sh, addr, size_of(t), tg);
     }
 }
 
@@ -1693,6 +1720,8 @@ fn push_frame(machine mut* it, u64 r) u64 {
     if (base == 0) {
         return NONE;
     }
+    // the run writes the parameters of the new frame by their names
+    it->sh.place.d.named = true;
     frame_vec mut* v = &it->frames;
     if (v->len == v->items.len) {
         u64 cap = fir.grown_capacity(v->items.len, "fir.interpreter: frame capacity overflow");
@@ -1711,19 +1740,24 @@ fn push_frame(machine mut* it, u64 r) u64 {
     return v->len - 1;
 }
 
-// Writes `values[i]` into parameter `i` of frame `k`: the bits of a scalar, or the address of
-// the bytes of an aggregate. A value past the parameters goes nowhere.
-fn write_values(machine mut* it, u64 k, u64@ values) void {
+// Writes `values[i]` into parameter `i` of frame `k`: the bits of a scalar, which derive as
+// `from[i]` says (D10.7) when `from` has an item `i`, or the address of the bytes of an
+// aggregate. A value past the parameters goes nowhere.
+fn write_values(machine mut* it, u64 k, u64@ values, shadow.derivation@ from) void {
     fir.func* f = it->frames.items[k].f;
     for (u64 mut i = 0; i < values.len && i < f->ty->params.len && !has_ended(it); i++) {
         u32 n = cast(i + 1, u32);
         types.node* t = fir.local_at(f, n)->ty;
         u64 at = local_address(it, k, n);
+        shadow.tag mut tg = shadow.tag{};
+        if (i < from.len) {
+            tg.d = from[i];
+        }
         if (fir.type_aggregate(t)) {
             copy_bytes(it, at, values[i], types.type_sizeof(t));
         } else {
             store(it, at, types.type_sizeof(t), values[i]);
-            settle(it, at, t, shadow.tag{});
+            settle(it, at, t, tg);
         }
     }
 }
@@ -1743,9 +1777,10 @@ fn is_callable(machine mut* it, u64 r) bool {
     return false;
 }
 
-// Calls the function `s` from frame `k` with the arguments `values`, and makes frame `k` wait
-// for it as `wait` says.
-fn call_values(machine mut* it, u64 k, ast.sym* s, u64@ values, wait_kind wait) void {
+// Calls the function `s` from frame `k` with the arguments `values`, which derive as `from`
+// says, and makes frame `k` wait for it as `wait` says.
+fn call_values(machine mut* it, u64 k, ast.sym* s, u64@ values, shadow.derivation@ from,
+               wait_kind wait) void {
     if (s == null) {
         fault(it, "a runtime entry that std.rt lacks");
         return;
@@ -1758,7 +1793,7 @@ fn call_values(machine mut* it, u64 k, ast.sym* s, u64@ values, wait_kind wait) 
     if (callee == NONE) {
         return;
     }
-    write_values(it, callee, values);
+    write_values(it, callee, values, from);
     it->frames.items[k].wait = wait;
 }
 
@@ -1845,6 +1880,8 @@ fn call_address(machine mut* it, u64 k, u64 addr, fir.rvalue r, u32 first) void 
 fn alloc_from(machine mut* it, u64 k, fir.statement* s) void {
     types.node* mut t = null;
     u64 n = read_scalar(it, k, fir.rvalue_operand(it->frames.items[k].f, s->value, 0), &t);
+    shadow.derivation[2] mut from = {};
+    from[1] = it->sh.value.d;
     u64[5] mut values = {};
     values[0] = types.type_sizeof(s->value.ty);
     values[1] = n;
@@ -1852,23 +1889,30 @@ fn alloc_from(machine mut* it, u64 k, fir.statement* s) void {
     values[3] = cast(s->loc.line, u64);
     values[4] = cast(s->loc.col, u64);
     if (!has_ended(it)) {
-        call_values(it, k, it->alloc_entry, values[..], wait_kind.wk_assign);
+        call_values(it, k, it->alloc_entry, values[..], from[..], wait_kind.wk_assign);
     }
 }
 
 // `del(move p)`: the pointer of `p`, the pointer field of a span or a `string`, then
-// `std.rt.free`, then the zero value into `p` (spec/fir.md 12.2).
+// `std.rt.free`, then the zero value into `p` (spec/fir.md 12.2). The `del` writes each byte of
+// `p`, so the shadow tests the access of the whole place before the call when a live region holds
+// it; the run faults where it faulted before, so the shadow changes no outcome.
 fn del_from(machine mut* it, u64 k, fir.statement* s) void {
     types.node* mut t = null;
     u64 addr = place_address(it, k, s->place, &t);
     u64 ptr = load(it, addr, WORD);
+    shadow.derivation[1] mut from = {};
+    from[0] = it->sh.value.d;
     if (has_ended(it)) {
         return;
+    }
+    if (find_region(it, addr, types.type_sizeof(t)) != NONE) {
+        shadow.access(&it->sh, addr, types.type_sizeof(t), true, false);
     }
     shadow.free_through(&it->sh, addr, ptr);
     u64[1] mut values = {};
     values[0] = ptr;
-    call_values(it, k, it->free_entry, values[..], wait_kind.wk_del);
+    call_values(it, k, it->free_entry, values[..], from[..], wait_kind.wk_del);
     it->frames.items[k].addr = addr;
     it->frames.items[k].size = types.type_sizeof(t);
 }
@@ -1922,10 +1966,12 @@ fn arm_bits(types.node* t, consts.cval v) u64 {
 fn fail_check(machine mut* it, u64 k, fir.terminator* t) void {
     fir.func* f = it->frames.items[k].f;
     u64[6] mut values = {};
+    shadow.derivation[3] mut from = {};
     u32 mut i = 0;
     while (i < t->args_len && i < 3) {
         types.node* mut ty = null;
         values[cast(i, u64)] = read_scalar(it, k, fir.operand_at(f, t->args_first + i), &ty);
+        from[cast(i, u64)] = it->sh.value.d;
         i += 1;
     }
     u64 n = cast(i, u64);
@@ -1934,7 +1980,7 @@ fn fail_check(machine mut* it, u64 k, fir.terminator* t) void {
     values[n + 2] = cast(t->loc.col, u64);
     ast.sym* entry = it->rt.entry[cast(cast(t->check, i32), u64)];
     if (!has_ended(it)) {
-        call_values(it, k, entry, values[..n + 3], wait_kind.wk_noreturn);
+        call_values(it, k, entry, values[..n + 3], from[..n], wait_kind.wk_noreturn);
     }
 }
 
@@ -1988,6 +2034,8 @@ fn terminate(machine mut* it, u64 k, fir.terminator* t) void {
 // ends its statement. At the bottom of the stack the result goes to `ret` and `dest`. The test
 // of the owner counts at the `return` counts the value of `_0` as an owner.
 fn return_from(machine mut* it, u64 k) void {
+    // the run reads the result and zeroes the place of a `del` by their names
+    it->sh.place.d.named = true;
     frame callee = it->frames.items[k];
     types.node* t = fir.local_at(callee.f, 0)->ty;
     u64 size = size_of(t);
@@ -2089,6 +2137,8 @@ fn run_extern(machine mut* it, u64 k, fir.statement* s) void {
     }
     u64[shadow.EXTERN_ARGS] mut a = {};
     types.node*[shadow.EXTERN_ARGS] mut t = {};
+    // the result of a model derives from each argument: C can compute it from each (D10.7)
+    shadow.tag mut tg = shadow.tag{};
     for (u32 mut i = 0; i < r.ops_len; i++) {
         fir.operand o = fir.rvalue_operand(f, r, i);
         if (fir.type_aggregate(fir.operand_type(f, o))) {
@@ -2098,6 +2148,7 @@ fn run_extern(machine mut* it, u64 k, fir.statement* s) void {
         }
         a[cast(i, u64)] = read_scalar(it, k, o, &t[cast(i, u64)]);
         shadow.pass(&it->sh, cast(i, u64), a[cast(i, u64)]);
+        tg.d = shadow.join(tg.d, it->sh.value.d);
     }
     if (has_ended(it)) {
         // an argument ended the run, so the extern does not run and makes no access
@@ -2105,7 +2156,6 @@ fn run_extern(machine mut* it, u64 k, fir.statement* s) void {
     }
     it->sh.nargs = cast(r.ops_len, u64);
     // `oracle_pass` returns its argument with its tag, and no other extern gives a tag
-    shadow.tag mut tg = shadow.tag{};
     if (name == "oracle_pass") {
         tg = it->sh.value;
     }
@@ -2328,7 +2378,8 @@ fn invoke(machine mut* it, ast.sym* s, u64@ values, u64 dest) void {
     if (k == NONE) {
         return;
     }
-    write_values(it, k, values);
+    shadow.derivation@ none = {};
+    write_values(it, k, values, none);
     while (it->frames.len > 0 && !has_ended(it)) {
         step(it);
     }

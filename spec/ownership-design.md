@@ -155,6 +155,33 @@ comparison gives a `bool`, which has no tag.
 - **Kept**: a callee marks a value kept when it stores a value with a frame tag of F outside its
   own frame. A cast to an integer type that a callee runs removes each tag of F from the value.
 
+A value also holds its derivation (D10.7): the entries of the locals whose addresses it derives
+from. These steps are those of D10.7, and the casts keep the derivation that they remove from a
+tag.
+- An `addr`, or a `slice` of a fixed array, of a place whose base is a local `x` of the run gives
+  the entry of `x`, and the derivation of each index of the place. Each `live` of `x` starts a new
+  entry, and the frame of a run has its own entries.
+- Each other operation joins the derivations of its operands, a comparison included. A `slice`
+  gives its pointer the derivations of the pointer and of the bounds, and its length the
+  derivations of the bounds. A `move`, an argument and a result keep the derivation, also an
+  argument of the runtime entry of an `alloc`, a `del` or a failed check, and an owner slot.
+- A load joins the derivations of the words that it reads, also when it reads only some bytes of
+  them. A store gives each word that it writes its derivation, and a word that it writes in part
+  keeps the derivation of its other bytes. The zero bytes of a `move` or a `del` derive from no
+  address.
+- A branch, a constant and bytes that no store wrote give no derivation. The result of an extern
+  of 3.2 derives from each of its arguments, because the C code can compute it from each.
+- The oracle departs from D10.7 at three points. A value that derives from more than 4 entries
+  derives from each address, and a word keeps its derivation until a store writes the whole word,
+  so a narrow local keeps the derivation of an earlier value. Both give fewer events. The bytes
+  that `snprintf` writes derive from no address, and the results of `memcmp`, `strlen` and
+  `strtod` derive only from their arguments and not from the bytes that they read. So a value that
+  C computes from bytes that derive from an address loses that derivation, which gives more
+  events.
+
+An access by the name of a local goes through no value. The interpreter writes the parameters of a
+new frame and reads the `_0` of a frame that returns by their names.
+
 ### 3.4 The events
 
 Each event names the function, the FIR location and one of these kinds:
@@ -170,9 +197,15 @@ Each event names the function, the FIR location and one of these kinds:
 | `use after move`    | a load or a store through a null that a vacated slot gave             |
 | `use after scope`   | a load or a store in a slot of a dead local or of a returned frame    |
 | `duplicate owner`   | an owner count becomes 2, or a `del` frees through no owner slot      |
+| `forged`            | a load or a store of a local through a value with no address of it    |
 
-`leak at exit` finds the allocations of a cycle of owners, whose counts never become 0. A run also
-has an outcome: its output, its exit status, or its runtime error. A load through a null that no
+`leak at exit` finds the allocations of a cycle of owners, whose counts never become 0. A load or a
+store through a value is `forged` when it reaches a byte of a local of a run that stands, and the
+value does not derive from an address of the entry of that local that the run took (D10.7). A byte
+of padding counts as a byte of the local before it. D10.7 makes each access of padding undefined,
+so the oracle reports fewer events there than D10.7 allows.
+After a `forged` event the run reports no event, because each rule assumes A8 (5.1). A run also has
+an outcome: its output, its exit status, or its runtime error. A load through a null that no
 vacated slot gave is the outcome `null dereference`, which is no ownership event.
 
 Each event belongs to at most one rule, by the scope of that rule (sections 5.2 and 6). An event
@@ -191,6 +224,7 @@ that no rule covers is counted apart, and it is no false accept:
 | `use after release`, `double release`, through an owner tag      | (e) part 1      |
 | `use after scope` through a frame tag that is not kept           | (e) part 2      |
 | `invalid release`, `duplicate owner`                             | assumption A2   |
+| `forged`                                                         | assumption A8   |
 
 ### 3.5 The tests of the oracle
 
@@ -200,7 +234,10 @@ that no rule covers is counted apart, and it is no false accept:
   `outside` and the differences, which must be 0. It runs in 120 s or less in CI (estimated).
 - Each event has tests at its boundaries: the ends of an allocation and a span of length 0. Other
   tests cover a `del` of `null` and of an interior pointer, and a cycle of two owners. More tests
-  cover a tag through a cast to `u64` and back, and a kept frame tag.
+  cover a tag through a cast to `u64` and back, and a kept frame tag. The tests of `forged` cover
+  each step of the derivation that 3.3 lists, each kind of access through a value, the first byte
+  of the next local, a byte of padding, a local of 0 bytes, an address of an earlier entry, and a
+  derivation of more than 4 entries.
 
 ### 3.6 The tests of a rule against the oracle
 
@@ -499,7 +536,7 @@ These are all the assumptions of the rules. A program that breaks one gets no cl
     reads a mark of a pointer place in a read-only view, and a later change forbids the form.
 
   An owner slot that one of these three forms forges is outside the guarantee of rules (a) and
-  (c).
+  (c). The oracle reports a break of A8 as `forged` (3.4).
 
 ### 5.2 Outside the scopes
 
@@ -1016,6 +1053,8 @@ digits   = "0" | nonzero { digit } ;
   `fir/emptiness.ft` (measured). V1 needs 5,000: 900 for `owner.place`, 3,600 for `owner.prover` and
   500 for `owner.report`, and each of R1 to R4 adds 400 to `owner.summary` (estimated, low). The
   oracle holds at most 3,500 more (need: 2,800), so the caps give 11,500 (Q6). The wave held 61,355.
+  The count of the oracle is `wc -l` of the two modules of 3.1, as the coordinator ratified on
+  2026-10-27: 3,421 with the event `forged` (measured).
 - Each PR writes `wc -l` of `src/fort/owner/*.ft` and of the oracle in its ticket; a PR that
   would pass a cap goes to the user. The test ratio stays above `agents/lines.py --min 3.0`.
 - Time: `fort --check` of `src/fort/main.ft` takes 0.94 to 0.96 s (measured: three runs, 90b50c0a,
