@@ -340,11 +340,13 @@ fn help_prints_the_usage_line_and_the_option_table() void {
     assert(str.starts_with(out, "usage: fort [options] entry.ft\noptions:\n"));
     // One line per option follows the usage line and the
     // `options:` header.
-    assert(capture.line_count(out) == 39);
+    assert(capture.line_count(out) == 40);
     assert(str.find(out, "--overwrite-report") < 0);
     string leak =
         "  --leak-report      as --check, and write each leak site that is no error yet\n";
     assert(str.find(out, leak) >= 0);
+    string uses = "  --move-report      as --check, and write each use after move or del\n";
+    assert(str.find(out, uses) >= 0);
     string ar = "  --ar <path>        the archiver that writes the lib.a of --lib (default ar)\n";
     assert(str.find(out, ar) >= 0);
     string cache_dir = "  --cache-dir <dir>  the cache directory of a library build\n";
@@ -2067,6 +2069,124 @@ fn the_leak_report_refuses_the_document() void {
     assert(err_has("fort: error: --leak-report does not combine with --json or --index\n"));
 }
 
+// A program whose one use of rule (b) is the load through `p` after its `move` (D17.21). The
+// `move` empties `p` and `q` takes the `del`, so D17.11 and the leak rule hold.
+string[7] USE_SITE = {
+    "fn main() i32 {",
+    "    i32 mut* own mut p = new(i32);",
+    "    i32 mut* own q = move(p);",
+    "    i32 v = *p;",
+    "    del(q);",
+    "    return v;",
+    "}",
+};
+
+// The lines of --move-report for USE_SITE: the read of `p` in `*p`, and the note at the `move`.
+string[2] USE_SITE_LISTED = {
+    "use_site.ft:4:14: use after move or del: 'p' can be vacated here\n",
+    "use_site.ft:3:22: note: 'p' is moved here\n",
+};
+
+// --move-report implies --check, and it lists on stdout each use of rule (b) that the pass does
+// not prove, with the message and the note of D17.21. Rule (b) is no error yet, so the run exits 0
+// with no diagnostic, --check alone lists nothing, and a build in each mode writes its module with
+// no diagnostic. With --leak-report too, one print holds the lines of both, those of part 2 of
+// the leak rule first.
+fn the_move_report_lists_each_use_of_rule_b() void {
+    write_runtime();
+    write_lines("use_site.ft", USE_SITE[..]);
+    remove_file("a.out");
+    string[3] mut report = {"fort", "--move-report", "use_site.ft"};
+    assert(run(report[0..3]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    assert(listed(USE_SITE_LISTED[..]));
+    assert(!file_exists("a.out"));
+    string[3] mut check = {"fort", "--check", "use_site.ft"};
+    assert(run(check[0..3]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    assert(listed(USE_SITE_LISTED[..0]));
+    string[6] mut build = {"fort", "-S", "-S", "use_site.ft", "-o", "use_site.ll"};
+    for (string mode : MODES) {
+        remove_file("use_site.ll");
+        build[2] = mode;
+        assert(run(build[0..6]) == EXIT_OK);
+        assert(captured_err_is_empty());
+        assert(file_exists("use_site.ll"));
+    }
+    write_lines("cast_site.ft", CAST_SITE[..]);
+    string[4] mut both = {"fort", "--move-report", "--leak-report", "cast_site.ft"};
+    assert(run(both[0..4]) == EXIT_OK);
+    assert(listed(CAST_SITE_LISTED[..]));
+    string[4] mut neither = {"fort", "--leak-report", "--move-report", "use_site.ft"};
+    assert(run(neither[0..4]) == EXIT_OK);
+    assert(listed(USE_SITE_LISTED[..]));
+}
+
+// A program whose one use of rule (b) is the index of a span after its `move` (D17.21): the
+// index reads the header of `buf` for its bounds check and for the address of its element.
+// Its count check of `new` and its bounds check name the two entries of SPAN_RUNTIME.
+string[8] SPAN_RUNTIME = {
+    "fn fail_bounds(i64 index, u64 len, char* file, u32 line, u32 col) noreturn {",
+    "    while (true) {",
+    "    }",
+    "}",
+    "fn fail_alloc_count(i64 n, char* file, u32 line, u32 col) noreturn {",
+    "    while (true) {",
+    "    }",
+    "}",
+};
+
+string[7] SPAN_SITE = {
+    "fn main() i32 {",
+    "    u8 mut@ own mut buf = new(u8, 4);",
+    "    u8 mut@ own c = move(buf);",
+    "    u8 y = buf[1];",
+    "    del(c);",
+    "    return cast(y, i32);",
+    "}",
+};
+
+// The lines of --move-report for SPAN_SITE: the read of `buf` in `buf[1]`, and the note at the
+// `move`.
+string[2] SPAN_SITE_LISTED = {
+    "span_site.ft:4:12: use after move or del: 'buf' can be vacated here\n",
+    "span_site.ft:3:21: note: 'buf' is moved here\n",
+};
+
+// Checked and release builds give the same verdict of rule (b) (D17.21): --move-report lists the
+// same lines alone, with --release, and with --no-bounds-check, which drops the bounds check that
+// reads the header of the span. The run reads SPAN_RUNTIME: rule V7 refuses a check whose entry
+// the runtime lacks (fir.md 10), and the report names no use of a function that is not lowered.
+fn the_move_report_is_the_same_in_each_mode() void {
+    assert(libc.mkdir("std_span".ptr, 0o700) == 0 || sys.errno() == libc.EEXIST);
+    write_lines("std_span/rt.ft", SPAN_RUNTIME[..]);
+    write_lines("span_site.ft", SPAN_SITE[..]);
+    string[5] mut alone = {"fort", "--std-dir", "std_span", "--move-report", "span_site.ft"};
+    assert(run(alone[0..5]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    assert(listed(SPAN_SITE_LISTED[..]));
+    string[2] modes = {"--release", "--no-bounds-check"};
+    string[6] mut report = {"fort", "--std-dir", "std_span", "--move-report", "--release",
+                            "span_site.ft"};
+    for (string mode : modes) {
+        report[4] = mode;
+        assert(run(report[0..6]) == EXIT_OK);
+        assert(captured_err_is_empty());
+        assert(listed(SPAN_SITE_LISTED[..]));
+    }
+}
+
+// The report of rule (b) goes to stdout as the document of --json does, so the two do not
+// combine.
+fn the_move_report_refuses_the_document() void {
+    string[4] mut json = {"fort", "--move-report", "--json", "entry.ft"};
+    assert(run(json[0..4]) == EXIT_USAGE);
+    assert(err_has("fort: error: --move-report does not combine with --json or --index\n"));
+    string[4] mut index = {"fort", "--index", "--move-report", "entry.ft"};
+    assert(run(index[0..4]) == EXIT_USAGE);
+    assert(err_has("fort: error: --move-report does not combine with --json or --index\n"));
+}
+
 // `if (c) { return 1; }` falling off the end of a function that returns a value: a path from
 // `bb0` reaches `unreachable`, which rule V9 refuses (test/fir/verify/v09_reachable.fir).
 string[12] FIR_V9_TEXT = {
@@ -2588,6 +2708,9 @@ fn main() i32 {
     the_leak_report_lists_each_site_of_part_2();
     the_leak_report_lists_a_site_at_a_cast();
     the_leak_report_refuses_the_document();
+    the_move_report_lists_each_use_of_rule_b();
+    the_move_report_refuses_the_document();
+    the_move_report_is_the_same_in_each_mode();
     a_proved_store_leaves_no_check_in_any_mode();
     fir_test_parses_as_a_flag();
     fir_test_combines_with_no_other_mode();

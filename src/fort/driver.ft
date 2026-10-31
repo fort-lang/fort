@@ -152,6 +152,7 @@ struct options {
     bool no_bounds_check; // --no-bounds-check
     bool check; // --check: the front end alone
     bool leak_report; // --leak-report: each leak site that is no error yet, on stdout
+    bool move_report; // --move-report: each use after move or del that is no error yet, on stdout
     bool json; // --json, the document on stdout
     bool index; // --index, the identifier index in it
     bool tokens; // --tokens: the entry file's tokens on stdout
@@ -223,6 +224,7 @@ fn help() void {
     println("  -Xcc <arg>         pass <arg> to --cc verbatim; repeatable, in order");
     println("  --check            check the program, its overwrites and its leaks; emit nothing");
     println("  --leak-report      as --check, and write each leak site that is no error yet");
+    println("  --move-report      as --check, and write each use after move or del");
     println("  --json             write the check document to stdout; needs --check");
     println("  --index            fill the document's identifier index; implies --check --json");
     println("  --tokens           write the entry file's tokens to stdout and stop");
@@ -372,9 +374,9 @@ fn parse_cfg(options mut* opts, string list) bool {
 }
 
 // The options that carry no value: -S, -c, --release, --no-bounds-check, --check,
-// --leak-report, --json, --index, --tokens, --ast, --fir, --fir-test, --fir-verify-report,
-// --fir-stats, --fir-run, --emit-interface, --emit-summaries and --cache-stats, each of which
-// sets one flag.
+// --leak-report, --move-report, --json, --index, --tokens, --ast, --fir, --fir-test,
+// --fir-verify-report, --fir-stats, --fir-run, --emit-interface, --emit-summaries and
+// --cache-stats, each of which sets one flag.
 fn parse_flag(options mut* opts, string arg) bool {
     if (arg == "-S") {
         opts->emit_ir = true;
@@ -389,6 +391,10 @@ fn parse_flag(options mut* opts, string arg) bool {
     } else if (arg == "--leak-report") {
         // --leak-report implies --check, which runs the emptiness pass
         opts->leak_report = true;
+        opts->check = true;
+    } else if (arg == "--move-report") {
+        // --move-report implies --check, which runs the proof of rule (b) with the emptiness pass
+        opts->move_report = true;
         opts->check = true;
     } else if (arg == "--json") {
         opts->json = true;
@@ -674,6 +680,10 @@ fn parse(options mut* opts, string@ args) i32 {
     if (opts->leak_report && opts->json) {
         // the report and the document both go to stdout
         usage_error("--leak-report does not combine with --json or --index");
+        return PARSE_ERROR;
+    }
+    if (opts->move_report && opts->json) {
+        usage_error("--move-report does not combine with --json or --index");
         return PARSE_ERROR;
     }
     if (opts->use_names.len > 0 && !opts->tokens && !opts->ast
@@ -1907,6 +1917,8 @@ fn run_emptiness(session.session mut* s, fir.func* f) prover.proof {
 // because a build reports it. --leak-report lists the leak sites that are no error yet on stdout,
 // with one print: the lines of report.write_inners for each site of part 2 of the leak rule that
 // the pass does not prove. Part 2 only reports, so no such site changes the verdict (D17.20).
+// --move-report lists on stdout, in the same print, the lines of report.write_uses for each use of
+// rule (b) that the pass does not prove, which changes no verdict either (D17.21).
 // `*calls` takes each function that the pass proves with no error, its direct calls and the work
 // of its proof, and after a run with no error it is solved: it holds the ownership summaries of
 // spec/ownership-design.md 8. `*calls` must be empty.
@@ -1932,6 +1944,9 @@ fn overwrite_entry(session.session mut* s, analysis mut* an, options* opts,
                 if (opts->leak_report) {
                     report.write_inners(&f, &verdicts, s, &leaks);
                 }
+                if (opts->move_report) {
+                    report.write_uses(&f, &verdicts, s, &leaks);
+                }
                 if (prover.has_error(&verdicts)) {
                     proved = false;
                 } else {
@@ -1943,7 +1958,7 @@ fn overwrite_entry(session.session mut* s, analysis mut* an, options* opts,
         }
         i += 1;
     }
-    if (opts->leak_report) {
+    if (opts->leak_report || opts->move_report) {
         print(strbuf.view(&leaks));
     }
     if (!proved) {

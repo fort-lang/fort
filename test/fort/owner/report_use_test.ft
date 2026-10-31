@@ -1,0 +1,752 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| uses ok
+//| fir text ok
+//| limit ok
+/// Checks the report of rule (b) in owner.report (D17.21): for each use that owner.prover does
+/// not prove, the line `use after move or del: '<place>' can be vacated here` at the first token of
+/// the expression whose read is the use, and the line of its note at the operation: `is moved
+/// here` at a `move` or at the `return` of an implicit `move`, `is deleted here` at a `del`, and
+/// `can change in this call` at the first token of a call. `<place>` is the source text of the
+/// read of an `own` reference, or the first owner of the local that can be vacated, with the names
+/// of its fields. A deferred use gives one line for each location and local. FIR text with no
+/// tree names the FIR place. Past the limit the first line takes the note of the limit, and no
+/// line names an operation.
+import fort.fir;
+import fort.fir_lower;
+import fort.owner.prover;
+import fort.owner.report;
+import check_env;
+import lower_env;
+import pass_env;
+import std.str;
+import std.strbuf;
+
+// The cases of the report over lowered source: the examples of D17.21 and the forms of the tests
+// against null of D17.11 gen rule 6. `refilled`, `tested` and the tests of `forms` before the
+// whole value of `&&` are proved. `result` evaluates its value into a temporary before its deferred
+// call, so the call vacates no owner of `_0`. `built` reads through a pointer after a call, and the
+// place can be a place of `_0`, which no `return` names there: the use names `_0` as the call of
+// the function. The `for` of `ranged` reads each element of `kids` through an index that no
+// source expression names, so the use names the first owner that can be vacated, `kids[0]`.
+// After `ranged` each function holds one form of `<place>` or of the location: a nested field, a
+// read through a pointer, a key, a `string`, an operand of a literal or of a cast, two locals in
+// one item, a deferred use of two locals, and a comparison with null before the use in one item,
+// which is no read of the use. `returned_moved` returns a deleted owner: the operand of the
+// implicit `move` is no use. `argument_text` moves a vacated owner, which is no use either. The
+// later functions hold a nested array, a span field, the call of a note, a loop condition, a
+// compound assignment, a `.len` through a pointer, an arm of `?:`, an index expression, a read
+// through an address that the function takes after the `del`, and an arm of a `switch`.
+// `null_store_text` stores `null` after the `del`: the store ends the state, and its load
+// through `null` stays undefined (D10.5). `array_through` reads a fixed array of owners through
+// a pointer to it.
+string[388] USES = {
+    "struct pair {",
+    "    i32* own a;",
+    "    i32* own b;",
+    "}",
+    "fn take(i32 mut* own a, i32 v) void {",
+    "    del(a);",
+    "}",
+    "fn g() void {",
+    "}",
+    "fn deleted() void {",
+    "    i32 mut* own mut p = new(i32);",
+    "    del(p);",
+    "    i32 v = *p;",
+    "}",
+    "fn refilled() void {",
+    "    i32 mut* own mut p = new(i32);",
+    "    del(p);",
+    "    p = new(i32);",
+    "    i32 v = *p;",
+    "    del(p);",
+    "}",
+    "fn tested(bool c) void {",
+    "    i32 mut* own mut p = new(i32);",
+    "    if (c) {",
+    "        del(p);",
+    "    }",
+    "    if (p != null) {",
+    "        i32 v = *p;",
+    "    }",
+    "    del(p);",
+    "}",
+    "fn argument() void {",
+    "    i32 mut* own mut q = new(i32);",
+    "    take(move(q), *q);",
+    "}",
+    "fn span() void {",
+    "    u8 mut@ own buf = new(u8, 4);",
+    "    u8 mut@ own c = move(buf);",
+    "    u64 n = buf.len;",
+    "    if (buf.ptr == null) {",
+    "        del(buf);",
+    "    }",
+    "    u8 x = buf[0];",
+    "    del(c);",
+    "}",
+    "fn fields() void {",
+    "    pair mut s = pair{};",
+    "    s.a = new(i32);",
+    "    s.b = new(i32);",
+    "    del(s.a);",
+    "    i32 v = *s.b;",
+    "    pair t = move(s);",
+    "    i32 w = *s.b;",
+    "    del(t.a);",
+    "    del(t.b);",
+    "}",
+    "fn keyed() void {",
+    "    i32 mut* own[2] mut b = {};",
+    "    u64 mut k = 0;",
+    "    del(b[k]);",
+    "    k = 1;",
+    "    del(b[k]);",
+    "    b[k] = new(i32);",
+    "    k = 0;",
+    "    i32 v = *b[k];",
+    "    del(b[0]);",
+    "    del(b[1]);",
+    "}",
+    "fn unkeyed(u64 i) void {",
+    "    i32 mut* own[2] mut b = {};",
+    "    del(b[1]);",
+    "    i32 v = *b[i % 2];",
+    "    del(b[0]);",
+    "}",
+    "fn pointer() void {",
+    "    i32 mut* own mut x = new(i32);",
+    "    i32 mut* own mut* px = &x;",
+    "    del(*px);",
+    "    *x = 1;",
+    "    x = new(i32);",
+    "    del(x);",
+    "    i32 v = **px;",
+    "    del(*px);",
+    "}",
+    "fn called() void {",
+    "    i32 mut* own mut x = new(i32);",
+    "    i32 mut* own mut* px = &x;",
+    "    g();",
+    "    *x = 1;",
+    "    del(x);",
+    "}",
+    "fn returned() i32 mut* own {",
+    "    i32 mut* own p = new(i32);",
+    "    defer *p = 0;",
+    "    return p;",
+    "}",
+    "fn deferred(bool c) void {",
+    "    i32 mut* own mut p = new(i32);",
+    "    i32 mut* own q = move(p);",
+    "    defer {",
+    "        i32 v = *p;",
+    "    }",
+    "    if (c) {",
+    "        del(q);",
+    "        return;",
+    "    }",
+    "    del(q);",
+    "}",
+    "fn forms(bool mut c) void {",
+    "    i32 mut* own mut p = new(i32);",
+    "    if (c) {",
+    "        del(p);",
+    "    }",
+    "    if (p != null && *p == 1) {",
+    "        c = false;",
+    "    }",
+    "    if (p == null || *p == 1) {",
+    "        c = true;",
+    "    }",
+    "    i32 v = p != null ? *p : 0;",
+    "    if (!(p == null)) {",
+    "        *p = 2;",
+    "    }",
+    "    while (p != null) {",
+    "        *p = 3;",
+    "        del(p);",
+    "    }",
+    "    bool ok = p != null && c;",
+    "    if (ok) {",
+    "        *p = 4;",
+    "    }",
+    "    del(p);",
+    "}",
+    "fn result() pair {",
+    "    defer g();",
+    "    return pair{new(i32), new(i32)};",
+    "}",
+    "fn built(i32* v) pair {",
+    "    g();",
+    "    i32 w = *v;",
+    "    return pair{};",
+    "}",
+    "fn ranged() i32 {",
+    "    i32 mut* own[2] mut kids = {};",
+    "    kids[0] = new(i32);",
+    "    del(kids[1]);",
+    "    i32 mut sum = 0;",
+    "    for (i32 mut* c : kids) {",
+    "        sum += *c;",
+    "    }",
+    "    del(kids[0]);",
+    "    return sum;",
+    "}",
+    "struct cell {",
+    "    i32 mut* own o;",
+    "    i32 v;",
+    "}",
+    "struct inner {",
+    "    i32 mut* own a;",
+    "}",
+    "struct outer {",
+    "    inner in;",
+    "    i32 mut* own[2] e;",
+    "}",
+    "fn take2(i32 mut* own a, i32 mut* own b) void {",
+    "    del(a);",
+    "    del(b);",
+    "}",
+    "fn nested_text() void {",
+    "    outer mut t = outer{};",
+    "    t.e[0] = new(i32);",
+    "    del(t.e[1]); //@op",
+    "    i32 v = *t.e[0]; //@use",
+    "    del(t.e[0]);",
+    "}",
+    "fn through_text() void {",
+    "    pair mut s = pair{};",
+    "    pair* ps = &s;",
+    "    del(s.b); //@op",
+    "    i32* own mut x = new(i32);",
+    "    bool same = ps->a == x; //@use",
+    "    del(x);",
+    "}",
+    "fn keyed_text(u64 k) void {",
+    "    pair[2] mut arr = {};",
+    "    del(arr[k].a); //@op",
+    "    i32 v = *arr[k].a; //@use",
+    "}",
+    "fn string_text() void {",
+    "    u8 mut@ own buf = new(u8, 2);",
+    "    string own s = cast(move(buf), string own);",
+    "    string own t = move(s); //@op",
+    "    u64 n = s.len;",
+    "    char c = s[0]; //@use",
+    "    del(t);",
+    "}",
+    "fn literal_note() void {",
+    "    i32 mut* own mut p = new(i32);",
+    "    pair t = pair{null, move(p)}; //@op",
+    "    i32 v = *p; //@use",
+    "    del(t.b);",
+    "}",
+    "fn cast_note() void {",
+    "    u8 mut@ own buf = new(u8, 2);",
+    "    string own s = cast(move(buf), string own); //@op",
+    "    u8 x = buf[1]; //@use",
+    "    del(s);",
+    "}",
+    "fn two_moves() void {",
+    "    i32 mut* own mut p = new(i32);",
+    "    i32 mut* own mut q = new(i32);",
+    "    take2(move(q), move(p)); //@op",
+    "    i32 v = *p; //@use",
+    "}",
+    "fn chain_text() void {",
+    "    i32 mut* own mut x = new(i32);",
+    "    i32 mut* own mut* mut p = &x;",
+    "    i32 mut* own mut** pp = &p;",
+    "    del(x); //@op",
+    "    i32 v = ***pp; //@use",
+    "}",
+    "fn compared_text(i32 mut* q) bool {",
+    "    i32 mut* own mut p = new(i32);",
+    "    del(p); //@op",
+    "    return cast(p, i32 mut*) == q; //@use",
+    "}",
+    "fn returned_moved() i32 mut* own {",
+    "    i32 mut* own mut p = new(i32);",
+    "    del(p);",
+    "    return p;",
+    "}",
+    "fn address_text() void {",
+    "    cell mut* own mut p = new(cell);",
+    "    del(p); //@op",
+    "    i32* v = &p->v; //@use",
+    "}",
+    "fn two_locals() void {",
+    "    i32 mut* own mut p = new(i32);",
+    "    i32 mut* own mut q = new(i32);",
+    "    del(q); //@op",
+    "    del(p); //@op2",
+    "    i32 v = *p + *q; //@use",
+    "}",
+    "fn deferred_two(bool c) void {",
+    "    i32 mut* own mut p = new(i32);",
+    "    i32 mut* own mut q = new(i32);",
+    "    i32 mut* own r = move(p); //@op",
+    "    i32 mut* own s = move(q); //@op2",
+    "    defer {",
+    "        i32 v = *p + *q; //@use",
+    "    }",
+    "    if (c) {",
+    "        del(r);",
+    "        del(s);",
+    "        return;",
+    "    }",
+    "    del(r);",
+    "    del(s);",
+    "}",
+    "fn field_call() void {",
+    "    pair mut s = pair{};",
+    "    s.a = new(i32);",
+    "    pair mut* ps = &s;",
+    "    g(); //@op",
+    "    i32 v = *s.a; //@use",
+    "    del(s.a);",
+    "}",
+    "fn element_field(u64 i) void {",
+    "    outer mut t = outer{};",
+    "    del(t.e[0]); //@op",
+    "    i32 v = *t.e[i]; //@use",
+    "}",
+    "fn null_operand() void {",
+    "    i32 mut* own mut p = new(i32);",
+    "    del(p); //@op",
+    "    bool b = p == null;",
+    "    i32 v = *p; //@use",
+    "}",
+    "fn both(bool a, i32 b) void {",
+    "}",
+    "fn null_first() void {",
+    "    i32 mut* own mut p = new(i32);",
+    "    del(p); //@op",
+    "    both(p == null, *p); //@use",
+    "}",
+    "fn null_left() void {",
+    "    i32 mut* own mut p = new(i32);",
+    "    i32 mut* own q = move(p); //@op",
+    "    both(null != p, *p); //@use",
+    "    del(q);",
+    "}",
+    "struct bag {",
+    "    u8 mut@ own data;",
+    "    u64 n;",
+    "}",
+    "fn keep(i32 mut* own mut* p) void {",
+    "}",
+    "fn matrix_text() void {",
+    "    i32 mut* own[2][2] mut m = {};",
+    "    m[1][0] = new(i32);",
+    "    del(m[0][1]); //@op",
+    "    i32 v = *m[1][0]; //@use",
+    "    del(m[1][0]);",
+    "}",
+    "fn bag_text() void {",
+    "    bag mut b = bag{};",
+    "    b.data = new(u8, 2);",
+    "    del(b.data); //@op",
+    "    u8 x = b.data[1]; //@use",
+    "}",
+    "fn keep_note() void {",
+    "    i32 mut* own mut x = new(i32);",
+    "    keep(&x); //@op",
+    "    *x = 1; //@use",
+    "    del(x);",
+    "}",
+    "fn while_text() void {",
+    "    i32 mut* own mut p = new(i32);",
+    "    del(p); //@op",
+    "    while (*p > 0) { //@use",
+    "        break;",
+    "    }",
+    "}",
+    "fn compound_text() void {",
+    "    i32 mut* own mut p = new(i32);",
+    "    del(p); //@op",
+    "    *p += 1; //@use",
+    "}",
+    "fn pointer_len_text() void {",
+    "    u8 mut@ own mut buf = new(u8, 2);",
+    "    u8 mut@ own mut* pb = &buf;",
+    "    u8 mut@ own c = move(buf); //@op",
+    "    u64 n = (*pb).len; //@use",
+    "    del(c);",
+    "}",
+    "fn outer_element_text() void {",
+    "    outer mut o = outer{};",
+    "    o.e[1] = new(i32);",
+    "    i32 mut* own a = move(o.e[1]); //@op",
+    "    i32 v = *o.e[1]; //@use",
+    "    del(a);",
+    "}",
+    "fn ternary_text(bool c) void {",
+    "    i32 mut* own mut p = new(i32);",
+    "    del(p); //@op",
+    "    i32 v = c ? *p : 0; //@use",
+    "}",
+    "fn index_text() void {",
+    "    i32 mut* own mut p = new(i32);",
+    "    i32[2] a = {};",
+    "    del(p); //@op",
+    "    i32 v = a[cast(*p, u64)]; //@use",
+    "}",
+    "fn argument_text() void {",
+    "    i32 mut* own mut p = new(i32);",
+    "    i32 mut* own mut q = new(i32);",
+    "    take2(move(q), move(p)); //@op",
+    "    take2(new(i32), move(q)); //@use",
+    "}",
+    "fn address_after_text() void {",
+    "    i32 mut* own mut x = new(i32);",
+    "    del(x); //@op",
+    "    i32 mut* own mut* px = &x;",
+    "    i32 v = **px; //@use",
+    "}",
+    "fn switch_text(i32 n) void {",
+    "    i32 mut* own mut p = new(i32);",
+    "    switch (n) {",
+    "    case 0:",
+    "        del(p); //@op",
+    "    default:",
+    "        g();",
+    "    }",
+    "    *p = 2; //@use",
+    "}",
+    "fn null_store_text() void {",
+    "    i32 mut* own mut p = new(i32);",
+    "    del(p);",
+    "    p = null;",
+    "    *p = 1;",
+    "}",
+    "fn array_through() void {",
+    "    i32 mut* own[2] mut b = {};",
+    "    i32 mut* own[2] mut* pb = &b;",
+    "    b[0] = new(i32);",
+    "    del(b[0]); //@op",
+    "    i32 w = *(*pb)[0]; //@use",
+    "}",
+};
+string[48] USE_NAMES = {
+    "deleted", "refilled", "tested", "argument", "span", "fields", "keyed", "unkeyed", "pointer",
+    "called", "returned", "deferred", "forms", "result", "built", "ranged", "nested_text",
+    "through_text", "keyed_text", "string_text", "literal_note", "cast_note", "two_moves",
+    "chain_text", "compared_text", "returned_moved", "address_text", "two_locals", "deferred_two",
+    "field_call", "element_field", "null_operand", "null_first", "null_left", "matrix_text",
+    "bag_text", "keep_note", "while_text", "compound_text", "pointer_len_text",
+    "outer_element_text", "ternary_text", "index_text", "argument_text", "address_after_text",
+    "switch_text", "null_store_text", "array_through",
+};
+
+// The lines of the report of USES, each after the file, in the order of the functions. Each was
+// derived from the source: the column of the first token of the read, and of the `del`, the
+// `move`, the `return` or the call of the note.
+string[90] USE_LINES = {
+    ":13:14: use after move or del: 'p' can be vacated here",
+    ":12:5: note: 'p' is deleted here",
+    ":34:20: use after move or del: 'q' can be vacated here",
+    ":34:10: note: 'q' is moved here",
+    ":43:12: use after move or del: 'buf' can be vacated here",
+    ":38:21: note: 'buf' is moved here",
+    ":53:14: use after move or del: 's.b' can be vacated here",
+    ":52:14: note: 's.b' is moved here",
+    ":65:14: use after move or del: 'b[k]' can be vacated here",
+    ":60:5: note: 'b[k]' is deleted here",
+    ":72:14: use after move or del: 'b[i % 2]' can be vacated here",
+    ":71:5: note: 'b[i % 2]' is deleted here",
+    ":79:6: use after move or del: 'x' can be vacated here",
+    ":78:5: note: 'x' is deleted here",
+    ":82:14: use after move or del: 'x' can be vacated here",
+    ":81:5: note: 'x' is deleted here",
+    ":89:6: use after move or del: 'x' can be vacated here",
+    ":88:5: note: 'x' can change in this call",
+    ":94:12: use after move or del: 'p' can be vacated here",
+    ":95:5: note: 'p' is moved here",
+    ":101:18: use after move or del: 'p' can be vacated here",
+    ":99:22: note: 'p' is moved here",
+    ":130:10: use after move or del: 'p' can be vacated here",
+    ":112:9: note: 'p' is deleted here",
+    ":140:13: use after move or del: 'built().a' can be vacated here",
+    ":139:5: note: 'built().a' can change in this call",
+    ":148:23: use after move or del: 'kids[0]' can be vacated here",
+    ":146:5: note: 'kids[0]' is deleted here",
+    ":173:14: use after move or del: 't.e[0]' can be vacated here",
+    ":172:5: note: 't.e[0]' is deleted here",
+    ":181:17: use after move or del: 's.b' can be vacated here",
+    ":179:5: note: 's.b' is deleted here",
+    ":187:14: use after move or del: 'arr[k].a' can be vacated here",
+    ":186:5: note: 'arr[k].a' is deleted here",
+    ":194:14: use after move or del: 's' can be vacated here",
+    ":192:20: note: 's' is moved here",
+    ":200:14: use after move or del: 'p' can be vacated here",
+    ":199:25: note: 'p' is moved here",
+    ":206:12: use after move or del: 'buf' can be vacated here",
+    ":205:25: note: 'buf' is moved here",
+    ":213:14: use after move or del: 'p' can be vacated here",
+    ":212:20: note: 'p' is moved here",
+    ":220:14: use after move or del: 'x' can be vacated here",
+    ":219:5: note: 'x' is deleted here",
+    ":225:17: use after move or del: 'p' can be vacated here",
+    ":224:5: note: 'p' is deleted here",
+    ":235:15: use after move or del: 'p' can be vacated here",
+    ":234:5: note: 'p' is deleted here",
+    ":242:14: use after move or del: 'p' can be vacated here",
+    ":241:5: note: 'p' is deleted here",
+    ":242:19: use after move or del: 'q' can be vacated here",
+    ":240:5: note: 'q' is deleted here",
+    ":250:18: use after move or del: 'p' can be vacated here",
+    ":247:22: note: 'p' is moved here",
+    ":250:23: use after move or del: 'q' can be vacated here",
+    ":248:22: note: 'q' is moved here",
+    ":265:14: use after move or del: 's.a' can be vacated here",
+    ":264:5: note: 's.a' can change in this call",
+    ":271:14: use after move or del: 't.e[i]' can be vacated here",
+    ":270:5: note: 't.e[i]' is deleted here",
+    ":277:14: use after move or del: 'p' can be vacated here",
+    ":275:5: note: 'p' is deleted here",
+    ":284:22: use after move or del: 'p' can be vacated here",
+    ":283:5: note: 'p' is deleted here",
+    ":289:22: use after move or del: 'p' can be vacated here",
+    ":288:22: note: 'p' is moved here",
+    ":302:14: use after move or del: 'm[1][0]' can be vacated here",
+    ":301:5: note: 'm[1][0]' is deleted here",
+    ":309:12: use after move or del: 'b.data' can be vacated here",
+    ":308:5: note: 'b.data' is deleted here",
+    ":314:6: use after move or del: 'x' can be vacated here",
+    ":313:5: note: 'x' can change in this call",
+    ":320:13: use after move or del: 'p' can be vacated here",
+    ":319:5: note: 'p' is deleted here",
+    ":327:6: use after move or del: 'p' can be vacated here",
+    ":326:5: note: 'p' is deleted here",
+    ":333:14: use after move or del: 'buf' can be vacated here",
+    ":332:21: note: 'buf' is moved here",
+    ":340:14: use after move or del: 'o.e[1]' can be vacated here",
+    ":339:22: note: 'o.e[1]' is moved here",
+    ":346:18: use after move or del: 'p' can be vacated here",
+    ":345:5: note: 'p' is deleted here",
+    ":352:21: use after move or del: 'p' can be vacated here",
+    ":351:5: note: 'p' is deleted here",
+    ":364:14: use after move or del: 'x' can be vacated here",
+    ":362:5: note: 'x' is deleted here",
+    ":374:6: use after move or del: 'p' can be vacated here",
+    ":370:9: note: 'p' is deleted here",
+    ":387:15: use after move or del: 'b[0]' can be vacated here",
+    ":386:5: note: 'b[0]' is deleted here",
+};
+
+// Lowers the function `name` of the checked source of `e` into *out, and holds that the
+// verifier accepts it.
+fn lower(lower_env.env mut* e, string name, fir.func mut* out) void {
+    fir_lower.report mut why = fir_lower.report{};
+    if (!fir_lower.lower_function(&e->c.ck, lower_env.decl(e, name), out, &why)) {
+        panic("report_use_test: the lowering refuses the function");
+    }
+    pass_env.verified(e, out, "report_use_test: the verifier refuses the lowering");
+}
+
+// Holds that `got` holds the lines of `want`, each after `file` and with a newline, and nothing
+// else.
+fn expect_lines(string got, string file, string@ want) void {
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut k = 0;
+    while (k < want.len) {
+        strbuf.append(&text, file);
+        strbuf.append(&text, want[k]);
+        strbuf.push(&text, '\n');
+        k += 1;
+    }
+    if (got != strbuf.view(&text)) {
+        eprintln(got, "and not\n", strbuf.view(&text));
+        panic("report_use_test: the lines differ");
+    }
+}
+
+// The report names each use of USES that the pass does not prove, in the file of the function,
+// and writes no diagnostic: rule (b) is no error yet.
+fn the_report_names_each_unproved_use() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, USES[..], true);
+    string file = lower_env.decl(&e, "deleted")->loc.file;
+    assert(str.ends_with(file, "main.ft"));
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    u64 before = check_env.reports(&e.c);
+    u64 mut k = 0;
+    while (k < USE_NAMES.len) {
+        fir.func mut f = fir.func{};
+        lower(&e, USE_NAMES[k], &f);
+        prover.proof mut p = prover.prove(&f);
+        report.write_uses(&f, &p, &e.c.m.s, &got);
+        prover.free(&p);
+        fir.func_free(&f);
+        k += 1;
+    }
+    assert(check_env.reports(&e.c) == before);
+    expect_lines(strbuf.view(&got), file, USE_LINES[..]);
+    println("uses ok");
+}
+
+// The types of the FIR texts of TEXT_USES.
+string[8] TEXT_PRELUDE = {
+    "struct node {",
+    "    node mut* own left;",
+    "    i32 v;",
+    "}",
+    "struct pair {",
+    "    node mut* own a;",
+    "    node mut* own b;",
+    "}",
+};
+
+// FIR texts with locations and no tree: a named local or a parameter takes its name, the fields
+// their names, and a temporary with no location the FIR place. The read of `t2` through a pointer
+// names the first owner of `s` that can be vacated, `s.b`.
+string[33] TEXT_USES = {
+    "fn main.t1(_1 (p): node mut* own) -> void {",
+    "    let _2: i32;",
+    "    bb0: {",
+    "        del(move _1) #2:1;",
+    "        _2 = copy (*_1).1 #3:1;",
+    "        return #4:1;",
+    "    }",
+    "}",
+    "fn main.t2(_1 (s): pair) -> void {",
+    "    let _2: pair*;",
+    "    let _3: bool;",
+    "    bb0: {",
+    "        _2 = addr(_1) #6:1;",
+    "        del(move _1.1) #7:1;",
+    "        _3 = eq(copy (*_2).0, copy (*_2).1) #8:1;",
+    "        return #9:1;",
+    "    }",
+    "}",
+    "fn main.t3() -> void {",
+    "    let _1: node mut* own;",
+    "    let _2: i32;",
+    "    bb0: {",
+    "        _1 = alloc<node>(const u64 1) #11:1;",
+    "        del(move _1) #12:1;",
+    "        _2 = copy (*_1).1 #13:1;",
+    "        return #14:1;",
+    "    }",
+    "}",
+    "fn main.t4() -> void {",
+    "    bb0: {",
+    "        return #16:1;",
+    "    }",
+    "}",
+};
+
+string[6] TEXT_USE_LINES = {
+    "t.fir:3:1: use after move or del: 'p' can be vacated here\n",
+    "t.fir:2:1: note: 'p' is deleted here\n",
+    "t.fir:8:1: use after move or del: 's.b' can be vacated here\n",
+    "t.fir:7:1: note: 's.b' is deleted here\n",
+    "t.fir:13:1: use after move or del: '_1' can be vacated here\n",
+    "t.fir:12:1: note: '_1' is deleted here\n",
+};
+
+// With no tree, the report of rule (b) names the FIR place where no name stands.
+fn the_report_of_a_fir_text_names_the_fir_place() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    fir.module mut m = pass_env.parse(&e, TEXT_PRELUDE[..], TEXT_USES[..]);
+    defer fir.module_free(&m);
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    u64 mut f = 0;
+    while (f < m.funcs.len) {
+        prover.proof mut p = prover.prove(&m.funcs.items[f]);
+        report.write_uses(&m.funcs.items[f], &p, &e.c.m.s, &got);
+        prover.free(&p);
+        f += 1;
+    }
+    strbuf.str_buf mut want = strbuf.create();
+    defer strbuf.free(&want);
+    u64 mut k = 0;
+    while (k < TEXT_USE_LINES.len) {
+        strbuf.append(&want, TEXT_USE_LINES[k]);
+        k += 1;
+    }
+    if (strbuf.view(&got) != strbuf.view(&want)) {
+        eprintln(strbuf.view(&got));
+        panic("report_use_test: the lines of a FIR text differ");
+    }
+    println("fir text ok");
+}
+
+// The lines of `pointer` past the limit: each use is unproved, no line names an operation, and only
+// the first line takes the note of the limit.
+string[3] POINTER_LIMIT_LINES = {
+    ":79:6: use after move or del: 'x' can be vacated here",
+    ":79:6: note: the function exceeds the work limit of D17.21; split it",
+    ":82:14: use after move or del: 'x' can be vacated here",
+};
+
+// Past the limit no use is proved: `refilled`, which the pass proves, has its one use, the read of
+// `p`, past a limit of 0.
+string[2] REFILLED_LIMIT_LINES = {
+    ":19:14: use after move or del: 'p' can be vacated here",
+    ":19:14: note: the function exceeds the work limit of D17.21; split it",
+};
+
+// The lines of `array_through` past the limit: its read through `pb` names the first owner of the
+// memory local `b`, `b[0]`, and no operation.
+string[2] THROUGH_LIMIT_LINES = {
+    ":387:15: use after move or del: 'b[0]' can be vacated here",
+    ":387:15: note: the function exceeds the work limit of D17.21; split it",
+};
+
+fn the_first_line_past_the_limit_names_the_limit() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, USES[..], true);
+    string file = lower_env.decl(&e, "pointer")->loc.file;
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    lower(&e, "pointer", &f);
+    prover.proof mut over = prover.prove_limits(&f, prover.WORK_LIMIT, 0);
+    defer prover.free(&over);
+    assert(over.use_over && over.use_unproved == 2);
+    report.write_uses(&f, &over, &e.c.m.s, &got);
+    expect_lines(strbuf.view(&got), file, POINTER_LIMIT_LINES[..]);
+    fir.func mut g = fir.func{};
+    defer fir.func_free(&g);
+    lower(&e, "refilled", &g);
+    prover.proof mut proved = prover.prove(&g);
+    defer prover.free(&proved);
+    assert(!proved.use_over && proved.use_unproved == 0);
+    prover.proof mut past = prover.prove_limits(&g, prover.WORK_LIMIT, 0);
+    defer prover.free(&past);
+    strbuf.clear(&got);
+    report.write_uses(&g, &past, &e.c.m.s, &got);
+    expect_lines(strbuf.view(&got), file, REFILLED_LIMIT_LINES[..]);
+    fir.func mut h = fir.func{};
+    defer fir.func_free(&h);
+    lower(&e, "array_through", &h);
+    prover.proof mut through = prover.prove_limits(&h, prover.WORK_LIMIT, 0);
+    defer prover.free(&through);
+    assert(through.use_over && through.use_unproved == 1);
+    strbuf.clear(&got);
+    report.write_uses(&h, &through, &e.c.m.s, &got);
+    expect_lines(strbuf.view(&got), file, THROUGH_LIMIT_LINES[..]);
+    println("limit ok");
+}
+
+fn main() i32 {
+    the_report_names_each_unproved_use();
+    the_report_of_a_fir_text_names_the_fir_place();
+    the_first_line_past_the_limit_names_the_limit();
+    return 0;
+}

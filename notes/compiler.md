@@ -886,6 +886,40 @@ came here.
   whose name stands at the location of the FIR `del`, or the `cast` that starts there. To count the
   sites, run `--leak-report` over each entry of the corpora and group the lines by the directory of
   their file; the counts stand in the ticket of the change.
+- **The emptiness pass proves rule (b) of D17.21, and only reports it** (`spec/fir.md` 11, Uses).
+  `owner.prover.prove_uses` runs after the facts, in the same context, so it reuses the survey of
+  the places, the stale dataflow, the tests against null and the map of `owner.alias`, and it
+  changes no fact: `prove_limits` keeps each line of the emptiness proof, and `has_error` reads no
+  use, so no verdict of `--check` changes. A function with a local owner and no work of D17.11 or
+  D17.20 takes a light survey (`place.count_stores`, which counts no read and marks no held address,
+  and none reads an owner), and no stale dataflow when no index temporary takes its key from a
+  local. Each block turns into acts once (`collect_acts`), and the fixpoint and the judge read the
+  acts and trace no place again. An act traces a place only when its local holds an owner in its
+  type, or for a place through a pointer, also through a global, when a memory local holds one
+  (`can_name_owner`). A place through a global that holds `&x` can be `x` (`alias.can_be` gives the
+  exposure of `x`), and a refusal of each global place let `P = &x; del(x); **P` pass with no line.
+  A walk that traced each place of each function took 0.05 s more of
+  `fort --check src/fort/main.ft`. The state holds ranks, not bits: the rank of an operation orders
+  the `move`, `del` and call acts by their source positions (`rank_ops`), so the least rank of an
+  owner names the operation of the note, and a tie at one position cannot name an operation that
+  reaches no use. A position alone gave each act of FIR text with no location one value, and the
+  note of `b7` in `test/fort/owner/prover_use_test.ft` named a call that a store before the read had
+  ended. The values of the state are the owners that `make_owners` makes, each with one more for
+  each local key, which the charge of D17.21 counts; a bound that counted a read `b[k]` twice let
+  the first pass stop before the limit. The map of `owner.alias` is made only when an act goes
+  through a pointer; a map that rule (b) made before the facts and that the facts made again cost
+  0.05 s. `--move-report` writes the lines of `report.write_uses` in the print of `--leak-report`.
+  The error names the expression of the read in the tree of the item (`report.find_read`), which
+  matches a `*`, a `.`, a `->` or an index to each projection of the FIR place and skips the operand
+  of `&`, `move`, `del`, a comparison with `null`, the target of `=` and the operand of a field or
+  of an index into a fixed array, which load no pointer of it. A read that the lowering made, such
+  as the element of a `for` over a fixed array, has no expression; the use then names its owner in
+  the type of its local (`use.local_owner`), and FIR text gives the FIR place. The result `_0` of an
+  aggregate type, which a read through a pointer can reach before its store, is named as the call of
+  the function, `make()`. To count the uses, run `--move-report` over each entry of the corpora and
+  group the lines by the directory of their file; a probe compiler whose report also writes
+  `use.memory` and `use.through` gives the variants. The counts stand in `spec/ownership-design.md`
+  6.2.
 - **A test against null makes the facts of its place hold on one edge** (D17.11 gen rule 6,
   `spec/fir.md` 11, Tests). `owner.place.find_test` reads a block that ends in `switch(copy _c)` on
   a flag, a `bool` temporary that is no memory, and goes back through the last store into the
