@@ -63,11 +63,18 @@ fn from_u64(u64 v) big {
 
 fn copy_big(big* a, u64 extra) big {
     big mut out = make(a->count + extra);
-    for (u64 mut i = 0; i < a->count; i++) {
-        out.limbs[i] = a->limbs[i];
-    }
-    out.count = a->count;
+    copy_into(&out, a);
     return move(out);
+}
+
+// Each function that returns a big allocates it and fills it in an _into function. After
+// the call to make, a read through a parameter could read the result, which a call can
+// change, so the reads stay in a function that takes pointers (D17.21).
+fn copy_into(big mut* out, big* a) void {
+    for (u64 mut i = 0; i < a->count; i++) {
+        out->limbs[i] = a->limbs[i];
+    }
+    out->count = a->count;
 }
 
 fn compare_big(big* a, big* b) i32 {
@@ -96,6 +103,12 @@ fn add_big(big* a, big* b) big {
         n = b->count;
     }
     big mut out = make(n + 1);
+    add_into(&out, a, b, n);
+    return move(out);
+}
+
+// The limbs of a + b into out, which holds n + 1 limbs.
+fn add_into(big mut* out, big* a, big* b, u64 n) void {
     u64 mut carry = 0;
     for (u64 mut i = 0; i < n; i++) {
         u64 mut sum = carry;
@@ -105,18 +118,23 @@ fn add_big(big* a, big* b) big {
         if (i < b->count) {
             sum += b->limbs[i];
         }
-        out.limbs[i] = sum % BASE;
+        out->limbs[i] = sum % BASE;
         carry = sum / BASE;
     }
-    out.limbs[n] = carry;
-    out.count = n + 1;
-    trim(&out);
-    return move(out);
+    out->limbs[n] = carry;
+    out->count = n + 1;
+    trim(out);
 }
 
 // a - b, defined only when a >= b, which the caller checks.
 fn sub_big(big* a, big* b) big {
     big mut out = make(a->count);
+    sub_into(&out, a, b);
+    return move(out);
+}
+
+// The limbs of a - b into out.
+fn sub_into(big mut* out, big* a, big* b) void {
     u64 mut borrow = 0;
     for (u64 mut i = 0; i < a->count; i++) {
         u64 mut take = borrow;
@@ -124,60 +142,69 @@ fn sub_big(big* a, big* b) big {
             take += b->limbs[i];
         }
         if (a->limbs[i] >= take) {
-            out.limbs[i] = a->limbs[i] - take;
+            out->limbs[i] = a->limbs[i] - take;
             borrow = 0;
         } else {
-            out.limbs[i] = a->limbs[i] + BASE - take;
+            out->limbs[i] = a->limbs[i] + BASE - take;
             borrow = 1;
         }
     }
-    out.count = a->count;
-    trim(&out);
-    return move(out);
+    out->count = a->count;
+    trim(out);
 }
 
 fn mul_small(big* a, u64 k) big {
     big mut out = make(a->count + 2);
+    mul_small_into(&out, a, k);
+    return move(out);
+}
+
+// The limbs of a * k into out.
+fn mul_small_into(big mut* out, big* a, u64 k) void {
     u64 mut carry = 0;
     for (u64 mut i = 0; i < a->count; i++) {
         u64 product = a->limbs[i] * k + carry;
-        out.limbs[i] = product % BASE;
+        out->limbs[i] = product % BASE;
         carry = product / BASE;
     }
     u64 mut at = a->count;
     while (carry != 0) {
-        out.limbs[at] = carry % BASE;
+        out->limbs[at] = carry % BASE;
         carry /= BASE;
         at++;
     }
-    out.count = at;
-    if (out.count == 0) {
-        out.count = 1;
+    out->count = at;
+    if (out->count == 0) {
+        out->count = 1;
     }
-    trim(&out);
-    return move(out);
+    trim(out);
 }
 
 fn mul_big(big* a, big* b) big {
     big mut out = make(a->count + b->count + 1);
-    out.count = a->count + b->count + 1;
+    mul_big_into(&out, a, b);
+    return move(out);
+}
+
+// Long multiplication into out, which holds a->count + b->count + 1 zero limbs.
+fn mul_big_into(big mut* out, big* a, big* b) void {
+    out->count = a->count + b->count + 1;
     for (u64 mut i = 0; i < a->count; i++) {
         u64 mut carry = 0;
         for (u64 mut j = 0; j < b->count; j++) {
-            u64 cur = out.limbs[i + j] + a->limbs[i] * b->limbs[j] + carry;
-            out.limbs[i + j] = cur % BASE;
+            u64 cur = out->limbs[i + j] + a->limbs[i] * b->limbs[j] + carry;
+            out->limbs[i + j] = cur % BASE;
             carry = cur / BASE;
         }
         u64 mut at = i + b->count;
         while (carry != 0) {
-            u64 cur = out.limbs[at] + carry;
-            out.limbs[at] = cur % BASE;
+            u64 cur = out->limbs[at] + carry;
+            out->limbs[at] = cur % BASE;
             carry = cur / BASE;
             at++;
         }
     }
-    trim(&out);
-    return move(out);
+    trim(out);
 }
 
 // The decimal text: the top limb without padding, every other limb padded to

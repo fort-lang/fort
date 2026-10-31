@@ -768,6 +768,11 @@ import std.vec;
 
 struct node { i64 value; }
 
+// A read through a pointer parameter: the owner is no local owner here (D17.21).
+fn value_of(node* p) i64 {
+    return p->value;
+}
+
 fn demo() i64 {
     vec.ptr_vec mut stack = vec.ptr_create();
     defer vec.ptr_free(&stack);
@@ -776,7 +781,7 @@ fn demo() i64 {
     n->value = 7;
     vec.ptr_push(&stack, cast(n, void mut*)); // lends n; the vector never frees it
     node* top = cast(vec.ptr_pop(&stack), node*);
-    return top->value;
+    return value_of(top);   // top->value here could read stack after the call (D17.21)
 }
 ```
 
@@ -1350,18 +1355,10 @@ import std.io;
 import std.str;
 import std.sys;
 
-fn main(string@ args) i32 {
-    if (args.len != 2) {
-        eprintln("usage: ", args[0], " <file>");
-        return 2;
-    }
-    u8 mut@ own mut data = {};
-    defer del(data);
-    if (!io.read_file_bytes(args[1], &data)) {
-        eprintln("wc: cannot read ", args[1], " (errno ", sys.errno(), ")");
-        return 1;
-    }
-    string text = cast(data[..], string);
+// Prints the line and word counts of the bytes. data is a pointer, so its owner is no local
+// owner here (D17.21).
+fn count(u8 mut@ own* data) void {
+    string text = cast((*data)[..], string);
     u64 mut lines = 0;
     u64 mut words = 0;
     bool mut in_word = false;
@@ -1386,6 +1383,20 @@ fn main(string@ args) i32 {
         lines++;
     }
     println(lines, " ", words);
+}
+
+fn main(string@ args) i32 {
+    if (args.len != 2) {
+        eprintln("usage: ", args[0], " <file>");
+        return 2;
+    }
+    u8 mut@ own mut data = {};
+    defer del(data);
+    if (!io.read_file_bytes(args[1], &data)) {
+        eprintln("wc: cannot read ", args[1], " (errno ", sys.errno(), ")");
+        return 1;
+    }
+    count(&data);
     return 0;
 }
 ```
@@ -1394,7 +1405,9 @@ Notes: `data` is declared `u8 mut@ own mut` so that `&data` has type `u8 mut@ ow
 D17.2), the slot type `read_file_bytes` fills, and it starts as `{}` because the callee stores
 over it (D17.11); `defer del(data)` is registered before the call, so both later `return` paths
 free the bytes (D7.8), and on the failure path `del` of the still-zero span is a no-op (D17.9);
-`text` is a view of the bytes (`data[..]` and a cast between the span families, D17.3, D3.14),
+`count` reads the bytes through a pointer, because a read of `data` in `main` after the call
+is a use that D17.21 cannot prove;
+`text` is a view of the bytes (`(*data)[..]` and a cast between the span families, D17.3, D3.14),
 so no second owner exists; the counters are `u64` because `.len` is (D16); and the
 `text.len > 0` guard keeps `text.len - 1` from trapping on an empty file (D11.1).
 

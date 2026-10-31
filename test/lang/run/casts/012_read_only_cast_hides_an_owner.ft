@@ -53,26 +53,32 @@ struct link {
     u64 v;
 }
 
-fn main() i32 {
-    holder mut h = holder{.count = 7, .data = new(u64)};
-    u64* first = cast(&h, u64*);
-    void* anon = cast(&h, void*);
+// main takes the address of each owner, so a call in main can change them, and a read of
+// one after a call is a use that D17.21 cannot prove. So each part of the test is a function
+// that reads through a parameter, where the owner is no local owner.
+fn holder_views(holder mut* h) void {
+    u64* first = cast(h, u64*);
+    void* anon = cast(h, void*);
     holder_view* back = cast(anon, holder_view*);
-    u64* bits = cast(&h.data, u64*);
-    println(*first, " ", back->count, " ", *bits == cast(h.data, u64));
-    slots mut k = slots{.one = new(u64), .text = str.dup("ab"), .buf = new(u8, 2)};
-    u64* slot = cast(&k.one, u64*);
-    header* words = cast(&k.text, header*);
-    println(*slot == cast(k.one, u64), " ", words->len);
-    // A span of owners seen through read-only elements that keep their `own`.
-    node mut* own mut@ own kids = new(node mut* own, 2);
-    node mut* own@ kept = cast(kids, node mut* own@);
-    println(kept.len);
-    // A read-only view of an owning span header.
-    header* span_words = cast(&k.buf, header*);
+    u64* bits = cast(&h->data, u64*);
+    println(*first, " ", back->count, " ", *bits == cast(h->data, u64));
+}
+
+fn slot_views(slots mut* k) void {
+    u64* slot = cast(&k->one, u64*);
+    header* words = cast(&k->text, header*);
+    println(*slot == cast(k->one, u64), " ", words->len);
+}
+
+// A read-only view of an owning span header.
+fn span_view(slots mut* k) void {
+    header* span_words = cast(&k->buf, header*);
     println(span_words->len);
-    // Pointers with no mark added over an integer, over the storage behind a `void mut*`, from an
-    // integer, and two levels down.
+}
+
+// Pointers with no mark added over an integer, over the storage behind a `void mut*`, from an
+// integer, and two levels down.
+fn unmarked() void {
     u64 mut word = 0;
     u64** seen = cast(&word, u64**);
     void mut* anon_word = cast(&word, void mut*);
@@ -82,14 +88,35 @@ fn main() i32 {
     u64** deep = cast(&pn, u64**);
     u64* from_bits = cast(cast(&nine, u64), u64*);
     println(cast(*seen, u64), " ", **deep, " ", *from_bits, " ", from_void->count);
-    // A struct that reaches itself carries no mark when none of its pointers carries one.
+}
+
+// A struct that reaches itself carries no mark when none of its pointers carries one.
+fn self_reaching() void {
     link mut tail = link{.next = null, .v = 3};
     link mut head = link{.next = &tail, .v = 1};
     link* again = cast(cast(&head, void*), link*);
     println(again->next->v, " ", cast(cast(&tail, u64), link*)->v);
-    // A place that carries a mark is legal where the source holds a place of the same type.
-    mirror* seen_mirror = cast(&h, mirror*);
-    println(seen_mirror->tally, " ", seen_mirror->payload == h.data);
+}
+
+// A place that carries a mark is legal where the source holds a place of the same type.
+fn mirror_view(holder mut* h) void {
+    mirror* seen_mirror = cast(h, mirror*);
+    println(seen_mirror->tally, " ", seen_mirror->payload == h->data);
+}
+
+fn main() i32 {
+    holder mut h = holder{.count = 7, .data = new(u64)};
+    holder_views(&h);
+    slots mut k = slots{.one = new(u64), .text = str.dup("ab"), .buf = new(u8, 2)};
+    slot_views(&k);
+    // A span of owners seen through read-only elements that keep their `own`.
+    node mut* own mut@ own kids = new(node mut* own, 2);
+    node mut* own@ kept = cast(kids, node mut* own@);
+    println(kept.len);
+    span_view(&k);
+    unmarked();
+    self_reaching();
+    mirror_view(&h);
     del(kids);
     del(k.buf);
     del(k.text);

@@ -111,33 +111,50 @@ fn fresh(jkind k) jvalue mut* own {
 }
 
 // A JSON string, unescaped into freshly owned storage, which the value keeps
-// as a `string` view of bytes it owns for the life of the document.
+// as a `string` view of bytes it owns for the life of the document. It returns a span, and a
+// read through r after a call could read that result, which the call can change. So the reads
+// through r are in two functions that return no span (D17.21).
 fn read_string(reader mut* r) char mut@ own {
-    if (!eat(r, '"')) {
-        fail(r, "expected a string");
+    u64 mut start = 0;
+    u64 mut n = 0;
+    if (!scan_string(r, &start, &n)) {
         return new(char, 0);
     }
-    u64 start = r->pos;
-    u64 mut n = 0;
+    char mut@ own text = new(char, n);
+    unescape(r, start, text);
+    return move(text);
+}
+
+// Reads past a quoted string. Its body starts at *start and unescapes to *n chars.
+fn scan_string(reader mut* r, u64 mut* start, u64 mut* n) bool {
+    if (!eat(r, '"')) {
+        fail(r, "expected a string");
+        return false;
+    }
+    *start = r->pos;
     while (r->pos < r->src.len && r->src[r->pos] != '"') {
         if (r->src[r->pos] == '\\') {
             r->pos++;
             if (r->pos >= r->src.len) {
                 fail(r, "unterminated escape");
-                return new(char, 0);
+                return false;
             }
         }
         r->pos++;
-        n++;
+        *n += 1;
     }
     if (!eat(r, '"')) {
         fail(r, "unterminated string");
-        return new(char, 0);
+        return false;
     }
-    char mut@ own text = new(char, n);
+    return true;
+}
+
+// Unescapes the body that starts at start into text.
+fn unescape(reader* r, u64 start, char mut@ text) void {
     u64 mut at = 0;
     u64 mut i = start;
-    while (at < n) {
+    while (at < text.len) {
         char mut c = r->src[i];
         if (c == '\\') {
             i++;
@@ -154,7 +171,6 @@ fn read_string(reader mut* r) char mut@ own {
         at++;
         i++;
     }
-    return move(text);
 }
 
 fn read_int(reader mut* r) i64 {

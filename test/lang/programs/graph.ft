@@ -73,6 +73,13 @@ u64 NONE = 18446744073709551615;
 // Breadth-first distances from `source`, NONE where the node is unreachable.
 fn distances(graph* g, u64 source) u64 mut@ own {
     u64 mut@ own dist = new(u64, g->nodes);
+    bfs(g, source, dist);
+    return move(dist);
+}
+
+// The search fills a span parameter. In distances, a read after a call could read the result,
+// which the call can change, so the reads stay here (D17.21).
+fn bfs(graph* g, u64 source, u64 mut@ dist) void {
     for (u64 mut i = 0; i < g->nodes; i++) {
         dist[i] = NONE;
     }
@@ -94,7 +101,6 @@ fn distances(graph* g, u64 source) u64 mut@ own {
             }
         }
     }
-    return move(dist);
 }
 
 fn dfs(graph* g, u64 node, bool mut@ seen) void {
@@ -204,17 +210,50 @@ edge[11] DAG = {edge{0, 1}, edge{0, 2}, edge{1, 3}, edge{2, 3}, edge{3, 4}, edge
 edge[4] CYCLE = {edge{0, 1}, edge{1, 2}, edge{2, 0}, edge{2, 3}};
 edge[3] SPLIT = {edge{0, 1}, edge{2, 3}, edge{3, 2}};
 
-fn main() i32 {
-    graph mut g = build(8, DAG[0..DAG.len]);
-    defer free_graph(&g);
-    println("nodes=", g.nodes, " edges=", g.targets.len);
-    for (u64 mut i = 0; i < g.nodes; i++) {
+// The rows of the adjacency form. g is a parameter, so a read through it uses no local owner
+// here (D17.21).
+fn show_adjacency(graph* g) void {
+    for (u64 mut i = 0; i < g->nodes; i++) {
         print("adj[", i, "]:");
-        for (u64 next : neighbours(&g, i)) {
+        for (u64 next : neighbours(g, i)) {
             print(" ", next);
         }
         println();
     }
+}
+
+// order is a span parameter, so a read of it uses no local owner here (D17.21).
+fn show_order(u64 stuck, u64@ order) void {
+    print("topological (", stuck, " stuck):");
+    for (u64 n : order) {
+        print(" ", n);
+    }
+    println();
+}
+
+// The order is valid exactly when every edge runs forwards in it.
+fn runs_forwards(graph* g, u64@ order) bool {
+    u64 mut@ own place = new(u64, g->nodes);
+    defer del(place);
+    for (u64 mut i = 0; i < g->nodes; i++) {
+        place[order[i]] = i;
+    }
+    bool mut forwards = true;
+    for (u64 mut i = 0; i < g->nodes; i++) {
+        for (u64 next : neighbours(g, i)) {
+            if (place[i] >= place[next]) {
+                forwards = false;
+            }
+        }
+    }
+    return forwards;
+}
+
+fn main() i32 {
+    graph mut g = build(8, DAG[0..DAG.len]);
+    defer free_graph(&g);
+    println("nodes=", g.nodes, " edges=", g.targets.len);
+    show_adjacency(&g);
 
     u64 mut@ own d0 = distances(&g, 0);
     defer del(d0);
@@ -240,27 +279,9 @@ fn main() i32 {
     u64 mut@ own order = new(u64, g.nodes);
     defer del(order);
     u64 stuck = topological(&g, order);
-    print("topological (", stuck, " stuck):");
-    for (u64 n : order) {
-        print(" ", n);
-    }
-    println();
+    show_order(stuck, order);
 
-    // The order is valid exactly when every edge runs forwards in it.
-    u64 mut@ own place = new(u64, g.nodes);
-    defer del(place);
-    for (u64 mut i = 0; i < g.nodes; i++) {
-        place[order[i]] = i;
-    }
-    bool mut forwards = true;
-    for (u64 mut i = 0; i < g.nodes; i++) {
-        for (u64 next : neighbours(&g, i)) {
-            if (place[i] >= place[next]) {
-                forwards = false;
-            }
-        }
-    }
-    println("all edges forwards=", forwards, " components=", components(&g));
+    println("all edges forwards=", runs_forwards(&g, order), " components=", components(&g));
 
     graph mut c = build(4, CYCLE[0..CYCLE.len]);
     defer free_graph(&c);

@@ -15,6 +15,12 @@ import std.strmap;
 // test rather than the hash (stdlib.md 2.8): with a capacity of 16, str.hash
 // puts "aa", "aq", "bh" and "bx" all at slot 7, so they occupy 7, 8, 9 and 10
 // in insertion order. A tombstone in the middle of that chain must not cut it.
+
+// A read through a pointer: the owner is no local owner here (D17.21).
+fn slot(strmap.str_map* m, u64 k) strmap.str_map_entry {
+    return m->entries[k];
+}
+
 fn main() i32 {
     strmap.str_map mut m = strmap.create();
     defer strmap.free(&m);
@@ -23,14 +29,14 @@ fn main() i32 {
     strmap.put(&m, "bh", 3);
     strmap.put(&m, "bx", 4);
     println(strmap.count(&m), " ", m.live, " ", m.used, " ", m.entries.len);
-    println(m.entries[7].key, " ", m.entries[8].key, " ", m.entries[9].key, " ",
-            m.entries[10].key);
-    println(m.entries[7].val, " ", m.entries[8].val, " ", m.entries[9].val, " ",
-            m.entries[10].val);
+    println(slot(&m, 7).key, " ", slot(&m, 8).key, " ", slot(&m, 9).key, " ",
+            slot(&m, 10).key);
+    println(slot(&m, 7).val, " ", slot(&m, 8).val, " ", slot(&m, 9).val, " ",
+            slot(&m, 10).val);
 
     // Removing the second link leaves a tombstone: live falls, used does not.
     println(strmap.remove(&m, "aq"), " ", m.live, " ", m.used);
-    println(m.entries[8].state, " ", m.entries[7].state, " ", m.entries[8].state);
+    println(slot(&m, 8).state, " ", slot(&m, 7).state, " ", slot(&m, 8).state);
 
     // The keys beyond the tombstone are still reachable, which is the whole
     // reason a removal does not empty the slot.
@@ -42,11 +48,11 @@ fn main() i32 {
     // Putting the key back reuses the tombstone rather than the empty slot at
     // the end of the chain, so used does not grow.
     println(strmap.put(&m, "aq", 5), " ", m.live, " ", m.used, " ", m.entries.len, " ",
-            m.entries[8].val);
-    println(m.entries[7].key, " ", m.entries[8].key, " ", m.entries[9].key, " ",
-            m.entries[10].key);
+            slot(&m, 8).val);
+    println(slot(&m, 7).key, " ", slot(&m, 8).key, " ", slot(&m, 9).key, " ",
+            slot(&m, 10).key);
     // The slot after the chain was never touched by any of it.
-    println(m.entries[11].state, " ", m.entries[7].state, " ", m.entries[8].state, " ",
-            m.entries[10].state);
+    println(slot(&m, 11).state, " ", slot(&m, 7).state, " ", slot(&m, 8).state, " ",
+            slot(&m, 10).state);
     return 0;
 }
