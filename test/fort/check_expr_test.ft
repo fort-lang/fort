@@ -700,8 +700,8 @@ fn an_extern_argument_keeps_each_function_pointer_place() void {
     assert(reported_at(&e, 1, "19:23", "cannot cast u64[2] mut* to both*",
                        ": a cast adds the pointer fn (u64*) void at byte 8"));
     // the exempt walks read the mark of a function pointer alone, and keep no mark of each kind
-    assert(types.fn_mark_of(check_env.sym_main(&e, "cell")->ty) == check.MARK_NONE);
-    assert(types.fn_mark_of(check_env.sym_main(&e, "both")->ty) == check.MARK_SOME);
+    assert(fn_mark(&e, "cell") == check.MARK_NONE);
+    assert(fn_mark(&e, "both") == check.MARK_SOME);
     assert(kept_mark(&e, "cell") == check.MARK_UNKNOWN);
     assert(kept_mark(&e, "both") == check.MARK_UNKNOWN);
 }
@@ -897,15 +897,6 @@ fn nested(string name, u64 depth, u64 width, string leaf, string last) string ow
 fn one_owner(check_env.env mut* e) types.node* {
     types.node* word = types.type_prim(&e->ck.types, prim.prim_kind.prim_u64);
     return types.type_ptr(&e->ck.types, word, true, false);
-}
-
-// Makes a `check_env.env`, runs `body` on it, and releases it. `body` reads the value through a
-// pointer, so the use rule of `move` and `del` (D17.21) asks no proof of its reads after a call.
-fn run(fn (check_env.env mut*) void body) void {
-    check_env.env mut e = check_env.env{};
-    check_env.open(&e);
-    defer check_env.close(&e);
-    body(&e);
 }
 
 fn the_memo_keeps_one_key_for_each_kind_of_part_and_not_for_each_owner(check_env.env mut* e) void {
@@ -1139,6 +1130,13 @@ fn a_struct_that_reaches_a_mark_through_a_cycle_keeps_it() void {
 // The mark that the struct `name` of the checked module keeps (types.layout.mark).
 fn kept_mark(check_env.env mut* e, string name) u8 {
     return types.mark_of(check_env.sym_main(e, name)->ty);
+}
+
+// The mark of the function pointers that the struct `name` of the checked module holds
+// (types.fn_mark_of). The read through `e` stands in a function that takes it as a parameter
+// (D17.21).
+fn fn_mark(check_env.env mut* e, string name) u8 {
+    return types.fn_mark_of(check_env.sym_main(e, name)->ty);
 }
 
 fn a_closed_walk_keeps_no_mark_for_each_struct_it_entered() void {
@@ -2164,9 +2162,9 @@ fn main() i32 {
     nested_structs_over_arrays_of_parts_take_no_walk_of_each_owner();
     the_last_owner_that_differs_is_found_after_each_equal_part();
     each_end_of_the_target_chain_at_a_mut_level_hides_the_pointer_to_the_next();
-    run(the_memo_keeps_one_key_for_each_kind_of_part_and_not_for_each_owner);
-    run(the_memo_keeps_no_key_for_a_run_with_a_hidden_owner);
-    run(a_part_holds_its_own_bytes_and_padding_and_the_end_hold_none);
+    check_env.run(the_memo_keeps_one_key_for_each_kind_of_part_and_not_for_each_owner);
+    check_env.run(the_memo_keeps_no_key_for_a_run_with_a_hidden_owner);
+    check_env.run(a_part_holds_its_own_bytes_and_padding_and_the_end_hold_none);
     a_mut_view_keeps_each_pointer_place_and_puns_the_rest();
     the_walk_of_the_marks_enters_each_struct_once_for_the_checker();
     a_struct_with_no_mark_behind_a_mark_is_walked_once();
@@ -2174,7 +2172,7 @@ fn main() i32 {
     a_struct_that_reaches_a_mark_through_a_cycle_keeps_it();
     a_closed_walk_keeps_no_mark_for_each_struct_it_entered();
     a_walk_that_finds_a_mark_keeps_it_on_its_path_only();
-    run(a_walk_that_meets_a_layout_that_waits_keeps_no_answer_until_later);
+    check_env.run(a_walk_that_meets_a_layout_that_waits_keeps_no_answer_until_later);
     the_work_limit_makes_a_cast_an_error_with_a_note();
     the_rule_reads_no_long_array_element_by_element();
     sizeof_yields_an_untyped_constant_of_the_type_s_size();
@@ -2201,13 +2199,13 @@ fn main() i32 {
     assert_and_panic_take_one_argument_each();
     a_universe_function_is_callable_and_nothing_else();
     the_five_place_forms_carry_the_lvalue_mark();
-    run(the_five_rvalue_forms_carry_no_lvalue_mark);
+    check_env.run(the_five_rvalue_forms_carry_no_lvalue_mark);
     an_index_or_field_of_an_rvalue_and_a_function_name_are_not_lvalues();
-    run(a_call_of_move_carries_the_move_mark_and_no_other_call_does);
+    check_env.run(a_call_of_move_carries_the_move_mark_and_no_other_call_does);
     own_storage_and_a_mutable_indirection_are_emptiable();
-    run(a_constant_and_a_member_of_one_are_read_only);
-    run(an_immutable_indirection_is_not_emptiable);
-    run(an_rvalue_carries_no_emptiability_mark);
+    check_env.run(a_constant_and_a_member_of_one_are_read_only);
+    check_env.run(an_immutable_indirection_is_not_emptiable);
+    check_env.run(an_rvalue_carries_no_emptiability_mark);
     a_string_element_and_an_imported_constant_carry_their_marks();
     move_and_del_read_the_mark_on_their_operand();
     a_declaration_of_an_imported_module_is_reached_through_its_name();

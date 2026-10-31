@@ -11,6 +11,7 @@
 /// removal of the dead temporaries. Each case runs the verifier before and after the pass.
 import fort.consts;
 import fort.fir;
+import fir_env;
 import lower_env;
 import pass_env;
 import std.strbuf;
@@ -69,13 +70,7 @@ string[8] KIND_LINES = {
     "}",
 };
 
-// The kind of the terminator of block `b` of `f`. The read through `f` stands in a function that
-// takes it as a parameter (D17.21).
-fn term_kind_of(fir.func* f, u32 b) fir.term_kind {
-    return fir.block_at(f, b)->term.kind;
-}
-
-// The local that statement `i` of block `b` of `f` assigns, for the reason of term_kind_of
+// The local that statement `i` of block `b` of `f` assigns, for the reason of fir_env.term_kind_of
 // (D17.21).
 fn assigned_local(fir.func* f, u32 b, u32 i) u32 {
     return fir.block_statement(f, b, i)->place.local;
@@ -98,17 +93,17 @@ fn each_mode_removes_the_kinds_of_its_column() void {
         for (pass_env.mode m : pass_env.MODES) {
             fir.module mut fm = pass_env.parse(&e, KIND_PRELUDE[..], lines[..]);
             fir.func mut* f = &fm.funcs.items[0];
-            fir.term_kind before = term_kind_of(f, 0);
+            fir.term_kind before = fir_env.term_kind_of(f, 0);
             pass_env.build(&e, f, m);
             if ((m.release && BY_RELEASE[k]) || (m.no_bounds && BY_NO_BOUNDS[k])) {
                 assert(fir.block_count(f) == 1);
-                assert(term_kind_of(f, 0) == fir.term_kind.tk_return);
+                assert(fir_env.term_kind_of(f, 0) == fir.term_kind.tk_return);
                 assert(fir.block_statement_count(f, 0) == 0);
                 removed += 1;
             } else {
                 assert(fir.block_count(f) == 2);
-                assert(term_kind_of(f, 0) == before);
-                assert(term_kind_of(f, 1) == fir.term_kind.tk_return);
+                assert(fir_env.term_kind_of(f, 0) == before);
+                assert(fir_env.term_kind_of(f, 1) == fir.term_kind.tk_return);
                 kept += 1;
             }
             fir.module_free(&fm);
