@@ -23,16 +23,23 @@ fn main() i32 {
         "}",
     };
     lower_env.check_lines(&e, source[..], true);
-    ast.node* decl = lower_env.decl(&e, "f");
-    fir.func mut f = fir.func_new(&e.c.ck.types, decl->sym, decl->sym->ty);
+    return_a_marked_literal(&e);
+    return 0;
+}
+
+// Lowers `return 1;` with the mark of a move. The function takes the environment as a
+// parameter, so the reads through `decl` and `ret` use no owner of its frame. The mark and its
+// read come before `f` and `lw` exist (D17.21).
+fn return_a_marked_literal(lower_env.env mut* e) void {
+    ast.node* decl = lower_env.decl(e, "f");
+    ast.node mut* ret = check_env.node_in_main(&e->c, ast.ast_kind.k_return, "");
+    ret->ann |= check.ANN_MOVE;
+    println(ret->a->kind == ast.ast_kind.k_int);
+    fir.func mut f = fir.func_new(&e->c.ck.types, decl->sym, decl->sym->ty);
     defer fir.func_free(&f);
-    fir_lower.lowerer mut lw = fir_lower.lowerer{.ck = &e.c.ck, .f = &f};
+    fir_lower.lowerer mut lw = fir_lower.lowerer{.ck = &e->c.ck, .f = &f};
     defer fir_lower.scopes_free(&lw.scopes);
     fir_lower.prescan(&f, decl->b);
     fir_lower.scope_push(&lw, fir_lower.scope_kind.sc_fn, 0, 0);
-    ast.node mut* ret = check_env.node_in_main(&e.c, ast.ast_kind.k_return, "");
-    ret->ann |= check.ANN_MOVE;
-    println(ret->a->kind == ast.ast_kind.k_int);
     fir_lower.lower_return(&lw, ret);
-    return 0;
 }

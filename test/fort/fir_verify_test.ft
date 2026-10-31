@@ -253,8 +253,9 @@ fn ty(env mut* e, string name) types.node* {
 
 // The FIR function of the prelude function `name`, with no statement and no terminator.
 fn func_of(env mut* e, string name) fir.func {
-    ast.sym* s = check_env.sym_main(&e->c, name);
-    return fir.func_new(tt(e), s, s->ty);
+    // The type comes from ty, so this function, whose result is an aggregate, reads nothing
+    // through a pointer before its first store (D17.21).
+    return fir.func_new(tt(e), check_env.sym_main(&e->c, name), ty(e, name));
 }
 
 fn at(u32 line, u32 col) diag.loc {
@@ -483,6 +484,14 @@ fn types_agree_after_mut_and_own_are_removed() void {
 
 // ---- the runtime entries ---------------------------------------------------------------------
 
+// The runtime entry `s` of the check kind `k`: a function of std.rt with the name of the kind.
+// The reads through `s` stand in a function that takes it as a parameter (D17.21).
+fn expect_entry(ast.sym* s, fir.check_kind k) void {
+    assert(s != null && s->kind == ast.sym_kind.s_fn);
+    assert(s->name == fir.check_entry(k));
+    assert(s->owner->name == "std.rt");
+}
+
 // Each check kind but `overwrite` finds its entry. The overwrite check names no entry, so it finds
 // none, though the sandbox declares fail_overwrite as std/rt.ft does (spec/fir.md 8).
 fn every_check_kind_finds_its_runtime_entry() void {
@@ -496,9 +505,7 @@ fn every_check_kind_finds_its_runtime_entry() void {
         if (cast(k, fir.check_kind) == fir.check_kind.chk_overwrite) {
             assert(s == null);
         } else {
-            assert(s != null && s->kind == ast.sym_kind.s_fn);
-            assert(s->name == fir.check_entry(cast(k, fir.check_kind)));
-            assert(s->owner->name == "std.rt");
+            expect_entry(s, cast(k, fir.check_kind));
             found += 1;
         }
         k += 1;

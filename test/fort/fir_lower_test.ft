@@ -539,16 +539,24 @@ fn a_noreturn_body_ends_in_trap() void {
         "}",
     };
     lower_env.expect(lower_env.lower(&e, source[..], "stop"), lowered[..]);
-    ast.node* decl = lower_env.decl(&e, "stop");
-    fir.func mut f = fir.func_new(&e.c.ck.types, decl->sym, decl->sym->ty);
+    end_twice(&e);
+}
+
+// Lowers the end of the body of `stop` twice into a new function, so that one `trap` ends it. The
+// function takes the environment as a parameter, so the reads through `decl` use no owner of its
+// frame. The read of the body comes before `f` and `lw` exist (D17.21).
+fn end_twice(lower_env.env mut* e) void {
+    ast.node* decl = lower_env.decl(e, "stop");
+    ast.node* body = decl->b;
+    fir.func mut f = fir.func_new(&e->c.ck.types, decl->sym, decl->sym->ty);
     defer fir.func_free(&f);
-    fir_lower.lowerer mut lw = fir_lower.lowerer{.ck = &e.c.ck, .f = &f};
-    fir_lower.lower_end(&lw, decl->b);
-    fir_lower.lower_end(&lw, decl->b);
+    fir_lower.lowerer mut lw = fir_lower.lowerer{.ck = &e->c.ck, .f = &f};
+    fir_lower.lower_end(&lw, body);
+    fir_lower.lower_end(&lw, body);
     fir_verify.violation mut v = fir_verify.violation{};
-    assert(!fir_verify.find_violation(&f, &e.rt, &v));
-    strbuf.clear(&e.text);
-    fir_print.print_function(&f, &e.text);
+    assert(!fir_verify.find_violation(&f, &e->rt, &v));
+    strbuf.clear(&e->text);
+    fir_print.print_function(&f, &e->text);
     string[7] want = {
         "fn main.stop() -> noreturn {",
         "    let _0: void;",
@@ -558,7 +566,7 @@ fn a_noreturn_body_ends_in_trap() void {
         "    }",
         "}",
     };
-    lower_env.expect(strbuf.view(&e.text), want[..]);
+    lower_env.expect(strbuf.view(&e->text), want[..]);
 }
 
 // ---- constructs that stopped the lowering ------------------------------------------------------
@@ -772,6 +780,12 @@ fn a_construct_not_lowered_stops_its_function() void {
 
 // ---- the program ------------------------------------------------------------------------------
 
+// The name of declaration `i` of `decls`. The read through `decls` stands in a function that
+// takes it as a parameter (D17.21).
+fn decl_name(gen.node_ref_vec* decls, u64 i) string {
+    return gen.refs_at(decls, i)->name;
+}
+
 // The functions of a closure in the order of a FIR module: the modules in dependency order, and in
 // each module the declarations in source order with the selected branch of each `$if`. An
 // `extern fn` has no body and is no function to lower.
@@ -814,7 +828,7 @@ fn the_program_lists_its_functions_in_module_order() void {
     assert(decls.len == 5);
     u64 mut i = 0;
     while (i < 5) {
-        assert(gen.refs_at(&decls, i)->name == names[i]);
+        assert(decl_name(&decls, i) == names[i]);
         i += 1;
     }
 }

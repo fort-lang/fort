@@ -10,21 +10,79 @@ import fir_env;
 import heap;
 import fort.types;
 
+// ---- reads through a local --------------------------------------------------------------------
+
+// The functions of this part read a local through the pointer that local_at gives. Each takes
+// that pointer or the function as a parameter, so no read through it follows a call in the frame
+// that owns the function and the environment (D17.21).
+
+// Holds that `r` is the return local `_0`, with no symbol and the type that `ty` spells.
+fn expect_return(fir_env.env mut* e, fir.local* r, string ty) void {
+    assert(r->number == 0);
+    assert(r->kind == fir.local_kind.lk_return);
+    assert(r->sym == null);
+    fir_env.expect(e, r->ty, ty);
+}
+
+// Holds that `x` is parameter `number`, of the type that `ty` spells, with the symbol `name`.
+fn expect_param(fir_env.env mut* e, fir.local* x, u32 number, string ty, string name) void {
+    assert(x->number == number);
+    assert(x->kind == fir.local_kind.lk_param);
+    fir_env.expect(e, x->ty, ty);
+    assert(x->sym != null && x->sym->name == name);
+    assert(x->sym->kind == ast.sym_kind.s_param);
+}
+
+// Holds that `r` is a return local of the type `void`.
+fn expect_void_return(fir.local* r) void {
+    assert(r->ty->kind == types.type_kind.k_void);
+    assert(r->kind == fir.local_kind.lk_return);
+}
+
+// Holds that `l` stands at line `line` and column `col`.
+fn expect_at(fir.local* l, u32 line, u32 col) void {
+    assert(l->loc.line == line && l->loc.col == col);
+}
+
+// Holds that `l` has the number `i` and stands at line `i`.
+fn expect_numbered(fir.local* l, u32 i) void {
+    assert(l->number == i);
+    assert(l->loc.line == i);
+}
+
+// The kind of local `n` of `f`.
+fn kind_of(fir.func* f, u32 n) fir.local_kind {
+    return fir.local_at(f, n)->kind;
+}
+
+// The symbol of local `n` of `f`.
+fn sym_of(fir.func* f, u32 n) ast.sym* {
+    return fir.local_at(f, n)->sym;
+}
+
+// The `name` field of local `n` of `f`.
+fn name_of(fir.func* f, u32 n) string {
+    return fir.local_at(f, n)->name;
+}
+
+// The address of the vector of the locals of `f`.
+fn locals_address(fir.func* f) u64 {
+    return cast(f->locals.items.ptr, u64);
+}
+
+// ---- the locals ---------------------------------------------------------------------------------
+
 fn the_return_local_has_the_result_type() void {
     fir_env.env mut e = fir_env.env{};
     fir_env.open(&e);
     defer fir_env.close(&e);
     fir.func mut f = fir_env.func_of(&e, "add");
     defer fir.func_free(&f);
-    fir.local* r = fir.local_at(&f, 0);
-    assert(r->number == 0);
-    assert(r->kind == fir.local_kind.lk_return);
-    assert(r->sym == null);
-    fir_env.expect(&e, r->ty, "u64");
+    expect_return(&e, fir.local_at(&f, 0), "u64");
     // A struct result is a place like any other local.
     fir.func mut g = fir_env.func_of(&e, "make");
     defer fir.func_free(&g);
-    fir_env.expect(&e, fir.local_at(&g, 0)->ty, "pair");
+    expect_return(&e, fir.local_at(&g, 0), "pair");
 }
 
 fn the_function_keeps_its_symbol_and_type() void {
@@ -46,17 +104,8 @@ fn the_parameters_are_one_to_n_in_order() void {
     defer fir.func_free(&f);
     // `fn add(i32 x, i64 y) u64`: _0, then x as _1 and y as _2.
     assert(fir.local_count(&f) == 3);
-    fir.local* x = fir.local_at(&f, 1);
-    assert(x->number == 1);
-    assert(x->kind == fir.local_kind.lk_param);
-    fir_env.expect(&e, x->ty, "i32");
-    assert(x->sym != null && x->sym->name == "x");
-    assert(x->sym->kind == ast.sym_kind.s_param);
-    fir.local* y = fir.local_at(&f, 2);
-    assert(y->number == 2);
-    assert(y->kind == fir.local_kind.lk_param);
-    fir_env.expect(&e, y->ty, "i64");
-    assert(y->sym != null && y->sym->name == "y");
+    expect_param(&e, fir.local_at(&f, 1), 1, "i32", "x");
+    expect_param(&e, fir.local_at(&f, 2), 2, "i64", "y");
 }
 
 fn a_function_with_no_parameter_has_only_the_return_local() void {
@@ -74,13 +123,11 @@ fn a_void_function_has_a_void_return_local() void {
     defer fir_env.close(&e);
     fir.func mut f = fir_env.func_of(&e, "nothing");
     defer fir.func_free(&f);
-    fir.local* r = fir.local_at(&f, 0);
-    assert(r->ty->kind == types.type_kind.k_void);
-    assert(r->kind == fir.local_kind.lk_return);
+    expect_void_return(fir.local_at(&f, 0));
     // A noreturn function has a void result as well.
     fir.func mut g = fir_env.func_of(&e, "stop");
     defer fir.func_free(&g);
-    assert(fir.local_at(&g, 0)->ty->kind == types.type_kind.k_void);
+    expect_void_return(fir.local_at(&g, 0));
     assert(fir.local_count(&g) == 1);
 }
 
@@ -98,9 +145,9 @@ fn named_and_temporary_locals_take_the_next_numbers() void {
                           fir_env.at(5, 2));
     assert(t == 4);
     assert(fir.local_count(&f) == 5);
-    assert(fir.local_at(&f, 3)->kind == fir.local_kind.lk_named);
-    assert(fir.local_at(&f, 4)->kind == fir.local_kind.lk_temp);
-    assert(fir.local_at(&f, 4)->sym == null);
+    assert(kind_of(&f, 3) == fir.local_kind.lk_named);
+    assert(kind_of(&f, 4) == fir.local_kind.lk_temp);
+    assert(sym_of(&f, 4) == null);
 }
 
 fn local_at_returns_what_local_add_stored() void {
@@ -112,16 +159,23 @@ fn local_at_returns_what_local_add_stored() void {
     ast.sym* named = fir_env.sym(&e, "total");
     types.node* ty = fir_env.i64_ty(&e);
     u32 n = fir.local_add(&f, ty, fir.local_kind.lk_named, named, fir_env.at(7, 3));
-    fir.local* l = fir.local_at(&f, n);
+    expect_stored(&f, n, ty, named);
+}
+
+// Holds that local `n` of `f` has what local_add stored: the type `ty`, the symbol `named` and
+// the location 7:3. The reads through `f` stand in a function that takes it as a parameter
+// (D17.21).
+fn expect_stored(fir.func* f, u32 n, types.node* ty, ast.sym* named) void {
+    fir.local* l = fir.local_at(f, n);
     assert(l->number == n);
     assert(l->ty == ty);
     assert(l->kind == fir.local_kind.lk_named);
     assert(l->sym == named);
     assert(l->loc.file == "t.ft");
-    assert(l->loc.line == 7 && l->loc.col == 3);
+    expect_at(l, 7, 3);
     // The locals of func_new carry the empty range.
-    assert(fir.local_at(&f, 0)->loc.line == 0);
-    assert(fir.local_at(&f, 0)->loc.file.len == 0);
+    assert(fir.local_at(f, 0)->loc.line == 0);
+    assert(fir.local_at(f, 0)->loc.file.len == 0);
 }
 
 // local_mut changes a local in place, and local_name prefers the name of the symbol.
@@ -132,12 +186,12 @@ fn a_local_takes_a_name_and_a_location_in_place() void {
     fir.func mut f = fir_env.func_of(&e, "add");
     defer fir.func_free(&f);
     u32 n = fir.local_add(&f, fir_env.i64_ty(&e), fir.local_kind.lk_named, null, diag.loc{});
-    assert(fir.local_at(&f, n)->name == "");
+    assert(name_of(&f, n) == "");
     assert(fir.local_name(fir.local_at(&f, n)) == "");
     fir.local_mut(&f, n)->name = "count";
     fir.local_mut(&f, n)->loc = fir_env.at(4, 2);
     assert(fir.local_name(fir.local_at(&f, n)) == "count");
-    assert(fir.local_at(&f, n)->loc.line == 4 && fir.local_at(&f, n)->loc.col == 2);
+    expect_at(fir.local_at(&f, n), 4, 2);
     // A parameter with a symbol answers the symbol's name, whatever its `name` holds.
     fir.local_mut(&f, 1)->name = "other";
     assert(fir.local_name(fir.local_at(&f, 1)) == "x");
@@ -160,9 +214,7 @@ fn locals_keep_their_values_while_the_vector_grows() void {
     assert(fir.local_count(&f) == 1001);
     i = 1;
     while (i <= 1000) {
-        fir.local* l = fir.local_at(&f, i);
-        assert(l->number == i);
-        assert(l->loc.line == i);
+        expect_numbered(fir.local_at(&f, i), i);
         i += 1;
     }
 }
@@ -188,12 +240,13 @@ fn a_thousand_locals_leave_the_heap_where_it_was() void {
     fir_env.open(&e);
     defer fir_env.close(&e);
     ast.sym* s = fir_env.sym(&e, "add");
+    types.node* fn_ty = fir_env.ty(&e, "add");
     types.node* ty = fir_env.u64_ty(&e);
     u64[3] mut break_at = {};
     u64[3] mut locals_at = {};
     u64 mut round = 0;
     while (round < fir_env.LEAK_ROUNDS) {
-        fir.func mut f = fir.func_new(fir_env.tt(&e), s, s->ty);
+        fir.func mut f = fir.func_new(fir_env.tt(&e), s, fn_ty);
         u32 mut i = 0;
         while (i < 1000) {
             fir.local_add(&f, ty, fir.local_kind.lk_temp, null, fir_env.at(1, 1));
@@ -201,7 +254,7 @@ fn a_thousand_locals_leave_the_heap_where_it_was() void {
         }
         u64 slot = fir_env.leak_slot(round);
         if (slot < 3) {
-            locals_at[slot] = cast(f.locals.items.ptr, u64);
+            locals_at[slot] = locals_address(&f);
         }
         fir.func_free(&f);
         if (slot < 3) {

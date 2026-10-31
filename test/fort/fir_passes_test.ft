@@ -69,6 +69,18 @@ string[8] KIND_LINES = {
     "}",
 };
 
+// The kind of the terminator of block `b` of `f`. The read through `f` stands in a function that
+// takes it as a parameter (D17.21).
+fn term_kind_of(fir.func* f, u32 b) fir.term_kind {
+    return fir.block_at(f, b)->term.kind;
+}
+
+// The local that statement `i` of block `b` of `f` assigns, for the reason of term_kind_of
+// (D17.21).
+fn assigned_local(fir.func* f, u32 b, u32 i) u32 {
+    return fir.block_statement(f, b, i)->place.local;
+}
+
 // Each of the four modes removes exactly the kinds of its column, for 13 terminators. A removed
 // check leaves `goto bb1`, and bb1 merges into bb0, so one block that returns stays. The mask of
 // the shift check reads the parameter `_2`, which nothing reads later, so the mask goes too. A
@@ -86,17 +98,17 @@ fn each_mode_removes_the_kinds_of_its_column() void {
         for (pass_env.mode m : pass_env.MODES) {
             fir.module mut fm = pass_env.parse(&e, KIND_PRELUDE[..], lines[..]);
             fir.func mut* f = &fm.funcs.items[0];
-            fir.term_kind before = fir.block_at(f, 0)->term.kind;
+            fir.term_kind before = term_kind_of(f, 0);
             pass_env.build(&e, f, m);
             if ((m.release && BY_RELEASE[k]) || (m.no_bounds && BY_NO_BOUNDS[k])) {
                 assert(fir.block_count(f) == 1);
-                assert(fir.block_at(f, 0)->term.kind == fir.term_kind.tk_return);
+                assert(term_kind_of(f, 0) == fir.term_kind.tk_return);
                 assert(fir.block_statement_count(f, 0) == 0);
                 removed += 1;
             } else {
                 assert(fir.block_count(f) == 2);
-                assert(fir.block_at(f, 0)->term.kind == before);
-                assert(fir.block_at(f, 1)->term.kind == fir.term_kind.tk_return);
+                assert(term_kind_of(f, 0) == before);
+                assert(term_kind_of(f, 1) == fir.term_kind.tk_return);
                 kept += 1;
             }
             fir.module_free(&fm);
@@ -134,7 +146,13 @@ fn a_removed_check_leaves_goto_at_its_location() void {
     fir.func mut* f = &fm.funcs.items[0];
     build_unverified(f, pass_env.RELEASE);
     assert(fir.block_count(f) == 3);
-    fir.terminator* t = &fir.block_at(f, 2)->term;
+    expect_left_goto(&fir.block_at(f, 2)->term);
+}
+
+// Holds that `t` is `goto bb1` at the location 4:9, the exit 7:3 and the statement index 5 of the
+// check that it replaces. The reads through `t` stand in a function that takes it as a parameter
+// (D17.21).
+fn expect_left_goto(fir.terminator* t) void {
     assert(t->kind == fir.term_kind.tk_goto && t->target == 1);
     assert(t->loc.line == 4 && t->loc.col == 9 && t->stmt == 5);
     assert(t->exit_loc.line == 7 && t->exit_loc.col == 3);
@@ -174,6 +192,29 @@ string[13] WIDTH_LINES = {
     "}",
 };
 
+// Holds that the pass gave WIDTH_LINES the mask `_5 = and(copy _3, const i64 mask)` of the check,
+// and that the read after the check reads `_5`. The reads through `f` stand in a function that
+// takes it as a parameter (D17.21).
+fn expect_mask(fir.func* f, u64 mask) void {
+    assert(fir.block_count(f) == 1 && fir.block_statement_count(f, 0) == 3);
+    assert(fir.local_count(f) == 6);
+    fir.local* m = fir.local_at(f, 5);
+    assert(m->kind == fir.local_kind.lk_temp && m->ty == fir.local_at(f, 3)->ty);
+    assert(m->loc.line == 3 && m->loc.col == 7);
+    fir.statement* s = fir.block_statement(f, 0, 1);
+    assert(s->place.local == 5 && s->value.kind == fir.rvalue_kind.rv_and);
+    assert(s->loc.line == 3 && s->loc.col == 7 && s->stmt == 2);
+    assert(s->exit_loc.line == 9 && s->exit_loc.col == 1);
+    fir.operand n = fir.rvalue_operand(f, s->value, 0);
+    assert(n.kind == fir.operand_kind.ok_copy && n.place.local == 3);
+    fir.operand top = fir.rvalue_operand(f, s->value, 1);
+    assert(top.kind == fir.operand_kind.ok_const && top.value.ty == m->ty);
+    u64 mut value = 0;
+    assert(consts.cv_to_u64(top.value.value, &value) && value == mask);
+    fir.statement* read = fir.block_statement(f, 0, 2);
+    assert(fir.rvalue_operand(f, read->value, 0).place.local == 5);
+}
+
 // The constant of `and(n, const i64 W - 1)` is the width of the named type less 1, for each of
 // the eight integer types. The mask `_5` is a new temporary of the type `i64` of the count, at the
 // location, the exit and the statement index of the check, and the read of `_3` after the check
@@ -195,23 +236,7 @@ fn the_mask_is_the_width_of_the_named_type_less_one() void {
         fir.module mut fm = pass_env.parse(&e, WIDTH_PRELUDE[..], lines[..]);
         fir.func mut* f = &fm.funcs.items[0];
         pass_env.build(&e, f, pass_env.RELEASE);
-        assert(fir.block_count(f) == 1 && fir.block_statement_count(f, 0) == 3);
-        assert(fir.local_count(f) == 6);
-        fir.local* m = fir.local_at(f, 5);
-        assert(m->kind == fir.local_kind.lk_temp && m->ty == fir.local_at(f, 3)->ty);
-        assert(m->loc.line == 3 && m->loc.col == 7);
-        fir.statement* s = fir.block_statement(f, 0, 1);
-        assert(s->place.local == 5 && s->value.kind == fir.rvalue_kind.rv_and);
-        assert(s->loc.line == 3 && s->loc.col == 7 && s->stmt == 2);
-        assert(s->exit_loc.line == 9 && s->exit_loc.col == 1);
-        fir.operand n = fir.rvalue_operand(f, s->value, 0);
-        assert(n.kind == fir.operand_kind.ok_copy && n.place.local == 3);
-        fir.operand top = fir.rvalue_operand(f, s->value, 1);
-        assert(top.kind == fir.operand_kind.ok_const && top.value.ty == m->ty);
-        u64 mut value = 0;
-        assert(consts.cv_to_u64(top.value.value, &value) && value == WIDTH_MASKS[k]);
-        fir.statement* read = fir.block_statement(f, 0, 2);
-        assert(fir.rvalue_operand(f, read->value, 0).place.local == 5);
+        expect_mask(f, WIDTH_MASKS[k]);
         fir.module_free(&fm);
         k += 1;
     }
@@ -760,7 +785,7 @@ fn a_pure_rvalue_goes_and_the_others_stay() void {
             assert(fir.block_statement_count(f, 0) == 0);
         } else {
             assert(fir.block_statement_count(f, 0) == 1);
-            assert(fir.block_statement(f, 0, 0)->place.local == 7);
+            assert(assigned_local(f, 0, 0) == 7);
         }
         fir.module_free(&fm);
         k += 1;

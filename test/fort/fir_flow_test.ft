@@ -46,16 +46,26 @@ fn expect_set(fir_flow.bits* s, string want) void {
 // The set of the numbers below `count` that `list` names.
 fn set_of(u32 count, u32@ list) fir_flow.bits {
     fir_flow.bits mut s = fir_flow.bits_new(count);
-    {
-        u32@ range_values = list;
-        u64 mut range_index = 0;
-        while (range_index < range_values.len) {
-            u32 i = range_values[range_index];
-            range_index += 1;
-            fir_flow.bits_set(&s, i);
-        }
-    }
+    set_each(&s, list);
     return s;
+}
+
+// Adds to `s` each number that `list` names. The reads of `list` stand in a function that returns
+// no aggregate, so none of them can read the result of set_of before its first store (D17.21).
+fn set_each(fir_flow.bits mut* s, u32@ list) void {
+    u32@ range_values = list;
+    u64 mut range_index = 0;
+    while (range_index < range_values.len) {
+        u32 i = range_values[range_index];
+        range_index += 1;
+        fir_flow.bits_set(s, i);
+    }
+}
+
+// Word `w` of `s`. The read through `s` stands in a function that takes it as a parameter
+// (D17.21).
+fn word(fir_flow.bits* s, u64 w) u64 {
+    return s->words[w];
 }
 
 u64 WORD_FULL = 18446744073709551615;
@@ -89,9 +99,9 @@ fn set_get_and_clear_reach_the_ends_of_each_word() void {
         assert(fir_flow.bits_get(&s, i));
     }
     expect_set(&s, " 0 63 64 127 128");
-    assert(s.words[0] == 9223372036854775809);
-    assert(s.words[1] == 9223372036854775809);
-    assert(s.words[2] == 1);
+    assert(word(&s, 0) == 9223372036854775809);
+    assert(word(&s, 1) == 9223372036854775809);
+    assert(word(&s, 2) == 1);
     // a second set and a clear of an absent number change nothing
     fir_flow.bits_set(&s, 63);
     fir_flow.bits_clear(&s, 62);
@@ -101,7 +111,7 @@ fn set_get_and_clear_reach_the_ends_of_each_word() void {
     fir_flow.bits_clear(&s, 128);
     expect_set(&s, " 63 127");
     assert(!fir_flow.bits_get(&s, 64));
-    assert(s.words[2] == 0);
+    assert(word(&s, 2) == 0);
 }
 
 fn fill_sets_every_number_below_the_count_and_clear_all_removes_each() void {
@@ -112,11 +122,11 @@ fn fill_sets_every_number_below_the_count_and_clear_all_removes_each() void {
         fir_flow.bits mut s = fir_flow.bits_new(counts[k]);
         fir_flow.bits_fill(&s);
         if (s.words.len > 0) {
-            assert(s.words[s.words.len - 1] == last[k]);
+            assert(word(&s, s.words.len - 1) == last[k]);
         }
         u64 mut w = 0;
         while (w + 1 < s.words.len) {
-            assert(s.words[w] == WORD_FULL);
+            assert(word(&s, w) == WORD_FULL);
             w += 1;
         }
         // the set equals the set built one number at a time
@@ -133,7 +143,7 @@ fn fill_sets_every_number_below_the_count_and_clear_all_removes_each() void {
         assert(fir_flow.bits_equal(&s, &none));
         w = 0;
         while (w < s.words.len) {
-            assert(s.words[w] == 0);
+            assert(word(&s, w) == 0);
             w += 1;
         }
         fir_flow.bits_free(&none);
@@ -625,6 +635,17 @@ fn the_transfers_stay_linear_in_the_blocks() void {
     assert(some.steps == 2 * cast(BLOCKS, u64) - 2);
 }
 
+// The address of the vector of in-sets of `d`. The read through `d` stands in a function that
+// takes it as a parameter (D17.21).
+fn ins_address(fir_flow.dataflow* d) u64 {
+    return cast(d->ins.ptr, u64);
+}
+
+// The address of the vector of out-sets of `d`, for the reason of ins_address (D17.21).
+fn outs_address(fir_flow.dataflow* d) u64 {
+    return cast(d->outs.ptr, u64);
+}
+
 // Each round runs a dataflow over the chain twice into one record. The address of each result
 // vector is the block view, and the program break is the system view (notes/testing.md 4). The
 // block view of one set of 80 bytes read 465808 with nothing leaked, because a round this large
@@ -645,8 +666,8 @@ fn two_hundred_rounds_leave_the_heap_where_it_was() void {
         fir_flow.dataflow_forward(f, &d);
         u64 slot = fir_env.leak_slot(round);
         if (slot < 3) {
-            ins_at[slot] = cast(d.ins.ptr, u64);
-            outs_at[slot] = cast(d.outs.ptr, u64);
+            ins_at[slot] = ins_address(&d);
+            outs_at[slot] = outs_address(&d);
         }
         fir_flow.dataflow_free(&d);
         if (slot < 3) {

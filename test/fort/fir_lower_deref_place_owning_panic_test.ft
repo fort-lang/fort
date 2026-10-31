@@ -23,16 +23,23 @@ fn main() i32 {
         "}",
     };
     lower_env.check_lines(&e, source[..], true);
-    ast.node* decl = lower_env.decl(&e, "f");
-    fir.func mut f = fir.func_new(&e.c.ck.types, decl->sym, decl->sym->ty);
+    deref_the_move(&e);
+    return 0;
+}
+
+// Dereferences the `move(p)` of `f`. The function takes the environment as a parameter, so
+// the reads through `decl` and `call` use no owner of its frame. The read of the mark comes
+// before `f` and `lw` exist (D17.21).
+fn deref_the_move(lower_env.env mut* e) void {
+    ast.node* decl = lower_env.decl(e, "f");
+    ast.node mut* call = check_env.node_in_main(&e->c, ast.ast_kind.k_call, "");
+    println((call->ann & check.ANN_MOVE) != 0);
+    fir.func mut f = fir.func_new(&e->c.ck.types, decl->sym, decl->sym->ty);
     defer fir.func_free(&f);
-    fir_lower.lowerer mut lw = fir_lower.lowerer{.ck = &e.c.ck, .f = &f};
+    fir_lower.lowerer mut lw = fir_lower.lowerer{.ck = &e->c.ck, .f = &f};
     defer fir_lower.scopes_free(&lw.scopes);
     fir_lower.prescan(&f, decl->b);
     fir_lower.scope_push(&lw, fir_lower.scope_kind.sc_fn, 0, 0);
-    ast.node mut* call = check_env.node_in_main(&e.c, ast.ast_kind.k_call, "");
-    println((call->ann & check.ANN_MOVE) != 0);
     fir.place mut out = fir.place{};
     fir_lower.deref_place(&lw, call, &out);
-    return 0;
 }
