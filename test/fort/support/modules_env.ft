@@ -55,6 +55,14 @@ fn close(env mut* e) void {
     del(e->dir);
 }
 
+// Opens an environment, runs `body` on it, and closes it. `body` reaches the environment through
+// a pointer, so the use rule of `move` and `del` asks no proof of its reads after a call.
+fn run(fn (env mut*) void body) void {
+    env mut e = open();
+    defer close(&e);
+    body(&e);
+}
+
 // Creates one directory of the sandbox, ignoring a directory that is there.
 fn make_dir(string path) void {
     char mut@ own c_path = str.to_cstr(path);
@@ -64,9 +72,10 @@ fn make_dir(string path) void {
 
 // `<sandbox>/<rel>`, a fresh string the caller owns.
 fn in_sandbox(env* e, string rel) string own {
+    string dir = e->dir;
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
-    strbuf.append(&b, e->dir);
+    strbuf.append(&b, dir);
     strbuf.push(&b, '/');
     strbuf.append(&b, rel);
     return strbuf.take(&b);
@@ -194,6 +203,12 @@ fn passed(env* e, u64 i) string {
         return "";
     }
     return modules.pass_at(&e->set, i)->path;
+}
+
+// The path of `m`. The callers lend an environment, so the use rule of `move` and `del` needs
+// this read through `m` in a frame of its own.
+fn path_of(modules.module* m) string {
+    return m->path;
 }
 
 // The binding of `name` in the namespace of the module `path`, or null.

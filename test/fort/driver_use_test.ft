@@ -767,11 +767,9 @@ fn manifest_value(string dir, string field) string own {
     i64 at = str.find(manifest, strbuf.view(&head));
     assert(at > 0);
     u64 start = cast(at, u64) + strbuf.view(&head).len;
-    u64 mut end = start;
-    while (manifest[end] != '\n') {
-        end += 1;
-    }
-    return str.dup(manifest[start..end]);
+    i64 eol = str.find(manifest[start..], "\n");
+    assert(eol >= 0);
+    return str.dup(manifest[start..start + cast(eol, u64)]);
 }
 
 fn a_dependent_holds_the_interface_hash_of_both_files_of_its_library() void {
@@ -1746,6 +1744,12 @@ fn a_library_build_records_each_used_library_in_byte_order() void {
 
 // ---- the artifact that a build writes reads back ---------------------------------------
 
+// The value `i` of `values`. The callers lend buffers, so the use rule of `move` and `del` needs
+// this read through `values` in a frame of its own.
+fn value_at(string@ values, u64 i) string {
+    return values[i];
+}
+
 fn the_artifact_of_a_build_reads_back_with_the_fields_of_the_build() void {
     string[3] configured = {"--no-bounds-check", "--cfg", "zone=a b"};
     build_std(configured[..]);
@@ -1769,9 +1773,9 @@ fn the_artifact_of_a_build_reads_back_with_the_fields_of_the_build() void {
     assert(c.fields.compiler == strbuf.view(&compiler));
     // the configuration map: the three keys of the target and the pair of --cfg, in byte order
     assert(c.fields.cfg_keys.len == 4);
-    assert(c.fields.cfg_keys[0] == "target_abi");
-    assert(c.fields.cfg_keys[3] == "zone");
-    assert(c.fields.cfg_values[3] == "a b");
+    assert(value_at(c.fields.cfg_keys, 0) == "target_abi");
+    assert(value_at(c.fields.cfg_keys, 3) == "zone");
+    assert(value_at(c.fields.cfg_values, 3) == "a b");
     // the bytes of the read are the files
     string own interface = contents("std.flib/interface.ft");
     defer del(interface);

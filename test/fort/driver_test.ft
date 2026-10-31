@@ -2204,6 +2204,12 @@ string[12] FIR_V9_TEXT = {
     "}\n",
 };
 
+// The first function of `m`.
+fn first_function(fir.module mut* m) fir.func mut* {
+    assert(m->funcs.len >= 1);
+    return &m->funcs.items[0];
+}
+
 // driver.report_function, which --fir-verify-report runs on each function, writes the first
 // violation of a function at the location it is given: here V9, on a function built by hand.
 // A function that keeps every rule writes nothing, after the build-mode pass of each mode too.
@@ -2224,7 +2230,7 @@ fn fir_verify_report_holds_a_function_built_by_hand() void {
     strbuf.str_buf mut out = strbuf.create();
     defer strbuf.free(&out);
     diag.loc at = diag.loc{"v9.ft", 1, 4, 1, 5};
-    driver.report_function(&m.funcs.items[0], &rt, at, false, false, &out);
+    driver.report_function(first_function(&m), &rt, at, false, false, &out);
     assert(str.starts_with(strbuf.view(&out), "v9.ft:1:4: fir.verify: V9 a path from bb0 "));
     assert(str.ends_with(strbuf.view(&out), "unreachable: main.f bb2 statement 0 (s0)\n"));
     assert(capture.line_count(strbuf.view(&out)) == 1);
@@ -2246,7 +2252,7 @@ fn fir_verify_report_holds_a_function_built_by_hand() void {
     defer fir.module_free(&good);
     bool[2] modes = {false, true};
     for (bool mode : modes) {
-        driver.report_function(&good.funcs.items[0], &rt, at, mode, mode, &out);
+        driver.report_function(first_function(&good), &rt, at, mode, mode, &out);
         assert(strbuf.view(&out) == "");
     }
 }
@@ -2410,6 +2416,18 @@ fn fir_test_of_the_pass_verify_writes_a_function_that_keeps_the_rules() void {
     assert(out == strbuf.view(&want));
 }
 
+// Appends `text` to `out` with a carriage return before each newline.
+fn append_crlf(string text, strbuf.str_buf mut* out) void {
+    u64 mut i = 0;
+    while (i < text.len) {
+        if (text[i] == '\n') {
+            strbuf.push(out, '\r');
+        }
+        strbuf.push(out, text[i]);
+        i += 1;
+    }
+}
+
 // A `.fir` file with CRLF line ends reads as one with LF line ends: the directives drop the
 // carriage return, and the parser and the checker read it as a blank.
 fn fir_test_reads_crlf_line_ends() void {
@@ -2419,18 +2437,7 @@ fn fir_test_reads_crlf_line_ends() void {
     assert(io.read_file("t.fir", &lf));
     strbuf.str_buf mut crlf = strbuf.create();
     defer strbuf.free(&crlf);
-    {
-        string range_values = strbuf.view(&lf);
-        u64 mut range_index = 0;
-        while (range_index < range_values.len) {
-            char c = range_values[range_index];
-            range_index += 1;
-            if (c == '\n') {
-                strbuf.push(&crlf, '\r');
-            }
-            strbuf.push(&crlf, c);
-        }
-    }
+    append_crlf(strbuf.view(&lf), &crlf);
     write_file("t.fir", strbuf.view(&crlf));
     string[3] mut argv = {"fort", "--fir-test", "t.fir"};
     assert(run(argv[0..3]) == EXIT_OK);

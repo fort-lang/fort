@@ -76,16 +76,14 @@ fn a_named_entry_takes_the_path_it_is_given() void {
 
 // The file of a named entry is read through the session, so a text that set_source installed
 // stands in for a file that is not on the disk.
-fn a_named_entry_reads_the_text_of_the_session() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    string own path = modules_env.in_sandbox(&e, "t.fir");
+fn a_named_entry_reads_the_text_of_the_session(modules_env.env mut* e) void {
+    string own path = modules_env.in_sandbox(e, "t.fir");
     defer del(path);
-    session.set_source(&e.s, path, "struct point {\n    i32 x;\n}\n");
-    assert(modules.load_named(&e.s, &e.set, "main", path));
-    assert(modules_env.ordered(&e, 0) == "main");
-    assert(modules.at(&e.set, 0)->file == path);
-    assert(modules_env.errors(&e) == 0);
+    session.set_source(&e->s, path, "struct point {\n    i32 x;\n}\n");
+    assert(modules.load_named(&e->s, &e->set, "main", path));
+    assert(modules_env.ordered(e, 0) == "main");
+    assert(modules.at(&e->set, 0)->file == path);
+    assert(modules_env.errors(e) == 0);
 }
 
 fn a_named_entry_that_does_not_open_is_reported() void {
@@ -325,43 +323,39 @@ fn a_syntax_error_in_an_imported_module_stops_the_compilation() void {
 
 // ---- the module reading ------------------------------------
 
-fn an_import_binds_the_short_name_to_the_module() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "import util;\nfn main() i32 { return util.add(1, 2); }\n");
-    modules_env.add(&e, "util.ft", modules_env.src_add());
-    assert(modules_env.load(&e, "main.ft"));
-    scope.binding* b = modules_env.bound(&e, "main", "util");
+fn an_import_binds_the_short_name_to_the_module(modules_env.env mut* e) void {
+    modules_env.add(e, "main.ft", "import util;\nfn main() i32 { return util.add(1, 2); }\n");
+    modules_env.add(e, "util.ft", modules_env.src_add());
+    assert(modules_env.load(e, "main.ft"));
+    scope.binding* b = modules_env.bound(e, "main", "util");
     assert(b != null);
     assert(b->kind == scope.bind_kind.b_module);
     // The binding denotes the module itself, as its position in the set plus 1, and the
     // position gives the module back.
-    modules.module* util = modules.find(&e.set, "util");
+    modules.module* util = modules.find(&e->set, "util");
     assert(b->module == util->index + 1);
-    assert(modules.read_at(&e.set, b->module - 1) == util);
+    assert(modules.read_at(&e->set, b->module - 1) == util);
     // the entry module is read first, so it holds position 0
-    assert(modules.find(&e.set, "main")->index == 0);
+    assert(modules.find(&e->set, "main")->index == 0);
 }
 
 // Each module keeps its position in the set, in read order, and read_at gives it back. A module
 // binding holds that position plus 1.
-fn each_module_keeps_its_position_in_read_order() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add2(&e, "main.ft", "import util;\nimport extra;\n",
+fn each_module_keeps_its_position_in_read_order(modules_env.env mut* e) void {
+    modules_env.add2(e, "main.ft", "import util;\nimport extra;\n",
                      "fn main() i32 { return util.add(1, 2); }\n");
-    modules_env.add(&e, "util.ft", modules_env.src_add());
-    modules_env.add(&e, "extra.ft", "u64 N = 1;\n");
-    assert(modules_env.load(&e, "main.ft"));
+    modules_env.add(e, "util.ft", modules_env.src_add());
+    modules_env.add(e, "extra.ft", "u64 N = 1;\n");
+    assert(modules_env.load(e, "main.ft"));
     u64 mut k = 0;
     while (k < 3) {
-        assert(modules.read_at(&e.set, k)->index == k);
+        assert(modules.read_at(&e->set, k)->index == k);
         k += 1;
     }
-    scope.binding* util = modules_env.bound(&e, "main", "util");
-    scope.binding* extra = modules_env.bound(&e, "main", "extra");
-    assert(modules.read_at(&e.set, util->module - 1) == modules.find(&e.set, "util"));
-    assert(modules.read_at(&e.set, extra->module - 1) == modules.find(&e.set, "extra"));
+    scope.binding* util = modules_env.bound(e, "main", "util");
+    scope.binding* extra = modules_env.bound(e, "main", "extra");
+    assert(modules.read_at(&e->set, util->module - 1) == modules.find(&e->set, "util"));
+    assert(modules.read_at(&e->set, extra->module - 1) == modules.find(&e->set, "extra"));
     assert(util->module != extra->module);
 }
 
@@ -418,29 +412,25 @@ fn an_include_root_is_searched_after_the_entry_directory() void {
     assert(modules_env.ordered(&e, 0) == "util");
 }
 
-fn the_entry_directory_wins_over_an_include_root() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "src/main.ft", "import util;\nfn main() i32 { return 0; }\n");
-    modules_env.add(&e, "src/util.ft", modules_env.src_add());
-    modules_env.add(&e, "lib/util.ft", "fn add(i32 a, i32 b) i32 { return 0; }\n");
-    modules_env.root(&e, "lib");
-    assert(modules_env.load(&e, "src/main.ft"));
-    modules.module* util = modules.find(&e.set, "util");
+fn the_entry_directory_wins_over_an_include_root(modules_env.env mut* e) void {
+    modules_env.add(e, "src/main.ft", "import util;\nfn main() i32 { return 0; }\n");
+    modules_env.add(e, "src/util.ft", modules_env.src_add());
+    modules_env.add(e, "lib/util.ft", "fn add(i32 a, i32 b) i32 { return 0; }\n");
+    modules_env.root(e, "lib");
+    assert(modules_env.load(e, "src/main.ft"));
+    modules.module* util = modules.find(&e->set, "util");
     assert(util != null);
     assert(str.find(util->file, "src/util.ft") >= 0);
 }
 
-fn include_roots_are_searched_in_command_line_order() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "import util;\nfn main() i32 { return 0; }\n");
-    modules_env.add(&e, "first/util.ft", modules_env.src_add());
-    modules_env.add(&e, "second/util.ft", modules_env.src_add());
-    modules_env.root(&e, "first");
-    modules_env.root(&e, "second");
-    assert(modules_env.load(&e, "main.ft"));
-    modules.module* util = modules.find(&e.set, "util");
+fn include_roots_are_searched_in_command_line_order(modules_env.env mut* e) void {
+    modules_env.add(e, "main.ft", "import util;\nfn main() i32 { return 0; }\n");
+    modules_env.add(e, "first/util.ft", modules_env.src_add());
+    modules_env.add(e, "second/util.ft", modules_env.src_add());
+    modules_env.root(e, "first");
+    modules_env.root(e, "second");
+    assert(modules_env.load(e, "main.ft"));
+    modules.module* util = modules.find(&e->set, "util");
     assert(util != null);
     assert(str.find(util->file, "first/util.ft") >= 0);
 }
@@ -518,7 +508,7 @@ fn a_file_of_the_runtimes_closure_is_the_entry_and_not_a_second_module() void {
     assert(modules_env.ordered(&e, 0) == "std.helper");
     assert(modules_env.ordered(&e, 1) == "std.rt");
     assert(modules.entry(&e.set) != null);
-    assert(modules.entry(&e.set)->path == "std.rt");
+    assert(modules_env.path_of(modules.entry(&e.set)) == "std.rt");
 
     // This case checks a module imported by the runtime. The
     // loader reads std.helper, and that module becomes the entry file.
@@ -531,7 +521,7 @@ fn a_file_of_the_runtimes_closure_is_the_entry_and_not_a_second_module() void {
     assert(modules_env.load(&f, "lib/helper.ft"));
     assert(modules.count(&f.set) == 2);
     assert(modules.entry(&f.set) != null);
-    assert(modules.entry(&f.set)->path == "std.helper");
+    assert(modules_env.path_of(modules.entry(&f.set)) == "std.helper");
 }
 
 fn the_runtime_is_loaded_once_when_the_program_imports_it() void {
@@ -627,16 +617,14 @@ fn std_alone_is_a_directory_and_not_a_module() void {
 
 // ---- the symbol reading ------------------------------------
 
-fn a_trailing_declaration_is_bound_to_that_declaration() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "import util.add;\nfn main() i32 { return add(1, 2); }\n");
-    modules_env.add(&e, "util.ft", modules_env.src_add());
-    assert(modules_env.load(&e, "main.ft"));
-    scope.binding* b = modules_env.bound(&e, "main", "add");
+fn a_trailing_declaration_is_bound_to_that_declaration(modules_env.env mut* e) void {
+    modules_env.add(e, "main.ft", "import util.add;\nfn main() i32 { return add(1, 2); }\n");
+    modules_env.add(e, "util.ft", modules_env.src_add());
+    assert(modules_env.load(e, "main.ft"));
+    scope.binding* b = modules_env.bound(e, "main", "add");
     assert(b != null);
     assert(b->kind == scope.bind_kind.b_symbol);
-    assert(b->to == modules_env.bound(&e, "util", "add"));
+    assert(b->to == modules_env.bound(e, "util", "add"));
 }
 
 fn as_renames_an_imported_declaration() void {
@@ -742,25 +730,21 @@ fn ambiguity_holds_whichever_roots_the_two_files_live_under() void {
     assert(modules_env.said(&e, "ambiguous import 'a.b.c'"));
 }
 
-fn a_prefix_that_lacks_the_name_leaves_the_module_reading() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "import a.b.c;\nfn main() i32 { return 0; }\n");
-    modules_env.add(&e, "a/b.ft", "fn other() i32 { return 0; }\n");
-    modules_env.add(&e, "a/b/c.ft", "fn f() i32 { return 0; }\n");
-    assert(modules_env.load(&e, "main.ft"));
-    scope.binding* b = modules_env.bound(&e, "main", "c");
+fn a_prefix_that_lacks_the_name_leaves_the_module_reading(modules_env.env mut* e) void {
+    modules_env.add(e, "main.ft", "import a.b.c;\nfn main() i32 { return 0; }\n");
+    modules_env.add(e, "a/b.ft", "fn other() i32 { return 0; }\n");
+    modules_env.add(e, "a/b/c.ft", "fn f() i32 { return 0; }\n");
+    assert(modules_env.load(e, "main.ft"));
+    scope.binding* b = modules_env.bound(e, "main", "c");
     assert(b != null);
     assert(b->kind == scope.bind_kind.b_module);
 }
 
-fn a_missing_module_file_leaves_the_symbol_reading() void {
-    modules_env.env mut e = modules_env.open();
-    defer modules_env.close(&e);
-    modules_env.add(&e, "main.ft", "import a.b.c;\nfn main() i32 { return 0; }\n");
-    modules_env.add(&e, "a/b.ft", "fn c(i32 x) i32 { return x; }\n");
-    assert(modules_env.load(&e, "main.ft"));
-    scope.binding* b = modules_env.bound(&e, "main", "c");
+fn a_missing_module_file_leaves_the_symbol_reading(modules_env.env mut* e) void {
+    modules_env.add(e, "main.ft", "import a.b.c;\nfn main() i32 { return 0; }\n");
+    modules_env.add(e, "a/b.ft", "fn c(i32 x) i32 { return x; }\n");
+    assert(modules_env.load(e, "main.ft"));
+    scope.binding* b = modules_env.bound(e, "main", "c");
     assert(b != null);
     assert(b->kind == scope.bind_kind.b_symbol);
 }
@@ -860,7 +844,7 @@ fn main() i32 {
     an_entry_file_in_a_directory_keeps_only_its_base_name();
     the_entry_directory_is_the_first_search_root();
     a_named_entry_takes_the_path_it_is_given();
-    a_named_entry_reads_the_text_of_the_session();
+    modules_env.run(a_named_entry_reads_the_text_of_the_session);
     a_named_entry_that_does_not_open_is_reported();
     an_entry_base_name_that_is_no_identifier_is_taken_as_it_is();
     a_dotted_entry_base_name_is_rejected();
@@ -882,16 +866,16 @@ fn main() i32 {
     a_file_reports_at_most_twenty_errors();
     each_file_has_a_budget_of_its_own();
     println("errors ok");
-    an_import_binds_the_short_name_to_the_module();
-    each_module_keeps_its_position_in_read_order();
+    modules_env.run(an_import_binds_the_short_name_to_the_module);
+    modules_env.run(each_module_keeps_its_position_in_read_order);
     a_nested_path_names_a_file_in_a_directory();
     as_renames_a_module_binding();
     import_paths_are_root_relative_and_not_file_relative();
     a_sibling_is_not_reachable_by_its_short_name();
     println("module reading ok");
     an_include_root_is_searched_after_the_entry_directory();
-    the_entry_directory_wins_over_an_include_root();
-    include_roots_are_searched_in_command_line_order();
+    modules_env.run(the_entry_directory_wins_over_an_include_root);
+    modules_env.run(include_roots_are_searched_in_command_line_order);
     println("roots ok");
     a_std_path_is_looked_up_in_the_standard_library_directory();
     every_closure_holds_the_runtime();
@@ -905,7 +889,7 @@ fn main() i32 {
     a_closure_that_holds_a_float_loads_the_runtime_and_nothing_else();
     a_float_module_in_the_library_directory_is_an_ordinary_module();
     println("std ok");
-    a_trailing_declaration_is_bound_to_that_declaration();
+    modules_env.run(a_trailing_declaration_is_bound_to_that_declaration);
     as_renames_an_imported_declaration();
     braces_are_sugar_for_independent_symbol_imports();
     a_braced_import_whose_prefix_is_no_module_file_is_an_error();
@@ -916,8 +900,8 @@ fn main() i32 {
     println("symbol reading ok");
     both_readings_succeeding_is_ambiguous();
     ambiguity_holds_whichever_roots_the_two_files_live_under();
-    a_prefix_that_lacks_the_name_leaves_the_module_reading();
-    a_missing_module_file_leaves_the_symbol_reading();
+    modules_env.run(a_prefix_that_lacks_the_name_leaves_the_module_reading);
+    modules_env.run(a_missing_module_file_leaves_the_symbol_reading);
     println("ambiguity ok");
     a_prefix_that_lacks_the_name_is_not_read_into_the_closure();
     a_syntax_error_in_a_prefix_the_module_reading_beats_is_not_reported();

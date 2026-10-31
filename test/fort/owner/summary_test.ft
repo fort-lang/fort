@@ -30,13 +30,28 @@ string[1] PRELUDE = {
 // module, which the caller frees.
 fn graph_of(lower_env.env mut* e, string@ text, u64@ works, summary.graph mut* g) fir.module {
     fir.module m = pass_env.parse(e, PRELUDE[..], text);
-    assert(m.funcs.len == works.len);
+    add_each(g, &m, works);
+    return m;
+}
+
+// Adds function `k` of `m` to `g` with the work `works[k]`.
+fn add_each(summary.graph mut* g, fir.module* m, u64@ works) void {
+    assert(fir.module_function_count(m) == works.len);
     u64 mut k = 0;
-    while (k < m.funcs.len) {
-        summary.add(g, &m.funcs.items[k], works[k]);
+    while (k < works.len) {
+        summary.add(g, fir.module_function_at(m, k), works[k]);
         k += 1;
     }
-    return m;
+}
+
+// The node `n` of `g`.
+fn node_at(summary.graph* g, u64 n) summary.node {
+    return g->nodes.items[n];
+}
+
+// The node of the direct call `k` of `g`, or -1.
+fn target_at(summary.graph* g, u64 k) i64 {
+    return g->targets.items[k];
 }
 
 // The components of `g` in order, as `<members> | <members>`: the symbols of the members in node
@@ -86,7 +101,7 @@ fn expect_order(string@ text, string want) void {
     defer fir.module_free(&m);
     u64 mut i = 0;
     while (i < m.funcs.len) {
-        summary.add(&g, &m.funcs.items[i], 1);
+        summary.add(&g, fir.module_function_at(&m, i), 1);
         i += 1;
     }
     summary.order(&g);
@@ -397,8 +412,8 @@ fn a_call_through_a_value_adds_no_edge() void {
     defer strbuf.free(&b);
     assert(same(components_of(&g, &b), "main.via | main.target"));
     // the call through the value is no direct call of `via`
-    assert(g.nodes.items[0].call_count == 0);
-    assert(g.nodes.items[1].call_count == 1);
+    assert(node_at(&g, 0).call_count == 0);
+    assert(node_at(&g, 1).call_count == 1);
 }
 
 fn an_extern_call_adds_no_node_and_no_edge() void {
@@ -412,7 +427,7 @@ fn an_extern_call_adds_no_node_and_no_edge() void {
     defer fir.module_free(&m);
     summary.order(&g);
     assert(summary.node_count(&g) == 1);
-    assert(g.nodes.items[0].call_count == 0);
+    assert(node_at(&g, 0).call_count == 0);
     assert(g.calls.len == 0);
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
@@ -430,15 +445,15 @@ fn a_call_of_a_function_outside_the_graph_adds_no_edge() void {
     defer summary.free(&g);
     fir.module mut m = pass_env.parse(&e, PRELUDE[..], CYCLE[..]);
     defer fir.module_free(&m);
-    summary.add(&g, &m.funcs.items[0], 1);
-    summary.add(&g, &m.funcs.items[2], 1);
+    summary.add(&g, fir.module_function_at(&m, 0), 1);
+    summary.add(&g, fir.module_function_at(&m, 2), 1);
     summary.order(&g);
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     assert(same(components_of(&g, &b), "main.ping | main.leaf"));
     assert(g.calls.len == 1);
     assert(g.targets.len == 1);
-    assert(g.targets.items[0] == -1);
+    assert(target_at(&g, 0) == -1);
 }
 
 fn two_calls_of_one_callee_are_one_dependency() void {
@@ -454,8 +469,8 @@ fn two_calls_of_one_callee_are_one_dependency() void {
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     assert(same(components_of(&g, &b), "*main.twice main.once"));
-    assert(g.nodes.items[0].call_count == 2);
-    assert(g.targets.items[0] == 1 && g.targets.items[1] == 1);
+    assert(node_at(&g, 0).call_count == 2);
+    assert(target_at(&g, 0) == 1 && target_at(&g, 1) == 1);
 }
 
 fn a_self_call_is_found_among_other_calls() void {
@@ -468,10 +483,10 @@ fn a_self_call_is_found_among_other_calls() void {
     fir.module mut m = graph_of(&e, TWO_CYCLES[..], works[..], &g);
     defer fir.module_free(&m);
     summary.order(&g);
-    assert(!g.nodes.items[0].calls_itself);
-    assert(!g.nodes.items[1].calls_itself);
-    assert(!g.nodes.items[2].calls_itself);
-    assert(g.nodes.items[3].calls_itself);
+    assert(!node_at(&g, 0).calls_itself);
+    assert(!node_at(&g, 1).calls_itself);
+    assert(!node_at(&g, 2).calls_itself);
+    assert(node_at(&g, 3).calls_itself);
 }
 
 fn a_second_order_gives_the_same_components_and_takes_new_nodes() void {
@@ -482,8 +497,8 @@ fn a_second_order_gives_the_same_components_and_takes_new_nodes() void {
     defer summary.free(&g);
     fir.module mut m = pass_env.parse(&e, PRELUDE[..], CYCLE[..]);
     defer fir.module_free(&m);
-    summary.add(&g, &m.funcs.items[0], 1);
-    summary.add(&g, &m.funcs.items[1], 1);
+    summary.add(&g, fir.module_function_at(&m, 0), 1);
+    summary.add(&g, fir.module_function_at(&m, 1), 1);
     summary.order(&g);
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
@@ -491,7 +506,7 @@ fn a_second_order_gives_the_same_components_and_takes_new_nodes() void {
     summary.order(&g);
     assert(same(components_of(&g, &b), "*main.ping main.pong"));
     // a node added after the order takes part in the next one
-    summary.add(&g, &m.funcs.items[2], 1);
+    summary.add(&g, fir.module_function_at(&m, 2), 1);
     summary.order(&g);
     assert(same(components_of(&g, &b), "main.leaf | *main.ping main.pong"));
 }
@@ -533,7 +548,7 @@ fn a_long_chain_is_ordered_by_the_walk_of_its_own_stack() void {
     defer summary.free(&g);
     u64 mut i = 0;
     while (i < m.funcs.len) {
-        summary.add(&g, &m.funcs.items[i], 1);
+        summary.add(&g, fir.module_function_at(&m, i), 1);
         i += 1;
     }
     summary.solve(&g, summary.WORK_LIMIT);
@@ -649,7 +664,7 @@ fn a_component_of_no_work_passes_no_limit() void {
     // one unit of work passes a limit of 0
     summary.graph mut h = summary.graph{};
     defer summary.free(&h);
-    summary.add(&h, &m.funcs.items[0], 1);
+    summary.add(&h, fir.module_function_at(&m, 0), 1);
     summary.solve(&h, 0);
     assert(summary.component_at(&h, 0).over);
 }
@@ -1001,11 +1016,11 @@ fn add_counts_the_parameters_of_each_function() void {
     defer summary.free(&g);
     fir.module mut m = ordered_params(&e, &g);
     defer fir.module_free(&m);
-    assert(g.nodes.items[0].params == 2);
-    assert(g.nodes.items[1].params == 11);
-    assert(g.nodes.items[2].params == 0);
+    assert(node_at(&g, 0).params == 2);
+    assert(node_at(&g, 1).params == 11);
+    assert(node_at(&g, 2).params == 0);
     // the locals after the parameters do not count
-    assert(fir.local_count(&m.funcs.items[1]) == 13);
+    assert(fir.local_count(fir.module_function_at(&m, 1)) == 13);
 }
 
 fn past_the_limit_each_may_line_is_present_and_each_must_line_absent() void {
@@ -1163,11 +1178,9 @@ fn collect_puts_each_node_with_a_line_in_byte_order_of_the_symbol() void {
     assert(summary.entry_count(&t) == 2);
     assert(summary.symbol(&t, 0) == "main.leaf");
     assert(summary.symbol(&t, 1) == "main.pong");
-    summary.line@ first = summary.lines(&t, 0);
-    assert(first.len == 1 && summary.compare(first[0], RESULT_1) == 0);
-    summary.line@ second = summary.lines(&t, 1);
-    assert(second.len == 2);
-    assert(summary.compare(second[0], EMPTY_1) == 0 && summary.compare(second[1], KEEP_2) == 0);
+    assert(summary.same_lines(summary.lines(&t, 0), leaf_lines[..]));
+    summary.line[2] sorted = {EMPTY_1, KEEP_2};
+    assert(summary.same_lines(summary.lines(&t, 1), sorted[..]));
     assert(summary.find(&t, "main.leaf") == 0);
     assert(summary.find(&t, "main.pong") == 1);
     assert(summary.find(&t, "main.ping") == -1);
