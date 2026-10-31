@@ -73,6 +73,12 @@ fn expect_effects(lower_env.env mut* e, string@ text, string want) void {
     expect_effects_of(e, text, parts[..]);
 }
 
+// Whether the entry of `first` past the last of the `blocks` blocks of `ef` closes its list. The
+// reads through `ef` stand in a function that takes it as a parameter (D17.21).
+fn closes(fir_verify.effects* ef, u32 blocks) bool {
+    return ef->first[cast(blocks, u64)] == ef->len;
+}
+
 // Holds the effects of the only function of `text` against the parts of `want` joined.
 fn expect_effects_of(lower_env.env mut* e, string@ text, string@ want_parts) void {
     strbuf.str_buf mut wanted = strbuf.create();
@@ -97,7 +103,7 @@ fn expect_effects_of(lower_env.env mut* e, string@ text, string@ want_parts) voi
         panic("fir_verify_effects_test: the effects differ");
     }
     // the last entry of `first` closes the list
-    assert(ef.first[cast(fir.block_count(f), u64)] == ef.len);
+    assert(closes(&ef, fir.block_count(f)));
 }
 
 // ---- the effect list -----------------------------------------------------------------------
@@ -258,6 +264,16 @@ fn next(lcg mut* g, u64 below) u64 {
 
 u32 LOCALS = 6;
 
+// Applies each effect of `e` in order to `set` under `rule`. The reads through `e` stand in a
+// function that takes it as a parameter (D17.21).
+fn apply_all(fir_verify.effects* e, u32 rule, fir_flow.bits mut* set) void {
+    u64 mut j = 0;
+    while (j < e->len) {
+        fir_verify.apply_effect(rule, e->items[j], set);
+        j += 1;
+    }
+}
+
 // For 300 blocks of up to 12 random effects on six temporaries, and four random in-sets each,
 // applying the effects in order gives what the sets give: the in-set less the kill set, with
 // the gen set added. The case holds both rules.
@@ -294,11 +310,7 @@ fn the_sets_equal_the_effects_applied_in_order() void {
                     }
                     i += 1;
                 }
-                u64 mut j = 0;
-                while (j < e.len) {
-                    fir_verify.apply_effect(rule, e.items[j], &walked);
-                    j += 1;
-                }
+                apply_all(&e, rule, &walked);
                 fir_flow.bits_subtract(&by_sets, &kills[0]);
                 fir_flow.bits_union(&by_sets, &gens[0]);
                 assert(fir_flow.bits_equal(&walked, &by_sets));

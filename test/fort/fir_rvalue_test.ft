@@ -191,6 +191,17 @@ fn a_slice_gives_the_span_of_its_place() void {
     assert(!fir.rvalue_owns(&x.f, view));
 }
 
+// The kind of `t`. The read through `t` stands in a function that takes it as a parameter
+// (D17.21).
+fn kind_of(types.node* t) types.type_kind {
+    return t->kind;
+}
+
+// The type of local `n` of `f`, for the reason of kind_of (D17.21).
+fn local_type(fir.func* f, u32 n) types.node* {
+    return fir.local_at(f, n)->ty;
+}
+
 fn a_call_gives_the_result_of_its_callee() void {
     fir_env.env mut e = fir_env.env{};
     fir_env.open(&e);
@@ -213,7 +224,7 @@ fn a_call_gives_the_result_of_its_callee() void {
     fir_env.expect(&e, fir.rvalue_type(&x.f, value), "u64");
     // A `noreturn` callee gives `void`.
     fir.rvalue stop = fir.rvalue_call_fn(fir_env.sym(&e, "stop"), first, 0);
-    assert(fir.rvalue_type(&x.f, stop)->kind == types.type_kind.k_void);
+    assert(kind_of(fir.rvalue_type(&x.f, stop)) == types.type_kind.k_void);
 }
 
 // ---- rvalue_owns ------------------------------------------------------------------------
@@ -231,7 +242,7 @@ fn five_forms_produce_an_owning_value() void {
     fir.operand_push(f, copy(x.n));
     assert(fir.rvalue_owns(f, fir.rvalue_aggregate_new(fir_env.ty(&e, "holder"), first, 2)));
     // A cast to an owning type owns; the checker admits one only from an owning operand (D3.14).
-    types.node* owned = fir.local_at(f, x.own_local)->ty;
+    types.node* owned = local_type(f, x.own_local);
     assert(fir.rvalue_owns(f, fir.rvalue_cast(f, owned, copy(x.n))));
     // A call with an owning result.
     assert(fir.rvalue_owns(f, fir.rvalue_call_fn(fir_env.sym(&e, "grab"), first, 0)));

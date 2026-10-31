@@ -9,6 +9,55 @@ import fort.consts;
 import fort.fir;
 import fir_env;
 import heap;
+import fort.types;
+
+// ---- reads through a pointer -------------------------------------------------------------------
+
+// The functions of this part read through a pointer that a call gives. Each takes that pointer or
+// the module as a parameter, so no read through it follows a call in the frame that owns the
+// module and the environment (D17.21).
+
+// The symbol of function `k` of `m`.
+fn sym_of(fir.module* m, u64 k) ast.sym* {
+    return fir.module_function_at(m, k)->sym;
+}
+
+// The name of `s`.
+fn name_of(ast.sym* s) string {
+    return s->name;
+}
+
+// A copy of `s`.
+fn copy_of(ast.sym* s) ast.sym {
+    return *s;
+}
+
+// Holds that `g` is the global of `named`, of the type that `ty` spells, with the value `value`.
+fn expect_global(fir_env.env mut* e, fir.global* g, ast.sym* named, string ty, i64 value) void {
+    assert(g->sym == named);
+    fir_env.expect(e, g->ty, ty);
+    i64 mut v = 0;
+    assert(consts.cv_to_i64(g->value, &v) && v == value);
+}
+
+// The address of each vector that the release probe watches, in each of three rounds.
+struct watched {
+    u64[3] funcs;
+    u64[3] globals;
+    u64[3] externs;
+    u64[3] locals;
+}
+
+// Records in slot `slot` of `at` the address of the function, global and extern vectors of `m`,
+// and of the locals of its function 20.
+fn record(fir.module* m, u64 slot, watched mut* at) void {
+    at->funcs[slot] = cast(m->funcs.items.ptr, u64);
+    at->globals[slot] = cast(m->globals.items.ptr, u64);
+    at->externs[slot] = cast(m->externs.items.ptr, u64);
+    at->locals[slot] = cast(fir.module_function_at(m, 20)->locals.items.ptr, u64);
+}
+
+// ---- the module ---------------------------------------------------------------------------------
 
 fn functions_keep_their_order() void {
     fir_env.env mut e = fir_env.env{};
@@ -22,8 +71,8 @@ fn functions_keep_their_order() void {
     fir.module_add_function(&m, move(first));
     fir.module_add_function(&m, move(second));
     assert(fir.module_function_count(&m) == 2);
-    assert(fir.module_function_at(&m, 0)->sym == fir_env.sym(&e, "add"));
-    assert(fir.module_function_at(&m, 1)->sym == fir_env.sym(&e, "nothing"));
+    assert(sym_of(&m, 0) == fir_env.sym(&e, "add"));
+    assert(sym_of(&m, 1) == fir_env.sym(&e, "nothing"));
     // The module holds the function as it was built.
     assert(fir.local_count(fir.module_function_at(&m, 0)) == 4);
     // The move emptied the caller's function.
@@ -63,16 +112,13 @@ fn a_global_keeps_its_value() void {
     defer fir.module_free(&m);
     ast.sym* limit = fir_env.sym(&e, "LIMIT");
     ast.sym* total = fir_env.sym(&e, "total");
-    fir.module_add_global(&m, fir.global{limit, limit->ty, consts.cv_from_i64(7), null});
-    fir.module_add_global(&m, fir.global{total, total->ty, consts.cv_from_i64(-3), null});
+    types.node* limit_ty = fir_env.ty(&e, "LIMIT");
+    types.node* total_ty = fir_env.ty(&e, "total");
+    fir.module_add_global(&m, fir.global{limit, limit_ty, consts.cv_from_i64(7), null});
+    fir.module_add_global(&m, fir.global{total, total_ty, consts.cv_from_i64(-3), null});
     assert(fir.module_global_count(&m) == 2);
-    fir.global* g = fir.module_global_at(&m, 0);
-    assert(g->sym == limit);
-    fir_env.expect(&e, g->ty, "i32");
-    i64 mut v = 0;
-    assert(consts.cv_to_i64(g->value, &v) && v == 7);
-    assert(consts.cv_to_i64(fir.module_global_at(&m, 1)->value, &v) && v == -3);
-    assert(fir.module_global_at(&m, 1)->sym == total);
+    expect_global(&e, fir.module_global_at(&m, 0), limit, "i32", 7);
+    expect_global(&e, fir.module_global_at(&m, 1), total, "i32", -3);
 }
 
 fn the_module_holds_the_entry_main() void {
@@ -83,7 +129,7 @@ fn the_module_holds_the_entry_main() void {
     defer fir.module_free(&m);
     assert(m.main == null);
     m.main = fir_env.sym(&e, "main");
-    assert(m.main->name == "main");
+    assert(name_of(m.main) == "main");
 }
 
 fn an_extern_used_twice_is_recorded_once() void {
@@ -98,7 +144,7 @@ fn an_extern_used_twice_is_recorded_once() void {
     assert(fir.module_extern_count(&m) == 1);
     assert(fir.module_extern_at(&m, 0) == puts);
     // A second declaration of one C name is the same extern.
-    ast.sym mut twin = *puts;
+    ast.sym mut twin = copy_of(puts);
     fir.module_use_extern(&m, &twin);
     assert(fir.module_extern_count(&m) == 1);
     assert(fir.module_extern_at(&m, 0) == puts);
@@ -151,17 +197,16 @@ fn a_module_leaves_the_heap_where_it_was() void {
     ast.sym* add = fir_env.sym(&e, "add");
     ast.sym* limit = fir_env.sym(&e, "LIMIT");
     ast.sym* puts = fir_env.sym(&e, "puts");
+    types.node* add_ty = fir_env.ty(&e, "add");
+    types.node* limit_ty = fir_env.ty(&e, "LIMIT");
     u64[3] mut break_at = {};
-    u64[3] mut funcs_at = {};
-    u64[3] mut globals_at = {};
-    u64[3] mut externs_at = {};
-    u64[3] mut locals_at = {};
+    watched mut at = watched{};
     // Forty distinct C names, one for each extern.
     ast.sym[40] mut names = {};
     string letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN";
     u64 mut n = 0;
     while (n < 40) {
-        names[n] = *puts;
+        names[n] = copy_of(puts);
         names[n].name = letters[n..n + 1];
         n += 1;
     }
@@ -170,7 +215,7 @@ fn a_module_leaves_the_heap_where_it_was() void {
         fir.module mut m = fir.module_new();
         u64 mut i = 0;
         while (i < 40) {
-            fir.func mut f = fir.func_new(fir_env.tt(&e), add, add->ty);
+            fir.func mut f = fir.func_new(fir_env.tt(&e), add, add_ty);
             u32 mut k = 0;
             while (k < 100) {
                 fir.local_add(&f, fir_env.u64_ty(&e), fir.local_kind.lk_temp, null,
@@ -178,16 +223,13 @@ fn a_module_leaves_the_heap_where_it_was() void {
                 k += 1;
             }
             fir.module_add_function(&m, move(f));
-            fir.module_add_global(&m, fir.global{limit, limit->ty, consts.cv_from_i64(7), null});
+            fir.module_add_global(&m, fir.global{limit, limit_ty, consts.cv_from_i64(7), null});
             fir.module_use_extern(&m, &names[i]);
             i += 1;
         }
         u64 slot = fir_env.leak_slot(round);
         if (slot < 3) {
-            funcs_at[slot] = cast(m.funcs.items.ptr, u64);
-            globals_at[slot] = cast(m.globals.items.ptr, u64);
-            externs_at[slot] = cast(m.externs.items.ptr, u64);
-            locals_at[slot] = cast(fir.module_function_at(&m, 20)->locals.items.ptr, u64);
+            record(&m, slot, &at);
         }
         assert(fir.module_extern_count(&m) == 40);
         fir.module_free(&m);
@@ -197,10 +239,10 @@ fn a_module_leaves_the_heap_where_it_was() void {
         round += 1;
     }
     assert(fir_env.moved(break_at) < fir_env.LEAK_BOUND);
-    assert(fir_env.address_moved(funcs_at) < fir_env.LEAK_BOUND);
-    assert(fir_env.address_moved(globals_at) < fir_env.LEAK_BOUND);
-    assert(fir_env.address_moved(externs_at) < fir_env.LEAK_BOUND);
-    assert(fir_env.address_moved(locals_at) < fir_env.LEAK_BOUND);
+    assert(fir_env.address_moved(at.funcs) < fir_env.LEAK_BOUND);
+    assert(fir_env.address_moved(at.globals) < fir_env.LEAK_BOUND);
+    assert(fir_env.address_moved(at.externs) < fir_env.LEAK_BOUND);
+    assert(fir_env.address_moved(at.locals) < fir_env.LEAK_BOUND);
 }
 
 fn main() i32 {

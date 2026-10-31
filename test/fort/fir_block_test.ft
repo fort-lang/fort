@@ -32,6 +32,50 @@ fn ret(fir.func mut* f, u32 from) void {
     fir.block_set_terminator(f, from, fir.term_return(fir_env.at(1, 1), 1));
 }
 
+// ---- reads through a block --------------------------------------------------------------------
+
+// The functions of this part read a block or a statement through the pointer that block_at or
+// block_statement gives. Each takes that pointer or the function as a parameter, so no read
+// through it follows a call in the frame that owns the function and the environment (D17.21).
+
+// The number of block `b` of `f`.
+fn number_of(fir.func* f, u32 b) u32 {
+    return fir.block_at(f, b)->number;
+}
+
+// Whether block `b` of `f` has its terminator.
+fn terminated(fir.func* f, u32 b) bool {
+    return fir.block_at(f, b)->terminated;
+}
+
+// The kind of the terminator of block `b` of `f`.
+fn term_kind_of(fir.func* f, u32 b) fir.term_kind {
+    return fir.block_at(f, b)->term.kind;
+}
+
+// The statement index of statement `i` of block `b` of `f`.
+fn stmt_of(fir.func* f, u32 b, u32 i) u32 {
+    return fir.block_statement(f, b, i)->stmt;
+}
+
+// The local of statement `i` of block `b` of `f`.
+fn local_of(fir.func* f, u32 b, u32 i) u32 {
+    return fir.block_statement(f, b, i)->local;
+}
+
+// Holds that `s` names the local `local` and has the statement index `stmt`.
+fn expect_live(fir.statement* s, u32 local, u32 stmt) void {
+    assert(s->local == local && s->stmt == stmt);
+}
+
+// Holds that `bl` ends in `goto` to `target`.
+fn expect_goto(fir.block* bl, u32 target) void {
+    assert(bl->terminated);
+    assert(bl->term.kind == fir.term_kind.tk_goto && bl->term.target == target);
+}
+
+// ---- blocks -------------------------------------------------------------------------------------
+
 fn func_new_makes_the_entry_block() void {
     fir_env.env mut e = fir_env.env{};
     fir_env.open(&e);
@@ -39,9 +83,8 @@ fn func_new_makes_the_entry_block() void {
     fir.func mut f = fir_env.func_of(&e, "add");
     defer fir.func_free(&f);
     assert(fir.block_count(&f) == 1);
-    fir.block* entry = fir.block_at(&f, 0);
-    assert(entry->number == 0);
-    assert(!entry->terminated);
+    assert(number_of(&f, 0) == 0);
+    assert(!terminated(&f, 0));
     assert(fir.block_statement_count(&f, 0) == 0);
 }
 
@@ -59,7 +102,7 @@ fn blocks_are_numbered_in_creation_order() void {
     assert(fir.block_count(&f) == 40);
     i = 0;
     while (i < 40) {
-        assert(fir.block_at(&f, i)->number == i);
+        assert(number_of(&f, i) == i);
         i += 1;
     }
 }
@@ -82,15 +125,12 @@ fn a_block_keeps_its_statements_in_order_and_its_terminator() void {
     assert(fir.block_statement_count(&f, 0) == 1);
     i = 0;
     while (i < 50) {
-        fir.statement* s = fir.block_statement(&f, b, i);
-        assert(s->local == i && s->stmt == i + 1);
+        expect_live(fir.block_statement(&f, b, i), i, i + 1);
         i += 1;
     }
-    assert(fir.block_statement(&f, 0, 0)->stmt == 99);
+    assert(stmt_of(&f, 0, 0) == 99);
     goto(&f, b, 0);
-    fir.block* bl = fir.block_at(&f, b);
-    assert(bl->terminated);
-    assert(bl->term.kind == fir.term_kind.tk_goto && bl->term.target == 0);
+    expect_goto(fir.block_at(&f, b), 0);
 }
 
 fn blocks_keep_their_statements_while_the_vector_grows() void {
@@ -107,9 +147,9 @@ fn blocks_keep_their_statements_while_the_vector_grows() void {
         fir.block_append(&f, b, live(b, b));
         i += 1;
     }
-    assert(fir.block_statement(&f, 0, 0)->stmt == 5);
-    assert(fir.block_at(&f, 0)->term.kind == fir.term_kind.tk_return);
-    assert(fir.block_statement(&f, 100, 0)->local == 100);
+    assert(stmt_of(&f, 0, 0) == 5);
+    assert(term_kind_of(&f, 0) == fir.term_kind.tk_return);
+    assert(local_of(&f, 100, 0) == 100);
 }
 
 // ---- predecessors -----------------------------------------------------------------------
@@ -230,6 +270,32 @@ fn a_function_with_no_edge_has_an_empty_table() void {
 
 // ---- release ----------------------------------------------------------------------------
 
+// The address of each vector that the release probe watches, in each of three rounds.
+struct watched {
+    u64[3] locals;
+    u64[3] projs;
+    u64[3] ops;
+    u64[3] arms;
+    u64[3] blocks;
+    u64[3] stmts;
+    u64[3] first;
+    u64[3] preds;
+}
+
+// Records in slot `slot` of `at` the address of each vector of `f` and of `pt`, and of the
+// statements of block 100. The reads through `f` and `pt` stand in a function that takes them as
+// parameters (D17.21).
+fn record(fir.func* f, fir.pred_table* pt, u64 slot, watched mut* at) void {
+    at->locals[slot] = cast(f->locals.items.ptr, u64);
+    at->projs[slot] = cast(f->projs.items.ptr, u64);
+    at->ops[slot] = cast(f->ops.items.ptr, u64);
+    at->arms[slot] = cast(f->arms.items.ptr, u64);
+    at->blocks[slot] = cast(f->blocks.items.ptr, u64);
+    at->stmts[slot] = cast(fir.block_at(f, 100)->statements.items.ptr, u64);
+    at->first[slot] = cast(pt->first.ptr, u64);
+    at->preds[slot] = cast(pt->preds.ptr, u64);
+}
+
 // A function with 200 blocks and its predecessor table, made and freed two hundred times, leave
 // the heap where they were. Each block holds four statements, one of them an assignment into a
 // field with two operands, and ends in a switch with one arm, so the round fills the locals, the
@@ -241,19 +307,13 @@ fn two_hundred_blocks_leave_the_heap_where_they_were() void {
     fir_env.open(&e);
     defer fir_env.close(&e);
     ast.sym* s = fir_env.sym(&e, "add");
+    types.node* fn_ty = fir_env.ty(&e, "add");
     types.node* pair = fir_env.ty(&e, "pair");
     u64[3] mut break_at = {};
-    u64[3] mut locals_at = {};
-    u64[3] mut projs_at = {};
-    u64[3] mut ops_at = {};
-    u64[3] mut arms_at = {};
-    u64[3] mut blocks_at = {};
-    u64[3] mut stmts_at = {};
-    u64[3] mut first_at = {};
-    u64[3] mut preds_at = {};
+    watched mut at = watched{};
     u64 mut round = 0;
     while (round < fir_env.LEAK_ROUNDS) {
-        fir.func mut f = fir.func_new(fir_env.tt(&e), s, s->ty);
+        fir.func mut f = fir.func_new(fir_env.tt(&e), s, fn_ty);
         u32 mut b = 0;
         while (b < 200) {
             if (b > 0) {
@@ -279,14 +339,7 @@ fn two_hundred_blocks_leave_the_heap_where_they_were() void {
         fir.pred_table mut pt = fir.func_predecessors(&f);
         u64 slot = fir_env.leak_slot(round);
         if (slot < 3) {
-            locals_at[slot] = cast(f.locals.items.ptr, u64);
-            projs_at[slot] = cast(f.projs.items.ptr, u64);
-            ops_at[slot] = cast(f.ops.items.ptr, u64);
-            arms_at[slot] = cast(f.arms.items.ptr, u64);
-            blocks_at[slot] = cast(f.blocks.items.ptr, u64);
-            stmts_at[slot] = cast(fir.block_at(&f, 100)->statements.items.ptr, u64);
-            first_at[slot] = cast(pt.first.ptr, u64);
-            preds_at[slot] = cast(pt.preds.ptr, u64);
+            record(&f, &pt, slot, &at);
         }
         fir.pred_table_free(&pt);
         fir.func_free(&f);
@@ -296,14 +349,14 @@ fn two_hundred_blocks_leave_the_heap_where_they_were() void {
         round += 1;
     }
     assert(fir_env.moved(break_at) < fir_env.LEAK_BOUND);
-    assert(fir_env.address_moved(locals_at) < fir_env.LEAK_BOUND);
-    assert(fir_env.address_moved(projs_at) < fir_env.LEAK_BOUND);
-    assert(fir_env.address_moved(ops_at) < fir_env.LEAK_BOUND);
-    assert(fir_env.address_moved(arms_at) < fir_env.LEAK_BOUND);
-    assert(fir_env.address_moved(blocks_at) < fir_env.LEAK_BOUND);
-    assert(fir_env.address_moved(stmts_at) < fir_env.LEAK_BOUND);
-    assert(fir_env.address_moved(first_at) < fir_env.LEAK_BOUND);
-    assert(fir_env.address_moved(preds_at) < fir_env.LEAK_BOUND);
+    assert(fir_env.address_moved(at.locals) < fir_env.LEAK_BOUND);
+    assert(fir_env.address_moved(at.projs) < fir_env.LEAK_BOUND);
+    assert(fir_env.address_moved(at.ops) < fir_env.LEAK_BOUND);
+    assert(fir_env.address_moved(at.arms) < fir_env.LEAK_BOUND);
+    assert(fir_env.address_moved(at.blocks) < fir_env.LEAK_BOUND);
+    assert(fir_env.address_moved(at.stmts) < fir_env.LEAK_BOUND);
+    assert(fir_env.address_moved(at.first) < fir_env.LEAK_BOUND);
+    assert(fir_env.address_moved(at.preds) < fir_env.LEAK_BOUND);
 }
 
 fn main() i32 {

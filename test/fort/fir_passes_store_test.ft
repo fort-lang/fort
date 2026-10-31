@@ -255,6 +255,26 @@ bool[FOLD_COUNT] FOLDS = {
     true, false, false, false, false, false, false, false, true, true, false, true, false,
 };
 
+// Function `k` of `m`, to change. The read of the vector of `m` stands in a function that takes
+// `m` as a parameter (D17.21).
+fn function_mut(fir.module mut* m, u64 k) fir.func mut* {
+    return &m->funcs.items[k];
+}
+
+// Holds that block `b` of `f` ends in `goto` to `target`. The reads through `f` stand in a
+// function that takes it as a parameter (D17.21).
+fn expect_goto(fir.func* f, u32 b, u32 target) void {
+    fir.terminator* t = &fir.block_at(f, b)->term;
+    assert(t->kind == fir.term_kind.tk_goto && t->target == target);
+}
+
+// Holds that block `b` of `f` is new: it has its number, no statement and no terminator. The
+// reads through `f` stand in a function that takes it as a parameter (D17.21).
+fn expect_new_block(fir.func* f, u32 b) void {
+    assert(fir.block_at(f, b)->number == b);
+    assert(!fir.block_at(f, b)->terminated && fir.block_statement_count(f, b) == 0);
+}
+
 // The count of the assignments of the whole local `t` in `f`.
 fn assignments(fir.func* f, u32 t) u32 {
     u32 mut count = 0;
@@ -286,7 +306,7 @@ fn the_fold_needs_each_of_its_conditions() void {
     assert(fm.funcs.len == FOLD_COUNT);
     u64 mut k = 0;
     while (k < FOLD_COUNT) {
-        fir.func mut* f = &fm.funcs.items[k];
+        fir.func mut* f = function_mut(&fm, k);
         u32 before = assignments(f, FOLD_TEMPS[k]);
         u32 blocks = fir.block_count(f);
         pass_env.build(&e, f, pass_env.RELEASE);
@@ -373,8 +393,7 @@ fn the_merge_leaves_a_loop_and_the_entry() void {
         pass_env.build_proved(f, true, false);
         assert(fir.block_count(f) == 2);
         pass_env.numbered(f);
-        fir.terminator* t = &fir.block_at(f, 1)->term;
-        assert(t->kind == fir.term_kind.tk_goto && t->target == cast(1 - k, u32));
+        expect_goto(f, 1, cast(1 - k, u32));
         fir.module_free(&fm);
         k += 1;
     }
@@ -479,8 +498,8 @@ fn a_block_after_a_merge_starts_empty() void {
     u32 mut k = 0;
     while (k < 2) {
         u32 b = fir.block_new(f);
-        assert(b == 3 + k && fir.block_at(f, b)->number == b);
-        assert(!fir.block_at(f, b)->terminated && fir.block_statement_count(f, b) == 0);
+        assert(b == 3 + k);
+        expect_new_block(f, b);
         fir.rvalue r = fir.rvalue_use(f, fir.operand_copy(fir.place_local(2)));
         fir.block_append(f, b, fir.stmt_assign(fir.place_local(2), r, diag.loc{}, 0));
         fir.block_set_terminator(f, b, fir.term_return(diag.loc{}, 0));

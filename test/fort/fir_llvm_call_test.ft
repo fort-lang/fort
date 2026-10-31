@@ -320,6 +320,18 @@ fn an_extern_call_carries_its_c_form() void {
     llvm_env.verified(&e, got);
 }
 
+// The C name of extern `k` of `m`. The read through `m` stands in a function that takes it as a
+// parameter (D17.21).
+fn extern_name(fir.module* m, u64 k) string {
+    return fir.module_extern_at(m, k)->name;
+}
+
+// Names the symbol of function 0 of `m` as its entry `main`, for the reason of extern_name
+// (D17.21).
+fn name_main(fir.module mut* m) void {
+    m->main = fir.module_function_at(m, 0)->sym;
+}
+
 // The extern list of the FIR module drives the `declare` lines: first-use order, `...` for the
 // variadic tail, the extension attributes, and `nobuiltin` on each. `#3` is the only group that an
 // extern call adds.
@@ -332,8 +344,8 @@ fn the_extern_list_drives_the_declarations() void {
     fir.module_add_function(&m, llvm_env.lower(&e, SOURCE[..], "c_calls", pass_env.CHECKED));
     fir.module_collect_externs(&m);
     assert(fir.module_extern_count(&m) == 3);
-    assert(fir.module_extern_at(&m, 0)->name == "printf");
-    assert(fir.module_extern_at(&m, 2)->name == "write");
+    assert(extern_name(&m, 0) == "printf");
+    assert(extern_name(&m, 2) == "write");
     fir_llvm.translate_module(&e.g, &m);
     string[6] want = {
         "declare i32 @printf(ptr, ...) nobuiltin",
@@ -363,7 +375,7 @@ fn the_module_writes_the_c_main() void {
     fir.module mut m = fir.module_new();
     defer fir.module_free(&m);
     fir.module_add_function(&m, llvm_env.lower(&e, ENTRY[..], "main", pass_env.CHECKED));
-    m.main = fir.module_function_at(&m, 0)->sym;
+    name_main(&m);
     fir_llvm.translate_module(&e.g, &m);
     string[10] want = {
         "define dso_local i32 @main(i32 %argc, ptr %argv) #0 {",

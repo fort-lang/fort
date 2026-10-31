@@ -18,12 +18,18 @@ import std.strbuf;
 // The set of the numbers of `list`, below `count`.
 fn set_of(u32 count, u32@ list) fir_flow.bits {
     fir_flow.bits mut s = fir_flow.bits_new(count);
+    set_each(&s, list);
+    return s;
+}
+
+// Adds to `s` each number of `list`. The reads of `list` stand in a function that returns no
+// aggregate, so none of them can read the result of set_of before its first store (D17.21).
+fn set_each(fir_flow.bits mut* s, u32@ list) void {
     u64 mut i = 0;
     while (i < list.len) {
-        fir_flow.bits_set(&s, list[i]);
+        fir_flow.bits_set(s, list[i]);
         i += 1;
     }
-    return s;
 }
 
 // ---- bits_subtract -------------------------------------------------------------------------
@@ -145,6 +151,13 @@ fn parse(env mut* e, string lets, string@ blocks) fir.func* {
     return fir.module_function_at(&e->m, 0);
 }
 
+// Holds that the last runs of `a` and `b` give block `at` one in-set and one out-set. The reads
+// through `a` and `b` stand in a function that takes them as parameters (D17.21).
+fn same_sets(fir_flow.dataflow* a, fir_flow.dataflow* b, u64 at) void {
+    assert(fir_flow.bits_equal(&a->ins[at], &b->ins[at]));
+    assert(fir_flow.bits_equal(&a->outs[at], &b->outs[at]));
+}
+
 // Runs the dataflow of `join` over `f` twice, with scope_marks as a function and as sets, and
 // holds that the two reach one fixpoint after one count of transfers. Returns that count.
 fn agree(fir.func* f, u32 count, fir_flow.join_kind join, bool full_entry) u64 {
@@ -178,8 +191,7 @@ fn agree(fir.func* f, u32 count, fir_flow.join_kind join, bool full_entry) u64 {
     b = 0;
     while (b < n) {
         u64 at = cast(b, u64);
-        assert(fir_flow.bits_equal(&by_fn.ins[at], &by_sets.ins[at]));
-        assert(fir_flow.bits_equal(&by_fn.outs[at], &by_sets.outs[at]));
+        same_sets(&by_fn, &by_sets, at);
         fir_flow.bits_free(&gens[at]);
         fir_flow.bits_free(&kills[at]);
         b += 1;
@@ -262,14 +274,14 @@ fn a_second_run_with_sets_replaces_the_result() void {
     fir_flow.bits[2] mut kills = {fir_flow.bits_new(5), fir_flow.bits_new(5)};
     fir_flow.bits_set(&gens[0], 2);
     fir_flow.dataflow_forward_sets(f, &pt, &d, gens[..], kills[..]);
-    assert(fir_flow.bits_get(&d.ins[1], 2));
+    assert(holds(&d, 1, 2));
     // the second run kills `_2` in bb0 and generates `_3`
     fir_flow.bits_clear(&gens[0], 2);
     fir_flow.bits_set(&gens[0], 3);
     fir_flow.bits_set(&kills[0], 2);
     fir_flow.dataflow_forward_sets(f, &pt, &d, gens[..], kills[..]);
-    assert(!fir_flow.bits_get(&d.ins[1], 2));
-    assert(fir_flow.bits_get(&d.ins[1], 3));
+    assert(!holds(&d, 1, 2));
+    assert(holds(&d, 1, 3));
     assert(d.steps == 2);
     u64 mut i = 0;
     while (i < 2) {
@@ -356,6 +368,22 @@ fn agree_edges(fir.func* f, fir.func* split, u32 count, edge@ es, fir_flow.join_
         edge_to[cast(b, u64)] = fir_flow.NO_EDGE;
         b += 1;
     }
+    add_edges(es, n, edge_to, edge_gens, split_gens);
+    fir_flow.dataflow_forward_edges(f, &pt, &by_edges, gens, kills, edge_to, edge_gens);
+    fir_flow.dataflow_forward_sets(split, &spt, &by_blocks, split_gens, split_kills);
+    b = 0;
+    while (b < n) {
+        same_sets(&by_edges, &by_blocks, cast(b, u64));
+        b += 1;
+    }
+    return by_edges.steps;
+}
+
+// Gives each edge set of `es` to its block in `edge_to` and `edge_gens`, and to the gen set of
+// its new block in `split_gens`, past the `n` blocks of the function. The reads of `es` stand in
+// a function that takes the sets as parameters (D17.21).
+fn add_edges(edge@ es, u32 n, u32 mut@ edge_to, fir_flow.bits mut@ edge_gens,
+             fir_flow.bits mut@ split_gens) void {
     u64 mut k = 0;
     while (k < es.len) {
         u64 at = cast(es[k].from, u64);
@@ -368,16 +396,6 @@ fn agree_edges(fir.func* f, fir.func* split, u32 count, edge@ es, fir_flow.join_
         }
         k += 1;
     }
-    fir_flow.dataflow_forward_edges(f, &pt, &by_edges, gens, kills, edge_to, edge_gens);
-    fir_flow.dataflow_forward_sets(split, &spt, &by_blocks, split_gens, split_kills);
-    b = 0;
-    while (b < n) {
-        u64 at = cast(b, u64);
-        assert(fir_flow.bits_equal(&by_edges.ins[at], &by_blocks.ins[at]));
-        assert(fir_flow.bits_equal(&by_edges.outs[at], &by_blocks.outs[at]));
-        b += 1;
-    }
-    return by_edges.steps;
 }
 
 // Runs agree_edges under both joins.
@@ -498,8 +516,7 @@ fn an_edge_set_holds_on_its_edge_as_a_block_on_that_edge_does() void {
     fir_flow.dataflow_forward_sets(f, &pt, &plain, gens, kills);
     u64 mut b = 0;
     while (b < 4) {
-        assert(fir_flow.bits_equal(&d.ins[b], &plain.ins[b]));
-        assert(fir_flow.bits_equal(&d.outs[b], &plain.outs[b]));
+        same_sets(&d, &plain, b);
         b += 1;
     }
     assert(d.steps == plain.steps);

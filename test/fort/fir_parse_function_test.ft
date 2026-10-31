@@ -11,6 +11,7 @@ import fir_env;
 import fort.fir_parse;
 import fort.fir_print;
 import std.strbuf;
+import fort.types;
 
 // The worked example of spec/fir.md 13 as the printer writes it, without the comment of the
 // `let` of `_3`.
@@ -117,6 +118,22 @@ fn sum_text(strbuf.str_buf mut* out) void {
     strbuf.append(out, "}\n");
 }
 
+// The type of local `n` of `f`. The read through `f` stands in a function that takes it as a
+// parameter (D17.21).
+fn local_type(fir.func* f, u32 n) types.node* {
+    return fir.local_at(f, n)->ty;
+}
+
+// Whether block `b` of `f` has its terminator, for the reason of local_type (D17.21).
+fn terminated(fir.func* f, u32 b) bool {
+    return fir.block_at(f, b)->terminated;
+}
+
+// The symbol of function `k` of `m`, for the reason of local_type (D17.21).
+fn sym_of(fir.module* m, u64 k) ast.sym* {
+    return fir.module_function_at(m, k)->sym;
+}
+
 // Parses `text` against the fixture into *m and returns the count of new errors.
 fn parse(fir_env.env mut* e, string text, fir.module mut* m) u64 {
     u64 before = fir_env.errors(e);
@@ -179,8 +196,14 @@ fn the_worked_example_has_the_prelude_symbols() void {
     defer fir.module_free(&m);
     assert(parse(&e, strbuf.view(&text), &m) == 0);
     assert(fir.module_function_count(&m) == 1);
-    fir.func* f = fir.module_function_at(&m, 0);
-    assert(f->sym == fir_env.sym(&e, "f") && f->ty == fir_env.ty(&e, "f"));
+    expect_worked_example(&e, fir.module_function_at(&m, 0));
+}
+
+// Holds that `f` is the worked example with the symbols of the prelude, its locals, the `del` of
+// bb2 and the switch of bb1. The reads through `f` stand in a function that takes it as a
+// parameter (D17.21).
+fn expect_worked_example(fir_env.env mut* e, fir.func* f) void {
+    assert(f->sym == fir_env.sym(e, "f") && f->ty == fir_env.ty(e, "f"));
     assert(fir.local_count(f) == 4 && fir.block_count(f) == 4);
     // `_1` is the parameter `c` of the prelude, with its symbol.
     fir.local* c = fir.local_at(f, 1);
@@ -214,7 +237,13 @@ fn a_loop_round_trips_byte_for_byte() void {
     defer fir.module_free(&m);
     // A second parse finds the symbol that the first one made, with the same type.
     assert(parse(&e, strbuf.view(&text), &m) == 0);
-    fir.func* f = fir.module_function_at(&m, 0);
+    expect_sum(fir.module_function_at(&m, 0));
+}
+
+// Holds that `f` is `sum` with a new symbol of the module `main`, and that its local `_1` has a
+// name and no symbol. The reads through `f` stand in a function that takes it as a parameter
+// (D17.21).
+fn expect_sum(fir.func* f) void {
     assert(f->sym->kind == ast.sym_kind.s_fn && f->sym->name == "sum");
     assert(f->sym->owner->kind == ast.sym_kind.s_module && f->sym->owner->name == "main");
     assert(f->sym->node == null);
@@ -268,19 +297,25 @@ fn a_module_of_two_functions_round_trips() void {
     fir.module mut m = fir.module{};
     defer fir.module_free(&m);
     assert(parse(&e, text, &m) == 0);
-    assert(fir.module_function_count(&m) == 2);
+    expect_two_functions(&e, &m);
+}
+
+// Holds that `m` is the module of TWO: its call, its externs, its unnamed parameter, and no `main`
+// and no global. The reads through `m` stand in a function that takes it as a parameter (D17.21).
+fn expect_two_functions(fir_env.env mut* e, fir.module* m) void {
+    assert(fir.module_function_count(m) == 2);
     // The call of the first function names the symbol of the second.
-    fir.func* first = fir.module_function_at(&m, 0);
-    fir.func* second = fir.module_function_at(&m, 1);
+    fir.func* first = fir.module_function_at(m, 0);
+    fir.func* second = fir.module_function_at(m, 1);
     assert(fir.block_statement(first, 0, 0)->value.callee_sym == second->sym);
     // The externs, each once, in first-use order.
-    assert(fir.module_extern_count(&m) == 2);
-    assert(fir.module_extern_at(&m, 0) == fir_env.sym(&e, "abs"));
-    assert(fir.module_extern_at(&m, 1) == fir_env.sym(&e, "labs"));
+    assert(fir.module_extern_count(m) == 2);
+    assert(fir.module_extern_at(m, 0) == fir_env.sym(e, "abs"));
+    assert(fir.module_extern_at(m, 1) == fir_env.sym(e, "labs"));
     // `_1` has no name and no symbol.
     fir.local* one = fir.local_at(second, 1);
     assert(one->kind == fir.local_kind.lk_param && one->sym == null && one->name == "");
-    assert(m.main == null && fir.module_global_count(&m) == 0);
+    assert(m->main == null && fir.module_global_count(m) == 0);
 }
 
 u64 STOP_LINES = 7;
@@ -335,7 +370,7 @@ fn a_function_type_round_trips() void {
     defer fir.module_free(&m);
     assert(parse(&e, text, &m) == 0);
     fir.func* f = fir.module_function_at(&m, 0);
-    assert(fir.local_at(f, 3)->ty == fir_env.ty(&e, "add"));
+    assert(local_type(f, 3) == fir_env.ty(&e, "add"));
 }
 
 // No `let _0`, a location with no index, a location over two lines with no index, and a name on
@@ -384,7 +419,13 @@ fn a_let_and_a_location_take_their_defaults() void {
     fir.module mut m = fir.module{};
     defer fir.module_free(&m);
     assert(parse(&e, text, &m) == 0);
-    fir.func* f = fir.module_function_at(&m, 0);
+    expect_defaults(fir.module_function_at(&m, 0));
+}
+
+// Holds that `f` has the kinds and the statement indexes of DEFAULTS: `_1` named, `_2` a
+// temporary, and index 0 where the text gives none. The reads through `f` stand in a function
+// that takes it as a parameter (D17.21).
+fn expect_defaults(fir.func* f) void {
     assert(fir.local_at(f, 1)->kind == fir.local_kind.lk_named);
     assert(fir.local_at(f, 2)->kind == fir.local_kind.lk_temp);
     assert(fir.block_statement(f, 0, 0)->stmt == 0);
@@ -441,7 +482,12 @@ fn no_location_is_the_empty_location() void {
     fir.module mut m = fir.module{};
     defer fir.module_free(&m);
     assert(parse(&e, text, &m) == 0);
-    fir.terminator* t = &fir.block_at(fir.module_function_at(&m, 0), 0)->term;
+    expect_no_location(&fir.block_at(fir.module_function_at(&m, 0), 0)->term);
+}
+
+// Holds that `t` has the empty location, the empty exit and the index 0. The reads through `t`
+// stand in a function that takes it as a parameter (D17.21).
+fn expect_no_location(fir.terminator* t) void {
     assert(t->loc.line == 0 && t->exit_loc.line == 0 && t->stmt == 0);
 }
 
@@ -471,7 +517,7 @@ fn a_missing_semicolon_keeps_the_rest_of_the_block() void {
     assert(parse(&e, with_item(&b, "live(_0)"), &m) == 1);
     fir_env.said(&e, 0, "5:17: expected ';'");
     fir.func* f = fir.module_function_at(&m, 0);
-    assert(fir.block_statement_count(f, 0) == 1 && fir.block_at(f, 0)->terminated);
+    assert(fir.block_statement_count(f, 0) == 1 && terminated(f, 0));
     // On one line, the rest of the line is skipped with no second diagnostic.
     fir.module mut n = fir.module{};
     defer fir.module_free(&n);
@@ -786,7 +832,7 @@ fn an_error_leaves_the_next_function() void {
     defer fir.module_free(&m);
     assert(parse(&e, strbuf.view(&both), &m) == 1);
     assert(fir.module_function_count(&m) == 1);
-    assert(fir.module_function_at(&m, 0)->sym == fir_env.sym(&e, "nothing"));
+    assert(sym_of(&m, 0) == fir_env.sym(&e, "nothing"));
 }
 
 fn main() i32 {

@@ -11,6 +11,7 @@
 /// find the loop, expand its deferred statements, and so itself again, with no end.
 import fort.ast;
 import check_env;
+import fort.diag;
 import fort.fir;
 import fort.fir_lower;
 import fort.gen;
@@ -28,13 +29,22 @@ fn main() i32 {
         "}",
     };
     lower_env.check_lines(&e, source[..], true);
-    ast.node mut* decl = check_env.sym_main(&e.c, "f")->node;
+    expand_the_deferred_break(&e);
+    return 0;
+}
+
+// Expands a deferred `break` of the loop of `f`. The function takes the environment as a
+// parameter, so the reads through `decl` and `brk` use no owner of its frame. The read of the
+// location comes before `f` and `lw` exist (D17.21).
+fn expand_the_deferred_break(lower_env.env mut* e) void {
+    ast.node mut* decl = check_env.sym_main(&e->c, "f")->node;
     ast.node mut* loop = ast.ast_child_mut(decl->b, 0);
     ast.node mut* brk = ast.ast_child_mut(loop->b, 0);
-    ast.node mut wrapper = ast.node{.kind = ast.ast_kind.k_defer, .loc = brk->loc, .a = brk};
-    fir.func mut f = fir.func_new(&e.c.ck.types, decl->sym, decl->sym->ty);
+    diag.loc at = brk->loc;
+    ast.node mut wrapper = ast.node{.kind = ast.ast_kind.k_defer, .loc = at, .a = brk};
+    fir.func mut f = fir.func_new(&e->c.ck.types, decl->sym, decl->sym->ty);
     defer fir.func_free(&f);
-    fir_lower.lowerer mut lw = fir_lower.lowerer{.ck = &e.c.ck, .f = &f};
+    fir_lower.lowerer mut lw = fir_lower.lowerer{.ck = &e->c.ck, .f = &f};
     defer fir_lower.scopes_free(&lw.scopes);
     defer gen.refs_free(&lw.defers);
     fir_lower.scope_push(&lw, fir_lower.scope_kind.sc_fn, 0, 0);
@@ -42,7 +52,6 @@ fn main() i32 {
     gen.refs_push(&lw.defers, &wrapper);
     assert(lw.floor == 0);
     println("the deferred break has a loop outside it");
-    fir_lower.expand(&lw, 1, brk->loc);
+    fir_lower.expand(&lw, 1, at);
     println("the deferred break left its expansion");
-    return 0;
 }
