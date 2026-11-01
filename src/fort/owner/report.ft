@@ -1,8 +1,10 @@
 /// Writes the error of D17.11 for each overwrite check that owner.prover does not prove: the text
 /// and the position of each error (spec/fir.md 11, spec/ownership-design.md 4.1). It also writes
 /// the error of part 1 of the leak rule (D17.20) for each exit that owner.prover does not prove,
-/// the error of rule (b) (D17.21) for each use that it does not prove, and the line of
-/// `--leak-report` for each site of part 2 that it does not prove.
+/// the error of rule (b) (D17.21) for each use that it does not prove, the line of
+/// `--leak-report` for each site of part 2 that it does not prove, and the lines of
+/// `--aggregate-report` for each exit of a local of an owning aggregate type that it does not
+/// prove.
 //
 // The module holds no module-level mutable state: each buffer belongs to one call.
 import fort.ast;
@@ -24,6 +26,11 @@ string LIMIT_NOTE = "the function exceeds the work limit of D17.11; split it";
 /// not reach, so the note does not name D17.11.
 string LEAK_LIMIT_NOTE =
     "the function exceeds the work limit of the leak rule; split it";
+
+/// The note of the first site of `--aggregate-report` in a function whose aggregate work passed
+/// prover.WORK_LIMIT. The aggregate work has a limit of its own, which the leak work does not
+/// reach, so the note does not name the leak rule.
+string AGGREGATE_LIMIT_NOTE = "the function exceeds the aggregate work limit; split it";
 
 // The offset of `line`:`col` in `src`, or the length of `src` past its end.
 fn offset(string src, u32 line, u32 col) u64 {
@@ -672,6 +679,126 @@ fn write_inner_lines(fir.func* f, prover.proof* p, session.session mut* s,
                 write_position(st->loc, out);
                 strbuf.append(out, "note: ");
                 strbuf.append(out, LEAK_LIMIT_NOTE);
+                strbuf.push(out, '\n');
+            }
+            limit_told = true;
+        }
+        k += 1;
+    }
+}
+
+// ---- the report of the owning aggregate locals -------------------------------------------------
+
+// The line of the cause `k` of an exit of a local of an owning aggregate type (prover.cause_kind),
+// or "" for no cause.
+fn cause_text(prover.cause_kind k) string {
+    switch (k) {
+    case prover.cause_kind.cs_none:
+        return "";
+    case prover.cause_kind.cs_call:
+        return "cause 1: R1 can prove it if each callee that takes its address empties the owner";
+    case prover.cause_kind.cs_paths:
+        return "cause 2: the owner holds a value on some paths only";
+    case prover.cause_kind.cs_other:
+        return "cause 3: another cause";
+    case prover.cause_kind.cs_limit:
+        return "cause 4: the aggregate work of the function passes the limit";
+    }
+}
+
+/// Appends the text that names the first owner that the exit `a` of `f` does not prove: the
+/// declared name of a named local or a parameter, or the source text of the expression of a
+/// temporary, in a parenthesis unless it is a name, a call, a `cast`, an index, a field, `new` or
+/// `sizeof`, then `.` and the name of each field and `[n]` for element `n`, as `s.items` or
+/// `pairs[1].a`, as write_owner names an owner local. A FIR text with no tree gives the FIR place
+/// of a temporary and the number of each field, `_3.0[1]`.
+fn write_aggregate_owner(fir.func* f, prover.aggregate* a, session.session mut* s,
+                         strbuf.str_buf mut* out) void {
+    fir.local* l = fir.local_at(f, a->at.local);
+    types.node* t = l->ty;
+    bool temp = l->kind == fir.local_kind.lk_temp;
+    string name = fir.local_name(l);
+    ast.node* mut n = null;
+    if (temp && f->sym != null && f->sym->node != null && l->loc.line > 0) {
+        n = find_node(f->sym->node, l->loc);
+    }
+    strbuf.str_buf mut base = strbuf.create();
+    defer strbuf.free(&base);
+    bool mut numbered = false;
+    if (n != null && write_text(n, s, &base)) {
+        append_operand(out, strbuf.view(&base), is_postfix(n));
+    } else if (!temp && name.len > 0) {
+        strbuf.append(out, name);
+    } else {
+        fir_print.print_place(f, fir.place_local(a->at.local), out);
+        numbered = true;
+    }
+    append_steps(t, a->first, numbered, out);
+}
+
+// Whether an exit of p->aggregates before exit `k` that `p` does not prove names the local of exit
+// `k` at its location, as is_leak_repeated asks for an owner local.
+fn is_aggregate_repeated(fir.func* f, prover.proof* p, u64 k) bool {
+    prover.exit* e = &p->aggregates[k].at;
+    diag.loc at = exit_loc(f, e);
+    u64 mut j = 0;
+    while (j < k) {
+        prover.exit* x = &p->aggregates[j].at;
+        bool same = x->local == e->local && is_same_loc(exit_loc(f, x), at);
+        if (same && !x->proved) {
+            return true;
+        }
+        j += 1;
+    }
+    return false;
+}
+
+/// Appends the lines of `--aggregate-report` for each exit of a local of an owning aggregate type
+/// of `f` that `p` does not prove, once for each location and local, in the order of the exits:
+/// `<file>:<line>:<col>: leak: cannot prove '<place>' is empty at this exit` and the note `del or
+/// move '<place>' before this exit` of D17.20 at the `dead` marker or the `return`, and the line of
+/// its cause (cause_text) when prover.prove_causes gave one. `<place>` names the first owner that
+/// the pass does not prove (write_aggregate_owner). When the aggregate work of `f` passed
+/// prover.WORK_LIMIT, a line of the note AGGREGATE_LIMIT_NOTE follows the first site. Such an exit
+/// is no error until refinement R1 (D17.20), so the lines go to `out` and not to the diagnostics.
+fn write_aggregates(fir.func* f, prover.proof* p, session.session mut* s,
+                    strbuf.str_buf mut* out) void {
+    strbuf.str_buf mut owner = strbuf.create();
+    defer strbuf.free(&owner);
+    write_aggregate_lines(f, p, s, &owner, out);
+}
+
+// The lines of write_aggregates, with the scratch buffer `owner`. The caller keeps `owner`, so it
+// is no local owner here.
+fn write_aggregate_lines(fir.func* f, prover.proof* p, session.session mut* s,
+                         strbuf.str_buf mut* owner, strbuf.str_buf mut* out) void {
+    bool mut limit_told = false;
+    u64 mut k = 0;
+    while (k < p->aggregates.len) {
+        prover.aggregate* a = &p->aggregates[k];
+        if (!a->at.proved && !is_aggregate_repeated(f, p, k)) {
+            diag.loc at = exit_loc(f, &a->at);
+            strbuf.clear(owner);
+            write_aggregate_owner(f, a, s, owner);
+            write_position(at, out);
+            strbuf.append(out, "leak: cannot prove '");
+            strbuf.append(out, strbuf.view(owner));
+            strbuf.append(out, "' is empty at this exit\n");
+            write_position(at, out);
+            strbuf.append(out, "note: del or move '");
+            strbuf.append(out, strbuf.view(owner));
+            strbuf.append(out, "' before this exit\n");
+            if (p->aggregate_over && !limit_told) {
+                write_position(at, out);
+                strbuf.append(out, "note: ");
+                strbuf.append(out, AGGREGATE_LIMIT_NOTE);
+                strbuf.push(out, '\n');
+            }
+            string cause = cause_text(a->cause);
+            if (cause.len > 0) {
+                write_position(at, out);
+                strbuf.append(out, "note: ");
+                strbuf.append(out, cause);
                 strbuf.push(out, '\n');
             }
             limit_told = true;

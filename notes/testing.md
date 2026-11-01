@@ -723,6 +723,21 @@ bullet at a time and without a rewrite.
   integer to a pointer, `v = cast(u, i32*)`, reads back an integer of an `own` value or of an
   `i32`, and no hand case forges a pointer to a local. So each set prints `forged 0`, and the other
   counts did not change when the event came (measured).
+  **The test holds the report of the owning aggregate locals too** (D17.20, refinement R1). A site
+  is a function and the location of a `dead` of a local of an owning aggregate type outside an
+  abort block, or of a `return` of a function with a parameter or a temporary of such a type, from
+  the FIR, or of an exit of `proof.aggregates` (`add_aggregates`). Each `leak` event marks the site
+  at its location and keeps its count outside part 1, so the counts of part 1 do not change. The
+  event at a `return` does not say which owner leaked, so an exit of an owner local that the pass
+  does not prove at that `return` rejects the site too. Such a masked site hides a wrong proof of
+  the aggregate, so each set prints its masked sites and those with an event, and the case `masked`
+  holds one. The cases of `AGG_CASES` give each exit
+  kind, a callee that frees the local through its address (a false reject that R1 can prove), an
+  owner on some paths, a fixed array and a nested struct, and the seeded family inserts into them.
+  A deferred block of several lines in a hand case lets the seeded family put a store into it,
+  which expands at two exits with one location: two checks there stop the test, so each deferred
+  `del` of `AGG_CASES` takes one line. Each set has 0 false accepts, and the expected stdout holds
+  its false rejects.
   **The test holds rule (b) of D17.21 too.** A site of rule (b) is a function, the location of an
   item and a local whose owner the item reads, from `proof.uses`, rejected when the pass does not
   prove the use and `prover.has_error` holds, so the test holds the verdict of the error and the

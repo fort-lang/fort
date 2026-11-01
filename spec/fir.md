@@ -834,7 +834,10 @@ changes the function, and the verifier runs after it. The passes run in this ord
    mode, under `--check` and under `--fir`, as for a store. It proves part 2 too (**Inner
    owners**), as a report first: `--leak-report` lists each site of part 2 that the pass cannot
    prove, and such a site is no error, so no build and no `--check` changes its verdict. Part 1
-   adds no line to the report.
+   adds no line to the report. The pass also proves part 1 for each owner below a local of an
+   owning aggregate type (**Aggregates**), which D17.20 defers to refinement R1, as a report:
+   `--aggregate-report` lists each such exit that the pass cannot prove, and such an exit is no
+   error either.
    Rule (b) of D17.21, a use after `move` or `del`, reads the places of this pass, its tests against
    null and its borrows, and adds a state of its own (**Uses**). The pass reports the error of
    D17.21 for each use that it cannot prove, in every build mode, under `--check` and under
@@ -1274,6 +1277,39 @@ changes the function, and the verifier runs after it. The passes run in this ord
      `n->left->left` for a `node` whose first field is `left`. FIR text with no tree gives
      `(*<the FIR place of p>)` and `.<field number>` and `[n]`: `(*_1).1[1]`. Past the limit the
      first line of a function takes a third line, the note of the leak limit of **Exits**.
+   - **Aggregates.** A local of an owning aggregate type (D17.7) is a named local, a parameter or a
+     temporary whose type is a struct or a fixed array that holds an owner in its fixed storage.
+     `_0` passes its value to the caller. D17.20 gives such a local no obligation of part 1 until
+     refinement R1 of `spec/ownership-design.md` 7, so its exits only report, and no build and no
+     `--check` changes its verdict. Its exits are those of an owner local in **Exits**: each `dead`
+     outside an abort block, each `return` for a parameter and a temporary, and each `return` where
+     the scope of a named local can be open, by the fifth dataflow, whose entry holds each named
+     local of an owning aggregate type too. The obligation of an exit is the fact of each owner
+     below the local, the tracked places in its fixed storage: the fields and the elements at each
+     constant index of a fixed array, in the order of the inner owners of **Inner owners**. Each
+     owner of each local with an exit takes a fact of its own, which each exit of the local shares,
+     and the facts join the facts of **Facts**; no gen rule and no kill rule changes. Each call
+     kills the fact of each owner of a memory local (D17.11), also a call that frees them. The
+     aggregate work adds the statements and terminators times the steps of the owners of each such
+     local, 1 more than the most steps from its type to an owner for each owner, to the inner work.
+     When it passes 1048576, the pass proves no such exit; the work of D17.11, the leak work and the
+     inner work keep their own limits, so no other verdict changes. `--aggregate-report` writes
+     three lines for each location and local of such an exit that the pass does not prove, in the
+     order of the exits: the error and the note of D17.20, and `<file>:<line>:<col>: note: cause
+     <n>: <text>`. `<place>` names the first owner that the pass does not prove: the text of the
+     local as for an owner local, then `.` and the name of each field and `[n]` for element `n`,
+     with the text of a temporary in a parenthesis unless it is a name, a call, a `cast`, an index,
+     a field, `new` or `sizeof`; FIR text with no tree gives the FIR place of a temporary and the
+     number of each field (`_3.1.1`). The cause tells where the proof fails, and it changes no
+     verdict. Cause 1: the facts prove the exit when each call that takes the address of fixed
+     storage of the local through an `addr` temporary makes each owner below that place empty, after
+     the kill of the call and before the kill rules of the store of its result: R1 can prove it if
+     each such callee empties the owner. Cause 2: else the first owner that the pass does not prove
+     holds the zero value on some path to the exit: the facts dataflow with the same gen and kill
+     rules, joined by union and with no fact at a block before its first transfer, holds its fact
+     there. Cause 3: each other exit. Cause 4: the function passed the aggregate work limit, and the
+     first site of the function then also takes the note `the function exceeds the aggregate work
+     limit; split it`, which names no other limit.
    - **Uses.** Rule (b) of D17.21 runs after the facts, apart from them, so it changes no fact of
      D17.11 or of D17.20. It runs for each function with a local whose type holds an owner (D17.20),
      `_0` included. A walk of each block, with the stale set of **Keys**, turns its items into acts

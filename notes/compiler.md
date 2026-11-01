@@ -896,6 +896,36 @@ came here.
   whose name stands at the location of the FIR `del`, or the `cast` that starts there. To count the
   sites, run `--leak-report` over each entry of the corpora and group the lines by the directory of
   their file; the counts stand in the ticket of the change.
+- **The emptiness pass proves part 1 for the locals of an owning aggregate type, and only reports
+  it** (D17.20 defers them to refinement R1; `spec/fir.md` 11, Aggregates). `owner.prover` lists
+  their exits in `proof.aggregates` with the scan of the owner locals (`scan_exits` with
+  `aggregate`), gives each owner below each such local with an exit a fact of its own
+  (`collect_aggregate_facts`, `place.put_local_owners`), and `judge_aggregates` tests them;
+  `proof.aggregate_leaks` counts the exits that it does not prove, and `prover.has_error` does not
+  read it, so no verdict changes. A function whose only owners stand in such locals now takes the
+  full proof and not the light survey of rule (b) alone; the verdicts of rule (b) stay. The
+  aggregate work has its own limit over the inner work, so a function past it keeps every other
+  verdict. `prover.prove_causes` gives each exit that the pass does not prove its cause: it runs
+  the facts dataflow twice more, with the gen of R1 at each call that takes the address of the
+  local through an `addr` temporary (`gen_addressed`, in `apply_kills`), and joined by union
+  (`run_facts` fills the initial set only for an intersection). Only `--aggregate-report` asks for
+  the causes, so `--check` and a build pay for neither run. The report writes three lines for each
+  location and local (`report.write_aggregates`). Most sites are memory locals after a call: a
+  call kills each fact of a memory local, and a deferred `free(&b)` that a later deferred call
+  follows leaves `b` unproved also with R1, so the order of the deferred frees decides cause 1 or
+  cause 3 (`test/lang/programs/bignum.ft`, where only the last deferred `free_big` gets cause 1).
+  The time that the change added to `fort --check src/fort/main.ft` is that of the functions that
+  the full proof takes on: a variant that proved the aggregates only in a function with other work
+  of the pass, `has_owner` without `is_aggregate_local`, added none. Measure such a variant with a
+  copy of `src` in which `sed` makes the change, a compiler built from the copy with
+  `build/Linux/debug/fort --std-dir build/Linux/debug/std -I <copy>/src <copy>/src/fort/main.ft -o
+  <binary>`, and nine interleaved runs of `<binary> --check --std-dir <std> -I src
+  src/fort/main.ft` beside the compiler of `origin/main`. Such a function now also gets the leak
+  work and the inner work of a full proof, the sets of its dataflows, where it got 0 before. The
+  inner work is the work that `driver.overwrite_entry` gives `summary.add`, which charges it to the
+  component of the function against `summary.WORK_LIMIT`; V1 gives no line, so the summaries of the
+  libraries `std` and `fort` do not change (measured with `--emit-summaries`), but a refinement that
+  gives lines, such as R1, reads the larger charge.
 - **The emptiness pass proves rule (b) of D17.21, and each use that it does not prove is an error**
   (`spec/fir.md` 11, Uses). `owner.prover.prove_uses` runs after the facts, in the same context, so
   it reuses the survey of the places, the stale dataflow, the tests against null and the map of

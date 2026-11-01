@@ -1,0 +1,1105 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| aggregate exits ok
+//| aggregate source ok
+//| aggregate work ok
+//| aggregate report ok
+//| aggregate text ok
+/// Checks the obligations of part 1 of the leak rule for the locals of an owning aggregate type in
+/// owner.prover, which only report until refinement R1 (D17.20, spec/fir.md 11, Aggregates): the
+/// exits that have one, the facts of the owners below the local, the cause of each exit that the
+/// pass does not prove, the limit of the aggregate work, and the lines of owner.report.
+import check_env;
+import fort.fir;
+import fort.fir_lower;
+import fort.owner.prover;
+import fort.owner.report;
+import lower_env;
+import pass_env;
+import std.str;
+import std.strbuf;
+
+// The types and the functions that the FIR text of each case names. A `pair` has two owners, a
+// `wrap` holds a `pair` after an integer, and a `plain` holds no owner. `make_pair` gives a pair
+// whose first owner holds an allocation, and `free_pair` frees both owners of a pair through a
+// pointer.
+string[31] PRELUDE = {
+    "struct node {",
+    "    node mut* own next;",
+    "}",
+    "struct pair {",
+    "    node mut* own a;",
+    "    node mut* own b;",
+    "}",
+    "struct wrap {",
+    "    i32 n;",
+    "    pair p;",
+    "}",
+    "struct plain {",
+    "    i32 n;",
+    "    node mut* m;",
+    "}",
+    "fn g() void {",
+    "}",
+    "fn make_pair() pair {",
+    "    return pair{new(node), null};",
+    "}",
+    "fn take_pair(pair p) void {",
+    "    del(p.a);",
+    "    del(p.b);",
+    "}",
+    "fn free_pair(pair mut* p) void {",
+    "    del(p->a);",
+    "    del(p->b);",
+    "}",
+    "fn free_node(node mut* own mut* n) void {",
+    "    del(*n);",
+    "}",
+};
+
+// Each case is a FIR function and the verdicts of the exits of its locals of an owning aggregate
+// type (write_verdicts), which its comment gives. Each owner below the local must hold the zero
+// value at a `dead` of a named local outside an abort block, and at a `return` for a parameter, a
+// temporary and a named local whose scope can be open there. The owners of a `pair` are `a` and
+// `b`, numbered 0 and 1.
+string[413] CASES = {
+    // the store of the zero value at the declaration makes each owner empty: dpP
+    "fn main.c1() -> void {",
+    "    let _1 (p): pair;",
+    "    bb0: {",
+    "        live(_1);",
+    "        _1 = const zero pair;",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // a call result holds an allocation: dpU0:3
+    "fn main.c2() -> void {",
+    "    let _1 (p): pair;",
+    "    bb0: {",
+    "        live(_1);",
+    "        _1 = call fn main.make_pair();",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // a `del` of the first owner leaves the second: dpU1:3
+    "fn main.c3() -> void {",
+    "    let _1 (p): pair;",
+    "    bb0: {",
+    "        live(_1);",
+    "        _1 = call fn main.make_pair();",
+    "        del(move _1.0);",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // a `del` of each owner: dpP
+    "fn main.c4() -> void {",
+    "    let _1 (p): pair;",
+    "    bb0: {",
+    "        live(_1);",
+    "        _1 = call fn main.make_pair();",
+    "        del(move _1.1);",
+    "        del(move _1.0);",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // a `move` of the whole local into a call makes each owner below it empty: dpP
+    "fn main.c5() -> void {",
+    "    let _1 (p): pair;",
+    "    let _2: void;",
+    "    bb0: {",
+    "        live(_1);",
+    "        _1 = call fn main.make_pair();",
+    "        _2 = call fn main.take_pair(move _1);",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // a parameter has no fact at the entry: rqU0:3
+    "fn main.c6(_1 (q): pair) -> void {",
+    "    bb0: {",
+    "        return;",
+    "    }",
+    "}",
+    // a `del` of each owner of the parameter: rqP
+    "fn main.c7(_1 (q): pair) -> void {",
+    "    bb0: {",
+    "        del(move _1.0);",
+    "        del(move _1.1);",
+    "        return;",
+    "    }",
+    "}",
+    // a temporary that holds a call result at the `return`: rtU0:3
+    "fn main.c8() -> void {",
+    "    let _1: pair;",
+    "    bb0: {",
+    "        _1 = call fn main.make_pair();",
+    "        return;",
+    "    }",
+    "}",
+    // a temporary that a call takes: rtP
+    "fn main.c9() -> void {",
+    "    let _1: pair;",
+    "    let _2: void;",
+    "    bb0: {",
+    "        _1 = call fn main.make_pair();",
+    "        _2 = call fn main.take_pair(move _1);",
+    "        return;",
+    "    }",
+    "}",
+    // a fixed array has an owner at each constant index. The store into `v[1]` also kills the fact
+    // of `v[0]`, which is not separate from it: dvU0:3
+    "fn main.c10() -> void {",
+    "    let _1 (v): node mut* own[2];",
+    "    let _2: node mut* own;",
+    "    let _3: u64;",
+    "    bb0: {",
+    "        live(_1);",
+    "        _1 = const zero node mut* own[2];",
+    "        _2 = alloc<node>(const u64 1);",
+    "        _3 = const u64 1;",
+    "        check(overwrite: _1[_3]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1[_3] = move _2;",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // the `del` of `v[0]` with the constant key 0 leaves `v[1]`: dvU1:3
+    "fn main.c11() -> void {",
+    "    let _1 (v): node mut* own[2];",
+    "    let _2: node mut* own;",
+    "    let _3: u64;",
+    "    let _4: u64;",
+    "    bb0: {",
+    "        live(_1);",
+    "        _1 = const zero node mut* own[2];",
+    "        _2 = alloc<node>(const u64 1);",
+    "        _3 = const u64 0;",
+    "        check(overwrite: _1[_3]) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1[_3] = move _2;",
+    "        _4 = const u64 0;",
+    "        del(move _1[_4]);",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // an owner of a nested struct: the second owner of the `pair` of a `wrap`: dwU1:3
+    "fn main.c12() -> void {",
+    "    let _1 (w): wrap;",
+    "    let _2: node mut* own;",
+    "    bb0: {",
+    "        live(_1);",
+    "        _1 = const zero wrap;",
+    "        _2 = alloc<node>(const u64 1);",
+    "        check(overwrite: _1.1.1) -> bb1;",
+    "    }",
+    "    bb1: {",
+    "        _1.1.1 = move _2;",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // a call kills each fact of a memory local, also one whose address it does not take:
+    // dpU0:3
+    "fn main.c13() -> void {",
+    "    let _1 (p): pair;",
+    "    let _2: pair mut*;",
+    "    let _3: void;",
+    "    bb0: {",
+    "        live(_1);",
+    "        _1 = const zero pair;",
+    "        _2 = addr mut(_1);",
+    "        _3 = call fn main.g();",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // the call that takes the address of the local frees it, and R1 can prove it: dpU0:1
+    "fn main.c14() -> void {",
+    "    let _1 (p): pair;",
+    "    let _2: pair mut*;",
+    "    let _3: void;",
+    "    bb0: {",
+    "        live(_1);",
+    "        _1 = call fn main.make_pair();",
+    "        _2 = addr mut(_1);",
+    "        _3 = call fn main.free_pair(copy _2);",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // the call takes the address of the first owner only, and it kills the fact of the second:
+    // dpU0:3
+    "fn main.c15() -> void {",
+    "    let _1 (p): pair;",
+    "    let _2: node mut* own mut*;",
+    "    let _3: void;",
+    "    bb0: {",
+    "        live(_1);",
+    "        _1 = call fn main.make_pair();",
+    "        _2 = addr mut(_1.0);",
+    "        _3 = call fn main.free_node(copy _2);",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // the owners hold the zero value on the path of the `del`s only: dpU0:2
+    "fn main.c16(_1 (c): bool) -> void {",
+    "    let _2 (p): pair;",
+    "    bb0: {",
+    "        live(_2);",
+    "        _2 = call fn main.make_pair();",
+    "        switch(copy _1) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        del(move _2.0);",
+    "        del(move _2.1);",
+    "        goto bb2;",
+    "    }",
+    "    bb2: {",
+    "        dead(_2);",
+    "        return;",
+    "    }",
+    "}",
+    // a `dead` in an abort block has no obligation: dpP
+    "fn main.c17(_1 (c): bool) -> void {",
+    "    let _2 (p): pair;",
+    "    bb0: {",
+    "        live(_2);",
+    "        _2 = call fn main.make_pair();",
+    "        switch(copy _1) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        dead(_2);",
+    "        trap;",
+    "    }",
+    "    bb2: {",
+    "        del(move _2.0);",
+    "        del(move _2.1);",
+    "        dead(_2);",
+    "        return;",
+    "    }",
+    "}",
+    // a named local whose scope no `dead` ended has an obligation at the `return`: rpU0:3
+    "fn main.c18() -> void {",
+    "    let _1 (p): pair;",
+    "    bb0: {",
+    "        live(_1);",
+    "        _1 = call fn main.make_pair();",
+    "        return;",
+    "    }",
+    "}",
+    // the result `_0` passes its value to the caller, and a `plain` holds no owner: no exit
+    "fn main.c19() -> pair {",
+    "    let _1 (x): plain;",
+    "    bb0: {",
+    "        live(_1);",
+    "        _1 = const zero plain;",
+    "        dead(_1);",
+    "        _0 = call fn main.make_pair();",
+    "        return;",
+    "    }",
+    "}",
+    // the edge where the test finds the first owner null makes it empty: rqP rqP
+    "fn main.c20(_1 (q): pair) -> void {",
+    "    let _2: bool;",
+    "    bb0: {",
+    "        _2 = eq(copy _1.0, const null node mut* own);",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        del(move _1.1);",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        del(move _1.0);",
+    "        del(move _1.1);",
+    "        return;",
+    "    }",
+    "}",
+    // a store of the zero value into the whole local makes each owner empty: dpP
+    "fn main.c21() -> void {",
+    "    let _1 (p): pair;",
+    "    bb0: {",
+    "        live(_1);",
+    "        _1 = call fn main.make_pair();",
+    "        _1 = const zero pair;",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // the back edge carries the second owner to the `dead` of the next round: dpU1:3
+    "fn main.c22(_1 (c): bool) -> void {",
+    "    let _2 (p): pair;",
+    "    bb0: {",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        switch(copy _1) -> [true: bb2, otherwise: bb3];",
+    "    }",
+    "    bb2: {",
+    "        live(_2);",
+    "        _2 = call fn main.make_pair();",
+    "        del(move _2.0);",
+    "        dead(_2);",
+    "        goto bb1;",
+    "    }",
+    "    bb3: {",
+    "        return;",
+    "    }",
+    "}",
+    // the two exits of one block stand in the order of the statements, then the `return` takes
+    // the parameter and the temporary in number order: dpP dsU0:3 rqU0:3 rtP
+    "fn main.c23(_1 (q): pair) -> void {",
+    "    let _2 (p): pair;",
+    "    let _3 (s): pair;",
+    "    let _4: pair;",
+    "    bb0: {",
+    "        live(_2);",
+    "        _2 = const zero pair;",
+    "        live(_3);",
+    "        _3 = call fn main.make_pair();",
+    "        dead(_2);",
+    "        dead(_3);",
+    "        _4 = const zero pair;",
+    "        return;",
+    "    }",
+    "}",
+    // an owner local and an aggregate in one function: the exit of `n` is no exit of an aggregate:
+    // dpU0:3
+    "fn main.c24() -> void {",
+    "    let _1 (p): pair;",
+    "    let _2 (n): node mut* own;",
+    "    bb0: {",
+    "        _2 = const zero node mut* own;",
+    "        live(_1);",
+    "        _1 = call fn main.make_pair();",
+    "        live(_2);",
+    "        dead(_2);",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // a call that takes the address through a named pointer local, no temporary: dpU0:3
+    "fn main.c25() -> void {",
+    "    let _1 (p): pair;",
+    "    let _2 (r): pair mut*;",
+    "    let _3: void;",
+    "    bb0: {",
+    "        live(_1);",
+    "        _1 = call fn main.make_pair();",
+    "        live(_2);",
+    "        _2 = addr mut(_1);",
+    "        _3 = call fn main.free_pair(copy _2);",
+    "        dead(_2);",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // a second call after the free kills the facts again, also with R1: dpU0:3
+    "fn main.c26() -> void {",
+    "    let _1 (p): pair;",
+    "    let _2: pair mut*;",
+    "    let _3: void;",
+    "    let _4: void;",
+    "    bb0: {",
+    "        live(_1);",
+    "        _1 = call fn main.make_pair();",
+    "        _2 = addr mut(_1);",
+    "        _3 = call fn main.free_pair(copy _2);",
+    "        _4 = call fn main.g();",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // the address of a part of a struct: R1 empties the owners below it only: dwU0:1
+    "fn main.c27() -> void {",
+    "    let _1 (w): wrap;",
+    "    let _2: pair mut*;",
+    "    let _3: void;",
+    "    bb0: {",
+    "        live(_1);",
+    "        _1 = const zero wrap;",
+    "        _2 = addr mut(_1.1);",
+    "        _3 = call fn main.free_pair(copy _2);",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // the frame of a call holds no allocation of the call, so the scope of a named local has ended
+    // at the entry, and the `return` before its store has no obligation: dpP
+    "fn main.c28(_1 (c): bool) -> void {",
+    "    let _2 (p): pair;",
+    "    bb0: {",
+    "        switch(copy _1) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb1: {",
+    "        return;",
+    "    }",
+    "    bb2: {",
+    "        live(_2);",
+    "        _2 = const zero pair;",
+    "        dead(_2);",
+    "        return;",
+    "    }",
+    "}",
+    // a loop that touches no owner: the union of the causes starts with no fact at its back edge,
+    // so no path holds the zero value of the parameter: rqU0:3
+    "fn main.c29(_1 (q): pair, _2 (c): bool) -> void {",
+    "    bb0: {",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        switch(copy _2) -> [true: bb1, otherwise: bb2];",
+    "    }",
+    "    bb2: {",
+    "        return;",
+    "    }",
+    "}",
+    // R1 stands at a call only: a copy of the address after the call that kills the facts gives
+    // no fact, and the call takes no address of the local: dpU0:3
+    "fn main.c30() -> void {",
+    "    let _1 (p): pair;",
+    "    let _2: pair mut*;",
+    "    let _3: void;",
+    "    let _4: pair mut*;",
+    "    bb0: {",
+    "        live(_1);",
+    "        _1 = call fn main.make_pair();",
+    "        _2 = addr mut(_1);",
+    "        _3 = call fn main.g();",
+    "        _4 = copy _2;",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+    // the walk of an exit starts from the facts at the entry of its block: the fact of the memory
+    // local comes from the predecessor, and the call after the `dead` kills it after the exit: dpP
+    "fn main.c31() -> void {",
+    "    let _1 (p): pair;",
+    "    let _2: pair mut*;",
+    "    let _3: void;",
+    "    bb0: {",
+    "        live(_1);",
+    "        _1 = const zero pair;",
+    "        _2 = addr mut(_1);",
+    "        goto bb1;",
+    "    }",
+    "    bb1: {",
+    "        dead(_1);",
+    "        _3 = call fn main.g();",
+    "        return;",
+    "    }",
+    "}",
+    // R1 reads an argument temporary that one store writes: `_3` has two stores, and the second
+    // takes the address of `p` after the call, so no fact of R1 reaches `p`: dqU0:3 dpU0:3
+    "fn main.c32() -> void {",
+    "    let _1 (p): pair;",
+    "    let _2 (q): pair;",
+    "    let _3: pair mut*;",
+    "    let _4: void;",
+    "    bb0: {",
+    "        live(_1);",
+    "        _1 = call fn main.make_pair();",
+    "        live(_2);",
+    "        _2 = const zero pair;",
+    "        _3 = addr mut(_2);",
+    "        _4 = call fn main.free_pair(copy _3);",
+    "        _3 = addr mut(_1);",
+    "        dead(_2);",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+string[32] VERDICTS = {
+    "dpP", "dpU0:3", "dpU1:3", "dpP", "dpP", "rqU0:3", "rqP", "rtU0:3", "rtP", "dvU0:3", "dvU1:3",
+    "dwU1:3", "dpU0:3", "dpU0:1", "dpU0:3", "dpU0:2", "dpP", "rpU0:3", "", "rqP rqP", "dpP",
+    "dpU1:3", "dpP dsU0:3 rqU0:3 rtP", "dpU0:3", "dpU0:3", "dpU0:3", "dwU0:1", "dpP", "rqU0:3",
+    "dpU0:3", "dpP", "dqU0:3 dpU0:3",
+};
+
+// Writes the verdict of each exit of p->aggregates into `out`, in the order of the exits, with a
+// space between two: `d` for a `dead` marker or `r` for a `return`, then the name of a named local
+// or a parameter or `t` for a temporary, then `P` for an exit that `p` proves, or `U`, the number
+// of the first owner that it does not prove and, with `causes`, `:` and the digit of its cause.
+// Holds the count of `p` against the verdicts, and that no such exit is an error.
+fn write_verdicts(fir.func* f, prover.proof* p, bool causes, strbuf.str_buf mut* out) void {
+    strbuf.clear(out);
+    u32 mut leaks = 0;
+    u64 mut k = 0;
+    while (k < p->aggregates.len) {
+        prover.aggregate* a = &p->aggregates[k];
+        if (k > 0) {
+            strbuf.push(out, ' ');
+        }
+        if (a->at.index < fir.block_statement_count(f, a->at.block)) {
+            assert(fir.block_statement(f, a->at.block, a->at.index)->kind
+                   == fir.stmt_kind.st_dead);
+            strbuf.push(out, 'd');
+        } else {
+            assert(fir.block_at(f, a->at.block)->term.kind == fir.term_kind.tk_return);
+            strbuf.push(out, 'r');
+        }
+        fir.local* l = fir.local_at(f, a->at.local);
+        if (l->kind == fir.local_kind.lk_temp) {
+            strbuf.push(out, 't');
+        } else {
+            strbuf.append(out, fir.local_name(l));
+        }
+        if (a->at.proved) {
+            strbuf.push(out, 'P');
+            assert(a->first == a->owners && a->cause == prover.cause_kind.cs_none);
+        } else {
+            strbuf.push(out, 'U');
+            strbuf.append_u64(out, a->first);
+            leaks += 1;
+        }
+        if (!a->at.proved && causes) {
+            strbuf.push(out, ':');
+            strbuf.append_u64(out, cast(cast(a->cause, i32), u64));
+        } else {
+            assert(a->cause == prover.cause_kind.cs_none);
+        }
+        k += 1;
+    }
+    assert(p->aggregate_leaks == leaks);
+}
+
+// The verdicts of `want` without the causes: each `:` and the digit after it.
+fn without_causes(string want, strbuf.str_buf mut* out) void {
+    strbuf.clear(out);
+    u64 mut i = 0;
+    while (i < want.len) {
+        if (want[i] == ':') {
+            i += 2;
+        } else {
+            strbuf.push(out, want[i]);
+            i += 1;
+        }
+    }
+}
+
+// Holds that the proof `a`, which prover.prove gave, and the proof `b`, which prover.prove_causes
+// gave, give one verdict of each check, store, exit, site of part 2 and use, and so one error.
+fn same_verdicts(prover.proof* a, prover.proof* b) void {
+    assert(a->unproved == b->unproved && a->leaks == b->leaks);
+    assert(a->inner_leaks == b->inner_leaks && a->use_unproved == b->use_unproved);
+    assert(a->aggregate_leaks == b->aggregate_leaks && a->aggregates.len == b->aggregates.len);
+    assert(prover.has_error(a) == prover.has_error(b));
+    assert(a->work == b->work && a->leak_work == b->leak_work);
+    assert(a->aggregate_work == b->aggregate_work);
+}
+
+// Proves `f` with prover.prove and with prover.prove_causes, holds that both give the verdicts
+// `want`, with the causes for prove_causes only, and that the causes change no other verdict.
+// `name` names the function in a failure.
+fn expect_function(fir.func* f, string want, string name) void {
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    strbuf.str_buf mut plain = strbuf.create();
+    defer strbuf.free(&plain);
+    prover.proof mut p = prover.prove(f);
+    defer prover.free(&p);
+    prover.proof mut q = prover.prove_causes(f, true);
+    defer prover.free(&q);
+    same_verdicts(&p, &q);
+    without_causes(want, &plain);
+    write_verdicts(f, &p, false, &got);
+    if (strbuf.view(&got) != strbuf.view(&plain)) {
+        eprintln(name, " gives ", strbuf.view(&got), " and not ", strbuf.view(&plain));
+        panic("prover_aggregate_test: a verdict differs");
+    }
+    write_verdicts(f, &q, true, &got);
+    if (strbuf.view(&got) != want) {
+        eprintln(name, " gives ", strbuf.view(&got), " with its causes and not ", want);
+        panic("prover_aggregate_test: a cause differs");
+    }
+}
+
+// Each local of an owning aggregate type has its obligation at each exit of its scope, and the
+// pass proves it with the fact of each owner below the local; no other local has one.
+fn each_exit_holds_the_owners_below_its_local() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    fir.module mut m = pass_env.parse(&e, PRELUDE[..], CASES[..]);
+    defer fir.module_free(&m);
+    expect_module(&e, &m, VERDICTS[..]);
+}
+
+// Holds that the verifier accepts each function of `m` and that function `k` gives the verdicts
+// `want[k]` (expect_function).
+fn expect_module(lower_env.env mut* e, fir.module* m, string@ want) void {
+    assert(m->funcs.len == want.len);
+    u64 mut k = 0;
+    while (k < m->funcs.len) {
+        fir.func* f = fir.module_function_at(m, k);
+        pass_env.verified(e, f, "prover_aggregate_test: the verifier refuses the input");
+        expect_function(f, want[k], f->sym->name);
+        k += 1;
+    }
+}
+
+// Fort sources whose locals of an owning aggregate type have exits that the pass proves and exits
+// that it does not prove, of each kind and of each cause. A comment gives the verdicts of each
+// function (write_verdicts).
+string[120] SOURCE = {
+    "struct node {",
+    "    node mut* own next;",
+    "}",
+    "struct pair {",
+    "    node mut* own a;",
+    "    node mut* own b;",
+    "}",
+    "struct env {",
+    "    pair one;",
+    "    pair two;",
+    "}",
+    "fn g() void {",
+    "}",
+    "fn make_pair() pair {",
+    "    return pair{new(node), null};",
+    "}",
+    "fn take_pair(pair p) void {",
+    "    del(p.a);",
+    "    del(p.b);",
+    "}",
+    "fn free_pair(pair mut* p) void {",
+    "    del(p->a);",
+    "    del(p->b);",
+    "}",
+    // R1 can prove the exit at the call that frees the local: dpU0:1
+    "fn freed_by_call() void {",
+    "    pair mut p = make_pair();",
+    "    free_pair(&p);",
+    "}",
+    // a call after the free kills the facts of the memory local again: dpU0:3
+    "fn call_after_free() void {",
+    "    pair mut p = make_pair();",
+    "    free_pair(&p);",
+    "    g();",
+    "}",
+    // two calls free the two parts, and the second kills the facts of the first: deU0:3
+    "fn two_frees() void {",
+    "    env mut e = env{};",
+    "    e.one = make_pair();",
+    "    e.two = make_pair();",
+    "    free_pair(&e.one);",
+    "    free_pair(&e.two);",
+    "}",
+    // the owner holds an allocation on one path only: dpU0:2
+    "fn some_paths(bool c) void {",
+    "    pair mut p = pair{};",
+    "    if (c) {",
+    "        p.a = new(node);",
+    "    }",
+    "}",
+    // a `del` on each path: dpP
+    "fn each_path(bool c) void {",
+    "    pair mut p = make_pair();",
+    "    if (c) {",
+    "        del(p.a);",
+    "    } else {",
+    "        del(p.a);",
+    "    }",
+    "    del(p.b);",
+    "}",
+    // the `return` moves the local into the result: dpP
+    "fn give() pair {",
+    "    pair mut p = make_pair();",
+    "    return p;",
+    "}",
+    // a parameter that keeps its owners: rqU0:3
+    "fn keep(pair q) void {",
+    "}",
+    // a parameter whose owners the function frees: rqP
+    "fn drop(pair q) void {",
+    "    del(q.a);",
+    "    del(q.b);",
+    "}",
+    // the `break` leaves the loop with the owners, and the closing brace of the body without them:
+    // dpU0:3 dpP
+    "fn loop_exits(bool c) void {",
+    "    while (c) {",
+    "        pair mut p = make_pair();",
+    "        if (c) {",
+    "            break;",
+    "        }",
+    "        del(p.a);",
+    "        del(p.b);",
+    "    }",
+    "}",
+    // a `case` clause ends its local at its last token: dpU0:3
+    "fn clause(i32 k) void {",
+    "    switch (k) {",
+    "    case 1:",
+    "        pair p = make_pair();",
+    "    default:",
+    "    }",
+    "}",
+    // the deferred `del` of each owner runs before the `dead` of each exit: dpP dpP
+    "fn deferred(bool c) void {",
+    "    pair mut p = make_pair();",
+    "    defer {",
+    "        del(p.a);",
+    "        del(p.b);",
+    "    }",
+    "    if (c) {",
+    "        return;",
+    "    }",
+    "}",
+    // a `del` of each element of a fixed array of owners: dvP
+    "fn array() void {",
+    "    node mut* own[2] mut v = {new(node), null};",
+    "    del(v[0]);",
+    "    del(v[1]);",
+    "}",
+    // the temporary of the argument moves into the call: rtP
+    "fn temp_arg() void {",
+    "    take_pair(make_pair());",
+    "}",
+    // the `dead` of the block stands in the block of the `panic`, an abort block: no exit
+    "fn abort_end() void {",
+    "    {",
+    "        pair p = make_pair();",
+    "    }",
+    "    panic(\"stop\");",
+    "}",
+    // a store of a literal with an allocation into a fixed array: dvU0:3
+    "fn array_leak() void {",
+    "    node mut* own[2] mut v = {new(node), null};",
+    "}",
+    // the local of a deferred block ends at its closing brace at each exit: dpU0:3 dpU0:3
+    "fn deferred_local(bool c) void {",
+    "    defer {",
+    "        pair p = make_pair();",
+    "    }",
+    "    if (c) {",
+    "        return;",
+    "    }",
+    "}",
+    // the result of the conditional is a temporary that the call takes: rtP
+    "fn temp_cond(bool c) void {",
+    "    take_pair(c ? make_pair() : make_pair());",
+    "}",
+};
+
+string[18] SOURCE_NAMES = {
+    "freed_by_call", "call_after_free", "two_frees", "some_paths", "each_path", "give", "keep",
+    "drop", "loop_exits", "clause", "deferred", "array", "temp_arg", "abort_end", "make_pair",
+    "array_leak", "deferred_local", "temp_cond",
+};
+
+string[18] SOURCE_VERDICTS = {
+    "dpU0:1", "dpU0:3", "deU0:3", "dpU0:2", "dpP", "dpP", "rqU0:3", "rqP", "dpU0:3 dpP", "dpU0:3",
+    "dpP dpP", "dvP", "rtP", "", "", "dvU0:3", "dpU0:3 dpU0:3", "rtP",
+};
+
+// Lowers the function `name` of the checked source of `e` and holds that the verifier accepts it.
+fn lower(lower_env.env mut* e, string name, fir.func mut* out) void {
+    fir_lower.report mut why = fir_lower.report{};
+    if (!fir_lower.lower_function(&e->c.ck, lower_env.decl(e, name), out, &why)) {
+        panic("prover_aggregate_test: the lowering refuses the function");
+    }
+    pass_env.verified(e, out, "prover_aggregate_test: the verifier refuses the lowering");
+}
+
+// Each exit kind and each cause has its verdict in the lowering of fort source.
+fn each_exit_of_lowered_source_has_its_verdict() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, SOURCE[..], true);
+    u64 mut k = 0;
+    while (k < SOURCE_NAMES.len) {
+        fir.func mut f = fir.func{};
+        lower(&e, SOURCE_NAMES[k], &f);
+        expect_function(&f, SOURCE_VERDICTS[k], SOURCE_NAMES[k]);
+        fir.func_free(&f);
+        k += 1;
+    }
+}
+
+// A function with a named owner local `n` and a local `w` of an owning aggregate type. Its 6
+// statements and 1 terminator are 7 units. Its leak work is 7 for the fact of `n` and 3 for the
+// sets of its 1 block and 3 locals: 10. Its inner work adds nothing. The 2 owners of a `wrap`
+// stand 2 steps below it, so the aggregate work adds 7 times 2 times 3: 52.
+string[13] WORK = {
+    "fn main.w1() -> void {",
+    "    let _1 (w): wrap;",
+    "    let _2 (n): node mut* own;",
+    "    bb0: {",
+    "        _2 = const zero node mut* own;",
+    "        live(_1);",
+    "        _1 = const zero wrap;",
+    "        live(_2);",
+    "        dead(_2);",
+    "        dead(_1);",
+    "        return;",
+    "    }",
+    "}",
+};
+
+// Proves `f` within `limit` and holds its work, that the exit of `n` gets `exit`, and that the
+// exit of `w` gets `aggregate`, with the cause 4 when the aggregate work passes the limit.
+fn expect_limit(fir.func* f, u64 limit, string exit, string aggregate) void {
+    prover.proof mut p = prover.prove_within(f, limit);
+    defer prover.free(&p);
+    assert(p.leak_work == 10 && p.inner_work == 10 && p.aggregate_work == 52);
+    assert(p.aggregate_over == (52 > limit) && p.leak_over == (10 > limit));
+    expect_proof(f, &p, exit, aggregate);
+}
+
+// Holds that the one exit of `n` of the proof `p` of `f` gets `exit` and that the one exit of
+// its local of an owning aggregate type gets `aggregate`: `P`, or `U` and the digit of its cause.
+fn expect_proof(fir.func* f, prover.proof* p, string exit, string aggregate) void {
+    assert(p->exits.len == 1 && p->aggregates.len == 1 && p->aggregates[0].owners == 2);
+    prover.aggregate* a = &p->aggregates[0];
+    assert((exit == "P") == p->exits[0].proved && p->leaks == cast(!p->exits[0].proved, u32));
+    if (aggregate == "P") {
+        assert(a->at.proved && a->first == 2 && p->aggregate_leaks == 0);
+    } else {
+        assert(!a->at.proved && a->first == 0 && p->aggregate_leaks == 1);
+        assert(a->cause == prover.cause_kind.cs_limit && aggregate == "U4");
+    }
+    assert(prover.has_error(p) == (exit != "P"));
+}
+
+// The aggregate work holds the inner work and the statements times the steps of the owners below
+// each local of an owning aggregate type. At the limit the pass proves the exit of `w`, and past it
+// the exit takes the cause 4, while the leak work keeps the verdict of `n`. Past the leak work the
+// pass proves neither, and counts the exit of `w` once.
+fn the_aggregate_work_has_a_limit_of_its_own() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    fir.module mut m = pass_env.parse(&e, PRELUDE[..], WORK[..]);
+    defer fir.module_free(&m);
+    expect_limits(&e, &m);
+}
+
+// The limits of the_aggregate_work_has_a_limit_of_its_own over the function of `m`.
+fn expect_limits(lower_env.env mut* e, fir.module* m) void {
+    fir.func* f = fir.module_function_at(m, 0);
+    pass_env.verified(e, f, "prover_aggregate_test: the verifier refuses the input");
+    expect_limit(f, prover.WORK_LIMIT, "P", "P");
+    expect_limit(f, 52, "P", "P");
+    expect_limit(f, 51, "P", "U4");
+    expect_limit(f, 10, "P", "U4");
+    expect_limit(f, 9, "U", "U4");
+    expect_limit(f, 0, "U", "U4");
+}
+
+// The lines of the report of each function of SOURCE_NAMES that the pass does not prove, in
+// order, after the file of the function: the message and the note of D17.20 and the cause, at the
+// `dead` marker or the `return`. A temporary of SOURCE ends with no exit that the pass does not
+// prove, and the deferred block of `deferred_local` ends `p` twice at one location.
+string[27] REPORTED = {
+    ":28:1: leak: cannot prove 'p.a' is empty at this exit",
+    ":28:1: note: del or move 'p.a' before this exit",
+    ":28:1: note: cause 1: R1 can prove it if each callee that takes its address empties the owner",
+    ":33:1: leak: cannot prove 'p.a' is empty at this exit",
+    ":33:1: note: del or move 'p.a' before this exit",
+    ":33:1: note: cause 3: another cause",
+    ":40:1: leak: cannot prove 'e.one.a' is empty at this exit",
+    ":40:1: note: del or move 'e.one.a' before this exit",
+    ":40:1: note: cause 3: another cause",
+    ":46:1: leak: cannot prove 'p.a' is empty at this exit",
+    ":46:1: note: del or move 'p.a' before this exit",
+    ":46:1: note: cause 2: the owner holds a value on some paths only",
+    ":61:1: leak: cannot prove 'q.a' is empty at this exit",
+    ":61:1: note: del or move 'q.a' before this exit",
+    ":61:1: note: cause 3: another cause",
+    ":70:13: leak: cannot prove 'p.a' is empty at this exit",
+    ":70:13: note: del or move 'p.a' before this exit",
+    ":70:13: note: cause 3: another cause",
+    ":79:29: leak: cannot prove 'p.a' is empty at this exit",
+    ":79:29: note: del or move 'p.a' before this exit",
+    ":79:29: note: cause 3: another cause",
+    ":109:1: leak: cannot prove 'v[0]' is empty at this exit",
+    ":109:1: note: del or move 'v[0]' before this exit",
+    ":109:1: note: cause 3: another cause",
+    ":113:5: leak: cannot prove 'p.a' is empty at this exit",
+    ":113:5: note: del or move 'p.a' before this exit",
+    ":113:5: note: cause 3: another cause",
+};
+
+// The lines of `temp_arg` and of `temp_cond` once the call that takes the temporary is gone: the
+// text of the expression of the temporary, in a parenthesis unless it is a call.
+string[6] TEMP_REPORTED = {
+    ":100:1: leak: cannot prove 'make_pair().a' is empty at this exit",
+    ":100:1: note: del or move 'make_pair().a' before this exit",
+    ":100:1: note: cause 3: another cause",
+    ":120:1: leak: cannot prove '(c ? make_pair() : make_pair()).a' is empty at this exit",
+    ":120:1: note: del or move '(c ? make_pair() : make_pair()).a' before this exit",
+    ":120:1: note: cause 3: another cause",
+};
+
+// The lines of `loop_exits` past the limit of the aggregate work: each exit with the cause 4, and
+// the note of the aggregate limit after the first.
+string[7] LIMIT_REPORTED = {
+    ":70:13: leak: cannot prove 'p.a' is empty at this exit",
+    ":70:13: note: del or move 'p.a' before this exit",
+    ":70:13: note: the function exceeds the aggregate work limit; split it",
+    ":70:13: note: cause 4: the aggregate work of the function passes the limit",
+    ":74:5: leak: cannot prove 'p.a' is empty at this exit",
+    ":74:5: note: del or move 'p.a' before this exit",
+    ":74:5: note: cause 4: the aggregate work of the function passes the limit",
+};
+
+// Holds that `got` holds the lines of `want`, each after `file` and with a line feed.
+fn expect_lines(string got, string file, string@ want) void {
+    strbuf.str_buf mut text = strbuf.create();
+    defer strbuf.free(&text);
+    u64 mut k = 0;
+    while (k < want.len) {
+        strbuf.append(&text, file);
+        strbuf.append(&text, want[k]);
+        strbuf.push(&text, '\n');
+        k += 1;
+    }
+    if (got != strbuf.view(&text)) {
+        eprintln(got, "and not\n", strbuf.view(&text));
+        panic("prover_aggregate_test: the lines of the report differ");
+    }
+}
+
+// Removes the last statement of the block of the first `return` of `f`: the call that takes the
+// temporary of `temp_arg` and of `temp_cond`.
+fn drop_call(fir.func mut* f) void {
+    u32 mut b = 0;
+    while (fir.block_at(f, b)->term.kind != fir.term_kind.tk_return) {
+        b += 1;
+    }
+    fir.block_mut(f, b)->statements.len -= 1;
+}
+
+// Appends the lines of the report of the function `name` of the checked source of `e` to `out`,
+// with the proof of prover.prove_causes, or past the limit with prover.prove_within and the limit
+// 0, after the last statement of its first `return` is gone when `dropped`.
+fn report_function(lower_env.env mut* e, string name, bool limit, bool dropped,
+                   strbuf.str_buf mut* out) void {
+    fir.func mut f = fir.func{};
+    defer fir.func_free(&f);
+    lower(e, name, &f);
+    if (dropped) {
+        drop_call(&f);
+    }
+    if (limit) {
+        prover.proof mut p = prover.prove_within(&f, 0);
+        defer prover.free(&p);
+        report.write_aggregates(&f, &p, &e->c.m.s, out);
+    } else {
+        prover.proof mut q = prover.prove_causes(&f, true);
+        defer prover.free(&q);
+        report.write_aggregates(&f, &q, &e->c.m.s, out);
+    }
+}
+
+// The report names the first owner of each exit that the pass does not prove, at its `dead` marker
+// or its `return`, once for each location and local, with its cause, in the file of the function.
+// It writes no diagnostic: such an exit is no error until refinement R1 (D17.20). Past the work
+// limit the first line takes the note of the leak limit.
+fn the_report_names_the_first_owner_of_each_exit() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, SOURCE[..], true);
+    string file = lower_env.decl_file(&e, "keep");
+    assert(str.ends_with(file, "main.ft"));
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    u64 before = check_env.reports(&e.c);
+    u64 mut k = 0;
+    while (k < SOURCE_NAMES.len) {
+        report_function(&e, SOURCE_NAMES[k], false, false, &got);
+        k += 1;
+    }
+    expect_lines(strbuf.view(&got), file, REPORTED[..]);
+    strbuf.clear(&got);
+    report_function(&e, "temp_arg", false, true, &got);
+    report_function(&e, "temp_cond", false, true, &got);
+    expect_lines(strbuf.view(&got), file, TEMP_REPORTED[..]);
+    strbuf.clear(&got);
+    report_function(&e, "loop_exits", true, false, &got);
+    expect_lines(strbuf.view(&got), file, LIMIT_REPORTED[..]);
+    assert(check_env.reports(&e.c) == before);
+}
+
+// A FIR text with locations and no tree: a parameter gives its declared name and the names of
+// the fields, and a temporary its FIR place and the numbers of the fields.
+string[17] TEXT = {
+    "fn main.t1(_1 (q): wrap) -> void {",
+    "    let _2 (v): node mut* own[2] #2:5;",
+    "    let _3: wrap #3:9;",
+    "    let _4: node mut* own;",
+    "    bb0: {",
+    "        live(_2) #2:5;",
+    "        _2 = const zero node mut* own[2] #2:5;",
+    "        _3 = const zero wrap #3:9;",
+    "        _4 = alloc<node>(const u64 1) #3:9;",
+    "        check(overwrite: _3.1.1) -> bb1 #3:9;",
+    "    }",
+    "    bb1: {",
+    "        _3.1.1 = move _4 #3:9;",
+    "        dead(_2) #4:1;",
+    "        return #4:1;",
+    "    }",
+    "}",
+};
+
+string[6] TEXT_REPORTED = {
+    ":4:1: leak: cannot prove 'q.p.a' is empty at this exit",
+    ":4:1: note: del or move 'q.p.a' before this exit",
+    ":4:1: note: cause 3: another cause",
+    ":4:1: leak: cannot prove '_3.1.1' is empty at this exit",
+    ":4:1: note: del or move '_3.1.1' before this exit",
+    ":4:1: note: cause 3: another cause",
+};
+
+// With no tree, the report names a temporary by its FIR place.
+fn the_report_of_a_fir_text_names_the_fir_place() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    fir.module mut m = pass_env.parse(&e, PRELUDE[..], TEXT[..]);
+    defer fir.module_free(&m);
+    strbuf.str_buf mut got = strbuf.create();
+    defer strbuf.free(&got);
+    report_text(&e, &m, &got);
+    expect_lines(strbuf.view(&got), "t.fir", TEXT_REPORTED[..]);
+}
+
+// Appends the lines of the report of the function of `m` to `out`, with the proof of
+// prover.prove_causes.
+fn report_text(lower_env.env mut* e, fir.module* m, strbuf.str_buf mut* out) void {
+    fir.func* f = fir.module_function_at(m, 0);
+    pass_env.verified(e, f, "prover_aggregate_test: the verifier refuses the input");
+    prover.proof mut p = prover.prove_causes(f, true);
+    defer prover.free(&p);
+    report.write_aggregates(f, &p, &e->c.m.s, out);
+}
+
+fn main() i32 {
+    each_exit_holds_the_owners_below_its_local();
+    println("aggregate exits ok");
+    each_exit_of_lowered_source_has_its_verdict();
+    println("aggregate source ok");
+    the_aggregate_work_has_a_limit_of_its_own();
+    println("aggregate work ok");
+    the_report_names_the_first_owner_of_each_exit();
+    println("aggregate report ok");
+    the_report_of_a_fir_text_names_the_fir_place();
+    println("aggregate text ok");
+    return 0;
+}

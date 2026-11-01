@@ -1,0 +1,321 @@
+{
+  "comment": [
+    "One row for each rule of the report of part 1 of the leak rule of D17.20 for the locals of an",
+    "owning aggregate type (D17.7), which only reports until refinement R1: the obligation of each",
+    "exit kind and its exceptions, the facts of the owners below the local and the walk that tests",
+    "them, the verdict and its count, the limit of the aggregate work, and the cause of each exit",
+    "that the pass does not prove (src/fort/owner/prover.ft). Then the lines of the report",
+    "(src/fort/owner/report.ft) and the option --aggregate-report (src/fort/driver.ft). The first",
+    "stage runs the cases over FIR text and over lowered fort source, the work limit and the lines",
+    "of the report (test/fort/owner/prover_aggregate_test.ft). The second runs the driver test, which",
+    "holds the option. The third runs the oracle test, which prints a false accept of the owning",
+    "aggregate locals for each row that makes the pass prove an exit that a run leaks at. The table",
+    "runs in the Linux VM with the debug preset and the default runner. The md5 guard reads the",
+    "product compiler, whose driver imports owner.prover and owner.report.",
+    "The first two rounds of a run can read stale (notes/testing.md 7), so the first two rows are",
+    "ones that a full run caught."
+  ],
+  "sources": [
+    "src/fort/owner/prover.ft",
+    "src/fort/owner/report.ft",
+    "src/fort/driver.ft"
+  ],
+  "binary": "build/Linux/debug/fort",
+  "build": "ninja -C build/Linux/debug fort",
+  "stages": [
+    {
+      "name": "the aggregate module test",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 2 owner/prover_aggregate_test"
+    },
+    {
+      "name": "the driver test",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 2 driver_test"
+    },
+    {
+      "name": "the oracle test",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std --timeout 1500 -j 2 owner/oracle_test"
+    }
+  ],
+  "mutations": [
+    {
+      "decision": "D17.20-aggregate-return",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    if (!is_exit_local(f, n, aggregate)) {",
+      "new": "    if (aggregate || !is_exit_local(f, n, aggregate)) {",
+      "what": "a local of an owning aggregate type has no obligation at a `return`"
+    },
+    {
+      "decision": "D17.20-aggregate-result",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    return l->kind != fir.local_kind.lk_return && types.type_is_owning_aggregate(l->ty);",
+      "new": "    return types.type_is_owning_aggregate(l->ty);",
+      "what": "the result `_0` of an owning aggregate type has an obligation at a `return`"
+    },
+    {
+      "decision": "D17.20-aggregate-dead",
+      "file": "src/fort/owner/prover.ft",
+      "old": "            if (s->kind == fir.stmt_kind.st_dead && is_exit_local(f, s->local, aggregate)) {",
+      "new": "            if (s->kind == fir.stmt_kind.st_dead && !aggregate && is_exit_local(f, s->local, aggregate)) {",
+      "what": "the `dead` marker of a local of an owning aggregate type has no obligation"
+    },
+    {
+      "decision": "D17.20-aggregate-abort",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        while (i < count && !fir.term_is_abort(t)) {",
+      "new": "        while (i < count && (aggregate || !fir.term_is_abort(t))) {",
+      "what": "a `dead` of a local of an owning aggregate type in an abort block keeps its obligation"
+    },
+    {
+      "decision": "D17.20-aggregate-type",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    return l->kind != fir.local_kind.lk_return && types.type_is_owning_aggregate(l->ty);",
+      "new": "    return false;",
+      "what": "no local of an owning aggregate type has an obligation"
+    },
+    {
+      "decision": "D17.20-aggregate-early",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        if (kind && (is_owner_local(f, n) || is_aggregate_local(f, n))) {",
+      "new": "        if (kind && is_owner_local(f, n)) {",
+      "what": "a function whose only owners stand in locals of an owning aggregate type gets no proof of them"
+    },
+    {
+      "decision": "D17.20-aggregate-ended",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        bool owner = is_owner_local(f, k) || is_aggregate_local(f, k);",
+      "new": "        bool owner = is_owner_local(f, k);",
+      "what": "the scope of a named local of an owning aggregate type has not ended at the entry"
+    },
+    {
+      "decision": "D17.20-aggregate-owners",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        u64 owners = place.count_owners(fir.local_at(f, found[k].local)->ty);",
+      "new": "        u64 owners = 1;",
+      "what": "an exit tests the first owner below its local only"
+    },
+    {
+      "decision": "D17.20-aggregate-fact",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        c->aggregate_fact[k] = first[local];",
+      "new": "        c->aggregate_fact[k] = 0;",
+      "what": "each exit tests the facts from the first fact of the function"
+    },
+    {
+      "decision": "D17.20-aggregate-holds",
+      "file": "src/fort/owner/prover.ft",
+      "old": "            while (m < a->owners && fir_flow.bits_get(&pr.none, base + cast(m, u32))) {",
+      "new": "            while (m < a->owners) {",
+      "what": "each owner below the local holds the zero value at each exit"
+    },
+    {
+      "decision": "D17.20-aggregate-walk",
+      "file": "src/fort/owner/prover.ft",
+      "old": "            while (i < a->at.index) {\n                fir.statement* s = fir.block_statement(f, b, i);\n                apply_facts(c, s, &at_stale, &at_fresh, &at_alias, &pr, NO_FACT, &unused);",
+      "new": "            while (i < a->at.index) {\n                fir.statement* s = fir.block_statement(f, b, i);",
+      "what": "an exit reads the facts at the entry of its block"
+    },
+    {
+      "decision": "D17.20-aggregate-entry",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        u32 b = out->aggregates[k].at.block;\n        fir_flow.bits_copy(&pr.none, &d->ins[cast(b, u64)]);",
+      "new": "        u32 b = out->aggregates[k].at.block;\n        fir_flow.bits_copy(&pr.none, &d->outs[cast(b, u64)]);",
+      "what": "the walk of an exit starts from the facts at the end of its block"
+    },
+    {
+      "decision": "D17.20-aggregate-proved",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        a->at.proved = first[k] == a->owners;",
+      "new": "        a->at.proved = true;",
+      "what": "the pass proves each exit of a local of an owning aggregate type"
+    },
+    {
+      "decision": "D17.20-aggregate-count",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        if (!a->at.proved) {\n            out->aggregate_leaks += 1;\n        }",
+      "new": "        if (false) {\n            out->aggregate_leaks += 1;\n        }",
+      "what": "the proof counts no exit of an owning aggregate that it does not prove"
+    },
+    {
+      "decision": "D17.20-aggregate-limit",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    out.aggregate_over = out.aggregate_work > limit;",
+      "new": "    out.aggregate_over = false;",
+      "what": "the aggregate work has no limit"
+    },
+    {
+      "decision": "D17.20-aggregate-work",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    out.aggregate_work = types.capped_sum(out.inner_work,\n                                          types.capped_product(units, count_aggregate_steps(f)));",
+      "new": "    out.aggregate_work = types.capped_sum(out.inner_work, count_aggregate_steps(f));",
+      "what": "the aggregate work counts the steps of the owners once, and not for each statement"
+    },
+    {
+      "decision": "D17.20-aggregate-steps",
+      "file": "src/fort/owner/prover.ft",
+      "old": "            u64 steps = types.capped_product(place.count_owners(t), place.depth_to_owners(t) + 1);",
+      "new": "            u64 steps = types.capped_product(place.count_owners(t), place.depth_to_owners(t));",
+      "what": "the aggregate work counts no step of the fact of an owner"
+    },
+    {
+      "decision": "D17.20-aggregate-pass-cause",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        out->aggregates[k].cause = cause_kind.cs_limit;",
+      "new": "        out->aggregates[k].cause = cause_kind.cs_other;",
+      "what": "an exit past the limit of the aggregate work takes cause 3"
+    },
+    {
+      "decision": "D17.20-aggregate-pass-once",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        if (!out->leak_over) {\n            pass_aggregates(out);\n        }",
+      "new": "        pass_aggregates(out);",
+      "what": "past the leak work the proof counts each exit of an owning aggregate twice"
+    },
+    {
+      "decision": "D17.20-aggregate-pass-leak",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        // the aggregate work holds the leak work\n        pass_aggregates(&out);",
+      "new": "        // the aggregate work holds the leak work",
+      "what": "past the leak work the proof gives the exits of an owning aggregate no verdict"
+    },
+    {
+      "decision": "D17.20-aggregate-causes",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    if (c->causes && out->aggregate_leaks > 0) {",
+      "new": "    if (out->aggregate_leaks > 0) {",
+      "what": "prover.prove gives causes too"
+    },
+    {
+      "decision": "D17.20-aggregate-cause-r1",
+      "file": "src/fort/owner/prover.ft",
+      "old": "                gen_below(c, place.trace(&c->places, r.place, stale), pr);",
+      "new": "                place.trace(&c->places, r.place, stale);",
+      "what": "a call that takes the address of a local gives no fact of R1, so no exit takes cause 1"
+    },
+    {
+      "decision": "D17.20-aggregate-cause-temp",
+      "file": "src/fort/owner/prover.ft",
+      "old": "            && fir.local_at(f, o.place.local)->kind == fir.local_kind.lk_temp\n",
+      "new": "\n",
+      "what": "an argument that a named pointer local holds gives the facts of R1 too"
+    },
+    {
+      "decision": "D17.20-aggregate-cause-single",
+      "file": "src/fort/owner/prover.ft",
+      "old": "            && fir.local_at(f, o.place.local)->kind == fir.local_kind.lk_temp\n            && place.is_single(&c->places, o.place.local);",
+      "new": "            && fir.local_at(f, o.place.local)->kind == fir.local_kind.lk_temp;",
+      "what": "R1 reads the last store of an argument temporary that two stores write"
+    },
+    {
+      "decision": "D17.20-aggregate-cause-call",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    if (c->r1 && s->value.kind == fir.rvalue_kind.rv_call) {\n        gen_addressed(c, s, stale, pr);",
+      "new": "    if (c->r1) {\n        gen_addressed(c, s, stale, pr);",
+      "what": "each store gives the facts of R1, not only a call"
+    },
+    {
+      "decision": "D17.20-aggregate-cause-union",
+      "file": "src/fort/owner/prover.ft",
+      "old": "    if (d->join == fir_flow.join_kind.join_intersect) {\n        fir_flow.bits_fill(&d->init);\n    }",
+      "new": "    fir_flow.bits_fill(&d->init);",
+      "what": "the union of the causes starts with each fact at a back edge"
+    },
+    {
+      "decision": "D17.20-aggregate-cause-paths",
+      "file": "src/fort/owner/prover.ft",
+      "old": "            if (first[k] > a->first) {",
+      "new": "            if (first[k] >= a->first) {",
+      "what": "each exit that R1 cannot prove takes cause 2"
+    },
+    {
+      "decision": "D17.20-aggregate-cause-order",
+      "file": "src/fort/owner/prover.ft",
+      "old": "        if (!a->at.proved && first[k] == a->owners) {\n            a->cause = cause_kind.cs_call;",
+      "new": "        if (!a->at.proved && first[k] > a->first) {\n            a->cause = cause_kind.cs_call;",
+      "what": "an exit whose first owner R1 proves takes cause 1, also when R1 leaves another owner"
+    },
+    {
+      "decision": "D17.20-aggregate-report-repeat",
+      "file": "src/fort/owner/report.ft",
+      "old": "        if (same && !x->proved) {\n            return true;\n        }",
+      "new": "        if (false) {\n            return true;\n        }",
+      "what": "the report writes an exit of one local at one location once for each expansion"
+    },
+    {
+      "decision": "D17.20-aggregate-report-paren",
+      "file": "src/fort/owner/report.ft",
+      "old": "        append_operand(out, strbuf.view(&base), is_postfix(n));",
+      "new": "        append_operand(out, strbuf.view(&base), true);",
+      "what": "the text of a temporary takes no parenthesis"
+    },
+    {
+      "decision": "D17.20-aggregate-report-numbered",
+      "file": "src/fort/owner/report.ft",
+      "old": "        fir_print.print_place(f, fir.place_local(a->at.local), out);\n        numbered = true;",
+      "new": "        fir_print.print_place(f, fir.place_local(a->at.local), out);",
+      "what": "the FIR place of a temporary takes the names of the fields"
+    },
+    {
+      "decision": "D17.20-aggregate-report-name",
+      "file": "src/fort/owner/report.ft",
+      "old": "    } else if (!temp && name.len > 0) {\n        strbuf.append(out, name);",
+      "new": "    } else if (false) {\n        strbuf.append(out, name);",
+      "what": "a named local and a parameter give their FIR places"
+    },
+    {
+      "decision": "D17.20-aggregate-report-limit",
+      "file": "src/fort/owner/report.ft",
+      "old": "            if (p->aggregate_over && !limit_told) {",
+      "new": "            if (false) {",
+      "what": "past the aggregate work the report writes no note of the limit"
+    },
+    {
+      "decision": "D17.20-aggregate-report-limit-note",
+      "file": "src/fort/owner/report.ft",
+      "old": "                strbuf.append(out, AGGREGATE_LIMIT_NOTE);",
+      "new": "                strbuf.append(out, LEAK_LIMIT_NOTE);",
+      "what": "past the aggregate work the report writes the note of the leak limit"
+    },
+    {
+      "decision": "D17.20-aggregate-report-cause",
+      "file": "src/fort/owner/report.ft",
+      "old": "            if (cause.len > 0) {",
+      "new": "            if (false) {",
+      "what": "the report writes no cause"
+    },
+    {
+      "decision": "D17.20-aggregate-report-proved",
+      "file": "src/fort/owner/report.ft",
+      "old": "        if (!a->at.proved && !is_aggregate_repeated(f, p, k)) {",
+      "new": "        if (!is_aggregate_repeated(f, p, k)) {",
+      "what": "the report writes each exit, also a proved one"
+    },
+    {
+      "decision": "D17.20-aggregate-option-check",
+      "file": "src/fort/driver.ft",
+      "old": "        opts->aggregate_report = true;\n        opts->check = true;",
+      "new": "        opts->aggregate_report = true;",
+      "what": "--aggregate-report does not imply --check, so the run builds the program"
+    },
+    {
+      "decision": "D17.20-aggregate-option-lines",
+      "file": "src/fort/driver.ft",
+      "old": "                if (opts->aggregate_report) {\n                    report.write_aggregates(&f, &verdicts, s, &leaks);",
+      "new": "                if (false) {\n                    report.write_aggregates(&f, &verdicts, s, &leaks);",
+      "what": "--aggregate-report lists no exit"
+    },
+    {
+      "decision": "D17.20-aggregate-option-causes",
+      "file": "src/fort/driver.ft",
+      "old": "    prover.proof verdicts = prover.prove_causes(f, causes);",
+      "new": "    prover.proof verdicts = prover.prove(f);",
+      "what": "--aggregate-report lists no cause"
+    },
+    {
+      "decision": "D17.20-aggregate-option-json",
+      "file": "src/fort/driver.ft",
+      "old": "    if (opts->aggregate_report && opts->json) {",
+      "new": "    if (false) {",
+      "what": "--aggregate-report combines with --json"
+    }
+  ]
+}

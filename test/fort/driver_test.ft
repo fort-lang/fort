@@ -340,11 +340,14 @@ fn help_prints_the_usage_line_and_the_option_table() void {
     assert(str.starts_with(out, "usage: fort [options] entry.ft\noptions:\n"));
     // One line per option follows the usage line and the
     // `options:` header.
-    assert(capture.line_count(out) == 39);
+    assert(capture.line_count(out) == 40);
     assert(str.find(out, "--overwrite-report") < 0);
     string leak =
         "  --leak-report      as --check, and write each leak site that is no error yet\n";
     assert(str.find(out, leak) >= 0);
+    string aggregate =
+        "  --aggregate-report as --check, and write each leak of an owning aggregate local\n";
+    assert(str.find(out, aggregate) >= 0);
     // rule (b) is an error, so its report option is gone (D17.21)
     assert(str.find(out, "--move-report") < 0);
     string ar = "  --ar <path>        the archiver that writes the lib.a of --lib (default ar)\n";
@@ -2069,6 +2072,82 @@ fn the_leak_report_refuses_the_document() void {
     assert(err_has("fort: error: --leak-report does not combine with --json or --index\n"));
 }
 
+// A program with two locals of an owning aggregate type. The call that takes the address of `b`
+// kills the fact of `b.data`, and it leaves an allocation there, which leaks at the `return`. The
+// pass proves the exit of `c`, which is no memory local.
+string[14] AGG_SITE = {
+    "struct buf {",
+    "    u8 mut@ own data;",
+    "}",
+    "fn fill(buf mut* b) void {",
+    "    del(b->data);",
+    "    b->data = new(u8, 4);",
+    "}",
+    "fn main() i32 {",
+    "    buf mut b = buf{};",
+    "    fill(&b);",
+    "    buf mut c = buf{};",
+    "    del(c.data);",
+    "    return 0;",
+    "}",
+};
+
+// The lines of --aggregate-report for AGG_SITE: the exit of `b` at the `return`, with its cause.
+// listed joins the entries, so the last line takes two.
+string[4] AGG_SITE_LISTED = {
+    "agg.ft:13:5: leak: cannot prove 'b.data' is empty at this exit\n",
+    "agg.ft:13:5: note: del or move 'b.data' before this exit\n",
+    "agg.ft:13:5: note: cause 1: R1 can prove it if each callee that takes its address ",
+    "empties the owner\n",
+};
+
+// --aggregate-report implies --check, and it lists on stdout each exit of a local of an owning
+// aggregate type that the pass does not prove, with the message and the note of D17.20 and a line
+// of its cause. Such an exit is no error until refinement R1, so the run exits 0 with no
+// diagnostic, as --check does, and no build runs. With --leak-report the run lists the lines of
+// both reports in one print.
+fn the_aggregate_report_lists_each_exit_of_an_owning_aggregate() void {
+    write_runtime();
+    write_lines("agg.ft", AGG_SITE[..]);
+    remove_file("a.out");
+    string[3] mut report = {"fort", "--aggregate-report", "agg.ft"};
+    assert(run(report[0..3]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    assert(listed(AGG_SITE_LISTED[..]));
+    assert(!file_exists("a.out"));
+    string[3] mut check = {"fort", "--check", "agg.ft"};
+    assert(run(check[0..3]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    assert(listed(AGG_SITE_LISTED[..0]));
+    string[4] mut both = {"fort", "--leak-report", "--aggregate-report", "agg.ft"};
+    assert(run(both[0..4]) == EXIT_OK);
+    assert(captured_err_is_empty());
+    assert(listed(AGG_SITE_LISTED[..]));
+    string[4] mut moded = {"fort", "--aggregate-report", "-S", "agg.ft"};
+    for (string mode : MODES) {
+        moded[2] = mode;
+        assert(run(moded[0..4]) == EXIT_OK);
+        assert(listed(AGG_SITE_LISTED[..]));
+    }
+    // a program with an error keeps its status and its diagnostics
+    write_lines("leak_sites.ft", LEAK_SITES[..]);
+    string[3] mut errors = {"fort", "--aggregate-report", "leak_sites.ft"};
+    assert(run(errors[0..3]) == EXIT_COMPILE_ERROR);
+    assert(reported_leak_sites());
+    assert(listed(AGG_SITE_LISTED[..0]));
+}
+
+// The report and the document of --json both go to stdout, so the two do not combine, and
+// --index sets --json.
+fn the_aggregate_report_refuses_the_document() void {
+    string[4] mut json = {"fort", "--aggregate-report", "--json", "entry.ft"};
+    assert(run(json[0..4]) == EXIT_USAGE);
+    assert(err_has("fort: error: --aggregate-report does not combine with --json or --index\n"));
+    string[4] mut index = {"fort", "--index", "--aggregate-report", "entry.ft"};
+    assert(run(index[0..4]) == EXIT_USAGE);
+    assert(err_has("fort: error: --aggregate-report does not combine with --json or --index\n"));
+}
+
 // A program whose one use of rule (b) is the load through `p` after its `move` (D17.21). The
 // `move` empties `p` and `q` takes the `del`, so D17.11 and the leak rule hold.
 string[7] USE_SITE = {
@@ -2781,6 +2860,8 @@ fn main() i32 {
     the_leak_report_lists_each_site_of_part_2();
     the_leak_report_lists_a_site_at_a_cast();
     the_leak_report_refuses_the_document();
+    the_aggregate_report_lists_each_exit_of_an_owning_aggregate();
+    the_aggregate_report_refuses_the_document();
     each_unproved_use_is_an_error_in_every_mode();
     the_use_error_is_the_same_in_each_mode();
     the_errors_of_one_function_stand_in_the_order_of_the_rules();

@@ -4,7 +4,8 @@
 /// emptiness fact of spec/ownership-design.md 4.4, and with it it proves part 1 of the leak rule
 /// (D17.20): an owner local holds the zero value at each exit of its scope. It also proves part 2,
 /// which only reports for now: each inner owner of `*p` holds the zero value before a `del` or an
-/// owning `cast` of `p`.
+/// owning `cast` of `p`. It proves part 1 for each owner below a local of an owning aggregate type
+/// too, which only reports until refinement R1 (spec/fir.md 11, Aggregates).
 //
 // The analysis proves each store into a place of an `own` reference type that needs a proof
 // (find_stores): the fact of its place holds after its right side and before its own kill rules. A
@@ -22,9 +23,11 @@
 // local whose obligation needs one, and a fifth dataflow (run_ended) that says where the scope of a
 // named owner local has ended; a third walk of each block that holds an exit tests its obligation
 // (judge_exits). Part 2 adds the fact of each inner owner of each `del` or owning `cast`
-// (find_inners), and a fourth walk tests them (judge_inners). Before the facts dataflow, the
-// fixpoint of owner.alias (run_aliases) gives the origins and the exposures that kill rules 3 and
-// 4 read (is_apart), and each walk moves that state past each statement (apply_facts).
+// (find_inners), and a fourth walk tests them (judge_inners). The exits of a local of an owning
+// aggregate type add the fact of each owner below the local, and a fifth walk tests them
+// (judge_aggregates). Before the facts dataflow, the fixpoint of owner.alias (run_aliases) gives
+// the origins and the exposures that kill rules 3 and 4 read (is_apart), and each walk moves that
+// state past each statement (apply_facts).
 // The module uses switches and no function-pointer dispatch table. It holds no module-level
 // mutable state: each vector belongs to one call of prove, or to the proof that it returns.
 import fort.diag;
@@ -69,6 +72,33 @@ struct exit {
     bool proved;
 }
 
+/// The cause of an exit of a local of an owning aggregate type that the analysis does not prove,
+/// for the report of those exits (find_causes). Only prove_causes gives a cause. Cause 1: the facts
+/// prove the exit when each call that takes the address of fixed storage of the local, through an
+/// `addr` temporary, makes each owner below that place empty, as an `empty` line of refinement R1
+/// can. Cause 2: the first owner that the analysis does not prove holds the zero value on some path
+/// to the exit. Cause 3: each other exit. Cause 4: the function passed the aggregate work limit.
+enum cause_kind {
+    cs_none, // a proved exit, or no cause was asked for
+    cs_call, // cause 1
+    cs_paths, // cause 2
+    cs_other, // cause 3
+    cs_limit, // cause 4
+}
+
+/// An obligation of part 1 of the leak rule for a local of an owning aggregate type (D17.7). D17.20
+/// gives such a local no obligation until refinement R1, so the obligation only reports: each owner
+/// below the local holds the zero value at the exit. `at` is the exit, as for an owner local. The
+/// local holds `owners` owners (place.count_owners), and `first` is the first that the analysis
+/// does not prove, in the order of place.next_owner_step. `cause` is the cause of an exit that it
+/// does not prove.
+struct aggregate {
+    exit at;
+    u64 owners;
+    u64 first;
+    cause_kind cause;
+}
+
 /// An obligation of part 2 of the leak rule (D17.20): before the `del` or the owning `cast` that is
 /// statement `index` of block `block`, each inner owner of `*p` holds the zero value. `p` is the
 /// place of the `del` or of the operand of the `cast` (released_place), of type `T* own`, and `T`
@@ -102,7 +132,10 @@ struct inner {
 /// block order and in the order of the reads (D17.21, prove_uses), and `use_unproved` counts those
 /// that the analysis does not prove. Each of them is a compile error too (has_error). `use_work` is
 /// the charge of the proof of rule (b), as USE_LIMIT counts it, and `use_over` says that it passed
-/// USE_LIMIT.
+/// USE_LIMIT. `aggregates` holds the exits of the locals of an owning aggregate type in the order
+/// of `exits` (find_aggregates), and `aggregate_leaks` counts those that the analysis does not
+/// prove, which are no error. `aggregate_work` adds the steps of the paths of their owners to
+/// `inner_work` (count_aggregate_steps), and `aggregate_over` says that it passed the limit.
 struct proof {
     bool mut@ own proved;
     store mut@ own stores;
@@ -124,6 +157,10 @@ struct proof {
     u32 use_unproved;
     u64 use_work;
     bool use_over;
+    aggregate mut@ own aggregates;
+    u32 aggregate_leaks;
+    u64 aggregate_work;
+    bool aggregate_over;
 }
 
 fn free(proof mut* p) void {
@@ -132,11 +169,13 @@ fn free(proof mut* p) void {
     del(p->exits);
     del(p->inners);
     del(p->uses);
+    del(p->aggregates);
     p->checks = 0;
     p->unproved = 0;
     p->leaks = 0;
     p->inner_leaks = 0;
     p->use_unproved = 0;
+    p->aggregate_leaks = 0;
 }
 
 /// Whether the check that ends block `b` is proved, or true when block `b` ends in another
@@ -149,7 +188,8 @@ fn is_proved(proof* p, u32 b) bool {
 /// D17.11, an exit that it does not prove, the error of part 1 of the leak rule (D17.20), or a use
 /// that it does not prove, the error of rule (b) (D17.21). A function with an error reaches no
 /// later pass. An obligation of part 2 that it does not prove is no error yet: part 2 only reports
-/// (D17.20).
+/// (D17.20). An exit of a local of an owning aggregate type is no error either, until refinement
+/// R1 (D17.20).
 fn has_error(proof* p) bool {
     return p->unproved > 0 || p->leaks > 0 || p->use_unproved > 0;
 }
@@ -160,11 +200,14 @@ fn has_error(proof* p) bool {
 // of exit `k`. The stores of block `b` are the stores `first_store[b]` to `first_store[b + 1] - 1`
 // of the proof. The facts of the inner owners of inner `k` of the proof are the entries
 // `first_inner[k]` to `first_inner[k + 1] - 1` of `inner_fact`, in the order of the owners, and
-// `site_fact[k]` is the fact of the place that inner `k` releases. `tested[b]` says that block `b`
-// ends in a test against null, and then `tests[b]` is that test (find_tests). `aliases` says which
-// memory locals a place through a pointer can be (alias.can_be), and `origins` is the set of
-// origins that the walks of its state use. `units` counts the statements and the terminators of
-// the function (count_units).
+// `site_fact[k]` is the fact of the place that inner `k` releases. The facts of the owners of the
+// local of aggregate `k` of the proof are the facts `aggregate_fact[k]` and on, in the order of the
+// owners. `r1` says that a call gives the facts of refinement R1 (gen_addressed), for the causes of
+// the report only, and `causes` that the proof gives the causes (find_causes). `tested[b]` says
+// that block `b` ends in a test against null, and then `tests[b]` is that test (find_tests).
+// `aliases` says which memory locals a place through a pointer can be (alias.can_be), and
+// `origins` is the set of origins that the walks of its state use. `units` counts the statements
+// and the terminators of the function (count_units).
 struct context {
     place.survey places;
     place.path mut@ own facts;
@@ -176,6 +219,9 @@ struct context {
     u32 mut@ own inner_fact;
     u64 mut@ own first_inner;
     u32 mut@ own site_fact;
+    u32 mut@ own aggregate_fact;
+    bool r1;
+    bool causes;
     bool mut@ own tested;
     place.test mut@ own tests;
     alias.map aliases;
@@ -195,6 +241,7 @@ fn free_context(context mut* c) void {
     del(c->inner_fact);
     del(c->first_inner);
     del(c->site_fact);
+    del(c->aggregate_fact);
     del(c->tested);
     del(c->tests);
     alias.free(&c->aliases);
@@ -405,9 +452,13 @@ fn gen_reads(context mut* c, fir.statement* s, fir_flow.bits* stale, probes mut*
 }
 
 // The kill rules of the store of the assignment `s` into `d`, the path of its destination.
-// `stale` holds the stale set before `s`, and `fresh` the fresh set after its right side.
-fn apply_kills(context* c, fir.statement* s, place.path d, fir_flow.bits* stale,
+// `stale` holds the stale set before `s`, and `fresh` the fresh set after its right side. For the
+// causes of the report, the gen of refinement R1 at a call comes first (gen_addressed).
+fn apply_kills(context mut* c, fir.statement* s, place.path d, fir_flow.bits* stale,
                fir_flow.bits* fresh, fir_flow.bits* aliased, probes mut* pr) void {
+    if (c->r1 && s->value.kind == fir.rvalue_kind.rv_call) {
+        gen_addressed(c, s, stale, pr);
+    }
     // a store through a stale held address can write a place through a fresh pointer local,
     // because the `addr` of a held address ends no freshness, so no fresh fact survives it
     if (place.is_stale_held(&c->places, s->place, stale)) {
@@ -657,7 +708,8 @@ fn collect_block_facts(context mut* c, fir_flow.dataflow* stale, proof* out, u32
 
 // Runs the facts dataflow: an intersection from the entry, which holds the fact of each place in
 // fixed storage of a temporary or of an `_0` that is no aggregate (place.is_empty_at_entry), and no
-// other fact.
+// other fact. With a dataflow `d` that joins by union, a fact holds on some path, for the causes of
+// the report (find_causes), and a block that no edge reaches starts with no fact.
 fn run_facts(context mut* c, fir.pred_table* pt, fir_flow.dataflow* stale,
              fir_flow.dataflow* fresh, fir_flow.dataflow mut* d) void {
     fir.func* f = c->places.f;
@@ -720,7 +772,9 @@ fn run_facts(context mut* c, fir.pred_table* pt, fir_flow.dataflow* stale,
         }
         k += 1;
     }
-    fir_flow.bits_fill(&d->init);
+    if (d->join == fir_flow.join_kind.join_intersect) {
+        fir_flow.bits_fill(&d->init);
+    }
     fir_flow.dataflow_forward_edges(f, pt, d, gens, kills, edge_to, edge_gens);
 }
 
@@ -962,8 +1016,8 @@ fn prove_within(fir.func* f, u64 limit) proof {
 }
 
 // Takes each check of `out` as proved, counts the checks of `f`, and gives in `check_of` the block
-// of the check before each continuation, or NO_BLOCK, for prove_limits. The result of prove_limits
-// is no local owner here.
+// of the check before each continuation, or NO_BLOCK, for prove_all. The result of prove_all is no
+// local owner here.
 fn mark_checks(fir.func* f, proof mut* out, u32 mut@ check_of) void {
     u32 n = fir.block_count(f);
     u32 mut b = 0;
@@ -987,6 +1041,18 @@ fn mark_checks(fir.func* f, proof mut* out, u32 mut@ check_of) void {
 /// facts of the emptiness proof (run_dataflows) and apart from them: it reads their survey of the
 /// places, their stale set, their tests and their map of owner.alias, and it changes no fact.
 fn prove_limits(fir.func* f, u64 limit, u64 use_limit) proof {
+    return prove_all(f, limit, use_limit, false);
+}
+
+/// Proves as prove does, and with `causes` gives each exit of a local of an owning aggregate type
+/// that it does not prove its cause (find_causes), for the report of those exits. The causes change
+/// no verdict.
+fn prove_causes(fir.func* f, bool causes) proof {
+    return prove_all(f, WORK_LIMIT, USE_LIMIT, causes);
+}
+
+// Proves as prove_limits does, and with `causes` as prove_causes does.
+fn prove_all(fir.func* f, u64 limit, u64 use_limit, bool causes) proof {
     u32 n = fir.block_count(f);
     proof mut out = proof{};
     out.proved = new(bool, cast(n, u64));
@@ -1025,6 +1091,7 @@ fn prove_limits(fir.func* f, u64 limit, u64 use_limit) proof {
     place.mark_sources(&c.places);
     c.owners = owners;
     c.use_limit = use_limit;
+    c.causes = causes;
     if (!emptiness) {
         prove_uses_alone(&c, &out);
         return out;
@@ -1041,9 +1108,14 @@ fn prove_limits(fir.func* f, u64 limit, u64 use_limit) proof {
     out.over = out.work > limit;
     out.leak_over = out.leak_work > limit;
     out.inner_over = out.inner_work > limit;
+    out.aggregate_work = types.capped_sum(out.inner_work,
+                                          types.capped_product(units, count_aggregate_steps(f)));
+    out.aggregate_over = out.aggregate_work > limit;
     if (out.leak_over) {
         find_exits(&c, null, &out);
         pass_exits(&c, &out);
+        // the aggregate work holds the leak work
+        pass_aggregates(&out);
     }
     if (out.inner_over) {
         pass_inners(&out);
@@ -1058,9 +1130,10 @@ fn prove_limits(fir.func* f, u64 limit, u64 use_limit) proof {
 }
 
 // Runs the dataflows of the proof `c` within the limit and writes the verdict of each check and
-// each store into `out`, of each exit unless the leak work passed the limit, and of each obligation
-// of part 2 unless the inner work passed it. Its own function keeps the work of prove_within, a
-// function of the compiler, within the measure of D17.11.
+// each store into `out`, of each exit unless the leak work passed the limit, of each obligation of
+// part 2 unless the inner work passed it, and of each exit of a local of an owning aggregate type.
+// Its own function keeps the work of prove_within, a function of the compiler, within the measure
+// of D17.11.
 fn run_dataflows(context mut* c, proof mut* out) void {
     fir.func* f = c->places.f;
     u32 locals = fir.local_count(f);
@@ -1081,7 +1154,8 @@ fn run_dataflows(context mut* c, proof mut* out) void {
     defer fir_flow.dataflow_free(&scratch);
     run_scratch(c, &pt, &scratch);
     if (!out->leak_over && has_owner(f, true)) {
-        // the ended dataflow runs only for a function with a named owner local
+        // the ended dataflow runs only for a function with a named owner local or a named local
+        // of an owning aggregate type
         fir_flow.dataflow mut ended = fir_flow.dataflow_new(locals,
                                                             fir_flow.join_kind.join_intersect,
                                                             transfer_none);
@@ -1101,6 +1175,7 @@ fn run_dataflows(context mut* c, proof mut* out) void {
     if (!out->inner_over) {
         collect_inner_facts(c, &stale, out);
     }
+    collect_aggregate_facts(c, out);
     if (c->fact_count == 0) {
         judge(c, &stale, &fresh, null, &scratch, out);
         if (!out->leak_over) {
@@ -1125,6 +1200,7 @@ fn run_dataflows(context mut* c, proof mut* out) void {
     if (!out->inner_over) {
         judge_inners(c, &stale, &fresh, &facts, &scratch, out);
     }
+    judge_aggregates(c, &pt, &stale, &fresh, &facts, out);
     prove_uses(c, &pt, &stale, out);
 }
 
@@ -1421,12 +1497,29 @@ fn is_owner_local(fir.func* f, u32 n) bool {
     return l->kind != fir.local_kind.lk_return && is_own_reference(l->ty);
 }
 
-// Whether `f` has an owner local, or with `named` a named owner local.
+// Whether the local `n` is a local of an owning aggregate type (D17.7) with an obligation of part 1
+// of the leak rule that only reports: a named local, a parameter or a temporary.
+fn is_aggregate_local(fir.func* f, u32 n) bool {
+    fir.local* l = fir.local_at(f, n);
+    return l->kind != fir.local_kind.lk_return && types.type_is_owning_aggregate(l->ty);
+}
+
+// Whether the local `n` has an obligation of part 1: with `aggregate` a local of an owning
+// aggregate type, and else an owner local.
+fn is_exit_local(fir.func* f, u32 n, bool aggregate) bool {
+    if (aggregate) {
+        return is_aggregate_local(f, n);
+    }
+    return is_owner_local(f, n);
+}
+
+// Whether `f` has an owner local or a local of an owning aggregate type, or with `named` a named
+// one.
 fn has_owner(fir.func* f, bool named) bool {
     u32 mut n = 0;
     while (n < fir.local_count(f)) {
         bool kind = !named || fir.local_at(f, n)->kind == fir.local_kind.lk_named;
-        if (kind && is_owner_local(f, n)) {
+        if (kind && (is_owner_local(f, n) || is_aggregate_local(f, n))) {
             return true;
         }
         n += 1;
@@ -1450,12 +1543,14 @@ fn count_owner_facts(context* c) u64 {
     return count;
 }
 
-// Whether the owner local `n` has an obligation at the `return` that ends block `b`. A parameter
-// and a temporary have one. A named local has one when `ended` does not prove that its scope ended
-// on each path to the end of the block. With a null `ended` it has none: the lowering writes the
-// `dead` of each named local of each scope that a `return` leaves (spec/fir.md 9.5).
-fn has_return_obligation(fir.func* f, fir_flow.dataflow* ended, u32 b, u32 n) bool {
-    if (!is_owner_local(f, n)) {
+// Whether the owner local `n`, or with `aggregate` the local `n` of an owning aggregate type, has
+// an obligation at the `return` that ends block `b`. A parameter and a temporary have one. A named
+// local has one when `ended` does not prove that its scope ended on each path to the end of the
+// block. With a null `ended` it has none: the lowering writes the `dead` of each named local of
+// each scope that a `return` leaves (spec/fir.md 9.5).
+fn has_return_obligation(fir.func* f, fir_flow.dataflow* ended, u32 b, u32 n, bool aggregate)
+    bool {
+    if (!is_exit_local(f, n, aggregate)) {
         return false;
     }
     if (fir.local_at(f, n)->kind != fir.local_kind.lk_named) {
@@ -1464,9 +1559,11 @@ fn has_return_obligation(fir.func* f, fir_flow.dataflow* ended, u32 b, u32 n) bo
     return ended != null && !fir_flow.bits_get(&ended->outs[cast(b, u64)], n);
 }
 
-// Counts the exits of `f` in the order of find_exits, and with `fill` writes them into out->exits,
-// which has room for each.
-fn scan_exits(fir.func* f, fir_flow.dataflow* ended, proof mut* out, bool fill) u64 {
+// Counts the exits of `f` in the order of find_exits, of the owner locals or with `aggregate` of
+// the locals of an owning aggregate type, and with `fill` writes them into `into`, which has room
+// for each.
+fn scan_exits(fir.func* f, fir_flow.dataflow* ended, bool aggregate, exit mut@ into, bool fill)
+    u64 {
     u64 mut k = 0;
     u32 mut b = 0;
     while (b < fir.block_count(f)) {
@@ -1475,9 +1572,9 @@ fn scan_exits(fir.func* f, fir_flow.dataflow* ended, proof mut* out, bool fill) 
         u32 mut i = 0;
         while (i < count && !fir.term_is_abort(t)) {
             fir.statement* s = fir.block_statement(f, b, i);
-            if (s->kind == fir.stmt_kind.st_dead && is_owner_local(f, s->local)) {
+            if (s->kind == fir.stmt_kind.st_dead && is_exit_local(f, s->local, aggregate)) {
                 if (fill) {
-                    out->exits[k] = exit{b, i, s->local, false};
+                    into[k] = exit{b, i, s->local, false};
                 }
                 k += 1;
             }
@@ -1485,9 +1582,9 @@ fn scan_exits(fir.func* f, fir_flow.dataflow* ended, proof mut* out, bool fill) 
         }
         u32 mut n = 0;
         while (t->kind == fir.term_kind.tk_return && n < fir.local_count(f)) {
-            if (has_return_obligation(f, ended, b, n)) {
+            if (has_return_obligation(f, ended, b, n, aggregate)) {
                 if (fill) {
-                    out->exits[k] = exit{b, count, n, false};
+                    into[k] = exit{b, count, n, false};
                 }
                 k += 1;
             }
@@ -1501,15 +1598,69 @@ fn scan_exits(fir.func* f, fir_flow.dataflow* ended, proof mut* out, bool fill) 
 // Lists in out->exits each obligation of part 1 of the leak rule, in block order. The `dead`
 // marker of an owner local is one, but in an abort block: a runtime error runs no deferred code
 // (D7.8, D11.4), so an exit into an abort block has no obligation. Rule V10 lets a `dead` name a
-// named local only. A `return` has one for each owner local of has_return_obligation.
+// named local only. A `return` has one for each owner local of has_return_obligation. The exits
+// of the locals of an owning aggregate type go into out->aggregates (find_aggregates).
 fn find_exits(context* c, fir_flow.dataflow* ended, proof mut* out) void {
-    u64 count = scan_exits(c->places.f, ended, out, false);
+    find_aggregates(c->places.f, ended, out);
+    u64 count = scan_exits(c->places.f, ended, false, out->exits, false);
     if (count == 0) {
         return;
     }
     del(out->exits);
     out->exits = new(exit, count);
-    scan_exits(c->places.f, ended, out, true);
+    scan_exits(c->places.f, ended, false, out->exits, true);
+}
+
+// Lists in out->aggregates the exits of the locals of an owning aggregate type, in the order and
+// with the obligations of find_exits. They only report until refinement R1 (D17.20).
+fn find_aggregates(fir.func* f, fir_flow.dataflow* ended, proof mut* out) void {
+    u64 count = scan_exits(f, ended, true, out->exits, false);
+    if (count == 0) {
+        return;
+    }
+    exit mut@ own found = new(exit, count);
+    defer del(found);
+    scan_exits(f, ended, true, found, true);
+    del(out->aggregates);
+    out->aggregates = new(aggregate, count);
+    u64 mut k = 0;
+    while (k < count) {
+        u64 owners = place.count_owners(fir.local_at(f, found[k].local)->ty);
+        out->aggregates[k] = aggregate{found[k], owners, 0, cause_kind.cs_none};
+        k += 1;
+    }
+}
+
+// Writes the verdict of each exit of a local of an owning aggregate type past the limit of the
+// aggregate work: none is proved, and the first owner is the first that the analysis does not
+// prove.
+fn pass_aggregates(proof mut* out) void {
+    u64 mut k = 0;
+    while (k < out->aggregates.len) {
+        out->aggregates[k].first = 0;
+        out->aggregates[k].cause = cause_kind.cs_limit;
+        out->aggregate_leaks += 1;
+        k += 1;
+    }
+}
+
+// The count of the steps of the paths of the owners below each local of an owning aggregate type
+// of `f`: for each owner 1 more than place.depth_to_owners of the type of its local. Each owner of
+// a local with an exit takes a fact (collect_aggregate_facts), and each walk of the facts reads
+// its steps, so the aggregate work counts them as the inner work counts the inner owners. It stops
+// at types.OWNER_CAP.
+fn count_aggregate_steps(fir.func* f) u64 {
+    u64 mut sum = 0;
+    u32 mut n = 0;
+    while (n < fir.local_count(f)) {
+        if (is_aggregate_local(f, n)) {
+            types.node* t = fir.local_at(f, n)->ty;
+            u64 steps = types.capped_product(place.count_owners(t), place.depth_to_owners(t) + 1);
+            sum = types.capped_sum(sum, steps);
+        }
+        n += 1;
+    }
+    return sum;
 }
 
 // Writes the verdict of each exit past the work limit. Only an exit of a scratch local holds: no
@@ -1596,6 +1747,195 @@ fn judge_exits(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fres
     }
 }
 
+// ---- the owning aggregates ---------------------------------------------------------------------
+
+// Gives the owners below the local of each exit of out->aggregates their facts, the paths below the
+// local (place.put_local_owners), once for each local: its exits share them. No search for an
+// earlier fact of a path: no rule reads the number of a fact. Past the limit of the aggregate work
+// the exits get no fact, and none is proved (pass_aggregates). The aggregate work bounds the owners
+// and their steps.
+fn collect_aggregate_facts(context mut* c, proof mut* out) void {
+    if (out->aggregate_over) {
+        // prove_all passed the exits when the leak work passed the limit too
+        if (!out->leak_over) {
+            pass_aggregates(out);
+        }
+        return;
+    }
+    fir.func* f = c->places.f;
+    u32 mut@ own first = new(u32, cast(fir.local_count(f), u64));
+    defer del(first);
+    u64 mut n = 0;
+    while (n < first.len) {
+        first[n] = NO_FACT;
+        n += 1;
+    }
+    del(c->aggregate_fact);
+    c->aggregate_fact = new(u32, out->aggregates.len);
+    u64 mut k = 0;
+    while (k < out->aggregates.len) {
+        aggregate* a = &out->aggregates[k];
+        u64 local = cast(a->at.local, u64);
+        if (first[local] == NO_FACT) {
+            first[local] = cast(c->fact_count, u32);
+            place.path mut@ own paths = new(place.path, a->owners);
+            place.put_local_owners(&c->places, a->at.local, paths);
+            u64 mut m = 0;
+            while (m < paths.len) {
+                push_fact(c, paths[m]);
+                m += 1;
+            }
+            del(paths);
+        }
+        c->aggregate_fact[k] = first[local];
+        k += 1;
+    }
+}
+
+// Writes the verdict of each exit of out->aggregates within the limit of the aggregate work: the
+// fact of each owner below its local holds at its `dead` marker or at the end of the block of its
+// `return` (walk_aggregates). Each exit that the analysis does not prove counts in
+// out->aggregate_leaks, and with c->causes it takes its cause (find_causes).
+fn judge_aggregates(context mut* c, fir.pred_table* pt, fir_flow.dataflow* stale,
+                    fir_flow.dataflow* fresh, fir_flow.dataflow* d, proof mut* out) void {
+    if (out->aggregate_over) {
+        return;
+    }
+    u64 count = out->aggregates.len;
+    u64 mut@ own from = new(u64, count);
+    u64 mut@ own first = new(u64, count);
+    defer {
+        del(from);
+        del(first);
+    }
+    walk_aggregates(c, stale, fresh, d, out, from, first);
+    u64 mut k = 0;
+    while (k < count) {
+        aggregate mut* a = &out->aggregates[k];
+        a->first = first[k];
+        a->at.proved = first[k] == a->owners;
+        if (!a->at.proved) {
+            out->aggregate_leaks += 1;
+        }
+        k += 1;
+    }
+    if (c->causes && out->aggregate_leaks > 0) {
+        find_causes(c, pt, stale, fresh, out, from, first);
+    }
+}
+
+// Writes into first[k] the first owner from from[k] of the local of exit `k` of out->aggregates
+// whose fact does not hold at the exit with the facts of `d`, or the count of its owners when each
+// of them holds. A `dead` marker changes no fact, and a `return` reads `_0`, so the walk of each
+// block that holds an exit applies the statements before the exit to the sets of the entry of the
+// block. The caller keeps `from` and `first`, so they are no local owners here.
+fn walk_aggregates(context mut* c, fir_flow.dataflow* stale, fir_flow.dataflow* fresh,
+                   fir_flow.dataflow* d, proof* out, u64@ from, u64 mut@ first) void {
+    fir.func* f = c->places.f;
+    u32 locals = fir.local_count(f);
+    probes mut pr = make_probes(cast(c->fact_count, u32));
+    defer free_probes(&pr);
+    fir_flow.bits mut at_stale = fir_flow.bits_new(locals);
+    defer fir_flow.bits_free(&at_stale);
+    fir_flow.bits mut at_fresh = fir_flow.bits_new(locals);
+    defer fir_flow.bits_free(&at_fresh);
+    fir_flow.bits mut at_alias = alias_state(c);
+    defer fir_flow.bits_free(&at_alias);
+    bool mut unused = false;
+    u64 mut k = 0;
+    while (k < out->aggregates.len) {
+        u32 b = out->aggregates[k].at.block;
+        fir_flow.bits_copy(&pr.none, &d->ins[cast(b, u64)]);
+        fir_flow.bits_copy(&at_stale, &stale->ins[cast(b, u64)]);
+        fir_flow.bits_copy(&at_fresh, &fresh->ins[cast(b, u64)]);
+        alias_in(c, b, &at_alias);
+        u32 mut i = 0;
+        while (k < out->aggregates.len && out->aggregates[k].at.block == b) {
+            aggregate* a = &out->aggregates[k];
+            while (i < a->at.index) {
+                fir.statement* s = fir.block_statement(f, b, i);
+                apply_facts(c, s, &at_stale, &at_fresh, &at_alias, &pr, NO_FACT, &unused);
+                i += 1;
+            }
+            u64 mut m = from[k];
+            u32 base = c->aggregate_fact[k];
+            while (m < a->owners && fir_flow.bits_get(&pr.none, base + cast(m, u32))) {
+                m += 1;
+            }
+            first[k] = m;
+            k += 1;
+        }
+    }
+}
+
+// The gen of refinement R1 at the call of `s`, for the causes of the report only (find_causes): a
+// callee with an `empty` line for each parameter leaves each owner below the place of each argument
+// that is an `addr` temporary of fixed storage empty (spec/ownership-design.md 7). The gen comes
+// after the kill of the call and before the kill rules of the store of its result (apply_kills).
+// No verdict reads it.
+fn gen_addressed(context mut* c, fir.statement* s, fir_flow.bits* stale, probes mut* pr) void {
+    fir.func* f = c->places.f;
+    u32 mut i = 0;
+    while (i < s->value.ops_len) {
+        fir.operand o = fir.rvalue_operand(f, s->value, i);
+        bool temp = o.kind != fir.operand_kind.ok_const && place.is_local(o.place)
+            && fir.local_at(f, o.place.local)->kind == fir.local_kind.lk_temp
+            && place.is_single(&c->places, o.place.local);
+        if (temp) {
+            fir.rvalue r = place.store_of(&c->places, o.place.local)->value;
+            if (r.kind == fir.rvalue_kind.rv_addr && fir.place_fixed(f, r.place)) {
+                u64 mark = c->places.steps_len;
+                gen_below(c, place.trace(&c->places, r.place, stale), pr);
+                c->places.steps_len = mark;
+            }
+        }
+        i += 1;
+    }
+}
+
+// Gives each exit of out->aggregates that the analysis does not prove its cause (cause_kind), with
+// `from` and `first` as scratch. Cause 1 when the facts with the gen of refinement R1 at each call
+// (gen_addressed) prove each owner of the exit. Else cause 2 when the facts joined by union, which
+// hold on some path, hold the first owner that the analysis does not prove. Else cause 3. Each runs
+// the facts dataflow again with the same gen and kill rules, so the causes change no verdict. The
+// caller keeps `from` and `first`, so they are no local owners here.
+fn find_causes(context mut* c, fir.pred_table* pt, fir_flow.dataflow* stale,
+               fir_flow.dataflow* fresh, proof mut* out, u64 mut@ from, u64 mut@ first) void {
+    u32 count = cast(c->fact_count, u32);
+    fir_flow.dataflow mut r1 = fir_flow.dataflow_new(count, fir_flow.join_kind.join_intersect,
+                                                     transfer_none);
+    defer fir_flow.dataflow_free(&r1);
+    c->r1 = true;
+    run_facts(c, pt, stale, fresh, &r1);
+    walk_aggregates(c, stale, fresh, &r1, out, from, first);
+    c->r1 = false;
+    u64 mut k = 0;
+    while (k < out->aggregates.len) {
+        aggregate mut* a = &out->aggregates[k];
+        if (!a->at.proved && first[k] == a->owners) {
+            a->cause = cause_kind.cs_call;
+        }
+        from[k] = a->first;
+        k += 1;
+    }
+    fir_flow.dataflow mut some = fir_flow.dataflow_new(count, fir_flow.join_kind.join_union,
+                                                       transfer_none);
+    defer fir_flow.dataflow_free(&some);
+    run_facts(c, pt, stale, fresh, &some);
+    walk_aggregates(c, stale, fresh, &some, out, from, first);
+    k = 0;
+    while (k < out->aggregates.len) {
+        aggregate mut* a = &out->aggregates[k];
+        if (!a->at.proved && a->cause == cause_kind.cs_none) {
+            a->cause = cause_kind.cs_other;
+            if (first[k] > a->first) {
+                a->cause = cause_kind.cs_paths;
+            }
+        }
+        k += 1;
+    }
+}
+
 // ---- the ended scopes --------------------------------------------------------------------------
 
 // The effect of the statement `s` on the ended set. `dead(_n)` ends the scope of the named local
@@ -1656,12 +1996,13 @@ fn run_ended(context mut* c, fir.pred_table* pt, fir_flow.dataflow mut* d) void 
     fir_flow.dataflow_forward_sets(f, pt, d, gens, kills);
 }
 
-// Adds each named owner local of `f` to `entry`, for run_ended. The caller keeps its probes, so
-// they are no local owners here.
+// Adds each named owner local of `f` and each named local of an owning aggregate type to `entry`,
+// for run_ended. The caller keeps its probes, so they are no local owners here.
 fn mark_named_owners(fir.func* f, fir_flow.bits mut* entry) void {
     u32 mut k = 0;
     while (k < fir.local_count(f)) {
-        if (fir.local_at(f, k)->kind == fir.local_kind.lk_named && is_owner_local(f, k)) {
+        bool owner = is_owner_local(f, k) || is_aggregate_local(f, k);
+        if (fir.local_at(f, k)->kind == fir.local_kind.lk_named && owner) {
             fir_flow.bits_set(entry, k);
         }
         k += 1;
