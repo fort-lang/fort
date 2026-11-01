@@ -176,13 +176,17 @@ string[ENTRY_COUNT] ENTRY_PARAMS = {
     "",
     "i64 v, char* type_name, ",
     "char* text, ",
-    "char* ptr, u64 len, ",
+    "string msg, ",
 };
 
+// The index of `panic` in ENTRY_NAMES.
+u64 PANIC_ENTRY = 10;
+
 // The sandbox's std/rt.ft: the eleven functions of ENTRY_NAMES. `bounds` gives the reported
-// parameters of fail_bounds. The entry `other` is a global of the module and no
-// function when `as_global` is set, and it is not there at all otherwise.
-fn runtime_text(strbuf.str_buf mut* b, string bounds, string other, bool as_global) void {
+// parameters of fail_bounds, and `message` those of panic. The entry `other` is a global of the
+// module and no function when `as_global` is set, and it is not there at all otherwise.
+fn runtime_text(strbuf.str_buf mut* b, string bounds, string message, string other,
+                bool as_global) void {
     u64 mut i = 0;
     while (i < ENTRY_COUNT) {
         string name = ENTRY_NAMES[i];
@@ -194,6 +198,8 @@ fn runtime_text(strbuf.str_buf mut* b, string bounds, string other, bool as_glob
             }
         } else if (name == "fail_bounds") {
             entry(b, name, bounds);
+        } else if (name == "panic") {
+            entry(b, name, message);
         } else {
             entry(b, name, ENTRY_PARAMS[i]);
         }
@@ -210,10 +216,15 @@ struct env {
 }
 
 fn open_with(env mut* e, string bounds, string other, bool as_global) void {
+    open_runtime(e, bounds, ENTRY_PARAMS[PANIC_ENTRY], other, as_global);
+}
+
+// open_with, where `message` gives the reported parameters of panic.
+fn open_runtime(env mut* e, string bounds, string message, string other, bool as_global) void {
     check_env.open(&e->c);
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
-    runtime_text(&b, bounds, other, as_global);
+    runtime_text(&b, bounds, message, other, as_global);
     check_env.add(&e->c, "std/rt.ft", strbuf.view(&b));
     modules_env.std_dir_without_runtime(&e->c.m, "std");
     strbuf.clear(&b);
@@ -1437,7 +1448,7 @@ fn v6_an_owning_value_lands_in_an_owning_position() void {
         fir_verify.V6_LANDS_OPERAND, 0, 0);
     red(&e, lets, "_6 = aggregate u8 mut*[2](move _1, copy _2); return; }", 6,
         fir_verify.V6_LANDS_OPERAND, 0, 0);
-    red(&e, lets, "fail(panic, move _9.0, copy _9.1); }", 6, fir_verify.V6_LANDS_OPERAND, 0, 0);
+    red(&e, lets, "fail(panic, move _9); }", 6, fir_verify.V6_LANDS_OPERAND, 0, 0);
     red(&e, lets, "goto bb1; } bb1: { check(copy _3, user, move _9.0) -> bb2; } bb2: { return; }",
         6, fir_verify.V6_LANDS_OPERAND, 1, 0);
     // the positions that own: a del, an owning place, an own parameter, an owning member, a cast
@@ -1621,7 +1632,7 @@ fn v7_a_check_reports_what_its_runtime_entry_takes() void {
     open(&e);
     defer close(&e);
     string ck = "let _1: bool; let _2: i64; let _3: u64; let _4: char*; let _5: i32;";
-    string more = "let _6: string own; let _7: u8 mut* own; bb0: {";
+    string more = "let _6: string own; let _7: u8 mut* own; let _8: string; bb0: {";
     strbuf.str_buf mut b = strbuf.create();
     defer strbuf.free(&b);
     strbuf.append(&b, ck);
@@ -1638,13 +1649,15 @@ fn v7_a_check_reports_what_its_runtime_entry_takes() void {
     green(&e, lets, "check(overwrite: _7) -> bb1; } bb1: { return; }");
     green(&e, lets, "check(copy _1, enum, copy _2, const bytes \"red\") -> bb1; } bb1: { trap; }");
     green(&e, lets, "check(copy _1, user, const bytes \"x > 0\") -> bb1; } bb1: { return; }");
-    green(&e, lets, "fail(panic, copy _6.0, copy _6.1); }");
+    green(&e, lets, "fail(panic, copy _8); }");
     // the count of the reported operands
     red(&e, lets, "check(copy _1, bounds, copy _2) -> bb1; } bb1: { return; }", 7,
         fir_verify.V7_REPORTED_COUNT, 0, 0);
     red(&e, lets, "check(copy _1, overflow, copy _2) -> bb1; } bb1: { return; }", 7,
         fir_verify.V7_REPORTED_COUNT, 0, 0);
     red(&e, lets, "fail(panic); }", 7, fir_verify.V7_REPORTED_COUNT, 0, 0);
+    red(&e, lets, "fail(panic, copy _8.0, copy _8.1); }", 7, fir_verify.V7_REPORTED_COUNT, 0, 0);
+    red(&e, lets, "fail(panic, copy _8, copy _3); }", 7, fir_verify.V7_REPORTED_COUNT, 0, 0);
     // each reported operand agrees with its parameter
     red(&e, lets, "check(copy _1, bounds, copy _3, copy _3) -> bb1; } bb1: { return; }", 7,
         fir_verify.V7_REPORTED, 0, 0);
@@ -1652,6 +1665,39 @@ fn v7_a_check_reports_what_its_runtime_entry_takes() void {
         fir_verify.V7_REPORTED, 0, 0);
     red(&e, lets, "fail(user, const i32 1); }", 7, fir_verify.V7_REPORTED, 0, 0);
     red(&e, lets, "fail(shift, copy _5, const bytes \"i32\"); }", 7, fir_verify.V7_REPORTED, 0, 0);
+    red(&e, lets, "fail(panic, copy _4); }", 7, fir_verify.V7_REPORTED, 0, 0);
+    red(&e, lets, "fail(panic, copy _2); }", 7, fir_verify.V7_REPORTED, 0, 0);
+    // the message of `panic` is a place, as an aggregate argument of a `call` is: the translator
+    // passes its address, and no constant has one
+    red(&e, lets, "fail(panic, const \"stop\"); }", 7, fir_verify.V7_AGGREGATE, 0, 0);
+    red(&e, lets, "fail(panic, const zero string); }", 7, fir_verify.V7_AGGREGATE, 0, 0);
+}
+
+// The runtime of the last pin of tools/bootstrap.ref takes the message of panic as `char* ptr, u64
+// len`. V7 takes that entry beside the `string` one (fir_verify.pointer_panic), with the two
+// operands that it takes. An entry with another pointer or another length type is no such form.
+fn v7_the_pinned_runtime_takes_a_pointer_and_a_length() void {
+    string lets = "let _1: bool; let _2: i64; let _3: u64; let _4: string; bb0: {";
+    env mut e = env{};
+    open_runtime(&e, BOUNDS, "char* ptr, u64 len, ", "", false);
+    defer close(&e);
+    green(&e, lets, "fail(panic, copy _4.0, copy _4.1); }");
+    red(&e, lets, "fail(panic, copy _4); }", 7, fir_verify.V7_REPORTED_COUNT, 0, 0);
+    red(&e, lets, "fail(panic, copy _4.1, copy _4.1); }", 7, fir_verify.V7_REPORTED, 0, 0);
+    red(&e, lets, "fail(panic, copy _4.0, copy _2); }", 7, fir_verify.V7_REPORTED, 0, 0);
+    env mut u = env{};
+    open_runtime(&u, BOUNDS, "u8* ptr, u64 len, ", "", false);
+    defer close(&u);
+    red(&u, lets, "fail(panic, copy _4.0, copy _4.1); }", 7, fir_verify.V7_ENTRY, 0, 0);
+    red(&u, lets, "fail(panic, copy _4); }", 7, fir_verify.V7_ENTRY, 0, 0);
+    env mut w = env{};
+    open_runtime(&w, BOUNDS, "char* ptr, u32 len, ", "", false);
+    defer close(&w);
+    red(&w, lets, "fail(panic, copy _4.0, copy _4.1); }", 7, fir_verify.V7_ENTRY, 0, 0);
+    env mut x = env{};
+    open_runtime(&x, BOUNDS, "string msg, u64 len, ", "", false);
+    defer close(&x);
+    red(&x, lets, "fail(panic, copy _4); }", 7, fir_verify.V7_ENTRY, 0, 0);
 }
 
 fn v7_a_runtime_entry_matches_its_kind() void {
@@ -1753,7 +1799,7 @@ string[KIND_COUNT] KIND_WRONG = {
     "fail(overwrite, copy _4); }",
     "check(copy _1, enum, copy _4, copy _4) -> bb1; } bb1: { return; }",
     "check(copy _1, user, copy _2) -> bb1; } bb1: { return; }",
-    "fail(panic, copy _4, copy _2); }",
+    "fail(panic, copy _4); }",
 };
 
 // The violation of each case of KIND_WRONG: WRONG_COUNT for the count of the operands,
@@ -2016,7 +2062,7 @@ fn v9_keeps_a_function_that_ends_in_return_or_an_abort() void {
     // an abort block is a sink
     string[3] aborts = {
         "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb2]; }",
-        "bb1: { fail(panic, const bytes \"m\", const u64 1); }",
+        "bb1: { fail(user, const bytes \"m\"); }",
         "bb2: { trap; }",
     };
     flow_green(&e, F, aborts[..]);
@@ -2142,7 +2188,7 @@ fn v12_no_read_of_a_temporary_after_a_move_of_it() void {
     string[3] reported = {
         "let _1: string own; let _2: string own;",
         "bb0: { _1 = const zero string own; _2 = move _1;",
-        "fail(panic, copy _1.0, copy _1.1); }",
+        "fail(panic, copy _1); }",
     };
     flow_red(&e, NOTHING, reported[..], 12, fir_verify.V12_MOVED, 0, 2);
 }
@@ -2302,7 +2348,7 @@ string[READ_ROWS] READ_LETS = {
     "let _1: bool;",
     "let _1: bool;",
     "let _1: i64;",
-    "let _1: u64;",
+    "let _1: string;",
     "let _1: u64; let _2 (h): holder;",
     "let _1: i32; let _2: pair;",
 };
@@ -2320,7 +2366,7 @@ string[READ_ROWS] READ_BLOCKS = {
     "bb0: { switch(copy _1) -> [true: bb1, otherwise: bb1]; } bb1: { return; }",
     "bb0: { check(copy _1, overflow) -> bb1; } bb1: { return; }",
     "bb0: { check(const false, bounds, copy _1, const u64 4) -> bb1; } bb1: { return; }",
-    "bb0: { fail(panic, const bytes \"m\", copy _1); }",
+    "bb0: { fail(panic, copy _1); }",
     "bb0: { _2.1 = copy _1; return; }",
     "bb0: { _2 = aggregate pair(copy _1, const u64 0); return; }",
 };
@@ -2676,6 +2722,7 @@ fn main() i32 {
     println("V5 V6 ok");
     v7_a_call_matches_its_callee();
     v7_a_check_reports_what_its_runtime_entry_takes();
+    v7_the_pinned_runtime_takes_a_pointer_and_a_length();
     v7_a_runtime_entry_matches_its_kind();
     v7_an_excused_kind_needs_no_entry_before_the_pass();
     v7_every_kind_holds_its_operands_against_its_entry();

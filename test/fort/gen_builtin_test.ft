@@ -77,12 +77,19 @@ fn an_enum_prints_through_its_table_and_its_member_count() void {
     defer gen_env.close(&e);
     assert(open_prints(&e));
     // the table is emitted for an enum some `print` of that type
-    // reaches, and the count stands beside it.
+    // reaches. The table and the count fill the span `%tmp0`, and the call
+    // passes its address.
+    string got = gen_env.main_text(&e);
+    gen_env.expect_in(got, "  %tmp0 = alloca %fort.span, align 8\n");
     gen_env.expect_in(
-        gen_env.main_text(&e),
-        gen_env.join3(&e, "  %t4 = load i32, ptr %k.2, align 4\n",
-                      "  call void @\"std.rt.print_enum\"(i32 1, i32 %t4, ",
-                      "ptr @.enum.main.color, i64 2)\n"));
+        got,
+        gen_env.join4(&e, "  %t4 = load i32, ptr %k.2, align 4\n",
+                      "  %t5 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 0\n",
+                      "  store ptr @.enum.main.color, ptr %t5, align 8\n",
+                      "  %t6 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 1\n"));
+    gen_env.expect_in(
+        got, gen_env.join2(&e, "  store i64 2, ptr %t6, align 8\n",
+                           "  call void @\"std.rt.print_enum\"(i32 1, i32 %t4, ptr %tmp0)\n"));
     assert(e.g.enums.len == 1);
 }
 
@@ -92,8 +99,8 @@ fn a_pointer_prints_through_the_pointer_entry_point() void {
     defer gen_env.close(&e);
     assert(open_prints(&e));
     gen_env.expect_in(gen_env.main_text(&e),
-                      gen_env.join2(&e, "  %t5 = load ptr, ptr %p.3, align 8\n",
-                                    "  call void @\"std.rt.print_ptr\"(i32 1, ptr %t5)\n"));
+                      gen_env.join2(&e, "  %t7 = load ptr, ptr %p.3, align 8\n",
+                                    "  call void @\"std.rt.print_ptr\"(i32 1, ptr %t7)\n"));
 }
 
 fn an_integer_is_extended_to_64_bits_by_its_own_signedness() void {
@@ -105,10 +112,10 @@ fn an_integer_is_extended_to_64_bits_by_its_own_signedness() void {
     // already agrees here, so nothing widens it. `eprint` is the same call to
     // descriptor 2.
     gen_env.expect_in(gen_env.main_text(&e),
-                      gen_env.join4(&e, "  %t6 = load i64, ptr %u.4, align 8\n",
-                                    "  call void @\"std.rt.print_u64\"(i32 1, i64 %t6)\n",
-                                    "  %t7 = load i64, ptr %u.4, align 8\n",
-                                    "  call void @\"std.rt.print_u64\"(i32 2, i64 %t7)\n"));
+                      gen_env.join4(&e, "  %t8 = load i64, ptr %u.4, align 8\n",
+                                    "  call void @\"std.rt.print_u64\"(i32 1, i64 %t8)\n",
+                                    "  %t9 = load i64, ptr %u.4, align 8\n",
+                                    "  call void @\"std.rt.print_u64\"(i32 2, i64 %t9)\n"));
 }
 
 fn println_ends_with_a_newline_byte_of_its_own() void {
@@ -120,9 +127,9 @@ fn println_ends_with_a_newline_byte_of_its_own() void {
     // sign-extended and goes to `_i64`.
     gen_env.expect_in(
         gen_env.main_text(&e),
-        gen_env.join4(&e, "  %t8 = load i32, ptr %n.5, align 4\n",
-                      "  %t9 = sext i32 %t8 to i64\n",
-                      "  call void @\"std.rt.print_i64\"(i32 1, i64 %t9)\n",
+        gen_env.join4(&e, "  %t10 = load i32, ptr %n.5, align 4\n",
+                      "  %t11 = sext i32 %t10 to i64\n",
+                      "  call void @\"std.rt.print_i64\"(i32 1, i64 %t11)\n",
                       "  call void @\"std.rt.print_char\"(i32 1, i8 zeroext 10)\n"));
 }
 
@@ -131,11 +138,18 @@ fn a_string_literal_prints_as_its_constant_and_its_length() void {
     gen_env.open(&e);
     defer gen_env.close(&e);
     assert(open_prints(&e));
-    // A literal is `@.str.N` and its length, with no header built for
-    // it at all. The two member names of the enum table took `@.str.0` and
-    // `@.str.1` at the print of `k`.
-    gen_env.expect_in(gen_env.main_text(&e),
-                      "  call void @\"std.rt.print_str\"(i32 1, ptr @.str.2, i64 2)\n");
+    // A literal is `@.str.N` and its length in the header of the `string`
+    // temporary `%tmp1`, and the call passes its address. The two member names
+    // of the enum table took `@.str.0` and `@.str.1` at the print of `k`.
+    string got = gen_env.main_text(&e);
+    gen_env.expect_in(
+        got,
+        gen_env.join3(&e, "  %t12 = getelementptr inbounds %fort.span, ptr %tmp1, i32 0, i32 0\n",
+                      "  store ptr @.str.2, ptr %t12, align 8\n",
+                      "  %t13 = getelementptr inbounds %fort.span, ptr %tmp1, i32 0, i32 1\n"));
+    gen_env.expect_in(
+        got, gen_env.join2(&e, "  store i64 2, ptr %t13, align 8\n",
+                           "  call void @\"std.rt.print_str\"(i32 1, ptr %tmp1)\n"));
     gen_env.expect_text(gen_env.record_text(&e, 2), "hi");
 }
 
@@ -147,8 +161,8 @@ fn fprint_evaluates_its_descriptor_once_and_before_the_arguments() void {
     // `fd` is an expression like any other and is evaluated before the
     // arguments, left to right.
     gen_env.expect_in(gen_env.main_text(&e),
-                      gen_env.join2(&e, "  %t10 = load i64, ptr %u.4, align 8\n",
-                                    "  call void @\"std.rt.print_u64\"(i32 2, i64 %t10)\n"));
+                      gen_env.join2(&e, "  %t14 = load i64, ptr %u.4, align 8\n",
+                                    "  call void @\"std.rt.print_u64\"(i32 2, i64 %t14)\n"));
 }
 
 // ---- assert and panic --------------------------------------------------------------
@@ -181,13 +195,19 @@ fn panic_writes_its_message_and_ends_the_block() void {
     defer gen_env.close(&e);
     string[2] mut lines = {"    i32 mut n = 3;", "    panic(\"bad\");"};
     assert(gen_env.open_lines(&e, lines[..]));
-    // The callee aborts, so the call is followed by `unreachable` and the
-    // block is terminated.
+    // The message fills the `string` temporary `%tmp0`, and the call passes
+    // its address. The callee aborts, so the call is followed by `unreachable`
+    // and the block is terminated.
+    string got = gen_env.main_text(&e);
     gen_env.expect_in(
-        gen_env.main_text(&e),
-        gen_env.join2(&e,
-                      "  call void @\"std.rt.panic\"(ptr @.str.0, i64 3, ptr @.file.0, ",
-                      "i32 3, i32 5)\n  unreachable\n"));
+        got,
+        gen_env.join4(&e, "  %t0 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 0\n",
+                      "  store ptr @.str.0, ptr %t0, align 8\n",
+                      "  %t1 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 1\n",
+                      "  store i64 3, ptr %t1, align 8\n"));
+    gen_env.expect_in(
+        got, gen_env.join2(&e, "  call void @\"std.rt.panic\"(ptr %tmp0, ptr @.file.0, ",
+                           "i32 3, i32 5)\n  unreachable\n"));
 }
 
 // ---- calls -------------------------------------------------------------------------

@@ -20,11 +20,11 @@ import modules_env;
 import std.str;
 import std.strbuf;
 
-u64 SOURCE_LINES = 17;
+u64 SOURCE_LINES = 18;
 
 // One function for each print function, one for the newline of `println`, one for a descriptor
-// of `fprintln`, one for each of `==` and `!=` on strings, and one that prints a function, which
-// print_ptr takes. Each needs one entry of the runtime.
+// of `fprintln`, one for each of `==` and `!=` on strings, one that prints a function, which
+// print_ptr takes, and one that panics. Each needs one entry of the runtime.
 string[SOURCE_LINES] SOURCE = {
     "enum color {",
     "    red,",
@@ -43,6 +43,7 @@ string[SOURCE_LINES] SOURCE = {
     "fn same(string a, string b) bool { return a == b; }",
     "fn differ(string a, string b) bool { return a != b; }",
     "fn p_fn(fn (i32) void x) void { print(x); }",
+    "fn p_panic(string m) void { panic(m); }",
 };
 
 // One runtime entry with other parameters: the entry `name`, its declaration `decl` with its
@@ -55,7 +56,7 @@ struct bad_entry {
     string report;
 }
 
-u64 BAD_ENTRIES = 34;
+u64 BAD_ENTRIES = 43;
 
 // Each entry differs from spec/toolchain.md 5.1 in one place: the count of the parameters, the
 // type or the `mut` or `own` mark of one parameter, `noreturn`, or the result of `str_eq`. The
@@ -102,6 +103,25 @@ bad_entry[BAD_ENTRIES] BAD = {
     bad_entry{"print_str", "fn print_str(i32 fd, char mut* ptr, u64 len) void {\n}", "p_str",
               "// not supported: ident at 9:33"},
     bad_entry{"print_enum", "fn print_enum(i32 fd, i32 v, enum_member mut* m, u64 n) void {\n}",
+              "p_enum", "// not supported: ident at 10:33"},
+    bad_entry{"print_str", "fn print_str(i32 fd, string own s) void {\n}", "p_str",
+              "// not supported: ident at 9:33"},
+    bad_entry{"print_str", "fn print_str(i32 fd, char@ s) void {\n}", "p_str",
+              "// not supported: ident at 9:33"},
+    bad_entry{"print_str", "fn print_str(i32 fd, string s, u64 n) void {\n}", "p_str",
+              "// not supported: ident at 9:33"},
+    bad_entry{"print_enum", "fn print_enum(i32 fd, i32 v, enum_member mut@ table) void {\n}",
+              "p_enum", "// not supported: ident at 10:33"},
+    bad_entry{"print_enum", "fn print_enum(i32 fd, i32 v, enum_member@ own table) void {\n}",
+              "p_enum", "// not supported: ident at 10:33"},
+    bad_entry{"print_enum", "fn print_enum(i32 fd, i64 v, enum_member@ table) void {\n}",
+              "p_enum", "// not supported: ident at 10:33"},
+    bad_entry{"print_enum", "fn print_enum(i32 fd, i32 v, enum_member* m) void {\n}", "p_enum",
+              "// not supported: ident at 10:33"},
+    bad_entry{"print_enum",
+              "struct rec {\n    i32 a;\n}\nfn print_enum(i32 fd, i32 v, rec@ table) void {\n}",
+              "p_enum", "// not supported: ident at 10:33"},
+    bad_entry{"print_enum", "fn print_enum(i64 fd, i32 v, enum_member@ table) void {\n}",
               "p_enum", "// not supported: ident at 10:33"},
     bad_entry{"print_f32", "fn print_f32(i32 fd, f64 v) void {\n}", "p_f32",
               "// not supported: ident at 11:30"},
@@ -302,6 +322,72 @@ fn the_result_of_a_print_does_not_count() void {
     }
 }
 
+// The struct `enum_member` of another module in a span is another parameter too.
+fn a_span_of_the_member_record_of_another_module_is_another_parameter() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    strbuf.str_buf mut rt = strbuf.create();
+    defer strbuf.free(&rt);
+    strbuf.append(&rt, "import std.em;\n");
+    runtime_with("print_enum", "fn print_enum(i32 fd, i32 v, em.enum_member@ table) void {\n}",
+                 &rt);
+    check_over(&e, strbuf.view(&rt), "struct enum_member {\n    i32 value;\n    char* name;\n}\n");
+    fir_lower.report mut why = fir_lower.report{};
+    refusal(&e, "p_enum", &why);
+    expect_report(&why, "print_enum", true, "// not supported: ident at 10:33");
+}
+
+// The runtime of lower_env gives print_str one `string`, print_enum one span of the member
+// table, and panic one `string`: the lowering passes the place of each as one operand.
+fn a_string_and_a_table_are_one_operand_each() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    lower_env.check_lines(&e, SOURCE[..], true);
+    assert(str.find(lower_env.lower_checked(&e, "p_str"),
+                    "call fn std.rt.print_str(const i32 1, copy _1) #9:33 s1;") >= 0);
+    string table = lower_env.lower_checked(&e, "p_enum");
+    assert(str.find(table, "= aggregate enum_member@(const enum_table main.color, const u64 1)")
+           >= 0);
+    assert(str.find(table, "call fn std.rt.print_enum(const i32 1, copy _2, copy _3)") >= 0);
+    assert(str.find(lower_env.lower_checked(&e, "p_panic"), "fail(panic, copy _1) #18:29") >= 0);
+}
+
+u64 POINTER_FORMS = 3;
+
+// The pointer forms of the runtime of the last pin of tools/bootstrap.ref: print_str and panic
+// take a pointer and a length, and print_enum a pointer to the table and the member count. The
+// lowering takes each, so that this compiler can build a later tree whose runtime takes a `string`
+// and a span (D14.7). The report field holds a part of the lowered text.
+bad_entry[POINTER_FORMS] POINTER = {
+    bad_entry{"print_str", "fn print_str(i32 fd, char* ptr, u64 len) void {\n}", "p_str",
+              "print_str(const i32 1, copy _1.0, copy _1.1) #9:33 s1;"},
+    bad_entry{"print_enum", "fn print_enum(i32 fd, i32 v, enum_member* m, u64 n) void {\n}",
+              "p_enum", "copy _2, const enum_table main.color, const u64 1) #10:33 s1;"},
+    bad_entry{"panic",
+              "fn panic(char* p, u64 n, char* f, u32 l, u32 c) noreturn {\n    for (;;) {}\n}",
+              "p_panic", "fail(panic, copy _1.0, copy _1.1) #18:29"},
+};
+
+fn the_pointer_forms_of_the_pinned_runtime_lower() void {
+    lower_env.env mut e = lower_env.env{};
+    lower_env.open(&e);
+    defer lower_env.close(&e);
+    for (bad_entry c : POINTER) {
+        strbuf.str_buf mut rt = strbuf.create();
+        defer strbuf.free(&rt);
+        runtime_with(c.name, c.decl, &rt);
+        check_over(&e, strbuf.view(&rt), "");
+        string text = lower_env.lower_checked(&e, c.fn_name);
+        if (str.find(text, c.report) < 0) {
+            eprintln("fir_lower_runtime_test: ", c.name, " lacks <", c.report, "> in");
+            eprint(text);
+            panic("fir_lower_runtime_test: a pointer form lowers otherwise");
+        }
+    }
+}
+
 // A runtime that lacks the entry gives a report with `signature` false, so the compile error says
 // that the runtime has no entry at all.
 fn a_missing_entry_is_no_entry_with_other_parameters() void {
@@ -322,8 +408,11 @@ fn a_missing_entry_is_no_entry_with_other_parameters() void {
 fn main() i32 {
     an_entry_with_other_parameters_stops_the_lowering();
     the_member_record_of_another_module_is_another_parameter();
+    a_span_of_the_member_record_of_another_module_is_another_parameter();
     println("other parameters ok");
     the_result_of_a_print_does_not_count();
+    a_string_and_a_table_are_one_operand_each();
+    the_pointer_forms_of_the_pinned_runtime_lower();
     println("fitting entries ok");
     a_missing_entry_is_no_entry_with_other_parameters();
     println("missing entries ok");
