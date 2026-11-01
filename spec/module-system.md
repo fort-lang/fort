@@ -390,20 +390,20 @@ A fort function is a valid C callback exactly when its signature is extern-legal
 symbol is dotted (`main.by_value`), which C cannot spell, but a callback is passed by value:
 
 ```fort
-extern fn qsort(void* base, u64 n, u64 size, fn (void*, void*) i32 cmp) void;
+extern fn qsort(i32 mut* base, u64 n, u64 size, fn (i32*, i32*) i32 cmp) void;
 
-fn by_value(void* a, void* b) i32 {
-    i32 x = *cast(a, i32*);
-    i32 y = *cast(b, i32*);
-    return x < y ? -1 : (x > y ? 1 : 0);
+fn by_value(i32* a, i32* b) i32 {
+    return *a < *b ? -1 : (*a > *b ? 1 : 0);
 }
 ```
 
-An `i32 mut@ xs` is sorted with `qsort(cast(xs.ptr, void*), xs.len, sizeof(i32), by_value);`. A
-function taking a span, string, struct or fixed array is not extern-legal and cannot be passed
-to C. The library declares `qsort` in `std.libc` and wraps it in `std.sort`, which is what a
-program calls (`stdlib.md` 2.2, 2.10); the declaration above is the same one, written out here
-because a program may redeclare a C symbol with an identical signature (D9.8).
+An `i32 mut@ xs` is sorted with `qsort(xs.ptr, xs.len, sizeof(i32), by_value);`. C calls
+`by_value` with pointers to two elements of the argument `base` (A7 of `ownership-design.md` 5.1).
+A function taking a span, string, struct or fixed array is not extern-legal and cannot be passed
+to C. The library declares no `qsort`. One C symbol has one signature in a closure (D9.8), so a
+program declares it with the element type that it sorts, and a comparator of `void*` reads no
+element, because no cast gives a type to a `void*` (D3.14). `std.sort` sorts typed spans in fort
+(`stdlib.md` 2.10).
 
 ### 8.6 Spans and strings
 

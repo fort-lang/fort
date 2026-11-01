@@ -198,7 +198,41 @@ Sections:
   read-only pseudo-fields. Spans are produced by `new(T, n)` (D10.2, as `T mut@ own`), by taking a
   span (D6.9, always a view) and by the zero initializer `{}`. A span literal `{1, 2, 3}` does not
   exist.
+  **`.ptr` is no element pointer.** The `.ptr` of a span or of a string (D3.7) is legal in four
+  positions only: an argument of a call of an `extern fn`, alone or as the operand of the casts
+  that form that argument; the argument of `str.from_cstr` (D6.9); an operand of `==` or `!=`;
+  and the operand of a cast to `u64` or to a `void*`. Each other use is the error
+  `'.ptr' can name the byte after the last element: write '&s[0]'`. The reason: the `.ptr` of an
+  empty span names the byte after its object, and no check reads it. For an `i32[2] a`,
+  `*a[2..].ptr` read the next local, and for an `i64 mut@ own a = new(i64, 3)`,
+  `*a[3..].ptr = 0` wrote the size word of the next chunk of the allocator. `&s[0]` checks its
+  index (D10.6), so a pointer to an element of a span stays inside the span. A C function that
+  gets the `.ptr` and the `.len` of an empty span reads no element (A7 of `ownership-design.md`
+  5.1). As an argument of an `extern fn`, a `.ptr` is legal only for a parameter whose C type is
+  no C type of a pointer that C gives in that declaration (D17.13), because C can give that
+  argument back. The C types compare with the `mut` and `own` marks dropped on both sides, with
+  `char` and `u8` as one type (D9.8), and with a `void*` equal to each pointer type. A type that C
+  gives and that says `own` is a new allocation (A2), and C gives back no argument through it.
+  With `memcpy` declared with a `u8 mut*` result, `libc.memcpy(a[24..].ptr, a.ptr, 0)` gave back
+  the byte after the 24 bytes of `a`, and a store through it wrote the size word of the next
+  chunk; `strncpy(char mut* dst, char* src, u64 n) char mut*` and
+  `strncpy(u8 mut* dst, u8* src, u64 n) char*` did the same through `dst`. So `libc.write(1, s.ptr,
+  s.len)`, `str.from_cstr(buf.ptr)`, `s.ptr == t.ptr` and `cast(s.ptr, u64)` stay legal;
+  `i32* p = s.ptr` is an error, and so is `libc.getenv(c.ptr)`, because `getenv` gives back a
+  `char*`: write `libc.getenv(&c[0])`.
 - history: Amended 2026-09-10: the type was called a slice until then, and the operation slicing.
+  Amended 2026-10-31: `.ptr` was legal in each position, so the `.ptr` of an empty span at the end
+  of its object gave fort code a pointer to the next object, with no extern and no cast. The user
+  ruled "No undefined behavior. Fix with compile time guarantees" (user, 2026-10-31), and the
+  coordinator ratified this rule on 2026-11-01. A count at 855b512f over `src`, `std`,
+  `test/fort`, `test/lsp`, `test/lang` and `test/library` (by text) found 64 uses that it refuses:
+  15 in `test/lang/run`, 6 in `test/lang/fail`, and 43 arguments of `std.rt` functions whose
+  parameter stays a `char*` (`alloc`, the `fail_*` entries, `assert_fail` and `str_eq`). The 58
+  other arguments of `std.rt` functions go to a `string` (D6.9). A review of 2026-11-01 added the
+  rule of an extern argument: the `.ptr` of an empty span went to `memcpy`, which gave it back. A
+  review of the same day made it compare C types. It refuses 11 more arguments (by text): 1 in
+  `src`, 6 in `std` (`getenv`, `realpath`, the `qsort` of `std.sort`) and 4 in `test/lang`, 3 of
+  them `qsort` calls, which go with the `qsort` of `std.libc` (`stdlib.md` 2.2).
 
 ### D3.6 How type suffixes read
 - owner: `type-system.md`.
@@ -312,8 +346,11 @@ Sections:
 - rule: `void*` is an opaque pointer with no pointee type: no `*`, `->`, indexing or span
   expression. It reaches one storage level all the same, which no expression names and which
   `void mut*` marks writable; `void* mut p` marks the binding instead, so the two are distinct
-  and both legal (D5.2, D5.3). Conversion to and from any pointer, function pointer or `u64`
-  requires `cast`.
+  and both legal (D5.2, D5.3). A conversion from any pointer or function pointer to `void*`, and
+  from `void*` to `u64`, requires `cast`. No cast takes a `void*` to a typed pointer or to a
+  function pointer type, and no cast takes an integer to a `void*` (D3.14). So a `void*` goes to C,
+  compares with `null` and with another `void*`, and gives its address as a `u64`, and fort code
+  reads no storage through it.
 - rationale: mutability is a property of storage, not of the type of that storage. A `void*`
   reaches storage whose type is unknown, and whether a callee may write that storage is what a C
   signature states with `const`: `fread(void*)` against `fwrite(const void*)`. Without
@@ -322,6 +359,10 @@ Sections:
 - history: Amended 2026-09-14 (T-086): until then `void*` had no pointee level at all and
   `void mut*` was the error "'void' is only a return type or the base of 'void*'". The `mut`
   costs no run-time representation, since every pointer is one machine word.
+  Amended 2026-10-31: a cast took a `void*` to a typed pointer and a `u64` to a `void*`. The user
+  ruled "(A) Close R1-R7" (user, 2026-10-31), and D3.14 now refuses the cast from an integer and
+  the cast from a `void*` to a typed pointer. A cast from a `void*` to `u64` stays legal, and a
+  cast from a `void*` to a function pointer type was an error before this date.
 
 ### D3.12 Type identity
 - owner: `type-system.md`.
@@ -342,8 +383,11 @@ Sections:
   zero-extends by the source's signedness, narrowing truncates, and a same-width sign change
   reinterprets. Integer to float rounds to nearest. Float to integer truncates toward zero and
   saturates at the target's range, and NaN becomes 0. Float to float, `bool` to integer, `char`
-  to and from integer, and enum to and from integer are allowed too. So are any pointer to any
-  pointer or `void*`, pointer to and from `u64`, and function pointer to `void*`. Casts among
+  to and from integer, and enum to and from integer are allowed too. So are a typed pointer to a
+  typed pointer whose pointee is no larger and no more aligned, any pointer to `void*`, a `void*` to
+  `void*`, a pointer or a `void*` to `u64`, and a function pointer to `void*` (the rules of the
+  pointers
+  below). Casts among
   `string`, `char@`, `u8@`, `char mut@` and `u8 mut@` are allowed. A `mut` in the outermost
   position of a cast target is an error, because a cast result has no binding. A span casts to a
   span of the same element type whose marks differ only in mutability, dropped at any level. The
@@ -371,13 +415,13 @@ Sections:
   `string`. There is no cast-away-const escape. With `void mut*` in an `extern` (D17.13) this
   leaves `mut` on a reference with no cast escape at all: the one way to a writable reference over
   foreign storage is a declaration that says `void mut*`, which the fort programmer writes, and
-  `std.libc`'s `malloc` does. An `extern` that lies about a C function stays unsafe, and no rule
-  inside fort reaches it. The library follows the rule and does not bend it: `std.sort_ptr` takes
-  `void* mut@`, which a caller holds as slots of `void*`, because a cast from slots of `void mut*`
-  would change the type of a pointer place behind a `mut` level (the rule of the pointer places
-  below). `std.ptr_vec` keeps `void mut*` slots, because `ptr_push` takes a pointer and `ptr_pop`
-  gives one back and a round trip through `void*` slots would lose the `mut` for good (`stdlib.md`
-  2.7, 2.10).
+  `std.libc`'s `malloc` does. D17.13 refuses a pointer type that C gives, a result, a parameter
+  of a callback or a pointer that a `mut` level of a parameter holds, that marks `mut` where no
+  parameter of the same type has the mark, unless it says `own` or the extern has no parameter that
+  can carry a pointer. An `extern` that
+  lies about a C function stays unsafe, and no rule inside fort
+  reaches it. The library holds no `void*` slots: `std.sort` sorts typed elements, and a vector of
+  pointers is a typed copy of the pattern of `std.vec` (`stdlib.md` 2.7, 2.10).
   **A cast never adds `own`, from any source.** The target marks a level `own` only where the
   source marks the level at the same depth `own` too. Where the source has no reference at that
   depth -- an integer, the `void` behind a `void*`, or a pointee type the cast reinterprets -- the
@@ -389,6 +433,48 @@ Sections:
   conservative reading, and a later amendment may relax the `mut` and the `own` walk together. A
   cast carries `own` or drops it, and it never adds it. Ownership enters a program only through
   `new` and through an `extern` signature that says `own` (D17.3, D17.13).
+  **No cast makes a pointer from an integer.** No cast takes an integer, a `char`, a `bool`, an
+  enum or a float to a pointer, a `void*` or a function pointer type. `null` is the one pointer
+  constant (D10.5). A pointer and a `void*` cast to `u64`, and no cast takes the `u64` back. So
+  `u64 a = cast(p, u64)` is legal, and `cast(a, i32*)` is the error
+  `cannot cast u64 to i32*: a cast never makes a pointer from an integer`.
+  **No cast gives a type to a `void*`.** No cast takes a `void*`, with any marks, to a typed
+  pointer. A `void*` holds no type and no size, so a cast back could give a larger type than the
+  storage has. A cast from a `void*` to a `void*` that keeps or drops marks stays legal, and so
+  does a cast to `u64`. So `cast(cast(&x, void*), i64*)` is the error
+  `cannot cast void* to i64*: a cast never gives a type to a void*`. A cast from a `void*` to a
+  function pointer type keeps the error of the rule of the function pointers below.
+  **No cast makes the pointee larger or more aligned.** A cast from a typed pointer to a typed
+  pointer, with any marks, needs a target pointee no larger and no more aligned than the source
+  pointee. The pointees are the types that level 1 of the source and of the target reach.
+  `sizeof` gives their sizes (D3.15), a fixed array `T[N]` as `N` times the size of `T`, and the
+  alignment of a type is that of D3.1, a fixed array `T[N]` that of `T`. So
+  `cast(&x, i64*)` for an `i32 x` is the error
+  `cannot cast i32* to i64*: a cast never makes the pointee larger (4 to 8 bytes)`, and
+  `cast(&a, i64*)` for an `i32[2] a` is the error
+  `cannot cast i32[2]* to i64*: a cast never makes the alignment larger (4 to 8 bytes)`. A
+  pointer to the pointee with the smaller alignment can hold an address that the larger
+  alignment does not allow, and a load or a store through it then has an alignment that the
+  emitted code assumes and the address does not have. A cast to a pointee of the same size or
+  smaller, with the same alignment or a smaller one, stays legal: `cast(&f, u64*)` for an `f64 f`,
+  and `cast(&x, u8*)` for an `i64 x`. A cast to a smaller pointee and back to the first type is an
+  error at the second cast. The size is read first, so a cast that breaks both rules reports the
+  size.
+  The reason of the three rules: each such cast gave fort code a pointer to storage whose address
+  it did not hold, or a pointer with an alignment that its address does not have. For an `i32[2]
+  pair`, `*cast(cast(&pair, u64) + 8, i32*)` read the bytes after `pair`, and for a `struct two {
+  i32 x; i32 y; }`, `*cast(&t.x, i64 mut*) = 0` wrote `t.y`. With
+  these rules, the rules of the pointer places below, D3.5, D6.9 and D17.13, fort code holds a
+  pointer only to the storage of an address that it derives from, inside that object (D10.7).
+  **The order of the errors.** A cast reports one error: that of the first rule in this order
+  that it breaks. First the allowed pairs above, with the pointer from an integer and the type
+  for a `void*`; then a `mut` that the cast adds; then an `own` that it adds; then an `own`
+  lvalue with no `move`; then the size and then the alignment of the pointee; then a function
+  pointer type that the cast changes; then the pointer places of a `mut` cast; and last the
+  pointer places of a view. An error of the operand comes before each error of the cast: so
+  `cast(s.ptr, i64*)` for an `i32@ s` reports the `.ptr` of D3.5, which is no operand of a cast to
+  `u64` or to a `void*`. So `cast(bits, i32 mut*)` for a `u64 bits` reports the pointer from
+  an integer, and `cast(&x, i64 mut*)` for an `i32 mut x` reports the size.
   **A `mut` cast keeps the pointer places that its result can change.** The result of a cast can
   change level `k` (D5.2) when its type marks a level from 1 to `k` `mut`: by a store when it
   marks level `k` `mut`, and by a store of another pointer when it marks a level above `k` `mut`.
@@ -413,11 +499,11 @@ Sections:
   for a place of the target that the source does not hold, at the cast. ` of level K` follows when
   `K` is 2 or more. A hidden place is named before an added one, each the first in the order of
   the fields and the elements. `N` counts from the start of the storage of the level. A result
-  that can change no level, a read-only view, may hide a pointer place, and it may add or change
-  one that carries no mark (the rule of the marked places below): no store goes through it, and a
-  read through it gives the bits (D10.7). The reason: through a level that the result can
-  change, a store writes any bits into a pointer slot of the source, or the source reads bits
-  that no pointer wrote, and an owner that holds such bits frees what is no allocation.
+  that can change no level, a read-only view, may hide a pointer place, and it adds or changes
+  none (the rule of the pointer places of a view below). The reason: through a level that the
+  result can change, a store writes any bits into a pointer slot of the source, or the source
+  reads bits that no pointer wrote, and an owner that holds such bits frees what is no
+  allocation.
   `*cast(&slot, u64 mut*) = cast(&o, u64)` for a `u64 mut* mut slot` makes the next store through
   `slot` write the owner slot `o`; `*cast(&po, u64 mut*) = cast(&fake, u64)` gives `*po` a slot
   that holds no owner; and `del(cast(&x, wrap mut*)->p)` frees the bits of a `u64 mut x`. D17.4
@@ -430,17 +516,15 @@ Sections:
   `the check of a cast` for the walk of the marked places below, with the
   note `the check cannot prove that the cast keeps its pointer places`, as D17.11 treats its limit
   ("Unknown is an error"). The casts of `src`, `std`, `test/fort`, `test/lsp` and `test/lang` take
-  10 steps or fewer, but for `fail/casts/027`, which passes the limit on purpose. **The
-  exemption:** a cast that is itself an argument of a call of an `extern fn` (D9.8) is legal. The
-  parser keeps no node for parentheses, so `f((cast(p, void mut*)))` is the same call. C sees no
-  `own` (D17.13), and the design trusts the C side of an extern signature (A7 of
-  `ownership-design.md` 5.1). A cast inside such an argument is not the argument. An argument of a
-  fort function and an argument of a call through a function pointer get no exemption. The
-  exemption covers the rule of the marked places below too, but it covers no function pointer
-  place. C calls a function as its type says. So an exempt view keeps each place that is or
-  reaches a function pointer with its type. A cast to a function pointer type is an error
-  (below).
-  **A cast keeps each pointer place that carries a mark, in any view.** A pointer place carries
+  10 steps or fewer, but for `fail/casts/027`, which passes the limit on purpose. **No
+  exemption:** a cast that is itself an argument of a call of an `extern fn` (D9.8) follows each
+  rule of this decision, as each other cast does. C sees no `own` (D17.13), and the design trusts
+  the C side of an extern signature (A7 of `ownership-design.md` 5.1). But an argument that hides
+  or adds a pointer place lets C write bits that no pointer wrote into a pointer place. For an
+  `i32 mut* mut p`, `libc.memcpy(cast(&p, u8 mut*), cast(&bits, u8*), 8)` gave `p` the bits of
+  the integer `bits`, and `*p = 9` then wrote an immutable local. An extern whose parameter takes
+  storage with pointer places names the type of that storage in the parameter.
+  **A cast adds and changes no pointer place, in any view.** A pointer place carries
   a mark in three cases. Its type marks a reference `mut` or `own`, it is a function pointer, or
   a type that it reaches does one of the two. A
   reference reaches its pointee or its element, a fixed array its element, and a struct the type
@@ -455,46 +539,52 @@ Sections:
   call is no read. At
   level 1 of the result, in a read-only view as in a `mut` one, each pointer place of the target
   that carries a mark must sit at a byte where the source holds a pointer place of the same type
-  (`type-system.md` 6, D6.2), the marks included. A pointer place of the same type reaches the
-  same types, so level 1 answers for each deeper level. The storage of a `void*` holds no
-  pointer place, and an integer reaches no level. So a cast whose source pointee is `void`, or
-  whose source is an integer, to a target whose level 1 holds a pointer place that carries a
-  mark is an error. A pointer place that carries no mark stays free to pun: through it a view
-  only reads. The error is `cannot cast S to T: a cast adds the pointer P at byte N`. Where the
+  (`type-system.md` 6, D6.2), the marks included. Each pointer place of the target that carries
+  no mark must sit at a byte where the source holds a pointer place of the same type, or of a type
+  that differs from it only by `mut` and `own` marks that the target drops. A pointer place of
+  the same type reaches the same types, and a drop of marks keeps the types that it reaches, so
+  level 1 answers for each deeper level. The storage of a `void*` holds no pointer place, and an
+  integer reaches no level, so a view of either that holds a pointer place is an error. So
+  `cast(&bits, i32**)` for a `u64 bits` is an error, and `cast(&p, u64**)` for a
+  `u64 mut* mut p` drops a mark and stays legal. The error is
+  `cannot cast S to T: a cast adds the pointer P at byte N`, for a place that the source does not
+  hold and for a place whose type the target changes. Where the
   rule of a `mut` cast refuses the cast too, its error comes first. A struct with no layout
   carries no mark: a struct in error has reported, and a layout waits only in a module-level
   initializer, which D4.6 refuses. The reason: through a pointer place that carries a mark, a
   view that changes no level still writes or frees the storage that the place reaches, and no
   pointer of that type wrote the place. `holder2* g = cast(&bits, holder2*)`, for a `u64 bits`
   that holds the address of a `struct wrapper { u64* own x; }` and a
-  `struct holder2 { u64 mut* q; }`, makes `*g->q = 1234` write the owner slot `x`. The type of
+  `struct holder2 { u64 mut* q; }`, makes `*g->q = 1234` write the owner slot `x`. Through a
+  pointer place with no mark, a view reads storage whose address the program does not hold:
+  `**cast(&bits, i32**)` reads the local whose address the integer `bits` holds. The type of
   a place must be the same, and a drop of a mark that the implicit conversion makes is no
   exception: `node mut*@ seen = kids` lends, and `cast(kids, node mut*@)` is an error for a
-  `node mut* own mut@ own kids`. A fort callback that writes through its context takes a context
-  of a named type and not a `void*`, because the cast back from `void*` adds each pointer place
-  that carries a mark: `diag.set_lookup` takes the source store that `diag` declares. A
-  comparator of `qsort` reads an element whose pointers carry a mark through a view whose
-  pointers carry none.
+  `node mut* own mut@ own kids`. A fort callback takes a context of a named type and not a
+  `void*`, because no cast gives a type to a `void*`: `diag.set_lookup` takes the source store
+  that `diag` declares. A comparator of `std.sort` takes typed pointers to two elements
+  (`stdlib.md` 2.10).
   **A cast to a function pointer type keeps the type of the function.** A `void*` is its one
   source other than the same type. A `void*` reaches no type, so a cast from a `void*` to a
   function pointer type adds a function pointer, and it is an error:
   `cannot cast void* to fn (u64) void: a cast adds the function pointer fn (u64) void`. The error
-  names no byte, because a function pointer value has no storage level. The exemption of an
-  argument of an `extern fn` does not cover this rule. An integer reaches a function pointer
-  type only through a `void*`. A view that adds a function pointer place meets the rule of the
-  marked places above. So a function pointer holds `null`, a fort function of its type (D3.10),
+  names no byte, because a function pointer value has no storage level. An argument of an
+  `extern fn` follows this rule too. No cast takes an integer to a `void*` or to a function
+  pointer type (above). A view that adds a function pointer place meets the rule of the pointer
+  places of a view above. So a function pointer holds `null`, a fort function of its type (D3.10),
   or a value that C gave (A7). A cast of a function pointer to `void*` stays legal. A read-only
   view may hide a pointer place, and no cast gives the bits a function pointer type again. The
   reason: a call through another function type gives the function arguments that its parameter
   types do not describe. For a `fn take(u64* own p) void`, a call through
-  `cast(cast(take, void*), fn (u64) void)` frees the address of a local. `qsort` calls its
-  comparator the same way, so an argument of an `extern fn` gets no exemption. With no mark on
+  `cast(cast(take, void*), fn (u64) void)` frees the address of a local. C calls a function
+  pointer argument the same way. With no mark on
   either side, the call still writes or jumps. A struct parameter or result goes through a hidden
   pointer (`type-system.md` 11.2). So `fn () pair` called as `fn (u64) void` writes its result at
   the address that the integer holds. Bits that no function name gave jump to any code.
-  One form stays outside the guarantee of the rules of the pointer places, and A8 of
-  `ownership-design.md` 5.1 names it. It is a view that C gives back from an exempt argument, as
-  `memmove(dst, src, 0)` returns `dst` (A7). The examples use these structs. `holder` holds a
+  No form stays outside the guarantee of the rules of the pointer places. An argument of an
+  `extern fn` follows them, and C gives back only storage that C gave or an argument, with no
+  `mut` that the argument lacked (A7 of `ownership-design.md` 5.1, D17.13). The examples use these
+  structs. `two` holds two `i32`. `holder` holds a
   `u64 count` and a `u64* own data`, and `mirror` a `u64` and a `u64* own`. `wrap` holds one
   `u64* own`. `owner_cb` and `same_cb` hold one `fn (u64* own) void`, and `view_cb` one
   `fn (u64*) void`. `oh` holds one `owner_cb*`, and `vh` one `view_cb*`:
@@ -509,18 +599,23 @@ Sections:
   | `u64 mut* mut s`       | `cast(&s, u64* mut*)`             | error: the mark changes the type  |
   | `f64 mut f`            | `cast(&f, u64 mut*)`              | ok: no pointer place              |
   | `u64 mut x`            | `cast(&x, wrap mut*)`             | error: adds `u64* own` at byte 0  |
-  | `void mut* v`          | `cast(v, holder mut*)`            | error: adds `u64* own` at byte 8  |
+  | `void mut* v`          | `cast(v, holder mut*)`            | error: a type for a `void*`       |
   | `u64* own mut* mut@ k` | `cast(k, u64* mut*@)`             | error: hides at byte 0 of level 2 |
   | `holder mut* own p`    | `cast(move(p), void mut* own)`    | error: hides `u64* own` at byte 8 |
-  | `holder[2] mut a`      | `qsort(cast(&a, void mut*), ...)` | ok: `qsort` is an `extern fn`     |
-  | `holder mut h`         | `keep(cast(&h, void mut*))`       | error: `keep` is a fort function  |
-  | `void* v`              | `cast(v, holder*)`                | error: adds `u64* own` at byte 8  |
+  | `holder[2] mut a`      | `memset(cast(&a, u8 mut*), ...)`  | error: hides `u64* own` at byte 8 |
+  | `void* v`              | `cast(v, holder*)`                | error: a type for a `void*`       |
   | `u64 x`                | `cast(&x, wrap*)`                 | error: adds `u64* own` at byte 0  |
-  | `u64 bits`             | `cast(bits, wrap*)`               | error: adds `u64* own` at byte 0  |
+  | `u64 bits`             | `cast(bits, wrap*)`               | error: a pointer from an integer  |
+  | `u64 bits`             | `cast(bits, void*)`               | error: a pointer from an integer  |
+  | `i32* p`               | `cast(p, u64)`                    | ok: a pointer to `u64`            |
+  | `two mut t`            | `cast(&t.x, i64 mut*)`            | error: the pointee grows to 8     |
+  | `i64 x`                | `cast(&x, u8*)`                   | ok: the pointee is smaller        |
+  | `u64 x`                | `cast(&x, u64**)`                 | error: adds `u64*` at byte 0      |
+  | `u64 mut* mut p`       | `cast(&p, u64**)`                 | ok: drops the mark of the place   |
   | `u64 mut* mut p`       | `cast(&p, wrap**)`                | error: adds `wrap*` at byte 0     |
   | `holder mut* mut ph`   | `cast(&ph, mirror mut**)`         | error: adds `mirror mut*` at 0    |
   | `holder h`             | `cast(&h, mirror*)`               | ok: the same pointer at byte 8    |
-  | `void* v`              | `cast(v, u64**)`                  | ok: `u64*` carries no mark        |
+  | `void* v`              | `cast(v, u64**)`                  | error: a type for a `void*`       |
   | `owner_cb o`           | `cast(&o, view_cb*)`              | error: adds `fn (u64*) void` at 0 |
   | `owner_cb o`           | `cast(&o, same_cb*)`              | ok: the same type at byte 0       |
   | `owner_cb o`           | `cast(&o, u64*)`                  | ok: a read-only view hides it     |
@@ -619,6 +714,17 @@ Sections:
   place over an integer compiled too, and C could call it. So the exemption now covers no
   function pointer place. The exemption of a place that carries `mut` or `own` and reaches no
   function pointer stays. The five trees hold 3 such casts, and they stay legal.
+  Amended 2026-10-31: a cast took a `u64` to a pointer or a `void*`, a `void*` to a typed
+  pointer, and a typed pointer to a larger pointee. A read-only view added or changed a pointer
+  place that carries no mark, and an argument of an `extern fn` was exempt from the rules of the
+  pointer places. Each gave fort code a pointer to storage whose address it did not hold, and
+  D10.7 made an access to a local through such a value undefined. The user ruled "No undefined
+  behavior. Fix with compile time guarantees" and "(A) Close R1-R7" (user, 2026-10-31). A count
+  at 855b512f over `src`, `std`, `test/fort`, `test/lsp`, `test/lang` and `test/library`, with a
+  checker that marked each site, found 14 casts from an integer, 104 casts from a `void*`, 0 casts
+  to a larger pointee, 4 views that add or change a pointer place when the types are compared
+  exactly (2 of them only drop marks and stay legal), and 19 exempt arguments of an `extern fn`, 1
+  of them in `std.sort.sort_ptr`.
 
 ### D3.15 sizeof
 - owner: `type-system.md`.
@@ -996,10 +1102,41 @@ Sections:
 - rule: Span expressions `e[lo..hi]`, `e[lo..]`, `e[..hi]`, `e[..]`: `e` is a fixed array (lvalue
   only), a span, or a string; bounds are any integer type or untyped constants; the result is a span
   (or string) whose mutability is that of `e`'s elements. The runtime check is `0 <= lo <= hi <=
-  len`, relative to the operand, not the original allocation. `p[lo..hi]` on a `T*` or `T mut*`
-  produces a `T@` or `T mut@` with no check; this is the explicit unsafe escape for foreign memory.
-  No span can be taken of a `void*`.
+  len`, relative to the operand, not the original allocation. No span can be taken of a `void*`.
+  **A span of a raw pointer only in two functions.** Each span expression of a `T*` or a
+  `T mut*` is the error `cannot take a span of T*: a pointer has no length`, but in the body of
+  two functions of the standard library. A pointer holds no length, so the bounds of such a span
+  could reach past the object. The two functions take a pointer with no length that fort can
+  check (A7 of `ownership-design.md` 5.1): `str.from_cstr(char* p) string` makes
+  `p[0..libc.strlen(p)]` of a C string, which C gave or which C wrote into a buffer of fort code,
+  as `getcwd` does, and it trusts that a NUL ends `p` inside its storage; and `rt.args_init(i32
+  argc, char* mut* argv)` makes `argv[0..argc]` from the values that C passes to `main`. In their
+  bodies, `p[lo..hi]` on a `T*` or a `T mut*` produces a
+  `T@` or a `T mut@` with no check, and `p[lo..]`, `p[..hi]` and `p[..]` stay errors. Each other
+  function, of `std` too, takes no span of a raw pointer. So the functions of `std.rt` that made
+  a span of a pointer and a length take a span or a string: `rt.print_str` and `rt.panic` take a
+  `string`, `rt.print_enum` takes an `enum_member@`, `rt.emit_cstr` and `rt.message_cstr` take a
+  `string`, and `rt.scan` takes the span of its buffer. `rt.str_eq` makes no span: it gives its
+  pointers and lengths to `memcmp` (A7). A `char*` that the compiler gives as a C string,
+  the file of a position or the name of an enum member, keeps its type, and `std.rt` reads it
+  through `str.from_cstr`.
+  `rt.args_init` gets each argument string through `str.from_cstr`. Only the `main` that the
+  compiler emits calls `rt.args_init` (`toolchain.md` 6 item 22): each name of it in source, a
+  call or a function value, is the error
+  `'std.rt.args_init' belongs to the start of the program`, in `std.rt` too. A program gets a span
+  of a C string through the one trusted form `str.from_cstr`. A span of a fixed array, of a span and
+  of a string stays legal everywhere,
+  with its check. So `i32 mut@ s = px[0..2]` for an `i32 mut* px` is an error, and
+  `string v = str.from_cstr(libc.getenv(&name[0]))` gives the value of a variable of the
+  environment.
 - history: Amended 2026-09-10: the operation was called slicing and its result a slice (D3.5).
+  Amended 2026-10-31: `p[lo..hi]` on a raw pointer was legal in each module, with no check, as the
+  escape for foreign memory. For a `struct two { i32 x; i32 y; }`, `(&t.x)[0..2]` wrote `t.y`.
+  The user ruled "(A) Close R1-R7" (user, 2026-10-31). A count at 855b512f found 24 such spans:
+  3 in `src`, 9 in `std` and 12 in `test/lang`. Of the 9 in `std`, 7 can take a span or a string
+  that the compiler passes; `str.from_cstr` and `rt.args_init` get a bare pointer from C. The
+  coordinator ratified on 2026-10-31 the exception of these two functions, in place of each
+  module of `std`.
 
 ### D6.10 The arrow operator
 - owner: `core-language.md` (Expressions).
@@ -1687,9 +1824,17 @@ Sections:
 ### D10.4 No pointer arithmetic
 - owner: `memory-model.md`.
 - rule: No pointer arithmetic: `p + 1`, `p++` and `p[i]` are errors. The only ways to get a pointer
-  are `null`, `&`, `new`, `.ptr`, `cast`, a function name, and calls; the only way to get a span
-  from a raw pointer is the two-bound form `p[lo..hi]` (D6.9); `p[lo..]`, `p[..hi]` and `p[..]` are
+  are `null`, `&`, `new`, `.ptr` in the positions of D3.5, a function name, calls, and a `cast`
+  of another pointer to a
+  pointee no larger, or of any pointer to `void*` (D3.14). No cast takes an integer to a pointer,
+  and no cast takes a `void*` to a typed pointer, so arithmetic on the `u64` of an address gives
+  no pointer: `cast(cast(p, u64) + 8, i32*)` is an error. Only the bodies of `str.from_cstr` and
+  `rt.args_init` get a span from a raw pointer, with the two-bound form `p[lo..hi]` (D6.9); each
+  other span expression of a raw pointer is an error, and `p[lo..]`, `p[..hi]` and `p[..]` are
   errors because a pointer has no length.
+- history: Amended 2026-10-31: a cast from a `u64` gave a pointer, so the arithmetic that this
+  decision refuses on a pointer was legal on the `u64` of its address, and each module could take
+  `p[lo..hi]` of a raw pointer. The user ruled "(A) Close R1-R7" (user, 2026-10-31).
 
 ### D10.5 The null value
 - owner: `memory-model.md`.
@@ -1711,28 +1856,30 @@ Sections:
 - owner: `memory-model.md`.
 - rule: Undefined behavior in v1 is limited to: using a view, or a copy made before a `move` or
   `del`, after the allocation was freed; `del` of an `extern` result that is not the start of an
-  allocation; dereferencing `null` or a dangling pointer; `p[lo..hi]` beyond the object, calling a
-  null function pointer, data races, and an access to a local through a forged value (below).
-  Everything else is defined or a diagnosed error. In particular there is no strict-aliasing rule:
-  reading an object through a pointer to another type of the same size (`*cast(&x, u64*)` for an
-  `f64 x`) is defined and yields the bit pattern.
-  **An access to a local through a forged value.** A read or a write of the storage of a local of
-  a run of a fort function is undefined when the pointer or span that the access goes through does
-  not derive from an address of that local that this run took. The terms are exact:
+  allocation; dereferencing `null` or a dangling pointer; `p[lo..hi]` beyond the object, which only
+  `str.from_cstr` and `rt.args_init` can write (D6.9); calling a null function pointer; and data
+  races. Everything else is defined or a diagnosed error. In particular there is no
+  strict-aliasing rule: reading an object through a pointer to another type of the same size or
+  a smaller one (`*cast(&x, u64*)` for an `f64 x`) is defined and yields the bit pattern.
+  A pointer to a local dangles after the end of the scope of the local and after the return of its
+  run, also when a later local takes the same storage. Each entry of the block that declares a
+  named local starts a new local, so a pointer to the local of an earlier entry dangles.
+  **No forged pointer.** Fort code reaches storage only through a value that derives from an
+  address of that storage, inside its object, or through a dangling pointer. The terms are exact:
   A run is one call of a fort function. Each call starts a new run with its own locals.
-  A local of a run is a parameter, a named local or a temporary (D6.3) of the run. Each entry of
-  the block that declares a named local starts a new local, so an address that an earlier entry
-  took is no address of the new local. The storage of a local is each byte of it, its fields, its
-  elements and its padding included. A read or a write by a fort function of a byte of the frame of
-  a run that is no storage of a local, such as padding between locals, a spilled register or the
-  return address, is undefined too, through a pointer or a span. The storage of a frame of a C
-  function is outside this item, for an access by fort code and by C code. So a read by fort code of
-  a C local through a pointer that C code gave it is defined, because the C storage is outside this
-  item.
+  A local of a run is a parameter, a named local or a temporary (D6.3) of the run. The storage of
+  a local is each byte of it, its fields, its elements and its padding included. A byte of the
+  frame of a run that is no storage of a local, such as padding between locals, a spilled
+  register or the return address, has no address that fort code takes.
   An address of a local that a run took is a pointer or a span that an operation of that run
   computes from a place `e` that is the local or a part of it: `&e` (D5.8), and a span expression
   of `e` when `e` is a fixed array (D6.9). A part is a field or an element of a fixed array, at any
-  depth, that the place reaches through no pointer and no span.
+  depth, that the place reaches through no pointer and no span. An address of a global is `&e` or
+  a span expression of a place of the global, and an address of an allocation is the result of a
+  `new` (D10.2) or of an `extern` that says `own` (D17.13). An address of the storage of a string
+  literal is the `.ptr` of the literal, or a span expression of it (D3.7). An address of storage
+  of C is a pointer that C gives to fort code: a result of an `extern fn`, an argument of a fort
+  function that C calls, or a pointer that fort code reads from storage of C (A7).
   A value derives from an address `a` when it is `a`, when an operation computes it from operands of
   which one or more derive from `a` (`?:` is an exception below), or when a load reads it from
   storage that a store of a value that derives from `a` wrote. Each operation carries it: a copy, a
@@ -1748,16 +1895,36 @@ Sections:
   these steps can happen in any function, fort or C. A value derives from an address only through
   these steps: an integer constant, or bytes that no store of the program wrote, derive from no
   address, even when they are equal to one.
-  An access by the name of a local in its own run goes through no value, so this item does not
-  apply to it. The item covers each read and each write, of each type.
-  D3.14 lets no cast from an integer mark a level `mut` or `own`, so a cast alone gives no forged
-  write. A same-size reinterpretation, which stays defined, can still give a `mut` pointer from an
-  integer: a store of the integer and a load of the same bytes as a `mut` pointer. When the pointer
-  does not derive from an address of a local that the run of the local took, this item makes a read
-  or a write of that local through it undefined. The item adds no strict-aliasing rule: the
-  derivation of the value decides, and the type of the access and the type of the address do not.
-  The item covers only the frames of fort runs: it does not make an access to a global, to an
-  allocation or to a frame of a C function undefined.
+  The compile-time rules give this guarantee, and no undefined item is necessary for it. D3.14:
+  no cast makes a pointer from an integer, gives a type to a `void*` or makes the pointee larger
+  or more aligned, and no view adds or changes a pointer place, an argument of an `extern fn`
+  included. D3.5: the `.ptr` of a span or a string is legal only where no fort code loads or
+  stores through it. D6.9: only `str.from_cstr` and `rt.args_init` take a span of a raw pointer,
+  and no source calls `rt.args_init`. D10.4: no pointer arithmetic. D10.6: each index and each
+  span expression of a fixed array, a span or a string is in bounds. D17.13: a pointer type that
+  C gives marks `mut` only where it says `own`, where a parameter of the same type marks the
+  level, or where the extern has no parameter that can carry a pointer. For C, A7 of
+  `ownership-design.md` 5.1 holds: C gives fort code only storage that C gave, or storage that
+  fort code gave to C, with the whole pointee inside that storage, at an address aligned for the
+  pointee, and with no `mut` that fort code did not give; and C writes only a level that the type
+  of a parameter marks `mut`. So a pointer that fort code holds is `null`, a value that derives from
+  an address and keeps its whole pointee inside the object of that address, or a dangling pointer.
+  A read or a write of the storage of a local of a run goes through a value that derives from an
+  address of that local that the run took, or through a dangling pointer. Fort code reaches a
+  frame of a C function, or a byte of the allocator outside each live allocation, only through a
+  pointer that C gave to that storage. An access by the name of a local in its own run goes through
+  no value, and the guarantee covers each read and each write, of each type. It adds no
+  strict-aliasing
+  rule: the derivation of the value decides, and the type of the access does not.
+  Four cases are outside the guarantee. A build with `--no-bounds-check` removes the checks of
+  D10.6. A build with a standard library other than the one of the compiler (`--std-dir`, D14.1)
+  runs code that these rules did not check as `std`, such as a span of a raw pointer in each
+  function. An `extern fn` declaration or C code that breaks A7, such as `memchr` declared with an
+  `i64*` result for a search of one byte, or a declaration whose parameter marks no `mut` at a
+  level that C writes, has the behavior that C gives it, and fort defines no more. And a call of an
+  `extern fn` whose arguments break the contract of the C function, such as a `char*` with no NUL
+  inside its storage for `strlen` or a length past the end of a buffer for `memcpy`, has the
+  behavior that C gives it (A7).
 - history: Amended 2026-09-29 (T-257): the list held "`del` of adopted memory (D17.3) that is not
   the start of an allocation" and "writing through a cast that added mutability into read-only
   memory". A cast adds neither `own` nor `mut` (D3.14); the second item was stale since T-085.
@@ -1765,6 +1932,15 @@ Sections:
   `ownership-design.md` 5.1. Before, the list had no forged pointer, so a callee could return
   `cast(cast(p, u64) + 8, i32*)` for `p = &x` of an `i32 x`, and a read through it was defined.
   Rules (b) and (e) and refinement R6 of `ownership-design.md` need the item.
+  Amended 2026-10-31: the list held "an access to a local through a forged value". A read or a
+  write of the storage of a local through a value that did not derive from an address of that
+  local that the run took was undefined, and a forged access to a global, to an allocation, to a
+  frame of a C function or to the bytes of the allocator was defined. A fort write through the
+  result of `strchr` set the size word of a glibc chunk to 0, and the next `del` aborted. The user
+  ruled "No undefined behavior. Fix with compile time guarantees" and "(A) Close R1-R7" (user,
+  2026-10-31). D3.14, D6.9 and D17.13 now refuse each route by which fort code got such a value,
+  so no program that compiles makes such an access, and the item went. The terms of the item stay
+  as the terms of the guarantee, because D17.11 and D17.21 read them.
 
 ### D10.8 Stack probes
 - owner: `memory-model.md`.
@@ -1962,11 +2138,12 @@ Sections:
   short name does not collide with the common parameter name `c`), `std.mem` (copy, fill, equal),
   `std.io` (descriptors, read/write whole files and streams, close), `std.str` (compare, search,
   classify, parse integers, duplicate, NUL-terminated copies for C), `std.strbuf` (growable byte
-  buffer), `std.vec` (`ptr_vec`, `int_vec`, the non-generic pattern), `std.strmap` (string-keyed
+  buffer), `std.vec` (`int_vec`, the non-generic pattern), `std.strmap` (string-keyed
   open-addressing table), `std.math` (float bit casts, abs/min/max per type), `std.sort` (an
-  in-place sort of an array over libc `qsort`), `std.net` (a TCP listener and a TCP connection over
-  `std.libc`, IPv4 only and with no name resolution), `std.os` (the target triple and the path of
-  the running binary) and `std.rt` (the runtime itself, D13.1:
+  in-place sort of a typed span, in fort, and the pattern for each other element type),
+  `std.net` (a TCP listener and a TCP connection over `std.libc`, IPv4 only and with no name
+  resolution), `std.os` (the target triple and the path of the running binary) and `std.rt` (the
+  runtime itself, D13.1:
   process start and exit, allocation, the failure paths, the print buffers and the float text of
   D18.1 to a descriptor or to a `str_buf`, over `std.libc` and `std.strbuf`). A C library
   function is declared in `std.libc` and nowhere else: the compiler, the runtime and the tests
@@ -2010,6 +2187,11 @@ Sections:
   in `std/linux/` and `std/darwin/`.
   Amended 2026-09-25 (the user): every C library declaration moved into `std.libc`; until then
   the compiler, the runtime and the `test/fort` suites declared the functions they alone called.
+  Amended 2026-10-31: `std.vec` held `ptr_vec`, whose slots were `void mut*`, and `std.sort`
+  sorted through `libc.qsort`, whose comparator read each element through a cast from a
+  `void*`. No cast gives a type to a `void*` now (D3.14), so neither works. The user ruled
+  "(A) Close R1-R7" (user, 2026-10-31). A vector of pointers is a copy of the pattern with a typed
+  slot, and `std.sort` sorts typed spans in fort (`stdlib.md` 2.7, 2.10).
 
 ### D13.3 The error-handling idiom
 - owner: `stdlib.md`.
@@ -2029,10 +2211,12 @@ Sections:
   (`str.dup`, `str.concat` and `strbuf.take` return `string own`, exact length, no NUL;
   `str.to_cstr` returns `char mut@ own` with a trailing NUL) or delivers it through an `own` slot
   (`io.read_file_bytes`); containers hold their storage as `own` fields (`str_buf { u8 mut@ own
-  data; u64 len; }`, `ptr_vec`, `int_vec`, `str_map`) and expose a `free` function that `del`s them;
+  data; u64 len; }`, `int_vec`, `str_map`) and expose a `free` function that `del`s them;
   out-parameters that receive ownership are pointers to `own` slots (`u8 mut@ own mut* out`), which
   the caller initializes to `{}` or `null`; `sys.args()` and every `view`-style accessor return
   borrowed values.
+- history: Amended 2026-10-31: the list of containers held `ptr_vec`, which went with the ruling
+  "(A) Close R1-R7" (user, 2026-10-31; D13.2).
 
 ## D14 Toolchain and test conventions
 
@@ -2791,9 +2975,9 @@ says ownership is "by convention", this section supersedes it.
   dereference and no index into a span or a `string`.
   This rule assumes that no operation accesses the storage of a local through a value that does
   not derive from an address of that local that the run took, as D10.7 gives, and that an `own`
-  pointer holds the start of an allocation or `null` (D17.1). A same-size reinterpretation that
-  writes an address of a local into the bytes of an owner slot is outside the guarantee
-  (`spec/ownership-design.md` 5.1, A8).
+  pointer holds the start of an allocation or `null` (D17.1). D3.14 refuses each cast that lets a
+  store write an address of a local into the bytes of an owner slot, an argument of an
+  `extern fn` included.
   The origins have a limit of their own. Their bits are the borrow locals times 1 more than the
   memory locals whose frames are origins, plus those memory locals. A forward fixpoint over the
   blocks gives the origins at the start of each block. It takes each block in the order of its
@@ -2977,6 +3161,10 @@ says ownership is "by convention", this section supersedes it.
   one of 23 sites, in `test/lang/run/ownership/062`. The examples above add `run/ownership` 071 and
   072 and `fail/ownership` 076 and 077, whose two errors bring the sites of D17.11 in `test/lang`
   to 24.
+  Amended 2026-10-31: the Borrows said that a same-size reinterpretation that writes an address of
+  a local into the bytes of an owner slot is outside the guarantee. The user ruled "(A) Close
+  R1-R7" (user, 2026-10-31), and D3.14 refuses each such cast, an argument of an `extern fn`
+  included, so no form stays outside.
 
 ### D17.12 Owned strings
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,
@@ -3003,11 +3191,64 @@ says ownership is "by convention", this section supersedes it.
   signature (D9.8). The owning form is a fort function that allocates the buffer itself:
   `std.libc` declares `realpath` with a `char mut*` buffer, and `std.os.real_path` allocates that
   buffer with `new`.
+  **A pointer from C adds no `mut`.** An `extern fn` declaration names the types of the
+  pointers that C gives to fort code. They are its result type; each parameter type of each
+  function pointer parameter, because C calls that callback with such values; and each type that a
+  level of a parameter holds where the parameter type marks that level `mut` and the held type is
+  itself a pointer, because C can store a pointer there: `char mut* mut* end` holds `char mut*`.
+  The rule reads no field of a struct that C writes, such as a `void mut*` field of the
+  `struct msghdr` of `recvmsg`; A7 asks that C write a pointer place only where the contract of
+  the C function writes it. Take each such type `G` that marks a level `k`
+  `mut` and does not say `own`. The extern has a fixed parameter of the same type as `G`, the `mut`
+  of level `k` included, or it has no parameter that can carry a pointer. A pointer, a `void*`, a
+  function pointer and the variable tail `...` can each carry a pointer. Else the declaration is
+  the error `extern 'strchr': C gives 'char mut*' with a 'mut' that no parameter of that type has`,
+  which names the first such type. A function pointer type that C gives, as the result, as a
+  parameter type of a callback or in a level that C writes, follows the same rule as the
+  declaration of an `extern fn` of that type, because a call through it runs C.
+  The reason: C can give back an argument (A7 of `ownership-design.md` 5.1), and a `mut` that no
+  argument had lets fort code write storage that it lent read-only. Each of these forms wrote an
+  immutable local `x`: `extern fn strchr(char* s, i32 c) char mut*` through
+  `strchr(cast(&x, char*), c)`; `extern fn pick(i32 n, ...) u64 mut*` through `pick(1, &x)`;
+  `extern fn apply(u64* p, fn (u64 mut*) void cb) void`, whose C calls `cb` with `p`;
+  `extern fn get_strchr() fn (char*, i32) char mut*`; and
+  `extern fn strtol(char* nptr, char mut* mut* endptr, i32 base) i64`, whose C stores
+  `nptr + 2` into `*endptr`. With `extern fn call(fn () u64* g) u64 mut*`, C gave back the
+  read-only pointer that the callback `g` gave to C.
+  These declarations stay legal: `getcwd(char mut* buf, u64 size) char mut*` (the parameter `buf`
+  has the type of the result), `__errno_location() i32 mut*` (no parameter, so the storage is
+  C's), `fdopendir(i32 fd) void mut* own`, `strtol(char* nptr, char* mut* endptr, i32 base) i64`,
+  `qsort(i32 mut* base, u64 n, u64 size, fn (i32*, i32*) i32 cmp) void`, and a result with no
+  `mut`, such as `strchr(char* s, i32 c) char*` and `readdir(void mut* dir) dirent*`.
+  **The cost.** The rule refuses some C functions at their exact C type, because their result is
+  storage of C that the rule cannot tell from an argument. Each has a declaration that the rule
+  takes. A C stream or a C object that one C function opens and another closes is an allocation
+  of C: `extern fn opendir(char* path) void mut* own;` with
+  `extern fn closedir(void mut* own dir) i32;`, and `fopen(char* path, char* mode) void mut* own`
+  with `fclose(void mut* own f)`. A result that fort code only reads drops its `mut`:
+  `gmtime(i64* t) tm*`, or `gmtime_r(i64* t, tm mut* out) tm mut*`, whose `out` has the type of
+  the result. An out-parameter drops the `mut` of the level that it holds:
+  `strsep(char* mut* stringp, char* delim) char*`. A count at 855b512f
+  found 3 declarations that the rule refuses: `opendir` in the two `std.libc` modules and
+  `malloc_get_all_zones` of `test/fort/support/heap.ft`, whose `zone* mut* mut* addresses` becomes
+  `zone** mut* addresses`.
 - history: Amended 2026-09-14 (T-086): `malloc` was declared `void* own`, because `void mut*` was
   not a type until D3.11 was amended.
   Amended 2026-09-29 (T-257): added the borrowing form for a C result that is owned on some calls
   only. A cast no longer adds `own` (D3.14), so an `extern` signature is the one way that C memory
   gets an owner.
+  Amended 2026-10-31: an extern result could mark `mut` where no argument had the mark, so
+  `strchr` gave a writable pointer into a local that fort code lent read-only. The user ruled
+  "(A) Close R1-R7" (user, 2026-10-31). A count at 855b512f over `src`, `std`, `test/fort`,
+  `test/lsp`, `test/lang` and `test/library` found 2 such declarations, `opendir` in the two
+  `std.libc` modules, which now says `own`. `__errno_location`, `__error`, `fdopendir` and the
+  C allocators of three tests have no pointer parameter and stay legal. A review of 2026-10-31
+  found that the first text read the result alone and the fixed parameters alone: `...`, a
+  function pointer parameter, a callback parameter and a function pointer result each gave back
+  a `mut` (probed). The rule now reads each type that C gives, and the count stays 2. A review of
+  2026-11-01 found the out-parameter: `strtol` with `char mut* mut* endptr` stored a `mut` pointer
+  into the immutable argument (probed). The rule now reads the types that a `mut` level of a
+  parameter holds, and the count is 3 with `malloc_get_all_zones` of a test.
 
 ### D17.14 What ownership does not track
 - owner: `type-system.md` (the `own` qualifier, placement, identity), `memory-model.md` (`move`,

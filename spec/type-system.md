@@ -193,8 +193,9 @@ it, and append `*`.
 i32 mut@ own s = new(i32, 8);        // eight zeroed elements, owned, all levels mutable
 i32@ t = s;                          // same storage; own and element mutability dropped
 u64 n = s.len;                       // 8
-i32 mut* p = s.ptr;                  // a view of the elements
-i32 mut* own q = s.ptr;              // error: .ptr is a view; cannot add own
+i32 mut* p = &s[0];                  // a view of the first element; the index is checked
+i32 mut* r = s.ptr;                  // error: '.ptr' can name the byte after the last element
+bool same = s.ptr == t.ptr;          // ok: .ptr compares (D3.5)
 i32@ e = {};                         // {null, 0}
 i32@ u = {1, 2, 3};                  // error: there is no span literal
 s.len = 4;                           // error: .len is not an lvalue (D6.7)
@@ -264,7 +265,7 @@ mutable (D5.2), whether or not the string is `own`.
 string s = "hello";                  // storage: h e l l o NUL; s.len == 5
 char c = s[1];                       // 'e'
 string t = s[1..3];                  // "el", shares s's bytes, not NUL-terminated
-char* p = s.ptr;
+char* p = &s[0];                     // 'h'; s.ptr goes only to C, to a comparison or a cast (D3.5)
 string z = {};                       // {null, 0}
 bool eq = z == "";                   // true: both have len 0
 bool dist = z.ptr == "".ptr;         // false
@@ -425,10 +426,15 @@ fn (i32, i32) i32 own u = add;       // error: an own marks a reference (D17.2)
 fields, cannot be indexed and has no span expression (D3.11). It reaches one storage level all the
 same, the storage the address names, and `void mut*` marks that storage writable (D5.2, D5.3). No
 expression reaches it, so the mark states what a callee may do with the address: C writes the same
-distinction as `void*` against `const void*`. Every conversion to or from `void*` requires `cast`
-(D3.14); `== null` is allowed (D10.5). `void* own` is its owned form (D17.1): `del` accepts it, a
-`cast` between it and a typed pointer yields `own` exactly when the target says `own` (D3.14,
-section 9.2), and it is the type C's `malloc` and `free` are declared with (section 11.2).
+distinction as `void*` against `const void*`. A conversion from a pointer or a function pointer
+to `void*`, and from `void*` to `u64`, requires `cast` (D3.14); `== null` is allowed (D10.5). No
+cast takes a `void*` back to a typed pointer or a function pointer type, and no cast takes an
+integer to a `void*` (D3.14, D3.11). A `void*` holds no type and no size, so a cast back could
+give a larger type than the storage has, and fort code would reach storage whose address it does
+not hold. A `void*` goes to C, compares with `null` and with another `void*`, and gives its
+address as a `u64`. `void* own` is its owned form (D17.1): `del` accepts it, and it is the type
+C's `malloc` and `free` are declared with (section 11.2). A program that wants typed storage
+uses `new` (D10.2).
 
 `void* mut p` and `void mut* p` are two types. The first is a rebindable binding whose target is
 read-only; the second is a fixed binding whose target a callee may write. `void mut*` converts to
@@ -445,13 +451,14 @@ i32 v = *vp;                         // error: void* cannot be dereferenced
 i32 f = vp->x;                       // error: void* has no fields
 i32 g = vp[0];                       // error: void* cannot be indexed
 i32@ h = vp[0..1];                   // error: cannot take a span of a void*
-i32 mut* back = cast(vp, i32 mut*);
+i32* back = cast(vp, i32*);          // error: a cast never gives a type to a void*
+void* forged = cast(4096, void*);    // error: a cast never makes a pointer from an integer
 u64 addr = cast(vp, u64);
 bool isnull = vp == null;
 void mut* own raw = libc.malloc(16); // an own rvalue lands; malloc answers a writable block
 void* peek = raw;                    // ok: lends, and drops the mut on the way (D5.4)
-u8 mut* own bytes = cast(move(raw), u8 mut* own);   // ok: the target says own, so raw is moved
-u8 mut* own twice = cast(raw, u8 mut* own);         // error: copying own lvalue 'raw' needs move
+u8 mut* own bytes = cast(move(raw), u8 mut* own);   // error: no type for a void*
+del(raw);                            // ok: del accepts void* own
 ```
 
 ## 6. Type identity and equality
@@ -1093,13 +1100,14 @@ first takes its default type (D4.5) and is then converted with the runtime seman
 | enum                | enum, `bool`, float      | error (go through an integer)                 |
 | `bool`              | float, `char`, enum      | error                                         |
 | float               | `bool`, `char`, enum     | error                                         |
-| `T*`                | `U*`                     | reinterpret the address; carries or drops own |
-| `T*`, `void*`       | `void*`, `U*`            | reinterpret the address; carries or drops own |
+| `T*`                | `U*`, `U` no larger      | reinterpret the address; carries or drops own |
+| `T*`                | `U*`, `U` larger         | error: a cast never makes the pointee larger  |
+| `T*`, `void*`       | `void*`                  | reinterpret the address; carries or drops own |
+| `void*`             | `U*`                     | error: a cast never gives a type to a void*   |
 | `T mut*`            | any target above         | the same, and the `mut` may be dropped        |
 | any pointer         | a target that adds `mut` | error: a cast never adds `mut`                |
 | `T*`, `void*`       | `u64`                    | the address as an integer                     |
-| `u64`               | `T*`, `void*`            | the integer as an address                     |
-| `u64`               | `T mut*`, `void mut*`    | error: an integer marks no level `mut`        |
+| integer             | `T*`, `void*`            | error: no pointer from an integer             |
 | pointer             | other integer types      | error                                         |
 | function pointer    | `void*`                  | reinterpret                                   |
 | `void*`             | function pointer         | error, as an `extern` argument too            |
@@ -1113,8 +1121,8 @@ first takes its default type (D4.5) and is then converted with the runtime seman
 | `T@`                | `T mut@`                 | error: a cast never adds `mut`                |
 | any reference       | a target that adds `own` | error: a cast never adds `own`                |
 | `own` reference     | same, `own` dropped at any level | lends; refused on an `own` rvalue     |
-| pointer or span     | result changes a pointer place   | error, except as an `extern` argument |
-| pointer, integer    | adds a pointer place with a mark | error, except as an `extern` argument |
+| pointer or span     | result changes a pointer place   | error, as an `extern` argument too    |
+| pointer             | a view adds or changes a place   | error, as an `extern` argument too    |
 | `own` rvalue        | any `own` target above   | transfer: the result is `own`                 |
 | `own` lvalue        | any `own` target above   | error unless `cast(move(x), T)` (D17.5)       |
 | `T mut*`            | `T*`                     | drop mutability, as the implicit conversion   |
@@ -1164,15 +1172,14 @@ storage, and its level from level 2 on: `cannot cast holder mut* to void mut*: a
 hides the pointer u64* own at byte 8`. A place of the target that the source lacks reads `adds
 the pointer`. Through such a level a store writes any bits into a pointer slot of the source, or
 the source reads bits that no pointer wrote. A read-only view, which can change no level, hides
-pointer places freely, and it adds or changes one that carries no mark (below); a read through
-it gives the bits (D10.7). The check has a work limit of 65536 steps; past it the cast is an error
-with the note `the check cannot prove that the cast keeps its pointer places`. The exemption: a
-cast that is itself an argument of a call of an `extern fn` is legal, because C sees no `own`
-(D17.13). A cast inside that argument, an argument of a fort function and an argument of a call
-through a function pointer get no exemption. One form is outside the rule (D3.14,
-`ownership-design.md` 5.1): a view that C gives back from an exempt argument.
+pointer places freely, and it adds and changes none (below). The check has a work limit of 65536
+steps; past it the cast is an error with the note
+`the check cannot prove that the cast keeps its pointer places`. A cast that is itself an
+argument of a call of an `extern fn` follows the rule as each other cast does: no exemption
+stays, because an argument that hides a pointer place lets C write the bits of an integer into
+that place (D3.14).
 
-**A cast keeps each pointer place that carries a mark, in any view** (D3.14). A pointer place
+**A cast adds and changes no pointer place, in any view** (D3.14). A pointer place
 carries a mark when its type marks a reference `mut` or `own`, or when it is a function pointer.
 It carries one too when a type that it reaches does one of the two. A place reaches its pointee
 or element, the element of a fixed array, and the type of each field of a struct. It reaches
@@ -1181,23 +1188,35 @@ so the walk reads no parameter and no result of a function pointer. A function p
 carries a mark always. A call through it runs the function that its bits name, and a call is no
 read. At level 1 of the result, read-only or
 `mut`, each marked pointer place of the target needs a pointer place of the source. That place
-starts at the same byte and has the same type, the marks included (section 6). Level 1 then
-answers for each deeper level. The storage of a `void*`
-holds no pointer place and an integer reaches no level, so a cast from a `void*` or from an
-integer gives a target whose level 1 holds no pointer place that carries a mark. A place that
-carries no mark stays free to pun, because through it a view only reads. The error reads
-`cannot cast u64* to holder2*: a cast adds the pointer u64 mut* at byte 0`, and the error of the
-`mut` rule comes first. The exemption of an `extern` argument and the work limit hold here too.
-The exemption covers no function pointer place: an exempt view keeps each place that is or
-reaches a function pointer with its type.
+starts at the same byte and has the same type, the marks included (section 6). Each pointer
+place of the target that carries no mark needs a pointer place of the source at the same byte,
+of the same type or of a type that differs from it only by `mut` and `own` marks that the target
+drops. Level 1 then answers for each deeper level. The storage of a `void*` holds no pointer place
+and an integer reaches no level, so a view of either holds no pointer place. Through a place with
+no mark, a view reads storage whose address the program does not hold:
+`**cast(&bits, i32**)` reads the local whose address the integer `bits` holds. The error reads
+`cannot cast u64* to holder2*: a cast adds the pointer u64 mut* at byte 0`, also for a place
+whose type the target changes, and the error of the `mut` rule comes first. The work limit holds
+here too, and an argument of an `extern fn` follows the rule as each other cast does.
 Each struct that the walk enters is a step of the limit. A struct keeps its answer for the
 rest of the check. So at the limit, the verdict of a cast can depend on the casts before it and on
 the build.
 A drop of a mark that the implicit conversion of section 8.4 makes is no exception: the cast
 keeps the exact type. Through such a place a view that changes no level writes or frees the
-storage that the place reaches. A callback that writes through its context takes a context of a
-named type, and a comparator of `qsort` reads an element whose pointers carry a mark through a
-view type whose pointers carry none.
+storage that the place reaches. A callback takes a context of a named type, because no cast
+gives a type to a `void*`, and a comparator of `std.sort` takes typed pointers to two elements
+(`stdlib.md` 2.10).
+
+**A cast makes no pointer from an integer, gives no type to a `void*` and makes no pointee
+larger** (D3.14). No cast takes an integer, a `char`, a `bool`, an enum or a float to a pointer,
+a `void*` or a function pointer type: `cannot cast u64 to i32*: a cast never makes a pointer from
+an integer`. A pointer and a `void*` cast to `u64`, and nothing casts the `u64` back. No cast takes
+a `void*` to a typed pointer: `cannot cast void* to i64*: a cast never gives a type to a void*`. A
+cast from a typed pointer to a typed pointer needs a target pointee no larger than the source
+pointee, by `sizeof` (D3.15): `cannot cast i32* to i64*: a cast never makes the pointee larger
+(4 to 8 bytes)`. Each such cast gave fort code a pointer to storage whose address it did not
+hold, and with these rules a pointer reaches only the storage of an address that it derives
+from, inside that object (D10.7).
 
 **A cast to a function pointer type keeps the type of the function** (D3.14). The matrix gives a
 function pointer type one source other than itself, a `void*`, and a `void*` reaches no type. So
@@ -1208,7 +1227,7 @@ holds `null`, a fort function of its type, or a value that C gave. A cast of a f
 to `void*` stays legal. So does a read-only view that hides a function pointer place, because
 no cast gives the bits a function pointer type again. A call through another function type is no
 read. For `fn take(u64* own p) void`, a call through `cast(cast(take, void*), fn (u64) void)`
-frees the address of a local. `qsort` calls an exempt comparator the same way. With no mark on
+frees the address of a local. C calls a function pointer argument the same way. With no mark on
 either side, a struct result goes through its hidden pointer (section 11.2). It goes to the
 address that an integer argument holds. Bits that no function name gave jump to any code.
 
@@ -1224,18 +1243,22 @@ void* r = cast(&h, void*);                // ok: the storage of a `void*` holds 
 mirror mut* m = cast(&h, mirror mut*);    // ok: the same pointer type at byte 8
 u64 mut x = 0;
 void mut* vx = cast(&x, void mut*);       // ok: neither side holds a pointer place
-holder mut* hx = cast(vx, holder mut*);   // error: adds the pointer u64* own at byte 8
+holder mut* hx = cast(vx, holder mut*);   // error: a cast never gives a type to a void*
 wrap mut* w = cast(&x, wrap mut*);        // error: adds the pointer u64* own at byte 0
 wrap* seen = cast(&x, wrap*);             // error: adds the pointer u64* own at byte 0
-u64** bits_seen = cast(&x, u64**);        // ok: `u64*` carries no mark
-holder* back = cast(cast(&h, void*), holder*);   // error: adds the pointer u64* own at byte 8
-wrap* forged = cast(cast(&x, u64), wrap*);       // error: adds the pointer u64* own at byte 0
+u64** bits_seen = cast(&x, u64**);        // error: adds the pointer u64* at byte 0
+u64 mut* mut px = &x;
+u64** read_px = cast(&px, u64**);         // ok: the place only drops the mark `mut`
+holder* back = cast(cast(&h, void*), holder*);   // error: a cast never gives a type to a void*
+wrap* forged = cast(cast(&x, u64), wrap*);       // error: no pointer from an integer
+u8* low = cast(&x, u8*);                  // ok: the pointee is smaller
+i64[2]* wide = cast(&x, i64[2]*);         // error: the pointee grows from 8 to 16 bytes
 f64 mut f = 1.0;
 u64 mut* bits = cast(&f, u64 mut*);       // ok: a float holds no pointer place
 u64 mut* mut slot = &x;
 *cast(&slot, u64 mut*) = 0;               // error: hides the pointer u64 mut* at byte 0
 u64* mut* ro = cast(&slot, u64* mut*);    // error: the mark changes the type of the place
-libc.memset(cast(&h, u8 mut*), 0, sizeof(holder));   // ok: an argument of an extern fn
+libc.memset(cast(&h, u8 mut*), 0, sizeof(holder));   // error: hides u64* own at byte 8
 owner_cb o = owner_cb{.f = take};         // `fn take(u64* own p) void` frees its argument
 void* code = cast(o.f, void*);            // ok: a function pointer goes to `void*`
 fn (u64*) void call = cast(code, fn (u64*) void);   // error: adds the function pointer
@@ -1279,8 +1302,9 @@ u8@ ro = cast("abc", u8@);              // ok
 i8@ sb = cast(ro, i8@);                 // error: element type of a span never changes
 i32@ q = cast(p, i32@);                 // error: no cast from pointer to span
 point pt = cast(r, point);           // error: no struct casts
-u8 mut* own m = cast(libc.malloc(64), u8 mut* own);    // own rvalue to own type; del(m) frees it
-u8 mut@ own got = cast(p2[0..n], u8 mut@ own);         // error: a span expression is a view
+u8 mut* own m = cast(libc.malloc(64), u8 mut* own);    // error: no type for a void*
+i64 mut* own w = new(i64);
+u8 mut* own low = cast(move(w), u8 mut* own);          // own rvalue to own type; del(low) frees it
 node mut* own mut@ own kids = new(node mut* own, 8);   // owned slots (section 8.3)
 node mut* mut@ esc = cast(kids, node mut* mut@);       // error: hides the owner node mut* own
 node mut*@ seen = cast(kids, node mut*@);              // error: adds the pointer node mut*
@@ -1564,7 +1588,11 @@ convention, so a fort caller must `move` into an `own` parameter and must land a
 A `void*` result carries the marks the C function's contract states: `malloc` answers storage the
 caller may write, so it is `void mut* own`, and `free` takes `void* own`, which every caller
 reaches by dropping marks (D3.11, D5.4). Signature identity includes `own` and the level-1
-mutability (D9.8): two modules declaring one C symbol with and without either conflict.
+mutability (D9.8): two modules declaring one C symbol with and without either conflict. A result
+marks a level `mut` only when it says `own`, when a parameter marks that level `mut`, or when no
+parameter is a pointer or a `void*` (D17.13): `extern fn strchr(char* s, i32 c) char mut*` is the
+error `extern 'strchr': the result marks level 1 'mut', and no parameter marks it`, because C
+gives back `s`, which fort code lent read-only.
 
 ```fort
 extern fn write(i32 fd, u8* buf, u64 n) i64;       // C means bytes here, so fort says bytes

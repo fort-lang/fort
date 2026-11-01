@@ -653,7 +653,10 @@ written `(*p)[i]` (5.7). Qualified names also use `.`: `io.read_file(path)`,
 element type carrying the element level's mutability (`i32*` for `i32@`, `i32 mut*` for
 `i32 mut@`, `node* mut*` for `node* mut@`) and never `own` at its outermost reference
 (`u8 mut*` for `u8 mut@ own`, `node mut* own mut*` for `node mut* own mut@ own`, D17.3); a
-string has `.len` (`u64`) and `.ptr` (`char*`).
+string has `.len` (`u64`) and `.ptr` (`char*`). A `.ptr` is legal only as an argument of an
+`extern fn` whose parameter type C does not give back, as the argument of `str.from_cstr`, as an
+operand of `==` or `!=`, and as the operand of a cast to `u64` or to a `void*` (D3.5): the `.ptr`
+of an empty span names the byte after its object. `&s[0]` names the first element, with a check.
 Fixed arrays have no `.ptr`. `.len` of any expression of fixed-array type is a constant
 expression and its operand is not evaluated (`m[i].len` is `4` for `i32[3][4] m`); `.len` of
 a span or string is not a constant expression.
@@ -744,15 +747,17 @@ to guess whether a parenthesized name is a type, and it never traps. Allowed:
   target's range, NaN becomes 0; float to float;
 - `bool` to integer (0 or 1); `char` to and from any integer type; enum to and from any integer
   type (integer to enum is unchecked);
-- any pointer to any pointer or `void*`; pointer to and from `u64`; function pointer to `void*`.
-  A cast never adds `mut`, so the storage a pointer reaches is writable through the result only
-  where the source says so. In any view, each marked pointer place of the target sits where the
-  source holds a pointer place of the same type (D3.14). A place carries a mark when it is a
-  function pointer or marks a reference `mut` or `own`. A type that it reaches can carry the
-  mark too. A `void*` and an integer hold no place. So
-  `cast(v, holder*)` is an error for a `void* v` and a `holder` with a `u64* own` field. A cast
-  from a `void*` to a function pointer type is an error too, as an argument of an `extern fn`
-  as elsewhere;
+- a typed pointer to a typed pointer whose pointee is no larger; any pointer to `void*`; a
+  `void*` to `void*`; a pointer or a `void*` to `u64`; a function pointer to `void*`. No cast
+  takes an integer to a pointer or a `void*`, no cast takes a `void*` to a typed pointer or a
+  function pointer type, and no cast makes the pointee larger (D3.14), so `cast(a, i32*)` for a
+  `u64 a` and `cast(v, holder*)` for a `void* v` are errors. A cast never adds `mut`, so the
+  storage a pointer reaches is writable through the result only where the source says so. In any
+  view, each marked pointer place of the target sits where the source holds a pointer place of the
+  same type, and each other pointer place of the target sits where the source holds one of the
+  same type or of a type with more marks (D3.14). A place carries a mark when it is a function
+  pointer or marks a reference `mut` or `own`. A type that it reaches can carry the mark too. An
+  argument of an `extern fn` follows each of these rules;
 - among `string`, `char@`, `u8@`, `char mut@` and `u8 mut@`, and their `own` forms, where
   the result is `own` exactly when the target spells it: `cast(move(buf), string own)` for a
   `u8 mut@ own buf`, and `cast(buf, string)` lends a view (D17.12); `T mut@` to `T@`;
@@ -767,7 +772,7 @@ to guess whether a parenthesized name is a type, and it never traps. Allowed:
 - dropping `own` at any level: a no-op wherever 3.9 already converts, and the escape where the
   monotone rule of 3.9 refuses the implicit form, behind read-only levels. At the first level that
   its result marks `mut`, a cast must keep each pointer place of its source with its exact type,
-  except as an argument of an `extern fn` (D3.14). So `node mut* own mut@ own` to
+  as an argument of an `extern fn` too (D3.14). So `node mut* own mut@ own` to
   `node mut* mut@` is an error, as its implicit form is. In a read-only view the cast keeps each
   pointer place that carries a mark with its exact type too, so `node mut* own mut@ own` to
   `node mut*@` is an error, although its implicit form lends.
@@ -777,9 +782,10 @@ because `len` counts elements); pointer to span; struct or array casts. An untyp
 first takes its default type (D4.5) and then converts with the semantics above, so
 `cast(0x80000000, i32)` is `-2147483648` and `cast(-1, u32)` is `4294967295`. `null` is not a valid
 operand, because it has no type of its own (D10.5). There is no strict aliasing: reading an object
-through a pointer of another type, as in `*cast(&x, u64*)` for an `f64 x`, is defined. A read or a
-write of a local through a pointer that a cast makes can still be undefined: D10.7 gives the whole
-rule for an access to a local through a forged value. The result of
+through a pointer of another type, as in `*cast(&x, u64*)` for an `f64 x`, is defined. A pointer
+that a cast makes reaches only the storage of an address that its operand derives from, inside
+that object, because no cast makes a pointer from an integer, gives a type to a `void*` or makes
+the pointee larger (D3.14, D10.7). The result of
 a cast is `own` exactly when its target type says `own` (D3.14): an `own` source cast to a non-`own`
 target lends, so the result is a view; a non-`own` source cast to an `own` target is an error,
 because a cast never adds `own`; and an `own` lvalue cast to an `own` target is a copy into an `own`

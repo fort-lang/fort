@@ -511,7 +511,7 @@ result owns what it points to (D17.3):
 | `&e`            | `T*`, level 1 per D5.8               | no: a view of `e`                    |
 | `new(T)`        | `T mut* own`                         | yes                                  |
 | `s.ptr`         | `T*` with `s`'s element mutability   | no: a view of `s`                    |
-| `cast(e, T*)`   | as written                           | as written; a cast never adds `own`  |
+| `cast(e, T*)`   | from a pointer to no larger a `T`    | as written; a cast never adds `own`  |
 | a function name | its function type                    | never: `own` on it is an error       |
 | a call          | the declared result type             | as declared                          |
 
@@ -524,7 +524,7 @@ itself in every operand position (D17.4); only `del` and `move` distinguish them
 | `*p`        | the object `p` points to, an lvalue    | a `T*`, never `void*` or a fn pointer    |
 | `p->f`      | `(*p).f`                               | a pointer to a struct                    |
 | `p == null` | `p` is null                            | a pointer, `void*` or fn pointer         |
-| `p[lo..hi]` | unchecked span of `hi - lo` elements   | a `T*` or `T mut*`                       |
+| `p[lo..hi]` | unchecked span of `hi - lo` elements   | in `str.from_cstr`, `rt.args_init` only  |
 
 ```fort
 i32 mut x = 10;
@@ -553,30 +553,58 @@ del(o);                              // o == null; w now dangles
 `null` is the zero pointer and function-pointer value (D10.5). Dereferencing `null` or a dangling
 pointer is undefined behavior, in practice a segmentation fault (D10.5, D10.7).
 
-### 3.1 From a raw pointer to a span
-
-There is no pointer arithmetic (D10.4). The only way to view memory behind a raw pointer as
-elements is `p[lo..hi]`, which yields a `T@` (or `T mut@` from a `T mut*`) with `ptr` advanced
-by `lo` elements and `len == hi - lo`, performing no check at all (D6.9). The result is a view
-whether or not `p` is `own` (D17.3). It is the explicit unsafe escape for foreign memory: a
-range that extends beyond the object, or `hi < lo`, is undefined behavior (D10.7). Only the
-two-bound form exists for pointers, because a pointer has no length; `p[lo..]`, `p[..hi]` and
-`p[..]` are errors, as is any span expression on a `void*` (D6.9).
+A `cast` gives a pointer only from another pointer (D3.14). No cast takes an integer to a pointer
+or a `void*`, no cast takes a `void*` to a typed pointer, and no cast makes the pointee larger.
+So each pointer that fort code holds reaches the storage of an address that it derives from,
+inside that object, or it is `null`, a pointer that C gave, or a dangling pointer (D10.7):
 
 ```fort
-extern fn strlen(char* s) u64;
-extern fn getenv(char* name) char*;
+i32[2] mut pair = {1, 2};
+u64 a = cast(&pair, u64);            // ok: a pointer gives its address as a u64
+i32* next = cast(a + 8, i32*);       // error: a cast never makes a pointer from an integer
+void* v = cast(&pair, void*);        // ok
+i32[2]* back = cast(v, i32[2]*);     // error: a cast never gives a type to a void*
+i64* wide = cast(&pair[0], i64*);    // error: the pointee grows from 4 to 8 bytes
+i64* whole = cast(&pair, i64*);      // error: the alignment grows from 4 to 8 bytes
+i32* first = cast(&pair, i32*);      // ok: 4 bytes from 8, with the same alignment
+i32* past = pair[2..].ptr;           // error: '.ptr' can name the byte after the last element
+i32* elem = &pair[1];                // ok: the index is checked
+```
+
+### 3.1 From a raw pointer to a span
+
+There is no pointer arithmetic (D10.4), and a pointer has no length. No span expression takes a
+raw pointer, but in the bodies of `str.from_cstr` and `rt.args_init`: `p[lo..hi]`, `p[lo..]`,
+`p[..hi]` and `p[..]` on a `T*` or a `T mut*` are each the error `cannot take a span of T*: a
+pointer has no length` (D6.9). The
+bounds of such a span could reach past the object, and fort code would reach storage whose
+address it does not hold. A program gets a span from `new(T, n)` (D10.2), from a fixed array,
+from a span or a string, all with their checks, and a span of a C string from the one trusted
+form, `str.from_cstr(char* p) string` (`stdlib.md` 2.5). That form trusts that a NUL ends `p`
+inside its storage, as `strlen` does (A7 of `ownership-design.md` 5.1).
+
+In those two bodies, `p[lo..hi]` yields a `T@` (or `T mut@` from a `T mut*`) with `ptr` advanced
+by `lo` elements and `len == hi - lo`, performing no check at all. `str.from_cstr` makes
+`p[0..libc.strlen(p)]`, and `rt.args_init` makes `argv[0..argc]` from the values that C passes to
+`main`; only the `main` that the compiler emits calls `rt.args_init`, and each name of it in
+source is an error (D6.9). Each other function of `std` takes a span or a
+string, the entries of `std.rt` that the compiler calls included. A range of the two functions
+that extends beyond the object, or `hi < lo`, is undefined behavior (D10.7).
+
+```fort
+import std.libc;
+import std.str;
 
 fn env_value(string name) string {   // name must be NUL-terminated, for example a literal
-    char* p = getenv(name.ptr);
-    if (p == null) { return ""; }
-    return cast(p[0..strlen(p)], string);
+    return str.from_cstr(libc.getenv(&name[0]));   // null gives the empty string
 }
-char@ tail = p[3..];                 // error: a pointer has no length
+char* p = libc.getenv(&"HOME"[0]);
+char@ tail = p[3..];                 // error: cannot take a span of char*: a pointer has no length
+char@ head = p[0..3];                // error: the same, outside std
 void* vp = cast(p, void*);
 u8@ bytes = vp[0..4];                // error: cannot take a span of a void*
-u8 mut* own raw = new(u8);
-u8 mut@ one = raw[0..1];             // a view of the allocation, not a second owner
+u8 mut@ own raw = new(u8, 1);
+u8 mut@ one = raw[0..1];             // a view of the allocation, with its check
 del(one);                            // error: cannot del 'one': not an own type (D17.9)
 del(raw);                            // frees the byte; one now dangles
 ```
@@ -584,23 +612,25 @@ del(raw);                            // frees the byte; one now dangles
 ### 3.2 `void*`
 
 `void*` is an address with no pointee type: it cannot be dereferenced, cannot reach fields,
-cannot be indexed and has no span expression; every conversion to and from it is a `cast` (D3.11).
-It exists for `extern` signatures and for storing an address whose type is recovered later with
-`cast`.
-`void* own` is its owning form (D17.1): what `free` takes (D17.13), a legal operand of `del`, and
-the type a container such as `ptr_vec` would use if it owned what it stores. A `cast` between
-`void* own` and a typed `own` pointer yields `own` because its target says so, and an `own` lvalue
-operand must therefore be moved (D3.14, D17.5). `malloc` answers `void mut* own`, because the
-storage it gives back is storage the caller may write, and that mark drops to `void* own` at the
-call to `free` (D3.11, D5.4).
+cannot be indexed and has no span expression (D3.11). A pointer or a function pointer casts to
+it, and it casts to `u64`. No cast takes it back to a typed pointer or to a function pointer
+type, and no cast takes an integer to it (D3.14): a `void*` holds no type and no size, so a cast
+back could give a larger type than the storage has. It exists for `extern` signatures: fort code
+gives an address to C as a `void*`, and an opaque handle of C, such as a directory stream, is a
+`void*` that goes back to C. An address whose type fort code needs later stays in a typed slot,
+or it is an index into a typed span (`stdlib.md` 2.7).
+`void* own` is its owning form (D17.1): what `free` takes (D17.13) and a legal operand of `del`.
+`malloc` answers `void mut* own`, because the storage it gives back is storage the caller may
+write, and that mark drops to `void* own` at the call to `free` (D3.11, D5.4). Fort code gets no
+typed view of that storage, so a program that wants typed storage uses `new`.
 
 ```fort
 extern fn malloc(u64 n) void mut* own;
 void mut* own blob = malloc(16);
-point mut* own pt = cast(move(blob), point mut* own);   // blob == null afterwards
-point mut* own pt2 = cast(blob, point mut* own);        // error: copying own lvalue needs move
-del(pt);
-del(blob);                           // no-op: blob is null
+point mut* own pt = cast(move(blob), point mut* own);   // error: no type for a void*
+point mut* own typed = new(point);   // the typed allocation
+del(typed);
+del(blob);                           // frees the block of malloc
 ```
 
 ## 4. Spans and strings in memory
@@ -612,7 +642,7 @@ A span `T@` is sixteen bytes: a pointer to the first element followed by a `u64`
 Whether the header owns its elements is part of the type, never of the bits: an `own` span or
 `string own` is the same two words as a view (D17.1). A view's elements live on the stack (a span
 of a local array), on the heap (`new`, seen through a lent `own` value or a span of one), in
-read-only data (a literal, a span of a module constant) or in foreign memory (`p[lo..hi]`); an
+read-only data (a literal, a span of a module constant) or in C memory (`str.from_cstr`); an
 `own` span's elements always start a heap allocation (D17.1).
 
 | Offset | Word  | Type  | Holds                                                    |
@@ -734,7 +764,7 @@ Spans, strings, structs and fixed arrays never cross an `extern` boundary (D9.8,
 
 ```fort
 extern fn write(i32 fd, u8* buf, u64 n) i64;
-extern fn memset(u8 mut* p, i32 c, u64 n) u8 mut*;
+extern fn memset(u8 mut* p, i32 c, u64 n) void;
 
 fn put(string s) void {
     write(1, cast(s.ptr, u8*), s.len);
@@ -750,13 +780,14 @@ extern fn sum(i32@ xs) void;        // error: spans cannot cross an extern bound
 `mut` of `void mut*` is separate and says whether C may write the storage the address names, so
 `libc.malloc` is `void mut* own` and `libc.free` takes `void* own` (D3.11, D5.4); the outermost
 position carries no `mut` on a result, which has no binding (D5.5).
-Memory received from C is used through `p[lo..hi]` (section 3.1) and released with `del` or the
-C library's own function, whichever the C side documents; `new`/`del` and `malloc`/`free` are
-interchangeable (D10.3). Memory from C enters the `own` discipline only through an `extern`
-whose result says `own` (D17.3, D17.13), because a cast never adds `own` (D3.14). Handing an
-`own` value to a C function that frees it is a `move` into its `own` parameter. Declare a C
-result `own` when the caller frees it, and plain when C keeps it. A span over an `own` result is
-a view (`p[0..n]`), so the pointer stays the one `own` value of the allocation (D17.14). A C
+Memory received from C goes back to C, and fort code reads a C string of it through
+`str.from_cstr` (section 3.1). It is released with `del` or the C library's own function,
+whichever the C side documents; `new`/`del` and `malloc`/`free` are interchangeable (D10.3).
+Bytes that fort code reads and writes live in a span from `new`, which a C function fills
+through `.ptr`, as `read` does. Memory from C enters the `own` discipline only through an
+`extern` whose result says `own` (D17.3, D17.13), because a cast never adds `own` (D3.14).
+Handing an `own` value to a C function that frees it is a `move` into its `own` parameter.
+Declare a C result `own` when the caller frees it, and plain when C keeps it. A C
 function whose result is owned on some calls only is declared in its borrowing form, and a fort
 function allocates the buffer (D17.13; `stdlib.md` 2.2 declares `realpath` so). `del` of an
 `extern` result that does not start an allocation is undefined (D10.7).
@@ -766,14 +797,12 @@ extern fn malloc(u64 n) void mut* own;
 extern fn free(void* own p) void;
 extern fn read_line(u64 mut* len) char mut* own;   // C documents: the caller frees with free()
 
-u8 mut* own raw = cast(malloc(64), u8 mut* own);   // own rvalue to own type; not zeroed
-u8 mut@ bytes = raw[0..64];                    // a view for filling
-free(cast(move(raw), void* own));              // or del(raw); raw == null either way
+void mut* own raw = malloc(64);                // not zeroed; fort code gives it to C only
+free(move(raw));                               // or del(raw); raw == null either way
 u64 mut n = 0;
 char mut* own line = read_line(&n);            // the extern says own: the caller frees
-char mut@ text = line[0..n];                   // a view of the line
-char mut@ own copy = cast(text, char mut@ own);   // error: a cast never adds own (D3.14)
-char mut@ own mid = cast(line[1..n], char mut@ own);   // error: the same rule
+char mut@ text = line[0..n];                   // error: cannot take a span of char mut*
+string seen = str.from_cstr(line);             // a view of the line up to its NUL
 del(line);                                     // frees what C allocated
 u8 mut@ own b = new(u8, 64);
 free(cast(b.ptr, void* own));                  // error: a cast never adds own to the view b.ptr
@@ -863,7 +892,7 @@ Notes:
 - Index and span checks compare unsigned: a signed index is sign-extended and a negative value
   becomes a huge unsigned number that fails the single comparison (D6.8). A constant index out of
   range for a fixed array is a compile error instead (D6.8). `p[lo..hi]` on a pointer is never
-  checked (D6.9).
+  checked, and only `str.from_cstr` and `rt.args_init` can write it (D6.9).
 - Overflow checks cover signed and unsigned integers alike, so `len - 1` on an empty span traps
   in checked mode (D11.1, D16). The wrapping operators exist so hashes and counters behave
   identically in both modes (D11.2). Programs must not rely on either overflow behavior (D11.1).
@@ -953,65 +982,64 @@ a diagnosed error (D10.7). None of these is detected.
 | `del` of an `extern` result not at the start   | `del(p)` for a C `own` result inside a block |
 | dereferencing `null`                           | `node* q = null; i32 v = q->value;`        |
 | dereferencing a dangling pointer               | `fn f() i32* { i32 x = 1; return &x; }`    |
-| `p[lo..hi]` beyond the object                  | `i32 one = 0; i32@ s = (&one)[0..4];`     |
+| `p[lo..hi]` beyond the object, two functions   | none while C keeps A7 (D6.9)               |
 | calling a null function pointer                | `fn () void f = null; f();`                 |
 | data races                                     | two threads from `extern` writing one `g`  |
-| an access to a local through a forged value    | `*cast(cast(&x, u64) + 8, i32*)`, `i32 x`  |
 
 Returning or storing a span of a local array is the span form of the dangling-pointer case
-(section 4.3). Reading an object after its `del` through any alias, including a copy of the
-`own` value made by lending before the `del` or `move`, is the first row (D10.7, D17.14). Use
-after `del` or `move` through the emptied reference itself is not in the list: it dereferences
-`null` or indexes a zero-length span, a segfault or a bounds error (D17.9); double `del`
-through one reference is a no-op (D17.9), and through two copies it is the first row. `del` of
-a view, a sub-span, a `.ptr`, a stack address or a literal is a compile error (D17.9), and no
-cast adds `own` to such a value (D3.14). So the second row needs an `extern` that says `own` of
-a result that does not start an allocation. Not undefined and not detected: an `own` value that
-is never freed, outside the leak rule of D17.20 (D17.14).
+(section 4.3). A pointer to a local dangles after the end of the scope of the local and after the
+return of its run, also when a later local takes the same storage (D10.7). Reading an object after
+its `del` through any alias, including a copy of the `own` value made by lending before the `del`
+or `move`, is the first row (D10.7, D17.14). Use after `del` or `move` through the emptied
+reference itself is not in the list: it dereferences `null` or indexes a zero-length span, a
+segfault or a bounds error (D17.9); double `del` through one reference is a no-op (D17.9), and
+through two copies it is the first row. `del` of a view, a sub-span, a `.ptr`, a stack address or
+a literal is a compile error (D17.9), and no cast adds `own` to such a value (D3.14). So the second
+row needs an `extern` that says `own` of a result that does not start an allocation. Not undefined
+and not detected: an `own` value that is never freed, outside the leak rule of D17.20 (D17.14).
+The fifth row needs `str.from_cstr` or `rt.args_init`, the two functions that take a span of a
+raw pointer (D6.9).
 
-The last row is assumption A8 of `ownership-design.md` 5.1, which the user ruled into D10.7 on
-2026-10-26. A read or a write of the storage of a local of a run of a fort function is undefined
-when the pointer or span that it goes through does not derive from an address of that local that
-this run took. A run is one call of a fort function, and a local is a parameter, a named local or a
-temporary of the run. A read or a write by fort code of another byte of a fort frame, such as
-padding between locals, a spilled register or the return address, is undefined too. The storage of a
-frame of a C function is outside the item, so fort code that reads a C local through a pointer that
-C code gave it reads defined storage. The run takes the address of a local with `&` or with a span
-expression of a local fixed array, on the local or on a field or an element of it. A value that an
-operation computes from its operands derives from each address that an operand derives from: a copy,
-a `move`, an aggregate literal, a cast and arithmetic carry it. `?:` carries the derivation of the
-operand that it yields. A branch carries none from its condition to a value that the branch assigns.
-A load derives from each address that the stored value derives from, for a store and a load of any
-type, in a fort or a C function. An integer constant, or bytes that no store of the program wrote,
-derive from no address, even when they are equal to one. D10.7 gives the exact terms.
+**No forged pointer** (D10.7). The list holds no access through a forged value. Fort code reaches
+storage only through a value that derives from an address of that storage, inside its object, or
+through a dangling pointer, and compile-time rules give this. No cast makes a pointer from an
+integer, gives a type to a `void*` or makes the pointee larger, and no view adds or changes a
+pointer place, an argument of an `extern fn` included (D3.14). No span expression takes a raw
+pointer but in `str.from_cstr` and `rt.args_init` (D6.9). No pointer arithmetic exists (D10.4), and
+each index and each span of a fixed array, a span or a string is checked (D10.6). The `.ptr` of a
+span or a string is legal only where no fort code loads or stores through it, so `&s[0]`, which is
+checked, names an element (D3.5). A pointer type that C gives marks `mut` only where it says
+`own`, where a parameter of the same type marks the level, or where the extern has no parameter
+that can carry a pointer (D17.13). C gives fort code only storage that C gave, or storage that
+fort code gave to C, with the whole pointee inside it (A7 of `ownership-design.md` 5.1). So a read
+or a write of a local goes through a value that derives from an address of that local that its run
+took, and fort code reaches a frame of a C
+function, or a byte of the allocator outside each live allocation, only through a pointer that C
+gave to that storage. A build with `--no-bounds-check` is outside this guarantee (D10.6), and so
+are an `extern fn` declaration or C code that breaks A7 and a call of an `extern fn` whose
+arguments break the contract of the C function, such as a `char*` with no NUL inside its storage
+for `strlen` (A7).
 
 ```fort
 fn next(i32* p) i32* {
-    return cast(cast(p, u64) + 4, i32*);   // the result derives from p
+    return cast(cast(p, u64) + 4, i32*);   // error: a cast never makes a pointer from an integer
 }
 
 fn f() i32 {
     i32[2] pair = {1, 2};
     i32 one = 3;
-    i32 a = *next(&pair[0]);               // 2: derives from &pair[0], and reads pair[1]
-    u64 bits = cast(&one, u64);
-    i32 b = *cast(bits, i32*);             // 3: derives from &one through two casts
-    u64 mut guess = 0;
-    for (u64 mut k = 0; k < 64; k++) {
-        if (((bits >> k) & 1) == 1) {
-            guess = guess | (cast(1, u64) << k);   // the if carries nothing from its condition
-        }
-    }
-    i32 c = *cast(guess, i32*);            // undefined: guess equals &one, but derives from nothing
-    return a + b + c;
+    i32 a = pair[1];                       // 2: the index is checked
+    u64 bits = cast(&one, u64);            // ok: the address as an integer
+    i32 b = *cast(bits, i32*);             // error: a cast never makes a pointer from an integer
+    i32* p = &one;
+    i32 c = *p;                            // 3: p derives from &one
+    i64* wide = cast(&one, i64*);          // error: the pointee grows from 4 to 8 bytes
+    return a + c;
 }
 ```
 
-The last row covers only fort frames. It adds no strict-aliasing rule: the derivation decides, and
-the types of the access and of the address do not. D3.14 lets no cast from an integer mark a level
-`mut` or `own`. A same-size reinterpretation, which stays defined, can still load a `mut` pointer
-from the bytes of an integer, and a write of a local through it is undefined unless it derives from
-an address of that local that the run took.
+The rules add no strict-aliasing rule: the derivation of a value decides, and the type of the
+access does not.
 
 Explicitly not undefined: there is no strict-aliasing rule. Reading an object through a pointer
 to another type of the same size is defined and yields the bit pattern (D10.7):
@@ -1128,8 +1156,8 @@ fn use_both() void {
 One struct per element type: an `own` backing span plus a count of the elements in use
 (D13.5). The backing span is replaced by a larger one when full, and because `del` empties the
 field first, the replacement passes the overwrite check (D17.11). The struct is an owning
-aggregate and is passed by pointer (D17.7); `std.vec` provides `int_vec` and `ptr_vec` on this
-pattern (D13.2).
+aggregate and is passed by pointer (D17.7); `std.vec` provides `int_vec` on this pattern
+(D13.2), and a vector of pointers is a typed copy of it (`stdlib.md` 2.7).
 
 ```fort
 struct int_buf {

@@ -1025,8 +1025,10 @@ process start and exit (D11.6), heap allocation (D10.2, D10.3), the runtime-erro
 (D11.4), formatting and buffering for the print family (D11.5, D11.7, D12.2, D18), and the program
 arguments for `std.sys`. It imports `std.libc` and reaches the operating system through it (D9.8):
 `write` for the buffers, `calloc` and `free` for `alloc` and `free` below, `abort` for the failure
-paths, `isatty` for D11.5's question and `strlen` for `args_init`. A program that writes
-`import std.rt;` calls it as it calls any module (D9.3).
+paths, `isatty` for D11.5's question and `strlen` for `str.from_cstr`. A program that writes
+`import std.rt;` calls it as it calls any module (D9.3), but for `args_init`: only the `main`
+that the compiler emits calls it (section 6 item 22), and each name of it in source is the error
+`'std.rt.args_init' belongs to the start of the program` (D6.9).
 
 Four things about it are not ordinary, and they are the whole list: it is a root of every closure,
 imported or not (D9.10); the compiler knows the names of section 5.1 and emits calls to them
@@ -1066,9 +1068,10 @@ struct enum_member { i32 value; char* name; }
 // zeroes a `del` or `move` operand itself (section 6, items 17 and 18). The
 // result is `void mut* own`, the type `libc.calloc` answers with: storage of no
 // type that the caller owns and may write (D3.11, `stdlib.md` 2.2). `alloc`
-// carries that mark out rather than dropping it, so a caller that reaches this
-// entry point directly casts to a typed `own` pointer to write through it, and
-// the cast carries the `own` and adds no `mut` (D3.14, D17.3). `free`
+// carries that mark out rather than dropping it. No cast gives a type to a
+// `void*` (D3.14), so a program that calls this entry point directly gives the
+// result only to C, to `free` or to `del`; the compiler types the result of a
+// `new` itself (section 6, item 17). `free`
 // takes `void* own`, which every result of `alloc` reaches by the monotone drop
 // of D5.4. The mark reaches no instruction, no signature and no size: every
 // pointer is one machine word, so the IR form of item 7 is `ptr` either way
@@ -1106,7 +1109,7 @@ fn fail_div_zero(char* file, u32 line, u32 col) noreturn;
 fn fail_div_overflow(char* file, u32 line, u32 col) noreturn;
 fn fail_alloc_count(i64 n, char* file, u32 line, u32 col) noreturn;
 fn fail_enum(i64 v, char* type_name, char* file, u32 line, u32 col) noreturn;
-fn panic(char* ptr, u64 len, char* file, u32 line, u32 col) noreturn;
+fn panic(string msg, char* file, u32 line, u32 col) noreturn;
 fn assert_fail(char* text, char* file, u32 line, u32 col) noreturn;
 
 // Printing (D11.5, D11.7, D12.2): format one value per D11.7 and append it to the
@@ -1124,8 +1127,8 @@ fn print_f64(i32 fd, f64 v) void;
 fn print_bool(i32 fd, bool v) void;
 fn print_char(i32 fd, char c) void;
 fn print_ptr(i32 fd, void* p) void;
-fn print_str(i32 fd, char* ptr, u64 len) void;
-fn print_enum(i32 fd, i32 v, enum_member* m, u64 n) void;
+fn print_str(i32 fd, string s) void;
+fn print_enum(i32 fd, i32 v, enum_member@ table) void;
 fn flush(i32 fd) void;
 fn flush_all() void;
 
@@ -1509,10 +1512,11 @@ to the emitter's text is a change here.
     verifier's dominance rule without any analysis in the compiler.
 
 12. **Casts** (D3.14). `trunc`, `zext` and `sext` for integer to integer, widening by the
-    source's signedness; `zext i1` for `bool` to integer; `ptrtoint` and `inttoptr` for pointer
-    to and from `u64`; nothing at all for pointer to pointer and for casts that only drop
-    mutability or ownership (D5.4, D17.4); `sitofp` and `uitofp` for integer to float; `fptrunc`
-    and `fpext` for float to float; and the saturating intrinsics for float to integer, because
+    source's signedness; `zext i1` for `bool` to integer; `ptrtoint` for pointer to `u64`, and no
+    `inttoptr`, because no cast takes an integer to a pointer (D3.14); nothing at all for pointer
+    to pointer and for casts that only drop mutability or ownership (D5.4, D17.4); `sitofp` and
+    `uitofp` for integer to float; `fptrunc` and `fpext` for float to float; and the saturating
+    intrinsics for float to integer, because
     plain `fptosi` is poison out of range while D3.14 requires truncation toward zero,
     saturation at the target's range, 0 for NaN, and no trap:
 
@@ -1637,15 +1641,16 @@ to the emitter's text is a change here.
     sign-extended to `i64` to `std.rt.print_i64`; `u8 u16 u32 u64` zero-extended to `i64` to
     `print_u64`; `f32` and `f64` to `std.rt.print_f32` and `print_f64` (D18.1); `bool`
     passed as it stands to `print_bool`, whose parameter is a fort `bool`; `char` to
-    `print_char`; an enum as
-    `(i32 %v, ptr @.enum.<path.name>, i64 <count>)` to `print_enum`; a pointer, `void*` or
-    function pointer to `print_ptr`; a `string` as its `ptr` and `len`
-    fields, or as `(ptr @.str.N, i64 <len>)` for a literal, to `print_str`. Each unqualified name
+    `print_char`; an enum as `i32 %v` and a span of `@.enum.<path.name>` to `print_enum`; a
+    pointer, `void*` or function pointer to `print_ptr`; a `string`, a literal too, as one
+    `string` argument to `print_str`, by one hidden pointer (D9.9; D6.9: the runtime takes no
+    pointer and length pair). Each unqualified name
     here is a function of `std.rt` (section 5.1). `println` and its
     relatives end with `std.rt.print_char(i32 %fd, i8 zeroext 10)`. `assert(cond)` branches to
     a block that calls `std.rt.assert_fail(ptr @.str.N, ptr @.file.N, i32 line, i32 col)` and
     is followed by `unreachable`, in both build modes, where `@.str.N` is the verbatim source
-    text of the argument; `panic(msg)` calls `std.rt.panic(ptr, i64, ptr, i32, i32)` and is
+    text of the argument; `panic(msg)` calls `std.rt.panic(ptr, ptr, i32, i32)`, whose first
+    `ptr` is the hidden pointer of the `string msg` (D9.9), and is
     followed by `unreachable` (D11.4).
 
 20. **`noreturn`** (D8.5, D19.7). A `noreturn` fort function is
@@ -1760,6 +1765,10 @@ effects, and a fort `while (true) { }` must keep running (D8.4 counts it as term
 D14.2 emits no warning about what follows it).
 
 ### 6.1 A program without checks
+
+The dumps of this section and of 6.2 show the runtime before the migration of D6.9: there
+`print_str` and `panic` take a pointer and a length, and `print_enum` a pointer and a count.
+After it, each takes a `string` or a span by one hidden pointer (section 5.1).
 
 ```fort
 fn main() i32 { println("hello, world!"); return 0; }

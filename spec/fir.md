@@ -1056,8 +1056,9 @@ changes the function, and the verifier runs after it. The passes run in this ord
      2. The borrows of `copy q` or `move q` hold, for each `_x` whose address the value derives
         from, the frame of `_x` or `exposed` while `_x` is exposed. For fixed storage of a borrow
         local, (a) gives it. An `own` pointer holds the start of an allocation or `null` (D17.1,
-        A3), and no cast adds `own` (D3.14), so its value derives from no address of a local; a
-        forged owner slot is outside the guarantee (`spec/ownership-design.md` 5.1, A8). For any
+        A3), and no cast adds `own` (D3.14), so its value derives from no address of a local; no
+        rule lets a store forge an owner slot (D3.14, D17.13; `spec/ownership-design.md` 5.1,
+        A8). For any
         other place, (b) makes `_x` exposed, and the operand borrows `exposed`. An `addr` or a
         `slice` derives from the address of its base: `_x` itself, a global, which is no local, or
         the pointer that the last load reads and the index locals, whose borrows this step gives.

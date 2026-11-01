@@ -50,13 +50,13 @@ library follows:
   the result to an `own` variable, passes it to an `own` parameter or `del`s it; using it where
   a plain `string` is expected is the "owning temporary would leak" error (D17.8). `del` of a
   `string own` frees it (D17.12); the earlier `del(cast(s, u8@))` is gone.
-- **Containers own their storage, not their contents.** `str_buf`, `ptr_vec`, `int_vec` and
+- **Containers own their storage, not their contents.** `str_buf`, `int_vec` and
   `str_map` keep their storage in an `own` field, which makes each an owning aggregate (D17.7):
   it is passed by pointer (`str_buf mut*`), copying one from a variable into another needs
   `move`, and `del` of a whole container is an error. Each has a `free` that `del`s the storage
   and leaves the zero value; `free` of the zero value is a no-op (D17.9), so
-  `defer free(&c);` right after the declaration is always safe. `ptr_vec` items and `str_map`
-  keys are borrowed; freeing the container never touches them.
+  `defer free(&c);` right after the declaration is always safe. `str_map` keys are borrowed;
+  freeing the container never touches them.
 - **Out-parameters that receive ownership are pointers to `own` slots**, `u8 mut@ own mut* out`
   (D13.5, D17.2). The caller initializes the slot to `{}` or `null` and passes its address; the
   callee `del`s `*out` and then stores an `own` rvalue into it, because the entry value of `*out`
@@ -127,9 +127,9 @@ library follows:
 Module short names are the last path segment:
 `sys libc mem io str strbuf vec strmap math sort net sha256`.
 Functions, struct and enum types, enum members, fields and variables are `lower_case` with
-underscores (`str_buf`, `ptr_vec`, `str_map_entry`); module constants are `UPPER_CASE` (D1.4).
+underscores (`str_buf`, `int_vec`, `str_map_entry`); module constants are `UPPER_CASE` (D1.4).
 When a module has several struct types, the functions carry the type as a prefix
-(`vec.ptr_push`, `vec.int_push`). A variable never takes its type's name (`str_buf b`, never
+(`vec.int_push`, `strbuf.append`). A variable never takes its type's name (`str_buf b`, never
 `str_buf str_buf`; D1.4). A `char` parameter is called `ch`, and library sources do not reuse an
 import binding's name for a local even though D7.9 permits it.
 
@@ -144,10 +144,10 @@ import binding's name for a local even though D7.9 permits it.
 | `std.sys`       | `libc`, `rt`, `str`                         | exit, args, errno, env           |
 | `std.strbuf`    | `mem`                                       | growable text and byte buffer    |
 | `std.io`        | `libc`, `rt`, `mem`, `sys`, `str`, `strbuf` | descriptors, whole files, streams|
-| `std.vec`       | none                                        | `ptr_vec`, `int_vec`, the pattern|
+| `std.vec`       | none                                        | `int_vec`, the pattern           |
 | `std.strmap`    | `str`                                       | string-keyed open-addressing map |
 | `std.math`      | none                                        | float bit casts, abs, min, max   |
-| `std.sort`      | `libc`                                      | an array sorted in place         |
+| `std.sort`      | none                                        | a typed span sorted in place     |
 | `std.net`       | `libc`, `str`, `sys`                        | a TCP listener and a connection  |
 | `std.os`        | `libc`, `str`, `strbuf`                     | triple, paths, file mode         |
 
@@ -242,15 +242,14 @@ i32 EINVAL = 22;
 extern fn malloc(u64 size) void mut* own;
 extern fn calloc(u64 n, u64 size) void mut* own;
 extern fn free(void* own p) void;
-extern fn memcpy(u8 mut* dst, u8* src, u64 n) u8 mut*;
-extern fn memmove(u8 mut* dst, u8* src, u64 n) u8 mut*;
+extern fn memcpy(u8 mut* dst, u8* src, u64 n) void;
+extern fn memmove(u8 mut* dst, u8* src, u64 n) void;
 extern fn memcmp(u8* a, u8* b, u64 n) i32;
-extern fn memset(u8 mut* dst, i32 v, u64 n) u8 mut*;
+extern fn memset(u8 mut* dst, i32 v, u64 n) void;
 extern fn strlen(char* s) u64;
 extern fn getenv(char* name) char*;
 extern fn exit(i32 code) noreturn;
 extern fn abort() noreturn;
-extern fn qsort(void mut* base, u64 n, u64 size, fn (void*, void*) i32 cmp) void;
 
 // <fcntl.h>, <unistd.h>
 extern fn open(char* path, i32 flags, ...) i32;
@@ -280,6 +279,21 @@ extern fn readlink(char* path, char mut* buf, u64 size) i64;
 // A null buffer makes C allocate a result that fort cannot free, so use `os.real_path` instead.
 extern fn realpath(char* path, char mut* resolved) char*;
 
+// <dirent.h>: a directory stream is an allocation of C that closedir frees. `dirent` is the
+// x86-64 glibc layout of `struct dirent` (std/darwin/libc.ft holds the Mac layout); only `kind`
+// and `name` are read. readdir gives null at the end of the stream and on an error.
+struct dirent {
+    u64 ino;
+    i64 off;
+    u16 reclen;
+    u8 kind;
+    char[256] name;
+}
+extern fn opendir(char* path) void mut* own;
+extern fn fdopendir(i32 fd) void mut* own;
+extern fn readdir(void mut* dir) dirent*;
+extern fn closedir(void mut* own dir) i32;
+
 // The size of the buffer that realpath(3) writes, the terminating zero included.
 u64 PATH_MAX = 4096;                         // 1024 in std/darwin/libc.ft
 
@@ -288,8 +302,8 @@ u64 PATH_MAX = 4096;                         // 1024 in std/darwin/libc.ft
 i32 EEXIST = 17;
 i32 R_OK = 4;
 extern fn strerror(i32 code) char*;
-extern fn strtod(char* s, void* end) f64;
-extern fn strtof(char* s, void* end) f32;
+extern fn strtod(char* s, char* mut* end) f64;
+extern fn strtof(char* s, char* mut* end) f32;
 extern fn mkdtemp(char mut* tmpl) char*;
 extern fn setenv(char* name, char* value, i32 overwrite) i32;
 extern fn unsetenv(char* name) i32;
@@ -318,15 +332,15 @@ A C library function is declared here and nowhere else (since 2026-09-25): the c
 
 Semantics are those of the C functions. Each buffer parameter says what C means by it (1.4):
 `read`, `write` and the four `<string.h>` entries count bytes, so they take `u8*` and `u8 mut*`
-and a `u8` span's `.ptr` crosses with no cast; `malloc`, `calloc`, `qsort` and the socket
-addresses take storage of no fixed type, so they take `void*` and `void mut*`. The `mut` is
+and a `u8` span's `.ptr` crosses with no cast; `malloc`, `calloc` and the socket addresses take
+storage of no fixed type, so they take `void*` and `void mut*`. The `mut` is
 there exactly where C's own prototype has no `const`, so the type system refuses a buffer the
 caller may not write: `libc.read(fd, view.ptr, view.len)` on a `u8@` is
 "the argument expects u8 mut*, not u8*".
 `malloc` and `calloc` return `void mut* own`, storage of no type that the caller may write, and
 `free` takes `void* own`, which every result reaches by dropping marks (D3.11, D5.4, D17.13):
 the `own` is erased at the boundary and states C's convention, so the pair is interchangeable
-with `new` and `del` (D10.3) and exists for code that sizes an allocation in bytes.
+with `new` and `del` (D10.3) and exists for storage that fort code gives to C.
 `calloc` returns zeroed storage for `n` items of `size` bytes, or null, and is what `std.rt`
 allocates with, since `new` promises zeroed memory (D10.2, `toolchain.md` 5.1); `isatty` answers
 D11.5's question about a descriptor and is asked once per buffer (`toolchain.md` 5.3).
@@ -335,17 +349,24 @@ writes errno back around that `isatty` (`toolchain.md` 5.3), and a caller that o
 the `mut` on the way (D5.4), which is what `sys.errno()` does. Both are
 here because the runtime is a module of this library and imports `std.libc` like any other
 (D13.1); no other module calls them.
-`u8 mut* own p = cast(libc.malloc(n), u8 mut* own);` types the block, the cast's result being
-`own` because its target says so and the `malloc` result says so too (D3.14; `p` is `null` when
-C is out of memory, where `new` would trap, D10.2), `p[0..n]` is a
-`u8 mut@` view of it (D6.9), and `del(p)` releases it; so does
-`libc.free(cast(move(p), void* own))`, where the `own` lvalue must be moved into the `own`
-parameter (D6.11) and is left `null` (D17.6). `memcpy`, `memmove` and `memset` return their
-`dst` argument, a view, so each returns `u8 mut*`. `libc.exit` does not flush the runtime's
-output buffers; programs call `sys.exit`. `libc.abort` is what the runtime calls after a
-runtime error (D11.4). `qsort` orders `n` elements of `size` bytes in place and calls `cmp` with
-a pointer to each of two of them; `std.sort` wraps it and is what a caller uses (2.10), and
-`module-system.md` 8.5 gives the rule the `cmp` parameter obeys.
+No cast gives a type to the `void*` of `malloc` or `calloc` (D3.14), so fort code gives that
+storage to C and releases it with `del` or `libc.free(move(p))`, where the `own` lvalue must be
+moved into the `own` parameter (D6.11) and is left `null` (D17.6). A program that wants typed
+storage uses `new`. C's `memcpy`, `memmove` and `memset` return their `dst` argument, and the
+declarations here give no result: a result would give back the `.ptr` of an empty span as a
+`u8 mut*` to the byte after the span (D3.5), and no code of the six trees used it. A program that
+declares one of them must write the same `void` result (D9.8). `strtod` and `strtof` take
+`char* mut* end`, because C writes a `char*` into `*end` (A7 of `ownership-design.md` 5.1);
+`std.rt` passes `null`.
+`libc.exit` does not flush the runtime's output buffers; programs call `sys.exit`. `libc.abort`
+is what the runtime calls after a runtime error (D11.4). `std.libc` declares no `qsort`: its
+comparator reads each element through a cast from a `void*`, which no cast allows (D3.14), and
+`std.sort` sorts typed spans in fort (2.10). A directory stream of `opendir` and `fdopendir` is an
+allocation of C, so each result says `own`, and `closedir` takes it with `move`; a `del` of it
+frees the memory and leaves the descriptor open. `readdir` gives a typed `dirent*`, a view of
+storage of C that the next `readdir` of the stream can change, or null at the end of the stream
+and on an error. `__errno_location` has no pointer parameter, so its `i32 mut*` result names
+storage of C and stays legal (D17.13).
 Ownership: `malloc`, `calloc` and `free` carry it in their types, so a
 `calloc` result is released like a `malloc` one and not dropped; every other extern here takes
 and returns views, and the library wraps every ownership-bearing call below.
@@ -546,7 +567,12 @@ fn is_hex(char ch) bool
   `libc.open(c.ptr, ...)`, since `.ptr` lends (D17.3).
 - `from_cstr`: wraps the C string at `p` as `p[0..libc.strlen(p)]` cast to `string`; no copy,
   so the result aliases `p` and stays valid as long as `p` does. `from_cstr(null)` is the zero
-  string. Ownership: a view (D17.3) of whatever owns `p`; `del` on it does not compile.
+  string. It is the one trusted form by which a program gets a span from a raw pointer: no other
+  function takes a span of a raw pointer but `rt.args_init`, which no source calls (D6.9).
+  It trusts that a NUL ends `p` inside its storage, as `strlen` does; a `p` with no such NUL is
+  outside the guarantee of D10.7 (A7 of `ownership-design.md` 5.1). Ownership: a view (D17.3) of
+  whatever owns `p`; `del` on it does
+  not compile.
 - `parse_i64`: decimal with an optional leading `-`, at least one digit and nothing else: no
   `+`, no whitespace, no `_`. Returns `false` on a syntax error or when the value does not fit
   `i64`; `-9223372036854775808` is accepted. Overflow is detected arithmetically, without
@@ -690,39 +716,22 @@ fn emit_mov(i32 fd) bool {
 
 ### 2.7 `std.vec`
 
-Growable sequences of pointers and of `i64`, and the pattern for every other element type.
+A growable sequence of `i64`, and the pattern for every other element type.
 
 ```fort
-struct ptr_vec {
-    void mut* mut@ own items;   // slots the vector owns; items.len is the cap
-    u64 len;                    // slots in use; len <= items.len
-}
-
 struct int_vec {
-    i64 mut@ own items;
-    u64 len;
+    i64 mut@ own items;   // slots the vector owns; items.len is the cap
+    u64 len;              // slots in use; len <= items.len
 }
 ```
 
-Both structs are 24 bytes with `items` at offset 0 and `len` at offset 16 (`own` is erased,
-D17.1); `{}` is a valid empty vector. Both are owning aggregates (D17.7): functions take them by
-pointer and `*_free` releases them. Each `own` marks one reference (D17.2), so a `ptr_vec` owns its
-slots and borrows every pointer in them: `ptr_push` lends its argument (D17.4), `ptr_pop`
-returns a view, and `ptr_free` never touches a pointee. The slots hold `void mut*`, which is
-what `new` answers with (D5.8): a caller pushes a pointer to storage it may write and gets one
-back, a caller that only reads what it pops drops the mark on the way out (D5.4), and a caller
-holding an immutable pointer casts on the way in (D3.11). The live elements are
-`v.items[..v.len]`. Indexing `v.items[i]` with `v.len <= i < v.items.len` is not a runtime
-error; it reads a zero or stale slot, so code that wants a bounds check indexes the live span.
+The struct is 24 bytes with `items` at offset 0 and `len` at offset 16 (`own` is erased, D17.1);
+`{}` is a valid empty vector. It is an owning aggregate (D17.7): functions take it by pointer and
+`int_free` releases it. The live elements are `v.items[..v.len]`. Indexing `v.items[i]` with
+`v.len <= i < v.items.len` is not a runtime error; it reads a zero or stale slot, so code that
+wants a bounds check indexes the live span.
 
 ```fort
-fn ptr_create() ptr_vec
-fn ptr_with_cap(u64 cap) ptr_vec
-fn ptr_free(ptr_vec mut* v) void
-fn ptr_reserve(ptr_vec mut* v, u64 extra) void
-fn ptr_push(ptr_vec mut* v, void mut* p) void
-fn ptr_pop(ptr_vec mut* v) void mut*
-
 fn int_create() int_vec
 fn int_with_cap(u64 cap) int_vec
 fn int_free(int_vec mut* v) void
@@ -731,28 +740,26 @@ fn int_push(int_vec mut* v, i64 x) void
 fn int_pop(int_vec mut* v) i64
 ```
 
-- `*_create`, `*_with_cap`, `*_free`, `*_reserve`: exactly as their `strbuf` counterparts,
-  counting elements instead of bytes and using the same growth policy (16, then doubling).
-  Growth copies the elements to fresh storage with an element loop, then `del`s the old span
-  and stores the new one (`del(v->items); v->items = move(bigger);`, D17.11), which is what
-  makes the file usable as a template. Ownership: `*_free` `del`s the slots and leaves `{}`; it
-  never frees the pointees of a `ptr_vec`.
-- `*_push`: appends one element, growing as needed. `*_pop`: removes and returns the last
-  element; panics with `"vec.ptr_pop: empty"` or `"vec.int_pop: empty"` on an empty vector.
+- `int_create`, `int_with_cap`, `int_free`, `int_reserve`: exactly as their `strbuf`
+  counterparts, counting elements instead of bytes and using the same growth policy (16, then
+  doubling). Growth copies the elements to fresh storage with an element loop, then `del`s the
+  old span and stores the new one (`del(v->items); v->items = move(bigger);`, D17.11), which is
+  what makes the file usable as a template. Ownership: `int_free` `del`s the slots and leaves
+  `{}`.
+- `int_push`: appends one element, growing as needed. `int_pop`: removes and returns the last
+  element; panics with `"vec.int_pop: empty"` on an empty vector.
 
 This module is the non-generic container pattern (D15). To hold `token` values, copy `int_vec`
 and its six functions, replace `i64` with `token` and the prefix `int_` with `token_`: about
-forty lines, type-checked like any other code. `ptr_vec` is for elements that must not be
-copied and belong to someone else (an arena, a fixed array, an owner that outlives the vector):
-store `cast(p, void mut*)` and cast back on retrieval; the slots are `void mut*` and `ptr_pop`
-answers `void mut*`, so a `node mut*` survives the round trip with the mark it went in with. A
-`node*` does not go in at all, because `ptr_push` takes a `void mut*` and no cast adds the mark
-(D3.14). The element type holds no pointer place, because the cast of a pointer to it to
-`void mut*` would hide each pointer place and the cast back would add them (D3.14). A container of
-immutable pointers is a different container, and this pattern makes one:
-copy the file with the slot type `void*`. When the vector is to own its elements, copy
-the file with the slot type `node mut* own mut@ own items;` instead, an owned span of owned nodes
-(D17.2):
+forty lines, type-checked like any other code. The module has no vector of `void*`: no cast gives
+a type to a `void*` (D3.14), so a pointer that went in as a `void*` could not come back as a
+typed pointer. A vector of pointers is a typed copy of the pattern. For pointers to elements that
+belong to someone else (an arena, a fixed array, an owner that outlives the vector), copy the file
+with the slot type `node mut* mut@ own items;`: `node_push(node_vec mut* v, node mut* n)` stores
+the view, `node_pop` returns `node mut*`, and `node_free` never touches a pointee. A typed handle
+is the other form: an `int_vec` of indices into a typed span that the caller owns. When the
+vector is to own its elements, copy the file with the slot type `node mut* own mut@ own items;`
+instead, an owned span of owned nodes (D17.2):
 `node_push(node_vec mut* v, node mut* own n)` copies the index into a local and empties the slot
 first, `u64 k = v->len; del(v->items[k]); v->items[k] = move(n);` (a parameter is an `own`
 lvalue, D17.5). The `del` frees nothing, because a fresh slot is zero at run time (D10.2), but
@@ -764,9 +771,13 @@ before the span; and a range loop over the live span lends,
 `for (node mut* n : v->items[..v->len])` (D17.10).
 
 ```fort
-import std.vec;
-
 struct node { i64 value; }
+
+// A vector of views of nodes: a typed copy of int_vec with the slot type node mut*.
+struct node_vec {
+    node mut* mut@ own items;
+    u64 len;
+}
 
 // A read through a pointer parameter: the owner is no local owner here (D17.21).
 fn value_of(node* p) i64 {
@@ -774,14 +785,14 @@ fn value_of(node* p) i64 {
 }
 
 fn demo() i64 {
-    vec.ptr_vec mut stack = vec.ptr_create();
-    defer vec.ptr_free(&stack);
+    node_vec mut stack = node_vec{};
+    defer node_free(&stack);
     node mut* own n = new(node);              // new lands in an own place (D17.3, D17.8)
     defer del(n);
     n->value = 7;
-    vec.ptr_push(&stack, cast(n, void mut*)); // lends n; the vector never frees it
-    node* top = cast(vec.ptr_pop(&stack), node*);
-    return value_of(top);   // top->value here could read stack after the call (D17.21)
+    node_push(&stack, n);                     // lends n; the vector never frees it
+    node mut* top = node_pop(&stack);         // the type that went in comes back
+    return value_of(top);
 }
 ```
 
@@ -851,11 +862,10 @@ fn count(str_map* m) u64
 - `get`: `true` and `*out = val` when present; `false` with `*out` unchanged otherwise. `has`:
   the presence test alone. `remove`: `true` when the key was present. `count`: `live`.
 
-To map names to pointers, keep the pointers in a span beside the map and store the index. A
-`sym` holds a `string`, a pointer place, so a pointer to it goes into no `vec.ptr_vec`: the cast
-to `void mut*` would hide that place (D3.14). The table copies the vector pattern with the slot
-type `sym mut*` (2.7). A struct that holds two containers is itself an owning aggregate (D17.7),
-so it is passed by pointer and gets a `free` of its own:
+To map names to pointers, keep the pointers in a span beside the map and store the index. The
+table copies the vector pattern with the slot type `sym mut*` (2.7), because no container holds
+a `void*` that a cast could type again (D3.14). A struct that holds two containers is itself an
+owning aggregate (D17.7), so it is passed by pointer and gets a `free` of its own:
 
 ```fort
 import std.strmap;
@@ -956,101 +966,48 @@ fn is_negative_zero(f64 x) bool {
 
 ### 2.10 `std.sort`
 
-An array sorted in place, over `libc.qsort` (D13.2, 2.2).
+A typed span sorted in place, in fort, and the pattern for each other element type (D13.2).
 
 ```fort
-fn sort(void mut* base, u64 n, u64 elem_size, fn (void*, void*) i32 cmp) void
-fn sort_i64(i64 mut@ items, fn (void*, void*) i32 cmp) void
-fn sort_u64(u64 mut@ items, fn (void*, void*) i32 cmp) void
-fn sort_ptr(void* mut@ items, fn (void*, void*) i32 cmp) void
-fn cmp_i64(void* a, void* b) i32
-fn cmp_u64(void* a, void* b) i32
+fn sort_i64(i64 mut@ items, fn (i64*, i64*) i32 cmp) void
+fn sort_u64(u64 mut@ items, fn (u64*, u64*) i32 cmp) void
+fn cmp_i64(i64* a, i64* b) i32
+fn cmp_u64(u64* a, u64* b) i32
 ```
 
-- `sort`: orders the `n` elements of `elem_size` bytes that start at `base`, in place, so that
-  `cmp` answers zero or less for every adjacent pair. The element type holds no pointer place:
-  `sort` is a fort function, so the cast of the elements to `void mut*` for its `base` would hide
-  each pointer place (D3.14); `libc.qsort`, an `extern fn`, takes such elements. The order is **not
-  stable**: two elements the comparator calls equal come out in an unspecified order, because
-  `qsort` is what C specifies. Panics with `"sort.sort: element size is zero"` when `elem_size` is
-  0, with
-  `"sort.sort: null comparator"` when `cmp` is `null`, since calling a null function pointer is
-  undefined (D3.10), and with `"sort.sort: null base"` when `base` is `null` and `n` is above 0.
-  **The three tests come before the count**, so `sort(base, 0, 0, cmp)` panics and
-  `sort(base, 1, elem_size, null)` panics: a call that asks for nothing is still a call that must
-  say what it is sorting. An `n` below 2 that passes the three tests returns at once and makes no
-  C call, which is how the null `.ptr` of a zero span (D3.5) stays out of C. The three typed
-  entries below delegate, so their panics name `sort.sort` as well. Ownership: none; `base` is a
-  view and no `own` crosses to C (1.4, D17.13).
-- `sort_i64`, `sort_u64`, `sort_ptr`: `sort(cast(items.ptr, void mut*), items.len, sizeof(T), cmp)`
-  for `T` equal to `i64` and `u64`; `sort_ptr` makes the checks of `sort` and passes its slots,
-  pointer places, to `libc.qsort` as an exempt argument (D3.14). A span carries its length (D3.5)
-  and its element type fixes `sizeof` (D3.15), so two of the four arguments disappear and the caller
-  cannot pass a count or an element size that disagrees with the storage. The parameter is `T mut@`,
-  which is the second thing these entries add: the elements must be mutable and the compiler checks
-  it here, whereas a `void mut*` says that the bytes may be written and nothing about how many or
-  how wide (D3.11), so `sort` can check nothing else. `sort_ptr` marks the slots and not the
-  pointees, because the sort permutes the slots and never writes through a pointee. A caller holds
-  slots of `void*`: from `void mut* mut@`, which is what `vec.ptr_vec` holds (2.7), no conversion
-  and no cast reaches `void* mut@`, because the drop of the mark at level 2 behind the `mut` level 1
-  changes the type of a pointer place (D5.4, D3.14). Ownership: none; an `own` span argument lends
-  (D17.4).
+- `sort_i64`, `sort_u64`: order the elements of `items` in place, so that `cmp` answers zero or
+  less for every adjacent pair. The sort is written in fort and makes no C call. The order is
+  **not stable**: two elements that the comparator calls equal come out in an unspecified order.
+  Each panics with `"sort.sort_i64: null comparator"` or `"sort.sort_u64: null comparator"` when
+  `cmp` is `null`, since calling a null function pointer is undefined (D3.10), and the test
+  comes before the count, so a span of 0 or 1 elements with a `null` comparator panics too. A
+  span carries its length (D3.5), so the caller cannot pass a count that disagrees with the
+  storage, and the parameter `T mut@` says that the elements must be mutable. Ownership: none;
+  an `own` span argument lends (D17.4).
 - `cmp_i64`, `cmp_u64`: ready-made ascending comparators, `-1`, `0` or `1`. `cmp_u64` compares
   unsigned, so it orders `0xFFFFFFFFFFFFFFFF` last where `cmp_i64` on the same bytes orders it
   first. A qualified function name is a value (D3.10), so a call reads
   `sort.sort_i64(xs, sort.cmp_i64)`. A descending order is a comparator of the caller's own with
   the two arguments exchanged.
 
-**The comparator.** Its type is C's, `fn (void*, void*) i32`, because `qsort` is what calls it;
-fort has neither generics nor overloading (D8.3, D15), so there is no per-element comparator
-type and every comparator reads its two elements through `*cast(a, T*)` (D3.11). A cast from
-`void*` gives no pointer place that carries `mut` or `own` (D3.14), so for an element whose
-pointers carry a mark `T` is a view type of the same layout whose pointers carry none:
-`struct item_view { u64 key; u8* buf; }` reads a `struct item { u64 key; u8 mut* buf; }`.
-It answers a
-negative `i32` when the element at `a` sorts before the element at `b`, `0` when the two tie, and
-a positive one when it sorts after. It must be a total order and it must be consistent between
-calls; it must not change the elements, and it must not call `sort` on the same array. C leaves
-the result of the whole call undefined when it does. A comparator may `panic` (D12.2): the
-failure path flushes the print buffers and aborts (D11.4) from inside the C frame, the array is
-left half sorted, and no deferred code of the caller runs, which is what a panic does everywhere
-else. A fort function is usable as a callback
-exactly when its signature is extern-legal (D9.9), which this one is
-(`module-system.md` 8.5); an `extern` name cannot be a comparator, because an extern is not a
-value (D3.10).
+**The comparator.** Its type is `fn (T*, T*) i32` for the element type `T`: it reads two
+elements through typed pointers, with no cast. It answers a negative `i32` when the element at
+`a` sorts before the element at `b`, `0` when the two tie, and a positive one when it sorts
+after. It must be a total order and it must be consistent between calls; it must not change the
+elements, and it must not call the sort on the same span. When it breaks this, the order of the
+result is unspecified, and each element of the input is still in the span once. A comparator may
+`panic` (D12.2): the span is left half sorted, and the failure path runs as everywhere else.
 
-**What a caller may sort.** `n * elem_size` bytes must exist at `base` and must belong to one
-array of that element type. Nothing checks it: `base` is a `void*` and carries neither a length
-nor a type, so an `n` above the storage reads and writes past the end in silence, exactly as C
-does. Its `mut` says that C writes those bytes and nothing about how many. The three typed
-entries take the count from the span and cannot get it wrong, which is the first reason to use
-one.
-
-The element type must own nothing (D17). `sort` permutes the
-elements byte by byte inside C: the compiler tracks ownership by variable and by field (D17.1,
-D17.7) and sees none of that permutation, and `qsort` may hold a copy of an element in a
-temporary of its own while it works, so an element carrying `own` exists twice for part of the
-call with nothing to end either copy. D17.14 already leaves a `cast`-made duplicate untracked,
-and this is the same hole one call deeper. So:
-
-- Sort arrays of integers, floats, `char`, `bool`, enums, pointers, `string` and structs whose
-  fields are all of those. `string` is a view (1.3) and `sizeof(string)` is 16 (D3.15), so an
-  array of strings sorts like any other struct.
-- Do not sort an array of `T@ own`, of `string own`, or of a struct with an `own` field. Nothing
-  rejects it, because ownership stops at the `void mut*`, and the result is a leak or a double
-  free.
-  Order owned data by sorting views of it and leaving the owner where it is: an array of `string`
-  views into an owning buffer, an array of pointers, or an array of indices. The items of a
-  `ptr_vec` are borrowed for this reason (1.3, 2.7).
-- An element must hold no pointer into the array itself. The permutation moves every element and
-  leaves such a pointer at the wrong one.
-- The elements must be mutable. The three typed entries say so in their parameter types and the
-  compiler rejects an immutable span; `sort` says less, because its `void mut*` says that the
-  bytes may be written and nothing about how many or how wide (D3.11). A caller cannot reach it
-  with immutable elements either: `items.ptr` of an `i64@` is an `i64*`, and `cast(items.ptr,
-  void mut*)` adds the mark, which no cast does (D3.14). So the two entries agree on this one
-  rule, the typed entries by the element type and the core entry by the mark on its `base`. What
-  the core entry still cannot check is the count and the width.
+**Each other element type.** fort has neither generics nor overloading (D8.3, D15), so this
+module is the pattern of `std.vec`: to sort `point` values, copy `sort_i64`, replace `i64` with
+`point` and the prefix with `point_`. The comparator then takes `point*` and reads the fields.
+The module has no sort of `void*` elements and no sort over `libc.qsort`: the comparator of
+`qsort` reads each element through a cast from a `void*`, and no cast gives a type to a `void*`
+(D3.14). To order data that a pointer or an owner holds, sort a typed span of pointers with a
+typed copy, or sort an `int_vec` of indices with a comparator that reads the data of the caller.
+The elements of `sort_i64` and `sort_u64` own nothing. A typed copy for an element type that
+holds an owner moves each element with `move` (D17.5), as the growth loop of `std.vec` does; the
+simpler way orders views of owned data, pointers or indices, and leaves the owner where it is.
 
 ```fort
 import std.sort;
@@ -1060,9 +1017,9 @@ struct point {
     i64 y;
 }
 
-fn by_x(void* a, void* b) i32 {
-    point* p = cast(a, point*);
-    point* q = cast(b, point*);
+// The comparator of point_sort, a copy of sort.sort_i64 in the module of the caller with i64
+// replaced by point; the copy is not shown.
+fn by_x(point* p, point* q) i32 {
     if (p->x < q->x) {
         return -1;
     }
@@ -1073,7 +1030,7 @@ fn by_x(void* a, void* b) i32 {
 }
 
 fn order(point mut@ ps, i64 mut@ xs) void {
-    sort.sort(cast(ps.ptr, void mut*), ps.len, sizeof(point), by_x);
+    point_sort(ps, by_x);                 // the copy of sort_i64 for point
     sort.sort_i64(xs, sort.cmp_i64);
 }
 ```
