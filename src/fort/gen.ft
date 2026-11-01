@@ -1548,30 +1548,30 @@ fn gen_main(emitter mut* g, ast.sym* main_sym) void {
     strbuf.append_u64(&g->allocas, SPAN_ALIGN);
     strbuf.push(&g->allocas, '\n');
     gen_args mut init_args = gen_args_init();
+    defer del(init_args.text.data);
     gen_args_add(&init_args, gen_literal(g, "i32", "%argc"));
     gen_args_add(&init_args, gen_literal(g, "ptr", "%argv"));
     gen_call_rt(g, runtime_sig.rt_entry.rt_args_init, &init_args);
-    gen_args_free(&init_args);
     // The hidden result pointer carries `sret`, as it does at every aggregate call.
     gen_args mut args_args = gen_args_init();
+    defer del(args_args.text.data);
     gen_args_add_ext(&args_args, span, "sret(%fort.span)");
     gen_call_rt(g, runtime_sig.rt_entry.rt_args, &args_args);
-    gen_args_free(&args_args);
     // The program's `main` takes the span at `%args` when it declares the parameter. The span is
     // the caller-made copy of an aggregate argument, so the callee uses it in place.
     gen_args mut main_args = gen_args_init();
+    defer del(main_args.text.data);
     // made after main_args, because prover.prove_uses takes each call as a change of `s`
     signature mut s = signature_of(g, main_sym->ty, null);
-    defer signature_free(&s);
+    defer del(s.params);
     if (s.params.len == 1) {
         gen_args_add_ext(&main_args, span, s.params[0].attr);
     }
     gen_val callee = gen_literal(g, "ptr", gen_symbol_ref(g, main_sym));
     gen_val status = gen_call_sig(g, &s, callee, false, &main_args);
-    gen_args_free(&main_args);
     gen_args mut flush_args = gen_args_init();
+    defer del(flush_args.text.data);
     gen_call_rt(g, runtime_sig.rt_entry.rt_flush_all, &flush_args);
-    gen_args_free(&flush_args);
     gen_val masked = gen_binary(g, "and", status, gen_const_unsigned(g, "i32", STATUS_MASK));
     strbuf.append(&g->body, "  ret i32 ");
     strbuf.append(&g->body, masked.val);

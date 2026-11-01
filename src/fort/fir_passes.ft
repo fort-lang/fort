@@ -179,9 +179,16 @@ fn substitute(fir.func mut* f, mask@ masks) void {
     }
     u32 width = cast(masks.len, u32);
     fir.pred_table mut pt = fir.func_predecessors(f);
-    defer fir.pred_table_free(&pt);
+    defer {
+        del(pt.first);
+        del(pt.preds);
+    }
     mask_table mut mt = table_new(f, masks);
-    defer table_free(&mt);
+    defer {
+        del(mt.of_value);
+        del(mt.of_count);
+        del(mt.next);
+    }
     fir_flow.bits mut@ own ends = new(fir_flow.bits, f->blocks.len);
     u64 mut b = 0;
     while (b < ends.len) {
@@ -190,6 +197,7 @@ fn substitute(fir.func mut* f, mask@ masks) void {
         b += 1;
     }
     fir_flow.bits mut live = fir_flow.bits_new(width);
+    defer del(live.words);
     bool mut changed = true;
     while (changed) {
         changed = false;
@@ -210,7 +218,6 @@ fn substitute(fir.func mut* f, mask@ masks) void {
         walk_masks(f, &mt, cast(b, u32), &live, true);
         b += 1;
     }
-    fir_flow.bits_free(&live);
     b = 0;
     while (b < ends.len) {
         fir_flow.bits_free(&ends[b]);
@@ -247,12 +254,6 @@ fn table_new(fir.func* f, mask@ masks) mask_table {
         }
     }
     return mt;
-}
-
-fn table_free(mask_table mut* mt) void {
-    del(mt->of_value);
-    del(mt->of_count);
-    del(mt->next);
 }
 
 // The first mask whose count is local `l`, or NO_LOCAL.
@@ -555,7 +556,10 @@ fn fold_store(fir.func mut* f, u32 b, fir.place p, u32@ uses) void {
 fn merge_blocks(fir.func mut* f, removal mut@ done) void {
     u64 n = f->blocks.len;
     fir.pred_table mut pt = fir.func_predecessors(f);
-    defer fir.pred_table_free(&pt);
+    defer {
+        del(pt.first);
+        del(pt.preds);
+    }
     bool mut@ own gone = new(bool, n);
     defer del(gone);
     u64 mut k = 0;

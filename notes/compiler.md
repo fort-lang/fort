@@ -1076,6 +1076,31 @@ came here.
   each element in its initializer, so no `del` of one element comes before a read of another
   (`test/lang/run/ownership/016`). Read early and one initializer are no forms of X2; the
   coordinator ratified both as simpler forms that remove the use.
+- **End an owning aggregate local in a form that part 1 of the leak rule proves** (D17.20,
+  `spec/fir.md` 11, Aggregates). The pass reads no callee, a call kills each fact of a memory
+  local (D17.11 kill rule 5), and the `dead` markers of a scope come after each of its deferred
+  statements (`spec/fir.md` 9.5), also after the move of a `return` operand (9.6). So each owner
+  below the local needs a `del`, a `move` or a test on null after the last call of the exit. A
+  call that takes the local by `move`, as `drop(move(x))`, kills the facts of `x` too when the
+  function takes the address of `x` anywhere. Seven forms remove a site. Del: a free that only
+  dels the owners of its parameter becomes the `del` of each owner (`defer del(buf.data)` for
+  `strbuf.free(&buf)` in `std/io.ft`). End: a free that must call stays, and after it each owner
+  takes a `del`, or a loop on `!= null` when its object holds owners, a chain such as
+  `pool.head`: a `del` of a chain is a site of part 2 (`--leak-report`), the loop proves the chain
+  null on its exit edge, and `assert(x == null)` does not (`check.check_pointer_places`; a pool
+  alone ends with the loop, `library/tree.walk_dir`). The form proves one chain of a local: the
+  call in the body of a second loop kills the fact of the first chain. Order: the deferred
+  statements run from the last, so write the `del`s first and the ends that call last; a scope
+  holds one end that calls and then dels, because its call kills the `del`s of a second one
+  (`prover.run_facts`, `driver.run_cc`). Block: two locals whose ends call end in blocks of their
+  own (`prover.find_causes`). Split: a function that returns a local holds no deferred
+  call after the move of its result, and a helper holds the other locals
+  (`fir_parse.parse_into`, `prover.prove_into`). Drop: a value that moves out of an allocation
+  into a local whose address no call takes ends with a free that takes it by `move`
+  (`fir.func_drop`, `scope.drop`). Allocation: a local that the function lends to calls lives in an
+  allocation, whose `own` pointer no call changes (`fir_flow.dataflow_make` and `dataflow_drop` in
+  `prover.run_dataflows`). No form stores the zero value over a live aggregate: D17.11 checks no
+  aggregate store field by field, so `x = T{}` would quiet the report and leak.
 - **The ownership summaries come from the call graph of the proved functions**
   (`spec/ownership-design.md` 8, `src/fort/owner/summary.ft`). `summary.add` takes each function
   that the emptiness pass proves with no error, with `proof.inner_work` (the largest of the three

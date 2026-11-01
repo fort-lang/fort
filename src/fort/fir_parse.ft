@@ -307,7 +307,7 @@ fn scan_string(scanner mut* sc) bool {
     u32 line = sc->line;
     u32 col = sc->col;
     lexer.tok_vec mut one = lexer.tokvec_create();
-    defer lexer.tokvec_free(&one);
+    defer del(one.items);
     lexer.lexer mut lx = lexer.lexer{
         .sess = sc->sess,
         .file = sc->file,
@@ -319,8 +319,8 @@ fn scan_string(scanner mut* sc) bool {
         .buf = strbuf.create(),
         .msg = strbuf.create(),
     };
-    defer strbuf.free(&lx.buf);
-    defer strbuf.free(&lx.msg);
+    defer del(lx.buf.data);
+    defer del(lx.msg.data);
     if (!lexer.lex_string(&lx)) {
         sc->clean = false;
         // the rest of the line holds no token that the string did not end
@@ -433,7 +433,7 @@ fn scan_one(scanner mut* sc) void {
 /// diagnostic too. Returns true when no diagnostic was reported.
 fn tokenize(session.session mut* s, string file, string src, ftok_vec mut* out) bool {
     scanner mut sc = scanner{s, file, src, 0, 1, 1, out, strbuf.create(), true};
-    defer strbuf.free(&sc.msg);
+    defer del(sc.msg.data);
     // the tokens of one file share the diagnostics of that file, as the lexer's do
     diag.begin_file(session.diags(s));
     while (true) {
@@ -887,7 +887,7 @@ fn parse_type_text(fir_parser mut* p, string text, diag.loc at) types.node* {
 // `p->pre.ck` with no local owner that a call can vacate.
 fn parse_type_tree(fir_parser mut* p, string text, diag.loc at, u64 before) ast.node mut* {
     lexer.tok_vec mut toks = lexer.tokvec_create();
-    defer lexer.tokvec_free(&toks);
+    defer del(toks.items);
     lexer.lexer mut lx = lexer.lexer{
         .sess = p->sess,
         .file = p->file,
@@ -898,9 +898,11 @@ fn parse_type_tree(fir_parser mut* p, string text, diag.loc at, u64 before) ast.
         .buf = strbuf.create(),
         .msg = strbuf.create(),
     };
+    defer {
+        del(lx.buf.data);
+        del(lx.msg.data);
+    }
     bool lexed = lexer.lex_all(&lx);
-    strbuf.free(&lx.buf);
-    strbuf.free(&lx.msg);
     if (!lexed) {
         return null;
     }
@@ -913,10 +915,10 @@ fn parse_type_tree(fir_parser mut* p, string text, diag.loc at, u64 before) ast.
         .last = diag.loc_make(p->file, 0, 0),
         .msg = strbuf.create(),
     };
+    defer del(pp.msg.data);
     ast.node mut* n = parser.parse_type(&pp, false);
     bool rest = parser.kind(&pp) != lexer.tok_kind.eof;
     diag.loc rest_at = parser.here(&pp);
-    strbuf.free(&pp.msg);
     if (n == null) {
         if (session.error_count(p->sess) == before) {
             fail_at(p, at, "expected a type");
@@ -2128,12 +2130,17 @@ fn read_headers(fir_parser mut* p, fir.module mut* m, pos_vec mut* bodies) void 
             } else if (kind(p) != ftok_kind.ft_lbrace) {
                 fail_expected(p, "'{'");
             } else {
-                fir.func mut f = fir.func{};
-                if (function_of(p, &h, &f)) {
+                // The function is made in an allocation and moves out to a local whose address
+                // no call takes, so that the call that takes it ends the local.
+                fir.func mut* own made = new(fir.func);
+                bool ok = function_of(p, &h, made);
+                fir.func f = move(*made);
+                del(made);
+                if (ok) {
                     pos_push(bodies, p->pos);
                     fir.module_add_function(m, move(f));
                 } else {
-                    fir.func_free(&f);
+                    fir.func_drop(move(f));
                 }
             }
         }
@@ -2149,19 +2156,37 @@ fn read_headers(fir_parser mut* p, fir.module mut* m, pos_vec mut* bodies) void 
 /// nothing, so the module is empty. When the session counts a new error, the module is incomplete
 /// and serves module_free alone.
 fn parse_module(session.session mut* s, string file, string text, prelude pre) fir.module {
-    fir_parser mut p = parser_create(s, file, text, pre);
-    defer parser_free(&p);
     fir.module mut m = fir.module_new();
-    if (!p.clean) {
-        // a malformed token is its one diagnostic, and no function is read
-        return m;
-    }
+    parse_into(s, file, text, pre, &m);
+    return m;
+}
+
+// Parses `text` into `m` for parse_module. The parser is a local here, so that no deferred call
+// of parse_module comes after the move of its result.
+fn parse_into(session.session mut* s, string file, string text, prelude pre, fir.module mut* m)
+    void {
     pos_vec mut bodies = pos_vec{};
     defer del(bodies.items);
-    read_headers(&p, &m, &bodies);
-    parse_bodies(&p, &m, &bodies);
-    fir.module_collect_externs(&m);
-    return m;
+    fir_parser mut p = parser_create(s, file, text, pre);
+    defer {
+        parser_free(&p);
+        // The leak rule reads no callee: after the calls, the test of a loop proves each chain
+        // empty, and each other owner takes a `del`.
+        while (p.arena.last != null) {
+            ast.ast_arena_free(&p.arena);
+        }
+        del(p.toks.items);
+        del(p.refs.items);
+        del(p.arena.nodes);
+        del(p.msg.data);
+    }
+    if (!p.clean) {
+        // a malformed token is its one diagnostic, and no function is read
+        return;
+    }
+    read_headers(&p, m, &bodies);
+    parse_bodies(&p, m, &bodies);
+    fir.module_collect_externs(m);
 }
 
 // Parses the body of each function of `m`, which starts at its position in `bodies`. The caller
