@@ -152,6 +152,7 @@ struct options {
     bool no_bounds_check; // --no-bounds-check
     bool check; // --check: the front end alone
     bool leak_report; // --leak-report: each leak site that is no error yet, on stdout
+    bool aggregate_report; // --aggregate-report: each leak of an owning aggregate local, on stdout
     bool json; // --json, the document on stdout
     bool index; // --index, the identifier index in it
     bool tokens; // --tokens: the entry file's tokens on stdout
@@ -223,6 +224,7 @@ fn help() void {
     println("  -Xcc <arg>         pass <arg> to --cc verbatim; repeatable, in order");
     println("  --check            check the program, its overwrites, leaks and uses; emit nothing");
     println("  --leak-report      as --check, and write each leak site that is no error yet");
+    println("  --aggregate-report as --check, and write each leak of an owning aggregate local");
     println("  --json             write the check document to stdout; needs --check");
     println("  --index            fill the document's identifier index; implies --check --json");
     println("  --tokens           write the entry file's tokens to stdout and stop");
@@ -372,7 +374,7 @@ fn parse_cfg(options mut* opts, string list) bool {
 }
 
 // The options that carry no value: -S, -c, --release, --no-bounds-check, --check,
-// --leak-report, --json, --index, --tokens, --ast, --fir, --fir-test,
+// --leak-report, --aggregate-report, --json, --index, --tokens, --ast, --fir, --fir-test,
 // --fir-verify-report, --fir-stats, --fir-run, --emit-interface, --emit-summaries and
 // --cache-stats, each of which sets one flag.
 fn parse_flag(options mut* opts, string arg) bool {
@@ -389,6 +391,10 @@ fn parse_flag(options mut* opts, string arg) bool {
     } else if (arg == "--leak-report") {
         // --leak-report implies --check, which runs the emptiness pass
         opts->leak_report = true;
+        opts->check = true;
+    } else if (arg == "--aggregate-report") {
+        // --aggregate-report implies --check, which proves the exits of the owning aggregates
+        opts->aggregate_report = true;
         opts->check = true;
     } else if (arg == "--json") {
         opts->json = true;
@@ -674,6 +680,10 @@ fn parse(options mut* opts, string@ args) i32 {
     if (opts->leak_report && opts->json) {
         // the report and the document both go to stdout
         usage_error("--leak-report does not combine with --json or --index");
+        return PARSE_ERROR;
+    }
+    if (opts->aggregate_report && opts->json) {
+        usage_error("--aggregate-report does not combine with --json or --index");
         return PARSE_ERROR;
     }
     if (opts->use_names.len > 0 && !opts->tokens && !opts->ast
@@ -1830,7 +1840,7 @@ fn fir_entry(session.session mut* s, analysis mut* an, options* opts) i32 {
         fir_lower.report mut why = fir_lower.report{};
         if (fir_lower.lower_function(&an->ck, gen.refs_at(&decls, i), &f, &why)) {
             fir_verify.verify(&f, &rt);
-            prover.proof mut verdicts = run_emptiness(s, &f);
+            prover.proof mut verdicts = run_emptiness(s, &f, false);
             if (prover.has_error(&verdicts)) {
                 proved = false;
             }
@@ -1924,9 +1934,11 @@ fn report_declaration(analysis mut* an, options* opts, ast.node* decl, fir_verif
 // notes at each overwrite check and each store that the pass does not prove, then the error of
 // the leak rule and its notes at each exit that the pass does not prove (D17.20), and then the
 // error of rule (b) and its notes at each use that the pass does not prove (D17.21, spec/fir.md
-// 11). Returns the proof, which the caller frees.
-fn run_emptiness(session.session mut* s, fir.func* f) prover.proof {
-    prover.proof verdicts = prover.prove(f);
+// 11). With `causes`, the proof gives the cause of each exit of a local of an owning aggregate type
+// that it does not prove (prover.prove_causes), which changes no verdict. Returns the proof, which
+// the caller frees.
+fn run_emptiness(session.session mut* s, fir.func* f, bool causes) prover.proof {
+    prover.proof verdicts = prover.prove_causes(f, causes);
     report.write(f, &verdicts, s);
     report.write_leaks(f, &verdicts, s);
     report.write_uses(f, &verdicts, s);
@@ -1941,7 +1953,9 @@ fn run_emptiness(session.session mut* s, fir.func* f) prover.proof {
 // part, because a build reports it. --leak-report lists the leak sites that are no error yet on
 // stdout, with one print: the lines of report.write_inners for each site of part 2 of the leak
 // rule that the pass does not prove. Part 2 only reports, so no such site changes the verdict
-// (D17.20).
+// (D17.20). --aggregate-report lists on stdout, in the same print, the lines of
+// report.write_aggregates for each exit of a local of an owning aggregate type that the pass does
+// not prove, which changes no verdict either (D17.20, refinement R1).
 // `*calls` takes each function that the pass proves with no error, its direct calls and the work
 // of its proof, and after a run with no error it is solved: it holds the ownership summaries of
 // spec/ownership-design.md 8. `*calls` must be empty.
@@ -1963,9 +1977,12 @@ fn overwrite_entry(session.session mut* s, analysis mut* an, options* opts,
             fir.check_kind mut missing = fir.check_kind.chk_overflow;
             if (fir_verify.runtime_holds(&f, &rt, &missing)) {
                 fir_verify.verify(&f, &rt);
-                prover.proof mut verdicts = run_emptiness(s, &f);
+                prover.proof mut verdicts = run_emptiness(s, &f, opts->aggregate_report);
                 if (opts->leak_report) {
                     report.write_inners(&f, &verdicts, s, &leaks);
+                }
+                if (opts->aggregate_report) {
+                    report.write_aggregates(&f, &verdicts, s, &leaks);
                 }
                 if (prover.has_error(&verdicts)) {
                     proved = false;
@@ -1978,7 +1995,7 @@ fn overwrite_entry(session.session mut* s, analysis mut* an, options* opts,
         }
         i += 1;
     }
-    if (opts->leak_report) {
+    if (opts->leak_report || opts->aggregate_report) {
         print(strbuf.view(&leaks));
     }
     if (!proved) {

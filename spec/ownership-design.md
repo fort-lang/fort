@@ -719,27 +719,29 @@ The probe P4 of section 14 runs V1, and the column R1 adds the first refinement 
 cell gives sites/functions (measured with P4). The direction says how the real count can differ.
 The probe gives no key to an index that a local holds (high), and it loses the type of 72 places of
 `src/fort` (low, section 14). `?` means both directions. `pass` marks a row that the report-only
-mode of the real pass measured in place of P4. Rule (b) is an error (6.2), so its rows hold 0: the
+mode of the real pass measured in place of P4. The row R1 of the owning aggregate locals counts the
+sites of the real pass that are not of cause 1 (6.3): it takes each callee as one that empties the
+owner, so it is low (`pass, low`). Rule (b) is an error (6.2), so its rows hold 0: the
 error rejects each use. No cast in the corpora carries `own` to
 another pointee type with owners, so part 2 of rule (c) has 0 sites at a cast (measured, P4 and
 `--leak-report`).
 
-| rule and variant                 | src/fort  | src/lsp | std   | test/fort    | test/lang | dir  |
-|----------------------------------|----------:|--------:|------:|-------------:|----------:|------|
-| (b) local, not memory            | 0/0       | 0/0     | 0/0   | 0/0          | 0/0       | pass |
-| (b) memory owner, direct         | 0/0       | 0/0     | 0/0   | 0/0          | 0/0       | pass |
-| (b) memory owner, by a pointer   | 0/0       | 0/0     | 0/0   | 0/0          | 0/0       | pass |
-| (c) `own` local, parameter, temp | 2/2       | 0/0     | 0/0   | 0/0          | 32/24     | pass |
-| (c) owning aggregate local, V1   | 199/99    | 1/1     | 2/1   | 2,424/2,354  | 93/77     | ?    |
-| (c) owning aggregate local, R1   | 106/48    | 1/1     | 0/0   | 2,116/2,076  | 35/30     | ?    |
-| (c) part 2, a pointer            | 14/13     | 2/2     | 0/0   | 0/0          | 41/18     | pass |
-| (c) part 2, a span (Q7)          | 29/21     | 4/4     | 0/0   | 2/1          | 8/5       | ?    |
-| (d) a maybe-vacated `del`        | 5/4       | 0/0     | 0/0   | 1/1          | 63/34     | ?    |
-| (e)1 stale view local read       | 122/44    | 0/0     | 0/0   | 2,137/699    | 39/18     | ?    |
-| (e)2 frame origin stored         | 54/38     | 2/2     | 0/0   | 1,093/465    | 63/27     | ?    |
-| (e)3 pinned owner: `del`, `move` | 83/43     | 0/0     | 21/11 | 222/143      | 178/80    | ?    |
-| (e)3 pinned owner: a call (4.6)  | 1,269/92  | 0/0     | 2/1   | 16,249/1,846 | 1,296/64  | ?    |
-| (e) all parts                    | 1,400/128 | 2/2     | 23/11 | 17,193/1,981 | 1,552/134 | ?    |
+| rule and variant           | src/fort  | src/lsp | std   | test/fort    | test/lang | dir       |
+|----------------------------|----------:|--------:|------:|-------------:|----------:|-----------|
+| (b) local, not memory      | 0/0       | 0/0     | 0/0   | 0/0          | 0/0       | pass      |
+| (b) memory owner, direct   | 0/0       | 0/0     | 0/0   | 0/0          | 0/0       | pass      |
+| (b) memory owner, indirect | 0/0       | 0/0     | 0/0   | 0/0          | 0/0       | pass      |
+| (c) `own` local/param/temp | 2/2       | 0/0     | 0/0   | 0/0          | 32/24     | pass      |
+| (c) owning aggregate local | 669/167   | 1/1     | 2/1   | 4,231/2,703  | 167/84    | pass      |
+| (c) the same, with R1      | 373/67    | 0/0     | 0/0   | 1,460/893    | 83/35     | pass, low |
+| (c) part 2, a pointer      | 14/13     | 2/2     | 0/0   | 0/0          | 41/18     | pass      |
+| (c) part 2, a span (Q7)    | 29/21     | 4/4     | 0/0   | 2/1          | 8/5       | ?         |
+| (d) a maybe-vacated `del`  | 5/4       | 0/0     | 0/0   | 1/1          | 63/34     | ?         |
+| (e)1 stale view local read | 122/44    | 0/0     | 0/0   | 2,137/699    | 39/18     | ?         |
+| (e)2 frame origin stored   | 54/38     | 2/2     | 0/0   | 1,093/465    | 63/27     | ?         |
+| (e)3 pinned: `del`, `move` | 83/43     | 0/0     | 21/11 | 222/143      | 178/80    | ?         |
+| (e)3 pinned: a call (4.6)  | 1,269/92  | 0/0     | 2/1   | 16,249/1,846 | 1,296/64  | ?         |
+| (e) all parts              | 1,400/128 | 2/2     | 23/11 | 17,193/1,981 | 1,552/134 | ?         |
 
 The causes of the (e) counts in `src/fort`, from variants of P4 (measured, `?`). A variant other
 than R1 and R6 is a bound, and it is not sound:
@@ -854,6 +856,34 @@ whose elements hold owners, for which no element is tracked, waits for R8.
   26 locations in 21 functions, as P4 did. Most aggregate sites are memory locals after their last
   call. A test environment whose `close` frees two fields with two calls is an example: the second
   call kills the fact of the first, also with R1.
+- Report of part 1 on the owning aggregate locals (measured with `--aggregate-report` over each tree
+  that CI compiles, the rows `pass` of the table; `spec/fir.md` 11, Aggregates). Each site is a
+  location and a local, as for the `own` locals, and names the first owner that the pass does not
+  prove. The sites are 5,070 in the rows, and 5,616 with `test/lsp`, 512 in 317 functions, and
+  `test/library`, 34 in 6, which the table leaves out; `test/tty`, `test/highlight` and the fixtures
+  of the editor add none. By location, as P4 counted, the sites are 313 in `src/fort`, 1 in
+  `src/lsp`, 2 in `std`, 2,796 in `test/fort` and 100 in `test/lang`. Each site has one cause, in
+  this order:
+  1. A call takes the address of the local through an `addr` temporary, and the facts prove the site
+     when each such call empties each owner below its place: R1 can prove it if each such callee
+     empties the owner. 296 sites in 156 functions of `src/fort`, 1/1 of `src/lsp`, 2/1 of `std`,
+     2,771/2,693 of `test/fort` and 84/68 of `test/lang`: 3,154 in the rows, and 3,481 with
+     `test/lsp` (313/313) and `test/library` (14/6). The deferred `memo_free(&m)` of
+     `check.check_pointer_places` (`src/fort/check.ft:3640`) and the deferred `strbuf.free(&buf)` of
+     `io.read_file_bytes` (`std/io.ft:132`) are each the last call before the exit. It is a bound: a
+     callee that leaves an allocation in the owner leaves the site, and the program leaks there.
+  2. The first owner that the pass does not prove holds the zero value on some path to the exit: 1
+     site, `test/lang/run/operators/017_ternary_aggregates.ft:43`, where `true ? move(big) :
+     move(small)` leaves `big` on the arm that no run takes. A probe that gives no cause 1 finds the
+     same site alone, so no site of cause 1 holds on some path.
+  3. Another cause: 373 sites in 67 functions of `src/fort`, 1,458/891 of `test/fort` and 82/34 of
+     `test/lang`: 1,913 in the rows, and 2,132 with `test/lsp` (199/135) and `test/library` (20/2).
+     Most are memory locals that a later call kills: the deferred `strbuf.free(&dump)` of
+     `driver.tokens_entry` runs before the deferred frees of `toks` and of the session
+     (`src/fort/driver.ft:880`), and each `free_big` of `test/lang/programs/bignum.ft` (`:300`) but
+     the last.
+  4. The aggregate work passes its limit: 2 sites, `integers` and `casts` of
+     `test/fort/fir/interpreter_test.ft` (`:5306`, `:6949`).
 - Migration of part 2 (measured with `--leak-report`, then read; the row `pass` of the table is the
   count of the real pass, which replaces the 11/10, 2/2 and 34/16 of P4, and no site is a `cast`).
   Of the 14 sites of `src/fort`, 8 free an element of a vector of owning pointers before a store
@@ -1132,7 +1162,9 @@ one PR (impl-hard, rev-deep). The oracle and the move are impl-hard and rev-deep
    the text form, `--emit-summaries`, the file in the artifact and the hash of section 8.
 7. `refine-empty` (R1, M), after 6.
 8. `aggregate-leak-*`, after 7: rule (c) part 1 on owning aggregates. Migration L, split by
-   directory.
+   directory. The coordinator ruled on 2026-10-31 that its report comes before 7, so that the user
+   rules on R1 against the counts of the real pass (6.3). The report adds no error, so the ruling
+   on Q1 holds.
 9. `refine-alias` (R6, M), after 5: it adds `B` for the frames that view locals borrow and the
    origin `exposed`. It also adds one may-fact for each memory local: the local can be exposed.
    Its decision is D17.11 (Borrows), with the five points of R6 (section 7).
