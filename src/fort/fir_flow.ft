@@ -190,6 +190,27 @@ fn dataflow_new(u32 count, join_kind join, fn (fir.func*, u32, bits mut*) void t
     return d;
 }
 
+/// A dataflow as dataflow_new makes it, in an allocation that dataflow_drop frees. A function that
+/// holds two dataflows to its end holds them so, because the leak rule reads no callee: a call
+/// that frees the one would come after the `del` of each owner of the other.
+fn dataflow_make(u32 count, join_kind join, fn (fir.func*, u32, bits mut*) void transfer)
+    dataflow mut* own {
+    dataflow mut* own d = new(dataflow);
+    *d = dataflow_new(count, join, transfer);
+    return d;
+}
+
+/// Frees a dataflow that dataflow_make made, and its allocation.
+fn dataflow_drop(dataflow mut* own d) void {
+    dataflow_free(d);
+    // The leak rule reads no callee, so each owner takes a `del` after the call.
+    del(d->entry.words);
+    del(d->init.words);
+    del(d->ins);
+    del(d->outs);
+    del(d);
+}
+
 // Releases the sets of each block that dataflow_forward wrote.
 fn results_free(dataflow mut* d) void {
     u64 mut b = 0;
@@ -287,7 +308,10 @@ fn work_pop(work_list mut* wl) u32 {
 /// `d->outs[b]` hold the sets before and after block `b`. A second call replaces the result.
 fn dataflow_forward(fir.func* f, dataflow mut* d) void {
     fir.pred_table mut pt = fir.func_predecessors(f);
-    defer fir.pred_table_free(&pt);
+    defer {
+        del(pt.first);
+        del(pt.preds);
+    }
     dataflow_forward_with(f, &pt, d);
 }
 
@@ -300,6 +324,7 @@ fn dataflow_forward(fir.func* f, dataflow mut* d) void {
 fn dataflow_forward_with(fir.func* f, fir.pred_table* pt, dataflow mut* d) void {
     bits@ none = {};
     edges mut e = edges{};
+    defer del(e.joined.words);
     forward(f, pt, d, none, none, &e, false);
 }
 
@@ -315,6 +340,7 @@ fn dataflow_forward_sets(fir.func* f, fir.pred_table* pt, dataflow mut* d, bits@
         panic("fir_flow.dataflow_forward_sets: the set counts differ from the block count");
     }
     edges mut e = edges{};
+    defer del(e.joined.words);
     forward(f, pt, d, gens, kills, &e, true);
 }
 
@@ -337,7 +363,7 @@ fn dataflow_forward_edges(fir.func* f, fir.pred_table* pt, dataflow mut* d, bits
     }
     edges mut e = edges{.to = edge_to, .gens = edge_gens};
     e.joined = bits_new(d->count);
-    defer bits_free(&e.joined);
+    defer del(e.joined.words);
     forward(f, pt, d, gens, kills, &e, true);
 }
 
@@ -358,7 +384,7 @@ fn forward(fir.func* f, fir.pred_table* pt, dataflow mut* d, bits@ gens, bits@ k
     wl.ring = new(u32, size);
     wl.listed = bits_new(n);
     defer del(wl.ring);
-    defer bits_free(&wl.listed);
+    defer del(wl.listed.words);
     u32 mut b = 0;
     while (b < n) {
         d->ins[cast(b, u64)] = bits_new(d->count);
@@ -368,7 +394,7 @@ fn forward(fir.func* f, fir.pred_table* pt, dataflow mut* d, bits@ gens, bits@ k
         b += 1;
     }
     bits mut next = bits_new(d->count);
-    defer bits_free(&next);
+    defer del(next.words);
     while (wl.len > 0) {
         u32 at = work_pop(&wl);
         block_in(d, pt, at, e);

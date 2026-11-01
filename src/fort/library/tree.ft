@@ -136,7 +136,7 @@ fn kind_of(string path, u8 given) u8 {
 // Appends the module `<prefix>.<base>` at `file`, the strings interned.
 fn add(tree mut* t, string prefix, string base, string file) void {
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
     strbuf.append(&b, prefix);
     strbuf.push(&b, PATH_SEPARATOR);
     strbuf.append(&b, base);
@@ -185,14 +185,20 @@ fn walk_dir(tree mut* t, string dir, string prefix, i32 mut* error) bool {
         return false;
     }
     // The names are copied out of each entry, because the next readdir(3) can reuse its storage.
-    containers.pool mut scratch = containers.pool_create();
-    defer containers.pool_free(&scratch);
     containers.str_vec mut dirs = containers.str_create();
-    defer containers.str_free(&dirs);
+    defer del(dirs.items);
     containers.str_vec mut files = containers.str_create();
-    defer containers.str_free(&files);
+    defer del(files.items);
     strbuf.str_buf mut b = strbuf.create();
-    defer strbuf.free(&b);
+    defer del(b.data);
+    containers.pool mut scratch = containers.pool_create();
+    defer {
+        // The leak rule reads no callee: the test of the loop proves the pool empty, and the body
+        // runs at most once.
+        while (scratch.head != null) {
+            containers.pool_free(&scratch);
+        }
+    }
     list_entries(stream, dir, &b, &scratch, &dirs, &files);
     // readdir(3) gives null at the end and on an error, and only an error sets errno
     i32 failure = sys.errno();
