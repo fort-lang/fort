@@ -751,10 +751,11 @@ The probe gives no key to an index that a local holds (high), and it loses the t
 `src/fort` (low, section 14). `?` means both directions. `pass` marks a row that the report-only
 mode of the real pass measured in place of P4. The row R1 of the owning aggregate locals counts the
 sites of the real pass that are not of cause 1 (6.3): it takes each callee as one that empties the
-owner, so it is low (`pass, low`). Rule (b) is an error (6.2), so its rows hold 0: the
-error rejects each use. No cast in the corpora carries `own` to
-another pointee type with owners, so part 2 of rule (c) has 0 sites at a cast (measured, P4 and
-`--leak-report`).
+owner, so it is low (`pass, low`). The probe of R1 (section 7) left 464/87, 1/1, 0/0,
+3,593/2,330 and 88/38 in the five columns. The user dropped R1 on 2026-11-01, so the migration
+takes each site of the row `(c) owning aggregate local` (6.3). Rule (b) is an error (6.2), so its
+rows hold 0: the error rejects each use. No cast in the corpora carries `own` to another pointee
+type with owners, so part 2 of rule (c) has 0 sites at a cast (measured, P4 and `--leak-report`).
 
 | rule and variant           | src/fort  | src/lsp | std   | test/fort    | test/lang | dir       |
 |----------------------------|----------:|--------:|------:|-------------:|----------:|-----------|
@@ -895,13 +896,17 @@ whose elements hold owners, for which no element is tracked, waits for R8.
   `src/lsp`, 2 in `std`, 2,796 in `test/fort` and 100 in `test/lang`. Each site has one cause, in
   this order:
   1. A call takes the address of the local through an `addr` temporary, and the facts prove the site
-     when each such call empties each owner below its place: R1 can prove it if each such callee
-     empties the owner. 296 sites in 156 functions of `src/fort`, 1/1 of `src/lsp`, 2/1 of `std`,
-     2,771/2,693 of `test/fort` and 84/68 of `test/lang`: 3,154 in the rows, and 3,481 with
-     `test/lsp` (313/313) and `test/library` (14/6). The deferred `memo_free(&m)` of
-     `check.check_pointer_places` (`src/fort/check.ft:3640`) and the deferred `strbuf.free(&buf)` of
-     `io.read_file_bytes` (`std/io.ft:132`) are each the last call before the exit. It is a bound: a
-     callee that leaves an allocation in the owner leaves the site, and the program leaks there.
+     when each such call empties each owner below its place: a summary of the callee (R1, dropped,
+     section 7) can prove it if each such callee empties the owner. 296 sites in 156 functions of
+     `src/fort`, 1/1 of `src/lsp`, 2/1 of `std`, 2,771/2,693 of `test/fort` and 84/68 of
+     `test/lang`: 3,154 in the rows, and 3,481 with `test/lsp` (313/313) and `test/library` (14/6).
+     The deferred `memo_free(&m)` of `check.check_pointer_places` (`src/fort/check.ft:3640`) and the
+     deferred `strbuf.free(&buf)` of `io.read_file_bytes` (`std/io.ft:132`) are each the last call
+     before the exit. It is a bound: a callee that leaves an allocation in the owner leaves the
+     site, and the program leaks there. The probe of R1 (section 7) proved 1,148 of these 3,481
+     sites. It proved the second example and not the first: `check.memo_free` empties `m->held`,
+     `m->keys` and `m->text` with three calls, so each call kills the facts of the call before it,
+     and only its two `del`s give lines.
   2. The first owner that the pass does not prove holds the zero value on some path to the exit: 1
      site, `test/lang/run/operators/017_ternary_aggregates.ft:43`, where `true ? move(big) :
      move(small)` leaves `big` on the arm that no run takes. A probe that gives no cause 1 finds the
@@ -929,6 +934,13 @@ whose elements hold owners, for which no element is tracked, waits for R8.
   `programs/expr_eval.ft` (320:11) and `programs/json.ft` (439:11, 441:11) leak at run time
   (`EXPECTED_EVENTS` of `test/fir_run_test.py`). The pass and P4 were not compared site by site.
   A span with owners, as the span of `bits` in `fir.emptiness`, adds 21 functions (Q7).
+- Ruling on the owning aggregate locals: migrate all (the user, 2026-11-01, "Drop R1, migrate
+  all"). The user ruled "R1 first, then migrate" on 2026-10-31, and then dropped R1 after its probe
+  proved 1,148 of the 5,616 sites and added 0.19 to 0.21 s (section 7). No refinement comes before
+  the error. Each of the 5,616 sites migrates, split by directory, and then each exit of an owning
+  aggregate local that the analysis cannot prove becomes an error of part 1 (D17.20). `del` is a
+  fix at each site: a `del` of each owner of the local after its last call frees what the callee
+  left, and it does nothing on an empty owner (D17.9).
 - Size: decision S, report M, migration M (the `own` locals, part 2) or L (the aggregates), error S.
 
 ### 6.4 (d) A double `del`
@@ -989,6 +1001,27 @@ counts of its rules before and after it. A report count can change the order of 
   parameter is never written and never memory. Gain (measured, P4): (c) for aggregates falls from
   99 to 48 functions in `src/fort` and from 77 to 30 in `test/lang`. In `src/fort`, 40 functions get
   a line. The 69 components with 245 functions took at most 3 rounds.
+  **Measured and dropped** (the user, 2026-11-01, "Drop R1, migrate all"). A probe compiler of R1
+  (section 14) ran over the 1,319 entries of the trees that CI compiles, at 40713b8f. It proved
+  1,148 of the 5,616 sites of the aggregate report (6.3), in 1,016 functions, each of cause 1:
+  205/122 in `src/fort`, 0/0 in `src/lsp`, 2/1 in `std`, 638/613 in `test/fort`, 210/210 in
+  `test/lsp`, 79/64 in `test/lang` and 14/6 in `test/library`. No entry changed its exit status or
+  its stderr under `--check`. In `src/fort`, 35 functions got 67 lines, each component that takes
+  rounds took 2 rounds, and the largest charge of a component was 16,315,034, in `test/fort`.
+  4,468 sites stayed. Of the 2,333 sites of cause 1 among them, 1,744 are in `test/fort` and name a
+  local `e`, the environment of a module test. The `close` of `test/fort/ast_test.ft` empties
+  `e->arena` and `e->buf` with two calls (read), and the second call kills the facts of the first
+  in `close` too, so `close` got no line. A wider form that also read an argument that is a
+  pointer local, and an `addr` of a place through a parameter that its function never stores into,
+  proved 36 more sites. A form that took an index with a local key proved the same 1,148. The
+  probe added 0.19 to 0.21 s to `fort --check` of `src/fort/main.ft` (release, two sets of five
+  interleaved runs): 0.06 s for the order of the components, the FIR that it keeps and the search
+  of each callee, and 0.13 to 0.15 s for a whole proof of each function with a parameter that can
+  have a line. The wider form added 0.57 s. The probe added 450 lines to `src/fort/owner/` (343
+  added and 4 removed in `prover.ft`, and the 111 of a new module) and 154 to `src/fort/driver.ft`.
+  The revision that the time runs measured had 437 lines in `src/fort/owner/`: it did not have the
+  13 lines that select the form with only constant indexes, a form that is off in the probe of the
+  design.
 - **R2 `kept` lines.** The callee returns with `(*_k).q` holding its entry value, so the caller
   keeps `S(x.p.q)` after step 3. It helps (b) and (e)1 for memory owners.
 - **R3 `result` lines.** A line names what a result borrows: the origins of argument `k`, or the
@@ -1081,7 +1114,8 @@ V1 needs no summary. Refinements R1 to R4 need one, and this section gives its f
 them adds one kind of line to one file: `empty <path>` (R1), `kept <path>` (R2), `result <token>`
 (R3) and `keep <token>` (R4). A path holds fields and constant indexes of fixed arrays below
 `(*_k)`, where parameter `k` is never written and never memory. A token is `_k`, the origins of
-argument `k`, or a path.
+argument `k`, or a path. The user dropped R1 on 2026-11-01 (section 7), so no analysis gives an
+`empty` line.
 
 ### 8.1 The order and the fixpoint
 
@@ -1141,7 +1175,8 @@ digits   = "0" | nonzero { digit } ;
 
 - Lines: `src/fort/owner/` holds at most 8,000 lines, with the 1,456 that move from
   `fir/emptiness.ft` (measured). V1 needs 5,000: 900 for `owner.place`, 3,600 for `owner.prover` and
-  500 for `owner.report`, and each of R1 to R4 adds 400 to `owner.summary` (estimated, low). The
+  500 for `owner.report`, and each of R1 to R4 adds 400 to `owner.summary` (estimated, low; R1
+  dropped, section 7). The
   oracle holds at most 3,500 more (need: 2,800), so the caps give 11,500 (Q6). The wave held 61,355.
   The count of the oracle is `wc -l` of the two modules of 3.1, as the coordinator ratified on
   2026-10-27: 3,421 with the event `forged` (measured).
@@ -1150,6 +1185,14 @@ digits   = "0" | nonzero { digit } ;
 - Time: `fort --check` of `src/fort/main.ft` takes 0.94 to 0.96 s (measured: three runs, 90b50c0a,
   VM slot 4). A rule or a refinement may add 0.10 s, and the subsystem 0.50 s. Each PR writes five
   interleaved runs before and after (`notes/environment.md` 1) in its ticket.
+  The cap of 0.50 s counts the time of the subsystem only, and not the growth of the source that
+  the command checks (the coordinator, 2026-11-01). Measured on 2026-11-01 in VM slot 1, with the
+  compiler of each commit that the pin `bootstrap-1` builds with `--release`, as the release preset
+  does, in three sets of five interleaved runs: the median is 0.84 to 0.89 s at 90b50c0a and 1.31
+  to 1.37 s at 40713b8f, 0.45 to 0.50 s more. The subsystem takes 0.15 to 0.19 s of the time at
+  40713b8f, and 0.04 s or less at 90b50c0a: a variant whose `owner.prover` proves nothing, or whose
+  `fir.emptiness` runs no dataflow, measures that much less. `src/fort` grew from 39,494 to 52,960
+  lines between the two commits. `wc -l src/fort/owner/*.ft` gives 7,802 at 40713b8f.
 - CI: no step audits the tree, as the wave did (1.1 to 37.9 minutes). A rule may add 3 % to the
   fort jobs of PR CI. The oracle adds the run corpus (120 s or less) and the generator (60 s).
 
@@ -1173,7 +1216,8 @@ digits   = "0" | nonzero { digit } ;
 The ids are names. A ticket starts when its dependencies merge. S is hours, M is half a day, and L
 is up to one agent-day. A decision comes before each code ticket of its rule (retrospective rule 6).
 The order follows the ruling on Q1. The leak checks on `own` locals and the shallow `del` come
-first. The aggregates follow R1, rule (b) follows a sound R6, and rule (e) follows R3, R4 and R6.
+first. The aggregates follow their migration (6.3), rule (b) follows a sound R6, and rule (e)
+follows R3, R4 and R6.
 
 A rule of V1 has four tickets in a row. The decision is S, for the user. The report (M, impl-hard,
 rev-deep) adds its facts and gives the count and the oracle test. The migration is impl-std and
@@ -1190,11 +1234,12 @@ one PR (impl-hard, rev-deep). The oracle and the move are impl-hard and rev-deep
 5. `leak-*`, after 4: rule (c) part 1 on `own` locals, and part 2. The report adds `S`. Migration S.
 6. `summary-format` (M), after 5 and the library tickets L5 and L6 of the plan: `owner.summary`,
    the text form, `--emit-summaries`, the file in the artifact and the hash of section 8.
-7. `refine-empty` (R1, M), after 6.
-8. `aggregate-leak-*`, after 7: rule (c) part 1 on owning aggregates. Migration L, split by
+7. `refine-empty` (R1, M): dropped (the user, 2026-11-01, "Drop R1, migrate all"; section 7).
+8. `aggregate-leak-*`, after 5: rule (c) part 1 on owning aggregates. Migration L, split by
    directory. The coordinator ruled on 2026-10-31 that its report comes before 7, so that the user
    rules on R1 against the counts of the real pass (6.3). The report adds no error, so the ruling
-   on Q1 holds.
+   on Q1 holds. The user then dropped R1, so the migration takes each of the 5,616 sites, and the
+   error follows it (6.3).
 9. `refine-alias` (R6, M), after 5: it adds `B` for the frames that view locals borrow and the
    origin `exposed`. It also adds one may-fact for each memory local: the local can be exposed.
    Its decision is D17.11 (Borrows), with the five points of R6 (section 7).
@@ -1206,7 +1251,7 @@ one PR (impl-hard, rev-deep). The oracle and the move are impl-hard and rev-deep
 14. `refine-span-del` (R8, M), after 5, by the ruling on Q7.
 15. `refine-kept` (R2), `refine-view-aggregate` (R5), `refine-null-edge` (R7) and `refine-typed`
     (R10): M each, after 6 or 5, only when a report count needs one.
-16. `refine-private` (R9, L), after 7, only if the user rules for it.
+16. `refine-private` (R9, L), after 6, only if the user rules for it.
 
 A report ticket adds a temporary option that lists each site, as `--overwrite-report` did, and the
 error ticket removes it. A ticket that changes a pass or a test method updates `notes/compiler.md`
@@ -1216,12 +1261,18 @@ or `notes/testing.md`.
 
 The user ruled on each question on 2026-10-23, each as its recommendation says:
 - Q1: option (2), staged. The leak checks on `own` locals and the shallow `del` come now. Rule (b)
-  waits for a sound R6, the aggregates for R1, and rule (e) for R3, R4 and a sound R6.
+  waits for a sound R6, the aggregates for R1, and rule (e) for R3, R4 and a sound R6 (the ruling
+  of 2026-11-01 below replaces this for the aggregates).
 - Q2: (A), no annotation. Q3: (1), no error for a `del` of an owner that can be vacated.
 - Q4: (a) the call of 4.6 step 3 stays; (b) what a callee keeps or writes out stays outside (X4).
 - Q5: (1), the list of 6.2, now in D17.21. Q6: (1), 8,000 lines for the analysis and 3,500
   for the oracle.
 - Q7: (1), a `del` or a `cast` of a span whose elements hold owners waits for R8.
+
+The user ruled on the route of the owning aggregate locals on 2026-10-31: "R1 first, then
+migrate". After the probe of R1 (section 7), the user ruled on 2026-11-01: "Drop R1, migrate all".
+So the migration takes each of the 5,616 sites, and then each exit becomes an error of part 1 of
+D17.20 (6.3). The cap of `src/fort/owner/` stays 8,000 lines (Q6, section 9).
 
 The user ruled on two questions of D17.21 on 2026-10-27. Through a pointer, the operand of a
 `move` or a `del` and a comparison with `null` are no uses: "Exempt move/del and null test". The
@@ -1305,7 +1356,8 @@ The questions, their options and their counts stay below as the record.
 
 **Q6. Does the line budget of the plan, "under 8,000 lines", cover the oracle?**
 - (1) No: 8,000 lines for the analysis and 3,500 for the oracle. (2) Yes: 8,000 in all, which
-  leaves the analysis 5,200 (estimated). Recommendation: (1); V1 with R1 to R4 is 6,600 (low).
+  leaves the analysis 5,200 (estimated). Recommendation: (1); V1 with R1 to R4 is 6,600 (low; R1
+  dropped, section 7).
 
 **Q7. Does part 2 of rule (c) cover a `del` or a `cast` of a span whose elements hold owners?**
 - (1) Not in V1: the case is outside the scope (X3) until refinement R8 proves each element empty.
@@ -1365,6 +1417,20 @@ imports. A worklist runs the state of 4.4 to its fixpoint, and one more pass rec
 The variants of section 6 change premise 3 (R6, sound), step 4 of 4.6 and the pin of a call
 argument (bounds, not sound). P3 of revision 3 had the type filter that this revision removes, and
 P0 to P2 measured rules of revision 1.
+
+The method of **the probe of R1** (2026-11-01, section 7): a compiler built from a copy of `src` at
+40713b8f, which is not checked in. It lowers each function once, orders the components of the
+direct calls callees first (`owner.summary`), and runs `owner.prover` on each function in that
+order, with the rounds of 8.1. A parameter can have a line when its type is a pointer that does not
+own at its outermost level, the function never stores into it, and it is no memory. The proof adds
+the fact of each owner below `(*_k)` for such a parameter `_k`, and a line holds when its fact holds
+at each `return`. At a direct call, after the kill of the call, the probe makes `p.q` empty for an
+argument that is an `addr` temporary of fixed storage `p` and each line `empty (*_k).q` of the
+callee. Its charge is the inner work, and the verdicts and the report come from the last analysis
+of each function. A filter gives no line to a parameter when no `del`, `move`, store, comparison or
+`addr` names a place through it that holds an owner. A site is a location and a local of
+`--aggregate-report`, and a site that the compiler of 40713b8f reports and the probe does not is a
+site that R1 proves.
 
 ## 15. Choices that the coordinator ratified
 

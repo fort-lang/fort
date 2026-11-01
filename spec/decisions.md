@@ -3317,10 +3317,11 @@ says ownership is "by convention", this section supersedes it.
   the leak rule; split it`. The note names no limit of D17.11. The work of D17.11 and its verdicts
   do not change, so the first error of D17.11 in a function past both limits takes the note of
   D17.11. Only `big` of `fail/ownership/060` passes the limit of the leak work, on purpose.
-  Until refinement R1 of `spec/ownership-design.md` 7, part 1 applies only to a named local, a
-  parameter or a temporary whose type is an `own` reference. A local of an owning aggregate type
-  (D17.7) has no obligation of part 1 until then, and its leak is outside the guarantee of this
-  rule.
+  Part 1 applies only to a named local, a parameter or a temporary whose type is an `own`
+  reference. A local of an owning aggregate type (D17.7) has no obligation of part 1, and its leak
+  is outside the guarantee of this rule, until a later change makes each exit of such a local that
+  the analysis cannot prove a compile error and amends this entry. That change follows the
+  migration of each such exit (the user, 2026-11-01: "Drop R1, migrate all").
   Part 2. Take `del(p)` where the type of `p` is `T* own`, of each mutability, and `T` holds owners
   in its fixed storage. The analysis must prove each owner of `*p` empty, as a tracked place of
   D17.11 through `p`. Otherwise the `del` is a compile error, because it frees an object whose
@@ -3365,8 +3366,9 @@ says ownership is "by convention", this section supersedes it.
 - rationale: an obligation that the analysis cannot prove is an error, as in D17.11 ("Unknown is
   an error", the user, 2026-10-22), so the rule keeps no list of known gaps. `del` is shallow
   (D17.7), so a `del` of an object whose owners hold allocations leaks them. The order of the
-  rules follows the ruling on Q1 (`spec/ownership-design.md` 12): the `own` locals and the shallow
-  `del` come first, the owning aggregates follow R1, and a span of owners follows R8.
+  rules follows the ruling on Q1 (`spec/ownership-design.md` 12) and the ruling of 2026-11-01: the
+  `own` locals and the shallow `del` come first, the owning aggregates follow the migration of their
+  exits, and a span of owners follows R8.
 - history: Amended 2026-10-24: the user approved parts 1 and 2 of spec/ownership-design.md 6.3
   (user, 2026-10-24). The coordinator ruled the position and the note of the error of part 2, the
   message of a `cast` and the text of `<place>`. The coordinator also ratified seven additions to
@@ -3389,6 +3391,11 @@ says ownership is "by convention", this section supersedes it.
   proposed 2026-10-26, ratified by the user 2026-10-26. Before, `if (q == null) { del(q); }` was a
   site that the analysis could not prove for a parameter `q`, and so were `del(l->head)` after a
   loop on `l->head != null`, and `del(p)` after `move(p)` or after `del(p)`, with no test.
+  Amended 2026-11-01: the owning aggregate locals wait for the migration of each of their exits,
+  and no longer for refinement R1 of `spec/ownership-design.md` 7. The user ruled "Drop R1,
+  migrate all" (user, 2026-11-01) after a probe of R1 proved 1,148 of the 5,616 exits that the
+  aggregate report lists and added 0.19 to 0.21 s to `fort --check` of `src/fort/main.ft`
+  (`spec/ownership-design.md` 7). Before, the owning aggregate locals waited "until refinement R1".
 
 ### D17.21 Use after move or del
 - owner: `memory-model.md` (`move`, `del`, transfer, lending, the overwrite check, the leak rule,
