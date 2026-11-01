@@ -398,8 +398,8 @@ fn a_noreturn_call_ends_its_block() void {
     lower_env.expect(lower_env.lower(&e, source[..], "e"), want[..]);
 }
 
-// `panic("stop")` is `fail(panic, ptr, len)` at the name `panic`, with the pointer and the length
-// of the literal as constants, and it ends the body.
+// `panic("stop")` puts the literal into the `string` temporary `_1` and is `fail(panic, copy _1)`
+// at the name `panic`, and it ends the body.
 fn a_panic_of_a_literal_ends_the_body() void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
@@ -434,12 +434,14 @@ fn a_panic_of_a_literal_ends_the_body() void {
         "    return 1;",
         "}",
     };
-    string[7] want = {
+    string[9] want = {
         "fn main.stop() -> noreturn {",
         "    let _0: void;",
+        "    let _1: string #8:11;",
         "",
         "    bb0: {",
-        "        fail(panic, const bytes \"stop\", const u64 4) #8:5 s1;",
+        "        _1 = const \"stop\" #8:11 s1;",
+        "        fail(panic, copy _1) #8:5 s1;",
         "    }",
         "}",
     };
@@ -447,8 +449,8 @@ fn a_panic_of_a_literal_ends_the_body() void {
 }
 
 // `println(x, e)`: `fd` once, `print_i64` of `cast<i64>(x)`, `print_enum` of `cast<i32>(e)` with
-// the member table and the member count, then `print_char` of `const char 10` (spec/fir.md 9.4,
-// spec/toolchain.md 6 item 19).
+// the span of the member table and the member count in a temporary, then `print_char` of `const
+// char 10` (spec/fir.md 9.4, spec/toolchain.md 6 item 19).
 fn println_of_an_integer_and_an_enum() void {
     lower_env.env mut e = lower_env.env{};
     lower_env.open(&e);
@@ -462,22 +464,23 @@ fn println_of_an_integer_and_an_enum() void {
         "    println(x, e);",
         "}",
     };
-    string[18] want = {
+    string[19] want = {
         "fn main.f(_1 (x): i32, _2 (e): color) -> void {",
         "    let _0: void;",
         "    let _3: i64 #6:13;",
         "    let _4: void #6:13;",
         "    let _5: i32 #6:16;",
-        "    let _6: void #6:16;",
-        "    let _7: void #6:12;",
+        "    let _6: enum_member@ #6:16;",
+        "    let _7: void #6:16;",
+        "    let _8: void #6:12;",
         "",
         "    bb0: {",
         "        _3 = cast<i64>(copy _1) #6:13 s1;",
         "        _4 = call fn std.rt.print_i64(const i32 1, copy _3) #6:13 s1;",
         "        _5 = cast<i32>(copy _2) #6:16 s1;",
-        "        _6 = call fn std.rt.print_enum(const i32 1, copy _5, \\",
-        "const enum_table main.color, const u64 2) #6:16 s1;",
-        "        _7 = call fn std.rt.print_char(const i32 1, const char 10) #6:12 s1;",
+        "        _6 = aggregate enum_member@(const enum_table main.color, const u64 2) #6:16 s1;",
+        "        _7 = call fn std.rt.print_enum(const i32 1, copy _5, copy _6) #6:16 s1;",
+        "        _8 = call fn std.rt.print_char(const i32 1, const char 10) #6:12 s1;",
         "        return #7:1 s0;",
         "    }",
         "}",
@@ -574,8 +577,8 @@ fn print_of_a_float_a_bool_and_a_char() void {
     lower_env.expect(lower_env.lower(&e, source[..], "k"), want[..]);
 }
 
-// `eprint` writes to descriptor 2. A `string` place gives its two fields, and a literal, the empty
-// one included, gives `const bytes` and its length. A pointer and a function convert to `void*`,
+// `eprint` writes to descriptor 2. A `string` place is one operand, and a literal, the empty one
+// included, goes into a `string` temporary first. A pointer and a function convert to `void*`,
 // and `void*` stands as it is. `fprintln(fd, next(&fd))` reads `fd` once, into a temporary, before
 // `next` runs.
 fn print_of_strings_pointers_and_a_descriptor() void {
@@ -601,43 +604,45 @@ fn print_of_strings_pointers_and_a_descriptor() void {
         "    fprintln(fd, next(&fd));",
         "}",
     };
-    string[39] want = {
+    string[41] want = {
         "fn main.g(_1 (s): string, _2 (p): u8*, _3 (v): void*, _4 (fd): i32) -> void {",
         "    let _0: void;",
         "    let _5: void #14:12;",
-        "    let _6: void #14:15;",
-        "    let _7: void #14:22;",
-        "    let _8: void* #14:26;",
-        "    let _9: void #14:26;",
-        "    let _10: void #14:29;",
-        "    let _11: void* #14:32;",
-        "    let _12: void #14:32;",
-        "    let _13: void #15:13;",
-        "    let _14: i32 #16:14;",
-        "    let _15: i32 mut* #16:23;",
-        "    let _16: i32 #16:22;",
-        "    let _17: i64 #16:22;",
-        "    let _18: void #16:22;",
-        "    let _19: void #16:13;",
+        "    let _6: string #14:15;",
+        "    let _7: void #14:15;",
+        "    let _8: string #14:22;",
+        "    let _9: void #14:22;",
+        "    let _10: void* #14:26;",
+        "    let _11: void #14:26;",
+        "    let _12: void #14:29;",
+        "    let _13: void* #14:32;",
+        "    let _14: void #14:32;",
+        "    let _15: void #15:13;",
+        "    let _16: i32 #16:14;",
+        "    let _17: i32 mut* #16:23;",
+        "    let _18: i32 #16:22;",
+        "    let _19: i64 #16:22;",
+        "    let _20: void #16:22;",
+        "    let _21: void #16:13;",
         "",
         "    bb0: {",
-        "        _5 = call fn std.rt.print_str(const i32 2, copy _1.0, copy _1.1) #14:12 s1;",
-        "        _6 = call fn std.rt.print_str(const i32 2, const bytes \"lit\", \\",
-        "const u64 3) #14:15 s1;",
-        "        _7 = call fn std.rt.print_str(const i32 2, const bytes \"\", \\",
-        "const u64 0) #14:22 s1;",
-        "        _8 = cast<void*>(copy _2) #14:26 s1;",
-        "        _9 = call fn std.rt.print_ptr(const i32 2, copy _8) #14:26 s1;",
-        "        _10 = call fn std.rt.print_ptr(const i32 2, copy _3) #14:29 s1;",
-        "        _11 = cast<void*>(const fn main.one) #14:32 s1;",
-        "        _12 = call fn std.rt.print_ptr(const i32 2, copy _11) #14:32 s1;",
-        "        _13 = call fn std.rt.print_char(const i32 2, const char 10) #15:13 s2;",
-        "        _14 = copy _4 #16:14 s3;",
-        "        _15 = addr mut(_4) #16:23 s3;",
-        "        _16 = call fn main.next(copy _15) #16:22 s3;",
-        "        _17 = cast<i64>(copy _16) #16:22 s3;",
-        "        _18 = call fn std.rt.print_i64(copy _14, copy _17) #16:22 s3;",
-        "        _19 = call fn std.rt.print_char(copy _14, const char 10) #16:13 s3;",
+        "        _5 = call fn std.rt.print_str(const i32 2, copy _1) #14:12 s1;",
+        "        _6 = const \"lit\" #14:15 s1;",
+        "        _7 = call fn std.rt.print_str(const i32 2, copy _6) #14:15 s1;",
+        "        _8 = const \"\" #14:22 s1;",
+        "        _9 = call fn std.rt.print_str(const i32 2, copy _8) #14:22 s1;",
+        "        _10 = cast<void*>(copy _2) #14:26 s1;",
+        "        _11 = call fn std.rt.print_ptr(const i32 2, copy _10) #14:26 s1;",
+        "        _12 = call fn std.rt.print_ptr(const i32 2, copy _3) #14:29 s1;",
+        "        _13 = cast<void*>(const fn main.one) #14:32 s1;",
+        "        _14 = call fn std.rt.print_ptr(const i32 2, copy _13) #14:32 s1;",
+        "        _15 = call fn std.rt.print_char(const i32 2, const char 10) #15:13 s2;",
+        "        _16 = copy _4 #16:14 s3;",
+        "        _17 = addr mut(_4) #16:23 s3;",
+        "        _18 = call fn main.next(copy _17) #16:22 s3;",
+        "        _19 = cast<i64>(copy _18) #16:22 s3;",
+        "        _20 = call fn std.rt.print_i64(copy _16, copy _19) #16:22 s3;",
+        "        _21 = call fn std.rt.print_char(copy _16, const char 10) #16:13 s3;",
         "        return #17:1 s0;",
         "    }",
         "}",
@@ -646,7 +651,7 @@ fn print_of_strings_pointers_and_a_descriptor() void {
 }
 
 // `assert(c)` is `check(a, user, bytes "<text>")` at the name `assert`, with the source text of the
-// argument; a constant condition stays a constant. `panic(m)` of a place gives its two fields, and
+// argument; a constant condition stays a constant. `panic(m)` of a place gives the place, and
 // each `fail` ends its block (spec/fir.md 9.4).
 fn an_assert_and_a_panic() void {
     lower_env.env mut e = lower_env.env{};
@@ -662,11 +667,12 @@ fn an_assert_and_a_panic() void {
         "    panic(m);",
         "}",
     };
-    string[23] want = {
+    string[25] want = {
         "fn main.f(_1 (x): i32, _2 (m): string) -> void {",
         "    let _0: void;",
         "    let _3: bool #2:14;",
         "    let _4: bool #4:11;",
+        "    let _5: string #5:15;",
         "",
         "    bb0: {",
         "        _3 = gt(copy _1, const i32 0) #2:14 s1;",
@@ -680,10 +686,11 @@ fn an_assert_and_a_panic() void {
         "        switch(copy _4) -> [true: bb3, otherwise: bb4] #4:5 s3;",
         "    }",
         "    bb3: {",
-        "        fail(panic, const bytes \"two\", const u64 3) #5:9 s4;",
+        "        _5 = const \"two\" #5:15 s4;",
+        "        fail(panic, copy _5) #5:9 s4;",
         "    }",
         "    bb4: {",
-        "        fail(panic, copy _2.0, copy _2.1) #7:5 s5;",
+        "        fail(panic, copy _2) #7:5 s5;",
         "    }",
         "}",
     };
@@ -1476,28 +1483,29 @@ fn print_of_constants() void {
         "    println(color.green, '\\n', -5, 300);",
         "}",
     };
-    string[24] want = {
+    string[25] want = {
         "fn main.f() -> void {",
         "    let _0: void;",
         "    let _1: i32 #6:18;",
-        "    let _2: void #6:18;",
-        "    let _3: void #6:26;",
-        "    let _4: i64 #6:32;",
-        "    let _5: void #6:32;",
-        "    let _6: i64 #6:36;",
-        "    let _7: void #6:36;",
-        "    let _8: void #6:12;",
+        "    let _2: enum_member@ #6:18;",
+        "    let _3: void #6:18;",
+        "    let _4: void #6:26;",
+        "    let _5: i64 #6:32;",
+        "    let _6: void #6:32;",
+        "    let _7: i64 #6:36;",
+        "    let _8: void #6:36;",
+        "    let _9: void #6:12;",
         "",
         "    bb0: {",
         "        _1 = cast<i32>(const color 1) #6:18 s1;",
-        "        _2 = call fn std.rt.print_enum(const i32 1, copy _1, \\",
-        "const enum_table main.color, const u64 2) #6:18 s1;",
-        "        _3 = call fn std.rt.print_char(const i32 1, const char 10) #6:26 s1;",
-        "        _4 = cast<i64>(const i32 -5) #6:32 s1;",
-        "        _5 = call fn std.rt.print_i64(const i32 1, copy _4) #6:32 s1;",
-        "        _6 = cast<i64>(const i32 300) #6:36 s1;",
-        "        _7 = call fn std.rt.print_i64(const i32 1, copy _6) #6:36 s1;",
-        "        _8 = call fn std.rt.print_char(const i32 1, const char 10) #6:12 s1;",
+        "        _2 = aggregate enum_member@(const enum_table main.color, const u64 2) #6:18 s1;",
+        "        _3 = call fn std.rt.print_enum(const i32 1, copy _1, copy _2) #6:18 s1;",
+        "        _4 = call fn std.rt.print_char(const i32 1, const char 10) #6:26 s1;",
+        "        _5 = cast<i64>(const i32 -5) #6:32 s1;",
+        "        _6 = call fn std.rt.print_i64(const i32 1, copy _5) #6:32 s1;",
+        "        _7 = cast<i64>(const i32 300) #6:36 s1;",
+        "        _8 = call fn std.rt.print_i64(const i32 1, copy _7) #6:36 s1;",
+        "        _9 = call fn std.rt.print_char(const i32 1, const char 10) #6:12 s1;",
         "        return #7:1 s0;",
         "    }",
         "}",

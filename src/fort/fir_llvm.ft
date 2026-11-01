@@ -1263,11 +1263,23 @@ fn entry_of(fir.check_kind kind) runtime_sig.rt_entry {
     }
 }
 
-// Adds the value of each reported operand of the `check` or `fail` `term` to `args`, in order.
+// Adds the value of each reported operand of the `check` or `fail` `term` to `args`, in order. A
+// reported operand of an aggregate type, the message of `panic`, passes the address of the
+// caller-made copy of toolchain.md 6 item 7, as call_of passes an aggregate argument.
 fn add_reported(translator mut* t, fir.terminator* term, gen.gen_args mut* args) void {
     u32 mut k = 0;
     while (k < term->args_len) {
-        gen.gen_args_add(args, operand_value(t, fir.operand_at(t->f, term->args_first + k)));
+        fir.operand o = fir.operand_at(t->f, term->args_first + k);
+        types.node* ty = fir.operand_type(t->f, o);
+        if (fir.type_aggregate(ty)) {
+            held h = hold(t, o, ty, true);
+            if (h.text || h.zero) {
+                panic("fir_llvm.add_reported: an aggregate operand that is no place");
+            }
+            gen.gen_args_add(args, h.addr);
+        } else {
+            gen.gen_args_add(args, operand_value(t, o));
+        }
         k += 1;
     }
 }

@@ -1963,7 +1963,9 @@ fn arm_bits(types.node* t, consts.cval v) u64 {
 
 // The failure of the `check` or `fail` `t` of frame `k`: the runtime entry of its kind with the
 // reported operands, the file, the line and the column of `t` (spec/fir.md 12.4). The entry
-// writes the message of D11.4 and calls `abort`.
+// writes the message of D11.4 and calls `abort`. A reported operand of an aggregate type, the
+// message of `panic`, is a place, and the entry gets its address, from which write_values copies
+// the bytes.
 fn fail_check(machine mut* it, u64 k, fir.terminator* t) void {
     fir.func* f = it->frames.items[k].f;
     u64[6] mut values = {};
@@ -1971,7 +1973,12 @@ fn fail_check(machine mut* it, u64 k, fir.terminator* t) void {
     u32 mut i = 0;
     while (i < t->args_len && i < 3) {
         types.node* mut ty = null;
-        values[cast(i, u64)] = read_scalar(it, k, fir.operand_at(f, t->args_first + i), &ty);
+        fir.operand o = fir.operand_at(f, t->args_first + i);
+        if (o.kind != fir.operand_kind.ok_const && fir.type_aggregate(fir.operand_type(f, o))) {
+            values[cast(i, u64)] = place_address(it, k, o.place, &ty);
+        } else {
+            values[cast(i, u64)] = read_scalar(it, k, o, &ty);
+        }
         from[cast(i, u64)] = it->sh.value.d;
         i += 1;
     }

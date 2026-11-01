@@ -80,7 +80,7 @@ fn the_worked_example_translates_whole() void {
 
 // ---- the terminators ----------------------------------------------------------------------------
 
-string[68] SOURCE = {
+string[71] SOURCE = {
     "enum color {",
     "    red,",
     "    green,",
@@ -148,6 +148,9 @@ string[68] SOURCE = {
     "}",
     "fn make(i32 x) pair {",
     "    return pair{x, 2};",
+    "}",
+    "fn halt(string m) noreturn {",
+    "    panic(m);",
     "}",
 };
 
@@ -409,16 +412,18 @@ fn an_aggregate_result_returns_void() void {
 // ---- failures -----------------------------------------------------------------------------------
 
 // `panic` in a block that holds only `fail` is the failure block `%L3`, and its number 1 is no
-// label: the `br i1` of `bb0` names `%L3`. The pointer and the length of the message load inside
-// the failure block, because the block has no statement to hold them.
+// label: the `br i1` of `bb0` names `%L3`. The message is copied into the caller-made copy
+// `%tmp0` inside the failure block, because the block has no statement to hold the copy, and the
+// call passes its address (toolchain.md 6 items 7 and 19).
 fn a_panic_alone_in_its_block_is_a_failure_block() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
     defer llvm_env.close(&e);
-    string[20] want = {
+    string[19] want = {
         "define dso_local void @\"main.msg\"(ptr %m.in, i1 zeroext %c.in) #0 {",
         "entry:",
         "  %c.1 = alloca i8, align 1",
+        "  %tmp0 = alloca %fort.span, align 8",
         "  %t0 = zext i1 %c.in to i8",
         "  store i8 %t0, ptr %c.1, align 1",
         "  %t1 = load i8, ptr %c.1, align 1",
@@ -429,11 +434,9 @@ fn a_panic_alone_in_its_block_is_a_failure_block() void {
         "  ret void",
         "",
         "L3:",
-        "  %t3 = getelementptr inbounds %fort.span, ptr %m.in, i32 0, i32 0",
-        "  %t4 = load ptr, ptr %t3, align 8",
-        "  %t5 = getelementptr inbounds %fort.span, ptr %m.in, i32 0, i32 1",
-        "  %t6 = load i64, ptr %t5, align 8",
-        "  call void @\"std.rt.panic\"(ptr %t4, i64 %t6, ptr @.file.0, i32 38, i32 9)",
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %m.in, i64 16, i1 \\",
+        "false)",
+        "  call void @\"std.rt.panic\"(ptr %tmp0, ptr @.file.0, i32 38, i32 9)",
         "  unreachable",
         "}",
     };
@@ -443,17 +446,19 @@ fn a_panic_alone_in_its_block_is_a_failure_block() void {
 }
 
 // `panic` after statements is the call and `unreachable` in place, in the block `%L1` that holds
-// the statements, and no failure block follows (toolchain.md 6 item 19).
+// the statements, and no failure block follows (toolchain.md 6 item 19). The literal fills the
+// `string` temporary `%tmp0` field by field, and the call passes its address.
 fn a_panic_after_statements_stands_in_place() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
     defer llvm_env.close(&e);
-    string[21] want = {
+    string[26] want = {
         "define dso_local void @\"main.boom\"(i1 zeroext %c.in, i32 %x.in) #0 {",
         "entry:",
         "  %c.0 = alloca i8, align 1",
         "  %x.1 = alloca i32, align 4",
         "  %y.2 = alloca i32, align 4",
+        "  %tmp0 = alloca %fort.span, align 8",
         "  %t0 = zext i1 %c.in to i8",
         "  store i8 %t0, ptr %c.0, align 1",
         "  store i32 %x.in, ptr %x.1, align 4",
@@ -464,7 +469,11 @@ fn a_panic_after_statements_stands_in_place() void {
         "L1:",
         "  %t3 = load i32, ptr %x.1, align 4",
         "  store i32 %t3, ptr %y.2, align 4",
-        "  call void @\"std.rt.panic\"(ptr @.str.0, i64 4, ptr @.file.0, i32 44, i32 9)",
+        "  %t4 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 0",
+        "  store ptr @.str.0, ptr %t4, align 8",
+        "  %t5 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 1",
+        "  store i64 4, ptr %t5, align 8",
+        "  call void @\"std.rt.panic\"(ptr %tmp0, ptr @.file.0, i32 44, i32 9)",
         "  unreachable",
         "",
         "L2:",
@@ -476,21 +485,47 @@ fn a_panic_after_statements_stands_in_place() void {
     llvm_env.verified(&e, got);
 }
 
-// `bb0` that holds only `fail` stays the entry block, with the call in place, because LLVM needs
-// an entry block. A `noreturn` function takes `#1`.
+// `bb0` that ends in `fail` stays the entry block, with the call in place, because LLVM needs an
+// entry block. A `noreturn` function takes `#1`.
 fn a_panic_in_the_entry_block_stands_in_place() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
     defer llvm_env.close(&e);
-    string[5] want = {
+    string[10] want = {
         "define dso_local void @\"main.stop\"() #1 {",
         "entry:",
-        "  call void @\"std.rt.panic\"(ptr @.str.0, i64 4, ptr @.file.0, i32 48, i32 5)",
+        "  %tmp0 = alloca %fort.span, align 8",
+        "  %t0 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 0",
+        "  store ptr @.str.0, ptr %t0, align 8",
+        "  %t1 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 1",
+        "  store i64 4, ptr %t1, align 8",
+        "  call void @\"std.rt.panic\"(ptr %tmp0, ptr @.file.0, i32 48, i32 5)",
         "  unreachable",
         "}",
     };
     string got = llvm_env.lowered_whole(&e, SOURCE[..], "stop", pass_env.CHECKED);
     llvm_env.expect(&e, got, want[..]);
+    llvm_env.verified(&e, got);
+}
+
+// `bb0` that holds only `fail` stays the entry block too, and it copies the message parameter into
+// `%tmp0` before the call.
+fn a_panic_alone_in_the_entry_block_stands_in_place() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[7] want = {
+        "define dso_local void @\"main.halt\"(ptr %m.in) #1 {",
+        "entry:",
+        "  %tmp0 = alloca %fort.span, align 8",
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp0, ptr align 8 %m.in, i64 16, \\",
+        "i1 false)",
+        "  call void @\"std.rt.panic\"(ptr %tmp0, ptr @.file.0, i32 70, i32 5)",
+        "  unreachable",
+    };
+    string[1] tail = {"}"};
+    string got = llvm_env.lowered_whole(&e, SOURCE[..], "halt", pass_env.CHECKED);
+    llvm_env.expect2(&e, got, want[..], tail[..]);
     llvm_env.verified(&e, got);
 }
 
@@ -583,6 +618,7 @@ fn main() i32 {
     a_panic_alone_in_its_block_is_a_failure_block();
     a_panic_after_statements_stands_in_place();
     a_panic_in_the_entry_block_stands_in_place();
+    a_panic_alone_in_the_entry_block_stands_in_place();
     the_failure_blocks_follow_the_blocks_that_make_them();
     println("failures ok");
     return 0;

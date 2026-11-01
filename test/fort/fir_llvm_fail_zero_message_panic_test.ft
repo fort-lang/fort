@@ -1,0 +1,40 @@
+//! run
+//! flags: -I ../../src -I support
+//! abort
+//! stderr: panic: fir_llvm.add_reported: an aggregate operand that is no place
+//! stdout:
+//| true
+/// The lowering passes the message of `panic` as a place, never as a constant. The text gives
+/// `fail(panic, ...)` the constant `const zero string`, so the translation of the `fail` panics.
+import fort.fir;
+import llvm_env;
+
+string[1] PRELUDE = {"fn f() void {}"};
+
+string[6] TEXT = {
+    "fn main.f() -> void {",
+    "",
+    "    bb0: {",
+    "        fail(panic, const zero string) #1:1 s1;",
+    "    }",
+    "}",
+};
+
+// A panic ends the program, so the case stands in a file of its own.
+fn main() i32 {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    fir.module mut m = llvm_env.parse(&e, PRELUDE[..], TEXT[..]);
+    defer fir.module_free(&m);
+    fir.func* f = fir.module_function_at(&m, 0);
+    println(ends_in_fail(f));
+    llvm_env.whole(&e, f);
+    return 0;
+}
+
+// Whether bb0 of `f` ends in `fail`. The read through `f` stands in a function that takes it as a
+// parameter (D17.21).
+fn ends_in_fail(fir.func* f) bool {
+    return fir.block_at(f, 0)->term.kind == fir.term_kind.tk_fail;
+}

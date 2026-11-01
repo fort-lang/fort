@@ -432,12 +432,13 @@ string[26] RUNTIME = {
 };
 
 // The print family calls each entry of std.rt through the signature map: `i1 zeroext` for a
-// `bool`, `i8 zeroext` for a `char`, the enum table and its count, and the newline.
+// `bool`, `i8 zeroext` for a `char`, a `string` as the caller-made copy `%tmp1` that one pointer
+// passes, the enum table and its count as the span `%tmp0`, and the newline.
 fn each_print_entry_is_a_fort_call() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
     defer llvm_env.close(&e);
-    string[45] want = {
+    string[49] want = {
         "define dso_local void @\"main.show\"(i32 %i.in, i16 zeroext %u.in, i1 zeroext %b.in, \\",
         "i8 zeroext %c.in, ptr %p.in, ptr %s.in, i32 %k.in, float %x.in, double %y.in) #0 {",
         "entry:",
@@ -449,6 +450,8 @@ fn each_print_entry_is_a_fort_call() void {
         "  %k.6 = alloca i32, align 4",
         "  %x.7 = alloca float, align 4",
         "  %y.8 = alloca double, align 8",
+        "  %tmp0 = alloca %fort.span, align 8",
+        "  %tmp1 = alloca %fort.span, align 8",
         "  store i32 %i.in, ptr %i.0, align 4",
         "  store i16 %u.in, ptr %u.1, align 2",
         "  %t0 = zext i1 %b.in to i8",
@@ -471,17 +474,19 @@ fn each_print_entry_is_a_fort_call() void {
         "  call void @\"std.rt.print_char\"(i32 1, i8 zeroext %t7)",
         "  %t8 = load ptr, ptr %p.4, align 8",
         "  call void @\"std.rt.print_ptr\"(i32 1, ptr %t8)",
-        "  %t9 = getelementptr inbounds %fort.span, ptr %s.in, i32 0, i32 0",
-        "  %t10 = load ptr, ptr %t9, align 8",
-        "  %t11 = getelementptr inbounds %fort.span, ptr %s.in, i32 0, i32 1",
-        "  %t12 = load i64, ptr %t11, align 8",
-        "  call void @\"std.rt.print_str\"(i32 1, ptr %t10, i64 %t12)",
-        "  %t13 = load i32, ptr %k.6, align 4",
-        "  call void @\"std.rt.print_enum\"(i32 1, i32 %t13, ptr @.enum.main.color, i64 2)",
-        "  %t14 = load float, ptr %x.7, align 4",
-        "  call void @\"std.rt.print_f32\"(i32 1, float %t14)",
-        "  %t15 = load double, ptr %y.8, align 8",
-        "  call void @\"std.rt.print_f64\"(i32 1, double %t15)",
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %tmp1, ptr align 8 %s.in, i64 16, i1 \\",
+        "false)",
+        "  call void @\"std.rt.print_str\"(i32 1, ptr %tmp1)",
+        "  %t9 = load i32, ptr %k.6, align 4",
+        "  %t10 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 0",
+        "  store ptr @.enum.main.color, ptr %t10, align 8",
+        "  %t11 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 1",
+        "  store i64 2, ptr %t11, align 8",
+        "  call void @\"std.rt.print_enum\"(i32 1, i32 %t9, ptr %tmp0)",
+        "  %t12 = load float, ptr %x.7, align 4",
+        "  call void @\"std.rt.print_f32\"(i32 1, float %t12)",
+        "  %t13 = load double, ptr %y.8, align 8",
+        "  call void @\"std.rt.print_f64\"(i32 1, double %t13)",
         "  call void @\"std.rt.print_char\"(i32 1, i8 zeroext 10)",
     };
     string[2] tail = {"  ret void", "}"};
