@@ -24,6 +24,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 # Pair each source group with the search roots that resolve its imports.
@@ -489,6 +490,57 @@ def text_problems(relative, text, root=None):
     return problems
 
 
+def std_module(relative):
+    """The module path of a file of `std/` in the standard root of its target, or None.
+
+    `std/str.ft` gives `std.str`, `std/linux/os.ft` gives `std.os` and `std/digest/sha256.ft`
+    gives `std.digest.sha256`.
+    """
+    parts = Path(relative).parts
+    if len(parts) < 2 or parts[0] != "std" or not parts[-1].endswith(".ft"):
+        return None
+    rest = list(parts[1:])
+    if len(rest) > 1 and rest[0] in TARGETS:
+        rest = rest[1:]
+    rest[-1] = rest[-1][: -len(".ft")]
+    return ".".join(["std"] + rest)
+
+
+def std_document(fort, root, entries, cache):
+    """Run `fort --index` over the modules of `std/` among `entries`, as `std.<name>`.
+
+    D6.9 names two functions of `std` by their modules, `str.from_cstr` and `rt.args_init`, so
+    a module of `std/` checks as `std.<name>` and not as an entry module named by its file. The
+    run uses a standard root of symbolic links to the files of `std/`: the real path of a record
+    is then the file of `std/`, while the links exist. One entry module imports each module.
+    Returns (records by real path, diagnostics, error), or (None, None, None) when `entries`
+    holds no file of `std/`.
+    """
+    modules = []
+    for relative, _, _, _ in entries:
+        module = std_module(relative)
+        if module is not None:
+            modules.append((relative, module))
+    if not modules:
+        return None, None, None
+    with tempfile.TemporaryDirectory() as tmp:
+        std_root = Path(tmp) / "std"
+        for relative, module in modules:
+            link = std_root.joinpath(*module.split(".")[1:]).with_suffix(".ft")
+            link.parent.mkdir(parents=True, exist_ok=True)
+            # Two targets give one module path; the first file of it stands in the root.
+            if not link.is_symlink():
+                link.symlink_to((Path(root) / relative).resolve())
+        entry = Path(tmp) / "lint_std.ft"
+        lines = ["import %s;" % module for module in sorted({module for _, module in modules})]
+        lines.append("fn main() i32 {\n    return 0;\n}")
+        entry.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        document, error = index_document(fort, root, str(entry), (), std_root)
+        if error is not None:
+            return {}, [], error
+        return group_records(document, root, cache), diagnostic_problems(document), None
+
+
 def lint_files(fort, root, files, std_dir=None):
     """Return the formatted problems of each file, and the number of runs.
 
@@ -518,6 +570,18 @@ def lint_files(fort, root, files, std_dir=None):
         entries.append((relative, tuple(includes), real_path(root, relative, cache), text))
     reports = [None] * len(entries)
     runs = 0
+    buckets, diagnostics, error = std_document(fort, root, entries, cache)
+    if buckets is not None:
+        runs += 1
+        for index, (relative, _, path, text) in enumerate(entries):
+            if std_module(relative) is None:
+                continue
+            if error is not None:
+                reports[index] = [(1, 1, error)]
+                continue
+            records = buckets.get(path, [])
+            reports[index] = file_problems(records, diagnostics, has_source_text(text),
+                                           module_segments(relative))
     for index, (relative, includes, _, _) in enumerate(entries):
         if reports[index] is not None:
             continue

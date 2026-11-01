@@ -1,0 +1,59 @@
+//! run
+//! stdout:
+//| abc
+//| 3 0 3
+//| true true true
+//| true true
+//| xyz 3
+//| true true
+import std.libc;
+import std.str;
+
+// The `.ptr` of a span or a string stands in three positions (D3.5): an argument of an
+// `extern fn`, as it stands, where C gives back no argument of the type of its parameter; the
+// argument of `str.from_cstr`; and an operand of `==` or `!=`. No cast takes a `.ptr`, so a
+// program casts a span first, `cast(text, u8@).ptr`, or writes the address of an element,
+// `cast(&s[0], void*)`. Each line below uses one of these forms.
+
+// strdup gives a new allocation, which says `own`: C gives back no argument through it, so its
+// parameter takes a `.ptr`.
+extern fn strdup(char* s) char mut* own;
+
+fn main() i32 {
+    string text = "abc\n";
+    // write gives an integer, so C gives back no argument. The span cast gives the bytes the type
+    // of the parameter, and the `.ptr` of an empty span goes to C too.
+    i64 wrote = libc.write(1, cast(text, u8@).ptr, text.len);
+    string empty = text[4..];
+    libc.write(1, cast(empty, u8@).ptr, empty.len);
+    // strlen and memcmp give no pointer either.
+    u8@ bytes = cast(text, u8@);
+    println(libc.strlen(text.ptr) - 1, " ", libc.memcmp(bytes.ptr, bytes.ptr, 0), " ", wrote - 1);
+
+    // == and != compare the address, through `->` too. The `.ptr` of an empty span at the end of
+    // its object compares as the byte after the object, and a read through it does not exist.
+    u8 mut@ own heap = new(u8, 4);
+    u8 mut@ tail = heap[4..];
+    u8 mut@* where = &tail;
+    println(tail.ptr != null, " ", where->ptr == tail.ptr, " ", heap[0..0].ptr == heap.ptr);
+    // The address of an element goes to a `void*` or to a `u64`, and its index is checked.
+    println(cast(&heap[0], void*) != null, " ", cast(&heap[3], u64) - cast(&heap[0], u64) == 3);
+
+    // The argument of str.from_cstr, and of an extern whose result says `own`.
+    char mut* own copy = strdup(text.ptr);
+    char mut@ own buf = new(char, 4);
+    buf[0] = 'x';
+    buf[1] = 'y';
+    buf[2] = 'z';
+    string view = str.from_cstr(buf.ptr);
+    println(view, " ", view.len);
+
+    // getenv gives back a `char*`, so its argument is the address of an element.
+    string name = "FORT_T542_UNSET";
+    char* found = libc.getenv(&name[0]);
+    println(found == null, " ", copy != null);
+    libc.free(cast(move(copy), void* own));
+    del(buf);
+    del(heap);
+    return 0;
+}

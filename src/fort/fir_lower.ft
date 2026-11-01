@@ -26,11 +26,9 @@ import fort.session;
 import std.strbuf;
 import fort.types;
 
-// The module of the runtime, its function that compares two strings, and the function that a
-// `panic` calls.
+// The module of the runtime, and its function that compares two strings.
 string RUNTIME_MODULE = "std.rt";
 string STR_EQ = "str_eq";
-string PANIC = "panic";
 // The name of the member record of an enum table in std.rt (spec/toolchain.md 5.1).
 string ENUM_MEMBER = "enum_member";
 
@@ -2225,14 +2223,11 @@ fn print_function(lowerer mut* lw, print_kind k, ast.node* n, ast.sym* mut* entr
 // refuses, and an `own` parameter takes no copy (rule V6). A `noreturn` print is another
 // signature too: call_runtime ends no block after the call, which rule V8 requires. The result
 // of a print that returns does not count, because call_runtime puts it in a temporary of its own
-// type. pointer_print_fits takes the form of the runtime of the last pin of tools/bootstrap.ref.
+// type.
 fn print_fits(check.checker* ck, types.node* ft, print_kind k) bool {
     if (ft->is_noreturn || ft->params.len < 2
         || !types.is_prim(ft->params[0], prim.prim_kind.prim_i32)) {
         return false;
-    }
-    if (pointer_print_fits(ck, ft, k)) {
-        return true;
     }
     if (k == print_kind.pk_enum) {
         return ft->params.len == 3 && types.is_prim(ft->params[1], prim.prim_kind.prim_i32)
@@ -2264,24 +2259,6 @@ fn print_fits(check.checker* ck, types.node* ft, print_kind k) bool {
     }
 }
 
-// Whether the fort type `ft` of the print function of `k` takes a `string` as `char* ptr, u64
-// len`, or an enum as `i32 v, enum_member* m, u64 n`. The standard directory of the last pin of
-// tools/bootstrap.ref declares these forms. This compiler takes them beside the forms of
-// print_fits, so that it can build a later tree whose runtime takes a `string` and a span
-// (D6.9, D14.7). The caller tested the descriptor.
-fn pointer_print_fits(check.checker* ck, types.node* ft, print_kind k) bool {
-    if (k == print_kind.pk_str) {
-        return ft->params.len == 3 && char_pointer(ft->params[1])
-            && types.is_prim(ft->params[2], prim.prim_kind.prim_u64);
-    }
-    if (k == print_kind.pk_enum) {
-        return ft->params.len == 4 && types.is_prim(ft->params[1], prim.prim_kind.prim_i32)
-            && enum_table(ck, ft->params[2])
-            && types.is_prim(ft->params[3], prim.prim_kind.prim_u64);
-    }
-    return false;
-}
-
 // Whether the fort type `ft` of `str_eq` is the one of spec/toolchain.md 5.1: `char* a, u64 a_len,
 // char* b, u64 b_len`, and the result `bool`, which lower_string_eq assigns to a `bool` temporary.
 // A `noreturn` function has the result `void`, so it fails the test. As in print_fits, a pointer
@@ -2303,12 +2280,6 @@ fn unmarked(types.node* t) bool {
 fn char_pointer(types.node* t) bool {
     return t->kind == types.type_kind.k_ptr && unmarked(t)
         && types.is_prim(t->elem, prim.prim_kind.prim_char);
-}
-
-// Whether `t`, a type of `ck`, is a pointer to the `struct enum_member` of std.rt, the member
-// record that the enum table of a print holds, with neither `mut` nor `own`.
-fn enum_table(check.checker* ck, types.node* t) bool {
-    return t->kind == types.type_kind.k_ptr && unmarked(t) && enum_member_type(ck, t->elem);
 }
 
 // Whether `t`, a type of `ck`, is a span of the `struct enum_member` of std.rt with neither `mut`
@@ -2418,20 +2389,14 @@ fn converted(lowerer mut* lw, fir.operand v, types.node* t, diag.loc at) fir.ope
 // One print argument `a`: a `string` as one `string` place, an enum as `cast<i32>(a)` and `_t =
 // aggregate enum_member@(const enum_table m.E, const u64 n)` of its `n` members, a pointer or a
 // function as `void*`, a signed integer as `i64` and an unsigned one as `u64`, and a `bool`, a
-// `char` or a float as it stands. Each call stands at the argument. An entry that
-// pointer_print_fits takes gets a `string` as its pointer and its length, and the table and the
-// count as two operands.
+// `char` or a float as it stands. Each call stands at the argument.
 fn lower_print_arg(lowerer mut* lw, ast.node* a, fir.operand fd) bool {
     print_kind k = print_kind_of(a->ty);
     ast.sym* mut entry = null;
     if (!print_function(lw, k, a, &entry)) {
         return false;
     }
-    bool parts = pointer_print_fits(lw->ck, entry->ty, k);
     if (k == print_kind.pk_str) {
-        if (parts) {
-            return print_string_parts(lw, a, fd, entry);
-        }
         fir.operand mut s = fir.operand{};
         if (!string_operand(lw, a, &s)) {
             return false;
@@ -2454,14 +2419,6 @@ fn lower_print_arg(lowerer mut* lw, ast.node* a, fir.operand fd) bool {
     }
     ast.sym* e = check.nominal_sym(lw->ck, a->ty);
     fir.operand count = int_const(u64_ty(lw), false, gen.gen_enum_count(e));
-    if (parts) {
-        u32 first = fir.operand_push(lw->f, fd);
-        fir.operand_push(lw->f, value);
-        fir.operand_push(lw->f, fir.operand_const(fir.const_enum_table(e, param_type(entry, 2))));
-        fir.operand_push(lw->f, count);
-        call_runtime(lw, entry, first, 4, a->loc);
-        return true;
-    }
     types.node* span = param_type(entry, 2);
     types.node* pointer = types.type_ptr(&lw->ck->types, span->elem, false, false);
     u32 members = fir.operand_push(lw->f, fir.operand_const(fir.const_enum_table(e, pointer)));
@@ -2470,21 +2427,6 @@ fn lower_print_arg(lowerer mut* lw, ast.node* a, fir.operand fd) bool {
     u32 first = fir.operand_push(lw->f, fd);
     fir.operand_push(lw->f, value);
     fir.operand_push(lw->f, table);
-    call_runtime(lw, entry, first, 3, a->loc);
-    return true;
-}
-
-// The print argument `a` of type `string` for an entry that pointer_print_fits takes: its pointer
-// and its length, then `call fn std.rt.print_str(fd, ptr, len)` at the argument.
-fn print_string_parts(lowerer mut* lw, ast.node* a, fir.operand fd, ast.sym* entry) bool {
-    fir.operand mut ptr = fir.operand{};
-    fir.operand mut len = fir.operand{};
-    if (!string_parts(lw, a, &ptr, &len)) {
-        return false;
-    }
-    u32 first = fir.operand_push(lw->f, fd);
-    fir.operand_push(lw->f, ptr);
-    fir.operand_push(lw->f, len);
     call_runtime(lw, entry, first, 3, a->loc);
     return true;
 }
@@ -2499,29 +2441,6 @@ fn string_operand(lowerer mut* lw, ast.node* m, fir.operand mut* out) bool {
     if (out->kind != fir.operand_kind.ok_copy) {
         panic("fir_lower.string_operand: a string that owns");
     }
-    return true;
-}
-
-// The pointer and the length of the `string` expression `m`, in *ptr and *len: `const bytes
-// "..."` and its length for a folded constant, which the call passes as a literal, and else
-// `copy p.0` and `copy p.1` of the place of `m`.
-fn string_parts(lowerer mut* lw, ast.node* m, fir.operand mut* ptr, fir.operand mut* len) bool {
-    if (string_constant(lw, m)) {
-        string text = check.check_node_value(lw->ck, m).str;
-        *ptr = fir.operand_const(fir.const_bytes(text));
-        *len = int_const(u64_ty(lw), false, text.len);
-        return true;
-    }
-    fir.operand mut v = fir.operand{};
-    if (!aggregate_operand(lw, m, &v)) {
-        return false;
-    }
-    if (v.kind != fir.operand_kind.ok_copy) {
-        // the checker gives a print argument and `panic` no owning rvalue, which would leak
-        panic("fir_lower.string_parts: a string that owns");
-    }
-    *ptr = fir.operand_copy(fir.place_field(lw->f, v.place, PTR_FIELD));
-    *len = fir.operand_copy(fir.place_field(lw->f, v.place, LEN_FIELD));
     return true;
 }
 
@@ -2576,26 +2495,10 @@ fn lower_assert(lowerer mut* lw, ast.node* n) bool {
 }
 
 // `panic(m)`: the place of `m`, then `fail(panic, m)` at the name `panic`, which the runtime
-// reports (spec/fir.md 9.4). The `fail` ends the block. A `std.rt.panic` whose first parameter is
-// a `char*` gets the pointer and the length of `m`, as in `fail(panic, ptr, len)`: the standard
-// directory of the last pin of tools/bootstrap.ref declares that form, and this compiler takes it
-// beside the `string` form, so that it can build a later tree (D6.9, D14.7).
+// reports (spec/fir.md 9.4). The `fail` ends the block.
 fn lower_panic(lowerer mut* lw, ast.node* n) bool {
-    ast.node* m = ast.ast_child(n, 0);
-    ast.sym* entry = runtime_fn(lw->ck, PANIC);
-    if (entry != null && entry->ty->params.len > 0 && char_pointer(entry->ty->params[0])) {
-        fir.operand mut ptr = fir.operand{};
-        fir.operand mut len = fir.operand{};
-        if (!string_parts(lw, m, &ptr, &len)) {
-            return false;
-        }
-        u32 first = fir.operand_push(lw->f, ptr);
-        fir.operand_push(lw->f, len);
-        terminate(lw, fir.term_fail(fir.check_kind.chk_panic, first, 2, n->a->loc, lw->stmt));
-        return true;
-    }
     fir.operand mut s = fir.operand{};
-    if (!string_operand(lw, m, &s)) {
+    if (!string_operand(lw, ast.ast_child(n, 0), &s)) {
         return false;
     }
     u32 first = fir.operand_push(lw->f, s);

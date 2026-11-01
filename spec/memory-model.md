@@ -760,14 +760,15 @@ del(d);                              // frees the copy; d is {null, 0}, which eq
 ### 4.5 Handing memory to C
 
 Spans, strings, structs and fixed arrays never cross an `extern` boundary (D9.8, D13.4). Unpack
-`.ptr` and `.len`, cast the pointer to the declared C type, and pass a struct by address.
+`.ptr` and `.len`, and pass a struct by address. No cast takes a `.ptr` (D3.5), so cast the span to
+the element type of the C parameter first: `cast(s, u8@).ptr`.
 
 ```fort
 extern fn write(i32 fd, u8* buf, u64 n) i64;
 extern fn memset(u8 mut* p, i32 c, u64 n) void;
 
 fn put(string s) void {
-    write(1, cast(s.ptr, u8*), s.len);
+    write(1, cast(s, u8@).ptr, s.len);
 }
 fn clear(u8 mut@ b) void {
     memset(b.ptr, 0, b.len);
@@ -805,7 +806,7 @@ char mut@ text = line[0..n];                   // error: cannot take a span of c
 string seen = str.from_cstr(line);             // a view of the line up to its NUL
 del(line);                                     // frees what C allocated
 u8 mut@ own b = new(u8, 64);
-free(cast(b.ptr, void* own));                  // error: a cast never adds own to the view b.ptr
+free(cast(&b[0], void* own));                  // error: a cast never adds own to the view &b[0]
 ```
 
 The last line would make a second owner: `b` would still look live after it, so a `del(b)` would

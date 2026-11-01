@@ -198,28 +198,31 @@ Sections:
   read-only pseudo-fields. Spans are produced by `new(T, n)` (D10.2, as `T mut@ own`), by taking a
   span (D6.9, always a view) and by the zero initializer `{}`. A span literal `{1, 2, 3}` does not
   exist.
-  **`.ptr` is no element pointer.** The `.ptr` of a span or of a string (D3.7) is legal in four
-  positions only: an argument of a call of an `extern fn`, alone or as the operand of the casts
-  that form that argument; the argument of `str.from_cstr` (D6.9); an operand of `==` or `!=`;
-  and the operand of a cast to `u64` or to a `void*`. Each other use is the error
-  `'.ptr' can name the byte after the last element: write '&s[0]'`. The reason: the `.ptr` of an
-  empty span names the byte after its object, and no check reads it. For an `i32[2] a`,
-  `*a[2..].ptr` read the next local, and for an `i64 mut@ own a = new(i64, 3)`,
-  `*a[3..].ptr = 0` wrote the size word of the next chunk of the allocator. `&s[0]` checks its
-  index (D10.6), so a pointer to an element of a span stays inside the span. A C function that
-  gets the `.ptr` and the `.len` of an empty span reads no element (A7 of `ownership-design.md`
-  5.1). As an argument of an `extern fn`, a `.ptr` is legal only for a parameter whose C type is
-  no C type of a pointer that C gives in that declaration (D17.13), because C can give that
-  argument back. The C types compare with the `mut` and `own` marks dropped on both sides, with
-  `char` and `u8` as one type (D9.8), and with a `void*` equal to each pointer type. A type that C
-  gives and that says `own` is a new allocation (A2), and C gives back no argument through it.
-  With `memcpy` declared with a `u8 mut*` result, `libc.memcpy(a[24..].ptr, a.ptr, 0)` gave back
-  the byte after the 24 bytes of `a`, and a store through it wrote the size word of the next
-  chunk; `strncpy(char mut* dst, char* src, u64 n) char mut*` and
-  `strncpy(u8 mut* dst, u8* src, u64 n) char*` did the same through `dst`. So `libc.write(1, s.ptr,
-  s.len)`, `str.from_cstr(buf.ptr)`, `s.ptr == t.ptr` and `cast(s.ptr, u64)` stay legal;
-  `i32* p = s.ptr` is an error, and so is `libc.getenv(c.ptr)`, because `getenv` gives back a
-  `char*`: write `libc.getenv(&c[0])`.
+  **`.ptr` is no element pointer.** The `.ptr` of a span or of a string (D3.7) is legal in three
+  positions only, each as the `.ptr` stands: an argument of a call of an `extern fn`; the argument
+  of `str.from_cstr` (D6.9); and an operand of `==` or `!=`. No cast takes a `.ptr`, so
+  `cast(s.ptr, void*)` and `cast(s.ptr, u64)` are errors too: write `cast(&s[0], void*)`. Each other
+  use is the error `'.ptr' can name the byte after the last element: write '&s[0]'`. The reason: the
+  `.ptr` of an empty span names the byte after its object, and no check reads it. For an `i32[2] a`,
+  `*a[2..].ptr` read the next local, and for an `i64 mut@ own a = new(i64, 3)`, `*a[3..].ptr = 0`
+  wrote the size word of the next chunk of the allocator. `&s[0]` checks its index (D10.6), so a
+  pointer to an element of a span stays inside the span. A C function that gets the `.ptr` and the
+  `.len` of an empty span reads no element (A7 of `ownership-design.md` 5.1). As an argument of an
+  `extern fn`, a `.ptr` is legal only for a parameter whose C type is no C type of a pointer that C
+  gives in that declaration (D17.13), because C can give that argument back. The C types compare
+  with the `mut` and `own` marks dropped on both sides, with `char` and `u8` as one type (D9.8), and
+  with a `void*` equal to each pointer type. A type that C gives and that says `own` is a new
+  allocation (A2), and C gives back no argument through it. With `memcpy` declared with a `u8 mut*`
+  result, `libc.memcpy(a[24..].ptr, a.ptr, 0)` gave back the byte after the 24 bytes of `a`, and a
+  store through it wrote the size word of the next chunk;
+  `strncpy(char mut* dst, char* src, u64 n) char mut*` and
+  `strncpy(u8 mut* dst, u8* src, u64 n) char*` did the same through `dst`. A cast hid the `.ptr`
+  from this rule: `cast(a[24..].ptr, void mut*)` went to a local and then to `mempcpy`, which gave
+  back the byte after the 24 bytes of `a`. C gives back an argument only through a parameter of
+  pointer type (A7), and the cast to `u64` is an error too, so no `.ptr` leaves the positions where
+  this rule reads it. So `libc.write(1, s.ptr, s.len)` for a `u8@ s`, `str.from_cstr(buf.ptr)` and
+  `s.ptr == t.ptr` stay legal; `i32* p = s.ptr` is an error, and so is `libc.getenv(c.ptr)`, because
+  `getenv` gives back a `char*`: write `libc.getenv(&c[0])`.
 - history: Amended 2026-09-10: the type was called a slice until then, and the operation slicing.
   Amended 2026-10-31: `.ptr` was legal in each position, so the `.ptr` of an empty span at the end
   of its object gave fort code a pointer to the next object, with no extern and no cast. The user
@@ -233,6 +236,15 @@ Sections:
   review of the same day made it compare C types. It refuses 11 more arguments (by text): 1 in
   `src`, 6 in `std` (`getenv`, `realpath`, the `qsort` of `std.sort`) and 4 in `test/lang`, 3 of
   them `qsort` calls, which go with the `qsort` of `std.libc` (`stdlib.md` 2.2).
+  Amended 2026-11-01: a `.ptr` was legal as the operand of a cast to `u64` or to a `void*`, and
+  as the operand of the casts that formed an extern argument. A `.ptr` in a `void*` or a `u64`
+  then reached an extern parameter as no `.ptr`, and the rule of the extern argument did not read
+  it. The user ruled "No .ptr escape" (user, 2026-11-01): a `.ptr` stands only in the three
+  positions, and no cast takes it. A count over the trees of 858e2eb8 with the checker of this
+  rule (`fort --check` of each file, `std` by an entry that imports each module) found 79 uses
+  that it refuses: 1 in `src`, 2 in `std` (`std/sort.ft`), 24 in `test/fort`, 30 in
+  `test/lang/run` and 22 in `test/lang/fail`. 4 more stood in the sources that `test/fort`
+  embeds (by text). Each became `&s[0]`, a cast of a span, or a `.ptr` in one of the positions.
 
 ### D3.6 How type suffixes read
 - owner: `type-system.md`.
@@ -472,9 +484,9 @@ Sections:
   lvalue with no `move`; then the size and then the alignment of the pointee; then a function
   pointer type that the cast changes; then the pointer places of a `mut` cast; and last the
   pointer places of a view. An error of the operand comes before each error of the cast: so
-  `cast(s.ptr, i64*)` for an `i32@ s` reports the `.ptr` of D3.5, which is no operand of a cast to
-  `u64` or to a `void*`. So `cast(bits, i32 mut*)` for a `u64 bits` reports the pointer from
-  an integer, and `cast(&x, i64 mut*)` for an `i32 mut x` reports the size.
+  `cast(s.ptr, i64*)` for an `i32@ s` reports the `.ptr` of D3.5, which no cast takes. So
+  `cast(bits, i32 mut*)` for a `u64 bits` reports the pointer from an integer, and
+  `cast(&x, i64 mut*)` for an `i32 mut x` reports the size.
   **A `mut` cast keeps the pointer places that its result can change.** The result of a cast can
   change level `k` (D5.2) when its type marks a level from 1 to `k` `mut`: by a store when it
   marks level `k` `mut`, and by a store of another pointer when it marks a level above `k` `mut`.
@@ -1115,8 +1127,9 @@ Sections:
   `T@` or a `T mut@` with no check, and `p[lo..]`, `p[..hi]` and `p[..]` stay errors. Each other
   function, of `std` too, takes no span of a raw pointer. So the functions of `std.rt` that made
   a span of a pointer and a length take a span or a string: `rt.print_str` and `rt.panic` take a
-  `string`, `rt.print_enum` takes an `enum_member@`, `rt.emit_cstr` and `rt.message_cstr` take a
-  `string`, and `rt.scan` takes the span of its buffer. `rt.str_eq` makes no span: it gives its
+  `string`, `rt.print_enum` takes an `enum_member@`, and `rt.scan` takes the span of its buffer.
+  `rt.emit_cstr` and `rt.message_cstr` do not exist: a caller gives `str.from_cstr(p)` to
+  `rt.emit_str` or to `rt.message_str`. `rt.str_eq` makes no span: it gives its
   pointers and lengths to `memcmp` (A7). A `char*` that the compiler gives as a C string,
   the file of a position or the name of an enum member, keeps its type, and `std.rt` reads it
   through `str.from_cstr`.
@@ -1137,6 +1150,10 @@ Sections:
   that the compiler passes; `str.from_cstr` and `rt.args_init` get a bare pointer from C. The
   coordinator ratified on 2026-10-31 the exception of these two functions, in place of each
   module of `std`.
+  Amended 2026-11-01: the rule said that `rt.emit_cstr` and `rt.message_cstr` take a `string`.
+  With a `string` each would do what `rt.emit_str` and `rt.message_str` do, so `std.rt` removed
+  both, and their callers give `str.from_cstr(p)` to the `_str` entries. The coordinator ratified
+  the removal on 2026-11-01.
 
 ### D6.10 The arrow operator
 - owner: `core-language.md` (Expressions).

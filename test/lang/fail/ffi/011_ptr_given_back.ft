@@ -1,0 +1,58 @@
+//! fail
+// As an argument of an `extern fn`, a `.ptr` stands as it is, and only for a parameter whose C type
+// is no C type of a pointer that C gives in that declaration, because C can give that argument
+// back (D3.5, D17.13). C gives its result, each parameter type of a function pointer parameter,
+// each pointer that a `mut` level of a parameter holds, and a pointer that a function pointer of
+// the declaration gives when fort code calls it. The C types compare with `mut` and `own` dropped,
+// with `char` and `u8` as one type, with a `void*` equal to each pointer type, and with the length
+// of a fixed array, whose element follows the same rules. An argument of the variable tail is read
+// as each pointer type. No cast takes a `.ptr`, so a cast to a `void*` frees no argument. The
+// address of an element, `&s[0]`, stands in each of these positions.
+extern fn keep(char* p) char*;
+extern fn keep_mut(char mut* p) char*;
+extern fn keep_void(u8* p) void*;
+extern fn keep_byte(u8* p) char*;
+extern fn keep_back(char* s, fn (char*) void cb) void;
+extern fn keep_out(char* s, char* mut* end) void;
+extern fn keep_tail(i32 n, ...) char*;
+extern fn keep_later(char* p) fn () char*;
+extern fn keep_any(void* p) void*;
+extern fn keep_row(u8[4]* p) u8[4]*;
+extern fn keep_wide(u8[4]* p) u8[8]*;
+extern fn keep_text(u8[4]* p) char[4]*;
+
+fn seen(char* p) void {
+}
+
+fn main() i32 {
+    string s = "abc";
+    char mut@ own m = new(char, 4);
+    u8@ b = cast(s, u8@);
+    u8[2][4] mut grid = {};
+    u8[4]@ rows = grid[..];
+    char* a = keep(s.ptr); //! error: '.ptr' can name the byte after the last element
+    char* c = keep_mut(m.ptr); //! error: '.ptr' can name the byte after the last element
+    void* d = keep_void(b.ptr); //! error: '.ptr' can name the byte after the last element
+    char* e = keep_byte(b.ptr); //! error: '.ptr' can name the byte after the last element
+    keep_back(s.ptr, seen); //! error: '.ptr' can name the byte after the last element
+    char* mut end = null;
+    keep_out(s.ptr, &end); //! error: '.ptr' can name the byte after the last element
+    char* f = keep_tail(1, s.ptr); //! error: '.ptr' can name the byte after the last element
+    fn () char* g = keep_later(s.ptr); //! error: '.ptr' can name the byte after the last element
+    u8[4]* h = keep_row(rows.ptr); //! error: '.ptr' can name the byte after the last element
+    // C gives no `u8[4]*` back through a `u8[8]*`: the lengths differ. A `char[4]*` is a
+    // `u8[4]*` in C.
+    u8[8]* i = keep_wide(rows.ptr);
+    char[4]* t = keep_text(rows.ptr); //! error: '.ptr' can name the byte after the last element
+    // A cast to a `void*` that forms the argument changes nothing: no cast takes a `.ptr`.
+    void* j = keep_any(cast(s.ptr, void*)); //! error: '.ptr' can name the byte after the last
+    // The address of an element passes in each position.
+    char* k = keep(&s[0]);
+    void* l = keep_void(&b[0]);
+    keep_back(&s[0], seen);
+    keep_out(&s[0], &end);
+    char* n = keep_tail(1, &s[0]);
+    void* o = keep_any(cast(&s[0], void*));
+    del(m);
+    return 0;
+}

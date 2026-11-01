@@ -66,6 +66,20 @@ fn lower(env mut* e, string@ lines, string name, pass_env.mode m) fir.func {
     return f;
 }
 
+/// lower, for `lines` that lower_env.check_str_lines checks as the module std.str: a function
+/// `from_cstr` there takes `p[lo..hi]` of a raw pointer (D6.9).
+fn lower_str(env mut* e, string@ lines, string name, pass_env.mode m) fir.func {
+    lower_env.check_str_lines(&e->low, lines);
+    reset(e, m);
+    fir.func mut f = fir.func{};
+    fir_lower.report mut why = fir_lower.report{};
+    if (!fir_lower.lower_function(&e->low.c.ck, lower_env.decl(&e->low, name), &f, &why)) {
+        panic("llvm_env.lower_str: the lowering refuses the function");
+    }
+    pass_env.build(&e->low, &f, m);
+    return f;
+}
+
 /// Parses `text`, the lines of a FIR module, against `prelude`, as pass_env.parse does. The
 /// verifier runs on no function of it. The caller frees the module.
 fn parse(env mut* e, string@ prelude, string@ text) fir.module {
@@ -170,6 +184,13 @@ fn module_tail(env mut* e) string {
 /// Lowers the function `name` of `lines` in mode `m` and translates it.
 fn lowered(env mut* e, string@ lines, string name, pass_env.mode m) string {
     fir.func mut f = lower(e, lines, name, m);
+    defer fir.func_free(&f);
+    return translate(e, &f);
+}
+
+/// lowered, for `lines` that lower_env.check_str_lines checks as the module std.str.
+fn lowered_str(env mut* e, string@ lines, string name, pass_env.mode m) string {
+    fir.func mut f = lower_str(e, lines, name, m);
     defer fir.func_free(&f);
     return translate(e, &f);
 }

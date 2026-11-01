@@ -180,6 +180,8 @@ struct checker {
     // The argument of an `extern fn` call that the checker is checking. A cast that is this node
     // may hide or add a pointer place (D3.14).
     ast.node* extern_arg;
+    // The `.ptr` node that its position allows (D3.5).
+    ast.node* ptr_ok;
     // Whether the checker needs an operand address instead of its value.
     // `node N = node{&N};` is a legal self-reference. An address of a module
     // declaration is available from all modules, including its own module.
@@ -2514,6 +2516,12 @@ fn value_of_sym(checker mut* ck, ast.node* n, ast.sym mut* s, expr mut* out) voi
             out->init_const = true;
         }
     case ast.sym_kind.s_fn:
+        if (is_args_init(s)) {
+            // only the `main` that the compiler emits calls it (D6.9)
+            check_error(ck, n->name_loc, ARGS_INIT_ERROR);
+            out->ty = types.type_error(&ck->types);
+            return;
+        }
         // `&f` is an error; a function name initializes
         out->init_const = true;
     case ast.sym_kind.s_enum_member:
@@ -2593,6 +2601,156 @@ fn names_module_or_type(checker mut* ck, ast.node mut* n) scope.binding* {
     return b;
 }
 
+// ---- the positions of `.ptr` (D3.5) and the spans of a raw pointer (D6.9) ---------------
+
+// The error of a `.ptr` outside the positions of D3.5.
+string PTR_POSITION_ERROR = "'.ptr' can name the byte after the last element: write '&s[0]'";
+
+// The error of each name of `std.rt.args_init` in source (D6.9).
+string ARGS_INIT_ERROR = "'std.rt.args_init' belongs to the start of the program";
+
+// The two functions whose bodies take `p[lo..hi]` of a raw pointer, and their modules (D6.9).
+string CSTR_MODULE = "std.str";
+string CSTR_FN = "from_cstr";
+string ARGS_MODULE = "std.rt";
+string ARGS_FN = "args_init";
+
+// `n` when it is a `.ptr` or a `->ptr` node, and null otherwise. The checker gives such a node of
+// a span or a string the pseudo-field `.ptr`, and of a struct the field of that name.
+fn ptr_node(ast.node* n) ast.node* {
+    if (n == null || (n->kind != ast.ast_kind.k_field && n->kind != ast.ast_kind.k_arrow)) {
+        return null;
+    }
+    if (n->name != "ptr") {
+        return null;
+    }
+    return n;
+}
+
+// Whether `s` is a declaration of the module `path`.
+fn declared_in(ast.sym* s, string path) bool {
+    return s->owner != null && s->owner->kind == ast.sym_kind.s_module && s->owner->name == path;
+}
+
+// Whether `s` is the function `std.rt.args_init`.
+fn is_args_init(ast.sym* s) bool {
+    return s->kind == ast.sym_kind.s_fn && s->name == ARGS_FN && declared_in(s, ARGS_MODULE);
+}
+
+// Whether the checker checks the body of `str.from_cstr` or of `rt.args_init`, the two functions
+// that take `p[lo..hi]` of a raw pointer (D6.9).
+fn raw_span_allowed(checker* ck) bool {
+    if (!ck->in_function || ck->fn_sym == null || ck->module == null) {
+        return false;
+    }
+    string name = ck->fn_sym->name;
+    string path = ck->module->path;
+    return (path == CSTR_MODULE && name == CSTR_FN) || (path == ARGS_MODULE && name == ARGS_FN);
+}
+
+// Whether `t` is a pointer or a `void*`, the kinds that a `void*` equals in a comparison of C
+// types (D3.5). A function pointer is neither.
+fn c_pointer(types.node* t) bool {
+    return t->kind == types.type_kind.k_ptr || t->kind == types.type_kind.k_voidptr;
+}
+
+// Whether `a` and `b` are one C type (D3.5): the `mut` and `own` marks drop at each level, `char`
+// and `u8` are one type (D9.8), and a `void*` equals each pointer type, at each level.
+fn c_type_same(types.node* a, types.node* b) bool {
+    if (c_pointer(a) && c_pointer(b)) {
+        if (a->kind == types.type_kind.k_voidptr || b->kind == types.type_kind.k_voidptr) {
+            return true;
+        }
+        return c_type_same(a->elem, b->elem);
+    }
+    if (a->kind == types.type_kind.k_prim && b->kind == types.type_kind.k_prim) {
+        return c_byte(a->prim) == c_byte(b->prim);
+    }
+    if (a->kind == types.type_kind.k_array && b->kind == types.type_kind.k_array) {
+        return a->len == b->len && c_type_same(a->elem, b->elem);
+    }
+    return types.type_same_shape(a, b);
+}
+
+// `u8` for `char`, and `k` for each other primitive.
+fn c_byte(prim.prim_kind k) prim.prim_kind {
+    if (k == prim.prim_kind.prim_char) {
+        return prim.prim_kind.prim_u8;
+    }
+    return k;
+}
+
+// Whether C can give back an argument of the C type `p` through the function type `fty` of an
+// `extern fn` (D3.5, D17.13). C gives its result, each parameter type of each function pointer
+// parameter, and each pointer that a `mut` level of a parameter holds. A function pointer that C
+// gives follows the rule of an `extern fn` of its type, because a call through it runs C. A null
+// `p` is an argument of the variable tail, which C reads as each pointer type.
+fn c_gives_back(types.node* fty, types.node* p) bool {
+    if (c_gives(fty->elem, p)) {
+        return true;
+    }
+    u64 mut i = 0;
+    while (i < fty->params.len) {
+        types.node* q = fty->params[i];
+        if (q->kind == types.type_kind.k_fn) {
+            u64 mut k = 0;
+            while (k < q->params.len) {
+                if (c_gives(q->params[k], p)) {
+                    return true;
+                }
+                k += 1;
+            }
+        }
+        types.node* mut level = q;
+        while (c_pointer(level) && level->elem != null) {
+            if (level->is_mut && c_gives(level->elem, p)) {
+                return true;
+            }
+            level = level->elem;
+        }
+        i += 1;
+    }
+    return false;
+}
+
+// Whether `g`, a type that C gives, can be an argument of the C type `p` that C gives back. A type
+// that says `own` is a new allocation and no argument (A2 of `ownership-design.md` 5.1).
+fn c_gives(types.node* g, types.node* p) bool {
+    if (g->kind == types.type_kind.k_fn) {
+        return c_gives_back(g, p);
+    }
+    if (!c_pointer(g) || g->is_own) {
+        return false;
+    }
+    return p == null || c_type_same(p, g);
+}
+
+// The `.ptr` node that argument `i`, `a`, of a call of `callee` of the type `fty` may be, or null
+// (D3.5): for an `extern fn`, the argument itself when it is a `.ptr` and C gives back no argument
+// of the type of its parameter; for `str.from_cstr`, the argument itself. A cast of a `.ptr`
+// stands in no position.
+fn ptr_argument(ast.sym* callee, types.node* fty, u64 i, ast.node* a) ast.node* {
+    if (callee == null) {
+        return null;
+    }
+    if (callee->kind == ast.sym_kind.s_extern_fn) {
+        ast.node* p = ptr_node(a);
+        types.node* mut param = null;
+        if (i < fty->params.len) {
+            param = fty->params[i];
+        }
+        if (p == null || c_gives_back(fty, param)) {
+            return null;
+        }
+        return p;
+    }
+    if (callee->kind == ast.sym_kind.s_fn && callee->name == CSTR_FN
+        && declared_in(callee, CSTR_MODULE) && i == 0) {
+        return ptr_node(a);
+    }
+    return null;
+}
+
 // `.len` and `.ptr`, the read-only pseudo-fields of arrays, spans and strings.
 fn pseudo_field(checker mut* ck, ast.node mut* n, types.node* t, expr mut* out) bool {
     bool len = n->name == "len";
@@ -2608,6 +2766,13 @@ fn pseudo_field(checker mut* ck, ast.node mut* n, types.node* t, expr mut* out) 
     if (t->kind == types.type_kind.k_span || t->kind == types.type_kind.k_string) {
         if (len) {
             out->ty = types.type_prim(&ck->types, prim.prim_kind.prim_u64);
+            return true;
+        }
+        ast.node* self = n;
+        if (self != ck->ptr_ok) {
+            // the `.ptr` of an empty span names the byte after its object (D3.5)
+            check_error(ck, n->name_loc, PTR_POSITION_ERROR);
+            out->ty = types.type_error(&ck->types);
             return true;
         }
         types.node* mut elem = t->elem;
@@ -3001,6 +3166,15 @@ fn check_span_expr(checker mut* ck, ast.node mut* n, expr mut* out) void {
         return;
     }
     if (a.ty->kind == types.type_kind.k_ptr) {
+        if (!raw_span_allowed(ck)) {
+            // the bounds of a span of a pointer could reach past its object (D6.9)
+            check_msg_begin(ck);
+            msg_str(ck, "cannot take a span of ");
+            check_msg_type(ck, a.ty);
+            msg_str(ck, ": a pointer has no length");
+            check_msg_end(ck, n->loc);
+            return;
+        }
         // a pointer has no length, so only the two-bound form
         if (n->b == null || n->c == null) {
             check_error(ck, n->loc, "a pointer has no length: write 'p[lo..hi]'");
@@ -3775,6 +3949,8 @@ fn report_pointee_growth(checker mut* ck, ast.node* n, types.node* src, types.no
 
 fn check_cast(checker mut* ck, ast.node mut* n, expr mut* out) void {
     expr mut a = expr{};
+    // A position of `.ptr` names the node of the argument or of the operand itself, so the operand
+    // of a cast is in no position (D3.5).
     check_expr(ck, n->a, &a);
     if (a.value.kind == consts.cval_kind.cv_null) {
         check_error(ck, n->a->loc, "'null' is not a cast operand");
@@ -4199,11 +4375,16 @@ fn check_call(checker mut* ck, ast.node mut* n, expr mut* out) void {
     // C sees no `own` (D17.13), so a cast that is an argument of an `extern fn` may pun pointers.
     bool trusted = f.sym != null && f.sym->kind == ast.sym_kind.s_extern_fn;
     ast.node* outer_arg = ck->extern_arg;
+    ast.node* outer_ptr = ck->ptr_ok;
     u64 mut i = 0;
     while (i < ast.ast_len(n)) {
         expr mut arg = expr{};
         if (trusted) {
             ck->extern_arg = ast.ast_child(n, i);
+        }
+        ck->ptr_ok = null;
+        if (known) {
+            ck->ptr_ok = ptr_argument(f.sym, f.ty, i, ast.ast_child(n, i));
         }
         if (known && i < f.ty->params.len) {
             check_expr_as(ck, ast_child_mut(n, i), f.ty->params[i], "the argument", &arg);
@@ -4217,6 +4398,7 @@ fn check_call(checker mut* ck, ast.node mut* n, expr mut* out) void {
                 check_msg_end(ck, ast.ast_child(n, i)->loc);
             }
         }
+        ck->ptr_ok = outer_ptr;
         i += 1;
     }
     // An extern call in an argument of an extern call gives the outer argument back.
@@ -4615,8 +4797,18 @@ fn check_expr(checker mut* ck, ast.node mut* n, expr mut* out) void {
     case ast.ast_kind.k_binary:
         expr mut a = expr{};
         expr mut b = expr{};
+        // an operand of `==` or `!=` may be a `.ptr` (D3.5)
+        ast.node* outer_ptr = ck->ptr_ok;
+        bool equality = op_is_equality(n->op);
+        if (equality) {
+            ck->ptr_ok = n->a;
+        }
         check_expr(ck, n->a, &a);
+        if (equality) {
+            ck->ptr_ok = n->b;
+        }
         check_expr(ck, n->b, &b);
+        ck->ptr_ok = outer_ptr;
         check_operands(ck, n->loc, n->op, n->a, &a, n->b, &b, out);
         out->init_const = out->value.kind != consts.cval_kind.cv_none;
     case ast.ast_kind.k_call:

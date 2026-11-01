@@ -1645,13 +1645,19 @@ fn a_span_of_an_array_is_a_view_of_its_elements() void {
     assert(check_env.type_text(&e, sub.ty) == "string");
 }
 
-fn a_pointer_has_only_the_two_bound_span_form() void {
+// Outside str.from_cstr and rt.args_init, each span expression of a pointer is the error of D6.9,
+// the one-bound form as the two-bound one. check_raw_span_test holds the two functions.
+fn a_pointer_takes_no_span_outside_the_two_functions() void {
     check_env.env mut e = check_env.env{};
     check_env.open(&e);
     defer check_env.close(&e);
-    assert(open_probe(&e, "fn probe() void {\n    s_span(q[0..]);\n}\n"));
+    assert(open_probe(&e, "fn probe() void {\n    s_span(q[0..]);\n    s_span(q[0..1]);\n}\n"));
     check_env.probe_stmt(&e, "probe", 0);
-    assert(check_env.said(&e, "a pointer has no length: write 'p[lo..hi]'"));
+    assert(check_env.said(&e, "cannot take a span of i32 mut*: a pointer has no length"));
+    assert(!check_env.said(&e, "write 'p[lo..hi]'"));
+    assert(check_env.errors(&e) == 1);
+    check_env.probe_stmt(&e, "probe", 1);
+    assert(check_env.errors(&e) == 2);
 }
 
 // ---- the pseudo-fields -------------------------------------------------------------
@@ -1674,10 +1680,17 @@ fn len_of_a_string_is_a_u64_and_ptr_is_a_char_pointer() void {
     check.expr len = check_env.probe_expr(&e,
         check_env.node_find(check_env.body_expr(&e, "probe", 0), ast.ast_kind.k_field, "len"));
     assert(check_env.type_text(&e, len.ty) == "u64");
-    // `.ptr` carries the element level's mutability and is never `own`. A
-    // string's bytes are immutable.
-    check.expr ptr = check_env.probe_expr(&e,
-        check_env.node_find(check_env.body_expr(&e, "probe", 1), ast.ast_kind.k_field, "ptr"));
+    // An argument of a fort function is no position of `.ptr` (D3.5), so the probe of the node
+    // alone reports it. In a position that allows it, such as an operand of `==`, `.ptr`
+    // carries the element level's mutability and is never `own`. A string's bytes are immutable.
+    ast.node mut* field =
+        check_env.node_find(check_env.body_expr(&e, "probe", 1), ast.ast_kind.k_field, "ptr");
+    check.expr refused = check_env.probe_expr(&e, field);
+    assert(check_env.said(&e, "'.ptr' can name the byte after the last element: write '&s[0]'"));
+    assert(check_env.type_text(&e, refused.ty) == "<error>");
+    e.ck.ptr_ok = field;
+    check.expr ptr = check_env.probe_expr(&e, field);
+    e.ck.ptr_ok = null;
     assert(check_env.type_text(&e, ptr.ty) == "char*");
     // Neither is an lvalue.
     assert(!len.lvalue && !ptr.lvalue);
@@ -2455,7 +2468,7 @@ fn main() i32 {
     a_constant_index_out_of_range_for_a_fixed_array_is_a_compile_error();
     a_pointer_cannot_be_indexed();
     a_span_of_an_array_is_a_view_of_its_elements();
-    a_pointer_has_only_the_two_bound_span_form();
+    a_pointer_takes_no_span_outside_the_two_functions();
     len_of_a_fixed_array_is_an_untyped_constant();
     len_of_a_string_is_a_u64_and_ptr_is_a_char_pointer();
     a_fixed_array_has_no_ptr();

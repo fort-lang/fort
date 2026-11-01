@@ -127,12 +127,12 @@ enum region_kind {
     rk_slot, // storage of the run: errno, the slot of `oracle_keep`, the arguments of `main`
 }
 
-// One range of the address space. `bytes` is its storage in the compiler: null for a function,
-// and null after the region ends. `routine` is the routine of a function.
+// One range of the address space. `bytes` is its storage in the compiler: empty for a function,
+// and empty after the region ends. `routine` is the routine of a function.
 struct region {
     u64 base;
     u64 size;
-    u8 mut* own bytes;
+    u8 mut@ own bytes;
     region_kind kind;
     bool live;
     bool readonly;
@@ -421,21 +421,24 @@ fn align_up(u64 v, u64 align) u64 {
 }
 
 // Makes a region of `size` zero bytes at the next free address and returns its base. The return
-// is 0 when the compiler has no storage for the bytes.
+// is 0 when the compiler has no storage for the bytes: calloc of the C library refuses them. A
+// span holds the bytes, and `new` aborts where calloc gives null, so calloc asks first and its
+// block goes at once. No span of the pointer of calloc exists (D6.9).
 fn make_region(machine mut* it, region_kind kind, u64 size, bool readonly) u64 {
     u64 base = align_up(it->next, REGION_ALIGN);
     u64 mut room = size;
     if (room == 0) {
         room = 1;
     }
-    u8 mut* own mut bytes = null;
+    u8 mut@ own mut bytes = {};
     if (kind != region_kind.rk_code) {
         void mut* own p = libc.calloc(1, room);
-        if (p == null) {
-            del(p); // frees nothing: the test finds p null (D17.11 gen rule 6, D17.20)
+        bool refused = p == null;
+        libc.free(move(p));
+        if (refused) {
             return 0;
         }
-        bytes = cast(move(p), u8 mut* own);
+        bytes = new(u8, room);
     }
     region_vec mut* v = &it->regions;
     if (v->len == v->items.len) {
@@ -473,7 +476,7 @@ fn region_at(machine* it, u64 addr) u64 {
 
 // Whether the live region `r` holds the `len` bytes at `addr`.
 fn has_range(region* r, u64 addr, u64 len) bool {
-    if (!r->live || r->bytes == null || addr < r->base) {
+    if (!r->live || r->bytes.len == 0 || addr < r->base) {
         return false;
     }
     u64 at = addr - r->base;
@@ -671,9 +674,13 @@ fn seal(machine mut* it, u64 base) void {
 // ---- constants, globals and functions ----------------------------------------------------------
 
 // The address of the NUL-terminated copy of `text`, which the run makes when it meets the bytes
-// of `text` first.
+// of `text` first. The key is the address of the first byte of `text`, because no cast takes a
+// `.ptr` (D3.5), and 0 for each empty text, whose copy is one NUL.
 fn data_address(machine mut* it, string text) u64 {
-    u64 key = cast(text.ptr, u64);
+    u64 mut key = 0;
+    if (text.len > 0) {
+        key = cast(&text[0], u64);
+    }
     u64 mut at = 0;
     if (find_key(&it->data, key, &at)
         && it->regions.items[region_at(it, at)].size == text.len + 1) {
@@ -2320,7 +2327,7 @@ fn is_float_format(machine mut* it, u64@ a, types.node*@ t) bool {
 fn format_float(machine mut* it, u64@ a) u64 {
     char mut@ own text = new(char, a[1]);
     defer del(text);
-    i32 n = libc.snprintf_float(&text[0], a[1], FLOAT_FORMAT.ptr,
+    i32 n = libc.snprintf_float(&text[0], a[1], &FLOAT_FORMAT[0],
                                 cast(widen(a[3], WORD_BITS / 2), i32), f64_of(a[4]));
     if (n >= 0) {
         u64 mut written = cast(n, u64);

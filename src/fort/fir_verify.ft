@@ -201,62 +201,25 @@ fn runtime_holds(fir.func* f, runtime* rt, fir.check_kind mut* missing) bool {
 }
 
 /// Whether `rt` holds the runtime entry of `kind` with the parameters that V7 requires: the
-/// operands that reported_count and reported_type give, then the file, the line and the column.
+/// operands that fir.check_reported gives, then the file, the line and the column.
 fn entry_fits(runtime* rt, fir.check_kind kind, types.table mut* tt) bool {
     ast.sym* entry = rt->entry[cast(kind, u64)];
     if (entry == null) {
         return false;
     }
-    u32 count = reported_count(kind, entry, tt);
+    u32 count = fir.check_reported_count(kind);
     types.node* ft = entry->ty;
     if (ft->params.len != cast(count, u64) + LOCATION_PARAMS) {
         return false;
     }
     u32 mut k = 0;
     while (k < count) {
-        if (!types_agree(ft->params[cast(k, u64)], reported_type(kind, entry, k, tt))) {
+        if (!types_agree(ft->params[cast(k, u64)], fir.check_reported(kind, k, tt))) {
             return false;
         }
         k += 1;
     }
     return true;
-}
-
-// The parameters before the location of the `panic` of a runtime that takes the message as a
-// pointer and a length: `char* ptr, u64 len`.
-u64 POINTER_PANIC_PARAMS = 2;
-
-// Whether `entry`, the runtime entry of `kind`, is the `panic` of a runtime that takes the message
-// as a pointer and a length: `panic(char* ptr, u64 len, char* file, u32 line, u32 col)`. The
-// standard directory of the last pin of tools/bootstrap.ref declares that form. This compiler
-// takes it beside the `string` form, so that it can build a later tree whose runtime takes a
-// `string` (D6.9, D14.7).
-fn pointer_panic(fir.check_kind kind, ast.sym* entry, types.table mut* tt) bool {
-    if (kind != fir.check_kind.chk_panic
-        || entry->ty->params.len != POINTER_PANIC_PARAMS + LOCATION_PARAMS) {
-        return false;
-    }
-    types.node* ch = types.type_prim(tt, prim.prim_kind.prim_char);
-    return types_agree(entry->ty->params[0], types.type_ptr(tt, ch, false, false))
-        && is_prim(entry->ty->params[1], prim.prim_kind.prim_u64);
-}
-
-// The count of the operands that a `check` or a `fail` of `kind` reports to `entry`: the count
-// that fir.check_reported_count gives, or two for a pointer_panic entry.
-fn reported_count(fir.check_kind kind, ast.sym* entry, types.table mut* tt) u32 {
-    if (pointer_panic(kind, entry, tt)) {
-        return cast(POINTER_PANIC_PARAMS, u32);
-    }
-    return fir.check_reported_count(kind);
-}
-
-// The fort type of reported operand `k` for `entry`: the type that fir.check_reported gives, or
-// the parameter of a pointer_panic entry, `char*` and then `u64`.
-fn reported_type(fir.check_kind kind, ast.sym* entry, u32 k, types.table mut* tt) types.node* {
-    if (pointer_panic(kind, entry, tt)) {
-        return entry->ty->params[cast(k, u64)];
-    }
-    return fir.check_reported(kind, k, tt);
 }
 
 // ---- agreement and the type classes ------------------------------------------------------
@@ -1032,7 +995,7 @@ fn v7_reported(walk mut* w, fir.terminator* t, u32 b, u32 position) bool {
     if (!entry_fits(w->rt, t->check, w->f->tt)) {
         return fail(w, RULE_V7, V7_ENTRY, b, position);
     }
-    u32 count = reported_count(t->check, entry, w->f->tt);
+    u32 count = fir.check_reported_count(t->check);
     types.node* ft = entry->ty;
     if (t->args_len != count) {
         return fail(w, RULE_V7, V7_REPORTED_COUNT, b, position);

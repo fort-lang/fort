@@ -4,6 +4,7 @@
 // DECIMAL_MAX and HEX_MAX have no spare bytes. Keep their sizes with their formatter widths.
 // buffer_append flushes or bypasses a full buffer before copying bytes.
 import std.libc;
+import std.str;
 import std.strbuf;
 
 // ---- descriptors and buffers ------------------------------------------------
@@ -194,11 +195,6 @@ fn emit_str(i32 fd, string s) void {
     emit(fd, cast(s, u8@));
 }
 
-// Write a NUL-terminated C string.
-fn emit_cstr(i32 fd, char* s) void {
-    emit(fd, cast(s[0..libc.strlen(s)], u8@));
-}
-
 // Flush fd when it has a buffer.
 fn flush(i32 fd) void {
     buffers_init();
@@ -312,20 +308,20 @@ fn print_ptr(i32 fd, void* p) void {
     emit(fd, out[start..]);
 }
 
-// Write len string bytes without a terminator.
-fn print_str(i32 fd, char* ptr, u64 len) void {
-    if (len == 0) {
+// Write the bytes of s without a terminator. An empty string reaches no buffer and no `write`.
+fn print_str(i32 fd, string s) void {
+    if (s.len == 0) {
         return;
     }
-    emit(fd, cast(ptr[0..len], u8@));
+    emit_str(fd, s);
 }
 
-// Write the first matching enum name. Write the numeric value when none matches.
-fn print_enum(i32 fd, i32 v, enum_member* m, u64 n) void {
-    enum_member@ table = m[0..n];
-    for (u64 mut i = 0; i < n; i++) {
+// Write the first matching enum name. Write the numeric value when none matches. The compiler
+// gives each name as a NUL-terminated C string.
+fn print_enum(i32 fd, i32 v, enum_member@ table) void {
+    for (u64 mut i = 0; i < table.len; i++) {
         if (table[i].value == v) {
-            emit_cstr(fd, table[i].name);
+            emit_str(fd, str.from_cstr(table[i].name));
             return;
         }
     }
@@ -394,10 +390,15 @@ fn char_of(u64 digit) char {
     return cast(cast('0', u64) + digit, char);
 }
 
-// Parse unsigned %e text into digits and an exponent.
+// Parse unsigned %e text into digits and an exponent. The text is the bytes of buf before its
+// first NUL, or all of buf when it holds no NUL.
 // Treat text without digits as zero so a failed snprintf has a defined result.
-fn scan(char* s, decimal mut* d) void {
-    char@ text = s[0..libc.strlen(s)];
+fn scan(char@ buf, decimal mut* d) void {
+    u64 mut end = 0;
+    while (end < buf.len && buf[end] != '\0') {
+        end += 1;
+    }
+    char@ text = buf[0..end];
     d->digit_count = 0;
     d->exponent = 0;
     u64 mut i = 0;
@@ -580,12 +581,12 @@ fn decimal_f64(f64 v, decimal mut* d) void {
     char[SCRATCH_MAX] mut scratch = {};
     for (u64 mut precision = 0; precision < DIGITS_F64; precision += 1) {
         scratch[0] = '\0';
-        if (libc.snprintf_float(&scratch[0], SCRATCH_MAX, FORMAT.ptr,
+        if (libc.snprintf_float(&scratch[0], SCRATCH_MAX, &FORMAT[0],
                                 cast(precision, i32), v) < 0) {
             // A printf that fails leaves the text empty, which scans as zero.
             scratch[0] = '\0';
         }
-        scan(&scratch[0], d);
+        scan(scratch[..], d);
         if (precision == DIGITS_F64 - 1 || reads_back_f64(d, v)) {
             return;
         }
@@ -603,11 +604,11 @@ fn decimal_f32(f32 v, decimal mut* d) void {
     char[SCRATCH_MAX] mut scratch = {};
     for (u64 mut precision = 0; precision < DIGITS_F32; precision += 1) {
         scratch[0] = '\0';
-        if (libc.snprintf_float(&scratch[0], SCRATCH_MAX, FORMAT.ptr,
+        if (libc.snprintf_float(&scratch[0], SCRATCH_MAX, &FORMAT[0],
                                 cast(precision, i32), cast(v, f64)) < 0) {
             scratch[0] = '\0';
         }
-        scan(&scratch[0], d);
+        scan(scratch[..], d);
         if (precision == DIGITS_F32 - 1 || reads_back_f32(d, v)) {
             return;
         }
@@ -726,10 +727,6 @@ fn message_str(string s) void {
     buffer_append(&message, cast(s, u8@));
 }
 
-fn message_cstr(char* s) void {
-    buffer_append(&message, cast(s[0..libc.strlen(s)], u8@));
-}
-
 fn message_u64(u64 v) void {
     u8[DECIMAL_MAX] mut out = {};
     u64 start = format_u64(out[..], v);
@@ -744,11 +741,12 @@ fn message_i64(i64 v) void {
 
 // Flushes every buffer. It then starts the failure line with the position and
 // the kind. The kind is "runtime error", "panic" or "assertion failed". The
-// runtime error contract fixes this shape for all three.
+// runtime error contract fixes this shape for all three. The compiler gives the
+// file as a NUL-terminated C string.
 fn fail_begin(char* file, u32 line, u32 col, string kind) void {
     flush_all();
     message.len = 0;
-    message_cstr(file);
+    message_str(str.from_cstr(file));
     message_str(":");
     message_u64(cast(line, u64));
     message_str(":");
@@ -801,7 +799,7 @@ fn fail_shift(i64 count, char* type_name, char* file, u32 line, u32 col) noretur
     message_str("shift count ");
     message_i64(count);
     message_str(" out of range for ");
-    message_cstr(type_name);
+    message_str(str.from_cstr(type_name));
     fail_end();
 }
 
@@ -820,8 +818,9 @@ fn fail_alloc_count(i64 n, char* file, u32 line, u32 col) noreturn {
     fail_end();
 }
 
-// Reports a store into an own reference that is not zero. This compiler emits no call (D17.11);
-// the pinned bootstrap-1 of tools/bootstrap.ref emits one for each such store it compiles.
+// Reports a store into an own reference that is not zero. This compiler emits no call (D17.11).
+// bootstrap-1 of tools/bootstrap.ref emits one for each such store, and it builds no module with
+// this std. The tests run/stdlib/082 and run/modes/022 call this entry directly.
 fn fail_overwrite(char* file, u32 line, u32 col) noreturn {
     fail_runtime(file, line, col, "overwriting owned value");
 }
@@ -833,16 +832,14 @@ fn fail_enum(i64 v, char* type_name, char* file, u32 line, u32 col) noreturn {
     message_str("enum value ");
     message_i64(v);
     message_str(" is not a member of ");
-    message_cstr(type_name);
+    message_str(str.from_cstr(type_name));
     fail_end();
 }
 
 // Report a panic message, including any embedded NUL byte.
-fn panic(char* ptr, u64 len, char* file, u32 line, u32 col) noreturn {
+fn panic(string msg, char* file, u32 line, u32 col) noreturn {
     fail_begin(file, line, col, "panic");
-    if (len > 0) {
-        buffer_append(&message, cast(ptr[0..len], u8@));
-    }
+    message_str(msg);
     fail_end();
 }
 
@@ -850,7 +847,7 @@ fn panic(char* ptr, u64 len, char* file, u32 line, u32 col) noreturn {
 // byte for byte.
 fn assert_fail(char* text, char* file, u32 line, u32 col) noreturn {
     fail_begin(file, line, col, "assertion failed");
-    message_cstr(text);
+    message_str(str.from_cstr(text));
     fail_end();
 }
 
@@ -895,8 +892,10 @@ fn str_eq(char* a, u64 a_len, char* b, u64 b_len) bool {
 
 // ---- process ----------------------------------------------------------------
 
-// Build the argument span from argv before the program's main runs.
-// Delete an earlier span first, so that a second call frees it on each path.
+// Build the argument span from argv before the program's main runs. Only the
+// main that the compiler emits calls it (D6.9), with the argc and the argv that
+// C gives to main. Delete an earlier span first, so that a second call frees it
+// on each path.
 fn args_init(i32 argc, char* mut* argv) void {
     del(args_store);
     if (argc <= 0) {
@@ -906,8 +905,7 @@ fn args_init(i32 argc, char* mut* argv) void {
     string mut@ own a = new(string, n);
     char* mut@ view = argv[0..n];
     for (u64 mut i = 0; i < n; i++) {
-        char* p = view[i];
-        a[i] = cast(p[0..libc.strlen(p)], string);
+        a[i] = str.from_cstr(view[i]);
     }
     // The strlen calls of the loop kill the fact of the first del (D17.11).
     del(args_store);

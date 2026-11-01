@@ -21,54 +21,70 @@ import std.rt;
 // std.rt calls del on its own storage (D12.2, D7.9).
 string FILE = "070_rt_alloc_free.ft";
 
-// Answers whether all n bytes at p are zero. D10.2 promises that of both.
-// The parameter is void*, which alloc's void mut* own result reaches by the
-// monotone drop of D5.4, so a reader writes no cast.
+// bcmp(3) and bcopy(3) read and write the bytes of a block through a `void*`. A
+// cast gives no type to a `void*` (D3.14), and no span of a pointer exists
+// (D6.9), so these helpers hand the block to C as it is.
+extern fn bcmp(void* a, void* b, u64 n) i32;
+extern fn bcopy(void* source, void mut* destination, u64 n) void;
+
+// Answers whether all n bytes at p are zero, for an n above 0. D10.2 promises
+// that of both. The parameter is void*, which alloc's void mut* own result
+// reaches by the monotone drop of D5.4, so a reader writes no cast. bcmp holds
+// the bytes against zeroed ones.
 fn all_zero(void* p, u64 n) bool {
-    u8@ bytes = cast(p, u8*)[0..n];
-    for (u64 mut i = 0; i < n; i++) {
-        if (bytes[i] != 0) {
-            return false;
-        }
-    }
-    return true;
+    u8@ own zeros = new(u8, n);
+    bool same = bcmp(p, cast(&zeros[0], void*), n) == 0;
+    del(zeros);
+    return same;
+}
+
+// Answers byte i of the block at p, through a copy of its first i + 1 bytes.
+fn byte_at(void* p, u64 i) u8 {
+    u8 mut@ own copy = new(u8, i + 1);
+    bcopy(p, cast(&copy[0], void mut*), i + 1);
+    u8 v = copy[i];
+    del(copy);
+    return v;
 }
 
 // Writes one byte of a block alloc answered with. The parameter is void mut*,
 // which is what alloc answers: a callee that writes takes the result as it
 // comes. A caller that bound the result as void* own could not call this at
 // all, because the drop of D5.4 runs one way only (D3.11, toolchain.md 5.1).
+// bcopy copies the first i + 1 bytes out, and back with byte i set.
 fn poke(void mut* p, u64 i, u8 v) void {
-    u8 mut@ bytes = cast(p, u8 mut*)[0..i + 1];
-    bytes[i] = v;
+    u8 mut@ own copy = new(u8, i + 1);
+    bcopy(p, cast(&copy[0], void mut*), i + 1);
+    copy[i] = v;
+    bcopy(cast(&copy[0], void*), p, i + 1);
+    del(copy);
 }
 
 fn main() i32 {
     u64 n = 64;
     u8 mut@ own from_new = new(u8, n);
-    void mut* own from_alloc = rt.alloc(1, n, FILE.ptr, 1, 1);
-    println(from_new.ptr != null, " ", all_zero(cast(from_new.ptr, void*), n));
+    void mut* own from_alloc = rt.alloc(1, n, &FILE[0], 1, 1);
+    println(from_new.ptr != null, " ", all_zero(cast(&from_new[0], void*), n));
     println(from_alloc != null, " ", all_zero(from_alloc, n));
 
     // This writes the first and the last byte of each block. A count used as
     // a size, or a size used as a count, gives out a block that is too short,
     // and the last byte is where that shows. The two writes into the alloc
     // block go through poke, so the write crosses a void mut* parameter, and
-    // the cast that makes a byte view of the block adds no mut: alloc answered
-    // with the mark already.
-    u8 mut@ alloc_bytes = cast(from_alloc, u8 mut*)[0..n];
+    // the cast in poke adds no mut: alloc answered with the mark already.
     from_new[0] = 7;
     from_new[n - 1] = 9;
     poke(from_alloc, 0, 7);
     poke(from_alloc, n - 1, 9);
-    println(from_new[0] == alloc_bytes[0], " ", from_new[n - 1] == alloc_bytes[n - 1]);
+    println(from_new[0] == byte_at(from_alloc, 0), " ",
+            from_new[n - 1] == byte_at(from_alloc, n - 1));
 
     // new(T, 0) allocates and does not answer null (D10.2). alloc gets there
     // by asking for one byte when the product is zero. An element size of zero
     // reaches the same line from the other side.
     i32@ own empty_new = new(i32, 0);
-    void mut* own empty_alloc = rt.alloc(4, 0, FILE.ptr, 1, 1);
-    void mut* own zero_elem = rt.alloc(0, 100, FILE.ptr, 1, 1);
+    void mut* own empty_alloc = rt.alloc(4, 0, &FILE[0], 1, 1);
+    void mut* own zero_elem = rt.alloc(0, 100, &FILE[0], 1, 1);
     println(empty_new.ptr != null, " ", empty_alloc != null, " ", empty_new.len);
     println(zero_elem != null, " ", all_zero(zero_elem, 1));
 
@@ -76,7 +92,7 @@ fn main() i32 {
     // large block by asking the kernel for fresh pages. That is a different
     // path in the C library from the small block above.
     u64 big = 1048576;
-    void mut* own large = rt.alloc(8, big / 8, FILE.ptr, 1, 1);
+    void mut* own large = rt.alloc(8, big / 8, &FILE[0], 1, 1);
     println(large != null, " ", all_zero(large, big));
 
     // free releases what alloc answered with. A null p does nothing, and del

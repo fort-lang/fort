@@ -1,0 +1,195 @@
+{
+  "comment": [
+    "The rules of D3.5 and D6.9 that close two routes to a forged pointer. The `.ptr` of a span or a",
+    "string stands in three positions only, each as it stands: an argument of an `extern fn` for a",
+    "parameter whose C type is no C type that C gives back in that declaration, the argument of",
+    "`str.from_cstr`, and an operand of `==` or `!=`. No cast takes a `.ptr` (D3.5). Only",
+    "`str.from_cstr` and `rt.args_init` take `p[lo..hi]` of a raw pointer, and no source names",
+    "`rt.args_init` (D6.9). The rows cover src/fort/check.ft: pseudo_field, ptr_argument,",
+    "c_gives_back, c_gives, c_type_same, c_byte, the operands of `==` and `!=` in check_expr,",
+    "raw_span_allowed, is_args_init, check_span_expr and value_of_sym. The first stage runs the",
+    "language tests of the two rules, whose goldens pin each message and its position. The second",
+    "runs check_raw_span_test.ft, which holds the two functions in a sandbox std. The table runs in",
+    "the VM with the debug preset: pass a --runner that runs tools/vm run in one slot, as",
+    "notes/environment.md says. The md5 guard reads the product compiler. The first round of a run",
+    "in the VM can read stale (notes/testing.md 1), so run the first row again before you trust it."
+  ],
+  "sources": [
+    "src/fort/check.ft"
+  ],
+  "binary": "build/Linux/debug/fort",
+  "build": "sleep 2 && touch src/fort/check.ft && ninja -C build/Linux/debug fort",
+  "stages": [
+    {
+      "name": "the language tests of the two rules",
+      "command": "python3 test/lang/run_tests.py --fort build/Linux/debug/fort --std-dir build/Linux/debug/std -j 4 fail/spans/007 fail/stdlib/007 fail/pointers/009 fail/ffi/011 run/pointers/004 run/pointers/014 run/stdlib/013 run/stdlib/068"
+    },
+    {
+      "name": "the checker suite of the two functions",
+      "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std -j 2 check_raw_span_test"
+    }
+  ],
+  "mutations": [
+    {
+      "decision": "D3.5-ptr-position",
+      "file": "src/fort/check.ft",
+      "old": "        if (self != ck->ptr_ok) {",
+      "new": "        if (self != ck->ptr_ok && false) {",
+      "what": "a `.ptr` stands in each position"
+    },
+    {
+      "decision": "D3.5-ptr-extern-channel",
+      "file": "src/fort/check.ft",
+      "old": "        if (p == null || c_gives_back(fty, param)) {",
+      "new": "        if (p == null) {",
+      "what": "a `.ptr` is legal for each parameter of an `extern fn`, a channel back too"
+    },
+    {
+      "decision": "D3.5-ptr-extern-argument",
+      "file": "src/fort/check.ft",
+      "old": "        if (p == null || c_gives_back(fty, param)) {\n            return null;\n        }\n        return p;",
+      "new": "        if (p == null || c_gives_back(fty, param)) {\n            return null;\n        }\n        return null;",
+      "what": "no argument of an `extern fn` takes a `.ptr`"
+    },
+    {
+      "decision": "D3.5-gives-result",
+      "file": "src/fort/check.ft",
+      "old": "    if (c_gives(fty->elem, p)) {",
+      "new": "    if (c_gives(fty->elem, p) && false) {",
+      "what": "C gives back no argument through the result"
+    },
+    {
+      "decision": "D3.5-gives-callback",
+      "file": "src/fort/check.ft",
+      "old": "                if (c_gives(q->params[k], p)) {",
+      "new": "                if (c_gives(q->params[k], p) && false) {",
+      "what": "C gives back no argument through a parameter of a callback"
+    },
+    {
+      "decision": "D3.5-gives-mut-level",
+      "file": "src/fort/check.ft",
+      "old": "            if (level->is_mut && c_gives(level->elem, p)) {",
+      "new": "            if (level->is_mut && c_gives(level->elem, p) && false) {",
+      "what": "C gives back no argument through a `mut` level of a parameter"
+    },
+    {
+      "decision": "D3.5-gives-function",
+      "file": "src/fort/check.ft",
+      "old": "        return c_gives_back(g, p);",
+      "new": "        return false;",
+      "what": "a function pointer that C gives gives back no argument"
+    },
+    {
+      "decision": "D3.5-gives-own",
+      "file": "src/fort/check.ft",
+      "old": "    if (!c_pointer(g) || g->is_own) {",
+      "new": "    if (!c_pointer(g)) {",
+      "what": "a result that says `own` is a channel back"
+    },
+    {
+      "decision": "D3.5-gives-tail",
+      "file": "src/fort/check.ft",
+      "old": "    return p == null || c_type_same(p, g);",
+      "new": "    return p != null && c_type_same(p, g);",
+      "what": "an argument of the variable tail is no channel back"
+    },
+    {
+      "decision": "D3.5-ctype-void",
+      "file": "src/fort/check.ft",
+      "old": "        if (a->kind == types.type_kind.k_voidptr || b->kind == types.type_kind.k_voidptr) {",
+      "new": "        if (a->kind == types.type_kind.k_voidptr && b->kind == types.type_kind.k_voidptr) {",
+      "what": "a `void*` equals no other pointer type"
+    },
+    {
+      "decision": "D3.5-ctype-byte",
+      "file": "src/fort/check.ft",
+      "old": "    if (k == prim.prim_kind.prim_char) {",
+      "new": "    if (k == prim.prim_kind.prim_char && false) {",
+      "what": "`char` and `u8` are two C types"
+    },
+    {
+      "decision": "D3.5-ctype-marks",
+      "file": "src/fort/check.ft",
+      "old": "        return c_type_same(a->elem, b->elem);",
+      "new": "        return a->is_mut == b->is_mut && c_type_same(a->elem, b->elem);",
+      "what": "the `mut` mark counts in a comparison of C types"
+    },
+    {
+      "decision": "D3.5-ctype-array-length",
+      "file": "src/fort/check.ft",
+      "old": "        return a->len == b->len && c_type_same(a->elem, b->elem);",
+      "new": "        return c_type_same(a->elem, b->elem);",
+      "what": "fixed arrays of two lengths are one C type"
+    },
+    {
+      "decision": "D3.5-ctype-array",
+      "file": "src/fort/check.ft",
+      "old": "    if (a->kind == types.type_kind.k_array && b->kind == types.type_kind.k_array) {\n        return a->len == b->len && c_type_same(a->elem, b->elem);\n    }\n",
+      "new": "",
+      "what": "a fixed array of `char` and one of `u8` are two C types"
+    },
+    {
+      "decision": "D3.5-equality",
+      "file": "src/fort/check.ft",
+      "old": "            ck->ptr_ok = n->a;",
+      "new": "            ck->ptr_ok = null;",
+      "what": "the left operand of `==` and `!=` takes no `.ptr`"
+    },
+    {
+      "decision": "D3.5-equality-right",
+      "file": "src/fort/check.ft",
+      "old": "            ck->ptr_ok = n->b;",
+      "new": "            ck->ptr_ok = null;",
+      "what": "the right operand of `==` and `!=` takes no `.ptr`"
+    },
+    {
+      "decision": "D3.5-from-cstr",
+      "file": "src/fort/check.ft",
+      "old": "        return ptr_node(a);",
+      "new": "        return null;",
+      "what": "the argument of `str.from_cstr` takes no `.ptr`"
+    },
+    {
+      "decision": "D3.5-from-cstr-module",
+      "file": "src/fort/check.ft",
+      "old": "        && declared_in(callee, CSTR_MODULE) && i == 0) {",
+      "new": "        && i == 0) {",
+      "what": "a function named `from_cstr` of each module takes a `.ptr`"
+    },
+    {
+      "decision": "D6.9-raw-span",
+      "file": "src/fort/check.ft",
+      "old": "        if (!raw_span_allowed(ck)) {",
+      "new": "        if (!raw_span_allowed(ck) && false) {",
+      "what": "each function takes `p[lo..hi]` of a raw pointer"
+    },
+    {
+      "decision": "D6.9-two-functions",
+      "file": "src/fort/check.ft",
+      "old": "    return (path == CSTR_MODULE && name == CSTR_FN) || (path == ARGS_MODULE && name == ARGS_FN);",
+      "new": "    return false;",
+      "what": "`str.from_cstr` and `rt.args_init` take no span of a raw pointer"
+    },
+    {
+      "decision": "D6.9-module-of-the-function",
+      "file": "src/fort/check.ft",
+      "old": "    return (path == CSTR_MODULE && name == CSTR_FN) || (path == ARGS_MODULE && name == ARGS_FN);",
+      "new": "    return name == CSTR_FN || name == ARGS_FN;",
+      "what": "a function of that name in each module takes a span of a raw pointer"
+    },
+    {
+      "decision": "D6.9-args-init-name",
+      "file": "src/fort/check.ft",
+      "old": "        if (is_args_init(s)) {",
+      "new": "        if (is_args_init(s) && false) {",
+      "what": "a source names `rt.args_init`"
+    },
+    {
+      "decision": "D6.9-args-init-module",
+      "file": "src/fort/check.ft",
+      "old": "    return s->kind == ast.sym_kind.s_fn && s->name == ARGS_FN && declared_in(s, ARGS_MODULE);",
+      "new": "    return s->kind == ast.sym_kind.s_fn && s->name == ARGS_FN;",
+      "what": "a function named `args_init` of each module belongs to the start of the program"
+    }
+  ]
+}

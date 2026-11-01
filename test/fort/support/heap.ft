@@ -44,6 +44,8 @@
 // address of a fresh block comes from a per-CPU magazine, so two rounds get
 // addresses gigabytes apart with nothing leaked.
 
+import std.libc;
+
 $if ($cfg(target_os) == "macos") {
     // <malloc/malloc.h>: one range of live blocks, as the enumerator reports it.
     struct range {
@@ -51,11 +53,26 @@ $if ($cfg(target_os) == "macos") {
         u64 size;
     }
 
+    // One walk of the zones: the sum of the sizes so far, a copy of the
+    // batch that the recorder reads, and whether a batch did not fit in that
+    // copy. C gives a batch as a pointer and a count, and fort takes no span
+    // of a pointer (D6.9), so the recorder copies the batch first. The walk
+    // is a local of the caller, so the copy takes no block of the heap that
+    // the walk counts. A probe of 200000 live blocks on macOS 26 gave batches
+    // of at most 341 ranges.
+    struct walk {
+        u64 sum;
+        bool overflow;
+        range[4096] batch;
+    }
+
     // The first field of malloc_introspection_t. The enumerator takes the
     // task, a context, a type mask, the zone address, a reader (null reads
-    // this process) and the recorder it calls with each batch of ranges.
+    // this process) and the recorder it calls with each batch of ranges. C
+    // types the context as a `void*` and gives it to the recorder as it is,
+    // so this declaration names the walk that it points at.
     struct introspection {
-        fn (u32, void mut*, u32, u64, void*, fn (u32, void mut*, u32, range*, u32) void) i32
+        fn (u32, walk mut*, u32, u64, void*, fn (u32, walk mut*, u32, range*, u32) void) i32
             enumerator;
     }
 
@@ -80,15 +97,34 @@ $if ($cfg(target_os) == "macos") {
     extern fn malloc_get_all_zones(u32 task, void* reader, zone* mut* mut* addresses,
                                    u32 mut* count) i32;
 
+    // bcopy(3) copies the zone pointers that C gives as a pointer and a count.
+    // Its parameters name the storage of zone pointers, as D3.14 asks of an
+    // extern that takes storage with pointer places. `libc.memcpy` takes
+    // bytes, and a cast to bytes would hide each pointer place. Two
+    // declarations of one symbol agree (D9.8), so this one is not memcpy.
+    extern fn bcopy(zone** source, zone* mut* destination, u64 n) void;
+
     // MALLOC_PTR_IN_USE_RANGE_TYPE: the live blocks.
     u32 PTR_IN_USE = 1;
 
-    // Adds the size of each range to the total the context points at. The
-    // zones are locked while it runs, so it allocates nothing.
-    fn record(u32 task, void mut* total, u32 kind, range* ranges, u32 count) void {
-        u64 mut* sum = cast(total, u64 mut*);
-        for (range r : ranges[0..cast(count, u64)]) {
-            *sum += r.size;
+    // Adds the size of each range of one batch to the sum of the walk. The
+    // zones are locked while it runs, so it allocates nothing and does not
+    // panic: a batch larger than the copy sets the flag, and the caller
+    // asserts on the flag after the enumerator returns.
+    fn record(u32 task, walk mut* w, u32 kind, range* ranges, u32 count) void {
+        u64 n = cast(count, u64);
+        if (n > w->batch.len) {
+            w->overflow = true;
+            return;
+        }
+        if (n == 0) {
+            return;
+        }
+        libc.memcpy(cast(&w->batch[0], u8 mut*), cast(ranges, u8*), n * sizeof(range));
+        u64 mut i = 0;
+        while (i < n) {
+            w->sum += w->batch[i].size;
+            i += 1;
         }
     }
 
@@ -98,18 +134,23 @@ $if ($cfg(target_os) == "macos") {
         u32 task = mach_task_self();
         void* reader = null;
         assert(malloc_get_all_zones(task, reader, &zones, &count) == 0);
-        u64 mut total = 0;
-        {
-            zone*@ range_values = zones[0..cast(count, u64)];
-            u64 mut range_index = 0;
-            while (range_index < range_values.len) {
-                zone* z = range_values[range_index];
-                range_index += 1;
-                assert(z->introspect->enumerator(task, cast(&total, void mut*), PTR_IN_USE,
-                                                 cast(z, u64), reader, record) == 0);
-            }
+        // A copy of the zone pointers; the same probe found one zone.
+        zone*[64] mut list = {};
+        u64 n = cast(count, u64);
+        assert(n <= list.len);
+        if (n > 0) {
+            bcopy(zones, &list[0], n * sizeof(zone*));
         }
-        return total;
+        walk mut w = {};
+        u64 mut i = 0;
+        while (i < n) {
+            zone* z = list[i];
+            i += 1;
+            assert(z->introspect->enumerator(task, &w, PTR_IN_USE, cast(z, u64), reader, record)
+                   == 0);
+            assert(!w.overflow);
+        }
+        return w.sum;
     }
 
     fn block_view() u64 {
@@ -133,7 +174,7 @@ $if ($cfg(target_os) == "macos") {
 
     fn block_view() u64 {
         u8 mut@ own block = new(u8, PROBE_BLOCK);
-        u64 at = cast(block.ptr, u64);
+        u64 at = cast(&block[0], u64);
         del(block);
         return at;
     }

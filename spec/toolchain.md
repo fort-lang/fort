@@ -1245,10 +1245,12 @@ interactive path, and the script drives a compiled program on a real pseudo term
 
 This section is normative for the compiler. The LLVM IR module it emits must satisfy every item
 and must pass `opt -passes=verify` (D19.1). The two examples at the end are what the compiler
-emits for their programs, as the goldens of `bootstrap0/test/gen_module_test.c` hold it, plus a
-hand-written definition of each `std.rt` entry point the example calls, over the C library,
-where a module the compiler builds holds the whole of `std.rt` (item 8, D9.10, D13.1). A change
-to the emitter's text is a change here.
+emits for their programs, plus a hand-written definition of each `std.rt` entry point the example
+calls, over the C library, where a module the compiler builds holds the whole of `std.rt` (item 8,
+D9.10, D13.1). `test/fort/fir_llvm_example_test.ft` holds the function that the FIR translator
+writes for each program, and the goldens of `bootstrap0/test/gen_module_test.c` hold the form of
+the frozen C compiler, whose runtime took a pointer and a length before D6.9. A change to the
+emitter's text is a change here.
 
 1. **Form and module header.** One textual module (`.ll`, LLVM 18 syntax, opaque pointers) holds
    the whole program (D9.10, D19.1) and is built by appending text. In a library build, one module
@@ -1766,10 +1768,6 @@ D14.2 emits no warning about what follows it).
 
 ### 6.1 A program without checks
 
-The dumps of this section and of 6.2 show the runtime before the migration of D6.9: there
-`print_str` and `panic` take a pointer and a length, and `print_enum` a pointer and a count.
-After it, each takes a `string` or a span by one hidden pointer (section 5.1).
-
 ```fort
 fn main() i32 { println("hello, world!"); return 0; }
 ```
@@ -1782,9 +1780,13 @@ target triple = "x86_64-unknown-linux-gnu"
 %fort.span = type { ptr, i64 }
 %fort.enum_member = type { i32, ptr }
 
-define dso_local void @"std.rt.print_str"(i32 %fd, ptr %ptr, i64 %len) #0 {
+define dso_local void @"std.rt.print_str"(i32 %fd, ptr %s) #0 {
 entry:
-  %t0 = call i64 @write(i32 %fd, ptr %ptr, i64 %len) #3
+  %t0 = getelementptr inbounds %fort.span, ptr %s, i32 0, i32 0
+  %t1 = load ptr, ptr %t0, align 8
+  %t2 = getelementptr inbounds %fort.span, ptr %s, i32 0, i32 1
+  %t3 = load i64, ptr %t2, align 8
+  %t4 = call i64 @write(i32 %fd, ptr %t1, i64 %t3) #3
   ret void
 }
 
@@ -1817,9 +1819,17 @@ entry:
 
 define dso_local i32 @"main.main"() #0 {
 entry:
-  call void @"std.rt.print_str"(i32 1, ptr @.str.0, i64 13)
+  %result = alloca i32, align 4
+  %tmp0 = alloca %fort.span, align 8
+  %t0 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 0
+  store ptr @.str.0, ptr %t0, align 8
+  %t1 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 1
+  store i64 13, ptr %t1, align 8
+  call void @"std.rt.print_str"(i32 1, ptr %tmp0)
   call void @"std.rt.print_char"(i32 1, i8 zeroext 10)
-  ret i32 0
+  store i32 0, ptr %result, align 4
+  %t2 = load i32, ptr %result, align 4
+  ret i32 %t2
 }
 
 define dso_local i32 @main(i32 %argc, ptr %argv) #0 {
@@ -1868,9 +1878,13 @@ target triple = "x86_64-unknown-linux-gnu"
 %fort.span = type { ptr, i64 }
 %fort.enum_member = type { i32, ptr }
 
-define dso_local void @"std.rt.print_str"(i32 %fd, ptr %ptr, i64 %len) #0 {
+define dso_local void @"std.rt.print_str"(i32 %fd, ptr %s) #0 {
 entry:
-  %t0 = call i64 @write(i32 %fd, ptr %ptr, i64 %len) #3
+  %t0 = getelementptr inbounds %fort.span, ptr %s, i32 0, i32 0
+  %t1 = load ptr, ptr %t0, align 8
+  %t2 = getelementptr inbounds %fort.span, ptr %s, i32 0, i32 1
+  %t3 = load i64, ptr %t2, align 8
+  %t4 = call i64 @write(i32 %fd, ptr %t1, i64 %t3) #3
   ret void
 }
 
@@ -1911,23 +1925,31 @@ entry:
 
 define dso_local i32 @"abort.main"() #0 {
 entry:
+  %result = alloca i32, align 4
   %a.0 = alloca [3 x i32], align 4
   %i.1 = alloca i64, align 8
-  call void @"std.rt.print_str"(i32 1, ptr @.str.0, i64 6)
+  %tmp0 = alloca %fort.span, align 8
+  %t0 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 0
+  store ptr @.str.0, ptr %t0, align 8
+  %t1 = getelementptr inbounds %fort.span, ptr %tmp0, i32 0, i32 1
+  store i64 6, ptr %t1, align 8
+  call void @"std.rt.print_str"(i32 1, ptr %tmp0)
   call void @"std.rt.print_char"(i32 1, i8 zeroext 10)
   call void @llvm.memset.p0.i64(ptr align 4 %a.0, i8 0, i64 12, i1 false)
   store i64 5, ptr %i.1, align 8
-  %t0 = load i64, ptr %i.1, align 8
-  %t1 = icmp uge i64 %t0, 3
-  br i1 %t1, label %L1, label %L0
-
-L0:
-  %t2 = getelementptr inbounds [3 x i32], ptr %a.0, i64 0, i64 %t0
-  %t3 = load i32, ptr %t2, align 4
-  ret i32 %t3
+  %t2 = load i64, ptr %i.1, align 8
+  %t3 = icmp uge i64 %t2, 3
+  br i1 %t3, label %L2, label %L1
 
 L1:
-  call void @"std.rt.fail_bounds"(i64 %t0, i64 3, ptr @.file.0, i32 12, i32 13)
+  %t4 = getelementptr inbounds [3 x i32], ptr %a.0, i64 0, i64 %t2
+  %t5 = load i32, ptr %t4, align 4
+  store i32 %t5, ptr %result, align 4
+  %t6 = load i32, ptr %result, align 4
+  ret i32 %t6
+
+L2:
+  call void @"std.rt.fail_bounds"(i64 %t2, i64 3, ptr @.file.0, i32 12, i32 13)
   unreachable
 }
 
@@ -1963,8 +1985,9 @@ attributes #8 = { cold noreturn nounwind "frame-pointer"="all" "probe-stack"="in
 The `@.str.1` constant is one line in the module and is wrapped here only to fit the page, as the
 `llvm.memcpy` declaration of item 8 is. The locals are entry-block allocas, the array is zeroed
 with `llvm.memset`, the bounds check of item 16 branches to a failure block at the end of the
-function, and `%fort.span` and `%fort.enum_member` are emitted although nothing but `main` uses
-them (item 2). The definition of `std.rt.fail_bounds` carries the `#8` of item 14 and ends with
+function, the message of `print_str` is the `string` of the temporary `%tmp0`, which the call
+passes by its address (item 7), and `%fort.enum_member` is emitted although nothing uses it
+(item 2). The definition of `std.rt.fail_bounds` carries the `#8` of item 14 and ends with
 the `llvm.trap` of item 20 after its call to a C function declared `noreturn` nowhere. The
 program prints `before`, then `abort.ft:12:13: runtime error: index 5 out of range for length 3`,
 and dies with SIGABRT (D11.4).

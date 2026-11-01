@@ -90,11 +90,13 @@ string[RUNTIME_LINES] RUNTIME = {
 };
 
 /// The checker of the last source, its runtime entries, and the text of the last lowering. It
-/// must stay at the address that open filled, because the checker points into itself.
+/// must stay at the address that open filled, because the checker points into itself. `in_str`
+/// says that check_str_lines checked the last source as the module std.str.
 struct env {
     check_env.env c;
     fir_verify.runtime rt;
     strbuf.str_buf text;
+    bool in_str;
 }
 
 fn open(env mut* e) void {
@@ -139,6 +141,42 @@ fn check_lines(env mut* e, string@ lines, bool runtime) void {
         panic("lower_env.check_lines: the source does not check");
     }
     e->rt = fir_verify.runtime_of(&e->c.ck);
+    e->in_str = false;
+}
+
+/// Checks `lines`, one line of source each, as the module std.str of a fresh sandbox whose
+/// std/rt.ft holds RUNTIME, with an entry module that imports std.str. Only `str.from_cstr` and
+/// `rt.args_init` take `p[lo..hi]` of a raw pointer (D6.9), so a test of that span writes it in a
+/// function `from_cstr` here. decl then reads std.str. The source must check with no diagnostic.
+fn check_str_lines(env mut* e, string@ lines) void {
+    check_env.reopen(&e->c);
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    for (string line : RUNTIME) {
+        strbuf.append(&b, line);
+        strbuf.push(&b, '\n');
+    }
+    check_env.add(&e->c, "std/rt.ft", strbuf.view(&b));
+    strbuf.clear(&b);
+    {
+        string@ range_values = lines;
+        u64 mut range_index = 0;
+        while (range_index < range_values.len) {
+            string line = range_values[range_index];
+            range_index += 1;
+            strbuf.append(&b, line);
+            strbuf.push(&b, '\n');
+        }
+    }
+    check_env.add(&e->c, "std/str.ft", strbuf.view(&b));
+    modules_env.std_dir_without_runtime(&e->c.m, "std");
+    e->c.want_main = false;
+    if (!check_env.check_src(&e->c, "import std.str;\n")) {
+        eprintln(check_env.report_text(&e->c, 0));
+        panic("lower_env.check_str_lines: the source does not check");
+    }
+    e->rt = fir_verify.runtime_of(&e->c.ck);
+    e->in_str = true;
 }
 
 /// Checks `lines` as check_lines does, holds that the checker refuses them, and gives the first
@@ -164,9 +202,15 @@ fn diagnostic(env mut* e, string@ lines) string {
     return check_env.report_text(&e->c, 0);
 }
 
-/// The declaration of the function `name` of the module `main`.
+/// The declaration of the function `name` of the module `main`, or of std.str after
+/// check_str_lines.
 fn decl(env* e, string name) ast.node* {
-    ast.sym* s = check_env.sym_main(&e->c, name);
+    ast.sym* mut s = null;
+    if (e->in_str) {
+        s = check_env.sym_of(&e->c, "std.str", name);
+    } else {
+        s = check_env.sym_main(&e->c, name);
+    }
     if (s == null || s->node == null) {
         panic("lower_env.decl: no such function");
     }
@@ -205,6 +249,12 @@ fn lower_checked(env mut* e, string name) string {
 /// rule of the verifier, and gives its text.
 fn lower(env mut* e, string@ lines, string name) string {
     check_lines(e, lines, true);
+    return lower_checked(e, name);
+}
+
+/// lower, for `lines` that check_str_lines checks as the module std.str.
+fn lower_str(env mut* e, string@ lines, string name) string {
+    check_str_lines(e, lines);
     return lower_checked(e, name);
 }
 

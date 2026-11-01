@@ -431,32 +431,18 @@ fn an_arrow_reaches_the_header_the_pointer_points_at() void {
                       "  %t4 = load i64, ptr %t3, align 8\n"));
 }
 
-fn a_span_of_a_pointer_checks_nothing_at_all() void {
+fn a_span_of_a_pointer_is_refused_in_main() void {
     gen_env.env mut e = gen_env.env{};
     gen_env.open(&e);
     defer gen_env.close(&e);
     string[3] mut lines = {ARR, "    i32 mut* mut p = &arr[0];",
                            "    i32 mut@ mut w = p[1..3];"};
-    assert(gen_env.open_lines(&e, lines[..]));
-    // A pointer has no length, so only the two-bound form exists and it is
-    // the explicit unsafe escape. The one check before it is the index of
-    // `&arr[0]`.
-    string[11] want = {
-        "  store ptr %t5, ptr %p.1, align 8\n",
-        "  %t6 = load ptr, ptr %p.1, align 8\n",
-        "  %t7 = sext i32 1 to i64\n",
-        "  %t8 = sext i32 3 to i64\n",
-        "  %t9 = getelementptr inbounds i32, ptr %t6, i64 %t7\n",
-        "  %t10 = sub i64 %t8, %t7\n",
-        "  %t11 = getelementptr inbounds %fort.span, ptr %w.2, i32 0, i32 0\n",
-        "  store ptr %t9, ptr %t11, align 8\n",
-        "  %t12 = getelementptr inbounds %fort.span, ptr %w.2, i32 0, i32 1\n",
-        "  store i64 %t10, ptr %t12, align 8\n",
-        "  store i32 0, ptr %result, align 4\n",
-    };
-    string got = gen_env.main_text(&e);
-    gen_env.expect_in(got, gen_env.join_lines(&e, want[..]));
-    assert(str.find(got, "fail_span") < 0);
+    // A pointer has no length, so its span could reach past the object. Only `str.from_cstr` and
+    // `rt.args_init` take one (D6.9), and fir_llvm_rvalue_test holds the IR of that span. The
+    // emitter writes nothing for a source that does not check.
+    assert(!gen_env.open_lines(&e, lines[..]));
+    assert(gen_env.errors(&e) == 1);
+    assert(gen_env.said(&e, "cannot take a span of i32 mut*: a pointer has no length"));
 }
 
 fn a_written_high_bound_makes_the_length_a_read_of_its_own() void {
@@ -558,7 +544,7 @@ fn main() i32 {
     a_field_of_a_value_and_a_field_behind_a_pointer_are_one_shape();
     the_pseudo_fields_of_a_span_are_its_header_fields();
     an_arrow_reaches_the_header_the_pointer_points_at();
-    a_span_of_a_pointer_checks_nothing_at_all();
+    a_span_of_a_pointer_is_refused_in_main();
     a_written_high_bound_makes_the_length_a_read_of_its_own();
     println("places ok");
     a_positional_struct_literal_writes_its_members_in_field_order();

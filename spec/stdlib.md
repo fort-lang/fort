@@ -379,10 +379,10 @@ writes a file atomically with a temporary file beside the target and a `rename` 
 must free it, but one symbol has one signature (D9.8) and a cast never adds `own` (D3.14), so
 fort code cannot free that result. `std.os.real_path` is the owning form: it allocates a buffer
 of `PATH_MAX` bytes with `new` and passes it (2.14, D17.13).
-Direct use looks like `libc.write(fd, cast(s.ptr, u8*), s.len) == cast(s.len, i64)`, which
+Direct use looks like `libc.write(fd, cast(s, u8@).ptr, s.len) == cast(s.len, i64)`, which
 writes a string to a descriptor, bypassing the runtime's buffers; the `cast` is there because a
-`string` carries `char*` and not `u8*`, and `libc.read(fd, buf.ptr, buf.len)` on a `u8 mut@`
-needs none.
+`string` carries `char*` and not `u8*`, and it casts the string because no cast takes a `.ptr`
+(D3.5). `libc.read(fd, buf.ptr, buf.len)` on a `u8 mut@` needs none.
 
 The seven socket calls come from `<sys/socket.h>` and `<netinet/in.h>`. `socklen_t` is
 `unsigned int`, so it is `u32`; an address is a struct of no fixed type here, so it crosses as

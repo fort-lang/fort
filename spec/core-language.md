@@ -653,10 +653,11 @@ written `(*p)[i]` (5.7). Qualified names also use `.`: `io.read_file(path)`,
 element type carrying the element level's mutability (`i32*` for `i32@`, `i32 mut*` for
 `i32 mut@`, `node* mut*` for `node* mut@`) and never `own` at its outermost reference
 (`u8 mut*` for `u8 mut@ own`, `node mut* own mut*` for `node mut* own mut@ own`, D17.3); a
-string has `.len` (`u64`) and `.ptr` (`char*`). A `.ptr` is legal only as an argument of an
-`extern fn` whose parameter type C does not give back, as the argument of `str.from_cstr`, as an
-operand of `==` or `!=`, and as the operand of a cast to `u64` or to a `void*` (D3.5): the `.ptr`
-of an empty span names the byte after its object. `&s[0]` names the first element, with a check.
+string has `.len` (`u64`) and `.ptr` (`char*`). A `.ptr` is legal only as it stands: as an
+argument of an `extern fn` whose parameter type C does not give back, as the argument of
+`str.from_cstr`, and as an operand of `==` or `!=` (D3.5). No cast takes it: the `.ptr` of an
+empty span names the byte after its object. `&s[0]` names the first element, with a check, and
+`cast(&s[0], void*)` gives its address to a `void*`.
 Fixed arrays have no `.ptr`. `.len` of any expression of fixed-array type is a constant
 expression and its operand is not evaluated (`m[i].len` is `4` for `i32[3][4] m`); `.len` of
 a span or string is not a constant expression.

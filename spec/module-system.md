@@ -459,7 +459,7 @@ extern fn write(i32 fd, u8* buf, u64 n) i64;
 extern fn strlen(char* s) u64;
 
 fn put(string s) void {
-    write(1, cast(s.ptr, u8*), s.len);
+    write(1, cast(s, u8@).ptr, s.len);
 }
 
 fn main(string@ args) i32 {

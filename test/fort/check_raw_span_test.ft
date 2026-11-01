@@ -1,0 +1,154 @@
+//! run
+//! flags: -I ../../src -I support
+//! stdout:
+//| exception ok
+//| other functions ok
+//| args_init ok
+/// Checks the two functions of D6.9 that take a span of a raw pointer, `str.from_cstr` and
+/// `rt.args_init`, through a sandbox whose std/str.ft and std/rt.ft hold them. In their bodies
+/// `p[lo..hi]` checks, and each one-bound form stays the error of a pointer with no length. Each
+/// other function of a module of std, and a function of the same name in another module, takes no
+/// span of a raw pointer. Each name of `std.rt.args_init` in source is an error, in std.rt too.
+import check_env;
+import modules_env;
+import std.strbuf;
+
+// The error of a span of a raw pointer outside the two functions.
+string SPAN_ERROR = "cannot take a span of char*: a pointer has no length";
+
+// The error of a one-bound form in the body of one of the two functions.
+string BOUND_ERROR = "a pointer has no length: write 'p[lo..hi]'";
+
+// The error of a name of std.rt.args_init in source.
+string ARGS_ERROR = "'std.rt.args_init' belongs to the start of the program";
+
+// Checks `main`, a module of the sandbox, over a std/str.ft that is `str_text` and a std/rt.ft
+// that is `rt_text`. The entry module needs no `main`.
+fn check(check_env.env mut* e, string str_text, string rt_text, string main) bool {
+    check_env.reopen(e);
+    check_env.add(e, "std/str.ft", str_text);
+    check_env.add(e, "std/rt.ft", rt_text);
+    modules_env.std_dir_without_runtime(&e->m, "std");
+    e->want_main = false;
+    return check_env.check_src(e, main);
+}
+
+// Holds that the check reported exactly one error, `<line>:<col>: <message>`, in the file `file`.
+fn one_error(check_env.env mut* e, string file, string want) void {
+    if (check_env.errors(e) != 1 || check_env.report_text(e, 0) != want
+        || !ends_with(check_env.report_file(e, 0), file)) {
+        eprintln("check_raw_span_test: expected ", file, " ", want, ", got ",
+                 check_env.errors(e), " errors, the first ", check_env.report_file(e, 0), " ",
+                 check_env.report_text(e, 0));
+        panic("check_raw_span_test: the diagnostics differ");
+    }
+}
+
+fn ends_with(string s, string tail) bool {
+    return s.len >= tail.len && s[s.len - tail.len..] == tail;
+}
+
+// The text `a` and then `b`, which `out` holds until its next use.
+fn joined(strbuf.str_buf mut* out, string a, string b) string {
+    strbuf.clear(out);
+    strbuf.append(out, a);
+    strbuf.append(out, b);
+    return strbuf.view(out);
+}
+
+// An args_init with an empty body, and a function that calls it in the same module.
+string ARGS_DECL = "fn args_init(i32 argc, char* mut* argv) void {\n}\n";
+string CALLER = "fn restart(char* mut* argv) void {\n    args_init(0, argv);\n}\n";
+
+// A std/str.ft whose from_cstr takes the two-bound span of its pointer.
+string STR_EXCEPTION =
+    "fn from_cstr(char* p) string {\n    return cast(p[0..1], string);\n}\n";
+
+// A std/rt.ft whose args_init takes the two-bound span of argv.
+string RT_EXCEPTION =
+    "fn args_init(i32 argc, char* mut* argv) void {\n    char* mut@ v = argv[0..1];\n}\n";
+
+// The source of `main`, which imports both modules and names no function of them.
+string MAIN = "import std.rt;\nimport std.str;\nfn f() void {\n}\n";
+
+// In the bodies of the two functions `p[lo..hi]` checks: the bounds 0 and 1 are the least span
+// of a pointer that holds an element. The two modules load because `main` imports them.
+fn the_two_functions_take_the_two_bound_span() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    assert(check(&e, STR_EXCEPTION, RT_EXCEPTION, MAIN));
+    assert(check_env.errors(&e) == 0);
+    // A span from 0 to 0 holds no element, and it checks too.
+    string empty = "fn from_cstr(char* p) string {\n    return cast(p[0..0], string);\n}\n";
+    assert(check(&e, empty, RT_EXCEPTION, MAIN));
+    // Each one-bound form stays an error in their bodies (D6.9).
+    string open_end = "fn from_cstr(char* p) string {\n    return cast(p[1..], string);\n}\n";
+    assert(!check(&e, open_end, RT_EXCEPTION, MAIN));
+    one_error(&e, "std/str.ft", "2:18: a pointer has no length: write 'p[lo..hi]'");
+    string open_start =
+        "fn args_init(i32 argc, char* mut* argv) void {\n    char* mut@ v = argv[..1];\n}\n";
+    assert(!check(&e, STR_EXCEPTION, open_start, MAIN));
+    one_error(&e, "std/rt.ft", "2:24: a pointer has no length: write 'p[lo..hi]'");
+    string whole =
+        "fn args_init(i32 argc, char* mut* argv) void {\n    char* mut@ v = argv[..];\n}\n";
+    assert(!check(&e, STR_EXCEPTION, whole, MAIN));
+    one_error(&e, "std/rt.ft", "2:24: a pointer has no length: write 'p[lo..hi]'");
+    assert(!check_env.said(&e, SPAN_ERROR));
+    println("exception ok");
+}
+
+// Each other function of std.str and std.rt takes no span of a raw pointer, and neither does a
+// function named from_cstr or args_init of the entry module.
+fn each_other_function_takes_no_span_of_a_pointer() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    string other_str = "fn to_text(char* p) string {\n    return cast(p[0..1], string);\n}\n";
+    assert(!check(&e, other_str, RT_EXCEPTION, MAIN));
+    one_error(&e, "std/str.ft", "2:18: cannot take a span of char*: a pointer has no length");
+    // The function of the other module: from_cstr in std.rt and args_init in std.str.
+    string swapped_str = "fn args_init(char* p) string {\n    return cast(p[0..1], string);\n}\n";
+    assert(!check(&e, swapped_str, RT_EXCEPTION, MAIN));
+    one_error(&e, "std/str.ft", "2:18: cannot take a span of char*: a pointer has no length");
+    string swapped_rt = "fn from_cstr(char* p) string {\n    return cast(p[0..1], string);\n}\n";
+    assert(!check(&e, STR_EXCEPTION, swapped_rt, MAIN));
+    one_error(&e, "std/rt.ft", "2:18: cannot take a span of char*: a pointer has no length");
+    // The entry module's own from_cstr, with the same body.
+    assert(!check(&e, STR_EXCEPTION, RT_EXCEPTION, swapped_rt));
+    one_error(&e, "main.ft", "2:18: cannot take a span of char*: a pointer has no length");
+    // A span of a span stays legal in each function, with its check.
+    string spans = "fn first(string s) string {\n    return s[0..1];\n}\n";
+    assert(check(&e, spans, RT_EXCEPTION, MAIN));
+    println("other functions ok");
+}
+
+// Each name of std.rt.args_init in source is an error: a call from another module, a function
+// value, and a call from another function of std.rt itself (D6.9).
+fn args_init_belongs_to_the_start_of_the_program() void {
+    check_env.env mut e = check_env.env{};
+    check_env.open(&e);
+    defer check_env.close(&e);
+    string call = "import std.rt;\nfn f(char* mut* argv) void {\n    rt.args_init(0, argv);\n}\n";
+    assert(!check(&e, STR_EXCEPTION, RT_EXCEPTION, call));
+    one_error(&e, "main.ft", "3:8: 'std.rt.args_init' belongs to the start of the program");
+    string value =
+        "import std.rt;\nfn f() void {\n    fn (i32, char* mut*) void g = rt.args_init;\n}\n";
+    assert(!check(&e, STR_EXCEPTION, RT_EXCEPTION, value));
+    one_error(&e, "main.ft", "3:38: 'std.rt.args_init' belongs to the start of the program");
+    strbuf.str_buf mut b = strbuf.create();
+    defer strbuf.free(&b);
+    assert(!check(&e, STR_EXCEPTION, joined(&b, ARGS_DECL, CALLER), MAIN));
+    one_error(&e, "std/rt.ft", "4:5: 'std.rt.args_init' belongs to the start of the program");
+    // A function named args_init of another module is no such name.
+    assert(check(&e, STR_EXCEPTION, RT_EXCEPTION, joined(&b, ARGS_DECL, CALLER)));
+    assert(!check_env.said(&e, ARGS_ERROR));
+    println("args_init ok");
+}
+
+fn main() i32 {
+    the_two_functions_take_the_two_bound_span();
+    each_other_function_takes_no_span_of_a_pointer();
+    args_init_belongs_to_the_start_of_the_program();
+    return 0;
+}

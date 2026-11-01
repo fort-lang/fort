@@ -3,16 +3,21 @@
 //! expect:
 //| fn main.pa() -> void {
 //|     let _0: void;
+//|     let _1: string;
 //|
 //|     bb0: {
-//|         fail(panic, const bytes "stop", const u64 4) #27:5 s1;
+//|         _1 = const "stop" #27:11 s1;
+//|         fail(panic, copy _1) #27:5 s1;
 //|     }
 //| }
-// The lowering of `panic("stop");`. No build mode removes `fail(panic, ...)`.
+// The lowering of `panic("stop");`: the message in a `string` temporary, then the `fail`. No build
+// mode removes `fail(panic, ...)`.
 fn main.pa() -> void {
     let _0: void;
+    let _1: string;
 
     bb0: {
-        fail(panic, const bytes "stop", const u64 4) #27:5 s1;
+        _1 = const "stop" #27:11 s1;
+        fail(panic, copy _1) #27:5 s1;
     }
 }

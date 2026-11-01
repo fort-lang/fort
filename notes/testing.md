@@ -549,7 +549,8 @@ bullet at a time and without a rewrite.
   after a `switch` that names every member of an enum is dead, because D7.7 gives that switch a
   trapping `default`. `cast(250, types.type_kind)` stopped with `enum value 250 is not a member of
   type_kind`. **A length can be forged, so a guard on the `.len` of a span is reachable.**
-  `p[lo..hi]` on a pointer makes a view with no runtime check (D6.9). A same-size
+  `p[lo..hi]` on a pointer makes a view with no runtime check, in `str.from_cstr` and
+  `rt.args_init` only (D6.9). A same-size
   reinterpretation (D10.7) can write the pointer or the length of a span:
   `cast(&tt.nodes, raw mut*)->len = n`, with `raw` a struct of two `u64`, reached
   `types.reserve` before D3.14 refused that cast, which hides the owner `tt.nodes`. An argument
@@ -1169,7 +1170,7 @@ bullet at a time and without a rewrite.
   builtin but `move` there, and the checker refuses a discarded `move`
   (`fail/ownership/018_discard_own_rvalue`). No compile reaches either panic, so a mutant of either
   line measures no rule of the emitter.
-  **A mutant of `src/fort` reaches two places.** bootstrap-1 builds the product compiler from it,
+  **A mutant of `src/fort` reaches two places.** bootstrap-2 builds the product compiler from it,
   and each `test/fort` suite compiles the mutated module itself. So a row that turns every suite
   red usually means that the compiler stopped on `std.rt`, often with a panic of `fir_verify`.
   It does not mean that every suite names the rule.

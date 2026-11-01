@@ -294,9 +294,13 @@ else()
         set(pin_dir "${FORT_BOOTSTRAP_DIR}/bootstrap-${pin_number}")
         set(pin_stamp "${pin_dir}/.assembled-${pin_sha}-${FORT_TARGET}")
         set(pin_binary "${pin_dir}/fort")
+        # Some predecessors load rt_float.ft for every closure that holds a float, and a pin after
+        # the fold has none, so the predecessor builds the pin with its root plus an empty one, as
+        # the last pin builds HEAD below. `touch` keeps a file that the pin holds.
         add_custom_command(
             OUTPUT "${pin_stamp}"
             COMMAND bash "${FORT_TREE_SCRIPT}" "${pin_sha}" "${pin_dir}" "${FORT_TARGET}"
+            COMMAND "${CMAKE_COMMAND}" -E touch "${pin_dir}/std/rt_float.ft"
             DEPENDS "${FORT_BOOTSTRAP_REF}" "${FORT_TREE_SCRIPT}"
             COMMENT "Extracting and assembling bootstrap-${pin_number}"
             VERBATIM

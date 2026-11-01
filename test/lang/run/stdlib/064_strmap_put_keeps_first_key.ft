@@ -14,10 +14,11 @@ import std.str;
 // below pin down, and a caller that wants the later key's storage removes the
 // entry and puts it again.
 
-// The address of the key bytes in the slot of key. It reads through a pointer, so the owner
-// is no local owner here (D17.21).
-fn key_ptr(strmap.str_map* m, string key) void* {
-    return cast(m->entries[cast(str.hash(key) & 15, u64)].key.ptr, void*);
+// Whether the key bytes in the slot of key are the bytes of other: the `.ptr` of each is an
+// operand of `==` (D3.5). It reads through a pointer, so the owner is no local owner here
+// (D17.21).
+fn key_at(strmap.str_map* m, string key, string other) bool {
+    return m->entries[cast(str.hash(key) & 15, u64)].key.ptr == other.ptr;
 }
 
 fn main() i32 {
@@ -29,25 +30,20 @@ fn main() i32 {
     strmap.str_map mut m = strmap.create();
     defer strmap.free(&m);
     println(strmap.put(&m, first, 1), " ", strmap.count(&m), " ",
-            key_ptr(&m, first) ==
-                cast(first.ptr, void*), " ",
-            key_ptr(&m, first) ==
-                cast(second.ptr, void*));
+            key_at(&m, first, first), " ",
+            key_at(&m, first, second));
 
     // The replacement moves the value and leaves the key where it was.
     i64 mut got = 0;
     println(strmap.put(&m, second, 7), " ", strmap.count(&m) + 1, " ", strmap.count(&m), " ",
-            key_ptr(&m, first) ==
-                cast(first.ptr, void*), " ",
-            key_ptr(&m, first) ==
-                cast(second.ptr, void*));
+            key_at(&m, first, first), " ",
+            key_at(&m, first, second));
     println(strmap.get(&m, "key", &got), " ", got - 5, " ", strmap.has(&m, second));
 
     // Removing and putting again is how the later key's storage takes over.
     println(strmap.remove(&m, first) == false, " ", got, " ", strmap.count(&m));
     strmap.put(&m, second, 9);
     println(strmap.get(&m, second, &got), " ", got, " ",
-            key_ptr(&m, second) ==
-                cast(second.ptr, void*));
+            key_at(&m, second, second));
     return 0;
 }
