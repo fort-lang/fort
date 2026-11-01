@@ -1615,12 +1615,12 @@ fn skip_to_boundary(parser mut* p, u64 start, i32 level) void {
     }
 }
 
-// Drops boundary tokens that cannot start a construct.
+// Skips the boundary tokens that cannot start a construct.
 // These tokens are unmatched `)` or `]`, a following `;`, and a top-level `}`.
 // Directly after a skip, they belong to the failed construct.
-// Dropping them prevents a second diagnostic for the same error.
+// Skipping them prevents a second diagnostic for the same error.
 // The parser reports the same token when it reaches the token without recovery.
-fn drop_leftovers(parser mut* p, i32 level) void {
+fn skip_leftovers(parser mut* p, i32 level) void {
     while (at(p, lexer.tok_kind.rparen) || at(p, lexer.tok_kind.rbracket)
            || at(p, lexer.tok_kind.semi)
            || (level == RECOVER_DECL && at(p, lexer.tok_kind.rbrace))) {
@@ -1635,7 +1635,7 @@ fn drop_leftovers(parser mut* p, i32 level) void {
 fn recover(parser mut* p, ast.node mut* parent, u64 start, bool skipping, i32 level) void {
     if (skipping) {
         skip_to_boundary(p, start, level);
-        drop_leftovers(p, level);
+        skip_leftovers(p, level);
         if (p->pos > start) {
             diag.loc at_loc = tok_loc(p, lexer.tokvec_at(p->toks, start));
             ast.node mut* err = node_at(p, ast.ast_kind.k_error, at_loc);
@@ -2742,7 +2742,7 @@ fn parse_module(session.session mut* sess, string file, lexer.tok_vec* toks,
     }
     parser mut p = parser{sess, file, toks, ntoks, 0, ar, 0, 0, false, 0,
                           diag.loc_make(file, 0, 0), strbuf.create(), 0, 0, false};
-    defer strbuf.free(&p.msg);
+    defer del(p.msg.data);
 
     ast.node mut* mod = ast.ast_new(ar, ast.ast_kind.k_module, diag.loc_make(file, 1, 1));
     // Both loops are recovery points, so one error removes one subtree.
@@ -2817,7 +2817,7 @@ fn parse_interface(session.session mut* sess, string file, lexer.tok_vec* toks,
     }
     parser mut p = parser{sess, file, toks, ntoks, 0, ar, 0, 0, false, 0,
                           diag.loc_make(file, 0, 0), strbuf.create(), 0, 0, true};
-    defer strbuf.free(&p.msg);
+    defer del(p.msg.data);
     diag.loc mut start = diag.loc_make(file, 1, 1);
     if (ntoks > 0) {
         start = here(&p);

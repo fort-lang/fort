@@ -3643,7 +3643,18 @@ fn check_pointer_places(checker mut* ck, ast.node* n, types.node* src, types.nod
         }
         if (d->is_mut) {
             place_memo mut m = place_memo{};
-            defer memo_free(&m);
+            defer {
+                memo_free(&m);
+                // The leak rule reads no callee: after the calls, the test of a loop proves each
+                // chain empty, and each other owner takes a `del`.
+                while (m.keys.head != null) {
+                    containers.pool_free(&m.keys);
+                }
+                del(m.held.entries);
+                del(m.text.data);
+                del(m.frames);
+                del(m.entered);
+            }
             pointer_place mut h = pointer_place{};
             bool hides = sp != null && first_hidden(&m, sp, 1, 0, dp, &h);
             if (!m.over && hides) {
@@ -3714,7 +3725,18 @@ fn check_view_places(checker mut* ck, ast.node* n, types.node* src, types.node* 
     // each cast of a `void*` to a typed pointer.
     bool view = !fn_only && src->kind != types.type_kind.k_voidptr;
     place_memo mut m = place_memo{.marked = !view, .fn_only = fn_only, .view = view};
-    defer memo_free(&m);
+    defer {
+        memo_free(&m);
+        // The leak rule reads no callee: after the calls, the test of a loop proves each chain
+        // empty, and each other owner takes a `del`.
+        while (m.keys.head != null) {
+            containers.pool_free(&m.keys);
+        }
+        del(m.held.entries);
+        del(m.text.data);
+        del(m.frames);
+        del(m.entered);
+    }
     pointer_place mut h = pointer_place{};
     bool adds = first_hidden(&m, dp, 1, 0, sp, &h);
     if (m.over) {

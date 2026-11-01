@@ -385,6 +385,16 @@ add_test(NAME fixpoint
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 set_tests_properties(fixpoint PROPERTIES LABELS "fort;integration")
 
+# The exits of the owning aggregate locals that the leak rule does not prove, in the compiler, the
+# language server and the standard library, for both targets: the test holds the count of each
+# file.
+add_test(NAME aggregate-sites
+    COMMAND "${FORT_PYTHON3}" "${FORT_TEST_DIR}/aggregate_sites_test.py"
+            --fort "${FORT_COMPILER_BINARY}" --root "${CMAKE_SOURCE_DIR}")
+set_tests_properties(aggregate-sites PROPERTIES
+    LABELS "fort;integration"
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
 # ---- the language server -------------------------------------------------------
 # fort_lsp is src/lsp compiled by the production compiler. It stands at the
 # build root. The C-started source chain builds that compiler for the native

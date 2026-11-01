@@ -447,6 +447,12 @@ bullet at a time and without a rewrite.
   `libc6_<version>_amd64.deb`, link `lib` and `lib64` to `usr/lib` and
   `usr/lib64`, and pass `--runner "qemu-x86_64-static -L <root>"` to `run_tests.py`. Running its
   loader directly moves the start of the break and made a probe red on the base tree too.
+  **A release that moves on the path of a lifetime probe can move the break under glibc 2.43.**
+  `gen.gen_main` freed its four argument lists at its exit, not after each call: the emitter probe
+  measured a system distance of 1896448 bytes and a live distance of 0 under glibc 2.43, and 0 under
+  2.39 and on macOS (PR 204). So before the hand-off of a change that moves a release on such a
+  path, run the six `driver_lifetime_*` probes under the glibc 2.43 runner above. A block around
+  each buffer keeps the release where it was.
   On macOS the address of a buffer is no view of the heap: the allocator serves a block from a
   per-CPU magazine, so `heap.ADDRESS_IS_A_VIEW` in `test/fort/support/heap.ft` is false there,
   `fir_env.address_moved` answers 0, and each probe that samples an address asserts on it only
