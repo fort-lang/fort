@@ -721,9 +721,10 @@ bullet at a time and without a rewrite.
   may keep the fact of `x`. Each set prints its count of `forged` events on a line of its own
   (`outside each rule (A8)`), with its rejected sites that have no event at
   or after a `forged` event of their function: such a site is no false reject, because the run
-  reports no event after `forged`. The generator forges no pointer to a local: its one cast of an
-  integer to a pointer, `v = cast(u, i32*)`, reads back an integer of an `own` value or of an
-  `i32`, and no hand case forges a pointer to a local. So each set prints `forged 0`, and the other
+  reports no event after `forged`. The generator forges no pointer to a local, and no hand case
+  does: no cast makes a pointer from an integer (D3.14), so the vocabulary lends through `id(x)`
+  where it read back an integer, a shape lends through `cast(x, i32*)` where it kept a `u64`, and
+  `g4` reads no pointer back after its cast to `u64`. So each set prints `forged 0`, and the other
   counts did not change when the event came (measured).
   **The test holds the report of the owning aggregate locals too** (D17.20). A site
   is a function and the location of a `dead` of a local of an owning aggregate type outside an

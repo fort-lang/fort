@@ -857,14 +857,26 @@ string[27] CASTS = {
     "fn c6(u8 x) i32 {",
     "    return cast(x, i32);",
     "}",
-    "fn c7(u64 x) i32* {",
-    "    return cast(x, i32*);",
+    "fn c7(i64* p) u8* {",
+    "    return cast(p, u8*);",
     "}",
     "fn c8(i32 x) f64 {",
     "    return cast(x, f64);",
     "}",
     "fn c9(f64 x) f32 {",
     "    return cast(x, f32);",
+    "}",
+};
+
+// A cast from `u64` to a pointer, the one source of an `inttoptr`. No fort source makes it, because
+// no cast makes a pointer from an integer (D3.14). Hand-written FIR text forges a pointer with it
+// on purpose, and V4 admits it.
+string[6] FORGED_ADDRESS = {
+    "fn main.address(_1 (x): u64) -> i32* {",
+    "    bb0: {",
+    "        _0 = cast<i32*>(copy _1) #1:1 s1;",
+    "        return #1:1 s1;",
+    "    }",
     "}",
 };
 
@@ -877,9 +889,11 @@ fn cast_case(llvm_env.env mut* e, string name, string@ entry, string@ body) void
 }
 
 // `cast` prints nothing when the two LLVM value types are equal, and the result takes the name of
-// its operand: `i32` to `u32` stores `%t0`, the load of `x`. Every other cast is the instruction
-// of toolchain.md 6 item 12: `zext` of the `i1` of a `bool`, `trunc`, `ptrtoint`, the saturating
-// `llvm.fptosi.sat`, `zext` of a `u8`, `inttoptr`, `sitofp` and `fptrunc`.
+// its operand: `i32` to `u32` and a pointer to a smaller pointee store `%t0`, the load of the
+// parameter. Every other cast is the instruction of toolchain.md 6 item 12: `zext` of the `i1` of
+// a `bool`, `trunc`, `ptrtoint`, the saturating `llvm.fptosi.sat`, `zext` of a `u8`, `sitofp` and
+// `fptrunc`. No fort source makes an `inttoptr`, because no cast makes a pointer from an integer
+// (D3.14).
 fn each_cast_prints_the_instruction_of_its_types() void {
     llvm_env.env mut e = llvm_env.env{};
     llvm_env.open(&e);
@@ -960,18 +974,17 @@ fn each_cast_prints_the_instruction_of_its_types() void {
         "  store i32 %t1, ptr %result, align 4",
     };
     cast_case(&e, "c6", u8_entry[..], unsigned[..]);
-    string[4] u64_entry = {
+    string[4] pointer_entry = {
         "entry:",
         "  %result = alloca ptr, align 8",
-        "  %x.0 = alloca i64, align 8",
-        "  store i64 %x.in, ptr %x.0, align 8",
+        "  %p.0 = alloca ptr, align 8",
+        "  store ptr %p.in, ptr %p.0, align 8",
     };
-    string[3] address = {
-        "  %t0 = load i64, ptr %x.0, align 8",
-        "  %t1 = inttoptr i64 %t0 to ptr",
-        "  store ptr %t1, ptr %result, align 8",
+    string[2] same_pointer = {
+        "  %t0 = load ptr, ptr %p.0, align 8",
+        "  store ptr %t0, ptr %result, align 8",
     };
-    cast_case(&e, "c7", u64_entry[..], address[..]);
+    cast_case(&e, "c7", pointer_entry[..], same_pointer[..]);
     string[4] to_f64 = {
         "entry:",
         "  %result = alloca double, align 8",
@@ -996,6 +1009,29 @@ fn each_cast_prints_the_instruction_of_its_types() void {
         "  store float %t1, ptr %result, align 4",
     };
     cast_case(&e, "c9", f64_entry[..], shorter[..]);
+}
+
+// The translator writes the `u64` of FORGED_ADDRESS as a pointer with `inttoptr`.
+fn a_cast_from_u64_to_a_pointer_in_fir_text_prints_inttoptr() void {
+    llvm_env.env mut e = llvm_env.env{};
+    llvm_env.open(&e);
+    defer llvm_env.close(&e);
+    string[1] prelude = {"i32 UNUSED = 0;"};
+    fir.module mut m = llvm_env.parse(&e, prelude[..], FORGED_ADDRESS[..]);
+    defer fir.module_free(&m);
+    string[4] u64_entry = {
+        "entry:",
+        "  %result = alloca ptr, align 8",
+        "  %x.0 = alloca i64, align 8",
+        "  store i64 %x.in, ptr %x.0, align 8",
+    };
+    string[3] address = {
+        "  %t0 = load i64, ptr %x.0, align 8",
+        "  %t1 = inttoptr i64 %t0 to ptr",
+        "  store ptr %t1, ptr %result, align 8",
+    };
+    string got = llvm_env.translate(&e, fir.module_function_at(&m, 0));
+    llvm_env.expect2(&e, got, u64_entry[..], address[..]);
 }
 
 // ---- addresses, headers and allocations ---------------------------------------------------------
@@ -1517,6 +1553,7 @@ fn main() i32 {
     every_predicate();
     println("comparisons ok");
     each_cast_prints_the_instruction_of_its_types();
+    a_cast_from_u64_to_a_pointer_in_fir_text_prints_inttoptr();
     println("casts ok");
     an_address_prints_no_load();
     a_slice_of_a_fixed_array();

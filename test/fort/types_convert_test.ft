@@ -353,6 +353,14 @@ fn casts_among_pointers_and_u64() void {
     assert(castable(&e, "void*", "u64"));
     assert(castable(&e, "void* own", "u64"));
     assert(castable(&e, "node**", "node* mut*"));
+    // The matrix keeps the row from `u64` back to a pointer for FIR text, and the checker refuses
+    // it before the matrix: no cast makes a pointer from an integer (D3.14).
+    assert(types.type_cast_makes_pointer(types_env.type_of(&e, "node*"),
+                                         types_env.type_of(&e, "u64")));
+    assert(types.type_cast_makes_pointer(types_env.type_of(&e, "void* own"),
+                                         types_env.type_of(&e, "u64")));
+    assert(!types.type_cast_makes_pointer(types_env.type_of(&e, "u64"),
+                                          types_env.type_of(&e, "node*")));
     // Pointers cast to no other integer type, and never to a span.
     assert(!castable(&e, "i64", "node*"));
     assert(!castable(&e, "i32", "node*"));
@@ -688,6 +696,74 @@ fn the_matrix_admits_own_at_any_reference() void {
 
 // ---- the matrix and the invariants ---------------------------------------------
 
+// The ordered pairs of the sample table whose source is an integer and whose target is a pointer,
+// a `void*` or a function pointer type: the 2 integers `i32` and `u8` and 14 such targets.
+u64 INTEGER_POINTER_PAIRS = 28;
+
+// The pairs of a scalar of the matrix and a pointer-like sample that the matrix admits: `u64` to
+// `node*`, `node**`, `void*`, `void* own` and a pointer to a function pointer, which add no `mut`.
+u64 MATRIX_INTEGER_POINTER_ROWS = 5;
+
+// Whether `t` is a pointer, a `void*` or a function pointer type.
+fn is_pointer_like(types.node* t) bool {
+    return t->kind == types.type_kind.k_ptr || t->kind == types.type_kind.k_voidptr
+        || t->kind == types.type_kind.k_fn;
+}
+
+// No cast makes a pointer from an integer, a `char`, a `bool`, an enum or a float (D3.14). The
+// rule is a universal one, so the test walks each scalar of the matrix and each sample source to
+// each sample target. type_cast_makes_pointer holds exactly for an integer source and a
+// pointer-like target, and check_cast refuses each such pair before it reads the matrix. The
+// matrix admits a `u64` to a pointer for FIR text, so each pair of a scalar and a pointer-like
+// target that the matrix admits must be such a pair. The two counts hold the table to the rule,
+// so a table that stops naming an integer or a pointer goes red.
+fn no_cast_makes_a_pointer_from_an_integer() void {
+    types_env.env mut e = types_env.env{};
+    types_env.init(&e);
+    defer types_env.free(&e);
+    types.node*[35] mut samples = {};
+    u64 n = sample_types(&e, samples[..]);
+    assert(n == SAMPLES_MAX);
+    types.node*[14] mut scalars = {};
+    scalar_class[14] mut classes = {};
+    u64 k = scalar_types(&e, scalars[..], classes[..]);
+    assert(k == SCALARS_MAX);
+    u64 mut pairs = 0;
+    u64 mut admitted = 0;
+    u64 mut d = 0;
+    while (d < n) {
+        types.node* dst = samples[d];
+        u64 mut s = 0;
+        while (s < k) {
+            bool named = is_pointer_like(dst) && classes[s] == scalar_class.class_int;
+            if (types.type_cast_makes_pointer(dst, scalars[s]) != named) {
+                fail_pair(&e, scalars[s], " has the wrong rule name for a cast to ", dst);
+            }
+            if (is_pointer_like(dst) && types.type_cast_allowed(dst, scalars[s])) {
+                admitted += 1;
+                if (!named) {
+                    fail_pair(&e, scalars[s], " casts to the pointer ", dst);
+                }
+            }
+            s += 1;
+        }
+        u64 mut t = 0;
+        while (t < n) {
+            bool named = is_pointer_like(dst) && types.type_is_int(samples[t]);
+            if (types.type_cast_makes_pointer(dst, samples[t]) != named) {
+                fail_pair(&e, samples[t], " has the wrong rule name for a cast to ", dst);
+            }
+            if (named) {
+                pairs += 1;
+            }
+            t += 1;
+        }
+        d += 1;
+    }
+    assert(pairs == INTEGER_POINTER_PAIRS);
+    assert(admitted == MATRIX_INTEGER_POINTER_ROWS);
+}
+
 fn every_scalar_pair_follows_the_d3_14_matrix() void {
     types_env.env mut e = types_env.env{};
     types_env.init(&e);
@@ -899,6 +975,7 @@ fn main() i32 {
     the_matrix_admits_own_at_any_reference();
     println("further ok");
     every_scalar_pair_follows_the_d3_14_matrix();
+    no_cast_makes_a_pointer_from_an_integer();
     every_implicit_conversion_is_also_a_cast();
     clearing_every_mark_of_a_type();
     no_conversion_and_no_cast_adds_mut();

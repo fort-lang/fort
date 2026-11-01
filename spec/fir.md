@@ -280,7 +280,8 @@ place lends it (D17.4).
   fast-math flag; the type of `a` (item 15).
 - `eq(a, b)`, `ne`, `lt`, `le`, `gt`, `ge`: comparison, signed, unsigned or float by the type;
   `bool` (item 15).
-- `cast<T>(a)`: the conversion of D3.14; `T` (item 12).
+- `cast<T>(a)`: the conversion of D3.14, or the FIR-only row from `u64` to a pointer or a `void*`;
+  `T` (item 12).
 - `addr(p)`: the address of `p`, which is `&lv`; a pointer to the type of `p` (item 3).
   `addr mut(p)` gives a `mut` pointer, as the checker typed the `&`.
 - `slice(p, lo, hi)`: the span `p[lo..hi]` of a fixed array, a span or a `string` at `p`, a view
@@ -303,7 +304,10 @@ Rules:
 - The two operands of an arithmetic, bitwise or comparison rvalue have one type after `mut` and
   `own` are removed. The count of a shift has the type of `a`.
 - `cast<T>(a)` covers every conversion of D3.14, including the ones that print nothing and the
-  casts between aggregate types. The translator chooses the instruction from the two types
+  casts between aggregate types. It covers one row more, which D3.14 refuses in fort source: a
+  `u64` to a pointer or a `void*`, which hand-written FIR text uses to forge a pointer on purpose
+  and which V4 admits. No fort source produces it, because the checker refuses each cast from an
+  integer to a pointer (D3.14). The translator chooses the instruction from the two types
   (item 12).
 - A `cast` carries `own` or drops it, and never adds it (D3.14). `T` marks a level `own` only
   where the type of `a` marks that level `own` too. When `T` owns, `a` is a `move`, which carries

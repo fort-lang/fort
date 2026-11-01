@@ -5,6 +5,8 @@
 /// Checks that each struct that the walk of the marks of a cast enters is a step of the work
 /// limit of D3.14, in src/fort/check.ft (carries_mark). A chain of more structs than the limit
 /// has steps makes the check of a read-only cast an error with a note, as D17.11 treats its limit.
+/// The walk reads the chain to learn whether a place of the target carries no mark, because such a
+/// place may drop the marks of the place of the source under it.
 /// The test stands alone because its program is large: the chain has 65600 structs.
 import check_env;
 import std.strbuf;
@@ -32,17 +34,19 @@ fn main() i32 {
         }
         k += 1;
     }
-    // The place `p` of `t` is added over a `u64`, and its walk enters each struct of the chain
-    // before it reads the `u64 mut*` that gives `t` a mark.
+    // The place `p` of `t` sits on the place `c0 mut* p` of `s`, which differs from it only by a
+    // `mut`. Its walk enters each struct of the chain to learn whether `p` carries a mark, before
+    // it reads the `u64 mut*` that `t` adds over the `u64` of `s`.
+    strbuf.append(&b, "struct s {\n    c0 mut* p;\n    u64 x;\n}\n");
     strbuf.append(&b, "struct t {\n    c0* p;\n    u64 mut* m;\n}\n");
-    strbuf.append(&b, "fn view(u64* a) t* {\n    return cast(a, t*);\n}\n");
+    strbuf.append(&b, "fn view(s* a) t* {\n    return cast(a, t*);\n}\n");
     // A walk past the limit keeps no answer, so the same cast in a second function passes the
     // limit again. A walk that kept "no mark" for the chain would report the `u64 mut*` instead.
-    strbuf.append(&b, "fn again(u64* a) t* {\n    return cast(a, t*);\n}\n");
+    strbuf.append(&b, "fn again(s* a) t* {\n    return cast(a, t*);\n}\n");
     assert(!check_env.check_decls(&e, strbuf.view(&b)));
     assert(check_env.errors(&e) == 2);
     assert(!check_env.said(&e, "a cast adds the pointer u64 mut* at byte 8"));
-    assert(check_env.said(&e, "cannot cast u64* to t*"));
+    assert(check_env.said(&e, "cannot cast s* to t*"));
     assert(check_env.said(&e, "the check of a cast passes its work limit of 65536 steps"));
     assert(check_env.said(&e, "the check cannot prove that the cast keeps its pointer places"));
     println("ok");

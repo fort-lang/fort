@@ -265,17 +265,33 @@ came here.
   `extern fn` call that the checker checks, and `check_call` gives the outer value back after its
   arguments. So an extern call in the operand of an exempt cast keeps the exemption
   (`run/casts/014`).
-- **A cast keeps each pointer place that carries a mark, in any view** (D3.14). After the walk of
-  the `mut` levels, `check_marked_places` runs `first_hidden` once more over level 1 of the target
-  with `place_memo.marked` set: the walk skips each type that `carries_mark` answers false for, so
-  only a place that carries `mut` or `own`, in its own chain or in a struct that it reaches, needs a
-  place of the same type at its byte in the source. A function pointer carries a mark always
+- **A cast makes no pointer from an integer and no larger pointee** (D3.14). `check_cast` asks
+  `types.type_cast_makes_pointer` before the matrix, so an integer source of each width reports
+  the rule before an added `mut` or `own`. A `char`, a `bool`, an enum and a float keep the report
+  of a pair that no row allows. `types.type_cast_allowed` keeps its row from `u64` to a pointer and
+  to a `void*`: FIR verification (V4) reads the matrix alone, and the FIR text of
+  `test/fort/fir/shadow_test.ft` (30 casts) and `interpreter_test.ft` (2) forges a pointer through
+  it on purpose. Those suites run the FIR in `fir.interpreter` and never reach `fir_llvm`.
+  `fir_llvm.cast_value` writes the row as `inttoptr`, which the FIR text of
+  `fir_llvm_rvalue_test.ft` holds. No fort source reaches the row.
+  `check_pointee_growth` compares `sizeof` and then the alignment of the level-1 pointees of a
+  typed pointer cast, after the rules of `mut`, `own` and `move` and before `check_pointer_places`,
+  with no exemption for an `extern` argument.
+- **A cast keeps each pointer place, in any view** (D3.14). After the walk of the `mut` levels,
+  `check_view_places` runs `first_hidden` once more over level 1 of the target with
+  `place_memo.view` set. A place of the same type at its byte in the source holds a place of the
+  target. A place of the source of the same shape (`types.type_same_shape`) holds it only when
+  `carries_mark` answers false for the place of the target, so the walk of the marks runs only
+  for such a place, and a cast whose places are all identical walks no struct. Each other place
+  of the target is added. A `void*` source keeps the walk of `place_memo.marked`, which skips each
+  type that `carries_mark` answers false for, until the checker refuses each cast of a `void*` to
+  a typed pointer. A function pointer carries a mark always
   (`mark_step` answers MARK_SOME). The walk reads none of its parameters and not its result, so
   no cycle passes through a function type. A cast to a function pointer type from another type
   (the matrix allows only `void*`) is the error of `report_function_pointer`, with no byte. The
   test stands at the top of `check_pointer_places`, before the exemption of an `extern` argument.
   C calls a function as the type of its parameter says (`fail/casts/036` to `038` and `040`,
-  `run/casts/017`). Under the exemption, `check_marked_places` walks with `place_memo.fn_only`.
+  `run/casts/017`). Under the exemption, `check_view_places` walks with `place_memo.fn_only`.
   There a mark is a function pointer alone, and a reference marked `mut` or `own` leads on to
   what it reaches. That walk keeps its answer in `types.layout.fn_mark`, apart from
   `layout.mark`, and counts against the same POINTER_WORK_LIMIT (`fail/casts/041` to `043`,
@@ -286,14 +302,14 @@ came here.
   closes the set with no mark, and no answer after a layout that waits or the work limit. So the
   walk enters each struct once, and each entry is a step of POINTER_WORK_LIMIT
   (`check_mark_limit_test.ft`). Before the cache, one legal cast of a 15248-line program took
-  15.65 s, because each pointer place walked its chain again. A `void*` or an integer source has no
-  level-1 storage, so each marked place of the target is added. **No compiler module casts a `void*`
-  back to a type that holds such a place.** A type keeps a `u64` handle of its declaration, `k + 1`
-  for `ck->syms[k]` (`check.nominal_sym`), and the layout of a struct keeps the type, the offset and
-  the name of each field, so the FIR, the interpreter and `owner/place` read the fields with no
-  declaration. `scope.binding.module` is `k + 1` for module `k` of the set (`check.module_of`,
-  `modules.read_at`), and the source lookup of `diag` takes the `diag.sources` that the session
-  embeds.
+  15.65 s, because each pointer place walked its chain again. A `void*` source has no level-1
+  storage, so each place of the target that the walk reads is added. **No compiler module casts a
+  `void*` back to a type that holds such a place.** A type keeps a `u64` handle of its declaration,
+  `k + 1` for `ck->syms[k]` (`check.nominal_sym`), and the layout of a struct keeps the type, the
+  offset and the name of each field, so the FIR, the interpreter and `owner/place` read the fields
+  with no declaration. `scope.binding.module` is `k + 1` for module `k` of the set
+  (`check.module_of`, `modules.read_at`), and the source lookup of `diag` takes the `diag.sources`
+  that the session embeds.
 
 ## 5. Modules, the driver and the diagnostics
 
