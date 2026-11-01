@@ -1460,7 +1460,7 @@ fn a_straight_store_kills_a_fact_only_through_a_pointer_that_can_reach_it() void
 // `error` with the count of the checks and the stores that the pass does not prove and the count
 // of the exits. The lowering puts a store right after its check, so one store of the source that
 // the pass does not prove counts twice. Each case has one obligation that the refinement decides.
-string[110] SOURCE = {
+string[111] SOURCE = {
     "struct cell {",
     "    i32 mut* own o;",
     "    u64 v;",
@@ -1564,15 +1564,17 @@ string[110] SOURCE = {
     "    del(x);",
     "    q->v = 1;",
     "}",
-    // error: the store through a copy of `P` can write `x`, which `P = &x` exposed (part 1).
-    // D3.14 refuses the cast of `P` to `u64 mut*`, so the copy passes `memmove`, an extern whose
-    // argument may hide an owner. The call comes before `del(x)`, so the store alone kills the
-    // fact of `x` at the exit.
+    // error: the store through the result of a call can write `x`, which `P = &x` exposed (part
+    // 1). The result borrows `exposed`, as each call result does. D3.14 refuses a `mut` view of
+    // `P` as `u64 mut*`, as an argument of an `extern fn` too, so the call gets `&k` and a
+    // read-only view of `P`. The call comes before `del(x)`, so the store alone kills the fact of
+    // `x` at the exit.
     "extern fn memmove(u64 mut* dst, u8* src, u64 n) u64 mut*;",
     "fn exit_exposed() void {",
     "    i32 mut* own mut x = new(i32);",
     "    P = &x;",
-    "    u64 mut* w = memmove(cast(P, u64 mut*), cast(P, u8*), 0);",
+    "    u64 mut k = 0;",
+    "    u64 mut* w = memmove(&k, cast(P, u8*), 0);",
     "    del(x);",
     "    *w = 0;",
     "}",

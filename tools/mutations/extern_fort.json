@@ -1,0 +1,146 @@
+{
+ "comment": [
+  "The table of the rule of D17.13 for the pointers that C gives: an `extern fn` declaration names",
+  "the result, each parameter type of a function pointer parameter, and each pointer that a level",
+  "of a parameter holds where the parameter marks that level `mut`, through fixed arrays. Such a",
+  "type marks a level `mut` only where it says `own`, where a fixed parameter of the same type has",
+  "the mark, or where no parameter can carry a pointer; a function pointer type that C gives",
+  "follows the same rule. The rows cover first_given_mut, given_lacks_mut, marks_a_level_mut and",
+  "report_given_mut of src/fort/check.ft, and the call in resolve_fn. Each row breaks one part of",
+  "the rule. The stages are the ffi fail corpus of test/lang, whose tests pin each message, and",
+  "check_extern_test.ft, which pins each position and each declaration that the rule takes. The",
+  "table runs in the VM: pass a --runner that runs tools/vm run in one slot and then syncs, as",
+  "notes/environment.md says. The md5 guard reads the product compiler that the build links. Put a",
+  "row that an earlier run caught first, because the first round of a run in the VM can read stale",
+  "(notes/testing.md)."
+ ],
+ "sources": [
+  "src/fort/check.ft"
+ ],
+ "binary": "build/Linux/debug/fort",
+ "build": "sleep 2 && touch src/fort/check.ft && ninja -C build/Linux/debug fort",
+ "stages": [
+  {
+   "name": "the ffi fail corpus",
+   "command": "python3 test/lang/run_tests.py --fort build/Linux/debug/fort --std-dir build/Linux/debug/std -j 4 fail/ffi/"
+  },
+  {
+   "name": "the extern suite",
+   "command": "python3 test/lang/run_tests.py --root test/fort --fort build/Linux/debug/fort --std-dir build/Linux/debug/std -j 4 check_extern_test"
+  }
+ ],
+ "mutations": [
+  {
+   "decision": "D17.13-result",
+   "file": "src/fort/check.ft",
+   "old": "    types.node* r = given_lacks_mut(f, carries, f->elem);",
+   "new": "    types.node* r = null;",
+   "what": "the result of an extern is no type that C gives"
+  },
+  {
+   "decision": "D17.13-callback",
+   "file": "src/fort/check.ft",
+   "old": "                found = given_lacks_mut(f, carries, p->params[j]);",
+   "new": "                found = null;",
+   "what": "a parameter type of a function pointer parameter is no type that C gives"
+  },
+  {
+   "decision": "D17.13-held",
+   "file": "src/fort/check.ft",
+   "old": "            if (cur->is_mut && types.type_is_pointer_place(held)) {",
+   "new": "            if (false) {",
+   "what": "a pointer that a `mut` level of a parameter holds is no type that C gives"
+  },
+  {
+   "decision": "D17.13-held-unmarked",
+   "file": "src/fort/check.ft",
+   "old": "            if (cur->is_mut && types.type_is_pointer_place(held)) {",
+   "new": "            if (types.type_is_pointer_place(held)) {",
+   "what": "C stores a pointer at a level that the parameter does not mark `mut` too"
+  },
+  {
+   "decision": "D17.13-held-deeper",
+   "file": "src/fort/check.ft",
+   "old": "        while (found == null && types.has_target_level(cur)) {",
+   "new": "        while (found == null && types.has_target_level(cur) && cur == p) {",
+   "what": "the rule reads level 1 of a parameter alone"
+  },
+  {
+   "decision": "D17.13-held-arrays",
+   "file": "src/fort/check.ft",
+   "old": "            types.node* held = types.behind_arrays(cur->elem);",
+   "new": "            types.node* held = cur->elem;",
+   "what": "a fixed array that a level holds hides its pointers"
+  },
+  {
+   "decision": "D17.13-tail",
+   "file": "src/fort/check.ft",
+   "old": "    bool mut carries = tail;",
+   "new": "    bool mut carries = false;",
+   "what": "the variable tail carries no pointer"
+  },
+  {
+   "decision": "D17.13-carry-fn",
+   "file": "src/fort/check.ft",
+   "old": "        if (types.type_is_pointer_place(f->params[i])) {",
+   "new": "        if (types.type_is_reference(f->params[i])) {",
+   "what": "a function pointer parameter carries no pointer"
+  },
+  {
+   "decision": "D17.13-no-carry",
+   "file": "src/fort/check.ft",
+   "old": "    if (!carries || (types.type_is_reference(g) && g->is_own) || !marks_a_level_mut(g)) {",
+   "new": "    if ((types.type_is_reference(g) && g->is_own) || !marks_a_level_mut(g)) {",
+   "what": "an extern with no parameter that can carry a pointer gives no storage of C"
+  },
+  {
+   "decision": "D17.13-own",
+   "file": "src/fort/check.ft",
+   "old": "    if (!carries || (types.type_is_reference(g) && g->is_own) || !marks_a_level_mut(g)) {",
+   "new": "    if (!carries || !marks_a_level_mut(g)) {",
+   "what": "a type that says `own` is no new allocation"
+  },
+  {
+   "decision": "D17.13-same-type",
+   "file": "src/fort/check.ft",
+   "old": "        if (types.type_equal(f->params[i], g)) {",
+   "new": "        if (types.type_same_shape(f->params[i], g)) {",
+   "what": "a parameter whose marks differ gives the `mut` too"
+  },
+  {
+   "decision": "D17.13-fn-given",
+   "file": "src/fort/check.ft",
+   "old": "        return first_given_mut(g, false).ty;",
+   "new": "        return null;",
+   "what": "a function pointer type that C gives follows no rule"
+  },
+  {
+   "decision": "D17.13-fn-own-params",
+   "file": "src/fort/check.ft",
+   "old": "        return first_given_mut(g, false).ty;",
+   "new": "        return first_given_mut(g, true).ty;",
+   "what": "a function pointer type that C gives has a variable tail"
+  },
+  {
+   "decision": "D17.13-levels",
+   "file": "src/fort/check.ft",
+   "old": "        cur = types.behind_arrays(cur->elem);\n    }\n    return false;",
+   "new": "        return false;\n    }\n    return false;",
+   "what": "a type marks only its level 1"
+  },
+  {
+   "decision": "D17.13-at",
+   "file": "src/fort/check.ft",
+   "old": "        at = param_at(decl, g.at - 1)->loc;",
+   "new": "        at = decl->a->loc;",
+   "what": "the error of a parameter stands at the result"
+  },
+  {
+   "decision": "D17.13-fail",
+   "file": "src/fort/check.ft",
+   "old": "            report_given_mut(ck, decl, s->name, g);\n            sym_fail(ck, s);",
+   "new": "            report_given_mut(ck, decl, s->name, g);",
+   "what": "a refused declaration keeps its symbol"
+  }
+ ]
+}
